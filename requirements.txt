@@ -1,0 +1,5 @@
+pandas
+duckdb
+rich
+psutil
+#pyarrow
