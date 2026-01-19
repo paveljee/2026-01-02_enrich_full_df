@@ -12,18 +12,23 @@ from rich.console import Console
 from rich.prompt import Prompt, Confirm
 from rich.progress import track
 import shutil
-try:
-    from markitdown import MarkItDown
-    MARKITDOWN_AVAILABLE = True
-except ImportError:
-    MARKITDOWN_AVAILABLE = False
+
+from .unify_names import unify_first_last
+from ._vars import (
+    KTP_FIRST_NAME_COL,
+    KTP_LAST_NAME_COL,
+    KTP_FIRST_NAME_ORIG_COLNAME_COL,
+    KTP_LAST_NAME_ORIG_COLNAME_COL,
+    DRAW_LABEL,
+)
 
 console = Console()
 
-PANDOC_REFERENCE_DOCX_PATH = Path(__file__).parent / "pandoc-custom-reference.docx"
+PACKAGE_ROOT = Path(__file__).parent
+PANDOC_REFERENCE_DOCX_PATH = PACKAGE_ROOT / "resources" / "pandoc-custom-reference.docx"
+
 LEFT_LAST_NAME_COL = "hcr.last_name"
 LEFT_FIRST_NAME_COL = "hcr.first_name"
-DRAW_LABEL = 'ktp.draw_number'
 RIGHT_NAME_COL = "Researcher/author"
 TOTAL_DRAWS = 310  # e.g., as of 2025-12-23 (including pilot)
 
@@ -63,32 +68,22 @@ def validate_csv_headers(csv_files: list[Path]) -> bool:
     
     return True
 
-def parse_docx_with_markitdown(docx_path: Path) -> list[pd.DataFrame]:
-    """Parse DOCX using markitdown to preserve formatting."""
-    if not MARKITDOWN_AVAILABLE:
-        raise ImportError("markitdown package not available. Install with: pip install markitdown")
-    
-    md = MarkItDown()
-    result = md.convert(str(docx_path))
-    
-    # For now, fall back to python-docx for table extraction
-    # markitdown preserves formatting but we still need structured table data
-    doc = Document(docx_path)
-    dfs = []
-    for t in doc.tables:
-        rows = []
-        for row in t.rows:
-            rows.append([cell.text.strip() for cell in row.cells])
-
-        df = pd.DataFrame(rows)
-
-        # optional: first row as header
-        df.columns = df.iloc[0]
-        df = df.iloc[1:].reset_index(drop=True)
-
-        dfs.append(df)
-    
-    return dfs
+def get_cell_text_with_format(cell):
+    texts = []
+    for paragraph in cell.paragraphs:
+        for run in paragraph.runs:
+            # mark formatting in some way, e.g., HTML-like
+            txt = run.text
+            if run.bold:
+                txt = f"**{txt}**"
+            if run.italic:
+                txt = f"_{txt}_"
+            if run.font.subscript:
+                txt = f"~{txt}~"
+            if run.font.superscript:
+                txt = f"^{txt}^"
+            texts.append(txt)
+    return ''.join(texts)
 
 def parse_docx_standard(docx_path: Path) -> list[pd.DataFrame]:
     """Parse DOCX using standard python-docx."""
@@ -97,13 +92,16 @@ def parse_docx_standard(docx_path: Path) -> list[pd.DataFrame]:
     dfs = []
     for t in doc.tables:
         rows = []
-        for row in t.rows:
-            rows.append([cell.text.strip() for cell in row.cells])
+        for i, row in enumerate(t.rows):
+            # Use plain text for the first row, formatted text for the rest
+            if i == 0:
+                rows.append([cell.text.strip() for cell in row.cells])
+            else:
+                rows.append([get_cell_text_with_format(cell) for cell in row.cells])
 
         df = pd.DataFrame(rows)
 
-        # optional: first row as header
-        df.columns = df.iloc[0]
+        df.columns = df.iloc[0]  # first row as header (plain text)
         df = df.iloc[1:].reset_index(drop=True)
 
         dfs.append(df)
@@ -111,7 +109,7 @@ def parse_docx_standard(docx_path: Path) -> list[pd.DataFrame]:
     return dfs
 
 def process_documents(docx_dir: Path, csv_dir: Path, recursive: bool, 
-                     output_dir: Path, output_format: str, use_markitdown: bool = False):
+                     output_dir: Path, output_format: str):
     """Main processing logic."""
     # Find all DOCX files
     docx_files = find_files_by_extension(docx_dir, "docx", recursive)
@@ -135,7 +133,7 @@ def process_documents(docx_dir: Path, csv_dir: Path, recursive: bool,
     
     # Parse DOCX files
     all_dfs = []
-    parse_func = parse_docx_with_markitdown if use_markitdown and MARKITDOWN_AVAILABLE else parse_docx_standard
+    parse_func = parse_docx_standard
     
     for docx_path in track(docx_files, description="Parsing DOCX files..."):
         dfs = parse_func(docx_path)
@@ -164,8 +162,21 @@ def process_documents(docx_dir: Path, csv_dir: Path, recursive: bool,
     joined_df = joined_df.drop(columns=["join_name"])
     joined_df.rename(  # normalize header row for docx table
         columns=lambda col: (
-            'ktp.table_1_' + re.sub(r'\s', '_', re.sub(r'[^\w\s]', '_', str(col).lower()))
-            if not re.match(r'^[\w_]+\.', str(col)) else col
+            re.sub(
+                pattern=r'_+',  # otherwise consecutive underscores break markdown
+                repl='_',
+                string=(
+                    col if re.match(
+                        pattern=r'^[\w_]+\.',  # e.g., starts with `ktp.`, `hcr.` etc.
+                        string=str(col),
+                    )
+                    else 'ktp.table_1_' + re.sub(
+                        pattern=r'\s',
+                        repl='_',
+                        string=re.sub(r'[^\w\s]', '_', str(col).lower()),
+                    )
+                )
+            )
         ),
         inplace=True,
     )
@@ -183,8 +194,8 @@ def process_documents(docx_dir: Path, csv_dir: Path, recursive: bool,
         card = f"### Draw #{draw_number} of {TOTAL_DRAWS}: {row.get(LEFT_LAST_NAME_COL)}, {row.get(LEFT_FIRST_NAME_COL)}\n"
         # docx_filename = re.sub(r'\s+', '_', re.sub(r'[^A-Za-z0-9\s]+', '', card)).strip('_')
         # Less verbose version
-        less_verbose_card = f"### {draw_number}: {row.get(LEFT_LAST_NAME_COL)}, {row.get(LEFT_FIRST_NAME_COL)}\n"
-        docx_filename = re.sub(r'\s+', '_', re.sub(r'[^A-Za-z0-9\s]+', '', less_verbose_card)).strip('_')
+        minified_card = f"{draw_number}: {row.get(LEFT_FIRST_NAME_COL)} {row.get(LEFT_LAST_NAME_COL)}\n"
+        docx_filename = re.sub(r'\s+', '_', re.sub(r'[^A-Za-z0-9\s]+', '', minified_card)).strip('_')
         for col, val in row.items():
             if '\n' in str(val):
                 # treat as code block
@@ -269,12 +280,8 @@ def interactive():
         default="txt"
     )
     
-    use_markitdown = False
-    if MARKITDOWN_AVAILABLE:
-        use_markitdown = Confirm.ask("Use markitdown for better formatting preservation?", default=True)
-    
     # Process
-    process_documents(docx_dir, csv_dir, recursive, output_dir, output_format, use_markitdown)
+    process_documents(docx_dir, csv_dir, recursive, output_dir, output_format)
 
 @cli.command()
 @click.argument('docx_dir', type=click.Path(exists=True, file_okay=False, path_type=Path))
@@ -284,19 +291,14 @@ def interactive():
               help='Output directory (default: ./output)')
 @click.option('--output-format', type=click.Choice(['txt', 'docx']), default='txt',
               help='Output format: txt (markdown) or docx (default: txt)')
-@click.option('--use-markitdown', is_flag=True, help='Use markitdown for better formatting preservation')
 def process(docx_dir: Path, csv_dir: Path, recursive: bool, output_dir: Path, 
-           output_format: str, use_markitdown: bool):
+           output_format: str):
     """Process DOCX files and enrich with CSV data.
     
     DOCX_DIR: Directory containing DOCX files
     CSV_DIR: Directory containing CSV files (must have matching headers)
     """
-    if use_markitdown and not MARKITDOWN_AVAILABLE:
-        console.print("[yellow]Warning: markitdown not available. Falling back to standard parsing.[/yellow]")
-        use_markitdown = False
     
-    process_documents(docx_dir, csv_dir, recursive, output_dir, output_format, use_markitdown)
+    process_documents(docx_dir, csv_dir, recursive, output_dir, output_format)
 
-if __name__ == "__main__":
-    cli()
+

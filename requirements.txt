@@ -3,3 +3,4 @@ duckdb
 rich
 psutil
 #pyarrow
+python-docx
