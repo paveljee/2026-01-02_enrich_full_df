@@ -13,9 +13,10 @@ def unify_first_last(row: pd.Series) -> tuple[dict[str, str], dict[str, str]]:
     """
     expected_cols = ['hcr.firstname_middlename', 'hcr.lastname', 'hcr.familyname', 'hcr.first_name', 'hcr.last_name', 'hcr.firstname']
     
+    is_nonempty_str = lambda x: isinstance(x, str) and len(x) > 0  # to account for nan etc.
     found_names = {
         col: row[col] for col in expected_cols
-             if col in row.index and row.get(col) is not None
+             if col in row.index and is_nonempty_str(row.get(col))
     }
 
     if ((k := len(found_names.items())) == 0):

@@ -1,3 +1,6 @@
+from pathlib import Path
+import tempfile
+
 import pandas as pd
 import pytest
 
@@ -6,6 +9,9 @@ from .. import (
     KTP_FIRST_NAME_COL,
     KTP_LAST_NAME_COL,
 )
+from ..src.cli import find_files_by_extension
+
+TEST_CSV_DIR = Path("data/samples")
 
 @pytest.fixture
 def hcr_row():
@@ -42,3 +48,48 @@ def test_unify_first_last_with_hcr_fixture(hcr_row):
     first, last = unify_first_last(hcr_row)
     assert "Lane" in first[KTP_FIRST_NAME_COL]
     assert last[KTP_LAST_NAME_COL] == "Martin"
+
+def test_unify_first_last_on_full_dataset(tmp_path, csv_dir=TEST_CSV_DIR):
+    """Test that unify_first_last runs without exceptions on a full dataset.
+    
+    This test doesn't validate correctness but ensures the function handles
+    all real-world data without crashing.
+    """
+    
+    # This test assumes you have actual CSV files in your test fixtures
+    # Adjust the path to wherever your test data lives
+    
+    if not csv_dir.exists():
+        pytest.skip(f"Test data directory not found: {csv_dir}")
+    
+    # Find CSV files using the CLI function
+    
+    csv_files = find_files_by_extension(csv_dir, "csv", recursive=False)
+    
+    if not csv_files:
+        pytest.skip("No CSV files found in test directory")
+    
+    # Load and combine CSV files (mimicking CLI logic)
+    csv_df = pd.concat([pd.read_csv(csv_path) for csv_path in csv_files], ignore_index=True)
+    
+    # Track any failures
+    failures = []
+    
+    # Run unify_first_last on each row
+    for idx, row in csv_df.iterrows():
+        try:
+            first, last = unify_first_last(row)
+            # Basic sanity checks
+            assert KTP_FIRST_NAME_COL in first
+            assert KTP_LAST_NAME_COL in last
+        except Exception as e:
+            failures.append((idx, row.get("hcr.first_name"), row.get("hcr.last_name"), str(e)))
+    
+    # If there were failures, report them
+    if failures:
+        failure_msg = "\n".join([
+            f"Row {idx}: {first_name} {last_name} - {error}"
+            for idx, first_name, last_name, error in failures[:10]  # Show first 10
+        ])
+        pytest.fail(f"unify_first_last failed on {len(failures)} rows.\n"
+                    f"Showing first 10 for example:\n{failure_msg}")
