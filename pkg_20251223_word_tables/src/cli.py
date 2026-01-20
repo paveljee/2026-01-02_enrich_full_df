@@ -13,13 +13,17 @@ from rich.prompt import Prompt, Confirm
 from rich.progress import track
 import shutil
 
-from .unify_names import unify_first_last
+from .name_utils import (
+    unify_first_last,
+    match_csv_docx_names,
+)
 from ._vars import (
     KTP_FIRST_NAME_COL,
     KTP_LAST_NAME_COL,
     KTP_FIRST_NAME_ORIG_COLNAME_COL,
     KTP_LAST_NAME_ORIG_COLNAME_COL,
     DRAW_LABEL,
+    RIGHT_NAME_COL,
 )
 
 console = Console()
@@ -27,9 +31,6 @@ console = Console()
 PACKAGE_ROOT = Path(__file__).parent
 PANDOC_REFERENCE_DOCX_PATH = PACKAGE_ROOT / "resources" / "pandoc-custom-reference.docx"
 
-LEFT_LAST_NAME_COL = "hcr.last_name"
-LEFT_FIRST_NAME_COL = "hcr.first_name"
-RIGHT_NAME_COL = "Researcher/author"
 TOTAL_DRAWS = 310  # e.g., as of 2025-12-23 (including pilot)
 
 INTRODUCTION = """## Introduction
@@ -142,24 +143,30 @@ def process_documents(docx_dir: Path, csv_dir: Path, recursive: bool,
     # load and combine all CSV files
     csv_df = pd.concat([pd.read_csv(csv_path) for csv_path in csv_files], ignore_index=True)
 
-    # docx table (already extracted)
-    docx_df = all_dfs[0]
+    # docx tables
+    docx_df = pd.concat(all_dfs, ignore_index=True)
 
     # csv join key
-    csv_df["join_name"] = csv_df[LEFT_FIRST_NAME_COL] + " " + csv_df[LEFT_LAST_NAME_COL]
+    unified_names = csv_df.apply(unify_first_last, axis=1, result_type='expand')
+    csv_df[KTP_FIRST_NAME_COL] = unified_names[0].apply(lambda x: x[KTP_FIRST_NAME_COL])
+    csv_df[KTP_LAST_NAME_COL] = unified_names[1].apply(lambda x: x[KTP_LAST_NAME_COL])
 
-    # docx join key
-    docx_df["join_name"] = docx_df[RIGHT_NAME_COL]
-
-    # ---- left join ----
-    joined_df = csv_df.merge(
-        docx_df,
-        on="join_name",
-        how="left"
+    docx_df.to_csv('tmp/docx_df.csv') # debug
+    
+    # Match names and get DOCX indices
+    docx_indices = match_csv_docx_names(
+        csv_df[KTP_FIRST_NAME_COL],
+        csv_df[KTP_LAST_NAME_COL],
+        docx_df[RIGHT_NAME_COL],
     )
 
+    # Join using the matched indices
+    csv_df['_docx_idx'] = docx_indices
+    docx_df['_docx_idx'] = docx_df.index
+    joined_df = csv_df.merge(docx_df, on='_docx_idx', how='left')
+
     # optional cleanup
-    joined_df = joined_df.drop(columns=["join_name"])
+    joined_df = joined_df.drop(columns=['_docx_idx'])
     joined_df.rename(  # normalize header row for docx table
         columns=lambda col: (
             re.sub(
@@ -191,10 +198,13 @@ def process_documents(docx_dir: Path, csv_dir: Path, recursive: bool,
     ) + "\n\n"  # will merge later so as not to spoil cards
     for _, row in joined_df.iterrows():
         draw_number = row.pop(DRAW_LABEL)
-        card = f"### Draw #{draw_number} of {TOTAL_DRAWS}: {row.get(LEFT_LAST_NAME_COL)}, {row.get(LEFT_FIRST_NAME_COL)}\n"
+        card = (
+            f"### Draw #{draw_number} of {TOTAL_DRAWS}: {row.get(KTP_LAST_NAME_COL)}, {row.get(KTP_FIRST_NAME_COL)}\n"
+            f"Fun fact: the last name came from `{row.get(KTP_LAST_NAME_ORIG_COLNAME_COL)}` and the first name – from `{row.get(KTP_FIRST_NAME_ORIG_COLNAME_COL)}` in the originating HCR list."
+        )
         # docx_filename = re.sub(r'\s+', '_', re.sub(r'[^A-Za-z0-9\s]+', '', card)).strip('_')
         # Less verbose version
-        minified_card = f"{draw_number}: {row.get(LEFT_FIRST_NAME_COL)} {row.get(LEFT_LAST_NAME_COL)}\n"
+        minified_card = f"{draw_number}: {row.get(KTP_FIRST_NAME_COL)} {row.get(KTP_LAST_NAME_COL)}\n"
         docx_filename = re.sub(r'\s+', '_', re.sub(r'[^A-Za-z0-9\s]+', '', minified_card)).strip('_')
         for col, val in row.items():
             if '\n' in str(val):

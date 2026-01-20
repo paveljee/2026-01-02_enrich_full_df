@@ -4,8 +4,8 @@ import tempfile
 import pandas as pd
 import pytest
 
-from .. import (
-    unify_first_last,
+from ..src.name_utils import unify_first_last
+from ..src._vars import (
     KTP_FIRST_NAME_COL,
     KTP_LAST_NAME_COL,
 )

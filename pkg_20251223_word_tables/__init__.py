@@ -1,17 +1,11 @@
-from .src.unify_names import unify_first_last
-from .src.cli import cli
-from .src._vars import (
-    KTP_FIRST_NAME_COL,
-    KTP_LAST_NAME_COL,
-    KTP_FIRST_NAME_ORIG_COLNAME_COL,
-    KTP_LAST_NAME_ORIG_COLNAME_COL,
+from .src.name_utils import (
+    unify_first_last,
+    match_csv_docx_names,
 )
+from .src.cli import cli
 
 __all__ = [
-    "unify_first_last",
     "cli",
-    "KTP_FIRST_NAME_COL",
-    "KTP_LAST_NAME_COL",
-    "KTP_FIRST_NAME_ORIG_COLNAME_COL",
-    "KTP_LAST_NAME_ORIG_COLNAME_COL",
+    "unify_first_last",
+    "match_csv_docx_names",
 ]

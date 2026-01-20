@@ -1,6 +1,7 @@
 .DS_Store
 data/*
 .output/
+tmp/
 
 # pixi environments
 .pixi/*
