@@ -1,4 +1,6 @@
 from pathlib import Path
+import re
+
 from zipfile import ZipFile
 from lxml import etree
 import pandas as pd
@@ -98,6 +100,10 @@ def parse_docx_table(docx_path: Path) -> list[pd.DataFrame]:
 
         df = pd.DataFrame(rows)
         df.columns = df.iloc[0]          # header now plain (no **, _, ~, ^)
+        
+        # Strip and sanitize whitespaces
+        df.columns = [re.sub(r"\s+", " ", str(c)).strip() for c in df.iloc[0]]
+        
         df = df.iloc[1:].reset_index(drop=True)
         dfs.append(df)
 
