@@ -1,3 +1,5 @@
+import re
+
 import pandas as pd
 
 from ._vars import (
@@ -49,7 +51,8 @@ def match_csv_docx_names(
 ) -> pd.Series:
     """
     Match CSV first/last names to DOCX combined-name strings using literal
-    substring checks (case-sensitive).
+    substring checks (case-insensitive), after stripping non-alphanumeric chars
+    from each compared string.
 
     For each row in `csv_names`, find DOCX rows whose `docx_names` value contains
     BOTH the first-name substring and the last-name substring. If exactly one
@@ -79,6 +82,7 @@ def match_csv_docx_names(
     ValueError
         If any CSV row has zero matches or multiple matches in `docx_names`.
     """
+
     if not isinstance(csv_names, pd.DataFrame):
         raise TypeError("csv_names must be a DataFrame with two columns [first, last].")
     if csv_names.shape[1] != 2:
@@ -95,28 +99,41 @@ def match_csv_docx_names(
     # (astype(str) would turn NaN into 'nan', so avoid that.)
     docx = docx_names
 
+    # Pre-clean once for speed / clarity; still no mutation.
+    # - Strip non-alphanumerics
+    # - Casefold for robust case-insensitivity
+    non_alnum_anywhere = re.compile(r"[^0-9A-Za-z]+")
+
+    def _clean(s: pd.Series) -> pd.Series:
+        s2 = s.astype("string")
+        return (
+            s2.str.replace(non_alnum_anywhere, "", regex=True)
+              .str.casefold()
+        )
+
+    docx_clean = _clean(docx)
+    docx_index = docx.index
+
+    first_clean = _clean(first)
+    last_clean = _clean(last)
+
     matched: list[object | None] = []
     failures: list[tuple[object, object, str, list[object] | None]] = []
 
-    # Pre-extract for speed / clarity; still no mutation.
-    docx_values = docx.values
-    docx_index = docx.index
-
-    for i, (f, l) in enumerate(zip(first.values, last.values)):
-        csv_idx = csv_names.index[i]
-
-        if pd.isna(f) or pd.isna(l):
+    # Why not fully vectorized (single op)? A true all-at-once solution requires a
+    # cross-product between CSV rows and DOCX rows (or complex regex construction),
+    # which is usually memory-expensive and harder to reason about. This approach
+    # pre-cleans once and then uses vectorized `.str.contains(..., regex=False)`
+    # per CSV row, avoiding inner Python loops over DOCX rows.
+    for csv_idx, f, l in zip(csv_names.index, first_clean.values, last_clean.values):
+        if pd.isna(f) or pd.isna(l) or f == "" or l == "":
             failures.append((csv_idx, None, "NO_MATCH (missing first/last)", None))
             matched.append(pd.NA)
             continue
 
-        # Literal substring check, case-sensitive.
-        hits = []
-        for j, cell in enumerate(docx_values):
-            if pd.isna(cell):
-                continue
-            if (f in cell) and (l in cell):
-                hits.append(docx_index[j])
+        # Literal substring check, case-insensitive, after edge-cleaning.
+        mask = docx_clean.str.contains(f, na=False, regex=False) & docx_clean.str.contains(l, na=False, regex=False)
+        hits = docx_index[mask].tolist()
 
         if len(hits) == 1:
             matched.append(hits[0])
@@ -129,17 +146,17 @@ def match_csv_docx_names(
 
     if failures:
         lines = []
-        for (csv_idx, first, last, kind, hits) in failures[:max_error_rows]:
-            name = f"{last}, {first}"
+        for (csv_idx, first_v, last_v, kind, hits) in failures[:max_error_rows]:
+            name = f"{last_v}, {first_v}"
             if hits:
                 lines.append(f"  {name} (csv_idx={csv_idx}) - {kind}: {hits}")
             else:
                 lines.append(f"  {name} (csv_idx={csv_idx}) - {kind}")
         more = (
             ""
-            if len(failures) <= max_error_rows
-            else f"\n  ...(showing first {max_error_rows} of {len(failures)})"
+            if (n := len(failures)) <= max_error_rows
+            else f"\n  ...(showing first {max_error_rows} of {n})"
         )
-        raise ValueError("Could not uniquely match some CSV rows:\n" + "\n".join(lines) + more)
+        raise ValueError(f"Could not uniquely match {n} CSV rows:\n" + "\n".join(lines) + more)
 
     return pd.Series(matched, index=csv_names.index, name="_docx_idx")
