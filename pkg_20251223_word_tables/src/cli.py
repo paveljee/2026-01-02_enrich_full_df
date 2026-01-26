@@ -1,4 +1,3 @@
-from docx import Document
 import pandas as pd
 import re
 from pathlib import Path
@@ -16,6 +15,9 @@ import shutil
 from .name_utils import (
     unify_first_last,
     match_csv_docx_names,
+)
+from .parse_docx import (
+    parse_docx_table,
 )
 from ._vars import (
     KTP_FIRST_NAME_COL,
@@ -69,46 +71,6 @@ def validate_csv_headers(csv_files: list[Path]) -> bool:
     
     return True
 
-def get_cell_text_with_format(cell):
-    texts = []
-    for paragraph in cell.paragraphs:
-        for run in paragraph.runs:
-            # mark formatting in some way, e.g., HTML-like
-            txt = run.text
-            if run.bold:
-                txt = f"**{txt}**"
-            if run.italic:
-                txt = f"_{txt}_"
-            if run.font.subscript:
-                txt = f"~{txt}~"
-            if run.font.superscript:
-                txt = f"^{txt}^"
-            texts.append(txt)
-    return ''.join(texts)
-
-def parse_docx_standard(docx_path: Path) -> list[pd.DataFrame]:
-    """Parse DOCX using standard python-docx."""
-    doc = Document(docx_path)
-
-    dfs = []
-    for t in doc.tables:
-        rows = []
-        for i, row in enumerate(t.rows):
-            # Use plain text for the first row, formatted text for the rest
-            if i == 0:
-                rows.append([cell.text.strip() for cell in row.cells])
-            else:
-                rows.append([get_cell_text_with_format(cell) for cell in row.cells])
-
-        df = pd.DataFrame(rows)
-
-        df.columns = df.iloc[0]  # first row as header (plain text)
-        df = df.iloc[1:].reset_index(drop=True)
-
-        dfs.append(df)
-    
-    return dfs
-
 def process_documents(docx_dir: Path, csv_dir: Path, recursive: bool, 
                      output_dir: Path, output_format: str):
     """Main processing logic."""
@@ -134,7 +96,7 @@ def process_documents(docx_dir: Path, csv_dir: Path, recursive: bool,
     
     # Parse DOCX files
     all_dfs = []
-    parse_func = parse_docx_standard
+    parse_func = parse_docx_table
     
     for docx_path in track(docx_files, description="Parsing DOCX files..."):
         dfs = parse_func(docx_path)
