@@ -1,5 +1,3 @@
-from typing import Callable
-
 import pandas as pd
 
 from ._vars import (
@@ -45,96 +43,104 @@ def unify_first_last(row: pd.Series) -> tuple[dict[str, str], dict[str, str]]:
     return first, last
 
 def match_csv_docx_names(
-    first_names: pd.Series,
-    last_names: pd.Series,
-    docx_names: pd.Series
+    csv_names: pd.DataFrame,
+    docx_names: pd.Series,
+    max_error_rows: int = 10,
 ) -> pd.Series:
     """
-    Match CSV first/last names to DOCX combined names.
-    
-    This addresses the mismatch between CSV samples, which (sloppily)
-    used the original `hcr.` colnames, separate for first, last name,
-    and DOCX Table 1, which uses a single column combining the first
-    and last name in a human-readable yet manual (non-deterministic) way.
-    
+    Match CSV first/last names to DOCX combined-name strings using literal
+    substring checks (case-sensitive).
+
+    For each row in `csv_names`, find DOCX rows whose `docx_names` value contains
+    BOTH the first-name substring and the last-name substring. If exactly one
+    DOCX row matches, return that DOCX index for the CSV row; otherwise mark as
+    unmatched (NA). After scanning all rows, raise if any CSV row did not have
+    exactly one match.
+
     Parameters
     ----------
-    first_names : pd.Series
-        Series of first names from CSV (will be copied)
-    last_names : pd.Series
-        Series of last names from CSV (will be copied)
+    csv_names : pd.DataFrame
+        DataFrame with exactly two columns: [first_name, last_name] in that order.
+        Must be a real DataFrame (use double brackets upstream). The index is
+        preserved and used as the index of the returned Series.
     docx_names : pd.Series
-        Series of combined names from DOCX (will be copied)
-    
+        Series of DOCX combined-name strings to search (index are DOCX row indices).
+    max_error_rows : int, optional
+        Maximum number of failing CSV rows to include in the error message if
+        matching fails. Defaults to 10.
+
     Returns
     -------
     pd.Series
-        Series of matched DOCX indices (same length as first_names/last_names),
-        with NaN for unmatched rows
-    
+        Series aligned to `csv_names.index` whose values are matching DOCX indices.
+
     Raises
     ------
     ValueError
-        If any rows have 0 or >1 matches
+        If any CSV row has zero matches or multiple matches in `docx_names`.
     """
-    orig_index = first_names.index.copy()
+    if not isinstance(csv_names, pd.DataFrame):
+        raise TypeError("csv_names must be a DataFrame with two columns [first, last].")
+    if csv_names.shape[1] != 2:
+        raise ValueError("csv_names must have exactly two columns: [first, last].")
 
-    # Lambda to copy, reset index. Keeps original versions for error reporting
-    orig: Callable[[pd.Series], pd.Series] = lambda s: s.copy().reset_index(drop=True)
-    first_orig = orig(first_names)
-    last_orig = orig(last_names)
-    docx_orig = orig(docx_names)
+    # Read-only views; do not mutate inputs.
+    first_col = csv_names.columns[0]
+    last_col = csv_names.columns[1]
 
-    # Lambda to copy, reset index, and lowercase for matching
-    # prep: Callable[[pd.Series], pd.Series] = lambda s: orig(s).str.lower()
-    # to use above if non-lowercases doesn't work
-    prep: Callable[[pd.Series], pd.Series] = lambda s: orig(s)
-    first_prepped = prep(first_names)
-    last_prepped = prep(last_names)
-    docx_prepped = prep(docx_names)
-    
-    match_failures = []
-    matched_indices = []
-    
-    for idx in range(len(first_prepped)):
-        first = first_prepped.iloc[idx]
-        last = last_prepped.iloc[idx]
-        
-        # Find docx rows where name contains both first and last
-        mask = (
-            docx_prepped.str.contains(first, na=False, regex=False) &
-            docx_prepped.str.contains(last, na=False, regex=False)
-        )
-        matches = docx_orig[mask]
-        
-        if len(matches) == 0:
-            match_failures.append((
-                first_orig.iloc[idx],
-                last_orig.iloc[idx],
-                "NO_MATCH",
-                None
-            ))
-            matched_indices.append(None)
-        elif len(matches) > 1:
-            match_failures.append((
-                first_orig.iloc[idx],
-                last_orig.iloc[idx],
-                "MULTIPLE_MATCHES",
-                matches.tolist()
-            ))
-            matched_indices.append(None)
+    first = csv_names[first_col]
+    last = csv_names[last_col]
+
+    # Ensure we're searching strings; keep NA safe behavior.
+    # (astype(str) would turn NaN into 'nan', so avoid that.)
+    docx = docx_names
+
+    matched: list[object | None] = []
+    failures: list[tuple[object, object, str, list[object] | None]] = []
+
+    # Pre-extract for speed / clarity; still no mutation.
+    docx_values = docx.values
+    docx_index = docx.index
+
+    for i, (f, l) in enumerate(zip(first.values, last.values)):
+        csv_idx = csv_names.index[i]
+
+        if pd.isna(f) or pd.isna(l):
+            failures.append((csv_idx, None, "NO_MATCH (missing first/last)", None))
+            matched.append(pd.NA)
+            continue
+
+        # Literal substring check, case-sensitive.
+        hits = []
+        for j, cell in enumerate(docx_values):
+            if pd.isna(cell):
+                continue
+            if (f in cell) and (l in cell):
+                print(repr(f), repr(l), repr(cell))
+                hits.append(docx_index[j])
+
+        if len(hits) == 1:
+            matched.append(hits[0])
+        elif len(hits) == 0:
+            failures.append((csv_idx, f, l, "NO_MATCH", None))
+            matched.append(pd.NA)
         else:
-            matched_indices.append(matches.index[0])
-    
-    # Raise exception if there were matching failures
-    if match_failures:
-        failure_msg = "\n".join([
-            f"  {last}, {first} - {error}" + (f": {matches}" if matches else "")
-            for first, last, error, matches in match_failures[:10]
-        ])
-        raise ValueError(
-            f"Could not uniquely match {len(match_failures)} CSV rows:\n{failure_msg}\n"
-            f"{'...(showing first 10 of ' + str(len(match_failures)) + ')' if len(match_failures) > 10 else ''}"
+            failures.append((csv_idx, f, l, "MULTIPLE_MATCHES", hits))
+            matched.append(pd.NA)
+
+    if failures:
+        lines = []
+        for (csv_idx, first, last, kind, hits) in failures[:max_error_rows]:
+            name = f"{last}, {first}"
+            if hits:
+                lines.append(f"  {name} (csv_idx={csv_idx}) - {kind}: {hits}")
+            else:
+                lines.append(f"  {name} (csv_idx={csv_idx}) - {kind}")
+        more = (
+            ""
+            if len(failures) <= max_error_rows
+            else f"\n  ...(showing first {max_error_rows} of {len(failures)})"
         )
-    
-    return pd.Series(matched_indices, index=orig_index)
+        raise ValueError("Could not uniquely match some CSV rows:\n" + "\n".join(lines) + more)
+
+    return pd.Series(matched, index=csv_names.index, name="_docx_idx")

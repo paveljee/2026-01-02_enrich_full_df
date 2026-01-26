@@ -117,9 +117,9 @@ def process_documents(docx_dir: Path, csv_dir: Path, recursive: bool,
     
     # Match names and get DOCX indices
     docx_indices = match_csv_docx_names(
-        csv_df[KTP_FIRST_NAME_COL],
-        csv_df[KTP_LAST_NAME_COL],
-        docx_df[RIGHT_NAME_COL],
+        csv_names=csv_df[[KTP_FIRST_NAME_COL, KTP_LAST_NAME_COL]],
+        docx_names=docx_df[RIGHT_NAME_COL],
+        max_error_rows=93,
     )
 
     # Join using the matched indices
