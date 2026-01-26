@@ -12,10 +12,7 @@ This includes new CLI commands, DuckDB pipelines, CSV merging logic, enrichment 
 The roadmap *must* reuse the existing code and logic below. Do not change logic or comments unless strictly necessary for integration.
 
 ### Sampling
-- Main sampler (local copy): `./pkg_20250819_sampler/src/sampler.py`
-- Pilot sampler (local copy): `./pkg_20251223_pilot_sampler/src/pilot_sampler.py`
-
-Upstream references to fetch during implementation:
+Upstream references to fetch during implementation (implementers must fetch and preserve these files verbatim):
 - https://github.com/paveljee/research-integrity-ktp/blob/analysis/2025-08-19-sampler/analyses/2025-08-19_sampler/sampler.py
 - https://github.com/paveljee/research-integrity-ktp/blob/analysis/2025-12-23_pilot_sampler/analyses/2025-12-23_pilot_sampler/pilot_sampler.py
 
