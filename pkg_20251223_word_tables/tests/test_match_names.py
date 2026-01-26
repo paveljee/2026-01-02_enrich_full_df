@@ -10,7 +10,7 @@ from ..src._vars import (
     KTP_LAST_NAME_COL,
     RIGHT_NAME_COL,
 )
-from ..src.cli import find_files_by_extension, parse_docx_standard
+from ..src.cli import find_files_by_extension, parse_docx_table
 
 TEST_CSV_DIR = Path("data/samples")
 TEST_DOCX_DIR = Path("data/manual_extractions")
@@ -113,13 +113,14 @@ def test_match_csv_docx_names_with_synthetic_data(synthetic_csv_docx_pair):
     csv_df = pd.read_csv(csv_path)
     
     # Parse DOCX
-    docx_dfs = parse_docx_standard(docx_path)
+    docx_dfs = parse_docx_table(docx_path)
     docx_df = docx_dfs[0]
+
+    docx_df.to_csv('tmp/test_docx_df.csv') # debug
     
     # Run the matching function
     docx_indices = match_csv_docx_names(
-        csv_df[KTP_FIRST_NAME_COL],
-        csv_df[KTP_LAST_NAME_COL],
+        csv_df[[KTP_FIRST_NAME_COL, KTP_LAST_NAME_COL]],
         docx_df[RIGHT_NAME_COL],
     )
     
@@ -157,7 +158,7 @@ def test_match_csv_docx_names_on_full_dataset(tmp_path):
     # Parse DOCX files
     all_docx_dfs = []
     for docx_path in docx_files:
-        dfs = parse_docx_standard(docx_path)
+        dfs = parse_docx_table(docx_path)
         all_docx_dfs.extend(dfs)
     
     docx_df = pd.concat(all_docx_dfs, ignore_index=True)
@@ -173,8 +174,7 @@ def test_match_csv_docx_names_on_full_dataset(tmp_path):
     try:
         # Run the matching function
         docx_indices = match_csv_docx_names(
-            csv_df[KTP_FIRST_NAME_COL],
-            csv_df[KTP_LAST_NAME_COL],
+            csv_df[[KTP_FIRST_NAME_COL, KTP_LAST_NAME_COL]],
             docx_df[RIGHT_NAME_COL],
         )
         

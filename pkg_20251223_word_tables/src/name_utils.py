@@ -116,7 +116,6 @@ def match_csv_docx_names(
             if pd.isna(cell):
                 continue
             if (f in cell) and (l in cell):
-                print(repr(f), repr(l), repr(cell))
                 hits.append(docx_index[j])
 
         if len(hits) == 1:
