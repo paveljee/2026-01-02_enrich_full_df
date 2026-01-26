@@ -16,6 +16,26 @@ dependencies = [
 channels = ["conda-forge"]
 platforms = ["osx-arm64", "linux-aarch64"]
 
-[tool.pixi.tasks]
+[tool.pixi.tasks.test]
+args = [
+  { "arg" = "module_name", "default" = "." },
+]
+cmd = "pytest -vv -s {{ module_name }}"
+cwd = "."
+
+[tool.pixi.tasks.module]
+args = [
+  { "arg" = "module_name", "default" = "." },
+]
+cmd = """
+{% if module_name == "pkg_20251223_word_tables" %}
+python {{ module_name }} process \
+    data/manual_extractions \
+    data/samples \
+    --output-dir ./.output \
+    --output-format txt
+{% endif %}
+"""
+cwd = "."
 
 [tool.pytest.ini_options]
