@@ -14,7 +14,6 @@ import shutil
 
 from .name_utils import (
     unify_first_last,
-    match_csv_docx_names,
 )
 from .parse_docx import (
     parse_docx_table,
@@ -24,9 +23,11 @@ from ._vars import (
     KTP_LAST_NAME_COL,
     KTP_FIRST_NAME_ORIG_COLNAME_COL,
     KTP_LAST_NAME_ORIG_COLNAME_COL,
+    KTP_FILENAME_COL,
     DRAW_LABEL,
     RIGHT_NAME_COL,
 )
+from .data_models import InnerDict, MatchingProcedure, NameKey, OuterDict
 
 console = Console()
 
@@ -45,6 +46,83 @@ Last modified (introduction): December 23, 2025
 Date of report: {}
 """
 
+NON_ALNUM_ANYWHERE = re.compile(r"[^0-9A-Za-z]+")
+
+
+class CsvNameMatchProcedure:
+    dataset_id_field = KTP_FILENAME_COL
+
+
+class DocxNameMatchProcedure:
+    dataset_id_field = KTP_FILENAME_COL
+
+
+def _clean_series(series: pd.Series) -> pd.Series:
+    series_str = series.astype("string")
+    return (
+        series_str.str.replace(NON_ALNUM_ANYWHERE, "", regex=True)
+        .str.casefold()
+    )
+
+
+def _clean_token(value: str) -> str:
+    return NON_ALNUM_ANYWHERE.sub("", str(value)).casefold()
+
+
+def build_outer_dict_from_names(names: pd.DataFrame) -> OuterDict:
+    """Build an OuterDict from a dataframe of unique first/last pairs."""
+    name_keys = [
+        NameKey(first_name=first, last_name=last)
+        for first, last in names.itertuples(index=False, name=None)
+    ]
+    return OuterDict.from_name_keys(name_keys)
+
+
+def append_csv_matches(
+    outer_dict: OuterDict,
+    csv_df: pd.DataFrame,
+    procedure: MatchingProcedure,
+) -> None:
+    """Append exact CSV matches to each outer dict key."""
+    for name_key, _ in outer_dict.items():
+        matches = csv_df[
+            (csv_df[KTP_FIRST_NAME_COL] == name_key.first_name)
+            & (csv_df[KTP_LAST_NAME_COL] == name_key.last_name)
+        ]
+        for _, row in matches.iterrows():
+            outer_dict.add_inner(
+                name_key,
+                InnerDict.from_mapping(row.to_dict(), procedure),
+            )
+
+
+def append_docx_matches(
+    outer_dict: OuterDict,
+    docx_df: pd.DataFrame,
+    procedure: MatchingProcedure,
+) -> None:
+    """Append DOCX matches using the established substring-based matching logic."""
+    docx_clean = _clean_series(docx_df[RIGHT_NAME_COL])
+    docx_index = docx_df.index
+
+    for name_key, _ in outer_dict.items():
+        first_clean = _clean_token(name_key.first_name)
+        last_clean = _clean_token(name_key.last_name)
+        if not first_clean or not last_clean:
+            continue
+        mask = docx_clean.str.contains(first_clean, na=False, regex=False) & docx_clean.str.contains(
+            last_clean, na=False, regex=False
+        )
+        hits = docx_index[mask]
+        if hits.empty:
+            continue
+        for _, row in docx_df.loc[hits].iterrows():
+            outer_dict.add_inner(
+                name_key,
+                InnerDict.from_mapping(row.to_dict(), procedure),
+            )
+
+
 def find_files_by_extension(directory: Path, extension: str, recursive: bool = False) -> list[Path]:
     """Find all files with given extension in directory."""
     pattern = f"*.{extension}"
@@ -52,7 +130,8 @@ def find_files_by_extension(directory: Path, extension: str, recursive: bool = F
         return list(directory.rglob(pattern))
     else:
         return list(directory.glob(pattern))
-    
+
+
 def validate_csv_headers(csv_files: list[Path]) -> bool:
     """Validate that all CSV files have the same column names."""
     if not csv_files:
@@ -70,6 +149,7 @@ def validate_csv_headers(csv_files: list[Path]) -> bool:
             return False
     
     return True
+
 
 def process_documents(docx_dir: Path, csv_dir: Path, recursive: bool, 
                      output_dir: Path, output_format: str):
@@ -100,10 +180,18 @@ def process_documents(docx_dir: Path, csv_dir: Path, recursive: bool,
     
     for docx_path in track(docx_files, description="Parsing DOCX files..."):
         dfs = parse_func(docx_path)
+        for df in dfs:
+            df[KTP_FILENAME_COL] = docx_path.name
         all_dfs.extend(dfs)
     
     # load and combine all CSV files
-    csv_df = pd.concat([pd.read_csv(csv_path) for csv_path in csv_files], ignore_index=True)
+    csv_df = pd.concat(
+        [
+            pd.read_csv(csv_path).assign(**{KTP_FILENAME_COL: csv_path.name})
+            for csv_path in csv_files
+        ],
+        ignore_index=True,
+    )
 
     # docx tables
     docx_df = pd.concat(all_dfs, ignore_index=True)
@@ -113,23 +201,7 @@ def process_documents(docx_dir: Path, csv_dir: Path, recursive: bool,
     csv_df[KTP_FIRST_NAME_COL] = unified_names[0].apply(lambda x: x[KTP_FIRST_NAME_COL])
     csv_df[KTP_LAST_NAME_COL] = unified_names[1].apply(lambda x: x[KTP_LAST_NAME_COL])
 
-    docx_df.to_csv('tmp/docx_df.csv') # debug
-    
-    # Match names and get DOCX indices
-    docx_indices = match_csv_docx_names(
-        csv_names=csv_df[[KTP_FIRST_NAME_COL, KTP_LAST_NAME_COL]],
-        docx_names=docx_df[RIGHT_NAME_COL],
-        max_error_rows=93,
-    )
-
-    # Join using the matched indices
-    csv_df['_docx_idx'] = docx_indices
-    docx_df['_docx_idx'] = docx_df.index
-    joined_df = csv_df.merge(docx_df, on='_docx_idx', how='left')
-
-    # optional cleanup
-    joined_df = joined_df.drop(columns=['_docx_idx'])
-    joined_df.rename(  # normalize header row for docx table
+    docx_df.rename(  # normalize header row for docx table
         columns=lambda col: (
             re.sub(
                 pattern=r'_+',  # otherwise consecutive underscores break markdown
@@ -150,6 +222,19 @@ def process_documents(docx_dir: Path, csv_dir: Path, recursive: bool,
         inplace=True,
     )
 
+    unique_names = (
+        csv_df[[KTP_FIRST_NAME_COL, KTP_LAST_NAME_COL]]
+        .drop_duplicates()
+        .reset_index(drop=True)
+    )
+    outer_dict = build_outer_dict_from_names(unique_names)
+
+    csv_matcher = CsvNameMatchProcedure()
+    docx_matcher = DocxNameMatchProcedure()
+
+    append_csv_matches(outer_dict, csv_df, csv_matcher)
+    append_docx_matches(outer_dict, docx_df, docx_matcher)
+
     # Create markdown cards for each row
     cards = {}
     intro = INTRODUCTION.format(
@@ -158,22 +243,50 @@ def process_documents(docx_dir: Path, csv_dir: Path, recursive: bool,
             .strftime('%B %d, %Y')
         )
     ) + "\n\n"  # will merge later so as not to spoil cards
-    for _, row in joined_df.iterrows():
-        draw_number = row.pop(DRAW_LABEL)
-        card = (
-            f"### Draw #{draw_number} of {TOTAL_DRAWS}: {row.get(KTP_LAST_NAME_COL)}, {row.get(KTP_FIRST_NAME_COL)}\n"
-            f"Fun fact: the last name came from `{row.get(KTP_LAST_NAME_ORIG_COLNAME_COL)}` and the first name – from `{row.get(KTP_FIRST_NAME_ORIG_COLNAME_COL)}` in the originating HCR list."
+    for name_key, inner_dicts in outer_dict.items():
+        draw_numbers = []
+        for inner in inner_dicts:
+            draw_number = inner.data.get(DRAW_LABEL)
+            if draw_number is not None and not pd.isna(draw_number):
+                draw_numbers.append(str(draw_number))
+        draw_numbers = sorted(set(draw_numbers))
+        if draw_numbers:
+            draw_label = ", ".join(draw_numbers)
+            header = f"### Draw #{draw_label} of {TOTAL_DRAWS}: {name_key.last_name}, {name_key.first_name}\n"
+        else:
+            draw_label = ""
+            header = f"### {name_key.last_name}, {name_key.first_name}\n"
+
+        fun_fact = ""
+        for inner in inner_dicts:
+            last_col = inner.data.get(KTP_LAST_NAME_ORIG_COLNAME_COL)
+            first_col = inner.data.get(KTP_FIRST_NAME_ORIG_COLNAME_COL)
+            if last_col and first_col:
+                fun_fact = (
+                    f"Fun fact: the last name came from `{last_col}` and the first name – "
+                    f"from `{first_col}` in the originating HCR list."
+                )
+                break
+        card = header + (fun_fact + "\n" if fun_fact else "")
+
+        minified_card = (
+            f"{draw_label}: {name_key.first_name} {name_key.last_name}"
+            if draw_label
+            else f"{name_key.first_name} {name_key.last_name}"
         )
-        # docx_filename = re.sub(r'\s+', '_', re.sub(r'[^A-Za-z0-9\s]+', '', card)).strip('_')
-        # Less verbose version
-        minified_card = f"{draw_number}: {row.get(KTP_FIRST_NAME_COL)} {row.get(KTP_LAST_NAME_COL)}\n"
         docx_filename = re.sub(r'\s+', '_', re.sub(r'[^A-Za-z0-9\s]+', '', minified_card)).strip('_')
-        for col, val in row.items():
-            if '\n' in str(val):
-                # treat as code block
-                card += f"**{col}**:\n\n{str(val).replace('\n','\n\n')}\n\n"
-            else:
-                card += f"**{col}**: {str(val)}\n\n"
+
+        for inner in inner_dicts:
+            filename = inner.data.get(KTP_FILENAME_COL, "unknown")
+            card += f"\n\n#### {KTP_FILENAME_COL}: {filename}\n"
+            for col, val in inner.data.items():
+                if col == KTP_FILENAME_COL or pd.isna(val):
+                    continue
+                if '\n' in str(val):
+                    # treat as code block
+                    card += f"**{col}**:\n\n{str(val).replace('\n','\n\n')}\n\n"
+                else:
+                    card += f"**{col}**: {str(val)}\n\n"
         cards[docx_filename] = card
 
     # Create output directory if it doesn't exist
@@ -219,12 +332,14 @@ def process_documents(docx_dir: Path, csv_dir: Path, recursive: bool,
                     zipf.write(path, arcname=path.name)
         console.print(f"[green]Saved DOCX files to: {zip_path}[/green]")
 
+
 @click.group(invoke_without_command=True)
 @click.pass_context
 def cli(ctx):
     """Document enrichment CLI tool."""
     if ctx.invoked_subcommand is None:
         ctx.invoke(interactive)
+
 
 @cli.command()
 def interactive():
@@ -255,6 +370,7 @@ def interactive():
     # Process
     process_documents(docx_dir, csv_dir, recursive, output_dir, output_format)
 
+
 @cli.command()
 @click.argument('docx_dir', type=click.Path(exists=True, file_okay=False, path_type=Path))
 @click.argument('csv_dir', type=click.Path(exists=True, file_okay=False, path_type=Path))
@@ -272,5 +388,3 @@ def process(docx_dir: Path, csv_dir: Path, recursive: bool, output_dir: Path,
     """
     
     process_documents(docx_dir, csv_dir, recursive, output_dir, output_format)
-
-

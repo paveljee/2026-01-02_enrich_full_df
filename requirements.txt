@@ -4,3 +4,4 @@ rich
 psutil
 #pyarrow
 python-docx
+pydantic
