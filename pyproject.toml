@@ -12,7 +12,7 @@ dependencies = [
     "click>=8.3.1,<9",
     "pydantic>=2.11.0,<3",
     "pytest>=9.0.2,<10",
-    "lxml>=6.0.2,<7",
+    "lxml>=6.0.2,<7", "ruff>=0.14.14,<0.15", "mypy>=1.19.1,<2",
 ]
 
 [tool.pixi.workspace]
@@ -41,4 +41,25 @@ python {{ module_name }} process \
 """
 cwd = "."
 
+[tool.pixi.tasks.ruff]
+cmd = "ruff check pkg_20251223_word_tables"
+cwd = "."
+
+[tool.pixi.tasks.mypy]
+cmd = "mypy pkg_20251223_word_tables"
+cwd = "."
+
 [tool.pytest.ini_options]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+plugins = ["pydantic.mypy"]
+warn_unused_ignores = true

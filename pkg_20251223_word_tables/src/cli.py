@@ -1,33 +1,30 @@
-import pandas as pd
 import re
-from pathlib import Path
-from datetime import datetime
-from zoneinfo import ZoneInfo
-from zipfile import ZipFile
-import tempfile
-import subprocess
-import click
-from rich.console import Console
-from rich.prompt import Prompt, Confirm
-from rich.progress import track
 import shutil
+import subprocess
+import tempfile
+from datetime import datetime
+from pathlib import Path
+from zipfile import ZipFile
+from zoneinfo import ZoneInfo
 
-from .name_utils import (
-    unify_first_last,
-)
-from .parse_docx import (
-    parse_docx_table,
-)
+import click
+import pandas as pd
+from rich.console import Console
+from rich.progress import track
+from rich.prompt import Confirm, Prompt
+
 from ._vars import (
-    KTP_FIRST_NAME_COL,
-    KTP_LAST_NAME_COL,
-    KTP_FIRST_NAME_ORIG_COLNAME_COL,
-    KTP_LAST_NAME_ORIG_COLNAME_COL,
-    KTP_FILENAME_COL,
     DRAW_LABEL,
+    KTP_FILENAME_COL,
+    KTP_FIRST_NAME_COL,
+    KTP_FIRST_NAME_ORIG_COLNAME_COL,
+    KTP_LAST_NAME_COL,
+    KTP_LAST_NAME_ORIG_COLNAME_COL,
 )
 from .data_models import NameKey, OuterDict
 from .matchers import CsvMatcher, DocxMatcher
+from .name_utils import unify_first_last
+from .parse_docx import parse_docx_table
 
 console = Console()
 
@@ -169,12 +166,8 @@ def process_documents(docx_dir: Path, csv_dir: Path, recursive: bool,
 
     # Create markdown cards for each row
     cards = {}
-    intro = INTRODUCTION.format(
-        today := (
-            datetime.now(ZoneInfo('America/Toronto'))
-            .strftime('%B %d, %Y')
-        )
-    ) + "\n\n"  # will merge later so as not to spoil cards
+    today = datetime.now(ZoneInfo("America/Toronto")).strftime("%B %d, %Y")
+    intro = INTRODUCTION.format(today) + "\n\n"  # will merge later so as not to spoil cards
     for name_key, inner_dicts in outer_dict.items():
         draw_numbers = []
         for inner in inner_dicts:
@@ -184,7 +177,10 @@ def process_documents(docx_dir: Path, csv_dir: Path, recursive: bool,
         draw_numbers = sorted(set(draw_numbers))
         if draw_numbers:
             draw_label = ", ".join(draw_numbers)
-            header = f"### Draw #{draw_label} of {TOTAL_DRAWS}: {name_key.last_name}, {name_key.first_name}\n"
+            header = (
+                f"### Draw #{draw_label} of {TOTAL_DRAWS}: "
+                f"{name_key.last_name}, {name_key.first_name}\n"
+            )
         else:
             draw_label = ""
             header = f"### {name_key.last_name}, {name_key.first_name}\n"
@@ -206,7 +202,11 @@ def process_documents(docx_dir: Path, csv_dir: Path, recursive: bool,
             if draw_label
             else f"{name_key.first_name} {name_key.last_name}"
         )
-        docx_filename = re.sub(r'\s+', '_', re.sub(r'[^A-Za-z0-9\s]+', '', minified_card)).strip('_')
+        docx_filename = re.sub(
+            r"\s+",
+            "_",
+            re.sub(r"[^A-Za-z0-9\s]+", "", minified_card),
+        ).strip("_")
 
         for inner in inner_dicts:
             filename = inner.data.get(KTP_FILENAME_COL, "unknown")
@@ -231,7 +231,10 @@ def process_documents(docx_dir: Path, csv_dir: Path, recursive: bool,
     if output_format == "txt":
         with tempfile.TemporaryDirectory() as tmpdir:
             txt_paths = []
-            for filename, card in track(list(cards.items()), description="Creating Markdown (*.txt) files..."):
+            for filename, card in track(
+                list(cards.items()),
+                description="Creating Markdown (*.txt) files...",
+            ):
                 txt_path = Path(tmpdir) / f"{filename}.txt"
                 txt_path.write_text(intro + card, encoding="utf-8")
                 txt_paths.append(txt_path)

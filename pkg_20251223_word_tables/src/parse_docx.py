@@ -1,9 +1,9 @@
-from pathlib import Path
 import re
-
+from pathlib import Path
 from zipfile import ZipFile
-from lxml import etree
+
 import pandas as pd
+from lxml import etree
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 NS = {"w": W}
