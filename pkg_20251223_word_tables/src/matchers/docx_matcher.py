@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 
+import numpy as np
 import pandas as pd
 
 from .._vars import (
@@ -11,7 +12,7 @@ from .._vars import (
     RIGHT_NAME_COL,
 )
 from ..data_models import OuterDict
-from .base import BaseMatcher, NAME_KEY_COL, build_name_key_frame
+from .base import NAME_KEY_COL, BaseMatcher, build_name_key_frame
 
 NON_ALNUM_ANYWHERE = re.compile(r"[^0-9A-Za-z]+")
 
@@ -62,10 +63,11 @@ class DocxMatcher(BaseMatcher):
             how="inner",
             suffixes=("", "_key"),
         )
-        mask = cross["_docx_clean"].str.contains(
-            cross["_first_clean"], na=False, regex=False
-        ) & cross["_docx_clean"].str.contains(
-            cross["_last_clean"], na=False, regex=False
+        docx_values = cross["_docx_clean"].to_numpy(dtype=str)
+        first_values = cross["_first_clean"].to_numpy(dtype=str)
+        last_values = cross["_last_clean"].to_numpy(dtype=str)
+        mask = (np.char.find(docx_values, first_values) >= 0) & (
+            np.char.find(docx_values, last_values) >= 0
         )
         matched = cross.loc[mask]
         if matched.empty:

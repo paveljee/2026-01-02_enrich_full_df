@@ -4,7 +4,7 @@ import pandas as pd
 
 from .._vars import KTP_FILENAME_COL, KTP_FIRST_NAME_COL, KTP_LAST_NAME_COL
 from ..data_models import OuterDict
-from .base import BaseMatcher, NAME_KEY_COL, build_name_key_frame
+from .base import NAME_KEY_COL, BaseMatcher, build_name_key_frame
 
 
 class CsvNameMatchProcedure:
