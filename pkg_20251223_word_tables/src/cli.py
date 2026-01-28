@@ -25,9 +25,9 @@ from ._vars import (
     KTP_LAST_NAME_ORIG_COLNAME_COL,
     KTP_FILENAME_COL,
     DRAW_LABEL,
-    RIGHT_NAME_COL,
 )
-from .data_models import InnerDict, MatchingProcedure, NameKey, OuterDict
+from .data_models import NameKey, OuterDict
+from .matchers import CsvMatcher, DocxMatcher
 
 console = Console()
 
@@ -46,29 +46,6 @@ Last modified (introduction): December 23, 2025
 Date of report: {}
 """
 
-NON_ALNUM_ANYWHERE = re.compile(r"[^0-9A-Za-z]+")
-
-
-class CsvNameMatchProcedure:
-    dataset_id_field = KTP_FILENAME_COL
-
-
-class DocxNameMatchProcedure:
-    dataset_id_field = KTP_FILENAME_COL
-
-
-def _clean_series(series: pd.Series) -> pd.Series:
-    series_str = series.astype("string")
-    return (
-        series_str.str.replace(NON_ALNUM_ANYWHERE, "", regex=True)
-        .str.casefold()
-    )
-
-
-def _clean_token(value: str) -> str:
-    return NON_ALNUM_ANYWHERE.sub("", str(value)).casefold()
-
-
 def build_outer_dict_from_names(names: pd.DataFrame) -> OuterDict:
     """Build an OuterDict from a dataframe of unique first/last pairs."""
     name_keys = [
@@ -76,51 +53,6 @@ def build_outer_dict_from_names(names: pd.DataFrame) -> OuterDict:
         for first, last in names.itertuples(index=False, name=None)
     ]
     return OuterDict.from_name_keys(name_keys)
-
-
-def append_csv_matches(
-    outer_dict: OuterDict,
-    csv_df: pd.DataFrame,
-    procedure: MatchingProcedure,
-) -> None:
-    """Append exact CSV matches to each outer dict key."""
-    for name_key, _ in outer_dict.items():
-        matches = csv_df[
-            (csv_df[KTP_FIRST_NAME_COL] == name_key.first_name)
-            & (csv_df[KTP_LAST_NAME_COL] == name_key.last_name)
-        ]
-        for _, row in matches.iterrows():
-            outer_dict.add_inner(
-                name_key,
-                InnerDict.from_mapping(row.to_dict(), procedure),
-            )
-
-
-def append_docx_matches(
-    outer_dict: OuterDict,
-    docx_df: pd.DataFrame,
-    procedure: MatchingProcedure,
-) -> None:
-    """Append DOCX matches using the established substring-based matching logic."""
-    docx_clean = _clean_series(docx_df[RIGHT_NAME_COL])
-    docx_index = docx_df.index
-
-    for name_key, _ in outer_dict.items():
-        first_clean = _clean_token(name_key.first_name)
-        last_clean = _clean_token(name_key.last_name)
-        if not first_clean or not last_clean:
-            continue
-        mask = docx_clean.str.contains(first_clean, na=False, regex=False) & docx_clean.str.contains(
-            last_clean, na=False, regex=False
-        )
-        hits = docx_index[mask]
-        if hits.empty:
-            continue
-        for _, row in docx_df.loc[hits].iterrows():
-            outer_dict.add_inner(
-                name_key,
-                InnerDict.from_mapping(row.to_dict(), procedure),
-            )
 
 
 def find_files_by_extension(directory: Path, extension: str, recursive: bool = False) -> list[Path]:
@@ -229,11 +161,11 @@ def process_documents(docx_dir: Path, csv_dir: Path, recursive: bool,
     )
     outer_dict = build_outer_dict_from_names(unique_names)
 
-    csv_matcher = CsvNameMatchProcedure()
-    docx_matcher = DocxNameMatchProcedure()
+    csv_matcher = CsvMatcher(outer_dict)
+    docx_matcher = DocxMatcher(outer_dict)
 
-    append_csv_matches(outer_dict, csv_df, csv_matcher)
-    append_docx_matches(outer_dict, docx_df, docx_matcher)
+    csv_matcher.match(csv_df)
+    docx_matcher.match(docx_df)
 
     # Create markdown cards for each row
     cards = {}
