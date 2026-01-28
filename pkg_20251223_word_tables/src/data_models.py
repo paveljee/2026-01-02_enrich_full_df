@@ -58,6 +58,15 @@ class OuterDict(BaseModel):
     def add_inner(self, name_key: NameKey, inner: InnerDict) -> None:
         self.data.setdefault(name_key.to_json_key(), []).append(inner)
 
+    def add_inner_by_key(self, key: str, inner: InnerDict) -> None:
+        self.data.setdefault(key, []).append(inner)
+
+    def ensure_inner_list(self, name_key: NameKey) -> list[InnerDict]:
+        return self.data.setdefault(name_key.to_json_key(), [])
+
+    def ensure_inner_list_by_key(self, key: str) -> list[InnerDict]:
+        return self.data.setdefault(key, [])
+
     def items(self) -> Iterable[tuple[NameKey, list[InnerDict]]]:
         for key, items in self.data.items():
             yield NameKey.from_json_key(key), items
