@@ -3,7 +3,7 @@ from typing import Any, Iterable, Mapping, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from ._vars import KTP_FIRST_NAME_COL, KTP_LAST_NAME_COL
+from .._vars import KTP_FIRST_NAME_COL, KTP_LAST_NAME_COL
 
 
 class MatchingProcedure(Protocol):

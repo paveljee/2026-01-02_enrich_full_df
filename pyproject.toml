@@ -10,9 +10,13 @@ dependencies = [
     "psutil>=7.2.1,<8",
     "python-docx>=1.2.0,<2",
     "click>=8.3.1,<9",
-    "pydantic>=2.11.0,<3",
+    "pydantic>=2.12.5,<3",
     "pytest>=9.0.2,<10",
-    "lxml>=6.0.2,<7", "ruff>=0.14.14,<0.15", "mypy>=1.19.1,<2",
+    "lxml>=6.0.2,<7",
+    "ruff>=0.14.14,<0.15",
+    "mypy>=1.19.1,<2",
+    "requests>=2.32.5,<3",
+    "types-requests>=2.32.4.20260107,<3",
 ]
 
 [tool.pixi.workspace]
@@ -59,7 +63,7 @@ target-version = "py312"
 select = ["E", "F", "I"]
 
 [tool.mypy]
-python_version = "3.12"
+python_version = "3.14"
 ignore_missing_imports = true
 plugins = ["pydantic.mypy"]
 warn_unused_ignores = true
