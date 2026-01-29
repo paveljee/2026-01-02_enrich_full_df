@@ -10,7 +10,7 @@ from pydantic import AnyUrl, BaseModel, Field, field_validator, model_validator
 from pydantic_core import core_schema
 
 
-class ResourceGroup(Enum):
+class ResourceGroup(str, Enum):
     """Enum identifying the provenance of registered resources.
     
     Members:
@@ -28,7 +28,7 @@ class ResourceGroup(Enum):
     KTP_PILOT_SAMPLE = "ktp_pilot_sample"
 
 
-class FragmentType(Enum):
+class FragmentType(str, Enum):
     """Enum identifying the type of fragment within a registered resource.
     
     Members:
@@ -64,18 +64,18 @@ class RegisteredResource(BaseModel):
         ..., description="Type of fragments contained in this resource")
     description: str | None = Field(None, description="Optional human-readable description")
     url: AnyUrl | None = Field(
-        ..., description="URL to resource (file:/// for local paths, https:// for remote)")
+        None, description="URL to resource (file:/// for local paths, https:// for remote)")
     verify_hash_on_init: bool = Field(
-        default=True, 
+        default=True,
         description="If True, verify hash matches file content on initialization"
     )
-    
+
     @field_validator('url')
     @classmethod
     def validate_url(cls, v: AnyUrl | None) -> AnyUrl | None:
         """Validate URL is non-empty and has no fragment."""
         if v is None:
-            raise ValueError("URL is required")
+            return None
         
         url_str = str(v)
         if not url_str or url_str.isspace():
@@ -97,6 +97,10 @@ class RegisteredResource(BaseModel):
     def verify_hash_if_requested(self) -> 'RegisteredResource':
         """Verify hash matches file content if verify_hash_on_init is True."""
         if self.verify_hash_on_init:
+            if self.url is None:
+                raise ValueError(
+                    f"Could not verify hash for resource '{self.name}': URL is required"
+                )
             try:
                 actual_hash = self._compute_hash()
                 if actual_hash != self.hash:
@@ -179,6 +183,9 @@ class RegisteredResource(BaseModel):
         Raises:
             ValueError: If url is not a file:/// URL.
         """
+        if self.url is None:
+            raise ValueError(f"Resource '{self.name}' has no URL")
+
         url_str = str(self.url)
         if not url_str.startswith("file:///"):
             raise ValueError(

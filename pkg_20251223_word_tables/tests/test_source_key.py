@@ -47,14 +47,15 @@ class TestRegisteredResource:
             name="test.csv",
             hash="hash123",
             group=ResourceGroup.KTP_PILOT_SAMPLE,
-            fragment_type=FragmentType.CSV_ROW
+            fragment_type=FragmentType.CSV_ROW,
+            verify_hash_on_init=False,
         )
         assert resource.url is None
         assert resource.description is None
     
     def test_url_validation_rejects_empty(self):
         """Test URL validation rejects empty/whitespace strings."""
-        with pytest.raises(ValidationError, match="valid non-empty URL"):
+        with pytest.raises(ValidationError, match="Input should be a valid URL"):
             RegisteredResource(
                 name="test.csv", hash="h", group=ResourceGroup.KTP_PILOT_SAMPLE,
                 fragment_type=FragmentType.CSV_ROW, url=""
@@ -65,20 +66,20 @@ class TestRegisteredResource:
         for url in ["file:///path/file", "https://example.com/file", "http://example.com/file"]:
             resource = RegisteredResource(
                 name="test", hash="h", group=ResourceGroup.KTP_PILOT_SAMPLE,
-                fragment_type=FragmentType.CSV_ROW, url=url
+                fragment_type=FragmentType.CSV_ROW, url=url, verify_hash_on_init=False
             )
             assert resource.url is not None
     
     @pytest.mark.parametrize("url,expected_path", [
         ("file:///home/user/data.csv", "/home/user/data.csv"),
-        ("file:///C:/Users/user/data.csv", "/C:/Users/user/data.csv"),  # Windows
+        ("file:///C:/Users/user/data.csv", "C:/Users/user/data.csv"),  # Windows
         ("file:///home/user/spaced%20file.csv", "/home/user/spaced file.csv"),  # URL-encoded
     ])
     def test_fspath_extracts_paths(self, url, expected_path):
         """Test __fspath__ correctly extracts filesystem paths."""
         resource = RegisteredResource(
             name="test", hash="h", group=ResourceGroup.KTP_PILOT_SAMPLE,
-            fragment_type=FragmentType.CSV_ROW, url=url
+            fragment_type=FragmentType.CSV_ROW, url=url, verify_hash_on_init=False
         )
         assert resource.__fspath__() == expected_path
     
@@ -86,7 +87,7 @@ class TestRegisteredResource:
         """Test __fspath__ raises when URL is None."""
         resource = RegisteredResource(
             name="test", hash="h", group=ResourceGroup.KTP_PILOT_SAMPLE,
-            fragment_type=FragmentType.CSV_ROW
+            fragment_type=FragmentType.CSV_ROW, verify_hash_on_init=False
         )
         with pytest.raises(ValueError, match="has no URL"):
             resource.__fspath__()
@@ -95,7 +96,9 @@ class TestRegisteredResource:
         """Test __fspath__ raises for HTTP URLs."""
         resource = RegisteredResource(
             name="test", hash="h", group=ResourceGroup.KTP_PILOT_SAMPLE,
-            fragment_type=FragmentType.CSV_ROW, url="https://example.com/data.csv"
+            fragment_type=FragmentType.CSV_ROW,
+            url="https://example.com/data.csv",
+            verify_hash_on_init=False,
         )
         with pytest.raises(ValueError, match="not a file path"):
             resource.__fspath__()
@@ -104,7 +107,9 @@ class TestRegisteredResource:
         """Test that __fspath__ works with pathlib.Path."""
         resource = RegisteredResource(
             name="test", hash="h", group=ResourceGroup.KTP_PILOT_SAMPLE,
-            fragment_type=FragmentType.CSV_ROW, url="file:///data/test.csv"
+            fragment_type=FragmentType.CSV_ROW,
+            url="file:///data/test.csv",
+            verify_hash_on_init=False,
         )
         path = Path(resource)
         assert isinstance(path, Path)
@@ -121,7 +126,8 @@ class TestSourceKey:
             hash="abc123",
             group=ResourceGroup.SCISCINET_HF,
             fragment_type=FragmentType.AUTHOR_ID,
-            url="file:///data/authors.parquet"
+            url="file:///data/authors.parquet",
+            verify_hash_on_init=False,
         )
     
     def test_fragment_has_type_mixin(self, sample_resource):
