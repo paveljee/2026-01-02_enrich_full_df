@@ -5,13 +5,14 @@
 
 ## Task summary
 
-The user requests that we **retire `pkg_20251223_word_tables/src/cli.py`** by **porting/rewiring all of its logic and imported matching modules** into the mature DuckDB-based pipeline in `repl.py`. The port must **replace all pandas/numpy matching logic with DuckDB logic** while retaining the **outer/inner dict abstraction** used in `repl.py`, and unify around the same CSV schema already used in both inputs. Additionally, I must **not modify any files other than this RFC** and must present a thorough, obsessive implementation plan before any code changes are made.
+The user requests that we **retire `pkg_20251223_word_tables/src/cli.py`** by **porting/rewiring all of its logic and imported matching modules** into the mature DuckDB-based pipeline in `repl.py`. The port must **replace all pandas/numpy matching logic with DuckDB logic** while retaining the **outer/inner dict abstraction** (from `pkg_20251223_word_tables/src/data_models.py`) and unify around the same CSV schema already used in both inputs. Additionally, I must **not modify any files other than this RFC** and must present a thorough, obsessive implementation plan before any code changes are made.
 
 This RFC documents:
 - Current behavior of `cli.py` and its dependency modules.
 - Current behavior and architecture of `repl.py`.
 - Gaps and differences (in-memory pandas vs. DuckDB SQL pipeline).
 - A step-by-step plan to rewire/port the entire CLI logic into the `repl.py` pipeline using DuckDB for matching and aggregation, while preserving the `OuterDict` abstraction semantics.
+- Integration plan for new provenance/data models (`RegisteredResource`, `SourceKey`, etc.).
 - Questions for the human architect.
 
 ## Repo review (deep & thorough)
@@ -80,40 +81,44 @@ Key steps (current in-memory, pandas-based):
 1. **Delete/retire CLI** by porting its logic into `repl.py` (the mature DuckDB pipeline).
 2. **Move all matching logic** (CSV match + DOCX match) **from pandas/numpy to DuckDB SQL**.
 3. **Unify around CSV schema** (input_df in `repl.py` and CSVs from `cli.py` are the same).
-4. **Keep the outer/inner dict abstraction** that `repl.py` uses, and have DuckDB feed it.
-5. **Do not edit any files** besides this RFC for now.
+4. **Keep the outer/inner dict abstraction** from `pkg_20251223_word_tables/src/data_models.py`, and have DuckDB feed it.
+5. **Preserve SciSciNet pipeline** in `repl.py` unchanged while adding the new functionality.
+6. **Do not edit any files** besides this RFC for now.
 
 ## Proposed architecture after port (high-level)
 
-1. **Replace CLI entrypoints** with `repl.py` as a single pipeline orchestrator.
+1. **Replace CLI entrypoints** with `repl.py` as a single pipeline orchestrator (delete `cli.py`).
 2. **Add DuckDB tables for DOCX-derived data**:
    - Parse DOCX tables with existing `parse_docx_table` into pandas (the parsing step must still be in Python). Immediately register each table in DuckDB.
    - Persist combined DOCX rows in DuckDB table `docx_rows` (with `ktp.filename`).
    - Ensure columns are sanitized to `ktp.table_1_*` naming as in current CLI.
-3. **Normalize CSV inputs** using DuckDB operations:
-   - Load CSV files into DuckDB; add `ktp.filename` based on file name.
-   - Apply `unify_first_last` logic: either implement as SQL (CASE-based column coalescing) or use a Python pre-step to populate `ktp.first_name`, `ktp.last_name`, and original column names before writing into DuckDB.
-4. **Derive `OuterDict` keys** in DuckDB:
+3. **Normalize CSV inputs** in a **pre-OuterDict phase** (no DuckDB yet):
+   - Load CSV files; add `ktp.filename` based on file name.
+   - Apply `unify_first_last` in Python to populate `ktp.first_name`, `ktp.last_name`, and original column names.
+   - Produce initial `OuterDict` (first inner dicts come from the initial datasets in this phase).
+4. **Initialize DuckDB only after OuterDict exists** and use DuckDB for all matching/inner-dict additions from this point forward.
+5. **Derive `OuterDict` keys** in DuckDB (post-initialization only if needed for later matching):
    - `SELECT DISTINCT ktp.first_name, ktp.last_name` to build name keys.
-5. **Matching in DuckDB**:
+6. **Matching in DuckDB**:
    - **CSV match**: SQL inner join between CSV table and name key table on first/last.
    - **DOCX match**: SQL cross join between name key table and DOCX rows, using a cleaned `Researcher/author` column + cleaned first/last (regex replace + lower) with substring matching using `POSITION` or `INSTR`.
    - Store results in DuckDB `matched_csv` and `matched_docx` tables.
-6. **Rebuild `OuterDict`** from DuckDB matched tables, yielding inner dict lists by name key.
-7. **Render cards** using the same logic (fun fact, draw numbers, docx filename, etc.), but source from DuckDB query results instead of pandas groupby.
-8. **Output** (txt/docx + zip), same as CLI.
+7. **Append to `OuterDict`** from DuckDB matched tables, yielding additional inner dict lists by name key.
+8. **Render cards** using the same logic (fun fact, draw numbers, docx filename, etc.), but source from `OuterDict`.
+9. **Output** (txt/docx + zip), same as CLI.
+10. **Integrate resource/data model support** (see new section below) into the pipeline to track provenance and sources.
 
 ## Detailed plan & actions (implementation intentions)
 
 ### Phase 0 — Setup & sanity
 - Confirm `parse_docx_table` still needed in Python, but move all matching into DuckDB.
 - Confirm schema parity: `repl.py` input CSV schema is the same as CLI CSVs.
-- Decide scope of CLI replacement (replace CLI entrypoints or leave stubs that call `repl.py`).
+- Delete CLI entrypoints and re-home arguments in `repl.py`.
 - Define new `repl.py` steps analogous to existing `PipelineManager` steps but for the word-table pipeline, or integrate into existing steps with a new pipeline class.
 
 ### Phase 1 — DuckDB schema design
 
-**Tables to create:**
+**Tables to create (post-OuterDict initialization):**
 1. `ktp_csv_raw` (all CSV rows with `ktp.filename` and original columns)
 2. `ktp_csv_norm` (same as raw + `ktp.first_name`, `ktp.last_name`, `ktp.first_name_original_column_name`, `ktp.last_name_original_column_name`)
 3. `ktp_docx_raw` (all parsed DOCX rows + `ktp.filename` + normalized/sanitized column names)
@@ -129,20 +134,14 @@ Key steps (current in-memory, pandas-based):
   ```
   or use Python to generate canonical JSON strings via `NameKey.to_json_key()` after pulling distinct names.
 
-### Phase 2 — Port `unify_first_last` to DuckDB
+### Phase 2 — Pre-OuterDict normalization (no DuckDB)
 
-**Goal:** reproduce `unify_first_last` logic (which selects first/last from multiple possible columns) using SQL, avoiding pandas.
+**Goal:** reproduce `unify_first_last` logic (which selects first/last from multiple possible columns) in Python before DuckDB initializes.
 
-Options:
-- **Option A (SQL CASE + COALESCE):**
-  - Identify first-name candidates among known columns (e.g., `hcr.firstname_middlename`, `hcr.first_name`, `hcr.firstname`).
-  - Identify last-name candidates among known columns (e.g., `hcr.lastname`, `hcr.familyname`, `hcr.last_name`).
-  - Choose first non-null (and non-empty) value for each and store the column name used in the `_orig` fields.
-- **Option B (Python pre-pass):**
-  - Use `unify_first_last` on each row in a pandas DF, then register the normalized result into DuckDB.
-  - This keeps exact behavior but still pushes matching and joins into DuckDB.
-
-**Preferred (alignment with request):** Option A if feasible, to fully remove pandas logic except for file parsing and I/O.
+Approach:
+- Use `unify_first_last` on each CSV row to populate canonical `ktp.first_name` and `ktp.last_name`.
+- Capture `ktp.first_name_original_column_name` and `ktp.last_name_original_column_name` for fun-fact metadata.
+- Seed `OuterDict` directly from these canonical name pairs and initial datasets, **before** initializing DuckDB.
 
 ### Phase 3 — Docx name matching via DuckDB
 
@@ -180,7 +179,7 @@ WHERE POSITION(first_clean IN docx_clean) > 0
 - Potentially add pre-filter on first or last initial to reduce cross join size.
 - If dataset large, use `JOIN` on tokenized surnames in `docx_clean` using `LIKE` or `regexp_matches` (though substring match still required).
 
-### Phase 4 — Constructing `OuterDict` from DuckDB
+### Phase 4 — Appending to `OuterDict` from DuckDB
 
 **Current behavior:**
 - `OuterDict` is seeded with all unique names.
@@ -200,11 +199,11 @@ WHERE POSITION(first_clean IN docx_clean) > 0
 
 - Keep existing rendering logic (draw numbers, fun fact, header, per-row fields) in Python.
 - Source data from `OuterDict` which now originates from DuckDB matches.
-- Output creation (TXT/DOCX + ZIP) remains unchanged.
+- Output creation (TXT/DOCX + ZIP) remains unchanged and should be copied from `cli.py` as-is.
 
 ### Phase 6 — CLI retirement and integration
 
-- Remove or stub `cli.py` (or rewire CLI to call `repl.py` pipeline). Per user request, “get rid of cli.py” suggests deprecating or removing entrypoints.
+- Delete `cli.py` and move its CLI arguments into `repl.py` as the canonical interface.
 - Consolidate all functionality inside `repl.py`, possibly with a new “word table enrichment” pipeline class or mode.
 - Ensure `repl.py` supports file inputs for DOCX and CSV directories (mirrors CLI options).
 
@@ -215,17 +214,17 @@ WHERE POSITION(first_clean IN docx_clean) > 0
 
 ## Potential issues & design decisions
 
-1. **DuckDB SQL vs Python for unify_first_last:**
-   - Full SQL implementation may be complex but is doable with `CASE` and `COALESCE` if input columns are consistent.
+1. **Pre-OuterDict normalization (no DuckDB):**
+   - `unify_first_last` runs before DuckDB initialization; therefore no SQL implementation is needed or desired.
 
 2. **Cross join blowup for DOCX matching:**
    - DuckDB can handle cross joins, but for large CSV/Docx counts it may be expensive. Consider filtering with surname tokens or even indexing docx rows by last name token.
 
 3. **OuterDict serialization:**
-   - `OuterDict` uses JSON keys; in DuckDB, `json_object` ordering may differ. To ensure stable keys, build keys in Python using `NameKey` after pulling distinct names.
+   - `OuterDict` uses JSON keys; ensure key generation remains in Python via `NameKey` for stability.
 
 4. **CLI removal vs. deprecation:**
-   - The user wants to get rid of CLI; will confirm whether to delete file or keep a wrapper that calls `repl.py` for backwards compatibility.
+   - CLI should be deleted; the `repl.py` interface will replace it.
 
 5. **Pandoc dependency for DOCX output:**
    - `cli.py` uses pandoc and a reference docx; if this is moved to `repl.py`, we must preserve the reference file path and validate that pandoc is available.
@@ -233,17 +232,32 @@ WHERE POSITION(first_clean IN docx_clean) > 0
 ## Explicit action list (planned edits later, not done now)
 
 1. **Add a new pipeline section** in `repl.py` for word-table enrichment, potentially under a CLI mode or a config flag.
-2. **Replace in-memory matching with DuckDB SQL** queries and store matches in tables.
-3. **Port name normalization logic** into DuckDB or a minimal Python-to-DuckDB transform step.
-4. **Build `OuterDict` from DuckDB results** and reuse existing card generation logic.
-5. **Remove or deprecate `cli.py`** (depending on decision).
-6. **Add tests / validation scripts**: compare outputs of old CLI vs. new pipeline for a sample dataset.
+2. **Implement pre-OuterDict normalization** using `unify_first_last` to create canonical names and seed the `OuterDict`.
+3. **Replace in-memory matching with DuckDB SQL** queries and store matches in tables (post-OuterDict only).
+4. **Append to `OuterDict` from DuckDB results** and reuse existing card generation logic.
+5. **Delete `cli.py`** and preserve CLI arguments by migrating them into `repl.py`.
+6. **Integrate resource/data model tracking** into the pipeline (see next section).
+7. **Add tests / validation scripts**: compare outputs of old CLI vs. new pipeline for a sample dataset.
+
+## Additional data models to integrate (new requirement)
+
+The pipeline must incorporate the following models for provenance and source tracking:
+
+- **`ResourceGroup`** and **`FragmentType`** enums for resource provenance and fragment identification.
+- **`RegisteredResource`** with integrity verification (hash checking, `__fspath__` support, URL validation).
+- **`SourceKey`** for uniquely identifying the source fragment of each `InnerDict`, replacing `dataset_id_field`-only tracking.
+
+**Integration intent:**
+- Define these models in a shared module (preferred location to be confirmed) and import them in `repl.py`.
+- Register all input CSV/DOCX resources as `RegisteredResource` instances before ingestion.
+- When creating `InnerDict`s, attach a `SourceKey` derived from the resource and its fragment (e.g., CSV row index, DOCX row index).
+- Update the `InnerDict`/matching procedures to rely on `SourceKey` instead of dataset id fields, consistent with the new model.
 
 ## Q&A for human architect
 
-1. **CLI removal expectation:** Should `cli.py` be deleted outright, or left as a thin wrapper that calls `repl.py` for backward compatibility?
-2. **Name normalization authority:** Do you require a **pure DuckDB SQL** implementation of `unify_first_last`, or is a minimal Python pre-processing step acceptable as long as matching is DuckDB-based?
-3. **Output format parity:** Must the output ZIP naming and file naming be byte-for-byte identical to current CLI outputs, or is functional equivalence acceptable?
-4. **Docx matching scale:** Do you expect the docx matching to be large enough to require additional optimizations (indexing / pre-tokenizing), or is a direct cross join acceptable?
-5. **`OuterDict` placement:** Should the `OuterDict`/`InnerDict` abstraction remain in `pkg_20251223_word_tables`, or should it be moved into `repl.py` (or a new shared module)?
-6. **Pipeline coexistence:** Should the existing SciSciNet pipeline in `repl.py` remain intact, or is this a repurposing of `repl.py` into the word-table pipeline exclusively?
+1. **CLI removal expectation:** Confirmed: delete `cli.py` outright and migrate its arguments into `repl.py`.
+2. **Name normalization authority:** Confirmed: `unify_first_last` runs pre-OuterDict; no DuckDB implementation needed.
+3. **Output format parity:** Confirmed: output creation code should be copied as-is from `cli.py` (functional parity expected).
+4. **Docx matching scale:** Confirmed: direct cross join acceptable.
+5. **`OuterDict` placement:** Confirmed: `OuterDict`/`InnerDict` remain in `pkg_20251223_word_tables/src/data_models.py`, and `repl.py` will import them.
+6. **Pipeline coexistence:** Confirmed: existing SciSciNet pipeline in `repl.py` remains intact.
