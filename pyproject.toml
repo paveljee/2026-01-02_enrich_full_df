@@ -53,8 +53,11 @@ cwd = "."
 cmd = "mypy pkg_20251223_word_tables"
 cwd = "."
 
+[tool.pixi.tasks.lint]
+depends-on = ["ruff", "mypy"]
+
 [tool.pixi.tasks.pre-commit]
-depends-on = ["ruff", "mypy", "test"]
+depends-on = ["lint", "test"]
 
 [tool.pytest.ini_options]
 
