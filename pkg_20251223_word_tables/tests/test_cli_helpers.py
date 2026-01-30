@@ -5,7 +5,8 @@ from zipfile import ZipFile
 
 import pandas as pd
 
-from ..src import cli
+import repl
+
 from ..src._vars import KTP_FIRST_NAME_COL, KTP_LAST_NAME_COL, RIGHT_NAME_COL
 from ..src.data_models import NameKey
 
@@ -17,7 +18,7 @@ def test_build_outer_dict_from_names():
             {KTP_FIRST_NAME_COL: "Grace", KTP_LAST_NAME_COL: "Hopper"},
         ]
     )
-    outer_dict = cli.build_outer_dict_from_names(names)
+    outer_dict = repl.build_outer_dict_from_names(names)
 
     assert len(outer_dict.data) == 2
     keys = set(outer_dict.data)
@@ -31,10 +32,10 @@ def test_find_files_by_extension(tmp_path: Path) -> None:
     (tmp_path / "b.docx").write_text("stub", encoding="utf-8")
     (tmp_path / "c.csv").write_text("stub", encoding="utf-8")
 
-    non_recursive = cli.find_files_by_extension(tmp_path, "docx")
+    non_recursive = repl.find_files_by_extension(tmp_path, "docx")
     assert {p.name for p in non_recursive} == {"b.docx"}
 
-    recursive = cli.find_files_by_extension(tmp_path, "docx", recursive=True)
+    recursive = repl.find_files_by_extension(tmp_path, "docx", recursive=True)
     assert {p.name for p in recursive} == {"a.docx", "b.docx"}
 
 
@@ -47,8 +48,8 @@ def test_validate_csv_headers(tmp_path: Path) -> None:
     pd.DataFrame([{"a": 3, "b": 4}]).to_csv(second, index=False)
     pd.DataFrame([{"a": 5, "c": 6}]).to_csv(mismatch, index=False)
 
-    assert cli.validate_csv_headers([first, second]) is True
-    assert cli.validate_csv_headers([first, mismatch]) is False
+    assert repl.validate_csv_headers([first, second]) is True
+    assert repl.validate_csv_headers([first, mismatch]) is False
 
 
 def test_process_documents_creates_zip(tmp_path: Path, monkeypatch) -> None:
@@ -68,18 +69,9 @@ def test_process_documents_creates_zip(tmp_path: Path, monkeypatch) -> None:
     def fake_parse_docx_table(_: Path) -> list[pd.DataFrame]:
         return [pd.DataFrame({RIGHT_NAME_COL: ["Jane Doe"], "extra": ["value"]})]
 
-    class DummyMatcher:
-        def __init__(self, outer_dict):
-            self.outer_dict = outer_dict
+    monkeypatch.setattr(repl, "parse_docx_table", fake_parse_docx_table)
 
-        def match(self, _: pd.DataFrame) -> None:
-            return None
-
-    monkeypatch.setattr(cli, "parse_docx_table", fake_parse_docx_table)
-    monkeypatch.setattr(cli, "CsvMatcher", DummyMatcher)
-    monkeypatch.setattr(cli, "DocxMatcher", DummyMatcher)
-
-    cli.process_documents(docx_dir, csv_dir, False, output_dir, "txt")
+    repl.process_documents(docx_dir, csv_dir, False, output_dir, "txt")
 
     zip_path = output_dir / f"{csv_dir.name}_combined_cards.zip"
     assert zip_path.exists()

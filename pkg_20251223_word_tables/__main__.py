@@ -1,4 +1,4 @@
-from src.cli import cli
+from repl import main
 
 if __name__ == "__main__":
-    cli()
+    main()

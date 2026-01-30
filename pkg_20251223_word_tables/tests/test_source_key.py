@@ -25,7 +25,7 @@ class TestEnums:
         """Test FragmentType enum has expected values."""
         assert FragmentType.AUTHOR_ID == "author_id"
         assert FragmentType.EXCEL_ROW == "excel_row"
-        assert len(list(FragmentType)) == 7
+        assert len(list(FragmentType)) == 8
 
 
 class TestRegisteredResource:
