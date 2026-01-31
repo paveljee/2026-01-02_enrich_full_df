@@ -261,3 +261,62 @@ The pipeline must incorporate the following models for provenance and source tra
 4. **Docx matching scale:** Confirmed: direct cross join acceptable.
 5. **`OuterDict` placement:** Confirmed: `OuterDict`/`InnerDict` remain in `pkg_20251223_word_tables/src/data_models.py`, and `repl.py` will import them.
 6. **Pipeline coexistence:** Confirmed: existing SciSciNet pipeline in `repl.py` remains intact.
+
+## report
+
+### Execution overview
+- Ported the full DOCX+CSV enrichment pipeline into `repl.py`, replacing in-memory pandas/numpy matching with DuckDB SQL joins and substring filters.
+- Rebuilt the CLI surface in `repl.py` with `process`, `interactive`, and `sciscinet` subcommands to preserve the previous CLI entrypoints while keeping SciSciNet behavior intact.
+- Integrated provenance tracking using `RegisteredResource`, `ResourceGroup`, `FragmentType`, and `SourceKey`, and added a DOCX-specific fragment type for table-row tracking.
+- Updated tests to target the new `repl.py` helpers and to reflect the expanded fragment type enumeration.
+
+### Key code changes
+#### 1) DuckDB-backed pipeline in `repl.py`
+- Added a full `process_documents` implementation that:
+  - Loads and validates CSV headers.
+  - Parses DOCX tables and normalizes column names.
+  - Registers CSV + DOCX datasets in DuckDB.
+  - Builds a name key table and performs:
+    - A direct inner join for CSV matching on normalized first/last names.
+    - A cross join for DOCX matching using cleaned substring matching in SQL.
+  - Hydrates an `OuterDict` by converting DuckDB match results into `InnerDict` entries.
+  - Produces the same TXT/DOCX output card bundle as the previous CLI.
+- Added interactive prompts to align with the previous CLI’s interactive mode.
+
+#### 2) Provenance and source tracking
+- Registered each CSV and DOCX file as a `RegisteredResource` with SHA256 verification.
+- Created `SourceKey` values per matched record, using:
+  - CSV row indices for CSV fragments.
+  - DOCX table/row composite identifiers for DOCX fragments.
+- Appended a `ktp.source_key` field into the inner record payload for traceability.
+
+#### 3) CLI retirement + wiring updates
+- Removed `pkg_20251223_word_tables/src/cli.py`.
+- Updated `pkg_20251223_word_tables/__main__.py` to invoke `repl.main()`.
+- Removed the CLI export from `pkg_20251223_word_tables/__init__.py`.
+
+#### 4) Test updates
+- Retargeted CLI helper tests to import from `repl.py`.
+- Updated fragment type test expectations to include `DOCX_ROW`.
+
+### Notes and behavioral parity
+- CSV name normalization still uses `unify_first_last`, and its original-column metadata is preserved for fun-fact rendering.
+- DOCX matching keeps the same substring semantics (casefold + non-alphanumeric stripping) but now runs entirely in DuckDB SQL.
+- Output bundles remain identical in structure: one TXT/DOCX file per matched name, zipped by CSV directory name.
+
+### Testing
+- Planned execution: `pixi run pre-commit` (run after code changes to validate formatting, types, and tests).
+
+## revision
+
+### Rework summary
+- Relocated all package code into top-level `src/`, `tests/`, and `resources/`, removing the nested package layout.
+- Refactored `repl.py` into `src/repl.py` with a focused pipeline that delegates XLSX sampling, CSV/DOCX matching, and parquet enrichment into dedicated modules.
+- Implemented sampler logic from `sampler.py` and `pilot_sampler.py`, including fixed pilot rows and deterministic draw generation, and then concatenated to 310 total sample rows.
+- Built dedicated DuckDB-backed matchers (`xlsx_matcher`, `csv_matcher`, `docx_matcher`, `parquet_matcher`) that append `InnerDict` entries with `SourceKey` provenance.
+- Updated configuration, dependencies, and pixi tasks to reference the new module layout.
+
+### Results
+- KTP pipeline steps are now explicit in `src/repl.py` and encapsulated in modular logic for sampling, matching, and card generation.
+- DuckDB matching for XLSX/CSV/DOCX/parquet sources lives in separate modules, with provenance checking and CSV-to-XLSX duplicate validation.
+- Repository layout aligns with requested `src/`, `tests/`, and `resources/` structure, and tests target the new module paths.

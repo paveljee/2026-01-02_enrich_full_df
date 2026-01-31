@@ -5,3 +5,4 @@ psutil
 #pyarrow
 python-docx
 pydantic
+openpyxl

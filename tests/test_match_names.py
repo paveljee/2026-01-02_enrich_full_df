@@ -4,14 +4,14 @@ import pandas as pd
 import pytest
 from docx import Document
 
-from ..src._vars import (
+from src._vars import (
     KTP_FIRST_NAME_COL,
     KTP_LAST_NAME_COL,
     RIGHT_NAME_COL,
 )
-from ..src.cli import find_files_by_extension
-from ..src.name_utils import match_csv_docx_names, unify_first_last
-from ..src.parse_docx import parse_docx_table
+from src.io_utils import find_files_by_extension
+from src.name_utils import match_csv_docx_names, unify_first_last
+from src.parse_docx import parse_docx_table
 
 TEST_CSV_DIR = Path("data/samples")
 TEST_DOCX_DIR = Path("data/manual_extractions")
