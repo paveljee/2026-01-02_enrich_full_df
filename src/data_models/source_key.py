@@ -39,6 +39,7 @@ class FragmentType(str, Enum):
         PAPER_ID: Paper unique identifier
         CSV_ROW: Row index in a CSV file
         PARQUET_ROW: Row index in a Parquet file
+        DOCX_ROW: Row index in a DOCX table
     """
     
     EXCEL_ROW = "excel_row"
@@ -48,6 +49,7 @@ class FragmentType(str, Enum):
     PAPER_ID = "paper_id"
     CSV_ROW = "csv_row"
     PARQUET_ROW = "parquet_row"
+    DOCX_ROW = "docx_row"
 
 
 class RegisteredResource(BaseModel):
