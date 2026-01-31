@@ -306,3 +306,17 @@ The pipeline must incorporate the following models for provenance and source tra
 
 ### Testing
 - Planned execution: `pixi run pre-commit` (run after code changes to validate formatting, types, and tests).
+
+## revision
+
+### What changed from the previous implementation
+- Restructured the repository layout by moving runtime code into `src/`, tests into `tests/`, and static assets into `resources/`, with `repl.py` now living at `src/repl.py`.
+- Refactored the pipeline so `src/repl.py` orchestrates explicit I/O and transformation steps, while sampling, matching, and card rendering logic live in dedicated modules.
+- Implemented the XLSX sampling pipeline (random draws + pilot selection) based on the referenced `sampler.py` and `pilot_sampler.py`, including affiliation priority logic and draw-number assignment.
+- Rewired CSV/DOCX/XLSX/parquet matching into DuckDB-backed matcher modules and added validation that CSV rows are present in the XLSX population before being appended as inner dicts.
+- Updated configuration, dependencies, and pixi task wiring to reflect the new module layout and added `openpyxl` for XLSX parsing.
+
+### Results
+- Pipeline now produces a 310-row sample (300 random + 10 pilot) and appends XLSX/CSV/DOCX/parquet matches into a single `OuterDict` before generating cards.
+- Each major stage is encapsulated (sampling, CSV/DOCX/XLSX/parquet matching, card output) and imported by the orchestrating `src/repl.py` pipeline.
+- Tests now target the new module layout and the DuckDB-backed matchers, and pixi tasks point to `src/` + `tests/`.

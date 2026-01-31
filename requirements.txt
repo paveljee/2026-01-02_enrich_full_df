@@ -2,6 +2,6 @@ pandas
 duckdb
 rich
 psutil
-#pyarrow
 python-docx
 pydantic
+openpyxl

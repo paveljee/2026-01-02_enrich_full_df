@@ -5,10 +5,15 @@ from zipfile import ZipFile
 
 import pandas as pd
 
-import repl
+from src._vars import KTP_FIRST_NAME_COL, KTP_LAST_NAME_COL
+from src.cards import build_cards, write_cards_zip
+from src.data_models import InnerDict, NameKey, OuterDict
+from src.io_utils import find_files_by_extension, validate_csv_headers
+from src.outer_dict_utils import build_outer_dict_from_names
 
-from ..src._vars import KTP_FIRST_NAME_COL, KTP_LAST_NAME_COL, RIGHT_NAME_COL
-from ..src.data_models import NameKey
+
+class DummyProcedure:
+    dataset_id_field = "ktp.source_key"
 
 
 def test_build_outer_dict_from_names():
@@ -18,7 +23,7 @@ def test_build_outer_dict_from_names():
             {KTP_FIRST_NAME_COL: "Grace", KTP_LAST_NAME_COL: "Hopper"},
         ]
     )
-    outer_dict = repl.build_outer_dict_from_names(names)
+    outer_dict = build_outer_dict_from_names(names)
 
     assert len(outer_dict.data) == 2
     keys = set(outer_dict.data)
@@ -32,10 +37,10 @@ def test_find_files_by_extension(tmp_path: Path) -> None:
     (tmp_path / "b.docx").write_text("stub", encoding="utf-8")
     (tmp_path / "c.csv").write_text("stub", encoding="utf-8")
 
-    non_recursive = repl.find_files_by_extension(tmp_path, "docx")
+    non_recursive = find_files_by_extension(tmp_path, "docx")
     assert {p.name for p in non_recursive} == {"b.docx"}
 
-    recursive = repl.find_files_by_extension(tmp_path, "docx", recursive=True)
+    recursive = find_files_by_extension(tmp_path, "docx", recursive=True)
     assert {p.name for p in recursive} == {"a.docx", "b.docx"}
 
 
@@ -48,34 +53,26 @@ def test_validate_csv_headers(tmp_path: Path) -> None:
     pd.DataFrame([{"a": 3, "b": 4}]).to_csv(second, index=False)
     pd.DataFrame([{"a": 5, "c": 6}]).to_csv(mismatch, index=False)
 
-    assert repl.validate_csv_headers([first, second]) is True
-    assert repl.validate_csv_headers([first, mismatch]) is False
+    assert validate_csv_headers([first, second]) is True
+    assert validate_csv_headers([first, mismatch]) is False
 
 
-def test_process_documents_creates_zip(tmp_path: Path, monkeypatch) -> None:
-    docx_dir = tmp_path / "docx"
-    csv_dir = tmp_path / "csv"
-    output_dir = tmp_path / "output"
-    docx_dir.mkdir()
-    csv_dir.mkdir()
+def test_write_cards_zip(tmp_path: Path) -> None:
+    name_key = NameKey(first_name="Jane", last_name="Doe")
+    outer_dict = OuterDict.from_name_keys([name_key])
+    inner = InnerDict.from_mapping({"field": "value"}, DummyProcedure())
+    outer_dict.add_inner(name_key, inner)
 
-    (docx_dir / "example.docx").write_text("stub", encoding="utf-8")
-    pd.DataFrame(
-        [
-            {"hcr.first_name": "Jane", "hcr.last_name": "Doe"},
-        ]
-    ).to_csv(csv_dir / "sample.csv", index=False)
+    cards = build_cards(outer_dict)
+    zip_path = write_cards_zip(
+        cards,
+        output_dir=tmp_path,
+        output_format="txt",
+        bundle_name="sample",
+        reference_docx_path=Path("resources/pandoc-custom-reference.docx"),
+    )
 
-    def fake_parse_docx_table(_: Path) -> list[pd.DataFrame]:
-        return [pd.DataFrame({RIGHT_NAME_COL: ["Jane Doe"], "extra": ["value"]})]
-
-    monkeypatch.setattr(repl, "parse_docx_table", fake_parse_docx_table)
-
-    repl.process_documents(docx_dir, csv_dir, False, output_dir, "txt")
-
-    zip_path = output_dir / f"{csv_dir.name}_combined_cards.zip"
     assert zip_path.exists()
-
     with ZipFile(zip_path) as zipf:
         names = set(zipf.namelist())
 

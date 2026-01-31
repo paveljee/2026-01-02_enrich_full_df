@@ -4,8 +4,8 @@ from typing import Iterable, Mapping, Protocol
 
 import pandas as pd
 
-from .._vars import KTP_FIRST_NAME_COL, KTP_LAST_NAME_COL
-from ..data_models import InnerDict, MatchingProcedure, NameKey, OuterDict
+from src._vars import KTP_FIRST_NAME_COL, KTP_LAST_NAME_COL
+from src.data_models import InnerDict, MatchingProcedure, NameKey, OuterDict
 
 NAME_KEY_COL = "_name_key"
 

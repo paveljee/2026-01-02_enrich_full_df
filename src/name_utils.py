@@ -2,7 +2,7 @@ import re
 
 import pandas as pd
 
-from ._vars import (
+from src._vars import (
     KTP_FIRST_NAME_COL,
     KTP_FIRST_NAME_ORIG_COLNAME_COL,
     KTP_LAST_NAME_COL,
