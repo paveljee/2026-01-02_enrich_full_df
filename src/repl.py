@@ -67,7 +67,7 @@ class ResourceMonitor:
 
     def start(self) -> None:
         self.running = True
-        self.thread = threading.Thread(target=self._monitor)
+        self.thread = threading.Thread(target=self._monitor, daemon=True)
         self.thread.start()
 
     def _monitor(self) -> None:
@@ -187,13 +187,15 @@ def register_pipeline_resources(
     )
 
 
-def run_reproduction(config: PipelineConfig | None = None) -> Path:
+def run_reproduction(config: PipelineConfig | None = None, *, use_live: bool = True) -> Path:
     config = config or PipelineConfig()
     monitor = ResourceMonitor()
     monitor.start()
 
     pm = PipelineManager(config.state_file, config.db_file)
     conn = pm.connect_db()
+    cards: dict[str, str] | None = None
+    zip_path: Path | None = None
 
     layout = Layout()
     layout.split_column(
@@ -204,9 +206,18 @@ def run_reproduction(config: PipelineConfig | None = None) -> Path:
     layout["header"].update(Panel("KTP Pipeline", style="bold white on blue"))
     layout["footer"].update(Panel("Preparing cards", style="italic grey50"))
 
-    with Live(layout, refresh_per_second=4, console=console):
+    live: Live | None = None
+    peak_ram: float | None = None
+    try:
+        if use_live:
+            live = Live(layout, refresh_per_second=4, console=console, transient=True)
+            live.start()
+
         def log(msg: str, style: str = "white") -> None:
-            layout["body"].update(Panel(msg, style=style, title="Current Task"))
+            if use_live:
+                layout["body"].update(Panel(msg, style=style, title="Current Task"))
+            else:
+                console.print(f"[{style}]{msg}[/{style}]")
 
         log("Discovering XLSX inputs...", style="cyan")
         xlsx_files = find_files_by_extension(config.xlsx_dir, "xlsx", recursive=False)
@@ -311,17 +322,25 @@ def run_reproduction(config: PipelineConfig | None = None) -> Path:
             output_format=config.output_format,
             reference_docx=config.reference_docx,
         )
-
-    peak_ram = monitor.stop()
-    pm.close()
+    finally:
+        if live is not None:
+            live.stop()
+        peak_ram = monitor.stop()
+        pm.close()
 
     m_table = Table(title="Execution Metrics", box=box.SIMPLE)
     m_table.add_column("Metric", style="cyan")
     m_table.add_column("Value", style="magenta")
-    m_table.add_row("Peak RAM Usage", f"{peak_ram:.2f} GB")
-    m_table.add_row("Cards", str(len(cards)))
+    if peak_ram is not None:
+        m_table.add_row("Peak RAM Usage", f"{peak_ram:.2f} GB")
+    else:
+        m_table.add_row("Peak RAM Usage", "n/a")
+    if cards is not None:
+        m_table.add_row("Cards", str(len(cards)))
 
     console.print(m_table)
+    if zip_path is None:
+        raise RuntimeError("Pipeline did not produce output zip.")
     console.print(f"[bold green]Success! Output saved to: {zip_path}[/bold green]")
     return zip_path
 
@@ -334,12 +353,17 @@ def signal_handler(sig, frame) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="KTP pipeline runner.")
     parser.add_argument("--config", type=Path, help="Path to JSON config file.")
+    parser.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help="Disable the rich live UI and print log lines instead.",
+    )
     args = parser.parse_args()
     if args.config:
         config = PipelineConfig.from_json(args.config)
     else:
         config = PipelineConfig()
-    run_reproduction(config)
+    run_reproduction(config, use_live=not args.non_interactive)
 
 
 if __name__ == "__main__":
