@@ -30,14 +30,6 @@ FILES_CONFIG = {
         "sha256": "f78b1fc5287de26aee57665943a50c95aa980420449d7c099c351600cd584c7a",
         "desc": "Field Definitions",
     },
-    "input_df": {
-        "path": (
-            "/Volumes/home/anonymous/research-integrity-ktp/analyses/2025-12-23_pilot_sampler/"
-            "pilot_sample_2025-07-24.csv"
-        ),
-        "sha256": "29d32fa214c3e6d2a77c52005035fba9f48392c22c0d58240ce064c353c221cd",
-        "desc": "User Input DataFrame (60k rows)",
-    },
 }
 
 

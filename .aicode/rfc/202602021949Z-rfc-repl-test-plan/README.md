@@ -198,6 +198,134 @@ Method: read-only metadata checks using `os.access(path, R_OK/W_OK)` plus glob e
 
 1. Should we add a `pixi run cov` task and make coverage gating part of CI (if any), or keep it optional? = **We add but keep it optional.**
 2. For heavy integration tests, do you prefer:
+
+## Report (Implementation + Test Run Log)
+
+### Summary of work completed
+- Implemented new test suites for:
+  - Data models: `NameKey`, `InnerDict`, `OuterDict`.
+  - Utils: DuckDB registration, resource registration, file discovery, name key framing.
+  - HCR XLSX pipeline: loader, preprocessor, sampler, indexer, matcher.
+  - Manual DOCX pipeline: loader + matcher error paths.
+  - SciSciNet parquet matcher (synthetic parquet via DuckDB `COPY`).
+  - Cards rendering and ZIP output.
+  - Minimal integration test (synthetic end-to-end).
+- Added Pixi `cov` task and removed legacy `input_df` entry from `src/config.py` (per RFC note).
+- Added real-data integration tests per package and a full end-to-end pipeline test using read-only external datasets.
+
+### Files created/updated
+- New tests:
+  - `tests/test_outer_dict.py`
+  - `tests/test_utils.py`
+  - `tests/test_hcr_xlsx.py`
+  - `tests/test_manual_docx_loader.py`
+  - `tests/test_manual_docx_matcher.py`
+  - `tests/test_sciscinet_parquet.py`
+- `tests/test_cards.py`
+- `tests/test_repl_integration.py`
+- `tests/test_realdata_hcr_xlsx.py`
+- `tests/test_realdata_manual_docx.py`
+- `tests/test_realdata_sciscinet.py`
+- `tests/test_realdata_pipeline.py`
+- `tests/real_data_utils.py`
+- Updated:
+  - `pyproject.toml` (Pixi `cov` task)
+  - `src/config.py` (removed legacy `input_df` reference)
+  - `src/utils/duckdb.py` (unregister views after materializing tables)
+  - `src/hcr_xlsx/loader.py` (schema alignment + string coercion for mixed XLSX columns)
+  - `src/hcr_xlsx/indexer.py` (emit `name_key` column in samples table)
+  - `src/hcr_xlsx/sampler.py` (schema alignment, string coercion, pilot uses file-specific name cols)
+  - `src/sciscinet_parquet/matcher.py` (robust name columns + quoted fragment alias)
+  - `tests/test_csv_sample_validation.py` (real-data paths + pilot mapping inference)
+  - `tests/test_hcr_xlsx.py` (mapping setup + updated expectations)
+  - `tests/test_repl_integration.py` (mapping hygiene)
+  - `tests/test_matchers.py` (mapping hygiene)
+
+### Test runs performed
+1) Direct `pytest -q` (outside Pixi) failed due to missing `duckdb` in that environment.
+2) `pixi run test` (required escalated permission to access Pixi cache) ran and produced failures.
+3) `pixi run test` after fixes completed successfully.
+
+### Failures observed (Pixi run)
+- `tests/test_cards.py::test_build_cards_includes_intro_and_fun_fact`
+  - Expected filename key `Ada_Lovelace` but actual card key includes draw label prefix (e.g., `1_Ada_Lovelace`).
+- `tests/test_cards.py::test_write_cards_zip_docx_skips_without_pandoc`
+  - `pandoc` exists but fails because the reference docx in test is a stub (not a valid docx).
+- `tests/test_hcr_xlsx.py::test_build_population_table_normalizes_headers_and_indices`
+  - DuckDB error: `population is not a table` during INSERT after first iteration.
+- `tests/test_hcr_xlsx.py::test_preprocess_samples_priority_and_economies`
+  - KeyError on `ktp.filename` because test data uses `hcr.filename`.
+- `tests/test_hcr_xlsx.py::test_sample_population_deterministic_draws`
+  - DuckDB error: `samples is not a table` during INSERT after first iteration.
+- `tests/test_hcr_xlsx.py::test_index_samples_updates_table_and_keys`
+  - `ktp.first_name` missing in updated table; test assumes indexer always writes those columns.
+- `tests/test_repl_integration.py::test_repl_pipeline_minimal`
+  - `ktp.first_name` missing when constructing `name_key` from samples (same root as above).
+- `tests/test_sciscinet_parquet.py::test_match_parquet_builds_records`
+  - Missing `import pandas as pd` (test file error).
+
+### Fixes applied after first failing run
+- Unregistered DuckDB views after materializing tables to avoid view/table name collisions.
+- Coerced non-index XLSX columns to string and aligned schema when appending population tables.
+- Coerced non-index sample columns to string and aligned schema when appending sample tables.
+- `sample_pilot` now uses filename-specific name columns from `HCR_XLSX_NAME_COLS`.
+- `index_samples` now emits `name_key` in the samples table.
+- `match_parquet` now quotes fragment alias and falls back to `ktp.*` name columns if `hcr.*` are missing.
+- Added mapping hygiene in tests to avoid cross-test contamination.
+
+### Root-cause hypotheses and intended fixes
+- Cards filename in `build_cards` includes `draw_label` prefix when present. Tests should match that behavior or explicitly verify expected key format.
+- DOCX card output test must use a valid reference DOCX or skip if `pandoc` fails. Use repo reference `resources/pandoc-custom-reference.docx` if available.
+- Loader/sampler tests:
+  - `build_population_table` and `_append_samples_table` call `INSERT` into a table after `register_frame`. The error indicates `CREATE OR REPLACE TABLE` was not issued prior to `INSERT` for the second iteration. Tests may be exercising a flow that expects `register_frame` to materialize as a table. Need to verify behavior and adjust tests (or fix code if bug exists).
+- `preprocess_samples` expects `ktp.filename` by default; tests should provide `ktp.filename` or pass `filename_col=HCR_FILENAME_COL`.
+- `index_samples` only adds `ktp.first_name` and `ktp.last_name` to the sample table if the derived columns are assigned into the frame and then materialized. Current test failed to see those columns, so need to re-check expected behavior and potentially adjust test setup or fix `index_samples`.
+- SciSciNet test missing import.
+→ All of the above are now fixed.
+
+### Work not yet completed (future steps)
+All items completed:
+1. Fixed failing tests and aligned expectations.
+2. Added integration tests against read-only real data.
+3. Added package-level real-data integration tests.
+4. Added full real-data pipeline integration test.
+5. CSV-based sampling validation now runs with real data when available.
+
+### Final test status
+`pixi run test` → **61 passed, 0 skipped** (all tests now run with the available real data).
+
+## Coverage + Follow-Up Report (2026-02-02)
+
+### What I ran
+- `pixi run cov` (pytest + coverage)
+
+### Coverage summary
+- Overall coverage: **70%** (coverage XML written to `coverage.xml`).
+- Lowest-coverage areas:
+  - `src/repl.py` (0%)
+  - `src/config.py` (0%)
+  - `src/manual_docx/*` indexer/preprocessor/sampler (0%)
+  - `src/sciscinet_parquet/*` indexer/loader/preprocessor/sampler (0%)
+  - Some `name_utils` paths (66%)
+- High-coverage areas:
+  - HCR XLSX pipeline (90%+)
+  - DOCX loader/matcher (96%+)
+  - Core data models and utils (95%+)
+
+### Skipped tests and why
+- **None**. The previously skipped full-dataset tests now run against the same read-only paths via `tests/real_data_utils.py`.
+
+### How tests passed without manual XLSX name mapping
+The real-data tests infer name columns from XLSX headers via `tests/real_data_utils.infer_name_columns_from_xlsx()` and set `HCR_XLSX_NAME_COLS` inside the tests before calling `index_samples`, `match_population`, or `sample_pilot`.
+
+If you want that mapping to be explicit in config, we can add a formal mapping file or allow `PipelineConfig` to load it. For now, tests keep this logic internal to remain deterministic without manual config.
+
+### Additional verification
+- Full suite rerun after enabling all tests: **61 passed, 0 skipped**.
+
+### Notes / constraints
+- Real-data integration tests must remain read-only and avoid writing to external paths.
+- Any tests using `pandoc` should gracefully skip if missing or failing, and prefer the repo reference docx.
    - **THIS ->>>** Local-only (skipped unless data files exist), or
    - A small checked-in synthetic dataset to keep CI deterministic?
 3. Any preference on naming convention for test markers (e.g., `@pytest.mark.integration` / `@pytest.mark.slow`)? = **No preference.**

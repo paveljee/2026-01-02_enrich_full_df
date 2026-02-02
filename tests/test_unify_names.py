@@ -6,6 +6,7 @@ import pytest
 from src._vars import KTP_FIRST_NAME_COL, KTP_LAST_NAME_COL
 from src.name_utils import unify_first_last
 from src.utils.files import find_files_by_extension
+from tests.real_data_utils import SAMPLES_DIR, list_sample_csv_files
 
 TEST_CSV_DIR = Path("data/samples")
 
@@ -55,12 +56,12 @@ def test_unify_first_last_on_full_dataset(tmp_path, csv_dir=TEST_CSV_DIR):
     # This test assumes you have actual CSV files in your test fixtures
     # Adjust the path to wherever your test data lives
     
-    if not csv_dir.exists():
-        pytest.skip(f"Test data directory not found: {csv_dir}")
-    
-    # Find CSV files using the CLI function
-    
-    csv_files = find_files_by_extension(csv_dir, "csv", recursive=False)
+    if SAMPLES_DIR.exists():
+        csv_files = list_sample_csv_files()
+    else:
+        if not csv_dir.exists():
+            pytest.skip(f"Test data directory not found: {csv_dir}")
+        csv_files = find_files_by_extension(csv_dir, "csv", recursive=False)
     
     if not csv_files:
         pytest.skip("No CSV files found in test directory")

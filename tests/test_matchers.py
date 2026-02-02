@@ -27,11 +27,9 @@ def test_xlsx_matcher_appends_records(tmp_path, monkeypatch) -> None:
             fragment_type=FragmentType.EXCEL_ROW,
         )
     }
-    monkeypatch.setitem(
-        _vars.HCR_XLSX_NAME_COLS,
-        xlsx_path.name,
-        ("hcr.first_name", "hcr.last_name"),
-    )
+    original = dict(_vars.HCR_XLSX_NAME_COLS)
+    _vars.HCR_XLSX_NAME_COLS.clear()
+    _vars.HCR_XLSX_NAME_COLS.update({xlsx_path.name: ("hcr.first_name", "hcr.last_name")})
 
     outer_dict = OuterDict.from_name_keys(
         [
@@ -62,6 +60,8 @@ def test_xlsx_matcher_appends_records(tmp_path, monkeypatch) -> None:
     conn.execute("CREATE OR REPLACE TABLE population AS SELECT * FROM population")
     match_population(conn, outer_dict, population_table="population", resources=resources)
     conn.close()
+    _vars.HCR_XLSX_NAME_COLS.clear()
+    _vars.HCR_XLSX_NAME_COLS.update(original)
 
     ada_key = NameKey(first_name="Ada", last_name="Lovelace").to_json_key()
     grace_key = NameKey(first_name="Grace", last_name="Hopper").to_json_key()
