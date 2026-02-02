@@ -320,3 +320,9 @@ The pipeline must incorporate the following models for provenance and source tra
 - KTP pipeline steps are now explicit in `src/repl.py` and encapsulated in modular logic for sampling, matching, and card generation.
 - DuckDB matching for XLSX/CSV/DOCX/parquet sources lives in separate modules, with provenance checking and CSV-to-XLSX duplicate validation.
 - Repository layout aligns with requested `src/`, `tests/`, and `resources/` structure, and tests target the new module paths.
+
+### Revision 2 updates
+- Reorganized pipeline logic into `hcr_xlsx`, `manual_docx`, and `sciscinet_parquet` packages, each with loader/preprocessor/sampler/indexer/matcher modules.
+- Moved shared helpers into a `utils` package and relocated name-key building into a dedicated `utils/name_keys.py`.
+- Added DOCX card output support (pandoc-based) and ensured resource registration uses `RegisteredResource` hashing.
+- Added CSV-to-samples validation as a dedicated test and removed CSV matching from the pipeline.

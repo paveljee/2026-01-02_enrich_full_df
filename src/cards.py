@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import re
+import shutil
+import subprocess
 import tempfile
 from pathlib import Path
 from zipfile import ZipFile
@@ -89,16 +91,49 @@ def build_cards(
     return cards
 
 
-def write_cards_zip(cards: dict[str, str], output_dir: Path, zip_name: str) -> Path:
+def write_cards_zip(
+    cards: dict[str, str],
+    output_dir: Path,
+    zip_name: str,
+    *,
+    output_format: str,
+    reference_docx: Path,
+) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     zip_path = output_dir / zip_name
     with tempfile.TemporaryDirectory() as tmpdir:
-        txt_paths = []
-        for filename, card in cards.items():
-            txt_path = Path(tmpdir) / f"{filename}.txt"
-            txt_path.write_text(card, encoding="utf-8")
-            txt_paths.append(txt_path)
-        with ZipFile(zip_path, "w") as zipf:
-            for path in txt_paths:
-                zipf.write(path, arcname=path.name)
+        if output_format == "txt":
+            txt_paths = []
+            for filename, card in cards.items():
+                txt_path = Path(tmpdir) / f"{filename}.txt"
+                txt_path.write_text(card, encoding="utf-8")
+                txt_paths.append(txt_path)
+            with ZipFile(zip_path, "w") as zipf:
+                for path in txt_paths:
+                    zipf.write(path, arcname=path.name)
+        elif output_format == "docx":
+            tmp_ref_path = Path(tmpdir) / reference_docx.name
+            shutil.copy(reference_docx, tmp_ref_path)
+            docx_paths: list[Path] = []
+            for filename, card in cards.items():
+                md_path = Path(tmpdir) / f"{filename}.md"
+                docx_path = Path(tmpdir) / f"{filename}.docx"
+                md_path.write_text(card, encoding="utf-8")
+                subprocess.run(
+                    [
+                        "pandoc",
+                        str(md_path),
+                        "-o",
+                        str(docx_path),
+                        "--reference-doc",
+                        str(tmp_ref_path),
+                    ],
+                    check=True,
+                )
+                docx_paths.append(docx_path)
+            with ZipFile(zip_path, "w") as zipf:
+                for path in docx_paths:
+                    zipf.write(path, arcname=path.name)
+        else:
+            raise ValueError(f"Unsupported output format: {output_format}")
     return zip_path

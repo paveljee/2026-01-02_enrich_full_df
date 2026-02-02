@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 import signal
 import sys
@@ -11,7 +12,6 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import duckdb
-import pandas as pd
 import psutil
 from rich import box
 from rich.console import Console
@@ -21,38 +21,31 @@ from rich.panel import Panel
 from rich.table import Table
 
 from ._vars import (
-    KTP_FILENAME_COL,
-    KTP_FIRST_NAME_COL,
-    KTP_LAST_NAME_COL,
-)
-from .cards import build_cards, write_cards_zip
-from .config import PipelineConfig
-from .data_models import FragmentType, NameKey, RegisteredResource, ResourceGroup
-from .dict_utils import NAME_KEY_COL, build_outer_dict_from_names
-from .io_utils import (
     CSV_ROW_INDEX_COL,
     DOCX_FRAGMENT_COL,
     DOCX_ROW_INDEX_COL,
     DOCX_TABLE_INDEX_COL,
-    find_files_by_extension,
-    load_csv_files,
-    load_docx_tables,
-    validate_csv_headers,
+    HCR_FILENAME_COL,
+    HCR_ROW_COL,
+    KTP_ECONOMIES_COL,
+    KTP_FILENAME_COL,
+    KTP_PRIORITY_COL,
+    KTP_PRIORITY_GROUP_COL,
+    KTP_SOURCE_KEY_COL,
 )
-from .matchers import (
-    match_csv_df,
-    match_docx_df,
-    match_parquet_sources,
-    match_population_df,
-)
-from .name_processing import apply_unify_first_last
-from .resources_utils import register_resource, register_resources
-from .sampling import (
-    HCR_LIST_LABEL,
-    build_pilot_sample,
-    concat_dfs_from_file_list,
-    sample_population_df,
-)
+from .cards import build_cards, write_cards_zip
+from .config import PipelineConfig
+from .data_models import FragmentType, RegisteredResource, ResourceGroup
+from .hcr_xlsx.indexer import index_samples
+from .hcr_xlsx.loader import build_population_table
+from .hcr_xlsx.matcher import match_population
+from .hcr_xlsx.preprocessor import load_high_income_economies
+from .hcr_xlsx.sampler import sample_pilot, sample_population
+from .manual_docx.loader import load_docx_tables
+from .manual_docx.matcher import match_docx
+from .sciscinet_parquet.matcher import match_parquet
+from .utils.files import find_files_by_extension
+from .utils.resources import register_resource, register_resources
 
 console = Console()
 
@@ -61,7 +54,7 @@ console = Console()
 class PipelineResources:
     parquet_resources: dict[str, RegisteredResource]
     xlsx_resources: dict[str, RegisteredResource]
-    csv_resources: dict[str, RegisteredResource]
+    world_bank_resource: RegisteredResource
     docx_resources: dict[str, RegisteredResource]
 
 
@@ -127,42 +120,42 @@ def register_pipeline_resources(
     config: PipelineConfig,
     xlsx_files: list[Path],
 ) -> PipelineResources:
-    parquet = config.parquet_config
+    files = config.files_config
     parquet_resources = {
-        parquet.author_details_path.name: register_resource(
-            parquet.author_details_path,
+        Path(files["author_details"]["path"]).name: register_resource(
+            Path(files["author_details"]["path"]),
             group=ResourceGroup.SCISCINET_HF,
             fragment_type=FragmentType.AUTHOR_ID,
-            description="Author details parquet",
-            expected_hash=parquet.author_details_sha256,
+            description=files["author_details"]["desc"],
+            expected_hash=files["author_details"]["sha256"],
         ),
-        parquet.authors_paper_path.name: register_resource(
-            parquet.authors_paper_path,
+        Path(files["authors_paper"]["path"]).name: register_resource(
+            Path(files["authors_paper"]["path"]),
             group=ResourceGroup.SCISCINET_HF,
             fragment_type=FragmentType.PAPER_ID,
-            description="Authors to paper IDs parquet",
-            expected_hash=parquet.authors_paper_sha256,
+            description=files["authors_paper"]["desc"],
+            expected_hash=files["authors_paper"]["sha256"],
         ),
-        parquet.hit_papers_level0_path.name: register_resource(
-            parquet.hit_papers_level0_path,
+        Path(files["hit_papers_0"]["path"]).name: register_resource(
+            Path(files["hit_papers_0"]["path"]),
             group=ResourceGroup.SCISCINET_HF,
             fragment_type=FragmentType.PAPER_ID,
-            description="Hit papers level 0",
-            expected_hash=parquet.hit_papers_level0_sha256,
+            description=files["hit_papers_0"]["desc"],
+            expected_hash=files["hit_papers_0"]["sha256"],
         ),
-        parquet.hit_papers_level1_path.name: register_resource(
-            parquet.hit_papers_level1_path,
+        Path(files["hit_papers_1"]["path"]).name: register_resource(
+            Path(files["hit_papers_1"]["path"]),
             group=ResourceGroup.SCISCINET_HF,
             fragment_type=FragmentType.PAPER_ID,
-            description="Hit papers level 1",
-            expected_hash=parquet.hit_papers_level1_sha256,
+            description=files["hit_papers_1"]["desc"],
+            expected_hash=files["hit_papers_1"]["sha256"],
         ),
-        parquet.fields_path.name: register_resource(
-            parquet.fields_path,
+        Path(files["fields"]["path"]).name: register_resource(
+            Path(files["fields"]["path"]),
             group=ResourceGroup.SCISCINET_HF,
             fragment_type=FragmentType.PARQUET_ROW,
-            description="Fields parquet",
-            expected_hash=parquet.fields_sha256,
+            description=files["fields"]["desc"],
+            expected_hash=files["fields"]["sha256"],
         ),
     }
 
@@ -172,12 +165,25 @@ def register_pipeline_resources(
         fragment_type=FragmentType.EXCEL_ROW,
         description="HCR XLSX inputs",
     )
+    world_bank_resource = register_resource(
+        config.world_bank_xlsx,
+        group=ResourceGroup.KTP_PILOT_SAMPLE,
+        fragment_type=FragmentType.EXCEL_ROW,
+        description="World Bank country list",
+    )
+    docx_files = find_files_by_extension(config.docx_dir, "docx", recursive=False)
+    docx_resources = register_resources(
+        docx_files,
+        group=ResourceGroup.KTP_PILOT_SAMPLE,
+        fragment_type=FragmentType.DOCX_ROW,
+        description="KTP DOCX inputs",
+    )
 
     return PipelineResources(
         parquet_resources=parquet_resources,
         xlsx_resources=xlsx_resources,
-        csv_resources={},
-        docx_resources={},
+        world_bank_resource=world_bank_resource,
+        docx_resources=docx_resources,
     )
 
 
@@ -187,6 +193,7 @@ def run_reproduction(config: PipelineConfig | None = None) -> Path:
     monitor.start()
 
     pm = PipelineManager(config.state_file, config.db_file)
+    conn = pm.connect_db()
 
     layout = Layout()
     layout.split_column(
@@ -201,114 +208,95 @@ def run_reproduction(config: PipelineConfig | None = None) -> Path:
         def log(msg: str, style: str = "white") -> None:
             layout["body"].update(Panel(msg, style=style, title="Current Task"))
 
-        if not pm.is_done("discover_inputs"):
-            log("Discovering XLSX files...", style="cyan")
-            xlsx_files = find_files_by_extension(config.xlsx_dir, "xlsx", recursive=False)
-            if not xlsx_files:
-                raise FileNotFoundError(f"No XLSX files found in {config.xlsx_dir}")
-            pm.save_state("discover_inputs")
-        else:
-            xlsx_files = find_files_by_extension(config.xlsx_dir, "xlsx", recursive=False)
+        log("Discovering XLSX inputs...", style="cyan")
+        xlsx_files = find_files_by_extension(config.xlsx_dir, "xlsx", recursive=False)
+        if not xlsx_files:
+            raise FileNotFoundError(f"No XLSX files found in {config.xlsx_dir}")
 
-        if not pm.is_done("register_resources"):
-            log("Registering parquet and XLSX resources...", style="cyan")
-            pipeline_resources = register_pipeline_resources(config, xlsx_files)
-            pm.save_state("register_resources")
-        else:
-            pipeline_resources = register_pipeline_resources(config, xlsx_files)
+        log("Registering resources...", style="cyan")
+        resources = register_pipeline_resources(config, xlsx_files)
 
-        log("Loading population dataframe from XLSX...", style="yellow")
-        population_df = concat_dfs_from_file_list(xlsx_files)
-        population_df[KTP_FILENAME_COL] = population_df[HCR_LIST_LABEL]
-        population_df = apply_unify_first_last(population_df)
+        log("Loading population table into DuckDB...", style="yellow")
+        build_population_table(
+            conn,
+            resources.xlsx_resources,
+            table_name="population",
+            filename_col=HCR_FILENAME_COL,
+            row_col=HCR_ROW_COL,
+        )
 
-        log("Sampling population dataframe...", style="yellow")
+        log("Preprocessing world bank economies...", style="yellow")
+        economies = load_high_income_economies(resources.world_bank_resource)
+
+        log("Sampling XLSX population...", style="yellow")
         if sum(config.sample_draw_sizes) != 300:
             raise ValueError(
                 "Sample draw sizes must total 300 before pilot samples. "
                 f"Got {sum(config.sample_draw_sizes)} from {config.sample_draw_sizes}."
             )
-        sample_df = sample_population_df(
-            population_df,
+        sample_population(
+            conn,
+            population_table="population",
+            samples_table="samples",
             draw_sizes=config.sample_draw_sizes,
             seed=config.sample_seed,
-            affiliation_sort=True,
+            economies=economies,
+        )
+        sample_pilot(
+            conn,
+            population_table="population",
+            samples_table="samples",
+            pilot_filename=config.pilot_xlsx_name,
+            economies=economies,
         )
 
-        pilot_xlsx_path = config.xlsx_dir / config.pilot_xlsx_name
-        pilot_df = build_pilot_sample(
-            pilot_xlsx_path,
-            config.xlsx_dir,
-            affiliation_sort=False,
-        )
-        sample_df = pd.concat([sample_df, pilot_df], ignore_index=True)
-        sample_df = apply_unify_first_last(sample_df)
+        log("Indexing samples for name keys...", style="yellow")
+        outer_dict = index_samples(conn, samples_table="samples")
 
-        name_keys = sample_df[[KTP_FIRST_NAME_COL, KTP_LAST_NAME_COL]].drop_duplicates()
-        outer_dict = build_outer_dict_from_names(name_keys)
-        sample_df[NAME_KEY_COL] = [
-            NameKey(
-                first_name=row[KTP_FIRST_NAME_COL],
-                last_name=row[KTP_LAST_NAME_COL],
-            ).to_json_key()
-            for row in sample_df.to_dict("records")
-        ]
-
-        conn = pm.connect_db()
-
-        log("Matching population XLSX rows...", style="magenta")
-        match_population_df(conn, outer_dict, population_df, pipeline_resources.xlsx_resources)
-
-        log("Matching CSV rows...", style="magenta")
-        csv_files = find_files_by_extension(config.csv_dir, "csv", recursive=False)
-        if not csv_files:
-            raise FileNotFoundError(f"No CSV files found in {config.csv_dir}")
-        if not validate_csv_headers(csv_files):
-            raise ValueError("CSV headers do not match.")
-        pipeline_resources.csv_resources = register_resources(
-            csv_files,
-            group=ResourceGroup.KTP_PILOT_SAMPLE,
-            fragment_type=FragmentType.CSV_ROW,
-            description="KTP CSV inputs",
-        )
-        csv_df = load_csv_files(csv_files)
-        csv_df = apply_unify_first_last(csv_df)
-        match_csv_df(conn, outer_dict, csv_df, population_df, pipeline_resources.csv_resources)
-
-        log("Matching DOCX rows...", style="magenta")
-        docx_files = find_files_by_extension(config.docx_dir, "docx", recursive=False)
-        if not docx_files:
-            raise FileNotFoundError(f"No DOCX files found in {config.docx_dir}")
-        pipeline_resources.docx_resources = register_resources(
-            docx_files,
-            group=ResourceGroup.KTP_PILOT_SAMPLE,
-            fragment_type=FragmentType.DOCX_ROW,
-            description="KTP DOCX inputs",
-        )
-        docx_df = load_docx_tables(docx_files)
-        match_docx_df(conn, outer_dict, docx_df, pipeline_resources.docx_resources)
-
-        log("Matching parquet data...", style="magenta")
-        parquet = config.parquet_config
-        match_parquet_sources(
+        log("Matching population rows...", style="magenta")
+        match_population(
             conn,
             outer_dict,
-            sample_df,
-            pipeline_resources.parquet_resources,
-            author_details_path=str(parquet.author_details_path),
-            authors_paper_path=str(parquet.authors_paper_path),
-            hit_papers_level0_path=str(parquet.hit_papers_level0_path),
-            hit_papers_level1_path=str(parquet.hit_papers_level1_path),
+            population_table="population",
+            resources=resources.xlsx_resources,
+        )
+
+        log("Loading DOCX tables...", style="magenta")
+        docx_df = load_docx_tables(resources.docx_resources)
+
+        log("Matching DOCX rows...", style="magenta")
+        match_docx(
+            conn,
+            outer_dict,
+            docx_df,
+            resources.docx_resources,
+            fragment_col=DOCX_FRAGMENT_COL,
+        )
+
+        log("Matching parquet data...", style="magenta")
+        files = config.files_config
+        match_parquet(
+            conn,
+            outer_dict,
+            conn.execute("SELECT * FROM samples").df(),
+            resources.parquet_resources,
+            author_details_path=files["author_details"]["path"],
+            authors_paper_path=files["authors_paper"]["path"],
+            hit_papers_level0_path=files["hit_papers_0"]["path"],
+            hit_papers_level1_path=files["hit_papers_1"]["path"],
         )
 
         log("Rendering cards...", style="green")
         excluded_cols = {
             KTP_FILENAME_COL,
-            "ktp.source_key",
+            KTP_SOURCE_KEY_COL,
             CSV_ROW_INDEX_COL,
             DOCX_TABLE_INDEX_COL,
             DOCX_ROW_INDEX_COL,
             DOCX_FRAGMENT_COL,
+            KTP_ECONOMIES_COL,
+            KTP_PRIORITY_COL,
+            KTP_PRIORITY_GROUP_COL,
         }
         cards = build_cards(
             outer_dict,
@@ -319,9 +307,10 @@ def run_reproduction(config: PipelineConfig | None = None) -> Path:
         zip_path = write_cards_zip(
             cards,
             config.output_dir,
-            f"{config.csv_dir.name}_combined_cards.zip",
+            f"{config.xlsx_dir.name}_combined_cards.zip",
+            output_format=config.output_format,
+            reference_docx=config.reference_docx,
         )
-        pm.save_state("complete")
 
     peak_ram = monitor.stop()
     pm.close()
@@ -342,10 +331,21 @@ def signal_handler(sig, frame) -> None:
     sys.exit(0)
 
 
+def main() -> None:
+    parser = argparse.ArgumentParser(description="KTP pipeline runner.")
+    parser.add_argument("--config", type=Path, help="Path to JSON config file.")
+    args = parser.parse_args()
+    if args.config:
+        config = PipelineConfig.from_json(args.config)
+    else:
+        config = PipelineConfig()
+    run_reproduction(config)
+
+
 if __name__ == "__main__":
     signal.signal(signal.SIGINT, signal_handler)
     try:
-        run_reproduction()
+        main()
     except Exception:
         console.print_exception()
         sys.exit(1)

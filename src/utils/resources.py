@@ -1,17 +1,20 @@
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
 
-from .data_models import FragmentType, RegisteredResource, ResourceGroup
+from ..data_models import FragmentType, RegisteredResource, ResourceGroup
 
 
-def compute_sha256(path: Path) -> str:
-    sha256_hash = hashlib.sha256()
-    with open(path, "rb") as handle:
-        for chunk in iter(lambda: handle.read(8192), b""):
-            sha256_hash.update(chunk)
-    return sha256_hash.hexdigest()
+def _compute_hash_via_resource(path: Path) -> str:
+    probe = RegisteredResource(
+        name=path.name,
+        hash="pending",
+        group=ResourceGroup.REGISTERED_SAMPLES,
+        fragment_type=FragmentType.PARQUET_ROW,
+        url=path.resolve().as_uri(),
+        verify_hash_on_init=False,
+    )
+    return probe._compute_hash()
 
 
 def register_resource(
@@ -22,7 +25,7 @@ def register_resource(
     description: str | None = None,
     expected_hash: str | None = None,
 ) -> RegisteredResource:
-    resource_hash = expected_hash or compute_sha256(path)
+    resource_hash = expected_hash or _compute_hash_via_resource(path)
     return RegisteredResource(
         name=path.name,
         hash=resource_hash,

@@ -2,18 +2,8 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 
-import duckdb
-import pandas as pd
-
-from .._vars import KTP_FILENAME_COL
+from .._vars import KTP_FILENAME_COL, KTP_SOURCE_KEY_COL
 from ..data_models import InnerDict, MatchingProcedure, OuterDict, RegisteredResource, SourceKey
-
-SOURCE_KEY_COL = "ktp.source_key"
-
-
-def register_frame(conn: duckdb.DuckDBPyConnection, name: str, df: pd.DataFrame) -> None:
-    conn.register(name, df)
-    conn.execute(f"CREATE OR REPLACE TABLE {name} AS SELECT * FROM {name}")
 
 
 def append_records(
@@ -35,6 +25,6 @@ def append_records(
         source_key = SourceKey(resource=resource, fragment=str(fragment)).to_string_key()
         payload = dict(record)
         payload.pop(name_key_field, None)
-        payload[SOURCE_KEY_COL] = source_key
+        payload[KTP_SOURCE_KEY_COL] = source_key
         inner = InnerDict.from_mapping(payload, procedure)
         outer_dict.add_inner_by_key(str(name_key), inner)

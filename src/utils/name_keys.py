@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pandas as pd
 
-from ._vars import KTP_FIRST_NAME_COL, KTP_LAST_NAME_COL
-from .data_models import NameKey, OuterDict
+from .._vars import KTP_FIRST_NAME_COL, KTP_LAST_NAME_COL
+from ..data_models import NameKey, OuterDict
 
 NAME_KEY_COL = "name_key"
 

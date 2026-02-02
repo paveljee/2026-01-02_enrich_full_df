@@ -7,8 +7,9 @@ import pandas as pd
 
 from .._vars import KTP_FILENAME_COL
 from ..data_models import OuterDict, RegisteredResource
-from ..dict_utils import NAME_KEY_COL
-from .utils import append_records, register_frame
+from ..utils.duckdb import register_frame
+from ..utils.name_keys import NAME_KEY_COL
+from ..utils.records import append_records
 
 AUTHOR_ID_FRAGMENT_COL = "ktp.author_id_fragment"
 
@@ -17,7 +18,7 @@ class ParquetMatchProcedure:
     dataset_id_field = "ktp.source_key"
 
 
-def match_parquet_sources(
+def match_parquet(
     conn: duckdb.DuckDBPyConnection,
     outer_dict: OuterDict,
     sample_df: pd.DataFrame,
@@ -121,7 +122,7 @@ def match_parquet_sources(
             CAST(f.paperids_level0_list AS VARCHAR) AS paperids_level0,
             CAST(f.paperids_level1_list AS VARCHAR) AS paperids_level1,
             CAST(f.field_ids AS VARCHAR) AS field_ids_list,
-            b.authorid AS ktp_author_id_fragment,
+            b.authorid AS {AUTHOR_ID_FRAGMENT_COL},
             ? AS "{KTP_FILENAME_COL}"
         FROM matched_authors_bridge b
         LEFT JOIN final_agg f ON f.authorid = b.authorid AND f.name_key = b.name_key

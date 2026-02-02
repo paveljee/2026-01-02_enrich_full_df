@@ -5,22 +5,23 @@ import pandas as pd
 
 from .._vars import KTP_FIRST_NAME_COL, KTP_LAST_NAME_COL, RIGHT_NAME_COL
 from ..data_models import OuterDict, RegisteredResource
-from ..dict_utils import build_name_key_frame
-from ..io_utils import normalize_docx_column_name
-from .utils import append_records, register_frame
-
-DOCX_FRAGMENT_COL = "ktp.docx_fragment"
+from ..utils.duckdb import register_frame
+from ..utils.name_keys import build_name_key_frame
+from ..utils.records import append_records
+from .loader import normalize_docx_column_name
 
 
 class DocxMatchProcedure:
     dataset_id_field = "ktp.source_key"
 
 
-def match_docx_df(
+def match_docx(
     conn: duckdb.DuckDBPyConnection,
     outer_dict: OuterDict,
     docx_df: pd.DataFrame,
     resources: dict[str, RegisteredResource],
+    *,
+    fragment_col: str,
 ) -> None:
     name_keys = build_name_key_frame(outer_dict)
     if name_keys.empty or docx_df.empty:
@@ -36,8 +37,8 @@ def match_docx_df(
             f"Docx data does not contain expected name column '{RIGHT_NAME_COL}'."
         )
 
-    register_frame(conn, "ktp_docx", docx_df)
-    register_frame(conn, "ktp_name_keys", name_keys)
+    register_frame(conn, "docx_rows", docx_df)
+    register_frame(conn, "docx_name_keys", name_keys)
 
     matched = conn.execute(
         f"""
@@ -48,7 +49,7 @@ def match_docx_df(
                     AS first_clean,
                 regexp_replace(lower("{KTP_LAST_NAME_COL}"), '[^0-9a-z]+', '', 'g')
                     AS last_clean
-            FROM ktp_name_keys
+            FROM docx_name_keys
             WHERE "{KTP_FIRST_NAME_COL}" IS NOT NULL
               AND "{KTP_LAST_NAME_COL}" IS NOT NULL
               AND "{KTP_FIRST_NAME_COL}" <> ''
@@ -63,7 +64,7 @@ def match_docx_df(
                     '',
                     'g'
                 ) AS docx_clean
-            FROM ktp_docx
+            FROM docx_rows
         )
         SELECT n.name_key, d.*
         FROM names n
@@ -88,5 +89,5 @@ def match_docx_df(
         DocxMatchProcedure(),
         resources,
         name_key_field="name_key",
-        fragment_field=DOCX_FRAGMENT_COL,
+        fragment_field=fragment_col,
     )
