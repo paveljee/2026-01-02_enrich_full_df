@@ -18,6 +18,7 @@ dependencies = [
     "requests>=2.32.5,<3",
     "types-requests>=2.32.4.20260107,<3",
     "openpyxl>=3.1.5,<4",
+    "pytest-cov>=7.0.0,<8",
 ]
 
 [tool.pixi.workspace]
