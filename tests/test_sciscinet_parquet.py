@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import duckdb
+import pandas as pd
 
 from src._vars import KTP_FILENAME_COL
 from src.data_models import FragmentType, NameKey, OuterDict, ResourceGroup

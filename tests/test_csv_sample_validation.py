@@ -12,16 +12,27 @@ from src.hcr_xlsx.loader import build_population_table
 from src.hcr_xlsx.preprocessor import load_high_income_economies
 from src.hcr_xlsx.sampler import sample_pilot, sample_population
 from src.utils.resources import register_resource, register_resources
+from tests.real_data_utils import (
+    HCR_XLSX_DIR,
+    SAMPLES_DIR,
+    WORLD_BANK_XLSX,
+    infer_name_columns_from_xlsx,
+)
+from src import _vars
 
 
 def test_csv_rows_match_samples(tmp_path: Path) -> None:
-    data_dir = Path("data")
-    xlsx_dir = data_dir / "xlsx"
-    csv_dir = data_dir / "samples"
-    world_bank = data_dir / "OGHIST_2025_07_01.xlsx"
-
-    if not xlsx_dir.exists() or not csv_dir.exists() or not world_bank.exists():
-        pytest.skip("Sample data not available for CSV validation.")
+    if HCR_XLSX_DIR.exists() and SAMPLES_DIR.exists() and WORLD_BANK_XLSX.exists():
+        xlsx_dir = HCR_XLSX_DIR
+        csv_dir = SAMPLES_DIR
+        world_bank = WORLD_BANK_XLSX
+    else:
+        data_dir = Path("data")
+        xlsx_dir = data_dir / "xlsx"
+        csv_dir = data_dir / "samples"
+        world_bank = data_dir / "OGHIST_2025_07_01.xlsx"
+        if not xlsx_dir.exists() or not csv_dir.exists() or not world_bank.exists():
+            pytest.skip("Sample data not available for CSV validation.")
 
     xlsx_files = sorted(xlsx_dir.glob("*.xlsx"))
     if not xlsx_files:
@@ -61,13 +72,27 @@ def test_csv_rows_match_samples(tmp_path: Path) -> None:
         seed=42,
         economies=economies,
     )
-    sample_pilot(
-        conn,
-        population_table="population",
-        samples_table="samples",
-        pilot_filename="2024_HCR.xlsx",
-        economies=economies,
-    )
+    pilot_path = xlsx_dir / "2024_HCR.xlsx"
+    if not pilot_path.exists():
+        pytest.skip("Pilot XLSX not available for CSV validation.")
+    mapping = infer_name_columns_from_xlsx(pilot_path)
+    if not mapping:
+        pytest.skip("Could not infer pilot name columns for CSV validation.")
+
+    original = dict(_vars.HCR_XLSX_NAME_COLS)
+    _vars.HCR_XLSX_NAME_COLS.clear()
+    _vars.HCR_XLSX_NAME_COLS.update({pilot_path.name: mapping})
+    try:
+        sample_pilot(
+            conn,
+            population_table="population",
+            samples_table="samples",
+            pilot_filename="2024_HCR.xlsx",
+            economies=economies,
+        )
+    finally:
+        _vars.HCR_XLSX_NAME_COLS.clear()
+        _vars.HCR_XLSX_NAME_COLS.update(original)
 
     csv_df = pd.concat([pd.read_csv(path) for path in csv_files], ignore_index=True)
     csv_df["__csv_id"] = range(len(csv_df))

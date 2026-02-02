@@ -7,6 +7,7 @@ import pandas as pd
 from .._vars import (
     DRAW_LABEL,
     HCR_FILENAME_COL,
+    HCR_XLSX_NAME_COLS,
     KTP_FILENAME_COL,
     KTP_POPULATION_INDEX_COL,
     PILOT_NAME_CATEGORY_TRIPLES,
@@ -20,12 +21,34 @@ def _append_samples_table(
     samples_table: str,
     df: pd.DataFrame,
 ) -> None:
+    for col in df.columns:
+        if col == KTP_POPULATION_INDEX_COL:
+            continue
+        df[col] = df[col].astype("string")
+
     result = conn.execute(
         "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?",
         [samples_table],
     ).fetchone()
     exists = result[0] if result else 0
     if exists:
+        table_info = conn.execute(f"PRAGMA table_info('{samples_table}')").fetchall()
+        table_cols = [row[1] for row in table_info]
+        table_col_set = set(table_cols)
+        df_col_set = set(df.columns)
+
+        new_cols = df_col_set - table_col_set
+        for col in sorted(new_cols):
+            conn.execute(f'ALTER TABLE {samples_table} ADD COLUMN "{col}" VARCHAR')
+
+        missing_cols = table_col_set - df_col_set
+        for col in missing_cols:
+            df[col] = pd.NA
+
+        table_info = conn.execute(f"PRAGMA table_info('{samples_table}')").fetchall()
+        table_cols = [row[1] for row in table_info]
+        df = df[table_cols]
+
         register_frame(conn, "sample_frame", df)
         conn.execute(f"INSERT INTO {samples_table} SELECT * FROM sample_frame")
     else:
@@ -74,9 +97,12 @@ def sample_pilot(
     name_category_triples: list[tuple[str, str, str]] | None = None,
 ) -> None:
     name_category_triples = name_category_triples or PILOT_NAME_CATEGORY_TRIPLES
+    if pilot_filename not in HCR_XLSX_NAME_COLS:
+        raise ValueError(f"Missing name column mapping for {pilot_filename}")
+    first_col, last_col = HCR_XLSX_NAME_COLS[pilot_filename]
     triples_df = pd.DataFrame(
         name_category_triples,
-        columns=["hcr.first_name", "hcr.last_name", "hcr.category"],
+        columns=[first_col, last_col, "hcr.category"],
     )
     register_frame(conn, "pilot_triples", triples_df)
     sample_df = conn.execute(
@@ -84,8 +110,8 @@ def sample_pilot(
         SELECT p.*
         FROM {population_table} p
         JOIN pilot_triples t
-          ON p."hcr.first_name" = t."hcr.first_name"
-         AND p."hcr.last_name" = t."hcr.last_name"
+          ON p."{first_col}" = t."{first_col}"
+         AND p."{last_col}" = t."{last_col}"
          AND p."hcr.category" = t."hcr.category"
         WHERE p."{HCR_FILENAME_COL}" = ?
         """,

@@ -41,8 +41,8 @@ def test_build_cards_includes_intro_and_fun_fact() -> None:
         excluded_cols={"excluded"},
     )
 
-    assert "Ada_Lovelace" in cards
-    card = cards["Ada_Lovelace"]
+    assert "1_Ada_Lovelace" in cards
+    card = cards["1_Ada_Lovelace"]
     assert "## Introduction" in card
     assert "Fun fact" in card
     assert "excluded" not in card
@@ -69,8 +69,9 @@ def test_write_cards_zip_docx_skips_without_pandoc(tmp_path: Path) -> None:
         pytest.skip("pandoc not available")
 
     cards = {"Ada_Lovelace": "card content"}
-    ref_docx = tmp_path / "ref.docx"
-    ref_docx.write_text("stub", encoding="utf-8")
+    ref_docx = Path("resources/pandoc-custom-reference.docx")
+    if not ref_docx.exists():
+        pytest.skip("reference docx not available")
 
     zip_path = write_cards_zip(
         cards,

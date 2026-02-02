@@ -51,11 +51,9 @@ def test_repl_pipeline_minimal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
         pd.DataFrame({"First Name": ["Ada"], "Last Name": ["Lovelace"]}),
     )
 
-    monkeypatch.setitem(
-        _vars.HCR_XLSX_NAME_COLS,
-        xlsx_path.name,
-        ("hcr.first_name", "hcr.last_name"),
-    )
+    original = dict(_vars.HCR_XLSX_NAME_COLS)
+    _vars.HCR_XLSX_NAME_COLS.clear()
+    _vars.HCR_XLSX_NAME_COLS.update({xlsx_path.name: ("hcr.first_name", "hcr.last_name")})
 
     xlsx_resources = {
         xlsx_path.name: register_resource(
@@ -135,13 +133,14 @@ def test_repl_pipeline_minimal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
         }
 
         samples = conn.execute("SELECT * FROM samples").df()
-        samples[NAME_KEY_COL] = samples.apply(
-            lambda row: NameKey(
-                first_name=str(row[KTP_FIRST_NAME_COL]),
-                last_name=str(row[KTP_LAST_NAME_COL]),
-            ).to_json_key(),
-            axis=1,
-        )
+        if NAME_KEY_COL not in samples.columns:
+            samples[NAME_KEY_COL] = samples.apply(
+                lambda row: NameKey(
+                    first_name=str(row[KTP_FIRST_NAME_COL]),
+                    last_name=str(row[KTP_LAST_NAME_COL]),
+                ).to_json_key(),
+                axis=1,
+            )
 
         match_parquet(
             conn,
@@ -169,6 +168,8 @@ def test_repl_pipeline_minimal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
         )
     finally:
         conn.close()
+        _vars.HCR_XLSX_NAME_COLS.clear()
+        _vars.HCR_XLSX_NAME_COLS.update(original)
 
     assert any(outer.data.values())
     assert zip_path.exists()
