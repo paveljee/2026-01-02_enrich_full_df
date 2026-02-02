@@ -4,13 +4,10 @@ import pandas as pd
 import pytest
 from docx import Document
 
-from ..src.name_utils import unify_first_last, match_csv_docx_names
-from ..src._vars import (
-    KTP_FIRST_NAME_COL,
-    KTP_LAST_NAME_COL,
-    RIGHT_NAME_COL,
-)
-from ..src.cli import find_files_by_extension, parse_docx_table
+from src._vars import KTP_FIRST_NAME_COL, KTP_LAST_NAME_COL, RIGHT_NAME_COL
+from src.name_utils import match_csv_docx_names, unify_first_last
+from src.parse_docx import parse_docx_table
+from src.utils.files import find_files_by_extension
 
 TEST_CSV_DIR = Path("data/samples")
 TEST_DOCX_DIR = Path("data/manual_extractions")
@@ -22,7 +19,10 @@ def create_test_docx_with_table(path: Path, names: list[str]):
     
     # Add italic caption
     caption = doc.add_paragraph()
-    caption_run = caption.add_run("Table 1: PROGRESS-Plus factors for sample (n_52) of authors on Clarivate's Highly Cited Researchers List.")
+    caption_run = caption.add_run(
+        "Table 1: PROGRESS-Plus factors for sample (n_52) of authors on "
+        "Clarivate's Highly Cited Researchers List."
+    )
     caption_run.italic = True
     
     # Create table: 9 columns matching the image
@@ -58,13 +58,11 @@ def create_test_docx_with_table(path: Path, names: list[str]):
     doc.add_paragraph("*verified with ORCID")
     doc.add_paragraph("**NR = Not Reported, NA = Not Available/Applicable")
     
-    doc.save(path)
+    doc.save(str(path))
 
-def test_create_test_docx_with_table():
+def test_create_test_docx_with_table(tmp_path):
     names = ["name1", "name2"]
-    out_dir = Path("tmp")
-    out_dir.mkdir(exist_ok=True)
-    work_path = out_dir / "mock_RI_test.docx"
+    work_path = tmp_path / "mock_RI_test.docx"
     create_test_docx_with_table(work_path, names)
     assert work_path.exists()
 
@@ -116,8 +114,6 @@ def test_match_csv_docx_names_with_synthetic_data(synthetic_csv_docx_pair):
     docx_dfs = parse_docx_table(docx_path)
     docx_df = docx_dfs[0]
 
-    docx_df.to_csv('tmp/test_docx_df.csv') # debug
-    
     # Run the matching function
     docx_indices = match_csv_docx_names(
         csv_df[[KTP_FIRST_NAME_COL, KTP_LAST_NAME_COL]],

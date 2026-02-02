@@ -10,13 +10,20 @@ dependencies = [
     "psutil>=7.2.1,<8",
     "python-docx>=1.2.0,<2",
     "click>=8.3.1,<9",
+    "pydantic>=2.12.5,<3",
     "pytest>=9.0.2,<10",
     "lxml>=6.0.2,<7",
+    "ruff>=0.14.14,<0.15",
+    "mypy>=1.19.1,<2",
+    "requests>=2.32.5,<3",
+    "types-requests>=2.32.4.20260107,<3",
+    "openpyxl>=3.1.5,<4",
+    "pytest-cov>=7.0.0,<8",
 ]
 
 [tool.pixi.workspace]
 channels = ["conda-forge"]
-platforms = ["osx-arm64", "linux-aarch64"]
+platforms = ["osx-arm64", "linux-aarch64", "linux-64"]
 
 [tool.pixi.tasks.test]
 args = [
@@ -27,17 +34,40 @@ cwd = "."
 
 [tool.pixi.tasks.module]
 args = [
-  { "arg" = "module_name", "default" = "." },
+  { "arg" = "module_name", "default" = "src.repl" },
 ]
 cmd = """
-{% if module_name == "pkg_20251223_word_tables" %}
-python {{ module_name }} process \
-    data/manual_extractions \
-    data/samples \
-    --output-dir ./.output \
-    --output-format txt
+{% if module_name == "src.repl" %}
+python -m src.repl
 {% endif %}
 """
 cwd = "."
 
+[tool.pixi.tasks.ruff]
+cmd = "ruff check src tests"
+cwd = "."
+
+[tool.pixi.tasks.mypy]
+cmd = "mypy src tests"
+cwd = "."
+
+[tool.pixi.tasks.lint]
+depends-on = ["ruff", "mypy"]
+
+[tool.pixi.tasks.pre-commit]
+depends-on = ["lint", "test"]
+
 [tool.pytest.ini_options]
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
+[tool.mypy]
+python_version = "3.14"
+ignore_missing_imports = true
+plugins = ["pydantic.mypy"]
+warn_unused_ignores = true
