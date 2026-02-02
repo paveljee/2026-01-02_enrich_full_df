@@ -134,9 +134,11 @@ Add informative, structured progress and diagnostic messaging to the REPL pipeli
 - `pixi run repl` (re-run with a longer timeout)
 
 ### Observed behavior
-- The REPL now progresses through the earlier pipeline stages with informative messages.
-- The REPL currently stalls during **“Matching parquet data...”**. In my last runs, the process did not terminate within the timeout window and required manual interruption. This matches your observation that the CLI appears to hang at that stage.
-- The expected progress messages from the previous version are no longer all visible in the CLI output. The diagnostics are now written into the report file as well, but the hang prevents reaching the final “report written” message for that stage.
+The REPL currently stalls during **“Matching parquet data...”**. This is not the expected behavior. The previous version of REPL (from `master` branch) worked and quite fast.
+
+Also, somehow informative messages that the former version (from `master`) showed in the REPL are not shown anymore.
+
+We need to investigate and address this.
 
 ### Known issues and risks
 - **Hanging during SciSciNet parquet matching**: the REPL can stall at this stage and does not exit automatically.
