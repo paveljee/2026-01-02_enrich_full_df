@@ -17,6 +17,8 @@ dependencies = [
     "mypy>=1.19.1,<2",
     "requests>=2.32.5,<3",
     "types-requests>=2.32.4.20260107,<3",
+    "openpyxl>=3.1.5,<4",
+    "pytest-cov>=7.0.0,<8",
 ]
 
 [tool.pixi.workspace]
@@ -32,25 +34,21 @@ cwd = "."
 
 [tool.pixi.tasks.module]
 args = [
-  { "arg" = "module_name", "default" = "." },
+  { "arg" = "module_name", "default" = "src.repl" },
 ]
 cmd = """
-{% if module_name == "pkg_20251223_word_tables" %}
-python {{ module_name }} process \
-    data/manual_extractions \
-    data/samples \
-    --output-dir ./.output \
-    --output-format txt
+{% if module_name == "src.repl" %}
+python -m src.repl
 {% endif %}
 """
 cwd = "."
 
 [tool.pixi.tasks.ruff]
-cmd = "ruff check pkg_20251223_word_tables"
+cmd = "ruff check src tests"
 cwd = "."
 
 [tool.pixi.tasks.mypy]
-cmd = "mypy pkg_20251223_word_tables"
+cmd = "mypy src tests"
 cwd = "."
 
 [tool.pixi.tasks.lint]

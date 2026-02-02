@@ -3,9 +3,9 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from ..src._vars import KTP_FIRST_NAME_COL, KTP_LAST_NAME_COL
-from ..src.cli import find_files_by_extension
-from ..src.name_utils import unify_first_last
+from src._vars import KTP_FIRST_NAME_COL, KTP_LAST_NAME_COL
+from src.name_utils import unify_first_last
+from src.utils.files import find_files_by_extension
 
 TEST_CSV_DIR = Path("data/samples")
 
