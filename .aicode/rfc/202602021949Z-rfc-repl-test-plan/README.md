@@ -292,7 +292,36 @@ All items completed:
 5. CSV-based sampling validation now runs with real data when available.
 
 ### Final test status
-`pixi run test` → **59 passed, 2 skipped** (skips are the existing full-dataset tests gated on data availability).
+`pixi run test` → **61 passed, 0 skipped** (all tests now run with the available real data).
+
+## Coverage + Follow-Up Report (2026-02-02)
+
+### What I ran
+- `pixi run cov` (pytest + coverage)
+
+### Coverage summary
+- Overall coverage: **70%** (coverage XML written to `coverage.xml`).
+- Lowest-coverage areas:
+  - `src/repl.py` (0%)
+  - `src/config.py` (0%)
+  - `src/manual_docx/*` indexer/preprocessor/sampler (0%)
+  - `src/sciscinet_parquet/*` indexer/loader/preprocessor/sampler (0%)
+  - Some `name_utils` paths (66%)
+- High-coverage areas:
+  - HCR XLSX pipeline (90%+)
+  - DOCX loader/matcher (96%+)
+  - Core data models and utils (95%+)
+
+### Skipped tests and why
+- **None**. The previously skipped full-dataset tests now run against the same read-only paths via `tests/real_data_utils.py`.
+
+### How tests passed without manual XLSX name mapping
+The real-data tests infer name columns from XLSX headers via `tests/real_data_utils.infer_name_columns_from_xlsx()` and set `HCR_XLSX_NAME_COLS` inside the tests before calling `index_samples`, `match_population`, or `sample_pilot`.
+
+If you want that mapping to be explicit in config, we can add a formal mapping file or allow `PipelineConfig` to load it. For now, tests keep this logic internal to remain deterministic without manual config.
+
+### Additional verification
+- Full suite rerun after enabling all tests: **61 passed, 0 skipped**.
 
 ### Notes / constraints
 - Real-data integration tests must remain read-only and avoid writing to external paths.
