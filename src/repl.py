@@ -12,6 +12,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import duckdb
+import pandas as pd
 import psutil
 from rich import box
 from rich.console import Console
@@ -27,10 +28,13 @@ from ._vars import (
     DOCX_TABLE_INDEX_COL,
     HCR_FILENAME_COL,
     HCR_ROW_COL,
+    HCR_XLSX_NAME_COLS,
     KTP_ECONOMIES_COL,
     KTP_FILENAME_COL,
+    KTP_FIRST_NAME_COL,
     KTP_PRIORITY_COL,
     KTP_PRIORITY_GROUP_COL,
+    KTP_LAST_NAME_COL,
     KTP_SOURCE_KEY_COL,
 )
 from .cards import build_cards, write_cards_zip
@@ -38,6 +42,7 @@ from .config import PipelineConfig
 from .data_models import FragmentType, RegisteredResource, ResourceGroup
 from .hcr_xlsx.indexer import index_samples
 from .hcr_xlsx.loader import build_population_table
+from .hcr_xlsx.loader import normalize_hcr_header
 from .hcr_xlsx.matcher import match_population
 from .hcr_xlsx.preprocessor import load_high_income_economies
 from .hcr_xlsx.sampler import sample_pilot, sample_population
@@ -48,6 +53,52 @@ from .utils.files import find_files_by_extension
 from .utils.resources import register_resource, register_resources
 
 console = Console()
+
+
+class DiagnosticsReport:
+    def __init__(self, base_dir: Path) -> None:
+        base_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.path = base_dir / f"repl_diagnostics_{timestamp}.md"
+        self.path.write_text("# REPL Diagnostics Report\n\n", encoding="utf-8")
+
+    def add_section(self, title: str, lines: list[str]) -> None:
+        content = [f"## {title}", ""] + [f"- {line}" for line in lines] + [""]
+        self.path.write_text(
+            self.path.read_text(encoding="utf-8") + "\n".join(content),
+            encoding="utf-8",
+        )
+
+
+def _summarize_list(items: list[str], limit: int = 5) -> tuple[list[str], int]:
+    if len(items) <= limit:
+        return items, 0
+    return items[:limit], len(items) - limit
+
+
+def _count_outer_records(outer_dict) -> int:
+    return sum(len(items) for items in outer_dict.data.values())
+
+
+def _infer_name_columns(path: Path) -> tuple[str, str] | None:
+    try:
+        df = pd.read_excel(path, engine="openpyxl")
+    except Exception:
+        return None
+    normalized = [normalize_hcr_header(str(col).lower()) for col in df.columns]
+
+    def pick(candidates: list[str]) -> str | None:
+        for cand in candidates:
+            for col in normalized:
+                if cand in col:
+                    return col
+        return None
+
+    first = pick(["first_name", "firstname", "first name", "first"])
+    last = pick(["last_name", "lastname", "last name", "family_name", "familyname", "surname", "last"])
+    if not first or not last or first == last:
+        return None
+    return first, last
 
 
 @dataclass
@@ -187,7 +238,12 @@ def register_pipeline_resources(
     )
 
 
-def run_reproduction(config: PipelineConfig | None = None, *, use_live: bool = True) -> Path:
+def run_reproduction(
+    config: PipelineConfig | None = None,
+    *,
+    use_live: bool = True,
+    verbose: bool = True,
+) -> Path:
     config = config or PipelineConfig()
     monitor = ResourceMonitor()
     monitor.start()
@@ -196,6 +252,7 @@ def run_reproduction(config: PipelineConfig | None = None, *, use_live: bool = T
     conn = pm.connect_db()
     cards: dict[str, str] | None = None
     zip_path: Path | None = None
+    diagnostics = DiagnosticsReport(Path("data/diagnostics"))
 
     layout = Layout()
     layout.split_column(
@@ -223,9 +280,65 @@ def run_reproduction(config: PipelineConfig | None = None, *, use_live: bool = T
         xlsx_files = find_files_by_extension(config.xlsx_dir, "xlsx", recursive=False)
         if not xlsx_files:
             raise FileNotFoundError(f"No XLSX files found in {config.xlsx_dir}")
+        if verbose:
+            names = [path.name for path in xlsx_files if not path.name.startswith("~$")]
+            sample, extra = _summarize_list(names)
+            lines = [f"XLSX files: {len(names)}"]
+            if sample:
+                lines.append(f"Example XLSX: {', '.join(sample)}")
+            if extra:
+                lines.append(f"and {extra} more XLSX files (see report).")
+            diagnostics.add_section("Input Discovery", lines)
+
+        if not HCR_XLSX_NAME_COLS:
+            inferred: dict[str, tuple[str, str]] = {}
+            for path in xlsx_files:
+                if path.name.startswith("~$"):
+                    continue
+                mapping = _infer_name_columns(path)
+                if mapping:
+                    inferred[path.name] = mapping
+            if not inferred:
+                raise ValueError("Could not infer name columns from XLSX files.")
+            HCR_XLSX_NAME_COLS.update(inferred)
+            if verbose:
+                examples = [f"{name}: {cols[0]}, {cols[1]}" for name, cols in list(inferred.items())[:5]]
+                diagnostics.add_section(
+                    "XLSX Name Mapping",
+                    [
+                        f"Inferred mappings: {len(inferred)} files",
+                        f"Examples: {', '.join(examples)}",
+                    ],
+                )
 
         log("Registering resources...", style="cyan")
         resources = register_pipeline_resources(config, xlsx_files)
+        if verbose:
+            lines = [
+                f"Parquet resources: {len(resources.parquet_resources)}",
+                f"XLSX resources: {len(resources.xlsx_resources)}",
+                f"DOCX resources: {len(resources.docx_resources)}",
+            ]
+            diagnostics.add_section("Resource Registration", lines)
+
+        log("Resetting pipeline tables...", style="cyan")
+        for table in (
+            "population",
+            "samples",
+            "name_keys",
+            "docx_rows",
+            "docx_name_keys",
+            "matched_authors_bridge",
+            "author_papers",
+            "final_agg",
+        ):
+            conn.execute(f"DROP TABLE IF EXISTS {table}")
+        conn.execute("DROP VIEW IF EXISTS all_hits")
+        if verbose:
+            diagnostics.add_section(
+                "Reset",
+                ["Dropped existing pipeline tables/views to ensure a clean run."],
+            )
 
         log("Loading population table into DuckDB...", style="yellow")
         build_population_table(
@@ -235,9 +348,24 @@ def run_reproduction(config: PipelineConfig | None = None, *, use_live: bool = T
             filename_col=HCR_FILENAME_COL,
             row_col=HCR_ROW_COL,
         )
+        if verbose:
+            row_count = conn.execute("SELECT COUNT(*) FROM population").fetchone()[0]
+            col_count = conn.execute("PRAGMA table_info('population')").fetchdf().shape[0]
+            diagnostics.add_section(
+                "Population Load",
+                [f"Rows: {row_count}", f"Columns: {col_count}"],
+            )
 
         log("Preprocessing world bank economies...", style="yellow")
         economies = load_high_income_economies(resources.world_bank_resource)
+        if verbose:
+            sample, extra = _summarize_list(economies, limit=10)
+            lines = [f"High-income economies: {len(economies)}"]
+            if sample:
+                lines.append(f"Example economies: {', '.join(sample)}")
+            if extra:
+                lines.append(f"and {extra} more economies (see report).")
+            diagnostics.add_section("World Bank Economies", lines)
 
         log("Sampling XLSX population...", style="yellow")
         if sum(config.sample_draw_sizes) != 300:
@@ -260,22 +388,77 @@ def run_reproduction(config: PipelineConfig | None = None, *, use_live: bool = T
             pilot_filename=config.pilot_xlsx_name,
             economies=economies,
         )
+        if verbose:
+            sample_rows = conn.execute("SELECT COUNT(*) FROM samples").fetchone()[0]
+            candidate_pairs = [
+                (KTP_FIRST_NAME_COL, KTP_LAST_NAME_COL),
+                ("hcr.first_name", "hcr.last_name"),
+                ("hcr.firstname_middlename", "hcr.lastname"),
+            ]
+            name_pair = None
+            for first_col, last_col in candidate_pairs:
+                cols = conn.execute("PRAGMA table_info('samples')").fetchall()
+                col_names = {row[1] for row in cols}
+                if first_col in col_names and last_col in col_names:
+                    name_pair = (first_col, last_col)
+                    break
+            if name_pair:
+                first_col, last_col = name_pair
+                sample_names = conn.execute(
+                    f"""
+                    SELECT "{first_col}", "{last_col}"
+                    FROM samples
+                    WHERE "{first_col}" IS NOT NULL
+                    LIMIT 5
+                    """
+                ).fetchall()
+                names = [f"{last}, {first}" for first, last in sample_names]
+            else:
+                names = []
+            diagnostics.add_section(
+                "Sampling",
+                [
+                    f"Draw sizes: {config.sample_draw_sizes}",
+                    f"Seed: {config.sample_seed}",
+                    f"Sample rows: {sample_rows}",
+                    f"Sample names: {', '.join(names) if names else 'n/a'}",
+                ],
+            )
 
         log("Indexing samples for name keys...", style="yellow")
         outer_dict = index_samples(conn, samples_table="samples")
+        if verbose:
+            name_key_count = len(outer_dict.data)
+            diagnostics.add_section(
+                "Indexing",
+                [f"Unique name keys: {name_key_count}"],
+            )
 
         log("Matching population rows...", style="magenta")
+        before_match = _count_outer_records(outer_dict)
         match_population(
             conn,
             outer_dict,
             population_table="population",
             resources=resources.xlsx_resources,
         )
+        if verbose:
+            after_match = _count_outer_records(outer_dict)
+            diagnostics.add_section(
+                "Population Match",
+                [f"Matched records: {after_match - before_match}"],
+            )
 
         log("Loading DOCX tables...", style="magenta")
         docx_df = load_docx_tables(resources.docx_resources)
+        if verbose:
+            diagnostics.add_section(
+                "DOCX Load",
+                [f"DOCX rows: {len(docx_df)}", f"DOCX tables: {docx_df[DOCX_TABLE_INDEX_COL].nunique() if not docx_df.empty else 0}"],
+            )
 
         log("Matching DOCX rows...", style="magenta")
+        before_docx = _count_outer_records(outer_dict)
         match_docx(
             conn,
             outer_dict,
@@ -283,9 +466,16 @@ def run_reproduction(config: PipelineConfig | None = None, *, use_live: bool = T
             resources.docx_resources,
             fragment_col=DOCX_FRAGMENT_COL,
         )
+        if verbose:
+            after_docx = _count_outer_records(outer_dict)
+            diagnostics.add_section(
+                "DOCX Match",
+                [f"Matched records: {after_docx - before_docx}"],
+            )
 
         log("Matching parquet data...", style="magenta")
         files = config.files_config
+        before_parquet = _count_outer_records(outer_dict)
         match_parquet(
             conn,
             outer_dict,
@@ -296,6 +486,12 @@ def run_reproduction(config: PipelineConfig | None = None, *, use_live: bool = T
             hit_papers_level0_path=files["hit_papers_0"]["path"],
             hit_papers_level1_path=files["hit_papers_1"]["path"],
         )
+        if verbose:
+            after_parquet = _count_outer_records(outer_dict)
+            diagnostics.add_section(
+                "SciSciNet Match",
+                [f"Matched records: {after_parquet - before_parquet}"],
+            )
 
         log("Rendering cards...", style="green")
         excluded_cols = {
@@ -322,6 +518,18 @@ def run_reproduction(config: PipelineConfig | None = None, *, use_live: bool = T
             output_format=config.output_format,
             reference_docx=config.reference_docx,
         )
+        if verbose:
+            card_names = list(cards.keys())
+            sample, extra = _summarize_list(card_names)
+            lines = [
+                f"Cards: {len(cards)}",
+                f"Output: {zip_path}",
+            ]
+            if sample:
+                lines.append(f"Example cards: {', '.join(sample)}")
+            if extra:
+                lines.append(f"and {extra} more cards (see report).")
+            diagnostics.add_section("Cards Output", lines)
     finally:
         if live is not None:
             live.stop()
@@ -342,6 +550,7 @@ def run_reproduction(config: PipelineConfig | None = None, *, use_live: bool = T
     if zip_path is None:
         raise RuntimeError("Pipeline did not produce output zip.")
     console.print(f"[bold green]Success! Output saved to: {zip_path}[/bold green]")
+    console.print(f"[bold cyan]Diagnostics report saved to: {diagnostics.path}[/bold cyan]")
     return zip_path
 
 
@@ -358,12 +567,21 @@ def main() -> None:
         action="store_true",
         help="Disable the rich live UI and print log lines instead.",
     )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Reduce diagnostic output (still writes report file).",
+    )
     args = parser.parse_args()
     if args.config:
         config = PipelineConfig.from_json(args.config)
     else:
         config = PipelineConfig()
-    run_reproduction(config, use_live=not args.non_interactive)
+    run_reproduction(
+        config,
+        use_live=not args.non_interactive,
+        verbose=not args.quiet,
+    )
 
 
 if __name__ == "__main__":

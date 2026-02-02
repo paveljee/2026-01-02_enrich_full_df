@@ -122,7 +122,7 @@ def match_parquet(
             CAST(f.paperids_level0_list AS VARCHAR) AS paperids_level0,
             CAST(f.paperids_level1_list AS VARCHAR) AS paperids_level1,
             CAST(f.field_ids AS VARCHAR) AS field_ids_list,
-            b.authorid AS {AUTHOR_ID_FRAGMENT_COL},
+            b.authorid AS "{AUTHOR_ID_FRAGMENT_COL}",
             ? AS "{KTP_FILENAME_COL}"
         FROM matched_authors_bridge b
         LEFT JOIN final_agg f ON f.authorid = b.authorid AND f.name_key = b.name_key

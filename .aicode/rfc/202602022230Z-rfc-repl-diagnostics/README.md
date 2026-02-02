@@ -108,3 +108,42 @@ Add informative, structured progress and diagnostic messaging to the REPL pipeli
 1. Should verbosity be controlled by `--verbose` (default off) or `--quiet` (default on)? **default on**
 2. Should the diagnostic report file default to `data/diagnostics/` or a timestamped temp dir? **data/diagnostics/**
 3. Do you prefer a human-readable report (Markdown/CSV) or machine-readable (JSONL)? **human-readable**
+
+## Report: Work Performed and Next Steps (2026-02-02)
+### Summary of work completed
+- Implemented diagnostic reporting for the REPL pipeline with rich, human-readable output in `src/repl.py`.
+- Added non-interactive mode to ensure the REPL exits cleanly on errors and does not hang waiting for input.
+- Added a Pixi task to standardize REPL execution from the CLI.
+- Added or restored pipeline guardrails so diagnostics and sampling behave deterministically (e.g., schema alignment, `name_key` creation, sample ordering).
+- Added logic to infer XLSX name columns when mappings are missing, then report the inferred columns and sample names.
+- Added a diagnostic report file writer that spills large outputs to `data/diagnostics/` and prints the report path.
+- Expanded stage-by-stage messaging to include counts, durations, and examples (names, IDs, file examples).
+
+### Files touched and why (high level)
+- `src/repl.py`: core diagnostics, stage logging, non-interactive mode, diagnostics report file.
+- `src/hcr_xlsx/loader.py`: normalize headers, align columns, coerce column types to strings, include file and row identifiers.
+- `src/hcr_xlsx/sampler.py`: ensure sampling uses actual `population_index`, preserve deterministic ordering, align schema when appending.
+- `src/hcr_xlsx/indexer.py`: add `name_key` column to samples; this is required for subsequent matching.
+- `src/utils/duckdb.py`: unregister temporary views after creating tables to avoid stale view collisions.
+- `src/sciscinet_parquet/matcher.py`: added robust name fallback and SQL alias quoting for fragment IDs.
+- `pyproject.toml`: added a `repl` Pixi task for consistent execution.
+- `config.repl.json`: shared REPL config that points to known data locations.
+
+### Commands executed
+- `pixi run repl`
+- `pixi run repl` (re-run with a longer timeout)
+
+### Observed behavior
+- The REPL now progresses through the earlier pipeline stages with informative messages.
+- The REPL currently stalls during **“Matching parquet data...”**. In my last runs, the process did not terminate within the timeout window and required manual interruption. This matches your observation that the CLI appears to hang at that stage.
+- The expected progress messages from the previous version are no longer all visible in the CLI output. The diagnostics are now written into the report file as well, but the hang prevents reaching the final “report written” message for that stage.
+
+### Known issues and risks
+- **Hanging during SciSciNet parquet matching**: the REPL can stall at this stage and does not exit automatically.
+- **CLI progress regression**: some stage messages are not reaching the console consistently; this needs follow-up to ensure live console output remains visible while running heavy matching steps.
+
+### Next steps (not executed yet)
+1. Investigate the SciSciNet matching stage to identify the bottleneck or hang, and confirm whether it is waiting on a long-running query, a missing index, or a blocked I/O call.
+2. Restore any regressions in REPL progress output so all stage messages show in the console even during heavy operations.
+3. Add a hard timeout or watchdog around the parquet match stage to ensure the process exits on error or after a configurable duration.
+4. Run the REPL end-to-end once the hang is resolved to validate the full diagnostics report and finalize the pipeline readiness review.
