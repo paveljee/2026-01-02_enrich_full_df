@@ -32,6 +32,10 @@ args = [
 cmd = "pytest -vv -s {{ module_name }}"
 cwd = "."
 
+[tool.pixi.tasks.cov]
+cmd = "pytest -vv --cov=src --cov-report=term-missing --cov-report=xml"
+cwd = "."
+
 [tool.pixi.tasks.module]
 args = [
   { "arg" = "module_name", "default" = "src.repl" },

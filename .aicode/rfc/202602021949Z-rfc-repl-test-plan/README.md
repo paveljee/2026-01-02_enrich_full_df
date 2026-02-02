@@ -198,6 +198,83 @@ Method: read-only metadata checks using `os.access(path, R_OK/W_OK)` plus glob e
 
 1. Should we add a `pixi run cov` task and make coverage gating part of CI (if any), or keep it optional? = **We add but keep it optional.**
 2. For heavy integration tests, do you prefer:
+
+## Report (Implementation + Test Run Log)
+
+### Summary of work completed
+- Implemented new test suites for:
+  - Data models: `NameKey`, `InnerDict`, `OuterDict`.
+  - Utils: DuckDB registration, resource registration, file discovery, name key framing.
+  - HCR XLSX pipeline: loader, preprocessor, sampler, indexer, matcher.
+  - Manual DOCX pipeline: loader + matcher error paths.
+  - SciSciNet parquet matcher (synthetic parquet via DuckDB `COPY`).
+  - Cards rendering and ZIP output.
+  - Minimal integration test (synthetic end-to-end).
+- Added Pixi `cov` task and removed legacy `input_df` entry from `src/config.py` (per RFC note).
+
+### Files created/updated
+- New tests:
+  - `tests/test_outer_dict.py`
+  - `tests/test_utils.py`
+  - `tests/test_hcr_xlsx.py`
+  - `tests/test_manual_docx_loader.py`
+  - `tests/test_manual_docx_matcher.py`
+  - `tests/test_sciscinet_parquet.py`
+  - `tests/test_cards.py`
+  - `tests/test_repl_integration.py`
+- Updated:
+  - `pyproject.toml` (Pixi `cov` task)
+  - `src/config.py` (removed legacy `input_df` reference)
+
+### Test runs performed
+1) Direct `pytest -q` (outside Pixi) failed due to missing `duckdb` in that environment.
+2) `pixi run test` (required escalated permission to access Pixi cache) ran and produced failures.
+
+### Failures observed (Pixi run)
+- `tests/test_cards.py::test_build_cards_includes_intro_and_fun_fact`
+  - Expected filename key `Ada_Lovelace` but actual card key includes draw label prefix (e.g., `1_Ada_Lovelace`).
+- `tests/test_cards.py::test_write_cards_zip_docx_skips_without_pandoc`
+  - `pandoc` exists but fails because the reference docx in test is a stub (not a valid docx).
+- `tests/test_hcr_xlsx.py::test_build_population_table_normalizes_headers_and_indices`
+  - DuckDB error: `population is not a table` during INSERT after first iteration.
+- `tests/test_hcr_xlsx.py::test_preprocess_samples_priority_and_economies`
+  - KeyError on `ktp.filename` because test data uses `hcr.filename`.
+- `tests/test_hcr_xlsx.py::test_sample_population_deterministic_draws`
+  - DuckDB error: `samples is not a table` during INSERT after first iteration.
+- `tests/test_hcr_xlsx.py::test_index_samples_updates_table_and_keys`
+  - `ktp.first_name` missing in updated table; test assumes indexer always writes those columns.
+- `tests/test_repl_integration.py::test_repl_pipeline_minimal`
+  - `ktp.first_name` missing when constructing `name_key` from samples (same root as above).
+- `tests/test_sciscinet_parquet.py::test_match_parquet_builds_records`
+  - Missing `import pandas as pd` (test file error).
+
+### Root-cause hypotheses and intended fixes
+- Cards filename in `build_cards` includes `draw_label` prefix when present. Tests should match that behavior or explicitly verify expected key format.
+- DOCX card output test must use a valid reference DOCX or skip if `pandoc` fails. Use repo reference `resources/pandoc-custom-reference.docx` if available.
+- Loader/sampler tests:
+  - `build_population_table` and `_append_samples_table` call `INSERT` into a table after `register_frame`. The error indicates `CREATE OR REPLACE TABLE` was not issued prior to `INSERT` for the second iteration. Tests may be exercising a flow that expects `register_frame` to materialize as a table. Need to verify behavior and adjust tests (or fix code if bug exists).
+- `preprocess_samples` expects `ktp.filename` by default; tests should provide `ktp.filename` or pass `filename_col=HCR_FILENAME_COL`.
+- `index_samples` only adds `ktp.first_name` and `ktp.last_name` to the sample table if the derived columns are assigned into the frame and then materialized. Current test failed to see those columns, so need to re-check expected behavior and potentially adjust test setup or fix `index_samples`.
+- SciSciNet test missing import.
+
+### Work not yet completed (future steps)
+1. Fix the failing tests above (with behavior-aligned expectations).
+2. Add integration tests that run against **read-only real data** per RFC:
+   - HCR XLSX input directory
+   - World Bank XLSX economies file
+   - Manual DOCX tables
+   - SciSciNet parquet files
+   - CSV samples used for validation
+3. Create package-level integration tests (one per pipeline package) using actual files:
+   - `hcr_xlsx` loader/preprocessor/sampler/indexer/matcher
+   - `manual_docx` loader + matcher
+   - `sciscinet_parquet` matcher
+4. Add a **full pipeline integration test** with actual data paths and validated outputs.
+5. Ensure CSV-based sampling validation test is executed (currently skipped if sample CSVs not available).
+
+### Notes / constraints
+- Real-data integration tests must remain read-only and avoid writing to external paths.
+- Any tests using `pandoc` should gracefully skip if missing or failing, and prefer the repo reference docx.
    - **THIS ->>>** Local-only (skipped unless data files exist), or
    - A small checked-in synthetic dataset to keep CI deterministic?
 3. Any preference on naming convention for test markers (e.g., `@pytest.mark.integration` / `@pytest.mark.slow`)? = **No preference.**
