@@ -436,3 +436,92 @@ Before moving to the next step (in interactive mode), the user is shown the path
 - Each step is **self-contained, transactional, and resumable**.
 - Diagnostics tell the full story of each step, including **input capture, transformation narrative, and output artifacts**.
 - The pipeline becomes easier to debug, easier to extend, and safer to resume.
+
+## Human feedback on proposed refactor plan
+
+human review is concerned about a few things:
+
+- humans see that the two jump requirement is too tight. in light of this we may allow this architecture: we have repl module, steps package and helpers package. steps contains one module per each step. helps contains one module per each helper category. repl module is allowed to import from steps and from helpers. steps are allowed to import from helpers. thats it.
+
+- order and content of steps. how it should work i list below. important note 1: pipeline catches any exceptions arising from within step and properly fails the step, rolls back transaction, steps pipeline. important note 2: repl owns all console rendering.
+
+Repl starts with Init, then does RunSteps, then CleanUp.
+
+Init: REPL starts with triggering  init. It imports init from helpers. Inside this what happens: it reads cli args passed from REPL module, loads config from json (deprecate default - only load from json must be supported), initializes resource monitor, duck db, pipeine config, pipeline manager, diagnostic report. Creates a list of steps which must be run by pipeline, depending on whether --new or --resume was used; and if REPL started in an interactive mode then REPL itself passes the appropriate flag to step 1. Passes all these instances back to the repl.
+
+Note btw that resource monitor, pipeline manager etc classes should be moved from repl module to helpers.
+
+Pipeline reset is also inside the Init stuff but it is only performed if —new is chosen and ONLY after confirmation by user (user confirms with Y in interactive or passes —yes in noninteractive).
+
+Now REPL has a list of steps to run. So it start running them. Below I list all steps in case of new session.
+
+1) register all resources. searching for xlsx, docx, parquet will be internalized within this step. step returns an object with all needed RegisteredResource objects.
+
+2) Load xlsx. The input is xlsx registered resources and world bank registered resource, and ofc duckdb connection and any other necessary stuff from Init (for example - but  not necessarily limited to -  diagnostic report to which step can contribute). Inside the step all xlsx are loaded one by one into population table in duckdb. during this process headers are "hcr.*" normalized and hcr.row_number, hcr.filename, are recorded. Step returns to REPL (in addition to db transaction/pipeline manager scope that REPL  must close if no exceptions came from within step), the artifacts that must be dumped (ie pandas df dumped from population table) and content that must be displayed to user (either interactive or noninteractive). REPL handles the dumping and rendering.
+
+Note that population table is untampered with since then. Note that EVERY artifact (or rather its origin - duckdb table) must never be touched by subsequent steps.
+
+2) new cols are added - name col inference. so new table is created in duckdb that points 1-to-1 to population table rows and has two other cols: ktp.first name and ktp.last name. Returns to REPL (also view is saved in duckdb for future reuse if resumed from this step): pandas df that joins population table and the new table; content to output to user.
+
+3) new cols are added - ktp.economy and ktp.priority. again new table is created in duck db, 1-to-1 to population table. returns to REPL (also view is saved in duckdb for future reuse if resumed from this step): df that joins population, ktp first last name, and these new columns, content to output to user.
+
+Note that world bank table never persists in the duck db and is only used to fill in appropriate columns. then it'd dropped. all happens within this step.
+
+4) sampling. entire sampling happens in this step. samples table is created. it only contains the following cols: ktp filename (1-to-1 to hcr.filename), ktp fragment (1-to-1 to hcr.row_number), ktp.draw_number (new col). this way each row uniquely identifies a record from one of the XLSX RegisteredResource's, plus adds its draw number, therefore uniquely identifying a draw. Returns to REP (creates a view in duckdb which then is dumped to df): df that inner joins samples table with population table and tables from step 2 and step 3 (for naming cols in the resulting table prefer colnames from samples table); content to output to user.
+
+5) building index - namekeys and outerdict stub. everything is ready by that point: ktp first last name are available from step 2 and samples table available from step 4, so it's straightforward. Returns to REPL: outerdict object (REPL will dump it to a JSON file where serialized first/last is a key and list of innerdicts is value; please incorporate this functionality into outerdict class itself - REPL will just trigger it); contents to output to user. 
+
+Note that the outerdict stub is also persisted in a dedicated duckdb table, from which it can then be loaded on any —-resume. The table has only two columns: json serialized first/last key (string); list of inner dicts serialized as json lines (meaning that each row contains entire json lines of inner dicts attributable to this first/last key; at this point obviously the list of inner dicts is empty for all namekeys).
+
+Remember that tables created at a step are never modified by subsequent steps. So this table is also immutable - only to be used to load outerdict stub into memory if resumed from this step.
+
+Note also that outerdict-to samples 1-to-1 match must always be guaranteed. So that we were safe to use samples table directly whenever we need outer dict's namekeys index, and vice versa.
+
+Also note that outerdict object must persist throughout the pipeline. We only pass reference to it down to steps, which can append innerdicts to keys.
+
+Steps must not be allowed to modify outerdict in any way except appending innerdicts. No removing of innerdicts, no anything. Of course never modifying any keys of outerdict. Such functionality must never be implemented for outerdict in the first place. Only append or extend innerdict(s) by namekey, plus reading (such as getting by namekey, dumping).
+
+6) here we start filling in innerdicts. and at this step we use population table. we create a new VIEW: right join population table to samples table, on first and last name key. it has the following columns: ktp.first name, ktp last name, ktp draw number, ktp filename, ktp fragment. so here we must get any (ktp filename, ktp fragment) tuple from population table that matches the given first/last namekey. matching is done such that lower(unaccent(ktp.last_name)) is an exact match, and at the same time lower(unaccent(ktp.first_name)) is tokenized by "any whitespace sequence", and the first token from samples must be present among population table's tokens.
+
+But we need to create innerdicts. So we create a TABLE which will persist as the result of this step if we need to resume: two columns, namekey (json serialized) and innerdicts (serialized to json lines). each inner dict is a row from the new view for the given namekey - so we sort of group by namekey and the grouping function for the remaining columns is that we json serialize these rows. This is what we persist and also from which the step creates innerdict instances which it extends into outerdict instance by namekey.
+
+Now let's talk about what the step returns to REPL. Returning outerdict is not even needed because REPL already has reference to it and so it can access it. On the other hand, our table with innerdicts is not user friendly. So what step returns to REPL  – creates a view: inner join our new table with population table and tables from step 2 and step 3; dumps df dump from the view and returns that df; also returns content to output to user.
+
+Both views we created in this step we preserve in the duckdb.
+
+7) at this step we continue filling innerdicts - this time with data from docx files. the architecture of this step is basically the same as step 6, the differences being that it also under the hood must load docx files and that the matching logic is different.
+
+loading docx files: so from REPL we have all RegisteredResource instances for each docx file in question. We load them into a single, new table in duckdb the way similar to how we loaded xlsx at step 2: one by one we load them, "ktp.table_1_*" normalize them (including normalize_docx_column_name of course) and record ktp.filename, ktp.table_1_row_number. so yes, we assume that every docx must have exactly one table. if that's not the case for any of them, raise and exception from within step. and like with excel, we start row numbering from 1 here.
+
+matching: again we create a VIEW with cols: ktp.first name, ktp last name, ktp draw number, ktp.filename, ktp.fragment. to fill it, we right join docx with samples table keeping any (ktp.filename, ktp.table_1_row_number) tuple from docx table that matches ktp.first, last name from samples. in the joined view, you use ktp.fragment colname for ktp.table_1_row_number. the matching logic is such that we (on the left - samples table) we tokenize lower(unaccent(ktp.first_name)) and lower(unaccent(ktp.first_name)) by "any whitespace sequence" and (on the right - docx table) we tokenize lower(unaccent("Researcher/author")) by "any whitespace sequence", and then (right join logic) we keep any rows where ALL tokens from samples table are found among docx table tokens.
+
+then we create a TABLE with two columns, namekey (json serialized) and innerdicts (serialized to json lines). each inner dict is a row from the new view for the given namekey - so we sort of group by namekey and the grouping function for the remaining columns is that we json serialize these rows. This is what we persist and also from which the step creates innerdict instances which it extends into outerdict instance by namekey.
+
+Returns to REPL – creates a view: inner join our new table with population table and tables from step 2 and step 3; dumps df dump from the view and returns that df; also returns content to output to user.
+
+8) we add parquet data to outerdict. the logic is very similar to steps 6 and 8 in general, just with specifics for parquets.
+
+we create THREE TABLES and TWO VIEWS per parquet while we right join parquet data to samples table (using logic already available from parquet matcher). This way we persist the matches conveniently.
+
+first table for every of the parquets must contain the original columns. these tables will be like a slice of rows from parquet, after matching. to clarify, ALL COLS from parquet must be preserved there. so it's the same parquet but only the matched rows. these tables must also normalize parquet colnames (using logic we used to normalize colnames before) to "ssnad.*" for author details, "ssnap.*" for authors papers, "ssnhpl0.*" for hit papers level 0, "ssnhpl1.*" for hit papers level 1. a "ssn.filename" column must also be added containing filename from registered resource.
+
+
+---WRITING IN PROGRESS BELOW THIS LINE--
+
+
+
+second TABLE per parquet will be only match data. it will have columns: ktp.first, last name, ktp draw number, ktp.filename (equal to ssn.filename), ktp.fragment (parquet's unique row id - authorid for author parquets or paperid for hit parquets). Note that for steps 6 and 7 we used a view to store matches - because entire dataset was persisted in a table; here we only persist the matched data from parquets so the match data must be a TABLE to persist this info.
+
+at this point we create a FIRST VIEW, per parquet, which just inner joins all data from first and second table. this view will be used for innerdicts.
+
+third TABLE is NOT per parquet anymore. Rather, it is produced using the table combination logic from the parquet matching logic available from repo. in particular where we do matching by author details and hit papers at the same time. just that 
+
+is for producing innerdicts (which again persists and will be used to pick up from this step on resume): two columns, namekey (json serialized) and innerdicts (serialized to json lines). each inner dict is a row from the corresponding view for the given namekey - so we sort of group by namekey and the grouping function for the remaining columns is that we json serialize these rows. This is what we persist and also from which the step creates innerdict instances which it extends into outerdict instance by namekey.
+
+To clarify, because each innerkey already has all the identifying info that is needed, the step can safely extend the outerdict by namekey with ALL innerdicts produced by the step for this namekey, regardless from which parquet they came (i.e., parquet identifying info is already contained within innerdicts).
+
+finally we create 2nd view per parquet: inner join "first per-parquet view" with population table and tables from step 2 and step 3.
+
+Return to REPL; dumps all "2nd views per parquet" into dfs returns a list of these dfs; also returns content to output to user. REPL will dump all of these df into separate files (i.e., one file per parquet) so user can review.
+
+CleanUp. This is always executed. It properly handles winding down all operations and prints concluding message(s) to user.
