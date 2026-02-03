@@ -310,3 +310,129 @@ All RFC statements and step descriptions are consistent with the current codebas
 
 ## Open questions / follow-ups
 - None for this RFC. The intent is purely documentation.
+
+---
+
+## Proposed refactor plan: transactional step architecture for REPL
+
+Below is a concrete, implementation-ready plan to refactor the REPL so each pipeline step is **fully encapsulated**, **transactional**, **uniformly structured**, and **two-jumps max** from `src/repl.py` (REPL → step module). The plan aligns with the “game level / checkpoint” model, ensuring deterministic resumability and a consistent diagnostics story per step.
+
+### Guiding principles
+- **Two-jump accessibility:** From `src/repl.py`, each step is a single import and a single function call. The function lives in a dedicated step module. Any logic beyond trivial orchestration lives in the step module itself.
+- **Uniform step interface:** Every step uses the same standardized signature and returns a structured output object. Each step’s code documents **input → transform → output** in one place.
+- **Transactional semantics:** A step is atomic: either it completes and persists its output + diagnostics + state checkpoint, or it fails without partial state.
+- **Checkpointed progression:** `PipelineManager` becomes the authoritative checkpoint manager. Steps check “done” status before executing; on success they mark done; on failure they do not.
+- **Interactive gating:** In interactive mode, the user opts to continue after each step. Non-interactive mode runs exactly one step and exits (resume picks up at next step).
+- **Diagnostics per step:** Each step emits a self-contained report to the diagnostics directory and **dumps outputs** (or references to them) so the user can inspect before proceeding.
+
+### Step 0: Define a unified step contract
+**Action:** Add a step protocol + result payload (e.g., `StepResult`) used by all steps.  
+**Required fields:**
+- `step_id: str` (stable identifier, e.g., `"load_population"`).
+- `inputs: dict[str, Any]` (serialized summary of inputs).
+- `transforms: list[str]` (structured bullets of transformations, order preserved).
+- `outputs: dict[str, Any]` (summary of outputs; include file paths or table names).
+- `artifacts: dict[str, Path | str]` (paths to outputs dumped to disk).
+- `metrics: dict[str, Any]` (counts, timings, memory, etc.).
+- `status: Literal["success", "skipped", "failed"]`.
+  
+**Implementation detail:** Each step returns a `StepResult`, and the REPL is responsible for writing a standardized diagnostics report using the result.
+
+### Step 1: Introduce a step runner in `repl.py`
+**Action:** In `src/repl.py`, define a **single** `run_step(step_fn, context)` helper that:
+1. Checks `PipelineManager.is_done(step_id)`.
+2. If done: return a `StepResult` with `status="skipped"`.
+3. If not done: executes step function in a try/except.
+4. On success: writes diagnostics report for the step, dumps artifacts, marks state as done.
+5. On failure: writes diagnostics report with failure details and re-raises.
+
+**Benefits:** Ensures **transactionality** and **consistent diagnostics** in one place.
+
+### Step 2: Create dedicated step modules (one per pipeline step)
+**Action:** Each step becomes its own module, e.g.:
+- `src/steps/01_discover_xlsx.py`
+- `src/steps/02_infer_name_columns.py`
+- `src/steps/03_register_resources.py`
+- `src/steps/04_reset_db.py`
+- `src/steps/05_load_population.py`
+- `src/steps/06_load_world_bank.py`
+- `src/steps/07_sample_population.py`
+- `src/steps/08_sample_pilot.py`
+- `src/steps/09_index_samples.py`
+- `src/steps/10_match_population.py`
+- `src/steps/11_load_docx.py`
+- `src/steps/12_match_docx.py`
+- `src/steps/13_match_parquet.py`
+- `src/steps/14_render_cards.py`
+- `src/steps/15_package_cards.py`
+- `src/steps/16_finalize.py`
+
+**Structure of each step module:**
+1. A top-level function `run(context) -> StepResult`.
+2. Inline comments that explicitly label **Input**, **Transform**, **Output** sections.
+3. No deep nesting or opaque helpers unless they are local to that module (no jumping further than the module).
+
+### Step 3: Define a shared `PipelineContext`
+**Action:** Centralize shared state in a `PipelineContext` object, passed to every step.
+- Should include: config, conn, resources, xlsx_files, docx_df, outer_dict, cards, zip_path, diagnostics_dir, etc.
+- Steps read/write fields they own (explicitly documented in their module).
+
+**Benefit:** Makes step input/output explicit and discoverable in one place.
+
+### Step 4: Standardize diagnostics per step
+**Action:** Replace ad-hoc reporting with **one diagnostics writer** that consumes a `StepResult` and writes:
+- **Step summary** (inputs/transformations/outputs).
+- **Metrics** (counts/timings/ram).
+- **Artifacts** (table snapshots, sample rows, file previews).
+
+**Artifact expectations per step (examples):**
+- Discover XLSX: write a CSV with file list + metadata.
+- Load population: dump schema + sample rows to JSON/CSV.
+- Match steps: dump matched rows sample + counts.
+- Cards: dump list of card filenames, counts, sample card text.
+
+### Step 5: Implement transactional behavior with `PipelineManager`
+**Action:** Treat each step as a transaction boundary:
+- **Before step:** confirm prerequisites are present in context.
+- **During step:** stage outputs in temp locations or temp tables.
+- **After step success:** move temp outputs to canonical names; only then call `save_state(step_id)`.
+- **On failure:** ensure temp artifacts are cleaned or clearly marked as partial (no state update).
+
+**Example for DuckDB:** use temp tables (`_tmp_*`) and `ALTER TABLE RENAME` only after validation.
+
+### Step 6: Interactive vs non-interactive control flow
+**Action:** Modify REPL so:
+- **Interactive mode:** after each step, prompt user to “Continue” or “Stop”. If stop, exit cleanly with state saved.
+- **Non-interactive mode:** run **exactly one step** and exit. Add `--resume` to continue at next step.
+
+**Implementation:** The step runner can return a `StepResult`, and REPL decides whether to proceed based on mode.
+
+### Step 7: Enforce a canonical step order
+**Action:** In `repl.py`, declare a **single ordered list** of step functions. The REPL loops through them. This order is the single source of truth.
+
+**Benefit:** Clean, auditable progression and consistent checkpointing.
+
+### Step 8: Validate step contracts with linting/tests
+**Action:** Add lightweight tests that:
+- Ensure each step module exposes `run(context)`.
+- Ensure each step returns a `StepResult` with required fields.
+- Validate that step IDs are unique and ordered.
+
+### Step 9: Migration strategy (incremental refactor)
+**Action:** Refactor the REPL **step-by-step** without big-bang changes:
+1. Introduce `PipelineContext`, `StepResult`, and step runner.
+2. Move the **first step only** (XLSX discovery) into a module.
+3. Iterate through steps in order, converting one at a time.
+4. Keep existing functionality working after each conversion.
+
+### Step 10: Ensure diagnostics are complete and reviewable between steps
+**Action:** Make “diagnostics per step” mandatory.  
+Before moving to the next step (in interactive mode), the user is shown the path to the diagnostics folder and a short summary of what changed.
+
+---
+
+## Expected outcomes
+- REPL reads as a **clear pipeline of steps** where inputs/transformations/outputs are obvious at a glance.
+- Each step is **self-contained, transactional, and resumable**.
+- Diagnostics tell the full story of each step, including **input capture, transformation narrative, and output artifacts**.
+- The pipeline becomes easier to debug, easier to extend, and safer to resume.
