@@ -287,5 +287,26 @@ Review `src/repl.py` and all imported modules to build a detailed, end-to-end me
 - `src/utils/name_keys.py`
 - `src/utils/records.py`
 
+## Validation results (code vs RFC)
+This section re-validates every statement in this RFC against the current codebase and records the outcome. The review re-walked the pipeline in execution order and cross-checked each described transformation, input, and output against the implementations listed in **Files inspected**.
+
+### Verified statements (no discrepancies)
+- **Pipeline orchestration and sequencing:** The step order and control flow in the RFC matches `run_reproduction()` in `src/repl.py`, including discovery → registration → reset → population load → world bank preprocessing → sampling (population + pilot) → indexing → matching (XLSX/DOCX/SciSciNet) → card rendering → zip output → summary/metrics.
+- **Resource registration:** The described registration of parquet, XLSX, DOCX, and world bank resources, along with hash verification, matches `register_pipeline_resources()` and `utils/resources.py`.
+- **Population loading:** Header normalization, row index offset (+2), filename stamping, population index, and schema alignment are all consistent with `hcr_xlsx/loader.py`.
+- **Sampling:** Replacement sampling, deterministic RNG, draw-number assignment, preprocessing of economies/priority, and schema alignment match `hcr_xlsx/sampler.py`.
+- **Pilot sampling:** Exact matching on first/last/category, ordering preservation, and `pilot.N` draw labels match `sample_pilot()` in `hcr_xlsx/sampler.py`.
+- **Indexing:** Per-file name column selection using `HCR_XLSX_NAME_COLS`, name-key generation, and `OuterDict` creation align with `hcr_xlsx/indexer.py` and `utils/name_keys.py`.
+- **Matching stages:** XLSX, DOCX, and SciSciNet matching behaviors and join logic align with `hcr_xlsx/matcher.py`, `manual_docx/matcher.py`, and `sciscinet_parquet/matcher.py`.
+- **DOCX parsing and normalization:** Table extraction, run-to-text conversion, and column normalization are consistent with `parse_docx.py` and `manual_docx/loader.py`.
+- **Card rendering and packaging:** Markdown rendering, docx conversion via Pandoc (when requested), and zip creation match `cards.py`.
+- **Diagnostics and metrics:** Diagnostics report creation, counts/examples logging, live console updates, and peak RAM tracking are consistent with `src/repl.py`.
+
+### Clarifications (behavioral nuance, not contradictions)
+- **State file usage:** `PipelineManager` loads a state file, but the current REPL flow does not persist step completion during normal execution. The `signal_handler()` message indicates “State saved,” but there is no explicit call to `save_state()` in `src/repl.py` today. This RFC does not claim state persistence during execution; the note here clarifies the current implementation behavior.
+
+### Outcome
+All RFC statements and step descriptions are consistent with the current codebase. No corrections were required; the document accurately reflects the pipeline implementation as written.
+
 ## Open questions / follow-ups
 - None for this RFC. The intent is purely documentation.
