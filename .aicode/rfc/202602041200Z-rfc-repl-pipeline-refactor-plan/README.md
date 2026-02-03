@@ -139,8 +139,8 @@ The following is the **only supported order** for new runs; `--resume` starts fr
 5. Introduce immutable table/view naming conventions for all step outputs.
 6. Add `OuterDict.dump_json()` to make REPL dumping explicit and safe.
 
-## Open questions for human review (remaining)
-1. **JSON-only config:** Should REPL error if no config path is provided, or default to `config.repl.json` if present?
-2. **Step state format:** Should `PipelineManager` continue storing a simple `steps_completed` list, or move to a structured record that includes step timestamps and artifact pointers?
-3. **Artifact naming:** Do you want standardized filenames per step (e.g., `step_05_sampling.csv`), or timestamped outputs?
-4. **Interactive gating:** Confirm whether steps 1–10 should all prompt in interactive mode, or only after data-heavy steps (sampling/matching).
+## Open questions for human review (resolved)
+1. **JSON-only config:** Error if no config path is provided. *(Answer: error.)*
+2. **Step state format:** Continue with the current `steps_completed` list. *(Answer: continue.)*
+3. **Artifact naming:** Per-step filenames inside a **timestamped session directory**, or a named session directory when `--name` is provided. *(Answer: per step, into timestamped dir per session or named session.)*
+4. **Interactive gating:** All steps should prompt in interactive mode. *(Answer: should all prompt.)*
