@@ -160,6 +160,8 @@ class PipelineManager:
         if self.conn is None:
             self.conn = duckdb.connect(str(self.db_file))
             self.conn.execute("SET memory_limit='20GB'")
+            # Enable unaccent for name matching
+            self.conn.execute("INSTALL splink_udfs FROM community; LOAD splink_udfs;") 
         return self.conn
 
     def close(self) -> None:

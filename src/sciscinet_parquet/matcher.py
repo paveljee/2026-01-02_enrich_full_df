@@ -32,13 +32,69 @@ def match_parquet(
     if sample_df.empty:
         return
 
+    # Pre-calculate match key in Python to save DB compute
+    # Strip diacritics via simple string methods if simple, but DB unaccent is better for robust logic.
+    #
+    # For reference:
+    # unaccent(VARCHAR) → VARCHAR
+    # Provides a more comprehensive transliteration of a string. It first strips all diacritics and then converts other special characters and ligatures (e.g., Æ → AE, ø → o, ß → ss) to their basic Latin equivalents.
+    # https://github.com/moj-analytical-services/splink_udfs
+
     input_df = sample_df.copy()
     input_df["match_name"] = (
         input_df["hcr.first_name"].astype(str) + " " + input_df["hcr.last_name"].astype(str)
     )
     input_df["match_key_norm"] = input_df["match_name"].str.lower()
 
-    register_frame(conn, "input_researchers", input_df)
+    # Out register_frame won't work because we don't need
+    # a persistent table here, so we use conn directly below
+    # register_frame(conn, "input_researchers", input_df)
+    
+    # 1) Register a temporary relation (view-like) backed by the dataframe
+    conn.register("input_researchers_view", input_df)
+
+    # 2) Materialize the persistent table with normalization
+    conn.execute("""
+        CREATE OR REPLACE TABLE input_researchers AS
+        SELECT
+            *,
+            lower(unaccent(match_name)) AS match_key_norm
+        FROM input_researchers_view
+    """)
+
+    # 3) Cleanup the registered view
+    try:
+        conn.unregister("input_researchers_view")
+    except Exception:
+        pass
+
+    ### DEBUG ###
+    # Run your query
+    # res = pm.conn.execute(f"""
+    #     SELECT
+    #         authorid,
+    #         display_name,
+    #         display_name_alternatives,
+    #         length(display_name_alternatives) AS len,
+    #         unnest(CAST(json(display_name_alternatives) AS VARCHAR[])) AS alt_name
+    #     FROM read_parquet('{FILES_CONFIG["author_details"]["path"]}')
+    #     LIMIT 10;
+    # """)
+
+    # # Fetch all rows
+    # rows = res.fetchall()
+
+    # # Print them nicely
+    # for row in rows:
+    #     print(row)
+
+    # exit(0)
+    ### END DEBUG ###
+    
+    # Technique: We don't load the parquet. We query it directly.
+    # We handle the "serialized list" by treating it as string manipulation 
+    # because JSON parsing can be strict about quotes.
+    # Assumption: serialized list looks like `["Name A", "Name B"]`
 
     conn.execute(
         f"""
@@ -65,7 +121,7 @@ def match_parquet(
             p.display_name,
             p.display_name_alternatives
         FROM input_researchers i
-        JOIN parq p ON lower(p.alt_name) = i.match_key_norm
+        JOIN parq p ON lower(unaccent(p.alt_name)) = i.match_key_norm
         """
     )
 
