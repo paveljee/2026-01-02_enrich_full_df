@@ -522,3 +522,104 @@ Return to REPL; dumps all "2nd view per parquet" into dfs returns a list of thes
 9) prepare card from outerdict. this is just as currently implemented.
 
 CleanUp. This is always executed. It properly handles winding down all operations and prints concluding message(s) to user.
+
+## Revised refactor plan (incorporating human feedback)
+
+This section updates the refactor plan to match the clarified architecture, step order, and transactional semantics described in the human review.
+
+### Architecture boundaries (updated)
+- **Modules:** `repl` module + `steps/` package + `helpers/` package.
+- **Import rules:**
+  - `repl` may import from `steps` and `helpers`.
+  - `steps` may import from `helpers`.
+  - `helpers` must not import from `repl` or `steps`.
+- **Rationale:** This relaxes the two-jump rule while keeping a strict, acyclic dependency graph.
+
+### Lifecycle (updated)
+1. **Init** (REPL calls `helpers.init`).
+2. **RunSteps** (REPL runs ordered step list; exceptions are caught, transactions rolled back, pipeline state updated).
+3. **CleanUp** (always executed; REPL owns all console rendering).
+
+### Init phase (updated details)
+`helpers.init` is responsible for:
+- Parsing CLI args passed in by REPL.
+- Loading config **only from JSON** (deprecate defaults; JSON is required).
+- Initializing: ResourceMonitor, DuckDB connection, PipelineConfig, PipelineManager, DiagnosticsReport.
+- Constructing the **ordered step list** based on `--new` vs `--resume` (and REPL passes any interactive flags to Step 1).
+- Performing **pipeline reset** only if `--new` and only **after user confirmation** (`Y` in interactive, `--yes` in non-interactive).
+- Returning all initialized objects + step list to REPL.
+- Moving ResourceMonitor, PipelineManager, and other shared classes out of `repl` and into `helpers`.
+
+### Transaction & error handling (updated)
+- REPL wraps each step in a transaction boundary and catches exceptions.
+- On exception: step is marked failed, transaction is rolled back, pipeline stops cleanly.
+- Steps return artifacts + user-facing content, but **REPL owns all rendering and dumping**.
+
+### Step order and responsibilities (updated)
+Below is the **authoritative step order** for a new session, with immutable tables and resume-safe persistence.
+
+#### Step 1 — Register resources
+- Discover XLSX/DOCX/parquet inputs internally.
+- Return `RegisteredResource` objects for all inputs.
+
+#### Step 2 — Load XLSX → population
+- Load each XLSX into DuckDB `population` with `hcr.*` normalization.
+- Record `hcr.row_number` and `hcr.filename`.
+- Return artifacts for REPL to dump (e.g., `population` DF) + content for user output.
+- **Rule:** `population` is immutable from this point onward.
+
+#### Step 3 — Name column inference → `ktp.first_name` / `ktp.last_name`
+- Create a new DuckDB table (1:1 to `population`) with inferred name columns.
+- Persist a view for resume.
+- Return DF joining `population` + inferred names + user content.
+
+#### Step 4 — Economy/priority enrichment
+- Create a new DuckDB table (1:1 to `population`) with `ktp.economy` and `ktp.priority`.
+- Use World Bank data **only inside this step**; it does not persist in DuckDB.
+- Persist a view for resume.
+- Return DF joining `population` + name table + economy/priority + user content.
+
+#### Step 5 — Sampling
+- Create `samples` with only: `ktp.filename`, `ktp.fragment` (from `hcr.row_number`), `ktp.draw_number`.
+- Return a view that inner joins `samples` with `population` and step-3/4 tables (prefer sample column names), dumped to DF by REPL.
+
+#### Step 6 — Build namekeys + outerdict stub
+- Create immutable DuckDB table: `namekey` (JSON) + `innerdicts` (JSON lines, empty lists at this step).
+- Build in-memory `outerdict` from the stub table.
+- **OuterDict rule:** only append innerdicts; no mutation/removal of keys or prior innerdicts.
+- Return `outerdict` to REPL (REPL triggers `outerdict.dump_json()`), plus user content.
+
+#### Step 7 — XLSX matching (populate innerdicts)
+- Create a **view**: right join `population` to outerdict stub by namekey (JSON parse in-query).
+- Matching: exact `lower(unaccent(last_name))`; first-name token containment (outerdict token in population tokens).
+- Persist a **table**: `namekey` + `innerdicts` (JSON lines grouped per key).
+- Extend `outerdict` from this table.
+- Return a user-facing **view**: outer join `innerdicts` with `population`, `samples`, and step-3/4 tables.
+
+#### Step 8 — DOCX matching (populate innerdicts)
+- Load all DOCX tables into DuckDB with `ktp.table_1_*` normalization, `ktp.filename`, `ktp.table_1_row_number` (start at 1).
+- Require exactly **one** table per DOCX; otherwise raise an exception.
+- Create a **view**: right join DOCX to outerdict stub on namekey with token containment (all outerdict tokens contained in docx tokens for “Researcher/author”).
+- Persist a **table**: `namekey` + `innerdicts` (JSON lines grouped per key).
+- Extend `outerdict` from this table.
+- Return a user-facing **view**: outer join `innerdicts` with `population` and `samples`.
+
+#### Step 9 — Parquet matching (populate innerdicts)
+- For each parquet: create a matched-row table containing **all original columns**, normalized with `ssnad.*`, `ssnap.*`, `ssnhpl0.*`, `ssnhpl1.*`, plus `ssn.filename`.
+- Persist a **table** linking outerdict stub to author details (`ktp.first_name`, `ktp.last_name`, `ssnad.author_id`, `ssnad.display_name`, `ssnad.display_name_alternatives`, `ktp.ssnad_match`).
+- Create per-parquet **views** combining author-link + matched parquet rows (`ktp.first_name`, `ktp.last_name`, `ktp.filename`, `ktp.fragment`, plus all parquet columns).
+- Persist a **table**: `namekey` + `innerdicts` (JSON lines) populated from per-parquet views.
+- Extend `outerdict` from this table.
+- Return per-parquet user-facing **views** (outer-joined with `population` + `samples`) as DFs; REPL dumps one file per parquet.
+
+#### Step 10 — Build cards
+- Generate cards from `outerdict` (same as current implementation).
+
+### CleanUp (updated)
+- Always executed regardless of prior step outcomes.
+- Closes resources and prints final messages via REPL.
+
+### Resume rules (updated)
+- Each step persists **immutable** tables/views; no step mutates prior outputs.
+- `outerdict` persists in memory but is reconstructed as needed from persisted tables when resuming.
+- Step resumption uses the persisted tables/views created at the last successful step.
