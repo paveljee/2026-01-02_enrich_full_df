@@ -69,7 +69,7 @@ def run(context: PipelineContext) -> StepResult:
             ) AS "ktp.docx_match"
         FROM {DOCX_TABLE} d
         RIGHT JOIN name_draws nd
-          ON list_length(
+          ON array_length(
                 list_intersect(
                     regexp_split_to_array(lower(unaccent(d."{name_col}")), '\\s+'),
                     regexp_split_to_array(
@@ -77,7 +77,7 @@ def run(context: PipelineContext) -> StepResult:
                         '\\s+'
                     )
                 )
-             ) = list_length(
+             ) = array_length(
                 regexp_split_to_array(
                     lower(unaccent(nd."{KTP_FIRST_NAME_COL}" || ' ' || nd."{KTP_LAST_NAME_COL}")),
                     '\\s+'

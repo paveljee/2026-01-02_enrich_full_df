@@ -46,6 +46,7 @@ def run(context: PipelineContext) -> StepResult:
     missing = [
         res.name
         for res in context.resources.xlsx_resources.values()
+        if not res.name.startswith("~$")
         if res.name not in HCR_XLSX_NAME_COLS
     ]
     if missing:

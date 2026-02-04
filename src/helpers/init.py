@@ -73,7 +73,10 @@ def _reset_pipeline(conn, manager: PipelineManager) -> None:
     for (table_name,) in conn.execute("SHOW TABLES").fetchall():
         if table_name.startswith("ssn_"):
             conn.execute(f"DROP TABLE IF EXISTS {table_name}")
-    for (view_name,) in conn.execute("SHOW VIEWS").fetchall():
+    for (view_name,) in conn.execute("""
+        SELECT table_name
+        FROM information_schema.views
+    """).fetchall():
         if view_name.startswith("ssn_"):
             conn.execute(f"DROP VIEW IF EXISTS {view_name}")
     manager.reset_state()

@@ -34,9 +34,25 @@ def _append_samples(conn: duckdb.DuckDBPyConnection, df: pd.DataFrame) -> None:
         [SAMPLES_TABLE],
     ).fetchone()[0]
     if exists:
-        conn.execute(f"INSERT INTO {SAMPLES_TABLE} SELECT * FROM samples_frame")
+        conn.execute(
+            f"""
+            INSERT INTO {SAMPLES_TABLE}
+            SELECT "{KTP_FILENAME_COL}",
+                   "{KTP_FRAGMENT_COL}",
+                   CAST("{DRAW_LABEL}" AS VARCHAR) AS "{DRAW_LABEL}"
+            FROM samples_frame
+            """
+        )
     else:
-        conn.execute(f"CREATE TABLE {SAMPLES_TABLE} AS SELECT * FROM samples_frame")
+        conn.execute(
+            f"""
+            CREATE TABLE {SAMPLES_TABLE} AS
+            SELECT "{KTP_FILENAME_COL}",
+                   "{KTP_FRAGMENT_COL}",
+                   CAST("{DRAW_LABEL}" AS VARCHAR) AS "{DRAW_LABEL}"
+            FROM samples_frame
+            """
+        )
     conn.execute("DROP TABLE IF EXISTS samples_frame")
 
 
