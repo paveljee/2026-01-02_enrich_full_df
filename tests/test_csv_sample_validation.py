@@ -16,7 +16,7 @@ from src.utils.resources import register_resource, register_resources
 
 def test_csv_rows_match_samples(tmp_path: Path) -> None:
     data_dir = Path("data")
-    xlsx_dir = data_dir / "xlsx"
+    xlsx_dir = data_dir / "2024-Historical-Highly-Cited-Researchers-lists - final"
     csv_dir = data_dir / "samples"
     world_bank = data_dir / "OGHIST_2025_07_01.xlsx"
 
