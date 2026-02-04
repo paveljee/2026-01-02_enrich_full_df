@@ -31,7 +31,7 @@ def run(context: PipelineContext) -> StepResult:
     cards = build_cards(
         context.outer_dict,
         total_draws=context.config.total_draws,
-        intro_date=datetime.now(ZoneInfo("America/Toronto")).strftime("%B %d, %Y"),
+        intro_date=datetime.now(ZoneInfo(context.config.timezone)).strftime("%B %d, %Y"),
         excluded_cols=excluded_cols,
     )
     zip_path = write_cards_zip(

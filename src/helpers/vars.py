@@ -2,6 +2,16 @@ from __future__ import annotations
 
 from typing import Final
 
+CARD_INTRODUCTION = """## Introduction
+**Draw number** is the sequential order in which rows were sampled from HCR tables.
+
+Name is displayed as **Last Name, First Name**.
+
+Last modified (introduction): December 23, 2025
+
+Date of report: {}
+"""
+
 KTP_FIRST_NAME_COL: Final = "ktp.first_name"
 KTP_LAST_NAME_COL: Final = "ktp.last_name"
 KTP_FIRST_NAME_ORIG_COLNAME_COL: Final = "ktp.first_name_original_column_name"
@@ -18,6 +28,11 @@ KTP_HCR_SECONDARY_AFFILIATIONS_COL: Final = "ktp.hcr_secondary_affiliations"
 DRAW_LABEL: Final = "ktp.draw_number"
 RIGHT_NAME_COL: Final = "Researcher/author"
 KTP_FRAGMENT_COL: Final = "ktp.fragment"
+SSN_FILENAME_COL: Final = "ssn.filename"
+SSN_SUM_HIT_PCT_COL: Final = "ssn.sum_hit_1pct"
+SSN_PAPERIDS_LEVEL0_COL: Final = "ssn.paperids_level0"
+SSN_PAPERIDS_LEVEL1_COL: Final = "ssn.paperids_level1"
+SSN_FIELD_IDS_LIST_COL: Final = "ssn.field_ids_list"
 
 HCR_FILENAME_COL: Final = "hcr.filename"
 HCR_ROW_COL: Final = "hcr.row_number"
@@ -356,6 +371,11 @@ __all__ = [
     "KTP_PRIORITY_COL",
     "KTP_PRIORITY_GROUP_COL",
     "KTP_SOURCE_KEY_COL",
+    "SSN_FILENAME_COL",
+    "SSN_SUM_HIT_PCT_COL",
+    "SSN_PAPERIDS_LEVEL0_COL",
+    "SSN_PAPERIDS_LEVEL1_COL",
+    "SSN_FIELD_IDS_LIST_COL",
     "PILOT_NAME_CATEGORY_TRIPLES",
     "RIGHT_NAME_COL",
     "COUNTRY_PREFIX",

@@ -25,6 +25,11 @@ FILES_CONFIG = {
         "sha256": "62c373c747d74879585c3b1cfbbe70971c86927ec4fbc601482d3c2513ad9c1a",
         "desc": "Author Details (Names)",
     },
+    "authors": {
+        "path": "/Volumes/home/anonymous/sciscinet/v2/hf/xet/sciscinet_authors.parquet",
+        "sha256": "17669bf36ddfe2c6fcebd759bdbc292269d3651292792babe0211a6161ae492e",
+        "desc": "Authors",
+    },
     "fields": {
         "path": "/Volumes/home/anonymous/sciscinet/v2/hf/xet/sciscinet_fields.parquet",
         "sha256": "f78b1fc5287de26aee57665943a50c95aa980420449d7c099c351600cd584c7a",
@@ -44,6 +49,7 @@ class PipelineConfig:
     xlsx_dir: Path = Path("data/xlsx")
     docx_dir: Path = Path("data/manual_extractions")
     world_bank_xlsx: Path = Path("data/OGHIST_2025_07_01.xlsx")
+    timezone: str = "America/Toronto"
     sample_seed: int = 42
     sample_draw_sizes: list[int] = field(default_factory=lambda: [20] + [40] * 7)
     pilot_xlsx_name: str = "2024_HCR.xlsx"

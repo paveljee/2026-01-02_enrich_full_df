@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import sys
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from rich import box
 from rich.console import Console
@@ -67,6 +69,11 @@ def run_reproduction(args: argparse.Namespace) -> Path | None:
             return
         for style, msg in log_history:
             console.print(f"[{style}]{msg}[/{style}]")
+        marker = (
+            f"-- resumed from previous @ "
+            f"{datetime.now(ZoneInfo(context.config.timezone)).strftime('%Y-%m-%d %H:%M:%S %Z')} --"
+        )
+        log(marker, style="dim")
 
     def log(msg: str, style: str = "white") -> None:
         session_log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -116,6 +123,9 @@ def run_reproduction(args: argparse.Namespace) -> Path | None:
                 response = console.input("> ", markup=False).strip().lower()
                 if response != "y":
                     break
+    except Exception as exc:
+        log(f"Exited prematurely: {type(exc).__name__}: {exc}", style="red")
+        raise
     finally:
         if monitor is not None:
             peak_ram = monitor.stop()
@@ -131,10 +141,15 @@ def run_reproduction(args: argparse.Namespace) -> Path | None:
     if card_count is not None:
         m_table.add_row("Cards", str(card_count))
     console.print(m_table)
-    console.print(f"[bold cyan]Diagnostics report saved to: {context.diagnostics.path}[/bold cyan]")
+    log("Execution Metrics", style="cyan")
+    log(f"Peak RAM Usage: {peak_ram:.2f} GB", style="magenta")
+    if card_count is not None:
+        log(f"Cards: {card_count}", style="magenta")
+    if context is not None:
+        log(f"Diagnostics report saved to: {context.diagnostics.path}", style="cyan")
 
     if zip_path is not None:
-        console.print(f"[bold green]Success! Output saved to: {zip_path}[/bold green]")
+        log(f"Success! Output saved to: {zip_path}", style="green")
     return zip_path
 
 

@@ -11,21 +11,12 @@ import pandas as pd
 
 from .data_models import OuterDict
 from .vars import (
+    CARD_INTRODUCTION,
     DRAW_LABEL,
     KTP_FILENAME_COL,
     KTP_FIRST_NAME_ORIG_COLNAME_COL,
     KTP_LAST_NAME_ORIG_COLNAME_COL,
 )
-
-INTRODUCTION = """## Introduction
-**Draw number** is the sequential order in which rows were sampled from HCR tables.
-
-Name is displayed as **Last Name, First Name**.
-
-Last modified (introduction): December 23, 2025
-
-Date of report: {}
-"""
 
 
 def build_cards(
@@ -36,7 +27,7 @@ def build_cards(
     excluded_cols: set[str],
 ) -> dict[str, str]:
     cards: dict[str, str] = {}
-    intro = INTRODUCTION.format(intro_date) + "\n\n"
+    intro = CARD_INTRODUCTION.format(intro_date) + "\n\n"
     for name_key, inner_dicts in outer_dict.items():
         draw_numbers = []
         for inner in inner_dicts:

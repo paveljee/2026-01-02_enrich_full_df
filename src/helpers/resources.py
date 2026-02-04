@@ -87,6 +87,13 @@ def register_pipeline_resources(config: PipelineConfig) -> PipelineResources:
             description=files["author_details"]["desc"],
             expected_hash=files["author_details"]["sha256"],
         ),
+        Path(files["authors"]["path"]).name: register_resource(
+            Path(files["authors"]["path"]),
+            group=ResourceGroup.SCISCINET_HF,
+            fragment_type=FragmentType.AUTHOR_ID,
+            description=files["authors"]["desc"],
+            expected_hash=files["authors"]["sha256"],
+        ),
         Path(files["authors_paper"]["path"]).name: register_resource(
             Path(files["authors_paper"]["path"]),
             group=ResourceGroup.SCISCINET_HF,

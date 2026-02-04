@@ -7,6 +7,7 @@
   "xlsx_dir": "/Volumes/Users/Anonymous/Workshop/202504161200UTC-4_Nancy_Baxter_Andrea_Tricco_collabs/2024-Historical-Highly-Cited-Researchers-lists - final",
   "docx_dir": "/Volumes/Users/Anonymous/Workshop/202504161200UTC-4_Nancy_Baxter_Andrea_Tricco_collabs/analyses/2026-01-02_enrich_full_df/data/manual_extractions",
   "world_bank_xlsx": "/Volumes/Users/Anonymous/Workshop/202504161200UTC-4_Nancy_Baxter_Andrea_Tricco_collabs/analyses/2026-01-02_enrich_full_df/data/OGHIST_2025_07_01.xlsx",
+  "timezone": "America/Toronto",
   "sample_seed": 42,
   "sample_draw_sizes": [20, 40, 40, 40, 40, 40, 40, 40],
   "pilot_xlsx_name": "2024_HCR.xlsx",
@@ -31,6 +32,11 @@
       "path": "/Volumes/home/anonymous/sciscinet/v2/hf/xet/sciscinet_author_details.parquet",
       "sha256": "62c373c747d74879585c3b1cfbbe70971c86927ec4fbc601482d3c2513ad9c1a",
       "desc": "Author Details (Names)"
+    },
+    "authors": {
+      "path": "/Volumes/home/anonymous/sciscinet/v2/hf/xet/sciscinet_authors.parquet",
+      "sha256": "17669bf36ddfe2c6fcebd759bdbc292269d3651292792babe0211a6161ae492e",
+      "desc": "Authors"
     },
     "fields": {
       "path": "/Volumes/home/anonymous/sciscinet/v2/hf/xet/sciscinet_fields.parquet",

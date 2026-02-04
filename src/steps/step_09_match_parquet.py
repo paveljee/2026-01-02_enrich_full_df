@@ -12,6 +12,7 @@ from ..helpers.schema import (
     OUTERDICT_NAME_VIEW,
     PARQUET_AUTHOR_MATCH_TABLE,
     PARQUET_AUTHOR_OUTPUT_TABLE,
+    PARQUET_AUTHORS_OUTPUT_TABLE,
     POPULATION_ECON_TABLE,
     POPULATION_TABLE,
     SAMPLES_WITH_NAMES_VIEW,
@@ -32,6 +33,11 @@ from ..helpers.vars import (
     KTP_PRIORITY_COL,
     KTP_PRIORITY_GROUP_COL,
     KTP_SSNAD_MATCH_COL,
+    SSN_FIELD_IDS_LIST_COL,
+    SSN_FILENAME_COL,
+    SSN_PAPERIDS_LEVEL0_COL,
+    SSN_PAPERIDS_LEVEL1_COL,
+    SSN_SUM_HIT_PCT_COL,
 )
 
 
@@ -79,7 +85,7 @@ def _create_parquet_table(
         f"""
         CREATE OR REPLACE TABLE {table_name} AS
         SELECT {select_cols},
-               '{filename}' AS "ssn.filename"
+               '{filename}' AS "{SSN_FILENAME_COL}"
         FROM read_parquet('{path}') parq
         {join_sql}
         """
@@ -100,11 +106,13 @@ def run(context: PipelineContext) -> StepResult:
     conn: duckdb.DuckDBPyConnection = context.conn
     files = context.config.files_config
     author_details_path = files["author_details"]["path"]
+    authors_path = files["authors"]["path"]
     authors_paper_path = files["authors_paper"]["path"]
     hit_papers0_path = files["hit_papers_0"]["path"]
     hit_papers1_path = files["hit_papers_1"]["path"]
 
     author_id_col = normalize_parquet_column_name("authorid", "ssnad")
+    authors_author_id_col = normalize_parquet_column_name("authorid", "ssna")
     author_id_raw = "authorid"
 
     log("Match author details to name keys (author_details scan)")
@@ -166,6 +174,19 @@ def run(context: PipelineContext) -> StepResult:
         ),
     )
 
+    log("Create matched authors table")
+    authors_table = f"ssn_{safe_identifier(Path(authors_path).stem)}"
+    _create_parquet_table(
+        conn,
+        table_name=authors_table,
+        path=authors_path,
+        prefix="ssna",
+        join_sql=(
+            "JOIN "
+            f"{PARQUET_AUTHOR_MATCH_TABLE} m ON parq.{author_id_raw} = m.\"{author_id_col}\""
+        ),
+    )
+
     log("Create author->paper table")
     conn.execute(
         f"""
@@ -194,15 +215,15 @@ def run(context: PipelineContext) -> StepResult:
 
     log("Aggregate author-level hit stats")
     conn.execute(
-        """
+        f"""
         CREATE OR REPLACE TABLE ssn_author_agg AS
         SELECT
             ap.name_key AS name_key,
             ap.authorid AS authorid,
-            SUM(COALESCE(h.hit_1pct, 0)) AS "ssn.sum_hit_1pct",
-            LIST(ap.paperid) FILTER (WHERE h.level = 'level0') AS "ssn.paperids_level0",
-            LIST(ap.paperid) FILTER (WHERE h.level = 'level1') AS "ssn.paperids_level1",
-            LIST(DISTINCT h.fieldid) AS "ssn.field_ids_list"
+            SUM(COALESCE(h.hit_1pct, 0)) AS "{SSN_SUM_HIT_PCT_COL}",
+            LIST(ap.paperid) FILTER (WHERE h.level = 'level0') AS "{SSN_PAPERIDS_LEVEL0_COL}",
+            LIST(ap.paperid) FILTER (WHERE h.level = 'level1') AS "{SSN_PAPERIDS_LEVEL1_COL}",
+            LIST(DISTINCT h.fieldid) AS "{SSN_FIELD_IDS_LIST_COL}"
         FROM ssn_author_papers ap
         LEFT JOIN ssn_all_hits h
           ON ap.paperid = h.paperid
@@ -218,12 +239,13 @@ def run(context: PipelineContext) -> StepResult:
             m.name_key AS name_key,
             m."{KTP_FIRST_NAME_COL}" AS "{KTP_FIRST_NAME_COL}",
             m."{KTP_LAST_NAME_COL}" AS "{KTP_LAST_NAME_COL}",
+            a."{SSN_FILENAME_COL}" AS "{KTP_FILENAME_COL}",
             a."{author_id_col}" AS "{KTP_FRAGMENT_COL}",
             a.*,
-            CAST(agg."ssn.paperids_level0" AS VARCHAR) AS "ssn.paperids_level0",
-            CAST(agg."ssn.paperids_level1" AS VARCHAR) AS "ssn.paperids_level1",
-            CAST(agg."ssn.field_ids_list" AS VARCHAR) AS "ssn.field_ids_list",
-            agg."ssn.sum_hit_1pct"
+            CAST(agg."{SSN_PAPERIDS_LEVEL0_COL}" AS VARCHAR) AS "{SSN_PAPERIDS_LEVEL0_COL}",
+            CAST(agg."{SSN_PAPERIDS_LEVEL1_COL}" AS VARCHAR) AS "{SSN_PAPERIDS_LEVEL1_COL}",
+            CAST(agg."{SSN_FIELD_IDS_LIST_COL}" AS VARCHAR) AS "{SSN_FIELD_IDS_LIST_COL}",
+            agg."{SSN_SUM_HIT_PCT_COL}"
         FROM {PARQUET_AUTHOR_MATCH_TABLE} m
         JOIN {author_table} a
           ON a."{author_id_col}" = m."{author_id_col}"
@@ -233,10 +255,32 @@ def run(context: PipelineContext) -> StepResult:
         """
     )
 
+    log("Create authors output table")
+    conn.execute(
+        f"""
+        CREATE OR REPLACE TABLE {PARQUET_AUTHORS_OUTPUT_TABLE} AS
+        SELECT
+            m.name_key AS name_key,
+            m."{KTP_FIRST_NAME_COL}" AS "{KTP_FIRST_NAME_COL}",
+            m."{KTP_LAST_NAME_COL}" AS "{KTP_LAST_NAME_COL}",
+            au."{SSN_FILENAME_COL}" AS "{KTP_FILENAME_COL}",
+            au."{authors_author_id_col}" AS "{KTP_FRAGMENT_COL}",
+            au.*
+        FROM {PARQUET_AUTHOR_MATCH_TABLE} m
+        JOIN {authors_table} au
+          ON au."{authors_author_id_col}" = m."{author_id_col}"
+        """
+    )
+
     log("Append parquet matches into OuterDict")
     _append_innerdicts_from_rows_table(
         conn,
         table_name=PARQUET_AUTHOR_OUTPUT_TABLE,
+        context=context,
+    )
+    _append_innerdicts_from_rows_table(
+        conn,
+        table_name=PARQUET_AUTHORS_OUTPUT_TABLE,
         context=context,
     )
 
@@ -273,8 +317,39 @@ def run(context: PipelineContext) -> StepResult:
     )
 
     log("Load parquet output dataframe")
-    output_dfs = [conn.execute("SELECT * FROM ssn_parquet_output").df()]
-    output_views = ["ssn_parquet_output"]
+    conn.execute(
+        f"""
+        CREATE OR REPLACE VIEW ssn_authors_output_view AS
+        WITH sample_context AS (
+            SELECT
+                s."{KTP_FILENAME_COL}" AS sample_filename,
+                s."{KTP_FRAGMENT_COL}" AS sample_fragment,
+                s."{DRAW_LABEL}" AS sample_draw,
+                s."{KTP_FIRST_NAME_COL}",
+                s."{KTP_LAST_NAME_COL}",
+                p.*,
+                e."{KTP_ECONOMIES_COL}" AS "{KTP_ECONOMIES_COL}",
+                e."{KTP_ECONOMIES_INCOME_GROUP_COL}" AS "{KTP_ECONOMIES_INCOME_GROUP_COL}",
+                e."{KTP_ECONOMY_MATCH_COL}" AS "{KTP_ECONOMY_MATCH_COL}",
+                e."{KTP_PRIORITY_COL}" AS "{KTP_PRIORITY_COL}",
+                e."{KTP_PRIORITY_GROUP_COL}" AS "{KTP_PRIORITY_GROUP_COL}"
+            FROM {SAMPLES_WITH_NAMES_VIEW} s
+            JOIN {POPULATION_TABLE} p
+              ON s."{KTP_FILENAME_COL}" = p."{HCR_FILENAME_COL}"
+             AND s."{KTP_FRAGMENT_COL}" = p."{HCR_ROW_COL}"
+            LEFT JOIN {POPULATION_ECON_TABLE} e
+              ON p."{KTP_POPULATION_INDEX_COL}" = e."{KTP_POPULATION_INDEX_COL}"
+        )
+        SELECT v.*, sc.*
+        FROM {PARQUET_AUTHORS_OUTPUT_TABLE} v
+        LEFT JOIN sample_context sc
+          ON lower(v."{KTP_FIRST_NAME_COL}") = lower(sc."{KTP_FIRST_NAME_COL}")
+         AND lower(v."{KTP_LAST_NAME_COL}") = lower(sc."{KTP_LAST_NAME_COL}")
+        """
+    )
+
+    output_views = ["ssn_parquet_output", "ssn_authors_output_view"]
+    output_dfs = [conn.execute(f"SELECT * FROM {view}").df() for view in output_views]
 
     return StepResult(
         step_id="match_parquet",
