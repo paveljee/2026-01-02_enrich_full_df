@@ -3,14 +3,6 @@ from __future__ import annotations
 import duckdb
 import pandas as pd
 
-from ..helpers.vars import (
-    DRAW_LABEL,
-    HCR_FILENAME_COL,
-    HCR_ROW_COL,
-    KTP_FIRST_NAME_COL,
-    KTP_FRAGMENT_COL,
-    KTP_LAST_NAME_COL,
-)
 from ..helpers.context import PipelineContext, StepResult
 from ..helpers.duckdb_utils import register_frame
 from ..helpers.jsonlines import dumps_jsonlines
@@ -25,6 +17,14 @@ from ..helpers.schema import (
     XLSX_INNERDICT_TABLE,
     XLSX_MATCH_VIEW,
     XLSX_OUTPUT_VIEW,
+)
+from ..helpers.vars import (
+    DRAW_LABEL,
+    HCR_FILENAME_COL,
+    HCR_ROW_COL,
+    KTP_FIRST_NAME_COL,
+    KTP_FRAGMENT_COL,
+    KTP_LAST_NAME_COL,
 )
 
 
@@ -49,16 +49,25 @@ def run(context: PipelineContext) -> StepResult:
              AND lower(nk."{KTP_LAST_NAME_COL}") = lower(s."{KTP_LAST_NAME_COL}")
         ),
         pop_names AS (
-            SELECT p.*, n."{KTP_FIRST_NAME_COL}" AS pop_first, n."{KTP_LAST_NAME_COL}" AS pop_last
+            SELECT
+                p.*,
+                n."{KTP_FIRST_NAME_COL}" AS pop_first,
+                n."{KTP_LAST_NAME_COL}" AS pop_last,
+                e."ktp.economies" AS "ktp.economies",
+                e."ktp.priority" AS "ktp.priority",
+                e."ktp.priority_group" AS "ktp.priority_group"
             FROM {POPULATION_TABLE} p
             JOIN {POPULATION_NAMES_TABLE} n
               ON p."ktp.population_index" = n."ktp.population_index"
+            LEFT JOIN {POPULATION_ECON_TABLE} e
+              ON p."ktp.population_index" = e."ktp.population_index"
         )
         SELECT
             nd.name_key,
             nd."{KTP_FIRST_NAME_COL}",
             nd."{KTP_LAST_NAME_COL}",
             nd."{DRAW_LABEL}",
+            p.*,
             p."{HCR_FILENAME_COL}" AS "ktp.filename",
             p."{HCR_ROW_COL}" AS "{KTP_FRAGMENT_COL}",
             json_object(

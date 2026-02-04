@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import re
 
-
 POPULATION_TABLE = "population"
 POPULATION_NAMES_TABLE = "population_names"
 POPULATION_NAMES_VIEW = "population_with_names"

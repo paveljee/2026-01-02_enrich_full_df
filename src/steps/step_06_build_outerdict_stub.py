@@ -3,9 +3,9 @@ from __future__ import annotations
 import duckdb
 import pandas as pd
 
-from ..helpers.models import NameKey, OuterDict
 from ..helpers.context import PipelineContext, StepResult
 from ..helpers.duckdb_utils import register_frame
+from ..helpers.models import NameKey, OuterDict
 from ..helpers.schema import OUTERDICT_NAME_VIEW, OUTERDICT_STUB_TABLE, SAMPLES_WITH_NAMES_VIEW
 from ..helpers.vars import KTP_FIRST_NAME_COL, KTP_LAST_NAME_COL
 
@@ -13,7 +13,10 @@ from ..helpers.vars import KTP_FIRST_NAME_COL, KTP_LAST_NAME_COL
 def run(context: PipelineContext) -> StepResult:
     conn: duckdb.DuckDBPyConnection = context.conn
     names_df = conn.execute(
-        f'SELECT DISTINCT "{KTP_FIRST_NAME_COL}", "{KTP_LAST_NAME_COL}" FROM {SAMPLES_WITH_NAMES_VIEW}'
+        f"""
+        SELECT DISTINCT "{KTP_FIRST_NAME_COL}", "{KTP_LAST_NAME_COL}"
+        FROM {SAMPLES_WITH_NAMES_VIEW}
+        """
     ).df()
     names_df = names_df.dropna(subset=[KTP_FIRST_NAME_COL, KTP_LAST_NAME_COL])
     names_df = names_df[(names_df[KTP_FIRST_NAME_COL] != "") & (names_df[KTP_LAST_NAME_COL] != "")]

@@ -16,6 +16,7 @@ from ..helpers.vars import (
     KTP_ECONOMIES_COL,
     KTP_POPULATION_INDEX_COL,
     KTP_PRIORITY_COL,
+    KTP_PRIORITY_GROUP_COL,
 )
 
 
@@ -33,8 +34,16 @@ def run(context: PipelineContext) -> StepResult:
         filename_col=HCR_FILENAME_COL,
         economies_col=KTP_ECONOMIES_COL,
         priority_col=KTP_PRIORITY_COL,
+        priority_group_col=KTP_PRIORITY_GROUP_COL,
     )
-    econ_df = processed[[KTP_POPULATION_INDEX_COL, KTP_ECONOMIES_COL, KTP_PRIORITY_COL]]
+    econ_df = processed[
+        [
+            KTP_POPULATION_INDEX_COL,
+            KTP_ECONOMIES_COL,
+            KTP_PRIORITY_COL,
+            KTP_PRIORITY_GROUP_COL,
+        ]
+    ]
 
     register_frame(conn, "population_econ_frame", econ_df)
     conn.execute(
@@ -44,7 +53,12 @@ def run(context: PipelineContext) -> StepResult:
     conn.execute(
         f"""
         CREATE OR REPLACE VIEW {POPULATION_ECON_VIEW} AS
-        SELECT p.*, n.*, e."{KTP_ECONOMIES_COL}", e."{KTP_PRIORITY_COL}"
+        SELECT
+            p.*,
+            n.*,
+            e."{KTP_ECONOMIES_COL}",
+            e."{KTP_PRIORITY_COL}",
+            e."{KTP_PRIORITY_GROUP_COL}"
         FROM {POPULATION_TABLE} p
         JOIN {POPULATION_NAMES_TABLE} n
           ON p."{KTP_POPULATION_INDEX_COL}" = n."{KTP_POPULATION_INDEX_COL}"

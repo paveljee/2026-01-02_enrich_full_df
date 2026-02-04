@@ -9,7 +9,6 @@ from ..data_models import RegisteredResource
 from ..manual_docx.loader import normalize_docx_column_name
 from ..parse_docx import parse_docx_table
 
-
 DOCX_ROW_NUMBER_COL = "ktp.table_1_row_number"
 
 

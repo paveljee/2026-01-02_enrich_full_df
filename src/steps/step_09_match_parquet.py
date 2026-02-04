@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import duckdb
+
 from ..helpers.context import PipelineContext, StepResult
 from ..helpers.outerdict_io import append_innerdicts_from_rows_table
 from ..helpers.parquet_utils import normalize_parquet_column_name, parquet_columns, parquet_filename
@@ -11,7 +12,7 @@ from ..helpers.schema import (
     OUTERDICT_NAME_VIEW,
     PARQUET_AUTHOR_MATCH_TABLE,
     PARQUET_AUTHOR_OUTPUT_TABLE,
-    POPULATION_NAMES_TABLE,
+    POPULATION_ECON_TABLE,
     POPULATION_TABLE,
     SAMPLES_WITH_NAMES_VIEW,
     safe_identifier,
@@ -52,7 +53,7 @@ def run(context: PipelineContext) -> StepResult:
 
     def log(msg: str) -> None:
         if context.log:
-            context.log(msg, style="cyan")
+            context.log(msg, "cyan")
 
     conn: duckdb.DuckDBPyConnection = context.conn
     files = context.config.files_config
@@ -73,7 +74,9 @@ def run(context: PipelineContext) -> StepResult:
                 name_key,
                 "{KTP_FIRST_NAME_COL}" AS "{KTP_FIRST_NAME_COL}",
                 "{KTP_LAST_NAME_COL}" AS "{KTP_LAST_NAME_COL}",
-                lower(unaccent("{KTP_FIRST_NAME_COL}" || ' ' || "{KTP_LAST_NAME_COL}")) AS match_key_norm
+                lower(
+                    unaccent("{KTP_FIRST_NAME_COL}" || ' ' || "{KTP_LAST_NAME_COL}")
+                ) AS match_key_norm
             FROM {OUTERDICT_NAME_VIEW}
         ),
         parq AS (
@@ -115,7 +118,10 @@ def run(context: PipelineContext) -> StepResult:
         table_name=author_table,
         path=author_details_path,
         prefix="ssnad",
-        join_sql=f"JOIN {PARQUET_AUTHOR_MATCH_TABLE} m ON parq.{author_id_raw} = m.\"{author_id_col}\"",
+        join_sql=(
+            "JOIN "
+            f"{PARQUET_AUTHOR_MATCH_TABLE} m ON parq.{author_id_raw} = m.\"{author_id_col}\""
+        ),
     )
 
     log("Create author->paper table")
@@ -197,19 +203,29 @@ def run(context: PipelineContext) -> StepResult:
     conn.execute(
         f"""
         CREATE OR REPLACE VIEW ssn_parquet_output AS
-        SELECT v.*, s."{KTP_FILENAME_COL}" AS sample_filename,
-               s."{KTP_FRAGMENT_COL}" AS sample_fragment,
-               s."ktp.draw_number" AS sample_draw,
-               p.*, n.*
+        WITH sample_context AS (
+            SELECT
+                s."{KTP_FILENAME_COL}" AS sample_filename,
+                s."{KTP_FRAGMENT_COL}" AS sample_fragment,
+                s."ktp.draw_number" AS sample_draw,
+                s."{KTP_FIRST_NAME_COL}",
+                s."{KTP_LAST_NAME_COL}",
+                p.*,
+                e."ktp.economies" AS "ktp.economies",
+                e."ktp.priority" AS "ktp.priority",
+                e."ktp.priority_group" AS "ktp.priority_group"
+            FROM {SAMPLES_WITH_NAMES_VIEW} s
+            JOIN {POPULATION_TABLE} p
+              ON s."{KTP_FILENAME_COL}" = p."hcr.filename"
+             AND s."{KTP_FRAGMENT_COL}" = p."hcr.row_number"
+            LEFT JOIN {POPULATION_ECON_TABLE} e
+              ON p."ktp.population_index" = e."ktp.population_index"
+        )
+        SELECT v.*, sc.*
         FROM {PARQUET_AUTHOR_OUTPUT_TABLE} v
-        LEFT JOIN {SAMPLES_WITH_NAMES_VIEW} s
-          ON lower(v."{KTP_FIRST_NAME_COL}") = lower(s."{KTP_FIRST_NAME_COL}")
-         AND lower(v."{KTP_LAST_NAME_COL}") = lower(s."{KTP_LAST_NAME_COL}")
-        LEFT JOIN {POPULATION_NAMES_TABLE} n
-          ON lower(v."{KTP_FIRST_NAME_COL}") = lower(n."{KTP_FIRST_NAME_COL}")
-         AND lower(v."{KTP_LAST_NAME_COL}") = lower(n."{KTP_LAST_NAME_COL}")
-        LEFT JOIN {POPULATION_TABLE} p
-          ON p."ktp.population_index" = n."ktp.population_index"
+        LEFT JOIN sample_context sc
+          ON lower(v."{KTP_FIRST_NAME_COL}") = lower(sc."{KTP_FIRST_NAME_COL}")
+         AND lower(v."{KTP_LAST_NAME_COL}") = lower(sc."{KTP_LAST_NAME_COL}")
         """
     )
 

@@ -4,15 +4,6 @@ import duckdb
 import numpy as np
 import pandas as pd
 
-from ..helpers.vars import (
-    DRAW_LABEL,
-    HCR_FILENAME_COL,
-    HCR_ROW_COL,
-    KTP_FILENAME_COL,
-    KTP_FRAGMENT_COL,
-    KTP_POPULATION_INDEX_COL,
-    PILOT_NAME_CATEGORY_TRIPLES,
-)
 from ..helpers.context import PipelineContext, StepResult
 from ..helpers.duckdb_utils import register_frame
 from ..helpers.schema import (
@@ -23,16 +14,26 @@ from ..helpers.schema import (
     SAMPLES_VIEW,
     SAMPLES_WITH_NAMES_VIEW,
 )
+from ..helpers.vars import (
+    DRAW_LABEL,
+    HCR_FILENAME_COL,
+    HCR_ROW_COL,
+    KTP_FILENAME_COL,
+    KTP_FRAGMENT_COL,
+    KTP_POPULATION_INDEX_COL,
+    PILOT_NAME_CATEGORY_TRIPLES,
+)
 
 
 def _append_samples(conn: duckdb.DuckDBPyConnection, df: pd.DataFrame) -> None:
     if df.empty:
         return
     register_frame(conn, "samples_frame", df)
-    exists = conn.execute(
+    result = conn.execute(
         "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?",
         [SAMPLES_TABLE],
-    ).fetchone()[0]
+    ).fetchone()
+    exists = result[0] if result else 0
     if exists:
         conn.execute(
             f"""

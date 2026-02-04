@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-
 STEP_REGISTER_RESOURCES = "register_resources"
 STEP_LOAD_XLSX = "load_xlsx"
 STEP_INFER_NAMES = "infer_names"

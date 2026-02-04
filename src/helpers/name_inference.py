@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from pathlib import Path
 import warnings
+from pathlib import Path
 
 import pandas as pd
 
@@ -25,7 +25,17 @@ def infer_name_columns_from_xlsx(path: Path) -> tuple[str, str] | None:
         return None
 
     first = pick(["first_name", "firstname", "first name", "first"])
-    last = pick(["last_name", "lastname", "last name", "family_name", "familyname", "surname", "last"])
+    last = pick(
+        [
+            "last_name",
+            "lastname",
+            "last name",
+            "family_name",
+            "familyname",
+            "surname",
+            "last",
+        ]
+    )
     if not first or not last or first == last:
         return None
     return first, last

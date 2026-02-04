@@ -8,7 +8,11 @@ from ..config import PipelineConfig
 from ..data_models import OuterDict
 from .context import PipelineContext
 from .diagnostics import DiagnosticsReport
-from .outerdict_io import append_innerdicts_from_rows_table, append_innerdicts_from_table, load_outerdict_stub
+from .outerdict_io import (
+    append_innerdicts_from_rows_table,
+    append_innerdicts_from_table,
+    load_outerdict_stub,
+)
 from .pipeline_manager import PipelineManager
 from .procedures import DocxMatchProcedure, ParquetMatchProcedure, XlsxMatchProcedure
 from .resource_monitor import ResourceMonitor

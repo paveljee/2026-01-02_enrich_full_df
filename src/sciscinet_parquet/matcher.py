@@ -7,7 +7,6 @@ import pandas as pd
 
 from .._vars import KTP_FILENAME_COL
 from ..data_models import OuterDict, RegisteredResource
-from ..utils.duckdb import register_frame
 from ..utils.name_keys import NAME_KEY_COL
 from ..utils.records import append_records
 
@@ -33,11 +32,14 @@ def match_parquet(
         return
 
     # Pre-calculate match key in Python to save DB compute
-    # Strip diacritics via simple string methods if simple, but DB unaccent is better for robust logic.
+    # Strip diacritics via simple string methods if simple, but DB unaccent is
+    # better for robust logic.
     #
     # For reference:
     # unaccent(VARCHAR) → VARCHAR
-    # Provides a more comprehensive transliteration of a string. It first strips all diacritics and then converts other special characters and ligatures (e.g., Æ → AE, ø → o, ß → ss) to their basic Latin equivalents.
+    # Provides a more comprehensive transliteration of a string. It first strips
+    # all diacritics and then converts other special characters and ligatures
+    # (e.g., Æ → AE, ø → o, ß → ss) to their basic Latin equivalents.
     # https://github.com/moj-analytical-services/splink_udfs
 
     input_df = sample_df.copy()

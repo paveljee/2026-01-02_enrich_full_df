@@ -3,17 +3,14 @@ from __future__ import annotations
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from ..helpers.context import PipelineContext, StepResult
 from ..helpers.cards_helpers import build_cards, write_cards_zip
+from ..helpers.context import PipelineContext, StepResult
 from ..helpers.vars import (
     CSV_ROW_INDEX_COL,
     DOCX_FRAGMENT_COL,
     DOCX_ROW_INDEX_COL,
     DOCX_TABLE_INDEX_COL,
-    KTP_ECONOMIES_COL,
     KTP_FILENAME_COL,
-    KTP_PRIORITY_COL,
-    KTP_PRIORITY_GROUP_COL,
     KTP_SOURCE_KEY_COL,
 )
 
@@ -29,9 +26,6 @@ def run(context: PipelineContext) -> StepResult:
         DOCX_TABLE_INDEX_COL,
         DOCX_ROW_INDEX_COL,
         DOCX_FRAGMENT_COL,
-        KTP_ECONOMIES_COL,
-        KTP_PRIORITY_COL,
-        KTP_PRIORITY_GROUP_COL,
     }
 
     cards = build_cards(

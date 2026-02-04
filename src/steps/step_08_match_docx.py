@@ -4,7 +4,11 @@ import duckdb
 import pandas as pd
 
 from ..helpers.context import PipelineContext, StepResult
-from ..helpers.docx_loader import DOCX_ROW_NUMBER_COL, load_single_table_docx, normalize_docx_column_name
+from ..helpers.docx_loader import (
+    DOCX_ROW_NUMBER_COL,
+    load_single_table_docx,
+    normalize_docx_column_name,
+)
 from ..helpers.duckdb_utils import register_frame
 from ..helpers.jsonlines import dumps_jsonlines
 from ..helpers.outerdict_io import append_innerdicts_from_table
@@ -19,7 +23,13 @@ from ..helpers.schema import (
     POPULATION_TABLE,
     SAMPLES_WITH_NAMES_VIEW,
 )
-from ..helpers.vars import DRAW_LABEL, KTP_FIRST_NAME_COL, KTP_FRAGMENT_COL, KTP_LAST_NAME_COL, RIGHT_NAME_COL
+from ..helpers.vars import (
+    DRAW_LABEL,
+    KTP_FIRST_NAME_COL,
+    KTP_FRAGMENT_COL,
+    KTP_LAST_NAME_COL,
+    RIGHT_NAME_COL,
+)
 
 
 def run(context: PipelineContext) -> StepResult:
@@ -81,7 +91,7 @@ def run(context: PipelineContext) -> StepResult:
             nd."{KTP_FIRST_NAME_COL}",
             nd."{KTP_LAST_NAME_COL}",
             nd."{DRAW_LABEL}",
-            d."ktp.filename" AS "ktp.filename",
+            d.*,
             d."{DOCX_ROW_NUMBER_COL}" AS "{KTP_FRAGMENT_COL}",
             json_object(
                 lower(unaccent(nd."{KTP_FIRST_NAME_COL}" || ' ' || nd."{KTP_LAST_NAME_COL}")),
@@ -95,6 +105,8 @@ def run(context: PipelineContext) -> StepResult:
     )
 
     matched_df = conn.execute(f"SELECT * FROM {DOCX_MATCH_VIEW}").df()
+    if "docx_clean" in matched_df.columns:
+        matched_df = matched_df.drop(columns=["docx_clean"])
     matched_df = matched_df[matched_df["ktp.filename"].notna()]
 
     inner_rows = []

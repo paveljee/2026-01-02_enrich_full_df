@@ -35,7 +35,11 @@ def _dump_artifacts(context: PipelineContext, step_id: str, artifacts: dict) -> 
 
     parquet_names = artifacts.get("parquet_view_names")
     parquet_dfs = artifacts.get("parquet_match_dfs")
-    if isinstance(parquet_names, list) and isinstance(parquet_dfs, list) and len(parquet_names) == len(parquet_dfs):
+    if (
+        isinstance(parquet_names, list)
+        and isinstance(parquet_dfs, list)
+        and len(parquet_names) == len(parquet_dfs)
+    ):
         for view_name, df in zip(parquet_names, parquet_dfs):
             if isinstance(df, pd.DataFrame):
                 path = context.artifacts_dir / f"{step_id}_{view_name}.csv"

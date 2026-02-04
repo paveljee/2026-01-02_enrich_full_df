@@ -11,7 +11,11 @@ from ..helpers.resources import (
 
 
 def run(context: PipelineContext) -> StepResult:
-    xlsx_files = [p for p in discover_xlsx_files(context.config.xlsx_dir) if not p.name.startswith("~$")]
+    xlsx_files = [
+        p
+        for p in discover_xlsx_files(context.config.xlsx_dir)
+        if not p.name.startswith("~$")
+    ]
     if not xlsx_files:
         raise FileNotFoundError(f"No XLSX files found in {context.config.xlsx_dir}")
 

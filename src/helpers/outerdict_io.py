@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from typing import Iterable
+from collections.abc import Mapping
 
 import duckdb
 
 from .._vars import KTP_FILENAME_COL, KTP_FRAGMENT_COL
-from ..data_models import InnerDict, NameKey, OuterDict
+from ..data_models import InnerDict, MatchingProcedure, NameKey, OuterDict, RegisteredResource
 from ..utils.records import append_records
 from .jsonlines import loads_jsonlines
 
@@ -25,8 +25,8 @@ def append_innerdicts_from_table(
     outer_dict: OuterDict,
     *,
     table_name: str,
-    procedure: object,
-    resources: dict[str, object],
+    procedure: MatchingProcedure,
+    resources: Mapping[str, RegisteredResource],
 ) -> None:
     rows = conn.execute(f"SELECT name_key, innerdicts FROM {table_name}").fetchall()
     for name_key, payload in rows:
@@ -55,7 +55,7 @@ def append_innerdicts_from_rows_table(
     outer_dict: OuterDict,
     *,
     table_name: str,
-    procedure: object,
+    procedure: MatchingProcedure,
 ) -> None:
     rel = conn.execute(f"SELECT * FROM {table_name}")
     cols = [desc[0] for desc in rel.description]
