@@ -6,8 +6,8 @@ from typing import Any, Callable
 
 import duckdb
 
-from ..config import PipelineConfig
-from ..data_models import OuterDict
+from .config import PipelineConfig
+from .data_models import OuterDict
 from .diagnostics import DiagnosticsReport
 from .pipeline_manager import PipelineManager
 from .resources import PipelineResources

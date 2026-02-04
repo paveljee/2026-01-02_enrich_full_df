@@ -4,27 +4,11 @@ from pathlib import Path
 
 import pandas as pd
 
-from src._vars import KTP_FIRST_NAME_COL, KTP_LAST_NAME_COL, RIGHT_NAME_COL
-from src.data_models import FragmentType, NameKey, ResourceGroup
-from src.manual_docx.loader import load_docx_tables
-from src.utils.files import find_files_by_extension
-from src.utils.name_keys import build_outer_dict_from_names
-from src.utils.resources import register_resource
-
-
-def test_build_outer_dict_from_names():
-    names = pd.DataFrame(
-        [
-            {KTP_FIRST_NAME_COL: "Ada", KTP_LAST_NAME_COL: "Lovelace"},
-            {KTP_FIRST_NAME_COL: "Grace", KTP_LAST_NAME_COL: "Hopper"},
-        ]
-    )
-    outer_dict = build_outer_dict_from_names(names)
-
-    assert len(outer_dict.data) == 2
-    keys = set(outer_dict.data)
-    assert NameKey(first_name="Ada", last_name="Lovelace").to_json_key() in keys
-    assert NameKey(first_name="Grace", last_name="Hopper").to_json_key() in keys
+from src.helpers.data_models import FragmentType, ResourceGroup
+from src.helpers.docx_loader import load_docx_tables
+from src.helpers.files import find_files_by_extension
+from src.helpers.resources import register_resource
+from src.helpers.vars import RIGHT_NAME_COL
 
 
 def test_find_files_by_extension(tmp_path: Path) -> None:
@@ -52,7 +36,7 @@ def test_load_docx_tables_uses_parser(tmp_path: Path, monkeypatch) -> None:
     def fake_parse_docx_table(_: Path) -> list[pd.DataFrame]:
         return [pd.DataFrame({RIGHT_NAME_COL: ["Jane Doe"], "extra": ["value"]})]
 
-    monkeypatch.setattr("src.manual_docx.loader.parse_docx_table", fake_parse_docx_table)
+    monkeypatch.setattr("src.helpers.docx_loader.parse_docx_table", fake_parse_docx_table)
 
     df = load_docx_tables({resource.name: resource})
     assert RIGHT_NAME_COL in df.columns or "ktp.table_1_researcher_author" in df.columns

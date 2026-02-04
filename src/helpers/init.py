@@ -4,9 +4,9 @@ import argparse
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..config import PipelineConfig
-from ..data_models import OuterDict
+from .config import PipelineConfig
 from .context import PipelineContext
+from .data_models import OuterDict
 from .diagnostics import DiagnosticsReport
 from .outerdict_io import (
     append_innerdicts_from_rows_table,

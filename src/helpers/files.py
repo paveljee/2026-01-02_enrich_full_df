@@ -8,3 +8,6 @@ def find_files_by_extension(directory: Path, extension: str, recursive: bool = F
     if recursive:
         return list(directory.rglob(pattern))
     return list(directory.glob(pattern))
+
+
+__all__ = ["find_files_by_extension"]

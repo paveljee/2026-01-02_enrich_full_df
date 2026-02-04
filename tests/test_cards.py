@@ -6,14 +6,14 @@ from zipfile import ZipFile
 
 import pytest
 
-from src._vars import (
+from src.helpers.cards import build_cards, write_cards_zip
+from src.helpers.data_models import InnerDict, NameKey, OuterDict
+from src.helpers.vars import (
     DRAW_LABEL,
     KTP_FILENAME_COL,
     KTP_FIRST_NAME_ORIG_COLNAME_COL,
     KTP_LAST_NAME_ORIG_COLNAME_COL,
 )
-from src.cards import build_cards, write_cards_zip
-from src.data_models import InnerDict, NameKey, OuterDict
 
 
 class DummyProcedure:

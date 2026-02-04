@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from src.data_models import (
+from src.helpers.data_models import (
     FragmentType,
     RegisteredResource,
     ResourceGroup,

@@ -3,12 +3,16 @@ from __future__ import annotations
 import duckdb
 import pandas as pd
 
-from ..utils.duckdb import register_frame as _register_frame
+
+def register_frame(conn: duckdb.DuckDBPyConnection, name: str, df: pd.DataFrame) -> None:
+    conn.register(name, df)
+    conn.execute(f"CREATE OR REPLACE TABLE {name} AS SELECT * FROM {name}")
+    # Avoid name collisions between the registered view and the materialized table.
+    try:
+        conn.unregister(name)
+    except Exception:
+        # Older DuckDB versions or already-unregistered names should be ignored.
+        pass
 
 
-def register_frame(
-    conn: duckdb.DuckDBPyConnection,
-    table_name: str,
-    df: pd.DataFrame,
-) -> None:
-    _register_frame(conn, table_name, df)
+__all__ = ["register_frame"]

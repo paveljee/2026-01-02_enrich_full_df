@@ -9,13 +9,13 @@ from zipfile import ZipFile
 
 import pandas as pd
 
-from ._vars import (
+from .data_models import OuterDict
+from .vars import (
     DRAW_LABEL,
     KTP_FILENAME_COL,
     KTP_FIRST_NAME_ORIG_COLNAME_COL,
     KTP_LAST_NAME_ORIG_COLNAME_COL,
 )
-from .data_models import OuterDict
 
 INTRODUCTION = """## Introduction
 **Draw number** is the sequential order in which rows were sampled from HCR tables.

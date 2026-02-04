@@ -198,6 +198,28 @@ Review `src/repl.py` and all imported modules to build a detailed, end-to-end me
   - For each row, choose the correct first/last name columns based on `hcr.filename`.
   - Write derived `ktp.first_name`/`ktp.last_name` to samples.
   - Generate JSON `name_key` per row and persist back into `samples` table.
+
+---
+
+## Implementation log (2026-02-04)
+- Removed unused modules and tests that were no longer referenced by `src/repl.py` and the step-based pipeline. This trimmed legacy `hcr_xlsx/*` matcher/indexer/sampler, `manual_docx/*` matcher/indexer/sampler, and `sciscinet_parquet/*` modules plus their unused tests so the repo matches the current step-driven architecture.
+- Reimplemented CSV sample validation as an end-to-end pipeline test using the current steps (`step_03_infer_names`, `step_04_add_economy_priority`, `step_05_sampling`) and the real XLSX + ground-truth CSVs. The test compares `(hcr.filename, hcr.row_number, ktp.draw_number)` via `Counter` to ensure exact agreement.
+- Fixed sampling order determinism by preserving per-draw sample ordering. Each draw now stores `sample_id` with sampled indices and orders the join by `sample_id` before assigning draw labels. This restores exact draw-number alignment with the ground-truth CSVs.
+- Test run summary:
+- Command: `pixi run pre-commit`
+- Ruff: passed
+- MyPy: passed
+- Pytest: passed (38 tests, including `tests/test_csv_sample_validation.py::test_csv_rows_match_samples`)
+- Consolidated all non-REPL modules into `src/helpers` and removed the legacy root/layout:
+- Moved `config.py`, `_vars.py`, `cards.py`, `parse_docx.py`, and `data_models/` into `src/helpers/`.
+- Folded `hcr_xlsx` loader/preprocessor into `src/helpers/hcr.py` and folded DOCX parsing/loading into `src/helpers/docx_loader.py` + `src/helpers/docx_parse.py`.
+- Removed `src/utils`, `src/manual_docx`, `src/hcr_xlsx`, and empty `src/sciscinet_parquet` directories; updated all imports/tests accordingly.
+- Added `src/helpers/files.py` and inlined register-resource helpers into `src/helpers/resources.py`.
+- Test run summary (post-refactor):
+- Command: `pixi run pre-commit`
+- Ruff: passed
+- MyPy: passed
+- Pytest: passed (38 tests)
   - Build `OuterDict` from unique name pairs.
 - **Output:** Updated `samples` table (with name keys); initialized `OuterDict`.
 

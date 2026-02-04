@@ -1,1 +1,0 @@
-"""Manual DOCX pipeline modules."""

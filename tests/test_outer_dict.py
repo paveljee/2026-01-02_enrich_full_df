@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.data_models import InnerDict, NameKey, OuterDict
+from src.helpers.data_models import InnerDict, NameKey, OuterDict
 
 
 class DummyProcedure:

@@ -77,17 +77,25 @@ def run(context: PipelineContext) -> StepResult:
     draw_number = 1
     for draw_size in context.config.sample_draw_sizes:
         indices = rng.choice(index_pool, size=draw_size, replace=True)
-        idx_df = pd.DataFrame({KTP_POPULATION_INDEX_COL: indices})
+        idx_df = pd.DataFrame(
+            {
+                "sample_id": np.arange(draw_size),
+                KTP_POPULATION_INDEX_COL: indices,
+            }
+        )
         register_frame(conn, "sample_indices", idx_df)
         sample_df = conn.execute(
             f"""
-            SELECT p."{HCR_FILENAME_COL}" AS "{KTP_FILENAME_COL}",
+            SELECT s.sample_id,
+                   p."{HCR_FILENAME_COL}" AS "{KTP_FILENAME_COL}",
                    p."{HCR_ROW_COL}" AS "{KTP_FRAGMENT_COL}"
             FROM {POPULATION_TABLE} p
             JOIN sample_indices s
               ON p."{KTP_POPULATION_INDEX_COL}" = s."{KTP_POPULATION_INDEX_COL}"
+            ORDER BY s.sample_id
             """
         ).df()
+        sample_df = sample_df.sort_values("sample_id").drop(columns="sample_id")
         sample_df[DRAW_LABEL] = np.arange(draw_number, draw_number + draw_size)
         _append_samples(conn, sample_df[[KTP_FILENAME_COL, KTP_FRAGMENT_COL, DRAW_LABEL]])
         draw_number += draw_size

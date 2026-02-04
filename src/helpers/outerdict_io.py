@@ -1,13 +1,18 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 
 import duckdb
 
-from .._vars import KTP_FILENAME_COL, KTP_FRAGMENT_COL
-from ..data_models import InnerDict, MatchingProcedure, NameKey, OuterDict, RegisteredResource
-from ..utils.records import append_records
+from .data_models import (
+    InnerDict,
+    MatchingProcedure,
+    NameKey,
+    OuterDict,
+    RegisteredResource,
+)
 from .jsonlines import loads_jsonlines
+from .vars import KTP_FILENAME_COL, KTP_FRAGMENT_COL
 
 
 def load_outerdict_stub(
@@ -18,6 +23,23 @@ def load_outerdict_stub(
     rows = conn.execute(f"SELECT name_key FROM {table_name}").fetchall()
     name_keys = [NameKey.from_json_key(row[0]) for row in rows]
     return OuterDict.from_name_keys(name_keys)
+
+
+def _append_records(
+    outer_dict: OuterDict,
+    records: Iterable[Mapping[str, object]],
+    procedure: MatchingProcedure,
+    resources: Mapping[str, RegisteredResource],
+    *,
+    name_key_field: str,
+    fragment_field: str,
+) -> None:
+    for record in records:
+        name_key = record[name_key_field]
+        payload = dict(record)
+        payload.pop(name_key_field, None)
+        inner = InnerDict.from_mapping(payload, procedure)
+        outer_dict.add_inner_by_key(str(name_key), inner)
 
 
 def append_innerdicts_from_table(
@@ -36,7 +58,7 @@ def append_innerdicts_from_table(
                 raise ValueError(f"Innerdict missing required column '{KTP_FILENAME_COL}'")
             if KTP_FRAGMENT_COL not in record:
                 raise ValueError(f"Innerdict missing required column '{KTP_FRAGMENT_COL}'")
-            append_records(
+            _append_records(
                 outer_dict,
                 [record],
                 procedure,

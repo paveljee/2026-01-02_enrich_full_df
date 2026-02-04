@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from ..hcr_xlsx.loader import normalize_hcr_header
+from .hcr import normalize_hcr_header
 
 
 def infer_name_columns_from_xlsx(path: Path) -> tuple[str, str] | None:

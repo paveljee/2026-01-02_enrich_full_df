@@ -6,11 +6,10 @@ from pathlib import Path
 import duckdb
 import pandas as pd
 
-from src.data_models import FragmentType, NameKey, OuterDict, ResourceGroup
-from src.utils.duckdb import register_frame
-from src.utils.files import find_files_by_extension
-from src.utils.name_keys import build_name_key_frame
-from src.utils.resources import register_resource, register_resources
+from src.helpers.data_models import FragmentType, ResourceGroup
+from src.helpers.duckdb_utils import register_frame
+from src.helpers.files import find_files_by_extension
+from src.helpers.resources import register_resource, register_resources
 
 
 def test_register_frame_replaces_schema() -> None:
@@ -73,23 +72,3 @@ def test_find_files_by_extension_uppercase(tmp_path: Path) -> None:
 
     matches = find_files_by_extension(tmp_path, "TXT")
     assert matches == [file_path]
-
-
-def test_build_name_key_frame_order() -> None:
-    outer = OuterDict.from_name_keys(
-        [
-            NameKey(first_name="Ada", last_name="Lovelace"),
-            NameKey(first_name="Grace", last_name="Hopper"),
-        ]
-    )
-    df = build_name_key_frame(outer)
-    assert df.iloc[0].tolist() == [
-        NameKey(first_name="Ada", last_name="Lovelace").to_json_key(),
-        "Ada",
-        "Lovelace",
-    ]
-    assert df.iloc[1].tolist() == [
-        NameKey(first_name="Grace", last_name="Hopper").to_json_key(),
-        "Grace",
-        "Hopper",
-    ]
