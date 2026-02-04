@@ -276,6 +276,7 @@ class SourceKey(BaseModel):
         
         return cls(resource=resource, fragment=fragment_id)  # ok to init fragment with a str
 
+
 # Usage examples:
 if __name__ == "__main__":
     # Create a registered resource

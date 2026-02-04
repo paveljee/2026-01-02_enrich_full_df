@@ -8,6 +8,7 @@ from lxml import etree
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 NS = {"w": W}
 
+
 def _fmt_flags(r):
     rPr = r.find("w:rPr", namespaces=NS)
     if rPr is None:
@@ -25,6 +26,7 @@ def _fmt_flags(r):
 
     return bold, italic, sub, sup
 
+
 def _wrap(txt, bold, italic, sub, sup):
     if txt == "":
         return txt
@@ -37,6 +39,7 @@ def _wrap(txt, bold, italic, sub, sup):
     if sup:
         txt = f"^{txt}^"
     return txt
+
 
 def _run_to_text(r):
     bold, italic, sub, sup = _fmt_flags(r)
@@ -52,6 +55,7 @@ def _run_to_text(r):
         # ignore other run children (drawing, fldChar, etc.) but they don't contain visible text
     return "".join(out)
 
+
 def _run_to_text_plain(r):
     out = []
     for child in r:
@@ -63,6 +67,7 @@ def _run_to_text_plain(r):
         elif tag in ("br", "cr"):
             out.append("\n")
     return "".join(out)
+
 
 def cell_text(tc, *, plain=False):
     out = []
@@ -81,6 +86,7 @@ def cell_text(tc, *, plain=False):
                     out.append(_run_to_text_plain(r) if plain else _run_to_text(r))
             # other paragraph children are usually bookmarks/proofErr/etc.
     return "".join(out)
+
 
 def parse_docx_table(docx_path: Path) -> list[pd.DataFrame]:
     with ZipFile(docx_path) as z:

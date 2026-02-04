@@ -84,7 +84,7 @@ def build_cards(
                 if col in excluded_cols or pd.isna(val):
                     continue
                 if "\n" in str(val):
-                    card += f"**{col}**:\n\n{str(val).replace('\n','\n\n')}\n\n"
+                    card += f"**{col}**:\n\n{str(val).replace('\n', '\n\n')}\n\n"
                 else:
                     card += f"**{col}**: {str(val)}\n\n"
         cards[docx_filename] = intro + card
