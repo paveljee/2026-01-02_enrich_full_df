@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import warnings
 from pathlib import Path
+from typing import Mapping
 
 import duckdb
 import pandas as pd
@@ -20,10 +21,14 @@ from ..helpers.vars import (
     ENGLISH_HICS,
     EU_COUNTRIES,
     GREATER_CHINA,
+    HCR_XLSX_AFFILIATIONS_COLS,
+    HCR_XLSX_NAME_COLS,
     KTP_COUNTRY_ALIASES,
     KTP_ECONOMIES_COL,
-    KTP_ECONOMIES_GROUP_COL,
+    KTP_ECONOMIES_INCOME_GROUP_COL,
     KTP_ECONOMY_MATCH_COL,
+    KTP_HCR_PRIMARY_AFFILIATIONS_COL,
+    KTP_HCR_SECONDARY_AFFILIATIONS_COL,
     KTP_POPULATION_INDEX_COL,
     KTP_PRIORITY_COL,
     KTP_PRIORITY_GROUP_COL,
@@ -93,10 +98,54 @@ def _non_english_non_eu_hics(economies: list[str]) -> list[str]:
     ]
 
 
-def _affiliation_expression(columns: list[str]) -> str:
-    parts = [f'COALESCE(CAST(p."{col}" AS VARCHAR), \'\')' for col in columns]
+def _affiliation_expression(columns: list[str], table_alias: str = "p") -> str:
+    parts = [f'COALESCE(CAST({table_alias}."{col}" AS VARCHAR), \'\')' for col in columns]
     joined = " || ' ' || ".join(parts) if parts else "''"
     return f"TRIM({joined})"
+
+
+def _infer_affiliation_columns(columns: list[str], keyword: str) -> list[str]:
+    return [
+        col
+        for col in columns
+        if keyword in col.lower() and "affiliation" in col.lower()
+    ]
+
+
+def _normalize_affiliation_map(
+    raw_map: Mapping[str, list[str] | tuple[list[str], list[str]] | str],
+    *,
+    index: int,
+) -> dict[str, list[str]]:
+    normalized: dict[str, list[str]] = {}
+    for filename, cols in raw_map.items():
+        if isinstance(cols, tuple):
+            selected = cols[index] if len(cols) > index else []
+        elif isinstance(cols, list):
+            selected = cols
+        elif isinstance(cols, str):
+            selected = [cols]
+        else:
+            selected = []
+        normalized[filename] = selected
+    return normalized
+
+
+def _affiliation_case(
+    *,
+    filename_col: str,
+    default_cols: list[str],
+    filename_map: dict[str, list[str]],
+) -> str:
+    if not filename_map:
+        return _affiliation_expression(default_cols)
+    cases = []
+    for filename, cols in filename_map.items():
+        expr = _affiliation_expression(cols)
+        safe_filename = filename.replace("'", "''")
+        cases.append(f"WHEN {filename_col} = '{safe_filename}' THEN {expr}")
+    default_expr = _affiliation_expression(default_cols)
+    return f"(CASE {' '.join(cases)} ELSE {default_expr} END)"
 
 
 def run(context: PipelineContext) -> StepResult:
@@ -115,7 +164,21 @@ def run(context: PipelineContext) -> StepResult:
         for row in conn.execute(f"DESCRIBE {POPULATION_TABLE}").fetchall()
         if "affiliation" in row[0].lower()
     ]
-    aff_expr = _affiliation_expression(aff_cols)
+    primary_default = _infer_affiliation_columns(aff_cols, "primary")
+    secondary_default = _infer_affiliation_columns(aff_cols, "secondary")
+    primary_map = _normalize_affiliation_map(HCR_XLSX_AFFILIATIONS_COLS, index=0)
+    secondary_map = _normalize_affiliation_map(HCR_XLSX_AFFILIATIONS_COLS, index=1)
+    primary_expr = _affiliation_case(
+        filename_col='p."hcr.filename"',
+        default_cols=primary_default,
+        filename_map=primary_map,
+    )
+    secondary_expr = _affiliation_case(
+        filename_col='p."hcr.filename"',
+        default_cols=secondary_default,
+        filename_map=secondary_map,
+    )
+    aff_expr = "TRIM(" + " || ' ' || ".join([primary_expr, secondary_expr]) + ")"
     aff_text_col = "a.aff_text"
 
     high_income = sorted(
@@ -143,7 +206,9 @@ def run(context: PipelineContext) -> StepResult:
         WITH aff AS (
             SELECT
                 p."{KTP_POPULATION_INDEX_COL}" AS "{KTP_POPULATION_INDEX_COL}",
-                {aff_expr} AS aff_text
+                {aff_expr} AS aff_text,
+                {primary_expr} AS "{KTP_HCR_PRIMARY_AFFILIATIONS_COL}",
+                {secondary_expr} AS "{KTP_HCR_SECONDARY_AFFILIATIONS_COL}"
             FROM {POPULATION_TABLE} p
         ),
         matches AS (
@@ -158,12 +223,24 @@ def run(context: PipelineContext) -> StepResult:
         )
         SELECT
             a."{KTP_POPULATION_INDEX_COL}",
-            COALESCE(string_agg(DISTINCT m.income_label, '; '), '') AS "{KTP_ECONOMIES_COL}",
-            COALESCE(string_agg(DISTINCT m.country, '; '), '') AS "{KTP_ECONOMIES_GROUP_COL}",
+            COALESCE(to_json(list(DISTINCT m.country)), '[]') AS "{KTP_ECONOMIES_COL}",
+            CASE
+                WHEN bool_or(m.income_label = '{OGHIST_INCOME_LABELS["H"]}')
+                    THEN '{OGHIST_INCOME_LABELS["H"]}'
+                WHEN bool_or(m.income_label = '{OGHIST_INCOME_LABELS["UM"]}')
+                    THEN '{OGHIST_INCOME_LABELS["UM"]}'
+                WHEN bool_or(m.income_label = '{OGHIST_INCOME_LABELS["LM"]}')
+                    THEN '{OGHIST_INCOME_LABELS["LM"]}'
+                WHEN bool_or(m.income_label = '{OGHIST_INCOME_LABELS["L"]}')
+                    THEN '{OGHIST_INCOME_LABELS["L"]}'
+                ELSE NULL
+            END AS "{KTP_ECONOMIES_INCOME_GROUP_COL}",
             CASE
                 WHEN count(m.country) = 0 THEN NULL
                 ELSE json_object(a.aff_text, list(DISTINCT m.country))
             END AS "{KTP_ECONOMY_MATCH_COL}",
+            a."{KTP_HCR_PRIMARY_AFFILIATIONS_COL}",
+            a."{KTP_HCR_SECONDARY_AFFILIATIONS_COL}",
             CASE
                 WHEN NOT ({any_priority_clause}) THEN 1
                 WHEN {china_clause} THEN 2
@@ -181,7 +258,11 @@ def run(context: PipelineContext) -> StepResult:
         FROM aff a
         LEFT JOIN matches m
           ON a."{KTP_POPULATION_INDEX_COL}" = m."{KTP_POPULATION_INDEX_COL}"
-        GROUP BY a."{KTP_POPULATION_INDEX_COL}", a.aff_text
+        GROUP BY
+            a."{KTP_POPULATION_INDEX_COL}",
+            a.aff_text,
+            a."{KTP_HCR_PRIMARY_AFFILIATIONS_COL}",
+            a."{KTP_HCR_SECONDARY_AFFILIATIONS_COL}"
         """
     )
     conn.execute(
@@ -191,8 +272,10 @@ def run(context: PipelineContext) -> StepResult:
             p.*,
             n.*,
             e."{KTP_ECONOMIES_COL}",
-            e."{KTP_ECONOMIES_GROUP_COL}",
+            e."{KTP_ECONOMIES_INCOME_GROUP_COL}",
             e."{KTP_ECONOMY_MATCH_COL}",
+            e."{KTP_HCR_PRIMARY_AFFILIATIONS_COL}",
+            e."{KTP_HCR_SECONDARY_AFFILIATIONS_COL}",
             e."{KTP_PRIORITY_COL}",
             e."{KTP_PRIORITY_GROUP_COL}"
         FROM {POPULATION_TABLE} p
@@ -206,11 +289,61 @@ def run(context: PipelineContext) -> StepResult:
     view_columns = [
         row[0]
         for row in conn.execute(f"DESCRIBE {POPULATION_ECON_VIEW}").fetchall()
-        if not row[0].lower().startswith("hcr.")
-        and "unnamed" not in row[0].lower()
-        and row[0] not in {KTP_POPULATION_INDEX_COL, f"{KTP_POPULATION_INDEX_COL}_1"}
+        if "unnamed" not in row[0].lower()
+        and row[0] != f"{KTP_POPULATION_INDEX_COL}_1"
     ]
-    select_cols = ", ".join([f'"{col}"' for col in view_columns])
+    hcr_cols = [col for col in view_columns if col.startswith("hcr.")]
+    explicit_name_cols: set[str] = set()
+    for _, (first_col, last_col) in HCR_XLSX_NAME_COLS.items():
+        explicit_name_cols.update({first_col, last_col})
+    if not explicit_name_cols:
+        inferred_name_cols = {
+            col
+            for col in hcr_cols
+            if ("first" in col.lower() and "name" in col.lower())
+            or ("last" in col.lower() and "name" in col.lower())
+            or "firstname" in col.lower()
+            or "lastname" in col.lower()
+            or "familyname" in col.lower()
+        }
+        explicit_name_cols = inferred_name_cols
+    hcr_cols = [
+        col
+        for col in hcr_cols
+        if col not in explicit_name_cols and "unnamed" not in col.lower()
+    ]
+    ordered_hcr = []
+    for col in ("hcr.filename", "hcr.row_number", "hcr.category"):
+        if col in hcr_cols:
+            ordered_hcr.append(col)
+    ordered_hcr += [col for col in hcr_cols if col not in ordered_hcr]
+    ordered_cols = (
+        [
+            KTP_POPULATION_INDEX_COL,
+            "hcr.filename",
+            "hcr.row_number",
+            "ktp.first_name",
+            "ktp.last_name",
+            "hcr.category",
+        ]
+        + [col for col in ordered_hcr if col not in {"hcr.filename", "hcr.row_number", "hcr.category"}]
+        + [
+            KTP_HCR_PRIMARY_AFFILIATIONS_COL,
+            KTP_HCR_SECONDARY_AFFILIATIONS_COL,
+            KTP_ECONOMIES_COL,
+            KTP_ECONOMIES_INCOME_GROUP_COL,
+            KTP_ECONOMY_MATCH_COL,
+            KTP_PRIORITY_COL,
+            KTP_PRIORITY_GROUP_COL,
+        ]
+    )
+    extra_cols = [
+        col
+        for col in view_columns
+        if not col.startswith("hcr.") and col not in ordered_cols
+    ]
+    ordered_cols += extra_cols
+    select_cols = ", ".join([f'"{col}"' for col in ordered_cols if col in view_columns])
     merged_df = conn.execute(f"SELECT {select_cols} FROM {POPULATION_ECON_VIEW}").df()
 
     return StepResult(

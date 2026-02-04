@@ -9,10 +9,12 @@ KTP_LAST_NAME_ORIG_COLNAME_COL: Final = "ktp.last_name_original_column_name"
 KTP_FILENAME_COL: Final = "ktp.filename"
 KTP_SOURCE_KEY_COL: Final = "ktp.source_key"
 KTP_ECONOMIES_COL: Final = "ktp.economies"
-KTP_ECONOMIES_GROUP_COL: Final = "ktp.economies_group"
+KTP_ECONOMIES_INCOME_GROUP_COL: Final = "ktp.economies_income_group"
 KTP_ECONOMY_MATCH_COL: Final = "ktp.economy_match"
 KTP_PRIORITY_COL: Final = "ktp.priority"
 KTP_PRIORITY_GROUP_COL: Final = "ktp.priority_group"
+KTP_HCR_PRIMARY_AFFILIATIONS_COL: Final = "ktp.hcr_primary_affiliations"
+KTP_HCR_SECONDARY_AFFILIATIONS_COL: Final = "ktp.hcr_secondary_affiliations"
 DRAW_LABEL: Final = "ktp.draw_number"
 RIGHT_NAME_COL: Final = "Researcher/author"
 KTP_FRAGMENT_COL: Final = "ktp.fragment"
@@ -156,6 +158,8 @@ KTP_COUNTRY_ALIASES = {
 
 # Filled later by user: mapping of XLSX filename -> (first_name_col, last_name_col)
 HCR_XLSX_NAME_COLS: Final[dict[str, tuple[str, str]]] = {}
+# Filled later by user: mapping of XLSX filename -> (primary, secondary) affiliation cols
+HCR_XLSX_AFFILIATIONS_COLS: Final[dict[str, tuple[list[str], list[str]]]] = {}
 
 COUNTRY_PREFIX: Final = ", "
 ENGLISH_HICS: Final[list[str]] = [
@@ -311,14 +315,17 @@ __all__ = [
     "DRAW_LABEL",
     "HCR_FILENAME_COL",
     "HCR_ROW_COL",
+    "HCR_XLSX_AFFILIATIONS_COLS",
     "HCR_XLSX_NAME_COLS",
     "KTP_ECONOMIES_COL",
-    "KTP_ECONOMIES_GROUP_COL",
+    "KTP_ECONOMIES_INCOME_GROUP_COL",
     "KTP_ECONOMY_MATCH_COL",
     "KTP_FILENAME_COL",
     "KTP_FIRST_NAME_COL",
     "KTP_FRAGMENT_COL",
     "KTP_LAST_NAME_COL",
+    "KTP_HCR_PRIMARY_AFFILIATIONS_COL",
+    "KTP_HCR_SECONDARY_AFFILIATIONS_COL",
     "KTP_POPULATION_INDEX_COL",
     "KTP_PRIORITY_COL",
     "KTP_PRIORITY_GROUP_COL",
