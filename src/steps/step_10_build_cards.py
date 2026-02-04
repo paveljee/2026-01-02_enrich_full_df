@@ -39,7 +39,7 @@ def run(context: PipelineContext) -> StepResult:
         context.config.output_dir,
         f"{context.config.xlsx_dir.name}_combined_cards.zip",
         output_format=context.config.output_format,
-        reference_docx=context.config.reference_docx,
+        reference_docx=context.config.pandoc_reference_docx,
     )
 
     return StepResult(

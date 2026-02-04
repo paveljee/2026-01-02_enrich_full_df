@@ -27,7 +27,6 @@ DOCX_OUTPUT_VIEW = "docx_output"
 PARQUET_AUTHOR_MATCH_TABLE = "ssn_author_matches"
 PARQUET_INNERDICT_TABLE = "ssn_innerdicts"
 PARQUET_AUTHOR_OUTPUT_TABLE = "ssn_author_output"
-PARQUET_AUTHORS_OUTPUT_TABLE = "ssn_authors_output"
 
 
 def safe_identifier(value: str) -> str:

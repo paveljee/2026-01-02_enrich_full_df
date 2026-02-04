@@ -45,7 +45,7 @@ class PipelineConfig:
     state_file: Path = Path("data/pipeline_state.json")
     output_dir: Path = Path("data/output")
     output_format: str = "txt"
-    reference_docx: Path = Path("resources/pandoc-custom-reference.docx")
+    pandoc_reference_docx: Path = Path("resources/pandoc-custom-reference.docx")
     xlsx_dir: Path = Path("data/xlsx")
     docx_dir: Path = Path("data/manual_extractions")
     world_bank_xlsx: Path = Path("data/OGHIST_2025_07_01.xlsx")
@@ -67,7 +67,10 @@ class PipelineConfig:
         config.db_file = Path(config.db_file)
         config.state_file = Path(config.state_file)
         config.output_dir = Path(config.output_dir)
-        config.reference_docx = Path(config.reference_docx)
+        if hasattr(config, "reference_docx"):
+            config.pandoc_reference_docx = Path(getattr(config, "reference_docx"))
+            delattr(config, "reference_docx")
+        config.pandoc_reference_docx = Path(config.pandoc_reference_docx)
         config.xlsx_dir = Path(config.xlsx_dir)
         config.docx_dir = Path(config.docx_dir)
         config.world_bank_xlsx = Path(config.world_bank_xlsx)

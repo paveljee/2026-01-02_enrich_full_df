@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import duckdb
@@ -12,7 +13,6 @@ from ..helpers.schema import (
     OUTERDICT_NAME_VIEW,
     PARQUET_AUTHOR_MATCH_TABLE,
     PARQUET_AUTHOR_OUTPUT_TABLE,
-    PARQUET_AUTHORS_OUTPUT_TABLE,
     POPULATION_ECON_TABLE,
     POPULATION_TABLE,
     SAMPLES_WITH_NAMES_VIEW,
@@ -231,6 +231,15 @@ def run(context: PipelineContext) -> StepResult:
         """
     )
 
+    parquet_filenames = [
+        parquet_filename(author_details_path),
+        parquet_filename(authors_path),
+        parquet_filename(authors_paper_path),
+        parquet_filename(hit_papers0_path),
+        parquet_filename(hit_papers1_path),
+    ]
+    parquet_filename_payload = json.dumps(parquet_filenames)
+
     log("Create author-level output table")
     conn.execute(
         f"""
@@ -239,9 +248,10 @@ def run(context: PipelineContext) -> StepResult:
             m.name_key AS name_key,
             m."{KTP_FIRST_NAME_COL}" AS "{KTP_FIRST_NAME_COL}",
             m."{KTP_LAST_NAME_COL}" AS "{KTP_LAST_NAME_COL}",
-            a."{SSN_FILENAME_COL}" AS "{KTP_FILENAME_COL}",
             a."{author_id_col}" AS "{KTP_FRAGMENT_COL}",
+            '{parquet_filename_payload}' AS "{KTP_FILENAME_COL}",
             a.*,
+            au.* EXCLUDE ("{authors_author_id_col}"),
             CAST(agg."{SSN_PAPERIDS_LEVEL0_COL}" AS VARCHAR) AS "{SSN_PAPERIDS_LEVEL0_COL}",
             CAST(agg."{SSN_PAPERIDS_LEVEL1_COL}" AS VARCHAR) AS "{SSN_PAPERIDS_LEVEL1_COL}",
             CAST(agg."{SSN_FIELD_IDS_LIST_COL}" AS VARCHAR) AS "{SSN_FIELD_IDS_LIST_COL}",
@@ -249,26 +259,11 @@ def run(context: PipelineContext) -> StepResult:
         FROM {PARQUET_AUTHOR_MATCH_TABLE} m
         JOIN {author_table} a
           ON a."{author_id_col}" = m."{author_id_col}"
+        JOIN {authors_table} au
+          ON au."{authors_author_id_col}" = m."{author_id_col}"
         LEFT JOIN ssn_author_agg agg
           ON agg.authorid = m."{author_id_col}"
          AND agg.name_key = m.name_key
-        """
-    )
-
-    log("Create authors output table")
-    conn.execute(
-        f"""
-        CREATE OR REPLACE TABLE {PARQUET_AUTHORS_OUTPUT_TABLE} AS
-        SELECT
-            m.name_key AS name_key,
-            m."{KTP_FIRST_NAME_COL}" AS "{KTP_FIRST_NAME_COL}",
-            m."{KTP_LAST_NAME_COL}" AS "{KTP_LAST_NAME_COL}",
-            au."{SSN_FILENAME_COL}" AS "{KTP_FILENAME_COL}",
-            au."{authors_author_id_col}" AS "{KTP_FRAGMENT_COL}",
-            au.*
-        FROM {PARQUET_AUTHOR_MATCH_TABLE} m
-        JOIN {authors_table} au
-          ON au."{authors_author_id_col}" = m."{author_id_col}"
         """
     )
 
@@ -276,11 +271,6 @@ def run(context: PipelineContext) -> StepResult:
     _append_innerdicts_from_rows_table(
         conn,
         table_name=PARQUET_AUTHOR_OUTPUT_TABLE,
-        context=context,
-    )
-    _append_innerdicts_from_rows_table(
-        conn,
-        table_name=PARQUET_AUTHORS_OUTPUT_TABLE,
         context=context,
     )
 
@@ -317,38 +307,7 @@ def run(context: PipelineContext) -> StepResult:
     )
 
     log("Load parquet output dataframe")
-    conn.execute(
-        f"""
-        CREATE OR REPLACE VIEW ssn_authors_output_view AS
-        WITH sample_context AS (
-            SELECT
-                s."{KTP_FILENAME_COL}" AS sample_filename,
-                s."{KTP_FRAGMENT_COL}" AS sample_fragment,
-                s."{DRAW_LABEL}" AS sample_draw,
-                s."{KTP_FIRST_NAME_COL}",
-                s."{KTP_LAST_NAME_COL}",
-                p.*,
-                e."{KTP_ECONOMIES_COL}" AS "{KTP_ECONOMIES_COL}",
-                e."{KTP_ECONOMIES_INCOME_GROUP_COL}" AS "{KTP_ECONOMIES_INCOME_GROUP_COL}",
-                e."{KTP_ECONOMY_MATCH_COL}" AS "{KTP_ECONOMY_MATCH_COL}",
-                e."{KTP_PRIORITY_COL}" AS "{KTP_PRIORITY_COL}",
-                e."{KTP_PRIORITY_GROUP_COL}" AS "{KTP_PRIORITY_GROUP_COL}"
-            FROM {SAMPLES_WITH_NAMES_VIEW} s
-            JOIN {POPULATION_TABLE} p
-              ON s."{KTP_FILENAME_COL}" = p."{HCR_FILENAME_COL}"
-             AND s."{KTP_FRAGMENT_COL}" = p."{HCR_ROW_COL}"
-            LEFT JOIN {POPULATION_ECON_TABLE} e
-              ON p."{KTP_POPULATION_INDEX_COL}" = e."{KTP_POPULATION_INDEX_COL}"
-        )
-        SELECT v.*, sc.*
-        FROM {PARQUET_AUTHORS_OUTPUT_TABLE} v
-        LEFT JOIN sample_context sc
-          ON lower(v."{KTP_FIRST_NAME_COL}") = lower(sc."{KTP_FIRST_NAME_COL}")
-         AND lower(v."{KTP_LAST_NAME_COL}") = lower(sc."{KTP_LAST_NAME_COL}")
-        """
-    )
-
-    output_views = ["ssn_parquet_output", "ssn_authors_output_view"]
+    output_views = ["ssn_parquet_output"]
     output_dfs = [conn.execute(f"SELECT * FROM {view}").df() for view in output_views]
 
     return StepResult(
