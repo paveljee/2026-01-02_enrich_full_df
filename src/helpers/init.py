@@ -74,15 +74,17 @@ def _reset_pipeline(conn, manager: PipelineManager) -> None:
         conn.execute(f"DROP VIEW IF EXISTS {view}")
 
     # Drop any parquet-derived tables/views from prior runs.
-    for (table_name,) in conn.execute("SHOW TABLES").fetchall():
-        if table_name.startswith("ssn_"):
+    # Get all tables and views with their types
+    objects = conn.execute("""
+        SELECT table_name, table_type 
+        FROM information_schema.tables
+        WHERE table_name LIKE 'ssn_%'
+    """).fetchall()
+    for table_name, table_type in objects:
+        if table_type == 'BASE TABLE':
             conn.execute(f"DROP TABLE IF EXISTS {table_name}")
-    for (view_name,) in conn.execute("""
-        SELECT table_name
-        FROM information_schema.views
-    """).fetchall():
-        if view_name.startswith("ssn_"):
-            conn.execute(f"DROP VIEW IF EXISTS {view_name}")
+        elif table_type == 'VIEW':
+            conn.execute(f"DROP VIEW IF EXISTS {table_name}")
     manager.reset_state()
 
 
