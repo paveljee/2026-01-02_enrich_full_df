@@ -5,7 +5,7 @@ from pathlib import Path
 import duckdb
 
 from ..helpers.context import PipelineContext, StepResult
-from ..helpers.outerdict_io import append_innerdicts_from_rows_table
+from ..helpers.data_models import InnerDict
 from ..helpers.parquet_utils import normalize_parquet_column_name, parquet_columns, parquet_filename
 from ..helpers.procedures import ParquetMatchProcedure
 from ..helpers.schema import (
@@ -18,6 +18,33 @@ from ..helpers.schema import (
     safe_identifier,
 )
 from ..helpers.vars import KTP_FILENAME_COL, KTP_FIRST_NAME_COL, KTP_FRAGMENT_COL, KTP_LAST_NAME_COL
+
+
+def _append_innerdicts_from_rows_table(
+    conn: duckdb.DuckDBPyConnection,
+    *,
+    table_name: str,
+    context: PipelineContext,
+) -> None:
+    if context.outer_dict is None:
+        raise ValueError("OuterDict not initialized. Run build_outerdict first.")
+    outer_dict = context.outer_dict
+    procedure = ParquetMatchProcedure()
+    rel = conn.execute(f"SELECT * FROM {table_name}")
+    cols = [desc[0] for desc in rel.description]
+    try:
+        name_idx = cols.index("name_key")
+    except ValueError as exc:
+        raise ValueError(f"Missing name_key column in {table_name}") from exc
+    while True:
+        rows = rel.fetchmany(5000)
+        if not rows:
+            break
+        for row in rows:
+            name_key = row[name_idx]
+            record = {col: row[i] for i, col in enumerate(cols) if i != name_idx}
+            inner = InnerDict.from_mapping(record, procedure)
+            outer_dict.add_inner_by_key(str(name_key), inner)
 
 
 def _create_parquet_table(
@@ -192,11 +219,10 @@ def run(context: PipelineContext) -> StepResult:
     )
 
     log("Append parquet matches into OuterDict")
-    append_innerdicts_from_rows_table(
+    _append_innerdicts_from_rows_table(
         conn,
-        context.outer_dict,
         table_name=PARQUET_AUTHOR_OUTPUT_TABLE,
-        procedure=ParquetMatchProcedure(),
+        context=context,
     )
 
     log("Create parquet output view")

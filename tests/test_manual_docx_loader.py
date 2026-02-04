@@ -6,7 +6,6 @@ import pandas as pd
 import pytest
 
 from src.helpers.data_models import FragmentType, ResourceGroup
-from src.helpers.docx_loader import load_docx_tables, normalize_docx_column_name
 from src.helpers.resources import register_resource
 from src.helpers.vars import (
     DOCX_FRAGMENT_COL,
@@ -14,6 +13,7 @@ from src.helpers.vars import (
     DOCX_TABLE_INDEX_COL,
     KTP_FILENAME_COL,
 )
+from src.steps.step_08_match_docx import load_docx_tables, normalize_docx_column_name
 
 
 def test_normalize_docx_column_name_rules() -> None:
@@ -31,7 +31,7 @@ def test_load_docx_tables_adds_metadata(monkeypatch: pytest.MonkeyPatch, tmp_pat
     def fake_parse_docx_table(_: Path) -> list[pd.DataFrame]:
         return [table]
 
-    monkeypatch.setattr("src.helpers.docx_loader.parse_docx_table", fake_parse_docx_table)
+    monkeypatch.setattr("src.steps.step_08_match_docx.parse_docx_table", fake_parse_docx_table)
 
     resources = {
         docx_path.name: register_resource(

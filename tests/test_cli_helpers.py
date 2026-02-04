@@ -5,10 +5,10 @@ from pathlib import Path
 import pandas as pd
 
 from src.helpers.data_models import FragmentType, ResourceGroup
-from src.helpers.docx_loader import load_docx_tables
 from src.helpers.files import find_files_by_extension
 from src.helpers.resources import register_resource
 from src.helpers.vars import RIGHT_NAME_COL
+from src.steps.step_08_match_docx import load_docx_tables
 
 
 def test_find_files_by_extension(tmp_path: Path) -> None:
@@ -36,7 +36,7 @@ def test_load_docx_tables_uses_parser(tmp_path: Path, monkeypatch) -> None:
     def fake_parse_docx_table(_: Path) -> list[pd.DataFrame]:
         return [pd.DataFrame({RIGHT_NAME_COL: ["Jane Doe"], "extra": ["value"]})]
 
-    monkeypatch.setattr("src.helpers.docx_loader.parse_docx_table", fake_parse_docx_table)
+    monkeypatch.setattr("src.steps.step_08_match_docx.parse_docx_table", fake_parse_docx_table)
 
     df = load_docx_tables({resource.name: resource})
     assert RIGHT_NAME_COL in df.columns or "ktp.table_1_researcher_author" in df.columns

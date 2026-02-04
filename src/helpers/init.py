@@ -6,13 +6,9 @@ from pathlib import Path
 
 from .config import PipelineConfig
 from .context import PipelineContext
-from .data_models import OuterDict
+from .data_models import InnerDict, NameKey, OuterDict
 from .diagnostics import DiagnosticsReport
-from .outerdict_io import (
-    append_innerdicts_from_rows_table,
-    append_innerdicts_from_table,
-    load_outerdict_stub,
-)
+from .jsonlines import loads_jsonlines
 from .pipeline_manager import PipelineManager
 from .procedures import DocxMatchProcedure, ParquetMatchProcedure, XlsxMatchProcedure
 from .resource_monitor import ResourceMonitor
@@ -88,6 +84,49 @@ def _reset_pipeline(conn, manager: PipelineManager) -> None:
     manager.reset_state()
 
 
+def _load_outerdict_stub(conn, table_name: str) -> OuterDict:
+    rows = conn.execute(f"SELECT name_key FROM {table_name}").fetchall()
+    name_keys = [NameKey.from_json_key(row[0]) for row in rows]
+    return OuterDict.from_name_keys(name_keys)
+
+
+def _append_innerdicts_from_table(
+    conn,
+    *,
+    table_name: str,
+    outer_dict: OuterDict,
+    procedure,
+) -> None:
+    rows = conn.execute(f"SELECT name_key, innerdicts FROM {table_name}").fetchall()
+    for name_key, payload in rows:
+        for record in loads_jsonlines(payload or ""):
+            inner = InnerDict.from_mapping(record, procedure)
+            outer_dict.add_inner_by_key(str(name_key), inner)
+
+
+def _append_innerdicts_from_rows_table(
+    conn,
+    *,
+    table_name: str,
+    outer_dict: OuterDict,
+    procedure,
+) -> None:
+    rel = conn.execute(f"SELECT * FROM {table_name}")
+    cols = [desc[0] for desc in rel.description]
+    try:
+        name_idx = cols.index("name_key")
+    except ValueError as exc:
+        raise ValueError(f"Missing name_key column in {table_name}") from exc
+    while True:
+        rows = rel.fetchmany(5000)
+        if not rows:
+            break
+        for row in rows:
+            record = {col: row[i] for i, col in enumerate(cols) if i != name_idx}
+            inner = InnerDict.from_mapping(record, procedure)
+            outer_dict.add_inner_by_key(str(row[name_idx]), inner)
+
+
 def init_pipeline(
     args: argparse.Namespace,
     *,
@@ -118,30 +157,28 @@ def init_pipeline(
 
     outer_dict: OuterDict | None = None
     if manager.is_done(STEP_BUILD_OUTERDICT):
-        outer_dict = load_outerdict_stub(conn, table_name=OUTERDICT_STUB_TABLE)
+        outer_dict = _load_outerdict_stub(conn, table_name=OUTERDICT_STUB_TABLE)
         if resources is None:
             resources = register_pipeline_resources(config)
         if manager.is_done(STEP_MATCH_XLSX):
-            append_innerdicts_from_table(
+            _append_innerdicts_from_table(
                 conn,
-                outer_dict,
                 table_name=XLSX_INNERDICT_TABLE,
+                outer_dict=outer_dict,
                 procedure=XlsxMatchProcedure(),
-                resources=resources.xlsx_resources,
             )
         if manager.is_done(STEP_MATCH_DOCX):
-            append_innerdicts_from_table(
+            _append_innerdicts_from_table(
                 conn,
-                outer_dict,
                 table_name=DOCX_INNERDICT_TABLE,
+                outer_dict=outer_dict,
                 procedure=DocxMatchProcedure(),
-                resources=resources.docx_resources,
             )
         if manager.is_done(STEP_MATCH_PARQUET):
-            append_innerdicts_from_rows_table(
+            _append_innerdicts_from_rows_table(
                 conn,
-                outer_dict,
                 table_name=PARQUET_AUTHOR_OUTPUT_TABLE,
+                outer_dict=outer_dict,
                 procedure=ParquetMatchProcedure(),
             )
 

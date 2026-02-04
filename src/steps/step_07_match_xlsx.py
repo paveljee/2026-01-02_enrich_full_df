@@ -4,9 +4,9 @@ import duckdb
 import pandas as pd
 
 from ..helpers.context import PipelineContext, StepResult
+from ..helpers.data_models import InnerDict
 from ..helpers.duckdb_utils import register_frame
-from ..helpers.jsonlines import dumps_jsonlines
-from ..helpers.outerdict_io import append_innerdicts_from_table
+from ..helpers.jsonlines import dumps_jsonlines, loads_jsonlines
 from ..helpers.procedures import XlsxMatchProcedure
 from ..helpers.schema import (
     OUTERDICT_NAME_VIEW,
@@ -22,10 +22,32 @@ from ..helpers.vars import (
     DRAW_LABEL,
     HCR_FILENAME_COL,
     HCR_ROW_COL,
+    KTP_FILENAME_COL,
     KTP_FIRST_NAME_COL,
     KTP_FRAGMENT_COL,
     KTP_LAST_NAME_COL,
 )
+
+
+def _append_innerdicts_from_table(
+    conn: duckdb.DuckDBPyConnection,
+    *,
+    table_name: str,
+    context: PipelineContext,
+) -> None:
+    if context.outer_dict is None:
+        raise ValueError("OuterDict not initialized. Run build_outerdict first.")
+    outer_dict = context.outer_dict
+    procedure = XlsxMatchProcedure()
+    rows = conn.execute(f"SELECT name_key, innerdicts FROM {table_name}").fetchall()
+    for name_key, payload in rows:
+        for record in loads_jsonlines(payload or ""):
+            if KTP_FILENAME_COL not in record:
+                raise ValueError(f"Innerdict missing required column '{KTP_FILENAME_COL}'")
+            if KTP_FRAGMENT_COL not in record:
+                raise ValueError(f"Innerdict missing required column '{KTP_FRAGMENT_COL}'")
+            inner = InnerDict.from_mapping(record, procedure)
+            outer_dict.add_inner_by_key(str(name_key), inner)
 
 
 def run(context: PipelineContext) -> StepResult:
@@ -106,13 +128,7 @@ def run(context: PipelineContext) -> StepResult:
     )
     conn.execute("DROP TABLE IF EXISTS xlsx_innerdict_frame")
 
-    append_innerdicts_from_table(
-        conn,
-        context.outer_dict,
-        table_name=XLSX_INNERDICT_TABLE,
-        procedure=XlsxMatchProcedure(),
-        resources=context.resources.xlsx_resources,
-    )
+    _append_innerdicts_from_table(conn, table_name=XLSX_INNERDICT_TABLE, context=context)
 
     conn.execute(
         f"""

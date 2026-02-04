@@ -11,20 +11,14 @@ from src.helpers.config import PipelineConfig
 from src.helpers.context import PipelineContext
 from src.helpers.data_models import FragmentType, ResourceGroup
 from src.helpers.diagnostics import DiagnosticsReport
-from src.helpers.hcr import build_population_table
 from src.helpers.pipeline_manager import PipelineManager
 from src.helpers.resources import (
     PipelineResources,
     register_resource,
     register_resources,
 )
-from src.helpers.vars import (
-    DRAW_LABEL,
-    HCR_FILENAME_COL,
-    HCR_ROW_COL,
-    KTP_FILENAME_COL,
-    KTP_FRAGMENT_COL,
-)
+from src.helpers.vars import DRAW_LABEL, KTP_FILENAME_COL, KTP_FRAGMENT_COL
+from src.steps.step_02_load_xlsx import run as run_load_xlsx
 from src.steps.step_03_infer_names import run as run_infer_names
 from src.steps.step_04_add_economy_priority import run as run_add_economy_priority
 from src.steps.step_05_sampling import run as run_sampling
@@ -62,14 +56,6 @@ def test_csv_rows_match_samples(tmp_path: Path) -> None:
             group=ResourceGroup.KTP_PILOT_SAMPLE,
             fragment_type=FragmentType.EXCEL_ROW,
         )
-        build_population_table(
-            conn,
-            xlsx_resources,
-            table_name="population",
-            filename_col=HCR_FILENAME_COL,
-            row_col=HCR_ROW_COL,
-        )
-
         config = PipelineConfig()
         config.sample_draw_sizes = [20] + [40] * 7
         config.sample_seed = 42
@@ -95,6 +81,7 @@ def test_csv_rows_match_samples(tmp_path: Path) -> None:
             docx_resources={},
         )
 
+        run_load_xlsx(context)
         run_infer_names(context)
         run_add_economy_priority(context)
         run_sampling(context)

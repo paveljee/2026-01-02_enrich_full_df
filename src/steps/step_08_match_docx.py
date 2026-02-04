@@ -1,17 +1,16 @@
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 import duckdb
 import pandas as pd
 
 from ..helpers.context import PipelineContext, StepResult
-from ..helpers.docx_loader import (
-    DOCX_ROW_NUMBER_COL,
-    load_single_table_docx,
-    normalize_docx_column_name,
-)
+from ..helpers.data_models import InnerDict, RegisteredResource
+from ..helpers.docx_parse import parse_docx_table
 from ..helpers.duckdb_utils import register_frame
-from ..helpers.jsonlines import dumps_jsonlines
-from ..helpers.outerdict_io import append_innerdicts_from_table
+from ..helpers.jsonlines import dumps_jsonlines, loads_jsonlines
 from ..helpers.procedures import DocxMatchProcedure
 from ..helpers.schema import (
     DOCX_INNERDICT_TABLE,
@@ -24,12 +23,88 @@ from ..helpers.schema import (
     SAMPLES_WITH_NAMES_VIEW,
 )
 from ..helpers.vars import (
+    DOCX_FRAGMENT_COL,
+    DOCX_ROW_INDEX_COL,
+    DOCX_TABLE_INDEX_COL,
     DRAW_LABEL,
+    KTP_FILENAME_COL,
     KTP_FIRST_NAME_COL,
     KTP_FRAGMENT_COL,
     KTP_LAST_NAME_COL,
     RIGHT_NAME_COL,
 )
+
+DOCX_ROW_NUMBER_COL = "ktp.table_1_row_number"
+
+
+def normalize_docx_column_name(column: str) -> str:
+    if re.match(r"^[\w_]+\.", str(column)):
+        return str(column)
+    normalized = re.sub(r"[^\w\s]", "_", str(column).lower())
+    normalized = re.sub(r"\s", "_", normalized)
+    normalized = f"ktp.table_1_{normalized}"
+    normalized = re.sub(r"_+", "_", normalized)
+    return normalized
+
+
+def load_docx_tables(resources: dict[str, RegisteredResource]) -> pd.DataFrame:
+    frames: list[pd.DataFrame] = []
+    for resource in resources.values():
+        path = Path(resource.__fspath__())
+        tables = parse_docx_table(path)
+        for table_index, df in enumerate(tables):
+            table = df.copy()
+            table.columns = [normalize_docx_column_name(col) for col in table.columns]
+            table[KTP_FILENAME_COL] = path.name
+            table[DOCX_TABLE_INDEX_COL] = table_index
+            table[DOCX_ROW_INDEX_COL] = range(len(table))
+            table[DOCX_FRAGMENT_COL] = [
+                f"table{table_index}_row{row_index}" for row_index in range(len(table))
+            ]
+            frames.append(table)
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)
+
+
+def load_single_table_docx(resources: dict[str, RegisteredResource]) -> pd.DataFrame:
+    frames: list[pd.DataFrame] = []
+    for resource in resources.values():
+        path = Path(resource.__fspath__())
+        tables = parse_docx_table(path)
+        if len(tables) != 1:
+            raise ValueError(
+                f"Expected exactly one table in DOCX '{path.name}', got {len(tables)}"
+            )
+        table = tables[0].copy()
+        table.columns = [normalize_docx_column_name(col) for col in table.columns]
+        table[KTP_FILENAME_COL] = path.name
+        table[DOCX_ROW_NUMBER_COL] = range(1, len(table) + 1)
+        frames.append(table)
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)
+
+
+def _append_innerdicts_from_table(
+    conn: duckdb.DuckDBPyConnection,
+    *,
+    table_name: str,
+    context: PipelineContext,
+) -> None:
+    if context.outer_dict is None:
+        raise ValueError("OuterDict not initialized. Run build_outerdict first.")
+    outer_dict = context.outer_dict
+    procedure = DocxMatchProcedure()
+    rows = conn.execute(f"SELECT name_key, innerdicts FROM {table_name}").fetchall()
+    for name_key, payload in rows:
+        for record in loads_jsonlines(payload or ""):
+            if KTP_FILENAME_COL not in record:
+                raise ValueError(f"Innerdict missing required column '{KTP_FILENAME_COL}'")
+            if KTP_FRAGMENT_COL not in record:
+                raise ValueError(f"Innerdict missing required column '{KTP_FRAGMENT_COL}'")
+            inner = InnerDict.from_mapping(record, procedure)
+            outer_dict.add_inner_by_key(str(name_key), inner)
 
 
 def run(context: PipelineContext) -> StepResult:
@@ -125,13 +200,7 @@ def run(context: PipelineContext) -> StepResult:
     )
     conn.execute("DROP TABLE IF EXISTS docx_innerdict_frame")
 
-    append_innerdicts_from_table(
-        conn,
-        context.outer_dict,
-        table_name=DOCX_INNERDICT_TABLE,
-        procedure=DocxMatchProcedure(),
-        resources=context.resources.docx_resources,
-    )
+    _append_innerdicts_from_table(conn, table_name=DOCX_INNERDICT_TABLE, context=context)
 
     conn.execute(
         f"""

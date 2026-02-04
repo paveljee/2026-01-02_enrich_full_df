@@ -4,8 +4,8 @@ import duckdb
 import pandas as pd
 
 from ..helpers.context import PipelineContext, StepResult
+from ..helpers.data_models import NameKey, OuterDict
 from ..helpers.duckdb_utils import register_frame
-from ..helpers.models import NameKey, OuterDict
 from ..helpers.schema import OUTERDICT_NAME_VIEW, OUTERDICT_STUB_TABLE, SAMPLES_WITH_NAMES_VIEW
 from ..helpers.vars import KTP_FIRST_NAME_COL, KTP_LAST_NAME_COL
 

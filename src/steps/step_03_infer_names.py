@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 
 import duckdb
+import pandas as pd
 
 from ..helpers.context import PipelineContext, StepResult
-from ..helpers.name_inference import infer_name_columns_from_xlsx
 from ..helpers.schema import POPULATION_NAMES_TABLE, POPULATION_NAMES_VIEW, POPULATION_TABLE
 from ..helpers.vars import (
     HCR_FILENAME_COL,
@@ -29,6 +30,43 @@ def _build_name_expr(mapping: dict[str, tuple[str, str]], column_index: int) -> 
     return "CASE " + " ".join(cases) + " END"
 
 
+def _normalize_hcr_header(name: str) -> str:
+    return "hcr." + name.replace(" ", "_").replace(":", "")
+
+
+def _infer_name_columns_from_xlsx(path: Path) -> tuple[str, str] | None:
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            df = pd.read_excel(path, engine="openpyxl")
+    except Exception:
+        return None
+    normalized = [_normalize_hcr_header(str(col).lower()) for col in df.columns]
+
+    def pick(candidates: list[str]) -> str | None:
+        for cand in candidates:
+            for col in normalized:
+                if cand in col:
+                    return col
+        return None
+
+    first = pick(["first_name", "firstname", "first name", "first"])
+    last = pick(
+        [
+            "last_name",
+            "lastname",
+            "last name",
+            "family_name",
+            "familyname",
+            "surname",
+            "last",
+        ]
+    )
+    if not first or not last or first == last:
+        return None
+    return first, last
+
+
 def run(context: PipelineContext) -> StepResult:
     if context.resources is None:
         raise ValueError("Resources not initialized. Run register_resources first.")
@@ -36,7 +74,7 @@ def run(context: PipelineContext) -> StepResult:
     if not HCR_XLSX_NAME_COLS:
         inferred: dict[str, tuple[str, str]] = {}
         for resource in context.resources.xlsx_resources.values():
-            mapping = infer_name_columns_from_xlsx(Path(resource.__fspath__()))
+            mapping = _infer_name_columns_from_xlsx(Path(resource.__fspath__()))
             if mapping:
                 inferred[Path(resource.__fspath__()).name] = mapping
         if not inferred:
