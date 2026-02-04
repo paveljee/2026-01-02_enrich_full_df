@@ -121,10 +121,13 @@ def run_reproduction(args: argparse.Namespace) -> Path | None:
                         return zip_path
                 else:
                     console.print(
-                        "[yellow]Resume requested without --yes; showing last session report and exiting.[/yellow]"
+                        "[yellow]Resume requested without --yes;"
+                        "showing last session report and exiting.[/yellow]"
                     )
                     console.print(
-                        f"[bold cyan]Diagnostics report saved to: {context.diagnostics.path}[/bold cyan]"
+                        f"[bold cyan]"
+                        f"Diagnostics report saved to: "
+                        f"{context.diagnostics.path}[/bold cyan]"
                     )
                     return zip_path
 

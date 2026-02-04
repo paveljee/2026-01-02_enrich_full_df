@@ -9,6 +9,8 @@ KTP_LAST_NAME_ORIG_COLNAME_COL: Final = "ktp.last_name_original_column_name"
 KTP_FILENAME_COL: Final = "ktp.filename"
 KTP_SOURCE_KEY_COL: Final = "ktp.source_key"
 KTP_ECONOMIES_COL: Final = "ktp.economies"
+KTP_ECONOMIES_GROUP_COL: Final = "ktp.economies_group"
+KTP_ECONOMY_MATCH_COL: Final = "ktp.economy_match"
 KTP_PRIORITY_COL: Final = "ktp.priority"
 KTP_PRIORITY_GROUP_COL: Final = "ktp.priority_group"
 DRAW_LABEL: Final = "ktp.draw_number"
@@ -24,11 +26,132 @@ DOCX_FRAGMENT_COL: Final = "ktp.docx_fragment"
 CSV_ROW_INDEX_COL: Final = "ktp.csv_row_index"
 
 KTP_PRIORITY_GROUP_LABELS: Final[dict[int, str]] = {
-    1: "non_target",
-    2: "greater_china",
-    3: "non_english_non_eu_hic",
-    4: "eu",
-    5: "other",
+    1: "LMICS_NO_GREATER_CHINA",
+    2: "GREATER_CHINA",
+    3: "NON_ENGLISH_NON_EU_HICS_NO_GREATER_CHINA",
+    4: "EU_COUNTRIES",
+    5: "ENGLISH_HICS",
+}
+
+OGHIST_INCOME_LABELS = {
+    "H": "High income countries",
+    "L": "Low income LMICs",
+    "LM": "Lower middle income LMICs",
+    "UM": "Upper middle income LMICs",
+}
+
+# Source: GPT 5.2 via chatgpt.com, inference date: 2026-02-04
+KTP_COUNTRY_ALIASES = {
+    # Big common ones
+    "United States": [
+        "USA",
+        "U.S.A.",
+        "US",
+        "U.S.",
+        "United States of America",
+        "America",
+    ],
+    "United Kingdom": [
+        "UK",
+        "U.K.",
+        "Great Britain",
+        "Britain",
+        "GB",
+        "G.B.",
+        "United Kingdom of Great Britain and Northern Ireland",
+    ],
+
+    # Koreas
+    "Korea, Rep.": ["South Korea", "Republic of Korea", "Korea (South)", "ROK", "KOR"],
+    "Korea, Dem. Rep.": ["North Korea", "Democratic People's Republic of Korea", "DPRK", "PRK"],
+
+    # Congo pair
+    "Congo, Dem. Rep.": [
+        "Democratic Republic of the Congo",
+        "DR Congo",
+        "D.R. Congo",
+        "Congo (DRC)",
+        "Congo-Kinshasa",
+        "Dem. Rep. Congo",
+        "COD",
+    ],
+    "Congo, Rep.": [
+        "Republic of the Congo",
+        "Congo Republic",
+        "Congo-Brazzaville",
+        "COG",
+    ],
+
+    # Diacritics / punctuation / common English names
+    "Côte d'Ivoire": ["Cote d'Ivoire", "Cote dIvoire", "Ivory Coast"],
+    "Curaçao": ["Curacao"],
+    "São Tomé and Príncipe": [
+        "Sao Tome and Principe",
+        "São Tomé & Príncipe",
+        "Sao Tome & Principe",
+    ],
+    "Türkiye": ["Turkey", "Turkiye"],
+
+    # “The” / comma variants
+    "Bahamas, The": ["The Bahamas", "Bahamas"],
+    "Gambia, The": ["The Gambia", "Gambia"],
+    "Egypt, Arab Rep.": ["Egypt", "Arab Republic of Egypt"],
+    "Iran, Islamic Rep.": ["Iran", "Islamic Republic of Iran"],
+    "Venezuela, RB": ["Venezuela", "Bolivarian Republic of Venezuela"],
+    "Yemen, Rep.": ["Yemen", "Republic of Yemen"],
+    "Russian Federation": ["Russia", "Russian Fed.", "RF"],
+    "Syrian Arab Republic": ["Syria"],
+    "Hong Kong SAR, China": ["Hong Kong", "Hong Kong SAR"],
+    "Macao SAR, China": ["Macao", "Macau", "Macau SAR", "Macao SAR"],
+    "Taiwan, China": ["Taiwan", "Chinese Taipei", "Republic of China", "ROC"],
+
+    # Split/long official names commonly shortened
+    "Czechia": ["Czech Republic"],
+    "Slovak Republic": ["Slovakia"],
+    "Kyrgyz Republic": ["Kyrgyzstan"],
+    "Lao PDR": ["Laos", "Lao People's Democratic Republic"],
+    "Micronesia, Fed. Sts.": ["Federated States of Micronesia", "Micronesia", "FSM"],
+    "West Bank and Gaza": [
+        "Palestine",
+        "State of Palestine",
+        "Palestinian Territories",
+        "Occupied Palestinian Territory",
+        "OPT",
+    ],
+    "United Arab Emirates": ["UAE", "U.A.E.", "Emirates"],
+    "Brunei Darussalam": ["Brunei"],
+    "Bolivia": ["Bolivia (Plurinational State of)", "Plurinational State of Bolivia"],
+    "Tanzania": ["United Republic of Tanzania", "Tanzania, United Rep."],
+    "Vietnam": ["Viet Nam", "Vietnam"],
+    "Cabo Verde": ["Cape Verde"],
+    "Eswatini": ["Swaziland"],
+
+    # Territories / parentheses / common shortenings
+    "Virgin Islands (U.S.)": [
+        "U.S. Virgin Islands",
+        "US Virgin Islands",
+        "United States Virgin Islands",
+        "USVI",
+        "U.S.V.I.",
+    ],
+    "Puerto Rico (U.S.)": ["Puerto Rico", "PR"],
+    "Sint Maarten (Dutch part)": ["Sint Maarten", "St. Maarten"],
+    "St. Martin (French part)": ["Saint Martin", "St Martin"],
+    "Turks and Caicos Islands": ["Turks & Caicos Islands", "Turks and Caicos", "T&C", "TCI"],
+    "British Virgin Islands": ["BVI", "B.V.I.", "Virgin Islands, British"],
+    "Faeroe Islands": ["Faroe Islands", "Faroes"],
+    "Channel Islands": ["Jersey", "Guernsey"],
+
+    # “St.” variants (people often type either way)
+    "St. Kitts and Nevis": ["Saint Kitts and Nevis", "St Kitts and Nevis", "St Kitts & Nevis"],
+    "St. Lucia": ["Saint Lucia", "St Lucia"],
+    "St. Vincent and the Grenadines": [
+        "Saint Vincent and the Grenadines",
+        "St Vincent and the Grenadines",
+        "St Vincent & the Grenadines",
+    ],
+    "Antigua and Barbuda": ["Antigua & Barbuda"],
+    "Trinidad and Tobago": ["Trinidad & Tobago"],
 }
 
 # Filled later by user: mapping of XLSX filename -> (first_name_col, last_name_col)
@@ -190,6 +313,8 @@ __all__ = [
     "HCR_ROW_COL",
     "HCR_XLSX_NAME_COLS",
     "KTP_ECONOMIES_COL",
+    "KTP_ECONOMIES_GROUP_COL",
+    "KTP_ECONOMY_MATCH_COL",
     "KTP_FILENAME_COL",
     "KTP_FIRST_NAME_COL",
     "KTP_FRAGMENT_COL",

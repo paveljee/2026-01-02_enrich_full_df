@@ -22,6 +22,9 @@ from ..helpers.vars import (
     DRAW_LABEL,
     HCR_FILENAME_COL,
     HCR_ROW_COL,
+    KTP_ECONOMIES_COL,
+    KTP_ECONOMIES_GROUP_COL,
+    KTP_ECONOMY_MATCH_COL,
     KTP_FILENAME_COL,
     KTP_FIRST_NAME_COL,
     KTP_FRAGMENT_COL,
@@ -75,7 +78,9 @@ def run(context: PipelineContext) -> StepResult:
                 p.*,
                 n."{KTP_FIRST_NAME_COL}" AS pop_first,
                 n."{KTP_LAST_NAME_COL}" AS pop_last,
-                e."ktp.economies" AS "ktp.economies",
+                e."{KTP_ECONOMIES_COL}" AS "{KTP_ECONOMIES_COL}",
+                e."{KTP_ECONOMIES_GROUP_COL}" AS "{KTP_ECONOMIES_GROUP_COL}",
+                e."{KTP_ECONOMY_MATCH_COL}" AS "{KTP_ECONOMY_MATCH_COL}",
                 e."ktp.priority" AS "ktp.priority",
                 e."ktp.priority_group" AS "ktp.priority_group"
             FROM {POPULATION_TABLE} p

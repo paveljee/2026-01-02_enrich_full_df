@@ -17,7 +17,15 @@ from ..helpers.schema import (
     SAMPLES_WITH_NAMES_VIEW,
     safe_identifier,
 )
-from ..helpers.vars import KTP_FILENAME_COL, KTP_FIRST_NAME_COL, KTP_FRAGMENT_COL, KTP_LAST_NAME_COL
+from ..helpers.vars import (
+    KTP_ECONOMIES_COL,
+    KTP_ECONOMIES_GROUP_COL,
+    KTP_ECONOMY_MATCH_COL,
+    KTP_FILENAME_COL,
+    KTP_FIRST_NAME_COL,
+    KTP_FRAGMENT_COL,
+    KTP_LAST_NAME_COL,
+)
 
 
 def _append_innerdicts_from_rows_table(
@@ -237,7 +245,9 @@ def run(context: PipelineContext) -> StepResult:
                 s."{KTP_FIRST_NAME_COL}",
                 s."{KTP_LAST_NAME_COL}",
                 p.*,
-                e."ktp.economies" AS "ktp.economies",
+                e."{KTP_ECONOMIES_COL}" AS "{KTP_ECONOMIES_COL}",
+                e."{KTP_ECONOMIES_GROUP_COL}" AS "{KTP_ECONOMIES_GROUP_COL}",
+                e."{KTP_ECONOMY_MATCH_COL}" AS "{KTP_ECONOMY_MATCH_COL}",
                 e."ktp.priority" AS "ktp.priority",
                 e."ktp.priority_group" AS "ktp.priority_group"
             FROM {SAMPLES_WITH_NAMES_VIEW} s
