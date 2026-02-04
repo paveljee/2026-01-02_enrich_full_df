@@ -34,10 +34,14 @@ from ..helpers.vars import (
     KTP_PRIORITY_GROUP_COL,
     KTP_SSNAD_MATCH_COL,
     SSN_FIELD_IDS_LIST_COL,
-    SSN_FILENAME_COL,
     SSN_PAPERIDS_LEVEL0_COL,
     SSN_PAPERIDS_LEVEL1_COL,
     SSN_SUM_HIT_PCT_COL,
+    SSNA_FILENAME_COL,
+    SSNAD_FILENAME_COL,
+    SSNAP_FILENAME_COL,
+    SSNHPL0_FILENAME_COL,
+    SSNHPL1_FILENAME_COL,
 )
 
 
@@ -74,6 +78,7 @@ def _create_parquet_table(
     table_name: str,
     path: str,
     prefix: str,
+    filename_col: str,
     join_sql: str,
 ) -> dict[str, str]:
     columns = parquet_columns(conn, path)
@@ -85,7 +90,7 @@ def _create_parquet_table(
         f"""
         CREATE OR REPLACE TABLE {table_name} AS
         SELECT {select_cols},
-               '{filename}' AS "{SSN_FILENAME_COL}"
+               '{filename}' AS "{filename_col}"
         FROM read_parquet('{path}') parq
         {join_sql}
         """
@@ -168,6 +173,7 @@ def run(context: PipelineContext) -> StepResult:
         table_name=author_table,
         path=author_details_path,
         prefix="ssnad",
+        filename_col=SSNAD_FILENAME_COL,
         join_sql=(
             "JOIN "
             f"{PARQUET_AUTHOR_MATCH_TABLE} m ON parq.{author_id_raw} = m.\"{author_id_col}\""
@@ -181,6 +187,7 @@ def run(context: PipelineContext) -> StepResult:
         table_name=authors_table,
         path=authors_path,
         prefix="ssna",
+        filename_col=SSNA_FILENAME_COL,
         join_sql=(
             "JOIN "
             f"{PARQUET_AUTHOR_MATCH_TABLE} m ON parq.{author_id_raw} = m.\"{author_id_col}\""
@@ -239,6 +246,9 @@ def run(context: PipelineContext) -> StepResult:
         parquet_filename(hit_papers1_path),
     ]
     parquet_filename_payload = json.dumps(parquet_filenames)
+    authors_paper_filename = parquet_filename(authors_paper_path)
+    hit_papers0_filename = parquet_filename(hit_papers0_path)
+    hit_papers1_filename = parquet_filename(hit_papers1_path)
 
     log("Create author-level output table")
     conn.execute(
@@ -250,6 +260,9 @@ def run(context: PipelineContext) -> StepResult:
             m."{KTP_LAST_NAME_COL}" AS "{KTP_LAST_NAME_COL}",
             a."{author_id_col}" AS "{KTP_FRAGMENT_COL}",
             '{parquet_filename_payload}' AS "{KTP_FILENAME_COL}",
+            '{authors_paper_filename}' AS "{SSNAP_FILENAME_COL}",
+            '{hit_papers0_filename}' AS "{SSNHPL0_FILENAME_COL}",
+            '{hit_papers1_filename}' AS "{SSNHPL1_FILENAME_COL}",
             a.*,
             au.* EXCLUDE ("{authors_author_id_col}"),
             CAST(agg."{SSN_PAPERIDS_LEVEL0_COL}" AS VARCHAR) AS "{SSN_PAPERIDS_LEVEL0_COL}",

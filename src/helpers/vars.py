@@ -28,7 +28,11 @@ KTP_HCR_SECONDARY_AFFILIATIONS_COL: Final = "ktp.hcr_secondary_affiliations"
 DRAW_LABEL: Final = "ktp.draw_number"
 RIGHT_NAME_COL: Final = "Researcher/author"
 KTP_FRAGMENT_COL: Final = "ktp.fragment"
-SSN_FILENAME_COL: Final = "ssn.filename"
+SSNAD_FILENAME_COL: Final = "ssnad.filename"
+SSNA_FILENAME_COL: Final = "ssna.filename"
+SSNAP_FILENAME_COL: Final = "ssnap.filename"
+SSNHPL0_FILENAME_COL: Final = "ssnhpl0.filename"
+SSNHPL1_FILENAME_COL: Final = "ssnhpl1.filename"
 SSN_SUM_HIT_PCT_COL: Final = "ssn.sum_hit_1pct"
 SSN_PAPERIDS_LEVEL0_COL: Final = "ssn.paperids_level0"
 SSN_PAPERIDS_LEVEL1_COL: Final = "ssn.paperids_level1"
@@ -371,7 +375,11 @@ __all__ = [
     "KTP_PRIORITY_COL",
     "KTP_PRIORITY_GROUP_COL",
     "KTP_SOURCE_KEY_COL",
-    "SSN_FILENAME_COL",
+    "SSNAD_FILENAME_COL",
+    "SSNA_FILENAME_COL",
+    "SSNAP_FILENAME_COL",
+    "SSNHPL0_FILENAME_COL",
+    "SSNHPL1_FILENAME_COL",
     "SSN_SUM_HIT_PCT_COL",
     "SSN_PAPERIDS_LEVEL0_COL",
     "SSN_PAPERIDS_LEVEL1_COL",
