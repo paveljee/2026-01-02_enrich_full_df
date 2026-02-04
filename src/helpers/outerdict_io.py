@@ -48,3 +48,26 @@ def append_innerdicts_from_table(
 
 def outerdict_record_count(outer_dict: OuterDict) -> int:
     return sum(len(items) for items in outer_dict.values())
+
+
+def append_innerdicts_from_rows_table(
+    conn: duckdb.DuckDBPyConnection,
+    outer_dict: OuterDict,
+    *,
+    table_name: str,
+    procedure: object,
+) -> None:
+    rel = conn.execute(f"SELECT * FROM {table_name}")
+    cols = [desc[0] for desc in rel.description]
+    name_idx = cols.index("name_key")
+    outer_data = outer_dict._data
+    while True:
+        rows = rel.fetchmany(5000)
+        if not rows:
+            break
+        for row in rows:
+            name_key = row[name_idx]
+            record = {col: row[i] for i, col in enumerate(cols) if i != name_idx}
+            outer_data.setdefault(str(name_key), []).append(
+                InnerDict.from_mapping(record, procedure)
+            )

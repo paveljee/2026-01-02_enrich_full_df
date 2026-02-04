@@ -8,7 +8,7 @@ from ..config import PipelineConfig
 from ..data_models import OuterDict
 from .context import PipelineContext
 from .diagnostics import DiagnosticsReport
-from .outerdict_io import append_innerdicts_from_table, load_outerdict_stub
+from .outerdict_io import append_innerdicts_from_rows_table, append_innerdicts_from_table, load_outerdict_stub
 from .pipeline_manager import PipelineManager
 from .procedures import DocxMatchProcedure, ParquetMatchProcedure, XlsxMatchProcedure
 from .resource_monitor import ResourceMonitor
@@ -16,7 +16,7 @@ from .resources import PipelineResources, register_pipeline_resources
 from .schema import (
     DOCX_INNERDICT_TABLE,
     OUTERDICT_STUB_TABLE,
-    PARQUET_INNERDICT_TABLE,
+    PARQUET_AUTHOR_OUTPUT_TABLE,
     XLSX_INNERDICT_TABLE,
 )
 from .step_ids import (
@@ -132,12 +132,11 @@ def init_pipeline(
                 resources=resources.docx_resources,
             )
         if manager.is_done(STEP_MATCH_PARQUET):
-            append_innerdicts_from_table(
+            append_innerdicts_from_rows_table(
                 conn,
                 outer_dict,
-                table_name=PARQUET_INNERDICT_TABLE,
+                table_name=PARQUET_AUTHOR_OUTPUT_TABLE,
                 procedure=ParquetMatchProcedure(),
-                resources=resources.parquet_resources,
             )
 
     context = PipelineContext(

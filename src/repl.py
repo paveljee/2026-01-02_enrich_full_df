@@ -133,6 +133,8 @@ def run_pipeline(args: argparse.Namespace) -> Path | None:
         else:
             console.print(f"[{style}]{msg}[/{style}]")
 
+    context.log = log
+
     try:
         if interactive:
             live = Live(layout, refresh_per_second=4, console=console, transient=True)

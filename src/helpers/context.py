@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import duckdb
 
@@ -31,3 +31,4 @@ class PipelineContext:
     artifacts_dir: Path
     resources: PipelineResources | None = None
     outer_dict: OuterDict | None = None
+    log: Callable[[str, str], None] | None = None
