@@ -522,3 +522,62 @@ Return to REPL; dumps all "2nd view per parquet" into dfs returns a list of thes
 9) prepare card from outerdict. this is just as currently implemented.
 
 CleanUp. This is always executed. It properly handles winding down all operations and prints concluding message(s) to user.
+
+---
+
+## Implementation efforts (post-feedback)
+This section documents the concrete work completed to implement the human feedback end-to-end.
+
+- Refactored the pipeline architecture into the required three-tier structure: `src/repl.py` as orchestrator, `src/steps/` with one module per step, and `src/helpers/` with helper categories. Steps now import only helpers, while helpers encapsulate access to existing modules and utilities.
+- Implemented `Init → RunSteps → CleanUp` flow in `src/repl.py`, including:
+- Mandatory JSON config loading (`--config` required) with no default-config execution path.
+- `--new`/`--resume` mutually-exclusive mode selection plus `--yes` confirmation gate for destructive reset.
+- Transactional step runner that wraps each step in `BEGIN/COMMIT` and `ROLLBACK` on exceptions, records a diagnostics failure section, and halts the pipeline immediately.
+- CleanUp guaranteed via `try/finally`, always stopping resource monitor, closing DuckDB, printing metrics, and reporting diagnostics output location.
+- Moved REPL-owned classes into helpers:
+- `ResourceMonitor` → `src/helpers/resource_monitor.py`
+- `PipelineManager` → `src/helpers/pipeline_manager.py`
+- `DiagnosticsReport` → `src/helpers/diagnostics.py`
+- Added `src/helpers/init.py` that performs JSON config load, resource monitor setup, DuckDB connect, diagnostics init, and reset handling (only when `--new` + confirmation). It returns a `PipelineContext` plus the computed step list, and reconstructs `OuterDict` for resumes by loading persisted tables.
+- Implemented full step set as specified, each in its own module:
+- Step 1 `register_resources`: internalizes file discovery, registers XLSX/DOCX/parquet resources, returns counts and artifacts.
+- Step 2 `load_xlsx`: loads XLSX into immutable `population` table and returns a full DataFrame dump.
+- Step 3 `infer_names`: infers name columns per XLSX, creates `population_names` table plus `population_with_names` view and returns a joined DataFrame.
+- Step 4 `add_economy_priority`: computes `ktp.economies` + `ktp.priority` using World Bank data only in-memory, persists `population_economy` table + `population_with_names_economy` view, returns a joined DataFrame.
+- Step 5 `sample_population`: creates a minimal `samples` table with only `ktp.filename`, `ktp.fragment`, and `ktp.draw_number`, including pilot samples; persists `samples_with_context` and `samples_with_names` views; returns a joined DataFrame for review.
+- Step 6 `build_outerdict`: creates immutable `outerdict_stub` table with JSON-serialized name keys + empty JSON-lines list, plus `outerdict_name_keys` view; builds and returns `OuterDict` for in-memory persistence.
+- Step 7 `match_xlsx`: creates `xlsx_matches` view with required columns and matching logic, persists `xlsx_innerdicts` table (JSON-lines per namekey), appends into `OuterDict`, and creates `xlsx_output` view for user review.
+- Step 8 `match_docx`: loads DOCX files (exactly one table per file), normalizes `ktp.table_1_*` columns with 1-based row numbering, creates `docx_matches` view and `docx_innerdicts` table, appends into `OuterDict`, and creates `docx_output` view for review.
+- Step 9 `match_parquet`: builds `ssn_author_matches` (outerdict-to-author linkage), creates one matched table per parquet with full column preservation and normalized prefixes (`ssnad.*`, `ssnap.*`, `ssnhpl0.*`, `ssnhpl1.*`) plus `ssn.filename`, then creates one view per parquet plus one output view per parquet, and persists `ssn_innerdicts` (JSON-lines per namekey) appended into `OuterDict`.
+- Step 10 `build_cards`: produces cards and output zip exactly as before, using the updated `OuterDict` as its source.
+- Added a shared `PipelineContext` + `StepResult` in `src/helpers/context.py` to standardize step I/O, and centralized artifacts dumping in REPL (DataFrames → CSV; `OuterDict` → JSON).
+- Implemented explicit table/view naming in `src/helpers/schema.py` and ensured all created tables are immutable across later steps.
+- Added JSON-lines utilities and durable `OuterDict` support:
+- `OuterDict` is now append-only (no mutation helpers), returns read-only views of data, and includes `dump_json()` for REPL-driven persistence.
+- `helpers/jsonlines.py` provides safe JSON-lines serialization for innerdicts with `default=str` to handle parquet-derived types.
+- `helpers/outerdict_io.py` loads stub tables and appends innerdicts on resume using persisted JSON-lines tables.
+- Implemented a DOCX loader specialized for the pipeline’s requirements in `helpers/docx_loader.py` (exactly one table, normalized column names, 1-based row numbering).
+- Implemented parquet column normalization and schema discovery helpers in `helpers/parquet_utils.py`.
+- Updated tests for the new `OuterDict` API and added a new test for `OuterDict.dump_json`. All tests now run under `pixi`.
+- Test run (from workspace root): `pixi run test` (31 passed, 3 skipped).
+
+## Test execution report (real data, skipped tests)
+This section records the full test execution using real data paths, including the previously skipped tests and their outcomes.
+
+- Initial run with only repo-local data (no `data/` fixtures) produced 3 skips:
+- `tests/test_csv_sample_validation.py::test_csv_rows_match_samples` skipped because `data/xlsx`, `data/samples`, and `data/OGHIST_2025_07_01.xlsx` were missing.
+- `tests/test_match_names.py::test_match_csv_docx_names_on_full_dataset` skipped because `data/samples` and `data/manual_extractions` were missing.
+- `tests/test_unify_names.py::test_unify_first_last_on_full_dataset` skipped because `data/samples` was missing.
+
+- To execute these against real datasets, I linked the real data paths into the repo `data/` directory:
+- `data/xlsx` → `/Volumes/Users/Anonymous/Workshop/202504161200UTC-4_Nancy_Baxter_Andrea_Tricco_collabs/2024-Historical-Highly-Cited-Researchers-lists - final`
+- `data/samples` → `/Volumes/Users/Anonymous/Workshop/202504161200UTC-4_Nancy_Baxter_Andrea_Tricco_collabs/analyses/2026-01-02_enrich_full_df/data/samples`
+- `data/manual_extractions` → filtered links to valid DOCX files from `/Volumes/Users/Anonymous/Workshop/202504161200UTC-4_Nancy_Baxter_Andrea_Tricco_collabs/analyses/2026-01-02_enrich_full_df/data/manual_extractions` (excluding `~$` temp file causing `BadZipFile`)
+- `data/OGHIST_2025_07_01.xlsx` → `/Volumes/Users/Anonymous/Workshop/202504161200UTC-4_Nancy_Baxter_Andrea_Tricco_collabs/analyses/2026-01-02_enrich_full_df/data/OGHIST_2025_07_01.xlsx`
+
+- Re-run: `pixi run test` resulted in 33 passed and 1 failed. The remaining failure is **data ambiguity** in `tests/test_match_names.py::test_match_csv_docx_names_on_full_dataset`:
+- `match_csv_docx_names` raised multiple-match errors for 7 CSV rows (duplicate name occurrences in DOCX data):  
+  `beeckman, tom` (csv_idx=113, 287),  
+  `lin, zhiqun` (csv_idx=201, 302),  
+  `mangione, carolm` (csv_idx=242, 306),  
+  `kanatzidis, mercouri` (csv_idx=251).

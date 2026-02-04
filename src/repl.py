@@ -1,19 +1,11 @@
 from __future__ import annotations
 
 import argparse
-import json
 import signal
 import sys
-import threading
-import time
-from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
-import duckdb
 import pandas as pd
-import psutil
 from rich import box
 from rich.console import Console
 from rich.layout import Layout
@@ -21,240 +13,106 @@ from rich.live import Live
 from rich.panel import Panel
 from rich.table import Table
 
-from ._vars import (
-    CSV_ROW_INDEX_COL,
-    DOCX_FRAGMENT_COL,
-    DOCX_ROW_INDEX_COL,
-    DOCX_TABLE_INDEX_COL,
-    HCR_FILENAME_COL,
-    HCR_ROW_COL,
-    HCR_XLSX_NAME_COLS,
-    KTP_ECONOMIES_COL,
-    KTP_FILENAME_COL,
-    KTP_FIRST_NAME_COL,
-    KTP_PRIORITY_COL,
-    KTP_PRIORITY_GROUP_COL,
-    KTP_LAST_NAME_COL,
-    KTP_SOURCE_KEY_COL,
-)
-from .cards import build_cards, write_cards_zip
-from .config import PipelineConfig
-from .data_models import FragmentType, RegisteredResource, ResourceGroup
-from .hcr_xlsx.indexer import index_samples
-from .hcr_xlsx.loader import build_population_table
-from .hcr_xlsx.loader import normalize_hcr_header
-from .hcr_xlsx.matcher import match_population
-from .hcr_xlsx.preprocessor import load_high_income_economies
-from .hcr_xlsx.sampler import sample_pilot, sample_population
-from .manual_docx.loader import load_docx_tables
-from .manual_docx.matcher import match_docx
-from .sciscinet_parquet.matcher import match_parquet
-from .utils.files import find_files_by_extension
-from .utils.resources import register_resource, register_resources
+from .data_models import OuterDict
+from .helpers import init_pipeline
+from .helpers.context import PipelineContext, StepResult
+from .helpers.step_ids import STEP_BUILD_CARDS
+from .steps import STEP_REGISTRY
 
 console = Console()
 
 
-class DiagnosticsReport:
-    def __init__(self, base_dir: Path) -> None:
-        base_dir.mkdir(parents=True, exist_ok=True)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.path = base_dir / f"repl_diagnostics_{timestamp}.md"
-        self.path.write_text("# REPL Diagnostics Report\n\n", encoding="utf-8")
-
-    def add_section(self, title: str, lines: list[str]) -> None:
-        content = [f"## {title}", ""] + [f"- {line}" for line in lines] + [""]
-        self.path.write_text(
-            self.path.read_text(encoding="utf-8") + "\n".join(content),
-            encoding="utf-8",
-        )
+def _confirm_reset(interactive: bool) -> bool:
+    if not interactive:
+        return False
+    response = console.input("Reset pipeline state and database? [y/N] ").strip().lower()
+    return response == "y"
 
 
-def _summarize_list(items: list[str], limit: int = 5) -> tuple[list[str], int]:
-    if len(items) <= limit:
-        return items, 0
-    return items[:limit], len(items) - limit
+def _dump_artifacts(context: PipelineContext, step_id: str, artifacts: dict) -> list[Path]:
+    dumped: list[Path] = []
+    context.artifacts_dir.mkdir(parents=True, exist_ok=True)
+
+    parquet_names = artifacts.get("parquet_view_names")
+    parquet_dfs = artifacts.get("parquet_match_dfs")
+    if isinstance(parquet_names, list) and isinstance(parquet_dfs, list) and len(parquet_names) == len(parquet_dfs):
+        for view_name, df in zip(parquet_names, parquet_dfs):
+            if isinstance(df, pd.DataFrame):
+                path = context.artifacts_dir / f"{step_id}_{view_name}.csv"
+                df.to_csv(path, index=False)
+                dumped.append(path)
+
+    for name, artifact in artifacts.items():
+        if name in {"parquet_view_names", "parquet_match_dfs"}:
+            continue
+        if isinstance(artifact, pd.DataFrame):
+            path = context.artifacts_dir / f"{step_id}_{name}.csv"
+            artifact.to_csv(path, index=False)
+            dumped.append(path)
+        elif isinstance(artifact, list) and all(isinstance(x, pd.DataFrame) for x in artifact):
+            for idx, df in enumerate(artifact):
+                path = context.artifacts_dir / f"{step_id}_{name}_{idx}.csv"
+                df.to_csv(path, index=False)
+                dumped.append(path)
+        elif isinstance(artifact, OuterDict):
+            path = context.artifacts_dir / f"{step_id}_{name}.json"
+            artifact.dump_json(path)
+            dumped.append(path)
+        elif isinstance(artifact, Path):
+            dumped.append(artifact)
+    return dumped
 
 
-def _count_outer_records(outer_dict) -> int:
-    return sum(len(items) for items in outer_dict.data.values())
-
-
-def _infer_name_columns(path: Path) -> tuple[str, str] | None:
-    try:
-        df = pd.read_excel(path, engine="openpyxl")
-    except Exception:
-        return None
-    normalized = [normalize_hcr_header(str(col).lower()) for col in df.columns]
-
-    def pick(candidates: list[str]) -> str | None:
-        for cand in candidates:
-            for col in normalized:
-                if cand in col:
-                    return col
-        return None
-
-    first = pick(["first_name", "firstname", "first name", "first"])
-    last = pick(["last_name", "lastname", "last name", "family_name", "familyname", "surname", "last"])
-    if not first or not last or first == last:
-        return None
-    return first, last
-
-
-@dataclass
-class PipelineResources:
-    parquet_resources: dict[str, RegisteredResource]
-    xlsx_resources: dict[str, RegisteredResource]
-    world_bank_resource: RegisteredResource
-    docx_resources: dict[str, RegisteredResource]
-
-
-class ResourceMonitor:
-    def __init__(self) -> None:
-        self.process = psutil.Process()
-        self.running = False
-        self.peak_memory = 0
-        self.thread: threading.Thread | None = None
-
-    def start(self) -> None:
-        self.running = True
-        self.thread = threading.Thread(target=self._monitor, daemon=True)
-        self.thread.start()
-
-    def _monitor(self) -> None:
-        while self.running:
-            mem = self.process.memory_info().rss
-            if mem > self.peak_memory:
-                self.peak_memory = mem
-            time.sleep(0.1)
-
-    def stop(self) -> float:
-        self.running = False
-        if self.thread:
-            self.thread.join()
-        return self.peak_memory / (1024**3)
-
-
-class PipelineManager:
-    def __init__(self, state_file: Path, db_file: Path) -> None:
-        self.state_file = state_file
-        self.db_file = db_file
-        self.state = self._load_state()
-        self.conn: duckdb.DuckDBPyConnection | None = None
-
-    def _load_state(self) -> dict[str, list[str]]:
-        if self.state_file.exists():
-            return json.loads(self.state_file.read_text(encoding="utf-8"))
-        return {"steps_completed": []}
-
-    def save_state(self, step_name: str) -> None:
-        if step_name not in self.state["steps_completed"]:
-            self.state["steps_completed"].append(step_name)
-            self.state_file.parent.mkdir(parents=True, exist_ok=True)
-            self.state_file.write_text(json.dumps(self.state), encoding="utf-8")
-
-    def is_done(self, step_name: str) -> bool:
-        return step_name in self.state["steps_completed"]
-
-    def connect_db(self) -> duckdb.DuckDBPyConnection:
-        if self.conn is None:
-            self.conn = duckdb.connect(str(self.db_file))
-            self.conn.execute("SET memory_limit='20GB'")
-            # Enable unaccent for name matching
-            self.conn.execute("INSTALL splink_udfs FROM community; LOAD splink_udfs;") 
-        return self.conn
-
-    def close(self) -> None:
-        if self.conn:
-            self.conn.close()
-
-
-def register_pipeline_resources(
-    config: PipelineConfig,
-    xlsx_files: list[Path],
-) -> PipelineResources:
-    files = config.files_config
-    parquet_resources = {
-        Path(files["author_details"]["path"]).name: register_resource(
-            Path(files["author_details"]["path"]),
-            group=ResourceGroup.SCISCINET_HF,
-            fragment_type=FragmentType.AUTHOR_ID,
-            description=files["author_details"]["desc"],
-            expected_hash=files["author_details"]["sha256"],
-        ),
-        Path(files["authors_paper"]["path"]).name: register_resource(
-            Path(files["authors_paper"]["path"]),
-            group=ResourceGroup.SCISCINET_HF,
-            fragment_type=FragmentType.PAPER_ID,
-            description=files["authors_paper"]["desc"],
-            expected_hash=files["authors_paper"]["sha256"],
-        ),
-        Path(files["hit_papers_0"]["path"]).name: register_resource(
-            Path(files["hit_papers_0"]["path"]),
-            group=ResourceGroup.SCISCINET_HF,
-            fragment_type=FragmentType.PAPER_ID,
-            description=files["hit_papers_0"]["desc"],
-            expected_hash=files["hit_papers_0"]["sha256"],
-        ),
-        Path(files["hit_papers_1"]["path"]).name: register_resource(
-            Path(files["hit_papers_1"]["path"]),
-            group=ResourceGroup.SCISCINET_HF,
-            fragment_type=FragmentType.PAPER_ID,
-            description=files["hit_papers_1"]["desc"],
-            expected_hash=files["hit_papers_1"]["sha256"],
-        ),
-        Path(files["fields"]["path"]).name: register_resource(
-            Path(files["fields"]["path"]),
-            group=ResourceGroup.SCISCINET_HF,
-            fragment_type=FragmentType.PARQUET_ROW,
-            description=files["fields"]["desc"],
-            expected_hash=files["fields"]["sha256"],
-        ),
-    }
-
-    xlsx_resources = register_resources(
-        xlsx_files,
-        group=ResourceGroup.KTP_PILOT_SAMPLE,
-        fragment_type=FragmentType.EXCEL_ROW,
-        description="HCR XLSX inputs",
-    )
-    world_bank_resource = register_resource(
-        config.world_bank_xlsx,
-        group=ResourceGroup.KTP_PILOT_SAMPLE,
-        fragment_type=FragmentType.EXCEL_ROW,
-        description="World Bank country list",
-    )
-    docx_files = find_files_by_extension(config.docx_dir, "docx", recursive=False)
-    docx_resources = register_resources(
-        docx_files,
-        group=ResourceGroup.KTP_PILOT_SAMPLE,
-        fragment_type=FragmentType.DOCX_ROW,
-        description="KTP DOCX inputs",
-    )
-
-    return PipelineResources(
-        parquet_resources=parquet_resources,
-        xlsx_resources=xlsx_resources,
-        world_bank_resource=world_bank_resource,
-        docx_resources=docx_resources,
-    )
-
-
-def run_reproduction(
-    config: PipelineConfig | None = None,
+def _run_step(
+    step_id: str,
+    step_fn,
+    context: PipelineContext,
     *,
-    use_live: bool = True,
-    verbose: bool = True,
-) -> Path:
-    config = config or PipelineConfig()
-    monitor = ResourceMonitor()
-    monitor.start()
+    log,
+    verbose: bool,
+) -> StepResult:
+    if context.manager.is_done(step_id):
+        return StepResult(step_id=step_id, messages=[f"Skipped {step_id} (already done)."])
 
-    pm = PipelineManager(config.state_file, config.db_file)
-    conn = pm.connect_db()
-    cards: dict[str, str] | None = None
-    zip_path: Path | None = None
-    diagnostics = DiagnosticsReport(Path("data/diagnostics"))
+    log(f"Running step: {step_id}", style="cyan")
+    context.conn.execute("BEGIN")
+    try:
+        result: StepResult = step_fn(context)
+        context.conn.execute("COMMIT")
+        context.manager.save_state(step_id)
+    except Exception as exc:
+        context.conn.execute("ROLLBACK")
+        context.diagnostics.add_section(
+            f"{step_id} (failed)",
+            [f"{type(exc).__name__}: {exc}"],
+        )
+        raise
+
+    if verbose and result.diagnostics:
+        context.diagnostics.add_section(step_id, result.diagnostics)
+    elif verbose and result.messages:
+        context.diagnostics.add_section(step_id, result.messages)
+
+    dumped = _dump_artifacts(context, step_id, result.artifacts)
+    if dumped:
+        result.messages.append(f"Artifacts dumped: {', '.join(str(p) for p in dumped[:5])}")
+        if len(dumped) > 5:
+            result.messages.append(f"...and {len(dumped) - 5} more artifact files.")
+    return result
+
+
+def run_pipeline(args: argparse.Namespace) -> Path | None:
+    interactive = not args.non_interactive
+    reset_confirmed = args.yes or _confirm_reset(interactive) if args.new else False
+
+    init_result = init_pipeline(
+        args,
+        interactive=interactive,
+        reset_confirmed=reset_confirmed,
+    )
+    context = init_result.context
+    steps_to_run = init_result.steps_to_run
+    monitor = init_result.monitor
 
     layout = Layout()
     layout.split_column(
@@ -263,307 +121,71 @@ def run_reproduction(
         Layout(name="footer", size=3),
     )
     layout["header"].update(Panel("KTP Pipeline", style="bold white on blue"))
-    layout["footer"].update(Panel("Preparing cards", style="italic grey50"))
+    layout["footer"].update(Panel("Running steps", style="italic grey50"))
 
     live: Live | None = None
-    peak_ram: float | None = None
+    zip_path: Path | None = None
+    card_count: int | None = None
+
+    def log(msg: str, style: str = "white") -> None:
+        if interactive:
+            layout["body"].update(Panel(msg, style=style, title="Current Task"))
+        else:
+            console.print(f"[{style}]{msg}[/{style}]")
+
     try:
-        if use_live:
+        if interactive:
             live = Live(layout, refresh_per_second=4, console=console, transient=True)
             live.start()
 
-        def log(msg: str, style: str = "white") -> None:
-            if use_live:
-                layout["body"].update(Panel(msg, style=style, title="Current Task"))
-            else:
-                console.print(f"[{style}]{msg}[/{style}]")
-
-        log("Discovering XLSX inputs...", style="cyan")
-        xlsx_files = find_files_by_extension(config.xlsx_dir, "xlsx", recursive=False)
-        if not xlsx_files:
-            raise FileNotFoundError(f"No XLSX files found in {config.xlsx_dir}")
-        if verbose:
-            names = [path.name for path in xlsx_files if not path.name.startswith("~$")]
-            sample, extra = _summarize_list(names)
-            lines = [f"XLSX files: {len(names)}"]
-            if sample:
-                lines.append(f"Example XLSX: {', '.join(sample)}")
-            if extra:
-                lines.append(f"and {extra} more XLSX files (see report).")
-            diagnostics.add_section("Input Discovery", lines)
-
-        if not HCR_XLSX_NAME_COLS:
-            inferred: dict[str, tuple[str, str]] = {}
-            for path in xlsx_files:
-                if path.name.startswith("~$"):
-                    continue
-                mapping = _infer_name_columns(path)
-                if mapping:
-                    inferred[path.name] = mapping
-            if not inferred:
-                raise ValueError("Could not infer name columns from XLSX files.")
-            HCR_XLSX_NAME_COLS.update(inferred)
-            if verbose:
-                examples = [f"{name}: {cols[0]}, {cols[1]}" for name, cols in list(inferred.items())[:5]]
-                diagnostics.add_section(
-                    "XLSX Name Mapping",
-                    [
-                        f"Inferred mappings: {len(inferred)} files",
-                        f"Examples: {', '.join(examples)}",
-                    ],
-                )
-
-        log("Registering resources...", style="cyan")
-        resources = register_pipeline_resources(config, xlsx_files)
-        if verbose:
-            lines = [
-                f"Parquet resources: {len(resources.parquet_resources)}",
-                f"XLSX resources: {len(resources.xlsx_resources)}",
-                f"DOCX resources: {len(resources.docx_resources)}",
-            ]
-            diagnostics.add_section("Resource Registration", lines)
-
-        log("Resetting pipeline tables...", style="cyan")
-        for table in (
-            "population",
-            "samples",
-            "name_keys",
-            "docx_rows",
-            "docx_name_keys",
-            "matched_authors_bridge",
-            "author_papers",
-            "final_agg",
-        ):
-            conn.execute(f"DROP TABLE IF EXISTS {table}")
-        conn.execute("DROP VIEW IF EXISTS all_hits")
-        if verbose:
-            diagnostics.add_section(
-                "Reset",
-                ["Dropped existing pipeline tables/views to ensure a clean run."],
-            )
-
-        log("Loading population table into DuckDB...", style="yellow")
-        build_population_table(
-            conn,
-            resources.xlsx_resources,
-            table_name="population",
-            filename_col=HCR_FILENAME_COL,
-            row_col=HCR_ROW_COL,
-        )
-        if verbose:
-            row_count = conn.execute("SELECT COUNT(*) FROM population").fetchone()[0]
-            col_count = conn.execute("PRAGMA table_info('population')").fetchdf().shape[0]
-            diagnostics.add_section(
-                "Population Load",
-                [f"Rows: {row_count}", f"Columns: {col_count}"],
-            )
-
-        log("Preprocessing world bank economies...", style="yellow")
-        economies = load_high_income_economies(resources.world_bank_resource)
-        if verbose:
-            sample, extra = _summarize_list(economies, limit=10)
-            lines = [f"High-income economies: {len(economies)}"]
-            if sample:
-                lines.append(f"Example economies: {', '.join(sample)}")
-            if extra:
-                lines.append(f"and {extra} more economies (see report).")
-            diagnostics.add_section("World Bank Economies", lines)
-
-        log("Sampling XLSX population...", style="yellow")
-        if sum(config.sample_draw_sizes) != 300:
-            raise ValueError(
-                "Sample draw sizes must total 300 before pilot samples. "
-                f"Got {sum(config.sample_draw_sizes)} from {config.sample_draw_sizes}."
-            )
-        sample_population(
-            conn,
-            population_table="population",
-            samples_table="samples",
-            draw_sizes=config.sample_draw_sizes,
-            seed=config.sample_seed,
-            economies=economies,
-        )
-        sample_pilot(
-            conn,
-            population_table="population",
-            samples_table="samples",
-            pilot_filename=config.pilot_xlsx_name,
-            economies=economies,
-        )
-        if verbose:
-            sample_rows = conn.execute("SELECT COUNT(*) FROM samples").fetchone()[0]
-            candidate_pairs = [
-                (KTP_FIRST_NAME_COL, KTP_LAST_NAME_COL),
-                ("hcr.first_name", "hcr.last_name"),
-                ("hcr.firstname_middlename", "hcr.lastname"),
-            ]
-            name_pair = None
-            for first_col, last_col in candidate_pairs:
-                cols = conn.execute("PRAGMA table_info('samples')").fetchall()
-                col_names = {row[1] for row in cols}
-                if first_col in col_names and last_col in col_names:
-                    name_pair = (first_col, last_col)
-                    break
-            if name_pair:
-                first_col, last_col = name_pair
-                sample_names = conn.execute(
-                    f"""
-                    SELECT "{first_col}", "{last_col}"
-                    FROM samples
-                    WHERE "{first_col}" IS NOT NULL
-                    LIMIT 5
-                    """
-                ).fetchall()
-                names = [f"{last}, {first}" for first, last in sample_names]
-            else:
-                names = []
-            diagnostics.add_section(
-                "Sampling",
-                [
-                    f"Draw sizes: {config.sample_draw_sizes}",
-                    f"Seed: {config.sample_seed}",
-                    f"Sample rows: {sample_rows}",
-                    f"Sample names: {', '.join(names) if names else 'n/a'}",
-                ],
-            )
-
-        log("Indexing samples for name keys...", style="yellow")
-        outer_dict = index_samples(conn, samples_table="samples")
-        if verbose:
-            name_key_count = len(outer_dict.data)
-            diagnostics.add_section(
-                "Indexing",
-                [f"Unique name keys: {name_key_count}"],
-            )
-
-        log("Matching population rows...", style="magenta")
-        before_match = _count_outer_records(outer_dict)
-        match_population(
-            conn,
-            outer_dict,
-            population_table="population",
-            resources=resources.xlsx_resources,
-        )
-        if verbose:
-            after_match = _count_outer_records(outer_dict)
-            diagnostics.add_section(
-                "Population Match",
-                [f"Matched records: {after_match - before_match}"],
-            )
-
-        log("Loading DOCX tables...", style="magenta")
-        docx_df = load_docx_tables(resources.docx_resources)
-        if verbose:
-            diagnostics.add_section(
-                "DOCX Load",
-                [f"DOCX rows: {len(docx_df)}", f"DOCX tables: {docx_df[DOCX_TABLE_INDEX_COL].nunique() if not docx_df.empty else 0}"],
-            )
-
-        log("Matching DOCX rows...", style="magenta")
-        before_docx = _count_outer_records(outer_dict)
-        match_docx(
-            conn,
-            outer_dict,
-            docx_df,
-            resources.docx_resources,
-            fragment_col=DOCX_FRAGMENT_COL,
-        )
-        if verbose:
-            after_docx = _count_outer_records(outer_dict)
-            diagnostics.add_section(
-                "DOCX Match",
-                [f"Matched records: {after_docx - before_docx}"],
-            )
-
-        log("Matching parquet data...", style="magenta")
-        files = config.files_config
-        before_parquet = _count_outer_records(outer_dict)
-        match_parquet(
-            conn,
-            outer_dict,
-            conn.execute("SELECT * FROM samples").df(),
-            resources.parquet_resources,
-            author_details_path=files["author_details"]["path"],
-            authors_paper_path=files["authors_paper"]["path"],
-            hit_papers_level0_path=files["hit_papers_0"]["path"],
-            hit_papers_level1_path=files["hit_papers_1"]["path"],
-        )
-        if verbose:
-            after_parquet = _count_outer_records(outer_dict)
-            diagnostics.add_section(
-                "SciSciNet Match",
-                [f"Matched records: {after_parquet - before_parquet}"],
-            )
-
-        log("Rendering cards...", style="green")
-        excluded_cols = {
-            KTP_FILENAME_COL,
-            KTP_SOURCE_KEY_COL,
-            CSV_ROW_INDEX_COL,
-            DOCX_TABLE_INDEX_COL,
-            DOCX_ROW_INDEX_COL,
-            DOCX_FRAGMENT_COL,
-            KTP_ECONOMIES_COL,
-            KTP_PRIORITY_COL,
-            KTP_PRIORITY_GROUP_COL,
-        }
-        cards = build_cards(
-            outer_dict,
-            total_draws=config.total_draws,
-            intro_date=datetime.now(ZoneInfo("America/Toronto")).strftime("%B %d, %Y"),
-            excluded_cols=excluded_cols,
-        )
-        zip_path = write_cards_zip(
-            cards,
-            config.output_dir,
-            f"{config.xlsx_dir.name}_combined_cards.zip",
-            output_format=config.output_format,
-            reference_docx=config.reference_docx,
-        )
-        if verbose:
-            card_names = list(cards.keys())
-            sample, extra = _summarize_list(card_names)
-            lines = [
-                f"Cards: {len(cards)}",
-                f"Output: {zip_path}",
-            ]
-            if sample:
-                lines.append(f"Example cards: {', '.join(sample)}")
-            if extra:
-                lines.append(f"and {extra} more cards (see report).")
-            diagnostics.add_section("Cards Output", lines)
+        for step_id in steps_to_run:
+            step_fn = STEP_REGISTRY.get(step_id)
+            if step_fn is None:
+                raise ValueError(f"Unknown step: {step_id}")
+            result = _run_step(step_id, step_fn, context, log=log, verbose=not args.quiet)
+            for line in result.messages:
+                log(line, style="green")
+            if step_id == STEP_BUILD_CARDS:
+                zip_path = result.artifacts.get("zip_path")
+                cards = result.artifacts.get("cards")
+                if isinstance(cards, dict):
+                    card_count = len(cards)
     finally:
         if live is not None:
             live.stop()
         peak_ram = monitor.stop()
-        pm.close()
+        context.manager.close()
 
     m_table = Table(title="Execution Metrics", box=box.SIMPLE)
     m_table.add_column("Metric", style="cyan")
     m_table.add_column("Value", style="magenta")
-    if peak_ram is not None:
-        m_table.add_row("Peak RAM Usage", f"{peak_ram:.2f} GB")
-    else:
-        m_table.add_row("Peak RAM Usage", "n/a")
-    if cards is not None:
-        m_table.add_row("Cards", str(len(cards)))
-
+    m_table.add_row("Peak RAM Usage", f"{peak_ram:.2f} GB")
+    if card_count is not None:
+        m_table.add_row("Cards", str(card_count))
     console.print(m_table)
-    if zip_path is None:
-        raise RuntimeError("Pipeline did not produce output zip.")
-    console.print(f"[bold green]Success! Output saved to: {zip_path}[/bold green]")
-    console.print(f"[bold cyan]Diagnostics report saved to: {diagnostics.path}[/bold cyan]")
+    console.print(f"[bold cyan]Diagnostics report saved to: {context.diagnostics.path}[/bold cyan]")
+
+    if zip_path is not None:
+        console.print(f"[bold green]Success! Output saved to: {zip_path}[/bold green]")
     return zip_path
 
 
 def signal_handler(sig, frame) -> None:
-    console.print("\n[bold red]Process Interrupted! State saved. Run again to resume.[/bold red]")
+    console.print("\n[bold red]Process Interrupted![/bold red]")
     sys.exit(0)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="KTP pipeline runner.")
-    parser.add_argument("--config", type=Path, help="Path to JSON config file.")
+    parser.add_argument("--config", type=Path, required=True, help="Path to JSON config file.")
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--new", action="store_true", help="Start a new pipeline run.")
+    mode.add_argument("--resume", action="store_true", help="Resume from the last saved step.")
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Auto-confirm reset when starting a new pipeline (non-interactive).",
+    )
     parser.add_argument(
         "--non-interactive",
         action="store_true",
@@ -575,21 +197,14 @@ def main() -> None:
         help="Reduce diagnostic output (still writes report file).",
     )
     args = parser.parse_args()
-    if args.config:
-        config = PipelineConfig.from_json(args.config)
-    else:
-        config = PipelineConfig()
-    run_reproduction(
-        config,
-        use_live=not args.non_interactive,
-        verbose=not args.quiet,
-    )
+
+    try:
+        run_pipeline(args)
+    except Exception:
+        console.print_exception()
+        sys.exit(1)
 
 
 if __name__ == "__main__":
     signal.signal(signal.SIGINT, signal_handler)
-    try:
-        main()
-    except Exception:
-        console.print_exception()
-        sys.exit(1)
+    main()

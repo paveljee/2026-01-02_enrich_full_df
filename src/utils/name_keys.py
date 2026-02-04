@@ -18,7 +18,7 @@ def build_outer_dict_from_names(names: pd.DataFrame) -> OuterDict:
 
 def build_name_key_frame(outer_dict: OuterDict) -> pd.DataFrame:
     rows = []
-    for key in outer_dict.data:
+    for key in outer_dict.keys():
         name_key = NameKey.from_json_key(key)
         rows.append(
             {
