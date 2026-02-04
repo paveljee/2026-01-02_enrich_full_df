@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import warnings
 from pathlib import Path
 from typing import Mapping
@@ -67,6 +68,9 @@ def _load_income_labels(
     countries = df[1].astype(str).str.strip()
     mapping: dict[str, str] = {}
     rows: list[dict[str, str]] = []
+    def _normalize_match(value: str) -> str:
+        return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
+
     for country, code in zip(countries, codes):
         label = OGHIST_INCOME_LABELS.get(code)
         if label and country and country != "nan":
@@ -74,6 +78,7 @@ def _load_income_labels(
             rows.append(
                 {
                     "match_name": country,
+                    "match_norm": _normalize_match(country),
                     "country": country,
                     "income_label": label,
                 }
@@ -83,6 +88,7 @@ def _load_income_labels(
             rows.append(
                 {
                     "match_name": alias,
+                    "match_norm": _normalize_match(alias),
                     "country": country,
                     "income_label": label,
                 }
@@ -180,17 +186,25 @@ def run(context: PipelineContext) -> StepResult:
     )
     aff_expr = "TRIM(" + " || ' ' || ".join([primary_expr, secondary_expr]) + ")"
     aff_text_col = "a.aff_text"
+    aff_tokens_col = "a.aff_tokens"
 
     high_income = sorted(
         {name for name, label in canonical_map.items() if label == OGHIST_INCOME_LABELS["H"]}
     )
     non_english_hics = _non_english_non_eu_hics(high_income)
 
+    def _normalize_match(value: str) -> str:
+        return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
+
     def _like_clause(items: list[str]) -> str:
         clauses = []
         for item in items:
-            safe_item = item.replace("'", "''")
-            clauses.append(f"{aff_text_col} LIKE '%{COUNTRY_PREFIX}{safe_item}%'")
+            match_norm = _normalize_match(item).replace("'", "''")
+            if not match_norm:
+                continue
+            clauses.append(
+                f"(' ' || {aff_tokens_col} || ' ') LIKE '% {match_norm} %'"
+            )
         return " OR ".join(clauses) if clauses else "FALSE"
 
     any_priority_clause = _like_clause(
@@ -207,6 +221,8 @@ def run(context: PipelineContext) -> StepResult:
             SELECT
                 p."{KTP_POPULATION_INDEX_COL}" AS "{KTP_POPULATION_INDEX_COL}",
                 {aff_expr} AS aff_text,
+                TRIM(regexp_replace(lower(unaccent({aff_expr})), '[^a-z0-9]+', ' '))
+                    AS aff_tokens,
                 {primary_expr} AS "{KTP_HCR_PRIMARY_AFFILIATIONS_COL}",
                 {secondary_expr} AS "{KTP_HCR_SECONDARY_AFFILIATIONS_COL}"
             FROM {POPULATION_TABLE} p
@@ -219,11 +235,14 @@ def run(context: PipelineContext) -> StepResult:
                 m.income_label
             FROM aff a
             JOIN income_map m
-              ON a.aff_text LIKE '%' || '{COUNTRY_PREFIX}' || m.match_name || '%'
+              ON (' ' || a.aff_tokens || ' ') LIKE '% ' || m.match_norm || ' %'
         )
         SELECT
             a."{KTP_POPULATION_INDEX_COL}",
-            COALESCE(to_json(list(DISTINCT m.country)), '[]') AS "{KTP_ECONOMIES_COL}",
+            COALESCE(
+                to_json(list(DISTINCT m.country) FILTER (WHERE m.country IS NOT NULL)),
+                '[]'
+            ) AS "{KTP_ECONOMIES_COL}",
             CASE
                 WHEN bool_or(m.income_label = '{OGHIST_INCOME_LABELS["H"]}')
                     THEN '{OGHIST_INCOME_LABELS["H"]}'
@@ -261,6 +280,7 @@ def run(context: PipelineContext) -> StepResult:
         GROUP BY
             a."{KTP_POPULATION_INDEX_COL}",
             a.aff_text,
+            a.aff_tokens,
             a."{KTP_HCR_PRIMARY_AFFILIATIONS_COL}",
             a."{KTP_HCR_SECONDARY_AFFILIATIONS_COL}"
         """
