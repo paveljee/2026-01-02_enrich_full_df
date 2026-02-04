@@ -16,10 +16,15 @@ from ..helpers.schema import (
 )
 from ..helpers.vars import (
     DRAW_LABEL,
+    HCR_CATEGORY_COL,
     HCR_FILENAME_COL,
+    HCR_FIRST_NAME_COL,
+    HCR_LAST_NAME_COL,
     HCR_ROW_COL,
     KTP_FILENAME_COL,
+    KTP_FIRST_NAME_COL,
     KTP_FRAGMENT_COL,
+    KTP_LAST_NAME_COL,
     KTP_POPULATION_INDEX_COL,
     PILOT_NAME_CATEGORY_TRIPLES,
 )
@@ -102,21 +107,21 @@ def run(context: PipelineContext) -> StepResult:
 
     triples_df = pd.DataFrame(
         PILOT_NAME_CATEGORY_TRIPLES,
-        columns=["hcr.first_name", "hcr.last_name", "hcr.category"],
+        columns=[HCR_FIRST_NAME_COL, HCR_LAST_NAME_COL, HCR_CATEGORY_COL],
     )
     register_frame(conn, "pilot_triples", triples_df)
     pilot_df = conn.execute(
         f"""
         SELECT p."{HCR_FILENAME_COL}" AS "{KTP_FILENAME_COL}",
                p."{HCR_ROW_COL}" AS "{KTP_FRAGMENT_COL}",
-               p."hcr.first_name",
-               p."hcr.last_name",
-               p."hcr.category"
+               p."{HCR_FIRST_NAME_COL}",
+               p."{HCR_LAST_NAME_COL}",
+               p."{HCR_CATEGORY_COL}"
         FROM {POPULATION_TABLE} p
         JOIN pilot_triples t
-          ON p."hcr.first_name" = t."hcr.first_name"
-         AND p."hcr.last_name" = t."hcr.last_name"
-         AND p."hcr.category" = t."hcr.category"
+          ON p."{HCR_FIRST_NAME_COL}" = t."{HCR_FIRST_NAME_COL}"
+         AND p."{HCR_LAST_NAME_COL}" = t."{HCR_LAST_NAME_COL}"
+         AND p."{HCR_CATEGORY_COL}" = t."{HCR_CATEGORY_COL}"
         WHERE p."{HCR_FILENAME_COL}" = ?
         """,
         [context.config.pilot_xlsx_name],
@@ -124,7 +129,7 @@ def run(context: PipelineContext) -> StepResult:
     if not pilot_df.empty:
         order_map = {pair: i for i, pair in enumerate(PILOT_NAME_CATEGORY_TRIPLES)}
         pilot_df["__order"] = pilot_df[
-            ["hcr.first_name", "hcr.last_name", "hcr.category"]
+            [HCR_FIRST_NAME_COL, HCR_LAST_NAME_COL, HCR_CATEGORY_COL]
         ].apply(tuple, axis=1).map(order_map)
         pilot_df = pilot_df.sort_values("__order").drop(columns="__order")
         pilot_df[DRAW_LABEL] = "pilot." + (
@@ -151,7 +156,7 @@ def run(context: PipelineContext) -> StepResult:
         f"""
         CREATE OR REPLACE VIEW {SAMPLES_WITH_NAMES_VIEW} AS
         SELECT s."{KTP_FILENAME_COL}", s."{KTP_FRAGMENT_COL}", s."{DRAW_LABEL}",
-               n."ktp.first_name", n."ktp.last_name"
+               n."{KTP_FIRST_NAME_COL}", n."{KTP_LAST_NAME_COL}"
         FROM {SAMPLES_TABLE} s
         JOIN {POPULATION_TABLE} p
           ON s."{KTP_FILENAME_COL}" = p."{HCR_FILENAME_COL}"

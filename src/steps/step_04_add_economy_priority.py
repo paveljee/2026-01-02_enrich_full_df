@@ -21,14 +21,19 @@ from ..helpers.vars import (
     ENGLISH_HICS,
     EU_COUNTRIES,
     GREATER_CHINA,
+    HCR_CATEGORY_COL,
+    HCR_FILENAME_COL,
+    HCR_ROW_COL,
     HCR_XLSX_AFFILIATIONS_COLS,
     HCR_XLSX_NAME_COLS,
     KTP_COUNTRY_ALIASES,
     KTP_ECONOMIES_COL,
     KTP_ECONOMIES_INCOME_GROUP_COL,
     KTP_ECONOMY_MATCH_COL,
+    KTP_FIRST_NAME_COL,
     KTP_HCR_PRIMARY_AFFILIATIONS_COL,
     KTP_HCR_SECONDARY_AFFILIATIONS_COL,
+    KTP_LAST_NAME_COL,
     KTP_POPULATION_INDEX_COL,
     KTP_PRIORITY_COL,
     KTP_PRIORITY_GROUP_COL,
@@ -185,33 +190,38 @@ def run(context: PipelineContext) -> StepResult:
         filename_map=secondary_map,
     )
     aff_expr = "TRIM(" + " || ' ' || ".join([primary_expr, secondary_expr]) + ")"
-    aff_tokens_col = "a.aff_tokens"
 
     high_income = sorted(
         {name for name, label in canonical_map.items() if label == OGHIST_INCOME_LABELS["H"]}
     )
     non_english_hics = _non_english_non_eu_hics(high_income)
 
-    def _normalize_match(value: str) -> str:
-        return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
+    match_name_to_country = {row["match_name"]: row["country"] for row in income_rows}
 
-    def _like_clause(items: list[str]) -> str:
-        clauses = []
-        for item in items:
-            match_norm = _normalize_match(item).replace("'", "''")
-            if not match_norm:
-                continue
-            clauses.append(
-                f"(' ' || {aff_tokens_col} || ' ') LIKE '% {match_norm} %'"
-            )
-        return " OR ".join(clauses) if clauses else "FALSE"
+    def _countries_for(match_names: list[str]) -> list[str]:
+        countries: list[str] = []
+        for name in match_names:
+            country = match_name_to_country.get(name)
+            if country and country not in countries:
+                countries.append(country)
+        return countries
 
-    any_priority_clause = _like_clause(
-        ENGLISH_HICS + EU_COUNTRIES + GREATER_CHINA + non_english_hics
-    )
-    china_clause = _like_clause(GREATER_CHINA)
-    non_english_clause = _like_clause(non_english_hics)
-    eu_clause = _like_clause(EU_COUNTRIES)
+    english_countries = _countries_for(ENGLISH_HICS)
+    eu_countries = _countries_for(EU_COUNTRIES)
+    china_countries = _countries_for(GREATER_CHINA)
+    non_english_countries = [
+        country for country in non_english_hics if country not in english_countries + eu_countries
+    ]
+
+    def _sql_in_list(values: list[str]) -> str:
+        if not values:
+            return "FALSE"
+
+        def _escape(value: str) -> str:
+            return value.replace("'", "''")
+
+        quoted = ", ".join(f"'{_escape(value)}'" for value in values)
+        return f"m.country IN ({quoted})"
 
     conn.execute(
         f"""
@@ -220,7 +230,7 @@ def run(context: PipelineContext) -> StepResult:
             SELECT
                 p."{KTP_POPULATION_INDEX_COL}" AS "{KTP_POPULATION_INDEX_COL}",
                 {aff_expr} AS aff_text,
-                TRIM(regexp_replace(lower(unaccent({aff_expr})), '[^a-z0-9]+', ' '))
+                TRIM(regexp_replace(lower(unaccent({aff_expr})), '[^a-z0-9]+', ' ', 'g'))
                     AS aff_tokens,
                 {primary_expr} AS "{KTP_HCR_PRIMARY_AFFILIATIONS_COL}",
                 {secondary_expr} AS "{KTP_HCR_SECONDARY_AFFILIATIONS_COL}"
@@ -260,18 +270,24 @@ def run(context: PipelineContext) -> StepResult:
             a."{KTP_HCR_PRIMARY_AFFILIATIONS_COL}",
             a."{KTP_HCR_SECONDARY_AFFILIATIONS_COL}",
             CASE
-                WHEN NOT ({any_priority_clause}) THEN 1
-                WHEN {china_clause} THEN 2
-                WHEN {non_english_clause} THEN 3
-                WHEN {eu_clause} THEN 4
-                ELSE 5
+                WHEN count(m.country) = 0 THEN 1
+                WHEN bool_or({_sql_in_list(china_countries)}) THEN 2
+                WHEN bool_or({_sql_in_list(non_english_countries)}) THEN 3
+                WHEN bool_or({_sql_in_list(eu_countries)}) THEN 4
+                WHEN bool_or({_sql_in_list(english_countries)}) THEN 5
+                ELSE 1
             END AS "{KTP_PRIORITY_COL}",
             CASE
-                WHEN NOT ({any_priority_clause}) THEN '{KTP_PRIORITY_GROUP_LABELS[1]}'
-                WHEN {china_clause} THEN '{KTP_PRIORITY_GROUP_LABELS[2]}'
-                WHEN {non_english_clause} THEN '{KTP_PRIORITY_GROUP_LABELS[3]}'
-                WHEN {eu_clause} THEN '{KTP_PRIORITY_GROUP_LABELS[4]}'
-                ELSE '{KTP_PRIORITY_GROUP_LABELS[5]}'
+                WHEN count(m.country) = 0 THEN '{KTP_PRIORITY_GROUP_LABELS[1]}'
+                WHEN bool_or({_sql_in_list(china_countries)})
+                    THEN '{KTP_PRIORITY_GROUP_LABELS[2]}'
+                WHEN bool_or({_sql_in_list(non_english_countries)})
+                    THEN '{KTP_PRIORITY_GROUP_LABELS[3]}'
+                WHEN bool_or({_sql_in_list(eu_countries)})
+                    THEN '{KTP_PRIORITY_GROUP_LABELS[4]}'
+                WHEN bool_or({_sql_in_list(english_countries)})
+                    THEN '{KTP_PRIORITY_GROUP_LABELS[5]}'
+                ELSE '{KTP_PRIORITY_GROUP_LABELS[1]}'
             END AS "{KTP_PRIORITY_GROUP_COL}"
         FROM aff a
         LEFT JOIN matches m
@@ -332,22 +348,22 @@ def run(context: PipelineContext) -> StepResult:
         if col not in explicit_name_cols and "unnamed" not in col.lower()
     ]
     ordered_hcr = []
-    for col in ("hcr.filename", "hcr.row_number", "hcr.category"):
+    for col in (HCR_FILENAME_COL, HCR_ROW_COL, HCR_CATEGORY_COL):
         if col in hcr_cols:
             ordered_hcr.append(col)
     ordered_hcr += [col for col in hcr_cols if col not in ordered_hcr]
     ordered_cols = (
         [
             KTP_POPULATION_INDEX_COL,
-            "hcr.filename",
-            "hcr.row_number",
-            "ktp.first_name",
-            "ktp.last_name",
-            "hcr.category",
+            HCR_FILENAME_COL,
+            HCR_ROW_COL,
+            KTP_FIRST_NAME_COL,
+            KTP_LAST_NAME_COL,
+            HCR_CATEGORY_COL,
         ]
         + [
             col for col in ordered_hcr
-            if col not in {"hcr.filename", "hcr.row_number", "hcr.category"}
+            if col not in {HCR_FILENAME_COL, HCR_ROW_COL, HCR_CATEGORY_COL}
         ]
         + [
             KTP_HCR_PRIMARY_AFFILIATIONS_COL,

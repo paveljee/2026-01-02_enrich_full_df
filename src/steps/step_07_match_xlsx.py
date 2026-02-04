@@ -29,6 +29,10 @@ from ..helpers.vars import (
     KTP_FIRST_NAME_COL,
     KTP_FRAGMENT_COL,
     KTP_LAST_NAME_COL,
+    KTP_POPULATION_INDEX_COL,
+    KTP_PRIORITY_COL,
+    KTP_PRIORITY_GROUP_COL,
+    KTP_XLSX_MATCH_COL,
 )
 
 
@@ -81,13 +85,13 @@ def run(context: PipelineContext) -> StepResult:
                 e."{KTP_ECONOMIES_COL}" AS "{KTP_ECONOMIES_COL}",
                 e."{KTP_ECONOMIES_INCOME_GROUP_COL}" AS "{KTP_ECONOMIES_INCOME_GROUP_COL}",
                 e."{KTP_ECONOMY_MATCH_COL}" AS "{KTP_ECONOMY_MATCH_COL}",
-                e."ktp.priority" AS "ktp.priority",
-                e."ktp.priority_group" AS "ktp.priority_group"
+                e."{KTP_PRIORITY_COL}" AS "{KTP_PRIORITY_COL}",
+                e."{KTP_PRIORITY_GROUP_COL}" AS "{KTP_PRIORITY_GROUP_COL}"
             FROM {POPULATION_TABLE} p
             JOIN {POPULATION_NAMES_TABLE} n
-              ON p."ktp.population_index" = n."ktp.population_index"
+              ON p."{KTP_POPULATION_INDEX_COL}" = n."{KTP_POPULATION_INDEX_COL}"
             LEFT JOIN {POPULATION_ECON_TABLE} e
-              ON p."ktp.population_index" = e."ktp.population_index"
+              ON p."{KTP_POPULATION_INDEX_COL}" = e."{KTP_POPULATION_INDEX_COL}"
         )
         SELECT
             nd.name_key,
@@ -95,12 +99,12 @@ def run(context: PipelineContext) -> StepResult:
             nd."{KTP_LAST_NAME_COL}",
             nd."{DRAW_LABEL}",
             p.*,
-            p."{HCR_FILENAME_COL}" AS "ktp.filename",
+            p."{HCR_FILENAME_COL}" AS "{KTP_FILENAME_COL}",
             p."{HCR_ROW_COL}" AS "{KTP_FRAGMENT_COL}",
             json_object(
                 lower(unaccent(nd."{KTP_FIRST_NAME_COL}" || ' ' || nd."{KTP_LAST_NAME_COL}")),
                 lower(unaccent(p.pop_first || ' ' || p.pop_last))
-            ) AS "ktp.xlsx_match"
+            ) AS "{KTP_XLSX_MATCH_COL}"
         FROM pop_names p
         RIGHT JOIN name_draws nd
           ON lower(unaccent(nd."{KTP_LAST_NAME_COL}")) = lower(unaccent(p.pop_last))
@@ -115,7 +119,7 @@ def run(context: PipelineContext) -> StepResult:
     )
 
     matched_df = conn.execute(f"SELECT * FROM {XLSX_MATCH_VIEW}").df()
-    matched_df = matched_df[matched_df["ktp.filename"].notna()]
+    matched_df = matched_df[matched_df[KTP_FILENAME_COL].notna()]
 
     inner_rows = []
     for name_key, group in matched_df.groupby("name_key", dropna=False):
@@ -140,8 +144,8 @@ def run(context: PipelineContext) -> StepResult:
         CREATE OR REPLACE VIEW {XLSX_OUTPUT_VIEW} AS
         SELECT x.*, nk."{KTP_FIRST_NAME_COL}", nk."{KTP_LAST_NAME_COL}",
                s."{DRAW_LABEL}" AS sample_draw,
-               s."ktp.filename" AS sample_filename,
-               s."ktp.fragment" AS sample_fragment,
+               s."{KTP_FILENAME_COL}" AS sample_filename,
+               s."{KTP_FRAGMENT_COL}" AS sample_fragment,
                p.*, n.*, e.*
         FROM {XLSX_INNERDICT_TABLE} x
         LEFT JOIN {OUTERDICT_NAME_VIEW} nk
@@ -153,9 +157,9 @@ def run(context: PipelineContext) -> StepResult:
           ON lower(nk."{KTP_FIRST_NAME_COL}") = lower(n."{KTP_FIRST_NAME_COL}")
          AND lower(nk."{KTP_LAST_NAME_COL}") = lower(n."{KTP_LAST_NAME_COL}")
         LEFT JOIN {POPULATION_TABLE} p
-          ON p."ktp.population_index" = n."ktp.population_index"
+          ON p."{KTP_POPULATION_INDEX_COL}" = n."{KTP_POPULATION_INDEX_COL}"
         LEFT JOIN {POPULATION_ECON_TABLE} e
-          ON p."ktp.population_index" = e."ktp.population_index"
+          ON p."{KTP_POPULATION_INDEX_COL}" = e."{KTP_POPULATION_INDEX_COL}"
         """
     )
 

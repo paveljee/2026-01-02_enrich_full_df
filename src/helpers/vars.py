@@ -8,11 +8,11 @@ KTP_FIRST_NAME_ORIG_COLNAME_COL: Final = "ktp.first_name_original_column_name"
 KTP_LAST_NAME_ORIG_COLNAME_COL: Final = "ktp.last_name_original_column_name"
 KTP_FILENAME_COL: Final = "ktp.filename"
 KTP_SOURCE_KEY_COL: Final = "ktp.source_key"
-KTP_ECONOMIES_COL: Final = "ktp.economies"
-KTP_ECONOMIES_INCOME_GROUP_COL: Final = "ktp.economies_income_group"
-KTP_ECONOMY_MATCH_COL: Final = "ktp.economy_match"
+KTP_ECONOMIES_COL: Final = "ktp.world_bank_economies"
+KTP_ECONOMIES_INCOME_GROUP_COL: Final = "ktp.world_bank_economies_income_group"
+KTP_ECONOMY_MATCH_COL: Final = "ktp.world_bank_economies_match"
 KTP_PRIORITY_COL: Final = "ktp.priority"
-KTP_PRIORITY_GROUP_COL: Final = "ktp.priority_group"
+KTP_PRIORITY_GROUP_COL: Final = "ktp.priority_label"
 KTP_HCR_PRIMARY_AFFILIATIONS_COL: Final = "ktp.hcr_primary_affiliations"
 KTP_HCR_SECONDARY_AFFILIATIONS_COL: Final = "ktp.hcr_secondary_affiliations"
 DRAW_LABEL: Final = "ktp.draw_number"
@@ -21,14 +21,23 @@ KTP_FRAGMENT_COL: Final = "ktp.fragment"
 
 HCR_FILENAME_COL: Final = "hcr.filename"
 HCR_ROW_COL: Final = "hcr.row_number"
+HCR_FIRST_NAME_COL: Final = "hcr.first_name"
+HCR_LAST_NAME_COL: Final = "hcr.last_name"
+HCR_CATEGORY_COL: Final = "hcr.category"
 KTP_POPULATION_INDEX_COL: Final = "ktp.population_index"
 DOCX_TABLE_INDEX_COL: Final = "ktp.docx_table_index"
 DOCX_ROW_INDEX_COL: Final = "ktp.docx_row_index"
 DOCX_FRAGMENT_COL: Final = "ktp.docx_fragment"
 CSV_ROW_INDEX_COL: Final = "ktp.csv_row_index"
 
+KTP_XLSX_MATCH_COL: Final = "ktp.xlsx_match"
+KTP_DOCX_MATCH_COL: Final = "ktp.docx_match"
+KTP_SSNAD_MATCH_COL: Final = "ktp.ssnad_match"
+KTP_DOCX_ROW_NUMBER_COL: Final = "ktp.table_1_row_number"
+KTP_DOCX_TABLE_1_PREFIX: Final = "ktp.table_1_"
+
 KTP_PRIORITY_GROUP_LABELS: Final[dict[int, str]] = {
-    1: "LMICS_NO_GREATER_CHINA",
+    1: "LMICS_NO_GREATER_CHINA_OR_UNKNOWN",
     2: "GREATER_CHINA",
     3: "NON_ENGLISH_NON_EU_HICS_NO_GREATER_CHINA",
     4: "EU_COUNTRIES",
@@ -42,7 +51,10 @@ OGHIST_INCOME_LABELS = {
     "UM": "Upper middle income LMICs",
 }
 
-# Source: GPT 5.2 via chatgpt.com, inference date: 2026-02-04
+# Source: GPT-5.2 via chatgpt.com, inference date: 2026-02-04
+# Updated with GPT-5.2-Codex via Codex app for macOS, same date
+# Revised manually by Pavel Zhelnov on the same date
+# Keys are as in OGHIST_2025_07_01.xlsx
 KTP_COUNTRY_ALIASES = {
     # Big common ones
     "United States": [
@@ -52,6 +64,10 @@ KTP_COUNTRY_ALIASES = {
         "U.S.",
         "United States of America",
         "America",
+        "United State",
+        "Stanford University",
+        "E.I. Dupont de Nemours Co.",
+        "Urban Design 4 Health, Inc.",
     ],
     "United Kingdom": [
         "UK",
@@ -60,11 +76,18 @@ KTP_COUNTRY_ALIASES = {
         "Britain",
         "GB",
         "G.B.",
-        "United Kingdom of Great Britain and Northern Ireland",
+        "England",
     ],
 
     # Koreas
-    "Korea, Rep.": ["South Korea", "Republic of Korea", "Korea (South)", "ROK", "KOR"],
+    "Korea, Rep.": [
+        "South Korea",
+        "Republic of Korea",
+        "Korea (South)",
+        "ROK",
+        "KOR",
+        "Korea, Republic of",
+    ],
     "Korea, Dem. Rep.": ["North Korea", "Democratic People's Republic of Korea", "DPRK", "PRK"],
 
     # Congo pair
@@ -107,8 +130,14 @@ KTP_COUNTRY_ALIASES = {
     "Macao SAR, China": ["Macao", "Macau", "Macau SAR", "Macao SAR"],
     "Taiwan, China": ["Taiwan", "Chinese Taipei", "Republic of China", "ROC"],
 
+    # Institution / shorthand aliases seen in HCR affiliations
+    "Finland": ["University of Helsinki"],
+    "Saudi Arabia": [
+        "King Abdullah University of Science and Technology",
+    ],
+
     # Split/long official names commonly shortened
-    "Czechia": ["Czech Republic"],
+    "Czechia": ["Czech"],
     "Slovak Republic": ["Slovakia"],
     "Kyrgyz Republic": ["Kyrgyzstan"],
     "Lao PDR": ["Laos", "Lao People's Democratic Republic"],
@@ -124,7 +153,7 @@ KTP_COUNTRY_ALIASES = {
     "Brunei Darussalam": ["Brunei"],
     "Bolivia": ["Bolivia (Plurinational State of)", "Plurinational State of Bolivia"],
     "Tanzania": ["United Republic of Tanzania", "Tanzania, United Rep."],
-    "Vietnam": ["Viet Nam", "Vietnam"],
+    "Viet Nam": ["Vietnam"],
     "Cabo Verde": ["Cape Verde"],
     "Eswatini": ["Swaziland"],
 
@@ -142,7 +171,7 @@ KTP_COUNTRY_ALIASES = {
     "Turks and Caicos Islands": ["Turks & Caicos Islands", "Turks and Caicos", "T&C", "TCI"],
     "British Virgin Islands": ["BVI", "B.V.I.", "Virgin Islands, British"],
     "Faeroe Islands": ["Faroe Islands", "Faroes"],
-    "Channel Islands": ["Jersey", "Guernsey"],
+    # "Channel Islands": ["Jersey", "Guernsey"],  # mismatch with New Jersey
 
     # “St.” variants (people often type either way)
     "St. Kitts and Nevis": ["Saint Kitts and Nevis", "St Kitts and Nevis", "St Kitts & Nevis"],
@@ -164,13 +193,7 @@ HCR_XLSX_AFFILIATIONS_COLS: Final[dict[str, tuple[list[str], list[str]]]] = {}
 COUNTRY_PREFIX: Final = ", "
 ENGLISH_HICS: Final[list[str]] = [
     "United States",
-    "USA",
-    "U.S.A.",
-    "US",
-    "U.S.",
     "United Kingdom",
-    "UK",
-    "U.K.",
     "Australia",
     "Canada",
     "New Zealand",
@@ -314,6 +337,9 @@ __all__ = [
     "DOCX_TABLE_INDEX_COL",
     "DRAW_LABEL",
     "HCR_FILENAME_COL",
+    "HCR_FIRST_NAME_COL",
+    "HCR_LAST_NAME_COL",
+    "HCR_CATEGORY_COL",
     "HCR_ROW_COL",
     "HCR_XLSX_AFFILIATIONS_COLS",
     "HCR_XLSX_NAME_COLS",

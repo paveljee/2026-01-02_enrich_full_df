@@ -19,6 +19,9 @@ console = Console()
 def run_reproduction(args: argparse.Namespace) -> Path | None:
     interactive = not args.non_interactive
     reset_confirmed = False
+    context = None
+    monitor = None
+    auto_confirm = bool(args.yes)
 
     if args.new:
         if args.yes:
@@ -78,7 +81,7 @@ def run_reproduction(args: argparse.Namespace) -> Path | None:
         if interactive:
             print_history()
         if args.resume:
-            if not args.yes:
+            if not auto_confirm:
                 if interactive:
                     console.print("Resume pipeline from next step? [y/N]", markup=False)
                     response = console.input("> ", markup=False).strip().lower()
@@ -108,14 +111,18 @@ def run_reproduction(args: argparse.Namespace) -> Path | None:
                 cards = result.artifacts.get("cards")
                 if isinstance(cards, dict):
                     card_count = len(cards)
-            if interactive:
+            if interactive and not auto_confirm:
                 console.print("Continue to next step? [y/N]", markup=False)
                 response = console.input("> ", markup=False).strip().lower()
                 if response != "y":
                     break
     finally:
-        peak_ram = monitor.stop()
-        context.manager.close()
+        if monitor is not None:
+            peak_ram = monitor.stop()
+        else:
+            peak_ram = 0.0
+        if context is not None:
+            context.manager.close()
 
     m_table = Table(title="Execution Metrics", box=box.SIMPLE)
     m_table.add_column("Metric", style="cyan")

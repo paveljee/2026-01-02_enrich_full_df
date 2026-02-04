@@ -140,69 +140,73 @@ def init_pipeline(
     config = PipelineConfig.from_json(Path(args.config))
     manager = PipelineManager(config.state_file, config.db_file)
     conn = manager.connect_db()
-
     monitor = ResourceMonitor()
     monitor.start()
 
-    if args.new:
-        if not reset_confirmed:
-            raise ValueError("Pipeline reset confirmation required for --new.")
-        _reset_pipeline(conn, manager)
+    try:
+        if args.new:
+            if not reset_confirmed:
+                raise ValueError("Pipeline reset confirmation required for --new.")
+            _reset_pipeline(conn, manager)
 
-    session_stamp = None
-    if args.new:
-        session_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        manager.set_session_dir(session_stamp)
-    else:
-        session_stamp = manager.get_session_dir()
-        if session_stamp is None:
+        session_stamp = None
+        if args.new:
             session_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             manager.set_session_dir(session_stamp)
+        else:
+            session_stamp = manager.get_session_dir()
+            if session_stamp is None:
+                session_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                manager.set_session_dir(session_stamp)
 
-    diagnostics_dir = Path("data/diagnostics") / session_stamp
-    diagnostics = DiagnosticsReport(diagnostics_dir)
+        diagnostics_dir = Path("data/diagnostics") / session_stamp
+        diagnostics = DiagnosticsReport(diagnostics_dir)
 
-    steps_to_run = STEP_ORDER if args.new else [s for s in STEP_ORDER if not manager.is_done(s)]
+        steps_to_run = STEP_ORDER if args.new else [s for s in STEP_ORDER if not manager.is_done(s)]
 
-    resources: PipelineResources | None = None
-    if manager.is_done(STEP_REGISTER_RESOURCES):
-        resources = register_pipeline_resources(config)
-
-    outer_dict: OuterDict | None = None
-    if manager.is_done(STEP_BUILD_OUTERDICT):
-        outer_dict = _load_outerdict_stub(conn, table_name=OUTERDICT_STUB_TABLE)
-        if resources is None:
+        resources: PipelineResources | None = None
+        if manager.is_done(STEP_REGISTER_RESOURCES):
             resources = register_pipeline_resources(config)
-        if manager.is_done(STEP_MATCH_XLSX):
-            _append_innerdicts_from_table(
-                conn,
-                table_name=XLSX_INNERDICT_TABLE,
-                outer_dict=outer_dict,
-                procedure=XlsxMatchProcedure(),
-            )
-        if manager.is_done(STEP_MATCH_DOCX):
-            _append_innerdicts_from_table(
-                conn,
-                table_name=DOCX_INNERDICT_TABLE,
-                outer_dict=outer_dict,
-                procedure=DocxMatchProcedure(),
-            )
-        if manager.is_done(STEP_MATCH_PARQUET):
-            _append_innerdicts_from_rows_table(
-                conn,
-                table_name=PARQUET_AUTHOR_OUTPUT_TABLE,
-                outer_dict=outer_dict,
-                procedure=ParquetMatchProcedure(),
-            )
 
-    context = PipelineContext(
-        config=config,
-        manager=manager,
-        conn=conn,
-        diagnostics=diagnostics,
-        interactive=interactive,
-        artifacts_dir=_artifact_dir(diagnostics_dir),
-        resources=resources,
-        outer_dict=outer_dict,
-    )
-    return InitResult(context=context, steps_to_run=steps_to_run, monitor=monitor)
+        outer_dict: OuterDict | None = None
+        if manager.is_done(STEP_BUILD_OUTERDICT):
+            outer_dict = _load_outerdict_stub(conn, table_name=OUTERDICT_STUB_TABLE)
+            if resources is None:
+                resources = register_pipeline_resources(config)
+            if manager.is_done(STEP_MATCH_XLSX):
+                _append_innerdicts_from_table(
+                    conn,
+                    table_name=XLSX_INNERDICT_TABLE,
+                    outer_dict=outer_dict,
+                    procedure=XlsxMatchProcedure(),
+                )
+            if manager.is_done(STEP_MATCH_DOCX):
+                _append_innerdicts_from_table(
+                    conn,
+                    table_name=DOCX_INNERDICT_TABLE,
+                    outer_dict=outer_dict,
+                    procedure=DocxMatchProcedure(),
+                )
+            if manager.is_done(STEP_MATCH_PARQUET):
+                _append_innerdicts_from_rows_table(
+                    conn,
+                    table_name=PARQUET_AUTHOR_OUTPUT_TABLE,
+                    outer_dict=outer_dict,
+                    procedure=ParquetMatchProcedure(),
+                )
+
+        context = PipelineContext(
+            config=config,
+            manager=manager,
+            conn=conn,
+            diagnostics=diagnostics,
+            interactive=interactive,
+            artifacts_dir=_artifact_dir(diagnostics_dir),
+            resources=resources,
+            outer_dict=outer_dict,
+        )
+        return InitResult(context=context, steps_to_run=steps_to_run, monitor=monitor)
+    except Exception:
+        monitor.stop()
+        manager.close()
+        raise

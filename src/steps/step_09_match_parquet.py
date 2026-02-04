@@ -18,6 +18,9 @@ from ..helpers.schema import (
     safe_identifier,
 )
 from ..helpers.vars import (
+    DRAW_LABEL,
+    HCR_FILENAME_COL,
+    HCR_ROW_COL,
     KTP_ECONOMIES_COL,
     KTP_ECONOMIES_INCOME_GROUP_COL,
     KTP_ECONOMY_MATCH_COL,
@@ -25,6 +28,10 @@ from ..helpers.vars import (
     KTP_FIRST_NAME_COL,
     KTP_FRAGMENT_COL,
     KTP_LAST_NAME_COL,
+    KTP_POPULATION_INDEX_COL,
+    KTP_PRIORITY_COL,
+    KTP_PRIORITY_GROUP_COL,
+    KTP_SSNAD_MATCH_COL,
 )
 
 
@@ -139,7 +146,7 @@ def run(context: PipelineContext) -> StepResult:
             json_object(
                 n.match_key_norm,
                 lower(unaccent(p.alt_name))
-            ) AS "ktp.ssnad_match"
+            ) AS "{KTP_SSNAD_MATCH_COL}"
         FROM names n
         JOIN parq p
           ON lower(unaccent(p.alt_name)) = n.match_key_norm
@@ -241,21 +248,21 @@ def run(context: PipelineContext) -> StepResult:
             SELECT
                 s."{KTP_FILENAME_COL}" AS sample_filename,
                 s."{KTP_FRAGMENT_COL}" AS sample_fragment,
-                s."ktp.draw_number" AS sample_draw,
+                s."{DRAW_LABEL}" AS sample_draw,
                 s."{KTP_FIRST_NAME_COL}",
                 s."{KTP_LAST_NAME_COL}",
                 p.*,
                 e."{KTP_ECONOMIES_COL}" AS "{KTP_ECONOMIES_COL}",
                 e."{KTP_ECONOMIES_INCOME_GROUP_COL}" AS "{KTP_ECONOMIES_INCOME_GROUP_COL}",
                 e."{KTP_ECONOMY_MATCH_COL}" AS "{KTP_ECONOMY_MATCH_COL}",
-                e."ktp.priority" AS "ktp.priority",
-                e."ktp.priority_group" AS "ktp.priority_group"
+                e."{KTP_PRIORITY_COL}" AS "{KTP_PRIORITY_COL}",
+                e."{KTP_PRIORITY_GROUP_COL}" AS "{KTP_PRIORITY_GROUP_COL}"
             FROM {SAMPLES_WITH_NAMES_VIEW} s
             JOIN {POPULATION_TABLE} p
-              ON s."{KTP_FILENAME_COL}" = p."hcr.filename"
-             AND s."{KTP_FRAGMENT_COL}" = p."hcr.row_number"
+              ON s."{KTP_FILENAME_COL}" = p."{HCR_FILENAME_COL}"
+             AND s."{KTP_FRAGMENT_COL}" = p."{HCR_ROW_COL}"
             LEFT JOIN {POPULATION_ECON_TABLE} e
-              ON p."ktp.population_index" = e."ktp.population_index"
+              ON p."{KTP_POPULATION_INDEX_COL}" = e."{KTP_POPULATION_INDEX_COL}"
         )
         SELECT v.*, sc.*
         FROM {PARQUET_AUTHOR_OUTPUT_TABLE} v

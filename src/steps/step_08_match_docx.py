@@ -27,14 +27,16 @@ from ..helpers.vars import (
     DOCX_ROW_INDEX_COL,
     DOCX_TABLE_INDEX_COL,
     DRAW_LABEL,
+    KTP_DOCX_MATCH_COL,
+    KTP_DOCX_ROW_NUMBER_COL,
+    KTP_DOCX_TABLE_1_PREFIX,
     KTP_FILENAME_COL,
     KTP_FIRST_NAME_COL,
     KTP_FRAGMENT_COL,
     KTP_LAST_NAME_COL,
+    KTP_POPULATION_INDEX_COL,
     RIGHT_NAME_COL,
 )
-
-DOCX_ROW_NUMBER_COL = "ktp.table_1_row_number"
 
 
 def normalize_docx_column_name(column: str) -> str:
@@ -42,7 +44,7 @@ def normalize_docx_column_name(column: str) -> str:
         return str(column)
     normalized = re.sub(r"[^\w\s]", "_", str(column).lower())
     normalized = re.sub(r"\s", "_", normalized)
-    normalized = f"ktp.table_1_{normalized}"
+    normalized = f"{KTP_DOCX_TABLE_1_PREFIX}{normalized}"
     normalized = re.sub(r"_+", "_", normalized)
     return normalized
 
@@ -79,7 +81,7 @@ def load_single_table_docx(resources: dict[str, RegisteredResource]) -> pd.DataF
         table = tables[0].copy()
         table.columns = [normalize_docx_column_name(col) for col in table.columns]
         table[KTP_FILENAME_COL] = path.name
-        table[DOCX_ROW_NUMBER_COL] = range(1, len(table) + 1)
+        table[KTP_DOCX_ROW_NUMBER_COL] = range(1, len(table) + 1)
         frames.append(table)
     if not frames:
         return pd.DataFrame()
@@ -167,11 +169,11 @@ def run(context: PipelineContext) -> StepResult:
             nd."{KTP_LAST_NAME_COL}",
             nd."{DRAW_LABEL}",
             d.*,
-            d."{DOCX_ROW_NUMBER_COL}" AS "{KTP_FRAGMENT_COL}",
+            d."{KTP_DOCX_ROW_NUMBER_COL}" AS "{KTP_FRAGMENT_COL}",
             json_object(
                 lower(unaccent(nd."{KTP_FIRST_NAME_COL}" || ' ' || nd."{KTP_LAST_NAME_COL}")),
                 lower(unaccent(d."{name_col}"))
-            ) AS "ktp.docx_match"
+            ) AS "{KTP_DOCX_MATCH_COL}"
         FROM docx_clean d
         RIGHT JOIN names_clean nd
           ON POSITION(nd.first_clean IN d.docx_clean) > 0
@@ -182,7 +184,7 @@ def run(context: PipelineContext) -> StepResult:
     matched_df = conn.execute(f"SELECT * FROM {DOCX_MATCH_VIEW}").df()
     if "docx_clean" in matched_df.columns:
         matched_df = matched_df.drop(columns=["docx_clean"])
-    matched_df = matched_df[matched_df["ktp.filename"].notna()]
+    matched_df = matched_df[matched_df[KTP_FILENAME_COL].notna()]
 
     inner_rows = []
     for name_key, group in matched_df.groupby("name_key", dropna=False):
@@ -207,8 +209,8 @@ def run(context: PipelineContext) -> StepResult:
         CREATE OR REPLACE VIEW {DOCX_OUTPUT_VIEW} AS
         SELECT d.*, nk."{KTP_FIRST_NAME_COL}", nk."{KTP_LAST_NAME_COL}",
                s."{DRAW_LABEL}" AS sample_draw,
-               s."ktp.filename" AS sample_filename,
-               s."ktp.fragment" AS sample_fragment,
+               s."{KTP_FILENAME_COL}" AS sample_filename,
+               s."{KTP_FRAGMENT_COL}" AS sample_fragment,
                p.*, n.*
         FROM {DOCX_INNERDICT_TABLE} d
         LEFT JOIN {OUTERDICT_NAME_VIEW} nk
@@ -220,7 +222,7 @@ def run(context: PipelineContext) -> StepResult:
           ON lower(nk."{KTP_FIRST_NAME_COL}") = lower(n."{KTP_FIRST_NAME_COL}")
          AND lower(nk."{KTP_LAST_NAME_COL}") = lower(n."{KTP_LAST_NAME_COL}")
         LEFT JOIN {POPULATION_TABLE} p
-          ON p."ktp.population_index" = n."ktp.population_index"
+          ON p."{KTP_POPULATION_INDEX_COL}" = n."{KTP_POPULATION_INDEX_COL}"
         """
     )
 
