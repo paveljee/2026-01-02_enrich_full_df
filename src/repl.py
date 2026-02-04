@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import signal
 import sys
 from pathlib import Path
 
@@ -13,7 +12,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from .helpers import init_pipeline
-from .helpers.repl_runtime import confirm_reset, run_step
+from .helpers.repl_runtime import run_step
 from .helpers.step_ids import STEP_BUILD_CARDS
 from .steps import STEP_REGISTRY
 
@@ -23,8 +22,18 @@ console = Console()
 def run_reproduction(args: argparse.Namespace) -> Path | None:
     interactive = not args.non_interactive
     reset_confirmed = False
+
     if args.new:
-        reset_confirmed = args.yes or confirm_reset(console, interactive=interactive)
+        if args.yes:
+            reset_confirmed = True
+        elif interactive:
+            response = console.input(
+                "Reset pipeline state and database? [y/N] ",
+                markup=False,
+            ).strip().lower()
+            reset_confirmed = response == "y"
+        else:
+            reset_confirmed = False
 
     init_result = init_pipeline(
         args,
@@ -58,7 +67,12 @@ def run_reproduction(args: argparse.Namespace) -> Path | None:
 
     try:
         if interactive:
-            live = Live(layout, refresh_per_second=4, console=console, transient=True)
+            live = Live(
+                renderable=layout,
+                refresh_per_second=4,
+                console=console,
+                transient=True,
+            )
             live.start()
 
         for step_id in steps_to_run:
@@ -73,6 +87,19 @@ def run_reproduction(args: argparse.Namespace) -> Path | None:
                 cards = result.artifacts.get("cards")
                 if isinstance(cards, dict):
                     card_count = len(cards)
+            if interactive:
+                if live is not None:
+                    live.stop()
+                try:
+                    response = console.input(
+                        "Continue to next step? [y/N] ",
+                        markup=False,
+                    ).strip().lower()
+                    if response != "y":
+                        break
+                finally:
+                    if live is not None:
+                        live.start()
     finally:
         if live is not None:
             live.stop()
@@ -91,11 +118,6 @@ def run_reproduction(args: argparse.Namespace) -> Path | None:
     if zip_path is not None:
         console.print(f"[bold green]Success! Output saved to: {zip_path}[/bold green]")
     return zip_path
-
-
-def signal_handler(sig, frame) -> None:
-    console.print("\n[bold red]Process Interrupted![/bold red]")
-    sys.exit(0)
 
 
 def main() -> None:
@@ -123,11 +145,13 @@ def main() -> None:
 
     try:
         run_reproduction(args)
+    except KeyboardInterrupt:
+        console.print("\n[bold red]Process Interrupted![/bold red]")
+        sys.exit(130)
     except Exception:
         console.print_exception()
         sys.exit(1)
 
 
 if __name__ == "__main__":
-    signal.signal(signal.SIGINT, signal_handler)
     main()

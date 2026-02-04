@@ -61,3 +61,12 @@ The user requested a refactor that makes step modules more self-contained and pr
 - MyPy: passed
 - Pytest: passed (37 passed, 1 skipped)
 - Skipped: `tests/test_csv_sample_validation.py::test_csv_rows_match_samples` (sample data not present at the expected path)
+
+### REPL interactive fixes (2026-02-04)
+- Added a per-step confirmation prompt in interactive mode.
+- Switched SIGINT handling to `KeyboardInterrupt` so cleanup runs and exit is graceful.
+- Test run (post-change):
+- Command: `pixi run pre-commit`
+- Ruff: passed
+- MyPy: passed
+- Pytest: passed (37 passed, 1 skipped)

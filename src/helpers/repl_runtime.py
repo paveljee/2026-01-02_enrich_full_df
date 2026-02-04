@@ -4,17 +4,9 @@ from pathlib import Path
 from typing import Callable
 
 import pandas as pd
-from rich.console import Console
 
 from .context import PipelineContext, StepResult
 from .data_models import OuterDict
-
-
-def confirm_reset(console: Console, *, interactive: bool) -> bool:
-    if not interactive:
-        return False
-    response = console.input("Reset pipeline state and database? [y/N] ").strip().lower()
-    return response == "y"
 
 
 def dump_artifacts(context: PipelineContext, step_id: str, artifacts: dict) -> list[Path]:
@@ -93,4 +85,4 @@ def run_step(
     return result
 
 
-__all__ = ["confirm_reset", "dump_artifacts", "run_step"]
+__all__ = ["dump_artifacts", "run_step"]
