@@ -55,6 +55,26 @@ def run(context: PipelineContext) -> StepResult:
             LEFT JOIN {SAMPLES_WITH_NAMES_VIEW} s
               ON lower(nk."{KTP_FIRST_NAME_COL}") = lower(s."{KTP_FIRST_NAME_COL}")
              AND lower(nk."{KTP_LAST_NAME_COL}") = lower(s."{KTP_LAST_NAME_COL}")
+        ),
+        names_clean AS (
+            SELECT
+                nd.*,
+                regexp_replace(lower(unaccent(nd."{KTP_FIRST_NAME_COL}")), '[^0-9a-z]+', '', 'g')
+                    AS first_clean,
+                regexp_replace(lower(unaccent(nd."{KTP_LAST_NAME_COL}")), '[^0-9a-z]+', '', 'g')
+                    AS last_clean
+            FROM name_draws nd
+            WHERE nd."{KTP_FIRST_NAME_COL}" IS NOT NULL
+              AND nd."{KTP_LAST_NAME_COL}" IS NOT NULL
+              AND nd."{KTP_FIRST_NAME_COL}" <> ''
+              AND nd."{KTP_LAST_NAME_COL}" <> ''
+        ),
+        docx_clean AS (
+            SELECT
+                d.*,
+                regexp_replace(lower(unaccent(COALESCE(d."{name_col}", ''))), '[^0-9a-z]+', '', 'g')
+                    AS docx_clean
+            FROM {DOCX_TABLE} d
         )
         SELECT
             nd.name_key,
@@ -67,22 +87,10 @@ def run(context: PipelineContext) -> StepResult:
                 lower(unaccent(nd."{KTP_FIRST_NAME_COL}" || ' ' || nd."{KTP_LAST_NAME_COL}")),
                 lower(unaccent(d."{name_col}"))
             ) AS "ktp.docx_match"
-        FROM {DOCX_TABLE} d
-        RIGHT JOIN name_draws nd
-          ON array_length(
-                list_intersect(
-                    regexp_split_to_array(lower(unaccent(d."{name_col}")), '\\s+'),
-                    regexp_split_to_array(
-                        lower(unaccent(nd."{KTP_FIRST_NAME_COL}" || ' ' || nd."{KTP_LAST_NAME_COL}")),
-                        '\\s+'
-                    )
-                )
-             ) = array_length(
-                regexp_split_to_array(
-                    lower(unaccent(nd."{KTP_FIRST_NAME_COL}" || ' ' || nd."{KTP_LAST_NAME_COL}")),
-                    '\\s+'
-                )
-             )
+        FROM docx_clean d
+        RIGHT JOIN names_clean nd
+          ON POSITION(nd.first_clean IN d.docx_clean) > 0
+         AND POSITION(nd.last_clean IN d.docx_clean) > 0
         """
     )
 
@@ -122,15 +130,15 @@ def run(context: PipelineContext) -> StepResult:
                s."ktp.fragment" AS sample_fragment,
                p.*, n.*
         FROM {DOCX_INNERDICT_TABLE} d
-        FULL OUTER JOIN {OUTERDICT_NAME_VIEW} nk
+        LEFT JOIN {OUTERDICT_NAME_VIEW} nk
           ON d.name_key = nk.name_key
-        FULL OUTER JOIN {SAMPLES_WITH_NAMES_VIEW} s
+        LEFT JOIN {SAMPLES_WITH_NAMES_VIEW} s
           ON lower(nk."{KTP_FIRST_NAME_COL}") = lower(s."{KTP_FIRST_NAME_COL}")
          AND lower(nk."{KTP_LAST_NAME_COL}") = lower(s."{KTP_LAST_NAME_COL}")
-        FULL OUTER JOIN {POPULATION_NAMES_TABLE} n
+        LEFT JOIN {POPULATION_NAMES_TABLE} n
           ON lower(nk."{KTP_FIRST_NAME_COL}") = lower(n."{KTP_FIRST_NAME_COL}")
          AND lower(nk."{KTP_LAST_NAME_COL}") = lower(n."{KTP_LAST_NAME_COL}")
-        FULL OUTER JOIN {POPULATION_TABLE} p
+        LEFT JOIN {POPULATION_TABLE} p
           ON p."ktp.population_index" = n."ktp.population_index"
         """
     )

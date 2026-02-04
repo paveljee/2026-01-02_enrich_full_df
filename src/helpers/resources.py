@@ -18,11 +18,11 @@ class PipelineResources:
 
 
 def discover_xlsx_files(xlsx_dir: Path) -> list[Path]:
-    return find_files_by_extension(xlsx_dir, "xlsx", recursive=False)
+    return sorted(find_files_by_extension(xlsx_dir, "xlsx", recursive=False))
 
 
 def discover_docx_files(docx_dir: Path) -> list[Path]:
-    return find_files_by_extension(docx_dir, "docx", recursive=False)
+    return sorted(find_files_by_extension(docx_dir, "docx", recursive=False))
 
 
 def register_pipeline_resources(config: PipelineConfig) -> PipelineResources:

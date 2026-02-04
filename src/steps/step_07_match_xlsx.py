@@ -114,17 +114,17 @@ def run(context: PipelineContext) -> StepResult:
                s."ktp.fragment" AS sample_fragment,
                p.*, n.*, e.*
         FROM {XLSX_INNERDICT_TABLE} x
-        FULL OUTER JOIN {OUTERDICT_NAME_VIEW} nk
+        LEFT JOIN {OUTERDICT_NAME_VIEW} nk
           ON x.name_key = nk.name_key
-        FULL OUTER JOIN {SAMPLES_WITH_NAMES_VIEW} s
+        LEFT JOIN {SAMPLES_WITH_NAMES_VIEW} s
           ON lower(nk."{KTP_FIRST_NAME_COL}") = lower(s."{KTP_FIRST_NAME_COL}")
          AND lower(nk."{KTP_LAST_NAME_COL}") = lower(s."{KTP_LAST_NAME_COL}")
-        FULL OUTER JOIN {POPULATION_NAMES_TABLE} n
+        LEFT JOIN {POPULATION_NAMES_TABLE} n
           ON lower(nk."{KTP_FIRST_NAME_COL}") = lower(n."{KTP_FIRST_NAME_COL}")
          AND lower(nk."{KTP_LAST_NAME_COL}") = lower(n."{KTP_LAST_NAME_COL}")
-        FULL OUTER JOIN {POPULATION_TABLE} p
+        LEFT JOIN {POPULATION_TABLE} p
           ON p."ktp.population_index" = n."ktp.population_index"
-        FULL OUTER JOIN {POPULATION_ECON_TABLE} e
+        LEFT JOIN {POPULATION_ECON_TABLE} e
           ON p."ktp.population_index" = e."ktp.population_index"
         """
     )
