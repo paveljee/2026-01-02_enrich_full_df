@@ -46,6 +46,8 @@ def test_csv_rows_match_samples(tmp_path: Path) -> None:
 
     conn = duckdb.connect()
     try:
+        conn.execute("INSTALL splink_udfs FROM community;")
+        conn.execute("LOAD splink_udfs;")
         xlsx_resources = register_resources(
             xlsx_files,
             group=ResourceGroup.KTP_PILOT_SAMPLE,

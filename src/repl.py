@@ -6,11 +6,7 @@ from pathlib import Path
 
 from rich import box
 from rich.console import Console
-from rich.layout import Layout
-from rich.live import Live
-from rich.panel import Panel
 from rich.table import Table
-from rich.text import Text
 
 from .helpers import init_pipeline
 from .helpers.repl_runtime import run_step
@@ -45,16 +41,6 @@ def run_reproduction(args: argparse.Namespace) -> Path | None:
     steps_to_run = init_result.steps_to_run
     monitor = init_result.monitor
 
-    layout = Layout()
-    layout.split_column(
-        Layout(name="header", size=3),
-        Layout(name="body"),
-        Layout(name="footer", size=3),
-    )
-    layout["header"].update(Panel("KTP Pipeline", style="bold white on blue"))
-    layout["footer"].update(Panel("Running steps", style="italic grey50"))
-
-    live: Live | None = None
     zip_path: Path | None = None
     card_count: int | None = None
 
@@ -73,50 +59,29 @@ def run_reproduction(args: argparse.Namespace) -> Path | None:
                 style, msg = "white", line
             log_history.append((style, msg))
 
-    def render_history() -> Text:
-        text = Text()
+    def print_history() -> None:
+        if not log_history:
+            return
         for style, msg in log_history:
-            text.append(msg, style=style)
-            text.append("\n")
-        return text
+            console.print(f"[{style}]{msg}[/{style}]")
 
     def log(msg: str, style: str = "white") -> None:
         session_log_path.parent.mkdir(parents=True, exist_ok=True)
         with session_log_path.open("a", encoding="utf-8") as handle:
             handle.write(f"{style}\t{msg}\n")
-        if interactive:
-            log_history.append((style, msg))
-            layout["body"].update(Panel(render_history(), title="Current Task"))
-        else:
-            console.print(f"[{style}]{msg}[/{style}]")
+        log_history.append((style, msg))
+        console.print(f"[{style}]{msg}[/{style}]")
 
     context.log = log
 
     try:
         if interactive:
-            if log_history:
-                layout["body"].update(
-                    Panel(render_history(), title="Current Task")
-                )
-            live = Live(
-                renderable=layout,
-                refresh_per_second=4,
-                console=console,
-                transient=False,
-            )
-            live.start()
-
+            print_history()
         if args.resume:
             if not args.yes:
                 if interactive:
-                    if live is not None:
-                        live.stop()
-                    layout["footer"].update(Panel("Resume pipeline from next step? [y/N]"))
                     console.print("Resume pipeline from next step? [y/N]", markup=False)
                     response = console.input("> ", markup=False).strip().lower()
-                    layout["footer"].update(Panel("Running steps", style="italic grey50"))
-                    if live is not None:
-                        live.start()
                     if response != "y":
                         return zip_path
                 else:
@@ -144,19 +109,11 @@ def run_reproduction(args: argparse.Namespace) -> Path | None:
                 if isinstance(cards, dict):
                     card_count = len(cards)
             if interactive:
-                if live is not None:
-                    live.stop()
-                layout["footer"].update(Panel("Continue to next step? [y/N]"))
                 console.print("Continue to next step? [y/N]", markup=False)
                 response = console.input("> ", markup=False).strip().lower()
-                layout["footer"].update(Panel("Running steps", style="italic grey50"))
-                if live is not None:
-                    live.start()
                 if response != "y":
                     break
     finally:
-        if live is not None:
-            live.stop()
         peak_ram = monitor.stop()
         context.manager.close()
 

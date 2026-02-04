@@ -18,7 +18,6 @@ from ..helpers.schema import (
     POPULATION_TABLE,
 )
 from ..helpers.vars import (
-    COUNTRY_PREFIX,
     ENGLISH_HICS,
     EU_COUNTRIES,
     GREATER_CHINA,
@@ -68,6 +67,7 @@ def _load_income_labels(
     countries = df[1].astype(str).str.strip()
     mapping: dict[str, str] = {}
     rows: list[dict[str, str]] = []
+
     def _normalize_match(value: str) -> str:
         return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
 
@@ -185,7 +185,6 @@ def run(context: PipelineContext) -> StepResult:
         filename_map=secondary_map,
     )
     aff_expr = "TRIM(" + " || ' ' || ".join([primary_expr, secondary_expr]) + ")"
-    aff_text_col = "a.aff_text"
     aff_tokens_col = "a.aff_tokens"
 
     high_income = sorted(
@@ -346,7 +345,10 @@ def run(context: PipelineContext) -> StepResult:
             "ktp.last_name",
             "hcr.category",
         ]
-        + [col for col in ordered_hcr if col not in {"hcr.filename", "hcr.row_number", "hcr.category"}]
+        + [
+            col for col in ordered_hcr
+            if col not in {"hcr.filename", "hcr.row_number", "hcr.category"}
+        ]
         + [
             KTP_HCR_PRIMARY_AFFILIATIONS_COL,
             KTP_HCR_SECONDARY_AFFILIATIONS_COL,
