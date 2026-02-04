@@ -65,8 +65,15 @@ The user requested a refactor that makes step modules more self-contained and pr
 ### REPL interactive fixes (2026-02-04)
 - Added a per-step confirmation prompt in interactive mode.
 - Switched SIGINT handling to `KeyboardInterrupt` so cleanup runs and exit is graceful.
+- Inserted a blank line before starting the rich Live UI to avoid overwriting Pixi startup output.
+- Added an early newline when running under Pixi (via `PIXI_*` env vars) so initial output does not share the activation line.
+- Kept the Live UI visible during per-step prompts by setting `transient=False` and pausing Live for input.
+- Prompt now renders in the footer and as a plain console line before reading input.
 - Test run (post-change):
 - Command: `pixi run pre-commit`
 - Ruff: passed
 - MyPy: passed
 - Pytest: passed (37 passed, 1 skipped)
+
+### Diagnostics output fix (2026-02-04)
+- Diagnostics now write to a timestamped session directory under `data/diagnostics/<YYYYmmdd_HHMMSS>/`.

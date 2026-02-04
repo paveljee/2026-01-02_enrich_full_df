@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from .config import PipelineConfig
@@ -137,7 +138,6 @@ def init_pipeline(
         raise ValueError("A JSON config file is required. Use --config <path>.")
 
     config = PipelineConfig.from_json(Path(args.config))
-    diagnostics = DiagnosticsReport(Path("data/diagnostics"))
     manager = PipelineManager(config.state_file, config.db_file)
     conn = manager.connect_db()
 
@@ -148,6 +148,19 @@ def init_pipeline(
         if not reset_confirmed:
             raise ValueError("Pipeline reset confirmation required for --new.")
         _reset_pipeline(conn, manager)
+
+    session_stamp = None
+    if args.new:
+        session_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        manager.set_session_dir(session_stamp)
+    else:
+        session_stamp = manager.get_session_dir()
+        if session_stamp is None:
+            session_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            manager.set_session_dir(session_stamp)
+
+    diagnostics_dir = Path("data/diagnostics") / session_stamp
+    diagnostics = DiagnosticsReport(diagnostics_dir)
 
     steps_to_run = STEP_ORDER if args.new else [s for s in STEP_ORDER if not manager.is_done(s)]
 
@@ -188,7 +201,7 @@ def init_pipeline(
         conn=conn,
         diagnostics=diagnostics,
         interactive=interactive,
-        artifacts_dir=_artifact_dir(Path("data/diagnostics")),
+        artifacts_dir=_artifact_dir(diagnostics_dir),
         resources=resources,
         outer_dict=outer_dict,
     )
