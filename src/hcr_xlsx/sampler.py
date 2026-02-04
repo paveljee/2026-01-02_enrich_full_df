@@ -7,6 +7,7 @@ import pandas as pd
 from .._vars import (
     DRAW_LABEL,
     HCR_FILENAME_COL,
+    HCR_XLSX_NAME_COLS,
     KTP_FILENAME_COL,
     KTP_POPULATION_INDEX_COL,
     PILOT_NAME_CATEGORY_TRIPLES,
@@ -109,9 +110,12 @@ def sample_pilot(
     name_category_triples: list[tuple[str, str, str]] | None = None,
 ) -> None:
     name_category_triples = name_category_triples or PILOT_NAME_CATEGORY_TRIPLES
+    if pilot_filename not in HCR_XLSX_NAME_COLS:
+        raise ValueError(f"Missing name column mapping for {pilot_filename}")
+    first_col, last_col = HCR_XLSX_NAME_COLS[pilot_filename]
     triples_df = pd.DataFrame(
         name_category_triples,
-        columns=["hcr.first_name", "hcr.last_name", "hcr.category"],
+        columns=[first_col, last_col, "hcr.category"],
     )
     register_frame(conn, "pilot_triples", triples_df)
     sample_df = conn.execute(
@@ -119,8 +123,8 @@ def sample_pilot(
         SELECT p.*
         FROM {population_table} p
         JOIN pilot_triples t
-          ON p."hcr.first_name" = t."hcr.first_name"
-         AND p."hcr.last_name" = t."hcr.last_name"
+          ON p."{first_col}" = t."{first_col}"
+         AND p."{last_col}" = t."{last_col}"
          AND p."hcr.category" = t."hcr.category"
         WHERE p."{HCR_FILENAME_COL}" = ?
         """,

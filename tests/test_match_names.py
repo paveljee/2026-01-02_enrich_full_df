@@ -8,6 +8,7 @@ from src._vars import KTP_FIRST_NAME_COL, KTP_LAST_NAME_COL, RIGHT_NAME_COL
 from src.name_utils import match_csv_docx_names, unify_first_last
 from src.parse_docx import parse_docx_table
 from src.utils.files import find_files_by_extension
+from tests.real_data_utils import DOCX_DIR, SAMPLES_DIR, list_docx_files, list_sample_csv_files
 
 TEST_CSV_DIR = Path("data/samples")
 TEST_DOCX_DIR = Path("data/manual_extractions")
@@ -132,19 +133,20 @@ def test_match_csv_docx_names_with_synthetic_data(synthetic_csv_docx_pair):
 
 def test_match_csv_docx_names_on_full_dataset(tmp_path):
     """Test match_csv_docx_names on full dataset with actual data."""
-    
-    if not TEST_CSV_DIR.exists():
-        pytest.skip(f"Test data directory not found: {TEST_CSV_DIR}")
-    
-    if not TEST_DOCX_DIR.exists():
-        pytest.skip(f"Test DOCX directory not found: {TEST_DOCX_DIR}")
-    
-    # Find files
-    csv_files = find_files_by_extension(TEST_CSV_DIR, "csv", recursive=False)
+
+    if SAMPLES_DIR.exists() and DOCX_DIR.exists():
+        csv_files = list_sample_csv_files()
+        docx_files = list_docx_files()
+    else:
+        if not TEST_CSV_DIR.exists():
+            pytest.skip(f"Test data directory not found: {TEST_CSV_DIR}")
+        if not TEST_DOCX_DIR.exists():
+            pytest.skip(f"Test DOCX directory not found: {TEST_DOCX_DIR}")
+        csv_files = find_files_by_extension(TEST_CSV_DIR, "csv", recursive=False)
+        docx_files = find_files_by_extension(TEST_DOCX_DIR, "docx", recursive=False)
+
     if not csv_files:
         pytest.skip("No CSV files found")
-    
-    docx_files = find_files_by_extension(TEST_DOCX_DIR, "docx", recursive=False)
     if not docx_files:
         pytest.skip("No DOCX files found")
     
@@ -173,16 +175,16 @@ def test_match_csv_docx_names_on_full_dataset(tmp_path):
             csv_df[[KTP_FIRST_NAME_COL, KTP_LAST_NAME_COL]],
             docx_df[RIGHT_NAME_COL],
         )
-        
+
         # Verify sample of matches
         for idx in range(min(10, len(docx_indices))):
             first = csv_df[KTP_FIRST_NAME_COL].iloc[idx]
             last = csv_df[KTP_LAST_NAME_COL].iloc[idx]
             matched_name = docx_df[RIGHT_NAME_COL].iloc[docx_indices[idx]]
-            
+
             if first not in matched_name or last not in matched_name:
                 failures.append((idx, first, last, matched_name))
-        
+
     except ValueError as e:
         msg = str(e)
 

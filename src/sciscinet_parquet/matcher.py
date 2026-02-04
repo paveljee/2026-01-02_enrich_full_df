@@ -5,7 +5,7 @@ from pathlib import Path
 import duckdb
 import pandas as pd
 
-from .._vars import KTP_FILENAME_COL
+from .._vars import KTP_FILENAME_COL, KTP_FIRST_NAME_COL, KTP_LAST_NAME_COL
 from ..data_models import OuterDict, RegisteredResource
 from ..utils.name_keys import NAME_KEY_COL
 from ..utils.records import append_records
@@ -43,8 +43,17 @@ def match_parquet(
     # https://github.com/moj-analytical-services/splink_udfs
 
     input_df = sample_df.copy()
+    if "hcr.first_name" in input_df.columns and "hcr.last_name" in input_df.columns:
+        first_col = "hcr.first_name"
+        last_col = "hcr.last_name"
+    elif KTP_FIRST_NAME_COL in input_df.columns and KTP_LAST_NAME_COL in input_df.columns:
+        first_col = KTP_FIRST_NAME_COL
+        last_col = KTP_LAST_NAME_COL
+    else:
+        raise ValueError("Sample data missing required name columns for parquet matching.")
+
     input_df["match_name"] = (
-        input_df["hcr.first_name"].astype(str) + " " + input_df["hcr.last_name"].astype(str)
+        input_df[first_col].astype(str) + " " + input_df[last_col].astype(str)
     )
     input_df["match_key_norm"] = input_df["match_name"].str.lower()
 
