@@ -22,17 +22,13 @@ from src import _vars
 
 
 def test_csv_rows_match_samples(tmp_path: Path) -> None:
-    if HCR_XLSX_DIR.exists() and SAMPLES_DIR.exists() and WORLD_BANK_XLSX.exists():
-        xlsx_dir = HCR_XLSX_DIR
-        csv_dir = SAMPLES_DIR
-        world_bank = WORLD_BANK_XLSX
-    else:
-        data_dir = Path("data")
-        xlsx_dir = data_dir / "xlsx"
-        csv_dir = data_dir / "samples"
-        world_bank = data_dir / "OGHIST_2025_07_01.xlsx"
-        if not xlsx_dir.exists() or not csv_dir.exists() or not world_bank.exists():
-            pytest.skip("Sample data not available for CSV validation.")
+    data_dir = Path("data")
+    xlsx_dir = data_dir / "2024-Historical-Highly-Cited-Researchers-lists - final"
+    csv_dir = data_dir / "samples"
+    world_bank = data_dir / "OGHIST_2025_07_01.xlsx"
+
+    if not xlsx_dir.exists() or not csv_dir.exists() or not world_bank.exists():
+        pytest.skip("Sample data not available for CSV validation.")
 
     xlsx_files = sorted(xlsx_dir.glob("*.xlsx"))
     if not xlsx_files:

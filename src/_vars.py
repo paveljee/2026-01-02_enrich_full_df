@@ -11,6 +11,7 @@ KTP_PRIORITY_COL: Final = "ktp.priority"
 KTP_PRIORITY_GROUP_COL: Final = "ktp.priority_group"
 DRAW_LABEL: Final = "ktp.draw_number"
 RIGHT_NAME_COL: Final = "Researcher/author"
+KTP_FRAGMENT_COL: Final = "ktp.fragment"
 
 HCR_FILENAME_COL: Final = "hcr.filename"
 HCR_ROW_COL: Final = "hcr.row_number"

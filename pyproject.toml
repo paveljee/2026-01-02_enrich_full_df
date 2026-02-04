@@ -42,9 +42,13 @@ args = [
 ]
 cmd = """
 {% if module_name == "src.repl" %}
-python -m src.repl
+python -m src.repl --config config.repl.json --new --yes --non-interactive
 {% endif %}
 """
+cwd = "."
+
+[tool.pixi.tasks.repl]
+cmd = "python -m src.repl --config config.repl.json --new --yes --non-interactive"
 cwd = "."
 
 [tool.pixi.tasks.ruff]

@@ -66,23 +66,36 @@ def sample_population(
 ) -> None:
     result = conn.execute(f"SELECT COUNT(*) FROM {population_table}").fetchone()
     count = result[0] if result else 0
+    population_indices = conn.execute(
+        f'SELECT "{KTP_POPULATION_INDEX_COL}" FROM {population_table}'
+    ).df()
+    index_pool = population_indices[KTP_POPULATION_INDEX_COL].to_numpy()
     rng = np.random.default_rng(seed)
     draw_number = 1
     for draw_size in draw_sizes:
-        indices = rng.integers(0, count, size=draw_size)
-        idx_df = pd.DataFrame({KTP_POPULATION_INDEX_COL: indices})
+        if count == 0 or len(index_pool) == 0:
+            raise ValueError("Population table is empty; cannot sample.")
+        indices = rng.choice(index_pool, size=draw_size, replace=True)
+        idx_df = pd.DataFrame(
+            {
+                "sample_id": np.arange(draw_size),
+                KTP_POPULATION_INDEX_COL: indices,
+            }
+        )
         register_frame(conn, "sample_indices", idx_df)
         sample_df = conn.execute(
             f"""
-            SELECT p.*
+            SELECT s.sample_id, p.*
             FROM {population_table} p
             JOIN sample_indices s
               ON p."{KTP_POPULATION_INDEX_COL}" = s."{KTP_POPULATION_INDEX_COL}"
             """
         ).df()
+        sample_df = sample_df.sort_values("sample_id").reset_index(drop=True)
         sample_df[DRAW_LABEL] = np.arange(draw_number, draw_number + draw_size)
         sample_df[KTP_FILENAME_COL] = sample_df[HCR_FILENAME_COL]
         sample_df = preprocess_samples(sample_df, economies=economies)
+        sample_df = sample_df.drop(columns=["sample_id"])
         _append_samples_table(conn, samples_table, sample_df)
         draw_number += draw_size
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 
 import pandas as pd
@@ -21,7 +22,9 @@ from ..data_models import RegisteredResource
 
 def load_high_income_economies(resource: RegisteredResource) -> list[str]:
     path = Path(resource.__fspath__())
-    df = pd.read_excel(path, sheet_name="Country Analytical History", engine="openpyxl")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        df = pd.read_excel(path, sheet_name="Country Analytical History", engine="openpyxl")
     filtered = df[df.iloc[:, 38] == "H"]
     values = filtered.iloc[:, 1].tolist()
     return values

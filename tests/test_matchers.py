@@ -66,10 +66,10 @@ def test_xlsx_matcher_appends_records(tmp_path, monkeypatch) -> None:
     ada_key = NameKey(first_name="Ada", last_name="Lovelace").to_json_key()
     grace_key = NameKey(first_name="Grace", last_name="Hopper").to_json_key()
 
-    assert len(outer_dict.data[ada_key]) == 1
-    assert outer_dict.data[ada_key][0].data[HCR_ROW_COL] == 10
-    assert outer_dict.data[ada_key][0].data[KTP_FILENAME_COL] == xlsx_path.name
-    assert outer_dict.data[grace_key] == []
+    assert len(outer_dict.get_inner_by_key(ada_key)) == 1
+    assert outer_dict.get_inner_by_key(ada_key)[0].data[HCR_ROW_COL] == 10
+    assert outer_dict.get_inner_by_key(ada_key)[0].data[KTP_FILENAME_COL] == xlsx_path.name
+    assert outer_dict.get_inner_by_key(grace_key) == ()
 
 
 def test_docx_matcher_matches_cleaned_names(tmp_path) -> None:
@@ -116,7 +116,7 @@ def test_docx_matcher_matches_cleaned_names(tmp_path) -> None:
     jane_key = NameKey(first_name="Jane", last_name="Doe").to_json_key()
     ada_key = NameKey(first_name="Ada", last_name="Lovelace").to_json_key()
 
-    assert len(outer_dict.data[jane_key]) == 1
-    assert outer_dict.data[jane_key][0].data[RIGHT_NAME_COL] == "Dr. Jane A. Doe"
-    assert len(outer_dict.data[ada_key]) == 1
-    assert outer_dict.data[ada_key][0].data[RIGHT_NAME_COL] == "Ada-Lovelace"
+    assert len(outer_dict.get_inner_by_key(jane_key)) == 1
+    assert outer_dict.get_inner_by_key(jane_key)[0].data[RIGHT_NAME_COL] == "Dr. Jane A. Doe"
+    assert len(outer_dict.get_inner_by_key(ada_key)) == 1
+    assert outer_dict.get_inner_by_key(ada_key)[0].data[RIGHT_NAME_COL] == "Ada-Lovelace"
