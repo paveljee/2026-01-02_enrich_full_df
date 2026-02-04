@@ -6,12 +6,11 @@ from pathlib import Path
 import duckdb
 import pandas as pd
 
-from src.data_models import FragmentType, ResourceGroup
+from src.data_models import FragmentType, NameKey, OuterDict, ResourceGroup
 from src.utils.duckdb import register_frame
 from src.utils.files import find_files_by_extension
 from src.utils.name_keys import build_name_key_frame
 from src.utils.resources import register_resource, register_resources
-from src.data_models import NameKey, OuterDict
 
 
 def test_register_frame_replaces_schema() -> None:
@@ -25,7 +24,9 @@ def test_register_frame_replaces_schema() -> None:
         cols = conn.execute("PRAGMA table_info('demo')").fetchall()
         col_names = [row[1] for row in cols]
         assert col_names == ["b"]
-        assert conn.execute("SELECT COUNT(*) FROM demo").fetchone()[0] == 1
+        result = conn.execute("SELECT COUNT(*) FROM demo").fetchone()
+        assert result is not None
+        assert result[0] == 1
     finally:
         conn.close()
 

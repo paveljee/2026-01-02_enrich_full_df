@@ -6,6 +6,7 @@ import duckdb
 import pandas as pd
 import pytest
 
+from src import _vars
 from src._vars import HCR_FILENAME_COL, KTP_POPULATION_INDEX_COL
 from src.data_models import FragmentType, ResourceGroup
 from src.hcr_xlsx.loader import build_population_table
@@ -13,12 +14,8 @@ from src.hcr_xlsx.preprocessor import load_high_income_economies
 from src.hcr_xlsx.sampler import sample_pilot, sample_population
 from src.utils.resources import register_resource, register_resources
 from tests.real_data_utils import (
-    HCR_XLSX_DIR,
-    SAMPLES_DIR,
-    WORLD_BANK_XLSX,
     infer_name_columns_from_xlsx,
 )
-from src import _vars
 
 
 def test_csv_rows_match_samples(tmp_path: Path) -> None:

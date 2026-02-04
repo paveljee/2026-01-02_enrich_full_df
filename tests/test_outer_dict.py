@@ -34,8 +34,8 @@ def test_outer_dict_add_ensure_items() -> None:
     inner = InnerDict.from_mapping({"x": 1}, DummyProcedure())
     outer.add_inner(ada, inner)
 
-    assert len(outer.ensure_inner_list(ada)) == 1
-    assert outer.ensure_inner_list(grace) == []
+    assert len(outer.get_inner_by_key(ada.to_json_key())) == 1
+    assert outer.get_inner_by_key(grace.to_json_key()) == ()
 
     items = list(outer.items())
     assert items[0][0] == ada

@@ -30,7 +30,8 @@ def test_match_parquet_builds_records(tmp_path: Path) -> None:
 
     _write_parquet(
         author_details,
-        "CREATE TABLE input(authorid VARCHAR, display_name VARCHAR, display_name_alternatives VARCHAR)",
+        "CREATE TABLE input(authorid VARCHAR, display_name VARCHAR, "
+        "display_name_alternatives VARCHAR)",
         """
         INSERT INTO input VALUES
             ('A1', 'Ada Lovelace', '["A. Lovelace"]'),
@@ -86,6 +87,7 @@ def test_match_parquet_builds_records(tmp_path: Path) -> None:
 
     conn = duckdb.connect()
     try:
+        conn.execute("INSTALL splink_udfs FROM community; LOAD splink_udfs;")
         match_parquet(
             conn,
             outer,

@@ -77,6 +77,7 @@ def test_sciscinet_parquet_real_data() -> None:
 
     conn = duckdb.connect()
     try:
+        conn.execute("INSTALL splink_udfs FROM community; LOAD splink_udfs;")
         match_parquet(
             conn,
             outer,

@@ -17,15 +17,14 @@ from src._vars import (
     KTP_PRIORITY_COL,
     KTP_PRIORITY_GROUP_COL,
 )
-from src.data_models import FragmentType, ResourceGroup
+from src.data_models import FragmentType, NameKey, OuterDict, ResourceGroup
 from src.hcr_xlsx.indexer import index_samples
 from src.hcr_xlsx.loader import build_population_table
+from src.hcr_xlsx.matcher import match_population
 from src.hcr_xlsx.preprocessor import load_high_income_economies, preprocess_samples
 from src.hcr_xlsx.sampler import sample_pilot, sample_population
-from src.hcr_xlsx.matcher import match_population
-from src.utils.resources import register_resource
-from src.data_models import NameKey, OuterDict
 from src.utils.name_keys import NAME_KEY_COL
+from src.utils.resources import register_resource
 
 
 def _write_xlsx(path: Path, df: pd.DataFrame) -> None:

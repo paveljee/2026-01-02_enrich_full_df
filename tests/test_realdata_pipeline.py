@@ -68,6 +68,7 @@ def test_full_pipeline_real_data(tmp_path, monkeypatch: pytest.MonkeyPatch) -> N
 
     conn = duckdb.connect()
     try:
+        conn.execute("INSTALL splink_udfs FROM community; LOAD splink_udfs;")
         xlsx_resources = register_resources(
             xlsx_files,
             group=ResourceGroup.KTP_PILOT_SAMPLE,

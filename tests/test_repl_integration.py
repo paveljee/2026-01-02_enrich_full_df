@@ -11,7 +11,6 @@ from src import _vars
 from src._vars import (
     DOCX_FRAGMENT_COL,
     DRAW_LABEL,
-    HCR_FILENAME_COL,
     KTP_FILENAME_COL,
     KTP_FIRST_NAME_COL,
     KTP_LAST_NAME_COL,
@@ -65,6 +64,7 @@ def test_repl_pipeline_minimal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
 
     conn = duckdb.connect()
     try:
+        conn.execute("INSTALL splink_udfs FROM community; LOAD splink_udfs;")
         build_population_table(conn, xlsx_resources, table_name="population")
         sample_population(
             conn,
@@ -105,7 +105,11 @@ def test_repl_pipeline_minimal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
 
         _write_parquet(
             author_details,
-            "CREATE TABLE input(authorid VARCHAR, display_name VARCHAR, display_name_alternatives VARCHAR)",
+            (
+                "CREATE TABLE input(authorid VARCHAR, "
+                "display_name VARCHAR,"
+                "display_name_alternatives VARCHAR)"
+            ),
             "INSERT INTO input VALUES ('A1', 'Ada Lovelace', '[\"A. Lovelace\"]');",
         )
         _write_parquet(

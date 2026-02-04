@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import duckdb
-import pandas as pd
 import pytest
 
 from src._vars import DOCX_FRAGMENT_COL, RIGHT_NAME_COL
