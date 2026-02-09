@@ -288,6 +288,15 @@ def run(context: PipelineContext) -> StepResult:
         context=context,
     )
 
+    removed_zero_hit_count_row = conn.execute(
+        f"""
+        SELECT COUNT(*)
+        FROM {PARQUET_AUTHOR_OUTPUT_TABLE}
+        WHERE "{SSN_SUM_HIT_PCT_COL}" = 0
+        """
+    ).fetchone()
+    removed_zero_hit_count = int(removed_zero_hit_count_row[0]) if removed_zero_hit_count_row else 0
+
     log("Create parquet output view")
     conn.execute(
         f"""
@@ -317,16 +326,28 @@ def run(context: PipelineContext) -> StepResult:
         LEFT JOIN sample_context sc
           ON lower(v."{KTP_FIRST_NAME_COL}") = lower(sc."{KTP_FIRST_NAME_COL}")
          AND lower(v."{KTP_LAST_NAME_COL}") = lower(sc."{KTP_LAST_NAME_COL}")
+        WHERE v."{SSN_SUM_HIT_PCT_COL}" IS NULL OR v."{SSN_SUM_HIT_PCT_COL}" <> 0
         """
+    )
+    log(
+        f"Filtered out parquet output rows with {SSN_SUM_HIT_PCT_COL} == 0: "
+        f"{removed_zero_hit_count}"
     )
 
     log("Load parquet output dataframe")
     output_views = ["ssn_parquet_output"]
     output_dfs = [conn.execute(f"SELECT * FROM {view}").df() for view in output_views]
+    matched_rows = sum(len(df) for df in output_dfs)
 
     return StepResult(
         step_id=STEP_MATCH_PARQUET,
         artifacts={"parquet_match_dfs": output_dfs, "parquet_view_names": output_views},
-        messages=[f"Parquet views created: {len(output_dfs)}"],
-        diagnostics=[f"Parquet match views: {len(output_dfs)}"],
+        messages=[
+            f"Parquet views created: {len(output_dfs)}",
+            f"Matched parquet rows: {matched_rows}",
+        ],
+        diagnostics=[
+            f"Parquet match views: {len(output_dfs)}",
+            f"Matched parquet rows: {matched_rows}",
+        ],
     )
