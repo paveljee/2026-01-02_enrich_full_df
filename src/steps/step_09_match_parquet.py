@@ -42,6 +42,7 @@ from ..helpers.vars import (
     SSNAP_FILENAME_COL,
     SSNHPL0_FILENAME_COL,
     SSNHPL1_FILENAME_COL,
+    STEP_MATCH_PARQUET,
 )
 
 
@@ -324,7 +325,7 @@ def run(context: PipelineContext) -> StepResult:
     output_dfs = [conn.execute(f"SELECT * FROM {view}").df() for view in output_views]
 
     return StepResult(
-        step_id="match_parquet",
+        step_id=STEP_MATCH_PARQUET,
         artifacts={"parquet_match_dfs": output_dfs, "parquet_view_names": output_views},
         messages=[f"Parquet views created: {len(output_dfs)}"],
         diagnostics=[f"Parquet match views: {len(output_dfs)}"],

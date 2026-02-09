@@ -7,7 +7,7 @@ from ..helpers.context import PipelineContext, StepResult
 from ..helpers.data_models import NameKey, OuterDict
 from ..helpers.duckdb_utils import register_frame
 from ..helpers.schema import OUTERDICT_NAME_VIEW, OUTERDICT_STUB_TABLE, SAMPLES_WITH_NAMES_VIEW
-from ..helpers.vars import KTP_FIRST_NAME_COL, KTP_LAST_NAME_COL
+from ..helpers.vars import KTP_FIRST_NAME_COL, KTP_LAST_NAME_COL, STEP_BUILD_OUTERDICT
 
 
 def run(context: PipelineContext) -> StepResult:
@@ -52,7 +52,7 @@ def run(context: PipelineContext) -> StepResult:
     )
 
     return StepResult(
-        step_id="build_outerdict",
+        step_id=STEP_BUILD_OUTERDICT,
         artifacts={"outer_dict": outer_dict},
         messages=[f"OuterDict keys: {len(name_keys)}"],
         diagnostics=[f"Unique name keys: {len(name_keys)}"],

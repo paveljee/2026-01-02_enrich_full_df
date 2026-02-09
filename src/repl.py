@@ -12,7 +12,7 @@ from rich.table import Table
 
 from .helpers import init_pipeline
 from .helpers.repl_runtime import run_step
-from .helpers.step_ids import STEP_BUILD_CARDS
+from .helpers.vars import STEP_BUILD_CARDS
 from .steps import STEP_REGISTRY
 
 console = Console()

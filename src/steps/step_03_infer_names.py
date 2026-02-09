@@ -14,6 +14,7 @@ from ..helpers.vars import (
     KTP_FIRST_NAME_COL,
     KTP_LAST_NAME_COL,
     KTP_POPULATION_INDEX_COL,
+    STEP_INFER_NAMES,
 )
 
 
@@ -117,7 +118,7 @@ def run(context: PipelineContext) -> StepResult:
     merged_df = conn.execute(f"SELECT * FROM {POPULATION_NAMES_VIEW}").df()
 
     return StepResult(
-        step_id="infer_names",
+        step_id=STEP_INFER_NAMES,
         artifacts={"population_with_names_df": merged_df},
         messages=[f"Inferred name columns for {len(HCR_XLSX_NAME_COLS)} XLSX files."],
         diagnostics=[f"Inferred mappings: {len(HCR_XLSX_NAME_COLS)} files"],

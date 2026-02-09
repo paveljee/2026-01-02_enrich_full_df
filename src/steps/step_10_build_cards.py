@@ -12,6 +12,7 @@ from ..helpers.vars import (
     DOCX_TABLE_INDEX_COL,
     KTP_FILENAME_COL,
     KTP_SOURCE_KEY_COL,
+    STEP_BUILD_CARDS,
 )
 
 
@@ -43,7 +44,7 @@ def run(context: PipelineContext) -> StepResult:
     )
 
     return StepResult(
-        step_id="build_cards",
+        step_id=STEP_BUILD_CARDS,
         artifacts={"cards": cards, "zip_path": zip_path},
         messages=[f"Cards generated: {len(cards)}", f"Output zip: {zip_path}"],
         diagnostics=[f"Cards: {len(cards)}", f"Output: {zip_path}"],

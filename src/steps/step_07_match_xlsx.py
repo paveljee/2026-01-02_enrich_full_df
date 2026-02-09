@@ -33,6 +33,7 @@ from ..helpers.vars import (
     KTP_PRIORITY_COL,
     KTP_PRIORITY_GROUP_COL,
     KTP_XLSX_MATCH_COL,
+    STEP_MATCH_XLSX,
 )
 
 
@@ -166,7 +167,7 @@ def run(context: PipelineContext) -> StepResult:
     output_df = conn.execute(f"SELECT * FROM {XLSX_OUTPUT_VIEW}").df()
 
     return StepResult(
-        step_id="match_xlsx",
+        step_id=STEP_MATCH_XLSX,
         artifacts={"xlsx_matches_df": output_df},
         messages=[f"Matched XLSX rows: {len(matched_df)}"],
         diagnostics=[f"Matched XLSX rows: {len(matched_df)}"],

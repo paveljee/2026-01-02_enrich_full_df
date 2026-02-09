@@ -55,6 +55,30 @@ KTP_SSNAD_MATCH_COL: Final = "ktp.ssnad_match"
 KTP_DOCX_ROW_NUMBER_COL: Final = "ktp.table_1_row_number"
 KTP_DOCX_TABLE_1_PREFIX: Final = "ktp.table_1_"
 
+STEP_REGISTER_RESOURCES: Final = "01_register_resources"
+STEP_LOAD_XLSX: Final = "02_load_xlsx"
+STEP_INFER_NAMES: Final = "03_infer_names"
+STEP_ADD_ECONOMY_PRIORITY: Final = "04_add_economy_priority"
+STEP_SAMPLE_POPULATION: Final = "05_sample_population"
+STEP_BUILD_OUTERDICT: Final = "06_build_outerdict"
+STEP_MATCH_XLSX: Final = "07_match_xlsx"
+STEP_MATCH_DOCX: Final = "08_match_docx"
+STEP_MATCH_PARQUET: Final = "09_match_parquet"
+STEP_BUILD_CARDS: Final = "10_build_cards"
+
+STEP_ORDER: Final[list[str]] = [
+    STEP_REGISTER_RESOURCES,
+    STEP_LOAD_XLSX,
+    STEP_INFER_NAMES,
+    STEP_ADD_ECONOMY_PRIORITY,
+    STEP_SAMPLE_POPULATION,
+    STEP_BUILD_OUTERDICT,
+    STEP_MATCH_XLSX,
+    STEP_MATCH_DOCX,
+    STEP_MATCH_PARQUET,
+    STEP_BUILD_CARDS,
+]
+
 KTP_PRIORITY_GROUP_LABELS: Final[dict[int, str]] = {
     1: "LMICS_NO_GREATER_CHINA_OR_UNKNOWN",
     2: "GREATER_CHINA",

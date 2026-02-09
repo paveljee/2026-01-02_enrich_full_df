@@ -8,6 +8,7 @@ from ..helpers.resources import (
     discover_xlsx_files,
     register_pipeline_resources,
 )
+from ..helpers.vars import STEP_REGISTER_RESOURCES
 
 
 def run(context: PipelineContext) -> StepResult:
@@ -47,7 +48,7 @@ def run(context: PipelineContext) -> StepResult:
         diagnostics.append(f"Example parquet: {', '.join(parquet_names[:5])}")
 
     return StepResult(
-        step_id="register_resources",
+        step_id=STEP_REGISTER_RESOURCES,
         artifacts={
             "xlsx_files": [Path(p) for p in xlsx_files],
             "docx_files": [Path(p) for p in docx_files],

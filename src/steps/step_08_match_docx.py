@@ -36,6 +36,7 @@ from ..helpers.vars import (
     KTP_LAST_NAME_COL,
     KTP_POPULATION_INDEX_COL,
     RIGHT_NAME_COL,
+    STEP_MATCH_DOCX,
 )
 
 
@@ -229,7 +230,7 @@ def run(context: PipelineContext) -> StepResult:
     output_df = conn.execute(f"SELECT * FROM {DOCX_OUTPUT_VIEW}").df()
 
     return StepResult(
-        step_id="match_docx",
+        step_id=STEP_MATCH_DOCX,
         artifacts={"docx_matches_df": output_df},
         messages=[f"Matched DOCX rows: {len(matched_df)}"],
         diagnostics=[f"Matched DOCX rows: {len(matched_df)}"],

@@ -20,7 +20,7 @@ from .schema import (
     PARQUET_AUTHOR_OUTPUT_TABLE,
     XLSX_INNERDICT_TABLE,
 )
-from .step_ids import (
+from .vars import (
     STEP_BUILD_OUTERDICT,
     STEP_MATCH_DOCX,
     STEP_MATCH_PARQUET,

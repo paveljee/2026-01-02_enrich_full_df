@@ -39,6 +39,7 @@ from ..helpers.vars import (
     KTP_PRIORITY_GROUP_COL,
     KTP_PRIORITY_GROUP_LABELS,
     OGHIST_INCOME_LABELS,
+    STEP_ADD_ECONOMY_PRIORITY,
 )
 
 
@@ -385,7 +386,7 @@ def run(context: PipelineContext) -> StepResult:
     merged_df = conn.execute(f"SELECT {select_cols} FROM {POPULATION_ECON_VIEW}").df()
 
     return StepResult(
-        step_id="add_economy_priority",
+        step_id=STEP_ADD_ECONOMY_PRIORITY,
         artifacts={"population_with_economy_df": merged_df},
         messages=[f"Computed economies for {len(canonical_map)} country entries."],
         diagnostics=[f"Country income entries: {len(canonical_map)}"],

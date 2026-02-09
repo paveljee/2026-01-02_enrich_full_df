@@ -27,6 +27,7 @@ from ..helpers.vars import (
     KTP_LAST_NAME_COL,
     KTP_POPULATION_INDEX_COL,
     PILOT_NAME_CATEGORY_TRIPLES,
+    STEP_SAMPLE_POPULATION,
 )
 
 
@@ -172,7 +173,7 @@ def run(context: PipelineContext) -> StepResult:
     joined_df = conn.execute(f"SELECT * FROM {SAMPLES_VIEW}").df()
 
     return StepResult(
-        step_id="sample_population",
+        step_id=STEP_SAMPLE_POPULATION,
         artifacts={"samples_with_context_df": joined_df},
         messages=[f"Sample rows: {len(joined_df)}"],
         diagnostics=[
