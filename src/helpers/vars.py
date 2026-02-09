@@ -33,10 +33,13 @@ SSNA_FILENAME_COL: Final = "ssna.filename"
 SSNAP_FILENAME_COL: Final = "ssnap.filename"
 SSNHPL0_FILENAME_COL: Final = "ssnhpl0.filename"
 SSNHPL1_FILENAME_COL: Final = "ssnhpl1.filename"
+SSNF_FILENAME_COL: Final = "ssnf.filename"
 SSN_SUM_HIT_PCT_COL: Final = "ssn.sum_hit_1pct"
 SSN_PAPERIDS_LEVEL0_COL: Final = "ssn.paperids_level0"
 SSN_PAPERIDS_LEVEL1_COL: Final = "ssn.paperids_level1"
 SSN_FIELD_IDS_LIST_COL: Final = "ssn.field_ids_list"
+KTP_SSN_TOP_PAPERS_HIT_1PCT_COL: Final = "ktp.ssn_top_papers_hit_1pct"
+KTP_SSN_FIELD_DISPLAY_NAMES_LIST_COL: Final = "ktp.ssn_field_display_names_list"
 
 HCR_FILENAME_COL: Final = "hcr.filename"
 HCR_ROW_COL: Final = "hcr.row_number"
@@ -404,10 +407,13 @@ __all__ = [
     "SSNAP_FILENAME_COL",
     "SSNHPL0_FILENAME_COL",
     "SSNHPL1_FILENAME_COL",
+    "SSNF_FILENAME_COL",
     "SSN_SUM_HIT_PCT_COL",
     "SSN_PAPERIDS_LEVEL0_COL",
     "SSN_PAPERIDS_LEVEL1_COL",
     "SSN_FIELD_IDS_LIST_COL",
+    "KTP_SSN_TOP_PAPERS_HIT_1PCT_COL",
+    "KTP_SSN_FIELD_DISPLAY_NAMES_LIST_COL",
     "PILOT_NAME_CATEGORY_TRIPLES",
     "RIGHT_NAME_COL",
     "COUNTRY_PREFIX",

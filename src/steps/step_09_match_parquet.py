@@ -32,6 +32,8 @@ from ..helpers.vars import (
     KTP_POPULATION_INDEX_COL,
     KTP_PRIORITY_COL,
     KTP_PRIORITY_GROUP_COL,
+    KTP_SSN_FIELD_DISPLAY_NAMES_LIST_COL,
+    KTP_SSN_TOP_PAPERS_HIT_1PCT_COL,
     KTP_SSNAD_MATCH_COL,
     SSN_FIELD_IDS_LIST_COL,
     SSN_PAPERIDS_LEVEL0_COL,
@@ -40,6 +42,7 @@ from ..helpers.vars import (
     SSNA_FILENAME_COL,
     SSNAD_FILENAME_COL,
     SSNAP_FILENAME_COL,
+    SSNF_FILENAME_COL,
     SSNHPL0_FILENAME_COL,
     SSNHPL1_FILENAME_COL,
     STEP_MATCH_PARQUET,
@@ -116,6 +119,7 @@ def run(context: PipelineContext) -> StepResult:
     authors_paper_path = files["authors_paper"]["path"]
     hit_papers0_path = files["hit_papers_0"]["path"]
     hit_papers1_path = files["hit_papers_1"]["path"]
+    fields_path = files["fields"]["path"]
 
     author_id_col = normalize_parquet_column_name("authorid", "ssnad")
     authors_author_id_col = normalize_parquet_column_name("authorid", "ssna")
@@ -245,11 +249,13 @@ def run(context: PipelineContext) -> StepResult:
         parquet_filename(authors_paper_path),
         parquet_filename(hit_papers0_path),
         parquet_filename(hit_papers1_path),
+        parquet_filename(fields_path),
     ]
     parquet_filename_payload = json.dumps(parquet_filenames)
     authors_paper_filename = parquet_filename(authors_paper_path)
     hit_papers0_filename = parquet_filename(hit_papers0_path)
     hit_papers1_filename = parquet_filename(hit_papers1_path)
+    fields_filename = parquet_filename(fields_path)
 
     log("Create author-level output table")
     conn.execute(
@@ -264,6 +270,7 @@ def run(context: PipelineContext) -> StepResult:
             '{authors_paper_filename}' AS "{SSNAP_FILENAME_COL}",
             '{hit_papers0_filename}' AS "{SSNHPL0_FILENAME_COL}",
             '{hit_papers1_filename}' AS "{SSNHPL1_FILENAME_COL}",
+            '{fields_filename}' AS "{SSNF_FILENAME_COL}",
             a.*,
             au.* EXCLUDE ("{authors_author_id_col}"),
             CAST(agg."{SSN_PAPERIDS_LEVEL0_COL}" AS VARCHAR) AS "{SSN_PAPERIDS_LEVEL0_COL}",
@@ -281,13 +288,6 @@ def run(context: PipelineContext) -> StepResult:
         """
     )
 
-    log("Append parquet matches into OuterDict")
-    _append_innerdicts_from_rows_table(
-        conn,
-        table_name=PARQUET_AUTHOR_OUTPUT_TABLE,
-        context=context,
-    )
-
     removed_zero_hit_count_row = conn.execute(
         f"""
         SELECT COUNT(*)
@@ -296,6 +296,151 @@ def run(context: PipelineContext) -> StepResult:
         """
     ).fetchone()
     removed_zero_hit_count = int(removed_zero_hit_count_row[0]) if removed_zero_hit_count_row else 0
+
+    paper_reduction_row = conn.execute(
+        """
+        WITH paper_counts AS (
+            SELECT
+                name_key,
+                authorid,
+                COUNT(*) AS paper_count
+            FROM ssn_author_papers
+            GROUP BY name_key, authorid
+        )
+        SELECT
+            COALESCE(SUM(paper_count), 0) AS total_papers,
+            COALESCE(SUM(LEAST(paper_count, 5)), 0) AS kept_papers
+        FROM paper_counts
+        """
+    ).fetchone()
+    total_papers = int(paper_reduction_row[0]) if paper_reduction_row else 0
+    kept_papers = int(paper_reduction_row[1]) if paper_reduction_row else 0
+    removed_papers = max(total_papers - kept_papers, 0)
+    log(f"Top-5 paper reduction: kept {kept_papers} of {total_papers}, removed {removed_papers}.")
+
+    fields_match_row = conn.execute(
+        f"""
+        WITH field_lookup AS (
+            SELECT
+                CAST(fieldid AS VARCHAR) AS field_id,
+                CAST(display_name AS VARCHAR) AS field_display_name
+            FROM read_parquet('{fields_path}')
+        ),
+        expanded_ids AS (
+            SELECT CAST(fid.field_id AS VARCHAR) AS field_id
+            FROM ssn_author_agg a
+            LEFT JOIN LATERAL UNNEST(a."{SSN_FIELD_IDS_LIST_COL}") AS fid(field_id) ON TRUE
+        )
+        SELECT
+            COUNT(*) FILTER (WHERE e.field_id IS NOT NULL) AS total_field_ids,
+            COUNT(*) FILTER (
+                WHERE e.field_id IS NOT NULL
+                  AND fl.field_display_name IS NOT NULL
+            ) AS matched_field_ids
+        FROM expanded_ids e
+        LEFT JOIN field_lookup fl
+          ON e.field_id = fl.field_id
+        """
+    ).fetchone()
+    total_field_ids = int(fields_match_row[0]) if fields_match_row else 0
+    matched_field_ids = int(fields_match_row[1]) if fields_match_row else 0
+    unmatched_field_ids = max(total_field_ids - matched_field_ids, 0)
+    log(
+        "Fields display-name mapping: "
+        f"matched {matched_field_ids}/{total_field_ids} IDs "
+        f"(unmatched: {unmatched_field_ids})."
+    )
+
+    parquet_innerdict_table = "ssn_parquet_enriched"
+    log("Create parquet enriched table (top-5 papers, concept display names, nonzero hits)")
+    conn.execute(
+        f"""
+        CREATE OR REPLACE TABLE {parquet_innerdict_table} AS
+        WITH paper_hits AS (
+            SELECT
+                ap.name_key AS name_key,
+                ap.authorid AS authorid,
+                ap.paperid AS paperid,
+                COALESCE(MAX(h.hit_1pct), 0) AS hit_1pct
+            FROM ssn_author_papers ap
+            LEFT JOIN ssn_all_hits h
+              ON ap.paperid = h.paperid
+            GROUP BY ap.name_key, ap.authorid, ap.paperid
+        ),
+        paper_ranked AS (
+            SELECT
+                ph.name_key AS name_key,
+                ph.authorid AS authorid,
+                ph.paperid AS paperid,
+                ph.hit_1pct AS hit_1pct,
+                ROW_NUMBER() OVER (
+                    PARTITION BY ph.name_key, ph.authorid
+                    ORDER BY ph.hit_1pct DESC, ph.paperid
+                ) AS rn
+            FROM paper_hits ph
+        ),
+        top_papers AS (
+            SELECT
+                pr.name_key AS name_key,
+                pr.authorid AS authorid,
+                CAST(
+                    LIST(pr.paperid ORDER BY pr.hit_1pct DESC, pr.paperid)
+                        FILTER (WHERE pr.rn <= 5)
+                    AS VARCHAR
+                ) AS "{KTP_SSN_TOP_PAPERS_HIT_1PCT_COL}"
+            FROM paper_ranked pr
+            GROUP BY pr.name_key, pr.authorid
+        ),
+        field_lookup AS (
+            SELECT
+                CAST(f.fieldid AS VARCHAR) AS field_id,
+                CAST(f.display_name AS VARCHAR) AS field_display_name
+            FROM read_parquet('{fields_path}') f
+        ),
+        concept_display AS (
+            SELECT
+                a.name_key AS name_key,
+                a.authorid AS authorid,
+                CAST(
+                    LIST(
+                        DISTINCT COALESCE(
+                            fl.field_display_name,
+                            CAST(fid.field_id AS VARCHAR)
+                        )
+                    )
+                    AS VARCHAR
+                ) AS "{KTP_SSN_FIELD_DISPLAY_NAMES_LIST_COL}"
+            FROM ssn_author_agg a
+            LEFT JOIN LATERAL UNNEST(a."{SSN_FIELD_IDS_LIST_COL}") AS fid(field_id) ON TRUE
+            LEFT JOIN field_lookup fl
+              ON CAST(fid.field_id AS VARCHAR) = fl.field_id
+            GROUP BY a.name_key, a.authorid
+        )
+        SELECT
+            v.* EXCLUDE (
+                "{SSN_FIELD_IDS_LIST_COL}",
+                "{SSN_PAPERIDS_LEVEL0_COL}",
+                "{SSN_PAPERIDS_LEVEL1_COL}"
+            ),
+            tp."{KTP_SSN_TOP_PAPERS_HIT_1PCT_COL}",
+            cd."{KTP_SSN_FIELD_DISPLAY_NAMES_LIST_COL}"
+        FROM {PARQUET_AUTHOR_OUTPUT_TABLE} v
+        LEFT JOIN top_papers tp
+          ON tp.name_key = v.name_key
+         AND CAST(tp.authorid AS VARCHAR) = CAST(v."{author_id_col}" AS VARCHAR)
+        LEFT JOIN concept_display cd
+          ON cd.name_key = v.name_key
+         AND CAST(cd.authorid AS VARCHAR) = CAST(v."{author_id_col}" AS VARCHAR)
+        WHERE v."{SSN_SUM_HIT_PCT_COL}" IS NULL OR v."{SSN_SUM_HIT_PCT_COL}" <> 0
+        """
+    )
+
+    log("Append parquet matches into OuterDict")
+    _append_innerdicts_from_rows_table(
+        conn,
+        table_name=parquet_innerdict_table,
+        context=context,
+    )
 
     log("Create parquet output view")
     conn.execute(
@@ -321,12 +466,13 @@ def run(context: PipelineContext) -> StepResult:
             LEFT JOIN {POPULATION_ECON_TABLE} e
               ON p."{KTP_POPULATION_INDEX_COL}" = e."{KTP_POPULATION_INDEX_COL}"
         )
-        SELECT v.*, sc.*
-        FROM {PARQUET_AUTHOR_OUTPUT_TABLE} v
+        SELECT
+            v.*,
+            sc.*
+        FROM {parquet_innerdict_table} v
         LEFT JOIN sample_context sc
           ON lower(v."{KTP_FIRST_NAME_COL}") = lower(sc."{KTP_FIRST_NAME_COL}")
          AND lower(v."{KTP_LAST_NAME_COL}") = lower(sc."{KTP_LAST_NAME_COL}")
-        WHERE v."{SSN_SUM_HIT_PCT_COL}" IS NULL OR v."{SSN_SUM_HIT_PCT_COL}" <> 0
         """
     )
     log(
