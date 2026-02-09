@@ -21,11 +21,19 @@ from ..helpers.vars import (
     HCR_FIRST_NAME_COL,
     HCR_LAST_NAME_COL,
     HCR_ROW_COL,
+    HCR_XLSX_AFFILIATIONS_COLS,
+    HCR_XLSX_NAME_COLS,
+    KTP_ECONOMIES_COL,
+    KTP_ECONOMIES_INCOME_GROUP_COL,
     KTP_FILENAME_COL,
     KTP_FIRST_NAME_COL,
     KTP_FRAGMENT_COL,
+    KTP_HCR_PRIMARY_AFFILIATIONS_COL,
+    KTP_HCR_SECONDARY_AFFILIATIONS_COL,
     KTP_LAST_NAME_COL,
     KTP_POPULATION_INDEX_COL,
+    KTP_PRIORITY_COL,
+    KTP_PRIORITY_GROUP_COL,
     PILOT_NAME_CATEGORY_TRIPLES,
     STEP_SAMPLE_POPULATION,
 )
@@ -138,10 +146,46 @@ def run(context: PipelineContext) -> StepResult:
         ).astype(str)
         _append_samples(conn, pilot_df[[KTP_FILENAME_COL, KTP_FRAGMENT_COL, DRAW_LABEL]])
 
+    p_columns = [row[0] for row in conn.execute(f"DESCRIBE {POPULATION_TABLE}").fetchall()]
+    source_name_aff_cols: set[str] = {HCR_FIRST_NAME_COL, HCR_LAST_NAME_COL}
+    for first_col, last_col in HCR_XLSX_NAME_COLS.values():
+        source_name_aff_cols.add(first_col)
+        source_name_aff_cols.add(last_col)
+    for primary_cols, secondary_cols in HCR_XLSX_AFFILIATIONS_COLS.values():
+        source_name_aff_cols.update(primary_cols)
+        source_name_aff_cols.update(secondary_cols)
+    source_name_aff_cols.update(
+        col for col in p_columns if col.startswith("hcr.") and "affiliation" in col.lower()
+    )
+    excluded_p_cols = source_name_aff_cols | {
+        HCR_FILENAME_COL,
+        HCR_ROW_COL,
+        KTP_POPULATION_INDEX_COL,
+    }
+    p_extra_cols = [col for col in p_columns if col not in excluded_p_cols]
+    p_extra_select = ", ".join([f'p."{col}"' for col in p_extra_cols])
+
+    select_parts = [
+        f'p."{KTP_POPULATION_INDEX_COL}" AS "{KTP_POPULATION_INDEX_COL}"',
+        f's."{KTP_FILENAME_COL}" AS "{KTP_FILENAME_COL}"',
+        f's."{KTP_FRAGMENT_COL}" AS "{KTP_FRAGMENT_COL}"',
+        f's."{DRAW_LABEL}" AS "{DRAW_LABEL}"',
+        f'n."{KTP_FIRST_NAME_COL}" AS "{KTP_FIRST_NAME_COL}"',
+        f'n."{KTP_LAST_NAME_COL}" AS "{KTP_LAST_NAME_COL}"',
+        p_extra_select,
+        f'e."{KTP_HCR_PRIMARY_AFFILIATIONS_COL}" AS "{KTP_HCR_PRIMARY_AFFILIATIONS_COL}"',
+        f'e."{KTP_HCR_SECONDARY_AFFILIATIONS_COL}" AS "{KTP_HCR_SECONDARY_AFFILIATIONS_COL}"',
+        f'e."{KTP_ECONOMIES_COL}" AS "{KTP_ECONOMIES_COL}"',
+        f'e."{KTP_ECONOMIES_INCOME_GROUP_COL}" AS "{KTP_ECONOMIES_INCOME_GROUP_COL}"',
+        f'e."{KTP_PRIORITY_COL}" AS "{KTP_PRIORITY_COL}"',
+        f'e."{KTP_PRIORITY_GROUP_COL}" AS "{KTP_PRIORITY_GROUP_COL}"',
+    ]
+    select_expr = ", ".join(part for part in select_parts if part)
+
     conn.execute(
         f"""
         CREATE OR REPLACE VIEW {SAMPLES_VIEW} AS
-        SELECT s."{KTP_FILENAME_COL}", s."{KTP_FRAGMENT_COL}", s."{DRAW_LABEL}", p.*, n.*, e.*
+        SELECT {select_expr}
         FROM {SAMPLES_TABLE} s
         JOIN {POPULATION_TABLE} p
           ON s."{KTP_FILENAME_COL}" = p."{HCR_FILENAME_COL}"
@@ -150,6 +194,20 @@ def run(context: PipelineContext) -> StepResult:
           ON p."{KTP_POPULATION_INDEX_COL}" = n."{KTP_POPULATION_INDEX_COL}"
         JOIN {POPULATION_ECON_TABLE} e
           ON p."{KTP_POPULATION_INDEX_COL}" = e."{KTP_POPULATION_INDEX_COL}"
+        ORDER BY
+            CASE
+                WHEN starts_with(s."{DRAW_LABEL}", 'pilot.') THEN 0
+                WHEN TRY_CAST(s."{DRAW_LABEL}" AS BIGINT) IS NOT NULL THEN 1
+                ELSE 2
+            END,
+            CASE
+                WHEN starts_with(s."{DRAW_LABEL}", 'pilot.')
+                    THEN TRY_CAST(split_part(s."{DRAW_LABEL}", '.', 2) AS BIGINT)
+                WHEN TRY_CAST(s."{DRAW_LABEL}" AS BIGINT) IS NOT NULL
+                    THEN CAST(s."{DRAW_LABEL}" AS BIGINT)
+                ELSE NULL
+            END,
+            s."{DRAW_LABEL}"
         """
     )
 
