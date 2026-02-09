@@ -2,7 +2,7 @@
   "db_file": "data/scisci_process.duckdb",
   "state_file": "data/pipeline_state.json",
   "output_dir": "data/output",
-  "output_format": "txt",
+  "output_format": "docx",
   "pandoc_reference_docx": "resources/pandoc-custom-reference.docx",
   "xlsx_dir": "/Volumes/Users/Anonymous/Workshop/202504161200UTC-4_Nancy_Baxter_Andrea_Tricco_collabs/2024-Historical-Highly-Cited-Researchers-lists - final",
   "docx_dir": "/Volumes/Users/Anonymous/Workshop/202504161200UTC-4_Nancy_Baxter_Andrea_Tricco_collabs/analyses/2026-01-02_enrich_full_df/data/manual_extractions",

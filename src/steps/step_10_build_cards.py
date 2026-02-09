@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -20,6 +21,42 @@ def run(context: PipelineContext) -> StepResult:
     if context.outer_dict is None:
         raise ValueError("OuterDict not initialized. Run build_outerdict first.")
 
+    def log(msg: str) -> None:
+        if context.log:
+            context.log(msg, "cyan")
+
+    def progress_bar(done: int, total: int, width: int = 24) -> str:
+        if total <= 0:
+            return "[" + ("-" * width) + "]"
+        filled = min(width, int(width * done / total))
+        return "[" + ("#" * filled) + ("-" * (width - filled)) + "]"
+
+    total_cards = len(list(context.outer_dict.items()))
+    conversion_total = (
+        total_cards if context.config.output_format == "docx" else max(total_cards, 1)
+    )
+    overall_total = total_cards + conversion_total
+    build_done = 0
+    conversion_done = 0
+
+    def on_build_progress(done: int, _total: int, _card_id: str) -> None:
+        nonlocal build_done
+        build_done = done
+        overall_done = min(overall_total, build_done + conversion_done)
+        log(
+            f"Card progress {progress_bar(overall_done, overall_total)} "
+            f"{overall_done}/{overall_total}"
+        )
+
+    def on_conversion_progress(done: int, _total: int, _card_id: str) -> None:
+        nonlocal conversion_done
+        conversion_done = done
+        overall_done = min(overall_total, build_done + conversion_done)
+        log(
+            f"Card progress {progress_bar(overall_done, overall_total)} "
+            f"{overall_done}/{overall_total}"
+        )
+
     excluded_cols = {
         KTP_FILENAME_COL,
         KTP_SOURCE_KEY_COL,
@@ -34,6 +71,7 @@ def run(context: PipelineContext) -> StepResult:
         total_draws=context.config.total_draws,
         intro_date=datetime.now(ZoneInfo(context.config.timezone)).strftime("%B %d, %Y"),
         excluded_cols=excluded_cols,
+        progress_callback=on_build_progress,
     )
     zip_path = write_cards_zip(
         cards,
@@ -41,6 +79,8 @@ def run(context: PipelineContext) -> StepResult:
         f"{context.config.xlsx_dir.name}_combined_cards.zip",
         output_format=context.config.output_format,
         reference_docx=context.config.pandoc_reference_docx,
+        docx_workers=max(1, min(8, os.cpu_count() or 1)),
+        progress_callback=on_conversion_progress,
     )
 
     return StepResult(

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
 import tempfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import Callable
 from zipfile import ZipFile
 
 import pandas as pd
@@ -25,10 +28,13 @@ def build_cards(
     total_draws: int,
     intro_date: str,
     excluded_cols: set[str],
+    progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> dict[str, str]:
     cards: dict[str, str] = {}
     intro = CARD_INTRODUCTION.format(intro_date) + "\n\n"
-    for name_key, inner_dicts in outer_dict.items():
+    items = list(outer_dict.items())
+    total_cards = len(items)
+    for card_idx, (name_key, inner_dicts) in enumerate(items, start=1):
         draw_numbers = []
         for inner in inner_dicts:
             draw_number = inner.data.get(DRAW_LABEL)
@@ -79,7 +85,24 @@ def build_cards(
                 else:
                     card += f"**{col}**: {str(val)}\n\n"
         cards[docx_filename] = intro + card
+        if progress_callback is not None:
+            progress_callback(card_idx, total_cards, docx_filename)
     return cards
+
+
+def _render_docx(md_path: Path, docx_path: Path, reference_docx: Path) -> Path:
+    subprocess.run(
+        [
+            "pandoc",
+            str(md_path),
+            "-o",
+            str(docx_path),
+            "--reference-doc",
+            str(reference_docx),
+        ],
+        check=True,
+    )
+    return docx_path
 
 
 def write_cards_zip(
@@ -89,39 +112,49 @@ def write_cards_zip(
     *,
     output_format: str,
     reference_docx: Path,
+    docx_workers: int | None = None,
+    progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     zip_path = output_dir / zip_name
     with tempfile.TemporaryDirectory() as tmpdir:
         if output_format == "txt":
             txt_paths = []
-            for filename, card in cards.items():
+            total = len(cards)
+            for idx, (filename, card) in enumerate(cards.items(), start=1):
                 txt_path = Path(tmpdir) / f"{filename}.txt"
                 txt_path.write_text(card, encoding="utf-8")
                 txt_paths.append(txt_path)
+                if progress_callback is not None:
+                    progress_callback(idx, total, filename)
             with ZipFile(zip_path, "w") as zipf:
                 for path in txt_paths:
                     zipf.write(path, arcname=path.name)
         elif output_format == "docx":
             tmp_ref_path = Path(tmpdir) / reference_docx.name
             shutil.copy(reference_docx, tmp_ref_path)
-            docx_paths: list[Path] = []
+            md_docx_pairs: list[tuple[Path, Path]] = []
             for filename, card in cards.items():
                 md_path = Path(tmpdir) / f"{filename}.md"
                 docx_path = Path(tmpdir) / f"{filename}.docx"
                 md_path.write_text(card, encoding="utf-8")
-                subprocess.run(
-                    [
-                        "pandoc",
-                        str(md_path),
-                        "-o",
-                        str(docx_path),
-                        "--reference-doc",
-                        str(tmp_ref_path),
-                    ],
-                    check=True,
-                )
-                docx_paths.append(docx_path)
+                md_docx_pairs.append((md_path, docx_path))
+
+            max_workers = docx_workers or max(1, min(8, os.cpu_count() or 1))
+            docx_paths: list[Path] = []
+            total = len(md_docx_pairs)
+            done = 0
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = [
+                    executor.submit(_render_docx, md_path, docx_path, tmp_ref_path)
+                    for md_path, docx_path in md_docx_pairs
+                ]
+                for future in as_completed(futures):
+                    rendered = future.result()
+                    docx_paths.append(rendered)
+                    done += 1
+                    if progress_callback is not None:
+                        progress_callback(done, total, rendered.stem)
             with ZipFile(zip_path, "w") as zipf:
                 for path in docx_paths:
                     zipf.write(path, arcname=path.name)
