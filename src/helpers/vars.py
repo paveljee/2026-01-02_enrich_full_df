@@ -89,10 +89,14 @@ KTP_DOCX_MATCH_DOCX_NAME_NORM_KEY: Final = "ktp.table_1_researcher_author_norm"
 KTP_SSNAD_MATCH_KTP_NAME_NORM_KEY: Final = "ktp.source_key_norm"
 KTP_SSNAD_MATCH_SSNAD_NAME_NORM_KEY: Final = "ktp.ssnad_display_name_norm"
 KTP_DOCX_ROW_NUMBER_COL: Final = "ktp.table_1_row_number"
+KTP_DOCX_FOOTNOTES_COL: Final = "ktp.table_1_footnotes"
+KTP_DOCX_COMMENTS_COL: Final = "ktp.table_1_comments"
 KTP_DOCX_TABLE_1_PREFIX: Final = "ktp.table_1_"
 KTP_DOCX_OPTIONAL_EMPTY_COLS: Final[set[str]] = {
     "ktp.table_1_socioeconomic_status",
     "ktp.table_1_race_ethnicity_language_culture",
+    KTP_DOCX_FOOTNOTES_COL,
+    KTP_DOCX_COMMENTS_COL,
 }
 CARD_BUILD_SUBSET_DESCRIPTIONS: Final[dict[int, str]] = {
     0: "all name keys (no filtering)",
@@ -484,5 +488,7 @@ __all__ = [
     "HIGH_INCOME_COUNTRIES_FY2025",
     "KTP_FIRST_NAME_ORIG_COLNAME_COL",
     "KTP_LAST_NAME_ORIG_COLNAME_COL",
+    "KTP_DOCX_FOOTNOTES_COL",
+    "KTP_DOCX_COMMENTS_COL",
     "KTP_PRIORITY_GROUP_LABELS",
 ]

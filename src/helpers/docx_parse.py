@@ -1,4 +1,5 @@
 import re
+from datetime import datetime
 from pathlib import Path
 from zipfile import ZipFile
 
@@ -6,7 +7,8 @@ import pandas as pd
 from lxml import etree
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
-NS = {"w": W}
+W15 = "http://schemas.microsoft.com/office/word/2012/wordml"
+NS = {"w": W, "w15": W15}
 
 
 def _fmt_flags(r):
@@ -294,10 +296,264 @@ def cell_text(
     return "".join(out)
 
 
-def parse_docx_table(docx_path: Path) -> list[pd.DataFrame]:
+def _paragraph_to_text(
+    p,
+    *,
+    plain: bool = False,
+    numbering_defs: dict[int, dict[int, dict[str, object]]] | None = None,
+    counters: dict[int, dict[int, int]] | None = None,
+) -> str:
+    out: list[str] = []
+    if numbering_defs is not None and counters is not None:
+        out.append(
+            _paragraph_list_prefix(
+                p,
+                numbering_defs=numbering_defs,
+                counters=counters,
+            )
+        )
+    for node in p:
+        tag = etree.QName(node).localname
+        if tag == "r":
+            out.append(_run_to_text_plain(node) if plain else _run_to_text(node))
+        elif tag == "hyperlink":
+            for r in node.findall("w:r", namespaces=NS):
+                out.append(_run_to_text_plain(r) if plain else _run_to_text(r))
+    return "".join(out)
+
+
+def _collect_paragraph_texts(
+    root,
+    *,
+    xpath: str,
+    numbering_defs: dict[int, dict[int, dict[str, object]]],
+) -> list[str]:
+    texts: list[str] = []
+    counters: dict[int, dict[int, int]] = {}
+    for p in root.findall(xpath, namespaces=NS):
+        txt = _paragraph_to_text(
+            p,
+            numbering_defs=numbering_defs,
+            counters=counters,
+        ).strip()
+        if txt:
+            texts.append(txt)
+    return texts
+
+
+def _collect_body_text_below_tables(
+    root,
+    *,
+    numbering_defs: dict[int, dict[int, dict[str, object]]],
+) -> list[str]:
+    body = root.find("./w:body", namespaces=NS)
+    if body is None:
+        return []
+    texts: list[str] = []
+    counters: dict[int, dict[int, int]] = {}
+    seen_table = False
+    for child in body:
+        tag = etree.QName(child).localname
+        if tag == "tbl":
+            seen_table = True
+            continue
+        if not seen_table or tag != "p":
+            continue
+        txt = _paragraph_to_text(
+            child,
+            numbering_defs=numbering_defs,
+            counters=counters,
+        ).strip()
+        if txt:
+            texts.append(txt)
+    return texts
+
+
+def _extract_comment_context_by_id(root) -> dict[str, str]:
+    context_chunks: dict[str, list[str]] = {}
+    for p in root.findall(".//w:p", namespaces=NS):
+        active_ids: list[str] = []
+        for node in p:
+            tag = etree.QName(node).localname
+            if tag == "commentRangeStart":
+                comment_id = node.get(f"{{{W}}}id")
+                if comment_id:
+                    active_ids.append(str(comment_id))
+                continue
+            if tag == "commentRangeEnd":
+                comment_id = node.get(f"{{{W}}}id")
+                if comment_id:
+                    active_ids = [cid for cid in active_ids if cid != str(comment_id)]
+                continue
+
+            text = ""
+            if tag == "r":
+                text = _run_to_text_plain(node)
+            elif tag == "hyperlink":
+                text = "".join(_run_to_text_plain(r) for r in node.findall("w:r", namespaces=NS))
+            if not text:
+                continue
+            for comment_id in active_ids:
+                context_chunks.setdefault(comment_id, []).append(text)
+
+    context_by_id: dict[str, str] = {}
+    for comment_id, chunks in context_chunks.items():
+        merged = re.sub(r"\s+", " ", "".join(chunks)).strip()
+        if merged:
+            context_by_id[comment_id] = merged
+    return context_by_id
+
+
+def _collect_comments_with_metadata(
+    comments_root,
+    *,
+    numbering_defs: dict[int, dict[int, dict[str, object]]],
+    comments_extended_root=None,
+    comment_context_by_id: dict[str, str] | None = None,
+) -> list[str]:
+    para_parent_map: dict[str, str] = {}
+    para_done_map: dict[str, str] = {}
+    if comments_extended_root is not None:
+        for comment_ex in comments_extended_root.findall(".//w15:commentEx", namespaces=NS):
+            para_id = ""
+            para_parent_id = ""
+            done = ""
+            for attr_key, attr_val in comment_ex.attrib.items():
+                local = etree.QName(attr_key).localname
+                if local == "paraId":
+                    para_id = str(attr_val)
+                elif local == "paraIdParent":
+                    para_parent_id = str(attr_val)
+                elif local == "done":
+                    done = str(attr_val)
+            if para_id and para_parent_id:
+                para_parent_map[para_id] = para_parent_id
+            if para_id and done:
+                para_done_map[para_id] = done
+
+    comments: list[dict[str, str]] = []
+    for comment in comments_root.findall(".//w:comment", namespaces=NS):
+        comment_id = comment.get(f"{{{W}}}id", "")
+        comment_para_id = ""
+        first_p = comment.find("./w:p", namespaces=NS)
+        if first_p is not None:
+            for attr_key, attr_val in first_p.attrib.items():
+                if etree.QName(attr_key).localname == "paraId":
+                    comment_para_id = str(attr_val)
+                    break
+
+        parent_id = ""
+        for attr_key, attr_val in comment.attrib.items():
+            if etree.QName(attr_key).localname == "parentId":
+                parent_id = str(attr_val)
+                break
+
+        author = (comment.get(f"{{{W}}}author", "") or "").strip()
+        initials = (comment.get(f"{{{W}}}initials", "") or "").strip()
+        date = (comment.get(f"{{{W}}}date", "") or "").strip()
+        text = "\n".join(
+            _collect_paragraph_texts(
+                comment,
+                xpath="./w:p",
+                numbering_defs=numbering_defs,
+            )
+        ).strip()
+        if not text:
+            continue
+
+        comments.append(
+            {
+                "id": comment_id,
+                "para_id": comment_para_id,
+                "parent_id": parent_id,
+                "author": author,
+                "initials": initials,
+                "date": date,
+                "text": text,
+                "done": para_done_map.get(comment_para_id, ""),
+            }
+        )
+
+    def sort_key(comment_meta: dict[str, str]) -> tuple[float, str]:
+        raw_date = comment_meta.get("date", "").strip()
+        if raw_date:
+            normalized = raw_date.replace("Z", "+00:00")
+            try:
+                return (datetime.fromisoformat(normalized).timestamp(), comment_meta["id"])
+            except ValueError:
+                pass
+        return (float("inf"), comment_meta["id"])
+
+    by_id = {item["id"]: item for item in comments if item.get("id")}
+    by_para = {item["para_id"]: item for item in comments if item.get("para_id")}
+    for item in comments:
+        if item.get("parent_id"):
+            continue
+        para_id = item.get("para_id", "")
+        if para_id and para_id in para_parent_map:
+            parent_para = para_parent_map[para_id]
+            parent_comment = by_para.get(parent_para)
+            if parent_comment and parent_comment.get("id"):
+                item["parent_id"] = str(parent_comment["id"])
+
+    children: dict[str, list[dict[str, str]]] = {}
+    roots: list[dict[str, str]] = []
+    for item in comments:
+        parent = item.get("parent_id", "").strip()
+        if parent and parent in by_id:
+            children.setdefault(parent, []).append(item)
+        else:
+            roots.append(item)
+
+    for child_list in children.values():
+        child_list.sort(key=sort_key)
+    roots.sort(key=sort_key)
+
+    lines: list[str] = []
+
+    def render(comment_meta: dict[str, str], depth: int) -> None:
+        author_display = (
+            comment_meta.get("author", "").strip()
+            or comment_meta.get("initials", "").strip()
+            or "Comment"
+        )
+        context = ""
+        if comment_context_by_id is not None:
+            context = comment_context_by_id.get(comment_meta.get("id", ""), "").strip()
+        context_display = context if context else "context unavailable"
+        date_display = comment_meta.get("date", "").strip()
+        status_bits: list[str] = []
+        if date_display:
+            status_bits.append(date_display)
+        if comment_meta.get("done", "").strip() == "1":
+            status_bits.append("resolved")
+        suffix = f" ({'; '.join(status_bits)})" if status_bits else ""
+        indent = "  " * depth
+        lines.append(
+            f'{indent}- **{author_display}** commented on "{context_display}": '
+            f"{comment_meta['text']}{suffix}"
+        )
+        for child in children.get(comment_meta.get("id", ""), []):
+            render(child, depth + 1)
+
+    for root in roots:
+        render(root, 0)
+
+    return lines
+
+
+def parse_docx_tables_and_notes(docx_path: Path) -> tuple[list[pd.DataFrame], str, str]:
     with ZipFile(docx_path) as z:
         xml = z.read("word/document.xml")
         numbering_defs = _load_numbering_definitions(z)
+        try:
+            comments_xml = z.read("word/comments.xml")
+        except KeyError:
+            comments_xml = None
+        try:
+            comments_extended_xml = z.read("word/commentsExtended.xml")
+        except KeyError:
+            comments_extended_xml = None
 
     root = etree.fromstring(xml)
 
@@ -328,4 +584,30 @@ def parse_docx_table(docx_path: Path) -> list[pd.DataFrame]:
         df = df.iloc[1:].reset_index(drop=True)
         dfs.append(df)
 
-    return dfs
+    footnotes_chunks = _collect_body_text_below_tables(
+        root,
+        numbering_defs=numbering_defs,
+    )
+
+    comments_chunks: list[str] = []
+    if comments_xml is not None:
+        comments_root = etree.fromstring(comments_xml)
+        comments_extended_root = (
+            etree.fromstring(comments_extended_xml) if comments_extended_xml is not None else None
+        )
+        comment_context_by_id = _extract_comment_context_by_id(root)
+        comments_chunks.extend(
+            _collect_comments_with_metadata(
+                comments_root,
+                numbering_defs=numbering_defs,
+                comments_extended_root=comments_extended_root,
+                comment_context_by_id=comment_context_by_id,
+            )
+        )
+
+    return dfs, "\n".join(footnotes_chunks), "\n".join(comments_chunks)
+
+
+def parse_docx_table(docx_path: Path) -> list[pd.DataFrame]:
+    tables, _, _ = parse_docx_tables_and_notes(docx_path)
+    return tables
