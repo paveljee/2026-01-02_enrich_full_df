@@ -26,8 +26,8 @@ from ..helpers.vars import (
     KTP_XLSX_MATCH_COL,
     KTP_XLSX_MATCH_FIRST_TOKENS_KEY,
     KTP_XLSX_MATCH_LAST_NAME_NORM_KEY,
-    KTP_XLSX_MATCH_SOURCE_KEY_FIRST_TOKEN_KEY,
     KTP_XLSX_MATCH_SOURCE_KEY_LAST_KEY,
+    KTP_XLSX_MATCH_SOURCE_KEY_TOKENS_KEY,
     SSNA_FILENAME_COL,
     SSNAD_FILENAME_COL,
     SSNAP_FILENAME_COL,
@@ -140,22 +140,26 @@ def run(context: PipelineContext) -> StepResult:
             return False
         if not isinstance(payload, dict):
             return False
-        source_key_first_token = payload.get(KTP_XLSX_MATCH_SOURCE_KEY_FIRST_TOKEN_KEY)
+        source_key_tokens = payload.get(KTP_XLSX_MATCH_SOURCE_KEY_TOKENS_KEY, [])
         source_key_last = payload.get(KTP_XLSX_MATCH_SOURCE_KEY_LAST_KEY)
         first_tokens = payload.get(KTP_XLSX_MATCH_FIRST_TOKENS_KEY, [])
         last_name_norm = payload.get(KTP_XLSX_MATCH_LAST_NAME_NORM_KEY)
+        if not isinstance(source_key_tokens, list):
+            source_key_tokens = []
         if not isinstance(first_tokens, list):
             first_tokens = []
-        source_key_first_token_str = (
-            str(source_key_first_token).strip() if source_key_first_token is not None else ""
-        )
         source_key_last_str = str(source_key_last).strip() if source_key_last is not None else ""
         last_name_norm_str = str(last_name_norm).strip() if last_name_norm is not None else ""
-        if not source_key_first_token_str or not source_key_last_str:
+        source_key_token_values = sorted(
+            {str(token).strip() for token in source_key_tokens if str(token).strip()}
+        )
+        if not source_key_token_values or not source_key_last_str:
             return False
-        first_token_values = [str(token).strip() for token in first_tokens if str(token).strip()]
+        first_token_values = sorted(
+            {str(token).strip() for token in first_tokens if str(token).strip()}
+        )
         return (
-            source_key_first_token_str in first_token_values
+            source_key_token_values == first_token_values
             and bool(last_name_norm_str)
             and source_key_last_str == last_name_norm_str
         )

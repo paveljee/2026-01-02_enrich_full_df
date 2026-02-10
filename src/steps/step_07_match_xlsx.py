@@ -42,8 +42,8 @@ from ..helpers.vars import (
     KTP_XLSX_MATCH_COL,
     KTP_XLSX_MATCH_FIRST_TOKENS_KEY,
     KTP_XLSX_MATCH_LAST_NAME_NORM_KEY,
-    KTP_XLSX_MATCH_SOURCE_KEY_FIRST_TOKEN_KEY,
     KTP_XLSX_MATCH_SOURCE_KEY_LAST_KEY,
+    KTP_XLSX_MATCH_SOURCE_KEY_TOKENS_KEY,
     STEP_MATCH_XLSX,
 )
 from .shared import draw_sort_ctes_sql, draw_sort_order_by_sql, hcr_excluded_columns
@@ -75,11 +75,13 @@ def run(context: PipelineContext) -> StepResult:
                    nk."{KTP_FIRST_NAME_COL}" AS "{KTP_FIRST_NAME_COL}",
                    nk."{KTP_LAST_NAME_COL}" AS "{KTP_LAST_NAME_COL}",
                    lower(unaccent(nk."{KTP_FIRST_NAME_COL}")) AS nd_first_clean,
-                   lower(unaccent(nk."{KTP_LAST_NAME_COL}")) AS nd_last_clean,
-                   list_extract(
+                lower(unaccent(nk."{KTP_LAST_NAME_COL}")) AS nd_last_clean,
+                list_extract(
                        regexp_split_to_array(lower(unaccent(nk."{KTP_FIRST_NAME_COL}")), '\\s+'),
                        1
-                   ) AS nd_first_token
+                   ) AS nd_first_token,
+                regexp_split_to_array(lower(unaccent(nk."{KTP_FIRST_NAME_COL}")), '\\s+')
+                    AS nd_first_tokens
             FROM {OUTERDICT_NAME_VIEW} nk
         ),
         pop_names AS (
@@ -120,7 +122,7 @@ def run(context: PipelineContext) -> StepResult:
                 p.pop_first AS "{KTP_FIRST_NAME_COL}",
                 p.pop_last AS "{KTP_LAST_NAME_COL}",
                 json_object(
-                    '{KTP_XLSX_MATCH_SOURCE_KEY_FIRST_TOKEN_KEY}', nd.nd_first_token,
+                    '{KTP_XLSX_MATCH_SOURCE_KEY_TOKENS_KEY}', to_json(nd.nd_first_tokens),
                     '{KTP_XLSX_MATCH_SOURCE_KEY_LAST_KEY}', nd.nd_last_clean,
                     '{KTP_XLSX_MATCH_FIRST_TOKENS_KEY}', to_json(p.pop_first_tokens),
                     '{KTP_XLSX_MATCH_LAST_NAME_NORM_KEY}', p.pop_last_clean
