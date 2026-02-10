@@ -95,8 +95,16 @@ KTP_DOCX_TABLE_1_PREFIX: Final = "ktp.table_1_"
 KTP_DOCX_OPTIONAL_EMPTY_COLS: Final[set[str]] = {
     "ktp.table_1_socioeconomic_status",
     "ktp.table_1_race_ethnicity_language_culture",
+    "ktp.table_1_topics",
     KTP_DOCX_FOOTNOTES_COL,
     KTP_DOCX_COMMENTS_COL,
+}
+KTP_TABLE_1_EMPTY_VALUE_PLACEHOLDERS: Final[set[str]] = {
+    "-",
+    "–",
+    "—",
+    "−",
+    "NR",
 }
 CARD_BUILD_SUBSET_DESCRIPTIONS: Final[dict[int, str]] = {
     0: "all name keys (no filtering)",
@@ -490,5 +498,6 @@ __all__ = [
     "KTP_LAST_NAME_ORIG_COLNAME_COL",
     "KTP_DOCX_FOOTNOTES_COL",
     "KTP_DOCX_COMMENTS_COL",
+    "KTP_TABLE_1_EMPTY_VALUE_PLACEHOLDERS",
     "KTP_PRIORITY_GROUP_LABELS",
 ]

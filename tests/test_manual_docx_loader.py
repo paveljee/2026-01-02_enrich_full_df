@@ -33,8 +33,10 @@ def test_load_docx_tables_adds_metadata(monkeypatch: pytest.MonkeyPatch, tmp_pat
 
     table = pd.DataFrame({"Researcher/author": ["Ada", "Grace"], "Notes": ["A", "B"]})
 
-    def fake_parse_docx_tables_and_notes(_: Path) -> tuple[list[pd.DataFrame], str, str]:
-        return [table], "outside note", "comment note"
+    def fake_parse_docx_tables_and_notes(
+        _: Path,
+    ) -> tuple[list[pd.DataFrame], str, list[list[str]]]:
+        return [table], "outside note", [["comment row 1", "comment row 2"]]
 
     monkeypatch.setattr(
         "src.steps.step_08_match_docx.parse_docx_tables_and_notes",
@@ -57,7 +59,7 @@ def test_load_docx_tables_adds_metadata(monkeypatch: pytest.MonkeyPatch, tmp_pat
     assert df[DOCX_ROW_INDEX_COL].tolist() == [0, 1]
     assert df[DOCX_FRAGMENT_COL].tolist() == ["table0_row0", "table0_row1"]
     assert df[KTP_DOCX_FOOTNOTES_COL].tolist() == ["outside note", "outside note"]
-    assert df[KTP_DOCX_COMMENTS_COL].tolist() == ["comment note", "comment note"]
+    assert df[KTP_DOCX_COMMENTS_COL].tolist() == ["comment row 1", "comment row 2"]
 
 
 def test_parse_docx_tables_and_notes_extracts_lists_and_notes(tmp_path: Path) -> None:
@@ -69,7 +71,14 @@ def test_parse_docx_tables_and_notes_extracts_lists_and_notes(tmp_path: Path) ->
             <w:p><w:r><w:t>Outside paragraph note</w:t></w:r></w:p>
             <w:tbl>
               <w:tr>
-                <w:tc><w:p><w:r><w:t>Researcher/author</w:t></w:r></w:p></w:tc>
+                <w:tc>
+                  <w:p>
+                    <w:commentRangeStart w:id="0"/>
+                    <w:r><w:t>Researcher/author</w:t></w:r>
+                    <w:commentRangeEnd w:id="0"/>
+                    <w:r><w:commentReference w:id="0"/></w:r>
+                  </w:p>
+                </w:tc>
                 <w:tc><w:p><w:r><w:t>Notes</w:t></w:r></w:p></w:tc>
               </w:tr>
               <w:tr>
@@ -85,7 +94,10 @@ def test_parse_docx_tables_and_notes_extracts_lists_and_notes(tmp_path: Path) ->
                   </w:p>
                   <w:p>
                     <w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="2"/></w:numPr></w:pPr>
+                    <w:commentRangeStart w:id="1"/>
                     <w:r><w:t>Bullet item</w:t></w:r>
+                    <w:commentRangeEnd w:id="1"/>
+                    <w:r><w:commentReference w:id="1"/></w:r>
                   </w:p>
                 </w:tc>
               </w:tr>
@@ -142,7 +154,7 @@ def test_parse_docx_tables_and_notes_extracts_lists_and_notes(tmp_path: Path) ->
         zf.writestr("word/numbering.xml", numbering_xml)
         zf.writestr("word/comments.xml", comments_xml)
 
-    tables, footnotes, comments = parse_docx_tables_and_notes(docx_path)
+    tables, footnotes, comments_by_row = parse_docx_tables_and_notes(docx_path)
     assert len(tables) == 1
     assert len(tables[0]) == 1
     notes_val = tables[0].iloc[0, 1]
@@ -151,11 +163,12 @@ def test_parse_docx_tables_and_notes_extracts_lists_and_notes(tmp_path: Path) ->
     assert "• Bullet item" in notes_val
     assert "Outside paragraph note" not in footnotes
     assert "Footnote-like text below table" in footnotes
-    lines = comments.splitlines()
-    assert lines[0].startswith('- **First Last** commented on "context unavailable":')
+    row_comments = comments_by_row[0][0]
+    lines = row_comments.splitlines()
+    assert lines[0].startswith('- **First Last** commented on "Researcher/author":')
     assert "(2024-01-02T03:04:05Z)" in lines[0]
-    assert lines[1].startswith('  - **Reply Author** commented on "context unavailable":')
-    assert lines[2].startswith('- **Second Reviewer** commented on "context unavailable":')
+    assert lines[1].startswith('  - **Reply Author** commented on "anchor unavailable": Reply text')
+    assert lines[2].startswith('- **Second Reviewer** commented on "Bullet item":')
 
     review_dir = Path("data/test_data/parse_docx")
     review_dir.mkdir(parents=True, exist_ok=True)
@@ -164,7 +177,7 @@ def test_parse_docx_tables_and_notes_extracts_lists_and_notes(tmp_path: Path) ->
 
     notes_val_md = str(notes_val).replace("\n", "\n\n")
     footnotes_md = footnotes.replace("\n", "\n\n") if footnotes else ""
-    comments_md = comments.replace("\n", "\n\n") if comments else ""
+    comments_md = row_comments.replace("\n", "\n\n") if row_comments else ""
     output_md = "\n\n".join(
         [
             "# parse_docx test output",
@@ -184,9 +197,10 @@ def test_parse_docx_tables_and_notes_real_mock_fixture_for_review() -> None:
     if not mock_docx.exists():
         pytest.skip("resources/mock_RI_test.docx not available.")
 
-    tables, footnotes, comments = parse_docx_tables_and_notes(mock_docx)
+    tables, footnotes, comments_by_row = parse_docx_tables_and_notes(mock_docx)
     assert len(tables) >= 1
     assert len(tables[0]) >= 1
+    comments = "\n".join(comments_by_row[0]) if comments_by_row and comments_by_row[0] else ""
     assert "Some comment" in comments
 
     review_dir = Path("data/test_data/parse_docx")

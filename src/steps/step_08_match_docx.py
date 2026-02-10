@@ -64,12 +64,22 @@ def load_docx_tables(resources: dict[str, RegisteredResource]) -> pd.DataFrame:
     frames: list[pd.DataFrame] = []
     for resource in resources.values():
         path = Path(resource.__fspath__())
-        tables, footnotes_text, comments_text = parse_docx_tables_and_notes(path)
+        tables, footnotes_text, comments_by_table_row = parse_docx_tables_and_notes(path)
         for table_index, df in enumerate(tables):
             table = df.copy()
             table.columns = [normalize_docx_column_name(col) for col in table.columns]
             table[KTP_DOCX_FOOTNOTES_COL] = footnotes_text
-            table[KTP_DOCX_COMMENTS_COL] = comments_text
+            row_comments = (
+                comments_by_table_row[table_index]
+                if table_index < len(comments_by_table_row)
+                else [""] * len(table)
+            )
+            if len(row_comments) != len(table):
+                raise ValueError(
+                    f"DOCX row comments mismatch for '{path.name}' table {table_index}: "
+                    f"{len(row_comments)} comments for {len(table)} rows."
+                )
+            table[KTP_DOCX_COMMENTS_COL] = row_comments
             table[KTP_FILENAME_COL] = path.name
             table[DOCX_TABLE_INDEX_COL] = table_index
             table[DOCX_ROW_INDEX_COL] = range(len(table))
@@ -89,7 +99,7 @@ def load_single_table_docx(resources: dict[str, RegisteredResource]) -> pd.DataF
         if path.name.startswith("~$"):
             continue
         try:
-            tables, footnotes_text, comments_text = parse_docx_tables_and_notes(path)
+            tables, footnotes_text, comments_by_table_row = parse_docx_tables_and_notes(path)
         except BadZipFile as exc:
             raise ValueError(
                 f"Invalid DOCX file '{path.name}' (not a valid DOCX/zip archive). "
@@ -102,7 +112,13 @@ def load_single_table_docx(resources: dict[str, RegisteredResource]) -> pd.DataF
         table = tables[0].copy()
         table.columns = [normalize_docx_column_name(col) for col in table.columns]
         table[KTP_DOCX_FOOTNOTES_COL] = footnotes_text
-        table[KTP_DOCX_COMMENTS_COL] = comments_text
+        row_comments = comments_by_table_row[0] if comments_by_table_row else [""] * len(table)
+        if len(row_comments) != len(table):
+            raise ValueError(
+                f"DOCX row comments mismatch for '{path.name}': "
+                f"{len(row_comments)} comments for {len(table)} rows."
+            )
+        table[KTP_DOCX_COMMENTS_COL] = row_comments
         table[KTP_FILENAME_COL] = path.name
         table[KTP_DOCX_ROW_NUMBER_COL] = range(1, len(table) + 1)
         frames.append(table)

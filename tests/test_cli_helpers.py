@@ -33,8 +33,10 @@ def test_load_docx_tables_uses_parser(tmp_path: Path, monkeypatch) -> None:
         fragment_type=FragmentType.DOCX_ROW,
     )
 
-    def fake_parse_docx_tables_and_notes(_: Path) -> tuple[list[pd.DataFrame], str, str]:
-        return [pd.DataFrame({RIGHT_NAME_COL: ["Jane Doe"], "extra": ["value"]})], "", ""
+    def fake_parse_docx_tables_and_notes(
+        _: Path,
+    ) -> tuple[list[pd.DataFrame], str, list[list[str]]]:
+        return [pd.DataFrame({RIGHT_NAME_COL: ["Jane Doe"], "extra": ["value"]})], "", [[""]]
 
     monkeypatch.setattr(
         "src.steps.step_08_match_docx.parse_docx_tables_and_notes",

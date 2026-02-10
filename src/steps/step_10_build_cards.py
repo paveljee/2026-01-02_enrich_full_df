@@ -23,6 +23,7 @@ from ..helpers.vars import (
     KTP_DOCX_TABLE_1_PREFIX,
     KTP_FILENAME_COL,
     KTP_SOURCE_KEY_COL,
+    KTP_TABLE_1_EMPTY_VALUE_PLACEHOLDERS,
     KTP_XLSX_MATCH_COL,
     KTP_XLSX_MATCH_FIRST_TOKENS_KEY,
     KTP_XLSX_MATCH_LAST_NAME_NORM_KEY,
@@ -172,7 +173,12 @@ def run(context: PipelineContext) -> StepResult:
         if value is None:
             return False
         if isinstance(value, str):
-            return bool(value.strip())
+            normalized = value.strip()
+            if not normalized:
+                return False
+            if normalized in KTP_TABLE_1_EMPTY_VALUE_PLACEHOLDERS:
+                return False
+            return True
         return not bool(pd.isna(value))
 
     def _has_complete_docx_table_fields(inner) -> bool:

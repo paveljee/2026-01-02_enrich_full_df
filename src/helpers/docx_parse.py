@@ -369,21 +369,75 @@ def _collect_body_text_below_tables(
     return texts
 
 
-def _extract_comment_context_by_id(root) -> dict[str, str]:
-    context_chunks: dict[str, list[str]] = {}
+def _extract_comment_ids_from_node(node) -> set[str]:
+    ids: set[str] = set()
+    for marker_tag in ("commentRangeStart", "commentRangeEnd", "commentReference"):
+        for marker in node.findall(f".//w:{marker_tag}", namespaces=NS):
+            cid = marker.get(f"{{{W}}}id")
+            if cid is not None:
+                ids.add(str(cid))
+    return ids
+
+
+def _extract_table_comment_ids(root) -> tuple[list[list[set[str]]], list[set[str]], list[set[str]]]:
+    body = root.find("./w:body", namespaces=NS)
+    if body is None:
+        return [], [], []
+
+    row_ids_by_table: list[list[set[str]]] = []
+    header_ids_by_table: list[set[str]] = []
+    below_ids_by_table: list[set[str]] = []
+    table_nodes = [child for child in body if etree.QName(child).localname == "tbl"]
+    below_ids_by_table = [set() for _ in table_nodes]
+
+    for tbl in table_nodes:
+        tr_nodes = tbl.findall("./w:tr", namespaces=NS)
+        row_ids: list[set[str]] = []
+        for tr in tr_nodes:
+            row_comment_ids = _extract_comment_ids_from_node(tr)
+            row_ids.append(row_comment_ids)
+        row_ids_by_table.append(row_ids[1:] if len(row_ids) > 1 else [])
+        header_ids_by_table.append(row_ids[0] if row_ids else set())
+
+    children = list(body)
+    table_cursor = -1
+    for child in children:
+        tag = etree.QName(child).localname
+        if tag == "tbl":
+            table_cursor += 1
+            continue
+        if tag != "p" or table_cursor < 0 or table_cursor >= len(below_ids_by_table):
+            continue
+        below_ids_by_table[table_cursor].update(_extract_comment_ids_from_node(child))
+
+    return row_ids_by_table, header_ids_by_table, below_ids_by_table
+
+
+def _extract_comment_anchor_by_id(root) -> dict[str, str]:
+    context_ranges: dict[str, list[tuple[str, int, int]]] = {}
+
     for p in root.findall(".//w:p", namespaces=NS):
-        active_ids: list[str] = []
+        active_starts: dict[str, list[int]] = {}
+        para_parts: list[str] = []
+        para_ranges: list[tuple[str, int, int]] = []
+        current_offset = 0
+
         for node in p:
             tag = etree.QName(node).localname
             if tag == "commentRangeStart":
                 comment_id = node.get(f"{{{W}}}id")
                 if comment_id:
-                    active_ids.append(str(comment_id))
+                    cid = str(comment_id)
+                    active_starts.setdefault(cid, []).append(current_offset)
                 continue
             if tag == "commentRangeEnd":
                 comment_id = node.get(f"{{{W}}}id")
                 if comment_id:
-                    active_ids = [cid for cid in active_ids if cid != str(comment_id)]
+                    cid = str(comment_id)
+                    starts = active_starts.get(cid, [])
+                    if starts:
+                        start_offset = starts.pop()
+                        para_ranges.append((cid, start_offset, current_offset))
                 continue
 
             text = ""
@@ -393,15 +447,38 @@ def _extract_comment_context_by_id(root) -> dict[str, str]:
                 text = "".join(_run_to_text_plain(r) for r in node.findall("w:r", namespaces=NS))
             if not text:
                 continue
-            for comment_id in active_ids:
-                context_chunks.setdefault(comment_id, []).append(text)
+            para_parts.append(text)
+            current_offset += len(text)
 
-    context_by_id: dict[str, str] = {}
-    for comment_id, chunks in context_chunks.items():
-        merged = re.sub(r"\s+", " ", "".join(chunks)).strip()
-        if merged:
-            context_by_id[comment_id] = merged
-    return context_by_id
+        para_text = re.sub(r"\s+", " ", "".join(para_parts)).strip()
+        if not para_text:
+            continue
+        for cid, starts in active_starts.items():
+            for start_offset in starts:
+                para_ranges.append((cid, start_offset, current_offset))
+        for cid, start_offset, end_offset in para_ranges:
+            context_ranges.setdefault(cid, []).append((para_text, start_offset, end_offset))
+
+    anchor_by_id: dict[str, str] = {}
+    for comment_id, ranges in context_ranges.items():
+        anchors: list[str] = []
+        for para_text, start_offset, end_offset in ranges:
+            start = max(0, min(start_offset, len(para_text)))
+            end = max(start, min(end_offset, len(para_text)))
+            selected = para_text[start:end].strip()
+            selected = re.sub(r"\s+", " ", selected).strip()
+            if selected:
+                anchors.append(selected)
+        if anchors:
+            seen: set[str] = set()
+            deduped: list[str] = []
+            for anchor in anchors:
+                if anchor in seen:
+                    continue
+                seen.add(anchor)
+                deduped.append(anchor)
+            anchor_by_id[comment_id] = " | ".join(deduped)
+    return anchor_by_id
 
 
 def _collect_comments_with_metadata(
@@ -409,8 +486,7 @@ def _collect_comments_with_metadata(
     *,
     numbering_defs: dict[int, dict[int, dict[str, object]]],
     comments_extended_root=None,
-    comment_context_by_id: dict[str, str] | None = None,
-) -> list[str]:
+) -> tuple[dict[str, dict[str, str]], dict[str, list[str]], list[str]]:
     para_parent_map: dict[str, str] = {}
     para_done_map: dict[str, str] = {}
     if comments_extended_root is not None:
@@ -509,40 +585,78 @@ def _collect_comments_with_metadata(
         child_list.sort(key=sort_key)
     roots.sort(key=sort_key)
 
+    root_ids = [item["id"] for item in roots if item.get("id")]
+    return by_id, {k: [c["id"] for c in v if c.get("id")] for k, v in children.items()}, root_ids
+
+
+def _render_comments_for_ids(
+    *,
+    selected_ids: set[str],
+    by_id: dict[str, dict[str, str]],
+    children_ids: dict[str, list[str]],
+    root_ids: list[str],
+    anchor_by_id: dict[str, str],
+) -> list[str]:
+    if not selected_ids:
+        return []
+
+    expanded_ids: set[str] = set()
+    for cid in selected_ids:
+        current = cid
+        while current and current in by_id and current not in expanded_ids:
+            expanded_ids.add(current)
+            current = by_id[current].get("parent_id", "").strip()
+    stack = list(expanded_ids)
+    while stack:
+        current = stack.pop()
+        for child_id in children_ids.get(current, []):
+            if child_id in by_id and child_id not in expanded_ids:
+                expanded_ids.add(child_id)
+                stack.append(child_id)
+
     lines: list[str] = []
 
-    def render(comment_meta: dict[str, str], depth: int) -> None:
+    def render(comment_id: str, depth: int) -> None:
+        meta = by_id.get(comment_id)
+        if meta is None or comment_id not in expanded_ids:
+            return
         author_display = (
-            comment_meta.get("author", "").strip()
-            or comment_meta.get("initials", "").strip()
-            or "Comment"
+            meta.get("author", "").strip() or meta.get("initials", "").strip() or "Comment"
         )
-        context = ""
-        if comment_context_by_id is not None:
-            context = comment_context_by_id.get(comment_meta.get("id", ""), "").strip()
-        context_display = context if context else "context unavailable"
-        date_display = comment_meta.get("date", "").strip()
+        date_display = meta.get("date", "").strip()
         status_bits: list[str] = []
         if date_display:
             status_bits.append(date_display)
-        if comment_meta.get("done", "").strip() == "1":
+        if meta.get("done", "").strip() == "1":
             status_bits.append("resolved")
         suffix = f" ({'; '.join(status_bits)})" if status_bits else ""
         indent = "  " * depth
+        anchor = anchor_by_id.get(comment_id, "").strip() or "anchor unavailable"
         lines.append(
-            f'{indent}- **{author_display}** commented on "{context_display}": '
-            f"{comment_meta['text']}{suffix}"
+            f'{indent}- **{author_display}** commented on "{anchor}": '
+            f"{meta.get('text', '')}{suffix}"
         )
-        for child in children.get(comment_meta.get("id", ""), []):
-            render(child, depth + 1)
+        for child_id in children_ids.get(comment_id, []):
+            render(child_id, depth + 1)
 
-    for root in roots:
-        render(root, 0)
+    roots_for_render: list[str] = []
+    for cid in root_ids:
+        if cid in expanded_ids:
+            roots_for_render.append(cid)
+    for cid in sorted(expanded_ids):
+        if cid in roots_for_render:
+            continue
+        parent_id = by_id.get(cid, {}).get("parent_id", "").strip()
+        if not parent_id or parent_id not in expanded_ids:
+            roots_for_render.append(cid)
+
+    for rid in roots_for_render:
+        render(rid, 0)
 
     return lines
 
 
-def parse_docx_tables_and_notes(docx_path: Path) -> tuple[list[pd.DataFrame], str, str]:
+def parse_docx_tables_and_notes(docx_path: Path) -> tuple[list[pd.DataFrame], str, list[list[str]]]:
     with ZipFile(docx_path) as z:
         xml = z.read("word/document.xml")
         numbering_defs = _load_numbering_definitions(z)
@@ -556,6 +670,8 @@ def parse_docx_tables_and_notes(docx_path: Path) -> tuple[list[pd.DataFrame], st
             comments_extended_xml = None
 
     root = etree.fromstring(xml)
+
+    row_ids_by_table, header_ids_by_table, below_ids_by_table = _extract_table_comment_ids(root)
 
     dfs = []
     for tbl in root.findall(".//w:tbl", namespaces=NS):
@@ -589,23 +705,41 @@ def parse_docx_tables_and_notes(docx_path: Path) -> tuple[list[pd.DataFrame], st
         numbering_defs=numbering_defs,
     )
 
-    comments_chunks: list[str] = []
+    comments_by_table_row: list[list[str]] = [[""] * len(df) for df in dfs]
     if comments_xml is not None:
         comments_root = etree.fromstring(comments_xml)
         comments_extended_root = (
             etree.fromstring(comments_extended_xml) if comments_extended_xml is not None else None
         )
-        comment_context_by_id = _extract_comment_context_by_id(root)
-        comments_chunks.extend(
-            _collect_comments_with_metadata(
-                comments_root,
-                numbering_defs=numbering_defs,
-                comments_extended_root=comments_extended_root,
-                comment_context_by_id=comment_context_by_id,
-            )
+        by_id, children_ids, root_ids = _collect_comments_with_metadata(
+            comments_root,
+            numbering_defs=numbering_defs,
+            comments_extended_root=comments_extended_root,
         )
+        anchor_by_id = _extract_comment_anchor_by_id(root)
+        for table_idx, df in enumerate(dfs):
+            table_row_comments: list[str] = []
+            row_id_sets = row_ids_by_table[table_idx] if table_idx < len(row_ids_by_table) else []
+            header_ids = (
+                header_ids_by_table[table_idx] if table_idx < len(header_ids_by_table) else set()
+            )
+            below_ids = (
+                below_ids_by_table[table_idx] if table_idx < len(below_ids_by_table) else set()
+            )
+            for row_idx in range(len(df)):
+                row_ids = row_id_sets[row_idx] if row_idx < len(row_id_sets) else set()
+                selected_ids = set(row_ids) | set(header_ids) | set(below_ids)
+                rendered = _render_comments_for_ids(
+                    selected_ids=selected_ids,
+                    by_id=by_id,
+                    children_ids=children_ids,
+                    root_ids=root_ids,
+                    anchor_by_id=anchor_by_id,
+                )
+                table_row_comments.append("\n".join(rendered))
+            comments_by_table_row[table_idx] = table_row_comments
 
-    return dfs, "\n".join(footnotes_chunks), "\n".join(comments_chunks)
+    return dfs, "\n".join(footnotes_chunks), comments_by_table_row
 
 
 def parse_docx_table(docx_path: Path) -> list[pd.DataFrame]:
