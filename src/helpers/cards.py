@@ -14,7 +14,6 @@ import pandas as pd
 
 from .data_models import OuterDict
 from .vars import (
-    CARD_INTRODUCTION,
     DRAW_LABEL,
     KTP_FILENAME_COL,
     KTP_FIRST_NAME_ORIG_COLNAME_COL,
@@ -26,12 +25,12 @@ def build_cards(
     outer_dict: OuterDict,
     *,
     total_draws: int,
-    intro_date: str,
+    intro: str,
     excluded_cols: set[str],
     progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> dict[str, str]:
     cards: dict[str, str] = {}
-    intro = CARD_INTRODUCTION.format(intro_date) + "\n\n"
+    intro_prefix = intro if intro.endswith("\n\n") else f"{intro}\n\n"
     items = list(outer_dict.items())
     total_cards = len(items)
     for card_idx, (name_key, inner_dicts) in enumerate(items, start=1):
@@ -84,7 +83,7 @@ def build_cards(
                     card += f"**{col}**:\n\n{str(val).replace('\n', '\n\n')}\n\n"
                 else:
                     card += f"**{col}**: {str(val)}\n\n"
-        cards[docx_filename] = intro + card
+        cards[docx_filename] = intro_prefix + card
         if progress_callback is not None:
             progress_callback(card_idx, total_cards, docx_filename)
     return cards

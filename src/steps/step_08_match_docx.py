@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from zipfile import BadZipFile
 
 import duckdb
 import pandas as pd
@@ -78,7 +79,15 @@ def load_single_table_docx(resources: dict[str, RegisteredResource]) -> pd.DataF
     frames: list[pd.DataFrame] = []
     for resource in resources.values():
         path = Path(resource.__fspath__())
-        tables = parse_docx_table(path)
+        if path.name.startswith("~$"):
+            continue
+        try:
+            tables = parse_docx_table(path)
+        except BadZipFile as exc:
+            raise ValueError(
+                f"Invalid DOCX file '{path.name}' (not a valid DOCX/zip archive). "
+                "Remove temp/lock files (e.g., '~$*.docx') from docx_dir."
+            ) from exc
         if len(tables) != 1:
             raise ValueError(
                 f"Expected exactly one table in DOCX '{path.name}', got {len(tables)}"

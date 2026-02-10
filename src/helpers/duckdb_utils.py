@@ -44,13 +44,14 @@ def append_innerdicts_from_rows_table(
     outer_dict: OuterDict,
     procedure,
     required_columns: set[str] | None = None,
+    key_column: str = "name_key",
 ) -> None:
     rel = conn.execute(f"SELECT * FROM {table_name}")
     cols = [desc[0] for desc in rel.description]
     try:
-        name_idx = cols.index("name_key")
+        name_idx = cols.index(key_column)
     except ValueError as exc:
-        raise ValueError(f"Missing name_key column in {table_name}") from exc
+        raise ValueError(f"Missing {key_column} column in {table_name}") from exc
     required = required_columns or set()
     while True:
         rows = rel.fetchmany(5000)

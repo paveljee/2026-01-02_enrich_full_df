@@ -37,7 +37,7 @@ def test_build_cards_includes_intro_and_fun_fact() -> None:
     cards = build_cards(
         outer,
         total_draws=10,
-        intro_date="2026-02-02",
+        intro="## Introduction\nDate of report: 2026-02-02",
         excluded_cols={"excluded"},
     )
 

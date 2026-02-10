@@ -71,7 +71,11 @@ def register_resources(
 
 
 def discover_docx_files(docx_dir: Path) -> list[Path]:
-    return sorted(find_files_by_extension(docx_dir, "docx", recursive=False))
+    return sorted(
+        path
+        for path in find_files_by_extension(docx_dir, "docx", recursive=False)
+        if not path.name.startswith("~$")
+    )
 
 
 def configured_hcr_xlsx_entries(config: PipelineConfig) -> list[tuple[str, dict[str, str]]]:

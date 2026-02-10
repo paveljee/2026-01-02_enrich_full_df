@@ -52,6 +52,7 @@ class PipelineConfig:
     sample_draw_sizes: list[int] = field(default_factory=lambda: [20] + [40] * 7)
     pilot_xlsx_name: str = "2024_HCR.xlsx"
     total_draws: int = 310
+    card_subset_mode: int = 0
 
     @classmethod
     def from_json(cls, path: Path) -> "PipelineConfig":
