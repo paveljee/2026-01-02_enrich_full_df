@@ -28,12 +28,14 @@ from ..helpers.vars import (
     KTP_XLSX_MATCH_LAST_NAME_NORM_KEY,
     KTP_XLSX_MATCH_SOURCE_KEY_LAST_KEY,
     KTP_XLSX_MATCH_SOURCE_KEY_TOKENS_KEY,
-    SSNA_FILENAME_COL,
     SSNAD_FILENAME_COL,
+    SSNAF_FILENAME_COL,
     SSNAP_FILENAME_COL,
+    SSNAU_FILENAME_COL,
     SSNF_FILENAME_COL,
     SSNHPL0_FILENAME_COL,
     SSNHPL1_FILENAME_COL,
+    SSNPAA_FILENAME_COL,
     STEP_BUILD_CARDS,
 )
 
@@ -114,8 +116,10 @@ def run(context: PipelineContext) -> StepResult:
         filename_cols = [
             KTP_FILENAME_COL,
             SSNAD_FILENAME_COL,
-            SSNA_FILENAME_COL,
+            SSNAU_FILENAME_COL,
             SSNAP_FILENAME_COL,
+            SSNPAA_FILENAME_COL,
+            SSNAF_FILENAME_COL,
             SSNHPL0_FILENAME_COL,
             SSNHPL1_FILENAME_COL,
             SSNF_FILENAME_COL,

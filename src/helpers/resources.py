@@ -121,6 +121,20 @@ def register_pipeline_resources(config: PipelineConfig) -> PipelineResources:
             description=files["authors_paper"]["desc"],
             expected_hash=files["authors_paper"]["sha256"],
         ),
+        Path(files["paper_author_affiliation"]["path"]).name: register_resource(
+            Path(files["paper_author_affiliation"]["path"]),
+            group=ResourceGroup.SCISCINET_HF,
+            fragment_type=FragmentType.PAPER_ID,
+            description=files["paper_author_affiliation"]["desc"],
+            expected_hash=files["paper_author_affiliation"]["sha256"],
+        ),
+        Path(files["affiliations"]["path"]).name: register_resource(
+            Path(files["affiliations"]["path"]),
+            group=ResourceGroup.SCISCINET_HF,
+            fragment_type=FragmentType.PARQUET_ROW,
+            description=files["affiliations"]["desc"],
+            expected_hash=files["affiliations"]["sha256"],
+        ),
         Path(files["hit_papers_0"]["path"]).name: register_resource(
             Path(files["hit_papers_0"]["path"]),
             group=ResourceGroup.SCISCINET_HF,

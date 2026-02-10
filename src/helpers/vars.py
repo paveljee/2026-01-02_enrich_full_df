@@ -33,17 +33,25 @@ DRAW_LABEL: Final = "ktp.draw_number"
 RIGHT_NAME_COL: Final = "Researcher/author"
 KTP_FRAGMENT_COL: Final = "ktp.fragment"
 SSNAD_FILENAME_COL: Final = "ssnad.filename"
-SSNA_FILENAME_COL: Final = "ssna.filename"
+SSNAU_FILENAME_COL: Final = "ssnau.filename"
 SSNAP_FILENAME_COL: Final = "ssnap.filename"
 SSNHPL0_FILENAME_COL: Final = "ssnhpl0.filename"
 SSNHPL1_FILENAME_COL: Final = "ssnhpl1.filename"
 SSNF_FILENAME_COL: Final = "ssnf.filename"
-SSN_SUM_HIT_PCT_COL: Final = "ssn.sum_hit_1pct"
+SSNPAA_FILENAME_COL: Final = "ssnpaa.filename"
+SSNAF_FILENAME_COL: Final = "ssnaf.filename"
+KTP_SSN_SUM_HIT_1PCT_COL: Final = "ktp.ssn_sum_hit_1pct"
 SSN_PAPERIDS_LEVEL0_COL: Final = "ssn.paperids_level0"
 SSN_PAPERIDS_LEVEL1_COL: Final = "ssn.paperids_level1"
 SSN_FIELD_IDS_LIST_COL: Final = "ssn.field_ids_list"
 KTP_SSN_TOP_PAPERS_HIT_1PCT_COL: Final = "ktp.ssn_top_papers_hit_1pct"
 KTP_SSN_FIELD_DISPLAY_NAMES_LIST_COL: Final = "ktp.ssn_field_display_names_list"
+KTP_SSN_TOP_INSTITUTIONS_COL: Final = "ktp.ssn_top_institutions"
+SSNPAA_INSTITUTION_ID_COL: Final = "ssnpaa.institution_id"
+SSNAF_DISPLAY_NAME_COL: Final = "ssnaf.display_name"
+KTP_SSN_COUNT_PAPERID_COL: Final = "ktp.ssn_count_paperid"
+TOP_K_WORKS: Final = 5
+TOP_K_INSTITUTIONS: Final = 5
 
 HCR_FILENAME_COL: Final = "hcr.filename"
 HCR_ROW_COL: Final = "hcr.row_number"
@@ -432,17 +440,25 @@ __all__ = [
     "KTP_PRIORITY_GROUP_COL",
     "KTP_SOURCE_KEY_COL",
     "SSNAD_FILENAME_COL",
-    "SSNA_FILENAME_COL",
+    "SSNAU_FILENAME_COL",
     "SSNAP_FILENAME_COL",
     "SSNHPL0_FILENAME_COL",
     "SSNHPL1_FILENAME_COL",
     "SSNF_FILENAME_COL",
-    "SSN_SUM_HIT_PCT_COL",
+    "KTP_SSN_SUM_HIT_1PCT_COL",
     "SSN_PAPERIDS_LEVEL0_COL",
     "SSN_PAPERIDS_LEVEL1_COL",
     "SSN_FIELD_IDS_LIST_COL",
     "KTP_SSN_TOP_PAPERS_HIT_1PCT_COL",
     "KTP_SSN_FIELD_DISPLAY_NAMES_LIST_COL",
+    "KTP_SSN_TOP_INSTITUTIONS_COL",
+    "SSNPAA_FILENAME_COL",
+    "SSNAF_FILENAME_COL",
+    "SSNPAA_INSTITUTION_ID_COL",
+    "SSNAF_DISPLAY_NAME_COL",
+    "KTP_SSN_COUNT_PAPERID_COL",
+    "TOP_K_WORKS",
+    "TOP_K_INSTITUTIONS",
     "PILOT_NAME_CATEGORY_TRIPLES",
     "RIGHT_NAME_COL",
     "COUNTRY_PREFIX",

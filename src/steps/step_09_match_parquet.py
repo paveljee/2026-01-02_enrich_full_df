@@ -24,7 +24,10 @@ from ..helpers.vars import (
     KTP_FRAGMENT_TYPE_COL,
     KTP_LAST_NAME_COL,
     KTP_SOURCE_KEY_COL,
+    KTP_SSN_COUNT_PAPERID_COL,
     KTP_SSN_FIELD_DISPLAY_NAMES_LIST_COL,
+    KTP_SSN_SUM_HIT_1PCT_COL,
+    KTP_SSN_TOP_INSTITUTIONS_COL,
     KTP_SSN_TOP_PAPERS_HIT_1PCT_COL,
     KTP_SSNAD_MATCH_COL,
     KTP_SSNAD_MATCH_KTP_NAME_NORM_KEY,
@@ -32,14 +35,19 @@ from ..helpers.vars import (
     SSN_FIELD_IDS_LIST_COL,
     SSN_PAPERIDS_LEVEL0_COL,
     SSN_PAPERIDS_LEVEL1_COL,
-    SSN_SUM_HIT_PCT_COL,
-    SSNA_FILENAME_COL,
     SSNAD_FILENAME_COL,
+    SSNAF_DISPLAY_NAME_COL,
+    SSNAF_FILENAME_COL,
     SSNAP_FILENAME_COL,
+    SSNAU_FILENAME_COL,
     SSNF_FILENAME_COL,
     SSNHPL0_FILENAME_COL,
     SSNHPL1_FILENAME_COL,
+    SSNPAA_FILENAME_COL,
+    SSNPAA_INSTITUTION_ID_COL,
     STEP_MATCH_PARQUET,
+    TOP_K_INSTITUTIONS,
+    TOP_K_WORKS,
 )
 from .shared import draw_sort_ctes_sql, draw_sort_order_by_sql
 
@@ -85,12 +93,14 @@ def run(context: PipelineContext) -> StepResult:
     author_details_path = files["author_details"]["path"]
     authors_path = files["authors"]["path"]
     authors_paper_path = files["authors_paper"]["path"]
+    paper_author_affiliation_path = files["paper_author_affiliation"]["path"]
+    affiliations_path = files["affiliations"]["path"]
     hit_papers0_path = files["hit_papers_0"]["path"]
     hit_papers1_path = files["hit_papers_1"]["path"]
     fields_path = files["fields"]["path"]
 
     author_id_col = normalize_parquet_column_name("authorid", "ssnad")
-    authors_author_id_col = normalize_parquet_column_name("authorid", "ssna")
+    authors_author_id_col = normalize_parquet_column_name("authorid", "ssnau")
     author_id_raw = "authorid"
 
     log("Match author details to name keys (author_details scan)")
@@ -159,8 +169,8 @@ def run(context: PipelineContext) -> StepResult:
         conn,
         table_name=authors_table,
         path=authors_path,
-        prefix="ssna",
-        filename_col=SSNA_FILENAME_COL,
+        prefix="ssnau",
+        filename_col=SSNAU_FILENAME_COL,
         join_sql=(
             "JOIN "
             f"{PARQUET_AUTHOR_MATCH_TABLE} m ON parq.{author_id_raw} = m.\"{author_id_col}\""
@@ -181,6 +191,47 @@ def run(context: PipelineContext) -> StepResult:
         """
     )
 
+    log("Create matched paper-author-affiliation table")
+    paper_author_affiliation_table = (
+        f"ssn_{safe_identifier(Path(paper_author_affiliation_path).stem)}"
+    )
+    _create_parquet_table(
+        conn,
+        table_name=paper_author_affiliation_table,
+        path=paper_author_affiliation_path,
+        prefix="ssnpaa",
+        filename_col=SSNPAA_FILENAME_COL,
+        join_sql=(
+            "JOIN "
+            f"{PARQUET_AUTHOR_MATCH_TABLE} m ON parq.authorid = m.\"{author_id_col}\""
+        ),
+    )
+
+    ssnpaa_institution_id_col = normalize_parquet_column_name("institutionid", "ssnpaa")
+    ssnpaa_paper_id_col = normalize_parquet_column_name("paperid", "ssnpaa")
+    ssnpaa_author_id_col = normalize_parquet_column_name("authorid", "ssnpaa")
+
+    log("Create matched affiliations table")
+    affiliations_table = f"ssn_{safe_identifier(Path(affiliations_path).stem)}"
+    _create_parquet_table(
+        conn,
+        table_name=affiliations_table,
+        path=affiliations_path,
+        prefix="ssnaf",
+        filename_col=SSNAF_FILENAME_COL,
+        join_sql=(
+            "JOIN ("
+            f"SELECT DISTINCT CAST(\"{ssnpaa_institution_id_col}\" AS VARCHAR) AS institution_id "
+            f"FROM {paper_author_affiliation_table} "
+            f"WHERE \"{ssnpaa_institution_id_col}\" IS NOT NULL "
+            f"AND trim(CAST(\"{ssnpaa_institution_id_col}\" AS VARCHAR)) <> ''"
+            ") ids ON CAST(parq.institution_id AS VARCHAR) = ids.institution_id"
+        ),
+    )
+
+    ssnaf_institution_id_col = normalize_parquet_column_name("institution_id", "ssnaf")
+    ssnaf_display_name_col = SSNAF_DISPLAY_NAME_COL
+
     log("Create hits union view")
     conn.execute(
         f"""
@@ -200,7 +251,7 @@ def run(context: PipelineContext) -> StepResult:
         SELECT
             ap.name_key AS name_key,
             ap.authorid AS authorid,
-            SUM(COALESCE(h.hit_1pct, 0)) AS "{SSN_SUM_HIT_PCT_COL}",
+            SUM(COALESCE(h.hit_1pct, 0)) AS "{KTP_SSN_SUM_HIT_1PCT_COL}",
             LIST(ap.paperid) FILTER (WHERE h.level = 'level0') AS "{SSN_PAPERIDS_LEVEL0_COL}",
             LIST(ap.paperid) FILTER (WHERE h.level = 'level1') AS "{SSN_PAPERIDS_LEVEL1_COL}",
             LIST(DISTINCT h.fieldid) AS "{SSN_FIELD_IDS_LIST_COL}"
@@ -215,6 +266,8 @@ def run(context: PipelineContext) -> StepResult:
         parquet_filename(author_details_path),
         parquet_filename(authors_path),
         parquet_filename(authors_paper_path),
+        parquet_filename(paper_author_affiliation_path),
+        parquet_filename(affiliations_path),
         parquet_filename(hit_papers0_path),
         parquet_filename(hit_papers1_path),
         parquet_filename(fields_path),
@@ -224,6 +277,8 @@ def run(context: PipelineContext) -> StepResult:
     hit_papers0_filename = parquet_filename(hit_papers0_path)
     hit_papers1_filename = parquet_filename(hit_papers1_path)
     fields_filename = parquet_filename(fields_path)
+    paper_author_affiliation_filename = parquet_filename(paper_author_affiliation_path)
+    affiliations_filename = parquet_filename(affiliations_path)
 
     log("Create author-level output table")
     conn.execute(
@@ -241,12 +296,14 @@ def run(context: PipelineContext) -> StepResult:
             '{hit_papers0_filename}' AS "{SSNHPL0_FILENAME_COL}",
             '{hit_papers1_filename}' AS "{SSNHPL1_FILENAME_COL}",
             '{fields_filename}' AS "{SSNF_FILENAME_COL}",
+            '{paper_author_affiliation_filename}' AS "{SSNPAA_FILENAME_COL}",
+            '{affiliations_filename}' AS "{SSNAF_FILENAME_COL}",
             a.*,
-            au.* EXCLUDE ("{authors_author_id_col}"),
+            au.*,
             CAST(agg."{SSN_PAPERIDS_LEVEL0_COL}" AS VARCHAR) AS "{SSN_PAPERIDS_LEVEL0_COL}",
             CAST(agg."{SSN_PAPERIDS_LEVEL1_COL}" AS VARCHAR) AS "{SSN_PAPERIDS_LEVEL1_COL}",
             CAST(agg."{SSN_FIELD_IDS_LIST_COL}" AS VARCHAR) AS "{SSN_FIELD_IDS_LIST_COL}",
-            agg."{SSN_SUM_HIT_PCT_COL}"
+            agg."{KTP_SSN_SUM_HIT_1PCT_COL}"
         FROM {PARQUET_AUTHOR_MATCH_TABLE} m
         JOIN {author_table} a
           ON a."{author_id_col}" = m."{author_id_col}"
@@ -262,13 +319,13 @@ def run(context: PipelineContext) -> StepResult:
         f"""
         SELECT COUNT(*)
         FROM {PARQUET_AUTHOR_OUTPUT_TABLE}
-        WHERE "{SSN_SUM_HIT_PCT_COL}" = 0
+        WHERE "{KTP_SSN_SUM_HIT_1PCT_COL}" = 0
         """
     ).fetchone()
     removed_zero_hit_count = int(removed_zero_hit_count_row[0]) if removed_zero_hit_count_row else 0
 
     paper_reduction_row = conn.execute(
-        """
+        f"""
         WITH paper_counts AS (
             SELECT
                 name_key,
@@ -279,14 +336,60 @@ def run(context: PipelineContext) -> StepResult:
         )
         SELECT
             COALESCE(SUM(paper_count), 0) AS total_papers,
-            COALESCE(SUM(LEAST(paper_count, 5)), 0) AS kept_papers
+            COALESCE(SUM(LEAST(paper_count, {TOP_K_WORKS})), 0) AS kept_papers
         FROM paper_counts
         """
     ).fetchone()
     total_papers = int(paper_reduction_row[0]) if paper_reduction_row else 0
     kept_papers = int(paper_reduction_row[1]) if paper_reduction_row else 0
     removed_papers = max(total_papers - kept_papers, 0)
-    log(f"Top-5 paper reduction: kept {kept_papers} of {total_papers}, removed {removed_papers}.")
+    log(
+        f"Top-{TOP_K_WORKS} paper reduction: kept {kept_papers} of {total_papers}, "
+        f"removed {removed_papers}."
+    )
+
+    institution_reduction_row = conn.execute(
+        f"""
+        WITH institution_counts AS (
+            SELECT
+                m.name_key AS name_key,
+                m."{author_id_col}" AS authorid,
+                CAST(paa."{ssnpaa_institution_id_col}" AS VARCHAR) AS institution_id,
+                COUNT(DISTINCT paa."{ssnpaa_paper_id_col}") AS paper_count
+            FROM {paper_author_affiliation_table} paa
+            JOIN {PARQUET_AUTHOR_MATCH_TABLE} m
+              ON CAST(paa."{ssnpaa_author_id_col}" AS VARCHAR)
+                = CAST(m."{author_id_col}" AS VARCHAR)
+            WHERE paa."{ssnpaa_institution_id_col}" IS NOT NULL
+              AND trim(CAST(paa."{ssnpaa_institution_id_col}" AS VARCHAR)) <> ''
+            GROUP BY
+                m.name_key,
+                m."{author_id_col}",
+                CAST(paa."{ssnpaa_institution_id_col}" AS VARCHAR)
+        ),
+        grouped AS (
+            SELECT
+                name_key,
+                authorid,
+                COUNT(*) AS institution_count
+            FROM institution_counts
+            GROUP BY name_key, authorid
+        )
+        SELECT
+            COALESCE(SUM(institution_count), 0) AS total_institutions,
+            COALESCE(SUM(LEAST(institution_count, {TOP_K_INSTITUTIONS})), 0)
+                AS kept_institutions
+        FROM grouped
+        """
+    ).fetchone()
+    total_institutions = int(institution_reduction_row[0]) if institution_reduction_row else 0
+    kept_institutions = int(institution_reduction_row[1]) if institution_reduction_row else 0
+    removed_institutions = max(total_institutions - kept_institutions, 0)
+    log(
+        f"Top-{TOP_K_INSTITUTIONS} institution reduction: "
+        f"kept {kept_institutions} of {total_institutions}, "
+        f"removed {removed_institutions}."
+    )
 
     fields_match_row = conn.execute(
         f"""
@@ -322,7 +425,10 @@ def run(context: PipelineContext) -> StepResult:
     )
 
     parquet_innerdict_table = "ssn_parquet_enriched"
-    log("Create parquet enriched table (top-5 papers, concept display names, nonzero hits)")
+    log(
+        f"Create parquet enriched table (top-{TOP_K_WORKS} papers, "
+        f"top-{TOP_K_INSTITUTIONS} institutions, concept display names, nonzero hits)"
+    )
     conn.execute(
         f"""
         CREATE OR REPLACE TABLE {parquet_innerdict_table} AS
@@ -358,11 +464,70 @@ def run(context: PipelineContext) -> StepResult:
                         'https://openalex.org/' || CAST(pr.paperid AS VARCHAR)
                         ORDER BY pr.hit_1pct DESC, pr.paperid
                     )
-                        FILTER (WHERE pr.rn <= 5)
+                        FILTER (WHERE pr.rn <= {TOP_K_WORKS})
                     AS VARCHAR
                 ) AS "{KTP_SSN_TOP_PAPERS_HIT_1PCT_COL}"
             FROM paper_ranked pr
             GROUP BY pr.name_key, pr.authorid
+        ),
+        affiliation_counts AS (
+            SELECT
+                m.name_key AS name_key,
+                m."{author_id_col}" AS authorid,
+                CAST(paa."{ssnpaa_institution_id_col}" AS VARCHAR) AS institution_id,
+                COUNT(DISTINCT paa."{ssnpaa_paper_id_col}") AS paper_count,
+                MAX(af."{ssnaf_display_name_col}") AS institution_display_name
+            FROM {paper_author_affiliation_table} paa
+            JOIN {PARQUET_AUTHOR_MATCH_TABLE} m
+              ON CAST(paa."{ssnpaa_author_id_col}" AS VARCHAR)
+                = CAST(m."{author_id_col}" AS VARCHAR)
+            LEFT JOIN {affiliations_table} af
+              ON CAST(af."{ssnaf_institution_id_col}" AS VARCHAR)
+                = CAST(paa."{ssnpaa_institution_id_col}" AS VARCHAR)
+            WHERE paa."{ssnpaa_institution_id_col}" IS NOT NULL
+              AND trim(CAST(paa."{ssnpaa_institution_id_col}" AS VARCHAR)) <> ''
+            GROUP BY
+                m.name_key,
+                m."{author_id_col}",
+                CAST(paa."{ssnpaa_institution_id_col}" AS VARCHAR)
+        ),
+        affiliation_ranked AS (
+            SELECT
+                ac.name_key AS name_key,
+                ac.authorid AS authorid,
+                ac.institution_id AS institution_id,
+                ac.paper_count AS paper_count,
+                ac.institution_display_name AS institution_display_name,
+                ROW_NUMBER() OVER (
+                    PARTITION BY ac.name_key, ac.authorid
+                    ORDER BY ac.paper_count DESC, ac.institution_id
+                ) AS rn
+            FROM affiliation_counts ac
+        ),
+        top_institutions AS (
+            SELECT
+                ar.name_key AS name_key,
+                ar.authorid AS authorid,
+                CAST(
+                    LIST(
+                        json_object(
+                            '{SSNPAA_INSTITUTION_ID_COL}',
+                            'https://openalex.org/' || CAST(ar.institution_id AS VARCHAR),
+                            '{SSNAF_DISPLAY_NAME_COL}',
+                            COALESCE(
+                                ar.institution_display_name,
+                                CAST(ar.institution_id AS VARCHAR)
+                            ),
+                            '{KTP_SSN_COUNT_PAPERID_COL}',
+                            ar.paper_count
+                        )
+                        ORDER BY ar.paper_count DESC, ar.institution_id
+                    )
+                        FILTER (WHERE ar.rn <= {TOP_K_INSTITUTIONS})
+                    AS VARCHAR
+                ) AS "{KTP_SSN_TOP_INSTITUTIONS_COL}"
+            FROM affiliation_ranked ar
+            GROUP BY ar.name_key, ar.authorid
         ),
         field_lookup AS (
             SELECT
@@ -406,20 +571,26 @@ def run(context: PipelineContext) -> StepResult:
                     "{KTP_FIRST_NAME_COL}",
                     "{KTP_LAST_NAME_COL}",
                     "{KTP_SSNAD_MATCH_COL}",
+                    "{author_id_col}",
+                    "{authors_author_id_col}",
                     "{SSN_FIELD_IDS_LIST_COL}",
                     "{SSN_PAPERIDS_LEVEL0_COL}",
                     "{SSN_PAPERIDS_LEVEL1_COL}"
                 ),
                 tp."{KTP_SSN_TOP_PAPERS_HIT_1PCT_COL}",
+                ti."{KTP_SSN_TOP_INSTITUTIONS_COL}",
                 cd."{KTP_SSN_FIELD_DISPLAY_NAMES_LIST_COL}"
             FROM {PARQUET_AUTHOR_OUTPUT_TABLE} v
             LEFT JOIN top_papers tp
               ON tp.name_key = v."{KTP_SOURCE_KEY_COL}"
              AND CAST(tp.authorid AS VARCHAR) = CAST(v."{author_id_col}" AS VARCHAR)
+            LEFT JOIN top_institutions ti
+              ON ti.name_key = v."{KTP_SOURCE_KEY_COL}"
+             AND CAST(ti.authorid AS VARCHAR) = CAST(v."{author_id_col}" AS VARCHAR)
             LEFT JOIN concept_display cd
               ON cd.name_key = v."{KTP_SOURCE_KEY_COL}"
              AND CAST(cd.authorid AS VARCHAR) = CAST(v."{author_id_col}" AS VARCHAR)
-            WHERE v."{SSN_SUM_HIT_PCT_COL}" IS NULL OR v."{SSN_SUM_HIT_PCT_COL}" <> 0
+            WHERE v."{KTP_SSN_SUM_HIT_1PCT_COL}" IS NULL OR v."{KTP_SSN_SUM_HIT_1PCT_COL}" <> 0
         ),
         source_draw AS (
             SELECT
@@ -556,7 +727,7 @@ def run(context: PipelineContext) -> StepResult:
         """
     )
     log(
-        f"Filtered out parquet output rows with {SSN_SUM_HIT_PCT_COL} == 0: "
+        f"Filtered out parquet output rows with {KTP_SSN_SUM_HIT_1PCT_COL} == 0: "
         f"{removed_zero_hit_count}"
     )
 

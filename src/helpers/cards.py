@@ -83,7 +83,7 @@ def build_cards(
                     card += f"**{col}**:\n\n{str(val).replace('\n', '\n\n')}\n\n"
                 else:
                     card += f"**{col}**: {str(val)}\n\n"
-                ##### if want to render null values: ####
+                # if want to render null values: ####
                 # if col in excluded_cols:
                 #     continue
                 # render_val = "null" if pd.isna(val) else str(val)

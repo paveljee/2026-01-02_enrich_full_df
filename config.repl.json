@@ -27,6 +27,16 @@
       "sha256": "c97f4552f22d8e05b1c2bb70746b5a16f29c41c2807738d3c49f3852573910f2",
       "desc": "Authors -> Paper IDs"
     },
+    "paper_author_affiliation": {
+      "path": "/Volumes/home/anonymous/sciscinet/v2/hf/xet/sciscinet_paper_author_affiliation.parquet",
+      "sha256": "6b468f3f562b9e1292d8d656909990790ab8512d0a1e45dbec13b9d0900ca6ef",
+      "desc": "Paper-Author-Affiliation links"
+    },
+    "affiliations": {
+      "path": "/Volumes/home/anonymous/sciscinet/v2/hf/xet/sciscinet_affiliations.parquet",
+      "sha256": "8cb50e952aceac7226bbed08828050e9c2af46f46e975c0638493d3d6a81f65e",
+      "desc": "Affiliation metadata"
+    },
     "author_details": {
       "path": "/Volumes/home/anonymous/sciscinet/v2/hf/xet/sciscinet_author_details.parquet",
       "sha256": "62c373c747d74879585c3b1cfbbe70971c86927ec4fbc601482d3c2513ad9c1a",
