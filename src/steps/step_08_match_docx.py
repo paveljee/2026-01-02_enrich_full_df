@@ -7,10 +7,10 @@ import duckdb
 import pandas as pd
 
 from ..helpers.context import PipelineContext, StepResult
-from ..helpers.data_models import InnerDict, RegisteredResource
+from ..helpers.data_models import RegisteredResource
 from ..helpers.docx_parse import parse_docx_table
-from ..helpers.duckdb_utils import register_frame
-from ..helpers.jsonlines import dumps_jsonlines, loads_jsonlines
+from ..helpers.duckdb_utils import append_innerdicts_from_jsonlines_table, register_frame
+from ..helpers.jsonlines import dumps_jsonlines
 from ..helpers.procedures import DocxMatchProcedure
 from ..helpers.schema import (
     DOCX_INNERDICT_TABLE,
@@ -35,6 +35,7 @@ from ..helpers.vars import (
     KTP_FRAGMENT_COL,
     KTP_LAST_NAME_COL,
     KTP_POPULATION_INDEX_COL,
+    KTP_SOURCE_KEY_COL,
     RIGHT_NAME_COL,
     STEP_MATCH_DOCX,
 )
@@ -89,27 +90,6 @@ def load_single_table_docx(resources: dict[str, RegisteredResource]) -> pd.DataF
     return pd.concat(frames, ignore_index=True)
 
 
-def _append_innerdicts_from_table(
-    conn: duckdb.DuckDBPyConnection,
-    *,
-    table_name: str,
-    context: PipelineContext,
-) -> None:
-    if context.outer_dict is None:
-        raise ValueError("OuterDict not initialized. Run build_outerdict first.")
-    outer_dict = context.outer_dict
-    procedure = DocxMatchProcedure()
-    rows = conn.execute(f"SELECT name_key, innerdicts FROM {table_name}").fetchall()
-    for name_key, payload in rows:
-        for record in loads_jsonlines(payload or ""):
-            if KTP_FILENAME_COL not in record:
-                raise ValueError(f"Innerdict missing required column '{KTP_FILENAME_COL}'")
-            if KTP_FRAGMENT_COL not in record:
-                raise ValueError(f"Innerdict missing required column '{KTP_FRAGMENT_COL}'")
-            inner = InnerDict.from_mapping(record, procedure)
-            outer_dict.add_inner_by_key(str(name_key), inner)
-
-
 def run(context: PipelineContext) -> StepResult:
     if context.outer_dict is None:
         raise ValueError("OuterDict not initialized. Run build_outerdict first.")
@@ -135,7 +115,7 @@ def run(context: PipelineContext) -> StepResult:
         f"""
         CREATE OR REPLACE VIEW {DOCX_MATCH_VIEW} AS
         WITH name_draws AS (
-            SELECT nk.name_key,
+            SELECT nk."{KTP_SOURCE_KEY_COL}",
                    nk."{KTP_FIRST_NAME_COL}" AS "{KTP_FIRST_NAME_COL}",
                    nk."{KTP_LAST_NAME_COL}" AS "{KTP_LAST_NAME_COL}",
                    s."{DRAW_LABEL}" AS "{DRAW_LABEL}"
@@ -165,7 +145,7 @@ def run(context: PipelineContext) -> StepResult:
             FROM {DOCX_TABLE} d
         )
         SELECT
-            nd.name_key,
+            nd."{KTP_SOURCE_KEY_COL}" AS "{KTP_SOURCE_KEY_COL}",
             nd."{KTP_FIRST_NAME_COL}",
             nd."{KTP_LAST_NAME_COL}",
             nd."{DRAW_LABEL}",
@@ -188,8 +168,8 @@ def run(context: PipelineContext) -> StepResult:
     matched_df = matched_df[matched_df[KTP_FILENAME_COL].notna()]
 
     inner_rows = []
-    for name_key, group in matched_df.groupby("name_key", dropna=False):
-        rows = group.drop(columns=["name_key"]).to_dict("records")
+    for name_key, group in matched_df.groupby(KTP_SOURCE_KEY_COL, dropna=False):
+        rows = group.drop(columns=[KTP_SOURCE_KEY_COL]).to_dict("records")
         inner_rows.append(
             {
                 "name_key": name_key,
@@ -203,19 +183,26 @@ def run(context: PipelineContext) -> StepResult:
     )
     conn.execute("DROP TABLE IF EXISTS docx_innerdict_frame")
 
-    _append_innerdicts_from_table(conn, table_name=DOCX_INNERDICT_TABLE, context=context)
+    append_innerdicts_from_jsonlines_table(
+        conn,
+        table_name=DOCX_INNERDICT_TABLE,
+        outer_dict=context.outer_dict,
+        procedure=DocxMatchProcedure(),
+        required_columns={KTP_FILENAME_COL, KTP_FRAGMENT_COL},
+    )
 
     conn.execute(
         f"""
         CREATE OR REPLACE VIEW {DOCX_OUTPUT_VIEW} AS
-        SELECT d.*, nk."{KTP_FIRST_NAME_COL}", nk."{KTP_LAST_NAME_COL}",
+        SELECT d.* EXCLUDE (name_key), d.name_key AS "{KTP_SOURCE_KEY_COL}",
+               nk."{KTP_FIRST_NAME_COL}", nk."{KTP_LAST_NAME_COL}",
                s."{DRAW_LABEL}" AS sample_draw,
                s."{KTP_FILENAME_COL}" AS sample_filename,
                s."{KTP_FRAGMENT_COL}" AS sample_fragment,
                p.*, n.*
         FROM {DOCX_INNERDICT_TABLE} d
         LEFT JOIN {OUTERDICT_NAME_VIEW} nk
-          ON d.name_key = nk.name_key
+          ON d.name_key = nk."{KTP_SOURCE_KEY_COL}"
         LEFT JOIN {SAMPLES_WITH_NAMES_VIEW} s
           ON lower(nk."{KTP_FIRST_NAME_COL}") = lower(s."{KTP_FIRST_NAME_COL}")
          AND lower(nk."{KTP_LAST_NAME_COL}") = lower(s."{KTP_LAST_NAME_COL}")

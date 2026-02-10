@@ -7,7 +7,12 @@ from ..helpers.context import PipelineContext, StepResult
 from ..helpers.data_models import NameKey, OuterDict
 from ..helpers.duckdb_utils import register_frame
 from ..helpers.schema import OUTERDICT_NAME_VIEW, OUTERDICT_STUB_TABLE, SAMPLES_WITH_NAMES_VIEW
-from ..helpers.vars import KTP_FIRST_NAME_COL, KTP_LAST_NAME_COL, STEP_BUILD_OUTERDICT
+from ..helpers.vars import (
+    KTP_FIRST_NAME_COL,
+    KTP_LAST_NAME_COL,
+    KTP_SOURCE_KEY_COL,
+    STEP_BUILD_OUTERDICT,
+)
 
 
 def run(context: PipelineContext) -> StepResult:
@@ -44,7 +49,7 @@ def run(context: PipelineContext) -> StepResult:
         f"""
         CREATE OR REPLACE VIEW {OUTERDICT_NAME_VIEW} AS
         SELECT
-            name_key,
+            name_key AS "{KTP_SOURCE_KEY_COL}",
             json_extract_string(name_key, '$.\"{KTP_FIRST_NAME_COL}\"') AS "{KTP_FIRST_NAME_COL}",
             json_extract_string(name_key, '$.\"{KTP_LAST_NAME_COL}\"') AS "{KTP_LAST_NAME_COL}"
         FROM {OUTERDICT_STUB_TABLE}

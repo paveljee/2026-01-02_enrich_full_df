@@ -7,9 +7,9 @@ from pathlib import Path
 
 from .config import PipelineConfig
 from .context import PipelineContext
-from .data_models import InnerDict, NameKey, OuterDict
+from .data_models import NameKey, OuterDict
 from .diagnostics import DiagnosticsReport
-from .jsonlines import loads_jsonlines
+from .duckdb_utils import append_innerdicts_from_jsonlines_table, append_innerdicts_from_rows_table
 from .pipeline_manager import PipelineManager
 from .procedures import DocxMatchProcedure, ParquetMatchProcedure, XlsxMatchProcedure
 from .resource_monitor import ResourceMonitor
@@ -91,43 +91,6 @@ def _load_outerdict_stub(conn, table_name: str) -> OuterDict:
     return OuterDict.from_name_keys(name_keys)
 
 
-def _append_innerdicts_from_table(
-    conn,
-    *,
-    table_name: str,
-    outer_dict: OuterDict,
-    procedure,
-) -> None:
-    rows = conn.execute(f"SELECT name_key, innerdicts FROM {table_name}").fetchall()
-    for name_key, payload in rows:
-        for record in loads_jsonlines(payload or ""):
-            inner = InnerDict.from_mapping(record, procedure)
-            outer_dict.add_inner_by_key(str(name_key), inner)
-
-
-def _append_innerdicts_from_rows_table(
-    conn,
-    *,
-    table_name: str,
-    outer_dict: OuterDict,
-    procedure,
-) -> None:
-    rel = conn.execute(f"SELECT * FROM {table_name}")
-    cols = [desc[0] for desc in rel.description]
-    try:
-        name_idx = cols.index("name_key")
-    except ValueError as exc:
-        raise ValueError(f"Missing name_key column in {table_name}") from exc
-    while True:
-        rows = rel.fetchmany(5000)
-        if not rows:
-            break
-        for row in rows:
-            record = {col: row[i] for i, col in enumerate(cols) if i != name_idx}
-            inner = InnerDict.from_mapping(record, procedure)
-            outer_dict.add_inner_by_key(str(row[name_idx]), inner)
-
-
 def init_pipeline(
     args: argparse.Namespace,
     *,
@@ -174,21 +137,21 @@ def init_pipeline(
             if resources is None:
                 resources = register_pipeline_resources(config)
             if manager.is_done(STEP_MATCH_XLSX):
-                _append_innerdicts_from_table(
+                append_innerdicts_from_jsonlines_table(
                     conn,
                     table_name=XLSX_INNERDICT_TABLE,
                     outer_dict=outer_dict,
                     procedure=XlsxMatchProcedure(),
                 )
             if manager.is_done(STEP_MATCH_DOCX):
-                _append_innerdicts_from_table(
+                append_innerdicts_from_jsonlines_table(
                     conn,
                     table_name=DOCX_INNERDICT_TABLE,
                     outer_dict=outer_dict,
                     procedure=DocxMatchProcedure(),
                 )
             if manager.is_done(STEP_MATCH_PARQUET):
-                _append_innerdicts_from_rows_table(
+                append_innerdicts_from_rows_table(
                     conn,
                     table_name=PARQUET_AUTHOR_OUTPUT_TABLE,
                     outer_dict=outer_dict,

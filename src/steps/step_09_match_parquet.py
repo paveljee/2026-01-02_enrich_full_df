@@ -6,7 +6,7 @@ from pathlib import Path
 import duckdb
 
 from ..helpers.context import PipelineContext, StepResult
-from ..helpers.data_models import InnerDict
+from ..helpers.duckdb_utils import append_innerdicts_from_rows_table
 from ..helpers.parquet_utils import normalize_parquet_column_name, parquet_columns, parquet_filename
 from ..helpers.procedures import ParquetMatchProcedure
 from ..helpers.schema import (
@@ -32,6 +32,7 @@ from ..helpers.vars import (
     KTP_POPULATION_INDEX_COL,
     KTP_PRIORITY_COL,
     KTP_PRIORITY_GROUP_COL,
+    KTP_SOURCE_KEY_COL,
     KTP_SSN_FIELD_DISPLAY_NAMES_LIST_COL,
     KTP_SSN_TOP_PAPERS_HIT_1PCT_COL,
     KTP_SSNAD_MATCH_COL,
@@ -47,33 +48,6 @@ from ..helpers.vars import (
     SSNHPL1_FILENAME_COL,
     STEP_MATCH_PARQUET,
 )
-
-
-def _append_innerdicts_from_rows_table(
-    conn: duckdb.DuckDBPyConnection,
-    *,
-    table_name: str,
-    context: PipelineContext,
-) -> None:
-    if context.outer_dict is None:
-        raise ValueError("OuterDict not initialized. Run build_outerdict first.")
-    outer_dict = context.outer_dict
-    procedure = ParquetMatchProcedure()
-    rel = conn.execute(f"SELECT * FROM {table_name}")
-    cols = [desc[0] for desc in rel.description]
-    try:
-        name_idx = cols.index("name_key")
-    except ValueError as exc:
-        raise ValueError(f"Missing name_key column in {table_name}") from exc
-    while True:
-        rows = rel.fetchmany(5000)
-        if not rows:
-            break
-        for row in rows:
-            name_key = row[name_idx]
-            record = {col: row[i] for i, col in enumerate(cols) if i != name_idx}
-            inner = InnerDict.from_mapping(record, procedure)
-            outer_dict.add_inner_by_key(str(name_key), inner)
 
 
 def _create_parquet_table(
@@ -131,7 +105,7 @@ def run(context: PipelineContext) -> StepResult:
         CREATE OR REPLACE TABLE {PARQUET_AUTHOR_MATCH_TABLE} AS
         WITH names AS (
             SELECT
-                name_key,
+                "{KTP_SOURCE_KEY_COL}" AS name_key,
                 "{KTP_FIRST_NAME_COL}" AS "{KTP_FIRST_NAME_COL}",
                 "{KTP_LAST_NAME_COL}" AS "{KTP_LAST_NAME_COL}",
                 lower(
@@ -436,10 +410,11 @@ def run(context: PipelineContext) -> StepResult:
     )
 
     log("Append parquet matches into OuterDict")
-    _append_innerdicts_from_rows_table(
+    append_innerdicts_from_rows_table(
         conn,
         table_name=parquet_innerdict_table,
-        context=context,
+        outer_dict=context.outer_dict,
+        procedure=ParquetMatchProcedure(),
     )
 
     log("Create parquet output view")
@@ -467,7 +442,8 @@ def run(context: PipelineContext) -> StepResult:
               ON p."{KTP_POPULATION_INDEX_COL}" = e."{KTP_POPULATION_INDEX_COL}"
         )
         SELECT
-            v.*,
+            v.* EXCLUDE (name_key),
+            v.name_key AS "{KTP_SOURCE_KEY_COL}",
             sc.*
         FROM {parquet_innerdict_table} v
         LEFT JOIN sample_context sc
