@@ -8,8 +8,8 @@ from ..helpers.context import PipelineContext, StepResult
 from ..helpers.duckdb_utils import register_frame
 from ..helpers.resources import (
     PipelineResources,
+    configured_hcr_xlsx_paths,
     discover_docx_files,
-    discover_xlsx_files,
     register_pipeline_resources,
 )
 from ..helpers.schema import REGISTERED_RESOURCES_TABLE
@@ -38,13 +38,9 @@ def _resource_registry_frame(resources: PipelineResources) -> pd.DataFrame:
 
 
 def run(context: PipelineContext) -> StepResult:
-    xlsx_files = [
-        p
-        for p in discover_xlsx_files(context.config.xlsx_dir)
-        if not p.name.startswith("~$")
-    ]
+    xlsx_files = configured_hcr_xlsx_paths(context.config)
     if not xlsx_files:
-        raise FileNotFoundError(f"No XLSX files found in {context.config.xlsx_dir}")
+        raise FileNotFoundError("No configured HCR XLSX files found in files_config.")
 
     docx_files = discover_docx_files(context.config.docx_dir)
 

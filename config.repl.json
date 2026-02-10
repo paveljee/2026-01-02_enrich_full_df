@@ -4,9 +4,7 @@
   "output_dir": "data/output",
   "output_format": "docx",
   "pandoc_reference_docx": "resources/pandoc-custom-reference.docx",
-  "xlsx_dir": "/Volumes/Users/Anonymous/Workshop/202504161200UTC-4_Nancy_Baxter_Andrea_Tricco_collabs/2024-Historical-Highly-Cited-Researchers-lists - final",
   "docx_dir": "/Volumes/Users/Anonymous/Workshop/202504161200UTC-4_Nancy_Baxter_Andrea_Tricco_collabs/analyses/2026-01-02_enrich_full_df/data/manual_extractions",
-  "world_bank_xlsx": "/Volumes/Users/Anonymous/Workshop/202504161200UTC-4_Nancy_Baxter_Andrea_Tricco_collabs/analyses/2026-01-02_enrich_full_df/data/OGHIST_2025_07_01.xlsx",
   "timezone": "America/Toronto",
   "sample_seed": 42,
   "sample_draw_sizes": [20, 40, 40, 40, 40, 40, 40, 40],
@@ -42,6 +40,66 @@
       "path": "/Volumes/home/anonymous/sciscinet/v2/hf/xet/sciscinet_fields.parquet",
       "sha256": "f78b1fc5287de26aee57665943a50c95aa980420449d7c099c351600cd584c7a",
       "desc": "Field Definitions"
+    },
+    "world_bank_xlsx": {
+      "path": "/Volumes/Users/Anonymous/Workshop/202504161200UTC-4_Nancy_Baxter_Andrea_Tricco_collabs/analyses/2026-01-02_enrich_full_df/data/OGHIST_2025_07_01.xlsx",
+      "sha256": "567d7646d2ac762b4058fcbc93f7df435ea7a3c441a1e666894e6d3e96128aa6",
+      "desc": "World Bank country list"
+    },
+    "hcr_xlsx_2014": {
+      "path": "/Volumes/Users/Anonymous/Workshop/202504161200UTC-4_Nancy_Baxter_Andrea_Tricco_collabs/2024-Historical-Highly-Cited-Researchers-lists - final/2014_HCR.xlsx",
+      "sha256": "4340ec4c63c35757cb87e39f5cfad64c7aa2b23b4717f127ca2caf4d6e15978f",
+      "desc": "HCR XLSX 2014"
+    },
+    "hcr_xlsx_2015": {
+      "path": "/Volumes/Users/Anonymous/Workshop/202504161200UTC-4_Nancy_Baxter_Andrea_Tricco_collabs/2024-Historical-Highly-Cited-Researchers-lists - final/2015_HCR.xlsx",
+      "sha256": "51ded7b3b8e67bae4807bf542adb64b6856a69bb93f44050eff422e5c3b998ff",
+      "desc": "HCR XLSX 2015"
+    },
+    "hcr_xlsx_2016": {
+      "path": "/Volumes/Users/Anonymous/Workshop/202504161200UTC-4_Nancy_Baxter_Andrea_Tricco_collabs/2024-Historical-Highly-Cited-Researchers-lists - final/2016_HCR.xlsx",
+      "sha256": "8932c854ea77cfe03d512e8140ebf6db67aa7e99477197f5952ae1f08e5af37b",
+      "desc": "HCR XLSX 2016"
+    },
+    "hcr_xlsx_2017": {
+      "path": "/Volumes/Users/Anonymous/Workshop/202504161200UTC-4_Nancy_Baxter_Andrea_Tricco_collabs/2024-Historical-Highly-Cited-Researchers-lists - final/2017_HCR.xlsx",
+      "sha256": "1bc25d154541da65763d104f15d04abf8a73644419dc2be077cf0ab0e7613d1e",
+      "desc": "HCR XLSX 2017"
+    },
+    "hcr_xlsx_2018": {
+      "path": "/Volumes/Users/Anonymous/Workshop/202504161200UTC-4_Nancy_Baxter_Andrea_Tricco_collabs/2024-Historical-Highly-Cited-Researchers-lists - final/2018_HCR.xlsx",
+      "sha256": "2dcded6bdcda99a9ae842cbf49a2327ff128914f1943fe8a693336caddf77b18",
+      "desc": "HCR XLSX 2018"
+    },
+    "hcr_xlsx_2019": {
+      "path": "/Volumes/Users/Anonymous/Workshop/202504161200UTC-4_Nancy_Baxter_Andrea_Tricco_collabs/2024-Historical-Highly-Cited-Researchers-lists - final/2019_HCR.xlsx",
+      "sha256": "052279561dd19628592bff7a5c8adb5f3c4b247054a2b4a2c7ec1ca25d1651af",
+      "desc": "HCR XLSX 2019"
+    },
+    "hcr_xlsx_2020": {
+      "path": "/Volumes/Users/Anonymous/Workshop/202504161200UTC-4_Nancy_Baxter_Andrea_Tricco_collabs/2024-Historical-Highly-Cited-Researchers-lists - final/2020_HCR.xlsx",
+      "sha256": "418c7142fa3be817f26a6e1caf3fd701dd45affe83f491838a26b4e8787dca9c",
+      "desc": "HCR XLSX 2020"
+    },
+    "hcr_xlsx_2021": {
+      "path": "/Volumes/Users/Anonymous/Workshop/202504161200UTC-4_Nancy_Baxter_Andrea_Tricco_collabs/2024-Historical-Highly-Cited-Researchers-lists - final/2021_HCR.xlsx",
+      "sha256": "eca6f94f18438e9be57bf9dbcfba613a4060284deef003581c2ccbdf63fa5896",
+      "desc": "HCR XLSX 2021"
+    },
+    "hcr_xlsx_2022": {
+      "path": "/Volumes/Users/Anonymous/Workshop/202504161200UTC-4_Nancy_Baxter_Andrea_Tricco_collabs/2024-Historical-Highly-Cited-Researchers-lists - final/2022_HCR.xlsx",
+      "sha256": "d0799080838fc6135453280ead2660a0a9de5272a9603eef35ff28e30253c734",
+      "desc": "HCR XLSX 2022"
+    },
+    "hcr_xlsx_2023": {
+      "path": "/Volumes/Users/Anonymous/Workshop/202504161200UTC-4_Nancy_Baxter_Andrea_Tricco_collabs/2024-Historical-Highly-Cited-Researchers-lists - final/2023_HCR.xlsx",
+      "sha256": "672b6774d1e39b4bbde2a8414f4fdeb73ea6c3dd777ac17b7d0f4fc3716f9ab0",
+      "desc": "HCR XLSX 2023"
+    },
+    "hcr_xlsx_2024": {
+      "path": "/Volumes/Users/Anonymous/Workshop/202504161200UTC-4_Nancy_Baxter_Andrea_Tricco_collabs/2024-Historical-Highly-Cited-Researchers-lists - final/2024_HCR.xlsx",
+      "sha256": "dabf094643254a8c6de84f08f6d6774388e1b9d2f090935a85084bdde44ec294",
+      "desc": "HCR XLSX 2024"
     }
   }
 }

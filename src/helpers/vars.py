@@ -12,6 +12,9 @@ Last modified (introduction): December 23, 2025
 Date of report: {}
 """
 
+HCR_XLSX_KEY_PREFIX = "hcr_xlsx_"
+WORLD_BANK_XLSX_KEY = "world_bank_xlsx"
+
 KTP_FIRST_NAME_COL: Final = "ktp.first_name"
 KTP_LAST_NAME_COL: Final = "ktp.last_name"
 KTP_FIRST_NAME_ORIG_COLNAME_COL: Final = "ktp.first_name_original_column_name"

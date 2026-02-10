@@ -6,6 +6,7 @@ from pathlib import Path
 from .config import PipelineConfig
 from .data_models import FragmentType, RegisteredResource, ResourceGroup
 from .files import find_files_by_extension
+from .vars import HCR_XLSX_KEY_PREFIX, WORLD_BANK_XLSX_KEY
 
 
 @dataclass
@@ -69,12 +70,27 @@ def register_resources(
     return resources
 
 
-def discover_xlsx_files(xlsx_dir: Path) -> list[Path]:
-    return sorted(find_files_by_extension(xlsx_dir, "xlsx", recursive=False))
-
-
 def discover_docx_files(docx_dir: Path) -> list[Path]:
     return sorted(find_files_by_extension(docx_dir, "docx", recursive=False))
+
+
+def configured_hcr_xlsx_entries(config: PipelineConfig) -> list[tuple[str, dict[str, str]]]:
+    entries = [
+        (key, value)
+        for key, value in config.files_config.items()
+        if key.startswith(HCR_XLSX_KEY_PREFIX)
+    ]
+    return sorted(entries, key=lambda item: item[0])
+
+
+def configured_hcr_xlsx_paths(config: PipelineConfig) -> list[Path]:
+    paths: list[Path] = []
+    for _, meta in configured_hcr_xlsx_entries(config):
+        path = Path(meta["path"])
+        if path.name.startswith("~$"):
+            continue
+        paths.append(path)
+    return paths
 
 
 def register_pipeline_resources(config: PipelineConfig) -> PipelineResources:
@@ -124,18 +140,33 @@ def register_pipeline_resources(config: PipelineConfig) -> PipelineResources:
         ),
     }
 
-    xlsx_files = discover_xlsx_files(config.xlsx_dir)
+    xlsx_files = configured_hcr_xlsx_paths(config)
+    if not xlsx_files:
+        raise FileNotFoundError(
+            "No HCR XLSX files configured in files_config "
+            f"(keys must start with '{HCR_XLSX_KEY_PREFIX}')."
+        )
+    xlsx_hashes = {
+        Path(meta["path"]).name: meta["sha256"]
+        for _, meta in configured_hcr_xlsx_entries(config)
+        if "sha256" in meta and meta["sha256"]
+    }
     xlsx_resources = register_resources(
         xlsx_files,
         group=ResourceGroup.KTP_PILOT_SAMPLE,
         fragment_type=FragmentType.EXCEL_ROW,
         description="HCR XLSX inputs",
+        expected_hashes=xlsx_hashes,
     )
+    if WORLD_BANK_XLSX_KEY not in files:
+        raise KeyError(f"Missing '{WORLD_BANK_XLSX_KEY}' entry in files_config")
+    world_bank_meta = files[WORLD_BANK_XLSX_KEY]
     world_bank_resource = register_resource(
-        config.world_bank_xlsx,
+        Path(world_bank_meta["path"]),
         group=ResourceGroup.KTP_PILOT_SAMPLE,
         fragment_type=FragmentType.EXCEL_ROW,
-        description="World Bank country list",
+        description=world_bank_meta.get("desc", "World Bank country list"),
+        expected_hash=world_bank_meta.get("sha256"),
     )
     docx_files = discover_docx_files(config.docx_dir)
     docx_resources = register_resources(
@@ -155,8 +186,9 @@ def register_pipeline_resources(config: PipelineConfig) -> PipelineResources:
 
 __all__ = [
     "PipelineResources",
+    "configured_hcr_xlsx_entries",
+    "configured_hcr_xlsx_paths",
     "discover_docx_files",
-    "discover_xlsx_files",
     "register_pipeline_resources",
     "register_resource",
     "register_resources",

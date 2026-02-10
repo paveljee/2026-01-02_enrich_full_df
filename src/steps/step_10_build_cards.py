@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from datetime import datetime
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from ..helpers.cards import build_cards, write_cards_zip
@@ -14,6 +15,7 @@ from ..helpers.vars import (
     KTP_FILENAME_COL,
     KTP_SOURCE_KEY_COL,
     STEP_BUILD_CARDS,
+    HCR_XLSX_KEY_PREFIX,
 )
 
 
@@ -30,6 +32,19 @@ def run(context: PipelineContext) -> StepResult:
             return "[" + ("-" * width) + "]"
         filled = min(width, int(width * done / total))
         return "[" + ("#" * filled) + ("-" * (width - filled)) + "]"
+
+    def hcr_bundle_name() -> str:
+        hcr_paths = [
+            Path(meta["path"])
+            for key, meta in context.config.files_config.items()
+            if key.startswith(HCR_XLSX_KEY_PREFIX) and "path" in meta
+        ]
+        if not hcr_paths:
+            return "hcr_xlsx_inputs"
+        parent_names = {path.parent.name for path in hcr_paths}
+        if len(parent_names) == 1:
+            return next(iter(parent_names))
+        return "hcr_xlsx_inputs"
 
     def on_build_progress(done: int, total: int, _card_id: str) -> None:
         log(
@@ -63,7 +78,7 @@ def run(context: PipelineContext) -> StepResult:
     zip_path = write_cards_zip(
         cards,
         context.config.output_dir,
-        f"{context.config.xlsx_dir.name}_combined_cards.zip",
+        f"{hcr_bundle_name()}_combined_cards.zip",
         output_format=context.config.output_format,
         reference_docx=context.config.pandoc_reference_docx,
         docx_workers=max(1, min(8, os.cpu_count() or 1)),
