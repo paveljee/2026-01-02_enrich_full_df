@@ -157,10 +157,11 @@ def run(context: PipelineContext) -> StepResult:
                 nd."{KTP_FIRST_NAME_COL}" AS "{KTP_FIRST_NAME_COL}",
                 nd."{KTP_LAST_NAME_COL}" AS "{KTP_LAST_NAME_COL}",
                 json_object(
-                    lower(unaccent(nd."{KTP_FIRST_NAME_COL}" || ' ' || nd."{KTP_LAST_NAME_COL}")),
-                    lower(unaccent(d."{name_col}"))
+                    'ktp.first_clean', nd.first_clean,
+                    'ktp.last_clean', nd.last_clean,
+                    'docx.name_clean', d.docx_clean
                 ) AS "{KTP_DOCX_MATCH_COL}",
-                d.* EXCLUDE ("{KTP_FILENAME_COL}")
+                d.* EXCLUDE ("{KTP_FILENAME_COL}", "{KTP_DOCX_ROW_NUMBER_COL}", docx_clean)
             FROM docx_clean d
             RIGHT JOIN names_clean nd
               ON POSITION(nd.first_clean IN d.docx_clean) > 0
