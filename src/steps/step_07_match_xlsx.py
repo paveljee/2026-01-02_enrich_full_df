@@ -12,7 +12,8 @@ from ..helpers.schema import (
     POPULATION_ECON_TABLE,
     POPULATION_NAMES_TABLE,
     POPULATION_TABLE,
-    SAMPLES_WITH_NAMES_VIEW,
+    REGISTERED_RESOURCES_TABLE,
+    SAMPLES_TABLE,
     XLSX_INNERDICT_TABLE,
     XLSX_MATCH_VIEW,
     XLSX_OUTPUT_VIEW,
@@ -20,13 +21,20 @@ from ..helpers.schema import (
 from ..helpers.vars import (
     DRAW_LABEL,
     HCR_FILENAME_COL,
+    HCR_FIRST_NAME_COL,
+    HCR_LAST_NAME_COL,
     HCR_ROW_COL,
+    HCR_XLSX_AFFILIATIONS_COLS,
+    HCR_XLSX_NAME_COLS,
     KTP_ECONOMIES_COL,
     KTP_ECONOMIES_INCOME_GROUP_COL,
     KTP_ECONOMY_MATCH_COL,
     KTP_FILENAME_COL,
     KTP_FIRST_NAME_COL,
     KTP_FRAGMENT_COL,
+    KTP_FRAGMENT_TYPE_COL,
+    KTP_HCR_PRIMARY_AFFILIATIONS_COL,
+    KTP_HCR_SECONDARY_AFFILIATIONS_COL,
     KTP_LAST_NAME_COL,
     KTP_POPULATION_INDEX_COL,
     KTP_PRIORITY_COL,
@@ -37,6 +45,72 @@ from ..helpers.vars import (
 )
 
 
+def _hcr_excluded_columns(population_columns: list[str]) -> set[str]:
+    excluded = {HCR_FILENAME_COL, HCR_ROW_COL, HCR_FIRST_NAME_COL, HCR_LAST_NAME_COL}
+    for first_col, last_col in HCR_XLSX_NAME_COLS.values():
+        excluded.add(first_col)
+        excluded.add(last_col)
+    for primary_cols, secondary_cols in HCR_XLSX_AFFILIATIONS_COLS.values():
+        excluded.update(primary_cols)
+        excluded.update(secondary_cols)
+    excluded.update(
+        col
+        for col in population_columns
+        if col.startswith("hcr.") and "affiliation" in col.lower()
+    )
+    return excluded
+
+
+def _draw_sort_ctes() -> str:
+    return f"""
+        row_ranked AS (
+            SELECT
+                b.*,
+                CASE
+                    WHEN starts_with(CAST(b."{DRAW_LABEL}" AS VARCHAR), 'pilot.') THEN 0
+                    WHEN TRY_CAST(b."{DRAW_LABEL}" AS BIGINT) IS NOT NULL THEN 1
+                    WHEN b."{DRAW_LABEL}" IS NULL
+                      OR trim(CAST(b."{DRAW_LABEL}" AS VARCHAR)) = '' THEN 3
+                    ELSE 2
+                END AS row_draw_group,
+                CASE
+                    WHEN starts_with(CAST(b."{DRAW_LABEL}" AS VARCHAR), 'pilot.')
+                        THEN TRY_CAST(
+                            split_part(CAST(b."{DRAW_LABEL}" AS VARCHAR), '.', 2) AS BIGINT
+                        )
+                    WHEN TRY_CAST(b."{DRAW_LABEL}" AS BIGINT) IS NOT NULL
+                        THEN CAST(b."{DRAW_LABEL}" AS BIGINT)
+                    ELSE NULL
+                END AS row_draw_num
+            FROM base b
+        ),
+        ranked AS (
+            SELECT
+                rr.*,
+                COALESCE(
+                    MIN(CASE WHEN rr.row_draw_group < 3 THEN rr.row_draw_group ELSE NULL END)
+                        OVER (PARTITION BY rr."{KTP_SOURCE_KEY_COL}"),
+                    3
+                ) AS source_draw_group,
+                MIN(CASE WHEN rr.row_draw_group < 3 THEN rr.row_draw_num ELSE NULL END)
+                    OVER (PARTITION BY rr."{KTP_SOURCE_KEY_COL}") AS source_draw_num
+            FROM row_ranked rr
+        )
+    """
+
+
+def _draw_sort_order_by() -> str:
+    return f"""
+            source_draw_group,
+            source_draw_num NULLS LAST,
+            "{KTP_SOURCE_KEY_COL}",
+            row_draw_group,
+            row_draw_num NULLS LAST,
+            "{KTP_FILENAME_COL}",
+            "{KTP_FRAGMENT_COL}"
+    """
+
+
 def run(context: PipelineContext) -> StepResult:
     if context.outer_dict is None:
         raise ValueError("OuterDict not initialized. Run build_outerdict first.")
@@ -44,57 +118,88 @@ def run(context: PipelineContext) -> StepResult:
         raise ValueError("Resources not initialized. Run register_resources first.")
 
     conn: duckdb.DuckDBPyConnection = context.conn
+    population_columns = [row[0] for row in conn.execute(f"DESCRIBE {POPULATION_TABLE}").fetchall()]
+    hcr_excluded = _hcr_excluded_columns(population_columns)
+    hcr_payload_columns = [
+        col for col in population_columns if col.startswith("hcr.") and col not in hcr_excluded
+    ]
+    hcr_payload_select = ",\n                ".join([f'p."{col}"' for col in hcr_payload_columns])
+    hcr_payload_suffix = f",\n                {hcr_payload_select}" if hcr_payload_select else ""
+    hcr_projection_select = ",\n            ".join([f'p."{col}"' for col in hcr_payload_columns])
+    hcr_projection_suffix = (
+        f",\n            {hcr_projection_select}" if hcr_projection_select else ""
+    )
     conn.execute(
         f"""
         CREATE OR REPLACE VIEW {XLSX_MATCH_VIEW} AS
         WITH name_draws AS (
             SELECT nk."{KTP_SOURCE_KEY_COL}" as "{KTP_SOURCE_KEY_COL}",
                    nk."{KTP_FIRST_NAME_COL}" AS "{KTP_FIRST_NAME_COL}",
-                   nk."{KTP_LAST_NAME_COL}" AS "{KTP_LAST_NAME_COL}",
-                   s."{DRAW_LABEL}" AS "{DRAW_LABEL}"
+                   nk."{KTP_LAST_NAME_COL}" AS "{KTP_LAST_NAME_COL}"
             FROM {OUTERDICT_NAME_VIEW} nk
-            LEFT JOIN {SAMPLES_WITH_NAMES_VIEW} s
-              ON lower(nk."{KTP_FIRST_NAME_COL}") = lower(s."{KTP_FIRST_NAME_COL}")
-             AND lower(nk."{KTP_LAST_NAME_COL}") = lower(s."{KTP_LAST_NAME_COL}")
         ),
         pop_names AS (
             SELECT
-                p.*,
+                p."{HCR_FILENAME_COL}",
+                p."{HCR_ROW_COL}",
                 n."{KTP_FIRST_NAME_COL}" AS pop_first,
                 n."{KTP_LAST_NAME_COL}" AS pop_last,
                 e."{KTP_ECONOMIES_COL}" AS "{KTP_ECONOMIES_COL}",
                 e."{KTP_ECONOMIES_INCOME_GROUP_COL}" AS "{KTP_ECONOMIES_INCOME_GROUP_COL}",
                 e."{KTP_ECONOMY_MATCH_COL}" AS "{KTP_ECONOMY_MATCH_COL}",
+                e."{KTP_HCR_PRIMARY_AFFILIATIONS_COL}" AS "{KTP_HCR_PRIMARY_AFFILIATIONS_COL}",
+                e."{KTP_HCR_SECONDARY_AFFILIATIONS_COL}" AS "{KTP_HCR_SECONDARY_AFFILIATIONS_COL}",
                 e."{KTP_PRIORITY_COL}" AS "{KTP_PRIORITY_COL}",
-                e."{KTP_PRIORITY_GROUP_COL}" AS "{KTP_PRIORITY_GROUP_COL}"
+                e."{KTP_PRIORITY_GROUP_COL}" AS "{KTP_PRIORITY_GROUP_COL}",
+                rr.fragment_type AS resource_fragment_type{hcr_payload_suffix}
             FROM {POPULATION_TABLE} p
             JOIN {POPULATION_NAMES_TABLE} n
               ON p."{KTP_POPULATION_INDEX_COL}" = n."{KTP_POPULATION_INDEX_COL}"
             LEFT JOIN {POPULATION_ECON_TABLE} e
               ON p."{KTP_POPULATION_INDEX_COL}" = e."{KTP_POPULATION_INDEX_COL}"
-        )
-        SELECT
-            nd."{KTP_SOURCE_KEY_COL}",
-            nd."{KTP_FIRST_NAME_COL}",
-            nd."{KTP_LAST_NAME_COL}",
-            nd."{DRAW_LABEL}",
-            p.*,
-            p."{HCR_FILENAME_COL}" AS "{KTP_FILENAME_COL}",
-            p."{HCR_ROW_COL}" AS "{KTP_FRAGMENT_COL}",
-            json_object(
-                lower(unaccent(nd."{KTP_FIRST_NAME_COL}" || ' ' || nd."{KTP_LAST_NAME_COL}")),
-                lower(unaccent(p.pop_first || ' ' || p.pop_last))
-            ) AS "{KTP_XLSX_MATCH_COL}"
-        FROM pop_names p
-        RIGHT JOIN name_draws nd
-          ON lower(unaccent(nd."{KTP_LAST_NAME_COL}")) = lower(unaccent(p.pop_last))
-         AND list_contains(
-                regexp_split_to_array(lower(unaccent(p.pop_first)), '\\s+'),
-                list_extract(
-                    regexp_split_to_array(lower(unaccent(nd."{KTP_FIRST_NAME_COL}")), '\\s+'),
-                    1
-                )
-             )
+            LEFT JOIN {REGISTERED_RESOURCES_TABLE} rr
+              ON rr.resource_name = p."{HCR_FILENAME_COL}"
+        ),
+        base AS (
+            SELECT
+                nd."{KTP_SOURCE_KEY_COL}",
+                p."{HCR_FILENAME_COL}" AS "{KTP_FILENAME_COL}",
+                p."{HCR_ROW_COL}" AS "{KTP_FRAGMENT_COL}",
+                COALESCE(p.resource_fragment_type, 'excel_row') AS "{KTP_FRAGMENT_TYPE_COL}",
+                s."{DRAW_LABEL}" AS "{DRAW_LABEL}",
+                p.pop_first AS "{KTP_FIRST_NAME_COL}",
+                p.pop_last AS "{KTP_LAST_NAME_COL}",
+                json_object(
+                    lower(unaccent(nd."{KTP_FIRST_NAME_COL}" || ' ' || nd."{KTP_LAST_NAME_COL}")),
+                    lower(unaccent(p.pop_first || ' ' || p.pop_last))
+                ) AS "{KTP_XLSX_MATCH_COL}",
+                p."{KTP_HCR_PRIMARY_AFFILIATIONS_COL}",
+                p."{KTP_HCR_SECONDARY_AFFILIATIONS_COL}"{hcr_projection_suffix},
+                p."{KTP_ECONOMIES_COL}",
+                p."{KTP_ECONOMIES_INCOME_GROUP_COL}",
+                p."{KTP_ECONOMY_MATCH_COL}",
+                p."{KTP_PRIORITY_COL}",
+                p."{KTP_PRIORITY_GROUP_COL}"
+            FROM pop_names p
+            JOIN name_draws nd
+              ON lower(unaccent(nd."{KTP_LAST_NAME_COL}")) = lower(unaccent(p.pop_last))
+             AND list_contains(
+                    regexp_split_to_array(lower(unaccent(p.pop_first)), '\\s+'),
+                    list_extract(
+                        regexp_split_to_array(lower(unaccent(nd."{KTP_FIRST_NAME_COL}")), '\\s+'),
+                        1
+                    )
+                 )
+            LEFT JOIN {SAMPLES_TABLE} s
+              ON s."{KTP_FILENAME_COL}" = p."{HCR_FILENAME_COL}"
+             AND s."{KTP_FRAGMENT_COL}" = p."{HCR_ROW_COL}"
+            WHERE p."{HCR_FILENAME_COL}" IS NOT NULL
+        ),
+        {_draw_sort_ctes()}
+        SELECT * EXCLUDE (row_draw_group, row_draw_num, source_draw_group, source_draw_num)
+        FROM ranked
+        ORDER BY
+            {_draw_sort_order_by()}
         """
     )
 
@@ -128,25 +233,16 @@ def run(context: PipelineContext) -> StepResult:
     conn.execute(
         f"""
         CREATE OR REPLACE VIEW {XLSX_OUTPUT_VIEW} AS
-        SELECT x.* EXCLUDE (name_key), x.name_key AS "{KTP_SOURCE_KEY_COL}",
-               nk."{KTP_FIRST_NAME_COL}", nk."{KTP_LAST_NAME_COL}",
-               s."{DRAW_LABEL}" AS sample_draw,
-               s."{KTP_FILENAME_COL}" AS sample_filename,
-               s."{KTP_FRAGMENT_COL}" AS sample_fragment,
-               p.*, n.*, e.*
-        FROM {XLSX_INNERDICT_TABLE} x
-        LEFT JOIN {OUTERDICT_NAME_VIEW} nk
-          ON x.name_key = nk."{KTP_SOURCE_KEY_COL}"
-        LEFT JOIN {SAMPLES_WITH_NAMES_VIEW} s
-          ON lower(nk."{KTP_FIRST_NAME_COL}") = lower(s."{KTP_FIRST_NAME_COL}")
-         AND lower(nk."{KTP_LAST_NAME_COL}") = lower(s."{KTP_LAST_NAME_COL}")
-        LEFT JOIN {POPULATION_NAMES_TABLE} n
-          ON lower(nk."{KTP_FIRST_NAME_COL}") = lower(n."{KTP_FIRST_NAME_COL}")
-         AND lower(nk."{KTP_LAST_NAME_COL}") = lower(n."{KTP_LAST_NAME_COL}")
-        LEFT JOIN {POPULATION_TABLE} p
-          ON p."{KTP_POPULATION_INDEX_COL}" = n."{KTP_POPULATION_INDEX_COL}"
-        LEFT JOIN {POPULATION_ECON_TABLE} e
-          ON p."{KTP_POPULATION_INDEX_COL}" = e."{KTP_POPULATION_INDEX_COL}"
+        WITH base AS (
+            SELECT *
+            FROM {XLSX_MATCH_VIEW}
+            WHERE "{KTP_FILENAME_COL}" IS NOT NULL
+        ),
+        {_draw_sort_ctes()}
+        SELECT * EXCLUDE (row_draw_group, row_draw_num, source_draw_group, source_draw_num)
+        FROM ranked
+        ORDER BY
+            {_draw_sort_order_by()}
         """
     )
 

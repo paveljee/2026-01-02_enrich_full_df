@@ -17,10 +17,11 @@ KTP_LAST_NAME_COL: Final = "ktp.last_name"
 KTP_FIRST_NAME_ORIG_COLNAME_COL: Final = "ktp.first_name_original_column_name"
 KTP_LAST_NAME_ORIG_COLNAME_COL: Final = "ktp.last_name_original_column_name"
 KTP_FILENAME_COL: Final = "ktp.filename"
+KTP_FRAGMENT_TYPE_COL: Final = "ktp.fragment_type"
 KTP_SOURCE_KEY_COL: Final = "ktp.source_key"
-KTP_ECONOMIES_COL: Final = "ktp.world_bank_economies"
-KTP_ECONOMIES_INCOME_GROUP_COL: Final = "ktp.world_bank_economies_income_group"
-KTP_ECONOMY_MATCH_COL: Final = "ktp.world_bank_economies_match"
+KTP_ECONOMIES_COL: Final = "ktp.hcr_world_bank_economies"
+KTP_ECONOMIES_INCOME_GROUP_COL: Final = "ktp.hcr_world_bank_economies_income_group"
+KTP_ECONOMY_MATCH_COL: Final = "ktp.hcr_world_bank_economies_match"
 KTP_PRIORITY_COL: Final = "ktp.priority"
 KTP_PRIORITY_GROUP_COL: Final = "ktp.priority_label"
 KTP_HCR_PRIMARY_AFFILIATIONS_COL: Final = "ktp.hcr_primary_affiliations"
@@ -393,6 +394,7 @@ __all__ = [
     "KTP_ECONOMIES_INCOME_GROUP_COL",
     "KTP_ECONOMY_MATCH_COL",
     "KTP_FILENAME_COL",
+    "KTP_FRAGMENT_TYPE_COL",
     "KTP_FIRST_NAME_COL",
     "KTP_FRAGMENT_COL",
     "KTP_LAST_NAME_COL",

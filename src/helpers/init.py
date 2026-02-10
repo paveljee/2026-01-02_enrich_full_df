@@ -43,6 +43,7 @@ def _artifact_dir(base: Path) -> Path:
 
 def _reset_pipeline(conn, manager: PipelineManager) -> None:
     tables = [
+        "registered_resources",
         "population",
         "population_names",
         "population_economy",

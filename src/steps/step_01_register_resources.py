@@ -2,13 +2,39 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pandas as pd
+
 from ..helpers.context import PipelineContext, StepResult
+from ..helpers.duckdb_utils import register_frame
 from ..helpers.resources import (
+    PipelineResources,
     discover_docx_files,
     discover_xlsx_files,
     register_pipeline_resources,
 )
+from ..helpers.schema import REGISTERED_RESOURCES_TABLE
 from ..helpers.vars import STEP_REGISTER_RESOURCES
+
+
+def _resource_registry_frame(resources: PipelineResources) -> pd.DataFrame:
+    all_resources = (
+        list(resources.parquet_resources.values())
+        + list(resources.xlsx_resources.values())
+        + [resources.world_bank_resource]
+        + list(resources.docx_resources.values())
+    )
+    rows = [
+        {
+            "resource_name": res.name,
+            "resource_hash": res.hash,
+            "resource_group": res.group.value,
+            "fragment_type": res.fragment_type.value,
+            "resource_description": res.description,
+            "resource_url": str(res.url) if res.url is not None else None,
+        }
+        for res in all_resources
+    ]
+    return pd.DataFrame(rows)
 
 
 def run(context: PipelineContext) -> StepResult:
@@ -24,6 +50,15 @@ def run(context: PipelineContext) -> StepResult:
 
     resources = register_pipeline_resources(context.config)
     context.resources = resources
+    resources_df = _resource_registry_frame(resources)
+    register_frame(context.conn, "registered_resources_frame", resources_df)
+    context.conn.execute(
+        f"""
+        CREATE OR REPLACE TABLE {REGISTERED_RESOURCES_TABLE} AS
+        SELECT * FROM registered_resources_frame
+        """
+    )
+    context.conn.execute("DROP TABLE IF EXISTS registered_resources_frame")
 
     xlsx_names = [path.name for path in xlsx_files if not path.name.startswith("~$")]
     docx_names = [path.name for path in docx_files]
