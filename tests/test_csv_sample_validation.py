@@ -17,7 +17,13 @@ from src.helpers.resources import (
     register_resource,
     register_resources,
 )
-from src.helpers.vars import DRAW_LABEL, KTP_FILENAME_COL, KTP_FRAGMENT_COL
+from src.helpers.vars import (
+    DRAW_LABEL,
+    HCR_XLSX_KEY_PREFIX,
+    KTP_FILENAME_COL,
+    KTP_FRAGMENT_COL,
+    REQUIRED_FILES_CONFIG_KEYS,
+)
 from src.steps.step_02_load_xlsx import run as run_load_xlsx
 from src.steps.step_03_infer_names import run as run_infer_names
 from src.steps.step_04_add_economy_priority import run as run_add_economy_priority
@@ -58,10 +64,30 @@ def test_csv_rows_match_samples(tmp_path: Path) -> None:
             group=ResourceGroup.KTP_MANUAL_EXTRACTIONS,
             fragment_type=FragmentType.EXCEL_ROW,
         )
-        config = PipelineConfig()
-        config.sample_draw_sizes = [20] + [40] * 7
-        config.sample_seed = 42
-        config.pilot_xlsx_name = "2024_HCR.xlsx"
+        files_config = {
+            key: {"path": "dummy", "sha256": "dummy", "desc": "dummy"}
+            for key in REQUIRED_FILES_CONFIG_KEYS
+        }
+        files_config[f"{HCR_XLSX_KEY_PREFIX}dummy"] = {
+            "path": "dummy",
+            "sha256": "dummy",
+            "desc": "dummy",
+        }
+        config = PipelineConfig(
+            files_config=files_config,
+            db_file=tmp_path / "pipeline.duckdb",
+            state_file=tmp_path / "pipeline_state.json",
+            output_dir=tmp_path / "output",
+            output_format="txt",
+            pandoc_reference_docx=tmp_path / "reference.docx",
+            docx_dir=tmp_path,
+            timezone="America/Toronto",
+            sample_seed=42,
+            sample_draw_sizes=[20] + [40] * 7,
+            pilot_xlsx_name="2024_HCR.xlsx",
+            total_draws=310,
+            card_subset_mode=0,
+        )
 
         manager = PipelineManager(
             state_file=tmp_path / "pipeline_state.json",

@@ -14,6 +14,18 @@ Date of report: {}
 
 HCR_XLSX_KEY_PREFIX = "hcr_xlsx_"
 WORLD_BANK_XLSX_KEY = "world_bank_xlsx"
+REQUIRED_FILES_CONFIG_KEYS: Final[set[str]] = {
+    "hit_papers_0",
+    "hit_papers_1",
+    "authors_paper",
+    "paper_author_affiliation",
+    "affiliations",
+    "author_details",
+    "authors",
+    "fields",
+    WORLD_BANK_XLSX_KEY,
+}
+REQUIRED_FILE_ENTRY_KEYS: Final[set[str]] = {"path", "sha256", "desc"}
 
 KTP_FIRST_NAME_COL: Final = "ktp.first_name"
 KTP_LAST_NAME_COL: Final = "ktp.last_name"
@@ -425,6 +437,10 @@ __all__ = [
     "HCR_ROW_COL",
     "HCR_XLSX_AFFILIATIONS_COLS",
     "HCR_XLSX_NAME_COLS",
+    "HCR_XLSX_KEY_PREFIX",
+    "WORLD_BANK_XLSX_KEY",
+    "REQUIRED_FILES_CONFIG_KEYS",
+    "REQUIRED_FILE_ENTRY_KEYS",
     "KTP_ECONOMIES_COL",
     "KTP_ECONOMIES_INCOME_GROUP_COL",
     "KTP_ECONOMY_MATCH_COL",
