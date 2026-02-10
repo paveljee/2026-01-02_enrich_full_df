@@ -40,6 +40,10 @@ from ..helpers.vars import (
     KTP_PRIORITY_GROUP_COL,
     KTP_SOURCE_KEY_COL,
     KTP_XLSX_MATCH_COL,
+    KTP_XLSX_MATCH_FIRST_TOKENS_KEY,
+    KTP_XLSX_MATCH_LAST_NAME_NORM_KEY,
+    KTP_XLSX_MATCH_SOURCE_KEY_FIRST_TOKEN_KEY,
+    KTP_XLSX_MATCH_SOURCE_KEY_LAST_KEY,
     STEP_MATCH_XLSX,
 )
 from .shared import draw_sort_ctes_sql, draw_sort_order_by_sql, hcr_excluded_columns
@@ -88,6 +92,8 @@ def run(context: PipelineContext) -> StepResult:
                 lower(unaccent(n."{KTP_LAST_NAME_COL}")) AS pop_last_clean,
                 regexp_split_to_array(lower(unaccent(n."{KTP_FIRST_NAME_COL}")), '\\s+')
                     AS pop_first_tokens,
+                regexp_split_to_array(lower(unaccent(n."{KTP_LAST_NAME_COL}")), '\\s+')
+                    AS pop_last_tokens,
                 e."{KTP_ECONOMIES_COL}" AS "{KTP_ECONOMIES_COL}",
                 e."{KTP_ECONOMIES_INCOME_GROUP_COL}" AS "{KTP_ECONOMIES_INCOME_GROUP_COL}",
                 e."{KTP_ECONOMY_MATCH_COL}" AS "{KTP_ECONOMY_MATCH_COL}",
@@ -114,14 +120,10 @@ def run(context: PipelineContext) -> StepResult:
                 p.pop_first AS "{KTP_FIRST_NAME_COL}",
                 p.pop_last AS "{KTP_LAST_NAME_COL}",
                 json_object(
-                    'left.column.first', '{KTP_FIRST_NAME_COL}',
-                    'left.value.first_token_clean', nd.nd_first_token,
-                    'left.column.last', '{KTP_LAST_NAME_COL}',
-                    'left.value.last_clean', nd.nd_last_clean,
-                    'right.column.first', 'population_names.{KTP_FIRST_NAME_COL}',
-                    'right.value.first_tokens_clean', CAST(p.pop_first_tokens AS VARCHAR),
-                    'right.column.last', 'population_names.{KTP_LAST_NAME_COL}',
-                    'right.value.last_clean', p.pop_last_clean
+                    '{KTP_XLSX_MATCH_SOURCE_KEY_FIRST_TOKEN_KEY}', nd.nd_first_token,
+                    '{KTP_XLSX_MATCH_SOURCE_KEY_LAST_KEY}', nd.nd_last_clean,
+                    '{KTP_XLSX_MATCH_FIRST_TOKENS_KEY}', to_json(p.pop_first_tokens),
+                    '{KTP_XLSX_MATCH_LAST_NAME_NORM_KEY}', p.pop_last_clean
                 ) AS "{KTP_XLSX_MATCH_COL}",
                 p."{KTP_HCR_PRIMARY_AFFILIATIONS_COL}",
                 p."{KTP_HCR_SECONDARY_AFFILIATIONS_COL}"{hcr_projection_suffix},

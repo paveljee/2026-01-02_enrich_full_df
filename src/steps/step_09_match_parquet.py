@@ -27,6 +27,8 @@ from ..helpers.vars import (
     KTP_SSN_FIELD_DISPLAY_NAMES_LIST_COL,
     KTP_SSN_TOP_PAPERS_HIT_1PCT_COL,
     KTP_SSNAD_MATCH_COL,
+    KTP_SSNAD_MATCH_KTP_NAME_NORM_KEY,
+    KTP_SSNAD_MATCH_SSNAD_NAME_NORM_KEY,
     SSN_FIELD_IDS_LIST_COL,
     SSN_PAPERIDS_LEVEL0_COL,
     SSN_PAPERIDS_LEVEL1_COL,
@@ -128,8 +130,8 @@ def run(context: PipelineContext) -> StepResult:
             p.display_name AS "ssnad.display_name",
             p.display_name_alternatives AS "ssnad.display_name_alternatives",
             json_object(
-                'ktp.name_clean', n.match_key_norm,
-                'ssnad.alt_name_clean', lower(unaccent(p.alt_name))
+                '{KTP_SSNAD_MATCH_KTP_NAME_NORM_KEY}', n.match_key_norm,
+                '{KTP_SSNAD_MATCH_SSNAD_NAME_NORM_KEY}', lower(unaccent(p.alt_name))
             ) AS "{KTP_SSNAD_MATCH_COL}"
         FROM names n
         JOIN parq p

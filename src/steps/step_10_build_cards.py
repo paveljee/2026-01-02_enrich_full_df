@@ -24,6 +24,10 @@ from ..helpers.vars import (
     KTP_FILENAME_COL,
     KTP_SOURCE_KEY_COL,
     KTP_XLSX_MATCH_COL,
+    KTP_XLSX_MATCH_FIRST_TOKENS_KEY,
+    KTP_XLSX_MATCH_LAST_NAME_NORM_KEY,
+    KTP_XLSX_MATCH_SOURCE_KEY_FIRST_TOKEN_KEY,
+    KTP_XLSX_MATCH_SOURCE_KEY_LAST_KEY,
     SSNA_FILENAME_COL,
     SSNAD_FILENAME_COL,
     SSNAP_FILENAME_COL,
@@ -136,10 +140,25 @@ def run(context: PipelineContext) -> StepResult:
             return False
         if not isinstance(payload, dict):
             return False
-        for left, right in payload.items():
-            if str(left).strip() != str(right).strip():
-                return False
-        return True
+        source_key_first_token = payload.get(KTP_XLSX_MATCH_SOURCE_KEY_FIRST_TOKEN_KEY)
+        source_key_last = payload.get(KTP_XLSX_MATCH_SOURCE_KEY_LAST_KEY)
+        first_tokens = payload.get(KTP_XLSX_MATCH_FIRST_TOKENS_KEY, [])
+        last_name_norm = payload.get(KTP_XLSX_MATCH_LAST_NAME_NORM_KEY)
+        if not isinstance(first_tokens, list):
+            first_tokens = []
+        source_key_first_token_str = (
+            str(source_key_first_token).strip() if source_key_first_token is not None else ""
+        )
+        source_key_last_str = str(source_key_last).strip() if source_key_last is not None else ""
+        last_name_norm_str = str(last_name_norm).strip() if last_name_norm is not None else ""
+        if not source_key_first_token_str or not source_key_last_str:
+            return False
+        first_token_values = [str(token).strip() for token in first_tokens if str(token).strip()]
+        return (
+            source_key_first_token_str in first_token_values
+            and bool(last_name_norm_str)
+            and source_key_last_str == last_name_norm_str
+        )
 
     def _is_non_empty_value(value: object) -> bool:
         if value is None:
