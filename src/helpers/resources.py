@@ -157,7 +157,7 @@ def register_pipeline_resources(config: PipelineConfig) -> PipelineResources:
     }
     xlsx_resources = register_resources(
         xlsx_files,
-        group=ResourceGroup.KTP_PILOT_SAMPLE,
+        group=ResourceGroup.KTP_MANUAL_EXTRACTIONS,
         fragment_type=FragmentType.EXCEL_ROW,
         description="HCR XLSX inputs",
         expected_hashes=xlsx_hashes,
@@ -167,7 +167,7 @@ def register_pipeline_resources(config: PipelineConfig) -> PipelineResources:
     world_bank_meta = files[WORLD_BANK_XLSX_KEY]
     world_bank_resource = register_resource(
         Path(world_bank_meta["path"]),
-        group=ResourceGroup.KTP_PILOT_SAMPLE,
+        group=ResourceGroup.KTP_MANUAL_EXTRACTIONS,
         fragment_type=FragmentType.EXCEL_ROW,
         description=world_bank_meta.get("desc", "World Bank country list"),
         expected_hash=world_bank_meta.get("sha256"),
@@ -175,7 +175,7 @@ def register_pipeline_resources(config: PipelineConfig) -> PipelineResources:
     docx_files = discover_docx_files(config.docx_dir)
     docx_resources = register_resources(
         docx_files,
-        group=ResourceGroup.KTP_PILOT_SAMPLE,
+        group=ResourceGroup.KTP_MANUAL_EXTRACTIONS,
         fragment_type=FragmentType.DOCX_ROW,
         description="KTP DOCX inputs",
     )

@@ -6,9 +6,11 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import pandas as pd
+
 from ..helpers.cards import build_cards, write_cards_zip
 from ..helpers.context import PipelineContext, StepResult
-from ..helpers.data_models import OuterDict, ResourceGroup
+from ..helpers.data_models import FragmentType, OuterDict, ResourceGroup
 from ..helpers.vars import (
     CARD_BUILD_SUBSET_DESCRIPTIONS,
     CARD_INTRODUCTION,
@@ -17,6 +19,8 @@ from ..helpers.vars import (
     DOCX_ROW_INDEX_COL,
     DOCX_TABLE_INDEX_COL,
     HCR_XLSX_KEY_PREFIX,
+    KTP_DOCX_OPTIONAL_EMPTY_COLS,
+    KTP_DOCX_TABLE_1_PREFIX,
     KTP_FILENAME_COL,
     KTP_SOURCE_KEY_COL,
     KTP_XLSX_MATCH_COL,
@@ -137,6 +141,23 @@ def run(context: PipelineContext) -> StepResult:
                 return False
         return True
 
+    def _is_non_empty_value(value: object) -> bool:
+        if value is None:
+            return False
+        if isinstance(value, str):
+            return bool(value.strip())
+        return not bool(pd.isna(value))
+
+    def _has_complete_docx_table_fields(inner) -> bool:
+        docx_cols = [
+            col
+            for col in inner.data.keys()
+            if col.startswith(KTP_DOCX_TABLE_1_PREFIX) and col not in KTP_DOCX_OPTIONAL_EMPTY_COLS
+        ]
+        if not docx_cols:
+            return True
+        return all(_is_non_empty_value(inner.data.get(col)) for col in docx_cols)
+
     def _filtered_outer_dict() -> OuterDict:
         sciscinet_filenames: set[str] = set()
         if context.resources is not None:
@@ -151,24 +172,67 @@ def run(context: PipelineContext) -> StepResult:
                 for resource in all_resources
                 if resource.group == ResourceGroup.SCISCINET_HF
             }
+        docx_filenames: set[str] = set()
+        if context.resources is not None:
+            all_resources = (
+                list(context.resources.parquet_resources.values())
+                + list(context.resources.xlsx_resources.values())
+                + [context.resources.world_bank_resource]
+                + list(context.resources.docx_resources.values())
+            )
+            docx_filenames = {
+                resource.name
+                for resource in all_resources
+                if resource.group == ResourceGroup.KTP_MANUAL_EXTRACTIONS
+                and resource.fragment_type == FragmentType.DOCX_ROW
+            }
+
         all_items = list(outer_dict.items())
         exactly_one = []
         zero_or_many = []
+        sciscinet_count_failures = 0
         xlsx_match_failed = 0
+        docx_table_fields_failed = 0
+        sciscinet_count_pass = 0
+        xlsx_match_pass = 0
+        docx_table_fields_pass = 0
         for name_key, inner_dicts in all_items:
             sciscinet_count = sum(
                 1 for inner in inner_dicts if _is_sciscinet_inner(inner, sciscinet_filenames)
             )
+            sciscinet_exactly_one_ok = sciscinet_count == 1
             xlsx_exact_ok = all(
                 _is_exact_xlsx_match_payload(inner.data.get(KTP_XLSX_MATCH_COL))
                 for inner in inner_dicts
             )
-            if sciscinet_count == 1 and xlsx_exact_ok:
+            docx_innerdicts = []
+            for inner in inner_dicts:
+                filenames = _extract_filenames(inner.data.get(KTP_FILENAME_COL))
+                if filenames & docx_filenames:
+                    docx_innerdicts.append(inner)
+            # New rule is docx-innerdict-scoped: require at least one docx innerdict
+            # where all ktp.table_1_* fields are non-empty.
+            docx_complete_ok = (
+                not docx_innerdicts
+                or any(_has_complete_docx_table_fields(inner) for inner in docx_innerdicts)
+            )
+            if sciscinet_exactly_one_ok:
+                sciscinet_count_pass += 1
+            else:
+                sciscinet_count_failures += 1
+            if xlsx_exact_ok:
+                xlsx_match_pass += 1
+            else:
+                xlsx_match_failed += 1
+            if docx_complete_ok:
+                docx_table_fields_pass += 1
+            else:
+                docx_table_fields_failed += 1
+
+            if sciscinet_exactly_one_ok and xlsx_exact_ok and docx_complete_ok:
                 exactly_one.append((name_key, inner_dicts))
             else:
                 zero_or_many.append((name_key, inner_dicts))
-                if not xlsx_exact_ok:
-                    xlsx_match_failed += 1
         subset_items = all_items
         if subset_mode == 1:
             subset_items = exactly_one
@@ -176,14 +240,33 @@ def run(context: PipelineContext) -> StepResult:
             subset_items = zero_or_many
         subset_1_desc = CARD_BUILD_SUBSET_DESCRIPTIONS[1]
         subset_2_desc = CARD_BUILD_SUBSET_DESCRIPTIONS[2]
-        log(
-            "Card subset mode "
-            f"{subset_mode}: {subset_mode_desc} "
-            f"(selected {len(subset_items)} of {len(all_items)} name keys; "
-            f"subset_1='{subset_1_desc}' count={len(exactly_one)}, "
-            f"subset_2='{subset_2_desc}' count={len(zero_or_many)}, "
-            f"xlsx_exact_failures={xlsx_match_failed})"
-        )
+        total = len(all_items)
+        mode_header = f"Card subset mode {subset_mode}: {subset_mode_desc}"
+        table_header = f"{'Rule':<44} {'Pass':>6} {'Fail':>6}"
+        table_sep = "-" * len(table_header)
+
+        def row(label: str, passed: int, failed: int) -> str:
+            return f"{label:<44} {passed:>6} {failed:>6}"
+
+        table_lines = [
+            mode_header,
+            table_header,
+            table_sep,
+            row("sciscinet: exactly one innerdict", sciscinet_count_pass, sciscinet_count_failures),
+            row("xlsx: all present ktp.xlsx_match exact", xlsx_match_pass, xlsx_match_failed),
+            row(
+                "docx: required ktp.table_1_* non-empty",
+                docx_table_fields_pass,
+                docx_table_fields_failed,
+            ),
+            table_sep,
+            row("subset_1", len(exactly_one), 0),
+            row("subset_2", len(zero_or_many), 0),
+            row("selected for current mode", len(subset_items), total - len(subset_items)),
+            f"subset_1 description: {subset_1_desc}",
+            f"subset_2 description: {subset_2_desc}",
+        ]
+        log("\n".join(table_lines))
         subset_outer = OuterDict.from_name_keys([name_key for name_key, _ in subset_items])
         for name_key, inner_dicts in subset_items:
             for inner in inner_dicts:
@@ -201,7 +284,16 @@ def run(context: PipelineContext) -> StepResult:
 
     selected_outer_dict = _filtered_outer_dict()
     intro_date = datetime.now(ZoneInfo(context.config.timezone)).strftime("%B %d, %Y")
+    optional_docx_fields = sorted(KTP_DOCX_OPTIONAL_EMPTY_COLS)
+    optional_docx_fields_text = (
+        ", ".join(optional_docx_fields) if optional_docx_fields else "none"
+    )
     subset_intro_note = f"Subset applied: mode {subset_mode} ({subset_mode_desc})."
+    if subset_mode in {1, 2}:
+        subset_intro_note += (
+            " For ktp.table_1_* fields, non-empty is required except these allowed-empty "
+            f"fields: [{optional_docx_fields_text}]."
+        )
     intro = f"{CARD_INTRODUCTION.format(intro_date)}\n{subset_intro_note}"
     log("Building cards from selected subset")
     cards = build_cards(

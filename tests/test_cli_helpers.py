@@ -29,7 +29,7 @@ def test_load_docx_tables_uses_parser(tmp_path: Path, monkeypatch) -> None:
     docx_path.write_text("stub", encoding="utf-8")
     resource = register_resource(
         docx_path,
-        group=ResourceGroup.KTP_PILOT_SAMPLE,
+        group=ResourceGroup.KTP_MANUAL_EXTRACTIONS,
         fragment_type=FragmentType.DOCX_ROW,
     )
 

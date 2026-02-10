@@ -50,12 +50,12 @@ def test_csv_rows_match_samples(tmp_path: Path) -> None:
         conn.execute("LOAD splink_udfs;")
         xlsx_resources = register_resources(
             xlsx_files,
-            group=ResourceGroup.KTP_PILOT_SAMPLE,
+            group=ResourceGroup.KTP_MANUAL_EXTRACTIONS,
             fragment_type=FragmentType.EXCEL_ROW,
         )
         world_bank_resource = register_resource(
             world_bank,
-            group=ResourceGroup.KTP_PILOT_SAMPLE,
+            group=ResourceGroup.KTP_MANUAL_EXTRACTIONS,
             fragment_type=FragmentType.EXCEL_ROW,
         )
         config = PipelineConfig()

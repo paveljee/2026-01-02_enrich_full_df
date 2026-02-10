@@ -18,14 +18,14 @@ class ResourceGroup(str, Enum):
         REGISTERED_SAMPLES: Registered sample datasets
         LLAMA_CPP: LlamaCpp generated or processed resources
         SCISCINET_HF: SciSciNet datasets from HuggingFace
-        KTP_PILOT_SAMPLE: KTP pilot sample data
+        KTP_MANUAL_EXTRACTIONS: KTP manual extractions
     """
     
     HCR_LISTS_2024_ZIP = "hcr_lists_2024_zip"
     REGISTERED_SAMPLES = "registered_samples"
     LLAMA_CPP = "llama_cpp"
     SCISCINET_HF = "sciscinet_hf"
-    KTP_PILOT_SAMPLE = "ktp_pilot_sample"
+    KTP_MANUAL_EXTRACTIONS = "ktp_manual_extractions"
 
 
 class FragmentType(str, Enum):

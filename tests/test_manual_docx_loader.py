@@ -36,7 +36,7 @@ def test_load_docx_tables_adds_metadata(monkeypatch: pytest.MonkeyPatch, tmp_pat
     resources = {
         docx_path.name: register_resource(
             docx_path,
-            group=ResourceGroup.KTP_PILOT_SAMPLE,
+            group=ResourceGroup.KTP_MANUAL_EXTRACTIONS,
             fragment_type=FragmentType.DOCX_ROW,
         )
     }

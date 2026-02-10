@@ -24,11 +24,7 @@ from ..helpers.schema import (
 from ..helpers.vars import (
     DRAW_LABEL,
     HCR_FILENAME_COL,
-    HCR_FIRST_NAME_COL,
-    HCR_LAST_NAME_COL,
     HCR_ROW_COL,
-    HCR_XLSX_AFFILIATIONS_COLS,
-    HCR_XLSX_NAME_COLS,
     KTP_ECONOMIES_COL,
     KTP_ECONOMIES_INCOME_GROUP_COL,
     KTP_ECONOMY_MATCH_COL,
@@ -47,72 +43,6 @@ from ..helpers.vars import (
     STEP_MATCH_XLSX,
 )
 from .shared import draw_sort_ctes_sql, draw_sort_order_by_sql, hcr_excluded_columns
-
-
-def _hcr_excluded_columns(population_columns: list[str]) -> set[str]:
-    excluded = {HCR_FILENAME_COL, HCR_ROW_COL, HCR_FIRST_NAME_COL, HCR_LAST_NAME_COL}
-    for first_col, last_col in HCR_XLSX_NAME_COLS.values():
-        excluded.add(first_col)
-        excluded.add(last_col)
-    for primary_cols, secondary_cols in HCR_XLSX_AFFILIATIONS_COLS.values():
-        excluded.update(primary_cols)
-        excluded.update(secondary_cols)
-    excluded.update(
-        col
-        for col in population_columns
-        if col.startswith("hcr.") and "affiliation" in col.lower()
-    )
-    return excluded
-
-
-def _draw_sort_ctes() -> str:
-    return f"""
-        row_ranked AS (
-            SELECT
-                b.*,
-                CASE
-                    WHEN starts_with(CAST(b."{DRAW_LABEL}" AS VARCHAR), 'pilot.') THEN 0
-                    WHEN TRY_CAST(b."{DRAW_LABEL}" AS BIGINT) IS NOT NULL THEN 1
-                    WHEN b."{DRAW_LABEL}" IS NULL
-                      OR trim(CAST(b."{DRAW_LABEL}" AS VARCHAR)) = '' THEN 3
-                    ELSE 2
-                END AS row_draw_group,
-                CASE
-                    WHEN starts_with(CAST(b."{DRAW_LABEL}" AS VARCHAR), 'pilot.')
-                        THEN TRY_CAST(
-                            split_part(CAST(b."{DRAW_LABEL}" AS VARCHAR), '.', 2) AS BIGINT
-                        )
-                    WHEN TRY_CAST(b."{DRAW_LABEL}" AS BIGINT) IS NOT NULL
-                        THEN CAST(b."{DRAW_LABEL}" AS BIGINT)
-                    ELSE NULL
-                END AS row_draw_num
-            FROM base b
-        ),
-        ranked AS (
-            SELECT
-                rr.*,
-                COALESCE(
-                    MIN(CASE WHEN rr.row_draw_group < 3 THEN rr.row_draw_group ELSE NULL END)
-                        OVER (PARTITION BY rr."{KTP_SOURCE_KEY_COL}"),
-                    3
-                ) AS source_draw_group,
-                MIN(CASE WHEN rr.row_draw_group < 3 THEN rr.row_draw_num ELSE NULL END)
-                    OVER (PARTITION BY rr."{KTP_SOURCE_KEY_COL}") AS source_draw_num
-            FROM row_ranked rr
-        )
-    """
-
-
-def _draw_sort_order_by() -> str:
-    return f"""
-            source_draw_group,
-            source_draw_num NULLS LAST,
-            "{KTP_SOURCE_KEY_COL}",
-            row_draw_group,
-            row_draw_num NULLS LAST,
-            "{KTP_FILENAME_COL}",
-            "{KTP_FRAGMENT_COL}"
-    """
 
 
 def run(context: PipelineContext) -> StepResult:
@@ -139,7 +69,13 @@ def run(context: PipelineContext) -> StepResult:
         WITH name_draws AS (
             SELECT nk."{KTP_SOURCE_KEY_COL}" as "{KTP_SOURCE_KEY_COL}",
                    nk."{KTP_FIRST_NAME_COL}" AS "{KTP_FIRST_NAME_COL}",
-                   nk."{KTP_LAST_NAME_COL}" AS "{KTP_LAST_NAME_COL}"
+                   nk."{KTP_LAST_NAME_COL}" AS "{KTP_LAST_NAME_COL}",
+                   lower(unaccent(nk."{KTP_FIRST_NAME_COL}")) AS nd_first_clean,
+                   lower(unaccent(nk."{KTP_LAST_NAME_COL}")) AS nd_last_clean,
+                   list_extract(
+                       regexp_split_to_array(lower(unaccent(nk."{KTP_FIRST_NAME_COL}")), '\\s+'),
+                       1
+                   ) AS nd_first_token
             FROM {OUTERDICT_NAME_VIEW} nk
         ),
         pop_names AS (
@@ -148,6 +84,10 @@ def run(context: PipelineContext) -> StepResult:
                 p."{HCR_ROW_COL}",
                 n."{KTP_FIRST_NAME_COL}" AS pop_first,
                 n."{KTP_LAST_NAME_COL}" AS pop_last,
+                lower(unaccent(n."{KTP_FIRST_NAME_COL}")) AS pop_first_clean,
+                lower(unaccent(n."{KTP_LAST_NAME_COL}")) AS pop_last_clean,
+                regexp_split_to_array(lower(unaccent(n."{KTP_FIRST_NAME_COL}")), '\\s+')
+                    AS pop_first_tokens,
                 e."{KTP_ECONOMIES_COL}" AS "{KTP_ECONOMIES_COL}",
                 e."{KTP_ECONOMIES_INCOME_GROUP_COL}" AS "{KTP_ECONOMIES_INCOME_GROUP_COL}",
                 e."{KTP_ECONOMY_MATCH_COL}" AS "{KTP_ECONOMY_MATCH_COL}",
@@ -174,8 +114,14 @@ def run(context: PipelineContext) -> StepResult:
                 p.pop_first AS "{KTP_FIRST_NAME_COL}",
                 p.pop_last AS "{KTP_LAST_NAME_COL}",
                 json_object(
-                    lower(unaccent(nd."{KTP_FIRST_NAME_COL}" || ' ' || nd."{KTP_LAST_NAME_COL}")),
-                    lower(unaccent(p.pop_first || ' ' || p.pop_last))
+                    'left.column.first', '{KTP_FIRST_NAME_COL}',
+                    'left.value.first_token_clean', nd.nd_first_token,
+                    'left.column.last', '{KTP_LAST_NAME_COL}',
+                    'left.value.last_clean', nd.nd_last_clean,
+                    'right.column.first', 'population_names.{KTP_FIRST_NAME_COL}',
+                    'right.value.first_tokens_clean', CAST(p.pop_first_tokens AS VARCHAR),
+                    'right.column.last', 'population_names.{KTP_LAST_NAME_COL}',
+                    'right.value.last_clean', p.pop_last_clean
                 ) AS "{KTP_XLSX_MATCH_COL}",
                 p."{KTP_HCR_PRIMARY_AFFILIATIONS_COL}",
                 p."{KTP_HCR_SECONDARY_AFFILIATIONS_COL}"{hcr_projection_suffix},
@@ -186,14 +132,8 @@ def run(context: PipelineContext) -> StepResult:
                 p."{KTP_PRIORITY_GROUP_COL}"
             FROM pop_names p
             JOIN name_draws nd
-              ON lower(unaccent(nd."{KTP_LAST_NAME_COL}")) = lower(unaccent(p.pop_last))
-             AND list_contains(
-                    regexp_split_to_array(lower(unaccent(p.pop_first)), '\\s+'),
-                    list_extract(
-                        regexp_split_to_array(lower(unaccent(nd."{KTP_FIRST_NAME_COL}")), '\\s+'),
-                        1
-                    )
-                 )
+              ON nd.nd_last_clean = p.pop_last_clean
+             AND list_contains(p.pop_first_tokens, nd.nd_first_token)
             LEFT JOIN {SAMPLES_TABLE} s
               ON s."{KTP_FILENAME_COL}" = p."{HCR_FILENAME_COL}"
              AND s."{KTP_FRAGMENT_COL}" = p."{HCR_ROW_COL}"

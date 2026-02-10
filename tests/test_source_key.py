@@ -46,7 +46,7 @@ class TestRegisteredResource:
         resource = RegisteredResource(
             name="test.csv",
             hash="hash123",
-            group=ResourceGroup.KTP_PILOT_SAMPLE,
+            group=ResourceGroup.KTP_MANUAL_EXTRACTIONS,
             fragment_type=FragmentType.CSV_ROW,
             verify_hash_on_init=False,
         )
@@ -57,7 +57,7 @@ class TestRegisteredResource:
         """Test URL validation rejects empty/whitespace strings."""
         with pytest.raises(ValidationError, match="Input should be a valid URL"):
             RegisteredResource(
-                name="test.csv", hash="h", group=ResourceGroup.KTP_PILOT_SAMPLE,
+                name="test.csv", hash="h", group=ResourceGroup.KTP_MANUAL_EXTRACTIONS,
                 fragment_type=FragmentType.CSV_ROW, url=""
             )
     
@@ -65,7 +65,7 @@ class TestRegisteredResource:
         """Test URL accepts file://, https://, http:// protocols."""
         for url in ["file:///path/file", "https://example.com/file", "http://example.com/file"]:
             resource = RegisteredResource(
-                name="test", hash="h", group=ResourceGroup.KTP_PILOT_SAMPLE,
+                name="test", hash="h", group=ResourceGroup.KTP_MANUAL_EXTRACTIONS,
                 fragment_type=FragmentType.CSV_ROW, url=url, verify_hash_on_init=False
             )
             assert resource.url is not None
@@ -78,7 +78,7 @@ class TestRegisteredResource:
     def test_fspath_extracts_paths(self, url, expected_path):
         """Test __fspath__ correctly extracts filesystem paths."""
         resource = RegisteredResource(
-            name="test", hash="h", group=ResourceGroup.KTP_PILOT_SAMPLE,
+            name="test", hash="h", group=ResourceGroup.KTP_MANUAL_EXTRACTIONS,
             fragment_type=FragmentType.CSV_ROW, url=url, verify_hash_on_init=False
         )
         assert resource.__fspath__() == expected_path
@@ -86,7 +86,7 @@ class TestRegisteredResource:
     def test_fspath_raises_for_missing_url(self):
         """Test __fspath__ raises when URL is None."""
         resource = RegisteredResource(
-            name="test", hash="h", group=ResourceGroup.KTP_PILOT_SAMPLE,
+            name="test", hash="h", group=ResourceGroup.KTP_MANUAL_EXTRACTIONS,
             fragment_type=FragmentType.CSV_ROW, verify_hash_on_init=False
         )
         with pytest.raises(ValueError, match="has no URL"):
@@ -95,7 +95,7 @@ class TestRegisteredResource:
     def test_fspath_raises_for_non_file_url(self):
         """Test __fspath__ raises for HTTP URLs."""
         resource = RegisteredResource(
-            name="test", hash="h", group=ResourceGroup.KTP_PILOT_SAMPLE,
+            name="test", hash="h", group=ResourceGroup.KTP_MANUAL_EXTRACTIONS,
             fragment_type=FragmentType.CSV_ROW,
             url="https://example.com/data.csv",
             verify_hash_on_init=False,
@@ -106,7 +106,7 @@ class TestRegisteredResource:
     def test_pathlib_integration(self):
         """Test that __fspath__ works with pathlib.Path."""
         resource = RegisteredResource(
-            name="test", hash="h", group=ResourceGroup.KTP_PILOT_SAMPLE,
+            name="test", hash="h", group=ResourceGroup.KTP_MANUAL_EXTRACTIONS,
             fragment_type=FragmentType.CSV_ROW,
             url="file:///data/test.csv",
             verify_hash_on_init=False,
@@ -172,7 +172,7 @@ class TestRegisteredResourceEnhanced:
         """Test URLs with fragments (#) are rejected."""
         with pytest.raises(ValidationError, match="URLs with fragments are not supported"):
             RegisteredResource(
-                name="test", hash="h", group=ResourceGroup.KTP_PILOT_SAMPLE,
+                name="test", hash="h", group=ResourceGroup.KTP_MANUAL_EXTRACTIONS,
                 fragment_type=FragmentType.CSV_ROW,
                 url="file:///data/file.csv#section",
                 verify_hash_on_init=False
@@ -181,7 +181,7 @@ class TestRegisteredResourceEnhanced:
     def test_url_with_query_string_accepted(self):
         """Test URLs with query strings (?) are accepted."""
         resource = RegisteredResource(
-            name="test", hash="h", group=ResourceGroup.KTP_PILOT_SAMPLE,
+            name="test", hash="h", group=ResourceGroup.KTP_MANUAL_EXTRACTIONS,
             fragment_type=FragmentType.CSV_ROW,
             url="https://example.com/data.csv?version=1",
             verify_hash_on_init=False
@@ -191,7 +191,7 @@ class TestRegisteredResourceEnhanced:
     def test_windows_path_handling(self):
         """Test Windows file paths are handled correctly."""
         resource = RegisteredResource(
-            name="test", hash="h", group=ResourceGroup.KTP_PILOT_SAMPLE,
+            name="test", hash="h", group=ResourceGroup.KTP_MANUAL_EXTRACTIONS,
             fragment_type=FragmentType.CSV_ROW,
             url="file:///C:/Users/test/data.csv",
             verify_hash_on_init=False
@@ -214,7 +214,7 @@ class TestRegisteredResourceEnhanced:
         resource = RegisteredResource(
             name="test.txt",
             hash=correct_hash,
-            group=ResourceGroup.KTP_PILOT_SAMPLE,
+            group=ResourceGroup.KTP_MANUAL_EXTRACTIONS,
             fragment_type=FragmentType.CSV_ROW,
             url=f"file:///{test_file}",
             verify_hash_on_init=True
@@ -226,7 +226,7 @@ class TestRegisteredResourceEnhanced:
             RegisteredResource(
                 name="test.txt",
                 hash="wrong_hash",
-                group=ResourceGroup.KTP_PILOT_SAMPLE,
+                group=ResourceGroup.KTP_MANUAL_EXTRACTIONS,
                 fragment_type=FragmentType.CSV_ROW,
                 url=f"file:///{test_file}",
                 verify_hash_on_init=True
@@ -241,7 +241,7 @@ class TestRegisteredResourceEnhanced:
         resource = RegisteredResource(
             name="test.txt",
             hash="any_string_works",
-            group=ResourceGroup.KTP_PILOT_SAMPLE,
+            group=ResourceGroup.KTP_MANUAL_EXTRACTIONS,
             fragment_type=FragmentType.CSV_ROW,
             url=f"file:///{test_file}",
             verify_hash_on_init=False
@@ -257,7 +257,7 @@ class TestRegisteredResourceEnhanced:
         resource = RegisteredResource(
             name="test.txt",
             hash=correct_hash,
-            group=ResourceGroup.KTP_PILOT_SAMPLE,
+            group=ResourceGroup.KTP_MANUAL_EXTRACTIONS,
             fragment_type=FragmentType.CSV_ROW,
             url=f"file:///{test_file}",
             verify_hash_on_init=False

@@ -61,10 +61,20 @@ KTP_DOCX_MATCH_COL: Final = "ktp.docx_match"
 KTP_SSNAD_MATCH_COL: Final = "ktp.ssnad_match"
 KTP_DOCX_ROW_NUMBER_COL: Final = "ktp.table_1_row_number"
 KTP_DOCX_TABLE_1_PREFIX: Final = "ktp.table_1_"
+KTP_DOCX_OPTIONAL_EMPTY_COLS: Final[set[str]] = {
+    "ktp.table_1_socioeconomic_status",
+    "ktp.table_1_race_ethnicity_language_culture",
+}
 CARD_BUILD_SUBSET_DESCRIPTIONS: Final[dict[int, str]] = {
     0: "all name keys (no filtering)",
-    1: "exactly one sciscinet innerdict and all present ktp.xlsx_match payloads are exact",
-    2: "remaining name keys (zero or >1 sciscinet innerdict, or any non-exact ktp.xlsx_match)",
+    1: (
+        "exactly one sciscinet innerdict, all present ktp.xlsx_match payloads are exact, "
+        "and all required present ktp.table_1_* fields are non-empty"
+    ),
+    2: (
+        "remaining name keys (zero or >1 sciscinet innerdict, any non-exact ktp.xlsx_match, "
+        "or any empty required ktp.table_1_* value)"
+    ),
 }
 
 STEP_REGISTER_RESOURCES: Final = "01_register_resources"
