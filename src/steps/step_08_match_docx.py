@@ -9,7 +9,10 @@ import pandas as pd
 from ..helpers.context import PipelineContext, StepResult
 from ..helpers.data_models import RegisteredResource
 from ..helpers.docx_parse import parse_docx_table
-from ..helpers.duckdb_utils import append_innerdicts_from_jsonlines_table, register_frame
+from ..helpers.duckdb_utils import (
+    append_innerdicts_from_jsonlines_table,
+    register_frame,
+)
 from ..helpers.jsonlines import dumps_jsonlines
 from ..helpers.procedures import DocxMatchProcedure
 from ..helpers.schema import (
@@ -18,8 +21,7 @@ from ..helpers.schema import (
     DOCX_OUTPUT_VIEW,
     DOCX_TABLE,
     OUTERDICT_NAME_VIEW,
-    POPULATION_NAMES_TABLE,
-    POPULATION_TABLE,
+    REGISTERED_RESOURCES_TABLE,
     SAMPLES_WITH_NAMES_VIEW,
 )
 from ..helpers.vars import (
@@ -33,12 +35,13 @@ from ..helpers.vars import (
     KTP_FILENAME_COL,
     KTP_FIRST_NAME_COL,
     KTP_FRAGMENT_COL,
+    KTP_FRAGMENT_TYPE_COL,
     KTP_LAST_NAME_COL,
-    KTP_POPULATION_INDEX_COL,
     KTP_SOURCE_KEY_COL,
     RIGHT_NAME_COL,
     STEP_MATCH_DOCX,
 )
+from .shared import draw_sort_ctes_sql, draw_sort_order_by_sql
 
 
 def normalize_docx_column_name(column: str) -> str:
@@ -143,22 +146,39 @@ def run(context: PipelineContext) -> StepResult:
                 regexp_replace(lower(unaccent(COALESCE(d."{name_col}", ''))), '[^0-9a-z]+', '', 'g')
                     AS docx_clean
             FROM {DOCX_TABLE} d
+        ),
+        base AS (
+            SELECT
+                nd."{KTP_SOURCE_KEY_COL}" AS "{KTP_SOURCE_KEY_COL}",
+                d."{KTP_FILENAME_COL}" AS "{KTP_FILENAME_COL}",
+                d."{KTP_DOCX_ROW_NUMBER_COL}" AS "{KTP_FRAGMENT_COL}",
+                COALESCE(rr.fragment_type, 'docx_row') AS "{KTP_FRAGMENT_TYPE_COL}",
+                nd."{DRAW_LABEL}" AS "{DRAW_LABEL}",
+                nd."{KTP_FIRST_NAME_COL}" AS "{KTP_FIRST_NAME_COL}",
+                nd."{KTP_LAST_NAME_COL}" AS "{KTP_LAST_NAME_COL}",
+                json_object(
+                    lower(unaccent(nd."{KTP_FIRST_NAME_COL}" || ' ' || nd."{KTP_LAST_NAME_COL}")),
+                    lower(unaccent(d."{name_col}"))
+                ) AS "{KTP_DOCX_MATCH_COL}",
+                d.* EXCLUDE ("{KTP_FILENAME_COL}")
+            FROM docx_clean d
+            RIGHT JOIN names_clean nd
+              ON POSITION(nd.first_clean IN d.docx_clean) > 0
+             AND POSITION(nd.last_clean IN d.docx_clean) > 0
+            LEFT JOIN {REGISTERED_RESOURCES_TABLE} rr
+              ON rr.resource_name = d."{KTP_FILENAME_COL}"
+            WHERE d."{KTP_FILENAME_COL}" IS NOT NULL
         )
-        SELECT
-            nd."{KTP_SOURCE_KEY_COL}" AS "{KTP_SOURCE_KEY_COL}",
-            nd."{KTP_FIRST_NAME_COL}",
-            nd."{KTP_LAST_NAME_COL}",
-            nd."{DRAW_LABEL}",
-            d.*,
-            d."{KTP_DOCX_ROW_NUMBER_COL}" AS "{KTP_FRAGMENT_COL}",
-            json_object(
-                lower(unaccent(nd."{KTP_FIRST_NAME_COL}" || ' ' || nd."{KTP_LAST_NAME_COL}")),
-                lower(unaccent(d."{name_col}"))
-            ) AS "{KTP_DOCX_MATCH_COL}"
-        FROM docx_clean d
-        RIGHT JOIN names_clean nd
-          ON POSITION(nd.first_clean IN d.docx_clean) > 0
-         AND POSITION(nd.last_clean IN d.docx_clean) > 0
+        ,
+        {draw_sort_ctes_sql(draw_col=DRAW_LABEL, source_key_col=KTP_SOURCE_KEY_COL)}
+        SELECT * EXCLUDE (row_draw_group, row_draw_num, source_draw_group, source_draw_num)
+        FROM ranked
+        ORDER BY
+            {draw_sort_order_by_sql(
+                source_key_col=KTP_SOURCE_KEY_COL,
+                filename_col=KTP_FILENAME_COL,
+                fragment_col=KTP_FRAGMENT_COL,
+            )}
         """
     )
 
@@ -194,23 +214,20 @@ def run(context: PipelineContext) -> StepResult:
     conn.execute(
         f"""
         CREATE OR REPLACE VIEW {DOCX_OUTPUT_VIEW} AS
-        SELECT d.* EXCLUDE (name_key), d.name_key AS "{KTP_SOURCE_KEY_COL}",
-               nk."{KTP_FIRST_NAME_COL}", nk."{KTP_LAST_NAME_COL}",
-               s."{DRAW_LABEL}" AS sample_draw,
-               s."{KTP_FILENAME_COL}" AS sample_filename,
-               s."{KTP_FRAGMENT_COL}" AS sample_fragment,
-               p.*, n.*
-        FROM {DOCX_INNERDICT_TABLE} d
-        LEFT JOIN {OUTERDICT_NAME_VIEW} nk
-          ON d.name_key = nk."{KTP_SOURCE_KEY_COL}"
-        LEFT JOIN {SAMPLES_WITH_NAMES_VIEW} s
-          ON lower(nk."{KTP_FIRST_NAME_COL}") = lower(s."{KTP_FIRST_NAME_COL}")
-         AND lower(nk."{KTP_LAST_NAME_COL}") = lower(s."{KTP_LAST_NAME_COL}")
-        LEFT JOIN {POPULATION_NAMES_TABLE} n
-          ON lower(nk."{KTP_FIRST_NAME_COL}") = lower(n."{KTP_FIRST_NAME_COL}")
-         AND lower(nk."{KTP_LAST_NAME_COL}") = lower(n."{KTP_LAST_NAME_COL}")
-        LEFT JOIN {POPULATION_TABLE} p
-          ON p."{KTP_POPULATION_INDEX_COL}" = n."{KTP_POPULATION_INDEX_COL}"
+        WITH base AS (
+            SELECT *
+            FROM {DOCX_MATCH_VIEW}
+            WHERE "{KTP_FILENAME_COL}" IS NOT NULL
+        ),
+        {draw_sort_ctes_sql(draw_col=DRAW_LABEL, source_key_col=KTP_SOURCE_KEY_COL)}
+        SELECT * EXCLUDE (row_draw_group, row_draw_num, source_draw_group, source_draw_num)
+        FROM ranked
+        ORDER BY
+            {draw_sort_order_by_sql(
+                source_key_col=KTP_SOURCE_KEY_COL,
+                filename_col=KTP_FILENAME_COL,
+                fragment_col=KTP_FRAGMENT_COL,
+            )}
         """
     )
 

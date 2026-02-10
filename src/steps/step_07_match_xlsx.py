@@ -4,7 +4,10 @@ import duckdb
 import pandas as pd
 
 from ..helpers.context import PipelineContext, StepResult
-from ..helpers.duckdb_utils import append_innerdicts_from_jsonlines_table, register_frame
+from ..helpers.duckdb_utils import (
+    append_innerdicts_from_jsonlines_table,
+    register_frame,
+)
 from ..helpers.jsonlines import dumps_jsonlines
 from ..helpers.procedures import XlsxMatchProcedure
 from ..helpers.schema import (
@@ -43,6 +46,7 @@ from ..helpers.vars import (
     KTP_XLSX_MATCH_COL,
     STEP_MATCH_XLSX,
 )
+from .shared import draw_sort_ctes_sql, draw_sort_order_by_sql, hcr_excluded_columns
 
 
 def _hcr_excluded_columns(population_columns: list[str]) -> set[str]:
@@ -119,7 +123,7 @@ def run(context: PipelineContext) -> StepResult:
 
     conn: duckdb.DuckDBPyConnection = context.conn
     population_columns = [row[0] for row in conn.execute(f"DESCRIBE {POPULATION_TABLE}").fetchall()]
-    hcr_excluded = _hcr_excluded_columns(population_columns)
+    hcr_excluded = hcr_excluded_columns(population_columns)
     hcr_payload_columns = [
         col for col in population_columns if col.startswith("hcr.") and col not in hcr_excluded
     ]
@@ -195,11 +199,15 @@ def run(context: PipelineContext) -> StepResult:
              AND s."{KTP_FRAGMENT_COL}" = p."{HCR_ROW_COL}"
             WHERE p."{HCR_FILENAME_COL}" IS NOT NULL
         ),
-        {_draw_sort_ctes()}
+        {draw_sort_ctes_sql(draw_col=DRAW_LABEL, source_key_col=KTP_SOURCE_KEY_COL)}
         SELECT * EXCLUDE (row_draw_group, row_draw_num, source_draw_group, source_draw_num)
         FROM ranked
         ORDER BY
-            {_draw_sort_order_by()}
+            {draw_sort_order_by_sql(
+                source_key_col=KTP_SOURCE_KEY_COL,
+                filename_col=KTP_FILENAME_COL,
+                fragment_col=KTP_FRAGMENT_COL,
+            )}
         """
     )
 
@@ -238,11 +246,15 @@ def run(context: PipelineContext) -> StepResult:
             FROM {XLSX_MATCH_VIEW}
             WHERE "{KTP_FILENAME_COL}" IS NOT NULL
         ),
-        {_draw_sort_ctes()}
+        {draw_sort_ctes_sql(draw_col=DRAW_LABEL, source_key_col=KTP_SOURCE_KEY_COL)}
         SELECT * EXCLUDE (row_draw_group, row_draw_num, source_draw_group, source_draw_num)
         FROM ranked
         ORDER BY
-            {_draw_sort_order_by()}
+            {draw_sort_order_by_sql(
+                source_key_col=KTP_SOURCE_KEY_COL,
+                filename_col=KTP_FILENAME_COL,
+                fragment_col=KTP_FRAGMENT_COL,
+            )}
         """
     )
 

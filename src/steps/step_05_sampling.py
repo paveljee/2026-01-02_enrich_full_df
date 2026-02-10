@@ -21,8 +21,6 @@ from ..helpers.vars import (
     HCR_FIRST_NAME_COL,
     HCR_LAST_NAME_COL,
     HCR_ROW_COL,
-    HCR_XLSX_AFFILIATIONS_COLS,
-    HCR_XLSX_NAME_COLS,
     KTP_ECONOMIES_COL,
     KTP_ECONOMIES_INCOME_GROUP_COL,
     KTP_FILENAME_COL,
@@ -37,6 +35,7 @@ from ..helpers.vars import (
     PILOT_NAME_CATEGORY_TRIPLES,
     STEP_SAMPLE_POPULATION,
 )
+from .shared import hcr_excluded_columns
 
 
 def _append_samples(conn: duckdb.DuckDBPyConnection, df: pd.DataFrame) -> None:
@@ -147,17 +146,7 @@ def run(context: PipelineContext) -> StepResult:
         _append_samples(conn, pilot_df[[KTP_FILENAME_COL, KTP_FRAGMENT_COL, DRAW_LABEL]])
 
     p_columns = [row[0] for row in conn.execute(f"DESCRIBE {POPULATION_TABLE}").fetchall()]
-    source_name_aff_cols: set[str] = {HCR_FIRST_NAME_COL, HCR_LAST_NAME_COL}
-    for first_col, last_col in HCR_XLSX_NAME_COLS.values():
-        source_name_aff_cols.add(first_col)
-        source_name_aff_cols.add(last_col)
-    for primary_cols, secondary_cols in HCR_XLSX_AFFILIATIONS_COLS.values():
-        source_name_aff_cols.update(primary_cols)
-        source_name_aff_cols.update(secondary_cols)
-    source_name_aff_cols.update(
-        col for col in p_columns if col.startswith("hcr.") and "affiliation" in col.lower()
-    )
-    excluded_p_cols = source_name_aff_cols | {
+    excluded_p_cols = hcr_excluded_columns(p_columns) | {
         HCR_FILENAME_COL,
         HCR_ROW_COL,
         KTP_POPULATION_INDEX_COL,

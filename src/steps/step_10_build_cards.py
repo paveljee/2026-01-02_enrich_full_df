@@ -31,30 +31,17 @@ def run(context: PipelineContext) -> StepResult:
         filled = min(width, int(width * done / total))
         return "[" + ("#" * filled) + ("-" * (width - filled)) + "]"
 
-    total_cards = len(list(context.outer_dict.items()))
-    conversion_total = (
-        total_cards if context.config.output_format == "docx" else max(total_cards, 1)
-    )
-    overall_total = total_cards + conversion_total
-    build_done = 0
-    conversion_done = 0
-
-    def on_build_progress(done: int, _total: int, _card_id: str) -> None:
-        nonlocal build_done
-        build_done = done
-        overall_done = min(overall_total, build_done + conversion_done)
+    def on_build_progress(done: int, total: int, _card_id: str) -> None:
         log(
-            f"Card progress {progress_bar(overall_done, overall_total)} "
-            f"{overall_done}/{overall_total}"
+            f"Card build progress {progress_bar(done, total)} "
+            f"{done}/{total}"
         )
 
-    def on_conversion_progress(done: int, _total: int, _card_id: str) -> None:
-        nonlocal conversion_done
-        conversion_done = done
-        overall_done = min(overall_total, build_done + conversion_done)
+    def on_conversion_progress(done: int, total: int, _card_id: str) -> None:
+        phase = "DOCX conversion" if context.config.output_format == "docx" else "Output write"
         log(
-            f"Card progress {progress_bar(overall_done, overall_total)} "
-            f"{overall_done}/{overall_total}"
+            f"{phase} progress {progress_bar(done, total)} "
+            f"{done}/{total}"
         )
 
     excluded_cols = {
