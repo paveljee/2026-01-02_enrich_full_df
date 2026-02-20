@@ -4,9 +4,11 @@ import ast
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import textwrap
+from collections.abc import Generator
 from copy import deepcopy
 from pathlib import Path
 
@@ -147,6 +149,19 @@ def config_path(tmp_path: Path) -> Path:
     return path
 
 
+@pytest.fixture(autouse=True)
+def _isolate_hcr_name_cols() -> Generator[None, None, None]:
+    from src.helpers.vars import HCR_XLSX_NAME_COLS
+
+    prior = dict(HCR_XLSX_NAME_COLS)
+    HCR_XLSX_NAME_COLS.clear()
+    try:
+        yield
+    finally:
+        HCR_XLSX_NAME_COLS.clear()
+        HCR_XLSX_NAME_COLS.update(prior)
+
+
 def _noop_log(_: str, __: str = "white") -> None:
     return None
 
@@ -227,6 +242,10 @@ def _breakdown_block(stdout: str) -> str:
     if end == -1:
         return stdout[start:].strip()
     return stdout[start:end].strip()
+
+
+def _strip_ansi(text: str) -> str:
+    return re.sub(r"\x1B\[[0-?]*[ -/]*[@-~]", "", text)
 
 
 def _parse_snapshot(stdout: str) -> dict[str, object]:
@@ -431,11 +450,12 @@ def test_detour_contract_entrypoint_isolation_and_db_separation(
     config = PipelineConfig.from_json(config_path)
     result = run_detour(config, interactive=False)
     stdout = capsys.readouterr().out
+    plain_stdout = _strip_ansi(stdout)
 
     assert result.success is True
     assert result.steps_completed == DETOUR_STEPS
-    assert "Detour Breakdown (Steps 1-4)" in stdout
-    assert "Rows by hcr.filename:" in stdout
+    assert "Detour Breakdown (Steps 1-4)" in plain_stdout
+    assert "Rows by hcr.filename:" in plain_stdout
 
     detour_db = Path(str(result.metadata["detour_db_file"]))
     detour_state = Path(str(result.metadata["detour_state_file"]))
