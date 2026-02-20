@@ -250,7 +250,9 @@ def run(context: PipelineContext) -> StepResult:
         SELECT
             a."{KTP_POPULATION_INDEX_COL}",
             COALESCE(
-                to_json(list(DISTINCT m.country) FILTER (WHERE m.country IS NOT NULL)),
+                to_json(
+                    list_sort(list(DISTINCT m.country) FILTER (WHERE m.country IS NOT NULL))
+                ),
                 '[]'
             ) AS "{KTP_ECONOMIES_COL}",
             CASE
@@ -266,7 +268,7 @@ def run(context: PipelineContext) -> StepResult:
             END AS "{KTP_ECONOMIES_INCOME_GROUP_COL}",
             CASE
                 WHEN count(m.country) = 0 THEN NULL
-                ELSE json_object(a.aff_text, list(DISTINCT m.country))
+                ELSE json_object(a.aff_text, list_sort(list(DISTINCT m.country)))
             END AS "{KTP_ECONOMY_MATCH_COL}",
             a."{KTP_HCR_PRIMARY_AFFILIATIONS_COL}",
             a."{KTP_HCR_SECONDARY_AFFILIATIONS_COL}",
