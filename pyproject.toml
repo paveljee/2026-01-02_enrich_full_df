@@ -66,6 +66,9 @@ depends-on = ["ruff", "mypy"]
 depends-on = ["lint", "test"]
 
 [tool.pytest.ini_options]
+markers = [
+    "slow: long-running integration tests against real config/data",
+]
 
 [tool.ruff]
 line-length = 100
