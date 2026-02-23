@@ -7,7 +7,7 @@ CARD_INTRODUCTION = """## Introduction
 
 Name is displayed as **Last Name, First Name**.
 
-Last modified (introduction): February 10, 2026
+Last modified (introduction): February 23, 2026
 
 Date of report: {}
 """
@@ -109,12 +109,22 @@ KTP_TABLE_1_EMPTY_VALUE_PLACEHOLDERS: Final[set[str]] = {
 CARD_BUILD_SUBSET_DESCRIPTIONS: Final[dict[int, str]] = {
     0: "all name keys (no filtering)",
     1: (
-        "exactly one sciscinet innerdict, all present ktp.xlsx_match payloads are exact, "
-        "and all required present ktp.table_1_* fields are non-empty"
+        "Exactly one sciscinet innerdict, all present ktp.xlsx_match payloads are exact, "
+        "and all required present ktp.table_1_* fields are non-empty. "
+        "For ktp.table_1_* fields, non-empty is required except these " 
+        f"allowed-empty fields: {sorted(KTP_DOCX_OPTIONAL_EMPTY_COLS)!r}"
     ),
     2: (
-        "remaining name keys (zero or >1 sciscinet innerdict, any non-exact ktp.xlsx_match, "
-        "or any empty required ktp.table_1_* value)"
+        "Remaining name keys (zero or >1 sciscinet innerdict, any non-exact ktp.xlsx_match, "
+        "or any empty required ktp.table_1_* value). "
+        "For ktp.table_1_* fields, non-empty is required except these " 
+        f"allowed-empty fields: {sorted(KTP_DOCX_OPTIONAL_EMPTY_COLS)!r}"
+    ),
+    3: (
+        "Exactly one sciscinet innerdict and all present ktp.xlsx_match payloads are exact."
+    ),
+    4: (
+        "Remaining name keys (zero or >1 sciscinet innerdict or any non-exact ktp.xlsx_match)."
     ),
 }
 

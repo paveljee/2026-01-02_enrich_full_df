@@ -10,7 +10,7 @@ import pandas as pd
 
 from ..helpers.cards import build_cards, write_cards_zip
 from ..helpers.context import PipelineContext, StepResult
-from ..helpers.data_models import FragmentType, OuterDict, ResourceGroup
+from ..helpers.data_models import FragmentType, InnerDict, NameKey, OuterDict, ResourceGroup
 from ..helpers.vars import (
     CARD_BUILD_SUBSET_DESCRIPTIONS,
     CARD_INTRODUCTION,
@@ -192,6 +192,25 @@ def run(context: PipelineContext) -> StepResult:
         return all(_is_non_empty_value(inner.data.get(col)) for col in docx_cols)
 
     def _filtered_outer_dict() -> OuterDict:
+        def _mode_matches(
+            mode: int,
+            *,
+            sciscinet_exactly_one_ok: bool,
+            xlsx_exact_ok: bool,
+            docx_complete_ok: bool,
+        ) -> bool:
+            if mode == 0:
+                return True
+            if mode == 1:
+                return sciscinet_exactly_one_ok and xlsx_exact_ok and docx_complete_ok
+            if mode == 2:
+                return not (sciscinet_exactly_one_ok and xlsx_exact_ok and docx_complete_ok)
+            if mode == 3:
+                return sciscinet_exactly_one_ok and xlsx_exact_ok
+            if mode == 4:
+                return not (sciscinet_exactly_one_ok and xlsx_exact_ok)
+            raise ValueError(f"Unsupported card_subset_mode={mode}")
+
         sciscinet_filenames: set[str] = set()
         if context.resources is not None:
             all_resources = (
@@ -221,8 +240,9 @@ def run(context: PipelineContext) -> StepResult:
             }
 
         all_items = list(outer_dict.items())
-        exactly_one = []
-        zero_or_many = []
+        subset_mode_items: dict[int, list[tuple[NameKey, tuple[InnerDict, ...]]]] = {
+            mode: [] for mode in CARD_BUILD_SUBSET_DESCRIPTIONS
+        }
         sciscinet_count_failures = 0
         xlsx_match_failed = 0
         docx_table_fields_failed = 0
@@ -262,17 +282,16 @@ def run(context: PipelineContext) -> StepResult:
             else:
                 docx_table_fields_failed += 1
 
-            if sciscinet_exactly_one_ok and xlsx_exact_ok and docx_complete_ok:
-                exactly_one.append((name_key, inner_dicts))
-            else:
-                zero_or_many.append((name_key, inner_dicts))
-        subset_items = all_items
-        if subset_mode == 1:
-            subset_items = exactly_one
-        elif subset_mode == 2:
-            subset_items = zero_or_many
-        subset_1_desc = CARD_BUILD_SUBSET_DESCRIPTIONS[1]
-        subset_2_desc = CARD_BUILD_SUBSET_DESCRIPTIONS[2]
+            for mode in subset_mode_items:
+                if _mode_matches(
+                    mode,
+                    sciscinet_exactly_one_ok=sciscinet_exactly_one_ok,
+                    xlsx_exact_ok=xlsx_exact_ok,
+                    docx_complete_ok=docx_complete_ok,
+                ):
+                    subset_mode_items[mode].append((name_key, inner_dicts))
+
+        subset_items = subset_mode_items[subset_mode]
         total = len(all_items)
         mode_header = f"Card subset mode {subset_mode}: {subset_mode_desc}"
         table_header = f"{'Rule':<44} {'Pass':>6} {'Fail':>6}"
@@ -293,11 +312,15 @@ def run(context: PipelineContext) -> StepResult:
                 docx_table_fields_failed,
             ),
             table_sep,
-            row("subset_1", len(exactly_one), 0),
-            row("subset_2", len(zero_or_many), 0),
+            row("mode_1", len(subset_mode_items[1]), total - len(subset_mode_items[1])),
+            row("mode_2", len(subset_mode_items[2]), total - len(subset_mode_items[2])),
+            row("mode_3", len(subset_mode_items[3]), total - len(subset_mode_items[3])),
+            row("mode_4", len(subset_mode_items[4]), total - len(subset_mode_items[4])),
             row("selected for current mode", len(subset_items), total - len(subset_items)),
-            f"subset_1 description: {subset_1_desc}",
-            f"subset_2 description: {subset_2_desc}",
+            f"mode_1 description: {CARD_BUILD_SUBSET_DESCRIPTIONS[1]}",
+            f"mode_2 description: {CARD_BUILD_SUBSET_DESCRIPTIONS[2]}",
+            f"mode_3 description: {CARD_BUILD_SUBSET_DESCRIPTIONS[3]}",
+            f"mode_4 description: {CARD_BUILD_SUBSET_DESCRIPTIONS[4]}",
         ]
         log("\n".join(table_lines))
         subset_outer = OuterDict.from_name_keys([name_key for name_key, _ in subset_items])
@@ -317,16 +340,7 @@ def run(context: PipelineContext) -> StepResult:
 
     selected_outer_dict = _filtered_outer_dict()
     intro_date = datetime.now(ZoneInfo(context.config.timezone)).strftime("%B %d, %Y")
-    optional_docx_fields = sorted(KTP_DOCX_OPTIONAL_EMPTY_COLS)
-    optional_docx_fields_text = (
-        ", ".join(optional_docx_fields) if optional_docx_fields else "none"
-    )
     subset_intro_note = f"Subset applied: mode {subset_mode} ({subset_mode_desc})."
-    if subset_mode in {1, 2}:
-        subset_intro_note += (
-            " For ktp.table_1_* fields, non-empty is required except these allowed-empty "
-            f"fields: [{optional_docx_fields_text}]."
-        )
     intro = f"{CARD_INTRODUCTION.format(intro_date)}\n{subset_intro_note}"
     log("Building cards from selected subset")
     cards = build_cards(
