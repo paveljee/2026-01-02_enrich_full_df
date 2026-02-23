@@ -73,10 +73,15 @@ def _append_samples(conn: duckdb.DuckDBPyConnection, df: pd.DataFrame) -> None:
 def run(context: PipelineContext) -> StepResult:
     conn: duckdb.DuckDBPyConnection = context.conn
 
-    if sum(context.config.sample_draw_sizes) != 300:
+    pilot_count = len(PILOT_NAME_CATEGORY_TRIPLES)
+    expected_non_pilot_draws = context.config.total_draws - pilot_count
+    actual_non_pilot_draws = sum(context.config.sample_draw_sizes)
+    if actual_non_pilot_draws != expected_non_pilot_draws:
         raise ValueError(
-            "Sample draw sizes must total 300 before pilot samples. "
-            f"Got {sum(context.config.sample_draw_sizes)} from {context.config.sample_draw_sizes}."
+            "Sample draw sizes must total "
+            f"{expected_non_pilot_draws} before pilot samples "
+            f"(total_draws={context.config.total_draws}, pilot_count={pilot_count}). "
+            f"Got {actual_non_pilot_draws} from {context.config.sample_draw_sizes}."
         )
 
     population_indices = conn.execute(
@@ -135,6 +140,12 @@ def run(context: PipelineContext) -> StepResult:
         [context.config.pilot_xlsx_name],
     ).df()
     if not pilot_df.empty:
+        if len(pilot_df) != pilot_count:
+            raise ValueError(
+                f"Expected {pilot_count} pilot samples from PILOT_NAME_CATEGORY_TRIPLES, "
+                f"but found {len(pilot_df)} rows in population for "
+                f"{context.config.pilot_xlsx_name}."
+            )
         order_map = {pair: i for i, pair in enumerate(PILOT_NAME_CATEGORY_TRIPLES)}
         pilot_df["__order"] = pilot_df[
             [HCR_FIRST_NAME_COL, HCR_LAST_NAME_COL, HCR_CATEGORY_COL]
@@ -144,6 +155,11 @@ def run(context: PipelineContext) -> StepResult:
             pilot_df.reset_index(drop=True).index + 1
         ).astype(str)
         _append_samples(conn, pilot_df[[KTP_FILENAME_COL, KTP_FRAGMENT_COL, DRAW_LABEL]])
+    elif pilot_count:
+        raise ValueError(
+            f"Expected {pilot_count} pilot samples from PILOT_NAME_CATEGORY_TRIPLES, "
+            f"but found none in population for {context.config.pilot_xlsx_name}."
+        )
 
     p_columns = [row[0] for row in conn.execute(f"DESCRIBE {POPULATION_TABLE}").fetchall()]
     excluded_p_cols = hcr_excluded_columns(p_columns) | {
