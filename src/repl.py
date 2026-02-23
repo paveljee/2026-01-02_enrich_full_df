@@ -158,7 +158,11 @@ def main() -> None:
     parser.add_argument("--config", type=Path, required=True, help="Path to JSON config file.")
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--new", action="store_true", help="Start a new pipeline run.")
-    mode.add_argument("--resume", action="store_true", help="Resume from the last saved step.")
+    mode.add_argument(
+        "--resume", "--continue",
+        action="store_true",
+        help="Resume from the last saved step.",
+    )
     parser.add_argument(
         "--yes",
         action="store_true",
