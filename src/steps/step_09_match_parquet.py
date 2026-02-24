@@ -11,8 +11,15 @@ from ..helpers.parquet_utils import normalize_parquet_column_name, parquet_colum
 from ..helpers.procedures import ParquetMatchProcedure
 from ..helpers.schema import (
     OUTERDICT_NAME_VIEW,
+    PARQUET_ALL_HITS_TABLE,
+    PARQUET_AUTHOR_AGG_TABLE,
+    PARQUET_AUTHOR_MATCH_NONZERO_HIT_AUTHOR_IDS_VIEW,
+    PARQUET_AUTHOR_MATCH_NONZERO_HIT_VIEW,
     PARQUET_AUTHOR_MATCH_TABLE,
     PARQUET_AUTHOR_OUTPUT_TABLE,
+    PARQUET_AUTHOR_PAPERS_TABLE,
+    PARQUET_INNERDICT_TABLE,
+    PARQUET_OUTPUT_VIEW,
     SAMPLES_WITH_NAMES_VIEW,
     safe_identifier,
 )
@@ -46,6 +53,14 @@ from ..helpers.vars import (
     SSNPAA_FILENAME_COL,
     SSNPAA_INSTITUTION_ID_COL,
     STEP_MATCH_PARQUET,
+    STEP_MATCH_PARQUET_LOG_LEGEND_LINES,
+    STEP_MATCH_PARQUET_LOG_TAG_LEGEND,
+    STEP_MATCH_PARQUET_LOG_TAG_OUTERDICT,
+    STEP_MATCH_PARQUET_LOG_TAG_TABLE_EFF,
+    STEP_MATCH_PARQUET_LOG_TAG_TABLE_INNERDICT,
+    STEP_MATCH_PARQUET_LOG_TAG_TABLE_PARQUET,
+    STEP_MATCH_PARQUET_LOG_TAG_VIEW_FILTER,
+    STEP_MATCH_PARQUET_LOG_TAG_VIEW_OUTPUT,
     TOP_K_INSTITUTIONS,
     TOP_K_WORKS,
 )
@@ -88,6 +103,9 @@ def run(context: PipelineContext) -> StepResult:
         if context.log:
             context.log(msg, "cyan")
 
+    def log_tag(tag: str, msg: str) -> None:
+        log(f"[{tag}] {msg}")
+
     conn: duckdb.DuckDBPyConnection = context.conn
     files = context.config.files_config
     author_details_path = files["author_details"]["path"]
@@ -103,7 +121,24 @@ def run(context: PipelineContext) -> StepResult:
     authors_author_id_col = normalize_parquet_column_name("authorid", "ssnau")
     author_id_raw = "authorid"
 
-    log("Match author details to name keys (author_details scan)")
+    def scalar_int(sql: str) -> int:
+        row = conn.execute(sql).fetchone()
+        if row is None or row[0] is None:
+            return 0
+        return int(row[0])
+
+    for legend_line in STEP_MATCH_PARQUET_LOG_LEGEND_LINES:
+        log_tag(STEP_MATCH_PARQUET_LOG_TAG_LEGEND, legend_line)
+
+    log_tag(
+        STEP_MATCH_PARQUET_LOG_TAG_TABLE_PARQUET,
+        "Match author details to name keys (author_details scan)",
+    )
+    log_tag(
+        STEP_MATCH_PARQUET_LOG_TAG_TABLE_PARQUET,
+        "HEAVY step ahead: author_details exact-name matching scans author_details "
+        "(display_name + alternatives) and joins against all outerdict name keys.",
+    )
     conn.execute(
         f"""
         CREATE OR REPLACE TABLE {PARQUET_AUTHOR_MATCH_TABLE} AS
@@ -148,39 +183,35 @@ def run(context: PipelineContext) -> StepResult:
           ON lower(unaccent(p.alt_name)) = n.match_key_norm
         """
     )
-
-    log("Create matched author_details table")
-    author_table = f"ssn_{safe_identifier(Path(author_details_path).stem)}"
-    _create_parquet_table(
-        conn,
-        table_name=author_table,
-        path=author_details_path,
-        prefix="ssnad",
-        filename_col=SSNAD_FILENAME_COL,
-        join_sql=(
-            "JOIN "
-            f"{PARQUET_AUTHOR_MATCH_TABLE} m ON parq.{author_id_raw} = m.\"{author_id_col}\""
-        ),
+    match_stats_row = conn.execute(
+        f"""
+        SELECT
+            COUNT(*) AS row_count,
+            COUNT(DISTINCT name_key) AS name_key_count,
+            COUNT(DISTINCT "{author_id_col}") AS author_count
+        FROM {PARQUET_AUTHOR_MATCH_TABLE}
+        """
+    ).fetchone()
+    parquet_author_match_rows = int(match_stats_row[0]) if match_stats_row else 0
+    parquet_author_match_name_keys = int(match_stats_row[1]) if match_stats_row else 0
+    parquet_author_match_authors = int(match_stats_row[2]) if match_stats_row else 0
+    log_tag(
+        STEP_MATCH_PARQUET_LOG_TAG_TABLE_PARQUET,
+        "Matched author-details candidates: "
+        f"{parquet_author_match_rows:,} rows, "
+        f"{parquet_author_match_name_keys:,} name keys, "
+        f"{parquet_author_match_authors:,} author IDs.",
     )
 
-    log("Create matched authors table")
-    authors_table = f"ssn_{safe_identifier(Path(authors_path).stem)}"
-    _create_parquet_table(
-        conn,
-        table_name=authors_table,
-        path=authors_path,
-        prefix="ssnau",
-        filename_col=SSNAU_FILENAME_COL,
-        join_sql=(
-            "JOIN "
-            f"{PARQUET_AUTHOR_MATCH_TABLE} m ON parq.{author_id_raw} = m.\"{author_id_col}\""
-        ),
+    log_tag(STEP_MATCH_PARQUET_LOG_TAG_TABLE_PARQUET, "Create author->paper table")
+    log_tag(
+        STEP_MATCH_PARQUET_LOG_TAG_TABLE_PARQUET,
+        "HEAVY step ahead: author->paper expansion joins matched author rows to "
+        "authors_paper parquet and can grow substantially.",
     )
-
-    log("Create author->paper table")
     conn.execute(
         f"""
-        CREATE OR REPLACE TABLE ssn_author_papers AS
+        CREATE OR REPLACE TABLE {PARQUET_AUTHOR_PAPERS_TABLE} AS
         SELECT
             m.name_key AS name_key,
             m."{author_id_col}" AS authorid,
@@ -190,10 +221,244 @@ def run(context: PipelineContext) -> StepResult:
           ON pap.authorid = m."{author_id_col}"
         """
     )
+    author_papers_stats_row = conn.execute(
+        f"""
+        SELECT
+            COUNT(*) AS row_count,
+            COUNT(DISTINCT name_key || '|' || CAST(authorid AS VARCHAR)) AS pair_count,
+            COUNT(DISTINCT paperid) AS paper_count
+        FROM {PARQUET_AUTHOR_PAPERS_TABLE}
+        """
+    ).fetchone()
+    author_papers_rows = int(author_papers_stats_row[0]) if author_papers_stats_row else 0
+    author_papers_pair_count = int(author_papers_stats_row[1]) if author_papers_stats_row else 0
+    author_papers_distinct_papers = (
+        int(author_papers_stats_row[2]) if author_papers_stats_row else 0
+    )
+    log_tag(
+        STEP_MATCH_PARQUET_LOG_TAG_TABLE_PARQUET,
+        "Author->paper rows: "
+        f"{author_papers_rows:,} rows, "
+        f"{author_papers_pair_count:,} name/author pairs, "
+        f"{author_papers_distinct_papers:,} distinct papers.",
+    )
 
-    log("Create matched paper-author-affiliation table")
+    log_tag(STEP_MATCH_PARQUET_LOG_TAG_TABLE_EFF, "Create hits union table")
+    log_tag(
+        STEP_MATCH_PARQUET_LOG_TAG_TABLE_EFF,
+        "HEAVY step ahead: materializing hit tables union from 2 parquet files "
+        f"filtered to author->paper distinct papers ({author_papers_distinct_papers:,}) "
+        "for reuse in multiple downstream queries.",
+    )
+    conn.execute(
+        f"""
+        CREATE OR REPLACE TABLE {PARQUET_ALL_HITS_TABLE} AS
+        WITH needed_papers AS (
+            SELECT DISTINCT paperid
+            FROM {PARQUET_AUTHOR_PAPERS_TABLE}
+        )
+        SELECT h.paperid, h.fieldid, h."Hit_1pct" AS hit_1pct, 'level0' AS level
+        FROM read_parquet('{hit_papers0_path}') h
+        JOIN needed_papers p
+          ON p.paperid = h.paperid
+        UNION ALL
+        SELECT h.paperid, h.fieldid, h."Hit_1pct" AS hit_1pct, 'level1' AS level
+        FROM read_parquet('{hit_papers1_path}') h
+        JOIN needed_papers p
+          ON p.paperid = h.paperid
+        """
+    )
+    all_hits_stats_row = conn.execute(
+        f"""
+        SELECT
+            COUNT(*) AS row_count,
+            COUNT(DISTINCT paperid) AS paper_count,
+            COUNT(DISTINCT fieldid) AS field_count
+        FROM {PARQUET_ALL_HITS_TABLE}
+        """
+    ).fetchone()
+    all_hits_rows = int(all_hits_stats_row[0]) if all_hits_stats_row else 0
+    all_hits_distinct_papers = int(all_hits_stats_row[1]) if all_hits_stats_row else 0
+    all_hits_distinct_fields = int(all_hits_stats_row[2]) if all_hits_stats_row else 0
+    log_tag(
+        STEP_MATCH_PARQUET_LOG_TAG_TABLE_EFF,
+        "Hits union materialized: "
+        f"{all_hits_rows:,} rows, "
+        f"{all_hits_distinct_papers:,} papers, "
+        f"{all_hits_distinct_fields:,} fields.",
+    )
+
+    log_tag(STEP_MATCH_PARQUET_LOG_TAG_TABLE_EFF, "Aggregate author-level hit stats")
+    log_tag(
+        STEP_MATCH_PARQUET_LOG_TAG_TABLE_EFF,
+        "HEAVY step ahead: aggregating hit stats over author->paper rows "
+        f"({author_papers_rows:,}) joined to hits union rows ({all_hits_rows:,}).",
+    )
+    conn.execute(
+        f"""
+        CREATE OR REPLACE TABLE {PARQUET_AUTHOR_AGG_TABLE} AS
+        SELECT
+            ap.name_key AS name_key,
+            ap.authorid AS authorid,
+            SUM(COALESCE(h.hit_1pct, 0)) AS "{KTP_SSN_SUM_HIT_1PCT_COL}",
+            LIST(ap.paperid) FILTER (WHERE h.level = 'level0') AS "{SSN_PAPERIDS_LEVEL0_COL}",
+            LIST(ap.paperid) FILTER (WHERE h.level = 'level1') AS "{SSN_PAPERIDS_LEVEL1_COL}",
+            LIST(DISTINCT h.fieldid) AS "{SSN_FIELD_IDS_LIST_COL}"
+        FROM {PARQUET_AUTHOR_PAPERS_TABLE} ap
+        LEFT JOIN {PARQUET_ALL_HITS_TABLE} h
+          ON ap.paperid = h.paperid
+        GROUP BY ap.name_key, ap.authorid
+        """
+    )
+    author_agg_stats_row = conn.execute(
+        f"""
+        SELECT
+            COUNT(*) AS row_count,
+            COUNT(*) FILTER (WHERE "{KTP_SSN_SUM_HIT_1PCT_COL}" = 0) AS zero_hit_rows,
+            COUNT(*) FILTER (WHERE "{KTP_SSN_SUM_HIT_1PCT_COL}" <> 0) AS nonzero_hit_rows,
+            COUNT(*) FILTER (WHERE "{KTP_SSN_SUM_HIT_1PCT_COL}" IS NULL) AS null_hit_rows
+        FROM {PARQUET_AUTHOR_AGG_TABLE}
+        """
+    ).fetchone()
+    log_tag(
+        STEP_MATCH_PARQUET_LOG_TAG_TABLE_EFF,
+        "Author hit aggregates: "
+        f"{int(author_agg_stats_row[0]) if author_agg_stats_row else 0:,} rows "
+        f"(zero={int(author_agg_stats_row[1]) if author_agg_stats_row else 0:,}, "
+        f"nonzero={int(author_agg_stats_row[2]) if author_agg_stats_row else 0:,}, "
+        f"null={int(author_agg_stats_row[3]) if author_agg_stats_row else 0:,}).",
+    )
+
+    removed_zero_hit_count_row = conn.execute(
+        f"""
+        SELECT COUNT(*)
+        FROM {PARQUET_AUTHOR_MATCH_TABLE} m
+        LEFT JOIN {PARQUET_AUTHOR_AGG_TABLE} agg
+          ON agg.authorid = m."{author_id_col}"
+         AND agg.name_key = m.name_key
+        WHERE agg."{KTP_SSN_SUM_HIT_1PCT_COL}" = 0
+        """
+    ).fetchone()
+    removed_zero_hit_count = int(removed_zero_hit_count_row[0]) if removed_zero_hit_count_row else 0
+
+    log_tag(
+        STEP_MATCH_PARQUET_LOG_TAG_VIEW_FILTER,
+        "Create filtered parquet author-match view before downstream enrichment",
+    )
+    conn.execute(
+        f"""
+        CREATE OR REPLACE VIEW {PARQUET_AUTHOR_MATCH_NONZERO_HIT_VIEW} AS
+        SELECT m.*
+        FROM {PARQUET_AUTHOR_MATCH_TABLE} m
+        LEFT JOIN {PARQUET_AUTHOR_AGG_TABLE} agg
+          ON agg.authorid = m."{author_id_col}"
+         AND agg.name_key = m.name_key
+        WHERE agg."{KTP_SSN_SUM_HIT_1PCT_COL}" IS NULL
+           OR agg."{KTP_SSN_SUM_HIT_1PCT_COL}" <> 0
+        """
+    )
+    nonzero_hit_stats_row = conn.execute(
+        f"""
+        SELECT
+            COUNT(*) AS row_count,
+            COUNT(DISTINCT name_key) AS name_key_count,
+            COUNT(DISTINCT "{author_id_col}") AS author_count
+        FROM {PARQUET_AUTHOR_MATCH_NONZERO_HIT_VIEW}
+        """
+    ).fetchone()
+    nonzero_hit_rows = int(nonzero_hit_stats_row[0]) if nonzero_hit_stats_row else 0
+    nonzero_hit_name_keys = int(nonzero_hit_stats_row[1]) if nonzero_hit_stats_row else 0
+    nonzero_hit_authors = int(nonzero_hit_stats_row[2]) if nonzero_hit_stats_row else 0
+    log_tag(
+        STEP_MATCH_PARQUET_LOG_TAG_VIEW_FILTER,
+        "Nonzero-hit author-match filter: "
+        f"kept {nonzero_hit_rows:,}/{parquet_author_match_rows:,} rows, "
+        f"{nonzero_hit_name_keys:,} name keys, "
+        f"{nonzero_hit_authors:,} author IDs; "
+        f"removed zero-hit rows={removed_zero_hit_count:,}.",
+    )
+
+    log_tag(
+        STEP_MATCH_PARQUET_LOG_TAG_VIEW_FILTER,
+        "Create distinct nonzero-hit author-id filter view",
+    )
+    conn.execute(
+        f"""
+        CREATE OR REPLACE VIEW {PARQUET_AUTHOR_MATCH_NONZERO_HIT_AUTHOR_IDS_VIEW} AS
+        SELECT DISTINCT
+            m."{author_id_col}" AS "{author_id_col}"
+        FROM {PARQUET_AUTHOR_MATCH_NONZERO_HIT_VIEW} m
+        """
+    )
+    nonzero_hit_author_ids_count = scalar_int(
+        f'SELECT COUNT(*) FROM {PARQUET_AUTHOR_MATCH_NONZERO_HIT_AUTHOR_IDS_VIEW}'
+    )
+    log_tag(
+        STEP_MATCH_PARQUET_LOG_TAG_VIEW_FILTER,
+        f"Distinct nonzero-hit author IDs: {nonzero_hit_author_ids_count:,}.",
+    )
+
+    log_tag(STEP_MATCH_PARQUET_LOG_TAG_TABLE_PARQUET, "Create matched author_details table")
+    author_table = f"ssn_{safe_identifier(Path(author_details_path).stem)}"
+    log_tag(
+        STEP_MATCH_PARQUET_LOG_TAG_TABLE_PARQUET,
+        "HEAVY step ahead: filtering author_details parquet by distinct nonzero-hit "
+        f"author IDs ({nonzero_hit_author_ids_count:,}).",
+    )
+    _create_parquet_table(
+        conn,
+        table_name=author_table,
+        path=author_details_path,
+        prefix="ssnad",
+        filename_col=SSNAD_FILENAME_COL,
+        join_sql=(
+            "JOIN "
+            f"{PARQUET_AUTHOR_MATCH_NONZERO_HIT_AUTHOR_IDS_VIEW} ids "
+            f"ON parq.{author_id_raw} = ids.\"{author_id_col}\""
+        ),
+    )
+    log_tag(
+        STEP_MATCH_PARQUET_LOG_TAG_TABLE_PARQUET,
+        "Matched author_details rows: "
+        f"{scalar_int(f'SELECT COUNT(*) FROM {author_table}'):,}."
+    )
+
+    log_tag(STEP_MATCH_PARQUET_LOG_TAG_TABLE_PARQUET, "Create matched authors table")
+    authors_table = f"ssn_{safe_identifier(Path(authors_path).stem)}"
+    log_tag(
+        STEP_MATCH_PARQUET_LOG_TAG_TABLE_PARQUET,
+        "HEAVY step ahead: filtering authors parquet by distinct nonzero-hit "
+        f"author IDs ({nonzero_hit_author_ids_count:,}).",
+    )
+    _create_parquet_table(
+        conn,
+        table_name=authors_table,
+        path=authors_path,
+        prefix="ssnau",
+        filename_col=SSNAU_FILENAME_COL,
+        join_sql=(
+            "JOIN "
+            f"{PARQUET_AUTHOR_MATCH_NONZERO_HIT_AUTHOR_IDS_VIEW} ids "
+            f"ON parq.{author_id_raw} = ids.\"{author_id_col}\""
+        ),
+    )
+    log_tag(
+        STEP_MATCH_PARQUET_LOG_TAG_TABLE_PARQUET,
+        "Matched authors rows: "
+        f"{scalar_int(f'SELECT COUNT(*) FROM {authors_table}'):,}."
+    )
+
+    log_tag(
+        STEP_MATCH_PARQUET_LOG_TAG_TABLE_PARQUET,
+        "Create matched paper-author-affiliation table",
+    )
     paper_author_affiliation_table = (
         f"ssn_{safe_identifier(Path(paper_author_affiliation_path).stem)}"
+    )
+    log_tag(
+        STEP_MATCH_PARQUET_LOG_TAG_TABLE_PARQUET,
+        "HEAVY step ahead: filtering paper_author_affiliation parquet by distinct "
+        f"nonzero-hit author IDs ({nonzero_hit_author_ids_count:,}); this can still be very large.",
     )
     _create_parquet_table(
         conn,
@@ -203,16 +468,27 @@ def run(context: PipelineContext) -> StepResult:
         filename_col=SSNPAA_FILENAME_COL,
         join_sql=(
             "JOIN "
-            f"{PARQUET_AUTHOR_MATCH_TABLE} m ON parq.authorid = m.\"{author_id_col}\""
+            f"{PARQUET_AUTHOR_MATCH_NONZERO_HIT_AUTHOR_IDS_VIEW} ids "
+            f"ON parq.authorid = ids.\"{author_id_col}\""
         ),
+    )
+    log_tag(
+        STEP_MATCH_PARQUET_LOG_TAG_TABLE_PARQUET,
+        "Matched paper-author-affiliation rows: "
+        f"{scalar_int(f'SELECT COUNT(*) FROM {paper_author_affiliation_table}'):,}."
     )
 
     ssnpaa_institution_id_col = normalize_parquet_column_name("institutionid", "ssnpaa")
     ssnpaa_paper_id_col = normalize_parquet_column_name("paperid", "ssnpaa")
     ssnpaa_author_id_col = normalize_parquet_column_name("authorid", "ssnpaa")
 
-    log("Create matched affiliations table")
+    log_tag(STEP_MATCH_PARQUET_LOG_TAG_TABLE_PARQUET, "Create matched affiliations table")
     affiliations_table = f"ssn_{safe_identifier(Path(affiliations_path).stem)}"
+    log_tag(
+        STEP_MATCH_PARQUET_LOG_TAG_TABLE_PARQUET,
+        "HEAVY step ahead: filtering affiliations parquet to institutions "
+        "referenced by matched paper-author-affiliation rows.",
+    )
     _create_parquet_table(
         conn,
         table_name=affiliations_table,
@@ -228,39 +504,14 @@ def run(context: PipelineContext) -> StepResult:
             ") ids ON CAST(parq.institution_id AS VARCHAR) = ids.institution_id"
         ),
     )
+    log_tag(
+        STEP_MATCH_PARQUET_LOG_TAG_TABLE_PARQUET,
+        "Matched affiliations rows: "
+        f"{scalar_int(f'SELECT COUNT(*) FROM {affiliations_table}'):,}."
+    )
 
     ssnaf_institution_id_col = normalize_parquet_column_name("institution_id", "ssnaf")
     ssnaf_display_name_col = SSNAF_DISPLAY_NAME_COL
-
-    log("Create hits union view")
-    conn.execute(
-        f"""
-        CREATE OR REPLACE VIEW ssn_all_hits AS
-        SELECT paperid, fieldid, "Hit_1pct" AS hit_1pct, 'level0' AS level
-        FROM read_parquet('{hit_papers0_path}')
-        UNION ALL
-        SELECT paperid, fieldid, "Hit_1pct" AS hit_1pct, 'level1' AS level
-        FROM read_parquet('{hit_papers1_path}')
-        """
-    )
-
-    log("Aggregate author-level hit stats")
-    conn.execute(
-        f"""
-        CREATE OR REPLACE TABLE ssn_author_agg AS
-        SELECT
-            ap.name_key AS name_key,
-            ap.authorid AS authorid,
-            SUM(COALESCE(h.hit_1pct, 0)) AS "{KTP_SSN_SUM_HIT_1PCT_COL}",
-            LIST(ap.paperid) FILTER (WHERE h.level = 'level0') AS "{SSN_PAPERIDS_LEVEL0_COL}",
-            LIST(ap.paperid) FILTER (WHERE h.level = 'level1') AS "{SSN_PAPERIDS_LEVEL1_COL}",
-            LIST(DISTINCT h.fieldid) AS "{SSN_FIELD_IDS_LIST_COL}"
-        FROM ssn_author_papers ap
-        LEFT JOIN ssn_all_hits h
-          ON ap.paperid = h.paperid
-        GROUP BY ap.name_key, ap.authorid
-        """
-    )
 
     parquet_filenames = [
         parquet_filename(author_details_path),
@@ -280,7 +531,12 @@ def run(context: PipelineContext) -> StepResult:
     paper_author_affiliation_filename = parquet_filename(paper_author_affiliation_path)
     affiliations_filename = parquet_filename(affiliations_path)
 
-    log("Create author-level output table")
+    log_tag(STEP_MATCH_PARQUET_LOG_TAG_TABLE_INNERDICT, "Create author-level output table")
+    log_tag(
+        STEP_MATCH_PARQUET_LOG_TAG_TABLE_INNERDICT,
+        "HEAVY step ahead: joining nonzero-hit author matches with matched author_details, "
+        "matched authors, and author hit aggregates.",
+    )
     conn.execute(
         f"""
         CREATE OR REPLACE TABLE {PARQUET_AUTHOR_OUTPUT_TABLE} AS
@@ -304,26 +560,27 @@ def run(context: PipelineContext) -> StepResult:
             CAST(agg."{SSN_PAPERIDS_LEVEL1_COL}" AS VARCHAR) AS "{SSN_PAPERIDS_LEVEL1_COL}",
             CAST(agg."{SSN_FIELD_IDS_LIST_COL}" AS VARCHAR) AS "{SSN_FIELD_IDS_LIST_COL}",
             agg."{KTP_SSN_SUM_HIT_1PCT_COL}"
-        FROM {PARQUET_AUTHOR_MATCH_TABLE} m
+        FROM {PARQUET_AUTHOR_MATCH_NONZERO_HIT_VIEW} m
         JOIN {author_table} a
           ON a."{author_id_col}" = m."{author_id_col}"
         JOIN {authors_table} au
           ON au."{authors_author_id_col}" = m."{author_id_col}"
-        LEFT JOIN ssn_author_agg agg
+        LEFT JOIN {PARQUET_AUTHOR_AGG_TABLE} agg
           ON agg.authorid = m."{author_id_col}"
          AND agg.name_key = m.name_key
         """
     )
+    parquet_author_output_rows = scalar_int(f"SELECT COUNT(*) FROM {PARQUET_AUTHOR_OUTPUT_TABLE}")
+    log_tag(
+        STEP_MATCH_PARQUET_LOG_TAG_TABLE_INNERDICT,
+        f"Author-level output rows: {parquet_author_output_rows:,}.",
+    )
 
-    removed_zero_hit_count_row = conn.execute(
-        f"""
-        SELECT COUNT(*)
-        FROM {PARQUET_AUTHOR_OUTPUT_TABLE}
-        WHERE "{KTP_SSN_SUM_HIT_1PCT_COL}" = 0
-        """
-    ).fetchone()
-    removed_zero_hit_count = int(removed_zero_hit_count_row[0]) if removed_zero_hit_count_row else 0
-
+    log_tag(
+        STEP_MATCH_PARQUET_LOG_TAG_TABLE_EFF,
+        "HEAVY diagnostic ahead: estimate top-paper reduction by scanning author->paper "
+        "rows filtered to nonzero-hit matches.",
+    )
     paper_reduction_row = conn.execute(
         f"""
         WITH paper_counts AS (
@@ -331,7 +588,13 @@ def run(context: PipelineContext) -> StepResult:
                 name_key,
                 authorid,
                 COUNT(*) AS paper_count
-            FROM ssn_author_papers
+            FROM {PARQUET_AUTHOR_PAPERS_TABLE} ap
+            WHERE EXISTS (
+                SELECT 1
+                FROM {PARQUET_AUTHOR_MATCH_NONZERO_HIT_VIEW} m
+                WHERE m.name_key = ap.name_key
+                  AND CAST(m."{author_id_col}" AS VARCHAR) = CAST(ap.authorid AS VARCHAR)
+            )
             GROUP BY name_key, authorid
         )
         SELECT
@@ -348,6 +611,11 @@ def run(context: PipelineContext) -> StepResult:
         f"removed {removed_papers}."
     )
 
+    log_tag(
+        STEP_MATCH_PARQUET_LOG_TAG_TABLE_EFF,
+        "HEAVY diagnostic ahead: estimate top-institution reduction from matched "
+        "paper-author-affiliation rows.",
+    )
     institution_reduction_row = conn.execute(
         f"""
         WITH institution_counts AS (
@@ -357,7 +625,7 @@ def run(context: PipelineContext) -> StepResult:
                 CAST(paa."{ssnpaa_institution_id_col}" AS VARCHAR) AS institution_id,
                 COUNT(DISTINCT paa."{ssnpaa_paper_id_col}") AS paper_count
             FROM {paper_author_affiliation_table} paa
-            JOIN {PARQUET_AUTHOR_MATCH_TABLE} m
+            JOIN {PARQUET_AUTHOR_MATCH_NONZERO_HIT_VIEW} m
               ON CAST(paa."{ssnpaa_author_id_col}" AS VARCHAR)
                 = CAST(m."{author_id_col}" AS VARCHAR)
             WHERE paa."{ssnpaa_institution_id_col}" IS NOT NULL
@@ -391,6 +659,11 @@ def run(context: PipelineContext) -> StepResult:
         f"removed {removed_institutions}."
     )
 
+    log_tag(
+        STEP_MATCH_PARQUET_LOG_TAG_TABLE_EFF,
+        "HEAVY diagnostic ahead: expand field-id lists and join fields parquet to "
+        "measure display-name coverage.",
+    )
     fields_match_row = conn.execute(
         f"""
         WITH field_lookup AS (
@@ -401,7 +674,10 @@ def run(context: PipelineContext) -> StepResult:
         ),
         expanded_ids AS (
             SELECT CAST(fid.field_id AS VARCHAR) AS field_id
-            FROM ssn_author_agg a
+            FROM {PARQUET_AUTHOR_AGG_TABLE} a
+            JOIN {PARQUET_AUTHOR_MATCH_NONZERO_HIT_VIEW} m
+              ON a.name_key = m.name_key
+             AND CAST(a.authorid AS VARCHAR) = CAST(m."{author_id_col}" AS VARCHAR)
             LEFT JOIN LATERAL UNNEST(a."{SSN_FIELD_IDS_LIST_COL}") AS fid(field_id) ON TRUE
         )
         SELECT
@@ -418,16 +694,23 @@ def run(context: PipelineContext) -> StepResult:
     total_field_ids = int(fields_match_row[0]) if fields_match_row else 0
     matched_field_ids = int(fields_match_row[1]) if fields_match_row else 0
     unmatched_field_ids = max(total_field_ids - matched_field_ids, 0)
-    log(
+    log_tag(
+        STEP_MATCH_PARQUET_LOG_TAG_TABLE_EFF,
         "Fields display-name mapping: "
         f"matched {matched_field_ids}/{total_field_ids} IDs "
-        f"(unmatched: {unmatched_field_ids})."
+        f"(unmatched: {unmatched_field_ids}).",
     )
 
-    parquet_innerdict_table = "ssn_parquet_enriched"
-    log(
+    parquet_innerdict_table = PARQUET_INNERDICT_TABLE
+    log_tag(
+        STEP_MATCH_PARQUET_LOG_TAG_TABLE_INNERDICT,
         f"Create parquet enriched table (top-{TOP_K_WORKS} papers, "
         f"top-{TOP_K_INSTITUTIONS} institutions, concept display names, nonzero hits)"
+    )
+    log_tag(
+        STEP_MATCH_PARQUET_LOG_TAG_TABLE_INNERDICT,
+        "HEAVY step ahead: builds final parquet innerdict rows with paper ranking, "
+        "institution ranking, concept display mapping, and draw ordering.",
     )
     conn.execute(
         f"""
@@ -438,9 +721,15 @@ def run(context: PipelineContext) -> StepResult:
                 ap.authorid AS authorid,
                 ap.paperid AS paperid,
                 COALESCE(MAX(h.hit_1pct), 0) AS hit_1pct
-            FROM ssn_author_papers ap
-            LEFT JOIN ssn_all_hits h
+            FROM {PARQUET_AUTHOR_PAPERS_TABLE} ap
+            LEFT JOIN {PARQUET_ALL_HITS_TABLE} h
               ON ap.paperid = h.paperid
+            WHERE EXISTS (
+                SELECT 1
+                FROM {PARQUET_AUTHOR_MATCH_NONZERO_HIT_VIEW} m
+                WHERE m.name_key = ap.name_key
+                  AND CAST(m."{author_id_col}" AS VARCHAR) = CAST(ap.authorid AS VARCHAR)
+            )
             GROUP BY ap.name_key, ap.authorid, ap.paperid
         ),
         paper_ranked AS (
@@ -478,7 +767,7 @@ def run(context: PipelineContext) -> StepResult:
                 COUNT(DISTINCT paa."{ssnpaa_paper_id_col}") AS paper_count,
                 MAX(af."{ssnaf_display_name_col}") AS institution_display_name
             FROM {paper_author_affiliation_table} paa
-            JOIN {PARQUET_AUTHOR_MATCH_TABLE} m
+            JOIN {PARQUET_AUTHOR_MATCH_NONZERO_HIT_VIEW} m
               ON CAST(paa."{ssnpaa_author_id_col}" AS VARCHAR)
                 = CAST(m."{author_id_col}" AS VARCHAR)
             LEFT JOIN {affiliations_table} af
@@ -548,7 +837,10 @@ def run(context: PipelineContext) -> StepResult:
                     )
                     AS VARCHAR
                 ) AS "{KTP_SSN_FIELD_DISPLAY_NAMES_LIST_COL}"
-            FROM ssn_author_agg a
+            FROM {PARQUET_AUTHOR_AGG_TABLE} a
+            JOIN {PARQUET_AUTHOR_MATCH_NONZERO_HIT_VIEW} m
+              ON a.name_key = m.name_key
+             AND CAST(a.authorid AS VARCHAR) = CAST(m."{author_id_col}" AS VARCHAR)
             LEFT JOIN LATERAL UNNEST(a."{SSN_FIELD_IDS_LIST_COL}") AS fid(field_id) ON TRUE
             LEFT JOIN field_lookup fl
               ON CAST(fid.field_id AS VARCHAR) = fl.field_id
@@ -652,8 +944,16 @@ def run(context: PipelineContext) -> StepResult:
             )}
         """
     )
+    parquet_innerdict_rows = scalar_int(f"SELECT COUNT(*) FROM {parquet_innerdict_table}")
+    log_tag(
+        STEP_MATCH_PARQUET_LOG_TAG_TABLE_INNERDICT,
+        f"Parquet enriched rows: {parquet_innerdict_rows:,}.",
+    )
 
-    log("Append parquet matches into OuterDict")
+    log_tag(
+        STEP_MATCH_PARQUET_LOG_TAG_OUTERDICT,
+        f"Append parquet matches into OuterDict ({parquet_innerdict_rows:,} rows)",
+    )
     append_innerdicts_from_rows_table(
         conn,
         table_name=parquet_innerdict_table,
@@ -662,10 +962,10 @@ def run(context: PipelineContext) -> StepResult:
         key_column=KTP_SOURCE_KEY_COL,
     )
 
-    log("Create parquet output view")
+    log_tag(STEP_MATCH_PARQUET_LOG_TAG_VIEW_OUTPUT, "Create parquet output view")
     conn.execute(
         f"""
-        CREATE OR REPLACE VIEW ssn_parquet_output AS
+        CREATE OR REPLACE VIEW {PARQUET_OUTPUT_VIEW} AS
         WITH source_draw AS (
             SELECT
                 x."{KTP_SOURCE_KEY_COL}" AS "{KTP_SOURCE_KEY_COL}",
@@ -726,15 +1026,25 @@ def run(context: PipelineContext) -> StepResult:
             )}
         """
     )
-    log(
-        f"Filtered out parquet output rows with {KTP_SSN_SUM_HIT_1PCT_COL} == 0: "
-        f"{removed_zero_hit_count}"
+    log_tag(
+        STEP_MATCH_PARQUET_LOG_TAG_VIEW_FILTER,
+        "Filtered out parquet author-match rows before downstream enrichment with "
+        f"{KTP_SSN_SUM_HIT_1PCT_COL} == 0: {removed_zero_hit_count:,}"
     )
 
-    log("Load parquet output dataframe")
-    output_views = ["ssn_parquet_output"]
+    log_tag(STEP_MATCH_PARQUET_LOG_TAG_VIEW_OUTPUT, "Load parquet output dataframe")
+    log_tag(
+        STEP_MATCH_PARQUET_LOG_TAG_VIEW_OUTPUT,
+        "HEAVY step ahead: executes output view and converts result to pandas dataframe.",
+    )
+    output_views = [PARQUET_OUTPUT_VIEW]
     output_dfs = [conn.execute(f"SELECT * FROM {view}").df() for view in output_views]
     matched_rows = sum(len(df) for df in output_dfs)
+    log_tag(
+        STEP_MATCH_PARQUET_LOG_TAG_VIEW_OUTPUT,
+        f"Loaded parquet output dataframe rows: {matched_rows:,} "
+        f"across {len(output_views)} view(s)."
+    )
 
     return StepResult(
         step_id=STEP_MATCH_PARQUET,

@@ -26,8 +26,14 @@ DOCX_INNERDICT_TABLE = "docx_innerdicts"
 DOCX_OUTPUT_VIEW = "docx_output"
 
 PARQUET_AUTHOR_MATCH_TABLE = "ssn_author_matches"
+PARQUET_AUTHOR_MATCH_NONZERO_HIT_VIEW = "ssn_author_matches_nonzero_hit"
+PARQUET_AUTHOR_MATCH_NONZERO_HIT_AUTHOR_IDS_VIEW = "ssn_author_match_nonzero_hit_author_ids"
+PARQUET_AUTHOR_PAPERS_TABLE = "ssn_author_papers"
+PARQUET_ALL_HITS_TABLE = "ssn_all_hits"
+PARQUET_AUTHOR_AGG_TABLE = "ssn_author_agg"
 PARQUET_INNERDICT_TABLE = "ssn_innerdicts"
 PARQUET_AUTHOR_OUTPUT_TABLE = "ssn_author_output"
+PARQUET_OUTPUT_VIEW = "ssn_parquet_output"
 
 
 def safe_identifier(value: str) -> str:
