@@ -4,6 +4,7 @@ import duckdb
 import numpy as np
 import pandas as pd
 
+from ..helpers.config import SampleDrawSpec
 from ..helpers.context import PipelineContext, StepResult
 from ..helpers.duckdb_utils import register_frame
 from ..helpers.schema import (
@@ -70,18 +71,55 @@ def _append_samples(conn: duckdb.DuckDBPyConnection, df: pd.DataFrame) -> None:
     conn.execute("DROP TABLE IF EXISTS samples_frame")
 
 
+def _precompute_draw_batches(
+    *,
+    index_pool: np.ndarray,
+    draw_specs: list[SampleDrawSpec],
+    rng: np.random.Generator,
+    seen_indices_initial: set[int] | None = None,
+) -> list[np.ndarray]:
+    batches: list[np.ndarray] = []
+    seen_indices: set[int] = set() if seen_indices_initial is None else set(seen_indices_initial)
+
+    for spec in draw_specs:
+        draw_size = int(spec.size)
+        if bool(spec.replace):
+            drawn = rng.choice(index_pool, size=draw_size, replace=True)
+        else:
+            remaining_pool = np.array(
+                [idx for idx in index_pool.tolist() if int(idx) not in seen_indices],
+                dtype=index_pool.dtype,
+            )
+            if draw_size > len(remaining_pool):
+                raise ValueError(
+                    "Cannot draw without replacement: requested "
+                    f"{draw_size} rows but only {len(remaining_pool)} remain after "
+                    "excluding previously drawn rows."
+                )
+            drawn = rng.choice(remaining_pool, size=draw_size, replace=False)
+        seen_indices.update(int(idx) for idx in np.asarray(drawn).tolist())
+        batches.append(np.asarray(drawn))
+
+    return batches
+
+
 def run(context: PipelineContext) -> StepResult:
     conn: duckdb.DuckDBPyConnection = context.conn
 
+    def log(msg: str) -> None:
+        if context.log:
+            context.log(msg, "cyan")
+
     pilot_count = len(PILOT_NAME_CATEGORY_TRIPLES)
     expected_non_pilot_draws = context.config.total_draws - pilot_count
-    actual_non_pilot_draws = sum(context.config.sample_draw_sizes)
+    draw_specs = context.config.sample_draw_sizes
+    actual_non_pilot_draws = sum(spec.size for spec in draw_specs)
     if actual_non_pilot_draws != expected_non_pilot_draws:
         raise ValueError(
             "Sample draw sizes must total "
             f"{expected_non_pilot_draws} before pilot samples "
             f"(total_draws={context.config.total_draws}, pilot_count={pilot_count}). "
-            f"Got {actual_non_pilot_draws} from {context.config.sample_draw_sizes}."
+            f"Got {actual_non_pilot_draws} from {draw_specs}."
         )
 
     population_indices = conn.execute(
@@ -90,11 +128,66 @@ def run(context: PipelineContext) -> StepResult:
     index_pool = population_indices[KTP_POPULATION_INDEX_COL].to_numpy()
     if len(index_pool) == 0:
         raise ValueError("Population table is empty; cannot sample.")
+    log(
+        "Precompute random draw batches: "
+        f"{len(draw_specs)} draws, total random rows={actual_non_pilot_draws}, "
+        f"population rows={len(index_pool)}"
+    )
+
+    triples_df = pd.DataFrame(
+        PILOT_NAME_CATEGORY_TRIPLES,
+        columns=[HCR_FIRST_NAME_COL, HCR_LAST_NAME_COL, HCR_CATEGORY_COL],
+    )
+    register_frame(conn, "pilot_triples", triples_df)
+    log(f"Precompute pilot rows for sampling exclusion ({pilot_count} configured pilot triples)")
+    pilot_population_indices = {
+        int(row[0])
+        for row in conn.execute(
+            f"""
+            SELECT DISTINCT p."{KTP_POPULATION_INDEX_COL}"
+            FROM {POPULATION_TABLE} p
+            JOIN pilot_triples t
+              ON p."{HCR_FIRST_NAME_COL}" = t."{HCR_FIRST_NAME_COL}"
+             AND p."{HCR_LAST_NAME_COL}" = t."{HCR_LAST_NAME_COL}"
+             AND p."{HCR_CATEGORY_COL}" = t."{HCR_CATEGORY_COL}"
+            WHERE p."{HCR_FILENAME_COL}" = ?
+            """,
+            [context.config.pilot_xlsx_name],
+        ).fetchall()
+    }
+    if pilot_count:
+        log(
+            "Pilot sampling exclusion seed rows: "
+            f"{len(pilot_population_indices)} distinct population rows found in "
+            f"{context.config.pilot_xlsx_name}"
+        )
 
     rng = np.random.default_rng(context.config.sample_seed)
+    draw_batches = _precompute_draw_batches(
+        index_pool=index_pool,
+        draw_specs=draw_specs,
+        rng=rng,
+        seen_indices_initial=pilot_population_indices,
+    )
+    random_unique_rows = len(
+        {
+            int(idx)
+            for batch in draw_batches
+            for idx in np.asarray(batch).tolist()
+        }
+    )
+    log(
+        "Random draw batches ready: "
+        f"{sum(spec.size for spec in draw_specs)} rows across {len(draw_batches)} draws, "
+        f"{random_unique_rows} distinct population rows selected"
+    )
     draw_number = 1
-    for draw_size in context.config.sample_draw_sizes:
-        indices = rng.choice(index_pool, size=draw_size, replace=True)
+    for draw_idx, (spec, indices) in enumerate(zip(draw_specs, draw_batches, strict=True), start=1):
+        draw_size = spec.size
+        log(
+            "Materialize random draw "
+            f"{draw_idx}/{len(draw_batches)}: size={draw_size}, replace={spec.replace}"
+        )
         idx_df = pd.DataFrame(
             {
                 "sample_id": np.arange(draw_size),
@@ -118,11 +211,6 @@ def run(context: PipelineContext) -> StepResult:
         _append_samples(conn, sample_df[[KTP_FILENAME_COL, KTP_FRAGMENT_COL, DRAW_LABEL]])
         draw_number += draw_size
 
-    triples_df = pd.DataFrame(
-        PILOT_NAME_CATEGORY_TRIPLES,
-        columns=[HCR_FIRST_NAME_COL, HCR_LAST_NAME_COL, HCR_CATEGORY_COL],
-    )
-    register_frame(conn, "pilot_triples", triples_df)
     pilot_df = conn.execute(
         f"""
         SELECT p."{HCR_FILENAME_COL}" AS "{KTP_FILENAME_COL}",

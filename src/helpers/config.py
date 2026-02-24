@@ -2,9 +2,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .vars import HCR_XLSX_KEY_PREFIX, REQUIRED_FILE_ENTRY_KEYS, REQUIRED_FILES_CONFIG_KEYS
+
+
+class SampleDrawSpec(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    size: int = Field(gt=0)
+    replace: bool
 
 
 class PipelineConfig(BaseModel):
@@ -19,10 +26,25 @@ class PipelineConfig(BaseModel):
     docx_dir: Path
     timezone: str
     sample_seed: int
-    sample_draw_sizes: list[int]
+    sample_draw_sizes: list[SampleDrawSpec]
     pilot_xlsx_name: str
     total_draws: int
     card_subset_mode: int
+
+    @field_validator("sample_draw_sizes", mode="before")
+    @classmethod
+    def _normalize_sample_draw_sizes(
+        cls, value: object
+    ) -> list[int | dict[str, object]] | object:
+        if not isinstance(value, list):
+            return value
+        normalized: list[int | dict[str, object]] = []
+        for entry in value:
+            if isinstance(entry, int):
+                normalized.append({"size": entry, "replace": False})
+            else:
+                normalized.append(entry)
+        return normalized
 
     @model_validator(mode="after")
     def _validate_files_config(self) -> PipelineConfig:
