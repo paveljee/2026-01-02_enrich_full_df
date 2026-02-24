@@ -169,6 +169,13 @@ def run(context: PipelineContext) -> StepResult:
             and source_key_last_str == last_name_norm_str
         )
 
+    def _has_present_xlsx_match_payload(value: object) -> bool:
+        if value is None:
+            return False
+        if isinstance(value, str):
+            return bool(value.strip())
+        return not bool(pd.isna(value))
+
     def _is_non_empty_value(value: object) -> bool:
         if value is None:
             return False
@@ -254,10 +261,10 @@ def run(context: PipelineContext) -> StepResult:
                 1 for inner in inner_dicts if _is_sciscinet_inner(inner, sciscinet_filenames)
             )
             sciscinet_exactly_one_ok = sciscinet_count == 1
-            xlsx_exact_ok = all(
-                _is_exact_xlsx_match_payload(inner.data.get(KTP_XLSX_MATCH_COL))
-                for inner in inner_dicts
-            )
+            xlsx_match_payloads = [inner.data.get(KTP_XLSX_MATCH_COL) for inner in inner_dicts]
+            xlsx_exact_ok = any(
+                _has_present_xlsx_match_payload(value) for value in xlsx_match_payloads
+            ) and all(_is_exact_xlsx_match_payload(value) for value in xlsx_match_payloads)
             docx_innerdicts = []
             for inner in inner_dicts:
                 filenames = _extract_filenames(inner.data.get(KTP_FILENAME_COL))
@@ -265,9 +272,8 @@ def run(context: PipelineContext) -> StepResult:
                     docx_innerdicts.append(inner)
             # New rule is docx-innerdict-scoped: require at least one docx innerdict
             # where all ktp.table_1_* fields are non-empty.
-            docx_complete_ok = (
-                not docx_innerdicts
-                or any(_has_complete_docx_table_fields(inner) for inner in docx_innerdicts)
+            docx_complete_ok = bool(docx_innerdicts) and any(
+                _has_complete_docx_table_fields(inner) for inner in docx_innerdicts
             )
             if sciscinet_exactly_one_ok:
                 sciscinet_count_pass += 1
