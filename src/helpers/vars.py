@@ -170,6 +170,7 @@ STEP_MATCH_XLSX: Final = "07_match_xlsx"
 STEP_MATCH_DOCX: Final = "08_match_docx"
 STEP_MATCH_PARQUET: Final = "09_match_parquet"
 STEP_BUILD_CARDS: Final = "10_build_cards"
+STEP_BUILD_OUTERDICT_EXCLUDED_LOG_MAX_ROWS: Final = 4
 
 STEP_ORDER: Final[list[str]] = [
     STEP_REGISTER_RESOURCES,

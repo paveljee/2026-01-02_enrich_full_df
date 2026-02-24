@@ -14,6 +14,8 @@ SAMPLES_WITH_NAMES_VIEW = "samples_with_names"
 
 OUTERDICT_STUB_TABLE = "outerdict_stub"
 OUTERDICT_NAME_VIEW = "outerdict_name_keys"
+OUTERDICT_EXCLUDED_STUB_TABLE = "outerdict_stub_excluded"
+OUTERDICT_EXCLUDED_NAME_VIEW = "outerdict_name_keys_excluded"
 REGISTERED_RESOURCES_TABLE = "registered_resources"
 
 XLSX_MATCH_VIEW = "xlsx_matches"
