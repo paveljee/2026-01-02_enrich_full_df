@@ -1,5 +1,5 @@
 {
-  "db_file": "data/scisci_process.duckdb",
+  "db_file": "/Volumes/home/aicode/2026-01-02_enrich_full_df/data/scisci_process__p_gf.duckdb",
   "state_file": "data/pipeline_state.json",
   "output_dir": "data/output",
   "output_format": "txt",
