@@ -13,6 +13,7 @@ from ..helpers.schema import (
     OUTERDICT_NAME_VIEW,
     PARQUET_ALL_HITS_TABLE,
     PARQUET_AUTHOR_AGG_TABLE,
+    PARQUET_AUTHOR_HIT_AGG_TABLE,
     PARQUET_AUTHOR_MATCH_NONZERO_HIT_AUTHOR_IDS_VIEW,
     PARQUET_AUTHOR_MATCH_NONZERO_HIT_VIEW,
     PARQUET_AUTHOR_MATCH_TABLE,
@@ -296,14 +297,11 @@ def run(context: PipelineContext) -> StepResult:
     )
     conn.execute(
         f"""
-        CREATE OR REPLACE TABLE {PARQUET_AUTHOR_AGG_TABLE} AS
+        CREATE OR REPLACE TABLE {PARQUET_AUTHOR_HIT_AGG_TABLE} AS
         SELECT
             ap.name_key AS name_key,
             ap.authorid AS authorid,
-            SUM(COALESCE(h.hit_1pct, 0)) AS "{KTP_SSN_SUM_HIT_1PCT_COL}",
-            LIST(ap.paperid) FILTER (WHERE h.level = 'level0') AS "{SSN_PAPERIDS_LEVEL0_COL}",
-            LIST(ap.paperid) FILTER (WHERE h.level = 'level1') AS "{SSN_PAPERIDS_LEVEL1_COL}",
-            LIST(DISTINCT h.fieldid) AS "{SSN_FIELD_IDS_LIST_COL}"
+            SUM(COALESCE(h.hit_1pct, 0)) AS "{KTP_SSN_SUM_HIT_1PCT_COL}"
         FROM {PARQUET_AUTHOR_PAPERS_TABLE} ap
         LEFT JOIN {PARQUET_ALL_HITS_TABLE} h
           ON ap.paperid = h.paperid
@@ -317,7 +315,7 @@ def run(context: PipelineContext) -> StepResult:
             COUNT(*) FILTER (WHERE "{KTP_SSN_SUM_HIT_1PCT_COL}" = 0) AS zero_hit_rows,
             COUNT(*) FILTER (WHERE "{KTP_SSN_SUM_HIT_1PCT_COL}" <> 0) AS nonzero_hit_rows,
             COUNT(*) FILTER (WHERE "{KTP_SSN_SUM_HIT_1PCT_COL}" IS NULL) AS null_hit_rows
-        FROM {PARQUET_AUTHOR_AGG_TABLE}
+        FROM {PARQUET_AUTHOR_HIT_AGG_TABLE}
         """
     ).fetchone()
     log_tag(
@@ -333,7 +331,7 @@ def run(context: PipelineContext) -> StepResult:
         f"""
         SELECT COUNT(*)
         FROM {PARQUET_AUTHOR_MATCH_TABLE} m
-        LEFT JOIN {PARQUET_AUTHOR_AGG_TABLE} agg
+        LEFT JOIN {PARQUET_AUTHOR_HIT_AGG_TABLE} agg
           ON agg.authorid = m."{author_id_col}"
          AND agg.name_key = m.name_key
         WHERE agg."{KTP_SSN_SUM_HIT_1PCT_COL}" = 0
@@ -350,7 +348,7 @@ def run(context: PipelineContext) -> StepResult:
         CREATE OR REPLACE VIEW {PARQUET_AUTHOR_MATCH_NONZERO_HIT_VIEW} AS
         SELECT m.*
         FROM {PARQUET_AUTHOR_MATCH_TABLE} m
-        LEFT JOIN {PARQUET_AUTHOR_AGG_TABLE} agg
+        LEFT JOIN {PARQUET_AUTHOR_HIT_AGG_TABLE} agg
           ON agg.authorid = m."{author_id_col}"
          AND agg.name_key = m.name_key
         WHERE agg."{KTP_SSN_SUM_HIT_1PCT_COL}" IS NULL
@@ -396,6 +394,44 @@ def run(context: PipelineContext) -> StepResult:
     log_tag(
         STEP_MATCH_PARQUET_LOG_TAG_VIEW_FILTER,
         f"Distinct nonzero-hit author IDs: {nonzero_hit_author_ids_count:,}.",
+    )
+
+    log_tag(
+        STEP_MATCH_PARQUET_LOG_TAG_TABLE_EFF,
+        "Create full author aggregate payload table (nonzero-hit subset only)",
+    )
+    log_tag(
+        STEP_MATCH_PARQUET_LOG_TAG_TABLE_EFF,
+        "HEAVY step ahead: list-heavy author aggregation (paper lists + field IDs) "
+        "restricted to nonzero-hit author matches after pruning.",
+    )
+    conn.execute(
+        f"""
+        CREATE OR REPLACE TABLE {PARQUET_AUTHOR_AGG_TABLE} AS
+        SELECT
+            ap.name_key AS name_key,
+            ap.authorid AS authorid,
+            SUM(COALESCE(h.hit_1pct, 0)) AS "{KTP_SSN_SUM_HIT_1PCT_COL}",
+            LIST(ap.paperid) FILTER (WHERE h.level = 'level0') AS "{SSN_PAPERIDS_LEVEL0_COL}",
+            LIST(ap.paperid) FILTER (WHERE h.level = 'level1') AS "{SSN_PAPERIDS_LEVEL1_COL}",
+            LIST(DISTINCT h.fieldid) AS "{SSN_FIELD_IDS_LIST_COL}"
+        FROM {PARQUET_AUTHOR_PAPERS_TABLE} ap
+        LEFT JOIN {PARQUET_ALL_HITS_TABLE} h
+          ON ap.paperid = h.paperid
+        WHERE EXISTS (
+            SELECT 1
+            FROM {PARQUET_AUTHOR_MATCH_NONZERO_HIT_VIEW} m
+            WHERE m.name_key = ap.name_key
+              AND CAST(m."{author_id_col}" AS VARCHAR) = CAST(ap.authorid AS VARCHAR)
+        )
+        GROUP BY ap.name_key, ap.authorid
+        """
+    )
+    parquet_author_agg_payload_rows = scalar_int(f"SELECT COUNT(*) FROM {PARQUET_AUTHOR_AGG_TABLE}")
+    log_tag(
+        STEP_MATCH_PARQUET_LOG_TAG_TABLE_EFF,
+        "Author aggregate payload rows (nonzero-hit subset): "
+        f"{parquet_author_agg_payload_rows:,}.",
     )
 
     log_tag(STEP_MATCH_PARQUET_LOG_TAG_TABLE_PARQUET, "Create matched author_details table")
@@ -701,7 +737,6 @@ def run(context: PipelineContext) -> StepResult:
         f"(unmatched: {unmatched_field_ids}).",
     )
 
-    parquet_innerdict_table = PARQUET_INNERDICT_TABLE
     log_tag(
         STEP_MATCH_PARQUET_LOG_TAG_TABLE_INNERDICT,
         f"Create parquet enriched table (top-{TOP_K_WORKS} papers, "
@@ -714,7 +749,7 @@ def run(context: PipelineContext) -> StepResult:
     )
     conn.execute(
         f"""
-        CREATE OR REPLACE TABLE {parquet_innerdict_table} AS
+        CREATE OR REPLACE TABLE {PARQUET_INNERDICT_TABLE} AS
         WITH paper_hits AS (
             SELECT
                 ap.name_key AS name_key,
@@ -944,7 +979,7 @@ def run(context: PipelineContext) -> StepResult:
             )}
         """
     )
-    parquet_innerdict_rows = scalar_int(f"SELECT COUNT(*) FROM {parquet_innerdict_table}")
+    parquet_innerdict_rows = scalar_int(f"SELECT COUNT(*) FROM {PARQUET_INNERDICT_TABLE}")
     log_tag(
         STEP_MATCH_PARQUET_LOG_TAG_TABLE_INNERDICT,
         f"Parquet enriched rows: {parquet_innerdict_rows:,}.",
@@ -956,7 +991,7 @@ def run(context: PipelineContext) -> StepResult:
     )
     append_innerdicts_from_rows_table(
         conn,
-        table_name=parquet_innerdict_table,
+        table_name=PARQUET_INNERDICT_TABLE,
         outer_dict=context.outer_dict,
         procedure=ParquetMatchProcedure(),
         key_column=KTP_SOURCE_KEY_COL,
@@ -1009,7 +1044,7 @@ def run(context: PipelineContext) -> StepResult:
             SELECT
                 v.*,
                 sd."{DRAW_LABEL}" AS "{DRAW_LABEL}"
-            FROM {parquet_innerdict_table} v
+            FROM {PARQUET_INNERDICT_TABLE} v
             LEFT JOIN source_draw sd
               ON sd."{KTP_SOURCE_KEY_COL}" = v."{KTP_SOURCE_KEY_COL}"
         ),
