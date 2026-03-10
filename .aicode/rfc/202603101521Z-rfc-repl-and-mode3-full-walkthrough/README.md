@@ -3,860 +3,321 @@
 **Timestamp (UTC):** 2026-03-10 15:21Z  \
 **Author:** GPT-5 Codex (OpenAI)
 
-## Task summary
-Provide a complete execution walkthrough for:
-- the full `src/repl.py` flow (including scaffolding and all pipeline steps), and
-- the full `src/detours/detour_mode3_pgf_stats.py` flow.
-
-This RFC is intentionally exhaustive and sequence-first so critical junctions can be isolated for review later.
-
-## Goals
-- Enumerate all invocation paths and branch behavior for REPL.
-- Enumerate the exact sequential processing performed by each REPL step (`01` through `10`).
-- Enumerate the exact sequential processing in the mode-3 read-only detour.
-- Capture control flow, side effects, invariants, and output artifacts.
-
-## Non-goals
-- Deciding mini-dataset strategy.
-- Refactoring or modifying pipeline code.
-- Covering the step-4 breakdown detour (explicitly out of scope).
-
----
-
-## 1) FULL End-to-End REPL Walkthrough (`src/repl.py` + full step chain)
-
-### 1.1 Invocation surface
-
-Primary entrypoint:
-- `python -m src.repl --config <config.json> (--new | --resume|--continue) [--yes] [--non-interactive] [--quiet]`
-
-Project wrappers:
-- `pixi run repl` runs: `python -m src.repl --config config.repl.json --new --yes --non-interactive`
-- `pixi run module --module_name src.repl` runs the same branch in `pyproject.toml`
-
-Hard CLI constraints:
-1. `--config` is required.
-2. Exactly one of `--new` or `--resume/--continue` is required.
-3. `--yes` changes prompt behavior in both `--new` and `--resume` paths.
-
-Representative invocation matrix:
-1. `--new` + interactive shell + no `--yes`:
-- Prompts `Reset pipeline state and database? [y/N]`.
-- If not `y`, initialization fails (`Pipeline reset confirmation required for --new`).
-2. `--new --yes`:
-- Skips reset prompt and proceeds directly.
-3. `--new --non-interactive` without `--yes`:
-- No prompt available; reset is not confirmed; initialization fails.
-4. `--resume` + interactive + no `--yes`:
-- Prompts `Resume pipeline from next step? [y/N]`; non-`y` exits cleanly before running steps.
-5. `--resume --non-interactive --yes`:
-- Resumes immediately without prompt.
-6. `--resume --non-interactive` without `--yes`:
-- Prints warning and diagnostics path, then exits before running steps.
-7. `--quiet`:
-- Still runs steps and writes diagnostics report; only reduces diagnostic section verbosity behavior passed to `run_step`.
-
-### 1.2 Top-level process in `main()`
-
-Sequential flow:
-1. Parse args.
-2. Call `run_reproduction(args)`.
-3. Handle `KeyboardInterrupt` with exit code `130`.
-4. Handle any other exception via Rich traceback and exit `1`.
-
-### 1.3 `run_reproduction(args)` control flow
-
-#### 1.3.1 Runtime mode setup
-1. Compute `interactive = not args.non_interactive`.
-2. Initialize `reset_confirmed = False`, `auto_confirm = bool(args.yes)`.
-3. For `--new`:
-- If `--yes`: set `reset_confirmed = True`.
-- Else if interactive: prompt for reset confirmation.
-- Else non-interactive/no-yes: leave `reset_confirmed = False`.
-
-#### 1.3.2 Pipeline initialization via `init_pipeline(...)`
-
-Call:
-- `init_pipeline(args, interactive=interactive, reset_confirmed=reset_confirmed)`
-
-This returns:
-- `context` (`PipelineContext`)
-- `steps_to_run` (ordered step IDs)
-- `monitor` (`ResourceMonitor`, started)
-
-### 1.4 `init_pipeline(...)` full sequence (`src/helpers/init.py`)
-
-1. Validate `args.config` exists.
-2. Parse config JSON into `PipelineConfig`.
-- Enforces required `files_config` keys and required fields per entry.
-- Enforces at least one HCR key prefix (`hcr_xlsx_...`).
-- Normalizes `sample_draw_sizes` integer shorthand into `{"size": int, "replace": False}`.
-3. Build `PipelineManager(state_file, db_file)`.
-4. Open DuckDB connection (`manager.connect_db()`):
-- `SET memory_limit='20GB'`
-- `INSTALL splink_udfs FROM community; LOAD splink_udfs;`
-5. Start `ResourceMonitor` thread.
-
-New-run reset path:
-6. If `args.new` and `reset_confirmed` is false: raise ValueError.
-7. If `args.new` and confirmed: `_reset_pipeline(...)`.
-- Drops canonical tables:
-  - `registered_resources`, `population`, `population_names`, `population_economy`, `samples`,
-  - `outerdict_stub`, `xlsx_innerdicts`, `docx_rows`, `docx_innerdicts`,
-  - `ssn_author_matches`, `ssn_innerdicts`
-- Drops canonical views:
-  - `population_with_names`, `population_with_names_economy`, `samples_with_context`,
-  - `samples_with_names`, `outerdict_name_keys`, `xlsx_matches`, `xlsx_output`,
-  - `docx_matches`, `docx_output`
-- Drops any remaining `ssn_%` objects discovered in `information_schema.tables`.
-- Resets manager state JSON (`steps_completed`, `session_dir`).
-
-Session and diagnostics pathing:
-8. Determine `session_stamp`:
-- `--new`: always new timestamp and saved to state.
-- `--resume`: reuse saved session stamp if present, otherwise create/save one.
-9. Create `DiagnosticsReport` at `data/diagnostics/<session_stamp>/repl_diagnostics.md`.
-10. Compute `steps_to_run`:
-- `--new`: full `STEP_ORDER`.
-- `--resume`: only steps not marked done in state.
-
-Resume hydration of context dependencies:
-11. If step `01_register_resources` marked done, re-register resources into context.
-12. If step `06_build_outerdict` marked done, reconstruct `OuterDict` from `outerdict_stub` keys.
-13. If downstream match steps are already done, re-append persisted innerdict payloads into reconstructed `OuterDict`:
-- `07_match_xlsx`: load from `xlsx_innerdicts` JSONL table.
-- `08_match_docx`: load from `docx_innerdicts` JSONL table.
-- `09_match_parquet`: load from `ssn_author_output` rows table.
-
-Context return:
-14. Return `InitResult(context, steps_to_run, monitor)`.
-15. On any init error: stop monitor, close DB manager, re-raise.
-
-### 1.5 Session log + diagnostics wiring in REPL runtime
-
-After init returns:
-1. Set session log path: `data/diagnostics/<session_stamp>/repl_session.log`.
-2. If `--new` + confirmed reset and old session log exists: delete it.
-3. Load prior session log lines into `log_history` if file exists.
-4. Define `log(msg, style)`:
-- Append styled line to session log file.
-- Append to in-memory history.
-- Print via Rich.
-5. Assign `context.log = log` so steps can emit live logs.
-6. If interactive, print prior history and emit resume marker timestamp in config timezone.
-
-### 1.6 Resume confirmation branch at runtime
-
-If `args.resume`:
-1. If no `--yes` and interactive: ask `Resume pipeline from next step? [y/N]`; non-`y` returns early.
-2. If no `--yes` and non-interactive: print warning + diagnostics path and return early.
-3. Else proceed to step execution loop.
-
-### 1.7 Step execution loop semantics (`run_step` transaction wrapper)
-
-For each `step_id` in `steps_to_run`:
-1. Resolve function from `STEP_REGISTRY`; unknown step -> ValueError.
-2. Call `run_step(step_id, step_fn, context, log=log, verbose=not args.quiet)`.
-
-`run_step(...)` behavior:
-1. If state already marks step done: return `StepResult(messages=[Skipped...])`.
-2. Log `Running step: <id>`.
-3. `BEGIN` transaction.
-4. Execute `step_fn(context)`.
-5. On success:
-- `COMMIT`
-- mark state done in state file.
-6. On exception:
-- `ROLLBACK`
-- append failed section to diagnostics report
-- re-raise.
-7. If verbose and step has diagnostics/messages, append section to diagnostics markdown.
-8. Dump artifacts to `data/diagnostics/<session>/step_artifacts`:
-- DataFrames -> CSV files
-- list[DataFrame] -> indexed CSV files
-- `OuterDict` -> JSON
-- `Path` artifacts -> tracked in message list
-9. Append artifact summary messages to step result.
-
-Back in REPL loop:
-3. Print every step message via `log(..., green)`.
-4. If current step is `10_build_cards`, capture `zip_path` and card count.
-5. If interactive and no `--yes`, prompt `Continue to next step? [y/N]` after each step.
-
-### 1.8 Full step chain (`01` → `10`) with sequential processing
-
-#### Step `01_register_resources`
-1. Resolve configured HCR XLSX paths from `files_config` entries with HCR key prefix.
-2. Discover DOCX files in `docx_dir` (non-recursive, skip `~$`).
-3. Register all pipeline resources with hash verification:
-- SciSciNet parquets (`author_details`, `authors`, `authors_paper`, `paper_author_affiliation`, `affiliations`, `hit_papers_0`, `hit_papers_1`, `fields`)
-- HCR XLSX resources
-- World Bank XLSX resource
-- DOCX resources
-4. Persist resource registry table `registered_resources`.
-5. Return resource counts and examples in diagnostics.
-
-#### Step `02_load_xlsx`
-1. Iterate all registered XLSX resources.
-2. Read XLSX via pandas/openpyxl (skip temporary lock files).
-3. Normalize headers to `hcr.*` format.
-4. Add `hcr.row_number` (excel-like row index +2), `hcr.filename`, and global `ktp.population_index`.
-5. Coerce non-index columns to string.
-6. Create/append table `population`, dynamically adding missing columns when files differ schema.
-7. Return full `population` DataFrame artifact and row/column counts.
-
-#### Step `03_infer_names`
-1. If global `HCR_XLSX_NAME_COLS` mapping is empty:
-- infer first/last name columns per XLSX by candidate header matching.
-2. Validate every configured XLSX has a mapping.
-3. Build filename-conditioned SQL CASE expressions for first and last names.
-4. Create table `population_names` with `ktp.population_index`, `ktp.first_name`, `ktp.last_name`.
-5. Create view `population_with_names` joining `population` + `population_names`.
-6. Return merged DataFrame artifact.
-
-#### Step `04_add_economy_priority`
-1. Load World Bank sheet `Country Analytical History`.
-2. Locate latest FY column in sheet dynamically.
-3. Build `income_map` from country + aliases (`KTP_COUNTRY_ALIASES`) to income labels.
-4. Infer affiliation columns from `population` schema and filename-specific overrides (`HCR_XLSX_AFFILIATIONS_COLS`).
-5. Create `population_economy`:
-- tokenize affiliation text
-- fuzzy token containment match against `income_map.match_norm`
-- compute economies JSON list, income group, economy match payload
-- assign priority and priority-group labels using country buckets (greater china, non-English non-EU HIC, EU, English HIC)
-6. Create view `population_with_names_economy` joining population + names + economy output.
-7. Select a stable column ordering for output artifact.
-8. Return merged DataFrame artifact and country-entry diagnostics.
-
-#### Step `05_sample_population`
-1. Validate draw size total equals `total_draws - pilot_count`.
-2. Load population index pool.
-3. Build pilot exclusion set by matching configured pilot triples in pilot XLSX file.
-4. Precompute random draw batches by `sample_draw_sizes`, honoring per-draw `replace` flag and exclusion state.
-5. Materialize each random draw:
-- build temporary `sample_indices`
-- join to `population`
-- append to `samples` with draw labels
-6. Materialize pilot draws:
-- query pilot rows
-- enforce expected pilot count
-- stable order by configured triple sequence
-- assign labels `pilot.1`, `pilot.2`, ...
-- append to `samples`
-7. Create views:
-- `samples_with_context` (joins samples + population + names + economy, sorted by draw semantics)
-- `samples_with_names` (minimal join for downstream name matching)
-8. Drop temp tables and return joined DataFrame artifact.
-
-#### Step `06_build_outerdict`
-1. Identify rows in `samples_with_names` with null/empty first/last names.
-2. Log excluded row previews and counts.
-3. Create excluded-key archive objects:
-- table `outerdict_stub_excluded`
-- view `outerdict_name_keys_excluded`
-4. Build unique valid name pairs from `samples_with_names`.
-5. Create in-memory `OuterDict` from these name keys.
-6. Persist key universe objects:
-- table `outerdict_stub`
-- view `outerdict_name_keys`
-7. Return artifacts containing `outer_dict` and excluded archive `OuterDict`.
-
-#### Step `07_match_xlsx`
-1. Compute HCR payload column set (`hcr.*` minus excluded columns).
-2. Build view `xlsx_matches`:
-- normalize name keys and population names
-- token-based matching (`last exact`, first-token containment)
-- attach draw labels if available
-- include economy/priority + HCR payload columns
-- include structured `ktp.xlsx_match` JSON payload
-- apply canonical draw/source ordering via shared draw sort CTEs
-3. Materialize grouped JSONL table `xlsx_innerdicts` keyed by `name_key`.
-4. Append JSONL innerdict rows to `context.outer_dict` via `XlsxMatchProcedure`.
-5. Create `xlsx_output` view and load output DataFrame artifact.
-
-#### Step `08_match_docx`
-1. Parse DOCX resources using `load_single_table_docx` (strictly one table per file).
-2. Normalize DOCX column names to `ktp.table_1_*` namespace.
-3. Attach footnotes/comments metadata and per-row row number.
-4. Persist raw DOCX rows to `docx_rows` table.
-5. Validate required researcher/author name column exists.
-6. Build view `docx_matches`:
-- normalize source name tokens and docx name field
-- match by substring containment of normalized first/last tokens
-- attach draw labels and structured `ktp.docx_match` payload
-- apply shared draw/source ordering
-7. Materialize grouped JSONL table `docx_innerdicts`.
-8. Append JSONL innerdict rows to `context.outer_dict` via `DocxMatchProcedure`.
-9. Create `docx_output` view and return output DataFrame artifact.
-
-#### Step `09_match_parquet` (largest critical junction)
-
-Sequential sub-phases:
-1. Validate `context.outer_dict` and `context.resources` are initialized.
-2. Load parquet file paths from config.
-3. Emit legend lines for log tag semantics.
-4. Create `ssn_author_matches` by exact normalized name match against `author_details` (`display_name` + alternatives).
-5. Create `ssn_author_papers` by joining matched authors to `authors_paper`.
-6. Create `ssn_all_hits` union table from level0/level1 hit parquet filtered to needed papers.
-7. Create `ssn_author_hit_agg` and identify zero-hit rows.
-8. Create filtered view `ssn_author_matches_nonzero_hit` and distinct author-id view `ssn_author_match_nonzero_hit_author_ids`.
-9. Create `ssn_author_agg` (paper list and field-id aggregates) limited to nonzero-hit matched author pairs.
-10. Materialize filtered parquet-derived tables via `_create_parquet_table(...)`:
-- matched `author_details`
-- matched `authors`
-- matched `paper_author_affiliation`
-- matched `affiliations`
-11. Create author-level output table `ssn_author_output` joining match rows + materialized parquet tables + aggregates.
-12. Compute diagnostics:
-- top-paper reduction estimate
-- top-institution reduction estimate
-- field-id display-name mapping coverage
-13. Create final enriched innerdict table `ssn_innerdicts`:
-- top-K papers per author
-- top-K institutions per author
-- concept display names
-- draw/source ordering
-- drop intermediate draw-order helper columns
-14. Append row-wise innerdicts from `ssn_innerdicts` to `context.outer_dict` via `ParquetMatchProcedure`.
-15. Create sorted output view `ssn_parquet_output` and load output DataFrame artifact.
-16. Return step messages/diagnostics with matched row counts.
-
-#### Step `10_build_cards`
-1. Validate `OuterDict` exists.
-2. Read `card_subset_mode` and validate against supported modes.
-3. Define helper predicates for filtering:
-- sciscinet-innerdict detection by filename provenance
-- exactness test for `ktp.xlsx_match` payload
-- docx table-field completeness (required `ktp.table_1_*` non-empty except optional columns/placeholders)
-4. Evaluate all names and classify each into subset modes `0..4`:
-- Mode 0: no filtering
-- Mode 1: exactly-one-sciscinet + exact-xlsx + complete-docx
-- Mode 2: complement of mode 1
-- Mode 3: exactly-one-sciscinet + exact-xlsx
-- Mode 4: complement of mode 3
-5. Log mode pass/fail table.
-6. Build filtered `OuterDict` for selected mode.
-7. Build card intro text with timezone-aware date and subset note.
-8. Render cards via `build_cards(...)` with progress callbacks.
-9. Write zip output via `write_cards_zip(...)`:
-- `txt` mode: write text files and zip
-- `docx` mode: run pandoc conversions (parallel workers) then zip
-10. Return artifacts: `cards` map and output `zip_path`.
-
-### 1.9 Completion, exception, and teardown behavior
-
-Normal completion:
-1. Stop monitor and compute peak RAM.
-2. Close pipeline manager connection.
-3. Print execution metrics table.
-4. Log metrics and diagnostics report path to session log.
-5. If cards built, log output zip path.
-6. Return `zip_path` or `None`.
-
-Exception path:
-1. Any exception in loop logs `Exited prematurely: <Type>: <msg>`.
-2. Exception re-raised to `main()` handler.
-3. `main()` prints traceback and exits non-zero.
-4. `run_step` ensures failed step transaction rollback and diagnostics section append.
-
-### 1.10 Strict function invocation ledger (called functions only)
-
-This subsection is a strict call ledger for the executed REPL path. It separates:
-1. functions that are actually invoked by script execution, and
-2. nearby functions that exist in code but are not invoked on this path.
-
-#### 1.10.1 Top-level REPL call tree
-
-`src.repl.main()` invokes, in order:
-1. `argparse.ArgumentParser(...)`
-2. `parser.add_argument(...)` / `add_mutually_exclusive_group(...)`
-3. `parser.parse_args()`
-4. `run_reproduction(args)`
-5. on interrupt: `console.print(...)`, `sys.exit(130)`
-6. on other exception: `console.print_exception()`, `sys.exit(1)`
-
-`src.repl.run_reproduction(args)` invokes, in order/branches:
-1. `init_pipeline(args, interactive=..., reset_confirmed=...)`
-2. filesystem session-log operations:
-- `session_log_path.exists()`
-- `session_log_path.unlink()` (new-run reset path only)
-- `session_log_path.read_text(...)` (if existing)
-3. closure definitions:
-- `print_history()` (called only when interactive)
-- `log(...)` (called throughout runtime)
-4. `print_history()` (interactive only)
-5. resume prompt branch:
-- `console.print(...)`
-- `console.input(...)`
-6. step loop per `step_id`:
-- `STEP_REGISTRY.get(step_id)`
-- `run_step(step_id, step_fn, context, log=log, verbose=not args.quiet)`
-- `log(...)` for every message line
-7. shutdown path:
-- `monitor.stop()` (if monitor exists)
-- `context.manager.close()` (if context exists)
-8. summary output:
-- `Table(...)`, `m_table.add_column(...)`, `m_table.add_row(...)`, `console.print(m_table)`
-- additional `log(...)` calls for metrics/diagnostics/output path
-
-#### 1.10.2 Initialization call tree (`src/helpers/init.py`)
-
-`init_pipeline(...)` invokes:
-1. `PipelineConfig.from_json(Path(args.config))`
-2. `PipelineManager(...)`
-3. `manager.connect_db()`
-4. `ResourceMonitor()`, `monitor.start()`
-5. new-run branch:
-- `_reset_pipeline(conn, manager)` -> `conn.execute(...)` table/view drops + `manager.reset_state()`
-6. session handling:
-- `datetime.now().strftime(...)`
-- `manager.set_session_dir(...)` / `manager.get_session_dir()`
-7. diagnostics:
-- `DiagnosticsReport(diagnostics_dir)`
-8. resume hydration branches:
-- `manager.is_done(...)` checks
-- `register_pipeline_resources(config)` when needed
-- `_load_outerdict_stub(conn, OUTERDICT_STUB_TABLE)` when needed
-- `append_innerdicts_from_jsonlines_table(...)` for XLSX/DOCX restoration when needed
-- `append_innerdicts_from_rows_table(...)` for parquet restoration when needed
-9. context assembly:
-- `PipelineContext(...)`
-10. on init exception:
-- `monitor.stop()`
-- `manager.close()`
-
-`_load_outerdict_stub(...)` invokes:
-1. `conn.execute(...).fetchall()`
-2. `NameKey.from_json_key(...)` for each row
-3. `OuterDict.from_name_keys(...)`
-
-#### 1.10.3 Step runtime wrapper call tree (`src/helpers/repl_runtime.py`)
-
-`run_step(...)` invokes:
-1. `context.manager.is_done(step_id)`
-2. `log(...)` ("Running step")
-3. `context.conn.execute("BEGIN")`
-4. `step_fn(context)` (one of steps `01`..`10`)
-5. success path:
-- `context.conn.execute("COMMIT")`
-- `context.manager.save_state(step_id)`
-6. failure path:
-- `context.conn.execute("ROLLBACK")`
-- `context.diagnostics.add_section(...)`
-7. diagnostics path:
-- `context.diagnostics.add_section(...)` (verbose mode)
-8. artifact path:
-- `dump_artifacts(context, step_id, result.artifacts)`
-
-`dump_artifacts(...)` invokes (by artifact type):
-1. `context.artifacts_dir.mkdir(...)`
-2. parquet special list path:
-- `DataFrame.to_csv(...)`
-3. generic DataFrame path:
-- `DataFrame.to_csv(...)`
-4. `OuterDict` path:
-- `artifact.dump_json(path)`
-5. path artifacts:
-- append `Path` directly
-
-#### 1.10.4 Per-step invoked helper functions (`01`..`10`)
-
-Step `01_register_resources` invokes:
-1. `configured_hcr_xlsx_paths(...)`
-2. `discover_docx_files(...)`
-3. `register_pipeline_resources(...)`
-4. `_resource_registry_frame(...)`
-5. `register_frame(...)`
-6. `context.conn.execute(...)` (create/drop registry temp table)
-
-Inside `register_pipeline_resources(...)` (called by step 01):
-1. repeated `register_resource(...)`
-2. `configured_hcr_xlsx_paths(...)`
-3. `configured_hcr_xlsx_entries(...)`
-4. `register_resources(...)` for XLSX and DOCX batches
-5. `discover_docx_files(...)`
-
-Step `02_load_xlsx` invokes:
-1. `_build_population_table(...)`
-2. `conn.execute(...).df()` for artifact load
-
-Inside `_build_population_table(...)`:
-1. `Path(resource.__fspath__())`
-2. `pd.read_excel(...)`
-3. `_normalize_hcr_header(...)`
-4. `conn.execute(...)` table existence/schema queries
-5. `register_frame(...)`
-6. `conn.execute(...)` insert/alter SQL
-
-Step `03_infer_names` invokes:
-1. `_infer_name_columns_from_xlsx(...)` (if mapping empty)
-2. `_build_name_expr(...)` twice
-3. `conn.execute(...)` create table/view SQL
-4. `conn.execute(...).df()`
-
-Inside `_infer_name_columns_from_xlsx(...)`:
-1. `pd.read_excel(...)`
-2. `_normalize_hcr_header(...)`
-3. local `pick(...)`
-
-Step `04_add_economy_priority` invokes:
-1. `_load_income_labels(...)`
-2. `pd.DataFrame(...)`
-3. `register_frame(...)`
-4. `conn.execute(...)` for table/view creation
-5. `_infer_affiliation_columns(...)`
-6. `_normalize_affiliation_map(...)`
-7. `_affiliation_case(...)` (which invokes `_affiliation_expression(...)`)
-8. `_non_english_non_eu_hics(...)`
-9. local `_countries_for(...)`
-10. local `_sql_in_list(...)`
-11. final `conn.execute(...).df()`
-
-Step `05_sample_population` invokes:
-1. local `log(...)` (delegates `context.log(...)`)
-2. `conn.execute(...).df()/fetchall()/fetchone()`
-3. `register_frame(conn, "pilot_triples", ...)`
-4. `np.random.default_rng(...)`
-5. `_precompute_draw_batches(...)`
-6. per-draw:
-- `register_frame(conn, "sample_indices", ...)`
-- `conn.execute(...).df()`
-- `_append_samples(...)`
-7. pilot append branch:
-- `_append_samples(...)`
-8. view creation SQL via `conn.execute(...)`
-9. cleanup SQL drop temp tables
-
-Step `06_build_outerdict` invokes:
-1. local `_normalize_name_part(...)`
-2. local `_name_key_json(...)`
-3. `conn.execute(...).df()`
-4. `register_frame(...)` for excluded stub + active stub
-5. `conn.execute(...)` create tables/views
-6. `NameKey(...)` model construction
-7. `OuterDict.from_name_keys(...)`
-8. `OuterDict(...)` constructor for excluded archive
-
-Step `07_match_xlsx` invokes:
-1. `conn.execute(...).fetchall()` for schema
-2. `hcr_excluded_columns(...)`
-3. `draw_sort_ctes_sql(...)`
-4. `draw_sort_order_by_sql(...)`
-5. `conn.execute(...)` create view SQL
-6. `conn.execute(...).df()`
-7. `dumps_jsonlines(...)`
-8. `register_frame(...)`
-9. `append_innerdicts_from_jsonlines_table(..., procedure=XlsxMatchProcedure(), ...)`
-10. `conn.execute(...)` create output view + load output DF
-
-Step `08_match_docx` invokes:
-1. `load_single_table_docx(context.resources.docx_resources)`
-2. `register_frame(...)`
-3. `normalize_docx_column_name(RIGHT_NAME_COL)`
-4. `draw_sort_ctes_sql(...)`
-5. `draw_sort_order_by_sql(...)`
-6. `conn.execute(...)` create match view + load DF
-7. `dumps_jsonlines(...)`
-8. `register_frame(...)`
-9. `append_innerdicts_from_jsonlines_table(..., procedure=DocxMatchProcedure(), ...)`
-10. `conn.execute(...)` create output view + load output DF
-
-Inside `load_single_table_docx(...)` (called by step 08):
-1. `Path(resource.__fspath__())`
-2. `parse_docx_tables_and_notes(path)`
-3. `normalize_docx_column_name(...)`
-4. pandas frame construction/concat
-
-Step `09_match_parquet` invokes:
-1. `normalize_parquet_column_name(...)`
-2. local `scalar_int(...)`
-3. local `log_tag(...)`
-4. multiple `conn.execute(...)` table/view materializations + metrics queries
-5. `_create_parquet_table(...)` four times for matched parquet tables
-6. `parquet_columns(...)` (inside `_create_parquet_table`)
-7. `parquet_filename(...)` (inside `_create_parquet_table` and additional filename payload paths)
-8. `draw_sort_ctes_sql(...)`
-9. `draw_sort_order_by_sql(...)`
-10. `append_innerdicts_from_rows_table(..., procedure=ParquetMatchProcedure(), key_column=KTP_SOURCE_KEY_COL)`
-11. `conn.execute(...).df()` for output dataframe
-
-Step `10_build_cards` invokes:
-1. local `log(...)`
-2. local `progress_bar(...)`
-3. local `hcr_bundle_name(...)`
-4. local callbacks `on_build_progress(...)` and `on_conversion_progress(...)`
-5. local `_filtered_outer_dict(...)` and its nested helpers:
-- `_mode_matches(...)`
-- `_extract_filenames(...)`
-- `_is_sciscinet_inner(...)`
-- `_is_exact_xlsx_match_payload(...)`
-- `_has_present_xlsx_match_payload(...)`
-- `_is_non_empty_value(...)`
-- `_has_complete_docx_table_fields(...)`
-6. `OuterDict.from_name_keys(...)` and `subset_outer.add_inner(...)`
-7. `datetime.now(ZoneInfo(...)).strftime(...)`
-8. `build_cards(...)`
-9. `write_cards_zip(...)`
-
-#### 1.10.5 Defined but not invoked on the REPL step path
-
-1. `src.steps.step_08_match_docx.load_docx_tables(...)` is defined but step `08` runtime invokes `load_single_table_docx(...)`, not `load_docx_tables(...)`.
-2. Any detour module entrypoints are not invoked by REPL path.
-
----
-
-## 2) FULL End-to-End Mode-3 `p_gf` Stats Detour Walkthrough (`src/detours/detour_mode3_pgf_stats.py`)
-
-### 2.1 Invocation surface
-
-Primary entrypoint:
-- `python -m src.detours.detour_mode3_pgf_stats --config <config.json>`
-
-Behavioral contract:
-1. No `--new`/`--resume` semantics (unlike REPL).
-2. No detour-specific runtime flags in current version.
-3. Read-only analytics over an existing DB.
-
-### 2.2 Top-level process in `main()`
-
-1. Parse required `--config`.
-2. Load `PipelineConfig`.
-3. Call `run_detour(config)`.
-4. If result unsuccessful, raise runtime error.
-5. Keyboard interrupt exits `130`; other exceptions re-raised.
-
-### 2.3 `run_detour(config)` full sequence
-
-1. Start `ResourceMonitor`.
-2. Open DuckDB connection in read-only mode:
-- `duckdb.connect(str(config.db_file), read_only=True)`
-3. Build metadata by calling `_build_mode3_pgf_metadata(conn)`.
-4. Print human-readable summary via `_print_summary(metadata)`.
-5. Construct `DetourResult` with:
-- `success=True`
-- `steps_completed=[]` (`DETOUR_STEPS` is empty)
-- summary text
-- metadata payload
-6. On exception:
-- print red failure line
-- re-raise
-7. Finally:
-- stop monitor, capture peak RAM
-- close connection
-8. Print execution metrics table and return `DetourResult`.
-
-### 2.4 `_build_mode3_pgf_metadata(conn)` full sequence
-
-#### 2.4.1 Base counts and key universe
-1. Count population rows from `population_with_names_economy`.
-2. Load ordered key universe from `outerdict_stub.name_key`.
-3. Set `outerdict_keys = len(outer_keys)`.
-
-#### 2.4.2 Load XLSX payloads per key
-1. Read `name_key, innerdicts` from `xlsx_innerdicts`.
-2. Parse each `innerdicts` blob as JSON Lines (`loads_jsonlines`).
-3. Collect `ktp.xlsx_match` payload values per `name_key`.
-
-Helper predicates used:
-- `_has_present_xlsx_match_payload(value)`
-- `_is_exact_xlsx_match_payload(value)`
-
-Exactness logic details:
-1. Empty/None payload is not exact unless treated as absent.
-2. Valid exact payload requires matching token set and matching normalized last-name fields between source-key and matched row.
-3. Any malformed JSON string payload fails exactness.
-
-#### 2.4.3 Load parquet innerdict evidence per key
-1. Read from `ssn_innerdicts` columns:
-- `ktp.source_key`
-- `ssnau.p_gf`
-- `ssnau.inference_counts`
-- `ssnau.inference_sources`
-2. Build:
-- sciscinet row count per key
-- full row tuples per key for selected-key extraction
-
-#### 2.4.4 Reconstruct mode-3 selection
-
-For each key in `outer_keys`:
-1. `sciscinet_exactly_one_ok := sciscinet_count == 1`.
-2. `xlsx_exact_ok := any(present payload) and all(present payload exact)`.
-3. Count pass totals per rule.
-4. If both rules pass:
-- append key to selected set
-- enforce invariant: exactly one sciscinet row tuple exists
-- append that tuple’s `p_gf` to distribution array
-- if `p_gf` missing, capture `(inference_counts, inference_sources)` for audit.
-
-#### 2.4.5 Compute distribution statistics
-
-From selected set:
-1. `selected_names`
-2. non-missing vector and `non_missing_n`, `missing_n`
-3. mean, SD, SE, 95% CI
-4. min, q1, median, q3, max
-5. IQR and Tukey fences
-6. lower/upper/total outlier counts and percentages
-
-#### 2.4.6 Compute bucket partition and invariants
-
-Buckets over selected set:
-1. missing
-2. exactly `0`
-3. exactly `0.5`
-4. exactly `1`
-5. `(0, 0.5)` exclusive
-6. `(0.5, 1)` exclusive
-
-Invariant checks:
-1. Bucket partition sum must equal selected count.
-2. Missing-`p_gf` tuple count must equal missing bucket count.
-
-#### 2.4.7 Missing `p_gf` inference audit
-
-For missing `p_gf` selected rows, compute:
-1. `inference_counts == 0`, `!=0`, `NULL`
-2. `inference_sources == 0`, `!=0`, `NULL`
-3. both-zero count
-4. whether all missing rows have both-zero (or `None` when no missing rows)
-
-#### 2.4.8 Metadata payload assembly
-
-Returns structured dictionary with:
-1. identity and scope:
-- detour_id, mode, mode_description, db_file, tables_used
-2. counts block
-3. rule_counts block
-4. pgf_distribution block
-5. pgf_outliers_tukey block
-6. pgf_buckets block
-7. missing_pgf_inference_audit block
-
-### 2.5 `_print_summary(metadata)` full output sequence
-
-1. Print detour header, DB path, mode description, tables used.
-2. Render and print `Selection Counts` table.
-3. Render and print `Mode-3 Rule Counts` table.
-4. Render and print `p_gf Distribution` table.
-5. Render and print `p_gf Buckets` table.
-6. Render and print `Missing p_gf Inference Audit` table.
-7. Render and print `Outliers (Tukey 1.5*IQR)` table.
-
-### 2.6 Failure and teardown behavior
-
-Failure path:
-1. Any exception in metadata build or summary print logs red failure line.
-2. Exception re-raised to module entrypoint.
-
-Teardown path (always):
-1. Stop monitor.
-2. Close read-only connection if opened.
-3. Print execution metrics with peak RAM.
-
-### 2.7 Strict function invocation ledger (called functions only)
-
-#### 2.7.1 Entrypoint call tree
-
-`src.detours.detour_mode3_pgf_stats.main()` invokes:
-1. `argparse.ArgumentParser(...)`
-2. `parser.add_argument("--config", ...)`
-3. `parser.parse_args()`
-4. `PipelineConfig.from_json(args.config)`
-5. `run_detour(config)`
-6. if failure result: `RuntimeError(...)`
-7. interrupt handling: `sys.exit(130)`
-
-#### 2.7.2 Runtime call tree
-
-`run_detour(config, interactive=True, diagnostics=None)` invokes:
-1. `ResourceMonitor()`
-2. `monitor.start()`
-3. `duckdb.connect(str(config.db_file), read_only=True)`
-4. `_build_mode3_pgf_metadata(conn)`
-5. `_print_summary(metadata)`
-6. `DetourResult(...)`
-7. failure branch: `console.print(...)` red error line
-8. finally:
-- `monitor.stop()`
-- `conn.close()` (if opened)
-9. metrics rendering:
-- `Table(...)`, `add_column(...)`, `add_row(...)`, `console.print(...)`
-10. return `DetourResult`
-
-#### 2.7.3 Metadata builder call tree
-
-`_build_mode3_pgf_metadata(conn)` invokes:
-1. `_scalar_int(conn, ...)` for population row count
-2. `conn.execute(...).fetchall()` for `outerdict_stub` keys
-3. `conn.execute(...).fetchall()` for `xlsx_innerdicts`
-4. `loads_jsonlines(...)` to parse JSONL payload blobs
-5. `inner.get(KTP_XLSX_MATCH_COL)` per parsed record
-6. `conn.execute(...).fetchall()` for `ssn_innerdicts`
-7. `_has_present_xlsx_match_payload(...)` in mode-3 xlsx rule
-8. `_is_exact_xlsx_match_payload(...)` in mode-3 xlsx rule
-9. numpy/math statistics stack:
-- `np.array(...)`
-- `non_missing_values.mean()/std()/min()/max()`
-- `np.quantile(...)`
-- `math.sqrt(...)`
-- `np.sum(...)`
-10. local `_eq_count(...)` for exact-value bucket counts
-11. `_db_file_from_pragma(conn)`
-12. repeated `_pct(...)` for all percentages in metadata blocks
-
-`_scalar_int(...)` invokes:
-1. `conn.execute(sql).fetchone()`
-2. raises `RuntimeError(...)` when row missing
-
-`_db_file_from_pragma(...)` invokes:
-1. `conn.execute("PRAGMA database_list").fetchone()`
-
-`_has_present_xlsx_match_payload(...)` invokes:
-1. `value.strip()` for strings
-2. `pd.isna(value)` for non-strings
-
-`_is_exact_xlsx_match_payload(...)` invokes:
-1. `json.loads(raw)`
-2. payload field extraction `.get(...)`
-3. normalization via `str(...).strip()`
-4. sorted token-set comparisons
-
-#### 2.7.4 Summary renderer call tree
-
-`_print_summary(metadata)` invokes:
-1. `console.print(...)` header lines
-2. Rich table construction/printing for each section:
-- `Selection Counts`
-- `Mode-3 Rule Counts`
-- `p_gf Distribution`
-- `p_gf Buckets`
-- `Missing p_gf Inference Audit`
-- `Outliers (Tukey 1.5*IQR)`
-
-#### 2.7.5 Defined but not invoked on detour runtime path
-
-1. `_round_or_none(...)` is defined in this module but is not called by `main()` / `run_detour()` / `_build_mode3_pgf_metadata()` / `_print_summary()` in current code.
-
----
-
-## Source files walked end-to-end for this RFC
-- `src/repl.py`
-- `src/helpers/init.py`
-- `src/helpers/repl_runtime.py`
-- `src/helpers/config.py`
-- `src/helpers/pipeline_manager.py`
-- `src/helpers/diagnostics.py`
-- `src/helpers/resources.py`
-- `src/steps/__init__.py`
-- `src/steps/shared.py`
-- `src/steps/step_01_register_resources.py`
-- `src/steps/step_02_load_xlsx.py`
-- `src/steps/step_03_infer_names.py`
-- `src/steps/step_04_add_economy_priority.py`
-- `src/steps/step_05_sampling.py`
-- `src/steps/step_06_build_outerdict_stub.py`
-- `src/steps/step_07_match_xlsx.py`
-- `src/steps/step_08_match_docx.py`
-- `src/steps/step_09_match_parquet.py`
-- `src/steps/step_10_build_cards.py`
-- `src/detours/detour_mode3_pgf_stats.py`
+## 1) FULL end-to-end REPL walkthrough (atomic invocation + SQL walkthrough)
+1. `src.repl.main()` starts and creates `argparse.ArgumentParser(description="KTP pipeline runner.")`.
+2. `main()` registers CLI arguments: `--config`, mutually-exclusive `--new`/`--resume(--continue)`, optional `--yes`, `--non-interactive`, `--quiet`.
+3. `main()` invokes `parser.parse_args()`.
+4. `main()` invokes `run_reproduction(args)` inside `try`.
+5. If Ctrl+C occurs, `main()` invokes `console.print("Process Interrupted")` and `sys.exit(130)`.
+6. If any other exception escapes, `main()` invokes `console.print_exception()` and `sys.exit(1)`.
+7. `run_reproduction(args)` computes runtime switches: `interactive = not args.non_interactive`, `auto_confirm = bool(args.yes)`.
+8. If `args.new` and `args.yes`, `reset_confirmed = True`.
+9. If `args.new` and interactive without `--yes`, `run_reproduction()` invokes `console.input("Reset pipeline state and database? [y/N]")` and sets `reset_confirmed` only when input is `y`.
+10. If `args.new` and non-interactive without `--yes`, `reset_confirmed` remains `False`.
+11. `run_reproduction()` invokes `init_pipeline(args, interactive=interactive, reset_confirmed=reset_confirmed)`.
+12. `init_pipeline()` validates `args.config`; if missing, raises `ValueError("A JSON config file is required...")`.
+13. `init_pipeline()` invokes `PipelineConfig.from_json(Path(args.config))`.
+14. `PipelineConfig.from_json()` invokes `model_validate_json(...)` and enforces schema/validators.
+15. Config validation enforces required `files_config` keys, required file-entry fields (`path`, `sha256`, `desc`), at least one key with `hcr_xlsx_` prefix, and normalizes integer `sample_draw_sizes` to dict specs.
+16. `init_pipeline()` constructs `PipelineManager(config.state_file, config.db_file)`.
+17. `PipelineManager.__init__()` invokes `_load_state()`; if no state file, uses default `{"steps_completed": [], "session_dir": None}`.
+18. `init_pipeline()` invokes `manager.connect_db()`.
+19. `connect_db()` invokes `duckdb.connect(str(self.db_file))`.
+20. `connect_db()` executes SQL: `SET memory_limit='20GB'`.
+21. `connect_db()` executes SQL: `INSTALL splink_udfs FROM community; LOAD splink_udfs;`.
+22. `init_pipeline()` constructs `ResourceMonitor()` and invokes `monitor.start()`.
+23. If `args.new` and `reset_confirmed` is false, `init_pipeline()` raises `ValueError("Pipeline reset confirmation required for --new.")`.
+24. If `args.new` and confirmed, `init_pipeline()` invokes `_reset_pipeline(conn, manager)`.
+25. `_reset_pipeline()` executes SQL `DROP TABLE IF EXISTS ...` for canonical pipeline tables (`registered_resources`, `population`, `population_names`, `population_economy`, `samples`, `outerdict_stub`, `xlsx_innerdicts`, `docx_rows`, `docx_innerdicts`, `ssn_author_matches`, `ssn_innerdicts`).
+26. `_reset_pipeline()` executes SQL `DROP VIEW IF EXISTS ...` for canonical views (`population_with_names`, `population_with_names_economy`, `samples_with_context`, `samples_with_names`, `outerdict_name_keys`, `xlsx_matches`, `xlsx_output`, `docx_matches`, `docx_output`).
+27. `_reset_pipeline()` executes SQL against `information_schema.tables` to discover all objects with name like `ssn_%` and drops each by type (`BASE TABLE` => `DROP TABLE`, `VIEW` => `DROP VIEW`).
+28. `_reset_pipeline()` invokes `manager.reset_state()`; this clears in-memory state and unlinks state file if present.
+29. `init_pipeline()` sets `session_stamp`: for new runs, invokes `datetime.now().strftime("%Y%m%d_%H%M%S")` and `manager.set_session_dir(session_stamp)`.
+30. On resume runs, `init_pipeline()` invokes `manager.get_session_dir()`; if absent, generates/saves a fresh timestamp.
+31. `manager.set_session_dir(...)` writes JSON state file (ensuring parent dir exists).
+32. `init_pipeline()` constructs `DiagnosticsReport(Path("data/diagnostics") / session_stamp)`.
+33. `DiagnosticsReport` ensures diagnostics directory exists and creates `repl_diagnostics.md` with header if missing.
+34. `init_pipeline()` computes `steps_to_run` as full `STEP_ORDER` for `--new`, else as `[step for step in STEP_ORDER if not manager.is_done(step)]`.
+35. If `manager.is_done(STEP_REGISTER_RESOURCES)` is true, `init_pipeline()` invokes `register_pipeline_resources(config)` to hydrate `context.resources` for resume workflows.
+36. `register_pipeline_resources()` invokes many `register_resource(...)` calls for each configured parquet and world-bank file.
+37. Each `register_resource(...)` constructs `RegisteredResource(..., verify_hash_on_init=True)` and triggers hash verification against expected SHA256.
+38. `register_pipeline_resources()` invokes `configured_hcr_xlsx_paths(config)` and `register_resources(...)` for HCR XLSX files.
+39. `register_pipeline_resources()` invokes `discover_docx_files(config.docx_dir)` and `register_resources(...)` for DOCX files.
+40. `discover_docx_files()` invokes `find_files_by_extension(docx_dir, "docx", recursive=False)` and filters `~$` files.
+41. If `manager.is_done(STEP_BUILD_OUTERDICT)` is true, `init_pipeline()` invokes `_load_outerdict_stub(conn, table_name=OUTERDICT_STUB_TABLE)`.
+42. `_load_outerdict_stub()` executes SQL: `SELECT name_key FROM outerdict_stub`.
+43. `_load_outerdict_stub()` invokes `NameKey.from_json_key(...)` for each row and then `OuterDict.from_name_keys(...)`.
+44. If resume state marks step `07` done, `init_pipeline()` invokes `append_innerdicts_from_jsonlines_table(conn, table_name=xlsx_innerdicts, outer_dict=..., procedure=XlsxMatchProcedure())`.
+45. That helper executes SQL: `SELECT name_key, innerdicts FROM xlsx_innerdicts`, parses JSONL payload per key, constructs `InnerDict.from_mapping(...)`, and appends via `outer_dict.add_inner_by_key(...)`.
+46. If resume state marks step `08` done, `init_pipeline()` invokes `append_innerdicts_from_jsonlines_table(... table_name=docx_innerdicts, procedure=DocxMatchProcedure())`.
+47. If resume state marks step `09` done, `init_pipeline()` invokes `append_innerdicts_from_rows_table(conn, table_name=ssn_author_output, outer_dict=..., procedure=ParquetMatchProcedure())`.
+48. `append_innerdicts_from_rows_table()` executes SQL `SELECT * FROM ssn_author_output`, streams batches, reconstructs records, and appends innerdicts by `name_key`.
+49. `init_pipeline()` constructs and returns `InitResult(context=PipelineContext(...), steps_to_run=..., monitor=...)`.
+50. If any init exception occurs, `init_pipeline()` invokes `monitor.stop()`, `manager.close()`, then re-raises.
+51. Back in `run_reproduction()`, it stores `context`, `steps_to_run`, and `monitor` from `init_result`.
+52. `run_reproduction()` computes session log path: `context.diagnostics.path.parent / "repl_session.log"`.
+53. If new run with confirmed reset and old session log exists, it invokes `session_log_path.unlink()`.
+54. If session log exists, it invokes `session_log_path.read_text(...)`, parses each line into `(style, message)` tuples for history replay.
+55. `run_reproduction()` defines closure `print_history()` that prints historical lines and emits a resume marker with `datetime.now(ZoneInfo(context.config.timezone)).strftime(...)`.
+56. `run_reproduction()` defines closure `log(msg, style)` that appends to session log file, appends to in-memory history, and prints via Rich.
+57. `run_reproduction()` sets `context.log = log` so step modules can emit runtime logs.
+58. If interactive, `run_reproduction()` invokes `print_history()` before continuing.
+59. If `args.resume` and no `--yes` in interactive mode, it prompts with `console.input("> ")`; non-`y` returns early.
+60. If `args.resume` and no `--yes` in non-interactive mode, it prints warning + diagnostics path and returns early.
+61. `run_reproduction()` enters loop `for step_id in steps_to_run:`.
+62. Per iteration, it invokes `STEP_REGISTRY.get(step_id)`.
+63. If `step_fn is None`, raises `ValueError("Unknown step: ...")`.
+64. It invokes `run_step(step_id, step_fn, context, log=log, verbose=not args.quiet)`.
+65. `run_step()` checks `context.manager.is_done(step_id)`; if true, returns `StepResult(messages=["Skipped ..."])`.
+66. Otherwise `run_step()` invokes `log("Running step: ...", "cyan")`.
+67. `run_step()` executes SQL `BEGIN`.
+68. `run_step()` invokes the step function `step_fn(context)`.
+69. On step success, `run_step()` executes SQL `COMMIT` and invokes `context.manager.save_state(step_id)`.
+70. On step failure, `run_step()` executes SQL `ROLLBACK`, invokes `context.diagnostics.add_section(f"{step_id} (failed)", [error])`, then re-raises.
+71. If verbose and step diagnostics/messages exist, `run_step()` invokes `context.diagnostics.add_section(step_id, ...)`.
+72. `run_step()` invokes `dump_artifacts(context, step_id, result.artifacts)`.
+73. `dump_artifacts()` ensures artifacts dir exists with `mkdir(parents=True, exist_ok=True)`.
+74. If artifacts include parquet view names/dfs lists, it writes each DataFrame with `to_csv(...)` named `<step_id>_<view_name>.csv`.
+75. For any direct DataFrame artifact it writes `<step_id>_<artifact>.csv`.
+76. For list-of-DataFrame artifacts, writes `<step_id>_<artifact>_<idx>.csv`.
+77. For `OuterDict` artifact, invokes `dump_json(...)` to write `<step_id>_<artifact>.json`.
+78. For `Path` artifact, records path directly as dumped artifact.
+79. `run_step()` appends artifact summary lines to `result.messages` and returns.
+80. Back in loop, `run_reproduction()` invokes `log(line, style="green")` for every returned message line.
+81. If `step_id == STEP_BUILD_CARDS`, it reads `result.artifacts.get("zip_path")` and `result.artifacts.get("cards")`, storing `zip_path` and `card_count`.
+82. If interactive and no `--yes`, it prompts `Continue to next step? [y/N]`; non-`y` breaks loop.
+83. If any exception escapes loop, `run_reproduction()` invokes `log("Exited prematurely: ...", style="red")` and re-raises.
+84. `run_reproduction()` always enters `finally`: invokes `monitor.stop()` if monitor exists; then invokes `context.manager.close()` if context exists.
+85. After loop completion, `run_reproduction()` builds a Rich metrics table and prints peak RAM (and cards count if known).
+86. It invokes `log("Execution Metrics", ...)`, `log("Peak RAM Usage: ...")`, optional `log("Cards: ...")`, and `log("Diagnostics report saved to: ...")`.
+87. If `zip_path` exists, invokes `log("Success! Output saved to: ...")`.
+88. `run_reproduction()` returns `zip_path` (or `None` if not produced).
+89. Loop step invocation order is always `STEP_ORDER` when `--new`: `01_register_resources`, `02_load_xlsx`, `03_infer_names`, `04_add_economy_priority`, `05_sample_population`, `06_build_outerdict`, `07_match_xlsx`, `08_match_docx`, `09_match_parquet`, `10_build_cards`.
+90. Step `01_register_resources.run(context)` starts by invoking `configured_hcr_xlsx_paths(context.config)`.
+91. It invokes `discover_docx_files(context.config.docx_dir)`.
+92. It invokes `register_pipeline_resources(context.config)` and stores in `context.resources`.
+93. It invokes internal `_resource_registry_frame(resources)` to assemble a pandas frame of resource metadata.
+94. It invokes `register_frame(context.conn, "registered_resources_frame", resources_df)`.
+95. `register_frame()` invokes `conn.register(name, df)`, SQL `CREATE OR REPLACE TABLE <name> AS SELECT * FROM <name>`, then `conn.unregister(name)` best-effort.
+96. Step 01 executes SQL: `CREATE OR REPLACE TABLE registered_resources AS SELECT * FROM registered_resources_frame`.
+97. Step 01 executes SQL: `DROP TABLE IF EXISTS registered_resources_frame`.
+98. Step 01 returns `StepResult` with message counts and artifact paths for discovered xlsx/docx files.
+99. Step `02_load_xlsx.run(context)` invokes `_build_population_table(conn, context.resources.xlsx_resources, table_name=population, ...)`.
+100. `_build_population_table()` loops through XLSX resources, invoking `Path(resource.__fspath__())` per resource.
+101. It skips non-`.xlsx` and temporary `~$` files.
+102. It invokes `pd.read_excel(path, engine="openpyxl")`.
+103. It invokes `_normalize_hcr_header(...)` for each input column and prepends `hcr.` naming.
+104. It adds row/index columns: `hcr.row_number = reset_index + 2`, `hcr.filename`, and global `ktp.population_index` sequence.
+105. It coerces non-index columns to `string` dtype.
+106. It executes SQL existence check: `SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?`.
+107. If table exists, it executes SQL `PRAGMA table_info('population')` and computes schema diff.
+108. For new columns it executes SQL `ALTER TABLE population ADD COLUMN "<col>" <type>`.
+109. It pads missing columns in DataFrame with `pd.NA`, reorders to table schema, invokes `register_frame(conn, "population_frame", df)`, then SQL `INSERT INTO population SELECT * FROM population_frame`.
+110. If table does not exist, it invokes `register_frame(conn, "population", df)` which materializes `population` directly.
+111. Back in step 02, it executes SQL `SELECT * FROM population` to load artifact DataFrame and returns row/column counts.
+112. Step `03_infer_names.run(context)` verifies resources exist; if `HCR_XLSX_NAME_COLS` is empty, it infers mappings per XLSX via `_infer_name_columns_from_xlsx(...)`.
+113. `_infer_name_columns_from_xlsx()` invokes `pd.read_excel(...)`, normalizes headers, then helper `pick(...)` to find first/last columns by candidate tokens.
+114. Step 03 validates every configured XLSX has mapping; missing mappings raise `ValueError`.
+115. Step 03 invokes `_build_name_expr(HCR_XLSX_NAME_COLS, 0)` and `_build_name_expr(..., 1)` to build filename-conditioned CASE expressions.
+116. Step 03 executes SQL: `CREATE OR REPLACE TABLE population_names AS SELECT p.ktp.population_index, <first_case> AS ktp.first_name, <last_case> AS ktp.last_name FROM population p`.
+117. Step 03 executes SQL: `CREATE OR REPLACE VIEW population_with_names AS SELECT p.*, n.ktp.first_name, n.ktp.last_name FROM population p JOIN population_names n ON p.ktp.population_index = n.ktp.population_index`.
+118. Step 03 executes SQL `SELECT * FROM population_with_names` and returns artifact.
+119. Step `04_add_economy_priority.run(context)` invokes `_load_income_labels(context.resources.world_bank_resource)`.
+120. `_load_income_labels()` invokes `pd.read_excel(sheet_name="Country Analytical History", header=None)`.
+121. It scans rows for an `FY##` token, picks the last FY column, then builds canonical country-to-income map and alias-expanded match rows using `KTP_COUNTRY_ALIASES`.
+122. Step 04 builds DataFrame from income rows and invokes `register_frame(conn, "income_map_frame", ...)`.
+123. Step 04 executes SQL: `CREATE OR REPLACE TABLE income_map AS SELECT * FROM income_map_frame`.
+124. Step 04 executes SQL: `DROP TABLE IF EXISTS income_map_frame`.
+125. Step 04 executes SQL `DESCRIBE population` to infer affiliation columns.
+126. It invokes `_infer_affiliation_columns(...)` for primary and secondary defaults.
+127. It invokes `_normalize_affiliation_map(HCR_XLSX_AFFILIATIONS_COLS, index=0/1)`.
+128. It invokes `_affiliation_case(...)` twice to produce filename-aware primary/secondary affiliation SQL expressions.
+129. It computes country buckets using `_non_english_non_eu_hics(...)`, local `_countries_for(...)`, and local `_sql_in_list(...)`.
+130. Step 04 executes core SQL to create `population_economy` with CTEs `aff` and `matches`.
+131. Inside that SQL it invokes key operations: `regexp_replace(lower(unaccent(...)))`, token-space containment match `(' ' || aff_tokens || ' ') LIKE '% ' || m.match_norm || ' %'`, aggregated JSON economies via `to_json(list_sort(list(DISTINCT m.country) FILTER ...))`, income-group priority CASE logic, and priority-group label CASE logic.
+132. Step 04 executes SQL: `CREATE OR REPLACE VIEW population_with_names_economy AS SELECT p.*, n.*, e.<economy fields> FROM population p JOIN population_names n ... JOIN population_economy e ...`.
+133. Step 04 executes SQL `DESCRIBE population_with_names_economy` then SQL `SELECT <ordered_cols> FROM population_with_names_economy` and returns artifact.
+134. Step `05_sampling.run(context)` validates arithmetic: `sum(sample_draw_sizes) == total_draws - pilot_count`; else raises `ValueError`.
+135. It executes SQL `SELECT ktp.population_index FROM population` and creates numpy `index_pool`.
+136. It creates `pilot_triples` DataFrame from `PILOT_NAME_CATEGORY_TRIPLES`, invokes `register_frame(conn, "pilot_triples", ...)`.
+137. It executes SQL to fetch pilot exclusion indices by joining `population` to `pilot_triples` on first/last/category and filtering `hcr.filename = pilot_xlsx_name`.
+138. It invokes `np.random.default_rng(context.config.sample_seed)`.
+139. It invokes `_precompute_draw_batches(index_pool, draw_specs, rng, seen_indices_initial=pilot_population_indices)`.
+140. `_precompute_draw_batches()` iterates each draw spec; with `replace=True` invokes `rng.choice(index_pool, size=draw_size, replace=True)`; with `replace=False` computes remaining pool excluding seen indices and validates capacity.
+141. For each precomputed draw, step 05 creates `sample_indices` DataFrame and invokes `register_frame(conn, "sample_indices", ...)`.
+142. For each draw, step 05 executes SQL joining `population` to `sample_indices` to get filename+fragment rows ordered by `sample_id`.
+143. It labels draw numbers and invokes `_append_samples(conn, sample_df[[ktp.filename, ktp.fragment, ktp.draw_number]])`.
+144. `_append_samples()` invokes `register_frame(conn, "samples_frame", df)`, checks table existence via SQL on `information_schema.tables`, then either SQL `INSERT INTO samples SELECT ... FROM samples_frame` or SQL `CREATE TABLE samples AS SELECT ... FROM samples_frame`, and drops temp table.
+145. Step 05 executes SQL query for pilot rows joined with `pilot_triples`, enforces expected pilot count, orders by configured tuple order, sets labels `pilot.1...`, and invokes `_append_samples(...)`.
+146. Step 05 executes SQL to create `samples_with_context` view using joins to `population`, `population_names`, and `population_economy` with draw-order CASE sorting.
+147. Step 05 executes SQL to create `samples_with_names` view as reduced join.
+148. Step 05 executes SQL drops: `DROP TABLE IF EXISTS sample_indices`, `DROP TABLE IF EXISTS pilot_triples`.
+149. Step 05 executes SQL `SELECT * FROM samples_with_context` and returns artifact.
+150. Step `06_build_outerdict_stub.run(context)` executes SQL selecting excluded-name rows from `samples_with_names` where first/last is null/empty, with deterministic draw/file sort ordering.
+151. It logs excluded-row diagnostics and preview lines.
+152. It builds excluded key JSON strings via local `_name_key_json(...)` and invokes `register_frame(conn, "outerdict_excluded_stub_frame", ...)`.
+153. It executes SQL: `CREATE OR REPLACE TABLE outerdict_stub_excluded AS SELECT * FROM outerdict_excluded_stub_frame`.
+154. It executes SQL: `DROP TABLE IF EXISTS outerdict_excluded_stub_frame`.
+155. It executes SQL: `CREATE OR REPLACE VIEW outerdict_name_keys_excluded AS SELECT name_key AS ktp.source_key, json_extract_string(...) AS ktp.first_name, json_extract_string(...) AS ktp.last_name FROM outerdict_stub_excluded`.
+156. It executes SQL: `SELECT DISTINCT ktp.first_name, ktp.last_name FROM samples_with_names` to get valid names.
+157. It constructs `NameKey(...)` objects and invokes `OuterDict.from_name_keys(name_keys)`; assigns to `context.outer_dict`.
+158. It builds active stub DataFrame and invokes `register_frame(conn, "outerdict_stub_frame", ...)`.
+159. It executes SQL: `CREATE OR REPLACE TABLE outerdict_stub AS SELECT * FROM outerdict_stub_frame`.
+160. It executes SQL: `DROP TABLE IF EXISTS outerdict_stub_frame`.
+161. It executes SQL: `CREATE OR REPLACE VIEW outerdict_name_keys AS SELECT name_key AS ktp.source_key, json_extract_string(...) AS ktp.first_name, json_extract_string(...) AS ktp.last_name FROM outerdict_stub`.
+162. Step `07_match_xlsx.run(context)` executes SQL `DESCRIBE population` and invokes `hcr_excluded_columns(...)` to decide payload columns.
+163. It invokes `draw_sort_ctes_sql(draw_col=ktp.draw_number, source_key_col=ktp.source_key)` and `draw_sort_order_by_sql(...)` to embed deterministic sort CTE SQL.
+164. Step 07 executes SQL `CREATE OR REPLACE VIEW xlsx_matches AS WITH name_draws, pop_names, base, row_ranked, ranked ...`.
+165. In `name_draws`, SQL computes normalized source-key tokens with `lower(unaccent(...))`, `regexp_split_to_array`, and first token extraction via `list_extract`.
+166. In `pop_names`, SQL joins `population` + `population_names` + left joins `population_economy` and `registered_resources`, while deriving normalized token arrays for population names.
+167. In `base`, SQL joins `name_draws` to `pop_names` with key conditions `nd.nd_last_clean = p.pop_last_clean` and `list_contains(p.pop_first_tokens, nd.nd_first_token)`.
+168. In `base`, SQL emits structured JSON `ktp.xlsx_match` using `json_object(...)` including source-key token list and matched-pop token list.
+169. Step 07 executes SQL `SELECT * FROM xlsx_matches` to pandas, filters non-null filename rows, groups by `ktp.source_key`, serializes grouped records via `dumps_jsonlines(...)`.
+170. Step 07 invokes `register_frame(conn, "xlsx_innerdict_frame", inner_df)`.
+171. It executes SQL: `CREATE OR REPLACE TABLE xlsx_innerdicts AS SELECT * FROM xlsx_innerdict_frame`.
+172. It executes SQL: `DROP TABLE IF EXISTS xlsx_innerdict_frame`.
+173. It invokes `append_innerdicts_from_jsonlines_table(conn, table_name=xlsx_innerdicts, outer_dict=context.outer_dict, procedure=XlsxMatchProcedure(), required_columns={ktp.filename, ktp.fragment})`.
+174. It executes SQL: `CREATE OR REPLACE VIEW xlsx_output AS WITH base AS (SELECT * FROM xlsx_matches WHERE ktp.filename IS NOT NULL), row_ranked, ranked SELECT ... ORDER BY ...`.
+175. It executes SQL `SELECT * FROM xlsx_output` and returns artifact.
+176. Step `08_match_docx.run(context)` invokes `load_single_table_docx(context.resources.docx_resources)`.
+177. `load_single_table_docx()` loops resources, skips `~$` files, invokes `parse_docx_tables_and_notes(path)`, enforces exactly one table, normalizes columns with `normalize_docx_column_name(...)`, adds `ktp.docx_footnotes`, `ktp.docx_comments`, `ktp.filename`, and `ktp.docx.row_number`.
+178. If parse mismatch occurs (bad zip, row-comment count mismatch, missing table), it raises descriptive `ValueError`.
+179. Step 08 invokes `register_frame(conn, "docx_frame", docx_df)`.
+180. Step 08 executes SQL: `CREATE OR REPLACE TABLE docx_rows AS SELECT * FROM docx_frame`.
+181. Step 08 executes SQL: `DROP TABLE IF EXISTS docx_frame`.
+182. Step 08 invokes `normalize_docx_column_name(RIGHT_NAME_COL)` and validates that normalized column exists in loaded DOCX frame.
+183. Step 08 invokes `draw_sort_ctes_sql(...)` and `draw_sort_order_by_sql(...)`.
+184. Step 08 executes SQL: `CREATE OR REPLACE VIEW docx_matches AS WITH name_draws, names_clean, docx_clean, base, row_ranked, ranked ...`.
+185. In `name_draws`, SQL left joins `outerdict_name_keys` to `samples_with_names` to attach draw labels.
+186. In `names_clean`, SQL normalizes names with `regexp_replace(lower(unaccent(...)), '[^0-9a-z]+', '', 'g')`.
+187. In `docx_clean`, SQL normalizes candidate docx name field similarly.
+188. In `base`, SQL uses `RIGHT JOIN names_clean nd ON POSITION(nd.first_clean IN d.docx_clean) > 0 AND POSITION(nd.last_clean IN d.docx_clean) > 0`, then left joins `registered_resources`.
+189. Step 08 executes SQL `SELECT * FROM docx_matches`, drops `docx_clean` column if present, filters non-null filename rows, groups by key, serializes JSONL via `dumps_jsonlines(...)`.
+190. Step 08 invokes `register_frame(conn, "docx_innerdict_frame", inner_df)`.
+191. It executes SQL: `CREATE OR REPLACE TABLE docx_innerdicts AS SELECT * FROM docx_innerdict_frame`.
+192. It executes SQL: `DROP TABLE IF EXISTS docx_innerdict_frame`.
+193. It invokes `append_innerdicts_from_jsonlines_table(conn, table_name=docx_innerdicts, outer_dict=context.outer_dict, procedure=DocxMatchProcedure(), required_columns={ktp.filename, ktp.fragment})`.
+194. It executes SQL: `CREATE OR REPLACE VIEW docx_output AS WITH base AS (SELECT * FROM docx_matches WHERE ktp.filename IS NOT NULL), row_ranked, ranked SELECT ... ORDER BY ...`.
+195. It executes SQL `SELECT * FROM docx_output` and returns artifact.
+196. Step `09_match_parquet.run(context)` validates `context.outer_dict` and `context.resources` are present.
+197. Step 09 reads parquet file paths from `context.config.files_config` for `author_details`, `authors`, `authors_paper`, `paper_author_affiliation`, `affiliations`, `hit_papers_0`, `hit_papers_1`, and `fields`.
+198. Step 09 logs legend entries from `STEP_MATCH_PARQUET_LOG_LEGEND_LINES`.
+199. Step 09 executes SQL: `CREATE OR REPLACE TABLE ssn_author_matches AS WITH names, parq AS (...) SELECT DISTINCT ... FROM names JOIN parq ON lower(unaccent(p.alt_name)) = n.match_key_norm`.
+200. `parq` CTE unions exploded `display_name_alternatives` and direct `display_name` rows from `read_parquet(author_details_path)`.
+201. Step 09 executes SQL aggregate stats query on `ssn_author_matches` for row/name/author counts.
+202. Step 09 executes SQL: `CREATE OR REPLACE TABLE ssn_author_papers AS SELECT m.name_key, m.authorid, pap.paperid FROM ssn_author_matches m JOIN read_parquet(authors_paper_path) pap ON pap.authorid = m.authorid`.
+203. Step 09 executes SQL stats query on `ssn_author_papers` for row/pair/paper counts.
+204. Step 09 executes SQL: `CREATE OR REPLACE TABLE ssn_all_hits AS WITH needed_papers AS (SELECT DISTINCT paperid FROM ssn_author_papers) SELECT ... FROM read_parquet(hit_papers_0) JOIN needed_papers UNION ALL SELECT ... FROM read_parquet(hit_papers_1) JOIN needed_papers`.
+205. Step 09 executes SQL stats query on `ssn_all_hits`.
+206. Step 09 executes SQL: `CREATE OR REPLACE TABLE ssn_author_hit_agg AS SELECT ap.name_key, ap.authorid, SUM(COALESCE(h.hit_1pct,0)) AS ktp.ssn.sum_hit_1pct FROM ssn_author_papers ap LEFT JOIN ssn_all_hits h ON ap.paperid=h.paperid GROUP BY ap.name_key, ap.authorid`.
+207. Step 09 executes SQL stats query on `ssn_author_hit_agg` (zero/nonzero/null counts).
+208. Step 09 executes SQL count query for zero-hit rows removed.
+209. Step 09 executes SQL: `CREATE OR REPLACE VIEW ssn_author_matches_nonzero_hit AS SELECT m.* FROM ssn_author_matches m LEFT JOIN ssn_author_hit_agg agg ON ... WHERE agg.sum_hit IS NULL OR agg.sum_hit <> 0`.
+210. Step 09 executes SQL stats query on `ssn_author_matches_nonzero_hit`.
+211. Step 09 executes SQL: `CREATE OR REPLACE VIEW ssn_author_match_nonzero_hit_author_ids AS SELECT DISTINCT authorid FROM ssn_author_matches_nonzero_hit`.
+212. Step 09 executes SQL scalar count on that distinct-author-id view.
+213. Step 09 executes SQL: `CREATE OR REPLACE TABLE ssn_author_agg AS SELECT ap.name_key, ap.authorid, SUM(...), LIST(paperid) FILTER(level0), LIST(paperid) FILTER(level1), LIST(DISTINCT fieldid) FROM ssn_author_papers ap LEFT JOIN ssn_all_hits h ... WHERE EXISTS (SELECT 1 FROM ssn_author_matches_nonzero_hit ...) GROUP BY ap.name_key, ap.authorid`.
+214. Step 09 executes SQL scalar count on `ssn_author_agg`.
+215. Step 09 invokes `_create_parquet_table(...)` for matched `author_details` table.
+216. `_create_parquet_table()` invokes `parquet_columns(conn, path)` (which runs `DESCRIBE SELECT * FROM read_parquet('<path>')`).
+217. `_create_parquet_table()` invokes `normalize_parquet_column_name(...)` for each parquet field.
+218. `_create_parquet_table()` invokes `parquet_filename(path)` and executes SQL `CREATE OR REPLACE TABLE <target> AS SELECT parq.<cols as normalized>, '<filename>' AS <filename_col> FROM read_parquet('<path>') parq <join_sql>`.
+219. Step 09 repeats `_create_parquet_table(...)` for matched `authors` table (joined by distinct nonzero author ids).
+220. Step 09 repeats `_create_parquet_table(...)` for matched `paper_author_affiliation` table (joined by distinct nonzero author ids).
+221. Step 09 repeats `_create_parquet_table(...)` for matched `affiliations` table (joined by distinct institution ids derived from matched paper-author-affiliation rows).
+222. Step 09 executes SQL counts for each matched parquet-derived table.
+223. Step 09 executes SQL: `CREATE OR REPLACE TABLE ssn_author_output AS SELECT m.name_key AS ktp.source_key, ... a.*, au.*, CAST(agg.paperids_level0 AS VARCHAR), CAST(agg.paperids_level1 AS VARCHAR), CAST(agg.field_ids_list AS VARCHAR), agg.sum_hit FROM ssn_author_matches_nonzero_hit m JOIN <matched_author_details> a ... JOIN <matched_authors> au ... LEFT JOIN ssn_author_agg agg ...`.
+224. Step 09 executes SQL scalar count on `ssn_author_output`.
+225. Step 09 executes SQL diagnostic query estimating top-works reduction (`SUM(paper_count)` vs `SUM(LEAST(paper_count, TOP_K_WORKS))`).
+226. Step 09 executes SQL diagnostic query estimating top-institutions reduction (`SUM(institution_count)` vs `SUM(LEAST(..., TOP_K_INSTITUTIONS))`).
+227. Step 09 executes SQL diagnostic query for field-id display-name mapping coverage by joining exploded field IDs to `read_parquet(fields_path)`.
+228. Step 09 executes SQL: `CREATE OR REPLACE TABLE ssn_innerdicts AS WITH paper_hits, paper_ranked, top_papers, affiliation_counts, affiliation_ranked, top_institutions, field_lookup, concept_display, enriched, source_draw, base, row_ranked, ranked SELECT ...`.
+229. In this SQL, it ranks papers by hit score, builds top-K OpenAlex paper URLs, ranks institutions by paper count, builds top-K institution JSON objects, maps field IDs to display names, and reattaches draw ordering.
+230. Step 09 executes SQL scalar count on `ssn_innerdicts`.
+231. Step 09 invokes `append_innerdicts_from_rows_table(conn, table_name=ssn_innerdicts, outer_dict=context.outer_dict, procedure=ParquetMatchProcedure(), key_column=ktp.source_key)`.
+232. Step 09 executes SQL: `CREATE OR REPLACE VIEW ssn_parquet_output AS WITH source_draw, base, row_ranked, ranked SELECT ... ORDER BY ...`.
+233. Step 09 executes SQL log message for number of filtered zero-hit rows.
+234. Step 09 executes SQL `SELECT * FROM ssn_parquet_output` into pandas output frame and returns step artifact.
+235. Step `10_build_cards.run(context)` checks `context.outer_dict` exists; else raises `ValueError`.
+236. Step 10 reads `subset_mode = int(context.config.card_subset_mode)` and validates membership in `CARD_BUILD_SUBSET_DESCRIPTIONS`.
+237. Step 10 defines logging/progress closures and helper predicate closures used for subset filtering.
+238. `_extract_filenames(value)` parses filenames from scalar string/list/json-list payloads.
+239. `_is_sciscinet_inner(inner, sciscinet_filenames)` checks if any filename fields intersect SciSciNet resource names.
+240. `_is_exact_xlsx_match_payload(value)` parses JSON and enforces exact token/last-name equivalence.
+241. `_has_present_xlsx_match_payload(value)` defines non-empty payload presence.
+242. `_is_non_empty_value(value)` handles string emptiness/placeholder semantics for docx fields.
+243. `_has_complete_docx_table_fields(inner)` requires non-empty required `ktp.table_1_*` fields (except optional-empty set).
+244. `_filtered_outer_dict()` iterates every `(NameKey, innerdicts)` from `outer_dict.items()`.
+245. For each name, it computes `sciscinet_exactly_one_ok`, `xlsx_exact_ok`, and `docx_complete_ok`.
+246. `_filtered_outer_dict()` applies `_mode_matches(mode, ...)` for all modes `0..4` and stores lists per mode.
+247. `_filtered_outer_dict()` logs rule pass/fail and mode counts table.
+248. `_filtered_outer_dict()` invokes `OuterDict.from_name_keys(...)` for selected names and re-appends matching innerdicts.
+249. Step 10 computes intro date via `datetime.now(ZoneInfo(context.config.timezone)).strftime("%B %d, %Y")` and appends subset note.
+250. Step 10 invokes `build_cards(selected_outer_dict, total_draws=..., intro=..., excluded_cols=..., progress_callback=on_build_progress)`.
+251. `build_cards()` iterates `outer_dict.items()`, derives draw labels, header, optional fun-fact from original name-column provenance fields, emits per-innerdict field blocks excluding configured columns/NaN, and returns `{filename: markdown}` map.
+252. Step 10 invokes `write_cards_zip(cards, output_dir, zip_name, output_format=context.config.output_format, reference_docx=context.config.pandoc_reference_docx, docx_workers=..., progress_callback=on_conversion_progress)`.
+253. In TXT mode, `write_cards_zip()` writes each card to `<tmp>/<name>.txt` and zips all files.
+254. In DOCX mode, `write_cards_zip()` copies reference docx, writes `.md` files, invokes pandoc conversion via `_render_docx()` in thread pool, then zips rendered `.docx` files.
+255. Step 10 returns `StepResult(artifacts={"cards": cards, "zip_path": zip_path}, messages=[...], diagnostics=[...])`.
+256. After loop, REPL prints execution metrics table and logs diagnostics/output paths; this final output is the terminal end of the full REPL invocation chain.
+
+## 2) FULL end-to-end mode3 `p_gf` detour walkthrough (atomic invocation + SQL walkthrough)
+1. `src.detours.detour_mode3_pgf_stats.main()` starts and creates `argparse.ArgumentParser(...)` with description.
+2. `main()` registers required `--config` argument.
+3. `main()` invokes `parser.parse_args()`.
+4. `main()` invokes `PipelineConfig.from_json(args.config)`.
+5. `main()` invokes `run_detour(config)`.
+6. If `run_detour()` returns unsuccessful result, `main()` raises `RuntimeError(result.summary)`.
+7. If Ctrl+C occurs, `main()` invokes `sys.exit(130)`.
+8. Other exceptions are re-raised.
+9. `run_detour(config, interactive=True, diagnostics=None)` discards `interactive` and `diagnostics` (`del` statements), because this detour is read-only and not REPL-driven.
+10. `run_detour()` constructs `ResourceMonitor()` and invokes `monitor.start()`.
+11. `run_detour()` opens DB read-only via `duckdb.connect(str(config.db_file), read_only=True)`.
+12. `run_detour()` invokes `_build_mode3_pgf_metadata(conn)`.
+13. `_build_mode3_pgf_metadata()` invokes `_scalar_int(conn, "SELECT COUNT(*) FROM population_with_names_economy")`.
+14. `_scalar_int()` executes SQL and returns int scalar; if row missing, raises runtime error.
+15. `_build_mode3_pgf_metadata()` executes SQL: `SELECT name_key FROM outerdict_stub ORDER BY name_key` and builds ordered outer-key list.
+16. `_build_mode3_pgf_metadata()` executes SQL: `SELECT name_key, innerdicts FROM xlsx_innerdicts`.
+17. For each xlsx row, `_build_mode3_pgf_metadata()` invokes `loads_jsonlines(inner_blob or "")`.
+18. For each parsed innerdict, it collects `inner.get(KTP_XLSX_MATCH_COL)` into `xlsx_payloads_by_key[name_key]`.
+19. `_build_mode3_pgf_metadata()` executes SQL selecting parquet evidence from `ssn_innerdicts`: `SELECT "ktp.source_key", "ssnau.p_gf", "ssnau.inference_counts", "ssnau.inference_sources" FROM ssn_innerdicts`.
+20. It accumulates `sciscinet_count_by_key[source_key] += 1` and tuple lists per source key.
+21. It iterates each key in ordered `outer_keys`.
+22. For each key, computes `sciscinet_exactly_one_ok = (count == 1)`.
+23. For each key, computes xlsx rule `xlsx_exact_ok = any(_has_present_xlsx_match_payload(v) for v in payloads) and all(_is_exact_xlsx_match_payload(v) for v in payloads)`.
+24. `_has_present_xlsx_match_payload(value)` returns false for `None`, false for blank strings, otherwise true unless `pd.isna(value)` for non-strings.
+25. `_is_exact_xlsx_match_payload(value)` returns true for absent/blank by design path, else parses JSON and verifies exact token/last-name equivalence between source-key fields and matched-pop fields.
+26. If key passes both rules, it is added to mode-3 selected set.
+27. For selected keys, detour enforces invariant `len(sciscinet_rows_for_key) == 1`; otherwise raises runtime error.
+28. For selected key, it appends `p_gf` to distribution list.
+29. If selected key has missing `p_gf`, it appends `(inference_counts, inference_sources)` to missing-audit list.
+30. After selection, detour computes `selected_names`, `non_missing_values` vector, `non_missing_n`, `missing_n`.
+31. It computes mean, SD (`ddof=1` when `n>1`), SE, and 95% CI bounds.
+32. It computes min, q1, median, q3, max via numpy quantiles.
+33. It computes IQR, lower fence, upper fence, lower/upper/total outlier counts.
+34. It computes bucket counts over selected set: missing, exact 0, exact 0.5, exact 1, (0,0.5), (0.5,1).
+35. It checks bucket partition invariant: bucket sum must equal selected count; otherwise raises runtime error.
+36. It checks missing-audit invariant: number of missing-audit tuples must equal missing bucket count; otherwise raises runtime error.
+37. It computes missing audit tallies (`inference_counts` zero/nonzero/null and `inference_sources` zero/nonzero/null).
+38. It computes `both_zero` and `all_missing_pgf_have_both_zero` (or `None` when no missing rows).
+39. It invokes `_db_file_from_pragma(conn)`.
+40. `_db_file_from_pragma()` executes SQL `PRAGMA database_list` and returns active DB file path from result row.
+41. `_build_mode3_pgf_metadata()` invokes `_pct(...)` repeatedly to compute all percentage fields across counts, buckets, and audit blocks.
+42. `_build_mode3_pgf_metadata()` returns metadata dict containing identity/scope, counts, rule counts, distribution stats, outlier stats, bucket stats, and missing audit stats.
+43. Back in `run_detour()`, it invokes `_print_summary(metadata)`.
+44. `_print_summary()` invokes `console.print(...)` for header lines (detour name, DB path, mode description, tables used).
+45. `_print_summary()` constructs Rich `Selection Counts` table and invokes `add_row(...)` for population rows, outerdict keys, selected counts, and p_gf participation percentages.
+46. `_print_summary()` constructs Rich `Mode-3 Rule Counts` table and invokes `add_row(...)` for sciscinet exactly-one pass/fail and xlsx exact pass/fail.
+47. `_print_summary()` constructs Rich `p_gf Distribution` table and invokes `add_row(...)` for non-missing N, mean, CI, SD, SE, min, Q1, median, Q3, max.
+48. `_print_summary()` constructs Rich `p_gf Buckets` table and invokes `add_row(...)` for each bucket raw count and `% of mode-3`.
+49. `_print_summary()` constructs Rich `Missing p_gf Inference Audit` table and invokes `add_row(...)` for missing count, both-zero status, and all inference count/source splits.
+50. `_print_summary()` constructs Rich `Outliers` table and invokes `add_row(...)` for IQR, fences, lower/upper/total outliers, and outlier percent.
+51. Back in `run_detour()`, after summary print, it constructs `DetourResult(success=True, steps_completed=[], summary=..., metadata=metadata)`.
+52. If any exception occurs in build/print path, `run_detour()` invokes `console.print("[red]Exited prematurely: ...[/red]")` and re-raises.
+53. In `finally`, `run_detour()` invokes `monitor.stop()` and stores peak RAM.
+54. In `finally`, if connection was opened, it invokes `conn.close()`.
+55. After finally, `run_detour()` constructs and prints Rich `Execution Metrics` table with peak RAM.
+56. It prints two additional metrics lines (`Execution Metrics`, `Peak RAM Usage: ...`).
+57. `run_detour()` returns `DetourResult`.
+58. `main()` receives result and exits successfully if `result.success` is true.
+59. Defined but not invoked in this runtime path: `_round_or_none(...)` exists in module but is never called by `main()`, `run_detour()`, `_build_mode3_pgf_metadata()`, or `_print_summary()`.
