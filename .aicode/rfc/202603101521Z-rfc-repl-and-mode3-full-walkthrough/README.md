@@ -359,6 +359,250 @@ Exception path:
 3. `main()` prints traceback and exits non-zero.
 4. `run_step` ensures failed step transaction rollback and diagnostics section append.
 
+### 1.10 Strict function invocation ledger (called functions only)
+
+This subsection is a strict call ledger for the executed REPL path. It separates:
+1. functions that are actually invoked by script execution, and
+2. nearby functions that exist in code but are not invoked on this path.
+
+#### 1.10.1 Top-level REPL call tree
+
+`src.repl.main()` invokes, in order:
+1. `argparse.ArgumentParser(...)`
+2. `parser.add_argument(...)` / `add_mutually_exclusive_group(...)`
+3. `parser.parse_args()`
+4. `run_reproduction(args)`
+5. on interrupt: `console.print(...)`, `sys.exit(130)`
+6. on other exception: `console.print_exception()`, `sys.exit(1)`
+
+`src.repl.run_reproduction(args)` invokes, in order/branches:
+1. `init_pipeline(args, interactive=..., reset_confirmed=...)`
+2. filesystem session-log operations:
+- `session_log_path.exists()`
+- `session_log_path.unlink()` (new-run reset path only)
+- `session_log_path.read_text(...)` (if existing)
+3. closure definitions:
+- `print_history()` (called only when interactive)
+- `log(...)` (called throughout runtime)
+4. `print_history()` (interactive only)
+5. resume prompt branch:
+- `console.print(...)`
+- `console.input(...)`
+6. step loop per `step_id`:
+- `STEP_REGISTRY.get(step_id)`
+- `run_step(step_id, step_fn, context, log=log, verbose=not args.quiet)`
+- `log(...)` for every message line
+7. shutdown path:
+- `monitor.stop()` (if monitor exists)
+- `context.manager.close()` (if context exists)
+8. summary output:
+- `Table(...)`, `m_table.add_column(...)`, `m_table.add_row(...)`, `console.print(m_table)`
+- additional `log(...)` calls for metrics/diagnostics/output path
+
+#### 1.10.2 Initialization call tree (`src/helpers/init.py`)
+
+`init_pipeline(...)` invokes:
+1. `PipelineConfig.from_json(Path(args.config))`
+2. `PipelineManager(...)`
+3. `manager.connect_db()`
+4. `ResourceMonitor()`, `monitor.start()`
+5. new-run branch:
+- `_reset_pipeline(conn, manager)` -> `conn.execute(...)` table/view drops + `manager.reset_state()`
+6. session handling:
+- `datetime.now().strftime(...)`
+- `manager.set_session_dir(...)` / `manager.get_session_dir()`
+7. diagnostics:
+- `DiagnosticsReport(diagnostics_dir)`
+8. resume hydration branches:
+- `manager.is_done(...)` checks
+- `register_pipeline_resources(config)` when needed
+- `_load_outerdict_stub(conn, OUTERDICT_STUB_TABLE)` when needed
+- `append_innerdicts_from_jsonlines_table(...)` for XLSX/DOCX restoration when needed
+- `append_innerdicts_from_rows_table(...)` for parquet restoration when needed
+9. context assembly:
+- `PipelineContext(...)`
+10. on init exception:
+- `monitor.stop()`
+- `manager.close()`
+
+`_load_outerdict_stub(...)` invokes:
+1. `conn.execute(...).fetchall()`
+2. `NameKey.from_json_key(...)` for each row
+3. `OuterDict.from_name_keys(...)`
+
+#### 1.10.3 Step runtime wrapper call tree (`src/helpers/repl_runtime.py`)
+
+`run_step(...)` invokes:
+1. `context.manager.is_done(step_id)`
+2. `log(...)` ("Running step")
+3. `context.conn.execute("BEGIN")`
+4. `step_fn(context)` (one of steps `01`..`10`)
+5. success path:
+- `context.conn.execute("COMMIT")`
+- `context.manager.save_state(step_id)`
+6. failure path:
+- `context.conn.execute("ROLLBACK")`
+- `context.diagnostics.add_section(...)`
+7. diagnostics path:
+- `context.diagnostics.add_section(...)` (verbose mode)
+8. artifact path:
+- `dump_artifacts(context, step_id, result.artifacts)`
+
+`dump_artifacts(...)` invokes (by artifact type):
+1. `context.artifacts_dir.mkdir(...)`
+2. parquet special list path:
+- `DataFrame.to_csv(...)`
+3. generic DataFrame path:
+- `DataFrame.to_csv(...)`
+4. `OuterDict` path:
+- `artifact.dump_json(path)`
+5. path artifacts:
+- append `Path` directly
+
+#### 1.10.4 Per-step invoked helper functions (`01`..`10`)
+
+Step `01_register_resources` invokes:
+1. `configured_hcr_xlsx_paths(...)`
+2. `discover_docx_files(...)`
+3. `register_pipeline_resources(...)`
+4. `_resource_registry_frame(...)`
+5. `register_frame(...)`
+6. `context.conn.execute(...)` (create/drop registry temp table)
+
+Inside `register_pipeline_resources(...)` (called by step 01):
+1. repeated `register_resource(...)`
+2. `configured_hcr_xlsx_paths(...)`
+3. `configured_hcr_xlsx_entries(...)`
+4. `register_resources(...)` for XLSX and DOCX batches
+5. `discover_docx_files(...)`
+
+Step `02_load_xlsx` invokes:
+1. `_build_population_table(...)`
+2. `conn.execute(...).df()` for artifact load
+
+Inside `_build_population_table(...)`:
+1. `Path(resource.__fspath__())`
+2. `pd.read_excel(...)`
+3. `_normalize_hcr_header(...)`
+4. `conn.execute(...)` table existence/schema queries
+5. `register_frame(...)`
+6. `conn.execute(...)` insert/alter SQL
+
+Step `03_infer_names` invokes:
+1. `_infer_name_columns_from_xlsx(...)` (if mapping empty)
+2. `_build_name_expr(...)` twice
+3. `conn.execute(...)` create table/view SQL
+4. `conn.execute(...).df()`
+
+Inside `_infer_name_columns_from_xlsx(...)`:
+1. `pd.read_excel(...)`
+2. `_normalize_hcr_header(...)`
+3. local `pick(...)`
+
+Step `04_add_economy_priority` invokes:
+1. `_load_income_labels(...)`
+2. `pd.DataFrame(...)`
+3. `register_frame(...)`
+4. `conn.execute(...)` for table/view creation
+5. `_infer_affiliation_columns(...)`
+6. `_normalize_affiliation_map(...)`
+7. `_affiliation_case(...)` (which invokes `_affiliation_expression(...)`)
+8. `_non_english_non_eu_hics(...)`
+9. local `_countries_for(...)`
+10. local `_sql_in_list(...)`
+11. final `conn.execute(...).df()`
+
+Step `05_sample_population` invokes:
+1. local `log(...)` (delegates `context.log(...)`)
+2. `conn.execute(...).df()/fetchall()/fetchone()`
+3. `register_frame(conn, "pilot_triples", ...)`
+4. `np.random.default_rng(...)`
+5. `_precompute_draw_batches(...)`
+6. per-draw:
+- `register_frame(conn, "sample_indices", ...)`
+- `conn.execute(...).df()`
+- `_append_samples(...)`
+7. pilot append branch:
+- `_append_samples(...)`
+8. view creation SQL via `conn.execute(...)`
+9. cleanup SQL drop temp tables
+
+Step `06_build_outerdict` invokes:
+1. local `_normalize_name_part(...)`
+2. local `_name_key_json(...)`
+3. `conn.execute(...).df()`
+4. `register_frame(...)` for excluded stub + active stub
+5. `conn.execute(...)` create tables/views
+6. `NameKey(...)` model construction
+7. `OuterDict.from_name_keys(...)`
+8. `OuterDict(...)` constructor for excluded archive
+
+Step `07_match_xlsx` invokes:
+1. `conn.execute(...).fetchall()` for schema
+2. `hcr_excluded_columns(...)`
+3. `draw_sort_ctes_sql(...)`
+4. `draw_sort_order_by_sql(...)`
+5. `conn.execute(...)` create view SQL
+6. `conn.execute(...).df()`
+7. `dumps_jsonlines(...)`
+8. `register_frame(...)`
+9. `append_innerdicts_from_jsonlines_table(..., procedure=XlsxMatchProcedure(), ...)`
+10. `conn.execute(...)` create output view + load output DF
+
+Step `08_match_docx` invokes:
+1. `load_single_table_docx(context.resources.docx_resources)`
+2. `register_frame(...)`
+3. `normalize_docx_column_name(RIGHT_NAME_COL)`
+4. `draw_sort_ctes_sql(...)`
+5. `draw_sort_order_by_sql(...)`
+6. `conn.execute(...)` create match view + load DF
+7. `dumps_jsonlines(...)`
+8. `register_frame(...)`
+9. `append_innerdicts_from_jsonlines_table(..., procedure=DocxMatchProcedure(), ...)`
+10. `conn.execute(...)` create output view + load output DF
+
+Inside `load_single_table_docx(...)` (called by step 08):
+1. `Path(resource.__fspath__())`
+2. `parse_docx_tables_and_notes(path)`
+3. `normalize_docx_column_name(...)`
+4. pandas frame construction/concat
+
+Step `09_match_parquet` invokes:
+1. `normalize_parquet_column_name(...)`
+2. local `scalar_int(...)`
+3. local `log_tag(...)`
+4. multiple `conn.execute(...)` table/view materializations + metrics queries
+5. `_create_parquet_table(...)` four times for matched parquet tables
+6. `parquet_columns(...)` (inside `_create_parquet_table`)
+7. `parquet_filename(...)` (inside `_create_parquet_table` and additional filename payload paths)
+8. `draw_sort_ctes_sql(...)`
+9. `draw_sort_order_by_sql(...)`
+10. `append_innerdicts_from_rows_table(..., procedure=ParquetMatchProcedure(), key_column=KTP_SOURCE_KEY_COL)`
+11. `conn.execute(...).df()` for output dataframe
+
+Step `10_build_cards` invokes:
+1. local `log(...)`
+2. local `progress_bar(...)`
+3. local `hcr_bundle_name(...)`
+4. local callbacks `on_build_progress(...)` and `on_conversion_progress(...)`
+5. local `_filtered_outer_dict(...)` and its nested helpers:
+- `_mode_matches(...)`
+- `_extract_filenames(...)`
+- `_is_sciscinet_inner(...)`
+- `_is_exact_xlsx_match_payload(...)`
+- `_has_present_xlsx_match_payload(...)`
+- `_is_non_empty_value(...)`
+- `_has_complete_docx_table_fields(...)`
+6. `OuterDict.from_name_keys(...)` and `subset_outer.add_inner(...)`
+7. `datetime.now(ZoneInfo(...)).strftime(...)`
+8. `build_cards(...)`
+9. `write_cards_zip(...)`
+
+#### 1.10.5 Defined but not invoked on the REPL step path
+
+1. `src.steps.step_08_match_docx.load_docx_tables(...)` is defined but step `08` runtime invokes `load_single_table_docx(...)`, not `load_docx_tables(...)`.
+2. Any detour module entrypoints are not invoked by REPL path.
+
 ---
 
 ## 2) FULL End-to-End Mode-3 `p_gf` Stats Detour Walkthrough (`src/detours/detour_mode3_pgf_stats.py`)
@@ -508,6 +752,90 @@ Teardown path (always):
 1. Stop monitor.
 2. Close read-only connection if opened.
 3. Print execution metrics with peak RAM.
+
+### 2.7 Strict function invocation ledger (called functions only)
+
+#### 2.7.1 Entrypoint call tree
+
+`src.detours.detour_mode3_pgf_stats.main()` invokes:
+1. `argparse.ArgumentParser(...)`
+2. `parser.add_argument("--config", ...)`
+3. `parser.parse_args()`
+4. `PipelineConfig.from_json(args.config)`
+5. `run_detour(config)`
+6. if failure result: `RuntimeError(...)`
+7. interrupt handling: `sys.exit(130)`
+
+#### 2.7.2 Runtime call tree
+
+`run_detour(config, interactive=True, diagnostics=None)` invokes:
+1. `ResourceMonitor()`
+2. `monitor.start()`
+3. `duckdb.connect(str(config.db_file), read_only=True)`
+4. `_build_mode3_pgf_metadata(conn)`
+5. `_print_summary(metadata)`
+6. `DetourResult(...)`
+7. failure branch: `console.print(...)` red error line
+8. finally:
+- `monitor.stop()`
+- `conn.close()` (if opened)
+9. metrics rendering:
+- `Table(...)`, `add_column(...)`, `add_row(...)`, `console.print(...)`
+10. return `DetourResult`
+
+#### 2.7.3 Metadata builder call tree
+
+`_build_mode3_pgf_metadata(conn)` invokes:
+1. `_scalar_int(conn, ...)` for population row count
+2. `conn.execute(...).fetchall()` for `outerdict_stub` keys
+3. `conn.execute(...).fetchall()` for `xlsx_innerdicts`
+4. `loads_jsonlines(...)` to parse JSONL payload blobs
+5. `inner.get(KTP_XLSX_MATCH_COL)` per parsed record
+6. `conn.execute(...).fetchall()` for `ssn_innerdicts`
+7. `_has_present_xlsx_match_payload(...)` in mode-3 xlsx rule
+8. `_is_exact_xlsx_match_payload(...)` in mode-3 xlsx rule
+9. numpy/math statistics stack:
+- `np.array(...)`
+- `non_missing_values.mean()/std()/min()/max()`
+- `np.quantile(...)`
+- `math.sqrt(...)`
+- `np.sum(...)`
+10. local `_eq_count(...)` for exact-value bucket counts
+11. `_db_file_from_pragma(conn)`
+12. repeated `_pct(...)` for all percentages in metadata blocks
+
+`_scalar_int(...)` invokes:
+1. `conn.execute(sql).fetchone()`
+2. raises `RuntimeError(...)` when row missing
+
+`_db_file_from_pragma(...)` invokes:
+1. `conn.execute("PRAGMA database_list").fetchone()`
+
+`_has_present_xlsx_match_payload(...)` invokes:
+1. `value.strip()` for strings
+2. `pd.isna(value)` for non-strings
+
+`_is_exact_xlsx_match_payload(...)` invokes:
+1. `json.loads(raw)`
+2. payload field extraction `.get(...)`
+3. normalization via `str(...).strip()`
+4. sorted token-set comparisons
+
+#### 2.7.4 Summary renderer call tree
+
+`_print_summary(metadata)` invokes:
+1. `console.print(...)` header lines
+2. Rich table construction/printing for each section:
+- `Selection Counts`
+- `Mode-3 Rule Counts`
+- `p_gf Distribution`
+- `p_gf Buckets`
+- `Missing p_gf Inference Audit`
+- `Outliers (Tukey 1.5*IQR)`
+
+#### 2.7.5 Defined but not invoked on detour runtime path
+
+1. `_round_or_none(...)` is defined in this module but is not called by `main()` / `run_detour()` / `_build_mode3_pgf_metadata()` / `_print_summary()` in current code.
 
 ---
 
