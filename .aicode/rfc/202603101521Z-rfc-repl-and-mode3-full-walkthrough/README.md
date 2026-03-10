@@ -50,8 +50,8 @@
 44. If resume state marks step `07` done, `init_pipeline()` invokes `append_innerdicts_from_jsonlines_table(conn, table_name=xlsx_innerdicts, outer_dict=..., procedure=XlsxMatchProcedure())`.
 45. That helper executes SQL: `SELECT name_key, innerdicts FROM xlsx_innerdicts`, parses JSONL payload per key, constructs `InnerDict.from_mapping(...)`, and appends via `outer_dict.add_inner_by_key(...)`.
 46. If resume state marks step `08` done, `init_pipeline()` invokes `append_innerdicts_from_jsonlines_table(... table_name=docx_innerdicts, procedure=DocxMatchProcedure())`.
-47. If resume state marks step `09` done, `init_pipeline()` invokes `append_innerdicts_from_rows_table(conn, table_name=ssn_author_output, outer_dict=..., procedure=ParquetMatchProcedure())`.
-48. `append_innerdicts_from_rows_table()` executes SQL `SELECT * FROM ssn_author_output`, streams batches, reconstructs records, and appends innerdicts by `name_key`.
+47. If resume state marks step `09` done, `init_pipeline()` invokes `append_innerdicts_from_rows_table(conn, table_name=ssn_author_output, outer_dict=..., procedure=ParquetMatchProcedure())` without overriding `key_column`.
+48. `append_innerdicts_from_rows_table()` executes SQL `SELECT * FROM ssn_author_output`, then looks for default key column `name_key`; if absent, it raises `ValueError(\"Missing name_key column in ssn_author_output\")`; otherwise it streams batches, reconstructs records, and appends innerdicts.
 49. `init_pipeline()` constructs and returns `InitResult(context=PipelineContext(...), steps_to_run=..., monitor=...)`.
 50. If any init exception occurs, `init_pipeline()` invokes `monitor.stop()`, `manager.close()`, then re-raises.
 51. Back in `run_reproduction()`, it stores `context`, `steps_to_run`, and `monitor` from `init_result`.
@@ -236,7 +236,7 @@
 230. Step 09 executes SQL scalar count on `ssn_innerdicts`.
 231. Step 09 invokes `append_innerdicts_from_rows_table(conn, table_name=ssn_innerdicts, outer_dict=context.outer_dict, procedure=ParquetMatchProcedure(), key_column=ktp.source_key)`.
 232. Step 09 executes SQL: `CREATE OR REPLACE VIEW ssn_parquet_output AS WITH source_draw, base, row_ranked, ranked SELECT ... ORDER BY ...`.
-233. Step 09 executes SQL log message for number of filtered zero-hit rows.
+233. Step 09 logs (non-SQL) the number of filtered zero-hit rows via `log_tag(...)`.
 234. Step 09 executes SQL `SELECT * FROM ssn_parquet_output` into pandas output frame and returns step artifact.
 235. Step `10_build_cards.run(context)` checks `context.outer_dict` exists; else raises `ValueError`.
 236. Step 10 reads `subset_mode = int(context.config.card_subset_mode)` and validates membership in `CARD_BUILD_SUBSET_DESCRIPTIONS`.
