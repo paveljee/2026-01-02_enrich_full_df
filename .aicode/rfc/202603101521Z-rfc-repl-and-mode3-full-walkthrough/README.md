@@ -40,11 +40,11 @@
 34. `init_pipeline()` computes `steps_to_run` as full `STEP_ORDER` for `--new`, else as `[step for step in STEP_ORDER if not manager.is_done(step)]`.
 35. If `manager.is_done(STEP_REGISTER_RESOURCES)` is true, `init_pipeline()` invokes `register_pipeline_resources(config)` to hydrate `context.resources` for resume workflows.
 36. `register_pipeline_resources()` invokes many `register_resource(...)` calls for each configured parquet and world-bank file.
-37. Each `register_resource(...)` constructs `RegisteredResource(..., verify_hash_on_init=True)` and triggers hash verification against expected SHA256.
+37. `register_resource(...)` uses provided expected hash when present; otherwise it invokes `_compute_hash_via_resource(path)` first, then constructs `RegisteredResource(..., verify_hash_on_init=True)` and verifies hash on init.
 38. `register_pipeline_resources()` invokes `configured_hcr_xlsx_paths(config)` and `register_resources(...)` for HCR XLSX files.
 39. `register_pipeline_resources()` invokes `discover_docx_files(config.docx_dir)` and `register_resources(...)` for DOCX files.
 40. `discover_docx_files()` invokes `find_files_by_extension(docx_dir, "docx", recursive=False)` and filters `~$` files.
-41. If `manager.is_done(STEP_BUILD_OUTERDICT)` is true, `init_pipeline()` invokes `_load_outerdict_stub(conn, table_name=OUTERDICT_STUB_TABLE)`.
+41. If `manager.is_done(STEP_BUILD_OUTERDICT)` is true, `init_pipeline()` invokes `_load_outerdict_stub(conn, table_name=OUTERDICT_STUB_TABLE)`; and if `resources is None` in that branch, it invokes `register_pipeline_resources(config)` before hydrating resume innerdicts.
 42. `_load_outerdict_stub()` executes SQL: `SELECT name_key FROM outerdict_stub`.
 43. `_load_outerdict_stub()` invokes `NameKey.from_json_key(...)` for each row and then `OuterDict.from_name_keys(...)`.
 44. If resume state marks step `07` done, `init_pipeline()` invokes `append_innerdicts_from_jsonlines_table(conn, table_name=xlsx_innerdicts, outer_dict=..., procedure=XlsxMatchProcedure())`.
@@ -159,8 +159,8 @@
 153. It executes SQL: `CREATE OR REPLACE TABLE outerdict_stub_excluded AS SELECT * FROM outerdict_excluded_stub_frame`.
 154. It executes SQL: `DROP TABLE IF EXISTS outerdict_excluded_stub_frame`.
 155. It executes SQL: `CREATE OR REPLACE VIEW outerdict_name_keys_excluded AS SELECT name_key AS ktp.source_key, json_extract_string(...) AS ktp.first_name, json_extract_string(...) AS ktp.last_name FROM outerdict_stub_excluded`.
-156. It executes SQL: `SELECT DISTINCT ktp.first_name, ktp.last_name FROM samples_with_names` to get valid names.
-157. It constructs `NameKey(...)` objects and invokes `OuterDict.from_name_keys(name_keys)`; assigns to `context.outer_dict`.
+156. It executes SQL: `SELECT DISTINCT ktp.first_name, ktp.last_name FROM samples_with_names`; then pandas-side filtering drops null/empty pairs before key construction.
+157. It constructs `NameKey(...)` objects and invokes `OuterDict.from_name_keys(name_keys)`; assigns to `context.outer_dict`; it also constructs `outer_dict_excluded = OuterDict(data={name_key_json: [] ...})` for excluded null/empty-name keys.
 158. It builds active stub DataFrame and invokes `register_frame(conn, "outerdict_stub_frame", ...)`.
 159. It executes SQL: `CREATE OR REPLACE TABLE outerdict_stub AS SELECT * FROM outerdict_stub_frame`.
 160. It executes SQL: `DROP TABLE IF EXISTS outerdict_stub_frame`.
@@ -180,7 +180,7 @@
 174. It executes SQL: `CREATE OR REPLACE VIEW xlsx_output AS WITH base AS (SELECT * FROM xlsx_matches WHERE ktp.filename IS NOT NULL), row_ranked, ranked SELECT ... ORDER BY ...`.
 175. It executes SQL `SELECT * FROM xlsx_output` and returns artifact.
 176. Step `08_match_docx.run(context)` invokes `load_single_table_docx(context.resources.docx_resources)`.
-177. `load_single_table_docx()` loops resources, skips `~$` files, invokes `parse_docx_tables_and_notes(path)`, enforces exactly one table, normalizes columns with `normalize_docx_column_name(...)`, adds `ktp.docx_footnotes`, `ktp.docx_comments`, `ktp.filename`, and `ktp.docx.row_number`.
+177. `load_single_table_docx()` loops resources, skips `~$` files, invokes `parse_docx_tables_and_notes(path)`, enforces exactly one table, normalizes columns with `normalize_docx_column_name(...)`, adds `ktp.table_1_footnotes`, `ktp.table_1_comments`, `ktp.filename`, and `ktp.table_1_row_number`.
 178. If parse mismatch occurs (bad zip, row-comment count mismatch, missing table), it raises descriptive `ValueError`.
 179. Step 08 invokes `register_frame(conn, "docx_frame", docx_df)`.
 180. Step 08 executes SQL: `CREATE OR REPLACE TABLE docx_rows AS SELECT * FROM docx_frame`.
@@ -205,18 +205,18 @@
 199. Step 09 executes SQL: `CREATE OR REPLACE TABLE ssn_author_matches AS WITH names, parq AS (...) SELECT DISTINCT ... FROM names JOIN parq ON lower(unaccent(p.alt_name)) = n.match_key_norm`.
 200. `parq` CTE unions exploded `display_name_alternatives` and direct `display_name` rows from `read_parquet(author_details_path)`.
 201. Step 09 executes SQL aggregate stats query on `ssn_author_matches` for row/name/author counts.
-202. Step 09 executes SQL: `CREATE OR REPLACE TABLE ssn_author_papers AS SELECT m.name_key, m.authorid, pap.paperid FROM ssn_author_matches m JOIN read_parquet(authors_paper_path) pap ON pap.authorid = m.authorid`.
+202. Step 09 executes SQL: `CREATE OR REPLACE TABLE ssn_author_papers AS SELECT m.name_key, m."ssnad.authorid" AS authorid, pap.paperid FROM ssn_author_matches m JOIN read_parquet(authors_paper_path) pap ON pap.authorid = m."ssnad.authorid"`.
 203. Step 09 executes SQL stats query on `ssn_author_papers` for row/pair/paper counts.
 204. Step 09 executes SQL: `CREATE OR REPLACE TABLE ssn_all_hits AS WITH needed_papers AS (SELECT DISTINCT paperid FROM ssn_author_papers) SELECT ... FROM read_parquet(hit_papers_0) JOIN needed_papers UNION ALL SELECT ... FROM read_parquet(hit_papers_1) JOIN needed_papers`.
 205. Step 09 executes SQL stats query on `ssn_all_hits`.
-206. Step 09 executes SQL: `CREATE OR REPLACE TABLE ssn_author_hit_agg AS SELECT ap.name_key, ap.authorid, SUM(COALESCE(h.hit_1pct,0)) AS ktp.ssn.sum_hit_1pct FROM ssn_author_papers ap LEFT JOIN ssn_all_hits h ON ap.paperid=h.paperid GROUP BY ap.name_key, ap.authorid`.
+206. Step 09 executes SQL: `CREATE OR REPLACE TABLE ssn_author_hit_agg AS SELECT ap.name_key, ap.authorid, SUM(COALESCE(h.hit_1pct,0)) AS "ktp.ssn_sum_hit_1pct" FROM ssn_author_papers ap LEFT JOIN ssn_all_hits h ON ap.paperid=h.paperid GROUP BY ap.name_key, ap.authorid`.
 207. Step 09 executes SQL stats query on `ssn_author_hit_agg` (zero/nonzero/null counts).
 208. Step 09 executes SQL count query for zero-hit rows removed.
-209. Step 09 executes SQL: `CREATE OR REPLACE VIEW ssn_author_matches_nonzero_hit AS SELECT m.* FROM ssn_author_matches m LEFT JOIN ssn_author_hit_agg agg ON ... WHERE agg.sum_hit IS NULL OR agg.sum_hit <> 0`.
+209. Step 09 executes SQL: `CREATE OR REPLACE VIEW ssn_author_matches_nonzero_hit AS SELECT m.* FROM ssn_author_matches m LEFT JOIN ssn_author_hit_agg agg ON ... WHERE agg."ktp.ssn_sum_hit_1pct" IS NULL OR agg."ktp.ssn_sum_hit_1pct" <> 0`.
 210. Step 09 executes SQL stats query on `ssn_author_matches_nonzero_hit`.
-211. Step 09 executes SQL: `CREATE OR REPLACE VIEW ssn_author_match_nonzero_hit_author_ids AS SELECT DISTINCT authorid FROM ssn_author_matches_nonzero_hit`.
+211. Step 09 executes SQL: `CREATE OR REPLACE VIEW ssn_author_match_nonzero_hit_author_ids AS SELECT DISTINCT "ssnad.authorid" FROM ssn_author_matches_nonzero_hit`.
 212. Step 09 executes SQL scalar count on that distinct-author-id view.
-213. Step 09 executes SQL: `CREATE OR REPLACE TABLE ssn_author_agg AS SELECT ap.name_key, ap.authorid, SUM(...), LIST(paperid) FILTER(level0), LIST(paperid) FILTER(level1), LIST(DISTINCT fieldid) FROM ssn_author_papers ap LEFT JOIN ssn_all_hits h ... WHERE EXISTS (SELECT 1 FROM ssn_author_matches_nonzero_hit ...) GROUP BY ap.name_key, ap.authorid`.
+213. Step 09 executes SQL: `CREATE OR REPLACE TABLE ssn_author_agg AS SELECT ap.name_key, ap.authorid, SUM(COALESCE(h.hit_1pct,0)) AS "ktp.ssn_sum_hit_1pct", LIST(ap.paperid) FILTER (WHERE h.level='level0') AS "ssn.paperids_level0", LIST(ap.paperid) FILTER (WHERE h.level='level1') AS "ssn.paperids_level1", LIST(DISTINCT h.fieldid) AS "ssn.field_ids_list" FROM ssn_author_papers ap LEFT JOIN ssn_all_hits h ... WHERE EXISTS (SELECT 1 FROM ssn_author_matches_nonzero_hit ...) GROUP BY ap.name_key, ap.authorid`.
 214. Step 09 executes SQL scalar count on `ssn_author_agg`.
 215. Step 09 invokes `_create_parquet_table(...)` for matched `author_details` table.
 216. `_create_parquet_table()` invokes `parquet_columns(conn, path)` (which runs `DESCRIBE SELECT * FROM read_parquet('<path>')`).
@@ -226,7 +226,7 @@
 220. Step 09 repeats `_create_parquet_table(...)` for matched `paper_author_affiliation` table (joined by distinct nonzero author ids).
 221. Step 09 repeats `_create_parquet_table(...)` for matched `affiliations` table (joined by distinct institution ids derived from matched paper-author-affiliation rows).
 222. Step 09 executes SQL counts for each matched parquet-derived table.
-223. Step 09 executes SQL: `CREATE OR REPLACE TABLE ssn_author_output AS SELECT m.name_key AS ktp.source_key, ... a.*, au.*, CAST(agg.paperids_level0 AS VARCHAR), CAST(agg.paperids_level1 AS VARCHAR), CAST(agg.field_ids_list AS VARCHAR), agg.sum_hit FROM ssn_author_matches_nonzero_hit m JOIN <matched_author_details> a ... JOIN <matched_authors> au ... LEFT JOIN ssn_author_agg agg ...`.
+223. Step 09 executes SQL: `CREATE OR REPLACE TABLE ssn_author_output AS SELECT m.name_key AS ktp.source_key, ... a.*, au.*, CAST(agg."ssn.paperids_level0" AS VARCHAR), CAST(agg."ssn.paperids_level1" AS VARCHAR), CAST(agg."ssn.field_ids_list" AS VARCHAR), agg."ktp.ssn_sum_hit_1pct" FROM ssn_author_matches_nonzero_hit m JOIN <matched_author_details> a ... JOIN <matched_authors> au ... LEFT JOIN ssn_author_agg agg ...`.
 224. Step 09 executes SQL scalar count on `ssn_author_output`.
 225. Step 09 executes SQL diagnostic query estimating top-works reduction (`SUM(paper_count)` vs `SUM(LEAST(paper_count, TOP_K_WORKS))`).
 226. Step 09 executes SQL diagnostic query estimating top-institutions reduction (`SUM(institution_count)` vs `SUM(LEAST(..., TOP_K_INSTITUTIONS))`).
@@ -243,7 +243,7 @@
 237. Step 10 defines logging/progress closures and helper predicate closures used for subset filtering.
 238. `_extract_filenames(value)` parses filenames from scalar string/list/json-list payloads.
 239. `_is_sciscinet_inner(inner, sciscinet_filenames)` checks if any filename fields intersect SciSciNet resource names.
-240. `_is_exact_xlsx_match_payload(value)` parses JSON and enforces exact token/last-name equivalence.
+240. `_is_exact_xlsx_match_payload(value)` treats `None`/blank/non-string payloads as non-failing in that helper path, and for non-blank strings parses JSON then enforces exact token/last-name equivalence.
 241. `_has_present_xlsx_match_payload(value)` defines non-empty payload presence.
 242. `_is_non_empty_value(value)` handles string emptiness/placeholder semantics for docx fields.
 243. `_has_complete_docx_table_fields(inner)` requires non-empty required `ktp.table_1_*` fields (except optional-empty set).
@@ -286,7 +286,7 @@
 22. For each key, computes `sciscinet_exactly_one_ok = (count == 1)`.
 23. For each key, computes xlsx rule `xlsx_exact_ok = any(_has_present_xlsx_match_payload(v) for v in payloads) and all(_is_exact_xlsx_match_payload(v) for v in payloads)`.
 24. `_has_present_xlsx_match_payload(value)` returns false for `None`, false for blank strings, otherwise true unless `pd.isna(value)` for non-strings.
-25. `_is_exact_xlsx_match_payload(value)` returns true for absent/blank by design path, else parses JSON and verifies exact token/last-name equivalence between source-key fields and matched-pop fields.
+25. `_is_exact_xlsx_match_payload(value)` returns true for absent/blank/non-string by design path, else parses JSON and verifies exact token/last-name equivalence between source-key fields and matched-pop fields.
 26. If key passes both rules, it is added to mode-3 selected set.
 27. For selected keys, detour enforces invariant `len(sciscinet_rows_for_key) == 1`; otherwise raises runtime error.
 28. For selected key, it appends `p_gf` to distribution list.
