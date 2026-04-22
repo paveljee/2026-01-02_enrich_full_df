@@ -207,12 +207,19 @@ def _build_mode3_pgf_metadata(conn: duckdb.DuckDBPyConnection) -> dict[str, Any]
             else:
                 mode3_non_missing_keys.append(name_key)
 
-    mode3_selected_population_rows = sum(
-        len(xlsx_population_rows_by_key.get(name_key, set())) for name_key in mode3_selected_keys
+    mode3_selected_population_rows = len(
+        {
+            row_id
+            for name_key in mode3_selected_keys
+            for row_id in xlsx_population_rows_by_key.get(name_key, set())
+        }
     )
-    pgf_non_missing_population_rows = sum(
-        len(xlsx_population_rows_by_key.get(name_key, set()))
-        for name_key in mode3_non_missing_keys
+    pgf_non_missing_population_rows = len(
+        {
+            row_id
+            for name_key in mode3_non_missing_keys
+            for row_id in xlsx_population_rows_by_key.get(name_key, set())
+        }
     )
 
     selected_names = len(mode3_selected_keys)

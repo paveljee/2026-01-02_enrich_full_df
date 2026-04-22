@@ -180,7 +180,9 @@ def _build_fixture_db(path: Path) -> dict[str, int]:
             ),
             xrow(
                 keys["sel_half"],
-                exact_rows([("2019_HCR.xlsx", "11")], ["sel"], "half"),
+                # Intentionally overlap this persisted row identity with sel_zero to prove
+                # population-row coverage is counted as a union across selected name keys.
+                exact_rows([("2019_HCR.xlsx", "10")], ["sel"], "half"),
             ),
             xrow(
                 keys["sel_one"],
@@ -269,8 +271,8 @@ def _build_fixture_db(path: Path) -> dict[str, int]:
             "outerdict_rows": len(outer_rows),
             "xlsx_innerdict_rows": len(xlsx_rows),
             "ssn_innerdict_rows": len(ssn_rows),
-            "mode3_selected_population_rows": 7,
-            "pgf_non_missing_population_rows": 6,
+            "mode3_selected_population_rows": 6,
+            "pgf_non_missing_population_rows": 5,
         }
     finally:
         con.close()
@@ -331,11 +333,11 @@ def test_detour_contract_and_mode3_stats_readonly(
     assert counts["outerdict_keys"] == baseline_counts["outerdict_rows"]
     assert counts["mode3_selected_names"] == 6
     assert counts["mode3_selected_population_rows"] == baseline_counts["mode3_selected_population_rows"]
-    assert counts["mode3_selected_pct_of_population_rows"] == pytest.approx(7.0)
+    assert counts["mode3_selected_pct_of_population_rows"] == pytest.approx(6.0)
     assert counts["pgf_non_missing"] == 5
     assert counts["pgf_missing"] == 1
     assert counts["pgf_non_missing_population_rows"] == baseline_counts["pgf_non_missing_population_rows"]
-    assert counts["pgf_non_missing_pct_of_population_rows"] == pytest.approx(6.0)
+    assert counts["pgf_non_missing_pct_of_population_rows"] == pytest.approx(5.0)
 
     rules = md["rule_counts"]
     assert rules["sciscinet_exactly_one_pass"] == 8  # all except multi and zero-sciscinet
