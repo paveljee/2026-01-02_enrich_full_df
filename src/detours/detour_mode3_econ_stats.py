@@ -28,7 +28,11 @@ from src.helpers.vars import (
     KTP_ECONOMIES_COL,
     KTP_ECONOMIES_INCOME_GROUP_COL,
     KTP_FILENAME_COL,
+    KTP_FIRST_NAME_COL,
     KTP_FRAGMENT_COL,
+    KTP_HCR_PRIMARY_AFFILIATIONS_COL,
+    KTP_HCR_SECONDARY_AFFILIATIONS_COL,
+    KTP_LAST_NAME_COL,
     KTP_PRIORITY_GROUP_COL,
     KTP_PRIORITY_GROUP_LABELS,
     KTP_SOURCE_KEY_COL,
@@ -59,6 +63,7 @@ PRIORITY_GROUP_PRECEDENCE = [
     KTP_PRIORITY_GROUP_LABELS[5],
     KTP_PRIORITY_GROUP_LABELS[1],
 ]
+PRIORITY_GROUP_PRECEDENCE_LOW_FIRST = list(reversed(PRIORITY_GROUP_PRECEDENCE))
 PRIORITY_GROUP_RULES = [
     {
         "label": KTP_PRIORITY_GROUP_LABELS[2],
@@ -93,6 +98,12 @@ INCOME_GROUP_ORDER = [
     OGHIST_INCOME_LABELS["UM"],
     OGHIST_INCOME_LABELS["LM"],
     OGHIST_INCOME_LABELS["L"],
+]
+INCOME_GROUP_ORDER_LOW_FIRST = [
+    OGHIST_INCOME_LABELS["L"],
+    OGHIST_INCOME_LABELS["LM"],
+    OGHIST_INCOME_LABELS["UM"],
+    OGHIST_INCOME_LABELS["H"],
 ]
 
 
@@ -229,6 +240,92 @@ def _normalize_optional_label(value: object) -> str | None:
         return None
     raw = str(value).strip()
     return raw or None
+
+
+def _ordered_labels(observed: set[str], preferred: list[str]) -> list[str]:
+    preferred_set = set(preferred)
+    ordered = [label for label in preferred if label in observed]
+    ordered.extend(sorted(label for label in observed if label not in preferred_set))
+    return ordered
+
+
+def _preferred_income_group_for_countries(
+    countries: set[str] | list[str],
+    country_to_income: dict[str, str],
+    precedence: list[str],
+) -> str | None:
+    observed = {
+        income_group
+        for country in countries
+        if (income_group := country_to_income.get(country)) is not None
+    }
+    for label in precedence:
+        if label in observed:
+            return label
+    if observed:
+        return sorted(observed)[0]
+    return None
+
+
+def _preferred_label(observed: set[str], precedence: list[str]) -> str | None:
+    for label in precedence:
+        if label in observed:
+            return label
+    if observed:
+        return sorted(observed)[0]
+    return None
+
+
+def _preferred_priority_group_for_countries(
+    countries: set[str] | list[str],
+    priority_sets: dict[str, set[str]],
+    precedence: list[str],
+) -> str:
+    if not countries:
+        return KTP_PRIORITY_GROUP_LABELS[1]
+    observed = {_priority_group_for_country(country, priority_sets) for country in countries}
+    preferred = _preferred_label(observed, precedence)
+    if preferred is None:
+        return KTP_PRIORITY_GROUP_LABELS[1]
+    return preferred
+
+
+def _parse_name_key(name_key: str) -> tuple[str | None, str | None]:
+    try:
+        parsed = json.loads(name_key)
+    except json.JSONDecodeError:
+        return None, None
+    if not isinstance(parsed, dict):
+        return None, None
+    first_name = _normalize_optional_label(parsed.get(KTP_FIRST_NAME_COL))
+    last_name = _normalize_optional_label(parsed.get(KTP_LAST_NAME_COL))
+    return first_name, last_name
+
+
+def _display_name(name_key: str, rows: list[dict[str, object]]) -> str:
+    first_name, last_name = _parse_name_key(name_key)
+    if first_name is None:
+        for row in rows:
+            if (first_name := _normalize_optional_label(row.get(KTP_FIRST_NAME_COL))) is not None:
+                break
+    if last_name is None:
+        for row in rows:
+            if (last_name := _normalize_optional_label(row.get(KTP_LAST_NAME_COL))) is not None:
+                break
+
+    if last_name and first_name:
+        return f"{last_name}, {first_name}"
+    if last_name:
+        return last_name
+    if first_name:
+        return first_name
+    return name_key
+
+
+def _join_display(values: list[str], delimiter: str = " | ") -> str:
+    if not values:
+        return MISSING_BREAKDOWN_LABEL
+    return delimiter.join(values)
 
 
 def _load_income_label_maps_from_db(
@@ -382,6 +479,7 @@ def _build_mode3_econ_metadata(
     name_countries_by_key: dict[str, set[str]] = defaultdict(set)
     name_row_income_groups_by_key: dict[str, set[str]] = defaultdict(set)
     name_row_priority_groups_by_key: dict[str, set[str]] = defaultdict(set)
+    name_row_ids_by_key: dict[str, set[tuple[str, str]]] = defaultdict(set)
     selected_row_ids: set[tuple[str, str]] = set()
     selected_row_countries_by_id: dict[tuple[str, str], set[str]] = defaultdict(set)
     selected_row_income_group_by_id: dict[tuple[str, str], str | None] = {}
@@ -406,6 +504,7 @@ def _build_mode3_econ_metadata(
         for inner in xlsx_rows_by_key.get(name_key, []):
             row_id = (str(inner[KTP_FILENAME_COL]), str(inner[KTP_FRAGMENT_COL]))
             selected_row_ids.add(row_id)
+            name_row_ids_by_key[name_key].add(row_id)
 
             countries = set(_normalize_country_list(inner.get(KTP_ECONOMIES_COL)))
             selected_row_countries_by_id[row_id].update(countries)
@@ -502,9 +601,7 @@ def _build_mode3_econ_metadata(
         raise RuntimeError("Bucket partition invariant failed for mode-3 country cardinality.")
 
     income_row_counts: dict[str, int] = defaultdict(int)
-    income_name_coverage: dict[str, int] = defaultdict(int)
     priority_row_counts: dict[str, int] = defaultdict(int)
-    priority_name_coverage: dict[str, int] = defaultdict(int)
 
     for row_id in selected_row_ids:
         income_group = selected_row_income_group_by_id.get(row_id)
@@ -513,12 +610,6 @@ def _build_mode3_econ_metadata(
         priority_group = selected_row_priority_group_by_id.get(row_id)
         if priority_group is not None:
             priority_row_counts[priority_group] += 1
-
-    for name_key in mode3_selected_keys:
-        for income_group in name_row_income_groups_by_key.get(name_key, set()):
-            income_name_coverage[income_group] += 1
-        for priority_group in name_row_priority_groups_by_key.get(name_key, set()):
-            priority_name_coverage[priority_group] += 1
 
     selected_names_without_income_group = sum(
         not name_row_income_groups_by_key.get(name_key) for name_key in mode3_selected_keys
@@ -548,12 +639,27 @@ def _build_mode3_econ_metadata(
     selected_rows_missing_priority_group = (
         mode3_selected_population_rows - selected_population_rows_with_priority_group
     )
+    selected_row_lower_tier_income_group_by_id: dict[tuple[str, str], str | None] = {}
+    lower_tier_income_row_counts: dict[str, int] = defaultdict(int)
+
+    for row_id in selected_row_ids:
+        lower_tier_income_group = _preferred_income_group_for_countries(
+            selected_row_countries_by_id.get(row_id, set()),
+            country_to_income,
+            INCOME_GROUP_ORDER_LOW_FIRST,
+        )
+        selected_row_lower_tier_income_group_by_id[row_id] = lower_tier_income_group
+        if lower_tier_income_group is not None:
+            lower_tier_income_row_counts[lower_tier_income_group] += 1
+
+    selected_rows_missing_lower_tier_income_group = sum(
+        selected_row_lower_tier_income_group_by_id.get(row_id) is None
+        for row_id in selected_row_ids
+    )
 
     income_breakdown = [
         {
             "income_group": label,
-            "selected_names": income_name_coverage.get(label, 0),
-            "pct_of_mode3_selected_names": _pct(income_name_coverage.get(label, 0), selected_names),
             "selected_population_rows": income_row_counts.get(label, 0),
             "pct_of_selected_population_rows": _pct(
                 income_row_counts.get(label, 0), mode3_selected_population_rows
@@ -567,13 +673,33 @@ def _build_mode3_econ_metadata(
     income_breakdown.append(
         {
             "income_group": MISSING_BREAKDOWN_LABEL,
-            "selected_names": selected_names_without_income_group,
-            "pct_of_mode3_selected_names": _pct(
-                selected_names_without_income_group, selected_names
-            ),
             "selected_population_rows": selected_rows_missing_income_group,
             "pct_of_selected_population_rows": _pct(
                 selected_rows_missing_income_group, mode3_selected_population_rows
+            ),
+            "pct_of_non_missing_selected_population_rows": None,
+        }
+    )
+    income_breakdown_lower_tier_preferred = [
+        {
+            "income_group": label,
+            "selected_population_rows": lower_tier_income_row_counts.get(label, 0),
+            "pct_of_selected_population_rows": _pct(
+                lower_tier_income_row_counts.get(label, 0), mode3_selected_population_rows
+            ),
+            "pct_of_non_missing_selected_population_rows": _pct(
+                lower_tier_income_row_counts.get(label, 0),
+                mode3_selected_population_rows - selected_rows_missing_lower_tier_income_group,
+            ),
+        }
+        for label in INCOME_GROUP_ORDER_LOW_FIRST
+    ]
+    income_breakdown_lower_tier_preferred.append(
+        {
+            "income_group": MISSING_BREAKDOWN_LABEL,
+            "selected_population_rows": selected_rows_missing_lower_tier_income_group,
+            "pct_of_selected_population_rows": _pct(
+                selected_rows_missing_lower_tier_income_group, mode3_selected_population_rows
             ),
             "pct_of_non_missing_selected_population_rows": None,
         }
@@ -582,10 +708,6 @@ def _build_mode3_econ_metadata(
     priority_breakdown = [
         {
             "priority_group": label,
-            "selected_names": priority_name_coverage.get(label, 0),
-            "pct_of_mode3_selected_names": _pct(
-                priority_name_coverage.get(label, 0), selected_names
-            ),
             "selected_population_rows": priority_row_counts.get(label, 0),
             "pct_of_selected_population_rows": _pct(
                 priority_row_counts.get(label, 0), mode3_selected_population_rows
@@ -599,10 +721,6 @@ def _build_mode3_econ_metadata(
     priority_breakdown.append(
         {
             "priority_group": MISSING_BREAKDOWN_LABEL,
-            "selected_names": selected_names_without_priority_group,
-            "pct_of_mode3_selected_names": _pct(
-                selected_names_without_priority_group, selected_names
-            ),
             "selected_population_rows": selected_rows_missing_priority_group,
             "pct_of_selected_population_rows": _pct(
                 selected_rows_missing_priority_group, mode3_selected_population_rows
@@ -610,6 +728,114 @@ def _build_mode3_econ_metadata(
             "pct_of_non_missing_selected_population_rows": None,
         }
     )
+
+    name_derived_income_groups_by_key: dict[str, set[str]] = {}
+    name_derived_priority_groups_by_key: dict[str, set[str]] = {}
+    name_final_income_group_high_by_key: dict[str, str] = {}
+    name_final_income_group_low_by_key: dict[str, str] = {}
+    name_final_priority_group_high_by_key: dict[str, str] = {}
+    name_final_priority_group_low_by_key: dict[str, str] = {}
+    derived_name_group_breakdown_higher_preferred: list[dict[str, Any]] = []
+    derived_name_group_breakdown_lower_preferred: list[dict[str, Any]] = []
+
+    higher_income_name_counts: dict[str, int] = defaultdict(int)
+    lower_income_name_counts: dict[str, int] = defaultdict(int)
+    higher_priority_name_counts: dict[str, int] = defaultdict(int)
+    lower_priority_name_counts: dict[str, int] = defaultdict(int)
+
+    for name_key in mode3_selected_keys:
+        countries = name_countries_by_key.get(name_key, set())
+        derived_income_groups = {
+            income_group
+            for country in countries
+            if (income_group := country_to_income.get(country)) is not None
+        }
+        derived_priority_groups = {
+            _priority_group_for_country(country, priority_sets) for country in countries
+        }
+        name_derived_income_groups_by_key[name_key] = derived_income_groups
+        name_derived_priority_groups_by_key[name_key] = derived_priority_groups
+
+        higher_income_label = _preferred_income_group_for_countries(
+            countries,
+            country_to_income,
+            INCOME_GROUP_ORDER,
+        )
+        lower_income_label = _preferred_income_group_for_countries(
+            countries,
+            country_to_income,
+            INCOME_GROUP_ORDER_LOW_FIRST,
+        )
+        higher_priority_label = _preferred_priority_group_for_countries(
+            countries,
+            priority_sets,
+            PRIORITY_GROUP_PRECEDENCE,
+        )
+        lower_priority_label = _preferred_priority_group_for_countries(
+            countries,
+            priority_sets,
+            PRIORITY_GROUP_PRECEDENCE_LOW_FIRST,
+        )
+
+        name_final_income_group_high_by_key[name_key] = (
+            higher_income_label if higher_income_label is not None else MISSING_BREAKDOWN_LABEL
+        )
+        name_final_income_group_low_by_key[name_key] = (
+            lower_income_label if lower_income_label is not None else MISSING_BREAKDOWN_LABEL
+        )
+        name_final_priority_group_high_by_key[name_key] = higher_priority_label
+        name_final_priority_group_low_by_key[name_key] = lower_priority_label
+
+        higher_income_name_counts[name_final_income_group_high_by_key[name_key]] += 1
+        lower_income_name_counts[name_final_income_group_low_by_key[name_key]] += 1
+        higher_priority_name_counts[higher_priority_label] += 1
+        lower_priority_name_counts[lower_priority_label] += 1
+
+    for label in [*INCOME_GROUP_ORDER, MISSING_BREAKDOWN_LABEL]:
+        derived_name_group_breakdown_higher_preferred.append(
+            {
+                "group_type": "Income group",
+                "label": label,
+                "selected_names": higher_income_name_counts.get(label, 0),
+                "pct_of_mode3_selected_names": _pct(
+                    higher_income_name_counts.get(label, 0), selected_names
+                ),
+            }
+        )
+    for label in [*PRIORITY_GROUP_PRECEDENCE, MISSING_BREAKDOWN_LABEL]:
+        derived_name_group_breakdown_higher_preferred.append(
+            {
+                "group_type": "Priority group",
+                "label": label,
+                "selected_names": higher_priority_name_counts.get(label, 0),
+                "pct_of_mode3_selected_names": _pct(
+                    higher_priority_name_counts.get(label, 0), selected_names
+                ),
+            }
+        )
+
+    for label in [*INCOME_GROUP_ORDER_LOW_FIRST, MISSING_BREAKDOWN_LABEL]:
+        derived_name_group_breakdown_lower_preferred.append(
+            {
+                "group_type": "Income group",
+                "label": label,
+                "selected_names": lower_income_name_counts.get(label, 0),
+                "pct_of_mode3_selected_names": _pct(
+                    lower_income_name_counts.get(label, 0), selected_names
+                ),
+            }
+        )
+    for label in [*PRIORITY_GROUP_PRECEDENCE_LOW_FIRST, MISSING_BREAKDOWN_LABEL]:
+        derived_name_group_breakdown_lower_preferred.append(
+            {
+                "group_type": "Priority group",
+                "label": label,
+                "selected_names": lower_priority_name_counts.get(label, 0),
+                "pct_of_mode3_selected_names": _pct(
+                    lower_priority_name_counts.get(label, 0), selected_names
+                ),
+            }
+        )
 
     multi_country_names = 0
     multi_country_different_income_groups = 0
@@ -631,6 +857,91 @@ def _build_mode3_econ_metadata(
             multi_country_different_income_groups += 1
         if len(derived_priority_groups) > 1:
             multi_country_different_priority_groups += 1
+
+    researcher_profiles: list[dict[str, Any]] = []
+    for name_key in mode3_selected_keys:
+        rows = xlsx_rows_by_key.get(name_key, [])
+        sorted_countries = sorted(name_countries_by_key.get(name_key, set()))
+        primary_affiliations = sorted(
+            {
+                value
+                for row in rows
+                if (value := _normalize_optional_label(row.get(KTP_HCR_PRIMARY_AFFILIATIONS_COL)))
+                is not None
+            }
+        )
+        secondary_affiliations = sorted(
+            {
+                value
+                for row in rows
+                if (
+                    value := _normalize_optional_label(row.get(KTP_HCR_SECONDARY_AFFILIATIONS_COL))
+                )
+                is not None
+            }
+        )
+        derived_country_income_groups = _ordered_labels(
+            name_derived_income_groups_by_key.get(name_key, set()),
+            INCOME_GROUP_ORDER_LOW_FIRST,
+        )
+        derived_country_priority_groups = _ordered_labels(
+            name_derived_priority_groups_by_key.get(name_key, set()),
+            PRIORITY_GROUP_PRECEDENCE,
+        )
+        researcher_profiles.append(
+            {
+                "name_key": name_key,
+                "researcher_name": _display_name(name_key, rows),
+                "selected_population_row_count": len(name_row_ids_by_key.get(name_key, set())),
+                "country_count": len(sorted_countries),
+                "countries": sorted_countries,
+                "primary_affiliations": primary_affiliations,
+                "secondary_affiliations": secondary_affiliations,
+                "row_income_groups": _ordered_labels(
+                    name_row_income_groups_by_key.get(name_key, set()),
+                    INCOME_GROUP_ORDER,
+                ),
+                "lower_tier_row_income_groups": _ordered_labels(
+                    {
+                        lower_tier_label
+                        for row_id in name_row_ids_by_key.get(name_key, set())
+                        if (
+                            lower_tier_label := selected_row_lower_tier_income_group_by_id.get(
+                                row_id
+                            )
+                        ) is not None
+                    },
+                    INCOME_GROUP_ORDER_LOW_FIRST,
+                ),
+                "derived_country_income_groups": derived_country_income_groups,
+                "derived_country_priority_groups": derived_country_priority_groups,
+                "final_income_group_high": name_final_income_group_high_by_key[name_key],
+                "final_income_group_low": name_final_income_group_low_by_key[name_key],
+                "final_priority_group_high": name_final_priority_group_high_by_key[name_key],
+                "final_priority_group_low": name_final_priority_group_low_by_key[name_key],
+                "row_priority_groups": _ordered_labels(
+                    name_row_priority_groups_by_key.get(name_key, set()),
+                    PRIORITY_GROUP_PRECEDENCE,
+                ),
+            }
+        )
+
+    researcher_profiles.sort(key=lambda row: (row["researcher_name"], row["name_key"]))
+    researcher_detail_highlights = {
+        "any_low_income_affiliated_country": [
+            row
+            for row in researcher_profiles
+            if OGHIST_INCOME_LABELS["L"] in row["derived_country_income_groups"]
+        ],
+        "missing_income_group": [
+            row
+            for row in researcher_profiles
+            if row["final_income_group_high"] == MISSING_BREAKDOWN_LABEL
+        ],
+        "four_or_more_countries": [
+            row for row in researcher_profiles if row["country_count"] >= 4
+        ],
+    }
 
     return {
         "detour_id": DETOUR_ID,
@@ -719,7 +1030,14 @@ def _build_mode3_econ_metadata(
             "exact_4_or_more_pct_of_mode3": _pct(bucket_4_or_more, selected_names),
         },
         "income_group_breakdown": income_breakdown,
+        "income_group_breakdown_lower_tier_preferred": income_breakdown_lower_tier_preferred,
         "priority_group_breakdown": priority_breakdown,
+        "derived_name_group_breakdown_higher_preferred": (
+            derived_name_group_breakdown_higher_preferred
+        ),
+        "derived_name_group_breakdown_lower_preferred": (
+            derived_name_group_breakdown_lower_preferred
+        ),
         "multi_country_divergence": {
             "multi_country_names": multi_country_names,
             "multi_country_pct_of_mode3": _pct(multi_country_names, selected_names),
@@ -756,6 +1074,7 @@ def _build_mode3_econ_metadata(
             "selected_rows_missing_income_group": selected_rows_missing_income_group,
             "selected_rows_missing_priority_group": selected_rows_missing_priority_group,
         },
+        "researcher_detail_highlights": researcher_detail_highlights,
     }
 
 
@@ -765,10 +1084,18 @@ def _print_summary(metadata: dict[str, Any]) -> None:
     dist = metadata["country_cardinality_distribution"]
     buckets = metadata["country_cardinality_buckets"]
     income_breakdown = metadata["income_group_breakdown"]
+    income_breakdown_lower_tier_preferred = metadata["income_group_breakdown_lower_tier_preferred"]
     priority_breakdown = metadata["priority_group_breakdown"]
+    derived_name_group_breakdown_higher_preferred = metadata[
+        "derived_name_group_breakdown_higher_preferred"
+    ]
+    derived_name_group_breakdown_lower_preferred = metadata[
+        "derived_name_group_breakdown_lower_preferred"
+    ]
     divergence = metadata["multi_country_divergence"]
     audit = metadata["label_coverage_consistency_audit"]
     outliers = metadata["country_cardinality_outliers_tukey"]
+    highlights = metadata["researcher_detail_highlights"]
 
     console.print("[cyan]Mode-3 Economy Stats Detour (read-only)[/cyan]")
     console.print(f"[white]DB: {metadata['db_file']}[/white]")
@@ -928,40 +1255,95 @@ def _print_summary(metadata: dict[str, Any]) -> None:
     )
     console.print(bucket_table)
 
+    console.print(
+        "[white]Persisted row-label tables below are row-level only. "
+        "Exclusive one-label-per-name counts appear in the derived combined-country tables "
+        "that follow.[/white]"
+    )
+
     income_table = Table(title="Income-Group Breakdown (Selected Population Rows)", box=box.SIMPLE)
     income_table.add_column("Income group", style="cyan")
-    income_table.add_column("Selected names", style="magenta", justify="right")
-    income_table.add_column("% mode-3 names", style="magenta", justify="right")
     income_table.add_column("Rows", style="magenta", justify="right")
     income_table.add_column("% selected rows", style="magenta", justify="right")
     for row in income_breakdown:
         income_table.add_row(
             row["income_group"],
-            f"{row['selected_names']:,}",
-            _fmt_pct(row["pct_of_mode3_selected_names"]),
             f"{row['selected_population_rows']:,}",
             _fmt_pct(row["pct_of_selected_population_rows"]),
         )
     console.print(income_table)
+    console.print(
+        "[white]Lower-tier preferred income label uses affiliated-country income groups "
+        "with precedence: Low > Lower middle > Upper middle > High.[/white]"
+    )
+    income_lower_table = Table(
+        title="Income-Group Breakdown (Selected Population Rows; Lower-Tier Preferred)",
+        box=box.SIMPLE,
+    )
+    income_lower_table.add_column("Income group", style="cyan")
+    income_lower_table.add_column("Rows", style="magenta", justify="right")
+    income_lower_table.add_column("% selected rows", style="magenta", justify="right")
+    for row in income_breakdown_lower_tier_preferred:
+        income_lower_table.add_row(
+            row["income_group"],
+            f"{row['selected_population_rows']:,}",
+            _fmt_pct(row["pct_of_selected_population_rows"]),
+        )
+    console.print(income_lower_table)
 
     priority_table = Table(
         title="Priority-Group Breakdown (Selected Population Rows)",
         box=box.SIMPLE,
     )
     priority_table.add_column("Priority group", style="cyan")
-    priority_table.add_column("Selected names", style="magenta", justify="right")
-    priority_table.add_column("% mode-3 names", style="magenta", justify="right")
     priority_table.add_column("Rows", style="magenta", justify="right")
     priority_table.add_column("% selected rows", style="magenta", justify="right")
     for row in priority_breakdown:
         priority_table.add_row(
             row["priority_group"],
-            f"{row['selected_names']:,}",
-            _fmt_pct(row["pct_of_mode3_selected_names"]),
             f"{row['selected_population_rows']:,}",
             _fmt_pct(row["pct_of_selected_population_rows"]),
         )
     console.print(priority_table)
+
+    console.print(
+        "[white]Derived name-level tables below combine distinct affiliated countries across "
+        "all selected rows for each KTP name and then assign exactly one final label per "
+        "name. These counts sum to Mode-3 selected names.[/white]"
+    )
+    derived_higher_table = Table(
+        title="Derived Final Name-Level Groups (Combined Countries; Higher Preferred)",
+        box=box.SIMPLE,
+    )
+    derived_higher_table.add_column("Group type", style="cyan")
+    derived_higher_table.add_column("Label", style="white")
+    derived_higher_table.add_column("Selected names", style="magenta", justify="right")
+    derived_higher_table.add_column("% mode-3 names", style="magenta", justify="right")
+    for row in derived_name_group_breakdown_higher_preferred:
+        derived_higher_table.add_row(
+            row["group_type"],
+            row["label"],
+            f"{row['selected_names']:,}",
+            _fmt_pct(row["pct_of_mode3_selected_names"]),
+        )
+    console.print(derived_higher_table)
+
+    derived_lower_table = Table(
+        title="Derived Final Name-Level Groups (Combined Countries; Lower Preferred)",
+        box=box.SIMPLE,
+    )
+    derived_lower_table.add_column("Group type", style="cyan")
+    derived_lower_table.add_column("Label", style="white")
+    derived_lower_table.add_column("Selected names", style="magenta", justify="right")
+    derived_lower_table.add_column("% mode-3 names", style="magenta", justify="right")
+    for row in derived_name_group_breakdown_lower_preferred:
+        derived_lower_table.add_row(
+            row["group_type"],
+            row["label"],
+            f"{row['selected_names']:,}",
+            _fmt_pct(row["pct_of_mode3_selected_names"]),
+        )
+    console.print(derived_lower_table)
 
     divergence_table = Table(
         title="Multi-Country Divergence (Mode-3 Selected Names)",
@@ -1002,6 +1384,78 @@ def _print_summary(metadata: dict[str, Any]) -> None:
         _fmt_pct(divergence["different_priority_groups_pct_of_multi_country"]),
     )
     console.print(divergence_table)
+
+    low_income_table = Table(
+        title=(
+            "Researcher Details: Any Low-Income Affiliated Country "
+            f"({len(highlights['any_low_income_affiliated_country'])} names)"
+        ),
+        box=box.SIMPLE,
+    )
+    low_income_table.add_column("Researcher", style="cyan")
+    low_income_table.add_column("Primary affiliations", style="white")
+    low_income_table.add_column("Countries", style="white")
+    low_income_table.add_column("Derived country income groups", style="magenta")
+    low_income_table.add_column("Final income high", style="magenta")
+    low_income_table.add_column("Final income low", style="magenta")
+    for row in highlights["any_low_income_affiliated_country"]:
+        low_income_table.add_row(
+            row["researcher_name"],
+            _join_display(row["primary_affiliations"]),
+            _join_display(row["countries"], delimiter=", "),
+            _join_display(row["derived_country_income_groups"], delimiter=", "),
+            row["final_income_group_high"],
+            row["final_income_group_low"],
+        )
+    console.print(low_income_table)
+
+    missing_income_table = Table(
+        title=(
+            "Researcher Details: Missing Income Group "
+            f"({len(highlights['missing_income_group'])} names)"
+        ),
+        box=box.SIMPLE,
+    )
+    missing_income_table.add_column("Researcher", style="cyan")
+    missing_income_table.add_column("Primary affiliations", style="white")
+    missing_income_table.add_column("Secondary affiliations", style="white")
+    missing_income_table.add_column("Countries", style="white")
+    missing_income_table.add_column("Final priority high", style="magenta")
+    missing_income_table.add_column("Final priority low", style="magenta")
+    for row in highlights["missing_income_group"]:
+        missing_income_table.add_row(
+            row["researcher_name"],
+            _join_display(row["primary_affiliations"]),
+            _join_display(row["secondary_affiliations"]),
+            _join_display(row["countries"], delimiter=", "),
+            row["final_priority_group_high"],
+            row["final_priority_group_low"],
+        )
+    console.print(missing_income_table)
+
+    four_plus_countries_table = Table(
+        title=(
+            "Researcher Details: 4+ Countries "
+            f"({len(highlights['four_or_more_countries'])} names)"
+        ),
+        box=box.SIMPLE,
+    )
+    four_plus_countries_table.add_column("Researcher", style="cyan")
+    four_plus_countries_table.add_column("Primary affiliations", style="white")
+    four_plus_countries_table.add_column("Country count", style="magenta", justify="right")
+    four_plus_countries_table.add_column("Countries", style="white")
+    four_plus_countries_table.add_column("Final income high", style="magenta")
+    four_plus_countries_table.add_column("Final income low", style="magenta")
+    for row in highlights["four_or_more_countries"]:
+        four_plus_countries_table.add_row(
+            row["researcher_name"],
+            _join_display(row["primary_affiliations"]),
+            f"{row['country_count']:,}",
+            _join_display(row["countries"], delimiter=", "),
+            row["final_income_group_high"],
+            row["final_income_group_low"],
+        )
+    console.print(four_plus_countries_table)
 
     audit_table = Table(
         title="Label Coverage / Consistency Audit (Mode-3 Selected Names)",

@@ -26,7 +26,11 @@ from src.helpers.vars import (
     KTP_ECONOMIES_COL,
     KTP_ECONOMIES_INCOME_GROUP_COL,
     KTP_FILENAME_COL,
+    KTP_FIRST_NAME_COL,
     KTP_FRAGMENT_COL,
+    KTP_HCR_PRIMARY_AFFILIATIONS_COL,
+    KTP_HCR_SECONDARY_AFFILIATIONS_COL,
+    KTP_LAST_NAME_COL,
     KTP_PRIORITY_GROUP_COL,
     KTP_PRIORITY_GROUP_LABELS,
     KTP_SOURCE_KEY_COL,
@@ -170,10 +174,18 @@ def _build_fixture_db(path: Path) -> dict[str, int]:
             countries: object,
             income_group: object,
             priority_group: object,
+            first_name: str,
+            last_name: str,
+            primary_affiliation: str,
+            secondary_affiliation: str | None = None,
         ) -> dict[str, object]:
             return {
                 KTP_FILENAME_COL: filename,
                 KTP_FRAGMENT_COL: fragment,
+                KTP_FIRST_NAME_COL: first_name,
+                KTP_LAST_NAME_COL: last_name,
+                KTP_HCR_PRIMARY_AFFILIATIONS_COL: primary_affiliation,
+                KTP_HCR_SECONDARY_AFFILIATIONS_COL: secondary_affiliation,
                 KTP_XLSX_MATCH_COL: payload,
                 KTP_ECONOMIES_COL: countries,
                 KTP_ECONOMIES_INCOME_GROUP_COL: income_group,
@@ -212,6 +224,9 @@ def _build_fixture_db(path: Path) -> dict[str, int]:
                             countries="[]",
                             income_group=None,
                             priority_group=priority_fallback,
+                            first_name="Sel",
+                            last_name="Zero",
+                            primary_affiliation="No Country Institute",
                         ),
                         match_row(
                             filename="2019_HCR.xlsx",
@@ -220,6 +235,9 @@ def _build_fixture_db(path: Path) -> dict[str, int]:
                             countries="[]",
                             income_group=None,
                             priority_group=priority_fallback,
+                            first_name="Sel",
+                            last_name="Zero",
+                            primary_affiliation="No Country Institute",
                         ),
                     ]
                 ),
@@ -235,6 +253,9 @@ def _build_fixture_db(path: Path) -> dict[str, int]:
                             countries=json.dumps(["France"]),
                             income_group=high,
                             priority_group=priority_eu,
+                            first_name="Sel",
+                            last_name="One",
+                            primary_affiliation="Paris Health Center",
                         )
                     ]
                 ),
@@ -250,6 +271,9 @@ def _build_fixture_db(path: Path) -> dict[str, int]:
                             countries=json.dumps(["India"]),
                             income_group=lower_middle,
                             priority_group=priority_fallback,
+                            first_name="Sel",
+                            last_name="TwoIncome",
+                            primary_affiliation="Delhi Policy Lab",
                         ),
                         match_row(
                             filename="2021_HCR.xlsx",
@@ -258,6 +282,9 @@ def _build_fixture_db(path: Path) -> dict[str, int]:
                             countries=["Nepal"],
                             income_group=low,
                             priority_group=priority_fallback,
+                            first_name="Sel",
+                            last_name="TwoIncome",
+                            primary_affiliation="Kathmandu Policy Lab",
                         ),
                     ]
                 ),
@@ -273,6 +300,9 @@ def _build_fixture_db(path: Path) -> dict[str, int]:
                             countries=["United States"],
                             income_group=high,
                             priority_group=priority_english,
+                            first_name="Sel",
+                            last_name="TwoPriority",
+                            primary_affiliation="Boston Health Institute",
                         ),
                         match_row(
                             filename="2022_HCR.xlsx",
@@ -281,6 +311,9 @@ def _build_fixture_db(path: Path) -> dict[str, int]:
                             countries=json.dumps(["France"]),
                             income_group=high,
                             priority_group=priority_eu,
+                            first_name="Sel",
+                            last_name="TwoPriority",
+                            primary_affiliation="Paris Health Institute",
                         ),
                     ]
                 ),
@@ -296,6 +329,9 @@ def _build_fixture_db(path: Path) -> dict[str, int]:
                             countries=["United States", "France", "India", "India"],
                             income_group=high,
                             priority_group=priority_eu,
+                            first_name="Sel",
+                            last_name="Three",
+                            primary_affiliation="Tri-Country School",
                         )
                     ]
                 ),
@@ -313,6 +349,9 @@ def _build_fixture_db(path: Path) -> dict[str, int]:
                             ),
                             income_group=high,
                             priority_group=priority_china,
+                            first_name="Sel",
+                            last_name="FourPlus",
+                            primary_affiliation="Global Health Alliance",
                         )
                     ]
                 ),
@@ -328,6 +367,9 @@ def _build_fixture_db(path: Path) -> dict[str, int]:
                             countries=json.dumps(["France"]),
                             income_group=high,
                             priority_group=priority_eu,
+                            first_name="Fail",
+                            last_name="MultiSci",
+                            primary_affiliation="Should Not Appear",
                         )
                     ]
                 ),
@@ -343,6 +385,9 @@ def _build_fixture_db(path: Path) -> dict[str, int]:
                             countries=json.dumps(["France"]),
                             income_group=high,
                             priority_group=priority_eu,
+                            first_name="Fail",
+                            last_name="NoXlsxPresent",
+                            primary_affiliation="Should Not Appear",
                         ),
                         match_row(
                             filename="2024_HCR.xlsx",
@@ -351,6 +396,9 @@ def _build_fixture_db(path: Path) -> dict[str, int]:
                             countries=json.dumps(["France"]),
                             income_group=high,
                             priority_group=priority_eu,
+                            first_name="Fail",
+                            last_name="NoXlsxPresent",
+                            primary_affiliation="Should Not Appear",
                         ),
                     ]
                 ),
@@ -366,6 +414,9 @@ def _build_fixture_db(path: Path) -> dict[str, int]:
                             countries=json.dumps(["France"]),
                             income_group=high,
                             priority_group=priority_eu,
+                            first_name="Fail",
+                            last_name="Jsonl",
+                            primary_affiliation="Should Not Appear",
                         ),
                         match_row(
                             filename="2024_HCR.xlsx",
@@ -374,6 +425,9 @@ def _build_fixture_db(path: Path) -> dict[str, int]:
                             countries=json.dumps(["France"]),
                             income_group=high,
                             priority_group=priority_eu,
+                            first_name="Fail",
+                            last_name="Jsonl",
+                            primary_affiliation="Should Not Appear",
                         ),
                     ]
                 ),
@@ -389,6 +443,9 @@ def _build_fixture_db(path: Path) -> dict[str, int]:
                             countries=json.dumps(["France"]),
                             income_group=high,
                             priority_group=priority_eu,
+                            first_name="Fail",
+                            last_name="ZeroSci",
+                            primary_affiliation="Should Not Appear",
                         )
                     ]
                 ),
@@ -472,6 +529,11 @@ def test_detour_contract_and_mode3_econ_stats_readonly(
     assert "Income-Group Breakdown" in plain
     assert "Priority-Group Breakdown" in plain
     assert "Multi-Country Divergence" in plain
+    assert "Derived Final Name-Level Groups" in plain
+    assert "Lower-Tier Preferred" in plain
+    assert "Any Low-Income Affiliated Country" in plain
+    assert "Missing Income Group" in plain
+    assert "4+ Countries" in plain
     assert OGHIST_INCOME_LABELS["L"] in plain
     assert MISSING_BREAKDOWN_LABEL in plain
     assert KTP_PRIORITY_GROUP_LABELS[2] in plain
@@ -537,29 +599,79 @@ def test_detour_contract_and_mode3_econ_stats_readonly(
 
     income_breakdown = {row["income_group"]: row for row in md["income_group_breakdown"]}
     assert income_breakdown[OGHIST_INCOME_LABELS["H"]]["selected_population_rows"] == 5
-    assert income_breakdown[OGHIST_INCOME_LABELS["H"]]["selected_names"] == 4
     assert income_breakdown[OGHIST_INCOME_LABELS["LM"]]["selected_population_rows"] == 1
-    assert income_breakdown[OGHIST_INCOME_LABELS["LM"]]["selected_names"] == 1
     assert income_breakdown[OGHIST_INCOME_LABELS["L"]]["selected_population_rows"] == 1
-    assert income_breakdown[OGHIST_INCOME_LABELS["L"]]["selected_names"] == 1
     assert income_breakdown[OGHIST_INCOME_LABELS["UM"]]["selected_population_rows"] == 0
-    assert income_breakdown[OGHIST_INCOME_LABELS["UM"]]["selected_names"] == 0
     assert income_breakdown[MISSING_BREAKDOWN_LABEL]["selected_population_rows"] == 1
-    assert income_breakdown[MISSING_BREAKDOWN_LABEL]["selected_names"] == 1
+
+    lower_tier_breakdown = {
+        row["income_group"]: row for row in md["income_group_breakdown_lower_tier_preferred"]
+    }
+    assert lower_tier_breakdown[OGHIST_INCOME_LABELS["H"]]["selected_population_rows"] == 3
+    assert lower_tier_breakdown[OGHIST_INCOME_LABELS["UM"]]["selected_population_rows"] == 0
+    assert lower_tier_breakdown[OGHIST_INCOME_LABELS["LM"]]["selected_population_rows"] == 2
+    assert lower_tier_breakdown[OGHIST_INCOME_LABELS["L"]]["selected_population_rows"] == 2
+    assert lower_tier_breakdown[MISSING_BREAKDOWN_LABEL]["selected_population_rows"] == 1
 
     priority_breakdown = {row["priority_group"]: row for row in md["priority_group_breakdown"]}
     assert priority_breakdown[KTP_PRIORITY_GROUP_LABELS[1]]["selected_population_rows"] == 3
-    assert priority_breakdown[KTP_PRIORITY_GROUP_LABELS[1]]["selected_names"] == 2
     assert priority_breakdown[KTP_PRIORITY_GROUP_LABELS[2]]["selected_population_rows"] == 1
-    assert priority_breakdown[KTP_PRIORITY_GROUP_LABELS[2]]["selected_names"] == 1
     assert priority_breakdown[KTP_PRIORITY_GROUP_LABELS[3]]["selected_population_rows"] == 0
-    assert priority_breakdown[KTP_PRIORITY_GROUP_LABELS[3]]["selected_names"] == 0
     assert priority_breakdown[KTP_PRIORITY_GROUP_LABELS[4]]["selected_population_rows"] == 3
-    assert priority_breakdown[KTP_PRIORITY_GROUP_LABELS[4]]["selected_names"] == 3
     assert priority_breakdown[KTP_PRIORITY_GROUP_LABELS[5]]["selected_population_rows"] == 1
-    assert priority_breakdown[KTP_PRIORITY_GROUP_LABELS[5]]["selected_names"] == 1
     assert priority_breakdown[MISSING_BREAKDOWN_LABEL]["selected_population_rows"] == 0
-    assert priority_breakdown[MISSING_BREAKDOWN_LABEL]["selected_names"] == 0
+
+    derived_higher = {
+        (row["group_type"], row["label"]): row
+        for row in md["derived_name_group_breakdown_higher_preferred"]
+    }
+    assert derived_higher[("Income group", OGHIST_INCOME_LABELS["H"])]["selected_names"] == 4
+    assert derived_higher[("Income group", OGHIST_INCOME_LABELS["UM"])]["selected_names"] == 0
+    assert derived_higher[("Income group", OGHIST_INCOME_LABELS["LM"])]["selected_names"] == 1
+    assert derived_higher[("Income group", OGHIST_INCOME_LABELS["L"])]["selected_names"] == 0
+    assert derived_higher[("Income group", MISSING_BREAKDOWN_LABEL)]["selected_names"] == 1
+    assert (
+        derived_higher[("Priority group", KTP_PRIORITY_GROUP_LABELS[4])]["selected_names"] == 3
+    )
+    assert (
+        derived_higher[("Priority group", KTP_PRIORITY_GROUP_LABELS[2])]["selected_names"] == 1
+    )
+    assert (
+        derived_higher[("Priority group", KTP_PRIORITY_GROUP_LABELS[1])]["selected_names"] == 2
+    )
+    assert (
+        derived_higher[("Priority group", KTP_PRIORITY_GROUP_LABELS[3])]["selected_names"] == 0
+    )
+    assert (
+        derived_higher[("Priority group", KTP_PRIORITY_GROUP_LABELS[5])]["selected_names"] == 0
+    )
+    assert derived_higher[("Priority group", MISSING_BREAKDOWN_LABEL)]["selected_names"] == 0
+
+    derived_lower = {
+        (row["group_type"], row["label"]): row
+        for row in md["derived_name_group_breakdown_lower_preferred"]
+    }
+    assert derived_lower[("Income group", OGHIST_INCOME_LABELS["H"])]["selected_names"] == 2
+    assert derived_lower[("Income group", OGHIST_INCOME_LABELS["UM"])]["selected_names"] == 0
+    assert derived_lower[("Income group", OGHIST_INCOME_LABELS["LM"])]["selected_names"] == 1
+    assert derived_lower[("Income group", OGHIST_INCOME_LABELS["L"])]["selected_names"] == 2
+    assert derived_lower[("Income group", MISSING_BREAKDOWN_LABEL)]["selected_names"] == 1
+    assert (
+        derived_lower[("Priority group", KTP_PRIORITY_GROUP_LABELS[1])]["selected_names"] == 4
+    )
+    assert (
+        derived_lower[("Priority group", KTP_PRIORITY_GROUP_LABELS[5])]["selected_names"] == 1
+    )
+    assert (
+        derived_lower[("Priority group", KTP_PRIORITY_GROUP_LABELS[4])]["selected_names"] == 1
+    )
+    assert (
+        derived_lower[("Priority group", KTP_PRIORITY_GROUP_LABELS[3])]["selected_names"] == 0
+    )
+    assert (
+        derived_lower[("Priority group", KTP_PRIORITY_GROUP_LABELS[2])]["selected_names"] == 0
+    )
+    assert derived_lower[("Priority group", MISSING_BREAKDOWN_LABEL)]["selected_names"] == 0
 
     divergence = md["multi_country_divergence"]
     assert divergence["multi_country_names"] == 4
@@ -578,6 +690,13 @@ def test_detour_contract_and_mode3_econ_stats_readonly(
     assert audit["selected_names_with_multiple_row_priority_groups"] == 1
     assert audit["selected_rows_missing_income_group"] == 1
     assert audit["selected_rows_missing_priority_group"] == 0
+
+    highlights = md["researcher_detail_highlights"]
+    assert len(highlights["any_low_income_affiliated_country"]) == 2
+    assert len(highlights["missing_income_group"]) == 1
+    assert len(highlights["four_or_more_countries"]) == 1
+    assert highlights["missing_income_group"][0]["researcher_name"] == "Zero, Sel"
+    assert highlights["four_or_more_countries"][0]["researcher_name"] == "FourPlus, Sel"
 
     after = duckdb.connect(str(db_path), read_only=True)
     try:
