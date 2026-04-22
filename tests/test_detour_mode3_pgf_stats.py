@@ -332,11 +332,15 @@ def test_detour_contract_and_mode3_stats_readonly(
     assert counts["population_rows"] == baseline_counts["population_rows"]
     assert counts["outerdict_keys"] == baseline_counts["outerdict_rows"]
     assert counts["mode3_selected_names"] == 6
-    assert counts["mode3_selected_population_rows"] == baseline_counts["mode3_selected_population_rows"]
+    assert counts["mode3_selected_population_rows"] == baseline_counts[
+        "mode3_selected_population_rows"
+    ]
     assert counts["mode3_selected_pct_of_population_rows"] == pytest.approx(6.0)
     assert counts["pgf_non_missing"] == 5
     assert counts["pgf_missing"] == 1
-    assert counts["pgf_non_missing_population_rows"] == baseline_counts["pgf_non_missing_population_rows"]
+    assert counts["pgf_non_missing_population_rows"] == baseline_counts[
+        "pgf_non_missing_population_rows"
+    ]
     assert counts["pgf_non_missing_pct_of_population_rows"] == pytest.approx(5.0)
 
     rules = md["rule_counts"]
