@@ -13,6 +13,7 @@ import pytest
 
 from src.detours.detour_mode3_econ_stats import (
     DETOUR_STEPS,
+    MISSING_BREAKDOWN_LABEL,
     _is_exact_xlsx_match_payload,
     _normalize_country_list,
     run_detour,
@@ -471,6 +472,8 @@ def test_detour_contract_and_mode3_econ_stats_readonly(
     assert "Income-Group Breakdown" in plain
     assert "Priority-Group Breakdown" in plain
     assert "Multi-Country Divergence" in plain
+    assert OGHIST_INCOME_LABELS["L"] in plain
+    assert MISSING_BREAKDOWN_LABEL in plain
     assert KTP_PRIORITY_GROUP_LABELS[2] in plain
     assert KTP_PRIORITY_GROUP_LABELS[3] in plain
     assert KTP_PRIORITY_GROUP_LABELS[4] in plain
@@ -534,14 +537,29 @@ def test_detour_contract_and_mode3_econ_stats_readonly(
 
     income_breakdown = {row["income_group"]: row for row in md["income_group_breakdown"]}
     assert income_breakdown[OGHIST_INCOME_LABELS["H"]]["selected_population_rows"] == 5
+    assert income_breakdown[OGHIST_INCOME_LABELS["H"]]["selected_names"] == 4
     assert income_breakdown[OGHIST_INCOME_LABELS["LM"]]["selected_population_rows"] == 1
+    assert income_breakdown[OGHIST_INCOME_LABELS["LM"]]["selected_names"] == 1
     assert income_breakdown[OGHIST_INCOME_LABELS["L"]]["selected_population_rows"] == 1
+    assert income_breakdown[OGHIST_INCOME_LABELS["L"]]["selected_names"] == 1
+    assert income_breakdown[OGHIST_INCOME_LABELS["UM"]]["selected_population_rows"] == 0
+    assert income_breakdown[OGHIST_INCOME_LABELS["UM"]]["selected_names"] == 0
+    assert income_breakdown[MISSING_BREAKDOWN_LABEL]["selected_population_rows"] == 1
+    assert income_breakdown[MISSING_BREAKDOWN_LABEL]["selected_names"] == 1
 
     priority_breakdown = {row["priority_group"]: row for row in md["priority_group_breakdown"]}
     assert priority_breakdown[KTP_PRIORITY_GROUP_LABELS[1]]["selected_population_rows"] == 3
+    assert priority_breakdown[KTP_PRIORITY_GROUP_LABELS[1]]["selected_names"] == 2
     assert priority_breakdown[KTP_PRIORITY_GROUP_LABELS[2]]["selected_population_rows"] == 1
+    assert priority_breakdown[KTP_PRIORITY_GROUP_LABELS[2]]["selected_names"] == 1
+    assert priority_breakdown[KTP_PRIORITY_GROUP_LABELS[3]]["selected_population_rows"] == 0
+    assert priority_breakdown[KTP_PRIORITY_GROUP_LABELS[3]]["selected_names"] == 0
     assert priority_breakdown[KTP_PRIORITY_GROUP_LABELS[4]]["selected_population_rows"] == 3
+    assert priority_breakdown[KTP_PRIORITY_GROUP_LABELS[4]]["selected_names"] == 3
     assert priority_breakdown[KTP_PRIORITY_GROUP_LABELS[5]]["selected_population_rows"] == 1
+    assert priority_breakdown[KTP_PRIORITY_GROUP_LABELS[5]]["selected_names"] == 1
+    assert priority_breakdown[MISSING_BREAKDOWN_LABEL]["selected_population_rows"] == 0
+    assert priority_breakdown[MISSING_BREAKDOWN_LABEL]["selected_names"] == 0
 
     divergence = md["multi_country_divergence"]
     assert divergence["multi_country_names"] == 4
