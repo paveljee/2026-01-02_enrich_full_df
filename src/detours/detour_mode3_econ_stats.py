@@ -22,30 +22,77 @@ from src.helpers.resource_monitor import ResourceMonitor
 from src.helpers.schema import OUTERDICT_STUB_TABLE, PARQUET_INNERDICT_TABLE, XLSX_INNERDICT_TABLE
 from src.helpers.vars import (
     CARD_BUILD_SUBSET_DESCRIPTIONS,
+    ENGLISH_HICS,
+    EU_COUNTRIES,
+    GREATER_CHINA,
+    KTP_ECONOMIES_COL,
+    KTP_ECONOMIES_INCOME_GROUP_COL,
     KTP_FILENAME_COL,
     KTP_FRAGMENT_COL,
+    KTP_PRIORITY_GROUP_COL,
+    KTP_PRIORITY_GROUP_LABELS,
     KTP_SOURCE_KEY_COL,
     KTP_XLSX_MATCH_COL,
     KTP_XLSX_MATCH_FIRST_TOKENS_KEY,
     KTP_XLSX_MATCH_LAST_NAME_NORM_KEY,
     KTP_XLSX_MATCH_SOURCE_KEY_LAST_KEY,
     KTP_XLSX_MATCH_SOURCE_KEY_TOKENS_KEY,
+    OGHIST_INCOME_LABELS,
 )
 
 console = Console()
 
-DETOUR_ID = "mode3-pgf-stats"
-DETOUR_NAME = "Mode 3 p_gf Stats"
+DETOUR_ID = "mode3-econ-stats"
+DETOUR_NAME = "Mode 3 Economy Stats"
 DETOUR_DESCRIPTION = (
     "Read-only detour that reconstructs mode-3 selection from persisted tables and "
-    "prints p_gf statistics for selected unique names."
+    "prints income-group and priority-group statistics for selected unique names."
 )
 DETOUR_STEPS: list[str] = []
 
-P_GF_COL = "ssnau.p_gf"
-INFERENCE_COUNTS_COL = "ssnau.inference_counts"
-INFERENCE_SOURCES_COL = "ssnau.inference_sources"
 MODE = 3
+
+PRIORITY_GROUP_PRECEDENCE = [
+    KTP_PRIORITY_GROUP_LABELS[2],
+    KTP_PRIORITY_GROUP_LABELS[3],
+    KTP_PRIORITY_GROUP_LABELS[4],
+    KTP_PRIORITY_GROUP_LABELS[5],
+    KTP_PRIORITY_GROUP_LABELS[1],
+]
+PRIORITY_GROUP_RULES = [
+    {
+        "label": KTP_PRIORITY_GROUP_LABELS[2],
+        "rule": "Any matched country is in the Greater China set.",
+    },
+    {
+        "label": KTP_PRIORITY_GROUP_LABELS[3],
+        "rule": (
+            "No higher-priority rule fired and any matched country is a non-English, "
+            "non-EU high-income country."
+        ),
+    },
+    {
+        "label": KTP_PRIORITY_GROUP_LABELS[4],
+        "rule": "No higher-priority rule fired and any matched country is in the EU set.",
+    },
+    {
+        "label": KTP_PRIORITY_GROUP_LABELS[5],
+        "rule": "No higher-priority rule fired and any matched country is in the English-HIC set.",
+    },
+    {
+        "label": KTP_PRIORITY_GROUP_LABELS[1],
+        "rule": (
+            "Fallback bucket for no matched countries, LMIC-only countries, or countries "
+            "outside the higher-priority sets."
+        ),
+    },
+]
+INCOME_GROUP_ORDER = [
+    OGHIST_INCOME_LABELS["H"],
+    OGHIST_INCOME_LABELS["UM"],
+    OGHIST_INCOME_LABELS["LM"],
+    OGHIST_INCOME_LABELS["L"],
+]
 
 
 @dataclass
@@ -129,7 +176,173 @@ def _db_file_from_pragma(conn: duckdb.DuckDBPyConnection) -> str:
     return str(row[2])
 
 
-def _build_mode3_pgf_metadata(conn: duckdb.DuckDBPyConnection) -> dict[str, Any]:
+def _fmt_float(value: float | None, digits: int = 6) -> str:
+    if value is None:
+        return "N/A"
+    return f"{value:.{digits}f}"
+
+
+def _fmt_pct(value: float | None) -> str:
+    if value is None:
+        return "N/A"
+    return f"{value:.3f}%"
+
+
+def _normalize_country_list(value: object) -> list[str]:
+    if value is None:
+        return []
+    items: list[object]
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return []
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            items = [raw]
+        else:
+            if isinstance(parsed, list):
+                items = parsed
+            elif isinstance(parsed, str):
+                items = [parsed]
+            else:
+                items = [raw]
+    elif isinstance(value, (list, tuple, set)):
+        items = list(value)
+    else:
+        if bool(pd.isna(value)):
+            return []
+        items = [value]
+
+    normalized = sorted({str(item).strip() for item in items if str(item).strip()})
+    return normalized
+
+
+def _normalize_optional_label(value: object) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        raw = value.strip()
+        return raw or None
+    if bool(pd.isna(value)):
+        return None
+    raw = str(value).strip()
+    return raw or None
+
+
+def _load_income_label_maps_from_db(
+    conn: duckdb.DuckDBPyConnection,
+) -> tuple[dict[str, str], dict[str, str]]:
+    tables = {row[0] for row in conn.execute("SHOW TABLES").fetchall()}
+    if "income_map" not in tables:
+        raise RuntimeError(
+            "Required persisted table 'income_map' is missing from the DB; "
+            "mode-3 econ stats must run from persisted DB content only."
+        )
+
+    country_to_income: dict[str, str] = {}
+    alias_to_country: dict[str, str] = {}
+    for match_name, country, income_label in conn.execute(
+        """
+        SELECT DISTINCT match_name, country, income_label
+        FROM income_map
+        WHERE country IS NOT NULL AND income_label IS NOT NULL
+        """
+    ).fetchall():
+        country_str = str(country).strip()
+        income_label_str = str(income_label).strip()
+        match_name_str = str(match_name).strip() if match_name is not None else ""
+        if not country_str or not income_label_str:
+            continue
+        country_to_income[country_str] = income_label_str
+        if match_name_str:
+            alias_to_country[match_name_str] = country_str
+        alias_to_country.setdefault(country_str, country_str)
+
+    return country_to_income, alias_to_country
+
+
+def _non_english_non_eu_hics(economies: list[str]) -> list[str]:
+    return [
+        hic
+        for hic in economies
+        if not any(country in hic for country in ENGLISH_HICS + EU_COUNTRIES + GREATER_CHINA)
+    ]
+
+
+def _priority_country_sets(
+    country_to_income: dict[str, str],
+    alias_to_country: dict[str, str],
+) -> dict[str, set[str]]:
+    high_income = sorted(
+        {
+            country
+            for country, label in country_to_income.items()
+            if label == OGHIST_INCOME_LABELS["H"]
+        }
+    )
+    non_english_hics = _non_english_non_eu_hics(high_income)
+
+    def _countries_for(match_names: list[str]) -> list[str]:
+        countries: list[str] = []
+        for name in match_names:
+            country = alias_to_country.get(name)
+            if country and country not in countries:
+                countries.append(country)
+        return countries
+
+    english_countries = _countries_for(ENGLISH_HICS)
+    eu_countries = _countries_for(EU_COUNTRIES)
+    china_countries = _countries_for(GREATER_CHINA)
+    non_english_countries = [
+        country for country in non_english_hics if country not in english_countries + eu_countries
+    ]
+
+    return {
+        "greater_china": set(china_countries),
+        "non_english_non_eu_hics": set(non_english_countries),
+        "eu_countries": set(eu_countries),
+        "english_hics": set(english_countries),
+    }
+
+
+def _priority_group_for_country(country: str, priority_sets: dict[str, set[str]]) -> str:
+    if country in priority_sets["greater_china"]:
+        return KTP_PRIORITY_GROUP_LABELS[2]
+    if country in priority_sets["non_english_non_eu_hics"]:
+        return KTP_PRIORITY_GROUP_LABELS[3]
+    if country in priority_sets["eu_countries"]:
+        return KTP_PRIORITY_GROUP_LABELS[4]
+    if country in priority_sets["english_hics"]:
+        return KTP_PRIORITY_GROUP_LABELS[5]
+    return KTP_PRIORITY_GROUP_LABELS[1]
+
+
+def _ordered_labels(observed: set[str], preferred: list[str]) -> list[str]:
+    preferred_set = set(preferred)
+    ordered = [label for label in preferred if label in observed]
+    ordered.extend(sorted(label for label in observed if label not in preferred_set))
+    return ordered
+
+
+def _record_first_non_missing(
+    by_row_id: dict[tuple[str, str], str | None],
+    row_id: tuple[str, str],
+    value: str | None,
+) -> None:
+    current = by_row_id.get(row_id)
+    if current is None and value is not None:
+        by_row_id[row_id] = value
+    elif row_id not in by_row_id:
+        by_row_id[row_id] = value
+
+
+def _build_mode3_econ_metadata(
+    config: PipelineConfig,
+    conn: duckdb.DuckDBPyConnection,
+) -> dict[str, Any]:
+    del config
+
     population_rows = _scalar_int(conn, "SELECT COUNT(*) FROM population_with_names_economy")
 
     outer_keys = [
@@ -140,8 +353,11 @@ def _build_mode3_pgf_metadata(conn: duckdb.DuckDBPyConnection) -> dict[str, Any]
     ]
     outerdict_keys = len(outer_keys)
 
+    country_to_income, alias_to_country = _load_income_label_maps_from_db(conn)
+    priority_sets = _priority_country_sets(country_to_income, alias_to_country)
+
     xlsx_payloads_by_key: dict[str, list[object]] = defaultdict(list)
-    xlsx_population_rows_by_key: dict[str, set[tuple[str, str]]] = defaultdict(set)
+    xlsx_rows_by_key: dict[str, list[dict[str, object]]] = defaultdict(list)
     for name_key, inner_blob in conn.execute(
         f"SELECT name_key, innerdicts FROM {XLSX_INNERDICT_TABLE}"
     ).fetchall():
@@ -156,29 +372,26 @@ def _build_mode3_pgf_metadata(conn: duckdb.DuckDBPyConnection) -> dict[str, Any]
                     "XLSX innerdict row is missing persisted population row identity "
                     f"({KTP_FILENAME_COL}, {KTP_FRAGMENT_COL}) for {name_key!r}."
                 )
-            xlsx_population_rows_by_key[name_key].add((str(filename), str(fragment)))
+            xlsx_rows_by_key[name_key].append(inner)
 
     sciscinet_count_by_key: dict[str, int] = defaultdict(int)
-    sciscinet_row_tuple = tuple[float | None, int | None, int | None]
-    sciscinet_rows_by_key: dict[str, list[sciscinet_row_tuple]] = defaultdict(list)
-    for source_key, p_gf, inference_counts, inference_sources in conn.execute(
-        (
-            f'SELECT "{KTP_SOURCE_KEY_COL}", "{P_GF_COL}", '
-            f'"{INFERENCE_COUNTS_COL}", "{INFERENCE_SOURCES_COL}" '
-            f"FROM {PARQUET_INNERDICT_TABLE}"
-        )
+    for (source_key,) in conn.execute(
+        f'SELECT "{KTP_SOURCE_KEY_COL}" FROM {PARQUET_INNERDICT_TABLE}'
     ).fetchall():
         if source_key is None:
             continue
         sciscinet_count_by_key[source_key] += 1
-        sciscinet_rows_by_key[source_key].append((p_gf, inference_counts, inference_sources))
 
     sciscinet_exactly_one_pass = 0
     xlsx_exact_pass = 0
     mode3_selected_keys: list[str] = []
-    mode3_non_missing_keys: list[str] = []
-    mode3_pgf_values: list[float | None] = []
-    mode3_missing_pgf_inference_rows: list[tuple[int | None, int | None]] = []
+    name_countries_by_key: dict[str, set[str]] = defaultdict(set)
+    name_row_income_groups_by_key: dict[str, set[str]] = defaultdict(set)
+    name_row_priority_groups_by_key: dict[str, set[str]] = defaultdict(set)
+    selected_row_ids: set[tuple[str, str]] = set()
+    selected_row_countries_by_id: dict[tuple[str, str], set[str]] = defaultdict(set)
+    selected_row_income_group_by_id: dict[tuple[str, str], str | None] = {}
+    selected_row_priority_group_by_id: dict[tuple[str, str], str | None] = {}
 
     for name_key in outer_keys:
         sciscinet_exactly_one_ok = sciscinet_count_by_key.get(name_key, 0) == 1
@@ -192,132 +405,205 @@ def _build_mode3_pgf_metadata(conn: duckdb.DuckDBPyConnection) -> dict[str, Any]
         if xlsx_exact_ok:
             xlsx_exact_pass += 1
 
-        if sciscinet_exactly_one_ok and xlsx_exact_ok:
-            mode3_selected_keys.append(name_key)
-            sciscinet_rows = sciscinet_rows_by_key.get(name_key, [])
-            if len(sciscinet_rows) != 1:
-                raise RuntimeError(
-                    "Mode-3 invariant violation: selected key should map to exactly one "
-                    f"sciscinet innerdict, got {len(sciscinet_rows)} for {name_key!r}"
-                )
-            p_gf_value, inference_counts, inference_sources = sciscinet_rows[0]
-            mode3_pgf_values.append(p_gf_value)
-            if p_gf_value is None:
-                mode3_missing_pgf_inference_rows.append((inference_counts, inference_sources))
-            else:
-                mode3_non_missing_keys.append(name_key)
+        if not (sciscinet_exactly_one_ok and xlsx_exact_ok):
+            continue
 
-    mode3_selected_population_rows = len(
-        {
-            row_id
-            for name_key in mode3_selected_keys
-            for row_id in xlsx_population_rows_by_key.get(name_key, set())
-        }
-    )
-    pgf_non_missing_population_rows = len(
-        {
-            row_id
-            for name_key in mode3_non_missing_keys
-            for row_id in xlsx_population_rows_by_key.get(name_key, set())
-        }
-    )
+        mode3_selected_keys.append(name_key)
+        for inner in xlsx_rows_by_key.get(name_key, []):
+            row_id = (str(inner[KTP_FILENAME_COL]), str(inner[KTP_FRAGMENT_COL]))
+            selected_row_ids.add(row_id)
+
+            countries = set(_normalize_country_list(inner.get(KTP_ECONOMIES_COL)))
+            selected_row_countries_by_id[row_id].update(countries)
+            name_countries_by_key[name_key].update(countries)
+
+            income_group = _normalize_optional_label(inner.get(KTP_ECONOMIES_INCOME_GROUP_COL))
+            _record_first_non_missing(selected_row_income_group_by_id, row_id, income_group)
+            if income_group is not None:
+                name_row_income_groups_by_key[name_key].add(income_group)
+
+            priority_group = _normalize_optional_label(inner.get(KTP_PRIORITY_GROUP_COL))
+            _record_first_non_missing(selected_row_priority_group_by_id, row_id, priority_group)
+            if priority_group is not None:
+                name_row_priority_groups_by_key[name_key].add(priority_group)
 
     selected_names = len(mode3_selected_keys)
-    non_missing_values = np.array(
-        [float(value) for value in mode3_pgf_values if value is not None], dtype=float
-    )
-    non_missing_n = int(non_missing_values.size)
-    missing_n = selected_names - non_missing_n
+    mode3_selected_population_rows = len(selected_row_ids)
 
-    mean = float(non_missing_values.mean()) if non_missing_n else None
-    sd = float(non_missing_values.std(ddof=1)) if non_missing_n > 1 else None
-    se = float(sd / math.sqrt(non_missing_n)) if non_missing_n > 1 and sd is not None else None
+    selected_names_with_countries = sum(
+        bool(name_countries_by_key.get(name_key)) for name_key in mode3_selected_keys
+    )
+    selected_names_with_income_group = sum(
+        bool(name_row_income_groups_by_key.get(name_key)) for name_key in mode3_selected_keys
+    )
+    selected_names_with_priority_group = sum(
+        bool(name_row_priority_groups_by_key.get(name_key)) for name_key in mode3_selected_keys
+    )
+    selected_population_rows_with_countries = sum(
+        bool(selected_row_countries_by_id.get(row_id)) for row_id in selected_row_ids
+    )
+    selected_population_rows_with_income_group = sum(
+        selected_row_income_group_by_id.get(row_id) is not None for row_id in selected_row_ids
+    )
+    selected_population_rows_with_priority_group = sum(
+        selected_row_priority_group_by_id.get(row_id) is not None for row_id in selected_row_ids
+    )
+
+    country_cardinality = [
+        len(name_countries_by_key.get(name_key, set())) for name_key in mode3_selected_keys
+    ]
+    country_cardinality_values = np.array(country_cardinality, dtype=float)
+    card_n = int(country_cardinality_values.size)
+    mean = float(country_cardinality_values.mean()) if card_n else None
+    sd = float(country_cardinality_values.std(ddof=1)) if card_n > 1 else None
+    se = float(sd / math.sqrt(card_n)) if card_n > 1 and sd is not None else None
     ci95_lo = float(mean - 1.96 * se) if mean is not None and se is not None else None
     ci95_hi = float(mean + 1.96 * se) if mean is not None and se is not None else None
-    min_v = float(non_missing_values.min()) if non_missing_n else None
+    min_v = float(country_cardinality_values.min()) if card_n else None
     q1 = (
-        float(np.quantile(non_missing_values, 0.25, method="linear")) if non_missing_n else None
+        float(np.quantile(country_cardinality_values, 0.25, method="linear"))
+        if card_n
+        else None
     )
     median = (
-        float(np.quantile(non_missing_values, 0.5, method="linear")) if non_missing_n else None
+        float(np.quantile(country_cardinality_values, 0.5, method="linear"))
+        if card_n
+        else None
     )
     q3 = (
-        float(np.quantile(non_missing_values, 0.75, method="linear")) if non_missing_n else None
+        float(np.quantile(country_cardinality_values, 0.75, method="linear"))
+        if card_n
+        else None
     )
-    max_v = float(non_missing_values.max()) if non_missing_n else None
+    max_v = float(country_cardinality_values.max()) if card_n else None
 
     iqr = float(q3 - q1) if q1 is not None and q3 is not None else None
     lower_fence = float(q1 - 1.5 * iqr) if iqr is not None and q1 is not None else None
     upper_fence = float(q3 + 1.5 * iqr) if iqr is not None and q3 is not None else None
     lower_outliers = (
-        int(np.sum(non_missing_values < lower_fence))
-        if non_missing_n and lower_fence is not None
+        int(np.sum(country_cardinality_values < lower_fence))
+        if card_n and lower_fence is not None
         else 0
     )
     upper_outliers = (
-        int(np.sum(non_missing_values > upper_fence))
-        if non_missing_n and upper_fence is not None
+        int(np.sum(country_cardinality_values > upper_fence))
+        if card_n and upper_fence is not None
         else 0
     )
     total_outliers = lower_outliers + upper_outliers
 
-    def _eq_count(value: float) -> int:
-        return sum(v is not None and float(v) == value for v in mode3_pgf_values)
-
-    bucket_missing = sum(value is None for value in mode3_pgf_values)
-    bucket_exact_0 = _eq_count(0.0)
-    bucket_exact_05 = _eq_count(0.5)
-    bucket_exact_1 = _eq_count(1.0)
-    bucket_between_0_and_0_5_exclusive = sum(
-        value is not None and 0.0 < float(value) < 0.5 for value in mode3_pgf_values
-    )
-    bucket_between_0_5_and_1_exclusive = sum(
-        value is not None and 0.5 < float(value) < 1.0 for value in mode3_pgf_values
-    )
-
+    bucket_exact_0 = sum(value == 0 for value in country_cardinality)
+    bucket_exact_1 = sum(value == 1 for value in country_cardinality)
+    bucket_exact_2 = sum(value == 2 for value in country_cardinality)
+    bucket_exact_3 = sum(value == 3 for value in country_cardinality)
+    bucket_4_or_more = sum(value >= 4 for value in country_cardinality)
     if (
-        bucket_missing
-        + bucket_exact_0
-        + bucket_exact_05
+        bucket_exact_0
         + bucket_exact_1
-        + bucket_between_0_and_0_5_exclusive
-        + bucket_between_0_5_and_1_exclusive
+        + bucket_exact_2
+        + bucket_exact_3
+        + bucket_4_or_more
         != selected_names
     ):
-        raise RuntimeError("Bucket partition invariant failed for mode-3 p_gf values.")
+        raise RuntimeError("Bucket partition invariant failed for mode-3 country cardinality.")
 
-    if len(mode3_missing_pgf_inference_rows) != bucket_missing:
-        raise RuntimeError("Missing-p_gf inference audit invariant failed.")
+    income_row_counts: dict[str, int] = defaultdict(int)
+    income_name_coverage: dict[str, int] = defaultdict(int)
+    priority_row_counts: dict[str, int] = defaultdict(int)
+    priority_name_coverage: dict[str, int] = defaultdict(int)
 
-    missing_inference_counts_zero = sum(
-        inference_counts == 0 for inference_counts, _ in mode3_missing_pgf_inference_rows
+    for row_id in selected_row_ids:
+        income_group = selected_row_income_group_by_id.get(row_id)
+        if income_group is not None:
+            income_row_counts[income_group] += 1
+        priority_group = selected_row_priority_group_by_id.get(row_id)
+        if priority_group is not None:
+            priority_row_counts[priority_group] += 1
+
+    for name_key in mode3_selected_keys:
+        for income_group in name_row_income_groups_by_key.get(name_key, set()):
+            income_name_coverage[income_group] += 1
+        for priority_group in name_row_priority_groups_by_key.get(name_key, set()):
+            priority_name_coverage[priority_group] += 1
+
+    observed_income_groups = set(income_row_counts)
+    observed_priority_groups = set(priority_row_counts)
+    income_breakdown = [
+        {
+            "income_group": label,
+            "selected_population_rows": income_row_counts[label],
+            "pct_of_non_missing_selected_population_rows": _pct(
+                income_row_counts[label], selected_population_rows_with_income_group
+            ),
+            "selected_names": income_name_coverage.get(label, 0),
+            "pct_of_mode3_selected_names": _pct(income_name_coverage.get(label, 0), selected_names),
+        }
+        for label in _ordered_labels(observed_income_groups, INCOME_GROUP_ORDER)
+    ]
+    priority_breakdown = [
+        {
+            "priority_group": label,
+            "selected_population_rows": priority_row_counts[label],
+            "pct_of_non_missing_selected_population_rows": _pct(
+                priority_row_counts[label], selected_population_rows_with_priority_group
+            ),
+            "selected_names": priority_name_coverage.get(label, 0),
+            "pct_of_mode3_selected_names": _pct(
+                priority_name_coverage.get(label, 0), selected_names
+            ),
+        }
+        for label in _ordered_labels(observed_priority_groups, PRIORITY_GROUP_PRECEDENCE)
+    ]
+
+    multi_country_names = 0
+    multi_country_different_income_groups = 0
+    multi_country_different_priority_groups = 0
+    for name_key in mode3_selected_keys:
+        countries = name_countries_by_key.get(name_key, set())
+        if len(countries) <= 1:
+            continue
+        multi_country_names += 1
+        derived_income_groups = {
+            income_group
+            for country in countries
+            if (income_group := country_to_income.get(country)) is not None
+        }
+        derived_priority_groups = {
+            _priority_group_for_country(country, priority_sets) for country in countries
+        }
+        if len(derived_income_groups) > 1:
+            multi_country_different_income_groups += 1
+        if len(derived_priority_groups) > 1:
+            multi_country_different_priority_groups += 1
+
+    selected_names_without_income_group = sum(
+        not name_row_income_groups_by_key.get(name_key) for name_key in mode3_selected_keys
     )
-    missing_inference_counts_nonzero = sum(
-        inference_counts is not None and inference_counts != 0
-        for inference_counts, _ in mode3_missing_pgf_inference_rows
+    selected_names_without_priority_group = sum(
+        not name_row_priority_groups_by_key.get(name_key) for name_key in mode3_selected_keys
     )
-    missing_inference_counts_null = sum(
-        inference_counts is None for inference_counts, _ in mode3_missing_pgf_inference_rows
+    selected_names_with_exactly_one_row_income_group = sum(
+        len(name_row_income_groups_by_key.get(name_key, set())) == 1
+        for name_key in mode3_selected_keys
     )
-    missing_inference_sources_zero = sum(
-        inference_sources == 0 for _, inference_sources in mode3_missing_pgf_inference_rows
+    selected_names_with_multiple_row_income_groups = sum(
+        len(name_row_income_groups_by_key.get(name_key, set())) > 1
+        for name_key in mode3_selected_keys
     )
-    missing_inference_sources_nonzero = sum(
-        inference_sources is not None and inference_sources != 0
-        for _, inference_sources in mode3_missing_pgf_inference_rows
+    selected_names_with_exactly_one_row_priority_group = sum(
+        len(name_row_priority_groups_by_key.get(name_key, set())) == 1
+        for name_key in mode3_selected_keys
     )
-    missing_inference_sources_null = sum(
-        inference_sources is None for _, inference_sources in mode3_missing_pgf_inference_rows
+    selected_names_with_multiple_row_priority_groups = sum(
+        len(name_row_priority_groups_by_key.get(name_key, set())) > 1
+        for name_key in mode3_selected_keys
     )
-    missing_inference_both_zero = sum(
-        inference_counts == 0 and inference_sources == 0
-        for inference_counts, inference_sources in mode3_missing_pgf_inference_rows
+    selected_rows_missing_income_group = (
+        mode3_selected_population_rows - selected_population_rows_with_income_group
     )
-    all_missing_pgf_have_both_zero: bool | None
-    if bucket_missing == 0:
-        all_missing_pgf_have_both_zero = None
-    else:
-        all_missing_pgf_have_both_zero = missing_inference_both_zero == bucket_missing
+    selected_rows_missing_priority_group = (
+        mode3_selected_population_rows - selected_population_rows_with_priority_group
+    )
 
     return {
         "detour_id": DETOUR_ID,
@@ -325,6 +611,7 @@ def _build_mode3_pgf_metadata(conn: duckdb.DuckDBPyConnection) -> dict[str, Any]
         "mode_description": CARD_BUILD_SUBSET_DESCRIPTIONS[MODE],
         "db_file": _db_file_from_pragma(conn),
         "tables_used": [OUTERDICT_STUB_TABLE, XLSX_INNERDICT_TABLE, PARQUET_INNERDICT_TABLE],
+        "priority_group_definitions": PRIORITY_GROUP_RULES,
         "counts": {
             "population_rows": population_rows,
             "outerdict_keys": outerdict_keys,
@@ -335,14 +622,33 @@ def _build_mode3_pgf_metadata(conn: duckdb.DuckDBPyConnection) -> dict[str, Any]
             "mode3_selected_pct_of_population_rows": _pct(
                 mode3_selected_population_rows, population_rows
             ),
-            "pgf_non_missing": non_missing_n,
-            "pgf_missing": missing_n,
-            "pgf_non_missing_pct_of_mode3": _pct(non_missing_n, selected_names),
-            "pgf_missing_pct_of_mode3": _pct(missing_n, selected_names),
-            "pgf_non_missing_pct_of_outerdict_keys": _pct(non_missing_n, outerdict_keys),
-            "pgf_non_missing_population_rows": pgf_non_missing_population_rows,
-            "pgf_non_missing_pct_of_population_rows": _pct(
-                pgf_non_missing_population_rows, population_rows
+            "selected_names_with_countries": selected_names_with_countries,
+            "selected_names_with_countries_pct_of_mode3": _pct(
+                selected_names_with_countries, selected_names
+            ),
+            "selected_names_with_income_group": selected_names_with_income_group,
+            "selected_names_with_income_group_pct_of_mode3": _pct(
+                selected_names_with_income_group, selected_names
+            ),
+            "selected_names_with_priority_group": selected_names_with_priority_group,
+            "selected_names_with_priority_group_pct_of_mode3": _pct(
+                selected_names_with_priority_group, selected_names
+            ),
+            "selected_population_rows_with_countries": selected_population_rows_with_countries,
+            "selected_population_rows_with_countries_pct_of_population_rows": _pct(
+                selected_population_rows_with_countries, population_rows
+            ),
+            "selected_population_rows_with_income_group": (
+                selected_population_rows_with_income_group
+            ),
+            "selected_population_rows_with_income_group_pct_of_population_rows": _pct(
+                selected_population_rows_with_income_group, population_rows
+            ),
+            "selected_population_rows_with_priority_group": (
+                selected_population_rows_with_priority_group
+            ),
+            "selected_population_rows_with_priority_group_pct_of_population_rows": _pct(
+                selected_population_rows_with_priority_group, population_rows
             ),
         },
         "rule_counts": {
@@ -351,8 +657,8 @@ def _build_mode3_pgf_metadata(conn: duckdb.DuckDBPyConnection) -> dict[str, Any]
             "xlsx_exact_pass": xlsx_exact_pass,
             "xlsx_exact_fail": outerdict_keys - xlsx_exact_pass,
         },
-        "pgf_distribution": {
-            "non_missing_n": non_missing_n,
+        "country_cardinality_distribution": {
+            "n": card_n,
             "mean": mean,
             "sd": sd,
             "se": se,
@@ -364,66 +670,80 @@ def _build_mode3_pgf_metadata(conn: duckdb.DuckDBPyConnection) -> dict[str, Any]
             "q3": q3,
             "max": max_v,
         },
-        "pgf_outliers_tukey": {
+        "country_cardinality_outliers_tukey": {
             "iqr": iqr,
             "lower_fence": lower_fence,
             "upper_fence": upper_fence,
             "lower_outliers": lower_outliers,
             "upper_outliers": upper_outliers,
             "total_outliers": total_outliers,
-            "outlier_pct_of_non_missing": _pct(total_outliers, non_missing_n),
+            "outlier_pct_of_selected_names": _pct(total_outliers, selected_names),
         },
-        "pgf_buckets": {
-            "missing": bucket_missing,
+        "country_cardinality_buckets": {
             "exact_0": bucket_exact_0,
-            "exact_0_5": bucket_exact_05,
             "exact_1": bucket_exact_1,
-            "between_0_and_0_5_exclusive": bucket_between_0_and_0_5_exclusive,
-            "between_0_5_and_1_exclusive": bucket_between_0_5_and_1_exclusive,
-            "missing_pct_of_mode3": _pct(bucket_missing, selected_names),
+            "exact_2": bucket_exact_2,
+            "exact_3": bucket_exact_3,
+            "exact_4_or_more": bucket_4_or_more,
             "exact_0_pct_of_mode3": _pct(bucket_exact_0, selected_names),
-            "exact_0_5_pct_of_mode3": _pct(bucket_exact_05, selected_names),
             "exact_1_pct_of_mode3": _pct(bucket_exact_1, selected_names),
-            "between_0_and_0_5_exclusive_pct_of_mode3": _pct(
-                bucket_between_0_and_0_5_exclusive, selected_names
+            "exact_2_pct_of_mode3": _pct(bucket_exact_2, selected_names),
+            "exact_3_pct_of_mode3": _pct(bucket_exact_3, selected_names),
+            "exact_4_or_more_pct_of_mode3": _pct(bucket_4_or_more, selected_names),
+        },
+        "income_group_breakdown": income_breakdown,
+        "priority_group_breakdown": priority_breakdown,
+        "multi_country_divergence": {
+            "multi_country_names": multi_country_names,
+            "multi_country_pct_of_mode3": _pct(multi_country_names, selected_names),
+            "different_income_groups": multi_country_different_income_groups,
+            "different_income_groups_pct_of_mode3": _pct(
+                multi_country_different_income_groups, selected_names
             ),
-            "between_0_5_and_1_exclusive_pct_of_mode3": _pct(
-                bucket_between_0_5_and_1_exclusive, selected_names
+            "different_income_groups_pct_of_multi_country": _pct(
+                multi_country_different_income_groups, multi_country_names
             ),
-            "exact_0_pct_of_non_missing": _pct(bucket_exact_0, non_missing_n),
-            "exact_0_5_pct_of_non_missing": _pct(bucket_exact_05, non_missing_n),
-            "exact_1_pct_of_non_missing": _pct(bucket_exact_1, non_missing_n),
-            "between_0_and_0_5_exclusive_pct_of_non_missing": _pct(
-                bucket_between_0_and_0_5_exclusive, non_missing_n
+            "different_priority_groups": multi_country_different_priority_groups,
+            "different_priority_groups_pct_of_mode3": _pct(
+                multi_country_different_priority_groups, selected_names
             ),
-            "between_0_5_and_1_exclusive_pct_of_non_missing": _pct(
-                bucket_between_0_5_and_1_exclusive, non_missing_n
+            "different_priority_groups_pct_of_multi_country": _pct(
+                multi_country_different_priority_groups, multi_country_names
             ),
         },
-        "missing_pgf_inference_audit": {
-            "missing_pgf_rows": bucket_missing,
-            "inference_counts_zero": missing_inference_counts_zero,
-            "inference_counts_nonzero": missing_inference_counts_nonzero,
-            "inference_counts_null": missing_inference_counts_null,
-            "inference_sources_zero": missing_inference_sources_zero,
-            "inference_sources_nonzero": missing_inference_sources_nonzero,
-            "inference_sources_null": missing_inference_sources_null,
-            "both_zero": missing_inference_both_zero,
-            "all_missing_pgf_have_both_zero": all_missing_pgf_have_both_zero,
-            "both_zero_pct_of_missing_pgf_rows": _pct(missing_inference_both_zero, bucket_missing),
+        "label_coverage_consistency_audit": {
+            "selected_names_without_income_group": selected_names_without_income_group,
+            "selected_names_without_priority_group": selected_names_without_priority_group,
+            "selected_names_with_exactly_one_row_income_group": (
+                selected_names_with_exactly_one_row_income_group
+            ),
+            "selected_names_with_multiple_row_income_groups": (
+                selected_names_with_multiple_row_income_groups
+            ),
+            "selected_names_with_exactly_one_row_priority_group": (
+                selected_names_with_exactly_one_row_priority_group
+            ),
+            "selected_names_with_multiple_row_priority_groups": (
+                selected_names_with_multiple_row_priority_groups
+            ),
+            "selected_rows_missing_income_group": selected_rows_missing_income_group,
+            "selected_rows_missing_priority_group": selected_rows_missing_priority_group,
         },
     }
 
 
 def _print_summary(metadata: dict[str, Any]) -> None:
     counts = metadata["counts"]
-    dist = metadata["pgf_distribution"]
-    outliers = metadata["pgf_outliers_tukey"]
-    buckets = metadata["pgf_buckets"]
     rules = metadata["rule_counts"]
-    missing_audit = metadata["missing_pgf_inference_audit"]
+    dist = metadata["country_cardinality_distribution"]
+    buckets = metadata["country_cardinality_buckets"]
+    income_breakdown = metadata["income_group_breakdown"]
+    priority_breakdown = metadata["priority_group_breakdown"]
+    divergence = metadata["multi_country_divergence"]
+    audit = metadata["label_coverage_consistency_audit"]
+    outliers = metadata["country_cardinality_outliers_tukey"]
 
-    console.print("[cyan]Mode-3 p_gf Stats Detour (read-only)[/cyan]")
+    console.print("[cyan]Mode-3 Economy Stats Detour (read-only)[/cyan]")
     console.print(f"[white]DB: {metadata['db_file']}[/white]")
     console.print(f"[white]Mode {metadata['mode']}: {metadata['mode_description']}[/white]")
     console.print(
@@ -431,6 +751,16 @@ def _print_summary(metadata: dict[str, Any]) -> None:
         + ", ".join(str(name) for name in metadata["tables_used"])
         + "[/white]"
     )
+
+    definitions_table = Table(title="Priority-Group Definitions (Step-4 Rules)", box=box.SIMPLE)
+    definitions_table.add_column("Label", style="cyan")
+    definitions_table.add_column("Rule", style="white")
+    for definition in metadata["priority_group_definitions"]:
+        definitions_table.add_row(definition["label"], definition["rule"])
+    console.print(definitions_table)
+    console.print("[white]Priority-group precedence:[/white]")
+    for definition in metadata["priority_group_definitions"]:
+        console.print(f"[white]- {definition['label']}: {definition['rule']}[/white]")
 
     counts_table = Table(title="Selection Counts", box=box.SIMPLE)
     counts_table.add_column("Metric", style="cyan")
@@ -440,7 +770,7 @@ def _print_summary(metadata: dict[str, Any]) -> None:
     counts_table.add_row("Mode-3 selected names", f"{counts['mode3_selected_names']:,}")
     counts_table.add_row(
         "Mode-3 selected % of OuterDict keys",
-        f"{counts['mode3_selected_pct_of_outerdict_keys']:.3f}%",
+        _fmt_pct(counts["mode3_selected_pct_of_outerdict_keys"]),
     )
     counts_table.add_row(
         "Population rows containing mode-3 selected names",
@@ -448,21 +778,55 @@ def _print_summary(metadata: dict[str, Any]) -> None:
     )
     counts_table.add_row(
         "Mode-3 selected % of population rows",
-        f"{counts['mode3_selected_pct_of_population_rows']:.3f}%",
-    )
-    counts_table.add_row("p_gf non-missing (selected names)", f"{counts['pgf_non_missing']:,}")
-    counts_table.add_row("p_gf missing (selected names)", f"{counts['pgf_missing']:,}")
-    counts_table.add_row(
-        "p_gf non-missing % of mode-3",
-        f"{counts['pgf_non_missing_pct_of_mode3']:.3f}%",
+        _fmt_pct(counts["mode3_selected_pct_of_population_rows"]),
     )
     counts_table.add_row(
-        "Population rows containing mode-3 selected names with non-missing p_gf",
-        f"{counts['pgf_non_missing_population_rows']:,}",
+        "Selected names with at least one country",
+        f"{counts['selected_names_with_countries']:,}",
     )
     counts_table.add_row(
-        "p_gf non-missing % of population rows",
-        f"{counts['pgf_non_missing_pct_of_population_rows']:.3f}%",
+        "Selected names with at least one country % of mode-3",
+        _fmt_pct(counts["selected_names_with_countries_pct_of_mode3"]),
+    )
+    counts_table.add_row(
+        "Selected names with at least one income-group label",
+        f"{counts['selected_names_with_income_group']:,}",
+    )
+    counts_table.add_row(
+        "Selected names with income-group label % of mode-3",
+        _fmt_pct(counts["selected_names_with_income_group_pct_of_mode3"]),
+    )
+    counts_table.add_row(
+        "Selected names with at least one priority-group label",
+        f"{counts['selected_names_with_priority_group']:,}",
+    )
+    counts_table.add_row(
+        "Selected names with priority-group label % of mode-3",
+        _fmt_pct(counts["selected_names_with_priority_group_pct_of_mode3"]),
+    )
+    counts_table.add_row(
+        "Selected population rows with at least one country",
+        f"{counts['selected_population_rows_with_countries']:,}",
+    )
+    counts_table.add_row(
+        "Selected rows with countries % of population rows",
+        _fmt_pct(counts["selected_population_rows_with_countries_pct_of_population_rows"]),
+    )
+    counts_table.add_row(
+        "Selected population rows with non-missing income-group label",
+        f"{counts['selected_population_rows_with_income_group']:,}",
+    )
+    counts_table.add_row(
+        "Selected rows with income-group label % of population rows",
+        _fmt_pct(counts["selected_population_rows_with_income_group_pct_of_population_rows"]),
+    )
+    counts_table.add_row(
+        "Selected population rows with non-missing priority-group label",
+        f"{counts['selected_population_rows_with_priority_group']:,}",
+    )
+    counts_table.add_row(
+        "Selected rows with priority-group label % of population rows",
+        _fmt_pct(counts["selected_population_rows_with_priority_group_pct_of_population_rows"]),
     )
     console.print(counts_table)
 
@@ -482,110 +846,187 @@ def _print_summary(metadata: dict[str, Any]) -> None:
     )
     console.print(rules_table)
 
-    dist_table = Table(title="p_gf Distribution (Mode-3, Non-missing Only)", box=box.SIMPLE)
+    dist_table = Table(
+        title="Country Cardinality Distribution (Mode-3 Selected Names)",
+        box=box.SIMPLE,
+    )
     dist_table.add_column("Metric", style="cyan")
     dist_table.add_column("Value", style="magenta", justify="right")
-    dist_table.add_row("N (non-missing)", f"{dist['non_missing_n']:,}")
-    dist_table.add_row("Mean", f"{dist['mean']:.6f}")
-    dist_table.add_row("95% CI (mean)", f"[{dist['mean_ci95_lo']:.6f}, {dist['mean_ci95_hi']:.6f}]")
-    dist_table.add_row("SD", f"{dist['sd']:.6f}")
-    dist_table.add_row("SE", f"{dist['se']:.6f}")
-    dist_table.add_row("Min", f"{dist['min']:.6f}")
-    dist_table.add_row("Q1", f"{dist['q1']:.6f}")
-    dist_table.add_row("Median", f"{dist['median']:.6f}")
-    dist_table.add_row("Q3", f"{dist['q3']:.6f}")
-    dist_table.add_row("Max", f"{dist['max']:.6f}")
+    dist_table.add_row("N (selected names)", f"{dist['n']:,}")
+    dist_table.add_row("Mean", _fmt_float(dist["mean"]))
+    dist_table.add_row(
+        "95% CI (mean)",
+        f"[{_fmt_float(dist['mean_ci95_lo'])}, {_fmt_float(dist['mean_ci95_hi'])}]",
+    )
+    dist_table.add_row("SD", _fmt_float(dist["sd"]))
+    dist_table.add_row("SE", _fmt_float(dist["se"]))
+    dist_table.add_row("Min", _fmt_float(dist["min"]))
+    dist_table.add_row("Q1", _fmt_float(dist["q1"]))
+    dist_table.add_row("Median", _fmt_float(dist["median"]))
+    dist_table.add_row("Q3", _fmt_float(dist["q3"]))
+    dist_table.add_row("Max", _fmt_float(dist["max"]))
     console.print(dist_table)
 
-    bucket_table = Table(title="p_gf Buckets (Mode-3 Selected Names)", box=box.SIMPLE)
+    bucket_table = Table(
+        title="Country Cardinality Buckets (Mode-3 Selected Names)",
+        box=box.SIMPLE,
+    )
     bucket_table.add_column("Bucket", style="cyan")
     bucket_table.add_column("Raw", style="magenta", justify="right")
     bucket_table.add_column("% of mode-3", style="magenta", justify="right")
     bucket_table.add_row(
-        "exactly 0",
+        "0 countries",
         f"{buckets['exact_0']:,}",
-        f"{buckets['exact_0_pct_of_mode3']:.3f}%",
+        _fmt_pct(buckets["exact_0_pct_of_mode3"]),
     )
     bucket_table.add_row(
-        "0 < p_gf < 0.5",
-        f"{buckets['between_0_and_0_5_exclusive']:,}",
-        f"{buckets['between_0_and_0_5_exclusive_pct_of_mode3']:.3f}%",
-    )
-    bucket_table.add_row(
-        "exactly 0.5",
-        f"{buckets['exact_0_5']:,}",
-        f"{buckets['exact_0_5_pct_of_mode3']:.3f}%",
-    )
-    bucket_table.add_row(
-        "0.5 < p_gf < 1",
-        f"{buckets['between_0_5_and_1_exclusive']:,}",
-        f"{buckets['between_0_5_and_1_exclusive_pct_of_mode3']:.3f}%",
-    )
-    bucket_table.add_row(
-        "exactly 1",
+        "1 country",
         f"{buckets['exact_1']:,}",
-        f"{buckets['exact_1_pct_of_mode3']:.3f}%",
+        _fmt_pct(buckets["exact_1_pct_of_mode3"]),
     )
     bucket_table.add_row(
-        "missing",
-        f"{buckets['missing']:,}",
-        f"{buckets['missing_pct_of_mode3']:.3f}%",
+        "2 countries",
+        f"{buckets['exact_2']:,}",
+        _fmt_pct(buckets["exact_2_pct_of_mode3"]),
+    )
+    bucket_table.add_row(
+        "3 countries",
+        f"{buckets['exact_3']:,}",
+        _fmt_pct(buckets["exact_3_pct_of_mode3"]),
+    )
+    bucket_table.add_row(
+        "4+ countries",
+        f"{buckets['exact_4_or_more']:,}",
+        _fmt_pct(buckets["exact_4_or_more_pct_of_mode3"]),
     )
     console.print(bucket_table)
 
-    missing_table = Table(
-        title="Missing p_gf Inference Audit (Mode-3 Selected Names)",
+    income_table = Table(title="Income-Group Breakdown (Selected Population Rows)", box=box.SIMPLE)
+    income_table.add_column("Income group", style="cyan")
+    income_table.add_column("Rows", style="magenta", justify="right")
+    income_table.add_column("% non-missing rows", style="magenta", justify="right")
+    income_table.add_column("Selected names", style="magenta", justify="right")
+    for row in income_breakdown:
+        income_table.add_row(
+            row["income_group"],
+            f"{row['selected_population_rows']:,}",
+            _fmt_pct(row["pct_of_non_missing_selected_population_rows"]),
+            f"{row['selected_names']:,}",
+        )
+    console.print(income_table)
+
+    priority_table = Table(
+        title="Priority-Group Breakdown (Selected Population Rows)",
         box=box.SIMPLE,
     )
-    missing_table.add_column("Metric", style="cyan")
-    missing_table.add_column("Value", style="magenta", justify="right")
-    missing_table.add_row("Missing p_gf rows", f"{missing_audit['missing_pgf_rows']:,}")
-    if missing_audit["missing_pgf_rows"] == 0:
-        missing_table.add_row("All missing rows have both zeros", "N/A (no missing p_gf rows)")
-    else:
-        missing_table.add_row(
-            "All missing rows have both zeros",
-            "Yes" if missing_audit["all_missing_pgf_have_both_zero"] else "No",
+    priority_table.add_column("Priority group", style="cyan")
+    priority_table.add_column("Rows", style="magenta", justify="right")
+    priority_table.add_column("% non-missing rows", style="magenta", justify="right")
+    priority_table.add_column("Selected names", style="magenta", justify="right")
+    for row in priority_breakdown:
+        priority_table.add_row(
+            row["priority_group"],
+            f"{row['selected_population_rows']:,}",
+            _fmt_pct(row["pct_of_non_missing_selected_population_rows"]),
+            f"{row['selected_names']:,}",
         )
-        missing_table.add_row(
-            "Both inference_counts=0 and inference_sources=0",
-            (
-                f"{missing_audit['both_zero']:,} "
-                f"({missing_audit['both_zero_pct_of_missing_pgf_rows']:.3f}%)"
-            ),
-        )
-    missing_table.add_row(
-        "inference_counts == 0", f"{missing_audit['inference_counts_zero']:,}"
-    )
-    missing_table.add_row(
-        "inference_counts != 0 (non-null)", f"{missing_audit['inference_counts_nonzero']:,}"
-    )
-    missing_table.add_row(
-        "inference_counts is NULL", f"{missing_audit['inference_counts_null']:,}"
-    )
-    missing_table.add_row(
-        "inference_sources == 0", f"{missing_audit['inference_sources_zero']:,}"
-    )
-    missing_table.add_row(
-        "inference_sources != 0 (non-null)", f"{missing_audit['inference_sources_nonzero']:,}"
-    )
-    missing_table.add_row(
-        "inference_sources is NULL", f"{missing_audit['inference_sources_null']:,}"
-    )
-    console.print(missing_table)
+    console.print(priority_table)
 
-    outlier_table = Table(title="Outliers (Tukey 1.5*IQR, Non-missing)", box=box.SIMPLE)
+    divergence_table = Table(
+        title="Multi-Country Divergence (Mode-3 Selected Names)",
+        box=box.SIMPLE,
+    )
+    divergence_table.add_column("Metric", style="cyan")
+    divergence_table.add_column("Value", style="magenta", justify="right")
+    divergence_table.add_row(
+        "Selected names with >1 countries",
+        f"{divergence['multi_country_names']:,}",
+    )
+    divergence_table.add_row(
+        "Selected names with >1 countries % of mode-3",
+        _fmt_pct(divergence["multi_country_pct_of_mode3"]),
+    )
+    divergence_table.add_row(
+        "Selected names with >1 countries and >1 derived income groups",
+        f"{divergence['different_income_groups']:,}",
+    )
+    divergence_table.add_row(
+        "Different derived income groups % of mode-3",
+        _fmt_pct(divergence["different_income_groups_pct_of_mode3"]),
+    )
+    divergence_table.add_row(
+        "Different derived income groups % of multi-country selected names",
+        _fmt_pct(divergence["different_income_groups_pct_of_multi_country"]),
+    )
+    divergence_table.add_row(
+        "Selected names with >1 countries and >1 derived priority groups",
+        f"{divergence['different_priority_groups']:,}",
+    )
+    divergence_table.add_row(
+        "Different derived priority groups % of mode-3",
+        _fmt_pct(divergence["different_priority_groups_pct_of_mode3"]),
+    )
+    divergence_table.add_row(
+        "Different derived priority groups % of multi-country selected names",
+        _fmt_pct(divergence["different_priority_groups_pct_of_multi_country"]),
+    )
+    console.print(divergence_table)
+
+    audit_table = Table(
+        title="Label Coverage / Consistency Audit (Mode-3 Selected Names)",
+        box=box.SIMPLE,
+    )
+    audit_table.add_column("Metric", style="cyan")
+    audit_table.add_column("Value", style="magenta", justify="right")
+    audit_table.add_row(
+        "Selected names with no income-group labels",
+        f"{audit['selected_names_without_income_group']:,}",
+    )
+    audit_table.add_row(
+        "Selected names with no priority-group labels",
+        f"{audit['selected_names_without_priority_group']:,}",
+    )
+    audit_table.add_row(
+        "Selected names with exactly one distinct row income-group label",
+        f"{audit['selected_names_with_exactly_one_row_income_group']:,}",
+    )
+    audit_table.add_row(
+        "Selected names with 2+ distinct row income-group labels",
+        f"{audit['selected_names_with_multiple_row_income_groups']:,}",
+    )
+    audit_table.add_row(
+        "Selected names with exactly one distinct row priority-group label",
+        f"{audit['selected_names_with_exactly_one_row_priority_group']:,}",
+    )
+    audit_table.add_row(
+        "Selected names with 2+ distinct row priority-group labels",
+        f"{audit['selected_names_with_multiple_row_priority_groups']:,}",
+    )
+    audit_table.add_row(
+        "Selected rows with missing income-group label",
+        f"{audit['selected_rows_missing_income_group']:,}",
+    )
+    audit_table.add_row(
+        "Selected rows with missing priority-group label",
+        f"{audit['selected_rows_missing_priority_group']:,}",
+    )
+    console.print(audit_table)
+
+    outlier_table = Table(
+        title="Country Cardinality Outliers (Tukey 1.5*IQR)",
+        box=box.SIMPLE,
+    )
     outlier_table.add_column("Metric", style="cyan")
     outlier_table.add_column("Value", style="magenta", justify="right")
-    outlier_table.add_row("IQR", f"{outliers['iqr']:.6f}")
-    outlier_table.add_row("Lower fence", f"{outliers['lower_fence']:.6f}")
-    outlier_table.add_row("Upper fence", f"{outliers['upper_fence']:.6f}")
+    outlier_table.add_row("IQR", _fmt_float(outliers["iqr"]))
+    outlier_table.add_row("Lower fence", _fmt_float(outliers["lower_fence"]))
+    outlier_table.add_row("Upper fence", _fmt_float(outliers["upper_fence"]))
     outlier_table.add_row("Lower outliers", f"{outliers['lower_outliers']:,}")
     outlier_table.add_row("Upper outliers", f"{outliers['upper_outliers']:,}")
     outlier_table.add_row("Total outliers", f"{outliers['total_outliers']:,}")
     outlier_table.add_row(
-        "Outliers % of non-missing",
-        f"{outliers['outlier_pct_of_non_missing']:.3f}%",
+        "Outliers % of selected names",
+        _fmt_pct(outliers["outlier_pct_of_selected_names"]),
     )
     console.print(outlier_table)
 
@@ -604,12 +1045,12 @@ def run_detour(
 
     try:
         conn = duckdb.connect(str(config.db_file), read_only=True)
-        metadata = _build_mode3_pgf_metadata(conn)
+        metadata = _build_mode3_econ_metadata(config, conn)
         _print_summary(metadata)
         result = DetourResult(
             success=True,
             steps_completed=[],
-            summary="Computed read-only mode-3 p_gf stats from persisted tables.",
+            summary="Computed read-only mode-3 economy stats from persisted tables.",
             metadata=metadata,
         )
     except Exception as exc:
@@ -635,7 +1076,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
             "Read-only detour that reconstructs mode-3 selection from persisted tables "
-            "and prints p_gf stats."
+            "and prints income-group / priority-group stats."
         )
     )
     parser.add_argument("--config", type=Path, required=True, help="Path to JSON config file.")

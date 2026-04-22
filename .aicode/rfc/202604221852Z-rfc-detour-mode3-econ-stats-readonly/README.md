@@ -664,3 +664,221 @@ In practice that means:
 - income-group / priority-group aggregation rules should be made explicit,
 - `ktp.hcr_world_bank_economies` should stay in play as the supporting country list for the multi-country divergence section,
 - and the final output should feel like the same detour grew up to talk about the variables it is actually named after.
+
+---
+
+## Post-Implementation Addendum: Effort Log and Actual Execution Record
+
+This RFC started as a pre-implementation plan. The section below records the actual work performed, including corrections made after implementation pressure-testing against the real DB and user feedback.
+
+### 1. Initial orientation and preservation strategy
+
+The first implementation pass followed the spirit of the RFC very closely:
+- keep `src/detours/detour_mode3_econ_stats.py` in place,
+- preserve the existing mode-3 selector helpers,
+- preserve the read-only CLI shape,
+- preserve the report section flow wherever the new target variables allowed it,
+- and replace only the `p_gf`-specific extraction / aggregation logic.
+
+The preservation goal was deliberately surgical:
+- keep the same mode-3 reconstruction pattern from `outerdict_stub`, `xlsx_innerdicts`, and `ssn_innerdicts`,
+- keep Rich stdout reporting,
+- keep structured metadata,
+- and retarget only the parts that needed to talk about:
+  - `ktp.hcr_world_bank_economies_income_group`
+  - `ktp.priority_label`
+  - `ktp.hcr_world_bank_economies`
+
+### 2. First implemented feature set
+
+The first real code pass successfully retargeted the visible report structure to include:
+- priority-group definitions / legend,
+- selection counts,
+- rule counts,
+- country-cardinality distribution,
+- country-cardinality buckets,
+- income-group breakdown,
+- priority-group breakdown,
+- multi-country divergence,
+- label coverage / consistency audit,
+- and Tukey outlier reporting on country cardinality.
+
+That pass also added a dedicated test module:
+- `tests/test_detour_mode3_econ_stats.py`
+
+The fixture test covered:
+- JSONL parsing,
+- mode-3 selection semantics,
+- row-level versus name-level aggregation,
+- divergence detection,
+- and read-only behavior.
+
+### 3. The first major implementation mistake
+
+The first implementation pass still carried an external-resource dependency for the income lookup. That was wrong for this task.
+
+Concretely:
+- the detour could still fail if the World Bank XLSX referenced by config was not available locally,
+- which violated the intended read-only-detour contract for this task,
+- because the DB already persisted the necessary step-4 lookup data.
+
+This problem was exposed immediately when the module was run with:
+- `pixi run python -m src.detours.detour_mode3_econ_stats --config config_p_gf.json`
+
+The failure mode was:
+- missing external World Bank XLSX,
+- even though the real task only required analysis over the existing DuckDB file.
+
+That failure was a useful correction point. The user was right to push back on it.
+
+### 4. Investigation that led to the DB-only correction
+
+After the failure, the implementation was re-audited against the actual pipeline.
+
+The key findings were:
+- `income_map` is persisted in step 4 and is available inside the DB.
+- `ktp.priority_label` is not stored in `income_map`, but is derived in step 4 from:
+  - matched countries,
+  - hardcoded country-group sets in `vars.py`,
+  - and a derived non-English / non-EU HIC bucket.
+- `ktp.hcr_world_bank_economies_match` is not enough for country-level income divergence because it does not contain country-to-income labels.
+- `ktp.hcr_world_bank_economies_income_group` and `ktp.priority_label` are collapsed row-level labels, so they are not sufficient by themselves for exact country-level divergence metrics.
+
+This led to the corrected implementation rule:
+- use persisted `income_map` from the DB for country-to-income derivation,
+- use the same hardcoded priority-group rules from `vars.py` for per-country priority classification,
+- and keep the whole detour DB-only and read-only.
+
+This addendum therefore clarifies and partially supersedes any earlier RFC phrasing that sounded like the detour might reopen the raw World Bank workbook directly. The shipped implementation does not do that.
+
+### 5. Final implementation changes actually made
+
+The final implementation path in `src/detours/detour_mode3_econ_stats.py` now does the following:
+
+- keeps the existing mode-3 selector semantics intact,
+- opens DuckDB in read-only mode,
+- loads persisted `income_map` from the DB,
+- builds:
+  - `country_to_income`
+  - `alias_to_country`
+- derives priority-country sets from:
+  - `ENGLISH_HICS`
+  - `EU_COUNTRIES`
+  - `GREATER_CHINA`
+  - and the high-income countries observed in persisted `income_map`
+- derives per-country priority labels locally using the same precedence as step 4,
+- and computes all report sections from persisted DB content only.
+
+The most important code-level correction was the introduction of DB-only lookup helpers:
+- `_load_income_label_maps_from_db(...)`
+- `_priority_country_sets(...)`
+- `_priority_group_for_country(...)`
+
+At the same time, the implementation intentionally kept as much of the original detour skeleton as possible:
+- selector helper behavior,
+- read-only runtime shape,
+- report sequencing,
+- metadata structure,
+- and the general “detour, not pipeline step” architecture.
+
+### 6. Test fixture correction work
+
+Once the detour was corrected to use persisted `income_map`, the new test file also had to be corrected.
+
+The first version of the test fixture still:
+- created a fake World Bank XLSX,
+- referenced `WORLD_BANK_XLSX_KEY` directly for the fixture’s meaningful input,
+- and did not create a persisted `income_map` table.
+
+That no longer matched the detour’s correct runtime contract.
+
+The test fixture was then updated so it now:
+- creates a persisted `income_map` table directly in the fixture DB,
+- inserts representative countries and income labels there,
+- keeps placeholder config entries only to satisfy `PipelineConfig`,
+- and no longer depends on a real XLSX file to exercise the detour.
+
+This made the tests reflect the actual deployed behavior rather than the earlier mistaken assumption.
+
+### 7. Verification commands that were run
+
+The final implementation was verified with the following commands:
+
+- `pixi run lint`
+- `pixi run python -m pytest tests/test_detour_mode3_pgf_stats.py tests/test_detour_mode3_econ_stats.py`
+- `pixi run python -m src.detours.detour_mode3_econ_stats --config config_p_gf.json`
+
+One intermediate `pixi run lint` attempt hit an environment-linking issue:
+- `Text file busy` while Pixi was linking the Python executable
+
+That was an environment-level problem rather than a code problem. The command was rerun cleanly and completed successfully afterward.
+
+### 8. Direct read-only DB sanity-check work
+
+After the module ran successfully end-to-end, the output was sanity-checked against direct read-only DuckDB access on:
+- `data/scisci_process__p_gf.duckdb`
+
+The cross-check recomputed the detour’s key quantities directly from persisted tables:
+- mode-3 selected names,
+- mode-3 selected population rows,
+- row-level income-group counts,
+- row-level priority-group counts,
+- multi-country divergence counts,
+- and Tukey outlier totals.
+
+This verification was intentionally independent of the human-readable report formatting.
+
+### 9. Sanity-check values confirmed against the DB
+
+The direct DB pass matched the detour output for the key values checked:
+
+- `Population rows = 59,665`
+- `OuterDict keys = 19,786`
+- `Mode-3 selected names = 7,312`
+- `Mode-3 selected population rows = 23,671`
+- `Selected names with at least one country = 7,308`
+- `Selected rows with at least one country = 23,657`
+- `Selected rows with non-missing income-group label = 23,657`
+- `Selected rows with non-missing priority-group label = 23,671`
+- `High income countries rows = 21,487`
+- `Upper middle income LMICs rows = 2,078`
+- `Lower middle income LMICs rows = 92`
+- `GREATER_CHINA rows = 2,392`
+- `NON_ENGLISH_NON_EU_HICS_NO_GREATER_CHINA rows = 2,805`
+- `EU_COUNTRIES rows = 6,040`
+- `ENGLISH_HICS rows = 12,016`
+- `LMICS_NO_GREATER_CHINA_OR_UNKNOWN rows = 418`
+- `Selected names with >1 countries = 937`
+- `Selected names with >1 countries and >1 derived income groups = 320`
+- `Selected names with >1 countries and >1 derived priority groups = 735`
+- `Total Tukey outliers on country cardinality = 941`
+
+These checks gave confidence that:
+- the detour was no longer just structurally correct,
+- it was also numerically faithful to the persisted DB content.
+
+### 10. What stayed preserved, as requested
+
+Even after the correction from external-resource lookup to persisted-table lookup, the implementation still preserved the core character of the original detour:
+
+- mode-3 membership logic stayed materially unchanged,
+- the report still opens with scope / selection / rule counts,
+- the main numeric “distribution” analog remained a compact summary table,
+- the bucket section remained explicit and exhaustive,
+- and the audit section remained a first-class report section rather than an afterthought.
+
+So the final result is still intentionally recognizable as a close relative of the original `p_gf` detour, just speaking about the right target variables.
+
+### 11. Practical lessons from this implementation
+
+The biggest practical lesson from this effort was:
+- for read-only detours over a completed DB, the correct default is to trust persisted tables first and external files last.
+
+A second lesson was:
+- for economy / priority reporting, row-level labels and country-level divergence are two different analytical layers and both need to be represented explicitly.
+
+A third lesson was:
+- the right “surgical” implementation here was not “change as little code as possible no matter what,”
+- but rather “preserve the selector and report skeleton aggressively, and change the data-derivation layer firmly where the old logic was wrong.”
+
+That is the implementation that shipped.

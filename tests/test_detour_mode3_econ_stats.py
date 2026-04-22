@@ -1,0 +1,647 @@
+from __future__ import annotations
+
+import ast
+import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+import duckdb
+import pytest
+
+from src.detours.detour_mode3_econ_stats import (
+    DETOUR_STEPS,
+    _is_exact_xlsx_match_payload,
+    _normalize_country_list,
+    run_detour,
+)
+from src.helpers.config import PipelineConfig
+from src.helpers.jsonlines import dumps_jsonlines
+from src.helpers.schema import OUTERDICT_STUB_TABLE, PARQUET_INNERDICT_TABLE, XLSX_INNERDICT_TABLE
+from src.helpers.vars import (
+    HCR_XLSX_KEY_PREFIX,
+    KTP_ECONOMIES_COL,
+    KTP_ECONOMIES_INCOME_GROUP_COL,
+    KTP_FILENAME_COL,
+    KTP_FRAGMENT_COL,
+    KTP_PRIORITY_GROUP_COL,
+    KTP_PRIORITY_GROUP_LABELS,
+    KTP_SOURCE_KEY_COL,
+    KTP_XLSX_MATCH_COL,
+    KTP_XLSX_MATCH_FIRST_TOKENS_KEY,
+    KTP_XLSX_MATCH_LAST_NAME_NORM_KEY,
+    KTP_XLSX_MATCH_SOURCE_KEY_LAST_KEY,
+    KTP_XLSX_MATCH_SOURCE_KEY_TOKENS_KEY,
+    OGHIST_INCOME_LABELS,
+    REQUIRED_FILES_CONFIG_KEYS,
+)
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _strip_ansi(text: str) -> str:
+    return re.sub(r"\x1B\[[0-?]*[ -/]*[@-~]", "", text)
+
+
+def _name_key(first: str, last: str) -> str:
+    return json.dumps({"ktp.first_name": first, "ktp.last_name": last}, ensure_ascii=False)
+
+
+def _exact_xlsx_payload(first_tokens: list[str], last_norm: str) -> str:
+    return json.dumps(
+        {
+            KTP_XLSX_MATCH_SOURCE_KEY_TOKENS_KEY: first_tokens,
+            KTP_XLSX_MATCH_SOURCE_KEY_LAST_KEY: last_norm,
+            KTP_XLSX_MATCH_FIRST_TOKENS_KEY: first_tokens,
+            KTP_XLSX_MATCH_LAST_NAME_NORM_KEY: last_norm,
+        },
+        ensure_ascii=False,
+    )
+
+
+def _non_exact_xlsx_payload(
+    source_tokens: list[str], first_tokens: list[str], last_norm: str
+) -> str:
+    return json.dumps(
+        {
+            KTP_XLSX_MATCH_SOURCE_KEY_TOKENS_KEY: source_tokens,
+            KTP_XLSX_MATCH_SOURCE_KEY_LAST_KEY: last_norm,
+            KTP_XLSX_MATCH_FIRST_TOKENS_KEY: first_tokens,
+            KTP_XLSX_MATCH_LAST_NAME_NORM_KEY: last_norm,
+        },
+        ensure_ascii=False,
+    )
+
+
+def _minimal_config_dict(db_path: Path) -> dict[str, object]:
+    files_config: dict[str, dict[str, str]] = {}
+    for key in sorted(REQUIRED_FILES_CONFIG_KEYS):
+        files_config[key] = {
+            "path": f"/placeholder/{key}",
+            "sha256": "0" * 64,
+            "desc": f"placeholder {key}",
+        }
+    files_config[f"{HCR_XLSX_KEY_PREFIX}2024"] = {
+        "path": "/placeholder/2024_HCR.xlsx",
+        "sha256": "1" * 64,
+        "desc": "placeholder hcr",
+    }
+    return {
+        "files_config": files_config,
+        "db_file": str(db_path),
+        "state_file": str(db_path.with_suffix(".state.json")),
+        "output_dir": str(db_path.parent / "output"),
+        "output_format": "txt",
+        "pandoc_reference_docx": str(db_path.parent / "reference.docx"),
+        "docx_dir": str(db_path.parent / "docx"),
+        "timezone": "UTC",
+        "sample_seed": 42,
+        "sample_draw_sizes": [1],
+        "pilot_xlsx_name": "2024_HCR.xlsx",
+        "total_draws": 1,
+        "card_subset_mode": 3,
+    }
+
+
+def _build_fixture_db(path: Path) -> dict[str, int]:
+    con = duckdb.connect(str(path))
+    try:
+        con.execute("CREATE TABLE population_with_names_economy (id INTEGER)")
+        con.execute("INSERT INTO population_with_names_economy SELECT * FROM range(0, 100)")
+
+        con.execute(
+            f"""
+            CREATE TABLE {OUTERDICT_STUB_TABLE} (
+                name_key VARCHAR,
+                innerdicts VARCHAR
+            )
+            """
+        )
+        con.execute(
+            f"""
+            CREATE TABLE {XLSX_INNERDICT_TABLE} (
+                name_key VARCHAR,
+                innerdicts VARCHAR
+            )
+            """
+        )
+        con.execute(
+            f"""
+            CREATE TABLE {PARQUET_INNERDICT_TABLE} (
+                "{KTP_SOURCE_KEY_COL}" VARCHAR
+            )
+            """
+        )
+        con.execute(
+            """
+            CREATE TABLE income_map (
+                match_name VARCHAR,
+                country VARCHAR,
+                income_label VARCHAR
+            )
+            """
+        )
+
+        keys = {
+            "sel_zero": _name_key("Sel", "Zero"),
+            "sel_one": _name_key("Sel", "One"),
+            "sel_two_income": _name_key("Sel", "TwoIncome"),
+            "sel_two_priority": _name_key("Sel", "TwoPriority"),
+            "sel_three": _name_key("Sel", "Three"),
+            "sel_fourplus": _name_key("Sel", "FourPlus"),
+            "fail_multi_sciscinet": _name_key("Fail", "MultiSci"),
+            "fail_no_xlsx_present": _name_key("Fail", "NoXlsxPresent"),
+            "fail_non_exact_jsonl": _name_key("Fail", "Jsonl"),
+            "fail_zero_sciscinet": _name_key("Fail", "ZeroSci"),
+        }
+        con.executemany(
+            f"INSERT INTO {OUTERDICT_STUB_TABLE} VALUES (?, ?)",
+            [(name_key, "") for name_key in keys.values()],
+        )
+
+        def match_row(
+            *,
+            filename: str,
+            fragment: str,
+            payload: object,
+            countries: object,
+            income_group: object,
+            priority_group: object,
+        ) -> dict[str, object]:
+            return {
+                KTP_FILENAME_COL: filename,
+                KTP_FRAGMENT_COL: fragment,
+                KTP_XLSX_MATCH_COL: payload,
+                KTP_ECONOMIES_COL: countries,
+                KTP_ECONOMIES_INCOME_GROUP_COL: income_group,
+                KTP_PRIORITY_GROUP_COL: priority_group,
+            }
+
+        high = OGHIST_INCOME_LABELS["H"]
+        low = OGHIST_INCOME_LABELS["L"]
+        lower_middle = OGHIST_INCOME_LABELS["LM"]
+        priority_fallback = KTP_PRIORITY_GROUP_LABELS[1]
+        priority_china = KTP_PRIORITY_GROUP_LABELS[2]
+        priority_eu = KTP_PRIORITY_GROUP_LABELS[4]
+        priority_english = KTP_PRIORITY_GROUP_LABELS[5]
+        upper_middle = OGHIST_INCOME_LABELS["UM"]
+
+        con.executemany(
+            "INSERT INTO income_map VALUES (?, ?, ?)",
+            [
+                ("United States", "United States", high),
+                ("France", "France", high),
+                ("India", "India", lower_middle),
+                ("Nepal", "Nepal", low),
+                ("China", "China", upper_middle),
+            ],
+        )
+
+        xlsx_rows = [
+            (
+                keys["sel_zero"],
+                dumps_jsonlines(
+                    [
+                        match_row(
+                            filename="2019_HCR.xlsx",
+                            fragment="10",
+                            payload=_exact_xlsx_payload(["sel"], "zero"),
+                            countries="[]",
+                            income_group=None,
+                            priority_group=priority_fallback,
+                        ),
+                        match_row(
+                            filename="2019_HCR.xlsx",
+                            fragment="10",
+                            payload=_exact_xlsx_payload(["sel"], "zero"),
+                            countries="[]",
+                            income_group=None,
+                            priority_group=priority_fallback,
+                        ),
+                    ]
+                ),
+            ),
+            (
+                keys["sel_one"],
+                dumps_jsonlines(
+                    [
+                        match_row(
+                            filename="2020_HCR.xlsx",
+                            fragment="20",
+                            payload=_exact_xlsx_payload(["sel"], "one"),
+                            countries=json.dumps(["France"]),
+                            income_group=high,
+                            priority_group=priority_eu,
+                        )
+                    ]
+                ),
+            ),
+            (
+                keys["sel_two_income"],
+                dumps_jsonlines(
+                    [
+                        match_row(
+                            filename="2021_HCR.xlsx",
+                            fragment="30",
+                            payload=_exact_xlsx_payload(["sel"], "twoincome"),
+                            countries=json.dumps(["India"]),
+                            income_group=lower_middle,
+                            priority_group=priority_fallback,
+                        ),
+                        match_row(
+                            filename="2021_HCR.xlsx",
+                            fragment="31",
+                            payload=_exact_xlsx_payload(["sel"], "twoincome"),
+                            countries=["Nepal"],
+                            income_group=low,
+                            priority_group=priority_fallback,
+                        ),
+                    ]
+                ),
+            ),
+            (
+                keys["sel_two_priority"],
+                dumps_jsonlines(
+                    [
+                        match_row(
+                            filename="2022_HCR.xlsx",
+                            fragment="40",
+                            payload=_exact_xlsx_payload(["sel"], "twopriority"),
+                            countries=["United States"],
+                            income_group=high,
+                            priority_group=priority_english,
+                        ),
+                        match_row(
+                            filename="2022_HCR.xlsx",
+                            fragment="41",
+                            payload=_exact_xlsx_payload(["sel"], "twopriority"),
+                            countries=json.dumps(["France"]),
+                            income_group=high,
+                            priority_group=priority_eu,
+                        ),
+                    ]
+                ),
+            ),
+            (
+                keys["sel_three"],
+                dumps_jsonlines(
+                    [
+                        match_row(
+                            filename="2023_HCR.xlsx",
+                            fragment="50",
+                            payload=_exact_xlsx_payload(["sel"], "three"),
+                            countries=["United States", "France", "India", "India"],
+                            income_group=high,
+                            priority_group=priority_eu,
+                        )
+                    ]
+                ),
+            ),
+            (
+                keys["sel_fourplus"],
+                dumps_jsonlines(
+                    [
+                        match_row(
+                            filename="2024_HCR.xlsx",
+                            fragment="60",
+                            payload=_exact_xlsx_payload(["sel"], "fourplus"),
+                            countries=json.dumps(
+                                ["China", "United States", "France", "India", "Nepal", "China"]
+                            ),
+                            income_group=high,
+                            priority_group=priority_china,
+                        )
+                    ]
+                ),
+            ),
+            (
+                keys["fail_multi_sciscinet"],
+                dumps_jsonlines(
+                    [
+                        match_row(
+                            filename="2024_HCR.xlsx",
+                            fragment="61",
+                            payload=_exact_xlsx_payload(["fail"], "multisci"),
+                            countries=json.dumps(["France"]),
+                            income_group=high,
+                            priority_group=priority_eu,
+                        )
+                    ]
+                ),
+            ),
+            (
+                keys["fail_no_xlsx_present"],
+                dumps_jsonlines(
+                    [
+                        match_row(
+                            filename="2024_HCR.xlsx",
+                            fragment="62",
+                            payload=None,
+                            countries=json.dumps(["France"]),
+                            income_group=high,
+                            priority_group=priority_eu,
+                        ),
+                        match_row(
+                            filename="2024_HCR.xlsx",
+                            fragment="62",
+                            payload="   ",
+                            countries=json.dumps(["France"]),
+                            income_group=high,
+                            priority_group=priority_eu,
+                        ),
+                    ]
+                ),
+            ),
+            (
+                keys["fail_non_exact_jsonl"],
+                dumps_jsonlines(
+                    [
+                        match_row(
+                            filename="2024_HCR.xlsx",
+                            fragment="63",
+                            payload=_exact_xlsx_payload(["fail"], "jsonl"),
+                            countries=json.dumps(["France"]),
+                            income_group=high,
+                            priority_group=priority_eu,
+                        ),
+                        match_row(
+                            filename="2024_HCR.xlsx",
+                            fragment="63",
+                            payload=_non_exact_xlsx_payload(["fail"], ["different"], "jsonl"),
+                            countries=json.dumps(["France"]),
+                            income_group=high,
+                            priority_group=priority_eu,
+                        ),
+                    ]
+                ),
+            ),
+            (
+                keys["fail_zero_sciscinet"],
+                dumps_jsonlines(
+                    [
+                        match_row(
+                            filename="2024_HCR.xlsx",
+                            fragment="64",
+                            payload=_exact_xlsx_payload(["fail"], "zerosci"),
+                            countries=json.dumps(["France"]),
+                            income_group=high,
+                            priority_group=priority_eu,
+                        )
+                    ]
+                ),
+            ),
+        ]
+        con.executemany(f"INSERT INTO {XLSX_INNERDICT_TABLE} VALUES (?, ?)", xlsx_rows)
+
+        ssn_rows = [
+            (keys["sel_zero"],),
+            (keys["sel_one"],),
+            (keys["sel_two_income"],),
+            (keys["sel_two_priority"],),
+            (keys["sel_three"],),
+            (keys["sel_fourplus"],),
+            (keys["fail_multi_sciscinet"],),
+            (keys["fail_multi_sciscinet"],),
+            (keys["fail_no_xlsx_present"],),
+            (keys["fail_non_exact_jsonl"],),
+        ]
+        con.executemany(
+            f'INSERT INTO {PARQUET_INNERDICT_TABLE} ("{KTP_SOURCE_KEY_COL}") VALUES (?)',
+            ssn_rows,
+        )
+
+        return {
+            "population_rows": 100,
+            "outerdict_rows": len(keys),
+            "xlsx_innerdict_rows": len(xlsx_rows),
+            "ssn_innerdict_rows": len(ssn_rows),
+            "mode3_selected_population_rows": 8,
+            "selected_population_rows_with_countries": 7,
+            "selected_population_rows_with_income_group": 7,
+            "selected_population_rows_with_priority_group": 8,
+        }
+    finally:
+        con.close()
+
+
+@pytest.fixture()
+def detour_fixture(tmp_path: Path) -> tuple[Path, Path, dict[str, int]]:
+    db_path = tmp_path / "fixture.duckdb"
+    counts = _build_fixture_db(db_path)
+    cfg_path = tmp_path / "config.detour_mode3_econ.json"
+    cfg_path.write_text(
+        json.dumps(_minimal_config_dict(db_path), indent=2),
+        encoding="utf-8",
+    )
+    return cfg_path, db_path, counts
+
+
+def test_detour_contract_and_mode3_econ_stats_readonly(
+    detour_fixture: tuple[Path, Path, dict[str, int]],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config_path, db_path, baseline_counts = detour_fixture
+    config = PipelineConfig.from_json(config_path)
+
+    def _row_count(conn: duckdb.DuckDBPyConnection, table_name: str) -> int:
+        row = conn.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()
+        if row is None:
+            raise RuntimeError(f"Missing row count for {table_name}")
+        return int(row[0])
+
+    before = duckdb.connect(str(db_path), read_only=True)
+    try:
+        before_counts = {
+            OUTERDICT_STUB_TABLE: _row_count(before, OUTERDICT_STUB_TABLE),
+            XLSX_INNERDICT_TABLE: _row_count(before, XLSX_INNERDICT_TABLE),
+            PARQUET_INNERDICT_TABLE: _row_count(before, PARQUET_INNERDICT_TABLE),
+        }
+    finally:
+        before.close()
+
+    result = run_detour(config, interactive=False)
+    plain = _strip_ansi(capsys.readouterr().out)
+
+    assert result.success is True
+    assert result.steps_completed == DETOUR_STEPS == []
+    assert "Mode-3 Economy Stats Detour" in plain
+    assert "Priority-Group Definitions" in plain
+    assert "Income-Group Breakdown" in plain
+    assert "Priority-Group Breakdown" in plain
+    assert "Multi-Country Divergence" in plain
+    assert KTP_PRIORITY_GROUP_LABELS[2] in plain
+    assert KTP_PRIORITY_GROUP_LABELS[3] in plain
+    assert KTP_PRIORITY_GROUP_LABELS[4] in plain
+    assert KTP_PRIORITY_GROUP_LABELS[5] in plain
+    assert KTP_PRIORITY_GROUP_LABELS[1] in plain
+
+    md = result.metadata
+    assert md["detour_id"] == "mode3-econ-stats"
+    assert md["mode"] == 3
+    assert md["tables_used"] == [
+        OUTERDICT_STUB_TABLE,
+        XLSX_INNERDICT_TABLE,
+        PARQUET_INNERDICT_TABLE,
+    ]
+
+    counts = md["counts"]
+    assert counts["population_rows"] == baseline_counts["population_rows"]
+    assert counts["outerdict_keys"] == baseline_counts["outerdict_rows"]
+    assert counts["mode3_selected_names"] == 6
+    assert counts["mode3_selected_population_rows"] == baseline_counts[
+        "mode3_selected_population_rows"
+    ]
+    assert counts["mode3_selected_pct_of_population_rows"] == pytest.approx(8.0)
+    assert counts["selected_names_with_countries"] == 5
+    assert counts["selected_names_with_income_group"] == 5
+    assert counts["selected_names_with_priority_group"] == 6
+    assert counts["selected_population_rows_with_countries"] == baseline_counts[
+        "selected_population_rows_with_countries"
+    ]
+    assert counts["selected_population_rows_with_income_group"] == baseline_counts[
+        "selected_population_rows_with_income_group"
+    ]
+    assert counts["selected_population_rows_with_priority_group"] == baseline_counts[
+        "selected_population_rows_with_priority_group"
+    ]
+
+    rules = md["rule_counts"]
+    assert rules["sciscinet_exactly_one_pass"] == 8
+    assert rules["sciscinet_exactly_one_fail"] == 2
+    assert rules["xlsx_exact_pass"] == 8
+    assert rules["xlsx_exact_fail"] == 2
+
+    buckets = md["country_cardinality_buckets"]
+    assert buckets["exact_0"] == 1
+    assert buckets["exact_1"] == 1
+    assert buckets["exact_2"] == 2
+    assert buckets["exact_3"] == 1
+    assert buckets["exact_4_or_more"] == 1
+
+    dist = md["country_cardinality_distribution"]
+    assert dist["n"] == 6
+    assert dist["mean"] == pytest.approx(13 / 6, rel=0, abs=1e-12)
+    assert dist["median"] == pytest.approx(2.0, rel=0, abs=1e-12)
+    assert dist["q1"] == pytest.approx(1.25, rel=0, abs=1e-12)
+    assert dist["q3"] == pytest.approx(2.75, rel=0, abs=1e-12)
+    assert dist["min"] == pytest.approx(0.0, rel=0, abs=1e-12)
+    assert dist["max"] == pytest.approx(5.0, rel=0, abs=1e-12)
+
+    outliers = md["country_cardinality_outliers_tukey"]
+    assert outliers["total_outliers"] == 0
+
+    income_breakdown = {row["income_group"]: row for row in md["income_group_breakdown"]}
+    assert income_breakdown[OGHIST_INCOME_LABELS["H"]]["selected_population_rows"] == 5
+    assert income_breakdown[OGHIST_INCOME_LABELS["LM"]]["selected_population_rows"] == 1
+    assert income_breakdown[OGHIST_INCOME_LABELS["L"]]["selected_population_rows"] == 1
+
+    priority_breakdown = {row["priority_group"]: row for row in md["priority_group_breakdown"]}
+    assert priority_breakdown[KTP_PRIORITY_GROUP_LABELS[1]]["selected_population_rows"] == 3
+    assert priority_breakdown[KTP_PRIORITY_GROUP_LABELS[2]]["selected_population_rows"] == 1
+    assert priority_breakdown[KTP_PRIORITY_GROUP_LABELS[4]]["selected_population_rows"] == 3
+    assert priority_breakdown[KTP_PRIORITY_GROUP_LABELS[5]]["selected_population_rows"] == 1
+
+    divergence = md["multi_country_divergence"]
+    assert divergence["multi_country_names"] == 4
+    assert divergence["different_income_groups"] == 3
+    assert divergence["different_priority_groups"] == 3
+    assert divergence["multi_country_pct_of_mode3"] == pytest.approx(4 / 6 * 100.0)
+    assert divergence["different_income_groups_pct_of_multi_country"] == pytest.approx(75.0)
+    assert divergence["different_priority_groups_pct_of_multi_country"] == pytest.approx(75.0)
+
+    audit = md["label_coverage_consistency_audit"]
+    assert audit["selected_names_without_income_group"] == 1
+    assert audit["selected_names_without_priority_group"] == 0
+    assert audit["selected_names_with_exactly_one_row_income_group"] == 4
+    assert audit["selected_names_with_multiple_row_income_groups"] == 1
+    assert audit["selected_names_with_exactly_one_row_priority_group"] == 5
+    assert audit["selected_names_with_multiple_row_priority_groups"] == 1
+    assert audit["selected_rows_missing_income_group"] == 1
+    assert audit["selected_rows_missing_priority_group"] == 0
+
+    after = duckdb.connect(str(db_path), read_only=True)
+    try:
+        after_counts = {
+            OUTERDICT_STUB_TABLE: _row_count(after, OUTERDICT_STUB_TABLE),
+            XLSX_INNERDICT_TABLE: _row_count(after, XLSX_INNERDICT_TABLE),
+            PARQUET_INNERDICT_TABLE: _row_count(after, PARQUET_INNERDICT_TABLE),
+        }
+    finally:
+        after.close()
+    assert before_counts == after_counts == {
+        OUTERDICT_STUB_TABLE: baseline_counts["outerdict_rows"],
+        XLSX_INNERDICT_TABLE: baseline_counts["xlsx_innerdict_rows"],
+        PARQUET_INNERDICT_TABLE: baseline_counts["ssn_innerdict_rows"],
+    }
+
+
+def test_detour_module_entrypoint(detour_fixture: tuple[Path, Path, dict[str, int]]) -> None:
+    config_path, _db_path, _counts = detour_fixture
+    cmd = [
+        sys.executable,
+        "-m",
+        "src.detours.detour_mode3_econ_stats",
+        "--config",
+        str(config_path),
+    ]
+    env = {
+        **os.environ,
+        "PYTHONPATH": (
+            str(REPO_ROOT)
+            if not os.environ.get("PYTHONPATH")
+            else str(REPO_ROOT) + os.pathsep + os.environ["PYTHONPATH"]
+        ),
+    }
+    completed = subprocess.run(
+        cmd,
+        check=False,
+        capture_output=True,
+        text=True,
+        cwd=config_path.parent,
+        env=env,
+    )
+    assert completed.returncode == 0, completed.stderr
+    plain = _strip_ansi(completed.stdout)
+    assert "Mode-3 Economy Stats Detour" in plain
+    assert "Priority-Group Definitions" in plain
+    assert "Mode-3 selected names" in plain
+    assert "Execution Metrics" in plain
+
+
+def test_detour_import_isolation() -> None:
+    module_path = REPO_ROOT / "src" / "detours" / "detour_mode3_econ_stats.py"
+    tree = ast.parse(module_path.read_text(encoding="utf-8"))
+
+    imported_modules: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for name in node.names:
+                imported_modules.add(name.name)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported_modules.add(node.module)
+
+    assert "src.repl" not in imported_modules
+    assert "src.steps" not in imported_modules
+    assert "src.helpers.init" not in imported_modules
+    assert "src.helpers.repl_runtime" not in imported_modules
+    assert all(
+        not name.startswith("src.detours.") or name == "src.detours.detour_mode3_econ_stats"
+        for name in imported_modules
+    )
+
+
+def test_helpers_cover_normalization_and_exactness() -> None:
+    assert _normalize_country_list(None) == []
+    assert _normalize_country_list("   ") == []
+    assert _normalize_country_list('["France", "France", "India"]') == ["France", "India"]
+    assert _normalize_country_list(["India", "India", "France"]) == ["France", "India"]
+
+    assert _is_exact_xlsx_match_payload(None) is True
+    assert _is_exact_xlsx_match_payload("   ") is True
+    assert _is_exact_xlsx_match_payload("not-json") is False
+    assert _is_exact_xlsx_match_payload(_exact_xlsx_payload(["alpha"], "beta")) is True
+    assert _is_exact_xlsx_match_payload(
+        _non_exact_xlsx_payload(["alpha"], ["gamma"], "beta")
+    ) is False
