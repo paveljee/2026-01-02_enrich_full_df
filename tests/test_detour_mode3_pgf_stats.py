@@ -21,6 +21,8 @@ from src.helpers.jsonlines import dumps_jsonlines
 from src.helpers.schema import OUTERDICT_STUB_TABLE, PARQUET_INNERDICT_TABLE, XLSX_INNERDICT_TABLE
 from src.helpers.vars import (
     HCR_XLSX_KEY_PREFIX,
+    KTP_FILENAME_COL,
+    KTP_FRAGMENT_COL,
     KTP_SOURCE_KEY_COL,
     KTP_XLSX_MATCH_COL,
     KTP_XLSX_MATCH_FIRST_TOKENS_KEY,
@@ -149,55 +151,92 @@ def _build_fixture_db(path: Path) -> dict[str, int]:
         def xrow(name_key: str, rows: list[dict[str, object]]) -> tuple[str, str]:
             return (name_key, dumps_jsonlines(rows))
 
+        def match_row(*, filename: str, fragment: str, payload: object) -> dict[str, object]:
+            return {
+                KTP_FILENAME_COL: filename,
+                KTP_FRAGMENT_COL: fragment,
+                KTP_XLSX_MATCH_COL: payload,
+            }
+
+        def exact_rows(
+            row_ids: list[tuple[str, str]],
+            first_tokens: list[str],
+            last_norm: str,
+        ) -> list[dict[str, object]]:
+            payload = _exact_xlsx_payload(first_tokens, last_norm)
+            return [
+                match_row(filename=filename, fragment=fragment, payload=payload)
+                for filename, fragment in row_ids
+            ]
+
         xlsx_rows = [
             xrow(
                 keys["sel_zero"],
-                [{KTP_XLSX_MATCH_COL: _exact_xlsx_payload(["sel"], "zero")}],
+                exact_rows(
+                    [("2019_HCR.xlsx", "10"), ("2019_HCR.xlsx", "10")],
+                    ["sel"],
+                    "zero",
+                ),
             ),
             xrow(
                 keys["sel_half"],
-                [{KTP_XLSX_MATCH_COL: _exact_xlsx_payload(["sel"], "half")}],
+                exact_rows([("2019_HCR.xlsx", "11")], ["sel"], "half"),
             ),
             xrow(
                 keys["sel_one"],
-                [{KTP_XLSX_MATCH_COL: _exact_xlsx_payload(["sel"], "one")}],
+                exact_rows([("2020_HCR.xlsx", "20")], ["sel"], "one"),
             ),
             xrow(
                 keys["sel_q1"],
-                [{KTP_XLSX_MATCH_COL: _exact_xlsx_payload(["sel"], "quarter")}],
+                exact_rows(
+                    [("2021_HCR.xlsx", "30"), ("2021_HCR.xlsx", "30"), ("2021_HCR.xlsx", "31")],
+                    ["sel"],
+                    "quarter",
+                ),
             ),
             xrow(
                 keys["sel_missing"],
-                [{KTP_XLSX_MATCH_COL: _exact_xlsx_payload(["sel"], "missing")}],
+                exact_rows(
+                    [("2022_HCR.xlsx", "40"), ("2022_HCR.xlsx", "40")],
+                    ["sel"],
+                    "missing",
+                ),
             ),
             xrow(
                 keys["sel_q3"],
-                [{KTP_XLSX_MATCH_COL: _exact_xlsx_payload(["sel"], "threequarter")}],
+                exact_rows([("2023_HCR.xlsx", "50")], ["sel"], "threequarter"),
             ),
             xrow(
                 keys["fail_multi_sciscinet"],
-                [{KTP_XLSX_MATCH_COL: _exact_xlsx_payload(["fail"], "multisci")}],
+                exact_rows([("2024_HCR.xlsx", "60")], ["fail"], "multisci"),
             ),
             xrow(
                 keys["fail_no_xlsx_present"],
-                [{KTP_XLSX_MATCH_COL: None}, {KTP_XLSX_MATCH_COL: "   "}],
+                [
+                    match_row(filename="2024_HCR.xlsx", fragment="61", payload=None),
+                    match_row(filename="2024_HCR.xlsx", fragment="61", payload="   "),
+                ],
             ),
             # JSONL with first line exact and second line non-exact to prove
             # all-lines parsing matters.
             xrow(
                 keys["fail_non_exact_jsonl"],
                 [
-                    {KTP_XLSX_MATCH_COL: _exact_xlsx_payload(["fail"], "jsonl")},
-                    {
-                        KTP_XLSX_MATCH_COL: _non_exact_xlsx_payload(
-                            ["fail"], ["different"], "jsonl"
-                        )
-                    },
+                    match_row(
+                        filename="2024_HCR.xlsx",
+                        fragment="62",
+                        payload=_exact_xlsx_payload(["fail"], "jsonl"),
+                    ),
+                    match_row(
+                        filename="2024_HCR.xlsx",
+                        fragment="62",
+                        payload=_non_exact_xlsx_payload(["fail"], ["different"], "jsonl"),
+                    ),
                 ],
             ),
             xrow(
                 keys["fail_zero_sciscinet"],
-                [{KTP_XLSX_MATCH_COL: _exact_xlsx_payload(["fail"], "zerosci")}],
+                exact_rows([("2024_HCR.xlsx", "63")], ["fail"], "zerosci"),
             ),
         ]
         con.executemany(f"INSERT INTO {XLSX_INNERDICT_TABLE} VALUES (?, ?)", xlsx_rows)
@@ -230,6 +269,8 @@ def _build_fixture_db(path: Path) -> dict[str, int]:
             "outerdict_rows": len(outer_rows),
             "xlsx_innerdict_rows": len(xlsx_rows),
             "ssn_innerdict_rows": len(ssn_rows),
+            "mode3_selected_population_rows": 7,
+            "pgf_non_missing_population_rows": 6,
         }
     finally:
         con.close()
@@ -274,6 +315,7 @@ def test_detour_contract_and_mode3_stats_readonly(
     assert result.steps_completed == DETOUR_STEPS == []
     assert "Mode-3 p_gf Stats Detour" in plain
     assert "Selection Counts" in plain
+    assert "Population rows containing mode-3 selected names" in plain
     assert "p_gf Buckets" in plain
 
     md = result.metadata
@@ -288,8 +330,12 @@ def test_detour_contract_and_mode3_stats_readonly(
     assert counts["population_rows"] == baseline_counts["population_rows"]
     assert counts["outerdict_keys"] == baseline_counts["outerdict_rows"]
     assert counts["mode3_selected_names"] == 6
+    assert counts["mode3_selected_population_rows"] == baseline_counts["mode3_selected_population_rows"]
+    assert counts["mode3_selected_pct_of_population_rows"] == pytest.approx(7.0)
     assert counts["pgf_non_missing"] == 5
     assert counts["pgf_missing"] == 1
+    assert counts["pgf_non_missing_population_rows"] == baseline_counts["pgf_non_missing_population_rows"]
+    assert counts["pgf_non_missing_pct_of_population_rows"] == pytest.approx(6.0)
 
     rules = md["rule_counts"]
     assert rules["sciscinet_exactly_one_pass"] == 8  # all except multi and zero-sciscinet
@@ -367,6 +413,7 @@ def test_detour_module_entrypoint(detour_fixture: tuple[Path, Path, dict[str, in
     plain = _strip_ansi(completed.stdout)
     assert "Mode-3 p_gf Stats Detour" in plain
     assert "Mode-3 selected names" in plain
+    assert "Population rows containing mode-3 selected names" in plain
     assert "Execution Metrics" in plain
 
 

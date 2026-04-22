@@ -22,6 +22,8 @@ from src.helpers.resource_monitor import ResourceMonitor
 from src.helpers.schema import OUTERDICT_STUB_TABLE, PARQUET_INNERDICT_TABLE, XLSX_INNERDICT_TABLE
 from src.helpers.vars import (
     CARD_BUILD_SUBSET_DESCRIPTIONS,
+    KTP_FILENAME_COL,
+    KTP_FRAGMENT_COL,
     KTP_SOURCE_KEY_COL,
     KTP_XLSX_MATCH_COL,
     KTP_XLSX_MATCH_FIRST_TOKENS_KEY,
@@ -139,6 +141,7 @@ def _build_mode3_pgf_metadata(conn: duckdb.DuckDBPyConnection) -> dict[str, Any]
     outerdict_keys = len(outer_keys)
 
     xlsx_payloads_by_key: dict[str, list[object]] = defaultdict(list)
+    xlsx_population_rows_by_key: dict[str, set[tuple[str, str]]] = defaultdict(set)
     for name_key, inner_blob in conn.execute(
         f"SELECT name_key, innerdicts FROM {XLSX_INNERDICT_TABLE}"
     ).fetchall():
@@ -146,6 +149,14 @@ def _build_mode3_pgf_metadata(conn: duckdb.DuckDBPyConnection) -> dict[str, Any]
             continue
         for inner in loads_jsonlines(inner_blob or ""):
             xlsx_payloads_by_key[name_key].append(inner.get(KTP_XLSX_MATCH_COL))
+            filename = inner.get(KTP_FILENAME_COL)
+            fragment = inner.get(KTP_FRAGMENT_COL)
+            if filename is None or fragment is None:
+                raise RuntimeError(
+                    "XLSX innerdict row is missing persisted population row identity "
+                    f"({KTP_FILENAME_COL}, {KTP_FRAGMENT_COL}) for {name_key!r}."
+                )
+            xlsx_population_rows_by_key[name_key].add((str(filename), str(fragment)))
 
     sciscinet_count_by_key: dict[str, int] = defaultdict(int)
     sciscinet_row_tuple = tuple[float | None, int | None, int | None]
@@ -165,6 +176,7 @@ def _build_mode3_pgf_metadata(conn: duckdb.DuckDBPyConnection) -> dict[str, Any]
     sciscinet_exactly_one_pass = 0
     xlsx_exact_pass = 0
     mode3_selected_keys: list[str] = []
+    mode3_non_missing_keys: list[str] = []
     mode3_pgf_values: list[float | None] = []
     mode3_missing_pgf_inference_rows: list[tuple[int | None, int | None]] = []
 
@@ -192,6 +204,16 @@ def _build_mode3_pgf_metadata(conn: duckdb.DuckDBPyConnection) -> dict[str, Any]
             mode3_pgf_values.append(p_gf_value)
             if p_gf_value is None:
                 mode3_missing_pgf_inference_rows.append((inference_counts, inference_sources))
+            else:
+                mode3_non_missing_keys.append(name_key)
+
+    mode3_selected_population_rows = sum(
+        len(xlsx_population_rows_by_key.get(name_key, set())) for name_key in mode3_selected_keys
+    )
+    pgf_non_missing_population_rows = sum(
+        len(xlsx_population_rows_by_key.get(name_key, set()))
+        for name_key in mode3_non_missing_keys
+    )
 
     selected_names = len(mode3_selected_keys)
     non_missing_values = np.array(
@@ -302,13 +324,19 @@ def _build_mode3_pgf_metadata(conn: duckdb.DuckDBPyConnection) -> dict[str, Any]
             "sciscinet_distinct_source_keys": len(sciscinet_count_by_key),
             "mode3_selected_names": selected_names,
             "mode3_selected_pct_of_outerdict_keys": _pct(selected_names, outerdict_keys),
-            "mode3_selected_pct_of_population_rows": _pct(selected_names, population_rows),
+            "mode3_selected_population_rows": mode3_selected_population_rows,
+            "mode3_selected_pct_of_population_rows": _pct(
+                mode3_selected_population_rows, population_rows
+            ),
             "pgf_non_missing": non_missing_n,
             "pgf_missing": missing_n,
             "pgf_non_missing_pct_of_mode3": _pct(non_missing_n, selected_names),
             "pgf_missing_pct_of_mode3": _pct(missing_n, selected_names),
             "pgf_non_missing_pct_of_outerdict_keys": _pct(non_missing_n, outerdict_keys),
-            "pgf_non_missing_pct_of_population_rows": _pct(non_missing_n, population_rows),
+            "pgf_non_missing_population_rows": pgf_non_missing_population_rows,
+            "pgf_non_missing_pct_of_population_rows": _pct(
+                pgf_non_missing_population_rows, population_rows
+            ),
         },
         "rule_counts": {
             "sciscinet_exactly_one_pass": sciscinet_exactly_one_pass,
@@ -408,6 +436,10 @@ def _print_summary(metadata: dict[str, Any]) -> None:
         f"{counts['mode3_selected_pct_of_outerdict_keys']:.3f}%",
     )
     counts_table.add_row(
+        "Population rows containing mode-3 selected names",
+        f"{counts['mode3_selected_population_rows']:,}",
+    )
+    counts_table.add_row(
         "Mode-3 selected % of population rows",
         f"{counts['mode3_selected_pct_of_population_rows']:.3f}%",
     )
@@ -416,6 +448,14 @@ def _print_summary(metadata: dict[str, Any]) -> None:
     counts_table.add_row(
         "p_gf non-missing % of mode-3",
         f"{counts['pgf_non_missing_pct_of_mode3']:.3f}%",
+    )
+    counts_table.add_row(
+        "Population rows containing mode-3 selected names with non-missing p_gf",
+        f"{counts['pgf_non_missing_population_rows']:,}",
+    )
+    counts_table.add_row(
+        "p_gf non-missing % of population rows",
+        f"{counts['pgf_non_missing_pct_of_population_rows']:.3f}%",
     )
     console.print(counts_table)
 
