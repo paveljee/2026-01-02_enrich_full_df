@@ -129,6 +129,95 @@ def _db_file_from_pragma(conn: duckdb.DuckDBPyConnection) -> str:
     return str(row[2])
 
 
+def _exact_binomial_inference(successes: int, trials: int) -> dict[str, float | int | None]:
+    if trials == 0:
+        return {
+            "proportion": None,
+            "ci95_lo": None,
+            "ci95_hi": None,
+            "excess_over_0_5": None,
+            "excess_ci95_lo": None,
+            "excess_ci95_hi": None,
+            "p_two_sided": None,
+            "p_two_sided_mantissa": None,
+            "p_two_sided_exponent": None,
+            "p_two_sided_log10": None,
+        }
+
+    def log_pmf(k: int, p: float) -> float:
+        if p == 0.0:
+            return 0.0 if k == 0 else -math.inf
+        if p == 1.0:
+            return 0.0 if k == trials else -math.inf
+        return (
+            math.lgamma(trials + 1)
+            - math.lgamma(k + 1)
+            - math.lgamma(trials - k + 1)
+            + k * math.log(p)
+            + (trials - k) * math.log1p(-p)
+        )
+
+    def log_tail_prob(start: int, end: int, p: float) -> float:
+        logs = [log_pmf(k, p) for k in range(start, end + 1)]
+        max_log = max(logs, default=-math.inf)
+        if max_log == -math.inf:
+            return -math.inf
+        return max_log + math.log(sum(math.exp(value - max_log) for value in logs))
+
+    def tail_prob(start: int, end: int, p: float) -> float:
+        return math.exp(log_tail_prob(start, end, p))
+
+    alpha_half = 0.025
+    p_hat = successes / trials
+
+    if successes == 0:
+        ci_lo = 0.0
+    else:
+        lo, hi = 0.0, p_hat
+        for _ in range(80):
+            mid = (lo + hi) / 2.0
+            if tail_prob(successes, trials, mid) < alpha_half:
+                lo = mid
+            else:
+                hi = mid
+        ci_lo = (lo + hi) / 2.0
+
+    if successes == trials:
+        ci_hi = 1.0
+    else:
+        lo, hi = p_hat, 1.0
+        for _ in range(80):
+            mid = (lo + hi) / 2.0
+            if tail_prob(0, successes, mid) > alpha_half:
+                lo = mid
+            else:
+                hi = mid
+        ci_hi = (lo + hi) / 2.0
+
+    tail_count = min(successes, trials - successes)
+    p_two_sided_log = min(0.0, math.log(2.0) + log_tail_prob(0, tail_count, 0.5))
+    p_two_sided_log10 = p_two_sided_log / math.log(10.0)
+    p_two_sided_exponent = math.floor(p_two_sided_log10)
+    p_two_sided_mantissa = 10 ** (p_two_sided_log10 - p_two_sided_exponent)
+    if p_two_sided_mantissa >= 10.0:
+        p_two_sided_mantissa /= 10.0
+        p_two_sided_exponent += 1
+    p_two_sided = math.exp(p_two_sided_log)
+
+    return {
+        "proportion": p_hat,
+        "ci95_lo": ci_lo,
+        "ci95_hi": ci_hi,
+        "excess_over_0_5": p_hat - 0.5,
+        "excess_ci95_lo": ci_lo - 0.5,
+        "excess_ci95_hi": ci_hi - 0.5,
+        "p_two_sided": p_two_sided,
+        "p_two_sided_mantissa": p_two_sided_mantissa,
+        "p_two_sided_exponent": p_two_sided_exponent,
+        "p_two_sided_log10": p_two_sided_log10,
+    }
+
+
 def _build_mode3_pgf_metadata(conn: duckdb.DuckDBPyConnection) -> dict[str, Any]:
     population_rows = _scalar_int(conn, "SELECT COUNT(*) FROM population_with_names_economy")
 
@@ -289,6 +378,16 @@ def _build_mode3_pgf_metadata(conn: duckdb.DuckDBPyConnection) -> dict[str, Any]
     if len(mode3_missing_pgf_inference_rows) != bucket_missing:
         raise RuntimeError("Missing-p_gf inference audit invariant failed.")
 
+    sign_test_n = (
+        bucket_exact_0
+        + bucket_between_0_and_0_5_exclusive
+        + bucket_between_0_5_and_1_exclusive
+        + bucket_exact_1
+    )
+    sign_test_above = bucket_between_0_5_and_1_exclusive + bucket_exact_1
+    sign_test_below = bucket_exact_0 + bucket_between_0_and_0_5_exclusive
+    sign_test = _exact_binomial_inference(sign_test_above, sign_test_n)
+
     missing_inference_counts_zero = sum(
         inference_counts == 0 for inference_counts, _ in mode3_missing_pgf_inference_rows
     )
@@ -400,6 +499,29 @@ def _build_mode3_pgf_metadata(conn: duckdb.DuckDBPyConnection) -> dict[str, Any]
                 bucket_between_0_5_and_1_exclusive, non_missing_n
             ),
         },
+        "pgf_sign_test": {
+            "null": "median p_gf = 0.5",
+            "scope": "observed mode-3 complete-case unique names only",
+            "caveat": (
+                "Does not generalize to all unique names without missing-data assumptions "
+                "or a missing-data model."
+            ),
+            "estimand": "unique name keys as a person proxy, not Clarivate award rows",
+            "ties_at_0_5_excluded": bucket_exact_05,
+            "non_tie_n": sign_test_n,
+            "above_0_5": sign_test_above,
+            "below_0_5": sign_test_below,
+            "proportion_above_0_5": sign_test["proportion"],
+            "proportion_above_0_5_ci95_lo": sign_test["ci95_lo"],
+            "proportion_above_0_5_ci95_hi": sign_test["ci95_hi"],
+            "excess_above_0_5": sign_test["excess_over_0_5"],
+            "excess_above_0_5_ci95_lo": sign_test["excess_ci95_lo"],
+            "excess_above_0_5_ci95_hi": sign_test["excess_ci95_hi"],
+            "exact_binomial_p_two_sided": sign_test["p_two_sided"],
+            "exact_binomial_p_two_sided_mantissa": sign_test["p_two_sided_mantissa"],
+            "exact_binomial_p_two_sided_exponent": sign_test["p_two_sided_exponent"],
+            "exact_binomial_p_two_sided_log10": sign_test["p_two_sided_log10"],
+        },
         "missing_pgf_inference_audit": {
             "missing_pgf_rows": bucket_missing,
             "inference_counts_zero": missing_inference_counts_zero,
@@ -421,6 +543,7 @@ def _print_summary(metadata: dict[str, Any]) -> None:
     outliers = metadata["pgf_outliers_tukey"]
     buckets = metadata["pgf_buckets"]
     rules = metadata["rule_counts"]
+    sign_test = metadata["pgf_sign_test"]
     missing_audit = metadata["missing_pgf_inference_audit"]
 
     console.print("[cyan]Mode-3 p_gf Stats Detour (read-only)[/cyan]")
@@ -496,6 +619,52 @@ def _print_summary(metadata: dict[str, Any]) -> None:
     dist_table.add_row("Q3", f"{dist['q3']:.6f}")
     dist_table.add_row("Max", f"{dist['max']:.6f}")
     console.print(dist_table)
+
+    p_value = sign_test["exact_binomial_p_two_sided"]
+    p_value_mantissa = sign_test["exact_binomial_p_two_sided_mantissa"]
+    p_value_exponent = sign_test["exact_binomial_p_two_sided_exponent"]
+    if p_value is None:
+        p_value_text = "N/A"
+    elif p_value < 0.001:
+        p_value_text = f"{p_value_mantissa:.6f}e{p_value_exponent:+d}"
+    else:
+        p_value_text = f"{p_value:.6f}"
+    proportion_text = (
+        "N/A"
+        if sign_test["proportion_above_0_5"] is None
+        else (
+            f"{sign_test['proportion_above_0_5']:.6f} "
+            f"[{sign_test['proportion_above_0_5_ci95_lo']:.6f}, "
+            f"{sign_test['proportion_above_0_5_ci95_hi']:.6f}]"
+        )
+    )
+    excess_text = (
+        "N/A"
+        if sign_test["excess_above_0_5"] is None
+        else (
+            f"{sign_test['excess_above_0_5']:.6f} "
+            f"[{sign_test['excess_above_0_5_ci95_lo']:.6f}, "
+            f"{sign_test['excess_above_0_5_ci95_hi']:.6f}]"
+        )
+    )
+    inference_table = Table(
+        title="Exact Sign Test (Observed Complete-case Unique Names)",
+        box=box.SIMPLE,
+    )
+    inference_table.add_column("Metric", style="cyan")
+    inference_table.add_column("Value", style="magenta", justify="right")
+    inference_table.add_row("Null", sign_test["null"])
+    inference_table.add_row("Scope", sign_test["scope"])
+    inference_table.add_row("Caveat", sign_test["caveat"])
+    inference_table.add_row("Estimand", sign_test["estimand"])
+    inference_table.add_row("N (p_gf != 0.5)", f"{sign_test['non_tie_n']:,}")
+    inference_table.add_row("Above 0.5", f"{sign_test['above_0_5']:,}")
+    inference_table.add_row("Below 0.5", f"{sign_test['below_0_5']:,}")
+    inference_table.add_row("Ties at 0.5 excluded", f"{sign_test['ties_at_0_5_excluded']:,}")
+    inference_table.add_row("Proportion above 0.5 (95% exact CI)", proportion_text)
+    inference_table.add_row("Proportion above 0.5 minus 0.5", excess_text)
+    inference_table.add_row("Exact binomial p-value (two-sided)", p_value_text)
+    console.print(inference_table)
 
     bucket_table = Table(title="p_gf Buckets (Mode-3 Selected Names)", box=box.SIMPLE)
     bucket_table.add_column("Bucket", style="cyan")
