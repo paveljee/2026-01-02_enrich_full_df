@@ -15,6 +15,7 @@ import pytest
 from src.detours.detour_mode0_econ_stats import (
     DETOUR_STEPS,
     MISSING_BREAKDOWN_LABEL,
+    PARQUET_LEFT_JOIN_COLS,
     _is_exact_xlsx_match_payload,
     _normalize_country_list,
     run_detour,
@@ -509,6 +510,24 @@ def _build_fixture_db(path: Path) -> dict[str, int]:
                     ]
                 ),
             ),
+            (
+                _name_key("Wrong", "Person"),
+                dumps_jsonlines(
+                    [
+                        match_row(
+                            filename="2020_HCR.xlsx",
+                            fragment="20",
+                            payload=_non_exact_xlsx_payload(["wrong"], ["sel"], "one"),
+                            countries=json.dumps(["France"]),
+                            income_group=high,
+                            priority_group=priority_eu,
+                            first_name="Sel",
+                            last_name="One",
+                            primary_affiliation="Paris Health Center",
+                        )
+                    ]
+                ),
+            ),
         ]
         con.executemany(f"INSERT INTO {XLSX_INNERDICT_TABLE} VALUES (?, ?)", xlsx_rows)
         population_country_rows = [
@@ -550,6 +569,9 @@ def _build_fixture_db(path: Path) -> dict[str, int]:
             CREATE OR REPLACE VIEW {PARQUET_OUTPUT_VIEW} AS
             SELECT
                 "{KTP_SOURCE_KEY_COL}" AS "{KTP_SOURCE_KEY_COL}",
+                0.25 AS "ssnau.p_gf",
+                3 AS "ssnau.inference_counts",
+                1 AS "ssnau.inference_sources",
                 'author_details.parquet' AS "ssnad.filename",
                 'authors.parquet' AS "ssnau.filename",
                 '["Field A"]' AS "ssn.field_ids_list"
@@ -654,10 +676,20 @@ def test_detour_contract_and_mode0_econ_stats_readonly(
     assert Path(md["country_coverage_map_svg"]).is_file()
     assert Path(md["population_with_economy_parquet_csv"]["path"]).is_file()
     dump_df = pd.read_csv(md["population_with_economy_parquet_csv"]["path"])
+    assert len(dump_df) == baseline_counts["mode0_selected_population_rows"]
+    assert (
+        md["population_with_economy_parquet_csv"]["rows"]
+        == baseline_counts["mode0_selected_population_rows"]
+    )
     assert KTP_ECONOMIES_ISO_COL in dump_df.columns
-    assert "ssnad.filename" in dump_df.columns
-    assert "ssnau.filename" in dump_df.columns
-    assert "ssn.field_ids_list" in dump_df.columns
+    assert md["population_with_economy_parquet_csv"]["parquet_prefixed_columns"] == (
+        PARQUET_LEFT_JOIN_COLS
+    )
+    for col in PARQUET_LEFT_JOIN_COLS:
+        assert col in dump_df.columns
+    assert "ssnad.filename" not in dump_df.columns
+    assert "ssnau.filename" not in dump_df.columns
+    assert "ssn.field_ids_list" not in dump_df.columns
 
     counts = md["counts"]
     assert counts["population_rows"] == baseline_counts["population_rows"]

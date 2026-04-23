@@ -78,6 +78,13 @@ POPULATION_WITH_ECONOMY_PARQUET_CSV_PATH = (
     Path("tmp") / "mode0_econ_stats_population_with_economy_and_parquet.csv"
 )
 UNCOVERED_COLOUR = "#DA7842"
+PARQUET_LEFT_JOIN_COLS = [
+    "ssnau.p_gf",
+    "ssnau.inference_counts",
+    "ssnau.inference_sources",
+]
+BRIDGE_FIRST_NAME_COL = "__bridge_first_name"
+BRIDGE_LAST_NAME_COL = "__bridge_last_name"
 
 PRIORITY_GROUP_PRECEDENCE = [
     KTP_PRIORITY_GROUP_LABELS[2],
@@ -782,14 +789,37 @@ def _xlsx_match_bridge_df(
     xlsx_rows_by_key: dict[str, list[dict[str, object]]],
 ) -> pd.DataFrame:
     rows: list[dict[str, str]] = []
-    seen: set[tuple[str, str, str]] = set()
+    seen: set[tuple[str, str, str, str, str]] = set()
     for source_key, inner_rows in xlsx_rows_by_key.items():
+        try:
+            parsed_name_key = json.loads(source_key)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(parsed_name_key, dict):
+            continue
+        key_first_name = parsed_name_key.get(KTP_FIRST_NAME_COL)
+        key_last_name = parsed_name_key.get(KTP_LAST_NAME_COL)
         for inner in inner_rows:
             filename = _normalize_optional_label(inner.get(KTP_FILENAME_COL))
             fragment = _normalize_optional_label(inner.get(KTP_FRAGMENT_COL))
-            if filename is None or fragment is None:
+            inner_first_name = inner.get(KTP_FIRST_NAME_COL)
+            inner_last_name = inner.get(KTP_LAST_NAME_COL)
+            if (
+                filename is None
+                or fragment is None
+                or key_first_name != inner_first_name
+                or key_last_name != inner_last_name
+            ):
                 continue
-            dedupe_key = (source_key, filename, fragment)
+            bridge_first_name = str(inner_first_name)
+            bridge_last_name = str(inner_last_name)
+            dedupe_key = (
+                source_key,
+                filename,
+                fragment,
+                bridge_first_name,
+                bridge_last_name,
+            )
             if dedupe_key in seen:
                 continue
             rows.append(
@@ -797,24 +827,56 @@ def _xlsx_match_bridge_df(
                     KTP_SOURCE_KEY_COL: source_key,
                     KTP_FILENAME_COL: filename,
                     KTP_FRAGMENT_COL: fragment,
+                    BRIDGE_FIRST_NAME_COL: bridge_first_name,
+                    BRIDGE_LAST_NAME_COL: bridge_last_name,
                 }
             )
             seen.add(dedupe_key)
-    return pd.DataFrame(rows, columns=[KTP_SOURCE_KEY_COL, KTP_FILENAME_COL, KTP_FRAGMENT_COL])
+    return pd.DataFrame(
+        rows,
+        columns=[
+            KTP_SOURCE_KEY_COL,
+            KTP_FILENAME_COL,
+            KTP_FRAGMENT_COL,
+            BRIDGE_FIRST_NAME_COL,
+            BRIDGE_LAST_NAME_COL,
+        ],
+    )
 
 
 def _fallback_population_with_economy_rows(
     xlsx_rows_by_key: dict[str, list[dict[str, object]]],
 ) -> pd.DataFrame:
     rows: list[dict[str, object]] = []
-    seen: set[tuple[str, str, str]] = set()
+    seen: set[tuple[str, str, str, str, str]] = set()
     for source_key, inner_rows in xlsx_rows_by_key.items():
+        try:
+            parsed_name_key = json.loads(source_key)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(parsed_name_key, dict):
+            continue
+        key_first_name = parsed_name_key.get(KTP_FIRST_NAME_COL)
+        key_last_name = parsed_name_key.get(KTP_LAST_NAME_COL)
         for inner in inner_rows:
             filename = _normalize_optional_label(inner.get(KTP_FILENAME_COL))
             fragment = _normalize_optional_label(inner.get(KTP_FRAGMENT_COL))
-            if filename is None or fragment is None:
+            inner_first_name = inner.get(KTP_FIRST_NAME_COL)
+            inner_last_name = inner.get(KTP_LAST_NAME_COL)
+            if (
+                filename is None
+                or fragment is None
+                or key_first_name != inner_first_name
+                or key_last_name != inner_last_name
+            ):
                 continue
-            dedupe_key = (source_key, filename, fragment)
+            dedupe_key = (
+                source_key,
+                filename,
+                fragment,
+                str(inner_first_name),
+                str(inner_last_name),
+            )
             if dedupe_key in seen:
                 continue
             rows.append({KTP_SOURCE_KEY_COL: source_key, **inner})
@@ -822,7 +884,7 @@ def _fallback_population_with_economy_rows(
     return pd.DataFrame(rows)
 
 
-def _parquet_prefixed_df(
+def _parquet_left_join_df(
     conn: duckdb.DuckDBPyConnection,
 ) -> tuple[pd.DataFrame, list[str]]:
     tables = {row[0] for row in conn.execute("SHOW TABLES").fetchall()}
@@ -835,11 +897,13 @@ def _parquet_prefixed_df(
         return pd.DataFrame(columns=[KTP_SOURCE_KEY_COL]), []
 
     parquet_df = conn.execute(f"SELECT * FROM {source_name}").df()
-    prefixed_cols = [col for col in parquet_df.columns if col.startswith("ssn")]
-    keep_cols = [col for col in [KTP_SOURCE_KEY_COL, *prefixed_cols] if col in parquet_df.columns]
+    join_cols = [col for col in PARQUET_LEFT_JOIN_COLS if col in parquet_df.columns]
+    keep_cols = [col for col in [KTP_SOURCE_KEY_COL, *join_cols] if col in parquet_df.columns]
     if not keep_cols:
         return pd.DataFrame(columns=[KTP_SOURCE_KEY_COL]), []
-    return parquet_df[keep_cols].copy(), prefixed_cols
+    parquet_df = parquet_df[keep_cols].copy()
+    parquet_df = parquet_df.drop_duplicates(subset=[KTP_SOURCE_KEY_COL], keep="first")
+    return parquet_df, join_cols
 
 
 def _write_population_with_economy_and_parquet_csv(
@@ -873,15 +937,39 @@ def _write_population_with_economy_and_parquet_csv(
             base_df[HCR_ROW_COL] = base_df[HCR_ROW_COL].map(
                 lambda value: None if pd.isna(value) else str(value)
             )
+            base_df[KTP_FIRST_NAME_COL] = base_df[KTP_FIRST_NAME_COL].map(
+                lambda value: None if pd.isna(value) else str(value)
+            )
+            base_df[KTP_LAST_NAME_COL] = base_df[KTP_LAST_NAME_COL].map(
+                lambda value: None if pd.isna(value) else str(value)
+            )
             bridge_df = bridge_df.copy()
             bridge_df[KTP_FILENAME_COL] = bridge_df[KTP_FILENAME_COL].astype(str)
             bridge_df[KTP_FRAGMENT_COL] = bridge_df[KTP_FRAGMENT_COL].astype(str)
             merged_df = base_df.merge(
                 bridge_df,
                 how="left",
-                left_on=[HCR_FILENAME_COL, HCR_ROW_COL],
-                right_on=[KTP_FILENAME_COL, KTP_FRAGMENT_COL],
-            ).drop(columns=[KTP_FILENAME_COL, KTP_FRAGMENT_COL], errors="ignore")
+                left_on=[
+                    HCR_FILENAME_COL,
+                    HCR_ROW_COL,
+                    KTP_FIRST_NAME_COL,
+                    KTP_LAST_NAME_COL,
+                ],
+                right_on=[
+                    KTP_FILENAME_COL,
+                    KTP_FRAGMENT_COL,
+                    BRIDGE_FIRST_NAME_COL,
+                    BRIDGE_LAST_NAME_COL,
+                ],
+            ).drop(
+                columns=[
+                    KTP_FILENAME_COL,
+                    KTP_FRAGMENT_COL,
+                    BRIDGE_FIRST_NAME_COL,
+                    BRIDGE_LAST_NAME_COL,
+                ],
+                errors="ignore",
+            )
         else:
             merged_df = base_df.copy()
             merged_df[KTP_SOURCE_KEY_COL] = None
@@ -908,7 +996,7 @@ def _write_population_with_economy_and_parquet_csv(
     else:
         merged_df[KTP_ECONOMIES_ISO_COL] = _json_country_list([])
 
-    parquet_df, parquet_prefixed_cols = _parquet_prefixed_df(conn)
+    parquet_df, parquet_join_cols = _parquet_left_join_df(conn)
     if (
         not parquet_df.empty
         and KTP_SOURCE_KEY_COL in merged_df.columns
@@ -922,7 +1010,7 @@ def _write_population_with_economy_and_parquet_csv(
     final_cols.extend(
         [
             col
-            for col in parquet_prefixed_cols
+            for col in parquet_join_cols
             if col in merged_df.columns and col not in final_cols
         ]
     )
@@ -941,7 +1029,7 @@ def _write_population_with_economy_and_parquet_csv(
         "rows": len(final_df),
         "step4_base_columns": final_cols[: len(step4_base_columns)],
         "parquet_prefixed_columns": [
-            col for col in parquet_prefixed_cols if col in final_df.columns
+            col for col in parquet_join_cols if col in final_df.columns
         ],
     }
 
