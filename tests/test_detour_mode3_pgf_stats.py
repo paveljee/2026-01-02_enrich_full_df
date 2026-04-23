@@ -319,6 +319,7 @@ def test_detour_contract_and_mode3_stats_readonly(
     assert "Mode-3 p_gf Stats Detour" in plain
     assert "Selection Counts" in plain
     assert "Population rows containing mode-3 selected names" in plain
+    assert "p_gf Inference Evidence Distribution" in plain
     assert "p_gf Buckets" in plain
 
     md = result.metadata
@@ -366,6 +367,26 @@ def test_detour_contract_and_mode3_stats_readonly(
     assert dist["q3"] == pytest.approx(0.75, rel=0, abs=1e-12)
     assert dist["min"] == pytest.approx(0.0, rel=0, abs=1e-12)
     assert dist["max"] == pytest.approx(1.0, rel=0, abs=1e-12)
+
+    evidence = md["pgf_inference_evidence_distribution"]
+    inference_counts = evidence["inference_counts"]
+    assert inference_counts["non_null_n"] == 6
+    assert inference_counts["null_n"] == 0
+    assert inference_counts["mean"] == pytest.approx(20 / 6, rel=0, abs=1e-12)
+    assert inference_counts["median"] == pytest.approx(3.5, rel=0, abs=1e-12)
+    assert inference_counts["q1"] == pytest.approx(2.25, rel=0, abs=1e-12)
+    assert inference_counts["q3"] == pytest.approx(4.75, rel=0, abs=1e-12)
+    assert inference_counts["min"] == pytest.approx(0.0, rel=0, abs=1e-12)
+    assert inference_counts["max"] == pytest.approx(6.0, rel=0, abs=1e-12)
+    inference_sources = evidence["inference_sources"]
+    assert inference_sources["non_null_n"] == 6
+    assert inference_sources["null_n"] == 0
+    assert inference_sources["mean"] == pytest.approx(2.0, rel=0, abs=1e-12)
+    assert inference_sources["median"] == pytest.approx(2.0, rel=0, abs=1e-12)
+    assert inference_sources["q1"] == pytest.approx(1.25, rel=0, abs=1e-12)
+    assert inference_sources["q3"] == pytest.approx(2.75, rel=0, abs=1e-12)
+    assert inference_sources["min"] == pytest.approx(0.0, rel=0, abs=1e-12)
+    assert inference_sources["max"] == pytest.approx(4.0, rel=0, abs=1e-12)
 
     outliers = md["pgf_outliers_tukey"]
     assert outliers["total_outliers"] == 0

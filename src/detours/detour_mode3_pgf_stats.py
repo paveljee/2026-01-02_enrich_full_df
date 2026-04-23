@@ -5,6 +5,7 @@ import json
 import math
 import sys
 from collections import defaultdict
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -113,6 +114,39 @@ def _round_or_none(value: float | None, digits: int = 6) -> float | None:
     if value is None:
         return None
     return round(float(value), digits)
+
+
+def _numeric_distribution(values: Sequence[int | float | None]) -> dict[str, float | int | None]:
+    non_null_values = np.array([float(value) for value in values if value is not None], dtype=float)
+    non_null_n = int(non_null_values.size)
+    mean = float(non_null_values.mean()) if non_null_n else None
+    sd = float(non_null_values.std(ddof=1)) if non_null_n > 1 else None
+    se = float(sd / math.sqrt(non_null_n)) if non_null_n > 1 and sd is not None else None
+    ci95_lo = float(mean - 1.96 * se) if mean is not None and se is not None else None
+    ci95_hi = float(mean + 1.96 * se) if mean is not None and se is not None else None
+    q1 = (
+        float(np.quantile(non_null_values, 0.25, method="linear")) if non_null_n else None
+    )
+    median = (
+        float(np.quantile(non_null_values, 0.5, method="linear")) if non_null_n else None
+    )
+    q3 = (
+        float(np.quantile(non_null_values, 0.75, method="linear")) if non_null_n else None
+    )
+    return {
+        "non_null_n": non_null_n,
+        "null_n": len(values) - non_null_n,
+        "mean": mean,
+        "sd": sd,
+        "se": se,
+        "mean_ci95_lo": ci95_lo,
+        "mean_ci95_hi": ci95_hi,
+        "min": float(non_null_values.min()) if non_null_n else None,
+        "q1": q1,
+        "median": median,
+        "q3": q3,
+        "max": float(non_null_values.max()) if non_null_n else None,
+    }
 
 
 def _scalar_int(conn: duckdb.DuckDBPyConnection, sql: str) -> int:
@@ -267,6 +301,8 @@ def _build_mode3_pgf_metadata(conn: duckdb.DuckDBPyConnection) -> dict[str, Any]
     mode3_selected_keys: list[str] = []
     mode3_non_missing_keys: list[str] = []
     mode3_pgf_values: list[float | None] = []
+    mode3_inference_counts_values: list[int | None] = []
+    mode3_inference_sources_values: list[int | None] = []
     mode3_missing_pgf_inference_rows: list[tuple[int | None, int | None]] = []
 
     for name_key in outer_keys:
@@ -291,6 +327,8 @@ def _build_mode3_pgf_metadata(conn: duckdb.DuckDBPyConnection) -> dict[str, Any]
                 )
             p_gf_value, inference_counts, inference_sources = sciscinet_rows[0]
             mode3_pgf_values.append(p_gf_value)
+            mode3_inference_counts_values.append(inference_counts)
+            mode3_inference_sources_values.append(inference_sources)
             if p_gf_value is None:
                 mode3_missing_pgf_inference_rows.append((inference_counts, inference_sources))
             else:
@@ -378,6 +416,9 @@ def _build_mode3_pgf_metadata(conn: duckdb.DuckDBPyConnection) -> dict[str, Any]
     if len(mode3_missing_pgf_inference_rows) != bucket_missing:
         raise RuntimeError("Missing-p_gf inference audit invariant failed.")
 
+    inference_counts_dist = _numeric_distribution(mode3_inference_counts_values)
+    inference_sources_dist = _numeric_distribution(mode3_inference_sources_values)
+
     sign_test_n = (
         bucket_exact_0
         + bucket_between_0_and_0_5_exclusive
@@ -463,6 +504,10 @@ def _build_mode3_pgf_metadata(conn: duckdb.DuckDBPyConnection) -> dict[str, Any]
             "q3": q3,
             "max": max_v,
         },
+        "pgf_inference_evidence_distribution": {
+            "inference_counts": inference_counts_dist,
+            "inference_sources": inference_sources_dist,
+        },
         "pgf_outliers_tukey": {
             "iqr": iqr,
             "lower_fence": lower_fence,
@@ -540,6 +585,7 @@ def _build_mode3_pgf_metadata(conn: duckdb.DuckDBPyConnection) -> dict[str, Any]
 def _print_summary(metadata: dict[str, Any]) -> None:
     counts = metadata["counts"]
     dist = metadata["pgf_distribution"]
+    evidence = metadata["pgf_inference_evidence_distribution"]
     outliers = metadata["pgf_outliers_tukey"]
     buckets = metadata["pgf_buckets"]
     rules = metadata["rule_counts"]
@@ -619,6 +665,64 @@ def _print_summary(metadata: dict[str, Any]) -> None:
     dist_table.add_row("Q3", f"{dist['q3']:.6f}")
     dist_table.add_row("Max", f"{dist['max']:.6f}")
     console.print(dist_table)
+
+    evidence_table = Table(
+        title="p_gf Inference Evidence Distribution (Mode-3 Selected Names)",
+        box=box.SIMPLE,
+    )
+    evidence_table.add_column("Metric", style="cyan")
+    evidence_table.add_column("inference_counts", style="magenta", justify="right")
+    evidence_table.add_column("inference_sources", style="magenta", justify="right")
+    evidence_counts = evidence["inference_counts"]
+    evidence_sources = evidence["inference_sources"]
+
+    def _evidence_pair(metric: str, key: str) -> None:
+        counts_value = evidence_counts[key]
+        sources_value = evidence_sources[key]
+        evidence_table.add_row(
+            metric,
+            "N/A" if counts_value is None else f"{counts_value:.6f}",
+            "N/A" if sources_value is None else f"{sources_value:.6f}",
+        )
+
+    evidence_table.add_row(
+        "N (non-null)",
+        f"{evidence_counts['non_null_n']:,}",
+        f"{evidence_sources['non_null_n']:,}",
+    )
+    evidence_table.add_row(
+        "Null",
+        f"{evidence_counts['null_n']:,}",
+        f"{evidence_sources['null_n']:,}",
+    )
+    _evidence_pair("Mean", "mean")
+    evidence_table.add_row(
+        "95% CI (mean)",
+        (
+            "N/A"
+            if evidence_counts["mean_ci95_lo"] is None
+            else (
+                f"[{evidence_counts['mean_ci95_lo']:.6f}, "
+                f"{evidence_counts['mean_ci95_hi']:.6f}]"
+            )
+        ),
+        (
+            "N/A"
+            if evidence_sources["mean_ci95_lo"] is None
+            else (
+                f"[{evidence_sources['mean_ci95_lo']:.6f}, "
+                f"{evidence_sources['mean_ci95_hi']:.6f}]"
+            )
+        ),
+    )
+    _evidence_pair("SD", "sd")
+    _evidence_pair("SE", "se")
+    _evidence_pair("Min", "min")
+    _evidence_pair("Q1", "q1")
+    _evidence_pair("Median", "median")
+    _evidence_pair("Q3", "q3")
+    _evidence_pair("Max", "max")
+    console.print(evidence_table)
 
     p_value = sign_test["exact_binomial_p_two_sided"]
     p_value_mantissa = sign_test["exact_binomial_p_two_sided_mantissa"]
