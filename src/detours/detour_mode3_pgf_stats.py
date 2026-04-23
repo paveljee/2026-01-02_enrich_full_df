@@ -47,6 +47,22 @@ P_GF_COL = "ssnau.p_gf"
 INFERENCE_COUNTS_COL = "ssnau.inference_counts"
 INFERENCE_SOURCES_COL = "ssnau.inference_sources"
 MODE = 3
+NQG_NAME_HANDLING_NOTICE = (
+    "nomquamgender 0.1.0 normalizes each input name with unidecode, lower(), "
+    "and strip(); it then tries the full normalized string first and, only if "
+    "that is not found, falls back to the first whitespace-delimited token."
+)
+SCISCINET_PIPELINE_NOTICE = (
+    "This database uses SciSciNet-v2 parquet data in step 09 "
+    "(src/steps/step_09_match_parquet.py): matched HCR name keys are joined to "
+    "SciSciNet author_details/authors tables, and ssnau.p_gf, "
+    "ssnau.inference_counts, and ssnau.inference_sources are persisted in "
+    "ssn_innerdicts."
+)
+SCISCINET_METHODS_NOTICE = (
+    "SciSciNet-v2 reports following original SciSciNet methods; the original "
+    "SciSciNet paper reports using nomquamgender for name-gender inference."
+)
 
 
 @dataclass
@@ -465,6 +481,11 @@ def _build_mode3_pgf_metadata(conn: duckdb.DuckDBPyConnection) -> dict[str, Any]
         "mode_description": CARD_BUILD_SUBSET_DESCRIPTIONS[MODE],
         "db_file": _db_file_from_pragma(conn),
         "tables_used": [OUTERDICT_STUB_TABLE, XLSX_INNERDICT_TABLE, PARQUET_INNERDICT_TABLE],
+        "methodology_notice": {
+            "nomquamgender_name_handling": NQG_NAME_HANDLING_NOTICE,
+            "sciscinet_v2_pipeline_use": SCISCINET_PIPELINE_NOTICE,
+            "sciscinet_methods": SCISCINET_METHODS_NOTICE,
+        },
         "counts": {
             "population_rows": population_rows,
             "outerdict_keys": outerdict_keys,
@@ -600,6 +621,24 @@ def _print_summary(metadata: dict[str, Any]) -> None:
         + ", ".join(str(name) for name in metadata["tables_used"])
         + "[/white]"
     )
+
+    methodology = metadata["methodology_notice"]
+    methodology_table = Table(title="p_gf Methodology / Provenance Notice", box=box.SIMPLE)
+    methodology_table.add_column("Topic", style="cyan")
+    methodology_table.add_column("Notice", style="magenta")
+    methodology_table.add_row(
+        "nomquamgender name handling",
+        methodology["nomquamgender_name_handling"],
+    )
+    methodology_table.add_row(
+        "SciSciNet-v2 pipeline use",
+        methodology["sciscinet_v2_pipeline_use"],
+    )
+    methodology_table.add_row(
+        "SciSciNet methods",
+        methodology["sciscinet_methods"],
+    )
+    console.print(methodology_table)
 
     counts_table = Table(title="Selection Counts", box=box.SIMPLE)
     counts_table.add_column("Metric", style="cyan")

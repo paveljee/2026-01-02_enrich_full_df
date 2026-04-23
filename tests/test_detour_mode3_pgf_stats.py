@@ -317,6 +317,9 @@ def test_detour_contract_and_mode3_stats_readonly(
     assert result.success is True
     assert result.steps_completed == DETOUR_STEPS == []
     assert "Mode-3 p_gf Stats Detour" in plain
+    assert "p_gf Methodology / Provenance Notice" in plain
+    assert "full normalized string first" in plain
+    assert "step_09_match_parquet.py" in plain
     assert "Selection Counts" in plain
     assert "Population rows containing mode-3 selected names" in plain
     assert "p_gf Inference Evidence Distribution" in plain
@@ -328,6 +331,14 @@ def test_detour_contract_and_mode3_stats_readonly(
         OUTERDICT_STUB_TABLE,
         XLSX_INNERDICT_TABLE,
         PARQUET_INNERDICT_TABLE,
+    ]
+    methodology = md["methodology_notice"]
+    assert "full normalized string first" in methodology["nomquamgender_name_handling"]
+    assert "first whitespace-delimited token" in methodology["nomquamgender_name_handling"]
+    assert "step_09_match_parquet.py" in methodology["sciscinet_v2_pipeline_use"]
+    assert "ssn_innerdicts" in methodology["sciscinet_v2_pipeline_use"]
+    assert "original SciSciNet paper reports using nomquamgender" in methodology[
+        "sciscinet_methods"
     ]
 
     counts = md["counts"]
