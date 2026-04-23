@@ -65,6 +65,12 @@ depends-on = ["ruff", "mypy"]
 [tool.pixi.tasks.pre-commit]
 depends-on = ["lint", "test"]
 
+[tool.pixi.feature.detour-mode0-econ-stats.dependencies]
+plotly = "==6.6.0"
+
+[tool.pixi.environments]
+detour-mode0-econ-stats = ["detour-mode0-econ-stats"]
+
 [tool.pytest.ini_options]
 markers = [
     "slow: long-running integration tests against real config/data",
@@ -83,3 +89,6 @@ python_version = "3.14"
 ignore_missing_imports = true
 plugins = ["pydantic.mypy"]
 warn_unused_ignores = true
+
+[dependency-groups]
+detour-mode0-econ-stats = ["kaleido==0.2.1"]

@@ -17,9 +17,11 @@ from rich.console import Console
 from rich.table import Table
 
 from src.helpers.config import PipelineConfig
+from src.helpers.data_models import FragmentType, ResourceGroup
 from src.helpers.jsonlines import loads_jsonlines
 from src.helpers.resource_monitor import ResourceMonitor
-from src.helpers.schema import OUTERDICT_STUB_TABLE, PARQUET_INNERDICT_TABLE, XLSX_INNERDICT_TABLE
+from src.helpers.resources import register_resource
+from src.helpers.schema import OUTERDICT_STUB_TABLE, XLSX_INNERDICT_TABLE
 from src.helpers.vars import (
     CARD_BUILD_SUBSET_DESCRIPTIONS,
     ENGLISH_HICS,
@@ -35,26 +37,27 @@ from src.helpers.vars import (
     KTP_LAST_NAME_COL,
     KTP_PRIORITY_GROUP_COL,
     KTP_PRIORITY_GROUP_LABELS,
-    KTP_SOURCE_KEY_COL,
-    KTP_XLSX_MATCH_COL,
     KTP_XLSX_MATCH_FIRST_TOKENS_KEY,
     KTP_XLSX_MATCH_LAST_NAME_NORM_KEY,
     KTP_XLSX_MATCH_SOURCE_KEY_LAST_KEY,
     KTP_XLSX_MATCH_SOURCE_KEY_TOKENS_KEY,
     OGHIST_INCOME_LABELS,
+    WORLD_BANK_XLSX_KEY,
 )
 
 console = Console()
 
-DETOUR_ID = "mode3-econ-stats"
-DETOUR_NAME = "Mode 3 Economy Stats"
+DETOUR_ID = "mode0-econ-stats"
+DETOUR_NAME = "Mode 0 Economy Stats"
 DETOUR_DESCRIPTION = (
-    "Read-only detour that reconstructs mode-3 selection from persisted tables and "
-    "prints income-group and priority-group statistics for selected unique names."
+    "Read-only detour that analyzes income-group and priority-group coverage across "
+    "all HCR population rows and all persisted name keys."
 )
 DETOUR_STEPS: list[str] = []
 
-MODE = 3
+MODE = 0
+UNCOVERED_COUNTRIES_SVG_PATH = Path("tmp") / "mode0_econ_stats_not_covered_countries.svg"
+UNCOVERED_COLOUR = "#2a6fdb"
 
 PRIORITY_GROUP_PRECEDENCE = [
     KTP_PRIORITY_GROUP_LABELS[2],
@@ -335,7 +338,7 @@ def _load_income_label_maps_from_db(
     if "income_map" not in tables:
         raise RuntimeError(
             "Required persisted table 'income_map' is missing from the DB; "
-            "mode-3 econ stats must run from persisted DB content only."
+            "mode-0 econ stats must run from persisted DB content only."
         )
 
     country_to_income: dict[str, str] = {}
@@ -428,12 +431,238 @@ def _record_first_non_missing(
         by_row_id[row_id] = value
 
 
-def _build_mode3_econ_metadata(
+def _registered_world_bank_resource(config: PipelineConfig):
+    if WORLD_BANK_XLSX_KEY not in config.files_config:
+        raise KeyError(f"Missing '{WORLD_BANK_XLSX_KEY}' entry in files_config")
+    meta = config.files_config[WORLD_BANK_XLSX_KEY]
+    return register_resource(
+        Path(meta["path"]),
+        group=ResourceGroup.KTP_MANUAL_EXTRACTIONS,
+        fragment_type=FragmentType.EXCEL_ROW,
+        description=meta.get("desc", "World Bank country list"),
+        expected_hash=meta.get("sha256"),
+    )
+
+
+def _normalize_iso3_code(value: object) -> str | None:
+    if value is None or bool(pd.isna(value)):
+        return None
+    raw = str(value).strip().upper()
+    if len(raw) != 3 or raw == "NAN":
+        return None
+    return raw
+
+
+def _load_world_bank_country_rows(
+    config: PipelineConfig,
+    *,
+    priority_sets: dict[str, set[str]],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    resource = _registered_world_bank_resource(config)
+    path = Path(resource.__fspath__())
+    df = pd.read_excel(
+        path,
+        sheet_name="Country Analytical History",
+        engine="openpyxl",
+        header=None,
+    )
+    fy_row = None
+    for _, row in df.iterrows():
+        if row.astype(str).str.contains(r"\bFY\d{2}\b", regex=True).any():
+            fy_row = row
+            break
+    if fy_row is None:
+        raise ValueError("Unable to locate FY column in World Bank history sheet.")
+    fy_cols = [
+        col_idx
+        for col_idx, value in fy_row.items()
+        if isinstance(value, str) and value.startswith("FY")
+    ]
+    if not fy_cols:
+        raise ValueError("Unable to locate fiscal year columns in World Bank history sheet.")
+    fy_col = fy_cols[-1]
+    fiscal_year = str(fy_row[fy_col]).strip()
+
+    rows: list[dict[str, Any]] = []
+    seen_codes: set[str] = set()
+    for _, row in df.iterrows():
+        country_code = _normalize_iso3_code(row.get(0))
+        country = _normalize_optional_label(row.get(1))
+        if country_code is None or country is None or country_code in seen_codes:
+            continue
+        income_code = _normalize_optional_label(row.get(fy_col))
+        income_group = (
+            OGHIST_INCOME_LABELS.get(income_code)
+            if income_code is not None
+            else None
+        )
+        priority_group = _priority_group_for_country(country, priority_sets)
+        rows.append(
+            {
+                "country_code": country_code,
+                "country": country,
+                "income_group": (
+                    income_group if income_group is not None else MISSING_BREAKDOWN_LABEL
+                ),
+                "priority_group": priority_group,
+            }
+        )
+        seen_codes.add(country_code)
+
+    metadata = {
+        "resource_name": resource.name,
+        "resource_hash": resource.hash,
+        "resource_path": str(path),
+        "income_group_fiscal_year": fiscal_year,
+        "country_code_column": 0,
+        "country_name_column": 1,
+    }
+    return rows, metadata
+
+
+def _country_coverage_rows(
+    *,
+    country_rows: list[dict[str, Any]],
+    covered_countries: set[str],
+    priority_sets: dict[str, set[str]],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    enriched_rows: list[dict[str, Any]] = []
+    for row in country_rows:
+        country = str(row["country"])
+        covered = country in covered_countries
+        enriched_rows.append({**row, "covered": covered})
+
+    total_countries = len(enriched_rows)
+    covered_country_rows = [row for row in enriched_rows if row["covered"]]
+    not_covered_country_rows = [row for row in enriched_rows if not row["covered"]]
+
+    def _breakdown(
+        label_key: str,
+        labels: list[str],
+    ) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for label in labels:
+            in_label = [row for row in enriched_rows if row[label_key] == label]
+            covered_in_label = [row for row in in_label if row["covered"]]
+            not_covered_in_label = [row for row in in_label if not row["covered"]]
+            rows.append(
+                {
+                    "label": label,
+                    "total_countries": len(in_label),
+                    "pct_of_total_countries": _pct(len(in_label), total_countries),
+                    "covered_countries": len(covered_in_label),
+                    "pct_of_covered_countries": _pct(
+                        len(covered_in_label), len(covered_country_rows)
+                    ),
+                    "not_covered_countries": len(not_covered_in_label),
+                    "pct_of_not_covered_countries": _pct(
+                        len(not_covered_in_label), len(not_covered_country_rows)
+                    ),
+                    "coverage_pct_within_label": _pct(len(covered_in_label), len(in_label)),
+                }
+            )
+        return rows
+
+    income_labels = [*INCOME_GROUP_ORDER, MISSING_BREAKDOWN_LABEL]
+    priority_labels = [*PRIORITY_GROUP_PRECEDENCE, MISSING_BREAKDOWN_LABEL]
+    coverage = {
+        "total_countries": total_countries,
+        "covered_countries": len(covered_country_rows),
+        "not_covered_countries": len(not_covered_country_rows),
+        "covered_pct_of_total_countries": _pct(len(covered_country_rows), total_countries),
+        "not_covered_pct_of_total_countries": _pct(
+            len(not_covered_country_rows), total_countries
+        ),
+        "covered_country_names": sorted(row["country"] for row in covered_country_rows),
+        "not_covered_country_names": sorted(row["country"] for row in not_covered_country_rows),
+        "not_covered_country_codes": sorted(
+            row["country_code"] for row in not_covered_country_rows
+        ),
+        "income_group_breakdown": _breakdown("income_group", income_labels),
+        "priority_group_breakdown": _breakdown("priority_group", priority_labels),
+        "priority_set_country_counts": {
+            key: len(value) for key, value in sorted(priority_sets.items())
+        },
+    }
+    return enriched_rows, coverage
+
+
+def _write_uncovered_countries_svg(country_rows: list[dict[str, Any]], output_path: Path) -> None:
+    try:
+        import plotly.express as px
+    except ImportError as exc:
+        raise RuntimeError(
+            "Writing the uncovered-country SVG requires the optional pixi environment "
+            "'detour-mode0-econ-stats' (plotly + kaleido). Run with "
+            "`pixi run -e detour-mode0-econ-stats ...`."
+        ) from exc
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    rows = [
+        {
+            "country_code": row["country_code"],
+            "country": row["country"],
+            "coverage": "Not covered",
+        }
+        for row in country_rows
+        if not row["covered"]
+    ]
+    df = pd.DataFrame(rows, columns=["country_code", "country", "coverage"])
+    fig = px.choropleth(
+        df,
+        locations="country_code",
+        locationmode="ISO-3",
+        hover_name="country",
+        color="coverage",
+        color_discrete_map={"Not covered": UNCOVERED_COLOUR},
+    )
+    fig.update_geos(
+        projection_type="natural earth",
+        showframe=False,
+        showcoastlines=False,
+        showcountries=True,
+        countrycolor="white",
+        showland=True,
+        landcolor="#e5e7eb",
+        bgcolor="rgba(0,0,0,0)",
+    )
+    fig.update_layout(
+        margin=dict(l=0, r=0, t=0, b=0),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        showlegend=False,
+    )
+    fig.write_image(str(output_path), format="svg", width=1200, height=650)
+
+
+def _covered_countries_from_population_rows(
+    conn: duckdb.DuckDBPyConnection,
+    fallback_rows_by_id: dict[tuple[str, str], set[str]],
+) -> set[str]:
+    tables = {row[0] for row in conn.execute("SHOW TABLES").fetchall()}
+    if "population_with_names_economy" in tables:
+        columns = {
+            row[0]
+            for row in conn.execute("DESCRIBE population_with_names_economy").fetchall()
+        }
+        if KTP_ECONOMIES_COL in columns:
+            countries: set[str] = set()
+            for (value,) in conn.execute(
+                f'SELECT "{KTP_ECONOMIES_COL}" FROM population_with_names_economy'
+            ).fetchall():
+                countries.update(_normalize_country_list(value))
+            return countries
+
+    countries = set()
+    for row_countries in fallback_rows_by_id.values():
+        countries.update(row_countries)
+    return countries
+
+
+def _build_mode0_econ_metadata(
     config: PipelineConfig,
     conn: duckdb.DuckDBPyConnection,
 ) -> dict[str, Any]:
-    del config
-
     population_rows = _scalar_int(conn, "SELECT COUNT(*) FROM population_with_names_economy")
 
     outer_keys = [
@@ -447,7 +676,6 @@ def _build_mode3_econ_metadata(
     country_to_income, alias_to_country = _load_income_label_maps_from_db(conn)
     priority_sets = _priority_country_sets(country_to_income, alias_to_country)
 
-    xlsx_payloads_by_key: dict[str, list[object]] = defaultdict(list)
     xlsx_rows_by_key: dict[str, list[dict[str, object]]] = defaultdict(list)
     for name_key, inner_blob in conn.execute(
         f"SELECT name_key, innerdicts FROM {XLSX_INNERDICT_TABLE}"
@@ -455,7 +683,6 @@ def _build_mode3_econ_metadata(
         if name_key is None:
             continue
         for inner in loads_jsonlines(inner_blob or ""):
-            xlsx_payloads_by_key[name_key].append(inner.get(KTP_XLSX_MATCH_COL))
             filename = inner.get(KTP_FILENAME_COL)
             fragment = inner.get(KTP_FRAGMENT_COL)
             if filename is None or fragment is None:
@@ -465,17 +692,7 @@ def _build_mode3_econ_metadata(
                 )
             xlsx_rows_by_key[name_key].append(inner)
 
-    sciscinet_count_by_key: dict[str, int] = defaultdict(int)
-    for (source_key,) in conn.execute(
-        f'SELECT "{KTP_SOURCE_KEY_COL}" FROM {PARQUET_INNERDICT_TABLE}'
-    ).fetchall():
-        if source_key is None:
-            continue
-        sciscinet_count_by_key[source_key] += 1
-
-    sciscinet_exactly_one_pass = 0
-    xlsx_exact_pass = 0
-    mode3_selected_keys: list[str] = []
+    mode0_selected_keys: list[str] = []
     name_countries_by_key: dict[str, set[str]] = defaultdict(set)
     name_row_income_groups_by_key: dict[str, set[str]] = defaultdict(set)
     name_row_priority_groups_by_key: dict[str, set[str]] = defaultdict(set)
@@ -486,21 +703,7 @@ def _build_mode3_econ_metadata(
     selected_row_priority_group_by_id: dict[tuple[str, str], str | None] = {}
 
     for name_key in outer_keys:
-        sciscinet_exactly_one_ok = sciscinet_count_by_key.get(name_key, 0) == 1
-        xlsx_payloads = xlsx_payloads_by_key.get(name_key, [])
-        xlsx_exact_ok = any(
-            _has_present_xlsx_match_payload(value) for value in xlsx_payloads
-        ) and all(_is_exact_xlsx_match_payload(value) for value in xlsx_payloads)
-
-        if sciscinet_exactly_one_ok:
-            sciscinet_exactly_one_pass += 1
-        if xlsx_exact_ok:
-            xlsx_exact_pass += 1
-
-        if not (sciscinet_exactly_one_ok and xlsx_exact_ok):
-            continue
-
-        mode3_selected_keys.append(name_key)
+        mode0_selected_keys.append(name_key)
         for inner in xlsx_rows_by_key.get(name_key, []):
             row_id = (str(inner[KTP_FILENAME_COL]), str(inner[KTP_FRAGMENT_COL]))
             selected_row_ids.add(row_id)
@@ -520,17 +723,17 @@ def _build_mode3_econ_metadata(
             if priority_group is not None:
                 name_row_priority_groups_by_key[name_key].add(priority_group)
 
-    selected_names = len(mode3_selected_keys)
-    mode3_selected_population_rows = len(selected_row_ids)
+    selected_names = len(mode0_selected_keys)
+    mode0_selected_population_rows = len(selected_row_ids)
 
     selected_names_with_countries = sum(
-        bool(name_countries_by_key.get(name_key)) for name_key in mode3_selected_keys
+        bool(name_countries_by_key.get(name_key)) for name_key in mode0_selected_keys
     )
     selected_names_with_income_group = sum(
-        bool(name_row_income_groups_by_key.get(name_key)) for name_key in mode3_selected_keys
+        bool(name_row_income_groups_by_key.get(name_key)) for name_key in mode0_selected_keys
     )
     selected_names_with_priority_group = sum(
-        bool(name_row_priority_groups_by_key.get(name_key)) for name_key in mode3_selected_keys
+        bool(name_row_priority_groups_by_key.get(name_key)) for name_key in mode0_selected_keys
     )
     selected_population_rows_with_countries = sum(
         bool(selected_row_countries_by_id.get(row_id)) for row_id in selected_row_ids
@@ -543,7 +746,7 @@ def _build_mode3_econ_metadata(
     )
 
     country_cardinality = [
-        len(name_countries_by_key.get(name_key, set())) for name_key in mode3_selected_keys
+        len(name_countries_by_key.get(name_key, set())) for name_key in mode0_selected_keys
     ]
     country_cardinality_values = np.array(country_cardinality, dtype=float)
     card_n = int(country_cardinality_values.size)
@@ -598,7 +801,7 @@ def _build_mode3_econ_metadata(
         + bucket_4_or_more
         != selected_names
     ):
-        raise RuntimeError("Bucket partition invariant failed for mode-3 country cardinality.")
+        raise RuntimeError("Bucket partition invariant failed for mode-0 country cardinality.")
 
     income_row_counts: dict[str, int] = defaultdict(int)
     priority_row_counts: dict[str, int] = defaultdict(int)
@@ -612,32 +815,32 @@ def _build_mode3_econ_metadata(
             priority_row_counts[priority_group] += 1
 
     selected_names_without_income_group = sum(
-        not name_row_income_groups_by_key.get(name_key) for name_key in mode3_selected_keys
+        not name_row_income_groups_by_key.get(name_key) for name_key in mode0_selected_keys
     )
     selected_names_without_priority_group = sum(
-        not name_row_priority_groups_by_key.get(name_key) for name_key in mode3_selected_keys
+        not name_row_priority_groups_by_key.get(name_key) for name_key in mode0_selected_keys
     )
     selected_names_with_exactly_one_row_income_group = sum(
         len(name_row_income_groups_by_key.get(name_key, set())) == 1
-        for name_key in mode3_selected_keys
+        for name_key in mode0_selected_keys
     )
     selected_names_with_multiple_row_income_groups = sum(
         len(name_row_income_groups_by_key.get(name_key, set())) > 1
-        for name_key in mode3_selected_keys
+        for name_key in mode0_selected_keys
     )
     selected_names_with_exactly_one_row_priority_group = sum(
         len(name_row_priority_groups_by_key.get(name_key, set())) == 1
-        for name_key in mode3_selected_keys
+        for name_key in mode0_selected_keys
     )
     selected_names_with_multiple_row_priority_groups = sum(
         len(name_row_priority_groups_by_key.get(name_key, set())) > 1
-        for name_key in mode3_selected_keys
+        for name_key in mode0_selected_keys
     )
     selected_rows_missing_income_group = (
-        mode3_selected_population_rows - selected_population_rows_with_income_group
+        mode0_selected_population_rows - selected_population_rows_with_income_group
     )
     selected_rows_missing_priority_group = (
-        mode3_selected_population_rows - selected_population_rows_with_priority_group
+        mode0_selected_population_rows - selected_population_rows_with_priority_group
     )
     selected_row_lower_tier_income_group_by_id: dict[tuple[str, str], str | None] = {}
     lower_tier_income_row_counts: dict[str, int] = defaultdict(int)
@@ -662,7 +865,7 @@ def _build_mode3_econ_metadata(
             "income_group": label,
             "selected_population_rows": income_row_counts.get(label, 0),
             "pct_of_selected_population_rows": _pct(
-                income_row_counts.get(label, 0), mode3_selected_population_rows
+                income_row_counts.get(label, 0), mode0_selected_population_rows
             ),
             "pct_of_non_missing_selected_population_rows": _pct(
                 income_row_counts.get(label, 0), selected_population_rows_with_income_group
@@ -675,7 +878,7 @@ def _build_mode3_econ_metadata(
             "income_group": MISSING_BREAKDOWN_LABEL,
             "selected_population_rows": selected_rows_missing_income_group,
             "pct_of_selected_population_rows": _pct(
-                selected_rows_missing_income_group, mode3_selected_population_rows
+                selected_rows_missing_income_group, mode0_selected_population_rows
             ),
             "pct_of_non_missing_selected_population_rows": None,
         }
@@ -685,11 +888,11 @@ def _build_mode3_econ_metadata(
             "income_group": label,
             "selected_population_rows": lower_tier_income_row_counts.get(label, 0),
             "pct_of_selected_population_rows": _pct(
-                lower_tier_income_row_counts.get(label, 0), mode3_selected_population_rows
+                lower_tier_income_row_counts.get(label, 0), mode0_selected_population_rows
             ),
             "pct_of_non_missing_selected_population_rows": _pct(
                 lower_tier_income_row_counts.get(label, 0),
-                mode3_selected_population_rows - selected_rows_missing_lower_tier_income_group,
+                mode0_selected_population_rows - selected_rows_missing_lower_tier_income_group,
             ),
         }
         for label in INCOME_GROUP_ORDER_LOW_FIRST
@@ -699,7 +902,7 @@ def _build_mode3_econ_metadata(
             "income_group": MISSING_BREAKDOWN_LABEL,
             "selected_population_rows": selected_rows_missing_lower_tier_income_group,
             "pct_of_selected_population_rows": _pct(
-                selected_rows_missing_lower_tier_income_group, mode3_selected_population_rows
+                selected_rows_missing_lower_tier_income_group, mode0_selected_population_rows
             ),
             "pct_of_non_missing_selected_population_rows": None,
         }
@@ -710,7 +913,7 @@ def _build_mode3_econ_metadata(
             "priority_group": label,
             "selected_population_rows": priority_row_counts.get(label, 0),
             "pct_of_selected_population_rows": _pct(
-                priority_row_counts.get(label, 0), mode3_selected_population_rows
+                priority_row_counts.get(label, 0), mode0_selected_population_rows
             ),
             "pct_of_non_missing_selected_population_rows": _pct(
                 priority_row_counts.get(label, 0), selected_population_rows_with_priority_group
@@ -723,7 +926,7 @@ def _build_mode3_econ_metadata(
             "priority_group": MISSING_BREAKDOWN_LABEL,
             "selected_population_rows": selected_rows_missing_priority_group,
             "pct_of_selected_population_rows": _pct(
-                selected_rows_missing_priority_group, mode3_selected_population_rows
+                selected_rows_missing_priority_group, mode0_selected_population_rows
             ),
             "pct_of_non_missing_selected_population_rows": None,
         }
@@ -743,7 +946,7 @@ def _build_mode3_econ_metadata(
     higher_priority_name_counts: dict[str, int] = defaultdict(int)
     lower_priority_name_counts: dict[str, int] = defaultdict(int)
 
-    for name_key in mode3_selected_keys:
+    for name_key in mode0_selected_keys:
         countries = name_countries_by_key.get(name_key, set())
         derived_income_groups = {
             income_group
@@ -797,7 +1000,7 @@ def _build_mode3_econ_metadata(
                 "group_type": "Income group",
                 "label": label,
                 "selected_names": higher_income_name_counts.get(label, 0),
-                "pct_of_mode3_selected_names": _pct(
+                "pct_of_mode0_selected_names": _pct(
                     higher_income_name_counts.get(label, 0), selected_names
                 ),
             }
@@ -808,7 +1011,7 @@ def _build_mode3_econ_metadata(
                 "group_type": "Priority group",
                 "label": label,
                 "selected_names": higher_priority_name_counts.get(label, 0),
-                "pct_of_mode3_selected_names": _pct(
+                "pct_of_mode0_selected_names": _pct(
                     higher_priority_name_counts.get(label, 0), selected_names
                 ),
             }
@@ -820,7 +1023,7 @@ def _build_mode3_econ_metadata(
                 "group_type": "Income group",
                 "label": label,
                 "selected_names": lower_income_name_counts.get(label, 0),
-                "pct_of_mode3_selected_names": _pct(
+                "pct_of_mode0_selected_names": _pct(
                     lower_income_name_counts.get(label, 0), selected_names
                 ),
             }
@@ -831,7 +1034,7 @@ def _build_mode3_econ_metadata(
                 "group_type": "Priority group",
                 "label": label,
                 "selected_names": lower_priority_name_counts.get(label, 0),
-                "pct_of_mode3_selected_names": _pct(
+                "pct_of_mode0_selected_names": _pct(
                     lower_priority_name_counts.get(label, 0), selected_names
                 ),
             }
@@ -840,7 +1043,7 @@ def _build_mode3_econ_metadata(
     multi_country_names = 0
     multi_country_different_income_groups = 0
     multi_country_different_priority_groups = 0
-    for name_key in mode3_selected_keys:
+    for name_key in mode0_selected_keys:
         countries = name_countries_by_key.get(name_key, set())
         if len(countries) <= 1:
             continue
@@ -859,7 +1062,7 @@ def _build_mode3_econ_metadata(
             multi_country_different_priority_groups += 1
 
     researcher_profiles: list[dict[str, Any]] = []
-    for name_key in mode3_selected_keys:
+    for name_key in mode0_selected_keys:
         rows = xlsx_rows_by_key.get(name_key, [])
         sorted_countries = sorted(name_countries_by_key.get(name_key, set()))
         primary_affiliations = sorted(
@@ -943,33 +1146,50 @@ def _build_mode3_econ_metadata(
         ],
     }
 
+    covered_countries = _covered_countries_from_population_rows(
+        conn,
+        selected_row_countries_by_id,
+    )
+    world_bank_country_rows, world_bank_metadata = _load_world_bank_country_rows(
+        config,
+        priority_sets=priority_sets,
+    )
+    country_rows_with_coverage, country_coverage = _country_coverage_rows(
+        country_rows=world_bank_country_rows,
+        covered_countries=covered_countries,
+        priority_sets=priority_sets,
+    )
+    _write_uncovered_countries_svg(country_rows_with_coverage, UNCOVERED_COUNTRIES_SVG_PATH)
+
     return {
         "detour_id": DETOUR_ID,
         "mode": MODE,
         "mode_description": CARD_BUILD_SUBSET_DESCRIPTIONS[MODE],
         "db_file": _db_file_from_pragma(conn),
-        "tables_used": [OUTERDICT_STUB_TABLE, XLSX_INNERDICT_TABLE, PARQUET_INNERDICT_TABLE],
+        "tables_used": [OUTERDICT_STUB_TABLE, XLSX_INNERDICT_TABLE],
+        "world_bank_country_resource": world_bank_metadata,
+        "country_coverage": country_coverage,
+        "country_coverage_map_svg": str(UNCOVERED_COUNTRIES_SVG_PATH),
         "priority_group_definitions": PRIORITY_GROUP_RULES,
         "counts": {
             "population_rows": population_rows,
             "outerdict_keys": outerdict_keys,
-            "sciscinet_distinct_source_keys": len(sciscinet_count_by_key),
-            "mode3_selected_names": selected_names,
-            "mode3_selected_pct_of_outerdict_keys": _pct(selected_names, outerdict_keys),
-            "mode3_selected_population_rows": mode3_selected_population_rows,
-            "mode3_selected_pct_of_population_rows": _pct(
-                mode3_selected_population_rows, population_rows
+            "mode0_selected_names": selected_names,
+            "mode0_selected_pct_of_outerdict_keys": _pct(selected_names, outerdict_keys),
+            "mode0_selected_population_rows": mode0_selected_population_rows,
+            "mode0_selected_pct_of_population_rows": _pct(
+                mode0_selected_population_rows, population_rows
             ),
             "selected_names_with_countries": selected_names_with_countries,
-            "selected_names_with_countries_pct_of_mode3": _pct(
+            "selected_names_with_countries_pct_of_mode0": _pct(
                 selected_names_with_countries, selected_names
             ),
             "selected_names_with_income_group": selected_names_with_income_group,
-            "selected_names_with_income_group_pct_of_mode3": _pct(
+            "selected_names_with_income_group_pct_of_mode0": _pct(
                 selected_names_with_income_group, selected_names
             ),
             "selected_names_with_priority_group": selected_names_with_priority_group,
-            "selected_names_with_priority_group_pct_of_mode3": _pct(
+            "selected_names_with_priority_group_pct_of_mode0": _pct(
                 selected_names_with_priority_group, selected_names
             ),
             "selected_population_rows_with_countries": selected_population_rows_with_countries,
@@ -988,12 +1208,6 @@ def _build_mode3_econ_metadata(
             "selected_population_rows_with_priority_group_pct_of_population_rows": _pct(
                 selected_population_rows_with_priority_group, population_rows
             ),
-        },
-        "rule_counts": {
-            "sciscinet_exactly_one_pass": sciscinet_exactly_one_pass,
-            "sciscinet_exactly_one_fail": outerdict_keys - sciscinet_exactly_one_pass,
-            "xlsx_exact_pass": xlsx_exact_pass,
-            "xlsx_exact_fail": outerdict_keys - xlsx_exact_pass,
         },
         "country_cardinality_distribution": {
             "n": card_n,
@@ -1023,11 +1237,11 @@ def _build_mode3_econ_metadata(
             "exact_2": bucket_exact_2,
             "exact_3": bucket_exact_3,
             "exact_4_or_more": bucket_4_or_more,
-            "exact_0_pct_of_mode3": _pct(bucket_exact_0, selected_names),
-            "exact_1_pct_of_mode3": _pct(bucket_exact_1, selected_names),
-            "exact_2_pct_of_mode3": _pct(bucket_exact_2, selected_names),
-            "exact_3_pct_of_mode3": _pct(bucket_exact_3, selected_names),
-            "exact_4_or_more_pct_of_mode3": _pct(bucket_4_or_more, selected_names),
+            "exact_0_pct_of_mode0": _pct(bucket_exact_0, selected_names),
+            "exact_1_pct_of_mode0": _pct(bucket_exact_1, selected_names),
+            "exact_2_pct_of_mode0": _pct(bucket_exact_2, selected_names),
+            "exact_3_pct_of_mode0": _pct(bucket_exact_3, selected_names),
+            "exact_4_or_more_pct_of_mode0": _pct(bucket_4_or_more, selected_names),
         },
         "income_group_breakdown": income_breakdown,
         "income_group_breakdown_lower_tier_preferred": income_breakdown_lower_tier_preferred,
@@ -1040,16 +1254,16 @@ def _build_mode3_econ_metadata(
         ),
         "multi_country_divergence": {
             "multi_country_names": multi_country_names,
-            "multi_country_pct_of_mode3": _pct(multi_country_names, selected_names),
+            "multi_country_pct_of_mode0": _pct(multi_country_names, selected_names),
             "different_income_groups": multi_country_different_income_groups,
-            "different_income_groups_pct_of_mode3": _pct(
+            "different_income_groups_pct_of_mode0": _pct(
                 multi_country_different_income_groups, selected_names
             ),
             "different_income_groups_pct_of_multi_country": _pct(
                 multi_country_different_income_groups, multi_country_names
             ),
             "different_priority_groups": multi_country_different_priority_groups,
-            "different_priority_groups_pct_of_mode3": _pct(
+            "different_priority_groups_pct_of_mode0": _pct(
                 multi_country_different_priority_groups, selected_names
             ),
             "different_priority_groups_pct_of_multi_country": _pct(
@@ -1080,7 +1294,7 @@ def _build_mode3_econ_metadata(
 
 def _print_summary(metadata: dict[str, Any]) -> None:
     counts = metadata["counts"]
-    rules = metadata["rule_counts"]
+    country_coverage = metadata["country_coverage"]
     dist = metadata["country_cardinality_distribution"]
     buckets = metadata["country_cardinality_buckets"]
     income_breakdown = metadata["income_group_breakdown"]
@@ -1097,13 +1311,22 @@ def _print_summary(metadata: dict[str, Any]) -> None:
     outliers = metadata["country_cardinality_outliers_tukey"]
     highlights = metadata["researcher_detail_highlights"]
 
-    console.print("[cyan]Mode-3 Economy Stats Detour (read-only)[/cyan]")
+    console.print("[cyan]Mode-0 Economy Stats Detour (read-only)[/cyan]")
     console.print(f"[white]DB: {metadata['db_file']}[/white]")
     console.print(f"[white]Mode {metadata['mode']}: {metadata['mode_description']}[/white]")
     console.print(
         "[white]Tables used: "
         + ", ".join(str(name) for name in metadata["tables_used"])
         + "[/white]"
+    )
+    console.print(
+        "[white]World Bank country resource: "
+        f"{metadata['world_bank_country_resource']['resource_name']} "
+        f"({metadata['world_bank_country_resource']['resource_hash']})[/white]"
+    )
+    console.print(
+        "[white]Uncovered countries SVG: "
+        f"{metadata['country_coverage_map_svg']}[/white]"
     )
 
     definitions_table = Table(title="Priority-Group Definitions (Step-4 Rules)", box=box.SIMPLE)
@@ -1121,42 +1344,42 @@ def _print_summary(metadata: dict[str, Any]) -> None:
     counts_table.add_column("Value", style="magenta", justify="right")
     counts_table.add_row("Population rows", f"{counts['population_rows']:,}")
     counts_table.add_row("OuterDict keys (step 6)", f"{counts['outerdict_keys']:,}")
-    counts_table.add_row("Mode-3 selected names", f"{counts['mode3_selected_names']:,}")
+    counts_table.add_row("Mode-0 selected names", f"{counts['mode0_selected_names']:,}")
     counts_table.add_row(
-        "Mode-3 selected % of OuterDict keys",
-        _fmt_pct(counts["mode3_selected_pct_of_outerdict_keys"]),
+        "Mode-0 selected % of OuterDict keys",
+        _fmt_pct(counts["mode0_selected_pct_of_outerdict_keys"]),
     )
     counts_table.add_row(
-        "Population rows containing mode-3 selected names",
-        f"{counts['mode3_selected_population_rows']:,}",
+        "Population rows containing mode-0 selected names",
+        f"{counts['mode0_selected_population_rows']:,}",
     )
     counts_table.add_row(
-        "Mode-3 selected % of population rows",
-        _fmt_pct(counts["mode3_selected_pct_of_population_rows"]),
+        "Mode-0 selected % of population rows",
+        _fmt_pct(counts["mode0_selected_pct_of_population_rows"]),
     )
     counts_table.add_row(
         "Selected names with at least one country",
         f"{counts['selected_names_with_countries']:,}",
     )
     counts_table.add_row(
-        "Selected names with at least one country % of mode-3",
-        _fmt_pct(counts["selected_names_with_countries_pct_of_mode3"]),
+        "Selected names with at least one country % of mode-0",
+        _fmt_pct(counts["selected_names_with_countries_pct_of_mode0"]),
     )
     counts_table.add_row(
         "Selected names with at least one income-group label",
         f"{counts['selected_names_with_income_group']:,}",
     )
     counts_table.add_row(
-        "Selected names with income-group label % of mode-3",
-        _fmt_pct(counts["selected_names_with_income_group_pct_of_mode3"]),
+        "Selected names with income-group label % of mode-0",
+        _fmt_pct(counts["selected_names_with_income_group_pct_of_mode0"]),
     )
     counts_table.add_row(
         "Selected names with at least one priority-group label",
         f"{counts['selected_names_with_priority_group']:,}",
     )
     counts_table.add_row(
-        "Selected names with priority-group label % of mode-3",
-        _fmt_pct(counts["selected_names_with_priority_group_pct_of_mode3"]),
+        "Selected names with priority-group label % of mode-0",
+        _fmt_pct(counts["selected_names_with_priority_group_pct_of_mode0"]),
     )
     counts_table.add_row(
         "Selected population rows with at least one country",
@@ -1184,24 +1407,65 @@ def _print_summary(metadata: dict[str, Any]) -> None:
     )
     console.print(counts_table)
 
-    rules_table = Table(title="Mode-3 Rule Counts (Across OuterDict Keys)", box=box.SIMPLE)
-    rules_table.add_column("Rule", style="cyan")
-    rules_table.add_column("Pass", style="green", justify="right")
-    rules_table.add_column("Fail", style="red", justify="right")
-    rules_table.add_row(
-        "sciscinet: exactly one innerdict",
-        f"{rules['sciscinet_exactly_one_pass']:,}",
-        f"{rules['sciscinet_exactly_one_fail']:,}",
+    country_scope_table = Table(title="Country Coverage Scope", box=box.SIMPLE)
+    country_scope_table.add_column("Metric", style="cyan")
+    country_scope_table.add_column("Value", style="magenta", justify="right")
+    country_scope_table.add_row(
+        "World Bank countries",
+        f"{country_coverage['total_countries']:,}",
     )
-    rules_table.add_row(
-        "xlsx: present payload + all present exact",
-        f"{rules['xlsx_exact_pass']:,}",
-        f"{rules['xlsx_exact_fail']:,}",
+    country_scope_table.add_row(
+        "Covered in any population row",
+        f"{country_coverage['covered_countries']:,}",
     )
-    console.print(rules_table)
+    country_scope_table.add_row(
+        "Covered % of World Bank countries",
+        _fmt_pct(country_coverage["covered_pct_of_total_countries"]),
+    )
+    country_scope_table.add_row(
+        "Not covered in any population row",
+        f"{country_coverage['not_covered_countries']:,}",
+    )
+    country_scope_table.add_row(
+        "Not covered % of World Bank countries",
+        _fmt_pct(country_coverage["not_covered_pct_of_total_countries"]),
+    )
+    console.print(country_scope_table)
+
+    def _print_country_coverage_breakdown(title: str, rows: list[dict[str, Any]]) -> None:
+        table = Table(title=title, box=box.SIMPLE)
+        table.add_column("Label", style="cyan")
+        table.add_column("Total", style="magenta", justify="right")
+        table.add_column("% total", style="magenta", justify="right")
+        table.add_column("Covered", style="magenta", justify="right")
+        table.add_column("% covered", style="magenta", justify="right")
+        table.add_column("Not covered", style="magenta", justify="right")
+        table.add_column("% not covered", style="magenta", justify="right")
+        table.add_column("Coverage within label", style="magenta", justify="right")
+        for row in rows:
+            table.add_row(
+                row["label"],
+                f"{row['total_countries']:,}",
+                _fmt_pct(row["pct_of_total_countries"]),
+                f"{row['covered_countries']:,}",
+                _fmt_pct(row["pct_of_covered_countries"]),
+                f"{row['not_covered_countries']:,}",
+                _fmt_pct(row["pct_of_not_covered_countries"]),
+                _fmt_pct(row["coverage_pct_within_label"]),
+            )
+        console.print(table)
+
+    _print_country_coverage_breakdown(
+        "Country Coverage by Economy Category",
+        country_coverage["income_group_breakdown"],
+    )
+    _print_country_coverage_breakdown(
+        "Country Coverage by Priority Category",
+        country_coverage["priority_group_breakdown"],
+    )
 
     dist_table = Table(
-        title="Country Cardinality Distribution (Mode-3 Selected Names)",
+        title="Country Cardinality Distribution (Mode-0 Selected Names)",
         box=box.SIMPLE,
     )
     dist_table.add_column("Metric", style="cyan")
@@ -1222,36 +1486,36 @@ def _print_summary(metadata: dict[str, Any]) -> None:
     console.print(dist_table)
 
     bucket_table = Table(
-        title="Country Cardinality Buckets (Mode-3 Selected Names)",
+        title="Country Cardinality Buckets (Mode-0 Selected Names)",
         box=box.SIMPLE,
     )
     bucket_table.add_column("Bucket", style="cyan")
     bucket_table.add_column("Raw", style="magenta", justify="right")
-    bucket_table.add_column("% of mode-3", style="magenta", justify="right")
+    bucket_table.add_column("% of mode-0", style="magenta", justify="right")
     bucket_table.add_row(
         "0 countries",
         f"{buckets['exact_0']:,}",
-        _fmt_pct(buckets["exact_0_pct_of_mode3"]),
+        _fmt_pct(buckets["exact_0_pct_of_mode0"]),
     )
     bucket_table.add_row(
         "1 country",
         f"{buckets['exact_1']:,}",
-        _fmt_pct(buckets["exact_1_pct_of_mode3"]),
+        _fmt_pct(buckets["exact_1_pct_of_mode0"]),
     )
     bucket_table.add_row(
         "2 countries",
         f"{buckets['exact_2']:,}",
-        _fmt_pct(buckets["exact_2_pct_of_mode3"]),
+        _fmt_pct(buckets["exact_2_pct_of_mode0"]),
     )
     bucket_table.add_row(
         "3 countries",
         f"{buckets['exact_3']:,}",
-        _fmt_pct(buckets["exact_3_pct_of_mode3"]),
+        _fmt_pct(buckets["exact_3_pct_of_mode0"]),
     )
     bucket_table.add_row(
         "4+ countries",
         f"{buckets['exact_4_or_more']:,}",
-        _fmt_pct(buckets["exact_4_or_more_pct_of_mode3"]),
+        _fmt_pct(buckets["exact_4_or_more_pct_of_mode0"]),
     )
     console.print(bucket_table)
 
@@ -1309,7 +1573,7 @@ def _print_summary(metadata: dict[str, Any]) -> None:
     console.print(
         "[white]Derived name-level tables below combine distinct affiliated countries across "
         "all selected rows for each KTP name and then assign exactly one final label per "
-        "name. These counts sum to Mode-3 selected names.[/white]"
+        "name. These counts sum to Mode-0 selected names.[/white]"
     )
     derived_higher_table = Table(
         title="Derived Final Name-Level Groups (Combined Countries; Higher Preferred)",
@@ -1318,13 +1582,13 @@ def _print_summary(metadata: dict[str, Any]) -> None:
     derived_higher_table.add_column("Group type", style="cyan")
     derived_higher_table.add_column("Label", style="white")
     derived_higher_table.add_column("Selected names", style="magenta", justify="right")
-    derived_higher_table.add_column("% mode-3 names", style="magenta", justify="right")
+    derived_higher_table.add_column("% mode-0 names", style="magenta", justify="right")
     for row in derived_name_group_breakdown_higher_preferred:
         derived_higher_table.add_row(
             row["group_type"],
             row["label"],
             f"{row['selected_names']:,}",
-            _fmt_pct(row["pct_of_mode3_selected_names"]),
+            _fmt_pct(row["pct_of_mode0_selected_names"]),
         )
     console.print(derived_higher_table)
 
@@ -1335,18 +1599,18 @@ def _print_summary(metadata: dict[str, Any]) -> None:
     derived_lower_table.add_column("Group type", style="cyan")
     derived_lower_table.add_column("Label", style="white")
     derived_lower_table.add_column("Selected names", style="magenta", justify="right")
-    derived_lower_table.add_column("% mode-3 names", style="magenta", justify="right")
+    derived_lower_table.add_column("% mode-0 names", style="magenta", justify="right")
     for row in derived_name_group_breakdown_lower_preferred:
         derived_lower_table.add_row(
             row["group_type"],
             row["label"],
             f"{row['selected_names']:,}",
-            _fmt_pct(row["pct_of_mode3_selected_names"]),
+            _fmt_pct(row["pct_of_mode0_selected_names"]),
         )
     console.print(derived_lower_table)
 
     divergence_table = Table(
-        title="Multi-Country Divergence (Mode-3 Selected Names)",
+        title="Multi-Country Divergence (Mode-0 Selected Names)",
         box=box.SIMPLE,
     )
     divergence_table.add_column("Metric", style="cyan")
@@ -1356,16 +1620,16 @@ def _print_summary(metadata: dict[str, Any]) -> None:
         f"{divergence['multi_country_names']:,}",
     )
     divergence_table.add_row(
-        "Selected names with >1 countries % of mode-3",
-        _fmt_pct(divergence["multi_country_pct_of_mode3"]),
+        "Selected names with >1 countries % of mode-0",
+        _fmt_pct(divergence["multi_country_pct_of_mode0"]),
     )
     divergence_table.add_row(
         "Selected names with >1 countries and >1 derived income groups",
         f"{divergence['different_income_groups']:,}",
     )
     divergence_table.add_row(
-        "Different derived income groups % of mode-3",
-        _fmt_pct(divergence["different_income_groups_pct_of_mode3"]),
+        "Different derived income groups % of mode-0",
+        _fmt_pct(divergence["different_income_groups_pct_of_mode0"]),
     )
     divergence_table.add_row(
         "Different derived income groups % of multi-country selected names",
@@ -1376,8 +1640,8 @@ def _print_summary(metadata: dict[str, Any]) -> None:
         f"{divergence['different_priority_groups']:,}",
     )
     divergence_table.add_row(
-        "Different derived priority groups % of mode-3",
-        _fmt_pct(divergence["different_priority_groups_pct_of_mode3"]),
+        "Different derived priority groups % of mode-0",
+        _fmt_pct(divergence["different_priority_groups_pct_of_mode0"]),
     )
     divergence_table.add_row(
         "Different derived priority groups % of multi-country selected names",
@@ -1458,7 +1722,7 @@ def _print_summary(metadata: dict[str, Any]) -> None:
     console.print(four_plus_countries_table)
 
     audit_table = Table(
-        title="Label Coverage / Consistency Audit (Mode-3 Selected Names)",
+        title="Label Coverage / Consistency Audit (Mode-0 Selected Names)",
         box=box.SIMPLE,
     )
     audit_table.add_column("Metric", style="cyan")
@@ -1530,12 +1794,12 @@ def run_detour(
 
     try:
         conn = duckdb.connect(str(config.db_file), read_only=True)
-        metadata = _build_mode3_econ_metadata(config, conn)
+        metadata = _build_mode0_econ_metadata(config, conn)
         _print_summary(metadata)
         result = DetourResult(
             success=True,
             steps_completed=[],
-            summary="Computed read-only mode-3 economy stats from persisted tables.",
+            summary="Computed read-only mode-0 economy stats from persisted tables.",
             metadata=metadata,
         )
     except Exception as exc:
@@ -1560,7 +1824,7 @@ def run_detour(
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Read-only detour that reconstructs mode-3 selection from persisted tables "
+            "Read-only detour that analyzes mode-0 rows from persisted tables "
             "and prints income-group / priority-group stats."
         )
     )

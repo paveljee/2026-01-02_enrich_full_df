@@ -9,9 +9,10 @@ import sys
 from pathlib import Path
 
 import duckdb
+import pandas as pd
 import pytest
 
-from src.detours.detour_mode3_econ_stats import (
+from src.detours.detour_mode0_econ_stats import (
     DETOUR_STEPS,
     MISSING_BREAKDOWN_LABEL,
     _is_exact_xlsx_match_payload,
@@ -19,7 +20,9 @@ from src.detours.detour_mode3_econ_stats import (
     run_detour,
 )
 from src.helpers.config import PipelineConfig
+from src.helpers.data_models import FragmentType, ResourceGroup
 from src.helpers.jsonlines import dumps_jsonlines
+from src.helpers.resources import register_resource
 from src.helpers.schema import OUTERDICT_STUB_TABLE, PARQUET_INNERDICT_TABLE, XLSX_INNERDICT_TABLE
 from src.helpers.vars import (
     HCR_XLSX_KEY_PREFIX,
@@ -41,6 +44,7 @@ from src.helpers.vars import (
     KTP_XLSX_MATCH_SOURCE_KEY_TOKENS_KEY,
     OGHIST_INCOME_LABELS,
     REQUIRED_FILES_CONFIG_KEYS,
+    WORLD_BANK_XLSX_KEY,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -80,7 +84,39 @@ def _non_exact_xlsx_payload(
     )
 
 
-def _minimal_config_dict(db_path: Path) -> dict[str, object]:
+def _write_world_bank_fixture(path: Path) -> str:
+    rows = [
+        [None, "Bank's fiscal year:", "FY24", "FY25"],
+        [None, "Data for calendar year :", "2022", "2023"],
+        [None, "Low income (L)", "<= 1135", "<= 1145"],
+        [None, "Lower middle income (LM)", "1136-4465", "1146-4515"],
+        [None, "Upper middle income (UM)", "4466-13845", "4516-14005"],
+        [None, "High income (H)", "> 13845", "> 14005"],
+        ["USA", "United States", "H", "H"],
+        ["FRA", "France", "H", "H"],
+        ["IND", "India", "LM", "LM"],
+        ["NPL", "Nepal", "L", "L"],
+        ["CHN", "China", "UM", "UM"],
+        ["BRA", "Brazil", "UM", "UM"],
+        ["AFG", "Afghanistan", "L", "L"],
+    ]
+    df = pd.DataFrame(rows)
+    with pd.ExcelWriter(path, engine="openpyxl") as writer:
+        df.to_excel(writer, sheet_name="Country Analytical History", header=False, index=False)
+    resource = register_resource(
+        path,
+        group=ResourceGroup.KTP_MANUAL_EXTRACTIONS,
+        fragment_type=FragmentType.EXCEL_ROW,
+        description="World Bank country list fixture",
+    )
+    return resource.hash
+
+
+def _minimal_config_dict(
+    db_path: Path,
+    world_bank_path: Path,
+    world_bank_hash: str,
+) -> dict[str, object]:
     files_config: dict[str, dict[str, str]] = {}
     for key in sorted(REQUIRED_FILES_CONFIG_KEYS):
         files_config[key] = {
@@ -88,6 +124,11 @@ def _minimal_config_dict(db_path: Path) -> dict[str, object]:
             "sha256": "0" * 64,
             "desc": f"placeholder {key}",
         }
+    files_config[WORLD_BANK_XLSX_KEY] = {
+        "path": str(world_bank_path),
+        "sha256": world_bank_hash,
+        "desc": "World Bank country list fixture",
+    }
     files_config[f"{HCR_XLSX_KEY_PREFIX}2024"] = {
         "path": "/placeholder/2024_HCR.xlsx",
         "sha256": "1" * 64,
@@ -106,15 +147,25 @@ def _minimal_config_dict(db_path: Path) -> dict[str, object]:
         "sample_draw_sizes": [1],
         "pilot_xlsx_name": "2024_HCR.xlsx",
         "total_draws": 1,
-        "card_subset_mode": 3,
+        "card_subset_mode": 0,
     }
 
 
 def _build_fixture_db(path: Path) -> dict[str, int]:
     con = duckdb.connect(str(path))
     try:
-        con.execute("CREATE TABLE population_with_names_economy (id INTEGER)")
-        con.execute("INSERT INTO population_with_names_economy SELECT * FROM range(0, 100)")
+        con.execute(
+            f"""
+            CREATE TABLE population_with_names_economy (
+                id INTEGER,
+                "{KTP_ECONOMIES_COL}" VARCHAR
+            )
+            """
+        )
+        con.executemany(
+            f'INSERT INTO population_with_names_economy (id, "{KTP_ECONOMIES_COL}") VALUES (?, ?)',
+            [(idx, "[]") for idx in range(100)],
+        )
 
         con.execute(
             f"""
@@ -209,6 +260,8 @@ def _build_fixture_db(path: Path) -> dict[str, int]:
                 ("India", "India", lower_middle),
                 ("Nepal", "Nepal", low),
                 ("China", "China", upper_middle),
+                ("Brazil", "Brazil", upper_middle),
+                ("Afghanistan", "Afghanistan", low),
             ],
         )
 
@@ -452,6 +505,23 @@ def _build_fixture_db(path: Path) -> dict[str, int]:
             ),
         ]
         con.executemany(f"INSERT INTO {XLSX_INNERDICT_TABLE} VALUES (?, ?)", xlsx_rows)
+        population_country_rows = [
+            (20, json.dumps(["France"])),
+            (30, json.dumps(["India"])),
+            (31, json.dumps(["Nepal"])),
+            (40, json.dumps(["United States"])),
+            (41, json.dumps(["France"])),
+            (50, json.dumps(["United States", "France", "India"])),
+            (60, json.dumps(["China", "United States", "France", "India", "Nepal"])),
+            (61, json.dumps(["France"])),
+            (62, json.dumps(["France"])),
+            (63, json.dumps(["France"])),
+            (64, json.dumps(["France"])),
+        ]
+        con.executemany(
+            f'UPDATE population_with_names_economy SET "{KTP_ECONOMIES_COL}" = ? WHERE id = ?',
+            [(countries, idx) for idx, countries in population_country_rows],
+        )
 
         ssn_rows = [
             (keys["sel_zero"],),
@@ -475,10 +545,10 @@ def _build_fixture_db(path: Path) -> dict[str, int]:
             "outerdict_rows": len(keys),
             "xlsx_innerdict_rows": len(xlsx_rows),
             "ssn_innerdict_rows": len(ssn_rows),
-            "mode3_selected_population_rows": 8,
-            "selected_population_rows_with_countries": 7,
-            "selected_population_rows_with_income_group": 7,
-            "selected_population_rows_with_priority_group": 8,
+            "mode0_selected_population_rows": 12,
+            "selected_population_rows_with_countries": 11,
+            "selected_population_rows_with_income_group": 11,
+            "selected_population_rows_with_priority_group": 12,
         }
     finally:
         con.close()
@@ -487,16 +557,18 @@ def _build_fixture_db(path: Path) -> dict[str, int]:
 @pytest.fixture()
 def detour_fixture(tmp_path: Path) -> tuple[Path, Path, dict[str, int]]:
     db_path = tmp_path / "fixture.duckdb"
+    world_bank_path = tmp_path / "OGHIST_2025_07_01.xlsx"
+    world_bank_hash = _write_world_bank_fixture(world_bank_path)
     counts = _build_fixture_db(db_path)
-    cfg_path = tmp_path / "config.detour_mode3_econ.json"
+    cfg_path = tmp_path / "config.detour_mode0_econ.json"
     cfg_path.write_text(
-        json.dumps(_minimal_config_dict(db_path), indent=2),
+        json.dumps(_minimal_config_dict(db_path, world_bank_path, world_bank_hash), indent=2),
         encoding="utf-8",
     )
     return cfg_path, db_path, counts
 
 
-def test_detour_contract_and_mode3_econ_stats_readonly(
+def test_detour_contract_and_mode0_econ_stats_readonly(
     detour_fixture: tuple[Path, Path, dict[str, int]],
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -524,8 +596,12 @@ def test_detour_contract_and_mode3_econ_stats_readonly(
 
     assert result.success is True
     assert result.steps_completed == DETOUR_STEPS == []
-    assert "Mode-3 Economy Stats Detour" in plain
+    assert "Mode-0 Economy Stats Detour" in plain
     assert "Priority-Group Definitions" in plain
+    assert "Country Coverage Scope" in plain
+    assert "Country Coverage by Economy Category" in plain
+    assert "Country Coverage by Priority Category" in plain
+    assert "Uncovered countries SVG" in plain
     assert "Income-Group Breakdown" in plain
     assert "Priority-Group Breakdown" in plain
     assert "Multi-Country Divergence" in plain
@@ -543,25 +619,28 @@ def test_detour_contract_and_mode3_econ_stats_readonly(
     assert KTP_PRIORITY_GROUP_LABELS[1] in plain
 
     md = result.metadata
-    assert md["detour_id"] == "mode3-econ-stats"
-    assert md["mode"] == 3
+    assert md["detour_id"] == "mode0-econ-stats"
+    assert md["mode"] == 0
     assert md["tables_used"] == [
         OUTERDICT_STUB_TABLE,
         XLSX_INNERDICT_TABLE,
-        PARQUET_INNERDICT_TABLE,
     ]
+    assert md["world_bank_country_resource"]["resource_name"] == "OGHIST_2025_07_01.xlsx"
+    assert md["world_bank_country_resource"]["resource_hash"]
+    assert md["country_coverage_map_svg"] == "tmp/mode0_econ_stats_not_covered_countries.svg"
+    assert Path(md["country_coverage_map_svg"]).is_file()
 
     counts = md["counts"]
     assert counts["population_rows"] == baseline_counts["population_rows"]
     assert counts["outerdict_keys"] == baseline_counts["outerdict_rows"]
-    assert counts["mode3_selected_names"] == 6
-    assert counts["mode3_selected_population_rows"] == baseline_counts[
-        "mode3_selected_population_rows"
+    assert counts["mode0_selected_names"] == baseline_counts["outerdict_rows"]
+    assert counts["mode0_selected_population_rows"] == baseline_counts[
+        "mode0_selected_population_rows"
     ]
-    assert counts["mode3_selected_pct_of_population_rows"] == pytest.approx(8.0)
-    assert counts["selected_names_with_countries"] == 5
-    assert counts["selected_names_with_income_group"] == 5
-    assert counts["selected_names_with_priority_group"] == 6
+    assert counts["mode0_selected_pct_of_population_rows"] == pytest.approx(12.0)
+    assert counts["selected_names_with_countries"] == 9
+    assert counts["selected_names_with_income_group"] == 9
+    assert counts["selected_names_with_priority_group"] == 10
     assert counts["selected_population_rows_with_countries"] == baseline_counts[
         "selected_population_rows_with_countries"
     ]
@@ -572,33 +651,76 @@ def test_detour_contract_and_mode3_econ_stats_readonly(
         "selected_population_rows_with_priority_group"
     ]
 
-    rules = md["rule_counts"]
-    assert rules["sciscinet_exactly_one_pass"] == 8
-    assert rules["sciscinet_exactly_one_fail"] == 2
-    assert rules["xlsx_exact_pass"] == 8
-    assert rules["xlsx_exact_fail"] == 2
+    country_coverage = md["country_coverage"]
+    assert country_coverage["total_countries"] == 7
+    assert country_coverage["covered_countries"] == 5
+    assert country_coverage["not_covered_countries"] == 2
+    assert country_coverage["covered_pct_of_total_countries"] == pytest.approx(5 / 7 * 100.0)
+    assert country_coverage["not_covered_pct_of_total_countries"] == pytest.approx(
+        2 / 7 * 100.0
+    )
+    assert country_coverage["covered_country_names"] == [
+        "China",
+        "France",
+        "India",
+        "Nepal",
+        "United States",
+    ]
+    assert country_coverage["not_covered_country_names"] == ["Afghanistan", "Brazil"]
+    assert country_coverage["not_covered_country_codes"] == ["AFG", "BRA"]
+
+    country_income_breakdown = {
+        row["label"]: row for row in country_coverage["income_group_breakdown"]
+    }
+    assert country_income_breakdown[OGHIST_INCOME_LABELS["H"]]["total_countries"] == 2
+    assert country_income_breakdown[OGHIST_INCOME_LABELS["UM"]]["total_countries"] == 2
+    assert country_income_breakdown[OGHIST_INCOME_LABELS["LM"]]["total_countries"] == 1
+    assert country_income_breakdown[OGHIST_INCOME_LABELS["L"]]["total_countries"] == 2
+    assert country_income_breakdown[OGHIST_INCOME_LABELS["H"]]["covered_countries"] == 2
+    assert country_income_breakdown[OGHIST_INCOME_LABELS["UM"]]["covered_countries"] == 1
+    assert country_income_breakdown[OGHIST_INCOME_LABELS["LM"]]["covered_countries"] == 1
+    assert country_income_breakdown[OGHIST_INCOME_LABELS["L"]]["covered_countries"] == 1
+    assert country_income_breakdown[OGHIST_INCOME_LABELS["UM"]]["not_covered_countries"] == 1
+    assert country_income_breakdown[OGHIST_INCOME_LABELS["L"]]["not_covered_countries"] == 1
+
+    country_priority_breakdown = {
+        row["label"]: row for row in country_coverage["priority_group_breakdown"]
+    }
+    assert country_priority_breakdown[KTP_PRIORITY_GROUP_LABELS[2]]["total_countries"] == 1
+    assert country_priority_breakdown[KTP_PRIORITY_GROUP_LABELS[3]]["total_countries"] == 0
+    assert country_priority_breakdown[KTP_PRIORITY_GROUP_LABELS[4]]["total_countries"] == 1
+    assert country_priority_breakdown[KTP_PRIORITY_GROUP_LABELS[5]]["total_countries"] == 1
+    assert country_priority_breakdown[KTP_PRIORITY_GROUP_LABELS[1]]["total_countries"] == 4
+    assert country_priority_breakdown[KTP_PRIORITY_GROUP_LABELS[2]]["covered_countries"] == 1
+    assert country_priority_breakdown[KTP_PRIORITY_GROUP_LABELS[4]]["covered_countries"] == 1
+    assert country_priority_breakdown[KTP_PRIORITY_GROUP_LABELS[5]]["covered_countries"] == 1
+    assert country_priority_breakdown[KTP_PRIORITY_GROUP_LABELS[1]]["covered_countries"] == 2
+    assert country_priority_breakdown[KTP_PRIORITY_GROUP_LABELS[1]][
+        "not_covered_countries"
+    ] == 2
 
     buckets = md["country_cardinality_buckets"]
     assert buckets["exact_0"] == 1
-    assert buckets["exact_1"] == 1
+    assert buckets["exact_1"] == 5
     assert buckets["exact_2"] == 2
     assert buckets["exact_3"] == 1
     assert buckets["exact_4_or_more"] == 1
 
     dist = md["country_cardinality_distribution"]
-    assert dist["n"] == 6
-    assert dist["mean"] == pytest.approx(13 / 6, rel=0, abs=1e-12)
-    assert dist["median"] == pytest.approx(2.0, rel=0, abs=1e-12)
-    assert dist["q1"] == pytest.approx(1.25, rel=0, abs=1e-12)
-    assert dist["q3"] == pytest.approx(2.75, rel=0, abs=1e-12)
+    assert dist["n"] == 10
+    assert dist["mean"] == pytest.approx(1.7, rel=0, abs=1e-12)
+    assert dist["median"] == pytest.approx(1.0, rel=0, abs=1e-12)
+    assert dist["q1"] == pytest.approx(1.0, rel=0, abs=1e-12)
+    assert dist["q3"] == pytest.approx(2.0, rel=0, abs=1e-12)
     assert dist["min"] == pytest.approx(0.0, rel=0, abs=1e-12)
     assert dist["max"] == pytest.approx(5.0, rel=0, abs=1e-12)
 
     outliers = md["country_cardinality_outliers_tukey"]
-    assert outliers["total_outliers"] == 0
+    assert outliers["upper_outliers"] == 1
+    assert outliers["total_outliers"] == 1
 
     income_breakdown = {row["income_group"]: row for row in md["income_group_breakdown"]}
-    assert income_breakdown[OGHIST_INCOME_LABELS["H"]]["selected_population_rows"] == 5
+    assert income_breakdown[OGHIST_INCOME_LABELS["H"]]["selected_population_rows"] == 9
     assert income_breakdown[OGHIST_INCOME_LABELS["LM"]]["selected_population_rows"] == 1
     assert income_breakdown[OGHIST_INCOME_LABELS["L"]]["selected_population_rows"] == 1
     assert income_breakdown[OGHIST_INCOME_LABELS["UM"]]["selected_population_rows"] == 0
@@ -607,7 +729,7 @@ def test_detour_contract_and_mode3_econ_stats_readonly(
     lower_tier_breakdown = {
         row["income_group"]: row for row in md["income_group_breakdown_lower_tier_preferred"]
     }
-    assert lower_tier_breakdown[OGHIST_INCOME_LABELS["H"]]["selected_population_rows"] == 3
+    assert lower_tier_breakdown[OGHIST_INCOME_LABELS["H"]]["selected_population_rows"] == 7
     assert lower_tier_breakdown[OGHIST_INCOME_LABELS["UM"]]["selected_population_rows"] == 0
     assert lower_tier_breakdown[OGHIST_INCOME_LABELS["LM"]]["selected_population_rows"] == 2
     assert lower_tier_breakdown[OGHIST_INCOME_LABELS["L"]]["selected_population_rows"] == 2
@@ -617,7 +739,7 @@ def test_detour_contract_and_mode3_econ_stats_readonly(
     assert priority_breakdown[KTP_PRIORITY_GROUP_LABELS[1]]["selected_population_rows"] == 3
     assert priority_breakdown[KTP_PRIORITY_GROUP_LABELS[2]]["selected_population_rows"] == 1
     assert priority_breakdown[KTP_PRIORITY_GROUP_LABELS[3]]["selected_population_rows"] == 0
-    assert priority_breakdown[KTP_PRIORITY_GROUP_LABELS[4]]["selected_population_rows"] == 3
+    assert priority_breakdown[KTP_PRIORITY_GROUP_LABELS[4]]["selected_population_rows"] == 7
     assert priority_breakdown[KTP_PRIORITY_GROUP_LABELS[5]]["selected_population_rows"] == 1
     assert priority_breakdown[MISSING_BREAKDOWN_LABEL]["selected_population_rows"] == 0
 
@@ -625,13 +747,13 @@ def test_detour_contract_and_mode3_econ_stats_readonly(
         (row["group_type"], row["label"]): row
         for row in md["derived_name_group_breakdown_higher_preferred"]
     }
-    assert derived_higher[("Income group", OGHIST_INCOME_LABELS["H"])]["selected_names"] == 4
+    assert derived_higher[("Income group", OGHIST_INCOME_LABELS["H"])]["selected_names"] == 8
     assert derived_higher[("Income group", OGHIST_INCOME_LABELS["UM"])]["selected_names"] == 0
     assert derived_higher[("Income group", OGHIST_INCOME_LABELS["LM"])]["selected_names"] == 1
     assert derived_higher[("Income group", OGHIST_INCOME_LABELS["L"])]["selected_names"] == 0
     assert derived_higher[("Income group", MISSING_BREAKDOWN_LABEL)]["selected_names"] == 1
     assert (
-        derived_higher[("Priority group", KTP_PRIORITY_GROUP_LABELS[4])]["selected_names"] == 3
+        derived_higher[("Priority group", KTP_PRIORITY_GROUP_LABELS[4])]["selected_names"] == 7
     )
     assert (
         derived_higher[("Priority group", KTP_PRIORITY_GROUP_LABELS[2])]["selected_names"] == 1
@@ -651,7 +773,7 @@ def test_detour_contract_and_mode3_econ_stats_readonly(
         (row["group_type"], row["label"]): row
         for row in md["derived_name_group_breakdown_lower_preferred"]
     }
-    assert derived_lower[("Income group", OGHIST_INCOME_LABELS["H"])]["selected_names"] == 2
+    assert derived_lower[("Income group", OGHIST_INCOME_LABELS["H"])]["selected_names"] == 6
     assert derived_lower[("Income group", OGHIST_INCOME_LABELS["UM"])]["selected_names"] == 0
     assert derived_lower[("Income group", OGHIST_INCOME_LABELS["LM"])]["selected_names"] == 1
     assert derived_lower[("Income group", OGHIST_INCOME_LABELS["L"])]["selected_names"] == 2
@@ -663,7 +785,7 @@ def test_detour_contract_and_mode3_econ_stats_readonly(
         derived_lower[("Priority group", KTP_PRIORITY_GROUP_LABELS[5])]["selected_names"] == 1
     )
     assert (
-        derived_lower[("Priority group", KTP_PRIORITY_GROUP_LABELS[4])]["selected_names"] == 1
+        derived_lower[("Priority group", KTP_PRIORITY_GROUP_LABELS[4])]["selected_names"] == 5
     )
     assert (
         derived_lower[("Priority group", KTP_PRIORITY_GROUP_LABELS[3])]["selected_names"] == 0
@@ -677,16 +799,16 @@ def test_detour_contract_and_mode3_econ_stats_readonly(
     assert divergence["multi_country_names"] == 4
     assert divergence["different_income_groups"] == 3
     assert divergence["different_priority_groups"] == 3
-    assert divergence["multi_country_pct_of_mode3"] == pytest.approx(4 / 6 * 100.0)
+    assert divergence["multi_country_pct_of_mode0"] == pytest.approx(40.0)
     assert divergence["different_income_groups_pct_of_multi_country"] == pytest.approx(75.0)
     assert divergence["different_priority_groups_pct_of_multi_country"] == pytest.approx(75.0)
 
     audit = md["label_coverage_consistency_audit"]
     assert audit["selected_names_without_income_group"] == 1
     assert audit["selected_names_without_priority_group"] == 0
-    assert audit["selected_names_with_exactly_one_row_income_group"] == 4
+    assert audit["selected_names_with_exactly_one_row_income_group"] == 8
     assert audit["selected_names_with_multiple_row_income_groups"] == 1
-    assert audit["selected_names_with_exactly_one_row_priority_group"] == 5
+    assert audit["selected_names_with_exactly_one_row_priority_group"] == 9
     assert audit["selected_names_with_multiple_row_priority_groups"] == 1
     assert audit["selected_rows_missing_income_group"] == 1
     assert audit["selected_rows_missing_priority_group"] == 0
@@ -719,7 +841,7 @@ def test_detour_module_entrypoint(detour_fixture: tuple[Path, Path, dict[str, in
     cmd = [
         sys.executable,
         "-m",
-        "src.detours.detour_mode3_econ_stats",
+        "src.detours.detour_mode0_econ_stats",
         "--config",
         str(config_path),
     ]
@@ -741,14 +863,14 @@ def test_detour_module_entrypoint(detour_fixture: tuple[Path, Path, dict[str, in
     )
     assert completed.returncode == 0, completed.stderr
     plain = _strip_ansi(completed.stdout)
-    assert "Mode-3 Economy Stats Detour" in plain
+    assert "Mode-0 Economy Stats Detour" in plain
     assert "Priority-Group Definitions" in plain
-    assert "Mode-3 selected names" in plain
+    assert "Mode-0 selected names" in plain
     assert "Execution Metrics" in plain
 
 
 def test_detour_import_isolation() -> None:
-    module_path = REPO_ROOT / "src" / "detours" / "detour_mode3_econ_stats.py"
+    module_path = REPO_ROOT / "src" / "detours" / "detour_mode0_econ_stats.py"
     tree = ast.parse(module_path.read_text(encoding="utf-8"))
 
     imported_modules: set[str] = set()
@@ -764,7 +886,7 @@ def test_detour_import_isolation() -> None:
     assert "src.helpers.init" not in imported_modules
     assert "src.helpers.repl_runtime" not in imported_modules
     assert all(
-        not name.startswith("src.detours.") or name == "src.detours.detour_mode3_econ_stats"
+        not name.startswith("src.detours.") or name == "src.detours.detour_mode0_econ_stats"
         for name in imported_modules
     )
 
