@@ -40,6 +40,7 @@ from ..helpers.vars import (
     KTP_PRIORITY_GROUP_LABELS,
     OGHIST_INCOME_LABELS,
     STEP_ADD_ECONOMY_PRIORITY,
+    WORLD_BANK_INCOME_FISCAL_YEAR,
 )
 
 
@@ -62,13 +63,15 @@ def _load_income_labels(
             break
     if fy_row is None:
         raise ValueError("Unable to locate FY column in World Bank history sheet.")
-    fy_cols = [
-        col_idx for col_idx, value in fy_row.items()
-        if isinstance(value, str) and value.startswith("FY")
-    ]
-    if not fy_cols:
-        raise ValueError("Unable to locate fiscal year columns in World Bank history sheet.")
-    fy_col = fy_cols[-1]
+    fy_col = None
+    for col_idx, value in fy_row.items():
+        if isinstance(value, str) and value.strip() == WORLD_BANK_INCOME_FISCAL_YEAR:
+            fy_col = col_idx
+            break
+    if fy_col is None:
+        raise ValueError(
+            f"Unable to locate {WORLD_BANK_INCOME_FISCAL_YEAR} column in World Bank history sheet."
+        )
     codes = df[fy_col].astype(str).str.strip()
     countries = df[1].astype(str).str.strip()
     mapping: dict[str, str] = {}

@@ -21,27 +21,44 @@ from src.helpers.data_models import FragmentType, ResourceGroup
 from src.helpers.jsonlines import loads_jsonlines
 from src.helpers.resource_monitor import ResourceMonitor
 from src.helpers.resources import register_resource
-from src.helpers.schema import OUTERDICT_STUB_TABLE, XLSX_INNERDICT_TABLE
+from src.helpers.schema import (
+    OUTERDICT_STUB_TABLE,
+    PARQUET_INNERDICT_TABLE,
+    PARQUET_OUTPUT_VIEW,
+    POPULATION_ECON_VIEW,
+    XLSX_INNERDICT_TABLE,
+)
 from src.helpers.vars import (
     CARD_BUILD_SUBSET_DESCRIPTIONS,
     ENGLISH_HICS,
     EU_COUNTRIES,
     GREATER_CHINA,
+    HCR_CATEGORY_COL,
+    HCR_FILENAME_COL,
+    HCR_ROW_COL,
+    HCR_XLSX_NAME_COLS,
     KTP_ECONOMIES_COL,
     KTP_ECONOMIES_INCOME_GROUP_COL,
+    KTP_ECONOMIES_ISO_COL,
+    KTP_ECONOMY_MATCH_COL,
     KTP_FILENAME_COL,
     KTP_FIRST_NAME_COL,
     KTP_FRAGMENT_COL,
     KTP_HCR_PRIMARY_AFFILIATIONS_COL,
     KTP_HCR_SECONDARY_AFFILIATIONS_COL,
     KTP_LAST_NAME_COL,
+    KTP_POPULATION_INDEX_COL,
+    KTP_PRIORITY_COL,
     KTP_PRIORITY_GROUP_COL,
     KTP_PRIORITY_GROUP_LABELS,
+    KTP_SOURCE_KEY_COL,
     KTP_XLSX_MATCH_FIRST_TOKENS_KEY,
     KTP_XLSX_MATCH_LAST_NAME_NORM_KEY,
     KTP_XLSX_MATCH_SOURCE_KEY_LAST_KEY,
     KTP_XLSX_MATCH_SOURCE_KEY_TOKENS_KEY,
     OGHIST_INCOME_LABELS,
+    WORLD_BANK_FORMER_ECONOMY_CODES,
+    WORLD_BANK_INCOME_FISCAL_YEAR,
     WORLD_BANK_XLSX_KEY,
 )
 
@@ -57,7 +74,10 @@ DETOUR_STEPS: list[str] = []
 
 MODE = 0
 UNCOVERED_COUNTRIES_SVG_PATH = Path("tmp") / "mode0_econ_stats_not_covered_countries.svg"
-UNCOVERED_COLOUR = "#2a6fdb"
+POPULATION_WITH_ECONOMY_PARQUET_CSV_PATH = (
+    Path("tmp") / "mode0_econ_stats_population_with_economy_and_parquet.csv"
+)
+UNCOVERED_COLOUR = "#DA7842"
 
 PRIORITY_GROUP_PRECEDENCE = [
     KTP_PRIORITY_GROUP_LABELS[2],
@@ -231,6 +251,26 @@ def _normalize_country_list(value: object) -> list[str]:
 
     normalized = sorted({str(item).strip() for item in items if str(item).strip()})
     return normalized
+
+
+def _json_country_list(values: list[str]) -> str:
+    return json.dumps(values)
+
+
+def _iso_codes_for_countries(
+    countries: list[str] | set[str],
+    country_to_iso: dict[str, str],
+) -> list[str]:
+    return [
+        iso_code
+        for country in sorted(set(countries))
+        if (iso_code := country_to_iso.get(country)) is not None
+    ]
+
+
+def _iso_country_list_json(value: object, country_to_iso: dict[str, str]) -> str:
+    countries = _normalize_country_list(value)
+    return _json_country_list(_iso_codes_for_countries(countries, country_to_iso))
 
 
 def _normalize_optional_label(value: object) -> str | None:
@@ -473,22 +513,36 @@ def _load_world_bank_country_rows(
             break
     if fy_row is None:
         raise ValueError("Unable to locate FY column in World Bank history sheet.")
-    fy_cols = [
-        col_idx
-        for col_idx, value in fy_row.items()
-        if isinstance(value, str) and value.startswith("FY")
-    ]
-    if not fy_cols:
-        raise ValueError("Unable to locate fiscal year columns in World Bank history sheet.")
-    fy_col = fy_cols[-1]
-    fiscal_year = str(fy_row[fy_col]).strip()
+    fy_col = None
+    for col_idx, value in fy_row.items():
+        if isinstance(value, str) and value.strip() == WORLD_BANK_INCOME_FISCAL_YEAR:
+            fy_col = col_idx
+            break
+    if fy_col is None:
+        raise ValueError(
+            f"Unable to locate {WORLD_BANK_INCOME_FISCAL_YEAR} column in World Bank history sheet."
+        )
+    fiscal_year = WORLD_BANK_INCOME_FISCAL_YEAR
 
     rows: list[dict[str, Any]] = []
+    excluded_former_economies: list[dict[str, str]] = []
+    missing_income_group_countries: list[dict[str, str]] = []
     seen_codes: set[str] = set()
     for _, row in df.iterrows():
-        country_code = _normalize_iso3_code(row.get(0))
+        raw_country_code = _normalize_optional_label(row.get(0))
         country = _normalize_optional_label(row.get(1))
-        if country_code is None or country is None or country_code in seen_codes:
+        if raw_country_code is None or country is None:
+            continue
+        if raw_country_code in WORLD_BANK_FORMER_ECONOMY_CODES or "(former)" in country.lower():
+            excluded_former_economies.append(
+                {
+                    "country_code": raw_country_code,
+                    "country": country,
+                }
+            )
+            continue
+        country_code = _normalize_iso3_code(raw_country_code)
+        if country_code is None or country_code in seen_codes:
             continue
         income_code = _normalize_optional_label(row.get(fy_col))
         income_group = (
@@ -496,6 +550,13 @@ def _load_world_bank_country_rows(
             if income_code is not None
             else None
         )
+        if income_group is None:
+            missing_income_group_countries.append(
+                {
+                    "country_code": country_code,
+                    "country": country,
+                }
+            )
         priority_group = _priority_group_for_country(country, priority_sets)
         rows.append(
             {
@@ -516,6 +577,8 @@ def _load_world_bank_country_rows(
         "income_group_fiscal_year": fiscal_year,
         "country_code_column": 0,
         "country_name_column": 1,
+        "excluded_former_economies": excluded_former_economies,
+        "missing_income_group_countries": missing_income_group_countries,
     }
     return rows, metadata
 
@@ -587,7 +650,23 @@ def _country_coverage_rows(
     return enriched_rows, coverage
 
 
-def _write_uncovered_countries_svg(country_rows: list[dict[str, Any]], output_path: Path) -> None:
+def _uncovered_country_rows(country_rows: list[dict[str, Any]]) -> list[dict[str, str]]:
+    rows = [
+        {
+            "country_code": str(row["country_code"]),
+            "country": str(row["country"]),
+            "coverage": "Not covered",
+        }
+        for row in country_rows
+        if not row["covered"]
+    ]
+    return sorted(rows, key=lambda row: (row["country_code"], row["country"]))
+
+
+def _write_uncovered_countries_svg(
+    uncovered_country_rows: list[dict[str, str]],
+    output_path: Path,
+) -> None:
     try:
         import plotly.express as px
     except ImportError as exc:
@@ -598,16 +677,10 @@ def _write_uncovered_countries_svg(country_rows: list[dict[str, Any]], output_pa
         ) from exc
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    rows = [
-        {
-            "country_code": row["country_code"],
-            "country": row["country"],
-            "coverage": "Not covered",
-        }
-        for row in country_rows
-        if not row["covered"]
-    ]
-    df = pd.DataFrame(rows, columns=["country_code", "country", "coverage"])
+    df = pd.DataFrame(
+        uncovered_country_rows,
+        columns=["country_code", "country", "coverage"],
+    )
     fig = px.choropleth(
         df,
         locations="country_code",
@@ -633,6 +706,244 @@ def _write_uncovered_countries_svg(country_rows: list[dict[str, Any]], output_pa
         showlegend=False,
     )
     fig.write_image(str(output_path), format="svg", width=1200, height=650)
+
+
+def _step4_population_with_economy_columns(
+    conn: duckdb.DuckDBPyConnection,
+) -> list[str]:
+    view_columns = [
+        row[0]
+        for row in conn.execute(f"DESCRIBE {POPULATION_ECON_VIEW}").fetchall()
+        if "unnamed" not in row[0].lower()
+        and row[0] != f"{KTP_POPULATION_INDEX_COL}_1"
+    ]
+    if not view_columns:
+        return []
+
+    hcr_cols = [col for col in view_columns if col.startswith("hcr.")]
+    explicit_name_cols: set[str] = set()
+    for _, (first_col, last_col) in HCR_XLSX_NAME_COLS.items():
+        explicit_name_cols.update({first_col, last_col})
+    if not explicit_name_cols:
+        explicit_name_cols = {
+            col
+            for col in hcr_cols
+            if ("first" in col.lower() and "name" in col.lower())
+            or ("last" in col.lower() and "name" in col.lower())
+            or "firstname" in col.lower()
+            or "lastname" in col.lower()
+            or "familyname" in col.lower()
+        }
+    hcr_cols = [
+        col
+        for col in hcr_cols
+        if col not in explicit_name_cols and "unnamed" not in col.lower()
+    ]
+    ordered_hcr: list[str] = []
+    for col in (HCR_FILENAME_COL, HCR_ROW_COL, HCR_CATEGORY_COL):
+        if col in hcr_cols:
+            ordered_hcr.append(col)
+    ordered_hcr += [col for col in hcr_cols if col not in ordered_hcr]
+
+    ordered_cols = (
+        [
+            KTP_POPULATION_INDEX_COL,
+            HCR_FILENAME_COL,
+            HCR_ROW_COL,
+            KTP_FIRST_NAME_COL,
+            KTP_LAST_NAME_COL,
+            HCR_CATEGORY_COL,
+        ]
+        + [
+            col
+            for col in ordered_hcr
+            if col not in {HCR_FILENAME_COL, HCR_ROW_COL, HCR_CATEGORY_COL}
+        ]
+        + [
+            KTP_HCR_PRIMARY_AFFILIATIONS_COL,
+            KTP_HCR_SECONDARY_AFFILIATIONS_COL,
+            KTP_ECONOMIES_COL,
+            KTP_ECONOMIES_INCOME_GROUP_COL,
+            KTP_ECONOMY_MATCH_COL,
+            KTP_PRIORITY_COL,
+            KTP_PRIORITY_GROUP_COL,
+        ]
+    )
+    extra_cols = [
+        col
+        for col in view_columns
+        if not col.startswith("hcr.") and col not in ordered_cols
+    ]
+    ordered_cols += extra_cols
+    return [col for col in ordered_cols if col in view_columns]
+
+
+def _xlsx_match_bridge_df(
+    xlsx_rows_by_key: dict[str, list[dict[str, object]]],
+) -> pd.DataFrame:
+    rows: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for source_key, inner_rows in xlsx_rows_by_key.items():
+        for inner in inner_rows:
+            filename = _normalize_optional_label(inner.get(KTP_FILENAME_COL))
+            fragment = _normalize_optional_label(inner.get(KTP_FRAGMENT_COL))
+            if filename is None or fragment is None:
+                continue
+            dedupe_key = (source_key, filename, fragment)
+            if dedupe_key in seen:
+                continue
+            rows.append(
+                {
+                    KTP_SOURCE_KEY_COL: source_key,
+                    KTP_FILENAME_COL: filename,
+                    KTP_FRAGMENT_COL: fragment,
+                }
+            )
+            seen.add(dedupe_key)
+    return pd.DataFrame(rows, columns=[KTP_SOURCE_KEY_COL, KTP_FILENAME_COL, KTP_FRAGMENT_COL])
+
+
+def _fallback_population_with_economy_rows(
+    xlsx_rows_by_key: dict[str, list[dict[str, object]]],
+) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for source_key, inner_rows in xlsx_rows_by_key.items():
+        for inner in inner_rows:
+            filename = _normalize_optional_label(inner.get(KTP_FILENAME_COL))
+            fragment = _normalize_optional_label(inner.get(KTP_FRAGMENT_COL))
+            if filename is None or fragment is None:
+                continue
+            dedupe_key = (source_key, filename, fragment)
+            if dedupe_key in seen:
+                continue
+            rows.append({KTP_SOURCE_KEY_COL: source_key, **inner})
+            seen.add(dedupe_key)
+    return pd.DataFrame(rows)
+
+
+def _parquet_prefixed_df(
+    conn: duckdb.DuckDBPyConnection,
+) -> tuple[pd.DataFrame, list[str]]:
+    tables = {row[0] for row in conn.execute("SHOW TABLES").fetchall()}
+    source_name = None
+    if PARQUET_OUTPUT_VIEW in tables:
+        source_name = PARQUET_OUTPUT_VIEW
+    elif PARQUET_INNERDICT_TABLE in tables:
+        source_name = PARQUET_INNERDICT_TABLE
+    if source_name is None:
+        return pd.DataFrame(columns=[KTP_SOURCE_KEY_COL]), []
+
+    parquet_df = conn.execute(f"SELECT * FROM {source_name}").df()
+    prefixed_cols = [col for col in parquet_df.columns if col.startswith("ssn")]
+    keep_cols = [col for col in [KTP_SOURCE_KEY_COL, *prefixed_cols] if col in parquet_df.columns]
+    if not keep_cols:
+        return pd.DataFrame(columns=[KTP_SOURCE_KEY_COL]), []
+    return parquet_df[keep_cols].copy(), prefixed_cols
+
+
+def _write_population_with_economy_and_parquet_csv(
+    conn: duckdb.DuckDBPyConnection,
+    *,
+    xlsx_rows_by_key: dict[str, list[dict[str, object]]],
+    country_to_iso: dict[str, str],
+    output_path: Path,
+) -> dict[str, Any]:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    tables = {row[0] for row in conn.execute("SHOW TABLES").fetchall()}
+    base_cols = (
+        _step4_population_with_economy_columns(conn)
+        if POPULATION_ECON_VIEW in tables
+        else []
+    )
+    bridge_df = _xlsx_match_bridge_df(xlsx_rows_by_key)
+
+    if (
+        POPULATION_ECON_VIEW in tables
+        and HCR_FILENAME_COL in base_cols
+        and HCR_ROW_COL in base_cols
+    ):
+        select_cols = ", ".join(f'"{col}"' for col in base_cols)
+        base_df = conn.execute(f"SELECT {select_cols} FROM {POPULATION_ECON_VIEW}").df()
+        if not bridge_df.empty:
+            base_df = base_df.copy()
+            base_df[HCR_FILENAME_COL] = base_df[HCR_FILENAME_COL].map(
+                lambda value: None if pd.isna(value) else str(value)
+            )
+            base_df[HCR_ROW_COL] = base_df[HCR_ROW_COL].map(
+                lambda value: None if pd.isna(value) else str(value)
+            )
+            bridge_df = bridge_df.copy()
+            bridge_df[KTP_FILENAME_COL] = bridge_df[KTP_FILENAME_COL].astype(str)
+            bridge_df[KTP_FRAGMENT_COL] = bridge_df[KTP_FRAGMENT_COL].astype(str)
+            merged_df = base_df.merge(
+                bridge_df,
+                how="left",
+                left_on=[HCR_FILENAME_COL, HCR_ROW_COL],
+                right_on=[KTP_FILENAME_COL, KTP_FRAGMENT_COL],
+            ).drop(columns=[KTP_FILENAME_COL, KTP_FRAGMENT_COL], errors="ignore")
+        else:
+            merged_df = base_df.copy()
+            merged_df[KTP_SOURCE_KEY_COL] = None
+    else:
+        merged_df = _fallback_population_with_economy_rows(xlsx_rows_by_key)
+        if not base_cols:
+            fallback_base_cols = [
+                KTP_FILENAME_COL,
+                KTP_FRAGMENT_COL,
+                KTP_FIRST_NAME_COL,
+                KTP_LAST_NAME_COL,
+                KTP_HCR_PRIMARY_AFFILIATIONS_COL,
+                KTP_HCR_SECONDARY_AFFILIATIONS_COL,
+                KTP_ECONOMIES_COL,
+                KTP_ECONOMIES_INCOME_GROUP_COL,
+                KTP_PRIORITY_GROUP_COL,
+            ]
+            base_cols = [col for col in fallback_base_cols if col in merged_df.columns]
+
+    if KTP_ECONOMIES_COL in merged_df.columns:
+        merged_df[KTP_ECONOMIES_ISO_COL] = merged_df[KTP_ECONOMIES_COL].map(
+            lambda value: _iso_country_list_json(value, country_to_iso)
+        )
+    else:
+        merged_df[KTP_ECONOMIES_ISO_COL] = _json_country_list([])
+
+    parquet_df, parquet_prefixed_cols = _parquet_prefixed_df(conn)
+    if (
+        not parquet_df.empty
+        and KTP_SOURCE_KEY_COL in merged_df.columns
+        and KTP_SOURCE_KEY_COL in parquet_df.columns
+    ):
+        merged_df = merged_df.merge(parquet_df, how="left", on=KTP_SOURCE_KEY_COL)
+
+    final_cols = [col for col in base_cols if col in merged_df.columns]
+    if KTP_ECONOMIES_ISO_COL in merged_df.columns:
+        final_cols.append(KTP_ECONOMIES_ISO_COL)
+    final_cols.extend(
+        [
+            col
+            for col in parquet_prefixed_cols
+            if col in merged_df.columns and col not in final_cols
+        ]
+    )
+    if not final_cols:
+        final_cols = [
+            col
+            for col in merged_df.columns
+            if col != KTP_SOURCE_KEY_COL
+        ]
+
+    final_df = merged_df[final_cols].copy()
+    final_df.to_csv(output_path, index=False)
+    step4_base_columns = [col for col in base_cols if col in final_df.columns]
+    return {
+        "path": str(output_path),
+        "rows": len(final_df),
+        "step4_base_columns": final_cols[: len(step4_base_columns)],
+        "parquet_prefixed_columns": [
+            col for col in parquet_prefixed_cols if col in final_df.columns
+        ],
+    }
 
 
 def _covered_countries_from_population_rows(
@@ -1154,12 +1465,23 @@ def _build_mode0_econ_metadata(
         config,
         priority_sets=priority_sets,
     )
+    country_to_iso = {
+        str(row["country"]): str(row["country_code"])
+        for row in world_bank_country_rows
+    }
     country_rows_with_coverage, country_coverage = _country_coverage_rows(
         country_rows=world_bank_country_rows,
         covered_countries=covered_countries,
         priority_sets=priority_sets,
     )
-    _write_uncovered_countries_svg(country_rows_with_coverage, UNCOVERED_COUNTRIES_SVG_PATH)
+    uncovered_country_rows = _uncovered_country_rows(country_rows_with_coverage)
+    _write_uncovered_countries_svg(uncovered_country_rows, UNCOVERED_COUNTRIES_SVG_PATH)
+    population_with_economy_and_parquet_csv = _write_population_with_economy_and_parquet_csv(
+        conn,
+        xlsx_rows_by_key=xlsx_rows_by_key,
+        country_to_iso=country_to_iso,
+        output_path=POPULATION_WITH_ECONOMY_PARQUET_CSV_PATH,
+    )
 
     return {
         "detour_id": DETOUR_ID,
@@ -1169,7 +1491,9 @@ def _build_mode0_econ_metadata(
         "tables_used": [OUTERDICT_STUB_TABLE, XLSX_INNERDICT_TABLE],
         "world_bank_country_resource": world_bank_metadata,
         "country_coverage": country_coverage,
+        "uncovered_countries": uncovered_country_rows,
         "country_coverage_map_svg": str(UNCOVERED_COUNTRIES_SVG_PATH),
+        "population_with_economy_parquet_csv": population_with_economy_and_parquet_csv,
         "priority_group_definitions": PRIORITY_GROUP_RULES,
         "counts": {
             "population_rows": population_rows,
@@ -1328,6 +1652,39 @@ def _print_summary(metadata: dict[str, Any]) -> None:
         "[white]Uncovered countries SVG: "
         f"{metadata['country_coverage_map_svg']}[/white]"
     )
+    console.print(
+        "[white]Population+parquet CSV: "
+        f"{metadata['population_with_economy_parquet_csv']['path']}[/white]"
+    )
+    excluded_former_economies = metadata["world_bank_country_resource"].get(
+        "excluded_former_economies",
+        [],
+    )
+    if excluded_former_economies:
+        console.print(
+            "[white]Excluded former economies: "
+            f"{len(excluded_former_economies)}[/white]"
+        )
+        excluded_table = Table(title="Excluded Former Economies", box=box.SIMPLE)
+        excluded_table.add_column("Code", style="cyan")
+        excluded_table.add_column("Country", style="white")
+        for row in excluded_former_economies:
+            excluded_table.add_row(row["country_code"], row["country"])
+        console.print(excluded_table)
+    missing_income_group_countries = metadata["world_bank_country_resource"].get(
+        "missing_income_group_countries",
+        [],
+    )
+    if missing_income_group_countries:
+        missing_income_table = Table(
+            title=f"Countries with Missing {WORLD_BANK_INCOME_FISCAL_YEAR} Economy Category",
+            box=box.SIMPLE,
+        )
+        missing_income_table.add_column("ISO-3", style="cyan")
+        missing_income_table.add_column("Country", style="white")
+        for row in missing_income_group_countries:
+            missing_income_table.add_row(row["country_code"], row["country"])
+        console.print(missing_income_table)
 
     definitions_table = Table(title="Priority-Group Definitions (Step-4 Rules)", box=box.SIMPLE)
     definitions_table.add_column("Label", style="cyan")
@@ -1463,6 +1820,16 @@ def _print_summary(metadata: dict[str, Any]) -> None:
         "Country Coverage by Priority Category",
         country_coverage["priority_group_breakdown"],
     )
+
+    uncovered_table = Table(
+        title="Uncovered Countries Shown in SVG",
+        box=box.SIMPLE,
+    )
+    uncovered_table.add_column("ISO-3", style="cyan")
+    uncovered_table.add_column("Country", style="white")
+    for row in metadata["uncovered_countries"]:
+        uncovered_table.add_row(row["country_code"], row["country"])
+    console.print(uncovered_table)
 
     dist_table = Table(
         title="Country Cardinality Distribution (Mode-0 Selected Names)",

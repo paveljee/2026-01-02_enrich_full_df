@@ -23,11 +23,17 @@ from src.helpers.config import PipelineConfig
 from src.helpers.data_models import FragmentType, ResourceGroup
 from src.helpers.jsonlines import dumps_jsonlines
 from src.helpers.resources import register_resource
-from src.helpers.schema import OUTERDICT_STUB_TABLE, PARQUET_INNERDICT_TABLE, XLSX_INNERDICT_TABLE
+from src.helpers.schema import (
+    OUTERDICT_STUB_TABLE,
+    PARQUET_INNERDICT_TABLE,
+    PARQUET_OUTPUT_VIEW,
+    XLSX_INNERDICT_TABLE,
+)
 from src.helpers.vars import (
     HCR_XLSX_KEY_PREFIX,
     KTP_ECONOMIES_COL,
     KTP_ECONOMIES_INCOME_GROUP_COL,
+    KTP_ECONOMIES_ISO_COL,
     KTP_FILENAME_COL,
     KTP_FIRST_NAME_COL,
     KTP_FRAGMENT_COL,
@@ -86,19 +92,19 @@ def _non_exact_xlsx_payload(
 
 def _write_world_bank_fixture(path: Path) -> str:
     rows = [
-        [None, "Bank's fiscal year:", "FY24", "FY25"],
-        [None, "Data for calendar year :", "2022", "2023"],
-        [None, "Low income (L)", "<= 1135", "<= 1145"],
-        [None, "Lower middle income (LM)", "1136-4465", "1146-4515"],
-        [None, "Upper middle income (UM)", "4466-13845", "4516-14005"],
-        [None, "High income (H)", "> 13845", "> 14005"],
-        ["USA", "United States", "H", "H"],
-        ["FRA", "France", "H", "H"],
-        ["IND", "India", "LM", "LM"],
-        ["NPL", "Nepal", "L", "L"],
-        ["CHN", "China", "UM", "UM"],
-        ["BRA", "Brazil", "UM", "UM"],
-        ["AFG", "Afghanistan", "L", "L"],
+        [None, "Bank's fiscal year:", "FY24", "FY25", "FY26"],
+        [None, "Data for calendar year :", "2022", "2023", "2024"],
+        [None, "Low income (L)", "<= 1135", "<= 1145", "<= 1155"],
+        [None, "Lower middle income (LM)", "1136-4465", "1146-4515", "1156-4565"],
+        [None, "Upper middle income (UM)", "4466-13845", "4516-14005", "4566-14105"],
+        [None, "High income (H)", "> 13845", "> 14005", "> 14105"],
+        ["USA", "United States", "H", "H", "H"],
+        ["FRA", "France", "H", "H", "H"],
+        ["IND", "India", "LM", "LM", "LM"],
+        ["NPL", "Nepal", "L", "L", "L"],
+        ["CHN", "China", "UM", "UM", "UM"],
+        ["BRA", "Brazil", "UM", "UM", "UM"],
+        ["AFG", "Afghanistan", "L", "L", "L"],
     ]
     df = pd.DataFrame(rows)
     with pd.ExcelWriter(path, engine="openpyxl") as writer:
@@ -539,6 +545,17 @@ def _build_fixture_db(path: Path) -> dict[str, int]:
             f'INSERT INTO {PARQUET_INNERDICT_TABLE} ("{KTP_SOURCE_KEY_COL}") VALUES (?)',
             ssn_rows,
         )
+        con.execute(
+            f"""
+            CREATE OR REPLACE VIEW {PARQUET_OUTPUT_VIEW} AS
+            SELECT
+                "{KTP_SOURCE_KEY_COL}" AS "{KTP_SOURCE_KEY_COL}",
+                'author_details.parquet' AS "ssnad.filename",
+                'authors.parquet' AS "ssnau.filename",
+                '["Field A"]' AS "ssn.field_ids_list"
+            FROM {PARQUET_INNERDICT_TABLE}
+            """
+        )
 
         return {
             "population_rows": 100,
@@ -601,6 +618,8 @@ def test_detour_contract_and_mode0_econ_stats_readonly(
     assert "Country Coverage Scope" in plain
     assert "Country Coverage by Economy Category" in plain
     assert "Country Coverage by Priority Category" in plain
+    assert "Uncovered Countries" in plain
+    assert "Shown in SVG" in plain
     assert "Uncovered countries SVG" in plain
     assert "Income-Group Breakdown" in plain
     assert "Priority-Group Breakdown" in plain
@@ -627,8 +646,18 @@ def test_detour_contract_and_mode0_econ_stats_readonly(
     ]
     assert md["world_bank_country_resource"]["resource_name"] == "OGHIST_2025_07_01.xlsx"
     assert md["world_bank_country_resource"]["resource_hash"]
+    assert md["world_bank_country_resource"]["excluded_former_economies"] == []
+    assert md["population_with_economy_parquet_csv"]["path"] == (
+        "tmp/mode0_econ_stats_population_with_economy_and_parquet.csv"
+    )
     assert md["country_coverage_map_svg"] == "tmp/mode0_econ_stats_not_covered_countries.svg"
     assert Path(md["country_coverage_map_svg"]).is_file()
+    assert Path(md["population_with_economy_parquet_csv"]["path"]).is_file()
+    dump_df = pd.read_csv(md["population_with_economy_parquet_csv"]["path"])
+    assert KTP_ECONOMIES_ISO_COL in dump_df.columns
+    assert "ssnad.filename" in dump_df.columns
+    assert "ssnau.filename" in dump_df.columns
+    assert "ssn.field_ids_list" in dump_df.columns
 
     counts = md["counts"]
     assert counts["population_rows"] == baseline_counts["population_rows"]
@@ -668,6 +697,10 @@ def test_detour_contract_and_mode0_econ_stats_readonly(
     ]
     assert country_coverage["not_covered_country_names"] == ["Afghanistan", "Brazil"]
     assert country_coverage["not_covered_country_codes"] == ["AFG", "BRA"]
+    assert md["uncovered_countries"] == [
+        {"country_code": "AFG", "country": "Afghanistan", "coverage": "Not covered"},
+        {"country_code": "BRA", "country": "Brazil", "coverage": "Not covered"},
+    ]
 
     country_income_breakdown = {
         row["label"]: row for row in country_coverage["income_group_breakdown"]

@@ -14,6 +14,15 @@ Date of report: {}
 
 HCR_XLSX_KEY_PREFIX = "hcr_xlsx_"
 WORLD_BANK_XLSX_KEY = "world_bank_xlsx"
+WORLD_BANK_INCOME_FISCAL_YEAR: Final = "FY26"
+WORLD_BANK_FORMER_ECONOMY_CODES: Final[set[str]] = {
+    "ANT",
+    "CSK",
+    "MYT",
+    "SUN",
+    "YUG",
+    "YUGf",
+}
 REQUIRED_FILES_CONFIG_KEYS: Final[set[str]] = {
     "hit_papers_0",
     "hit_papers_1",
@@ -35,6 +44,7 @@ KTP_FILENAME_COL: Final = "ktp.filename"
 KTP_FRAGMENT_TYPE_COL: Final = "ktp.fragment_type"
 KTP_SOURCE_KEY_COL: Final = "ktp.source_key"
 KTP_ECONOMIES_COL: Final = "ktp.hcr_world_bank_economies"
+KTP_ECONOMIES_ISO_COL: Final = "ktp.hcr_world_bank_economies_iso"
 KTP_ECONOMIES_INCOME_GROUP_COL: Final = "ktp.hcr_world_bank_economies_income_group"
 KTP_ECONOMY_MATCH_COL: Final = "ktp.hcr_world_bank_economies_match"
 KTP_PRIORITY_COL: Final = "ktp.priority"
@@ -494,9 +504,12 @@ __all__ = [
     "HCR_XLSX_NAME_COLS",
     "HCR_XLSX_KEY_PREFIX",
     "WORLD_BANK_XLSX_KEY",
+    "WORLD_BANK_FORMER_ECONOMY_CODES",
+    "WORLD_BANK_INCOME_FISCAL_YEAR",
     "REQUIRED_FILES_CONFIG_KEYS",
     "REQUIRED_FILE_ENTRY_KEYS",
     "KTP_ECONOMIES_COL",
+    "KTP_ECONOMIES_ISO_COL",
     "KTP_ECONOMIES_INCOME_GROUP_COL",
     "KTP_ECONOMY_MATCH_COL",
     "KTP_FILENAME_COL",
