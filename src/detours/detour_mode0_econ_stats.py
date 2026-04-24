@@ -2286,7 +2286,7 @@ def _print_summary(metadata: dict[str, Any]) -> None:
     console.print(four_plus_countries_table)
 
     audit_table = Table(
-        title="Label Coverage / Consistency Audit (Mode-0 Selected Names)",
+        title="Label Coverage / Consistency Audit",
         box=box.SIMPLE,
     )
     audit_table.add_column("Metric", style="cyan")
