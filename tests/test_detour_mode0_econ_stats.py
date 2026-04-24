@@ -28,9 +28,13 @@ from src.helpers.schema import (
     OUTERDICT_STUB_TABLE,
     PARQUET_INNERDICT_TABLE,
     PARQUET_OUTPUT_VIEW,
+    POPULATION_ECON_VIEW,
     XLSX_INNERDICT_TABLE,
 )
 from src.helpers.vars import (
+    HCR_CATEGORY_COL,
+    HCR_FILENAME_COL,
+    HCR_ROW_COL,
     HCR_XLSX_KEY_PREFIX,
     KTP_ECONOMIES_COL,
     KTP_ECONOMIES_INCOME_GROUP_COL,
@@ -41,6 +45,8 @@ from src.helpers.vars import (
     KTP_HCR_PRIMARY_AFFILIATIONS_COL,
     KTP_HCR_SECONDARY_AFFILIATIONS_COL,
     KTP_LAST_NAME_COL,
+    KTP_POPULATION_INDEX_COL,
+    KTP_PRIORITY_COL,
     KTP_PRIORITY_GROUP_COL,
     KTP_PRIORITY_GROUP_LABELS,
     KTP_SOURCE_KEY_COL,
@@ -163,15 +169,22 @@ def _build_fixture_db(path: Path) -> dict[str, int]:
     try:
         con.execute(
             f"""
-            CREATE TABLE population_with_names_economy (
+            CREATE TABLE {POPULATION_ECON_VIEW} (
                 id INTEGER,
-                "{KTP_ECONOMIES_COL}" VARCHAR
+                "{KTP_POPULATION_INDEX_COL}" INTEGER,
+                "{HCR_FILENAME_COL}" VARCHAR,
+                "{HCR_ROW_COL}" VARCHAR,
+                "{KTP_FIRST_NAME_COL}" VARCHAR,
+                "{KTP_LAST_NAME_COL}" VARCHAR,
+                "{HCR_CATEGORY_COL}" VARCHAR,
+                "{KTP_HCR_PRIMARY_AFFILIATIONS_COL}" VARCHAR,
+                "{KTP_HCR_SECONDARY_AFFILIATIONS_COL}" VARCHAR,
+                "{KTP_ECONOMIES_COL}" VARCHAR,
+                "{KTP_ECONOMIES_INCOME_GROUP_COL}" VARCHAR,
+                "{KTP_PRIORITY_COL}" INTEGER,
+                "{KTP_PRIORITY_GROUP_COL}" VARCHAR
             )
             """
-        )
-        con.executemany(
-            f'INSERT INTO population_with_names_economy (id, "{KTP_ECONOMIES_COL}") VALUES (?, ?)',
-            [(idx, "[]") for idx in range(100)],
         )
 
         con.execute(
@@ -530,22 +543,237 @@ def _build_fixture_db(path: Path) -> dict[str, int]:
             ),
         ]
         con.executemany(f"INSERT INTO {XLSX_INNERDICT_TABLE} VALUES (?, ?)", xlsx_rows)
-        population_country_rows = [
-            (20, json.dumps(["France"])),
-            (30, json.dumps(["India"])),
-            (31, json.dumps(["Nepal"])),
-            (40, json.dumps(["United States"])),
-            (41, json.dumps(["France"])),
-            (50, json.dumps(["United States", "France", "India"])),
-            (60, json.dumps(["China", "United States", "France", "India", "Nepal"])),
-            (61, json.dumps(["France"])),
-            (62, json.dumps(["France"])),
-            (63, json.dumps(["France"])),
-            (64, json.dumps(["France"])),
+        population_rows = [
+            (
+                10,
+                0,
+                "2019_HCR.xlsx",
+                "10",
+                "Sel",
+                "Zero",
+                "Fixture",
+                "No Country Institute",
+                None,
+                "[]",
+                None,
+                1,
+                priority_fallback,
+            ),
+            (
+                20,
+                1,
+                "2020_HCR.xlsx",
+                "20",
+                "Sel",
+                "One",
+                "Fixture",
+                "Paris Health Center",
+                None,
+                json.dumps(["France"]),
+                high,
+                4,
+                priority_eu,
+            ),
+            (
+                30,
+                2,
+                "2021_HCR.xlsx",
+                "30",
+                "Sel",
+                "TwoIncome",
+                "Fixture",
+                "Delhi Policy Lab",
+                None,
+                json.dumps(["India"]),
+                lower_middle,
+                1,
+                priority_fallback,
+            ),
+            (
+                31,
+                3,
+                "2021_HCR.xlsx",
+                "31",
+                "Sel",
+                "TwoIncome",
+                "Fixture",
+                "Kathmandu Policy Lab",
+                None,
+                json.dumps(["Nepal"]),
+                low,
+                1,
+                priority_fallback,
+            ),
+            (
+                40,
+                4,
+                "2022_HCR.xlsx",
+                "40",
+                "Sel",
+                "TwoPriority",
+                "Fixture",
+                "Boston Health Institute",
+                None,
+                json.dumps(["United States"]),
+                high,
+                5,
+                priority_english,
+            ),
+            (
+                41,
+                5,
+                "2022_HCR.xlsx",
+                "41",
+                "Sel",
+                "TwoPriority",
+                "Fixture",
+                "Paris Health Institute",
+                None,
+                json.dumps(["France"]),
+                high,
+                4,
+                priority_eu,
+            ),
+            (
+                50,
+                6,
+                "2023_HCR.xlsx",
+                "50",
+                "Sel",
+                "Three",
+                "Fixture",
+                "Tri-Country School",
+                None,
+                json.dumps(["United States", "France", "India", "India"]),
+                high,
+                4,
+                priority_eu,
+            ),
+            (
+                60,
+                7,
+                "2024_HCR.xlsx",
+                "60",
+                "Sel",
+                "FourPlus",
+                "Fixture",
+                "Global Health Alliance",
+                None,
+                json.dumps(["China", "United States", "France", "India", "Nepal", "China"]),
+                high,
+                2,
+                priority_china,
+            ),
+            (
+                61,
+                8,
+                "2024_HCR.xlsx",
+                "61",
+                "Fail",
+                "MultiSci",
+                "Fixture",
+                "Should Not Appear",
+                None,
+                json.dumps(["France"]),
+                high,
+                4,
+                priority_eu,
+            ),
+            (
+                62,
+                9,
+                "2024_HCR.xlsx",
+                "62",
+                "Fail",
+                "NoXlsxPresent",
+                "Fixture",
+                "Should Not Appear",
+                None,
+                json.dumps(["France"]),
+                high,
+                4,
+                priority_eu,
+            ),
+            (
+                63,
+                10,
+                "2024_HCR.xlsx",
+                "63",
+                "Fail",
+                "Jsonl",
+                "Fixture",
+                "Should Not Appear",
+                None,
+                json.dumps(["France"]),
+                high,
+                4,
+                priority_eu,
+            ),
+            (
+                64,
+                11,
+                "2024_HCR.xlsx",
+                "64",
+                "Fail",
+                "ZeroSci",
+                "Fixture",
+                "Should Not Appear",
+                None,
+                json.dumps(["France"]),
+                high,
+                4,
+                priority_eu,
+            ),
+            (
+                70,
+                12,
+                "2024_HCR.xlsx",
+                "70",
+                None,
+                "Danish",
+                "Fixture",
+                "Guangdong University of Foreign Studies",
+                None,
+                json.dumps(["China"]),
+                upper_middle,
+                2,
+                priority_china,
+            ),
+            (
+                71,
+                13,
+                "2024_HCR.xlsx",
+                "71",
+                "Nameless",
+                None,
+                "Fixture",
+                "Boston Health Institute",
+                None,
+                json.dumps(["United States"]),
+                high,
+                5,
+                priority_english,
+            ),
         ]
         con.executemany(
-            f'UPDATE population_with_names_economy SET "{KTP_ECONOMIES_COL}" = ? WHERE id = ?',
-            [(countries, idx) for idx, countries in population_country_rows],
+            f"""
+            INSERT INTO {POPULATION_ECON_VIEW} (
+                id,
+                "{KTP_POPULATION_INDEX_COL}",
+                "{HCR_FILENAME_COL}",
+                "{HCR_ROW_COL}",
+                "{KTP_FIRST_NAME_COL}",
+                "{KTP_LAST_NAME_COL}",
+                "{HCR_CATEGORY_COL}",
+                "{KTP_HCR_PRIMARY_AFFILIATIONS_COL}",
+                "{KTP_HCR_SECONDARY_AFFILIATIONS_COL}",
+                "{KTP_ECONOMIES_COL}",
+                "{KTP_ECONOMIES_INCOME_GROUP_COL}",
+                "{KTP_PRIORITY_COL}",
+                "{KTP_PRIORITY_GROUP_COL}"
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            population_rows,
         )
 
         ssn_rows = [
@@ -580,14 +808,14 @@ def _build_fixture_db(path: Path) -> dict[str, int]:
         )
 
         return {
-            "population_rows": 100,
+            "population_rows": len(population_rows),
             "outerdict_rows": len(keys),
             "xlsx_innerdict_rows": len(xlsx_rows),
             "ssn_innerdict_rows": len(ssn_rows),
             "mode0_selected_population_rows": 12,
-            "selected_population_rows_with_countries": 11,
-            "selected_population_rows_with_income_group": 11,
-            "selected_population_rows_with_priority_group": 12,
+            "population_rows_with_countries": 13,
+            "population_rows_with_income_group": 13,
+            "population_rows_with_priority_group": 14,
         }
     finally:
         con.close()
@@ -645,9 +873,10 @@ def test_detour_contract_and_mode0_econ_stats_readonly(
     assert "Uncovered countries SVG" in plain
     assert "Income-Group Breakdown" in plain
     assert "Priority-Group Breakdown" in plain
+    assert "Population Rows" in plain
     assert "Multi-Country Divergence" in plain
     assert "Derived Final Name-Level Groups" in plain
-    assert "Lower-Tier Preferred" in plain
+    assert "Lower-tier preferred" in plain
     assert "Any Low-Income Affiliated Country" in plain
     assert "Missing Income Group" in plain
     assert "4+ Countries" in plain
@@ -676,12 +905,16 @@ def test_detour_contract_and_mode0_econ_stats_readonly(
     assert Path(md["country_coverage_map_svg"]).is_file()
     assert Path(md["population_with_economy_parquet_csv"]["path"]).is_file()
     dump_df = pd.read_csv(md["population_with_economy_parquet_csv"]["path"])
-    assert len(dump_df) == baseline_counts["mode0_selected_population_rows"]
+    assert len(dump_df) == baseline_counts["population_rows"]
     assert (
         md["population_with_economy_parquet_csv"]["rows"]
-        == baseline_counts["mode0_selected_population_rows"]
+        == baseline_counts["population_rows"]
     )
     assert KTP_ECONOMIES_ISO_COL in dump_df.columns
+    assert dump_df[KTP_PRIORITY_GROUP_COL].notna().sum() == baseline_counts[
+        "population_rows_with_priority_group"
+    ]
+    assert dump_df[KTP_ECONOMIES_ISO_COL].eq("[]").sum() == 1
     assert md["population_with_economy_parquet_csv"]["parquet_prefixed_columns"] == (
         PARQUET_LEFT_JOIN_COLS
     )
@@ -698,18 +931,20 @@ def test_detour_contract_and_mode0_econ_stats_readonly(
     assert counts["mode0_selected_population_rows"] == baseline_counts[
         "mode0_selected_population_rows"
     ]
-    assert counts["mode0_selected_pct_of_population_rows"] == pytest.approx(12.0)
+    assert counts["mode0_selected_pct_of_population_rows"] == pytest.approx(12 / 14 * 100.0)
     assert counts["selected_names_with_countries"] == 9
     assert counts["selected_names_with_income_group"] == 9
     assert counts["selected_names_with_priority_group"] == 10
-    assert counts["selected_population_rows_with_countries"] == baseline_counts[
-        "selected_population_rows_with_countries"
+    assert counts["row_label_scope_source"] == POPULATION_ECON_VIEW
+    assert counts["row_label_population_rows"] == baseline_counts["population_rows"]
+    assert counts["population_rows_with_countries"] == baseline_counts[
+        "population_rows_with_countries"
     ]
-    assert counts["selected_population_rows_with_income_group"] == baseline_counts[
-        "selected_population_rows_with_income_group"
+    assert counts["population_rows_with_income_group"] == baseline_counts[
+        "population_rows_with_income_group"
     ]
-    assert counts["selected_population_rows_with_priority_group"] == baseline_counts[
-        "selected_population_rows_with_priority_group"
+    assert counts["population_rows_with_priority_group"] == baseline_counts[
+        "population_rows_with_priority_group"
     ]
 
     country_coverage = md["country_coverage"]
@@ -785,27 +1020,27 @@ def test_detour_contract_and_mode0_econ_stats_readonly(
     assert outliers["total_outliers"] == 1
 
     income_breakdown = {row["income_group"]: row for row in md["income_group_breakdown"]}
-    assert income_breakdown[OGHIST_INCOME_LABELS["H"]]["selected_population_rows"] == 9
+    assert income_breakdown[OGHIST_INCOME_LABELS["H"]]["selected_population_rows"] == 10
     assert income_breakdown[OGHIST_INCOME_LABELS["LM"]]["selected_population_rows"] == 1
     assert income_breakdown[OGHIST_INCOME_LABELS["L"]]["selected_population_rows"] == 1
-    assert income_breakdown[OGHIST_INCOME_LABELS["UM"]]["selected_population_rows"] == 0
+    assert income_breakdown[OGHIST_INCOME_LABELS["UM"]]["selected_population_rows"] == 1
     assert income_breakdown[MISSING_BREAKDOWN_LABEL]["selected_population_rows"] == 1
 
     lower_tier_breakdown = {
         row["income_group"]: row for row in md["income_group_breakdown_lower_tier_preferred"]
     }
-    assert lower_tier_breakdown[OGHIST_INCOME_LABELS["H"]]["selected_population_rows"] == 7
-    assert lower_tier_breakdown[OGHIST_INCOME_LABELS["UM"]]["selected_population_rows"] == 0
+    assert lower_tier_breakdown[OGHIST_INCOME_LABELS["H"]]["selected_population_rows"] == 8
+    assert lower_tier_breakdown[OGHIST_INCOME_LABELS["UM"]]["selected_population_rows"] == 1
     assert lower_tier_breakdown[OGHIST_INCOME_LABELS["LM"]]["selected_population_rows"] == 2
     assert lower_tier_breakdown[OGHIST_INCOME_LABELS["L"]]["selected_population_rows"] == 2
     assert lower_tier_breakdown[MISSING_BREAKDOWN_LABEL]["selected_population_rows"] == 1
 
     priority_breakdown = {row["priority_group"]: row for row in md["priority_group_breakdown"]}
     assert priority_breakdown[KTP_PRIORITY_GROUP_LABELS[1]]["selected_population_rows"] == 3
-    assert priority_breakdown[KTP_PRIORITY_GROUP_LABELS[2]]["selected_population_rows"] == 1
+    assert priority_breakdown[KTP_PRIORITY_GROUP_LABELS[2]]["selected_population_rows"] == 2
     assert priority_breakdown[KTP_PRIORITY_GROUP_LABELS[3]]["selected_population_rows"] == 0
     assert priority_breakdown[KTP_PRIORITY_GROUP_LABELS[4]]["selected_population_rows"] == 7
-    assert priority_breakdown[KTP_PRIORITY_GROUP_LABELS[5]]["selected_population_rows"] == 1
+    assert priority_breakdown[KTP_PRIORITY_GROUP_LABELS[5]]["selected_population_rows"] == 2
     assert priority_breakdown[MISSING_BREAKDOWN_LABEL]["selected_population_rows"] == 0
 
     derived_higher = {
@@ -875,8 +1110,8 @@ def test_detour_contract_and_mode0_econ_stats_readonly(
     assert audit["selected_names_with_multiple_row_income_groups"] == 1
     assert audit["selected_names_with_exactly_one_row_priority_group"] == 9
     assert audit["selected_names_with_multiple_row_priority_groups"] == 1
-    assert audit["selected_rows_missing_income_group"] == 1
-    assert audit["selected_rows_missing_priority_group"] == 0
+    assert audit["population_rows_missing_income_group"] == 1
+    assert audit["population_rows_missing_priority_group"] == 0
 
     highlights = md["researcher_detail_highlights"]
     assert len(highlights["any_low_income_affiliated_country"]) == 2
