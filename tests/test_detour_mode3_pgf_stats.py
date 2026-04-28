@@ -13,6 +13,7 @@ import pytest
 
 from src.detours.detour_mode3_pgf_stats import (
     DETOUR_STEPS,
+    _exact_binomial_inference,
     _is_exact_xlsx_match_payload,
     run_detour,
 )
@@ -316,8 +317,12 @@ def test_detour_contract_and_mode3_stats_readonly(
     assert result.success is True
     assert result.steps_completed == DETOUR_STEPS == []
     assert "Mode-3 p_gf Stats Detour" in plain
+    assert "p_gf Methodology / Provenance Notice" in plain
+    assert "full normalized string first" in plain
+    assert "step_09_match_parquet.py" in plain
     assert "Selection Counts" in plain
     assert "Population rows containing mode-3 selected names" in plain
+    assert "p_gf Inference Evidence Distribution" in plain
     assert "p_gf Buckets" in plain
 
     md = result.metadata
@@ -327,16 +332,28 @@ def test_detour_contract_and_mode3_stats_readonly(
         XLSX_INNERDICT_TABLE,
         PARQUET_INNERDICT_TABLE,
     ]
+    methodology = md["methodology_notice"]
+    assert "full normalized string first" in methodology["nomquamgender_name_handling"]
+    assert "first whitespace-delimited token" in methodology["nomquamgender_name_handling"]
+    assert "step_09_match_parquet.py" in methodology["sciscinet_v2_pipeline_use"]
+    assert "ssn_innerdicts" in methodology["sciscinet_v2_pipeline_use"]
+    assert "original SciSciNet paper reports using nomquamgender" in methodology[
+        "sciscinet_methods"
+    ]
 
     counts = md["counts"]
     assert counts["population_rows"] == baseline_counts["population_rows"]
     assert counts["outerdict_keys"] == baseline_counts["outerdict_rows"]
     assert counts["mode3_selected_names"] == 6
-    assert counts["mode3_selected_population_rows"] == baseline_counts["mode3_selected_population_rows"]
+    assert counts["mode3_selected_population_rows"] == baseline_counts[
+        "mode3_selected_population_rows"
+    ]
     assert counts["mode3_selected_pct_of_population_rows"] == pytest.approx(6.0)
     assert counts["pgf_non_missing"] == 5
     assert counts["pgf_missing"] == 1
-    assert counts["pgf_non_missing_population_rows"] == baseline_counts["pgf_non_missing_population_rows"]
+    assert counts["pgf_non_missing_population_rows"] == baseline_counts[
+        "pgf_non_missing_population_rows"
+    ]
     assert counts["pgf_non_missing_pct_of_population_rows"] == pytest.approx(5.0)
 
     rules = md["rule_counts"]
@@ -361,6 +378,26 @@ def test_detour_contract_and_mode3_stats_readonly(
     assert dist["q3"] == pytest.approx(0.75, rel=0, abs=1e-12)
     assert dist["min"] == pytest.approx(0.0, rel=0, abs=1e-12)
     assert dist["max"] == pytest.approx(1.0, rel=0, abs=1e-12)
+
+    evidence = md["pgf_inference_evidence_distribution"]
+    inference_counts = evidence["inference_counts"]
+    assert inference_counts["non_null_n"] == 6
+    assert inference_counts["null_n"] == 0
+    assert inference_counts["mean"] == pytest.approx(20 / 6, rel=0, abs=1e-12)
+    assert inference_counts["median"] == pytest.approx(3.5, rel=0, abs=1e-12)
+    assert inference_counts["q1"] == pytest.approx(2.25, rel=0, abs=1e-12)
+    assert inference_counts["q3"] == pytest.approx(4.75, rel=0, abs=1e-12)
+    assert inference_counts["min"] == pytest.approx(0.0, rel=0, abs=1e-12)
+    assert inference_counts["max"] == pytest.approx(6.0, rel=0, abs=1e-12)
+    inference_sources = evidence["inference_sources"]
+    assert inference_sources["non_null_n"] == 6
+    assert inference_sources["null_n"] == 0
+    assert inference_sources["mean"] == pytest.approx(2.0, rel=0, abs=1e-12)
+    assert inference_sources["median"] == pytest.approx(2.0, rel=0, abs=1e-12)
+    assert inference_sources["q1"] == pytest.approx(1.25, rel=0, abs=1e-12)
+    assert inference_sources["q3"] == pytest.approx(2.75, rel=0, abs=1e-12)
+    assert inference_sources["min"] == pytest.approx(0.0, rel=0, abs=1e-12)
+    assert inference_sources["max"] == pytest.approx(4.0, rel=0, abs=1e-12)
 
     outliers = md["pgf_outliers_tukey"]
     assert outliers["total_outliers"] == 0
@@ -390,6 +427,80 @@ def test_detour_contract_and_mode3_stats_readonly(
         XLSX_INNERDICT_TABLE: baseline_counts["xlsx_innerdict_rows"],
         PARQUET_INNERDICT_TABLE: baseline_counts["ssn_innerdict_rows"],
     }
+
+
+def test_detour_reports_exact_sign_test_inference(
+    detour_fixture: tuple[Path, Path, dict[str, int]],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config_path, _db_path, _baseline_counts = detour_fixture
+    config = PipelineConfig.from_json(config_path)
+
+    result = run_detour(config, interactive=False)
+    plain = _strip_ansi(capsys.readouterr().out)
+
+    assert "Exact Sign Test (Observed Complete-case Unique Names)" in plain
+
+    sign_test = result.metadata["pgf_sign_test"]
+    assert sign_test["null"] == "median p_gf = 0.5"
+    assert sign_test["scope"] == "observed mode-3 complete-case unique names only"
+    assert "Does not generalize to all unique names" in sign_test["caveat"]
+    assert sign_test["estimand"] == "unique name keys as a person proxy, not Clarivate award rows"
+    assert sign_test["ties_at_0_5_excluded"] == 1
+    assert sign_test["non_tie_n"] == 4
+    assert sign_test["above_0_5"] == 2
+    assert sign_test["below_0_5"] == 2
+    assert sign_test["proportion_above_0_5"] == pytest.approx(0.5, rel=0, abs=1e-12)
+    assert sign_test["proportion_above_0_5_ci95_lo"] == pytest.approx(
+        0.067586,
+        rel=0,
+        abs=1e-6,
+    )
+    assert sign_test["proportion_above_0_5_ci95_hi"] == pytest.approx(
+        0.932414,
+        rel=0,
+        abs=1e-6,
+    )
+    assert sign_test["excess_above_0_5"] == pytest.approx(0.0, rel=0, abs=1e-12)
+    assert sign_test["excess_above_0_5_ci95_lo"] == pytest.approx(
+        -0.432414,
+        rel=0,
+        abs=1e-6,
+    )
+    assert sign_test["excess_above_0_5_ci95_hi"] == pytest.approx(
+        0.432414,
+        rel=0,
+        abs=1e-6,
+    )
+    assert sign_test["exact_binomial_p_two_sided"] == pytest.approx(1.0, rel=0, abs=1e-12)
+    assert sign_test["exact_binomial_p_two_sided_mantissa"] == pytest.approx(
+        1.0,
+        rel=0,
+        abs=1e-12,
+    )
+    assert sign_test["exact_binomial_p_two_sided_exponent"] == 0
+    assert sign_test["exact_binomial_p_two_sided_log10"] == pytest.approx(
+        0.0,
+        rel=0,
+        abs=1e-12,
+    )
+
+
+def test_exact_binomial_inference_keeps_underflowed_p_value_in_scientific_parts() -> None:
+    sign_test = _exact_binomial_inference(successes=1412, trials=6644)
+
+    assert sign_test["p_two_sided"] == 0.0
+    assert sign_test["p_two_sided_mantissa"] == pytest.approx(
+        1.143782,
+        rel=0,
+        abs=1e-6,
+    )
+    assert sign_test["p_two_sided_exponent"] == -509
+    assert sign_test["p_two_sided_log10"] == pytest.approx(
+        -508.941657,
+        rel=0,
+        abs=1e-6,
+    )
 
 
 def test_detour_module_entrypoint(detour_fixture: tuple[Path, Path, dict[str, int]]) -> None:

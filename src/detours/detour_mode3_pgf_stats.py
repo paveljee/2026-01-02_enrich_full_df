@@ -5,6 +5,7 @@ import json
 import math
 import sys
 from collections import defaultdict
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -46,6 +47,22 @@ P_GF_COL = "ssnau.p_gf"
 INFERENCE_COUNTS_COL = "ssnau.inference_counts"
 INFERENCE_SOURCES_COL = "ssnau.inference_sources"
 MODE = 3
+NQG_NAME_HANDLING_NOTICE = (
+    "nomquamgender 0.1.0 normalizes each input name with unidecode, lower(), "
+    "and strip(); it then tries the full normalized string first and, only if "
+    "that is not found, falls back to the first whitespace-delimited token."
+)
+SCISCINET_PIPELINE_NOTICE = (
+    "This database uses SciSciNet-v2 parquet data in step 09 "
+    "(src/steps/step_09_match_parquet.py): matched HCR name keys are joined to "
+    "SciSciNet author_details/authors tables, and ssnau.p_gf, "
+    "ssnau.inference_counts, and ssnau.inference_sources are persisted in "
+    "ssn_innerdicts."
+)
+SCISCINET_METHODS_NOTICE = (
+    "SciSciNet-v2 reports following original SciSciNet methods; the original "
+    "SciSciNet paper reports using nomquamgender for name-gender inference."
+)
 
 
 @dataclass
@@ -115,6 +132,39 @@ def _round_or_none(value: float | None, digits: int = 6) -> float | None:
     return round(float(value), digits)
 
 
+def _numeric_distribution(values: Sequence[int | float | None]) -> dict[str, float | int | None]:
+    non_null_values = np.array([float(value) for value in values if value is not None], dtype=float)
+    non_null_n = int(non_null_values.size)
+    mean = float(non_null_values.mean()) if non_null_n else None
+    sd = float(non_null_values.std(ddof=1)) if non_null_n > 1 else None
+    se = float(sd / math.sqrt(non_null_n)) if non_null_n > 1 and sd is not None else None
+    ci95_lo = float(mean - 1.96 * se) if mean is not None and se is not None else None
+    ci95_hi = float(mean + 1.96 * se) if mean is not None and se is not None else None
+    q1 = (
+        float(np.quantile(non_null_values, 0.25, method="linear")) if non_null_n else None
+    )
+    median = (
+        float(np.quantile(non_null_values, 0.5, method="linear")) if non_null_n else None
+    )
+    q3 = (
+        float(np.quantile(non_null_values, 0.75, method="linear")) if non_null_n else None
+    )
+    return {
+        "non_null_n": non_null_n,
+        "null_n": len(values) - non_null_n,
+        "mean": mean,
+        "sd": sd,
+        "se": se,
+        "mean_ci95_lo": ci95_lo,
+        "mean_ci95_hi": ci95_hi,
+        "min": float(non_null_values.min()) if non_null_n else None,
+        "q1": q1,
+        "median": median,
+        "q3": q3,
+        "max": float(non_null_values.max()) if non_null_n else None,
+    }
+
+
 def _scalar_int(conn: duckdb.DuckDBPyConnection, sql: str) -> int:
     row = conn.execute(sql).fetchone()
     if row is None:
@@ -127,6 +177,95 @@ def _db_file_from_pragma(conn: duckdb.DuckDBPyConnection) -> str:
     if row is None:
         return ""
     return str(row[2])
+
+
+def _exact_binomial_inference(successes: int, trials: int) -> dict[str, float | int | None]:
+    if trials == 0:
+        return {
+            "proportion": None,
+            "ci95_lo": None,
+            "ci95_hi": None,
+            "excess_over_0_5": None,
+            "excess_ci95_lo": None,
+            "excess_ci95_hi": None,
+            "p_two_sided": None,
+            "p_two_sided_mantissa": None,
+            "p_two_sided_exponent": None,
+            "p_two_sided_log10": None,
+        }
+
+    def log_pmf(k: int, p: float) -> float:
+        if p == 0.0:
+            return 0.0 if k == 0 else -math.inf
+        if p == 1.0:
+            return 0.0 if k == trials else -math.inf
+        return (
+            math.lgamma(trials + 1)
+            - math.lgamma(k + 1)
+            - math.lgamma(trials - k + 1)
+            + k * math.log(p)
+            + (trials - k) * math.log1p(-p)
+        )
+
+    def log_tail_prob(start: int, end: int, p: float) -> float:
+        logs = [log_pmf(k, p) for k in range(start, end + 1)]
+        max_log = max(logs, default=-math.inf)
+        if max_log == -math.inf:
+            return -math.inf
+        return max_log + math.log(sum(math.exp(value - max_log) for value in logs))
+
+    def tail_prob(start: int, end: int, p: float) -> float:
+        return math.exp(log_tail_prob(start, end, p))
+
+    alpha_half = 0.025
+    p_hat = successes / trials
+
+    if successes == 0:
+        ci_lo = 0.0
+    else:
+        lo, hi = 0.0, p_hat
+        for _ in range(80):
+            mid = (lo + hi) / 2.0
+            if tail_prob(successes, trials, mid) < alpha_half:
+                lo = mid
+            else:
+                hi = mid
+        ci_lo = (lo + hi) / 2.0
+
+    if successes == trials:
+        ci_hi = 1.0
+    else:
+        lo, hi = p_hat, 1.0
+        for _ in range(80):
+            mid = (lo + hi) / 2.0
+            if tail_prob(0, successes, mid) > alpha_half:
+                lo = mid
+            else:
+                hi = mid
+        ci_hi = (lo + hi) / 2.0
+
+    tail_count = min(successes, trials - successes)
+    p_two_sided_log = min(0.0, math.log(2.0) + log_tail_prob(0, tail_count, 0.5))
+    p_two_sided_log10 = p_two_sided_log / math.log(10.0)
+    p_two_sided_exponent = math.floor(p_two_sided_log10)
+    p_two_sided_mantissa = 10 ** (p_two_sided_log10 - p_two_sided_exponent)
+    if p_two_sided_mantissa >= 10.0:
+        p_two_sided_mantissa /= 10.0
+        p_two_sided_exponent += 1
+    p_two_sided = math.exp(p_two_sided_log)
+
+    return {
+        "proportion": p_hat,
+        "ci95_lo": ci_lo,
+        "ci95_hi": ci_hi,
+        "excess_over_0_5": p_hat - 0.5,
+        "excess_ci95_lo": ci_lo - 0.5,
+        "excess_ci95_hi": ci_hi - 0.5,
+        "p_two_sided": p_two_sided,
+        "p_two_sided_mantissa": p_two_sided_mantissa,
+        "p_two_sided_exponent": p_two_sided_exponent,
+        "p_two_sided_log10": p_two_sided_log10,
+    }
 
 
 def _build_mode3_pgf_metadata(conn: duckdb.DuckDBPyConnection) -> dict[str, Any]:
@@ -178,6 +317,8 @@ def _build_mode3_pgf_metadata(conn: duckdb.DuckDBPyConnection) -> dict[str, Any]
     mode3_selected_keys: list[str] = []
     mode3_non_missing_keys: list[str] = []
     mode3_pgf_values: list[float | None] = []
+    mode3_inference_counts_values: list[int | None] = []
+    mode3_inference_sources_values: list[int | None] = []
     mode3_missing_pgf_inference_rows: list[tuple[int | None, int | None]] = []
 
     for name_key in outer_keys:
@@ -202,6 +343,8 @@ def _build_mode3_pgf_metadata(conn: duckdb.DuckDBPyConnection) -> dict[str, Any]
                 )
             p_gf_value, inference_counts, inference_sources = sciscinet_rows[0]
             mode3_pgf_values.append(p_gf_value)
+            mode3_inference_counts_values.append(inference_counts)
+            mode3_inference_sources_values.append(inference_sources)
             if p_gf_value is None:
                 mode3_missing_pgf_inference_rows.append((inference_counts, inference_sources))
             else:
@@ -289,6 +432,19 @@ def _build_mode3_pgf_metadata(conn: duckdb.DuckDBPyConnection) -> dict[str, Any]
     if len(mode3_missing_pgf_inference_rows) != bucket_missing:
         raise RuntimeError("Missing-p_gf inference audit invariant failed.")
 
+    inference_counts_dist = _numeric_distribution(mode3_inference_counts_values)
+    inference_sources_dist = _numeric_distribution(mode3_inference_sources_values)
+
+    sign_test_n = (
+        bucket_exact_0
+        + bucket_between_0_and_0_5_exclusive
+        + bucket_between_0_5_and_1_exclusive
+        + bucket_exact_1
+    )
+    sign_test_above = bucket_between_0_5_and_1_exclusive + bucket_exact_1
+    sign_test_below = bucket_exact_0 + bucket_between_0_and_0_5_exclusive
+    sign_test = _exact_binomial_inference(sign_test_above, sign_test_n)
+
     missing_inference_counts_zero = sum(
         inference_counts == 0 for inference_counts, _ in mode3_missing_pgf_inference_rows
     )
@@ -325,6 +481,11 @@ def _build_mode3_pgf_metadata(conn: duckdb.DuckDBPyConnection) -> dict[str, Any]
         "mode_description": CARD_BUILD_SUBSET_DESCRIPTIONS[MODE],
         "db_file": _db_file_from_pragma(conn),
         "tables_used": [OUTERDICT_STUB_TABLE, XLSX_INNERDICT_TABLE, PARQUET_INNERDICT_TABLE],
+        "methodology_notice": {
+            "nomquamgender_name_handling": NQG_NAME_HANDLING_NOTICE,
+            "sciscinet_v2_pipeline_use": SCISCINET_PIPELINE_NOTICE,
+            "sciscinet_methods": SCISCINET_METHODS_NOTICE,
+        },
         "counts": {
             "population_rows": population_rows,
             "outerdict_keys": outerdict_keys,
@@ -364,6 +525,10 @@ def _build_mode3_pgf_metadata(conn: duckdb.DuckDBPyConnection) -> dict[str, Any]
             "q3": q3,
             "max": max_v,
         },
+        "pgf_inference_evidence_distribution": {
+            "inference_counts": inference_counts_dist,
+            "inference_sources": inference_sources_dist,
+        },
         "pgf_outliers_tukey": {
             "iqr": iqr,
             "lower_fence": lower_fence,
@@ -400,6 +565,29 @@ def _build_mode3_pgf_metadata(conn: duckdb.DuckDBPyConnection) -> dict[str, Any]
                 bucket_between_0_5_and_1_exclusive, non_missing_n
             ),
         },
+        "pgf_sign_test": {
+            "null": "median p_gf = 0.5",
+            "scope": "observed mode-3 complete-case unique names only",
+            "caveat": (
+                "Does not generalize to all unique names without missing-data assumptions "
+                "or a missing-data model."
+            ),
+            "estimand": "unique name keys as a person proxy, not Clarivate award rows",
+            "ties_at_0_5_excluded": bucket_exact_05,
+            "non_tie_n": sign_test_n,
+            "above_0_5": sign_test_above,
+            "below_0_5": sign_test_below,
+            "proportion_above_0_5": sign_test["proportion"],
+            "proportion_above_0_5_ci95_lo": sign_test["ci95_lo"],
+            "proportion_above_0_5_ci95_hi": sign_test["ci95_hi"],
+            "excess_above_0_5": sign_test["excess_over_0_5"],
+            "excess_above_0_5_ci95_lo": sign_test["excess_ci95_lo"],
+            "excess_above_0_5_ci95_hi": sign_test["excess_ci95_hi"],
+            "exact_binomial_p_two_sided": sign_test["p_two_sided"],
+            "exact_binomial_p_two_sided_mantissa": sign_test["p_two_sided_mantissa"],
+            "exact_binomial_p_two_sided_exponent": sign_test["p_two_sided_exponent"],
+            "exact_binomial_p_two_sided_log10": sign_test["p_two_sided_log10"],
+        },
         "missing_pgf_inference_audit": {
             "missing_pgf_rows": bucket_missing,
             "inference_counts_zero": missing_inference_counts_zero,
@@ -418,9 +606,11 @@ def _build_mode3_pgf_metadata(conn: duckdb.DuckDBPyConnection) -> dict[str, Any]
 def _print_summary(metadata: dict[str, Any]) -> None:
     counts = metadata["counts"]
     dist = metadata["pgf_distribution"]
+    evidence = metadata["pgf_inference_evidence_distribution"]
     outliers = metadata["pgf_outliers_tukey"]
     buckets = metadata["pgf_buckets"]
     rules = metadata["rule_counts"]
+    sign_test = metadata["pgf_sign_test"]
     missing_audit = metadata["missing_pgf_inference_audit"]
 
     console.print("[cyan]Mode-3 p_gf Stats Detour (read-only)[/cyan]")
@@ -431,6 +621,24 @@ def _print_summary(metadata: dict[str, Any]) -> None:
         + ", ".join(str(name) for name in metadata["tables_used"])
         + "[/white]"
     )
+
+    methodology = metadata["methodology_notice"]
+    methodology_table = Table(title="p_gf Methodology / Provenance Notice", box=box.SIMPLE)
+    methodology_table.add_column("Topic", style="cyan")
+    methodology_table.add_column("Notice", style="magenta")
+    methodology_table.add_row(
+        "nomquamgender name handling",
+        methodology["nomquamgender_name_handling"],
+    )
+    methodology_table.add_row(
+        "SciSciNet-v2 pipeline use",
+        methodology["sciscinet_v2_pipeline_use"],
+    )
+    methodology_table.add_row(
+        "SciSciNet methods",
+        methodology["sciscinet_methods"],
+    )
+    console.print(methodology_table)
 
     counts_table = Table(title="Selection Counts", box=box.SIMPLE)
     counts_table.add_column("Metric", style="cyan")
@@ -496,6 +704,110 @@ def _print_summary(metadata: dict[str, Any]) -> None:
     dist_table.add_row("Q3", f"{dist['q3']:.6f}")
     dist_table.add_row("Max", f"{dist['max']:.6f}")
     console.print(dist_table)
+
+    evidence_table = Table(
+        title="p_gf Inference Evidence Distribution (Mode-3 Selected Names)",
+        box=box.SIMPLE,
+    )
+    evidence_table.add_column("Metric", style="cyan")
+    evidence_table.add_column("inference_counts", style="magenta", justify="right")
+    evidence_table.add_column("inference_sources", style="magenta", justify="right")
+    evidence_counts = evidence["inference_counts"]
+    evidence_sources = evidence["inference_sources"]
+
+    def _evidence_pair(metric: str, key: str) -> None:
+        counts_value = evidence_counts[key]
+        sources_value = evidence_sources[key]
+        evidence_table.add_row(
+            metric,
+            "N/A" if counts_value is None else f"{counts_value:.6f}",
+            "N/A" if sources_value is None else f"{sources_value:.6f}",
+        )
+
+    evidence_table.add_row(
+        "N (non-null)",
+        f"{evidence_counts['non_null_n']:,}",
+        f"{evidence_sources['non_null_n']:,}",
+    )
+    evidence_table.add_row(
+        "Null",
+        f"{evidence_counts['null_n']:,}",
+        f"{evidence_sources['null_n']:,}",
+    )
+    _evidence_pair("Mean", "mean")
+    evidence_table.add_row(
+        "95% CI (mean)",
+        (
+            "N/A"
+            if evidence_counts["mean_ci95_lo"] is None
+            else (
+                f"[{evidence_counts['mean_ci95_lo']:.6f}, "
+                f"{evidence_counts['mean_ci95_hi']:.6f}]"
+            )
+        ),
+        (
+            "N/A"
+            if evidence_sources["mean_ci95_lo"] is None
+            else (
+                f"[{evidence_sources['mean_ci95_lo']:.6f}, "
+                f"{evidence_sources['mean_ci95_hi']:.6f}]"
+            )
+        ),
+    )
+    _evidence_pair("SD", "sd")
+    _evidence_pair("SE", "se")
+    _evidence_pair("Min", "min")
+    _evidence_pair("Q1", "q1")
+    _evidence_pair("Median", "median")
+    _evidence_pair("Q3", "q3")
+    _evidence_pair("Max", "max")
+    console.print(evidence_table)
+
+    p_value = sign_test["exact_binomial_p_two_sided"]
+    p_value_mantissa = sign_test["exact_binomial_p_two_sided_mantissa"]
+    p_value_exponent = sign_test["exact_binomial_p_two_sided_exponent"]
+    if p_value is None:
+        p_value_text = "N/A"
+    elif p_value < 0.001:
+        p_value_text = f"{p_value_mantissa:.6f}e{p_value_exponent:+d}"
+    else:
+        p_value_text = f"{p_value:.6f}"
+    proportion_text = (
+        "N/A"
+        if sign_test["proportion_above_0_5"] is None
+        else (
+            f"{sign_test['proportion_above_0_5']:.6f} "
+            f"[{sign_test['proportion_above_0_5_ci95_lo']:.6f}, "
+            f"{sign_test['proportion_above_0_5_ci95_hi']:.6f}]"
+        )
+    )
+    excess_text = (
+        "N/A"
+        if sign_test["excess_above_0_5"] is None
+        else (
+            f"{sign_test['excess_above_0_5']:.6f} "
+            f"[{sign_test['excess_above_0_5_ci95_lo']:.6f}, "
+            f"{sign_test['excess_above_0_5_ci95_hi']:.6f}]"
+        )
+    )
+    inference_table = Table(
+        title="Exact Sign Test (Observed Complete-case Unique Names)",
+        box=box.SIMPLE,
+    )
+    inference_table.add_column("Metric", style="cyan")
+    inference_table.add_column("Value", style="magenta", justify="right")
+    inference_table.add_row("Null", sign_test["null"])
+    inference_table.add_row("Scope", sign_test["scope"])
+    inference_table.add_row("Caveat", sign_test["caveat"])
+    inference_table.add_row("Estimand", sign_test["estimand"])
+    inference_table.add_row("N (p_gf != 0.5)", f"{sign_test['non_tie_n']:,}")
+    inference_table.add_row("Above 0.5", f"{sign_test['above_0_5']:,}")
+    inference_table.add_row("Below 0.5", f"{sign_test['below_0_5']:,}")
+    inference_table.add_row("Ties at 0.5 excluded", f"{sign_test['ties_at_0_5_excluded']:,}")
+    inference_table.add_row("Proportion above 0.5 (95% exact CI)", proportion_text)
+    inference_table.add_row("Proportion above 0.5 minus 0.5", excess_text)
+    inference_table.add_row("Exact binomial p-value (two-sided)", p_value_text)
+    console.print(inference_table)
 
     bucket_table = Table(title="p_gf Buckets (Mode-3 Selected Names)", box=box.SIMPLE)
     bucket_table.add_column("Bucket", style="cyan")
