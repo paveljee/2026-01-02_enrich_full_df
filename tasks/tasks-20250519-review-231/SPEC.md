@@ -151,6 +151,28 @@ should assume that the ones from
 the higher tier ktp.partition have been resolved.
 so, out of the remaining ones,
 we want to see  the ones that
+fully qualify under all xlsx conditions,
+fully qualify under all docx conditions, 
+but have zero or >1 sciscinet innerdict,
+**in the order from fewer sciscinet innerdicts
+to more sciscinet innerdicts**
+(that is, the fewer the count of
+sciscinet innerdicts the higher
+the ktp partition priority because
+those with fewer sciscinet innerdicts
+will be easier for human to review and
+manually resolve).
+accordingly,
+this involves one flag which we'll call:
+`ktp.partition_flag_sciscinet_count`
+which contains count of sciscinet innerdicts and
+so we give it type of int rather than bool.
+centralize this label in vars.py.
+1. finally,
+exclusive of first two higher tier ktp partitions,
+we want to see all the remaining ones,
+that is, remaining should be only those that
+fully qualify under all xlsx and sciscinet but
 fail to qualify due to docx innerdict issues
 (i.e., any empty required ktp.table_1_* value or
 no docx innerdict present at all).
@@ -171,35 +193,30 @@ in which ALL required ktp.table_1_* value are non-empty,
 then this is sufficient for
 `ktp.partition_flag_docx_table_1_required_all` and
 it is set to true.
-to be sure,
-all outerdict entries in this partition
-should qualify under
-all the other subset 1 conditions
-except the docx bits.
-1. finally,
-exclusive of first two higher tier ktp partitions,
-we want to see all the remaining ones,
-that is, remaining should be only those that have
-zero or >1 sciscinet innerdict,
-**in the order from fewer sciscinet innerdicts
-to more sciscinet innerdicts**
-(that is, the fewer the count of
-sciscinet innerdicts the higher
-the ktp partition priority because
-those with fewer sciscinet innerdicts
-will be easier for human to review and
-manually resolve).
-accordingly,
-this involves one flag which we'll call:
-`ktp.partition_flag_sciscinet_count`
-which contains count of sciscinet innerdicts and
-so we give it type of int rather than bool.
-centralize this label in vars.py.
-to be sure,
-all outerdict entries in this partition
-should qualify under
-all the other subset 1 conditions
-except the sciscinet count.
+
+so to recap,
+the logical order is:
+- resolve those
+only encumbered by xlsx, and
+here we go they are complete -
+dispatch them downstream;
+- of those that remain,
+resolve those only encumbered by sciscinet
+(first resolve those that have fewer
+sciscinet innerdicts to check, then
+those that have progressively more) -
+dispatch downstream;
+- and so only those remain that
+don't have any docx innerdicts
+with all required fields filled in,
+or no docx innerdicts at all;
+these will need to undergo
+data augmentation before they can be
+dispatched downstream, unlike
+the higher tiers that only required
+conflict resolution based on existing data, and
+so these are the most complex ones
+kept for the end.
 
 as a result,
 we should get a nice breakdown
