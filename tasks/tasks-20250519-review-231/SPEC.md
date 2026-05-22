@@ -376,60 +376,98 @@ you take it from there.
 
 ## how ai understood the spec
 
-### review of revised human section
+### implementation reading
 
-The revised human section resolves the docx ambiguity: the intended
-namekey-level docx rule is the current step-10 rule, namely that a
-namekey passes `ktp.partition_flag_docx_table_1_required_all` when it has
-at least one docx innerdict whose required `ktp.table_1_*` values are all
-non-empty. It is not necessary for every docx innerdict under that
-namekey to be complete.
+Step 10 should be refactored without making the new artifact names or
+code path specific to `card_subset_mode = 2`. The current run uses mode
+2, so the verified output is the 231-namekey subset-2 resolution queue,
+but the implementation should not create mode-2-specific schema names or
+otherwise assume that the REPL can only be run in mode 2.
 
-The revised human section also makes the partitioning hierarchical. The
-phrase "all other subset 1 conditions except..." should be interpreted
-relative to the queue tier:
+The partition/breakdown/review-view logic described here applies only
+when `card_subset_mode` is 1 or 2, because it is specifically about
+subset-1 qualification and the subset-2 complement. For any other
+supported `card_subset_mode`, keep the existing card-selection/building
+behavior and skip this partition artifact logic entirely.
 
-- xlsx tier: actual docx and sciscinet conditions already pass; only xlsx
-  prevents subset 1.
-- docx tier: assume xlsx-tier problems have been resolved; actual
-  sciscinet condition passes; docx prevents subset 1.
-- sciscinet tier: assume xlsx/docx-tier problems have been resolved;
-  sciscinet count prevents subset 1.
+Separate three concerns:
 
-This interpretation is necessary to account for all 231 subset-2
-namekeys. If "all other conditions" is read literally against the raw DB
-flags for every tier, only 133 single-cause subset-2 namekeys are covered
-and 98 multi-cause namekeys are orphaned. Do not implement that literal
-single-cause-only interpretation.
+1. Compute per-namekey rule state for all outerdict keys: xlsx state,
+   docx state, and sciscinet count.
+2. Select the card subset using the existing `card_subset_mode` behavior.
+3. If the selected mode is 1 or 2, materialize partition artifacts:
+   subset-1 rows get the no-resolution sentinel, while subset-2 rows get
+   a manual-resolution `ktp.partition` bucket. If the selected mode is
+   anything else, stop after normal card subset selection/building.
 
-### confirmed repo/db context
+For the current mode-2 run, every selected row is a subset-2 row and the
+queue priority is:
 
-- I did not run `src.repl`; I queried `data/scisci_process.duckdb`
-  directly in read-only mode.
-- Current `config.repl.json` has `card_subset_mode = 2` and
+1. xlsx tier: dispatch after resolving only xlsx match ambiguity.
+2. sciscinet tier: dispatch after resolving sciscinet ambiguity; sort by
+   fewer sciscinet innerdicts first.
+3. docx tier: keep for last because these require data augmentation, not
+   only conflict resolution over existing rows.
+
+Within the sciscinet tier, ties on `ktp.partition_flag_sciscinet_count`
+should put raw sciscinet-only failures before raw xlsx+sciscinet
+failures. Raw flags stay visible; `ktp.partition` is the selected queue
+bucket, not a lossless encoding of every raw problem.
+
+### source-of-truth semantics
+
+Reuse existing step-10 semantics rather than creating parallel rule
+logic. Current subset 1 is:
+
+```text
+xlsx_ok and docx_ok and sciscinet_ok
+```
+
+where:
+
+- `xlsx_ok`: at least one present `ktp.xlsx_match` payload exists, and
+  all present xlsx match payloads are exact. Reuse the behavior currently
+  implemented by `_has_present_xlsx_match_payload` and
+  `_is_exact_xlsx_match_payload` in `src/steps/step_10_build_cards.py`.
+- `docx_ok`: at least one docx innerdict exists, and at least one docx
+  innerdict has all required `ktp.table_1_*` values non-empty. Reuse the
+  current `_has_complete_docx_table_fields` behavior.
+- `sciscinet_ok`: exactly one sciscinet innerdict exists under the
+  namekey, using the same sciscinet row detection/count source as step
+  10.
+
+Keep repo-owned definitions centralized. In particular, docx requiredness
+should derive from `KTP_DOCX_TABLE_1_PREFIX`,
+`KTP_DOCX_OPTIONAL_EMPTY_COLS`, and
+`KTP_TABLE_1_EMPTY_VALUE_PLACEHOLDERS` in `src/helpers/vars.py`, not from
+a duplicated literal required-column list.
+
+### repo/db context
+
+- I did not run `src.repl`; all DB checks were direct read-only queries
+  against `data/scisci_process.duckdb`.
+- Current `config.repl.json` uses `card_subset_mode = 2` and
   `db_file = data/scisci_process.duckdb`.
-- Step 10 is `src/steps/step_10_build_cards.py`. The current subset
-  logic is in the nested `_filtered_outer_dict()` helper and works from
-  `context.outer_dict`, which by step 10 contains rows appended from:
+- Step 10 is `src/steps/step_10_build_cards.py`; it currently filters
+  `context.outer_dict`, which is populated by earlier steps from:
   - `xlsx_innerdicts`
   - `docx_innerdicts`
-  - `ssn_innerdicts` during a fresh run
-- Existing persistent source tables relevant to this task are:
+  - `ssn_innerdicts`
+- Useful persisted DB sources for this refactor are:
   - `outerdict_stub` / `outerdict_name_keys`
   - `xlsx_innerdicts`
   - `docx_innerdicts`
   - `ssn_innerdicts`
-  - row-wise output views/tables such as `xlsx_output`, `docx_output`,
-    and `ssn_parquet_output`
-- The row-wise `xlsx_output` and `docx_output` views depend on
-  `unaccent`; in the real pipeline connection this is loaded by
-  `PipelineManager.connect_db()`. For the audit counts below, I used the
-  persisted innerdict tables so the counts do not depend on re-running
-  those views.
+  - `xlsx_output`, `docx_output`, and `ssn_parquet_output` for review-row
+    expansion
+- `xlsx_output` and `docx_output` depend on `unaccent`, which is loaded
+  in normal pipeline connections by `PipelineManager.connect_db()`. The
+  audit counts below used persisted innerdict tables, so they do not
+  depend on executing those views in an ad hoc connection.
 
-### confirmed counts
+### verified mode-2 counts
 
-Using the current subset semantics from `step_10_build_cards.py`:
+Current DB totals under current step-10 semantics:
 
 | item | count |
 |---|---:|
@@ -443,229 +481,250 @@ Using the current subset semantics from `step_10_build_cards.py`:
 | sciscinet exactly-one pass | 153 |
 | sciscinet exactly-one fail | 154 |
 
-Raw subset-2 failure combinations in the DB are:
+Raw subset-2 failure combinations:
 
 | raw failing condition(s) | namekeys |
 |---|---:|
 | xlsx only | 31 |
-| docx only | 36 |
 | sciscinet only | 66 |
-| xlsx + docx | 10 |
+| docx only | 36 |
 | xlsx + sciscinet | 34 |
+| xlsx + docx | 10 |
 | docx + sciscinet | 47 |
 | xlsx + docx + sciscinet | 7 |
 | total subset 2 | 231 |
 
-The requested hierarchical queue therefore breaks down as:
+Mode-2 queue implied by the human section:
 
 | ktp.partition meaning | included raw groups | namekeys |
 |---|---|---:|
 | xlsx tier | xlsx only | 31 |
-| docx tier | docx only; xlsx + docx | 46 |
-| sciscinet tier | all raw groups with sciscinet failure | 154 |
+| sciscinet tier | sciscinet only; xlsx + sciscinet | 100 |
+| docx tier | docx only; xlsx + docx; docx + sciscinet; xlsx + docx + sciscinet | 100 |
 | total |  | 231 |
 
-The 82 xlsx failures are still useful as an audit flag, but only 31 are
-xlsx-only queue entries. The other xlsx failures belong to later queue
-tiers once the hierarchy is applied:
+Sciscinet-tier tie-break classes:
 
-| bucket containing raw xlsx failures | namekeys |
+| class | namekeys |
 |---|---:|
-| xlsx tier | 31 |
-| docx tier | 10 |
-| sciscinet tier | 41 |
-| total raw xlsx failures | 82 |
+| sciscinet only | 66 |
+| xlsx + sciscinet | 34 |
+| total | 100 |
 
-### partition semantics to implement
+### table fields and constants
 
-The new breakdown table should contain exactly the 231 subset-2 namekeys,
-one row per namekey, with all partition flags persisted as audit columns.
-The review view may expand to multiple rows per namekey.
+Use mode-agnostic table/view names centralized in
+`src/helpers/schema.py`. The human spec requires a persistent table and
+a review view, but does not prescribe their literal names. Choose
+generic, current-mode-neutral constants that fit the existing
+`schema.py` naming pattern, for example `CARD_PARTITION_TABLE` and
+`CARD_PARTITION_REVIEW_VIEW`. Do not use `subset2_*` names: the same
+code path should run under any supported `card_subset_mode`.
 
-Use `ktp.partition` as the mutually exclusive queue bucket produced by
-the hierarchy. Recommended values:
-
-| value | meaning | priority |
-|---:|---|---:|
-| 1 | xlsx tier | 1 |
-| 2 | docx tier | 2 |
-| 4 | sciscinet tier | 3 |
-
-Keep raw flags separate. They are audit inputs and may reveal multi-cause
-failure; `ktp.partition` is the dispatch queue bucket. Do not compute the
-queue by naively OR-ing every raw problem bit, because that loses the
-human-requested priority order and the partition-specific row source.
-
-Per-namekey flags:
-
-- `ktp.partition_flag_xlsx_any`
-  - true when at least one present/nonblank `ktp.xlsx_match` payload
-    exists under the namekey.
-  - In the current DB this is true for all 307 namekeys, but implement
-    the false case because the spec asks for it.
-- `ktp.partition_flag_xlsx_non_exact_any`
-  - true when any present `ktp.xlsx_match` payload is non-exact by the
-    existing `_is_exact_xlsx_match_payload()` rules.
-  - Exactness means source-key first-name token list equals matched HCR
-    first-name token list, and source-key last-name norm equals matched
-    HCR last-name norm.
-  - Invalid JSON, non-dict JSON, or missing normalized source-key tokens
-    should be treated as non-exact, matching current step 10 behavior.
-- `ktp.partition_flag_docx_any`
-  - true when at least one docx innerdict exists under the namekey.
-  - In the current DB this is true for all 307 namekeys, but implement
-    the false case.
-- `ktp.partition_flag_docx_table_1_required_all`
-  - true when there is at least one docx innerdict whose required
-    `ktp.table_1_*` fields are all non-empty.
-  - Required fields are all `ktp.table_1_*` columns except:
-    `ktp.table_1_socioeconomic_status`,
-    `ktp.table_1_race_ethnicity_language_culture`,
-    `ktp.table_1_topics`,
-    `ktp.table_1_footnotes`,
-    `ktp.table_1_comments`.
-  - Empty means NULL, blank string, or one of the existing placeholders
-    in `KTP_TABLE_1_EMPTY_VALUE_PLACEHOLDERS`.
-  - This is now explicitly confirmed by the human section and matches
-    current step 10. The earlier Tom Beeckman/Zhiqun Lin ambiguity is no
-    longer a spec ambiguity.
-- `ktp.partition_flag_sciscinet_count`
-  - integer count of sciscinet innerdicts under the namekey, using the
-    same sciscinet row source as current step 10. In the persisted DB,
-    this is `COUNT(*)` from `ssn_innerdicts` grouped by `ktp.source_key`.
-
-Hierarchical partition assignment:
-
-```text
-xlsx_ok = xlsx_any and not xlsx_non_exact_any
-docx_ok = docx_any and docx_table_1_required_all
-sciscinet_ok = sciscinet_count == 1
-
-subset1_ok = xlsx_ok and docx_ok and sciscinet_ok
-
-if subset1_ok:
-    exclude from the new table/view
-elif not xlsx_ok and docx_ok and sciscinet_ok:
-    ktp.partition = 1  # xlsx tier
-elif not docx_ok and sciscinet_ok:
-    ktp.partition = 2  # docx tier; xlsx may already be bad, but is higher-tier
-else:
-    ktp.partition = 4  # sciscinet tier; xlsx/docx raw flags remain visible
-```
-
-This is equivalent to applying the queue in priority order: first extract
-xlsx-only blockers, then extract docx blockers after treating xlsx as
-resolved, then send all remaining subset-2 entries to sciscinet ordered
-by sciscinet count.
-
-### implementation shape
-
-Add constants in `src/helpers/vars.py`:
+Add/centralize these labels in `src/helpers/vars.py`:
 
 - `KTP_PARTITION_COL = "ktp.partition"`
 - `KTP_PARTITION_FLAG_XLSX_NON_EXACT_ANY_COL =
   "ktp.partition_flag_xlsx_non_exact_any"`
 - `KTP_PARTITION_FLAG_XLSX_ANY_COL =
   "ktp.partition_flag_xlsx_any"`
+- `KTP_PARTITION_FLAG_SCISCINET_COUNT_COL =
+  "ktp.partition_flag_sciscinet_count"`
 - `KTP_PARTITION_FLAG_DOCX_TABLE_1_REQUIRED_ALL_COL =
   "ktp.partition_flag_docx_table_1_required_all"`
 - `KTP_PARTITION_FLAG_DOCX_ANY_COL =
   "ktp.partition_flag_docx_any"`
-- `KTP_PARTITION_FLAG_SCISCINET_COUNT_COL =
-  "ktp.partition_flag_sciscinet_count"`
 - `KTP_FF_DISCARD_COL = "ktp.ff_discard"`
 - `KTP_FF_NOTE_COL = "ktp.ff_note"`
-- Optional but useful: partition value constants for xlsx/docx/sciscinet
-  and a display/order mapping.
 
-Add table/view constants in `src/helpers/schema.py`; suggested names:
+The persistent breakdown table should be one row per selected namekey
+and should include, at minimum, `ktp.source_key`, `ktp.partition`, and
+all five `ktp.partition_flag_*` columns named above. `card_subset_mode`
+metadata is optional but useful for later inspection because the same
+generic table name is reused across modes.
 
-- `SUBSET2_PARTITION_TABLE = "subset2_partitions"`
-- `SUBSET2_PARTITION_REVIEW_VIEW = "subset2_partition_review"`
+Use named partition-value constants in `src/helpers/vars.py` or the
+nearest existing constants module. The human spec requires bit-like,
+mutually exclusive queue buckets but does not prescribe exact numeric
+values. Define named values for these meanings:
+
+| partition meaning | use |
+|---|---|
+| xlsx tier | selected row is queued for xlsx-only manual resolution |
+| sciscinet tier | selected row is queued for sciscinet manual resolution |
+| docx tier | selected row is queued for docx/data-augmentation work |
+| no-resolution sentinel | selected row already satisfies subset 1, relevant only for modes that select such rows |
+
+The resolution values should be bit-like labels for mutually exclusive
+queue buckets. Do not OR the raw flags together: raw conditions are not
+mutually exclusive, and `ktp.partition_flag_sciscinet_count` is an
+integer count. Tests should assert partition meanings through the named
+constants rather than literal numeric values.
+
+### partition assignment
+
+Compute raw flags per namekey, select rows using the configured
+`card_subset_mode`, then assign one partition value to each selected row:
+
+```text
+xlsx_ok = xlsx_any and not xlsx_non_exact_any
+docx_ok = docx_any and docx_table_1_required_all
+sciscinet_ok = sciscinet_count == 1
+subset1_ok = xlsx_ok and docx_ok and sciscinet_ok
+
+if subset1_ok:
+    ktp.partition = NO_RESOLUTION_PARTITION  # selected but no resolution needed
+elif not xlsx_ok and docx_ok and sciscinet_ok:
+    ktp.partition = XLSX_PARTITION
+elif docx_ok and not sciscinet_ok:
+    ktp.partition = SCISCINET_PARTITION
+else:
+    ktp.partition = DOCX_PARTITION
+```
+
+For the current mode-2 run, no subset-1 rows are selected, so the table
+contains 231 rows with counts 31 xlsx, 100 sciscinet, and 100 docx. If
+mode 1 is selected, selected rows satisfy subset 1 and should receive
+the no-resolution sentinel. Modes other than 1 or 2 should not write the
+partition table/view, should not apply partition ordering, and should not
+write mode-specific schema objects such as `subset2_*`.
+
+### implementation shape
 
 In `src/steps/step_10_build_cards.py`:
 
-- Pull the existing xlsx exactness, xlsx-present, docx required-field,
-  and sciscinet-count helpers out of `_filtered_outer_dict()` enough that
-  both card filtering and partition materialization use one definition.
-- Before building cards, compute a partition dataframe/table for all
-  namekeys and persist only the non-subset-1 rows to
-  `SUBSET2_PARTITION_TABLE`.
-- Keep the existing card subset behavior unless the product decision is
-  to replace cards entirely. With current config, cards should still be
-  built from subset mode 2, and the new table/view/CSV are additional
-  step-10 artifacts.
-- Create `SUBSET2_PARTITION_REVIEW_VIEW` with the same queue ordering and
-  the human-review columns requested in the human section.
-- Load `SELECT * FROM SUBSET2_PARTITION_REVIEW_VIEW` into a DataFrame and
-  include it in `StepResult.artifacts`, e.g. under
-  `subset2_partition_review_df`; `run_step.dump_artifacts()` will then
-  dump it as a CSV step artifact automatically.
+- Extract the current subset-rule helpers out of `_filtered_outer_dict()`
+  enough that card filtering and partition materialization use the same
+  definitions.
+- For modes 1 and 2, compute rule/partition rows before card building
+  and persist rows for the currently selected card subset to the generic
+  partition table constant in `src/helpers/schema.py`.
+- For modes other than 1 or 2, skip partition-row persistence and review
+  view creation; card generation should behave as it does now.
+- Preserve existing card generation behavior unless separately changed;
+  with the current config, cards are still built from subset mode 2.
+- For modes 1 and 2, create the generic partition review view constant
+  in `src/helpers/schema.py` and return its DataFrame in
+  `StepResult.artifacts`, e.g. as `card_partition_review_df`, so the
+  existing `run_step.dump_artifacts()` path writes the CSV artifact.
 
 Recommended ordering:
 
 ```text
 ORDER BY
-    partition priority: xlsx, docx, sciscinet,
+    partition priority: xlsx, sciscinet, docx, no-resolution,
     CASE WHEN partition is sciscinet THEN sciscinet_count ELSE 0 END,
+    CASE WHEN partition is sciscinet AND xlsx_ok THEN 0 ELSE 1 END,
     draw ordering compatible with shared.draw_sort_ctes_sql(),
     ktp.source_key,
     ktp.filename,
     ktp.fragment
 ```
 
-The sciscinet tier must be sorted from fewer sciscinet innerdicts to
-more. Current subset-2 sciscinet counts include 39 namekeys with zero
-sciscinet rows, 49 with two, 18 with three, and a long tail up to very
-large ambiguous candidate counts.
+The second sciscinet CASE implements the same-count tie-break: raw
+sciscinet-only rows first, raw xlsx+sciscinet rows second. Current
+sciscinet-tier distribution is 28 namekeys with zero sciscinet rows, 35
+with two, 15 with three, and a long tail with larger candidate counts.
 
-### review view row source
+### review view
 
-The breakdown table is one row per subset-2 namekey. The review view may
-have multiple rows per namekey.
+The breakdown table is one row per selected namekey. The review view may
+have multiple rows per namekey, but its columns should follow the human
+spec's requested order exactly:
 
-Use the row source that matches the mutually exclusive queue partition:
+1. `ktp.source_key`
+2. `ktp.partition`
+3. `ktp.filename`
+4. `ktp.fragment`
+5. `ktp.fragment_type`
+6. `ktp.ff_discard`
+7. `ktp.ff_note`
+8. `ktp.draw_number`
+9. `ktp.first_name`
+10. `ktp.last_name`
+11. `ssnad.display_name`
+12. `ssnad.display_name_alternatives`
+13. `hcr.category`
+14. `ktp.ssn_field_display_names_list`
+15. `ktp.hcr_world_bank_economies`
+16. `ktp.hcr_world_bank_economies_match`
+17. `ktp.hcr_primary_affiliations`
+18. `ktp.hcr_secondary_affiliations`
+19. `ktp.ssn_top_institutions`
+20. xlsx partition flags:
+    `ktp.partition_flag_xlsx_non_exact_any`,
+    `ktp.partition_flag_xlsx_any`
+21. `ktp.xlsx_match`
+22. sciscinet count flag: `ktp.partition_flag_sciscinet_count`
+23. `ktp.ssnad_match`
+24. `ktp.ssn_sum_hit_1pct`
+25. `ssnad.works_count`
+26. `ssnad.cited_by_count`
+27. `ssnad.works_api_url`
+28. docx partition flags:
+    `ktp.partition_flag_docx_table_1_required_all`,
+    `ktp.partition_flag_docx_any`
+29. `ktp.docx_match`
+30. all required `ktp.table_1_*` columns, derived from the current repo
+    constants/schema rather than a duplicated literal list
 
-- xlsx tier: expand matching rows from `xlsx_output` or flattened
-  `xlsx_innerdicts`; include the xlsx filename/fragment and HCR fields.
-- docx tier: expand matching rows from `docx_output` or flattened
-  `docx_innerdicts`; include all required `ktp.table_1_*` columns and
-  `ktp.docx_match`.
-- sciscinet tier: expand rows from `ssn_parquet_output` or
-  `ssn_innerdicts`; include `ktp.ssnad_match`, `ktp.ssn_sum_hit_1pct`,
-  `ssnad.works_count`, `ssnad.cited_by_count`, and
-  `ssnad.works_api_url`.
-- sciscinet count zero: still emit one placeholder review row so the
-  source key is not lost. Populate source/name/draw and partition flags;
-  leave filename/fragment and ssnad-specific fields NULL/blank.
+Every explicitly named human-spec column above should be emitted under
+that exact label. Only the literal expansion of item 30 is delegated to
+repo-owned definitions, because the human spec names the column family
+but not the required-column list.
 
-For the human-editable columns, use empty typed fields in the view:
+For human-editable fields, add empty typed columns in the requested
+positions:
 
 - `CAST(NULL AS BOOLEAN) AS "ktp.ff_discard"`
 - `CAST(NULL AS VARCHAR) AS "ktp.ff_note"`
 
-If the view expands rows this way, the current DB would produce about
-2,873 review rows: 234 xlsx-tier rows, 46 docx-tier rows, and 2,593
-sciscinet-tier rows including one placeholder for each zero-count
-sciscinet namekey.
+Values for row-scoped fields should come from the row source implied by
+`ktp.partition`:
+
+- xlsx tier: expand matching rows from `xlsx_output` or flattened
+  `xlsx_innerdicts`; populate xlsx/HCR fields where available.
+- sciscinet tier: expand rows from `ssn_parquet_output` or
+  `ssn_innerdicts`; populate sciscinet/OpenAlex fields where available.
+- sciscinet count zero: emit one placeholder review row so the source key
+  stays visible; populate source/name/draw/flags and leave row-specific
+  sciscinet fields empty.
+- docx tier: expand matching rows from `docx_output` or flattened
+  `docx_innerdicts`; populate docx/table-1 fields where available. If a
+  future DB has no docx innerdict for a docx-tier namekey, emit one
+  placeholder row with source/name/draw/flags.
+- no-resolution rows, when mode 1 is selected, can be omitted from the
+  review view or placed after all resolution buckets; mode-2 output is
+  unaffected because mode 2 selects only resolution rows.
+
+With the current mode-2 DB, this expansion would produce about 1,250
+review rows: 234 xlsx-tier rows, 916 sciscinet-tier rows/placeholders,
+and 100 docx-tier rows.
 
 ### tests to add
 
-Add focused tests around the extracted partition helper rather than only
-snapshotting CSV output:
+Add focused tests around the extracted partition helper and review view:
 
-- subset1 namekey is excluded from the new partition table.
-- xlsx-only failure becomes partition 1.
-- docx-only failure with xlsx pass becomes partition 2.
-- combined xlsx+docx failure with sciscinet count 1 becomes partition 2,
-  not partition 1.
-- sciscinet count 0 and count >1 become partition 4 and sort by count
-  ascending.
-- combined xlsx+sciscinet, docx+sciscinet, and xlsx+docx+sciscinet
-  failures become partition 4, with raw xlsx/docx flags still visible.
+- mode-2 run produces 231 partition rows for the fixture/current-style
+  subset-2 inputs.
+- subset1 rows get no-resolution partition value when selected by a mode
+  that includes subset 1.
+- raw xlsx-only failure becomes the xlsx partition value.
+- raw sciscinet-only failure becomes the sciscinet partition value and
+  sorts by count.
+- raw xlsx+sciscinet failure becomes the sciscinet partition value, keeps
+  xlsx flags visible, and trails sciscinet-only rows with the same
+  sciscinet count.
+- raw docx-only failure becomes the docx partition value.
+- raw xlsx+docx, docx+sciscinet, and xlsx+docx+sciscinet failures become
+  the docx partition value with raw xlsx/sciscinet flags still visible.
+- sciscinet count 0 emits a placeholder review row and sorts before count
+  2+ rows.
 - missing xlsx/docx cases set `*_any` flags false.
 - invalid/non-dict xlsx match payloads count as non-exact.
 - multi-docx-row case preserves current subset semantics: if at least
   one docx row is complete, `docx_table_1_required_all` is true.
+- docx required-field tests derive required columns from repo constants,
+  not a duplicated literal list.
 - artifact dumping includes the review DataFrame as a CSV through the
   existing `run_step.dump_artifacts()` path.
