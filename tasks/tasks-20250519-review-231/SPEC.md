@@ -352,6 +352,32 @@ you take it from there.
 
 ## how ai understood the spec
 
+### review of revised human section
+
+The revised human section resolves the docx ambiguity: the intended
+namekey-level docx rule is the current step-10 rule, namely that a
+namekey passes `ktp.partition_flag_docx_table_1_required_all` when it has
+at least one docx innerdict whose required `ktp.table_1_*` values are all
+non-empty. It is not necessary for every docx innerdict under that
+namekey to be complete.
+
+The revised human section also makes the partitioning hierarchical. The
+phrase "all other subset 1 conditions except..." should be interpreted
+relative to the queue tier:
+
+- xlsx tier: actual docx and sciscinet conditions already pass; only xlsx
+  prevents subset 1.
+- docx tier: assume xlsx-tier problems have been resolved; actual
+  sciscinet condition passes; docx prevents subset 1.
+- sciscinet tier: assume xlsx/docx-tier problems have been resolved;
+  sciscinet count prevents subset 1.
+
+This interpretation is necessary to account for all 231 subset-2
+namekeys. If "all other conditions" is read literally against the raw DB
+flags for every tier, only 133 single-cause subset-2 namekeys are covered
+and 98 multi-cause namekeys are orphaned. Do not implement that literal
+single-cause-only interpretation.
+
 ### confirmed repo/db context
 
 - I did not run `src.repl`; I queried `data/scisci_process.duckdb`
@@ -393,35 +419,47 @@ Using the current subset semantics from `step_10_build_cards.py`:
 | sciscinet exactly-one pass | 153 |
 | sciscinet exactly-one fail | 154 |
 
-The requested mutually exclusive subset-2 queue should break down as:
+Raw subset-2 failure combinations in the DB are:
 
-| ktp.partition meaning | namekeys |
+| raw failing condition(s) | namekeys |
 |---|---:|
-| xlsx tier | 31 |
-| docx tier | 46 |
-| sciscinet tier | 154 |
-| total | 231 |
+| xlsx only | 31 |
+| docx only | 36 |
+| sciscinet only | 66 |
+| xlsx + docx | 10 |
+| xlsx + sciscinet | 34 |
+| docx + sciscinet | 47 |
+| xlsx + docx + sciscinet | 7 |
+| total subset 2 | 231 |
 
-Important audit detail: the 82 xlsx failures are not all xlsx-only
-resolution cases. Under the mutually exclusive queue, they distribute as:
+The requested hierarchical queue therefore breaks down as:
 
-| bucket containing xlsx failures | namekeys |
+| ktp.partition meaning | included raw groups | namekeys |
+|---|---|---:|
+| xlsx tier | xlsx only | 31 |
+| docx tier | docx only; xlsx + docx | 46 |
+| sciscinet tier | all raw groups with sciscinet failure | 154 |
+| total |  | 231 |
+
+The 82 xlsx failures are still useful as an audit flag, but only 31 are
+xlsx-only queue entries. The other xlsx failures belong to later queue
+tiers once the hierarchy is applied:
+
+| bucket containing raw xlsx failures | namekeys |
 |---|---:|
 | xlsx tier | 31 |
 | docx tier | 10 |
 | sciscinet tier | 41 |
-| total xlsx failures | 82 |
-
-So the implementation should keep the 82 fail count as an audit flag,
-but only 31 namekeys belong in the first/manual xlsx-only partition.
+| total raw xlsx failures | 82 |
 
 ### partition semantics to implement
 
-The new table should contain exactly the 231 subset-2 namekeys, one row
-per namekey, with all partition flags persisted as audit columns.
+The new breakdown table should contain exactly the 231 subset-2 namekeys,
+one row per namekey, with all partition flags persisted as audit columns.
+The review view may expand to multiple rows per namekey.
 
-Interpret `ktp.partition` as the mutually exclusive queue bucket, not as
-a raw OR of every boolean/int flag. A simple ordered bit code is fine:
+Use `ktp.partition` as the mutually exclusive queue bucket produced by
+the hierarchy. Recommended values:
 
 | value | meaning | priority |
 |---:|---|---:|
@@ -429,8 +467,10 @@ a raw OR of every boolean/int flag. A simple ordered bit code is fine:
 | 2 | docx tier | 2 |
 | 4 | sciscinet tier | 3 |
 
-Keep the raw flags separate so the bit/flag state can be audited without
-overloading `ktp.partition`.
+Keep raw flags separate. They are audit inputs and may reveal multi-cause
+failure; `ktp.partition` is the dispatch queue bucket. Do not compute the
+queue by naively OR-ing every raw problem bit, because that loses the
+human-requested priority order and the partition-specific row source.
 
 Per-namekey flags:
 
@@ -452,10 +492,8 @@ Per-namekey flags:
   - In the current DB this is true for all 307 namekeys, but implement
     the false case.
 - `ktp.partition_flag_docx_table_1_required_all`
-  - to preserve the confirmed subset-2 count of 231, interpret this in
-    line with current subset 1 logic: true when there is at least one
-    docx innerdict whose required `ktp.table_1_*` fields are all
-    non-empty.
+  - true when there is at least one docx innerdict whose required
+    `ktp.table_1_*` fields are all non-empty.
   - Required fields are all `ktp.table_1_*` columns except:
     `ktp.table_1_socioeconomic_status`,
     `ktp.table_1_race_ethnicity_language_culture`,
@@ -464,42 +502,37 @@ Per-namekey flags:
     `ktp.table_1_comments`.
   - Empty means NULL, blank string, or one of the existing placeholders
     in `KTP_TABLE_1_EMPTY_VALUE_PLACEHOLDERS`.
-  - Caution: a literal "all docx rows must be complete" interpretation
-    changes the DB result to subset 2 = 232, not 231. The two affected
-    namekeys are Tom Beeckman and Zhiqun Lin. Do not switch to that
-    stricter interpretation without human sign-off.
+  - This is now explicitly confirmed by the human section and matches
+    current step 10. The earlier Tom Beeckman/Zhiqun Lin ambiguity is no
+    longer a spec ambiguity.
 - `ktp.partition_flag_sciscinet_count`
   - integer count of sciscinet innerdicts under the namekey, using the
     same sciscinet row source as current step 10. In the persisted DB,
     this is `COUNT(*)` from `ssn_innerdicts` grouped by `ktp.source_key`.
 
-Partition assignment:
+Hierarchical partition assignment:
 
 ```text
-subset1_ok =
-    sciscinet_count == 1
-    and xlsx_any
-    and not xlsx_non_exact_any
-    and docx_table_1_required_all
+xlsx_ok = xlsx_any and not xlsx_non_exact_any
+docx_ok = docx_any and docx_table_1_required_all
+sciscinet_ok = sciscinet_count == 1
+
+subset1_ok = xlsx_ok and docx_ok and sciscinet_ok
 
 if subset1_ok:
     exclude from the new table/view
-elif sciscinet_count == 1
-     and docx_table_1_required_all
-     and (not xlsx_any or xlsx_non_exact_any):
+elif not xlsx_ok and docx_ok and sciscinet_ok:
     ktp.partition = 1  # xlsx tier
-elif sciscinet_count == 1
-     and not docx_table_1_required_all:
-    ktp.partition = 2  # docx tier
+elif not docx_ok and sciscinet_ok:
+    ktp.partition = 2  # docx tier; xlsx may already be bad, but is higher-tier
 else:
-    ktp.partition = 4  # sciscinet tier
+    ktp.partition = 4  # sciscinet tier; xlsx/docx raw flags remain visible
 ```
 
-This assignment is intentionally hierarchical. Namekeys that have both
-xlsx and docx problems are docx-tier once the xlsx tier is conceptually
-handled, which is why 10 xlsx failures are counted in the docx tier.
-After excluding xlsx and docx tiers, the remainder is exactly the
-zero-or-many sciscinet bucket.
+This is equivalent to applying the queue in priority order: first extract
+xlsx-only blockers, then extract docx blockers after treating xlsx as
+resolved, then send all remaining subset-2 entries to sciscinet ordered
+by sciscinet count.
 
 ### implementation shape
 
@@ -567,7 +600,7 @@ large ambiguous candidate counts.
 The breakdown table is one row per subset-2 namekey. The review view may
 have multiple rows per namekey.
 
-Use the row source that matches the mutually exclusive partition:
+Use the row source that matches the mutually exclusive queue partition:
 
 - xlsx tier: expand matching rows from `xlsx_output` or flattened
   `xlsx_innerdicts`; include the xlsx filename/fragment and HCR fields.
@@ -599,11 +632,13 @@ snapshotting CSV output:
 
 - subset1 namekey is excluded from the new partition table.
 - xlsx-only failure becomes partition 1.
-- docx failure with xlsx pass becomes partition 2.
+- docx-only failure with xlsx pass becomes partition 2.
 - combined xlsx+docx failure with sciscinet count 1 becomes partition 2,
   not partition 1.
 - sciscinet count 0 and count >1 become partition 4 and sort by count
   ascending.
+- combined xlsx+sciscinet, docx+sciscinet, and xlsx+docx+sciscinet
+  failures become partition 4, with raw xlsx/docx flags still visible.
 - missing xlsx/docx cases set `*_any` flags false.
 - invalid/non-dict xlsx match payloads count as non-exact.
 - multi-docx-row case preserves current subset semantics: if at least
