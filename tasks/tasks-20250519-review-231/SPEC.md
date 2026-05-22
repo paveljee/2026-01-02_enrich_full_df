@@ -106,7 +106,8 @@ in the following priority subcategories,
 from highest to lowest
 (let's call the subcategories `ktp.partition` -
 put this into vars.py;
-assume that the value of this field
+assume that the value of this field,
+defined per namekey,
 will be the result of bitwise operation on
 over all `ktp.partition_flag_*` fields,
 each of which will be one bit 
@@ -212,20 +213,8 @@ from left to write:
 
 - ktp.source_key
 - ktp.partition
-- ktp.draw_number
-- ktp.first_name
-- ktp.last_name
-- ssnad.display_name
-- ssnad.display_name_alternatives
-- hcr.category
-- ktp.ssn_field_display_names_list
-- ktp.hcr_world_bank_economies
-- ktp.hcr_world_bank_economies_match
-- ktp.hcr_primary_affiliations
-- ktp.hcr_secondary_affiliations
-- ktp.ssn_top_institutions
 - note that the values of the
-  following three fields
+  following fields
   must depend on the mutual
   exclusiveness of ktp.partition
   as described above, so
@@ -243,17 +232,60 @@ from left to write:
     - ktp.filename
     - ktp.fragment
     - ktp.fragment_type
-- ktp xlsx partition flags
-- ktp.xlsx_match
-- ktp docx partition flags
-- ktp.docx_match
-- all required ktp table 1 cols
-- ktp sciscinet count flag
-- ktp.ssnad_match
-- ktp.ssn_sum_hit_1pct
-- ssnad.works_count
-- ssnad.cited_by_count
-- ssnad.works_api_url
+    - ktp.ff_discard
+    (this will be an empty field -
+    be sure to add label to vars.py;
+    ff_discard means bitwise var
+    true if this filename-fragment entry
+    is to be discarded;
+    humans will review entries and
+    put boolean values in this field;
+    these will be used up by some logic
+    that we'll implement in the future;
+    for now just offer this empty field)
+    - ktp.ff_note
+    (this will be an empty field -
+    be sure to add label to vars.py;
+    ff_note means text var where
+    humans may add any notes for
+    this filename-fragment entry;
+    humans will review entries and
+    put str values in this field;
+    these will be used up by some logic
+    that we'll implement in the future;
+    for now just offer this empty field)
+    - ktp.draw_number
+    - ktp.first_name
+    - ktp.last_name
+    - ssnad.display_name
+    - ssnad.display_name_alternatives
+    - hcr.category
+    - ktp.ssn_field_display_names_list
+    - ktp.hcr_world_bank_economies
+    - ktp.hcr_world_bank_economies_match
+    - ktp.hcr_primary_affiliations
+    - ktp.hcr_secondary_affiliations
+    - ktp.ssn_top_institutions
+    - ktp xlsx partition flags
+    (these are per namekey so
+    will be same for each innerdict
+    within outerdict entry)
+    - ktp.xlsx_match
+    - ktp docx partition flags
+    (these are per namekey so
+    will be same for each innerdict
+    within outerdict entry)
+    - ktp.docx_match
+    - all required ktp table 1 cols
+    - ktp sciscinet count flag
+    (this is per namekey so
+    will be same for each innerdict
+    within outerdict entry)
+    - ktp.ssnad_match
+    - ktp.ssn_sum_hit_1pct
+    - ssnad.works_count
+    - ssnad.cited_by_count
+    - ssnad.works_api_url
 
 this view should be dumped
 as csv step artifact.
