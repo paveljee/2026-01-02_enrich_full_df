@@ -328,12 +328,6 @@ from left to write:
     will be same for each innerdict
     within outerdict entry)
     - ktp.xlsx_match
-    - ktp docx partition flags
-    (these are per namekey so
-    will be same for each innerdict
-    within outerdict entry)
-    - ktp.docx_match
-    - all required ktp table 1 cols
     - ktp sciscinet count flag
     (this is per namekey so
     will be same for each innerdict
@@ -343,6 +337,12 @@ from left to write:
     - ssnad.works_count
     - ssnad.cited_by_count
     - ssnad.works_api_url
+    - ktp docx partition flags
+    (these are per namekey so
+    will be same for each innerdict
+    within outerdict entry)
+    - ktp.docx_match
+    - all required ktp table 1 cols
 
 this view should be dumped
 as csv step artifact.
