@@ -161,7 +161,14 @@ sciscinet innerdicts the higher
 the ktp partition priority because
 those with fewer sciscinet innerdicts
 will be easier for human to review and
-manually resolve).
+manually resolve;
+if ties need to be broken 
+for the same sciscinet innerdict count,
+move up entries with sciscinet only failure
+but without xlsx failure, and
+those that have both sciscinet and xlsx failure
+should trail but within the same
+sciscinet innerdict count).
 accordingly,
 this involves one flag which we'll call:
 `ktp.partition_flag_sciscinet_count`
