@@ -323,3 +323,261 @@ you take it from there.
 
 ## how ai understood the spec
 
+### confirmed repo/db context
+
+- I did not run `src.repl`; I queried `data/scisci_process.duckdb`
+  directly in read-only mode.
+- Current `config.repl.json` has `card_subset_mode = 2` and
+  `db_file = data/scisci_process.duckdb`.
+- Step 10 is `src/steps/step_10_build_cards.py`. The current subset
+  logic is in the nested `_filtered_outer_dict()` helper and works from
+  `context.outer_dict`, which by step 10 contains rows appended from:
+  - `xlsx_innerdicts`
+  - `docx_innerdicts`
+  - `ssn_innerdicts` during a fresh run
+- Existing persistent source tables relevant to this task are:
+  - `outerdict_stub` / `outerdict_name_keys`
+  - `xlsx_innerdicts`
+  - `docx_innerdicts`
+  - `ssn_innerdicts`
+  - row-wise output views/tables such as `xlsx_output`, `docx_output`,
+    and `ssn_parquet_output`
+- The row-wise `xlsx_output` and `docx_output` views depend on
+  `unaccent`; in the real pipeline connection this is loaded by
+  `PipelineManager.connect_db()`. For the audit counts below, I used the
+  persisted innerdict tables so the counts do not depend on re-running
+  those views.
+
+### confirmed counts
+
+Using the current subset semantics from `step_10_build_cards.py`:
+
+| item | count |
+|---|---:|
+| outerdict namekeys | 307 |
+| subset 1 namekeys | 76 |
+| subset 2 namekeys | 231 |
+| xlsx rule pass | 225 |
+| xlsx rule fail | 82 |
+| docx rule pass | 207 |
+| docx rule fail | 100 |
+| sciscinet exactly-one pass | 153 |
+| sciscinet exactly-one fail | 154 |
+
+The requested mutually exclusive subset-2 queue should break down as:
+
+| ktp.partition meaning | namekeys |
+|---|---:|
+| xlsx tier | 31 |
+| docx tier | 46 |
+| sciscinet tier | 154 |
+| total | 231 |
+
+Important audit detail: the 82 xlsx failures are not all xlsx-only
+resolution cases. Under the mutually exclusive queue, they distribute as:
+
+| bucket containing xlsx failures | namekeys |
+|---|---:|
+| xlsx tier | 31 |
+| docx tier | 10 |
+| sciscinet tier | 41 |
+| total xlsx failures | 82 |
+
+So the implementation should keep the 82 fail count as an audit flag,
+but only 31 namekeys belong in the first/manual xlsx-only partition.
+
+### partition semantics to implement
+
+The new table should contain exactly the 231 subset-2 namekeys, one row
+per namekey, with all partition flags persisted as audit columns.
+
+Interpret `ktp.partition` as the mutually exclusive queue bucket, not as
+a raw OR of every boolean/int flag. A simple ordered bit code is fine:
+
+| value | meaning | priority |
+|---:|---|---:|
+| 1 | xlsx tier | 1 |
+| 2 | docx tier | 2 |
+| 4 | sciscinet tier | 3 |
+
+Keep the raw flags separate so the bit/flag state can be audited without
+overloading `ktp.partition`.
+
+Per-namekey flags:
+
+- `ktp.partition_flag_xlsx_any`
+  - true when at least one present/nonblank `ktp.xlsx_match` payload
+    exists under the namekey.
+  - In the current DB this is true for all 307 namekeys, but implement
+    the false case because the spec asks for it.
+- `ktp.partition_flag_xlsx_non_exact_any`
+  - true when any present `ktp.xlsx_match` payload is non-exact by the
+    existing `_is_exact_xlsx_match_payload()` rules.
+  - Exactness means source-key first-name token list equals matched HCR
+    first-name token list, and source-key last-name norm equals matched
+    HCR last-name norm.
+  - Invalid JSON, non-dict JSON, or missing normalized source-key tokens
+    should be treated as non-exact, matching current step 10 behavior.
+- `ktp.partition_flag_docx_any`
+  - true when at least one docx innerdict exists under the namekey.
+  - In the current DB this is true for all 307 namekeys, but implement
+    the false case.
+- `ktp.partition_flag_docx_table_1_required_all`
+  - to preserve the confirmed subset-2 count of 231, interpret this in
+    line with current subset 1 logic: true when there is at least one
+    docx innerdict whose required `ktp.table_1_*` fields are all
+    non-empty.
+  - Required fields are all `ktp.table_1_*` columns except:
+    `ktp.table_1_socioeconomic_status`,
+    `ktp.table_1_race_ethnicity_language_culture`,
+    `ktp.table_1_topics`,
+    `ktp.table_1_footnotes`,
+    `ktp.table_1_comments`.
+  - Empty means NULL, blank string, or one of the existing placeholders
+    in `KTP_TABLE_1_EMPTY_VALUE_PLACEHOLDERS`.
+  - Caution: a literal "all docx rows must be complete" interpretation
+    changes the DB result to subset 2 = 232, not 231. The two affected
+    namekeys are Tom Beeckman and Zhiqun Lin. Do not switch to that
+    stricter interpretation without human sign-off.
+- `ktp.partition_flag_sciscinet_count`
+  - integer count of sciscinet innerdicts under the namekey, using the
+    same sciscinet row source as current step 10. In the persisted DB,
+    this is `COUNT(*)` from `ssn_innerdicts` grouped by `ktp.source_key`.
+
+Partition assignment:
+
+```text
+subset1_ok =
+    sciscinet_count == 1
+    and xlsx_any
+    and not xlsx_non_exact_any
+    and docx_table_1_required_all
+
+if subset1_ok:
+    exclude from the new table/view
+elif sciscinet_count == 1
+     and docx_table_1_required_all
+     and (not xlsx_any or xlsx_non_exact_any):
+    ktp.partition = 1  # xlsx tier
+elif sciscinet_count == 1
+     and not docx_table_1_required_all:
+    ktp.partition = 2  # docx tier
+else:
+    ktp.partition = 4  # sciscinet tier
+```
+
+This assignment is intentionally hierarchical. Namekeys that have both
+xlsx and docx problems are docx-tier once the xlsx tier is conceptually
+handled, which is why 10 xlsx failures are counted in the docx tier.
+After excluding xlsx and docx tiers, the remainder is exactly the
+zero-or-many sciscinet bucket.
+
+### implementation shape
+
+Add constants in `src/helpers/vars.py`:
+
+- `KTP_PARTITION_COL = "ktp.partition"`
+- `KTP_PARTITION_FLAG_XLSX_NON_EXACT_ANY_COL =
+  "ktp.partition_flag_xlsx_non_exact_any"`
+- `KTP_PARTITION_FLAG_XLSX_ANY_COL =
+  "ktp.partition_flag_xlsx_any"`
+- `KTP_PARTITION_FLAG_DOCX_TABLE_1_REQUIRED_ALL_COL =
+  "ktp.partition_flag_docx_table_1_required_all"`
+- `KTP_PARTITION_FLAG_DOCX_ANY_COL =
+  "ktp.partition_flag_docx_any"`
+- `KTP_PARTITION_FLAG_SCISCINET_COUNT_COL =
+  "ktp.partition_flag_sciscinet_count"`
+- `KTP_FF_DISCARD_COL = "ktp.ff_discard"`
+- `KTP_FF_NOTE_COL = "ktp.ff_note"`
+- Optional but useful: partition value constants for xlsx/docx/sciscinet
+  and a display/order mapping.
+
+Add table/view constants in `src/helpers/schema.py`; suggested names:
+
+- `SUBSET2_PARTITION_TABLE = "subset2_partitions"`
+- `SUBSET2_PARTITION_REVIEW_VIEW = "subset2_partition_review"`
+
+In `src/steps/step_10_build_cards.py`:
+
+- Pull the existing xlsx exactness, xlsx-present, docx required-field,
+  and sciscinet-count helpers out of `_filtered_outer_dict()` enough that
+  both card filtering and partition materialization use one definition.
+- Before building cards, compute a partition dataframe/table for all
+  namekeys and persist only the non-subset-1 rows to
+  `SUBSET2_PARTITION_TABLE`.
+- Keep the existing card subset behavior unless the product decision is
+  to replace cards entirely. With current config, cards should still be
+  built from subset mode 2, and the new table/view/CSV are additional
+  step-10 artifacts.
+- Create `SUBSET2_PARTITION_REVIEW_VIEW` with the same queue ordering and
+  the human-review columns requested in the human section.
+- Load `SELECT * FROM SUBSET2_PARTITION_REVIEW_VIEW` into a DataFrame and
+  include it in `StepResult.artifacts`, e.g. under
+  `subset2_partition_review_df`; `run_step.dump_artifacts()` will then
+  dump it as a CSV step artifact automatically.
+
+Recommended ordering:
+
+```text
+ORDER BY
+    partition priority: xlsx, docx, sciscinet,
+    CASE WHEN partition is sciscinet THEN sciscinet_count ELSE 0 END,
+    draw ordering compatible with shared.draw_sort_ctes_sql(),
+    ktp.source_key,
+    ktp.filename,
+    ktp.fragment
+```
+
+The sciscinet tier must be sorted from fewer sciscinet innerdicts to
+more. Current subset-2 sciscinet counts include 39 namekeys with zero
+sciscinet rows, 49 with two, 18 with three, and a long tail up to very
+large ambiguous candidate counts.
+
+### review view row source
+
+The breakdown table is one row per subset-2 namekey. The review view may
+have multiple rows per namekey.
+
+Use the row source that matches the mutually exclusive partition:
+
+- xlsx tier: expand matching rows from `xlsx_output` or flattened
+  `xlsx_innerdicts`; include the xlsx filename/fragment and HCR fields.
+- docx tier: expand matching rows from `docx_output` or flattened
+  `docx_innerdicts`; include all required `ktp.table_1_*` columns and
+  `ktp.docx_match`.
+- sciscinet tier: expand rows from `ssn_parquet_output` or
+  `ssn_innerdicts`; include `ktp.ssnad_match`, `ktp.ssn_sum_hit_1pct`,
+  `ssnad.works_count`, `ssnad.cited_by_count`, and
+  `ssnad.works_api_url`.
+- sciscinet count zero: still emit one placeholder review row so the
+  source key is not lost. Populate source/name/draw and partition flags;
+  leave filename/fragment and ssnad-specific fields NULL/blank.
+
+For the human-editable columns, use empty typed fields in the view:
+
+- `CAST(NULL AS BOOLEAN) AS "ktp.ff_discard"`
+- `CAST(NULL AS VARCHAR) AS "ktp.ff_note"`
+
+If the view expands rows this way, the current DB would produce about
+2,873 review rows: 234 xlsx-tier rows, 46 docx-tier rows, and 2,593
+sciscinet-tier rows including one placeholder for each zero-count
+sciscinet namekey.
+
+### tests to add
+
+Add focused tests around the extracted partition helper rather than only
+snapshotting CSV output:
+
+- subset1 namekey is excluded from the new partition table.
+- xlsx-only failure becomes partition 1.
+- docx failure with xlsx pass becomes partition 2.
+- combined xlsx+docx failure with sciscinet count 1 becomes partition 2,
+  not partition 1.
+- sciscinet count 0 and count >1 become partition 4 and sort by count
+  ascending.
+- missing xlsx/docx cases set `*_any` flags false.
+- invalid/non-dict xlsx match payloads count as non-exact.
+- multi-docx-row case preserves current subset semantics: if at least
+  one docx row is complete, `docx_table_1_required_all` is true.
+- artifact dumping includes the review DataFrame as a CSV through the
+  existing `run_step.dump_artifacts()` path.
