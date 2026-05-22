@@ -97,9 +97,13 @@ subset 2 outerdict entries in
 a queue for downstream
 (outside of this repo)
 **manual resolution by humans***
-in the order
-from easiest/quickest to resolve
-to the most complex/time-draining entries.
+in the order that
+enables the best combo of
+"quickest to review" and
+"quickest to dispatch", with
+the ultimate goal of dispatching
+subset 2 entries gradually
+downstream asap.
 
 To do this reordering,
 we need to understand
@@ -137,6 +141,11 @@ a bitwise flag true if has any non-exact ktp.xlsx_match; and
 `ktp.partition_flag_xlsx_any`,
 false if no ktp.xlsx_match are present at all.
 be sure to centralize these labels in vars.py.
+to be sure,
+entries in this ktp partition
+should have all other conditions of
+subset 1 fulfilled other than
+the xlsx bits.
 1. this second ktp.partition
 should assume that the ones from
 the higher tier ktp.partition have been resolved.
@@ -148,10 +157,25 @@ no docx innerdict present at all).
 so this again involves two ktp partition flags,
 let's call them:
 `ktp.partition_flag_docx_table_1_required_all`
-a bitwise flag false if any required ktp.table_1_* value is empty; and
+a bitwise flag false if any required ktp.table_1_* value is empty
+within the given innerdict; and
 `ktp.partition_flag_docx_any`,
 false if no docx innerdict present at all.
 be sure to centralize these labels in vars.py.
+just to be sure,
+we honour the same logic as in step 10 currently
+as it concerns across-innerdict reasoning for docx,
+namely that if
+a namekey has _at least one_ docx innerdict 
+in which ALL required ktp.table_1_* value are non-empty,
+then this is sufficient for
+`ktp.partition_flag_docx_table_1_required_all` and
+it is set to true.
+to be sure,
+all outerdict entries in this partition
+should qualify under
+all the other subset 1 conditions
+except the docx bits.
 1. finally,
 exclusive of first two higher tier ktp partitions,
 we want to see all the remaining ones,
@@ -171,6 +195,11 @@ this involves one flag which we'll call:
 which contains count of sciscinet innerdicts and
 so we give it type of int rather than bool.
 centralize this label in vars.py.
+to be sure,
+all outerdict entries in this partition
+should qualify under
+all the other subset 1 conditions
+except the sciscinet count.
 
 as a result,
 we should get a nice breakdown
