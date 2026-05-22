@@ -519,7 +519,9 @@ a review view, but does not prescribe their literal names. Choose
 generic, current-mode-neutral constants that fit the existing
 `schema.py` naming pattern, for example `CARD_PARTITION_TABLE` and
 `CARD_PARTITION_REVIEW_VIEW`. Do not use `subset2_*` names: the same
-code path should run under any supported `card_subset_mode`.
+step-10 code must remain runnable under any supported
+`card_subset_mode`, even though these schema objects are only
+materialized for modes 1 and 2.
 
 Add/centralize these labels in `src/helpers/vars.py`:
 
@@ -540,8 +542,8 @@ Add/centralize these labels in `src/helpers/vars.py`:
 The persistent breakdown table should be one row per selected namekey
 and should include, at minimum, `ktp.source_key`, `ktp.partition`, and
 all five `ktp.partition_flag_*` columns named above. `card_subset_mode`
-metadata is optional but useful for later inspection because the same
-generic table name is reused across modes.
+metadata is optional but useful for later inspection because modes 1 and
+2 share the same generic table name.
 
 Use named partition-value constants in `src/helpers/vars.py` or the
 nearest existing constants module. The human spec requires bit-like,
@@ -553,7 +555,7 @@ values. Define named values for these meanings:
 | xlsx tier | selected row is queued for xlsx-only manual resolution |
 | sciscinet tier | selected row is queued for sciscinet manual resolution |
 | docx tier | selected row is queued for docx/data-augmentation work |
-| no-resolution sentinel | selected row already satisfies subset 1, relevant only for modes that select such rows |
+| no-resolution sentinel | selected row already satisfies subset 1; in this spec, materialized only for mode 1 |
 
 The resolution values should be bit-like labels for mutually exclusive
 queue buckets. Do not OR the raw flags together: raw conditions are not
@@ -563,8 +565,9 @@ constants rather than literal numeric values.
 
 ### partition assignment
 
-Compute raw flags per namekey, select rows using the configured
-`card_subset_mode`, then assign one partition value to each selected row:
+For modes 1 and 2, compute raw flags per namekey, select rows using the
+configured `card_subset_mode`, then assign one partition value to each
+selected row:
 
 ```text
 xlsx_ok = xlsx_any and not xlsx_non_exact_any
@@ -707,8 +710,7 @@ Add focused tests around the extracted partition helper and review view:
 
 - mode-2 run produces 231 partition rows for the fixture/current-style
   subset-2 inputs.
-- subset1 rows get no-resolution partition value when selected by a mode
-  that includes subset 1.
+- mode-1 subset-1 rows get the no-resolution partition value.
 - raw xlsx-only failure becomes the xlsx partition value.
 - raw sciscinet-only failure becomes the sciscinet partition value and
   sorts by count.
