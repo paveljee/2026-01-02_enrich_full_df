@@ -1,0 +1,444 @@
+from __future__ import annotations
+
+import json
+
+import duckdb
+import pandas as pd
+
+from src.helpers.data_models import InnerDict, NameKey
+from src.helpers.duckdb_utils import register_frame
+from src.helpers.schema import (
+    CARD_PARTITION_REVIEW_VIEW,
+    CARD_PARTITION_TABLE,
+    DOCX_OUTPUT_VIEW,
+    PARQUET_OUTPUT_VIEW,
+    XLSX_OUTPUT_VIEW,
+)
+from src.helpers.vars import (
+    CARD_PARTITION_ARTIFACT_MODES,
+    DRAW_LABEL,
+    HCR_CATEGORY_COL,
+    KTP_DOCX_MATCH_COL,
+    KTP_ECONOMIES_COL,
+    KTP_ECONOMY_MATCH_COL,
+    KTP_FF_DISCARD_COL,
+    KTP_FF_NOTE_COL,
+    KTP_FILENAME_COL,
+    KTP_FIRST_NAME_COL,
+    KTP_FRAGMENT_COL,
+    KTP_FRAGMENT_TYPE_COL,
+    KTP_HCR_PRIMARY_AFFILIATIONS_COL,
+    KTP_HCR_SECONDARY_AFFILIATIONS_COL,
+    KTP_LAST_NAME_COL,
+    KTP_PARTITION_COL,
+    KTP_PARTITION_DOCX_VALUE,
+    KTP_PARTITION_FLAG_DOCX_ANY_COL,
+    KTP_PARTITION_FLAG_DOCX_TABLE_1_REQUIRED_ALL_COL,
+    KTP_PARTITION_FLAG_SCISCINET_COUNT_COL,
+    KTP_PARTITION_FLAG_XLSX_ANY_COL,
+    KTP_PARTITION_FLAG_XLSX_NON_EXACT_ANY_COL,
+    KTP_PARTITION_NO_RESOLUTION_VALUE,
+    KTP_PARTITION_SCISCINET_VALUE,
+    KTP_PARTITION_XLSX_VALUE,
+    KTP_SOURCE_KEY_COL,
+    KTP_SSN_FIELD_DISPLAY_NAMES_LIST_COL,
+    KTP_SSN_SUM_HIT_1PCT_COL,
+    KTP_SSN_TOP_INSTITUTIONS_COL,
+    KTP_SSNAD_MATCH_COL,
+    KTP_XLSX_MATCH_COL,
+    KTP_XLSX_MATCH_FIRST_TOKENS_KEY,
+    KTP_XLSX_MATCH_LAST_NAME_NORM_KEY,
+    KTP_XLSX_MATCH_SOURCE_KEY_LAST_KEY,
+    KTP_XLSX_MATCH_SOURCE_KEY_TOKENS_KEY,
+    SSNAD_CITED_BY_COUNT_COL,
+    SSNAD_DISPLAY_NAME_ALTERNATIVES_COL,
+    SSNAD_DISPLAY_NAME_COL,
+    SSNAD_FILENAME_COL,
+    SSNAD_WORKS_API_URL_COL,
+    SSNAD_WORKS_COUNT_COL,
+)
+from src.steps import step_10_build_cards as step10
+
+
+class DummyProcedure:
+    dataset_id_field = KTP_SOURCE_KEY_COL
+
+
+def _inner(data: dict[str, object]) -> InnerDict:
+    return InnerDict.from_mapping(data, DummyProcedure())
+
+
+def _name(first: str = "Ada", last: str = "Lovelace") -> NameKey:
+    return NameKey(first_name=first, last_name=last)
+
+
+def _xlsx_payload(*, exact: bool = True) -> str:
+    return json.dumps(
+        {
+            KTP_XLSX_MATCH_SOURCE_KEY_TOKENS_KEY: ["ada"],
+            KTP_XLSX_MATCH_SOURCE_KEY_LAST_KEY: "lovelace",
+            KTP_XLSX_MATCH_FIRST_TOKENS_KEY: ["ada" if exact else "augusta"],
+            KTP_XLSX_MATCH_LAST_NAME_NORM_KEY: "lovelace",
+        }
+    )
+
+
+def _xlsx_inner(*, exact: bool = True, draw: object = 1) -> InnerDict:
+    return _inner(
+        {
+            KTP_FILENAME_COL: "hcr.xlsx",
+            KTP_FRAGMENT_COL: "11",
+            KTP_FRAGMENT_TYPE_COL: "excel_row",
+            DRAW_LABEL: draw,
+            KTP_XLSX_MATCH_COL: _xlsx_payload(exact=exact),
+        }
+    )
+
+
+def _docx_inner(*, complete: bool = True) -> InnerDict:
+    return _inner(
+        {
+            KTP_FILENAME_COL: "manual.docx",
+            KTP_FRAGMENT_COL: "1",
+            KTP_FRAGMENT_TYPE_COL: "docx_row",
+            "ktp.table_1_researcher_author": "Ada Lovelace",
+            "ktp.table_1_affiliation": "Analytical Engine Lab" if complete else "",
+        }
+    )
+
+
+def _sciscinet_inner(fragment: str = "A1") -> InnerDict:
+    return _inner(
+        {
+            SSNAD_FILENAME_COL: "author_details.parquet",
+            KTP_FRAGMENT_COL: fragment,
+            KTP_FRAGMENT_TYPE_COL: "author_id",
+        }
+    )
+
+
+def _state(*inner_dicts: InnerDict, name: NameKey | None = None) -> step10.CardPartitionRuleState:
+    return step10._evaluate_card_partition_state(
+        name or _name(),
+        tuple(inner_dicts),
+        sciscinet_filenames={"author_details.parquet"},
+        docx_filenames={"manual.docx"},
+    )
+
+
+def test_partition_values_follow_subset1_complement_priority() -> None:
+    subset1 = _state(_xlsx_inner(), _docx_inner(), _sciscinet_inner())
+    assert subset1.subset1_ok
+    assert step10._partition_value(subset1) == KTP_PARTITION_NO_RESOLUTION_VALUE
+
+    xlsx_only = _state(_xlsx_inner(exact=False), _docx_inner(), _sciscinet_inner())
+    assert xlsx_only.xlsx_any
+    assert xlsx_only.xlsx_non_exact_any
+    assert step10._partition_value(xlsx_only) == KTP_PARTITION_XLSX_VALUE
+
+    sciscinet_only = _state(_xlsx_inner(), _docx_inner())
+    assert sciscinet_only.sciscinet_count == 0
+    assert step10._partition_value(sciscinet_only) == KTP_PARTITION_SCISCINET_VALUE
+
+    xlsx_plus_sciscinet = _state(
+        _xlsx_inner(exact=False),
+        _docx_inner(),
+        _sciscinet_inner("A1"),
+        _sciscinet_inner("A2"),
+    )
+    assert step10._partition_value(xlsx_plus_sciscinet) == KTP_PARTITION_SCISCINET_VALUE
+
+    docx_only = _state(_xlsx_inner(), _docx_inner(complete=False), _sciscinet_inner())
+    assert step10._partition_value(docx_only) == KTP_PARTITION_DOCX_VALUE
+
+    xlsx_docx_sciscinet = _state(_xlsx_inner(exact=False), _docx_inner(complete=False))
+    assert step10._partition_value(xlsx_docx_sciscinet) == KTP_PARTITION_DOCX_VALUE
+
+
+def test_flags_cover_missing_invalid_and_multi_docx_cases() -> None:
+    missing_xlsx = _state(_inner({KTP_FILENAME_COL: "hcr.xlsx"}), _docx_inner(), _sciscinet_inner())
+    assert not missing_xlsx.xlsx_any
+    assert not missing_xlsx.xlsx_non_exact_any
+    assert step10._partition_value(missing_xlsx) == KTP_PARTITION_XLSX_VALUE
+
+    invalid_xlsx = _state(
+        _inner({KTP_FILENAME_COL: "hcr.xlsx", KTP_XLSX_MATCH_COL: "not-json"}),
+        _docx_inner(),
+        _sciscinet_inner(),
+    )
+    assert invalid_xlsx.xlsx_any
+    assert invalid_xlsx.xlsx_non_exact_any
+
+    missing_docx = _state(_xlsx_inner(), _sciscinet_inner())
+    assert not missing_docx.docx_any
+    assert not missing_docx.docx_table_1_required_all
+    assert step10._partition_value(missing_docx) == KTP_PARTITION_DOCX_VALUE
+
+    multi_docx_one_complete = _state(
+        _xlsx_inner(),
+        _docx_inner(complete=False),
+        _docx_inner(complete=True),
+        _sciscinet_inner(),
+    )
+    assert multi_docx_one_complete.docx_any
+    assert multi_docx_one_complete.docx_table_1_required_all
+    assert multi_docx_one_complete.subset1_ok
+
+
+def test_partition_rows_sort_sciscinet_by_count_then_xlsx_tie_break() -> None:
+    sc0_name = _name("Ada", "Zero")
+    sc2_name = _name("Ada", "Two")
+    sc2_xlsx_name = _name("Ada", "TwoXlsx")
+    selected = [
+        (
+            sc2_xlsx_name,
+            (
+                _xlsx_inner(exact=False),
+                _docx_inner(),
+                _sciscinet_inner("1"),
+                _sciscinet_inner("2"),
+            ),
+        ),
+        (sc2_name, (_xlsx_inner(), _docx_inner(), _sciscinet_inner("1"), _sciscinet_inner("2"))),
+        (sc0_name, (_xlsx_inner(), _docx_inner())),
+    ]
+    states = {
+        name_key.to_json_key(): step10._evaluate_card_partition_state(
+            name_key,
+            tuple(inner_dicts),
+            sciscinet_filenames={"author_details.parquet"},
+            docx_filenames={"manual.docx"},
+        )
+        for name_key, inner_dicts in selected
+    }
+
+    df = step10._partition_rows_df(selected, state_by_source_key=states, subset_mode=2)
+
+    assert df[KTP_LAST_NAME_COL].tolist() == ["Zero", "Two", "TwoXlsx"]
+    assert df[KTP_PARTITION_FLAG_SCISCINET_COUNT_COL].tolist() == [0, 2, 2]
+    assert df[KTP_PARTITION_COL].tolist() == [
+        KTP_PARTITION_SCISCINET_VALUE,
+        KTP_PARTITION_SCISCINET_VALUE,
+        KTP_PARTITION_SCISCINET_VALUE,
+    ]
+
+
+def test_partition_artifact_modes_are_limited_to_subset1_and_subset2() -> None:
+    assert CARD_PARTITION_ARTIFACT_MODES == {1, 2}
+
+
+def _create_relation(
+    conn: duckdb.DuckDBPyConnection,
+    name: str,
+    rows: list[dict[str, object]],
+    columns: list[str],
+) -> None:
+    df = pd.DataFrame(rows, columns=columns)
+    register_frame(conn, f"{name}_frame", df)
+    conn.execute(f"CREATE OR REPLACE VIEW {name} AS SELECT * FROM {name}_frame")
+
+
+def test_partition_review_view_has_specified_order_and_placeholders() -> None:
+    conn = duckdb.connect(":memory:")
+    partition_rows = pd.DataFrame(
+        [
+            {
+                KTP_SOURCE_KEY_COL: "xlsx-source",
+                KTP_PARTITION_COL: KTP_PARTITION_XLSX_VALUE,
+                KTP_PARTITION_FLAG_XLSX_NON_EXACT_ANY_COL: True,
+                KTP_PARTITION_FLAG_XLSX_ANY_COL: True,
+                KTP_PARTITION_FLAG_SCISCINET_COUNT_COL: 1,
+                KTP_PARTITION_FLAG_DOCX_TABLE_1_REQUIRED_ALL_COL: True,
+                KTP_PARTITION_FLAG_DOCX_ANY_COL: True,
+                "card_subset_mode": 2,
+                DRAW_LABEL: "1",
+                KTP_FIRST_NAME_COL: "Ada",
+                KTP_LAST_NAME_COL: "Xlsx",
+            },
+            {
+                KTP_SOURCE_KEY_COL: "sc-zero-source",
+                KTP_PARTITION_COL: KTP_PARTITION_SCISCINET_VALUE,
+                KTP_PARTITION_FLAG_XLSX_NON_EXACT_ANY_COL: False,
+                KTP_PARTITION_FLAG_XLSX_ANY_COL: True,
+                KTP_PARTITION_FLAG_SCISCINET_COUNT_COL: 0,
+                KTP_PARTITION_FLAG_DOCX_TABLE_1_REQUIRED_ALL_COL: True,
+                KTP_PARTITION_FLAG_DOCX_ANY_COL: True,
+                "card_subset_mode": 2,
+                DRAW_LABEL: "2",
+                KTP_FIRST_NAME_COL: "Ada",
+                KTP_LAST_NAME_COL: "ScZero",
+            },
+            {
+                KTP_SOURCE_KEY_COL: "docx-source",
+                KTP_PARTITION_COL: KTP_PARTITION_DOCX_VALUE,
+                KTP_PARTITION_FLAG_XLSX_NON_EXACT_ANY_COL: False,
+                KTP_PARTITION_FLAG_XLSX_ANY_COL: True,
+                KTP_PARTITION_FLAG_SCISCINET_COUNT_COL: 1,
+                KTP_PARTITION_FLAG_DOCX_TABLE_1_REQUIRED_ALL_COL: False,
+                KTP_PARTITION_FLAG_DOCX_ANY_COL: True,
+                "card_subset_mode": 2,
+                DRAW_LABEL: "3",
+                KTP_FIRST_NAME_COL: "Ada",
+                KTP_LAST_NAME_COL: "Docx",
+            },
+        ]
+    )
+    step10._materialize_partition_table(conn, partition_rows)
+
+    _create_relation(
+        conn,
+        XLSX_OUTPUT_VIEW,
+        [
+            {
+                KTP_SOURCE_KEY_COL: "xlsx-source",
+                KTP_FILENAME_COL: "hcr.xlsx",
+                KTP_FRAGMENT_COL: "11",
+                KTP_FRAGMENT_TYPE_COL: "excel_row",
+                DRAW_LABEL: "1",
+                KTP_FIRST_NAME_COL: "Ada",
+                KTP_LAST_NAME_COL: "Xlsx",
+                HCR_CATEGORY_COL: "Highly Cited",
+                KTP_ECONOMIES_COL: "United Kingdom",
+                KTP_ECONOMY_MATCH_COL: "exact",
+                KTP_HCR_PRIMARY_AFFILIATIONS_COL: "Analytical Engine Lab",
+                KTP_HCR_SECONDARY_AFFILIATIONS_COL: "Royal Society",
+                KTP_XLSX_MATCH_COL: _xlsx_payload(exact=False),
+            }
+        ],
+        [
+            KTP_SOURCE_KEY_COL,
+            KTP_FILENAME_COL,
+            KTP_FRAGMENT_COL,
+            KTP_FRAGMENT_TYPE_COL,
+            DRAW_LABEL,
+            KTP_FIRST_NAME_COL,
+            KTP_LAST_NAME_COL,
+            HCR_CATEGORY_COL,
+            KTP_ECONOMIES_COL,
+            KTP_ECONOMY_MATCH_COL,
+            KTP_HCR_PRIMARY_AFFILIATIONS_COL,
+            KTP_HCR_SECONDARY_AFFILIATIONS_COL,
+            KTP_XLSX_MATCH_COL,
+        ],
+    )
+    _create_relation(
+        conn,
+        PARQUET_OUTPUT_VIEW,
+        [
+            {
+                KTP_SOURCE_KEY_COL: "unselected-source",
+                KTP_FILENAME_COL: "author_details.parquet",
+                KTP_FRAGMENT_COL: "A1",
+                KTP_FRAGMENT_TYPE_COL: "author_id",
+                KTP_FIRST_NAME_COL: "Ada",
+                KTP_LAST_NAME_COL: "Other",
+                SSNAD_DISPLAY_NAME_COL: "Ada Other",
+                SSNAD_DISPLAY_NAME_ALTERNATIVES_COL: "[]",
+                KTP_SSN_FIELD_DISPLAY_NAMES_LIST_COL: "['Physics']",
+                KTP_SSNAD_MATCH_COL: "{}",
+                KTP_SSN_SUM_HIT_1PCT_COL: 5,
+                SSNAD_WORKS_COUNT_COL: 10,
+                SSNAD_CITED_BY_COUNT_COL: 20,
+                SSNAD_WORKS_API_URL_COL: "https://api.openalex.org/authors/A1",
+            }
+        ],
+        [
+            KTP_SOURCE_KEY_COL,
+            KTP_FILENAME_COL,
+            KTP_FRAGMENT_COL,
+            KTP_FRAGMENT_TYPE_COL,
+            KTP_FIRST_NAME_COL,
+            KTP_LAST_NAME_COL,
+            SSNAD_DISPLAY_NAME_COL,
+            SSNAD_DISPLAY_NAME_ALTERNATIVES_COL,
+            KTP_SSN_FIELD_DISPLAY_NAMES_LIST_COL,
+            KTP_SSNAD_MATCH_COL,
+            KTP_SSN_SUM_HIT_1PCT_COL,
+            SSNAD_WORKS_COUNT_COL,
+            SSNAD_CITED_BY_COUNT_COL,
+            SSNAD_WORKS_API_URL_COL,
+        ],
+    )
+    _create_relation(
+        conn,
+        DOCX_OUTPUT_VIEW,
+        [
+            {
+                KTP_SOURCE_KEY_COL: "docx-source",
+                KTP_FILENAME_COL: "manual.docx",
+                KTP_FRAGMENT_COL: "7",
+                KTP_FRAGMENT_TYPE_COL: "docx_row",
+                DRAW_LABEL: "3",
+                KTP_FIRST_NAME_COL: "Ada",
+                KTP_LAST_NAME_COL: "Docx",
+                KTP_DOCX_MATCH_COL: "{}",
+                "ktp.table_1_researcher_author": "Ada Docx",
+                "ktp.table_1_affiliation": "Difference Institute",
+            }
+        ],
+        [
+            KTP_SOURCE_KEY_COL,
+            KTP_FILENAME_COL,
+            KTP_FRAGMENT_COL,
+            KTP_FRAGMENT_TYPE_COL,
+            DRAW_LABEL,
+            KTP_FIRST_NAME_COL,
+            KTP_LAST_NAME_COL,
+            KTP_DOCX_MATCH_COL,
+            "ktp.table_1_researcher_author",
+            "ktp.table_1_affiliation",
+        ],
+    )
+
+    review_columns = step10._create_partition_review_view(conn)
+    review_df = conn.execute(f"SELECT * FROM {CARD_PARTITION_REVIEW_VIEW}").df()
+
+    assert conn.execute(f"SELECT COUNT(*) FROM {CARD_PARTITION_TABLE}").fetchone() == (3,)
+    assert review_df.columns.tolist() == review_columns
+    assert review_df.columns.tolist() == [
+        KTP_SOURCE_KEY_COL,
+        KTP_PARTITION_COL,
+        KTP_FILENAME_COL,
+        KTP_FRAGMENT_COL,
+        KTP_FRAGMENT_TYPE_COL,
+        KTP_FF_DISCARD_COL,
+        KTP_FF_NOTE_COL,
+        DRAW_LABEL,
+        KTP_FIRST_NAME_COL,
+        KTP_LAST_NAME_COL,
+        SSNAD_DISPLAY_NAME_COL,
+        SSNAD_DISPLAY_NAME_ALTERNATIVES_COL,
+        HCR_CATEGORY_COL,
+        KTP_SSN_FIELD_DISPLAY_NAMES_LIST_COL,
+        KTP_ECONOMIES_COL,
+        KTP_ECONOMY_MATCH_COL,
+        KTP_HCR_PRIMARY_AFFILIATIONS_COL,
+        KTP_HCR_SECONDARY_AFFILIATIONS_COL,
+        KTP_SSN_TOP_INSTITUTIONS_COL,
+        KTP_PARTITION_FLAG_XLSX_NON_EXACT_ANY_COL,
+        KTP_PARTITION_FLAG_XLSX_ANY_COL,
+        KTP_XLSX_MATCH_COL,
+        KTP_PARTITION_FLAG_SCISCINET_COUNT_COL,
+        KTP_SSNAD_MATCH_COL,
+        KTP_SSN_SUM_HIT_1PCT_COL,
+        SSNAD_WORKS_COUNT_COL,
+        SSNAD_CITED_BY_COUNT_COL,
+        SSNAD_WORKS_API_URL_COL,
+        KTP_PARTITION_FLAG_DOCX_TABLE_1_REQUIRED_ALL_COL,
+        KTP_PARTITION_FLAG_DOCX_ANY_COL,
+        KTP_DOCX_MATCH_COL,
+        "ktp.table_1_researcher_author",
+        "ktp.table_1_affiliation",
+    ]
+    assert review_df[KTP_SOURCE_KEY_COL].tolist() == [
+        "xlsx-source",
+        "sc-zero-source",
+        "docx-source",
+    ]
+    assert review_df[KTP_FF_DISCARD_COL].isna().all()
+    assert review_df[KTP_FF_NOTE_COL].isna().all()
+    sc_placeholder = review_df[review_df[KTP_SOURCE_KEY_COL] == "sc-zero-source"].iloc[0]
+    assert pd.isna(sc_placeholder[KTP_FILENAME_COL])
+    assert sc_placeholder[KTP_PARTITION_FLAG_SCISCINET_COUNT_COL] == 0
+    docx_row = review_df[review_df[KTP_SOURCE_KEY_COL] == "docx-source"].iloc[0]
+    assert docx_row["ktp.table_1_affiliation"] == "Difference Institute"

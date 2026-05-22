@@ -38,6 +38,9 @@ PARQUET_INNERDICT_TABLE = "ssn_innerdicts"
 PARQUET_AUTHOR_OUTPUT_TABLE = "ssn_author_output"
 PARQUET_OUTPUT_VIEW = "ssn_parquet_output"
 
+CARD_PARTITION_TABLE = "card_partitions"
+CARD_PARTITION_REVIEW_VIEW = "card_partition_review"
+
 
 def safe_identifier(value: str) -> str:
     cleaned = re.sub(r"[^0-9A-Za-z_]+", "_", value)

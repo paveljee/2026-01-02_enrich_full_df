@@ -55,6 +55,11 @@ DRAW_LABEL: Final = "ktp.draw_number"
 RIGHT_NAME_COL: Final = "Researcher/author"
 KTP_FRAGMENT_COL: Final = "ktp.fragment"
 SSNAD_FILENAME_COL: Final = "ssnad.filename"
+SSNAD_DISPLAY_NAME_COL: Final = "ssnad.display_name"
+SSNAD_DISPLAY_NAME_ALTERNATIVES_COL: Final = "ssnad.display_name_alternatives"
+SSNAD_WORKS_COUNT_COL: Final = "ssnad.works_count"
+SSNAD_CITED_BY_COUNT_COL: Final = "ssnad.cited_by_count"
+SSNAD_WORKS_API_URL_COL: Final = "ssnad.works_api_url"
 SSNAU_FILENAME_COL: Final = "ssnau.filename"
 SSNAP_FILENAME_COL: Final = "ssnap.filename"
 SSNHPL0_FILENAME_COL: Final = "ssnhpl0.filename"
@@ -117,6 +122,23 @@ CSV_ROW_INDEX_COL: Final = "ktp.csv_row_index"
 KTP_XLSX_MATCH_COL: Final = "ktp.xlsx_match"
 KTP_DOCX_MATCH_COL: Final = "ktp.docx_match"
 KTP_SSNAD_MATCH_COL: Final = "ktp.ssnad_match"
+KTP_PARTITION_COL: Final = "ktp.partition"
+KTP_PARTITION_FLAG_XLSX_NON_EXACT_ANY_COL: Final = (
+    "ktp.partition_flag_xlsx_non_exact_any"
+)
+KTP_PARTITION_FLAG_XLSX_ANY_COL: Final = "ktp.partition_flag_xlsx_any"
+KTP_PARTITION_FLAG_SCISCINET_COUNT_COL: Final = "ktp.partition_flag_sciscinet_count"
+KTP_PARTITION_FLAG_DOCX_TABLE_1_REQUIRED_ALL_COL: Final = (
+    "ktp.partition_flag_docx_table_1_required_all"
+)
+KTP_PARTITION_FLAG_DOCX_ANY_COL: Final = "ktp.partition_flag_docx_any"
+KTP_FF_DISCARD_COL: Final = "ktp.ff_discard"
+KTP_FF_NOTE_COL: Final = "ktp.ff_note"
+KTP_PARTITION_NO_RESOLUTION_VALUE: Final = 0
+KTP_PARTITION_XLSX_VALUE: Final = 1
+KTP_PARTITION_SCISCINET_VALUE: Final = 2
+KTP_PARTITION_DOCX_VALUE: Final = 4
+CARD_PARTITION_ARTIFACT_MODES: Final[set[int]] = {1, 2}
 KTP_XLSX_MATCH_SOURCE_KEY_TOKENS_KEY: Final = "ktp.source_key_first_name_norm_tok"
 KTP_XLSX_MATCH_SOURCE_KEY_LAST_KEY: Final = "ktp.source_key_last_name_norm"
 KTP_XLSX_MATCH_FIRST_TOKENS_KEY: Final = "ktp.first_name_norm_tok"
