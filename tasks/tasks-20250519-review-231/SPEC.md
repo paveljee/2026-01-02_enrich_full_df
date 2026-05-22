@@ -52,6 +52,10 @@ as appropriate to achieve the **goal**
 once you've got to the stage
 where you are actually ready to do so.
 
+git usage:
+you may not stage/unstage anything in git;
+only readonly use of git is allowed.
+
 ### the problem
 ideally we would like
 all 310 (100%) of drawn samples
