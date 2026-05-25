@@ -132,6 +132,7 @@ KTP_PARTITION_FLAG_DOCX_TABLE_1_REQUIRED_ALL_COL: Final = (
     "ktp.partition_flag_docx_table_1_required_all"
 )
 KTP_PARTITION_FLAG_DOCX_ANY_COL: Final = "ktp.partition_flag_docx_any"
+KTP_FF_AUTHOR_ID_COL: Final = "ktp.ff_author_id"
 KTP_FF_DISCARD_COL: Final = "ktp.ff_discard"
 KTP_FF_NOTE_COL: Final = "ktp.ff_note"
 KTP_PARTITION_NO_RESOLUTION_VALUE: Final = 0

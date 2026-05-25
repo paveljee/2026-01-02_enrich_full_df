@@ -38,6 +38,7 @@ from ..helpers.vars import (
     KTP_DOCX_TABLE_1_PREFIX,
     KTP_ECONOMIES_COL,
     KTP_ECONOMY_MATCH_COL,
+    KTP_FF_AUTHOR_ID_COL,
     KTP_FF_DISCARD_COL,
     KTP_FF_NOTE_COL,
     KTP_FILENAME_COL,
@@ -86,6 +87,17 @@ from ..helpers.vars import (
 from .shared import draw_sort_ctes_sql, draw_sort_order_by_sql
 
 CARD_PARTITION_FRAME_TABLE = "card_partition_frame"
+REVIEW_DOMAIN_XLSX = "xlsx"
+REVIEW_DOMAIN_SCISCINET = "sciscinet"
+REVIEW_DOMAIN_DOCX = "docx"
+XLSX_SINGLETON_CTE = "xlsx_singletons"
+SCISCINET_SINGLETON_CTE = "sciscinet_singletons"
+DOCX_SINGLETON_CTE = "docx_singletons"
+REVIEW_SINGLETON_ALIASES = {
+    REVIEW_DOMAIN_XLSX: "xs",
+    REVIEW_DOMAIN_SCISCINET: "ss",
+    REVIEW_DOMAIN_DOCX: "ds",
+}
 
 
 @dataclass(frozen=True)
@@ -519,6 +531,7 @@ def _review_columns(docx_columns: list[str]) -> list[str]:
         KTP_FILENAME_COL,
         KTP_FRAGMENT_COL,
         KTP_FRAGMENT_TYPE_COL,
+        KTP_FF_AUTHOR_ID_COL,
         KTP_FF_DISCARD_COL,
         KTP_FF_NOTE_COL,
         DRAW_LABEL,
@@ -549,11 +562,71 @@ def _review_columns(docx_columns: list[str]) -> list[str]:
     ]
 
 
-def _review_source_expr(alias: str, source_columns: set[str], col: str) -> str:
+def _review_info_domain(col: str) -> str | None:
+    if col in {
+        HCR_CATEGORY_COL,
+        KTP_ECONOMIES_COL,
+        KTP_ECONOMY_MATCH_COL,
+        KTP_HCR_PRIMARY_AFFILIATIONS_COL,
+        KTP_HCR_SECONDARY_AFFILIATIONS_COL,
+        KTP_XLSX_MATCH_COL,
+    }:
+        return REVIEW_DOMAIN_XLSX
+    if col in {
+        SSNAD_DISPLAY_NAME_COL,
+        SSNAD_DISPLAY_NAME_ALTERNATIVES_COL,
+        KTP_SSN_FIELD_DISPLAY_NAMES_LIST_COL,
+        KTP_SSN_TOP_INSTITUTIONS_COL,
+        KTP_SSNAD_MATCH_COL,
+        KTP_SSN_SUM_HIT_1PCT_COL,
+        SSNAD_WORKS_COUNT_COL,
+        SSNAD_CITED_BY_COUNT_COL,
+        SSNAD_WORKS_API_URL_COL,
+    }:
+        return REVIEW_DOMAIN_SCISCINET
+    if col == KTP_DOCX_MATCH_COL or col.startswith(KTP_DOCX_TABLE_1_PREFIX):
+        return REVIEW_DOMAIN_DOCX
+    return None
+
+
+def _review_domain_expr(
+    *,
+    col: str,
+    target_domain: str,
+    primary_alias: str | None,
+    primary_domain: str,
+    domain_columns: dict[str, set[str]],
+) -> str:
+    if col not in domain_columns[target_domain]:
+        return "NULL"
+    if target_domain == primary_domain and primary_alias is not None:
+        return _qualified(primary_alias, col)
+    return _qualified(REVIEW_SINGLETON_ALIASES[target_domain], col)
+
+
+def _review_source_expr(
+    *,
+    primary_alias: str | None,
+    primary_domain: str,
+    domain_columns: dict[str, set[str]],
+    col: str,
+) -> str:
     if col == KTP_SOURCE_KEY_COL:
         return _qualified("cp", col)
     if col == KTP_PARTITION_COL:
         return _qualified("cp", col)
+    if col == KTP_FF_AUTHOR_ID_COL:
+        if primary_domain == REVIEW_DOMAIN_SCISCINET and primary_alias is not None:
+            return _review_domain_expr(
+                col=KTP_FRAGMENT_COL,
+                target_domain=REVIEW_DOMAIN_SCISCINET,
+                primary_alias=primary_alias,
+                primary_domain=primary_domain,
+                domain_columns=domain_columns,
+            )
+        if KTP_FRAGMENT_COL in domain_columns[REVIEW_DOMAIN_SCISCINET]:
+            return _qualified(REVIEW_SINGLETON_ALIASES[REVIEW_DOMAIN_SCISCINET], KTP_FRAGMENT_COL)
+        return "NULL"
     if col == KTP_FF_DISCARD_COL:
         return "CAST(NULL AS BOOLEAN)"
     if col == KTP_FF_NOTE_COL:
@@ -566,52 +639,81 @@ def _review_source_expr(alias: str, source_columns: set[str], col: str) -> str:
         KTP_PARTITION_FLAG_DOCX_ANY_COL,
     }:
         return _qualified("cp", col)
+    if col in {KTP_FILENAME_COL, KTP_FRAGMENT_COL, KTP_FRAGMENT_TYPE_COL}:
+        if primary_alias is not None and col in domain_columns[primary_domain]:
+            return _qualified(primary_alias, col)
+        return "NULL"
     if col in {DRAW_LABEL, KTP_FIRST_NAME_COL, KTP_LAST_NAME_COL}:
-        if col in source_columns:
+        if primary_alias is not None and col in domain_columns[primary_domain]:
             return (
-                f"COALESCE(CAST({_qualified(alias, col)} AS VARCHAR), "
+                f"COALESCE(CAST({_qualified(primary_alias, col)} AS VARCHAR), "
                 f"CAST({_qualified('cp', col)} AS VARCHAR))"
             )
         return f"CAST({_qualified('cp', col)} AS VARCHAR)"
-    if col in source_columns:
-        return _qualified(alias, col)
-    return "NULL"
-
-
-def _review_placeholder_expr(col: str) -> str:
-    if col in {
-        KTP_SOURCE_KEY_COL,
-        KTP_PARTITION_COL,
-        KTP_PARTITION_FLAG_XLSX_NON_EXACT_ANY_COL,
-        KTP_PARTITION_FLAG_XLSX_ANY_COL,
-        KTP_PARTITION_FLAG_SCISCINET_COUNT_COL,
-        KTP_PARTITION_FLAG_DOCX_TABLE_1_REQUIRED_ALL_COL,
-        KTP_PARTITION_FLAG_DOCX_ANY_COL,
-    }:
-        return _qualified("cp", col)
-    if col == KTP_FF_DISCARD_COL:
-        return "CAST(NULL AS BOOLEAN)"
-    if col == KTP_FF_NOTE_COL:
-        return "CAST(NULL AS VARCHAR)"
-    if col in {DRAW_LABEL, KTP_FIRST_NAME_COL, KTP_LAST_NAME_COL}:
-        return f"CAST({_qualified('cp', col)} AS VARCHAR)"
+    target_domain = _review_info_domain(col)
+    if target_domain is not None:
+        return _review_domain_expr(
+            col=col,
+            target_domain=target_domain,
+            primary_alias=primary_alias,
+            primary_domain=primary_domain,
+            domain_columns=domain_columns,
+        )
     return "NULL"
 
 
 def _review_select_list(
     columns: list[str],
     *,
-    source_alias: str | None,
-    source_columns: set[str] | None = None,
+    primary_alias: str | None,
+    primary_domain: str,
+    domain_columns: dict[str, set[str]],
 ) -> str:
     exprs: list[str] = []
     for col in columns:
-        if source_alias is None:
-            expr = _review_placeholder_expr(col)
-        else:
-            expr = _review_source_expr(source_alias, source_columns or set(), col)
+        expr = _review_source_expr(
+            primary_alias=primary_alias,
+            primary_domain=primary_domain,
+            domain_columns=domain_columns,
+            col=col,
+        )
         exprs.append(f"{expr} AS {_quote_identifier(col)}")
     return ",\n                ".join(exprs)
+
+
+def _singleton_cte_sql(cte_name: str, source_view: str, source_alias: str) -> str:
+    singleton_alias = f"{source_alias}_singleton_keys"
+    return f"""
+        {cte_name} AS (
+            SELECT {source_alias}.*
+            FROM {source_view} {source_alias}
+            JOIN (
+                SELECT {_quote_identifier(KTP_SOURCE_KEY_COL)}
+                FROM {source_view}
+                GROUP BY {_quote_identifier(KTP_SOURCE_KEY_COL)}
+                HAVING COUNT(*) = 1
+            ) {singleton_alias}
+              ON {_qualified(source_alias, KTP_SOURCE_KEY_COL)} =
+                 {_qualified(singleton_alias, KTP_SOURCE_KEY_COL)}
+        )
+    """
+
+
+def _singleton_joins_sql() -> str:
+    xlsx_alias = REVIEW_SINGLETON_ALIASES[REVIEW_DOMAIN_XLSX]
+    sciscinet_alias = REVIEW_SINGLETON_ALIASES[REVIEW_DOMAIN_SCISCINET]
+    docx_alias = REVIEW_SINGLETON_ALIASES[REVIEW_DOMAIN_DOCX]
+    return f"""
+            LEFT JOIN {XLSX_SINGLETON_CTE} {xlsx_alias}
+              ON {_qualified(xlsx_alias, KTP_SOURCE_KEY_COL)} =
+                 {_qualified('cp', KTP_SOURCE_KEY_COL)}
+            LEFT JOIN {SCISCINET_SINGLETON_CTE} {sciscinet_alias}
+              ON {_qualified(sciscinet_alias, KTP_SOURCE_KEY_COL)} =
+                 {_qualified('cp', KTP_SOURCE_KEY_COL)}
+            LEFT JOIN {DOCX_SINGLETON_CTE} {docx_alias}
+              ON {_qualified(docx_alias, KTP_SOURCE_KEY_COL)} =
+                 {_qualified('cp', KTP_SOURCE_KEY_COL)}
+    """
 
 
 def _review_branch_sql(
@@ -619,13 +721,15 @@ def _review_branch_sql(
     columns: list[str],
     source_view: str,
     source_alias: str,
-    source_columns: set[str],
+    source_domain: str,
+    domain_columns: dict[str, set[str]],
     partition_value: int,
 ) -> str:
     select_list = _review_select_list(
         columns,
-        source_alias=source_alias,
-        source_columns=source_columns,
+        primary_alias=source_alias,
+        primary_domain=source_domain,
+        domain_columns=domain_columns,
     )
     source_key_join = (
         f"{_qualified(source_alias, KTP_SOURCE_KEY_COL)} = "
@@ -637,6 +741,7 @@ def _review_branch_sql(
             FROM {CARD_PARTITION_TABLE} cp
             JOIN {source_view} {source_alias}
               ON {source_key_join}
+            {_singleton_joins_sql()}
             WHERE {_qualified('cp', KTP_PARTITION_COL)} = {partition_value}
     """
 
@@ -646,6 +751,8 @@ def _review_placeholder_branch_sql(
     columns: list[str],
     source_view: str,
     source_alias: str,
+    source_domain: str,
+    domain_columns: dict[str, set[str]],
     partition_value: int,
 ) -> str:
     source_key_join = (
@@ -654,8 +761,14 @@ def _review_placeholder_branch_sql(
     )
     return f"""
             SELECT
-                {_review_select_list(columns, source_alias=None)}
+                {_review_select_list(
+                    columns,
+                    primary_alias=None,
+                    primary_domain=source_domain,
+                    domain_columns=domain_columns,
+                )}
             FROM {CARD_PARTITION_TABLE} cp
+            {_singleton_joins_sql()}
             WHERE {_qualified('cp', KTP_PARTITION_COL)} = {partition_value}
               AND NOT EXISTS (
                   SELECT 1
@@ -670,45 +783,59 @@ def _create_partition_review_view(conn: duckdb.DuckDBPyConnection) -> list[str]:
     sciscinet_columns = set(_relation_columns(conn, PARQUET_OUTPUT_VIEW))
     docx_column_list = _relation_columns(conn, DOCX_OUTPUT_VIEW)
     docx_columns = set(docx_column_list)
+    domain_columns = {
+        REVIEW_DOMAIN_XLSX: xlsx_columns,
+        REVIEW_DOMAIN_SCISCINET: sciscinet_columns,
+        REVIEW_DOMAIN_DOCX: docx_columns,
+    }
     columns = _review_columns(docx_column_list)
     branches = [
         _review_branch_sql(
             columns=columns,
             source_view=XLSX_OUTPUT_VIEW,
             source_alias="x",
-            source_columns=xlsx_columns,
+            source_domain=REVIEW_DOMAIN_XLSX,
+            domain_columns=domain_columns,
             partition_value=KTP_PARTITION_XLSX_VALUE,
         ),
         _review_placeholder_branch_sql(
             columns=columns,
             source_view=XLSX_OUTPUT_VIEW,
             source_alias="x",
+            source_domain=REVIEW_DOMAIN_XLSX,
+            domain_columns=domain_columns,
             partition_value=KTP_PARTITION_XLSX_VALUE,
         ),
         _review_branch_sql(
             columns=columns,
             source_view=PARQUET_OUTPUT_VIEW,
             source_alias="s",
-            source_columns=sciscinet_columns,
+            source_domain=REVIEW_DOMAIN_SCISCINET,
+            domain_columns=domain_columns,
             partition_value=KTP_PARTITION_SCISCINET_VALUE,
         ),
         _review_placeholder_branch_sql(
             columns=columns,
             source_view=PARQUET_OUTPUT_VIEW,
             source_alias="s",
+            source_domain=REVIEW_DOMAIN_SCISCINET,
+            domain_columns=domain_columns,
             partition_value=KTP_PARTITION_SCISCINET_VALUE,
         ),
         _review_branch_sql(
             columns=columns,
             source_view=DOCX_OUTPUT_VIEW,
             source_alias="d",
-            source_columns=docx_columns,
+            source_domain=REVIEW_DOMAIN_DOCX,
+            domain_columns=domain_columns,
             partition_value=KTP_PARTITION_DOCX_VALUE,
         ),
         _review_placeholder_branch_sql(
             columns=columns,
             source_view=DOCX_OUTPUT_VIEW,
             source_alias="d",
+            source_domain=REVIEW_DOMAIN_DOCX,
+            domain_columns=domain_columns,
             partition_value=KTP_PARTITION_DOCX_VALUE,
         ),
     ]
@@ -717,7 +844,15 @@ def _create_partition_review_view(conn: duckdb.DuckDBPyConnection) -> list[str]:
     conn.execute(
         f"""
         CREATE OR REPLACE VIEW {CARD_PARTITION_REVIEW_VIEW} AS
-        WITH base AS (
+        WITH
+        {_singleton_cte_sql(XLSX_SINGLETON_CTE, XLSX_OUTPUT_VIEW, 'x_single_source')},
+        {_singleton_cte_sql(
+            SCISCINET_SINGLETON_CTE,
+            PARQUET_OUTPUT_VIEW,
+            's_single_source',
+        )},
+        {_singleton_cte_sql(DOCX_SINGLETON_CTE, DOCX_OUTPUT_VIEW, 'd_single_source')},
+        base AS (
             {union_sql}
         ),
         {draw_sort_ctes_sql(draw_col=DRAW_LABEL, source_key_col=KTP_SOURCE_KEY_COL)}

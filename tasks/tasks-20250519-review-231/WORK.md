@@ -21,7 +21,7 @@
 
 ## Doing Now
 
-- SPEC AI section refreshed for the latest human text; see Done/Notes for the implementation implication.
+- Updated SPEC implementation is complete; latest verification results recorded below.
 
 ## Done
 
@@ -45,6 +45,13 @@
 - Confirmed the currently persisted review view does not yet implement the revised singleton-enrichment behavior: partition 2 review rows have 0 non-null HCR/xlsx context fields in the current DB.
 - Confirmed the currently persisted review view does not yet include the new `ktp.ff_author_id` column.
 - Updated the AI section to emphasize the current operating constraints, DuckDB-only source of truth, `LOAD splink_udfs;` note for review-view audits, and the review-view singleton enrichment requirement from the revised human text.
+- Implemented latest review-view update: added centralized `ktp.ff_author_id`, inserted it into the requested review column order, and made review rows explode only the partition focus domain while singleton-filling non-focus xlsx/sciscinet/docx context.
+- Added focused review-view test coverage for `ktp.ff_author_id`, xlsx-focus singleton sciscinet/docx fill, sciscinet-focus singleton xlsx/docx fill, sciscinet-count-zero placeholder behavior, and docx-focus singleton sciscinet fill.
+- Verified targeted tests: `pixi run pytest -q tests/test_step_10_build_cards.py` passed (`5 passed`).
+- Verified nearby coverage: `pixi run pytest -q tests/test_cards.py tests/test_outer_dict.py tests/test_step_10_build_cards.py` passed (`10 passed, 1 skipped`).
+- Verified targeted lint/type checks: `pixi run python -m ruff check src/steps/step_10_build_cards.py tests/test_step_10_build_cards.py src/helpers/vars.py` passed; `pixi run python -m mypy src/steps/step_10_build_cards.py tests/test_step_10_build_cards.py src/helpers/vars.py` passed.
+- Verified new review SQL against the current DuckDB through a temporary view in a read-only connection: 1,250 rows, `ktp.ff_author_id` present, and non-null `ktp.ff_author_id` counts by partition are 234/888/46 for xlsx/sciscinet/docx.
+- Ran requested `pixi run pre-commit`: Ruff and mypy passed across `src tests`; pytest failed on the same 6 detour cases already documented below.
 
 ## Notes
 
