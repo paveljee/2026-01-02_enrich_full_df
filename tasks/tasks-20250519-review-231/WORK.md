@@ -43,6 +43,7 @@
 - Re-read revised human SPEC before touching the AI section.
 - Re-checked the approved DuckDB source in read-only mode: `card_partitions` has 231 rows with partition counts 31/100/100, and `card_partition_review` has 1,250 rows after `LOAD splink_udfs;`.
 - Confirmed the currently persisted review view does not yet implement the revised singleton-enrichment behavior: partition 2 review rows have 0 non-null HCR/xlsx context fields in the current DB.
+- Confirmed the currently persisted review view does not yet include the new `ktp.ff_author_id` column.
 - Updated the AI section to emphasize the current operating constraints, DuckDB-only source of truth, `LOAD splink_udfs;` note for review-view audits, and the review-view singleton enrichment requirement from the revised human text.
 
 ## Notes
@@ -54,3 +55,4 @@
 - `src.repl` was not run.
 - Revised human text introduces/clarifies a review-view logic requirement: non-primary context columns should be populated only when the other domain has a singleton match for the source key; ambiguous non-primary context should remain empty. The AI section now states this as current contract.
 - Follow-up clarification: this singleton-fill rule is global, including xlsx/excel-row review rows. The partition focus domain is exploded by row; every non-focus domain is filled only when it has exactly one linked innerdict/value for the source key.
+- Latest human SPEC revision adds `ktp.ff_author_id` to the review view between `ktp.fragment_type` and `ktp.ff_discard`. AI section now requires a centralized label and states that sciscinet focus rows fill it from the row author id, while xlsx/docx focus rows fill it only from singleton linked sciscinet context.

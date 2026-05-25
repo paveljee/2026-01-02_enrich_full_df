@@ -299,6 +299,18 @@ from left to write:
     - ktp.filename
     - ktp.fragment
     - ktp.fragment_type
+    - ktp.ff_author_id
+    (this is filled in
+    with value of corresponding
+    sciscinet innerdict -
+    if we're closed up on
+    sciscinet partition, then
+    this will just equal ktp.fragment,
+    and if we're on a different partition,
+    this is only filled in if
+    there is only a single matching
+    sciscinet innerdict, in compliance
+    with the general note-rule above)
     - ktp.ff_discard
     (this will be an empty field -
     be sure to add label to vars.py;
@@ -547,6 +559,7 @@ Add/centralize these labels in `src/helpers/vars.py`:
   "ktp.partition_flag_docx_table_1_required_all"`
 - `KTP_PARTITION_FLAG_DOCX_ANY_COL =
   "ktp.partition_flag_docx_any"`
+- `KTP_FF_AUTHOR_ID_COL = "ktp.ff_author_id"`
 - `KTP_FF_DISCARD_COL = "ktp.ff_discard"`
 - `KTP_FF_NOTE_COL = "ktp.ff_note"`
 
@@ -651,45 +664,48 @@ spec's requested order exactly:
 3. `ktp.filename`
 4. `ktp.fragment`
 5. `ktp.fragment_type`
-6. `ktp.ff_discard`
-7. `ktp.ff_note`
-8. `ktp.draw_number`
-9. `ktp.first_name`
-10. `ktp.last_name`
-11. `ssnad.display_name`
-12. `ssnad.display_name_alternatives`
-13. `hcr.category`
-14. `ktp.ssn_field_display_names_list`
-15. `ktp.hcr_world_bank_economies`
-16. `ktp.hcr_world_bank_economies_match`
-17. `ktp.hcr_primary_affiliations`
-18. `ktp.hcr_secondary_affiliations`
-19. `ktp.ssn_top_institutions`
-20. xlsx partition flags:
+6. `ktp.ff_author_id`
+7. `ktp.ff_discard`
+8. `ktp.ff_note`
+9. `ktp.draw_number`
+10. `ktp.first_name`
+11. `ktp.last_name`
+12. `ssnad.display_name`
+13. `ssnad.display_name_alternatives`
+14. `hcr.category`
+15. `ktp.ssn_field_display_names_list`
+16. `ktp.hcr_world_bank_economies`
+17. `ktp.hcr_world_bank_economies_match`
+18. `ktp.hcr_primary_affiliations`
+19. `ktp.hcr_secondary_affiliations`
+20. `ktp.ssn_top_institutions`
+21. xlsx partition flags:
     `ktp.partition_flag_xlsx_non_exact_any`,
     `ktp.partition_flag_xlsx_any`
-21. `ktp.xlsx_match`
-22. sciscinet count flag: `ktp.partition_flag_sciscinet_count`
-23. `ktp.ssnad_match`
-24. `ktp.ssn_sum_hit_1pct`
-25. `ssnad.works_count`
-26. `ssnad.cited_by_count`
-27. `ssnad.works_api_url`
-28. docx partition flags:
+22. `ktp.xlsx_match`
+23. sciscinet count flag: `ktp.partition_flag_sciscinet_count`
+24. `ktp.ssnad_match`
+25. `ktp.ssn_sum_hit_1pct`
+26. `ssnad.works_count`
+27. `ssnad.cited_by_count`
+28. `ssnad.works_api_url`
+29. docx partition flags:
     `ktp.partition_flag_docx_table_1_required_all`,
     `ktp.partition_flag_docx_any`
-29. `ktp.docx_match`
-30. all required `ktp.table_1_*` columns, derived from the current repo
+30. `ktp.docx_match`
+31. all required `ktp.table_1_*` columns, derived from the current repo
     constants/schema rather than a duplicated literal list
 
 Every explicitly named human-spec column above should be emitted under
-that exact label. Only the literal expansion of item 30 is delegated to
+that exact label. Only the literal expansion of item 31 is delegated to
 repo-owned definitions, because the human spec names the column family
 but not the required-column list.
 
-For human-editable fields, add empty typed columns in the requested
-positions:
+For filename-fragment review helper fields, emit:
 
+- `ktp.ff_author_id`: the sciscinet author id when there is one in the
+  row's focus source or singleton non-focus sciscinet source; otherwise
+  empty.
 - `CAST(NULL AS BOOLEAN) AS "ktp.ff_discard"`
 - `CAST(NULL AS VARCHAR) AS "ktp.ff_note"`
 
@@ -704,16 +720,22 @@ empty.
 The focus domain by partition is:
 
 - xlsx tier: expand matching rows from `xlsx_output` or flattened
-  `xlsx_innerdicts`; populate xlsx/HCR fields where available.
+  `xlsx_innerdicts`; populate xlsx/HCR fields where available. Fill
+  `ktp.ff_author_id` only when the same source key has exactly one
+  linked sciscinet innerdict.
 - sciscinet tier: expand rows from `ssn_parquet_output` or
   `ssn_innerdicts`; populate sciscinet/OpenAlex fields where available.
+  In this focus domain, `ktp.ff_author_id` is the sciscinet author id
+  for the row, which should equal `ktp.fragment` for author-id rows.
 - sciscinet count zero: emit one placeholder review row so the source key
-  stays visible; populate source/name/draw/flags and leave row-specific
-  sciscinet fields empty.
+  stays visible; populate source/name/draw/flags and leave `ktp.ff_author_id`
+  and row-specific sciscinet fields empty.
 - docx tier: expand matching rows from `docx_output` or flattened
   `docx_innerdicts`; populate docx/table-1 fields where available. If a
   future DB has no docx innerdict for a docx-tier namekey, emit one
-  placeholder row with source/name/draw/flags.
+  placeholder row with source/name/draw/flags. Fill `ktp.ff_author_id`
+  only when the same source key has exactly one linked sciscinet
+  innerdict.
 - no-resolution rows, when mode 1 is selected, can be omitted from the
   review view or placed after all resolution buckets; mode-2 output is
   unaffected because mode 2 selects only resolution rows.
@@ -760,6 +782,8 @@ Add focused tests around the extracted partition helper and review view:
   2+ rows.
 - singleton non-primary context is populated in the review view, while
   ambiguous non-primary context remains empty.
+- `ktp.ff_author_id` appears in the exact requested column position and
+  follows the same focus-domain/singleton sciscinet rule.
 - missing xlsx/docx cases set `*_any` flags false.
 - invalid/non-dict xlsx match payloads count as non-exact.
 - multi-docx-row case preserves current subset semantics: if at least
