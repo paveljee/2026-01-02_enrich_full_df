@@ -3,6 +3,7 @@
 ## Current State
 
 - SPEC approved; implementation is now authorized.
+- Human SPEC text has been revised again; current task is to refresh the AI section so it reads as the current contract, not a change log.
 - `src.repl` must not be run directly for this task.
 - Git staging/unstaging is not allowed; only read-only git commands.
 - Partition/breakdown/review-view logic applies only to `card_subset_mode` 1 and 2.
@@ -20,7 +21,7 @@
 
 ## Doing Now
 
-- Implementation complete; verification results recorded below.
+- SPEC AI section refreshed for the latest human text; see Done/Notes for the implementation implication.
 
 ## Done
 
@@ -39,6 +40,10 @@
 - Verified nearby coverage: `pixi run pytest -q tests/test_cards.py tests/test_outer_dict.py tests/test_step_10_build_cards.py` passed (`10 passed, 1 skipped`).
 - Ran full test suite: `pixi run pytest -q` reached `51 passed, 3 skipped, 6 failed`; failures are in detour tests outside step 10.
 - Ran requested pre-commit: `pixi run pre-commit` passed Ruff and mypy across `src tests`, then failed in the pytest task with the same 6 detour failures.
+- Re-read revised human SPEC before touching the AI section.
+- Re-checked the approved DuckDB source in read-only mode: `card_partitions` has 231 rows with partition counts 31/100/100, and `card_partition_review` has 1,250 rows after `LOAD splink_udfs;`.
+- Confirmed the currently persisted review view does not yet implement the revised singleton-enrichment behavior: partition 2 review rows have 0 non-null HCR/xlsx context fields in the current DB.
+- Updated the AI section to emphasize the current operating constraints, DuckDB-only source of truth, `LOAD splink_udfs;` note for review-view audits, and the review-view singleton enrichment requirement from the revised human text.
 
 ## Notes
 
@@ -47,3 +52,5 @@
   - `tests/test_detour_mode0_econ_stats.py` has 2 failures because the default pixi env lacks optional `plotly`/`kaleido`; the error message points to the `detour-mode0-econ-stats` pixi environment.
   - `tests/test_detour_step4_breakdown.py` has 4 failures because the fixture workbook does not expose the currently expected `FY26` World Bank income column.
 - `src.repl` was not run.
+- Revised human text introduces/clarifies a review-view logic requirement: non-primary context columns should be populated only when the other domain has a singleton match for the source key; ambiguous non-primary context should remain empty. The AI section now states this as current contract.
+- Follow-up clarification: this singleton-fill rule is global, including xlsx/excel-row review rows. The partition focus domain is exploded by row; every non-focus domain is filled only when it has exactly one linked innerdict/value for the source key.

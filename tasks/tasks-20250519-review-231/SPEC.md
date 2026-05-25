@@ -285,7 +285,17 @@ from left to write:
   there may be multiple rows 
   per same source key and it's ok
   as long as ordering is made 
-  as specified above in "solution"
+  as specified above in "solution";
+  some special cases are 
+  where there is a single matching value
+  (that is, be it xlsx or sciscinet), and
+  in that case we may print the values
+  in the respective field - for example,
+  say we have a row that represents a
+  sciscinet author id but the given
+  ktp namekey only has a single
+  xlsx match - in that case we do
+  fill in the hcr category field etc.
     - ktp.filename
     - ktp.fragment
     - ktp.fragment_type
@@ -376,13 +386,20 @@ you take it from there.
 
 ## how ai understood the spec
 
-### implementation reading
+### operating constraints and implementation contract
+
+Do not run `src.repl`. The data source for confirming this spec is only
+`data/scisci_process.duckdb`, opened read-only. Code, config, and tests
+may be read as needed; do not inspect other `data/` or `.aicode/`
+artifacts. Git usage remains read-only: no staging, unstaging, reset, or
+checkout operations.
 
 Step 10 should be refactored without making the new artifact names or
-code path specific to `card_subset_mode = 2`. The current run uses mode
-2, so the verified output is the 231-namekey subset-2 resolution queue,
-but the implementation should not create mode-2-specific schema names or
-otherwise assume that the REPL can only be run in mode 2.
+code path specific to `card_subset_mode = 2`. The current config uses
+mode 2, so the current concrete output is the 231-namekey subset-2
+resolution queue, but the implementation should not create
+mode-2-specific schema names or otherwise assume that the REPL can only
+be run in mode 2.
 
 The partition/breakdown/review-view logic described here applies only
 when `card_subset_mode` is 1 or 2, because it is specifically about
@@ -444,26 +461,20 @@ a duplicated literal required-column list.
 
 ### repo/db context
 
-- I did not run `src.repl`; all DB checks were direct read-only queries
-  against `data/scisci_process.duckdb`.
 - Current `config.repl.json` uses `card_subset_mode = 2` and
   `db_file = data/scisci_process.duckdb`.
-- Step 10 is `src/steps/step_10_build_cards.py`; it currently filters
-  `context.outer_dict`, which is populated by earlier steps from:
-  - `xlsx_innerdicts`
-  - `docx_innerdicts`
-  - `ssn_innerdicts`
-- Useful persisted DB sources for this refactor are:
-  - `outerdict_stub` / `outerdict_name_keys`
-  - `xlsx_innerdicts`
-  - `docx_innerdicts`
-  - `ssn_innerdicts`
-  - `xlsx_output`, `docx_output`, and `ssn_parquet_output` for review-row
-    expansion
-- `xlsx_output` and `docx_output` depend on `unaccent`, which is loaded
-  in normal pipeline connections by `PipelineManager.connect_db()`. The
-  audit counts below used persisted innerdict tables, so they do not
-  depend on executing those views in an ad hoc connection.
+- Step 10 is `src/steps/step_10_build_cards.py`; it filters
+  `context.outer_dict`, which is populated by earlier steps from the
+  persisted `xlsx_innerdicts`, `docx_innerdicts`, and `ssn_innerdicts`
+  tables.
+- Useful persisted DB relations for this refactor are
+  `outerdict_stub` / `outerdict_name_keys`, `xlsx_innerdicts`,
+  `docx_innerdicts`, `ssn_innerdicts`, `xlsx_output`, `docx_output`, and
+  `ssn_parquet_output`.
+- Review-view SQL may reference views that call `unaccent`; direct
+  read-only DuckDB checks should run `LOAD splink_udfs;` before querying
+  those views. Normal pipeline connections load this extension in
+  `PipelineManager.connect_db()`.
 
 ### verified mode-2 counts
 
@@ -682,8 +693,15 @@ positions:
 - `CAST(NULL AS BOOLEAN) AS "ktp.ff_discard"`
 - `CAST(NULL AS VARCHAR) AS "ktp.ff_note"`
 
-Values for row-scoped fields should come from the row source implied by
-`ktp.partition`:
+Values for row-scoped fields follow one global rule. The partition's
+focus domain is exploded by row, so humans get one review row per
+candidate value in the domain they are resolving. Every other domain is
+singleton-filled: if that non-focus domain has exactly one linked
+innerdict/value for the same `ktp.source_key`, fill its informative
+columns; if it has zero or multiple linked values, leave those columns
+empty.
+
+The focus domain by partition is:
 
 - xlsx tier: expand matching rows from `xlsx_output` or flattened
   `xlsx_innerdicts`; populate xlsx/HCR fields where available.
@@ -700,9 +718,27 @@ Values for row-scoped fields should come from the row source implied by
   review view or placed after all resolution buckets; mode-2 output is
   unaffected because mode 2 selects only resolution rows.
 
-With the current mode-2 DB, this expansion would produce about 1,250
-review rows: 234 xlsx-tier rows, 916 sciscinet-tier rows/placeholders,
-and 100 docx-tier rows.
+This global singleton-fill rule applies equally to excel-row review
+rows, sciscinet author-id rows, and docx rows. For example:
+
+- an xlsx-partition `excel_row` should show singleton sciscinet/OpenAlex
+  and singleton docx/table-1 context when exactly one such linked row is
+  available;
+- a sciscinet-partition author row should show singleton HCR/xlsx and
+  singleton docx/table-1 context when exactly one such linked row is
+  available;
+- a docx-partition row should show singleton HCR/xlsx and singleton
+  sciscinet/OpenAlex context when exactly one such linked row is
+  available.
+
+In all cases, non-focus columns remain empty when that domain has zero or
+multiple linked rows, because multiple linked rows would introduce
+ambiguous context into a row whose purpose is to review a different
+partition focus.
+
+With the current mode-2 DB, this expansion produces 1,250 review rows:
+234 xlsx-tier rows, 916 sciscinet-tier rows/placeholders, and 100
+docx-tier rows.
 
 ### tests to add
 
@@ -722,6 +758,8 @@ Add focused tests around the extracted partition helper and review view:
   the docx partition value with raw xlsx/sciscinet flags still visible.
 - sciscinet count 0 emits a placeholder review row and sorts before count
   2+ rows.
+- singleton non-primary context is populated in the review view, while
+  ambiguous non-primary context remains empty.
 - missing xlsx/docx cases set `*_any` flags false.
 - invalid/non-dict xlsx match payloads count as non-exact.
 - multi-docx-row case preserves current subset semantics: if at least
