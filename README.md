@@ -53,7 +53,8 @@ review of the new year’s
 XLSX schema to
 ensure column names are
 properly normalized, in particular in
-steps 2 and 3.
+[steps 2 and 3](#data-flow) of
+the main pipeline.
 
 In addition to the
 original HCR XLSX spreadsheets,
