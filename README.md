@@ -100,6 +100,23 @@ Other data transformations are
 of course done as well along the way, but
 the two above are major conceptual ones.
 
+In addition to the main pipeline
+(i.e., `/src/repl.py` entry point), a
+separate route called `/src/detours/` exists;
+these detours contain variants of the
+main pipeline 
+created for a specific purpose.
+Detours must no rely on the main pipeline but
+rather the use its design principles and
+building blocks.
+For example,
+there are detours for
+gender analyses
+(`/src/detours/detour_mode3_pgf_stats.py`) and
+socioeconomic analyses
+(`/src/detours/detour_mode0_econ_stats.py`) that
+return bespoke data reports.
+
 ## Environment
 [pixi][pixi] is
 used with a
@@ -140,6 +157,65 @@ removed and recreated
 (e.g., using `pixi reinstall`)
 if switching between the two
 because the DuckDB binaries are incompatible across the operating systems.
+
+## User interface
+This repository is
+best interacted with through an
+AI coding agent –
+e.g., OpenAI Codex CLI.
+I have been running it within a
+Lima sandbox with only a
+dedicated volume mounted,
+connecting to it via SSH through a
+Visual Studio Code extension.
+
+A few routes may be taken:
+
+- Instruct the agent to
+  answer questions or
+  solve tasks
+  using an existing database
+  (e.g., produced after a
+  main pipeline run)
+  in read-only mode
+  (e.g., locked through
+  file permissions).
+- Instruct the agent to
+  develop a bespoke [detour](#pipeline-overview)
+  for a specific purpose;
+  this is particularly helpful
+  when an intervention is 
+  necessary mid-pipeline and
+  as such artifacts from the
+  main pipeline are not helpful.
+- Intervene at the
+  main pipeline,
+  including through introduction of
+  new knobs in
+  `./config*.json`, though this is
+  the least desirable route
+  as side effects and
+  regressions in main pipeline reproducibility guarantees must be
+  seriously considered.
+
+Some examples for
+all of these approaches
+may be found among
+[AI coding artifacts](#ai-assistance)
+in this repo;
+also see
+`/tasks/`.
+
+Minimal usage notes for
+the command-line interface (CLI) for
+the main pipeline
+can be viewed here:
+
+`pixi run python -m src.repl -h`
+
+Both interactive and
+non-interactive usage is
+supported.
 
 ## Data flow
 
