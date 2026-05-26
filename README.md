@@ -190,7 +190,7 @@ A few routes may be taken:
   (e.g., locked through
   file permissions).
 - Instruct the agent to
-  develop a bespoke [detour](#pipeline-overview)
+  develop a bespoke [detour](#detours)
   for a specific purpose;
   this is particularly helpful
   when an intervention is 
