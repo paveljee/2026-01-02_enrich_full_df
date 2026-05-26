@@ -2,7 +2,14 @@ pandas
 duckdb
 rich
 psutil
-#pyarrow
 python-docx
+click
 pydantic
+pytest
+lxml
+ruff
+mypy
+requests
+types-requests
 openpyxl
+pytest-cov
