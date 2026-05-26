@@ -41,3 +41,17 @@
   - 20 of the 31 legacy xlsx-tier rows become new relaxed subset-1 additions;
   - 11 legacy xlsx-tier rows remain xlsx-tier failures;
   - expected mode 5 count is 20 and mode 6 count is 211.
+
+### Sciscinet spot-check requested by user
+- Checked five manually reviewed OpenAlex IDs against persisted DB relations
+  with author-id/fragment columns. None of the five IDs are present in the
+  persisted DB relations.
+- Matching code in `step_09_match_parquet.py` uses exact normalized full-name
+  equality against `author_details.display_name` and alternatives, then applies
+  a nonzero-hit filter before writing sciscinet output/innerdicts.
+- Three examples have trailing spaces in `ktp.first_name`; current step 9 does
+  not trim/collapse whitespace before building the sciscinet match key, so the
+  match key contains a double space.
+- Claire M Fraser exact-matched a different author ID (`A5103968663`) but that
+  candidate had `ktp.ssn_sum_hit_1pct = 0` and was filtered out, leaving
+  sciscinet count zero.
