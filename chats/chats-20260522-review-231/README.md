@@ -9,7 +9,7 @@ the complete log of
 the interaction with OpenAI Codex
 (i.e., a Codex rollout) in relation to the
 implemention of this task specification:
-`/tasks/tasks-20250519-review-231/SPEC.md`.
+`/tasks/tasks-20260519-review-231/SPEC.md`.
 
 While the rollout is a
 plain text file

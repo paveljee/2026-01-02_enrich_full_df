@@ -1,6 +1,6 @@
 ## human written - ai never touches this
 ### prerequisites and setup
-`/tasks/tasks-20250519-review-231/SPEC.md`
+`/tasks/tasks-20260519-review-231/SPEC.md`
 
 ### new issue
 i am now reviewing partition 1  and
