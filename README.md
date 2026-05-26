@@ -229,6 +229,17 @@ Both interactive and
 non-interactive usage is
 supported.
 
+### DuckDB UI
+A DuckDB database produced from
+the main pipeline or a detour
+may be conveniently accessed via the
+stock DuckDB web UI
+(set to read-only by default):
+
+```bash
+pixi run duckdb-ui [OPTIONAL_PATH_TO_DB]
+```
+
 ## Data flow
 
 >[!NOTE]

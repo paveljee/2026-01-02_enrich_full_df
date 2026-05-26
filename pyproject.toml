@@ -51,6 +51,31 @@ cwd = "."
 cmd = "python -m src.repl --config config.repl.json --new --yes --non-interactive"
 cwd = "."
 
+[tool.pixi.tasks.duckdb-ui]
+args = [
+  { "arg" = "db_path", "default" = "data/scisci_process.duckdb" },
+]
+cmd = """
+python -c '
+import sys, duckdb
+read_only = True
+db_path = sys.argv[1]
+if not read_only:
+    sys.exit(
+      "Write access is not configured for this command. "
+      "Review the run command manually if you want to "
+      "open DuckDB UI with write access."
+    )
+con = duckdb.connect(db_path, read_only=read_only)
+con.sql("CALL start_ui();")
+input(
+  f"DuckDB UI running on {db_path!r} in read-only mode. "
+  "Press Enter to stop..."
+)
+' "{{ db_path }}"
+"""
+cwd = "."
+
 [tool.pixi.tasks.ruff]
 cmd = "ruff check src tests"
 cwd = "."
