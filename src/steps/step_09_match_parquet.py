@@ -7,6 +7,10 @@ import duckdb
 
 from ..helpers.context import PipelineContext, StepResult
 from ..helpers.duckdb_utils import append_innerdicts_from_rows_table
+from ..helpers.name_matching import (
+    sciscinet_author_name_norm_sql,
+    sciscinet_ktp_name_norm_sql,
+)
 from ..helpers.parquet_utils import normalize_parquet_column_name, parquet_columns, parquet_filename
 from ..helpers.procedures import ParquetMatchProcedure
 from ..helpers.schema import (
@@ -121,6 +125,16 @@ def run(context: PipelineContext) -> StepResult:
     author_id_col = normalize_parquet_column_name("authorid", "ssnad")
     authors_author_id_col = normalize_parquet_column_name("authorid", "ssnau")
     author_id_raw = "authorid"
+    strip_sciscinet_tokens = context.config.sciscinet_match_strip_tokens
+    ktp_match_key_expr = sciscinet_ktp_name_norm_sql(
+        f'"{KTP_FIRST_NAME_COL}"',
+        f'"{KTP_LAST_NAME_COL}"',
+        strip_tokens=strip_sciscinet_tokens,
+    )
+    ssnad_alt_name_expr = sciscinet_author_name_norm_sql(
+        "p.alt_name",
+        strip_tokens=strip_sciscinet_tokens,
+    )
 
     def scalar_int(sql: str) -> int:
         row = conn.execute(sql).fetchone()
@@ -148,9 +162,7 @@ def run(context: PipelineContext) -> StepResult:
                 "{KTP_SOURCE_KEY_COL}" AS name_key,
                 "{KTP_FIRST_NAME_COL}" AS "{KTP_FIRST_NAME_COL}",
                 "{KTP_LAST_NAME_COL}" AS "{KTP_LAST_NAME_COL}",
-                lower(
-                    unaccent("{KTP_FIRST_NAME_COL}" || ' ' || "{KTP_LAST_NAME_COL}")
-                ) AS match_key_norm
+                {ktp_match_key_expr} AS match_key_norm
             FROM {OUTERDICT_NAME_VIEW}
         ),
         parq AS (
@@ -177,11 +189,11 @@ def run(context: PipelineContext) -> StepResult:
             p.display_name_alternatives AS "ssnad.display_name_alternatives",
             json_object(
                 '{KTP_SSNAD_MATCH_KTP_NAME_NORM_KEY}', n.match_key_norm,
-                '{KTP_SSNAD_MATCH_SSNAD_NAME_NORM_KEY}', lower(unaccent(p.alt_name))
+                '{KTP_SSNAD_MATCH_SSNAD_NAME_NORM_KEY}', {ssnad_alt_name_expr}
             ) AS "{KTP_SSNAD_MATCH_COL}"
         FROM names n
         JOIN parq p
-          ON lower(unaccent(p.alt_name)) = n.match_key_norm
+          ON {ssnad_alt_name_expr} = n.match_key_norm
         """
     )
     match_stats_row = conn.execute(

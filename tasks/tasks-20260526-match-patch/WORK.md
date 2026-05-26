@@ -2,11 +2,24 @@
 
 ## Current State
 
-- Human SPEC text was updated again.
-- Current request is limited to refreshing the AI-understanding section so it
-  fully reflects the revised human contract.
-- New human clarifications captured: `WORK.md` can hold any useful notes, and
-  matching unit tests must live in three separate dedicated files under `tests/`.
+- SPEC approved; implementation is authorized.
+- Must not run `src.repl` or the full pipeline command.
+- If database context is needed, use only `data/scisci_process.duckdb` read-only.
+- Git usage remains read-only; do not stage/unstage.
+
+## Plan
+
+1. Add shared DuckDB-callable matching helpers for XLSX, SciSciNet, and DOCX.
+2. Add config knobs with default `false` and set them in `config.repl.json`.
+3. Wire XLSX and SciSciNet steps through the knobs while preserving v1 behavior.
+4. Rework step 10 review view aggregation to show all available same-domain
+   values per source key with newline/`-----` cell merging.
+5. Add three dedicated pytest/DuckDB test files under `tests/`.
+6. Run focused tests/lint where practical and record results.
+
+## Doing Now
+
+- Final verification and cleanup.
 
 ## Done
 
@@ -16,8 +29,38 @@
   restate the task contract cleanly.
 - Updated the AI section again for the latest human SPEC changes: workbook notes
   allowance and separate XLSX/DOCX/SciSciNet test files.
+- Re-read approved SPEC and inherited prerequisites before implementation.
+- Re-inspected current XLSX, DOCX, SciSciNet, config, and test/tooling context.
+- Human clarification during implementation: preserve the psyche of the original
+  code and avoid redesign; v1/default matching must not regress.
+- Human clarification during implementation: implement matching procedures in
+  DuckDB query logic for performance; helpers should centralize SQL, not move
+  matching into Python callbacks.
+- Added SQL-only `src.helpers.name_matching` helpers for XLSX, SciSciNet, and
+  DOCX matching. XLSX v1 emits the original SQL fragments; XLSX v2 emits inline
+  DuckDB SQL without Python callbacks or macros.
+- Wired `xlsx_match_name_tokens_v2` and `sciscinet_match_strip_tokens` config
+  knobs, both defaulting to `false` in `config.repl.json`.
+- Removed orphan Python XLSX token comparator code from `name_matching.py`.
+- Updated DOCX and SciSciNet steps to use the shared matching helper while
+  preserving existing default behavior.
+- Updated step 10 review context to aggregate all available same-domain values
+  per source key, newline-separated or `-----`-separated when any value is
+  multiline.
+- Added dedicated DuckDB pytest files:
+  `tests/test_xlsx_name_matching.py`, `tests/test_docx_name_matching.py`, and
+  `tests/test_sciscinet_name_matching.py`. Tests load `splink_udfs` and use
+  DuckDB `unaccent`, matching production.
+- Added step 10 review aggregation coverage in `tests/test_step_10_build_cards.py`.
 
 ## Verification
 
-- Read back the revised AI section and workbook entry; both reflect the updated
-  human SPEC contract.
+- Previous AI-section readback completed before implementation approval.
+- `pixi run pytest tests/test_xlsx_name_matching.py tests/test_docx_name_matching.py tests/test_sciscinet_name_matching.py tests/test_step_10_build_cards.py -q`
+  passed: 24 passed.
+- `pixi run ruff` passed.
+- `pixi run pre-commit` ran; ruff and mypy passed, then the full test task
+  failed in unrelated existing detour tests due missing optional
+  `detour-mode0-econ-stats` plotting dependencies (`plotly`) and FY26 fixture
+  expectations in `tests/test_detour_step4_breakdown.py`. The new focused
+  matching and step 10 tests passed within that run.

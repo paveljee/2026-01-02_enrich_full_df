@@ -20,6 +20,8 @@
   ],
   "pilot_xlsx_name": "2024_HCR.xlsx",
   "total_draws": 310,
+  "xlsx_match_name_tokens_v2": false,
+  "sciscinet_match_strip_tokens": false,
   "files_config": {
     "hit_papers_0": {
       "path": "/Volumes/home/anonymous/sciscinet/v2/hf/xet/hit_papers_level0.parquet",

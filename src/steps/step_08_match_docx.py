@@ -15,6 +15,7 @@ from ..helpers.duckdb_utils import (
     register_frame,
 )
 from ..helpers.jsonlines import dumps_jsonlines
+from ..helpers.name_matching import docx_match_condition_sql, docx_name_norm_sql
 from ..helpers.procedures import DocxMatchProcedure
 from ..helpers.schema import (
     DOCX_INNERDICT_TABLE,
@@ -148,6 +149,18 @@ def run(context: PipelineContext) -> StepResult:
             f"Docx data does not contain expected name column '{RIGHT_NAME_COL}'."
         )
 
+    docx_first_norm_expr = docx_name_norm_sql('nd."' + KTP_FIRST_NAME_COL + '"')
+    docx_last_norm_expr = docx_name_norm_sql('nd."' + KTP_LAST_NAME_COL + '"')
+    docx_table_name_norm_expr = docx_name_norm_sql(
+        'd."' + name_col + '"',
+        coalesce_empty=True,
+    )
+    docx_join_condition = docx_match_condition_sql(
+        "nd.first_clean",
+        "nd.last_clean",
+        "d.docx_clean",
+    )
+
     conn.execute(
         f"""
         CREATE OR REPLACE VIEW {DOCX_MATCH_VIEW} AS
@@ -164,10 +177,8 @@ def run(context: PipelineContext) -> StepResult:
         names_clean AS (
             SELECT
                 nd.*,
-                regexp_replace(lower(unaccent(nd."{KTP_FIRST_NAME_COL}")), '[^0-9a-z]+', '', 'g')
-                    AS first_clean,
-                regexp_replace(lower(unaccent(nd."{KTP_LAST_NAME_COL}")), '[^0-9a-z]+', '', 'g')
-                    AS last_clean
+                {docx_first_norm_expr} AS first_clean,
+                {docx_last_norm_expr} AS last_clean
             FROM name_draws nd
             WHERE nd."{KTP_FIRST_NAME_COL}" IS NOT NULL
               AND nd."{KTP_LAST_NAME_COL}" IS NOT NULL
@@ -177,8 +188,7 @@ def run(context: PipelineContext) -> StepResult:
         docx_clean AS (
             SELECT
                 d.*,
-                regexp_replace(lower(unaccent(COALESCE(d."{name_col}", ''))), '[^0-9a-z]+', '', 'g')
-                    AS docx_clean
+                {docx_table_name_norm_expr} AS docx_clean
             FROM {DOCX_TABLE} d
         ),
         base AS (
@@ -198,8 +208,7 @@ def run(context: PipelineContext) -> StepResult:
                 d.* EXCLUDE ("{KTP_FILENAME_COL}", "{KTP_DOCX_ROW_NUMBER_COL}", docx_clean)
             FROM docx_clean d
             RIGHT JOIN names_clean nd
-              ON POSITION(nd.first_clean IN d.docx_clean) > 0
-             AND POSITION(nd.last_clean IN d.docx_clean) > 0
+              ON {docx_join_condition}
             LEFT JOIN {REGISTERED_RESOURCES_TABLE} rr
               ON rr.resource_name = d."{KTP_FILENAME_COL}"
             WHERE d."{KTP_FILENAME_COL}" IS NOT NULL

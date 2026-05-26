@@ -67,6 +67,8 @@ from ..helpers.vars import (
     KTP_XLSX_MATCH_COL,
     KTP_XLSX_MATCH_FIRST_TOKENS_KEY,
     KTP_XLSX_MATCH_LAST_NAME_NORM_KEY,
+    KTP_XLSX_MATCH_RULE_KEY,
+    KTP_XLSX_MATCH_RULE_V2,
     KTP_XLSX_MATCH_SOURCE_KEY_LAST_KEY,
     KTP_XLSX_MATCH_SOURCE_KEY_TOKENS_KEY,
     SSNAD_CITED_BY_COUNT_COL,
@@ -90,10 +92,10 @@ CARD_PARTITION_FRAME_TABLE = "card_partition_frame"
 REVIEW_DOMAIN_XLSX = "xlsx"
 REVIEW_DOMAIN_SCISCINET = "sciscinet"
 REVIEW_DOMAIN_DOCX = "docx"
-XLSX_SINGLETON_CTE = "xlsx_singletons"
-SCISCINET_SINGLETON_CTE = "sciscinet_singletons"
-DOCX_SINGLETON_CTE = "docx_singletons"
-REVIEW_SINGLETON_ALIASES = {
+XLSX_CONTEXT_CTE = "xlsx_context"
+SCISCINET_CONTEXT_CTE = "sciscinet_context"
+DOCX_CONTEXT_CTE = "docx_context"
+REVIEW_CONTEXT_ALIASES = {
     REVIEW_DOMAIN_XLSX: "xs",
     REVIEW_DOMAIN_SCISCINET: "ss",
     REVIEW_DOMAIN_DOCX: "ds",
@@ -202,6 +204,15 @@ def _is_exact_xlsx_match_payload(value: object) -> bool:
         source_key_tokens = []
     if not isinstance(first_tokens, list):
         first_tokens = []
+    if payload.get(KTP_XLSX_MATCH_RULE_KEY) == KTP_XLSX_MATCH_RULE_V2:
+        source_key_last_tokens = source_key_last if isinstance(source_key_last, list) else []
+        last_name_tokens = last_name_norm if isinstance(last_name_norm, list) else []
+        return bool(
+            source_key_tokens
+            and first_tokens
+            and source_key_last_tokens
+            and last_name_tokens
+        )
     source_key_last_str = str(source_key_last).strip() if source_key_last is not None else ""
     last_name_norm_str = str(last_name_norm).strip() if last_name_norm is not None else ""
     source_key_token_values = sorted(
@@ -601,7 +612,7 @@ def _review_domain_expr(
         return "NULL"
     if target_domain == primary_domain and primary_alias is not None:
         return _qualified(primary_alias, col)
-    return _qualified(REVIEW_SINGLETON_ALIASES[target_domain], col)
+    return _qualified(REVIEW_CONTEXT_ALIASES[target_domain], col)
 
 
 def _review_source_expr(
@@ -625,7 +636,7 @@ def _review_source_expr(
                 domain_columns=domain_columns,
             )
         if KTP_FRAGMENT_COL in domain_columns[REVIEW_DOMAIN_SCISCINET]:
-            return _qualified(REVIEW_SINGLETON_ALIASES[REVIEW_DOMAIN_SCISCINET], KTP_FRAGMENT_COL)
+            return _qualified(REVIEW_CONTEXT_ALIASES[REVIEW_DOMAIN_SCISCINET], KTP_FRAGMENT_COL)
         return "NULL"
     if col == KTP_FF_DISCARD_COL:
         return "CAST(NULL AS BOOLEAN)"
@@ -681,36 +692,134 @@ def _review_select_list(
     return ",\n                ".join(exprs)
 
 
-def _singleton_cte_sql(cte_name: str, source_view: str, source_alias: str) -> str:
-    singleton_alias = f"{source_alias}_singleton_keys"
+def _review_context_specs(
+    *,
+    source_domain: str,
+    source_columns: set[str],
+    review_columns: list[str],
+) -> dict[str, str]:
+    specs = {
+        col: col
+        for col in review_columns
+        if _review_info_domain(col) == source_domain and col in source_columns
+    }
+    if source_domain == REVIEW_DOMAIN_SCISCINET and KTP_FRAGMENT_COL in source_columns:
+        specs[KTP_FRAGMENT_COL] = KTP_FRAGMENT_COL
+    return specs
+
+
+def _review_context_values_expr(
+    *,
+    source_alias: str,
+    source_col: str,
+    source_columns: set[str],
+) -> str:
+    value_expr = f"CAST({_qualified(source_alias, source_col)} AS VARCHAR)"
+    order_candidates = [KTP_FILENAME_COL, KTP_FRAGMENT_COL, KTP_FRAGMENT_TYPE_COL, source_col]
+    order_cols: list[str] = []
+    for col in order_candidates:
+        if col in source_columns and col not in order_cols:
+            order_cols.append(col)
+    order_sql = ", ".join(
+        f"CAST({_qualified(source_alias, col)} AS VARCHAR)" for col in order_cols
+    )
+    if not order_sql:
+        order_sql = value_expr
+    return (
+        "list_filter("
+        f"list(CASE WHEN {_qualified(source_alias, source_col)} IS NOT NULL "
+        f"AND trim({value_expr}) <> '' THEN {value_expr} ELSE NULL END "
+        f"ORDER BY {order_sql}), "
+        "value -> value IS NOT NULL)"
+    )
+
+
+def _review_context_merge_expr(values_col: str) -> str:
     return f"""
+        CASE
+            WHEN list_count({values_col}) = 0 THEN NULL
+            WHEN list_count(
+                list_filter(
+                    {values_col},
+                    value -> contains(value, chr(10)) OR contains(value, chr(13))
+                )
+            ) > 0
+                THEN array_to_string({values_col}, chr(10) || '-----' || chr(10))
+            ELSE array_to_string({values_col}, chr(10))
+        END
+    """
+
+
+def _review_context_cte_sql(
+    *,
+    cte_name: str,
+    source_view: str,
+    source_alias: str,
+    source_domain: str,
+    source_columns: set[str],
+    review_columns: list[str],
+) -> str:
+    specs = _review_context_specs(
+        source_domain=source_domain,
+        source_columns=source_columns,
+        review_columns=review_columns,
+    )
+    if not specs:
+        return f"""
         {cte_name} AS (
-            SELECT {source_alias}.*
+            SELECT DISTINCT {_quote_identifier(KTP_SOURCE_KEY_COL)}
+            FROM {source_view}
+        )
+        """
+
+    values_cte_name = f"{cte_name}_values"
+    values_cols = {col: f"__review_value_{idx}" for idx, col in enumerate(specs)}
+    values_select = ",\n                ".join(
+        f"{_review_context_values_expr(
+            source_alias=source_alias,
+            source_col=source_col,
+            source_columns=source_columns,
+        )} AS {_quote_identifier(values_col)}"
+        for col, source_col in specs.items()
+        for values_col in [values_cols[col]]
+    )
+    merge_select = ",\n                ".join(
+        f"{_review_context_merge_expr(_quote_identifier(values_col))} AS {_quote_identifier(col)}"
+        for col, values_col in values_cols.items()
+    )
+    source_key_select = (
+        f"{_qualified(source_alias, KTP_SOURCE_KEY_COL)} "
+        f"AS {_quote_identifier(KTP_SOURCE_KEY_COL)}"
+    )
+    return f"""
+        {values_cte_name} AS (
+            SELECT
+                {source_key_select},
+                {values_select}
             FROM {source_view} {source_alias}
-            JOIN (
-                SELECT {_quote_identifier(KTP_SOURCE_KEY_COL)}
-                FROM {source_view}
-                GROUP BY {_quote_identifier(KTP_SOURCE_KEY_COL)}
-                HAVING COUNT(*) = 1
-            ) {singleton_alias}
-              ON {_qualified(source_alias, KTP_SOURCE_KEY_COL)} =
-                 {_qualified(singleton_alias, KTP_SOURCE_KEY_COL)}
+            GROUP BY {_qualified(source_alias, KTP_SOURCE_KEY_COL)}
+        ),
+        {cte_name} AS (
+            SELECT
+                {_quote_identifier(KTP_SOURCE_KEY_COL)},
+                {merge_select}
+            FROM {values_cte_name}
         )
     """
 
 
-def _singleton_joins_sql() -> str:
-    xlsx_alias = REVIEW_SINGLETON_ALIASES[REVIEW_DOMAIN_XLSX]
-    sciscinet_alias = REVIEW_SINGLETON_ALIASES[REVIEW_DOMAIN_SCISCINET]
-    docx_alias = REVIEW_SINGLETON_ALIASES[REVIEW_DOMAIN_DOCX]
+def _context_joins_sql() -> str:
+    xlsx_alias = REVIEW_CONTEXT_ALIASES[REVIEW_DOMAIN_XLSX]
+    sciscinet_alias = REVIEW_CONTEXT_ALIASES[REVIEW_DOMAIN_SCISCINET]
+    docx_alias = REVIEW_CONTEXT_ALIASES[REVIEW_DOMAIN_DOCX]
     return f"""
-            LEFT JOIN {XLSX_SINGLETON_CTE} {xlsx_alias}
+            LEFT JOIN {XLSX_CONTEXT_CTE} {xlsx_alias}
               ON {_qualified(xlsx_alias, KTP_SOURCE_KEY_COL)} =
                  {_qualified('cp', KTP_SOURCE_KEY_COL)}
-            LEFT JOIN {SCISCINET_SINGLETON_CTE} {sciscinet_alias}
+            LEFT JOIN {SCISCINET_CONTEXT_CTE} {sciscinet_alias}
               ON {_qualified(sciscinet_alias, KTP_SOURCE_KEY_COL)} =
                  {_qualified('cp', KTP_SOURCE_KEY_COL)}
-            LEFT JOIN {DOCX_SINGLETON_CTE} {docx_alias}
+            LEFT JOIN {DOCX_CONTEXT_CTE} {docx_alias}
               ON {_qualified(docx_alias, KTP_SOURCE_KEY_COL)} =
                  {_qualified('cp', KTP_SOURCE_KEY_COL)}
     """
@@ -741,7 +850,7 @@ def _review_branch_sql(
             FROM {CARD_PARTITION_TABLE} cp
             JOIN {source_view} {source_alias}
               ON {source_key_join}
-            {_singleton_joins_sql()}
+            {_context_joins_sql()}
             WHERE {_qualified('cp', KTP_PARTITION_COL)} = {partition_value}
     """
 
@@ -768,7 +877,7 @@ def _review_placeholder_branch_sql(
                     domain_columns=domain_columns,
                 )}
             FROM {CARD_PARTITION_TABLE} cp
-            {_singleton_joins_sql()}
+            {_context_joins_sql()}
             WHERE {_qualified('cp', KTP_PARTITION_COL)} = {partition_value}
               AND NOT EXISTS (
                   SELECT 1
@@ -845,13 +954,30 @@ def _create_partition_review_view(conn: duckdb.DuckDBPyConnection) -> list[str]:
         f"""
         CREATE OR REPLACE VIEW {CARD_PARTITION_REVIEW_VIEW} AS
         WITH
-        {_singleton_cte_sql(XLSX_SINGLETON_CTE, XLSX_OUTPUT_VIEW, 'x_single_source')},
-        {_singleton_cte_sql(
-            SCISCINET_SINGLETON_CTE,
-            PARQUET_OUTPUT_VIEW,
-            's_single_source',
+        {_review_context_cte_sql(
+            cte_name=XLSX_CONTEXT_CTE,
+            source_view=XLSX_OUTPUT_VIEW,
+            source_alias='x_context_source',
+            source_domain=REVIEW_DOMAIN_XLSX,
+            source_columns=xlsx_columns,
+            review_columns=columns,
         )},
-        {_singleton_cte_sql(DOCX_SINGLETON_CTE, DOCX_OUTPUT_VIEW, 'd_single_source')},
+        {_review_context_cte_sql(
+            cte_name=SCISCINET_CONTEXT_CTE,
+            source_view=PARQUET_OUTPUT_VIEW,
+            source_alias='s_context_source',
+            source_domain=REVIEW_DOMAIN_SCISCINET,
+            source_columns=sciscinet_columns,
+            review_columns=columns,
+        )},
+        {_review_context_cte_sql(
+            cte_name=DOCX_CONTEXT_CTE,
+            source_view=DOCX_OUTPUT_VIEW,
+            source_alias='d_context_source',
+            source_domain=REVIEW_DOMAIN_DOCX,
+            source_columns=docx_columns,
+            review_columns=columns,
+        )},
         base AS (
             {union_sql}
         ),

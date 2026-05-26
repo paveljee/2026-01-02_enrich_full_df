@@ -582,3 +582,115 @@ def test_partition_review_view_has_specified_order_and_placeholders() -> None:
     assert docx_row[KTP_FF_AUTHOR_ID_COL] == "A-docx"
     assert docx_row[SSNAD_DISPLAY_NAME_COL] == "Ada Docx OpenAlex"
     assert pd.isna(docx_row[HCR_CATEGORY_COL])
+
+
+def test_partition_review_view_merges_all_available_context_values() -> None:
+    conn = duckdb.connect(":memory:")
+    partition_rows = pd.DataFrame(
+        [
+            {
+                KTP_SOURCE_KEY_COL: "xlsx-source",
+                KTP_PARTITION_COL: KTP_PARTITION_XLSX_VALUE,
+                KTP_PARTITION_FLAG_XLSX_NON_EXACT_ANY_COL: True,
+                KTP_PARTITION_FLAG_XLSX_ANY_COL: True,
+                KTP_PARTITION_FLAG_SCISCINET_COUNT_COL: 2,
+                KTP_PARTITION_FLAG_DOCX_TABLE_1_REQUIRED_ALL_COL: True,
+                KTP_PARTITION_FLAG_DOCX_ANY_COL: True,
+                "card_subset_mode": 2,
+                DRAW_LABEL: "1",
+                KTP_FIRST_NAME_COL: "Ada",
+                KTP_LAST_NAME_COL: "Merged",
+            }
+        ]
+    )
+    step10._materialize_partition_table(conn, partition_rows)
+
+    _create_relation(
+        conn,
+        XLSX_OUTPUT_VIEW,
+        [
+            {
+                KTP_SOURCE_KEY_COL: "xlsx-source",
+                KTP_FILENAME_COL: "hcr.xlsx",
+                KTP_FRAGMENT_COL: "11",
+                KTP_FRAGMENT_TYPE_COL: "excel_row",
+                DRAW_LABEL: "1",
+                KTP_FIRST_NAME_COL: "Ada",
+                KTP_LAST_NAME_COL: "Merged",
+                HCR_CATEGORY_COL: "Highly Cited",
+                KTP_XLSX_MATCH_COL: _xlsx_payload(exact=False),
+            }
+        ],
+        [
+            KTP_SOURCE_KEY_COL,
+            KTP_FILENAME_COL,
+            KTP_FRAGMENT_COL,
+            KTP_FRAGMENT_TYPE_COL,
+            DRAW_LABEL,
+            KTP_FIRST_NAME_COL,
+            KTP_LAST_NAME_COL,
+            HCR_CATEGORY_COL,
+            KTP_XLSX_MATCH_COL,
+        ],
+    )
+    _create_relation(
+        conn,
+        PARQUET_OUTPUT_VIEW,
+        [
+            {
+                KTP_SOURCE_KEY_COL: "xlsx-source",
+                KTP_FILENAME_COL: "author_details.parquet",
+                KTP_FRAGMENT_COL: "A-1",
+                KTP_FRAGMENT_TYPE_COL: "author_id",
+                SSNAD_DISPLAY_NAME_COL: "Ada One",
+            },
+            {
+                KTP_SOURCE_KEY_COL: "xlsx-source",
+                KTP_FILENAME_COL: "author_details.parquet",
+                KTP_FRAGMENT_COL: "A-2",
+                KTP_FRAGMENT_TYPE_COL: "author_id",
+                SSNAD_DISPLAY_NAME_COL: "Ada Two",
+            },
+        ],
+        [
+            KTP_SOURCE_KEY_COL,
+            KTP_FILENAME_COL,
+            KTP_FRAGMENT_COL,
+            KTP_FRAGMENT_TYPE_COL,
+            SSNAD_DISPLAY_NAME_COL,
+        ],
+    )
+    _create_relation(
+        conn,
+        DOCX_OUTPUT_VIEW,
+        [
+            {
+                KTP_SOURCE_KEY_COL: "xlsx-source",
+                KTP_FILENAME_COL: "manual.docx",
+                KTP_FRAGMENT_COL: "1",
+                KTP_FRAGMENT_TYPE_COL: "docx_row",
+                KTP_DOCX_MATCH_COL: "docx-one\nline",
+            },
+            {
+                KTP_SOURCE_KEY_COL: "xlsx-source",
+                KTP_FILENAME_COL: "manual.docx",
+                KTP_FRAGMENT_COL: "2",
+                KTP_FRAGMENT_TYPE_COL: "docx_row",
+                KTP_DOCX_MATCH_COL: "docx-two",
+            },
+        ],
+        [
+            KTP_SOURCE_KEY_COL,
+            KTP_FILENAME_COL,
+            KTP_FRAGMENT_COL,
+            KTP_FRAGMENT_TYPE_COL,
+            KTP_DOCX_MATCH_COL,
+        ],
+    )
+
+    step10._create_partition_review_view(conn)
+    review_row = conn.execute(f"SELECT * FROM {CARD_PARTITION_REVIEW_VIEW}").df().iloc[0]
+
+    assert review_row[KTP_FF_AUTHOR_ID_COL] == "A-1\nA-2"
+    assert review_row[SSNAD_DISPLAY_NAME_COL] == "Ada One\nAda Two"
+    assert review_row[KTP_DOCX_MATCH_COL] == "docx-one\nline\n-----\ndocx-two"

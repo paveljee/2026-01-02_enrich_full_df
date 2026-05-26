@@ -30,6 +30,8 @@ class PipelineConfig(BaseModel):
     pilot_xlsx_name: str
     total_draws: int
     card_subset_mode: int
+    xlsx_match_name_tokens_v2: bool = False
+    sciscinet_match_strip_tokens: bool = False
 
     @field_validator("sample_draw_sizes", mode="before")
     @classmethod
