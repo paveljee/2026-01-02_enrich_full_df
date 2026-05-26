@@ -29,6 +29,7 @@ AI coding artifacts under
 `/chats/`.
 
 ## Pipeline overview
+### Purpose
 This a reproducible pipeline whose
 outputs are threefold:
 
@@ -48,7 +49,9 @@ personal profile cards for
 HCR researchers
 across an arbitrary number of
 yearly HCR spreadsheets.
-The years are
+
+### Scope
+The HCR years covered are
 2014–2024 in this release, and
 adding further years will require a
 review of the new year’s
@@ -72,6 +75,7 @@ kept in mind from the very
 conception of this pipeline and
 so should be straightforward to add.
 
+### Main pipeline
 On a high level, the pipeline makes
 two major data transforms:
 
@@ -103,6 +107,7 @@ Other data transformations are
 of course done as well along the way, but
 the two above are major conceptual ones.
 
+### Detours
 In addition to the main pipeline
 (i.e., `/src/repl.py` entry point), a
 separate route called `/src/detours/` exists;
@@ -162,6 +167,7 @@ if switching between the two
 because the DuckDB binaries are incompatible across the operating systems.
 
 ## User interface
+### AI agent
 This repository is
 best interacted with through an
 AI coding agent –
@@ -209,12 +215,15 @@ in this repo;
 also see
 `/tasks/`.
 
+### Main pipeline CLI
 Minimal usage notes for
 the command-line interface (CLI) for
 the main pipeline
 can be viewed here:
 
-`pixi run python -m src.repl -h`
+```bash
+pixi run python -m src.repl -h
+```
 
 Both interactive and
 non-interactive usage is
