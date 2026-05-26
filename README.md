@@ -233,7 +233,7 @@ supported.
 A DuckDB database produced from
 the main pipeline or a detour
 may be conveniently accessed via the
-stock DuckDB web UI
+stock [DuckDB web UI][duckdb-ui]
 (set to read-only by default):
 
 ```bash
@@ -251,6 +251,6 @@ pixi run duckdb-ui [OPTIONAL_PATH_TO_DB]
 
 <!--- Markdown refs --->
 
-[owl-rdf]: http://www.w3.org/TR/owl-ref/ "OWL Web Ontology Language
-Reference"
-[pixi]: https://pixi.prefix.dev/latest/installation/
+[owl-rdf]: http://www.w3.org/TR/owl-ref/ "OWL Web Ontology Language Reference"
+[pixi]: https://pixi.prefix.dev/latest/installation/ "Pixi Installation"
+[duckdb-ui]: https://duckdb.org/2025/03/12/duckdb-ui "The DuckDB Local UI"
