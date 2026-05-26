@@ -8,7 +8,23 @@
 > 
 > This is a code review of
 > the entire pipeline, prior
-> generated with OpenAI Codex.
+> primarily AI-generated.
+
+## AI assistance
+The pipeline code was
+primarily generated with
+OpenAI Codex (GPT 5.2+).
+
+Original stub was
+generated with
+Gemini 3 Pro in
+January 2026, see
+`/chats/chats-202601xx-original-gemini/`.
+
+See more
+AI coding artifacts under
+`/.aicode/rfc/` and
+`/chats/`.
 
 ## Pipeline overview
 This a reproducible pipeline whose
