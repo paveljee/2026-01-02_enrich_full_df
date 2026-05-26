@@ -104,18 +104,18 @@ the two above are major conceptual ones.
 In addition to the main pipeline
 (i.e., `/src/repl.py` entry point), a
 separate route called `/src/detours/` exists;
-these detours contain variants of the
+these so-called detours contain variants of the
 main pipeline 
 created for a specific purpose.
-Detours must no rely on the main pipeline but
-rather the use its design principles and
+Detours must not rely on the main pipeline but
+rather use its design principles and
 building blocks.
 For example,
-there are detours for
+there is a detour for
 gender analyses
-(`/src/detours/detour_mode3_pgf_stats.py`) and
+(`/src/detours/detour_mode3_pgf_stats.py`) and for
 socioeconomic analyses
-(`/src/detours/detour_mode0_econ_stats.py`) that
+(`/src/detours/detour_mode0_econ_stats.py`), which
 return bespoke data reports.
 
 ## Environment
