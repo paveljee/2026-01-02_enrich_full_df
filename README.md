@@ -13,7 +13,9 @@
 ## AI assistance
 The pipeline code was
 primarily generated with
-OpenAI Codex (GPT 5.2+).
+OpenAI Codex (GPT 5.2+)
+under paid Plus subscription
+(~$30 CAD/month as of Q1-Q2 2026).
 
 Original stub was
 generated with
