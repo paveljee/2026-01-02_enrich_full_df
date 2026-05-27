@@ -58,6 +58,20 @@
   are now selected as `VARCHAR` display values, including primary-domain rows.
 - Added regression coverage for JSON-typed XLSX context values in the partition
   review view.
+- Compared `tmp/output-old/` and `tmp/output-new/` after user-provided rerun.
+  File sets match exactly: 231 cards in each tree; 191 files differ by content.
+  All changed card fields are `ktp.ssn_field_display_names_list`; across 2,403
+  changed occurrences, old and new lists have identical multisets of values and
+  differ only in ordering. No added/removed cards or changed match/review fields
+  were found in the card text outputs.
+- Root cause of output churn: `step_09_match_parquet.py` builds
+  `ktp.ssn_field_display_names_list` with `LIST(DISTINCT ...)` and no
+  `ORDER BY`, so DuckDB can emit nondeterministic list order when the plan
+  changes. This appears to be output-order noise rather than a semantic match
+  regression.
+- Surgically patched `ktp.ssn_field_display_names_list` aggregation to order
+  alphabetically by the field display value while preserving the same distinct
+  fallback-to-field-id expression.
 
 ## Verification
 
@@ -72,3 +86,16 @@
   matching and step 10 tests passed within that run.
 - User reran `pixi run pytest tests/test_step_10_build_cards.py -q` after the
   JSON display-value fix: 7 passed.
+- Local DuckDB smoke probe could not run in this shell after interruption due
+  `_duckdb` import failure from the pixi environment; no pipeline command was
+  attempted.
+- After pixi was fixed, verified the ordered `LIST(DISTINCT ... ORDER BY ...)`
+  DuckDB syntax with a focused in-memory query; output was deterministic:
+  `[3, Alpha, Beta]` for fallback field id plus display-name values.
+- `pixi run python -m py_compile src/steps/step_09_match_parquet.py` passed.
+- `pixi run ruff` passed.
+- Re-ran `pixi run pre-commit`; ruff and mypy passed, full pytest still failed
+  only in existing detour tests due missing optional `plotly` for
+  `detour-mode0-econ-stats` and FY26 fixture expectations in
+  `tests/test_detour_step4_breakdown.py`. Focused matching and step 10 tests
+  passed in that run.

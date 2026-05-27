@@ -881,6 +881,10 @@ def run(context: PipelineContext) -> StepResult:
                             fl.field_display_name,
                             CAST(fid.field_id AS VARCHAR)
                         )
+                        ORDER BY COALESCE(
+                            fl.field_display_name,
+                            CAST(fid.field_id AS VARCHAR)
+                        )
                     )
                     AS VARCHAR
                 ) AS "{KTP_SSN_FIELD_DISPLAY_NAMES_LIST_COL}"
