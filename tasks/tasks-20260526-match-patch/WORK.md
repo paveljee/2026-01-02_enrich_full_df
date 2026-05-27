@@ -90,6 +90,26 @@
   the existing DuckDB `lower(unaccent(...))` equality key expressions; it does
   not introduce recursive matching, lateral key expansion, or pairwise Python
   logic.
+- Investigated user report that subset1 v2 produced an empty
+  `10_build_cards_card_partition_review_df.csv` artifact. Root cause appears to
+  be step 10 review-view filtering, not XLSX v2 matching: subset mode 1 selects
+  only `subset1_ok` rows, `_partition_value(...)` labels those rows as
+  `ktp.partition = 0` (`KTP_PARTITION_NO_RESOLUTION_VALUE`), and
+  `_create_partition_review_view(...)` currently unions branches only for
+  partition values 1, 2, and 4 (XLSX, SciSciNet, DOCX resolution buckets). Since
+  `CARD_PARTITION_ARTIFACT_MODES` includes subset mode 1, the review CSV is
+  emitted for subset1, but the view has no branch that can return its partition
+  0 rows.
+- Fixed a v2 XLSX regression found by user with `Adriano` / `Nunes-Nesi` versus
+  HCR row first name `Adriano Nunes`. V2 now remains additive over original v1
+  XLSX matching: in v2 mode, the helper precomputes both v2 token/fallback keys
+  and original v1 first-token/last-name equality keys, tags matched rows as
+  `ktp.xlsx_match_rule = "v2"` or `"v1"`, and step 07 keeps only the best rule
+  path per source/HCR row, preferring `v2` over `v1`. The `use_v2=False` v1
+  branch remains wired through the original v1 helper path.
+- Tightened step 10 XLSX partition interpretation so a v2-mode row tagged with
+  `ktp.xlsx_match_rule = "v1"` is treated as a present but non-exact XLSX match,
+  sending the namekey to subset 2 as intended.
 
 ## Verification
 
@@ -138,3 +158,14 @@
   returned 1,000,000 matches; elapsed times were roughly 0.36s without trim and
   0.40s with trim.
 - `pixi run pytest tests/test_sciscinet_name_matching.py -q` passed: 3 passed.
+- Ran a focused in-memory reproduction for subset1 review output: one
+  `card_partitions` row with `ktp.partition = 0` plus matching XLSX/SciSciNet/DOCX
+  output rows produced `partition rows: 1` and `review rows: 0`, confirming the
+  empty-header CSV path without running the full pipeline.
+- After the v2 XLSX additive-v1 fix,
+  `pixi run pytest tests/test_xlsx_name_matching.py tests/test_step_10_build_cards.py -q`
+  passed: 23 passed.
+- `pixi run pytest tests/test_xlsx_name_matching.py tests/test_docx_name_matching.py tests/test_sciscinet_name_matching.py tests/test_step_10_build_cards.py -q`
+  passed: 30 passed.
+- `pixi run ruff` passed.
+- `pixi run mypy` passed.

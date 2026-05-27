@@ -68,6 +68,7 @@ from ..helpers.vars import (
     KTP_XLSX_MATCH_FIRST_TOKENS_KEY,
     KTP_XLSX_MATCH_LAST_NAME_NORM_KEY,
     KTP_XLSX_MATCH_RULE_KEY,
+    KTP_XLSX_MATCH_RULE_V1,
     KTP_XLSX_MATCH_RULE_V2,
     KTP_XLSX_MATCH_SOURCE_KEY_LAST_KEY,
     KTP_XLSX_MATCH_SOURCE_KEY_TOKENS_KEY,
@@ -204,7 +205,10 @@ def _is_exact_xlsx_match_payload(value: object) -> bool:
         source_key_tokens = []
     if not isinstance(first_tokens, list):
         first_tokens = []
-    if payload.get(KTP_XLSX_MATCH_RULE_KEY) == KTP_XLSX_MATCH_RULE_V2:
+    match_rule = payload.get(KTP_XLSX_MATCH_RULE_KEY)
+    if match_rule == KTP_XLSX_MATCH_RULE_V1:
+        return False
+    if match_rule == KTP_XLSX_MATCH_RULE_V2:
         source_key_last_tokens = source_key_last if isinstance(source_key_last, list) else []
         last_name_tokens = last_name_norm if isinstance(last_name_norm, list) else []
         return bool(

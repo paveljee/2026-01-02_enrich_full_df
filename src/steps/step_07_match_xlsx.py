@@ -44,6 +44,7 @@ from ..helpers.vars import (
     KTP_XLSX_MATCH_FIRST_TOKENS_KEY,
     KTP_XLSX_MATCH_LAST_NAME_NORM_KEY,
     KTP_XLSX_MATCH_RULE_KEY,
+    KTP_XLSX_MATCH_RULE_V1,
     KTP_XLSX_MATCH_RULE_V2,
     KTP_XLSX_MATCH_SOURCE_KEY_LAST_KEY,
     KTP_XLSX_MATCH_SOURCE_KEY_TOKENS_KEY,
@@ -78,8 +79,78 @@ def run(context: PipelineContext) -> StepResult:
         target_first_expr=f'n."{KTP_FIRST_NAME_COL}"',
         target_last_expr=f'n."{KTP_LAST_NAME_COL}"',
         rule_key=KTP_XLSX_MATCH_RULE_KEY,
+        rule_v1=KTP_XLSX_MATCH_RULE_V1,
         rule_v2=KTP_XLSX_MATCH_RULE_V2,
     )
+    match_path_priority_select = ""
+    if match_sql.match_path_priority_expr:
+        match_path_priority_select = (
+            f",\n                {match_sql.match_path_priority_expr} AS xlsx_match_path_priority"
+        )
+    base_select_sql = f"""
+            {match_sql.base_select_keyword}
+                nd."{KTP_SOURCE_KEY_COL}",
+                p."{HCR_FILENAME_COL}" AS "{KTP_FILENAME_COL}",
+                p."{HCR_ROW_COL}" AS "{KTP_FRAGMENT_COL}",
+                COALESCE(p.resource_fragment_type, 'excel_row') AS "{KTP_FRAGMENT_TYPE_COL}",
+                s."{DRAW_LABEL}" AS "{DRAW_LABEL}",
+                p.pop_first AS "{KTP_FIRST_NAME_COL}",
+                p.pop_last AS "{KTP_LAST_NAME_COL}",
+                json_object(
+                    {match_sql.rule_payload_entry}
+                    '{KTP_XLSX_MATCH_SOURCE_KEY_TOKENS_KEY}', to_json(nd.nd_first_tokens),
+                    '{KTP_XLSX_MATCH_SOURCE_KEY_LAST_KEY}', {match_sql.source_last_payload_expr},
+                    '{KTP_XLSX_MATCH_FIRST_TOKENS_KEY}', to_json(p.pop_first_tokens),
+                    '{KTP_XLSX_MATCH_LAST_NAME_NORM_KEY}', {match_sql.target_last_payload_expr}
+                ) AS "{KTP_XLSX_MATCH_COL}",
+                p."{KTP_HCR_PRIMARY_AFFILIATIONS_COL}",
+                p."{KTP_HCR_SECONDARY_AFFILIATIONS_COL}"{hcr_projection_suffix},
+                p."{KTP_ECONOMIES_COL}",
+                p."{KTP_ECONOMIES_INCOME_GROUP_COL}",
+                p."{KTP_ECONOMY_MATCH_COL}",
+                p."{KTP_PRIORITY_COL}",
+                p."{KTP_PRIORITY_GROUP_COL}"{match_path_priority_select}
+            FROM {match_sql.pop_names_relation} p
+            JOIN {match_sql.name_draws_relation} nd
+              ON {match_sql.condition}
+            LEFT JOIN {SAMPLES_TABLE} s
+              ON s."{KTP_FILENAME_COL}" = p."{HCR_FILENAME_COL}"
+             AND s."{KTP_FRAGMENT_COL}" = p."{HCR_ROW_COL}"
+            WHERE p."{HCR_FILENAME_COL}" IS NOT NULL
+    """
+    if match_sql.match_path_priority_expr:
+        base_ctes_sql = f"""
+        base_candidates AS (
+            {base_select_sql}
+        ),
+        base_min_priority AS (
+            SELECT
+                "{KTP_SOURCE_KEY_COL}",
+                "{KTP_FILENAME_COL}",
+                "{KTP_FRAGMENT_COL}",
+                MIN(xlsx_match_path_priority) AS xlsx_match_path_priority
+            FROM base_candidates
+            GROUP BY
+                "{KTP_SOURCE_KEY_COL}",
+                "{KTP_FILENAME_COL}",
+                "{KTP_FRAGMENT_COL}"
+        ),
+        base AS (
+            SELECT bc.* EXCLUDE (xlsx_match_path_priority)
+            FROM base_candidates bc
+            JOIN base_min_priority bp
+              ON bc."{KTP_SOURCE_KEY_COL}" = bp."{KTP_SOURCE_KEY_COL}"
+             AND bc."{KTP_FILENAME_COL}" = bp."{KTP_FILENAME_COL}"
+             AND bc."{KTP_FRAGMENT_COL}" = bp."{KTP_FRAGMENT_COL}"
+             AND bc.xlsx_match_path_priority = bp.xlsx_match_path_priority
+        )
+        """
+    else:
+        base_ctes_sql = f"""
+        base AS (
+            {base_select_sql}
+        )
+        """
     conn.execute(
         f"""
         CREATE OR REPLACE VIEW {XLSX_MATCH_VIEW} AS
@@ -113,37 +184,7 @@ def run(context: PipelineContext) -> StepResult:
             LEFT JOIN {REGISTERED_RESOURCES_TABLE} rr
               ON rr.resource_name = p."{HCR_FILENAME_COL}"
         ){match_sql.extra_ctes},
-        base AS (
-            {match_sql.base_select_keyword}
-                nd."{KTP_SOURCE_KEY_COL}",
-                p."{HCR_FILENAME_COL}" AS "{KTP_FILENAME_COL}",
-                p."{HCR_ROW_COL}" AS "{KTP_FRAGMENT_COL}",
-                COALESCE(p.resource_fragment_type, 'excel_row') AS "{KTP_FRAGMENT_TYPE_COL}",
-                s."{DRAW_LABEL}" AS "{DRAW_LABEL}",
-                p.pop_first AS "{KTP_FIRST_NAME_COL}",
-                p.pop_last AS "{KTP_LAST_NAME_COL}",
-                json_object(
-                    {match_sql.rule_payload_entry}
-                    '{KTP_XLSX_MATCH_SOURCE_KEY_TOKENS_KEY}', to_json(nd.nd_first_tokens),
-                    '{KTP_XLSX_MATCH_SOURCE_KEY_LAST_KEY}', {match_sql.source_last_payload_expr},
-                    '{KTP_XLSX_MATCH_FIRST_TOKENS_KEY}', to_json(p.pop_first_tokens),
-                    '{KTP_XLSX_MATCH_LAST_NAME_NORM_KEY}', {match_sql.target_last_payload_expr}
-                ) AS "{KTP_XLSX_MATCH_COL}",
-                p."{KTP_HCR_PRIMARY_AFFILIATIONS_COL}",
-                p."{KTP_HCR_SECONDARY_AFFILIATIONS_COL}"{hcr_projection_suffix},
-                p."{KTP_ECONOMIES_COL}",
-                p."{KTP_ECONOMIES_INCOME_GROUP_COL}",
-                p."{KTP_ECONOMY_MATCH_COL}",
-                p."{KTP_PRIORITY_COL}",
-                p."{KTP_PRIORITY_GROUP_COL}"
-            FROM {match_sql.pop_names_relation} p
-            JOIN {match_sql.name_draws_relation} nd
-              ON {match_sql.condition}
-            LEFT JOIN {SAMPLES_TABLE} s
-              ON s."{KTP_FILENAME_COL}" = p."{HCR_FILENAME_COL}"
-             AND s."{KTP_FRAGMENT_COL}" = p."{HCR_ROW_COL}"
-            WHERE p."{HCR_FILENAME_COL}" IS NOT NULL
-        ),
+        {base_ctes_sql},
         {draw_sort_ctes_sql(draw_col=DRAW_LABEL, source_key_col=KTP_SOURCE_KEY_COL)}
         SELECT * EXCLUDE (row_draw_group, row_draw_num, source_draw_group, source_draw_num)
         FROM ranked

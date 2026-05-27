@@ -15,6 +15,7 @@ class XlsxMatchSql:
     name_draws_relation: str = "name_draws"
     pop_names_relation: str = "pop_names"
     base_select_keyword: str = "SELECT"
+    match_path_priority_expr: str = ""
 
 
 def xlsx_v2_tokens_sql(expr: str) -> str:
@@ -62,7 +63,12 @@ def xlsx_v1_pop_names_fields_sql(first_expr: str, last_expr: str) -> str:
 def xlsx_v2_name_draws_fields_sql(first_expr: str, last_expr: str) -> str:
     return f"""
                    {xlsx_v2_tokens_sql(first_expr)} AS nd_first_tokens,
-                   {xlsx_v2_tokens_sql(last_expr)} AS nd_last_clean
+                   {xlsx_v2_tokens_sql(last_expr)} AS nd_last_clean,
+                   list_extract(
+                       regexp_split_to_array(lower(unaccent({first_expr})), '\\s+'),
+                       1
+                   ) AS nd_v1_first_token,
+                   lower(unaccent({last_expr})) AS nd_v1_last_clean
     """
 
 
@@ -70,6 +76,9 @@ def xlsx_v2_pop_names_fields_sql(first_expr: str, last_expr: str) -> str:
     return f"""
                 {xlsx_v2_tokens_sql(first_expr)} AS pop_first_tokens,
                 {xlsx_v2_tokens_sql(last_expr)} AS pop_last_clean,
+                regexp_split_to_array(lower(unaccent({first_expr})), '\\s+')
+                    AS pop_v1_first_tokens,
+                lower(unaccent({last_expr})) AS pop_v1_last_clean,
     """
 
 
@@ -208,12 +217,14 @@ def xlsx_token_match_keys_sql(tokens_expr: str, *, side: str) -> str:
     """
 
 
-def xlsx_v2_match_key_ctes_sql() -> str:
+def xlsx_v2_match_key_ctes_sql(*, rule_v1: str, rule_v2: str) -> str:
     return f"""
         ,
-        name_draw_keys AS (
+        name_draw_v2_keys AS (
             SELECT
                 nd.*,
+                '{rule_v2}' AS nd_xlsx_match_rule,
+                0 AS nd_xlsx_match_priority,
                 nd_first_key.match_key AS nd_first_match_key,
                 nd_last_key.match_key AS nd_last_match_key
             FROM name_draws nd
@@ -224,9 +235,24 @@ def xlsx_v2_match_key_ctes_sql() -> str:
                 {xlsx_token_match_keys_sql('nd.nd_last_clean', side='source')}
             ) AS nd_last_key(match_key)
         ),
-        pop_name_keys AS (
+        name_draw_v1_keys AS (
+            SELECT
+                nd.*,
+                '{rule_v1}' AS nd_xlsx_match_rule,
+                1 AS nd_xlsx_match_priority,
+                'V1F|' || nd.nd_v1_first_token AS nd_first_match_key,
+                'V1L|' || nd.nd_v1_last_clean AS nd_last_match_key
+            FROM name_draws nd
+        ),
+        name_draw_keys AS (
+            SELECT * FROM name_draw_v2_keys
+            UNION ALL
+            SELECT * FROM name_draw_v1_keys
+        ),
+        pop_name_v2_keys AS (
             SELECT
                 p.*,
+                '{rule_v2}' AS pop_xlsx_match_rule,
                 pop_first_key.match_key AS pop_first_match_key,
                 pop_last_key.match_key AS pop_last_match_key
             FROM pop_names p
@@ -236,6 +262,21 @@ def xlsx_v2_match_key_ctes_sql() -> str:
             CROSS JOIN LATERAL UNNEST(
                 {xlsx_token_match_keys_sql('p.pop_last_clean', side='target')}
             ) AS pop_last_key(match_key)
+        ),
+        pop_name_v1_keys AS (
+            SELECT
+                p.*,
+                '{rule_v1}' AS pop_xlsx_match_rule,
+                'V1F|' || pop_v1_first_token AS pop_first_match_key,
+                'V1L|' || p.pop_v1_last_clean AS pop_last_match_key
+            FROM pop_names p
+            CROSS JOIN LATERAL UNNEST(p.pop_v1_first_tokens)
+                AS pop_first_token(pop_v1_first_token)
+        ),
+        pop_name_keys AS (
+            SELECT * FROM pop_name_v2_keys
+            UNION ALL
+            SELECT * FROM pop_name_v1_keys
         )
     """
 
@@ -249,22 +290,28 @@ def xlsx_match_sql(
     target_last_expr: str,
     rule_key: str,
     rule_v2: str,
+    rule_v1: str = "v1",
 ) -> XlsxMatchSql:
     if use_v2:
         return XlsxMatchSql(
             name_draws_fields=xlsx_v2_name_draws_fields_sql(source_first_expr, source_last_expr),
             pop_names_fields=xlsx_v2_pop_names_fields_sql(target_first_expr, target_last_expr),
             condition=(
-                "nd.nd_first_match_key = p.pop_first_match_key "
+                "nd.nd_xlsx_match_rule = p.pop_xlsx_match_rule "
+                "AND nd.nd_first_match_key = p.pop_first_match_key "
                 "AND nd.nd_last_match_key = p.pop_last_match_key"
             ),
-            rule_payload_entry=f"'{rule_key}', '{rule_v2}',",
+            rule_payload_entry=f"'{rule_key}', nd.nd_xlsx_match_rule,",
             source_last_payload_expr="to_json(nd.nd_last_clean)",
             target_last_payload_expr="to_json(p.pop_last_clean)",
-            extra_ctes=xlsx_v2_match_key_ctes_sql(),
+            extra_ctes=xlsx_v2_match_key_ctes_sql(
+                rule_v1=rule_v1,
+                rule_v2=rule_v2,
+            ),
             name_draws_relation="name_draw_keys",
             pop_names_relation="pop_name_keys",
             base_select_keyword="SELECT DISTINCT",
+            match_path_priority_expr="nd.nd_xlsx_match_priority",
         )
     return XlsxMatchSql(
         name_draws_fields=xlsx_v1_name_draws_fields_sql(source_first_expr, source_last_expr),

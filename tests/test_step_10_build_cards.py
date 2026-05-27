@@ -49,6 +49,9 @@ from src.helpers.vars import (
     KTP_XLSX_MATCH_COL,
     KTP_XLSX_MATCH_FIRST_TOKENS_KEY,
     KTP_XLSX_MATCH_LAST_NAME_NORM_KEY,
+    KTP_XLSX_MATCH_RULE_KEY,
+    KTP_XLSX_MATCH_RULE_V1,
+    KTP_XLSX_MATCH_RULE_V2,
     KTP_XLSX_MATCH_SOURCE_KEY_LAST_KEY,
     KTP_XLSX_MATCH_SOURCE_KEY_TOKENS_KEY,
     SSNAD_CITED_BY_COUNT_COL,
@@ -80,6 +83,18 @@ def _xlsx_payload(*, exact: bool = True) -> str:
             KTP_XLSX_MATCH_SOURCE_KEY_LAST_KEY: "lovelace",
             KTP_XLSX_MATCH_FIRST_TOKENS_KEY: ["ada" if exact else "augusta"],
             KTP_XLSX_MATCH_LAST_NAME_NORM_KEY: "lovelace",
+        }
+    )
+
+
+def _xlsx_v2_payload(*, rule: str, first_tokens: list[str] | None = None) -> str:
+    return json.dumps(
+        {
+            KTP_XLSX_MATCH_RULE_KEY: rule,
+            KTP_XLSX_MATCH_SOURCE_KEY_TOKENS_KEY: ["ada"],
+            KTP_XLSX_MATCH_SOURCE_KEY_LAST_KEY: ["lovelace"],
+            KTP_XLSX_MATCH_FIRST_TOKENS_KEY: first_tokens or ["ada"],
+            KTP_XLSX_MATCH_LAST_NAME_NORM_KEY: ["lovelace"],
         }
     )
 
@@ -184,6 +199,43 @@ def test_flags_cover_missing_invalid_and_multi_docx_cases() -> None:
     assert multi_docx_one_complete.docx_any
     assert multi_docx_one_complete.docx_table_1_required_all
     assert multi_docx_one_complete.subset1_ok
+
+
+def test_v2_xlsx_v1_rule_payload_is_non_exact_for_partitioning() -> None:
+    state = _state(
+        _inner(
+            {
+                KTP_FILENAME_COL: "hcr.xlsx",
+                KTP_XLSX_MATCH_COL: _xlsx_v2_payload(
+                    rule=KTP_XLSX_MATCH_RULE_V1,
+                    first_tokens=["ada", "nunes"],
+                ),
+            }
+        ),
+        _docx_inner(),
+        _sciscinet_inner(),
+    )
+
+    assert state.xlsx_any
+    assert state.xlsx_non_exact_any
+    assert step10._partition_value(state) == KTP_PARTITION_XLSX_VALUE
+
+
+def test_v2_xlsx_v2_rule_payload_is_exact_for_partitioning() -> None:
+    state = _state(
+        _inner(
+            {
+                KTP_FILENAME_COL: "hcr.xlsx",
+                KTP_XLSX_MATCH_COL: _xlsx_v2_payload(rule=KTP_XLSX_MATCH_RULE_V2),
+            }
+        ),
+        _docx_inner(),
+        _sciscinet_inner(),
+    )
+
+    assert state.xlsx_any
+    assert not state.xlsx_non_exact_any
+    assert state.subset1_ok
 
 
 def test_partition_rows_sort_sciscinet_by_count_then_xlsx_tie_break() -> None:
