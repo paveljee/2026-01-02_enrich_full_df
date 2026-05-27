@@ -11,6 +11,10 @@ class XlsxMatchSql:
     rule_payload_entry: str
     source_last_payload_expr: str
     target_last_payload_expr: str
+    extra_ctes: str = ""
+    name_draws_relation: str = "name_draws"
+    pop_names_relation: str = "pop_names"
+    base_select_keyword: str = "SELECT"
 
 
 def xlsx_v2_tokens_sql(expr: str) -> str:
@@ -69,141 +73,169 @@ def xlsx_v2_pop_names_fields_sql(first_expr: str, last_expr: str) -> str:
     """
 
 
-def xlsx_match_condition_sql(
+def xlsx_v1_match_condition_sql(
     *,
     source_first_expr: str,
     source_last_expr: str,
     target_first_expr: str,
     target_last_expr: str,
-    use_v2: bool,
 ) -> str:
-    if use_v2:
-        return (
-            f"{xlsx_token_sequence_match_sql(source_first_expr, target_first_expr)} "
-            f"AND {xlsx_token_sequence_match_sql(source_last_expr, target_last_expr)}"
-        )
     return (
         f"{source_last_expr} = {target_last_expr} "
         f"AND list_contains({target_first_expr}, {source_first_expr})"
     )
 
 
-def xlsx_initial_expansion_match_sql(left_tokens_expr: str, right_tokens_expr: str) -> str:
-    left_tokens = xlsx_clean_tokens_sql(left_tokens_expr)
-    right_tokens = xlsx_clean_tokens_sql(right_tokens_expr)
-    return f"""
-        (
-            list_count({left_tokens}) = list_count({right_tokens})
-            AND list_count({left_tokens}) > 0
-            AND list_bool_and(
-                list_transform(
-                    range(1, list_count({left_tokens}) + 1),
-                    idx -> list_extract({left_tokens}, idx) = list_extract({right_tokens}, idx)
-                        OR (
-                            length(list_extract({left_tokens}, idx)) = 1
-                            AND starts_with(
-                                list_extract({right_tokens}, idx),
-                                list_extract({left_tokens}, idx)
-                            )
-                        )
-                        OR (
-                            length(list_extract({right_tokens}, idx)) = 1
-                            AND starts_with(
-                                list_extract({left_tokens}, idx),
-                                list_extract({right_tokens}, idx)
-                            )
-                        )
-                )
-            )
-        )
-    """
-
-
-def xlsx_compact_initials_one_way_match_sql(
-    expanded_tokens_expr: str,
-    compact_tokens_expr: str,
-) -> str:
-    expanded_tokens = xlsx_clean_tokens_sql(expanded_tokens_expr)
-    compact_tokens = xlsx_clean_tokens_sql(compact_tokens_expr)
+def xlsx_compact_match_keys_sql(tokens_expr: str) -> str:
+    tokens = xlsx_clean_tokens_sql(tokens_expr)
     return f"""
         (
             WITH RECURSIVE
-            input(expanded_tokens, compact_tokens) AS (
-                SELECT {expanded_tokens}, {compact_tokens}
+            input(tokens) AS (
+                SELECT {tokens}
             ),
-            states(expanded_tokens, compact_tokens, expanded_index, compact_index) AS (
-                SELECT expanded_tokens, compact_tokens, 1, 1
+            states(tokens, token_index, parts) AS (
+                SELECT tokens, 1, CAST([] AS VARCHAR[])
                 FROM input
                 UNION (
                     SELECT
-                        s.expanded_tokens,
-                        s.compact_tokens,
-                        s.expanded_index + 1,
-                        s.compact_index + 1
+                        s.tokens,
+                        s.token_index + 1,
+                        list_concat(s.parts, [list_extract(s.tokens, s.token_index)])
                     FROM states s
-                    WHERE s.expanded_index <= list_count(s.expanded_tokens)
-                      AND s.compact_index <= list_count(s.compact_tokens)
-                      AND list_extract(s.expanded_tokens, s.expanded_index)
-                          = list_extract(s.compact_tokens, s.compact_index)
-                    UNION
+                    WHERE s.token_index <= list_count(s.tokens)
+                    UNION ALL
                     SELECT
-                        s.expanded_tokens,
-                        s.compact_tokens,
+                        s.tokens,
                         run_end + 1,
-                        s.compact_index + 1
+                        list_concat(
+                            s.parts,
+                            [
+                                array_to_string(
+                                    list_transform(
+                                        range(s.token_index, run_end + 1),
+                                        idx -> list_extract(s.tokens, idx)
+                                    ),
+                                    ''
+                                )
+                            ]
+                        )
                     FROM states s,
-                         UNNEST(
-                             range(s.expanded_index + 1, list_count(s.expanded_tokens) + 1)
-                         ) AS r(run_end)
-                    WHERE s.expanded_index <= list_count(s.expanded_tokens)
-                      AND s.compact_index <= list_count(s.compact_tokens)
+                         UNNEST(range(s.token_index + 1, list_count(s.tokens) + 1))
+                            AS r(run_end)
+                    WHERE s.token_index <= list_count(s.tokens)
                       AND list_bool_and(
                           list_transform(
-                              range(s.expanded_index, run_end + 1),
-                              idx -> length(list_extract(s.expanded_tokens, idx)) = 1
-                          )
-                      )
-                      AND list_extract(s.compact_tokens, s.compact_index) IN (
-                          array_to_string(
-                              list_transform(
-                                  range(s.expanded_index, run_end + 1),
-                                  idx -> list_extract(s.expanded_tokens, idx)
-                              ),
-                              ''
-                          ),
-                          array_to_string(
-                              list_transform(
-                                  range(s.expanded_index, run_end + 1),
-                                  idx -> list_extract(s.expanded_tokens, idx)
-                              ),
-                              ' '
+                              range(s.token_index, run_end + 1),
+                              idx -> length(list_extract(s.tokens, idx)) = 1
                           )
                       )
                 )
-            )
-            SELECT EXISTS (
-                SELECT 1
+            ),
+            keys AS (
+                SELECT 'C|' || array_to_string(parts, chr(31)) AS match_key
                 FROM states s
-                WHERE s.expanded_index = list_count(s.expanded_tokens) + 1
-                  AND s.compact_index = list_count(s.compact_tokens) + 1
+                WHERE s.token_index = list_count(s.tokens) + 1
+                  AND list_count(parts) > 0
+            )
+            SELECT LIST(DISTINCT match_key ORDER BY match_key)
+            FROM keys
+        )
+    """
+
+
+def xlsx_initial_alternatives_sql(token_expr: str, *, side: str) -> str:
+    if side == "source":
+        return f"""
+            CASE
+                WHEN length({token_expr}) = 1 THEN ['x:' || {token_expr}, 's:' || {token_expr}]
+                ELSE ['x:' || {token_expr}, 't:' || left({token_expr}, 1)]
+            END
+        """
+    if side == "target":
+        return f"""
+            CASE
+                WHEN length({token_expr}) = 1 THEN ['x:' || {token_expr}, 't:' || {token_expr}]
+                ELSE ['x:' || {token_expr}, 's:' || left({token_expr}, 1)]
+            END
+        """
+    raise ValueError(f"Unsupported XLSX match key side: {side}")
+
+
+def xlsx_initial_match_keys_sql(tokens_expr: str, *, side: str) -> str:
+    tokens = xlsx_clean_tokens_sql(tokens_expr)
+    alternatives = xlsx_initial_alternatives_sql("list_extract(s.tokens, s.token_index)", side=side)
+    return f"""
+        (
+            WITH RECURSIVE
+            input(tokens) AS (
+                SELECT {tokens}
+            ),
+            states(tokens, token_index, parts) AS (
+                SELECT tokens, 1, CAST([] AS VARCHAR[])
+                FROM input
+                UNION ALL
+                SELECT
+                    s.tokens,
+                    s.token_index + 1,
+                    list_concat(s.parts, [alternative])
+                FROM states s,
+                     UNNEST({alternatives}) AS a(alternative)
+                WHERE s.token_index <= list_count(s.tokens)
+            ),
+            keys AS (
+                SELECT 'I|' || array_to_string(parts, chr(31)) AS match_key
+                FROM states s
+                WHERE s.token_index = list_count(s.tokens) + 1
+                  AND list_count(parts) > 0
+            )
+            SELECT LIST(DISTINCT match_key ORDER BY match_key)
+            FROM keys
+        )
+    """
+
+
+def xlsx_token_match_keys_sql(tokens_expr: str, *, side: str) -> str:
+    compact_keys = xlsx_compact_match_keys_sql(tokens_expr)
+    initial_keys = xlsx_initial_match_keys_sql(tokens_expr, side=side)
+    return f"""
+        list_distinct(
+            list_concat(
+                COALESCE({compact_keys}, CAST([] AS VARCHAR[])),
+                COALESCE({initial_keys}, CAST([] AS VARCHAR[]))
             )
         )
     """
 
 
-def xlsx_token_sequence_match_sql(left_tokens_expr: str, right_tokens_expr: str) -> str:
-    left_tokens = xlsx_clean_tokens_sql(left_tokens_expr)
-    right_tokens = xlsx_clean_tokens_sql(right_tokens_expr)
+def xlsx_v2_match_key_ctes_sql() -> str:
     return f"""
-        (
-            list_count({left_tokens}) > 0
-            AND list_count({right_tokens}) > 0
-            AND (
-                {left_tokens} = {right_tokens}
-                OR {xlsx_compact_initials_one_way_match_sql(left_tokens_expr, right_tokens_expr)}
-                OR {xlsx_compact_initials_one_way_match_sql(right_tokens_expr, left_tokens_expr)}
-                OR {xlsx_initial_expansion_match_sql(left_tokens_expr, right_tokens_expr)}
-            )
+        ,
+        name_draw_keys AS (
+            SELECT
+                nd.*,
+                nd_first_key.match_key AS nd_first_match_key,
+                nd_last_key.match_key AS nd_last_match_key
+            FROM name_draws nd
+            CROSS JOIN LATERAL UNNEST(
+                {xlsx_token_match_keys_sql('nd.nd_first_tokens', side='source')}
+            ) AS nd_first_key(match_key)
+            CROSS JOIN LATERAL UNNEST(
+                {xlsx_token_match_keys_sql('nd.nd_last_clean', side='source')}
+            ) AS nd_last_key(match_key)
+        ),
+        pop_name_keys AS (
+            SELECT
+                p.*,
+                pop_first_key.match_key AS pop_first_match_key,
+                pop_last_key.match_key AS pop_last_match_key
+            FROM pop_names p
+            CROSS JOIN LATERAL UNNEST(
+                {xlsx_token_match_keys_sql('p.pop_first_tokens', side='target')}
+            ) AS pop_first_key(match_key)
+            CROSS JOIN LATERAL UNNEST(
+                {xlsx_token_match_keys_sql('p.pop_last_clean', side='target')}
+            ) AS pop_last_key(match_key)
         )
     """
 
@@ -222,26 +254,26 @@ def xlsx_match_sql(
         return XlsxMatchSql(
             name_draws_fields=xlsx_v2_name_draws_fields_sql(source_first_expr, source_last_expr),
             pop_names_fields=xlsx_v2_pop_names_fields_sql(target_first_expr, target_last_expr),
-            condition=xlsx_match_condition_sql(
-                source_first_expr="nd.nd_first_tokens",
-                source_last_expr="nd.nd_last_clean",
-                target_first_expr="p.pop_first_tokens",
-                target_last_expr="p.pop_last_clean",
-                use_v2=True,
+            condition=(
+                "nd.nd_first_match_key = p.pop_first_match_key "
+                "AND nd.nd_last_match_key = p.pop_last_match_key"
             ),
             rule_payload_entry=f"'{rule_key}', '{rule_v2}',",
             source_last_payload_expr="to_json(nd.nd_last_clean)",
             target_last_payload_expr="to_json(p.pop_last_clean)",
+            extra_ctes=xlsx_v2_match_key_ctes_sql(),
+            name_draws_relation="name_draw_keys",
+            pop_names_relation="pop_name_keys",
+            base_select_keyword="SELECT DISTINCT",
         )
     return XlsxMatchSql(
         name_draws_fields=xlsx_v1_name_draws_fields_sql(source_first_expr, source_last_expr),
         pop_names_fields=xlsx_v1_pop_names_fields_sql(target_first_expr, target_last_expr),
-        condition=xlsx_match_condition_sql(
+        condition=xlsx_v1_match_condition_sql(
             source_first_expr="nd.nd_first_token",
             source_last_expr="nd.nd_last_clean",
             target_first_expr="p.pop_first_tokens",
             target_last_expr="p.pop_last_clean",
-            use_v2=False,
         ),
         rule_payload_entry="",
         source_last_payload_expr="nd.nd_last_clean",

@@ -112,9 +112,9 @@ def run(context: PipelineContext) -> StepResult:
               ON p."{KTP_POPULATION_INDEX_COL}" = e."{KTP_POPULATION_INDEX_COL}"
             LEFT JOIN {REGISTERED_RESOURCES_TABLE} rr
               ON rr.resource_name = p."{HCR_FILENAME_COL}"
-        ),
+        ){match_sql.extra_ctes},
         base AS (
-            SELECT
+            {match_sql.base_select_keyword}
                 nd."{KTP_SOURCE_KEY_COL}",
                 p."{HCR_FILENAME_COL}" AS "{KTP_FILENAME_COL}",
                 p."{HCR_ROW_COL}" AS "{KTP_FRAGMENT_COL}",
@@ -136,8 +136,8 @@ def run(context: PipelineContext) -> StepResult:
                 p."{KTP_ECONOMY_MATCH_COL}",
                 p."{KTP_PRIORITY_COL}",
                 p."{KTP_PRIORITY_GROUP_COL}"
-            FROM pop_names p
-            JOIN name_draws nd
+            FROM {match_sql.pop_names_relation} p
+            JOIN {match_sql.name_draws_relation} nd
               ON {match_sql.condition}
             LEFT JOIN {SAMPLES_TABLE} s
               ON s."{KTP_FILENAME_COL}" = p."{HCR_FILENAME_COL}"

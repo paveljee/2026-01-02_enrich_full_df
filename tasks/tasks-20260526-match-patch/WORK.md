@@ -19,7 +19,9 @@
 
 ## Doing Now
 
-- Final verification and cleanup.
+- Handoff after the XLSX v2 match-key rewrite; awaiting user-run pipeline
+  validation because the inherited prerequisite forbids AI-run full pipeline
+  commands.
 
 ## Done
 
@@ -72,6 +74,22 @@
 - Surgically patched `ktp.ssn_field_display_names_list` aggregation to order
   alphabetically by the field display value while preserving the same distinct
   fallback-to-field-id expression.
+- User reported that the first XLSX v2 implementation was a memory eater in the
+  main pipeline. Root cause: v2 put recursive/token-sequence comparison inside
+  the `JOIN ON`, preventing the cheap equality/blocking shape v1 had.
+- Replaced XLSX v2 pairwise comparator with precomputed relational match keys:
+  per-row compact/exact key family plus initial-expansion key family for first
+  and last names, then equality joins on first and last match-key columns. V1
+  SQL fragments remain unchanged. V2 base select is `SELECT DISTINCT` to remove
+  duplicate key-path matches for the same source/target row.
+- Added an XLSX test assertion that v2 uses key equality relations
+  (`name_draw_keys` and `pop_name_keys`) rather than a pairwise recursive join
+  predicate.
+- Checked `sciscinet_match_strip_tokens=true` for accidental memory-shape
+  regression. The SciSciNet change remains a surgical `trim(...)` wrapper around
+  the existing DuckDB `lower(unaccent(...))` equality key expressions; it does
+  not introduce recursive matching, lateral key expansion, or pairwise Python
+  logic.
 
 ## Verification
 
@@ -99,3 +117,24 @@
   `detour-mode0-econ-stats` and FY26 fixture expectations in
   `tests/test_detour_step4_breakdown.py`. Focused matching and step 10 tests
   passed in that run.
+- After the XLSX v2 match-key rewrite,
+  `pixi run pytest tests/test_xlsx_name_matching.py tests/test_docx_name_matching.py tests/test_sciscinet_name_matching.py tests/test_step_10_build_cards.py -q`
+  passed: 26 passed.
+- `pixi run python -m py_compile src/helpers/name_matching.py src/steps/step_07_match_xlsx.py tests/test_xlsx_name_matching.py`
+  passed.
+- `pixi run ruff` passed.
+- `pixi run mypy` passed.
+- Re-ran `pixi run pre-commit` after the XLSX v2 match-key rewrite; ruff and
+  mypy passed, then full pytest reported 72 passed, 3 skipped, and 6 failed in
+  the same unrelated detour areas: missing optional `plotly`/Kaleido support for
+  `detour-mode0-econ-stats` and FY26 fixture expectations in
+  `tests/test_detour_step4_breakdown.py`. Focused matching and step 10 tests
+  passed within that run.
+- Ran focused DuckDB plan probes for `sciscinet_match_strip_tokens=false` and
+  `true` using the production helper SQL. Both plans used `HASH_JOIN`; neither
+  plan contained nested-loop, blockwise nested-loop, or cross-product joins.
+- Ran a skewed synthetic SciSciNet equality join with 500 names and 1,000,000
+  author rows under `PRAGMA memory_limit='64MB'`. Both strip modes completed and
+  returned 1,000,000 matches; elapsed times were roughly 0.36s without trim and
+  0.40s with trim.
+- `pixi run pytest tests/test_sciscinet_name_matching.py -q` passed: 3 passed.

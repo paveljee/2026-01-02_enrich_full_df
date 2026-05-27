@@ -49,15 +49,35 @@ def _matches(
                 {match_sql.pop_names_fields}
                 1 AS sentinel
             FROM target_input n
-        )
-        SELECT {match_sql.condition} AS matched
-        FROM name_draws nd
-        CROSS JOIN pop_names p
+        ){match_sql.extra_ctes}
+        SELECT COALESCE(bool_or({match_sql.condition}), FALSE) AS matched
+        FROM {match_sql.name_draws_relation} nd
+        CROSS JOIN {match_sql.pop_names_relation} p
         """,
         [source_first, source_last, target_first, target_last],
     ).fetchone()
     assert row is not None
     return bool(row[0])
+
+
+def test_v2_join_condition_is_key_equality_not_pairwise_recursive_sql() -> None:
+    match_sql = xlsx_match_sql(
+        use_v2=True,
+        source_first_expr="nk.first_name",
+        source_last_expr="nk.last_name",
+        target_first_expr="n.first_name",
+        target_last_expr="n.last_name",
+        rule_key=KTP_XLSX_MATCH_RULE_KEY,
+        rule_v2=KTP_XLSX_MATCH_RULE_V2,
+    )
+
+    assert match_sql.condition == (
+        "nd.nd_first_match_key = p.pop_first_match_key "
+        "AND nd.nd_last_match_key = p.pop_last_match_key"
+    )
+    assert match_sql.name_draws_relation == "name_draw_keys"
+    assert match_sql.pop_names_relation == "pop_name_keys"
+    assert match_sql.base_select_keyword == "SELECT DISTINCT"
 
 
 def test_v1_preserves_original_first_token_contains_and_unaccent_behavior() -> None:

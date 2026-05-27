@@ -3,7 +3,7 @@
   "state_file": "data/pipeline_state.json",
   "output_dir": "data/output",
   "output_format": "txt",
-  "card_subset_mode": 2,
+  "card_subset_mode": 1,
   "pandoc_reference_docx": "resources/pandoc-custom-reference.docx",
   "docx_dir": "/Volumes/Users/Anonymous/Workshop/202504161200UTC-4_Nancy_Baxter_Andrea_Tricco_collabs/analyses/2026-01-02_enrich_full_df/data/manual_extractions",
   "timezone": "America/Toronto",
@@ -20,8 +20,8 @@
   ],
   "pilot_xlsx_name": "2024_HCR.xlsx",
   "total_draws": 310,
-  "xlsx_match_name_tokens_v2": false,
-  "sciscinet_match_strip_tokens": false,
+  "xlsx_match_name_tokens_v2": true,
+  "sciscinet_match_strip_tokens": true,
   "files_config": {
     "hit_papers_0": {
       "path": "/Volumes/home/anonymous/sciscinet/v2/hf/xet/hit_papers_level0.parquet",
