@@ -609,10 +609,10 @@ def _review_domain_expr(
     domain_columns: dict[str, set[str]],
 ) -> str:
     if col not in domain_columns[target_domain]:
-        return "NULL"
+        return "CAST(NULL AS VARCHAR)"
     if target_domain == primary_domain and primary_alias is not None:
-        return _qualified(primary_alias, col)
-    return _qualified(REVIEW_CONTEXT_ALIASES[target_domain], col)
+        return f"CAST({_qualified(primary_alias, col)} AS VARCHAR)"
+    return f"CAST({_qualified(REVIEW_CONTEXT_ALIASES[target_domain], col)} AS VARCHAR)"
 
 
 def _review_source_expr(

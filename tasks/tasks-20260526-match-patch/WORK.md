@@ -52,6 +52,12 @@
   `tests/test_sciscinet_name_matching.py`. Tests load `splink_udfs` and use
   DuckDB `unaccent`, matching production.
 - Added step 10 review aggregation coverage in `tests/test_step_10_build_cards.py`.
+- Fixed a step 10 review-view regression where DuckDB inferred JSON for
+  `ktp.hcr_world_bank_economies` across `UNION ALL` branches, then attempted to
+  cast newline-merged review context text back to JSON. Review-domain columns
+  are now selected as `VARCHAR` display values, including primary-domain rows.
+- Added regression coverage for JSON-typed XLSX context values in the partition
+  review view.
 
 ## Verification
 
@@ -64,3 +70,5 @@
   `detour-mode0-econ-stats` plotting dependencies (`plotly`) and FY26 fixture
   expectations in `tests/test_detour_step4_breakdown.py`. The new focused
   matching and step 10 tests passed within that run.
+- User reran `pixi run pytest tests/test_step_10_build_cards.py -q` after the
+  JSON display-value fix: 7 passed.

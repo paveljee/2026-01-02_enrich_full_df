@@ -694,3 +694,62 @@ def test_partition_review_view_merges_all_available_context_values() -> None:
     assert review_row[KTP_FF_AUTHOR_ID_COL] == "A-1\nA-2"
     assert review_row[SSNAD_DISPLAY_NAME_COL] == "Ada One\nAda Two"
     assert review_row[KTP_DOCX_MATCH_COL] == "docx-one\nline\n-----\ndocx-two"
+
+
+def test_partition_review_view_merges_json_typed_context_values_as_display_text() -> None:
+    conn = duckdb.connect(":memory:")
+    partition_rows = pd.DataFrame(
+        [
+            {
+                KTP_SOURCE_KEY_COL: "sc-source",
+                KTP_PARTITION_COL: KTP_PARTITION_SCISCINET_VALUE,
+                KTP_PARTITION_FLAG_XLSX_NON_EXACT_ANY_COL: False,
+                KTP_PARTITION_FLAG_XLSX_ANY_COL: True,
+                KTP_PARTITION_FLAG_SCISCINET_COUNT_COL: 0,
+                KTP_PARTITION_FLAG_DOCX_TABLE_1_REQUIRED_ALL_COL: True,
+                KTP_PARTITION_FLAG_DOCX_ANY_COL: True,
+                "card_subset_mode": 2,
+                DRAW_LABEL: "1",
+                KTP_FIRST_NAME_COL: "Ada",
+                KTP_LAST_NAME_COL: "Json",
+            }
+        ]
+    )
+    step10._materialize_partition_table(conn, partition_rows)
+    conn.execute(
+        f"""
+        CREATE OR REPLACE VIEW {XLSX_OUTPUT_VIEW} AS
+        SELECT
+            'sc-source' AS "{KTP_SOURCE_KEY_COL}",
+            'hcr.xlsx' AS "{KTP_FILENAME_COL}",
+            '1' AS "{KTP_FRAGMENT_COL}",
+            'excel_row' AS "{KTP_FRAGMENT_TYPE_COL}",
+            json('["United States"]') AS "{KTP_ECONOMIES_COL}"
+        UNION ALL
+        SELECT
+            'sc-source' AS "{KTP_SOURCE_KEY_COL}",
+            'hcr.xlsx' AS "{KTP_FILENAME_COL}",
+            '2' AS "{KTP_FRAGMENT_COL}",
+            'excel_row' AS "{KTP_FRAGMENT_TYPE_COL}",
+            json('["Canada"]') AS "{KTP_ECONOMIES_COL}"
+        """
+    )
+    conn.execute(
+        f"""
+        CREATE OR REPLACE VIEW {PARQUET_OUTPUT_VIEW} AS
+        SELECT CAST(NULL AS VARCHAR) AS "{KTP_SOURCE_KEY_COL}"
+        WHERE FALSE
+        """
+    )
+    conn.execute(
+        f"""
+        CREATE OR REPLACE VIEW {DOCX_OUTPUT_VIEW} AS
+        SELECT CAST(NULL AS VARCHAR) AS "{KTP_SOURCE_KEY_COL}"
+        WHERE FALSE
+        """
+    )
+
+    step10._create_partition_review_view(conn)
+    review_row = conn.execute(f"SELECT * FROM {CARD_PARTITION_REVIEW_VIEW}").df().iloc[0]
+
+    assert review_row[KTP_ECONOMIES_COL] == '["United States"]\n["Canada"]'
