@@ -71,6 +71,7 @@ if not read_only:
 con = duckdb.connect(":memory:")
 try:
   con.sql(f"ATTACH {input_path_safe} AS db (READ_ONLY)")
+  con.execute("INSTALL splink_udfs FROM community; LOAD splink_udfs;")
 except:
   if input_path.lower().endswith(".parquet"):
     con.sql("CREATE OR REPLACE VIEW parquet AS "
