@@ -240,6 +240,10 @@ stock [DuckDB web UI][duckdb-ui]
 pixi run duckdb-ui [OPTIONAL_PATH_TO_DB]
 ```
 
+> [!TIP]
+> This command can also
+> read `*.parquet` files.
+
 ## Data flow
 
 >[!NOTE]

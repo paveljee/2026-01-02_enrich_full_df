@@ -53,26 +53,36 @@ cwd = "."
 
 [tool.pixi.tasks.duckdb-ui]
 args = [
-  { "arg" = "db_path", "default" = "data/scisci_process.duckdb" },
+  { "arg" = "input_path", "default" = "data/scisci_process.duckdb" },
 ]
 cmd = """
 python -c '
 import sys, duckdb
 read_only = True
-db_path = sys.argv[1]
+input_path = sys.argv[1]
+# using chr(39) to avoid conflict with outer single quote
+input_path_safe = chr(39) + input_path.replace(chr(39), chr(39) + chr(39)) + chr(39)
 if not read_only:
     sys.exit(
       "Write access is not configured for this command. "
       "Review the run command manually if you want to "
       "open DuckDB UI with write access."
     )
-con = duckdb.connect(db_path, read_only=read_only)
+con = duckdb.connect(":memory:")
+try:
+  con.sql(f"ATTACH {input_path_safe} AS db (READ_ONLY)")
+except:
+  if input_path.lower().endswith(".parquet"):
+    con.sql("CREATE OR REPLACE VIEW parquet AS "
+            f"SELECT * FROM read_parquet({input_path_safe});")
+  else:
+    raise
 con.sql("CALL start_ui();")
 input(
-  f"DuckDB UI running on {db_path!r} in read-only mode. "
+  f"DuckDB UI running on {input_path!r} in read-only mode. "
   "Press Enter to stop..."
 )
-' "{{ db_path }}"
+' "{{ input_path }}"
 """
 cwd = "."
 
