@@ -4,6 +4,8 @@
   "output_dir": "data/output",
   "output_format": "txt",
   "card_subset_mode": 3,
+  "xlsx_match_name_tokens_v2": true,
+  "sciscinet_match_strip_tokens": true,
   "pandoc_reference_docx": "resources/pandoc-custom-reference.docx",
   "docx_dir": "/Volumes/Users/Anonymous/Workshop/202504161200UTC-4_Nancy_Baxter_Andrea_Tricco_collabs/analyses/2026-01-02_enrich_full_df/data/manual_extractions",
   "timezone": "America/Toronto",
