@@ -108,8 +108,22 @@ The surgical patches include:
     is NOT a match.
 - the new rule must be wired
   as a new knob under `config.repl.json`
-  which is set to false
-  but if set to true
+  according to this shape:
+  
+  ```json
+  {
+    ...
+    "name_matching_rule_version": {
+      "xlsx": 1, // 1 or 2
+      "docx": 1,  // only 1 exists
+      "sciscinet": 1  // 1 or 2
+    },
+    ...
+  }
+  ```
+  
+  where xlsx is set to 1
+  but if set to 2
   activates the new rule.
 - a unit test must be created
   under `/tests/` that
@@ -125,7 +139,62 @@ The surgical patches include:
   so simply put the exact same
   mechanism must be used in the
   unit test as in the actual pipeline.
-- for sciscinet matching step,
+- for sciscinet matching step, an
+  architectural pivot is applied.
+  as a bit of background,
+  in step 9, specifically at
+  "author_details exact-name matching",
+  a CTE is created from right side
+  (i.e., author details parquet)
+  which UNION ALLs, as alt_name, across 
+  display_name as well as
+  `unnest(CAST(json(display_name_alternatives) AS VARCHAR[]))`
+  while still preserving
+  authorid column.
+  with 100M rows in author details parquet,
+  this is easily billions of rows in CTE.
+  So we pivot to precomputing all this
+  at step 01
+  when registration of
+  author details parquet is taking place.
+  The new code for this
+  first checks for
+  "ktp_author_details_unnest" parquet in 
+  files_config in --config json, and
+  if found and hash matches then
+  this parquet is reused;
+  if hash not matches this is routinely
+  raised by current registration tooling, and
+  if not found then
+  this parquet is created and
+  message logged,
+  together with sha256 of it, in the 
+  repl session screen.
+  during creation of this parquet,
+  note that we also pivot to
+  only keeping unique
+  authorid-alt_name pairs
+  in the parquet.
+  note also that
+  the creation of this parquet 
+  must be implemented with care
+  for RAM, for example
+  it is totally fine
+  if this procedure takes a short while,
+  but if RAM crashes
+  this is not fine.
+  parquet
+  also bears the version of
+  the name matching rule used;
+  upon loading from
+  pre-existing parquet,
+  this version is checked
+  to match the version from --config.
+  and so later in step 9,
+  this parquet is used in
+  the select as right side table
+  instead of CTE.
+- also for sciscinet,
   a new knob must be wired through
   in `config.repl.json` in
   the same way as for xlsx above;
@@ -134,6 +203,26 @@ The surgical patches include:
   - tokens are
     left and right stripped of
     any whitespaces
+  - entire list of
+    alt_name is 
+    expanded with 
+    punctuation-free versions,
+    for example something like
+    (an example, 
+    not authoritative):
+
+    ```
+    regexp_replace(
+          lower(unaccent({alt_name})),
+          '[^[:alnum:]]+',
+          '',
+          'g'
+        )
+    ```
+
+    this expansion happens
+    before deduplication
+    during parquet creation.
 - a unit test must be created
   for sciscinet matching
   along the same lines as xlsx.
