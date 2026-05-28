@@ -23,7 +23,9 @@
 
 ## Doing Now
 
-- Latest regression patch complete; awaiting review/next instruction.
+- Documenting the intended step 9 RAM fix before code changes: keep the first
+  SSN author-match table narrow and defer full author_details display payloads
+  until after nonzero-hit pruning.
 
 ## Done
 
@@ -181,6 +183,31 @@
   equality-join query parses under DuckDB.
 - Added focused coverage that first-run `ktp_author_details_unnest` creation
   emits the live heavy-operation progress messages.
+- User reported step 9 now peaks around 8 GB instead of the earlier ~2 GB. The
+  likely low-risk culprit is that the first author-name match materialization
+  joins the 131.8M-row `ktp_author_details_unnest` back to full
+  `author_details` immediately, carrying `display_name` and
+  `display_name_alternatives` before nonzero-hit pruning even though those
+  payloads are fetched again later from the filtered author_details table.
+- Added AI-spec implementation guidance for the intended surgical step 9 RAM
+  fix: keep `PARQUET_AUTHOR_MATCH_TABLE` narrow (`name_key`, KTP name fields,
+  `ssnad.authorid`, and `ktp.ssnad_match`) and remove the early full
+  `author_details` join from that first match query. Preserve the existing
+  two-column `ktp_author_details_unnest` resource schema for now.
+- Read-only/user-provided evidence for future optimization: the v1 unnest parquet
+  has 131,843,627 author/name rows and 87,228,294 distinct `ktp.alt_name` values;
+  source `tmp/sciscinet_author_details.parquet` has 100,418,971 rows, exact
+  unique author IDs, and every authorid is `A` plus 10 digits. A future
+  `strings`/`id_map` normalized lookup could use numeric `BIGINT` author IDs
+  internally, but that is a separate benchmark/design path rather than the
+  immediate patch.
+- Reflected the priority decision in the AI spec: normalized DuckDB lookup,
+  distinct string tables, sorted `sid` maps, and numeric author IDs are plausible
+  second-generation optimizations, but the measured dedupe factor is moderate
+  and none of those directly explains the 8 GB regression as clearly as the
+  redundant early wide `author_details` join. Priority remains: first make the
+  initial step 9 match table narrow, then re-measure, then benchmark broader
+  resource-schema changes only if needed.
 
 ## Verification
 

@@ -429,6 +429,61 @@ The AI-readable interpretation is:
   `ktp_author_details_unnest`, do not leave stale CTE punctuation such as
   `WITH names AS (...), SELECT ...`; the resulting query must parse as the
   simple equality join shape.
+- Step 9 must also keep the first author-name match materialization narrow for
+  RAM. The initial `ssn_author_matches` / `PARQUET_AUTHOR_MATCH_TABLE` query
+  should join KTP name keys to `ktp_author_details_unnest` only and should not
+  immediately join back to the full `author_details` parquet merely to carry
+  `display_name` or `display_name_alternatives` payload columns. That early
+  wide join is redundant because step 9 later materializes a filtered
+  author-details table after nonzero-hit pruning and the final author output
+  already takes display payload columns from that later filtered table.
+- The intended immediate step 9 RAM fix is therefore surgical: keep
+  `PARQUET_AUTHOR_MATCH_TABLE` to the minimal match payload needed downstream:
+  source/name-key fields, `ssnad.authorid`, and `ktp.ssnad_match`. Apply
+  `SELECT DISTINCT` over those narrow columns only. Continue to join the later
+  filtered author-details table for full display payloads after the nonzero-hit
+  filter has reduced candidate authors.
+- Do not change the `ktp_author_details_unnest` resource schema as part of this
+  immediate RAM fix. It remains the approved two-column parquet with
+  `ssnad.authorid` and `ktp.alt_name`, with footer rule-version metadata.
+- Evidence gathered for future optimization, not for the immediate patch:
+  `data/output/ktp_author_details_unnest_v1.parquet` has 131,843,627
+  author/name rows and 87,228,294 distinct `ktp.alt_name` strings. The source
+  `tmp/sciscinet_author_details.parquet` has 100,418,971 rows and exact
+  one-row-per-authorid cardinality; every `authorid` is `A` plus 10 digits, with
+  numeric suffix range 5,000,000,002 through 5,115,709,198. This means a future
+  normalized lookup design could store author IDs as `BIGINT` internally and
+  reconstruct the canonical `A...` string at output boundaries, but this task's
+  surgical RAM patch should not introduce that broader schema/resource pivot.
+- If step 9 remains too memory-heavy after the narrow-match-table patch, the
+  next optimization candidate is a separately specified and benchmarked
+  normalized lookup resource, for example distinct `strings(sid, s)` plus
+  `id_map(sid, authorid)` sorted by `sid`. Such a design must use deterministic
+  `sid` assignment, preserve/declare parquet metadata and registration rules for
+  all derived resources, and be benchmarked against the current long parquet;
+  it is not part of the immediate surgical fix.
+- The reason not to prioritize that normalized DuckDB lookup before the narrow
+  step 9 patch is empirical rather than aesthetic. String deduplication is real
+  but moderate at the measured scale: 131,843,627 author/name rows versus
+  87,228,294 distinct `ktp.alt_name` strings, so dedupe removes roughly one
+  third of string occurrences, not a 5-10x factor. Parquet already compresses
+  repeated strings, so storage savings may be smaller than row-count savings,
+  though lookup speed could still improve by comparing against fewer unique
+  strings.
+- Numeric author IDs are also a good future optimization candidate, since every
+  source author ID is `A` plus 10 digits and fits in `BIGINT`; however, numeric
+  author IDs alone are expected to save at most hundreds of MB in the current
+  unnest, not explain a multi-GB step 9 peak. Also avoid applying
+  `CAST(substr(authorid, 2) AS BIGINT)` on the huge source-parquet side of joins
+  unless benchmarked; if numeric IDs are introduced later, prefer reconstructing
+  the canonical `A...` string on the already-small matched side or building
+  explicit numeric projections as a broader design.
+- Ordering derived lookup data and using DuckDB storage rather than parquet may
+  improve repeated lookup speed, especially if sorted integer `sid` columns make
+  zonemap pruning effective and if explicit indexes are benchmarked. But this is
+  a resource-schema/storage pivot with its own registration, metadata, storage,
+  and memory tradeoffs. It should follow measurement after the narrow-table fix,
+  not precede the immediate surgical regression fix.
 - SSN v2 is intentionally not XLSX v2. Do not add XLSX compact-initial or
   same-length initial-expansion logic to SciSciNet matching.
 - SSN v2 adds only the agreed string-edge/punctuation behavior:
