@@ -23,8 +23,8 @@
 
 ## Doing Now
 
-- HEAD commit note fix is implemented and verified; awaiting user's next REPL
-  benchmark/result.
+- AI interpretation is revised for the latest human SPEC clarification; awaiting
+  the next implementation/review instruction.
 
 ## Done
 
@@ -218,6 +218,21 @@
   distinguishes scalar-last-name pure v1 payloads from list-shaped v1 fallback
   payloads produced inside XLSX v2 mode, preserving the existing behavior that
   v2-mode v1 fallback rows are non-exact for partitioning.
+- Re-read the updated human SPEC and the referenced task-local DuckDB UI query
+  `tasks/tasks-20260526-match-patch/context/duckdb_ui_20260527T2115Z.sql`.
+  The query is useful for Tukey outlier definitions and the three SSN hit
+  metrics, but the human prose supersedes its ranking/tie-breaker behavior.
+- Updated the AI interpretation for the final patch: config is now
+  `match_rule_version` with `xlsx_name`, `docx_name`, `ssn_name`, and `ssn_hit`;
+  `name_matching_rule_version` is stale; the unnest parquet rule metadata should
+  refer to `match_rule_version.ssn_name`; and SSN hit v2 should filter nonzero
+  candidates to Tukey outliers, then keep max raw `works_count` outliers per
+  name key, preserving max-work ties for subset 2 review.
+- Clarified in the AI interpretation that the referenced SQL's secondary
+  ordering by hit/citation metrics should not be copied, that no-outlier SSN hit
+  v2 groups fall back to v1 by retaining all nonzero-hit candidates, and that
+  downstream step 9 should consume one effective author-match view after hit
+  selection.
 
 ## Verification
 

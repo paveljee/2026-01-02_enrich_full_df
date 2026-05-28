@@ -113,7 +113,7 @@ The surgical patches include:
   ```json
   {
     ...
-    "matching_rule_version": {
+    "match_rule_version": {
       "xlsx_name": 1, // 1 or 2
       "docx_name": 1,  // only 1 exists
       "ssn_name": 1,  // 1 or 2
@@ -262,7 +262,13 @@ The surgical patches include:
     keep all outlier innerdicts
     (and therefore will go
     into subset 2 subsequently
-    for human review).
+    for human review);
+  - If a `name_key` has
+    nonzero-hit SSN candidates but
+    none of them are Tukey outliers, then
+    all nonzero candidates are
+    selected as innerdicts
+    (i.e., fallback to v1 behaviour).
 - match_rule_version.ssn_hit
   from --config config.repl.json
   if set to 1, uses the old way
@@ -326,30 +332,39 @@ The AI-readable interpretation is:
 
 ### config shape and rule versions
 
-- Replace the old boolean knobs with the structured config object:
+- Replace the old boolean knobs and the interim `name_matching_rule_version`
+  object with the structured config object:
 
   ```json
-  "name_matching_rule_version": {
-    "xlsx": 1,
-    "docx": 1,
-    "sciscinet": 1
+  "match_rule_version": {
+    "xlsx_name": 1,
+    "docx_name": 1,
+    "ssn_name": 1,
+    "ssn_hit": 1
   }
   ```
 
 - Valid versions are:
-  - `xlsx`: `1` or `2`;
-  - `docx`: `1` only;
-  - `sciscinet`: `1` or `2`.
+  - `xlsx_name`: `1` or `2`;
+  - `docx_name`: `1` only;
+  - `ssn_name`: `1` or `2`;
+  - `ssn_hit`: `1` or `2`.
 - `PipelineConfig` should accept this object and reject unsupported rule
   versions. The old booleans `xlsx_match_name_tokens_v2` and
-  `sciscinet_match_strip_tokens` are stale and should not remain the active
+  `sciscinet_match_strip_tokens`, plus the interim
+  `name_matching_rule_version`, are stale and should not remain the active
   control path.
-- The task config may set `xlsx = 2`, `docx = 1`, and `sciscinet = 2`, while the
-  code still supports version `1` as the conservative/default behavior.
+- The task config may set `xlsx_name = 2`, `docx_name = 1`, `ssn_name = 2`, and
+  `ssn_hit = 2`, while the code still supports version `1` as the
+  conservative/default behavior for each supported rule.
 - Versioned match payloads should be consistent across domains:
   - XLSX payloads carry `ktp.xlsx_match_rule`;
   - DOCX payloads should carry `ktp.docx_match_rule`, currently always `v1`;
-  - SSN/SciSciNet payloads should carry `ktp.ssn_match_rule`, `v1` or `v2`.
+  - SSN/SciSciNet name-match payloads should carry `ktp.ssn_match_rule`, `v1` or
+    `v2`;
+  - SSN hit-selection metadata should carry an auditable rule version as well,
+    for example `ktp.ssn_hit_rule`, `v1` or `v2`, together with the v2 Tukey
+    flags described below when the rule is active.
 - Use `ssn` in internal output labels where applicable. In particular, the
   partition count flag is `ktp.partition_flag_ssn_count`, not
   `ktp.partition_flag_sciscinet_count`. It is still fine for prose to refer to
@@ -358,7 +373,7 @@ The AI-readable interpretation is:
 ### XLSX matching
 
 - XLSX v1 must remain the original pre-match-patch behavior. The
-  `name_matching_rule_version.xlsx = 1` path must use the same first-token and
+  `match_rule_version.xlsx_name = 1` path must use the same first-token and
   last-name equality semantics the pipeline had before this task.
 - XLSX v2 is additive to v1 for review/partition safety. It introduces the new
   token/fallback matching rule, but it must not lose rows that original v1 would
@@ -464,9 +479,9 @@ The AI-readable interpretation is:
   key-value metadata in the file footer, not as a repeated column across every
   author/alt-name row and not as a normal sidecar file. DuckDB parquet
   `KV_METADATA` is available in the project environment and should be used with
-  a small key such as `name_matching_rule_version.sciscinet`. On reuse, after
+  a small key such as `match_rule_version.ssn_name`. On reuse, after
   the normal registration/hash check passes, verify the stored footer metadata
-  rule version against `name_matching_rule_version.sciscinet` using DuckDB.
+  rule version against `match_rule_version.ssn_name` using DuckDB.
 - If the derived parquet is created during registration, include it in the
   registered resource diagnostics/table so the user can see its path, hash,
   resource group, fragment type, and description. Do not silently create an
@@ -548,14 +563,69 @@ The AI-readable interpretation is:
 - SSN v2 should still be an equality join over precomputed relational keys. It
   should not create a pairwise recursive comparator or broad token-expansion join
   against the full SciSciNet author universe.
-- Step 9 can still apply its downstream nonzero-hit filter. A raw author-details
-  name match that is later filtered out by `ktp.ssn_sum_hit_1pct == 0` will not
-  produce an SSN innerdict and therefore will still count as zero in step 10.
-  This task does not change that filter unless explicitly requested.
+- Step 9 still starts hit processing with the existing nonzero-hit filter: a raw
+  author-details name match with `ktp.ssn_sum_hit_1pct == 0` is not an SSN
+  candidate for downstream innerdict output. `match_rule_version.ssn_hit`
+  controls what happens after that nonzero-hit candidate set exists.
+- `match_rule_version.ssn_hit = 1` is the old behavior. The effective SSN
+  candidate view for downstream enrichment/output is simply the nonzero-hit
+  author-match view.
+- `match_rule_version.ssn_hit = 2` adds the Tukey-outlier candidate reduction.
+  The referenced SQL file
+  `tasks/tasks-20260526-match-patch/context/duckdb_ui_20260527T2115Z.sql` is a
+  useful source for the three metrics and the Tukey flag definition, but it is
+  not the exact implementation query and its later ranking/tie-breaker behavior
+  should not be copied wholesale.
+- For SSN hit v2, build a narrow candidate-metric relation from the nonzero-hit
+  author matches and only the metric columns needed for selection:
+  `ktp.ssn_sum_hit_1pct`, `ssnad.works_count`, and `ssnad.cited_by_count`. Keep
+  the recent RAM fix intact: do not reintroduce a wide early join to full
+  `author_details` payload columns. If `works_count` and `cited_by_count` must
+  come from author_details at this stage, join only `authorid`, `works_count`,
+  and `cited_by_count`, or reuse the already-filtered/narrow author-details
+  materialization if it is available at that point in the step.
+- Compute Tukey bounds globally over the v2 nonzero-hit candidate rows for each
+  metric, matching the referenced query's definition: `q1 = quantile_cont(metric,
+  0.25)`, `q3 = quantile_cont(metric, 0.75)`, `iqr = q3 - q1`, and a row is an
+  outlier for that metric when `metric < q1 - 1.5 * iqr` or
+  `metric > q3 + 1.5 * iqr`. Null metric values should not create a true Tukey
+  flag.
+- The v2 candidate-metric view should expose auditable columns for the three
+  metric flags and the raw work count, for example:
+  `ktp.ssn_hit_sum_hit_1pct_is_tukey_outlier`,
+  `ktp.ssn_hit_works_count_is_tukey_outlier`,
+  `ktp.ssn_hit_cited_by_count_is_tukey_outlier`,
+  `ktp.ssn_hit_row_has_tukey_outlier`, and `ktp.ssn_hit_works_count_raw`. It
+  should also expose the hit rule version, for example `ktp.ssn_hit_rule = "v2"`.
+- For SSN hit v2, filter to candidates where at least one of the three Tukey
+  flags is true. Within each `name_key`, find the maximum raw `works_count`
+  among those outlier candidates. Keep every outlier candidate whose raw
+  `works_count` equals that maximum. Do not apply the referenced query's
+  secondary ordering by `ktp.ssn_sum_hit_1pct` or `ssnad.cited_by_count` as a
+  tiebreaker. Ties on raw `works_count` intentionally keep multiple SSN
+  innerdicts so the name key lands in subset 2 for human review.
+- If a `name_key` has nonzero-hit SSN candidates but none of them are Tukey
+  outliers under v2, the hit-selection rule falls back to v1 behavior for that
+  name key: all nonzero-hit candidates remain selected/effective innerdicts.
+  This fallback can still send the name key to subset 2 when it leaves multiple
+  SSN innerdicts. Make the fallback auditable in the v2 selection relation, for
+  example with `ktp.ssn_hit_fallback_no_tukey_outlier = true` on those retained
+  rows, while leaving the three Tukey flags false.
+- Downstream step 9 enrichment should consume one effective author-match view
+  after hit selection. In v1 this view aliases or reproduces the nonzero-hit
+  candidate set; in v2 it is the max-work-among-Tukey-outliers selected set for
+  name keys with at least one Tukey outlier, plus the v1-style all-nonzero-hit
+  fallback set for name keys with no Tukey outliers. This keeps all later SSN
+  innerdict generation, top papers, institutions, field mapping, and step 10
+  partitioning aligned with the selected candidates.
 - SSN tests must use the production helper SQL and DuckDB directly. They should
-  cover v1 exact behavior, v2 leading/trailing whitespace, v2 punctuation-to-space
-  behavior such as `Claire M. Fraser` matching `Claire M Fraser`, and negative
-  cases proving v2 does not implement XLSX-style initials matching.
+  cover name-rule behavior (v1 exact behavior, v2 leading/trailing whitespace,
+  v2 punctuation-to-space behavior such as `Claire M. Fraser` matching
+  `Claire M Fraser`, and negative cases proving v2 does not implement
+  XLSX-style initials matching) and hit-rule behavior (`ssn_hit` v1 keeps all
+  nonzero-hit candidates, `ssn_hit` v2 keeps a unique max-work Tukey outlier,
+  v2 keeps tied max-work Tukey outliers, and v2 falls back to all nonzero-hit
+  candidates when there are no Tukey outliers).
 
 ### step 10 review dataframe
 
@@ -612,7 +682,8 @@ The AI-readable interpretation is:
 
 - Add/maintain dedicated direct DuckDB pytest files:
   `tests/test_xlsx_name_matching.py`, `tests/test_docx_name_matching.py`, and
-  `tests/test_sciscinet_name_matching.py`.
+  `tests/test_sciscinet_name_matching.py`. The SciSciNet/SSN test file should
+  cover both SSN name matching and SSN hit-selection rules.
 - Add/maintain step 10 tests proving review rows aggregate all available
   context, including placeholder rows, JSON-typed values, multiline delimiter
   behavior, generic provenance fields, and SSN author-id special handling.
