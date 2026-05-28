@@ -109,19 +109,19 @@ def test_register_pipeline_resources_creates_and_reuses_author_details_unnest(
 ) -> None:
     config = PipelineConfig.model_validate(_config_dict(tmp_path, sciscinet_rule_version=2))
     conn = _connect_with_unaccent()
-    progress_messages: list[str] = []
+    messages: list[str] = []
     try:
         resources = register_pipeline_resources(
             config,
             conn=conn,
-            progress_log=progress_messages.append,
+            log=messages.append,
         )
     finally:
         conn.close()
 
-    assert any("HEAVY step ahead" in message for message in progress_messages)
-    assert any(KTP_AUTHOR_DETAILS_UNNEST_KEY in message for message in progress_messages)
-    assert any("sciscinet rule version: v2" in message for message in progress_messages)
+    assert any("HEAVY step ahead" in message for message in messages)
+    assert any(KTP_AUTHOR_DETAILS_UNNEST_KEY in message for message in messages)
+    assert any("sciscinet rule version: v2" in message for message in messages)
 
     resource = resources.author_details_unnest_resource
     assert resource is not None

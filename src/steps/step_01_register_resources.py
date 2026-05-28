@@ -44,14 +44,14 @@ def run(context: PipelineContext) -> StepResult:
 
     docx_files = discover_docx_files(context.config.docx_dir)
 
-    def progress_log(message: str) -> None:
+    def log(message: str) -> None:
         if context.log is not None:
             context.log(message, "cyan")
 
     resources = register_pipeline_resources(
         context.config,
         conn=context.conn,
-        progress_log=progress_log,
+        log=log,
     )
     context.resources = resources
     resources_df = _resource_registry_frame(resources)

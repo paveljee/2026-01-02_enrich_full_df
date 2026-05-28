@@ -225,7 +225,7 @@ def _ensure_author_details_unnest_resource(
     config: PipelineConfig,
     *,
     conn: duckdb.DuckDBPyConnection | None,
-    progress_log: Callable[[str], None] | None = None,
+    log: Callable[[str], None] | None = None,
 ) -> tuple[RegisteredResource | None, list[str]]:
     files = config.files_config
     rule_version = config.name_matching_rule_version.sciscinet
@@ -241,7 +241,7 @@ def _ensure_author_details_unnest_resource(
             expected_hash=meta.get("sha256"),
         )
         _validate_author_details_unnest_metadata(path, rule_version=rule_version, conn=conn)
-        messages.append(f"Reused {KTP_AUTHOR_DETAILS_UNNEST_KEY}: {path}")
+        messages.append(f"Validated {KTP_AUTHOR_DETAILS_UNNEST_KEY}, rule version: {rule_version})")
         return resource, messages
 
     path = _author_details_unnest_default_path(config)
@@ -260,14 +260,14 @@ def _ensure_author_details_unnest_resource(
         return None, messages
 
     author_details_path = Path(files["author_details"]["path"])
-    if progress_log is not None:
-        progress_log(
+    if log is not None:
+        log(
             "HEAVY step ahead: creating "
             f"{KTP_AUTHOR_DETAILS_UNNEST_KEY} from author_details display names "
             "and alternatives."
         )
-        progress_log(f"{KTP_AUTHOR_DETAILS_UNNEST_KEY} output: {path}")
-        progress_log(
+        log(f"{KTP_AUTHOR_DETAILS_UNNEST_KEY} output: {path}")
+        log(
             f"{KTP_AUTHOR_DETAILS_UNNEST_KEY} sciscinet rule version: v{rule_version}"
         )
     _create_author_details_unnest_parquet(
@@ -291,7 +291,7 @@ def register_pipeline_resources(
     config: PipelineConfig,
     *,
     conn: duckdb.DuckDBPyConnection | None = None,
-    progress_log: Callable[[str], None] | None = None,
+    log: Callable[[str], None] | None = None,
 ) -> PipelineResources:
     files = config.files_config
     parquet_resources = {
@@ -391,7 +391,7 @@ def register_pipeline_resources(
     author_details_unnest_resource, messages = _ensure_author_details_unnest_resource(
         config,
         conn=conn,
-        progress_log=progress_log,
+        log=log,
     )
     if author_details_unnest_resource is not None:
         parquet_resources[author_details_unnest_resource.name] = author_details_unnest_resource

@@ -174,7 +174,7 @@
   the AI interpretation: derived unnest creation must log live before the heavy
   DuckDB `COPY`, and step 9 must cleanly consume the derived parquet without
   stale CTE punctuation.
-- Added a `progress_log` hook through resource registration, used by step 01 to
+- Added a `log` hook through resource registration, used by step 01 to
   print the heavy `ktp_author_details_unnest` creation warning, output path, and
   active SciSciNet rule version before creation starts.
 - Removed the stale comma after the step 09 `names` CTE so the derived-parquet
