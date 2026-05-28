@@ -113,10 +113,11 @@ The surgical patches include:
   ```json
   {
     ...
-    "name_matching_rule_version": {
-      "xlsx": 1, // 1 or 2
-      "docx": 1,  // only 1 exists
-      "sciscinet": 1  // 1 or 2
+    "matching_rule_version": {
+      "xlsx_name": 1, // 1 or 2
+      "docx_name": 1,  // only 1 exists
+      "ssn_name": 1,  // 1 or 2
+      "ssn_hit": 1 // 1 or 2
     },
     ...
   }
@@ -223,6 +224,51 @@ The surgical patches include:
     this expansion happens
     before deduplication
     during parquet creation.
+- also for sciscinet,
+  at step 9,
+  we add one more logic that
+  reduces sciscinet innerdicts
+  efficiently to exactly one
+  in all cases
+  except ties.
+  it's been empirically shown
+  to perform impressively.
+  consider this query:
+  `./context/duckdb_ui_20260527T2115Z.sql`.
+  this is NOT the exact query
+  we need to wire in here, but
+  the actually query must be
+  based off of that.
+  after reading this query,
+  the actual rule we wire in is
+  (immediately after creating a
+  view with nonzero hits):
+
+  - create a new view that
+    only keeps
+    tukey outliers by
+    at least any of the
+    three metrics, and
+    so this view has a
+    bool col is tukey outlier for
+    each of the three metrics, and
+    this view also should have
+    col with raw work count value;
+  - select among the outliers
+    one with max work count
+    as the ultimate innerdict;
+  - those that have a
+    tie on work count,
+    keep all outlier innerdicts
+    (and therefore will go
+    into subset 2 subsequently
+    for human review).
+- match_rule_version.ssn_hit
+  from --config config.repl.json
+  if set to 1, uses the old way
+  where only nonzero hits is used
+  else if set to 2 then this
+  new rule is used.
 - a unit test must be created
   for sciscinet matching
   along the same lines as xlsx.
@@ -237,7 +283,8 @@ The surgical patches include:
   three files: 
   one for xlsx match tests,
   one for docx match tests, and
-  one for sciscinet match tests.
+  one for sciscinet match tests
+  (both name and hit match).
 - in step 10 logic that builds
   `10_build_cards_card_partition_review_df.csv`
   the logic must be changed to show
