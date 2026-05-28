@@ -23,8 +23,7 @@
 
 ## Doing Now
 
-- Revising the approved implementation to store `ktp_author_details_unnest`
-  rule metadata in parquet footer `KV_METADATA` instead of a JSON sidecar.
+- Latest regression patch complete; awaiting review/next instruction.
 
 ## Done
 
@@ -171,6 +170,17 @@
 - Removed the resource-local `_sql_string_literal`; resource paths and metadata
   values now use DuckDB parameters, with the remaining `KV_METADATA` key literal
   escaping centralized as `duckdb_string_literal` in `duckdb_utils.py`.
+- Wired the latest first-run resource logging and step 09 parser findings into
+  the AI interpretation: derived unnest creation must log live before the heavy
+  DuckDB `COPY`, and step 9 must cleanly consume the derived parquet without
+  stale CTE punctuation.
+- Added a `progress_log` hook through resource registration, used by step 01 to
+  print the heavy `ktp_author_details_unnest` creation warning, output path, and
+  active SciSciNet rule version before creation starts.
+- Removed the stale comma after the step 09 `names` CTE so the derived-parquet
+  equality-join query parses under DuckDB.
+- Added focused coverage that first-run `ktp_author_details_unnest` creation
+  emits the live heavy-operation progress messages.
 
 ## Verification
 
@@ -256,3 +266,11 @@
   84 passed, 3 skipped, and 2 failed only in
   `tests/test_detour_mode0_econ_stats.py` because the default Pixi environment
   does not include the optional Plotly/Kaleido dependencies for SVG output.
+- Latest syntax check:
+  `pixi run python -m py_compile src/helpers/resources.py src/steps/step_01_register_resources.py src/steps/step_09_match_parquet.py tests/test_author_details_unnest_resource.py`
+  passed.
+- Latest focused run:
+  `pixi run pytest tests/test_author_details_unnest_resource.py tests/test_xlsx_name_matching.py tests/test_docx_name_matching.py tests/test_sciscinet_name_matching.py tests/test_step_10_build_cards.py -q`
+  passed: 34 passed.
+- Latest `pixi run pre-commit-repl` passed: ruff passed, mypy passed, and full
+  default pytest passed with 72 passed and 2 skipped.

@@ -378,6 +378,12 @@ The AI-readable interpretation is:
   `files_config`, step 01 must create it and register it before step 9 can run.
   Step 9 should not fall back to rebuilding the old giant author-details
   display/alt-name CTE.
+- First-run creation of `ktp_author_details_unnest` is a heavy operation and
+  must be logged live before the DuckDB `COPY` starts, not only as a completed
+  `StepResult` message after the parquet has already been written. The REPL
+  screen should warn that the derived author-details unnest build is starting,
+  identify the output path, and identify the active SSN/SciSciNet matching rule
+  version. Completion messages should still include the created path and sha256.
 - Do not add `ktp_author_details_unnest` to `REQUIRED_FILES_CONFIG_KEYS` in a way
   that prevents first-run creation. Instead, guarantee that by the end of
   resource registration the runtime resources include the derived unnest parquet,
@@ -418,6 +424,11 @@ The AI-readable interpretation is:
   registered resource diagnostics/table so the user can see its path, hash,
   resource group, fragment type, and description. Do not silently create an
   untracked side artifact.
+- Step 9 should cleanly consume the registered derived parquet in SQL. When
+  replacing the old `parq AS (...)` CTE with `read_parquet()` against
+  `ktp_author_details_unnest`, do not leave stale CTE punctuation such as
+  `WITH names AS (...), SELECT ...`; the resulting query must parse as the
+  simple equality join shape.
 - SSN v2 is intentionally not XLSX v2. Do not add XLSX compact-initial or
   same-length initial-expansion logic to SciSciNet matching.
 - SSN v2 adds only the agreed string-edge/punctuation behavior:

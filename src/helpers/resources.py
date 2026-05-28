@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 import duckdb
 
@@ -224,6 +225,7 @@ def _ensure_author_details_unnest_resource(
     config: PipelineConfig,
     *,
     conn: duckdb.DuckDBPyConnection | None,
+    progress_log: Callable[[str], None] | None = None,
 ) -> tuple[RegisteredResource | None, list[str]]:
     files = config.files_config
     rule_version = config.name_matching_rule_version.sciscinet
@@ -258,6 +260,16 @@ def _ensure_author_details_unnest_resource(
         return None, messages
 
     author_details_path = Path(files["author_details"]["path"])
+    if progress_log is not None:
+        progress_log(
+            "HEAVY step ahead: creating "
+            f"{KTP_AUTHOR_DETAILS_UNNEST_KEY} from author_details display names "
+            "and alternatives."
+        )
+        progress_log(f"{KTP_AUTHOR_DETAILS_UNNEST_KEY} output: {path}")
+        progress_log(
+            f"{KTP_AUTHOR_DETAILS_UNNEST_KEY} sciscinet rule version: v{rule_version}"
+        )
     _create_author_details_unnest_parquet(
         conn,
         author_details_path=author_details_path,
@@ -279,6 +291,7 @@ def register_pipeline_resources(
     config: PipelineConfig,
     *,
     conn: duckdb.DuckDBPyConnection | None = None,
+    progress_log: Callable[[str], None] | None = None,
 ) -> PipelineResources:
     files = config.files_config
     parquet_resources = {
@@ -378,6 +391,7 @@ def register_pipeline_resources(
     author_details_unnest_resource, messages = _ensure_author_details_unnest_resource(
         config,
         conn=conn,
+        progress_log=progress_log,
     )
     if author_details_unnest_resource is not None:
         parquet_resources[author_details_unnest_resource.name] = author_details_unnest_resource

@@ -5,9 +5,9 @@
   "output_format": "txt",
   "card_subset_mode": 2,
   "name_matching_rule_version": {
-    "xlsx": 2,
+    "xlsx": 1,
     "docx": 1,
-    "sciscinet": 2
+    "sciscinet": 1
   },
   "pandoc_reference_docx": "resources/pandoc-custom-reference.docx",
   "docx_dir": "/Volumes/Users/Anonymous/Workshop/202504161200UTC-4_Nancy_Baxter_Andrea_Tricco_collabs/analyses/2026-01-02_enrich_full_df/data/manual_extractions",
@@ -26,6 +26,11 @@
   "pilot_xlsx_name": "2024_HCR.xlsx",
   "total_draws": 310,
   "files_config": {
+    "ktp_author_details_unnest": {
+      "path": "/Volumes/home/aicode/2026-01-02_enrich_full_df/data/output/ktp_author_details_unnest_v1.parquet",
+      "sha256": "fa5fb9f2b88e53328b0d64e3bbf8f5e1a5e459d1eec7a09a01c77cce1707c9ff",
+      "desc": "SciSciNet author details unnested names"
+    },
     "hit_papers_0": {
       "path": "/Volumes/home/anonymous/sciscinet/v2/hf/xet/hit_papers_level0.parquet",
       "sha256": "453bf5e5fe4bd2427b467c35aaea36a9d5c1b8b61d1e01d84496fd7fd5e6d6aa",

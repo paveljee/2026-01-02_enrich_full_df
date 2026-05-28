@@ -172,7 +172,7 @@ def run(context: PipelineContext) -> StepResult:
                 "{KTP_LAST_NAME_COL}" AS "{KTP_LAST_NAME_COL}",
                 {ktp_match_key_expr} AS match_key_norm
             FROM {OUTERDICT_NAME_VIEW}
-        ),
+        )
         SELECT DISTINCT
             n.name_key AS name_key,
             n."{KTP_FIRST_NAME_COL}" AS "{KTP_FIRST_NAME_COL}",
