@@ -254,76 +254,249 @@ The surgical patches include:
 
 The AI-readable interpretation is:
 
+### inherited operating constraints
+
 - Honor all inherited prerequisites and setup from
   `/tasks/tasks-20260519-review-231/SPEC.md`.
-- Review the relevant codebase, especially the path that would be involved in
-  `pixi run python -m src.repl --config config.repl.json --new`, but do not run
-  that command.
-- Do not use `src.repl` at all. The full pipeline command is explicitly
-  disallowed and is expected not to execute in this environment because the
-  external resources are unavailable.
-- Assume that the full pipeline command has already been run with the current
-  `config.repl.json`, meaning current subset mode 2. If database evidence is
-  needed, use only `data/scisci_process.duckdb`, and open it only in read-only
-  mode.
-- For any data/context verification, the read-only DuckDB file is the single
-  source of truth. Do not touch or look for any other generated artifacts.
-- It is allowed to re-review repo code and configuration such as `src/`,
-  `config.repl.json`, and `tests/`, but do not inspect data files or `.aicode/`.
-- Code edits are allowed only after the implementation path is understood well
-  enough to be ready to make the change.
-- Git usage must remain read-only: do not stage, unstage, commit, reset, or
-  otherwise mutate git state.
+- Do not run `src.repl` and do not run the full pipeline command. In
+  particular, do not run
+  `pixi run python -m src.repl --config config.repl.json --new`.
+- If database evidence is needed, use only `data/scisci_process.duckdb`, opened
+  read-only. Do not mutate that database.
+- Git usage is read-only for the AI executor: do not stage, unstage, commit,
+  reset, checkout away, or otherwise mutate git state.
 - Use `tasks/tasks-20260526-match-patch/WORK.md` as the task-local workbook.
-  Keep it concise and organized for a busy tech lead and future executor,
-  recording intended actions, in-progress work, completed work, verification,
-  other useful notes, and relevant blockers or caveats.
-- The implementation goal is a narrow code-and-test patch set that improves
-  matching and review data, not an exploratory data rewrite.
-- Add two config booleans, both defaulting to `false` in `config.repl.json`:
-  - `xlsx_match_name_tokens_v2`
-  - `sciscinet_match_strip_tokens`
-- The XLSX knob preserves existing v1 behavior when false. When true, XLSX name
-  matching switches to a shared token-sequence comparator for first and last
-  names:
-  - before tokenization, lowercase/unaccent as appropriate to current matching,
-    then replace every punctuation sequence and whitespace sequence in first and
-    last names with one space;
-  - tokenize both first and last names, strip leading/trailing spaces from all
-    tokens on both sides, and drop empty tokens;
-  - first-name token sequences must match, and last-name token sequences must
-    match;
-  - if exact token-sequence matching fails, try the compact-initials rule in
-    either direction, where a run of two or more single-letter tokens on one side
-    may match one token on the other side equal to those initials joined either
-    with no separator or with a single space, with order and total token coverage
-    still exact;
-  - if that fails, try the same-length initial-expansion rule in either
-    direction, where a single-letter token may match a token at the same position
-    that starts with that letter, while all other positions match exactly;
-  - the fallback rules apply to both first-name and last-name matching, and exact
-    token order/count constraints must be preserved.
-- XLSX tests must cover both v1 and v2, including the stated positive and
-  negative edge cases. The tests should use pytest and DuckDB directly, importing
-  the actual matching def or registration/helper from `src/` so the pipeline and
-  tests share the same logic.
-- The SciSciNet knob preserves current exact normalized display-name matching
-  when false. When true, it changes only token/string edge handling by stripping
-  leading and trailing whitespace from compared tokens/strings before equality.
-- SciSciNet tests should mirror the XLSX testing style: pytest, DuckDB directly,
-  actual imported matching mechanism from `src/`, and coverage proving v1 rejects
-  leading/trailing whitespace while v2 accepts it without adding unrelated XLSX
-  punctuation or initials behavior.
-- DOCX matching behavior remains unchanged, but add direct pytest/DuckDB tests
-  around the actual imported DOCX matching mechanism so the existing
-  normalization and containment behavior is pinned.
-- Put these matching unit tests in three dedicated files under `tests/`: one
-  file for XLSX matching, one file for DOCX matching, and one file for SciSciNet
-  matching.
-- For `10_build_cards_card_partition_review_df.csv`, the review dataframe should
-  no longer show only singleton/one-available innerdict values for cross-domain
-  context. For each review column, collect all available values from the relevant
-  DOCX, XLSX, and/or SciSciNet innerdicts for the same source key, depending on
-  the column's domain. Merge multiple values inside the cell. If none of the
-  values contains multiline text, separate them with one newline. If any value is
-  multiline, separate values with a line containing `-----`.
+  Keep it current with concise notes about intent, work in progress, completed
+  changes, verification, and caveats.
+- The scope is surgical. Preserve the psyche and query shape of the original
+  code wherever possible. Do not redesign unrelated pipeline stages.
+- Matching logic must live in centralized matching helpers that emit DuckDB SQL
+  or other production query fragments. Do not move name matching into Python
+  callbacks or test-only reimplementations.
+- Tests for matching must use the same DuckDB mechanisms as production,
+  including DuckDB `unaccent` through `splink_udfs`. Do not use Python
+  `unaccent` or separate Python normalization as the asserted mechanism.
+
+### config shape and rule versions
+
+- Replace the old boolean knobs with the structured config object:
+
+  ```json
+  "name_matching_rule_version": {
+    "xlsx": 1,
+    "docx": 1,
+    "sciscinet": 1
+  }
+  ```
+
+- Valid versions are:
+  - `xlsx`: `1` or `2`;
+  - `docx`: `1` only;
+  - `sciscinet`: `1` or `2`.
+- `PipelineConfig` should accept this object and reject unsupported rule
+  versions. The old booleans `xlsx_match_name_tokens_v2` and
+  `sciscinet_match_strip_tokens` are stale and should not remain the active
+  control path.
+- The task config may set `xlsx = 2`, `docx = 1`, and `sciscinet = 2`, while the
+  code still supports version `1` as the conservative/default behavior.
+- Versioned match payloads should be consistent across domains:
+  - XLSX payloads carry `ktp.xlsx_match_rule`;
+  - DOCX payloads should carry `ktp.docx_match_rule`, currently always `v1`;
+  - SSN/SciSciNet payloads should carry `ktp.ssn_match_rule`, `v1` or `v2`.
+- Use `ssn` in internal output labels where applicable. In particular, the
+  partition count flag is `ktp.partition_flag_ssn_count`, not
+  `ktp.partition_flag_sciscinet_count`. It is still fine for prose to refer to
+  the external data source as SciSciNet.
+
+### XLSX matching
+
+- XLSX v1 must remain the original pre-match-patch behavior. The
+  `name_matching_rule_version.xlsx = 1` path must use the same first-token and
+  last-name equality semantics the pipeline had before this task.
+- XLSX v2 is additive to v1 for review/partition safety. It introduces the new
+  token/fallback matching rule, but it must not lose rows that original v1 would
+  have detected as present non-exact XLSX matches.
+- In v2 mode, generate relational match keys in DuckDB and join by equality on
+  those keys. Do not put recursive/token comparison directly inside the `JOIN
+  ON`, because that caused unacceptable memory growth.
+- For v2 tokenization:
+  - lower/unaccent using DuckDB;
+  - replace punctuation sequences and whitespace sequences with a single space;
+  - trim tokens;
+  - drop empty tokens;
+  - apply the same token-sequence rule to first and last names.
+- V2 exact token-sequence matching requires identical token sequence, count, and
+  order on source and target, separately for first and last names.
+- V2 compact-initial fallback applies in either direction. A run of two or more
+  single-letter tokens on one side may match one token on the other side equal
+  to the run joined with no separator or with a single space. The full token
+  sequence must still be consumed exactly and in order.
+- V2 same-length initial-expansion fallback applies in either direction. A
+  single-letter token may match a token at the same position that starts with
+  that letter. All non-initial positions must match exactly, and both sides must
+  have the same token count.
+- In v2 mode, include the original v1 key path as a secondary rule path. For the
+  same source/HCR row, prefer the v2 path over the v1 path. Rows matched only by
+  the v1 path should carry `ktp.xlsx_match_rule = "v1"` and are present XLSX
+  matches but non-exact for step 10 partitioning.
+- XLSX tests must cover v1 and v2 positive and negative edge cases, including
+  compact initials, same-length initials, order/count failures, punctuation,
+  whitespace, last-name tokenization, v2 preference over v1, and v1-only rows
+  being treated as non-exact in partitioning.
+
+### DOCX matching
+
+- DOCX matching behavior remains v1 only and should not be broadened as part of
+  this task.
+- The existing DOCX normalization/containment behavior should be centralized in
+  the matching helper and covered by direct DuckDB pytest tests.
+- DOCX match payloads should include `ktp.docx_match_rule = "v1"` so all
+  matching domains expose a rule version consistently.
+
+### SSN/SciSciNet matching
+
+- SSN/SciSciNet v1 must preserve the original exact normalized display-name
+  matching behavior. In v1, matching remains equality between the normalized KTP
+  full name and normalized SciSciNet display/alternative name.
+- The old step 9 right-side `parq` CTE is too large at full scale. It logically
+  expands `author_details` into one row for `display_name` plus one row for each
+  `display_name_alternatives` entry. With approximately 100M author rows, that
+  can become billions of logical right-side rows.
+- Pivot the right side of SSN author-details matching to a precomputed parquet
+  produced during resource registration / step 01 for author details. Step 9
+  should use that parquet as the right-side relation instead of rebuilding the
+  display/alt-name expansion CTE.
+- The precomputed parquet is keyed from the `files_config` entry named
+  `ktp_author_details_unnest`.
+  - If that entry exists and its registered hash matches, reuse it.
+  - If it exists and the hash does not match, rely on existing registration
+    validation to raise.
+  - If it is absent, create the parquet, log that it was created, and log the
+    sha256 so the user can add it to config.
+- `ktp_author_details_unnest` is a required derived resource for step 9, but it
+  is not necessarily a required pre-existing config input. If it is missing from
+  `files_config`, step 01 must create it and register it before step 9 can run.
+  Step 9 should not fall back to rebuilding the old giant author-details
+  display/alt-name CTE.
+- Do not add `ktp_author_details_unnest` to `REQUIRED_FILES_CONFIG_KEYS` in a way
+  that prevents first-run creation. Instead, guarantee that by the end of
+  resource registration the runtime resources include the derived unnest parquet,
+  whether it was reused from config or newly created. If present in
+  `files_config`, it should still obey the existing per-entry shape (`path`,
+  `sha256`, `desc`) unless the config model is deliberately extended with a
+  clearer derived-resource schema.
+- Resource registration is currently hard-coded for the required SciSciNet
+  parquet inputs. Extend the existing registration flow surgically so the
+  derived unnest parquet is created/reused and registered through the same
+  resource model and registry table. Do not create a fragmented or parallel
+  resource-registration path, and do not disrupt registration of the existing
+  required parquet files.
+- Creating this parquet must be done with RAM care:
+  - use DuckDB/parquet operations, not pandas materialization;
+  - avoid Python lists of author rows or alt-name rows;
+  - avoid pairwise/Python matching logic;
+  - prefer a query shape that can spill or stream through DuckDB rather than
+    forcing all expanded rows into Python memory;
+  - it is acceptable for this one-time build to take time, but it must not crash
+    RAM on the intended full-scale input.
+- The precomputed parquet should contain unique author/alt-name match rows after
+  rule-specific expansion. At minimum it must preserve `authorid`, the matching
+  alt-name/key value, and the SSN rule version used to create the parquet. It may
+  avoid storing large display payloads if step 9 can join back to
+  `author_details` for display fields after identifying matched author IDs.
+- The precomputed parquet must bear the SSN rule version. A straightforward
+  implementation is a column such as `ktp.ssn_match_rule` with a single expected
+  value. On reuse, verify that the parquet's rule version matches
+  `name_matching_rule_version.sciscinet`.
+- If the derived parquet is created during registration, include it in the
+  registered resource diagnostics/table so the user can see its path, hash,
+  resource group, fragment type, and description. Do not silently create an
+  untracked side artifact.
+- SSN v2 is intentionally not XLSX v2. Do not add XLSX compact-initial or
+  same-length initial-expansion logic to SciSciNet matching.
+- SSN v2 adds only the agreed string-edge/punctuation behavior:
+  - strip leading/trailing whitespace from compared names/keys;
+  - expand the right-side display/alt-name list with a punctuation-to-space
+    variant before deduplication;
+  - the punctuation-to-space variant should replace punctuation sequences with a
+    single space, then normalize whitespace and trim. It must not remove
+    whitespace entirely.
+- Because SSN v2 equality matching requires both sides to speak the same key
+  language, the KTP/namekey side must use the comparable v2 normalized key. For
+  example, `Claire M` + `Fraser` should compare as `claire m fraser`, and the
+  SciSciNet display name `Claire M. Fraser` should also produce
+  `claire m fraser`.
+- SSN v2 should still be an equality join over precomputed relational keys. It
+  should not create a pairwise recursive comparator or broad token-expansion join
+  against the full SciSciNet author universe.
+- Step 9 can still apply its downstream nonzero-hit filter. A raw author-details
+  name match that is later filtered out by `ktp.ssn_sum_hit_1pct == 0` will not
+  produce an SSN innerdict and therefore will still count as zero in step 10.
+  This task does not change that filter unless explicitly requested.
+- SSN tests must use the production helper SQL and DuckDB directly. They should
+  cover v1 exact behavior, v2 leading/trailing whitespace, v2 punctuation-to-space
+  behavior such as `Claire M. Fraser` matching `Claire M Fraser`, and negative
+  cases proving v2 does not implement XLSX-style initials matching.
+
+### step 10 review dataframe
+
+- Step 10 partitioning logic remains unchanged except for already-agreed naming
+  cleanup from `sciscinet` to `ssn` where applicable. Do not change which
+  namekeys land in subset 1 or subset 2 as part of the review-display fix.
+- The review dataframe fix is presentation/context aggregation only. By step 10,
+  processing is already done and innerdicts are available per namekey; the
+  review CSV should faithfully display those innerdicts.
+- `10_build_cards_card_partition_review_df.csv` must show all available
+  relevant innerdict values for each reviewed source key. It should not show a
+  blank just because the partition's primary branch has no row.
+- Keep `ktp.source_key`, `ktp.partition`, partition flags, draw number, first
+  name, and last name sourced from the card partition table.
+- Keep `ktp.ff_discard` and `ktp.ff_note` as blank/editor columns.
+- Treat `ktp.ff_author_id` specially. It is an SSN author id field:
+  - for an SSN candidate row, keep the row's candidate author id available for
+    editing/selection;
+  - if aggregating context, use only SSN `ktp.fragment` values as possible
+    author IDs;
+  - never fill `ktp.ff_author_id` from XLSX row numbers or DOCX row fragments;
+  - if there is no SSN innerdict, leave it blank.
+- Generic provenance columns are relevant across domains. For
+  `ktp.filename`, `ktp.fragment`, and `ktp.fragment_type`, aggregate available
+  values from XLSX, DOCX, and SSN innerdicts for the source key. This is the fix
+  for rows like Claire M Fraser, where XLSX and DOCX context exists but the
+  missing SSN primary row caused blank provenance fields.
+- Domain-specific columns should aggregate from their relevant domain:
+  - XLSX/HCR columns from XLSX innerdicts, including `hcr.category`, economies,
+    economy match, affiliations, and `ktp.xlsx_match`;
+  - SSN columns from SSN innerdicts, including display names, alternatives,
+    field display names, top institutions, `ktp.ssnad_match`, hit sums, works
+    counts, citations, and works API URL;
+  - DOCX columns from DOCX innerdicts, including `ktp.docx_match` and table 1
+    extraction columns.
+- Merge all non-empty values in-cell. Preserve repeated values when they come
+  from multiple innerdicts; do not collapse them merely because the display text
+  is identical. Use stable ordering, preferably by filename, fragment,
+  fragment_type, and the source column value.
+- If no merged value contains multiline text, separate values with one newline.
+  If any value being merged contains multiline text, separate values with a line
+  containing `-----`.
+- Review context values should be cast to display `VARCHAR` before merging so
+  JSON-typed values such as economies do not trigger DuckDB JSON re-casting
+  errors after newline merging.
+- The review view should handle both primary rows and placeholder rows. A
+  placeholder row for the SSN partition with zero SSN candidates should still
+  show all available XLSX and DOCX context.
+- If a review artifact is emitted for subset mode 1, partition value `0`
+  (`no resolution needed`) must be considered. The view should not produce an
+  empty header-only CSV solely because all selected rows are partition `0`.
+
+### verification expectations
+
+- Add/maintain dedicated direct DuckDB pytest files:
+  `tests/test_xlsx_name_matching.py`, `tests/test_docx_name_matching.py`, and
+  `tests/test_sciscinet_name_matching.py`.
+- Add/maintain step 10 tests proving review rows aggregate all available
+  context, including placeholder rows, JSON-typed values, multiline delimiter
+  behavior, generic provenance fields, and SSN author-id special handling.
+- Run focused matching and step 10 tests after implementation.
+- Run `pixi run pre-commit` when done. If unrelated existing failures remain,
+  record them precisely in `WORK.md` and the final response.

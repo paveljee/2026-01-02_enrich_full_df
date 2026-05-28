@@ -19,9 +19,8 @@
 
 ## Doing Now
 
-- Handoff after the XLSX v2 match-key rewrite; awaiting user-run pipeline
-  validation because the inherited prerequisite forbids AI-run full pipeline
-  commands.
+- Re-aligning SPEC AI interpretation with the updated human SPEC and rollout
+  discussion before resuming implementation.
 
 ## Done
 
@@ -110,6 +109,19 @@
 - Tightened step 10 XLSX partition interpretation so a v2-mode row tagged with
   `ktp.xlsx_match_rule = "v1"` is treated as a present but non-exact XLSX match,
   sending the namekey to subset 2 as intended.
+- Re-read inherited prerequisites from
+  `tasks/tasks-20260519-review-231/SPEC.md`, the updated match-patch human SPEC,
+  and pertinent config/resource/matching/step 10 code before rewriting the
+  match-patch AI interpretation.
+- Updated `tasks/tasks-20260526-match-patch/SPEC.md` AI section to replace stale
+  boolean-knob language with the `name_matching_rule_version` config shape,
+  versioned XLSX/DOCX/SSN payload expectations, SSN precomputed author-details
+  unnest parquet plan, SSN v2 punctuation-to-space equality rule, step 10
+  all-innerdict review-display contract, and verification expectations.
+- Clarified in the AI interpretation that `ktp_author_details_unnest` is a
+  required derived runtime resource for step 9: absence from config triggers
+  creation during step 01, not fallback to the old giant CTE, and registration
+  must stay inside the existing resource flow rather than a parallel path.
 
 ## Verification
 
