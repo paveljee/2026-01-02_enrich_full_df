@@ -213,11 +213,11 @@ The surgical patches include:
 
     ```
     regexp_replace(
-          lower(unaccent({alt_name})),
-          '[^[:alnum:]]+',
-          '',
-          'g'
-        )
+      lower(unaccent({alt_name})),
+      '[[:punct:]]+',
+      ' ',
+      'g'
+    )
     ```
 
     this expansion happens
