@@ -3,7 +3,7 @@
   "state_file": "data/pipeline_state.json",
   "output_dir": "data/output",
   "output_format": "txt",
-  "card_subset_mode": 2,
+  "card_subset_mode": 1,
   "name_matching_rule_version": {
     "xlsx": 1,
     "docx": 1,

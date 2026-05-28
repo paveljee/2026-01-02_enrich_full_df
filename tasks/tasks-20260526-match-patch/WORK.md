@@ -23,9 +23,8 @@
 
 ## Doing Now
 
-- Documenting the intended step 9 RAM fix before code changes: keep the first
-  SSN author-match table narrow and defer full author_details display payloads
-  until after nonzero-hit pruning.
+- Surgical step 9 RAM fix is implemented and verified; awaiting user's REPL RAM
+  benchmark.
 
 ## Done
 
@@ -208,6 +207,10 @@
   redundant early wide `author_details` join. Priority remains: first make the
   initial step 9 match table narrow, then re-measure, then benchmark broader
   resource-schema changes only if needed.
+- Implemented the surgical step 9 RAM fix: the initial author-name match table
+  now joins only KTP name keys to `ktp_author_details_unnest`, keeps narrow match
+  fields, and defers full `author_details` display payloads to the existing
+  post-pruning filtered author-details materialization.
 
 ## Verification
 
@@ -301,3 +304,11 @@
   passed: 34 passed.
 - Latest `pixi run pre-commit-repl` passed: ruff passed, mypy passed, and full
   default pytest passed with 72 passed and 2 skipped.
+- Step 9 narrow-match-table patch syntax check:
+  `pixi run python -m py_compile src/steps/step_09_match_parquet.py` passed.
+- Step 9 narrow-match-table patch focused run:
+  `pixi run pytest tests/test_author_details_unnest_resource.py tests/test_xlsx_name_matching.py tests/test_docx_name_matching.py tests/test_sciscinet_name_matching.py tests/test_step_10_build_cards.py -q`
+  passed: 34 passed.
+- Step 9 narrow-match-table patch `pixi run pre-commit-repl` passed: ruff
+  passed, mypy passed, and full default pytest passed with 72 passed and 2
+  skipped.

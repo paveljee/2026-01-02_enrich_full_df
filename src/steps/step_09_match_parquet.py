@@ -160,7 +160,8 @@ def run(context: PipelineContext) -> StepResult:
     log_tag(
         STEP_MATCH_PARQUET_LOG_TAG_TABLE_PARQUET,
         "HEAVY step ahead: author_details exact-name matching scans precomputed "
-        "author-name keys and joins against all outerdict name keys.",
+        "author-name keys and joins against all outerdict name keys. Display payloads "
+        "are deferred until after nonzero-hit pruning.",
     )
     conn.execute(
         f"""
@@ -178,8 +179,6 @@ def run(context: PipelineContext) -> StepResult:
             n."{KTP_FIRST_NAME_COL}" AS "{KTP_FIRST_NAME_COL}",
             n."{KTP_LAST_NAME_COL}" AS "{KTP_LAST_NAME_COL}",
             u."{SSNAD_AUTHORID_COL}" AS "{author_id_col}",
-            p.display_name AS "ssnad.display_name",
-            p.display_name_alternatives AS "ssnad.display_name_alternatives",
             json_object(
                 '{KTP_SSN_MATCH_RULE_KEY}', '{ssn_match_rule}',
                 '{KTP_SSNAD_MATCH_KTP_NAME_NORM_KEY}', n.match_key_norm,
@@ -188,8 +187,6 @@ def run(context: PipelineContext) -> StepResult:
         FROM names n
         JOIN read_parquet('{author_details_unnest_path}') u
           ON u."{KTP_ALT_NAME_COL}" = n.match_key_norm
-        JOIN read_parquet('{author_details_path}') p
-          ON p.authorid = u."{SSNAD_AUTHORID_COL}"
         """
     )
     match_stats_row = conn.execute(

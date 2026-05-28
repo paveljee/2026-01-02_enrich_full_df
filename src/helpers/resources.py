@@ -241,7 +241,7 @@ def _ensure_author_details_unnest_resource(
             expected_hash=meta.get("sha256"),
         )
         _validate_author_details_unnest_metadata(path, rule_version=rule_version, conn=conn)
-        messages.append(f"Validated {KTP_AUTHOR_DETAILS_UNNEST_KEY}, rule version: {rule_version})")
+        messages.append(f"Validated {KTP_AUTHOR_DETAILS_UNNEST_KEY}, rule version: {rule_version}")
         return resource, messages
 
     path = _author_details_unnest_default_path(config)
