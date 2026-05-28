@@ -33,7 +33,7 @@ from src.helpers.vars import (
 )
 from src.steps import STEP_REGISTRY
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 STEPS_TO_DEVIATION = [
     STEP_REGISTER_RESOURCES,

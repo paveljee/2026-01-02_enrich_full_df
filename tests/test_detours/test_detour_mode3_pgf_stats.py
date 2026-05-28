@@ -33,7 +33,7 @@ from src.helpers.vars import (
     REQUIRED_FILES_CONFIG_KEYS,
 )
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _strip_ansi(text: str) -> str:
