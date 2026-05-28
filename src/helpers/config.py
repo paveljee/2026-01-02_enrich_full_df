@@ -14,6 +14,31 @@ class SampleDrawSpec(BaseModel):
     replace: bool
 
 
+class NameMatchingRuleVersion(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    xlsx: int = 1
+    docx: int = 1
+    sciscinet: int = 1
+
+    @model_validator(mode="after")
+    def _validate_versions(self) -> NameMatchingRuleVersion:
+        allowed = {
+            "xlsx": {1, 2},
+            "docx": {1},
+            "sciscinet": {1, 2},
+        }
+        for field_name, allowed_versions in allowed.items():
+            value = getattr(self, field_name)
+            if value not in allowed_versions:
+                allowed_text = ", ".join(str(version) for version in sorted(allowed_versions))
+                raise ValueError(
+                    f"name_matching_rule_version.{field_name} must be one of "
+                    f"{allowed_text}; got {value}"
+                )
+        return self
+
+
 class PipelineConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -30,8 +55,9 @@ class PipelineConfig(BaseModel):
     pilot_xlsx_name: str
     total_draws: int
     card_subset_mode: int
-    xlsx_match_name_tokens_v2: bool = False
-    sciscinet_match_strip_tokens: bool = False
+    name_matching_rule_version: NameMatchingRuleVersion = Field(
+        default_factory=NameMatchingRuleVersion
+    )
 
     @field_validator("sample_draw_sizes", mode="before")
     @classmethod

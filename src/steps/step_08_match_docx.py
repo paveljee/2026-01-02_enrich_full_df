@@ -37,6 +37,8 @@ from ..helpers.vars import (
     KTP_DOCX_MATCH_DOCX_NAME_NORM_KEY,
     KTP_DOCX_MATCH_KTP_FIRST_NORM_KEY,
     KTP_DOCX_MATCH_KTP_LAST_NORM_KEY,
+    KTP_DOCX_MATCH_RULE_KEY,
+    KTP_DOCX_MATCH_RULE_V1,
     KTP_DOCX_ROW_NUMBER_COL,
     KTP_DOCX_TABLE_1_PREFIX,
     KTP_FILENAME_COL,
@@ -201,6 +203,7 @@ def run(context: PipelineContext) -> StepResult:
                 nd."{KTP_FIRST_NAME_COL}" AS "{KTP_FIRST_NAME_COL}",
                 nd."{KTP_LAST_NAME_COL}" AS "{KTP_LAST_NAME_COL}",
                 json_object(
+                    '{KTP_DOCX_MATCH_RULE_KEY}', '{KTP_DOCX_MATCH_RULE_V1}',
                     '{KTP_DOCX_MATCH_KTP_FIRST_NORM_KEY}', nd.first_clean,
                     '{KTP_DOCX_MATCH_KTP_LAST_NORM_KEY}', nd.last_clean,
                     '{KTP_DOCX_MATCH_DOCX_NAME_NORM_KEY}', d.docx_clean

@@ -50,7 +50,7 @@ def _sha256(path: Path) -> str:
 def _write_world_bank_xlsx(path: Path) -> None:
     df = pd.DataFrame(
         [
-            ["meta", "meta", "FY25"],
+            ["meta", "meta", "FY26"],
             ["", "Canada", "H"],
             ["", "United States", "H"],
             ["", "Brazil", "UM"],
@@ -83,6 +83,23 @@ def _write_hcr_xlsx(path: Path) -> None:
         df.to_excel(writer, index=False)
 
 
+def _write_author_details_parquet(path: Path) -> None:
+    conn = duckdb.connect()
+    try:
+        conn.execute(
+            f"""
+            COPY (
+                SELECT
+                    'A1' AS authorid,
+                    'Alice Smith' AS display_name,
+                    '["A. Smith"]' AS display_name_alternatives
+            ) TO '{path}' (FORMAT PARQUET)
+            """
+        )
+    finally:
+        conn.close()
+
+
 def _base_config_dict(tmp_path: Path) -> dict[str, object]:
     data_dir = tmp_path / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -105,7 +122,10 @@ def _base_config_dict(tmp_path: Path) -> dict[str, object]:
             }
             continue
         dummy_path = dummy_dir / f"{key}.parquet"
-        dummy_path.write_text(f"dummy-{key}", encoding="utf-8")
+        if key == "author_details":
+            _write_author_details_parquet(dummy_path)
+        else:
+            dummy_path.write_text(f"dummy-{key}", encoding="utf-8")
         files_config[key] = {
             "path": str(dummy_path),
             "sha256": _sha256(dummy_path),

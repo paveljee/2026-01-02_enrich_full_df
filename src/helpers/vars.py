@@ -13,6 +13,7 @@ Date of report: {}
 """
 
 HCR_XLSX_KEY_PREFIX = "hcr_xlsx_"
+KTP_AUTHOR_DETAILS_UNNEST_KEY = "ktp_author_details_unnest"
 WORLD_BANK_XLSX_KEY = "world_bank_xlsx"
 WORLD_BANK_INCOME_FISCAL_YEAR: Final = "FY26"
 WORLD_BANK_FORMER_ECONOMY_CODES: Final[set[str]] = {
@@ -54,7 +55,9 @@ KTP_HCR_SECONDARY_AFFILIATIONS_COL: Final = "ktp.hcr_secondary_affiliations"
 DRAW_LABEL: Final = "ktp.draw_number"
 RIGHT_NAME_COL: Final = "Researcher/author"
 KTP_FRAGMENT_COL: Final = "ktp.fragment"
+KTP_ALT_NAME_COL: Final = "ktp.alt_name"
 SSNAD_FILENAME_COL: Final = "ssnad.filename"
+SSNAD_AUTHORID_COL: Final = "ssnad.authorid"
 SSNAD_DISPLAY_NAME_COL: Final = "ssnad.display_name"
 SSNAD_DISPLAY_NAME_ALTERNATIVES_COL: Final = "ssnad.display_name_alternatives"
 SSNAD_WORKS_COUNT_COL: Final = "ssnad.works_count"
@@ -127,7 +130,7 @@ KTP_PARTITION_FLAG_XLSX_NON_EXACT_ANY_COL: Final = (
     "ktp.partition_flag_xlsx_non_exact_any"
 )
 KTP_PARTITION_FLAG_XLSX_ANY_COL: Final = "ktp.partition_flag_xlsx_any"
-KTP_PARTITION_FLAG_SCISCINET_COUNT_COL: Final = "ktp.partition_flag_sciscinet_count"
+KTP_PARTITION_FLAG_SSN_COUNT_COL: Final = "ktp.partition_flag_ssn_count"
 KTP_PARTITION_FLAG_DOCX_TABLE_1_REQUIRED_ALL_COL: Final = (
     "ktp.partition_flag_docx_table_1_required_all"
 )
@@ -137,7 +140,7 @@ KTP_FF_DISCARD_COL: Final = "ktp.ff_discard"
 KTP_FF_NOTE_COL: Final = "ktp.ff_note"
 KTP_PARTITION_NO_RESOLUTION_VALUE: Final = 0
 KTP_PARTITION_XLSX_VALUE: Final = 1
-KTP_PARTITION_SCISCINET_VALUE: Final = 2
+KTP_PARTITION_SSN_VALUE: Final = 2
 KTP_PARTITION_DOCX_VALUE: Final = 4
 CARD_PARTITION_ARTIFACT_MODES: Final[set[int]] = {1, 2}
 KTP_XLSX_MATCH_SOURCE_KEY_TOKENS_KEY: Final = "ktp.source_key_first_name_norm_tok"
@@ -147,9 +150,14 @@ KTP_XLSX_MATCH_LAST_NAME_NORM_KEY: Final = "ktp.last_name_norm"
 KTP_XLSX_MATCH_RULE_KEY: Final = "ktp.xlsx_match_rule"
 KTP_XLSX_MATCH_RULE_V1: Final = "v1"
 KTP_XLSX_MATCH_RULE_V2: Final = "v2"
+KTP_DOCX_MATCH_RULE_KEY: Final = "ktp.docx_match_rule"
+KTP_DOCX_MATCH_RULE_V1: Final = "v1"
 KTP_DOCX_MATCH_KTP_FIRST_NORM_KEY: Final = "ktp.source_key_first_name_norm"
 KTP_DOCX_MATCH_KTP_LAST_NORM_KEY: Final = "ktp.source_key_last_name_norm"
 KTP_DOCX_MATCH_DOCX_NAME_NORM_KEY: Final = "ktp.table_1_researcher_author_norm"
+KTP_SSN_MATCH_RULE_KEY: Final = "ktp.ssn_match_rule"
+KTP_SSN_MATCH_RULE_V1: Final = "v1"
+KTP_SSN_MATCH_RULE_V2: Final = "v2"
 KTP_SSNAD_MATCH_KTP_NAME_NORM_KEY: Final = "ktp.source_key_norm"
 KTP_SSNAD_MATCH_SSNAD_NAME_NORM_KEY: Final = "ktp.ssnad_display_name_norm"
 KTP_DOCX_ROW_NUMBER_COL: Final = "ktp.table_1_row_number"
@@ -529,6 +537,7 @@ __all__ = [
     "HCR_XLSX_AFFILIATIONS_COLS",
     "HCR_XLSX_NAME_COLS",
     "HCR_XLSX_KEY_PREFIX",
+    "KTP_AUTHOR_DETAILS_UNNEST_KEY",
     "WORLD_BANK_XLSX_KEY",
     "WORLD_BANK_FORMER_ECONOMY_CODES",
     "WORLD_BANK_INCOME_FISCAL_YEAR",
@@ -542,6 +551,7 @@ __all__ = [
     "KTP_FRAGMENT_TYPE_COL",
     "KTP_FIRST_NAME_COL",
     "KTP_FRAGMENT_COL",
+    "KTP_ALT_NAME_COL",
     "KTP_LAST_NAME_COL",
     "KTP_HCR_PRIMARY_AFFILIATIONS_COL",
     "KTP_HCR_SECONDARY_AFFILIATIONS_COL",
@@ -550,6 +560,7 @@ __all__ = [
     "KTP_PRIORITY_GROUP_COL",
     "KTP_SOURCE_KEY_COL",
     "SSNAD_FILENAME_COL",
+    "SSNAD_AUTHORID_COL",
     "SSNAU_FILENAME_COL",
     "SSNAP_FILENAME_COL",
     "SSNHPL0_FILENAME_COL",
@@ -588,6 +599,11 @@ __all__ = [
     "KTP_LAST_NAME_ORIG_COLNAME_COL",
     "KTP_DOCX_FOOTNOTES_COL",
     "KTP_DOCX_COMMENTS_COL",
+    "KTP_DOCX_MATCH_RULE_KEY",
+    "KTP_DOCX_MATCH_RULE_V1",
+    "KTP_SSN_MATCH_RULE_KEY",
+    "KTP_SSN_MATCH_RULE_V1",
+    "KTP_SSN_MATCH_RULE_V2",
     "KTP_TABLE_1_EMPTY_VALUE_PLACEHOLDERS",
     "KTP_PRIORITY_GROUP_LABELS",
 ]

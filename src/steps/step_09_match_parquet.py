@@ -8,7 +8,6 @@ import duckdb
 from ..helpers.context import PipelineContext, StepResult
 from ..helpers.duckdb_utils import append_innerdicts_from_rows_table
 from ..helpers.name_matching import (
-    sciscinet_author_name_norm_sql,
     sciscinet_ktp_name_norm_sql,
 )
 from ..helpers.parquet_utils import normalize_parquet_column_name, parquet_columns, parquet_filename
@@ -30,6 +29,8 @@ from ..helpers.schema import (
 )
 from ..helpers.vars import (
     DRAW_LABEL,
+    KTP_ALT_NAME_COL,
+    KTP_AUTHOR_DETAILS_UNNEST_KEY,
     KTP_FILENAME_COL,
     KTP_FIRST_NAME_COL,
     KTP_FRAGMENT_COL,
@@ -38,6 +39,9 @@ from ..helpers.vars import (
     KTP_SOURCE_KEY_COL,
     KTP_SSN_COUNT_PAPERID_COL,
     KTP_SSN_FIELD_DISPLAY_NAMES_LIST_COL,
+    KTP_SSN_MATCH_RULE_KEY,
+    KTP_SSN_MATCH_RULE_V1,
+    KTP_SSN_MATCH_RULE_V2,
     KTP_SSN_SUM_HIT_1PCT_COL,
     KTP_SSN_TOP_INSTITUTIONS_COL,
     KTP_SSN_TOP_PAPERS_HIT_1PCT_COL,
@@ -47,6 +51,7 @@ from ..helpers.vars import (
     SSN_FIELD_IDS_LIST_COL,
     SSN_PAPERIDS_LEVEL0_COL,
     SSN_PAPERIDS_LEVEL1_COL,
+    SSNAD_AUTHORID_COL,
     SSNAD_FILENAME_COL,
     SSNAF_DISPLAY_NAME_COL,
     SSNAF_FILENAME_COL,
@@ -122,18 +127,21 @@ def run(context: PipelineContext) -> StepResult:
     hit_papers1_path = files["hit_papers_1"]["path"]
     fields_path = files["fields"]["path"]
 
-    author_id_col = normalize_parquet_column_name("authorid", "ssnad")
+    if context.resources.author_details_unnest_resource is None:
+        raise ValueError(
+            f"Missing {KTP_AUTHOR_DETAILS_UNNEST_KEY} resource. Run register_resources first."
+        )
+
+    author_details_unnest_path = context.resources.author_details_unnest_resource.__fspath__()
+    author_id_col = SSNAD_AUTHORID_COL
     authors_author_id_col = normalize_parquet_column_name("authorid", "ssnau")
     author_id_raw = "authorid"
-    strip_sciscinet_tokens = context.config.sciscinet_match_strip_tokens
+    ssn_rule_version = context.config.name_matching_rule_version.sciscinet
+    ssn_match_rule = KTP_SSN_MATCH_RULE_V2 if ssn_rule_version == 2 else KTP_SSN_MATCH_RULE_V1
     ktp_match_key_expr = sciscinet_ktp_name_norm_sql(
         f'"{KTP_FIRST_NAME_COL}"',
         f'"{KTP_LAST_NAME_COL}"',
-        strip_tokens=strip_sciscinet_tokens,
-    )
-    ssnad_alt_name_expr = sciscinet_author_name_norm_sql(
-        "p.alt_name",
-        strip_tokens=strip_sciscinet_tokens,
+        rule_version=ssn_rule_version,
     )
 
     def scalar_int(sql: str) -> int:
@@ -147,12 +155,12 @@ def run(context: PipelineContext) -> StepResult:
 
     log_tag(
         STEP_MATCH_PARQUET_LOG_TAG_TABLE_PARQUET,
-        "Match author details to name keys (author_details scan)",
+        f"Match author details to name keys ({KTP_AUTHOR_DETAILS_UNNEST_KEY} scan)",
     )
     log_tag(
         STEP_MATCH_PARQUET_LOG_TAG_TABLE_PARQUET,
-        "HEAVY step ahead: author_details exact-name matching scans author_details "
-        "(display_name + alternatives) and joins against all outerdict name keys.",
+        "HEAVY step ahead: author_details exact-name matching scans precomputed "
+        "author-name keys and joins against all outerdict name keys.",
     )
     conn.execute(
         f"""
@@ -165,35 +173,23 @@ def run(context: PipelineContext) -> StepResult:
                 {ktp_match_key_expr} AS match_key_norm
             FROM {OUTERDICT_NAME_VIEW}
         ),
-        parq AS (
-            SELECT
-                authorid,
-                display_name,
-                display_name_alternatives,
-                unnest(CAST(json(display_name_alternatives) AS VARCHAR[])) AS alt_name
-            FROM read_parquet('{author_details_path}')
-            UNION ALL
-            SELECT
-                authorid,
-                display_name,
-                display_name_alternatives,
-                display_name AS alt_name
-            FROM read_parquet('{author_details_path}')
-        )
         SELECT DISTINCT
             n.name_key AS name_key,
             n."{KTP_FIRST_NAME_COL}" AS "{KTP_FIRST_NAME_COL}",
             n."{KTP_LAST_NAME_COL}" AS "{KTP_LAST_NAME_COL}",
-            p.authorid AS "{author_id_col}",
+            u."{SSNAD_AUTHORID_COL}" AS "{author_id_col}",
             p.display_name AS "ssnad.display_name",
             p.display_name_alternatives AS "ssnad.display_name_alternatives",
             json_object(
+                '{KTP_SSN_MATCH_RULE_KEY}', '{ssn_match_rule}',
                 '{KTP_SSNAD_MATCH_KTP_NAME_NORM_KEY}', n.match_key_norm,
-                '{KTP_SSNAD_MATCH_SSNAD_NAME_NORM_KEY}', {ssnad_alt_name_expr}
+                '{KTP_SSNAD_MATCH_SSNAD_NAME_NORM_KEY}', u."{KTP_ALT_NAME_COL}"
             ) AS "{KTP_SSNAD_MATCH_COL}"
         FROM names n
-        JOIN parq p
-          ON {ssnad_alt_name_expr} = n.match_key_norm
+        JOIN read_parquet('{author_details_unnest_path}') u
+          ON u."{KTP_ALT_NAME_COL}" = n.match_key_norm
+        JOIN read_parquet('{author_details_path}') p
+          ON p.authorid = u."{SSNAD_AUTHORID_COL}"
         """
     )
     match_stats_row = conn.execute(

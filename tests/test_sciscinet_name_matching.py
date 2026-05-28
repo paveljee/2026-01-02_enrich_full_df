@@ -3,6 +3,7 @@ from __future__ import annotations
 import duckdb
 
 from src.helpers.name_matching import (
+    sciscinet_author_alt_name_key_exprs_sql,
     sciscinet_author_name_norm_sql,
     sciscinet_ktp_name_norm_sql,
 )
@@ -16,7 +17,7 @@ def _connect() -> duckdb.DuckDBPyConnection:
 
 def _matches(
     *,
-    strip_tokens: bool,
+    rule_version: int,
     first_name: str,
     last_name: str,
     author_name: str,
@@ -25,11 +26,11 @@ def _matches(
     ktp_norm = sciscinet_ktp_name_norm_sql(
         "n.first_name",
         "n.last_name",
-        strip_tokens=strip_tokens,
+        rule_version=rule_version,
     )
     author_norm = sciscinet_author_name_norm_sql(
         "p.author_name",
-        strip_tokens=strip_tokens,
+        rule_version=rule_version,
     )
     row = conn.execute(
         f"""
@@ -47,13 +48,13 @@ def _matches(
 
 def test_v1_preserves_exact_normalized_name_and_unaccent_behavior() -> None:
     assert _matches(
-        strip_tokens=False,
+        rule_version=1,
         first_name="Ada",
         last_name="Lovelace",
         author_name="Ada Lovelace",
     )
     assert _matches(
-        strip_tokens=False,
+        rule_version=1,
         first_name="José",
         last_name="García",
         author_name="Jose Garcia",
@@ -62,29 +63,53 @@ def test_v1_preserves_exact_normalized_name_and_unaccent_behavior() -> None:
 
 def test_v1_rejects_leading_or_trailing_spaces() -> None:
     assert not _matches(
-        strip_tokens=False,
+        rule_version=1,
         first_name="Ada",
         last_name="Lovelace",
         author_name=" Ada Lovelace ",
     )
 
 
-def test_v2_strips_only_outer_whitespace() -> None:
+def test_v2_normalizes_punctuation_and_whitespace_to_spaces() -> None:
     assert _matches(
-        strip_tokens=True,
+        rule_version=2,
         first_name=" Ada",
         last_name="Lovelace ",
         author_name=" Ada Lovelace ",
     )
-    assert not _matches(
-        strip_tokens=True,
+    assert _matches(
+        rule_version=2,
         first_name="Ada",
         last_name="Lovelace",
         author_name="Ada  Lovelace",
     )
-    assert not _matches(
-        strip_tokens=True,
+    assert _matches(
+        rule_version=2,
         first_name="Ada",
         last_name="Lovelace",
         author_name="Ada-Lovelace",
     )
+    assert _matches(
+        rule_version=2,
+        first_name="Claire M",
+        last_name="Fraser",
+        author_name="Claire M. Fraser",
+    )
+
+
+def test_v2_author_unnest_keys_include_original_and_punctuation_space_forms() -> None:
+    conn = _connect()
+    key_exprs = sciscinet_author_alt_name_key_exprs_sql("author_name", rule_version=2)
+    selects = " UNION ALL ".join(
+        f"SELECT {expr} AS match_key FROM authors" for expr in key_exprs
+    )
+    rows = conn.execute(
+        f"""
+        WITH authors(author_name) AS (VALUES ('Claire M. Fraser'))
+        SELECT DISTINCT match_key
+        FROM ({selects})
+        ORDER BY match_key
+        """
+    ).fetchall()
+
+    assert [row[0] for row in rows] == ["claire m fraser", "claire m. fraser"]

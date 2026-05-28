@@ -328,19 +328,52 @@ def xlsx_match_sql(
     )
 
 
+def _sciscinet_punctuation_space_norm_sql(expr: str) -> str:
+    base = f"lower(unaccent(COALESCE({expr}, '')))"
+    punctuation_as_space = f"regexp_replace({base}, '[[:punct:]]+', ' ', 'g')"
+    return f"trim(regexp_replace({punctuation_as_space}, '\\s+', ' ', 'g'))"
+
+
 def sciscinet_ktp_name_norm_sql(
     first_expr: str,
     last_expr: str,
     *,
-    strip_tokens: bool,
+    rule_version: int,
 ) -> str:
-    base = f"lower(unaccent({first_expr} || ' ' || {last_expr}))"
-    return f"trim({base})" if strip_tokens else base
+    if rule_version == 1:
+        return f"lower(unaccent({first_expr} || ' ' || {last_expr}))"
+    if rule_version == 2:
+        return _sciscinet_punctuation_space_norm_sql(
+            f"COALESCE({first_expr}, '') || ' ' || COALESCE({last_expr}, '')"
+        )
+    raise ValueError(f"Unsupported SciSciNet match rule version: {rule_version}")
 
 
-def sciscinet_author_name_norm_sql(name_expr: str, *, strip_tokens: bool) -> str:
-    base = f"lower(unaccent({name_expr}))"
-    return f"trim({base})" if strip_tokens else base
+def sciscinet_author_name_norm_sql(
+    name_expr: str,
+    *,
+    rule_version: int,
+) -> str:
+    if rule_version == 1:
+        return f"lower(unaccent({name_expr}))"
+    if rule_version == 2:
+        return _sciscinet_punctuation_space_norm_sql(name_expr)
+    raise ValueError(f"Unsupported SciSciNet match rule version: {rule_version}")
+
+
+def sciscinet_author_alt_name_key_exprs_sql(
+    name_expr: str,
+    *,
+    rule_version: int,
+) -> tuple[str, ...]:
+    if rule_version == 1:
+        return (sciscinet_author_name_norm_sql(name_expr, rule_version=1),)
+    if rule_version == 2:
+        return (
+            f"trim(regexp_replace(lower(unaccent(COALESCE({name_expr}, ''))), '\\s+', ' ', 'g'))",
+            sciscinet_author_name_norm_sql(name_expr, rule_version=2),
+        )
+    raise ValueError(f"Unsupported SciSciNet match rule version: {rule_version}")
 
 
 def docx_name_norm_sql(expr: str, *, coalesce_empty: bool = False) -> str:

@@ -52,11 +52,11 @@ from ..helpers.vars import (
     KTP_PARTITION_DOCX_VALUE,
     KTP_PARTITION_FLAG_DOCX_ANY_COL,
     KTP_PARTITION_FLAG_DOCX_TABLE_1_REQUIRED_ALL_COL,
-    KTP_PARTITION_FLAG_SCISCINET_COUNT_COL,
+    KTP_PARTITION_FLAG_SSN_COUNT_COL,
     KTP_PARTITION_FLAG_XLSX_ANY_COL,
     KTP_PARTITION_FLAG_XLSX_NON_EXACT_ANY_COL,
     KTP_PARTITION_NO_RESOLUTION_VALUE,
-    KTP_PARTITION_SCISCINET_VALUE,
+    KTP_PARTITION_SSN_VALUE,
     KTP_PARTITION_XLSX_VALUE,
     KTP_SOURCE_KEY_COL,
     KTP_SSN_FIELD_DISPLAY_NAMES_LIST_COL,
@@ -96,6 +96,8 @@ REVIEW_DOMAIN_DOCX = "docx"
 XLSX_CONTEXT_CTE = "xlsx_context"
 SCISCINET_CONTEXT_CTE = "sciscinet_context"
 DOCX_CONTEXT_CTE = "docx_context"
+GENERIC_CONTEXT_CTE = "generic_context"
+GENERIC_CONTEXT_ALIAS = "gs"
 REVIEW_CONTEXT_ALIASES = {
     REVIEW_DOMAIN_XLSX: "xs",
     REVIEW_DOMAIN_SCISCINET: "ss",
@@ -423,14 +425,14 @@ def _partition_value(state: CardPartitionRuleState) -> int:
     if not state.xlsx_ok and state.docx_ok and state.sciscinet_ok:
         return KTP_PARTITION_XLSX_VALUE
     if state.docx_ok and not state.sciscinet_ok:
-        return KTP_PARTITION_SCISCINET_VALUE
+        return KTP_PARTITION_SSN_VALUE
     return KTP_PARTITION_DOCX_VALUE
 
 
 def _partition_priority(partition_value: int) -> int:
     return {
         KTP_PARTITION_XLSX_VALUE: 0,
-        KTP_PARTITION_SCISCINET_VALUE: 1,
+        KTP_PARTITION_SSN_VALUE: 1,
         KTP_PARTITION_DOCX_VALUE: 2,
         KTP_PARTITION_NO_RESOLUTION_VALUE: 3,
     }.get(partition_value, 99)
@@ -463,8 +465,8 @@ def _partition_sort_key(state: CardPartitionRuleState) -> tuple[Any, ...]:
     sciscinet_tie_sort = 0 if state.xlsx_ok else 1
     return (
         _partition_priority(partition_value),
-        state.sciscinet_count if partition_value == KTP_PARTITION_SCISCINET_VALUE else 0,
-        sciscinet_tie_sort if partition_value == KTP_PARTITION_SCISCINET_VALUE else 0,
+        state.sciscinet_count if partition_value == KTP_PARTITION_SSN_VALUE else 0,
+        sciscinet_tie_sort if partition_value == KTP_PARTITION_SSN_VALUE else 0,
         _draw_sort_key(state.draw_number),
         state.source_key,
     )
@@ -483,7 +485,7 @@ def _partition_rows_df(
         KTP_PARTITION_COL,
         KTP_PARTITION_FLAG_XLSX_NON_EXACT_ANY_COL,
         KTP_PARTITION_FLAG_XLSX_ANY_COL,
-        KTP_PARTITION_FLAG_SCISCINET_COUNT_COL,
+        KTP_PARTITION_FLAG_SSN_COUNT_COL,
         KTP_PARTITION_FLAG_DOCX_TABLE_1_REQUIRED_ALL_COL,
         KTP_PARTITION_FLAG_DOCX_ANY_COL,
         "card_subset_mode",
@@ -497,7 +499,7 @@ def _partition_rows_df(
             KTP_PARTITION_COL: _partition_value(state),
             KTP_PARTITION_FLAG_XLSX_NON_EXACT_ANY_COL: state.xlsx_non_exact_any,
             KTP_PARTITION_FLAG_XLSX_ANY_COL: state.xlsx_any,
-            KTP_PARTITION_FLAG_SCISCINET_COUNT_COL: state.sciscinet_count,
+            KTP_PARTITION_FLAG_SSN_COUNT_COL: state.sciscinet_count,
             KTP_PARTITION_FLAG_DOCX_TABLE_1_REQUIRED_ALL_COL: state.docx_table_1_required_all,
             KTP_PARTITION_FLAG_DOCX_ANY_COL: state.docx_any,
             "card_subset_mode": subset_mode,
@@ -564,7 +566,7 @@ def _review_columns(docx_columns: list[str]) -> list[str]:
         KTP_PARTITION_FLAG_XLSX_NON_EXACT_ANY_COL,
         KTP_PARTITION_FLAG_XLSX_ANY_COL,
         KTP_XLSX_MATCH_COL,
-        KTP_PARTITION_FLAG_SCISCINET_COUNT_COL,
+        KTP_PARTITION_FLAG_SSN_COUNT_COL,
         KTP_SSNAD_MATCH_COL,
         KTP_SSN_SUM_HIT_1PCT_COL,
         SSNAD_WORKS_COUNT_COL,
@@ -604,6 +606,46 @@ def _review_info_domain(col: str) -> str | None:
     return None
 
 
+def _review_context_has_col(
+    *,
+    col: str,
+    target_domain: str,
+    domain_columns: dict[str, set[str]],
+) -> bool:
+    if col in {KTP_FILENAME_COL, KTP_FRAGMENT_COL, KTP_FRAGMENT_TYPE_COL}:
+        return col in domain_columns[target_domain]
+    return _review_info_domain(col) == target_domain and col in domain_columns[target_domain]
+
+
+def _empty_varchar_list_expr() -> str:
+    return "CAST([] AS VARCHAR[])"
+
+
+def _review_context_list_expr(
+    *,
+    col: str,
+    target_domain: str,
+    domain_columns: dict[str, set[str]],
+) -> str:
+    if not _review_context_has_col(
+        col=col,
+        target_domain=target_domain,
+        domain_columns=domain_columns,
+    ):
+        return _empty_varchar_list_expr()
+    alias = REVIEW_CONTEXT_ALIASES[target_domain]
+    return f"COALESCE({_qualified(alias, col)}, {_empty_varchar_list_expr()})"
+
+
+def _list_concat_expr(values: list[str]) -> str:
+    if not values:
+        return _empty_varchar_list_expr()
+    merged = values[0]
+    for value in values[1:]:
+        merged = f"list_concat({merged}, {value})"
+    return merged
+
+
 def _review_domain_expr(
     *,
     col: str,
@@ -612,11 +654,22 @@ def _review_domain_expr(
     primary_domain: str,
     domain_columns: dict[str, set[str]],
 ) -> str:
-    if col not in domain_columns[target_domain]:
-        return "CAST(NULL AS VARCHAR)"
+    if _review_context_has_col(
+        col=col,
+        target_domain=target_domain,
+        domain_columns=domain_columns,
+    ):
+        return _review_context_merge_expr(
+            _review_context_list_expr(
+                col=col,
+                target_domain=target_domain,
+                domain_columns=domain_columns,
+            )
+        )
     if target_domain == primary_domain and primary_alias is not None:
-        return f"CAST({_qualified(primary_alias, col)} AS VARCHAR)"
-    return f"CAST({_qualified(REVIEW_CONTEXT_ALIASES[target_domain], col)} AS VARCHAR)"
+        if col in domain_columns[target_domain]:
+            return f"CAST({_qualified(primary_alias, col)} AS VARCHAR)"
+    return "CAST(NULL AS VARCHAR)"
 
 
 def _review_source_expr(
@@ -632,16 +685,15 @@ def _review_source_expr(
         return _qualified("cp", col)
     if col == KTP_FF_AUTHOR_ID_COL:
         if primary_domain == REVIEW_DOMAIN_SCISCINET and primary_alias is not None:
-            return _review_domain_expr(
+            if KTP_FRAGMENT_COL in domain_columns[REVIEW_DOMAIN_SCISCINET]:
+                return f"CAST({_qualified(primary_alias, KTP_FRAGMENT_COL)} AS VARCHAR)"
+        return _review_context_merge_expr(
+            _review_context_list_expr(
                 col=KTP_FRAGMENT_COL,
                 target_domain=REVIEW_DOMAIN_SCISCINET,
-                primary_alias=primary_alias,
-                primary_domain=primary_domain,
                 domain_columns=domain_columns,
             )
-        if KTP_FRAGMENT_COL in domain_columns[REVIEW_DOMAIN_SCISCINET]:
-            return _qualified(REVIEW_CONTEXT_ALIASES[REVIEW_DOMAIN_SCISCINET], KTP_FRAGMENT_COL)
-        return "NULL"
+        )
     if col == KTP_FF_DISCARD_COL:
         return "CAST(NULL AS BOOLEAN)"
     if col == KTP_FF_NOTE_COL:
@@ -649,21 +701,22 @@ def _review_source_expr(
     if col in {
         KTP_PARTITION_FLAG_XLSX_NON_EXACT_ANY_COL,
         KTP_PARTITION_FLAG_XLSX_ANY_COL,
-        KTP_PARTITION_FLAG_SCISCINET_COUNT_COL,
+        KTP_PARTITION_FLAG_SSN_COUNT_COL,
         KTP_PARTITION_FLAG_DOCX_TABLE_1_REQUIRED_ALL_COL,
         KTP_PARTITION_FLAG_DOCX_ANY_COL,
     }:
         return _qualified("cp", col)
     if col in {KTP_FILENAME_COL, KTP_FRAGMENT_COL, KTP_FRAGMENT_TYPE_COL}:
-        if primary_alias is not None and col in domain_columns[primary_domain]:
-            return _qualified(primary_alias, col)
-        return "NULL"
-    if col in {DRAW_LABEL, KTP_FIRST_NAME_COL, KTP_LAST_NAME_COL}:
-        if primary_alias is not None and col in domain_columns[primary_domain]:
-            return (
-                f"COALESCE(CAST({_qualified(primary_alias, col)} AS VARCHAR), "
-                f"CAST({_qualified('cp', col)} AS VARCHAR))"
+        values = [
+            _review_context_list_expr(
+                col=col,
+                target_domain=domain,
+                domain_columns=domain_columns,
             )
+            for domain in (REVIEW_DOMAIN_XLSX, REVIEW_DOMAIN_SCISCINET, REVIEW_DOMAIN_DOCX)
+        ]
+        return _review_context_merge_expr(_list_concat_expr(values))
+    if col in {DRAW_LABEL, KTP_FIRST_NAME_COL, KTP_LAST_NAME_COL}:
         return f"CAST({_qualified('cp', col)} AS VARCHAR)"
     target_domain = _review_info_domain(col)
     if target_domain is not None:
@@ -707,8 +760,9 @@ def _review_context_specs(
         for col in review_columns
         if _review_info_domain(col) == source_domain and col in source_columns
     }
-    if source_domain == REVIEW_DOMAIN_SCISCINET and KTP_FRAGMENT_COL in source_columns:
-        specs[KTP_FRAGMENT_COL] = KTP_FRAGMENT_COL
+    for col in (KTP_FILENAME_COL, KTP_FRAGMENT_COL, KTP_FRAGMENT_TYPE_COL):
+        if col in source_columns:
+            specs[col] = col
     return specs
 
 
@@ -787,8 +841,8 @@ def _review_context_cte_sql(
         for col, source_col in specs.items()
         for values_col in [values_cols[col]]
     )
-    merge_select = ",\n                ".join(
-        f"{_review_context_merge_expr(_quote_identifier(values_col))} AS {_quote_identifier(col)}"
+    context_select = ",\n                ".join(
+        f"{_quote_identifier(values_col)} AS {_quote_identifier(col)}"
         for col, values_col in values_cols.items()
     )
     source_key_select = (
@@ -806,7 +860,7 @@ def _review_context_cte_sql(
         {cte_name} AS (
             SELECT
                 {_quote_identifier(KTP_SOURCE_KEY_COL)},
-                {merge_select}
+                {context_select}
             FROM {values_cte_name}
         )
     """
@@ -891,6 +945,26 @@ def _review_placeholder_branch_sql(
     """
 
 
+def _review_context_only_branch_sql(
+    *,
+    columns: list[str],
+    domain_columns: dict[str, set[str]],
+    partition_value: int,
+) -> str:
+    return f"""
+            SELECT
+                {_review_select_list(
+                    columns,
+                    primary_alias=None,
+                    primary_domain=REVIEW_DOMAIN_XLSX,
+                    domain_columns=domain_columns,
+                )}
+            FROM {CARD_PARTITION_TABLE} cp
+            {_context_joins_sql()}
+            WHERE {_qualified('cp', KTP_PARTITION_COL)} = {partition_value}
+    """
+
+
 def _create_partition_review_view(conn: duckdb.DuckDBPyConnection) -> list[str]:
     xlsx_columns = set(_relation_columns(conn, XLSX_OUTPUT_VIEW))
     sciscinet_columns = set(_relation_columns(conn, PARQUET_OUTPUT_VIEW))
@@ -925,7 +999,7 @@ def _create_partition_review_view(conn: duckdb.DuckDBPyConnection) -> list[str]:
             source_alias="s",
             source_domain=REVIEW_DOMAIN_SCISCINET,
             domain_columns=domain_columns,
-            partition_value=KTP_PARTITION_SCISCINET_VALUE,
+            partition_value=KTP_PARTITION_SSN_VALUE,
         ),
         _review_placeholder_branch_sql(
             columns=columns,
@@ -933,7 +1007,7 @@ def _create_partition_review_view(conn: duckdb.DuckDBPyConnection) -> list[str]:
             source_alias="s",
             source_domain=REVIEW_DOMAIN_SCISCINET,
             domain_columns=domain_columns,
-            partition_value=KTP_PARTITION_SCISCINET_VALUE,
+            partition_value=KTP_PARTITION_SSN_VALUE,
         ),
         _review_branch_sql(
             columns=columns,
@@ -950,6 +1024,11 @@ def _create_partition_review_view(conn: duckdb.DuckDBPyConnection) -> list[str]:
             source_domain=REVIEW_DOMAIN_DOCX,
             domain_columns=domain_columns,
             partition_value=KTP_PARTITION_DOCX_VALUE,
+        ),
+        _review_context_only_branch_sql(
+            columns=columns,
+            domain_columns=domain_columns,
+            partition_value=KTP_PARTITION_NO_RESOLUTION_VALUE,
         ),
     ]
     union_sql = "\n            UNION ALL\n".join(branches)
@@ -992,21 +1071,21 @@ def _create_partition_review_view(conn: duckdb.DuckDBPyConnection) -> list[str]:
         ORDER BY
             CASE "{KTP_PARTITION_COL}"
                 WHEN {KTP_PARTITION_XLSX_VALUE} THEN 0
-                WHEN {KTP_PARTITION_SCISCINET_VALUE} THEN 1
+                WHEN {KTP_PARTITION_SSN_VALUE} THEN 1
                 WHEN {KTP_PARTITION_DOCX_VALUE} THEN 2
                 ELSE 3
             END,
             CASE
-                WHEN "{KTP_PARTITION_COL}" = {KTP_PARTITION_SCISCINET_VALUE}
-                    THEN "{KTP_PARTITION_FLAG_SCISCINET_COUNT_COL}"
+                WHEN "{KTP_PARTITION_COL}" = {KTP_PARTITION_SSN_VALUE}
+                    THEN "{KTP_PARTITION_FLAG_SSN_COUNT_COL}"
                 ELSE 0
             END,
             CASE
-                WHEN "{KTP_PARTITION_COL}" = {KTP_PARTITION_SCISCINET_VALUE}
+                WHEN "{KTP_PARTITION_COL}" = {KTP_PARTITION_SSN_VALUE}
                  AND "{KTP_PARTITION_FLAG_XLSX_ANY_COL}"
                  AND NOT "{KTP_PARTITION_FLAG_XLSX_NON_EXACT_ANY_COL}"
                     THEN 0
-                WHEN "{KTP_PARTITION_COL}" = {KTP_PARTITION_SCISCINET_VALUE}
+                WHEN "{KTP_PARTITION_COL}" = {KTP_PARTITION_SSN_VALUE}
                     THEN 1
                 ELSE 0
             END,

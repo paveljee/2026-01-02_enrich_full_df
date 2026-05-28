@@ -71,7 +71,7 @@ def run(context: PipelineContext) -> StepResult:
     hcr_projection_suffix = (
         f",\n            {hcr_projection_select}" if hcr_projection_select else ""
     )
-    use_name_tokens_v2 = context.config.xlsx_match_name_tokens_v2
+    use_name_tokens_v2 = context.config.name_matching_rule_version.xlsx == 2
     match_sql = xlsx_match_sql(
         use_v2=use_name_tokens_v2,
         source_first_expr=f'nk."{KTP_FIRST_NAME_COL}"',

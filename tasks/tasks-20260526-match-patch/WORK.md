@@ -9,18 +9,22 @@
 
 ## Plan
 
-1. Add shared DuckDB-callable matching helpers for XLSX, SciSciNet, and DOCX.
-2. Add config knobs with default `false` and set them in `config.repl.json`.
-3. Wire XLSX and SciSciNet steps through the knobs while preserving v1 behavior.
-4. Rework step 10 review view aggregation to show all available same-domain
-   values per source key with newline/`-----` cell merging.
-5. Add three dedicated pytest/DuckDB test files under `tests/`.
-6. Run focused tests/lint where practical and record results.
+1. Wire `name_matching_rule_version` through config and all matching steps.
+2. Keep XLSX v1/v2 behavior in the existing DuckDB equality-key helper shape.
+3. Add DOCX/SSN match-rule metadata payload entries.
+4. Create/reuse the derived `ktp_author_details_unnest` resource inside the
+   existing resource registration flow, with sidecar rule-version metadata.
+5. Point step 9 at the derived SSN key parquet and keep matching as DuckDB
+   equality joins.
+6. Patch step 10 review output to aggregate all available innerdict context,
+   including partition 0 rows.
+7. Update focused tests and run focused verification plus `pixi run pre-commit`.
 
 ## Doing Now
 
-- Re-aligning SPEC AI interpretation with the updated human SPEC and rollout
-  discussion before resuming implementation.
+- Implementation complete; final verification is recorded below. `pixi run
+  pre-commit` was run and only the default-environment optional Plotly/Kaleido
+  detour failures remain.
 
 ## Done
 
@@ -128,6 +132,36 @@
 - Tightened the derived `ktp_author_details_unnest` parquet contract to the
   intended slim row shape: `ssnad.authorid` plus centralized `ktp.alt_name`, with
   larger author-details display payloads left out of the derived match-key file.
+- Added `name_matching_rule_version` config validation with supported versions:
+  XLSX v1/v2, DOCX v1, and SSN v1/v2.
+- Rewired step 07 to use `name_matching_rule_version.xlsx` while leaving the
+  existing XLSX helper behavior in place.
+- Added DOCX match payload rule metadata (`ktp.docx_match_rule = v1`).
+- Added SSN v1/v2 SQL normalization helpers. SSN v1 preserves the original
+  `lower(unaccent(...))` equality shape; SSN v2 uses punctuation-to-space plus
+  whitespace normalization on both derived author-name keys and KTP name keys.
+- Started integrating `ktp_author_details_unnest` into `register_pipeline_resources`:
+  configured resources are hash-checked and sidecar-version checked, otherwise
+  the default derived parquet is reused or created during step 01 using the
+  existing DuckDB connection.
+- Updated step 09 to require the registered derived SSN unnest resource and to
+  match `OUTERDICT_NAME_VIEW` keys against `ktp.alt_name` via equality joins,
+  then join back to `author_details` for display fields.
+- Updated step 10 review-context SQL to keep per-domain context as typed
+  `VARCHAR[]` lists until final display merge, cast source values before list
+  aggregation, merge generic provenance from XLSX/SSN/DOCX, keep `ff_author_id`
+  SSN-only, and include a partition-0 review branch.
+- Added focused coverage for derived SSN unnest resource creation/reuse and
+  sidecar rule-version validation.
+- Updated SciSciNet matching tests to use rule versions and DuckDB `unaccent`,
+  covering v2 punctuation-to-space normalization and the dual original/
+  punctuation-space author-key expansion.
+- Updated step 10 review tests to expect all available XLSX/SSN/DOCX provenance
+  context, SSN-only `ff_author_id`, JSON-safe display casting, and non-empty
+  partition-0/subset1 review output.
+- Updated detour step-4 test fixtures so `author_details.parquet` is a tiny valid
+  parquet (needed now that step 01 creates `ktp_author_details_unnest`) and the
+  fixture World Bank workbook uses the current FY26 column.
 
 ## Verification
 
@@ -162,6 +196,22 @@
   passed.
 - `pixi run ruff` passed.
 - `pixi run mypy` passed.
+- `pixi install` was needed once because the default Pixi environment directory
+  was missing locally; after that, `pixi run python --version` reported Python
+  3.14.3.
+- `pixi run python -m py_compile src/helpers/config.py src/helpers/name_matching.py src/helpers/resources.py src/helpers/init.py src/steps/step_01_register_resources.py src/steps/step_07_match_xlsx.py src/steps/step_08_match_docx.py src/steps/step_09_match_parquet.py src/steps/step_10_build_cards.py`
+  passed.
+- `pixi run pytest tests/test_xlsx_name_matching.py tests/test_docx_name_matching.py tests/test_sciscinet_name_matching.py tests/test_author_details_unnest_resource.py tests/test_step_10_build_cards.py -q`
+  passed: 34 passed.
+- `pixi run pytest tests/test_detour_step4_breakdown.py -q` passed: 4 passed,
+  1 skipped.
+- `pixi run ruff` passed.
+- `pixi run mypy` passed.
+- Re-ran `pixi run pre-commit`; ruff and mypy passed, full pytest reported
+  84 passed, 3 skipped, and 2 failed. The remaining failures are the existing
+  default-environment optional dependency issue in
+  `tests/test_detour_mode0_econ_stats.py`: `plotly`/Kaleido are only available
+  through the `detour-mode0-econ-stats` Pixi environment.
 - Re-ran `pixi run pre-commit` after the XLSX v2 match-key rewrite; ruff and
   mypy passed, then full pytest reported 72 passed, 3 skipped, and 6 failed in
   the same unrelated detour areas: missing optional `plotly`/Kaleido support for
@@ -187,3 +237,13 @@
   passed: 30 passed.
 - `pixi run ruff` passed.
 - `pixi run mypy` passed.
+- Latest post-implementation focused run:
+  `pixi run pytest tests/test_xlsx_name_matching.py tests/test_docx_name_matching.py tests/test_sciscinet_name_matching.py tests/test_author_details_unnest_resource.py tests/test_step_10_build_cards.py -q`
+  passed: 34 passed.
+- Latest detour step-4 fixture run:
+  `pixi run pytest tests/test_detour_step4_breakdown.py -q` passed: 4 passed,
+  1 skipped.
+- Latest `pixi run pre-commit`: ruff and mypy passed; full pytest reported
+  84 passed, 3 skipped, and 2 failed only in
+  `tests/test_detour_mode0_econ_stats.py` because the default Pixi environment
+  does not include the optional Plotly/Kaleido dependencies for SVG output.

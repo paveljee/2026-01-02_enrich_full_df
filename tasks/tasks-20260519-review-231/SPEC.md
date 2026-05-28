@@ -171,7 +171,7 @@ should trail but within the same
 sciscinet innerdict count).
 accordingly,
 this involves one flag which we'll call:
-`ktp.partition_flag_sciscinet_count`
+`ktp.partition_flag_ssn_count`
 which contains count of sciscinet innerdicts and
 so we give it type of int rather than bool.
 centralize this label in vars.py.
@@ -240,7 +240,7 @@ note that
 all ktp partitition flags
 will therefore be boolean
 with the exception of
-`ktp.partition_flag_sciscinet_count`
+`ktp.partition_flag_ssn_count`
 which will be int
 (and of course can be zero).
 
@@ -438,7 +438,7 @@ queue priority is:
 3. docx tier: keep for last because these require data augmentation, not
    only conflict resolution over existing rows.
 
-Within the sciscinet tier, ties on `ktp.partition_flag_sciscinet_count`
+Within the sciscinet tier, ties on `ktp.partition_flag_ssn_count`
 should put raw sciscinet-only failures before raw xlsx+sciscinet
 failures. Raw flags stay visible; `ktp.partition` is the selected queue
 bucket, not a lossless encoding of every raw problem.
@@ -553,8 +553,8 @@ Add/centralize these labels in `src/helpers/vars.py`:
   "ktp.partition_flag_xlsx_non_exact_any"`
 - `KTP_PARTITION_FLAG_XLSX_ANY_COL =
   "ktp.partition_flag_xlsx_any"`
-- `KTP_PARTITION_FLAG_SCISCINET_COUNT_COL =
-  "ktp.partition_flag_sciscinet_count"`
+- `KTP_PARTITION_FLAG_SSN_COUNT_COL =
+  "ktp.partition_flag_ssn_count"`
 - `KTP_PARTITION_FLAG_DOCX_TABLE_1_REQUIRED_ALL_COL =
   "ktp.partition_flag_docx_table_1_required_all"`
 - `KTP_PARTITION_FLAG_DOCX_ANY_COL =
@@ -583,7 +583,7 @@ values. Define named values for these meanings:
 
 The resolution values should be bit-like labels for mutually exclusive
 queue buckets. Do not OR the raw flags together: raw conditions are not
-mutually exclusive, and `ktp.partition_flag_sciscinet_count` is an
+mutually exclusive, and `ktp.partition_flag_ssn_count` is an
 integer count. Tests should assert partition meanings through the named
 constants rather than literal numeric values.
 
@@ -683,7 +683,7 @@ spec's requested order exactly:
     `ktp.partition_flag_xlsx_non_exact_any`,
     `ktp.partition_flag_xlsx_any`
 22. `ktp.xlsx_match`
-23. sciscinet count flag: `ktp.partition_flag_sciscinet_count`
+23. sciscinet count flag: `ktp.partition_flag_ssn_count`
 24. `ktp.ssnad_match`
 25. `ktp.ssn_sum_hit_1pct`
 26. `ssnad.works_count`

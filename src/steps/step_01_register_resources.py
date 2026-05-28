@@ -44,7 +44,7 @@ def run(context: PipelineContext) -> StepResult:
 
     docx_files = discover_docx_files(context.config.docx_dir)
 
-    resources = register_pipeline_resources(context.config)
+    resources = register_pipeline_resources(context.config, conn=context.conn)
     context.resources = resources
     resources_df = _resource_registry_frame(resources)
     register_frame(context.conn, "registered_resources_frame", resources_df)
@@ -65,12 +65,14 @@ def run(context: PipelineContext) -> StepResult:
         f"Registered DOCX resources: {len(docx_names)}",
         f"Registered parquet resources: {len(parquet_names)}",
     ]
+    messages.extend(resources.messages)
 
     diagnostics = [
         f"XLSX files: {len(xlsx_names)}",
         f"DOCX files: {len(docx_names)}",
         f"Parquet files: {len(parquet_names)}",
     ]
+    diagnostics.extend(resources.messages)
     if xlsx_names:
         diagnostics.append(f"Example XLSX: {', '.join(xlsx_names[:5])}")
     if docx_names:

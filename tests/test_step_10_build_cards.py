@@ -35,11 +35,11 @@ from src.helpers.vars import (
     KTP_PARTITION_DOCX_VALUE,
     KTP_PARTITION_FLAG_DOCX_ANY_COL,
     KTP_PARTITION_FLAG_DOCX_TABLE_1_REQUIRED_ALL_COL,
-    KTP_PARTITION_FLAG_SCISCINET_COUNT_COL,
+    KTP_PARTITION_FLAG_SSN_COUNT_COL,
     KTP_PARTITION_FLAG_XLSX_ANY_COL,
     KTP_PARTITION_FLAG_XLSX_NON_EXACT_ANY_COL,
     KTP_PARTITION_NO_RESOLUTION_VALUE,
-    KTP_PARTITION_SCISCINET_VALUE,
+    KTP_PARTITION_SSN_VALUE,
     KTP_PARTITION_XLSX_VALUE,
     KTP_SOURCE_KEY_COL,
     KTP_SSN_FIELD_DISPLAY_NAMES_LIST_COL,
@@ -154,7 +154,7 @@ def test_partition_values_follow_subset1_complement_priority() -> None:
 
     sciscinet_only = _state(_xlsx_inner(), _docx_inner())
     assert sciscinet_only.sciscinet_count == 0
-    assert step10._partition_value(sciscinet_only) == KTP_PARTITION_SCISCINET_VALUE
+    assert step10._partition_value(sciscinet_only) == KTP_PARTITION_SSN_VALUE
 
     xlsx_plus_sciscinet = _state(
         _xlsx_inner(exact=False),
@@ -162,7 +162,7 @@ def test_partition_values_follow_subset1_complement_priority() -> None:
         _sciscinet_inner("A1"),
         _sciscinet_inner("A2"),
     )
-    assert step10._partition_value(xlsx_plus_sciscinet) == KTP_PARTITION_SCISCINET_VALUE
+    assert step10._partition_value(xlsx_plus_sciscinet) == KTP_PARTITION_SSN_VALUE
 
     docx_only = _state(_xlsx_inner(), _docx_inner(complete=False), _sciscinet_inner())
     assert step10._partition_value(docx_only) == KTP_PARTITION_DOCX_VALUE
@@ -268,11 +268,11 @@ def test_partition_rows_sort_sciscinet_by_count_then_xlsx_tie_break() -> None:
     df = step10._partition_rows_df(selected, state_by_source_key=states, subset_mode=2)
 
     assert df[KTP_LAST_NAME_COL].tolist() == ["Zero", "Two", "TwoXlsx"]
-    assert df[KTP_PARTITION_FLAG_SCISCINET_COUNT_COL].tolist() == [0, 2, 2]
+    assert df[KTP_PARTITION_FLAG_SSN_COUNT_COL].tolist() == [0, 2, 2]
     assert df[KTP_PARTITION_COL].tolist() == [
-        KTP_PARTITION_SCISCINET_VALUE,
-        KTP_PARTITION_SCISCINET_VALUE,
-        KTP_PARTITION_SCISCINET_VALUE,
+        KTP_PARTITION_SSN_VALUE,
+        KTP_PARTITION_SSN_VALUE,
+        KTP_PARTITION_SSN_VALUE,
     ]
 
 
@@ -300,7 +300,7 @@ def test_partition_review_view_has_specified_order_and_placeholders() -> None:
                 KTP_PARTITION_COL: KTP_PARTITION_XLSX_VALUE,
                 KTP_PARTITION_FLAG_XLSX_NON_EXACT_ANY_COL: True,
                 KTP_PARTITION_FLAG_XLSX_ANY_COL: True,
-                KTP_PARTITION_FLAG_SCISCINET_COUNT_COL: 1,
+                KTP_PARTITION_FLAG_SSN_COUNT_COL: 1,
                 KTP_PARTITION_FLAG_DOCX_TABLE_1_REQUIRED_ALL_COL: True,
                 KTP_PARTITION_FLAG_DOCX_ANY_COL: True,
                 "card_subset_mode": 2,
@@ -310,10 +310,10 @@ def test_partition_review_view_has_specified_order_and_placeholders() -> None:
             },
             {
                 KTP_SOURCE_KEY_COL: "sc-zero-source",
-                KTP_PARTITION_COL: KTP_PARTITION_SCISCINET_VALUE,
+                KTP_PARTITION_COL: KTP_PARTITION_SSN_VALUE,
                 KTP_PARTITION_FLAG_XLSX_NON_EXACT_ANY_COL: False,
                 KTP_PARTITION_FLAG_XLSX_ANY_COL: True,
-                KTP_PARTITION_FLAG_SCISCINET_COUNT_COL: 0,
+                KTP_PARTITION_FLAG_SSN_COUNT_COL: 0,
                 KTP_PARTITION_FLAG_DOCX_TABLE_1_REQUIRED_ALL_COL: True,
                 KTP_PARTITION_FLAG_DOCX_ANY_COL: True,
                 "card_subset_mode": 2,
@@ -323,10 +323,10 @@ def test_partition_review_view_has_specified_order_and_placeholders() -> None:
             },
             {
                 KTP_SOURCE_KEY_COL: "sc-one-source",
-                KTP_PARTITION_COL: KTP_PARTITION_SCISCINET_VALUE,
+                KTP_PARTITION_COL: KTP_PARTITION_SSN_VALUE,
                 KTP_PARTITION_FLAG_XLSX_NON_EXACT_ANY_COL: False,
                 KTP_PARTITION_FLAG_XLSX_ANY_COL: True,
-                KTP_PARTITION_FLAG_SCISCINET_COUNT_COL: 2,
+                KTP_PARTITION_FLAG_SSN_COUNT_COL: 2,
                 KTP_PARTITION_FLAG_DOCX_TABLE_1_REQUIRED_ALL_COL: True,
                 KTP_PARTITION_FLAG_DOCX_ANY_COL: True,
                 "card_subset_mode": 2,
@@ -339,7 +339,7 @@ def test_partition_review_view_has_specified_order_and_placeholders() -> None:
                 KTP_PARTITION_COL: KTP_PARTITION_DOCX_VALUE,
                 KTP_PARTITION_FLAG_XLSX_NON_EXACT_ANY_COL: False,
                 KTP_PARTITION_FLAG_XLSX_ANY_COL: True,
-                KTP_PARTITION_FLAG_SCISCINET_COUNT_COL: 1,
+                KTP_PARTITION_FLAG_SSN_COUNT_COL: 1,
                 KTP_PARTITION_FLAG_DOCX_TABLE_1_REQUIRED_ALL_COL: False,
                 KTP_PARTITION_FLAG_DOCX_ANY_COL: True,
                 "card_subset_mode": 2,
@@ -587,7 +587,7 @@ def test_partition_review_view_has_specified_order_and_placeholders() -> None:
         KTP_PARTITION_FLAG_XLSX_NON_EXACT_ANY_COL,
         KTP_PARTITION_FLAG_XLSX_ANY_COL,
         KTP_XLSX_MATCH_COL,
-        KTP_PARTITION_FLAG_SCISCINET_COUNT_COL,
+        KTP_PARTITION_FLAG_SSN_COUNT_COL,
         KTP_SSNAD_MATCH_COL,
         KTP_SSN_SUM_HIT_1PCT_COL,
         SSNAD_WORKS_COUNT_COL,
@@ -609,27 +609,28 @@ def test_partition_review_view_has_specified_order_and_placeholders() -> None:
     assert review_df[KTP_FF_NOTE_COL].isna().all()
 
     xlsx_row = review_df[review_df[KTP_SOURCE_KEY_COL] == "xlsx-source"].iloc[0]
-    assert xlsx_row[KTP_FILENAME_COL] == "hcr.xlsx"
+    assert xlsx_row[KTP_FILENAME_COL] == "hcr.xlsx\nauthor_details.parquet\nmanual.docx"
     assert xlsx_row[KTP_FF_AUTHOR_ID_COL] == "A-xlsx"
     assert xlsx_row[SSNAD_DISPLAY_NAME_COL] == "Ada Xlsx OpenAlex"
     assert xlsx_row[KTP_DOCX_MATCH_COL] == "xlsx-docx-match"
     assert xlsx_row["ktp.table_1_affiliation"] == "Xlsx Singleton Institute"
 
     sc_placeholder = review_df[review_df[KTP_SOURCE_KEY_COL] == "sc-zero-source"].iloc[0]
-    assert pd.isna(sc_placeholder[KTP_FILENAME_COL])
+    assert sc_placeholder[KTP_FILENAME_COL] == "hcr.xlsx\nmanual.docx"
     assert pd.isna(sc_placeholder[KTP_FF_AUTHOR_ID_COL])
     assert pd.isna(sc_placeholder[SSNAD_DISPLAY_NAME_COL])
     assert sc_placeholder[HCR_CATEGORY_COL] == "ScZero HCR"
     assert sc_placeholder[KTP_DOCX_MATCH_COL] == "sc-zero-docx-match"
-    assert sc_placeholder[KTP_PARTITION_FLAG_SCISCINET_COUNT_COL] == 0
+    assert sc_placeholder[KTP_PARTITION_FLAG_SSN_COUNT_COL] == 0
 
     sc_row = review_df[review_df[KTP_SOURCE_KEY_COL] == "sc-one-source"].iloc[0]
-    assert sc_row[KTP_FRAGMENT_COL] == "A-sc-one"
+    assert sc_row[KTP_FRAGMENT_COL] == "13\nA-sc-one\n10"
     assert sc_row[KTP_FF_AUTHOR_ID_COL] == "A-sc-one"
     assert sc_row[HCR_CATEGORY_COL] == "ScOne HCR"
     assert sc_row["ktp.table_1_affiliation"] == "ScOne Singleton Institute"
 
     docx_row = review_df[review_df[KTP_SOURCE_KEY_COL] == "docx-source"].iloc[0]
+    assert docx_row[KTP_FILENAME_COL] == "author_details.parquet\nmanual.docx"
     assert docx_row["ktp.table_1_affiliation"] == "Difference Institute"
     assert docx_row[KTP_FF_AUTHOR_ID_COL] == "A-docx"
     assert docx_row[SSNAD_DISPLAY_NAME_COL] == "Ada Docx OpenAlex"
@@ -645,7 +646,7 @@ def test_partition_review_view_merges_all_available_context_values() -> None:
                 KTP_PARTITION_COL: KTP_PARTITION_XLSX_VALUE,
                 KTP_PARTITION_FLAG_XLSX_NON_EXACT_ANY_COL: True,
                 KTP_PARTITION_FLAG_XLSX_ANY_COL: True,
-                KTP_PARTITION_FLAG_SCISCINET_COUNT_COL: 2,
+                KTP_PARTITION_FLAG_SSN_COUNT_COL: 2,
                 KTP_PARTITION_FLAG_DOCX_TABLE_1_REQUIRED_ALL_COL: True,
                 KTP_PARTITION_FLAG_DOCX_ANY_COL: True,
                 "card_subset_mode": 2,
@@ -748,16 +749,117 @@ def test_partition_review_view_merges_all_available_context_values() -> None:
     assert review_row[KTP_DOCX_MATCH_COL] == "docx-one\nline\n-----\ndocx-two"
 
 
+def test_partition_review_view_includes_no_resolution_partition_context() -> None:
+    conn = duckdb.connect(":memory:")
+    partition_rows = pd.DataFrame(
+        [
+            {
+                KTP_SOURCE_KEY_COL: "subset1-source",
+                KTP_PARTITION_COL: KTP_PARTITION_NO_RESOLUTION_VALUE,
+                KTP_PARTITION_FLAG_XLSX_NON_EXACT_ANY_COL: False,
+                KTP_PARTITION_FLAG_XLSX_ANY_COL: True,
+                KTP_PARTITION_FLAG_SSN_COUNT_COL: 1,
+                KTP_PARTITION_FLAG_DOCX_TABLE_1_REQUIRED_ALL_COL: True,
+                KTP_PARTITION_FLAG_DOCX_ANY_COL: True,
+                "card_subset_mode": 1,
+                DRAW_LABEL: "1",
+                KTP_FIRST_NAME_COL: "Ada",
+                KTP_LAST_NAME_COL: "Subset",
+            }
+        ]
+    )
+    step10._materialize_partition_table(conn, partition_rows)
+
+    _create_relation(
+        conn,
+        XLSX_OUTPUT_VIEW,
+        [
+            {
+                KTP_SOURCE_KEY_COL: "subset1-source",
+                KTP_FILENAME_COL: "hcr.xlsx",
+                KTP_FRAGMENT_COL: "21",
+                KTP_FRAGMENT_TYPE_COL: "excel_row",
+                HCR_CATEGORY_COL: "Highly Cited",
+                KTP_XLSX_MATCH_COL: _xlsx_payload(),
+            }
+        ],
+        [
+            KTP_SOURCE_KEY_COL,
+            KTP_FILENAME_COL,
+            KTP_FRAGMENT_COL,
+            KTP_FRAGMENT_TYPE_COL,
+            HCR_CATEGORY_COL,
+            KTP_XLSX_MATCH_COL,
+        ],
+    )
+    _create_relation(
+        conn,
+        PARQUET_OUTPUT_VIEW,
+        [
+            {
+                KTP_SOURCE_KEY_COL: "subset1-source",
+                KTP_FILENAME_COL: "author_details.parquet",
+                KTP_FRAGMENT_COL: "A-subset",
+                KTP_FRAGMENT_TYPE_COL: "author_id",
+                SSNAD_DISPLAY_NAME_COL: "Ada Subset OpenAlex",
+                KTP_SSNAD_MATCH_COL: "ssn-match",
+            }
+        ],
+        [
+            KTP_SOURCE_KEY_COL,
+            KTP_FILENAME_COL,
+            KTP_FRAGMENT_COL,
+            KTP_FRAGMENT_TYPE_COL,
+            SSNAD_DISPLAY_NAME_COL,
+            KTP_SSNAD_MATCH_COL,
+        ],
+    )
+    _create_relation(
+        conn,
+        DOCX_OUTPUT_VIEW,
+        [
+            {
+                KTP_SOURCE_KEY_COL: "subset1-source",
+                KTP_FILENAME_COL: "manual.docx",
+                KTP_FRAGMENT_COL: "4",
+                KTP_FRAGMENT_TYPE_COL: "docx_row",
+                KTP_DOCX_MATCH_COL: "docx-match",
+                "ktp.table_1_affiliation": "Subset Institute",
+            }
+        ],
+        [
+            KTP_SOURCE_KEY_COL,
+            KTP_FILENAME_COL,
+            KTP_FRAGMENT_COL,
+            KTP_FRAGMENT_TYPE_COL,
+            KTP_DOCX_MATCH_COL,
+            "ktp.table_1_affiliation",
+        ],
+    )
+
+    step10._create_partition_review_view(conn)
+    review_df = conn.execute(f"SELECT * FROM {CARD_PARTITION_REVIEW_VIEW}").df()
+
+    assert len(review_df) == 1
+    review_row = review_df.iloc[0]
+    assert review_row[KTP_PARTITION_COL] == KTP_PARTITION_NO_RESOLUTION_VALUE
+    assert review_row[KTP_FILENAME_COL] == "hcr.xlsx\nauthor_details.parquet\nmanual.docx"
+    assert review_row[KTP_FF_AUTHOR_ID_COL] == "A-subset"
+    assert review_row[HCR_CATEGORY_COL] == "Highly Cited"
+    assert review_row[SSNAD_DISPLAY_NAME_COL] == "Ada Subset OpenAlex"
+    assert review_row["ktp.table_1_affiliation"] == "Subset Institute"
+
+
 def test_partition_review_view_merges_json_typed_context_values_as_display_text() -> None:
     conn = duckdb.connect(":memory:")
     partition_rows = pd.DataFrame(
         [
             {
                 KTP_SOURCE_KEY_COL: "sc-source",
-                KTP_PARTITION_COL: KTP_PARTITION_SCISCINET_VALUE,
+                KTP_PARTITION_COL: KTP_PARTITION_SSN_VALUE,
                 KTP_PARTITION_FLAG_XLSX_NON_EXACT_ANY_COL: False,
                 KTP_PARTITION_FLAG_XLSX_ANY_COL: True,
-                KTP_PARTITION_FLAG_SCISCINET_COUNT_COL: 0,
+                KTP_PARTITION_FLAG_SSN_COUNT_COL: 0,
                 KTP_PARTITION_FLAG_DOCX_TABLE_1_REQUIRED_ALL_COL: True,
                 KTP_PARTITION_FLAG_DOCX_ANY_COL: True,
                 "card_subset_mode": 2,

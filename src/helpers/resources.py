@@ -1,12 +1,22 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+from dataclasses import dataclass, field
 from pathlib import Path
+
+import duckdb
 
 from .config import PipelineConfig
 from .data_models import FragmentType, RegisteredResource, ResourceGroup
 from .files import find_files_by_extension
-from .vars import HCR_XLSX_KEY_PREFIX, WORLD_BANK_XLSX_KEY
+from .name_matching import sciscinet_author_alt_name_key_exprs_sql
+from .vars import (
+    HCR_XLSX_KEY_PREFIX,
+    KTP_ALT_NAME_COL,
+    KTP_AUTHOR_DETAILS_UNNEST_KEY,
+    SSNAD_AUTHORID_COL,
+    WORLD_BANK_XLSX_KEY,
+)
 
 
 @dataclass
@@ -15,6 +25,8 @@ class PipelineResources:
     xlsx_resources: dict[str, RegisteredResource]
     world_bank_resource: RegisteredResource
     docx_resources: dict[str, RegisteredResource]
+    author_details_unnest_resource: RegisteredResource | None = None
+    messages: list[str] = field(default_factory=list)
 
 
 def _compute_hash_via_resource(path: Path) -> str:
@@ -97,7 +109,154 @@ def configured_hcr_xlsx_paths(config: PipelineConfig) -> list[Path]:
     return paths
 
 
-def register_pipeline_resources(config: PipelineConfig) -> PipelineResources:
+def _author_details_unnest_default_path(config: PipelineConfig) -> Path:
+    rule_version = config.name_matching_rule_version.sciscinet
+    return config.output_dir / f"{KTP_AUTHOR_DETAILS_UNNEST_KEY}_v{rule_version}.parquet"
+
+
+def _author_details_unnest_metadata_path(path: Path) -> Path:
+    return path.with_suffix(path.suffix + ".metadata.json")
+
+
+def _write_author_details_unnest_metadata(path: Path, *, rule_version: int) -> None:
+    metadata = {"name_matching_rule_version": {"sciscinet": rule_version}}
+    metadata_path = _author_details_unnest_metadata_path(path)
+    metadata_path.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
+
+
+def _validate_author_details_unnest_metadata(path: Path, *, rule_version: int) -> None:
+    metadata_path = _author_details_unnest_metadata_path(path)
+    if not metadata_path.exists():
+        raise FileNotFoundError(
+            f"Missing {KTP_AUTHOR_DETAILS_UNNEST_KEY} metadata sidecar: {metadata_path}"
+        )
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    stored_version = metadata.get("name_matching_rule_version", {}).get("sciscinet")
+    if stored_version != rule_version:
+        raise ValueError(
+            f"{KTP_AUTHOR_DETAILS_UNNEST_KEY} was built with sciscinet rule "
+            f"version {stored_version!r}; config requires {rule_version}."
+        )
+
+
+def _create_author_details_unnest_parquet(
+    conn: duckdb.DuckDBPyConnection,
+    *,
+    author_details_path: Path,
+    output_path: Path,
+    rule_version: int,
+) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    key_selects = []
+    for key_expr in sciscinet_author_alt_name_key_exprs_sql(
+        "r.raw_alt_name",
+        rule_version=rule_version,
+    ):
+        key_selects.append(
+            f"""
+            SELECT
+                r."{SSNAD_AUTHORID_COL}" AS "{SSNAD_AUTHORID_COL}",
+                {key_expr} AS "{KTP_ALT_NAME_COL}"
+            FROM raw_alt_names r
+            """
+        )
+    expanded_sql = "\n            UNION ALL\n".join(key_selects)
+    conn.execute(
+        f"""
+        COPY (
+            WITH raw_alt_names AS (
+                SELECT
+                    ad.authorid AS "{SSNAD_AUTHORID_COL}",
+                    raw_alt.raw_alt_name AS raw_alt_name
+                FROM read_parquet('{author_details_path}') ad
+                CROSS JOIN UNNEST(
+                    list_concat(
+                        CASE
+                            WHEN ad.display_name IS NULL THEN CAST([] AS VARCHAR[])
+                            ELSE [CAST(ad.display_name AS VARCHAR)]
+                        END,
+                        COALESCE(
+                            CAST(json(ad.display_name_alternatives) AS VARCHAR[]),
+                            CAST([] AS VARCHAR[])
+                        )
+                    )
+                ) AS raw_alt(raw_alt_name)
+            ),
+            expanded AS (
+                {expanded_sql}
+            )
+            SELECT DISTINCT
+                "{SSNAD_AUTHORID_COL}",
+                "{KTP_ALT_NAME_COL}"
+            FROM expanded
+            WHERE "{KTP_ALT_NAME_COL}" IS NOT NULL
+              AND trim(CAST("{KTP_ALT_NAME_COL}" AS VARCHAR)) <> ''
+        ) TO '{output_path}' (FORMAT PARQUET)
+        """
+    )
+    _write_author_details_unnest_metadata(output_path, rule_version=rule_version)
+
+
+def _ensure_author_details_unnest_resource(
+    config: PipelineConfig,
+    *,
+    conn: duckdb.DuckDBPyConnection | None,
+) -> tuple[RegisteredResource | None, list[str]]:
+    files = config.files_config
+    rule_version = config.name_matching_rule_version.sciscinet
+    messages: list[str] = []
+    meta = files.get(KTP_AUTHOR_DETAILS_UNNEST_KEY)
+    if meta is not None:
+        path = Path(meta["path"])
+        resource = register_resource(
+            path,
+            group=ResourceGroup.SCISCINET_HF,
+            fragment_type=FragmentType.AUTHOR_ID,
+            description=meta.get("desc", "SciSciNet author details unnested names"),
+            expected_hash=meta.get("sha256"),
+        )
+        _validate_author_details_unnest_metadata(path, rule_version=rule_version)
+        messages.append(f"Reused {KTP_AUTHOR_DETAILS_UNNEST_KEY}: {path}")
+        return resource, messages
+
+    path = _author_details_unnest_default_path(config)
+    if path.exists():
+        _validate_author_details_unnest_metadata(path, rule_version=rule_version)
+        resource = register_resource(
+            path,
+            group=ResourceGroup.SCISCINET_HF,
+            fragment_type=FragmentType.AUTHOR_ID,
+            description="SciSciNet author details unnested names",
+        )
+        messages.append(f"Reused {KTP_AUTHOR_DETAILS_UNNEST_KEY}: {path}")
+        return resource, messages
+
+    if conn is None:
+        return None, messages
+
+    author_details_path = Path(files["author_details"]["path"])
+    _create_author_details_unnest_parquet(
+        conn,
+        author_details_path=author_details_path,
+        output_path=path,
+        rule_version=rule_version,
+    )
+    resource = register_resource(
+        path,
+        group=ResourceGroup.SCISCINET_HF,
+        fragment_type=FragmentType.AUTHOR_ID,
+        description="SciSciNet author details unnested names",
+    )
+    messages.append(f"Created {KTP_AUTHOR_DETAILS_UNNEST_KEY}: {path}")
+    messages.append(f"{KTP_AUTHOR_DETAILS_UNNEST_KEY} sha256: {resource.hash}")
+    return resource, messages
+
+
+def register_pipeline_resources(
+    config: PipelineConfig,
+    *,
+    conn: duckdb.DuckDBPyConnection | None = None,
+) -> PipelineResources:
     files = config.files_config
     parquet_resources = {
         Path(files["author_details"]["path"]).name: register_resource(
@@ -193,12 +352,20 @@ def register_pipeline_resources(config: PipelineConfig) -> PipelineResources:
         fragment_type=FragmentType.DOCX_ROW,
         description="KTP DOCX inputs",
     )
+    author_details_unnest_resource, messages = _ensure_author_details_unnest_resource(
+        config,
+        conn=conn,
+    )
+    if author_details_unnest_resource is not None:
+        parquet_resources[author_details_unnest_resource.name] = author_details_unnest_resource
 
     return PipelineResources(
         parquet_resources=parquet_resources,
         xlsx_resources=xlsx_resources,
         world_bank_resource=world_bank_resource,
         docx_resources=docx_resources,
+        author_details_unnest_resource=author_details_unnest_resource,
+        messages=messages,
     )
 
 

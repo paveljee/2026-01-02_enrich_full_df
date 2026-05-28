@@ -130,13 +130,13 @@ def init_pipeline(
 
         resources: PipelineResources | None = None
         if manager.is_done(STEP_REGISTER_RESOURCES):
-            resources = register_pipeline_resources(config)
+            resources = register_pipeline_resources(config, conn=conn)
 
         outer_dict: OuterDict | None = None
         if manager.is_done(STEP_BUILD_OUTERDICT):
             outer_dict = _load_outerdict_stub(conn, table_name=OUTERDICT_STUB_TABLE)
             if resources is None:
-                resources = register_pipeline_resources(config)
+                resources = register_pipeline_resources(config, conn=conn)
             if manager.is_done(STEP_MATCH_XLSX):
                 append_innerdicts_from_jsonlines_table(
                     conn,
