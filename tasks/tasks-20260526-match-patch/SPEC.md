@@ -400,13 +400,18 @@ The AI-readable interpretation is:
   - it is acceptable for this one-time build to take time, but it must not crash
     RAM on the intended full-scale input.
 - The precomputed parquet should contain unique author/alt-name match rows after
-  rule-specific expansion. At minimum it must preserve `authorid`, the matching
-  alt-name/key value, and the SSN rule version used to create the parquet. It may
-  avoid storing large display payloads if step 9 can join back to
-  `author_details` for display fields after identifying matched author IDs.
-- The precomputed parquet must bear the SSN rule version. A straightforward
-  implementation is a column such as `ktp.ssn_match_rule` with a single expected
-  value. On reuse, verify that the parquet's rule version matches
+  rule-specific expansion. Keep the row payload lean and explicit: the intended
+  row columns are `ssnad.authorid` and `ktp.alt_name`. Centralize
+  `ktp.alt_name` in `vars.py` as a named constant. Do not store repeated
+  `display_name`, `display_name_alternatives`, or other large author-details
+  payload columns in this derived match-key parquet; step 9 already has access
+  to `author_details` and can retrieve display payloads there after author IDs
+  are matched.
+- The precomputed parquet must bear the SSN rule version as file-level metadata
+  or an equivalently tiny manifest/sidecar record, not as a repeated column
+  across every author/alt-name row. If DuckDB parquet key-value metadata is
+  available in the project environment, prefer that. On reuse, after the normal
+  registration/hash check passes, verify that the stored rule version matches
   `name_matching_rule_version.sciscinet`.
 - If the derived parquet is created during registration, include it in the
   registered resource diagnostics/table so the user can see its path, hash,

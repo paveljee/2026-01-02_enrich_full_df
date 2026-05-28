@@ -122,6 +122,12 @@
   required derived runtime resource for step 9: absence from config triggers
   creation during step 01, not fallback to the old giant CTE, and registration
   must stay inside the existing resource flow rather than a parallel path.
+- Corrected the AI interpretation so the SSN rule version for the derived
+  author-details unnest parquet is file-level metadata or a tiny manifest, not a
+  repeated column across the full expanded row set.
+- Tightened the derived `ktp_author_details_unnest` parquet contract to the
+  intended slim row shape: `ssnad.authorid` plus centralized `ktp.alt_name`, with
+  larger author-details display payloads left out of the derived match-key file.
 
 ## Verification
 
