@@ -221,6 +221,31 @@ def test_v2_xlsx_v1_rule_payload_is_non_exact_for_partitioning() -> None:
     assert step10._partition_value(state) == KTP_PARTITION_XLSX_VALUE
 
 
+def test_v1_xlsx_rule_payload_preserves_legacy_exact_partitioning() -> None:
+    state = _state(
+        _inner(
+            {
+                KTP_FILENAME_COL: "hcr.xlsx",
+                KTP_XLSX_MATCH_COL: json.dumps(
+                    {
+                        KTP_XLSX_MATCH_RULE_KEY: KTP_XLSX_MATCH_RULE_V1,
+                        KTP_XLSX_MATCH_SOURCE_KEY_TOKENS_KEY: ["ada"],
+                        KTP_XLSX_MATCH_SOURCE_KEY_LAST_KEY: "lovelace",
+                        KTP_XLSX_MATCH_FIRST_TOKENS_KEY: ["ada"],
+                        KTP_XLSX_MATCH_LAST_NAME_NORM_KEY: "lovelace",
+                    }
+                ),
+            }
+        ),
+        _docx_inner(),
+        _sciscinet_inner(),
+    )
+
+    assert state.xlsx_any
+    assert not state.xlsx_non_exact_any
+    assert state.subset1_ok
+
+
 def test_v2_xlsx_v2_rule_payload_is_exact_for_partitioning() -> None:
     state = _state(
         _inner(

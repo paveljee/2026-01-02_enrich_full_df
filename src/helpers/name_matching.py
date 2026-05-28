@@ -322,7 +322,7 @@ def xlsx_match_sql(
             target_first_expr="p.pop_first_tokens",
             target_last_expr="p.pop_last_clean",
         ),
-        rule_payload_entry="",
+        rule_payload_entry=f"'{rule_key}', '{rule_v1}',",
         source_last_payload_expr="nd.nd_last_clean",
         target_last_payload_expr="p.pop_last_clean",
     )

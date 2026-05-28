@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import duckdb
 import pytest
 
@@ -210,6 +212,33 @@ def test_v2_join_condition_is_key_equality_not_pairwise_recursive_sql() -> None:
     assert match_sql.pop_names_relation == "pop_name_keys"
     assert match_sql.base_select_keyword == "SELECT DISTINCT"
     assert match_sql.match_path_priority_expr == "nd.nd_xlsx_match_priority"
+
+
+def test_v1_payload_includes_rule_version() -> None:
+    match_sql = xlsx_match_sql(
+        use_v2=False,
+        source_first_expr="nk.first_name",
+        source_last_expr="nk.last_name",
+        target_first_expr="n.first_name",
+        target_last_expr="n.last_name",
+        rule_key=KTP_XLSX_MATCH_RULE_KEY,
+        rule_v2=KTP_XLSX_MATCH_RULE_V2,
+        rule_v1=KTP_XLSX_MATCH_RULE_V1,
+    )
+    payload = json.loads(
+        _connect()
+        .execute(
+            f"""
+            SELECT json_object(
+                {match_sql.rule_payload_entry}
+                'sentinel', 'ok'
+            )
+            """
+        )
+        .fetchone()[0]
+    )
+
+    assert payload[KTP_XLSX_MATCH_RULE_KEY] == KTP_XLSX_MATCH_RULE_V1
 
 
 def test_v1_preserves_original_first_token_contains_and_unaccent_behavior() -> None:

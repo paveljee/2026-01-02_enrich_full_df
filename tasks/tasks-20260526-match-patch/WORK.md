@@ -23,8 +23,8 @@
 
 ## Doing Now
 
-- Surgical step 9 RAM fix is implemented and verified; awaiting user's REPL RAM
-  benchmark.
+- HEAD commit note fix is implemented and verified; awaiting user's next REPL
+  benchmark/result.
 
 ## Done
 
@@ -211,6 +211,13 @@
   now joins only KTP name keys to `ktp_author_details_unnest`, keeps narrow match
   fields, and defers full `author_details` display payloads to the existing
   post-pruning filtered author-details materialization.
+- Read HEAD commit body and agreed with the noted minor issue: pure XLSX v1
+  payloads should include `ktp.xlsx_match_rule = "v1"` for consistency with v2,
+  DOCX, and SSN payload metadata.
+- Patched XLSX v1 payload generation to emit the rule key. Step 10 exactness now
+  distinguishes scalar-last-name pure v1 payloads from list-shaped v1 fallback
+  payloads produced inside XLSX v2 mode, preserving the existing behavior that
+  v2-mode v1 fallback rows are non-exact for partitioning.
 
 ## Verification
 
@@ -312,3 +319,13 @@
 - Step 9 narrow-match-table patch `pixi run pre-commit-repl` passed: ruff
   passed, mypy passed, and full default pytest passed with 72 passed and 2
   skipped.
+- XLSX v1 rule-payload patch syntax check:
+  `pixi run python -m py_compile src/helpers/name_matching.py src/steps/step_10_build_cards.py tests/test_xlsx_name_matching.py tests/test_step_10_build_cards.py`
+  passed.
+- XLSX v1 rule-payload patch focused retry:
+  `pixi run pytest tests/test_xlsx_name_matching.py tests/test_step_10_build_cards.py -q`
+  passed: 26 passed. The first direct focused attempt hit a transient Pixi
+  `_duckdb` import failure before collection, but the same tests passed in this
+  retry and inside `pre-commit-repl`.
+- XLSX v1 rule-payload patch `pixi run pre-commit-repl` passed: ruff passed,
+  mypy passed, and full default pytest passed with 74 passed and 2 skipped.

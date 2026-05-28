@@ -207,7 +207,8 @@ def _is_exact_xlsx_match_payload(value: object) -> bool:
         first_tokens = []
     match_rule = payload.get(KTP_XLSX_MATCH_RULE_KEY)
     if match_rule == KTP_XLSX_MATCH_RULE_V1:
-        return False
+        if isinstance(source_key_last, list) or isinstance(last_name_norm, list):
+            return False
     if match_rule == KTP_XLSX_MATCH_RULE_V2:
         source_key_last_tokens = source_key_last if isinstance(source_key_last, list) else []
         last_name_tokens = last_name_norm if isinstance(last_name_norm, list) else []
