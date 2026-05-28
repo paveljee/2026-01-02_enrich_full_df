@@ -13,7 +13,8 @@
 2. Keep XLSX v1/v2 behavior in the existing DuckDB equality-key helper shape.
 3. Add DOCX/SSN match-rule metadata payload entries.
 4. Create/reuse the derived `ktp_author_details_unnest` resource inside the
-   existing resource registration flow, with sidecar rule-version metadata.
+   existing resource registration flow, with parquet footer rule-version
+   metadata.
 5. Point step 9 at the derived SSN key parquet and keep matching as DuckDB
    equality joins.
 6. Patch step 10 review output to aggregate all available innerdict context,
@@ -22,9 +23,8 @@
 
 ## Doing Now
 
-- Implementation complete; final verification is recorded below. `pixi run
-  pre-commit` was run and only the default-environment optional Plotly/Kaleido
-  detour failures remain.
+- Revising the approved implementation to store `ktp_author_details_unnest`
+  rule metadata in parquet footer `KV_METADATA` instead of a JSON sidecar.
 
 ## Done
 
@@ -162,6 +162,15 @@
 - Updated detour step-4 test fixtures so `author_details.parquet` is a tiny valid
   parquet (needed now that step 01 creates `ktp_author_details_unnest`) and the
   fixture World Bank workbook uses the current FY26 column.
+- Updated the AI interpretation to require parquet footer key-value metadata for
+  the derived `ktp_author_details_unnest` rule version, matching the human
+  wording that the parquet itself bears the version.
+- Moved the derived parquet metadata key constant
+  `AUTHOR_DETAILS_UNNEST_RULE_VERSION_METADATA_KEY` into `vars.py` alongside
+  `KTP_AUTHOR_DETAILS_UNNEST_KEY`.
+- Removed the resource-local `_sql_string_literal`; resource paths and metadata
+  values now use DuckDB parameters, with the remaining `KV_METADATA` key literal
+  escaping centralized as `duckdb_string_literal` in `duckdb_utils.py`.
 
 ## Verification
 

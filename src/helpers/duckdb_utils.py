@@ -7,6 +7,10 @@ from .data_models import InnerDict, OuterDict
 from .jsonlines import loads_jsonlines
 
 
+def duckdb_string_literal(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
 def register_frame(conn: duckdb.DuckDBPyConnection, name: str, df: pd.DataFrame) -> None:
     conn.register(name, df)
     conn.execute(f"CREATE OR REPLACE TABLE {name} AS SELECT * FROM {name}")
@@ -68,6 +72,7 @@ def append_innerdicts_from_rows_table(
 
 
 __all__ = [
+    "duckdb_string_literal",
     "register_frame",
     "append_innerdicts_from_jsonlines_table",
     "append_innerdicts_from_rows_table",

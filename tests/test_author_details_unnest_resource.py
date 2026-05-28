@@ -10,6 +10,7 @@ import pytest
 from src.helpers.config import PipelineConfig
 from src.helpers.resources import register_pipeline_resources
 from src.helpers.vars import (
+    AUTHOR_DETAILS_UNNEST_RULE_VERSION_METADATA_KEY,
     HCR_XLSX_KEY_PREFIX,
     KTP_ALT_NAME_COL,
     KTP_AUTHOR_DETAILS_UNNEST_KEY,
@@ -118,7 +119,7 @@ def test_register_pipeline_resources_creates_and_reuses_author_details_unnest(
     assert resource.name in resources.parquet_resources
     path = Path(resource.__fspath__())
     metadata_path = path.with_suffix(path.suffix + ".metadata.json")
-    assert metadata_path.exists()
+    assert not metadata_path.exists()
 
     conn = duckdb.connect()
     try:
@@ -126,6 +127,13 @@ def test_register_pipeline_resources_creates_and_reuses_author_details_unnest(
             row[0]
             for row in conn.execute(f"DESCRIBE SELECT * FROM read_parquet('{path}')").fetchall()
         ]
+        metadata_rows = conn.execute(
+            f"""
+            SELECT decode(key), decode(value)
+            FROM parquet_kv_metadata('{path}')
+            ORDER BY 1
+            """
+        ).fetchall()
         rows = conn.execute(
             f"""
             SELECT "{SSNAD_AUTHORID_COL}", "{KTP_ALT_NAME_COL}"
@@ -137,6 +145,7 @@ def test_register_pipeline_resources_creates_and_reuses_author_details_unnest(
         conn.close()
 
     assert columns == [SSNAD_AUTHORID_COL, KTP_ALT_NAME_COL]
+    assert (AUTHOR_DETAILS_UNNEST_RULE_VERSION_METADATA_KEY, "2") in metadata_rows
     assert ("A5058677050", "claire m fraser") in rows
     assert ("A5058677050", "claire m. fraser") in rows
 
@@ -145,7 +154,9 @@ def test_register_pipeline_resources_creates_and_reuses_author_details_unnest(
     assert reused.author_details_unnest_resource.hash == resource.hash
 
 
-def test_configured_author_details_unnest_checks_sidecar_rule_version(tmp_path: Path) -> None:
+def test_configured_author_details_unnest_checks_parquet_metadata_rule_version(
+    tmp_path: Path,
+) -> None:
     config_data = _config_dict(tmp_path, sciscinet_rule_version=2)
     config = PipelineConfig.model_validate(config_data)
     conn = _connect_with_unaccent()

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -8,9 +7,11 @@ import duckdb
 
 from .config import PipelineConfig
 from .data_models import FragmentType, RegisteredResource, ResourceGroup
+from .duckdb_utils import duckdb_string_literal
 from .files import find_files_by_extension
 from .name_matching import sciscinet_author_alt_name_key_exprs_sql
 from .vars import (
+    AUTHOR_DETAILS_UNNEST_RULE_VERSION_METADATA_KEY,
     HCR_XLSX_KEY_PREFIX,
     KTP_ALT_NAME_COL,
     KTP_AUTHOR_DETAILS_UNNEST_KEY,
@@ -114,24 +115,41 @@ def _author_details_unnest_default_path(config: PipelineConfig) -> Path:
     return config.output_dir / f"{KTP_AUTHOR_DETAILS_UNNEST_KEY}_v{rule_version}.parquet"
 
 
-def _author_details_unnest_metadata_path(path: Path) -> Path:
-    return path.with_suffix(path.suffix + ".metadata.json")
-
-
-def _write_author_details_unnest_metadata(path: Path, *, rule_version: int) -> None:
-    metadata = {"name_matching_rule_version": {"sciscinet": rule_version}}
-    metadata_path = _author_details_unnest_metadata_path(path)
-    metadata_path.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
-
-
-def _validate_author_details_unnest_metadata(path: Path, *, rule_version: int) -> None:
-    metadata_path = _author_details_unnest_metadata_path(path)
-    if not metadata_path.exists():
-        raise FileNotFoundError(
-            f"Missing {KTP_AUTHOR_DETAILS_UNNEST_KEY} metadata sidecar: {metadata_path}"
+def _read_author_details_unnest_rule_version(
+    path: Path,
+    *,
+    conn: duckdb.DuckDBPyConnection | None,
+) -> int:
+    owns_conn = conn is None
+    metadata_conn = duckdb.connect() if owns_conn else conn
+    assert metadata_conn is not None
+    try:
+        row = metadata_conn.execute(
+            """
+            SELECT decode(value) AS rule_version
+            FROM parquet_kv_metadata(?)
+            WHERE decode(key) = ?
+            """,
+            [str(path), AUTHOR_DETAILS_UNNEST_RULE_VERSION_METADATA_KEY],
+        ).fetchone()
+    finally:
+        if owns_conn:
+            metadata_conn.close()
+    if row is None or row[0] is None:
+        raise ValueError(
+            f"Missing {AUTHOR_DETAILS_UNNEST_RULE_VERSION_METADATA_KEY} parquet metadata "
+            f"in {KTP_AUTHOR_DETAILS_UNNEST_KEY}: {path}"
         )
-    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    stored_version = metadata.get("name_matching_rule_version", {}).get("sciscinet")
+    return int(str(row[0]))
+
+
+def _validate_author_details_unnest_metadata(
+    path: Path,
+    *,
+    rule_version: int,
+    conn: duckdb.DuckDBPyConnection | None,
+) -> None:
+    stored_version = _read_author_details_unnest_rule_version(path, conn=conn)
     if stored_version != rule_version:
         raise ValueError(
             f"{KTP_AUTHOR_DETAILS_UNNEST_KEY} was built with sciscinet rule "
@@ -147,6 +165,11 @@ def _create_author_details_unnest_parquet(
     rule_version: int,
 ) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    metadata_sql = (
+        "KV_METADATA {"
+        f"{duckdb_string_literal(AUTHOR_DETAILS_UNNEST_RULE_VERSION_METADATA_KEY)}: ?"
+        "}"
+    )
     key_selects = []
     for key_expr in sciscinet_author_alt_name_key_exprs_sql(
         "r.raw_alt_name",
@@ -168,7 +191,7 @@ def _create_author_details_unnest_parquet(
                 SELECT
                     ad.authorid AS "{SSNAD_AUTHORID_COL}",
                     raw_alt.raw_alt_name AS raw_alt_name
-                FROM read_parquet('{author_details_path}') ad
+                FROM read_parquet(?) ad
                 CROSS JOIN UNNEST(
                     list_concat(
                         CASE
@@ -191,10 +214,10 @@ def _create_author_details_unnest_parquet(
             FROM expanded
             WHERE "{KTP_ALT_NAME_COL}" IS NOT NULL
               AND trim(CAST("{KTP_ALT_NAME_COL}" AS VARCHAR)) <> ''
-        ) TO '{output_path}' (FORMAT PARQUET)
-        """
+        ) TO ? (FORMAT PARQUET, {metadata_sql})
+        """,
+        [str(output_path), str(author_details_path), str(rule_version)],
     )
-    _write_author_details_unnest_metadata(output_path, rule_version=rule_version)
 
 
 def _ensure_author_details_unnest_resource(
@@ -215,13 +238,13 @@ def _ensure_author_details_unnest_resource(
             description=meta.get("desc", "SciSciNet author details unnested names"),
             expected_hash=meta.get("sha256"),
         )
-        _validate_author_details_unnest_metadata(path, rule_version=rule_version)
+        _validate_author_details_unnest_metadata(path, rule_version=rule_version, conn=conn)
         messages.append(f"Reused {KTP_AUTHOR_DETAILS_UNNEST_KEY}: {path}")
         return resource, messages
 
     path = _author_details_unnest_default_path(config)
     if path.exists():
-        _validate_author_details_unnest_metadata(path, rule_version=rule_version)
+        _validate_author_details_unnest_metadata(path, rule_version=rule_version, conn=conn)
         resource = register_resource(
             path,
             group=ResourceGroup.SCISCINET_HF,

@@ -407,12 +407,13 @@ The AI-readable interpretation is:
   payload columns in this derived match-key parquet; step 9 already has access
   to `author_details` and can retrieve display payloads there after author IDs
   are matched.
-- The precomputed parquet must bear the SSN rule version as file-level metadata
-  or an equivalently tiny manifest/sidecar record, not as a repeated column
-  across every author/alt-name row. If DuckDB parquet key-value metadata is
-  available in the project environment, prefer that. On reuse, after the normal
-  registration/hash check passes, verify that the stored rule version matches
-  `name_matching_rule_version.sciscinet`.
+- The precomputed parquet must bear the SSN rule version as Parquet file-level
+  key-value metadata in the file footer, not as a repeated column across every
+  author/alt-name row and not as a normal sidecar file. DuckDB parquet
+  `KV_METADATA` is available in the project environment and should be used with
+  a small key such as `name_matching_rule_version.sciscinet`. On reuse, after
+  the normal registration/hash check passes, verify the stored footer metadata
+  rule version against `name_matching_rule_version.sciscinet` using DuckDB.
 - If the derived parquet is created during registration, include it in the
   registered resource diagnostics/table so the user can see its path, hash,
   resource group, fragment type, and description. Do not silently create an

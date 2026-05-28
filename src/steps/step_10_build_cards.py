@@ -96,8 +96,6 @@ REVIEW_DOMAIN_DOCX = "docx"
 XLSX_CONTEXT_CTE = "xlsx_context"
 SCISCINET_CONTEXT_CTE = "sciscinet_context"
 DOCX_CONTEXT_CTE = "docx_context"
-GENERIC_CONTEXT_CTE = "generic_context"
-GENERIC_CONTEXT_ALIAS = "gs"
 REVIEW_CONTEXT_ALIASES = {
     REVIEW_DOMAIN_XLSX: "xs",
     REVIEW_DOMAIN_SCISCINET: "ss",
