@@ -29,7 +29,7 @@
   "files_config": {
     "ktp_author_details_unnest": {
       "path": "/Volumes/home/aicode/2026-01-02_enrich_full_df/data/output/ktp_author_details_unnest_v2.parquet",
-      "sha256": "3375c23736f301ad129ecfc9a174e6585f07cb64955805504ce6fcde3886721a",
+      "sha256": "40be4518298a7f51658131addbfb644f7dea749348342f8011a4d62568bf1636",
       "desc": "SciSciNet author details unnested names"
     },
     "hit_papers_0": {
