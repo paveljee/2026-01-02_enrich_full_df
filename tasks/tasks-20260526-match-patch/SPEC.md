@@ -618,6 +618,33 @@ The AI-readable interpretation is:
   fallback set for name keys with no Tukey outliers. This keeps all later SSN
   innerdict generation, top papers, institutions, field mapping, and step 10
   partitioning aligned with the selected candidates.
+- The SSN hit v2 implementation must keep the author-output SQL parse-safe when
+  it injects audit columns. The generated select-list fragment for v2 hit
+  metadata must close every quoted alias and leave a valid comma boundary before
+  the next provenance column such as `ssnap.filename`. Add a focused test that
+  executes or parses the v2 author-output metadata select fragment followed by a
+  normal downstream column, so a malformed alias cannot recur.
+- SSN hit v2 logging must be detailed enough to explain a reduction such as
+  `312/2,824` without requiring ad hoc SQL after the run. After the nonzero-hit
+  set exists and v2 hit selection is applied, log a breakdown of how the
+  nonzero-hit rows were classified and selected.
+- The v2 hit-selection breakdown should include Tukey bounds for each of the
+  three metrics: q1, q3, lower fence, and upper fence for
+  `ktp.ssn_sum_hit_1pct`, `ssnad.works_count`, and `ssnad.cited_by_count`.
+- The v2 hit-selection breakdown should also include candidate and selection
+  counts: total nonzero candidate rows/name keys/authors, rows outlying by each
+  metric, rows with any Tukey outlier, name keys with at least one Tukey
+  outlier, fallback/no-outlier name keys, selected rows/name keys/authors,
+  selected rows retained by the Tukey max-work rule, selected rows retained by
+  the no-outlier fallback, non-outlier rows pruned, outlier rows pruned because
+  they were not max-work winners, number of name keys with exactly one selected
+  row, number with multiple selected rows/ties, and the maximum selected row
+  count for any one name key.
+- Implement the v2 logging breakdown from the same production SQL relations used
+  by selection, preferably through the centralized SSN hit-selection helper, not
+  by reimplementing Tukey classification in Python. Add a focused DuckDB test
+  for the breakdown query on synthetic candidate rows, including the case where
+  max `works_count` outside the Tukey-outlier set must not be selected.
 - SSN tests must use the production helper SQL and DuckDB directly. They should
   cover name-rule behavior (v1 exact behavior, v2 leading/trailing whitespace,
   v2 punctuation-to-space behavior such as `Claire M. Fraser` matching

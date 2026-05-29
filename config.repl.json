@@ -8,7 +8,7 @@
     "xlsx_name": 2,
     "docx_name": 1,
     "ssn_name": 2,
-    "ssn_hit": 1
+    "ssn_hit": 2
   },
   "pandoc_reference_docx": "resources/pandoc-custom-reference.docx",
   "docx_dir": "/Volumes/Users/Anonymous/Workshop/202504161200UTC-4_Nancy_Baxter_Andrea_Tricco_collabs/analyses/2026-01-02_enrich_full_df/data/manual_extractions",
