@@ -21,12 +21,12 @@ Original stub was
 generated with
 Gemini 3 Pro in
 January 2026, see
-`/chats/chats-202601xx-original-gemini/`.
+`chats/chats-202601xx-original-gemini/`.
 
 See more
 AI coding artifacts under
-`/.aicode/rfc/` and
-`/chats/`.
+`.aicode/rfc/` and
+`chats/`.
 
 ## Pipeline overview
 ### Purpose
@@ -75,6 +75,86 @@ kept in mind from the very
 conception of this pipeline and
 so should be straightforward to add.
 
+### Architecture
+The repository tree is
+intentionally flat, making it
+easier for researchers to
+locate what module is
+responsible for what.
+
+Let us review it:
+
+```bash
+$ { tree . -d -L 1 -I 'tmp|data|__pycache__'; echo; \
+    tree ./src -d -L 1 -I '__pycache__'; }
+.
+├── chats
+├── resources
+├── src
+├── tasks
+└── tests
+
+6 directories
+
+./src
+├── detours
+├── github.com
+├── helpers
+└── steps
+
+5 directories
+```
+
+- `src` contains all code;
+- `tests` contains all tests;
+- `resources` contains any
+  helpful static assets for the
+  code or tests;
+- `chats` and `tasks`
+  are reserved for
+  AI interactions
+  (as well as
+  `.aicode`
+  hidden directory
+  used previously,
+  now unused).
+
+When it comes to `src`, the
+entrypoint for the
+main pipeline is in
+`src/repl.py`, and the
+entrypoint depends on
+pipeline steps, which are
+here `src/steps/`, and
+any helper functions or
+classes are exposed
+here `src/helpers/`;
+neither directory contains
+nested subdirectories.
+
+The pipeline’s
+[threefold outputs](#purpose) will be
+stored under `data/`:
+
+1. `data/scisci_process.duckdb` will be the
+   database file;
+1. `data/diagnostics/` will contain
+   diagnostic dumps;
+1. `data/outputs/` will contain the
+   final outputs, that is,
+   DOCX or TXT cards per HCR researcher.
+
+All detours
+([see below](#detours)) are
+under `src/detours/`.
+
+Finally,
+under `src/github.com/`,
+there is some additional
+external code
+on which the main pipeline
+does not depend.
+
 ### Main pipeline
 On a high level, the pipeline makes
 two major data transforms:
@@ -109,8 +189,8 @@ the two above are major conceptual ones.
 
 ### Detours
 In addition to the main pipeline
-(i.e., `/src/repl.py` entry point), a
-separate route called `/src/detours/` exists;
+(i.e., `src/repl.py` entry point), a
+separate route called `src/detours/` exists;
 these so-called detours contain variants of the
 main pipeline 
 created for a specific purpose.
@@ -120,9 +200,9 @@ building blocks.
 For example,
 there is a detour for
 gender analyses
-(`/src/detours/detour_mode3_pgf_stats.py`) and for
+(`src/detours/detour_mode3_pgf_stats.py`) and for
 socioeconomic analyses
-(`/src/detours/detour_mode0_econ_stats.py`), which
+(`src/detours/detour_mode0_econ_stats.py`), which
 return bespoke data reports.
 
 ## Environment
@@ -213,7 +293,7 @@ may be found among
 [AI coding artifacts](#ai-assistance)
 in this repo;
 also see
-`/tasks/`.
+`tasks/`.
 
 ### Main pipeline CLI
 Minimal usage notes for
