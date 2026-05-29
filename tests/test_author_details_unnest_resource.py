@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
-from typing import Any, cast
+from typing import cast
 
 import duckdb
 import pytest
+from pydantic import ValidationError
 
 from src.helpers.config import PipelineConfig
 from src.helpers.resources import register_pipeline_resources
@@ -47,7 +48,7 @@ def _connect_with_unaccent() -> duckdb.DuckDBPyConnection:
     return conn
 
 
-def _config_dict(tmp_path: Path, *, sciscinet_rule_version: int = 2) -> dict[str, object]:
+def _config_dict(tmp_path: Path, *, ssn_name_rule_version: int = 2) -> dict[str, object]:
     data_dir = tmp_path / "data"
     data_dir.mkdir()
     author_details_path = data_dir / "author_details.parquet"
@@ -96,10 +97,11 @@ def _config_dict(tmp_path: Path, *, sciscinet_rule_version: int = 2) -> dict[str
         "pilot_xlsx_name": "hcr.xlsx",
         "total_draws": 1,
         "card_subset_mode": 0,
-        "name_matching_rule_version": {
-            "xlsx": 1,
-            "docx": 1,
-            "sciscinet": sciscinet_rule_version,
+        "match_rule_version": {
+            "xlsx_name": 1,
+            "docx_name": 1,
+            "ssn_name": ssn_name_rule_version,
+            "ssn_hit": 1,
         },
     }
 
@@ -107,7 +109,7 @@ def _config_dict(tmp_path: Path, *, sciscinet_rule_version: int = 2) -> dict[str
 def test_register_pipeline_resources_creates_and_reuses_author_details_unnest(
     tmp_path: Path,
 ) -> None:
-    config = PipelineConfig.model_validate(_config_dict(tmp_path, sciscinet_rule_version=2))
+    config = PipelineConfig.model_validate(_config_dict(tmp_path, ssn_name_rule_version=2))
     conn = _connect_with_unaccent()
     messages: list[str] = []
     try:
@@ -121,7 +123,7 @@ def test_register_pipeline_resources_creates_and_reuses_author_details_unnest(
 
     assert any("HEAVY step ahead" in message for message in messages)
     assert any(KTP_AUTHOR_DETAILS_UNNEST_KEY in message for message in messages)
-    assert any("sciscinet rule version: v2" in message for message in messages)
+    assert any("SSN name rule version: v2" in message for message in messages)
 
     resource = resources.author_details_unnest_resource
     assert resource is not None
@@ -166,7 +168,7 @@ def test_register_pipeline_resources_creates_and_reuses_author_details_unnest(
 def test_configured_author_details_unnest_checks_parquet_metadata_rule_version(
     tmp_path: Path,
 ) -> None:
-    config_data = _config_dict(tmp_path, sciscinet_rule_version=2)
+    config_data = _config_dict(tmp_path, ssn_name_rule_version=2)
     config = PipelineConfig.model_validate(config_data)
     conn = _connect_with_unaccent()
     try:
@@ -183,9 +185,22 @@ def test_configured_author_details_unnest_checks_parquet_metadata_rule_version(
         "sha256": resource.hash,
         "desc": "configured derived resource",
     }
-    rule_config = cast(dict[str, Any], config_data["name_matching_rule_version"])
-    rule_config["sciscinet"] = 1
+    rule_config = cast(dict[str, object], config_data["match_rule_version"])
+    rule_config["ssn_name"] = 1
     mismatched_config = PipelineConfig.model_validate(config_data)
 
-    with pytest.raises(ValueError, match="was built with sciscinet rule"):
+    with pytest.raises(ValueError, match="was built with SSN name rule"):
         register_pipeline_resources(mismatched_config, conn=None)
+
+
+def test_config_rejects_old_name_matching_rule_version_shape(tmp_path: Path) -> None:
+    config_data = _config_dict(tmp_path, ssn_name_rule_version=1)
+    config_data.pop("match_rule_version")
+    config_data["name_matching_rule_version"] = {
+        "xlsx": 1,
+        "docx": 1,
+        "sciscinet": 1,
+    }
+
+    with pytest.raises(ValidationError, match="name_matching_rule_version"):
+        PipelineConfig.model_validate(config_data)

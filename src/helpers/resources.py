@@ -17,6 +17,9 @@ from .vars import (
     KTP_ALT_NAME_COL,
     KTP_AUTHOR_DETAILS_UNNEST_KEY,
     SSNAD_AUTHORID_COL,
+    SSNAD_RAW_AUTHORID_COL,
+    SSNAD_RAW_DISPLAY_NAME_ALTERNATIVES_COL,
+    SSNAD_RAW_DISPLAY_NAME_COL,
     WORLD_BANK_XLSX_KEY,
 )
 
@@ -112,7 +115,7 @@ def configured_hcr_xlsx_paths(config: PipelineConfig) -> list[Path]:
 
 
 def _author_details_unnest_default_path(config: PipelineConfig) -> Path:
-    rule_version = config.name_matching_rule_version.sciscinet
+    rule_version = config.match_rule_version.ssn_name
     return config.output_dir / f"{KTP_AUTHOR_DETAILS_UNNEST_KEY}_v{rule_version}.parquet"
 
 
@@ -153,7 +156,7 @@ def _validate_author_details_unnest_metadata(
     stored_version = _read_author_details_unnest_rule_version(path, conn=conn)
     if stored_version != rule_version:
         raise ValueError(
-            f"{KTP_AUTHOR_DETAILS_UNNEST_KEY} was built with sciscinet rule "
+            f"{KTP_AUTHOR_DETAILS_UNNEST_KEY} was built with SSN name rule "
             f"version {stored_version!r}; config requires {rule_version}."
         )
 
@@ -190,17 +193,21 @@ def _create_author_details_unnest_parquet(
         COPY (
             WITH raw_alt_names AS (
                 SELECT
-                    ad.authorid AS "{SSNAD_AUTHORID_COL}",
+                    ad."{SSNAD_RAW_AUTHORID_COL}" AS "{SSNAD_AUTHORID_COL}",
                     raw_alt.raw_alt_name AS raw_alt_name
                 FROM read_parquet(?) ad
                 CROSS JOIN UNNEST(
                     list_concat(
                         CASE
-                            WHEN ad.display_name IS NULL THEN CAST([] AS VARCHAR[])
-                            ELSE [CAST(ad.display_name AS VARCHAR)]
+                            WHEN ad."{SSNAD_RAW_DISPLAY_NAME_COL}" IS NULL
+                                THEN CAST([] AS VARCHAR[])
+                            ELSE [CAST(ad."{SSNAD_RAW_DISPLAY_NAME_COL}" AS VARCHAR)]
                         END,
                         COALESCE(
-                            CAST(json(ad.display_name_alternatives) AS VARCHAR[]),
+                            CAST(
+                                json(ad."{SSNAD_RAW_DISPLAY_NAME_ALTERNATIVES_COL}")
+                                AS VARCHAR[]
+                            ),
                             CAST([] AS VARCHAR[])
                         )
                     )
@@ -228,7 +235,7 @@ def _ensure_author_details_unnest_resource(
     log: Callable[[str], None] | None = None,
 ) -> tuple[RegisteredResource | None, list[str]]:
     files = config.files_config
-    rule_version = config.name_matching_rule_version.sciscinet
+    rule_version = config.match_rule_version.ssn_name
     messages: list[str] = []
     meta = files.get(KTP_AUTHOR_DETAILS_UNNEST_KEY)
     if meta is not None:
@@ -268,7 +275,7 @@ def _ensure_author_details_unnest_resource(
         )
         log(f"{KTP_AUTHOR_DETAILS_UNNEST_KEY} output: {path}")
         log(
-            f"{KTP_AUTHOR_DETAILS_UNNEST_KEY} sciscinet rule version: v{rule_version}"
+            f"{KTP_AUTHOR_DETAILS_UNNEST_KEY} SSN name rule version: v{rule_version}"
         )
     _create_author_details_unnest_parquet(
         conn,

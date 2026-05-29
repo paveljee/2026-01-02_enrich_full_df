@@ -9,7 +9,7 @@
 
 ## Plan
 
-1. Wire `name_matching_rule_version` through config and all matching steps.
+1. Wire `match_rule_version` through config and all matching steps.
 2. Keep XLSX v1/v2 behavior in the existing DuckDB equality-key helper shape.
 3. Add DOCX/SSN match-rule metadata payload entries.
 4. Create/reuse the derived `ktp_author_details_unnest` resource inside the
@@ -23,8 +23,42 @@
 
 ## Doing Now
 
-- AI interpretation is revised for the latest human SPEC clarification; awaiting
-  the next implementation/review instruction.
+- SSN hit-selection helper split and edge-case coverage are complete and
+  verified; awaiting user review.
+
+## Done - Final Patch
+
+- Cut config over to `match_rule_version` (`xlsx_name`, `docx_name`, `ssn_name`,
+  `ssn_hit`) and removed the active `name_matching_rule_version` path.
+- Centralized the new SSN hit audit column names and raw author-details column
+  names in `src/helpers/vars.py`.
+- Added the `ssn_author_matches_hit_selected` view: v1 aliases the existing
+  nonzero-hit view exactly; v2 reduces only name keys with Tukey outliers to the
+  max raw `works_count` outlier(s), while no-outlier name keys fall back to all
+  nonzero-hit candidates.
+- Updated step 9 downstream enrichment joins to consume the hit-selected SSN
+  author-match view.
+- Removed the legacy metadata-key fallback path per user direction; derived
+  `ktp_author_details_unnest` parquet now expects the footer key
+  `match_rule_version.ssn_name`. Any existing derived parquet carrying only the
+  old footer key must be regenerated or replaced before reuse.
+- Added focused tests for the new `match_rule_version` config shape, rejection
+  of the stale `name_matching_rule_version` shape, SSN hit v1 alias behavior,
+  SSN hit v2 Tukey max-work selection/ties, and no-outlier fallback to v1.
+- Inspected `tmp/duckdb_ui_20260527T2115Z_export.csv`. It is grouped by
+  `ktp.source_key`, not row-level candidate data, so it is useful for edge-case
+  selection but not as a direct fixture for reconstructing candidate metrics.
+- Added `src/helpers/ssn_hit_selection.py` to centralize SSN hit SQL factories:
+  zero-hit count, nonzero-hit candidate view, v1/v2 hit-selected view, and
+  selected-author-id view. `name_matching.py` remains focused on name-key SQL.
+- Updated step 9 to call the SSN hit-selection helper instead of carrying the
+  selection SQL inline.
+- Added SSN hit tests for nonzero-hit filtering and for the v2 rule's key edge
+  case: when a name key has Tukey outliers, choose max raw `works_count` only
+  among outlier rows, not across all nonzero-hit candidates. The test uses a
+  `Dabing Zhang` source key drawn from the exported edge-case results.
+- Fixed the XLSX v1 payload test mypy issue by asserting the DuckDB `fetchone()`
+  result is present before indexing it.
 
 ## Done
 
@@ -344,3 +378,32 @@
   retry and inside `pre-commit-repl`.
 - XLSX v1 rule-payload patch `pixi run pre-commit-repl` passed: ruff passed,
   mypy passed, and full default pytest passed with 74 passed and 2 skipped.
+- Final match-patch syntax check:
+  `pixi run python -m py_compile src/helpers/config.py src/helpers/vars.py src/helpers/resources.py src/helpers/schema.py src/steps/step_07_match_xlsx.py src/steps/step_09_match_parquet.py tests/test_author_details_unnest_resource.py tests/test_sciscinet_name_matching.py`
+  passed.
+- Final match-patch focused run:
+  `pixi run pytest tests/test_xlsx_name_matching.py tests/test_docx_name_matching.py tests/test_sciscinet_name_matching.py tests/test_author_details_unnest_resource.py tests/test_step_10_build_cards.py -q`
+  passed: 39 passed.
+- Final match-patch `pixi run pre-commit-repl` passed: ruff passed, mypy passed,
+  and full default pytest passed with 77 passed and 2 skipped.
+- SSN hit-selection helper split syntax check:
+  `pixi run python -m py_compile src/helpers/name_matching.py src/helpers/ssn_hit_selection.py src/steps/step_09_match_parquet.py tests/test_sciscinet_name_matching.py`
+  passed.
+- SSN hit-selection helper split focused run:
+  `pixi run pytest tests/test_sciscinet_name_matching.py -q` passed: 8 passed.
+- SSN hit-selection helper split targeted lint:
+  `pixi run python -m ruff check src/helpers/ssn_hit_selection.py src/steps/step_09_match_parquet.py tests/test_sciscinet_name_matching.py`
+  passed.
+- SSN hit-selection helper split focused suite:
+  `pixi run pytest tests/test_xlsx_name_matching.py tests/test_docx_name_matching.py tests/test_sciscinet_name_matching.py tests/test_author_details_unnest_resource.py tests/test_step_10_build_cards.py -q`
+  passed: 41 passed.
+- Latest `pixi run pre-commit-repl` passed: ruff passed, mypy passed, and full
+  default pytest passed with 79 passed and 2 skipped.
+- XLSX payload typing fix checks:
+  `pixi run python -m mypy tests/test_xlsx_name_matching.py`,
+  `pixi run python -m ruff check tests/test_xlsx_name_matching.py`, and
+  `pixi run pytest tests/test_xlsx_name_matching.py -q` all passed; pytest
+  reported 15 passed.
+- Latest `pixi run pre-commit-repl` after the XLSX payload typing fix passed:
+  ruff passed, mypy over `src tests` passed, and full default pytest passed with
+  79 passed and 2 skipped.

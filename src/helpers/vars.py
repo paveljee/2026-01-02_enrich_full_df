@@ -15,7 +15,7 @@ Date of report: {}
 HCR_XLSX_KEY_PREFIX = "hcr_xlsx_"
 KTP_AUTHOR_DETAILS_UNNEST_KEY = "ktp_author_details_unnest"
 AUTHOR_DETAILS_UNNEST_RULE_VERSION_METADATA_KEY: Final = (
-    "name_matching_rule_version.sciscinet"
+    "match_rule_version.ssn_name"
 )
 WORLD_BANK_XLSX_KEY = "world_bank_xlsx"
 WORLD_BANK_INCOME_FISCAL_YEAR: Final = "FY26"
@@ -59,6 +59,11 @@ DRAW_LABEL: Final = "ktp.draw_number"
 RIGHT_NAME_COL: Final = "Researcher/author"
 KTP_FRAGMENT_COL: Final = "ktp.fragment"
 KTP_ALT_NAME_COL: Final = "ktp.alt_name"
+SSNAD_RAW_AUTHORID_COL: Final = "authorid"
+SSNAD_RAW_DISPLAY_NAME_COL: Final = "display_name"
+SSNAD_RAW_DISPLAY_NAME_ALTERNATIVES_COL: Final = "display_name_alternatives"
+SSNAD_RAW_WORKS_COUNT_COL: Final = "works_count"
+SSNAD_RAW_CITED_BY_COUNT_COL: Final = "cited_by_count"
 SSNAD_FILENAME_COL: Final = "ssnad.filename"
 SSNAD_AUTHORID_COL: Final = "ssnad.authorid"
 SSNAD_DISPLAY_NAME_COL: Final = "ssnad.display_name"
@@ -161,6 +166,23 @@ KTP_DOCX_MATCH_DOCX_NAME_NORM_KEY: Final = "ktp.table_1_researcher_author_norm"
 KTP_SSN_MATCH_RULE_KEY: Final = "ktp.ssn_match_rule"
 KTP_SSN_MATCH_RULE_V1: Final = "v1"
 KTP_SSN_MATCH_RULE_V2: Final = "v2"
+KTP_SSN_HIT_RULE_KEY: Final = "ktp.ssn_hit_rule"
+KTP_SSN_HIT_RULE_V1: Final = "v1"
+KTP_SSN_HIT_RULE_V2: Final = "v2"
+KTP_SSN_HIT_SUM_HIT_1PCT_IS_TUKEY_OUTLIER_COL: Final = (
+    "ktp.ssn_hit_sum_hit_1pct_is_tukey_outlier"
+)
+KTP_SSN_HIT_WORKS_COUNT_IS_TUKEY_OUTLIER_COL: Final = (
+    "ktp.ssn_hit_works_count_is_tukey_outlier"
+)
+KTP_SSN_HIT_CITED_BY_COUNT_IS_TUKEY_OUTLIER_COL: Final = (
+    "ktp.ssn_hit_cited_by_count_is_tukey_outlier"
+)
+KTP_SSN_HIT_ROW_HAS_TUKEY_OUTLIER_COL: Final = "ktp.ssn_hit_row_has_tukey_outlier"
+KTP_SSN_HIT_WORKS_COUNT_RAW_COL: Final = "ktp.ssn_hit_works_count_raw"
+KTP_SSN_HIT_FALLBACK_NO_TUKEY_OUTLIER_COL: Final = (
+    "ktp.ssn_hit_fallback_no_tukey_outlier"
+)
 KTP_SSNAD_MATCH_KTP_NAME_NORM_KEY: Final = "ktp.source_key_norm"
 KTP_SSNAD_MATCH_SSNAD_NAME_NORM_KEY: Final = "ktp.ssnad_display_name_norm"
 KTP_DOCX_ROW_NUMBER_COL: Final = "ktp.table_1_row_number"
@@ -563,6 +585,11 @@ __all__ = [
     "KTP_PRIORITY_COL",
     "KTP_PRIORITY_GROUP_COL",
     "KTP_SOURCE_KEY_COL",
+    "SSNAD_RAW_AUTHORID_COL",
+    "SSNAD_RAW_DISPLAY_NAME_COL",
+    "SSNAD_RAW_DISPLAY_NAME_ALTERNATIVES_COL",
+    "SSNAD_RAW_WORKS_COUNT_COL",
+    "SSNAD_RAW_CITED_BY_COUNT_COL",
     "SSNAD_FILENAME_COL",
     "SSNAD_AUTHORID_COL",
     "SSNAU_FILENAME_COL",
@@ -608,6 +635,15 @@ __all__ = [
     "KTP_SSN_MATCH_RULE_KEY",
     "KTP_SSN_MATCH_RULE_V1",
     "KTP_SSN_MATCH_RULE_V2",
+    "KTP_SSN_HIT_RULE_KEY",
+    "KTP_SSN_HIT_RULE_V1",
+    "KTP_SSN_HIT_RULE_V2",
+    "KTP_SSN_HIT_SUM_HIT_1PCT_IS_TUKEY_OUTLIER_COL",
+    "KTP_SSN_HIT_WORKS_COUNT_IS_TUKEY_OUTLIER_COL",
+    "KTP_SSN_HIT_CITED_BY_COUNT_IS_TUKEY_OUTLIER_COL",
+    "KTP_SSN_HIT_ROW_HAS_TUKEY_OUTLIER_COL",
+    "KTP_SSN_HIT_WORKS_COUNT_RAW_COL",
+    "KTP_SSN_HIT_FALLBACK_NO_TUKEY_OUTLIER_COL",
     "KTP_TABLE_1_EMPTY_VALUE_PLACEHOLDERS",
     "KTP_PRIORITY_GROUP_LABELS",
 ]

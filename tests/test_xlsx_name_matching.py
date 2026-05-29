@@ -225,18 +225,16 @@ def test_v1_payload_includes_rule_version() -> None:
         rule_v2=KTP_XLSX_MATCH_RULE_V2,
         rule_v1=KTP_XLSX_MATCH_RULE_V1,
     )
-    payload = json.loads(
-        _connect()
-        .execute(
-            f"""
-            SELECT json_object(
-                {match_sql.rule_payload_entry}
-                'sentinel', 'ok'
-            )
-            """
+    row = _connect().execute(
+        f"""
+        SELECT json_object(
+            {match_sql.rule_payload_entry}
+            'sentinel', 'ok'
         )
-        .fetchone()[0]
-    )
+        """
+    ).fetchone()
+    assert row is not None
+    payload = json.loads(row[0])
 
     assert payload[KTP_XLSX_MATCH_RULE_KEY] == KTP_XLSX_MATCH_RULE_V1
 
