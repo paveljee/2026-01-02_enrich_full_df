@@ -645,6 +645,10 @@ The AI-readable interpretation is:
   by reimplementing Tukey classification in Python. Add a focused DuckDB test
   for the breakdown query on synthetic candidate rows, including the case where
   max `works_count` outside the Tukey-outlier set must not be selected.
+- Keep step 9 logging plumbing plain and local to the already-computed SQL
+  result rows. Do not add generic row-to-dict formatting helpers in the step;
+  the v1 branch should remain obviously the exact nonzero-hit alias, and the v2
+  branch should be the only branch that creates/reads the candidate metric table.
 - SSN tests must use the production helper SQL and DuckDB directly. They should
   cover name-rule behavior (v1 exact behavior, v2 leading/trailing whitespace,
   v2 punctuation-to-space behavior such as `Claire M. Fraser` matching

@@ -29,8 +29,12 @@ from ..helpers.schema import (
     safe_identifier,
 )
 from ..helpers.ssn_hit_selection import (
+    ssn_hit_metadata_select_sql,
     ssn_hit_selected_author_ids_view_sql,
     ssn_hit_selected_view_sql,
+    ssn_hit_v2_bounds_summary_sql,
+    ssn_hit_v2_candidate_metrics_table_sql,
+    ssn_hit_v2_selection_breakdown_sql,
     ssn_nonzero_hit_view_sql,
     ssn_removed_zero_hit_count_sql,
 )
@@ -46,13 +50,6 @@ from ..helpers.vars import (
     KTP_SOURCE_KEY_COL,
     KTP_SSN_COUNT_PAPERID_COL,
     KTP_SSN_FIELD_DISPLAY_NAMES_LIST_COL,
-    KTP_SSN_HIT_CITED_BY_COUNT_IS_TUKEY_OUTLIER_COL,
-    KTP_SSN_HIT_FALLBACK_NO_TUKEY_OUTLIER_COL,
-    KTP_SSN_HIT_ROW_HAS_TUKEY_OUTLIER_COL,
-    KTP_SSN_HIT_RULE_KEY,
-    KTP_SSN_HIT_SUM_HIT_1PCT_IS_TUKEY_OUTLIER_COL,
-    KTP_SSN_HIT_WORKS_COUNT_IS_TUKEY_OUTLIER_COL,
-    KTP_SSN_HIT_WORKS_COUNT_RAW_COL,
     KTP_SSN_MATCH_RULE_KEY,
     KTP_SSN_MATCH_RULE_V1,
     KTP_SSN_MATCH_RULE_V2,
@@ -379,13 +376,74 @@ def run(context: PipelineContext) -> StepResult:
         f"removed zero-hit rows={removed_zero_hit_count:,}.",
     )
 
+    if ssn_hit_rule_version == 2:
+        log_tag(
+            STEP_MATCH_PARQUET_LOG_TAG_TABLE_EFF,
+            "Create SSN hit v2 candidate metric table",
+        )
+        log_tag(
+            STEP_MATCH_PARQUET_LOG_TAG_TABLE_EFF,
+            "HEAVY step ahead: joining nonzero-hit candidates to the narrow "
+            "author_details metrics needed for Tukey hit selection.",
+        )
+        conn.execute(
+            ssn_hit_v2_candidate_metrics_table_sql(
+                author_details_path=author_details_path,
+                author_id_col=author_id_col,
+            )
+        )
+        bounds_row = conn.execute(ssn_hit_v2_bounds_summary_sql()).fetchone()
+        if bounds_row is None:
+            bounds_values = ["null"] * 12
+        else:
+            bounds_values = [
+                "null" if value is None else f"{float(value):,.3f}" for value in bounds_row
+            ]
+        (
+            ssn_q1,
+            ssn_q3,
+            ssn_lower,
+            ssn_upper,
+            works_q1,
+            works_q3,
+            works_lower,
+            works_upper,
+            cited_q1,
+            cited_q3,
+            cited_lower,
+            cited_upper,
+        ) = bounds_values
+        log_tag(
+            STEP_MATCH_PARQUET_LOG_TAG_VIEW_FILTER,
+            "SSN hit v2 Tukey bounds for ktp.ssn_sum_hit_1pct: "
+            f"q1={ssn_q1}, "
+            f"q3={ssn_q3}, "
+            f"lower={ssn_lower}, "
+            f"upper={ssn_upper}.",
+        )
+        log_tag(
+            STEP_MATCH_PARQUET_LOG_TAG_VIEW_FILTER,
+            "SSN hit v2 Tukey bounds for ssnad.works_count: "
+            f"q1={works_q1}, "
+            f"q3={works_q3}, "
+            f"lower={works_lower}, "
+            f"upper={works_upper}.",
+        )
+        log_tag(
+            STEP_MATCH_PARQUET_LOG_TAG_VIEW_FILTER,
+            "SSN hit v2 Tukey bounds for ssnad.cited_by_count: "
+            f"q1={cited_q1}, "
+            f"q3={cited_q3}, "
+            f"lower={cited_lower}, "
+            f"upper={cited_upper}.",
+        )
+
     log_tag(
         STEP_MATCH_PARQUET_LOG_TAG_VIEW_FILTER,
         f"Create hit-selected author-match view (SSN hit rule v{ssn_hit_rule_version})",
     )
     conn.execute(
         ssn_hit_selected_view_sql(
-            author_details_path=author_details_path,
             author_id_col=author_id_col,
             hit_rule_version=ssn_hit_rule_version,
         )
@@ -409,6 +467,71 @@ def run(context: PipelineContext) -> StepResult:
         f"{hit_selected_name_keys:,} name keys, "
         f"{hit_selected_authors:,} author IDs.",
     )
+
+    if ssn_hit_rule_version == 2:
+        breakdown_row = conn.execute(
+            ssn_hit_v2_selection_breakdown_sql(author_id_col=author_id_col)
+        ).fetchone()
+        if breakdown_row is None:
+            breakdown_values = [0] * 19
+        else:
+            breakdown_values = [int(value or 0) for value in breakdown_row]
+        (
+            candidate_rows,
+            candidate_name_keys,
+            candidate_authors,
+            sum_hit_outlier_rows,
+            works_count_outlier_rows,
+            cited_by_count_outlier_rows,
+            any_tukey_outlier_rows,
+            name_keys_with_tukey_outlier,
+            fallback_no_outlier_name_keys,
+            selected_rows,
+            selected_name_keys,
+            selected_authors,
+            selected_tukey_max_work_rows,
+            selected_fallback_rows,
+            pruned_non_outlier_rows,
+            pruned_outlier_nonmax_rows,
+            one_selected_row_name_keys,
+            multi_selected_row_name_keys,
+            max_selected_rows_per_name_key,
+        ) = breakdown_values
+        log_tag(
+            STEP_MATCH_PARQUET_LOG_TAG_VIEW_FILTER,
+            "SSN hit v2 candidate flags: "
+            f"candidate rows={candidate_rows:,}, "
+            f"name keys={candidate_name_keys:,}, "
+            f"author IDs={candidate_authors:,}; "
+            f"any Tukey outlier rows={any_tukey_outlier_rows:,}, "
+            f"sum-hit outlier rows={sum_hit_outlier_rows:,}, "
+            f"works-count outlier rows={works_count_outlier_rows:,}, "
+            f"cited-by-count outlier rows={cited_by_count_outlier_rows:,}.",
+        )
+        log_tag(
+            STEP_MATCH_PARQUET_LOG_TAG_VIEW_FILTER,
+            "SSN hit v2 name-key selection: "
+            f"name keys with Tukey outliers={name_keys_with_tukey_outlier:,}, "
+            f"fallback/no-outlier name keys={fallback_no_outlier_name_keys:,}; "
+            f"selected rows={selected_rows:,}, "
+            f"selected name keys={selected_name_keys:,}, "
+            f"selected author IDs={selected_authors:,}.",
+        )
+        log_tag(
+            STEP_MATCH_PARQUET_LOG_TAG_VIEW_FILTER,
+            "SSN hit v2 row disposition: "
+            f"selected by Tukey max-work={selected_tukey_max_work_rows:,}, "
+            f"selected by no-outlier fallback={selected_fallback_rows:,}, "
+            f"pruned non-outliers={pruned_non_outlier_rows:,}, "
+            f"pruned outlier non-max rows={pruned_outlier_nonmax_rows:,}.",
+        )
+        log_tag(
+            STEP_MATCH_PARQUET_LOG_TAG_VIEW_FILTER,
+            "SSN hit v2 selected-row multiplicity: "
+            f"one-row name keys={one_selected_row_name_keys:,}, "
+            f"multi-row/tied name keys={multi_selected_row_name_keys:,}, "
+            f"max selected rows for one name key={max_selected_rows_per_name_key:,}.",
+        )
 
     log_tag(
         STEP_MATCH_PARQUET_LOG_TAG_VIEW_FILTER,
@@ -594,21 +717,10 @@ def run(context: PipelineContext) -> StepResult:
     fields_filename = parquet_filename(fields_path)
     paper_author_affiliation_filename = parquet_filename(paper_author_affiliation_path)
     affiliations_filename = parquet_filename(affiliations_path)
-    ssn_hit_metadata_select = ""
-    if ssn_hit_rule_version == 2:
-        ssn_hit_metadata_select = f""",
-            m."{KTP_SSN_HIT_RULE_KEY}" AS "{KTP_SSN_HIT_RULE_KEY}",
-            m."{KTP_SSN_HIT_SUM_HIT_1PCT_IS_TUKEY_OUTLIER_COL}"
-                AS "{KTP_SSN_HIT_SUM_HIT_1PCT_IS_TUKEY_OUTLIER_COL}",
-            m."{KTP_SSN_HIT_WORKS_COUNT_IS_TUKEY_OUTLIER_COL}"
-                AS "{KTP_SSN_HIT_WORKS_COUNT_IS_TUKEY_OUTLIER_COL}",
-            m."{KTP_SSN_HIT_CITED_BY_COUNT_IS_TUKEY_OUTLIER_COL}"
-                AS "{KTP_SSN_HIT_CITED_BY_COUNT_IS_TUKEY_OUTLIER_COL}",
-            m."{KTP_SSN_HIT_ROW_HAS_TUKEY_OUTLIER_COL}"
-                AS "{KTP_SSN_HIT_ROW_HAS_TUKEY_OUTLIER_COL}",
-            m."{KTP_SSN_HIT_WORKS_COUNT_RAW_COL}" AS "{KTP_SSN_HIT_WORKS_COUNT_RAW_COL}",
-            m."{KTP_SSN_HIT_FALLBACK_NO_TUKEY_OUTLIER_COL}"
-                AS "{KTP_SSN_HIT_FALLBACK_NO_TUKEY_OUTLIER_COL}"""
+    ssn_hit_metadata_select = ssn_hit_metadata_select_sql(
+        hit_rule_version=ssn_hit_rule_version,
+        table_alias="m",
+    )
 
     log_tag(STEP_MATCH_PARQUET_LOG_TAG_TABLE_INNERDICT, "Create author-level output table")
     log_tag(

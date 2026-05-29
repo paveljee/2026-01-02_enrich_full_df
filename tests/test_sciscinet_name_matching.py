@@ -16,21 +16,27 @@ from src.helpers.schema import (
     PARQUET_AUTHOR_MATCH_TABLE,
 )
 from src.helpers.ssn_hit_selection import (
+    ssn_hit_metadata_select_sql,
     ssn_hit_selected_view_sql,
+    ssn_hit_v2_candidate_metrics_table_sql,
+    ssn_hit_v2_selection_breakdown_sql,
     ssn_nonzero_hit_view_sql,
 )
 from src.helpers.vars import (
     KTP_FIRST_NAME_COL,
     KTP_LAST_NAME_COL,
+    KTP_SSN_HIT_CITED_BY_COUNT_IS_TUKEY_OUTLIER_COL,
     KTP_SSN_HIT_FALLBACK_NO_TUKEY_OUTLIER_COL,
     KTP_SSN_HIT_ROW_HAS_TUKEY_OUTLIER_COL,
     KTP_SSN_HIT_RULE_KEY,
     KTP_SSN_HIT_RULE_V2,
     KTP_SSN_HIT_SUM_HIT_1PCT_IS_TUKEY_OUTLIER_COL,
+    KTP_SSN_HIT_WORKS_COUNT_IS_TUKEY_OUTLIER_COL,
     KTP_SSN_HIT_WORKS_COUNT_RAW_COL,
     KTP_SSN_SUM_HIT_1PCT_COL,
     KTP_SSNAD_MATCH_COL,
     SSNAD_AUTHORID_COL,
+    SSNAP_FILENAME_COL,
 )
 
 
@@ -228,6 +234,24 @@ def _create_hit_agg_table(
     )
 
 
+def _create_v2_hit_selected_view(
+    conn: duckdb.DuckDBPyConnection,
+    author_details_path: Path,
+) -> None:
+    conn.execute(
+        ssn_hit_v2_candidate_metrics_table_sql(
+            author_details_path=str(author_details_path),
+            author_id_col=SSNAD_AUTHORID_COL,
+        )
+    )
+    conn.execute(
+        ssn_hit_selected_view_sql(
+            author_id_col=SSNAD_AUTHORID_COL,
+            hit_rule_version=2,
+        )
+    )
+
+
 def test_ssn_nonzero_hit_view_keeps_nonzero_and_missing_hit_rows() -> None:
     conn = _connect()
     try:
@@ -262,16 +286,13 @@ def test_ssn_nonzero_hit_view_keeps_nonzero_and_missing_hit_rows() -> None:
     assert rows == [("keep-missing", "A2"), ("keep-nonzero", "A1")]
 
 
-def test_ssn_hit_v1_selected_view_is_exact_nonzero_hit_alias(tmp_path: Path) -> None:
+def test_ssn_hit_v1_selected_view_is_exact_nonzero_hit_alias() -> None:
     conn = _connect()
-    author_details_path = tmp_path / "author_details.parquet"
     try:
         _create_nonzero_hit_tables(conn, [("name-a", "A1"), ("name-b", "A2")])
-        _write_hit_selection_author_details(conn, author_details_path, [("A1", 10, 1)])
 
         conn.execute(
             ssn_hit_selected_view_sql(
-                author_details_path=str(author_details_path),
                 author_id_col=SSNAD_AUTHORID_COL,
                 hit_rule_version=1,
             )
@@ -342,13 +363,7 @@ def test_ssn_hit_v2_selects_tukey_max_work_and_falls_back_to_v1(
         _create_hit_agg_table(conn, hit_rows)
         _write_hit_selection_author_details(conn, author_details_path, details_rows)
 
-        conn.execute(
-            ssn_hit_selected_view_sql(
-                author_details_path=str(author_details_path),
-                author_id_col=SSNAD_AUTHORID_COL,
-                hit_rule_version=2,
-            )
-        )
+        _create_v2_hit_selected_view(conn, author_details_path)
 
         selected_rows = conn.execute(
             f'''
@@ -383,7 +398,10 @@ def test_ssn_hit_v2_does_not_take_max_works_outside_tukey_outliers(
     conn = _connect()
     author_details_path = tmp_path / "author_details.parquet"
     source_key = '{"ktp.first_name": "Dabing", "ktp.last_name": "Zhang"}'
-    nonzero_rows: list[tuple[str, str]] = [(source_key, "A5101447280"), (source_key, "A5101447281")]
+    nonzero_rows: list[tuple[str, str]] = [
+        (source_key, "A5101447280"),
+        (source_key, "A5101447281"),
+    ]
     nonzero_rows.extend((f"background-{idx}", f"A6{idx:02d}") for idx in range(40))
     hit_rows = [(source_key, "A5101447280", 1), (source_key, "A5101447281", 1000)]
     hit_rows.extend((f"background-{idx}", f"A6{idx:02d}", 1) for idx in range(40))
@@ -394,13 +412,7 @@ def test_ssn_hit_v2_does_not_take_max_works_outside_tukey_outliers(
         _create_hit_agg_table(conn, hit_rows)
         _write_hit_selection_author_details(conn, author_details_path, details_rows)
 
-        conn.execute(
-            ssn_hit_selected_view_sql(
-                author_details_path=str(author_details_path),
-                author_id_col=SSNAD_AUTHORID_COL,
-                hit_rule_version=2,
-            )
-        )
+        _create_v2_hit_selected_view(conn, author_details_path)
 
         selected_rows = conn.execute(
             f'''
@@ -416,7 +428,62 @@ def test_ssn_hit_v2_does_not_take_max_works_outside_tukey_outliers(
             ''',
             [source_key],
         ).fetchall()
+        breakdown_row = conn.execute(
+            ssn_hit_v2_selection_breakdown_sql(author_id_col=SSNAD_AUTHORID_COL)
+        ).fetchone()
     finally:
         conn.close()
 
     assert selected_rows == [("A5101447281", True, True, 30, False)]
+    assert breakdown_row == (
+        42,
+        41,
+        42,
+        1,
+        0,
+        0,
+        1,
+        1,
+        40,
+        41,
+        41,
+        41,
+        1,
+        40,
+        1,
+        0,
+        41,
+        0,
+        1,
+    )
+
+
+def test_ssn_hit_v2_metadata_select_is_parse_safe_before_next_column() -> None:
+    conn = _connect()
+    try:
+        result = conn.execute(
+            f'''
+            SELECT
+                m."{KTP_SSNAD_MATCH_COL}" AS "{KTP_SSNAD_MATCH_COL}"
+                {ssn_hit_metadata_select_sql(hit_rule_version=2, table_alias="m")},
+                'sciscinet_authors_paperid.parquet' AS "{SSNAP_FILENAME_COL}"
+            FROM (
+                SELECT
+                    '{{}}' AS "{KTP_SSNAD_MATCH_COL}",
+                    '{KTP_SSN_HIT_RULE_V2}' AS "{KTP_SSN_HIT_RULE_KEY}",
+                    true AS "{KTP_SSN_HIT_SUM_HIT_1PCT_IS_TUKEY_OUTLIER_COL}",
+                    false AS "{KTP_SSN_HIT_WORKS_COUNT_IS_TUKEY_OUTLIER_COL}",
+                    false AS "{KTP_SSN_HIT_CITED_BY_COUNT_IS_TUKEY_OUTLIER_COL}",
+                    true AS "{KTP_SSN_HIT_ROW_HAS_TUKEY_OUTLIER_COL}",
+                    30 AS "{KTP_SSN_HIT_WORKS_COUNT_RAW_COL}",
+                    false AS "{KTP_SSN_HIT_FALLBACK_NO_TUKEY_OUTLIER_COL}"
+            ) m
+            '''
+        )
+        row = result.fetchone()
+        assert row is not None
+        columns = [desc[0] for desc in result.description]
+        assert columns[-1] == SSNAP_FILENAME_COL
+        assert row[-1] == "sciscinet_authors_paperid.parquet"
+    finally:
+        conn.close()

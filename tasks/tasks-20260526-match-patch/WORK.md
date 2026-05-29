@@ -23,8 +23,7 @@
 
 ## Doing Now
 
-- SSN hit-selection helper split and edge-case coverage are complete and
-  verified; awaiting user review.
+- Ready for user rerun/benchmark of `match_rule_version.ssn_hit = 2`.
 
 ## Done - Final Patch
 
@@ -59,6 +58,34 @@
   `Dabing Zhang` source key drawn from the exported edge-case results.
 - Fixed the XLSX v1 payload test mypy issue by asserting the DuckDB `fetchone()`
   result is present before indexing it.
+- Read the failed hit-rule-v2 REPL log at
+  `data/diagnostics/20260529_154745_mode1_v2_ssn_hit_v2_fail/repl_session.log`
+  against the previous v2/v1-hit log. The run matches through nonzero-hit
+  aggregation, then v2 selection reduces 2,824 nonzero-hit rows to 312 selected
+  rows across 304 name keys and 306 author IDs before failing in generated
+  author-output SQL.
+- Root cause of the failure: the injected v2 `ktp.ssn_hit_fallback_no_tukey_outlier`
+  select-list alias is missing its closing quote before the next
+  `ssnap.filename` provenance column.
+- Added the SSN hit v2 follow-up to the AI interpretation: parse-safe metadata
+  select-list injection, detailed Tukey/selection logging, production-SQL-based
+  breakdowns, and plain step 9 logging plumbing without generic row-dict helper
+  indirection.
+- Fixed the v2 metadata select-list fragment by centralizing it in
+  `ssn_hit_metadata_select_sql` and closing the fallback alias before downstream
+  provenance columns.
+- Added the narrow v2 candidate metric table SQL and breakdown SQL to
+  `ssn_hit_selection.py`. The table exists only for `match_rule_version.ssn_hit = 2`;
+  v1 remains the exact nonzero-hit view alias.
+- Updated step 9 v2 logging to print Tukey bounds, candidate/outlier counts,
+  selected/fallback counts, pruned-row counts, and selected-row multiplicity from
+  production SQL results.
+- Added focused SSN hit tests for v1 alias shape, v2 candidate metric setup,
+  v2 selection breakdown counts, and parse-safe v2 audit-column injection before
+  `ssnap.filename`.
+- Verification passed: focused `tests/test_sciscinet_name_matching.py`, focused
+  ruff/mypy on touched code, and full `pixi run pre-commit-repl` (80 passed, 2
+  skipped).
 
 ## Done
 
