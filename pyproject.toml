@@ -122,18 +122,6 @@ cwd = "."
 [tool.pixi.tasks.lint]
 depends-on = ["ruff", "mypy"]  # whatever is default
 
-[tool.pixi.tasks.lint-repl]
-depends-on = [
-  { task = "ruff", args = ["src"] },
-  { task = "mypy", args = ["src"] },
-]
-
-[tool.pixi.tasks.lint-detours]
-depends-on = [
-  { task = "ruff", args = ["tests"] },
-  { task = "mypy", args = ["tests"] },
-]
-
 [tool.pixi.tasks.pre-commit]
 depends-on = [
   { task = "lint" },  # lint all across repo
@@ -142,10 +130,10 @@ depends-on = [
 ]
 
 [tool.pixi.tasks.pre-commit-repl]
-depends-on = ["lint-repl", "test-repl"]
+depends-on = ["lint", "test-repl"]
 
 [tool.pixi.tasks.pre-commit-detours]
-depends-on = ["lint-detours", "test-detours"]
+depends-on = ["lint", "test-detours"]
 
 [tool.pixi.feature.detour-mode0-econ-stats.dependencies]
 plotly = "==6.6.0"
