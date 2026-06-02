@@ -639,10 +639,14 @@ The AI-readable interpretation is:
   rules in order:
   - if the nonzero pool is empty, no SSN row is selected and the name key remains
     unresolved by SSN;
-  - if any row in the nonzero pool has missing or non-castable `works_count`,
-    the v2 rule fails for that name key and all nonzero-pool rows are selected
-    for subset 2 review;
-  - otherwise, if the nonzero pool has one or more per-key Tukey outliers, the
+  - if the nonzero pool has exactly one row, select that row as the effective
+    SSN row. The v2 hit-selection rule is only needed to adjudicate multiple
+    nonzero SSN candidates; a singleton nonzero candidate is accepted as-is and
+    does not require present/castable `works_count`;
+  - if the nonzero pool has multiple rows and any row in that pool has missing
+    or non-castable `works_count`, the v2 rule fails for that name key and all
+    nonzero-pool rows are selected for subset 2 review;
+  - otherwise, if the multi-row nonzero pool has one or more per-key Tukey outliers, the
     max-works decision pool is all outlier rows for that `name_key`;
   - otherwise, the max-works decision pool is the full nonzero pool for that
     `name_key`.
@@ -654,12 +658,15 @@ The AI-readable interpretation is:
 - `ktp.ssn_sum_hit_1pct` and `ssnad.cited_by_count` participate in Tukey outlier
   classification, not in the max-work decision.
 - Failure/fallback states should be auditable in the v2 selection relation,
-  especially missing works count and max-works tie. If a failure state selects a
-  single nonzero row, step 10 partitioning must still treat that name key as SSN
-  unresolved so it lands in subset 2.
+  especially multi-candidate missing works count and max-works tie. These v2
+  failure states select all nonzero-pool rows and therefore naturally leave at
+  least two effective SSN rows; step 10 can continue using effective SSN row
+  count for subset routing.
 - The selected/effective SSN rows under v2 are therefore:
   - no rows when there are no nonzero-hit candidates;
-  - all nonzero-hit candidates when any nonzero-hit candidate has missing or
+  - exactly one candidate when there is exactly one nonzero-hit candidate,
+    regardless of missing/non-castable auxiliary metrics;
+  - all nonzero-hit candidates when a multi-row nonzero pool has any missing or
     non-castable `works_count`;
   - exactly one candidate when the max-works decision pool has a unique maximum
     raw/numeric `works_count`;
@@ -692,11 +699,13 @@ The AI-readable interpretation is:
   metric, rows with any Tukey outlier, name keys with at least one Tukey
   outlier, name keys whose max-works decision pool is the outlier pool, name
   keys whose max-works decision pool is the full nonzero pool because no
-  outliers exist, rows/name keys with missing or non-castable `works_count`,
+  outliers exist, singleton nonzero name keys accepted without adjudication,
+  rows/name keys with missing or non-castable `works_count` in multi-row pools,
   unique max-work winner name keys, max-work tie/failure name keys, selected
-  rows/name keys/authors, selected rows retained by unique max-work selection,
-  selected rows retained because missing works count selects all nonzero rows,
-  selected rows retained because max-work ties select all nonzero rows,
+  rows/name keys/authors, selected rows retained because there was only one
+  nonzero candidate, selected rows retained by unique max-work selection,
+  selected rows retained because multi-row missing works count selects all
+  nonzero rows, selected rows retained because max-work ties select all nonzero rows,
   non-selected rows pruned by unique max-work selection, number of name keys
   with exactly one selected row, number with multiple selected rows/ties, and
   the maximum selected row count for any one name key.
@@ -705,9 +714,10 @@ The AI-readable interpretation is:
   by reimplementing Tukey classification in Python. Add a focused DuckDB test
   for the breakdown query on synthetic candidate rows, including cases where
   per-name-key bounds drive selection, max `works_count` outside the
-  Tukey-outlier set must not be selected when outliers exist, no-outlier keys
-  with a unique max works count select that unique author, missing works count
-  selects all nonzero candidates and remains unresolved, and max-work ties
+  Tukey-outlier set must not be selected when outliers exist, singleton nonzero
+  candidates are accepted even with missing/non-castable metrics, no-outlier
+  keys with a unique max works count select that unique author, missing works
+  count in a multi-row pool selects all nonzero candidates, and max-work ties
   select all nonzero candidates.
 - Keep step 9 logging plumbing plain and local to the already-computed SQL
   result rows. Do not add generic row-to-dict formatting helpers in the step;
@@ -721,9 +731,11 @@ The AI-readable interpretation is:
   nonzero-hit candidates, `ssn_hit` v2 uses per-name-key Tukey bounds, v2 keeps
   a unique max-work author from the outlier pool when outliers exist, v2 keeps a
   unique max-work author from the full nonzero pool when no outliers exist, v2
-  falls back to all nonzero-hit candidates when any nonzero candidate has
-  missing or non-castable `works_count`, and v2 falls back to all nonzero-hit
-  candidates when there is a max-work tie).
+  keeps a singleton nonzero candidate even when `works_count` is
+  missing/non-castable, v2 falls back to all nonzero-hit candidates when any
+  candidate in a multi-row nonzero pool has missing or non-castable
+  `works_count`, and v2 falls back to all nonzero-hit candidates when there is a
+  max-work tie).
 - Use `tasks/tasks-20260526-match-patch/context/duckdb_ui_20260601T1750Z_export_edit_done.xlsx`
   as an edge-case catalog for SSN hit v2 tests. The `manual_best` and
   `manual_best_note` columns identify approximately 35 reviewed source keys and
@@ -732,19 +744,20 @@ The AI-readable interpretation is:
   execute the production helper SQL. Good fixture classes include: no per-key
   outliers with a unique max-work winner, unique per-key outlier max-work
   winner, high-work non-outlier that must not be selected when outliers exist,
-  any missing works count selecting all nonzero candidates for review, max-work
-  ties selecting all nonzero candidates for review, and rows illustrating known
-  SSN/OpenAlex data quality limits that the rule cannot solve.
+  singleton nonzero candidates with missing metrics still being accepted,
+  multi-row missing works count selecting all nonzero candidates for review,
+  max-work ties selecting all nonzero candidates for review, and rows
+  illustrating known SSN/OpenAlex data quality limits that the rule cannot solve.
 
 ### step 10 review dataframe
 
 - Step 10 partitioning logic remains unchanged except for already-agreed naming
   cleanup from `sciscinet` to `ssn` where applicable. Do not change which
   namekeys land in subset 1 or subset 2 as part of the review-display fix.
-  Separately, SSN hit-v2 failure states such as missing/non-castable works count
-  or max-work ties are part of the SSN match rule and must be treated as SSN
-  unresolved for partitioning, even if the selected/effective SSN rows would
-  otherwise have count one.
+  SSN hit v2 must express unresolved multi-candidate cases by returning all
+  nonzero effective SSN rows, so step 10's effective SSN row-count logic remains
+  sufficient for subset routing. Do not add a parallel step 10 failure flag for
+  SSN hit v2.
 - The review dataframe fix is presentation/context aggregation only. By step 10,
   processing is already done and innerdicts are available per namekey; the
   review CSV should faithfully display those innerdicts.

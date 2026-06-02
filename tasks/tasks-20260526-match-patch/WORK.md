@@ -23,10 +23,12 @@
 
 ## Doing Now
 
-- Updating the AI interpretation for the revised SSN hit v2 rule so the
-  implementor-facing SPEC is self-contained. Also inspected the reviewed XLSX
-  edge-case catalog for `manual_best` / `manual_best_note` examples. No code
-  changes until user approves the revised interpretation.
+- Implementing the approved SSN hit v2 rule surgically: per-name-key Tukey
+  candidate metrics, singleton nonzero candidates accepted as-is, unique
+  max-works selection from the decision pool for multi-candidate pools, all
+  nonzero rows returned for multi-candidate missing/non-castable works count or
+  max-works ties, and step 9 logging from production SQL. Step 10 partitioning
+  remains count-based; no separate SSN hit-v2 failure flag is needed.
 
 ## Done - Final Patch
 
@@ -91,12 +93,13 @@
   ruff/mypy on touched code, and full `pixi run pre-commit-repl` (80 passed, 2
   skipped).
 - Latest SPEC-review note: SSN hit v2 uses per-source-key/per-name-key Tukey
-  bounds; if any nonzero candidate has missing/non-castable works count, return
-  all nonzero rows for review; otherwise use the Tukey outlier pool if outliers
-  exist, or the full nonzero pool if no outliers exist; if that decision pool
-  has a unique max works-count author, select it; if max works count ties,
-  return all nonzero rows for review. The reviewed XLSX context file has 37 rows
-  with manual notes and should inform focused synthetic DuckDB test fixtures.
+  bounds; if there is exactly one nonzero candidate, accept it as-is; for
+  multi-candidate pools, missing/non-castable works count returns all nonzero
+  rows for review; otherwise use the Tukey outlier pool if outliers exist, or
+  the full nonzero pool if no outliers exist; if that decision pool has a unique
+  max works-count author, select it; if max works count ties, return all
+  nonzero rows for review. The reviewed XLSX context file has 37 rows with
+  manual notes and should inform focused synthetic DuckDB test fixtures.
 - Revised the AI interpretation so the implementor-facing SPEC is self-contained:
   it now spells out the candidate metric columns, per-key quantile/fence
   formulas, null handling, combined flags, and v2 selection cases inline.
