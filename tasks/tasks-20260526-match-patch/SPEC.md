@@ -741,6 +741,10 @@ The AI-readable interpretation is:
 - Step 10 partitioning logic remains unchanged except for already-agreed naming
   cleanup from `sciscinet` to `ssn` where applicable. Do not change which
   namekeys land in subset 1 or subset 2 as part of the review-display fix.
+  Separately, SSN hit-v2 failure states such as missing/non-castable works count
+  or max-work ties are part of the SSN match rule and must be treated as SSN
+  unresolved for partitioning, even if the selected/effective SSN rows would
+  otherwise have count one.
 - The review dataframe fix is presentation/context aggregation only. By step 10,
   processing is already done and innerdicts are available per namekey; the
   review CSV should faithfully display those innerdicts.

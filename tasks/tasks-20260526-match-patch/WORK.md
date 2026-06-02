@@ -46,7 +46,8 @@
   old footer key must be regenerated or replaced before reuse.
 - Added focused tests for the new `match_rule_version` config shape, rejection
   of the stale `name_matching_rule_version` shape, SSN hit v1 alias behavior,
-  SSN hit v2 Tukey max-work selection/ties, and no-outlier fallback to v1.
+  and the earlier SSN hit v2 Tukey/max-work behavior. The latest AI SPEC text
+  supersedes those older v2 test expectations.
 - Inspected `tmp/duckdb_ui_20260527T2115Z_export.csv`. It is grouped by
   `ktp.source_key`, not row-level candidate data, so it is useful for edge-case
   selection but not as a direct fixture for reconstructing candidate metrics.
@@ -299,14 +300,11 @@
 - Updated the AI interpretation for the final patch: config is now
   `match_rule_version` with `xlsx_name`, `docx_name`, `ssn_name`, and `ssn_hit`;
   `name_matching_rule_version` is stale; the unnest parquet rule metadata should
-  refer to `match_rule_version.ssn_name`; and SSN hit v2 should filter nonzero
-  candidates to Tukey outliers when present, then use max raw `works_count` per
-  name key, with max-work ties selecting the full active pool for subset 2
-  review.
-- Clarified in the AI interpretation that SSN hit v2 uses max works count only
-  after per-key outlier filtering, that no-outlier groups fall back to v1 by
-  retaining all nonzero-hit candidates, and that downstream step 9 should consume
-  one effective author-match view after hit selection.
+  refer to `match_rule_version.ssn_name`; and SSN hit v2 should use per-key
+  Tukey bounds plus max raw `works_count` selection. This note is superseded by
+  the latest self-contained AI SPEC text for the exact v2 failure/fallback cases.
+- Clarified in the AI interpretation that downstream step 9 should consume one
+  effective author-match view after hit selection.
 
 ## Verification
 
