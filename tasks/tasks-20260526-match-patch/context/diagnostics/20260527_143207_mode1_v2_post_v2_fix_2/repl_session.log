@@ -1,0 +1,320 @@
+cyan	Running step: 01_register_resources
+green	Registered XLSX resources: 11
+green	Registered DOCX resources: 9
+green	Registered parquet resources: 8
+cyan	Running step: 02_load_xlsx
+green	Loaded population rows: 59665
+green	Columns: 26
+green	Artifacts dumped: data/diagnostics/20260527_143207/step_artifacts/02_load_xlsx_population_df.csv
+cyan	Running step: 03_infer_names
+green	Inferred name columns for 11 XLSX files.
+green	Artifacts dumped: data/diagnostics/20260527_143207/step_artifacts/03_infer_names_population_with_names_df.csv
+cyan	Running step: 04_add_economy_priority
+green	Computed economies for 217 country entries.
+green	Artifacts dumped: data/diagnostics/20260527_143207/step_artifacts/04_add_economy_priority_population_with_economy_df.csv
+cyan	Running step: 05_sample_population
+cyan	Precompute random draw batches: 8 draws, total random rows=300, population rows=59665
+cyan	Precompute pilot rows for sampling exclusion (10 configured pilot triples)
+cyan	Pilot sampling exclusion seed rows: 10 distinct population rows found in 2024_HCR.xlsx
+cyan	Random draw batches ready: 300 rows across 8 draws, 300 distinct population rows selected
+cyan	Materialize random draw 1/8: size=20, replace=True
+cyan	Materialize random draw 2/8: size=40, replace=True
+cyan	Materialize random draw 3/8: size=40, replace=True
+cyan	Materialize random draw 4/8: size=40, replace=True
+cyan	Materialize random draw 5/8: size=40, replace=True
+cyan	Materialize random draw 6/8: size=40, replace=True
+cyan	Materialize random draw 7/8: size=40, replace=True
+cyan	Materialize random draw 8/8: size=40, replace=True
+green	Sample rows: 310
+green	Artifacts dumped: data/diagnostics/20260527_143207/step_artifacts/05_sample_population_samples_with_context_df.csv
+cyan	Running step: 06_build_outerdict
+green	OuterDict keys: 307
+green	Artifacts dumped: data/diagnostics/20260527_143207/step_artifacts/06_build_outerdict_outer_dict.json, data/diagnostics/20260527_143207/step_artifacts/06_build_outerdict_outer_dict_excluded.json
+cyan	Running step: 07_match_xlsx
+green	Matched XLSX rows: 2018
+green	Artifacts dumped: data/diagnostics/20260527_143207/step_artifacts/07_match_xlsx_xlsx_matches_df.csv
+cyan	Running step: 08_match_docx
+green	Matched DOCX rows: 317
+green	Artifacts dumped: data/diagnostics/20260527_143207/step_artifacts/08_match_docx_docx_matches_df.csv
+cyan	Running step: 09_match_parquet
+cyan	[LEGEND] [TABLE/PARQUET]=parquet-derived tables we most want to preserve; 
+cyan	[LEGEND] [TABLE/INNERDICT]=materialized tables that feed recoverable innerdict/output artifacts; 
+cyan	[LEGEND] [TABLE/EFF]=materialized for efficiency only; 
+cyan	[LEGEND] [VIEW/FILTER]/[VIEW/OUTPUT]=ephemeral views; 
+cyan	[LEGEND] [OUTERDICT]=append/load actions.
+cyan	[TABLE/PARQUET] Match author details to name keys (author_details scan)
+cyan	[TABLE/PARQUET] HEAVY step ahead: author_details exact-name matching scans author_details (display_name + alternatives) and joins against all outerdict name keys.
+cyan	[TABLE/PARQUET] Matched author-details candidates: 7,479 rows, 270 name keys, 7,471 author IDs.
+cyan	[TABLE/PARQUET] Create author->paper table
+cyan	[TABLE/PARQUET] HEAVY step ahead: author->paper expansion joins matched author rows to authors_paper parquet and can grow substantially.
+cyan	[TABLE/PARQUET] Author->paper rows: 694,529 rows, 7,479 name/author pairs, 510,019 distinct papers.
+cyan	[TABLE/EFF] Create hits union table
+cyan	[TABLE/EFF] HEAVY step ahead: materializing hit tables union from 2 parquet files filtered to author->paper distinct papers (510,019) for reuse in multiple downstream queries.
+cyan	[TABLE/EFF] Hits union materialized: 3,426,173 rows, 509,984 papers, 303 fields.
+cyan	[TABLE/EFF] Aggregate author-level hit stats
+cyan	[TABLE/EFF] HEAVY step ahead: aggregating hit stats over author->paper rows (694,529) joined to hits union rows (3,426,173).
+cyan	[TABLE/EFF] Author hit aggregates: 7,479 rows (zero=4,772, nonzero=2,707, null=0).
+cyan	[VIEW/FILTER] Create filtered parquet author-match view before downstream enrichment
+cyan	[VIEW/FILTER] Nonzero-hit author-match filter: kept 2,707/7,479 rows, 268 name keys, 2,699 author IDs; removed zero-hit rows=4,772.
+cyan	[VIEW/FILTER] Create distinct nonzero-hit author-id filter view
+cyan	[VIEW/FILTER] Distinct nonzero-hit author IDs: 2,699.
+cyan	[TABLE/EFF] Create full author aggregate payload table (nonzero-hit subset only)
+cyan	[TABLE/EFF] HEAVY step ahead: list-heavy author aggregation (paper lists + field IDs) restricted to nonzero-hit author matches after pruning.
+cyan	[TABLE/EFF] Author aggregate payload rows (nonzero-hit subset): 2,707.
+cyan	[TABLE/PARQUET] Create matched author_details table
+cyan	[TABLE/PARQUET] HEAVY step ahead: filtering author_details parquet by distinct nonzero-hit author IDs (2,699).
+cyan	[TABLE/PARQUET] Matched author_details rows: 2,699.
+cyan	[TABLE/PARQUET] Create matched authors table
+cyan	[TABLE/PARQUET] HEAVY step ahead: filtering authors parquet by distinct nonzero-hit author IDs (2,699).
+cyan	[TABLE/PARQUET] Matched authors rows: 2,699.
+cyan	[TABLE/PARQUET] Create matched paper-author-affiliation table
+cyan	[TABLE/PARQUET] HEAVY step ahead: filtering paper_author_affiliation parquet by distinct nonzero-hit author IDs (2,699); this can still be very large.
+cyan	[TABLE/PARQUET] Matched paper-author-affiliation rows: 606,238.
+cyan	[TABLE/PARQUET] Create matched affiliations table
+cyan	[TABLE/PARQUET] HEAVY step ahead: filtering affiliations parquet to institutions referenced by matched paper-author-affiliation rows.
+cyan	[TABLE/PARQUET] Matched affiliations rows: 11,211.
+cyan	[TABLE/INNERDICT] Create author-level output table
+cyan	[TABLE/INNERDICT] HEAVY step ahead: joining nonzero-hit author matches with matched author_details, matched authors, and author hit aggregates.
+cyan	[TABLE/INNERDICT] Author-level output rows: 2,707.
+cyan	[TABLE/EFF] HEAVY diagnostic ahead: estimate top-paper reduction by scanning author->paper rows filtered to nonzero-hit matches.
+cyan	Top-5 paper reduction: kept 13274 of 617867, removed 604593.
+cyan	[TABLE/EFF] HEAVY diagnostic ahead: estimate top-institution reduction from matched paper-author-affiliation rows.
+cyan	Top-5 institution reduction: kept 12682 of 100917, removed 88235.
+cyan	[TABLE/EFF] HEAVY diagnostic ahead: expand field-id lists and join fields parquet to measure display-name coverage.
+cyan	[TABLE/EFF] Fields display-name mapping: matched 231480/231480 IDs (unmatched: 0).
+cyan	[TABLE/INNERDICT] Create parquet enriched table (top-5 papers, top-5 institutions, concept display names, nonzero hits)
+cyan	[TABLE/INNERDICT] HEAVY step ahead: builds final parquet innerdict rows with paper ranking, institution ranking, concept display mapping, and draw ordering.
+cyan	[TABLE/INNERDICT] Parquet enriched rows: 2,707.
+cyan	[OUTERDICT] Append parquet matches into OuterDict (2,707 rows)
+cyan	[VIEW/OUTPUT] Create parquet output view
+cyan	[VIEW/FILTER] Filtered out parquet author-match rows before downstream enrichment with ktp.ssn_sum_hit_1pct == 0: 4,772
+cyan	[VIEW/OUTPUT] Load parquet output dataframe
+cyan	[VIEW/OUTPUT] HEAVY step ahead: executes output view and converts result to pandas dataframe.
+cyan	[VIEW/OUTPUT] Loaded parquet output dataframe rows: 2,707 across 1 view(s).
+green	Parquet views created: 1
+green	Matched parquet rows: 2707
+green	Artifacts dumped: data/diagnostics/20260527_143207/step_artifacts/09_match_parquet_ssn_parquet_output.csv
+cyan	Running step: 10_build_cards
+cyan	Card subset mode 1: Exactly one sciscinet innerdict, at least one present ktp.xlsx_match payload and all present ktp.xlsx_match payloads are exact, and at least one docx innerdict with all required present ktp.table_1_* fields non-empty. For ktp.table_1_* fields, non-empty is required except these allowed-empty fields: ['ktp.table_1_comments', 'ktp.table_1_footnotes', 'ktp.table_1_race_ethnicity_language_culture', 'ktp.table_1_socioeconomic_status', 'ktp.table_1_topics']
+Rule                                           Pass   Fail
+----------------------------------------------------------
+sciscinet: exactly one innerdict                153    154
+xlsx: all present ktp.xlsx_match exact          282     25
+docx: required ktp.table_1_* non-empty          207    100
+----------------------------------------------------------
+mode_1                                           98    209
+mode_2                                          209     98
+mode_3                                          140    167
+mode_4                                          167    140
+selected for current mode                        98    209
+mode_1 description: Exactly one sciscinet innerdict, at least one present ktp.xlsx_match payload and all present ktp.xlsx_match payloads are exact, and at least one docx innerdict with all required present ktp.table_1_* fields non-empty. For ktp.table_1_* fields, non-empty is required except these allowed-empty fields: ['ktp.table_1_comments', 'ktp.table_1_footnotes', 'ktp.table_1_race_ethnicity_language_culture', 'ktp.table_1_socioeconomic_status', 'ktp.table_1_topics']
+mode_2 description: Remaining name keys (zero or >1 sciscinet innerdict, no present ktp.xlsx_match payload, any non-exact ktp.xlsx_match, no docx innerdict, or any empty required ktp.table_1_* value). For ktp.table_1_* fields, non-empty is required except these allowed-empty fields: ['ktp.table_1_comments', 'ktp.table_1_footnotes', 'ktp.table_1_race_ethnicity_language_culture', 'ktp.table_1_socioeconomic_status', 'ktp.table_1_topics']
+mode_3 description: Exactly one sciscinet innerdict, at least one present ktp.xlsx_match payload, and all present ktp.xlsx_match payloads are exact.
+mode_4 description: Remaining name keys (zero or >1 sciscinet innerdict, no present ktp.xlsx_match payload, or any non-exact ktp.xlsx_match).
+cyan	Building cards from selected subset
+cyan	Card build progress [------------------------] 1/98
+cyan	Card build progress [------------------------] 2/98
+cyan	Card build progress [------------------------] 3/98
+cyan	Card build progress [------------------------] 4/98
+cyan	Card build progress [#-----------------------] 5/98
+cyan	Card build progress [#-----------------------] 6/98
+cyan	Card build progress [#-----------------------] 7/98
+cyan	Card build progress [#-----------------------] 8/98
+cyan	Card build progress [##----------------------] 9/98
+cyan	Card build progress [##----------------------] 10/98
+cyan	Card build progress [##----------------------] 11/98
+cyan	Card build progress [##----------------------] 12/98
+cyan	Card build progress [###---------------------] 13/98
+cyan	Card build progress [###---------------------] 14/98
+cyan	Card build progress [###---------------------] 15/98
+cyan	Card build progress [###---------------------] 16/98
+cyan	Card build progress [####--------------------] 17/98
+cyan	Card build progress [####--------------------] 18/98
+cyan	Card build progress [####--------------------] 19/98
+cyan	Card build progress [####--------------------] 20/98
+cyan	Card build progress [#####-------------------] 21/98
+cyan	Card build progress [#####-------------------] 22/98
+cyan	Card build progress [#####-------------------] 23/98
+cyan	Card build progress [#####-------------------] 24/98
+cyan	Card build progress [######------------------] 25/98
+cyan	Card build progress [######------------------] 26/98
+cyan	Card build progress [######------------------] 27/98
+cyan	Card build progress [######------------------] 28/98
+cyan	Card build progress [#######-----------------] 29/98
+cyan	Card build progress [#######-----------------] 30/98
+cyan	Card build progress [#######-----------------] 31/98
+cyan	Card build progress [#######-----------------] 32/98
+cyan	Card build progress [########----------------] 33/98
+cyan	Card build progress [########----------------] 34/98
+cyan	Card build progress [########----------------] 35/98
+cyan	Card build progress [########----------------] 36/98
+cyan	Card build progress [#########---------------] 37/98
+cyan	Card build progress [#########---------------] 38/98
+cyan	Card build progress [#########---------------] 39/98
+cyan	Card build progress [#########---------------] 40/98
+cyan	Card build progress [##########--------------] 41/98
+cyan	Card build progress [##########--------------] 42/98
+cyan	Card build progress [##########--------------] 43/98
+cyan	Card build progress [##########--------------] 44/98
+cyan	Card build progress [###########-------------] 45/98
+cyan	Card build progress [###########-------------] 46/98
+cyan	Card build progress [###########-------------] 47/98
+cyan	Card build progress [###########-------------] 48/98
+cyan	Card build progress [############------------] 49/98
+cyan	Card build progress [############------------] 50/98
+cyan	Card build progress [############------------] 51/98
+cyan	Card build progress [############------------] 52/98
+cyan	Card build progress [############------------] 53/98
+cyan	Card build progress [#############-----------] 54/98
+cyan	Card build progress [#############-----------] 55/98
+cyan	Card build progress [#############-----------] 56/98
+cyan	Card build progress [#############-----------] 57/98
+cyan	Card build progress [##############----------] 58/98
+cyan	Card build progress [##############----------] 59/98
+cyan	Card build progress [##############----------] 60/98
+cyan	Card build progress [##############----------] 61/98
+cyan	Card build progress [###############---------] 62/98
+cyan	Card build progress [###############---------] 63/98
+cyan	Card build progress [###############---------] 64/98
+cyan	Card build progress [###############---------] 65/98
+cyan	Card build progress [################--------] 66/98
+cyan	Card build progress [################--------] 67/98
+cyan	Card build progress [################--------] 68/98
+cyan	Card build progress [################--------] 69/98
+cyan	Card build progress [#################-------] 70/98
+cyan	Card build progress [#################-------] 71/98
+cyan	Card build progress [#################-------] 72/98
+cyan	Card build progress [#################-------] 73/98
+cyan	Card build progress [##################------] 74/98
+cyan	Card build progress [##################------] 75/98
+cyan	Card build progress [##################------] 76/98
+cyan	Card build progress [##################------] 77/98
+cyan	Card build progress [###################-----] 78/98
+cyan	Card build progress [###################-----] 79/98
+cyan	Card build progress [###################-----] 80/98
+cyan	Card build progress [###################-----] 81/98
+cyan	Card build progress [####################----] 82/98
+cyan	Card build progress [####################----] 83/98
+cyan	Card build progress [####################----] 84/98
+cyan	Card build progress [####################----] 85/98
+cyan	Card build progress [#####################---] 86/98
+cyan	Card build progress [#####################---] 87/98
+cyan	Card build progress [#####################---] 88/98
+cyan	Card build progress [#####################---] 89/98
+cyan	Card build progress [######################--] 90/98
+cyan	Card build progress [######################--] 91/98
+cyan	Card build progress [######################--] 92/98
+cyan	Card build progress [######################--] 93/98
+cyan	Card build progress [#######################-] 94/98
+cyan	Card build progress [#######################-] 95/98
+cyan	Card build progress [#######################-] 96/98
+cyan	Card build progress [#######################-] 97/98
+cyan	Card build progress [########################] 98/98
+cyan	Output write progress [------------------------] 1/98
+cyan	Output write progress [------------------------] 2/98
+cyan	Output write progress [------------------------] 3/98
+cyan	Output write progress [------------------------] 4/98
+cyan	Output write progress [#-----------------------] 5/98
+cyan	Output write progress [#-----------------------] 6/98
+cyan	Output write progress [#-----------------------] 7/98
+cyan	Output write progress [#-----------------------] 8/98
+cyan	Output write progress [##----------------------] 9/98
+cyan	Output write progress [##----------------------] 10/98
+cyan	Output write progress [##----------------------] 11/98
+cyan	Output write progress [##----------------------] 12/98
+cyan	Output write progress [###---------------------] 13/98
+cyan	Output write progress [###---------------------] 14/98
+cyan	Output write progress [###---------------------] 15/98
+cyan	Output write progress [###---------------------] 16/98
+cyan	Output write progress [####--------------------] 17/98
+cyan	Output write progress [####--------------------] 18/98
+cyan	Output write progress [####--------------------] 19/98
+cyan	Output write progress [####--------------------] 20/98
+cyan	Output write progress [#####-------------------] 21/98
+cyan	Output write progress [#####-------------------] 22/98
+cyan	Output write progress [#####-------------------] 23/98
+cyan	Output write progress [#####-------------------] 24/98
+cyan	Output write progress [######------------------] 25/98
+cyan	Output write progress [######------------------] 26/98
+cyan	Output write progress [######------------------] 27/98
+cyan	Output write progress [######------------------] 28/98
+cyan	Output write progress [#######-----------------] 29/98
+cyan	Output write progress [#######-----------------] 30/98
+cyan	Output write progress [#######-----------------] 31/98
+cyan	Output write progress [#######-----------------] 32/98
+cyan	Output write progress [########----------------] 33/98
+cyan	Output write progress [########----------------] 34/98
+cyan	Output write progress [########----------------] 35/98
+cyan	Output write progress [########----------------] 36/98
+cyan	Output write progress [#########---------------] 37/98
+cyan	Output write progress [#########---------------] 38/98
+cyan	Output write progress [#########---------------] 39/98
+cyan	Output write progress [#########---------------] 40/98
+cyan	Output write progress [##########--------------] 41/98
+cyan	Output write progress [##########--------------] 42/98
+cyan	Output write progress [##########--------------] 43/98
+cyan	Output write progress [##########--------------] 44/98
+cyan	Output write progress [###########-------------] 45/98
+cyan	Output write progress [###########-------------] 46/98
+cyan	Output write progress [###########-------------] 47/98
+cyan	Output write progress [###########-------------] 48/98
+cyan	Output write progress [############------------] 49/98
+cyan	Output write progress [############------------] 50/98
+cyan	Output write progress [############------------] 51/98
+cyan	Output write progress [############------------] 52/98
+cyan	Output write progress [############------------] 53/98
+cyan	Output write progress [#############-----------] 54/98
+cyan	Output write progress [#############-----------] 55/98
+cyan	Output write progress [#############-----------] 56/98
+cyan	Output write progress [#############-----------] 57/98
+cyan	Output write progress [##############----------] 58/98
+cyan	Output write progress [##############----------] 59/98
+cyan	Output write progress [##############----------] 60/98
+cyan	Output write progress [##############----------] 61/98
+cyan	Output write progress [###############---------] 62/98
+cyan	Output write progress [###############---------] 63/98
+cyan	Output write progress [###############---------] 64/98
+cyan	Output write progress [###############---------] 65/98
+cyan	Output write progress [################--------] 66/98
+cyan	Output write progress [################--------] 67/98
+cyan	Output write progress [################--------] 68/98
+cyan	Output write progress [################--------] 69/98
+cyan	Output write progress [#################-------] 70/98
+cyan	Output write progress [#################-------] 71/98
+cyan	Output write progress [#################-------] 72/98
+cyan	Output write progress [#################-------] 73/98
+cyan	Output write progress [##################------] 74/98
+cyan	Output write progress [##################------] 75/98
+cyan	Output write progress [##################------] 76/98
+cyan	Output write progress [##################------] 77/98
+cyan	Output write progress [###################-----] 78/98
+cyan	Output write progress [###################-----] 79/98
+cyan	Output write progress [###################-----] 80/98
+cyan	Output write progress [###################-----] 81/98
+cyan	Output write progress [####################----] 82/98
+cyan	Output write progress [####################----] 83/98
+cyan	Output write progress [####################----] 84/98
+cyan	Output write progress [####################----] 85/98
+cyan	Output write progress [#####################---] 86/98
+cyan	Output write progress [#####################---] 87/98
+cyan	Output write progress [#####################---] 88/98
+cyan	Output write progress [#####################---] 89/98
+cyan	Output write progress [######################--] 90/98
+cyan	Output write progress [######################--] 91/98
+cyan	Output write progress [######################--] 92/98
+cyan	Output write progress [######################--] 93/98
+cyan	Output write progress [#######################-] 94/98
+cyan	Output write progress [#######################-] 95/98
+cyan	Output write progress [#######################-] 96/98
+cyan	Output write progress [#######################-] 97/98
+cyan	Output write progress [########################] 98/98
+green	Card partition rows: 98
+green	Card partition review rows: 0
+green	Cards generated: 98
+green	Output zip: data/output/2024-Historical-Highly-Cited-Researchers-lists - final_combined_cards.zip
+green	Artifacts dumped: data/diagnostics/20260527_143207/step_artifacts/10_build_cards_card_partitions_df.csv, data/diagnostics/20260527_143207/step_artifacts/10_build_cards_card_partition_review_df.csv, data/output/2024-Historical-Highly-Cited-Researchers-lists - final_combined_cards.zip
+cyan	Execution Metrics
+magenta	Peak RAM Usage: 3.76 GB
+magenta	Cards: 98
+cyan	Diagnostics report saved to: data/diagnostics/20260527_143207/repl_diagnostics.md
+green	Success! Output saved to: data/output/2024-Historical-Highly-Cited-Researchers-lists - final_combined_cards.zip

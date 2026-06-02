@@ -11,6 +11,19 @@ WITH base AS (
 
 bounds AS (
     SELECT
+        "ktp.source_key",
+        quantile_cont(ssn_sum_hit_1pct, 0.25::DOUBLE) AS ssn_q1,
+        quantile_cont(ssn_sum_hit_1pct, 0.75::DOUBLE) AS ssn_q3,
+        quantile_cont(works_count, 0.25::DOUBLE) AS works_q1,
+        quantile_cont(works_count, 0.75::DOUBLE) AS works_q3,
+        quantile_cont(cited_by_count, 0.25::DOUBLE) AS cited_q1,
+        quantile_cont(cited_by_count, 0.75::DOUBLE) AS cited_q3
+    FROM base
+    GROUP BY "ktp.source_key"
+),
+
+global_bounds AS (
+    SELECT
         quantile_cont(ssn_sum_hit_1pct, 0.25::DOUBLE) AS ssn_q1,
         quantile_cont(ssn_sum_hit_1pct, 0.75::DOUBLE) AS ssn_q3,
         quantile_cont(works_count, 0.25::DOUBLE) AS works_q1,
@@ -25,22 +38,33 @@ flagged AS (
         b.*,
 
         (
-            ssn_sum_hit_1pct < ssn_q1 - 1.5 * (ssn_q3 - ssn_q1)
-            OR ssn_sum_hit_1pct > ssn_q3 + 1.5 * (ssn_q3 - ssn_q1)
+            b.ssn_sum_hit_1pct < bo.ssn_q1 - 1.5 * (bo.ssn_q3 - bo.ssn_q1)
+            OR b.ssn_sum_hit_1pct > bo.ssn_q3 + 1.5 * (bo.ssn_q3 - bo.ssn_q1)
         ) AS ssn_is_tukey_outlier,
 
         (
-            works_count < works_q1 - 1.5 * (works_q3 - works_q1)
-            OR works_count > works_q3 + 1.5 * (works_q3 - works_q1)
+            b.works_count < bo.works_q1 - 1.5 * (bo.works_q3 - bo.works_q1)
+            OR b.works_count > bo.works_q3 + 1.5 * (bo.works_q3 - bo.works_q1)
         ) AS works_is_tukey_outlier,
 
         (
-            cited_by_count < cited_q1 - 1.5 * (cited_q3 - cited_q1)
-            OR cited_by_count > cited_q3 + 1.5 * (cited_q3 - cited_q1)
-        ) AS cited_is_tukey_outlier
+            b.cited_by_count < bo.cited_q1 - 1.5 * (bo.cited_q3 - bo.cited_q1)
+            OR b.cited_by_count > bo.cited_q3 + 1.5 * (bo.cited_q3 - bo.cited_q1)
+        ) AS cited_is_tukey_outlier,
+
+        (
+            b.ssn_sum_hit_1pct < gb.ssn_q1 - 1.5 * (gb.ssn_q3 - gb.ssn_q1)
+            OR b.ssn_sum_hit_1pct > gb.ssn_q3 + 1.5 * (gb.ssn_q3 - gb.ssn_q1)
+            OR b.works_count < gb.works_q1 - 1.5 * (gb.works_q3 - gb.works_q1)
+            OR b.works_count > gb.works_q3 + 1.5 * (gb.works_q3 - gb.works_q1)
+            OR b.cited_by_count < gb.cited_q1 - 1.5 * (gb.cited_q3 - gb.cited_q1)
+            OR b.cited_by_count > gb.cited_q3 + 1.5 * (gb.cited_q3 - gb.cited_q1)
+        ) AS global_row_has_tukey_outlier
 
     FROM base b
-    CROSS JOIN bounds
+    JOIN bounds bo
+        ON b."ktp.source_key" = bo."ktp.source_key"
+    CROSS JOIN global_bounds gb
 ),
 
 flagged2 AS (
@@ -97,14 +121,22 @@ grouped AS (
         max(cited_by_count) AS cited_max,
 
         count(*) FILTER (WHERE row_has_tukey_outlier) AS tukey_outlier_row_count,
+        count(*) FILTER (WHERE global_row_has_tukey_outlier) AS global_tukey_outlier_row_count,
 
-        coalesce(to_json(list("ktp.fragment" ORDER BY "ktp.fragment") FILTER (WHERE ssn_is_tukey_outlier)), json('[]'))
+        count("ktp.fragment") AS authorid_count,
+        
+        coalesce(
+            to_json(list("ktp.fragment" ORDER BY works_count DESC NULLS LAST, "ktp.fragment") FILTER (WHERE "ktp.fragment" IS NOT NULL)),
+            json('[]')
+        ) AS authorids_json,
+
+        coalesce(to_json(list("ktp.fragment" ORDER BY works_count DESC NULLS LAST, "ktp.fragment") FILTER (WHERE ssn_is_tukey_outlier)), json('[]'))
             AS ssn_sum_hit_1pct_tukey_fragments_json,
 
-        coalesce(to_json(list("ktp.fragment" ORDER BY "ktp.fragment") FILTER (WHERE works_is_tukey_outlier)), json('[]'))
+        coalesce(to_json(list("ktp.fragment" ORDER BY works_count DESC NULLS LAST, "ktp.fragment") FILTER (WHERE works_is_tukey_outlier)), json('[]'))
             AS works_count_tukey_fragments_json,
 
-        coalesce(to_json(list("ktp.fragment" ORDER BY "ktp.fragment") FILTER (WHERE cited_is_tukey_outlier)), json('[]'))
+        coalesce(to_json(list("ktp.fragment" ORDER BY works_count DESC NULLS LAST, "ktp.fragment") FILTER (WHERE cited_is_tukey_outlier)), json('[]'))
             AS cited_by_count_tukey_fragments_json,
 
         CASE
