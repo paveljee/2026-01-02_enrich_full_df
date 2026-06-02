@@ -13,3 +13,4 @@ requests
 types-requests
 openpyxl
 pytest-cov
+python-dotenv
