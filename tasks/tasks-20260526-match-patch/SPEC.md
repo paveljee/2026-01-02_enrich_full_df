@@ -303,6 +303,10 @@ The surgical patches include:
   or with '-----'
   if any innerdict value contains multiline text.
 
+### follow-up
+see "post-implementation" in
+`./context/README.md`.
+
 ## how ai understood the spec
 
 The AI-readable interpretation is:
@@ -748,6 +752,108 @@ The AI-readable interpretation is:
   multi-row missing works count selecting all nonzero candidates for review,
   max-work ties selecting all nonzero candidates for review, and rows
   illustrating known SSN/OpenAlex data quality limits that the rule cannot solve.
+
+### post-implementation follow-ups from context README
+
+- The updated `tasks/tasks-20260526-match-patch/context/README.md` adds three
+  final follow-up items. Treat them as part of the task interpretation, but keep
+  them surgical and do not rewrite the already-approved matching architecture.
+- Add a focused pytest output-fixture check under the SciSciNet/SSN test module.
+  The test file should define these paths near the top of the module:
+  - `tasks/tasks-20260526-match-patch/context/duckdb_ui_20260601T1750Z_export_edit_done.xlsx`;
+  - `tmp/hcr_cards_subset1_20260602T1624Z_v2_ssn_hit_v2_per_namekey_Tukey`;
+  - `tmp/hcr_cards_subset2_20260602T1754Z_v2_ssn_hit_v2_per_namekey_Tukey`.
+- The fixture test should read rows with known `manual_best` from the reviewed
+  XLSX and compare them against the actual production card outputs in the two
+  fixture directories. For the same `ktp.source_key`, the selected SSN author id
+  in the subset 1 output should equal `manual_best`.
+- Keep this fixture test narrow. It is an acceptance/regression check against
+  frozen outputs, not a broad pipeline rerun and not a replacement for the
+  direct DuckDB unit tests. It should not run `src.repl`.
+- Expected exceptions for the fixture check are limited to cases documented in
+  the context README:
+  - the three no-current-OpenAlex-result names listed there, currently
+    `{"ktp.first_name": "Rasmus", "ktp.last_name": "Nielsenlo"}`,
+    `{"ktp.first_name": "Baerbel-Maria", "ktp.last_name": "Kurth"}`, and
+    `{"ktp.first_name": "Huaiyu Y", "ktp.last_name": "Mi"}`;
+  - `{"ktp.first_name": "Baoshan ", "ktp.last_name": "Xing"}`, which is
+    expected to be in subset 2 because of a non-exact XLSX match, while still
+    carrying the correct SSN author id `A5035633946`.
+- In other words, for known `manual_best` rows not covered by the documented
+  exceptions, the test should assert the current fixture outputs select that
+  author id. The test should explicitly encode the known exceptions rather than
+  allowing broad skips.
+- Add an OpenAlex current-data cross-check in step 9, but only when
+  `match_rule_version.ssn_hit = 2` and the SSN hit rule has identified a single
+  effective author id for a `name_key`. Multi-row SSN review cases are already
+  unresolved and do not need an OpenAlex confidence check at this stage.
+- Load `OPENALEX_API_KEY` from the repo `.env` file using `python-dotenv`.
+  The request is:
+
+  ```text
+  GET https://api.openalex.org/authors?search={ktp.source_key_first}%20{ktp.source_key_last}&sort=relevance_score%3Adesc&select=id&per_page=1&api_key=OPENALEX_API_KEY
+  ```
+
+  where `{ktp.source_key_first}` and `{ktp.source_key_last}` come from the KTP
+  source key fields for that `name_key`.
+- Log every OpenAlex request/response/reuse to an append-only JSON Lines file
+  under `data/`. Centralize the concrete filename in code. Each line should use
+  schema version `1`; the schema-version constant must live in `vars.py`, not as
+  an inline literal in the OpenAlex logging helper. Each line should include at
+  least:
+
+  ```json
+  {
+    "schema_version": 1,
+    "method": "GET",
+    "scheme": "https",
+    "host": "api.openalex.org",
+    "path": "/authors",
+    "query": "...",
+    "request_headers": {},
+    "request_body": null,
+    "response_code": 200,
+    "response_headers": {},
+    "response_body": "...",
+    "received_at_unix_usec": 0,
+    "duration_usec": 0
+  }
+  ```
+
+  Additional fields needed for deterministic reuse, such as `ktp.source_key`,
+  selected SSN author id, parsed OpenAlex top author id, and match verdict, are
+  allowed and should be included if they make the cache/audit clearer.
+- Before making an OpenAlex API request, scan the append-only JSONL log for an
+  existing response for the same `ktp.source_key` and equivalent request. If one
+  exists, reuse it instead of making a network call. Reuse must be logged in the
+  REPL session just as readably as a fresh request.
+- REPL logging for the OpenAlex check should be informative but compact. For
+  each checked single-author `name_key`, log whether the response was reused or
+  fetched, the response status, the parsed top OpenAlex author id if present,
+  the selected SSN author id, the match/mismatch verdict, and request duration
+  for fresh requests.
+- Treat the OpenAlex check as a confidence gate for single SSN author selections
+  under hit rule v2 and wire its result directly into the effective SSN
+  selection. If the top current OpenAlex author id equals the selected SSN
+  author id, keep that single author id as the effective SSN innerdict. If
+  OpenAlex returns no result or returns a different top author id, consider SSN
+  hit rule v2 failed for that `name_key` and select the entire nonzero-sum-1pct
+  SSN candidate pool as effective innerdicts instead. This failed case must land
+  in subset 2 for manual review. If the full nonzero-sum-1pct pool contains only
+  one row, add whatever clear audit/partition signal is needed so the failed
+  OpenAlex confidence check still routes to subset 2 rather than being silently
+  accepted by count alone.
+- Do not make ordinary unit tests depend on the live OpenAlex API. Use mocked or
+  prewritten JSONL responses for tests of request construction, cache reuse,
+  response parsing, and mismatch handling.
+- The third context README item, forcing known `manual_best` author ids into the
+  pipeline through a new `RegisteredResource` and handler, is explicitly
+  recognized but remains pending. Do not implement manual-best forcing until a
+  separate implementation pass is approved. The pending design should preserve
+  resource registration/hash checking and should inject the forced author id
+  early enough that downstream papers, hits, institutions, and final innerdict
+  payloads are built for the forced author, but that handler is not part of the
+  current implementation request.
 
 ### step 10 review dataframe
 

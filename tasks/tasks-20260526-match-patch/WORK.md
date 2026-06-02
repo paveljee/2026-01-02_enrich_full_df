@@ -23,14 +23,24 @@
 
 ## Doing Now
 
-- Implementing the approved SSN hit v2 rule surgically: per-name-key Tukey
-  candidate metrics, singleton nonzero candidates accepted as-is, unique
-  max-works selection from the decision pool for multi-candidate pools, all
-  nonzero rows returned for multi-candidate missing/non-castable works count or
-  max-works ties, and step 9 logging from production SQL. Step 10 partitioning
-  remains count-based; no separate SSN hit-v2 failure flag is needed.
+- Updating the AI-readable SPEC interpretation for the post-implementation
+  follow-ups in `context/README.md`: focused output fixture checks against the
+  reviewed `manual_best` workbook, OpenAlex current-data confidence checks for
+  single SSN hit-v2 author selections with append-only JSONL reuse, and marking
+  manual-best force-in resource handling as pending.
 
 ## Done - Final Patch
+
+- Added AI SPEC detail for the three context README follow-ups: fixture paths
+  and expected exceptions for `manual_best` output checks, exact OpenAlex API
+  request/cache/logging expectations, and explicit pending status for a future
+  manual-best override `RegisteredResource`/handler.
+- Clarified the OpenAlex confidence gate in the AI SPEC: a current OpenAlex top
+  author-id match keeps the single SSN hit-v2 author; mismatch/no result makes
+  hit v2 fail for that name key and selects the full nonzero-sum-1pct candidate
+  pool for subset 2 review.
+- Noted that the OpenAlex JSONL log schema-version constant belongs in
+  `vars.py`.
 
 - Implemented the revised SSN hit v2 selection rule in
   `src/helpers/ssn_hit_selection.py`: Tukey bounds are per `name_key`, singleton
