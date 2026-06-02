@@ -206,3 +206,128 @@ leading to a release of
     The manual review
     basically was just confirming that
     matches were correct.
+
+### post-implementation
+
+as of parent commit:
+`2654cc0ac0f64ee568a18fac8fe56b06f530d58d`.
+
+I have run repl for
+mode 1 and 2 after Tukey per-row,
+with config therefore:
+
+```json
+{
+  ...
+  "match_rule_version": {
+    "xlsx_name": 2,
+    "docx_name": 1,
+    "ssn_name": 2,
+    "ssn_hit": 2
+  },
+  ...
+}
+```
+
+Looks good and overall aligns with what
+I expected based on my analysis:
+
+`./duckdb_ui_20260601T1750Z_export_edit_done.xlsx`.
+
+So for instance partition 2 now
+only has 3 namekeys:
+
+{"ktp.first_name": "Rasmus", "ktp.last_name": "Nielsenlo"}
+
+{"ktp.first_name": "Baerbel-Maria", "ktp.last_name": "Kurth"}
+
+{"ktp.first_name": "Huaiyu Y", "ktp.last_name": "Mi"}
+
+Of these 2 except Rasmus were also
+ones I say in the analysis.
+
+I've checked these three
+against OpenAlex again now
+at <https://openalex.org/authors>, and
+I confirm that all three give 
+`There are no results for this search.`
+
+The breakdown is:
+
+```
+Rule                                           Pass   Fail
+----------------------------------------------------------
+sciscinet: exactly one innerdict                304      3
+xlsx: all present ktp.xlsx_match exact          282     25
+docx: required ktp.table_1_* non-empty          207    100
+----------------------------------------------------------
+mode_1                                          186    121
+mode_2                                          121    186
+mode_3                                          280     27
+mode_4                                           27    280
+```
+
+Which totally makes sense
+because sciscinet matches
+almost completely now
+due to the good-quality algorithm
+while xlsx is cautious and
+thus keeps non-exact matches
+for a quick check.
+docx stays same at 100 obviously.
+
+Now what I need to do is
+to fully complete the
+`tasks-20260526-match-patch`:
+
+- I'd like to use the `*export_edit_done.xlsx` above
+  as a direct test fixture against outputs
+  to make sure they align,
+  reaffirming my happy interpretation here.
+
+  Interestingly,
+  this below is now 
+  confirmed in subset 1 and
+  has the right authorid matched!
+
+  | ktp.source_key | manual_best | manual_best_note |
+  |---|---|---|
+  | {"ktp.first_name": "Jacomine ", "ktp.last_name": "Krijnse-Locker"} | A5111904537 | "Not found under SSN v2 subset 1, probably under subset 2 due to non-exact matches. <br> Perhaps excluded under non-zero hit rule, as A5111904537, which is max works count, has count of 70 only." |
+
+  While this one
+  truly is in subset 2
+  due to a non-exact xlsx match, but
+  the authorid matched there is correct!
+
+  | ktp.source_key | manual_best | manual_best_note |
+  |---|---|---|
+  | {"ktp.first_name": "Baoshan ", "ktp.last_name": "Xing"} | A5035633946 | "Not found under SSN v2 subset 1, probably under subset 2 due to non-exact matches. <br> Less likely to fall under zero top 1pct hits as A5035633946, which is max works count, has works count of 1035." |
+
+  While this is good to know,
+  I would also prefer
+  algorithmic verification that
+  all where authorid with max works count is
+  "correct but no feedback to total candidate list" are
+  truly matched now and in subset 1;
+  in short,
+  I need to assert that
+  `manual_best` is equal to the authorid here,
+  except for the known wrong matches below.
+- Implement OpenAlex API cross-matches
+  to catch these falsely confidently matched ones,
+  like the ones I identified in the 
+  `*export_edit_done.xlsx`:
+  
+  | manual_best | manual_best_note
+  |---|---|
+  | A5100396117 | "A5100322864 has no ""Peng Wang"" alt name on OpenAlex but SSN v2 apparently has - not checking anymore because ssn_name v2 matching is robust. <br> Therefore here nothing could have been done to prevent the mismatch - it's in OA data." |
+  | A5100398890 | "A5100383082 has no ""Yulin Chen"" alt name on OpenAlex but confirmed present in SSN v2. <br> Therefore here nothing could have been done to prevent the mismatch - it's in OA data."
+  | A5049493168 | "A5076843232 has no ""Kuishuang Feng"" alt name anymore on OpenAlex, but SSN v2 apparently has - not checking anymore because ssn_name v2 matching is robust. <br> Therefore here nothing could have been done to prevent the mismatch - it's in OA data." |
+  | A5009534643 | "A5013357576 has no ""Zhiqun Lin"" alt name anymore on OpenAlex, but confirmed present in SSN v2. <br> Also, due to the absence of per-row Tukey outliers, selection must have happened here <br> from total candidate list, but that was not in the SQL query - need to add." |
+- Force the `manual_best` ones above,
+  that are already known,
+  into the pipeline so that the
+  appropriate innerdict was selected. 
+  For this I need a
+  new `RegisteredResource` and a
+  handler for this resource. 
