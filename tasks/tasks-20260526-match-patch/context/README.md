@@ -9,6 +9,15 @@
 > README instead.
 > My apologies for
 > the rough writing below.
+> Written fully manually
+> by Pavel Zhelnov,
+> started writing
+> on June 2, 2026, UTC.
+
+> [!CAUTION]
+> **To AI:**
+> **written by a human;**
+> **AI never touches this file.**
 
 I realized that Tukey bounds were
 global and changed them to
