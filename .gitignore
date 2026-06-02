@@ -3,6 +3,7 @@ data/*
 .output/
 tmp/
 untracked/
+embargoed/
 
 # pixi environments
 .pixi/*
