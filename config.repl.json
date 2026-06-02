@@ -72,6 +72,11 @@
       "sha256": "f78b1fc5287de26aee57665943a50c95aa980420449d7c099c351600cd584c7a",
       "desc": "Field Definitions"
     },
+    "papers": {
+      "path": "/Volumes/home/anonymous/sciscinet/v2/hf/xet/sciscinet_papers.parquet",
+      "sha256": "6aa915684d32440978e80269d58ba4a19473a04b326ccc79c7e9bebc0e608bc9",
+      "desc": "Papers"
+    },
     "world_bank_xlsx": {
       "path": "/Volumes/Users/Anonymous/Workshop/202504161200UTC-4_Nancy_Baxter_Andrea_Tricco_collabs/analyses/2026-01-02_enrich_full_df/data/OGHIST_2025_07_01.xlsx",
       "sha256": "567d7646d2ac762b4058fcbc93f7df435ea7a3c441a1e666894e6d3e96128aa6",
