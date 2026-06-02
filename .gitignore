@@ -2,6 +2,7 @@
 data/*
 .output/
 tmp/
+untracked/
 
 # pixi environments
 .pixi/*
