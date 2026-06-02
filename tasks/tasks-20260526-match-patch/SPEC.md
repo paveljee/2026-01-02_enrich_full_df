@@ -234,7 +234,7 @@ The surgical patches include:
   it's been empirically shown
   to perform impressively.
   consider this query:
-  `./context/duckdb_ui_20260527T2115Z.sql`.
+  `./context/duckdb_ui_20260601T1750Z.sql`.
   this is NOT the exact query
   we need to wire in here, but
   the actually query must be
@@ -571,11 +571,16 @@ The AI-readable interpretation is:
   candidate view for downstream enrichment/output is simply the nonzero-hit
   author-match view.
 - `match_rule_version.ssn_hit = 2` adds the Tukey-outlier candidate reduction.
-  The referenced SQL file
-  `tasks/tasks-20260526-match-patch/context/duckdb_ui_20260527T2115Z.sql` is a
-  useful source for the three metrics and the Tukey flag definition, but it is
-  not the exact implementation query and its later ranking/tie-breaker behavior
-  should not be copied wholesale.
+- The implementation contract for SSN hit v2 is fully specified in the bullets
+  below.
+- The production SSN hit v2 rule is: after the existing nonzero-hit SSN
+  candidate set exists, calculate Tukey fences separately within each
+  `name_key`, collect candidates that are outliers under at least one of the
+  three metrics, and then use max `works_count` to select a single confident
+  author when possible. No-outlier name keys still use the max-works rule over
+  the full nonzero-hit candidate pool. The rule falls back to returning the full
+  nonzero-hit candidate pool only when a confident max-works decision is not
+  possible.
 - For SSN hit v2, build a narrow candidate-metric relation from the nonzero-hit
   author matches and only the metric columns needed for selection:
   `ktp.ssn_sum_hit_1pct`, `ssnad.works_count`, and `ssnad.cited_by_count`. Keep
@@ -584,40 +589,87 @@ The AI-readable interpretation is:
   come from author_details at this stage, join only `authorid`, `works_count`,
   and `cited_by_count`, or reuse the already-filtered/narrow author-details
   materialization if it is available at that point in the step.
-- Compute Tukey bounds globally over the v2 nonzero-hit candidate rows for each
-  metric, matching the referenced query's definition: `q1 = quantile_cont(metric,
-  0.25)`, `q3 = quantile_cont(metric, 0.75)`, `iqr = q3 - q1`, and a row is an
-  outlier for that metric when `metric < q1 - 1.5 * iqr` or
-  `metric > q3 + 1.5 * iqr`. Null metric values should not create a true Tukey
-  flag.
+- The candidate-metric relation should be created only for
+  `match_rule_version.ssn_hit = 2`. It should be narrow and should include the
+  original columns from the nonzero-hit author-match view plus these SQL-derived
+  metric columns:
+  - `ssn_hit_sum_hit_1pct_metric = TRY_CAST(ktp.ssn_sum_hit_1pct AS DOUBLE)`,
+    sourced from the hit aggregate joined by `name_key` and author id;
+  - `ssn_hit_works_count_raw = ssnad.works_count`, preserved for audit/output;
+  - `ssn_hit_works_count_metric = TRY_CAST(ssnad.works_count AS DOUBLE)`, used
+    for quantiles and max-work comparison;
+  - `ssn_hit_cited_by_count_metric = TRY_CAST(ssnad.cited_by_count AS DOUBLE)`,
+    used for quantiles.
+- Compute Tukey bounds per `name_key` over that name key's v2 nonzero-hit
+  candidate rows for each metric:
+  - `ssn_q1 = quantile_cont(ssn_hit_sum_hit_1pct_metric, 0.25)`;
+  - `ssn_q3 = quantile_cont(ssn_hit_sum_hit_1pct_metric, 0.75)`;
+  - `works_q1 = quantile_cont(ssn_hit_works_count_metric, 0.25)`;
+  - `works_q3 = quantile_cont(ssn_hit_works_count_metric, 0.75)`;
+  - `cited_q1 = quantile_cont(ssn_hit_cited_by_count_metric, 0.25)`;
+  - `cited_q3 = quantile_cont(ssn_hit_cited_by_count_metric, 0.75)`.
+- For each metric, derive `lower = q1 - 1.5 * (q3 - q1)` and
+  `upper = q3 + 1.5 * (q3 - q1)` for that same `name_key`. A candidate is an
+  outlier for that metric when `metric < lower OR metric > upper`. Wrap each
+  metric flag with `COALESCE(..., false)` so null metric values do not create a
+  true Tukey flag.
+- Implement per-key bounds as relational SQL: group the candidate metric
+  relation by `name_key` to compute the three q1/q3 pairs, derive lower/upper
+  fences in that grouped relation, and join those per-key bounds back to
+  candidate rows on `name_key`.
+- The row-level combined flag is
+  `ssn_hit_row_has_tukey_outlier = ssn_flag OR works_flag OR cited_flag`. The
+  name-key-level combined flag is true if any row in that `name_key` has the
+  row-level combined flag true, for example
+  `MAX(CASE WHEN ssn_hit_row_has_tukey_outlier THEN 1 ELSE 0 END) OVER
+  (PARTITION BY name_key) = 1`.
 - The v2 candidate-metric view should expose auditable columns for the three
-  metric flags and the raw work count, for example:
+  metric flags, row-level combined flag, per-key combined flag, raw work count,
+  and enough per-key bound columns to explain/debug selection. At minimum it
+  should expose:
   `ktp.ssn_hit_sum_hit_1pct_is_tukey_outlier`,
   `ktp.ssn_hit_works_count_is_tukey_outlier`,
   `ktp.ssn_hit_cited_by_count_is_tukey_outlier`,
-  `ktp.ssn_hit_row_has_tukey_outlier`, and `ktp.ssn_hit_works_count_raw`. It
-  should also expose the hit rule version, for example `ktp.ssn_hit_rule = "v2"`.
-- For SSN hit v2, filter to candidates where at least one of the three Tukey
-  flags is true. Within each `name_key`, find the maximum raw `works_count`
-  among those outlier candidates. Keep every outlier candidate whose raw
-  `works_count` equals that maximum. Do not apply the referenced query's
-  secondary ordering by `ktp.ssn_sum_hit_1pct` or `ssnad.cited_by_count` as a
-  tiebreaker. Ties on raw `works_count` intentionally keep multiple SSN
-  innerdicts so the name key lands in subset 2 for human review.
-- If a `name_key` has nonzero-hit SSN candidates but none of them are Tukey
-  outliers under v2, the hit-selection rule falls back to v1 behavior for that
-  name key: all nonzero-hit candidates remain selected/effective innerdicts.
-  This fallback can still send the name key to subset 2 when it leaves multiple
-  SSN innerdicts. Make the fallback auditable in the v2 selection relation, for
-  example with `ktp.ssn_hit_fallback_no_tukey_outlier = true` on those retained
-  rows, while leaving the three Tukey flags false.
+  `ktp.ssn_hit_row_has_tukey_outlier`,
+  `ktp.ssn_hit_name_key_has_tukey_outlier`, and
+  `ktp.ssn_hit_works_count_raw`. It should also expose the hit rule version,
+  for example `ktp.ssn_hit_rule = "v2"`.
+- For SSN hit v2 selection, first define the nonzero pool for each `name_key` as
+  the rows in the existing nonzero-hit author-match view. Then apply these
+  rules in order:
+  - if the nonzero pool is empty, no SSN row is selected and the name key remains
+    unresolved by SSN;
+  - if any row in the nonzero pool has missing or non-castable `works_count`,
+    the v2 rule fails for that name key and all nonzero-pool rows are selected
+    for subset 2 review;
+  - otherwise, if the nonzero pool has one or more per-key Tukey outliers, the
+    max-works decision pool is all outlier rows for that `name_key`;
+  - otherwise, the max-works decision pool is the full nonzero pool for that
+    `name_key`.
+- Within the max-works decision pool, find the maximum numeric works-count
+  metric. If exactly one author ID has that maximum works count, select that one
+  candidate. If two or more author IDs share the maximum works count, the v2
+  rule fails for that name key and all nonzero-pool rows are selected for subset
+  2 review. Preserve `ktp.ssn_hit_works_count_raw` for audit/output.
+- `ktp.ssn_sum_hit_1pct` and `ssnad.cited_by_count` participate in Tukey outlier
+  classification, not in the max-work decision.
+- Failure/fallback states should be auditable in the v2 selection relation,
+  especially missing works count and max-works tie. If a failure state selects a
+  single nonzero row, step 10 partitioning must still treat that name key as SSN
+  unresolved so it lands in subset 2.
+- The selected/effective SSN rows under v2 are therefore:
+  - no rows when there are no nonzero-hit candidates;
+  - all nonzero-hit candidates when any nonzero-hit candidate has missing or
+    non-castable `works_count`;
+  - exactly one candidate when the max-works decision pool has a unique maximum
+    raw/numeric `works_count`;
+  - all nonzero-hit candidates when the max-works decision pool has a tie for
+    maximum raw/numeric `works_count`.
 - Downstream step 9 enrichment should consume one effective author-match view
   after hit selection. In v1 this view aliases or reproduces the nonzero-hit
-  candidate set; in v2 it is the max-work-among-Tukey-outliers selected set for
-  name keys with at least one Tukey outlier, plus the v1-style all-nonzero-hit
-  fallback set for name keys with no Tukey outliers. This keeps all later SSN
-  innerdict generation, top papers, institutions, field mapping, and step 10
-  partitioning aligned with the selected candidates.
+  candidate set; in v2 it is the selected set described immediately above. This
+  keeps all later SSN innerdict generation, top papers, institutions, field
+  mapping, and step 10 partitioning aligned with the selected candidates.
 - The SSN hit v2 implementation must keep the author-output SQL parse-safe when
   it injects audit columns. The generated select-list fragment for v2 hit
   metadata must close every quoted alias and leave a valid comma boundary before
@@ -631,20 +683,32 @@ The AI-readable interpretation is:
 - The v2 hit-selection breakdown should include Tukey bounds for each of the
   three metrics: q1, q3, lower fence, and upper fence for
   `ktp.ssn_sum_hit_1pct`, `ssnad.works_count`, and `ssnad.cited_by_count`.
+  Because these bounds are per name key, expose the per-key bound columns in the
+  v2 candidate metric artifact/relation for review queries, and keep step logs
+  compact by reporting selection/count diagnostics rather than printing one row
+  per name key.
 - The v2 hit-selection breakdown should also include candidate and selection
   counts: total nonzero candidate rows/name keys/authors, rows outlying by each
   metric, rows with any Tukey outlier, name keys with at least one Tukey
-  outlier, fallback/no-outlier name keys, selected rows/name keys/authors,
-  selected rows retained by the Tukey max-work rule, selected rows retained by
-  the no-outlier fallback, non-outlier rows pruned, outlier rows pruned because
-  they were not max-work winners, number of name keys with exactly one selected
-  row, number with multiple selected rows/ties, and the maximum selected row
-  count for any one name key.
+  outlier, name keys whose max-works decision pool is the outlier pool, name
+  keys whose max-works decision pool is the full nonzero pool because no
+  outliers exist, rows/name keys with missing or non-castable `works_count`,
+  unique max-work winner name keys, max-work tie/failure name keys, selected
+  rows/name keys/authors, selected rows retained by unique max-work selection,
+  selected rows retained because missing works count selects all nonzero rows,
+  selected rows retained because max-work ties select all nonzero rows,
+  non-selected rows pruned by unique max-work selection, number of name keys
+  with exactly one selected row, number with multiple selected rows/ties, and
+  the maximum selected row count for any one name key.
 - Implement the v2 logging breakdown from the same production SQL relations used
   by selection, preferably through the centralized SSN hit-selection helper, not
   by reimplementing Tukey classification in Python. Add a focused DuckDB test
-  for the breakdown query on synthetic candidate rows, including the case where
-  max `works_count` outside the Tukey-outlier set must not be selected.
+  for the breakdown query on synthetic candidate rows, including cases where
+  per-name-key bounds drive selection, max `works_count` outside the
+  Tukey-outlier set must not be selected when outliers exist, no-outlier keys
+  with a unique max works count select that unique author, missing works count
+  selects all nonzero candidates and remains unresolved, and max-work ties
+  select all nonzero candidates.
 - Keep step 9 logging plumbing plain and local to the already-computed SQL
   result rows. Do not add generic row-to-dict formatting helpers in the step;
   the v1 branch should remain obviously the exact nonzero-hit alias, and the v2
@@ -654,9 +718,23 @@ The AI-readable interpretation is:
   v2 punctuation-to-space behavior such as `Claire M. Fraser` matching
   `Claire M Fraser`, and negative cases proving v2 does not implement
   XLSX-style initials matching) and hit-rule behavior (`ssn_hit` v1 keeps all
-  nonzero-hit candidates, `ssn_hit` v2 keeps a unique max-work Tukey outlier,
-  v2 keeps tied max-work Tukey outliers, and v2 falls back to all nonzero-hit
-  candidates when there are no Tukey outliers).
+  nonzero-hit candidates, `ssn_hit` v2 uses per-name-key Tukey bounds, v2 keeps
+  a unique max-work author from the outlier pool when outliers exist, v2 keeps a
+  unique max-work author from the full nonzero pool when no outliers exist, v2
+  falls back to all nonzero-hit candidates when any nonzero candidate has
+  missing or non-castable `works_count`, and v2 falls back to all nonzero-hit
+  candidates when there is a max-work tie).
+- Use `tasks/tasks-20260526-match-patch/context/duckdb_ui_20260601T1750Z_export_edit_done.xlsx`
+  as an edge-case catalog for SSN hit v2 tests. The `manual_best` and
+  `manual_best_note` columns identify approximately 35 reviewed source keys and
+  expected/observed behavior. Do not make the tests depend on the old run DB;
+  translate representative workbook cases into small DuckDB fixtures that still
+  execute the production helper SQL. Good fixture classes include: no per-key
+  outliers with a unique max-work winner, unique per-key outlier max-work
+  winner, high-work non-outlier that must not be selected when outliers exist,
+  any missing works count selecting all nonzero candidates for review, max-work
+  ties selecting all nonzero candidates for review, and rows illustrating known
+  SSN/OpenAlex data quality limits that the rule cannot solve.
 
 ### step 10 review dataframe
 

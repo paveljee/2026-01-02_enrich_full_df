@@ -23,7 +23,10 @@
 
 ## Doing Now
 
-- Ready for user rerun/benchmark of `match_rule_version.ssn_hit = 2`.
+- Updating the AI interpretation for the revised SSN hit v2 rule so the
+  implementor-facing SPEC is self-contained. Also inspected the reviewed XLSX
+  edge-case catalog for `manual_best` / `manual_best_note` examples. No code
+  changes until user approves the revised interpretation.
 
 ## Done - Final Patch
 
@@ -86,6 +89,16 @@
 - Verification passed: focused `tests/test_sciscinet_name_matching.py`, focused
   ruff/mypy on touched code, and full `pixi run pre-commit-repl` (80 passed, 2
   skipped).
+- Latest SPEC-review note: SSN hit v2 uses per-source-key/per-name-key Tukey
+  bounds; if any nonzero candidate has missing/non-castable works count, return
+  all nonzero rows for review; otherwise use the Tukey outlier pool if outliers
+  exist, or the full nonzero pool if no outliers exist; if that decision pool
+  has a unique max works-count author, select it; if max works count ties,
+  return all nonzero rows for review. The reviewed XLSX context file has 37 rows
+  with manual notes and should inform focused synthetic DuckDB test fixtures.
+- Revised the AI interpretation so the implementor-facing SPEC is self-contained:
+  it now spells out the candidate metric columns, per-key quantile/fence
+  formulas, null handling, combined flags, and v2 selection cases inline.
 
 ## Done
 
@@ -279,21 +292,21 @@
   distinguishes scalar-last-name pure v1 payloads from list-shaped v1 fallback
   payloads produced inside XLSX v2 mode, preserving the existing behavior that
   v2-mode v1 fallback rows are non-exact for partitioning.
-- Re-read the updated human SPEC and the referenced task-local DuckDB UI query
-  `tasks/tasks-20260526-match-patch/context/duckdb_ui_20260527T2115Z.sql`.
-  The query is useful for Tukey outlier definitions and the three SSN hit
-  metrics, but the human prose supersedes its ranking/tie-breaker behavior.
+- Earlier SSN hit-v2 interpretation used task-local DuckDB UI query output as
+  context for Tukey definitions and metrics. This is superseded by the latest
+  self-contained AI SPEC text, which spells out the implementation contract
+  directly.
 - Updated the AI interpretation for the final patch: config is now
   `match_rule_version` with `xlsx_name`, `docx_name`, `ssn_name`, and `ssn_hit`;
   `name_matching_rule_version` is stale; the unnest parquet rule metadata should
   refer to `match_rule_version.ssn_name`; and SSN hit v2 should filter nonzero
-  candidates to Tukey outliers, then keep max raw `works_count` outliers per
-  name key, preserving max-work ties for subset 2 review.
-- Clarified in the AI interpretation that the referenced SQL's secondary
-  ordering by hit/citation metrics should not be copied, that no-outlier SSN hit
-  v2 groups fall back to v1 by retaining all nonzero-hit candidates, and that
-  downstream step 9 should consume one effective author-match view after hit
-  selection.
+  candidates to Tukey outliers when present, then use max raw `works_count` per
+  name key, with max-work ties selecting the full active pool for subset 2
+  review.
+- Clarified in the AI interpretation that SSN hit v2 uses max works count only
+  after per-key outlier filtering, that no-outlier groups fall back to v1 by
+  retaining all nonzero-hit candidates, and that downstream step 9 should consume
+  one effective author-match view after hit selection.
 
 ## Verification
 
