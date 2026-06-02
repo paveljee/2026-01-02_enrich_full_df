@@ -119,6 +119,7 @@ def ssn_hit_v2_candidate_metrics_table_sql(
         ),
         bounds_raw AS (
             SELECT
+                name_key,
                 quantile_cont(ssn_hit_sum_hit_1pct_metric, 0.25) AS ssn_q1,
                 quantile_cont(ssn_hit_sum_hit_1pct_metric, 0.75) AS ssn_q3,
                 quantile_cont(ssn_hit_works_count_metric, 0.25) AS works_q1,
@@ -126,9 +127,11 @@ def ssn_hit_v2_candidate_metrics_table_sql(
                 quantile_cont(ssn_hit_cited_by_count_metric, 0.25) AS cited_q1,
                 quantile_cont(ssn_hit_cited_by_count_metric, 0.75) AS cited_q3
             FROM candidate_metrics
+            GROUP BY name_key
         ),
         bounds AS (
             SELECT
+                name_key,
                 ssn_q1,
                 ssn_q3,
                 ssn_q1 - 1.5 * (ssn_q3 - ssn_q1) AS ssn_lower,
@@ -146,7 +149,7 @@ def ssn_hit_v2_candidate_metrics_table_sql(
         flagged_metrics AS (
             SELECT
                 c.*,
-                b.*,
+                b.* EXCLUDE (name_key),
                 COALESCE(
                     c.ssn_hit_sum_hit_1pct_metric < b.ssn_lower
                     OR c.ssn_hit_sum_hit_1pct_metric > b.ssn_upper,
@@ -163,7 +166,8 @@ def ssn_hit_v2_candidate_metrics_table_sql(
                     false
                 ) AS ssn_hit_cited_by_count_is_tukey_outlier
             FROM candidate_metrics c
-            CROSS JOIN bounds b
+            JOIN bounds b
+              ON b.name_key = c.name_key
         ),
         flagged AS (
             SELECT
@@ -174,30 +178,100 @@ def ssn_hit_v2_candidate_metrics_table_sql(
                     OR f.ssn_hit_cited_by_count_is_tukey_outlier
                 ) AS ssn_hit_row_has_tukey_outlier
             FROM flagged_metrics f
+        ),
+        name_key_flags AS (
+            SELECT
+                f.*,
+                COUNT(*) OVER (PARTITION BY f.name_key) AS ssn_hit_nonzero_pool_rows,
+                MAX(CASE WHEN f.ssn_hit_row_has_tukey_outlier THEN 1 ELSE 0 END)
+                    OVER (PARTITION BY f.name_key) = 1
+                    AS ssn_hit_name_key_has_tukey_outlier,
+                MAX(CASE WHEN f.ssn_hit_works_count_metric IS NULL THEN 1 ELSE 0 END)
+                    OVER (PARTITION BY f.name_key) = 1
+                    AS ssn_hit_name_key_has_missing_works_count
+            FROM flagged f
+        ),
+        decision_pool AS (
+            SELECT
+                n.*,
+                n.ssn_hit_nonzero_pool_rows = 1 AS ssn_hit_singleton_nonzero,
+                (
+                    n.ssn_hit_nonzero_pool_rows > 1
+                    AND n.ssn_hit_name_key_has_missing_works_count
+                ) AS ssn_hit_multi_candidate_missing_works_count,
+                CASE
+                    WHEN n.ssn_hit_nonzero_pool_rows = 1 THEN true
+                    WHEN n.ssn_hit_name_key_has_missing_works_count THEN true
+                    WHEN n.ssn_hit_name_key_has_tukey_outlier
+                        THEN n.ssn_hit_row_has_tukey_outlier
+                    ELSE true
+                END AS ssn_hit_decision_pool_row
+            FROM name_key_flags n
+        ),
+        decision_stats AS (
+            SELECT
+                d.*,
+                MAX(
+                    CASE
+                        WHEN d.ssn_hit_decision_pool_row
+                            THEN d.ssn_hit_works_count_metric
+                        ELSE NULL
+                    END
+                ) OVER (PARTITION BY d.name_key) AS ssn_hit_decision_pool_max_works
+            FROM decision_pool d
+        ),
+        final_stats AS (
+            SELECT
+                d.*,
+                SUM(
+                    CASE
+                        WHEN d.ssn_hit_decision_pool_row
+                             AND d.ssn_hit_works_count_metric IS NOT DISTINCT FROM
+                                 d.ssn_hit_decision_pool_max_works
+                            THEN 1
+                        ELSE 0
+                    END
+                ) OVER (PARTITION BY d.name_key) AS ssn_hit_decision_pool_max_works_count
+            FROM decision_stats d
         )
         SELECT
             f.*,
-            MAX(CASE WHEN f.ssn_hit_row_has_tukey_outlier THEN 1 ELSE 0 END)
-                OVER (PARTITION BY f.name_key) = 1 AS ssn_hit_name_key_has_tukey_outlier
-        FROM flagged f
+            (
+                NOT f.ssn_hit_multi_candidate_missing_works_count
+                AND f.ssn_hit_nonzero_pool_rows > 1
+                AND f.ssn_hit_decision_pool_max_works_count > 1
+            ) AS ssn_hit_max_works_tie,
+            (
+                f.ssn_hit_multi_candidate_missing_works_count
+                OR (
+                    f.ssn_hit_nonzero_pool_rows > 1
+                    AND f.ssn_hit_decision_pool_max_works_count > 1
+                )
+            ) AS ssn_hit_return_all_nonzero,
+            (
+                f.ssn_hit_decision_pool_row
+                AND f.ssn_hit_nonzero_pool_rows > 1
+                AND NOT f.ssn_hit_multi_candidate_missing_works_count
+                AND f.ssn_hit_decision_pool_max_works_count = 1
+                AND f.ssn_hit_works_count_metric IS NOT DISTINCT FROM
+                    f.ssn_hit_decision_pool_max_works
+            ) AS ssn_hit_unique_max_works_winner
+        FROM final_stats f
     """
 
 
 def ssn_hit_v2_bounds_summary_sql() -> str:
     return f"""
         SELECT
-            MAX(ssn_q1) AS ssn_q1,
-            MAX(ssn_q3) AS ssn_q3,
-            MAX(ssn_lower) AS ssn_lower,
-            MAX(ssn_upper) AS ssn_upper,
-            MAX(works_q1) AS works_q1,
-            MAX(works_q3) AS works_q3,
-            MAX(works_lower) AS works_lower,
-            MAX(works_upper) AS works_upper,
-            MAX(cited_q1) AS cited_q1,
-            MAX(cited_q3) AS cited_q3,
-            MAX(cited_lower) AS cited_lower,
-            MAX(cited_upper) AS cited_upper
+            COUNT(*) AS candidate_rows,
+            COUNT(DISTINCT name_key) AS candidate_name_keys,
+            COUNT(DISTINCT name_key) FILTER (WHERE ssn_hit_singleton_nonzero)
+                AS singleton_nonzero_name_keys,
+            COUNT(*) FILTER (WHERE ssn_hit_works_count_metric IS NULL)
+                AS missing_works_count_rows,
+            COUNT(DISTINCT name_key) FILTER (
+                WHERE ssn_hit_multi_candidate_missing_works_count
+            ) AS multi_candidate_missing_works_count_name_keys
         FROM {PARQUET_AUTHOR_MATCH_HIT_CANDIDATE_TABLE}
     """
 
@@ -240,25 +314,48 @@ def ssn_hit_v2_selection_breakdown_sql(*, author_id_col: str) -> str:
                 AS any_tukey_outlier_rows,
             COUNT(DISTINCT name_key) FILTER (WHERE ssn_hit_name_key_has_tukey_outlier)
                 AS name_keys_with_tukey_outlier,
-            COUNT(DISTINCT name_key) FILTER (WHERE NOT ssn_hit_name_key_has_tukey_outlier)
-                AS fallback_no_outlier_name_keys,
+            COUNT(DISTINCT name_key) FILTER (
+                WHERE ssn_hit_nonzero_pool_rows > 1
+                  AND ssn_hit_name_key_has_tukey_outlier
+                  AND NOT ssn_hit_multi_candidate_missing_works_count
+            ) AS outlier_decision_pool_name_keys,
+            COUNT(DISTINCT name_key) FILTER (
+                WHERE ssn_hit_nonzero_pool_rows > 1
+                  AND NOT ssn_hit_name_key_has_tukey_outlier
+                  AND NOT ssn_hit_multi_candidate_missing_works_count
+            ) AS full_nonzero_no_outlier_decision_pool_name_keys,
+            COUNT(DISTINCT name_key) FILTER (WHERE ssn_hit_singleton_nonzero)
+                AS singleton_nonzero_name_keys,
+            COUNT(*) FILTER (WHERE ssn_hit_works_count_metric IS NULL)
+                AS missing_works_count_rows,
+            COUNT(DISTINCT name_key) FILTER (
+                WHERE ssn_hit_multi_candidate_missing_works_count
+            ) AS multi_candidate_missing_works_count_name_keys,
+            COUNT(*) FILTER (WHERE ssn_hit_decision_pool_row) AS decision_pool_rows,
+            COUNT(DISTINCT name_key) FILTER (WHERE ssn_hit_decision_pool_row)
+                AS decision_pool_name_keys,
+            COUNT(DISTINCT name_key) FILTER (WHERE ssn_hit_unique_max_works_winner)
+                AS unique_max_work_winner_name_keys,
+            COUNT(DISTINCT name_key) FILTER (WHERE ssn_hit_max_works_tie)
+                AS max_work_tie_name_keys,
             COUNT(*) FILTER (WHERE is_selected) AS selected_rows,
             COUNT(DISTINCT name_key) FILTER (WHERE is_selected) AS selected_name_keys,
             COUNT(DISTINCT "{author_id_col}") FILTER (WHERE is_selected) AS selected_authors,
-            COUNT(*) FILTER (WHERE is_selected AND ssn_hit_name_key_has_tukey_outlier)
-                AS selected_tukey_max_work_rows,
-            COUNT(*) FILTER (WHERE is_selected AND NOT ssn_hit_name_key_has_tukey_outlier)
-                AS selected_fallback_rows,
+            COUNT(*) FILTER (WHERE is_selected AND ssn_hit_singleton_nonzero)
+                AS selected_singleton_rows,
+            COUNT(*) FILTER (WHERE is_selected AND ssn_hit_unique_max_works_winner)
+                AS selected_unique_max_work_rows,
+            COUNT(*) FILTER (
+                WHERE is_selected AND ssn_hit_multi_candidate_missing_works_count
+            ) AS selected_multi_missing_works_count_rows,
+            COUNT(*) FILTER (
+                WHERE is_selected AND ssn_hit_max_works_tie
+            ) AS selected_max_work_tie_rows,
             COUNT(*) FILTER (
                 WHERE NOT is_selected
-                  AND ssn_hit_name_key_has_tukey_outlier
-                  AND NOT ssn_hit_row_has_tukey_outlier
-            ) AS pruned_non_outlier_rows,
-            COUNT(*) FILTER (
-                WHERE NOT is_selected
-                  AND ssn_hit_name_key_has_tukey_outlier
-                  AND ssn_hit_row_has_tukey_outlier
-            ) AS pruned_outlier_nonmax_rows,
+                  AND NOT ssn_hit_return_all_nonzero
+                  AND NOT ssn_hit_singleton_nonzero
+            ) AS pruned_unique_max_work_rows,
             COALESCE((
                 SELECT COUNT(*)
                 FROM selected_counts
@@ -294,15 +391,6 @@ def ssn_hit_selected_view_sql(
 
     return f"""
         CREATE OR REPLACE VIEW {PARQUET_AUTHOR_MATCH_HIT_SELECTED_VIEW} AS
-        WITH
-        outlier_max_works AS (
-            SELECT
-                name_key,
-                MAX(ssn_hit_works_count_metric) AS max_works_count
-            FROM {PARQUET_AUTHOR_MATCH_HIT_CANDIDATE_TABLE}
-            WHERE ssn_hit_row_has_tukey_outlier
-            GROUP BY name_key
-        )
         SELECT
             w.* EXCLUDE (
                 ssn_hit_sum_hit_1pct_metric,
@@ -325,7 +413,17 @@ def ssn_hit_selected_view_sql(
                 ssn_hit_works_count_is_tukey_outlier,
                 ssn_hit_cited_by_count_is_tukey_outlier,
                 ssn_hit_row_has_tukey_outlier,
-                ssn_hit_name_key_has_tukey_outlier
+                ssn_hit_name_key_has_tukey_outlier,
+                ssn_hit_nonzero_pool_rows,
+                ssn_hit_name_key_has_missing_works_count,
+                ssn_hit_singleton_nonzero,
+                ssn_hit_multi_candidate_missing_works_count,
+                ssn_hit_decision_pool_row,
+                ssn_hit_decision_pool_max_works,
+                ssn_hit_decision_pool_max_works_count,
+                ssn_hit_max_works_tie,
+                ssn_hit_return_all_nonzero,
+                ssn_hit_unique_max_works_winner
             ),
             '{KTP_SSN_HIT_RULE_V2}' AS "{KTP_SSN_HIT_RULE_KEY}",
             w.ssn_hit_sum_hit_1pct_is_tukey_outlier
@@ -340,12 +438,7 @@ def ssn_hit_selected_view_sql(
             NOT w.ssn_hit_name_key_has_tukey_outlier
                 AS "{KTP_SSN_HIT_FALLBACK_NO_TUKEY_OUTLIER_COL}"
         FROM {PARQUET_AUTHOR_MATCH_HIT_CANDIDATE_TABLE} w
-        LEFT JOIN outlier_max_works o
-          ON o.name_key = w.name_key
-        WHERE (
-            w.ssn_hit_name_key_has_tukey_outlier
-            AND w.ssn_hit_row_has_tukey_outlier
-            AND w.ssn_hit_works_count_metric IS NOT DISTINCT FROM o.max_works_count
-        )
-        OR NOT w.ssn_hit_name_key_has_tukey_outlier
+        WHERE w.ssn_hit_singleton_nonzero
+           OR w.ssn_hit_return_all_nonzero
+           OR w.ssn_hit_unique_max_works_winner
     """

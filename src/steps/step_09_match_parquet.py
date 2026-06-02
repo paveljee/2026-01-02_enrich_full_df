@@ -394,48 +394,25 @@ def run(context: PipelineContext) -> StepResult:
         )
         bounds_row = conn.execute(ssn_hit_v2_bounds_summary_sql()).fetchone()
         if bounds_row is None:
-            bounds_values = ["null"] * 12
+            bounds_values = [0] * 5
         else:
-            bounds_values = [
-                "null" if value is None else f"{float(value):,.3f}" for value in bounds_row
-            ]
+            bounds_values = [int(value or 0) for value in bounds_row]
         (
-            ssn_q1,
-            ssn_q3,
-            ssn_lower,
-            ssn_upper,
-            works_q1,
-            works_q3,
-            works_lower,
-            works_upper,
-            cited_q1,
-            cited_q3,
-            cited_lower,
-            cited_upper,
+            candidate_metric_rows,
+            candidate_metric_name_keys,
+            singleton_nonzero_metric_name_keys,
+            missing_works_count_metric_rows,
+            multi_missing_works_count_metric_name_keys,
         ) = bounds_values
         log_tag(
             STEP_MATCH_PARQUET_LOG_TAG_VIEW_FILTER,
-            "SSN hit v2 Tukey bounds for ktp.ssn_sum_hit_1pct: "
-            f"q1={ssn_q1}, "
-            f"q3={ssn_q3}, "
-            f"lower={ssn_lower}, "
-            f"upper={ssn_upper}.",
-        )
-        log_tag(
-            STEP_MATCH_PARQUET_LOG_TAG_VIEW_FILTER,
-            "SSN hit v2 Tukey bounds for ssnad.works_count: "
-            f"q1={works_q1}, "
-            f"q3={works_q3}, "
-            f"lower={works_lower}, "
-            f"upper={works_upper}.",
-        )
-        log_tag(
-            STEP_MATCH_PARQUET_LOG_TAG_VIEW_FILTER,
-            "SSN hit v2 Tukey bounds for ssnad.cited_by_count: "
-            f"q1={cited_q1}, "
-            f"q3={cited_q3}, "
-            f"lower={cited_lower}, "
-            f"upper={cited_upper}.",
+            "SSN hit v2 per-name-key Tukey metrics: "
+            f"candidate rows={candidate_metric_rows:,}, "
+            f"name keys={candidate_metric_name_keys:,}, "
+            f"singleton nonzero name keys={singleton_nonzero_metric_name_keys:,}, "
+            f"missing works-count rows={missing_works_count_metric_rows:,}, "
+            "multi-candidate missing works-count name keys="
+            f"{multi_missing_works_count_metric_name_keys:,}.",
         )
 
     log_tag(
@@ -473,7 +450,7 @@ def run(context: PipelineContext) -> StepResult:
             ssn_hit_v2_selection_breakdown_sql(author_id_col=author_id_col)
         ).fetchone()
         if breakdown_row is None:
-            breakdown_values = [0] * 19
+            breakdown_values = [0] * 28
         else:
             breakdown_values = [int(value or 0) for value in breakdown_row]
         (
@@ -485,14 +462,23 @@ def run(context: PipelineContext) -> StepResult:
             cited_by_count_outlier_rows,
             any_tukey_outlier_rows,
             name_keys_with_tukey_outlier,
-            fallback_no_outlier_name_keys,
+            outlier_decision_pool_name_keys,
+            full_nonzero_no_outlier_decision_pool_name_keys,
+            singleton_nonzero_name_keys,
+            missing_works_count_rows,
+            multi_missing_works_count_name_keys,
+            decision_pool_rows,
+            decision_pool_name_keys,
+            unique_max_work_winner_name_keys,
+            max_work_tie_name_keys,
             selected_rows,
             selected_name_keys,
             selected_authors,
-            selected_tukey_max_work_rows,
-            selected_fallback_rows,
-            pruned_non_outlier_rows,
-            pruned_outlier_nonmax_rows,
+            selected_singleton_rows,
+            selected_unique_max_work_rows,
+            selected_multi_missing_works_count_rows,
+            selected_max_work_tie_rows,
+            pruned_unique_max_work_rows,
             one_selected_row_name_keys,
             multi_selected_row_name_keys,
             max_selected_rows_per_name_key,
@@ -512,7 +498,13 @@ def run(context: PipelineContext) -> StepResult:
             STEP_MATCH_PARQUET_LOG_TAG_VIEW_FILTER,
             "SSN hit v2 name-key selection: "
             f"name keys with Tukey outliers={name_keys_with_tukey_outlier:,}, "
-            f"fallback/no-outlier name keys={fallback_no_outlier_name_keys:,}; "
+            f"outlier decision-pool name keys={outlier_decision_pool_name_keys:,}, "
+            "full-nonzero/no-outlier decision-pool name keys="
+            f"{full_nonzero_no_outlier_decision_pool_name_keys:,}, "
+            f"singleton nonzero name keys={singleton_nonzero_name_keys:,}, "
+            "multi-candidate missing works-count name keys="
+            f"{multi_missing_works_count_name_keys:,}, "
+            f"max-work tie name keys={max_work_tie_name_keys:,}; "
             f"selected rows={selected_rows:,}, "
             f"selected name keys={selected_name_keys:,}, "
             f"selected author IDs={selected_authors:,}.",
@@ -520,10 +512,16 @@ def run(context: PipelineContext) -> StepResult:
         log_tag(
             STEP_MATCH_PARQUET_LOG_TAG_VIEW_FILTER,
             "SSN hit v2 row disposition: "
-            f"selected by Tukey max-work={selected_tukey_max_work_rows:,}, "
-            f"selected by no-outlier fallback={selected_fallback_rows:,}, "
-            f"pruned non-outliers={pruned_non_outlier_rows:,}, "
-            f"pruned outlier non-max rows={pruned_outlier_nonmax_rows:,}.",
+            f"decision-pool rows={decision_pool_rows:,}, "
+            f"decision-pool name keys={decision_pool_name_keys:,}, "
+            f"unique max-work winner name keys={unique_max_work_winner_name_keys:,}, "
+            f"missing works-count rows={missing_works_count_rows:,}; "
+            f"selected singleton rows={selected_singleton_rows:,}, "
+            f"selected unique max-work rows={selected_unique_max_work_rows:,}, "
+            "selected multi-candidate missing works-count rows="
+            f"{selected_multi_missing_works_count_rows:,}, "
+            f"selected max-work tie rows={selected_max_work_tie_rows:,}, "
+            f"pruned by unique max-work={pruned_unique_max_work_rows:,}.",
         )
         log_tag(
             STEP_MATCH_PARQUET_LOG_TAG_VIEW_FILTER,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 
 import duckdb
@@ -197,7 +198,7 @@ def _create_author_match_table(
 def _write_hit_selection_author_details(
     conn: duckdb.DuckDBPyConnection,
     path: Path,
-    rows: list[tuple[str, int, int]],
+    rows: Sequence[tuple[str, int | None, int | None]],
 ) -> None:
     conn.execute(
         """
@@ -323,12 +324,13 @@ def test_ssn_hit_v1_selected_view_is_exact_nonzero_hit_alias() -> None:
     assert selected_rows == nonzero_rows
 
 
-def test_ssn_hit_v2_selects_tukey_max_work_and_falls_back_to_v1(
+def test_ssn_hit_v2_selects_singletons_unique_max_and_review_fallbacks(
     tmp_path: Path,
 ) -> None:
     conn = _connect()
     author_details_path = tmp_path / "author_details.parquet"
     nonzero_rows: list[tuple[str, str]] = [
+        ("singleton-missing", "A010"),
         ("fallback", "A100"),
         ("fallback", "A101"),
         ("unique", "A200"),
@@ -336,19 +338,23 @@ def test_ssn_hit_v2_selects_tukey_max_work_and_falls_back_to_v1(
         ("unique", "A202"),
         ("tie", "A300"),
         ("tie", "A301"),
+        ("multi-missing", "A400"),
+        ("multi-missing", "A401"),
     ]
-    nonzero_rows.extend((f"background-{idx}", f"A4{idx:02d}") for idx in range(20))
     hit_rows = [
+        ("singleton-missing", "A010", 1),
         ("fallback", "A100", 1),
         ("fallback", "A101", 1),
         ("unique", "A200", 1),
-        ("unique", "A201", 1000),
-        ("unique", "A202", 1001),
-        ("tie", "A300", 1002),
-        ("tie", "A301", 1003),
+        ("unique", "A201", 1),
+        ("unique", "A202", 1),
+        ("tie", "A300", 1),
+        ("tie", "A301", 1),
+        ("multi-missing", "A400", 1),
+        ("multi-missing", "A401", 1),
     ]
-    hit_rows.extend((f"background-{idx}", f"A4{idx:02d}", 1) for idx in range(20))
     details_rows = [
+        ("A010", None, 1),
         ("A100", 10, 1),
         ("A101", 11, 1),
         ("A200", 12, 1),
@@ -356,8 +362,9 @@ def test_ssn_hit_v2_selects_tukey_max_work_and_falls_back_to_v1(
         ("A202", 40, 1),
         ("A300", 70, 1),
         ("A301", 70, 1),
+        ("A400", None, 1),
+        ("A401", 15, 1),
     ]
-    details_rows.extend((f"A4{idx:02d}", 20 + idx, 1) for idx in range(20))
     try:
         _create_nonzero_hit_tables(conn, nonzero_rows)
         _create_hit_agg_table(conn, hit_rows)
@@ -376,7 +383,13 @@ def test_ssn_hit_v2_selects_tukey_max_work_and_falls_back_to_v1(
                 "{KTP_SSN_HIT_WORKS_COUNT_RAW_COL}",
                 "{KTP_SSN_HIT_FALLBACK_NO_TUKEY_OUTLIER_COL}"
             FROM {PARQUET_AUTHOR_MATCH_HIT_SELECTED_VIEW}
-            WHERE name_key IN ('fallback', 'unique', 'tie')
+            WHERE name_key IN (
+                'fallback',
+                'multi-missing',
+                'singleton-missing',
+                'tie',
+                'unique'
+            )
             ORDER BY name_key, "{SSNAD_AUTHORID_COL}"
             '''
         ).fetchall()
@@ -384,11 +397,13 @@ def test_ssn_hit_v2_selects_tukey_max_work_and_falls_back_to_v1(
         conn.close()
 
     assert selected_rows == [
-        ("fallback", "A100", KTP_SSN_HIT_RULE_V2, False, False, 10, True),
         ("fallback", "A101", KTP_SSN_HIT_RULE_V2, False, False, 11, True),
-        ("tie", "A300", KTP_SSN_HIT_RULE_V2, True, True, 70, False),
-        ("tie", "A301", KTP_SSN_HIT_RULE_V2, True, True, 70, False),
-        ("unique", "A201", KTP_SSN_HIT_RULE_V2, True, True, 50, False),
+        ("multi-missing", "A400", KTP_SSN_HIT_RULE_V2, False, False, None, True),
+        ("multi-missing", "A401", KTP_SSN_HIT_RULE_V2, False, False, 15, True),
+        ("singleton-missing", "A010", KTP_SSN_HIT_RULE_V2, False, False, None, True),
+        ("tie", "A300", KTP_SSN_HIT_RULE_V2, False, False, 70, True),
+        ("tie", "A301", KTP_SSN_HIT_RULE_V2, False, False, 70, True),
+        ("unique", "A201", KTP_SSN_HIT_RULE_V2, False, False, 50, True),
     ]
 
 
@@ -402,11 +417,11 @@ def test_ssn_hit_v2_does_not_take_max_works_outside_tukey_outliers(
         (source_key, "A5101447280"),
         (source_key, "A5101447281"),
     ]
-    nonzero_rows.extend((f"background-{idx}", f"A6{idx:02d}") for idx in range(40))
+    nonzero_rows.extend((source_key, f"A51014472{idx:02d}") for idx in range(82, 91))
     hit_rows = [(source_key, "A5101447280", 1), (source_key, "A5101447281", 1000)]
-    hit_rows.extend((f"background-{idx}", f"A6{idx:02d}", 1) for idx in range(40))
+    hit_rows.extend((source_key, f"A51014472{idx:02d}", 1) for idx in range(82, 91))
     details_rows = [("A5101447280", 55, 100), ("A5101447281", 30, 100)]
-    details_rows.extend((f"A6{idx:02d}", 20 + idx, 100) for idx in range(40))
+    details_rows.extend((f"A51014472{idx:02d}", 50 + idx - 82, 100) for idx in range(82, 91))
     try:
         _create_nonzero_hit_tables(conn, nonzero_rows)
         _create_hit_agg_table(conn, hit_rows)
@@ -436,23 +451,32 @@ def test_ssn_hit_v2_does_not_take_max_works_outside_tukey_outliers(
 
     assert selected_rows == [("A5101447281", True, True, 30, False)]
     assert breakdown_row == (
-        42,
-        41,
-        42,
+        11,
         1,
+        11,
+        1,
+        1,
+        0,
+        1,
+        1,
+        1,
+        0,
+        0,
         0,
         0,
         1,
         1,
-        40,
-        41,
-        41,
-        41,
-        1,
-        40,
         1,
         0,
-        41,
+        1,
+        1,
+        1,
+        0,
+        1,
+        0,
+        0,
+        10,
+        1,
         0,
         1,
     )

@@ -32,6 +32,25 @@
 
 ## Done - Final Patch
 
+- Implemented the revised SSN hit v2 selection rule in
+  `src/helpers/ssn_hit_selection.py`: Tukey bounds are per `name_key`, singleton
+  nonzero candidates are accepted as-is, multi-candidate missing/non-castable
+  works counts return all nonzero rows, unique max works selects one row from
+  the decision pool, and max-work ties return all nonzero rows. The v1 hit view
+  remains the exact nonzero-hit alias.
+- Updated step 9 v2 logging to report compact per-key candidate metrics,
+  decision-pool counts, singleton accepts, multi-candidate missing works,
+  unique max-work winners, ties, selected rows, and pruned rows from production
+  SQL breakdowns.
+- Updated direct DuckDB SSN hit tests for singleton missing metrics, multi-row
+  missing metrics, no-outlier unique max selection, max-work tie fallback, and
+  per-key Tukey outlier selection that does not choose a higher-work non-outlier.
+- Focused verification passed: `pixi run pytest tests/test_sciscinet_name_matching.py -q`,
+  `pixi run python -m ruff check src/helpers/ssn_hit_selection.py src/steps/step_09_match_parquet.py tests/test_sciscinet_name_matching.py`,
+  and `pixi run python -m mypy src/helpers/ssn_hit_selection.py src/steps/step_09_match_parquet.py tests/test_sciscinet_name_matching.py`.
+- Full verification passed: `pixi run pre-commit-repl` (`ruff check src tests`,
+  `mypy src tests`, and `pytest -vv -s .`; 80 passed, 2 skipped).
+
 - Cut config over to `match_rule_version` (`xlsx_name`, `docx_name`, `ssn_name`,
   `ssn_hit`) and removed the active `name_matching_rule_version` path.
 - Centralized the new SSN hit audit column names and raw author-details column
