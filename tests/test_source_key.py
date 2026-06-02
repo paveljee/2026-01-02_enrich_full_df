@@ -19,7 +19,8 @@ class TestEnums:
         """Test ResourceGroup enum has expected values."""
         assert ResourceGroup.SCISCINET_HF == "sciscinet_hf"
         assert ResourceGroup.LLAMA_CPP == "llama_cpp"
-        assert len(list(ResourceGroup)) == 5
+        assert ResourceGroup.KTP_PIPELINE_ARTIFACT == "ktp_pipeline_artifact"
+        assert len(list(ResourceGroup)) == 6
     
     def test_fragment_type_values(self):
         """Test FragmentType enum has expected values."""

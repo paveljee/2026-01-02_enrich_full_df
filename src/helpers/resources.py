@@ -242,7 +242,7 @@ def _ensure_author_details_unnest_resource(
         path = Path(meta["path"])
         resource = register_resource(
             path,
-            group=ResourceGroup.SCISCINET_HF,
+            group=ResourceGroup.KTP_PIPELINE_ARTIFACT,
             fragment_type=FragmentType.AUTHOR_ID,
             description=meta.get("desc", "SciSciNet author details unnested names"),
             expected_hash=meta.get("sha256"),
@@ -256,7 +256,7 @@ def _ensure_author_details_unnest_resource(
         _validate_author_details_unnest_metadata(path, rule_version=rule_version, conn=conn)
         resource = register_resource(
             path,
-            group=ResourceGroup.SCISCINET_HF,
+            group=ResourceGroup.KTP_PIPELINE_ARTIFACT,
             fragment_type=FragmentType.AUTHOR_ID,
             description="SciSciNet author details unnested names",
         )
@@ -285,7 +285,7 @@ def _ensure_author_details_unnest_resource(
     )
     resource = register_resource(
         path,
-        group=ResourceGroup.SCISCINET_HF,
+        group=ResourceGroup.KTP_PIPELINE_ARTIFACT,
         fragment_type=FragmentType.AUTHOR_ID,
         description="SciSciNet author details unnested names",
     )

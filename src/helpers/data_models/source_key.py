@@ -19,6 +19,7 @@ class ResourceGroup(str, Enum):
         LLAMA_CPP: LlamaCpp generated or processed resources
         SCISCINET_HF: SciSciNet datasets from HuggingFace
         KTP_MANUAL_EXTRACTIONS: KTP manual extractions
+        KTP_PIPELINE_ARTIFACT: KTP pipeline artifact
     """
     
     HCR_LISTS_2024_ZIP = "hcr_lists_2024_zip"
@@ -26,6 +27,7 @@ class ResourceGroup(str, Enum):
     LLAMA_CPP = "llama_cpp"
     SCISCINET_HF = "sciscinet_hf"
     KTP_MANUAL_EXTRACTIONS = "ktp_manual_extractions"
+    KTP_PIPELINE_ARTIFACT = "ktp_pipeline_artifact"
 
 
 class FragmentType(str, Enum):
