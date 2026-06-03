@@ -17,6 +17,8 @@ KTP_AUTHOR_DETAILS_UNNEST_KEY = "ktp_author_details_unnest"
 AUTHOR_DETAILS_UNNEST_RULE_VERSION_METADATA_KEY: Final = (
     "match_rule_version.ssn_name"
 )
+OPENALEX_AUTHOR_SEARCH_LOG_SCHEMA_VERSION: Final = 1
+OPENALEX_AUTHOR_SEARCH_LOG_PATH: Final = "data/openalex_author_search_log.jsonl"
 WORLD_BANK_XLSX_KEY = "world_bank_xlsx"
 WORLD_BANK_INCOME_FISCAL_YEAR: Final = "FY26"
 WORLD_BANK_FORMER_ECONOMY_CODES: Final[set[str]] = {
@@ -184,6 +186,11 @@ KTP_SSN_HIT_WORKS_COUNT_RAW_COL: Final = "ktp.ssn_hit_works_count_raw"
 KTP_SSN_HIT_FALLBACK_NO_TUKEY_OUTLIER_COL: Final = (
     "ktp.ssn_hit_fallback_no_tukey_outlier"
 )
+KTP_OPENALEX_TOP_AUTHOR_ID_COL: Final = "ktp.openalex_top_author_id"
+KTP_OPENALEX_MATCH_COL: Final = "ktp.openalex_match"
+KTP_OPENALEX_REUSED_COL: Final = "ktp.openalex_reused"
+KTP_OPENALEX_RESPONSE_CODE_COL: Final = "ktp.openalex_response_code"
+KTP_OPENALEX_RECEIVED_AT_UNIX_USEC_COL: Final = "ktp.openalex_received_at_unix_usec"
 KTP_SSNAD_MATCH_KTP_NAME_NORM_KEY: Final = "ktp.source_key_norm"
 KTP_SSNAD_MATCH_SSNAD_NAME_NORM_KEY: Final = "ktp.ssnad_display_name_norm"
 KTP_DOCX_ROW_NUMBER_COL: Final = "ktp.table_1_row_number"

@@ -43,6 +43,7 @@ depends-on = [
   { task = "test", args = ["."] },  # whatever is in pytest.ini_options
   # no slow tests so far - otherwise exits 1 here
   # { task = "test", args = [".", "slow"] },
+  { task = "test", args = [".", "real_api"] },
 ]
 
 [tool.pixi.tasks.test-detours]
@@ -158,6 +159,7 @@ norecursedirs = [
 ]
 markers = [
     "slow: long-running integration tests against real config/data",
+    "real_api: live-network tests against external APIs; run explicitly with -m real_api",
 ]
 
 [tool.ruff]

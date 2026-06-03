@@ -196,7 +196,11 @@ def _ensure_clean_run_files(config: PipelineConfig) -> None:
 def _make_context(config: PipelineConfig, diagnostics_dir: Path) -> PipelineContext:
     _ensure_clean_run_files(config)
 
-    manager = PipelineManager(state_file=config.state_file, db_file=config.db_file)
+    manager = PipelineManager(
+        state_file=config.state_file,
+        db_file=config.db_file,
+        duckdb_extensions=config.duckdb_extensions,
+    )
     conn = manager.connect_db()
     diagnostics = DiagnosticsReport(diagnostics_dir)
     return PipelineContext(

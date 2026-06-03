@@ -783,10 +783,13 @@ The AI-readable interpretation is:
   exceptions, the test should assert the current fixture outputs select that
   author id. The test should explicitly encode the known exceptions rather than
   allowing broad skips.
-- Add an OpenAlex current-data cross-check in step 9, but only when
-  `match_rule_version.ssn_hit = 2` and the SSN hit rule has identified a single
-  effective author id for a `name_key`. Multi-row SSN review cases are already
-  unresolved and do not need an OpenAlex confidence check at this stage.
+- Add an OpenAlex current-data cross-check as part of SSN hit v2 selection, but
+  only when `match_rule_version.ssn_hit = 2` and the v2 max-works adjudication
+  has identified a single effective author id from a multi-row nonzero
+  candidate pool. Singleton nonzero candidates remain accepted as-is; the hit
+  v2 rule is only needed to adjudicate multiple SSN candidates. Multi-row SSN
+  review cases are already unresolved and do not need an OpenAlex confidence
+  check at this stage.
 - Load `OPENALEX_API_KEY` from the repo `.env` file using `python-dotenv`.
   The request is:
 
@@ -823,6 +826,12 @@ The AI-readable interpretation is:
   Additional fields needed for deterministic reuse, such as `ktp.source_key`,
   selected SSN author id, parsed OpenAlex top author id, and match verdict, are
   allowed and should be included if they make the cache/audit clearer.
+- The selected SSN innerdict audit fields should use OpenAlex-specific `ktp.*`
+  names rather than SSN-hit-prefixed names: `ktp.openalex_top_author_id`,
+  `ktp.openalex_match`, `ktp.openalex_reused`, `ktp.openalex_response_code`,
+  and `ktp.openalex_received_at_unix_usec`. Do not expose request duration as a
+  selected-row `ktp.*` field; `duration_usec` remains only in the append-only
+  JSONL request log.
 - Before making an OpenAlex API request, scan the append-only JSONL log for an
   existing response for the same `ktp.source_key` and equivalent request. If one
   exists, reuse it instead of making a network call. Reuse must be logged in the
@@ -832,17 +841,16 @@ The AI-readable interpretation is:
   fetched, the response status, the parsed top OpenAlex author id if present,
   the selected SSN author id, the match/mismatch verdict, and request duration
   for fresh requests.
-- Treat the OpenAlex check as a confidence gate for single SSN author selections
-  under hit rule v2 and wire its result directly into the effective SSN
-  selection. If the top current OpenAlex author id equals the selected SSN
+- Treat the OpenAlex check as a confidence gate for max-works single-author
+  selections under hit rule v2 and wire its result directly into the effective
+  SSN selection. If the top current OpenAlex author id equals the selected SSN
   author id, keep that single author id as the effective SSN innerdict. If
   OpenAlex returns no result or returns a different top author id, consider SSN
   hit rule v2 failed for that `name_key` and select the entire nonzero-sum-1pct
-  SSN candidate pool as effective innerdicts instead. This failed case must land
-  in subset 2 for manual review. If the full nonzero-sum-1pct pool contains only
-  one row, add whatever clear audit/partition signal is needed so the failed
-  OpenAlex confidence check still routes to subset 2 rather than being silently
-  accepted by count alone.
+  SSN candidate pool as effective innerdicts instead. Because this gate applies
+  only after multi-row v2 adjudication, the failed case naturally produces
+  multiple effective SSN rows and lands in subset 2 through existing row-count
+  partitioning; do not add a separate step 10 failure flag.
 - Do not make ordinary unit tests depend on the live OpenAlex API. Use mocked or
   prewritten JSONL responses for tests of request construction, cache reuse,
   response parsing, and mismatch handling.

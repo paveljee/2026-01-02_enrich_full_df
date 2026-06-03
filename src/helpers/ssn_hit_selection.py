@@ -5,11 +5,20 @@ from .schema import (
     PARQUET_AUTHOR_HIT_AGG_TABLE,
     PARQUET_AUTHOR_MATCH_HIT_CANDIDATE_TABLE,
     PARQUET_AUTHOR_MATCH_HIT_SELECTED_AUTHOR_IDS_VIEW,
+    PARQUET_AUTHOR_MATCH_HIT_SELECTED_PRE_OPENALEX_TABLE,
     PARQUET_AUTHOR_MATCH_HIT_SELECTED_VIEW,
     PARQUET_AUTHOR_MATCH_NONZERO_HIT_VIEW,
+    PARQUET_AUTHOR_MATCH_OPENALEX_CHECK_TABLE,
     PARQUET_AUTHOR_MATCH_TABLE,
 )
 from .vars import (
+    KTP_FIRST_NAME_COL,
+    KTP_LAST_NAME_COL,
+    KTP_OPENALEX_MATCH_COL,
+    KTP_OPENALEX_RECEIVED_AT_UNIX_USEC_COL,
+    KTP_OPENALEX_RESPONSE_CODE_COL,
+    KTP_OPENALEX_REUSED_COL,
+    KTP_OPENALEX_TOP_AUTHOR_ID_COL,
     KTP_SSN_HIT_CITED_BY_COUNT_IS_TUKEY_OUTLIER_COL,
     KTP_SSN_HIT_FALLBACK_NO_TUKEY_OUTLIER_COL,
     KTP_SSN_HIT_ROW_HAS_TUKEY_OUTLIER_COL,
@@ -24,9 +33,67 @@ from .vars import (
     SSNAD_RAW_WORKS_COUNT_COL,
 )
 
+_SSN_HIT_V2_INTERNAL_COLUMNS: tuple[str, ...] = (
+    "ssn_hit_sum_hit_1pct_metric",
+    "ssn_hit_works_count_raw",
+    "ssn_hit_works_count_metric",
+    "ssn_hit_cited_by_count_metric",
+    "ssn_q1",
+    "ssn_q3",
+    "ssn_lower",
+    "ssn_upper",
+    "works_q1",
+    "works_q3",
+    "works_lower",
+    "works_upper",
+    "cited_q1",
+    "cited_q3",
+    "cited_lower",
+    "cited_upper",
+    "ssn_hit_sum_hit_1pct_is_tukey_outlier",
+    "ssn_hit_works_count_is_tukey_outlier",
+    "ssn_hit_cited_by_count_is_tukey_outlier",
+    "ssn_hit_row_has_tukey_outlier",
+    "ssn_hit_name_key_has_tukey_outlier",
+    "ssn_hit_nonzero_pool_rows",
+    "ssn_hit_name_key_has_missing_works_count",
+    "ssn_hit_singleton_nonzero",
+    "ssn_hit_multi_candidate_missing_works_count",
+    "ssn_hit_decision_pool_row",
+    "ssn_hit_decision_pool_max_works",
+    "ssn_hit_decision_pool_max_works_count",
+    "ssn_hit_max_works_tie",
+    "ssn_hit_return_all_nonzero",
+    "ssn_hit_unique_max_works_winner",
+)
+
 
 def _qualified_col(table_alias: str, col: str) -> str:
     return f'{table_alias}."{col}"' if table_alias else f'"{col}"'
+
+
+def _ssn_hit_v2_internal_exclude_sql() -> str:
+    return ",\n                ".join(_SSN_HIT_V2_INTERNAL_COLUMNS)
+
+
+def _ssn_hit_v2_candidate_projection_sql(table_alias: str) -> str:
+    return f"""
+            {table_alias}.* EXCLUDE (
+                {_ssn_hit_v2_internal_exclude_sql()}
+            ),
+            '{KTP_SSN_HIT_RULE_V2}' AS "{KTP_SSN_HIT_RULE_KEY}",
+            {table_alias}.ssn_hit_sum_hit_1pct_is_tukey_outlier
+                AS "{KTP_SSN_HIT_SUM_HIT_1PCT_IS_TUKEY_OUTLIER_COL}",
+            {table_alias}.ssn_hit_works_count_is_tukey_outlier
+                AS "{KTP_SSN_HIT_WORKS_COUNT_IS_TUKEY_OUTLIER_COL}",
+            {table_alias}.ssn_hit_cited_by_count_is_tukey_outlier
+                AS "{KTP_SSN_HIT_CITED_BY_COUNT_IS_TUKEY_OUTLIER_COL}",
+            {table_alias}.ssn_hit_row_has_tukey_outlier
+                AS "{KTP_SSN_HIT_ROW_HAS_TUKEY_OUTLIER_COL}",
+            {table_alias}.ssn_hit_works_count_raw AS "{KTP_SSN_HIT_WORKS_COUNT_RAW_COL}",
+            NOT {table_alias}.ssn_hit_name_key_has_tukey_outlier
+                AS "{KTP_SSN_HIT_FALLBACK_NO_TUKEY_OUTLIER_COL}"
+    """
 
 
 def ssn_removed_zero_hit_count_sql(*, author_id_col: str) -> str:
@@ -81,7 +148,17 @@ def ssn_hit_metadata_select_sql(*, hit_rule_version: int, table_alias: str = "m"
             {_qualified_col(table_alias, KTP_SSN_HIT_WORKS_COUNT_RAW_COL)}
                 AS "{KTP_SSN_HIT_WORKS_COUNT_RAW_COL}",
             {_qualified_col(table_alias, KTP_SSN_HIT_FALLBACK_NO_TUKEY_OUTLIER_COL)}
-                AS "{KTP_SSN_HIT_FALLBACK_NO_TUKEY_OUTLIER_COL}"
+                AS "{KTP_SSN_HIT_FALLBACK_NO_TUKEY_OUTLIER_COL}",
+            {_qualified_col(table_alias, KTP_OPENALEX_TOP_AUTHOR_ID_COL)}
+                AS "{KTP_OPENALEX_TOP_AUTHOR_ID_COL}",
+            {_qualified_col(table_alias, KTP_OPENALEX_MATCH_COL)}
+                AS "{KTP_OPENALEX_MATCH_COL}",
+            {_qualified_col(table_alias, KTP_OPENALEX_REUSED_COL)}
+                AS "{KTP_OPENALEX_REUSED_COL}",
+            {_qualified_col(table_alias, KTP_OPENALEX_RESPONSE_CODE_COL)}
+                AS "{KTP_OPENALEX_RESPONSE_CODE_COL}",
+            {_qualified_col(table_alias, KTP_OPENALEX_RECEIVED_AT_UNIX_USEC_COL)}
+                AS "{KTP_OPENALEX_RECEIVED_AT_UNIX_USEC_COL}"
         """
 
 
@@ -179,17 +256,24 @@ def ssn_hit_v2_candidate_metrics_table_sql(
                 ) AS ssn_hit_row_has_tukey_outlier
             FROM flagged_metrics f
         ),
+        name_key_summary AS (
+            SELECT
+                name_key,
+                COUNT(*) AS ssn_hit_nonzero_pool_rows,
+                MAX(CASE WHEN ssn_hit_row_has_tukey_outlier THEN 1 ELSE 0 END) = 1
+                    AS ssn_hit_name_key_has_tukey_outlier,
+                MAX(CASE WHEN ssn_hit_works_count_metric IS NULL THEN 1 ELSE 0 END) = 1
+                    AS ssn_hit_name_key_has_missing_works_count
+            FROM flagged
+            GROUP BY name_key
+        ),
         name_key_flags AS (
             SELECT
                 f.*,
-                COUNT(*) OVER (PARTITION BY f.name_key) AS ssn_hit_nonzero_pool_rows,
-                MAX(CASE WHEN f.ssn_hit_row_has_tukey_outlier THEN 1 ELSE 0 END)
-                    OVER (PARTITION BY f.name_key) = 1
-                    AS ssn_hit_name_key_has_tukey_outlier,
-                MAX(CASE WHEN f.ssn_hit_works_count_metric IS NULL THEN 1 ELSE 0 END)
-                    OVER (PARTITION BY f.name_key) = 1
-                    AS ssn_hit_name_key_has_missing_works_count
+                s.* EXCLUDE (name_key)
             FROM flagged f
+            JOIN name_key_summary s
+              ON s.name_key = f.name_key
         ),
         decision_pool AS (
             SELECT
@@ -211,28 +295,44 @@ def ssn_hit_v2_candidate_metrics_table_sql(
         decision_stats AS (
             SELECT
                 d.*,
-                MAX(
-                    CASE
-                        WHEN d.ssn_hit_decision_pool_row
-                            THEN d.ssn_hit_works_count_metric
-                        ELSE NULL
-                    END
-                ) OVER (PARTITION BY d.name_key) AS ssn_hit_decision_pool_max_works
+                s.ssn_hit_decision_pool_max_works
             FROM decision_pool d
+            JOIN (
+                SELECT
+                    name_key,
+                    MAX(
+                        CASE
+                            WHEN ssn_hit_decision_pool_row
+                                THEN ssn_hit_works_count_metric
+                            ELSE NULL
+                        END
+                    ) AS ssn_hit_decision_pool_max_works
+                FROM decision_pool
+                GROUP BY name_key
+            ) s
+              ON s.name_key = d.name_key
         ),
         final_stats AS (
             SELECT
                 d.*,
-                SUM(
-                    CASE
-                        WHEN d.ssn_hit_decision_pool_row
-                             AND d.ssn_hit_works_count_metric IS NOT DISTINCT FROM
-                                 d.ssn_hit_decision_pool_max_works
-                            THEN 1
-                        ELSE 0
-                    END
-                ) OVER (PARTITION BY d.name_key) AS ssn_hit_decision_pool_max_works_count
+                s.ssn_hit_decision_pool_max_works_count
             FROM decision_stats d
+            JOIN (
+                SELECT
+                    name_key,
+                    SUM(
+                        CASE
+                            WHEN ssn_hit_decision_pool_row
+                                 AND ssn_hit_works_count_metric IS NOT DISTINCT FROM
+                                     ssn_hit_decision_pool_max_works
+                                THEN 1
+                            ELSE 0
+                        END
+                    ) AS ssn_hit_decision_pool_max_works_count
+                FROM decision_stats
+                GROUP BY name_key
+            ) s
+              ON s.name_key = d.name_key
         )
         SELECT
             f.*,
@@ -392,53 +492,86 @@ def ssn_hit_selected_view_sql(
     return f"""
         CREATE OR REPLACE VIEW {PARQUET_AUTHOR_MATCH_HIT_SELECTED_VIEW} AS
         SELECT
-            w.* EXCLUDE (
-                ssn_hit_sum_hit_1pct_metric,
-                ssn_hit_works_count_raw,
-                ssn_hit_works_count_metric,
-                ssn_hit_cited_by_count_metric,
-                ssn_q1,
-                ssn_q3,
-                ssn_lower,
-                ssn_upper,
-                works_q1,
-                works_q3,
-                works_lower,
-                works_upper,
-                cited_q1,
-                cited_q3,
-                cited_lower,
-                cited_upper,
-                ssn_hit_sum_hit_1pct_is_tukey_outlier,
-                ssn_hit_works_count_is_tukey_outlier,
-                ssn_hit_cited_by_count_is_tukey_outlier,
-                ssn_hit_row_has_tukey_outlier,
-                ssn_hit_name_key_has_tukey_outlier,
-                ssn_hit_nonzero_pool_rows,
-                ssn_hit_name_key_has_missing_works_count,
-                ssn_hit_singleton_nonzero,
-                ssn_hit_multi_candidate_missing_works_count,
-                ssn_hit_decision_pool_row,
-                ssn_hit_decision_pool_max_works,
-                ssn_hit_decision_pool_max_works_count,
-                ssn_hit_max_works_tie,
-                ssn_hit_return_all_nonzero,
-                ssn_hit_unique_max_works_winner
-            ),
-            '{KTP_SSN_HIT_RULE_V2}' AS "{KTP_SSN_HIT_RULE_KEY}",
-            w.ssn_hit_sum_hit_1pct_is_tukey_outlier
-                AS "{KTP_SSN_HIT_SUM_HIT_1PCT_IS_TUKEY_OUTLIER_COL}",
-            w.ssn_hit_works_count_is_tukey_outlier
-                AS "{KTP_SSN_HIT_WORKS_COUNT_IS_TUKEY_OUTLIER_COL}",
-            w.ssn_hit_cited_by_count_is_tukey_outlier
-                AS "{KTP_SSN_HIT_CITED_BY_COUNT_IS_TUKEY_OUTLIER_COL}",
-            w.ssn_hit_row_has_tukey_outlier
-                AS "{KTP_SSN_HIT_ROW_HAS_TUKEY_OUTLIER_COL}",
-            w.ssn_hit_works_count_raw AS "{KTP_SSN_HIT_WORKS_COUNT_RAW_COL}",
-            NOT w.ssn_hit_name_key_has_tukey_outlier
-                AS "{KTP_SSN_HIT_FALLBACK_NO_TUKEY_OUTLIER_COL}"
+            {_ssn_hit_v2_candidate_projection_sql("w")}
         FROM {PARQUET_AUTHOR_MATCH_HIT_CANDIDATE_TABLE} w
         WHERE w.ssn_hit_singleton_nonzero
            OR w.ssn_hit_return_all_nonzero
            OR w.ssn_hit_unique_max_works_winner
+    """
+
+
+def ssn_hit_openalex_check_candidates_sql(*, author_id_col: str) -> str:
+    return f"""
+        SELECT
+            c.name_key,
+            c."{KTP_FIRST_NAME_COL}",
+            c."{KTP_LAST_NAME_COL}",
+            c."{author_id_col}"
+        FROM {PARQUET_AUTHOR_MATCH_HIT_CANDIDATE_TABLE} c
+        WHERE c.ssn_hit_unique_max_works_winner
+        ORDER BY c.name_key
+    """
+
+
+def ssn_hit_openalex_check_table_sql(*, author_id_col: str) -> str:
+    return f"""
+        CREATE OR REPLACE TABLE {PARQUET_AUTHOR_MATCH_OPENALEX_CHECK_TABLE} (
+            name_key VARCHAR,
+            "{author_id_col}" VARCHAR,
+            "{KTP_OPENALEX_TOP_AUTHOR_ID_COL}" VARCHAR,
+            "{KTP_OPENALEX_MATCH_COL}" BOOLEAN,
+            "{KTP_OPENALEX_REUSED_COL}" BOOLEAN,
+            "{KTP_OPENALEX_RESPONSE_CODE_COL}" INTEGER,
+            "{KTP_OPENALEX_RECEIVED_AT_UNIX_USEC_COL}" BIGINT
+        )
+    """
+
+
+def ssn_hit_openalex_check_insert_sql(*, author_id_col: str) -> str:
+    return f"""
+        INSERT INTO {PARQUET_AUTHOR_MATCH_OPENALEX_CHECK_TABLE}
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """
+
+
+def ssn_hit_openalex_selected_view_sql(*, author_id_col: str) -> str:
+    return f"""
+        CREATE OR REPLACE VIEW {PARQUET_AUTHOR_MATCH_HIT_SELECTED_VIEW} AS
+        WITH failed_openalex AS (
+            SELECT *
+            FROM {PARQUET_AUTHOR_MATCH_OPENALEX_CHECK_TABLE}
+            WHERE NOT "{KTP_OPENALEX_MATCH_COL}"
+        ),
+        kept_pre_openalex AS (
+            SELECT
+                p.*,
+                c."{KTP_OPENALEX_TOP_AUTHOR_ID_COL}" AS "{KTP_OPENALEX_TOP_AUTHOR_ID_COL}",
+                c."{KTP_OPENALEX_MATCH_COL}" AS "{KTP_OPENALEX_MATCH_COL}",
+                c."{KTP_OPENALEX_REUSED_COL}" AS "{KTP_OPENALEX_REUSED_COL}",
+                c."{KTP_OPENALEX_RESPONSE_CODE_COL}" AS "{KTP_OPENALEX_RESPONSE_CODE_COL}",
+                c."{KTP_OPENALEX_RECEIVED_AT_UNIX_USEC_COL}"
+                    AS "{KTP_OPENALEX_RECEIVED_AT_UNIX_USEC_COL}"
+            FROM {PARQUET_AUTHOR_MATCH_HIT_SELECTED_PRE_OPENALEX_TABLE} p
+            LEFT JOIN {PARQUET_AUTHOR_MATCH_OPENALEX_CHECK_TABLE} c
+              ON c.name_key = p.name_key
+             AND CAST(c."{author_id_col}" AS VARCHAR) = CAST(p."{author_id_col}" AS VARCHAR)
+            WHERE c.name_key IS NULL
+               OR c."{KTP_OPENALEX_MATCH_COL}"
+        ),
+        failed_full_nonzero_pool AS (
+            SELECT
+                {_ssn_hit_v2_candidate_projection_sql("w")},
+                c."{KTP_OPENALEX_TOP_AUTHOR_ID_COL}" AS "{KTP_OPENALEX_TOP_AUTHOR_ID_COL}",
+                c."{KTP_OPENALEX_MATCH_COL}" AS "{KTP_OPENALEX_MATCH_COL}",
+                c."{KTP_OPENALEX_REUSED_COL}" AS "{KTP_OPENALEX_REUSED_COL}",
+                c."{KTP_OPENALEX_RESPONSE_CODE_COL}" AS "{KTP_OPENALEX_RESPONSE_CODE_COL}",
+                c."{KTP_OPENALEX_RECEIVED_AT_UNIX_USEC_COL}"
+                    AS "{KTP_OPENALEX_RECEIVED_AT_UNIX_USEC_COL}"
+            FROM {PARQUET_AUTHOR_MATCH_HIT_CANDIDATE_TABLE} w
+            JOIN failed_openalex c
+              ON c.name_key = w.name_key
+        )
+        SELECT * FROM kept_pre_openalex
+        UNION ALL
+        SELECT * FROM failed_full_nonzero_pool
     """

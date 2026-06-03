@@ -10,6 +10,7 @@ from ..helpers.duckdb_utils import append_innerdicts_from_rows_table
 from ..helpers.name_matching import (
     sciscinet_ktp_name_norm_sql,
 )
+from ..helpers.openalex import check_openalex_author
 from ..helpers.parquet_utils import normalize_parquet_column_name, parquet_columns, parquet_filename
 from ..helpers.procedures import ParquetMatchProcedure
 from ..helpers.schema import (
@@ -18,8 +19,10 @@ from ..helpers.schema import (
     PARQUET_AUTHOR_AGG_TABLE,
     PARQUET_AUTHOR_HIT_AGG_TABLE,
     PARQUET_AUTHOR_MATCH_HIT_SELECTED_AUTHOR_IDS_VIEW,
+    PARQUET_AUTHOR_MATCH_HIT_SELECTED_PRE_OPENALEX_TABLE,
     PARQUET_AUTHOR_MATCH_HIT_SELECTED_VIEW,
     PARQUET_AUTHOR_MATCH_NONZERO_HIT_VIEW,
+    PARQUET_AUTHOR_MATCH_OPENALEX_CHECK_TABLE,
     PARQUET_AUTHOR_MATCH_TABLE,
     PARQUET_AUTHOR_OUTPUT_TABLE,
     PARQUET_AUTHOR_PAPERS_TABLE,
@@ -30,6 +33,10 @@ from ..helpers.schema import (
 )
 from ..helpers.ssn_hit_selection import (
     ssn_hit_metadata_select_sql,
+    ssn_hit_openalex_check_candidates_sql,
+    ssn_hit_openalex_check_insert_sql,
+    ssn_hit_openalex_check_table_sql,
+    ssn_hit_openalex_selected_view_sql,
     ssn_hit_selected_author_ids_view_sql,
     ssn_hit_selected_view_sql,
     ssn_hit_v2_bounds_summary_sql,
@@ -47,6 +54,8 @@ from ..helpers.vars import (
     KTP_FRAGMENT_COL,
     KTP_FRAGMENT_TYPE_COL,
     KTP_LAST_NAME_COL,
+    KTP_OPENALEX_MATCH_COL,
+    KTP_OPENALEX_REUSED_COL,
     KTP_SOURCE_KEY_COL,
     KTP_SSN_COUNT_PAPERID_COL,
     KTP_SSN_FIELD_DISPLAY_NAMES_LIST_COL,
@@ -162,6 +171,92 @@ def run(context: PipelineContext) -> StepResult:
         if row is None or row[0] is None:
             return 0
         return int(row[0])
+
+    def apply_openalex_confidence_gate() -> None:
+        conn.execute(
+            f"""
+            CREATE OR REPLACE TABLE {PARQUET_AUTHOR_MATCH_HIT_SELECTED_PRE_OPENALEX_TABLE} AS
+            SELECT *
+            FROM {PARQUET_AUTHOR_MATCH_HIT_SELECTED_VIEW}
+            """
+        )
+        conn.execute(ssn_hit_openalex_check_table_sql(author_id_col=author_id_col))
+        check_candidates = conn.execute(
+            ssn_hit_openalex_check_candidates_sql(author_id_col=author_id_col)
+        ).fetchall()
+        if not check_candidates:
+            log_tag(
+                STEP_MATCH_PARQUET_LOG_TAG_VIEW_FILTER,
+                "SSN hit v2 OpenAlex confidence gate: no unique max-work "
+                "multi-candidate selections to check.",
+            )
+            conn.execute(ssn_hit_openalex_selected_view_sql(author_id_col=author_id_col))
+            return
+
+        log_tag(
+            STEP_MATCH_PARQUET_LOG_TAG_VIEW_FILTER,
+            "SSN hit v2 OpenAlex confidence gate: checking "
+            f"{len(check_candidates):,} unique max-work selections against current OpenAlex.",
+        )
+        check_rows: list[tuple[str, str, str | None, bool, bool, int | None, int | None]] = []
+        for name_key, first_name, last_name, selected_author_id in check_candidates:
+            selected_author_id_str = str(selected_author_id)
+            result = check_openalex_author(
+                source_key=str(name_key),
+                first_name=str(first_name or ""),
+                last_name=str(last_name or ""),
+                selected_author_id=selected_author_id_str,
+            )
+            check_rows.append(
+                (
+                    result.source_key,
+                    selected_author_id_str,
+                    result.top_author_id,
+                    result.matched,
+                    result.reused,
+                    result.response_code,
+                    result.received_at_unix_usec,
+                )
+            )
+            source = "reused" if result.reused else "fetched"
+            verdict = "match" if result.matched else "mismatch"
+            status = result.response_code if result.response_code is not None else "null"
+            top_author_id = result.top_author_id or "<none>"
+            received_at = (
+                result.received_at_unix_usec
+                if result.received_at_unix_usec is not None
+                else "null"
+            )
+            log_tag(
+                STEP_MATCH_PARQUET_LOG_TAG_VIEW_FILTER,
+                "OpenAlex author check "
+                f"{source}: name_key={name_key}, selected={selected_author_id_str}, "
+                f"top={top_author_id}, status={status}, verdict={verdict}, "
+                f"received_at_unix_usec={received_at}.",
+            )
+        conn.executemany(ssn_hit_openalex_check_insert_sql(author_id_col=author_id_col), check_rows)
+        conn.execute(ssn_hit_openalex_selected_view_sql(author_id_col=author_id_col))
+        openalex_counts = conn.execute(
+            f"""
+            SELECT
+                COUNT(*) AS checked,
+                COUNT(*) FILTER (WHERE "{KTP_OPENALEX_REUSED_COL}") AS reused,
+                COUNT(*) FILTER (WHERE NOT "{KTP_OPENALEX_REUSED_COL}") AS fetched,
+                COUNT(*) FILTER (WHERE "{KTP_OPENALEX_MATCH_COL}") AS matched,
+                COUNT(*) FILTER (WHERE NOT "{KTP_OPENALEX_MATCH_COL}") AS failed
+            FROM {PARQUET_AUTHOR_MATCH_OPENALEX_CHECK_TABLE}
+            """
+        ).fetchone()
+        if openalex_counts is not None:
+            log_tag(
+                STEP_MATCH_PARQUET_LOG_TAG_VIEW_FILTER,
+                "SSN hit v2 OpenAlex confidence gate summary: "
+                f"checked={int(openalex_counts[0] or 0):,}, "
+                f"reused={int(openalex_counts[1] or 0):,}, "
+                f"fetched={int(openalex_counts[2] or 0):,}, "
+                f"matched={int(openalex_counts[3] or 0):,}, "
+                f"failed={int(openalex_counts[4] or 0):,}.",
+            )
 
     for legend_line in STEP_MATCH_PARQUET_LOG_LEGEND_LINES:
         log_tag(STEP_MATCH_PARQUET_LOG_TAG_LEGEND, legend_line)
@@ -425,6 +520,8 @@ def run(context: PipelineContext) -> StepResult:
             hit_rule_version=ssn_hit_rule_version,
         )
     )
+    if ssn_hit_rule_version == 2:
+        apply_openalex_confidence_gate()
     hit_selected_stats_row = conn.execute(
         f"""
         SELECT

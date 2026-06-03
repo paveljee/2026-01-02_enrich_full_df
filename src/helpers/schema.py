@@ -31,6 +31,10 @@ PARQUET_AUTHOR_MATCH_TABLE = "ssn_author_matches"
 PARQUET_AUTHOR_MATCH_NONZERO_HIT_VIEW = "ssn_author_matches_nonzero_hit"
 PARQUET_AUTHOR_MATCH_HIT_CANDIDATE_TABLE = "ssn_author_match_hit_candidates"
 PARQUET_AUTHOR_MATCH_HIT_SELECTED_VIEW = "ssn_author_matches_hit_selected"
+PARQUET_AUTHOR_MATCH_HIT_SELECTED_PRE_OPENALEX_TABLE = (
+    "ssn_author_matches_hit_selected_pre_openalex"
+)
+PARQUET_AUTHOR_MATCH_OPENALEX_CHECK_TABLE = "ssn_author_match_openalex_checks"
 PARQUET_AUTHOR_MATCH_HIT_SELECTED_AUTHOR_IDS_VIEW = "ssn_author_match_hit_selected_author_ids"
 PARQUET_AUTHOR_PAPERS_TABLE = "ssn_author_papers"
 PARQUET_ALL_HITS_TABLE = "ssn_all_hits"
