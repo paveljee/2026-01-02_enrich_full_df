@@ -248,7 +248,25 @@ because the DuckDB binaries are incompatible across the operating systems.
 
 > [!TIP]
 > Alternatively,
-> this pixi config
+> the following pixi config
+> may be used.
+> Though Pixi themselves
+> [advise against this][pixi-detached-env]:
+>
+> > We recommend against using this because any environment created for a workspace is no longer placed in the same folder as the workspace. This creates a disconnect between the workspace and its environments and manual cleanup of the environments is required when deleting the workspace.
+> > 
+> > However, in some cases, this option can still be very useful, for instance to:
+> > 
+> > - force the installation on a specific filesystem/drive.
+> > - install environments locally but keep the workspace on a network drive.
+> > - let a system-administrator have more control over all environments on a system.
+>
+> Arguably,
+> keeping OS-specific binaries is
+> one of those special cases.
+>
+> If you would still like to do it
+> against Pixi advice,
 > `pixi config set detached-environments true --global`
 > can be used to
 > keep the environment global
@@ -349,4 +367,5 @@ pixi run duckdb-ui [OPTIONAL_PATH_TO_DB]
 
 [owl-rdf]: http://www.w3.org/TR/owl-ref/ "OWL Web Ontology Language Reference"
 [pixi]: https://pixi.prefix.dev/latest/installation/ "Pixi Installation"
+[pixi-detached-env]: https://pixi.prefix.dev/dev/reference/pixi_configuration/#detached-environments "detached-environments – Pixi Configuration"
 [duckdb-ui]: https://duckdb.org/2025/03/12/duckdb-ui "The DuckDB Local UI"
