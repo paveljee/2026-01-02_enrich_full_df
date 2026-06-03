@@ -246,6 +246,18 @@ removed and recreated
 if switching between the two
 because the DuckDB binaries are incompatible across the operating systems.
 
+> [!TIP]
+> Alternatively,
+> this pixi config
+> `pixi config set detached-environments true --global`
+> can be used to
+> keep the environment global
+> on each operating system.
+> After activating this option,
+> `rm -rf .pixi/envs && pixi install`
+> in the repo directory
+> may be necessary.
+
 ## User interface
 ### AI agent
 This repository is
