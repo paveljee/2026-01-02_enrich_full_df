@@ -23,13 +23,36 @@
 
 ## Doing Now
 
-- Updating the AI-readable SPEC interpretation for the post-implementation
-  follow-ups in `context/README.md`: focused output fixture checks against the
-  reviewed `manual_best` workbook, OpenAlex current-data confidence checks for
-  single SSN hit-v2 author selections with append-only JSONL reuse, and marking
-  manual-best force-in resource handling as pending.
+- No active implementation item. Latest DuckDB extension config/loading and
+  logging follow-up is implemented and verified.
 
 ## Done - Final Patch
+
+- Added generic `duckdb_extensions` config parsing (`repo` plus platform `bin`
+  paths), a centralized `src/helpers/duckdb_extensions.py` loader, and
+  production REPL manager plumbing. The REPL loads `splink_udfs` through this
+  generic extension mechanism: try the default community install/load first,
+  then the configured repo, then the current platform's local extension binary.
+- Routed the DuckDB UI Pixi task and unaccent-dependent tests through the same
+  generic loader. Added focused tests for extension config parsing,
+  default-to-repo-to-binary fallback order, and the configured binary's actual
+  DuckDB `unaccent` behavior.
+- Parameterized the Pixi `module`, `repl`, and `duckdb-ui` tasks with a
+  `config_path` argument. The default remains `config.repl.json`, but extension
+  loading now uses the config path supplied to the command instead of a hidden
+  hard-coded path.
+- Centralized the default config path in
+  `DEFAULT_DUCKDB_EXTENSIONS_CONFIG_PATH` in `src/helpers/duckdb_extensions.py`;
+  tests and simple callers no longer repeat `Path("config.repl.json")`, while
+  callers with a user-supplied config path can still pass it explicitly.
+- Added explicit DuckDB extension load notices from the helper itself. By
+  default the helper prints a concise line naming whether `splink_udfs` loaded
+  from the default community repository, configured repository, or configured
+  binary path; `PipelineManager` captures that same helper-emitted line for
+  `repl_session.log`.
+- Verification passed after the extension-loader follow-up: `pixi run
+  pre-commit-repl` reported ruff passing, mypy passing, default pytest at 90
+  passed/3 skipped, and the `real_api` selection as the expected xfail.
 
 - Added AI SPEC detail for the three context README follow-ups: fixture paths
   and expected exceptions for `manual_best` output checks, exact OpenAlex API
@@ -41,6 +64,85 @@
   pool for subset 2 review.
 - Noted that the OpenAlex JSONL log schema-version constant belongs in
   `vars.py`.
+- Implemented `src/helpers/openalex.py` for OpenAlex author-search request
+  construction, `.env` API-key loading, append-only JSONL logging under `data/`,
+  cache reuse by equivalent request/source key, and top-author-id parsing.
+- Added centralized OpenAlex constants in `vars.py`: JSONL schema version/path
+  plus selected-row audit columns `ktp.openalex_top_author_id`,
+  `ktp.openalex_match`, `ktp.openalex_reused`, `ktp.openalex_response_code`,
+  and `ktp.openalex_received_at_unix_usec`. Request duration remains only in
+  the JSONL request log, not in selected SSN innerdict audit fields.
+- Extended SSN hit v2 SQL in `src/helpers/ssn_hit_selection.py` so unique
+  max-work multi-candidate winners are checked against current OpenAlex. A
+  current top-author match keeps the winner; mismatch/no result expands the
+  effective SSN selection back to the full nonzero candidate pool, which routes
+  to subset 2 through existing SSN row-count partitioning. V1 remains the exact
+  nonzero-hit alias.
+- Updated step 9 to snapshot the pre-OpenAlex v2 selected set, materialize a
+  small OpenAlex check table, log each request/cache reuse compactly, and then
+  recreate the effective selected view through the SSN hit-selection helper.
+- Added focused tests for OpenAlex JSONL cache reuse, request append/parsing,
+  malformed/empty response parsing, OpenAlex mismatch expanding SSN hit v2 back
+  to the full nonzero pool, and reviewed `manual_best` fixture outputs against
+  the saved subset 1/subset 2 card directories.
+- Tightened the reviewed `manual_best` fixture harness so all expectations are
+  derived from `duckdb_ui_20260601T1750Z_export_edit_done.xlsx`: every
+  `manual_best_note` value is classified by exact note text and the test asserts
+  the category counts (`correct_no_outlier_fallback` 14,
+  `matched_under_current_ssn_v2` 6, `no_note` 8,
+  `false_confident_old_ssn_pick` 4,
+  `matched_current_subset1_despite_old_note` 1,
+  `xlsx_partition2_with_correct_ssn` 1). The test also cross-checks raw export
+  JSON columns, reconstructs the aggregate max-works pick, and verifies saved
+  subset 1/subset 2 card outputs according to those note-derived categories.
+- Added a workbook-wide note coverage assertion for all nonempty
+  `manual_best_note` values, including the no-current-OpenAlex-result notes and
+  the final summary note, so any new or changed reviewed note must be explicitly
+  categorized before the fixture test can pass.
+- Added explicit non-empty `manual_best` coverage assertions: every reviewed
+  source key with a non-empty manual best must be categorized, must have an
+  aggregate max-works reconstruction, and must be checked against the saved
+  subset 1/subset 2 artifacts exactly once.
+- Added a `slow`/`real_api` test that derives known false-confident SSN picks
+  from the workbook notes and runs them through the real OpenAlex helper/cache.
+  User re-reviewed Yulin Chen and confirmed current OpenAlex top ID
+  `A5100398894` is correct even though workbook `manual_best` says
+  `A5100398890`; the test marks that stale-workbook condition as an informative
+  `xfail` while still proving OpenAlex rejects old selected ID `A5100383082`.
+- Updated OpenAlex JSONL logging to redact `api_key` in stored query strings;
+  the live request URL still uses the real key, but cache matching and persisted
+  audit rows use `api_key=REDACTED`. Existing local JSONL rows were scrubbed.
+- Focused static checks passed on touched files: `pixi run python -m ruff check
+  src/helpers/openalex.py src/helpers/ssn_hit_selection.py
+  src/steps/step_09_match_parquet.py tests/test_sciscinet_name_matching.py` and
+  `pixi run python -m mypy src/helpers/openalex.py
+  src/helpers/ssn_hit_selection.py src/steps/step_09_match_parquet.py
+  tests/test_sciscinet_name_matching.py`.
+- Local full SciSciNet test execution is currently blocked by DuckDB extension
+  setup in this environment: `INSTALL splink_udfs FROM community` attempts to
+  download `linux_arm64/splink_udfs.duckdb_extension.gz` and receives HTTP 404.
+  Do not work around this locally; rerun the full matching tests in the normal
+  environment once the extension is available.
+- Standard verification attempt `pixi run pre-commit-repl`: ruff passed, mypy
+  passed, pytest collected 87 items and ended at 55 passed, 2 skipped, 30
+  failed. Every listed failure is the same DuckDB `splink_udfs` install/load
+  HTTP 404 from `community-extensions.duckdb.org/v1.5.3/linux_arm64/` in tests
+  that call the production DuckDB/unaccent setup. No local workaround was
+  applied.
+- Latest `pixi run pre-commit-repl` after OpenAlex/manual-best fixture updates:
+  ruff passed, mypy passed, then default pytest collected 88 items and ended at
+  55 passed, 3 skipped, 30 failed. All listed failures are again DuckDB
+  `splink_udfs` install/load HTTP 404s from the Linux ARM64 community extension
+  URL before the `real_api` follow-up task could run.
+- Focused verification for the new fixture/API pieces passed: reviewed fixture
+  test passed, OpenAlex helper cache/append/parser tests passed, lint/mypy on
+  touched files passed, the OpenAlex JSONL redaction scan passed, and the
+  explicit `real_api` test runs from the redacted cache and reports the
+  re-reviewed Yulin Chen stale-workbook case as `xfail`.
+- `pixi run test . real_api` selected only the real OpenAlex test and reported
+  one expected xfail for the Yulin Chen stale-workbook note. Cached diff
+  whitespace checks passed, and a staged-diff scan found no live OpenAlex API
+  key in tracked content.
 
 - Implemented the revised SSN hit v2 selection rule in
   `src/helpers/ssn_hit_selection.py`: Tukey bounds are per `name_key`, singleton

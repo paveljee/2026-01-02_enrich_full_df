@@ -5,6 +5,7 @@ from pathlib import Path
 
 import duckdb
 
+from src.helpers.duckdb_extensions import load_duckdb_extension_from_config_path
 from src.helpers.name_matching import (
     sciscinet_author_alt_name_key_exprs_sql,
     sciscinet_author_name_norm_sql,
@@ -43,7 +44,7 @@ from src.helpers.vars import (
 
 def _connect() -> duckdb.DuckDBPyConnection:
     conn = duckdb.connect(":memory:")
-    conn.execute("INSTALL splink_udfs FROM community; LOAD splink_udfs;")
+    load_duckdb_extension_from_config_path(conn, "splink_udfs")
     return conn
 
 

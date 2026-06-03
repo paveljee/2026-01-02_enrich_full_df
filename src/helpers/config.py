@@ -41,11 +41,19 @@ class MatchRuleVersion(BaseModel):
         return self
 
 
+class DuckDBExtensionConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    repo: str | None = None
+    bin: dict[str, Path] = Field(default_factory=dict)
+
+
 class PipelineConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     files_config: dict[str, dict[str, str]]
     db_file: Path
+    duckdb_extensions: dict[str, DuckDBExtensionConfig] = Field(default_factory=dict)
     state_file: Path
     output_dir: Path
     output_format: str

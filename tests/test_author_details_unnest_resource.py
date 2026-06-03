@@ -9,6 +9,7 @@ import pytest
 from pydantic import ValidationError
 
 from src.helpers.config import PipelineConfig
+from src.helpers.duckdb_extensions import load_duckdb_extension_from_config_path
 from src.helpers.resources import register_pipeline_resources
 from src.helpers.vars import (
     AUTHOR_DETAILS_UNNEST_RULE_VERSION_METADATA_KEY,
@@ -44,7 +45,7 @@ def _write_author_details(path: Path) -> None:
 
 def _connect_with_unaccent() -> duckdb.DuckDBPyConnection:
     conn = duckdb.connect()
-    conn.execute("INSTALL splink_udfs FROM community; LOAD splink_udfs;")
+    load_duckdb_extension_from_config_path(conn, "splink_udfs")
     return conn
 
 

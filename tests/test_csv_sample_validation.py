@@ -11,6 +11,7 @@ from src.helpers.config import PipelineConfig
 from src.helpers.context import PipelineContext
 from src.helpers.data_models import FragmentType, ResourceGroup
 from src.helpers.diagnostics import DiagnosticsReport
+from src.helpers.duckdb_extensions import load_duckdb_extension_from_config_path
 from src.helpers.pipeline_manager import PipelineManager
 from src.helpers.resources import (
     PipelineResources,
@@ -52,8 +53,7 @@ def test_csv_rows_match_samples(tmp_path: Path) -> None:
 
     conn = duckdb.connect()
     try:
-        conn.execute("INSTALL splink_udfs FROM community;")
-        conn.execute("LOAD splink_udfs;")
+        load_duckdb_extension_from_config_path(conn, "splink_udfs")
         xlsx_resources = register_resources(
             xlsx_files,
             group=ResourceGroup.KTP_MANUAL_EXTRACTIONS,

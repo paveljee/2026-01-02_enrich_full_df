@@ -1,5 +1,14 @@
 {
   "db_file": "data/scisci_process.duckdb",
+  "duckdb_extensions": {
+    "splink_udfs": {
+      "repo": "https://github.com/RobinL/splink_udfs",
+      "bin": {
+        "linux_arm64": "/Volumes/home/aicode/.duckdb/extensions/v1.5.1/linux_arm64/splink_udfs.duckdb_extension",
+        "osx_arm64": "/Volumes/home/aicode/.duckdb/extensions/v1.5.1/osx_arm64/splink_udfs.duckdb_extension"
+      }
+    }
+  },
   "state_file": "data/pipeline_state.json",
   "output_dir": "data/output",
   "output_format": "txt",

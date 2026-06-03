@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import duckdb
 
+from src.helpers.duckdb_extensions import load_duckdb_extension_from_config_path
 from src.helpers.name_matching import docx_match_condition_sql, docx_name_norm_sql
 
 
 def _connect() -> duckdb.DuckDBPyConnection:
     conn = duckdb.connect(":memory:")
-    conn.execute("INSTALL splink_udfs FROM community; LOAD splink_udfs;")
+    load_duckdb_extension_from_config_path(conn, "splink_udfs")
     return conn
 
 

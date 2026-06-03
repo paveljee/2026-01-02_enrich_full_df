@@ -102,7 +102,11 @@ def init_pipeline(
         raise ValueError("A JSON config file is required. Use --config <path>.")
 
     config = PipelineConfig.from_json(Path(args.config))
-    manager = PipelineManager(config.state_file, config.db_file)
+    manager = PipelineManager(
+        config.state_file,
+        config.db_file,
+        duckdb_extensions=config.duckdb_extensions,
+    )
     conn = manager.connect_db()
     monitor = ResourceMonitor()
     monitor.start()

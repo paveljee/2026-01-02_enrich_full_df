@@ -58,27 +58,35 @@ cwd = "."
 [tool.pixi.tasks.module]
 args = [
   { arg = "module_name", default = "src.repl" },
+  { arg = "config_path", default = "config.repl.json" },
 ]
 cmd = """
 {% if module_name == "src.repl" %}
-python -m src.repl --config config.repl.json --new --yes --non-interactive
+python -m src.repl --config "{{ config_path }}" --new --yes --non-interactive
 {% endif %}
 """
 cwd = "."
 
 [tool.pixi.tasks.repl]
-cmd = "python -m src.repl --config config.repl.json --new --yes --non-interactive"
+args = [
+  { arg = "config_path", default = "config.repl.json" },
+]
+cmd = "python -m src.repl --config \"{{ config_path }}\" --new --yes --non-interactive"
 cwd = "."
 
 [tool.pixi.tasks.duckdb-ui]
 args = [
   { arg = "input_path", default = "data/scisci_process.duckdb" },
+  { arg = "config_path", default = "config.repl.json" },
 ]
 cmd = """
 python -c '
 import sys, duckdb
+from pathlib import Path
+from src.helpers.duckdb_extensions import load_duckdb_extension_from_config_path
 read_only = True
 input_path = sys.argv[1]
+config_path = Path(sys.argv[2])
 # using chr(39) to avoid conflict with outer single quote
 input_path_safe = chr(39) + input_path.replace(chr(39), chr(39) + chr(39)) + chr(39)
 if not read_only:
@@ -90,7 +98,7 @@ if not read_only:
 con = duckdb.connect(":memory:")
 try:
   con.sql(f"ATTACH {input_path_safe} AS db (READ_ONLY)")
-  con.execute("INSTALL splink_udfs FROM community; LOAD splink_udfs;")
+  load_duckdb_extension_from_config_path(con, "splink_udfs", config_path)
 except:
   if input_path.lower().endswith(".parquet"):
     con.sql("CREATE OR REPLACE VIEW parquet AS "
@@ -102,7 +110,7 @@ input(
   f"DuckDB UI running on {input_path!r} in read-only mode. "
   "Press Enter to stop..."
 )
-' "{{ input_path }}"
+' "{{ input_path }}" "{{ config_path }}"
 """
 cwd = "."
 

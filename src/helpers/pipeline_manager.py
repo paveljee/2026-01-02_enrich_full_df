@@ -6,11 +6,23 @@ from typing import Any
 
 import duckdb
 
+from .config import DuckDBExtensionConfig
+from .duckdb_extensions import DuckDBExtensionLoadResult, load_duckdb_extension
+
 
 class PipelineManager:
-    def __init__(self, state_file: Path, db_file: Path) -> None:
+    def __init__(
+        self,
+        state_file: Path,
+        db_file: Path,
+        *,
+        duckdb_extensions: dict[str, DuckDBExtensionConfig] | None = None,
+    ) -> None:
         self.state_file = state_file
         self.db_file = db_file
+        self.duckdb_extensions = duckdb_extensions or {}
+        self.duckdb_extension_load_results: list[DuckDBExtensionLoadResult] = []
+        self.duckdb_extension_load_messages: list[str] = []
         self.state = self._load_state()
         self.conn: duckdb.DuckDBPyConnection | None = None
 
@@ -46,7 +58,14 @@ class PipelineManager:
         if self.conn is None:
             self.conn = duckdb.connect(str(self.db_file))
             self.conn.execute("SET memory_limit='20GB'")
-            self.conn.execute("INSTALL splink_udfs FROM community; LOAD splink_udfs;")
+            self.duckdb_extension_load_results.append(
+                load_duckdb_extension(
+                    self.conn,
+                    "splink_udfs",
+                    self.duckdb_extensions.get("splink_udfs"),
+                    log=self.duckdb_extension_load_messages.append,
+                )
+            )
         return self.conn
 
     def close(self) -> None:
