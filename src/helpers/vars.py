@@ -17,6 +17,7 @@ KTP_AUTHOR_DETAILS_UNNEST_KEY = "ktp_author_details_unnest"
 AUTHOR_DETAILS_UNNEST_RULE_VERSION_METADATA_KEY: Final = (
     "match_rule_version.ssn_name"
 )
+OPENALEX_AUTHOR_SEARCH_LOG_KEY: Final = "openalex_author_search_log"
 OPENALEX_AUTHOR_SEARCH_LOG_SCHEMA_VERSION: Final = 1
 OPENALEX_AUTHOR_SEARCH_LOG_PATH: Final = "data/openalex_author_search_log.jsonl"
 WORLD_BANK_XLSX_KEY = "world_bank_xlsx"
@@ -38,6 +39,7 @@ REQUIRED_FILES_CONFIG_KEYS: Final[set[str]] = {
     "author_details",
     "authors",
     "fields",
+    OPENALEX_AUTHOR_SEARCH_LOG_KEY,
     WORLD_BANK_XLSX_KEY,
 }
 REQUIRED_FILE_ENTRY_KEYS: Final[set[str]] = {"path", "sha256", "desc"}

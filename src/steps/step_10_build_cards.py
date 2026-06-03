@@ -350,6 +350,7 @@ def _resource_filename_sets(context: PipelineContext) -> tuple[set[str], set[str
         + [context.resources.world_bank_resource]
         + list(context.resources.docx_resources.values())
     )
+    all_resources.append(context.resources.openalex_author_search_log_resource)
     sciscinet_filenames = {
         resource.name for resource in all_resources if resource.group == ResourceGroup.SCISCINET_HF
     }

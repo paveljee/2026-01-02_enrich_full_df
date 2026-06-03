@@ -154,6 +154,7 @@ def run(context: PipelineContext) -> StepResult:
         )
 
     author_details_unnest_path = context.resources.author_details_unnest_resource.__fspath__()
+    openalex_log_path = Path(context.resources.openalex_author_search_log_resource.__fspath__())
     author_id_col = SSNAD_AUTHORID_COL
     authors_author_id_col = normalize_parquet_column_name(SSNAD_RAW_AUTHORID_COL, "ssnau")
     author_id_raw = SSNAD_RAW_AUTHORID_COL
@@ -206,6 +207,7 @@ def run(context: PipelineContext) -> StepResult:
                 first_name=str(first_name or ""),
                 last_name=str(last_name or ""),
                 selected_author_id=selected_author_id_str,
+                log_path=openalex_log_path,
             )
             check_rows.append(
                 (

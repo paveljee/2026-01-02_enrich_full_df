@@ -128,6 +128,7 @@ def _matching_cached_record(
             if not isinstance(record, dict):
                 continue
             record_query = record.get("query")
+            record_source_key = record.get(KTP_SOURCE_KEY_COL)
             if (
                 record.get("schema_version") == OPENALEX_AUTHOR_SEARCH_LOG_SCHEMA_VERSION
                 and record.get("method") == "GET"
@@ -136,7 +137,7 @@ def _matching_cached_record(
                 and record.get("path") == OPENALEX_AUTHOR_SEARCH_PATH
                 and isinstance(record_query, str)
                 and _redact_openalex_author_search_query(record_query) == query
-                and record.get(KTP_SOURCE_KEY_COL) == source_key
+                and (record_source_key is None or record_source_key == source_key)
             ):
                 match = record
     return match
@@ -224,14 +225,10 @@ def check_openalex_author(
         "response_body": response.text,
         "received_at_unix_usec": received_at_unix_usec,
         "duration_usec": duration_usec,
-        KTP_SOURCE_KEY_COL: source_key,
-        "selected_ssn_author_id": selected_author_id,
-        "openalex_top_author_id": top_author_id,
-        "openalex_match": matched,
     }
     resolved_log_path.parent.mkdir(parents=True, exist_ok=True)
     with resolved_log_path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(record, sort_keys=True) + "\n")
+        handle.write(json.dumps(record) + "\n")
     return OpenAlexAuthorCheckResult(
         source_key=source_key,
         selected_author_id=selected_author_id,

@@ -16,6 +16,7 @@ from .vars import (
     HCR_XLSX_KEY_PREFIX,
     KTP_ALT_NAME_COL,
     KTP_AUTHOR_DETAILS_UNNEST_KEY,
+    OPENALEX_AUTHOR_SEARCH_LOG_KEY,
     SSNAD_AUTHORID_COL,
     SSNAD_RAW_AUTHORID_COL,
     SSNAD_RAW_DISPLAY_NAME_ALTERNATIVES_COL,
@@ -30,6 +31,7 @@ class PipelineResources:
     xlsx_resources: dict[str, RegisteredResource]
     world_bank_resource: RegisteredResource
     docx_resources: dict[str, RegisteredResource]
+    openalex_author_search_log_resource: RegisteredResource
     author_details_unnest_resource: RegisteredResource | None = None
     messages: list[str] = field(default_factory=list)
 
@@ -294,6 +296,28 @@ def _ensure_author_details_unnest_resource(
     return resource, messages
 
 
+def _ensure_openalex_author_search_log_resource(
+    config: PipelineConfig,
+) -> tuple[RegisteredResource, list[str]]:
+    meta = config.files_config[OPENALEX_AUTHOR_SEARCH_LOG_KEY]
+    path = Path(meta["path"])
+    resource = register_resource(
+        path,
+        group=ResourceGroup.KTP_PIPELINE_ARTIFACT,
+        fragment_type=FragmentType.CSV_ROW,
+        description=meta.get("desc", "OpenAlex author search log"),
+        expected_hash=meta.get("sha256"),
+    )
+    try:
+        with path.open("r+", encoding="utf-8"):
+            pass
+    except OSError as exc:
+        raise ValueError(
+            f"Could not open {OPENALEX_AUTHOR_SEARCH_LOG_KEY} for append/update: {path}"
+        ) from exc
+    return resource, [f"Validated {OPENALEX_AUTHOR_SEARCH_LOG_KEY} writable log: {path}"]
+
+
 def register_pipeline_resources(
     config: PipelineConfig,
     *,
@@ -400,6 +424,10 @@ def register_pipeline_resources(
         conn=conn,
         log=log,
     )
+    openalex_author_search_log_resource, openalex_messages = (
+        _ensure_openalex_author_search_log_resource(config)
+    )
+    messages.extend(openalex_messages)
     if author_details_unnest_resource is not None:
         parquet_resources[author_details_unnest_resource.name] = author_details_unnest_resource
 
@@ -409,6 +437,7 @@ def register_pipeline_resources(
         world_bank_resource=world_bank_resource,
         docx_resources=docx_resources,
         author_details_unnest_resource=author_details_unnest_resource,
+        openalex_author_search_log_resource=openalex_author_search_log_resource,
         messages=messages,
     )
 

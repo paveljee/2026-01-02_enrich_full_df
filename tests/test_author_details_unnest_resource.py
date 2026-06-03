@@ -9,6 +9,7 @@ import pytest
 from pydantic import ValidationError
 
 from src.helpers.config import PipelineConfig
+from src.helpers.data_models import FragmentType, ResourceGroup
 from src.helpers.duckdb_extensions import load_duckdb_extension_from_config_path
 from src.helpers.resources import register_pipeline_resources
 from src.helpers.vars import (
@@ -16,6 +17,7 @@ from src.helpers.vars import (
     HCR_XLSX_KEY_PREFIX,
     KTP_ALT_NAME_COL,
     KTP_AUTHOR_DETAILS_UNNEST_KEY,
+    OPENALEX_AUTHOR_SEARCH_LOG_KEY,
     REQUIRED_FILES_CONFIG_KEYS,
     SSNAD_AUTHORID_COL,
     WORLD_BANK_XLSX_KEY,
@@ -125,6 +127,7 @@ def test_register_pipeline_resources_creates_and_reuses_author_details_unnest(
     assert any("HEAVY step ahead" in message for message in messages)
     assert any(KTP_AUTHOR_DETAILS_UNNEST_KEY in message for message in messages)
     assert any("SSN name rule version: v2" in message for message in messages)
+    assert any(OPENALEX_AUTHOR_SEARCH_LOG_KEY in message for message in resources.messages)
 
     resource = resources.author_details_unnest_resource
     assert resource is not None
@@ -160,6 +163,9 @@ def test_register_pipeline_resources_creates_and_reuses_author_details_unnest(
     assert (AUTHOR_DETAILS_UNNEST_RULE_VERSION_METADATA_KEY, "2") in metadata_rows
     assert ("A5058677050", "claire m fraser") in rows
     assert ("A5058677050", "claire m. fraser") in rows
+    openalex_resource = resources.openalex_author_search_log_resource
+    assert openalex_resource.group == ResourceGroup.KTP_PIPELINE_ARTIFACT
+    assert openalex_resource.fragment_type == FragmentType.CSV_ROW
 
     reused = register_pipeline_resources(config, conn=None)
     assert reused.author_details_unnest_resource is not None
@@ -204,4 +210,13 @@ def test_config_rejects_old_name_matching_rule_version_shape(tmp_path: Path) -> 
     }
 
     with pytest.raises(ValidationError, match="name_matching_rule_version"):
+        PipelineConfig.model_validate(config_data)
+
+
+def test_config_requires_openalex_author_search_log_resource(tmp_path: Path) -> None:
+    config_data = _config_dict(tmp_path, ssn_name_rule_version=1)
+    files_config = cast(dict[str, dict[str, str]], config_data["files_config"])
+    files_config.pop(OPENALEX_AUTHOR_SEARCH_LOG_KEY)
+
+    with pytest.raises(ValidationError, match=OPENALEX_AUTHOR_SEARCH_LOG_KEY):
         PipelineConfig.model_validate(config_data)

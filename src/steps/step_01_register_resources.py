@@ -23,6 +23,7 @@ def _resource_registry_frame(resources: PipelineResources) -> pd.DataFrame:
         + [resources.world_bank_resource]
         + list(resources.docx_resources.values())
     )
+    all_resources.append(resources.openalex_author_search_log_resource)
     rows = [
         {
             "resource_name": res.name,

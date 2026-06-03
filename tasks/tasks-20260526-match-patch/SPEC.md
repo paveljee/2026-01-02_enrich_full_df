@@ -799,11 +799,15 @@ The AI-readable interpretation is:
 
   where `{ktp.source_key_first}` and `{ktp.source_key_last}` come from the KTP
   source key fields for that `name_key`.
-- Log every OpenAlex request/response/reuse to an append-only JSON Lines file
-  under `data/`. Centralize the concrete filename in code. Each line should use
-  schema version `1`; the schema-version constant must live in `vars.py`, not as
-  an inline literal in the OpenAlex logging helper. Each line should include at
-  least:
+- Log every OpenAlex request/response/reuse to the append-only JSON Lines file
+  registered under `files_config.openalex_author_search_log`. The resource is a
+  required `RegisteredResource` with group `ktp_pipeline_artifact`; step 01 must
+  fail through ordinary resource registration if the file is missing, hash
+  mismatched, or cannot be opened for writing. Centralize the concrete resource
+  key and default filename in `vars.py`. Each line should use schema version
+  `1`; the schema-version constant must live in `vars.py`, not as an inline
+  literal in the OpenAlex logging helper. Each line should include exactly this
+  HTTP exchange schema:
 
   ```json
   {
@@ -823,9 +827,11 @@ The AI-readable interpretation is:
   }
   ```
 
-  Additional fields needed for deterministic reuse, such as `ktp.source_key`,
-  selected SSN author id, parsed OpenAlex top author id, and match verdict, are
-  allowed and should be included if they make the cache/audit clearer.
+  The JSONL request-log record itself should stay to this HTTP exchange schema:
+  do not add selected SSN author ids, parsed OpenAlex top author ids, match
+  verdicts, or `ktp.*` fields to the persisted request log. Derive parsed top
+  author id and match verdict from the stored response body at read time, and
+  expose run-level audit data through the selected SSN innerdict fields below.
 - The selected SSN innerdict audit fields should use OpenAlex-specific `ktp.*`
   names rather than SSN-hit-prefixed names: `ktp.openalex_top_author_id`,
   `ktp.openalex_match`, `ktp.openalex_reused`, `ktp.openalex_response_code`,

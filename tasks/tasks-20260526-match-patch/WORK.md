@@ -23,10 +23,42 @@
 
 ## Doing Now
 
-- No active implementation item. Latest reviewed `manual_best` fixture test
-  refactor is implemented and verified.
+- No active implementation item. Latest OpenAlex JSONL request-log schema and
+  registered-resource wiring is implemented and focused verification passed.
 
 ## Done - Final Patch
+
+- Tightened OpenAlex JSONL appends to the SPEC-shaped HTTP exchange schema only:
+  no persisted `ktp.source_key`, selected SSN author id, parsed top author id,
+  or match verdict fields in new request-log records. Cache reuse still derives
+  top-author/match data from `response_body`, and old local cache rows carrying
+  `ktp.source_key` remain readable.
+- Wired `openalex_author_search_log` as a required `files_config` resource with
+  `ResourceGroup.KTP_PIPELINE_ARTIFACT`. Step 01 now registers it, verifies the
+  configured hash, and opens it with `r+` so missing or non-writable logs fail
+  before step 9. Step 9 passes the registered resource path to the OpenAlex
+  helper instead of relying on the helper default path.
+- Corrected `config.repl.json` so `openalex_author_search_log.path` points to
+  `data/openalex_author_search_log.jsonl`, matching its existing configured
+  SHA-256.
+- Added focused resource tests for the OpenAlex log registration and required
+  config key, and tightened the OpenAlex append test to assert the exact JSONL
+  field order/set and absence of analysis fields.
+- Simplified downstream usage to match pipeline architecture: the OpenAlex log
+  resource is now a required `PipelineResources` member produced by step 01, and
+  step 9 simply consumes the registered path instead of performing a second
+  missing-resource check.
+- Verification passed for this follow-up: targeted ruff and mypy on touched
+  modules, focused non-real resource/OpenAlex tests (6 passed, 1 skipped), and
+  real_api OpenAlex fixture tests (3 passed, 1 xfailed). The real_api run
+  populated the cleaned JSONL with exact-schema rows; `config.repl.json` now
+  carries the matching SHA-256 `d60ccd566c620b74e6710eb155223f5a9062b3b8afa265c2c897839630dad458`.
+- Full `pixi run pre-commit-repl` passed after the registered-resource cleanup:
+  ruff passed, mypy passed, default pytest reported 121 passed, 6 skipped,
+  6 xfailed, and 1 xpassed; the real_api leg reported 3 passed and 1 xfailed.
+  The OpenAlex JSONL SHA-256 remained
+  `d60ccd566c620b74e6710eb155223f5a9062b3b8afa265c2c897839630dad458` after
+  the cache-backed real_api rerun.
 
 - Refactored `test_manual_best_reviewed_fixture_outputs_select_expected_author_ids`
   into one parametrized pytest case per reviewed workbook row where either

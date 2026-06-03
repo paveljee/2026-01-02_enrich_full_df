@@ -64,6 +64,13 @@ def test_csv_rows_match_samples(tmp_path: Path) -> None:
             group=ResourceGroup.KTP_MANUAL_EXTRACTIONS,
             fragment_type=FragmentType.EXCEL_ROW,
         )
+        openalex_log = tmp_path / "openalex_author_search_log.jsonl"
+        openalex_log.write_text("", encoding="utf-8")
+        openalex_resource = register_resource(
+            openalex_log,
+            group=ResourceGroup.KTP_PIPELINE_ARTIFACT,
+            fragment_type=FragmentType.CSV_ROW,
+        )
         files_config = {
             key: {"path": "dummy", "sha256": "dummy", "desc": "dummy"}
             for key in REQUIRED_FILES_CONFIG_KEYS
@@ -116,6 +123,7 @@ def test_csv_rows_match_samples(tmp_path: Path) -> None:
             xlsx_resources=xlsx_resources,
             world_bank_resource=world_bank_resource,
             docx_resources={},
+            openalex_author_search_log_resource=openalex_resource,
         )
 
         run_load_xlsx(context)

@@ -584,7 +584,6 @@ def test_openalex_author_check_reuses_jsonl_cache(tmp_path: Path) -> None:
                 "response_body": '{"results":[{"id":"https://openalex.org/A123"}]}',
                 "received_at_unix_usec": 111,
                 "duration_usec": 222,
-                KTP_SOURCE_KEY_COL: source_key,
             }
         )
         + "\n",
@@ -643,12 +642,28 @@ def test_openalex_author_check_appends_response_and_parses_mismatch(tmp_path: Pa
     assert not result.matched
     assert not result.reused
     assert result.query == record["query"]
+    assert list(record) == [
+        "schema_version",
+        "method",
+        "scheme",
+        "host",
+        "path",
+        "query",
+        "request_headers",
+        "request_body",
+        "response_code",
+        "response_headers",
+        "response_body",
+        "received_at_unix_usec",
+        "duration_usec",
+    ]
     assert record["schema_version"] == OPENALEX_AUTHOR_SEARCH_LOG_SCHEMA_VERSION
-    assert record[KTP_SOURCE_KEY_COL] == source_key
     assert record["query"].endswith("api_key=REDACTED")
     assert "test-key" not in record["query"]
-    assert record["openalex_top_author_id"] == "A999"
-    assert record["openalex_match"] is False
+    assert KTP_SOURCE_KEY_COL not in record
+    assert "selected_ssn_author_id" not in record
+    assert "openalex_top_author_id" not in record
+    assert "openalex_match" not in record
 
 
 def test_parse_openalex_top_author_id_handles_empty_or_malformed_results() -> None:

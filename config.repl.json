@@ -36,6 +36,11 @@
   "pilot_xlsx_name": "2024_HCR.xlsx",
   "total_draws": 310,
   "files_config": {
+    "openalex_author_search_log": {
+      "path": "/Volumes/home/aicode/2026-01-02_enrich_full_df/data/openalex_author_search_log.jsonl",
+      "sha256": "d60ccd566c620b74e6710eb155223f5a9062b3b8afa265c2c897839630dad458",
+      "desc": "OpenAlex author search log"
+    },
     "ktp_author_details_unnest": {
       "path": "/Volumes/home/aicode/2026-01-02_enrich_full_df/data/output/ktp_author_details_unnest_v2.parquet",
       "sha256": "40be4518298a7f51658131addbfb644f7dea749348342f8011a4d62568bf1636",
