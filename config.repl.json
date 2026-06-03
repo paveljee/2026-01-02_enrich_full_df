@@ -12,7 +12,7 @@
   "state_file": "data/pipeline_state.json",
   "output_dir": "data/output",
   "output_format": "txt",
-  "card_subset_mode": 2,
+  "card_subset_mode": 1,
   "match_rule_version": {
     "xlsx_name": 2,
     "docx_name": 1,
@@ -38,7 +38,7 @@
   "files_config": {
     "openalex_author_search_log": {
       "path": "/Volumes/home/aicode/2026-01-02_enrich_full_df/data/openalex_author_search_log.jsonl",
-      "sha256": "d60ccd566c620b74e6710eb155223f5a9062b3b8afa265c2c897839630dad458",
+      "sha256": "95544debe4bbd0638c913ddd718a68e80b90bab5fa2b9a7c65e7762d6900cbc6",
       "desc": "OpenAlex author search log"
     },
     "ktp_author_details_unnest": {
