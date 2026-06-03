@@ -1,0 +1,526 @@
+cyan	DuckDB extension splink_udfs loaded from default community repository: community.
+dim	-- resumed from previous @ 2026-06-03 12:27:43 EDT --
+cyan	Running step: 01_register_resources
+green	Registered XLSX resources: 11
+green	Registered DOCX resources: 9
+green	Registered parquet resources: 9
+green	Validated ktp_author_details_unnest, rule version: 2
+green	Validated openalex_author_search_log writable log
+cyan	Running step: 02_load_xlsx
+green	Loaded population rows: 59665
+green	Columns: 26
+green	Artifacts dumped: data/diagnostics/20260603_122743/step_artifacts/02_load_xlsx_population_df.csv
+cyan	Running step: 03_infer_names
+green	Inferred name columns for 11 XLSX files.
+green	Artifacts dumped: data/diagnostics/20260603_122743/step_artifacts/03_infer_names_population_with_names_df.csv
+cyan	Running step: 04_add_economy_priority
+green	Computed economies for 217 country entries.
+green	Artifacts dumped: data/diagnostics/20260603_122743/step_artifacts/04_add_economy_priority_population_with_economy_df.csv
+cyan	Running step: 05_sample_population
+cyan	Precompute random draw batches: 8 draws, total random rows=300, population rows=59665
+cyan	Precompute pilot rows for sampling exclusion (10 configured pilot triples)
+cyan	Pilot sampling exclusion seed rows: 10 distinct population rows found in 2024_HCR.xlsx
+cyan	Random draw batches ready: 300 rows across 8 draws, 300 distinct population rows selected
+cyan	Materialize random draw 1/8: size=20, replace=True
+cyan	Materialize random draw 2/8: size=40, replace=True
+cyan	Materialize random draw 3/8: size=40, replace=True
+cyan	Materialize random draw 4/8: size=40, replace=True
+cyan	Materialize random draw 5/8: size=40, replace=True
+cyan	Materialize random draw 6/8: size=40, replace=True
+cyan	Materialize random draw 7/8: size=40, replace=True
+cyan	Materialize random draw 8/8: size=40, replace=True
+green	Sample rows: 310
+green	Artifacts dumped: data/diagnostics/20260603_122743/step_artifacts/05_sample_population_samples_with_context_df.csv
+cyan	Running step: 06_build_outerdict
+green	OuterDict keys: 307
+green	Artifacts dumped: data/diagnostics/20260603_122743/step_artifacts/06_build_outerdict_outer_dict.json, data/diagnostics/20260603_122743/step_artifacts/06_build_outerdict_outer_dict_excluded.json
+cyan	Running step: 07_match_xlsx
+green	Matched XLSX rows: 2018
+green	Artifacts dumped: data/diagnostics/20260603_122743/step_artifacts/07_match_xlsx_xlsx_matches_df.csv
+cyan	Running step: 08_match_docx
+green	Matched DOCX rows: 317
+green	Artifacts dumped: data/diagnostics/20260603_122743/step_artifacts/08_match_docx_docx_matches_df.csv
+cyan	Running step: 09_match_parquet
+cyan	[LEGEND] [TABLE/PARQUET]=parquet-derived tables we most want to preserve; 
+cyan	[LEGEND] [TABLE/INNERDICT]=materialized tables that feed recoverable innerdict/output artifacts; 
+cyan	[LEGEND] [TABLE/EFF]=materialized for efficiency only; 
+cyan	[LEGEND] [VIEW/FILTER]/[VIEW/OUTPUT]=ephemeral views; 
+cyan	[LEGEND] [OUTERDICT]=append/load actions.
+cyan	[TABLE/PARQUET] Match author details to name keys (ktp_author_details_unnest scan)
+cyan	[TABLE/PARQUET] HEAVY step ahead: author_details exact-name matching scans precomputed author-name keys and joins against all outerdict name keys. Display payloads are deferred until after nonzero-hit pruning.
+cyan	[TABLE/PARQUET] Matched author-details candidates: 7,807 rows, 304 name keys, 7,799 author IDs.
+cyan	[TABLE/PARQUET] Create author->paper table
+cyan	[TABLE/PARQUET] HEAVY step ahead: author->paper expansion joins matched author rows to authors_paper parquet and can grow substantially.
+cyan	[TABLE/PARQUET] Author->paper rows: 741,577 rows, 7,807 name/author pairs, 541,941 distinct papers.
+cyan	[TABLE/EFF] Create hits union table
+cyan	[TABLE/EFF] HEAVY step ahead: materializing hit tables union from 2 parquet files filtered to author->paper distinct papers (541,941) for reuse in multiple downstream queries.
+cyan	[TABLE/EFF] Hits union materialized: 3,630,554 rows, 541,906 papers, 303 fields.
+cyan	[TABLE/EFF] Aggregate author-level hit stats
+cyan	[TABLE/EFF] HEAVY step ahead: aggregating hit stats over author->paper rows (741,577) joined to hits union rows (3,630,554).
+cyan	[TABLE/EFF] Author hit aggregates: 7,807 rows (zero=4,983, nonzero=2,824, null=0).
+cyan	[VIEW/FILTER] Create filtered parquet author-match view before downstream enrichment
+cyan	[VIEW/FILTER] Nonzero-hit author-match filter: kept 2,824/7,807 rows, 304 name keys, 2,816 author IDs; removed zero-hit rows=4,983.
+cyan	[TABLE/EFF] Create SSN hit v2 candidate metric table
+cyan	[TABLE/EFF] HEAVY step ahead: joining nonzero-hit candidates to the narrow author_details metrics needed for Tukey hit selection.
+cyan	[VIEW/FILTER] SSN hit v2 per-name-key Tukey metrics: candidate rows=2,824, name keys=304, singleton nonzero name keys=169, missing works-count rows=0, multi-candidate missing works-count name keys=0.
+cyan	[VIEW/FILTER] Create hit-selected author-match view (SSN hit rule v2)
+cyan	[VIEW/FILTER] SSN hit v2 OpenAlex confidence gate: checking 135 unique max-work selections against current OpenAlex.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "A.", "ktp.last_name": "Sheikh"}, selected=A5026215303, top=A5026215303, status=200, verdict=match, received_at_unix_usec=1780504182979735.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Achim", "ktp.last_name": "Schwenk"}, selected=A5078191461, top=A5078191461, status=200, verdict=match, received_at_unix_usec=1780504183211179.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Adrian ", "ktp.last_name": "Angold"}, selected=A5045943993, top=A5045943993, status=200, verdict=match, received_at_unix_usec=1780504183447211.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Adrian", "ktp.last_name": "Smith"}, selected=A5101604723, top=A5101604723, status=200, verdict=match, received_at_unix_usec=1780504183646311.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Amy C.", "ktp.last_name": "Justice"}, selected=A5025733523, top=A5025733523, status=200, verdict=match, received_at_unix_usec=1780504184003655.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Andrew P", "ktp.last_name": "Morris"}, selected=A5101573852, top=A5101573852, status=200, verdict=match, received_at_unix_usec=1780504184229831.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Andy", "ktp.last_name": "Hector"}, selected=A5018954744, top=A5018954744, status=200, verdict=match, received_at_unix_usec=1780504184461684.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Anita", "ktp.last_name": "Ho-Baillie"}, selected=A5060853707, top=A5060853707, status=200, verdict=match, received_at_unix_usec=1780504184587326.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Anjana", "ktp.last_name": "Rao"}, selected=A5080472610, top=A5080472610, status=200, verdict=match, received_at_unix_usec=1780504184716715.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Anne M.", "ktp.last_name": "Fagan"}, selected=A5025837253, top=A5025837253, status=200, verdict=match, received_at_unix_usec=1780504184863564.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Baoshan ", "ktp.last_name": "Xing"}, selected=A5035633946, top=A5035633946, status=200, verdict=match, received_at_unix_usec=1780504185076257.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Bashir", "ktp.last_name": "Ahmad"}, selected=A5077672620, top=A5077672620, status=200, verdict=match, received_at_unix_usec=1780504185303217.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Bernard", "ktp.last_name": "Prendergast"}, selected=A5060916411, top=A5060916411, status=200, verdict=match, received_at_unix_usec=1780504185527750.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Bin", "ktp.last_name": "Gao"}, selected=A5100757015, top=A5049519363, status=200, verdict=mismatch, received_at_unix_usec=1780504185720642.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Brenda W. J. H.", "ktp.last_name": "Penninx"}, selected=A5055183685, top=A5055183685, status=200, verdict=match, received_at_unix_usec=1780504185907617.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Bruce ", "ktp.last_name": "Fischl"}, selected=A5022799533, top=A5022799533, status=200, verdict=match, received_at_unix_usec=1780504186078180.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "C. Warren", "ktp.last_name": "Olanow"}, selected=A5088654646, top=A5088654646, status=200, verdict=match, received_at_unix_usec=1780504186230013.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Charles M", "ktp.last_name": "Rice"}, selected=A5019683467, top=A5019683467, status=200, verdict=match, received_at_unix_usec=1780504186483102.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Charles S.", "ktp.last_name": "Fuchs"}, selected=A5049314303, top=A5049314303, status=200, verdict=match, received_at_unix_usec=1780504186718297.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Chris R.", "ktp.last_name": "Brewin"}, selected=A5074178806, top=A5074178806, status=200, verdict=match, received_at_unix_usec=1780504186948154.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Christos", "ktp.last_name": "Sotiriou"}, selected=A5057269336, top=A5057269336, status=200, verdict=match, received_at_unix_usec=1780504187108813.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Chunsheng", "ktp.last_name": "Wang"}, selected=A5100331428, top=A5100331428, status=200, verdict=match, received_at_unix_usec=1780504187239087.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Dabing", "ktp.last_name": "Zhang"}, selected=A5101447281, top=A5101447281, status=200, verdict=match, received_at_unix_usec=1780504187374093.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Daniel", "ktp.last_name": "Moran"}, selected=A5073593750, top=A5073593750, status=200, verdict=match, received_at_unix_usec=1780504187497793.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "David A.", "ktp.last_name": "Mills"}, selected=A5083824130, top=A5083824130, status=200, verdict=match, received_at_unix_usec=1780504187666055.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "David G.", "ktp.last_name": "Koch"}, selected=A5081377615, top=A5081377615, status=200, verdict=match, received_at_unix_usec=1780504187852992.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "David N", "ktp.last_name": "Spergel"}, selected=A5091900050, top=A5091900050, status=200, verdict=match, received_at_unix_usec=1780504187989023.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "David", "ktp.last_name": "Haussler"}, selected=A5090849321, top=A5090849321, status=200, verdict=match, received_at_unix_usec=1780504188139080.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "David", "ktp.last_name": "Reich"}, selected=A5011819951, top=A5011819951, status=200, verdict=match, received_at_unix_usec=1780504188394516.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Elliott M.", "ktp.last_name": "Antman"}, selected=A5019612250, top=A5019612250, status=200, verdict=match, received_at_unix_usec=1780504188634362.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Eugene B.", "ktp.last_name": "Chang"}, selected=A5042231260, top=A5042231260, status=200, verdict=match, received_at_unix_usec=1780504188797271.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Fei", "ktp.last_name": "Wang"}, selected=A5100322864, top=A5100455803, status=200, verdict=mismatch, received_at_unix_usec=1780504189225664.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Gaoquan ", "ktp.last_name": "Shi"}, selected=A5101644939, top=A5101644939, status=200, verdict=match, received_at_unix_usec=1780504189369340.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "George D.", "ktp.last_name": "Yancopoulos"}, selected=A5085672493, top=A5085672493, status=200, verdict=match, received_at_unix_usec=1780504189513161.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Giuseppe ", "ktp.last_name": "Viale"}, selected=A5088697304, top=A5088697304, status=200, verdict=match, received_at_unix_usec=1780504189752113.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Glyn", "ktp.last_name": "Lewis"}, selected=A5055543220, top=A5055543220, status=200, verdict=match, received_at_unix_usec=1780504190351593.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Gokhan S.", "ktp.last_name": "Hotamisligil"}, selected=A5006982292, top=A5006982292, status=200, verdict=match, received_at_unix_usec=1780504190968280.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Guangyuan", "ktp.last_name": "Zheng"}, selected=A5054938555, top=A5054938555, status=200, verdict=match, received_at_unix_usec=1780504191646801.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "H. M.", "ktp.last_name": "Srivastava"}, selected=A5079512627, top=A5079512627, status=200, verdict=match, received_at_unix_usec=1780504192092467.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Hao", "ktp.last_name": "Wang"}, selected=A5100322864, top=A5080102032, status=200, verdict=mismatch, received_at_unix_usec=1780504193015300.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "He", "ktp.last_name": "Yan"}, selected=A5058196030, top=A5058196030, status=200, verdict=match, received_at_unix_usec=1780504193526147.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Henrik", "ktp.last_name": "Zetterberg"}, selected=A5079766290, top=A5079766290, status=200, verdict=match, received_at_unix_usec=1780504194164441.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Hidenori", "ktp.last_name": "Arai"}, selected=A5076061467, top=A5056794714, status=200, verdict=mismatch, received_at_unix_usec=1780504194387585.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Hsien-Da", "ktp.last_name": "Huang"}, selected=A5040277769, top=A5040277769, status=200, verdict=match, received_at_unix_usec=1780504195165120.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Hui-Ming", "ktp.last_name": "Cheng"}, selected=A5100406789, top=A5100406789, status=200, verdict=match, received_at_unix_usec=1780504195778950.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Isabelle", "ktp.last_name": "Soerjomataram"}, selected=A5057880586, top=A5057880586, status=200, verdict=match, received_at_unix_usec=1780504196216822.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Ivo", "ktp.last_name": "Labbe"}, selected=A5040520737, top=A5040520737, status=200, verdict=match, received_at_unix_usec=1780504197009131.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Jaakko", "ktp.last_name": "Tuomilehto"}, selected=A5101494461, top=A5101494462, status=200, verdict=mismatch, received_at_unix_usec=1780504197418335.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Jacomine ", "ktp.last_name": "Krijnse-Locker"}, selected=A5111904537, top=A5111904537, status=200, verdict=match, received_at_unix_usec=1780504197617671.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Jeffrey A.", "ktp.last_name": "Lieberman"}, selected=A5075093461, top=A5075093461, status=200, verdict=match, received_at_unix_usec=1780504197818681.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Jeremy L.", "ktp.last_name": "Tinker"}, selected=A5090415728, top=A5090415728, status=200, verdict=match, received_at_unix_usec=1780504197983681.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Jiaguo", "ktp.last_name": "Yu"}, selected=A5100423139, top=A5100423139, status=200, verdict=match, received_at_unix_usec=1780504198128322.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Jian", "ktp.last_name": "Zhang"}, selected=A5100410082, top=A5100410082, status=200, verdict=match, received_at_unix_usec=1780504198337886.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Jian-Qiang", "ktp.last_name": "Wang"}, selected=A5100436366, top=A5100436366, status=200, verdict=match, received_at_unix_usec=1780504198520366.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Jianxun", "ktp.last_name": "Qi"}, selected=A5087385265, top=A5087385265, status=200, verdict=match, received_at_unix_usec=1780504198675675.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Jingbo", "ktp.last_name": "Li"}, selected=A5100690872, top=A5100690872, status=200, verdict=match, received_at_unix_usec=1780504198840910.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "John", "ktp.last_name": "Haanen"}, selected=A5017136846, top=A5017136846, status=200, verdict=match, received_at_unix_usec=1780504199058778.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Jonathan B", "ktp.last_name": "Losos"}, selected=A5034418699, top=A5034418699, status=200, verdict=match, received_at_unix_usec=1780504199466741.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Joshua A.", "ktp.last_name": "Salomon"}, selected=A5059135593, top=A5059135593, status=200, verdict=match, received_at_unix_usec=1780504199772328.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Jun", "ktp.last_name": "Wang"}, selected=A5100322864, top=A5111964102, status=200, verdict=mismatch, received_at_unix_usec=1780504200183512.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Katrina", "ktp.last_name": "Brown"}, selected=A5101857024, top=A5101857024, status=200, verdict=match, received_at_unix_usec=1780504200372301.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Kin-Hang", "ktp.last_name": "Kok"}, selected=A5108682199, top=A5108682199, status=200, verdict=match, received_at_unix_usec=1780504200527570.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Kinam", "ktp.last_name": "Park"}, selected=A5056562604, top=A5056562604, status=200, verdict=match, received_at_unix_usec=1780504200695021.
+cyan	[VIEW/FILTER] OpenAlex author check reused: name_key={"ktp.first_name": "Kuishuang", "ktp.last_name": "Feng"}, selected=A5076843232, top=A5049493168, status=200, verdict=mismatch, received_at_unix_usec=1780503456971381.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Ling", "ktp.last_name": "Shao"}, selected=A5082634513, top=A5082634513, status=200, verdict=match, received_at_unix_usec=1780504200893311.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Lixin", "ktp.last_name": "Wang"}, selected=A5100331165, top=A5100331165, status=200, verdict=match, received_at_unix_usec=1780504201046862.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Lizhi", "ktp.last_name": "Zhang"}, selected=A5100663896, top=A5100663896, status=200, verdict=match, received_at_unix_usec=1780504201188101.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Luis", "ktp.last_name": "Martinez"}, selected=A5009797333, top=A5060958743, status=200, verdict=mismatch, received_at_unix_usec=1780504201448541.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "M. Arfan", "ktp.last_name": "Ikram"}, selected=A5036303967, top=A5036303967, status=200, verdict=match, received_at_unix_usec=1780504201684671.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Mark A.", "ktp.last_name": "Bradford"}, selected=A5079576860, top=A5047160510, status=200, verdict=mismatch, received_at_unix_usec=1780504201856722.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Mark S.", "ktp.last_name": "Sulkowski"}, selected=A5054201295, top=A5054201295, status=200, verdict=match, received_at_unix_usec=1780504202039184.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Mark", "ktp.last_name": "Woodward"}, selected=A5037890696, top=A5037890696, status=200, verdict=match, received_at_unix_usec=1780504202214032.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Mercouri G.", "ktp.last_name": "Kanatzidis"}, selected=A5035758112, top=A5035758112, status=200, verdict=match, received_at_unix_usec=1780504202401223.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Mercouri", "ktp.last_name": "Kanatzidis"}, selected=A5035758112, top=A5035758112, status=200, verdict=match, received_at_unix_usec=1780504202605055.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Michael A.", "ktp.last_name": "Matthay"}, selected=A5052576862, top=A5052576862, status=200, verdict=match, received_at_unix_usec=1780504202776279.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Michael J.", "ktp.last_name": "Mack"}, selected=A5019062163, top=A5019062163, status=200, verdict=match, received_at_unix_usec=1780504202954533.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Michael T.", "ktp.last_name": "Heneka"}, selected=A5032387052, top=A5078440867, status=200, verdict=mismatch, received_at_unix_usec=1780504203174713.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Michael", "ktp.last_name": "Bohm"}, selected=A5008678419, top=A5008678419, status=200, verdict=match, received_at_unix_usec=1780504204127159.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Min", "ktp.last_name": "Wu"}, selected=A5074710425, top=A5074710425, status=200, verdict=match, received_at_unix_usec=1780504206121864.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Mingchuan", "ktp.last_name": "Luo"}, selected=A5001987994, top=A5001987994, status=200, verdict=match, received_at_unix_usec=1780504206562261.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Mingxian", "ktp.last_name": "Liu"}, selected=A5038667152, top=A5102949297, status=200, verdict=mismatch, received_at_unix_usec=1780504206739302.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Muhammad", "ktp.last_name": "Bilal"}, selected=A5100439310, top=A5100439310, status=200, verdict=match, received_at_unix_usec=1780504206960707.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Padmanee", "ktp.last_name": "Sharma"}, selected=A5071033599, top=A5071033599, status=200, verdict=match, received_at_unix_usec=1780504207150447.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Patrick", "ktp.last_name": "Cramer"}, selected=A5008281609, top=A5008281609, status=200, verdict=match, received_at_unix_usec=1780504207321910.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Patrick", "ktp.last_name": "Wincker"}, selected=A5011555000, top=A5011555000, status=200, verdict=match, received_at_unix_usec=1780504207538407.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Paul", "ktp.last_name": "Allen"}, selected=A5058678580, top=A5023806324, status=200, verdict=mismatch, received_at_unix_usec=1780504207721505.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Peng", "ktp.last_name": "Shi"}, selected=A5100739668, top=A5100739668, status=200, verdict=match, received_at_unix_usec=1780504207912265.
+cyan	[VIEW/FILTER] OpenAlex author check reused: name_key={"ktp.first_name": "Peng", "ktp.last_name": "Wang"}, selected=A5100322864, top=A5100396117, status=200, verdict=mismatch, received_at_unix_usec=1780503456381871.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Philippe", "ktp.last_name": "Genereux"}, selected=A5007377189, top=A5007377189, status=200, verdict=match, received_at_unix_usec=1780504208080813.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Puneet", "ktp.last_name": "Kaur"}, selected=A5008128129, top=A5008128129, status=200, verdict=match, received_at_unix_usec=1780504208248402.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Qian", "ktp.last_name": "Chen"}, selected=A5100428456, top=A5100428454, status=200, verdict=mismatch, received_at_unix_usec=1780504208465227.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Qiao", "ktp.last_name": "Zhang"}, selected=A5100357514, top=A5032628543, status=200, verdict=mismatch, received_at_unix_usec=1780504208794114.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Ramamoorthy", "ktp.last_name": "Ramesh"}, selected=A5014493844, top=A5014493844, status=200, verdict=match, received_at_unix_usec=1780504208962787.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Reinette", "ktp.last_name": "Biggs"}, selected=A5083285683, top=A5083285683, status=200, verdict=match, received_at_unix_usec=1780504209135609.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Renu", "ktp.last_name": "Virmani"}, selected=A5071287538, top=A5071287538, status=200, verdict=match, received_at_unix_usec=1780504209603066.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Richard A.", "ktp.last_name": "Flavell"}, selected=A5064443404, top=A5064443404, status=200, verdict=match, received_at_unix_usec=1780504210113454.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Richard J.", "ktp.last_name": "Youle"}, selected=A5016723424, top=A5016723424, status=200, verdict=match, received_at_unix_usec=1780504210275981.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Robin L.", "ktp.last_name": "Carhart-Harris"}, selected=A5038609897, top=A5038609897, status=200, verdict=match, received_at_unix_usec=1780504210496716.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Ronald C.", "ktp.last_name": "Petersen"}, selected=A5045246745, top=A5045246745, status=200, verdict=match, received_at_unix_usec=1780504210702610.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Russel J", "ktp.last_name": "Reiter"}, selected=A5063159500, top=A5063159500, status=200, verdict=match, received_at_unix_usec=1780504210918446.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Samir", "ktp.last_name": "Mitragotri"}, selected=A5087180621, top=A5087180621, status=200, verdict=match, received_at_unix_usec=1780504211093157.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Seung-Jung", "ktp.last_name": "Park"}, selected=A5103118075, top=A5103118075, status=200, verdict=match, received_at_unix_usec=1780504211271492.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Sheng", "ktp.last_name": "Dai"}, selected=A5018814519, top=A5018814519, status=200, verdict=match, received_at_unix_usec=1780504211459490.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Shihua", "ktp.last_name": "Li"}, selected=A5100618284, top=A5100618284, status=200, verdict=match, received_at_unix_usec=1780504211675068.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Shimon", "ktp.last_name": "Sakaguchi"}, selected=A5025764166, top=A5025764166, status=200, verdict=match, received_at_unix_usec=1780504211843911.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Shuxiao", "ktp.last_name": "Wang"}, selected=A5100406427, top=A5100406427, status=200, verdict=match, received_at_unix_usec=1780504211999087.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Simon ", "ktp.last_name": "White"}, selected=A5079556845, top=A5079556845, status=200, verdict=match, received_at_unix_usec=1780504212159828.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Sonia I", "ktp.last_name": "Seneviratne"}, selected=A5011579041, top=A5011579041, status=200, verdict=match, received_at_unix_usec=1780504212674245.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Steven X.", "ktp.last_name": "Ding"}, selected=A5046071840, top=A5046071840, status=200, verdict=match, received_at_unix_usec=1780504213801441.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Steven", "ktp.last_name": "Chu"}, selected=A5001967033, top=A5001967033, status=200, verdict=match, received_at_unix_usec=1780504214210947.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Tarik", "ktp.last_name": "Taleb"}, selected=A5087043869, top=A5087043869, status=200, verdict=match, received_at_unix_usec=1780504214448125.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Tasawar", "ktp.last_name": "Hayat"}, selected=A5068730007, top=A5068730007, status=200, verdict=match, received_at_unix_usec=1780504214706939.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Tobin J.", "ktp.last_name": "Marks"}, selected=A5000731301, top=A5000731301, status=200, verdict=match, received_at_unix_usec=1780504215199434.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Toren", "ktp.last_name": "Finkel"}, selected=A5011179194, top=A5011179194, status=200, verdict=match, received_at_unix_usec=1780504215544249.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Uwe", "ktp.last_name": "Rudolph"}, selected=A5036255755, top=A5036255755, status=200, verdict=match, received_at_unix_usec=1780504215849534.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Wei", "ktp.last_name": "Gong"}, selected=A5100650782, top=A5005791362, status=200, verdict=mismatch, received_at_unix_usec=1780504216156616.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Wei", "ktp.last_name": "Lu"}, selected=A5100335597, top=A5066881061, status=200, verdict=mismatch, received_at_unix_usec=1780504216381398.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Weihua", "ktp.last_name": "Deng"}, selected=A5110039855, top=A5110039855, status=200, verdict=match, received_at_unix_usec=1780504216558659.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Willem M.", "ktp.last_name": "de Vos"}, selected=A5054572740, top=A5054572740, status=200, verdict=match, received_at_unix_usec=1780504216734905.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "William C.", "ktp.last_name": "Cho"}, selected=A5049313911, top=A5049313911, status=200, verdict=match, received_at_unix_usec=1780504216909087.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Xiaohong ", "ktp.last_name": "Liu"}, selected=A5063022663, top=A5063022663, status=200, verdict=match, received_at_unix_usec=1780504217061499.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Ye", "ktp.last_name": "Wang"}, selected=A5100322864, top=A5108047874, status=200, verdict=mismatch, received_at_unix_usec=1780504217246020.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Yehuda", "ktp.last_name": "Shoenfeld"}, selected=A5074738902, top=A5074738902, status=200, verdict=match, received_at_unix_usec=1780504217403664.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Yoko", "ktp.last_name": "Sato"}, selected=A5076409992, top=A5076409992, status=200, verdict=match, received_at_unix_usec=1780504217572268.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Yong-Sheng", "ktp.last_name": "Hu"}, selected=A5042083053, top=A5074018534, status=200, verdict=mismatch, received_at_unix_usec=1780504217769333.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Yongping", "ktp.last_name": "Yang"}, selected=A5029555016, top=A5029555016, status=200, verdict=match, received_at_unix_usec=1780504217931004.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Yongqiang", "ktp.last_name": "Guo"}, selected=A5100758120, top=A5100758120, status=200, verdict=match, received_at_unix_usec=1780504218087718.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Yongqing", "ktp.last_name": "Yang"}, selected=A5110919848, top=A5110919848, status=200, verdict=match, received_at_unix_usec=1780504218255923.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Younan", "ktp.last_name": "Xia"}, selected=A5041556229, top=A5041556229, status=200, verdict=match, received_at_unix_usec=1780504218428669.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Yu", "ktp.last_name": "Wang"}, selected=A5100322864, top=A5100445300, status=200, verdict=mismatch, received_at_unix_usec=1780504218663318.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Yuen", "ktp.last_name": "Wu"}, selected=A5051498051, top=A5022989538, status=200, verdict=mismatch, received_at_unix_usec=1780504218819695.
+cyan	[VIEW/FILTER] OpenAlex author check reused: name_key={"ktp.first_name": "Yulin", "ktp.last_name": "Chen"}, selected=A5100383082, top=A5100398894, status=200, verdict=mismatch, received_at_unix_usec=1780503456625137.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Yupeng", "ktp.last_name": "Zhang"}, selected=A5100434298, top=A5100434298, status=200, verdict=match, received_at_unix_usec=1780504218992206.
+cyan	[VIEW/FILTER] OpenAlex author check fetched: name_key={"ktp.first_name": "Zhijun", "ktp.last_name": "Li"}, selected=A5100450024, top=A5100450024, status=200, verdict=match, received_at_unix_usec=1780504219167717.
+cyan	[VIEW/FILTER] OpenAlex author check reused: name_key={"ktp.first_name": "Zhiqun", "ktp.last_name": "Lin"}, selected=A5009534643, top=A5009534643, status=200, verdict=match, received_at_unix_usec=1780503457256533.
+cyan	[VIEW/FILTER] SSN hit v2 OpenAlex confidence gate summary: checked=135, reused=4, fetched=131, matched=113, failed=22.
+cyan	[VIEW/FILTER] Hit-selected author-match view: kept 2,044/2,824 nonzero-hit rows, 304 name keys, 2,037 author IDs.
+cyan	[VIEW/FILTER] SSN hit v2 candidate flags: candidate rows=2,824, name keys=304, author IDs=2,816; any Tukey outlier rows=390, sum-hit outlier rows=283, works-count outlier rows=239, cited-by-count outlier rows=268.
+cyan	[VIEW/FILTER] SSN hit v2 name-key selection: name keys with Tukey outliers=51, outlier decision-pool name keys=51, full-nonzero/no-outlier decision-pool name keys=84, singleton nonzero name keys=169, multi-candidate missing works-count name keys=0, max-work tie name keys=0; selected rows=2,044, selected name keys=304, selected author IDs=2,037.
+cyan	[VIEW/FILTER] SSN hit v2 row disposition: decision-pool rows=756, decision-pool name keys=304, unique max-work winner name keys=135, missing works-count rows=0; selected singleton rows=169, selected unique max-work rows=135, selected multi-candidate missing works-count rows=0, selected max-work tie rows=0, pruned by unique max-work=780.
+cyan	[VIEW/FILTER] SSN hit v2 selected-row multiplicity: one-row name keys=282, multi-row/tied name keys=22, max selected rows for one name key=346.
+cyan	[VIEW/FILTER] Create distinct hit-selected author-id filter view
+cyan	[VIEW/FILTER] Distinct hit-selected author IDs: 2,037.
+cyan	[TABLE/EFF] Create full author aggregate payload table (nonzero-hit subset only)
+cyan	[TABLE/EFF] HEAVY step ahead: list-heavy author aggregation (paper lists + field IDs) restricted to hit-selected author matches after pruning.
+cyan	[TABLE/EFF] Author aggregate payload rows (hit-selected subset): 2,044.
+cyan	[TABLE/PARQUET] Create matched author_details table
+cyan	[TABLE/PARQUET] HEAVY step ahead: filtering author_details parquet by distinct hit-selected author IDs (2,037).
+cyan	[TABLE/PARQUET] Matched author_details rows: 2,037.
+cyan	[TABLE/PARQUET] Create matched authors table
+cyan	[TABLE/PARQUET] HEAVY step ahead: filtering authors parquet by distinct hit-selected author IDs (2,037).
+cyan	[TABLE/PARQUET] Matched authors rows: 2,037.
+cyan	[TABLE/PARQUET] Create matched paper-author-affiliation table
+cyan	[TABLE/PARQUET] HEAVY step ahead: filtering paper_author_affiliation parquet by distinct hit-selected author IDs (2,037); this can still be very large.
+cyan	[TABLE/PARQUET] Matched paper-author-affiliation rows: 553,221.
+cyan	[TABLE/PARQUET] Create matched affiliations table
+cyan	[TABLE/PARQUET] HEAVY step ahead: filtering affiliations parquet to institutions referenced by matched paper-author-affiliation rows.
+cyan	[TABLE/PARQUET] Matched affiliations rows: 10,600.
+cyan	[TABLE/INNERDICT] Create author-level output table
+cyan	[TABLE/INNERDICT] HEAVY step ahead: joining hit-selected author matches with matched author_details, matched authors, and author hit aggregates.
+cyan	[TABLE/INNERDICT] Author-level output rows: 2,044.
+cyan	[TABLE/EFF] HEAVY diagnostic ahead: estimate top-paper reduction by scanning author->paper rows filtered to hit-selected matches.
+cyan	Top-5 paper reduction: kept 10044 of 564686, removed 554642.
+cyan	[TABLE/EFF] HEAVY diagnostic ahead: estimate top-institution reduction from matched paper-author-affiliation rows.
+cyan	Top-5 institution reduction: kept 9668 of 84382, removed 74714.
+cyan	[TABLE/EFF] HEAVY diagnostic ahead: expand field-id lists and join fields parquet to measure display-name coverage.
+cyan	[TABLE/EFF] Fields display-name mapping: matched 182613/182613 IDs (unmatched: 0).
+cyan	[TABLE/INNERDICT] Create parquet enriched table (top-5 papers, top-5 institutions, concept display names, selected hits)
+cyan	[TABLE/INNERDICT] HEAVY step ahead: builds final parquet innerdict rows with paper ranking, institution ranking, concept display mapping, and draw ordering.
+cyan	[TABLE/INNERDICT] Parquet enriched rows: 2,044.
+cyan	[OUTERDICT] Append parquet matches into OuterDict (2,044 rows)
+cyan	[VIEW/OUTPUT] Create parquet output view
+cyan	[VIEW/FILTER] Filtered out parquet author-match rows before downstream enrichment with ktp.ssn_sum_hit_1pct == 0: 4,983
+cyan	[VIEW/OUTPUT] Load parquet output dataframe
+cyan	[VIEW/OUTPUT] HEAVY step ahead: executes output view and converts result to pandas dataframe.
+cyan	[VIEW/OUTPUT] Loaded parquet output dataframe rows: 2,044 across 1 view(s).
+green	Parquet views created: 1
+green	Matched parquet rows: 2044
+green	Artifacts dumped: data/diagnostics/20260603_122743/step_artifacts/09_match_parquet_ssn_parquet_output.csv
+cyan	Running step: 10_build_cards
+cyan	Card subset mode 2: Remaining name keys (zero or >1 sciscinet innerdict, no present ktp.xlsx_match payload, any non-exact ktp.xlsx_match, no docx innerdict, or any empty required ktp.table_1_* value). For ktp.table_1_* fields, non-empty is required except these allowed-empty fields: ['ktp.table_1_comments', 'ktp.table_1_footnotes', 'ktp.table_1_race_ethnicity_language_culture', 'ktp.table_1_socioeconomic_status', 'ktp.table_1_topics']
+Rule                                           Pass   Fail
+----------------------------------------------------------
+sciscinet: exactly one innerdict                282     25
+xlsx: all present ktp.xlsx_match exact          282     25
+docx: required ktp.table_1_* non-empty          207    100
+----------------------------------------------------------
+mode_1                                          181    126
+mode_2                                          126    181
+mode_3                                          259     48
+mode_4                                           48    259
+selected for current mode                       126    181
+mode_1 description: Exactly one sciscinet innerdict, at least one present ktp.xlsx_match payload and all present ktp.xlsx_match payloads are exact, and at least one docx innerdict with all required present ktp.table_1_* fields non-empty. For ktp.table_1_* fields, non-empty is required except these allowed-empty fields: ['ktp.table_1_comments', 'ktp.table_1_footnotes', 'ktp.table_1_race_ethnicity_language_culture', 'ktp.table_1_socioeconomic_status', 'ktp.table_1_topics']
+mode_2 description: Remaining name keys (zero or >1 sciscinet innerdict, no present ktp.xlsx_match payload, any non-exact ktp.xlsx_match, no docx innerdict, or any empty required ktp.table_1_* value). For ktp.table_1_* fields, non-empty is required except these allowed-empty fields: ['ktp.table_1_comments', 'ktp.table_1_footnotes', 'ktp.table_1_race_ethnicity_language_culture', 'ktp.table_1_socioeconomic_status', 'ktp.table_1_topics']
+mode_3 description: Exactly one sciscinet innerdict, at least one present ktp.xlsx_match payload, and all present ktp.xlsx_match payloads are exact.
+mode_4 description: Remaining name keys (zero or >1 sciscinet innerdict, no present ktp.xlsx_match payload, or any non-exact ktp.xlsx_match).
+cyan	Building cards from selected subset
+cyan	Card build progress [------------------------] 1/126
+cyan	Card build progress [------------------------] 2/126
+cyan	Card build progress [------------------------] 3/126
+cyan	Card build progress [------------------------] 4/126
+cyan	Card build progress [------------------------] 5/126
+cyan	Card build progress [#-----------------------] 6/126
+cyan	Card build progress [#-----------------------] 7/126
+cyan	Card build progress [#-----------------------] 8/126
+cyan	Card build progress [#-----------------------] 9/126
+cyan	Card build progress [#-----------------------] 10/126
+cyan	Card build progress [##----------------------] 11/126
+cyan	Card build progress [##----------------------] 12/126
+cyan	Card build progress [##----------------------] 13/126
+cyan	Card build progress [##----------------------] 14/126
+cyan	Card build progress [##----------------------] 15/126
+cyan	Card build progress [###---------------------] 16/126
+cyan	Card build progress [###---------------------] 17/126
+cyan	Card build progress [###---------------------] 18/126
+cyan	Card build progress [###---------------------] 19/126
+cyan	Card build progress [###---------------------] 20/126
+cyan	Card build progress [####--------------------] 21/126
+cyan	Card build progress [####--------------------] 22/126
+cyan	Card build progress [####--------------------] 23/126
+cyan	Card build progress [####--------------------] 24/126
+cyan	Card build progress [####--------------------] 25/126
+cyan	Card build progress [####--------------------] 26/126
+cyan	Card build progress [#####-------------------] 27/126
+cyan	Card build progress [#####-------------------] 28/126
+cyan	Card build progress [#####-------------------] 29/126
+cyan	Card build progress [#####-------------------] 30/126
+cyan	Card build progress [#####-------------------] 31/126
+cyan	Card build progress [######------------------] 32/126
+cyan	Card build progress [######------------------] 33/126
+cyan	Card build progress [######------------------] 34/126
+cyan	Card build progress [######------------------] 35/126
+cyan	Card build progress [######------------------] 36/126
+cyan	Card build progress [#######-----------------] 37/126
+cyan	Card build progress [#######-----------------] 38/126
+cyan	Card build progress [#######-----------------] 39/126
+cyan	Card build progress [#######-----------------] 40/126
+cyan	Card build progress [#######-----------------] 41/126
+cyan	Card build progress [########----------------] 42/126
+cyan	Card build progress [########----------------] 43/126
+cyan	Card build progress [########----------------] 44/126
+cyan	Card build progress [########----------------] 45/126
+cyan	Card build progress [########----------------] 46/126
+cyan	Card build progress [########----------------] 47/126
+cyan	Card build progress [#########---------------] 48/126
+cyan	Card build progress [#########---------------] 49/126
+cyan	Card build progress [#########---------------] 50/126
+cyan	Card build progress [#########---------------] 51/126
+cyan	Card build progress [#########---------------] 52/126
+cyan	Card build progress [##########--------------] 53/126
+cyan	Card build progress [##########--------------] 54/126
+cyan	Card build progress [##########--------------] 55/126
+cyan	Card build progress [##########--------------] 56/126
+cyan	Card build progress [##########--------------] 57/126
+cyan	Card build progress [###########-------------] 58/126
+cyan	Card build progress [###########-------------] 59/126
+cyan	Card build progress [###########-------------] 60/126
+cyan	Card build progress [###########-------------] 61/126
+cyan	Card build progress [###########-------------] 62/126
+cyan	Card build progress [############------------] 63/126
+cyan	Card build progress [############------------] 64/126
+cyan	Card build progress [############------------] 65/126
+cyan	Card build progress [############------------] 66/126
+cyan	Card build progress [############------------] 67/126
+cyan	Card build progress [############------------] 68/126
+cyan	Card build progress [#############-----------] 69/126
+cyan	Card build progress [#############-----------] 70/126
+cyan	Card build progress [#############-----------] 71/126
+cyan	Card build progress [#############-----------] 72/126
+cyan	Card build progress [#############-----------] 73/126
+cyan	Card build progress [##############----------] 74/126
+cyan	Card build progress [##############----------] 75/126
+cyan	Card build progress [##############----------] 76/126
+cyan	Card build progress [##############----------] 77/126
+cyan	Card build progress [##############----------] 78/126
+cyan	Card build progress [###############---------] 79/126
+cyan	Card build progress [###############---------] 80/126
+cyan	Card build progress [###############---------] 81/126
+cyan	Card build progress [###############---------] 82/126
+cyan	Card build progress [###############---------] 83/126
+cyan	Card build progress [################--------] 84/126
+cyan	Card build progress [################--------] 85/126
+cyan	Card build progress [################--------] 86/126
+cyan	Card build progress [################--------] 87/126
+cyan	Card build progress [################--------] 88/126
+cyan	Card build progress [################--------] 89/126
+cyan	Card build progress [#################-------] 90/126
+cyan	Card build progress [#################-------] 91/126
+cyan	Card build progress [#################-------] 92/126
+cyan	Card build progress [#################-------] 93/126
+cyan	Card build progress [#################-------] 94/126
+cyan	Card build progress [##################------] 95/126
+cyan	Card build progress [##################------] 96/126
+cyan	Card build progress [##################------] 97/126
+cyan	Card build progress [##################------] 98/126
+cyan	Card build progress [##################------] 99/126
+cyan	Card build progress [###################-----] 100/126
+cyan	Card build progress [###################-----] 101/126
+cyan	Card build progress [###################-----] 102/126
+cyan	Card build progress [###################-----] 103/126
+cyan	Card build progress [###################-----] 104/126
+cyan	Card build progress [####################----] 105/126
+cyan	Card build progress [####################----] 106/126
+cyan	Card build progress [####################----] 107/126
+cyan	Card build progress [####################----] 108/126
+cyan	Card build progress [####################----] 109/126
+cyan	Card build progress [####################----] 110/126
+cyan	Card build progress [#####################---] 111/126
+cyan	Card build progress [#####################---] 112/126
+cyan	Card build progress [#####################---] 113/126
+cyan	Card build progress [#####################---] 114/126
+cyan	Card build progress [#####################---] 115/126
+cyan	Card build progress [######################--] 116/126
+cyan	Card build progress [######################--] 117/126
+cyan	Card build progress [######################--] 118/126
+cyan	Card build progress [######################--] 119/126
+cyan	Card build progress [######################--] 120/126
+cyan	Card build progress [#######################-] 121/126
+cyan	Card build progress [#######################-] 122/126
+cyan	Card build progress [#######################-] 123/126
+cyan	Card build progress [#######################-] 124/126
+cyan	Card build progress [#######################-] 125/126
+cyan	Card build progress [########################] 126/126
+cyan	Output write progress [------------------------] 1/126
+cyan	Output write progress [------------------------] 2/126
+cyan	Output write progress [------------------------] 3/126
+cyan	Output write progress [------------------------] 4/126
+cyan	Output write progress [------------------------] 5/126
+cyan	Output write progress [#-----------------------] 6/126
+cyan	Output write progress [#-----------------------] 7/126
+cyan	Output write progress [#-----------------------] 8/126
+cyan	Output write progress [#-----------------------] 9/126
+cyan	Output write progress [#-----------------------] 10/126
+cyan	Output write progress [##----------------------] 11/126
+cyan	Output write progress [##----------------------] 12/126
+cyan	Output write progress [##----------------------] 13/126
+cyan	Output write progress [##----------------------] 14/126
+cyan	Output write progress [##----------------------] 15/126
+cyan	Output write progress [###---------------------] 16/126
+cyan	Output write progress [###---------------------] 17/126
+cyan	Output write progress [###---------------------] 18/126
+cyan	Output write progress [###---------------------] 19/126
+cyan	Output write progress [###---------------------] 20/126
+cyan	Output write progress [####--------------------] 21/126
+cyan	Output write progress [####--------------------] 22/126
+cyan	Output write progress [####--------------------] 23/126
+cyan	Output write progress [####--------------------] 24/126
+cyan	Output write progress [####--------------------] 25/126
+cyan	Output write progress [####--------------------] 26/126
+cyan	Output write progress [#####-------------------] 27/126
+cyan	Output write progress [#####-------------------] 28/126
+cyan	Output write progress [#####-------------------] 29/126
+cyan	Output write progress [#####-------------------] 30/126
+cyan	Output write progress [#####-------------------] 31/126
+cyan	Output write progress [######------------------] 32/126
+cyan	Output write progress [######------------------] 33/126
+cyan	Output write progress [######------------------] 34/126
+cyan	Output write progress [######------------------] 35/126
+cyan	Output write progress [######------------------] 36/126
+cyan	Output write progress [#######-----------------] 37/126
+cyan	Output write progress [#######-----------------] 38/126
+cyan	Output write progress [#######-----------------] 39/126
+cyan	Output write progress [#######-----------------] 40/126
+cyan	Output write progress [#######-----------------] 41/126
+cyan	Output write progress [########----------------] 42/126
+cyan	Output write progress [########----------------] 43/126
+cyan	Output write progress [########----------------] 44/126
+cyan	Output write progress [########----------------] 45/126
+cyan	Output write progress [########----------------] 46/126
+cyan	Output write progress [########----------------] 47/126
+cyan	Output write progress [#########---------------] 48/126
+cyan	Output write progress [#########---------------] 49/126
+cyan	Output write progress [#########---------------] 50/126
+cyan	Output write progress [#########---------------] 51/126
+cyan	Output write progress [#########---------------] 52/126
+cyan	Output write progress [##########--------------] 53/126
+cyan	Output write progress [##########--------------] 54/126
+cyan	Output write progress [##########--------------] 55/126
+cyan	Output write progress [##########--------------] 56/126
+cyan	Output write progress [##########--------------] 57/126
+cyan	Output write progress [###########-------------] 58/126
+cyan	Output write progress [###########-------------] 59/126
+cyan	Output write progress [###########-------------] 60/126
+cyan	Output write progress [###########-------------] 61/126
+cyan	Output write progress [###########-------------] 62/126
+cyan	Output write progress [############------------] 63/126
+cyan	Output write progress [############------------] 64/126
+cyan	Output write progress [############------------] 65/126
+cyan	Output write progress [############------------] 66/126
+cyan	Output write progress [############------------] 67/126
+cyan	Output write progress [############------------] 68/126
+cyan	Output write progress [#############-----------] 69/126
+cyan	Output write progress [#############-----------] 70/126
+cyan	Output write progress [#############-----------] 71/126
+cyan	Output write progress [#############-----------] 72/126
+cyan	Output write progress [#############-----------] 73/126
+cyan	Output write progress [##############----------] 74/126
+cyan	Output write progress [##############----------] 75/126
+cyan	Output write progress [##############----------] 76/126
+cyan	Output write progress [##############----------] 77/126
+cyan	Output write progress [##############----------] 78/126
+cyan	Output write progress [###############---------] 79/126
+cyan	Output write progress [###############---------] 80/126
+cyan	Output write progress [###############---------] 81/126
+cyan	Output write progress [###############---------] 82/126
+cyan	Output write progress [###############---------] 83/126
+cyan	Output write progress [################--------] 84/126
+cyan	Output write progress [################--------] 85/126
+cyan	Output write progress [################--------] 86/126
+cyan	Output write progress [################--------] 87/126
+cyan	Output write progress [################--------] 88/126
+cyan	Output write progress [################--------] 89/126
+cyan	Output write progress [#################-------] 90/126
+cyan	Output write progress [#################-------] 91/126
+cyan	Output write progress [#################-------] 92/126
+cyan	Output write progress [#################-------] 93/126
+cyan	Output write progress [#################-------] 94/126
+cyan	Output write progress [##################------] 95/126
+cyan	Output write progress [##################------] 96/126
+cyan	Output write progress [##################------] 97/126
+cyan	Output write progress [##################------] 98/126
+cyan	Output write progress [##################------] 99/126
+cyan	Output write progress [###################-----] 100/126
+cyan	Output write progress [###################-----] 101/126
+cyan	Output write progress [###################-----] 102/126
+cyan	Output write progress [###################-----] 103/126
+cyan	Output write progress [###################-----] 104/126
+cyan	Output write progress [####################----] 105/126
+cyan	Output write progress [####################----] 106/126
+cyan	Output write progress [####################----] 107/126
+cyan	Output write progress [####################----] 108/126
+cyan	Output write progress [####################----] 109/126
+cyan	Output write progress [####################----] 110/126
+cyan	Output write progress [#####################---] 111/126
+cyan	Output write progress [#####################---] 112/126
+cyan	Output write progress [#####################---] 113/126
+cyan	Output write progress [#####################---] 114/126
+cyan	Output write progress [#####################---] 115/126
+cyan	Output write progress [######################--] 116/126
+cyan	Output write progress [######################--] 117/126
+cyan	Output write progress [######################--] 118/126
+cyan	Output write progress [######################--] 119/126
+cyan	Output write progress [######################--] 120/126
+cyan	Output write progress [#######################-] 121/126
+cyan	Output write progress [#######################-] 122/126
+cyan	Output write progress [#######################-] 123/126
+cyan	Output write progress [#######################-] 124/126
+cyan	Output write progress [#######################-] 125/126
+cyan	Output write progress [########################] 126/126
+green	Card partition rows: 126
+green	Card partition review rows: 866
+green	Cards generated: 126
+green	Output zip: data/output/2024-Historical-Highly-Cited-Researchers-lists - final_combined_cards.zip
+green	Artifacts dumped: data/diagnostics/20260603_122743/step_artifacts/10_build_cards_card_partitions_df.csv, data/diagnostics/20260603_122743/step_artifacts/10_build_cards_card_partition_review_df.csv, data/output/2024-Historical-Highly-Cited-Researchers-lists - final_combined_cards.zip
+cyan	Execution Metrics
+magenta	Peak RAM Usage: 6.67 GB
+magenta	Cards: 126
+cyan	Diagnostics report saved to: data/diagnostics/20260603_122743/repl_diagnostics.md
+green	Success! Output saved to: data/output/2024-Historical-Highly-Cited-Researchers-lists - final_combined_cards.zip

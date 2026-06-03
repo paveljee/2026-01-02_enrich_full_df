@@ -331,3 +331,41 @@ to fully complete the
   For this I need a
   new `RegisteredResource` and a
   handler for this resource. 
+
+### post-post-implementation
+1. Test fixture with `*export_edit_done.xlsx`:
+   done at `tests/test_sciscinet_name_matching.py`,
+   in particular
+   `test_manual_best_reviewed_fixture_outputs_select_expected_author_ids` and
+   `test_real_api_openalex_identifies_known_false_confident_ssn_picks`,
+   hardened with
+   `test_manual_best_reviewed_fixture_expectation_coverage`.
+   Outputs are illustrative and make sense.
+1. OpenAlex checks.
+   Implemented, see `20260602` logs
+   here: `./context/diagnostics`.
+1. Forcing manually picked authorid
+   into the pipeline.
+   **Pending**, but also
+   not strictly necessary
+   at this particular point
+   (i.e.,
+   sharing the 3rd batch
+   after 76 and 31)
+   because the
+   "false confident old ssn picks"
+   are confirmed to,
+   thanks to OpenAlex checks, land in
+   subset 2 (partition 2) now,
+   where they will be manually checked.
+   For example,
+   this log
+   `./context/diagnostics/20260603_122743_mode2_v2_ssn_hit_v2_with_openalex/repl_session.log`
+   shows that all four of
+   known false confident matches
+   have been picked up with OpenAlex
+   (along with 18 failures,
+   which is exciting!
+   and also aligns with the
+   "10-15" or 11.4%
+   estimate above).
