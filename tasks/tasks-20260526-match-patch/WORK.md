@@ -23,10 +23,29 @@
 
 ## Doing Now
 
-- No active implementation item. Latest DuckDB extension config/loading and
-  logging follow-up is implemented and verified.
+- No active implementation item. Latest reviewed `manual_best` fixture test
+  refactor is implemented and verified.
 
 ## Done - Final Patch
+
+- Refactored `test_manual_best_reviewed_fixture_outputs_select_expected_author_ids`
+  into one parametrized pytest case per reviewed workbook row where either
+  `manual_best` or `manual_best_note` is nonempty. The pytest case id and
+  failure message now show source key, manual best, note, interpreted note
+  category, recalculated XLSX decision, expected subset/author IDs, and actual
+  output subset/author IDs. The workbook-wide count/category coverage checks now
+  live in a separate focused test.
+- Tightened the parametrized reviewed fixture test so only true matches pass:
+  nonempty `manual_best`, predicted subset equals actual subset, and the actual
+  selected author ID is exactly the manual-best author ID. All non-true-match
+  reviewed rows now `xfail` with the same detailed case message.
+- Focused verification passed for the refactor: parametrized reviewed fixture
+  tests reported 32 passed/6 xfailed plus one coverage pass, and ruff/mypy passed for
+  `tests/test_sciscinet_name_matching.py`.
+- Full verification passed after the reviewed fixture test refactor: `pixi run
+  pre-commit-repl` reported ruff passing, mypy passing, default pytest at 121
+  passed/3 skipped/6 xfailed, and the `real_api` selection as the expected
+  xfail.
 
 - Added generic `duckdb_extensions` config parsing (`repo` plus platform `bin`
   paths), a centralized `src/helpers/duckdb_extensions.py` loader, and
@@ -579,3 +598,10 @@
 - Latest `pixi run pre-commit-repl` after the XLSX payload typing fix passed:
   ruff passed, mypy over `src tests` passed, and full default pytest passed with
   79 passed and 2 skipped.
+- OpenAlex real-api fixture check was parametrized from workbook notes so each
+  old false-confident SSN pick is its own case; focused marker run
+  `pixi run pytest -vv -s tests/test_sciscinet_name_matching.py::test_real_api_openalex_identifies_known_false_confident_ssn_picks -m real_api`
+  passed with 3 passed and 1 xfailed (the reviewed-stale Yulin Chen manual_best).
+- The same nodeid without `-m real_api` collected the same 4 cases and skipped
+  them, confirming the marker gate remains explicit. Targeted ruff and mypy for
+  `tests/test_sciscinet_name_matching.py` passed.

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 import duckdb
@@ -855,7 +856,328 @@ def _workbook_note_category(note: str) -> str:
     return _manual_note_category(note)
 
 
-def test_manual_best_reviewed_fixture_outputs_select_expected_author_ids() -> None:
+@dataclass(frozen=True)
+class ManualBestReviewedCase:
+    row_index: int
+    source_key: str
+    manual_best: str
+    manual_note: str
+    note_category: str
+    recalculated_author_id: str | None
+    recalculated_mode: str
+    old_author_id: str | None
+    expected_decision: str
+    expected_subset: str
+    expected_author_ids: tuple[str, ...]
+    forbidden_author_ids: tuple[str, ...]
+    actual_subset: str
+    actual_author_ids: tuple[str, ...]
+    raw_mismatch_columns: tuple[str, ...]
+
+
+def _display_text(value: str | None) -> str:
+    if value is None or value == "":
+        return "<empty>"
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def _display_author_ids(author_ids: Sequence[str]) -> str:
+    return ",".join(author_ids) if author_ids else "<empty>"
+
+
+def _actual_output_for_name_pair(
+    name_pair: tuple[str, str] | None,
+    subset1_author_ids: dict[tuple[str, str], set[str]],
+    subset2_author_ids: dict[tuple[str, str], set[str]],
+) -> tuple[str, tuple[str, ...]]:
+    if name_pair is None:
+        return "not_applicable", ()
+    subset1_ids = subset1_author_ids.get(name_pair, set())
+    subset2_ids = subset2_author_ids.get(name_pair, set())
+    if subset1_ids and subset2_ids:
+        return "subset1+subset2", tuple(sorted(subset1_ids | subset2_ids))
+    if subset1_ids:
+        return "subset1", tuple(sorted(subset1_ids))
+    if subset2_ids:
+        return "subset2", tuple(sorted(subset2_ids))
+    return "missing", ()
+
+
+def _expected_manual_best_output(
+    *,
+    manual_best: str,
+    note_category: str,
+    recalculated_author_id: str | None,
+    recalculated_mode: str,
+    old_author_id: str | None,
+    actual_subset: str,
+) -> tuple[str, str, tuple[str, ...], tuple[str, ...]]:
+    if note_category == "summary_note":
+        return (
+            "summary note only; no source-key output assertion",
+            "not_applicable",
+            (),
+            (),
+        )
+    if note_category == "no_current_openalex_result":
+        return (
+            "manual note says current OpenAlex has no result; expect no saved card output",
+            "missing",
+            (),
+            (),
+        )
+    if note_category == "xlsx_partition2_with_correct_ssn":
+        return (
+            "manual note says the correct SSN author is present but XLSX partitioning "
+            "keeps row in subset2",
+            "subset2",
+            (manual_best,),
+            (),
+        )
+    if note_category == "false_confident_old_ssn_pick" and recalculated_author_id == old_author_id:
+        assert old_author_id is not None
+        return (
+            "review note flags the recalculated max-works pick as old false-confident SSN output",
+            "subset1",
+            (old_author_id,),
+            (manual_best,),
+        )
+    if note_category == "correct_no_outlier_fallback" and actual_subset == "subset2":
+        return (
+            "recalculated fallback max-works author is selected but saved fixture "
+            "partitions it in subset2",
+            "subset2",
+            (manual_best,),
+            (),
+        )
+    return (
+        f"manual_best is expected in subset1 after {note_category} interpretation "
+        f"and {recalculated_mode} recalculation",
+        "subset1",
+        (manual_best,),
+        (),
+    )
+
+
+def _manual_best_case_message(case: ManualBestReviewedCase) -> str:
+    return "\n".join(
+        [
+            "manual_best reviewed fixture case",
+            f"row_index: {case.row_index}",
+            f"source_key: {_display_text(case.source_key)}",
+            f"manual_best: {_display_text(case.manual_best)}",
+            f"manual_best_note: {_display_text(case.manual_note)}",
+            f"interpreted_note: {case.note_category}",
+            "recalculated_from_xlsx: "
+            f"author_id={_display_text(case.recalculated_author_id)}, "
+            f"mode={case.recalculated_mode}",
+            f"old_author_id_from_note: {_display_text(case.old_author_id)}",
+            f"expected_decision: {case.expected_decision}",
+            f"expected_subset: {case.expected_subset}",
+            f"expected_author_ids: {_display_author_ids(case.expected_author_ids)}",
+            f"forbidden_author_ids: {_display_author_ids(case.forbidden_author_ids)}",
+            f"actual_subset: {case.actual_subset}",
+            f"actual_author_ids: {_display_author_ids(case.actual_author_ids)}",
+        ]
+    )
+
+
+def _manual_best_case_is_true_match(case: ManualBestReviewedCase) -> bool:
+    return (
+        bool(case.manual_best)
+        and case.expected_subset == case.actual_subset
+        and set(case.expected_author_ids) == {case.manual_best}
+        and set(case.actual_author_ids) == {case.manual_best}
+    )
+
+
+def _manual_best_reviewed_xpass_reason(case: ManualBestReviewedCase) -> str | None:
+    if not case.source_key:
+        return None
+    if _source_key_name_pair(case.source_key) == ("zhiqun", "lin"):
+        return (
+            f"{case.source_key}: workbook manual_best_note is stale; user re-reviewed "
+            "OpenAlex and confirmed current top A5009534643 is correct. The reviewed "
+            "export authorids_json starts with A5009534643, and the saved fixture output "
+            "also selects manual_best A5009534643."
+        )
+    return None
+
+
+def _manual_best_reviewed_case_status_note(case: ManualBestReviewedCase) -> str | None:
+    if not case.source_key:
+        return None
+    name_pair = _source_key_name_pair(case.source_key)
+    if name_pair == ("zhiqun", "lin"):
+        return (
+            "XPASS stale manual_best_note; current OpenAlex/output/manual_best "
+            "agree on A5009534643"
+        )
+    if name_pair == ("yulin", "chen"):
+        return (
+            "XFAIL stale manual_best; current OpenAlex top is A5100398894, "
+            "saved output is A5100383082"
+        )
+    return None
+
+
+def _manual_best_reviewed_xfail_reason(case: ManualBestReviewedCase) -> str:
+    if not case.source_key:
+        return _manual_best_case_message(case)
+    if _source_key_name_pair(case.source_key) == ("yulin", "chen"):
+        return (
+            f"{case.source_key}: workbook manual_best {case.manual_best} is stale; "
+            "user re-reviewed and confirmed current OpenAlex top A5100398894 is "
+            f"correct, while this saved fixture output still selects "
+            f"{_display_author_ids(case.actual_author_ids)}.\n"
+            + _manual_best_case_message(case)
+        )
+    return _manual_best_case_message(case)
+
+
+def _manual_best_case_id(case: ManualBestReviewedCase | None) -> str:
+    if case is None:
+        return "manual_best_reviewed_fixture_missing"
+    note = _display_text(case.manual_note)
+    if len(note) > 180:
+        note = note[:177] + "..."
+    return (
+        f"row={case.row_index}"
+        f" | source_key={_display_text(case.source_key)}"
+        f" | manual_best={_display_text(case.manual_best)}"
+        f" | note={note}"
+        f" | interpreted={case.note_category}"
+        f" | recalculated={_display_text(case.recalculated_author_id)}/{case.recalculated_mode}"
+        f" | expected={case.expected_subset}:{_display_author_ids(case.expected_author_ids)}"
+        f" | actual={case.actual_subset}:{_display_author_ids(case.actual_author_ids)}"
+        + (
+            f" | reviewed_exception={status_note}"
+            if (status_note := _manual_best_reviewed_case_status_note(case)) is not None
+            else ""
+        )
+    )
+
+
+def _manual_best_reviewed_cases() -> list[ManualBestReviewedCase]:
+    manual_df = pd.read_excel(MANUAL_BEST_FIXTURE_PATH, engine="openpyxl")
+    raw_df = pd.read_csv(MANUAL_BEST_RAW_EXPORT_PATH)
+    raw_by_source_key = raw_df.set_index(KTP_SOURCE_KEY_COL)
+    subset1_author_ids = _card_author_ids_by_name(SUBSET1_FIXTURE_DIR)
+    subset2_author_ids = _card_author_ids_by_name(SUBSET2_FIXTURE_DIR)
+    cases: list[ManualBestReviewedCase] = []
+    raw_columns = (
+        "authorids_json",
+        "ssn_sum_hit_1pct_tukey_fragments_json",
+        "works_count_tukey_fragments_json",
+        "cited_by_count_tukey_fragments_json",
+    )
+
+    for row_index, row in manual_df.iterrows():
+        manual_best = "" if pd.isna(row["manual_best"]) else str(row["manual_best"]).strip()
+        note = _manual_note_text(row)
+        if not manual_best and not note:
+            continue
+        source_key = (
+            "" if pd.isna(row[KTP_SOURCE_KEY_COL]) else str(row[KTP_SOURCE_KEY_COL])
+        )
+        note_category = _workbook_note_category(note)
+        recalculated_author_id, recalculated_mode = _reviewed_export_max_works_pick(row)
+        old_author_id = _old_author_id_from_manual_note(note)
+        name_pair = _source_key_name_pair(source_key) if source_key else None
+        actual_subset, actual_author_ids = _actual_output_for_name_pair(
+            name_pair,
+            subset1_author_ids,
+            subset2_author_ids,
+        )
+        expected_decision, expected_subset, expected_author_ids, forbidden_author_ids = (
+            _expected_manual_best_output(
+                manual_best=manual_best,
+                note_category=note_category,
+                recalculated_author_id=recalculated_author_id,
+                recalculated_mode=recalculated_mode,
+                old_author_id=old_author_id,
+                actual_subset=actual_subset,
+            )
+        )
+        raw_mismatch_columns: list[str] = []
+        if source_key:
+            if source_key not in raw_by_source_key.index:
+                raw_mismatch_columns.append("<missing raw source_key>")
+            else:
+                raw_row = raw_by_source_key.loc[source_key]
+                for column in raw_columns:
+                    if _json_list_cell(row[column]) != _json_list_cell(raw_row[column]):
+                        raw_mismatch_columns.append(column)
+
+        cases.append(
+            ManualBestReviewedCase(
+                row_index=int(row_index),
+                source_key=source_key,
+                manual_best=manual_best,
+                manual_note=note,
+                note_category=note_category,
+                recalculated_author_id=recalculated_author_id,
+                recalculated_mode=recalculated_mode,
+                old_author_id=old_author_id,
+                expected_decision=expected_decision,
+                expected_subset=expected_subset,
+                expected_author_ids=expected_author_ids,
+                forbidden_author_ids=forbidden_author_ids,
+                actual_subset=actual_subset,
+                actual_author_ids=actual_author_ids,
+                raw_mismatch_columns=tuple(raw_mismatch_columns),
+            )
+        )
+    return cases
+
+
+def _manual_best_reviewed_required_paths() -> tuple[Path, ...]:
+    return (
+        MANUAL_BEST_FIXTURE_PATH,
+        MANUAL_BEST_RAW_EXPORT_PATH,
+        SUBSET1_FIXTURE_DIR,
+        SUBSET2_FIXTURE_DIR,
+    )
+
+
+def _manual_best_reviewed_missing_paths() -> list[Path]:
+    return [path for path in _manual_best_reviewed_required_paths() if not path.exists()]
+
+
+def _manual_best_reviewed_cases_or_empty() -> list[ManualBestReviewedCase]:
+    if _manual_best_reviewed_missing_paths():
+        return []
+    return _manual_best_reviewed_cases()
+
+
+MANUAL_BEST_REVIEWED_CASES = _manual_best_reviewed_cases_or_empty()
+
+
+def _manual_best_reviewed_case_params() -> list[object]:
+    missing_paths = _manual_best_reviewed_missing_paths()
+    if missing_paths:
+        return [
+            pytest.param(
+                None,
+                marks=pytest.mark.skip(
+                    reason="manual_best reviewed fixture paths missing: "
+                    + ", ".join(str(path) for path in missing_paths)
+                ),
+                id="manual_best_reviewed_fixture_missing",
+            )
+        ]
+    params: list[object] = []
+    for case in MANUAL_BEST_REVIEWED_CASES:
+        xpass_reason = _manual_best_reviewed_xpass_reason(case)
+        marks = () if xpass_reason is None else pytest.mark.xfail(reason=xpass_reason)
+        params.append(pytest.param(case, marks=marks, id=_manual_best_case_id(case)))
+    return params
+
+
+MANUAL_BEST_REVIEWED_CASE_PARAMS = _manual_best_reviewed_case_params()
+
+
+def test_manual_best_reviewed_fixture_expectation_coverage() -> None:
     assert MANUAL_BEST_FIXTURE_PATH.exists()
     assert MANUAL_BEST_RAW_EXPORT_PATH.exists()
     assert SUBSET1_FIXTURE_DIR.exists()
@@ -863,11 +1185,10 @@ def test_manual_best_reviewed_fixture_outputs_select_expected_author_ids() -> No
     manual_df = pd.read_excel(MANUAL_BEST_FIXTURE_PATH, engine="openpyxl")
     raw_df = pd.read_csv(MANUAL_BEST_RAW_EXPORT_PATH)
     manual_rows = manual_df[manual_df["manual_best"].notna()]
-    raw_by_source_key = raw_df.set_index(KTP_SOURCE_KEY_COL)
-    subset1_author_ids = _card_author_ids_by_name(SUBSET1_FIXTURE_DIR)
-    subset2_author_ids = _card_author_ids_by_name(SUBSET2_FIXTURE_DIR)
+    reviewed_cases = MANUAL_BEST_REVIEWED_CASES
     assert len(raw_df) == 100
     assert len(manual_rows) == 34
+    assert len(reviewed_cases) == 37
     manual_best_source_keys = {
         str(row[KTP_SOURCE_KEY_COL])
         for _, row in manual_rows.iterrows()
@@ -891,49 +1212,13 @@ def test_manual_best_reviewed_fixture_outputs_select_expected_author_ids() -> No
         "summary_note": 1,
     }
 
-    computed_picks: dict[str, str | None] = {}
-    computed_modes: dict[str, str] = {}
-    empty_export_source_keys: set[str] = set()
-    false_confident_old_author_ids: dict[str, str] = {}
-    manual_note_categories: dict[str, str] = {}
-    for _, row in manual_rows.iterrows():
-        source_key = str(row[KTP_SOURCE_KEY_COL])
-        manual_best = str(row["manual_best"]).strip()
-        note = _manual_note_text(row)
-        category = _manual_note_category(note)
-        manual_note_categories[source_key] = category
-        assert source_key in raw_by_source_key.index
-        raw_row = raw_by_source_key.loc[source_key]
-        for column in (
-            "authorids_json",
-            "ssn_sum_hit_1pct_tukey_fragments_json",
-            "works_count_tukey_fragments_json",
-            "cited_by_count_tukey_fragments_json",
-        ):
-            assert _json_list_cell(row[column]) == _json_list_cell(raw_row[column])
-        computed_pick, computed_mode = _reviewed_export_max_works_pick(row)
-        computed_picks[source_key] = computed_pick
-        computed_modes[source_key] = computed_mode
-
-        if not _json_list_cell(row["authorids_json"]):
-            empty_export_source_keys.add(source_key)
-        old_author_id = _old_author_id_from_manual_note(note)
-        if old_author_id is not None:
-            assert old_author_id != manual_best
-            assert old_author_id in _json_list_cell(row["authorids_json"])
-            false_confident_old_author_ids[source_key] = old_author_id
-
-        if computed_pick is None:
-            assert category in {
-                "matched_under_current_ssn_v2",
-                "matched_current_subset1_despite_old_note",
-                "xlsx_partition2_with_correct_ssn",
-            }
-            continue
-        if category != "false_confident_old_ssn_pick":
-            assert computed_pick == manual_best, source_key
-        else:
-            assert computed_pick in {manual_best, old_author_id}, source_key
+    manual_best_cases = [case for case in reviewed_cases if case.manual_best]
+    manual_note_categories = {
+        case.source_key: case.note_category for case in manual_best_cases
+    }
+    computed_picks = {
+        case.source_key: case.recalculated_author_id for case in manual_best_cases
+    }
 
     assert {
         category: list(manual_note_categories.values()).count(category)
@@ -949,97 +1234,83 @@ def test_manual_best_reviewed_fixture_outputs_select_expected_author_ids() -> No
     assert set(manual_note_categories) == manual_best_source_keys
     assert set(computed_picks) == manual_best_source_keys
 
-    assert {
-        source_key for source_key, computed_pick in computed_picks.items() if computed_pick is None
-    } == empty_export_source_keys
 
-    no_current_openalex_result_keys = {
-        _source_key_name_pair(str(row[KTP_SOURCE_KEY_COL]))
-        for _, row in manual_df[manual_df["manual_best"].isna()].iterrows()
-        if not pd.isna(row[KTP_SOURCE_KEY_COL])
-        and '"There are no results for this search"' in _manual_note_text(row)
-    }
-    for name_pair in no_current_openalex_result_keys:
-        assert name_pair not in subset1_author_ids
-        assert subset2_author_ids.get(name_pair) == set()
+@pytest.mark.parametrize("case", MANUAL_BEST_REVIEWED_CASE_PARAMS)
+def test_manual_best_reviewed_fixture_outputs_select_expected_author_ids(
+    case: ManualBestReviewedCase | None,
+) -> None:
+    assert case is not None
+    message = _manual_best_case_message(case)
+    if not _manual_best_case_is_true_match(case):
+        pytest.xfail(_manual_best_reviewed_xfail_reason(case))
 
-    output_checked_source_keys: set[str] = set()
-    for _, row in manual_rows.iterrows():
-        source_key = str(row[KTP_SOURCE_KEY_COL])
-        output_checked_source_keys.add(source_key)
-        name_pair = _source_key_name_pair(source_key)
-        manual_best = str(row["manual_best"]).strip()
-        old_author_id = false_confident_old_author_ids.get(source_key)
-        category = manual_note_categories[source_key]
-        if category == "xlsx_partition2_with_correct_ssn":
-            assert manual_best in subset2_author_ids.get(name_pair, set()), source_key
-            assert name_pair not in subset1_author_ids, source_key
-            continue
-        if (
-            category == "false_confident_old_ssn_pick"
-            and computed_picks[source_key] == old_author_id
-        ):
-            assert old_author_id is not None
-            assert old_author_id in subset1_author_ids.get(name_pair, set()), source_key
-            assert manual_best not in subset1_author_ids.get(name_pair, set()), source_key
-            assert name_pair not in subset2_author_ids, source_key
-            continue
-        if name_pair not in subset1_author_ids and manual_best in subset2_author_ids.get(
-            name_pair, set()
-        ):
-            assert computed_picks[source_key] == manual_best, source_key
-            assert category == "correct_no_outlier_fallback", source_key
-            continue
-        assert manual_best in subset1_author_ids.get(name_pair, set()), source_key
-        assert name_pair not in subset2_author_ids, source_key
-    assert output_checked_source_keys == manual_best_source_keys
+    assert case.raw_mismatch_columns == (), message
+    if case.manual_best and case.old_author_id is not None:
+        assert case.old_author_id != case.manual_best, message
+    if case.recalculated_author_id is None:
+        assert case.note_category in {
+            "matched_under_current_ssn_v2",
+            "matched_current_subset1_despite_old_note",
+            "no_current_openalex_result",
+            "summary_note",
+            "xlsx_partition2_with_correct_ssn",
+        }, message
+    elif case.note_category == "false_confident_old_ssn_pick":
+        assert case.recalculated_author_id in {
+            case.manual_best,
+            case.old_author_id,
+        }, message
+    elif case.manual_best:
+        assert case.recalculated_author_id == case.manual_best, message
+
+    assert case.actual_subset == case.expected_subset, message
+    actual_author_ids = set(case.actual_author_ids)
+    assert set(case.expected_author_ids).issubset(actual_author_ids), message
+    assert actual_author_ids.isdisjoint(case.forbidden_author_ids), message
 
 
 @pytest.mark.slow
 @pytest.mark.real_api
-def test_real_api_openalex_identifies_known_false_confident_ssn_picks() -> None:
-    manual_df = pd.read_excel(MANUAL_BEST_FIXTURE_PATH, engine="openpyxl")
-    cases: list[tuple[str, str, str, list[str]]] = []
-    for _, row in manual_df[manual_df["manual_best"].notna()].iterrows():
-        note = _manual_note_text(row)
-        old_selected_author_id = _old_author_id_from_manual_note(note)
-        if old_selected_author_id is None:
-            continue
-        source_key = str(row[KTP_SOURCE_KEY_COL])
-        manual_best = str(row["manual_best"]).strip()
-        assert old_selected_author_id != manual_best
-        authorids = _json_list_cell(row["authorids_json"])
-        assert old_selected_author_id in authorids
-        assert manual_best in authorids
-        cases.append((source_key, old_selected_author_id, manual_best, authorids))
+@pytest.mark.parametrize(
+    "case",
+    [
+        pytest.param(
+            case,
+            id=(
+                f"source_key={_display_text(case.source_key)}"
+                f" | old_selected={case.old_author_id}"
+                f" | manual_best={case.manual_best}"
+            ),
+        )
+        for case in MANUAL_BEST_REVIEWED_CASES
+        if case.old_author_id is not None
+    ],
+)
+def test_real_api_openalex_identifies_known_false_confident_ssn_picks(
+    case: ManualBestReviewedCase,
+) -> None:
+    assert case.old_author_id is not None
+    assert case.old_author_id != case.manual_best
+    payload = _source_key_payload(case.source_key)
+    try:
+        result = check_openalex_author(
+            source_key=case.source_key,
+            first_name=payload[KTP_FIRST_NAME_COL],
+            last_name=payload[KTP_LAST_NAME_COL],
+            selected_author_id=case.old_author_id,
+        )
+    except ValueError as exc:
+        pytest.skip(str(exc))
 
-    assert cases
-
-    stale_manual_best_messages: list[str] = []
-    for source_key, old_selected_author_id, manual_best, authorids in cases:
-        payload = _source_key_payload(source_key)
-        try:
-            result = check_openalex_author(
-                source_key=source_key,
-                first_name=payload[KTP_FIRST_NAME_COL],
-                last_name=payload[KTP_LAST_NAME_COL],
-                selected_author_id=old_selected_author_id,
-            )
-        except ValueError as exc:
-            pytest.skip(str(exc))
-        assert result.response_code == 200
-        assert result.top_author_id is not None
-        assert result.top_author_id != old_selected_author_id
-        assert result.matched is False
-        if result.top_author_id != manual_best:
-            assert _source_key_name_pair(source_key) == ("yulin", "chen"), source_key
-            assert result.top_author_id == "A5100398894"
-            assert result.top_author_id in authorids
-            stale_manual_best_messages.append(
-                f"{source_key}: workbook manual_best {manual_best} is stale; "
-                f"user re-reviewed and confirmed current OpenAlex top "
-                f"{result.top_author_id} is correct."
-            )
-
-    if stale_manual_best_messages:
-        pytest.xfail(" ".join(stale_manual_best_messages))
+    assert result.response_code == 200
+    assert result.top_author_id is not None
+    assert result.top_author_id != case.old_author_id
+    assert result.matched is False
+    if result.top_author_id != case.manual_best:
+        assert _source_key_name_pair(case.source_key) == ("yulin", "chen"), case.source_key
+        assert result.top_author_id == "A5100398894"
+        pytest.xfail(
+            f"{case.source_key}: workbook manual_best {case.manual_best} is stale; "
+            f"user re-reviewed and confirmed current OpenAlex top "
+            f"{result.top_author_id} is correct."
+        )
