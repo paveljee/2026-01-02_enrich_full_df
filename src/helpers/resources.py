@@ -315,7 +315,7 @@ def _ensure_openalex_author_search_log_resource(
         raise ValueError(
             f"Could not open {OPENALEX_AUTHOR_SEARCH_LOG_KEY} for append/update: {path}"
         ) from exc
-    return resource, [f"Validated {OPENALEX_AUTHOR_SEARCH_LOG_KEY} writable log: {path}"]
+    return resource, [f"Validated {OPENALEX_AUTHOR_SEARCH_LOG_KEY} writable log"]
 
 
 def register_pipeline_resources(
