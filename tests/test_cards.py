@@ -14,6 +14,9 @@ from src.helpers.vars import (
     KTP_FIRST_NAME_ORIG_COLNAME_COL,
     KTP_LAST_NAME_ORIG_COLNAME_COL,
     KTP_SSN_TOP_OLDEST_PAPERS_COL,
+    KTP_SSNP_PAPERID_URL_COL,
+    OPENALEX_TITLE_COL,
+    SSNP_DATE_COL,
 )
 
 
@@ -31,8 +34,9 @@ def test_build_cards_includes_intro_and_fun_fact() -> None:
         KTP_FIRST_NAME_ORIG_COLNAME_COL: "First Name",
         KTP_LAST_NAME_ORIG_COLNAME_COL: "Last Name",
         KTP_SSN_TOP_OLDEST_PAPERS_COL: (
-            '[{"ssnp.year":1903,'
-            '"ktp.ssnp_paperid_url":"https://openalex.org/W1568216332"}]'
+            f'[{{"{SSNP_DATE_COL}":"1903-01-01",'
+            f'"{OPENALEX_TITLE_COL}":"Early work",'
+            f'"{KTP_SSNP_PAPERID_URL_COL}":"https://openalex.org/W1568216332"}}]'
         ),
         "note": "hello",
         "excluded": "skip",
@@ -53,6 +57,7 @@ def test_build_cards_includes_intro_and_fun_fact() -> None:
     assert "excluded" not in card
     assert "Draw #1 of 10" in card
     assert f"**{KTP_SSN_TOP_OLDEST_PAPERS_COL}**" in card
+    assert "Early work" in card
     assert "https://openalex.org/W1568216332" in card
 
 

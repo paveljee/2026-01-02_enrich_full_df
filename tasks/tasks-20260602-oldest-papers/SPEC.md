@@ -229,8 +229,13 @@ Expected touchpoints:
 
 - `src/helpers/vars.py`
   - add `papers` to `REQUIRED_FILES_CONFIG_KEYS`;
-  - add a required config key/path/schema-version constant for the
-    separate OpenAlex work-title JSONL log;
+  - add a required config key/path constant for the separate OpenAlex
+    work-title JSONL log;
+  - use one generic HTTP-request JSONL schema/model,
+    `KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION = 1` with a helper under
+    `src/helpers/data_models/http_request_log.py`, for both the
+    author-search log and paper-title log rather than author-specific or
+    title-specific schema constants;
   - export `KTP_SSN_TOP_OLDEST_PAPERS_COL` in `__all__`;
   - add/use centralized labels for `ssnp.filename`, `ssnp.date`, and
     `ktp.ssnp_paperid_url` rather than scattering string literals;

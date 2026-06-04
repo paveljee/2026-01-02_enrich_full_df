@@ -13,7 +13,7 @@ from ..helpers.duckdb_utils import (
 from ..helpers.name_matching import (
     sciscinet_ktp_name_norm_sql,
 )
-from ..helpers.openalex import check_openalex_author
+from ..helpers.openalex import check_openalex_author, check_openalex_work_title
 from ..helpers.parquet_utils import normalize_parquet_column_name, parquet_columns, parquet_filename
 from ..helpers.procedures import ParquetMatchProcedure
 from ..helpers.schema import (
@@ -82,14 +82,15 @@ from ..helpers.vars import (
     KTP_SSNP_FILENAME_COL,
     KTP_SSNP_PAPERID_URL_COL,
     KTP_SSNPAA_FILENAME_COL,
+    OPENALEX_TITLE_COL,
     SSN_FIELD_IDS_LIST_COL,
     SSN_PAPERIDS_LEVEL0_COL,
     SSN_PAPERIDS_LEVEL1_COL,
     SSNAD_AUTHORID_COL,
     SSNAD_RAW_AUTHORID_COL,
     SSNAF_DISPLAY_NAME_COL,
+    SSNP_DATE_COL,
     SSNP_PAPERID_COL,
-    SSNP_YEAR_COL,
     SSNPAA_INSTITUTION_ID_COL,
     STEP_MATCH_PARQUET,
     STEP_MATCH_PARQUET_LOG_LEGEND_LINES,
@@ -149,9 +150,10 @@ def _top_oldest_papers_ctes_sql(
     author_papers_table: str,
     selected_author_view: str,
     papers_table: str,
+    title_table: str,
     author_id_col: str,
     paperid_col: str,
-    year_col: str,
+    date_col: str,
     top_k_works: int,
 ) -> str:
     return f"""
@@ -160,13 +162,13 @@ def _top_oldest_papers_ctes_sql(
                 ap.name_key AS name_key,
                 ap.authorid AS authorid,
                 CAST(ap.paperid AS VARCHAR) AS paperid,
-                TRY_CAST(p.{duckdb_quote_identifier(year_col)} AS BIGINT) AS year
+                TRY_CAST(p.{duckdb_quote_identifier(date_col)} AS DATE) AS date_value
             FROM {author_papers_table} ap
             JOIN {papers_table} p
               ON CAST(p.{duckdb_quote_identifier(paperid_col)} AS VARCHAR)
                 = CAST(ap.paperid AS VARCHAR)
             WHERE ap.paperid IS NOT NULL
-              AND TRY_CAST(p.{duckdb_quote_identifier(year_col)} AS BIGINT) IS NOT NULL
+              AND TRY_CAST(p.{duckdb_quote_identifier(date_col)} AS DATE) IS NOT NULL
               AND EXISTS (
                   SELECT 1
                   FROM {selected_author_view} m
@@ -180,10 +182,10 @@ def _top_oldest_papers_ctes_sql(
                 opc.name_key AS name_key,
                 opc.authorid AS authorid,
                 opc.paperid AS paperid,
-                opc.year AS year,
+                opc.date_value AS date_value,
                 ROW_NUMBER() OVER (
                     PARTITION BY opc.name_key, opc.authorid
-                    ORDER BY opc.year ASC, opc.paperid ASC
+                    ORDER BY opc.date_value ASC, opc.paperid ASC
                 ) AS rn
             FROM oldest_paper_candidates opc
         ),
@@ -194,17 +196,84 @@ def _top_oldest_papers_ctes_sql(
                 CAST(
                     LIST(
                         json_object(
-                            '{SSNP_YEAR_COL}', opr.year,
+                            '{SSNP_DATE_COL}', CAST(opr.date_value AS VARCHAR),
+                            '{OPENALEX_TITLE_COL}', wt.title,
                             '{KTP_SSNP_PAPERID_URL_COL}',
                             'https://openalex.org/' || CAST(opr.paperid AS VARCHAR)
                         )
-                        ORDER BY opr.year ASC, opr.paperid ASC
+                        ORDER BY opr.date_value ASC, opr.paperid ASC
                     )
                         FILTER (WHERE opr.rn <= {top_k_works})
                     AS VARCHAR
                 ) AS "{KTP_SSN_TOP_OLDEST_PAPERS_COL}"
             FROM oldest_paper_ranked opr
+            LEFT JOIN {title_table} wt
+              ON wt.paperid = opr.paperid
             GROUP BY opr.name_key, opr.authorid
+        )
+    """
+
+
+def _top_papers_hit_ctes_sql(
+    *,
+    author_papers_table: str,
+    all_hits_table: str,
+    selected_author_view: str,
+    title_table: str,
+    author_id_col: str,
+    top_k_works: int,
+) -> str:
+    return f"""
+        paper_hits AS (
+            SELECT
+                ap.name_key AS name_key,
+                ap.authorid AS authorid,
+                ap.paperid AS paperid,
+                COALESCE(MAX(h.hit_1pct), 0) AS hit_1pct
+            FROM {author_papers_table} ap
+            LEFT JOIN {all_hits_table} h
+              ON ap.paperid = h.paperid
+            WHERE EXISTS (
+                SELECT 1
+                FROM {selected_author_view} m
+                WHERE m.name_key = ap.name_key
+                  AND CAST(m.{duckdb_quote_identifier(author_id_col)} AS VARCHAR)
+                    = CAST(ap.authorid AS VARCHAR)
+            )
+            GROUP BY ap.name_key, ap.authorid, ap.paperid
+        ),
+        paper_ranked AS (
+            SELECT
+                ph.name_key AS name_key,
+                ph.authorid AS authorid,
+                ph.paperid AS paperid,
+                ph.hit_1pct AS hit_1pct,
+                ROW_NUMBER() OVER (
+                    PARTITION BY ph.name_key, ph.authorid
+                    ORDER BY ph.hit_1pct DESC, ph.paperid ASC
+                ) AS rn
+            FROM paper_hits ph
+        ),
+        top_papers AS (
+            SELECT
+                pr.name_key AS name_key,
+                pr.authorid AS authorid,
+                CAST(
+                    LIST(
+                        json_object(
+                            '{OPENALEX_TITLE_COL}', wt.title,
+                            '{KTP_SSNP_PAPERID_URL_COL}',
+                            'https://openalex.org/' || CAST(pr.paperid AS VARCHAR)
+                        )
+                        ORDER BY pr.hit_1pct DESC, pr.paperid ASC
+                    )
+                        FILTER (WHERE pr.rn <= {top_k_works})
+                    AS VARCHAR
+                ) AS "{KTP_SSN_TOP_PAPERS_HIT_1PCT_COL}"
+            FROM paper_ranked pr
+            LEFT JOIN {title_table} wt
+              ON wt.paperid = CAST(pr.paperid AS VARCHAR)
+            GROUP BY pr.name_key, pr.authorid
         )
     """
 
@@ -241,6 +310,9 @@ def run(context: PipelineContext) -> StepResult:
 
     author_details_unnest_path = context.resources.author_details_unnest_resource.__fspath__()
     openalex_log_path = Path(context.resources.openalex_author_search_log_resource.__fspath__())
+    openalex_paper_title_log_path = Path(
+        context.resources.openalex_paper_title_log_resource.__fspath__()
+    )
     author_id_col = SSNAD_AUTHORID_COL
     authors_author_id_col = normalize_parquet_column_name(SSNAD_RAW_AUTHORID_COL, "ssnau")
     author_id_raw = SSNAD_RAW_AUTHORID_COL
@@ -258,6 +330,115 @@ def run(context: PipelineContext) -> StepResult:
         if row is None or row[0] is None:
             return 0
         return int(row[0])
+
+    def materialize_openalex_work_titles(title_table: str) -> None:
+        paper_rows = conn.execute(
+            f"""
+            WITH paper_hits AS (
+                SELECT
+                    ap.name_key AS name_key,
+                    ap.authorid AS authorid,
+                    CAST(ap.paperid AS VARCHAR) AS paperid,
+                    COALESCE(MAX(h.hit_1pct), 0) AS hit_1pct
+                FROM {PARQUET_AUTHOR_PAPERS_TABLE} ap
+                LEFT JOIN {PARQUET_ALL_HITS_TABLE} h
+                  ON ap.paperid = h.paperid
+                WHERE ap.paperid IS NOT NULL
+                  AND EXISTS (
+                      SELECT 1
+                      FROM {PARQUET_AUTHOR_MATCH_HIT_SELECTED_VIEW} m
+                      WHERE m.name_key = ap.name_key
+                        AND CAST(m."{author_id_col}" AS VARCHAR)
+                            = CAST(ap.authorid AS VARCHAR)
+                  )
+                GROUP BY ap.name_key, ap.authorid, CAST(ap.paperid AS VARCHAR)
+            ),
+            top_work_ranked AS (
+                SELECT
+                    ph.paperid AS paperid,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY ph.name_key, ph.authorid
+                        ORDER BY ph.hit_1pct DESC, ph.paperid ASC
+                    ) AS rn
+                FROM paper_hits ph
+            ),
+            oldest_paper_candidates AS (
+                SELECT
+                    ap.name_key AS name_key,
+                    ap.authorid AS authorid,
+                    CAST(ap.paperid AS VARCHAR) AS paperid,
+                    TRY_CAST(p."{SSNP_DATE_COL}" AS DATE) AS date_value
+                FROM {PARQUET_AUTHOR_PAPERS_TABLE} ap
+                JOIN {papers_table} p
+                  ON CAST(p."{SSNP_PAPERID_COL}" AS VARCHAR) = CAST(ap.paperid AS VARCHAR)
+                WHERE ap.paperid IS NOT NULL
+                  AND TRY_CAST(p."{SSNP_DATE_COL}" AS DATE) IS NOT NULL
+                  AND EXISTS (
+                      SELECT 1
+                      FROM {PARQUET_AUTHOR_MATCH_HIT_SELECTED_VIEW} m
+                      WHERE m.name_key = ap.name_key
+                        AND CAST(m."{author_id_col}" AS VARCHAR)
+                            = CAST(ap.authorid AS VARCHAR)
+                  )
+            ),
+            top_oldest_ranked AS (
+                SELECT
+                    opc.paperid AS paperid,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY opc.name_key, opc.authorid
+                        ORDER BY opc.date_value ASC, opc.paperid ASC
+                    ) AS rn
+                FROM oldest_paper_candidates opc
+            )
+            SELECT DISTINCT paperid
+            FROM (
+                SELECT paperid FROM top_work_ranked WHERE rn <= {TOP_K_WORKS}
+                UNION ALL
+                SELECT paperid FROM top_oldest_ranked WHERE rn <= {TOP_K_WORKS}
+            ) selected_papers
+            ORDER BY paperid
+            """
+        ).fetchall()
+        paperids = [str(row[0]) for row in paper_rows if row[0] is not None]
+        conn.execute(
+            f"""
+            CREATE OR REPLACE TABLE {title_table} (
+                paperid VARCHAR,
+                title VARCHAR
+            )
+            """
+        )
+        title_rows: list[tuple[str, str | None]] = []
+        reused_count = 0
+        fetched_count = 0
+        titled_count = 0
+        missing_count = 0
+        for paperid in paperids:
+            result = check_openalex_work_title(
+                paperid=paperid,
+                log_path=openalex_paper_title_log_path,
+            )
+            if result.reused:
+                reused_count += 1
+            else:
+                fetched_count += 1
+            if result.title:
+                titled_count += 1
+            else:
+                missing_count += 1
+            title_rows.append((paperid, result.title))
+        if title_rows:
+            conn.executemany(
+                f"INSERT INTO {title_table} (paperid, title) VALUES (?, ?)",
+                title_rows,
+            )
+        log_tag(
+            STEP_MATCH_PARQUET_LOG_TAG_TABLE_EFF,
+            "OpenAlex work-title lookup: "
+            f"distinct paper IDs={len(paperids):,}, "
+            f"reused={reused_count:,}, fetched={fetched_count:,}, "
+            f"successful titles={titled_count:,}, missing/failed titles={missing_count:,}.",
+        )
 
     def apply_openalex_confidence_gate() -> None:
         conn.execute(
@@ -893,7 +1074,7 @@ def run(context: PipelineContext) -> StepResult:
     _raw_column_for_normalized(
         papers_columns,
         prefix="ssnp",
-        normalized_col=SSNP_YEAR_COL,
+        normalized_col=SSNP_DATE_COL,
     )
     papers_table = f"ssn_{safe_identifier(Path(papers_path).stem)}"
     log_tag(
@@ -928,7 +1109,7 @@ def run(context: PipelineContext) -> StepResult:
             COUNT(*) AS row_count,
             COUNT(DISTINCT "{SSNP_PAPERID_COL}") AS paper_count,
             COUNT(*) FILTER (
-                WHERE TRY_CAST("{SSNP_YEAR_COL}" AS BIGINT) IS NOT NULL
+                WHERE TRY_CAST("{SSNP_DATE_COL}" AS DATE) IS NOT NULL
             ) AS dated_rows
         FROM {papers_table}
         """
@@ -1064,7 +1245,7 @@ def run(context: PipelineContext) -> StepResult:
             JOIN {papers_table} p
               ON CAST(p."{SSNP_PAPERID_COL}" AS VARCHAR) = CAST(ap.paperid AS VARCHAR)
             WHERE ap.paperid IS NOT NULL
-              AND TRY_CAST(p."{SSNP_YEAR_COL}" AS BIGINT) IS NOT NULL
+              AND TRY_CAST(p."{SSNP_DATE_COL}" AS DATE) IS NOT NULL
               AND EXISTS (
                   SELECT 1
                   FROM {PARQUET_AUTHOR_MATCH_HIT_SELECTED_VIEW} m
@@ -1183,13 +1364,25 @@ def run(context: PipelineContext) -> StepResult:
         f"(unmatched: {unmatched_field_ids}).",
     )
 
+    openalex_work_title_table = "openalex_work_titles"
+    materialize_openalex_work_titles(openalex_work_title_table)
+
     top_oldest_papers_ctes = _top_oldest_papers_ctes_sql(
         author_papers_table=PARQUET_AUTHOR_PAPERS_TABLE,
         selected_author_view=PARQUET_AUTHOR_MATCH_HIT_SELECTED_VIEW,
         papers_table=papers_table,
+        title_table=openalex_work_title_table,
         author_id_col=author_id_col,
         paperid_col=SSNP_PAPERID_COL,
-        year_col=SSNP_YEAR_COL,
+        date_col=SSNP_DATE_COL,
+        top_k_works=TOP_K_WORKS,
+    )
+    top_papers_hit_ctes = _top_papers_hit_ctes_sql(
+        author_papers_table=PARQUET_AUTHOR_PAPERS_TABLE,
+        all_hits_table=PARQUET_ALL_HITS_TABLE,
+        selected_author_view=PARQUET_AUTHOR_MATCH_HIT_SELECTED_VIEW,
+        title_table=openalex_work_title_table,
+        author_id_col=author_id_col,
         top_k_works=TOP_K_WORKS,
     )
 
@@ -1207,50 +1400,7 @@ def run(context: PipelineContext) -> StepResult:
     conn.execute(
         f"""
         CREATE OR REPLACE TABLE {PARQUET_INNERDICT_TABLE} AS
-        WITH paper_hits AS (
-            SELECT
-                ap.name_key AS name_key,
-                ap.authorid AS authorid,
-                ap.paperid AS paperid,
-                COALESCE(MAX(h.hit_1pct), 0) AS hit_1pct
-            FROM {PARQUET_AUTHOR_PAPERS_TABLE} ap
-            LEFT JOIN {PARQUET_ALL_HITS_TABLE} h
-              ON ap.paperid = h.paperid
-            WHERE EXISTS (
-                SELECT 1
-                FROM {PARQUET_AUTHOR_MATCH_HIT_SELECTED_VIEW} m
-                WHERE m.name_key = ap.name_key
-                  AND CAST(m."{author_id_col}" AS VARCHAR) = CAST(ap.authorid AS VARCHAR)
-            )
-            GROUP BY ap.name_key, ap.authorid, ap.paperid
-        ),
-        paper_ranked AS (
-            SELECT
-                ph.name_key AS name_key,
-                ph.authorid AS authorid,
-                ph.paperid AS paperid,
-                ph.hit_1pct AS hit_1pct,
-                ROW_NUMBER() OVER (
-                    PARTITION BY ph.name_key, ph.authorid
-                    ORDER BY ph.hit_1pct DESC, ph.paperid
-                ) AS rn
-            FROM paper_hits ph
-        ),
-        top_papers AS (
-            SELECT
-                pr.name_key AS name_key,
-                pr.authorid AS authorid,
-                CAST(
-                    LIST(
-                        'https://openalex.org/' || CAST(pr.paperid AS VARCHAR)
-                        ORDER BY pr.hit_1pct DESC, pr.paperid
-                    )
-                        FILTER (WHERE pr.rn <= {TOP_K_WORKS})
-                    AS VARCHAR
-                ) AS "{KTP_SSN_TOP_PAPERS_HIT_1PCT_COL}"
-            FROM paper_ranked pr
-            GROUP BY pr.name_key, pr.authorid
-        ),
+        WITH {top_papers_hit_ctes},
         {top_oldest_papers_ctes},
         affiliation_counts AS (
             SELECT

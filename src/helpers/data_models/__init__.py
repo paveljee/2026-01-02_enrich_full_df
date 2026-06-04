@@ -1,3 +1,10 @@
+from .http_request_log import (
+    HttpRequestLogRecord,
+    append_http_request_log_record,
+    http_request_log_record,
+    matching_http_request_log_record,
+    redact_http_request_log_query,
+)
 from .outer_dict import (
     InnerDict,
     MatchingProcedure,
@@ -22,4 +29,9 @@ __all__ = [
     "RegisteredResource",
     "Fragment",
     "SourceKey",
+    "HttpRequestLogRecord",
+    "append_http_request_log_record",
+    "http_request_log_record",
+    "matching_http_request_log_record",
+    "redact_http_request_log_query",
 ]

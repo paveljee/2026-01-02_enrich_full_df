@@ -18,8 +18,11 @@ from src.helpers.name_matching import (
 )
 from src.helpers.openalex import (
     check_openalex_author,
+    check_openalex_work_title,
     openalex_author_search_query,
+    openalex_work_title_query,
     parse_openalex_top_author_id,
+    parse_openalex_work_title,
 )
 from src.helpers.schema import (
     PARQUET_AUTHOR_HIT_AGG_TABLE,
@@ -40,6 +43,7 @@ from src.helpers.ssn_hit_selection import (
 )
 from src.helpers.vars import (
     KTP_FIRST_NAME_COL,
+    KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION,
     KTP_LAST_NAME_COL,
     KTP_OPENALEX_MATCH_COL,
     KTP_OPENALEX_RECEIVED_AT_UNIX_USEC_COL,
@@ -58,7 +62,6 @@ from src.helpers.vars import (
     KTP_SSN_SUM_HIT_1PCT_COL,
     KTP_SSNAD_MATCH_COL,
     KTP_SSNAP_FILENAME_COL,
-    OPENALEX_AUTHOR_SEARCH_LOG_SCHEMA_VERSION,
     SSNAD_AUTHORID_COL,
 )
 
@@ -571,7 +574,7 @@ def test_openalex_author_check_reuses_jsonl_cache(tmp_path: Path) -> None:
     log_path.write_text(
         json.dumps(
             {
-                "schema_version": OPENALEX_AUTHOR_SEARCH_LOG_SCHEMA_VERSION,
+                "schema_version": KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION,
                 "method": "GET",
                 "scheme": "https",
                 "host": "api.openalex.org",
@@ -657,7 +660,7 @@ def test_openalex_author_check_appends_response_and_parses_mismatch(tmp_path: Pa
         "received_at_unix_usec",
         "duration_usec",
     ]
-    assert record["schema_version"] == OPENALEX_AUTHOR_SEARCH_LOG_SCHEMA_VERSION
+    assert record["schema_version"] == KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION
     assert record["query"].endswith("api_key=REDACTED")
     assert "test-key" not in record["query"]
     assert KTP_SOURCE_KEY_COL not in record
@@ -666,9 +669,103 @@ def test_openalex_author_check_appends_response_and_parses_mismatch(tmp_path: Pa
     assert "openalex_match" not in record
 
 
+def test_openalex_work_title_reuses_jsonl_cache(tmp_path: Path) -> None:
+    query = openalex_work_title_query(api_key="REDACTED")
+    log_path = tmp_path / "openalex_paper_title_log.jsonl"
+    log_path.write_text(
+        json.dumps(
+            {
+                "schema_version": KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION,
+                "method": "GET",
+                "scheme": "https",
+                "host": "api.openalex.org",
+                "path": "/works/W123",
+                "query": query,
+                "request_headers": {},
+                "request_body": None,
+                "response_code": 200,
+                "response_headers": {},
+                "response_body": '{"title":"A Fine Paper"}',
+                "received_at_unix_usec": 333,
+                "duration_usec": 444,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    def fail_get(_url: str, *, timeout: float) -> _FakeOpenAlexResponse:
+        raise AssertionError("cached OpenAlex title response should have been reused")
+
+    result = check_openalex_work_title(
+        paperid="W123",
+        log_path=log_path,
+        api_key="test-key",
+        request_get=fail_get,
+    )
+
+    assert result.reused
+    assert result.paperid == "W123"
+    assert result.query == query
+    assert result.title == "A Fine Paper"
+    assert result.received_at_unix_usec == 333
+
+
+def test_openalex_work_title_appends_response_and_parses_title(tmp_path: Path) -> None:
+    log_path = tmp_path / "openalex_paper_title_log.jsonl"
+    seen_urls: list[str] = []
+
+    def fake_get(url: str, *, timeout: float) -> _FakeOpenAlexResponse:
+        seen_urls.append(url)
+        assert timeout > 0
+        return _FakeOpenAlexResponse(status_code=200, text='{"title":"A Fine Paper"}')
+
+    result = check_openalex_work_title(
+        paperid="W123",
+        log_path=log_path,
+        api_key="test-key",
+        request_get=fake_get,
+    )
+    record = json.loads(log_path.read_text(encoding="utf-8"))
+
+    assert len(seen_urls) == 1
+    assert seen_urls[0].startswith("https://api.openalex.org/works/W123?")
+    assert "select=title" in seen_urls[0]
+    assert "per_page=1" in seen_urls[0]
+    assert "api_key=test-key" in seen_urls[0]
+    assert not result.reused
+    assert result.title == "A Fine Paper"
+    assert result.query == record["query"]
+    assert list(record) == [
+        "schema_version",
+        "method",
+        "scheme",
+        "host",
+        "path",
+        "query",
+        "request_headers",
+        "request_body",
+        "response_code",
+        "response_headers",
+        "response_body",
+        "received_at_unix_usec",
+        "duration_usec",
+    ]
+    assert record["schema_version"] == KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION
+    assert record["path"] == "/works/W123"
+    assert record["query"].endswith("api_key=REDACTED")
+    assert "test-key" not in record["query"]
+
+
 def test_parse_openalex_top_author_id_handles_empty_or_malformed_results() -> None:
     assert parse_openalex_top_author_id('{"results":[]}') is None
     assert parse_openalex_top_author_id("not-json") is None
+
+
+def test_parse_openalex_work_title_handles_missing_or_malformed_title() -> None:
+    assert parse_openalex_work_title('{"title":"A Fine Paper"}') == "A Fine Paper"
+    assert parse_openalex_work_title('{"title":"   "}') is None
+    assert parse_openalex_work_title("not-json") is None
 
 
 def test_ssn_hit_v2_openalex_mismatch_returns_full_nonzero_pool(tmp_path: Path) -> None:

@@ -18,8 +18,10 @@ AUTHOR_DETAILS_UNNEST_RULE_VERSION_METADATA_KEY: Final = (
     "match_rule_version.ssn_name"
 )
 OPENALEX_AUTHOR_SEARCH_LOG_KEY: Final = "openalex_author_search_log"
-OPENALEX_AUTHOR_SEARCH_LOG_SCHEMA_VERSION: Final = 1
+KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION: Final = 1
 OPENALEX_AUTHOR_SEARCH_LOG_PATH: Final = "data/openalex_author_search_log.jsonl"
+OPENALEX_PAPER_TITLE_LOG_KEY: Final = "openalex_paper_title_log"
+OPENALEX_PAPER_TITLE_LOG_PATH: Final = "data/openalex_paper_title_log.jsonl"
 WORLD_BANK_XLSX_KEY = "world_bank_xlsx"
 WORLD_BANK_INCOME_FISCAL_YEAR: Final = "FY26"
 WORLD_BANK_FORMER_ECONOMY_CODES: Final[set[str]] = {
@@ -41,6 +43,7 @@ REQUIRED_FILES_CONFIG_KEYS: Final[set[str]] = {
     "fields",
     "papers",
     OPENALEX_AUTHOR_SEARCH_LOG_KEY,
+    OPENALEX_PAPER_TITLE_LOG_KEY,
     WORLD_BANK_XLSX_KEY,
 }
 REQUIRED_FILE_ENTRY_KEYS: Final[set[str]] = {"path", "sha256", "desc"}
@@ -83,7 +86,7 @@ KTP_SSNHPL1_FILENAME_COL: Final = "ktp.ssnhpl1_filename"
 KTP_SSNF_FILENAME_COL: Final = "ktp.ssnf_filename"
 KTP_SSNP_FILENAME_COL: Final = "ktp.ssnp_filename"
 SSNP_PAPERID_COL: Final = "ssnp.paperid"
-SSNP_YEAR_COL: Final = "ssnp.year"
+SSNP_DATE_COL: Final = "ssnp.date"
 KTP_SSNPAA_FILENAME_COL: Final = "ktp.ssnpaa_filename"
 KTP_SSNAF_FILENAME_COL: Final = "ktp.ssnaf_filename"
 KTP_SSN_SUM_HIT_1PCT_COL: Final = "ktp.ssn_sum_hit_1pct"
@@ -92,6 +95,7 @@ SSN_PAPERIDS_LEVEL1_COL: Final = "ssn.paperids_level1"
 SSN_FIELD_IDS_LIST_COL: Final = "ssn.field_ids_list"
 KTP_SSN_TOP_PAPERS_HIT_1PCT_COL: Final = "ktp.ssn_top_papers_hit_1pct"
 KTP_SSN_TOP_OLDEST_PAPERS_COL: Final = "ktp.ssn_top_oldest_papers"
+OPENALEX_TITLE_COL: Final = "openalex.title"
 KTP_SSNP_PAPERID_URL_COL: Final = "ktp.ssnp_paperid_url"
 KTP_SSN_FIELD_DISPLAY_NAMES_LIST_COL: Final = "ktp.ssn_field_display_names_list"
 KTP_SSN_TOP_INSTITUTIONS_COL: Final = "ktp.ssn_top_institutions"
@@ -583,6 +587,11 @@ __all__ = [
     "HCR_XLSX_KEY_PREFIX",
     "KTP_AUTHOR_DETAILS_UNNEST_KEY",
     "AUTHOR_DETAILS_UNNEST_RULE_VERSION_METADATA_KEY",
+    "OPENALEX_AUTHOR_SEARCH_LOG_KEY",
+    "KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION",
+    "OPENALEX_AUTHOR_SEARCH_LOG_PATH",
+    "OPENALEX_PAPER_TITLE_LOG_KEY",
+    "OPENALEX_PAPER_TITLE_LOG_PATH",
     "WORLD_BANK_XLSX_KEY",
     "WORLD_BANK_FORMER_ECONOMY_CODES",
     "WORLD_BANK_INCOME_FISCAL_YEAR",
@@ -618,13 +627,14 @@ __all__ = [
     "KTP_SSNF_FILENAME_COL",
     "KTP_SSNP_FILENAME_COL",
     "SSNP_PAPERID_COL",
-    "SSNP_YEAR_COL",
+    "SSNP_DATE_COL",
     "KTP_SSN_SUM_HIT_1PCT_COL",
     "SSN_PAPERIDS_LEVEL0_COL",
     "SSN_PAPERIDS_LEVEL1_COL",
     "SSN_FIELD_IDS_LIST_COL",
     "KTP_SSN_TOP_PAPERS_HIT_1PCT_COL",
     "KTP_SSN_TOP_OLDEST_PAPERS_COL",
+    "OPENALEX_TITLE_COL",
     "KTP_SSNP_PAPERID_URL_COL",
     "KTP_SSN_FIELD_DISPLAY_NAMES_LIST_COL",
     "KTP_SSN_TOP_INSTITUTIONS_COL",
