@@ -61,6 +61,49 @@ No new card-rendering path is needed unless the implementation
 accidentally excludes the column. `build_cards()` already emits ordinary
 innerdict fields that are not in step 10's `excluded_cols`.
 
+### prerequisite guidance and rules reviewed
+
+This task inherits its setup rules from
+`tasks/tasks-20260519-review-231/SPEC.md`. I reviewed those rules as
+operating constraints, not as optional background:
+
+- Understand the code path behind
+  `pixi run python -m src.repl --config config.repl.json --new`, but do
+  not run that command and do not use `src.repl` directly. For this
+  SPEC-fill pass I read the relevant code path instead:
+  `src/repl.py`, `src/helpers/init.py`, `src/helpers/pipeline_manager.py`,
+  `src/helpers/repl_runtime.py`, `src/steps/step_01_register_resources.py`,
+  `src/steps/step_09_match_parquet.py`, and
+  `src/steps/step_10_build_cards.py`.
+- If persisted pipeline data has to be checked, use only
+  `data/scisci_process.duckdb` and only in read-only mode. Do not browse
+  other `data/` or `.aicode/` artifacts. For this pass I did not inspect
+  the DB or data files because code/config context was sufficient to fill
+  the SPEC.
+- Repo code, config, and tests may be reviewed as needed. I specifically
+  reviewed `config.repl.json`, `src/helpers/vars.py`,
+  `src/helpers/resources.py`, `src/helpers/config.py`,
+  `src/helpers/schema.py`, `src/helpers/parquet_utils.py`,
+  `src/helpers/cards.py`, and nearby tests for config/resource, card, and
+  SSN behavior.
+- Code edits for the eventual implementation should happen only after
+  the executor has enough context. This pass only edits the AI-owned SPEC
+  section and the task workbook.
+- Git usage is read-only under the linked prerequisite. I used only
+  read-only status/diff inspection and did not stage, unstage, reset, or
+  checkout anything.
+- The task asks to use `./WORK.md` as a concise workbook for a busy tech
+  lead and later executor; I updated it with the context reviewed and the
+  local `apply_patch` workaround used.
+
+I also followed relevant references beyond the prerequisite header:
+the older SPEC's step-10 subset/card discussion explains why current
+card output is driven by effective innerdict rows, and
+`tasks/tasks-20260526-match-patch/SPEC.md` documents the SSN hit v2 and
+OpenAlex selection flow. Those references matter here because oldest
+papers must be computed from `PARQUET_AUTHOR_MATCH_HIT_SELECTED_VIEW`,
+not from raw pre-selection SSN candidates.
+
 ### reviewed context
 
 - The linked setup/spec in `tasks/tasks-20260519-review-231/SPEC.md`

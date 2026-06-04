@@ -10,4 +10,5 @@
 ### completed
 
 - Filled the AI-owned section of `SPEC.md` with the intended step-9 data semantics, implementation touchpoints, logging requirements, and focused test expectations.
+- Amended the AI-owned SPEC section with explicit prerequisite rules and concrete evidence of linked-doc/repo review.
 - Used repo-documented workaround `env -u CODEX_SANDBOX_NETWORK_DISABLED apply_patch` because plain `apply_patch` failed locally with the sandbox-helper loopback error.
