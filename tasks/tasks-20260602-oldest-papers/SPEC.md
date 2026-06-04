@@ -28,10 +28,13 @@ It uses `TOP_K_WORKS`.
 Here is how it should
 look like in final card
 (works should be sorted
-ascending by year):
+ascending by date;
+break ties by
+sorting by paperid,
+ascending):
 
 ```
-**ktp.ssn_top_oldest_papers**: [{"ssnp.year":...,"ktp.ssnp_paperid_url":"https://openalex.org/W1568216332"}, ...]
+**ktp.ssn_top_oldest_papers**: [{"ssnp.date":...,"ktp.openalex_title":"...","ktp.ssnp_paperid_url":"https://openalex.org/W1568216332"}, ...]
 ```
 
 all relevant
@@ -39,6 +42,22 @@ manipulations with
 paper parquet
 should be properly logged
 in `repl_session.log`.
+
+"ktp.openalex_title"
+should be fetched from OpenAlex,
+reusing the whole same mechanism
+currently used for
+`openalex_author_search_log.jsonl`,
+except that a separate file log is used.
+Everything else is handled identically,
+like RegisteredResouce, reuse of data, etc.
+query to use:
+`api.openalex.org/works/{paperid}?select=title&per_page=1&api_key=REDACTED"`
+
+also,
+as long as we are adding titles here,
+let's also wire in titles for
+top works.
 
 ## how ai understood the spec
 
@@ -48,13 +67,15 @@ Add a step-9 SSN enrichment column named by
 `KTP_SSN_TOP_OLDEST_PAPERS_COL`
 (`ktp.ssn_top_oldest_papers`) so each effective SciSciNet/OpenAlex
 author innerdict can show up to `TOP_K_WORKS` oldest papers in the final
-card.
+card. Since the task now fetches OpenAlex work titles, also enrich the
+existing top-works output `ktp.ssn_top_papers_hit_1pct` with those same
+work titles.
 
 The final card should print the new value naturally through the existing
 card renderer, e.g.
 
 ```text
-**ktp.ssn_top_oldest_papers**: [{"ssnp.year":1903,"ktp.ssnp_paperid_url":"https://openalex.org/W1568216332"}, ...]
+**ktp.ssn_top_oldest_papers**: [{"ssnp.date":"1903-05-17","ktp.openalex_title":"...","ktp.ssnp_paperid_url":"https://openalex.org/W1568216332"}, ...]
 ```
 
 No new card-rendering path is needed unless the implementation
@@ -104,6 +125,15 @@ OpenAlex selection flow. Those references matter here because oldest
 papers must be computed from `PARQUET_AUTHOR_MATCH_HIT_SELECTED_VIEW`,
 not from raw pre-selection SSN candidates.
 
+The new title lookup should mirror the existing
+`openalex_author_search_log.jsonl` machinery in `src/helpers/openalex.py`:
+use a JSONL request log/cache with redacted API keys, reuse matching
+records before network, append complete response metadata after network,
+and represent the log as a registered pipeline-artifact resource. It
+should be a separate log file/resource from the author-search log. The
+same work-title lookup/cache should serve both `ktp.ssn_top_oldest_papers`
+and `ktp.ssn_top_papers_hit_1pct`.
+
 ### reviewed context
 
 - The linked setup/spec in `tasks/tasks-20260519-review-231/SPEC.md`
@@ -140,30 +170,58 @@ Candidate papers for one card row are:
 ```text
 name_key + selected authorid
   -> ssn_author_papers.paperid
-  -> papers parquet paperid/year metadata
+  -> papers parquet paperid/date metadata
 ```
 
-The paper parquet should be normalized with prefix `ssnp`, so the year
-field used in the payload is `ssnp.year`. The URL field in the JSON
-payload should be `ktp.ssnp_paperid_url`, built as
-`https://openalex.org/` plus the SciSciNet/OpenAlex work id.
+The paper parquet should be normalized with prefix `ssnp`, so the full
+date field used in the payload is `ssnp.date`. Date replaces the
+earlier year-only idea outright: do not emit a year-only payload field,
+do not add a fallback to year, and do not retain an `ssnp.year`/
+`SSNP_YEAR_COL` compatibility path. Year-only ordering is too coarse and
+makes within-year order fuzzy.
+
+The JSON payload for each oldest paper should include:
+
+```text
+ssnp.date
+ktp.openalex_title
+ktp.ssnp_paperid_url
+```
+
+The URL field should be built as `https://openalex.org/` plus the
+SciSciNet/OpenAlex work id. The title field should be fetched from
+OpenAlex work metadata for the same work id, using the separate JSONL
+request-cache/log resource described above. Title lookup should enrich
+the already-ranked oldest papers; it must not alter paper ranking or
+drop a paper that otherwise qualifies. If OpenAlex has no usable title
+for a qualifying paper, keep the paper row and leave the title null/empty
+rather than replacing the paper.
 
 Ranking should be deterministic:
 
 ```text
 PARTITION BY name_key, authorid
-ORDER BY ssnp.year ASC, paperid ASC
+ORDER BY ssnp.date ASC, paperid ASC
 keep rn <= TOP_K_WORKS
 ```
 
-Only rows with a non-null paper id and a non-null year should contribute
+Only rows with a non-null paper id and a non-null date should contribute
 to "oldest" papers. If an author has fewer than `TOP_K_WORKS` dated
 papers, return fewer. If there are none, leave
 `ktp.ssn_top_oldest_papers` null/empty rather than fabricating an
 undated oldest-paper record.
 
-The JSON/list ordering must be ascending by year in the stored string,
-not just in an intermediate CTE.
+The JSON/list ordering must be ascending by full date in the stored
+string, not just in an intermediate CTE. Break equal-date ties by
+paperid ascending for deterministic output.
+
+The existing `ktp.ssn_top_papers_hit_1pct` top-works field should keep
+its current candidate population and ranking semantics: selected author
+papers ordered by `hit_1pct` descending, then paperid ascending, capped
+at `TOP_K_WORKS`. The change for that field is title enrichment, not a
+ranking change. Its entries should include the OpenAlex title and
+OpenAlex work URL using the same title lookup/cache used for oldest
+papers.
 
 ### implementation notes
 
@@ -171,15 +229,31 @@ Expected touchpoints:
 
 - `src/helpers/vars.py`
   - add `papers` to `REQUIRED_FILES_CONFIG_KEYS`;
+  - add a required config key/path/schema-version constant for the
+    separate OpenAlex work-title JSONL log;
   - export `KTP_SSN_TOP_OLDEST_PAPERS_COL` in `__all__`;
-  - consider adding centralized labels for `ssnp.filename`,
-    `ssnp.year`, and `ktp.ssnp_paperid_url` rather than scattering
-    string literals.
+  - add/use centralized labels for `ssnp.filename`, `ssnp.date`, and
+    `ktp.ssnp_paperid_url` rather than scattering string literals;
+  - add/use a centralized label for `ktp.openalex_title`;
+  - use a date constant such as `SSNP_DATE_COL`, not `SSNP_YEAR_COL`.
 - `src/helpers/resources.py`
   - register the configured `papers` parquet as a `SCISCINET_HF`
     parquet resource, likely with `FragmentType.PAPER_ID`;
+  - validate/register the separate OpenAlex work-title JSONL log the
+    same way the author-search JSONL log is validated/registered, as a
+    writable `KTP_PIPELINE_ARTIFACT` resource;
   - step 01's resource table will then include it through the existing
     resource-frame path.
+- `src/helpers/openalex.py`
+  - add a work-title fetch/reuse helper parallel to
+    `check_openalex_author()`, using the same request-log shape,
+    redaction, cache-first behavior, request timing, and JSONL append
+    semantics;
+  - use `GET api.openalex.org/works/{paperid}` with query parameters
+    `select=title`, `per_page=1`, and `api_key=...`; the persisted log
+    should store the redacted query, just like the author-search log;
+  - fetch only the needed OpenAlex work record/title, not a broader
+    search result set.
 - `src/steps/step_09_match_parquet.py`
   - read `papers_path = files["papers"]["path"]`;
   - include the papers filename in the parquet provenance payload;
@@ -187,6 +261,12 @@ Expected touchpoints:
     for only selected author papers;
   - build a `top_oldest_papers` CTE beside the existing `top_papers`,
     then left join it into `enriched`;
+  - fetch/reuse OpenAlex titles only for distinct paper ids that survive
+    either the top-oldest selection or the existing top-works selection,
+    store those titles in a small relation, and join them into both JSON
+    outputs;
+  - enrich `ktp.ssn_top_papers_hit_1pct` with titles while preserving its
+    existing hit-count-descending/paperid-ascending ordering;
   - select the result as `"ktp.ssn_top_oldest_papers"`.
 
 A suitable DuckDB expression shape is:
@@ -195,17 +275,24 @@ A suitable DuckDB expression shape is:
 CAST(
     LIST(
         json_object(
-            'ssnp.year', CAST(year AS BIGINT),
+            'ssnp.date', CAST(date_value AS VARCHAR),
+            'ktp.openalex_title', title,
             'ktp.ssnp_paperid_url',
             'https://openalex.org/' || CAST(paperid AS VARCHAR)
         )
-        ORDER BY year ASC, paperid ASC
+        ORDER BY date_value ASC, paperid ASC
     ) FILTER (WHERE rn <= TOP_K_WORKS)
     AS VARCHAR
 ) AS "ktp.ssn_top_oldest_papers"
 ```
 
-Use the actual normalized paperid/year column names in code.
+Use the actual normalized paperid/date column names in code, and use a
+sortable date value for ordering. Do not add a year fallback.
+
+For `ktp.ssn_top_papers_hit_1pct`, use the same title field label
+(`ktp.openalex_title`) and URL field label (`ktp.ssnp_paperid_url`)
+inside each top-work entry, but order by the existing top-works ranking,
+not by date.
 
 ### logging contract
 
@@ -217,7 +304,10 @@ Log at least:
 - the count of matched paper metadata rows and distinct papers;
 - dated-paper coverage, if cheaply available;
 - the top-`TOP_K_WORKS` oldest-paper reduction count, analogous to the
-  existing top-paper and top-institution reduction diagnostics.
+  existing top-paper and top-institution reduction diagnostics;
+- OpenAlex work-title lookup counts, including distinct paper ids across
+  both oldest papers and top works, reused records, fetched records,
+  successful titles, and missing/failed titles.
 
 Use the existing log tags (`TABLE/PARQUET`, `TABLE/EFF`,
 `TABLE/INNERDICT`) consistently with the nearby step-9 blocks.
@@ -228,9 +318,16 @@ Add focused tests that do not require the real SciSciNet parquet files:
 
 - config/resource tests should expect `papers` as a required registered
   parquet resource;
+- config/resource tests should expect the separate OpenAlex work-title
+  JSONL log as a required writable registered pipeline-artifact resource;
 - a tiny DuckDB/parquet fixture should verify oldest-paper ranking by
-  ascending year, paperid tie-break, `TOP_K_WORKS` truncation, OpenAlex
-  work URL construction, and omission of null-year papers;
+  ascending full date, paperid tie-break, `TOP_K_WORKS` truncation,
+  OpenAlex work URL construction, and omission of null-date papers;
+- top-works tests should verify title enrichment without changing the
+  existing hit-count-descending/paperid-ascending ordering;
+- OpenAlex title tests should cover JSONL cache reuse, append-on-fetch,
+  title parsing from a work response, and no network request when a
+  matching cached work record exists;
 - card output should include `ktp.ssn_top_oldest_papers` when present on
   an innerdict;
 - existing step-10 partition/card tests should keep passing without
