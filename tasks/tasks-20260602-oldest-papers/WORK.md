@@ -50,3 +50,7 @@
 - `pixi run python -m mypy src/helpers/vars.py src/helpers/data_models/http_request_log.py src/helpers/data_models/__init__.py src/helpers/openalex.py src/helpers/resources.py src/steps/step_01_register_resources.py src/steps/step_09_match_parquet.py src/steps/step_10_build_cards.py tests/test_step_09_match_parquet.py tests/test_cards.py tests/test_author_details_unnest_resource.py tests/test_sciscinet_name_matching.py tests/test_csv_sample_validation.py` passed (`Success: no issues found in 13 source files`).
 - `rg -n "SSNP_YEAR_COL|ssnp\\.year|KTP_API_LOG|api_log|OPENALEX_AUTHOR_SEARCH_LOG_SCHEMA_VERSION|OPENALEX_PAPER_TITLE_LOG_SCHEMA_VERSION|OPENALEX_LOG_SCHEMA_VERSION|openalex_ssnp_title" src tests tasks/tasks-20260602-oldest-papers/SPEC.md` only found the SPEC lines that explicitly prohibit `ssnp.year`/`SSNP_YEAR_COL`.
 - `src.repl` was not run.
+
+### follow-up fix
+
+- Added one `TABLE/EFF` log line per OpenAlex work-title lookup, mirroring the per-check `OpenAlex author check ...` logging rather than only emitting the aggregate title summary.

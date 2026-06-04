@@ -4,6 +4,7 @@ import json
 
 import duckdb
 
+from src.helpers.openalex import OpenAlexWorkTitleResult
 from src.helpers.schema import (
     PARQUET_ALL_HITS_TABLE,
     PARQUET_AUTHOR_MATCH_HIT_SELECTED_VIEW,
@@ -20,9 +21,27 @@ from src.helpers.vars import (
     TOP_K_WORKS,
 )
 from src.steps.step_09_match_parquet import (
+    _openalex_work_title_log_message,
     _top_oldest_papers_ctes_sql,
     _top_papers_hit_ctes_sql,
 )
+
+
+def test_openalex_work_title_log_message_includes_each_lookup_details() -> None:
+    result = OpenAlexWorkTitleResult(
+        paperid="W123",
+        query="select=title&per_page=1&api_key=REDACTED",
+        response_code=200,
+        title="A Fine Paper",
+        reused=False,
+        received_at_unix_usec=123456,
+        duration_usec=789,
+    )
+
+    assert _openalex_work_title_log_message(result) == (
+        "OpenAlex work-title check fetched: paperid=W123, status=200, "
+        "title=title, received_at_unix_usec=123456."
+    )
 
 
 def test_top_oldest_papers_sql_orders_by_date_truncates_and_omits_null_date() -> None:

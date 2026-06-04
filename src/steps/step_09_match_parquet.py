@@ -13,7 +13,11 @@ from ..helpers.duckdb_utils import (
 from ..helpers.name_matching import (
     sciscinet_ktp_name_norm_sql,
 )
-from ..helpers.openalex import check_openalex_author, check_openalex_work_title
+from ..helpers.openalex import (
+    OpenAlexWorkTitleResult,
+    check_openalex_author,
+    check_openalex_work_title,
+)
 from ..helpers.parquet_utils import normalize_parquet_column_name, parquet_columns, parquet_filename
 from ..helpers.procedures import ParquetMatchProcedure
 from ..helpers.schema import (
@@ -278,6 +282,20 @@ def _top_papers_hit_ctes_sql(
     """
 
 
+def _openalex_work_title_log_message(result: OpenAlexWorkTitleResult) -> str:
+    source = "reused" if result.reused else "fetched"
+    status = result.response_code if result.response_code is not None else "null"
+    title_status = "title" if result.title else "missing"
+    received_at = (
+        result.received_at_unix_usec if result.received_at_unix_usec is not None else "null"
+    )
+    return (
+        "OpenAlex work-title check "
+        f"{source}: paperid={result.paperid}, status={status}, "
+        f"title={title_status}, received_at_unix_usec={received_at}."
+    )
+
+
 def run(context: PipelineContext) -> StepResult:
     if context.outer_dict is None:
         raise ValueError("OuterDict not initialized. Run build_outerdict first.")
@@ -427,6 +445,10 @@ def run(context: PipelineContext) -> StepResult:
             else:
                 missing_count += 1
             title_rows.append((paperid, result.title))
+            log_tag(
+                STEP_MATCH_PARQUET_LOG_TAG_TABLE_EFF,
+                _openalex_work_title_log_message(result),
+            )
         if title_rows:
             conn.executemany(
                 f"INSERT INTO {title_table} (paperid, title) VALUES (?, ?)",
