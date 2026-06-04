@@ -32,15 +32,15 @@ def test_openalex_work_title_log_message_includes_each_lookup_details() -> None:
         paperid="W123",
         query="select=title&per_page=1&api_key=REDACTED",
         response_code=200,
-        title="A Fine Paper",
+        title="A Fine Paper \u4f60\u597d",
         reused=False,
         received_at_unix_usec=123456,
         duration_usec=789,
     )
 
     assert _openalex_work_title_log_message(result) == (
-        "OpenAlex work-title check fetched: paperid=W123, status=200, "
-        "title=title, received_at_unix_usec=123456."
+        'OpenAlex work-title check fetched: paperid=W123, status=200, '
+        'title="A Fine Paper 你好", received_at_unix_usec=123456.'
     )
 
 

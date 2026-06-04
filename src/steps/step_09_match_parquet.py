@@ -285,7 +285,7 @@ def _top_papers_hit_ctes_sql(
 def _openalex_work_title_log_message(result: OpenAlexWorkTitleResult) -> str:
     source = "reused" if result.reused else "fetched"
     status = result.response_code if result.response_code is not None else "null"
-    title_status = "title" if result.title else "missing"
+    title_status = json.dumps(result.title, ensure_ascii=False) if result.title else "missing"
     received_at = (
         result.received_at_unix_usec if result.received_at_unix_usec is not None else "null"
     )
