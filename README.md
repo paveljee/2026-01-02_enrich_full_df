@@ -15,7 +15,13 @@ The pipeline code was
 primarily generated with
 OpenAI Codex (GPT 5.2+)
 under paid Plus subscription
-(~$30 CAD/month as of Q1-Q2 2026).
+(~$30 CAD/month as of Q1-Q2 2026;
+sometimes I also had to
+buy some credits,
+e.g., \$10 USD worth,
+if I needed to
+complete a small chunk of
+pending works urgently).
 
 Original stub was
 generated with
