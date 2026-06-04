@@ -23,6 +23,10 @@ from src.helpers.vars import (
     HCR_XLSX_KEY_PREFIX,
     KTP_FILENAME_COL,
     KTP_FRAGMENT_COL,
+    KTP_HCR_FILENAME_COL,
+    KTP_HCR_FILENAME_COL_LEGACY,
+    KTP_HCR_ROW_NUMBER_COL,
+    KTP_HCR_ROW_NUMBER_COL_LEGACY,
     REQUIRED_FILES_CONFIG_KEYS,
 )
 from src.steps.step_02_load_xlsx import run as run_load_xlsx
@@ -133,32 +137,38 @@ def test_csv_rows_match_samples(tmp_path: Path) -> None:
 
         sample_df = conn.execute(
             f"""
-            SELECT "{KTP_FILENAME_COL}" AS "hcr.filename",
-                   "{KTP_FRAGMENT_COL}" AS "hcr.row_number",
+            SELECT "{KTP_FILENAME_COL}" AS "{KTP_HCR_FILENAME_COL}",
+                   "{KTP_FRAGMENT_COL}" AS "{KTP_HCR_ROW_NUMBER_COL}",
                    "{DRAW_LABEL}" AS "ktp.draw_number"
             FROM samples
             """
         ).df()
 
         csv_df = pd.concat([pd.read_csv(path) for path in csv_files], ignore_index=True)
-        csv_df = csv_df[["hcr.filename", "hcr.row_number", "ktp.draw_number"]].copy()
+        csv_df = csv_df.rename(
+            columns={
+                KTP_HCR_FILENAME_COL_LEGACY: KTP_HCR_FILENAME_COL,
+                KTP_HCR_ROW_NUMBER_COL_LEGACY: KTP_HCR_ROW_NUMBER_COL,
+            }
+        )
+        csv_df = csv_df[[KTP_HCR_FILENAME_COL, KTP_HCR_ROW_NUMBER_COL, DRAW_LABEL]].copy()
 
-        for col in ["hcr.filename", "hcr.row_number", "ktp.draw_number"]:
+        for col in [KTP_HCR_FILENAME_COL, KTP_HCR_ROW_NUMBER_COL, DRAW_LABEL]:
             sample_df[col] = sample_df[col].astype(str)
             csv_df[col] = csv_df[col].astype(str)
 
         sample_rows = Counter(
             zip(
-                sample_df["hcr.filename"],
-                sample_df["hcr.row_number"],
-                sample_df["ktp.draw_number"],
+                sample_df[KTP_HCR_FILENAME_COL],
+                sample_df[KTP_HCR_ROW_NUMBER_COL],
+                sample_df[DRAW_LABEL],
             )
         )
         csv_rows = Counter(
             zip(
-                csv_df["hcr.filename"],
-                csv_df["hcr.row_number"],
-                csv_df["ktp.draw_number"],
+                csv_df[KTP_HCR_FILENAME_COL],
+                csv_df[KTP_HCR_ROW_NUMBER_COL],
+                csv_df[DRAW_LABEL],
             )
         )
 

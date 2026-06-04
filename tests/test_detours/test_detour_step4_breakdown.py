@@ -479,7 +479,7 @@ def test_detour_contract_entrypoint_isolation_and_db_separation(
     assert result.success is True
     assert result.steps_completed == DETOUR_STEPS
     assert "Detour Breakdown (Steps 1-4)" in plain_stdout
-    assert "Rows by hcr.filename:" in plain_stdout
+    assert "Rows by ktp.hcr_filename:" in plain_stdout
 
     detour_db = Path(str(result.metadata["detour_db_file"]))
     detour_state = Path(str(result.metadata["detour_state_file"]))

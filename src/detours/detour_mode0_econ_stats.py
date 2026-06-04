@@ -34,8 +34,6 @@ from src.helpers.vars import (
     EU_COUNTRIES,
     GREATER_CHINA,
     HCR_CATEGORY_COL,
-    HCR_FILENAME_COL,
-    HCR_ROW_COL,
     HCR_XLSX_NAME_COLS,
     KTP_ECONOMIES_COL,
     KTP_ECONOMIES_INCOME_GROUP_COL,
@@ -44,7 +42,9 @@ from src.helpers.vars import (
     KTP_FILENAME_COL,
     KTP_FIRST_NAME_COL,
     KTP_FRAGMENT_COL,
+    KTP_HCR_FILENAME_COL,
     KTP_HCR_PRIMARY_AFFILIATIONS_COL,
+    KTP_HCR_ROW_NUMBER_COL,
     KTP_HCR_SECONDARY_AFFILIATIONS_COL,
     KTP_LAST_NAME_COL,
     KTP_POPULATION_INDEX_COL,
@@ -757,7 +757,7 @@ def _step4_population_with_economy_columns(
         if col not in explicit_name_cols and "unnamed" not in col.lower()
     ]
     ordered_hcr: list[str] = []
-    for col in (HCR_FILENAME_COL, HCR_ROW_COL, HCR_CATEGORY_COL):
+    for col in (KTP_HCR_FILENAME_COL, KTP_HCR_ROW_NUMBER_COL, HCR_CATEGORY_COL):
         if col in hcr_cols:
             ordered_hcr.append(col)
     ordered_hcr += [col for col in hcr_cols if col not in ordered_hcr]
@@ -765,8 +765,8 @@ def _step4_population_with_economy_columns(
     ordered_cols = (
         [
             KTP_POPULATION_INDEX_COL,
-            HCR_FILENAME_COL,
-            HCR_ROW_COL,
+            KTP_HCR_FILENAME_COL,
+            KTP_HCR_ROW_NUMBER_COL,
             KTP_FIRST_NAME_COL,
             KTP_LAST_NAME_COL,
             HCR_CATEGORY_COL,
@@ -774,7 +774,7 @@ def _step4_population_with_economy_columns(
         + [
             col
             for col in ordered_hcr
-            if col not in {HCR_FILENAME_COL, HCR_ROW_COL, HCR_CATEGORY_COL}
+            if col not in {KTP_HCR_FILENAME_COL, KTP_HCR_ROW_NUMBER_COL, HCR_CATEGORY_COL}
         ]
         + [
             KTP_HCR_PRIMARY_AFFILIATIONS_COL,
@@ -984,17 +984,17 @@ def _write_population_with_economy_and_parquet_csv(
 
     if (
         POPULATION_ECON_VIEW in tables
-        and HCR_FILENAME_COL in base_cols
-        and HCR_ROW_COL in base_cols
+        and KTP_HCR_FILENAME_COL in base_cols
+        and KTP_HCR_ROW_NUMBER_COL in base_cols
     ):
         select_cols = ", ".join(f'"{col}"' for col in base_cols)
         base_df = conn.execute(f"SELECT {select_cols} FROM {POPULATION_ECON_VIEW}").df()
         if not bridge_df.empty:
             base_df = base_df.copy()
-            base_df[HCR_FILENAME_COL] = base_df[HCR_FILENAME_COL].map(
+            base_df[KTP_HCR_FILENAME_COL] = base_df[KTP_HCR_FILENAME_COL].map(
                 lambda value: None if pd.isna(value) else str(value)
             )
-            base_df[HCR_ROW_COL] = base_df[HCR_ROW_COL].map(
+            base_df[KTP_HCR_ROW_NUMBER_COL] = base_df[KTP_HCR_ROW_NUMBER_COL].map(
                 lambda value: None if pd.isna(value) else str(value)
             )
             base_df[KTP_FIRST_NAME_COL] = base_df[KTP_FIRST_NAME_COL].map(
@@ -1010,8 +1010,8 @@ def _write_population_with_economy_and_parquet_csv(
                 bridge_df,
                 how="left",
                 left_on=[
-                    HCR_FILENAME_COL,
-                    HCR_ROW_COL,
+                    KTP_HCR_FILENAME_COL,
+                    KTP_HCR_ROW_NUMBER_COL,
                     KTP_FIRST_NAME_COL,
                     KTP_LAST_NAME_COL,
                 ],

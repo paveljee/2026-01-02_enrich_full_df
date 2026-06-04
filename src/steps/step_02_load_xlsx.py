@@ -10,7 +10,12 @@ from ..helpers.context import PipelineContext, StepResult
 from ..helpers.data_models import RegisteredResource
 from ..helpers.duckdb_utils import register_frame
 from ..helpers.schema import POPULATION_TABLE
-from ..helpers.vars import HCR_FILENAME_COL, HCR_ROW_COL, KTP_POPULATION_INDEX_COL, STEP_LOAD_XLSX
+from ..helpers.vars import (
+    KTP_HCR_FILENAME_COL,
+    KTP_HCR_ROW_NUMBER_COL,
+    KTP_POPULATION_INDEX_COL,
+    STEP_LOAD_XLSX,
+)
 
 
 def _normalize_hcr_header(name: str) -> str:
@@ -22,8 +27,8 @@ def _build_population_table(
     resources: dict[str, RegisteredResource],
     *,
     table_name: str,
-    filename_col: str = HCR_FILENAME_COL,
-    row_col: str = HCR_ROW_COL,
+    filename_col: str = KTP_HCR_FILENAME_COL,
+    row_col: str = KTP_HCR_ROW_NUMBER_COL,
     population_index_col: str = KTP_POPULATION_INDEX_COL,
 ) -> None:
     counter = 0
@@ -93,8 +98,8 @@ def run(context: PipelineContext) -> StepResult:
         conn,
         context.resources.xlsx_resources,
         table_name=POPULATION_TABLE,
-        filename_col=HCR_FILENAME_COL,
-        row_col=HCR_ROW_COL,
+        filename_col=KTP_HCR_FILENAME_COL,
+        row_col=KTP_HCR_ROW_NUMBER_COL,
     )
 
     population_df = conn.execute(f"SELECT * FROM {POPULATION_TABLE}").df()

@@ -33,8 +33,6 @@ from src.helpers.schema import (
 )
 from src.helpers.vars import (
     HCR_CATEGORY_COL,
-    HCR_FILENAME_COL,
-    HCR_ROW_COL,
     HCR_XLSX_KEY_PREFIX,
     KTP_ECONOMIES_COL,
     KTP_ECONOMIES_INCOME_GROUP_COL,
@@ -42,7 +40,9 @@ from src.helpers.vars import (
     KTP_FILENAME_COL,
     KTP_FIRST_NAME_COL,
     KTP_FRAGMENT_COL,
+    KTP_HCR_FILENAME_COL,
     KTP_HCR_PRIMARY_AFFILIATIONS_COL,
+    KTP_HCR_ROW_NUMBER_COL,
     KTP_HCR_SECONDARY_AFFILIATIONS_COL,
     KTP_LAST_NAME_COL,
     KTP_POPULATION_INDEX_COL,
@@ -172,8 +172,8 @@ def _build_fixture_db(path: Path) -> dict[str, int]:
             CREATE TABLE {POPULATION_ECON_VIEW} (
                 id INTEGER,
                 "{KTP_POPULATION_INDEX_COL}" INTEGER,
-                "{HCR_FILENAME_COL}" VARCHAR,
-                "{HCR_ROW_COL}" VARCHAR,
+                "{KTP_HCR_FILENAME_COL}" VARCHAR,
+                "{KTP_HCR_ROW_NUMBER_COL}" VARCHAR,
                 "{KTP_FIRST_NAME_COL}" VARCHAR,
                 "{KTP_LAST_NAME_COL}" VARCHAR,
                 "{HCR_CATEGORY_COL}" VARCHAR,
@@ -760,8 +760,8 @@ def _build_fixture_db(path: Path) -> dict[str, int]:
             INSERT INTO {POPULATION_ECON_VIEW} (
                 id,
                 "{KTP_POPULATION_INDEX_COL}",
-                "{HCR_FILENAME_COL}",
-                "{HCR_ROW_COL}",
+                "{KTP_HCR_FILENAME_COL}",
+                "{KTP_HCR_ROW_NUMBER_COL}",
                 "{KTP_FIRST_NAME_COL}",
                 "{KTP_LAST_NAME_COL}",
                 "{HCR_CATEGORY_COL}",
@@ -800,8 +800,8 @@ def _build_fixture_db(path: Path) -> dict[str, int]:
                 0.25 AS "ssnau.p_gf",
                 3 AS "ssnau.inference_counts",
                 1 AS "ssnau.inference_sources",
-                'author_details.parquet' AS "ssnad.filename",
-                'authors.parquet' AS "ssnau.filename",
+                'author_details.parquet' AS "ktp.ssnad_filename",
+                'authors.parquet' AS "ktp.ssnau_filename",
                 '["Field A"]' AS "ssn.field_ids_list"
             FROM {PARQUET_INNERDICT_TABLE}
             """
@@ -920,8 +920,8 @@ def test_detour_contract_and_mode0_econ_stats_readonly(
     )
     for col in PARQUET_LEFT_JOIN_COLS:
         assert col in dump_df.columns
-    assert "ssnad.filename" not in dump_df.columns
-    assert "ssnau.filename" not in dump_df.columns
+    assert "ktp.ssnad_filename" not in dump_df.columns
+    assert "ktp.ssnau_filename" not in dump_df.columns
     assert "ssn.field_ids_list" not in dump_df.columns
 
     counts = md["counts"]

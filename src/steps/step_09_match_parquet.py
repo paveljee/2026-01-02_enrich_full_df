@@ -64,24 +64,29 @@ from ..helpers.vars import (
     KTP_SSN_MATCH_RULE_V2,
     KTP_SSN_SUM_HIT_1PCT_COL,
     KTP_SSN_TOP_INSTITUTIONS_COL,
+    KTP_SSN_TOP_OLDEST_PAPERS_COL,
     KTP_SSN_TOP_PAPERS_HIT_1PCT_COL,
+    KTP_SSNAD_FILENAME_COL,
     KTP_SSNAD_MATCH_COL,
     KTP_SSNAD_MATCH_KTP_NAME_NORM_KEY,
     KTP_SSNAD_MATCH_SSNAD_NAME_NORM_KEY,
+    KTP_SSNAF_FILENAME_COL,
+    KTP_SSNAP_FILENAME_COL,
+    KTP_SSNAU_FILENAME_COL,
+    KTP_SSNF_FILENAME_COL,
+    KTP_SSNHPL0_FILENAME_COL,
+    KTP_SSNHPL1_FILENAME_COL,
+    KTP_SSNP_FILENAME_COL,
+    KTP_SSNP_PAPERID_URL_COL,
+    KTP_SSNPAA_FILENAME_COL,
     SSN_FIELD_IDS_LIST_COL,
     SSN_PAPERIDS_LEVEL0_COL,
     SSN_PAPERIDS_LEVEL1_COL,
     SSNAD_AUTHORID_COL,
-    SSNAD_FILENAME_COL,
     SSNAD_RAW_AUTHORID_COL,
     SSNAF_DISPLAY_NAME_COL,
-    SSNAF_FILENAME_COL,
-    SSNAP_FILENAME_COL,
-    SSNAU_FILENAME_COL,
-    SSNF_FILENAME_COL,
-    SSNHPL0_FILENAME_COL,
-    SSNHPL1_FILENAME_COL,
-    SSNPAA_FILENAME_COL,
+    SSNP_PAPERID_COL,
+    SSNP_YEAR_COL,
     SSNPAA_INSTITUTION_ID_COL,
     STEP_MATCH_PARQUET,
     STEP_MATCH_PARQUET_LOG_LEGEND_LINES,
@@ -693,7 +698,7 @@ def run(context: PipelineContext) -> StepResult:
         table_name=author_table,
         path=author_details_path,
         prefix="ssnad",
-        filename_col=SSNAD_FILENAME_COL,
+        filename_col=KTP_SSNAD_FILENAME_COL,
         join_sql=(
             "JOIN "
             f"{PARQUET_AUTHOR_MATCH_HIT_SELECTED_AUTHOR_IDS_VIEW} ids "
@@ -718,7 +723,7 @@ def run(context: PipelineContext) -> StepResult:
         table_name=authors_table,
         path=authors_path,
         prefix="ssnau",
-        filename_col=SSNAU_FILENAME_COL,
+        filename_col=KTP_SSNAU_FILENAME_COL,
         join_sql=(
             "JOIN "
             f"{PARQUET_AUTHOR_MATCH_HIT_SELECTED_AUTHOR_IDS_VIEW} ids "
@@ -749,7 +754,7 @@ def run(context: PipelineContext) -> StepResult:
         table_name=paper_author_affiliation_table,
         path=paper_author_affiliation_path,
         prefix="ssnpaa",
-        filename_col=SSNPAA_FILENAME_COL,
+        filename_col=KTP_SSNPAA_FILENAME_COL,
         join_sql=(
             "JOIN "
             f"{PARQUET_AUTHOR_MATCH_HIT_SELECTED_AUTHOR_IDS_VIEW} ids "
@@ -778,7 +783,7 @@ def run(context: PipelineContext) -> StepResult:
         table_name=affiliations_table,
         path=affiliations_path,
         prefix="ssnaf",
-        filename_col=SSNAF_FILENAME_COL,
+        filename_col=KTP_SSNAF_FILENAME_COL,
         join_sql=(
             "JOIN ("
             f"SELECT DISTINCT CAST(\"{ssnpaa_institution_id_col}\" AS VARCHAR) AS institution_id "
@@ -836,12 +841,12 @@ def run(context: PipelineContext) -> StepResult:
             'author_id' AS "{KTP_FRAGMENT_TYPE_COL}",
             '{parquet_filename_payload}' AS "{KTP_FILENAME_COL}",
             m."{KTP_SSNAD_MATCH_COL}" AS "{KTP_SSNAD_MATCH_COL}"{ssn_hit_metadata_select},
-            '{authors_paper_filename}' AS "{SSNAP_FILENAME_COL}",
-            '{hit_papers0_filename}' AS "{SSNHPL0_FILENAME_COL}",
-            '{hit_papers1_filename}' AS "{SSNHPL1_FILENAME_COL}",
-            '{fields_filename}' AS "{SSNF_FILENAME_COL}",
-            '{paper_author_affiliation_filename}' AS "{SSNPAA_FILENAME_COL}",
-            '{affiliations_filename}' AS "{SSNAF_FILENAME_COL}",
+            '{authors_paper_filename}' AS "{KTP_SSNAP_FILENAME_COL}",
+            '{hit_papers0_filename}' AS "{KTP_SSNHPL0_FILENAME_COL}",
+            '{hit_papers1_filename}' AS "{KTP_SSNHPL1_FILENAME_COL}",
+            '{fields_filename}' AS "{KTP_SSNF_FILENAME_COL}",
+            '{paper_author_affiliation_filename}' AS "{KTP_SSNPAA_FILENAME_COL}",
+            '{affiliations_filename}' AS "{KTP_SSNAF_FILENAME_COL}",
             a.*,
             au.*,
             CAST(agg."{SSN_PAPERIDS_LEVEL0_COL}" AS VARCHAR) AS "{SSN_PAPERIDS_LEVEL0_COL}",

@@ -24,8 +24,6 @@ from ..helpers.schema import (
 )
 from ..helpers.vars import (
     DRAW_LABEL,
-    HCR_FILENAME_COL,
-    HCR_ROW_COL,
     KTP_ECONOMIES_COL,
     KTP_ECONOMIES_INCOME_GROUP_COL,
     KTP_ECONOMY_MATCH_COL,
@@ -33,7 +31,9 @@ from ..helpers.vars import (
     KTP_FIRST_NAME_COL,
     KTP_FRAGMENT_COL,
     KTP_FRAGMENT_TYPE_COL,
+    KTP_HCR_FILENAME_COL,
     KTP_HCR_PRIMARY_AFFILIATIONS_COL,
+    KTP_HCR_ROW_NUMBER_COL,
     KTP_HCR_SECONDARY_AFFILIATIONS_COL,
     KTP_LAST_NAME_COL,
     KTP_POPULATION_INDEX_COL,
@@ -90,8 +90,8 @@ def run(context: PipelineContext) -> StepResult:
     base_select_sql = f"""
             {match_sql.base_select_keyword}
                 nd."{KTP_SOURCE_KEY_COL}",
-                p."{HCR_FILENAME_COL}" AS "{KTP_FILENAME_COL}",
-                p."{HCR_ROW_COL}" AS "{KTP_FRAGMENT_COL}",
+                p."{KTP_HCR_FILENAME_COL}" AS "{KTP_FILENAME_COL}",
+                p."{KTP_HCR_ROW_NUMBER_COL}" AS "{KTP_FRAGMENT_COL}",
                 COALESCE(p.resource_fragment_type, 'excel_row') AS "{KTP_FRAGMENT_TYPE_COL}",
                 s."{DRAW_LABEL}" AS "{DRAW_LABEL}",
                 p.pop_first AS "{KTP_FIRST_NAME_COL}",
@@ -114,9 +114,9 @@ def run(context: PipelineContext) -> StepResult:
             JOIN {match_sql.name_draws_relation} nd
               ON {match_sql.condition}
             LEFT JOIN {SAMPLES_TABLE} s
-              ON s."{KTP_FILENAME_COL}" = p."{HCR_FILENAME_COL}"
-             AND s."{KTP_FRAGMENT_COL}" = p."{HCR_ROW_COL}"
-            WHERE p."{HCR_FILENAME_COL}" IS NOT NULL
+              ON s."{KTP_FILENAME_COL}" = p."{KTP_HCR_FILENAME_COL}"
+             AND s."{KTP_FRAGMENT_COL}" = p."{KTP_HCR_ROW_NUMBER_COL}"
+            WHERE p."{KTP_HCR_FILENAME_COL}" IS NOT NULL
     """
     if match_sql.match_path_priority_expr:
         base_ctes_sql = f"""
@@ -163,8 +163,8 @@ def run(context: PipelineContext) -> StepResult:
         ),
         pop_names AS (
             SELECT
-                p."{HCR_FILENAME_COL}",
-                p."{HCR_ROW_COL}",
+                p."{KTP_HCR_FILENAME_COL}",
+                p."{KTP_HCR_ROW_NUMBER_COL}",
                 n."{KTP_FIRST_NAME_COL}" AS pop_first,
                 n."{KTP_LAST_NAME_COL}" AS pop_last,
                 {match_sql.pop_names_fields}
@@ -182,7 +182,7 @@ def run(context: PipelineContext) -> StepResult:
             LEFT JOIN {POPULATION_ECON_TABLE} e
               ON p."{KTP_POPULATION_INDEX_COL}" = e."{KTP_POPULATION_INDEX_COL}"
             LEFT JOIN {REGISTERED_RESOURCES_TABLE} rr
-              ON rr.resource_name = p."{HCR_FILENAME_COL}"
+              ON rr.resource_name = p."{KTP_HCR_FILENAME_COL}"
         ){match_sql.extra_ctes},
         {base_ctes_sql},
         {draw_sort_ctes_sql(draw_col=DRAW_LABEL, source_key_col=KTP_SOURCE_KEY_COL)}

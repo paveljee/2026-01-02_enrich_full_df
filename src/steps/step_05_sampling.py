@@ -18,16 +18,16 @@ from ..helpers.schema import (
 from ..helpers.vars import (
     DRAW_LABEL,
     HCR_CATEGORY_COL,
-    HCR_FILENAME_COL,
     HCR_FIRST_NAME_COL,
     HCR_LAST_NAME_COL,
-    HCR_ROW_COL,
     KTP_ECONOMIES_COL,
     KTP_ECONOMIES_INCOME_GROUP_COL,
     KTP_FILENAME_COL,
     KTP_FIRST_NAME_COL,
     KTP_FRAGMENT_COL,
+    KTP_HCR_FILENAME_COL,
     KTP_HCR_PRIMARY_AFFILIATIONS_COL,
+    KTP_HCR_ROW_NUMBER_COL,
     KTP_HCR_SECONDARY_AFFILIATIONS_COL,
     KTP_LAST_NAME_COL,
     KTP_POPULATION_INDEX_COL,
@@ -150,7 +150,7 @@ def run(context: PipelineContext) -> StepResult:
               ON p."{HCR_FIRST_NAME_COL}" = t."{HCR_FIRST_NAME_COL}"
              AND p."{HCR_LAST_NAME_COL}" = t."{HCR_LAST_NAME_COL}"
              AND p."{HCR_CATEGORY_COL}" = t."{HCR_CATEGORY_COL}"
-            WHERE p."{HCR_FILENAME_COL}" = ?
+            WHERE p."{KTP_HCR_FILENAME_COL}" = ?
             """,
             [context.config.pilot_xlsx_name],
         ).fetchall()
@@ -198,8 +198,8 @@ def run(context: PipelineContext) -> StepResult:
         sample_df = conn.execute(
             f"""
             SELECT s.sample_id,
-                   p."{HCR_FILENAME_COL}" AS "{KTP_FILENAME_COL}",
-                   p."{HCR_ROW_COL}" AS "{KTP_FRAGMENT_COL}"
+                   p."{KTP_HCR_FILENAME_COL}" AS "{KTP_FILENAME_COL}",
+                   p."{KTP_HCR_ROW_NUMBER_COL}" AS "{KTP_FRAGMENT_COL}"
             FROM {POPULATION_TABLE} p
             JOIN sample_indices s
               ON p."{KTP_POPULATION_INDEX_COL}" = s."{KTP_POPULATION_INDEX_COL}"
@@ -213,8 +213,8 @@ def run(context: PipelineContext) -> StepResult:
 
     pilot_df = conn.execute(
         f"""
-        SELECT p."{HCR_FILENAME_COL}" AS "{KTP_FILENAME_COL}",
-               p."{HCR_ROW_COL}" AS "{KTP_FRAGMENT_COL}",
+        SELECT p."{KTP_HCR_FILENAME_COL}" AS "{KTP_FILENAME_COL}",
+               p."{KTP_HCR_ROW_NUMBER_COL}" AS "{KTP_FRAGMENT_COL}",
                p."{HCR_FIRST_NAME_COL}",
                p."{HCR_LAST_NAME_COL}",
                p."{HCR_CATEGORY_COL}"
@@ -223,7 +223,7 @@ def run(context: PipelineContext) -> StepResult:
           ON p."{HCR_FIRST_NAME_COL}" = t."{HCR_FIRST_NAME_COL}"
          AND p."{HCR_LAST_NAME_COL}" = t."{HCR_LAST_NAME_COL}"
          AND p."{HCR_CATEGORY_COL}" = t."{HCR_CATEGORY_COL}"
-        WHERE p."{HCR_FILENAME_COL}" = ?
+        WHERE p."{KTP_HCR_FILENAME_COL}" = ?
         """,
         [context.config.pilot_xlsx_name],
     ).df()
@@ -251,8 +251,8 @@ def run(context: PipelineContext) -> StepResult:
 
     p_columns = [row[0] for row in conn.execute(f"DESCRIBE {POPULATION_TABLE}").fetchall()]
     excluded_p_cols = hcr_excluded_columns(p_columns) | {
-        HCR_FILENAME_COL,
-        HCR_ROW_COL,
+        KTP_HCR_FILENAME_COL,
+        KTP_HCR_ROW_NUMBER_COL,
         KTP_POPULATION_INDEX_COL,
     }
     p_extra_cols = [col for col in p_columns if col not in excluded_p_cols]
@@ -281,8 +281,8 @@ def run(context: PipelineContext) -> StepResult:
         SELECT {select_expr}
         FROM {SAMPLES_TABLE} s
         JOIN {POPULATION_TABLE} p
-          ON s."{KTP_FILENAME_COL}" = p."{HCR_FILENAME_COL}"
-         AND s."{KTP_FRAGMENT_COL}" = p."{HCR_ROW_COL}"
+          ON s."{KTP_FILENAME_COL}" = p."{KTP_HCR_FILENAME_COL}"
+         AND s."{KTP_FRAGMENT_COL}" = p."{KTP_HCR_ROW_NUMBER_COL}"
         JOIN {POPULATION_NAMES_TABLE} n
           ON p."{KTP_POPULATION_INDEX_COL}" = n."{KTP_POPULATION_INDEX_COL}"
         JOIN {POPULATION_ECON_TABLE} e
@@ -311,8 +311,8 @@ def run(context: PipelineContext) -> StepResult:
                n."{KTP_FIRST_NAME_COL}", n."{KTP_LAST_NAME_COL}"
         FROM {SAMPLES_TABLE} s
         JOIN {POPULATION_TABLE} p
-          ON s."{KTP_FILENAME_COL}" = p."{HCR_FILENAME_COL}"
-         AND s."{KTP_FRAGMENT_COL}" = p."{HCR_ROW_COL}"
+          ON s."{KTP_FILENAME_COL}" = p."{KTP_HCR_FILENAME_COL}"
+         AND s."{KTP_FRAGMENT_COL}" = p."{KTP_HCR_ROW_NUMBER_COL}"
         JOIN {POPULATION_NAMES_TABLE} n
           ON p."{KTP_POPULATION_INDEX_COL}" = n."{KTP_POPULATION_INDEX_COL}"
         """

@@ -45,6 +45,7 @@ from src.helpers.vars import (
     KTP_SSN_FIELD_DISPLAY_NAMES_LIST_COL,
     KTP_SSN_SUM_HIT_1PCT_COL,
     KTP_SSN_TOP_INSTITUTIONS_COL,
+    KTP_SSNAD_FILENAME_COL,
     KTP_SSNAD_MATCH_COL,
     KTP_XLSX_MATCH_COL,
     KTP_XLSX_MATCH_FIRST_TOKENS_KEY,
@@ -57,7 +58,6 @@ from src.helpers.vars import (
     SSNAD_CITED_BY_COUNT_COL,
     SSNAD_DISPLAY_NAME_ALTERNATIVES_COL,
     SSNAD_DISPLAY_NAME_COL,
-    SSNAD_FILENAME_COL,
     SSNAD_WORKS_API_URL_COL,
     SSNAD_WORKS_COUNT_COL,
 )
@@ -126,7 +126,7 @@ def _docx_inner(*, complete: bool = True) -> InnerDict:
 def _sciscinet_inner(fragment: str = "A1") -> InnerDict:
     return _inner(
         {
-            SSNAD_FILENAME_COL: "author_details.parquet",
+            KTP_SSNAD_FILENAME_COL: "author_details.parquet",
             KTP_FRAGMENT_COL: fragment,
             KTP_FRAGMENT_TYPE_COL: "author_id",
         }

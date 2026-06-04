@@ -57,9 +57,9 @@ from src.helpers.vars import (
     KTP_SSN_HIT_WORKS_COUNT_RAW_COL,
     KTP_SSN_SUM_HIT_1PCT_COL,
     KTP_SSNAD_MATCH_COL,
+    KTP_SSNAP_FILENAME_COL,
     OPENALEX_AUTHOR_SEARCH_LOG_SCHEMA_VERSION,
     SSNAD_AUTHORID_COL,
-    SSNAP_FILENAME_COL,
 )
 
 MANUAL_BEST_FIXTURE_PATH = Path(
@@ -526,7 +526,7 @@ def test_ssn_hit_v2_metadata_select_is_parse_safe_before_next_column() -> None:
             SELECT
                 m."{KTP_SSNAD_MATCH_COL}" AS "{KTP_SSNAD_MATCH_COL}"
                 {ssn_hit_metadata_select_sql(hit_rule_version=2, table_alias="m")},
-                'sciscinet_authors_paperid.parquet' AS "{SSNAP_FILENAME_COL}"
+                'sciscinet_authors_paperid.parquet' AS "{KTP_SSNAP_FILENAME_COL}"
             FROM (
                 SELECT
                     '{{}}' AS "{KTP_SSNAD_MATCH_COL}",
@@ -548,7 +548,7 @@ def test_ssn_hit_v2_metadata_select_is_parse_safe_before_next_column() -> None:
         row = result.fetchone()
         assert row is not None
         columns = [desc[0] for desc in result.description]
-        assert columns[-1] == SSNAP_FILENAME_COL
+        assert columns[-1] == KTP_SSNAP_FILENAME_COL
         assert row[-1] == "sciscinet_authors_paperid.parquet"
     finally:
         conn.close()

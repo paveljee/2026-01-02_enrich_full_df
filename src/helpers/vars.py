@@ -39,6 +39,7 @@ REQUIRED_FILES_CONFIG_KEYS: Final[set[str]] = {
     "author_details",
     "authors",
     "fields",
+    "papers",
     OPENALEX_AUTHOR_SEARCH_LOG_KEY,
     WORLD_BANK_XLSX_KEY,
 }
@@ -68,26 +69,30 @@ SSNAD_RAW_DISPLAY_NAME_COL: Final = "display_name"
 SSNAD_RAW_DISPLAY_NAME_ALTERNATIVES_COL: Final = "display_name_alternatives"
 SSNAD_RAW_WORKS_COUNT_COL: Final = "works_count"
 SSNAD_RAW_CITED_BY_COUNT_COL: Final = "cited_by_count"
-SSNAD_FILENAME_COL: Final = "ssnad.filename"
+KTP_SSNAD_FILENAME_COL: Final = "ktp.ssnad_filename"
 SSNAD_AUTHORID_COL: Final = "ssnad.authorid"
 SSNAD_DISPLAY_NAME_COL: Final = "ssnad.display_name"
 SSNAD_DISPLAY_NAME_ALTERNATIVES_COL: Final = "ssnad.display_name_alternatives"
 SSNAD_WORKS_COUNT_COL: Final = "ssnad.works_count"
 SSNAD_CITED_BY_COUNT_COL: Final = "ssnad.cited_by_count"
 SSNAD_WORKS_API_URL_COL: Final = "ssnad.works_api_url"
-SSNAU_FILENAME_COL: Final = "ssnau.filename"
-SSNAP_FILENAME_COL: Final = "ssnap.filename"
-SSNHPL0_FILENAME_COL: Final = "ssnhpl0.filename"
-SSNHPL1_FILENAME_COL: Final = "ssnhpl1.filename"
-SSNF_FILENAME_COL: Final = "ssnf.filename"
-SSNPAA_FILENAME_COL: Final = "ssnpaa.filename"
-SSNAF_FILENAME_COL: Final = "ssnaf.filename"
+KTP_SSNAU_FILENAME_COL: Final = "ktp.ssnau_filename"
+KTP_SSNAP_FILENAME_COL: Final = "ktp.ssnap_filename"
+KTP_SSNHPL0_FILENAME_COL: Final = "ktp.ssnhpl0_filename"
+KTP_SSNHPL1_FILENAME_COL: Final = "ktp.ssnhpl1_filename"
+KTP_SSNF_FILENAME_COL: Final = "ktp.ssnf_filename"
+KTP_SSNP_FILENAME_COL: Final = "ktp.ssnp_filename"
+SSNP_PAPERID_COL: Final = "ssnp.paperid"
+SSNP_YEAR_COL: Final = "ssnp.year"
+KTP_SSNPAA_FILENAME_COL: Final = "ktp.ssnpaa_filename"
+KTP_SSNAF_FILENAME_COL: Final = "ktp.ssnaf_filename"
 KTP_SSN_SUM_HIT_1PCT_COL: Final = "ktp.ssn_sum_hit_1pct"
 SSN_PAPERIDS_LEVEL0_COL: Final = "ssn.paperids_level0"
 SSN_PAPERIDS_LEVEL1_COL: Final = "ssn.paperids_level1"
 SSN_FIELD_IDS_LIST_COL: Final = "ssn.field_ids_list"
 KTP_SSN_TOP_PAPERS_HIT_1PCT_COL: Final = "ktp.ssn_top_papers_hit_1pct"
-KTP_SSN_TOP_OLDEST_PAPERS_COL = "ktp.ssn_top_oldest_papers"
+KTP_SSN_TOP_OLDEST_PAPERS_COL: Final = "ktp.ssn_top_oldest_papers"
+KTP_SSNP_PAPERID_URL_COL: Final = "ktp.ssnp_paperid_url"
 KTP_SSN_FIELD_DISPLAY_NAMES_LIST_COL: Final = "ktp.ssn_field_display_names_list"
 KTP_SSN_TOP_INSTITUTIONS_COL: Final = "ktp.ssn_top_institutions"
 SSNPAA_INSTITUTION_ID_COL: Final = "ssnpaa.institution_id"
@@ -124,8 +129,10 @@ STEP_MATCH_PARQUET_LOG_LEGEND_LINES: Final[tuple[str, ...]] = (
     ),
 )
 
-HCR_FILENAME_COL: Final = "hcr.filename"
-HCR_ROW_COL: Final = "hcr.row_number"
+KTP_HCR_FILENAME_COL: Final = "ktp.hcr_filename"
+KTP_HCR_ROW_NUMBER_COL: Final = "ktp.hcr_row_number"
+KTP_HCR_FILENAME_COL_LEGACY: Final = "hcr.filename"
+KTP_HCR_ROW_NUMBER_COL_LEGACY: Final = "hcr.row_number"
 HCR_FIRST_NAME_COL: Final = "hcr.first_name"
 HCR_LAST_NAME_COL: Final = "hcr.last_name"
 HCR_CATEGORY_COL: Final = "hcr.category"
@@ -564,11 +571,13 @@ __all__ = [
     "DOCX_ROW_INDEX_COL",
     "DOCX_TABLE_INDEX_COL",
     "DRAW_LABEL",
-    "HCR_FILENAME_COL",
+    "KTP_HCR_FILENAME_COL",
+    "KTP_HCR_FILENAME_COL_LEGACY",
     "HCR_FIRST_NAME_COL",
     "HCR_LAST_NAME_COL",
     "HCR_CATEGORY_COL",
-    "HCR_ROW_COL",
+    "KTP_HCR_ROW_NUMBER_COL",
+    "KTP_HCR_ROW_NUMBER_COL_LEGACY",
     "HCR_XLSX_AFFILIATIONS_COLS",
     "HCR_XLSX_NAME_COLS",
     "HCR_XLSX_KEY_PREFIX",
@@ -600,22 +609,27 @@ __all__ = [
     "SSNAD_RAW_DISPLAY_NAME_ALTERNATIVES_COL",
     "SSNAD_RAW_WORKS_COUNT_COL",
     "SSNAD_RAW_CITED_BY_COUNT_COL",
-    "SSNAD_FILENAME_COL",
+    "KTP_SSNAD_FILENAME_COL",
     "SSNAD_AUTHORID_COL",
-    "SSNAU_FILENAME_COL",
-    "SSNAP_FILENAME_COL",
-    "SSNHPL0_FILENAME_COL",
-    "SSNHPL1_FILENAME_COL",
-    "SSNF_FILENAME_COL",
+    "KTP_SSNAU_FILENAME_COL",
+    "KTP_SSNAP_FILENAME_COL",
+    "KTP_SSNHPL0_FILENAME_COL",
+    "KTP_SSNHPL1_FILENAME_COL",
+    "KTP_SSNF_FILENAME_COL",
+    "KTP_SSNP_FILENAME_COL",
+    "SSNP_PAPERID_COL",
+    "SSNP_YEAR_COL",
     "KTP_SSN_SUM_HIT_1PCT_COL",
     "SSN_PAPERIDS_LEVEL0_COL",
     "SSN_PAPERIDS_LEVEL1_COL",
     "SSN_FIELD_IDS_LIST_COL",
     "KTP_SSN_TOP_PAPERS_HIT_1PCT_COL",
+    "KTP_SSN_TOP_OLDEST_PAPERS_COL",
+    "KTP_SSNP_PAPERID_URL_COL",
     "KTP_SSN_FIELD_DISPLAY_NAMES_LIST_COL",
     "KTP_SSN_TOP_INSTITUTIONS_COL",
-    "SSNPAA_FILENAME_COL",
-    "SSNAF_FILENAME_COL",
+    "KTP_SSNPAA_FILENAME_COL",
+    "KTP_SSNAF_FILENAME_COL",
     "SSNPAA_INSTITUTION_ID_COL",
     "SSNAF_DISPLAY_NAME_COL",
     "KTP_SSN_COUNT_PAPERID_COL",

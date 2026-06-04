@@ -151,8 +151,8 @@ def _preferred_matched_rules(
             ),
             pop_names AS (
                 SELECT
-                    'hcr.xlsx' AS "hcr.filename",
-                    1 AS "hcr.row_number",
+                    'hcr.xlsx' AS "ktp.hcr_filename",
+                    1 AS "ktp.hcr_row_number",
                     n.first_name AS pop_first,
                     n.last_name AS pop_last,
                     {match_sql.pop_names_fields}

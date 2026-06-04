@@ -22,8 +22,6 @@ from ..helpers.vars import (
     EU_COUNTRIES,
     GREATER_CHINA,
     HCR_CATEGORY_COL,
-    HCR_FILENAME_COL,
-    HCR_ROW_COL,
     HCR_XLSX_AFFILIATIONS_COLS,
     HCR_XLSX_NAME_COLS,
     KTP_COUNTRY_ALIASES,
@@ -31,7 +29,9 @@ from ..helpers.vars import (
     KTP_ECONOMIES_INCOME_GROUP_COL,
     KTP_ECONOMY_MATCH_COL,
     KTP_FIRST_NAME_COL,
+    KTP_HCR_FILENAME_COL,
     KTP_HCR_PRIMARY_AFFILIATIONS_COL,
+    KTP_HCR_ROW_NUMBER_COL,
     KTP_HCR_SECONDARY_AFFILIATIONS_COL,
     KTP_LAST_NAME_COL,
     KTP_POPULATION_INDEX_COL,
@@ -184,12 +184,12 @@ def run(context: PipelineContext) -> StepResult:
     primary_map = _normalize_affiliation_map(HCR_XLSX_AFFILIATIONS_COLS, index=0)
     secondary_map = _normalize_affiliation_map(HCR_XLSX_AFFILIATIONS_COLS, index=1)
     primary_expr = _affiliation_case(
-        filename_col='p."hcr.filename"',
+        filename_col=f'p."{KTP_HCR_FILENAME_COL}"',
         default_cols=primary_default,
         filename_map=primary_map,
     )
     secondary_expr = _affiliation_case(
-        filename_col='p."hcr.filename"',
+        filename_col=f'p."{KTP_HCR_FILENAME_COL}"',
         default_cols=secondary_default,
         filename_map=secondary_map,
     )
@@ -354,22 +354,22 @@ def run(context: PipelineContext) -> StepResult:
         if col not in explicit_name_cols and "unnamed" not in col.lower()
     ]
     ordered_hcr = []
-    for col in (HCR_FILENAME_COL, HCR_ROW_COL, HCR_CATEGORY_COL):
+    for col in (KTP_HCR_FILENAME_COL, KTP_HCR_ROW_NUMBER_COL, HCR_CATEGORY_COL):
         if col in hcr_cols:
             ordered_hcr.append(col)
     ordered_hcr += [col for col in hcr_cols if col not in ordered_hcr]
     ordered_cols = (
         [
             KTP_POPULATION_INDEX_COL,
-            HCR_FILENAME_COL,
-            HCR_ROW_COL,
+            KTP_HCR_FILENAME_COL,
+            KTP_HCR_ROW_NUMBER_COL,
             KTP_FIRST_NAME_COL,
             KTP_LAST_NAME_COL,
             HCR_CATEGORY_COL,
         ]
         + [
             col for col in ordered_hcr
-            if col not in {HCR_FILENAME_COL, HCR_ROW_COL, HCR_CATEGORY_COL}
+            if col not in {KTP_HCR_FILENAME_COL, KTP_HCR_ROW_NUMBER_COL, HCR_CATEGORY_COL}
         ]
         + [
             KTP_HCR_PRIMARY_AFFILIATIONS_COL,

@@ -9,9 +9,9 @@ import pandas as pd
 from ..helpers.context import PipelineContext, StepResult
 from ..helpers.schema import POPULATION_NAMES_TABLE, POPULATION_NAMES_VIEW, POPULATION_TABLE
 from ..helpers.vars import (
-    HCR_FILENAME_COL,
     HCR_XLSX_NAME_COLS,
     KTP_FIRST_NAME_COL,
+    KTP_HCR_FILENAME_COL,
     KTP_LAST_NAME_COL,
     KTP_POPULATION_INDEX_COL,
     STEP_INFER_NAMES,
@@ -24,7 +24,7 @@ def _build_name_expr(mapping: dict[str, tuple[str, str]], column_index: int) -> 
         col = cols[column_index]
         filename_safe = filename.replace("'", "''")
         cases.append(
-            f"WHEN p.\"{HCR_FILENAME_COL}\" = '{filename_safe}' THEN p.\"{col}\""
+            f"WHEN p.\"{KTP_HCR_FILENAME_COL}\" = '{filename_safe}' THEN p.\"{col}\""
         )
     if not cases:
         raise ValueError("No inferred name columns available.")

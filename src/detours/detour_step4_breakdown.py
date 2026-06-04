@@ -17,10 +17,10 @@ from src.helpers.init import init_pipeline
 from src.helpers.repl_runtime import run_step
 from src.helpers.schema import POPULATION_ECON_VIEW
 from src.helpers.vars import (
-    HCR_FILENAME_COL,
     KTP_ECONOMIES_COL,
     KTP_ECONOMIES_INCOME_GROUP_COL,
     KTP_FIRST_NAME_COL,
+    KTP_HCR_FILENAME_COL,
     KTP_LAST_NAME_COL,
     KTP_PRIORITY_COL,
     KTP_PRIORITY_GROUP_COL,
@@ -84,7 +84,7 @@ def _breakdown(conn) -> tuple[list[str], dict[str, Any]]:
 
     per_file_df = conn.execute(
         f'''
-        SELECT "{HCR_FILENAME_COL}" AS filename, COUNT(*) AS row_count
+        SELECT "{KTP_HCR_FILENAME_COL}" AS filename, COUNT(*) AS row_count
         FROM {POPULATION_ECON_VIEW}
         GROUP BY 1
         ORDER BY 1
@@ -182,7 +182,7 @@ def _breakdown(conn) -> tuple[list[str], dict[str, Any]]:
         "=== Detour Breakdown (Steps 1-4) ===",
         f"Total rows: {total_rows}",
         "",
-        "Rows by hcr.filename:",
+        "Rows by ktp.hcr_filename:",
     ]
     for row in per_file:
         lines.append(f"- {row['filename']}: {row['row_count']}")

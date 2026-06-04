@@ -1,17 +1,17 @@
 from __future__ import annotations
 
 from ..helpers.vars import (
-    HCR_FILENAME_COL,
     HCR_FIRST_NAME_COL,
     HCR_LAST_NAME_COL,
-    HCR_ROW_COL,
     HCR_XLSX_AFFILIATIONS_COLS,
     HCR_XLSX_NAME_COLS,
+    KTP_HCR_FILENAME_COL,
+    KTP_HCR_ROW_NUMBER_COL,
 )
 
 
 def hcr_excluded_columns(population_columns: list[str]) -> set[str]:
-    excluded = {HCR_FILENAME_COL, HCR_ROW_COL, HCR_FIRST_NAME_COL, HCR_LAST_NAME_COL}
+    excluded = {KTP_HCR_FILENAME_COL, KTP_HCR_ROW_NUMBER_COL, HCR_FIRST_NAME_COL, HCR_LAST_NAME_COL}
     for first_col, last_col in HCR_XLSX_NAME_COLS.values():
         excluded.add(first_col)
         excluded.add(last_col)
