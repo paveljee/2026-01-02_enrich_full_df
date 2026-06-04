@@ -14,7 +14,10 @@ import pandas as pd
 from ..helpers.cards import build_cards, write_cards_zip
 from ..helpers.context import PipelineContext, StepResult
 from ..helpers.data_models import FragmentType, InnerDict, NameKey, OuterDict, ResourceGroup
-from ..helpers.duckdb_utils import register_frame
+from ..helpers.duckdb_utils import (
+    duckdb_quote_identifier,
+    register_frame,
+)
 from ..helpers.schema import (
     CARD_PARTITION_REVIEW_VIEW,
     CARD_PARTITION_TABLE,
@@ -134,12 +137,8 @@ class CardPartitionRuleState:
         return self.xlsx_ok and self.docx_ok and self.sciscinet_ok
 
 
-def _quote_identifier(value: str) -> str:
-    return '"' + value.replace('"', '""') + '"'
-
-
 def _qualified(alias: str, col: str) -> str:
-    return f"{alias}.{_quote_identifier(col)}"
+    return f"{alias}.{duckdb_quote_identifier(col)}"
 
 
 def _extract_filenames(value: object) -> set[str]:
@@ -747,7 +746,7 @@ def _review_select_list(
             domain_columns=domain_columns,
             col=col,
         )
-        exprs.append(f"{expr} AS {_quote_identifier(col)}")
+        exprs.append(f"{expr} AS {duckdb_quote_identifier(col)}")
     return ",\n                ".join(exprs)
 
 
@@ -827,7 +826,7 @@ def _review_context_cte_sql(
     if not specs:
         return f"""
         {cte_name} AS (
-            SELECT DISTINCT {_quote_identifier(KTP_SOURCE_KEY_COL)}
+            SELECT DISTINCT {duckdb_quote_identifier(KTP_SOURCE_KEY_COL)}
             FROM {source_view}
         )
         """
@@ -839,17 +838,17 @@ def _review_context_cte_sql(
             source_alias=source_alias,
             source_col=source_col,
             source_columns=source_columns,
-        )} AS {_quote_identifier(values_col)}"
+        )} AS {duckdb_quote_identifier(values_col)}"
         for col, source_col in specs.items()
         for values_col in [values_cols[col]]
     )
     context_select = ",\n                ".join(
-        f"{_quote_identifier(values_col)} AS {_quote_identifier(col)}"
+        f"{duckdb_quote_identifier(values_col)} AS {duckdb_quote_identifier(col)}"
         for col, values_col in values_cols.items()
     )
     source_key_select = (
         f"{_qualified(source_alias, KTP_SOURCE_KEY_COL)} "
-        f"AS {_quote_identifier(KTP_SOURCE_KEY_COL)}"
+        f"AS {duckdb_quote_identifier(KTP_SOURCE_KEY_COL)}"
     )
     return f"""
         {values_cte_name} AS (
@@ -861,7 +860,7 @@ def _review_context_cte_sql(
         ),
         {cte_name} AS (
             SELECT
-                {_quote_identifier(KTP_SOURCE_KEY_COL)},
+                {duckdb_quote_identifier(KTP_SOURCE_KEY_COL)},
                 {context_select}
             FROM {values_cte_name}
         )
@@ -1034,7 +1033,7 @@ def _create_partition_review_view(conn: duckdb.DuckDBPyConnection) -> list[str]:
         ),
     ]
     union_sql = "\n            UNION ALL\n".join(branches)
-    select_columns = ",\n            ".join(_quote_identifier(col) for col in columns)
+    select_columns = ",\n            ".join(duckdb_quote_identifier(col) for col in columns)
     conn.execute(
         f"""
         CREATE OR REPLACE VIEW {CARD_PARTITION_REVIEW_VIEW} AS

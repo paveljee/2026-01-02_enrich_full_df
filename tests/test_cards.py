@@ -13,6 +13,7 @@ from src.helpers.vars import (
     KTP_FILENAME_COL,
     KTP_FIRST_NAME_ORIG_COLNAME_COL,
     KTP_LAST_NAME_ORIG_COLNAME_COL,
+    KTP_SSN_TOP_OLDEST_PAPERS_COL,
 )
 
 
@@ -29,6 +30,10 @@ def test_build_cards_includes_intro_and_fun_fact() -> None:
         KTP_FILENAME_COL: "2019_HCR.xlsx",
         KTP_FIRST_NAME_ORIG_COLNAME_COL: "First Name",
         KTP_LAST_NAME_ORIG_COLNAME_COL: "Last Name",
+        KTP_SSN_TOP_OLDEST_PAPERS_COL: (
+            '[{"ssnp.year":1903,'
+            '"ktp.ssnp_paperid_url":"https://openalex.org/W1568216332"}]'
+        ),
         "note": "hello",
         "excluded": "skip",
     }
@@ -47,6 +52,8 @@ def test_build_cards_includes_intro_and_fun_fact() -> None:
     assert "Fun fact" in card
     assert "excluded" not in card
     assert "Draw #1 of 10" in card
+    assert f"**{KTP_SSN_TOP_OLDEST_PAPERS_COL}**" in card
+    assert "https://openalex.org/W1568216332" in card
 
 
 def test_write_cards_zip_txt(tmp_path: Path) -> None:

@@ -382,6 +382,13 @@ def register_pipeline_resources(
             description=files["fields"]["desc"],
             expected_hash=files["fields"]["sha256"],
         ),
+        Path(files["papers"]["path"]).name: register_resource(
+            Path(files["papers"]["path"]),
+            group=ResourceGroup.SCISCINET_HF,
+            fragment_type=FragmentType.PAPER_ID,
+            description=files["papers"]["desc"],
+            expected_hash=files["papers"]["sha256"],
+        ),
     }
 
     xlsx_files = configured_hcr_xlsx_paths(config)

@@ -11,6 +11,10 @@ def duckdb_string_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
+def duckdb_quote_identifier(value: str) -> str:
+    return '"' + value.replace('"', '""') + '"'
+
+
 def register_frame(conn: duckdb.DuckDBPyConnection, name: str, df: pd.DataFrame) -> None:
     conn.register(name, df)
     conn.execute(f"CREATE OR REPLACE TABLE {name} AS SELECT * FROM {name}")

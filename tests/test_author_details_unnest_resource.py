@@ -166,6 +166,9 @@ def test_register_pipeline_resources_creates_and_reuses_author_details_unnest(
     openalex_resource = resources.openalex_author_search_log_resource
     assert openalex_resource.group == ResourceGroup.KTP_PIPELINE_ARTIFACT
     assert openalex_resource.fragment_type == FragmentType.CSV_ROW
+    papers_resource = resources.parquet_resources["papers.dat"]
+    assert papers_resource.group == ResourceGroup.SCISCINET_HF
+    assert papers_resource.fragment_type == FragmentType.PAPER_ID
 
     reused = register_pipeline_resources(config, conn=None)
     assert reused.author_details_unnest_resource is not None
@@ -219,4 +222,13 @@ def test_config_requires_openalex_author_search_log_resource(tmp_path: Path) -> 
     files_config.pop(OPENALEX_AUTHOR_SEARCH_LOG_KEY)
 
     with pytest.raises(ValidationError, match=OPENALEX_AUTHOR_SEARCH_LOG_KEY):
+        PipelineConfig.model_validate(config_data)
+
+
+def test_config_requires_papers_resource(tmp_path: Path) -> None:
+    config_data = _config_dict(tmp_path, ssn_name_rule_version=1)
+    files_config = cast(dict[str, dict[str, str]], config_data["files_config"])
+    files_config.pop("papers")
+
+    with pytest.raises(ValidationError, match="papers"):
         PipelineConfig.model_validate(config_data)

@@ -6,7 +6,10 @@ from pathlib import Path
 import duckdb
 
 from ..helpers.context import PipelineContext, StepResult
-from ..helpers.duckdb_utils import append_innerdicts_from_rows_table
+from ..helpers.duckdb_utils import (
+    append_innerdicts_from_rows_table,
+    duckdb_quote_identifier,
+)
 from ..helpers.name_matching import (
     sciscinet_ktp_name_norm_sql,
 )
@@ -129,6 +132,83 @@ def _create_parquet_table(
     return {col: normalize_parquet_column_name(col, prefix) for col in columns}
 
 
+def _raw_column_for_normalized(
+    columns: list[str],
+    *,
+    prefix: str,
+    normalized_col: str,
+) -> str:
+    for col in columns:
+        if normalize_parquet_column_name(col, prefix) == normalized_col:
+            return col
+    raise ValueError(f"Missing parquet column normalized as {normalized_col!r}.")
+
+
+def _top_oldest_papers_ctes_sql(
+    *,
+    author_papers_table: str,
+    selected_author_view: str,
+    papers_table: str,
+    author_id_col: str,
+    paperid_col: str,
+    year_col: str,
+    top_k_works: int,
+) -> str:
+    return f"""
+        oldest_paper_candidates AS (
+            SELECT
+                ap.name_key AS name_key,
+                ap.authorid AS authorid,
+                CAST(ap.paperid AS VARCHAR) AS paperid,
+                TRY_CAST(p.{duckdb_quote_identifier(year_col)} AS BIGINT) AS year
+            FROM {author_papers_table} ap
+            JOIN {papers_table} p
+              ON CAST(p.{duckdb_quote_identifier(paperid_col)} AS VARCHAR)
+                = CAST(ap.paperid AS VARCHAR)
+            WHERE ap.paperid IS NOT NULL
+              AND TRY_CAST(p.{duckdb_quote_identifier(year_col)} AS BIGINT) IS NOT NULL
+              AND EXISTS (
+                  SELECT 1
+                  FROM {selected_author_view} m
+                  WHERE m.name_key = ap.name_key
+                    AND CAST(m.{duckdb_quote_identifier(author_id_col)} AS VARCHAR)
+                        = CAST(ap.authorid AS VARCHAR)
+              )
+        ),
+        oldest_paper_ranked AS (
+            SELECT
+                opc.name_key AS name_key,
+                opc.authorid AS authorid,
+                opc.paperid AS paperid,
+                opc.year AS year,
+                ROW_NUMBER() OVER (
+                    PARTITION BY opc.name_key, opc.authorid
+                    ORDER BY opc.year ASC, opc.paperid ASC
+                ) AS rn
+            FROM oldest_paper_candidates opc
+        ),
+        top_oldest_papers AS (
+            SELECT
+                opr.name_key AS name_key,
+                opr.authorid AS authorid,
+                CAST(
+                    LIST(
+                        json_object(
+                            '{SSNP_YEAR_COL}', opr.year,
+                            '{KTP_SSNP_PAPERID_URL_COL}',
+                            'https://openalex.org/' || CAST(opr.paperid AS VARCHAR)
+                        )
+                        ORDER BY opr.year ASC, opr.paperid ASC
+                    )
+                        FILTER (WHERE opr.rn <= {top_k_works})
+                    AS VARCHAR
+                ) AS "{KTP_SSN_TOP_OLDEST_PAPERS_COL}"
+            FROM oldest_paper_ranked opr
+            GROUP BY opr.name_key, opr.authorid
+        )
+    """
+
+
 def run(context: PipelineContext) -> StepResult:
     if context.outer_dict is None:
         raise ValueError("OuterDict not initialized. Run build_outerdict first.")
@@ -152,6 +232,7 @@ def run(context: PipelineContext) -> StepResult:
     hit_papers0_path = files["hit_papers_0"]["path"]
     hit_papers1_path = files["hit_papers_1"]["path"]
     fields_path = files["fields"]["path"]
+    papers_path = files["papers"]["path"]
 
     if context.resources.author_details_unnest_resource is None:
         raise ValueError(
@@ -802,6 +883,66 @@ def run(context: PipelineContext) -> StepResult:
     ssnaf_institution_id_col = normalize_parquet_column_name("institution_id", "ssnaf")
     ssnaf_display_name_col = SSNAF_DISPLAY_NAME_COL
 
+    log_tag(STEP_MATCH_PARQUET_LOG_TAG_TABLE_PARQUET, "Create matched papers table")
+    papers_columns = parquet_columns(conn, papers_path)
+    papers_raw_paperid_col = _raw_column_for_normalized(
+        papers_columns,
+        prefix="ssnp",
+        normalized_col=SSNP_PAPERID_COL,
+    )
+    _raw_column_for_normalized(
+        papers_columns,
+        prefix="ssnp",
+        normalized_col=SSNP_YEAR_COL,
+    )
+    papers_table = f"ssn_{safe_identifier(Path(papers_path).stem)}"
+    log_tag(
+        STEP_MATCH_PARQUET_LOG_TAG_TABLE_PARQUET,
+        "HEAVY step ahead: filtering papers parquet to papers referenced by "
+        "hit-selected author rows.",
+    )
+    _create_parquet_table(
+        conn,
+        table_name=papers_table,
+        path=papers_path,
+        prefix="ssnp",
+        filename_col=KTP_SSNP_FILENAME_COL,
+        join_sql=(
+            "JOIN ("
+            "SELECT DISTINCT CAST(ap.paperid AS VARCHAR) AS paperid "
+            f"FROM {PARQUET_AUTHOR_PAPERS_TABLE} ap "
+            "WHERE ap.paperid IS NOT NULL "
+            "AND EXISTS ("
+            "SELECT 1 "
+            f"FROM {PARQUET_AUTHOR_MATCH_HIT_SELECTED_VIEW} m "
+            "WHERE m.name_key = ap.name_key "
+            f"AND CAST(m.\"{author_id_col}\" AS VARCHAR) = CAST(ap.authorid AS VARCHAR)"
+            ")"
+            f") ids ON CAST(parq.{duckdb_quote_identifier(papers_raw_paperid_col)} AS VARCHAR) "
+            "= ids.paperid"
+        ),
+    )
+    papers_stats_row = conn.execute(
+        f"""
+        SELECT
+            COUNT(*) AS row_count,
+            COUNT(DISTINCT "{SSNP_PAPERID_COL}") AS paper_count,
+            COUNT(*) FILTER (
+                WHERE TRY_CAST("{SSNP_YEAR_COL}" AS BIGINT) IS NOT NULL
+            ) AS dated_rows
+        FROM {papers_table}
+        """
+    ).fetchone()
+    papers_rows = int(papers_stats_row[0]) if papers_stats_row else 0
+    papers_distinct = int(papers_stats_row[1]) if papers_stats_row else 0
+    papers_dated_rows = int(papers_stats_row[2]) if papers_stats_row else 0
+    log_tag(
+        STEP_MATCH_PARQUET_LOG_TAG_TABLE_PARQUET,
+        "Matched papers rows: "
+        f"{papers_rows:,} rows, {papers_distinct:,} distinct papers, "
+        f"{papers_dated_rows:,} dated rows.",
+    )
+
     parquet_filenames = [
         parquet_filename(author_details_path),
         parquet_filename(authors_path),
@@ -811,12 +952,14 @@ def run(context: PipelineContext) -> StepResult:
         parquet_filename(hit_papers0_path),
         parquet_filename(hit_papers1_path),
         parquet_filename(fields_path),
+        parquet_filename(papers_path),
     ]
     parquet_filename_payload = json.dumps(parquet_filenames)
     authors_paper_filename = parquet_filename(authors_paper_path)
     hit_papers0_filename = parquet_filename(hit_papers0_path)
     hit_papers1_filename = parquet_filename(hit_papers1_path)
     fields_filename = parquet_filename(fields_path)
+    papers_filename = parquet_filename(papers_path)
     paper_author_affiliation_filename = parquet_filename(paper_author_affiliation_path)
     affiliations_filename = parquet_filename(affiliations_path)
     ssn_hit_metadata_select = ssn_hit_metadata_select_sql(
@@ -845,6 +988,7 @@ def run(context: PipelineContext) -> StepResult:
             '{hit_papers0_filename}' AS "{KTP_SSNHPL0_FILENAME_COL}",
             '{hit_papers1_filename}' AS "{KTP_SSNHPL1_FILENAME_COL}",
             '{fields_filename}' AS "{KTP_SSNF_FILENAME_COL}",
+            '{papers_filename}' AS "{KTP_SSNP_FILENAME_COL}",
             '{paper_author_affiliation_filename}' AS "{KTP_SSNPAA_FILENAME_COL}",
             '{affiliations_filename}' AS "{KTP_SSNAF_FILENAME_COL}",
             a.*,
@@ -902,6 +1046,51 @@ def run(context: PipelineContext) -> StepResult:
     log(
         f"Top-{TOP_K_WORKS} paper reduction: kept {kept_papers} of {total_papers}, "
         f"removed {removed_papers}."
+    )
+
+    log_tag(
+        STEP_MATCH_PARQUET_LOG_TAG_TABLE_EFF,
+        "HEAVY diagnostic ahead: estimate oldest-paper reduction by joining "
+        "hit-selected author->paper rows to dated papers metadata.",
+    )
+    oldest_paper_reduction_row = conn.execute(
+        f"""
+        WITH dated_paper_counts AS (
+            SELECT
+                ap.name_key AS name_key,
+                ap.authorid AS authorid,
+                COUNT(DISTINCT CAST(ap.paperid AS VARCHAR)) AS paper_count
+            FROM {PARQUET_AUTHOR_PAPERS_TABLE} ap
+            JOIN {papers_table} p
+              ON CAST(p."{SSNP_PAPERID_COL}" AS VARCHAR) = CAST(ap.paperid AS VARCHAR)
+            WHERE ap.paperid IS NOT NULL
+              AND TRY_CAST(p."{SSNP_YEAR_COL}" AS BIGINT) IS NOT NULL
+              AND EXISTS (
+                  SELECT 1
+                  FROM {PARQUET_AUTHOR_MATCH_HIT_SELECTED_VIEW} m
+                  WHERE m.name_key = ap.name_key
+                    AND CAST(m."{author_id_col}" AS VARCHAR) = CAST(ap.authorid AS VARCHAR)
+              )
+            GROUP BY ap.name_key, ap.authorid
+        )
+        SELECT
+            COALESCE(SUM(paper_count), 0) AS dated_papers,
+            COALESCE(SUM(LEAST(paper_count, {TOP_K_WORKS})), 0) AS kept_papers
+        FROM dated_paper_counts
+        """
+    ).fetchone()
+    oldest_total_papers = (
+        int(oldest_paper_reduction_row[0]) if oldest_paper_reduction_row else 0
+    )
+    oldest_kept_papers = (
+        int(oldest_paper_reduction_row[1]) if oldest_paper_reduction_row else 0
+    )
+    oldest_removed_papers = max(oldest_total_papers - oldest_kept_papers, 0)
+    log_tag(
+        STEP_MATCH_PARQUET_LOG_TAG_TABLE_EFF,
+        f"Top-{TOP_K_WORKS} oldest-paper reduction: "
+        f"kept {oldest_kept_papers} of {oldest_total_papers} dated papers, "
+        f"removed {oldest_removed_papers}.",
     )
 
     log_tag(
@@ -994,9 +1183,20 @@ def run(context: PipelineContext) -> StepResult:
         f"(unmatched: {unmatched_field_ids}).",
     )
 
+    top_oldest_papers_ctes = _top_oldest_papers_ctes_sql(
+        author_papers_table=PARQUET_AUTHOR_PAPERS_TABLE,
+        selected_author_view=PARQUET_AUTHOR_MATCH_HIT_SELECTED_VIEW,
+        papers_table=papers_table,
+        author_id_col=author_id_col,
+        paperid_col=SSNP_PAPERID_COL,
+        year_col=SSNP_YEAR_COL,
+        top_k_works=TOP_K_WORKS,
+    )
+
     log_tag(
         STEP_MATCH_PARQUET_LOG_TAG_TABLE_INNERDICT,
-        f"Create parquet enriched table (top-{TOP_K_WORKS} papers, "
+        f"Create parquet enriched table (top-{TOP_K_WORKS} hit papers, "
+        f"top-{TOP_K_WORKS} oldest papers, "
         f"top-{TOP_K_INSTITUTIONS} institutions, concept display names, selected hits)"
     )
     log_tag(
@@ -1051,6 +1251,7 @@ def run(context: PipelineContext) -> StepResult:
             FROM paper_ranked pr
             GROUP BY pr.name_key, pr.authorid
         ),
+        {top_oldest_papers_ctes},
         affiliation_counts AS (
             SELECT
                 m.name_key AS name_key,
@@ -1166,12 +1367,16 @@ def run(context: PipelineContext) -> StepResult:
                     "{SSN_PAPERIDS_LEVEL1_COL}"
                 ),
                 tp."{KTP_SSN_TOP_PAPERS_HIT_1PCT_COL}",
+                top_old."{KTP_SSN_TOP_OLDEST_PAPERS_COL}",
                 ti."{KTP_SSN_TOP_INSTITUTIONS_COL}",
                 cd."{KTP_SSN_FIELD_DISPLAY_NAMES_LIST_COL}"
             FROM {PARQUET_AUTHOR_OUTPUT_TABLE} v
             LEFT JOIN top_papers tp
               ON tp.name_key = v."{KTP_SOURCE_KEY_COL}"
              AND CAST(tp.authorid AS VARCHAR) = CAST(v."{author_id_col}" AS VARCHAR)
+            LEFT JOIN top_oldest_papers top_old
+              ON top_old.name_key = v."{KTP_SOURCE_KEY_COL}"
+             AND CAST(top_old.authorid AS VARCHAR) = CAST(v."{author_id_col}" AS VARCHAR)
             LEFT JOIN top_institutions ti
               ON ti.name_key = v."{KTP_SOURCE_KEY_COL}"
              AND CAST(ti.authorid AS VARCHAR) = CAST(v."{author_id_col}" AS VARCHAR)
