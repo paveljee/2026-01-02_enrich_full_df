@@ -34,7 +34,7 @@ sorting by paperid,
 ascending):
 
 ```
-**ktp.ssn_top_oldest_papers**: [{"ssnp.date":...,"ktp.openalex_title":"...","ktp.ssnp_paperid_url":"https://openalex.org/W1568216332"}, ...]
+**ktp.ssn_top_oldest_papers**: [{"ssnp.date":...,"openalex.title":"...","ktp.ssnp_paperid_url":"https://openalex.org/W1568216332"}, ...]
 ```
 
 all relevant
@@ -43,7 +43,7 @@ paper parquet
 should be properly logged
 in `repl_session.log`.
 
-"ktp.openalex_title"
+"openalex.title"
 should be fetched from OpenAlex,
 reusing the whole same mechanism
 currently used for
@@ -75,7 +75,7 @@ The final card should print the new value naturally through the existing
 card renderer, e.g.
 
 ```text
-**ktp.ssn_top_oldest_papers**: [{"ssnp.date":"1903-05-17","ktp.openalex_title":"...","ktp.ssnp_paperid_url":"https://openalex.org/W1568216332"}, ...]
+**ktp.ssn_top_oldest_papers**: [{"ssnp.date":"1903-05-17","openalex.title":"...","ktp.ssnp_paperid_url":"https://openalex.org/W1568216332"}, ...]
 ```
 
 No new card-rendering path is needed unless the implementation
@@ -184,7 +184,7 @@ The JSON payload for each oldest paper should include:
 
 ```text
 ssnp.date
-ktp.openalex_title
+openalex.title
 ktp.ssnp_paperid_url
 ```
 
@@ -234,7 +234,7 @@ Expected touchpoints:
   - export `KTP_SSN_TOP_OLDEST_PAPERS_COL` in `__all__`;
   - add/use centralized labels for `ssnp.filename`, `ssnp.date`, and
     `ktp.ssnp_paperid_url` rather than scattering string literals;
-  - add/use a centralized label for `ktp.openalex_title`;
+  - add/use a centralized label for `openalex.title`;
   - use a date constant such as `SSNP_DATE_COL`, not `SSNP_YEAR_COL`.
 - `src/helpers/resources.py`
   - register the configured `papers` parquet as a `SCISCINET_HF`
@@ -276,7 +276,7 @@ CAST(
     LIST(
         json_object(
             'ssnp.date', CAST(date_value AS VARCHAR),
-            'ktp.openalex_title', title,
+            'openalex.title', title,
             'ktp.ssnp_paperid_url',
             'https://openalex.org/' || CAST(paperid AS VARCHAR)
         )
@@ -290,7 +290,7 @@ Use the actual normalized paperid/date column names in code, and use a
 sortable date value for ordering. Do not add a year fallback.
 
 For `ktp.ssn_top_papers_hit_1pct`, use the same title field label
-(`ktp.openalex_title`) and URL field label (`ktp.ssnp_paperid_url`)
+(`openalex.title`) and URL field label (`ktp.ssnp_paperid_url`)
 inside each top-work entry, but order by the existing top-works ranking,
 not by date.
 
