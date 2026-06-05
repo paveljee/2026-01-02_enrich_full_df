@@ -38,7 +38,7 @@
   "files_config": {
     "openalex_paper_title_log": {
       "path": "/Volumes/home/aicode/2026-01-02_enrich_full_df/data/openalex_paper_title_log.jsonl",
-      "sha256": "992126c8306a027fcd3d9b680811320863681be908e858f569fcc2de31782f32",
+      "sha256": "981d5024579613081ffb1833a4a4666e1f934da6919439098d91212fe98269a2",
       "desc": "OpenAlex paper title log"
     },
     "openalex_author_search_log": {

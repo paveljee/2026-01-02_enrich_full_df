@@ -109,4 +109,4 @@ def http_request_log_record(
 def append_http_request_log_record(*, log_path: Path, record: HttpRequestLogRecord) -> None:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("a", encoding="utf-8") as handle:
-        handle.write(record.model_dump_json() + "\n")
+        handle.write(record.model_dump_json(ensure_ascii=False) + "\n")
