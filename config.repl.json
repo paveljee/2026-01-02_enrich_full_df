@@ -12,7 +12,7 @@
   "state_file": "data/pipeline_state.json",
   "output_dir": "data/output",
   "output_format": "txt",
-  "card_subset_mode": 1,
+  "card_subset_mode": 2,
   "match_rule_version": {
     "xlsx_name": 2,
     "docx_name": 1,
@@ -38,12 +38,12 @@
   "files_config": {
     "openalex_paper_title_parquet": {
       "path": "/Volumes/home/aicode/2026-01-02_enrich_full_df/data/output/openalex_paper_titles.parquet",
-      "sha256": "7c57e4df0b4da61ce294a905336b4290dfbc6da10abeb0208220b376f0db3c79",
+      "sha256": "3511bf749a170086f92556fcd2fdf464d8fe1c44191b77c06cab414da5f99fb8",
       "desc": "OpenAlex paper title parquet"
     },
     "openalex_paper_title_log": {
       "path": "/Volumes/home/aicode/2026-01-02_enrich_full_df/data/openalex_paper_title_log.jsonl",
-      "sha256": "10c2971c2773fb3b7a50006982d0db6b480e049c60b525b85ac0be8486263338",
+      "sha256": "a113fb5ea17b6cecc341113e81f0f7834f7c5d44ebaedbffa11ba89c1e61fd4e",
       "desc": "OpenAlex paper title log"
     },
     "openalex_author_search_log": {
