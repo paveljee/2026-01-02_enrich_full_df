@@ -363,12 +363,13 @@ def _ensure_openalex_paper_title_parquet_resource(
             )
         else:
             default_output_path = config.output_dir / OPENALEX_PAPER_TITLE_PARQUET_FILENAME
+            path = default_output_path
             if log is not None:
                 log(
                     "Path to OpenAlex paper-title parquet "
                     "specified is config is not found. "
                     "Writing an empty OpenAlex paper-title parquet to "
-                    f"default path: {default_output_path}"
+                    f"default path: {path}"
                 )
             write_openalex_paper_title_read_model(
                 conn,

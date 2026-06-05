@@ -52,7 +52,20 @@ except that a separate file log is used.
 Everything else is handled identically,
 like RegisteredResouce, reuse of data, etc.
 query to use:
-`api.openalex.org/works?filter=openalex_id:W2188173826|W2085049191&select=title&per_page=100&api_key=REDACTED"`.
+`api.openalex.org/works?filter=openalex_id:W2188173826|W2085049191&select=id,title&per_page=100&api_key=REDACTED"`.
+
+results look like e.g. this:
+
+```json
+{"meta": {"count": 2, "db_response_time_ms": 12, "page": 1, "per_page": 100, "groups_count": null, "cost_usd": 0.0001}, "results": [{"id": "https://openalex.org/W2085049191", "title": "Chitosan: A Natural Biopolymer for the Adsorption of Residue Oil from Oily Wastewater"}, {"id": "https://openalex.org/W2188173826", "title": "(ENV03) Equilibrium adsorption study of 3-chlorophenol and o-cresol on modified montmorillonite"}], "group_by": []}
+```
+
+we must ensure that
+id from request is matched
+to id from response
+to identify the correct title, as
+the order of titles in response is
+unreliable.
 
 Note that the
 query retrieves in batches
@@ -166,8 +179,9 @@ operating constraints, not as optional background:
   `src/steps/step_10_build_cards.py`.
 - If persisted pipeline data has to be checked, use only
   `data/scisci_process.duckdb` and only in read-only mode. Do not browse
-  other `data/` or `.aicode/` artifacts. No DB/data inspection is needed
-  for this SPEC because code/config context is sufficient.
+  other `data/` or `.aicode/` artifacts unless the human explicitly
+  authorizes a targeted check for this task, as with the OpenAlex title
+  JSONL/parquet debugging.
 - Repo code, config, and tests may be reviewed as needed. Relevant repo
   context includes `config.repl.json`, `src/helpers/vars.py`,
   `src/helpers/resources.py`, `src/helpers/config.py`,
@@ -189,9 +203,10 @@ OpenAlex selection flow. Therefore oldest papers must be computed from
 candidates.
 
 OpenAlex batch requirement: call
-`/works?filter=openalex_id:W...|W...&select=title&per_page=100` with at
-most 100 IDs per request. The quoted recipe and query in the human
-section are the relevant requirements.
+`/works?filter=openalex_id:W...|W...&select=id,title&per_page=100` with
+at most 100 IDs per request. The response order is not reliable, so the
+returned `results[*].id` must be used to map titles back to requested
+paper IDs.
 
 ### implementation context
 
@@ -340,11 +355,17 @@ Reuse must happen at the parquet layer:
 When rebuilding the parquet from JSONL, parse batch request records:
 
 - request path should be `/works`;
-- query should include `filter=openalex_id:W1|W2|...`, `select=title`,
-  `per_page=100`, and a redacted `api_key` in the persisted record;
+- query should include `filter=openalex_id:W1|W2|...`,
+  `select=id,title`, `per_page=100`, and a redacted `api_key` in the
+  persisted record;
 - response body should be parsed from the OpenAlex works-list shape,
   using `results[*].id` to map each returned work to its `W...` id and
-  `results[*].title` for `openalex.title`;
+  `results[*].title` for `openalex.title`. Do not infer mapping from
+  response order. If OpenAlex omits an id or does not return a requested
+  id, the requested id should remain represented in the rebuilt parquet
+  with NULL title. Titles written to the parquet should be decoded as
+  UTF-8 strings even when the JSONL response body stores OpenAlex's
+  escaped JSON text;
 - every requested id in a logged batch should be represented in the
   rebuilt parquet. If OpenAlex does not return a usable title for an id,
   keep a row with NULL title so Step 9 does not repeatedly refetch the
@@ -398,7 +419,7 @@ Expected touchpoints:
 - `src/helpers/openalex.py`
   - provide step-9 work-title fetching through batch requests;
   - add a batch title query builder using
-    `GET https://api.openalex.org/works?filter=openalex_id:W1|W2|...&select=title&per_page=100&api_key=...`;
+    `GET https://api.openalex.org/works?filter=openalex_id:W1|W2|...&select=id,title&per_page=100&api_key=...`;
   - chunk missing paper IDs into batches of at most 100;
   - append one strict HTTP request-log record per batch request, with the
     query redacted before persisting;
@@ -509,11 +530,12 @@ Add focused tests that do not require the real SciSciNet parquet files:
 - Step 9/request-set tests should verify that title-needed IDs are the
   distinct union of already top-K-reduced top-work IDs and already
   top-K-reduced top-oldest IDs, not all selected author papers;
-- OpenAlex title tests should cover batch query construction, chunking at
-  100 ids, redacted JSONL append-on-fetch, parsing a works-list response,
-  rebuilding title parquet from JSONL, parquet reuse without JSONL title
-  lookup, and no network request when the parquet is current and covers
-  all needed IDs;
+- OpenAlex title tests should cover batch query construction with
+  `select=id,title`, chunking at 100 ids, redacted JSONL append-on-fetch,
+  parsing a works-list response by returned OpenAlex id rather than
+  response order, rebuilding title parquet from JSONL, parquet reuse
+  without JSONL title lookup, and no network request when the parquet is
+  current and covers all needed IDs;
 - batch tests should include a missing/unreturned OpenAlex ID and assert
   the rebuilt parquet still has a row with NULL title for that paper id;
 - card output should include `ktp.ssn_top_oldest_papers` when present on

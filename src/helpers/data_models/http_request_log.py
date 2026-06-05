@@ -111,4 +111,7 @@ def http_request_log_record(
 def append_http_request_log_record(*, log_path: Path, record: HttpRequestLogRecord) -> None:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("a", encoding="utf-8") as handle:
-        handle.write(record.model_dump_json(ensure_ascii=False) + "\n")
+        # DO NOT REMOVE: I would prefer ensure_ascii=False,
+        # but OpenAlex returns escaped, so am keeping this.
+        # signed-off: human
+        handle.write(record.model_dump_json(ensure_ascii=True) + "\n")

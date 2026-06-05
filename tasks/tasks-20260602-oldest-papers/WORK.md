@@ -59,7 +59,7 @@
 
 ### context reviewed
 
-- Re-read the full current `SPEC.md`, including the revised human section that replaces per-paper title requests with batched OpenAlex `/works?filter=openalex_id:...|...&select=title&per_page=100` requests.
+- Re-read the full current `SPEC.md`, including the revised human section that replaces per-paper title requests with batched OpenAlex `/works?filter=openalex_id:...|...&select=id,title&per_page=100` requests.
 - Re-read linked prerequisites in `tasks/tasks-20260519-review-231/SPEC.md` and relevant context in `tasks/tasks-20260526-match-patch/SPEC.md`; `src.repl` was not run and no `data/` artifacts were inspected.
 - Reviewed current Step 9 top-work/top-oldest CTEs, OpenAlex helper code, HTTP request-log model, resource registration, author-details unnest parquet metadata pattern, config keys, and focused tests.
 
@@ -118,3 +118,56 @@
   `OpenAlexWorkTitleResult` in `src/helpers`, `src/steps`, or focused
   tests.
 - `src.repl` was not run.
+
+### current bug investigation
+
+- Re-read the current task SPEC and linked prerequisite/match-patch SPECs after
+  the Step 9 resume/title-parquet failures. `src.repl` was not run. The actual
+  pipeline DB was inspected only as explicitly requested, using
+  `data/scisci_process.duckdb` read-only.
+- Current `data/pipeline_state.json` marks steps `01` through
+  `09_match_parquet` complete, so resume initializes Step 10 by hydrating
+  `context.outer_dict` before Step 10 itself runs.
+- Current DB shape:
+  - `ssn_author_output`: 2,044 rows, has `ktp.source_key`, lacks `name_key`,
+    and lacks enriched top-paper/top-institution/field-display columns.
+  - `ssn_innerdicts`: 2,044 rows, has `ktp.source_key`, lacks `name_key`, and
+    has `ktp.ssn_top_papers_hit_1pct`, `ktp.ssn_top_oldest_papers`,
+    `ktp.ssn_top_institutions`, and `ktp.ssn_field_display_names_list`.
+  - `ssn_parquet_output`: view over the enriched Step 9 output, with the same
+    relevant shape as `ssn_innerdicts`.
+- Step 10 uses `context.outer_dict` for subset evaluation and card content. It
+  uses `PARQUET_OUTPUT_VIEW` only for the partition-review artifact. Therefore
+  resume should rebuild `context.outer_dict` from the same relation that
+  straight-through Step 9 appended: `PARQUET_INNERDICT_TABLE` with
+  `key_column=KTP_SOURCE_KEY_COL`. `PARQUET_AUTHOR_OUTPUT_TABLE` is now an
+  intermediate author-level base table, not the canonical Step 9 innerdict
+  resume source.
+- Historical check: before commit `802ed04`, Step 9 selected
+  `m.name_key AS name_key`; `802ed04` changed this to
+  `m.name_key AS "{KTP_SOURCE_KEY_COL}"` and changed the live Step 9 append to
+  use `key_column=KTP_SOURCE_KEY_COL`. The resume hydration path in
+  `src/helpers/init.py` stayed pointed at `PARQUET_AUTHOR_OUTPUT_TABLE` with the
+  default `name_key`, which explains the current resume crash after Step 9.
+- Current title read-model check: `data/output/openalex_paper_titles.parquet`
+  has 16,622 rows and zero non-null `openalex.title` values. The old JSONL
+  records used `select=title`, so OpenAlex returned title-only result objects
+  without ids; that cannot safely map titles to requested paper IDs because
+  response order is unreliable.
+- The current human SPEC now requires `select=id,title` and explicit matching of
+  request IDs to response IDs. Rebuild logic must map titles by `results[*].id`,
+  keep a NULL-title row for requested IDs not returned, and decode titles to
+  normal UTF-8 strings in the parquet while leaving JSONL response bodies as
+  OpenAlex returned them.
+
+### pending fixes
+
+- Change resume hydration to append parquet innerdicts from
+  `PARQUET_INNERDICT_TABLE` using `key_column=KTP_SOURCE_KEY_COL`, preserving
+  the straight-through Step 9 -> Step 10 behavior.
+- Fix OpenAlex paper-title batch query/rebuild logic to use
+  `select=id,title`, map titles by returned OpenAlex id, rebuild the title
+  parquet with populated `openalex.title`, and keep missing/unreturned IDs as
+  NULL-title rows.
+- Update focused tests around resume hydration source and OpenAlex title
+  response-order independence.
