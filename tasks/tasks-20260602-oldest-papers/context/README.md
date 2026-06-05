@@ -50,3 +50,7 @@ PY
 
 Trailing newline in response body is
 just how OpenAlex returned it.
+
+> [!CAUTION]
+> Later deprecated
+> in favour of batched title retrieval.

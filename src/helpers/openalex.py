@@ -16,6 +16,7 @@ from pydantic import ValidationError
 
 from .data_models import (
     HttpRequestLogRecord,
+    RegisteredResource,
     append_http_request_log_record,
     http_request_log_record,
     matching_http_request_log_record,
@@ -358,9 +359,15 @@ def validate_openalex_paper_title_read_model(
 def write_openalex_paper_title_read_model(
     conn: duckdb.DuckDBPyConnection,
     *,
-    log_path: Path,
+    openalex_paper_title_log_resource: RegisteredResource,
     output_path: Path,
 ) -> str:
+    """
+    Always recalculates hash
+    from `openalex_paper_title_log_resource.log_path`
+    before writing.
+    """
+    log_path = Path(openalex_paper_title_log_resource.__fspath__())
     log_sha256 = file_sha256(log_path)
     title_rows = openalex_work_title_rows_from_log(log_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)

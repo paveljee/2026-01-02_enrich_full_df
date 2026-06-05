@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from pathlib import Path
 
 import duckdb
 
-from ..helpers.context import PipelineContext, StepResult
+from ..helpers.context import (
+    PipelineContext,
+    PipelineResources,
+    StepResult,
+)
 from ..helpers.duckdb_utils import (
     append_innerdicts_from_rows_table,
     duckdb_quote_identifier,
@@ -422,7 +427,10 @@ def run(context: PipelineContext) -> StepResult:
             return 0
         return int(row[0])
 
-    def materialize_openalex_work_titles(title_table: str) -> None:
+    def materialize_openalex_work_titles(
+            title_table: str,
+            resources: PipelineResources
+        ) -> None:
         needed_table = "openalex_work_title_needed_paperids"
         title_parquet_sql = duckdb_string_literal(str(openalex_paper_title_parquet_path))
         parquet_log_hash = openalex_paper_title_read_model_log_sha256(
@@ -507,9 +515,10 @@ def run(context: PipelineContext) -> StepResult:
                 f"new titles returned={fetched_titled_count:,}, "
                 f"missing/null titles returned={len(missing_paperids) - fetched_titled_count:,}.",
             )
+            new_log_resource = deepcopy(resources.openalex_paper_title_log_resource)
             updated_log_hash = write_openalex_paper_title_read_model(
                 conn,
-                log_path=openalex_paper_title_log_path,
+                openalex_paper_title_log_resource=new_log_resource,
                 output_path=openalex_paper_title_parquet_path,
             )
             parquet_log_hash = openalex_paper_title_read_model_log_sha256(
@@ -1484,7 +1493,10 @@ def run(context: PipelineContext) -> StepResult:
     )
 
     openalex_work_title_table = "openalex_work_titles"
-    materialize_openalex_work_titles(openalex_work_title_table)
+    materialize_openalex_work_titles(
+        openalex_work_title_table,
+        context.resources,
+    )
 
     top_oldest_papers_ctes = _top_oldest_papers_ctes_sql(
         author_papers_table=PARQUET_AUTHOR_PAPERS_TABLE,

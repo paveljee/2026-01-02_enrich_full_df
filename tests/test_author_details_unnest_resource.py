@@ -11,6 +11,7 @@ from pydantic import ValidationError
 from src.helpers.config import PipelineConfig
 from src.helpers.data_models import (
     FragmentType,
+    RegisteredResource,
     ResourceGroup,
     append_http_request_log_record,
     http_request_log_record,
@@ -238,6 +239,14 @@ def test_openalex_paper_title_parquet_rebuilds_strict_batch_log(
     tmp_path: Path,
 ) -> None:
     log_path = tmp_path / "openalex_paper_title_log.jsonl"
+    openalex_paper_title_log_resource = RegisteredResource(
+        name="tes_openalex_paper_title_log",
+        hash="hash123",
+        url=log_path.resolve().as_uri(),
+        group=ResourceGroup.KTP_PIPELINE_ARTIFACT,
+        fragment_type=FragmentType.CSV_ROW,
+        verify_hash_on_init=False,
+    )
     output_path = tmp_path / "openalex_paper_titles.parquet"
     first_query = openalex_work_titles_batch_query(
         paperids=["W123", "W999"],
@@ -290,7 +299,7 @@ def test_openalex_paper_title_parquet_rebuilds_strict_batch_log(
     try:
         log_hash = write_openalex_paper_title_read_model(
             conn,
-            log_path=log_path,
+            openalex_paper_title_log_resource=openalex_paper_title_log_resource,
             output_path=output_path,
         )
         rows = conn.execute(

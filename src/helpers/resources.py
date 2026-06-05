@@ -340,12 +340,12 @@ def _ensure_openalex_paper_title_log_resource(
 def _ensure_openalex_paper_title_parquet_resource(
     config: PipelineConfig,
     *,
-    log_path: Path,
+    openalex_paper_title_log_resource: RegisteredResource,
     conn: duckdb.DuckDBPyConnection | None,
     log: Callable[[str], None] | None = None,
 ) -> tuple[RegisteredResource, list[str]]:
     messages: list[str] = []
-    title_log_hash = config.files_config[OPENALEX_PAPER_TITLE_LOG_KEY]["sha256"]
+    title_log_hash = openalex_paper_title_log_resource.hash
     meta = config.files_config.get(OPENALEX_PAPER_TITLE_PARQUET_KEY)
     if meta is not None:
         path = Path(meta["path"])
@@ -362,7 +362,14 @@ def _ensure_openalex_paper_title_parquet_resource(
                 "a DuckDB connection."
             )
         else:
-            write_openalex_paper_title_read_model(conn, log_path=log_path, output_path=path)
+            if log is not None:
+                log(
+                    f"Writing an empty OpenAlex paper-title parquet to {path}"
+                )
+            write_openalex_paper_title_read_model(
+                conn,
+                openalex_paper_title_log_resource=openalex_paper_title_log_resource,
+                output_path=path)
         resource = register_resource(
             path,
             group=ResourceGroup.KTP_PIPELINE_ARTIFACT,
@@ -400,11 +407,14 @@ def _ensure_openalex_paper_title_parquet_resource(
 
     if log is not None:
         log(
-            "Creating OpenAlex paper-title parquet read model from strict JSONL "
-            f"HTTP request log: {log_path}"
+            "Creating OpenAlex paper-title parquet read model from "
+            f"JSONL HTTP request {OPENALEX_PAPER_TITLE_LOG_KEY}"
         )
         log(f"{OPENALEX_PAPER_TITLE_PARQUET_KEY} output: {path}")
-    write_openalex_paper_title_read_model(conn, log_path=log_path, output_path=path)
+    write_openalex_paper_title_read_model(
+        conn,
+        openalex_paper_title_log_resource=openalex_paper_title_log_resource,
+        output_path=path)
     resource = register_resource(
         path,
         group=ResourceGroup.KTP_PIPELINE_ARTIFACT,
@@ -543,7 +553,7 @@ def register_pipeline_resources(
     openalex_paper_title_parquet_resource, title_parquet_messages = (
         _ensure_openalex_paper_title_parquet_resource(
             config,
-            log_path=Path(openalex_paper_title_log_resource.__fspath__()),
+            openalex_paper_title_log_resource=openalex_paper_title_log_resource,
             conn=conn,
             log=log,
         )
