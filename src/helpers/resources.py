@@ -362,14 +362,18 @@ def _ensure_openalex_paper_title_parquet_resource(
                 "a DuckDB connection."
             )
         else:
+            default_output_path = config.output_dir / OPENALEX_PAPER_TITLE_PARQUET_FILENAME
             if log is not None:
                 log(
-                    f"Writing an empty OpenAlex paper-title parquet to {path}"
+                    "Path to OpenAlex paper-title parquet "
+                    "specified is config is not found. "
+                    "Writing an empty OpenAlex paper-title parquet to "
+                    f"default path: {default_output_path}"
                 )
             write_openalex_paper_title_read_model(
                 conn,
                 openalex_paper_title_log_resource=openalex_paper_title_log_resource,
-                output_path=path)
+                output_path=default_output_path)
         resource = register_resource(
             path,
             group=ResourceGroup.KTP_PIPELINE_ARTIFACT,
