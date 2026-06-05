@@ -4,7 +4,6 @@ import json
 
 import duckdb
 
-from src.helpers.openalex import OpenAlexWorkTitleResult
 from src.helpers.schema import (
     PARQUET_ALL_HITS_TABLE,
     PARQUET_AUTHOR_MATCH_HIT_SELECTED_VIEW,
@@ -21,27 +20,111 @@ from src.helpers.vars import (
     TOP_K_WORKS,
 )
 from src.steps.step_09_match_parquet import (
-    _openalex_work_title_log_message,
+    _openalex_work_title_needed_paperids_sql,
     _top_oldest_papers_ctes_sql,
     _top_papers_hit_ctes_sql,
 )
 
 
-def test_openalex_work_title_log_message_includes_each_lookup_details() -> None:
-    result = OpenAlexWorkTitleResult(
-        paperid="W123",
-        query="select=title&per_page=1&api_key=REDACTED",
-        response_code=200,
-        title="A Fine Paper \u4f60\u597d",
-        reused=False,
-        received_at_unix_usec=123456,
-        duration_usec=789,
-    )
+def test_openalex_work_title_needed_paperids_uses_only_reduced_top_sets() -> None:
+    conn = duckdb.connect()
+    try:
+        conn.execute(
+            f"""
+            CREATE TABLE {PARQUET_AUTHOR_PAPERS_TABLE} (
+                name_key VARCHAR,
+                authorid VARCHAR,
+                paperid VARCHAR
+            )
+            """
+        )
+        conn.execute(
+            f"""
+            CREATE TABLE {PARQUET_AUTHOR_MATCH_HIT_SELECTED_VIEW} (
+                name_key VARCHAR,
+                "{SSNAD_AUTHORID_COL}" VARCHAR
+            )
+            """
+        )
+        conn.execute(
+            f"""
+            CREATE TABLE {PARQUET_ALL_HITS_TABLE} (
+                paperid VARCHAR,
+                hit_1pct BIGINT
+            )
+            """
+        )
+        conn.execute(
+            f"""
+            CREATE TABLE ssn_sciscinet_papers (
+                "{SSNP_PAPERID_COL}" VARCHAR,
+                "{SSNP_DATE_COL}" VARCHAR
+            )
+            """
+        )
+        conn.executemany(
+            f"INSERT INTO {PARQUET_AUTHOR_PAPERS_TABLE} VALUES (?, ?, ?)",
+            [
+                ("ada", "A1", "W1"),
+                ("ada", "A1", "W2"),
+                ("ada", "A1", "W3"),
+                ("ada", "A1", "W4"),
+                ("ada", "A1", "W5"),
+                ("ada", "A1", "W6"),
+                ("ada", "A1", "W7"),
+                ("ada", "A1", "W8"),
+                ("ada", "A2", "W0"),
+            ],
+        )
+        conn.executemany(
+            f"INSERT INTO {PARQUET_AUTHOR_MATCH_HIT_SELECTED_VIEW} VALUES (?, ?)",
+            [("ada", "A1")],
+        )
+        conn.executemany(
+            f"INSERT INTO {PARQUET_ALL_HITS_TABLE} VALUES (?, ?)",
+            [
+                ("W1", 9),
+                ("W2", 8),
+                ("W3", 7),
+                ("W4", 6),
+                ("W5", 5),
+                ("W6", 4),
+                ("W7", 0),
+                ("W8", 1),
+                ("W0", 99),
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO ssn_sciscinet_papers VALUES (?, ?)",
+            [
+                ("W1", "1996-01-01"),
+                ("W2", "1995-01-01"),
+                ("W3", "1994-01-01"),
+                ("W4", "1993-01-01"),
+                ("W5", "1992-01-01"),
+                ("W6", "1991-01-01"),
+                ("W7", "1990-01-01"),
+                ("W8", "2020-01-01"),
+                ("W0", "1800-01-01"),
+            ],
+        )
 
-    assert _openalex_work_title_log_message(result) == (
-        'OpenAlex work-title check fetched: paperid=W123, status=200, '
-        'title="A Fine Paper 你好", received_at_unix_usec=123456.'
-    )
+        rows = conn.execute(
+            _openalex_work_title_needed_paperids_sql(
+                author_papers_table=PARQUET_AUTHOR_PAPERS_TABLE,
+                all_hits_table=PARQUET_ALL_HITS_TABLE,
+                selected_author_view=PARQUET_AUTHOR_MATCH_HIT_SELECTED_VIEW,
+                papers_table="ssn_sciscinet_papers",
+                author_id_col=SSNAD_AUTHORID_COL,
+                paperid_col=SSNP_PAPERID_COL,
+                date_col=SSNP_DATE_COL,
+                top_k_works=TOP_K_WORKS,
+            )
+        ).fetchall()
+    finally:
+        conn.close()
+
+    assert [row[0] for row in rows] == ["W1", "W2", "W3", "W4", "W5", "W6", "W7"]
 
 
 def test_top_oldest_papers_sql_orders_by_date_truncates_and_omits_null_date() -> None:

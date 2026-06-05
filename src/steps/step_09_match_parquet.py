@@ -9,14 +9,18 @@ from ..helpers.context import PipelineContext, StepResult
 from ..helpers.duckdb_utils import (
     append_innerdicts_from_rows_table,
     duckdb_quote_identifier,
+    duckdb_string_literal,
 )
+from ..helpers.files import file_sha256
 from ..helpers.name_matching import (
     sciscinet_ktp_name_norm_sql,
 )
 from ..helpers.openalex import (
-    OpenAlexWorkTitleResult,
     check_openalex_author,
-    check_openalex_work_title,
+    chunk_openalex_work_title_paperids,
+    fetch_openalex_work_titles_batch,
+    openalex_paper_title_read_model_log_sha256,
+    write_openalex_paper_title_read_model,
 )
 from ..helpers.parquet_utils import normalize_parquet_column_name, parquet_columns, parquet_filename
 from ..helpers.procedures import ParquetMatchProcedure
@@ -282,18 +286,83 @@ def _top_papers_hit_ctes_sql(
     """
 
 
-def _openalex_work_title_log_message(result: OpenAlexWorkTitleResult) -> str:
-    source = "reused" if result.reused else "fetched"
-    status = result.response_code if result.response_code is not None else "null"
-    title_status = json.dumps(result.title, ensure_ascii=False) if result.title else "missing"
-    received_at = (
-        result.received_at_unix_usec if result.received_at_unix_usec is not None else "null"
-    )
-    return (
-        "OpenAlex work-title check "
-        f"{source}: paperid={result.paperid}, status={status}, "
-        f"title={title_status}, received_at_unix_usec={received_at}."
-    )
+def _openalex_work_title_needed_paperids_sql(
+    *,
+    author_papers_table: str,
+    all_hits_table: str,
+    selected_author_view: str,
+    papers_table: str,
+    author_id_col: str,
+    paperid_col: str,
+    date_col: str,
+    top_k_works: int,
+) -> str:
+    return f"""
+        WITH paper_hits AS (
+            SELECT
+                ap.name_key AS name_key,
+                ap.authorid AS authorid,
+                CAST(ap.paperid AS VARCHAR) AS paperid,
+                COALESCE(MAX(h.hit_1pct), 0) AS hit_1pct
+            FROM {author_papers_table} ap
+            LEFT JOIN {all_hits_table} h
+              ON ap.paperid = h.paperid
+            WHERE ap.paperid IS NOT NULL
+              AND EXISTS (
+                  SELECT 1
+                  FROM {selected_author_view} m
+                  WHERE m.name_key = ap.name_key
+                    AND CAST(m.{duckdb_quote_identifier(author_id_col)} AS VARCHAR)
+                        = CAST(ap.authorid AS VARCHAR)
+              )
+            GROUP BY ap.name_key, ap.authorid, CAST(ap.paperid AS VARCHAR)
+        ),
+        top_work_ranked AS (
+            SELECT
+                ph.paperid AS paperid,
+                ROW_NUMBER() OVER (
+                    PARTITION BY ph.name_key, ph.authorid
+                    ORDER BY ph.hit_1pct DESC, ph.paperid ASC
+                ) AS rn
+            FROM paper_hits ph
+        ),
+        oldest_paper_candidates AS (
+            SELECT
+                ap.name_key AS name_key,
+                ap.authorid AS authorid,
+                CAST(ap.paperid AS VARCHAR) AS paperid,
+                TRY_CAST(p.{duckdb_quote_identifier(date_col)} AS DATE) AS date_value
+            FROM {author_papers_table} ap
+            JOIN {papers_table} p
+              ON CAST(p.{duckdb_quote_identifier(paperid_col)} AS VARCHAR)
+                = CAST(ap.paperid AS VARCHAR)
+            WHERE ap.paperid IS NOT NULL
+              AND TRY_CAST(p.{duckdb_quote_identifier(date_col)} AS DATE) IS NOT NULL
+              AND EXISTS (
+                  SELECT 1
+                  FROM {selected_author_view} m
+                  WHERE m.name_key = ap.name_key
+                    AND CAST(m.{duckdb_quote_identifier(author_id_col)} AS VARCHAR)
+                        = CAST(ap.authorid AS VARCHAR)
+              )
+        ),
+        top_oldest_ranked AS (
+            SELECT
+                opc.paperid AS paperid,
+                ROW_NUMBER() OVER (
+                    PARTITION BY opc.name_key, opc.authorid
+                    ORDER BY opc.date_value ASC, opc.paperid ASC
+                ) AS rn
+            FROM oldest_paper_candidates opc
+        )
+        SELECT DISTINCT paperid
+        FROM (
+            SELECT paperid FROM top_work_ranked WHERE rn <= {top_k_works}
+            UNION ALL
+            SELECT paperid FROM top_oldest_ranked WHERE rn <= {top_k_works}
+        ) selected_papers
+        ORDER BY paperid
+    """
 
 
 def run(context: PipelineContext) -> StepResult:
@@ -331,6 +400,10 @@ def run(context: PipelineContext) -> StepResult:
     openalex_paper_title_log_path = Path(
         context.resources.openalex_paper_title_log_resource.__fspath__()
     )
+    openalex_paper_title_parquet_path = Path(
+        context.resources.openalex_paper_title_parquet_resource.__fspath__()
+    )
+    openalex_paper_title_log_hash = file_sha256(openalex_paper_title_log_path)
     author_id_col = SSNAD_AUTHORID_COL
     authors_author_id_col = normalize_parquet_column_name(SSNAD_RAW_AUTHORID_COL, "ssnau")
     author_id_raw = SSNAD_RAW_AUTHORID_COL
@@ -350,116 +423,140 @@ def run(context: PipelineContext) -> StepResult:
         return int(row[0])
 
     def materialize_openalex_work_titles(title_table: str) -> None:
-        paper_rows = conn.execute(
-            f"""
-            WITH paper_hits AS (
-                SELECT
-                    ap.name_key AS name_key,
-                    ap.authorid AS authorid,
-                    CAST(ap.paperid AS VARCHAR) AS paperid,
-                    COALESCE(MAX(h.hit_1pct), 0) AS hit_1pct
-                FROM {PARQUET_AUTHOR_PAPERS_TABLE} ap
-                LEFT JOIN {PARQUET_ALL_HITS_TABLE} h
-                  ON ap.paperid = h.paperid
-                WHERE ap.paperid IS NOT NULL
-                  AND EXISTS (
-                      SELECT 1
-                      FROM {PARQUET_AUTHOR_MATCH_HIT_SELECTED_VIEW} m
-                      WHERE m.name_key = ap.name_key
-                        AND CAST(m."{author_id_col}" AS VARCHAR)
-                            = CAST(ap.authorid AS VARCHAR)
-                  )
-                GROUP BY ap.name_key, ap.authorid, CAST(ap.paperid AS VARCHAR)
-            ),
-            top_work_ranked AS (
-                SELECT
-                    ph.paperid AS paperid,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY ph.name_key, ph.authorid
-                        ORDER BY ph.hit_1pct DESC, ph.paperid ASC
-                    ) AS rn
-                FROM paper_hits ph
-            ),
-            oldest_paper_candidates AS (
-                SELECT
-                    ap.name_key AS name_key,
-                    ap.authorid AS authorid,
-                    CAST(ap.paperid AS VARCHAR) AS paperid,
-                    TRY_CAST(p."{SSNP_DATE_COL}" AS DATE) AS date_value
-                FROM {PARQUET_AUTHOR_PAPERS_TABLE} ap
-                JOIN {papers_table} p
-                  ON CAST(p."{SSNP_PAPERID_COL}" AS VARCHAR) = CAST(ap.paperid AS VARCHAR)
-                WHERE ap.paperid IS NOT NULL
-                  AND TRY_CAST(p."{SSNP_DATE_COL}" AS DATE) IS NOT NULL
-                  AND EXISTS (
-                      SELECT 1
-                      FROM {PARQUET_AUTHOR_MATCH_HIT_SELECTED_VIEW} m
-                      WHERE m.name_key = ap.name_key
-                        AND CAST(m."{author_id_col}" AS VARCHAR)
-                            = CAST(ap.authorid AS VARCHAR)
-                  )
-            ),
-            top_oldest_ranked AS (
-                SELECT
-                    opc.paperid AS paperid,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY opc.name_key, opc.authorid
-                        ORDER BY opc.date_value ASC, opc.paperid ASC
-                    ) AS rn
-                FROM oldest_paper_candidates opc
-            )
-            SELECT DISTINCT paperid
-            FROM (
-                SELECT paperid FROM top_work_ranked WHERE rn <= {TOP_K_WORKS}
-                UNION ALL
-                SELECT paperid FROM top_oldest_ranked WHERE rn <= {TOP_K_WORKS}
-            ) selected_papers
-            ORDER BY paperid
-            """
-        ).fetchall()
-        paperids = [str(row[0]) for row in paper_rows if row[0] is not None]
-        conn.execute(
-            f"""
-            CREATE OR REPLACE TABLE {title_table} (
-                paperid VARCHAR,
-                title VARCHAR
-            )
-            """
+        needed_table = "openalex_work_title_needed_paperids"
+        title_parquet_sql = duckdb_string_literal(str(openalex_paper_title_parquet_path))
+        parquet_log_hash = openalex_paper_title_read_model_log_sha256(
+            conn,
+            openalex_paper_title_parquet_path,
         )
-        title_rows: list[tuple[str, str | None]] = []
-        reused_count = 0
-        fetched_count = 0
-        titled_count = 0
-        missing_count = 0
-        for paperid in paperids:
-            result = check_openalex_work_title(
-                paperid=paperid,
-                log_path=openalex_paper_title_log_path,
-            )
-            if result.reused:
-                reused_count += 1
-            else:
-                fetched_count += 1
-            if result.title:
-                titled_count += 1
-            else:
-                missing_count += 1
-            title_rows.append((paperid, result.title))
-            log_tag(
-                STEP_MATCH_PARQUET_LOG_TAG_TABLE_EFF,
-                _openalex_work_title_log_message(result),
-            )
-        if title_rows:
-            conn.executemany(
-                f"INSERT INTO {title_table} (paperid, title) VALUES (?, ?)",
-                title_rows,
-            )
+        hash_matches = parquet_log_hash == openalex_paper_title_log_hash
         log_tag(
             STEP_MATCH_PARQUET_LOG_TAG_TABLE_EFF,
-            "OpenAlex work-title lookup: "
-            f"distinct paper IDs={len(paperids):,}, "
-            f"reused={reused_count:,}, fetched={fetched_count:,}, "
-            f"successful titles={titled_count:,}, missing/failed titles={missing_count:,}.",
+            "OpenAlex work-title query side: "
+            f"parquet={openalex_paper_title_parquet_path}; "
+            f"parquet title-log sha256={parquet_log_hash or '<missing>'}; "
+            f"current JSONL sha256={openalex_paper_title_log_hash}; "
+            f"hash match={'yes' if hash_matches else 'no'}.",
+        )
+        if not hash_matches:
+            raise ValueError(
+                "OpenAlex paper-title parquet read model is out of sync with the "
+                "registered JSONL command log. Re-run resource registration."
+            )
+        conn.execute(
+            f"""
+            CREATE OR REPLACE TEMP TABLE {needed_table} AS
+            {_openalex_work_title_needed_paperids_sql(
+                author_papers_table=PARQUET_AUTHOR_PAPERS_TABLE,
+                all_hits_table=PARQUET_ALL_HITS_TABLE,
+                selected_author_view=PARQUET_AUTHOR_MATCH_HIT_SELECTED_VIEW,
+                papers_table=papers_table,
+                author_id_col=author_id_col,
+                paperid_col=SSNP_PAPERID_COL,
+                date_col=SSNP_DATE_COL,
+                top_k_works=TOP_K_WORKS,
+            )}
+            """
+        )
+        needed_count = scalar_int(f"SELECT COUNT(*) FROM {needed_table}")
+        missing_rows = conn.execute(
+            f"""
+            SELECT n.paperid
+            FROM {needed_table} n
+            LEFT JOIN read_parquet({title_parquet_sql}) t
+              ON CAST(t."{SSNP_PAPERID_COL}" AS VARCHAR) = n.paperid
+            WHERE t."{SSNP_PAPERID_COL}" IS NULL
+            ORDER BY n.paperid
+            """
+        ).fetchall()
+        missing_paperids = [str(row[0]) for row in missing_rows]
+        present_paperid_count = needed_count - len(missing_paperids)
+        log_tag(
+            STEP_MATCH_PARQUET_LOG_TAG_TABLE_EFF,
+            "OpenAlex work-title query side coverage: "
+            f"needed paper IDs={needed_count:,}, "
+            f"present in read model={present_paperid_count:,}, "
+            f"missing from read model={len(missing_paperids):,}.",
+        )
+        appended_log_record_count = 0
+        fetched_titled_count = 0
+        response_status_counts: dict[str, int] = {}
+        if missing_paperids:
+            for batch in chunk_openalex_work_title_paperids(missing_paperids):
+                result = fetch_openalex_work_titles_batch(
+                    paperids=batch,
+                    log_path=openalex_paper_title_log_path,
+                )
+                appended_log_record_count += 1
+                status_key = (
+                    str(result.response_code) if result.response_code is not None else "null"
+                )
+                response_status_counts[status_key] = response_status_counts.get(status_key, 0) + 1
+                fetched_titled_count += sum(
+                    1 for title in result.titles_by_paperid.values() if title is not None
+                )
+            status_summary = ", ".join(
+                f"{status}={count:,}" for status, count in sorted(response_status_counts.items())
+            )
+            log_tag(
+                STEP_MATCH_PARQUET_LOG_TAG_TABLE_EFF,
+                "OpenAlex work-title command side: "
+                f"fetched de novo={len(missing_paperids):,} paper IDs, "
+                f"JSONL batch records appended={appended_log_record_count:,}, "
+                f"batch HTTP statuses={status_summary or 'none'}, "
+                f"new titles returned={fetched_titled_count:,}, "
+                f"missing/null titles returned={len(missing_paperids) - fetched_titled_count:,}.",
+            )
+            updated_log_hash = write_openalex_paper_title_read_model(
+                conn,
+                log_path=openalex_paper_title_log_path,
+                output_path=openalex_paper_title_parquet_path,
+            )
+            parquet_log_hash = openalex_paper_title_read_model_log_sha256(
+                conn,
+                openalex_paper_title_parquet_path,
+            )
+            log_tag(
+                STEP_MATCH_PARQUET_LOG_TAG_TABLE_EFF,
+                "OpenAlex work-title query side rebuilt after command append: "
+                f"parquet={openalex_paper_title_parquet_path}; "
+                f"parquet title-log sha256={parquet_log_hash or '<missing>'}; "
+                f"current JSONL sha256={updated_log_hash}; "
+                f"hash match={'yes' if parquet_log_hash == updated_log_hash else 'no'}.",
+            )
+        else:
+            log_tag(
+                STEP_MATCH_PARQUET_LOG_TAG_TABLE_EFF,
+                "OpenAlex work-title command side: "
+                "fetched de novo=0 paper IDs, JSONL batch records appended=0.",
+            )
+
+        conn.execute(
+            f"""
+            CREATE OR REPLACE TABLE {title_table} AS
+            SELECT
+                n.paperid AS paperid,
+                t."{OPENALEX_TITLE_COL}" AS title
+            FROM {needed_table} n
+            LEFT JOIN read_parquet({title_parquet_sql}) t
+              ON CAST(t."{SSNP_PAPERID_COL}" AS VARCHAR) = n.paperid
+            """
+        )
+        title_counts = conn.execute(
+            f"""
+            SELECT
+                COUNT(*) AS row_count,
+                COUNT(*) FILTER (WHERE title IS NOT NULL) AS titled_count
+            FROM {title_table}
+            """
+        ).fetchone()
+        row_count = int(title_counts[0]) if title_counts else 0
+        titled_count = int(title_counts[1]) if title_counts else 0
+        log_tag(
+            STEP_MATCH_PARQUET_LOG_TAG_TABLE_EFF,
+            "OpenAlex work-title table materialized from parquet: "
+            f"{row_count:,} rows, {titled_count:,} with titles, "
+            f"{row_count - titled_count:,} missing/null titles.",
         )
 
     def apply_openalex_confidence_gate() -> None:

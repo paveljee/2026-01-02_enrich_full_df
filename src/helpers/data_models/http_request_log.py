@@ -31,6 +31,7 @@ def redact_http_request_log_query(
     query: str,
     *,
     sensitive_keys: set[str] | None = None,
+    safe: str = "",
 ) -> str:
     keys = sensitive_keys or {"api_key"}
     return urlencode(
@@ -38,6 +39,7 @@ def redact_http_request_log_query(
             (key, "REDACTED" if key in keys else value)
             for key, value in parse_qsl(query, keep_blank_values=True)
         ],
+        safe=safe,
         quote_via=quote,
     )
 

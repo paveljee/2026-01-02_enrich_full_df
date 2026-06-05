@@ -4,6 +4,7 @@ from src.helpers.data_models.http_request_log import (
     append_http_request_log_record,
     http_request_log_record,
     matching_http_request_log_record,
+    redact_http_request_log_query,
 )
 
 
@@ -61,3 +62,11 @@ def test_appended_http_request_log_record_roundtrips_unicode(tmp_path) -> None:
 
     assert restored is not None
     assert restored.response_body == '{"title":"A Fine Paper 你好"}'
+
+
+def test_redact_http_request_log_query_can_preserve_filter_separators() -> None:
+    query = "filter=openalex_id:W123|W456&select=title&api_key=test-key"
+
+    assert redact_http_request_log_query(query, safe=":|") == (
+        "filter=openalex_id:W123|W456&select=title&api_key=REDACTED"
+    )

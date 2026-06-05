@@ -18,11 +18,12 @@ from src.helpers.name_matching import (
 )
 from src.helpers.openalex import (
     check_openalex_author,
-    check_openalex_work_title,
+    fetch_openalex_work_titles_batch,
     openalex_author_search_query,
-    openalex_work_title_query,
+    openalex_work_title_paperids_from_query,
+    openalex_work_titles_batch_query,
     parse_openalex_top_author_id,
-    parse_openalex_work_title,
+    parse_openalex_work_titles_response,
 )
 from src.helpers.schema import (
     PARQUET_AUTHOR_HIT_AGG_TABLE,
@@ -669,59 +670,38 @@ def test_openalex_author_check_appends_response_and_parses_mismatch(tmp_path: Pa
     assert "openalex_match" not in record
 
 
-def test_openalex_work_title_reuses_jsonl_cache(tmp_path: Path) -> None:
-    query = openalex_work_title_query(api_key="REDACTED")
-    log_path = tmp_path / "openalex_paper_title_log.jsonl"
-    log_path.write_text(
-        json.dumps(
-            {
-                "schema_version": KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION,
-                "method": "GET",
-                "scheme": "https",
-                "host": "api.openalex.org",
-                "path": "/works/W123",
-                "query": query,
-                "request_headers": {},
-                "request_body": None,
-                "response_code": 200,
-                "response_headers": {},
-                "response_body": '{"title":"A Fine Paper"}',
-                "received_at_unix_usec": 333,
-                "duration_usec": 444,
-            }
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-
-    def fail_get(_url: str, *, timeout: float) -> _FakeOpenAlexResponse:
-        raise AssertionError("cached OpenAlex title response should have been reused")
-
-    result = check_openalex_work_title(
-        paperid="W123",
-        log_path=log_path,
+def test_openalex_work_titles_batch_query_preserves_work_id_filter() -> None:
+    query = openalex_work_titles_batch_query(
+        paperids=["W123", "W456"],
         api_key="test-key",
-        request_get=fail_get,
     )
 
-    assert result.reused
-    assert result.paperid == "W123"
-    assert result.query == query
-    assert result.title == "A Fine Paper"
-    assert result.received_at_unix_usec == 333
+    assert query == (
+        "filter=openalex_id:W123|W456&select=title&per_page=100&api_key=test-key"
+    )
+    assert openalex_work_title_paperids_from_query(query) == ("W123", "W456")
 
 
-def test_openalex_work_title_appends_response_and_parses_title(tmp_path: Path) -> None:
+def test_openalex_work_titles_batch_appends_response_and_parses_titles(
+    tmp_path: Path,
+) -> None:
     log_path = tmp_path / "openalex_paper_title_log.jsonl"
     seen_urls: list[str] = []
 
     def fake_get(url: str, *, timeout: float) -> _FakeOpenAlexResponse:
         seen_urls.append(url)
         assert timeout > 0
-        return _FakeOpenAlexResponse(status_code=200, text='{"title":"A Fine Paper"}')
+        return _FakeOpenAlexResponse(
+            status_code=200,
+            text=(
+                '{"results":['
+                '{"id":"https://openalex.org/W123","title":"A Fine Paper 你好"}'
+                "]}"
+            ),
+        )
 
-    result = check_openalex_work_title(
-        paperid="W123",
+    result = fetch_openalex_work_titles_batch(
+        paperids=["W123", "W999"],
         log_path=log_path,
         api_key="test-key",
         request_get=fake_get,
@@ -729,12 +709,13 @@ def test_openalex_work_title_appends_response_and_parses_title(tmp_path: Path) -
     record = json.loads(log_path.read_text(encoding="utf-8"))
 
     assert len(seen_urls) == 1
-    assert seen_urls[0].startswith("https://api.openalex.org/works/W123?")
+    assert seen_urls[0].startswith("https://api.openalex.org/works?")
+    assert "filter=openalex_id:W123|W999" in seen_urls[0]
     assert "select=title" in seen_urls[0]
-    assert "per_page=1" in seen_urls[0]
+    assert "per_page=100" in seen_urls[0]
     assert "api_key=test-key" in seen_urls[0]
-    assert not result.reused
-    assert result.title == "A Fine Paper"
+    assert result.paperids == ("W123", "W999")
+    assert result.titles_by_paperid == {"W123": "A Fine Paper 你好", "W999": None}
     assert result.query == record["query"]
     assert list(record) == [
         "schema_version",
@@ -752,7 +733,8 @@ def test_openalex_work_title_appends_response_and_parses_title(tmp_path: Path) -
         "duration_usec",
     ]
     assert record["schema_version"] == KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION
-    assert record["path"] == "/works/W123"
+    assert record["path"] == "/works"
+    assert record["query"].startswith("filter=openalex_id:W123|W999")
     assert record["query"].endswith("api_key=REDACTED")
     assert "test-key" not in record["query"]
 
@@ -762,10 +744,19 @@ def test_parse_openalex_top_author_id_handles_empty_or_malformed_results() -> No
     assert parse_openalex_top_author_id("not-json") is None
 
 
-def test_parse_openalex_work_title_handles_missing_or_malformed_title() -> None:
-    assert parse_openalex_work_title('{"title":"A Fine Paper"}') == "A Fine Paper"
-    assert parse_openalex_work_title('{"title":"   "}') is None
-    assert parse_openalex_work_title("not-json") is None
+def test_parse_openalex_work_titles_response_handles_missing_or_malformed_results() -> None:
+    assert parse_openalex_work_titles_response(
+        '{"results":[{"id":"https://openalex.org/W123","title":"A Fine Paper 你好"}]}',
+        requested_paperids=["W123", "W999"],
+    ) == {"W123": "A Fine Paper 你好", "W999": None}
+    assert parse_openalex_work_titles_response(
+        '{"results":[{"id":"https://openalex.org/W123","title":"   "}]}',
+        requested_paperids=["W123"],
+    ) == {"W123": None}
+    assert parse_openalex_work_titles_response(
+        "not-json",
+        requested_paperids=["W123"],
+    ) == {"W123": None}
 
 
 def test_ssn_hit_v2_openalex_mismatch_returns_full_nonzero_pool(tmp_path: Path) -> None:

@@ -69,3 +69,52 @@
 - Specified that title IDs are the distinct union of already top-K-reduced top-work IDs and already top-K-reduced top-oldest IDs, so title requests must not cover every selected author paper.
 - Specified batch-only OpenAlex title fetching in chunks of at most 100 IDs, parquet rebuild from JSONL after missing-title batches, and Step 9 title joins from parquet only.
 - Added expected logging and tests for parquet reuse/rebuild, JSONL hash metadata, batch requests, missing IDs, and unchanged top-work/oldest ranking semantics.
+
+### implementation completed
+
+- Implemented the CQRS title path from the approved SPEC:
+  JSONL remains the strict append-only OpenAlex HTTP request log, and the
+  registered OpenAlex paper-title parquet is the Step 9 read model.
+- Added the OpenAlex paper-title parquet resource to `PipelineResources`
+  and resource registration. Registration creates the parquet from the
+  title JSONL when missing, validates footer metadata against the
+  configured title-log SHA-256 when present, and raises on mismatch.
+- Kept OpenAlex title parsing, batch fetching, JSONL-to-parquet rebuild,
+  and parquet metadata validation under `src/helpers/openalex.py`.
+- Step 9 now derives needed title IDs only from the union of already
+  top-K-reduced top-hit papers and already top-K-reduced oldest papers,
+  queries the registered parquet for coverage, fetches only missing IDs in
+  `/works` batches, appends one JSONL record per batch, rebuilds the
+  parquet, and then joins titles from parquet only.
+- Step 9 repl logging now separates query-side read-model/hash/coverage
+  messages from command-side OpenAlex batch fetch/appended-record/status
+  messages. It logs aggregate title counts rather than one line per
+  paper-title lookup.
+- Updated the title parquet schema to use global vars for `ssnp.paperid`,
+  `openalex.title`, and `ktp.openalex_received_at_unix_usec`; the final
+  card payloads still contain only the SPEC-requested date/title/URL
+  fields.
+- Added shared local file hashing in `src/helpers/files.py` and reused it
+  from resource registration, OpenAlex title read-model hashing, Step 9
+  title-log hash logging, and the local-file branch of
+  `RegisteredResource._compute_hash()`.
+- Removed stale singleton/per-paper OpenAlex title lookup code paths and
+  stale title-cache helper naming. Existing configured resource hashes,
+  including a deliberate `"??"`, remain authoritative and may fail until
+  the correct hash is supplied.
+- Updated focused tests for batch OpenAlex title queries, strict shared
+  HTTP request-log redaction, title parquet schema/metadata/rebuild,
+  stale JSONL-hash rejection, needed-ID reduction semantics, and manual
+  `PipelineResources` fixtures.
+
+### verification
+
+- `pixi run python -m ruff check src/helpers/files.py src/helpers/data_models/source_key.py src/helpers/data_models/http_request_log.py src/helpers/openalex.py src/helpers/resources.py src/steps/step_09_match_parquet.py tests/test_source_key.py tests/test_utils.py tests/test_http_request_log.py tests/test_sciscinet_name_matching.py tests/test_author_details_unnest_resource.py tests/test_step_09_match_parquet.py tests/test_csv_sample_validation.py` passed.
+- `pixi run python -m mypy src/helpers/files.py src/helpers/data_models/source_key.py src/helpers/data_models/http_request_log.py src/helpers/openalex.py src/helpers/resources.py src/steps/step_09_match_parquet.py tests/test_source_key.py tests/test_utils.py tests/test_http_request_log.py tests/test_sciscinet_name_matching.py tests/test_author_details_unnest_resource.py tests/test_step_09_match_parquet.py tests/test_csv_sample_validation.py` passed (`Success: no issues found in 13 source files`).
+- `pixi run pytest tests/test_source_key.py tests/test_utils.py tests/test_http_request_log.py tests/test_sciscinet_name_matching.py::test_openalex_work_titles_batch_query_preserves_work_id_filter tests/test_sciscinet_name_matching.py::test_openalex_work_titles_batch_appends_response_and_parses_titles tests/test_sciscinet_name_matching.py::test_parse_openalex_work_titles_response_handles_missing_or_malformed_results tests/test_author_details_unnest_resource.py tests/test_step_09_match_parquet.py tests/test_csv_sample_validation.py` passed (`43 passed, 1 skipped`).
+- `git diff --check` passed.
+- Stale-reference search found no remaining singleton title lookup names
+  such as `check_openalex_work_title`, `openalex_work_title_query`, or
+  `OpenAlexWorkTitleResult` in `src/helpers`, `src/steps`, or focused
+  tests.
+- `src.repl` was not run.

@@ -9,8 +9,12 @@ import duckdb
 from .config import PipelineConfig
 from .data_models import FragmentType, RegisteredResource, ResourceGroup
 from .duckdb_utils import duckdb_string_literal
-from .files import find_files_by_extension
+from .files import file_sha256, find_files_by_extension
 from .name_matching import sciscinet_author_alt_name_key_exprs_sql
+from .openalex import (
+    validate_openalex_paper_title_read_model,
+    write_openalex_paper_title_read_model,
+)
 from .vars import (
     AUTHOR_DETAILS_UNNEST_RULE_VERSION_METADATA_KEY,
     HCR_XLSX_KEY_PREFIX,
@@ -18,6 +22,8 @@ from .vars import (
     KTP_AUTHOR_DETAILS_UNNEST_KEY,
     OPENALEX_AUTHOR_SEARCH_LOG_KEY,
     OPENALEX_PAPER_TITLE_LOG_KEY,
+    OPENALEX_PAPER_TITLE_PARQUET_FILENAME,
+    OPENALEX_PAPER_TITLE_PARQUET_KEY,
     SSNAD_AUTHORID_COL,
     SSNAD_RAW_AUTHORID_COL,
     SSNAD_RAW_DISPLAY_NAME_ALTERNATIVES_COL,
@@ -34,20 +40,9 @@ class PipelineResources:
     docx_resources: dict[str, RegisteredResource]
     openalex_author_search_log_resource: RegisteredResource
     openalex_paper_title_log_resource: RegisteredResource
+    openalex_paper_title_parquet_resource: RegisteredResource
     author_details_unnest_resource: RegisteredResource | None = None
     messages: list[str] = field(default_factory=list)
-
-
-def _compute_hash_via_resource(path: Path) -> str:
-    probe = RegisteredResource(
-        name=path.name,
-        hash="pending",
-        group=ResourceGroup.REGISTERED_SAMPLES,
-        fragment_type=FragmentType.PARQUET_ROW,
-        url=path.resolve().as_uri(),
-        verify_hash_on_init=False,
-    )
-    return probe._compute_hash()
 
 
 def register_resource(
@@ -58,7 +53,7 @@ def register_resource(
     description: str | None = None,
     expected_hash: str | None = None,
 ) -> RegisteredResource:
-    resource_hash = expected_hash or _compute_hash_via_resource(path)
+    resource_hash = expected_hash or file_sha256(path)
     return RegisteredResource(
         name=path.name,
         hash=resource_hash,
@@ -342,6 +337,88 @@ def _ensure_openalex_paper_title_log_resource(
     return resource, [f"Validated {OPENALEX_PAPER_TITLE_LOG_KEY} writable log"]
 
 
+def _ensure_openalex_paper_title_parquet_resource(
+    config: PipelineConfig,
+    *,
+    log_path: Path,
+    conn: duckdb.DuckDBPyConnection | None,
+    log: Callable[[str], None] | None = None,
+) -> tuple[RegisteredResource, list[str]]:
+    messages: list[str] = []
+    title_log_hash = config.files_config[OPENALEX_PAPER_TITLE_LOG_KEY]["sha256"]
+    meta = config.files_config.get(OPENALEX_PAPER_TITLE_PARQUET_KEY)
+    if meta is not None:
+        path = Path(meta["path"])
+        expected_hash = meta.get("sha256")
+        if path.exists():
+            validate_openalex_paper_title_read_model(
+                path,
+                expected_log_sha256=title_log_hash,
+                conn=conn,
+            )
+        elif conn is None:
+            raise ValueError(
+                f"Could not create {OPENALEX_PAPER_TITLE_PARQUET_KEY} without "
+                "a DuckDB connection."
+            )
+        else:
+            write_openalex_paper_title_read_model(conn, log_path=log_path, output_path=path)
+        resource = register_resource(
+            path,
+            group=ResourceGroup.KTP_PIPELINE_ARTIFACT,
+            fragment_type=FragmentType.PAPER_ID,
+            description=meta.get("desc", "OpenAlex paper-title parquet read model"),
+            expected_hash=expected_hash,
+        )
+        messages.append(
+            f"Validated {OPENALEX_PAPER_TITLE_PARQUET_KEY}, title log sha256: "
+            f"{title_log_hash}"
+        )
+        return resource, messages
+
+    path = config.output_dir / OPENALEX_PAPER_TITLE_PARQUET_FILENAME
+    if path.exists():
+        validate_openalex_paper_title_read_model(
+            path,
+            expected_log_sha256=title_log_hash,
+            conn=conn,
+        )
+        resource = register_resource(
+            path,
+            group=ResourceGroup.KTP_PIPELINE_ARTIFACT,
+            fragment_type=FragmentType.PAPER_ID,
+            description="OpenAlex paper-title parquet read model",
+        )
+        messages.append(f"Reused {OPENALEX_PAPER_TITLE_PARQUET_KEY}: {path}")
+        return resource, messages
+
+    if conn is None:
+        raise ValueError(
+            f"Could not create or validate {OPENALEX_PAPER_TITLE_PARQUET_KEY} without "
+            "a DuckDB connection."
+        )
+
+    if log is not None:
+        log(
+            "Creating OpenAlex paper-title parquet read model from strict JSONL "
+            f"HTTP request log: {log_path}"
+        )
+        log(f"{OPENALEX_PAPER_TITLE_PARQUET_KEY} output: {path}")
+    write_openalex_paper_title_read_model(conn, log_path=log_path, output_path=path)
+    resource = register_resource(
+        path,
+        group=ResourceGroup.KTP_PIPELINE_ARTIFACT,
+        fragment_type=FragmentType.PAPER_ID,
+        description="OpenAlex paper-title parquet read model",
+    )
+    messages.append(f"Created {OPENALEX_PAPER_TITLE_PARQUET_KEY}: {path}")
+    messages.append(f"{OPENALEX_PAPER_TITLE_PARQUET_KEY} sha256: {resource.hash}")
+    messages.append(
+        f"{OPENALEX_PAPER_TITLE_PARQUET_KEY} title log sha256: {title_log_hash}"
+    )
+    return resource, messages
+
+
 def register_pipeline_resources(
     config: PipelineConfig,
     *,
@@ -463,8 +540,20 @@ def register_pipeline_resources(
         _ensure_openalex_paper_title_log_resource(config)
     )
     messages.extend(title_log_messages)
+    openalex_paper_title_parquet_resource, title_parquet_messages = (
+        _ensure_openalex_paper_title_parquet_resource(
+            config,
+            log_path=Path(openalex_paper_title_log_resource.__fspath__()),
+            conn=conn,
+            log=log,
+        )
+    )
+    messages.extend(title_parquet_messages)
     if author_details_unnest_resource is not None:
         parquet_resources[author_details_unnest_resource.name] = author_details_unnest_resource
+    parquet_resources[openalex_paper_title_parquet_resource.name] = (
+        openalex_paper_title_parquet_resource
+    )
 
     return PipelineResources(
         parquet_resources=parquet_resources,
@@ -474,6 +563,7 @@ def register_pipeline_resources(
         author_details_unnest_resource=author_details_unnest_resource,
         openalex_author_search_log_resource=openalex_author_search_log_resource,
         openalex_paper_title_log_resource=openalex_paper_title_log_resource,
+        openalex_paper_title_parquet_resource=openalex_paper_title_parquet_resource,
         messages=messages,
     )
 

@@ -9,6 +9,8 @@ import requests
 from pydantic import AnyUrl, BaseModel, Field, field_validator, model_validator
 from pydantic_core import core_schema
 
+from ..files import file_hash
+
 
 class ResourceGroup(str, Enum):
     """Enum identifying the provenance of registered resources.
@@ -138,11 +140,7 @@ class RegisteredResource(BaseModel):
             # Local file - read from filesystem
             try:
                 path = Path(self.__fspath__())
-                hasher = hashlib.new(algorithm)
-                with open(path, 'rb') as f:
-                    for chunk in iter(lambda: f.read(8192), b''):
-                        hasher.update(chunk)
-                return hasher.hexdigest()
+                return file_hash(path, algorithm=algorithm)
             except Exception as e:
                 raise ValueError(f"Could not read local file: {e}") from e
         

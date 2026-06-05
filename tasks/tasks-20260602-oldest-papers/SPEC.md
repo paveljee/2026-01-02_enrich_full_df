@@ -99,6 +99,8 @@ wire it in as a
 proper RegisteredResource,
 mirror how we did with
 ktp unnest parquet.
+parquet must contain:
+ssnp.paperid, openalex.title, ktp.openalex_received_at_unix_usec.
 parquet, 
 in its footer metadata,
 must contain a hash of jsonlines files
@@ -314,14 +316,17 @@ used by Step 9.
   batch interactions with OpenAlex. It is not the normal lookup table for
   Step 9 joins.
 - Title parquet: one row per OpenAlex work id/paper id needed by Step 9,
-  with at least `paperid` and `openalex.title`. This parquet is what Step
-  9 reads to join titles into both JSON payloads.
+  with `ssnp.paperid`, `openalex.title`, and
+  `ktp.openalex_received_at_unix_usec`. This parquet is what Step 9 reads
+  to join titles into both JSON payloads.
 
 Reuse must happen at the parquet layer:
 
 1. Compute the SHA-256 hash of the title JSONL log.
 2. If the title parquet exists and its footer metadata contains the same
-   JSONL hash, register/reuse it.
+   JSONL hash, register/reuse it. If the parquet exists but the footer
+   hash does not match the registered JSONL hash, fail resource
+   registration instead of silently rebuilding a possibly stale artifact.
 3. Read titles from the parquet and compare its paper IDs with the
    current `needed title IDs`.
 4. If any needed paper IDs are absent from the parquet, request only
@@ -369,9 +374,11 @@ Expected touchpoints:
     author-search log and paper-title batch log rather than
     author-specific or title-specific schema constants;
   - export `KTP_SSN_TOP_OLDEST_PAPERS_COL` in `__all__`;
-  - add/use centralized labels for `ssnp.filename`, `ssnp.date`, and
-    `ktp.ssnp_paperid_url` rather than scattering string literals;
-  - add/use a centralized label for `openalex.title`;
+  - add/use centralized labels for `ssnp.filename`, `ssnp.paperid`,
+    `ssnp.date`, and `ktp.ssnp_paperid_url` rather than scattering string
+    literals;
+  - add/use centralized labels for `openalex.title` and
+    `ktp.openalex_received_at_unix_usec`;
   - use a date constant such as `SSNP_DATE_COL`, not `SSNP_YEAR_COL`.
 - `src/helpers/resources.py`
   - register the configured `papers` parquet as a `SCISCINET_HF`
@@ -383,7 +390,8 @@ Expected touchpoints:
   - implement an author-details-unnest-like ensure function for the title
     parquet: check configured artifact if present, otherwise default
     output path, validate footer metadata against the JSONL hash, reuse
-    when valid, create/recreate when missing or stale, register as
+    when valid, create when missing, fail when an existing parquet has a
+    stale/mismatched JSONL hash, register as
     `ResourceGroup.KTP_PIPELINE_ARTIFACT` with `FragmentType.PAPER_ID`;
   - step 01's resource table and step 10's resource filename accounting
     should include both the JSONL log and title parquet resources.
@@ -406,7 +414,9 @@ Expected touchpoints:
     then left join it into `enriched`;
   - after the top-work and top-oldest reductions are defined, materialize
     the distinct `needed title IDs` that survive either reduction;
-  - ensure/rebuild the OpenAlex paper-title parquet for those IDs;
+  - query the registered OpenAlex paper-title parquet for those IDs and,
+    when IDs are missing, fetch batches and rebuild that parquet through
+    the OpenAlex helper;
   - load a small title relation from the title parquet filtered to the
     needed IDs and join it into both JSON outputs;
   - enrich `ktp.ssn_top_papers_hit_1pct` with titles while preserving its
@@ -438,15 +448,16 @@ For `ktp.ssn_top_papers_hit_1pct`, use the same title field label
 inside each top-work entry, but order by the top-works ranking, not by
 date.
 
-The title parquet itself can be a narrow table, for example:
+The title parquet itself is a narrow read model:
 
 ```text
-paperid VARCHAR
+ssnp.paperid VARCHAR
 openalex.title VARCHAR NULL
+ktp.openalex_received_at_unix_usec BIGINT NULL
 ```
-
-Extra audit columns such as response code or received timestamp are OK if
-useful, but Step 9 should only depend on paper id and title.
+Step 9 should use the global constants for these column names. The
+received timestamp is required in the parquet for auditability, though
+the final JSON payloads only need paper date, title, and OpenAlex URL.
 
 ### logging contract
 
@@ -488,7 +499,8 @@ Add focused tests that do not require the real SciSciNet parquet files:
   paper-title parquet as a registered pipeline-artifact resource with
   footer metadata validation;
 - parquet metadata tests should verify the title parquet contains the
-  JSONL SHA-256 metadata and that a stale/mismatched hash forces rebuild;
+  JSONL SHA-256 metadata and that a stale/mismatched hash fails
+  validation for an existing parquet;
 - a tiny DuckDB/parquet fixture should verify oldest-paper ranking by
   ascending full date, paperid tie-break, `TOP_K_WORKS` truncation,
   OpenAlex work URL construction, and omission of null-date papers;

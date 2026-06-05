@@ -27,7 +27,10 @@ from src.helpers.vars import (
     KTP_HCR_FILENAME_COL_LEGACY,
     KTP_HCR_ROW_NUMBER_COL,
     KTP_HCR_ROW_NUMBER_COL_LEGACY,
+    KTP_OPENALEX_RECEIVED_AT_UNIX_USEC_COL,
+    OPENALEX_TITLE_COL,
     REQUIRED_FILES_CONFIG_KEYS,
+    SSNP_PAPERID_COL,
 )
 from src.steps.step_02_load_xlsx import run as run_load_xlsx
 from src.steps.step_03_infer_names import run as run_infer_names
@@ -81,6 +84,23 @@ def test_csv_rows_match_samples(tmp_path: Path) -> None:
             openalex_title_log,
             group=ResourceGroup.KTP_PIPELINE_ARTIFACT,
             fragment_type=FragmentType.CSV_ROW,
+        )
+        openalex_title_parquet = tmp_path / "openalex_paper_titles.parquet"
+        conn.execute(
+            f"""
+            COPY (
+                SELECT
+                    NULL::VARCHAR AS "{SSNP_PAPERID_COL}",
+                    NULL::VARCHAR AS "{OPENALEX_TITLE_COL}",
+                    NULL::BIGINT AS "{KTP_OPENALEX_RECEIVED_AT_UNIX_USEC_COL}"
+                WHERE false
+            ) TO '{openalex_title_parquet}' (FORMAT PARQUET)
+            """
+        )
+        openalex_title_parquet_resource = register_resource(
+            openalex_title_parquet,
+            group=ResourceGroup.KTP_PIPELINE_ARTIFACT,
+            fragment_type=FragmentType.PAPER_ID,
         )
         files_config = {
             key: {"path": "dummy", "sha256": "dummy", "desc": "dummy"}
@@ -136,6 +156,7 @@ def test_csv_rows_match_samples(tmp_path: Path) -> None:
             docx_resources={},
             openalex_author_search_log_resource=openalex_resource,
             openalex_paper_title_log_resource=openalex_title_resource,
+            openalex_paper_title_parquet_resource=openalex_title_parquet_resource,
         )
 
         run_load_xlsx(context)
