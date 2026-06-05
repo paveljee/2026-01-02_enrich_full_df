@@ -13,7 +13,7 @@ from rich.console import Console
 from rich.table import Table
 
 from src.helpers.config import PipelineConfig
-from src.helpers.init import init_pipeline
+from src.helpers.init_pipeline import init_pipeline
 from src.helpers.repl_runtime import run_step
 from src.helpers.schema import POPULATION_ECON_VIEW
 from src.helpers.vars import (

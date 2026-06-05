@@ -114,11 +114,11 @@ def openalex_work_titles_batch_query(
     return urlencode(
         {
             "filter": "openalex_id:" + "|".join(cleaned_paperids),
-            "select": "title",
+            "select": "id,title",
             "per_page": str(OPENALEX_WORK_TITLE_BATCH_SIZE),
             "api_key": api_key,
         },
-        safe=":|",
+        safe=":|,",
         quote_via=quote,
     )
 
@@ -219,7 +219,7 @@ def _validate_openalex_work_title_log_record(
         )
     query_values = dict(parse_qsl(record.query, keep_blank_values=True))
     if (
-        query_values.get("select") != "title"
+        query_values.get("select") != "id,title"
         or query_values.get("per_page") != str(OPENALEX_WORK_TITLE_BATCH_SIZE)
         or query_values.get("api_key") != "REDACTED"
     ):
@@ -411,6 +411,7 @@ def write_openalex_paper_title_read_model(
         ) TO {duckdb_string_literal(str(output_path))} (FORMAT PARQUET, {metadata_sql})
         """
     )
+    conn.execute(f"DROP TABLE IF EXISTS {temp_table}")
     return log_sha256
 
 
@@ -530,7 +531,7 @@ def fetch_openalex_work_titles_batch(
         paperids=cleaned_paperids,
         api_key=resolved_api_key,
     )
-    redacted_query = redact_http_request_log_query(query, safe=":|")
+    redacted_query = redact_http_request_log_query(query, safe=":|,")
     url = f"{OPENALEX_SCHEME}://{OPENALEX_HOST}{OPENALEX_WORKS_PATH}?{query}"
     resolved_request_get = request_get or cast(_RequestGet, requests.get)
     start_ns = time.monotonic_ns()

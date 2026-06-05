@@ -17,10 +17,11 @@ from .resources import PipelineResources, register_pipeline_resources
 from .schema import (
     DOCX_INNERDICT_TABLE,
     OUTERDICT_STUB_TABLE,
-    PARQUET_AUTHOR_OUTPUT_TABLE,
+    PARQUET_INNERDICT_TABLE,
     XLSX_INNERDICT_TABLE,
 )
 from .vars import (
+    KTP_SOURCE_KEY_COL,
     STEP_BUILD_OUTERDICT,
     STEP_MATCH_DOCX,
     STEP_MATCH_PARQUET,
@@ -158,9 +159,10 @@ def init_pipeline(
             if manager.is_done(STEP_MATCH_PARQUET):
                 append_innerdicts_from_rows_table(
                     conn,
-                    table_name=PARQUET_AUTHOR_OUTPUT_TABLE,
+                    table_name=PARQUET_INNERDICT_TABLE,
                     outer_dict=outer_dict,
                     procedure=ParquetMatchProcedure(),
+                    key_column=KTP_SOURCE_KEY_COL,
                 )
 
         context = PipelineContext(

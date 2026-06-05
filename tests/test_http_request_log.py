@@ -8,7 +8,7 @@ from src.helpers.data_models.http_request_log import (
 )
 
 
-def test_append_http_request_log_record_writes_unicode_without_ascii_escaping(
+def test_append_http_request_log_record_writes_escaped_unicode_jsonl(
     tmp_path,
 ) -> None:
     log_path = tmp_path / "logs" / "http.jsonl"
@@ -28,8 +28,8 @@ def test_append_http_request_log_record_writes_unicode_without_ascii_escaping(
     append_http_request_log_record(log_path=log_path, record=record)
 
     raw = log_path.read_text(encoding="utf-8")
-    assert "你好" in raw
-    assert "\\u4f60\\u597d" not in raw
+    assert "你好" not in raw
+    assert "\\u4f60\\u597d" in raw
     assert raw.endswith("\n")
 
 

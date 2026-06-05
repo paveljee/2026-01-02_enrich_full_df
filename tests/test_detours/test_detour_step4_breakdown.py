@@ -25,6 +25,7 @@ from src.helpers.repl_runtime import run_step
 from src.helpers.schema import POPULATION_ECON_VIEW, SAMPLES_TABLE
 from src.helpers.vars import (
     HCR_XLSX_KEY_PREFIX,
+    OPENALEX_PAPER_TITLE_LOG_KEY,
     REQUIRED_FILES_CONFIG_KEYS,
     STEP_ADD_ECONOMY_PRIORITY,
     STEP_INFER_NAMES,
@@ -119,6 +120,15 @@ def _base_config_dict(tmp_path: Path) -> dict[str, object]:
                 "path": str(world_bank_path),
                 "sha256": _sha256(world_bank_path),
                 "desc": "World Bank country list",
+            }
+            continue
+        if key == OPENALEX_PAPER_TITLE_LOG_KEY:
+            dummy_path = dummy_dir / f"{key}.jsonl"
+            dummy_path.write_text("", encoding="utf-8")
+            files_config[key] = {
+                "path": str(dummy_path),
+                "sha256": _sha256(dummy_path),
+                "desc": f"Dummy file for {key}",
             }
             continue
         dummy_path = dummy_dir / f"{key}.parquet"
@@ -293,7 +303,7 @@ def _run_pipeline_subprocess(
         import duckdb
         import pandas as pd
         from src.helpers.config import PipelineConfig
-        from src.helpers.init import init_pipeline
+        from src.helpers.init_pipeline import init_pipeline
         from src.helpers.repl_runtime import run_step
         from src.helpers.vars import (
             STEP_ADD_ECONOMY_PRIORITY,

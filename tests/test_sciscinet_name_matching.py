@@ -677,7 +677,7 @@ def test_openalex_work_titles_batch_query_preserves_work_id_filter() -> None:
     )
 
     assert query == (
-        "filter=openalex_id:W123|W456&select=title&per_page=100&api_key=test-key"
+        "filter=openalex_id:W123|W456&select=id,title&per_page=100&api_key=test-key"
     )
     assert openalex_work_title_paperids_from_query(query) == ("W123", "W456")
 
@@ -695,6 +695,7 @@ def test_openalex_work_titles_batch_appends_response_and_parses_titles(
             status_code=200,
             text=(
                 '{"results":['
+                '{"id":"https://openalex.org/W999","title":"Second Paper"},'
                 '{"id":"https://openalex.org/W123","title":"A Fine Paper 你好"}'
                 "]}"
             ),
@@ -711,11 +712,11 @@ def test_openalex_work_titles_batch_appends_response_and_parses_titles(
     assert len(seen_urls) == 1
     assert seen_urls[0].startswith("https://api.openalex.org/works?")
     assert "filter=openalex_id:W123|W999" in seen_urls[0]
-    assert "select=title" in seen_urls[0]
+    assert "select=id,title" in seen_urls[0]
     assert "per_page=100" in seen_urls[0]
     assert "api_key=test-key" in seen_urls[0]
     assert result.paperids == ("W123", "W999")
-    assert result.titles_by_paperid == {"W123": "A Fine Paper 你好", "W999": None}
+    assert result.titles_by_paperid == {"W123": "A Fine Paper 你好", "W999": "Second Paper"}
     assert result.query == record["query"]
     assert list(record) == [
         "schema_version",
@@ -746,11 +747,18 @@ def test_parse_openalex_top_author_id_handles_empty_or_malformed_results() -> No
 
 def test_parse_openalex_work_titles_response_handles_missing_or_malformed_results() -> None:
     assert parse_openalex_work_titles_response(
-        '{"results":[{"id":"https://openalex.org/W123","title":"A Fine Paper 你好"}]}',
+        '{"results":['
+        '{"id":"https://openalex.org/W999","title":"Other Paper"},'
+        '{"id":"https://openalex.org/W123","title":"A Fine Paper 你好"}'
+        "]}",
         requested_paperids=["W123", "W999"],
-    ) == {"W123": "A Fine Paper 你好", "W999": None}
+    ) == {"W123": "A Fine Paper 你好", "W999": "Other Paper"}
     assert parse_openalex_work_titles_response(
         '{"results":[{"id":"https://openalex.org/W123","title":"   "}]}',
+        requested_paperids=["W123"],
+    ) == {"W123": None}
+    assert parse_openalex_work_titles_response(
+        '{"results":[{"title":"Title Without ID"}]}',
         requested_paperids=["W123"],
     ) == {"W123": None}
     assert parse_openalex_work_titles_response(

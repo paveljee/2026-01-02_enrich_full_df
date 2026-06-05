@@ -147,8 +147,9 @@
   `m.name_key AS name_key`; `802ed04` changed this to
   `m.name_key AS "{KTP_SOURCE_KEY_COL}"` and changed the live Step 9 append to
   use `key_column=KTP_SOURCE_KEY_COL`. The resume hydration path in
-  `src/helpers/init.py` stayed pointed at `PARQUET_AUTHOR_OUTPUT_TABLE` with the
-  default `name_key`, which explains the current resume crash after Step 9.
+  `src/helpers/init_pipeline.py` stayed pointed at `PARQUET_AUTHOR_OUTPUT_TABLE`
+  with the default `name_key`, which explains the current resume crash after
+  Step 9.
 - Current title read-model check: `data/output/openalex_paper_titles.parquet`
   has 16,622 rows and zero non-null `openalex.title` values. The old JSONL
   records used `select=title`, so OpenAlex returned title-only result objects
@@ -160,14 +161,44 @@
   normal UTF-8 strings in the parquet while leaving JSONL response bodies as
   OpenAlex returned them.
 
-### pending fixes
+### fixes completed
 
-- Change resume hydration to append parquet innerdicts from
+- Changed resume hydration to append parquet innerdicts from
   `PARQUET_INNERDICT_TABLE` using `key_column=KTP_SOURCE_KEY_COL`, preserving
   the straight-through Step 9 -> Step 10 behavior.
-- Fix OpenAlex paper-title batch query/rebuild logic to use
+- Fixed OpenAlex paper-title batch query/rebuild logic to use
   `select=id,title`, map titles by returned OpenAlex id, rebuild the title
   parquet with populated `openalex.title`, and keep missing/unreturned IDs as
   NULL-title rows.
-- Update focused tests around resume hydration source and OpenAlex title
+- Updated focused tests around resume hydration source and OpenAlex title
   response-order independence.
+
+### implementation follow-up
+
+- Updated resume hydration in `src/helpers/init_pipeline.py` to read completed
+  parquet matches from `PARQUET_INNERDICT_TABLE` using `KTP_SOURCE_KEY_COL`,
+  matching the live Step 9 append path and avoiding the intermediate
+  `PARQUET_AUTHOR_OUTPUT_TABLE`.
+- Updated OpenAlex work-title batch query construction and strict JSONL-record
+  validation to require `select=id,title`; the query/log keeps the comma literal
+  so it matches the SPEC shape.
+- Left title parsing id-based: titles are mapped only by returned OpenAlex work
+  id, never by response order. Missing/unreturned ids remain NULL-title rows in
+  the rebuilt parquet.
+- Added `tests/test_init_pipeline.py` to cover resume hydration from enriched
+  `ssn_innerdicts` with `ktp.source_key`, and updated OpenAlex focused tests to
+  prove response-order independence and missing-id handling.
+- Updated the HTTP request-log test to reflect the signed-off JSONL behavior:
+  records may be ASCII-escaped on disk, while parsed records still round-trip
+  Unicode response bodies and the title parquet stores decoded strings.
+- Updated the step-4 detour test fixture for the renamed `init_pipeline` module
+  and for the strict OpenAlex title JSONL resource, and dropped the temporary
+  title read-model staging table after parquet writes so detour/main DB snapshots
+  stay aligned.
+
+### follow-up verification
+
+- `pixi run pytest -q tests/test_init_pipeline.py tests/test_sciscinet_name_matching.py::test_openalex_work_titles_batch_query_preserves_work_id_filter tests/test_sciscinet_name_matching.py::test_openalex_work_titles_batch_appends_response_and_parses_titles tests/test_sciscinet_name_matching.py::test_parse_openalex_work_titles_response_handles_missing_or_malformed_results tests/test_author_details_unnest_resource.py::test_openalex_paper_title_parquet_rebuilds_strict_batch_log tests/test_author_details_unnest_resource.py::test_openalex_paper_title_parquet_rejects_stale_log_hash` passed (`6 passed`).
+- `pixi run pytest -q tests/test_detours/test_detour_step4_breakdown.py tests/test_init_pipeline.py tests/test_http_request_log.py tests/test_sciscinet_name_matching.py tests/test_author_details_unnest_resource.py tests/test_step_09_match_parquet.py tests/test_cards.py tests/test_step_10_build_cards.py` passed (`79 passed, 6 skipped, 6 xfailed, 1 xpassed`).
+- `pixi run python -m ruff check src/helpers/init_pipeline.py src/helpers/openalex.py src/helpers/resources.py src/repl.py src/helpers/__init__.py src/detours/detour_step4_breakdown.py tests/test_init_pipeline.py tests/test_http_request_log.py tests/test_sciscinet_name_matching.py tests/test_author_details_unnest_resource.py tests/test_detours/test_detour_step4_breakdown.py` passed.
+- `pixi run python -m mypy src/helpers/init_pipeline.py src/helpers/openalex.py src/helpers/resources.py src/repl.py src/helpers/__init__.py src/detours/detour_step4_breakdown.py tests/test_init_pipeline.py tests/test_http_request_log.py tests/test_sciscinet_name_matching.py tests/test_author_details_unnest_resource.py tests/test_detours/test_detour_step4_breakdown.py` passed (`Success: no issues found in 11 source files`).
