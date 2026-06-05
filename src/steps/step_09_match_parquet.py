@@ -490,7 +490,21 @@ def run(context: PipelineContext) -> StepResult:
         fetched_titled_count = 0
         response_status_counts: dict[str, int] = {}
         if missing_paperids:
-            for batch in chunk_openalex_work_title_paperids(missing_paperids):
+            total_batches = sum(1 for _ in chunk_openalex_work_title_paperids(missing_paperids))
+            
+            for batch_index, batch in enumerate(
+                chunk_openalex_work_title_paperids(missing_paperids),
+                start=1,
+            ):
+                log_tag(
+                    STEP_MATCH_PARQUET_LOG_TAG_TABLE_EFF,
+                    "OpenAlex work-title request starting: "
+                    f"batch={batch_index:,}/{total_batches:,}, "
+                    f"paper IDs in request={len(batch):,}, "
+                    f"first paperid={batch[0] if batch else '<none>'}, "
+                    f"last paperid={batch[-1] if batch else '<none>'}.",
+                )
+                
                 result = fetch_openalex_work_titles_batch(
                     paperids=batch,
                     log_path=openalex_paper_title_log_path,
