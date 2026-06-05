@@ -369,3 +369,45 @@ to fully complete the
    and also aligns with the
    "10-15" or 11.4%
    estimate above).
+
+### post-release
+today 2026-06-05 UTC,
+shared batch #3 of 83 with team,
+for a total of
+76 + 31 + 83 = 190
+of 310 profiles
+sent off for 
+qualitative data analysis.
+
+used subset 1 output (dir1 below)
+except first two batches
+(dir3 and dir4 below):
+
+```bash
+mkdir -p "$dir2"
+
+find "$dir1" -maxdepth 1 -type f | while IFS= read -r file; do
+  name=$(basename "$file")
+
+  if [[ ! -e "$dir3/$name" && ! -e "$dir4/$name" ]]; then
+    cp -- "$file" "$dir2/"
+  fi
+done
+```
+
+This means 190 profiles are
+sent off for analyses, and 120 more
+to go in subset 2, of which 20
+require manual review (mostly
+very quick) and 100 require
+data augmentation due to
+missing DOCX fields (mostly
+education data) - but actually
+17 not 20
+because 3 were deduped
+making 310 -> 307, known fact.
+
+This seems to align with
+subset 2 data also, but I'll
+verify with more scrutiny
+as a next step.
