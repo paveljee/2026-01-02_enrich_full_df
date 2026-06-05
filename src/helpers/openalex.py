@@ -366,6 +366,10 @@ def write_openalex_paper_title_read_model(
     Always recalculates hash
     from `openalex_paper_title_log_resource.log_path`
     before writing.
+
+    Returns
+    the recalculated log hash,
+    not the parquet hash.
     """
     log_path = Path(openalex_paper_title_log_resource.__fspath__())
     log_sha256 = file_sha256(log_path)

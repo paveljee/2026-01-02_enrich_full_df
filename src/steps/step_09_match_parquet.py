@@ -408,7 +408,7 @@ def run(context: PipelineContext) -> StepResult:
     openalex_paper_title_parquet_path = Path(
         context.resources.openalex_paper_title_parquet_resource.__fspath__()
     )
-    openalex_paper_title_log_hash = file_sha256(openalex_paper_title_log_path)
+    openalex_paper_title_log_hash = context.resources.openalex_paper_title_log_resource.hash
     author_id_col = SSNAD_AUTHORID_COL
     authors_author_id_col = normalize_parquet_column_name(SSNAD_RAW_AUTHORID_COL, "ssnau")
     author_id_raw = SSNAD_RAW_AUTHORID_COL
@@ -433,18 +433,22 @@ def run(context: PipelineContext) -> StepResult:
         ) -> None:
         needed_table = "openalex_work_title_needed_paperids"
         title_parquet_sql = duckdb_string_literal(str(openalex_paper_title_parquet_path))
-        parquet_log_hash = openalex_paper_title_read_model_log_sha256(
+        parquet_metadata_log_hash = openalex_paper_title_read_model_log_sha256(
             conn,
             openalex_paper_title_parquet_path,
         )
-        hash_matches = parquet_log_hash == openalex_paper_title_log_hash
+        parquet_hash = resources.openalex_paper_title_parquet_resource.hash
+        hash_matches = parquet_metadata_log_hash == openalex_paper_title_log_hash
         log_tag(
             STEP_MATCH_PARQUET_LOG_TAG_TABLE_EFF,
             "OpenAlex work-title query side: "
             f"parquet={openalex_paper_title_parquet_path}; "
-            f"parquet title-log sha256={parquet_log_hash or '<missing>'}; "
-            f"current JSONL sha256={openalex_paper_title_log_hash}; "
-            f"hash match={'yes' if hash_matches else 'no'}.",
+            f"sha256 in parquet footer={parquet_metadata_log_hash or '<missing>'}; "
+            "title-log JSONL hash (read from config) "
+            f"sha256={openalex_paper_title_log_hash}; "
+            f"hash match={'yes' if hash_matches else 'no'}. "
+            "The parquet's own hash (read from config) "
+            f"sha256={parquet_hash}.",
         )
         if not hash_matches:
             raise ValueError(
@@ -535,7 +539,8 @@ def run(context: PipelineContext) -> StepResult:
                 openalex_paper_title_log_resource=new_log_resource,
                 output_path=openalex_paper_title_parquet_path,
             )
-            parquet_log_hash = openalex_paper_title_read_model_log_sha256(
+            updated_parquet_hash = file_sha256(openalex_paper_title_parquet_path)
+            parquet_metadata_log_hash = openalex_paper_title_read_model_log_sha256(
                 conn,
                 openalex_paper_title_parquet_path,
             )
@@ -543,9 +548,12 @@ def run(context: PipelineContext) -> StepResult:
                 STEP_MATCH_PARQUET_LOG_TAG_TABLE_EFF,
                 "OpenAlex work-title query side rebuilt after command append: "
                 f"parquet={openalex_paper_title_parquet_path}; "
-                f"parquet title-log sha256={parquet_log_hash or '<missing>'}; "
-                f"current JSONL sha256={updated_log_hash}; "
-                f"hash match={'yes' if parquet_log_hash == updated_log_hash else 'no'}.",
+                f"sha256 in parquet footer={parquet_metadata_log_hash or '<missing>'}; "
+                f"current title-log hash (calculated from JSONL) "
+                f"sha256={updated_log_hash}; "
+                f"hash match={'yes' if parquet_metadata_log_hash == updated_log_hash else 'no'}. "
+                "The parquet's own hash (calculated after rebuild) "
+                f"sha256={updated_parquet_hash}.",
             )
         else:
             log_tag(
