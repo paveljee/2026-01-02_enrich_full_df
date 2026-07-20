@@ -12,7 +12,7 @@
   "state_file": "data/pipeline_state.json",
   "output_dir": "data/output",
   "output_format": "docx",
-  "card_subset_mode": 1,
+  "card_subset_mode": 2,
   "match_rule_version": {
     "xlsx_name": 2,
     "docx_name": 1,
