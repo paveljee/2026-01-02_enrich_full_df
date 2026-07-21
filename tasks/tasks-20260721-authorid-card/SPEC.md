@@ -28,11 +28,16 @@ user passes --config and
 the detour prints to stdout
 the exact replica of step 9 innerdict
 for this authorid
-(from --config, db path is extracted)
-from the db path, opened readonly.
+(from --config, parquet registered resources are extracted)
+from parquet resources directly.
 this output should be identical
 to the corresponding innerdict subsection
 in a step 10 card, txt only.
 reuse all same logic.
+
+note: the detour actually replicates step 9
+(not importing it - replicates the logic;
+helpers may be imported),
+just for a single authorid.
 
 ## how ai understood the spec
