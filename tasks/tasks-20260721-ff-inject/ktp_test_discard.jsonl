@@ -1,0 +1,14 @@
+{
+    "ktp.source_key": "{\"ktp.first_name\": \"Paul G\", \"ktp.last_name\": \"Richardson\"}",
+    "ktp.ff_discard": {
+        "ktp.filename": "2014_HCR.xlsx",
+        "ktp.fragment": "2024"
+    }
+}
+{
+    "ktp.source_key": "{\"ktp.first_name\": \"Kuishuang\", \"ktp.last_name\": \"Feng\"}",
+    "ktp.ff_discard": {
+        "ktp.filename": "sciscinet_author_details.parquet",
+        "ktp.fragment": "A5076843232"
+    }
+}
