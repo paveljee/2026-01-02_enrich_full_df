@@ -10,10 +10,16 @@ the interaction with OpenAI Codex
 (i.e., a Codex rollout) in relation to the
 implemention of this task specification:
 `tasks/tasks-20260723-fix-ssn-schema/SPEC.md`.
-This includes the main rollout
+This includes the first rollout
 `rollout-2026-07-23T16-36-27-019f90b1-9ce8-7c60-9ef0-0da420efc14b.jsonl`
 _as well as_
 any related subagent rollouts.
+
+Further rollouts were with
+`agents.enabled` = `false`,
+so starting from
+`rollout-2026-07-23T17-23-11-019f90dc-6714-7860-8ac0-309ca54b78e9.jsonl`,
+rollouts stand alone.
 
 While the rollout is a
 plain text file
