@@ -4,6 +4,7 @@ data/*
 tmp/
 untracked/
 embargoed/
+.tmp
 
 # pixi environments
 .pixi/*
