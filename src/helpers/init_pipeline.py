@@ -9,7 +9,7 @@ from .config import PipelineConfig
 from .context import PipelineContext
 from .data_models import NameKey, OuterDict
 from .diagnostics import DiagnosticsReport
-from .duckdb_utils import append_innerdicts_from_jsonlines_table, append_innerdicts_from_rows_table
+from .duckdb_utils import append_innerdicts_from_jsonlines_table
 from .pipeline_manager import PipelineManager
 from .procedures import DocxMatchProcedure, ParquetMatchProcedure, XlsxMatchProcedure
 from .resource_monitor import ResourceMonitor
@@ -21,7 +21,6 @@ from .schema import (
     XLSX_INNERDICT_TABLE,
 )
 from .vars import (
-    KTP_SOURCE_KEY_COL,
     STEP_BUILD_OUTERDICT,
     STEP_MATCH_DOCX,
     STEP_MATCH_PARQUET,
@@ -157,12 +156,11 @@ def init_pipeline(
                     procedure=DocxMatchProcedure(),
                 )
             if manager.is_done(STEP_MATCH_PARQUET):
-                append_innerdicts_from_rows_table(
+                append_innerdicts_from_jsonlines_table(
                     conn,
                     table_name=PARQUET_INNERDICT_TABLE,
                     outer_dict=outer_dict,
                     procedure=ParquetMatchProcedure(),
-                    key_column=KTP_SOURCE_KEY_COL,
                 )
 
         context = PipelineContext(

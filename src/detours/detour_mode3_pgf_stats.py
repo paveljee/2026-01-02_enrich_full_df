@@ -20,7 +20,11 @@ from rich.table import Table
 from src.helpers.config import PipelineConfig
 from src.helpers.jsonlines import loads_jsonlines
 from src.helpers.resource_monitor import ResourceMonitor
-from src.helpers.schema import OUTERDICT_STUB_TABLE, PARQUET_INNERDICT_TABLE, XLSX_INNERDICT_TABLE
+from src.helpers.schema import (
+    OUTERDICT_STUB_TABLE,
+    PARQUET_LEGACY_ROWS_INNERDICT_TABLE,
+    XLSX_INNERDICT_TABLE,
+)
 from src.helpers.vars import (
     CARD_BUILD_SUBSET_DESCRIPTIONS,
     KTP_FILENAME_COL,
@@ -304,7 +308,7 @@ def _build_mode3_pgf_metadata(conn: duckdb.DuckDBPyConnection) -> dict[str, Any]
         (
             f'SELECT "{KTP_SOURCE_KEY_COL}", "{P_GF_COL}", '
             f'"{INFERENCE_COUNTS_COL}", "{INFERENCE_SOURCES_COL}" '
-            f"FROM {PARQUET_INNERDICT_TABLE}"
+            f"FROM {PARQUET_LEGACY_ROWS_INNERDICT_TABLE}"
         )
     ).fetchall():
         if source_key is None:
@@ -480,7 +484,11 @@ def _build_mode3_pgf_metadata(conn: duckdb.DuckDBPyConnection) -> dict[str, Any]
         "mode": MODE,
         "mode_description": CARD_BUILD_SUBSET_DESCRIPTIONS[MODE],
         "db_file": _db_file_from_pragma(conn),
-        "tables_used": [OUTERDICT_STUB_TABLE, XLSX_INNERDICT_TABLE, PARQUET_INNERDICT_TABLE],
+        "tables_used": [
+            OUTERDICT_STUB_TABLE,
+            XLSX_INNERDICT_TABLE,
+            PARQUET_LEGACY_ROWS_INNERDICT_TABLE,
+        ],
         "methodology_notice": {
             "nomquamgender_name_handling": NQG_NAME_HANDLING_NOTICE,
             "sciscinet_v2_pipeline_use": SCISCINET_PIPELINE_NOTICE,

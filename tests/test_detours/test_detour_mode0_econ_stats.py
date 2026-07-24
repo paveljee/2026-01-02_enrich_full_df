@@ -26,7 +26,7 @@ from src.helpers.jsonlines import dumps_jsonlines
 from src.helpers.resources import register_resource
 from src.helpers.schema import (
     OUTERDICT_STUB_TABLE,
-    PARQUET_INNERDICT_TABLE,
+    PARQUET_LEGACY_ROWS_INNERDICT_TABLE,
     PARQUET_OUTPUT_VIEW,
     POPULATION_ECON_VIEW,
     XLSX_INNERDICT_TABLE,
@@ -205,7 +205,7 @@ def _build_fixture_db(path: Path) -> dict[str, int]:
         )
         con.execute(
             f"""
-            CREATE TABLE {PARQUET_INNERDICT_TABLE} (
+            CREATE TABLE {PARQUET_LEGACY_ROWS_INNERDICT_TABLE} (
                 "{KTP_SOURCE_KEY_COL}" VARCHAR
             )
             """
@@ -789,7 +789,8 @@ def _build_fixture_db(path: Path) -> dict[str, int]:
             (keys["fail_non_exact_jsonl"],),
         ]
         con.executemany(
-            f'INSERT INTO {PARQUET_INNERDICT_TABLE} ("{KTP_SOURCE_KEY_COL}") VALUES (?)',
+            f'INSERT INTO {PARQUET_LEGACY_ROWS_INNERDICT_TABLE} '
+            f'("{KTP_SOURCE_KEY_COL}") VALUES (?)',
             ssn_rows,
         )
         con.execute(
@@ -803,7 +804,7 @@ def _build_fixture_db(path: Path) -> dict[str, int]:
                 'author_details.parquet' AS "ktp.ssnad_filename",
                 'authors.parquet' AS "ktp.ssnau_filename",
                 '["Field A"]' AS "ssn.field_ids_list"
-            FROM {PARQUET_INNERDICT_TABLE}
+            FROM {PARQUET_LEGACY_ROWS_INNERDICT_TABLE}
             """
         )
 
@@ -853,7 +854,9 @@ def test_detour_contract_and_mode0_econ_stats_readonly(
         before_counts = {
             OUTERDICT_STUB_TABLE: _row_count(before, OUTERDICT_STUB_TABLE),
             XLSX_INNERDICT_TABLE: _row_count(before, XLSX_INNERDICT_TABLE),
-            PARQUET_INNERDICT_TABLE: _row_count(before, PARQUET_INNERDICT_TABLE),
+            PARQUET_LEGACY_ROWS_INNERDICT_TABLE: _row_count(
+                before, PARQUET_LEGACY_ROWS_INNERDICT_TABLE
+            ),
         }
     finally:
         before.close()
@@ -1125,14 +1128,16 @@ def test_detour_contract_and_mode0_econ_stats_readonly(
         after_counts = {
             OUTERDICT_STUB_TABLE: _row_count(after, OUTERDICT_STUB_TABLE),
             XLSX_INNERDICT_TABLE: _row_count(after, XLSX_INNERDICT_TABLE),
-            PARQUET_INNERDICT_TABLE: _row_count(after, PARQUET_INNERDICT_TABLE),
+            PARQUET_LEGACY_ROWS_INNERDICT_TABLE: _row_count(
+                after, PARQUET_LEGACY_ROWS_INNERDICT_TABLE
+            ),
         }
     finally:
         after.close()
     assert before_counts == after_counts == {
         OUTERDICT_STUB_TABLE: baseline_counts["outerdict_rows"],
         XLSX_INNERDICT_TABLE: baseline_counts["xlsx_innerdict_rows"],
-        PARQUET_INNERDICT_TABLE: baseline_counts["ssn_innerdict_rows"],
+        PARQUET_LEGACY_ROWS_INNERDICT_TABLE: baseline_counts["ssn_innerdict_rows"],
     }
 
 

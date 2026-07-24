@@ -41,6 +41,7 @@ PARQUET_ALL_HITS_TABLE = "ssn_all_hits"
 PARQUET_AUTHOR_HIT_AGG_TABLE = "ssn_author_hit_agg"
 PARQUET_AUTHOR_AGG_TABLE = "ssn_author_agg"
 PARQUET_INNERDICT_TABLE = "ssn_innerdicts"
+PARQUET_LEGACY_ROWS_INNERDICT_TABLE = "ssn_legacy_rows_innerdicts"
 PARQUET_AUTHOR_OUTPUT_TABLE = "ssn_author_output"
 PARQUET_OUTPUT_VIEW = "ssn_parquet_output"
 

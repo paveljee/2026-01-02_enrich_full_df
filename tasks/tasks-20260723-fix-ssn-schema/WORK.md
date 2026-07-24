@@ -1,78 +1,64 @@
-# SSN innerdict schema and source-key JSON workbook
+# SSN innerdict schema workbook
 
 ## Constraints
 
-- Specification only; no application implementation in this task.
-- Preserve the human section of `SPEC.md`.
-- Never run or import `src.repl`. Git use is read-only; do not stage or unstage.
-- The only inspected data artifact was
-  `data/scisci_process.duckdb`, opened with `read_only=True`.
-- Code/config/tests were inspected read-only. No other `data/` or `.aicode/`
-  artifacts were consulted.
+- Preserve the human-authored `SPEC.md` section.
+- Never run or import `src.repl`; never mutate the supplied database.
+- Do not use Git.
+- Preserve `name_key` / `innerdicts` column labels for this task.
+- Keep changes surgical; do not refactor `OuterDict`, source-key ownership, or
+  shared DuckDB helpers beyond removing the obsolete row loader at the end.
+
+## Execution sequence
+
+1. Mechanically move the current wide SSN relation and every current consumer
+   to `PARQUET_LEGACY_ROWS_INNERDICT_TABLE`, preserving behavior.
+2. Materialize a new, initially unconsumed `PARQUET_INNERDICT_TABLE` with the
+   existing two-column JSONL contract used by XLSX and DOCX.
+3. Rebind only true innerdict consumers to the new table. Keep flat relational
+   consumers on the legacy table or `PARQUET_OUTPUT_VIEW`.
+4. Remove `append_innerdicts_from_rows_table`; adjust focused tests and verify.
 
 ## Status
 
-- Completed: re-read the updated human section after the added DuckDB JSON
-  requirement and re-read the linked prerequisite.
-- Completed: traced fresh-run and resume paths through steps 6-10,
-  `OuterDict`, innerdict persistence helpers, output views, and both current
-  detours.
-- Completed: inspected the supplied database schemas and cardinalities
-  read-only. Loaded `splink_udfs` before evaluating output views.
-- Completed: wrote the minimal coherent implementation and acceptance contract
-  into the AI section of `SPEC.md`.
+- Completed: re-read both spec sections, the linked prerequisite, and relevant
+  step-9/resume/detour consumers.
+- Completed: phase 1 mechanical legacy-table rename. All former wide consumers
+  now use `PARQUET_LEGACY_ROWS_INNERDICT_TABLE`; the new constant is free.
+- Completed: phase 2 creation of the two-column SSN JSONL table, inline in step
+  9 using the same group/drop/JSONL/register/create pattern as steps 7 and 8.
+- Completed: phase 3 consumer rebinding. Fresh step-9 and resume hydration use
+  `append_innerdicts_from_jsonlines_table` with `PARQUET_INNERDICT_TABLE`;
+  flat output and detours remain on the legacy relation/output view.
+- Completed: removed the now-unreferenced `append_innerdicts_from_rows_table`.
+- Completed: focused and repository validation.
 
-## Read-only baseline
+## Consumer classification
 
-| relation | current shape | current count |
-|---|---|---:|
-| `outerdict_stub` | `name_key`, `innerdicts` | 307 keys |
-| `xlsx_innerdicts` | `name_key`, `innerdicts` | 307 keys / 2,018 JSONL records |
-| `docx_innerdicts` | `name_key`, `innerdicts` | 307 keys / 317 JSONL records |
-| `ssn_innerdicts` | wide, 304 distinct `ktp.source_key` values | 2,044 rows |
-| `ssn_parquet_output` | wide view | 2,044 rows |
+- New JSONL table: fresh step-9 `OuterDict` hydration and resume hydration.
+- Legacy rows/output view: `PARQUET_OUTPUT_VIEW` and flat detour analytics.
+- Step-10 review remains on `PARQUET_OUTPUT_VIEW`.
 
-All 307 outerdict keys are valid JSON with non-null first and last names.
-Current XLSX and DOCX JSONL record totals equal their flat output-view row
-counts. Current SSN table and output-view row totals also agree.
+## Findings
 
-## Settled contract
-
-- `xlsx_innerdicts`, `docx_innerdicts`, and `ssn_innerdicts` each become the
-  same exact two-column JSONL store:
-  `ktp.source_key`, `ktp.innerdicts`.
-- Preserve an internal materialized wide SSN row relation and keep
-  `ssn_parquet_output` wide. Aggregate only the public innerdict store; do not
-  force downstream SQL to repeatedly unpack it.
-- Use one writer and one loader for all three stores. Fresh execution and
-  resume must hydrate equivalent outerdicts.
-- DuckDB alone converts names to source-key JSON and source-key JSON back to
-  names. Python carries the produced key opaquely.
-- The DuckDB-only boundary does not encompass unrelated match/config/log/body
-  JSON.
-- Treat the change as new-build-only. No old-schema migration or dual-read
-  compatibility is in scope.
-
-## Impact map for the executor
-
-- Constants/schema: `src/helpers/vars.py`, `src/helpers/schema.py`.
-- Source-key ownership/in-memory identity:
-  `src/helpers/data_models/outer_dict.py`,
-  `src/steps/step_06_build_outerdict_stub.py`,
-  `src/helpers/init_pipeline.py`, and keyed step-10 paths.
-- Shared innerdict persistence:
-  `src/helpers/duckdb_utils.py` and steps 7-9.
-- Flat consumers: `ssn_parquet_output`, step-10 review SQL,
-  `detour_mode0_econ_stats.py`, and `detour_mode3_pgf_stats.py`.
-- Tests/fixtures: outerdict, init/resume, steps 6-10, and both detours. Test
-  source keys must also be DuckDB-produced.
+- DuckDB nullable floats become pandas `NaN`; step 9 normalizes pandas missing
+  values to Python `None` before JSONL serialization so SQL `NULL` remains JSON
+  `null`. DuckDB JSON-typed cells arrive as strings and remain strings.
 
 ## Verification
 
-- `src.repl` was not run or imported.
-- View checks used `LOAD splink_udfs` before querying
-  `xlsx_output`, `docx_output`, or `ssn_parquet_output`.
-- No source, fixture, database, or application file was modified; only this
-  task's Markdown specification/workbook were edited.
-- No application test suite was run because this task only scopes the later
-  implementation.
+- Phase 1 narrow tests: 9 passed. Two mode-0 tests were blocked only because
+  the default environment lacks optional Plotly/Kaleido; rerun those in the
+  `detour-mode0-econ-stats` pixi environment.
+- Phase 2/3 focused tests: 10 passed.
+- Detours: mode 0 passed 4/4 in its optional pixi environment; mode 3 passed
+  6/6 in the default environment. Read-only assertions remained intact.
+- Ruff: passed for all touched Python files.
+- mypy: passed for all touched Python files.
+- Repository suite excluding live `real_api`: 133 passed, 3 skipped, 4
+  deselected, 6 xfailed, 1 xpassed. One unrelated environment failure remains:
+  the configured `splink_udfs` Linux ARM64 binary is absent at the expected
+  external path.
+- Supplied database was opened read-only only to confirm the former wide SSN
+  type profile; it was not mutated.
+- `src.repl` was neither run nor imported. No Git command was used.

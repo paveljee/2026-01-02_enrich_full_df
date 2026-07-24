@@ -45,39 +45,8 @@ def append_innerdicts_from_jsonlines_table(
             outer_dict.add_inner_by_key(str(name_key), inner)
 
 
-def append_innerdicts_from_rows_table(
-    conn: duckdb.DuckDBPyConnection,
-    *,
-    table_name: str,
-    outer_dict: OuterDict,
-    procedure,
-    required_columns: set[str] | None = None,
-    key_column: str = "name_key",
-) -> None:
-    rel = conn.execute(f"SELECT * FROM {table_name}")
-    cols = [desc[0] for desc in rel.description]
-    try:
-        name_idx = cols.index(key_column)
-    except ValueError as exc:
-        raise ValueError(f"Missing {key_column} column in {table_name}") from exc
-    required = required_columns or set()
-    while True:
-        rows = rel.fetchmany(5000)
-        if not rows:
-            break
-        for row in rows:
-            name_key = row[name_idx]
-            record = {col: row[i] for i, col in enumerate(cols) if i != name_idx}
-            for col in required:
-                if col not in record:
-                    raise ValueError(f"Innerdict missing required column '{col}'")
-            inner = InnerDict.from_mapping(record, procedure)
-            outer_dict.add_inner_by_key(str(name_key), inner)
-
-
 __all__ = [
     "duckdb_string_literal",
     "register_frame",
     "append_innerdicts_from_jsonlines_table",
-    "append_innerdicts_from_rows_table",
 ]

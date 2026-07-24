@@ -28,11 +28,15 @@ also, in fact these should have been:
 - `ktp.source_key`
 - `ktp.innerdicts`
 
+(but let's keep this migration
+out of scope for now).
+
 let's scope the minimal changes
 needed to address these comprehensively and
 what this will impact in the system.
 
 **additional issue:**
+(but let's keep it out of scope for now)
 it has become clear throughout
 the steps of the main pipeline that
 jsonification of names -> source keys
@@ -43,6 +47,35 @@ such that all json serialization and
 deserialization of source keys
 should happen through duckdb.
 add this to the consideration.
+
+**of note:**
+one change i've already made is this:
+
+```
+PARQUET_INNERDICT_TABLE = "ssn_innerdicts"
+PARQUET_LEGACY_ROWS_INNERDICT_TABLE = "ssn_legacy_rows_innerdicts"
+```
+
+so the goal is to replace all
+PARQUET_INNERDICT_TABLE  with
+PARQUET_LEGACY_ROWS_INNERDICT_TABLE
+first, to free PARQUET_INNERDICT_TABLE.
+
+Then we should ensure
+PARQUET_INNERDICT_TABLE is proper
+suitable for `append_innerdicts_from_jsonlines_table`
+just like xlsx and docx innerdicts tables are.
+
+Then we must ask ourselves:
+what downstream users depend on
+PARQUET_LEGACY_ROWS_INNERDICT_TABLE now?
+So, those that in good faith should
+have made use of a jsonlines table,
+we should migrate them to PARQUET_INNERDICT_TABLE
+(the new one).
+Those that just accidentally 
+depended on the legacy rows table,
+we may keep them on PARQUET_LEGACY_ROWS_INNERDICT_TABLE.
 
 ## how ai understood the spec
 

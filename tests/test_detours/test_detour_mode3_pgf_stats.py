@@ -19,7 +19,11 @@ from src.detours.detour_mode3_pgf_stats import (
 )
 from src.helpers.config import PipelineConfig
 from src.helpers.jsonlines import dumps_jsonlines
-from src.helpers.schema import OUTERDICT_STUB_TABLE, PARQUET_INNERDICT_TABLE, XLSX_INNERDICT_TABLE
+from src.helpers.schema import (
+    OUTERDICT_STUB_TABLE,
+    PARQUET_LEGACY_ROWS_INNERDICT_TABLE,
+    XLSX_INNERDICT_TABLE,
+)
 from src.helpers.vars import (
     HCR_XLSX_KEY_PREFIX,
     KTP_FILENAME_COL,
@@ -124,7 +128,7 @@ def _build_fixture_db(path: Path) -> dict[str, int]:
         )
         con.execute(
             f"""
-            CREATE TABLE {PARQUET_INNERDICT_TABLE} (
+            CREATE TABLE {PARQUET_LEGACY_ROWS_INNERDICT_TABLE} (
                 "{KTP_SOURCE_KEY_COL}" VARCHAR,
                 "ssnau.p_gf" DOUBLE,
                 "ssnau.inference_counts" BIGINT,
@@ -259,7 +263,7 @@ def _build_fixture_db(path: Path) -> dict[str, int]:
         ]
         con.executemany(
             (
-                f'INSERT INTO {PARQUET_INNERDICT_TABLE} '
+                f'INSERT INTO {PARQUET_LEGACY_ROWS_INNERDICT_TABLE} '
                 f'("{KTP_SOURCE_KEY_COL}", "ssnau.p_gf", '
                 f'"ssnau.inference_counts", "ssnau.inference_sources") '
                 f"VALUES (?, ?, ?, ?)"
@@ -306,7 +310,9 @@ def test_detour_contract_and_mode3_stats_readonly(
         before_counts = {
             OUTERDICT_STUB_TABLE: _row_count(before, OUTERDICT_STUB_TABLE),
             XLSX_INNERDICT_TABLE: _row_count(before, XLSX_INNERDICT_TABLE),
-            PARQUET_INNERDICT_TABLE: _row_count(before, PARQUET_INNERDICT_TABLE),
+            PARQUET_LEGACY_ROWS_INNERDICT_TABLE: _row_count(
+                before, PARQUET_LEGACY_ROWS_INNERDICT_TABLE
+            ),
         }
     finally:
         before.close()
@@ -330,7 +336,7 @@ def test_detour_contract_and_mode3_stats_readonly(
     assert md["tables_used"] == [
         OUTERDICT_STUB_TABLE,
         XLSX_INNERDICT_TABLE,
-        PARQUET_INNERDICT_TABLE,
+        PARQUET_LEGACY_ROWS_INNERDICT_TABLE,
     ]
     methodology = md["methodology_notice"]
     assert "full normalized string first" in methodology["nomquamgender_name_handling"]
@@ -418,14 +424,16 @@ def test_detour_contract_and_mode3_stats_readonly(
         after_counts = {
             OUTERDICT_STUB_TABLE: _row_count(after, OUTERDICT_STUB_TABLE),
             XLSX_INNERDICT_TABLE: _row_count(after, XLSX_INNERDICT_TABLE),
-            PARQUET_INNERDICT_TABLE: _row_count(after, PARQUET_INNERDICT_TABLE),
+            PARQUET_LEGACY_ROWS_INNERDICT_TABLE: _row_count(
+                after, PARQUET_LEGACY_ROWS_INNERDICT_TABLE
+            ),
         }
     finally:
         after.close()
     assert before_counts == after_counts == {
         OUTERDICT_STUB_TABLE: baseline_counts["outerdict_rows"],
         XLSX_INNERDICT_TABLE: baseline_counts["xlsx_innerdict_rows"],
-        PARQUET_INNERDICT_TABLE: baseline_counts["ssn_innerdict_rows"],
+        PARQUET_LEGACY_ROWS_INNERDICT_TABLE: baseline_counts["ssn_innerdict_rows"],
     }
 
 

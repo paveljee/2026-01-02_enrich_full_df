@@ -23,7 +23,7 @@ from src.helpers.resource_monitor import ResourceMonitor
 from src.helpers.resources import register_resource
 from src.helpers.schema import (
     OUTERDICT_STUB_TABLE,
-    PARQUET_INNERDICT_TABLE,
+    PARQUET_LEGACY_ROWS_INNERDICT_TABLE,
     PARQUET_OUTPUT_VIEW,
     POPULATION_ECON_VIEW,
     XLSX_INNERDICT_TABLE,
@@ -951,8 +951,8 @@ def _parquet_left_join_df(
     source_name = None
     if PARQUET_OUTPUT_VIEW in tables:
         source_name = PARQUET_OUTPUT_VIEW
-    elif PARQUET_INNERDICT_TABLE in tables:
-        source_name = PARQUET_INNERDICT_TABLE
+    elif PARQUET_LEGACY_ROWS_INNERDICT_TABLE in tables:
+        source_name = PARQUET_LEGACY_ROWS_INNERDICT_TABLE
     if source_name is None:
         return pd.DataFrame(columns=[KTP_SOURCE_KEY_COL]), []
 

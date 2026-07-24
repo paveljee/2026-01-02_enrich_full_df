@@ -5,6 +5,7 @@ from copy import deepcopy
 from pathlib import Path
 
 import duckdb
+import pandas as pd
 
 from ..helpers.context import (
     PipelineContext,
@@ -12,11 +13,13 @@ from ..helpers.context import (
     StepResult,
 )
 from ..helpers.duckdb_utils import (
-    append_innerdicts_from_rows_table,
+    append_innerdicts_from_jsonlines_table,
     duckdb_quote_identifier,
     duckdb_string_literal,
+    register_frame,
 )
 from ..helpers.files import file_sha256
+from ..helpers.jsonlines import dumps_jsonlines
 from ..helpers.name_matching import (
     sciscinet_ktp_name_norm_sql,
 )
@@ -43,6 +46,7 @@ from ..helpers.schema import (
     PARQUET_AUTHOR_OUTPUT_TABLE,
     PARQUET_AUTHOR_PAPERS_TABLE,
     PARQUET_INNERDICT_TABLE,
+    PARQUET_LEGACY_ROWS_INNERDICT_TABLE,
     PARQUET_OUTPUT_VIEW,
     SAMPLES_WITH_NAMES_VIEW,
     safe_identifier,
@@ -1552,7 +1556,7 @@ def run(context: PipelineContext) -> StepResult:
     )
     conn.execute(
         f"""
-        CREATE OR REPLACE TABLE {PARQUET_INNERDICT_TABLE} AS
+        CREATE OR REPLACE TABLE {PARQUET_LEGACY_ROWS_INNERDICT_TABLE} AS
         WITH {top_papers_hit_ctes},
         {top_oldest_papers_ctes},
         affiliation_counts AS (
@@ -1748,22 +1752,55 @@ def run(context: PipelineContext) -> StepResult:
             )}
         """
     )
-    parquet_innerdict_rows = scalar_int(f"SELECT COUNT(*) FROM {PARQUET_INNERDICT_TABLE}")
+    parquet_innerdict_df = conn.execute(
+        f"SELECT * FROM {PARQUET_LEGACY_ROWS_INNERDICT_TABLE}"
+    ).df()
+    parquet_inner_rows = []
+    for name_key, group in parquet_innerdict_df.groupby(KTP_SOURCE_KEY_COL, dropna=False):
+        payload_df = group.drop(columns=[KTP_SOURCE_KEY_COL]).astype(object)
+        payload_df = payload_df.where(pd.notna(payload_df), None)
+        rows = payload_df.to_dict("records")
+        parquet_inner_rows.append(
+            {
+                "name_key": name_key,
+                "innerdicts": dumps_jsonlines(rows),
+            }
+        )
+    parquet_inner_df = pd.DataFrame(
+        parquet_inner_rows,
+        columns=["name_key", "innerdicts"],
+    )
+    register_frame(conn, "ssn_innerdict_frame", parquet_inner_df)
+    conn.execute(
+        f"CREATE OR REPLACE TABLE {PARQUET_INNERDICT_TABLE} AS "
+        "SELECT * FROM ssn_innerdict_frame"
+    )
+    conn.execute("DROP TABLE IF EXISTS ssn_innerdict_frame")
+    parquet_innerdict_keys = len(parquet_inner_rows)
+    parquet_innerdict_records = len(parquet_innerdict_df)
+    parquet_innerdict_rows = scalar_int(
+        f"SELECT COUNT(*) FROM {PARQUET_LEGACY_ROWS_INNERDICT_TABLE}"
+    )
     log_tag(
         STEP_MATCH_PARQUET_LOG_TAG_TABLE_INNERDICT,
         f"Parquet enriched rows: {parquet_innerdict_rows:,}.",
+    )
+    log_tag(
+        STEP_MATCH_PARQUET_LOG_TAG_TABLE_INNERDICT,
+        "Parquet JSONL innerdict store: "
+        f"{parquet_innerdict_keys:,} source keys / "
+        f"{parquet_innerdict_records:,} records.",
     )
 
     log_tag(
         STEP_MATCH_PARQUET_LOG_TAG_OUTERDICT,
         f"Append parquet matches into OuterDict ({parquet_innerdict_rows:,} rows)",
     )
-    append_innerdicts_from_rows_table(
+    append_innerdicts_from_jsonlines_table(
         conn,
         table_name=PARQUET_INNERDICT_TABLE,
         outer_dict=context.outer_dict,
         procedure=ParquetMatchProcedure(),
-        key_column=KTP_SOURCE_KEY_COL,
     )
 
     log_tag(STEP_MATCH_PARQUET_LOG_TAG_VIEW_OUTPUT, "Create parquet output view")
@@ -1813,7 +1850,7 @@ def run(context: PipelineContext) -> StepResult:
             SELECT
                 v.*,
                 sd."{DRAW_LABEL}" AS "{DRAW_LABEL}"
-            FROM {PARQUET_INNERDICT_TABLE} v
+            FROM {PARQUET_LEGACY_ROWS_INNERDICT_TABLE} v
             LEFT JOIN source_draw sd
               ON sd."{KTP_SOURCE_KEY_COL}" = v."{KTP_SOURCE_KEY_COL}"
         ),
@@ -1860,5 +1897,7 @@ def run(context: PipelineContext) -> StepResult:
         diagnostics=[
             f"Parquet match views: {len(output_dfs)}",
             f"Matched parquet rows: {matched_rows}",
+            f"Parquet JSONL source keys: {parquet_innerdict_keys}",
+            f"Parquet JSONL records: {parquet_innerdict_records}",
         ],
     )
