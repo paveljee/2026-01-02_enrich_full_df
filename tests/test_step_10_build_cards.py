@@ -301,8 +301,38 @@ def test_partition_rows_sort_sciscinet_by_count_then_xlsx_tie_break() -> None:
     ]
 
 
-def test_partition_artifact_modes_are_limited_to_subset1_and_subset2() -> None:
-    assert CARD_PARTITION_ARTIFACT_MODES == {1, 2}
+def test_mode0_partition_rows_include_manual_review_and_subset1_entries() -> None:
+    subset1_name = _name("Ada", "Complete")
+    xlsx_manual_review_name = _name("Ada", "ReviewXlsx")
+    selected: list[tuple[NameKey, tuple[InnerDict, ...]]] = [
+        (subset1_name, (_xlsx_inner(), _docx_inner(), _sciscinet_inner())),
+        (
+            xlsx_manual_review_name,
+            (_xlsx_inner(exact=False), _docx_inner(), _sciscinet_inner()),
+        ),
+    ]
+    states = {
+        name_key.to_json_key(): step10._evaluate_card_partition_state(
+            name_key,
+            tuple(inner_dicts),
+            sciscinet_filenames={"author_details.parquet"},
+            docx_filenames={"manual.docx"},
+        )
+        for name_key, inner_dicts in selected
+    }
+
+    df = step10._partition_rows_df(selected, state_by_source_key=states, subset_mode=0)
+
+    assert df[KTP_LAST_NAME_COL].tolist() == ["ReviewXlsx", "Complete"]
+    assert df[KTP_PARTITION_COL].tolist() == [
+        KTP_PARTITION_XLSX_VALUE,
+        KTP_PARTITION_NO_RESOLUTION_VALUE,
+    ]
+    assert df["card_subset_mode"].tolist() == [0, 0]
+
+
+def test_partition_artifact_modes_include_all_and_subset_complements() -> None:
+    assert CARD_PARTITION_ARTIFACT_MODES == {0, 1, 2}
 
 
 def _create_relation(

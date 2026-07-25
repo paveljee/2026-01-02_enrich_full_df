@@ -70,13 +70,20 @@
   named SSN columns or ignore unrelated extras. Cards will now also render the
   draw field inside each SSN innerdict body, in addition to using it in the
   card header; this is an expected visible consequence unless `DRAW_LABEL` is
+  explicitly added to the card body exclusion set.
+- Mode-0 partition artifacts enabled: `CARD_PARTITION_ARTIFACT_MODES` now
+  includes mode 0. The existing mode-0 selection already contains all source
+  keys, so the common partition path emits resolution buckets for subset-2
+  rows and the no-resolution sentinel for subset-1 rows, ordered after the
+  resolution queue. Modes 3 and 4 remain unchanged. Focused verification is
+  pending the human-run Step 10 test command.
 
 ## Verification
 
 - Shared-writer tests: 6 passed across all three declared source/target
   contracts, covering exact schema, ordered hydration, JSON string
   preservation, SQL `NULL` to JSON `null`, empty inputs, the `HUGEINT` guard,
-  and `1186` remaining an integer.
+  `1186` remaining an integer, and `ktp.draw_number` surviving hydration.
 - Existing focused pipeline tests: 83 passed, 1 skipped, 4 deselected,
   6 xfailed, 1 xpassed. Final innerdict/init/step-9/step-10 gate: 21 passed.
 - Read-only whole-table parity: the pandas writer reproduced all 304 source
