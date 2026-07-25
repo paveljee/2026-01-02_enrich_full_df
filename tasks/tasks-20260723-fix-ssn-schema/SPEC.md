@@ -77,6 +77,19 @@ Those that just accidentally
 depended on the legacy rows table,
 we may keep them on PARQUET_LEGACY_ROWS_INNERDICT_TABLE.
 
+**other things that are worthy to note:**
+
+- ssn innerdicts miss draw numbers, which is
+not great because xlsx and docx have them and
+it is better to have them. this is sincerely a
+ssn schema inconsistency.
+- while not directly related to step 9,
+step 10 currently doesn't produce
+artifacts for mode0.
+this limits review of downstream reception of
+step 9/ssn changes, and thus is
+good to address.
+
 ## how ai understood the spec
 
 ### outcome and storage contract
