@@ -8,6 +8,7 @@ import pandas as pd
 from src.helpers.data_models import InnerDict, NameKey
 from src.helpers.duckdb_utils import register_frame
 from src.helpers.schema import (
+    CARD_PARTITION_REVIEW_ROWS_TABLE,
     CARD_PARTITION_REVIEW_VIEW,
     CARD_PARTITION_TABLE,
     DOCX_OUTPUT_VIEW,
@@ -617,6 +618,9 @@ def test_partition_review_view_has_specified_order_and_placeholders() -> None:
     review_df = conn.execute(f"SELECT * FROM {CARD_PARTITION_REVIEW_VIEW}").df()
 
     assert conn.execute(f"SELECT COUNT(*) FROM {CARD_PARTITION_TABLE}").fetchone() == (4,)
+    assert conn.execute(
+        f"SELECT COUNT(*) FROM {CARD_PARTITION_REVIEW_ROWS_TABLE}"
+    ).fetchone() == (4,)
     assert review_df.columns.tolist() == review_columns
     assert review_df.columns.tolist() == [
         KTP_SOURCE_KEY_COL,

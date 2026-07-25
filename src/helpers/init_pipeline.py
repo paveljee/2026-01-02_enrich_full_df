@@ -54,6 +54,8 @@ def _reset_pipeline(conn, manager: PipelineManager) -> None:
         "docx_innerdicts",
         "ssn_author_matches",
         "ssn_innerdicts",
+        "card_partitions",
+        "card_partition_review_rows",
     ]
     views = [
         "population_with_names",
@@ -65,6 +67,7 @@ def _reset_pipeline(conn, manager: PipelineManager) -> None:
         "xlsx_output",
         "docx_matches",
         "docx_output",
+        "card_partition_review",
     ]
     for table in tables:
         conn.execute(f"DROP TABLE IF EXISTS {table}")

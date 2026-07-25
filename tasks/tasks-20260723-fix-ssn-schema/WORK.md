@@ -43,12 +43,38 @@
   through a documented SSN SQL helper. The shared writer rejects any future
   `HUGEINT` source column rather than silently widening it through pandas.
 - Completed: focused and repository validation.
+- Completed: incorporated the added human requirements: SSN innerdicts retain
+  draw numbers, and Step 10 partition/review artifacts include mode 0.
+- Completed: Step 10 now materializes selected-key rows from each existing
+  output view once into temporary DuckDB tables, then runs the existing review
+  aggregation against those physical inputs.
+- Completed: materialized the ranked review result in
+  `card_partition_review_rows`; `card_partition_review` remains the same thin,
+  ordered public view. Temporary source tables are dropped afterward.
+- Pending: human-run verification of the Step 10 staging change.
 
 ## Consumer classification
 
 - New JSONL table: fresh step-9 `OuterDict` hydration and resume hydration.
 - Legacy rows/output view: `PARQUET_OUTPUT_VIEW` and flat detour analytics.
-- Step-10 review remains on `PARQUET_OUTPUT_VIEW`.
+- Step-10 partition review continues to consume `xlsx_output`,
+  `ssn_parquet_output`, and `docx_output`. Selected rows are staged once in
+  temporary DuckDB tables, and a persistent derived rows table backs the
+  public ordered review view.
+
+## Step 10 bounded review design
+
+- Input: selected `card_partitions` rows and the existing XLSX, SSN, and DOCX
+  output views.
+- Materialization: join each output view to `card_partitions` once and store
+  the selected rows in a temporary DuckDB table before building the next one.
+- Aggregation: run the existing context CTEs, seven review branches,
+  placeholders, multiline merging, and ranking against those physical tables;
+  their established semantics remain unchanged.
+- Persistence: materialize `card_partition_review_rows` as the ranked derived
+  read model; keep `card_partition_review` as the same public ordered view.
+- Removed cost: the review query no longer repeatedly expands and recomputes
+  the three output-view plans while producing its context and result branches.
 
 ## Findings
 
@@ -79,6 +105,10 @@
   pending the human-run Step 10 test command.
 
 ## Verification
+
+The results below predate the Step 10 output-view staging change. Per the human
+instruction, the AI will not run tests; updated verification is pending the
+human-run gate.
 
 - Shared-writer tests: 6 passed across all three declared source/target
   contracts, covering exact schema, ordered hydration, JSON string

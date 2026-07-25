@@ -95,26 +95,27 @@ good to address.
 ### outcome and storage contract
 
 This is a schema-and-boundary refactor. Do not change matching, SSN candidate
-selection, subset assignment, card contents, or card ordering.
+selection, subset assignment, card contents, or card ordering, apart from the
+explicitly requested SSN draw-number consistency and mode-0 review artifacts.
 
 After a new pipeline build, each of these persistent tables must have exactly
 the same two columns, in this order:
 
 | table | column 1 | column 2 |
 |---|---|---|
-| `xlsx_innerdicts` | `ktp.source_key` (`VARCHAR`) | `ktp.innerdicts` (`VARCHAR`) |
-| `docx_innerdicts` | `ktp.source_key` (`VARCHAR`) | `ktp.innerdicts` (`VARCHAR`) |
-| `ssn_innerdicts` | `ktp.source_key` (`VARCHAR`) | `ktp.innerdicts` (`VARCHAR`) |
+| `xlsx_innerdicts` | `name_key` (`VARCHAR`) | `innerdicts` (`VARCHAR`) |
+| `docx_innerdicts` | `name_key` (`VARCHAR`) | `innerdicts` (`VARCHAR`) |
+| `ssn_innerdicts` | `name_key` (`VARCHAR`) | `innerdicts` (`VARCHAR`) |
 
-`ktp.innerdicts` retains the existing XLSX/DOCX JSON Lines contract: one JSON
+`innerdicts` retains the existing XLSX/DOCX JSON Lines contract: one JSON
 object per non-empty line, with the source key omitted from each object. A table
 has at most one row for a source key and contains a row only when that source
 key has at least one innerdict. Within a blob, preserve the same stable
 filename/fragment/draw ordering used by the corresponding flat output.
 
-Add `KTP_INNERDICTS_COL = "ktp.innerdicts"` to `src/helpers/vars.py` and use it
-with the existing `KTP_SOURCE_KEY_COL`. No code that reads one of the three
-tables should contain the old literal column names.
+The `ktp.source_key` / `ktp.innerdicts` label migration remains out of scope.
+Keep the existing `name_key` / `innerdicts` labels and centralize them as the
+shared table contract in `src/helpers/schema.py`.
 
 This exact two-column contract is for the three named innerdict tables. Do not
 mass-rename internal SQL `name_key` aliases or unrelated working relations such
@@ -143,7 +144,7 @@ Remove the current XLSX/DOCX-versus-SSN split in
 innerdict rows and one shared JSONL loader for all three tables:
 
 - the materializer groups by `ktp.source_key`, removes that field from each
-  payload object, and writes only `ktp.source_key` and `ktp.innerdicts`;
+  payload object, and writes only `name_key` and `innerdicts`;
 - the loader selects those exact quoted columns, validates required innerdict
   fields, parses the JSONL payload, and appends by the already persisted source
   key; and
@@ -155,9 +156,8 @@ literal `name_key`/`innerdicts` labels.
 
 Step 9 needs one additional internal, schema-centralized relation because its
 current `ssn_innerdicts` table serves two incompatible purposes. Materialize
-the existing expensive wide result under a new internal table such as
-`ssn_innerdict_rows` (for example,
-`PARQUET_INNERDICT_ROWS_TABLE` in `src/helpers/schema.py`). Build:
+the existing expensive wide result as `ssn_legacy_rows_innerdicts` through
+`PARQUET_LEGACY_ROWS_INNERDICT_TABLE`. Build:
 
 1. the unchanged wide `ssn_parquet_output` view from that internal row table;
 2. the two-column `ssn_innerdicts` table from the same ordered rows through the
@@ -173,57 +173,26 @@ The JSONL round trip must preserve the values that step 9 currently appends
 directly from DuckDB. In particular, SQL `NULL` remains Python `None`/JSON
 `null`, numeric and boolean values retain their meaning, and JSON-typed match
 payloads do not silently change from display strings into nested Python
-objects. Add regression coverage before choosing a pandas- or SQL-based
-materializer.
+objects. DuckDB's bounded `ktp.ssn_sum_hit_1pct` sums must be cast to `BIGINT`
+before the shared pandas boundary so they remain integers rather than integral
+floats; reject an unhandled `HUGEINT` source column.
 
-Update reset/cleanup for the new internal SSN relation. Split step-9 diagnostics
+The ordered SSN legacy rows and the resulting SSN JSONL innerdicts must retain
+`ktp.draw_number`, matching XLSX and DOCX. `ssn_parquet_output` and Step 10
+review artifacts must expose one unsuffixed draw-number column.
+
+Update reset/cleanup for the internal SSN relation. Split step-9 diagnostics
 between wide innerdict-row count and grouped source-key count rather than
 reporting the latter as though it were the former.
 
-### DuckDB owns source-key JSON
+### DuckDB-owned source-key JSON consideration
 
-The additional requirement concerns the conversion boundary
-`(first_name, last_name) <-> ktp.source_key`. It does not require rewriting
-unrelated JSON such as configuration, pipeline state, OpenAlex responses,
-match payloads, JSONL innerdict bodies, or whole-artifact dumps.
-
-Centralize SQL expressions for this boundary in one neutral helper:
-
-- serialize with DuckDB `json_object`, always supplying
-  `ktp.first_name` first and `ktp.last_name` second, and cast the result to
-  `VARCHAR`; and
-- deserialize with DuckDB `json_extract_string` using the quoted JSON paths
-  for `ktp.first_name` and `ktp.last_name`.
-
-Step 6 must create both included and excluded source keys with that serializer.
-Its name views must use the shared extractor expressions. Delete the local
-Python `_name_key_json` path.
-
-After creation, Python must treat `ktp.source_key` as an opaque identifier and
-carry its exact persisted string through the pipeline. It must not parse and
-re-serialize the key merely to recover a `NameKey` or look up state. Concretely:
-
-- remove production dependence on `NameKey.to_json_key()` and
-  `NameKey.from_json_key()`; remove those JSON-owning methods if no non-pipeline
-  contract still needs them;
-- adapt `OuterDict` to retain each DuckDB-produced source key alongside the
-  typed first/last-name value used for cards;
-- expose keyed iteration or an equivalent small API so step 10 receives the
-  source key rather than regenerating it;
-- build selected/subset outerdicts by carrying the same key forward;
-- on resume, hydrate names and source keys from `outerdict_name_keys` (or an
-  equivalent DuckDB query that performs extraction), not by `json.loads`; and
-- replace source-key parsing in `detour_mode0_econ_stats.py` with columns
-  extracted by DuckDB.
-
-Python `json.loads` calls for `ktp.xlsx_match`, filename-list payloads, or other
-non-source-key JSON are unaffected and should not be removed under this task.
-
-DuckDB's canonical output may differ byte-for-byte from the existing
-Python-spaced JSON (for example, compact separators). This is acceptable and is
-why there must be one producer. All joins in a new database will use the same
-opaque value. Do not add Python whitespace post-processing or dual
-serializers to mimic the old representation.
+The additional source-key serialization issue remains out of scope for this
+task. A future change should centralize `(first_name, last_name) <->
+ktp.source_key` in DuckDB, carry the persisted source key opaquely in Python,
+and remove Python parse/re-serialize ownership. Do not implement that change,
+alter `OuterDict`, or migrate labels here. Python `json.loads` calls for match
+payloads and other non-source-key JSON are unaffected.
 
 ### affected consumers and compatibility
 
@@ -231,54 +200,55 @@ Update `src/helpers/init_pipeline.py` so all three completed matching steps
 hydrate through the common two-column loader. The old wide-row SSN loader is no
 longer valid.
 
-Update the two existing read-only detours rather than leaving hidden
-dependencies on the old schema:
+Keep the read-only detours on the appropriate contract:
 
-- both detours must select the renamed XLSX columns through constants;
-- `detour_mode3_pgf_stats.py` must obtain flat SSN fields from
+- XLSX innerdict consumers use the declared `name_key` / `innerdicts` columns;
+- `detour_mode3_pgf_stats.py` obtains flat SSN fields from
   `ssn_parquet_output`, not from the now-grouped `ssn_innerdicts`; and
-- the mode-0 flat-SSN fallback must use the wide output/internal row relation or
-  explicitly support the new blob contract. It must never treat the two-column
-  table as a wide relation.
+- the mode-0 flat-SSN fallback uses the wide output/internal row relation. It
+  must never treat the two-column table as a wide relation.
 
-Keep `ssn_parquet_output`, the step-10 partition review view, cards, and their
-CSV/TXT/DOCX artifacts semantically unchanged apart from the canonical source
-key string. Update detour fixtures and any schema fingerprints or metadata that
-describe the three innerdict tables.
+Keep `ssn_parquet_output`, the Step 10 partition review view, cards, and their
+CSV/TXT/DOCX artifacts semantically unchanged apart from the requested SSN
+draw field. Step 10 must also emit its existing partition and review artifacts
+for mode 0; fully resolved mode-0 rows use the existing no-resolution sentinel.
+
+The mode-0 review implementation must remain DuckDB-owned without repeatedly
+expanding the three output views inside the review query. Materialize the rows
+for selected `card_partitions` source keys from `xlsx_output`,
+`ssn_parquet_output`, and `docx_output` once into temporary DuckDB tables, then
+run the existing review aggregation over those physical inputs. Materialize
+the ranked rows into a small derived backing table and keep
+`card_partition_review` as the public ordered view with the same columns,
+values, row multiplicity, placeholders, multiline separators, and ordering.
 
 This is a clean-build schema break. Do not implement a migration, legacy
 column aliases, or dual-read compatibility. A database checkpoint made with
-the old schemas is not resumable under the new code; fail early with a concise
-schema error if encountered and require a full `--new` rebuild. Never run that
-command as part of this task's implementation or verification.
+the old SSN schema is not resumable under the new code; require a full
+`--new` rebuild. Never run that command as part of this task's implementation
+or verification.
 
 ### tests and acceptance
 
 Add focused tests that prove:
 
-- `DESCRIBE` reports exactly the two required columns, in order, for all three
-  innerdict tables;
+- `DESCRIBE` reports exactly `name_key` and `innerdicts`, in order, for all
+  three innerdict tables;
 - multiple ordered flat rows for one key become one JSONL blob, payload objects
   omit `ktp.source_key`, and loading restores the same ordered innerdict values;
 - empty/missing-match keys do not produce malformed or phantom innerdicts;
 - SSN `NULL`, numeric, boolean, string, and JSON-typed values survive
   materialization and hydration without card-visible changes;
+- `ktp.ssn_sum_hit_1pct` remains an integer and `ktp.draw_number` survives the
+  SSN JSONL round trip;
 - `ssn_parquet_output` retains the old wide columns, row count, and order while
   `ssn_innerdicts` has one row per represented source key;
 - fresh step execution and resume hydration produce equivalent outerdict/card
   inputs for XLSX, DOCX, and SSN;
-- source keys containing Unicode, apostrophes, quotes, and backslashes are
-  created and extracted by DuckDB and remain exact opaque keys through
-  `OuterDict` and step 10;
-- step-10 subset counts, partition rows, review rows, and rendered card content
-  do not change because of the storage refactor; and
+- Step 10 subset counts, mode-0 partition rows, review rows, and rendered card
+  content preserve the established contracts; and
 - both detours work against the new schemas and remain read-only.
 
-Construct source keys in tests with the production DuckDB SQL helper, not
-`json.dumps`. Any test or direct database check that evaluates pipeline views
-using `unaccent` must load `splink_udfs` through the existing extension helper
-or the same `LOAD splink_udfs` setup used by the pipeline.
-
-Run the focused data-model/init/steps 6-10/detour tests, then the repository's
-normal Ruff, mypy, and pre-commit test gate for touched code. Do not run or
-import `src.repl`, and do not mutate the supplied database.
+The remaining Step 10 review verification must be run by the human. The AI
+must not run tests, run or import `src.repl`, mutate the supplied database, or
+use Git.

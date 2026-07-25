@@ -58,6 +58,7 @@ INNERDICT_SOURCE_RELATIONS: dict[str, str] = {
 }
 
 CARD_PARTITION_TABLE = "card_partitions"
+CARD_PARTITION_REVIEW_ROWS_TABLE = "card_partition_review_rows"
 CARD_PARTITION_REVIEW_VIEW = "card_partition_review"
 
 

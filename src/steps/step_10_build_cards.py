@@ -19,6 +19,7 @@ from ..helpers.duckdb_utils import (
     register_frame,
 )
 from ..helpers.schema import (
+    CARD_PARTITION_REVIEW_ROWS_TABLE,
     CARD_PARTITION_REVIEW_VIEW,
     CARD_PARTITION_TABLE,
     DOCX_OUTPUT_VIEW,
@@ -94,6 +95,9 @@ from ..helpers.vars import (
 from .shared import draw_sort_ctes_sql, draw_sort_order_by_sql
 
 CARD_PARTITION_FRAME_TABLE = "card_partition_frame"
+XLSX_REVIEW_SOURCE_TABLE = "card_partition_review_xlsx_source"
+SCISCINET_REVIEW_SOURCE_TABLE = "card_partition_review_sciscinet_source"
+DOCX_REVIEW_SOURCE_TABLE = "card_partition_review_docx_source"
 REVIEW_DOMAIN_XLSX = "xlsx"
 REVIEW_DOMAIN_SCISCINET = "sciscinet"
 REVIEW_DOMAIN_DOCX = "docx"
@@ -524,6 +528,33 @@ def _materialize_partition_table(
         f"SELECT * FROM {CARD_PARTITION_FRAME_TABLE}"
     )
     conn.execute(f"DROP TABLE IF EXISTS {CARD_PARTITION_FRAME_TABLE}")
+
+
+def _materialize_partition_review_source_table(
+    conn: duckdb.DuckDBPyConnection,
+    *,
+    source_view: str,
+    table_name: str,
+) -> None:
+    source_key = duckdb_quote_identifier(KTP_SOURCE_KEY_COL)
+    conn.execute(
+        f"""
+        CREATE OR REPLACE TEMP TABLE {table_name} AS
+        SELECT source.*
+        FROM {source_view} source
+        JOIN {CARD_PARTITION_TABLE} cp
+          ON source.{source_key} = cp.{source_key}
+        """
+    )
+
+
+def _drop_partition_review_source_tables(conn: duckdb.DuckDBPyConnection) -> None:
+    for table_name in (
+        XLSX_REVIEW_SOURCE_TABLE,
+        SCISCINET_REVIEW_SOURCE_TABLE,
+        DOCX_REVIEW_SOURCE_TABLE,
+    ):
+        conn.execute(f"DROP TABLE IF EXISTS {table_name}")
 
 
 def _relation_columns(conn: duckdb.DuckDBPyConnection, relation_name: str) -> list[str]:
@@ -972,6 +1003,21 @@ def _create_partition_review_view(conn: duckdb.DuckDBPyConnection) -> list[str]:
     sciscinet_columns = set(_relation_columns(conn, PARQUET_OUTPUT_VIEW))
     docx_column_list = _relation_columns(conn, DOCX_OUTPUT_VIEW)
     docx_columns = set(docx_column_list)
+    _materialize_partition_review_source_table(
+        conn,
+        source_view=XLSX_OUTPUT_VIEW,
+        table_name=XLSX_REVIEW_SOURCE_TABLE,
+    )
+    _materialize_partition_review_source_table(
+        conn,
+        source_view=PARQUET_OUTPUT_VIEW,
+        table_name=SCISCINET_REVIEW_SOURCE_TABLE,
+    )
+    _materialize_partition_review_source_table(
+        conn,
+        source_view=DOCX_OUTPUT_VIEW,
+        table_name=DOCX_REVIEW_SOURCE_TABLE,
+    )
     domain_columns = {
         REVIEW_DOMAIN_XLSX: xlsx_columns,
         REVIEW_DOMAIN_SCISCINET: sciscinet_columns,
@@ -981,7 +1027,7 @@ def _create_partition_review_view(conn: duckdb.DuckDBPyConnection) -> list[str]:
     branches = [
         _review_branch_sql(
             columns=columns,
-            source_view=XLSX_OUTPUT_VIEW,
+            source_view=XLSX_REVIEW_SOURCE_TABLE,
             source_alias="x",
             source_domain=REVIEW_DOMAIN_XLSX,
             domain_columns=domain_columns,
@@ -989,7 +1035,7 @@ def _create_partition_review_view(conn: duckdb.DuckDBPyConnection) -> list[str]:
         ),
         _review_placeholder_branch_sql(
             columns=columns,
-            source_view=XLSX_OUTPUT_VIEW,
+            source_view=XLSX_REVIEW_SOURCE_TABLE,
             source_alias="x",
             source_domain=REVIEW_DOMAIN_XLSX,
             domain_columns=domain_columns,
@@ -997,7 +1043,7 @@ def _create_partition_review_view(conn: duckdb.DuckDBPyConnection) -> list[str]:
         ),
         _review_branch_sql(
             columns=columns,
-            source_view=PARQUET_OUTPUT_VIEW,
+            source_view=SCISCINET_REVIEW_SOURCE_TABLE,
             source_alias="s",
             source_domain=REVIEW_DOMAIN_SCISCINET,
             domain_columns=domain_columns,
@@ -1005,7 +1051,7 @@ def _create_partition_review_view(conn: duckdb.DuckDBPyConnection) -> list[str]:
         ),
         _review_placeholder_branch_sql(
             columns=columns,
-            source_view=PARQUET_OUTPUT_VIEW,
+            source_view=SCISCINET_REVIEW_SOURCE_TABLE,
             source_alias="s",
             source_domain=REVIEW_DOMAIN_SCISCINET,
             domain_columns=domain_columns,
@@ -1013,7 +1059,7 @@ def _create_partition_review_view(conn: duckdb.DuckDBPyConnection) -> list[str]:
         ),
         _review_branch_sql(
             columns=columns,
-            source_view=DOCX_OUTPUT_VIEW,
+            source_view=DOCX_REVIEW_SOURCE_TABLE,
             source_alias="d",
             source_domain=REVIEW_DOMAIN_DOCX,
             domain_columns=domain_columns,
@@ -1021,7 +1067,7 @@ def _create_partition_review_view(conn: duckdb.DuckDBPyConnection) -> list[str]:
         ),
         _review_placeholder_branch_sql(
             columns=columns,
-            source_view=DOCX_OUTPUT_VIEW,
+            source_view=DOCX_REVIEW_SOURCE_TABLE,
             source_alias="d",
             source_domain=REVIEW_DOMAIN_DOCX,
             domain_columns=domain_columns,
@@ -1037,11 +1083,11 @@ def _create_partition_review_view(conn: duckdb.DuckDBPyConnection) -> list[str]:
     select_columns = ",\n            ".join(duckdb_quote_identifier(col) for col in columns)
     conn.execute(
         f"""
-        CREATE OR REPLACE VIEW {CARD_PARTITION_REVIEW_VIEW} AS
+        CREATE OR REPLACE TABLE {CARD_PARTITION_REVIEW_ROWS_TABLE} AS
         WITH
         {_review_context_cte_sql(
             cte_name=XLSX_CONTEXT_CTE,
-            source_view=XLSX_OUTPUT_VIEW,
+            source_view=XLSX_REVIEW_SOURCE_TABLE,
             source_alias='x_context_source',
             source_domain=REVIEW_DOMAIN_XLSX,
             source_columns=xlsx_columns,
@@ -1049,7 +1095,7 @@ def _create_partition_review_view(conn: duckdb.DuckDBPyConnection) -> list[str]:
         )},
         {_review_context_cte_sql(
             cte_name=SCISCINET_CONTEXT_CTE,
-            source_view=PARQUET_OUTPUT_VIEW,
+            source_view=SCISCINET_REVIEW_SOURCE_TABLE,
             source_alias='s_context_source',
             source_domain=REVIEW_DOMAIN_SCISCINET,
             source_columns=sciscinet_columns,
@@ -1057,7 +1103,7 @@ def _create_partition_review_view(conn: duckdb.DuckDBPyConnection) -> list[str]:
         )},
         {_review_context_cte_sql(
             cte_name=DOCX_CONTEXT_CTE,
-            source_view=DOCX_OUTPUT_VIEW,
+            source_view=DOCX_REVIEW_SOURCE_TABLE,
             source_alias='d_context_source',
             source_domain=REVIEW_DOMAIN_DOCX,
             source_columns=docx_columns,
@@ -1067,9 +1113,16 @@ def _create_partition_review_view(conn: duckdb.DuckDBPyConnection) -> list[str]:
             {union_sql}
         ),
         {draw_sort_ctes_sql(draw_col=DRAW_LABEL, source_key_col=KTP_SOURCE_KEY_COL)}
+        SELECT *
+        FROM ranked
+        """
+    )
+    conn.execute(
+        f"""
+        CREATE OR REPLACE VIEW {CARD_PARTITION_REVIEW_VIEW} AS
         SELECT
             {select_columns}
-        FROM ranked
+        FROM {CARD_PARTITION_REVIEW_ROWS_TABLE}
         ORDER BY
             CASE "{KTP_PARTITION_COL}"
                 WHEN {KTP_PARTITION_XLSX_VALUE} THEN 0
@@ -1098,6 +1151,7 @@ def _create_partition_review_view(conn: duckdb.DuckDBPyConnection) -> list[str]:
             )}
         """
     )
+    _drop_partition_review_source_tables(conn)
     return columns
 
 
