@@ -16,7 +16,7 @@ from src.helpers.schema import (
     INNERDICT_TABLE_SCHEMA,
 )
 from src.helpers.ssn_hit_selection import ssn_sum_hit_1pct_sql
-from src.helpers.vars import KTP_SOURCE_KEY_COL
+from src.helpers.vars import DRAW_LABEL, KTP_SOURCE_KEY_COL
 
 
 @pytest.mark.parametrize(
@@ -33,6 +33,7 @@ def test_innerdict_contract_materializes_and_hydrates_ordered_rows(
             f'''
             CREATE TABLE {source_relation} (
                 "{KTP_SOURCE_KEY_COL}" VARCHAR,
+                "{DRAW_LABEL}" VARCHAR,
                 row_order INTEGER,
                 integer_value BIGINT,
                 nullable_value DOUBLE,
@@ -42,11 +43,11 @@ def test_innerdict_contract_materializes_and_hydrates_ordered_rows(
             '''
         )
         conn.executemany(
-            f"INSERT INTO {source_relation} VALUES (?, ?, ?, ?, ?, ?)",
+            f"INSERT INTO {source_relation} VALUES (?, ?, ?, ?, ?, ?, ?)",
             [
-                ("key-a", 1, 1186, None, True, '{"match":"first"}'),
-                ("key-a", 2, 7, 1.25, False, '{"match":"second"}'),
-                ("key-b", 3, 9, None, True, '{"match":"third"}'),
+                ("key-a", "7", 1, 1186, None, True, '{"match":"first"}'),
+                ("key-a", "7", 2, 7, 1.25, False, '{"match":"second"}'),
+                ("key-b", "8", 3, 9, None, True, '{"match":"third"}'),
             ],
         )
 
@@ -67,6 +68,7 @@ def test_innerdict_contract_materializes_and_hydrates_ordered_rows(
         assert [record["row_order"] for record in key_a_records] == [1, 2]
         assert all(KTP_SOURCE_KEY_COL not in record for record in key_a_records)
         assert key_a_records[0] == {
+            DRAW_LABEL: "7",
             "row_order": 1,
             "integer_value": 1186,
             "nullable_value": None,
@@ -87,6 +89,10 @@ def test_innerdict_contract_materializes_and_hydrates_ordered_rows(
             inner.data["row_order"]
             for inner in outer_dict.get_inner_by_key("key-a")
         ] == [1, 2]
+        assert all(
+            inner.data[DRAW_LABEL] == "7"
+            for inner in outer_dict.get_inner_by_key("key-a")
+        )
     finally:
         conn.close()
 

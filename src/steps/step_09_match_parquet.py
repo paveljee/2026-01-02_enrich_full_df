@@ -1741,7 +1741,7 @@ def run(context: PipelineContext) -> StepResult:
         ),
         {draw_sort_ctes_sql(draw_col=DRAW_LABEL, source_key_col=KTP_SOURCE_KEY_COL)}
         SELECT * EXCLUDE (
-            row_draw_group, row_draw_num, source_draw_group, source_draw_num, "{DRAW_LABEL}"
+            row_draw_group, row_draw_num, source_draw_group, source_draw_num
         )
         FROM ranked
         ORDER BY
@@ -1786,56 +1786,13 @@ def run(context: PipelineContext) -> StepResult:
     conn.execute(
         f"""
         CREATE OR REPLACE VIEW {PARQUET_OUTPUT_VIEW} AS
-        WITH source_draw AS (
-            SELECT
-                x."{KTP_SOURCE_KEY_COL}" AS "{KTP_SOURCE_KEY_COL}",
-                x."{DRAW_LABEL}" AS "{DRAW_LABEL}"
-            FROM (
-                SELECT
-                    nk."{KTP_SOURCE_KEY_COL}" AS "{KTP_SOURCE_KEY_COL}",
-                    s."{DRAW_LABEL}" AS "{DRAW_LABEL}",
-                    ROW_NUMBER() OVER (
-                        PARTITION BY nk."{KTP_SOURCE_KEY_COL}"
-                        ORDER BY
-                            CASE
-                                WHEN starts_with(CAST(s."{DRAW_LABEL}" AS VARCHAR), 'pilot.') THEN 0
-                                WHEN TRY_CAST(s."{DRAW_LABEL}" AS BIGINT) IS NOT NULL THEN 1
-                                WHEN s."{DRAW_LABEL}" IS NULL
-                                  OR trim(CAST(s."{DRAW_LABEL}" AS VARCHAR)) = '' THEN 3
-                                ELSE 2
-                            END,
-                            COALESCE(
-                                CASE
-                                    WHEN starts_with(CAST(s."{DRAW_LABEL}" AS VARCHAR), 'pilot.')
-                                        THEN TRY_CAST(
-                                            split_part(CAST(s."{DRAW_LABEL}" AS VARCHAR), '.', 2)
-                                            AS BIGINT
-                                        )
-                                    WHEN TRY_CAST(s."{DRAW_LABEL}" AS BIGINT) IS NOT NULL
-                                        THEN CAST(s."{DRAW_LABEL}" AS BIGINT)
-                                    ELSE NULL
-                                END,
-                                999999999
-                            )
-                    ) AS draw_rank
-                FROM {OUTERDICT_NAME_VIEW} nk
-                LEFT JOIN {SAMPLES_WITH_NAMES_VIEW} s
-                  ON lower(nk."{KTP_FIRST_NAME_COL}") = lower(s."{KTP_FIRST_NAME_COL}")
-                 AND lower(nk."{KTP_LAST_NAME_COL}") = lower(s."{KTP_LAST_NAME_COL}")
-            ) x
-            WHERE x.draw_rank = 1
-        ),
-        base AS (
-            SELECT
-                v.*,
-                sd."{DRAW_LABEL}" AS "{DRAW_LABEL}"
-            FROM {PARQUET_LEGACY_ROWS_INNERDICT_TABLE} v
-            LEFT JOIN source_draw sd
-              ON sd."{KTP_SOURCE_KEY_COL}" = v."{KTP_SOURCE_KEY_COL}"
+        WITH base AS (
+            SELECT *
+            FROM {PARQUET_LEGACY_ROWS_INNERDICT_TABLE}
         ),
         {draw_sort_ctes_sql(draw_col=DRAW_LABEL, source_key_col=KTP_SOURCE_KEY_COL)}
         SELECT * EXCLUDE (
-            row_draw_group, row_draw_num, source_draw_group, source_draw_num, "{DRAW_LABEL}"
+            row_draw_group, row_draw_num, source_draw_group, source_draw_num
         )
         FROM ranked
         ORDER BY

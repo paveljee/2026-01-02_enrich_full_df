@@ -58,6 +58,18 @@
   payload. Casting this bounded aggregate result to `BIGINT` restores integer
   semantics, allowing all three sources to use the same pandas writer and its
   explicit missing-value-to-`null` normalization.
+- Draw-label follow-up completed: `PARQUET_LEGACY_ROWS_INNERDICT_TABLE` retains
+  `ktp.draw_number`, so the SSN JSONL payload and fresh/resumed `OuterDict`
+  retain it. `PARQUET_OUTPUT_VIEW` now uses that existing value for sorting and
+  projection; its redundant `source_draw` CTE/join and final draw exclusion
+  were removed. The Step 9 output and Step 10 partition/review artifacts thus
+  expose exactly one `ktp.draw_number`, with no suffixed duplicate.
+- No other downstream adaptation is required: cards and partition state
+  already recognize `ktp.draw_number`, partition review reads it from the
+  partition table, resume uses the same JSONL loader, and detours either select
+  named SSN columns or ignore unrelated extras. Cards will now also render the
+  draw field inside each SSN innerdict body, in addition to using it in the
+  card header; this is an expected visible consequence unless `DRAW_LABEL` is
 
 ## Verification
 
