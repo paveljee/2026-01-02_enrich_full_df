@@ -12,9 +12,9 @@ from ..helpers.data_models import RegisteredResource
 from ..helpers.docx_parse import parse_docx_tables_and_notes
 from ..helpers.duckdb_utils import (
     append_innerdicts_from_jsonlines_table,
+    materialize_innerdicts_from_rows_table,
     register_frame,
 )
-from ..helpers.jsonlines import dumps_jsonlines
 from ..helpers.name_matching import docx_match_condition_sql, docx_name_norm_sql
 from ..helpers.procedures import DocxMatchProcedure
 from ..helpers.schema import (
@@ -22,6 +22,7 @@ from ..helpers.schema import (
     DOCX_MATCH_VIEW,
     DOCX_OUTPUT_VIEW,
     DOCX_TABLE,
+    INNERDICT_SOURCE_RELATIONS,
     OUTERDICT_NAME_VIEW,
     REGISTERED_RESOURCES_TABLE,
     SAMPLES_WITH_NAMES_VIEW,
@@ -229,26 +230,11 @@ def run(context: PipelineContext) -> StepResult:
         """
     )
 
-    matched_df = conn.execute(f"SELECT * FROM {DOCX_MATCH_VIEW}").df()
-    if "docx_clean" in matched_df.columns:
-        matched_df = matched_df.drop(columns=["docx_clean"])
-    matched_df = matched_df[matched_df[KTP_FILENAME_COL].notna()]
-
-    inner_rows = []
-    for name_key, group in matched_df.groupby(KTP_SOURCE_KEY_COL, dropna=False):
-        rows = group.drop(columns=[KTP_SOURCE_KEY_COL]).to_dict("records")
-        inner_rows.append(
-            {
-                "name_key": name_key,
-                "innerdicts": dumps_jsonlines(rows),
-            }
-        )
-    inner_df = pd.DataFrame(inner_rows, columns=["name_key", "innerdicts"])
-    register_frame(conn, "docx_innerdict_frame", inner_df)
-    conn.execute(
-        f"CREATE OR REPLACE TABLE {DOCX_INNERDICT_TABLE} AS SELECT * FROM docx_innerdict_frame"
+    _innerdict_keys, matched_rows = materialize_innerdicts_from_rows_table(
+        conn,
+        source_relation=INNERDICT_SOURCE_RELATIONS[DOCX_INNERDICT_TABLE],
+        table_name=DOCX_INNERDICT_TABLE,
     )
-    conn.execute("DROP TABLE IF EXISTS docx_innerdict_frame")
 
     append_innerdicts_from_jsonlines_table(
         conn,
@@ -283,6 +269,6 @@ def run(context: PipelineContext) -> StepResult:
     return StepResult(
         step_id=STEP_MATCH_DOCX,
         artifacts={"docx_matches_df": output_df},
-        messages=[f"Matched DOCX rows: {len(matched_df)}"],
-        diagnostics=[f"Matched DOCX rows: {len(matched_df)}"],
+        messages=[f"Matched DOCX rows: {matched_rows}"],
+        diagnostics=[f"Matched DOCX rows: {matched_rows}"],
     )

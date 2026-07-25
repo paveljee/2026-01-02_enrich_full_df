@@ -7,7 +7,9 @@
 - Do not use Git.
 - Preserve `name_key` / `innerdicts` column labels for this task.
 - Keep changes surgical; do not refactor `OuterDict`, source-key ownership, or
-  shared DuckDB helpers beyond removing the obsolete row loader at the end.
+  unrelated DuckDB behavior.
+- Declare the common innerdict table contract and source relations visibly in
+  `schema.py`; retain the existing `name_key` / `innerdicts` labels.
 
 ## Execution sequence
 
@@ -18,6 +20,8 @@
 3. Rebind only true innerdict consumers to the new table. Keep flat relational
    consumers on the legacy table or `PARQUET_OUTPUT_VIEW`.
 4. Remove `append_innerdicts_from_rows_table`; adjust focused tests and verify.
+5. Consolidate the existing XLSX/DOCX/SSN JSONL materialization pattern after
+   explicitly stabilizing bounded SSN hit sums as `BIGINT`.
 
 ## Status
 
@@ -25,12 +29,19 @@
   step-9/resume/detour consumers.
 - Completed: phase 1 mechanical legacy-table rename. All former wide consumers
   now use `PARQUET_LEGACY_ROWS_INNERDICT_TABLE`; the new constant is free.
-- Completed: phase 2 creation of the two-column SSN JSONL table, inline in step
-  9 using the same group/drop/JSONL/register/create pattern as steps 7 and 8.
+- Completed: phase 2 creation of the two-column SSN JSONL table from the ordered
+  legacy rows through the common group/drop/JSONL writer.
 - Completed: phase 3 consumer rebinding. Fresh step-9 and resume hydration use
   `append_innerdicts_from_jsonlines_table` with `PARQUET_INNERDICT_TABLE`;
   flat output and detours remain on the legacy relation/output view.
 - Completed: removed the now-unreferenced `append_innerdicts_from_rows_table`.
+- Completed: declared the common two-column schema and the three ordered source
+  relations in `schema.py`.
+- Completed: added `materialize_innerdicts_from_rows_table` as the single
+  pandas group/drop/JSONL writer used by steps 7, 8, and 9.
+- Completed: cast both bounded `ktp.ssn_sum_hit_1pct` aggregates to `BIGINT`
+  through a documented SSN SQL helper. The shared writer rejects any future
+  `HUGEINT` source column rather than silently widening it through pandas.
 - Completed: focused and repository validation.
 
 ## Consumer classification
@@ -41,24 +52,31 @@
 
 ## Findings
 
-- DuckDB nullable floats become pandas `NaN`; step 9 normalizes pandas missing
-  values to Python `None` before JSONL serialization so SQL `NULL` remains JSON
-  `null`. DuckDB JSON-typed cells arrive as strings and remain strings.
+- Root cause of the integer regression: DuckDB promotes `SUM(INTEGER)` to
+  `HUGEINT`; pandas then exposed the non-null value as `float64` (`1186.0`).
+  Read-only type comparison found no second conversion in the scalar SSN
+  payload. Casting this bounded aggregate result to `BIGINT` restores integer
+  semantics, allowing all three sources to use the same pandas writer and its
+  explicit missing-value-to-`null` normalization.
 
 ## Verification
 
-- Phase 1 narrow tests: 9 passed. Two mode-0 tests were blocked only because
-  the default environment lacks optional Plotly/Kaleido; rerun those in the
-  `detour-mode0-econ-stats` pixi environment.
-- Phase 2/3 focused tests: 10 passed.
-- Detours: mode 0 passed 4/4 in its optional pixi environment; mode 3 passed
-  6/6 in the default environment. Read-only assertions remained intact.
-- Ruff: passed for all touched Python files.
-- mypy: passed for all touched Python files.
-- Repository suite excluding live `real_api`: 133 passed, 3 skipped, 4
-  deselected, 6 xfailed, 1 xpassed. One unrelated environment failure remains:
-  the configured `splink_udfs` Linux ARM64 binary is absent at the expected
-  external path.
-- Supplied database was opened read-only only to confirm the former wide SSN
-  type profile; it was not mutated.
-- `src.repl` was neither run nor imported. No Git command was used.
+- Shared-writer tests: 6 passed across all three declared source/target
+  contracts, covering exact schema, ordered hydration, JSON string
+  preservation, SQL `NULL` to JSON `null`, empty inputs, the `HUGEINT` guard,
+  and `1186` remaining an integer.
+- Existing focused pipeline tests: 83 passed, 1 skipped, 4 deselected,
+  6 xfailed, 1 xpassed. Final innerdict/init/step-9/step-10 gate: 21 passed.
+- Read-only whole-table parity: the pandas writer reproduced all 304 source
+  keys / 2,044 records with zero differences after normalizing only
+  `ktp.ssn_sum_hit_1pct` from integral float to integer. No other payload value
+  or serialization changed.
+- Detours from the preceding phases remain verified: mode 0 passed 4/4 in its
+  optional pixi environment and mode 3 passed 6/6 in the default environment.
+- Ruff passed for every touched Python file. Repository mypy passed with no
+  issues in 67 source files.
+- Repository suite excluding live `real_api`: 139 passed, 3 skipped,
+  4 deselected, 6 xfailed, 1 xpassed. Its sole failure is the unrelated,
+  already-known missing external Linux ARM64 `splink_udfs` binary.
+- The supplied database was opened read-only and was not mutated. `src.repl`
+  was neither run nor imported. No Git command was used.

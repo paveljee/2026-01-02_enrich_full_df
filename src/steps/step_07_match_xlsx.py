@@ -1,17 +1,16 @@
 from __future__ import annotations
 
 import duckdb
-import pandas as pd
 
 from ..helpers.context import PipelineContext, StepResult
 from ..helpers.duckdb_utils import (
     append_innerdicts_from_jsonlines_table,
-    register_frame,
+    materialize_innerdicts_from_rows_table,
 )
-from ..helpers.jsonlines import dumps_jsonlines
 from ..helpers.name_matching import xlsx_match_sql
 from ..helpers.procedures import XlsxMatchProcedure
 from ..helpers.schema import (
+    INNERDICT_SOURCE_RELATIONS,
     OUTERDICT_NAME_VIEW,
     POPULATION_ECON_TABLE,
     POPULATION_NAMES_TABLE,
@@ -197,24 +196,11 @@ def run(context: PipelineContext) -> StepResult:
         """
     )
 
-    matched_df = conn.execute(f"SELECT * FROM {XLSX_MATCH_VIEW}").df()
-    matched_df = matched_df[matched_df[KTP_FILENAME_COL].notna()]
-
-    inner_rows = []
-    for name_key, group in matched_df.groupby(KTP_SOURCE_KEY_COL, dropna=False):
-        rows = group.drop(columns=[KTP_SOURCE_KEY_COL]).to_dict("records")
-        inner_rows.append(
-            {
-                "name_key": name_key,
-                "innerdicts": dumps_jsonlines(rows),
-            }
-        )
-    inner_df = pd.DataFrame(inner_rows, columns=["name_key", "innerdicts"])
-    register_frame(conn, "xlsx_innerdict_frame", inner_df)
-    conn.execute(
-        f"CREATE OR REPLACE TABLE {XLSX_INNERDICT_TABLE} AS SELECT * FROM xlsx_innerdict_frame"
+    _innerdict_keys, matched_rows = materialize_innerdicts_from_rows_table(
+        conn,
+        source_relation=INNERDICT_SOURCE_RELATIONS[XLSX_INNERDICT_TABLE],
+        table_name=XLSX_INNERDICT_TABLE,
     )
-    conn.execute("DROP TABLE IF EXISTS xlsx_innerdict_frame")
 
     append_innerdicts_from_jsonlines_table(
         conn,
@@ -249,6 +235,6 @@ def run(context: PipelineContext) -> StepResult:
     return StepResult(
         step_id=STEP_MATCH_XLSX,
         artifacts={"xlsx_matches_df": output_df},
-        messages=[f"Matched XLSX rows: {len(matched_df)}"],
-        diagnostics=[f"Matched XLSX rows: {len(matched_df)}"],
+        messages=[f"Matched XLSX rows: {matched_rows}"],
+        diagnostics=[f"Matched XLSX rows: {matched_rows}"],
     )

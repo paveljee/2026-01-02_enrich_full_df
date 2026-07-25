@@ -5,7 +5,6 @@ from copy import deepcopy
 from pathlib import Path
 
 import duckdb
-import pandas as pd
 
 from ..helpers.context import (
     PipelineContext,
@@ -16,10 +15,9 @@ from ..helpers.duckdb_utils import (
     append_innerdicts_from_jsonlines_table,
     duckdb_quote_identifier,
     duckdb_string_literal,
-    register_frame,
+    materialize_innerdicts_from_rows_table,
 )
 from ..helpers.files import file_sha256
-from ..helpers.jsonlines import dumps_jsonlines
 from ..helpers.name_matching import (
     sciscinet_ktp_name_norm_sql,
 )
@@ -33,6 +31,7 @@ from ..helpers.openalex import (
 from ..helpers.parquet_utils import normalize_parquet_column_name, parquet_columns, parquet_filename
 from ..helpers.procedures import ParquetMatchProcedure
 from ..helpers.schema import (
+    INNERDICT_SOURCE_RELATIONS,
     OUTERDICT_NAME_VIEW,
     PARQUET_ALL_HITS_TABLE,
     PARQUET_AUTHOR_AGG_TABLE,
@@ -64,6 +63,7 @@ from ..helpers.ssn_hit_selection import (
     ssn_hit_v2_selection_breakdown_sql,
     ssn_nonzero_hit_view_sql,
     ssn_removed_zero_hit_count_sql,
+    ssn_sum_hit_1pct_sql,
 )
 from ..helpers.vars import (
     DRAW_LABEL,
@@ -837,7 +837,7 @@ def run(context: PipelineContext) -> StepResult:
         SELECT
             ap.name_key AS name_key,
             ap.authorid AS authorid,
-            SUM(COALESCE(h.hit_1pct, 0)) AS "{KTP_SSN_SUM_HIT_1PCT_COL}"
+            {ssn_sum_hit_1pct_sql("h.hit_1pct")} AS "{KTP_SSN_SUM_HIT_1PCT_COL}"
         FROM {PARQUET_AUTHOR_PAPERS_TABLE} ap
         LEFT JOIN {PARQUET_ALL_HITS_TABLE} h
           ON ap.paperid = h.paperid
@@ -1079,7 +1079,7 @@ def run(context: PipelineContext) -> StepResult:
         SELECT
             ap.name_key AS name_key,
             ap.authorid AS authorid,
-            SUM(COALESCE(h.hit_1pct, 0)) AS "{KTP_SSN_SUM_HIT_1PCT_COL}",
+            {ssn_sum_hit_1pct_sql("h.hit_1pct")} AS "{KTP_SSN_SUM_HIT_1PCT_COL}",
             LIST(ap.paperid) FILTER (WHERE h.level = 'level0') AS "{SSN_PAPERIDS_LEVEL0_COL}",
             LIST(ap.paperid) FILTER (WHERE h.level = 'level1') AS "{SSN_PAPERIDS_LEVEL1_COL}",
             LIST(DISTINCT h.fieldid) AS "{SSN_FIELD_IDS_LIST_COL}"
@@ -1752,35 +1752,14 @@ def run(context: PipelineContext) -> StepResult:
             )}
         """
     )
-    parquet_innerdict_df = conn.execute(
-        f"SELECT * FROM {PARQUET_LEGACY_ROWS_INNERDICT_TABLE}"
-    ).df()
-    parquet_inner_rows = []
-    for name_key, group in parquet_innerdict_df.groupby(KTP_SOURCE_KEY_COL, dropna=False):
-        payload_df = group.drop(columns=[KTP_SOURCE_KEY_COL]).astype(object)
-        payload_df = payload_df.where(pd.notna(payload_df), None)
-        rows = payload_df.to_dict("records")
-        parquet_inner_rows.append(
-            {
-                "name_key": name_key,
-                "innerdicts": dumps_jsonlines(rows),
-            }
+    parquet_innerdict_keys, parquet_innerdict_records = (
+        materialize_innerdicts_from_rows_table(
+            conn,
+            source_relation=INNERDICT_SOURCE_RELATIONS[PARQUET_INNERDICT_TABLE],
+            table_name=PARQUET_INNERDICT_TABLE,
         )
-    parquet_inner_df = pd.DataFrame(
-        parquet_inner_rows,
-        columns=["name_key", "innerdicts"],
     )
-    register_frame(conn, "ssn_innerdict_frame", parquet_inner_df)
-    conn.execute(
-        f"CREATE OR REPLACE TABLE {PARQUET_INNERDICT_TABLE} AS "
-        "SELECT * FROM ssn_innerdict_frame"
-    )
-    conn.execute("DROP TABLE IF EXISTS ssn_innerdict_frame")
-    parquet_innerdict_keys = len(parquet_inner_rows)
-    parquet_innerdict_records = len(parquet_innerdict_df)
-    parquet_innerdict_rows = scalar_int(
-        f"SELECT COUNT(*) FROM {PARQUET_LEGACY_ROWS_INNERDICT_TABLE}"
-    )
+    parquet_innerdict_rows = parquet_innerdict_records
     log_tag(
         STEP_MATCH_PARQUET_LOG_TAG_TABLE_INNERDICT,
         f"Parquet enriched rows: {parquet_innerdict_rows:,}.",

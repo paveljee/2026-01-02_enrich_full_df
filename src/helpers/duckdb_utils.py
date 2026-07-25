@@ -4,7 +4,13 @@ import duckdb
 import pandas as pd
 
 from .data_models import InnerDict, OuterDict
-from .jsonlines import loads_jsonlines
+from .jsonlines import dumps_jsonlines, loads_jsonlines
+from .schema import (
+    INNERDICT_JSONLINES_COL,
+    INNERDICT_NAME_KEY_COL,
+    INNERDICT_TABLE_SCHEMA,
+)
+from .vars import KTP_SOURCE_KEY_COL
 
 
 def duckdb_string_literal(value: str) -> str:
@@ -26,6 +32,93 @@ def register_frame(conn: duckdb.DuckDBPyConnection, name: str, df: pd.DataFrame)
         pass
 
 
+def materialize_innerdicts_from_rows_table(
+    conn: duckdb.DuckDBPyConnection,
+    *,
+    source_relation: str,
+    table_name: str,
+) -> tuple[int, int]:
+    """Persist ordered flat rows under the common two-column JSONL contract.
+
+    DuckDB exposes ``SUM(INTEGER)`` as ``HUGEINT``, which pandas converts to a
+    float. Producers must cast domain-bounded aggregates to ``BIGINT`` before
+    this boundary so integer payloads remain integers. Other pandas missing
+    values are normalized to JSON ``null`` here.
+
+    Returns ``(source_key_count, innerdict_record_count)``.
+    """
+    source_schema = conn.execute(
+        f"DESCRIBE SELECT * FROM {source_relation}"
+    ).fetchall()
+    source_columns = [str(row[0]) for row in source_schema]
+    if KTP_SOURCE_KEY_COL not in source_columns:
+        raise ValueError(
+            f"Innerdict source relation '{source_relation}' is missing "
+            f"'{KTP_SOURCE_KEY_COL}'."
+        )
+
+    hugeint_columns = [
+        str(row[0]) for row in source_schema if str(row[1]).upper() == "HUGEINT"
+    ]
+    if hugeint_columns:
+        columns = ", ".join(hugeint_columns)
+        raise ValueError(
+            f"Innerdict source relation '{source_relation}' contains HUGEINT "
+            f"column(s): {columns}. Cast domain-bounded values to BIGINT in "
+            "the producing SQL before JSONL materialization."
+        )
+
+    ordered_rows = conn.execute(f"SELECT * FROM {source_relation}").df()
+    if ordered_rows[KTP_SOURCE_KEY_COL].isna().any():
+        raise ValueError(
+            f"Innerdict source relation '{source_relation}' contains a NULL "
+            f"'{KTP_SOURCE_KEY_COL}'."
+        )
+
+    inner_rows: list[dict[str, str]] = []
+    for source_key, group in ordered_rows.groupby(
+        KTP_SOURCE_KEY_COL,
+        dropna=False,
+        sort=False,
+    ):
+        payload_df = group.drop(columns=[KTP_SOURCE_KEY_COL]).astype(object)
+        payload_df = payload_df.where(pd.notna(payload_df), None)
+        inner_rows.append(
+            {
+                INNERDICT_NAME_KEY_COL: str(source_key),
+                INNERDICT_JSONLINES_COL: dumps_jsonlines(
+                    payload_df.to_dict("records")
+                ),
+            }
+        )
+
+    schema_columns = [name for name, _data_type in INNERDICT_TABLE_SCHEMA]
+    if not inner_rows:
+        definitions = ", ".join(
+            f"{duckdb_quote_identifier(name)} {data_type}"
+            for name, data_type in INNERDICT_TABLE_SCHEMA
+        )
+        conn.execute(f"CREATE OR REPLACE TABLE {table_name} ({definitions})")
+    else:
+        frame_name = f"{table_name}_frame"
+        inner_df = pd.DataFrame(inner_rows, columns=schema_columns)
+        register_frame(conn, frame_name, inner_df)
+        try:
+            projection = ", ".join(
+                f"CAST({duckdb_quote_identifier(name)} AS {data_type}) "
+                f"AS {duckdb_quote_identifier(name)}"
+                for name, data_type in INNERDICT_TABLE_SCHEMA
+            )
+            conn.execute(
+                f"CREATE OR REPLACE TABLE {table_name} AS "
+                f"SELECT {projection} FROM {frame_name}"
+            )
+        finally:
+            conn.execute(f"DROP TABLE IF EXISTS {frame_name}")
+
+    return len(inner_rows), len(ordered_rows)
+
+
 def append_innerdicts_from_jsonlines_table(
     conn: duckdb.DuckDBPyConnection,
     *,
@@ -34,7 +127,10 @@ def append_innerdicts_from_jsonlines_table(
     procedure,
     required_columns: set[str] | None = None,
 ) -> None:
-    rows = conn.execute(f"SELECT name_key, innerdicts FROM {table_name}").fetchall()
+    rows = conn.execute(
+        f"SELECT {duckdb_quote_identifier(INNERDICT_NAME_KEY_COL)}, "
+        f"{duckdb_quote_identifier(INNERDICT_JSONLINES_COL)} FROM {table_name}"
+    ).fetchall()
     required = required_columns or set()
     for name_key, payload in rows:
         for record in loads_jsonlines(payload or ""):
@@ -48,5 +144,6 @@ def append_innerdicts_from_jsonlines_table(
 __all__ = [
     "duckdb_string_literal",
     "register_frame",
+    "materialize_innerdicts_from_rows_table",
     "append_innerdicts_from_jsonlines_table",
 ]
