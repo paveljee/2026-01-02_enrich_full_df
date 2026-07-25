@@ -1311,13 +1311,53 @@ def run(context: PipelineContext) -> StepResult:
     conn.execute(
         f"""
         CREATE OR REPLACE TABLE {PARQUET_AUTHOR_OUTPUT_TABLE} AS
+        WITH source_draw AS (
+            SELECT
+                x."{KTP_SOURCE_KEY_COL}" AS "{KTP_SOURCE_KEY_COL}",
+                x."{DRAW_LABEL}" AS "{DRAW_LABEL}"
+            FROM (
+                SELECT
+                    nk."{KTP_SOURCE_KEY_COL}" AS "{KTP_SOURCE_KEY_COL}",
+                    s."{DRAW_LABEL}" AS "{DRAW_LABEL}",
+                    ROW_NUMBER() OVER (
+                        PARTITION BY nk."{KTP_SOURCE_KEY_COL}"
+                        ORDER BY
+                            CASE
+                                WHEN starts_with(CAST(s."{DRAW_LABEL}" AS VARCHAR), 'pilot.') THEN 0
+                                WHEN TRY_CAST(s."{DRAW_LABEL}" AS BIGINT) IS NOT NULL THEN 1
+                                WHEN s."{DRAW_LABEL}" IS NULL
+                                  OR trim(CAST(s."{DRAW_LABEL}" AS VARCHAR)) = '' THEN 3
+                                ELSE 2
+                            END,
+                            COALESCE(
+                                CASE
+                                    WHEN starts_with(CAST(s."{DRAW_LABEL}" AS VARCHAR), 'pilot.')
+                                        THEN TRY_CAST(
+                                            split_part(CAST(s."{DRAW_LABEL}" AS VARCHAR), '.', 2)
+                                            AS BIGINT
+                                        )
+                                    WHEN TRY_CAST(s."{DRAW_LABEL}" AS BIGINT) IS NOT NULL
+                                        THEN CAST(s."{DRAW_LABEL}" AS BIGINT)
+                                    ELSE NULL
+                                END,
+                                999999999
+                            )
+                    ) AS draw_rank
+                FROM {OUTERDICT_NAME_VIEW} nk
+                LEFT JOIN {SAMPLES_WITH_NAMES_VIEW} s
+                  ON lower(nk."{KTP_FIRST_NAME_COL}") = lower(s."{KTP_FIRST_NAME_COL}")
+                 AND lower(nk."{KTP_LAST_NAME_COL}") = lower(s."{KTP_LAST_NAME_COL}")
+            ) x
+            WHERE x.draw_rank = 1
+        )
         SELECT
             m.name_key AS "{KTP_SOURCE_KEY_COL}",
-            m."{KTP_FIRST_NAME_COL}" AS "{KTP_FIRST_NAME_COL}",
-            m."{KTP_LAST_NAME_COL}" AS "{KTP_LAST_NAME_COL}",
+            '{parquet_filename_payload}' AS "{KTP_FILENAME_COL}",
             a."{author_id_col}" AS "{KTP_FRAGMENT_COL}",
             'author_id' AS "{KTP_FRAGMENT_TYPE_COL}",
-            '{parquet_filename_payload}' AS "{KTP_FILENAME_COL}",
+            sd."{DRAW_LABEL}" AS "{DRAW_LABEL}",
+            m."{KTP_FIRST_NAME_COL}" AS "{KTP_FIRST_NAME_COL}",
+            m."{KTP_LAST_NAME_COL}" AS "{KTP_LAST_NAME_COL}",
             m."{KTP_SSNAD_MATCH_COL}" AS "{KTP_SSNAD_MATCH_COL}"{ssn_hit_metadata_select},
             '{authors_paper_filename}' AS "{KTP_SSNAP_FILENAME_COL}",
             '{hit_papers0_filename}' AS "{KTP_SSNHPL0_FILENAME_COL}",
@@ -1333,6 +1373,8 @@ def run(context: PipelineContext) -> StepResult:
             CAST(agg."{SSN_FIELD_IDS_LIST_COL}" AS VARCHAR) AS "{SSN_FIELD_IDS_LIST_COL}",
             agg."{KTP_SSN_SUM_HIT_1PCT_COL}"
         FROM {PARQUET_AUTHOR_MATCH_HIT_SELECTED_VIEW} m
+        LEFT JOIN source_draw sd
+          ON sd."{KTP_SOURCE_KEY_COL}" = m.name_key
         JOIN {author_table} a
           ON a."{author_id_col}" = m."{author_id_col}"
         JOIN {authors_table} au
@@ -1656,6 +1698,7 @@ def run(context: PipelineContext) -> StepResult:
                 v."{KTP_FILENAME_COL}",
                 v."{KTP_FRAGMENT_COL}",
                 v."{KTP_FRAGMENT_TYPE_COL}",
+                v."{DRAW_LABEL}",
                 v."{KTP_FIRST_NAME_COL}",
                 v."{KTP_LAST_NAME_COL}",
                 v."{KTP_SSNAD_MATCH_COL}",
@@ -1664,6 +1707,7 @@ def run(context: PipelineContext) -> StepResult:
                     "{KTP_FILENAME_COL}",
                     "{KTP_FRAGMENT_COL}",
                     "{KTP_FRAGMENT_TYPE_COL}",
+                    "{DRAW_LABEL}",
                     "{KTP_FIRST_NAME_COL}",
                     "{KTP_LAST_NAME_COL}",
                     "{KTP_SSNAD_MATCH_COL}",
@@ -1692,52 +1736,9 @@ def run(context: PipelineContext) -> StepResult:
              AND CAST(cd.authorid AS VARCHAR) = CAST(v."{author_id_col}" AS VARCHAR)
             WHERE v."{KTP_SSN_SUM_HIT_1PCT_COL}" IS NULL OR v."{KTP_SSN_SUM_HIT_1PCT_COL}" <> 0
         ),
-        source_draw AS (
-            SELECT
-                x."{KTP_SOURCE_KEY_COL}" AS "{KTP_SOURCE_KEY_COL}",
-                x."{DRAW_LABEL}" AS "{DRAW_LABEL}"
-            FROM (
-                SELECT
-                    nk."{KTP_SOURCE_KEY_COL}" AS "{KTP_SOURCE_KEY_COL}",
-                    s."{DRAW_LABEL}" AS "{DRAW_LABEL}",
-                    ROW_NUMBER() OVER (
-                        PARTITION BY nk."{KTP_SOURCE_KEY_COL}"
-                        ORDER BY
-                            CASE
-                                WHEN starts_with(CAST(s."{DRAW_LABEL}" AS VARCHAR), 'pilot.') THEN 0
-                                WHEN TRY_CAST(s."{DRAW_LABEL}" AS BIGINT) IS NOT NULL THEN 1
-                                WHEN s."{DRAW_LABEL}" IS NULL
-                                  OR trim(CAST(s."{DRAW_LABEL}" AS VARCHAR)) = '' THEN 3
-                                ELSE 2
-                            END,
-                            COALESCE(
-                                CASE
-                                    WHEN starts_with(CAST(s."{DRAW_LABEL}" AS VARCHAR), 'pilot.')
-                                        THEN TRY_CAST(
-                                            split_part(CAST(s."{DRAW_LABEL}" AS VARCHAR), '.', 2)
-                                            AS BIGINT
-                                        )
-                                    WHEN TRY_CAST(s."{DRAW_LABEL}" AS BIGINT) IS NOT NULL
-                                        THEN CAST(s."{DRAW_LABEL}" AS BIGINT)
-                                    ELSE NULL
-                                END,
-                                999999999
-                            )
-                    ) AS draw_rank
-                FROM {OUTERDICT_NAME_VIEW} nk
-                LEFT JOIN {SAMPLES_WITH_NAMES_VIEW} s
-                  ON lower(nk."{KTP_FIRST_NAME_COL}") = lower(s."{KTP_FIRST_NAME_COL}")
-                 AND lower(nk."{KTP_LAST_NAME_COL}") = lower(s."{KTP_LAST_NAME_COL}")
-            ) x
-            WHERE x.draw_rank = 1
-        ),
         base AS (
-            SELECT
-                e.*,
-                sd."{DRAW_LABEL}" AS "{DRAW_LABEL}"
-            FROM enriched e
-            LEFT JOIN source_draw sd
-              ON sd."{KTP_SOURCE_KEY_COL}" = e."{KTP_SOURCE_KEY_COL}"
+            SELECT *
+            FROM enriched
         ),
         {draw_sort_ctes_sql(draw_col=DRAW_LABEL, source_key_col=KTP_SOURCE_KEY_COL)}
         SELECT * EXCLUDE (

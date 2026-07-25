@@ -179,7 +179,8 @@ floats; reject an unhandled `HUGEINT` source column.
 
 The ordered SSN legacy rows and the resulting SSN JSONL innerdicts must retain
 `ktp.draw_number`, matching XLSX and DOCX. `ssn_parquet_output` and Step 10
-review artifacts must expose one unsuffixed draw-number column.
+review artifacts must expose one unsuffixed draw-number column immediately
+after `ktp.fragment_type`.
 
 Update reset/cleanup for the internal SSN relation. Split step-9 diagnostics
 between wide innerdict-row count and grouped source-key count rather than

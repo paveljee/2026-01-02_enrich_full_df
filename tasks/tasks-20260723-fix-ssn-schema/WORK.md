@@ -45,6 +45,11 @@
 - Completed: focused and repository validation.
 - Completed: incorporated the added human requirements: SSN innerdicts retain
   draw numbers, and Step 10 partition/review artifacts include mode 0.
+- Completed: aligned visible draw-number ordering across XLSX, DOCX, and SSN;
+  Step 9 creates `ktp.draw_number` after `ktp.fragment_type` in the
+  author-output source table, so enriched, legacy, output, and JSONL rows carry
+  it forward without downstream reshuffling. The Step 10 review relation
+  declares the same order.
 - Completed: Step 10 now materializes selected-key rows from each existing
   output view once into temporary DuckDB tables, then runs the existing review
   aggregation against those physical inputs.
@@ -86,10 +91,11 @@
   explicit missing-value-to-`null` normalization.
 - Draw-label follow-up completed: `PARQUET_LEGACY_ROWS_INNERDICT_TABLE` retains
   `ktp.draw_number`, so the SSN JSONL payload and fresh/resumed `OuterDict`
-  retain it. `PARQUET_OUTPUT_VIEW` now uses that existing value for sorting and
-  projection; its redundant `source_draw` CTE/join and final draw exclusion
-  were removed. The Step 9 output and Step 10 partition/review artifacts thus
-  expose exactly one `ktp.draw_number`, with no suffixed duplicate.
+  retain it. Step 9 obtains one source draw while creating
+  `PARQUET_AUTHOR_OUTPUT_TABLE`, positions it after `ktp.fragment_type`, and
+  carries that value forward for row ordering and `PARQUET_OUTPUT_VIEW`. The
+  Step 9 output and Step 10 partition/review artifacts thus expose exactly one
+  unsuffixed `ktp.draw_number` in the same position.
 - No other downstream adaptation is required: cards and partition state
   already recognize `ktp.draw_number`, partition review reads it from the
   partition table, resume uses the same JSONL loader, and detours either select
