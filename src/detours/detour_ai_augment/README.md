@@ -59,7 +59,7 @@ This section is intended to capture the specifics of the workflow operation in s
 
 **Control Centre:** Requires no specialized infrastructure beyond a computer capable of operating the workflow components, including sufficient computing resources and internet access. The test set-up (hereafter: the main host) used a Mac16,12 Macbook Air (Apple M4 chip) in a 10-core, 24 GB RAM, 512 GB SSD configuration, running macOS Sequoia 15.6.1 and Visual Studio Code 1.130.0, though these versions were not pinned and may have been updated moving forward.
 
-**AI Agent Runtime:** Deployed under the main host to a [Lima virtual machine version 2.1.1][lima211] using `./src/agent_runtime/deploy.sh`.
+**AI Agent Runtime:** Deployed under the main host to a [Lima virtual machine version 2.2.0][lima220] using `./src/agent_runtime/deploy.sh`.
 
 **Backend:** Deployed on the host machine using `./src/backend/api.py` in this (i.e., the `detour_ai_augment` “detour” of the KTP HCR pipeline) environment.
 
@@ -331,7 +331,7 @@ Even when the Codex sandbox is configured with unrestricted local access, that a
 
 [openai-multi-agent]: https://developers.openai.com/api/docs/guides/responses-multi-agent "Multi-agent | OpenAI Developers"
 
-[lima211]: https://github.com/lima-vm/lima/releases/tag/v2.1.1 "lima release v2.1.1 | GitHub"
+[lima220]: https://github.com/lima-vm/lima/releases/tag/v2.2.0 "lima release v2.2.0 | GitHub"
 
 [tongyi]: https://github.com/Alibaba-NLP/DeepResearch "Tongyi Deep Research | GitHub"
 

@@ -20,20 +20,38 @@ AIVM_GUEST_WORKDIR="$AIVM_HOME/workdir"
 # Lima config to be injected in AIVM
 build_aivm_config() {
     cat <<EOF
+plain: true
+
 user:
   name: "$AIVM_USER"
   home: "$AIVM_HOME"
+  passwordlessSudo: false
+
+mounts: []
 EOF
 }
-# Codex config to ship with AIVM
-AIVM_CODEX_CONFIG_PATH="$AIVM_HOME/.codex/config.toml"
+# Codex etc. config to ship with AIVM
+VSCODE_VERSION="1.130.0"
+VSCODE_COMMIT="1b6a188127eeaf9194f945eb6eb89a657e93c54c"
+VSCODE_URL="https://update.code.visualstudio.com/commit:$VSCODE_COMMIT/server-linux-arm64/stable"
+VSCODE_PATH="$AIVM_HOME/.vscode-server/bin/$VSCODE_COMMIT"
+VSCODE_BIN_PATH="$VSCODE_PATH/bin/code-server"
+VSCE_PATH="$AIVM_HOME/.vscode-server/extensions"
+CODEX_VSCE_VERSION="26.721.41059"
+CODEX_VSCE="openai.chatgpt@$CODEX_VSCE_VERSION"
+CODEX_PATH="$AIVM_HOME/.codex"
+CODEX_CONFIG_PATH="$CODEX_PATH/config.toml"
 build_aivm_provision() {
     cat <<EOF
+provision:
   - mode: user
     script: |
-      mkdir -p "$AIVM_HOME/.codex"
-      chmod 700 "$AIVM_HOME/.codex"
-      cat > "$AIVM_CODEX_CONFIG_PATH" <<'CODEX_CONFIG'
+      mkdir -p "$GUEST_WORKDIR"
+  - mode: user
+    script: |
+      mkdir -p "$CODEX_PATH"
+      chmod 700 "$CODEX_PATH"
+      cat > "$CODEX_CONFIG_PATH" <<'CODEX_CONFIG'
       model = "gpt-5.6-sol"
       model_reasoning_effort = "xhigh"
       personality = "none"
@@ -48,7 +66,15 @@ build_aivm_provision() {
       [sandbox_workspace_write]
       network_access = true
       CODEX_CONFIG
-      chmod 600 "$AIVM_HOME/.codex/config.toml"
+      chmod 600 "$CODEX_CONFIG_PATH"
+  - mode: user
+    script: |
+      mkdir -p "$VSCODE_PATH"
+      curl -fsSL "$VSCODE_URL" |
+        tar -xz --strip-components=1 -C "$VSCODE_PATH"
+      "$VSCODE_BIN_PATH" \
+        --extensions-dir "$VSCE_PATH" \
+        --install-extension "$CODEX_VSCE" --force
 EOF
 }
 ### END AIVM-SPECIFIC CONFIGS ###
@@ -160,6 +186,26 @@ else
         AIVM_CONFIG="$(build_aivm_config)"
         AIVM_PROVISION="$(build_aivm_provision)"
     fi
+
+    AICODE_MOUNTS="$(cat <<EOF
+# ONLY mount the project directory - no defaults
+mounts:
+  - location: "$MOUNT_DIR"
+    mountPoint: "$GUEST_WORKDIR"
+    writable: true
+
+mountType: "reverse-sshfs"
+EOF
+)"
+
+    AICODE_PROVISION="$(cat <<EOF
+# Ensure mount point exists
+provision:
+  - mode: system
+    script: |
+      mkdir -p "$GUEST_WORKDIR"
+EOF
+)"
     
     # Create a minimal Lima template for Apple Silicon
     cat > /tmp/aicode.yaml <<EOF
@@ -168,26 +214,13 @@ images:
   - location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img"
     arch: "aarch64"
 
-${AIVM_CONFIG:-}
-
-# ONLY mount the project directory - no defaults
-mounts:
-  - location: "$MOUNT_DIR"
-    mountPoint: "$GUEST_WORKDIR"
-    writable: true
-
-mountType: "reverse-sshfs"
+${AIVM_CONFIG:-$AICODE_MOUNTS}
 
 cpus: 4
 memory: "4GiB"
 disk: "10GiB"
 
-# Ensure mount point exists
-provision:
-  - mode: system
-    script: |
-      mkdir -p "$GUEST_WORKDIR"
-${AIVM_PROVISION:-}
+${AIVM_PROVISION:-$AICODE_PROVISION}
 EOF
 
     # Start with the minimal template
@@ -212,11 +245,47 @@ verify_instance() {
         || { echo "❌ Workdir is not writable: $GUEST_WORKDIR"; return 1; }
     echo "✅ Workdir is writable at '$GUEST_WORKDIR'"
 
+    PROBE=".aicode-probe-$$"
+    limactl shell --workdir=/ "$LIMA_INSTANCE" \
+        touch "$GUEST_WORKDIR/$PROBE"
+    if [ -f "$MOUNT_DIR/$PROBE" ]; then
+        rm -f "$MOUNT_DIR/$PROBE"
+        if [ "$AIVM_MODE" -eq 0 ]; then
+            echo "✅ Workdir is mounted"
+        else
+            echo "❌ Bad: workdir is mounted"
+            return 1
+        fi
+    else
+        limactl shell --workdir=/ "$LIMA_INSTANCE" \
+            rm -f "$GUEST_WORKDIR/$PROBE"
+        if [ "$AIVM_MODE" -eq 0 ]; then
+            echo "❌ Bad: workdir is not mounted"
+            return 1
+        else
+            echo "✅ Workdir is not mounted"
+        fi
+    fi
+
     if [ "$AIVM_MODE" -eq 1 ]; then
         limactl shell --workdir=/ "$LIMA_INSTANCE" \
-            test -f "$AIVM_CODEX_CONFIG_PATH" \
-            || { echo "❌ Codex config missing: $AIVM_HOME/.codex/config.toml"; return 1; }
-        echo "✅ Codex config exists at '$AIVM_CODEX_CONFIG_PATH'"
+            test -f "$CODEX_CONFIG_PATH" \
+            || { echo "❌ Codex config missing: $CODEX_CONFIG_PATH"; return 1; }
+        echo "✅ Codex config exists at '$CODEX_CONFIG_PATH'"
+
+        limactl shell --workdir=/ "$LIMA_INSTANCE" \
+            sh -c 'test "$("$1" --version | head -1)" = "$2"' \
+                sh "$VSCODE_BIN_PATH" "$VSCODE_VERSION" \
+            || { echo "❌ VS Code $VSCODE_VERSION not found"; return 1; }
+        echo "✅ VS Code $VSCODE_VERSION installed"
+
+        limactl shell --workdir=/ "$LIMA_INSTANCE" \
+            "$VSCODE_BIN_PATH" \
+            --extensions-dir "$VSCE_PATH" \
+            --list-extensions --show-versions |
+            grep -qx "$CODEX_VSCE" \
+            || { echo "❌ VS Code extension $CODEX_VSCE not found"; return 1; }
+        echo "✅ VS Code extension $CODEX_VSCE installed"
     fi
 }
 
