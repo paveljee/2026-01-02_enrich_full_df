@@ -1,12 +1,4 @@
 #!/bin/bash
-
-# NOTE: this is deprecated and will not be used.
-# The reason is because these changes ultimately
-# did not help solve the issue of enforcing
-# append-only Codex sessions.
-#
-# Logging for historical purposes; will roll back.
-
 set -e
 
 SCRIPT_NAME="aicode"
@@ -28,14 +20,14 @@ AIVM_GUEST_WORKDIR="$AIVM_HOME/workdir"
 # Lima config to be injected in AIVM
 build_aivm_config() {
     cat <<EOF
-#plain: true
+plain: true
 
 user:
   name: "$AIVM_USER"
   home: "$AIVM_HOME"
-#  passwordlessSudo: false
+  passwordlessSudo: false
 
-#mounts: []
+mounts: []
 EOF
 }
 # Codex etc. config to ship with AIVM
@@ -47,15 +39,14 @@ VSCODE_BIN_PATH="$VSCODE_PATH/bin/code-server"
 VSCE_PATH="$AIVM_HOME/.vscode-server/extensions"
 CODEX_VSCE_VERSION="26.721.41059"
 CODEX_VSCE="openai.chatgpt@$CODEX_VSCE_VERSION"
-#CODEX_PATH="$AIVM_HOME/.codex"
-CODEX_PATH="$AIVM_HOME/workdir/.codex"
+CODEX_PATH="$AIVM_HOME/.codex"
 CODEX_CONFIG_PATH="$CODEX_PATH/config.toml"
 build_aivm_provision() {
     cat <<EOF
-#provision:
-  #- mode: user
-  #  script: |
-  #    mkdir -p "$GUEST_WORKDIR"
+provision:
+  - mode: user
+    script: |
+      mkdir -p "$GUEST_WORKDIR"
   - mode: user
     script: |
       mkdir -p "$CODEX_PATH"
@@ -84,13 +75,6 @@ build_aivm_provision() {
       "$VSCODE_BIN_PATH" \
         --extensions-dir "$VSCE_PATH" \
         --install-extension "$CODEX_VSCE" --force
-  - mode: user
-    script: |
-      line='export CODEX_HOME="$CODEX_PATH"'
-      for file in "$AIVM_HOME/.profile" "$AIVM_HOME/.bashrc"; do
-        touch "\$file"
-        grep -qxF "\$line" "\$file" || printf '\n%s\n' "\$line" >> "\$file"
-      done
 EOF
 }
 ### END AIVM-SPECIFIC CONFIGS ###
@@ -216,7 +200,7 @@ EOF
 
     AICODE_PROVISION="$(cat <<EOF
 # Ensure mount point exists
-#provision:
+provision:
   - mode: system
     script: |
       mkdir -p "$GUEST_WORKDIR"
@@ -230,18 +214,13 @@ images:
   - location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img"
     arch: "aarch64"
 
-${AIVM_CONFIG:-}
-
-$AICODE_MOUNTS
+${AIVM_CONFIG:-$AICODE_MOUNTS}
 
 cpus: 4
 memory: "4GiB"
 disk: "10GiB"
 
-provision:
-${AIVM_PROVISION:-}
-
-$AICODE_PROVISION
+${AIVM_PROVISION:-$AICODE_PROVISION}
 EOF
 
     # Start with the minimal template
@@ -311,5 +290,4 @@ verify_instance() {
 }
 
 # If verified, open shell in project directory
-verify_instance && \
-    exec limactl shell --workdir="$GUEST_WORKDIR" "$LIMA_INSTANCE" bash
+verify_instance && exec limactl shell --workdir="$GUEST_WORKDIR" "$LIMA_INSTANCE" bash
