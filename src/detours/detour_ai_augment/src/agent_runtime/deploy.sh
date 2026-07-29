@@ -1,35 +1,27 @@
 #!/bin/bash
 set -e
 
-SCRIPT_NAME="aicode"
+SCRIPT_NAME="aivm"
+PROVISION_LIB_NAME="provision.sh"
 INSTALL_PATH="$HOME/.local/bin/$SCRIPT_NAME"
-PROJECT_DIR="/Volumes/home/aicode"
-LIMA_INSTANCE="aicode"
+INSTALL_LIB_DIR="$HOME/.local/lib/$SCRIPT_NAME"
+SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+PROJECT_DIR="/Volumes/home/aicode/aivm/home/ai"
+LIMA_INSTANCE="aivm"
 MOUNT_DIR="$PROJECT_DIR"
 # Though using the real --mount dir downstream to preserve macOS paths
 DEFAULT_MOUNTPOINT="$PROJECT_DIR"
-GUEST_WORKDIR="$DEFAULT_MOUNTPOINT"
-
-### BEGIN AIVM-SPECIFIC CONFIGS ###
-# AIVM if fresh instance needed
-AIVM_LIMA_INSTANCE="aivm"
-AIVM_MODE=0
-AIVM_USER="myvm"
+GUEST_MOUNTPOINT="$DEFAULT_MOUNTPOINT"
+AIVM_USER="ai"
 AIVM_HOME="/home/$AIVM_USER"
-AIVM_GUEST_WORKDIR="$AIVM_HOME/workdir"
-# Lima config to be injected in AIVM
-build_aivm_config() {
-    cat <<EOF
-plain: true
+AIVM_SSH_PORT="22022"
+AIVM_KEY_DIR="$HOME/.local/share/$SCRIPT_NAME/.ssh"
+AIVM_IDENTITY_FILE="$AIVM_KEY_DIR/id_ed25519"
+AIVM_KNOWN_HOSTS_FILE="$AIVM_KEY_DIR/known_hosts"
+AIVM_SSH_TARGET="$LIMA_INSTANCE-$AIVM_USER"
+AIVM_HOST_KEY_ALIAS="lima-$LIMA_INSTANCE-$AIVM_USER"
+AIVM_SSH_CMD=()
 
-user:
-  name: "$AIVM_USER"
-  home: "$AIVM_HOME"
-  passwordlessSudo: false
-
-mounts: []
-EOF
-}
 # Codex etc. config to ship with AIVM
 VSCODE_VERSION="1.130.0"
 VSCODE_COMMIT="1b6a188127eeaf9194f945eb6eb89a657e93c54c"
@@ -41,54 +33,27 @@ CODEX_VSCE_VERSION="26.721.41059"
 CODEX_VSCE="openai.chatgpt@$CODEX_VSCE_VERSION"
 CODEX_PATH="$AIVM_HOME/.codex"
 CODEX_CONFIG_PATH="$CODEX_PATH/config.toml"
-build_aivm_provision() {
-    cat <<EOF
-provision:
-  - mode: user
-    script: |
-      mkdir -p "$GUEST_WORKDIR"
-  - mode: user
-    script: |
-      mkdir -p "$CODEX_PATH"
-      chmod 700 "$CODEX_PATH"
-      cat > "$CODEX_CONFIG_PATH" <<'CODEX_CONFIG'
-      model = "gpt-5.6-sol"
-      model_reasoning_effort = "xhigh"
-      personality = "none"
-      web_search = "live"
-      sandbox_mode = "danger-full-access"
-      approval_policy = "never"
-      service_tier = "default"
 
-      [agents]
-      enabled = false
-
-      [sandbox_workspace_write]
-      network_access = true
-      CODEX_CONFIG
-      chmod 600 "$CODEX_CONFIG_PATH"
-  - mode: user
-    script: |
-      mkdir -p "$VSCODE_PATH"
-      curl -fsSL "$VSCODE_URL" |
-        tar -xz --strip-components=1 -C "$VSCODE_PATH"
-      "$VSCODE_BIN_PATH" \
-        --extensions-dir "$VSCE_PATH" \
-        --install-extension "$CODEX_VSCE" --force
-EOF
-}
-### END AIVM-SPECIFIC CONFIGS ###
+if [ "$0" = "$INSTALL_PATH" ]; then
+    PROVISION_SCRIPT="$INSTALL_LIB_DIR/$PROVISION_LIB_NAME"
+else
+    PROVISION_SCRIPT="${AIVM_PROVISION_SCRIPT:-$SOURCE_DIR/$PROVISION_LIB_NAME}"
+fi
 
 # Self-install function
 self_install() {
     if [ "$0" != "$INSTALL_PATH" ]; then
+        [ -f "$PROVISION_SCRIPT" ] \
+            || { echo "❌ Provisioning script not found: $PROVISION_SCRIPT"; exit 1; }
+
         echo "📦 Installing $SCRIPT_NAME to $INSTALL_PATH..."
-        mkdir -p "$HOME/.local/bin"
+        mkdir -p "$HOME/.local/bin" "$INSTALL_LIB_DIR"
         cp "$0" "$INSTALL_PATH"
-        chmod +x "$INSTALL_PATH"
+        cp "$PROVISION_SCRIPT" "$INSTALL_LIB_DIR/$PROVISION_LIB_NAME"
+        chmod +x "$INSTALL_PATH" "$INSTALL_LIB_DIR/$PROVISION_LIB_NAME"
         echo "✅ Installed! You can now run: $SCRIPT_NAME"
         echo "💡 Make sure $HOME/.local/bin is in your PATH"
-        
+
         # Check if in PATH
         if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
             echo "⚠️  Add this to your ~/.zshrc or ~/.bashrc:"
@@ -96,6 +61,70 @@ self_install() {
         fi
         exit 0
     fi
+}
+
+base64_string() {
+    printf '%s' "$1" | base64 | tr -d '\n'
+}
+
+base64_file() {
+    base64 < "$1" | tr -d '\n'
+}
+
+yaml_escape() {
+    local value="$1"
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    printf '%s' "$value"
+}
+
+generate_aivm_key() {
+    rm -rf "$AIVM_KEY_DIR"
+    mkdir -p "$AIVM_KEY_DIR"
+    chmod 700 "$AIVM_KEY_DIR"
+
+    ssh-keygen \
+        -q \
+        -t ed25519 \
+        -N "" \
+        -C "$LIMA_INSTANCE:$AIVM_USER" \
+        -f "$AIVM_IDENTITY_FILE"
+
+    chmod 600 "$AIVM_IDENTITY_FILE"
+    chmod 644 "$AIVM_IDENTITY_FILE.pub"
+    : > "$AIVM_KNOWN_HOSTS_FILE"
+    chmod 600 "$AIVM_KNOWN_HOSTS_FILE"
+}
+
+remove_aivm_key() {
+    rm -rf "$AIVM_KEY_DIR"
+}
+
+prepare_aivm_ssh() {
+    LIMA_SSH_CONFIG_PATH="$HOME/.lima/$LIMA_INSTANCE/ssh.config"
+
+    AIVM_SSH_CMD=(
+        ssh
+        -F "$LIMA_SSH_CONFIG_PATH"
+        -o "ProxyJump=lima-$LIMA_INSTANCE"
+        -o "HostName=127.0.0.1"
+        -o "Port=$AIVM_SSH_PORT"
+        -o "User=$AIVM_USER"
+        -o "IdentityFile=$AIVM_IDENTITY_FILE"
+        -o "IdentitiesOnly=yes"
+        -o "BatchMode=yes"
+        -o "PasswordAuthentication=no"
+        -o "KbdInteractiveAuthentication=no"
+        -o "ForwardAgent=no"
+        -o "ClearAllForwardings=yes"
+        -o "UserKnownHostsFile=$AIVM_KNOWN_HOSTS_FILE"
+        -o "HostKeyAlias=$AIVM_HOST_KEY_ALIAS"
+        -o "StrictHostKeyChecking=accept-new"
+    )
+}
+
+aivm_ssh() {
+    "${AIVM_SSH_CMD[@]}" "$AIVM_SSH_TARGET" "$@"
 }
 
 # Parse flags in any order
@@ -108,12 +137,8 @@ while [ "$#" -gt 0 ]; do
         --mount)
             [ -n "${2:-}" ] || { echo "❌ Missing mount path"; exit 1; }
             MOUNT_DIR="$(cd "$2" && pwd -P)"
-            GUEST_WORKDIR="$MOUNT_DIR"
+            GUEST_MOUNTPOINT="$MOUNT_DIR"
             shift 2
-            ;;
-        --aivm)
-            AIVM_MODE=1
-            shift
             ;;
         *)
             echo "❌ Unknown option: $1"
@@ -122,21 +147,23 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
-if [ "$AIVM_MODE" -eq 1 ]; then
-    LIMA_INSTANCE="$AIVM_LIMA_INSTANCE"
-    GUEST_WORKDIR="$AIVM_GUEST_WORKDIR"
-fi
+[ -f "$PROVISION_SCRIPT" ] \
+    || { echo "❌ Provisioning script not found: $PROVISION_SCRIPT"; exit 1; }
 
 # Navigate to project directory
 cd "$MOUNT_DIR" || { echo "❌ Directory not found: $MOUNT_DIR"; exit 1; }
 
 # Always recreate the AIVM instance but prompt to be sure
-if [ "$AIVM_MODE" -eq 1 ] && limactl list | grep -q "^$LIMA_INSTANCE"; then
+if limactl list | grep -q "^$LIMA_INSTANCE"; then
     echo "♻️ Recreating Lima instance '$LIMA_INSTANCE'..."
     read -r -p "⚠️ Delete Lima instance '$LIMA_INSTANCE'? [y/N] " reply
     case "$reply" in
         [yY]|[yY][eE][sS])
             limactl delete -f "$LIMA_INSTANCE"
+            echo "🗑️ Removed instance '$LIMA_INSTANCE' from Lima"
+            remove_aivm_key
+            echo "🗑️ Removed '$AIVM_KEY_DIR' containing '$AIVM_USER' SSH key"
+
             ;;
         *)
             echo "❌ Use existing instance with \`limactl shell $LIMA_INSTANCE\`"
@@ -145,149 +172,185 @@ if [ "$AIVM_MODE" -eq 1 ] && limactl list | grep -q "^$LIMA_INSTANCE"; then
     esac
 fi
 
-# Update the existing instance's mount when --mount is used
-if limactl list | grep -q "^$LIMA_INSTANCE"; then
-    CONFIG="$HOME/.lima/$LIMA_INSTANCE/lima.yaml"
+echo "🔑 Generating a dedicated SSH key for '$AIVM_USER' into '$AIVM_KEY_DIR'..."
+generate_aivm_key
 
-    limactl stop "$LIMA_INSTANCE" 2>/dev/null || true
+echo "🚀 Creating new Lima instance '$LIMA_INSTANCE'..."
 
-    awk -v location="$MOUNT_DIR" -v mountpoint="$GUEST_WORKDIR" '
-        /^mounts:/ {
-            print "mounts:"
-            print "  - location: \"" location "\""
-            print "    mountPoint: \"" mountpoint "\""
-            print "    writable: true"
-            replacing=1
-            next
-        }
-        replacing && /^[^[:space:]]/ {
-            replacing=0
-        }
-        /^[[:space:]]*mkdir -p / {
-            print "      mkdir -p \"" mountpoint "\""
-            next
-        }
-        !replacing { print }
-    ' "$CONFIG" > "$CONFIG.tmp"
+PROVISION_SCRIPT_B64="$(base64_file "$PROVISION_SCRIPT")"
+AIVM_USER_B64="$(base64_string "$AIVM_USER")"
+AIVM_HOME_B64="$(base64_string "$AIVM_HOME")"
+AIVM_AUTHORIZED_KEY_B64="$(base64_file "$AIVM_IDENTITY_FILE.pub")"
+AIVM_RESTRICTED_PATH_B64="$(base64_string "$GUEST_MOUNTPOINT")"
+AIVM_SSH_PORT_B64="$(base64_string "$AIVM_SSH_PORT")"
+VSCODE_VERSION_B64="$(base64_string "$VSCODE_VERSION")"
+VSCODE_COMMIT_B64="$(base64_string "$VSCODE_COMMIT")"
+VSCODE_URL_B64="$(base64_string "$VSCODE_URL")"
+VSCODE_PATH_B64="$(base64_string "$VSCODE_PATH")"
+VSCODE_BIN_PATH_B64="$(base64_string "$VSCODE_BIN_PATH")"
+VSCE_PATH_B64="$(base64_string "$VSCE_PATH")"
+CODEX_VSCE_B64="$(base64_string "$CODEX_VSCE")"
+CODEX_PATH_B64="$(base64_string "$CODEX_PATH")"
+CODEX_CONFIG_PATH_B64="$(base64_string "$CODEX_CONFIG_PATH")"
 
-    mv "$CONFIG.tmp" "$CONFIG"
-fi
+MOUNT_DIR_YAML="$(yaml_escape "$MOUNT_DIR")"
+GUEST_MOUNTPOINT_YAML="$(yaml_escape "$GUEST_MOUNTPOINT")"
 
-# Check if Lima instance exists and is running
-if limactl list | grep -q "^$LIMA_INSTANCE.*Running"; then
-    echo "✅ Lima instance '$LIMA_INSTANCE' is already running"
-elif limactl list | grep -q "^$LIMA_INSTANCE"; then
-    echo "🔄 Lima instance '$LIMA_INSTANCE' exists but not running, starting..."
-    limactl start "$LIMA_INSTANCE"
-else
-    echo "🚀 Creating new Lima instance '$LIMA_INSTANCE'..."
-
-    if [ "$AIVM_MODE" -eq 1 ]; then
-        AIVM_CONFIG="$(build_aivm_config)"
-        AIVM_PROVISION="$(build_aivm_provision)"
-    fi
-
-    AICODE_MOUNTS="$(cat <<EOF
-# ONLY mount the project directory - no defaults
-mounts:
-  - location: "$MOUNT_DIR"
-    mountPoint: "$GUEST_WORKDIR"
-    writable: true
-
-mountType: "reverse-sshfs"
-EOF
-)"
-
-    AICODE_PROVISION="$(cat <<EOF
-# Ensure mount point exists
-provision:
-  - mode: system
-    script: |
-      mkdir -p "$GUEST_WORKDIR"
-EOF
-)"
-    
-    # Create a minimal Lima template for Apple Silicon
-    cat > /tmp/aicode.yaml <<EOF
-# Minimal aicode configuration for Apple Silicon
+# Create a minimal Lima template for Apple Silicon
+cat > /tmp/aivm.yaml <<EOF
+# Minimal aivm configuration for Apple Silicon
 images:
   - location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img"
     arch: "aarch64"
 
-${AIVM_CONFIG:-$AICODE_MOUNTS}
+# ONLY mount the project directory - no defaults
+mounts:
+  - location: "$MOUNT_DIR_YAML"
+    mountPoint: "$GUEST_MOUNTPOINT_YAML"
+    writable: true
+
+mountType: "reverse-sshfs"
+
+# Do not load arbitrary host keys or forward the host SSH agent.
+ssh:
+  loadDotSSHPubKeys: false
+  forwardAgent: false
+
+# The private AIVM sshd is reachable only through the Lima SSH jump host.
+portForwards:
+  - guestIP: "127.0.0.1"
+    guestPort: $AIVM_SSH_PORT
+    proto: tcp
+    ignore: true
 
 cpus: 4
 memory: "4GiB"
 disk: "10GiB"
 
-${AIVM_PROVISION:-$AICODE_PROVISION}
+provision:
+  - mode: system
+    script: |
+      #!/bin/bash
+      set -euo pipefail
+
+      decode() {
+          printf '%s' "\$1" | base64 -d
+      }
+
+      PROVISION_SCRIPT_PATH="/tmp/$PROVISION_LIB_NAME"
+      decode "$PROVISION_SCRIPT_B64" > "\$PROVISION_SCRIPT_PATH"
+      chmod 700 "\$PROVISION_SCRIPT_PATH"
+
+      export AIVM_USER="\$(decode "$AIVM_USER_B64")"
+      export AIVM_HOME="\$(decode "$AIVM_HOME_B64")"
+      export AIVM_AUTHORIZED_KEY="\$(decode "$AIVM_AUTHORIZED_KEY_B64")"
+      export AIVM_RESTRICTED_PATH="\$(decode "$AIVM_RESTRICTED_PATH_B64")"
+      export AIVM_SSH_PORT="\$(decode "$AIVM_SSH_PORT_B64")"
+      export AIVM_VSCODE_VERSION="\$(decode "$VSCODE_VERSION_B64")"
+      export AIVM_VSCODE_COMMIT="\$(decode "$VSCODE_COMMIT_B64")"
+      export AIVM_VSCODE_URL="\$(decode "$VSCODE_URL_B64")"
+      export AIVM_VSCODE_PATH="\$(decode "$VSCODE_PATH_B64")"
+      export AIVM_VSCODE_BIN_PATH="\$(decode "$VSCODE_BIN_PATH_B64")"
+      export AIVM_VSCE_PATH="\$(decode "$VSCE_PATH_B64")"
+      export AIVM_CODEX_VSCE="\$(decode "$CODEX_VSCE_B64")"
+      export AIVM_CODEX_PATH="\$(decode "$CODEX_PATH_B64")"
+      export AIVM_CODEX_CONFIG_PATH="\$(decode "$CODEX_CONFIG_PATH_B64")"
+
+      "\$PROVISION_SCRIPT_PATH"
+      rm -f "\$PROVISION_SCRIPT_PATH"
 EOF
 
-    # Start with the minimal template
-    # No need to prompt if AIVM because already prompted to delete above
-    limactl start \
-        $([ "$AIVM_MODE" -eq 1 ] && echo --yes) \
-        --name="$LIMA_INSTANCE" \
-        /tmp/aicode.yaml
-    
-    echo "✅ Lima instance created successfully"
-fi
+# Start with the minimal template
+# No need to prompt because already prompted to delete above
+limactl start \
+    --yes \
+    --name="$LIMA_INSTANCE" \
+    /tmp/aivm.yaml
+
+echo "✅ Lima instance created successfully"
+
+prepare_aivm_ssh
 
 verify_instance() {
     LIMA_SSH_CONFIG_PATH="$HOME/.lima/$LIMA_INSTANCE/ssh.config"
     ssh -F "$LIMA_SSH_CONFIG_PATH" "lima-$LIMA_INSTANCE" \
         true \
-        || { echo "❌ SSH access failed"; return 1; }
-    echo "✅ SSH access from host works"
+        || { echo "❌ SSH access to Lima jump host failed"; return 1; }
+    echo "✅ SSH access to Lima jump host works"
 
-    limactl shell --workdir=/ "$LIMA_INSTANCE" \
-        test -w "$GUEST_WORKDIR" \
-        || { echo "❌ Workdir is not writable: $GUEST_WORKDIR"; return 1; }
-    echo "✅ Workdir is writable at '$GUEST_WORKDIR'"
+    aivm_ssh true \
+        || { echo "❌ SSH access to '$AIVM_USER' through jump host failed"; return 1; }
+    echo "✅ SSH access to '$AIVM_USER' through jump host works"
 
-    PROBE=".aicode-probe-$$"
-    limactl shell --workdir=/ "$LIMA_INSTANCE" \
-        touch "$GUEST_WORKDIR/$PROBE"
-    if [ -f "$MOUNT_DIR/$PROBE" ]; then
+    [ "$(aivm_ssh 'id -un')" = "$AIVM_USER" ] \
+        || { echo "❌ Connected as the wrong user"; return 1; }
+    echo "✅ Connected as '$AIVM_USER'"
+
+    [ "$(aivm_ssh 'printf "%s" "$HOME"')" = "$AIVM_HOME" ] \
+        || { echo "❌ Incorrect home directory"; return 1; }
+    echo "✅ Home is '$AIVM_HOME'"
+
+    if aivm_ssh 'command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1'; then
+        echo "❌ '$AIVM_USER' has passwordless sudo"
+        return 1
+    fi
+    echo "✅ '$AIVM_USER' has no passwordless sudo"
+
+    PROBE=".aivm-probe-$$"
+    touch "$MOUNT_DIR/$PROBE"
+    if ! limactl shell --workdir=/ "$LIMA_INSTANCE" \
+        test -f "$GUEST_MOUNTPOINT/$PROBE"; then
         rm -f "$MOUNT_DIR/$PROBE"
-        if [ "$AIVM_MODE" -eq 0 ]; then
-            echo "✅ Workdir is mounted"
-        else
-            echo "❌ Bad: workdir is mounted"
-            return 1
-        fi
-    else
-        limactl shell --workdir=/ "$LIMA_INSTANCE" \
-            rm -f "$GUEST_WORKDIR/$PROBE"
-        if [ "$AIVM_MODE" -eq 0 ]; then
-            echo "❌ Bad: workdir is not mounted"
-            return 1
-        else
-            echo "✅ Workdir is not mounted"
-        fi
+        echo "❌ Project directory is not mounted at '$GUEST_MOUNTPOINT'"
+        return 1
     fi
-
-    if [ "$AIVM_MODE" -eq 1 ]; then
-        limactl shell --workdir=/ "$LIMA_INSTANCE" \
-            test -f "$CODEX_CONFIG_PATH" \
-            || { echo "❌ Codex config missing: $CODEX_CONFIG_PATH"; return 1; }
-        echo "✅ Codex config exists at '$CODEX_CONFIG_PATH'"
-
-        limactl shell --workdir=/ "$LIMA_INSTANCE" \
-            sh -c 'test "$("$1" --version | head -1)" = "$2"' \
-                sh "$VSCODE_BIN_PATH" "$VSCODE_VERSION" \
-            || { echo "❌ VS Code $VSCODE_VERSION not found"; return 1; }
-        echo "✅ VS Code $VSCODE_VERSION installed"
-
-        limactl shell --workdir=/ "$LIMA_INSTANCE" \
-            "$VSCODE_BIN_PATH" \
-            --extensions-dir "$VSCE_PATH" \
-            --list-extensions --show-versions |
-            grep -qx "$CODEX_VSCE" \
-            || { echo "❌ VS Code extension $CODEX_VSCE not found"; return 1; }
-        echo "✅ VS Code extension $CODEX_VSCE installed"
+    echo "✅ Project directory is mounted at '$GUEST_MOUNTPOINT'"
+    if ! limactl shell --workdir=/ "$LIMA_INSTANCE" \
+        rm -f "$GUEST_MOUNTPOINT/$PROBE"; then
+        rm -f "$MOUNT_DIR/$PROBE"
+        echo "❌ Mounted project is not writable for the Lima jump user at '$GUEST_MOUNTPOINT'"
+        return 1
     fi
+    if [ -e "$MOUNT_DIR/$PROBE" ]; then
+        rm -f "$MOUNT_DIR/$PROBE"
+        echo "❌ Writes through mounted project are not reflected at '$GUEST_MOUNTPOINT'"
+        return 1
+    fi
+    echo "✅ Mounted project is writable for the Lima jump user at '$GUEST_MOUNTPOINT'"
+
+    printf -v GUEST_MOUNTPOINT_Q '%q' "$GUEST_MOUNTPOINT"
+    if aivm_ssh "ls -ld -- $GUEST_MOUNTPOINT_Q >/dev/null 2>&1"; then
+        echo "❌ Bad: '$AIVM_USER' can traverse or read the mounted project"
+        return 1
+    fi
+    echo "✅ Mounted project is inaccessible to '$AIVM_USER'"
+
+    printf -v CODEX_CONFIG_PATH_Q '%q' "$CODEX_CONFIG_PATH"
+    aivm_ssh "test -f $CODEX_CONFIG_PATH_Q" \
+        || { echo "❌ Codex config missing: $CODEX_CONFIG_PATH"; return 1; }
+    echo "✅ Codex config exists at '$CODEX_CONFIG_PATH'"
+
+    printf -v VSCODE_BIN_PATH_Q '%q' "$VSCODE_BIN_PATH"
+    ACTUAL_VSCODE_VERSION="$(
+        aivm_ssh "$VSCODE_BIN_PATH_Q --version | head -1"
+    )"
+    [ "$ACTUAL_VSCODE_VERSION" = "$VSCODE_VERSION" ] \
+        || { echo "❌ VS Code $VSCODE_VERSION not found"; return 1; }
+    echo "✅ VS Code $VSCODE_VERSION installed"
+
+    printf -v VSCE_PATH_Q '%q' "$VSCE_PATH"
+    aivm_ssh \
+        "$VSCODE_BIN_PATH_Q \
+        --extensions-dir $VSCE_PATH_Q \
+        --list-extensions --show-versions" |
+        grep -qx "$CODEX_VSCE" \
+        || { echo "❌ VS Code extension $CODEX_VSCE not found"; return 1; }
+    echo "✅ VS Code extension $CODEX_VSCE installed"
 }
 
-# If verified, open shell in project directory
-verify_instance && exec limactl shell --workdir="$GUEST_WORKDIR" "$LIMA_INSTANCE" bash
+# If verified, open shell in the AIVM user's home directory
+if verify_instance; then
+    exec "${AIVM_SSH_CMD[@]}" \
+        -t \
+        "$AIVM_SSH_TARGET"
+fi
