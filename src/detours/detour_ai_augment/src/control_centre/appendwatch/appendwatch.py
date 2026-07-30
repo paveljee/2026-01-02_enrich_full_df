@@ -56,6 +56,7 @@ WATCH_MASK = (
 )
 EVENT = struct.Struct("iIII")
 EMPTY_DIGEST = hashlib.sha256(b"").digest()
+RECONCILE_INTERVAL = 60.0
 
 
 @dataclasses.dataclass
@@ -87,6 +88,7 @@ class Inotify:
         self.libc.inotify_add_watch.restype = ctypes.c_int
         self.fd = -1
         self.wd_to_dir: Dict[int, str] = {}
+        self.warned_enospc = False
         self.open()
 
     def open(self) -> None:
@@ -104,7 +106,14 @@ class Inotify:
         wd = self.libc.inotify_add_watch(self.fd, raw, WATCH_MASK)
         if wd < 0:
             err = ctypes.get_errno()
-            if err in (errno.ENOENT, errno.ENOTDIR, errno.EACCES):
+            if err in (errno.ENOENT, errno.ENOTDIR, errno.EACCES, errno.ENOSPC):
+                if err == errno.ENOSPC and not self.warned_enospc:
+                    self.warned_enospc = True
+                    print(
+                        "appendwatch: inotify watch limit reached, some directories are "
+                        "unwatched; raise fs.inotify.max_user_watches",
+                        file=sys.stderr,
+                    )
                 return
             raise OSError(err, os.strerror(err), directory)
         self.wd_to_dir[wd] = directory
@@ -196,7 +205,6 @@ class AppendWatch:
         return found
 
     def rebuild_watches(self) -> None:
-        self.ino.open()
         stack = [self.root]
         while stack:
             directory = stack.pop()
@@ -254,10 +262,12 @@ class AppendWatch:
             flags |= os.O_NOFOLLOW
         try:
             fd = os.open(path, flags)
-        except (FileNotFoundError, PermissionError, OSError):
+        except FileNotFoundError:
             if rec and rec.exists:
                 rec.exists = False
                 return True
+            return False
+        except OSError:
             return False
 
         try:
@@ -447,13 +457,27 @@ class AppendWatch:
                     visit(entry.path, child_prefix)
                 else:
                     rec = self.records.get(self.rel(entry.path))
-                    status = rec.status if rec else "OK"
+                    status = rec.status if rec else "UNKNOWN"
                     suffix = ""
                     if rec and rec.status == "COMPROMISED" and rec.reason:
                         suffix = f"  [{rec.reason}]"
                     lines.append(f"{prefix}{branch}{status:<11} {name}{suffix}")
 
         visit(self.root, "")
+
+        removed = sorted(
+            ((rel, rec) for rel, rec in self.records.items() if not rec.exists),
+            key=lambda item: item[0],
+        )
+        if removed:
+            lines.append("")
+            lines.append("removed (no longer present):")
+            for rel, rec in removed:
+                suffix = ""
+                if rec.status == "COMPROMISED" and rec.reason:
+                    suffix = f"  [{rec.reason}]"
+                lines.append(f"    {rec.status:<11} {self.display_name(rel)}{suffix}")
+
         return "\n".join(lines) + "\n"
 
     def write_report(self) -> None:
@@ -500,6 +524,7 @@ class AppendWatch:
 
         poller = select.poll()
         poller.register(self.ino.fd, select.POLLIN)
+        next_reconcile = time.monotonic() + RECONCILE_INTERVAL
 
         while not self.stop:
             now = time.monotonic()
@@ -548,11 +573,10 @@ class AppendWatch:
                 self.pending.pop(path, None)
                 visible_changed |= self.inspect(path)
 
-            if topology_changed:
+            if topology_changed or time.monotonic() >= next_reconcile:
                 visible_changed |= self.reconcile()
                 self.rebuild_watches()
-                poller = select.poll()
-                poller.register(self.ino.fd, select.POLLIN)
+                next_reconcile = time.monotonic() + RECONCILE_INTERVAL
 
             if visible_changed:
                 self.write_report()
@@ -577,8 +601,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--debounce-ms",
         type=int,
-        default=0,
-        help="coalesce rapid events for this many milliseconds (default: 0)",
+        default=500,
+        help="coalesce rapid events for this many milliseconds (default: 500)",
     )
     args = parser.parse_args()
     if args.debounce_ms < 0:
