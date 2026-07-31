@@ -40,6 +40,8 @@ SCRIPT = Path(
     os.environ.get("APPENDWATCH_SCRIPT", Path(__file__).with_name("appendwatch.py"))
 ).resolve()
 
+WATCHER_PYTHON = os.environ.get("APPENDWATCH_PYTHON", sys.executable)
+
 
 def _load_module() -> ModuleType:
     spec = importlib.util.spec_from_file_location("appendwatch_under_test", SCRIPT)
@@ -112,7 +114,7 @@ class RunningWatcher:
         self.root = root
         self.report = report
         command = [
-            sys.executable,
+            WATCHER_PYTHON,
             str(SCRIPT),
             str(root),
             "--report",
@@ -122,7 +124,7 @@ class RunningWatcher:
         ]
         if os.environ.get("APPENDWATCH_COVERAGE") == "1":
             command = [
-                sys.executable,
+                WATCHER_PYTHON,
                 "-m",
                 "coverage",
                 "run",

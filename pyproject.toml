@@ -50,6 +50,7 @@ depends-on = [
 cmd = """
 sudo env \
   APPENDWATCH_SCRIPT="$PIXI_PROJECT_ROOT/src/detours/detour_ai_augment/src/control_centre/appendwatch/appendwatch.py" \
+  APPENDWATCH_PYTHON="/usr/bin/python3" \
   "$CONDA_PREFIX/bin/python" -m pytest -vv -srA \
   src/detours/detour_ai_augment/tests
 """
