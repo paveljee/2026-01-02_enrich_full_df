@@ -3,6 +3,7 @@ set -e
 
 SCRIPT_NAME="aivm"
 PROVISION_LIB_NAME="provision.sh"
+APPENDWATCH_LIB_NAME="appendwatch.py"
 INSTALL_PATH="$HOME/.local/bin/$SCRIPT_NAME"
 INSTALL_LIB_DIR="$HOME/.local/lib/$SCRIPT_NAME"
 SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -36,21 +37,33 @@ CODEX_CONFIG_PATH="$CODEX_PATH/config.toml"
 
 if [ "$0" = "$INSTALL_PATH" ]; then
     PROVISION_SCRIPT="$INSTALL_LIB_DIR/$PROVISION_LIB_NAME"
+    APPENDWATCH_SCRIPT="$INSTALL_LIB_DIR/$APPENDWATCH_LIB_NAME"
 else
     PROVISION_SCRIPT="${AIVM_PROVISION_SCRIPT:-$SOURCE_DIR/$PROVISION_LIB_NAME}"
+    APPENDWATCH_SCRIPT="${AIVM_APPENDWATCH_SCRIPT:-$SOURCE_DIR/../control_centre/appendwatch/$APPENDWATCH_LIB_NAME}"
 fi
+
+AIVM_CONTROL_DIR="$MOUNT_DIR/.aivm-control/appendwatch"
+GUEST_CONTROL_DIR="$GUEST_MOUNTPOINT/.aivm-control/appendwatch"
+GUEST_APPENDWATCH_SCRIPT="$GUEST_CONTROL_DIR/$APPENDWATCH_LIB_NAME"
+GUEST_APPENDWATCH_REPORT="$GUEST_CONTROL_DIR/appendwatch-tree.txt"
+HOST_APPENDWATCH_REPORT="$AIVM_CONTROL_DIR/appendwatch-tree.txt"
 
 # Self-install function
 self_install() {
     if [ "$0" != "$INSTALL_PATH" ]; then
         [ -f "$PROVISION_SCRIPT" ] \
             || { echo "❌ Provisioning script not found: $PROVISION_SCRIPT"; exit 1; }
+        [ -f "$APPENDWATCH_SCRIPT" ] \
+            || { echo "❌ Appendwatch script not found: $APPENDWATCH_SCRIPT"; exit 1; }
 
         echo "📦 Installing $SCRIPT_NAME to $INSTALL_PATH..."
         mkdir -p "$HOME/.local/bin" "$INSTALL_LIB_DIR"
         cp "$0" "$INSTALL_PATH"
         cp "$PROVISION_SCRIPT" "$INSTALL_LIB_DIR/$PROVISION_LIB_NAME"
+        cp "$APPENDWATCH_SCRIPT" "$INSTALL_LIB_DIR/$APPENDWATCH_LIB_NAME"
         chmod +x "$INSTALL_PATH" "$INSTALL_LIB_DIR/$PROVISION_LIB_NAME"
+        chmod 600 "$INSTALL_LIB_DIR/$APPENDWATCH_LIB_NAME"
         echo "✅ Installed! You can now run: $SCRIPT_NAME"
         echo "💡 Make sure $HOME/.local/bin is in your PATH"
 
@@ -149,6 +162,8 @@ done
 
 [ -f "$PROVISION_SCRIPT" ] \
     || { echo "❌ Provisioning script not found: $PROVISION_SCRIPT"; exit 1; }
+[ -f "$APPENDWATCH_SCRIPT" ] \
+    || { echo "❌ Appendwatch script not found: $APPENDWATCH_SCRIPT"; exit 1; }
 
 # Navigate to project directory
 cd "$MOUNT_DIR" || { echo "❌ Directory not found: $MOUNT_DIR"; exit 1; }
@@ -172,6 +187,11 @@ if limactl list | grep -q "^$LIMA_INSTANCE"; then
     esac
 fi
 
+mkdir -p "$AIVM_CONTROL_DIR"
+chmod 700 "$AIVM_CONTROL_DIR"
+cp "$APPENDWATCH_SCRIPT" "$AIVM_CONTROL_DIR/$APPENDWATCH_LIB_NAME"
+chmod 600 "$AIVM_CONTROL_DIR/$APPENDWATCH_LIB_NAME"
+
 echo "🔑 Generating a dedicated SSH key for '$AIVM_USER' into '$AIVM_KEY_DIR'..."
 generate_aivm_key
 
@@ -192,6 +212,8 @@ VSCE_PATH_B64="$(base64_string "$VSCE_PATH")"
 CODEX_VSCE_B64="$(base64_string "$CODEX_VSCE")"
 CODEX_PATH_B64="$(base64_string "$CODEX_PATH")"
 CODEX_CONFIG_PATH_B64="$(base64_string "$CODEX_CONFIG_PATH")"
+APPENDWATCH_SCRIPT_B64="$(base64_string "$GUEST_APPENDWATCH_SCRIPT")"
+APPENDWATCH_REPORT_B64="$(base64_string "$GUEST_APPENDWATCH_REPORT")"
 
 MOUNT_DIR_YAML="$(yaml_escape "$MOUNT_DIR")"
 GUEST_MOUNTPOINT_YAML="$(yaml_escape "$GUEST_MOUNTPOINT")"
@@ -255,6 +277,8 @@ provision:
       export AIVM_CODEX_VSCE="\$(decode "$CODEX_VSCE_B64")"
       export AIVM_CODEX_PATH="\$(decode "$CODEX_PATH_B64")"
       export AIVM_CODEX_CONFIG_PATH="\$(decode "$CODEX_CONFIG_PATH_B64")"
+      export AIVM_APPENDWATCH_SCRIPT="\$(decode "$APPENDWATCH_SCRIPT_B64")"
+      export AIVM_APPENDWATCH_REPORT="\$(decode "$APPENDWATCH_REPORT_B64")"
 
       "\$PROVISION_SCRIPT_PATH"
       rm -f "\$PROVISION_SCRIPT_PATH"
@@ -324,6 +348,55 @@ verify_instance() {
         return 1
     fi
     echo "✅ Mounted project is inaccessible to '$AIVM_USER'"
+
+    limactl shell --workdir=/ "$LIMA_INSTANCE" \
+        systemctl is-enabled --quiet aivm-appendwatch.service \
+        || { echo "❌ Appendwatch service is not enabled"; return 1; }
+    limactl shell --workdir=/ "$LIMA_INSTANCE" \
+        systemctl is-active --quiet aivm-appendwatch.service \
+        || { echo "❌ Appendwatch service is not active"; return 1; }
+    printf -v GUEST_CONTROL_DIR_Q '%q' "$GUEST_CONTROL_DIR"
+    printf -v GUEST_APPENDWATCH_SCRIPT_Q '%q' "$GUEST_APPENDWATCH_SCRIPT"
+    printf -v GUEST_APPENDWATCH_REPORT_Q '%q' "$GUEST_APPENDWATCH_REPORT"
+    limactl shell --workdir=/ "$LIMA_INSTANCE" \
+        sudo -n sh -c "test -r $GUEST_APPENDWATCH_SCRIPT_Q \
+            && test -s $GUEST_APPENDWATCH_REPORT_Q \
+            && test \"\$(stat -c %a $GUEST_CONTROL_DIR_Q)\" = 700 \
+            && test \"\$(stat -c %a $GUEST_APPENDWATCH_SCRIPT_Q)\" = 600 \
+            && test \"\$(stat -c %a $GUEST_APPENDWATCH_REPORT_Q)\" = 600 \
+            && test \"\$(cat $GUEST_APPENDWATCH_REPORT_Q)\" = ." \
+        || { echo "❌ Appendwatch source or report is unavailable to root"; return 1; }
+    [ -r "$HOST_APPENDWATCH_REPORT" ] \
+        && [ "$(cat "$HOST_APPENDWATCH_REPORT")" = . ] \
+        || { echo "❌ Appendwatch report is unavailable on the host"; return 1; }
+    if limactl shell --workdir=/ "$LIMA_INSTANCE" \
+        sudo -n find "$GUEST_CONTROL_DIR" -type f \
+            \( -name '*.pyc' -o -name '*.pyo' \) -print -quit |
+        grep -q .; then
+        echo "❌ Appendwatch created readable bytecode"
+        return 1
+    fi
+    local protected_probe
+    local -a protected_probes=(
+        "cd -- $GUEST_CONTROL_DIR_Q"
+        "ls -la -- $GUEST_CONTROL_DIR_Q"
+        "stat -- $GUEST_CONTROL_DIR_Q"
+        "stat -- $GUEST_APPENDWATCH_SCRIPT_Q"
+        "stat -- $GUEST_APPENDWATCH_REPORT_Q"
+        "cat -- $GUEST_APPENDWATCH_SCRIPT_Q"
+        "cat -- $GUEST_APPENDWATCH_REPORT_Q"
+        "cp -- $GUEST_APPENDWATCH_SCRIPT_Q /dev/null"
+        "cp -- $GUEST_APPENDWATCH_REPORT_Q /dev/null"
+        "/usr/bin/python3 -B $GUEST_APPENDWATCH_SCRIPT_Q --help"
+        "find $GUEST_CONTROL_DIR_Q -print"
+    )
+    for protected_probe in "${protected_probes[@]}"; do
+        if aivm_ssh "$protected_probe >/dev/null 2>&1"; then
+            echo "❌ '$AIVM_USER' passed a protected appendwatch access probe"
+            return 1
+        fi
+    done
+    echo "✅ Appendwatch is active and inaccessible to '$AIVM_USER'"
 
     printf -v CODEX_CONFIG_PATH_Q '%q' "$CODEX_CONFIG_PATH"
     aivm_ssh "test -f $CODEX_CONFIG_PATH_Q" \

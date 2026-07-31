@@ -6,6 +6,9 @@ AIVM_HOME="${AIVM_HOME:-/home/$AIVM_USER}"
 AIVM_AUTHORIZED_KEY="${AIVM_AUTHORIZED_KEY:-}"
 AIVM_RESTRICTED_PATH="${AIVM_RESTRICTED_PATH:-}"
 AIVM_SSH_PORT="${AIVM_SSH_PORT:-22022}"
+AIVM_SSH_SERVER_NAME="aivm-sshd.service"
+AIVM_SSH_SERVER_DESCRIPTION="AIVM private SSH server"
+AIVM_SERVICE_RESTART_SECONDS="2"
 
 AIVM_VSCODE_VERSION="${AIVM_VSCODE_VERSION:-1.130.0}"
 AIVM_VSCODE_COMMIT="${AIVM_VSCODE_COMMIT:-1b6a188127eeaf9194f945eb6eb89a657e93c54c}"
@@ -15,7 +18,15 @@ AIVM_VSCODE_BIN_PATH="${AIVM_VSCODE_BIN_PATH:-$AIVM_VSCODE_PATH/bin/code-server}
 AIVM_VSCE_PATH="${AIVM_VSCE_PATH:-$AIVM_HOME/.vscode-server/extensions}"
 AIVM_CODEX_VSCE="${AIVM_CODEX_VSCE:-openai.chatgpt@26.721.41059}"
 AIVM_CODEX_PATH="${AIVM_CODEX_PATH:-$AIVM_HOME/.codex}"
+AIVM_CODEX_SESSIONS_PATH="$AIVM_CODEX_PATH/sessions"
 AIVM_CODEX_CONFIG_PATH="${AIVM_CODEX_CONFIG_PATH:-$AIVM_CODEX_PATH/config.toml}"
+AIVM_APPENDWATCH_SCRIPT="${AIVM_APPENDWATCH_SCRIPT:-}"
+AIVM_APPENDWATCH_REPORT="${AIVM_APPENDWATCH_REPORT:-}"
+APPENDWATCH_DIR="$(dirname "$AIVM_APPENDWATCH_SCRIPT")"
+AIVM_APPENDWATCH_SERVICE_NAME="aivm-appendwatch.service"
+AIVM_APPENDWATCH_SERVICE_DESCRIPTION="AIVM Codex rollout append-only watcher"
+AIVM_APPENDWATCH_REPORT_WAIT_ATTEMPTS="50"
+AIVM_APPENDWATCH_REPORT_WAIT_INTERVAL_SECONDS="0.1"
 
 usage() {
     cat <<EOF
@@ -93,6 +104,18 @@ case "$AIVM_RESTRICTED_PATH" in
     /*) ;;
     "") echo "❌ Restricted path is required"; exit 1 ;;
     *) echo "❌ Restricted path must be absolute: $AIVM_RESTRICTED_PATH"; exit 1 ;;
+esac
+
+case "$AIVM_APPENDWATCH_SCRIPT" in
+    "$AIVM_RESTRICTED_PATH"/*) ;;
+    "") echo "❌ Appendwatch script path is required"; exit 1 ;;
+    *) echo "❌ Appendwatch script must be below the restricted path"; exit 1 ;;
+esac
+
+case "$AIVM_APPENDWATCH_REPORT" in
+    "$AIVM_RESTRICTED_PATH"/*) ;;
+    "") echo "❌ Appendwatch report path is required"; exit 1 ;;
+    *) echo "❌ Appendwatch report must be below the restricted path"; exit 1 ;;
 esac
 
 case "$AIVM_AUTHORIZED_KEY" in
@@ -199,6 +222,47 @@ if runuser -u "$AIVM_USER" -- \
     exit 1
 fi
 
+install -d \
+    -m 0700 \
+    -o "$AIVM_USER" \
+    -g "$AIVM_GROUP" \
+    "$AIVM_CODEX_PATH" \
+    "$AIVM_CODEX_SESSIONS_PATH"
+
+# Start appendwatch before anything Codex-capable runs as the AIVM user.
+chmod 0700 "$APPENDWATCH_DIR"
+chmod 0600 "$AIVM_APPENDWATCH_SCRIPT"
+
+cat > "/etc/systemd/system/$AIVM_APPENDWATCH_SERVICE_NAME" <<EOF
+[Unit]
+Description="$AIVM_APPENDWATCH_SERVICE_DESCRIPTION"
+After=local-fs.target
+RequiresMountsFor="$AIVM_APPENDWATCH_SCRIPT" "$AIVM_CODEX_SESSIONS_PATH"
+
+[Service]
+Type=simple
+UMask=0077
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 -B "$AIVM_APPENDWATCH_SCRIPT" "$AIVM_CODEX_SESSIONS_PATH" --report "$AIVM_APPENDWATCH_REPORT"
+Restart=on-failure
+RestartSec=$AIVM_SERVICE_RESTART_SECONDS
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now "$AIVM_APPENDWATCH_SERVICE_NAME"
+systemctl is-enabled --quiet "$AIVM_APPENDWATCH_SERVICE_NAME"
+systemctl is-active --quiet "$AIVM_APPENDWATCH_SERVICE_NAME"
+
+for ((attempt = 0; attempt < AIVM_APPENDWATCH_REPORT_WAIT_ATTEMPTS; attempt++)); do
+    [ -s "$AIVM_APPENDWATCH_REPORT" ] && break
+    sleep "$AIVM_APPENDWATCH_REPORT_WAIT_INTERVAL_SECONDS"
+done
+[ -s "$AIVM_APPENDWATCH_REPORT" ] \
+    || { echo "❌ Appendwatch did not create its report"; exit 1; }
+
 # Everything below runs as the unprivileged AIVM user.
 runuser -u "$AIVM_USER" -- env \
     HOME="$AIVM_HOME" \
@@ -210,11 +274,11 @@ runuser -u "$AIVM_USER" -- env \
     AIVM_VSCE_PATH="$AIVM_VSCE_PATH" \
     AIVM_CODEX_VSCE="$AIVM_CODEX_VSCE" \
     AIVM_CODEX_PATH="$AIVM_CODEX_PATH" \
+    AIVM_CODEX_SESSIONS_PATH="$AIVM_CODEX_SESSIONS_PATH" \
     AIVM_CODEX_CONFIG_PATH="$AIVM_CODEX_CONFIG_PATH" \
     bash <<'AIVM_USER_PROVISION'
 set -euo pipefail
 
-mkdir -p "$AIVM_CODEX_PATH"
 chmod 700 "$AIVM_CODEX_PATH"
 cat > "$AIVM_CODEX_CONFIG_PATH" <<'CODEX_CONFIG'
 model = "gpt-5.6-sol"
@@ -301,9 +365,9 @@ TCPKeepAlive yes
 Subsystem sftp internal-sftp
 EOF
 
-cat > /etc/systemd/system/aivm-sshd.service <<'EOF'
+cat > "/etc/systemd/system/$AIVM_SSH_SERVER_NAME" <<EOF
 [Unit]
-Description=AIVM private SSH server
+Description=$AIVM_SSH_SERVER_DESCRIPTION
 After=network.target ssh.service
 
 [Service]
@@ -313,7 +377,7 @@ ExecStart=/usr/sbin/sshd -D -e -f /etc/ssh/sshd_config_aivm
 ExecReload=/bin/kill -HUP $MAINPID
 KillMode=process
 Restart=on-failure
-RestartSec=2
+RestartSec=$AIVM_SERVICE_RESTART_SECONDS
 
 [Install]
 WantedBy=multi-user.target
@@ -321,8 +385,8 @@ EOF
 
 /usr/sbin/sshd -t -f /etc/ssh/sshd_config_aivm
 systemctl daemon-reload
-systemctl enable --now aivm-sshd.service
-systemctl restart aivm-sshd.service
+systemctl enable --now "$AIVM_SSH_SERVER_NAME"
+systemctl restart "$AIVM_SSH_SERVER_NAME"
 
 if command -v sudo >/dev/null 2>&1 \
     && runuser -u "$AIVM_USER" -- sudo -n true >/dev/null 2>&1; then

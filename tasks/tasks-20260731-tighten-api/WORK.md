@@ -2,9 +2,11 @@
 
 ## Status
 
-- Specification complete; implementation is not authorized in this task.
+- Implementation complete and verified.
+- Reviewed and preserved the human-reviewed staged deployment edits; Git remains read-only.
 - Reviewed the inherited setup, current detour README/assets/scripts/API/watcher/tests, prior FastAPI-detour context, and the bundled sample rollout.
 - Latest human edit requires surgical implementation: only necessary code changes, with unrelated code and comments untouched.
+- Protected appendwatch deployment, the ordered `/push` gate, strict evidence model, and reviewer artifacts are implemented.
 
 ## Confirmed findings
 
@@ -23,11 +25,14 @@
 4. Enforce `/push` order: SCP rollout, version-copy the existing tree report, check only that copy, parse the archived rollout, then run Pydantic.
 5. Extend each of the nine fields to carry `value` plus exact `web_search_excerpts`; accept matches only from linked Codex web `run` call/output pairs for search/open/click.
 6. Archive the rollout/report evidence and emit a field-oriented Markdown report containing complete escaped call/output objects, AI output, and ground truth.
-7. Add only focused deployment, copied-report, acquisition-order, evidence-schema, generic-error, and report tests listed in `SPEC.md`; preserve existing appendwatch tests.
+7. Add focused copied-report, acquisition-order, evidence-schema, generic-error, real-rollout, and report tests; preserve existing appendwatch tests. Deployment relies on its executable runtime probes plus shell syntax validation rather than decorative source-text assertions.
 
 ## Verification
 
 - Confirmed the human-authored section was not edited by this work; the AI addition starts after `## how ai understood the spec`.
-- `git diff --check` and `git diff --cached --check` pass for `SPEC.md` and `WORK.md`.
-- No production code or data was changed; no application tests were run for this Markdown-only task.
+- Public OpenAPI text does not disclose appendwatch/rollout internals. Excerpt string/list limits are permissive derivatives of the bounded raw request body, not invented web-tool limits.
+- `bash -n` passes for `deploy.sh` and `provision.sh`; Ruff and mypy pass for the changed API and focused tests.
+- Detour regression result: 69 passed, 3 existing privilege/platform skips. The only warning is from FastAPI's TestClient compatibility shim.
+- Real-world coverage uses only the bundled sample Codex rollout: 107 records and 9 eligible web pairs, including search/open/click. Full `/push` acceptance and exact-excerpt rejection run against that rollout with synthetic ground truth; an independent test-side JSONL oracle verifies the exact linked call/output/event objects, hashes, field placement, deduplication, and exclusion of unrelated objects in `response.md`.
+- Final scope/whitespace audit passes. `SPEC.md`, `README.md`, `appendwatch.py`, and its existing tests are unchanged.
 - Git was used read-only. `src.repl` and the pipeline database were not opened.
