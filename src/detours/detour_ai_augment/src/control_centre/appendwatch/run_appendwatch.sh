@@ -2,4 +2,5 @@
 
 # Run it inside the Linux Lima VM:
 sudo python3 appendwatch.py /home/ai/.codex/sessions \
-  --report ./appendwatch-tree.txt
+  --report -
+  #--report ./appendwatch-tree.txt
