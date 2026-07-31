@@ -86,9 +86,14 @@ class Inotify:
         self.libc.inotify_init1.restype = ctypes.c_int
         self.libc.inotify_add_watch.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_uint32]
         self.libc.inotify_add_watch.restype = ctypes.c_int
+        self.libc.inotify_rm_watch.argtypes = [ctypes.c_int, ctypes.c_int]
+        self.libc.inotify_rm_watch.restype = ctypes.c_int
         self.fd = -1
         self.wd_to_dir: Dict[int, str] = {}
+        self.dir_to_wd: Dict[str, int] = {}
+        self.unwatched_dirs: Dict[str, str] = {}
         self.warned_enospc = False
+        self.degraded_reason = ""
         self.open()
 
     def open(self) -> None:
@@ -100,23 +105,57 @@ class Inotify:
             err = ctypes.get_errno()
             raise OSError(err, os.strerror(err))
         self.wd_to_dir.clear()
+        self.dir_to_wd.clear()
+        self.unwatched_dirs.clear()
 
-    def add(self, directory: str) -> None:
+    def add(self, directory: str) -> bool:
+        if directory in self.dir_to_wd:
+            return True
         raw = os.fsencode(directory)
         wd = self.libc.inotify_add_watch(self.fd, raw, WATCH_MASK)
         if wd < 0:
             err = ctypes.get_errno()
-            if err in (errno.ENOENT, errno.ENOTDIR, errno.EACCES, errno.ENOSPC):
-                if err == errno.ENOSPC and not self.warned_enospc:
+            if err in (errno.ENOENT, errno.ENOTDIR):
+                self.unwatched_dirs.pop(directory, None)
+                return True
+            if err == errno.EACCES:
+                self.unwatched_dirs[directory] = (
+                    "directory could not be watched: permission denied"
+                )
+                return True
+            if err == errno.ENOSPC:
+                if not self.warned_enospc:
                     self.warned_enospc = True
                     print(
                         "appendwatch: inotify watch limit reached, some directories are "
                         "unwatched; raise fs.inotify.max_user_watches",
                         file=sys.stderr,
                     )
-                return
+                if not self.degraded_reason:
+                    self.degraded_reason = (
+                        "inotify watch limit reached; monitoring was incomplete"
+                    )
+                return False
             raise OSError(err, os.strerror(err), directory)
+        self.unwatched_dirs.pop(directory, None)
+        previous = self.wd_to_dir.get(wd)
+        if previous is not None and previous != directory:
+            self.dir_to_wd.pop(previous, None)
         self.wd_to_dir[wd] = directory
+        self.dir_to_wd[directory] = wd
+        return True
+
+    def remove(self, directory: str) -> None:
+        self.unwatched_dirs.pop(directory, None)
+        wd = self.dir_to_wd.pop(directory, None)
+        if wd is None:
+            return
+        if self.wd_to_dir.get(wd) == directory:
+            self.wd_to_dir.pop(wd, None)
+        if self.libc.inotify_rm_watch(self.fd, wd) < 0:
+            err = ctypes.get_errno()
+            if err not in (errno.EINVAL, errno.EBADF):
+                raise OSError(err, os.strerror(err), directory)
 
     def read(self) -> Iterable[Tuple[str, int, int, str]]:
         while True:
@@ -132,7 +171,15 @@ class Inotify:
                 offset += EVENT.size
                 raw_name = data[offset : offset + name_len].split(b"\0", 1)[0]
                 offset += name_len
-                base = self.wd_to_dir.get(wd, "")
+                base = self.wd_to_dir.get(wd)
+                if base is None:
+                    if mask & IN_Q_OVERFLOW:
+                        yield "", mask, cookie, ""
+                    continue
+                if mask & IN_IGNORED:
+                    self.wd_to_dir.pop(wd, None)
+                    if self.dir_to_wd.get(base) == wd:
+                        self.dir_to_wd.pop(base, None)
                 name = os.fsdecode(raw_name)
                 path = os.path.join(base, name) if name else base
                 yield path, mask, cookie, base
@@ -180,6 +227,18 @@ class AppendWatch:
             return None
         return st if stat.S_ISREG(st.st_mode) else None
 
+    @staticmethod
+    def replacement_reason(mode: int) -> str:
+        if stat.S_ISDIR(mode):
+            kind = "a directory"
+        elif stat.S_ISLNK(mode):
+            kind = "a symbolic link"
+        elif stat.S_ISFIFO(mode):
+            kind = "a FIFO"
+        else:
+            kind = "a non-regular file"
+        return f"path was replaced by {kind}"
+
     def walk_regular(self) -> Dict[str, os.stat_result]:
         found: Dict[str, os.stat_result] = {}
         stack = [self.root]
@@ -204,22 +263,47 @@ class AppendWatch:
                     continue
         return found
 
-    def rebuild_watches(self) -> None:
+    def rebuild_watches(self) -> bool:
+        directories: set[str] = set()
         stack = [self.root]
         while stack:
             directory = stack.pop()
-            self.ino.add(directory)
+            directories.add(directory)
             try:
                 with os.scandir(directory) as it:
                     entries = list(it)
-            except (FileNotFoundError, NotADirectoryError, PermissionError, OSError):
+            except PermissionError:
+                self.ino.unwatched_dirs[directory] = (
+                    "directory could not be watched: permission denied"
+                )
                 continue
+            except (FileNotFoundError, NotADirectoryError):
+                self.ino.unwatched_dirs.pop(directory, None)
+                continue
+            except OSError as exc:
+                if exc.errno in (errno.EACCES, errno.EPERM):
+                    self.ino.unwatched_dirs[directory] = (
+                        "directory could not be watched: permission denied"
+                    )
+                continue
+            self.ino.unwatched_dirs.pop(directory, None)
             for entry in entries:
                 try:
                     if entry.is_dir(follow_symlinks=False) and not self.excluded(entry.path):
                         stack.append(entry.path)
                 except OSError:
                     continue
+
+        complete = True
+        for directory in sorted(directories, key=lambda path: (path.count(os.sep), path)):
+            complete &= self.ino.add(directory)
+        for directory in list(self.ino.dir_to_wd):
+            if directory not in directories:
+                self.ino.remove(directory)
+        for directory in list(self.ino.unwatched_dirs):
+            if directory not in directories:
+                self.ino.unwatched_dirs.pop(directory, None)
+        return complete
 
     @staticmethod
     def hash_fd(fd: int, size: int, prefix_size: int) -> Tuple[bytes, bytes]:
@@ -257,7 +341,7 @@ class AppendWatch:
         rel = self.rel(path)
         rec = self.records.get(rel)
 
-        flags = os.O_RDONLY | os.O_CLOEXEC
+        flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
         try:
@@ -267,13 +351,44 @@ class AppendWatch:
                 rec.exists = False
                 return True
             return False
-        except OSError:
-            return False
+        except OSError as exc:
+            try:
+                st = os.lstat(path)
+            except OSError:
+                st = None
+            if rec is not None and st is not None and not stat.S_ISREG(st.st_mode):
+                changed = rec.exists
+                rec.exists = False
+                return changed | self.compromise(rec, self.replacement_reason(st.st_mode))
+            reason = f"could not open file for verification: {exc.strerror or exc}"
+            if rec is not None:
+                changed = not rec.exists
+                rec.exists = True
+                return changed | self.compromise(rec, reason)
+            st = self.regular_lstat(path)
+            if st is None:
+                return False
+            self.records[rel] = Record(
+                dev=st.st_dev,
+                ino=st.st_ino,
+                size=0,
+                mtime_ns=0,
+                ctime_ns=0,
+                digest=EMPTY_DIGEST,
+                status="COMPROMISED",
+                reason=reason,
+            )
+            return True
 
+        before: Optional[os.stat_result] = None
         try:
             before = os.fstat(fd)
             if not stat.S_ISREG(before.st_mode):
-                return False
+                if rec is None:
+                    return False
+                changed = rec.exists
+                rec.exists = False
+                return changed | self.compromise(rec, self.replacement_reason(before.st_mode))
 
             if rec is None:
                 full_digest, _ = self.hash_fd(fd, before.st_size, 0)
@@ -327,8 +442,23 @@ class AppendWatch:
                 rec.ctime_ns = after.st_ctime_ns
                 rec.digest = full_digest
             return visible_changed
-        except (FileNotFoundError, PermissionError, OSError):
-            return False
+        except OSError as exc:
+            reason = f"could not verify file contents: {exc.strerror or exc}"
+            if rec is not None:
+                return self.compromise(rec, reason)
+            if before is None:
+                return False
+            self.records[rel] = Record(
+                dev=before.st_dev,
+                ino=before.st_ino,
+                size=0,
+                mtime_ns=0,
+                ctime_ns=0,
+                digest=EMPTY_DIGEST,
+                status="COMPROMISED",
+                reason=reason,
+            )
+            return True
         finally:
             os.close(fd)
 
@@ -405,8 +535,23 @@ class AppendWatch:
                 # A file moved into the tree is accepted as its initial baseline.
                 visible_changed |= self.inspect(os.path.join(self.root, rel), new_path=True)
 
-        for rel, rec in old_active.items():
+        for rel, old_rec in old_active.items():
+            rec = self.records.get(rel, old_rec)
             if rel not in current and rec.exists:
+                path = os.path.join(self.root, rel)
+                try:
+                    st = os.lstat(path)
+                except FileNotFoundError:
+                    pass
+                except OSError as exc:
+                    visible_changed |= self.compromise(
+                        rec, f"could not inspect path during reconciliation: {exc.strerror or exc}"
+                    )
+                else:
+                    if stat.S_ISREG(st.st_mode):
+                        visible_changed |= self.inspect(path)
+                        continue
+                    visible_changed |= self.compromise(rec, self.replacement_reason(st.st_mode))
                 rec.exists = False
                 visible_changed = True
 
@@ -425,7 +570,8 @@ class AppendWatch:
         return name
 
     def render_tree(self) -> str:
-        lines = ["."]
+        root_reason = self.ino.unwatched_dirs.get(self.root)
+        lines = [f".  [COMPROMISED: {root_reason}]" if root_reason else "."]
 
         def visit(directory: str, prefix: str) -> None:
             try:
@@ -453,29 +599,36 @@ class AppendWatch:
                 except OSError:
                     continue
                 if is_dir:
-                    lines.append(f"{prefix}{branch}{name}/")
+                    reason = self.ino.unwatched_dirs.get(entry.path)
+                    if reason:
+                        lines.append(
+                            f"{prefix}{branch}{'COMPROMISED':<11} {name}/  [{reason}]"
+                        )
+                    else:
+                        lines.append(f"{prefix}{branch}{name}/")
                     visit(entry.path, child_prefix)
                 else:
                     rec = self.records.get(self.rel(entry.path))
-                    status = rec.status if rec else "UNKNOWN"
+                    status = rec.status if rec else "COMPROMISED"
                     suffix = ""
                     if rec and rec.status == "COMPROMISED" and rec.reason:
                         suffix = f"  [{rec.reason}]"
+                    elif rec is None:
+                        suffix = "  [not yet verified]"
                     lines.append(f"{prefix}{branch}{status:<11} {name}{suffix}")
 
         visit(self.root, "")
 
         removed = sorted(
-            ((rel, rec) for rel, rec in self.records.items() if not rec.exists),
-            key=lambda item: item[0],
+            (rel, rec)
+            for rel, rec in self.records.items()
+            if not rec.exists and rec.status == "COMPROMISED"
         )
         if removed:
             lines.append("")
-            lines.append("removed (no longer present):")
+            lines.append("removed or replaced (no longer a regular file):")
             for rel, rec in removed:
-                suffix = ""
-                if rec.status == "COMPROMISED" and rec.reason:
-                    suffix = f"  [{rec.reason}]"
+                suffix = f"  [{rec.reason}]" if rec.reason else ""
                 lines.append(f"    {rec.status:<11} {self.display_name(rel)}{suffix}")
 
         return "\n".join(lines) + "\n"
@@ -513,12 +666,28 @@ class AppendWatch:
                 changed |= self.compromise(rec, reason)
         return changed
 
+    def mark_unwatched_compromised(self) -> bool:
+        changed = False
+        for directory in self.ino.unwatched_dirs:
+            prefix = directory + os.sep
+            for rel, rec in self.records.items():
+                path = os.path.join(self.root, rel)
+                if path == directory or path.startswith(prefix):
+                    changed |= self.compromise(
+                        rec, "file was inside an unwatched directory; monitoring was incomplete"
+                    )
+        return changed
+
     def run(self) -> int:
         if not os.path.isdir(self.root):
             raise SystemExit(f"not a directory: {self.root}")
 
         self.reconcile(initial=True)
-        self.rebuild_watches()
+        if not self.rebuild_watches():
+            self.mark_all_compromised(
+                self.ino.degraded_reason or "some directories could not be watched"
+            )
+        self.mark_unwatched_compromised()
         self.write_report()
         print(f"appendwatch: watching {self.root}", file=sys.stderr)
 
@@ -528,9 +697,12 @@ class AppendWatch:
 
         while not self.stop:
             now = time.monotonic()
-            timeout_ms = 1000
+            timeout_ms = min(1000, max(0, int((next_reconcile - now) * 1000)))
             if self.pending:
-                timeout_ms = max(0, int((min(self.pending.values()) - now) * 1000))
+                timeout_ms = min(
+                    timeout_ms,
+                    max(0, int((min(self.pending.values()) - now) * 1000)),
+                )
             events = poller.poll(timeout_ms)
             visible_changed = False
             topology_changed = False
@@ -548,7 +720,18 @@ class AppendWatch:
                         topology_changed = True
                         continue
                     if mask & IN_ISDIR:
-                        if mask & (IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO | IN_DELETE_SELF | IN_MOVE_SELF):
+                        if mask & (IN_CREATE | IN_MOVED_TO):
+                            if self.rel(path) in self.records:
+                                modified.add(path)
+                        if mask & (
+                            IN_ATTRIB
+                            | IN_CREATE
+                            | IN_DELETE
+                            | IN_MOVED_FROM
+                            | IN_MOVED_TO
+                            | IN_DELETE_SELF
+                            | IN_MOVE_SELF
+                        ):
                             topology_changed = True
                         continue
 
@@ -575,7 +758,14 @@ class AppendWatch:
 
             if topology_changed or time.monotonic() >= next_reconcile:
                 visible_changed |= self.reconcile()
-                self.rebuild_watches()
+                visible_changed |= self.mark_unwatched_compromised()
+                unwatched_before = dict(self.ino.unwatched_dirs)
+                if not self.rebuild_watches():
+                    visible_changed |= self.mark_all_compromised(
+                        self.ino.degraded_reason or "some directories could not be watched"
+                    )
+                visible_changed |= self.mark_unwatched_compromised()
+                visible_changed |= unwatched_before != self.ino.unwatched_dirs
                 next_reconcile = time.monotonic() + RECONCILE_INTERVAL
 
             if visible_changed:
@@ -583,6 +773,7 @@ class AppendWatch:
 
         # Flush any final visible state.
         self.reconcile()
+        self.mark_unwatched_compromised()
         self.write_report()
         self.ino.close()
         return 0
@@ -601,8 +792,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--debounce-ms",
         type=int,
-        default=500,
-        help="coalesce rapid events for this many milliseconds (default: 500)",
+        default=0,
+        help="coalesce rapid events for this many milliseconds (default: 0)",
     )
     args = parser.parse_args()
     if args.debounce_ms < 0:
