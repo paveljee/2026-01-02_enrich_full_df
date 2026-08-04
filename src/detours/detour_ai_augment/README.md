@@ -88,6 +88,9 @@ This vulnerability was countered by the Control Centre implementing a series of 
 - Before launching Codex, under a root user (inside the virtual machine), a watcher `./src/agent_runtime/appendwatch/appendwatch.py` is running that monitors events within the `$CODEX_HOME/sessions` directory, where the Codex app stores session logs.
 The watcher tracks changes applied to session files using `inotify` and permanently flags any rollouts on which non-append-only changes were observed.
 - Both the watcher and the report it maintains are persisted beyond Codex’s user account (i.e., under root-only permissions), placing them out of reach of the AI Agent Runtime.
+
+Programmatic measures on the Control Centre’s end are supplemented with measures for which the Human Operator is responsible:
+
 - The report directly informs review of AI Agent Runtime submissions on the Backend: rollouts marked as compromised are tracked down to the corresponding submissions and invalidate them.
 - **As an important closing step, the human operator must review the session chat (i.e., as rendered by the VS Code extension), including any collapsed sections, before closing the Codex session to spot any obviously suspicious tool calls.** This step might be the most difficult to tamper with, as, upon adversarial testing, even if the underlying rollout is compromised, the already-rendered chat is not replaced _unless_ VS Code/the extension is restarted.
 
