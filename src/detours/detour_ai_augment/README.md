@@ -89,6 +89,7 @@ This vulnerability was countered by the Control Centre implementing a series of 
 The watcher tracks changes applied to session files using `inotify` and permanently flags any rollouts on which non-append-only changes were observed.
 - Both the watcher and the report it maintains are persisted beyond Codex’s user account (i.e., under root-only permissions), placing them out of reach of the AI Agent Runtime.
 - The report directly informs review of AI Agent Runtime submissions on the Backend: rollouts marked as compromised are tracked down to the corresponding submissions and invalidate them.
+- **As an important closing step, the human operator must review the session chat (i.e., as rendered by the VS Code extension), including any collapsed sections, before closing the Codex session to spot any obviously suspicious tool calls.** This step might be the most difficult to tamper with, as, upon adversarial testing, even if the underlying rollout is compromised, the already-rendered chat is not replaced _unless_ VS Code/the extension is restarted.
 
 The probability of rollout compromise is estimated to be quite small, but it is [non-zero][gh-issue-rollout-self-ingest].
 In contrast, the defensive measures in place tentatively establish session rollouts as _trusted_ artifacts, enabling their downstream use, for example, as a faithful record of web search tool outputs.
