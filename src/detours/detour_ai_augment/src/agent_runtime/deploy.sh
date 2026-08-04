@@ -43,11 +43,13 @@ else
     APPENDWATCH_SCRIPT="${AIVM_APPENDWATCH_SCRIPT:-$SOURCE_DIR/../control_centre/appendwatch/$APPENDWATCH_LIB_NAME}"
 fi
 
-AIVM_CONTROL_DIR="$MOUNT_DIR/.aivm-control/appendwatch"
-GUEST_CONTROL_DIR="$GUEST_MOUNTPOINT/.aivm-control/appendwatch"
-GUEST_APPENDWATCH_SCRIPT="$GUEST_CONTROL_DIR/$APPENDWATCH_LIB_NAME"
-GUEST_APPENDWATCH_REPORT="$GUEST_CONTROL_DIR/appendwatch-tree.txt"
-HOST_APPENDWATCH_REPORT="$AIVM_CONTROL_DIR/appendwatch-tree.txt"
+prepare_mount_paths() {
+    AIVM_CONTROL_DIR="$MOUNT_DIR/.aivm-control/appendwatch"
+    GUEST_CONTROL_DIR="$GUEST_MOUNTPOINT/.aivm-control/appendwatch"
+    GUEST_APPENDWATCH_SCRIPT="$GUEST_CONTROL_DIR/$APPENDWATCH_LIB_NAME"
+    GUEST_APPENDWATCH_REPORT="$GUEST_CONTROL_DIR/appendwatch-tree.txt"
+    HOST_APPENDWATCH_REPORT="$AIVM_CONTROL_DIR/appendwatch-tree.txt"
+}
 
 # Self-install function
 self_install() {
@@ -129,7 +131,7 @@ prepare_aivm_ssh() {
         -o "PasswordAuthentication=no"
         -o "KbdInteractiveAuthentication=no"
         -o "ForwardAgent=no"
-        -o "ClearAllForwardings=yes"
+        -o "ClearAllForwardings=no"
         -o "UserKnownHostsFile=$AIVM_KNOWN_HOSTS_FILE"
         -o "HostKeyAlias=$AIVM_HOST_KEY_ALIAS"
         -o "StrictHostKeyChecking=accept-new"
@@ -159,6 +161,8 @@ while [ "$#" -gt 0 ]; do
             ;;
     esac
 done
+
+prepare_mount_paths
 
 [ -f "$PROVISION_SCRIPT" ] \
     || { echo "❌ Provisioning script not found: $PROVISION_SCRIPT"; exit 1; }
