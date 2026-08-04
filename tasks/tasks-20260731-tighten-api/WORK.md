@@ -2,7 +2,8 @@
 
 ## Status
 
-- Implementation complete and verified.
+- August 4 production-rejection investigation in progress; no implementation changes are authorized.
+- Any corrective edit to the AI-authored `SPEC.md` section requires prior chat approval.
 - Reviewed and preserved the human-reviewed staged deployment edits; Git remains read-only.
 - Reviewed the inherited setup, current detour README/assets/scripts/API/watcher/tests, prior FastAPI-detour context, and the bundled sample rollout.
 - Latest human edit requires surgical implementation: only necessary code changes, with unrelated code and comments untouched.
@@ -36,3 +37,12 @@
 - Real-world coverage uses only the bundled sample Codex rollout: 107 records and 9 eligible web pairs, including search/open/click. Full `/push` acceptance and exact-excerpt rejection run against that rollout with synthetic ground truth; an independent test-side JSONL oracle verifies the exact linked call/output/event objects, hashes, field placement, deduplication, and exclusion of unrelated objects in `response.md`.
 - Final scope/whitespace audit passes. `SPEC.md`, `README.md`, `appendwatch.py`, and its existing tests are unchanged.
 - Git was used read-only. `src.repl` and the pipeline database were not opened.
+
+## August 4 investigation
+
+- In scope: `data/sample_run/ai-2026-08-04`, the associated 2026-08-04 Codex rollout, and matching archived attempts under `data/submissions/attempts`.
+- All 15 archived attempts passed rollout acquisition and the copied appendwatch `OK` gate, then failed at `pydantic_validation`. The current parser yields zero eligible pairs because the August rollout records web use as `custom_tool_call(name="exec")` -> `web_search_end` -> `custom_tool_call_output`, not the July `function_call(namespace="web", name="run")` envelope required by the current AI spec and code.
+- Replayed the logged annotation patches in memory and reproduced the committed final JSON exactly. Fourteen of the 15 actual submitted payloads had every excerpt as an exact contiguous substring of a completed `tools.web__run` output available before the push; one intermediate payload had one non-exact author excerpt. The final payload's 10 excerpts all match real web outputs.
+- `web_search_end` is useful corroborating metadata but is insufficient as the sole text source: several valid final excerpts occur in the full custom-tool web output but not in the event's summarized results.
+- The existing real-rollout E2E is tied to the July envelope and constructs its payload by selecting text from pairs it has already deemed eligible. That proves internal consistency, not replay of an independently authored production submission, and it does not cover code-mode web calls.
+- Approval-gated correction to propose in chat: retain the July adapter; add a narrow fail-closed adapter for the observed code-mode web envelope; and require an August production-replay E2E using the real annotation and associated archived rollout/status snapshot with fixed expected evidence objects. No production code or `SPEC.md` changes are authorized yet.
