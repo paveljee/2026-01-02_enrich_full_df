@@ -93,6 +93,14 @@ CALL_ARGUMENTS_TURN_4 = (
 )
 CALL_ARGUMENTS_TURN_6 = '{"open":[{"ref_id":"turn5search0"}],"response_length":"long"}'
 CALL_ARGUMENTS_TURN_7 = '{"click":[{"ref_id":"turn6view0","id":10}],"response_length":"long"}'
+DISPLAY_ARGUMENTS_TURN_6 = (
+    f'{{"open":[{{"ref_id":"turn5search0","url":"{COMPANY_URL}"}}],'
+    '"response_length":"long"}'
+)
+DISPLAY_ARGUMENTS_TURN_7 = (
+    f'{{"click":[{{"ref_id":"turn6view0","url":"{COMPANY_URL}","id":10}}],'
+    '"response_length":"long"}'
+)
 CALL_ARGUMENTS_TURN_8 = (
     '{"search_query":[{"q":"site:nam.edu \\"Aziz Sheikh\\" elected National '
     'Academy of Medicine 2024"},{"q":"site:ed.ac.uk \\"Aziz Sheikh\\" '
@@ -115,6 +123,7 @@ class ExpectedEvidence:
     fco_id: str
     fco_timestamp: str
     arguments_json: str
+    display_arguments_json: str
 
 
 EXPECTED_EVIDENCE = (
@@ -129,6 +138,7 @@ EXPECTED_EVIDENCE = (
         "fco_019fa459-883b-7480-b82c-b775520d1401",
         "2026-07-27T16:12:38.843Z",
         CALL_ARGUMENTS_TURN_7,
+        DISPLAY_ARGUMENTS_TURN_7,
     ),
     ExpectedEvidence(
         api.KTP_AI_AUGMENT_PLACE_OF_RESIDENCE_COL,
@@ -141,6 +151,7 @@ EXPECTED_EVIDENCE = (
         "fco_019fa459-883b-7480-b82c-b775520d1401",
         "2026-07-27T16:12:38.843Z",
         CALL_ARGUMENTS_TURN_7,
+        DISPLAY_ARGUMENTS_TURN_7,
     ),
     ExpectedEvidence(
         api.KTP_AI_AUGMENT_GENDER_COL,
@@ -153,6 +164,7 @@ EXPECTED_EVIDENCE = (
         "fco_019fa459-883b-7480-b82c-b775520d1401",
         "2026-07-27T16:12:38.843Z",
         CALL_ARGUMENTS_TURN_7,
+        DISPLAY_ARGUMENTS_TURN_7,
     ),
     ExpectedEvidence(
         api.KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL,
@@ -165,6 +177,7 @@ EXPECTED_EVIDENCE = (
         "fco_019fa459-883b-7480-b82c-b775520d1401",
         "2026-07-27T16:12:38.843Z",
         CALL_ARGUMENTS_TURN_7,
+        DISPLAY_ARGUMENTS_TURN_7,
     ),
     ExpectedEvidence(
         api.KTP_AI_AUGMENT_EDUCATION_COL,
@@ -181,6 +194,7 @@ EXPECTED_EVIDENCE = (
         "fco_019fa459-3dda-7ea0-8d5c-2351036f67f5",
         "2026-07-27T16:12:19.802Z",
         CALL_ARGUMENTS_TURN_4,
+        CALL_ARGUMENTS_TURN_4,
     ),
     ExpectedEvidence(
         api.KTP_AI_AUGMENT_ACADEMIC_POSITIONS_COL,
@@ -192,6 +206,7 @@ EXPECTED_EVIDENCE = (
         "fc_03938c1e0667a7cc016a678326af18819587231df3dd08c37d",
         "fco_019fa458-5973-77a1-93a4-0c27355f8eb8",
         "2026-07-27T16:11:21.331Z",
+        CALL_ARGUMENTS_TURN_2,
         CALL_ARGUMENTS_TURN_2,
     ),
     ExpectedEvidence(
@@ -208,6 +223,7 @@ EXPECTED_EVIDENCE = (
         "fco_019fa459-b0f8-79e1-88f4-535744154d8e",
         "2026-07-27T16:12:49.272Z",
         CALL_ARGUMENTS_TURN_8,
+        CALL_ARGUMENTS_TURN_8,
     ),
     ExpectedEvidence(
         api.KTP_AI_AUGMENT_LINKS_COL,
@@ -220,6 +236,7 @@ EXPECTED_EVIDENCE = (
         "fco_019fa459-750e-7920-b0cf-ef211333113f",
         "2026-07-27T16:12:33.934Z",
         CALL_ARGUMENTS_TURN_6,
+        DISPLAY_ARGUMENTS_TURN_6,
     ),
 )
 EXPECTED_COMMENT = "OpenAlex records may contain identity conflation."
@@ -777,6 +794,20 @@ def test_submission_contract_has_eight_evidence_fields_and_optional_comments() -
         api.Submission.model_validate(comments_with_evidence)
 
 
+def test_pydantic_failure_reports_exact_rejected_input() -> None:
+    body = valid_submission_body()
+    rejected_value = ["not", "an", "object"]
+    body[api.AI_AUGMENT_EVIDENCE_COLUMNS[0]] = rejected_value
+
+    with pytest.raises(ValidationError) as raised:
+        api.Submission.model_validate(body)
+
+    field, reason, failed_input = api.pydantic_failure(raised.value)
+    assert field == api.AI_AUGMENT_EVIDENCE_COLUMNS[0]
+    assert reason == "Input should be a valid dictionary or instance of FieldSubmission"
+    assert failed_input is rejected_value
+
+
 def test_persisted_index_is_idempotent_and_evidence_lookup_is_exact() -> None:
     connection = duckdb.connect(":memory:")
     try:
@@ -825,6 +856,7 @@ def test_persisted_index_is_idempotent_and_evidence_lookup_is_exact() -> None:
         connection.close()
 
 
+@pytest.mark.skip(reason="multiple evidence matches are currently allowed")
 def test_multiple_sql_matches_report_the_exact_excerpt() -> None:
     connection = duckdb.connect(":memory:")
     try:
@@ -886,21 +918,170 @@ def test_multiple_sql_matches_report_the_exact_excerpt() -> None:
         connection.close()
 
 
+def test_multiple_exact_excerpt_and_url_matches_use_random_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert api.ALLOW_MULTIPLE_EVIDENCE_MATCHES is True
+    connection = duckdb.connect(":memory:")
+    try:
+        index = build_test_index()
+        view_call_id = "call_view"
+        view_ref_id = "turn1view0"
+        view_arguments = '{"open":[{"ref_id":"turn0search0"}]}'
+        search_and_view_index = api.RolloutIndex(
+            session=index.session,
+            fc_rows=index.fc_rows
+            + (
+                api.CodexFcRow(
+                    timestamp=index.fc_rows[0].timestamp,
+                    fc_id="fc_view",
+                    call_id=view_call_id,
+                    name="run",
+                    namespace="web",
+                    arguments_json=view_arguments,
+                ),
+            ),
+            fco_rows=index.fco_rows
+            + (
+                api.CodexFcoRow(
+                    timestamp=index.fco_rows[0].timestamp,
+                    fco_id="fco_view",
+                    call_id=view_call_id,
+                ),
+            ),
+            turn_ref_rows=index.turn_ref_rows
+            + (
+                api.CodexTurnRefRow(
+                    ref_id=view_ref_id,
+                    call_id=view_call_id,
+                    domain="example.test",
+                    snippet="Opened result",
+                    thumbnail_url=None,
+                    title="Opened title",
+                    url=TEST_URL,
+                    cite_text=f"Opened result: {TEST_EXCERPT}",
+                ),
+            ),
+        )
+        api.persist_rollout_index(connection, search_and_view_index)
+        offered_ref_ids: list[tuple[str, ...]] = []
+
+        def choose_search(candidates: tuple[api.EvidenceCandidate, ...]) -> api.EvidenceCandidate:
+            offered_ref_ids.append(tuple(candidate.ref_id for candidate in candidates))
+            return next(candidate for candidate in candidates if candidate.ref_id == TEST_REF_ID)
+
+        monkeypatch.setattr(api, "choice", choose_search)
+        body = {
+            column: {
+                "value": column,
+                "web_search_excerpts": [{"excerpt": TEST_EXCERPT, "url": TEST_URL}],
+            }
+            for column in api.AI_AUGMENT_EVIDENCE_COLUMNS
+        }
+
+        validated = api.validate_submission_evidence(
+            connection,
+            api.Submission.model_validate(body),
+            rollout_filename=TEST_ROLLOUT_FILENAME,
+        )
+
+        matches = [match for field_matches in validated.values() for match in field_matches]
+        assert {match.ref_id for match in matches} == {TEST_REF_ID}
+        assert offered_ref_ids == [(TEST_REF_ID, view_ref_id)] * len(
+            api.AI_AUGMENT_EVIDENCE_COLUMNS
+        )
+    finally:
+        connection.close()
+
+
 def test_renderer_uses_generic_arguments_wording() -> None:
+    citation_marker = f"{api.CODEX_CITE_MARKER_PREFIX}{TEST_REF_ID}{api.CODEX_CITE_MARKER_SUFFIX}"
+    cite_prefix = (
+        f"Neighbor header turn9search9\n{citation_marker}\n"
+        "# Heading\n- [source](https://example.test) `before` "
+        f"{api.CODEX_CITE_MARKER_PREFIX}13\u2020"
+    )
+    cite_suffix = (
+        f"{codex_parse.INLINE_CITATION_SEPARATOR}example.test"
+        f"{api.CODEX_CITE_MARKER_SUFFIX} after\n> quoted"
+    )
     footnote = codex_parse.render_footnote(
         number=1,
-        cite_text=f"before {TEST_EXCERPT} after",
+        cite_text=f"{cite_prefix}{TEST_EXCERPT}{cite_suffix}",
+        citation_marker=citation_marker,
+        marker_prefix=api.CODEX_CITE_MARKER_PREFIX,
+        marker_suffix=api.CODEX_CITE_MARKER_SUFFIX,
         excerpt=TEST_EXCERPT,
-        excerpt_position=len("before "),
+        excerpt_position=len(cite_prefix),
         context_characters=api.FOOTNOTE_CONTEXT_CHARACTERS,
         fco_timestamp="2026-07-31T16:11:02.000Z",
         url=TEST_URL,
     )
 
-    assert f"**{TEST_EXCERPT}**" in footnote
+    assert f"**{codex_parse.escape_markdown_text(TEST_EXCERPT)}**" in footnote
+    assert r"\# Heading \- \[source\]\(https\:\/\/example\.test\) \`before\`" in footnote
+    assert r"after \> quoted" in footnote
+    assert "\n" not in footnote
+    assert TEST_REF_ID not in footnote
+    assert "turn9search9" not in footnote
+    assert api.CODEX_CITE_MARKER_PREFIX not in footnote
+    assert api.CODEX_CITE_MARKER_SUFFIX not in footnote
+    assert codex_parse.INLINE_CITATION_SEPARATOR not in footnote
     assert "using arguments^1^" in footnote
     assert "search query" not in footnote
-    assert codex_parse.render_footnote_argument(1, '{"open":[]}') == ('1. {"open":[]}')
+    assert codex_parse.render_footnote_argument(
+        1,
+        CALL_ARGUMENTS_TURN_6,
+        {"turn5search0": COMPANY_URL},
+        ref_id_pattern=api.CODEX_REF_ID_PATTERN,
+    ) == (
+        f"1. {DISPLAY_ARGUMENTS_TURN_6}"
+    )
+    assert codex_parse.render_footnote_argument(
+        1,
+        CALL_ARGUMENTS_TURN_7,
+        {"turn6view0": COMPANY_URL},
+        ref_id_pattern=api.CODEX_REF_ID_PATTERN,
+    ) == (
+        f"1. {DISPLAY_ARGUMENTS_TURN_7}"
+    )
+    multi_open = (
+        '{"open":[{"ref_id":"turn1search0"},{"ref_id":"turn1search1"}],'
+        '"response_length":"long"}'
+    )
+    assert codex_parse.render_footnote_argument(
+        1,
+        multi_open,
+        {"turn1search0": COMPANY_URL, "turn1search1": OFFICERS_URL},
+        ref_id_pattern=api.CODEX_REF_ID_PATTERN,
+    ) == (
+        f'1. {{"open":[{{"ref_id":"turn1search0","url":"{COMPANY_URL}"}},'
+        f'{{"ref_id":"turn1search1","url":"{OFFICERS_URL}"}}],'
+        '"response_length":"long"}'
+    )
+    assert codex_parse.render_footnote_argument(
+        1,
+        CALL_ARGUMENTS_TURN_6,
+        {},
+        ref_id_pattern=api.CODEX_REF_ID_PATTERN,
+    ) == (f"1. {CALL_ARGUMENTS_TURN_6}")
+    direct_url_open = (
+        f'{{"open":[{{"ref_id":"{COMPANY_URL}"}}],"response_length":"long"}}'
+    )
+    assert codex_parse.render_footnote_argument(
+        1,
+        direct_url_open,
+        {},
+        ref_id_pattern=api.CODEX_REF_ID_PATTERN,
+    ) == (f"1. {direct_url_open}")
+    assert codex_parse.render_footnote_argument(
+        1,
+        CALL_ARGUMENTS_TURN_2,
+        {},
+        ref_id_pattern=api.CODEX_REF_ID_PATTERN,
+    ) == (
+        f"1. {CALL_ARGUMENTS_TURN_2}"
+    )
 
 
 def test_copied_report_requires_one_exact_nested_ok_path(tmp_path: Path) -> None:
@@ -1195,13 +1376,20 @@ def test_real_july_push_matches_exact_objects_and_renders_card_end_to_end(
         metadata = json.loads(output[api.KTP_AI_AUGMENT_SESSION_METADATA_COL])
         assert metadata["session_id"] == JULY_SESSION_ID
         assert output[api.KTP_AI_AUGMENT_FOOTNOTE_ARGUMENTS_COL] == "\n".join(
-            f"{number}. {expected.arguments_json}"
+            f"{number}. {expected.display_arguments_json}"
             for number, expected in enumerate(EXPECTED_EVIDENCE, start=1)
         )
         footnotes = output[api.KTP_AI_AUGMENT_FOOTNOTES_COL]
-        for number, expected in enumerate(EXPECTED_EVIDENCE, start=1):
-            assert f"**{expected.excerpt}**" in footnotes
-            assert f'arguments^{number}^ on "{expected.fco_timestamp}", {expected.url}' in footnotes
+        footnote_lines = footnotes.splitlines()
+        assert len(footnote_lines) == len(EXPECTED_EVIDENCE)
+        assert api.CODEX_CITE_MARKER_PREFIX not in footnotes
+        assert api.CODEX_CITE_MARKER_SUFFIX not in footnotes
+        for number, (expected, footnote) in enumerate(
+            zip(EXPECTED_EVIDENCE, footnote_lines, strict=True),
+            start=1,
+        ):
+            assert f"**{codex_parse.escape_markdown_text(expected.excerpt)}**" in footnote
+            assert f'arguments^{number}^ on "{expected.fco_timestamp}", {expected.url}' in footnote
             assert output[expected.column] == (
                 f'**AI-generated text**: "{expected.value}"^{number}^'
             )
@@ -1230,6 +1418,11 @@ def test_real_july_push_matches_exact_objects_and_renders_card_end_to_end(
     assert f"**{api.KTP_AI_AUGMENT_ATTEMPT_ID_COL}**: {manifest['attempt_id']}" in card_text
     assert f"**{api.KTP_AI_AUGMENT_FOOTNOTES_COL}**:" in card_text
     assert f"**{api.KTP_AI_AUGMENT_FOOTNOTE_ARGUMENTS_COL}**:" in card_text
+    assert (
+        card_text.index(f"**{api.KTP_AI_AUGMENT_LINKS_COL}**:")
+        < card_text.index(f"**{api.KTP_AI_AUGMENT_COMMENTS_COL}**:")
+        < card_text.index(f"**{api.KTP_AI_AUGMENT_FOOTNOTES_COL}**:")
+    )
     assert "using arguments^1^" in card_text
     assert "<details>" not in card_text
     if output_format == "txt":
@@ -1243,6 +1436,7 @@ def test_real_july_push_rejects_changed_evidence_before_ground_truth(
     mutation: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     context = prepare_real_sample_push(tmp_path, monkeypatch)
     payload = json.loads(json.dumps(context.payload))
@@ -1269,6 +1463,8 @@ def test_real_july_push_rejects_changed_evidence_before_ground_truth(
 
     assert response.status_code == 422
     assert response.json() == {"detail": api.VALIDATION_ERROR_DETAIL}
+    assert f"excerpt={evidence['excerpt']!r}" in caplog.text
+    assert f"url={evidence['url']!r}" in caplog.text
     assert context.events == [
         "scp",
         "status_copy",

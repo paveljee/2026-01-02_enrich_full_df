@@ -14,6 +14,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
+from random import choice
 from typing import Annotated, Any, Literal, Self, cast
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -120,11 +121,20 @@ TREE_INDENT_WIDTH = len("│   ")
 APPENDWATCH_OK_PREFIX = f"{'OK':<{APPENDWATCH_STATUS_WIDTH}} "
 APPENDWATCH_COMPROMISED_PREFIX = f"{'COMPROMISED':<{APPENDWATCH_STATUS_WIDTH}} "
 CONFIGURATION_ERROR_DETAIL = "API is not properly configured. Contact the human operator."
-VALIDATION_ERROR_DETAIL = "Submission did not pass validation. Verify all details and try again."
+# VALIDATION_ERROR_DETAIL = "Submission did not pass validation. Verify all details and try again."
+VALIDATION_ERROR_DETAIL = (
+    "Submission did not pass validation. Recheck every evidence excerpt and URL before "
+    "retrying. Copy each excerpt verbatim as one contiguous span from the cited web-tool "
+    "output, preserving every character—including repeated spaces, line breaks, punctuation, "
+    "capitalization, and Unicode typography—and copy its associated URL exactly. Do not "
+    "paraphrase, normalize, retype, or join separated text."
+)
+PYDANTIC_MISSING_INPUT = "<missing>"
 MULTIPLE_MATCH_DETAIL = (
     "Excerpt matched multiple entries. Resubmit with an excerpt unique across "
     "the searched web pages: {excerpt}"
 )
+ALLOW_MULTIPLE_EVIDENCE_MATCHES = True
 ELIGIBLE_WEB_ACTIONS = frozenset({"search_query", "open", "click"})
 TREE_LINE = re.compile(r"^(?P<indent>(?:(?:│   )|(?:    ))*)(?:├── |└── )(?P<body>.*)$")
 CODEX_CITE_MARKER_PREFIX = "\ue200cite\ue202"
@@ -225,9 +235,9 @@ CODEX_OUTPUT_SCHEMA = (
     (KTP_AI_AUGMENT_ATTEMPT_ID_COL, "VARCHAR NOT NULL UNIQUE"),
     (KTP_AI_AUGMENT_SESSION_METADATA_COL, "VARCHAR NOT NULL"),
     *((column, "VARCHAR NOT NULL") for column in AI_AUGMENT_EVIDENCE_COLUMNS),
+    (KTP_AI_AUGMENT_COMMENTS_COL, "VARCHAR"),
     (KTP_AI_AUGMENT_FOOTNOTES_COL, "VARCHAR NOT NULL"),
     (KTP_AI_AUGMENT_FOOTNOTE_ARGUMENTS_COL, "VARCHAR NOT NULL"),
-    (KTP_AI_AUGMENT_COMMENTS_COL, "VARCHAR"),
 )
 
 CARD_EXCLUDED_COLUMNS = {
@@ -622,6 +632,17 @@ class EvidenceMatch:
     excerpt_position: int
     fco_timestamp: str
     arguments_json: str
+
+
+@dataclass(frozen=True)
+class EvidenceCandidate:
+    ref_id: str
+    call_id: str
+    cite_text: str
+    excerpt_position: int
+    url: str
+    fco_timestamp: datetime
+    arguments_json: object
 
 
 @dataclass(frozen=True)
@@ -1697,6 +1718,64 @@ def _render_fco_timestamp(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
+def _evidence_candidates(rows: list[tuple[Any, ...]]) -> tuple[EvidenceCandidate, ...]:
+    candidates: list[EvidenceCandidate] = []
+    for row in rows:
+        (
+            ref_id,
+            call_id,
+            cite_text,
+            excerpt_position,
+            url,
+            fco_timestamp,
+            arguments_json,
+        ) = row
+        candidates.append(
+            EvidenceCandidate(
+                ref_id=cast(str, ref_id),
+                call_id=cast(str, call_id),
+                cite_text=cast(str, cite_text),
+                excerpt_position=cast(int, excerpt_position),
+                url=cast(str, url),
+                fco_timestamp=cast(datetime, fco_timestamp),
+                arguments_json=arguments_json,
+            )
+        )
+    return tuple(candidates)
+
+
+def _rollout_ref_urls(
+    conn: duckdb.DuckDBPyConnection,
+    *,
+    rollout_filename: str,
+) -> dict[str, str]:
+    rows = conn.execute(
+        f"""
+        SELECT
+            ts.{duckdb_quote_identifier(CODEX_REF_ID_COL)},
+            ts.{duckdb_quote_identifier(CODEX_CALL_ID_COL)},
+            ts.{duckdb_quote_identifier(CODEX_REF_URL_COL)}
+        FROM {CODEX_TURN_REF_TABLE} ts
+        JOIN {CODEX_CALLS_TABLE} calls
+          ON calls.{duckdb_quote_identifier(CODEX_CALL_ID_COL)} =
+             ts.{duckdb_quote_identifier(CODEX_CALL_ID_COL)}
+        WHERE calls.{duckdb_quote_identifier(CODEX_ROLLOUT_FILENAME_COL)} = ?
+        ORDER BY ts.{duckdb_quote_identifier(CODEX_ID_COL)}
+        """,
+        [rollout_filename],
+    ).fetchall()
+    rows_by_ref: dict[str, set[tuple[str, str]]] = {}
+    for ref_id, call_id, url in rows:
+        rows_by_ref.setdefault(cast(str, ref_id), set()).add(
+            (cast(str, call_id), cast(str, url))
+        )
+    return {
+        ref_id: next(iter(ref_rows))[1]
+        for ref_id, ref_rows in rows_by_ref.items()
+        if len(ref_rows) == 1
+    }
+
+
 def validate_submission_evidence(
     conn: duckdb.DuckDBPyConnection,
     submission: Submission,
@@ -1738,13 +1817,24 @@ def validate_submission_evidence(
                 [evidence.excerpt, rollout_filename, evidence.excerpt],
             ).fetchall()
             if not rows:
-                raise PushValidationError(f"{field}: excerpt has no indexed match")
-            if len(rows) > 1:
+                raise PushValidationError(
+                    f"{field}: excerpt has no indexed match; "
+                    f"excerpt={evidence.excerpt!r} url={evidence.url!r}"
+                )
+            candidates = tuple(
+                candidate
+                for candidate in _evidence_candidates(rows)
+                if candidate.url == evidence.url
+            )
+            if not candidates:
+                raise PushValidationError(
+                    f"{field}: submitted URL does not match; "
+                    f"excerpt={evidence.excerpt!r} url={evidence.url!r}"
+                )
+            if len(candidates) > 1 and not ALLOW_MULTIPLE_EVIDENCE_MATCHES:
                 raise MultipleEvidenceMatches(evidence.excerpt)
-            row = rows[0]
-            if row[4] != evidence.url:
-                raise PushValidationError(f"{field}: submitted URL does not match")
-            arguments_json = row[6]
+            candidate = choice(candidates) if len(candidates) > 1 else candidates[0]
+            arguments_json = candidate.arguments_json
             if not isinstance(arguments_json, str):
                 arguments_json = json.dumps(
                     arguments_json,
@@ -1757,11 +1847,11 @@ def validate_submission_evidence(
                     evidence_number=evidence_number,
                     excerpt=evidence.excerpt,
                     url=evidence.url,
-                    ref_id=cast(str, row[0]),
-                    call_id=cast(str, row[1]),
-                    cite_text=cast(str, row[2]),
-                    excerpt_position=cast(int, row[3]) - 1,
-                    fco_timestamp=_render_fco_timestamp(cast(datetime, row[5])),
+                    ref_id=candidate.ref_id,
+                    call_id=candidate.call_id,
+                    cite_text=candidate.cite_text,
+                    excerpt_position=candidate.excerpt_position - 1,
+                    fco_timestamp=_render_fco_timestamp(candidate.fco_timestamp),
                     arguments_json=arguments_json,
                 )
             )
@@ -1961,6 +2051,7 @@ def render_codex_values(
     evidence: ValidatedEvidence,
     *,
     attempt_timestamp: datetime,
+    argument_ref_urls: Mapping[str, str],
 ) -> dict[str, str | None]:
     rendered: dict[str, str | None] = {}
     ordered_matches: list[EvidenceMatch] = []
@@ -1975,6 +2066,9 @@ def render_codex_values(
         codex_parse.render_footnote(
             number=match.evidence_number,
             cite_text=match.cite_text,
+            citation_marker=(f"{CODEX_CITE_MARKER_PREFIX}{match.ref_id}{CODEX_CITE_MARKER_SUFFIX}"),
+            marker_prefix=CODEX_CITE_MARKER_PREFIX,
+            marker_suffix=CODEX_CITE_MARKER_SUFFIX,
             excerpt=match.excerpt,
             excerpt_position=match.excerpt_position,
             context_characters=FOOTNOTE_CONTEXT_CHARACTERS,
@@ -1987,6 +2081,8 @@ def render_codex_values(
         codex_parse.render_footnote_argument(
             match.evidence_number,
             match.arguments_json,
+            argument_ref_urls,
+            ref_id_pattern=CODEX_REF_ID_PATTERN,
         )
         for match in ordered_matches
     )
@@ -2114,6 +2210,10 @@ def write_accepted_submission(
         submission,
         evidence,
         attempt_timestamp=attempt_timestamp,
+        argument_ref_urls=_rollout_ref_urls(
+            detour_conn,
+            rollout_filename=rollout_index.session.rollout_filename,
+        ),
     )
     output_row: dict[str, object] = {
         KTP_SOURCE_KEY_COL: researcher.source_key,
@@ -2186,14 +2286,14 @@ async def bounded_request_body(request: Request) -> bytes:
     return bytes(body)
 
 
-def pydantic_failure(exc: ValidationError) -> tuple[str | None, str]:
+def pydantic_failure(exc: ValidationError) -> tuple[str | None, str, object]:
     errors = exc.errors(
         include_url=False,
         include_context=False,
-        include_input=False,
+        include_input=True,
     )
     if not errors:
-        return None, "submission failed Pydantic validation"
+        return None, "submission failed Pydantic validation", PYDANTIC_MISSING_INPUT
     error = errors[0]
     reason = str(error.get("msg", "submission failed Pydantic validation"))
     field = next(
@@ -2209,7 +2309,12 @@ def pydantic_failure(exc: ValidationError) -> tuple[str | None, str]:
             (column for column in AI_AUGMENT_COLUMNS if column in reason),
             None,
         )
-    return field, reason
+    failed_input = (
+        PYDANTIC_MISSING_INPUT
+        if error.get("type") == "missing"
+        else error.get("input", PYDANTIC_MISSING_INPUT)
+    )
+    return field, reason, failed_input
 
 
 def safely_record_attempt(
@@ -2392,9 +2497,10 @@ async def push(request: Request) -> StreamingResponse:
             card_archive=card_archive,
         )
         logger.warning(
-            "push attempt=%s failed stage=%s: excerpt matched multiple rows",
+            "push attempt=%s failed stage=%s: excerpt matched multiple rows excerpt=%r",
             attempt_id,
             stage,
+            exc.excerpt,
         )
         raise HTTPException(
             status_code=422,
@@ -2418,7 +2524,7 @@ async def push(request: Request) -> StreamingResponse:
         )
         raise HTTPException(status_code=422, detail=VALIDATION_ERROR_DETAIL) from None
     except ValidationError as exc:
-        field, reason = pydantic_failure(exc)
+        field, reason, failed_input = pydantic_failure(exc)
         safely_record_attempt(
             attempt_dir,
             attempt_id,
@@ -2429,10 +2535,11 @@ async def push(request: Request) -> StreamingResponse:
             card_archive=card_archive,
         )
         logger.warning(
-            "push attempt=%s failed stage=%s field=%s: %s",
+            "push attempt=%s failed stage=%s field=%s value=%r: %s",
             attempt_id,
             stage,
             field or "unknown",
+            failed_input,
             reason,
         )
         raise HTTPException(status_code=422, detail=VALIDATION_ERROR_DETAIL) from None

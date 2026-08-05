@@ -127,7 +127,7 @@ So to recap, the sequence of validation is:
             * in addition to those, we will construct KTP_AI_AUGMENT_FOOTNOTES_COL (this label must be in globals at top of api.py; note that this is a detour and so main repl pipeline should never be affected or edited). this will be assempled from values of new codex tables above and how exactly this will look like - is shown in an output sample below. just like we have docx_parse we will also create (within detour) codex_parse module helper where we will follow that parser and implement the textual values that will go into footnotes. no need to drag machine readable stuff there - just follow the looks of sample output below and overall of docx_parse architecture. note that footnote numbers at end of each ktp.ai_augment_* value are added programmatically.
             * value of KTP_SOURCE_KEY_COL and ktp draw number is taken from  existing data based on what ktp first and last name was given in the /pull payload (later on we will implement that the api now draws a random source key from duckdb, but for now we are still using the hardcoded sample jsonl).
     * so that view is precreated from an appendwatch-accepted jsonl and further used for look up.
-* then look up is simple - see if any row contains an exact match within their codex.cite_text, and if yes grab the necessary data. if multiple rows, fail this and say in error status code to /push client that this particular excerpt (cite it as as submitted) matched multiple entries on validation and they are encouraged to resubmit ensuring that each value is supported by a distinct excerpt unique across searched web pages.
+* then look up is simple - see if any row contains an exact match within their codex.cite_text, and if yes grab the necessary data. if multiple rows, select any random one. unused: if multiple rows, fail this and say in error status code to /push client that this particular excerpt (cite it as as submitted) matched multiple entries on validation and they are encouraged to resubmit ensuring that each value is supported by a distinct excerpt unique across searched web pages.
 * let's extend the /push contract where together with each excerpt submitted must provide exact url as retrieved from search results. upon validation verify that both excerpt must be within codex.cite_text and also that submitted url must match corresponding codex.ref_url, otherwise fail submission.
 * note that this is purely all implemented in duckdb queries, pls consult step 08 for inspiration.
 
@@ -466,7 +466,9 @@ non-blank evidence item with no duplicate excerpt/URL pair in that field. Use st
 body rather than invented web-tool limits. Treat URLs as literal strings for
 comparison; URL parsing must not normalize or rewrite what the agent submits.
 An excerpt may be reused across fields when it genuinely supports them, but it
-must still resolve to exactly one indexed result in this attempt archive.
+must resolve to at least one indexed result with the submitted exact URL in
+this attempt archive. When several rows match that exact pair, randomly select
+one as the retained provenance row.
 
 Exact means a contiguous substring of one `codex.cite_text`, with no case
 folding, whitespace collapsing, Unicode normalization, fuzzy matching, URL
@@ -567,16 +569,18 @@ searches `codex_turn_ref` for the exact excerpt as a contiguous substring of
 perform a second Python-side rollout scan.
 
 - Zero matching rows produces the common generic validation failure.
-- More than one matching row produces the human-required client error that
-  includes the exact submitted excerpt and asks the agent to resubmit with a
-  distinct excerpt unique across the searched pages.
-- Exactly one row proceeds only if its `codex.ref_url` exactly equals the
-  submitted URL; a mismatch produces the common generic validation failure.
+- From all excerpt-matching rows, retain only rows whose `codex.ref_url`
+  exactly equals the submitted URL; zero remaining rows produces the common
+  generic validation failure.
+- Keep a visibly named top-level `ALLOW_MULTIPLE_EVIDENCE_MATCHES` switch set
+  to true. With that policy enabled, randomly select one row when multiple
+  exact excerpt/URL rows remain; do not prefer search, view, open, or click
+  provenance. A single remaining row is selected directly.
 
-The uniqueness check is against the full archived prefix for that attempt,
-including evidence from earlier cycles in the same rollout. Retain the one
-matched row, linked call arguments, FCO timestamp, and submitted field/item
-order for accepted-row construction and footnote numbering.
+The lookup covers the full archived prefix for that attempt, including
+evidence from earlier cycles in the same rollout. Retain the randomly selected
+row, linked call arguments, FCO timestamp, and submitted field/item order for
+accepted-row construction and footnote numbering.
 
 ### accepted Codex output view and innerdict contract
 
@@ -593,9 +597,9 @@ a `codex_output` view whose columns follow this order:
 5. `ktp.draw_number`, `ktp.first_name`, and `ktp.last_name`;
 6. `ktp.ai_augment_attempt_id` and `ktp.ai_augment_session_metadata`;
 7. the eight non-comment `ktp.ai_augment_*` values in
-   `AI_AUGMENT_COLUMNS` order;
-8. `ktp.ai_augment_footnotes` and `ktp.ai_augment_footnote_arguments`; and
-9. `ktp.ai_augment_comments`.
+   `AI_AUGMENT_EVIDENCE_COLUMNS` order, followed immediately by
+   `ktp.ai_augment_comments` after `ktp.ai_augment_links_`; and
+8. `ktp.ai_augment_footnotes` and `ktp.ai_augment_footnote_arguments`.
 
 Define every detour-owned label and the backing-table/output-view names at the
 top of `api.py`. One accepted push creates one output row. Enforce uniqueness
@@ -625,20 +629,38 @@ resulting superscript marker programmatically after the closing quote. The
 parameterized lookup supplies the matched cite text and
 exact position; the detour-local parser/renderer then
 follows `docx_parse.py`'s Markdown conventions to show a named-global amount of
-context before and after the match, bold the submitted excerpt, and add the FCO
-timestamp and result URL. Follow the human sample's footnote suffix exactly:
+context before and after the match. Clamp that context to the excerpt's side
+of the selected ref's citation marker so it never enters a neighboring ref or
+the marker/header across that boundary. In rendered Markdown only, replace
+every source line break with one space, remove Codex citation-marker markup
+while retaining its visible label text, and escape all Markdown punctuation in
+the context and excerpt before applying the renderer-owned bold wrapper to the
+submitted excerpt. Preserve the exact raw `codex.cite_text` in DuckDB. Add the
+FCO timestamp and result URL. Follow the human sample's footnote suffix exactly:
 `retrieved from web run tool using arguments^N^ on ...`, where `N` is the
 same global ordinal used by the corresponding argument-list item. Render the
 comments value through the same helper in the sample's exact
 `- **AI-generated text**: "<comment>" (<attempt timestamp>)` form, rather than
-assembling value, footnote, or comment Markdown in the route.
+assembling value, footnote, or comment Markdown in the route. Its output column
+and rendered card field appear immediately after `ktp.ai_augment_links_` and
+before the footnotes fields.
 
 `ktp.ai_augment_footnote_arguments` is a numbered list aligned one-to-one with
-the footnotes and their `arguments^N^` references. Each item contains the raw
-decoded `codex.fc_arguments` JSON for the call supporting that footnote.
-Repetition is intentional when several footnotes come from one call. Keep
-machine-readable provenance in the normalized tables; the footnotes and argument
-list are the human-readable rendering shown in the sample.
+the footnotes and their `arguments^N^` references. Search-call items show the
+raw decoded `codex.fc_arguments`. For `open` and `click`, inspect every action
+object independently. When its string `ref_id` matches the existing Codex
+turn-ref pattern and resolves to exactly one call-scoped `codex_turn_ref` row
+in the current locked rollout prefix, render a full action object that
+preserves that `ref_id`, adds its indexed `codex.ref_url` as `url`, and
+preserves properties such as a click ID. Apply this independently to every
+item in a multi-item action. If the turn-ref is absent or ambiguous, or the
+`ref_id` is already a URL or any other non-turn value, leave that action
+object unchanged. This is best-effort display enrichment, not an acceptance
+condition; do not substitute the selected footnote output URL for an input
+ref's own URL. Repetition is intentional when several footnotes come from one
+call. Keep the raw arguments unchanged in normalized machine-readable
+provenance; the footnotes and argument list are the human-readable rendering
+shown in the sample.
 
 For the selected namekey, load existing xlsx, docx, and ssn innerdicts from the
 configured database read-only and load every accumulated Codex innerdict from
@@ -664,23 +686,32 @@ second.
 Any structural, appendwatch-integrity, rollout/index, URL, eligibility, exact-
 excerpt, output-view, innerdict, or render failure rejects the submission,
 does not return ground truth, and creates no accepted response/card or Codex
-innerdict row. Except for the required multiple-match case, return only:
+innerdict row. With the current allow-multiple policy enabled, current
+failures return only:
 
 ```json
 {
-  "detail": "Submission did not pass validation. Verify all details and try again."
+  "detail": "Submission did not pass validation. Recheck every evidence excerpt and URL before retrying. Copy each excerpt verbatim as one contiguous span from the cited web-tool output, preserving every character—including repeated spaces, line breaks, punctuation, capitalization, and Unicode typography—and copy its associated URL exactly. Do not paraphrase, normalize, retype, or join separated text."
 }
 ```
 
-When an excerpt matches multiple `codex_turn_ref` rows, return HTTP 422 with
-a concise message containing that exact submitted excerpt and instructing the
-agent to resubmit with an excerpt unique across the searched web pages. This is
-the sole detailed validation response required by the human section; JSON
-encoding must safely preserve arbitrary excerpt characters.
+This universal guidance may explain the submission contract but must not name
+the failed field or value, supply expected source text, or expose validation
+order, rollout/index state, or persistence details.
+
+Keep the existing `MultipleEvidenceMatches` exception, detailed message, and
+HTTP handler in place. The named allow-multiple switch visibly disables that
+rejection branch; setting it false makes the selector raise the retained
+exception. Keep its original rejection test intact and mark it skipped with
+the current multiple-match policy as the reason.
 
 The backend log must include attempt ID, failed stage, field name where
 applicable, and an actionable reason for the operator without leaking secrets.
-Do not let FastAPI's default detailed Pydantic error body bypass this policy.
+Log the exact submitted excerpt and URL for evidence failures and the exact
+rejected input (or an explicit missing marker) for Pydantic failures, using a
+representation that escapes line breaks and control characters. Keep those
+values out of the generic client response. Do not let FastAPI's default
+detailed Pydantic error body bypass this policy.
 
 ### implementation tests and acceptance
 
@@ -714,13 +745,14 @@ Keep the existing appendwatch regression suite and add focused tests for:
   shell-output, rollout-scanning, orphan, multi-block, malformed-ID/argument,
   and unsupported-result cases;
 - parameterized SQL lookup, zero/exact/multiple substring matches, exact URL
-  verification, generic failures, the one excerpt-bearing multiple-match
-  response, and no ground-truth leak;
+  filtering before random candidate selection, generic failures, the retained
+  but skipped multiple-match rejection test, and no ground-truth leak;
 - cumulative accepted output rows where one namekey has multiple sections with
   the same rollout filename, distinct line-count fragments and attempt IDs,
   plus exact common-contract `codex_innerdicts` JSONL ordering;
-- exact AI-generated value/comment wrappers, footnote numbering/context/bold
-  excerpt/web-run wording/argument cross-reference/FCO time/URL, aligned raw argument lists,
+- exact AI-generated value/comment wrappers, footnote numbering, one-line
+  marker-bounded and Markdown-escaped context, bold excerpt, web-run
+  wording/argument cross-reference/FCO time/URL, aligned raw argument lists,
   xlsx -> Codex -> docx -> ssn card order,
   TXT and DOCX ZIPs, archive hashes, two-line success NDJSON, and no accepted
   artifacts on rejection; and
