@@ -289,6 +289,9 @@ sandbox_mode = "danger-full-access"
 approval_policy = "never"
 service_tier = "default"
 
+[features.code_mode]
+direct_only_tool_namespaces = ["web"]
+
 [agents]
 enabled = false
 
