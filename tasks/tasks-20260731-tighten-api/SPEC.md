@@ -116,11 +116,11 @@ So to recap, the sequence of validation is:
         * codex_fc table, 6 cols: pkey, codex.fc_timestamp (from fc json line), codex.fc_id, codex.fc_name (will always be "run" in this setup but no worries, just put the text value here - but always verify it's truly this in the rollout), codex.fc_namespace (same, will always be "web" - but need to verify in rollout) codex.fc_arguments which is a duckdb json object (put all these labels and table names as globals on top of api.py; don't touch vars.py and schema.py because this is a detour)
         * codex_fco table, 3 cols: pkey, codex.fco_timestamp (from fco jsonline), codex.fco_id
         * codex_calls table, 5 cols: pkey, codex.call_id, codex.fc_id, codex.fco_id, codex.rollout_filename (_original_ codex jsonl rollout filename including extension; can be reconstructed from session_id and timestamp from session_meta in the jsonl)
-        * codex_turn_search table, 8 cols: pkey, codex.ref_id (from event_msg corresponding turn-search), codex.call_id (establishes linkage to both fc and fco through codex_calls), codex.ref_domain, codex.ref_snippet, codex.ref_title, codex.ref_url (all from event_msg), codex.cite_text (raw text value from fco jsonline for parsed out related ref id)
+        * codex_turn_ref table, 9 cols: pkey, codex.ref_id (from event_msg corresponding turn-search), codex.call_id (establishes linkage to both fc and fco through codex_calls), codex.ref_domain, codex.ref_snippet, codex.ref_thumbnail_url, codex.ref_title, codex.ref_url (all from event_msg), codex.cite_text (raw text value from fco jsonline for parsed out related ref id)
         * finally, there is a codex_innerdicts table that follows same strict procedures as currently xlsx, docx, and ssn an serializes everything there properly with all proper columns and contract. this innerdicts table will be authoritative downstream.
     * also, in duckdb we establish a view (note that step 08 is overall closest in workflow, try to follow it as close as possible) where:
         * every row is a unique KTP_SOURCE_KEY_COL
-        * KTP_SOURCE_KEY_COL (see vars.py) here is the total number of lines as in `nl -ba`  in the _archived under attempts_ copy of codex. you should modify api.py so that in addition to size and sha256 it also calculated nl -ba. this is helpful because archived attempts are by our design always append only and so this will differ necessarily for different attemtps, and therefore it's a nice file-based identifier for an attempt allowing the overarching approach in this repo where unique data identification is based on filename and fragment within it. this line number will always be usable regardless of what archived copy we deal with. it's of fragment type LINE_NUMBER.  also, notably it's always possible to trim the original codex jsonl at this line number properly, recalc hash and this should match hash inside attempt json. 
+        * KTP_FRAGMENT (see vars.py) here is the total number of lines as in `nl -ba`  in the _archived under attempts_ copy of codex. you should modify api.py so that in addition to size and sha256 it also calculated nl -ba. this is helpful because archived attempts are by our design always append only and so this will differ necessarily for different attemtps, and therefore it's a nice file-based identifier for an attempt allowing the overarching approach in this repo where unique data identification is based on filename and fragment within it. this line number will always be usable regardless of what archived copy we deal with. it's of fragment type LINE_NUMBER.  also, notably it's always possible to trim the original codex jsonl at this line number properly, recalc hash and this should match hash inside attempt json. 
         * the KTP_FILENAME_COL for each row will be corresponding codex.rollout_filename
         * now, how do other columns get filled in? other columns include ALL as in ktp.table_1_* but are called ktp.ai_augment_* instead. the list is currently in api.py as COLUMNS but you must rename this to DOCX_COLUMNS and create new one with codex prefixes and fill out these (including in api).
             * the value of these codex-prefixed fields comes obviously from the /push submission. just raw text values.
@@ -168,12 +168,12 @@ here is what the output should look like:
 
 **ktp.ai_augment_footnotes**: 
 
-1. "...excerpt from codex.cite_text with some chars before and some chars after **web_search_excerpt number 1** in the list submitted with this value for ktp.ai_augment_researcher_author at /pull, where the raw submitted web search excerpt is boldened within the context...", retrieved from web run tool using search query^1^ on "fco timestamp", url://from-codex.ref_url
-2. "...excerpt from codex.cite_text with some chars before and some chars after **web_search_excerpt number 2** in the list submitted with this value for ktp.ai_augment_researcher_author at /pull, where the raw submitted web search excerpt is boldened within the context...", retrieved from web run tool using search query^2^ on "fco timestamp", url://from-codex.ref_url
-3. "...excerpt from codex.cite_text with some chars before and some chars after **web_search_excerpt number 1** in the list submitted with this value for ktp.ai_augment_place_of_residence at /pull, where the raw submitted web search excerpt is boldened within the context...", retrieved from web run tool using search query^3^ on "fco timestamp", url://from-codex.ref_url
+1. "...excerpt from codex.cite_text with some chars before and some chars after **web_search_excerpt number 1** in the list submitted with this value for ktp.ai_augment_researcher_author at /pull, where the raw submitted web search excerpt is boldened within the context...", retrieved from web run tool using arguments^1^ on "fco timestamp", url://from-codex.ref_url
+2. "...excerpt from codex.cite_text with some chars before and some chars after **web_search_excerpt number 2** in the list submitted with this value for ktp.ai_augment_researcher_author at /pull, where the raw submitted web search excerpt is boldened within the context...", retrieved from web run tool using arguments^2^ on "fco timestamp", url://from-codex.ref_url
+3. "...excerpt from codex.cite_text with some chars before and some chars after **web_search_excerpt number 1** in the list submitted with this value for ktp.ai_augment_place_of_residence at /pull, where the raw submitted web search excerpt is boldened within the context...", retrieved from web run tool using arguments^3^ on "fco timestamp", url://from-codex.ref_url
 4. ..etc
 
-**ktp.ai_augment_search_queries**: 
+**ktp.ai_augment_footnote_arguments**: 
 
 1. raw codex.fc_arguments value corresponding to fco from footnote 1 above
 2. raw codex.fc_arguments value corresponding to fco from footnote 2 above
@@ -435,9 +435,11 @@ For the current hardcoded task, `/pull` must expose the selected researcher's
 The backend, not the client, retains the authoritative source key and draw
 number used after acceptance. Queueing the next task is out of scope.
 
-The `/push` outer key set is exactly `AI_AUGMENT_COLUMNS`. Each field carries
-its raw AI value and every literal web-result excerpt used to justify it;
-every excerpt is paired with the exact URL reported for its result:
+The `/push` outer key set requires the eight non-comment entries from
+`AI_AUGMENT_COLUMNS` and permits the comments entry as the sole optional key.
+Each required field carries its raw AI value and every literal web-result
+excerpt used to justify it; every excerpt is paired with the exact URL reported
+for its result:
 
 ```json
 {
@@ -453,10 +455,12 @@ every excerpt is paired with the exact URL reported for its result:
 }
 ```
 
-The example is abbreviated; a real body must contain all nine current
-AI-augment keys and no others. Every field object has exactly `value` and
-`web_search_excerpts`; every evidence object has exactly `excerpt` and `url`.
-`value` is a non-blank strict text value, and every field has at least one
+The example is abbreviated; a real body must contain all eight non-comment
+AI-augment keys and may contain `ktp.ai_augment_comments`, with no other keys.
+Every required field object has exactly `value` and `web_search_excerpts`;
+every evidence object has exactly `excerpt` and `url`. The optional comments
+object has exactly one non-blank strict-text `value` and never requires or
+accepts web evidence. Every required field has at least one
 non-blank evidence item with no duplicate excerpt/URL pair in that field. Use strict types,
 `extra="forbid"`, and named permissive bounds derived from the bounded request
 body rather than invented web-tool limits. Treat URLs as literal strings for
@@ -491,7 +495,9 @@ blocks.
 For every such output, require exactly one corresponding
 `event_msg/web_search_end` with the same `call_id`. Its `results` must be a
 list, and each indexed `ref_id` must resolve to exactly one `text_result` with
-string domain, snippet, title, and URL fields. Then require exactly one earlier
+string domain, snippet, title, and URL fields. Preserve its optional
+`thumbnail_url` as `codex.ref_thumbnail_url`; it has no downstream use in this
+task. Then require exactly one earlier
 top-level `response_item/function_call` with that `call_id`, a globally unique
 `id` (`fc_id`), valid timestamp, `name="run"`, `namespace="web"`, and arguments
 that decode to one JSON object containing an eligible `search_query`, `open`,
@@ -510,7 +516,7 @@ Put the parsing/section-isolation helpers in detour-local `codex_parse.py`,
 following `docx_parse.py`'s separation between source extraction and
 human-readable Markdown rendering; do not copy that large parser or modify it.
 `api.py` supplies structured rollout/evidence rows, while `codex_parse.py`
-isolates cite sections and renders the Codex footnote/query/comment text shown
+isolates cite sections and renders the Codex footnote/arguments/comment text shown
 in the human sample. Validation lookups and accepted flat-row construction
 remain parameterized DuckDB SQL.
 
@@ -529,12 +535,13 @@ parallel serialization convention:
 - `codex_fco`, three columns: `id`, `codex.fco_timestamp`, `codex.fco_id`;
 - `codex_calls`, five columns: `id`, `codex.call_id`, `codex.fc_id`,
   `codex.fco_id`, `codex.rollout_filename`; and
-- `codex_turn_search`, eight columns: `id`, `codex.ref_id`,
+- `codex_turn_ref`, nine columns: `id`, `codex.ref_id`,
   `codex.call_id`, `codex.ref_domain`, `codex.ref_snippet`,
-  `codex.ref_title`, `codex.ref_url`, `codex.cite_text`.
+  `codex.ref_thumbnail_url`, `codex.ref_title`, `codex.ref_url`,
+  `codex.cite_text`.
 
 `codex.fc_id`, `codex.fco_id`, and `codex.call_id` are individually unique;
-`codex_turn_search` is unique on `(codex.call_id, codex.ref_id)`. Enforce the
+`codex_turn_ref` is unique on `(codex.call_id, codex.ref_id)`. Enforce the
 relationships using the same SQL-first style as step 08, including explicit
 validation where DuckDB does not enforce a desired cross-table relationship.
 Insert all four relations in one transaction and query them back to prove row
@@ -548,7 +555,7 @@ these relations in the configured pipeline database.
 ### DuckDB excerpt and URL validation
 
 For each submitted evidence item, issue one parameterized DuckDB query that
-searches `codex_turn_search` for the exact excerpt as a contiguous substring of
+searches `codex_turn_ref` for the exact excerpt as a contiguous substring of
 `codex.cite_text`. Do not interpolate excerpts or URLs into SQL and do not
 perform a second Python-side rollout scan.
 
@@ -580,7 +587,7 @@ a `codex_output` view whose columns follow this order:
 6. `ktp.ai_augment_attempt_id` and `ktp.ai_augment_session_metadata`;
 7. the eight non-comment `ktp.ai_augment_*` values in
    `AI_AUGMENT_COLUMNS` order;
-8. `ktp.ai_augment_footnotes` and `ktp.ai_augment_search_queries`; and
+8. `ktp.ai_augment_footnotes` and `ktp.ai_augment_footnote_arguments`; and
 9. `ktp.ai_augment_comments`.
 
 Define every detour-owned label and the backing-table/output-view names at the
@@ -600,10 +607,11 @@ data-model modules. This cumulative table is authoritative for downstream
 AI-augmentation rows. Rebuild it in the same transaction that adds an accepted
 output row so a failure cannot expose a partial authoritative state.
 
-### footnotes, queries, and card rendering
+### footnotes, arguments, and card rendering
 
-Assign footnote numbers globally in `AI_AUGMENT_COLUMNS` order and then in each
-field's submitted evidence-list order. The submitted `value` remains raw text;
+Assign footnote numbers globally in the eight non-comment
+`AI_AUGMENT_COLUMNS` entries' order and then in each field's submitted
+evidence-list order. The submitted `value` remains raw text;
 for each footnoted AI value, the detour-local parser/renderer constructs the
 human sample's `**AI-generated text**: "<value>"` presentation and appends the
 resulting superscript marker programmatically after the closing quote. The
@@ -612,17 +620,17 @@ exact position; the detour-local parser/renderer then
 follows `docx_parse.py`'s Markdown conventions to show a named-global amount of
 context before and after the match, bold the submitted excerpt, and add the FCO
 timestamp and result URL. Follow the human sample's footnote suffix exactly:
-`retrieved from web run tool using search query^N^ on ...`, where `N` is the
-same global ordinal used by the corresponding query-list item. Render the
+`retrieved from web run tool using arguments^N^ on ...`, where `N` is the
+same global ordinal used by the corresponding argument-list item. Render the
 comments value through the same helper in the sample's exact
 `- **AI-generated text**: "<comment>" (<attempt timestamp>)` form, rather than
 assembling value, footnote, or comment Markdown in the route.
 
-`ktp.ai_augment_search_queries` is a numbered list aligned one-to-one with the
-footnotes and their `search query^N^` references. Each item contains the raw
+`ktp.ai_augment_footnote_arguments` is a numbered list aligned one-to-one with
+the footnotes and their `arguments^N^` references. Each item contains the raw
 decoded `codex.fc_arguments` JSON for the call supporting that footnote.
 Repetition is intentional when several footnotes come from one call. Keep
-machine-readable provenance in the normalized tables; the footnotes and query
+machine-readable provenance in the normalized tables; the footnotes and argument
 list are the human-readable rendering shown in the sample.
 
 For the selected namekey, load existing xlsx, docx, and ssn innerdicts from the
@@ -657,7 +665,7 @@ innerdict row. Except for the required multiple-match case, return only:
 }
 ```
 
-When an excerpt matches multiple `codex_turn_search` rows, return HTTP 422 with
+When an excerpt matches multiple `codex_turn_ref` rows, return HTTP 422 with
 a concise message containing that exact submitted excerpt and instructing the
 agent to resubmit with an excerpt unique across the searched web pages. This is
 the sole detailed validation response required by the human section; JSON
@@ -686,9 +694,9 @@ Keep the existing appendwatch regression suite and add focused tests for:
   archives, and custom-mount connection settings;
 - copied-report parsing for nested exact paths, OK, compromised ancestors or
   rollout, global degradation, missing/duplicate paths, and malformed trees;
-- `DOCX_COLUMNS`/`AI_AUGMENT_COLUMNS` mapping, `/pull` identity, strict nine-
-  field value/evidence/URL models, absent or duplicate evidence, and exact
-  Unicode/whitespace/URL behavior;
+- `DOCX_COLUMNS`/`AI_AUGMENT_COLUMNS` mapping, `/pull` identity, strict eight-
+  field value/evidence/URL models, the optional evidence-free comments model,
+  absent or duplicate evidence, and exact Unicode/whitespace/URL behavior;
 - unique session metadata and reconstructed basename, physical line counting,
   one tolerated incomplete trailing record, and conflicting cumulative-prefix
   rows failing closed;
@@ -705,7 +713,7 @@ Keep the existing appendwatch regression suite and add focused tests for:
   the same rollout filename, distinct line-count fragments and attempt IDs,
   plus exact common-contract `codex_innerdicts` JSONL ordering;
 - exact AI-generated value/comment wrappers, footnote numbering/context/bold
-  excerpt/web-run wording/query cross-reference/FCO time/URL, aligned raw query lists,
+  excerpt/web-run wording/argument cross-reference/FCO time/URL, aligned raw argument lists,
   xlsx -> Codex -> docx -> ssn card order,
   TXT and DOCX ZIPs, archive hashes, two-line success NDJSON, and no accepted
   artifacts on rejection; and
@@ -720,5 +728,4 @@ Use mocks/fakes for host SCP and narrow provisioning checks, plus a small
 sanitized direct-web rollout fixture. Reuse the current E2E helper/flow as much
 as possible to reduce review fatigue. Keep existing appendwatch tests as the
 monitoring regression proof rather than adding decorative source-text tests.
-This specification task itself changes only `SPEC.md` and `WORK.md`;
-production code and tests are for the later implementation task.
+Implement production code and tests only within the surgical boundary above.

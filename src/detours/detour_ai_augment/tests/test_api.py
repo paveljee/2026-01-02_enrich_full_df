@@ -1,107 +1,461 @@
 from __future__ import annotations
 
 import hashlib
-import html
 import json
-from collections.abc import Mapping
+import re
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 from typing import Any
+from zipfile import ZipFile
 
+import duckdb
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from src.detours.detour_ai_augment.src.backend import api
+from src.detours.detour_ai_augment.src.backend import api, codex_parse
+from src.helpers.config import PipelineConfig
 
-ROLLOUT_GUEST_PATH = "/home/ai/.codex/sessions/2026/07/31/rollout-chat.jsonl"
-ROLLOUT_RELATIVE_PATH = PurePosixPath("2026/07/31/rollout-chat.jsonl")
-EVIDENCE_TEXT = "Professor Example holds the Example Chair."
-SAMPLE_SESSIONS = (
-    Path(__file__).resolve().parents[1]
+REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
+CONFIG_PATH = REPOSITORY_ROOT / "config.repl.json"
+SOURCE_DB_PATH = REPOSITORY_ROOT / "data" / "scisci_process.duckdb"
+SOURCE_JSONL_PATH = REPOSITORY_ROOT / "tmp" / "sheikh.jsonl"
+REFERENCE_DOCX_PATH = REPOSITORY_ROOT / "resources" / "pandoc-custom-reference.docx"
+JULY_ROLLOUT_RELATIVE_PATH = PurePosixPath(
+    "2026/07/27/rollout-2026-07-27T12-10-36-019fa457-aac5-7652-8669-9d571206e7cb.jsonl"
+)
+JULY_ROLLOUT_PATH = (
+    REPOSITORY_ROOT
+    / "src"
+    / "detours"
+    / "detour_ai_augment"
     / "data"
     / "sample_run"
     / ".codex"
     / "sessions"
+    / Path(*JULY_ROLLOUT_RELATIVE_PATH.parts)
+)
+JULY_ROLLOUT_GUEST_PATH = f"{api.CODEX_SESSIONS_ROOT}/{JULY_ROLLOUT_RELATIVE_PATH}"
+JULY_ROLLOUT_FILENAME = JULY_ROLLOUT_RELATIVE_PATH.name
+JULY_ROLLOUT_LINE_COUNT = 107
+JULY_SESSION_ID = "019fa457-aac5-7652-8669-9d571206e7cb"
+JULY_FC_COUNT = 9
+JULY_FCO_COUNT = 9
+JULY_CALL_COUNT = 9
+JULY_REF_COUNT = 155
+JULY_THUMBNAIL_REF_IDS = (
+    "turn0search3",
+    "turn0search17",
+    "turn0search18",
+    "turn0search20",
+    "turn0search24",
+)
+
+TEST_ROLLOUT_GUEST_PATH = "/home/ai/.codex/sessions/2026/07/31/rollout-chat.jsonl"
+TEST_ROLLOUT_RELATIVE_PATH = PurePosixPath("2026/07/31/rollout-chat.jsonl")
+TEST_TIMEZONE = "America/Toronto"
+TEST_SESSION_ID = "session-test"
+TEST_SESSION_TIMESTAMP = "2026-07-31T16:10:36.000Z"
+TEST_ROLLOUT_FILENAME = "rollout-2026-07-31T12-10-36-session-test.jsonl"
+TEST_CALL_ID = "call_test"
+TEST_FC_ID = "fc_test"
+TEST_FCO_ID = "fco_test"
+TEST_REF_ID = "turn0search0"
+TEST_EXCERPT = "Professor Example holds the Example Chair."
+TEST_URL = "https://example.test/profile"
+TEST_SOURCE_KEY = '{"ktp.first_name": "A.", "ktp.last_name": "Sheikh"}'
+
+OFFICERS_URL = (
+    "https://find-and-update.company-information.service.gov.uk/company/SC621293/officers"
+)
+COMPANY_URL = "https://find-and-update.company-information.service.gov.uk/company/SC621293"
+COMMONWEALTH_URL = "https://www.commonwealthfund.org/person/aziz-sheikh"
+OXFORD_BDI_URL = "https://www.bdi.ox.ac.uk/Team/aziz-sheikh"
+NIHR_URL = (
+    "https://www.spcr.nihr.ac.uk/news/congratulations-to-the-new-nihr-senior-investigators-2026"
+)
+
+CALL_ARGUMENTS_TURN_2 = (
+    '{"search_query":[{"q":"\\"Aziz Sheikh\\" \\"born\\" professor Edinburgh"},'
+    '{"q":"\\"Aziz Sheikh\\" \\"1968\\" professor"},'
+    '{"q":"\\"Aziz Sheikh\\" \\"1967\\" Edinburgh professor"},'
+    '{"q":"\\"Aziz Sheikh\\" age professor Oxford"}],"response_length":"long"}'
+)
+CALL_ARGUMENTS_TURN_4 = (
+    '{"search_query":[{"q":"\\"Aziz Sheikh\\" \\"Master\'s in Epidemiology\\""},'
+    '{"q":"\\"Aziz Sheikh\\" \\"Masters in Epidemiology\\""},'
+    '{"q":"\\"Aziz Sheikh\\" \\"University College London\\" '
+    '\\"London School of Hygiene\\" MD"},'
+    '{"q":"\\"Aziz Sheikh\\" BSc MBBS MSc MD education"}],'
+    '"response_length":"long"}'
+)
+CALL_ARGUMENTS_TURN_6 = '{"open":[{"ref_id":"turn5search0"}],"response_length":"long"}'
+CALL_ARGUMENTS_TURN_7 = '{"click":[{"ref_id":"turn6view0","id":10}],"response_length":"long"}'
+CALL_ARGUMENTS_TURN_8 = (
+    '{"search_query":[{"q":"site:nam.edu \\"Aziz Sheikh\\" elected National '
+    'Academy of Medicine 2024"},{"q":"site:ed.ac.uk \\"Aziz Sheikh\\" '
+    'National Academy of Medicine 2024"},{"q":"site:nihr.ac.uk '
+    '\\"Aziz Sheikh\\" Senior Investigator"},{"q":"site:hdr.uk '
+    '\\"Aziz Sheikh\\" Strategic Adviser Health Care Policy"}],'
+    '"response_length":"long"}'
 )
 
 
-def rollout_record(value: Mapping[str, object], line_number: int) -> api.RolloutRecord:
+@dataclass(frozen=True)
+class ExpectedEvidence:
+    column: str
+    value: str
+    excerpt: str
+    url: str
+    ref_id: str
+    call_id: str
+    fc_id: str
+    fco_id: str
+    fco_timestamp: str
+    arguments_json: str
+
+
+EXPECTED_EVIDENCE = (
+    ExpectedEvidence(
+        api.KTP_AI_AUGMENT_RESEARCHER_AUTHOR_COL,
+        "Aziz Sheikh",
+        "SHEIKH, Aziz Ul Haque",
+        OFFICERS_URL,
+        "turn7view0",
+        "call_SzOsv4AVuruWWBbM0oy5i4M0",
+        "fc_03938c1e0667a7cc016a6783752e2481959e7e365e71c60b20",
+        "fco_019fa459-883b-7480-b82c-b775520d1401",
+        "2026-07-27T16:12:38.843Z",
+        CALL_ARGUMENTS_TURN_7,
+    ),
+    ExpectedEvidence(
+        api.KTP_AI_AUGMENT_PLACE_OF_RESIDENCE_COL,
+        "Scotland",
+        "Country of residence\nL75:      Scotland",
+        OFFICERS_URL,
+        "turn7view0",
+        "call_SzOsv4AVuruWWBbM0oy5i4M0",
+        "fc_03938c1e0667a7cc016a6783752e2481959e7e365e71c60b20",
+        "fco_019fa459-883b-7480-b82c-b775520d1401",
+        "2026-07-27T16:12:38.843Z",
+        CALL_ARGUMENTS_TURN_7,
+    ),
+    ExpectedEvidence(
+        api.KTP_AI_AUGMENT_GENDER_COL,
+        "Male",
+        "Nationality\nL72:      British",
+        OFFICERS_URL,
+        "turn7view0",
+        "call_SzOsv4AVuruWWBbM0oy5i4M0",
+        "fc_03938c1e0667a7cc016a6783752e2481959e7e365e71c60b20",
+        "fco_019fa459-883b-7480-b82c-b775520d1401",
+        "2026-07-27T16:12:38.843Z",
+        CALL_ARGUMENTS_TURN_7,
+    ),
+    ExpectedEvidence(
+        api.KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL,
+        "Age derived from a December 1968 birth date",
+        "Date of birth\nL66:      December 1968",
+        OFFICERS_URL,
+        "turn7view0",
+        "call_SzOsv4AVuruWWBbM0oy5i4M0",
+        "fc_03938c1e0667a7cc016a6783752e2481959e7e365e71c60b20",
+        "fco_019fa459-883b-7480-b82c-b775520d1401",
+        "2026-07-27T16:12:38.843Z",
+        CALL_ARGUMENTS_TURN_7,
+    ),
+    ExpectedEvidence(
+        api.KTP_AI_AUGMENT_EDUCATION_COL,
+        "MSc epidemiology and MD",
+        (
+            "Sheikh holds a master's of science in epidemiology from the London "
+            "School of Hygiene & Tropical Medicine, and a M.D. from the University "
+            "of London."
+        ),
+        COMMONWEALTH_URL,
+        "turn4search0",
+        "call_S7SrLlbSPHIujjScm4LXYt2X",
+        "fc_03938c1e0667a7cc016a67836064b081958a409fea02229e26",
+        "fco_019fa459-3dda-7ea0-8d5c-2351036f67f5",
+        "2026-07-27T16:12:19.802Z",
+        CALL_ARGUMENTS_TURN_4,
+    ),
+    ExpectedEvidence(
+        api.KTP_AI_AUGMENT_ACADEMIC_POSITIONS_COL,
+        "Oxford Big Data Institute",
+        "Aziz Sheikh — Oxford Big Data Institute (https://www.bdi.ox.ac.uk/Team/aziz-sheikh)",
+        OXFORD_BDI_URL,
+        "turn2search0",
+        "call_Tv7D3tbhKCOUBdz2xfruMIIY",
+        "fc_03938c1e0667a7cc016a678326af18819587231df3dd08c37d",
+        "fco_019fa458-5973-77a1-93a4-0c27355f8eb8",
+        "2026-07-27T16:11:21.331Z",
+        CALL_ARGUMENTS_TURN_2,
+    ),
+    ExpectedEvidence(
+        api.KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL,
+        "NIHR Senior Investigator",
+        (
+            "The NIHR has announced its 2026 cohort of Senior Investigators, "
+            "recognising outstanding leaders in health and care research."
+        ),
+        NIHR_URL,
+        "turn8search0",
+        "call_KLTzFeZeazG7AjjhDp42wUtj",
+        "fc_03938c1e0667a7cc016a67837ae26881958bb5e280a116e970",
+        "fco_019fa459-b0f8-79e1-88f4-535744154d8e",
+        "2026-07-27T16:12:49.272Z",
+        CALL_ARGUMENTS_TURN_8,
+    ),
+    ExpectedEvidence(
+        api.KTP_AI_AUGMENT_LINKS_COL,
+        COMPANY_URL,
+        'Source: open({"ref_id":"turn5search0","lineno":null}); Total lines: 92',
+        COMPANY_URL,
+        "turn6view0",
+        "call_dWCc1wam5TvIfxwvI1o6RPEL",
+        "fc_03938c1e0667a7cc016a678370815881958bcee4380dc8ed61",
+        "fco_019fa459-750e-7920-b0cf-ef211333113f",
+        "2026-07-27T16:12:33.934Z",
+        CALL_ARGUMENTS_TURN_6,
+    ),
+)
+EXPECTED_COMMENT = "OpenAlex records may contain identity conflation."
+
+EXPECTED_CALL_LINKS = (
+    (
+        "call_JrCO9EEdFFwnncEyo0Tky0N3",
+        "fc_03938c1e0667a7cc016a67831675848195b35c40d330cd04b2",
+        "fco_019fa458-1fef-7a43-9f53-7d987861ad64",
+    ),
+    (
+        "call_C9nCCxE2YU5zrv9kI6ewtswG",
+        "fc_03938c1e0667a7cc016a67831c12b08195ae364f3f129f750c",
+        "fco_019fa458-3b72-7a83-8874-2b9e174b5aed",
+    ),
+    (
+        "call_Tv7D3tbhKCOUBdz2xfruMIIY",
+        "fc_03938c1e0667a7cc016a678326af18819587231df3dd08c37d",
+        "fco_019fa458-5973-77a1-93a4-0c27355f8eb8",
+    ),
+    (
+        "call_YxDU7O0lAHezJU2HMRaJAd0O",
+        "fc_03938c1e0667a7cc016a678352e1c88195bee04fa6259f5b3c",
+        "fco_019fa459-06a6-7a73-9cb5-9e75d35f47c0",
+    ),
+    (
+        "call_S7SrLlbSPHIujjScm4LXYt2X",
+        "fc_03938c1e0667a7cc016a67836064b081958a409fea02229e26",
+        "fco_019fa459-3dda-7ea0-8d5c-2351036f67f5",
+    ),
+    (
+        "call_3OgJqG5RIvAQxxZZmTZc7puu",
+        "fc_03938c1e0667a7cc016a67836ab04081958d8880d3cb1990a0",
+        "fco_019fa459-6641-7d53-9347-4c7d663d5003",
+    ),
+    (
+        "call_dWCc1wam5TvIfxwvI1o6RPEL",
+        "fc_03938c1e0667a7cc016a678370815881958bcee4380dc8ed61",
+        "fco_019fa459-750e-7920-b0cf-ef211333113f",
+    ),
+    (
+        "call_SzOsv4AVuruWWBbM0oy5i4M0",
+        "fc_03938c1e0667a7cc016a6783752e2481959e7e365e71c60b20",
+        "fco_019fa459-883b-7480-b82c-b775520d1401",
+    ),
+    (
+        "call_KLTzFeZeazG7AjjhDp42wUtj",
+        "fc_03938c1e0667a7cc016a67837ae26881958bb5e280a116e970",
+        "fco_019fa459-b0f8-79e1-88f4-535744154d8e",
+    ),
+)
+
+EXPECTED_TABLE_COLUMNS = {
+    api.CODEX_FC_TABLE: (
+        "id",
+        "codex.fc_timestamp",
+        "codex.fc_id",
+        "codex.fc_name",
+        "codex.fc_namespace",
+        "codex.fc_arguments",
+    ),
+    api.CODEX_FCO_TABLE: ("id", "codex.fco_timestamp", "codex.fco_id"),
+    api.CODEX_CALLS_TABLE: (
+        "id",
+        "codex.call_id",
+        "codex.fc_id",
+        "codex.fco_id",
+        "codex.rollout_filename",
+    ),
+    api.CODEX_TURN_REF_TABLE: (
+        "id",
+        "codex.ref_id",
+        "codex.call_id",
+        "codex.ref_domain",
+        "codex.ref_snippet",
+        "codex.ref_thumbnail_url",
+        "codex.ref_title",
+        "codex.ref_url",
+        "codex.cite_text",
+    ),
+}
+
+
+# File access helpers are intentionally centralized for fixture auditability.
+def read_bytes(path: Path) -> bytes:
+    return path.read_bytes()
+
+
+def read_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
+
+
+def write_bytes(path: Path, value: bytes) -> None:
+    path.write_bytes(value)
+
+
+def write_text(path: Path, value: str) -> None:
+    path.write_text(value, encoding="utf-8")
+
+
+def read_json(path: Path) -> dict[str, Any]:
+    value = json.loads(read_text(path))
+    assert isinstance(value, dict)
+    return value
+
+
+def file_signature(path: Path) -> tuple[int, int, str]:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(api.ARCHIVE_HASH_CHUNK_BYTES):
+            digest.update(chunk)
+    stat = path.stat()
+    return stat.st_size, stat.st_mtime_ns, digest.hexdigest()
+
+
+def read_zip_text(path: Path) -> str:
+    with ZipFile(path) as archive:
+        names = archive.namelist()
+        assert names
+        return "\n".join(archive.read(name).decode("utf-8") for name in names)
+
+
+def zip_member_names(path: Path) -> tuple[str, ...]:
+    with ZipFile(path) as archive:
+        return tuple(archive.namelist())
+
+
+def open_readonly_database(path: Path) -> duckdb.DuckDBPyConnection:
+    return duckdb.connect(str(path), read_only=True)
+
+
+def rollout_record(value: dict[str, object], line_number: int) -> api.RolloutRecord:
     raw_line = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode() + b"\n"
     return api.RolloutRecord(
         line_number=line_number,
         line_sha256=hashlib.sha256(raw_line).hexdigest(),
-        value=dict(value),
+        value=value,
     )
 
 
-def web_records(
-    action: str = "search_query",
-    *,
-    call_id: str = "call_example",
-    output: object | None = None,
-) -> tuple[api.RolloutRecord, ...]:
-    call = {
-        "type": "response_item",
-        "payload": {
-            "type": "function_call",
-            "namespace": "web",
-            "name": "run",
-            "arguments": json.dumps({action: [{"q": "example"}]}),
-            "call_id": call_id,
+def minimal_rollout_records(action: str = "search_query") -> tuple[api.RolloutRecord, ...]:
+    arguments = {
+        "search_query": [{"q": "example"}],
+        "open": [{"ref_id": TEST_REF_ID}],
+        "click": [{"ref_id": TEST_REF_ID, "id": 1}],
+    }[action]
+    cite_text = (
+        f"Result\n{api.CODEX_CITE_MARKER_PREFIX}{TEST_REF_ID}"
+        f"{api.CODEX_CITE_MARKER_SUFFIX}\n{TEST_EXCERPT}"
+    )
+    values: tuple[dict[str, object], ...] = (
+        {
+            "timestamp": TEST_SESSION_TIMESTAMP,
+            "type": "session_meta",
+            "payload": {
+                "session_id": TEST_SESSION_ID,
+                "timestamp": TEST_SESSION_TIMESTAMP,
+                "originator": "codex_vscode",
+                "source": "vscode",
+                "cli_version": "test",
+                "model_provider": "openai",
+            },
         },
-    }
-    event = {
-        "type": "event_msg",
-        "payload": {
-            "type": "web_search_end",
-            "call_id": call_id,
-            "query": "example",
+        {
+            "timestamp": TEST_SESSION_TIMESTAMP,
+            "type": "turn_context",
+            "payload": {"model": "test-model", "effort": "high"},
         },
-    }
-    result = {
-        "type": "response_item",
-        "payload": {
-            "type": "function_call_output",
-            "call_id": call_id,
-            "output": (
-                [{"type": "input_text", "text": EVIDENCE_TEXT}]
-                if output is None
-                else output
-            ),
+        {
+            "timestamp": "2026-07-31T16:11:00.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "id": TEST_FC_ID,
+                "name": "run",
+                "namespace": "web",
+                "arguments": json.dumps(
+                    {action: arguments, "response_length": "long"},
+                    separators=(",", ":"),
+                ),
+                "call_id": TEST_CALL_ID,
+            },
         },
-    }
-    return (
-        rollout_record(call, 1),
-        rollout_record(event, 2),
-        rollout_record(result, 3),
+        {
+            "timestamp": "2026-07-31T16:11:01.000Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "web_search_end",
+                "call_id": TEST_CALL_ID,
+                "results": [
+                    {
+                        "type": "text_result",
+                        "domain": "example.test",
+                        "ref_id": TEST_REF_ID,
+                        "snippet": "Example snippet",
+                        "thumbnail_url": "https://example.test/thumbnail.png",
+                        "title": "Example title",
+                        "url": TEST_URL,
+                    }
+                ],
+            },
+        },
+        {
+            "timestamp": "2026-07-31T16:11:02.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "id": TEST_FCO_ID,
+                "call_id": TEST_CALL_ID,
+                "output": [{"type": "input_text", "text": cite_text}],
+            },
+        },
+    )
+    return tuple(
+        rollout_record(value, line_number) for line_number, value in enumerate(values, start=1)
     )
 
 
-def submission_body(excerpt: str = EVIDENCE_TEXT) -> dict[str, object]:
-    return {
-        column: {
-            "value": f"answer for {column}",
-            "web_search_excerpts": [excerpt],
+def build_test_index(action: str = "search_query") -> api.RolloutIndex:
+    return api.build_rollout_index(
+        minimal_rollout_records(action),
+        timezone_name=TEST_TIMEZONE,
+        configured_rollout_basename=TEST_ROLLOUT_FILENAME,
+    )
+
+
+def valid_submission_body(*, include_comments: bool = True) -> dict[str, object]:
+    body: dict[str, object] = {
+        expected.column: {
+            "value": expected.value,
+            "web_search_excerpts": [{"excerpt": expected.excerpt, "url": expected.url}],
         }
-        for column in api.COLUMNS
+        for expected in EXPECTED_EVIDENCE
     }
-
-
-def valid_report() -> str:
-    return (
-        ".\n"
-        "└── 2026/\n"
-        "    └── 07/\n"
-        "        └── 31/\n"
-        f"            └── {api.APPENDWATCH_OK_PREFIX}rollout-chat.jsonl\n"
-    )
-
-
-def bundled_sample_rollout() -> Path:
-    rollout_paths = tuple(SAMPLE_SESSIONS.rglob("rollout-*.jsonl"))
-    assert len(rollout_paths) == 1
-    return rollout_paths[0]
+    if include_comments:
+        body[api.KTP_AI_AUGMENT_COMMENTS_COL] = {"value": EXPECTED_COMMENT}
+    return body
 
 
 def report_for_rollout(relative_path: PurePosixPath) -> str:
@@ -110,417 +464,393 @@ def report_for_rollout(relative_path: PurePosixPath) -> str:
         prefix = "    " * depth + "└── "
         lines.append(
             prefix
-            + (
-                f"{api.APPENDWATCH_OK_PREFIX}{part}"
-                if part == relative_path.name
-                else f"{part}/"
-            )
+            + (f"{api.APPENDWATCH_OK_PREFIX}{part}" if part == relative_path.name else f"{part}/")
         )
     return "\n".join(lines) + "\n"
 
 
-def configured(
+def runtime_for_test(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> api.PushConfiguration:
-    report = tmp_path / "appendwatch-tree.txt"
-    identity = tmp_path / "id_ed25519"
-    known_hosts = tmp_path / "known_hosts"
-    lima_config = tmp_path / "ssh.config"
-    report.write_text(valid_report(), encoding="utf-8")
-    for path in (identity, known_hosts, lima_config):
-        path.write_text("fixture\n", encoding="utf-8")
-
-    monkeypatch.setattr(api, "ROLLOUT_JSONL", ROLLOUT_GUEST_PATH)
-    monkeypatch.setattr(api, "APPENDWATCH_REPORT", report)
-    monkeypatch.setattr(api, "AIVM_IDENTITY_FILE", identity)
-    monkeypatch.setattr(api, "AIVM_KNOWN_HOSTS_FILE", known_hosts)
-    monkeypatch.setattr(api, "LIMA_SSH_CONFIG_PATH", lima_config)
-    return api.push_configuration()
-
-
-@pytest.mark.parametrize("action", sorted(api.ELIGIBLE_WEB_ACTIONS))
-def test_search_open_and_click_are_eligible(action: str) -> None:
-    index = api.build_evidence_index(web_records(action))
-
-    matches = index.matches("Example Chair")
-
-    assert len(matches) == 1
-    assert matches[0].call_id == "call_example"
-    assert matches[0].events[0].value["payload"]["type"] == "web_search_end"  # type: ignore[index]
-
-
-def test_bundled_sample_rollout_uses_supported_real_web_schema() -> None:
-    records = api.parse_rollout(bundled_sample_rollout())
-    index = api.build_evidence_index(records)
-    actions: set[str] = set()
-
-    assert records
-    assert index.pairs
-    for pair in index.pairs:
-        payload = pair.call.value["payload"]
-        assert isinstance(payload, dict)
-        arguments = payload["arguments"]
-        assert isinstance(arguments, str)
-        actions.update(set(json.loads(arguments)) & api.ELIGIBLE_WEB_ACTIONS)
-        complete_text = next(text for text in pair.text_blocks if text)
-        assert pair in index.matches(complete_text)
-
-    assert actions == api.ELIGIBLE_WEB_ACTIONS
-
-
-def independently_link_sample_web_pairs(sample_rollout: Path) -> tuple[SimpleNamespace, ...]:
-    calls: list[SimpleNamespace] = []
-    outputs: dict[str, list[SimpleNamespace]] = {}
-    events: dict[str, list[SimpleNamespace]] = {}
-
-    for line_number, raw_line in enumerate(
-        sample_rollout.read_bytes().splitlines(keepends=True),
-        start=1,
-    ):
-        value = json.loads(raw_line)
-        assert isinstance(value, dict)
-        record = SimpleNamespace(
-            line_number=line_number,
-            line_sha256=hashlib.sha256(raw_line).hexdigest(),
-            value=value,
-        )
-        payload = value.get("payload")
-        if not isinstance(payload, dict):
-            continue
-        if (
-            value.get("type") == "response_item"
-            and payload.get("type") == "function_call"
-            and payload.get("namespace") == "web"
-            and payload.get("name") == "run"
-        ):
-            call_id = payload.get("call_id")
-            arguments = payload.get("arguments")
-            assert isinstance(call_id, str) and call_id
-            assert isinstance(arguments, str)
-            decoded_arguments = json.loads(arguments)
-            assert isinstance(decoded_arguments, dict)
-            if set(decoded_arguments) & api.ELIGIBLE_WEB_ACTIONS:
-                calls.append(SimpleNamespace(call_id=call_id, record=record))
-        elif (
-            value.get("type") == "response_item"
-            and payload.get("type") == "function_call_output"
-        ):
-            call_id = payload.get("call_id")
-            assert isinstance(call_id, str) and call_id
-            outputs.setdefault(call_id, []).append(record)
-        elif value.get("type") == "event_msg" and payload.get("type") == "web_search_end":
-            call_id = payload.get("call_id")
-            assert isinstance(call_id, str) and call_id
-            events.setdefault(call_id, []).append(record)
-
-    pairs: list[SimpleNamespace] = []
-    for call in calls:
-        matching_outputs = outputs[call.call_id]
-        assert len(matching_outputs) == 1
-        output_record = matching_outputs[0]
-        output_payload = output_record.value["payload"]["output"]
-        if isinstance(output_payload, str):
-            text_blocks = (output_payload,)
-        else:
-            assert isinstance(output_payload, list) and output_payload
-            assert all(
-                isinstance(block, dict)
-                and block.get("type") == "input_text"
-                and isinstance(block.get("text"), str)
-                for block in output_payload
-            )
-            text_blocks = tuple(block["text"] for block in output_payload)
-        pairs.append(
-            SimpleNamespace(
-                call_id=call.call_id,
-                call=call.record,
-                output=output_record,
-                events=tuple(events.get(call.call_id, [])),
-                text_blocks=text_blocks,
-            )
-        )
-    return tuple(pairs)
+    *,
+    output_format: str = "txt",
+) -> api.RuntimeConfiguration:
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    pipeline = PipelineConfig.from_json(CONFIG_PATH).model_copy(
+        update={
+            "db_file": SOURCE_DB_PATH,
+            "output_dir": output_dir,
+            "output_format": output_format,
+            "pandoc_reference_docx": REFERENCE_DOCX_PATH,
+        }
+    )
+    return api.RuntimeConfiguration(
+        pipeline=pipeline,
+        detour_db_path=tmp_path / "detour_ai_augment.duckdb",
+    )
 
 
 def prepare_real_sample_push(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    output_format: str = "txt",
 ) -> SimpleNamespace:
-    sample_rollout = bundled_sample_rollout()
-    host_relative = sample_rollout.relative_to(SAMPLE_SESSIONS)
-    rollout_relative = PurePosixPath(*host_relative.parts)
-    rollout_guest_path = f"{api.CODEX_SESSIONS_ROOT}/{rollout_relative}"
-    deployment = tmp_path / "deployment"
-    deployment.mkdir()
-    report = deployment / "appendwatch-tree.txt"
-    identity = deployment / "id_ed25519"
-    known_hosts = deployment / "known_hosts"
-    lima_config = deployment / "ssh.config"
-    report.write_text(report_for_rollout(rollout_relative), encoding="utf-8")
-    for path in (identity, known_hosts, lima_config):
-        path.write_text("fixture\n", encoding="utf-8")
+    deployment_dir = tmp_path / "deployment"
+    attempts_dir = tmp_path / "attempts"
+    deployment_dir.mkdir()
+    report_path = deployment_dir / "appendwatch-tree.txt"
+    identity_path = deployment_dir / "id_ed25519"
+    known_hosts_path = deployment_dir / "known_hosts"
+    lima_config_path = deployment_dir / "ssh.config"
+    write_text(report_path, report_for_rollout(JULY_ROLLOUT_RELATIVE_PATH))
+    for path in (identity_path, known_hosts_path, lima_config_path):
+        write_text(path, "fixture\n")
 
-    attempts = tmp_path / "attempts"
-    monkeypatch.setattr(api, "ROLLOUT_JSONL", rollout_guest_path)
-    monkeypatch.setattr(api, "APPENDWATCH_REPORT", report)
-    monkeypatch.setattr(api, "AIVM_IDENTITY_FILE", identity)
-    monkeypatch.setattr(api, "AIVM_KNOWN_HOSTS_FILE", known_hosts)
-    monkeypatch.setattr(api, "LIMA_SSH_CONFIG_PATH", lima_config)
-    monkeypatch.setattr(api, "ATTEMPTS_DIR", attempts)
+    runtime = runtime_for_test(tmp_path, output_format=output_format)
+    events: list[str] = []
+    rendered_cards: list[str] = []
+    monkeypatch.setattr(api, "ROLLOUT_JSONL", JULY_ROLLOUT_GUEST_PATH)
+    monkeypatch.setattr(api, "APPENDWATCH_REPORT", report_path)
+    monkeypatch.setattr(api, "AIVM_IDENTITY_FILE", identity_path)
+    monkeypatch.setattr(api, "AIVM_KNOWN_HOSTS_FILE", known_hosts_path)
+    monkeypatch.setattr(api, "LIMA_SSH_CONFIG_PATH", lima_config_path)
+    monkeypatch.setattr(api, "AIVM_INSTANCE", "aivm")
+    monkeypatch.setattr(api, "AIVM_USER", "ai")
+    monkeypatch.setattr(api, "AIVM_SSH_PORT", "22022")
+    monkeypatch.setattr(api, "ATTEMPTS_DIR", attempts_dir)
+    monkeypatch.setattr(api, "SOURCE_FILE", SOURCE_JSONL_PATH)
+    monkeypatch.setattr(api, "runtime_configuration", lambda: runtime)
 
-    def fake_scp(command: list[str], **_kwargs: object) -> None:
-        assert command[-2].endswith(f":{rollout_guest_path}")
-        Path(command[-1]).write_bytes(sample_rollout.read_bytes())
+    def fake_subprocess(command: list[str], **_kwargs: object) -> None:
+        if command[0] == "scp":
+            events.append("scp")
+            assert command[-2] == f"aivm-ai:{JULY_ROLLOUT_GUEST_PATH}"
+            write_bytes(Path(command[-1]), read_bytes(JULY_ROLLOUT_PATH))
+            return
+        assert command[0] == "pandoc"
+        output_path = Path(command[command.index("-o") + 1])
+        write_bytes(output_path, b"test DOCX renderer output")
 
-    monkeypatch.setattr(api.subprocess, "run", fake_scp)
+    monkeypatch.setattr(api.subprocess, "run", fake_subprocess)
 
-    expected_pairs = independently_link_sample_web_pairs(sample_rollout)
-    assert len(expected_pairs) == len(api.COLUMNS)
-    payload: dict[str, object] = {}
-    expected_evidence: dict[str, tuple[str, SimpleNamespace]] = {}
-    for column, pair in zip(api.COLUMNS, expected_pairs, strict=True):
-        candidates = [
-            line
-            for text_block in pair.text_blocks
-            for line in text_block.splitlines()
-            if line.strip()
-        ] + list(pair.text_blocks)
-        excerpt = next(
-            candidate
-            for candidate in candidates
-            if tuple(
-                candidate_pair
-                for candidate_pair in expected_pairs
-                if any(candidate in text for text in candidate_pair.text_blocks)
-            )
-            == (pair,)
-        )
-        payload[column] = {
-            "value": f"synthetic answer for {column}",
-            "web_search_excerpts": [excerpt],
-        }
-        expected_evidence[column] = (excerpt, pair)
+    original_copy_report = api.copy_appendwatch_report
+    original_status_check = api.parse_appendwatch_report
+    original_persist = api.persist_rollout_index
+    original_model_validate_json = api.Submission.model_validate_json
+    original_validate_evidence = api.validate_submission_evidence
+    original_append_output = api.append_codex_output
+    original_ground_truth = api.ground_truth
+    original_write_cards_zip = api.write_cards_zip
 
-    eligible_lines = {
-        record.line_number
-        for pair in expected_pairs
-        for record in (pair.call, pair.output, *pair.events)
-    }
-    unrelated_record = next(
-        SimpleNamespace(
-            line_number=line_number,
-            line_sha256=hashlib.sha256(raw_line).hexdigest(),
-            value=value,
-        )
-        for line_number, raw_line in enumerate(
-            sample_rollout.read_bytes().splitlines(keepends=True),
-            start=1,
-        )
-        if (value := json.loads(raw_line)).get("type") == "response_item"
-        and line_number not in eligible_lines
+    def tracked_copy_report(*args: object, **kwargs: object) -> api.ArchivedFile:
+        events.append("status_copy")
+        return original_copy_report(*args, **kwargs)  # type: ignore[arg-type]
+
+    def tracked_status_check(*args: object, **kwargs: object) -> None:
+        events.append("status_check")
+        original_status_check(*args, **kwargs)  # type: ignore[arg-type]
+
+    def tracked_persist(*args: object, **kwargs: object) -> None:
+        events.append("rollout_index")
+        original_persist(*args, **kwargs)  # type: ignore[arg-type]
+
+    def tracked_model_validate_json(
+        _cls: type[api.Submission],
+        value: str | bytes | bytearray,
+        *args: object,
+        **kwargs: object,
+    ) -> api.Submission:
+        events.append("pydantic")
+        return original_model_validate_json(value, *args, **kwargs)
+
+    def tracked_validate_evidence(*args: object, **kwargs: object) -> api.ValidatedEvidence:
+        events.append("evidence")
+        return original_validate_evidence(*args, **kwargs)  # type: ignore[arg-type]
+
+    def tracked_append_output(*args: object, **kwargs: object) -> None:
+        events.append("output")
+        original_append_output(*args, **kwargs)  # type: ignore[arg-type]
+
+    def tracked_ground_truth() -> dict[str, object]:
+        events.append("ground_truth")
+        return original_ground_truth()
+
+    def tracked_write_cards_zip(*args: object, **kwargs: object) -> None:
+        events.append("card")
+        cards = args[0]
+        assert isinstance(cards, dict)
+        rendered_cards.extend(cards.values())
+        original_write_cards_zip(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(api, "copy_appendwatch_report", tracked_copy_report)
+    monkeypatch.setattr(api, "parse_appendwatch_report", tracked_status_check)
+    monkeypatch.setattr(api, "persist_rollout_index", tracked_persist)
+    monkeypatch.setattr(
+        api.Submission,
+        "model_validate_json",
+        classmethod(tracked_model_validate_json),
     )
+    monkeypatch.setattr(api, "validate_submission_evidence", tracked_validate_evidence)
+    monkeypatch.setattr(api, "append_codex_output", tracked_append_output)
+    monkeypatch.setattr(api, "ground_truth", tracked_ground_truth)
+    monkeypatch.setattr(api, "write_cards_zip", tracked_write_cards_zip)
 
     return SimpleNamespace(
         client=TestClient(api.app),
-        payload=payload,
-        attempts=attempts,
-        sample_rollout=sample_rollout,
-        report=report,
-        expected_evidence=expected_evidence,
-        unrelated_record=unrelated_record,
-        truth={column: f"synthetic truth for {column}" for column in api.COLUMNS},
+        payload=valid_submission_body(),
+        runtime=runtime,
+        attempts_dir=attempts_dir,
+        report_path=report_path,
+        events=events,
+        rendered_cards=rendered_cards,
     )
 
 
-def test_exact_excerpt_matching_does_not_normalize_or_join_blocks() -> None:
-    text = "café  Example\nChair"
-    index = api.build_evidence_index(
-        web_records(output=[{"type": "input_text", "text": text}])
+@pytest.mark.parametrize("action", sorted(api.ELIGIBLE_WEB_ACTIONS))
+def test_direct_search_open_and_click_build_complete_ref_rows(action: str) -> None:
+    index = build_test_index(action)
+
+    assert len(index.fc_rows) == len(index.fco_rows) == len(index.turn_ref_rows) == 1
+    assert index.fc_rows[0].call_id == TEST_CALL_ID
+    assert set(json.loads(index.fc_rows[0].arguments_json)) & api.ELIGIBLE_WEB_ACTIONS == {action}
+    assert index.fco_rows[0].fco_id == TEST_FCO_ID
+    assert index.turn_ref_rows[0] == api.CodexTurnRefRow(
+        ref_id=TEST_REF_ID,
+        call_id=TEST_CALL_ID,
+        domain="example.test",
+        snippet="Example snippet",
+        thumbnail_url="https://example.test/thumbnail.png",
+        title="Example title",
+        url=TEST_URL,
+        cite_text=index.turn_ref_rows[0].cite_text,
     )
-    split_index = api.build_evidence_index(
-        web_records(
-            output=[
-                {"type": "input_text", "text": "café  Example"},
-                {"type": "input_text", "text": "Chair"},
-            ]
+    assert TEST_EXCERPT in index.turn_ref_rows[0].cite_text
+
+
+def test_rollout_index_fails_closed_on_broken_direct_chain() -> None:
+    records = minimal_rollout_records()
+    without_event = records[:3] + records[4:]
+
+    with pytest.raises(api.PushValidationError, match="one function call and one"):
+        api.build_rollout_index(
+            without_event,
+            timezone_name=TEST_TIMEZONE,
+            configured_rollout_basename=TEST_ROLLOUT_FILENAME,
         )
+
+    malformed_output = list(records)
+    output_value = json.loads(json.dumps(malformed_output[-1].value))
+    output_value["payload"]["output"].append(  # type: ignore[index]
+        {"type": "input_text", "text": TEST_EXCERPT}
     )
-
-    assert index.matches("café  Example\nChair")
-    assert not index.matches("cafe  Example\nChair")
-    assert not index.matches("café Example\nChair")
-    assert not split_index.matches("ExampleChair")
-
-
-def test_non_web_and_orphan_text_is_not_eligible() -> None:
-    records = (
-        rollout_record(
-            {
-                "type": "response_item",
-                "payload": {
-                    "type": "message",
-                    "role": "assistant",
-                    "content": [{"type": "output_text", "text": EVIDENCE_TEXT}],
-                },
-            },
-            1,
-        ),
-        rollout_record(
-            {
-                "type": "response_item",
-                "payload": {
-                    "type": "reasoning",
-                    "summary": [{"type": "summary_text", "text": EVIDENCE_TEXT}],
-                },
-            },
-            2,
-        ),
-        rollout_record(
-            {
-                "type": "response_item",
-                "payload": {
-                    "type": "function_call",
-                    "name": "exec_command",
-                    "arguments": "{}",
-                    "call_id": "shell_call",
-                },
-            },
-            3,
-        ),
-        rollout_record(
-            {
-                "type": "response_item",
-                "payload": {
-                    "type": "function_call_output",
-                    "call_id": "orphan_call",
-                    "output": EVIDENCE_TEXT,
-                },
-            },
-            4,
-        ),
-        rollout_record(
-            {
-                "type": "event_msg",
-                "payload": {
-                    "type": "web_search_end",
-                    "call_id": "event_only",
-                    "query": EVIDENCE_TEXT,
-                },
-            },
-            5,
-        ),
-    )
-
-    assert not api.build_evidence_index(records).matches(EVIDENCE_TEXT)
-
-
-def test_duplicate_ids_and_unsupported_outputs_fail_closed() -> None:
-    call, _event, output = web_records()
-
-    with pytest.raises(api.PushValidationError, match="duplicate web call_id"):
-        api.build_evidence_index((call, call, output))
-    with pytest.raises(api.PushValidationError, match="duplicate function output"):
-        api.build_evidence_index((call, output, output))
-    unsupported = web_records(output=[{"type": "output_text", "text": EVIDENCE_TEXT}])
-    with pytest.raises(api.PushValidationError, match="unsupported text block"):
-        api.build_evidence_index(unsupported)
+    malformed_output[-1] = rollout_record(output_value, malformed_output[-1].line_number)
+    with pytest.raises(api.PushValidationError, match="exactly one input_text"):
+        api.build_rollout_index(
+            tuple(malformed_output),
+            timezone_name=TEST_TIMEZONE,
+            configured_rollout_basename=TEST_ROLLOUT_FILENAME,
+        )
 
 
 def test_rollout_parser_rejects_completed_malformed_json_but_ignores_live_tail(
     tmp_path: Path,
 ) -> None:
-    rollout = tmp_path / "rollout.jsonl"
-    rollout.write_bytes(b'{"type":"event_msg"}\n{"incomplete"')
-    assert len(api.parse_rollout(rollout)) == 1
+    rollout_path = tmp_path / "rollout.jsonl"
+    write_bytes(rollout_path, b'{"type":"event_msg"}\n{"incomplete"')
+    assert len(api.parse_rollout(rollout_path)) == 1
 
-    rollout.write_bytes(b'{"type":"event_msg"}\nnot-json\n')
+    write_bytes(rollout_path, b'{"type":"event_msg"}\nnot-json\n')
     with pytest.raises(api.PushValidationError, match="line 2"):
-        api.parse_rollout(rollout)
+        api.parse_rollout(rollout_path)
 
 
-def test_submission_requires_exact_outer_and_inner_contract() -> None:
-    index = api.build_evidence_index(web_records())
-    body = submission_body()
-    validated: api.ValidatedEvidence = {}
+def test_submission_contract_has_eight_evidence_fields_and_optional_comments() -> None:
+    without_comments = valid_submission_body(include_comments=False)
+    parsed = api.Submission.model_validate(without_comments)
 
-    parsed = api.Submission.model_validate(
-        body,
-        context={"evidence_index": index, "validated_evidence": validated},
+    assert tuple(column for column, _field in parsed.evidence_items()) == (
+        api.AI_AUGMENT_EVIDENCE_COLUMNS
+    )
+    assert parsed.comments is None
+    assert api.KTP_AI_AUGMENT_COMMENTS_COL not in parsed.normalized_values()
+
+    with_comments = api.Submission.model_validate(valid_submission_body())
+    assert with_comments.comments is not None
+    assert with_comments.comments.value == EXPECTED_COMMENT
+
+    missing = valid_submission_body()
+    missing.pop(api.AI_AUGMENT_EVIDENCE_COLUMNS[0])
+    with pytest.raises(ValidationError):
+        api.Submission.model_validate(missing)
+
+    absent_evidence = valid_submission_body()
+    absent_evidence[api.AI_AUGMENT_EVIDENCE_COLUMNS[0]]["web_search_excerpts"] = []  # type: ignore[index]
+    with pytest.raises(ValidationError):
+        api.Submission.model_validate(absent_evidence)
+
+    duplicate_evidence = valid_submission_body()
+    first_field = duplicate_evidence[api.AI_AUGMENT_EVIDENCE_COLUMNS[0]]
+    first_field["web_search_excerpts"] *= 2  # type: ignore[index,operator]
+    with pytest.raises(ValidationError):
+        api.Submission.model_validate(duplicate_evidence)
+
+    comments_with_evidence = valid_submission_body()
+    comments_with_evidence[api.KTP_AI_AUGMENT_COMMENTS_COL][  # type: ignore[index]
+        "web_search_excerpts"
+    ] = []
+    with pytest.raises(ValidationError):
+        api.Submission.model_validate(comments_with_evidence)
+
+
+def test_persisted_index_is_idempotent_and_evidence_lookup_is_exact() -> None:
+    connection = duckdb.connect(":memory:")
+    try:
+        index = build_test_index()
+        api.persist_rollout_index(connection, index)
+        api.persist_rollout_index(connection, index)
+        body = {
+            column: {
+                "value": column,
+                "web_search_excerpts": [{"excerpt": TEST_EXCERPT, "url": TEST_URL}],
+            }
+            for column in api.AI_AUGMENT_EVIDENCE_COLUMNS
+        }
+        submission = api.Submission.model_validate(body)
+        validated = api.validate_submission_evidence(
+            connection,
+            submission,
+            rollout_filename=TEST_ROLLOUT_FILENAME,
+        )
+        assert [
+            match.evidence_number for matches in validated.values() for match in matches
+        ] == list(range(1, len(api.AI_AUGMENT_EVIDENCE_COLUMNS) + 1))
+
+        changed_excerpt = json.loads(json.dumps(body))
+        changed_excerpt[api.AI_AUGMENT_EVIDENCE_COLUMNS[0]]["web_search_excerpts"][0]["excerpt"] = (
+            TEST_EXCERPT[:-1] + "X"
+        )
+        with pytest.raises(api.PushValidationError, match="no indexed match"):
+            api.validate_submission_evidence(
+                connection,
+                api.Submission.model_validate(changed_excerpt),
+                rollout_filename=TEST_ROLLOUT_FILENAME,
+            )
+
+        changed_url = json.loads(json.dumps(body))
+        changed_url[api.AI_AUGMENT_EVIDENCE_COLUMNS[0]]["web_search_excerpts"][0]["url"] = (
+            TEST_URL + "/"
+        )
+        with pytest.raises(api.PushValidationError, match="URL does not match"):
+            api.validate_submission_evidence(
+                connection,
+                api.Submission.model_validate(changed_url),
+                rollout_filename=TEST_ROLLOUT_FILENAME,
+            )
+    finally:
+        connection.close()
+
+
+def test_multiple_sql_matches_report_the_exact_excerpt() -> None:
+    connection = duckdb.connect(":memory:")
+    try:
+        index = build_test_index()
+        duplicate_call_id = "call_duplicate"
+        duplicate_index = api.RolloutIndex(
+            session=index.session,
+            fc_rows=index.fc_rows
+            + (
+                api.CodexFcRow(
+                    timestamp=index.fc_rows[0].timestamp,
+                    fc_id="fc_duplicate",
+                    call_id=duplicate_call_id,
+                    name="run",
+                    namespace="web",
+                    arguments_json=index.fc_rows[0].arguments_json,
+                ),
+            ),
+            fco_rows=index.fco_rows
+            + (
+                api.CodexFcoRow(
+                    timestamp=index.fco_rows[0].timestamp,
+                    fco_id="fco_duplicate",
+                    call_id=duplicate_call_id,
+                ),
+            ),
+            turn_ref_rows=index.turn_ref_rows
+            + (
+                api.CodexTurnRefRow(
+                    ref_id="turn1search0",
+                    call_id=duplicate_call_id,
+                    domain="duplicate.example.test",
+                    snippet="Duplicate snippet",
+                    thumbnail_url=None,
+                    title="Duplicate title",
+                    url=TEST_URL,
+                    cite_text=f"Duplicate result: {TEST_EXCERPT}",
+                ),
+            ),
+        )
+        api.persist_rollout_index(connection, duplicate_index)
+        body = {
+            column: {
+                "value": column,
+                "web_search_excerpts": [{"excerpt": TEST_EXCERPT, "url": TEST_URL}],
+            }
+            for column in api.AI_AUGMENT_EVIDENCE_COLUMNS
+        }
+
+        with pytest.raises(api.MultipleEvidenceMatches) as raised:
+            api.validate_submission_evidence(
+                connection,
+                api.Submission.model_validate(body),
+                rollout_filename=TEST_ROLLOUT_FILENAME,
+            )
+        assert raised.value.excerpt == TEST_EXCERPT
+        assert TEST_EXCERPT in api.MULTIPLE_MATCH_DETAIL.format(excerpt=raised.value.excerpt)
+    finally:
+        connection.close()
+
+
+def test_renderer_uses_generic_arguments_wording() -> None:
+    footnote = codex_parse.render_footnote(
+        number=1,
+        cite_text=f"before {TEST_EXCERPT} after",
+        excerpt=TEST_EXCERPT,
+        excerpt_position=len("before "),
+        context_characters=api.FOOTNOTE_CONTEXT_CHARACTERS,
+        fco_timestamp="2026-07-31T16:11:02.000Z",
+        url=TEST_URL,
     )
 
-    assert tuple(parsed.root) == api.COLUMNS
-    assert set(validated) == set(api.COLUMNS)
-
-    missing = dict(body)
-    missing.pop(api.COLUMNS[0])
-    with pytest.raises(ValidationError):
-        api.Submission.model_validate(
-            missing,
-            context={"evidence_index": index, "validated_evidence": {}},
-        )
-
-    extra_inner = json.loads(json.dumps(body))
-    extra_inner[api.COLUMNS[0]]["unexpected"] = True
-    with pytest.raises(ValidationError):
-        api.Submission.model_validate(
-            extra_inner,
-            context={"evidence_index": index, "validated_evidence": {}},
-        )
-
-    null_value = json.loads(json.dumps(body))
-    null_value[api.COLUMNS[0]]["value"] = None
-    with pytest.raises(ValidationError):
-        api.Submission.model_validate(
-            null_value,
-            context={"evidence_index": index, "validated_evidence": {}},
-        )
-
-    duplicate_excerpt = json.loads(json.dumps(body))
-    duplicate_excerpt[api.COLUMNS[0]]["web_search_excerpts"] *= 2
-    with pytest.raises(ValidationError):
-        api.Submission.model_validate(
-            duplicate_excerpt,
-            context={"evidence_index": index, "validated_evidence": {}},
-        )
-
-    absent_excerpt = json.loads(json.dumps(body))
-    absent_excerpt[api.COLUMNS[0]]["web_search_excerpts"] = []
-    with pytest.raises(ValidationError):
-        api.Submission.model_validate(
-            absent_excerpt,
-            context={"evidence_index": index, "validated_evidence": {}},
-        )
+    assert f"**{TEST_EXCERPT}**" in footnote
+    assert "using arguments^1^" in footnote
+    assert "search query" not in footnote
+    assert codex_parse.render_footnote_argument(1, '{"open":[]}') == ('1. {"open":[]}')
 
 
-def test_copied_report_requires_one_nested_ok_path(tmp_path: Path) -> None:
-    report = tmp_path / "snapshot.txt"
-    report.write_text(valid_report(), encoding="utf-8")
+def test_copied_report_requires_one_exact_nested_ok_path(tmp_path: Path) -> None:
+    report_path = tmp_path / "snapshot.txt"
+    write_text(report_path, report_for_rollout(TEST_ROLLOUT_RELATIVE_PATH))
+    api.parse_appendwatch_report(report_path, TEST_ROLLOUT_RELATIVE_PATH)
 
-    api.parse_appendwatch_report(report, ROLLOUT_RELATIVE_PATH)
+    write_text(
+        report_path,
+        report_for_rollout(TEST_ROLLOUT_RELATIVE_PATH).replace(
+            api.APPENDWATCH_OK_PREFIX,
+            api.APPENDWATCH_COMPROMISED_PREFIX,
+        ),
+    )
+    with pytest.raises(api.PushValidationError):
+        api.parse_appendwatch_report(report_path, TEST_ROLLOUT_RELATIVE_PATH)
 
 
 @pytest.mark.parametrize(
-    "report",
-    [
+    "report_text",
+    (
         ".  [COMPROMISED: monitoring gap]\n",
-        (
-            ".\n"
-            "└── 2026/\n"
-            "    └── COMPROMISED 07/  [monitoring gap]\n"
-            "        └── 31/\n"
-            f"            └── {api.APPENDWATCH_OK_PREFIX}rollout-chat.jsonl\n"
-        ),
-        (
-            ".\n"
-            "└── 2026/\n"
-            "    └── 07/\n"
-            "        └── 31/\n"
-            f"            └── {api.APPENDWATCH_COMPROMISED_PREFIX}"
-            "rollout-chat.jsonl  [modified]\n"
-        ),
-        ".\n└── malformed status rollout-chat.jsonl\n",
         ".\n",
+        ".\n└── malformed status rollout-chat.jsonl\n",
         (
             ".\n"
             "└── 2026/\n"
@@ -529,50 +859,59 @@ def test_copied_report_requires_one_nested_ok_path(tmp_path: Path) -> None:
             f"            ├── {api.APPENDWATCH_OK_PREFIX}rollout-chat.jsonl\n"
             f"            └── {api.APPENDWATCH_OK_PREFIX}rollout-chat.jsonl\n"
         ),
-        (
-            ".\n"
-            "\n"
-            "removed or replaced (no longer a regular file):\n"
-            f"    {api.APPENDWATCH_COMPROMISED_PREFIX}"
-            "2026/07/31/rollout-chat.jsonl  [removed]\n"
-        ),
-    ],
+    ),
 )
-def test_copied_report_fails_closed(report: str, tmp_path: Path) -> None:
-    snapshot = tmp_path / "snapshot.txt"
-    snapshot.write_text(report, encoding="utf-8")
+def test_copied_report_missing_malformed_or_ambiguous_fails_closed(
+    report_text: str,
+    tmp_path: Path,
+) -> None:
+    report_path = tmp_path / "snapshot.txt"
+    write_text(report_path, report_text)
 
     with pytest.raises(api.PushValidationError):
-        api.parse_appendwatch_report(snapshot, ROLLOUT_RELATIVE_PATH)
+        api.parse_appendwatch_report(report_path, TEST_ROLLOUT_RELATIVE_PATH)
 
 
 @pytest.mark.parametrize(
-    "rollout",
-    [
+    "rollout_path",
+    (
         "",
         "relative/rollout-chat.jsonl",
         "/home/ai/.codex/sessions/../rollout-chat.jsonl",
         "/home/ai/rollout-chat.jsonl",
         "/home/ai/.codex/sessions/2026/07/31/not-a-rollout.txt",
         "/home/ai/.codex/sessions/2026/07/31/rollout-chat.jsonl\n",
-    ],
+    ),
 )
 def test_rollout_configuration_is_confined(
-    rollout: str,
-    tmp_path: Path,
+    rollout_path: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(api, "ROLLOUT_JSONL", rollout)
-
+    monkeypatch.setattr(api, "ROLLOUT_JSONL", rollout_path)
     with pytest.raises(api.PushConfigurationError):
         api.push_configuration()
 
 
-def test_scp_uses_dedicated_pinned_connection_and_atomic_archive(
+def test_scp_uses_pinned_identity_and_counts_physical_lines(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    configuration = configured(tmp_path, monkeypatch)
+    report_path = tmp_path / "report.txt"
+    identity_path = tmp_path / "identity"
+    known_hosts_path = tmp_path / "known_hosts"
+    lima_config_path = tmp_path / "ssh.config"
+    for path in (report_path, identity_path, known_hosts_path, lima_config_path):
+        write_text(path, "fixture\n")
+    configuration = api.PushConfiguration(
+        rollout_guest_path=TEST_ROLLOUT_GUEST_PATH,
+        rollout_relative_path=TEST_ROLLOUT_RELATIVE_PATH,
+        appendwatch_report=report_path,
+        lima_ssh_config=lima_config_path,
+        identity_file=identity_path,
+        known_hosts_file=known_hosts_path,
+        ssh_target="aivm-ai",
+        host_key_alias="lima-aivm-ai",
+    )
     attempt_dir = tmp_path / "attempt"
     attempt_dir.mkdir()
     captured: dict[str, Any] = {}
@@ -580,247 +919,331 @@ def test_scp_uses_dedicated_pinned_connection_and_atomic_archive(
     def fake_run(command: list[str], **kwargs: object) -> None:
         captured["command"] = command
         captured["kwargs"] = kwargs
-        Path(command[-1]).write_bytes(b"rollout bytes\n")
+        write_bytes(Path(command[-1]), b"first\nsecond")
 
     monkeypatch.setattr(api.subprocess, "run", fake_run)
-
     archived = api.copy_rollout(configuration, attempt_dir, "attempt-id")
 
     command = captured["command"]
     assert command[0] == "scp"
-    assert f"IdentityFile={configuration.identity_file}" in command
-    assert f"UserKnownHostsFile={configuration.known_hosts_file}" in command
+    assert f"IdentityFile={identity_path}" in command
+    assert f"UserKnownHostsFile={known_hosts_path}" in command
     assert f"HostKeyAlias={configuration.host_key_alias}" in command
     assert "StrictHostKeyChecking=accept-new" in command
-    assert command[-2] == f"{configuration.ssh_target}:{ROLLOUT_GUEST_PATH}"
+    assert command[-2] == f"aivm-ai:{TEST_ROLLOUT_GUEST_PATH}"
     assert "shell" not in captured["kwargs"]
+    assert archived.line_count == 2
     assert archived.path.name == "rollout.attempt-id.jsonl"
-    assert archived.sha256 == hashlib.sha256(b"rollout bytes\n").hexdigest()
-    assert not (attempt_dir / ".rollout.tmp").exists()
 
 
-def fake_artifact(path: Path, value: bytes) -> api.ArchivedFile:
-    path.write_bytes(value)
-    return api.ArchivedFile(
-        path=path,
-        size=len(value),
-        sha256=hashlib.sha256(value).hexdigest(),
+def test_required_config_and_source_database_are_read_only(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit):
+        api.parse_args([])
+    assert api.parse_args(["--config", str(CONFIG_PATH)]).config == CONFIG_PATH
+    assert api._detour_db_path(SOURCE_DB_PATH) == SOURCE_DB_PATH.with_name(
+        "scisci_process__detour_ai-augment.duckdb"
     )
 
+    runtime = runtime_for_test(tmp_path)
+    before = file_signature(SOURCE_DB_PATH)
+    connection = api.open_source_database(runtime)
+    try:
+        with pytest.raises(duckdb.Error):
+            connection.execute("CREATE TABLE forbidden_write (id INTEGER)")
+    finally:
+        connection.close()
+    assert file_signature(SOURCE_DB_PATH) == before
 
-def test_push_runs_integrity_gate_in_exact_order(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    events: list[str] = []
-    attempt_dir = tmp_path / "attempt"
-    configuration = api.PushConfiguration(
-        rollout_guest_path=ROLLOUT_GUEST_PATH,
-        rollout_relative_path=ROLLOUT_RELATIVE_PATH,
-        appendwatch_report=tmp_path / "live-report",
-        lima_ssh_config=tmp_path / "ssh.config",
-        identity_file=tmp_path / "identity",
-        known_hosts_file=tmp_path / "known-hosts",
-        ssh_target="aivm-ai",
-        host_key_alias="lima-aivm-ai",
-    )
 
-    def fake_configuration() -> api.PushConfiguration:
-        events.append("configuration")
-        return configuration
+def test_repeated_researcher_rows_materialize_as_distinct_innerdicts() -> None:
+    connection = duckdb.connect(":memory:")
+    try:
 
-    def fake_create(_attempt_id: str) -> Path:
-        attempt_dir.mkdir()
-        return attempt_dir
-
-    def fake_rollout(
-        _configuration: api.PushConfiguration,
-        directory: Path,
-        _attempt_id: str,
-    ) -> api.ArchivedFile:
-        events.append("scp")
-        return fake_artifact(directory / "rollout.jsonl", b"rollout\n")
-
-    def fake_report(
-        _configuration: api.PushConfiguration,
-        directory: Path,
-        _attempt_id: str,
-    ) -> api.ArchivedFile:
-        events.append("status_copy")
-        return fake_artifact(directory / "report.txt", b".\n")
-
-    def fake_pydantic(
-        _cls: type[api.Submission],
-        _body: bytes,
-        *,
-        context: dict[str, object],
-    ) -> object:
-        events.append("pydantic")
-        validated_evidence = context["validated_evidence"]
-        assert isinstance(validated_evidence, dict)
-        validated_evidence.update({column: [] for column in api.COLUMNS})
-        return SimpleNamespace(
-            root={
-                column: SimpleNamespace(value=f"answer for {column}")
-                for column in api.COLUMNS
+        def output_row(fragment: int, attempt_id: str) -> dict[str, object]:
+            values: dict[str, object] = {
+                column: f"value for {column}" for column, _data_type in api.CODEX_OUTPUT_SCHEMA
             }
-        )
+            values.update({
+                api.KTP_SOURCE_KEY_COL: TEST_SOURCE_KEY,
+                api.KTP_FILENAME_COL: TEST_ROLLOUT_FILENAME,
+                api.KTP_FRAGMENT_COL: fragment,
+                api.KTP_FRAGMENT_TYPE_COL: api.ROLLOUT_LINE_FRAGMENT_TYPE,
+                api.DRAW_LABEL: api.TARGET_DRAW_NUMBER,
+                api.KTP_FIRST_NAME_COL: "A.",
+                api.KTP_LAST_NAME_COL: "Sheikh",
+                api.KTP_AI_AUGMENT_ATTEMPT_ID_COL: attempt_id,
+                api.KTP_AI_AUGMENT_COMMENTS_COL: None,
+            })
+            return values
 
-    def fake_status_check(*_args: object) -> None:
-        events.append("status_check")
+        api.append_codex_output(connection, output_row(100, "attempt-1"))
+        api.append_codex_output(connection, output_row(101, "attempt-2"))
+        innerdicts_text = connection.execute(
+            f"SELECT innerdicts FROM {api.CODEX_INNERDICT_TABLE}"
+        ).fetchone()[0]
+        innerdicts = tuple(json.loads(line) for line in innerdicts_text.splitlines())
+        assert [row[api.KTP_FRAGMENT_COL] for row in innerdicts] == [100, 101]
+        assert [row[api.KTP_AI_AUGMENT_ATTEMPT_ID_COL] for row in innerdicts] == [
+            "attempt-1",
+            "attempt-2",
+        ]
 
-    def fake_rollout_parse(*_args: object) -> tuple[api.RolloutRecord, ...]:
-        events.append("rollout_parse")
-        return ()
-
-    def fake_evidence_index(*_args: object) -> api.EvidenceIndex:
-        events.append("evidence_index")
-        return api.EvidenceIndex(())
-
-    def fake_ground_truth() -> dict[str, object]:
-        events.append("ground_truth")
-        return {column: f"truth for {column}" for column in api.COLUMNS}
-
-    def fake_dump(*_args: object, **_kwargs: object) -> tuple[str, str]:
-        events.append("dump")
-        return "submitted\n", "truth\n"
-
-    monkeypatch.setattr(api, "push_configuration", fake_configuration)
-    monkeypatch.setattr(api, "create_attempt", fake_create)
-    monkeypatch.setattr(api, "record_attempt", lambda *args, **kwargs: None)
-    monkeypatch.setattr(api, "copy_rollout", fake_rollout)
-    monkeypatch.setattr(api, "copy_appendwatch_report", fake_report)
-    monkeypatch.setattr(api, "parse_appendwatch_report", fake_status_check)
-    monkeypatch.setattr(api, "parse_rollout", fake_rollout_parse)
-    monkeypatch.setattr(api, "build_evidence_index", fake_evidence_index)
-    monkeypatch.setattr(
-        api.Submission,
-        "model_validate_json",
-        classmethod(fake_pydantic),
-    )
-    monkeypatch.setattr(api, "ground_truth", fake_ground_truth)
-    monkeypatch.setattr(api, "dump_push", fake_dump)
-
-    response = TestClient(api.app).post("/push", json=submission_body())
-
-    assert response.status_code == 200
-    assert events == [
-        "configuration",
-        "scp",
-        "status_copy",
-        "status_check",
-        "rollout_parse",
-        "evidence_index",
-        "pydantic",
-        "ground_truth",
-        "dump",
-    ]
+        with pytest.raises(api.PushValidationError, match="already accepted"):
+            api.append_codex_output(connection, output_row(101, "attempt-3"))
+    finally:
+        connection.close()
 
 
-def test_real_sample_exact_excerpts_render_linked_objects_end_to_end(
+@pytest.mark.parametrize("output_format", ("txt", "docx"))
+def test_real_july_push_matches_exact_objects_and_renders_card_end_to_end(
+    output_format: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    context = prepare_real_sample_push(tmp_path, monkeypatch)
-    monkeypatch.setattr(api, "ground_truth", lambda: context.truth)
+    context = prepare_real_sample_push(
+        tmp_path,
+        monkeypatch,
+        output_format=output_format,
+    )
+    source_signature = file_signature(SOURCE_DB_PATH)
 
     response = context.client.post("/push", json=context.payload)
 
-    assert response.status_code == 200
+    assert response.status_code == 200, response.text
+    assert context.events == [
+        "scp",
+        "status_copy",
+        "status_check",
+        "rollout_index",
+        "pydantic",
+        "evidence",
+        "output",
+        "ground_truth",
+        "card",
+    ]
+    assert file_signature(SOURCE_DB_PATH) == source_signature
     response_lines = response.text.splitlines()
     assert len(response_lines) == 2
     assert json.loads(response_lines[0]) == {
-        column: context.payload[column]["value"]
-        for column in api.COLUMNS
+        **{expected.column: expected.value for expected in EXPECTED_EVIDENCE},
+        api.KTP_AI_AUGMENT_COMMENTS_COL: EXPECTED_COMMENT,
     }
-    assert json.loads(response_lines[1]) == context.truth
+    truth = json.loads(response_lines[1])
+    assert tuple(truth) == api.DOCX_COLUMNS
 
-    attempt_dir = next(context.attempts.iterdir())
-    attempt = json.loads((attempt_dir / "attempt.json").read_text(encoding="utf-8"))
-    assert attempt["result"] == "accepted"
-    rollout_archive = next(attempt_dir.glob("rollout.*.jsonl"))
-    report_archive = next(attempt_dir.glob("appendwatch-tree.*.txt"))
-    assert rollout_archive.read_bytes() == context.sample_rollout.read_bytes()
-    assert report_archive.read_bytes() == context.report.read_bytes()
-    assert (attempt_dir / "response.jsonl").is_file()
-    markdown = (attempt_dir / "response.md").read_text(encoding="utf-8")
+    attempt_dir = next(context.attempts_dir.iterdir())
+    manifest = read_json(attempt_dir / "attempt.json")
+    assert manifest["result"] == "accepted"
+    assert manifest["artifacts"]["rollout"]["line_count"] == JULY_ROLLOUT_LINE_COUNT
+    archived_rollout = attempt_dir / manifest["artifacts"]["rollout"]["filename"]
+    archived_report = attempt_dir / manifest["artifacts"]["appendwatch_report"]["filename"]
+    assert read_bytes(archived_rollout) == read_bytes(JULY_ROLLOUT_PATH)
+    assert read_bytes(archived_report) == read_bytes(context.report_path)
+    assert read_text(attempt_dir / "response.jsonl") == response.text
 
-    def escaped_json(value: object) -> str:
-        return html.escape(json.dumps(value, ensure_ascii=False, indent=2))
-
-    assert attempt["artifacts"]["rollout"]["sha256"] in markdown
-    assert attempt["artifacts"]["appendwatch_report"]["sha256"] in markdown
-    assert markdown.count("<details>") == len(api.COLUMNS)
-    for column_index, column in enumerate(api.COLUMNS):
-        section_start = markdown.index(f"## {column}\n")
-        section_end = (
-            markdown.index(f"## {api.COLUMNS[column_index + 1]}\n")
-            if column_index + 1 < len(api.COLUMNS)
-            else len(markdown)
+    connection = open_readonly_database(context.runtime.detour_db_path)
+    try:
+        for table_name, expected_columns in EXPECTED_TABLE_COLUMNS.items():
+            columns = tuple(
+                row[1]
+                for row in connection.execute(f"PRAGMA table_info('{table_name}')").fetchall()
+            )
+            assert columns == expected_columns
+        counts = {
+            table_name: connection.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
+            for table_name in EXPECTED_TABLE_COLUMNS
+        }
+        assert counts == {
+            api.CODEX_FC_TABLE: JULY_FC_COUNT,
+            api.CODEX_FCO_TABLE: JULY_FCO_COUNT,
+            api.CODEX_CALLS_TABLE: JULY_CALL_COUNT,
+            api.CODEX_TURN_REF_TABLE: JULY_REF_COUNT,
+        }
+        call_links = tuple(
+            row[:3]
+            for row in connection.execute(
+                f'SELECT "{api.CODEX_CALL_ID_COL}", "{api.CODEX_FC_ID_COL}", '
+                f'"{api.CODEX_FCO_ID_COL}", "{api.CODEX_ROLLOUT_FILENAME_COL}" '
+                f"FROM {api.CODEX_CALLS_TABLE} ORDER BY id"
+            ).fetchall()
         )
-        section = markdown[section_start:section_end]
-        excerpt, pair = context.expected_evidence[column]
+        assert set(call_links) == set(EXPECTED_CALL_LINKS)
+        assert {
+            row[0]
+            for row in connection.execute(
+                f'SELECT "{api.CODEX_REF_ID_COL}" FROM {api.CODEX_TURN_REF_TABLE} '
+                f'WHERE "{api.CODEX_REF_THUMBNAIL_URL_COL}" IS NOT NULL'
+            ).fetchall()
+        } == set(JULY_THUMBNAIL_REF_IDS)
 
-        assert f"<pre><code>{html.escape(excerpt)}</code></pre>" in section
-        assert escaped_json(context.payload[column]["value"]) in section
-        assert escaped_json(context.truth[column]) in section
-        assert escaped_json(pair.call.value) in section
-        assert escaped_json(pair.output.value) in section
-        assert pair.call.line_sha256 in section
-        assert pair.output.line_sha256 in section
-        for event in pair.events:
-            assert escaped_json(event.value) in section
-            assert event.line_sha256 in section
+        for expected in EXPECTED_EVIDENCE:
+            rows = connection.execute(
+                f"""
+                SELECT refs."{api.CODEX_REF_ID_COL}", refs."{api.CODEX_CALL_ID_COL}",
+                       calls."{api.CODEX_FC_ID_COL}", calls."{api.CODEX_FCO_ID_COL}",
+                       fco."{api.CODEX_FCO_TIMESTAMP_COL}",
+                       fc."{api.CODEX_FC_ARGUMENTS_COL}",
+                       refs."{api.CODEX_REF_URL_COL}", refs."{api.CODEX_CITE_TEXT_COL}"
+                FROM {api.CODEX_TURN_REF_TABLE} refs
+                JOIN {api.CODEX_CALLS_TABLE} calls
+                  ON calls."{api.CODEX_CALL_ID_COL}" = refs."{api.CODEX_CALL_ID_COL}"
+                JOIN {api.CODEX_FCO_TABLE} fco
+                  ON fco."{api.CODEX_FCO_ID_COL}" = calls."{api.CODEX_FCO_ID_COL}"
+                JOIN {api.CODEX_FC_TABLE} fc
+                  ON fc."{api.CODEX_FC_ID_COL}" = calls."{api.CODEX_FC_ID_COL}"
+                WHERE strpos(refs."{api.CODEX_CITE_TEXT_COL}", ?) > 0
+                """,
+                [expected.excerpt],
+            ).fetchall()
+            assert len(rows) == 1
+            row = rows[0]
+            assert row[:4] == (
+                expected.ref_id,
+                expected.call_id,
+                expected.fc_id,
+                expected.fco_id,
+            )
+            assert api._render_fco_timestamp(row[4]) == expected.fco_timestamp
+            assert row[5] == expected.arguments_json
+            assert row[6] == expected.url
+            assert expected.excerpt in row[7]
 
-        assert markdown.count(escaped_json(pair.call.value)) == 1
-        assert markdown.count(escaped_json(pair.output.value)) == 1
+        output_columns = tuple(column for column, _type in api.CODEX_OUTPUT_SCHEMA)
+        output_values = connection.execute(f"SELECT * FROM {api.CODEX_OUTPUT_VIEW}").fetchone()
+        output = dict(zip(output_columns, output_values, strict=True))
+        assert output[api.KTP_SOURCE_KEY_COL] == (
+            '{"ktp.first_name": "A.", "ktp.last_name": "Sheikh"}'
+        )
+        assert output[api.KTP_FILENAME_COL] == JULY_ROLLOUT_FILENAME
+        assert output[api.KTP_FRAGMENT_COL] == JULY_ROLLOUT_LINE_COUNT
+        assert output[api.KTP_FRAGMENT_TYPE_COL] == api.ROLLOUT_LINE_FRAGMENT_TYPE
+        assert output[api.DRAW_LABEL] == api.TARGET_DRAW_NUMBER
+        metadata = json.loads(output[api.KTP_AI_AUGMENT_SESSION_METADATA_COL])
+        assert metadata["session_id"] == JULY_SESSION_ID
+        assert output[api.KTP_AI_AUGMENT_FOOTNOTE_ARGUMENTS_COL] == "\n".join(
+            f"{number}. {expected.arguments_json}"
+            for number, expected in enumerate(EXPECTED_EVIDENCE, start=1)
+        )
+        footnotes = output[api.KTP_AI_AUGMENT_FOOTNOTES_COL]
+        for number, expected in enumerate(EXPECTED_EVIDENCE, start=1):
+            assert f"**{expected.excerpt}**" in footnotes
+            assert f'arguments^{number}^ on "{expected.fco_timestamp}", {expected.url}' in footnotes
+            assert output[expected.column] == (
+                f'**AI-generated text**: "{expected.value}"^{number}^'
+            )
+        assert re.fullmatch(
+            rf'- \*\*AI-generated text\*\*: "{re.escape(EXPECTED_COMMENT)}" '
+            r"\(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\)",
+            output[api.KTP_AI_AUGMENT_COMMENTS_COL],
+        )
 
-    assert escaped_json(context.unrelated_record.value) not in markdown
+        name_key, innerdicts_text = connection.execute(
+            f"SELECT name_key, innerdicts FROM {api.CODEX_INNERDICT_TABLE}"
+        ).fetchone()
+        assert name_key == TEST_SOURCE_KEY
+        innerdicts = tuple(json.loads(line) for line in innerdicts_text.splitlines())
+        assert len(innerdicts) == 1
+        assert innerdicts[0][api.KTP_FILENAME_COL] == JULY_ROLLOUT_FILENAME
+        assert innerdicts[0][api.KTP_FRAGMENT_COL] == JULY_ROLLOUT_LINE_COUNT
+        assert innerdicts[0][api.KTP_AI_AUGMENT_ATTEMPT_ID_COL] == manifest["attempt_id"]
+    finally:
+        connection.close()
+
+    card_path = context.runtime.pipeline.output_dir / manifest["artifacts"]["card_zip"]["filename"]
+    card_text = "\n".join(context.rendered_cards)
+    assert f"#### {api.KTP_FILENAME_COL}: {JULY_ROLLOUT_FILENAME}" in card_text
+    assert f"**{api.KTP_FRAGMENT_COL}**: {JULY_ROLLOUT_LINE_COUNT}" in card_text
+    assert f"**{api.KTP_AI_AUGMENT_ATTEMPT_ID_COL}**: {manifest['attempt_id']}" in card_text
+    assert f"**{api.KTP_AI_AUGMENT_FOOTNOTES_COL}**:" in card_text
+    assert f"**{api.KTP_AI_AUGMENT_FOOTNOTE_ARGUMENTS_COL}**:" in card_text
+    assert "using arguments^1^" in card_text
+    assert "<details>" not in card_text
+    if output_format == "txt":
+        assert read_zip_text(card_path) == card_text
+    else:
+        assert all(name.endswith(".docx") for name in zip_member_names(card_path))
 
 
-def test_real_sample_rollout_rejects_non_exact_excerpt_before_ground_truth(
+@pytest.mark.parametrize("mutation", ("excerpt", "url"))
+def test_real_july_push_rejects_changed_evidence_before_ground_truth(
+    mutation: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     context = prepare_real_sample_push(tmp_path, monkeypatch)
     payload = json.loads(json.dumps(context.payload))
-    payload[api.COLUMNS[0]]["web_search_excerpts"][0] += " text absent from rollout"
+    first_column = EXPECTED_EVIDENCE[0].column
+    evidence = payload[first_column]["web_search_excerpts"][0]
+    if mutation == "excerpt":
+        evidence["excerpt"] = evidence["excerpt"][:-1] + "X"
+    else:
+        evidence["url"] += "/"
+    monkeypatch.setattr(
+        api,
+        "open_source_database",
+        lambda *_args, **_kwargs: pytest.fail(
+            "source database must not open after evidence rejection"
+        ),
+    )
     monkeypatch.setattr(
         api,
         "ground_truth",
-        lambda: pytest.fail("ground truth must not be loaded after rejection"),
+        lambda: pytest.fail("ground truth must not load after evidence rejection"),
     )
 
     response = context.client.post("/push", json=payload)
 
     assert response.status_code == 422
     assert response.json() == {"detail": api.VALIDATION_ERROR_DETAIL}
-    attempt_dir = next(context.attempts.iterdir())
-    attempt = json.loads((attempt_dir / "attempt.json").read_text(encoding="utf-8"))
-    assert attempt["result"] == "rejected"
+    assert context.events == [
+        "scp",
+        "status_copy",
+        "status_check",
+        "rollout_index",
+        "pydantic",
+        "evidence",
+    ]
+    attempt_dir = next(context.attempts_dir.iterdir())
+    manifest = read_json(attempt_dir / "attempt.json")
+    assert manifest["result"] == "rejected"
+    assert manifest["stage"] == "duckdb_evidence_validation"
     assert not (attempt_dir / "response.jsonl").exists()
-    assert not (attempt_dir / "response.md").exists()
+    assert not tuple(context.runtime.pipeline.output_dir.iterdir())
+
+    connection = open_readonly_database(context.runtime.detour_db_path)
+    try:
+        assert (
+            connection.execute(f"SELECT COUNT(*) FROM {api.CODEX_TURN_REF_TABLE}").fetchone()[0]
+            == JULY_REF_COUNT
+        )
+        tables = {row[0] for row in connection.execute("SHOW TABLES").fetchall()}
+        assert api.CODEX_OUTPUT_ROWS_TABLE not in tables
+        assert api.CODEX_INNERDICT_TABLE not in tables
+    finally:
+        connection.close()
 
 
-def test_missing_rollout_is_generic_503_and_pull_still_works(
+def test_missing_rollout_is_generic_503_and_pull_remains_available(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    source = tmp_path / "source.jsonl"
-    source.write_text(
-        json.dumps(
-            {
-                api.DRAW_NUMBER_COLUMN: api.TARGET_DRAW_NUMBER,
-                api.FRAGMENT_TYPE_COLUMN: api.DOCX_ROW_FRAGMENT_TYPE,
-                **dict.fromkeys(api.COLUMNS),
-            }
-        )
+    source_path = tmp_path / "source.jsonl"
+    write_text(
+        source_path,
+        json.dumps({
+            api.DRAW_NUMBER_COLUMN: api.TARGET_DRAW_NUMBER,
+            api.FRAGMENT_TYPE_COLUMN: api.DOCX_ROW_FRAGMENT_TYPE,
+            api.KTP_FIRST_NAME_COL: "A.",
+            api.KTP_LAST_NAME_COL: "Sheikh",
+            **dict.fromkeys(api.DOCX_COLUMNS),
+        })
         + "\n",
-        encoding="utf-8",
     )
-    monkeypatch.setattr(api, "SOURCE_FILE", source)
+    runtime = runtime_for_test(tmp_path)
+    monkeypatch.setattr(api, "SOURCE_FILE", source_path)
     monkeypatch.setattr(api, "ROLLOUT_JSONL", "")
+    monkeypatch.setattr(api, "runtime_configuration", lambda: runtime)
     client = TestClient(api.app)
 
     push_response = client.post("/push", json={})
@@ -830,48 +1253,11 @@ def test_missing_rollout_is_generic_503_and_pull_still_works(
     assert push_response.json() == {"detail": api.CONFIGURATION_ERROR_DETAIL}
     assert api.ROLLOUT_ENV_NAME in caplog.text
     assert pull_response.status_code == 200
-    assert json.loads(pull_response.text) == dict.fromkeys(api.COLUMNS)
-
-
-def test_validation_failure_is_generic_and_creates_no_accepted_artifacts(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    configuration = configured(tmp_path, monkeypatch)
-    attempts = tmp_path / "attempts"
-    monkeypatch.setattr(api, "ATTEMPTS_DIR", attempts)
-    monkeypatch.setattr(api, "push_configuration", lambda: configuration)
-    monkeypatch.setattr(
-        api,
-        "copy_rollout",
-        lambda _config, directory, _attempt_id: fake_artifact(
-            directory / "rollout.jsonl", b"{}\n"
-        ),
-    )
-    monkeypatch.setattr(
-        api,
-        "copy_appendwatch_report",
-        lambda _config, directory, _attempt_id: fake_artifact(
-            directory / "report.txt", valid_report().encode()
-        ),
-    )
-    monkeypatch.setattr(api, "parse_appendwatch_report", lambda *args: None)
-    monkeypatch.setattr(api, "parse_rollout", lambda *args: ())
-    monkeypatch.setattr(
-        api,
-        "ground_truth",
-        lambda: pytest.fail("ground truth must not be loaded after rejection"),
-    )
-
-    response = TestClient(api.app).post("/push", json=submission_body())
-
-    assert response.status_code == 422
-    assert response.json() == {"detail": api.VALIDATION_ERROR_DETAIL}
-    attempt_dir = next(attempts.iterdir())
-    assert not (attempt_dir / "response.jsonl").exists()
-    assert not (attempt_dir / "response.md").exists()
-    assert api.COLUMNS[0] in caplog.text
+    assert json.loads(pull_response.text) == {
+        api.KTP_FIRST_NAME_COL: "A.",
+        api.KTP_LAST_NAME_COL: "Sheikh",
+        **dict.fromkeys(api.AI_AUGMENT_COLUMNS),
+    }
 
 
 def test_openapi_does_not_disclose_integrity_internals() -> None:
@@ -883,44 +1269,3 @@ def test_openapi_does_not_disclose_integrity_internals() -> None:
     assert "appendwatch" not in serialized
     assert "rollout" not in serialized
     assert api.ROLLOUT_ENV_NAME.lower() not in serialized
-
-
-def test_report_contains_complete_deduplicated_escaped_evidence(
-    tmp_path: Path,
-) -> None:
-    malicious = "Evidence </code><script>alert('x')</script>"
-    records = web_records(output=malicious)
-    pair = api.build_evidence_index(records).pairs[0]
-    evidence: api.ValidatedEvidence = {
-        column: [(malicious, (pair,))]
-        for column in api.COLUMNS
-    }
-    submission = {column: f"answer <{column}>" for column in api.COLUMNS}
-    truth = {column: f"truth <{column}>" for column in api.COLUMNS}
-    rollout = fake_artifact(tmp_path / "rollout.jsonl", b"rollout\n")
-    report = fake_artifact(tmp_path / "appendwatch.txt", b".\n")
-
-    lines = api.dump_push(
-        submission,
-        truth,
-        output_dir=tmp_path,
-        evidence=evidence,
-        rollout_archive=rollout,
-        report_archive=report,
-    )
-
-    markdown = (tmp_path / "response.md").read_text(encoding="utf-8")
-    assert markdown.count("<details>") == 1
-    assert "<script>" not in markdown
-    assert "&lt;script&gt;" in markdown
-    assert html.escape(
-        json.dumps(pair.call.value, ensure_ascii=False, indent=2)
-    ) in markdown
-    assert html.escape(
-        json.dumps(pair.output.value, ensure_ascii=False, indent=2)
-    ) in markdown
-    assert rollout.sha256 in markdown
-    assert report.sha256 in markdown
-    assert all(f"## {column}" in markdown for column in api.COLUMNS)
-    assert (tmp_path / "response.jsonl").read_text(encoding="utf-8") == "".join(lines)
-    assert len((tmp_path / "response.jsonl").read_text().splitlines()) == 2
