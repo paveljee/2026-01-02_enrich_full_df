@@ -26,7 +26,164 @@ There we have everything almost ready for production.
 Some things need to be wired in:
 
 - deploy/provision scripts must provision appendwatch from a root-only dir that cannot even be traversed into by a non-sudo user. we can use the already mounted macos dir to host it which is properly protected from nonsudoers, and this also gives easy access to these files for the host backend. we use systemd for persistence, and we also must ensure that the non-sudoer must have absolutely zero ways to view the python source code.
-- api validator currently does not make use of appendwatch. how it should work: api must not accept pushes until human operator manually sets the path to the codex rollout associated with the chat. how it should be seen on agent runtime's end: there should be some generic error that says that api not properly configured and human operator must be contacted. then runtime will flag this to the user. the runtime does not need to know what the error is. but backend api logs should be informative, human operator goes to check them and sees that this var is not set in .env file for api, so operator checks what the rollout path is and sets it there, restarts api and goes back to runtime. now, backend knows what file to compare against. backend can scp the rollout file from vm (using provisioned ssh key from deploy.sh), then create a versioned copy of the appendwatch log from mounted protected dir, and only then  check if status is ok (i.e., not compromised) in that copy of the log. so copying of rollout should precede copying the log, and copying the log should precede checking the log - in this case if log is ok then we're certain that our copy of rollout is still ok. then backend can finally pydantic validate the submission. i think to be able to do this, we're going to have to extend /push contract and require agent runtime to provide a full list of exact excerpt(s) from its web search results that justify its response - per json key in the push payload. what the pydantic validation does it attempts to find an exact match in the rollout (there is an example rollout for you to review how web searches and responses are structured under "src/detours/detour_ai_augment/data/sample_run/.codex/sessions") and if found, validates that it truly comes from an eligible tool output (like websearch and click, open - those web tools), then takes the whole json object (or rather, at least two objects - object with tool output and with the tool call with this id) and puts it directly into the markdown report (we can use details/summary tag to hide; we may also reformat it as not a table but as a doc with sections where ai output plus validated match and ground truth output are just paragraphs within subsection for var). the human reviewer will then see not only ai output but also validated result from web search. if fails to validate, the api should fail to accept submission and briefly, without details advise that this did not pass validation and they are encouraged to verify all the details of the submission.
+- api validator currently does not make use of appendwatch. how it should work: api must not accept pushes until human operator manually sets the path to the codex rollout associated with the chat. how it should be seen on agent runtime's end: there should be some generic error that says that api not properly configured and human operator must be contacted. then runtime will flag this to the user. the runtime does not need to know what the error is. but backend api logs should be informative, human operator goes to check them and sees that this var is not set in .env file for api, so operator checks what the rollout path is and sets it there, restarts api and goes back to runtime. now, backend knows what file to compare against. backend can scp the rollout file from vm (using provisioned ssh key from deploy.sh), then create a versioned copy of the appendwatch log from mounted protected dir, and only then  check if status is ok (i.e., not compromised) in that copy of the log. so copying of rollout should precede copying the log, and copying the log should precede checking the log - in this case if log is ok then we're certain that our copy of rollout is still ok. then backend can finally pydantic validate the submission. i think to be able to do this, we're going to have to extend /push contract and require agent runtime to provide a full list of exact excerpt(s) from its web search results that justify its response - per json key in the push payload. what the pydantic validation does it attempts to find an exact match in the rollout (there is some example rollouts for you to review how web searches and responses are structured under "src/detours/detour_ai_augment/data/sample_run/.codex/sessions") and if found, validates that it truly comes from an eligible tool output (like websearch and click, open - those web tools), then shows the matching piece plus a bit of context like some chars before and some chars after, plus the json lines event in which this is located, plus the original call with which this id is associated, plus etc. (see below for details). for rendering the report we should include all these fields as specified below. all in all we should reuse step 10 rendering logic and include everything as if it was a proper researcher card, again docx and txt must be supported and read from --config config.json passed to this detour. so essentially what the human reviewer will see is a familiar card, but there will be a new section (between xlsx and docx) one per each jsonl rollout-line count pair (see below). the human reviewer will then see not only ai output but also validated result from web search. if fails to validate, the api should fail to accept submission and briefly, without details advise that this did not pass validation and they are encouraged to verify all the details of the submission.
+
+So to recap, the sequence of validation is:
+
+* pre-index appendwatch-accepted jsonl which linenumbers are eligible for matching
+    * that only includes only lines like,
+
+      ```
+      {
+        "timestamp": "2026-07-27T16:11:06.607Z",
+        "type": "response_item",
+        "payload": {
+          "type": "function_call_output",
+          "id": "fco_019fa458-1fef-7a43-9f53-7d987861ad64",
+          "call_id": "call_JrCO9EEdFFwnncEyo0Tky0N3",
+          "output": [
+            {
+              "type": "input_text",
+              "text": "a single text value containing citeturn0search0 symbolics; be sure to use valid unicode chars for delimiting these and put these chars as globals on top of api.py"
+              }
+          ],
+          ...
+        }
+      }
+      ```
+
+      from this line we capture timestamp (as the canonical timestamp for evidence piece - because it's the last timestamp when actually this was received), also fco id, call id, and actual single-text-value output text (which we parse by ref_id like citeturn0search0 within).
+
+      then, by looking up corresponding call_id event_msg/web_search_end line (must be unique - if not, raise error), we establish:
+
+      ```
+      {
+        ...
+        "type": "event_msg",
+        "payload": {
+          "type": "web_search_end",
+          "call_id": "call_C9nCCxE2YU5zrv9kI6ewtswG",
+          ...
+          "results": [
+            {
+              "type": "text_result",
+              "domain": "www.research.ed.ac.uk",
+              "ref_id": "turn1search7",
+              "snippet": "Image: No photo of Aziz Sheikh ... Professor ... & Sheikh, A., 21 May 2026, In: npj Primary Care Respiratory Medicine. 36, 3 p., 33.",
+              "title": "Aziz Sheikh - University of Edinburgh Research Explorer",
+              "url": "https://www.research.ed.ac.uk/en/persons/aziz-sheikh-2/"
+            },
+            ...
+          ]
+        }
+      }
+      ```
+
+      from which we link domain, url, title, and snippet to each ref_id.
+
+      and then finally, by same call_id we look up the originating query (must be unique, if not - raise):
+
+      ```
+      {
+        ...
+        "type": "response_item",
+        "payload": {
+          "type": "function_call",
+          "id": "fc_03938c1e0667a7cc016a67831c12b08195ae364f3f129f750c",
+          "name": "run",
+          "namespace": "web",
+          "arguments": "{\"search_query\":[{\"q\":\"\\\"Aziz Sheikh\\\" \\\"MBBS\\\" \\\"MSc\\\" \\\"MD\\\" biography education\"},{\"q\":\"\\\"Aziz Sheikh\\\" born 1968 professor medicine\"},{\"q\":\"\\\"Professor Aziz Sheikh\\\" education University College London MBBS\"},{\"q\":\"site:acmedsci.ac.uk \\\"Aziz Sheikh\\\" biography\"}],\"response_length\":\"long\"}",
+          "call_id": "call_C9nCCxE2YU5zrv9kI6ewtswG",
+          ...
+        }
+      }
+      ```
+
+      from this, we get fc_id and argument object which must be parsed as json and captured as the full dict.
+
+      that is, it must have:
+
+      - a valid timestamp (from fco),
+      - valid call_id, which sets the scope for all further validation
+      - all the other shape is as is shown above
+      - the single text value is parsed by citeturn0search0 symbolics
+      - fco id is the unique id for this function call output, use it to uniquely identify the source of this excerpt
+      - we also store unique value of and fc id for each query.
+
+    * and so, this dependency graph is preindexed, i think is even better to dump it into a duckdb table and use as the canonical representation of this rollout
+* now we don't need to search in the jsonl - we can search in duckdb.
+    * so the duckdb schema for as follows:
+        * codex_fc table, 6 cols: pkey, codex.fc_timestamp (from fc json line), codex.fc_id, codex.fc_name (will always be "run" in this setup but no worries, just put the text value here - but always verify it's truly this in the rollout), codex.fc_namespace (same, will always be "web" - but need to verify in rollout) codex.fc_arguments which is a duckdb json object (put all these labels and table names as globals on top of api.py; don't touch vars.py and schema.py because this is a detour)
+        * codex_fco table, 3 cols: pkey, codex.fco_timestamp (from fco jsonline), codex.fco_id
+        * codex_calls table, 5 cols: pkey, codex.call_id, codex.fc_id, codex.fco_id, codex.rollout_filename (_original_ codex jsonl rollout filename including extension; can be reconstructed from session_id and timestamp from session_meta in the jsonl)
+        * codex_turn_search table, 8 cols: pkey, codex.ref_id (from event_msg corresponding turn-search), codex.call_id (establishes linkage to both fc and fco through codex_calls), codex.ref_domain, codex.ref_snippet, codex.ref_title, codex.ref_url (all from event_msg), codex.cite_text (raw text value from fco jsonline for parsed out related ref id)
+        * finally, there is a codex_innerdicts table that follows same strict procedures as currently xlsx, docx, and ssn an serializes everything there properly with all proper columns and contract. this innerdicts table will be authoritative downstream.
+    * also, in duckdb we establish a view (note that step 08 is overall closest in workflow, try to follow it as close as possible) where:
+        * every row is a unique KTP_SOURCE_KEY_COL
+        * KTP_SOURCE_KEY_COL (see vars.py) here is the total number of lines as in `nl -ba`  in the _archived under attempts_ copy of codex. you should modify api.py so that in addition to size and sha256 it also calculated nl -ba. this is helpful because archived attempts are by our design always append only and so this will differ necessarily for different attemtps, and therefore it's a nice file-based identifier for an attempt allowing the overarching approach in this repo where unique data identification is based on filename and fragment within it. this line number will always be usable regardless of what archived copy we deal with. it's of fragment type LINE_NUMBER.  also, notably it's always possible to trim the original codex jsonl at this line number properly, recalc hash and this should match hash inside attempt json. 
+        * the KTP_FILENAME_COL for each row will be corresponding codex.rollout_filename
+        * now, how do other columns get filled in? other columns include ALL as in ktp.table_1_* but are called ktp.ai_augment_* instead. the list is currently in api.py as COLUMNS but you must rename this to DOCX_COLUMNS and create new one with codex prefixes and fill out these (including in api).
+            * the value of these codex-prefixed fields comes obviously from the /push submission. just raw text values.
+            * in addition to those, we will construct KTP_AI_AUGMENT_FOOTNOTES_COL (this label must be in globals at top of api.py; note that this is a detour and so main repl pipeline should never be affected or edited). this will be assempled from values of new codex tables above and how exactly this will look like - is shown in an output sample below. just like we have docx_parse we will also create (within detour) codex_parse module helper where we will follow that parser and implement the textual values that will go into footnotes. no need to drag machine readable stuff there - just follow the looks of sample output below and overall of docx_parse architecture. note that footnote numbers at end of each ktp.ai_augment_* value are added programmatically.
+            * value of KTP_SOURCE_KEY_COL and ktp draw number is taken from  existing data based on what ktp first and last name was given in the /pull payload (later on we will implement that the api now draws a random source key from duckdb, but for now we are still using the hardcoded sample jsonl).
+    * so that view is precreated from an appendwatch-accepted jsonl and further used for look up.
+* then look up is simple - see if any row contains an exact match within their codex.cite_text, and if yes grab the necessary data. if multiple rows, fail this and say in error status code to /push client that this particular excerpt (cite it as as submitted) matched multiple entries on validation and they are encouraged to resubmit ensuring that each value is supported by a distinct excerpt unique across searched web pages.
+* let's extend the /push contract where together with each excerpt submitted must provide exact url as retrieved from search results. upon validation verify that both excerpt must be within codex.cite_text and also that submitted url must match corresponding codex.ref_url, otherwise fail submission.
+* note that this is purely all implemented in duckdb queries, pls consult step 08 for inspiration.
+
+here is what the output should look like:
+
+
+```
+#### ktp.filename: rollout-2026-07-27T12-10-36-019fa457-aac5-7652-8669-9d571206e7cb.jsonl
+**ktp.fragment**: 416
+
+**ktp.fragment_type**: line_number
+
+**ktp.draw_number**: 146
+
+**ktp.first_name**: A.
+
+**ktp.last_name**: Sheikh
+
+**ktp.ai_augment_attempt_id**: 20260804T203221_866237Z_6074203f9b8a453f9a2dac2b822bb62b
+
+**ktp.ai_augment_session_metadata**: {"originator":"codex_vscode","source":"vscode","cli_version":"0.146.0-alpha.3.1","model_provider":"openai","model":"gpt-5.6-sol","reasoning_effort":"xhigh","session_id":"019fa457-aac5-7652-8669-9d571206e7cb","timestamp":"2026-07-27T16:10:36.764Z"}
+
+**ktp.ai_augment_researcher_author**: Professor Sir Aziz Sheikh OBE; publishes as Aziz Sheikh and A. Sheikh; ORCID 0000-0001-7022-3056.^1,2^
+
+**ktp.ai_augment_place_of_residence**: Scotland, United Kingdom (Companies House country of residence); professionally based at the University of Oxford, England.^3^
+
+**ktp.ai_augment_gender**: Male.^4,5^
+
+**ktp.ai_augment_age_first_publication_according_to_openalex_profile**: 28-29; born in December 1968, with the earliest credible work on the OpenAlex profile dated 13 December 1997. Earlier records on the profile are identity-conflation errors.^6^
+
+**ktp.ai_augment_education**: BSc Physiology and MBBS, University College London; MSc, London School of Hygiene and Tropical Medicine; MD, Imperial College London.^7^
+
+**ktp.ai_augment_academic_position_s_**: University of Oxford: Pro-Vice-Chancellor, Head of the Nuffield Department of Primary Care Health Sciences, and Nuffield Professor of Primary Care Health Sciences. Previously Chair of Primary Care Research and Development, Director of the Usher Institute, and Dean of Data at the University of Edinburgh.^8^
+
+**ktp.ai_augment_social_capital**: Officer of the Order of the British Empire (2014) and Knight Bachelor (2022); adviser to governments, the World Bank, World Health Organization, and World Innovation Summit for Health; committee service for the Academy of Medical Sciences and Royal Society.^7^
+
+**ktp.ai_augment_links_**: Oxford profile: https://www.phc.ox.ac.uk/team/aziz-sheikh; ORCID: https://orcid.org/0000-0001-7022-3056; OpenAlex: https://openalex.org/A5026215303.^8^
+
+**ktp.ai_augment_footnotes**: 
+
+1. "...excerpt from codex.cite_text with some chars before and some chars after **web_search_excerpt number 1** in the list submitted with this value for ktp.ai_augment_researcher_author at /pull, where the raw submitted web search excerpt is boldened within the context...", accessed "fco timestamp", url://from-codex.ref_url
+2. "...excerpt from codex.cite_text with some chars before and some chars after **web_search_excerpt number 2** in the list submitted with this value for ktp.ai_augment_researcher_author at /pull, where the raw submitted web search excerpt is boldened within the context...", accessed "fco timestamp", url://from-codex.ref_url
+3. "...excerpt from codex.cite_text with some chars before and some chars after **web_search_excerpt number 1** in the list submitted with this value for ktp.ai_augment_place_of_residence at /pull, where the raw submitted web search excerpt is boldened within the context...", accessed "fco timestamp", url://from-codex.ref_url
+4. ..etc
+
+**ktp.ai_augment_search_queries**: 
+
+1. raw codex.fc_arguments value corresponding to fco from footnote 1 above
+2. raw codex.fc_arguments value corresponding to fco from footnote 2 above
+3. raw codex.fc_arguments value corresponding to fco from footnote 3 above
+4. ..etc
+
+**ktp.ai_augment_comments**:
+
+- **AI** commented: OpenAlex author A5026215303 appears conflated: it includes a 1962 A. Sheikh paper that predates Aziz Sheikh's documented December 1968 birth. Treat the literal earliest-work age and profile bibliometrics as unreliable; ORCID and the verified 1997 BMJ publication are safer identity anchors. (2026-08-04T20:32:21Z)
+```
 
 **importantly:**
 

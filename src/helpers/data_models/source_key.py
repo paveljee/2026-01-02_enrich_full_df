@@ -39,6 +39,7 @@ class FragmentType(str, Enum):
         EXCEL_ROW: Row index in an Excel spreadsheet
         DRAW_NUMBER: Draw number identifier
         CHAT_ID: Chat conversation identifier
+        LINE_NUMBER: Line number as in `nl -ba`
         AUTHOR_ID: Author unique identifier
         PAPER_ID: Paper unique identifier
         CSV_ROW: Row index in a CSV file
@@ -49,6 +50,7 @@ class FragmentType(str, Enum):
     EXCEL_ROW = "excel_row"
     DRAW_NUMBER = "draw_number"
     CHAT_ID = "chat_id"
+    LINE_NUMBER = "line_number"
     AUTHOR_ID = "author_id"
     PAPER_ID = "paper_id"
     CSV_ROW = "csv_row"
