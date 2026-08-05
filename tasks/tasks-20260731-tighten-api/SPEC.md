@@ -494,17 +494,20 @@ blocks.
 
 For every such output, require exactly one corresponding
 `event_msg/web_search_end` with the same `call_id`. Its `results` must be a
-list, and each indexed `ref_id` must resolve to exactly one `text_result` with
-string domain, snippet, title, and URL fields. Preserve its optional
-`thumbnail_url` as `codex.ref_thumbnail_url`; it has no downstream use in this
-task. Then require exactly one earlier
+list, and each cited `ref_id` must resolve to exactly one `text_result`. An
+eligible ref requires only its non-blank `ref_id`, exact non-blank URL, and the
+isolated `codex.cite_text` from the FCO. Preserve domain, snippet, title, and
+thumbnail URL when present; these are nullable provenance metadata and have no
+downstream validation use. A uniquely linked result without a usable URL is
+individually ineligible and skipped without invalidating other refs in the
+same output. Then require exactly one earlier
 top-level `response_item/function_call` with that `call_id`, a globally unique
 `id` (`fc_id`), valid timestamp, `name="run"`, `namespace="web"`, and arguments
 that decode to one JSON object containing an eligible `search_query`, `open`,
 or `click` action. Store the entire decoded arguments object as DuckDB JSON.
 
 The chain is fail-closed: malformed/duplicate IDs, a duplicate or missing
-event/call, multiple text blocks, unsupported result shape, malformed
+event/call, multiple text blocks, unsupported required result shape, malformed
 arguments, a citation absent or duplicated in event results, or a ref section
 that cannot be isolated unambiguously rejects indexing. Output records without
 citation markers and unrelated records are simply ineligible. Assistant,
@@ -539,6 +542,10 @@ parallel serialization convention:
   `codex.call_id`, `codex.ref_domain`, `codex.ref_snippet`,
   `codex.ref_thumbnail_url`, `codex.ref_title`, `codex.ref_url`,
   `codex.cite_text`.
+
+In `codex_turn_ref`, `codex.ref_id`, `codex.call_id`, `codex.ref_url`, and
+`codex.cite_text` are required. Domain, snippet, thumbnail URL, and title are
+nullable because the web tool does not guarantee those metadata fields.
 
 `codex.fc_id`, `codex.fco_id`, and `codex.call_id` are individually unique;
 `codex_turn_ref` is unique on `(codex.call_id, codex.ref_id)`. Enforce the

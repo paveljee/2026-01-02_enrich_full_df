@@ -249,8 +249,7 @@ SUBMISSION_EXAMPLE: dict[str, object] = {
     AI_AUGMENT_COLUMNS[1]: "Stanford campus, Stanford, California.",
     AI_AUGMENT_COLUMNS[2]: "Female.",
     AI_AUGMENT_COLUMNS[3]: (
-        "28–29; born in 1976, with the earliest visible work on the "
-        "OpenAlex profile dated 2005."
+        "28–29; born in 1976, with the earliest visible work on the OpenAlex profile dated 2005."
     ),
     AI_AUGMENT_COLUMNS[4]: (
         "B.A. Physics, Princeton University, 1999; M.S. Electrical "
@@ -342,10 +341,7 @@ PULL_ROUTE: dict[str, Any] = {
             "description": "JSON Lines annotation task",
             "content": {
                 MEDIA_TYPE: {
-                    "example": (
-                        json.dumps(NULL_SUBMISSION_EXAMPLE, ensure_ascii=False)
-                        + "\n"
-                    ),
+                    "example": (json.dumps(NULL_SUBMISSION_EXAMPLE, ensure_ascii=False) + "\n"),
                 },
             },
         },
@@ -424,10 +420,7 @@ class FieldSubmission(BaseModel):
     def validate_field(self) -> Self:
         if not self.value.strip():
             raise ValueError("value must be non-blank")
-        evidence_pairs = [
-            (evidence.excerpt, evidence.url)
-            for evidence in self.web_search_excerpts
-        ]
+        evidence_pairs = [(evidence.excerpt, evidence.url) for evidence in self.web_search_excerpts]
         if len(set(evidence_pairs)) != len(evidence_pairs):
             raise ValueError("web_search_excerpts must not contain duplicate pairs")
         return self
@@ -467,23 +460,13 @@ class CompactSessionMetadata(BaseModel):
 class Submission(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    researcher_author: FieldSubmission = Field(
-        alias=KTP_AI_AUGMENT_RESEARCHER_AUTHOR_COL
-    )
-    place_of_residence: FieldSubmission = Field(
-        alias=KTP_AI_AUGMENT_PLACE_OF_RESIDENCE_COL
-    )
+    researcher_author: FieldSubmission = Field(alias=KTP_AI_AUGMENT_RESEARCHER_AUTHOR_COL)
+    place_of_residence: FieldSubmission = Field(alias=KTP_AI_AUGMENT_PLACE_OF_RESIDENCE_COL)
     gender: FieldSubmission = Field(alias=KTP_AI_AUGMENT_GENDER_COL)
-    age_first_publication: FieldSubmission = Field(
-        alias=KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL
-    )
+    age_first_publication: FieldSubmission = Field(alias=KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL)
     education: FieldSubmission = Field(alias=KTP_AI_AUGMENT_EDUCATION_COL)
-    academic_positions: FieldSubmission = Field(
-        alias=KTP_AI_AUGMENT_ACADEMIC_POSITIONS_COL
-    )
-    social_capital: FieldSubmission = Field(
-        alias=KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL
-    )
+    academic_positions: FieldSubmission = Field(alias=KTP_AI_AUGMENT_ACADEMIC_POSITIONS_COL)
+    social_capital: FieldSubmission = Field(alias=KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL)
     links: FieldSubmission = Field(alias=KTP_AI_AUGMENT_LINKS_COL)
     comments: CommentSubmission | None = Field(
         default=None,
@@ -503,10 +486,7 @@ class Submission(BaseModel):
         )
 
     def normalized_values(self) -> dict[str, str]:
-        values = {
-            column: field.value
-            for column, field in self.evidence_items()
-        }
+        values = {column: field.value for column, field in self.evidence_items()}
         if self.comments is not None:
             values[KTP_AI_AUGMENT_COMMENTS_COL] = self.comments.value
         return values
@@ -516,24 +496,17 @@ class CodexTextResult(BaseModel):
     model_config = ConfigDict(extra="ignore", strict=True)
 
     type: Literal["text_result"]
-    domain: StrictStr
+    domain: StrictStr | None = None
     ref_id: StrictStr
-    snippet: StrictStr
+    snippet: StrictStr | None = None
     thumbnail_url: StrictStr | None = None
-    title: StrictStr
-    url: StrictStr
+    title: StrictStr | None = None
+    url: StrictStr | None = None
 
     @model_validator(mode="after")
     def validate_result(self) -> Self:
-        if any(not value.strip() for value in (
-            self.domain,
-            self.ref_id,
-            self.title,
-            self.url,
-        )):
-            raise ValueError("web result identity fields must be non-blank")
-        if self.thumbnail_url is not None and not self.thumbnail_url.strip():
-            raise ValueError("web result thumbnail URL must be non-blank when present")
+        if not self.ref_id.strip():
+            raise ValueError("web result ref_id must be non-blank")
         return self
 
 
@@ -621,10 +594,10 @@ class CodexFcoRow:
 class CodexTurnRefRow:
     ref_id: str
     call_id: str
-    domain: str
-    snippet: str
+    domain: str | None
+    snippet: str | None
     thumbnail_url: str | None
-    title: str
+    title: str | None
     url: str
     cite_text: str
 
@@ -669,8 +642,7 @@ RUNTIME_CONFIGURATION: RuntimeConfiguration | None = None
 
 def _has_control_character(value: str) -> bool:
     return any(
-        ord(character) < CONTROL_CHARACTER_CEILING
-        or ord(character) == DELETE_CHARACTER_CODEPOINT
+        ord(character) < CONTROL_CHARACTER_CEILING or ord(character) == DELETE_CHARACTER_CODEPOINT
         for character in value
     )
 
@@ -706,15 +678,10 @@ def configure_runtime(config_path: Path) -> RuntimeConfiguration:
     try:
         pipeline = PipelineConfig.from_json(config_path)
     except (OSError, ValueError) as exc:
-        raise PushConfigurationError(
-            f"--config is invalid or unreadable: {config_path}"
-        ) from exc
+        raise PushConfigurationError(f"--config is invalid or unreadable: {config_path}") from exc
     if pipeline.output_format not in {"txt", "docx"}:
         raise PushConfigurationError("config output_format must be txt or docx")
-    if (
-        not pipeline.db_file.is_file()
-        or not os.access(pipeline.db_file, os.R_OK)
-    ):
+    if not pipeline.db_file.is_file() or not os.access(pipeline.db_file, os.R_OK):
         raise PushConfigurationError(
             f"configured source DuckDB is not readable: {pipeline.db_file}"
         )
@@ -744,9 +711,7 @@ def configure_runtime(config_path: Path) -> RuntimeConfiguration:
 
 def runtime_configuration() -> RuntimeConfiguration:
     if RUNTIME_CONFIGURATION is None:
-        raise PushConfigurationError(
-            "API was not started with required --config config.json"
-        )
+        raise PushConfigurationError("API was not started with required --config config.json")
     return RUNTIME_CONFIGURATION
 
 
@@ -784,8 +749,7 @@ def push_configuration() -> PushConfiguration:
         or relative_path.suffix != ".jsonl"
     ):
         raise PushConfigurationError(
-            f"{ROLLOUT_ENV_NAME} must name a rollout-*.jsonl file; "
-            "correct .env and restart the API"
+            f"{ROLLOUT_ENV_NAME} must name a rollout-*.jsonl file; correct .env and restart the API"
         )
 
     if not _valid_nonblank(AIVM_INSTANCE):
@@ -796,10 +760,7 @@ def push_configuration() -> PushConfiguration:
         raise PushConfigurationError(
             "FASTAPI_DETOUR_AIVM_USER is invalid; correct .env and restart the API"
         )
-    if (
-        not AIVM_SSH_PORT.isdecimal()
-        or not MIN_TCP_PORT <= int(AIVM_SSH_PORT) <= MAX_TCP_PORT
-    ):
+    if not AIVM_SSH_PORT.isdecimal() or not MIN_TCP_PORT <= int(AIVM_SSH_PORT) <= MAX_TCP_PORT:
         raise PushConfigurationError(
             "FASTAPI_DETOUR_AIVM_SSH_PORT is invalid; correct .env and restart the API"
         )
@@ -1045,9 +1006,10 @@ def parse_appendwatch_report(
             raise PushValidationError("archived appendwatch report contains a duplicate path")
         seen_paths.add(path)
         if path == target:
-            target_entries.append(
-                ("OK" if ok_file is not None else "COMPROMISED", parent_compromised)
-            )
+            target_entries.append((
+                "OK" if ok_file is not None else "COMPROMISED",
+                parent_compromised,
+            ))
         line_index += 1
 
     if line_index < len(lines):
@@ -1100,9 +1062,7 @@ def parse_rollout(rollout_path: Path) -> tuple[RolloutRecord, ...]:
                 f"archived rollout contains malformed JSONL at line {line_number}"
             ) from exc
         if not isinstance(value, dict):
-            raise PushValidationError(
-                f"archived rollout line {line_number} is not a JSON object"
-            )
+            raise PushValidationError(f"archived rollout line {line_number} is not a JSON object")
         records.append(
             RolloutRecord(
                 line_number=line_number,
@@ -1139,9 +1099,7 @@ def _web_arguments(payload: Mapping[str, object], line_number: int) -> dict[str,
         raise PushValidationError(f"web call {call_id} has malformed arguments") from exc
     if not isinstance(decoded, dict):
         raise PushValidationError(f"web call {call_id} arguments are not a JSON object")
-    eligible_actions = [
-        action for action in ELIGIBLE_WEB_ACTIONS if decoded.get(action)
-    ]
+    eligible_actions = [action for action in ELIGIBLE_WEB_ACTIONS if decoded.get(action)]
     if len(eligible_actions) != 1:
         raise PushValidationError(
             f"web call {call_id} must contain exactly one eligible web action"
@@ -1171,16 +1129,12 @@ def _session_metadata(
         session_record.value.get("timestamp"),
         label="session_meta response",
     )
-    local_timestamp = datetime.fromisoformat(
-        payload_timestamp.replace("Z", "+00:00")
-    ).astimezone(ZoneInfo(timezone_name))
-    rollout_filename = (
-        f"rollout-{local_timestamp:%Y-%m-%dT%H-%M-%S}-{session_id}.jsonl"
+    local_timestamp = datetime.fromisoformat(payload_timestamp.replace("Z", "+00:00")).astimezone(
+        ZoneInfo(timezone_name)
     )
+    rollout_filename = f"rollout-{local_timestamp:%Y-%m-%dT%H-%M-%S}-{session_id}.jsonl"
     if rollout_filename != configured_rollout_basename:
-        raise PushValidationError(
-            "session metadata does not match the configured rollout basename"
-        )
+        raise PushValidationError("session metadata does not match the configured rollout basename")
 
     turn_context_payload = next(
         (
@@ -1196,18 +1150,16 @@ def _session_metadata(
     model = turn_context_payload.get("model")
     reasoning_effort = turn_context_payload.get("effort")
     try:
-        compact = CompactSessionMetadata.model_validate(
-            {
-                "originator": payload.get("originator"),
-                "source": payload.get("source"),
-                "cli_version": payload.get("cli_version"),
-                "model_provider": payload.get("model_provider"),
-                "model": model,
-                "reasoning_effort": reasoning_effort,
-                "session_id": session_id,
-                "timestamp": response_timestamp,
-            }
-        )
+        compact = CompactSessionMetadata.model_validate({
+            "originator": payload.get("originator"),
+            "source": payload.get("source"),
+            "cli_version": payload.get("cli_version"),
+            "model_provider": payload.get("model_provider"),
+            "model": model,
+            "reasoning_effort": reasoning_effort,
+            "session_id": session_id,
+            "timestamp": response_timestamp,
+        })
     except ValidationError as exc:
         raise PushValidationError("rollout session metadata fields are incomplete") from exc
     return SessionMetadata(
@@ -1286,10 +1238,7 @@ def build_rollout_index(
                     f"web event at rollout line {record.line_number} has an invalid call_id"
                 )
             events.setdefault(cast(str, call_id), []).append(record)
-        elif (
-            value.get("type") == "response_item"
-            and payload_type == "function_call_output"
-        ):
+        elif value.get("type") == "response_item" and payload_type == "function_call_output":
             text = _eligible_fco_text(record, payload)
             if text is not None:
                 cited_outputs.append((record, payload, text))
@@ -1305,8 +1254,7 @@ def build_rollout_index(
         fco_id = output_payload.get("id")
         if not _valid_nonblank(call_id) or not _valid_nonblank(fco_id):
             raise PushValidationError(
-                f"cited function output at rollout line {output_record.line_number} "
-                "has invalid IDs"
+                f"cited function output at rollout line {output_record.line_number} has invalid IDs"
             )
         call_id = cast(str, call_id)
         fco_id = cast(str, fco_id)
@@ -1327,11 +1275,7 @@ def build_rollout_index(
             )
         call_record = matching_calls[0]
         event_record = matching_events[0]
-        if not (
-            call_record.line_number
-            < event_record.line_number
-            < output_record.line_number
-        ):
+        if not (call_record.line_number < event_record.line_number < output_record.line_number):
             raise PushValidationError(f"cited web chain {call_id} is out of order")
         call_payload = cast(dict[str, object], call_record.value["payload"])
         fc_id = call_payload.get("id")
@@ -1398,6 +1342,8 @@ def build_rollout_index(
                 raise PushValidationError(
                     f"citation {section.ref_id} has unsupported result metadata"
                 ) from exc
+            if not _valid_nonblank(result.url):
+                continue
             turn_ref_rows.append(
                 CodexTurnRefRow(
                     ref_id=section.ref_id,
@@ -1406,7 +1352,7 @@ def build_rollout_index(
                     snippet=result.snippet,
                     thumbnail_url=result.thumbnail_url,
                     title=result.title,
-                    url=result.url,
+                    url=cast(str, result.url),
                     cite_text=section.text,
                 )
             )
@@ -1467,10 +1413,10 @@ def _create_codex_schema(conn: duckdb.DuckDBPyConnection) -> None:
             {id_col} BIGINT PRIMARY KEY DEFAULT nextval('{CODEX_TURN_REF_ID_SEQUENCE}'),
             {duckdb_quote_identifier(CODEX_REF_ID_COL)} VARCHAR NOT NULL,
             {duckdb_quote_identifier(CODEX_CALL_ID_COL)} VARCHAR NOT NULL,
-            {duckdb_quote_identifier(CODEX_REF_DOMAIN_COL)} VARCHAR NOT NULL,
-            {duckdb_quote_identifier(CODEX_REF_SNIPPET_COL)} VARCHAR NOT NULL,
+            {duckdb_quote_identifier(CODEX_REF_DOMAIN_COL)} VARCHAR,
+            {duckdb_quote_identifier(CODEX_REF_SNIPPET_COL)} VARCHAR,
             {duckdb_quote_identifier(CODEX_REF_THUMBNAIL_URL_COL)} VARCHAR,
-            {duckdb_quote_identifier(CODEX_REF_TITLE_COL)} VARCHAR NOT NULL,
+            {duckdb_quote_identifier(CODEX_REF_TITLE_COL)} VARCHAR,
             {duckdb_quote_identifier(CODEX_REF_URL_COL)} VARCHAR NOT NULL,
             {duckdb_quote_identifier(CODEX_CITE_TEXT_COL)} VARCHAR NOT NULL,
             UNIQUE (
@@ -1493,8 +1439,7 @@ def _insert_or_validate(
 ) -> None:
     projection = ", ".join(duckdb_quote_identifier(column) for column in columns)
     existing = conn.execute(
-        f"SELECT {projection} FROM {table_name} "
-        f"WHERE {duckdb_quote_identifier(key_column)} = ?",
+        f"SELECT {projection} FROM {table_name} WHERE {duckdb_quote_identifier(key_column)} = ?",
         [key_value],
     ).fetchall()
     if existing:
@@ -1535,9 +1480,7 @@ def persist_rollout_index(
             raise PushValidationError(
                 "archived rollout prefix is older than its persisted provenance index"
             )
-        current_turn_keys = {
-            (row.call_id, row.ref_id) for row in rollout_index.turn_ref_rows
-        }
+        current_turn_keys = {(row.call_id, row.ref_id) for row in rollout_index.turn_ref_rows}
         existing_turn_keys = {
             (cast(str, row[0]), cast(str, row[1]))
             for row in conn.execute(
@@ -1624,9 +1567,7 @@ def persist_rollout_index(
                 CODEX_REF_URL_COL,
                 CODEX_CITE_TEXT_COL,
             )
-            projection = ", ".join(
-                duckdb_quote_identifier(column) for column in columns
-            )
+            projection = ", ".join(duckdb_quote_identifier(column) for column in columns)
             existing = conn.execute(
                 f"SELECT {projection} FROM {CODEX_TURN_REF_TABLE} WHERE "
                 f"{duckdb_quote_identifier(CODEX_CALL_ID_COL)} = ? AND "
@@ -1652,8 +1593,7 @@ def persist_rollout_index(
             else:
                 placeholders = ", ".join("?" for _column in columns)
                 conn.execute(
-                    f"INSERT INTO {CODEX_TURN_REF_TABLE} ({projection}) "
-                    f"VALUES ({placeholders})",
+                    f"INSERT INTO {CODEX_TURN_REF_TABLE} ({projection}) VALUES ({placeholders})",
                     list(values),
                 )
 
@@ -1672,14 +1612,16 @@ def persist_rollout_index(
             ),
             (
                 CODEX_TURN_REF_TABLE,
-                "(" + duckdb_quote_identifier(CODEX_CALL_ID_COL) + ", "
-                + duckdb_quote_identifier(CODEX_REF_ID_COL) + ")",
+                "("
+                + duckdb_quote_identifier(CODEX_CALL_ID_COL)
+                + ", "
+                + duckdb_quote_identifier(CODEX_REF_ID_COL)
+                + ")",
             ),
         )
         for table_name, distinct_expression in integrity_checks:
             total, distinct = conn.execute(
-                f"SELECT COUNT(*), COUNT(DISTINCT {distinct_expression}) "
-                f"FROM {table_name}"
+                f"SELECT COUNT(*), COUNT(DISTINCT {distinct_expression}) FROM {table_name}"
             ).fetchone()
             if total != distinct:
                 raise PushValidationError(
@@ -1752,9 +1694,7 @@ def persist_rollout_index(
 
 
 def _render_fco_timestamp(value: datetime) -> str:
-    return value.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace(
-        "+00:00", "Z"
-    )
+    return value.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def validate_submission_evidence(
@@ -1840,14 +1780,10 @@ def source_rows() -> Iterator[dict[str, object]]:
             try:
                 value: object = json.loads(line)
             except json.JSONDecodeError as exc:
-                raise RuntimeError(
-                    f"invalid JSON in {SOURCE_FILE} at line {line_number}"
-                ) from exc
+                raise RuntimeError(f"invalid JSON in {SOURCE_FILE} at line {line_number}") from exc
 
             if not isinstance(value, dict):
-                raise RuntimeError(
-                    f"expected an object in {SOURCE_FILE} at line {line_number}"
-                )
+                raise RuntimeError(f"expected an object in {SOURCE_FILE} at line {line_number}")
 
             yield cast(dict[str, object], value)
 
@@ -1856,9 +1792,7 @@ def select_columns(row: Mapping[str, object]) -> dict[str, object]:
     missing = [column for column in DOCX_COLUMNS if column not in row]
 
     if missing:
-        raise RuntimeError(
-            f"target row is missing keys: {', '.join(missing)}"
-        )
+        raise RuntimeError(f"target row is missing keys: {', '.join(missing)}")
 
     return {column: row[column] for column in DOCX_COLUMNS}
 
@@ -1876,20 +1810,19 @@ def json_line(row: Mapping[str, object]) -> str:
 
 def pull_lines() -> Iterator[str]:
     for row in source_rows():
-        if ((row.get(DRAW_NUMBER_COLUMN) == TARGET_DRAW_NUMBER) and
-            (row.get(FRAGMENT_TYPE_COLUMN) == DOCX_ROW_FRAGMENT_TYPE)):
+        if (row.get(DRAW_NUMBER_COLUMN) == TARGET_DRAW_NUMBER) and (
+            row.get(FRAGMENT_TYPE_COLUMN) == DOCX_ROW_FRAGMENT_TYPE
+        ):
             select_columns(row)
             first_name = row.get(KTP_FIRST_NAME_COL)
             last_name = row.get(KTP_LAST_NAME_COL)
             if not _valid_nonblank(first_name) or not _valid_nonblank(last_name):
                 raise RuntimeError("target row is missing researcher identity")
-            yield json_line(
-                {
-                    KTP_FIRST_NAME_COL: first_name,
-                    KTP_LAST_NAME_COL: last_name,
-                    **dict.fromkeys(AI_AUGMENT_COLUMNS),
-                }
-            )
+            yield json_line({
+                KTP_FIRST_NAME_COL: first_name,
+                KTP_LAST_NAME_COL: last_name,
+                **dict.fromkeys(AI_AUGMENT_COLUMNS),
+            })
             return
 
         yield json_line(row)
@@ -1897,8 +1830,9 @@ def pull_lines() -> Iterator[str]:
 
 def ground_truth() -> dict[str, object]:
     for row in source_rows():
-        if ((row.get(DRAW_NUMBER_COLUMN) == TARGET_DRAW_NUMBER) and
-            (row.get(FRAGMENT_TYPE_COLUMN) == DOCX_ROW_FRAGMENT_TYPE)):
+        if (row.get(DRAW_NUMBER_COLUMN) == TARGET_DRAW_NUMBER) and (
+            row.get(FRAGMENT_TYPE_COLUMN) == DOCX_ROW_FRAGMENT_TYPE
+        ):
             return select_columns(row)
 
     raise PushValidationError("target draw ground truth was not found")
@@ -2090,8 +2024,7 @@ def append_codex_output(
     placeholders = ", ".join("?" for _column in columns)
     try:
         conn.execute(
-            f"INSERT INTO {CODEX_OUTPUT_ROWS_TABLE} ({projection}) "
-            f"VALUES ({placeholders})",
+            f"INSERT INTO {CODEX_OUTPUT_ROWS_TABLE} ({projection}) VALUES ({placeholders})",
             [row[column] for column in columns],
         )
     except duckdb.ConstraintException as exc:
@@ -2121,12 +2054,10 @@ def selected_card_outer_dict(
     detour_conn: duckdb.DuckDBPyConnection,
     researcher: ResearcherContext,
 ) -> OuterDict:
-    name_key = NameKey(
-        **{
-            KTP_FIRST_NAME_COL: researcher.first_name,
-            KTP_LAST_NAME_COL: researcher.last_name,
-        }
-    )
+    name_key = NameKey(**{
+        KTP_FIRST_NAME_COL: researcher.first_name,
+        KTP_LAST_NAME_COL: researcher.last_name,
+    })
     outer_dict = OuterDict.from_name_keys([name_key])
     append_innerdicts_from_jsonlines_table(
         source_conn,
@@ -2204,9 +2135,9 @@ def write_accepted_submission(
         submitted_line = json_line(normalized_submission)
         truth_line = json_line(truth)
         outer_dict = selected_card_outer_dict(source_conn, detour_conn, researcher)
-        intro_date = attempt_timestamp.astimezone(
-            ZoneInfo(runtime.pipeline.timezone)
-        ).strftime("%B %d, %Y")
+        intro_date = attempt_timestamp.astimezone(ZoneInfo(runtime.pipeline.timezone)).strftime(
+            "%B %d, %Y"
+        )
         cards = build_cards(
             outer_dict,
             total_draws=runtime.pipeline.total_draws,

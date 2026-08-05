@@ -62,6 +62,7 @@ TEST_CALL_ID = "call_test"
 TEST_FC_ID = "fc_test"
 TEST_FCO_ID = "fco_test"
 TEST_REF_ID = "turn0search0"
+TEST_NO_URL_REF_ID = "turn0view1"
 TEST_EXCERPT = "Professor Example holds the Example Chair."
 TEST_URL = "https://example.test/profile"
 TEST_SOURCE_KEY = '{"ktp.first_name": "A.", "ktp.last_name": "Sheikh"}'
@@ -300,6 +301,12 @@ EXPECTED_TABLE_COLUMNS = {
         "codex.cite_text",
     ),
 }
+OPTIONAL_REF_METADATA_COLUMNS = (
+    api.CODEX_REF_DOMAIN_COL,
+    api.CODEX_REF_SNIPPET_COL,
+    api.CODEX_REF_THUMBNAIL_URL_COL,
+    api.CODEX_REF_TITLE_COL,
+)
 
 
 # File access helpers are intentionally centralized for fixture auditability.
@@ -626,6 +633,73 @@ def test_direct_search_open_and_click_build_complete_ref_rows(action: str) -> No
         cite_text=index.turn_ref_rows[0].cite_text,
     )
     assert TEST_EXCERPT in index.turn_ref_rows[0].cite_text
+
+
+def test_optional_result_metadata_is_nullable_and_no_url_ref_is_skipped() -> None:
+    records = list(minimal_rollout_records())
+    event_value = json.loads(json.dumps(records[3].value))
+    event_results = event_value["payload"]["results"]
+    valid_result = event_results[0]
+    for optional_field in ("domain", "snippet", "thumbnail_url", "title"):
+        valid_result.pop(optional_field, None)
+    event_results.append({
+        "type": "text_result",
+        "ref_id": TEST_NO_URL_REF_ID,
+        "snippet": "Total lines: 1",
+        "title": "Internal Error",
+    })
+    records[3] = rollout_record(event_value, records[3].line_number)
+
+    output_value = json.loads(json.dumps(records[4].value))
+    output_text = output_value["payload"]["output"][0]["text"]
+    output_value["payload"]["output"][0]["text"] = (
+        f"{output_text}\n{api.CODEX_RESULT_SEPARATOR}\nInternal Error ()\n"
+        f"{api.CODEX_CITE_MARKER_PREFIX}{TEST_NO_URL_REF_ID}"
+        f"{api.CODEX_CITE_MARKER_SUFFIX} Source: open; Total lines: 1"
+    )
+    records[4] = rollout_record(output_value, records[4].line_number)
+
+    index = api.build_rollout_index(
+        tuple(records),
+        timezone_name=TEST_TIMEZONE,
+        configured_rollout_basename=TEST_ROLLOUT_FILENAME,
+    )
+
+    assert index.turn_ref_rows == (
+        api.CodexTurnRefRow(
+            ref_id=TEST_REF_ID,
+            call_id=TEST_CALL_ID,
+            domain=None,
+            snippet=None,
+            thumbnail_url=None,
+            title=None,
+            url=TEST_URL,
+            cite_text=index.turn_ref_rows[0].cite_text,
+        ),
+    )
+    connection = duckdb.connect(":memory:")
+    try:
+        api._create_codex_schema(connection)
+        not_null = {
+            row[1]: bool(row[3])
+            for row in connection.execute(
+                f"PRAGMA table_info('{api.CODEX_TURN_REF_TABLE}')"
+            ).fetchall()
+        }
+        assert all(not not_null[column] for column in OPTIONAL_REF_METADATA_COLUMNS)
+
+        api.persist_rollout_index(connection, index)
+        stored = connection.execute(
+            f'SELECT "{api.CODEX_REF_DOMAIN_COL}", '
+            f'"{api.CODEX_REF_SNIPPET_COL}", '
+            f'"{api.CODEX_REF_THUMBNAIL_URL_COL}", '
+            f'"{api.CODEX_REF_TITLE_COL}", '
+            f'"{api.CODEX_REF_URL_COL}" '
+            f"FROM {api.CODEX_TURN_REF_TABLE}"
+        ).fetchone()
+        assert stored == (None, None, None, None, TEST_URL)
+    finally:
+        connection.close()
 
 
 def test_rollout_index_fails_closed_on_broken_direct_chain() -> None:

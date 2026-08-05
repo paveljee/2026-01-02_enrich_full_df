@@ -2,6 +2,13 @@
 
 ## Status
 
+- Production finding on 2026-08-05: valid direct-web results may omit title,
+  while an `Internal Error` result may omit domain and URL. The authoritative
+  clarification is that only ref ID, ref URL, and cite text are required for an
+  eligible ref; domain/snippet/title/thumbnail are optional provenance.
+- Fix in progress: relax optional metadata in the typed model and regenerated
+  DuckDB schema, and skip only no-URL refs. No compatibility path is needed for
+  the discarded strict detour DB.
 - Reviewed the major human-contract revamp and updated only the AI-authored section of `SPEC.md`.
 - Reflected the latest sample wording that links each footnote to its numbered raw web-run arguments, FCO timestamp, and exact result URL.
 - Reflected the newer card sample's programmatic `AI-generated text` label, quoted values, footnote placement, and matching comment form.

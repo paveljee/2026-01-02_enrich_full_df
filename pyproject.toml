@@ -171,7 +171,7 @@ pydantic = "==2.13.4"
 httpx2 = ">=2,<3"
 
 [tool.pixi.feature.detour-ai-augment-backend-api.tasks]
-serve = "python -m src.detours.detour_ai_augment.src.backend.api --config config.json"
+serve = "python -m src.detours.detour_ai_augment.src.backend.api --config config.repl.json"
 # provision a worktree first:
 # git worktree add --detach /tmp/detour-api-9a187d3 9a187d3fc497bef6d1568b885b33f0a834607d22
 # cp ./.env /tmp/detour-api-9a187d3; mkdir -p /tmp/detour-api-9a187d3/tmp && cp ./tmp/sheikh.jsonl /tmp/detour-api-9a187d3/tmp/sheikh.jsonl
