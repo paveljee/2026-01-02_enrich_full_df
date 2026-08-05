@@ -171,7 +171,13 @@ pydantic = "==2.13.4"
 httpx2 = ">=2,<3"
 
 [tool.pixi.feature.detour-ai-augment-backend-api.tasks]
-serve = "uvicorn src.detours.detour_ai_augment.src.backend.api:app --host 0.0.0.0 --port 8000"
+# serve = "uvicorn src.detours.detour_ai_augment.src.backend.api:app --host 0.0.0.0 --port 8000"
+# provision a worktree first:
+# git worktree add --detach /tmp/detour-api-9a187d3 9a187d3fc497bef6d1568b885b33f0a834607d22
+# cp ./.env /tmp/detour-api-9a187d3; mkdir -p /tmp/detour-api-9a187d3/tmp && cp ./tmp/sheikh.jsonl /tmp/detour-api-9a187d3/tmp/sheikh.jsonl
+serve = "cd /tmp/detour-api-9a187d3 && uvicorn src.detours.detour_ai_augment.src.backend.api:app --host 0.0.0.0 --port 8000"
+# don't forget to clean up afterwards:
+# rm -f /tmp/detour-api-9a187d3
 
 [tool.pixi.environments]
 detour-mode0-econ-stats = ["detour-mode0-econ-stats"]
