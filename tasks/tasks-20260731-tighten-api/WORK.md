@@ -2,47 +2,47 @@
 
 ## Status
 
-- August 4 production-rejection investigation in progress; no implementation changes are authorized.
-- Any corrective edit to the AI-authored `SPEC.md` section requires prior chat approval.
-- Reviewed and preserved the human-reviewed staged deployment edits; Git remains read-only.
-- Reviewed the inherited setup, current detour README/assets/scripts/API/watcher/tests, prior FastAPI-detour context, and the bundled sample rollout.
-- Latest human edit requires surgical implementation: only necessary code changes, with unrelated code and comments untouched.
-- Protected appendwatch deployment, the ordered `/push` gate, strict evidence model, and reviewer artifacts are implemented.
+- Reviewed the major human-contract revamp and updated only the AI-authored section of `SPEC.md`.
+- Reflected the latest sample wording that links each footnote to its numbered raw web-run query, FCO timestamp, and exact result URL.
+- Reflected the newer card sample's programmatic `AI-generated text` label, quoted values, footnote placement, and matching comment form.
+- Clarified that each schema `pkey` placeholder means a primary key whose concrete column name is `id`.
+- No production implementation is in progress. `test_api.py` is at the user-restored baseline.
+- Git use remains read-only. All review commands use `pixi run`.
+- `README.md`, `.env.example`, sample/ground-truth data, and main-pipeline code remain untouched.
 
-## Confirmed findings
+## Context refreshed
 
-- The mounted macOS project path is already denied to the `ai` user at its parent directory; root can use that protected mount for appendwatch code and reports, and the host backend can read the same files.
-- Current appendwatch provides append-only monitoring, sticky `COMPROMISED` state, fail-closed handling for monitoring gaps, and atomic report replacement, but it is not provisioned or managed by systemd.
-- Current `/push` accepts exactly the nine annotation keys with non-null values, writes the submission plus ground truth, and performs no rollout or appendwatch checks.
-- Sample Codex web activity links a `response_item/function_call` (`namespace: "web"`, `name: "run"`) to a `response_item/function_call_output` by `call_id`; `event_msg/web_search_end` with the same ID is additional metadata. Web search, open, and click all use the same web `run` call family.
-- Human-spec ordering is authoritative: SCP the configured rollout first, atomically/version-copy the appendwatch report second, then parse that immutable report copy. Only an OK entry for the copied rollout permits payload/evidence validation.
-- Missing rollout-path configuration must be generic to the runtime but explicit in backend logs; failed evidence validation must likewise return only brief generic guidance.
+- Re-read the prerequisite SPEC, current detour API/deployment/watcher/tests, and the July direct-web rollout plus its annotation/response.
+- Reviewed `step_08_match_docx.py`, `docx_parse.py`, `duckdb_utils.py`, common innerdict/data models, `cards.py`, and step 10 card assembly.
+- Reviewed `PipelineConfig.from_json()` and the sibling detour-DB derivation/isolation pattern in `detour_step4_breakdown.py` and its tests.
+- Confirmed the configured source DuckDB is context only and must remain read-only; Codex relations persist in one separately derived detour DuckDB.
 
-## Implementation plan captured in SPEC
+## Revised contract captured in SPEC
 
-1. Stage appendwatch in the protected mounted control directory; persist it with root systemd and verify it is active before opening the `ai` shell, without redesigning private SSH.
-2. Reuse appendwatch's current atomic tree report and OK/COMPROMISED behavior; add no second report/state system unless proven indispensable.
-3. Keep the chat-specific rollout path manual in root `.env` and reuse the existing deployment SSH/key/report settings without a new configuration subsystem.
-4. Enforce `/push` order: SCP rollout, version-copy the existing tree report, check only that copy, parse the archived rollout, then run Pydantic.
-5. Extend each of the nine fields to carry `value` plus exact `web_search_excerpts`; accept matches only from linked Codex web `run` call/output pairs for search/open/click.
-6. Archive the rollout/report evidence and emit a field-oriented Markdown report containing complete escaped call/output objects, AI output, and ground truth.
-7. Add focused copied-report, acquisition-order, evidence-schema, generic-error, real-rollout, and report tests; preserve existing appendwatch tests. Deployment relies on its executable runtime probes plus shell syntax validation rather than decorative source-text assertions.
+1. Preserve the existing fail-closed order: SCP rollout -> copy appendwatch report -> validate copied report -> index approved rollout -> Pydantic/SQL evidence validation -> accepted innerdict/card writes.
+2. Support many `/pull`/`push` cycles in one cumulative rollout. The rollout filename can repeat; each archived physical line count demarcates the prefix used by one attempt.
+3. Keep researcher identity in `ktp.source_key`/draw/name. Store the archive line count in `ktp.fragment` with fragment type `line_number`.
+4. Derive one persistent sibling detour DuckDB from `config.db_file`; open the configured source DB read-only and serialize detour-DB writes.
+5. Pre-index direct `function_call_output` -> unique `web_search_end` -> unique `function_call(name="run", namespace="web")` chains into the four human-specified normalized Codex tables.
+6. Rename current labels to `DOCX_COLUMNS`, add ordered `AI_AUGMENT_COLUMNS`, and require every submitted excerpt to carry its exact result URL.
+7. Validate exact excerpt uniqueness and exact URL equality with parameterized DuckDB queries over the current approved rollout prefix.
+8. Append one accepted flat Codex row per filename/line-count fragment, then rematerialize cumulative `codex_innerdicts` under the common two-column JSONL contract.
+9. Allow repeated `ktp.source_key` values: multiple accepted attempts for one researcher become multiple Codex sections, distinguished by fragment and explicit attempt ID.
+10. Reuse the existing parser/materializer/card seams: detour-local `codex_parse.py`, step-08-style output/innerdict flow, and `build_cards()`/`write_cards_zip()` with Codex sections between xlsx and docx.
 
-## Verification
+## Surgical implementation boundary
 
-- Confirmed the human-authored section was not edited by this work; the AI addition starts after `## how ai understood the spec`.
-- Public OpenAPI text does not disclose appendwatch/rollout internals. Excerpt string/list limits are permissive derivatives of the bounded raw request body, not invented web-tool limits.
-- `bash -n` passes for `deploy.sh` and `provision.sh`; Ruff and mypy pass for the changed API and focused tests.
-- Detour regression result: 69 passed, 3 existing privilege/platform skips. The only warning is from FastAPI's TestClient compatibility shim.
-- Real-world coverage uses only the bundled sample Codex rollout: 107 records and 9 eligible web pairs, including search/open/click. Full `/push` acceptance and exact-excerpt rejection run against that rollout with synthetic ground truth; an independent test-side JSONL oracle verifies the exact linked call/output/event objects, hashes, field placement, deduplication, and exclusion of unrelated objects in `response.md`.
-- Final scope/whitespace audit passes. `SPEC.md`, `README.md`, `appendwatch.py`, and its existing tests are unchanged.
-- Git was used read-only. `src.repl` and the pipeline database were not opened.
+- Expected later edits: `api.py`, new detour-local `codex_parse.py`, focused tests, and minimum serving-task wiring for required `--config config.json`.
+- Change deployment/provisioning only if the existing appendwatch implementation fails a concrete current requirement.
+- Do not edit `README.md`, `.env.example`, `appendwatch.py`, main `vars.py`/`schema.py`, main pipeline, architecture assets, or sample data.
+- Keep detour-owned paths, labels, table/view names, citation delimiters, bounds, context setting, and repeated numeric values as named `api.py` globals.
+- Current hardcoded task remains; advancing `/pull` to a later task is explicitly out of scope.
 
-## August 4 investigation
+## Planned verification
 
-- In scope: `data/sample_run/ai-2026-08-04`, the associated 2026-08-04 Codex rollout, and matching archived attempts under `data/submissions/attempts`.
-- All 15 archived attempts passed rollout acquisition and the copied appendwatch `OK` gate, then failed at `pydantic_validation`. The current parser yields zero eligible pairs because the August rollout records web use as `custom_tool_call(name="exec")` -> `web_search_end` -> `custom_tool_call_output`, not the July `function_call(namespace="web", name="run")` envelope required by the current AI spec and code.
-- Replayed the logged annotation patches in memory and reproduced the committed final JSON exactly. Fourteen of the 15 actual submitted payloads had every excerpt as an exact contiguous substring of a completed `tools.web__run` output available before the push; one intermediate payload had one non-exact author excerpt. The final payload's 10 excerpts all match real web outputs.
-- `web_search_end` is useful corroborating metadata but is insufficient as the sole text source: several valid final excerpts occur in the full custom-tool web output but not in the event's summarized results.
-- The existing real-rollout E2E is tied to the July envelope and constructs its payload by selecting text from pairs it has already deemed eligible. That proves internal consistency, not replay of an independently authored production submission, and it does not cover code-mode web calls.
-- Approval-gated correction to propose in chat: retain the July adapter; add a narrow fail-closed adapter for the observed code-mode web envelope; and require an August production-replay E2E using the real annotation and associated archived rollout/status snapshot with fixed expected evidence objects. No production code or `SPEC.md` changes are authorized yet.
+- Preserve copied-report and acquisition-order tests; add source-DB before/after immutability and deterministic detour-DB-path assertions.
+- Assert exact normalized table columns/linkages, cumulative-prefix conflict handling, citation parsing, SQL parameterization, excerpt multiplicity behavior, and exact URL checks.
+- Assert repeated-namekey output rows and common-innerdict JSONL ordering by rollout filename/line-count fragment/attempt ID.
+- Assert footnote-to-query ordinal cross-references and web-run/FCO-time/URL wording, comments, xlsx -> Codex -> docx -> ssn card order, and both configured TXT and DOCX ZIP output.
+- Reuse the existing E2E shape in `test_api.py` with fixed July excerpts/URLs and independent expected FC/FCO/call/ref identities; include one-character excerpt and URL mismatch rejection.
+- Prior test results predate this redesign and are baseline history only; rerun focused and full detour suites after implementation.

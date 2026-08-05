@@ -150,27 +150,27 @@ here is what the output should look like:
 
 **ktp.ai_augment_session_metadata**: {"originator":"codex_vscode","source":"vscode","cli_version":"0.146.0-alpha.3.1","model_provider":"openai","model":"gpt-5.6-sol","reasoning_effort":"xhigh","session_id":"019fa457-aac5-7652-8669-9d571206e7cb","timestamp":"2026-07-27T16:10:36.764Z"}
 
-**ktp.ai_augment_researcher_author**: Professor Sir Aziz Sheikh OBE; publishes as Aziz Sheikh and A. Sheikh; ORCID 0000-0001-7022-3056.^1,2^
+**ktp.ai_augment_researcher_author**: **AI-generated text**: "Professor Sir Aziz Sheikh OBE; publishes as Aziz Sheikh and A. Sheikh; ORCID 0000-0001-7022-3056."^1,2^
 
-**ktp.ai_augment_place_of_residence**: Scotland, United Kingdom (Companies House country of residence); professionally based at the University of Oxford, England.^3^
+**ktp.ai_augment_place_of_residence**: **AI-generated text**: "Scotland, United Kingdom (Companies House country of residence); professionally based at the University of Oxford, England."^3^
 
-**ktp.ai_augment_gender**: Male.^4,5^
+**ktp.ai_augment_gender**: **AI-generated text**: "Male."^4,5^
 
-**ktp.ai_augment_age_first_publication_according_to_openalex_profile**: 28-29; born in December 1968, with the earliest credible work on the OpenAlex profile dated 13 December 1997. Earlier records on the profile are identity-conflation errors.^6^
+**ktp.ai_augment_age_first_publication_according_to_openalex_profile**: **AI-generated text**: "28-29; born in December 1968, with the earliest credible work on the OpenAlex profile dated 13 December 1997. Earlier records on the profile are identity-conflation errors."^6^
 
-**ktp.ai_augment_education**: BSc Physiology and MBBS, University College London; MSc, London School of Hygiene and Tropical Medicine; MD, Imperial College London.^7^
+**ktp.ai_augment_education**: **AI-generated text**: "BSc Physiology and MBBS, University College London; MSc, London School of Hygiene and Tropical Medicine; MD, Imperial College London."^7^
 
-**ktp.ai_augment_academic_position_s_**: University of Oxford: Pro-Vice-Chancellor, Head of the Nuffield Department of Primary Care Health Sciences, and Nuffield Professor of Primary Care Health Sciences. Previously Chair of Primary Care Research and Development, Director of the Usher Institute, and Dean of Data at the University of Edinburgh.^8^
+**ktp.ai_augment_academic_position_s_**: **AI-generated text**: "University of Oxford: Pro-Vice-Chancellor, Head of the Nuffield Department of Primary Care Health Sciences, and Nuffield Professor of Primary Care Health Sciences. Previously Chair of Primary Care Research and Development, Director of the Usher Institute, and Dean of Data at the University of Edinburgh."^8^
 
-**ktp.ai_augment_social_capital**: Officer of the Order of the British Empire (2014) and Knight Bachelor (2022); adviser to governments, the World Bank, World Health Organization, and World Innovation Summit for Health; committee service for the Academy of Medical Sciences and Royal Society.^7^
+**ktp.ai_augment_social_capital**: **AI-generated text**: "Officer of the Order of the British Empire (2014) and Knight Bachelor (2022); adviser to governments, the World Bank, World Health Organization, and World Innovation Summit for Health; committee service for the Academy of Medical Sciences and Royal Society."^7^
 
-**ktp.ai_augment_links_**: Oxford profile: https://www.phc.ox.ac.uk/team/aziz-sheikh; ORCID: https://orcid.org/0000-0001-7022-3056; OpenAlex: https://openalex.org/A5026215303.^8^
+**ktp.ai_augment_links_**: **AI-generated text**: "Oxford profile: https://www.phc.ox.ac.uk/team/aziz-sheikh; ORCID: https://orcid.org/0000-0001-7022-3056; OpenAlex: https://openalex.org/A5026215303."^8^
 
 **ktp.ai_augment_footnotes**: 
 
-1. "...excerpt from codex.cite_text with some chars before and some chars after **web_search_excerpt number 1** in the list submitted with this value for ktp.ai_augment_researcher_author at /pull, where the raw submitted web search excerpt is boldened within the context...", accessed "fco timestamp", url://from-codex.ref_url
-2. "...excerpt from codex.cite_text with some chars before and some chars after **web_search_excerpt number 2** in the list submitted with this value for ktp.ai_augment_researcher_author at /pull, where the raw submitted web search excerpt is boldened within the context...", accessed "fco timestamp", url://from-codex.ref_url
-3. "...excerpt from codex.cite_text with some chars before and some chars after **web_search_excerpt number 1** in the list submitted with this value for ktp.ai_augment_place_of_residence at /pull, where the raw submitted web search excerpt is boldened within the context...", accessed "fco timestamp", url://from-codex.ref_url
+1. "...excerpt from codex.cite_text with some chars before and some chars after **web_search_excerpt number 1** in the list submitted with this value for ktp.ai_augment_researcher_author at /pull, where the raw submitted web search excerpt is boldened within the context...", retrieved from web run tool using search query^1^ on "fco timestamp", url://from-codex.ref_url
+2. "...excerpt from codex.cite_text with some chars before and some chars after **web_search_excerpt number 2** in the list submitted with this value for ktp.ai_augment_researcher_author at /pull, where the raw submitted web search excerpt is boldened within the context...", retrieved from web run tool using search query^2^ on "fco timestamp", url://from-codex.ref_url
+3. "...excerpt from codex.cite_text with some chars before and some chars after **web_search_excerpt number 1** in the list submitted with this value for ktp.ai_augment_place_of_residence at /pull, where the raw submitted web search excerpt is boldened within the context...", retrieved from web run tool using search query^3^ on "fco timestamp", url://from-codex.ref_url
 4. ..etc
 
 **ktp.ai_augment_search_queries**: 
@@ -182,7 +182,7 @@ here is what the output should look like:
 
 **ktp.ai_augment_comments**:
 
-- **AI** commented: OpenAlex author A5026215303 appears conflated: it includes a 1962 A. Sheikh paper that predates Aziz Sheikh's documented December 1968 birth. Treat the literal earliest-work age and profile bibliometrics as unreliable; ORCID and the verified 1997 BMJ publication are safer identity anchors. (2026-08-04T20:32:21Z)
+- **AI-generated text**: "OpenAlex author A5026215303 appears conflated: it includes a 1962 A. Sheikh paper that predates Aziz Sheikh's documented December 1968 birth. Treat the literal earliest-work age and profile bibliometrics as unreliable; ORCID and the verified 1997 BMJ publication are safer identity anchors." (2026-08-04T20:32:21Z)
 ```
 
 **importantly:**
@@ -201,11 +201,21 @@ existing code is not touched unless truly necessary
 
 This is a production-hardening follow-up for the existing, deliberately
 small detour under `src/detours/detour_ai_augment/`. The implementation
-must wire the existing appendwatch, Lima deployment, SSH identity, Codex
-rollout, `/push` validator, and submission report into one fail-closed
-chain. It must preserve the current `/pull` task and the current nine
-annotation fields. It must not invoke `src.repl`, alter the main pipeline,
-or write to a pipeline database.
+must wire the existing appendwatch, Lima deployment, SSH identity, archived
+Codex rollout, DuckDB provenance index, `/push` validator, detour innerdict,
+and researcher-card output into one fail-closed chain. It must not invoke
+`src.repl`, alter the main pipeline, edit its `vars.py` or `schema.py`, or
+write to the configured main-pipeline database.
+
+One Codex rollout/session is expected eventually to contain many successive
+`/pull` -> research -> `/push` cycles. Every push archives the then-current
+cumulative rollout prefix. The rollout filename/session can therefore repeat
+across attempts, while its physical line count advances and demarcates the
+prefix used by each attempt. This task continues to serve the current
+hardcoded task; advancing `/pull` to the next task after an accepted push is a
+later change. A later task may concern a new researcher or the same researcher
+again, so nothing implemented here may assume one rollout or one accepted
+attempt per researcher.
 
 The trust chain for an accepted push is:
 
@@ -217,10 +227,14 @@ The trust chain for an accepted push is:
    versioned copy of appendwatch's protected status log;
 5. only after the status-log copy completed, the backend checked that copy
    and proved the archived rollout was the exact rollout version marked OK;
-6. only then did Pydantic validate the submitted values and their exact
-   web-tool excerpts against the archived rollout; and
-7. only a fully valid attempt produced the normal response and reviewer
-   report.
+6. only then did the backend count and parse that immutable rollout and update
+   its normalized provenance tables in the detour-owned DuckDB;
+7. only then did Pydantic validate the submitted AI values and excerpt/URL
+   pairs through parameterized DuckDB lookups;
+8. only a fully valid attempt materialized the Codex output view and common
+   `codex_innerdicts` contract; and
+9. only then did it produce the normal response and the configured TXT or
+   DOCX researcher-card artifact.
 
 No later step may run when an earlier step fails.
 
@@ -230,13 +244,29 @@ The implementer must write surgical code: make only changes strictly required
 by this spec and leave unrelated code, comments, formatting, and behavior
 untouched. Do not perform incidental refactors or cleanup.
 
-The expected production edits are narrowly confined to `deploy.sh`,
-`provision.sh`, and `api.py`, plus focused tests and the minimum README/`.env`
-example updates needed to operate those changes. `appendwatch.py` and its
-existing regression tests should remain unchanged unless implementation
-proves a specific change is indispensable for this exact flow. The manual
-`run_appendwatch.sh`, architecture assets, sample data, main pipeline, and
-unrelated project configuration are out of scope.
+The expected production edits are narrowly confined to `api.py`, a new
+detour-local `codex_parse.py`, focused tests, and the minimum serving-task
+wiring needed to pass `--config config.json`. Touch `deploy.sh` or
+`provision.sh` only if their already implemented appendwatch behavior is shown
+not to satisfy this revised contract. `appendwatch.py`, its regression tests,
+`README.md`, `.env.example`, the main pipeline, `src/helpers/vars.py`,
+`src/helpers/schema.py`, architecture assets, and sample/ground-truth data
+remain untouched.
+
+All detour-owned table names, column labels, citation delimiters, paths,
+collection/body bounds, context-length settings, and other repeated numeric
+values belong in named globals at the top of `api.py`; do not scatter literals
+through the implementation. Reuse existing main-pipeline constants by import
+where the human section names them, without adding detour labels to the main
+constants modules.
+
+Reuse the existing codebase at its current seams rather than restating or
+forking it: `PipelineConfig.from_json()` for config, the deterministic sibling
+DB-path pattern in `detour_step4_breakdown.py`, step 08 and
+`duckdb_utils.py` for flat relation -> output view -> common JSONL-innerdict
+materialization, `docx_parse.py` for the parser/extraction/render separation,
+and `cards.py`/step 10 for card assembly and TXT/DOCX ZIP output. Keep the
+Codex-specific code detour-local and adapt only the data entering those seams.
 
 ### protected appendwatch deployment
 
@@ -287,6 +317,20 @@ degradation, or `COMPROMISED` rollout fails closed.
 
 ### backend configuration and SSH hand-off
 
+Serving the detour requires `--config config.json`. Parse it once at startup
+with the existing `PipelineConfig.from_json()` contract
+and use its existing `db_file`, `output_dir`, `output_format`,
+`pandoc_reference_docx`, `timezone`, and `total_draws` settings. Accept only
+`txt` or `docx`; DOCX output also requires a readable reference DOCX. The
+configured pipeline DuckDB is context only and must be opened read-only. Follow
+the existing detour DB separation pattern: derive one deterministic sibling
+DuckDB path from `config.db_file` using a named detour ID and the
+`<source-stem>__detour_<detour-id><suffix>` convention. Open that separate
+detour DB read/write for all Codex relations and preserve it across attempts;
+do not copy or mutate the source DB. Serialize detour-DB write transactions. A
+missing or invalid config prevents serving; do not silently fall back to
+another path or format.
+
 Use the repository-root `.env`, which is already ignored, with
 `python-dotenv`'s normal rule that a real process environment value wins.
 The per-chat setting is:
@@ -307,9 +351,9 @@ needed to make those paths testable; do not add a new configuration system or
 copy private-key material. Keep defaults aligned with `deploy.sh`, and ensure
 a custom `--mount` can supply the corresponding host report path.
 
-If the rollout setting or a required deployment/SSH/status setting is
-missing, blank, invalid, or unreadable, the API may still start and `/pull`
-may still work, but `/push` returns HTTP 503 with only:
+If the per-chat rollout setting or a required deployment/SSH/status setting
+is missing, blank, invalid, or unreadable, the configured API may still start
+and `/pull` may still work, but `/push` returns HTTP 503 with only:
 
 ```json
 {"detail":"API is not properly configured. Contact the human operator."}
@@ -337,7 +381,10 @@ and perform this exact order:
 2. SCP the configured rollout from the VM into a temporary file using the
    dedicated key and the same pinned SSH/known-hosts options as `deploy.sh`.
    Build an argv list without `shell=True`; fsync and atomically publish the
-   archived rollout, then record its size and SHA-256.
+   archived rollout, then record its size, SHA-256, and physical line count
+   equivalent to `nl -ba`. Count every physical JSONL line in the immutable
+   archive, including a final non-newline-terminated line; do not invoke a
+   shell command merely to calculate it.
 3. Copy the current atomic appendwatch tree report from the mounted protected
    host directory into the attempt directory. Fsync it, publish it under a
    unique versioned name, and record its SHA-256. Never inspect the live
@@ -346,104 +393,263 @@ and perform this exact order:
    relative tree path and require one unambiguous `OK` file entry beneath
    non-compromised ancestors. Missing, duplicated, malformed, degraded,
    unverified, deleted, or `COMPROMISED` status fails closed.
-5. Parse the archived rollout as JSONL and build the eligible evidence
-   index. Completed malformed records fail validation; at most one
-   incomplete trailing record may be ignored because the chat is live.
-6. Finally run the strict Pydantic submission and evidence validation using
-   that immutable evidence index as validation context.
-7. Only after success, load ground truth, write accepted response artifacts,
-   and return the existing two-line NDJSON response (normalized AI values,
-   then ground truth).
+5. Parse the immutable archive and, in one serialized transaction on the
+   detour-owned DuckDB, pre-index only complete eligible web provenance into
+   the normalized Codex tables specified below. Existing IDs from an earlier
+   prefix must have byte-equivalent normalized values; insert only genuinely
+   new rows and fail on conflicting reuse. Validate the unique session
+   metadata and reconstructed original rollout filename at this stage. A
+   completed malformed JSONL record fails closed; because the rollout is live,
+   one incomplete final record may be excluded from the index while remaining
+   part of the archived hash and physical line count.
+6. Read the bounded body, run strict Pydantic validation, and validate every
+   submitted excerpt/URL pair solely through parameterized DuckDB queries over
+   that index. No ground-truth or configured-pipeline-DB lookup may precede
+   this point.
+7. After every evidence lookup succeeds, resolve the hardcoded current
+   researcher against the configured pipeline DuckDB opened read-only; require
+   one source key and its draw/name context. In the detour DuckDB, create the
+   final Codex output view and materialize `codex_innerdicts` atomically.
+8. Only after that transaction succeeds, load ground truth, write the accepted
+   response and configured card artifact, mark the attempt accepted, and
+   return the existing two-line NDJSON response.
 
 The order above is an invariant, not an optimization: rollout copy first,
-report copy second, copied-report check third, payload validation last.
+report copy second, copied-report check third, DuckDB provenance index fourth,
+payload validation fifth, accepted innerdict/card writes last. A rejected
+attempt retains its immutable archives and failure-stage manifest, and the
+shared database may retain appendwatch-approved normalized provenance, but a
+rejected attempt must not add an authoritative accepted output row to
+`codex_innerdicts` or create accepted response/card artifacts.
 
-### extended submission contract
+### `/pull`, column mapping, and extended submission contract
 
-The outer key set remains exactly `COLUMNS`. Each field now carries its AI
-value and the full list of literal web-result excerpts used to justify that
-value:
+Rename the current `COLUMNS` tuple to `DOCX_COLUMNS`; those nine
+`ktp.table_1_*` labels remain the ground-truth columns. Add a parallel
+`AI_AUGMENT_COLUMNS` tuple in the same semantic order, replacing only the
+`ktp.table_1_` prefix with `ktp.ai_augment_`. Keep an explicit ordered mapping
+between the two tuples rather than deriving labels at request time.
+
+For the current hardcoded task, `/pull` must expose the selected researcher's
+`ktp.first_name` and `ktp.last_name` and the nine AI-augment fields to fill.
+The backend, not the client, retains the authoritative source key and draw
+number used after acceptance. Queueing the next task is out of scope.
+
+The `/push` outer key set is exactly `AI_AUGMENT_COLUMNS`. Each field carries
+its raw AI value and every literal web-result excerpt used to justify it;
+every excerpt is paired with the exact URL reported for its result:
 
 ```json
 {
-  "ktp.table_1_researcher_author": {
+  "ktp.ai_augment_researcher_author": {
     "value": "Professor ...",
     "web_search_excerpts": [
-      "exact contiguous text copied from an eligible web-tool output"
+      {
+        "excerpt": "exact contiguous text copied from one cited result",
+        "url": "https://exact.example/result"
+      }
     ]
   }
 }
 ```
 
 The example is abbreviated; a real body must contain all nine current
-outer keys and no others. Every inner object has exactly `value` and
-`web_search_excerpts`; `value` retains the current non-null rule, and every
-field has at least one non-blank, unique excerpt. Use strict types,
-`extra="forbid"`, and documented collection/string/body bounds. The agent
-must supply every excerpt it relied on; the API can prove presence and
-provenance, while the human report remains responsible for judging whether
-the excerpt substantively supports the answer.
+AI-augment keys and no others. Every field object has exactly `value` and
+`web_search_excerpts`; every evidence object has exactly `excerpt` and `url`.
+`value` is a non-blank strict text value, and every field has at least one
+non-blank evidence item with no duplicate excerpt/URL pair in that field. Use strict types,
+`extra="forbid"`, and named permissive bounds derived from the bounded request
+body rather than invented web-tool limits. Treat URLs as literal strings for
+comparison; URL parsing must not normalize or rewrite what the agent submits.
+An excerpt may be reused across fields when it genuinely supports them, but it
+must still resolve to exactly one indexed result in this attempt archive.
 
-Exact means a contiguous substring of one decoded text block in one
-eligible output, with no case folding, whitespace collapsing, Unicode
-normalization, fuzzy matching, or joining across blocks. An excerpt may be
-reused across fields when it genuinely supports them.
+Exact means a contiguous substring of one `codex.cite_text`, with no case
+folding, whitespace collapsing, Unicode normalization, fuzzy matching, URL
+canonicalization, or joining across refs. The URL must then equal that same
+row's `codex.ref_url` byte-for-byte as a decoded string.
 
-### eligible Codex evidence
+### eligible Codex evidence and rollout pre-index
 
-The bundled sample rollout establishes the current schema:
+The archive must contain exactly one valid `session_meta` record for the
+session. Retain the human-specified metadata fields as a compact JSON object.
+Reconstruct Codex's original rollout basename from its session ID and payload
+timestamp using the configured timezone and require it to equal the configured
+guest rollout basename. The same reconstructed filename is expected to recur
+across successive attempts in one rollout.
 
-- the call is a complete top-level `response_item` whose payload is
-  `type="function_call"`, `namespace="web"`, `name="run"`, with a non-empty
-  `call_id` and JSON-object arguments;
-- eligible arguments perform `search_query`, `open`, or `click` (with
-  `response_length` and similar transport options allowed); and
-- the result is a complete top-level `response_item` whose payload is
-  `type="function_call_output"` with the same `call_id`. Current outputs are
-  arrays of `input_text` blocks; isolate schema adapters so a documented
-  string/text-block variant can be supported without broadening eligibility.
+Only a complete direct web dependency chain is eligible. Start from each
+top-level `response_item/function_call_output` whose payload has a valid,
+globally unique `id` (`fco_id`), non-empty `call_id`, valid response timestamp,
+and `output` containing exactly one `input_text` object with one string `text`
+value. That output text must contain well-formed citation markers built from
+named Unicode prefix/suffix globals such as `cite` and ``. The parser must
+isolate each marker's `ref_id` and its complete associated result text into one
+`codex.cite_text`, ending before the next result. Never combine refs or text
+blocks.
 
-For each submitted excerpt, require at least one such eligible call/output
-pair containing the exact text in the output. A matching assistant message,
-reasoning item, web call arguments, `event_msg/web_search_end` summary alone,
-shell/`exec_command` output, API response, submitted file, or orphan output
-does not qualify. Search/open/click output may have a corresponding
-`event_msg/web_search_end`; retain it as optional context, but it does not
-replace the required pair.
+For every such output, require exactly one corresponding
+`event_msg/web_search_end` with the same `call_id`. Its `results` must be a
+list, and each indexed `ref_id` must resolve to exactly one `text_result` with
+string domain, snippet, title, and URL fields. Then require exactly one earlier
+top-level `response_item/function_call` with that `call_id`, a globally unique
+`id` (`fc_id`), valid timestamp, `name="run"`, `namespace="web"`, and arguments
+that decode to one JSON object containing an eligible `search_query`, `open`,
+or `click` action. Store the entire decoded arguments object as DuckDB JSON.
 
-Index records by rollout line number, line SHA-256, and `call_id`. Preserve
-every distinct matching eligible pair in rollout order and deduplicate a
-pair reused by multiple excerpts. Reject malformed IDs, ambiguous duplicate
-call/output IDs, unsupported payload shapes, or an excerpt with no eligible
-match.
+The chain is fail-closed: malformed/duplicate IDs, a duplicate or missing
+event/call, multiple text blocks, unsupported result shape, malformed
+arguments, a citation absent or duplicated in event results, or a ref section
+that cannot be isolated unambiguously rejects indexing. Output records without
+citation markers and unrelated records are simply ineligible. Assistant,
+reasoning, `exec`/`custom_tool_call`, shell output, API response, submitted
+file, rollout-scanning, orchestration-status, event-only, and orphan text never
+become evidence, including an exec record that mentions `tools.web__run`.
 
-### artifacts, report, and client-visible failures
+Put the parsing/section-isolation helpers in detour-local `codex_parse.py`,
+following `docx_parse.py`'s separation between source extraction and
+human-readable Markdown rendering; do not copy that large parser or modify it.
+`api.py` supplies structured rollout/evidence rows, while `codex_parse.py`
+isolates cite sections and renders the Codex footnote/query/comment text shown
+in the human sample. Validation lookups and accepted flat-row construction
+remain parameterized DuckDB SQL.
 
-Every accepted submission directory must contain the archived rollout, the
-versioned appendwatch status copy used to authorize it, their hashes, the
-normal `response.jsonl`, and `response.md`. Record an attempt ID and validation
-stage/result so pre-validation archives cannot be mistaken for accepted
-submissions. Never overwrite an earlier archive or status copy.
+### detour DuckDB schema
 
-Replace the wide Markdown table with a field-oriented document. For each
-annotation variable, show these subsections in order:
+Define all table/column labels as top-level `api.py` globals and create these
+exact normalized relations in the detour DuckDB. Follow the existing DuckDB
+relation/materialization conventions. The human section's `pkey` entries mean
+primary-key columns, not literal `pkey` labels; name each one `id` and make it
+stable and unique. Use timestamp-capable values for timestamps, text for
+IDs/text, and DuckDB `JSON` for `codex.fc_arguments`. Do not introduce a
+parallel serialization convention:
 
-1. AI response;
-2. validated web evidence, grouped by submitted excerpt; and
-3. human/ground-truth response.
+- `codex_fc`, six columns: `id`, `codex.fc_timestamp`, `codex.fc_id`,
+  `codex.fc_name`, `codex.fc_namespace`, `codex.fc_arguments`;
+- `codex_fco`, three columns: `id`, `codex.fco_timestamp`, `codex.fco_id`;
+- `codex_calls`, five columns: `id`, `codex.call_id`, `codex.fc_id`,
+  `codex.fco_id`, `codex.rollout_filename`; and
+- `codex_turn_search`, eight columns: `id`, `codex.ref_id`,
+  `codex.call_id`, `codex.ref_domain`, `codex.ref_snippet`,
+  `codex.ref_title`, `codex.ref_url`, `codex.cite_text`.
 
-Under the evidence subsection, use collapsed `<details>/<summary>` blocks
-and include the complete matched function-call JSON object and complete
-function-call-output JSON object, plus optional matching web event metadata.
-Do not truncate the objects. JSON/HTML-escape untrusted values so rollout
-content cannot break the report structure or inject active HTML. Report
-metadata must identify the archived rollout and appendwatch snapshot by
-filename and SHA-256.
+`codex.fc_id`, `codex.fco_id`, and `codex.call_id` are individually unique;
+`codex_turn_search` is unique on `(codex.call_id, codex.ref_id)`. Enforce the
+relationships using the same SQL-first style as step 08, including explicit
+validation where DuckDB does not enforce a desired cross-table relationship.
+Insert all four relations in one transaction and query them back to prove row
+counts and uniqueness before body validation.
+The detour database is the cumulative canonical representation of the
+appendwatch-approved rollout prefixes seen so far. Scope lookups to the current
+reconstructed rollout filename and serialize pushes so no later prefix can
+enter the database during validation of the current archive. Do not create
+these relations in the configured pipeline database.
 
-Any structural, appendwatch-integrity, rollout-parse, eligibility, or exact-
-excerpt failure must reject the submission, must not return ground truth,
-and must not create accepted response artifacts. Return one brief HTTP 422
-message for all such cases:
+### DuckDB excerpt and URL validation
+
+For each submitted evidence item, issue one parameterized DuckDB query that
+searches `codex_turn_search` for the exact excerpt as a contiguous substring of
+`codex.cite_text`. Do not interpolate excerpts or URLs into SQL and do not
+perform a second Python-side rollout scan.
+
+- Zero matching rows produces the common generic validation failure.
+- More than one matching row produces the human-required client error that
+  includes the exact submitted excerpt and asks the agent to resubmit with a
+  distinct excerpt unique across the searched pages.
+- Exactly one row proceeds only if its `codex.ref_url` exactly equals the
+  submitted URL; a mismatch produces the common generic validation failure.
+
+The uniqueness check is against the full archived prefix for that attempt,
+including evidence from earlier cycles in the same rollout. Retain the one
+matched row, linked call arguments, FCO timestamp, and submitted field/item
+order for accepted-row construction and footnote numbering.
+
+### accepted Codex output view and innerdict contract
+
+After validation, obtain the current researcher source key, draw number, first
+name, and last name from existing data using the identity exposed by `/pull`.
+The configured pipeline DuckDB remains read-only. In the detour DuckDB, append
+one accepted flat row to a narrowly named backing table and expose it through
+a `codex_output` view whose columns follow this order:
+
+1. `ktp.source_key`;
+2. `ktp.filename`, containing the reconstructed original rollout basename;
+3. `ktp.fragment`, containing this attempt archive's physical line count;
+4. `ktp.fragment_type`, always the existing `line_number` enum value;
+5. `ktp.draw_number`, `ktp.first_name`, and `ktp.last_name`;
+6. `ktp.ai_augment_attempt_id` and `ktp.ai_augment_session_metadata`;
+7. the eight non-comment `ktp.ai_augment_*` values in
+   `AI_AUGMENT_COLUMNS` order;
+8. `ktp.ai_augment_footnotes` and `ktp.ai_augment_search_queries`; and
+9. `ktp.ai_augment_comments`.
+
+Define every detour-owned label and the backing-table/output-view names at the
+top of `api.py`. One accepted push creates one output row. Enforce uniqueness
+of attempt ID and of `(ktp.filename, ktp.fragment)`, but do not make
+`ktp.source_key` unique: the same researcher may have multiple accepted rows,
+including several sections with one rollout filename and different line-count
+fragments.
+
+Materialize `codex_innerdicts` from all accepted `codex_output` rows using the
+same strict common two-column contract as xlsx/docx/ssn innerdicts:
+`name_key VARCHAR` plus `innerdicts VARCHAR` containing ordered JSONL records.
+Follow step 08's output-view/materialization sequence and use the existing
+materialization helper plus a detour-local matching procedure whose dataset ID
+field is `ktp.source_key`; do not modify the main schema, procedure, or
+data-model modules. This cumulative table is authoritative for downstream
+AI-augmentation rows. Rebuild it in the same transaction that adds an accepted
+output row so a failure cannot expose a partial authoritative state.
+
+### footnotes, queries, and card rendering
+
+Assign footnote numbers globally in `AI_AUGMENT_COLUMNS` order and then in each
+field's submitted evidence-list order. The submitted `value` remains raw text;
+for each footnoted AI value, the detour-local parser/renderer constructs the
+human sample's `**AI-generated text**: "<value>"` presentation and appends the
+resulting superscript marker programmatically after the closing quote. The
+parameterized lookup supplies the matched cite text and
+exact position; the detour-local parser/renderer then
+follows `docx_parse.py`'s Markdown conventions to show a named-global amount of
+context before and after the match, bold the submitted excerpt, and add the FCO
+timestamp and result URL. Follow the human sample's footnote suffix exactly:
+`retrieved from web run tool using search query^N^ on ...`, where `N` is the
+same global ordinal used by the corresponding query-list item. Render the
+comments value through the same helper in the sample's exact
+`- **AI-generated text**: "<comment>" (<attempt timestamp>)` form, rather than
+assembling value, footnote, or comment Markdown in the route.
+
+`ktp.ai_augment_search_queries` is a numbered list aligned one-to-one with the
+footnotes and their `search query^N^` references. Each item contains the raw
+decoded `codex.fc_arguments` JSON for the call supporting that footnote.
+Repetition is intentional when several footnotes come from one call. Keep
+machine-readable provenance in the normalized tables; the footnotes and query
+list are the human-readable rendering shown in the sample.
+
+For the selected namekey, load existing xlsx, docx, and ssn innerdicts from the
+configured database read-only and load every accumulated Codex innerdict from
+the detour database using the same common-innerdict loaders/procedures used by
+pipeline initialization. Reuse `build_cards()` and `write_cards_zip()` rather
+than forking step 10's renderer. Preserve the established innerdict order but
+insert all Codex sections between xlsx and docx sections. Each Codex record
+therefore renders through the existing generic card loop as its own
+`#### ktp.filename` section, including its explicit attempt ID and line-count
+fragment.
+
+Read TXT versus DOCX and the DOCX reference path from the required config.
+Pass those settings to the existing card ZIP writer and use the attempt ID in
+the ZIP name so a previous report is never overwritten; record its filename
+and SHA-256 in the attempt manifest. The accepted attempt contains
+the archived rollout, copied appendwatch report, their hashes, line count,
+stage/result manifest, and `response.jsonl`. Preserve the two-line NDJSON
+response: normalized AI-augment values first and mapped DOCX ground truth
+second.
+
+### client-visible failures
+
+Any structural, appendwatch-integrity, rollout/index, URL, eligibility, exact-
+excerpt, output-view, innerdict, or render failure rejects the submission,
+does not return ground truth, and creates no accepted response/card or Codex
+innerdict row. Except for the required multiple-match case, return only:
 
 ```json
 {
@@ -451,10 +657,15 @@ message for all such cases:
 }
 ```
 
+When an excerpt matches multiple `codex_turn_search` rows, return HTTP 422 with
+a concise message containing that exact submitted excerpt and instructing the
+agent to resubmit with an excerpt unique across the searched web pages. This is
+the sole detailed validation response required by the human section; JSON
+encoding must safely preserve arbitrary excerpt characters.
+
 The backend log must include attempt ID, failed stage, field name where
-applicable, and an actionable reason for the operator, without echoing an
-entire excerpt or leaking secrets. Do not let FastAPI's default detailed
-Pydantic error body bypass this policy.
+applicable, and an actionable reason for the operator without leaking secrets.
+Do not let FastAPI's default detailed Pydantic error body bypass this policy.
 
 ### implementation tests and acceptance
 
@@ -465,25 +676,49 @@ Keep the existing appendwatch regression suite and add focused tests for:
   negative source/report access probes as `ai`;
 - missing rollout configuration producing only generic 503 while logs name
   `FASTAPI_DETOUR_ROLLOUT_JSONL`, with `/pull` remaining available;
+- required `--config`, read-only access to its pipeline DuckDB, TXT/DOCX
+  selection, reference-DOCX handling, deterministic sibling detour-DB path,
+  and before/after proof of no writes to the configured source DB;
 - an instrumented assertion of the exact sequence SCP -> status copy ->
-  copied-status check -> rollout parse -> Pydantic -> ground truth/dump;
+  copied-status check -> rollout line count/index transaction -> Pydantic/SQL
+  lookup -> output view/innerdict -> ground truth/card;
 - strict SCP argv/known-hosts/key use, path confinement, unique atomic
   archives, and custom-mount connection settings;
 - copied-report parsing for nested exact paths, OK, compromised ancestors or
   rollout, global degradation, missing/duplicate paths, and malformed trees;
-- strict nine-field/inner-object models, no evidence-free field, exact
-  Unicode/whitespace behavior, absent excerpts, duplicate IDs, and stable
-  generic 422 responses with no ground-truth leak;
-- sanitized fixtures for search, open, and click call/output pairs, plus
-  negative assistant, reasoning, `web_search_end`-only, shell-output, orphan,
-  malformed JSONL, and unsupported-schema cases; and
-- complete, deduplicated, escaped call/output objects in the field-oriented
-  Markdown report, archive hashes, preserved two-line success NDJSON, and no
-  accepted artifacts on rejection.
+- `DOCX_COLUMNS`/`AI_AUGMENT_COLUMNS` mapping, `/pull` identity, strict nine-
+  field value/evidence/URL models, absent or duplicate evidence, and exact
+  Unicode/whitespace/URL behavior;
+- unique session metadata and reconstructed basename, physical line counting,
+  one tolerated incomplete trailing record, and conflicting cumulative-prefix
+  rows failing closed;
+- the exact four normalized table column contracts and transactionally linked
+  direct search/open/click FCO -> event results -> FC records, including
+  citation parsing and complete per-ref `codex.cite_text`;
+- missing, duplicate, cross-ref, event-only, assistant, reasoning, custom-exec,
+  shell-output, rollout-scanning, orphan, multi-block, malformed-ID/argument,
+  and unsupported-result cases;
+- parameterized SQL lookup, zero/exact/multiple substring matches, exact URL
+  verification, generic failures, the one excerpt-bearing multiple-match
+  response, and no ground-truth leak;
+- cumulative accepted output rows where one namekey has multiple sections with
+  the same rollout filename, distinct line-count fragments and attempt IDs,
+  plus exact common-contract `codex_innerdicts` JSONL ordering;
+- exact AI-generated value/comment wrappers, footnote numbering/context/bold
+  excerpt/web-run wording/query cross-reference/FCO time/URL, aligned raw query lists,
+  xlsx -> Codex -> docx -> ssn card order,
+  TXT and DOCX ZIPs, archive hashes, two-line success NDJSON, and no accepted
+  artifacts on rejection; and
+- an E2E in the existing `test_api.py` style using the real July direct-web
+  rollout with fixed submitted excerpts, URLs, and expected FC/FCO/call/ref
+  identities. Assert exact DuckDB rows and card sections, and prove a one-
+  character excerpt change and an exact-URL change are rejected before ground
+  truth or accepted artifacts. Do not derive the submitted fixture from the
+  production parser under test.
 
-Use mocks/fakes for host SCP and the narrow provisioning checks, plus a small
-sanitized rollout fixture shaped like the supplied sample. Keep existing
-appendwatch tests as the monitoring regression proof rather than duplicating
-them. This specification task itself changes only
-`SPEC.md` and `WORK.md`; production code, tests, README/operator instructions,
-and `.env.example` are for the later implementation task.
+Use mocks/fakes for host SCP and narrow provisioning checks, plus a small
+sanitized direct-web rollout fixture. Reuse the current E2E helper/flow as much
+as possible to reduce review fatigue. Keep existing appendwatch tests as the
+monitoring regression proof rather than adding decorative source-text tests.
+This specification task itself changes only `SPEC.md` and `WORK.md`;
+production code and tests are for the later implementation task.
