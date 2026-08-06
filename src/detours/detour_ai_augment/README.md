@@ -1,5 +1,8 @@
 # KTP HCR Detour: AI Augmentation
 
+> [!IMPORTANT]
+> This document contains minimal AI-generated text and was primarily written by [@paveljee][paveljee]
+
 A reproducible architecture for running an isolated AI agent against a task-oriented backend API.
 
 The AI Agent Runtime pulls work from the Backend, uses an LLM Inference API to complete it, and pushes the result back. A Human Operator deploys, operates, and reviews the system through a Control Centre.
