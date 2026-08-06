@@ -39,6 +39,12 @@
   `MultipleEvidenceMatches` path is visibly disabled by the named top-level
   `ALLOW_MULTIPLE_EVIDENCE_MATCHES = True` switch, not removed; its original
   test remains present and skipped.
+- Duplicate-evidence random selection uses a dedicated API RNG reseeded inside
+  the serialized push from the required pipeline config's `sample_seed`.
+  Combined with the explicit candidate-ID order and fixed submission
+  traversal, this makes a repeated identical body over a hash-identical
+  rollout select the same provenance rows regardless of prior push history,
+  without mutating the process-global random generator.
 - The accepted production TXT at
   `data/output/ai_augment_cards_20260805T182923_354844Z_d5ce3bb63b6b477c952728496a99748f/146_A_Sheikh.txt`
   records the pre-fix behavior: raw cite context rendered source
@@ -121,7 +127,7 @@
 
 ## Verification completed
 
-- The root Pixi task completes with 72 passed and the retained legacy
+- The root Pixi task completes with 73 passed and the retained legacy
   multiple-match rejection test skipped under the active allow-multiple
   policy. Its visible argparse usage line is expected stderr from the negative
   missing-`--config` assertion under `-s`.
@@ -135,7 +141,7 @@
   title-less URL-bearing refs and skips only the cited no-URL internal-error
   ref.
 - `ruff check` passes for `api.py`, `codex_parse.py`, and `test_api.py`.
-- Focused API suite: 31 passed, 1 skipped. The real July E2E proves 9 FC, 9 FCO, 9 call, and 155 generic ref rows; exact fixed call/ref identities; five preserved thumbnails; output view/common innerdict/card content; two-line response; source-DB byte immutability; and exact accepted-stage order. It exercises TXT and DOCX ZIP selection/reference handling, stubbing only the external Pandoc process for DOCX bytes. Focused coverage includes active random duplicate selection, the retained/skipped strict multiple-match test, exact private failure-value logging, and copied-report missing/malformed/ambiguous rejection.
+- Focused API suite: 32 passed, 1 skipped. The real July E2E proves 9 FC, 9 FCO, 9 call, and 155 generic ref rows; exact fixed call/ref identities; five preserved thumbnails; output view/common innerdict/card content; two-line response; source-DB byte immutability; and exact accepted-stage order. It exercises TXT and DOCX ZIP selection/reference handling, stubbing only the external Pandoc process for DOCX bytes. Focused coverage includes active random duplicate selection, a file-backed close/reopen roundtrip proving identical config-seeded provenance selection for the same body and candidate rows, the retained/skipped strict multiple-match test, exact private failure-value logging, and copied-report missing/malformed/ambiguous rejection.
 - The same July E2E proves normalized `codex.fc_arguments` remain raw while
   rendered open/click action objects preserve their turn-ref and add that
   input ref's call-scoped indexed URL. Renderer coverage also proves
@@ -145,7 +151,7 @@
 - Complete non-root detour suite under the pyproject-required
   `APPENDWATCH_SCRIPT` environment: 69 passed, 4 skipped (the retained strict
   multiple-match test plus three root-only watcher cases). The root Pixi task
-  runs the watcher cases and completes with 72 passed, 1 skipped. Unchanged
+  runs the watcher cases and completes with 73 passed, 1 skipped. Unchanged
   appendwatch suite alone: 38 passed, 3 skipped without root.
 - Independent July persistence smoke: 107 physical records; 9 FC, 9 FCO, 9 calls, 155 refs, 5 non-null thumbnails; a second persistence pass is idempotent.
 - Read-only `git diff --check` reports only two trailing-space lines in the human-authored SPEC section (lines 123 and 176). They are intentionally untouched under the “AI never touches this” rule; cached diff check otherwise passes.

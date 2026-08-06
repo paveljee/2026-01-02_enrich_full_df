@@ -14,7 +14,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from random import choice
+from random import Random
 from typing import Annotated, Any, Literal, Self, cast
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -147,6 +147,7 @@ SERVER_PORT = 8000
 
 DETOUR_ID = "ai-augment"
 DETOUR_DB_LOCK = threading.Lock()
+EVIDENCE_RANDOM = Random()
 CODEX_FC_TABLE = "codex_fc"
 CODEX_FCO_TABLE = "codex_fco"
 CODEX_CALLS_TABLE = "codex_calls"
@@ -691,6 +692,10 @@ def _detour_db_path(path: Path) -> Path:
     suffix = path.suffix or ".duckdb"
     stem = path.stem if path.suffix else path.name
     return path.with_name(f"{stem}__detour_{DETOUR_ID}{suffix}")
+
+
+def _seed_evidence_random(sample_seed: int) -> None:
+    EVIDENCE_RANDOM.seed(sample_seed)
 
 
 def configure_runtime(config_path: Path) -> RuntimeConfiguration:
@@ -1833,7 +1838,9 @@ def validate_submission_evidence(
                 )
             if len(candidates) > 1 and not ALLOW_MULTIPLE_EVIDENCE_MATCHES:
                 raise MultipleEvidenceMatches(evidence.excerpt)
-            candidate = choice(candidates) if len(candidates) > 1 else candidates[0]
+            candidate = (
+                EVIDENCE_RANDOM.choice(candidates) if len(candidates) > 1 else candidates[0]
+            )
             arguments_json = candidate.arguments_json
             if not isinstance(arguments_json, str):
                 arguments_json = json.dumps(
@@ -2425,6 +2432,7 @@ async def push(request: Request) -> StreamingResponse:
                 submission = Submission.model_validate_json(body)
 
                 stage = "duckdb_evidence_validation"
+                _seed_evidence_random(runtime.pipeline.sample_seed)
                 validated_evidence = validate_submission_evidence(
                     detour_conn,
                     submission,

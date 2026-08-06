@@ -574,8 +574,12 @@ perform a second Python-side rollout scan.
   generic validation failure.
 - Keep a visibly named top-level `ALLOW_MULTIPLE_EVIDENCE_MATCHES` switch set
   to true. With that policy enabled, randomly select one row when multiple
-  exact excerpt/URL rows remain; do not prefer search, view, open, or click
-  provenance. A single remaining row is selected directly.
+  exact excerpt/URL rows remain using a dedicated RNG reseeded immediately
+  before evidence validation from the required config's `sample_seed`; do not
+  prefer search, view, open, or click provenance. A single remaining row is
+  selected directly. Candidate ordering and submission traversal must remain
+  explicit and stable so the same body against a hash-identical rollout
+  selects the same provenance rows regardless of prior push history.
 
 The lookup covers the full archived prefix for that attempt, including
 evidence from earlier cycles in the same rollout. Retain the randomly selected

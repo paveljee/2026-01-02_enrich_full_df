@@ -62,6 +62,11 @@ TEST_CALL_ID = "call_test"
 TEST_FC_ID = "fc_test"
 TEST_FCO_ID = "fco_test"
 TEST_REF_ID = "turn0search0"
+TEST_VIEW_CALL_ID = "call_view"
+TEST_VIEW_FC_ID = "fc_view"
+TEST_VIEW_FCO_ID = "fco_view"
+TEST_VIEW_REF_ID = "turn1view0"
+TEST_VIEW_ARGUMENTS = '{"open":[{"ref_id":"turn0search0"}]}'
 TEST_NO_URL_REF_ID = "turn0view1"
 TEST_EXCERPT = "Professor Example holds the Example Chair."
 TEST_URL = "https://example.test/profile"
@@ -466,6 +471,45 @@ def build_test_index(action: str = "search_query") -> api.RolloutIndex:
         minimal_rollout_records(action),
         timezone_name=TEST_TIMEZONE,
         configured_rollout_basename=TEST_ROLLOUT_FILENAME,
+    )
+
+
+def build_duplicate_evidence_index() -> api.RolloutIndex:
+    index = build_test_index()
+    return api.RolloutIndex(
+        session=index.session,
+        fc_rows=index.fc_rows
+        + (
+            api.CodexFcRow(
+                timestamp=index.fc_rows[0].timestamp,
+                fc_id=TEST_VIEW_FC_ID,
+                call_id=TEST_VIEW_CALL_ID,
+                name="run",
+                namespace="web",
+                arguments_json=TEST_VIEW_ARGUMENTS,
+            ),
+        ),
+        fco_rows=index.fco_rows
+        + (
+            api.CodexFcoRow(
+                timestamp=index.fco_rows[0].timestamp,
+                fco_id=TEST_VIEW_FCO_ID,
+                call_id=TEST_VIEW_CALL_ID,
+            ),
+        ),
+        turn_ref_rows=index.turn_ref_rows
+        + (
+            api.CodexTurnRefRow(
+                ref_id=TEST_VIEW_REF_ID,
+                call_id=TEST_VIEW_CALL_ID,
+                domain="example.test",
+                snippet="Opened result",
+                thumbnail_url=None,
+                title="Opened title",
+                url=TEST_URL,
+                cite_text=f"Opened result: {TEST_EXCERPT}",
+            ),
+        ),
     )
 
 
@@ -924,53 +968,14 @@ def test_multiple_exact_excerpt_and_url_matches_use_random_candidate(
     assert api.ALLOW_MULTIPLE_EVIDENCE_MATCHES is True
     connection = duckdb.connect(":memory:")
     try:
-        index = build_test_index()
-        view_call_id = "call_view"
-        view_ref_id = "turn1view0"
-        view_arguments = '{"open":[{"ref_id":"turn0search0"}]}'
-        search_and_view_index = api.RolloutIndex(
-            session=index.session,
-            fc_rows=index.fc_rows
-            + (
-                api.CodexFcRow(
-                    timestamp=index.fc_rows[0].timestamp,
-                    fc_id="fc_view",
-                    call_id=view_call_id,
-                    name="run",
-                    namespace="web",
-                    arguments_json=view_arguments,
-                ),
-            ),
-            fco_rows=index.fco_rows
-            + (
-                api.CodexFcoRow(
-                    timestamp=index.fco_rows[0].timestamp,
-                    fco_id="fco_view",
-                    call_id=view_call_id,
-                ),
-            ),
-            turn_ref_rows=index.turn_ref_rows
-            + (
-                api.CodexTurnRefRow(
-                    ref_id=view_ref_id,
-                    call_id=view_call_id,
-                    domain="example.test",
-                    snippet="Opened result",
-                    thumbnail_url=None,
-                    title="Opened title",
-                    url=TEST_URL,
-                    cite_text=f"Opened result: {TEST_EXCERPT}",
-                ),
-            ),
-        )
-        api.persist_rollout_index(connection, search_and_view_index)
+        api.persist_rollout_index(connection, build_duplicate_evidence_index())
         offered_ref_ids: list[tuple[str, ...]] = []
 
         def choose_search(candidates: tuple[api.EvidenceCandidate, ...]) -> api.EvidenceCandidate:
             offered_ref_ids.append(tuple(candidate.ref_id for candidate in candidates))
             return next(candidate for candidate in candidates if candidate.ref_id == TEST_REF_ID)
 
-        monkeypatch.setattr(api, "choice", choose_search)
+        monkeypatch.setattr(api, "EVIDENCE_RANDOM", SimpleNamespace(choice=choose_search))
         body = {
             column: {
                 "value": column,
@@ -987,11 +992,52 @@ def test_multiple_exact_excerpt_and_url_matches_use_random_candidate(
 
         matches = [match for field_matches in validated.values() for match in field_matches]
         assert {match.ref_id for match in matches} == {TEST_REF_ID}
-        assert offered_ref_ids == [(TEST_REF_ID, view_ref_id)] * len(
+        assert offered_ref_ids == [(TEST_REF_ID, TEST_VIEW_REF_ID)] * len(
             api.AI_AUGMENT_EVIDENCE_COLUMNS
         )
     finally:
         connection.close()
+
+
+def test_seeded_evidence_selection_round_trips_deterministically(tmp_path: Path) -> None:
+    database_path = tmp_path / "evidence.duckdb"
+    index = build_duplicate_evidence_index()
+    submission = api.Submission.model_validate({
+        column: {
+            "value": column,
+            "web_search_excerpts": [{"excerpt": TEST_EXCERPT, "url": TEST_URL}],
+        }
+        for column in api.AI_AUGMENT_EVIDENCE_COLUMNS
+    })
+    sample_seed = PipelineConfig.from_json(CONFIG_PATH).sample_seed
+    selections: list[tuple[tuple[str, int, str, str], ...]] = []
+
+    for _roundtrip in range(2):
+        connection = duckdb.connect(str(database_path))
+        try:
+            api.persist_rollout_index(connection, index)
+            api._seed_evidence_random(sample_seed)
+            validated = api.validate_submission_evidence(
+                connection,
+                submission,
+                rollout_filename=TEST_ROLLOUT_FILENAME,
+            )
+            selections.append(tuple(
+                (match.field, match.evidence_number, match.ref_id, match.call_id)
+                for field_matches in validated.values()
+                for match in field_matches
+            ))
+        finally:
+            connection.close()
+
+    assert selections[0] == selections[1]
+    assert len(selections[0]) == len(api.AI_AUGMENT_EVIDENCE_COLUMNS)
+    assert {
+        (ref_id, call_id) for _field, _number, ref_id, call_id in selections[0]
+    }.issubset({
+        (TEST_REF_ID, TEST_CALL_ID),
+        (TEST_VIEW_REF_ID, TEST_VIEW_CALL_ID),
+    })
 
 
 def test_renderer_uses_generic_arguments_wording() -> None:
