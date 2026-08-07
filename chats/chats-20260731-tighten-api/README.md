@@ -13,6 +13,11 @@ implemention of this task specification:
 This includes the rollout
 `rollout-2026-07-31T14-42-27-019fb97c-1e5a-7830-9244-bd5a10a9cb73.jsonl`.
 
+This also includes the rollout
+for an experimental session
+experimenting with executable specs:
+`rollout-2026-08-07T12-56-51-019fdd27-f543-7942-ba04-eeda4f0cf2bb.jsonl`.
+
 While the rollout is a
 plain text file
 (JSON Lines), 
@@ -31,19 +36,25 @@ link using any web browser
 drag and drop the rollout file
 onto the viewer panel.
 
-The directory also contains `chatgpt.md`,
-which is an export of a separate ChatGPT chat
-produced via ChatGPT iOS app on 2026-08-06 UTC-4
-on a ChatGPT Plus subscription,
-with GPT-5.6-Sol (reasoning: high),
-with custom instructions
-`each word of response costs $1000 so uses them wisely`
-and the "memory" feature disabled.
-The file `./raw_chat_api_json/chatgpt.json`
-is the raw JSON files
-obtained from OpenAI API
+The directory also contains `*.md` files,
+which are exports of separate chatbot chats:
+
+* `chatgpt-1.md` was
+    produced via ChatGPT iOS app on 2026-08-06 UTC-4
+    on a ChatGPT Plus subscription,
+    with GPT-5.6-Sol (reasoning: high),
+    with custom instructions
+    `each word of response costs $1000 so uses them wisely`
+    and the "memory" feature disabled.
+* `chatgpt-2.md` was
+    produced in the same way
+    but on 2026-08-07 UTC-4.
+
+The `*.json` files under `./raw_chat_api_json/`
+are the raw JSON files
+obtained from chatbot API, e.g.,
 using [ChatGPT Exporter 2.32.3 by pionxzh](https://greasyfork.org/scripts/456055),
-from which ultimately `chatgpt.md` was produced
+from which ultimately the `*.md` files were produced
 using this [custom app](https://github.com/paveljee/chat-viewer).
 That project uses Tampermonkey exporter outputs and scripts as reference material.
 Thanks to their authors:
