@@ -10,8 +10,8 @@
     }
   },
   "state_file": "data/pipeline_state.json",
-  "output_dir": "data/output",
-  "output_format": "txt",
+  "output_dir": "data/output/ai_augment",
+  "output_format": "docx",
   "card_subset_mode": 0,
   "match_rule_version": {
     "xlsx_name": 2,
@@ -36,6 +36,11 @@
   "pilot_xlsx_name": "2024_HCR.xlsx",
   "total_draws": 310,
   "files_config": {
+    "map_subset_0_to_batch": {
+      "path": "/Volumes/home/aicode/2026-01-02_enrich_full_df/data/map_subset0_to_batch.csv",
+      "sha256": "a1cd6f3c4a045eff4a248b11b958c552d3c5520066139ec0102ab65e325a5a7c",
+      "desc": "map subset 0 to release batches"
+    },
     "openalex_paper_title_parquet": {
       "path": "/Volumes/home/aicode/2026-01-02_enrich_full_df/data/output/openalex_paper_titles.parquet",
       "sha256": "3511bf749a170086f92556fcd2fdf464d8fe1c44191b77c06cab414da5f99fb8",
