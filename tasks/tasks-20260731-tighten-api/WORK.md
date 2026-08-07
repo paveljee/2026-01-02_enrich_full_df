@@ -2,24 +2,38 @@
 
 ## Status
 
-- 2026-08-07 approved specification step is complete; this step changed only
-  the AI-authored SPEC and this workbook. The new Control Centre, dynamic
-  sanction flow, workbook lifecycle, cohort loader, and tunnel behavior have
-  not yet been implemented.
+- Implementation resumed on 2026-08-07 with the approved SPEC as the active
+  contract. The detour-local map/cohort loader, sanctioned API/workbook flow,
+  Control Centre, and tunnel/dependency wiring are implemented; focused
+  regression/E2E verification and review cleanup remain. Existing evidence
+  parsing/indexing and main-pipeline modules remain protected from refactoring.
+- SSH correction from the operator: preserve `ClearAllForwardings=no` in every
+  existing and new detour SSH/SCP command. Do not use
+  `ClearAllForwardings=yes`; it breaks the required forwarding setup.
+- The Control Centre's HTTP comparisons and errors use FastAPI's semantic
+  status constants; route-local or detour-local numeric status-code aliases are
+  not retained. Its Codex CLI argv is likewise centralized in the top-level
+  `CODEX_EXEC_COMMAND` process configuration and shell-joined at use.
 - The detour now has a dedicated `config_ai_augment.json`. Its
   `files_config["map_subset_0_to_batch"]` entry is required by the detour and
   must be loaded through `PipelineConfig.from_json()` plus the existing
   `register_resource()`/`RegisteredResource` seam with
   `ResourceGroup.KTP_PIPELINE_ARTIFACT`, `FragmentType.CSV_ROW`, and the
   configured SHA-256. Use the existing imported `DRAW_LABEL` and `BATCH_LABEL`
-  for the CSV schema and reject missing columns or duplicate/conflicting draw
-  rows. Keep this requirement detour-local: no edits to `PipelineConfig`, main
-  required-file constants, or main resource loading.
+  for the CSV schema and reject missing columns or conflicting draw
+  classifications. Identical duplicate draw rows are deduplicated; the real
+  map intentionally contains draw 125 twice as `subset 7`. Keep this
+  requirement detour-local: no edits to `PipelineConfig`, main required-file
+  constants, or main resource loading.
 - Cohort identity and every draw are owned only by common innerdict JSONL.
   The registered map may classify those innerdict-provided draws but may not
   supply or replace draws. `card_partitions` supplies only no-ground-truth
   eligibility flags joined by source key. Verified target invariants are 196
   ground-truth keys, 78 no-ground-truth keys, no overlap, and 274 total.
+- Source identity is the common innerdict table's canonical `name_key`.
+  Individual matched innerdict rows may legitimately carry a different name
+  rendering (confirmed for `A. Sheikh`) and must not be required to equal the
+  source-key names; their draw values remain eligible input to the draw set.
 - Production investigation on 2026-08-05: the cumulative 252-line rollout
   archived by attempt
   `20260805T200957_806376Z_7d2bb339299a4a9cabe31bec77ca9f87`
@@ -87,8 +101,8 @@
 - Latest implementation clarification: the eight non-comment push fields require evidence; comments is optional and accepts only its text value, without web excerpts.
 - The earlier evidence-indexing implementation is complete in `api.py`, new
   detour-local `codex_parse.py`, Pixi serving-task wiring, and focused
-  `test_api.py` coverage. The newly specified UI/control/cohort work remains
-  pending implementation.
+  `test_api.py` coverage. The specified UI/control/cohort implementation is now
+  present and under final focused verification.
 - `test_api.py` retains the shared `prepare_real_sample_push` setup/flow for accepted and rejected real-rollout cases. Its July excerpts, URLs, and expected FC/FCO/call/ref identities are fixed independently of the production parser.
 - Git use remains read-only. All review commands use `pixi run`.
 - `README.md`, `.env.example`, sample/ground-truth data, and main-pipeline code remain untouched.
@@ -146,7 +160,7 @@
 9. Allow repeated `ktp.source_key` values: multiple accepted attempts for one researcher become multiple Codex sections, distinguished by fragment and explicit attempt ID.
 10. Reuse the existing parser/materializer/card seams: detour-local `codex_parse.py`, step-08-style output/innerdict flow, and `build_cards()`/`write_cards_zip()` with Codex sections between xlsx and docx.
 
-## Approved Control Centre expansion (implementation pending)
+## Approved Control Centre expansion
 
 - Implement the supplied `control_centre/ui.py` skeleton as one NiceGUI + AG
   Grid operator screen. It owns one serial Codex process, queue/cancel/rerun,
@@ -199,6 +213,9 @@
 
 ## Verification completed
 
+- Current focused Control Centre suite: 9 passed. It includes the workbook/
+  prompt byte-identity regression after moving the prompt into the remote
+  `PROMPT.md` file; Control Centre Ruff checks also pass.
 - The root Pixi task completes with 73 passed and the retained legacy
   multiple-match rejection test skipped under the active allow-multiple
   policy. Its visible argparse usage line is expected stderr from the negative

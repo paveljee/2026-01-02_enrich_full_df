@@ -19,6 +19,7 @@ from src.helpers.config import PipelineConfig
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
 CONFIG_PATH = REPOSITORY_ROOT / "config.repl.json"
+AI_AUGMENT_CONFIG_PATH = REPOSITORY_ROOT / "config_ai_augment.json"
 SOURCE_DB_PATH = REPOSITORY_ROOT / "data" / "scisci_process.duckdb"
 SOURCE_JSONL_PATH = REPOSITORY_ROOT / "tmp" / "sheikh.jsonl"
 REFERENCE_DOCX_PATH = REPOSITORY_ROOT / "resources" / "pandoc-custom-reference.docx"
@@ -1539,7 +1540,7 @@ def test_real_july_push_rejects_changed_evidence_before_ground_truth(
         connection.close()
 
 
-def test_missing_rollout_is_generic_503_and_pull_remains_available(
+def test_missing_rollout_is_generic_503_and_pull_fails_closed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -1568,12 +1569,83 @@ def test_missing_rollout_is_generic_503_and_pull_remains_available(
     assert push_response.status_code == 503
     assert push_response.json() == {"detail": api.CONFIGURATION_ERROR_DETAIL}
     assert api.ROLLOUT_ENV_NAME in caplog.text
-    assert pull_response.status_code == 200
-    assert json.loads(pull_response.text) == {
-        api.KTP_FIRST_NAME_COL: "A.",
-        api.KTP_LAST_NAME_COL: "Sheikh",
+    assert pull_response.status_code == 503
+    assert pull_response.json() == {"detail": api.CONFIGURATION_ERROR_DETAIL}
+
+
+def test_sanctioned_pull_is_dynamic_retryable_and_omits_ground_truth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = api.configure_runtime(AI_AUGMENT_CONFIG_PATH)
+    assert runtime.eligible_cohorts is not None
+    source_key = next(
+        key
+        for key, cohort in runtime.eligible_cohorts.items()
+        if cohort == api.GROUND_TRUTH_COHORT
+    )
+    snapshot = api.SanctionSnapshot(
+        run_id=api.UUID("019fb000-0000-7000-8000-000000000001"),
+        source_key=source_key,
+        session_id="019fb000-0000-7000-8000-000000000002",
+        rollout_guest_path=(
+            "/home/ai/.codex/sessions/2026/08/07/"
+            "rollout-2026-08-07T00-00-00-019fb000-0000-7000-8000-000000000002.jsonl"
+        ),
+        control_base_url="http://127.0.0.1:8611",
+    )
+    monkeypatch.setattr(api, "runtime_configuration", lambda: runtime)
+    monkeypatch.setattr(api, "sanctioned_snapshot", lambda: snapshot)
+    monkeypatch.setattr(api, "push_configuration", lambda _rollout: SimpleNamespace())
+    monkeypatch.setattr(api, "WORKBOOK_INITIALIZED", True)
+    client = TestClient(api.app)
+
+    first_response = client.get("/pull")
+    retry_response = client.get("/pull")
+
+    assert first_response.status_code == 200
+    assert retry_response.status_code == 200
+    assert retry_response.content == first_response.content
+    rows = [json.loads(line) for line in first_response.text.splitlines()]
+    task = rows[-1]
+    name_key = api.NameKey.from_json_key(source_key)
+    assert task == {
+        api.KTP_FIRST_NAME_COL: name_key.first_name,
+        api.KTP_LAST_NAME_COL: name_key.last_name,
         **dict.fromkeys(api.AI_AUGMENT_COLUMNS),
     }
+    assert all(
+        row.get(api.KTP_FRAGMENT_TYPE_COL) != api.DOCX_ROW_FRAGMENT_TYPE
+        for row in rows[:-1]
+    )
+    assert not any(
+        column in row
+        for row in rows[:-1]
+        for column in api.DOCX_COLUMNS
+    )
+
+
+def test_control_mode_without_sanction_fails_both_routes_without_env_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = runtime_for_test(tmp_path)
+    monkeypatch.setattr(api, "CONTROL_BASE_URL", "http://127.0.0.1:8611")
+    monkeypatch.setattr(api, "ROLLOUT_JSONL", JULY_ROLLOUT_GUEST_PATH)
+    monkeypatch.setattr(api, "runtime_configuration", lambda: runtime)
+    monkeypatch.setattr(
+        api,
+        "_control_request",
+        lambda _base_url, _path, *, method, body=None: b'{"sanctioned_run":null}',
+    )
+    client = TestClient(api.app)
+
+    pull_response = client.get("/pull")
+    push_response = client.post("/push", json={})
+
+    assert pull_response.status_code == 503
+    assert push_response.status_code == 503
+    assert pull_response.json() == {"detail": api.CONFIGURATION_ERROR_DETAIL}
+    assert push_response.json() == {"detail": api.CONFIGURATION_ERROR_DETAIL}
 
 
 def test_openapi_does_not_disclose_integrity_internals() -> None:

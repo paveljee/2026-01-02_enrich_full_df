@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import json
 import logging
@@ -16,7 +17,10 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from random import Random
 from typing import Annotated, Any, Literal, Self, cast
-from uuid import uuid4
+from urllib import error as urllib_error
+from urllib import request as urllib_request
+from urllib.parse import urlsplit
+from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
 import duckdb
@@ -36,14 +40,22 @@ from pydantic import (
 
 from src.helpers.cards import build_cards, write_cards_zip
 from src.helpers.config import PipelineConfig
-from src.helpers.data_models import FragmentType, NameKey, OuterDict
+from src.helpers.data_models import (
+    FragmentType,
+    NameKey,
+    OuterDict,
+    RegisteredResource,
+    ResourceGroup,
+)
 from src.helpers.duckdb_utils import (
     append_innerdicts_from_jsonlines_table,
     duckdb_quote_identifier,
     materialize_innerdicts_from_rows_table,
 )
 from src.helpers.procedures import DocxMatchProcedure, ParquetMatchProcedure, XlsxMatchProcedure
+from src.helpers.resources import register_resource
 from src.helpers.schema import (
+    CARD_PARTITION_TABLE,
     DOCX_INNERDICT_TABLE,
     OUTERDICT_NAME_VIEW,
     PARQUET_INNERDICT_TABLE,
@@ -51,6 +63,7 @@ from src.helpers.schema import (
     XLSX_INNERDICT_TABLE,
 )
 from src.helpers.vars import (
+    BATCH_LABEL,
     CARD_INTRODUCTION,
     CSV_ROW_INDEX_COL,
     DOCX_FRAGMENT_COL,
@@ -62,6 +75,9 @@ from src.helpers.vars import (
     KTP_FRAGMENT_COL,
     KTP_FRAGMENT_TYPE_COL,
     KTP_LAST_NAME_COL,
+    KTP_PARTITION_COL,
+    KTP_PARTITION_FLAG_SSN_COUNT_COL,
+    KTP_PARTITION_FLAG_XLSX_NON_EXACT_ANY_COL,
     KTP_SOURCE_KEY_COL,
 )
 
@@ -75,9 +91,19 @@ logger = logging.getLogger(__name__)
 SUBMISSIONS_DIR = Path(__file__).resolve().parents[2] / "data" / "submissions"
 ATTEMPTS_DIR = SUBMISSIONS_DIR / "attempts"
 SOURCE_FILE = Path("tmp/sheikh.jsonl")
+HOST_WORKBOOK_PATH = Path(__file__).resolve().parents[2] / "data" / "workbook.md"
+AIVM_WORKDIR = PurePosixPath("/home/ai/workdir")
+AIVM_WORKBOOK_PATH = AIVM_WORKDIR / "WORKBOOK.md"
 
 ROLLOUT_ENV_NAME = "FASTAPI_DETOUR_ROLLOUT_JSONL"
 ROLLOUT_JSONL = os.environ.get(ROLLOUT_ENV_NAME, "")
+CONTROL_URL_ENV_NAME = "FASTAPI_DETOUR_CONTROL_URL"
+CONTROL_BASE_URL = os.environ.get(CONTROL_URL_ENV_NAME, "")
+CONTROL_CURRENT_PATH = "/_control/current"
+CONTROL_ACCEPTED_PATH_TEMPLATE = "/_control/runs/{run_id}/accepted"
+CONTROL_HTTP_TIMEOUT_SECONDS = 10
+CONTROL_HOST = "127.0.0.1"
+CONTROL_PORT = 8611
 CODEX_SESSIONS_ROOT = PurePosixPath("/home/ai/.codex/sessions")
 APPENDWATCH_REPORT = Path(
     os.environ.get(
@@ -112,6 +138,7 @@ MAX_URL_CHARACTERS = MAX_PUSH_BODY_BYTES
 MAX_EXCERPTS_PER_FIELD = MAX_PUSH_BODY_BYTES
 ARCHIVE_HASH_CHUNK_BYTES = 1024 * 1024
 SCP_TIMEOUT_SECONDS = 60
+SSH_TIMEOUT_SECONDS = 60
 MIN_TCP_PORT = 1
 MAX_TCP_PORT = 65_535
 CONTROL_CHARACTER_CEILING = 32
@@ -142,11 +169,32 @@ CODEX_CITE_MARKER_SUFFIX = "\ue201"
 CODEX_REF_ID_PATTERN = r"turn[0-9]+[A-Za-z_]+[0-9]+"
 CODEX_RESULT_SEPARATOR = "-" * 80
 FOOTNOTE_CONTEXT_CHARACTERS = 160
-SERVER_HOST = "0.0.0.0"
+SERVER_HOST = "127.0.0.1"
 SERVER_PORT = 8612
+
+CONFIG_FILENAME = "config_ai_augment.json"
+MAP_SUBSET_0_TO_BATCH_KEY = "map_subset_0_to_batch"
+MAP_COLUMNS = (DRAW_LABEL, BATCH_LABEL)
+GROUND_TRUTH_RELEASE_BATCHES = frozenset({"subset 1", "subset 5", "subset 6", "subset 7"})
+GROUND_TRUTH_COHORT = "ground_truth"
+NO_GROUND_TRUTH_COHORT = "no_ground_truth"
+EXPECTED_GROUND_TRUTH_RESEARCHERS = 196
+EXPECTED_NO_GROUND_TRUTH_RESEARCHERS = 78
+EXPECTED_ELIGIBLE_RESEARCHERS = 274
+NO_GROUND_TRUTH_PARTITION = 4
+NO_GROUND_TRUTH_SSN_COUNT = 1
+EXCLUDED_SOURCE_KEY = json.dumps(
+    {KTP_FIRST_NAME_COL: "Mercouri G.", KTP_LAST_NAME_COL: "Kanatzidis"},
+    sort_keys=True,
+)
+DRAW_VALUE_SEPARATOR = ", "
 
 DETOUR_ID = "ai-augment"
 DETOUR_DB_LOCK = threading.Lock()
+CONSUMED_RUN_LOCK = threading.Lock()
+CONSUMED_RUN_IDS: set[UUID] = set()
+WORKBOOK_STATE_LOCK = threading.Lock()
+WORKBOOK_INITIALIZED = False
 EVIDENCE_RANDOM = Random()
 CODEX_FC_TABLE = "codex_fc"
 CODEX_FCO_TABLE = "codex_fco"
@@ -178,21 +226,22 @@ CODEX_REF_TITLE_COL = "codex.ref_title"
 CODEX_REF_URL_COL = "codex.ref_url"
 CODEX_CITE_TEXT_COL = "codex.cite_text"
 
-KTP_AI_AUGMENT_ATTEMPT_ID_COL = "ktp.ai_augment_attempt_id"
-KTP_AI_AUGMENT_SESSION_METADATA_COL = "ktp.ai_augment_session_metadata"
-KTP_AI_AUGMENT_FOOTNOTES_COL = "ktp.ai_augment_footnotes"
-KTP_AI_AUGMENT_FOOTNOTE_ARGUMENTS_COL = "ktp.ai_augment_footnote_arguments"
-KTP_AI_AUGMENT_RESEARCHER_AUTHOR_COL = "ktp.ai_augment_researcher_author"
-KTP_AI_AUGMENT_PLACE_OF_RESIDENCE_COL = "ktp.ai_augment_place_of_residence"
-KTP_AI_AUGMENT_GENDER_COL = "ktp.ai_augment_gender"
+AI_AUGMENT_COLUMN_PREFIX = "ktp.ai_augment_"
+KTP_AI_AUGMENT_ATTEMPT_ID_COL = f"{AI_AUGMENT_COLUMN_PREFIX}attempt_id"
+KTP_AI_AUGMENT_SESSION_METADATA_COL = f"{AI_AUGMENT_COLUMN_PREFIX}session_metadata"
+KTP_AI_AUGMENT_FOOTNOTES_COL = f"{AI_AUGMENT_COLUMN_PREFIX}footnotes"
+KTP_AI_AUGMENT_FOOTNOTE_ARGUMENTS_COL = f"{AI_AUGMENT_COLUMN_PREFIX}footnote_arguments"
+KTP_AI_AUGMENT_RESEARCHER_AUTHOR_COL = f"{AI_AUGMENT_COLUMN_PREFIX}researcher_author"
+KTP_AI_AUGMENT_PLACE_OF_RESIDENCE_COL = f"{AI_AUGMENT_COLUMN_PREFIX}place_of_residence"
+KTP_AI_AUGMENT_GENDER_COL = f"{AI_AUGMENT_COLUMN_PREFIX}gender"
 KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL = (
-    "ktp.ai_augment_age_first_publication_according_to_openalex_profile"
+    f"{AI_AUGMENT_COLUMN_PREFIX}age_first_publication_according_to_openalex_profile"
 )
-KTP_AI_AUGMENT_EDUCATION_COL = "ktp.ai_augment_education"
-KTP_AI_AUGMENT_ACADEMIC_POSITIONS_COL = "ktp.ai_augment_academic_position_s_"
-KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL = "ktp.ai_augment_social_capital"
-KTP_AI_AUGMENT_LINKS_COL = "ktp.ai_augment_links_"
-KTP_AI_AUGMENT_COMMENTS_COL = "ktp.ai_augment_comments"
+KTP_AI_AUGMENT_EDUCATION_COL = f"{AI_AUGMENT_COLUMN_PREFIX}education"
+KTP_AI_AUGMENT_ACADEMIC_POSITIONS_COL = f"{AI_AUGMENT_COLUMN_PREFIX}academic_position_s_"
+KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL = f"{AI_AUGMENT_COLUMN_PREFIX}social_capital"
+KTP_AI_AUGMENT_LINKS_COL = f"{AI_AUGMENT_COLUMN_PREFIX}links_"
+KTP_AI_AUGMENT_COMMENTS_COL = f"{AI_AUGMENT_COLUMN_PREFIX}comments"
 
 DRAW_NUMBER_COLUMN = DRAW_LABEL
 TARGET_DRAW_NUMBER = "146"
@@ -322,9 +371,12 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
         logger.error("API startup failed: %s", exc)
         raise
     try:
-        push_configuration()
+        if _control_base_url() is None:
+            push_configuration()
+        else:
+            initialize_guest_workbook()
     except PushConfigurationError as exc:
-        logger.error("push is disabled: %s", exc)
+        logger.error("pull and push are disabled: %s", exc)
     yield
 
 
@@ -468,6 +520,44 @@ class CompactSessionMetadata(BaseModel):
         return self
 
 
+class ControlRun(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    run_id: UUID
+    source_key: StrictStr
+    session_id: StrictStr
+    rollout_jsonl: StrictStr
+
+    @model_validator(mode="after")
+    def validate_control_run(self) -> Self:
+        if any(
+            not _valid_nonblank(value)
+            for value in (self.source_key, self.session_id, self.rollout_jsonl)
+        ):
+            raise ValueError("control run fields must be non-blank and normalized")
+        return self
+
+
+class ControlSnapshot(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    sanctioned_run: ControlRun | None
+
+
+class ControlAcceptedRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    source_key: StrictStr
+    session_id: StrictStr
+    attempt_id: StrictStr
+
+
+class ControlAcceptedResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    acknowledged: bool
+
+
 class Submission(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
@@ -551,6 +641,29 @@ class PushConfiguration:
 class RuntimeConfiguration:
     pipeline: PipelineConfig
     detour_db_path: Path
+    release_map: RegisteredResource | None = None
+    eligible_cohorts: Mapping[str, str] | None = None
+
+
+@dataclass(frozen=True)
+class SanctionSnapshot:
+    run_id: UUID | None
+    source_key: str | None
+    session_id: str | None
+    rollout_guest_path: str
+    control_base_url: str | None
+
+
+@dataclass(frozen=True)
+class SourceResearcher:
+    source_key: str
+    first_name: str
+    last_name: str
+    draw_numbers: tuple[str, ...]
+    xlsx_rows: tuple[dict[str, object], ...]
+    docx_rows: tuple[dict[str, object], ...]
+    ssn_rows: tuple[dict[str, object], ...]
+    cohort: str
 
 
 @dataclass(frozen=True)
@@ -652,6 +765,8 @@ class ResearcherContext:
     draw_number: str
     first_name: str
     last_name: str
+    cohort: str = GROUND_TRUTH_COHORT
+    draw_numbers: tuple[str, ...] = ()
 
 
 class CodexMatchProcedure:
@@ -698,6 +813,287 @@ def _seed_evidence_random(sample_seed: int) -> None:
     EVIDENCE_RANDOM.seed(sample_seed)
 
 
+def registered_release_map(config: PipelineConfig) -> RegisteredResource:
+    meta = config.files_config.get(MAP_SUBSET_0_TO_BATCH_KEY)
+    if meta is None:
+        raise PushConfigurationError(
+            f"files_config is missing required detour resource {MAP_SUBSET_0_TO_BATCH_KEY!r}"
+        )
+    try:
+        return register_resource(
+            Path(meta["path"]),
+            group=ResourceGroup.KTP_PIPELINE_ARTIFACT,
+            fragment_type=FragmentType.CSV_ROW,
+            description=meta["desc"],
+            expected_hash=meta["sha256"],
+        )
+    except (KeyError, OSError, ValueError) as exc:
+        raise PushConfigurationError(
+            f"configured {MAP_SUBSET_0_TO_BATCH_KEY} resource is invalid"
+        ) from exc
+
+
+def load_release_batches(resource: RegisteredResource) -> dict[str, str]:
+    path = Path(resource)
+    try:
+        with path.open(encoding="utf-8", newline="") as stream:
+            reader = csv.DictReader(stream)
+            if tuple(reader.fieldnames or ()) != MAP_COLUMNS:
+                raise PushConfigurationError(
+                    f"{MAP_SUBSET_0_TO_BATCH_KEY} must have exactly columns {MAP_COLUMNS!r}"
+                )
+            batches: dict[str, str] = {}
+            for row_number, row in enumerate(reader, start=2):
+                draw_number = row.get(DRAW_LABEL)
+                release_batch = row.get(BATCH_LABEL)
+                if not _valid_nonblank(draw_number) or not _valid_nonblank(release_batch):
+                    raise PushConfigurationError(
+                        f"{MAP_SUBSET_0_TO_BATCH_KEY} row {row_number} has blank values"
+                    )
+                assert isinstance(draw_number, str)
+                assert isinstance(release_batch, str)
+                if draw_number in batches and batches[draw_number] != release_batch:
+                    raise PushConfigurationError(
+                        f"{MAP_SUBSET_0_TO_BATCH_KEY} has conflicting draw {draw_number!r}"
+                    )
+                batches[draw_number] = release_batch
+    except (OSError, UnicodeError, csv.Error) as exc:
+        raise PushConfigurationError(
+            f"configured {MAP_SUBSET_0_TO_BATCH_KEY} CSV is unreadable or malformed"
+        ) from exc
+    if not batches:
+        raise PushConfigurationError(f"configured {MAP_SUBSET_0_TO_BATCH_KEY} CSV is empty")
+    return batches
+
+
+def _innerdict_json_rows(
+    value: object,
+    *,
+    table_name: str,
+    source_key: str,
+) -> tuple[dict[str, object], ...]:
+    if not isinstance(value, str):
+        raise PushConfigurationError(f"{table_name} has non-text innerdicts for {source_key}")
+    rows: list[dict[str, object]] = []
+    for line_number, line in enumerate(value.splitlines(), start=1):
+        try:
+            row: object = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise PushConfigurationError(
+                f"{table_name} has malformed JSONL for {source_key} at line {line_number}"
+            ) from exc
+        if not isinstance(row, dict):
+            raise PushConfigurationError(
+                f"{table_name} has a non-object row for {source_key} at line {line_number}"
+            )
+        rows.append(cast(dict[str, object], row))
+    return tuple(rows)
+
+
+def _draw_sort_key(value: str) -> tuple[int, int | str]:
+    return (0, int(value)) if value.isdecimal() else (1, value)
+
+
+def _source_identity_and_draws(
+    conn: duckdb.DuckDBPyConnection,
+) -> dict[str, tuple[NameKey, tuple[str, ...]]]:
+    draws_by_source_key: dict[str, set[str]] = {}
+    names_by_source_key: dict[str, NameKey] = {}
+    for table_name in (XLSX_INNERDICT_TABLE, DOCX_INNERDICT_TABLE, PARQUET_INNERDICT_TABLE):
+        try:
+            table_rows = conn.execute(
+                f"SELECT name_key, innerdicts FROM {table_name} ORDER BY name_key"
+            ).fetchall()
+        except duckdb.Error as exc:
+            raise PushConfigurationError(f"configured source DuckDB lacks {table_name}") from exc
+        for raw_source_key, jsonlines in table_rows:
+            if not isinstance(raw_source_key, str):
+                raise PushConfigurationError(f"{table_name} contains a non-text name_key")
+            try:
+                name_key = NameKey.from_json_key(raw_source_key)
+            except (ValueError, TypeError, json.JSONDecodeError) as exc:
+                raise PushConfigurationError(f"{table_name} contains an invalid name_key") from exc
+            source_key = name_key.to_json_key()
+            names_by_source_key[source_key] = name_key
+            source_draws = draws_by_source_key.setdefault(source_key, set())
+            for row in _innerdict_json_rows(
+                jsonlines,
+                table_name=table_name,
+                source_key=source_key,
+            ):
+                draw_number = row.get(DRAW_LABEL)
+                if draw_number is not None:
+                    draw_text = str(draw_number).strip()
+                    if draw_text:
+                        source_draws.add(draw_text)
+    return {
+        source_key: (
+            name_key,
+            tuple(sorted(draws_by_source_key[source_key], key=_draw_sort_key)),
+        )
+        for source_key, name_key in names_by_source_key.items()
+    }
+
+
+def derive_eligible_cohorts(
+    conn: duckdb.DuckDBPyConnection,
+    release_batches: Mapping[str, str],
+) -> dict[str, str]:
+    source_researchers = _source_identity_and_draws(conn)
+    ground_truth = {
+        source_key
+        for source_key, (_name_key, draws) in source_researchers.items()
+        if source_key != EXCLUDED_SOURCE_KEY
+        and any(release_batches.get(draw) in GROUND_TRUTH_RELEASE_BATCHES for draw in draws)
+    }
+    try:
+        no_ground_truth = {
+            cast(str, row[0])
+            for row in conn.execute(
+                f"""
+                SELECT DISTINCT {duckdb_quote_identifier(KTP_SOURCE_KEY_COL)}
+                FROM {CARD_PARTITION_TABLE}
+                WHERE {duckdb_quote_identifier(KTP_PARTITION_COL)} = ?
+                  AND {duckdb_quote_identifier(KTP_PARTITION_FLAG_XLSX_NON_EXACT_ANY_COL)} = FALSE
+                  AND {duckdb_quote_identifier(KTP_PARTITION_FLAG_SSN_COUNT_COL)} = ?
+                ORDER BY {duckdb_quote_identifier(KTP_SOURCE_KEY_COL)}
+                """,
+                [NO_GROUND_TRUTH_PARTITION, NO_GROUND_TRUTH_SSN_COUNT],
+            ).fetchall()
+        }
+    except duckdb.Error as exc:
+        raise PushConfigurationError(
+            f"configured source DuckDB lacks usable {CARD_PARTITION_TABLE} eligibility flags"
+        ) from exc
+    missing_source_keys = no_ground_truth - source_researchers.keys()
+    overlap = ground_truth & no_ground_truth
+    if missing_source_keys:
+        raise PushConfigurationError("card-partition eligibility contains unknown source keys")
+    if overlap:
+        raise PushConfigurationError("ground-truth and no-ground-truth cohorts overlap")
+    if len(ground_truth) != EXPECTED_GROUND_TRUTH_RESEARCHERS:
+        raise PushConfigurationError(
+            "ground-truth cohort cardinality is invalid: "
+            f"expected {EXPECTED_GROUND_TRUTH_RESEARCHERS}, got {len(ground_truth)}"
+        )
+    if len(no_ground_truth) != EXPECTED_NO_GROUND_TRUTH_RESEARCHERS:
+        raise PushConfigurationError(
+            "no-ground-truth cohort cardinality is invalid: "
+            f"expected {EXPECTED_NO_GROUND_TRUTH_RESEARCHERS}, got {len(no_ground_truth)}"
+        )
+    if len(ground_truth | no_ground_truth) != EXPECTED_ELIGIBLE_RESEARCHERS:
+        raise PushConfigurationError("eligible cohort union cardinality is invalid")
+    return {
+        **dict.fromkeys(sorted(ground_truth), GROUND_TRUTH_COHORT),
+        **dict.fromkeys(sorted(no_ground_truth), NO_GROUND_TRUTH_COHORT),
+    }
+
+
+def _control_base_url() -> str | None:
+    raw = CONTROL_BASE_URL
+    if not raw:
+        return None
+    if raw != raw.strip() or _has_control_character(raw):
+        raise PushConfigurationError(f"{CONTROL_URL_ENV_NAME} is invalid")
+    parsed = urlsplit(raw)
+    if (
+        parsed.scheme != "http"
+        or parsed.hostname != CONTROL_HOST
+        or parsed.port != CONTROL_PORT
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        raise PushConfigurationError(
+            f"{CONTROL_URL_ENV_NAME} must be http://{CONTROL_HOST}:{CONTROL_PORT}"
+        )
+    return raw.rstrip("/")
+
+
+def _control_request(
+    base_url: str,
+    path: str,
+    *,
+    method: str,
+    body: bytes | None = None,
+) -> bytes:
+    headers = {"Accept": "application/json"}
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+    request = urllib_request.Request(
+        f"{base_url}{path}",
+        data=body,
+        headers=headers,
+        method=method,
+    )
+    try:
+        with urllib_request.urlopen(request, timeout=CONTROL_HTTP_TIMEOUT_SECONDS) as response:
+            return response.read()
+    except (OSError, urllib_error.URLError, urllib_error.HTTPError) as exc:
+        raise PushConfigurationError("Control Centre endpoint is unavailable") from exc
+
+
+def sanctioned_snapshot() -> SanctionSnapshot:
+    base_url = _control_base_url()
+    if base_url is None:
+        return SanctionSnapshot(
+            run_id=None,
+            source_key=None,
+            session_id=None,
+            rollout_guest_path=ROLLOUT_JSONL,
+            control_base_url=None,
+        )
+    try:
+        snapshot = ControlSnapshot.model_validate_json(
+            _control_request(base_url, CONTROL_CURRENT_PATH, method="GET")
+        )
+    except ValidationError as exc:
+        raise PushConfigurationError("Control Centre returned malformed sanction state") from exc
+    if snapshot.sanctioned_run is None:
+        raise PushConfigurationError("Control Centre has no sanctioned run")
+    run = snapshot.sanctioned_run
+    with CONSUMED_RUN_LOCK:
+        if run.run_id in CONSUMED_RUN_IDS:
+            raise PushConfigurationError("Control Centre run sanction has already been consumed")
+    return SanctionSnapshot(
+        run_id=run.run_id,
+        source_key=run.source_key,
+        session_id=run.session_id,
+        rollout_guest_path=run.rollout_jsonl,
+        control_base_url=base_url,
+    )
+
+
+def consume_sanction(snapshot: SanctionSnapshot) -> None:
+    if snapshot.run_id is None:
+        return
+    with CONSUMED_RUN_LOCK:
+        CONSUMED_RUN_IDS.add(snapshot.run_id)
+
+
+def acknowledge_sanction(snapshot: SanctionSnapshot, attempt_id: str) -> None:
+    if snapshot.run_id is None or snapshot.control_base_url is None:
+        return
+    assert snapshot.source_key is not None
+    assert snapshot.session_id is not None
+    body = ControlAcceptedRequest(
+        source_key=snapshot.source_key,
+        session_id=snapshot.session_id,
+        attempt_id=attempt_id,
+    ).model_dump_json().encode("utf-8")
+    path = CONTROL_ACCEPTED_PATH_TEMPLATE.format(run_id=snapshot.run_id)
+    try:
+        response = ControlAcceptedResponse.model_validate_json(
+            _control_request(snapshot.control_base_url, path, method="POST", body=body)
+        )
+    except ValidationError as exc:
+        raise PushConfigurationError("Control Centre returned malformed acknowledgement") from exc
+    if not response.acknowledged:
+        raise PushConfigurationError("Control Centre refused accepted-run acknowledgement")
+
+
 def configure_runtime(config_path: Path) -> RuntimeConfiguration:
     global RUNTIME_CONFIGURATION
 
@@ -725,24 +1121,40 @@ def configure_runtime(config_path: Path) -> RuntimeConfiguration:
             f"configured timezone is invalid: {pipeline.timezone}"
         ) from exc
 
+    release_map = registered_release_map(pipeline)
+    release_batches = load_release_batches(release_map)
+    source_conn: duckdb.DuckDBPyConnection | None = None
+    try:
+        source_conn = duckdb.connect(str(pipeline.db_file), read_only=True)
+        eligible_cohorts = derive_eligible_cohorts(source_conn, release_batches)
+    except duckdb.Error as exc:
+        raise PushConfigurationError("configured source DuckDB could not be validated") from exc
+    finally:
+        if source_conn is not None:
+            source_conn.close()
+
     detour_db_path = _detour_db_path(pipeline.db_file)
     if detour_db_path == pipeline.db_file:
         raise PushConfigurationError("detour DuckDB path must differ from source DuckDB")
     RUNTIME_CONFIGURATION = RuntimeConfiguration(
         pipeline=pipeline,
         detour_db_path=detour_db_path,
+        release_map=release_map,
+        eligible_cohorts=eligible_cohorts,
     )
     return RUNTIME_CONFIGURATION
 
 
 def runtime_configuration() -> RuntimeConfiguration:
     if RUNTIME_CONFIGURATION is None:
-        raise PushConfigurationError("API was not started with required --config config.json")
+        raise PushConfigurationError(
+            f"API was not started with required --config {CONFIG_FILENAME}"
+        )
     return RUNTIME_CONFIGURATION
 
 
-def push_configuration() -> PushConfiguration:
-    raw_rollout = ROLLOUT_JSONL
+def push_configuration(rollout_jsonl: str | None = None) -> PushConfiguration:
+    raw_rollout = ROLLOUT_JSONL if rollout_jsonl is None else rollout_jsonl
     if not raw_rollout.strip():
         raise PushConfigurationError(
             f"{ROLLOUT_ENV_NAME} is not set; add the active chat rollout path "
@@ -868,6 +1280,159 @@ def _publish_archive(temporary: Path, destination: Path) -> ArchivedFile:
     return _archived_file(destination)
 
 
+def _aivm_connection_options(
+    *,
+    lima_ssh_config: Path,
+    identity_file: Path,
+    known_hosts_file: Path,
+    host_key_alias: str,
+) -> list[str]:
+    return [
+        "-F",
+        str(lima_ssh_config),
+        "-o",
+        f"ProxyJump=lima-{AIVM_INSTANCE}",
+        "-o",
+        "HostName=127.0.0.1",
+        "-o",
+        f"Port={AIVM_SSH_PORT}",
+        "-o",
+        f"User={AIVM_USER}",
+        "-o",
+        f"IdentityFile={identity_file}",
+        "-o",
+        "IdentitiesOnly=yes",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "PasswordAuthentication=no",
+        "-o",
+        "KbdInteractiveAuthentication=no",
+        "-o",
+        "ForwardAgent=no",
+        "-o",
+        "ClearAllForwardings=no",
+        "-o",
+        f"UserKnownHostsFile={known_hosts_file}",
+        "-o",
+        f"HostKeyAlias={host_key_alias}",
+        "-o",
+        "StrictHostKeyChecking=accept-new",
+    ]
+
+
+def _host_workbook() -> Path:
+    HOST_WORKBOOK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if not HOST_WORKBOOK_PATH.exists():
+        _atomic_write_text(HOST_WORKBOOK_PATH, "")
+    if (
+        HOST_WORKBOOK_PATH.is_symlink()
+        or not HOST_WORKBOOK_PATH.is_file()
+        or not os.access(HOST_WORKBOOK_PATH, os.R_OK | os.W_OK)
+    ):
+        raise PushConfigurationError("host workbook is not a readable writable regular file")
+    return HOST_WORKBOOK_PATH
+
+
+def initialize_guest_workbook() -> None:
+    global WORKBOOK_INITIALIZED
+
+    host_workbook = _host_workbook()
+    lima_ssh_config = _configuration_file(
+        LIMA_SSH_CONFIG_PATH,
+        "FASTAPI_DETOUR_LIMA_SSH_CONFIG",
+    )
+    identity_file = _configuration_file(
+        AIVM_IDENTITY_FILE,
+        "FASTAPI_DETOUR_AIVM_IDENTITY_FILE",
+    )
+    known_hosts_file = _configuration_file(
+        AIVM_KNOWN_HOSTS_FILE,
+        "FASTAPI_DETOUR_AIVM_KNOWN_HOSTS_FILE",
+    )
+    options = _aivm_connection_options(
+        lima_ssh_config=lima_ssh_config,
+        identity_file=identity_file,
+        known_hosts_file=known_hosts_file,
+        host_key_alias=AIVM_HOST_KEY_ALIAS,
+    )
+    try:
+        subprocess.run(
+            ["ssh", *options, AIVM_SSH_TARGET, "mkdir", "-p", "--", str(AIVM_WORKDIR)],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=SSH_TIMEOUT_SECONDS,
+        )
+        subprocess.run(
+            [
+                "scp",
+                *options,
+                "--",
+                str(host_workbook),
+                f"{AIVM_SSH_TARGET}:{AIVM_WORKBOOK_PATH}",
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=SCP_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise PushConfigurationError(
+            "host workbook could not be initialized in the AIVM workdir"
+        ) from exc
+    with WORKBOOK_STATE_LOCK:
+        WORKBOOK_INITIALIZED = True
+
+
+def copy_guest_workbook(
+    configuration: PushConfiguration,
+    attempt_dir: Path,
+    attempt_id: str,
+) -> ArchivedFile:
+    temporary = attempt_dir / ".workbook.tmp"
+    destination = attempt_dir / f"workbook.{attempt_id}.md"
+    options = _aivm_connection_options(
+        lima_ssh_config=configuration.lima_ssh_config,
+        identity_file=configuration.identity_file,
+        known_hosts_file=configuration.known_hosts_file,
+        host_key_alias=configuration.host_key_alias,
+    )
+    try:
+        subprocess.run(
+            [
+                "scp",
+                *options,
+                "--",
+                f"{configuration.ssh_target}:{AIVM_WORKBOOK_PATH}",
+                str(temporary),
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=SCP_TIMEOUT_SECONDS,
+        )
+        if not temporary.is_file() or temporary.is_symlink():
+            raise PushConfigurationError("SCP did not produce a regular workbook archive")
+        archive = _publish_archive(temporary, destination)
+        host_temporary = HOST_WORKBOOK_PATH.with_name(f".{HOST_WORKBOOK_PATH.name}.tmp")
+        try:
+            shutil.copyfile(archive.path, host_temporary)
+            _fsync_file(host_temporary)
+            os.replace(host_temporary, _host_workbook())
+            _fsync_directory(HOST_WORKBOOK_PATH.parent)
+        finally:
+            host_temporary.unlink(missing_ok=True)
+        return archive
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise PushConfigurationError("guest workbook could not be archived") from exc
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def copy_rollout(
     configuration: PushConfiguration,
     attempt_dir: Path,
@@ -900,7 +1465,7 @@ def copy_rollout(
         "-o",
         "ForwardAgent=no",
         "-o",
-        "ClearAllForwardings=yes",
+        "ClearAllForwardings=no",
         "-o",
         f"UserKnownHostsFile={configuration.known_hosts_file}",
         "-o",
@@ -1969,12 +2534,14 @@ def record_attempt(
     result: str,
     *,
     rollout_archive: ArchivedFile | None = None,
+    workbook_archive: ArchivedFile | None = None,
     report_archive: ArchivedFile | None = None,
     card_archive: ArchivedFile | None = None,
 ) -> None:
     artifacts = {}
     for name, artifact in (
         ("rollout", rollout_archive),
+        ("workbook", workbook_archive),
         ("appendwatch_report", report_archive),
         ("card_zip", card_archive),
     ):
@@ -2016,6 +2583,120 @@ def open_detour_database(
         return duckdb.connect(str(runtime.detour_db_path))
     except (OSError, duckdb.Error) as exc:
         raise PushValidationError("detour DuckDB could not be opened") from exc
+
+
+def _source_table_rows(
+    source_conn: duckdb.DuckDBPyConnection,
+    *,
+    table_name: str,
+    source_key: str,
+) -> tuple[dict[str, object], ...]:
+    try:
+        rows = source_conn.execute(
+            f"SELECT innerdicts FROM {table_name} WHERE name_key = ?",
+            [source_key],
+        ).fetchall()
+    except duckdb.Error as exc:
+        raise PushValidationError(f"configured source DuckDB lacks {table_name}") from exc
+    if len(rows) > 1:
+        raise PushValidationError(f"{table_name} contains duplicate rows for sanctioned source key")
+    if not rows:
+        return ()
+    try:
+        return _innerdict_json_rows(
+            rows[0][0],
+            table_name=table_name,
+            source_key=source_key,
+        )
+    except PushConfigurationError as exc:
+        raise PushValidationError(str(exc)) from exc
+
+
+def load_source_researcher(
+    source_conn: duckdb.DuckDBPyConnection,
+    runtime: RuntimeConfiguration,
+    *,
+    source_key: str,
+) -> SourceResearcher:
+    cohorts = runtime.eligible_cohorts
+    if cohorts is None or source_key not in cohorts:
+        raise PushValidationError("sanctioned source key is not eligible for this detour")
+    try:
+        name_key = NameKey.from_json_key(source_key)
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        raise PushValidationError("sanctioned source key is malformed") from exc
+    if name_key.to_json_key() != source_key:
+        raise PushValidationError("sanctioned source key is not canonical")
+
+    xlsx_rows = _source_table_rows(
+        source_conn,
+        table_name=XLSX_INNERDICT_TABLE,
+        source_key=source_key,
+    )
+    docx_rows = _source_table_rows(
+        source_conn,
+        table_name=DOCX_INNERDICT_TABLE,
+        source_key=source_key,
+    )
+    ssn_rows = _source_table_rows(
+        source_conn,
+        table_name=PARQUET_INNERDICT_TABLE,
+        source_key=source_key,
+    )
+    if not xlsx_rows:
+        raise PushValidationError("sanctioned source key has no xlsx innerdict context")
+    draw_numbers = tuple(sorted({
+        str(row[DRAW_LABEL]).strip()
+        for row in (*xlsx_rows, *docx_rows, *ssn_rows)
+        if row.get(DRAW_LABEL) is not None and str(row[DRAW_LABEL]).strip()
+    }, key=_draw_sort_key))
+    if not draw_numbers:
+        raise PushValidationError("sanctioned source key has no innerdict-owned draw")
+    return SourceResearcher(
+        source_key=source_key,
+        first_name=name_key.first_name,
+        last_name=name_key.last_name,
+        draw_numbers=draw_numbers,
+        xlsx_rows=xlsx_rows,
+        docx_rows=docx_rows,
+        ssn_rows=ssn_rows,
+        cohort=cohorts[source_key],
+    )
+
+
+def researcher_context(researcher: SourceResearcher) -> ResearcherContext:
+    return ResearcherContext(
+        source_key=researcher.source_key,
+        draw_number=DRAW_VALUE_SEPARATOR.join(researcher.draw_numbers),
+        first_name=researcher.first_name,
+        last_name=researcher.last_name,
+        cohort=researcher.cohort,
+        draw_numbers=researcher.draw_numbers,
+    )
+
+
+def sanctioned_pull_lines(researcher: SourceResearcher) -> Iterator[str]:
+    for row in (*researcher.xlsx_rows, *researcher.ssn_rows):
+        yield json_line(row)
+    yield json_line({
+        KTP_FIRST_NAME_COL: researcher.first_name,
+        KTP_LAST_NAME_COL: researcher.last_name,
+        **dict.fromkeys(AI_AUGMENT_COLUMNS),
+    })
+
+
+def ground_truth_for_researcher(researcher: SourceResearcher) -> dict[str, object] | None:
+    if researcher.cohort == NO_GROUND_TRUTH_COHORT:
+        return None
+    required_columns = DOCX_COLUMNS[:-1]
+    complete_rows = [
+        row
+        for row in researcher.docx_rows
+        if all(column in row and bool(str(row[column]).strip()) for column in required_columns)
+    ]
+    if not complete_rows:
+        raise PushValidationError("ground-truth researcher has no complete docx innerdict")
+    return select_columns(complete_rows[0])
 
 
 def resolve_researcher(
@@ -2205,7 +2886,8 @@ def write_accepted_submission(
     attempt_dir: Path,
     attempt_id: str,
     attempt_timestamp: datetime,
-) -> tuple[tuple[str, str], ArchivedFile]:
+    source_researcher: SourceResearcher | None = None,
+) -> tuple[tuple[str, ...], ArchivedFile]:
     normalized_submission = submission.normalized_values()
     response_path = attempt_dir / "response.jsonl"
     zip_name = f"{CARD_ZIP_PREFIX}_{attempt_id}.zip"
@@ -2238,9 +2920,17 @@ def write_accepted_submission(
     detour_conn.execute("BEGIN TRANSACTION")
     try:
         append_codex_output(detour_conn, output_row)
-        truth = ground_truth()
         submitted_line = json_line(normalized_submission)
-        truth_line = json_line(truth)
+        truth = (
+            ground_truth()
+            if source_researcher is None
+            else ground_truth_for_researcher(source_researcher)
+        )
+        response_lines = (
+            (submitted_line,)
+            if truth is None
+            else (submitted_line, json_line(truth))
+        )
         outer_dict = selected_card_outer_dict(source_conn, detour_conn, researcher)
         intro_date = attempt_timestamp.astimezone(ZoneInfo(runtime.pipeline.timezone)).strftime(
             "%B %d, %Y"
@@ -2260,14 +2950,14 @@ def write_accepted_submission(
             output_format=runtime.pipeline.output_format,
             reference_docx=runtime.pipeline.pandoc_reference_docx,
         )
-        _atomic_write_text(response_path, submitted_line + truth_line)
+        _atomic_write_text(response_path, "".join(response_lines))
         detour_conn.execute("COMMIT")
     except Exception:
         detour_conn.execute("ROLLBACK")
         response_path.unlink(missing_ok=True)
         zip_path.unlink(missing_ok=True)
         raise
-    return (submitted_line, truth_line), _archived_file(zip_path)
+    return response_lines, _archived_file(zip_path)
 
 
 def validate_transport(request: Request) -> None:
@@ -2331,6 +3021,7 @@ def safely_record_attempt(
     result: str,
     *,
     rollout_archive: ArchivedFile | None,
+    workbook_archive: ArchivedFile | None = None,
     report_archive: ArchivedFile | None,
     card_archive: ArchivedFile | None,
 ) -> None:
@@ -2343,6 +3034,7 @@ def safely_record_attempt(
             stage,
             result,
             rollout_archive=rollout_archive,
+            workbook_archive=workbook_archive,
             report_archive=report_archive,
             card_archive=card_archive,
         )
@@ -2358,10 +3050,33 @@ def safely_record_attempt(
 # curl -N http://127.0.0.1:8000/pull
 @app.get(**PULL_ROUTE)
 def pull() -> StreamingResponse:
-    return StreamingResponse(
-        pull_lines(),
-        media_type=MEDIA_TYPE,
-    )
+    try:
+        runtime = runtime_configuration()
+        snapshot = sanctioned_snapshot()
+        push_configuration(snapshot.rollout_guest_path)
+        if snapshot.control_base_url is None:
+            lines = tuple(pull_lines())
+        else:
+            with WORKBOOK_STATE_LOCK:
+                if not WORKBOOK_INITIALIZED:
+                    raise PushConfigurationError(
+                        "guest workbook was not initialized at backend startup"
+                    )
+            assert snapshot.source_key is not None
+            source_conn = open_source_database(runtime)
+            try:
+                researcher = load_source_researcher(
+                    source_conn,
+                    runtime,
+                    source_key=snapshot.source_key,
+                )
+                lines = tuple(sanctioned_pull_lines(researcher))
+            finally:
+                source_conn.close()
+        return StreamingResponse(iter(lines), media_type=MEDIA_TYPE)
+    except (PushConfigurationError, PushValidationError, OSError, duckdb.Error) as exc:
+        logger.error("pull failed configuration/sanction validation: %s", exc)
+        raise HTTPException(status_code=503, detail=CONFIGURATION_ERROR_DETAIL) from None
 
 
 # curl -N \
@@ -2374,21 +3089,41 @@ async def push(request: Request) -> StreamingResponse:
     attempt_id = new_attempt_id(attempt_timestamp)
     attempt_dir: Path | None = None
     rollout_archive: ArchivedFile | None = None
+    workbook_archive: ArchivedFile | None = None
     report_archive: ArchivedFile | None = None
     card_archive: ArchivedFile | None = None
+    snapshot: SanctionSnapshot | None = None
     stage = "transport"
 
     try:
         validate_transport(request)
         stage = "configuration"
         runtime = runtime_configuration()
-        configuration = push_configuration()
+        snapshot = sanctioned_snapshot()
+        configuration = push_configuration(snapshot.rollout_guest_path)
+        if snapshot.control_base_url is not None:
+            with WORKBOOK_STATE_LOCK:
+                if not WORKBOOK_INITIALIZED:
+                    raise PushConfigurationError(
+                        "guest workbook was not initialized at backend startup"
+                    )
         attempt_dir = create_attempt(attempt_id)
         record_attempt(attempt_dir, attempt_id, stage, "pending")
 
         stage = "rollout_copy"
         record_attempt(attempt_dir, attempt_id, stage, "pending")
         rollout_archive = copy_rollout(configuration, attempt_dir, attempt_id)
+
+        if snapshot.control_base_url is not None:
+            stage = "workbook_copy"
+            record_attempt(
+                attempt_dir,
+                attempt_id,
+                stage,
+                "pending",
+                rollout_archive=rollout_archive,
+            )
+            workbook_archive = copy_guest_workbook(configuration, attempt_dir, attempt_id)
 
         stage = "appendwatch_report_copy"
         record_attempt(
@@ -2397,6 +3132,7 @@ async def push(request: Request) -> StreamingResponse:
             stage,
             "pending",
             rollout_archive=rollout_archive,
+            workbook_archive=workbook_archive,
         )
         report_archive = copy_appendwatch_report(configuration, attempt_dir, attempt_id)
 
@@ -2407,6 +3143,7 @@ async def push(request: Request) -> StreamingResponse:
             stage,
             "pending",
             rollout_archive=rollout_archive,
+            workbook_archive=workbook_archive,
             report_archive=report_archive,
         )
         parse_appendwatch_report(
@@ -2421,6 +3158,11 @@ async def push(request: Request) -> StreamingResponse:
             timezone_name=runtime.pipeline.timezone,
             configured_rollout_basename=configuration.rollout_relative_path.name,
         )
+        if (
+            snapshot.session_id is not None
+            and rollout_index.session.session_id != snapshot.session_id
+        ):
+            raise PushValidationError("sanctioned session does not match archived rollout")
         with DETOUR_DB_LOCK:
             detour_conn = open_detour_database(runtime)
             source_conn: duckdb.DuckDBPyConnection | None = None
@@ -2440,13 +3182,22 @@ async def push(request: Request) -> StreamingResponse:
                 )
 
                 stage = "researcher_resolution"
-                first_name, last_name = selected_task_identity()
                 source_conn = open_source_database(runtime)
-                researcher = resolve_researcher(
-                    source_conn,
-                    first_name=first_name,
-                    last_name=last_name,
-                )
+                source_researcher: SourceResearcher | None = None
+                if snapshot.source_key is None:
+                    first_name, last_name = selected_task_identity()
+                    researcher = resolve_researcher(
+                        source_conn,
+                        first_name=first_name,
+                        last_name=last_name,
+                    )
+                else:
+                    source_researcher = load_source_researcher(
+                        source_conn,
+                        runtime,
+                        source_key=snapshot.source_key,
+                    )
+                    researcher = researcher_context(source_researcher)
 
                 stage = "innerdict_and_card"
                 lines, card_archive = write_accepted_submission(
@@ -2461,6 +3212,7 @@ async def push(request: Request) -> StreamingResponse:
                     attempt_dir=attempt_dir,
                     attempt_id=attempt_id,
                     attempt_timestamp=attempt_timestamp,
+                    source_researcher=source_researcher,
                 )
             finally:
                 if source_conn is not None:
@@ -2472,9 +3224,20 @@ async def push(request: Request) -> StreamingResponse:
             "accepted",
             "accepted",
             rollout_archive=rollout_archive,
+            workbook_archive=workbook_archive,
             report_archive=report_archive,
             card_archive=card_archive,
         )
+        assert snapshot is not None
+        consume_sanction(snapshot)
+        try:
+            acknowledge_sanction(snapshot, attempt_id)
+        except PushConfigurationError as exc:
+            logger.error(
+                "push attempt=%s accepted but Control Centre acknowledgement failed: %s",
+                attempt_id,
+                exc,
+            )
         logger.info("push attempt=%s accepted", attempt_id)
         return StreamingResponse(iter(lines), media_type=MEDIA_TYPE)
     except PushConfigurationError as exc:
@@ -2484,6 +3247,7 @@ async def push(request: Request) -> StreamingResponse:
             stage,
             "configuration_error",
             rollout_archive=rollout_archive,
+            workbook_archive=workbook_archive,
             report_archive=report_archive,
             card_archive=card_archive,
         )
@@ -2501,6 +3265,7 @@ async def push(request: Request) -> StreamingResponse:
             stage,
             "rejected",
             rollout_archive=rollout_archive,
+            workbook_archive=workbook_archive,
             report_archive=report_archive,
             card_archive=card_archive,
         )
@@ -2521,6 +3286,7 @@ async def push(request: Request) -> StreamingResponse:
             stage,
             "rejected",
             rollout_archive=rollout_archive,
+            workbook_archive=workbook_archive,
             report_archive=report_archive,
             card_archive=card_archive,
         )
@@ -2539,6 +3305,7 @@ async def push(request: Request) -> StreamingResponse:
             stage,
             "rejected",
             rollout_archive=rollout_archive,
+            workbook_archive=workbook_archive,
             report_archive=report_archive,
             card_archive=card_archive,
         )
@@ -2558,6 +3325,7 @@ async def push(request: Request) -> StreamingResponse:
             stage,
             "rejected",
             rollout_archive=rollout_archive,
+            workbook_archive=workbook_archive,
             report_archive=report_archive,
             card_archive=card_archive,
         )

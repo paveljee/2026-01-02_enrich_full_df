@@ -6,6 +6,7 @@ AIVM_HOME="${AIVM_HOME:-/home/$AIVM_USER}"
 AIVM_AUTHORIZED_KEY="${AIVM_AUTHORIZED_KEY:-}"
 AIVM_RESTRICTED_PATH="${AIVM_RESTRICTED_PATH:-}"
 AIVM_SSH_PORT="${AIVM_SSH_PORT:-22022}"
+AIVM_BACKEND_PORT="${AIVM_BACKEND_PORT:-8612}"
 AIVM_SSH_SERVER_NAME="aivm-sshd.service"
 AIVM_SSH_SERVER_DESCRIPTION="AIVM private SSH server"
 AIVM_SERVICE_RESTART_SECONDS="2"
@@ -42,6 +43,7 @@ Options:
   --authorized-key-file PATH
   --restricted-path PATH
   --ssh-port PORT
+  --backend-port PORT
 EOF
 }
 
@@ -75,6 +77,11 @@ while [ "$#" -gt 0 ]; do
         --ssh-port)
             [ -n "${2:-}" ] || { echo "❌ Missing SSH port"; exit 1; }
             AIVM_SSH_PORT="$2"
+            shift 2
+            ;;
+        --backend-port)
+            [ -n "${2:-}" ] || { echo "❌ Missing backend port"; exit 1; }
+            AIVM_BACKEND_PORT="$2"
             shift 2
             ;;
         --help|-h)
@@ -128,6 +135,11 @@ esac
     && [ "$AIVM_SSH_PORT" -ge 1 ] \
     && [ "$AIVM_SSH_PORT" -le 65535 ] \
     || { echo "❌ Invalid SSH port: $AIVM_SSH_PORT"; exit 1; }
+
+[[ "$AIVM_BACKEND_PORT" =~ ^[0-9]+$ ]] \
+    && [ "$AIVM_BACKEND_PORT" -ge 1 ] \
+    && [ "$AIVM_BACKEND_PORT" -le 65535 ] \
+    || { echo "❌ Invalid backend port: $AIVM_BACKEND_PORT"; exit 1; }
 
 RESTRICTED_GATE="$(dirname "$AIVM_RESTRICTED_PATH")"
 [ "$RESTRICTED_GATE" != "/" ] \
@@ -353,8 +365,9 @@ AllowUsers $AIVM_USER
 
 AllowAgentForwarding no
 # For VS Code to be able to connect
-AllowTcpForwarding local
+AllowTcpForwarding yes
 PermitOpen 127.0.0.1:*
+PermitListen 127.0.0.1:$AIVM_BACKEND_PORT
 AllowStreamLocalForwarding no
 GatewayPorts no
 X11Forwarding no

@@ -164,14 +164,9 @@ depends-on = ["lint", "test-detours"]
 [tool.pixi.feature.detour-mode0-econ-stats.dependencies]
 plotly = "==6.6.0"
 
-[tool.pixi.feature.detour-ai-augment-backend-api.pypi-dependencies]
-fastapi = "==0.140.0"
-uvicorn = "==0.51.0"
-pydantic = "==2.13.4"
-httpx2 = ">=2,<3"
-
 [tool.pixi.feature.detour-ai-augment-backend-api.tasks]
-serve = "python -m src.detours.detour_ai_augment.src.backend.api --config config_ai_augment.json"
+#serve = "python -m src.detours.detour_ai_augment.src.backend.api --config config_ai_augment.json"
+dashboard = "python -m src.detours.detour_ai_augment.src.control_centre.ui"
 # provision a worktree first:
 # git worktree add --detach /tmp/detour-api-9a187d3 9a187d3fc497bef6d1568b885b33f0a834607d22
 # cp ./.env /tmp/detour-api-9a187d3; mkdir -p /tmp/detour-api-9a187d3/tmp && cp ./tmp/sheikh.jsonl /tmp/detour-api-9a187d3/tmp/sheikh.jsonl
@@ -210,4 +205,13 @@ plugins = ["pydantic.mypy"]
 warn_unused_ignores = true
 
 [dependency-groups]
-detour-mode0-econ-stats = ["kaleido==0.2.1"]
+detour-mode0-econ-stats = [
+  "kaleido==0.2.1",
+]
+detour-ai-augment-backend-api = [
+  "fastapi==0.140.0",
+  "uvicorn==0.51.0",
+  "pydantic==2.13.4",
+  "httpx==0.28.1",
+  "nicegui==3.13.0",
+]

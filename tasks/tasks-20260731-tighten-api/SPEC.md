@@ -292,9 +292,10 @@ CSV through the existing `register_resource()` helper as a
 map only through the verified registered-resource path, and import the
 existing `DRAW_LABEL` and `BATCH_LABEL` constants for its two-column schema.
 Require one non-blank release-batch classification per map draw and reject
-missing columns or duplicate/conflicting draw rows. Do not add this detour-only
-key to main-pipeline required-config constants, change `PipelineConfig`, or
-otherwise affect main-pipeline config/resource loading.
+missing columns or conflicting classifications. Identical duplicate rows, such
+as the known draw-125 entries, collapse to that one classification. Do not add
+this detour-only key to main-pipeline required-config constants, change
+`PipelineConfig`, or otherwise affect main-pipeline config/resource loading.
 
 ### eligible source-key cohorts and innerdict ownership
 
