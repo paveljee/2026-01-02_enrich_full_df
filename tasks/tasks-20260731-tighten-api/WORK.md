@@ -2,6 +2,20 @@
 
 ## Status
 
+- The human task is now compiled losslessly into `build/AGENTS.md` and
+  `build/SPEC.ipynb`. The 207 source lines route exactly once: 37 operational
+  lines to AGENTS and 170 specification lines to 15 whole Markdown cells.
+  Those cells have 100 independently executable evidence cells. `manifest.json`
+  is fully resolved, reconstructs the source byte-for-byte, and the legacy
+  AI-authored prose is historical rather than normative.
+- `make validate` now rejects raw/orphan/unlinked cells, enforces source order,
+  reconstructs and hashes `src/TASK.md`, and executes every Python evidence
+  cell under the frozen `detour-ai-augment-backend-api` Pixi environment.
+  Structural validation passes. Execution remains intentionally red for the
+  missing deployment/control acceptance suites, missing referenced
+  `chatgpt.md`, unresolved Control Centre skeleton, and pending control,
+  workbook, cohort, and tunnel implementation; completed API/provenance checks
+  execute successfully.
 - 2026-08-07 approved specification step is complete; this step changed only
   the AI-authored SPEC and this workbook. The new Control Centre, dynamic
   sanction flow, workbook lifecycle, cohort loader, and tunnel behavior have
@@ -190,7 +204,11 @@
   `codex_parse.py`, focused `test_api.py`, AI-authored SPEC/WORK sections, and
   minimum Pixi serving-task wiring. The task now passes the dedicated
   `--config config_ai_augment.json` path.
-- Deployment/provisioning and appendwatch code/tests required no changes after review.
+- Existing deployment/provisioning behavior remains intact. `deploy.sh` now
+  exposes its appendwatch post-deployment checks as read-only permission,
+  systemd, and source-confidentiality verification modes; normal deployment
+  calls the same functions. Permission verification additionally requires UID
+  0 ownership before probing non-traversal as the `ai` user.
 - Did not edit `README.md`, `.env.example`, `appendwatch.py`, main `vars.py`/`schema.py`, main pipeline, architecture assets, or sample/ground-truth data.
 - Keep detour-owned paths, labels, table/view names, citation delimiters, bounds, context setting, and repeated numeric values as named `api.py` globals.
 - Existing production code still has the hardcoded task pending the approved
@@ -199,6 +217,13 @@
 
 ## Verification completed
 
+- The refreshed executable spec routes all 209 TASK lines exactly once into 17
+  human Markdown cells and 94 evidence cells. Current guest validation reports
+  46 passed and 48 failed. Lines 28-30 now use live deployed-state checks; all
+  three report the explicit host-only prerequisite failure (`limactl` is not
+  available inside this Lima guest), while line 29's provisioning-order check
+  passes. Run validation on the macOS host with the deployed AIVM to collect
+  the actual permission, systemd, and source-access outcomes.
 - The root Pixi task completes with 73 passed and the retained legacy
   multiple-match rejection test skipped under the active allow-multiple
   policy. Its visible argparse usage line is expected stderr from the negative

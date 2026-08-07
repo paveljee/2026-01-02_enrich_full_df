@@ -1,0 +1,7 @@
+{
+    "python-envs.workspaceSearchPaths": [
+        "/Users/anonymous/Library/Caches/rattler/cache/envs/*/envs/*"
+    ],
+    "python-envs.defaultEnvManager": "renan-r-santos.pixi-code:pixi",
+    "python-envs.defaultPackageManager": "renan-r-santos.pixi-code:pixi"
+}

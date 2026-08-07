@@ -22,6 +22,7 @@ AIVM_KNOWN_HOSTS_FILE="$AIVM_KEY_DIR/known_hosts"
 AIVM_SSH_TARGET="$LIMA_INSTANCE-$AIVM_USER"
 AIVM_HOST_KEY_ALIAS="lima-$LIMA_INSTANCE-$AIVM_USER"
 AIVM_SSH_CMD=()
+VERIFY_APPENDWATCH=""
 
 # Codex etc. config to ship with AIVM
 VSCODE_VERSION="1.130.0"
@@ -155,6 +156,18 @@ while [ "$#" -gt 0 ]; do
             GUEST_MOUNTPOINT="$MOUNT_DIR"
             shift 2
             ;;
+        --verify-appendwatch-permissions)
+            VERIFY_APPENDWATCH="permissions"
+            shift
+            ;;
+        --verify-appendwatch-service)
+            VERIFY_APPENDWATCH="service"
+            shift
+            ;;
+        --verify-appendwatch-source)
+            VERIFY_APPENDWATCH="source"
+            shift
+            ;;
         *)
             echo "❌ Unknown option: $1"
             exit 1
@@ -164,6 +177,7 @@ done
 
 prepare_mount_paths
 
+if [ -z "$VERIFY_APPENDWATCH" ]; then
 [ -f "$PROVISION_SCRIPT" ] \
     || { echo "❌ Provisioning script not found: $PROVISION_SCRIPT"; exit 1; }
 [ -f "$APPENDWATCH_SCRIPT" ] \
@@ -298,6 +312,99 @@ limactl start \
 echo "✅ Lima instance created successfully"
 
 prepare_aivm_ssh
+fi
+
+verify_appendwatch_permissions() {
+    printf -v GUEST_CONTROL_DIR_Q '%q' "$GUEST_CONTROL_DIR"
+    printf -v GUEST_APPENDWATCH_SCRIPT_Q '%q' "$GUEST_APPENDWATCH_SCRIPT"
+    printf -v GUEST_APPENDWATCH_REPORT_Q '%q' "$GUEST_APPENDWATCH_REPORT"
+
+    if aivm_ssh 'command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1'; then
+        echo "❌ '$AIVM_USER' has passwordless sudo"
+        return 1
+    fi
+
+    limactl shell --workdir=/ "$LIMA_INSTANCE" \
+        sudo -n sh -c "test -r $GUEST_APPENDWATCH_SCRIPT_Q \
+            && test -s $GUEST_APPENDWATCH_REPORT_Q \
+            && test \"\$(stat -c %u $GUEST_CONTROL_DIR_Q)\" = 0 \
+            && test \"\$(stat -c %u $GUEST_APPENDWATCH_SCRIPT_Q)\" = 0 \
+            && test \"\$(stat -c %u $GUEST_APPENDWATCH_REPORT_Q)\" = 0 \
+            && test \"\$(stat -c %a $GUEST_CONTROL_DIR_Q)\" = 700 \
+            && test \"\$(stat -c %a $GUEST_APPENDWATCH_SCRIPT_Q)\" = 600 \
+            && test \"\$(stat -c %a $GUEST_APPENDWATCH_REPORT_Q)\" = 600 \
+            && test \"\$(cat $GUEST_APPENDWATCH_REPORT_Q)\" = ." \
+        || { echo "❌ Appendwatch assets are not root-owned and root-only"; return 1; }
+
+    if aivm_ssh "cd -- $GUEST_CONTROL_DIR_Q >/dev/null 2>&1"; then
+        echo "❌ '$AIVM_USER' can traverse the appendwatch directory"
+        return 1
+    fi
+
+    [ -r "$HOST_APPENDWATCH_REPORT" ] \
+        && [ "$(cat "$HOST_APPENDWATCH_REPORT")" = . ] \
+        || { echo "❌ Appendwatch report is unavailable on the host"; return 1; }
+
+    echo "✅ Appendwatch assets are root-only, non-traversable by '$AIVM_USER', and host-readable"
+}
+
+verify_appendwatch_service() {
+    limactl shell --workdir=/ "$LIMA_INSTANCE" \
+        systemctl is-enabled --quiet aivm-appendwatch.service \
+        || { echo "❌ Appendwatch service is not enabled"; return 1; }
+    limactl shell --workdir=/ "$LIMA_INSTANCE" \
+        systemctl is-active --quiet aivm-appendwatch.service \
+        || { echo "❌ Appendwatch service is not active"; return 1; }
+    echo "✅ Appendwatch systemd service is enabled and active"
+}
+
+verify_appendwatch_source_confidentiality() {
+    printf -v GUEST_CONTROL_DIR_Q '%q' "$GUEST_CONTROL_DIR"
+    printf -v GUEST_APPENDWATCH_SCRIPT_Q '%q' "$GUEST_APPENDWATCH_SCRIPT"
+    printf -v GUEST_APPENDWATCH_REPORT_Q '%q' "$GUEST_APPENDWATCH_REPORT"
+
+    if limactl shell --workdir=/ "$LIMA_INSTANCE" \
+        sudo -n find "$GUEST_CONTROL_DIR" -type f \
+            \( -name '*.pyc' -o -name '*.pyo' \) -print -quit |
+        grep -q .; then
+        echo "❌ Appendwatch created readable bytecode"
+        return 1
+    fi
+
+    local protected_probe
+    local -a protected_probes=(
+        "cd -- $GUEST_CONTROL_DIR_Q"
+        "ls -la -- $GUEST_CONTROL_DIR_Q"
+        "stat -- $GUEST_CONTROL_DIR_Q"
+        "stat -- $GUEST_APPENDWATCH_SCRIPT_Q"
+        "stat -- $GUEST_APPENDWATCH_REPORT_Q"
+        "cat -- $GUEST_APPENDWATCH_SCRIPT_Q"
+        "cat -- $GUEST_APPENDWATCH_REPORT_Q"
+        "cp -- $GUEST_APPENDWATCH_SCRIPT_Q /dev/null"
+        "cp -- $GUEST_APPENDWATCH_REPORT_Q /dev/null"
+        "/usr/bin/python3 -B $GUEST_APPENDWATCH_SCRIPT_Q --help"
+        "find $GUEST_CONTROL_DIR_Q -print"
+    )
+    for protected_probe in "${protected_probes[@]}"; do
+        if aivm_ssh "$protected_probe >/dev/null 2>&1"; then
+            echo "❌ '$AIVM_USER' passed protected probe: $protected_probe"
+            return 1
+        fi
+    done
+    echo "✅ Appendwatch source, report, and bytecode are inaccessible to '$AIVM_USER'"
+}
+
+verify_appendwatch_prerequisites() {
+    command -v limactl >/dev/null 2>&1 \
+        || { echo "❌ limactl is required for deployed appendwatch verification"; return 1; }
+    [ -f "$HOME/.lima/$LIMA_INSTANCE/ssh.config" ] \
+        || { echo "❌ Lima SSH config is missing for '$LIMA_INSTANCE'"; return 1; }
+    [ -f "$AIVM_IDENTITY_FILE" ] \
+        || { echo "❌ AIVM identity file is missing: $AIVM_IDENTITY_FILE"; return 1; }
+    prepare_aivm_ssh
+    aivm_ssh true \
+        || { echo "❌ SSH access to '$AIVM_USER' through jump host failed"; return 1; }
+}
 
 verify_instance() {
     LIMA_SSH_CONFIG_PATH="$HOME/.lima/$LIMA_INSTANCE/ssh.config"
@@ -353,54 +460,9 @@ verify_instance() {
     fi
     echo "✅ Mounted project is inaccessible to '$AIVM_USER'"
 
-    limactl shell --workdir=/ "$LIMA_INSTANCE" \
-        systemctl is-enabled --quiet aivm-appendwatch.service \
-        || { echo "❌ Appendwatch service is not enabled"; return 1; }
-    limactl shell --workdir=/ "$LIMA_INSTANCE" \
-        systemctl is-active --quiet aivm-appendwatch.service \
-        || { echo "❌ Appendwatch service is not active"; return 1; }
-    printf -v GUEST_CONTROL_DIR_Q '%q' "$GUEST_CONTROL_DIR"
-    printf -v GUEST_APPENDWATCH_SCRIPT_Q '%q' "$GUEST_APPENDWATCH_SCRIPT"
-    printf -v GUEST_APPENDWATCH_REPORT_Q '%q' "$GUEST_APPENDWATCH_REPORT"
-    limactl shell --workdir=/ "$LIMA_INSTANCE" \
-        sudo -n sh -c "test -r $GUEST_APPENDWATCH_SCRIPT_Q \
-            && test -s $GUEST_APPENDWATCH_REPORT_Q \
-            && test \"\$(stat -c %a $GUEST_CONTROL_DIR_Q)\" = 700 \
-            && test \"\$(stat -c %a $GUEST_APPENDWATCH_SCRIPT_Q)\" = 600 \
-            && test \"\$(stat -c %a $GUEST_APPENDWATCH_REPORT_Q)\" = 600 \
-            && test \"\$(cat $GUEST_APPENDWATCH_REPORT_Q)\" = ." \
-        || { echo "❌ Appendwatch source or report is unavailable to root"; return 1; }
-    [ -r "$HOST_APPENDWATCH_REPORT" ] \
-        && [ "$(cat "$HOST_APPENDWATCH_REPORT")" = . ] \
-        || { echo "❌ Appendwatch report is unavailable on the host"; return 1; }
-    if limactl shell --workdir=/ "$LIMA_INSTANCE" \
-        sudo -n find "$GUEST_CONTROL_DIR" -type f \
-            \( -name '*.pyc' -o -name '*.pyo' \) -print -quit |
-        grep -q .; then
-        echo "❌ Appendwatch created readable bytecode"
-        return 1
-    fi
-    local protected_probe
-    local -a protected_probes=(
-        "cd -- $GUEST_CONTROL_DIR_Q"
-        "ls -la -- $GUEST_CONTROL_DIR_Q"
-        "stat -- $GUEST_CONTROL_DIR_Q"
-        "stat -- $GUEST_APPENDWATCH_SCRIPT_Q"
-        "stat -- $GUEST_APPENDWATCH_REPORT_Q"
-        "cat -- $GUEST_APPENDWATCH_SCRIPT_Q"
-        "cat -- $GUEST_APPENDWATCH_REPORT_Q"
-        "cp -- $GUEST_APPENDWATCH_SCRIPT_Q /dev/null"
-        "cp -- $GUEST_APPENDWATCH_REPORT_Q /dev/null"
-        "/usr/bin/python3 -B $GUEST_APPENDWATCH_SCRIPT_Q --help"
-        "find $GUEST_CONTROL_DIR_Q -print"
-    )
-    for protected_probe in "${protected_probes[@]}"; do
-        if aivm_ssh "$protected_probe >/dev/null 2>&1"; then
-            echo "❌ '$AIVM_USER' passed a protected appendwatch access probe"
-            return 1
-        fi
-    done
-    echo "✅ Appendwatch is active and inaccessible to '$AIVM_USER'"
+    verify_appendwatch_permissions || return 1
+    verify_appendwatch_service || return 1
+    verify_appendwatch_source_confidentiality || return 1
 
     printf -v CODEX_CONFIG_PATH_Q '%q' "$CODEX_CONFIG_PATH"
     aivm_ssh "test -f $CODEX_CONFIG_PATH_Q" \
@@ -424,6 +486,16 @@ verify_instance() {
         || { echo "❌ VS Code extension $CODEX_VSCE not found"; return 1; }
     echo "✅ VS Code extension $CODEX_VSCE installed"
 }
+
+if [ -n "$VERIFY_APPENDWATCH" ]; then
+    verify_appendwatch_prerequisites
+    case "$VERIFY_APPENDWATCH" in
+        permissions) verify_appendwatch_permissions ;;
+        service) verify_appendwatch_service ;;
+        source) verify_appendwatch_source_confidentiality ;;
+    esac
+    exit 0
+fi
 
 # If verified, open shell in the AIVM user's home directory
 if verify_instance; then

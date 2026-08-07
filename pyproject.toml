@@ -173,6 +173,7 @@ uvicorn = "==0.51.0"
 pydantic = "==2.13.4"
 httpx2 = ">=2,<3"
 nbformat = ">=5.11.0,<6"
+ipykernel = ">=7.3.0,<8"
 
 [tool.pixi.feature.detour-ai-augment-backend-api.tasks]
 serve = "python -m src.detours.detour_ai_augment.src.backend.api --config config_ai_augment.json"
