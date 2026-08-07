@@ -2,6 +2,24 @@
 
 ## Status
 
+- 2026-08-07 approved specification step is complete; this step changed only
+  the AI-authored SPEC and this workbook. The new Control Centre, dynamic
+  sanction flow, workbook lifecycle, cohort loader, and tunnel behavior have
+  not yet been implemented.
+- The detour now has a dedicated `config_ai_augment.json`. Its
+  `files_config["map_subset_0_to_batch"]` entry is required by the detour and
+  must be loaded through `PipelineConfig.from_json()` plus the existing
+  `register_resource()`/`RegisteredResource` seam with
+  `ResourceGroup.KTP_PIPELINE_ARTIFACT`, `FragmentType.CSV_ROW`, and the
+  configured SHA-256. Use the existing imported `DRAW_LABEL` and `BATCH_LABEL`
+  for the CSV schema and reject missing columns or duplicate/conflicting draw
+  rows. Keep this requirement detour-local: no edits to `PipelineConfig`, main
+  required-file constants, or main resource loading.
+- Cohort identity and every draw are owned only by common innerdict JSONL.
+  The registered map may classify those innerdict-provided draws but may not
+  supply or replace draws. `card_partitions` supplies only no-ground-truth
+  eligibility flags joined by source key. Verified target invariants are 196
+  ground-truth keys, 78 no-ground-truth keys, no overlap, and 274 total.
 - Production investigation on 2026-08-05: the cumulative 252-line rollout
   archived by attempt
   `20260805T200957_806376Z_7d2bb339299a4a9cabe31bec77ca9f87`
@@ -67,7 +85,10 @@
 - Reflected the newer card sample's programmatic `AI-generated text` label, quoted values, footnote placement, and matching comment form.
 - Clarified that each schema `pkey` placeholder means a primary key whose concrete column name is `id`.
 - Latest implementation clarification: the eight non-comment push fields require evidence; comments is optional and accepts only its text value, without web excerpts.
-- Production implementation is complete in `api.py`, new detour-local `codex_parse.py`, the required Pixi serving-task wiring, and focused `test_api.py` coverage.
+- The earlier evidence-indexing implementation is complete in `api.py`, new
+  detour-local `codex_parse.py`, Pixi serving-task wiring, and focused
+  `test_api.py` coverage. The newly specified UI/control/cohort work remains
+  pending implementation.
 - `test_api.py` retains the shared `prepare_real_sample_push` setup/flow for accepted and rejected real-rollout cases. Its July excerpts, URLs, and expected FC/FCO/call/ref identities are fixed independently of the production parser.
 - Git use remains read-only. All review commands use `pixi run`.
 - `README.md`, `.env.example`, sample/ground-truth data, and main-pipeline code remain untouched.
@@ -101,14 +122,22 @@
 - Current card assembly uses the common loaders and intended xlsx -> Codex -> docx -> ssn ordering. Current source connection is read-only and the detour connection is separate/read-write.
 - DB audit corrections are complete: source relations use imported schema constants; persisted call and `(call_id, ref_id)` keys must be a subset of the current prefix; and temporary/real-fixture tests cover JSON/TIMESTAMPTZ round trips, idempotency, exact schemas, and source-DB immutability.
 - Accepted-write ordering now performs output-row insertion and cumulative innerdict materialization before loading ground truth/rendering, while keeping the accepted transaction rollback-capable until ground truth, card ZIP, and response writes all succeed. Any failure removes response/ZIP and rolls back the authoritative row.
-- Serving now enters through the API module's required `--config` argument; the Pixi feature task passes its required config path to that entry point. Startup fails for missing/invalid pipeline config while missing per-chat rollout configuration leaves only `/push` disabled.
+- Pre-revamp API serving enters through the module's required `--config`
+  argument. Its old behavior leaves `/pull` available without a per-chat
+  rollout; the approved control-sanction contract supersedes that behavior and
+  requires both `/pull` and `/push` to fail closed when no run is sanctioned.
 - The real July direct-web rollout is the sole E2E fixture. Do not derive submitted excerpts/URLs or expected FC/FCO/call/ref identities from the production parser. Never mention/use the discarded August rollout and never modify sample data.
 
 ## Revised contract captured in SPEC
 
-1. Preserve the existing fail-closed order: SCP rollout -> copy appendwatch report -> validate copied report -> index approved rollout -> Pydantic/SQL evidence validation -> accepted innerdict/card writes.
+1. Preserve the existing fail-closed order: SCP/publish rollout -> archive and
+   publish the workbook without moving the integrity steps -> copy appendwatch
+   report -> validate copied report -> index approved rollout -> Pydantic/SQL
+   evidence validation -> accepted innerdict/card writes.
 2. Support many `/pull`/`push` cycles in one cumulative rollout. The rollout filename can repeat; each archived physical line count demarcates the prefix used by one attempt.
-3. Keep researcher identity in `ktp.source_key`/draw/name. Store the archive line count in `ktp.fragment` with fragment type `line_number`.
+3. Keep researcher identity in `ktp.source_key`/draw/name, sourced only from
+   common innerdict records. Store the archive line count in `ktp.fragment`
+   with fragment type `line_number`.
 4. Derive one persistent sibling detour DuckDB from `config.db_file`; open the configured source DB read-only and serialize detour-DB writes.
 5. Pre-index direct `function_call_output` -> unique `web_search_end` -> unique `function_call(name="run", namespace="web")` chains into the four human-specified normalized Codex tables.
 6. Rename current labels to `DOCX_COLUMNS`, add ordered `AI_AUGMENT_COLUMNS`, and require every submitted excerpt to carry its exact result URL.
@@ -117,13 +146,56 @@
 9. Allow repeated `ktp.source_key` values: multiple accepted attempts for one researcher become multiple Codex sections, distinguished by fragment and explicit attempt ID.
 10. Reuse the existing parser/materializer/card seams: detour-local `codex_parse.py`, step-08-style output/innerdict flow, and `build_cards()`/`write_cards_zip()` with Codex sections between xlsx and docx.
 
+## Approved Control Centre expansion (implementation pending)
+
+- Implement the supplied `control_centre/ui.py` skeleton as one NiceGUI + AG
+  Grid operator screen. It owns one serial Codex process, queue/cancel/rerun,
+  UUID run IDs, source-key sanctions, backend lifetime, append-only UI journal,
+  and idle reconciliation against accepted detour-DB rows. `api.py` remains the
+  only detour-DB writer; UI detour reads stop while a sanctioned run can push.
+- Derive runnable researchers from common innerdict `name_key` values. Collect
+  first/last names and every distinct draw from their JSONL records. Use the
+  verified map only to classify those draws into release batches 1/5/6/7 for
+  the 196 ground-truth keys; explicitly exclude Mercouri G. Kanatzidis. Derive
+  the 78 augmentation keys from card-partition flags joined by source key.
+- The UI control service binds only `127.0.0.1:8611`. It exposes strict current
+  sanction and accepted-acknowledgement routes outside OpenAPI. The API binds
+  `127.0.0.1:8612`; only 8612 is reverse-forwarded to AIVM. Production uses the
+  control endpoint exclusively; `.env` rollout configuration remains only an
+  isolated backend-test fallback when no control URL exists.
+- Each request pins one control snapshot. A missing/invalid/unavailable
+  sanction gives the same generic 503 for both `/pull` and `/push`. Acceptance
+  consumes the sanction; notification failure cannot roll back authoritative
+  accepted output or silently re-enable the run.
+- Dynamic `/pull` emits the sanctioned key's xlsx/ssn context through common
+  loaders, omits docx ground truth and prior Codex attempts, and appends one
+  synthetic null-AI task row. Retries are allowed until one push is accepted.
+- Persist one operator-editable host workbook across runs. Copy it to AIVM at
+  backend initialization and immediately before each Codex execution; use the
+  same full bytes in the AIVM file and prompt. Archive/publish the guest copy
+  with every rollout attempt, but never treat workbook text as evidence.
+- Ground-truth runs return normalized AI values plus mapped DOCX ground truth
+  as two NDJSON lines. No-ground-truth runs return only normalized AI values.
+  Both materialize accepted Codex rows/cards through the existing one-sibling-
+  DuckDB and common loader/materializer/card seams.
+- Required implementation verification covers map registration/hash failure,
+  exact cohort invariants and contracted draws, dynamic pull/no ground-truth
+  leak, queue/journal/reconciliation/workbook behavior, control snapshot and
+  sanction consumption, loopback/tunnel restrictions, conditional response
+  shape, and preservation of the existing July evidence E2E.
+
 ## Surgical implementation boundary followed
 
-- Edited only `api.py`, new detour-local `codex_parse.py`, focused `test_api.py`, the AI-authored SPEC/WORK sections, and minimum Pixi serving-task wiring for required `--config config.json`.
+- Earlier evidence work edited only `api.py`, new detour-local
+  `codex_parse.py`, focused `test_api.py`, AI-authored SPEC/WORK sections, and
+  minimum Pixi serving-task wiring. The task now passes the dedicated
+  `--config config_ai_augment.json` path.
 - Deployment/provisioning and appendwatch code/tests required no changes after review.
 - Did not edit `README.md`, `.env.example`, `appendwatch.py`, main `vars.py`/`schema.py`, main pipeline, architecture assets, or sample/ground-truth data.
 - Keep detour-owned paths, labels, table/view names, citation delimiters, bounds, context setting, and repeated numeric values as named `api.py` globals.
-- Current hardcoded task remains; advancing `/pull` to a later task is explicitly out of scope.
+- Existing production code still has the hardcoded task pending the approved
+  Control Centre implementation; it must be replaced by sanctioned dynamic
+  `/pull`, not retained as an out-of-scope behavior.
 
 ## Verification completed
 

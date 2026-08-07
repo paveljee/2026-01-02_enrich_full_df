@@ -35,7 +35,7 @@ Some things need to be wired in:
     * what "shipped" means is that they have already been taken up by team for downstream analyses. what "shipped" also means is that means one of: 1) they had qualified under subset 1 (or "mode" 1, synonyms) - see full definition of that in CARD_BUILD_SUBSET_DESCRIPTIONS in vars.py, but basically this means that there are no duplicates of this across xlsx/docx/ssn; 2) they were assigned to subset 2 but then _manually_ reviewed afterwards and confirmed ok and basically functionally equivalent to subset 1 entries (with the exception of Mercouri Kanatzidis, who has two source keys one of which should be discarded as noted above, but the non-discarded one is subset-1-equivalent); 3) were manually reviewed and some sections were _manually discarded and edited directly in the card file before shipping_ - see more on that below. the shipment happened across several consecutive ktp.release_batch as noted in "tmp/map_subset0_to_batch.csv": subset 1 (the original one, smaller than current one subset 1, but for the purpose of release_batch it bears the same name so pls don't conflate), subset 6, subset 7, and subset 8. now, release_batch subsets 1 through 7 were as noted, mode-subset-1 equivalents. subset 8, comprising only 3 draw numbers/source keys (45, 172, and 256 as noted in the map file), is not a mode-subset-1 equivalent because some entries were discarded per source key. so let's please keep these out here. this explains 197 count - /subset [1567]/ regular expression for the "tmp/map_subset0_to_batch.csv" file. minus 1 more ineligible/duplicated `{"ktp.first_name": "Mercouri G.", "ktp.last_name": "Kanatzidis"}` as explained above, this leaves us with 196 eligible shipped keys and 4 ineligible shipped keys.
     * the 107 unshipped ones these are all in current subset 2, partition 4, or alternatively, in the "tmp/map_subset0_to_batch.csv" file they all bear "subset X/staging" notation. these 107 fall into two categories: 1) would-be mode-subset-1 functional equivalents _iff_ missing docx fields were filled in (that is to say, ktp_ai_augment_* fields were filled in in their stead as explained in more details below); these can be easily detected by checking which ones have "KTP_PARTITION_FLAG_XLSX_NON_EXACT_ANY_COL == False" AND "KTP_PARTITION_FLAG_SSN_COUNT_COL == 1", should be 78 source keys; 2) require discard of some sections (like release_batch subset 8); this includes all the remaining 29 source keys: 7 that remain from partition 2 (they bear "subset X/staging/partition 2 augment"), plus 6 from partition 4 ("subset X/staging/partition 4 augment") that have "KTP_PARTITION_FLAG_XLSX_NON_EXACT_ANY_COL == True" (all of them also have "KTP_PARTITION_FLAG_SSN_COUNT_COL == 1"), plus 16 from partition 4 ("subset X/staging/partition 4 augment") that have "KTP_PARTITION_FLAG_XLSX_NON_EXACT_ANY_COL == False" but "KTP_PARTITION_FLAG_SSN_COUNT_COL > 1". this sums back correctly to 16+6+7+78 = 107. so of the unshipped, only the 78 are eligible for anything here. we keep the 29 unshipped out of scope.
     * so to summarize: 310 sampled excel rows = 310 draw numbers; minus 3 draw numbers that got contracted into same source key = 307 source keys. these are separated into shipped and unshipped. shipped = 200 source keys, of which 1 was duplicated and made ineligible (Kanatzidis) so effectively 199 source keys for use here, and 3 ineligible (release_batch subset 8), so 196 source keys left for use here. out of unshipped: 107 total, of these 78 are kept for use here and 16+6+7=29 are ineligible for various reasons.
-    * **so we have 196 eligible source keys with ground truth from docx available (sometimes more than one docx innerdict!) and 78 eligible source keys that lack ground truth and need to be AI-augmented in this detour.** this makes 274 total eligible source keys for this detours. to confirm, in total 4 keys with ground truth are ineligible for this detour and 29 keys without ground truth are ineligible for the detour, in total 32 source keys ineligible. 274+33=107 total source keys which aligns with numbers above.
+    * **so we have 196 eligible source keys with ground truth from docx available (sometimes more than one docx innerdict!) and 78 eligible source keys that lack ground truth and need to be AI-augmented in this detour.** this makes 274 total eligible source keys for this detours. to confirm, in total 4 keys with ground truth are ineligible for this detour and 29 keys without ground truth are ineligible for the detour, in total 33 source keys ineligible. 274+33=307 total source keys which aligns with numbers above.
     
 
 So to recap, the sequence of validation is:
@@ -217,21 +217,22 @@ and researcher-card output into one fail-closed chain. It must not invoke
 `src.repl`, alter the main pipeline, edit its `vars.py` or `schema.py`, or
 write to the configured main-pipeline database.
 
-One Codex rollout/session is expected eventually to contain many successive
-`/pull` -> research -> `/push` cycles. Every push archives the then-current
-cumulative rollout prefix. The rollout filename/session can therefore repeat
-across attempts, while its physical line count advances and demarcates the
-prefix used by each attempt. This task continues to serve the current
-hardcoded task; advancing `/pull` to the next task after an accepted push is a
-later change. A later task may concern a new researcher or the same researcher
-again, so nothing implemented here may assume one rollout or one accepted
-attempt per researcher.
+The Control Centre now selects and sanctions each source-key run. A run starts
+one noninteractive Codex execution, permits retries until one push is
+accepted, and consumes its sanction after that acceptance so later pulls and
+pushes remain disabled until the operator starts another run. The same source
+key may be run repeatedly, and each run has its own UI run ID, Codex session,
+and accepted attempt ID. Keep the backend's existing cumulative-rollout
+support: every push archives the then-current prefix, and neither persistence
+nor validation may assume one rollout, run, or accepted attempt per source
+key.
 
 The trust chain for an accepted push is:
 
 1. appendwatch ran as root before the `ai` account could start Codex and
    continuously monitored `/home/ai/.codex/sessions`;
-2. the operator configured the absolute guest path of this chat's rollout;
+2. the Control Centre sanctioned one run with its source key, Codex session,
+   and absolute guest rollout path;
 3. the backend copied that rollout over the dedicated AIVM SSH connection;
 4. only after the rollout copy completed, the backend made an immutable,
    versioned copy of appendwatch's protected status log;
@@ -244,7 +245,8 @@ The trust chain for an accepted push is:
 8. only a fully valid attempt materialized the Codex output view and common
    `codex_innerdicts` contract; and
 9. only then did it produce the normal response and the configured TXT or
-   DOCX researcher-card artifact.
+   DOCX researcher-card artifact and acknowledge that accepted run to the
+   Control Centre.
 
 No later step may run when an earlier step fails.
 
@@ -254,21 +256,22 @@ The implementer must write surgical code: make only changes strictly required
 by this spec and leave unrelated code, comments, formatting, and behavior
 untouched. Do not perform incidental refactors or cleanup.
 
-The expected production edits are narrowly confined to `api.py`, a new
-detour-local `codex_parse.py`, focused tests, and the minimum serving-task
-wiring needed to pass `--config config.json`. Touch `deploy.sh` or
-`provision.sh` only if their already implemented appendwatch behavior is shown
-not to satisfy this revised contract. `appendwatch.py`, its regression tests,
-`README.md`, `.env.example`, the main pipeline, `src/helpers/vars.py`,
-`src/helpers/schema.py`, architecture assets, and sample/ground-truth data
-remain untouched.
+The expected production edits are narrowly confined to the existing
+detour-local `api.py` and `codex_parse.py`, the supplied
+`control_centre/ui.py` skeleton, focused tests, the minimum pinned
+NiceGUI/Pixi task wiring, and the minimum `deploy.sh`/`provision.sh` changes
+needed for the one approved API tunnel. `appendwatch.py`, its regression
+tests, `README.md`, `.env.example`, the main pipeline,
+`src/helpers/vars.py`, `src/helpers/schema.py`, architecture assets, and
+sample/ground-truth data remain untouched.
 
 All detour-owned table names, column labels, citation delimiters, paths,
-collection/body bounds, context-length settings, and other repeated numeric
-values belong in named globals at the top of `api.py`; do not scatter literals
-through the implementation. Reuse existing main-pipeline constants by import
-where the human section names them, without adding detour labels to the main
-constants modules.
+ports, collection/body bounds, context-length settings, and other repeated
+numeric values belong in named globals at the top of the file that owns them;
+do not scatter literals through the implementation. Keep the existing API
+schema labels at the top of `api.py`. Reuse existing main-pipeline constants
+by import where they already exist, without adding detour labels to the main
+constants modules or restating constants such as `CARD_PARTITION_TABLE`.
 
 Reuse the existing codebase at its current seams rather than restating or
 forking it: `PipelineConfig.from_json()` for config, the deterministic sibling
@@ -277,6 +280,110 @@ DB-path pattern in `detour_step4_breakdown.py`, step 08 and
 materialization, `docx_parse.py` for the parser/extraction/render separation,
 and `cards.py`/step 10 for card assembly and TXT/DOCX ZIP output. Keep the
 Codex-specific code detour-local and adapt only the data entering those seams.
+Use the existing common innerdict loaders as the source of researcher identity,
+draws, task context, ground truth, and rendered cards rather than querying or
+reconstructing a parallel card representation.
+
+The dedicated detour config is `config_ai_augment.json`. Require its
+`files_config["map_subset_0_to_batch"]` entry in detour code and register that
+CSV through the existing `register_resource()` helper as a
+`RegisteredResource`, using `ResourceGroup.KTP_PIPELINE_ARTIFACT`,
+`FragmentType.CSV_ROW`, and the configured description and SHA-256. Read the
+map only through the verified registered-resource path, and import the
+existing `DRAW_LABEL` and `BATCH_LABEL` constants for its two-column schema.
+Require one non-blank release-batch classification per map draw and reject
+missing columns or duplicate/conflicting draw rows. Do not add this detour-only
+key to main-pipeline required-config constants, change `PipelineConfig`, or
+otherwise affect main-pipeline config/resource loading.
+
+### eligible source-key cohorts and innerdict ownership
+
+The configured source DuckDB remains read-only. Its common innerdict tables
+are authoritative for researcher membership and presentation. Obtain each
+source key from the innerdict table's `name_key`, and obtain first/last names
+and every non-null `ktp.draw_number` only from that source key's innerdict
+JSONL records. Preserve every distinct draw carried by those records for a
+contracted source key. Never source, replace, or choose a representative draw
+from `card_partitions`, `samples_with_names`, another matching/view relation,
+or the registered release-map CSV.
+
+The SHA-256-verified `map_subset_0_to_batch` resource only classifies draw
+values already found in innerdicts. Derive the cohorts by source key, not by
+treating a draw as a unique researcher:
+
+- The ground-truth cohort contains the distinct source keys whose
+  innerdict-provided draws map to release batches `subset 1`, `subset 5`,
+  `subset 6`, or `subset 7`, excluding the source key
+  `{"ktp.first_name": "Mercouri G.", "ktp.last_name": "Kanatzidis"}`.
+  Their one or more `docx_innerdicts` records supply the ground truth.
+- The no-ground-truth cohort contains source keys selected by
+  `card_partitions` only for its eligibility flags: partition 4,
+  `ktp.partition_flag_xlsx_non_exact_any = false`, and
+  `ktp.partition_flag_ssn_count = 1`. Join that result by source key to the
+  innerdict-owned researcher data; do not take its draw/name columns.
+
+Fail startup if the two sets overlap or if their exact cardinalities are not
+196 and 78, respectively, with 274 distinct eligible source keys in total.
+The remaining 33 source keys are not displayed as runnable work. Keep the
+three release-batch-subset-8 source keys and the explicitly excluded
+Kanatzidis source key out of the ground-truth cohort, and keep the remaining
+29 staging source keys out of the augmentation cohort.
+
+### Control Centre, run journal, and review UI
+
+Implement the supplied `control_centre/ui.py` as one NiceGUI application with
+AG Grid and one operator screen. It owns the queue, exactly one active Codex
+process, source-key sanctions, cancel/rerun operations, and backend process
+lifecycle. It starts the backend once for the UI lifetime. Queue and rerun
+always create a new UUID run ID; repeated runs for one source key are valid.
+
+The UI reads source context and ground truth from the configured source
+DuckDB and accepted attempts from the one detour DuckDB. `api.py` remains the
+only detour-DB writer. Suspend UI detour-DB reads while a sanctioned Codex run
+could push; source-DB reads remain allowed. When idle, reopen the detour DB
+read-only and reconcile accepted rows by source key, session metadata, and
+attempt ID.
+
+Accepted values and provenance remain authoritative only in DuckDB. Preserve
+queued, running, failed, canceled, and process-exit history in the skeleton's
+append-only, atomically appended UI run journal so failed/canceled runs survive
+a UI restart without manufacturing accepted rows. A run becomes complete
+only after its push is accepted and its Codex process exits; an exited run
+without an accepted push is failed, and cancellation remains distinct.
+
+The table is variable-at-a-time and includes source identity and all
+innerdict-provided draws, the selected `ktp.ai_augment_*` value, its
+`ktp.table_1_*` counterpart where this cohort has ground truth, matching
+footnotes/arguments, attempt ID/time/status, and queue/cancel/rerun action.
+Show the latest attempt in the researcher row and every older attempt in
+chronological expandable history. Use a community-compatible custom expansion
+rather than requiring AG Grid Enterprise. Filters cover text, cohort, status,
+and variable. Below the table, render the selected researcher's full familiar
+card through the existing common loaders and `build_cards()`, preserving xlsx
+-> Codex -> docx -> ssn order.
+
+### workbook lifecycle and Codex prompt
+
+Keep one named host workbook path and one named AIVM workdir/workbook path as
+top-level `ui.py`/API globals. Initialize an absent host workbook as an empty
+text file. The host copy is the persistent operator-editable copy between
+runs; workbook content is an untrusted learning artifact, not rollout
+evidence or ground truth.
+
+At backend initialization, copy the host workbook to its fixed AIVM workdir.
+Because the backend stays alive across multiple runs, repeat that host-to-AIVM
+copy immediately before every `codex exec`, after any operator edit. Read the
+host workbook once for that launch: write those exact bytes to the AIVM file
+and include the full same text in the Codex user prompt together with the
+loopback OpenAPI URL. Do not truncate, summarize, or maintain a second prompt
+version.
+
+When the API copies a sanctioned rollout for a push attempt, also copy the
+current AIVM workbook into that attempt directory and atomically publish it to
+the host workbook path so it persists into the next execution. Keep the
+per-attempt workbook copy for audit. Its transfer does not alter the required
+rollout-copy -> appendwatch-report-copy -> copied-report-validation order and
+must never make workbook text eligible evidence.
 
 ### protected appendwatch deployment
 
@@ -301,8 +408,9 @@ root. The unit must be enabled, start on boot, restart on failure, use a
 restrictive umask, watch `/home/ai/.codex/sessions`, and atomically maintain
 its existing tree report in the protected mounted directory. Provisioning
 must start and verify the service before `deploy.sh` opens the `ai` shell.
-Do not otherwise redesign the existing private SSH service. The current
-manual `run_appendwatch.sh` is not the persistence mechanism.
+Do not otherwise redesign the existing private SSH service beyond the
+explicit, narrowly restricted API reverse-forwarding change below. The
+current manual `run_appendwatch.sh` is not the persistence mechanism.
 
 Deployment verification must prove all of the following before opening the
 `ai` shell:
@@ -327,32 +435,57 @@ degradation, or `COMPROMISED` rollout fails closed.
 
 ### backend configuration and SSH hand-off
 
-Serving the detour requires `--config config.json`. Parse it once at startup
-with the existing `PipelineConfig.from_json()` contract
-and use its existing `db_file`, `output_dir`, `output_format`,
-`pandoc_reference_docx`, `timezone`, and `total_draws` settings. Accept only
-`txt` or `docx`; DOCX output also requires a readable reference DOCX. The
-configured pipeline DuckDB is context only and must be opened read-only. Follow
-the existing detour DB separation pattern: derive one deterministic sibling
-DuckDB path from `config.db_file` using a named detour ID and the
-`<source-stem>__detour_<detour-id><suffix>` convention. Open that separate
-detour DB read/write for all Codex relations and preserve it across attempts;
-do not copy or mutate the source DB. Serialize detour-DB write transactions. A
-missing or invalid config prevents serving; do not silently fall back to
-another path or format.
+Serving the detour requires `--config config_ai_augment.json`. Parse it once at
+startup with the existing `PipelineConfig.from_json()` contract and use its
+existing `db_file`, `output_dir`, `output_format`, `pandoc_reference_docx`,
+`timezone`, `sample_seed`, and `total_draws` settings. Require and register the
+`map_subset_0_to_batch` resource as specified above before deriving cohorts;
+missing metadata, unreadable/non-regular CSV content, or a hash mismatch
+prevents serving. Accept only `txt` or `docx`; DOCX output also requires a
+readable reference DOCX. The configured pipeline DuckDB is context only and
+must be opened read-only. Follow the existing detour DB separation pattern:
+derive one deterministic sibling DuckDB path from `config.db_file` using a
+named detour ID and the `<source-stem>__detour_<detour-id><suffix>` convention.
+Open that separate detour DB read/write for all Codex relations and preserve it
+across attempts; do not copy or mutate the source DB. Serialize detour-DB write
+transactions. A missing or invalid config prevents serving; do not silently
+fall back to another path or format.
 
-Use the repository-root `.env`, which is already ignored, with
-`python-dotenv`'s normal rule that a real process environment value wins.
-The per-chat setting is:
+In production, `ui.py` is the only owner of the current human sanction.
+Expose these loopback-only NiceGUI/FastAPI control routes, excluded from its
+OpenAPI schema:
+
+- `GET /_control/current`, returning either no sanctioned run or one strict
+  object containing `run_id`, `source_key`, `session_id`, and
+  `rollout_jsonl`;
+- `POST /_control/runs/{run_id}/accepted`, accepting the exact source key,
+  session ID, and backend attempt ID and acknowledging only the matching
+  current run.
+
+The UI binds to `127.0.0.1:8611`; it is never forwarded to AIVM, so the
+control routes require no token/header mechanism. `ui.py` starts the backend
+with the control base URL in one named environment setting. When that setting
+is present, the API must use the control endpoint exclusively and must never
+fall back to `.env` if the UI is unavailable, returns malformed state, or has
+no sanction.
+
+At the start of each `/pull` or `/push`, fetch and validate one immutable
+control snapshot. Pin it for the whole request; never reread midway and never
+combine fields from different snapshots. Require its normalized absolute
+rollout path to be below the watched sessions root and to name a rollout
+JSONL file; reject traversal, control characters, symlinks/unmonitored paths,
+and paths outside that root. Resolve and serve only its exact sanctioned
+source key.
+
+Retain the existing repository-root `.env` rollout setting only as an
+isolated backend-unit-test override when no control URL is configured:
 
 ```dotenv
 FASTAPI_DETOUR_ROLLOUT_JSONL=/home/ai/.codex/sessions/YYYY/MM/DD/rollout-....jsonl
 ```
 
-It is intentionally unset until the operator identifies the rollout for
-the active chat. It must be an absolute, normalized path below the watched
-sessions root and must name a rollout JSONL file; reject traversal, control
-characters, symlinks/unmonitored paths, and paths outside that root.
+The real process environment still wins over `.env`. This fallback is not a
+production message bus and must not be consulted in control-endpoint mode.
 
 The backend must reuse the existing dedicated identity, known-hosts file,
 Lima SSH config, target, and host-mounted appendwatch-report path already
@@ -361,19 +494,30 @@ needed to make those paths testable; do not add a new configuration system or
 copy private-key material. Keep defaults aligned with `deploy.sh`, and ensure
 a custom `--mount` can supply the corresponding host report path.
 
-If the per-chat rollout setting or a required deployment/SSH/status setting
-is missing, blank, invalid, or unreadable, the configured API may still start
-and `/pull` may still work, but `/push` returns HTTP 503 with only:
+Bind the backend to `127.0.0.1:8612`. `deploy.sh` passes one named backend
+port into `provision.sh`; do not add a Lima YAML port forward. Preserve the
+private SSH service's local forwarding required by VS Code, permit remote TCP
+forwarding, and restrict remote listeners with
+`PermitListen 127.0.0.1:8612` plus `GatewayPorts no`. The Codex SSH command
+must require `ExitOnForwardFailure=yes` and create exactly
+`-R 127.0.0.1:8612:127.0.0.1:8612`. Never forward/listen on 8611. Codex uses
+`http://127.0.0.1:8612/openapi.json` inside AIVM.
+
+If no run is sanctioned, the control endpoint is unavailable/invalid, or a
+required rollout/deployment/SSH/status setting is missing, blank, invalid, or
+unreadable, the configured API may still start but both `/pull` and `/push`
+fail closed with HTTP 503 and only:
 
 ```json
 {"detail":"API is not properly configured. Contact the human operator."}
 ```
 
-Startup and request logs must name the exact missing/invalid setting and
-remediation for the operator. The client response, OpenAPI schema, and
-access log must not reveal environment names, host/guest paths, SSH data,
-appendwatch status, or compromise reasons. Restarting the API after editing
-`.env` must pick up the new rollout.
+Startup and request logs must name the exact missing/invalid setting or
+control-state problem and remediation for the operator. The client response,
+OpenAPI schema, and access log must not reveal environment names,
+host/guest paths, SSH data, control state, appendwatch status, or compromise
+reasons. Editing/restarting the `.env` override remains relevant only to
+isolated backend tests.
 
 ### ordered `/push` integrity gate
 
@@ -387,14 +531,16 @@ validation response may precede the gate.
 For each push attempt, use a unique backend-only attempt/version directory
 and perform this exact order:
 
-1. Validate operator/deployment configuration without inspecting the body.
+1. Validate and pin the one sanctioned control snapshot plus
+   operator/deployment configuration without inspecting the body.
 2. SCP the configured rollout from the VM into a temporary file using the
    dedicated key and the same pinned SSH/known-hosts options as `deploy.sh`.
    Build an argv list without `shell=True`; fsync and atomically publish the
    archived rollout, then record its size, SHA-256, and physical line count
    equivalent to `nl -ba`. Count every physical JSONL line in the immutable
    archive, including a final non-newline-terminated line; do not invoke a
-   shell command merely to calculate it.
+   shell command merely to calculate it. After the rollout copy is published,
+   copy and publish the current guest workbook as specified above.
 3. Copy the current atomic appendwatch tree report from the mounted protected
    host directory into the attempt directory. Fsync it, publish it under a
    unique versioned name, and record its SHA-256. Never inspect the live
@@ -416,17 +562,27 @@ and perform this exact order:
    submitted excerpt/URL pair solely through parameterized DuckDB queries over
    that index. No ground-truth or configured-pipeline-DB lookup may precede
    this point.
-7. After every evidence lookup succeeds, resolve the hardcoded current
-   researcher against the configured pipeline DuckDB opened read-only; require
-   one source key and its draw/name context. In the detour DuckDB, create the
-   final Codex output view and materialize `codex_innerdicts` atomically.
-8. Only after that transaction succeeds, load ground truth, write the accepted
-   response and configured card artifact, mark the attempt accepted, and
-   return the existing two-line NDJSON response.
+7. After every evidence lookup succeeds, resolve the exact sanctioned source
+   key against the configured pipeline DuckDB opened read-only. Require one
+   innerdict-owned researcher identity and preserve all of its
+   innerdict-provided draw context. In the detour DuckDB, create the final
+   Codex output view and materialize `codex_innerdicts` atomically.
+8. Only after that transaction succeeds, load ground truth for a
+   ground-truth-cohort run, write the accepted response and configured card
+   artifact, and mark the attempt accepted. Return normalized AI-augment
+   values followed by mapped DOCX ground truth for the 196 cohort; return only
+   the normalized accepted values for the 78 no-ground-truth cohort.
+9. Consume this run's sanction, reject any further pull/push for it, and send
+   the exact run/source/session/attempt acknowledgement to the Control Centre.
+   A control-notification failure must not roll back accepted DuckDB output or
+   silently re-enable the consumed run; the UI reconciles authoritative
+   accepted output when it next becomes idle.
 
 The order above is an invariant, not an optimization: rollout copy first,
-report copy second, copied-report check third, DuckDB provenance index fourth,
-payload validation fifth, accepted innerdict/card writes last. A rejected
+guest-workbook archival/publication next, report copy after the rollout copy,
+copied-report check after the report copy, then DuckDB provenance indexing,
+payload validation, and accepted innerdict/card writes. Workbook transfer must
+not move report copying or checking ahead of rollout publication. A rejected
 attempt retains its immutable archives and failure-stage manifest, and the
 shared database may retain appendwatch-approved normalized provenance, but a
 rejected attempt must not add an authoritative accepted output row to
@@ -440,10 +596,15 @@ Rename the current `COLUMNS` tuple to `DOCX_COLUMNS`; those nine
 `ktp.table_1_` prefix with `ktp.ai_augment_`. Keep an explicit ordered mapping
 between the two tuples rather than deriving labels at request time.
 
-For the current hardcoded task, `/pull` must expose the selected researcher's
-`ktp.first_name` and `ktp.last_name` and the nine AI-augment fields to fill.
-The backend, not the client, retains the authoritative source key and draw
-number used after acceptance. Queueing the next task is out of scope.
+For each sanctioned run, `/pull` resolves only that exact source key through
+the configured source DuckDB's common innerdict tables. Reuse the existing
+loaders to emit its xlsx and ssn context in the established JSONL shape, omit
+all docx ground truth and prior Codex attempts, and append one synthetic task
+record with the selected innerdict-owned first/last names and all nine
+AI-augment fields set to null. The backend, not the client, retains the exact
+sanctioned source key and every innerdict-provided draw used after acceptance.
+The same sanction may retry `/pull` until accepted; after acceptance it is
+consumed and no further pull or push is permitted for that run.
 
 The `/push` outer key set requires the eight non-comment entries from
 `AI_AUGMENT_COLUMNS` and permits the comments entry as the sole optional key.
@@ -598,11 +759,13 @@ accepted-row construction and footnote numbering.
 
 ### accepted Codex output view and innerdict contract
 
-After validation, obtain the current researcher source key, draw number, first
-name, and last name from existing data using the identity exposed by `/pull`.
-The configured pipeline DuckDB remains read-only. In the detour DuckDB, append
-one accepted flat row to a narrowly named backing table and expose it through
-a `codex_output` view whose columns follow this order:
+After validation, resolve the exact sanctioned source key and obtain its
+first/last names and complete draw context only from the common innerdict JSONL
+loaded for that key. Never accept these identity values from the push body or
+source them from the release map or card-partition relation. The configured
+pipeline DuckDB remains read-only. In the detour DuckDB, append one accepted
+flat row to a narrowly named backing table and expose it through a
+`codex_output` view whose columns follow this order:
 
 1. `ktp.source_key`;
 2. `ktp.filename`, containing the reconstructed original rollout basename;
@@ -691,9 +854,11 @@ Pass those settings to the existing card ZIP writer and use the attempt ID in
 the ZIP name so a previous report is never overwritten; record its filename
 and SHA-256 in the attempt manifest. The accepted attempt contains
 the archived rollout, copied appendwatch report, their hashes, line count,
-stage/result manifest, and `response.jsonl`. Preserve the two-line NDJSON
-response: normalized AI-augment values first and mapped DOCX ground truth
-second.
+stage/result manifest, archived workbook, and `response.jsonl`. For a
+ground-truth-cohort run, write two NDJSON lines: normalized AI-augment values
+first and mapped DOCX ground truth second. For a no-ground-truth-cohort run,
+write only the normalized accepted AI-augment values; never manufacture an
+empty ground-truth line.
 
 ### client-visible failures
 
@@ -734,14 +899,28 @@ Keep the existing appendwatch regression suite and add focused tests for:
 - protected asset staging/self-install, systemd enable/start/restart,
   restrictive paths/modes, service verification before the `ai` shell, and
   negative source/report access probes as `ai`;
-- missing rollout configuration producing only generic 503 while logs name
-  `FASTAPI_DETOUR_ROLLOUT_JSONL`, with `/pull` remaining available;
-- required `--config`, read-only access to its pipeline DuckDB, TXT/DOCX
-  selection, reference-DOCX handling, deterministic sibling detour-DB path,
-  and before/after proof of no writes to the configured source DB;
+- absent/malformed/unavailable control sanction producing the same generic 503
+  for both `/pull` and `/push`, exclusive control-endpoint mode, exact snapshot
+  pinning, one acceptance acknowledgement, consumed-sanction behavior, and the
+  isolated no-control-URL `.env` rollout fallback used only by backend tests;
+- required `--config config_ai_augment.json`, `PipelineConfig.from_json()`,
+  detour-local enforcement and repository-helper registration of
+  `map_subset_0_to_batch`, configured SHA-256 verification, malformed/missing
+  map rejection, read-only access to the pipeline DuckDB, TXT/DOCX selection,
+  reference-DOCX handling, deterministic sibling detour-DB path, and
+  before/after proof of no writes to the configured source DB;
+- innerdict-only source-key/name/draw loading, preservation of all contracted
+  draws, release-map classification of only those draws, source-key joins to
+  card-partition flags, explicit Kanatzidis exclusion, disjoint exact cohort
+  counts of 196 and 78/274 total, and startup failure on invariant drift;
+- sanctioned dynamic `/pull` output containing only selected xlsx/ssn context
+  plus one null-AI task record, with docx ground truth and prior Codex attempts
+  absent and retries allowed only until the run is accepted;
 - an instrumented assertion of the exact sequence SCP -> status copy ->
   copied-status check -> rollout line count/index transaction -> Pydantic/SQL
-  lookup -> output view/innerdict -> ground truth/card;
+  lookup -> output view/innerdict -> ground truth/card, while separately
+  proving the workbook is archived/published after rollout publication without
+  moving report copying or validation ahead of the rollout;
 - strict SCP argv/known-hosts/key use, path confinement, unique atomic
   archives, and custom-mount connection settings;
 - copied-report parsing for nested exact paths, OK, compromised ancestors or
@@ -768,8 +947,14 @@ Keep the existing appendwatch regression suite and add focused tests for:
   marker-bounded and Markdown-escaped context, bold excerpt, web-run
   wording/argument cross-reference/FCO time/URL, aligned raw argument lists,
   xlsx -> Codex -> docx -> ssn card order,
-  TXT and DOCX ZIPs, archive hashes, two-line success NDJSON, and no accepted
-  artifacts on rejection; and
+  TXT and DOCX ZIPs, archive hashes, two-line ground-truth success NDJSON,
+  one-line no-ground-truth success NDJSON, and no accepted artifacts on
+  rejection;
+- focused Control Centre tests for serial queueing, cancel/rerun/new UUIDs,
+  append-only journal replay, accepted-row reconciliation, detour-read
+  suspension while a push is possible, workbook round trips/full prompt
+  inclusion, backend lifetime, loopback-only ports, and the exact single API
+  reverse tunnel without forwarding the control port; and
 - an E2E in the existing `test_api.py` style using the real July direct-web
   rollout with fixed submitted excerpts, URLs, and expected FC/FCO/call/ref
   identities. Assert exact DuckDB rows and card sections, and prove a one-
