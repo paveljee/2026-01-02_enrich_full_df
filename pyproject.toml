@@ -165,7 +165,7 @@ depends-on = ["lint", "test-detours"]
 plotly = "==6.6.0"
 
 [tool.pixi.feature.detour-ai-augment-backend-api.tasks]
-#serve = "python -m src.detours.detour_ai_augment.src.backend.api --config config_ai_augment.json"
+serve = "python -m src.detours.detour_ai_augment.src.backend.api --config config_ai_augment.json"
 dashboard = "python -m src.detours.detour_ai_augment.src.control_centre.ui"
 # provision a worktree first:
 # git worktree add --detach /tmp/detour-api-9a187d3 9a187d3fc497bef6d1568b885b33f0a834607d22
