@@ -36,6 +36,11 @@
   "pilot_xlsx_name": "2024_HCR.xlsx",
   "total_draws": 310,
   "files_config": {
+    "manual_outerdict_mask": {
+      "path": "/Volumes/home/aicode/2026-01-02_enrich_full_df/tmp/manual_outerdict_mask.json",
+      "sha256": "190c1bb7a6e5581d4be8c2d37c2867f1bcd3ea54b529840ec40f621b22196629",
+      "desc": "manual OuterDict mask"
+    },
     "openalex_paper_title_parquet": {
       "path": "/Volumes/home/aicode/2026-01-02_enrich_full_df/data/output/openalex_paper_titles.parquet",
       "sha256": "3511bf749a170086f92556fcd2fdf464d8fe1c44191b77c06cab414da5f99fb8",
