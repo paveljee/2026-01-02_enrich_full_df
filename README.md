@@ -161,6 +161,33 @@ external code
 on which the main pipeline
 does not depend.
 
+### File path conventions
+
+File paths you may see in `config*.json` files or elsewhere may be located in various directories.
+Those distinctions are meaningful:
+
+* `/Volumes/Users/**` and `/Volumes/home/anonymous/**` directories are located on the host macOS machine within private human user files and outside of the AI coding agent scope; the AI agent will fail to access these and will receive pipeline failures whenever they are accessed by it.
+  The former concerns mostly private data files in progress (e.g., manual annotations), generally to be released upon the project publication.
+  The latter often concerns publicly available files that do not need to be committed to this repo, e.g., large SciSciNet v2 parquet files from HuggingFace.
+  The distinction between the former and the latter is not strict, though, and/or is not within privilege scope of this repo but rather is reported for general reference.
+* Relative paths like `data/**` or `resources/**` are the ones
+  either committed in the repo
+  or produced by the pipeline, and
+  they are therefore expected to be available whenever the repository is cloned and used by a public user.
+* `/Volumes/home/aicode/**` paths indicate the specific test instance of the repository in which development is being done.
+  These are available to the AI coding agent
+  but are often **not** committed into the public repo.
+  Regardless, they will often fail to be found if the pipeline is cloned into a new directory thanks to the intentionally hardcoded top-level directories here.
+  It is therefore considered that they are
+  either an instance of files as in relative paths above
+  or a responsibility of the pipeline user who should copy them from elsewhere.
+
+   * In particular, files under the `**/data` subdirectory of this absolute path are the pipeline artifacts being worked on.
+   The are **not** committed usually, but sometimes they are – if helpful for public reference.
+   They may be regenerated but usually persist across pipeline executions.
+   * Files under the `**/tmp` subdirectory of the absolute path are **not** committed and are ephemeral in the sense that they are copied by the human from elsewhere (i.e., the authoritative copy is held elsewhere) intentionally for the AI coding agent’s access.
+   This may include, for example, some disclosable files from `/Volumes/Users/**` or from elsewhere.
+
 ### Main pipeline
 On a high level, the pipeline makes
 two major data transforms:

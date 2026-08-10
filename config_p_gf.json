@@ -65,7 +65,7 @@
       "desc": "Field Definitions"
     },
     "world_bank_xlsx": {
-      "path": "/Volumes/Users/Anonymous/Workshop/202504161200UTC-4_Nancy_Baxter_Andrea_Tricco_collabs/analyses/2026-01-02_enrich_full_df/data/OGHIST_2025_07_01.xlsx",
+      "path": "/Volumes/home/aicode/2026-01-02_enrich_full_df/tmp/OGHIST_2025_07_01.xlsx",
       "sha256": "567d7646d2ac762b4058fcbc93f7df435ea7a3c441a1e666894e6d3e96128aa6",
       "desc": "World Bank country list"
     },

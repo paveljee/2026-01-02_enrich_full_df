@@ -37,7 +37,7 @@
   "total_draws": 310,
   "files_config": {
     "map_subset_0_to_batch": {
-      "path": "/Volumes/home/aicode/2026-01-02_enrich_full_df/data/map_subset0_to_batch.csv",
+      "path": "/Volumes/home/aicode/2026-01-02_enrich_full_df/tmp/map_subset0_to_batch.csv",
       "sha256": "a1cd6f3c4a045eff4a248b11b958c552d3c5520066139ec0102ab65e325a5a7c",
       "desc": "map subset 0 to release batches"
     },
@@ -107,7 +107,7 @@
       "desc": "Papers"
     },
     "world_bank_xlsx": {
-      "path": "/Volumes/Users/Anonymous/Workshop/202504161200UTC-4_Nancy_Baxter_Andrea_Tricco_collabs/analyses/2026-01-02_enrich_full_df/data/OGHIST_2025_07_01.xlsx",
+      "path": "/Volumes/home/aicode/2026-01-02_enrich_full_df/tmp/OGHIST_2025_07_01.xlsx",
       "sha256": "567d7646d2ac762b4058fcbc93f7df435ea7a3c441a1e666894e6d3e96128aa6",
       "desc": "World Bank country list"
     },
