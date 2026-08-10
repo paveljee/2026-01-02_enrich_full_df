@@ -137,6 +137,7 @@ To smoke-test the feasibility of this, on August 6^th^, 2026, UTC-4, a Human Ope
 * On the macOS host, launched the detour Backend API (i.e., using `pixi run serve`).
     * Note that a non-default port (e.g., `8612`) was used for the Backend API so as not to collide with the default `8000` port on which the self-hosted LLM Inference API would already be running in this set-up.
     * Note also that the `aivm-appendwatch` service, responsible for continuously verifying the integrity of Codex rollouts, would also have been provisioned already and running by that point as part of the AIVM deployment process.
+    * A helpful command to monitor `appendwatch` statuses on AIVM is this (to be run under a root user): `MOUNT_DIR=/path/to/mounted/dir/on/macos && watch --interval=1 cat "$MOUNT_DIR/.aivm-control/appendwatch/appendwatch-tree.txt"`
 * Codex CLI was prompted in a non-interactive mode: `codex exec --skip-git-repo-check "http://192.168.5.2:8612/openapi.json"`
     * Note that the URL here is _the_ prompt.
 
