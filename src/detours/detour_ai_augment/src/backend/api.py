@@ -86,7 +86,7 @@ from src.helpers.vars import (
     KTP_PARTITION_SSN_VALUE,
 )
 
-from . import codex_parse
+from .helpers import codex_parse
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[5]
 load_dotenv(REPOSITORY_ROOT / ".env")

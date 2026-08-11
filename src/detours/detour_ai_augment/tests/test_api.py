@@ -14,7 +14,8 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from src.detours.detour_ai_augment.src.backend import api, codex_parse
+from src.detours.detour_ai_augment.src.backend import api
+from src.detours.detour_ai_augment.src.backend.helpers import codex_parse
 from src.helpers.config import PipelineConfig
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
