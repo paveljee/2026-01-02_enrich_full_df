@@ -44,12 +44,13 @@ from src.helpers.vars import (
     KTP_HCR_PRIMARY_AFFILIATIONS_COL,
     KTP_HCR_ROW_NUMBER_COL,
     KTP_HCR_SECONDARY_AFFILIATIONS_COL,
+    KTP_INNERDICT_JSONLINES_COL,
     KTP_LAST_NAME_COL,
+    KTP_NAMEKEY_COL,
     KTP_POPULATION_INDEX_COL,
     KTP_PRIORITY_COL,
     KTP_PRIORITY_GROUP_COL,
     KTP_PRIORITY_GROUP_LABELS,
-    KTP_NAMEKEY_COL,
     KTP_XLSX_MATCH_COL,
     KTP_XLSX_MATCH_FIRST_TOKENS_KEY,
     KTP_XLSX_MATCH_LAST_NAME_NORM_KEY,
@@ -190,16 +191,16 @@ def _build_fixture_db(path: Path) -> dict[str, int]:
         con.execute(
             f"""
             CREATE TABLE {OUTERDICT_STUB_TABLE} (
-                name_key VARCHAR,
-                innerdicts VARCHAR
+                "{KTP_NAMEKEY_COL}" VARCHAR,
+                "{KTP_INNERDICT_JSONLINES_COL}" VARCHAR
             )
             """
         )
         con.execute(
             f"""
             CREATE TABLE {XLSX_INNERDICT_TABLE} (
-                name_key VARCHAR,
-                innerdicts VARCHAR
+                "{KTP_NAMEKEY_COL}" VARCHAR,
+                "{KTP_INNERDICT_JSONLINES_COL}" VARCHAR
             )
             """
         )

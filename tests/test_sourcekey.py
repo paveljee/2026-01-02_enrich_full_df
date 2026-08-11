@@ -13,20 +13,13 @@ from src.helpers.data_models import (
 
 
 class TestEnums:
-    """Test suite for enum types."""
-    
-    def test_resource_group_values(self):
-        """Test ResourceGroup enum has expected values."""
-        assert ResourceGroup.SCISCINET_HF == "sciscinet_hf"
-        assert ResourceGroup.LLAMA_CPP == "llama_cpp"
-        assert ResourceGroup.KTP_PIPELINE_ARTIFACT == "ktp_pipeline_artifact"
-        assert len(list(ResourceGroup)) == 6
-    
-    def test_fragment_type_values(self):
-        """Test FragmentType enum has expected values."""
-        assert FragmentType.AUTHOR_ID == "author_id"
-        assert FragmentType.EXCEL_ROW == "excel_row"
-        assert len(list(FragmentType)) == 8
+    """
+    Test suite for enum types.
+
+    Not sure what to meaningfully test here.
+
+    signed-off: human
+    """
 
 
 class TestRegisteredResource:

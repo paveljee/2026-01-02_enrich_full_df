@@ -28,6 +28,7 @@ from src.helpers.vars import (
     HCR_XLSX_KEY_PREFIX,
     KTP_FILENAME_COL,
     KTP_FRAGMENT_COL,
+    KTP_INNERDICT_JSONLINES_COL,
     KTP_NAMEKEY_COL,
     KTP_XLSX_MATCH_COL,
     KTP_XLSX_MATCH_FIRST_TOKENS_KEY,
@@ -113,16 +114,16 @@ def _build_fixture_db(path: Path) -> dict[str, int]:
         con.execute(
             f"""
             CREATE TABLE {OUTERDICT_STUB_TABLE} (
-                name_key VARCHAR,
-                innerdicts VARCHAR
+                "{KTP_NAMEKEY_COL}" VARCHAR,
+                "{KTP_INNERDICT_JSONLINES_COL}" VARCHAR
             )
             """
         )
         con.execute(
             f"""
             CREATE TABLE {XLSX_INNERDICT_TABLE} (
-                name_key VARCHAR,
-                innerdicts VARCHAR
+                "{KTP_NAMEKEY_COL}" VARCHAR,
+                "{KTP_INNERDICT_JSONLINES_COL}" VARCHAR
             )
             """
         )
