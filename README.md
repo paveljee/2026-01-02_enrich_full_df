@@ -1,10 +1,13 @@
 # README
-> [!NOTE]
+> [!IMPORTANT]
 > This was written manually
 > by Pavel Zhelnov.
 > 
 > Started writing this
-> on May 26, 2026.
+> on May 26, 2026, and
+> **have not updated it**
+> **in a while,** so it 
+> may be partially outdated.
 > 
 > This is a code review of
 > the entire pipeline, prior
