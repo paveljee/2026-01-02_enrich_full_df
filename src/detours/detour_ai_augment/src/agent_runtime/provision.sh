@@ -301,6 +301,7 @@ chmod 700 "$AIVM_CODEX_PATH"
 cat > "$AIVM_CODEX_CONFIG_PATH" <<'CODEX_CONFIG'
 model = "gpt-5.6-sol"
 model_reasoning_effort = "xhigh"
+model_reasoning_summary = "detailed"
 personality = "none"
 web_search = "live"
 sandbox_mode = "danger-full-access"
