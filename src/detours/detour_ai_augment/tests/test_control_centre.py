@@ -4,24 +4,32 @@ import asyncio
 import hashlib
 import json
 from collections import Counter
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
+from random import Random
 from types import SimpleNamespace
+from typing import cast
 from uuid import UUID, uuid4
+from zoneinfo import ZoneInfo
 
 import pytest
 
 from src.detours.detour_ai_augment.src.backend import api
-from src.detours.detour_ai_augment.src.control_centre import ui as control_ui
+from src.detours.detour_ai_augment.src.control_centre.dashboard import ui as control_ui
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
 CONFIG_PATH = REPOSITORY_ROOT / "config_ai_augment.json"
 SESSION_TIMESTAMP = datetime(2026, 8, 7, tzinfo=timezone.utc)
 SESSION_ID = control_ui.SessionId("019fb000-0000-7000-8000-000000000001")
+TERMINATE_RETURN_CODE = -15
+KILL_RETURN_CODE = -9
+REMOTE_TEST_PID = control_ui.RemotePid(4321)
 ROLLOUT_PATH = PurePosixPath(
     "/home/ai/.codex/sessions/2026/08/07/"
     "rollout-2026-08-07T00-00-00-019fb000-0000-7000-8000-000000000001.jsonl"
 )
+CONTROL_TIMEZONE = ZoneInfo("UTC")
 
 
 @pytest.fixture
@@ -29,13 +37,22 @@ def anyio_backend() -> str:
     return "asyncio"
 
 
-def researcher(number: int) -> control_ui.Researcher:
+def researcher(
+    number: int,
+    *,
+    cohort: control_ui.ResearcherCohort = (
+        control_ui.ResearcherCohort.NO_GROUND_TRUTH
+    ),
+    ineligibility_category: control_ui.IneligibilityCategory | None = None,
+) -> control_ui.Researcher:
     return control_ui.Researcher(
         source_key=control_ui.SourceKey(f'{{"researcher": {number}}}'),
+        rnd=number,
         draw_numbers=(str(number),),
         first_name=f"First {number}",
         last_name=f"Last {number}",
-        cohort=control_ui.ResearcherCohort.NO_GROUND_TRUTH,
+        cohort=cohort,
+        ineligibility_category=ineligibility_category,
     )
 
 
@@ -43,17 +60,61 @@ def test_real_config_derives_exact_innerdict_owned_cohorts() -> None:
     configuration = control_ui.RuntimeConfiguration(config_path=CONFIG_PATH)
     repository = control_ui.SourceRepository(configuration=configuration)
 
-    researchers = repository.load_eligible_researchers()
+    researchers = repository.load_researchers()
+    repeated_researchers = control_ui.SourceRepository(
+        configuration=control_ui.RuntimeConfiguration(config_path=CONFIG_PATH)
+    ).load_researchers()
 
     assert Counter(item.cohort for item in researchers) == {
         control_ui.ResearcherCohort.GROUND_TRUTH: api.EXPECTED_GROUND_TRUTH_RESEARCHERS,
         control_ui.ResearcherCohort.NO_GROUND_TRUTH: (
             api.EXPECTED_NO_GROUND_TRUTH_RESEARCHERS
         ),
+        control_ui.ResearcherCohort.INELIGIBLE: api.EXPECTED_INELIGIBLE_RESEARCHERS,
     }
-    assert len(researchers) == api.EXPECTED_ELIGIBLE_RESEARCHERS
-    assert api.EXCLUDED_SOURCE_KEY not in {item.source_key for item in researchers}
-    assert sum(len(item.draw_numbers) > 1 for item in researchers) == 4
+    assert Counter(
+        item.ineligibility_category
+        for item in researchers
+        if item.ineligibility_category is not None
+    ) == api.EXPECTED_INELIGIBILITY_COUNTS
+    assert len(researchers) == api.EXPECTED_SOURCE_RESEARCHERS
+    assert [
+        (item.source_key, item.rnd)
+        for item in researchers
+    ] == [
+        (item.source_key, item.rnd)
+        for item in repeated_researchers
+    ]
+    expected_rnd = list(
+        range(
+            api.RND_START,
+            api.EXPECTED_SOURCE_RESEARCHERS + api.RND_START,
+        )
+    )
+    Random(configuration.pipeline_config.sample_seed).shuffle(expected_rnd)
+    assert {
+        item.source_key: item.rnd
+        for item in researchers
+    } == dict(
+        zip(
+            sorted(item.source_key for item in researchers),
+            expected_rnd,
+            strict=True,
+        )
+    )
+    assert researchers[0].draw_numbers == ("pilot.1",)
+    excluded = next(
+        item for item in researchers if item.source_key == api.EXCLUDED_SOURCE_KEY
+    )
+    assert excluded.cohort is control_ui.ResearcherCohort.INELIGIBLE
+    assert (
+        excluded.ineligibility_category
+        is control_ui.IneligibilityCategory.EXCLUDED_DUPLICATE_SOURCE_KEY
+    )
+    assert (
+        sum(len(item.draw_numbers) > 1 for item in researchers)
+        == api.EXPECTED_MULTIDRAW_SOURCE_RESEARCHERS
+    )
     assert all(item.draw_numbers for item in researchers)
 
 
@@ -181,7 +242,7 @@ class FakeSourceRepository:
     def __init__(self, researchers: tuple[control_ui.Researcher, ...]) -> None:
         self.researchers = researchers
 
-    def load_eligible_researchers(self) -> tuple[control_ui.Researcher, ...]:
+    def load_researchers(self) -> tuple[control_ui.Researcher, ...]:
         return self.researchers
 
     def load_ground_truth_by_source_key(
@@ -203,6 +264,91 @@ class FakeDetourRepository:
         return ()
 
 
+class CountingCardRenderer:
+    def __init__(self) -> None:
+        self.calls: list[control_ui.SourceKey] = []
+
+    def render(
+        self,
+        source_key: control_ui.SourceKey,
+    ) -> control_ui.ResearcherCardView:
+        self.calls.append(source_key)
+        return control_ui.ResearcherCardView(
+            source_key=source_key,
+            draw_number="1",
+            first_name="First",
+            last_name="Last",
+            markdown=f"render {len(self.calls)}",
+        )
+
+
+class FakeButton:
+    def __init__(self) -> None:
+        self.text = ""
+        self.disabled = False
+
+    def set_text(self, value: str) -> None:
+        self.text = value
+
+    def disable(self) -> None:
+        self.disabled = True
+
+    def enable(self) -> None:
+        self.disabled = False
+
+
+class FakeProcess:
+    def __init__(self) -> None:
+        self.returncode: int | None = None
+        self.terminate_calls = 0
+        self.kill_calls = 0
+
+    def terminate(self) -> None:
+        self.terminate_calls += 1
+        self.returncode = TERMINATE_RETURN_CODE
+
+    def kill(self) -> None:
+        self.kill_calls += 1
+        self.returncode = KILL_RETURN_CODE
+
+    async def wait(self) -> int:
+        return 0 if self.returncode is None else self.returncode
+
+
+class StartingCancelableCodex:
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.canceled = asyncio.Event()
+        self.handle: control_ui.CodexProcessHandle | None = None
+
+    async def start(
+        self,
+        *,
+        run_id: UUID,
+        on_handle: (
+            Callable[[control_ui.CodexProcessHandle], Awaitable[None]] | None
+        ) = None,
+    ) -> control_ui.CodexStartResult:
+        self.handle = control_ui.CodexProcessHandle(
+            run_id=run_id,
+            process=cast(asyncio.subprocess.Process, FakeProcess()),
+        )
+        if on_handle is not None:
+            await on_handle(self.handle)
+        self.started.set()
+        await self.canceled.wait()
+        raise RuntimeError("Codex exited before rollout discovery")
+
+    async def cancel(self, handle: control_ui.CodexProcessHandle) -> None:
+        assert handle is self.handle
+        handle.process.terminate()
+        await handle.process.wait()
+        self.canceled.set()
+
+    async def wait(self, _handle: control_ui.CodexProcessHandle) -> int:
+        raise AssertionError("a canceled startup must not reach Codex wait")
+
+
 class FakeBackend:
     def __init__(self) -> None:
         self.status = control_ui.BackendStatus.STOPPED
@@ -219,13 +365,25 @@ class SerialFakeCodex:
         self.started: asyncio.Queue[UUID] = asyncio.Queue()
         self.release: asyncio.Queue[UUID] = asyncio.Queue()
 
-    async def start(self, *, run_id: UUID) -> control_ui.CodexStartResult:
+    async def start(
+        self,
+        *,
+        run_id: UUID,
+        on_handle: (
+            Callable[[control_ui.CodexProcessHandle], Awaitable[None]] | None
+        ) = None,
+    ) -> control_ui.CodexStartResult:
         await self.started.put(run_id)
         handle = control_ui.CodexProcessHandle(
             run_id=run_id,
-            process=SimpleNamespace(returncode=None),
+            process=cast(
+                asyncio.subprocess.Process,
+                SimpleNamespace(returncode=None),
+            ),
             remote_pid=control_ui.RemotePid(123),
         )
+        if on_handle is not None:
+            await on_handle(handle)
         return control_ui.CodexStartResult(
             handle=handle,
             session_id=control_ui.SessionId(str(run_id)),
@@ -241,6 +399,169 @@ class SerialFakeCodex:
         return None
 
 
+def make_test_controller(
+    *,
+    configuration: object,
+    source_repository: object,
+    detour_repository: object,
+    journal: control_ui.RunJournal,
+    card_renderer: object,
+    backend: object,
+    codex: object,
+    control_plane: control_ui.ControlPlane,
+    reconciler: control_ui.AttemptReconciler,
+    projector: control_ui.VariableProjector,
+) -> control_ui.ControlCentreController:
+    return control_ui.ControlCentreController(
+        configuration=cast(control_ui.RuntimeConfiguration, configuration),
+        source_repository=cast(control_ui.SourceRepository, source_repository),
+        detour_repository=cast(control_ui.DetourRepository, detour_repository),
+        journal=journal,
+        card_renderer=cast(control_ui.ResearcherCardRenderer, card_renderer),
+        backend=cast(control_ui.BackendSupervisor, backend),
+        codex=cast(control_ui.CodexRunner, codex),
+        control_plane=control_plane,
+        reconciler=reconciler,
+        projector=projector,
+    )
+
+
+@pytest.mark.anyio
+async def test_researchers_without_runs_are_shown_as_ready_placeholders(
+    tmp_path: Path,
+) -> None:
+    researchers = (researcher(1), researcher(2))
+    controller = make_test_controller(
+        configuration=SimpleNamespace(),
+        source_repository=FakeSourceRepository(researchers),
+        detour_repository=FakeDetourRepository(),
+        journal=control_ui.RunJournal(path=tmp_path / "runs.jsonl"),
+        card_renderer=SimpleNamespace(),
+        backend=FakeBackend(),
+        codex=SerialFakeCodex(),
+        control_plane=control_ui.ControlPlane(),
+        reconciler=control_ui.AttemptReconciler(),
+        projector=control_ui.VariableProjector(),
+    )
+    await controller.start()
+    try:
+        snapshot = await controller.snapshot(
+            selection=control_ui.UiSelection(
+                variable_key=control_ui.VARIABLE_SPECS[0].key,
+            ),
+        )
+        page = control_ui.ControlCentrePage(controller=controller)
+        grid_rows = page.grid_rows(snapshot=snapshot)
+        grid_options = page.grid_options(
+            snapshot=snapshot,
+            variable=control_ui.VARIABLE_SPECS[0],
+        )
+        grid_updates: list[None] = []
+        page._handles.grid = SimpleNamespace(
+            options={"theme": "quartz"},
+            update=lambda: grid_updates.append(None),
+        )
+        await page.refresh_grid(snapshot=snapshot)
+        await page.refresh_grid(snapshot=snapshot)
+    finally:
+        await controller.shutdown()
+
+    assert [row.source_key for row in snapshot.rows] == [
+        item.source_key for item in researchers
+    ]
+    assert all(not row.attempts for row in snapshot.rows)
+    assert [row["status"] for row in grid_rows] == [
+        control_ui.RunStatus.READY.value,
+        control_ui.RunStatus.READY.value,
+    ]
+    assert [row["action"] for row in grid_rows] == [
+        control_ui.RunAction.QUEUE.value,
+        control_ui.RunAction.QUEUE.value,
+    ]
+    assert all(row["run_id"] is None for row in grid_rows)
+    assert all(row["attempt_id"] is None for row in grid_rows)
+    assert all(row["row_id"] == row["source_key"] for row in grid_rows)
+    assert grid_options["rowData"] == grid_rows
+    assert grid_options[":getRowId"] == control_ui.AgGrid.GET_ROW_ID_TEMPLATE.format(
+        row_id_field=control_ui.GRID_ROW_ID_FIELD
+    )
+    assert "getRowId" not in grid_options
+    assert page._handles.grid.options["theme"] == "quartz"
+    assert grid_updates == [None]
+
+
+@pytest.mark.anyio
+async def test_ineligible_action_is_disabled_and_cards_are_click_cached(
+    tmp_path: Path,
+) -> None:
+    eligible = researcher(1)
+    ineligible = researcher(
+        2,
+        cohort=control_ui.ResearcherCohort.INELIGIBLE,
+        ineligibility_category=(
+            control_ui.IneligibilityCategory.STAGING_PARTITION_4_MULTIPLE_SSN
+        ),
+    )
+    card_renderer = CountingCardRenderer()
+    controller = make_test_controller(
+        configuration=SimpleNamespace(),
+        source_repository=FakeSourceRepository((eligible, ineligible)),
+        detour_repository=FakeDetourRepository(),
+        journal=control_ui.RunJournal(path=tmp_path / "runs.jsonl"),
+        card_renderer=card_renderer,
+        backend=FakeBackend(),
+        codex=SerialFakeCodex(),
+        control_plane=control_ui.ControlPlane(),
+        reconciler=control_ui.AttemptReconciler(),
+        projector=control_ui.VariableProjector(),
+    )
+    await controller.start()
+    try:
+        selection = control_ui.UiSelection(
+            variable_key=control_ui.VARIABLE_SPECS[0].key,
+            selected_source_key=eligible.source_key,
+        )
+        snapshot = await controller.snapshot(selection=selection)
+        page = control_ui.ControlCentrePage(controller=controller)
+        rows = page.grid_rows(snapshot=snapshot)
+        button = FakeButton()
+        page._handles.execute_button = button
+
+        assert card_renderer.calls == []
+        assert snapshot.counts.total == 2
+        assert snapshot.counts.no_ground_truth == 1
+        assert snapshot.counts.ineligible == 1
+        assert snapshot.counts.ready == 1
+        assert [row.latest.action for row in snapshot.rows] == [
+            control_ui.RunAction.QUEUE,
+            control_ui.RunAction.DISABLED,
+        ]
+        assert page.grid_column_definitions(
+            variable=control_ui.VARIABLE_SPECS[0]
+        )[0]["field"] == control_ui.GRID_RND_FIELD
+
+        page.selection.selected_source_key = ineligible.source_key
+        page.sync_selected_action(rows)
+        assert button.text == control_ui.ACTION_LABEL_BY_VALUE[
+            control_ui.RunAction.DISABLED.value
+        ]
+        assert button.disabled
+        with pytest.raises(ValueError, match="ineligible"):
+            await controller.queue(source_key=ineligible.source_key)
+
+        page.selection.selected_source_key = eligible.source_key
+        page.sync_selected_action(rows)
+        assert button.text == control_ui.ACTION_LABEL_BY_VALUE[
+            control_ui.RunAction.QUEUE.value
+        ]
+        assert not button.disabled
+        await page.refresh_card()
+        await page.refresh_card()
+        assert card_renderer.calls == [eligible.source_key]
+    finally:
+        await controller.shutdown()
+
+
 @pytest.mark.anyio
 async def test_controller_runs_queue_serially_and_reruns_get_new_ids(
     tmp_path: Path,
@@ -248,7 +569,7 @@ async def test_controller_runs_queue_serially_and_reruns_get_new_ids(
     researchers = (researcher(1), researcher(2))
     backend = FakeBackend()
     codex = SerialFakeCodex()
-    controller = control_ui.ControlCentreController(
+    controller = make_test_controller(
         configuration=SimpleNamespace(),
         source_repository=FakeSourceRepository(researchers),
         detour_repository=FakeDetourRepository(),
@@ -289,13 +610,117 @@ async def test_controller_runs_queue_serially_and_reruns_get_new_ids(
     ]
 
 
+@pytest.mark.anyio
+async def test_cancel_during_codex_startup_stops_the_visible_process(
+    tmp_path: Path,
+) -> None:
+    item = researcher(1)
+    codex = StartingCancelableCodex()
+    controller = make_test_controller(
+        configuration=SimpleNamespace(),
+        source_repository=FakeSourceRepository((item,)),
+        detour_repository=FakeDetourRepository(),
+        journal=control_ui.RunJournal(path=tmp_path / "runs.jsonl"),
+        card_renderer=SimpleNamespace(),
+        backend=FakeBackend(),
+        codex=codex,
+        control_plane=control_ui.ControlPlane(),
+        reconciler=control_ui.AttemptReconciler(),
+        projector=control_ui.VariableProjector(),
+    )
+    await controller.start()
+    try:
+        run_id = await controller.queue(source_key=item.source_key)
+        await asyncio.wait_for(codex.started.wait(), timeout=1)
+
+        await controller.cancel(run_id=run_id)
+        await asyncio.wait_for(controller._queue.join(), timeout=1)
+    finally:
+        await controller.shutdown()
+
+    assert codex.handle is not None
+    assert codex.handle.process.returncode == TERMINATE_RETURN_CODE
+    assert codex.canceled.is_set()
+    assert controller._journal.load_runs()[run_id].status is control_ui.RunStatus.CANCELED
+
+
+@pytest.mark.anyio
+async def test_codex_cancel_verifies_remote_and_local_process_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = control_ui.CodexRunner(timezone=CONTROL_TIMEZONE)
+    process = FakeProcess()
+    handle = control_ui.CodexProcessHandle(
+        run_id=uuid4(),
+        process=cast(asyncio.subprocess.Process, process),
+        remote_pid=REMOTE_TEST_PID,
+    )
+    remote_alive = True
+    commands: list[str] = []
+
+    async def remote_command(
+        command: str,
+        *,
+        input_bytes: bytes | None = None,
+        check: bool = True,
+    ) -> bytes:
+        nonlocal remote_alive
+        assert input_bytes is None
+        assert not check
+        commands.append(command)
+        if command == control_ui.CODEX_REMOTE_SIGNAL_COMMAND_TEMPLATE.format(
+            signal=control_ui.CODEX_REMOTE_KILL_SIGNAL,
+            remote_pid=int(REMOTE_TEST_PID),
+        ):
+            remote_alive = False
+        if command == control_ui.CODEX_REMOTE_PROCESS_ALIVE_COMMAND_TEMPLATE.format(
+            remote_pid=int(REMOTE_TEST_PID),
+            alive_marker=control_ui.CODEX_REMOTE_PROCESS_ALIVE_MARKER,
+        ):
+            return (
+                control_ui.CODEX_REMOTE_PROCESS_ALIVE_MARKER.encode()
+                if remote_alive
+                else b""
+            )
+        return b""
+
+    monkeypatch.setattr(control_ui, "CODEX_CANCEL_TIMEOUT_SECONDS", 0)
+    monkeypatch.setattr(runner, "_remote_command", remote_command)
+
+    await runner.cancel(handle)
+
+    assert not remote_alive
+    assert process.returncode == KILL_RETURN_CODE
+    assert process.terminate_calls == 1
+    assert process.kill_calls == 1
+    assert commands == [
+        control_ui.CODEX_REMOTE_SIGNAL_COMMAND_TEMPLATE.format(
+            signal=control_ui.CODEX_REMOTE_TERMINATE_SIGNAL,
+            remote_pid=int(REMOTE_TEST_PID),
+        ),
+        control_ui.CODEX_REMOTE_PROCESS_ALIVE_COMMAND_TEMPLATE.format(
+            remote_pid=int(REMOTE_TEST_PID),
+            alive_marker=control_ui.CODEX_REMOTE_PROCESS_ALIVE_MARKER,
+        ),
+        control_ui.CODEX_REMOTE_SIGNAL_COMMAND_TEMPLATE.format(
+            signal=control_ui.CODEX_REMOTE_KILL_SIGNAL,
+            remote_pid=int(REMOTE_TEST_PID),
+        ),
+        control_ui.CODEX_REMOTE_PROCESS_ALIVE_COMMAND_TEMPLATE.format(
+            remote_pid=int(REMOTE_TEST_PID),
+            alive_marker=control_ui.CODEX_REMOTE_PROCESS_ALIVE_MARKER,
+        ),
+    ]
+
+
 def test_codex_ssh_command_has_only_the_approved_reverse_forward() -> None:
-    runner = control_ui.CodexRunner(timezone=timezone.utc)
+    runner = control_ui.CodexRunner(timezone=CONTROL_TIMEZONE)
 
     command = runner.ssh_base_command()
 
     assert command.count("-R") == 1
     assert command[command.index("-R") + 1] == control_ui.CODEX_REMOTE_FORWARD
+    assert control_ui.CODEX_EXEC_COMMAND[0] == str(control_ui.CODEX_CLI_BIN_PATH)
     assert "127.0.0.1:8611" not in command
     assert "ExitOnForwardFailure=yes" in command
     assert "ClearAllForwardings=no" in command
@@ -310,7 +735,7 @@ async def test_codex_start_uses_the_same_full_workbook_bytes_in_file_and_prompt(
     workbook_path = tmp_path / "workbook.md"
     workbook_bytes = "First learning.\nUnicode: ’\n".encode()
     workbook_path.write_bytes(workbook_bytes)
-    runner = control_ui.CodexRunner(timezone=timezone.utc)
+    runner = control_ui.CodexRunner(timezone=CONTROL_TIMEZONE)
     remote_writes: list[tuple[PurePosixPath, bytes]] = []
     launched_commands: list[tuple[str, ...]] = []
 

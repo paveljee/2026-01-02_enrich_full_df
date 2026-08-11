@@ -258,10 +258,14 @@ untouched. Do not perform incidental refactors or cleanup.
 
 The expected production edits are narrowly confined to the existing
 detour-local `api.py` and `codex_parse.py`, the supplied
-`control_centre/ui.py` skeleton, focused tests, the minimum pinned
+`control_centre/dashboard/ui.py` application and its narrowly scoped
+`dashboard/helpers/aggrid.py` and `dashboard/helpers/locale.py` helpers,
+focused tests, the minimum pinned
 NiceGUI/Pixi task wiring, and the minimum `deploy.sh`/`provision.sh` changes
-needed for the one approved API tunnel. `appendwatch.py`, its regression
-tests, `README.md`, `.env.example`, the main pipeline,
+needed for the one approved API tunnel. Keep appendwatch's monitoring
+algorithm and behavior unchanged; any appendwatch source/test edits are
+limited to nonsemantic corrections required by repository-wide lint.
+`README.md`, `.env.example`, the main pipeline,
 `src/helpers/vars.py`, `src/helpers/schema.py`, architecture assets, and
 sample/ground-truth data remain untouched.
 
@@ -301,7 +305,7 @@ this detour-only key to main-pipeline required-config constants, change
 
 The configured source DuckDB remains read-only. Its common innerdict tables
 are authoritative for researcher membership and presentation. Obtain each
-source key from the innerdict table's `name_key`, and obtain first/last names
+source key from the innerdict table's `ktp.namekey`, and obtain first/last names
 and every non-null `ktp.draw_number` only from that source key's innerdict
 JSONL records. Preserve every distinct draw carried by those records for a
 contracted source key. Never source, replace, or choose a representative draw
@@ -325,15 +329,19 @@ treating a draw as a unique researcher:
 
 Fail startup if the two sets overlap or if their exact cardinalities are not
 196 and 78, respectively, with 274 distinct eligible source keys in total.
-The remaining 33 source keys are not displayed as runnable work. Keep the
-three release-batch-subset-8 source keys and the explicitly excluded
-Kanatzidis source key out of the ground-truth cohort, and keep the remaining
-29 staging source keys out of the augmentation cohort.
+Display all 307 source keys. The remaining 33 are classified with cohort
+`ineligible`, retain their specific ineligibility category, and have their run
+action disabled. Keep the three release-batch-subset-8 source keys and the
+explicitly excluded Kanatzidis source key out of the ground-truth cohort, and
+keep the remaining 29 staging source keys out of the augmentation cohort.
 
 ### Control Centre, run journal, and review UI
 
-Implement the supplied `control_centre/ui.py` as one NiceGUI application with
-AG Grid and one operator screen. It owns the queue, exactly one active Codex
+Implement `control_centre/dashboard/ui.py` as one NiceGUI application with AG
+Grid and one operator screen. Keep NiceGUI-specific literal ownership in its
+local `NiceGui` class, AG Grid vocabulary and option/column construction in
+`dashboard/helpers/aggrid.py`'s `AgGrid` class, and operator/log/error text in
+`dashboard/helpers/locale.py`. It owns the queue, exactly one active Codex
 process, source-key sanctions, cancel/rerun operations, and backend process
 lifecycle. It starts the backend once for the UI lifetime. Queue and rerun
 always create a new UUID run ID; repeated runs for one source key are valid.
@@ -357,11 +365,24 @@ innerdict-provided draws, the selected `ktp.ai_augment_*` value, its
 `ktp.table_1_*` counterpart where this cohort has ground truth, matching
 footnotes/arguments, attempt ID/time/status, and queue/cancel/rerun action.
 Show the latest attempt in the researcher row and every older attempt in
-chronological expandable history. Use a community-compatible custom expansion
-rather than requiring AG Grid Enterprise. Filters cover text, cohort, status,
-and variable. Below the table, render the selected researcher's full familiar
-card through the existing common loaders and `build_cards()`, preserving xlsx
--> Codex -> docx -> ssn order.
+chronological expandable history using native NiceGUI controls; do not build a
+custom JavaScript renderer or hand-written DOM table, and do not require AG
+Grid Enterprise. A researcher with no attempts must still have a visible
+ready/queue placeholder row. Filters cover text, cohort, status, and variable.
+Keep the AG Grid instance stable and apply targeted data changes so timer and
+action updates preserve the operator's search, filters, sorting, scroll, and
+selected cell text. Actions are real controls and must not rebuild the page.
+Below the table, load the selected researcher's full familiar card only when
+the operator uses its explicit View control, cache it by source key, and render
+it responsively with long values wrapping on narrow screens. Use the existing
+common loaders and `build_cards()`, preserving xlsx -> Codex -> docx -> ssn
+order.
+
+Register the Codex process handle as soon as SSH starts, before session/rollout
+discovery. Cancel must terminate and verify the remote Codex PID, escalating
+from TERM to KILL when needed, and must always terminate and await the local
+SSH process. Cancellation during startup/discovery remains a canceled journal
+outcome, not a failed run.
 
 ### workbook lifecycle and Codex prompt
 
@@ -768,7 +789,7 @@ pipeline DuckDB remains read-only. In the detour DuckDB, append one accepted
 flat row to a narrowly named backing table and expose it through a
 `codex_output` view whose columns follow this order:
 
-1. `ktp.source_key`;
+1. `ktp.namekey`;
 2. `ktp.filename`, containing the reconstructed original rollout basename;
 3. `ktp.fragment`, containing this attempt archive's physical line count;
 4. `ktp.fragment_type`, always the existing `line_number` enum value;
@@ -782,16 +803,17 @@ flat row to a narrowly named backing table and expose it through a
 Define every detour-owned label and the backing-table/output-view names at the
 top of `api.py`. One accepted push creates one output row. Enforce uniqueness
 of attempt ID and of `(ktp.filename, ktp.fragment)`, but do not make
-`ktp.source_key` unique: the same researcher may have multiple accepted rows,
+`ktp.namekey` unique: the same researcher may have multiple accepted rows,
 including several sections with one rollout filename and different line-count
 fragments.
 
 Materialize `codex_innerdicts` from all accepted `codex_output` rows using the
 same strict common two-column contract as xlsx/docx/ssn innerdicts:
-`name_key VARCHAR` plus `innerdicts VARCHAR` containing ordered JSONL records.
+`ktp.namekey VARCHAR` plus `ktp.innerdicts VARCHAR` containing ordered JSONL
+records.
 Follow step 08's output-view/materialization sequence and use the existing
 materialization helper plus a detour-local matching procedure whose dataset ID
-field is `ktp.source_key`; do not modify the main schema, procedure, or
+field is `ktp.namekey`; do not modify the main schema, procedure, or
 data-model modules. This cumulative table is authoritative for downstream
 AI-augmentation rows. Rebuild it in the same transaction that adds an accepted
 output row so a failure cannot expose a partial authoritative state.
@@ -967,4 +989,6 @@ Use mocks/fakes for host SCP and narrow provisioning checks, plus a small
 sanitized direct-web rollout fixture. Reuse the current E2E helper/flow as much
 as possible to reduce review fatigue. Keep existing appendwatch tests as the
 monitoring regression proof rather than adding decorative source-text tests.
+The repository-wide `pixi run lint` task must pass; any lint-only correction
+outside the functional boundary above must be mechanical and behavior-neutral.
 Implement production code and tests only within the surgical boundary above.

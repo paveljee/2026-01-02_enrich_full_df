@@ -627,11 +627,9 @@ def prepare_real_sample_push(
     def tracked_model_validate_json(
         _cls: type[api.Submission],
         value: str | bytes | bytearray,
-        *args: object,
-        **kwargs: object,
     ) -> api.Submission:
         events.append("pydantic")
-        return original_model_validate_json(value, *args, **kwargs)
+        return original_model_validate_json(value)
 
     def tracked_validate_evidence(*args: object, **kwargs: object) -> api.ValidatedEvidence:
         events.append("evidence")
@@ -777,7 +775,7 @@ def test_rollout_index_fails_closed_on_broken_direct_chain() -> None:
 
     malformed_output = list(records)
     output_value = json.loads(json.dumps(malformed_output[-1].value))
-    output_value["payload"]["output"].append(  # type: ignore[index]
+    output_value["payload"]["output"].append(
         {"type": "input_text", "text": TEST_EXCERPT}
     )
     malformed_output[-1] = rollout_record(output_value, malformed_output[-1].line_number)
@@ -827,7 +825,7 @@ def test_submission_contract_has_eight_evidence_fields_and_optional_comments() -
 
     duplicate_evidence = valid_submission_body()
     first_field = duplicate_evidence[api.AI_AUGMENT_EVIDENCE_COLUMNS[0]]
-    first_field["web_search_excerpts"] *= 2  # type: ignore[index,operator]
+    first_field["web_search_excerpts"] *= 2  # type: ignore[index]
     with pytest.raises(ValidationError):
         api.Submission.model_validate(duplicate_evidence)
 
@@ -1266,7 +1264,7 @@ def test_repeated_researcher_rows_materialize_as_distinct_innerdicts() -> None:
                 column: f"value for {column}" for column, _data_type in api.CODEX_OUTPUT_SCHEMA
             }
             values.update({
-                api.KTP_SOURCE_KEY_COL: TEST_SOURCE_KEY,
+                api.KTP_NAMEKEY_COL: TEST_SOURCE_KEY,
                 api.KTP_FILENAME_COL: TEST_ROLLOUT_FILENAME,
                 api.KTP_FRAGMENT_COL: fragment,
                 api.KTP_FRAGMENT_TYPE_COL: api.ROLLOUT_LINE_FRAGMENT_TYPE,
@@ -1280,9 +1278,12 @@ def test_repeated_researcher_rows_materialize_as_distinct_innerdicts() -> None:
 
         api.append_codex_output(connection, output_row(100, "attempt-1"))
         api.append_codex_output(connection, output_row(101, "attempt-2"))
-        innerdicts_text = connection.execute(
-            f"SELECT innerdicts FROM {api.CODEX_INNERDICT_TABLE}"
-        ).fetchone()[0]
+        innerdicts_row = connection.execute(
+            f"SELECT {api.duckdb_quote_identifier(api.KTP_INNERDICT_JSONLINES_COL)} "
+            f"FROM {api.CODEX_INNERDICT_TABLE}"
+        ).fetchone()
+        assert innerdicts_row is not None
+        innerdicts_text = innerdicts_row[0]
         innerdicts = tuple(json.loads(line) for line in innerdicts_text.splitlines())
         assert [row[api.KTP_FRAGMENT_COL] for row in innerdicts] == [100, 101]
         assert [row[api.KTP_AI_AUGMENT_ATTEMPT_ID_COL] for row in innerdicts] == [
@@ -1351,10 +1352,13 @@ def test_real_july_push_matches_exact_objects_and_renders_card_end_to_end(
                 for row in connection.execute(f"PRAGMA table_info('{table_name}')").fetchall()
             )
             assert columns == expected_columns
-        counts = {
-            table_name: connection.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
-            for table_name in EXPECTED_TABLE_COLUMNS
-        }
+        counts = {}
+        for table_name in EXPECTED_TABLE_COLUMNS:
+            count_row = connection.execute(
+                f"SELECT COUNT(*) FROM {table_name}"
+            ).fetchone()
+            assert count_row is not None
+            counts[table_name] = count_row[0]
         assert counts == {
             api.CODEX_FC_TABLE: JULY_FC_COUNT,
             api.CODEX_FCO_TABLE: JULY_FCO_COUNT,
@@ -1412,8 +1416,9 @@ def test_real_july_push_matches_exact_objects_and_renders_card_end_to_end(
 
         output_columns = tuple(column for column, _type in api.CODEX_OUTPUT_SCHEMA)
         output_values = connection.execute(f"SELECT * FROM {api.CODEX_OUTPUT_VIEW}").fetchone()
+        assert output_values is not None
         output = dict(zip(output_columns, output_values, strict=True))
-        assert output[api.KTP_SOURCE_KEY_COL] == (
+        assert output[api.KTP_NAMEKEY_COL] == (
             '{"ktp.first_name": "A.", "ktp.last_name": "Sheikh"}'
         )
         assert output[api.KTP_FILENAME_COL] == JULY_ROLLOUT_FILENAME
@@ -1446,9 +1451,13 @@ def test_real_july_push_matches_exact_objects_and_renders_card_end_to_end(
             output[api.KTP_AI_AUGMENT_COMMENTS_COL],
         )
 
-        name_key, innerdicts_text = connection.execute(
-            f"SELECT name_key, innerdicts FROM {api.CODEX_INNERDICT_TABLE}"
+        innerdicts_row = connection.execute(
+            f"SELECT {api.duckdb_quote_identifier(api.KTP_NAMEKEY_COL)}, "
+            f"{api.duckdb_quote_identifier(api.KTP_INNERDICT_JSONLINES_COL)} "
+            f"FROM {api.CODEX_INNERDICT_TABLE}"
         ).fetchone()
+        assert innerdicts_row is not None
+        name_key, innerdicts_text = innerdicts_row
         assert name_key == TEST_SOURCE_KEY
         innerdicts = tuple(json.loads(line) for line in innerdicts_text.splitlines())
         assert len(innerdicts) == 1
@@ -1529,10 +1538,11 @@ def test_real_july_push_rejects_changed_evidence_before_ground_truth(
 
     connection = open_readonly_database(context.runtime.detour_db_path)
     try:
-        assert (
-            connection.execute(f"SELECT COUNT(*) FROM {api.CODEX_TURN_REF_TABLE}").fetchone()[0]
-            == JULY_REF_COUNT
-        )
+        count_row = connection.execute(
+            f"SELECT COUNT(*) FROM {api.CODEX_TURN_REF_TABLE}"
+        ).fetchone()
+        assert count_row is not None
+        assert count_row[0] == JULY_REF_COUNT
         tables = {row[0] for row in connection.execute("SHOW TABLES").fetchall()}
         assert api.CODEX_OUTPUT_ROWS_TABLE not in tables
         assert api.CODEX_INNERDICT_TABLE not in tables

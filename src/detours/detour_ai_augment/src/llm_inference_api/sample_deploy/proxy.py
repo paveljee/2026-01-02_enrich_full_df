@@ -34,17 +34,18 @@ import os
 import queue
 import re
 import signal
+import socketserver
 import sqlite3
 import threading
 import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from typing import Any, Dict, Optional, Tuple
-import socketserver
+from typing import Dict, Optional, Tuple
 
 # -------------------------
 # Pure helpers (pytest-friendly)
 # -------------------------
+
 
 def utc_date_str_from_unix_ms(unix_ms: int) -> str:
     dt = _dt.datetime.fromtimestamp(unix_ms / 1000.0, tz=_dt.timezone.utc)
@@ -110,17 +111,26 @@ def fmt_ms(ms: Optional[float]) -> str:
     if ms < 1000:
         return f"{ms:.0f}ms"
     s = ms / 1000.0
-    w = int(s // 604800); s -= w * 604800
-    d = int(s // 86400);  s -= d * 86400
-    h = int(s // 3600);   s -= h * 3600
-    m = int(s // 60);     s -= m * 60
+    w = int(s // 604800)
+    s -= w * 604800
+    d = int(s // 86400)
+    s -= d * 86400
+    h = int(s // 3600)
+    s -= h * 3600
+    m = int(s // 60)
+    s -= m * 60
     sec = int(round(s))
     parts = []
-    if w: parts.append(f"{w}w")
-    if d: parts.append(f"{d}d")
-    if h: parts.append(f"{h}h")
-    if m: parts.append(f"{m}m")
-    if sec or not parts: parts.append(f"{sec}s")
+    if w:
+        parts.append(f"{w}w")
+    if d:
+        parts.append(f"{d}d")
+    if h:
+        parts.append(f"{h}h")
+    if m:
+        parts.append(f"{m}m")
+    if sec or not parts:
+        parts.append(f"{sec}s")
     return " ".join(parts)
 
 
@@ -159,7 +169,16 @@ def parse_last_json_object_from_tail(tail_bytes: bytes) -> Optional[dict]:
     return last_obj
 
 
-def extract_tokens_and_timings(obj: dict) -> Tuple[Optional[int], Optional[int], Optional[int], Optional[float], Optional[float], Optional[dict]]:
+def extract_tokens_and_timings(
+    obj: dict,
+) -> Tuple[
+    Optional[int],
+    Optional[int],
+    Optional[int],
+    Optional[float],
+    Optional[float],
+    Optional[dict],
+]:
     in_tok = out_tok = total_tok = None
     prompt_ms = predicted_ms = None
     timings = obj.get("timings") if isinstance(obj.get("timings"), dict) else None
@@ -188,7 +207,14 @@ def extract_tokens_and_timings(obj: dict) -> Tuple[Optional[int], Optional[int],
             return int(x)
         return None
 
-    return _to_int(in_tok), _to_int(out_tok), _to_int(total_tok), (float(prompt_ms) if prompt_ms is not None else None), (float(predicted_ms) if predicted_ms is not None else None), timings
+    return (
+        _to_int(in_tok),
+        _to_int(out_tok),
+        _to_int(total_tok),
+        float(prompt_ms) if prompt_ms is not None else None,
+        float(predicted_ms) if predicted_ms is not None else None,
+        timings,
+    )
 
 
 # -------------------------
@@ -229,11 +255,23 @@ class OpenRouterPricingProvider(PricingProvider):
         models = js.get("data") or []
 
         # 1) Prefer exact id match
-        target = next((m for m in models if isinstance(m, dict) and m.get("id") == provider_id), None)
+        target = next(
+            (
+                m
+                for m in models
+                if isinstance(m, dict) and m.get("id") == provider_id
+            ),
+            None,
+        )
 
-        # 2) If provider_id is a canonical_slug, choose the best candidate (prefer non-:free, then non-zero pricing)
+        # 2) If provider_id is a canonical_slug, choose the best candidate
+        # (prefer non-:free, then non-zero pricing)
         if target is None:
-            cands = [m for m in models if isinstance(m, dict) and m.get("canonical_slug") == provider_id]
+            cands = [
+                m
+                for m in models
+                if isinstance(m, dict) and m.get("canonical_slug") == provider_id
+            ]
             if not cands:
                 raise KeyError(f"OpenRouter model not found: {provider_id}")
 
@@ -282,7 +320,10 @@ class LocalHostPricingProvider(PricingProvider):
         )
 
 
-def provider_for(pricing_slug: str, openrouter_api_key: Optional[str]) -> Tuple[PricingProvider, str, str]:
+def provider_for(
+    pricing_slug: str,
+    openrouter_api_key: Optional[str],
+) -> Tuple[PricingProvider, str, str]:
     provider, provider_id = parse_pricing_slug(pricing_slug)
 
     if provider == "openrouter":
@@ -365,7 +406,9 @@ INSERT_REQUEST_SQL = (
 
 INSERT_PRICING_SQL = (
     "INSERT OR IGNORE INTO pricing_daily "
-    "(pricing_slug, provider, provider_id, date_utc, currency, prompt_usd_per_token, completion_usd_per_token, fetched_at_unix_ms, raw_json) "
+    "(pricing_slug, provider, provider_id, date_utc, currency, "
+    "prompt_usd_per_token, completion_usd_per_token, "
+    "fetched_at_unix_ms, raw_json) "
     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
 )
 
@@ -376,14 +419,16 @@ SELECT_PRICING_SQL = (
 
 
 SELECT_PRICING_FALLBACK_SQL = (
-    "SELECT provider, provider_id, currency, prompt_usd_per_token, completion_usd_per_token, date_utc "
+    "SELECT provider, provider_id, currency, prompt_usd_per_token, "
+    "completion_usd_per_token, date_utc "
     "FROM pricing_daily WHERE pricing_slug=? AND date_utc<=? "
     "ORDER BY date_utc DESC LIMIT 1"
 )
 
 
 def db_connect(db_path: str) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path, timeout=30, isolation_level=None)  # autocommit; we manage BEGIN/COMMIT
+    # autocommit; we manage BEGIN/COMMIT
+    conn = sqlite3.connect(db_path, timeout=30, isolation_level=None)
     conn.execute("PRAGMA busy_timeout=5000;")
     conn.executescript(SCHEMA_SQL)
     return conn
@@ -432,7 +477,8 @@ class DBWriter(threading.Thread):
         self.q: "queue.Queue[Optional[LogEvent]]" = queue.Queue()
         self._stop_event = threading.Event()
 
-        # in-memory cache: (pricing_slug, date_utc) -> (prompt_usd_per_token, completion_usd_per_token)
+        # in-memory cache: (pricing_slug, date_utc) ->
+        # (prompt_usd_per_token, completion_usd_per_token)
         self._price_cache: Dict[Tuple[str, str], Tuple[float, float]] = {}
 
     def stop(self) -> None:
@@ -461,7 +507,10 @@ class DBWriter(threading.Thread):
 
         # 2) try to fetch fresh quote
         try:
-            provider_obj, _pname, provider_id = provider_for(pricing_slug, self.openrouter_api_key)
+            provider_obj, _pname, provider_id = provider_for(
+                pricing_slug,
+                self.openrouter_api_key,
+            )
             quote = provider_obj.fetch_quote(provider_id)
         except Exception as e:
             # 3) fallback to most recent cached date <= requested date
@@ -473,20 +522,29 @@ class DBWriter(threading.Thread):
             if fb:
                 _provider, _provider_id, _currency, p, c, fb_date = fb
                 try:
-                    self._log(f"failed to fetch {pricing_slug} for {date_utc} ({e}); using cached {fb_date}")
+                    self._log(
+                        f"failed to fetch {pricing_slug} for {date_utc} ({e}); "
+                        f"using cached {fb_date}"
+                    )
                 except Exception:
                     pass
                 self._price_cache[key] = (float(p), float(c))
                 return self._price_cache[key]
 
             try:
-                self._log(f"failed to fetch {pricing_slug} for {date_utc} ({e}); no cached fallback available")
+                self._log(
+                    f"failed to fetch {pricing_slug} for {date_utc} ({e}); "
+                    "no cached fallback available"
+                )
             except Exception:
                 pass
             return None
 
         # IMPORTANT: cache immediately to avoid refetching for same (slug,date) in-process
-        self._price_cache[key] = (float(quote.prompt_usd_per_token), float(quote.completion_usd_per_token))
+        self._price_cache[key] = (
+            float(quote.prompt_usd_per_token),
+            float(quote.completion_usd_per_token),
+        )
 
         # 4) best-effort persist the quote for this date
         try:
@@ -575,7 +633,11 @@ class DBWriter(threading.Thread):
 
             cost = compute_cost_usd(item.in_tokens, item.out_tokens, prompt_price, completion_price)
 
-            timings_json = json.dumps(item.timings, separators=(",", ":")) if isinstance(item.timings, dict) else None
+            timings_json = (
+                json.dumps(item.timings, separators=(",", ":"))
+                if isinstance(item.timings, dict)
+                else None
+            )
 
             batch.append(
                 (
@@ -700,7 +762,10 @@ def build_handler(cfg: ProxyConfig, writer: DBWriter):
                             if so.get("include_usage") is not True:
                                 so["include_usage"] = True
                                 payload["stream_options"] = so
-                                req_body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+                                req_body = json.dumps(
+                                    payload,
+                                    separators=(",", ":"),
+                                ).encode("utf-8")
                     except Exception:
                         pass
 
@@ -800,7 +865,11 @@ def build_handler(cfg: ProxyConfig, writer: DBWriter):
 
             if read_err is not None:
                 try:
-                    print(f"[upstream read error] {type(read_err).__name__}: {read_err}", flush=True)
+                    print(
+                        f"[upstream read error] {type(read_err).__name__}: "
+                        f"{read_err}",
+                        flush=True,
+                    )
                 except Exception:
                     pass
 
@@ -825,7 +894,14 @@ def build_handler(cfg: ProxyConfig, writer: DBWriter):
             response_id = None
             system_fingerprint = None
             if isinstance(parsed, dict):
-                in_tok, out_tok, total_tok, prompt_ms, predicted_ms, timings = extract_tokens_and_timings(parsed)
+                (
+                    in_tok,
+                    out_tok,
+                    total_tok,
+                    prompt_ms,
+                    predicted_ms,
+                    timings,
+                ) = extract_tokens_and_timings(parsed)
                 response_id = parsed.get("id") if isinstance(parsed.get("id"), str) else None
                 system_fingerprint = (
                     parsed.get("system_fingerprint")
@@ -934,9 +1010,18 @@ def summary(db_path: str) -> int:
     print(f"  Total: {fmt_tokens(total_tok)} ({total_tok if total_tok is not None else '—'})")
     print("")
     print("Time")
-    print(f"  proc_ms:      {fmt_ms(proc_ms)} ({int(proc_ms) if proc_ms is not None else '—'}ms)")
-    print(f"  prompt_ms:    {fmt_ms(prompt_ms)} ({prompt_ms if prompt_ms is not None else '—'}ms)")
-    print(f"  predicted_ms: {fmt_ms(predicted_ms)} ({predicted_ms if predicted_ms is not None else '—'}ms)")
+    print(
+        f"  proc_ms:      {fmt_ms(proc_ms)} "
+        f"({int(proc_ms) if proc_ms is not None else '—'}ms)"
+    )
+    print(
+        f"  prompt_ms:    {fmt_ms(prompt_ms)} "
+        f"({prompt_ms if prompt_ms is not None else '—'}ms)"
+    )
+    print(
+        f"  predicted_ms: {fmt_ms(predicted_ms)} "
+        f"({predicted_ms if predicted_ms is not None else '—'}ms)"
+    )
     print("")
     print("Cost")
     print(f"  total: {fmt_usd(cost_usd)}")
@@ -959,19 +1044,53 @@ def main() -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     sp_serve = sub.add_parser("serve")
-    sp_serve.add_argument("--db", default=os.environ.get("DB_PATH") or os.path.expanduser("~/.local/state/llama-server/usage.sqlite"))
-    sp_serve.add_argument("--proxy-host", default=os.environ.get("PROXY_HOST", "0.0.0.0"))
-    sp_serve.add_argument("--proxy-port", type=int, default=int(os.environ.get("PROXY_PORT", "8000")))
-    sp_serve.add_argument("--backend-host", default=os.environ.get("BACKEND_HOST", "127.0.0.1"))
-    sp_serve.add_argument("--backend-port", type=int, default=int(os.environ.get("BACKEND_PORT", "8001")))
+    sp_serve.add_argument(
+        "--db",
+        default=os.environ.get("DB_PATH")
+        or os.path.expanduser("~/.local/state/llama-server/usage.sqlite"),
+    )
+    sp_serve.add_argument(
+        "--proxy-host",
+        default=os.environ.get("PROXY_HOST", "0.0.0.0"),
+    )
+    sp_serve.add_argument(
+        "--proxy-port",
+        type=int,
+        default=int(os.environ.get("PROXY_PORT", "8000")),
+    )
+    sp_serve.add_argument(
+        "--backend-host",
+        default=os.environ.get("BACKEND_HOST", "127.0.0.1"),
+    )
+    sp_serve.add_argument(
+        "--backend-port",
+        type=int,
+        default=int(os.environ.get("BACKEND_PORT", "8001")),
+    )
     sp_serve.add_argument("--model-alias", default=os.environ.get("MODEL_ALIAS", "unknown"))
     sp_serve.add_argument("--pricing-slug", default=os.environ.get("PRICING_SLUG"))
-    sp_serve.add_argument("--inject-oai-stream-usage", type=int, default=1 if env_bool("INJECT_OAI_STREAM_USAGE", True) else 0)
-    sp_serve.add_argument("--batch-n", type=int, default=int(os.environ.get("SQLITE_BATCH_N", "100")))
-    sp_serve.add_argument("--batch-ms", type=int, default=int(os.environ.get("SQLITE_BATCH_MS", "250")))
+    sp_serve.add_argument(
+        "--inject-oai-stream-usage",
+        type=int,
+        default=1 if env_bool("INJECT_OAI_STREAM_USAGE", True) else 0,
+    )
+    sp_serve.add_argument(
+        "--batch-n",
+        type=int,
+        default=int(os.environ.get("SQLITE_BATCH_N", "100")),
+    )
+    sp_serve.add_argument(
+        "--batch-ms",
+        type=int,
+        default=int(os.environ.get("SQLITE_BATCH_MS", "250")),
+    )
 
     sp_summary = sub.add_parser("summary")
-    sp_summary.add_argument("--db", default=os.environ.get("DB_PATH") or os.path.expanduser("~/.local/state/llama-server/usage.sqlite"))
+    sp_summary.add_argument(
+        "--db",
+        default=os.environ.get("DB_PATH")
+        or os.path.expanduser("~/.local/state/llama-server/usage.sqlite"),
+    )
 
     args = ap.parse_args()
 

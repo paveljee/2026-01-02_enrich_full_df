@@ -12,20 +12,18 @@
 # - Tests cover helpers, tail JSON parsing, token extraction, SQLite schema/IO,
 #   and DBWriter pricing + cost computation via a mocked provider.
 
+import http.client
 import json
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass
-from typing import Optional
-import threading
-import socket
-import http.client
 from http.server import BaseHTTPRequestHandler
-
-import pytest
-from dotenv import load_dotenv
+from typing import Optional
 
 import proxy as m
+import pytest
+from dotenv import load_dotenv
 
 load_dotenv()
 
@@ -179,7 +177,12 @@ def test_db_connect_creates_schema(tmp_path):
     db = tmp_path / "t.sqlite"
     conn = m.db_connect(str(db))
     # schema exists
-    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    tables = {
+        r[0]
+        for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
     assert "requests" in tables
     assert "pricing_daily" in tables
     # new columns exist
@@ -234,7 +237,8 @@ def test_dbwriter_inserts_request_without_pricing(tmp_path):
     conn = sqlite3.connect(str(db))
     assert _count_rows(conn, "requests") == 1
     row = conn.execute(
-        "SELECT model_alias, path, in_tokens, out_tokens, total_tokens, cost_usd, timings_json, response_id, system_fingerprint "
+        "SELECT model_alias, path, in_tokens, out_tokens, total_tokens, "
+        "cost_usd, timings_json, response_id, system_fingerprint "
         "FROM requests"
     ).fetchone()
     assert row[0] == "x"
@@ -472,7 +476,11 @@ def test_openrouter_provider_fetch_quote_parses_pricing(monkeypatch):
     payload = {
         "data": [
             {"id": "a", "pricing": {"prompt": "0.000001", "completion": "0.000002"}},
-            {"id": "target", "canonical_slug": "target", "pricing": {"prompt": 0.000003, "completion": 0.000004}},
+            {
+                "id": "target",
+                "canonical_slug": "target",
+                "pricing": {"prompt": 0.000003, "completion": 0.000004},
+            },
         ]
     }
 
@@ -576,6 +584,7 @@ def test_localhost_pricing_provider_parses_1m_rates():
     assert q.prompt_usd_per_token == pytest.approx(0.04 / 1_000_000.0)
     assert q.completion_usd_per_token == pytest.approx(0.06 / 1_000_000.0)
 
+
 def test_provider_for_localhost():
     prov, provider, provider_id = m.provider_for("localhost/0.04/0.04", None)
     assert provider == "localhost"
@@ -641,7 +650,11 @@ class _BackendHandler(BaseHTTPRequestHandler):
                 self.wfile.flush()
 
             send_chunk(b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n')
-            send_chunk(b'data: {"id":"chatcmpl-1","system_fingerprint":"fp-2","usage":{"prompt_tokens":5,"completion_tokens":7,"total_tokens":12}}\n\n')
+            send_chunk(
+                b'data: {"id":"chatcmpl-1","system_fingerprint":"fp-2",'
+                b'"usage":{"prompt_tokens":5,"completion_tokens":7,'
+                b'"total_tokens":12}}\n\n'
+            )
             self.wfile.write(b"0\r\n\r\n")
             self.wfile.flush()
             return
@@ -652,7 +665,8 @@ class _BackendHandler(BaseHTTPRequestHandler):
 
 
 def _start_backend():
-    backend = m.ThreadingHTTPServer(("127.0.0.1", 0), _BackendHandler)  # port 0 => OS picks free port
+    # port 0 => OS picks free port
+    backend = m.ThreadingHTTPServer(("127.0.0.1", 0), _BackendHandler)
     _start_server(backend)
     backend_port = backend.server_address[1]
     return backend, backend_port
@@ -723,7 +737,8 @@ def test_proxy_end_to_end_non_stream_logs_and_persists(tmp_path):
 
     c = sqlite3.connect(str(db))
     row = c.execute(
-        "SELECT in_tokens, out_tokens, total_tokens, cost_usd, path, response_id, system_fingerprint "
+        "SELECT in_tokens, out_tokens, total_tokens, cost_usd, path, "
+        "response_id, system_fingerprint "
         "FROM requests ORDER BY id DESC LIMIT 1"
     ).fetchone()
     c.close()
@@ -796,7 +811,12 @@ def test_proxy_concurrency_many_requests(tmp_path):
     def worker():
         try:
             conn = http.client.HTTPConnection("127.0.0.1", proxy_port, timeout=5)
-            conn.request("POST", "/completion", body=b"{}", headers={"Content-Type": "application/json"})
+            conn.request(
+                "POST",
+                "/completion",
+                body=b"{}",
+                headers={"Content-Type": "application/json"},
+            )
             r = conn.getresponse()
             _ = r.read()
             conn.close()

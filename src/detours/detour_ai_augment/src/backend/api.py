@@ -10,10 +10,12 @@ import re
 import shutil
 import subprocess
 import threading
-from collections.abc import AsyncGenerator, Iterator, Mapping
+from collections import Counter
+from collections.abc import AsyncGenerator, Iterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from random import Random
 from typing import Annotated, Any, Literal, Self, cast
@@ -74,11 +76,14 @@ from src.helpers.vars import (
     KTP_FIRST_NAME_COL,
     KTP_FRAGMENT_COL,
     KTP_FRAGMENT_TYPE_COL,
+    KTP_INNERDICT_JSONLINES_COL,
     KTP_LAST_NAME_COL,
+    KTP_NAMEKEY_COL,
     KTP_PARTITION_COL,
+    KTP_PARTITION_DOCX_VALUE,
     KTP_PARTITION_FLAG_SSN_COUNT_COL,
     KTP_PARTITION_FLAG_XLSX_NON_EXACT_ANY_COL,
-    KTP_SOURCE_KEY_COL,
+    KTP_PARTITION_SSN_VALUE,
 )
 
 from . import codex_parse
@@ -87,6 +92,21 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[5]
 load_dotenv(REPOSITORY_ROOT / ".env")
 
 logger = logging.getLogger(__name__)
+
+
+class SourceCohort(StrEnum):
+    GROUND_TRUTH = "ground_truth"
+    NO_GROUND_TRUTH = "no_ground_truth"
+    INELIGIBLE = "ineligible"
+
+
+class IneligibilityCategory(StrEnum):
+    EXCLUDED_DUPLICATE_SOURCE_KEY = "excluded_duplicate_source_key"
+    RELEASE_BATCH_SUBSET_8 = "release_batch_subset_8"
+    STAGING_PARTITION_2 = "staging_partition_2"
+    STAGING_PARTITION_4_XLSX_NON_EXACT = "staging_partition_4_xlsx_non_exact"
+    STAGING_PARTITION_4_MULTIPLE_SSN = "staging_partition_4_multiple_ssn"
+
 
 SUBMISSIONS_DIR = Path(__file__).resolve().parents[2] / "data" / "submissions"
 ATTEMPTS_DIR = SUBMISSIONS_DIR / "attempts"
@@ -176,18 +196,33 @@ CONFIG_FILENAME = "config_ai_augment.json"
 MAP_SUBSET_0_TO_BATCH_KEY = "map_subset_0_to_batch"
 MAP_COLUMNS = (DRAW_LABEL, BATCH_LABEL)
 GROUND_TRUTH_RELEASE_BATCHES = frozenset({"subset 1", "subset 5", "subset 6", "subset 7"})
-GROUND_TRUTH_COHORT = "ground_truth"
-NO_GROUND_TRUTH_COHORT = "no_ground_truth"
+GROUND_TRUTH_COHORT = SourceCohort.GROUND_TRUTH
+NO_GROUND_TRUTH_COHORT = SourceCohort.NO_GROUND_TRUTH
 EXPECTED_GROUND_TRUTH_RESEARCHERS = 196
 EXPECTED_NO_GROUND_TRUTH_RESEARCHERS = 78
 EXPECTED_ELIGIBLE_RESEARCHERS = 274
+EXPECTED_INELIGIBLE_RESEARCHERS = 33
+EXPECTED_SOURCE_RESEARCHERS = EXPECTED_ELIGIBLE_RESEARCHERS + EXPECTED_INELIGIBLE_RESEARCHERS
+EXPECTED_MULTIDRAW_SOURCE_RESEARCHERS = 5
+RND_START = 1
 NO_GROUND_TRUTH_PARTITION = 4
 NO_GROUND_TRUTH_SSN_COUNT = 1
+INELIGIBLE_COHORT = SourceCohort.INELIGIBLE
+INELIGIBLE_RELEASE_BATCH = "subset 8"
+EXPECTED_INELIGIBILITY_COUNTS = {
+    IneligibilityCategory.EXCLUDED_DUPLICATE_SOURCE_KEY: 1,
+    IneligibilityCategory.RELEASE_BATCH_SUBSET_8: 3,
+    IneligibilityCategory.STAGING_PARTITION_2: 7,
+    IneligibilityCategory.STAGING_PARTITION_4_XLSX_NON_EXACT: 6,
+    IneligibilityCategory.STAGING_PARTITION_4_MULTIPLE_SSN: 16,
+}
 EXCLUDED_SOURCE_KEY = json.dumps(
     {KTP_FIRST_NAME_COL: "Mercouri G.", KTP_LAST_NAME_COL: "Kanatzidis"},
     sort_keys=True,
 )
 DRAW_VALUE_SEPARATOR = ", "
+DRAW_PILOT_PREFIX = "pilot."
+DRAW_SORT_PART = re.compile(r"\d+|\D+")
 
 DETOUR_ID = "ai-augment"
 DETOUR_DB_LOCK = threading.Lock()
@@ -275,7 +310,7 @@ AI_AUGMENT_EVIDENCE_COLUMNS = (
 )
 AI_AUGMENT_COLUMNS = AI_AUGMENT_EVIDENCE_COLUMNS + (KTP_AI_AUGMENT_COMMENTS_COL,)
 CODEX_OUTPUT_SCHEMA = (
-    (KTP_SOURCE_KEY_COL, "VARCHAR NOT NULL"),
+    (KTP_NAMEKEY_COL, "VARCHAR NOT NULL"),
     (KTP_FILENAME_COL, "VARCHAR NOT NULL"),
     (KTP_FRAGMENT_COL, "BIGINT NOT NULL"),
     (KTP_FRAGMENT_TYPE_COL, "VARCHAR NOT NULL"),
@@ -292,7 +327,7 @@ CODEX_OUTPUT_SCHEMA = (
 
 CARD_EXCLUDED_COLUMNS = {
     KTP_FILENAME_COL,
-    KTP_SOURCE_KEY_COL,
+    KTP_NAMEKEY_COL,
     CSV_ROW_INDEX_COL,
     DOCX_TABLE_INDEX_COL,
     DOCX_ROW_INDEX_COL,
@@ -642,6 +677,7 @@ class RuntimeConfiguration:
     pipeline: PipelineConfig
     detour_db_path: Path
     release_map: RegisteredResource | None = None
+    source_population: tuple[SourcePopulationRow, ...] = ()
     eligible_cohorts: Mapping[str, str] | None = None
 
 
@@ -664,6 +700,17 @@ class SourceResearcher:
     docx_rows: tuple[dict[str, object], ...]
     ssn_rows: tuple[dict[str, object], ...]
     cohort: str
+
+
+@dataclass(frozen=True)
+class SourcePopulationRow:
+    source_key: str
+    rnd: int
+    first_name: str
+    last_name: str
+    draw_numbers: tuple[str, ...]
+    cohort: SourceCohort
+    ineligibility_category: IneligibilityCategory | None
 
 
 @dataclass(frozen=True)
@@ -770,7 +817,7 @@ class ResearcherContext:
 
 
 class CodexMatchProcedure:
-    dataset_id_field = KTP_SOURCE_KEY_COL
+    dataset_id_field = KTP_NAMEKEY_COL
 
 
 ValidatedEvidence = dict[str, list[EvidenceMatch]]
@@ -890,8 +937,28 @@ def _innerdict_json_rows(
     return tuple(rows)
 
 
-def _draw_sort_key(value: str) -> tuple[int, int | str]:
-    return (0, int(value)) if value.isdecimal() else (1, value)
+def _draw_sort_key(
+    value: str,
+) -> tuple[int, tuple[tuple[int, int | str], ...], str]:
+    raw = value.strip()
+    normalized = raw.casefold()
+    if normalized.startswith(DRAW_PILOT_PREFIX):
+        group = 0
+        sortable = normalized.removeprefix(DRAW_PILOT_PREFIX)
+    elif raw.isdecimal():
+        group = 1
+        sortable = normalized
+    elif raw:
+        group = 2
+        sortable = normalized
+    else:
+        group = 3
+        sortable = normalized
+    tokens = tuple(
+        (0, int(part)) if part.isdecimal() else (1, part)
+        for part in DRAW_SORT_PART.findall(sortable)
+    )
+    return (group, tokens, normalized)
 
 
 def _source_identity_and_draws(
@@ -902,7 +969,10 @@ def _source_identity_and_draws(
     for table_name in (XLSX_INNERDICT_TABLE, DOCX_INNERDICT_TABLE, PARQUET_INNERDICT_TABLE):
         try:
             table_rows = conn.execute(
-                f"SELECT name_key, innerdicts FROM {table_name} ORDER BY name_key"
+                f"SELECT {duckdb_quote_identifier(KTP_NAMEKEY_COL)}, "
+                f"{duckdb_quote_identifier(KTP_INNERDICT_JSONLINES_COL)} "
+                f"FROM {table_name} "
+                f"ORDER BY {duckdb_quote_identifier(KTP_NAMEKEY_COL)}"
             ).fetchall()
         except duckdb.Error as exc:
             raise PushConfigurationError(f"configured source DuckDB lacks {table_name}") from exc
@@ -935,11 +1005,20 @@ def _source_identity_and_draws(
     }
 
 
-def derive_eligible_cohorts(
+def derive_source_population(
     conn: duckdb.DuckDBPyConnection,
     release_batches: Mapping[str, str],
-) -> dict[str, str]:
+    *,
+    sample_seed: int,
+) -> tuple[SourcePopulationRow, ...]:
     source_researchers = _source_identity_and_draws(conn)
+    rnd_values = list(
+        range(RND_START, len(source_researchers) + RND_START)
+    )
+    Random(sample_seed).shuffle(rnd_values)
+    rnd_by_source_key = dict(
+        zip(sorted(source_researchers), rnd_values, strict=True)
+    )
     ground_truth = {
         source_key
         for source_key, (_name_key, draws) in source_researchers.items()
@@ -947,24 +1026,41 @@ def derive_eligible_cohorts(
         and any(release_batches.get(draw) in GROUND_TRUTH_RELEASE_BATCHES for draw in draws)
     }
     try:
-        no_ground_truth = {
-            cast(str, row[0])
-            for row in conn.execute(
+        partition_rows = conn.execute(
                 f"""
-                SELECT DISTINCT {duckdb_quote_identifier(KTP_SOURCE_KEY_COL)}
-                FROM {CARD_PARTITION_TABLE}
-                WHERE {duckdb_quote_identifier(KTP_PARTITION_COL)} = ?
-                  AND {duckdb_quote_identifier(KTP_PARTITION_FLAG_XLSX_NON_EXACT_ANY_COL)} = FALSE
-                  AND {duckdb_quote_identifier(KTP_PARTITION_FLAG_SSN_COUNT_COL)} = ?
-                ORDER BY {duckdb_quote_identifier(KTP_SOURCE_KEY_COL)}
-                """,
-                [NO_GROUND_TRUTH_PARTITION, NO_GROUND_TRUTH_SSN_COUNT],
-            ).fetchall()
-        }
+            SELECT
+                {duckdb_quote_identifier(KTP_NAMEKEY_COL)},
+                {duckdb_quote_identifier(KTP_PARTITION_COL)},
+                {duckdb_quote_identifier(KTP_PARTITION_FLAG_XLSX_NON_EXACT_ANY_COL)},
+                {duckdb_quote_identifier(KTP_PARTITION_FLAG_SSN_COUNT_COL)}
+            FROM {CARD_PARTITION_TABLE}
+            ORDER BY {duckdb_quote_identifier(KTP_NAMEKEY_COL)}
+            """
+        ).fetchall()
     except duckdb.Error as exc:
         raise PushConfigurationError(
             f"configured source DuckDB lacks usable {CARD_PARTITION_TABLE} eligibility flags"
         ) from exc
+    partition_flags: dict[str, tuple[int, bool, int]] = {}
+    for source_key, partition, xlsx_non_exact, ssn_count in partition_rows:
+        if (
+            not isinstance(source_key, str)
+            or not isinstance(partition, int)
+            or not isinstance(xlsx_non_exact, bool)
+            or not isinstance(ssn_count, int)
+            or source_key in partition_flags
+        ):
+            raise PushConfigurationError(
+                f"configured {CARD_PARTITION_TABLE} contains invalid source classifications"
+            )
+        partition_flags[source_key] = (partition, xlsx_non_exact, ssn_count)
+    no_ground_truth = {
+        source_key
+        for source_key, (partition, xlsx_non_exact, ssn_count) in partition_flags.items()
+        if partition == NO_GROUND_TRUTH_PARTITION
+        and not xlsx_non_exact
+        and ssn_count == NO_GROUND_TRUTH_SSN_COUNT
+    }
     missing_source_keys = no_ground_truth - source_researchers.keys()
     overlap = ground_truth & no_ground_truth
     if missing_source_keys:
@@ -983,9 +1079,100 @@ def derive_eligible_cohorts(
         )
     if len(ground_truth | no_ground_truth) != EXPECTED_ELIGIBLE_RESEARCHERS:
         raise PushConfigurationError("eligible cohort union cardinality is invalid")
+    if set(partition_flags) != set(source_researchers):
+        raise PushConfigurationError(
+            "card-partition source keys do not match innerdict-owned source keys"
+        )
+
+    population: list[SourcePopulationRow] = []
+    for source_key, (name_key, draws) in source_researchers.items():
+        ineligibility_category: IneligibilityCategory | None = None
+        if source_key in ground_truth:
+            cohort = GROUND_TRUTH_COHORT
+        elif source_key in no_ground_truth:
+            cohort = NO_GROUND_TRUTH_COHORT
+        else:
+            cohort = INELIGIBLE_COHORT
+            partition, xlsx_non_exact, ssn_count = partition_flags[source_key]
+            if source_key == EXCLUDED_SOURCE_KEY:
+                ineligibility_category = (
+                    IneligibilityCategory.EXCLUDED_DUPLICATE_SOURCE_KEY
+                )
+            elif any(
+                release_batches.get(draw) == INELIGIBLE_RELEASE_BATCH
+                for draw in draws
+            ):
+                ineligibility_category = (
+                    IneligibilityCategory.RELEASE_BATCH_SUBSET_8
+                )
+            elif partition == KTP_PARTITION_SSN_VALUE:
+                ineligibility_category = IneligibilityCategory.STAGING_PARTITION_2
+            elif partition == KTP_PARTITION_DOCX_VALUE and xlsx_non_exact:
+                ineligibility_category = (
+                    IneligibilityCategory.STAGING_PARTITION_4_XLSX_NON_EXACT
+                )
+            elif (
+                partition == KTP_PARTITION_DOCX_VALUE
+                and ssn_count > NO_GROUND_TRUTH_SSN_COUNT
+            ):
+                ineligibility_category = (
+                    IneligibilityCategory.STAGING_PARTITION_4_MULTIPLE_SSN
+                )
+            else:
+                raise PushConfigurationError(
+                    "an ineligible source key has no recognized category"
+                )
+        population.append(SourcePopulationRow(
+            source_key=source_key,
+            rnd=rnd_by_source_key[source_key],
+            first_name=name_key.first_name,
+            last_name=name_key.last_name,
+            draw_numbers=tuple(sorted(draws, key=_draw_sort_key)),
+            cohort=cohort,
+            ineligibility_category=ineligibility_category,
+        ))
+
+    population.sort(key=lambda row: (
+        tuple(_draw_sort_key(draw) for draw in row.draw_numbers),
+        row.first_name.casefold(),
+        row.last_name.casefold(),
+        row.source_key,
+    ))
+    cohort_counts = Counter(row.cohort for row in population)
+    ineligibility_counts = Counter(
+        row.ineligibility_category
+        for row in population
+        if row.ineligibility_category is not None
+    )
+    if cohort_counts != {
+        GROUND_TRUTH_COHORT: EXPECTED_GROUND_TRUTH_RESEARCHERS,
+        NO_GROUND_TRUTH_COHORT: EXPECTED_NO_GROUND_TRUTH_RESEARCHERS,
+        INELIGIBLE_COHORT: EXPECTED_INELIGIBLE_RESEARCHERS,
+    }:
+        raise PushConfigurationError("source population cohort cardinalities are invalid")
+    if ineligibility_counts != EXPECTED_INELIGIBILITY_COUNTS:
+        raise PushConfigurationError("source population ineligibility categories are invalid")
+    if len(population) != EXPECTED_SOURCE_RESEARCHERS:
+        raise PushConfigurationError("source population cardinality is invalid")
+    if {row.rnd for row in population} != set(
+        range(RND_START, EXPECTED_SOURCE_RESEARCHERS + RND_START)
+    ):
+        raise PushConfigurationError("source population rnd values are invalid")
+    if (
+        sum(len(row.draw_numbers) > 1 for row in population)
+        != EXPECTED_MULTIDRAW_SOURCE_RESEARCHERS
+    ):
+        raise PushConfigurationError("source population contracted-draw count is invalid")
+    return tuple(population)
+
+
+def eligible_cohorts(
+    source_population: Sequence[SourcePopulationRow],
+) -> dict[str, str]:
     return {
-        **dict.fromkeys(sorted(ground_truth), GROUND_TRUTH_COHORT),
-        **dict.fromkeys(sorted(no_ground_truth), NO_GROUND_TRUTH_COHORT),
+        row.source_key: row.cohort
+        for row in source_population
+        if row.cohort != INELIGIBLE_COHORT
     }
 
 
@@ -1126,7 +1313,11 @@ def configure_runtime(config_path: Path) -> RuntimeConfiguration:
     source_conn: duckdb.DuckDBPyConnection | None = None
     try:
         source_conn = duckdb.connect(str(pipeline.db_file), read_only=True)
-        eligible_cohorts = derive_eligible_cohorts(source_conn, release_batches)
+        source_population = derive_source_population(
+            source_conn,
+            release_batches,
+            sample_seed=pipeline.sample_seed,
+        )
     except duckdb.Error as exc:
         raise PushConfigurationError("configured source DuckDB could not be validated") from exc
     finally:
@@ -1140,7 +1331,8 @@ def configure_runtime(config_path: Path) -> RuntimeConfiguration:
         pipeline=pipeline,
         detour_db_path=detour_db_path,
         release_map=release_map,
-        eligible_cohorts=eligible_cohorts,
+        source_population=source_population,
+        eligible_cohorts=eligible_cohorts(source_population),
     )
     return RUNTIME_CONFIGURATION
 
@@ -2095,12 +2287,12 @@ def persist_rollout_index(
         fco_by_call = {row.call_id: row for row in rollout_index.fco_rows}
         if set(fc_by_call) != current_call_ids or set(fco_by_call) != current_call_ids:
             raise PushValidationError("normalized rollout call linkages are incomplete")
-        for row in rollout_index.fc_rows:
+        for function_call_row in rollout_index.fc_rows:
             _insert_or_validate(
                 conn,
                 table_name=CODEX_FC_TABLE,
                 key_column=CODEX_FC_ID_COL,
-                key_value=row.fc_id,
+                key_value=function_call_row.fc_id,
                 columns=(
                     CODEX_FC_TIMESTAMP_COL,
                     CODEX_FC_ID_COL,
@@ -2109,21 +2301,24 @@ def persist_rollout_index(
                     CODEX_FC_ARGUMENTS_COL,
                 ),
                 values=(
-                    _datetime_value(row.timestamp),
-                    row.fc_id,
-                    row.name,
-                    row.namespace,
-                    row.arguments_json,
+                    _datetime_value(function_call_row.timestamp),
+                    function_call_row.fc_id,
+                    function_call_row.name,
+                    function_call_row.namespace,
+                    function_call_row.arguments_json,
                 ),
             )
-        for row in rollout_index.fco_rows:
+        for function_output_row in rollout_index.fco_rows:
             _insert_or_validate(
                 conn,
                 table_name=CODEX_FCO_TABLE,
                 key_column=CODEX_FCO_ID_COL,
-                key_value=row.fco_id,
+                key_value=function_output_row.fco_id,
                 columns=(CODEX_FCO_TIMESTAMP_COL, CODEX_FCO_ID_COL),
-                values=(_datetime_value(row.timestamp), row.fco_id),
+                values=(
+                    _datetime_value(function_output_row.timestamp),
+                    function_output_row.fco_id,
+                ),
             )
         for call_id in sorted(current_call_ids):
             fc_row = fc_by_call[call_id]
@@ -2146,8 +2341,8 @@ def persist_rollout_index(
                     rollout_index.session.rollout_filename,
                 ),
             )
-        for row in rollout_index.turn_ref_rows:
-            key_value = f"{row.call_id}\0{row.ref_id}"
+        for turn_ref_row in rollout_index.turn_ref_rows:
+            key_value = f"{turn_ref_row.call_id}\0{turn_ref_row.ref_id}"
             columns = (
                 CODEX_REF_ID_COL,
                 CODEX_CALL_ID_COL,
@@ -2163,17 +2358,17 @@ def persist_rollout_index(
                 f"SELECT {projection} FROM {CODEX_TURN_REF_TABLE} WHERE "
                 f"{duckdb_quote_identifier(CODEX_CALL_ID_COL)} = ? AND "
                 f"{duckdb_quote_identifier(CODEX_REF_ID_COL)} = ?",
-                [row.call_id, row.ref_id],
+                [turn_ref_row.call_id, turn_ref_row.ref_id],
             ).fetchall()
             values = (
-                row.ref_id,
-                row.call_id,
-                row.domain,
-                row.snippet,
-                row.thumbnail_url,
-                row.title,
-                row.url,
-                row.cite_text,
+                turn_ref_row.ref_id,
+                turn_ref_row.call_id,
+                turn_ref_row.domain,
+                turn_ref_row.snippet,
+                turn_ref_row.thumbnail_url,
+                turn_ref_row.title,
+                turn_ref_row.url,
+                turn_ref_row.cite_text,
             )
             if existing:
                 if len(existing) != 1 or existing[0] != values:
@@ -2211,15 +2406,20 @@ def persist_rollout_index(
             ),
         )
         for table_name, distinct_expression in integrity_checks:
-            total, distinct = conn.execute(
+            integrity_row = conn.execute(
                 f"SELECT COUNT(*), COUNT(DISTINCT {distinct_expression}) FROM {table_name}"
             ).fetchone()
+            if integrity_row is None:
+                raise PushValidationError(
+                    f"normalized provenance integrity query failed for {table_name}"
+                )
+            total, distinct = integrity_row
             if total != distinct:
                 raise PushValidationError(
                     f"normalized provenance uniqueness failed for {table_name}"
                 )
 
-        missing_fc_links, missing_fco_links, missing_call_links = conn.execute(
+        linkage_row = conn.execute(
             f"""
             SELECT
                 (
@@ -2248,6 +2448,9 @@ def persist_rollout_index(
                 )
             """
         ).fetchone()
+        if linkage_row is None:
+            raise PushValidationError("normalized provenance linkage query failed")
+        missing_fc_links, missing_fco_links, missing_call_links = linkage_row
         if missing_fc_links or missing_fco_links or missing_call_links:
             raise PushValidationError("normalized provenance relationships are incomplete")
 
@@ -2593,7 +2796,9 @@ def _source_table_rows(
 ) -> tuple[dict[str, object], ...]:
     try:
         rows = source_conn.execute(
-            f"SELECT innerdicts FROM {table_name} WHERE name_key = ?",
+            f"SELECT {duckdb_quote_identifier(KTP_INNERDICT_JSONLINES_COL)} "
+            f"FROM {table_name} "
+            f"WHERE {duckdb_quote_identifier(KTP_NAMEKEY_COL)} = ?",
             [source_key],
         ).fetchall()
     except duckdb.Error as exc:
@@ -2708,7 +2913,7 @@ def resolve_researcher(
     rows = source_conn.execute(
         f"""
         SELECT DISTINCT
-            names.{duckdb_quote_identifier(KTP_SOURCE_KEY_COL)},
+            names.{duckdb_quote_identifier(KTP_NAMEKEY_COL)},
             samples.{duckdb_quote_identifier(DRAW_LABEL)},
             names.{duckdb_quote_identifier(KTP_FIRST_NAME_COL)},
             names.{duckdb_quote_identifier(KTP_LAST_NAME_COL)}
@@ -2905,7 +3110,7 @@ def write_accepted_submission(
         ),
     )
     output_row: dict[str, object] = {
-        KTP_SOURCE_KEY_COL: researcher.source_key,
+        KTP_NAMEKEY_COL: researcher.source_key,
         KTP_FILENAME_COL: rollout_index.session.rollout_filename,
         KTP_FRAGMENT_COL: rollout_archive.line_count,
         KTP_FRAGMENT_TYPE_COL: ROLLOUT_LINE_FRAGMENT_TYPE,

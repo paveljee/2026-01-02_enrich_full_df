@@ -20,7 +20,6 @@ import struct
 import sys
 import tempfile
 import time
-from pathlib import Path
 from typing import Dict, Iterable, Optional, Tuple
 
 # linux/inotify.h
@@ -493,27 +492,27 @@ class AppendWatch:
         old_active = {p: r for p, r in self.records.items() if r.exists}
         unmatched_old = {p: r for p, r in old_active.items() if p not in current}
         by_identity: Dict[Tuple[int, int], list[Tuple[str, Record]]] = {}
-        for path, rec in unmatched_old.items():
-            by_identity.setdefault(rec.identity, []).append((path, rec))
+        for path, old_record in unmatched_old.items():
+            by_identity.setdefault(old_record.identity, []).append((path, old_record))
 
         # Existing paths first.
         for rel, st in current.items():
-            rec = self.records.get(rel)
-            if rec and rec.exists:
+            record = self.records.get(rel)
+            if record and record.exists:
                 if initial:
                     continue
                 if (
-                    rec.identity != (st.st_dev, st.st_ino)
-                    or rec.size != st.st_size
-                    or rec.mtime_ns != st.st_mtime_ns
-                    or rec.ctime_ns != st.st_ctime_ns
+                    record.identity != (st.st_dev, st.st_ino)
+                    or record.size != st.st_size
+                    or record.mtime_ns != st.st_mtime_ns
+                    or record.ctime_ns != st.st_ctime_ns
                 ):
                     visible_changed |= self.inspect(os.path.join(self.root, rel))
 
         # New paths: preserve history across renames when the inode matches.
         for rel, st in current.items():
-            rec = self.records.get(rel)
-            if rec and rec.exists:
+            record = self.records.get(rel)
+            if record and record.exists:
                 continue
             candidates = by_identity.get((st.st_dev, st.st_ino), [])
             source = candidates.pop() if candidates else None
@@ -527,8 +526,8 @@ class AppendWatch:
                 self.records[rel] = moved
                 self.records[source_path] = dataclasses.replace(source_rec, exists=False)
                 visible_changed = True
-            elif rec is not None:
-                rec.exists = True
+            elif record is not None:
+                record.exists = True
                 visible_changed = True
                 visible_changed |= self.inspect(os.path.join(self.root, rel))
             else:
@@ -536,8 +535,8 @@ class AppendWatch:
                 visible_changed |= self.inspect(os.path.join(self.root, rel), new_path=True)
 
         for rel, old_rec in old_active.items():
-            rec = self.records.get(rel, old_rec)
-            if rel not in current and rec.exists:
+            record = self.records.get(rel, old_rec)
+            if rel not in current and record.exists:
                 path = os.path.join(self.root, rel)
                 try:
                     st = os.lstat(path)
@@ -545,14 +544,18 @@ class AppendWatch:
                     pass
                 except OSError as exc:
                     visible_changed |= self.compromise(
-                        rec, f"could not inspect path during reconciliation: {exc.strerror or exc}"
+                        record,
+                        f"could not inspect path during reconciliation: {exc.strerror or exc}",
                     )
                 else:
                     if stat.S_ISREG(st.st_mode):
                         visible_changed |= self.inspect(path)
                         continue
-                    visible_changed |= self.compromise(rec, self.replacement_reason(st.st_mode))
-                rec.exists = False
+                    visible_changed |= self.compromise(
+                        record,
+                        self.replacement_reason(st.st_mode),
+                    )
+                record.exists = False
                 visible_changed = True
 
         if initial:

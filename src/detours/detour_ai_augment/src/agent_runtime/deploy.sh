@@ -33,6 +33,9 @@ VSCODE_BIN_PATH="$VSCODE_PATH/bin/code-server"
 VSCE_PATH="$AIVM_HOME/.vscode-server/extensions"
 CODEX_VSCE_VERSION="26.721.41059"
 CODEX_VSCE="openai.chatgpt@$CODEX_VSCE_VERSION"
+CODEX_CLI_VERSION="0.146.0-alpha.3.1"
+CODEX_CLI_INSTALL_URL="https://chatgpt.com/codex/install.sh"
+CODEX_CLI_BIN_PATH="$AIVM_HOME/.local/bin/codex"
 CODEX_PATH="$AIVM_HOME/.codex"
 CODEX_CONFIG_PATH="$CODEX_PATH/config.toml"
 
@@ -216,6 +219,9 @@ VSCODE_PATH_B64="$(base64_string "$VSCODE_PATH")"
 VSCODE_BIN_PATH_B64="$(base64_string "$VSCODE_BIN_PATH")"
 VSCE_PATH_B64="$(base64_string "$VSCE_PATH")"
 CODEX_VSCE_B64="$(base64_string "$CODEX_VSCE")"
+CODEX_CLI_VERSION_B64="$(base64_string "$CODEX_CLI_VERSION")"
+CODEX_CLI_INSTALL_URL_B64="$(base64_string "$CODEX_CLI_INSTALL_URL")"
+CODEX_CLI_BIN_PATH_B64="$(base64_string "$CODEX_CLI_BIN_PATH")"
 CODEX_PATH_B64="$(base64_string "$CODEX_PATH")"
 CODEX_CONFIG_PATH_B64="$(base64_string "$CODEX_CONFIG_PATH")"
 APPENDWATCH_SCRIPT_B64="$(base64_string "$GUEST_APPENDWATCH_SCRIPT")"
@@ -282,6 +288,9 @@ provision:
       export AIVM_VSCODE_BIN_PATH="\$(decode "$VSCODE_BIN_PATH_B64")"
       export AIVM_VSCE_PATH="\$(decode "$VSCE_PATH_B64")"
       export AIVM_CODEX_VSCE="\$(decode "$CODEX_VSCE_B64")"
+      export AIVM_CODEX_CLI_VERSION="\$(decode "$CODEX_CLI_VERSION_B64")"
+      export AIVM_CODEX_CLI_INSTALL_URL="\$(decode "$CODEX_CLI_INSTALL_URL_B64")"
+      export AIVM_CODEX_CLI_BIN_PATH="\$(decode "$CODEX_CLI_BIN_PATH_B64")"
       export AIVM_CODEX_PATH="\$(decode "$CODEX_PATH_B64")"
       export AIVM_CODEX_CONFIG_PATH="\$(decode "$CODEX_CONFIG_PATH_B64")"
       export AIVM_APPENDWATCH_SCRIPT="\$(decode "$APPENDWATCH_SCRIPT_B64")"
@@ -426,6 +435,14 @@ verify_instance() {
         grep -qx "$CODEX_VSCE" \
         || { echo "❌ VS Code extension $CODEX_VSCE not found"; return 1; }
     echo "✅ VS Code extension $CODEX_VSCE installed"
+
+    printf -v CODEX_CLI_BIN_PATH_Q '%q' "$CODEX_CLI_BIN_PATH"
+    ACTUAL_CODEX_CLI_VERSION="$(
+        aivm_ssh "$CODEX_CLI_BIN_PATH_Q --version"
+    )"
+    [ "$ACTUAL_CODEX_CLI_VERSION" = "codex-cli $CODEX_CLI_VERSION" ] \
+        || { echo "❌ Codex CLI $CODEX_CLI_VERSION not found"; return 1; }
+    echo "✅ Codex CLI $CODEX_CLI_VERSION installed"
 }
 
 # If verified, open shell in the AIVM user's home directory

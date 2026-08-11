@@ -29,10 +29,9 @@ import tempfile
 import time
 from pathlib import Path
 from types import ModuleType
-from typing import Callable, Iterator
+from typing import Any, Callable, Iterator
 
 import pytest
-
 
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="appendwatch uses Linux inotify")
 
@@ -60,8 +59,8 @@ def aw() -> ModuleType:
 
 
 @pytest.fixture
-def watcher_factory(aw: ModuleType, tmp_path: Path) -> Iterator[Callable[..., object]]:
-    opened = []
+def watcher_factory(aw: ModuleType, tmp_path: Path) -> Iterator[Callable[..., Any]]:
+    opened: list[Any] = []
 
     def make(*, root: Path | None = None, report: Path | str | None = None, debounce_ms: int = 0):
         actual_root = root or (tmp_path / f"root-{len(opened)}")
@@ -80,7 +79,12 @@ def watcher_factory(aw: ModuleType, tmp_path: Path) -> Iterator[Callable[..., ob
             pass
 
 
-def wait_until(predicate: Callable[[], bool], *, timeout: float = 8.0, interval: float = 0.025) -> None:
+def wait_until(
+    predicate: Callable[[], bool],
+    *,
+    timeout: float = 8.0,
+    interval: float = 0.025,
+) -> None:
     deadline = time.monotonic() + timeout
     last_error: BaseException | None = None
     while time.monotonic() < deadline:
@@ -225,7 +229,11 @@ def drop_privileges(uid: int, gid: int) -> Callable[[], None]:
 # ---------------------------------------------------------------------------
 
 
-def test_default_debounce_is_zero(aw: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_default_debounce_is_zero(
+    aw: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     root = tmp_path / "root"
     root.mkdir()
     monkeypatch.setattr(sys, "argv", [str(SCRIPT), str(root)])
@@ -264,7 +272,7 @@ def test_hash_fd_rejects_short_reads(aw: ModuleType, monkeypatch: pytest.MonkeyP
 
 
 def test_append_stays_ok_and_updates_baseline(
-    aw: ModuleType, watcher_factory: Callable[..., object], tmp_path: Path
+    aw: ModuleType, watcher_factory: Callable[..., Any], tmp_path: Path
 ) -> None:
     root = tmp_path / "root"
     root.mkdir()
@@ -284,7 +292,7 @@ def test_append_stays_ok_and_updates_baseline(
 
 
 def test_truncate_is_compromised(
-    watcher_factory: Callable[..., object], tmp_path: Path
+    watcher_factory: Callable[..., Any], tmp_path: Path
 ) -> None:
     root = tmp_path / "root"
     root.mkdir()
@@ -302,7 +310,7 @@ def test_truncate_is_compromised(
 
 
 def test_same_size_prefix_rewrite_is_compromised(
-    watcher_factory: Callable[..., object], tmp_path: Path
+    watcher_factory: Callable[..., Any], tmp_path: Path
 ) -> None:
     root = tmp_path / "root"
     root.mkdir()
@@ -323,7 +331,7 @@ def test_same_size_prefix_rewrite_is_compromised(
 
 
 def test_atomic_replacement_is_compromised(
-    watcher_factory: Callable[..., object], tmp_path: Path
+    watcher_factory: Callable[..., Any], tmp_path: Path
 ) -> None:
     root = tmp_path / "root"
     root.mkdir()
@@ -351,7 +359,7 @@ def test_first_compromise_reason_is_preserved(aw: ModuleType) -> None:
 
 
 def test_created_file_uses_empty_baseline_then_accepts_append(
-    watcher_factory: Callable[..., object], tmp_path: Path
+    watcher_factory: Callable[..., Any], tmp_path: Path
 ) -> None:
     root = tmp_path / "root"
     root.mkdir()
@@ -367,7 +375,7 @@ def test_created_file_uses_empty_baseline_then_accepts_append(
 
 
 def test_new_file_moved_into_tree_is_accepted_as_initial_baseline(
-    watcher_factory: Callable[..., object], tmp_path: Path
+    watcher_factory: Callable[..., Any], tmp_path: Path
 ) -> None:
     root = tmp_path / "root"
     root.mkdir()
@@ -406,7 +414,7 @@ def _replace_with_socket(path: Path) -> socket.socket:
 def test_inspect_flags_nonregular_substitution_without_blocking(
     kind: str,
     expected_reason: str,
-    watcher_factory: Callable[..., object],
+    watcher_factory: Callable[..., Any],
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "root"
@@ -447,7 +455,7 @@ def test_inspect_flags_nonregular_substitution_without_blocking(
 
 
 def test_new_fifo_is_ignored_and_does_not_block(
-    watcher_factory: Callable[..., object], tmp_path: Path
+    watcher_factory: Callable[..., Any], tmp_path: Path
 ) -> None:
     root = tmp_path / "root"
     root.mkdir()
@@ -463,7 +471,7 @@ def test_new_fifo_is_ignored_and_does_not_block(
 
 def test_inspect_open_flags_include_nonblock(
     aw: ModuleType,
-    watcher_factory: Callable[..., object],
+    watcher_factory: Callable[..., Any],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -482,12 +490,13 @@ def test_inspect_open_flags_include_nonblock(
 
 
 def test_replacement_reason_covers_device_types(aw: ModuleType) -> None:
-    assert aw.AppendWatch.replacement_reason(stat.S_IFCHR) == "path was replaced by a non-regular file"
-    assert aw.AppendWatch.replacement_reason(stat.S_IFBLK) == "path was replaced by a non-regular file"
+    expected = "path was replaced by a non-regular file"
+    assert aw.AppendWatch.replacement_reason(stat.S_IFCHR) == expected
+    assert aw.AppendWatch.replacement_reason(stat.S_IFBLK) == expected
 
 
 def test_plain_delete_is_not_rendered_as_an_incident(
-    watcher_factory: Callable[..., object], tmp_path: Path
+    watcher_factory: Callable[..., Any], tmp_path: Path
 ) -> None:
     root = tmp_path / "root"
     root.mkdir()
@@ -508,7 +517,7 @@ def test_plain_delete_is_not_rendered_as_an_incident(
 
 
 def test_rename_preserves_history_and_append_only_status(
-    watcher_factory: Callable[..., object], tmp_path: Path
+    watcher_factory: Callable[..., Any], tmp_path: Path
 ) -> None:
     root = tmp_path / "root"
     root.mkdir()
@@ -533,7 +542,7 @@ def test_rename_preserves_history_and_append_only_status(
 
 
 def test_render_tree_has_only_binary_file_statuses(
-    watcher_factory: Callable[..., object], tmp_path: Path
+    watcher_factory: Callable[..., Any], tmp_path: Path
 ) -> None:
     root = tmp_path / "root"
     root.mkdir()
@@ -545,7 +554,7 @@ def test_render_tree_has_only_binary_file_statuses(
 
 
 def test_report_and_atomic_temp_files_are_excluded(
-    watcher_factory: Callable[..., object], tmp_path: Path
+    watcher_factory: Callable[..., Any], tmp_path: Path
 ) -> None:
     root = tmp_path / "root"
     root.mkdir()
@@ -600,7 +609,7 @@ class FakeLibc:
         return 0
 
 
-def make_fake_inotify(aw: ModuleType, libc: FakeLibc) -> object:
+def make_fake_inotify(aw: ModuleType, libc: FakeLibc) -> Any:
     ino = object.__new__(aw.Inotify)
     ino.libc = libc
     ino.fd = 123
@@ -634,7 +643,7 @@ def test_add_enospc_warns_once_and_sets_global_degradation(
 
 
 def test_remove_drops_maps_before_syscall_and_tolerates_einval(aw: ModuleType) -> None:
-    holder: dict[str, object] = {}
+    holder: dict[str, Any] = {}
 
     def check_removed_first() -> None:
         ino = holder["ino"]
@@ -688,7 +697,7 @@ def test_read_suppresses_unknown_ignored_but_preserves_queue_overflow(
 
 
 def test_queue_overflow_fail_closes_all_active_files(
-    watcher_factory: Callable[..., object], tmp_path: Path
+    watcher_factory: Callable[..., Any], tmp_path: Path
 ) -> None:
     root = tmp_path / "root"
     root.mkdir()
@@ -704,7 +713,7 @@ def test_queue_overflow_fail_closes_all_active_files(
 
 
 def test_rebuild_prunes_moved_out_watch_and_ignored_event_is_suppressed(
-    aw: ModuleType, watcher_factory: Callable[..., object], tmp_path: Path
+    aw: ModuleType, watcher_factory: Callable[..., Any], tmp_path: Path
 ) -> None:
     root = tmp_path / "root"
     root.mkdir()
@@ -739,7 +748,7 @@ def test_rebuild_prunes_moved_out_watch_and_ignored_event_is_suppressed(
 
 def test_existing_watch_dynamic_scandir_failure_sets_and_clears_marker(
     aw: ModuleType,
-    watcher_factory: Callable[..., object],
+    watcher_factory: Callable[..., Any],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -770,7 +779,7 @@ def test_existing_watch_dynamic_scandir_failure_sets_and_clears_marker(
 
 
 def test_unwatched_marker_compromises_only_its_subtree(
-    watcher_factory: Callable[..., object], tmp_path: Path
+    watcher_factory: Callable[..., Any], tmp_path: Path
 ) -> None:
     root = tmp_path / "root"
     root.mkdir()
@@ -799,7 +808,7 @@ def test_unwatched_marker_compromises_only_its_subtree(
 
 
 def test_enospc_fail_closed_is_global(
-    watcher_factory: Callable[..., object], tmp_path: Path
+    watcher_factory: Callable[..., Any], tmp_path: Path
 ) -> None:
     root = tmp_path / "root"
     root.mkdir()
@@ -816,7 +825,7 @@ def test_enospc_fail_closed_is_global(
 
 def test_shutdown_marks_files_discovered_after_unwatched_root_interval(
     aw: ModuleType,
-    watcher_factory: Callable[..., object],
+    watcher_factory: Callable[..., Any],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:

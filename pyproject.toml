@@ -37,6 +37,7 @@ detour-ai-augment = [
   "pydantic==2.13.4",
   "httpx==0.28.1",
   "nicegui==3.13.0",
+  "playwright==1.62.0",
 ]
 
 # ============
@@ -278,7 +279,7 @@ test-detour-mode0-econ-stats = [
 
 [tool.pixi.feature.detour-ai-augment.tasks]
 serve = "python -m src.detours.detour_ai_augment.src.backend.api --config config_ai_augment.json"
-dashboard = "python -m src.detours.detour_ai_augment.src.control_centre.ui"
+dashboard = "python -m src.detours.detour_ai_augment.src.control_centre.dashboard.ui"
 # provision a worktree first:
 # git worktree add --detach /tmp/detour-api-9a187d3 9a187d3fc497bef6d1568b885b33f0a834607d22
 # cp ./.env /tmp/detour-api-9a187d3; mkdir -p /tmp/detour-api-9a187d3/tmp && cp ./tmp/sheikh.jsonl /tmp/detour-api-9a187d3/tmp/sheikh.jsonl
@@ -289,6 +290,7 @@ test-detour-ai-augment-root = """
 sudo env \
   APPENDWATCH_SCRIPT="$PIXI_PROJECT_ROOT/src/detours/detour_ai_augment/src/control_centre/appendwatch/appendwatch.py" \
   APPENDWATCH_PYTHON="/usr/bin/python3" \
+  PLAYWRIGHT_BROWSERS_PATH="$HOME/.cache/ms-playwright" \
   "$CONDA_PREFIX/bin/python" -m pytest -vv -srA \
   src/detours/detour_ai_augment/tests
 """

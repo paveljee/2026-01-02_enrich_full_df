@@ -29,6 +29,9 @@ DOCX_MATCH_VIEW = "docx_matches"
 DOCX_INNERDICT_TABLE = "docx_innerdicts"
 DOCX_OUTPUT_VIEW = "docx_output"
 
+MISC_INNERDICT_TABLE = "misc_innerdicts"
+MISC_OUTPUT_VIEW = "misc_output"
+
 PARQUET_AUTHOR_MATCH_TABLE = "ssn_author_matches"
 PARQUET_AUTHOR_MATCH_NONZERO_HIT_VIEW = "ssn_author_matches_nonzero_hit"
 PARQUET_AUTHOR_MATCH_HIT_CANDIDATE_TABLE = "ssn_author_match_hit_candidates"
