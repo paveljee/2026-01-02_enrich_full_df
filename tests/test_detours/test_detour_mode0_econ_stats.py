@@ -49,12 +49,12 @@ from src.helpers.vars import (
     KTP_PRIORITY_COL,
     KTP_PRIORITY_GROUP_COL,
     KTP_PRIORITY_GROUP_LABELS,
-    KTP_SOURCE_KEY_COL,
+    KTP_NAMEKEY_COL,
     KTP_XLSX_MATCH_COL,
     KTP_XLSX_MATCH_FIRST_TOKENS_KEY,
     KTP_XLSX_MATCH_LAST_NAME_NORM_KEY,
-    KTP_XLSX_MATCH_SOURCE_KEY_LAST_KEY,
-    KTP_XLSX_MATCH_SOURCE_KEY_TOKENS_KEY,
+    KTP_XLSX_MATCH_NAMEKEY_LAST_KEY,
+    KTP_XLSX_MATCH_NAMEKEY_TOKENS_KEY,
     OGHIST_INCOME_LABELS,
     REQUIRED_FILES_CONFIG_KEYS,
     WORLD_BANK_XLSX_KEY,
@@ -74,8 +74,8 @@ def _name_key(first: str, last: str) -> str:
 def _exact_xlsx_payload(first_tokens: list[str], last_norm: str) -> str:
     return json.dumps(
         {
-            KTP_XLSX_MATCH_SOURCE_KEY_TOKENS_KEY: first_tokens,
-            KTP_XLSX_MATCH_SOURCE_KEY_LAST_KEY: last_norm,
+            KTP_XLSX_MATCH_NAMEKEY_TOKENS_KEY: first_tokens,
+            KTP_XLSX_MATCH_NAMEKEY_LAST_KEY: last_norm,
             KTP_XLSX_MATCH_FIRST_TOKENS_KEY: first_tokens,
             KTP_XLSX_MATCH_LAST_NAME_NORM_KEY: last_norm,
         },
@@ -88,8 +88,8 @@ def _non_exact_xlsx_payload(
 ) -> str:
     return json.dumps(
         {
-            KTP_XLSX_MATCH_SOURCE_KEY_TOKENS_KEY: source_tokens,
-            KTP_XLSX_MATCH_SOURCE_KEY_LAST_KEY: last_norm,
+            KTP_XLSX_MATCH_NAMEKEY_TOKENS_KEY: source_tokens,
+            KTP_XLSX_MATCH_NAMEKEY_LAST_KEY: last_norm,
             KTP_XLSX_MATCH_FIRST_TOKENS_KEY: first_tokens,
             KTP_XLSX_MATCH_LAST_NAME_NORM_KEY: last_norm,
         },
@@ -206,7 +206,7 @@ def _build_fixture_db(path: Path) -> dict[str, int]:
         con.execute(
             f"""
             CREATE TABLE {PARQUET_LEGACY_ROWS_INNERDICT_TABLE} (
-                "{KTP_SOURCE_KEY_COL}" VARCHAR
+                "{KTP_NAMEKEY_COL}" VARCHAR
             )
             """
         )
@@ -790,14 +790,14 @@ def _build_fixture_db(path: Path) -> dict[str, int]:
         ]
         con.executemany(
             f'INSERT INTO {PARQUET_LEGACY_ROWS_INNERDICT_TABLE} '
-            f'("{KTP_SOURCE_KEY_COL}") VALUES (?)',
+            f'("{KTP_NAMEKEY_COL}") VALUES (?)',
             ssn_rows,
         )
         con.execute(
             f"""
             CREATE OR REPLACE VIEW {PARQUET_OUTPUT_VIEW} AS
             SELECT
-                "{KTP_SOURCE_KEY_COL}" AS "{KTP_SOURCE_KEY_COL}",
+                "{KTP_NAMEKEY_COL}" AS "{KTP_NAMEKEY_COL}",
                 0.25 AS "ssnau.p_gf",
                 3 AS "ssnau.inference_counts",
                 1 AS "ssnau.inference_sources",

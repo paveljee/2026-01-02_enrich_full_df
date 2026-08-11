@@ -16,11 +16,13 @@ from .resource_monitor import ResourceMonitor
 from .resources import PipelineResources, register_pipeline_resources
 from .schema import (
     DOCX_INNERDICT_TABLE,
+    OUTERDICT_NAME_VIEW,
     OUTERDICT_STUB_TABLE,
     PARQUET_INNERDICT_TABLE,
     XLSX_INNERDICT_TABLE,
 )
 from .vars import (
+    KTP_NAMEKEY_COL,
     STEP_BUILD_OUTERDICT,
     STEP_MATCH_DOCX,
     STEP_MATCH_PARQUET,
@@ -62,7 +64,7 @@ def _reset_pipeline(conn, manager: PipelineManager) -> None:
         "population_with_names_economy",
         "samples_with_context",
         "samples_with_names",
-        "outerdict_name_keys",
+        OUTERDICT_NAME_VIEW,
         "xlsx_matches",
         "xlsx_output",
         "docx_matches",
@@ -90,7 +92,9 @@ def _reset_pipeline(conn, manager: PipelineManager) -> None:
 
 
 def _load_outerdict_stub(conn, table_name: str) -> OuterDict:
-    rows = conn.execute(f"SELECT name_key FROM {table_name}").fetchall()
+    rows = conn.execute(
+        f'SELECT "{KTP_NAMEKEY_COL}" FROM {table_name}'
+    ).fetchall()
     name_keys = [NameKey.from_json_key(row[0]) for row in rows]
     return OuterDict.from_name_keys(name_keys)
 

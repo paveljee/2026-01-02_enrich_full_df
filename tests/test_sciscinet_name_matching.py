@@ -51,7 +51,7 @@ from src.helpers.vars import (
     KTP_OPENALEX_RESPONSE_CODE_COL,
     KTP_OPENALEX_REUSED_COL,
     KTP_OPENALEX_TOP_AUTHOR_ID_COL,
-    KTP_SOURCE_KEY_COL,
+    KTP_NAMEKEY_COL,
     KTP_SSN_HIT_CITED_BY_COUNT_IS_TUKEY_OUTLIER_COL,
     KTP_SSN_HIT_FALLBACK_NO_TUKEY_OUTLIER_COL,
     KTP_SSN_HIT_ROW_HAS_TUKEY_OUTLIER_COL,
@@ -664,7 +664,7 @@ def test_openalex_author_check_appends_response_and_parses_mismatch(tmp_path: Pa
     assert record["schema_version"] == KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION
     assert record["query"].endswith("api_key=REDACTED")
     assert "test-key" not in record["query"]
-    assert KTP_SOURCE_KEY_COL not in record
+    assert KTP_NAMEKEY_COL not in record
     assert "selected_ssn_author_id" not in record
     assert "openalex_top_author_id" not in record
     assert "openalex_match" not in record
@@ -1172,7 +1172,7 @@ def _manual_best_case_id(case: ManualBestReviewedCase | None) -> str:
 def _manual_best_reviewed_cases() -> list[ManualBestReviewedCase]:
     manual_df = pd.read_excel(MANUAL_BEST_FIXTURE_PATH, engine="openpyxl")
     raw_df = pd.read_csv(MANUAL_BEST_RAW_EXPORT_PATH)
-    raw_by_source_key = raw_df.set_index(KTP_SOURCE_KEY_COL)
+    raw_by_source_key = raw_df.set_index(KTP_NAMEKEY_COL)
     subset1_author_ids = _card_author_ids_by_name(SUBSET1_FIXTURE_DIR)
     subset2_author_ids = _card_author_ids_by_name(SUBSET2_FIXTURE_DIR)
     cases: list[ManualBestReviewedCase] = []
@@ -1189,7 +1189,7 @@ def _manual_best_reviewed_cases() -> list[ManualBestReviewedCase]:
         if not manual_best and not note:
             continue
         source_key = (
-            "" if pd.isna(row[KTP_SOURCE_KEY_COL]) else str(row[KTP_SOURCE_KEY_COL])
+            "" if pd.isna(row[KTP_NAMEKEY_COL]) else str(row[KTP_NAMEKEY_COL])
         )
         note_category = _workbook_note_category(note)
         recalculated_author_id, recalculated_mode = _reviewed_export_max_works_pick(row)
@@ -1301,7 +1301,7 @@ def test_manual_best_reviewed_fixture_expectation_coverage() -> None:
     assert len(manual_rows) == 34
     assert len(reviewed_cases) == 37
     manual_best_source_keys = {
-        str(row[KTP_SOURCE_KEY_COL])
+        str(row[KTP_NAMEKEY_COL])
         for _, row in manual_rows.iterrows()
         if str(row["manual_best"]).strip()
     }

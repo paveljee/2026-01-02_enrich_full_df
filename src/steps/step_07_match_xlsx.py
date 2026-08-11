@@ -38,15 +38,15 @@ from ..helpers.vars import (
     KTP_POPULATION_INDEX_COL,
     KTP_PRIORITY_COL,
     KTP_PRIORITY_GROUP_COL,
-    KTP_SOURCE_KEY_COL,
+    KTP_NAMEKEY_COL,
     KTP_XLSX_MATCH_COL,
     KTP_XLSX_MATCH_FIRST_TOKENS_KEY,
     KTP_XLSX_MATCH_LAST_NAME_NORM_KEY,
     KTP_XLSX_MATCH_RULE_KEY,
     KTP_XLSX_MATCH_RULE_V1,
     KTP_XLSX_MATCH_RULE_V2,
-    KTP_XLSX_MATCH_SOURCE_KEY_LAST_KEY,
-    KTP_XLSX_MATCH_SOURCE_KEY_TOKENS_KEY,
+    KTP_XLSX_MATCH_NAMEKEY_LAST_KEY,
+    KTP_XLSX_MATCH_NAMEKEY_TOKENS_KEY,
     STEP_MATCH_XLSX,
 )
 from .shared import draw_sort_ctes_sql, draw_sort_order_by_sql, hcr_excluded_columns
@@ -88,7 +88,7 @@ def run(context: PipelineContext) -> StepResult:
         )
     base_select_sql = f"""
             {match_sql.base_select_keyword}
-                nd."{KTP_SOURCE_KEY_COL}",
+                nd."{KTP_NAMEKEY_COL}",
                 p."{KTP_HCR_FILENAME_COL}" AS "{KTP_FILENAME_COL}",
                 p."{KTP_HCR_ROW_NUMBER_COL}" AS "{KTP_FRAGMENT_COL}",
                 COALESCE(p.resource_fragment_type, 'excel_row') AS "{KTP_FRAGMENT_TYPE_COL}",
@@ -97,8 +97,8 @@ def run(context: PipelineContext) -> StepResult:
                 p.pop_last AS "{KTP_LAST_NAME_COL}",
                 json_object(
                     {match_sql.rule_payload_entry}
-                    '{KTP_XLSX_MATCH_SOURCE_KEY_TOKENS_KEY}', to_json(nd.nd_first_tokens),
-                    '{KTP_XLSX_MATCH_SOURCE_KEY_LAST_KEY}', {match_sql.source_last_payload_expr},
+                    '{KTP_XLSX_MATCH_NAMEKEY_TOKENS_KEY}', to_json(nd.nd_first_tokens),
+                    '{KTP_XLSX_MATCH_NAMEKEY_LAST_KEY}', {match_sql.source_last_payload_expr},
                     '{KTP_XLSX_MATCH_FIRST_TOKENS_KEY}', to_json(p.pop_first_tokens),
                     '{KTP_XLSX_MATCH_LAST_NAME_NORM_KEY}', {match_sql.target_last_payload_expr}
                 ) AS "{KTP_XLSX_MATCH_COL}",
@@ -124,13 +124,13 @@ def run(context: PipelineContext) -> StepResult:
         ),
         base_min_priority AS (
             SELECT
-                "{KTP_SOURCE_KEY_COL}",
+                "{KTP_NAMEKEY_COL}",
                 "{KTP_FILENAME_COL}",
                 "{KTP_FRAGMENT_COL}",
                 MIN(xlsx_match_path_priority) AS xlsx_match_path_priority
             FROM base_candidates
             GROUP BY
-                "{KTP_SOURCE_KEY_COL}",
+                "{KTP_NAMEKEY_COL}",
                 "{KTP_FILENAME_COL}",
                 "{KTP_FRAGMENT_COL}"
         ),
@@ -138,7 +138,7 @@ def run(context: PipelineContext) -> StepResult:
             SELECT bc.* EXCLUDE (xlsx_match_path_priority)
             FROM base_candidates bc
             JOIN base_min_priority bp
-              ON bc."{KTP_SOURCE_KEY_COL}" = bp."{KTP_SOURCE_KEY_COL}"
+              ON bc."{KTP_NAMEKEY_COL}" = bp."{KTP_NAMEKEY_COL}"
              AND bc."{KTP_FILENAME_COL}" = bp."{KTP_FILENAME_COL}"
              AND bc."{KTP_FRAGMENT_COL}" = bp."{KTP_FRAGMENT_COL}"
              AND bc.xlsx_match_path_priority = bp.xlsx_match_path_priority
@@ -154,7 +154,7 @@ def run(context: PipelineContext) -> StepResult:
         f"""
         CREATE OR REPLACE VIEW {XLSX_MATCH_VIEW} AS
         WITH name_draws AS (
-            SELECT nk."{KTP_SOURCE_KEY_COL}" as "{KTP_SOURCE_KEY_COL}",
+            SELECT nk."{KTP_NAMEKEY_COL}" as "{KTP_NAMEKEY_COL}",
                    nk."{KTP_FIRST_NAME_COL}" AS "{KTP_FIRST_NAME_COL}",
                    nk."{KTP_LAST_NAME_COL}" AS "{KTP_LAST_NAME_COL}",
                    {match_sql.name_draws_fields}
@@ -184,12 +184,12 @@ def run(context: PipelineContext) -> StepResult:
               ON rr.resource_name = p."{KTP_HCR_FILENAME_COL}"
         ){match_sql.extra_ctes},
         {base_ctes_sql},
-        {draw_sort_ctes_sql(draw_col=DRAW_LABEL, source_key_col=KTP_SOURCE_KEY_COL)}
+        {draw_sort_ctes_sql(draw_col=DRAW_LABEL, source_key_col=KTP_NAMEKEY_COL)}
         SELECT * EXCLUDE (row_draw_group, row_draw_num, source_draw_group, source_draw_num)
         FROM ranked
         ORDER BY
             {draw_sort_order_by_sql(
-                source_key_col=KTP_SOURCE_KEY_COL,
+                source_key_col=KTP_NAMEKEY_COL,
                 filename_col=KTP_FILENAME_COL,
                 fragment_col=KTP_FRAGMENT_COL,
             )}
@@ -218,12 +218,12 @@ def run(context: PipelineContext) -> StepResult:
             FROM {XLSX_MATCH_VIEW}
             WHERE "{KTP_FILENAME_COL}" IS NOT NULL
         ),
-        {draw_sort_ctes_sql(draw_col=DRAW_LABEL, source_key_col=KTP_SOURCE_KEY_COL)}
+        {draw_sort_ctes_sql(draw_col=DRAW_LABEL, source_key_col=KTP_NAMEKEY_COL)}
         SELECT * EXCLUDE (row_draw_group, row_draw_num, source_draw_group, source_draw_num)
         FROM ranked
         ORDER BY
             {draw_sort_order_by_sql(
-                source_key_col=KTP_SOURCE_KEY_COL,
+                source_key_col=KTP_NAMEKEY_COL,
                 filename_col=KTP_FILENAME_COL,
                 fragment_col=KTP_FRAGMENT_COL,
             )}

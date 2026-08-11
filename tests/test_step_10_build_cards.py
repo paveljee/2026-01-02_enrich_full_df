@@ -42,7 +42,7 @@ from src.helpers.vars import (
     KTP_PARTITION_NO_RESOLUTION_VALUE,
     KTP_PARTITION_SSN_VALUE,
     KTP_PARTITION_XLSX_VALUE,
-    KTP_SOURCE_KEY_COL,
+    KTP_NAMEKEY_COL,
     KTP_SSN_FIELD_DISPLAY_NAMES_LIST_COL,
     KTP_SSN_SUM_HIT_1PCT_COL,
     KTP_SSN_TOP_INSTITUTIONS_COL,
@@ -54,8 +54,8 @@ from src.helpers.vars import (
     KTP_XLSX_MATCH_RULE_KEY,
     KTP_XLSX_MATCH_RULE_V1,
     KTP_XLSX_MATCH_RULE_V2,
-    KTP_XLSX_MATCH_SOURCE_KEY_LAST_KEY,
-    KTP_XLSX_MATCH_SOURCE_KEY_TOKENS_KEY,
+    KTP_XLSX_MATCH_NAMEKEY_LAST_KEY,
+    KTP_XLSX_MATCH_NAMEKEY_TOKENS_KEY,
     SSNAD_CITED_BY_COUNT_COL,
     SSNAD_DISPLAY_NAME_ALTERNATIVES_COL,
     SSNAD_DISPLAY_NAME_COL,
@@ -66,7 +66,7 @@ from src.steps import step_10_build_cards as step10
 
 
 class DummyProcedure:
-    dataset_id_field = KTP_SOURCE_KEY_COL
+    dataset_id_field = KTP_NAMEKEY_COL
 
 
 def _inner(data: dict[str, object]) -> InnerDict:
@@ -80,8 +80,8 @@ def _name(first: str = "Ada", last: str = "Lovelace") -> NameKey:
 def _xlsx_payload(*, exact: bool = True) -> str:
     return json.dumps(
         {
-            KTP_XLSX_MATCH_SOURCE_KEY_TOKENS_KEY: ["ada"],
-            KTP_XLSX_MATCH_SOURCE_KEY_LAST_KEY: "lovelace",
+            KTP_XLSX_MATCH_NAMEKEY_TOKENS_KEY: ["ada"],
+            KTP_XLSX_MATCH_NAMEKEY_LAST_KEY: "lovelace",
             KTP_XLSX_MATCH_FIRST_TOKENS_KEY: ["ada" if exact else "augusta"],
             KTP_XLSX_MATCH_LAST_NAME_NORM_KEY: "lovelace",
         }
@@ -92,8 +92,8 @@ def _xlsx_v2_payload(*, rule: str, first_tokens: list[str] | None = None) -> str
     return json.dumps(
         {
             KTP_XLSX_MATCH_RULE_KEY: rule,
-            KTP_XLSX_MATCH_SOURCE_KEY_TOKENS_KEY: ["ada"],
-            KTP_XLSX_MATCH_SOURCE_KEY_LAST_KEY: ["lovelace"],
+            KTP_XLSX_MATCH_NAMEKEY_TOKENS_KEY: ["ada"],
+            KTP_XLSX_MATCH_NAMEKEY_LAST_KEY: ["lovelace"],
             KTP_XLSX_MATCH_FIRST_TOKENS_KEY: first_tokens or ["ada"],
             KTP_XLSX_MATCH_LAST_NAME_NORM_KEY: ["lovelace"],
         }
@@ -230,8 +230,8 @@ def test_v1_xlsx_rule_payload_preserves_legacy_exact_partitioning() -> None:
                 KTP_XLSX_MATCH_COL: json.dumps(
                     {
                         KTP_XLSX_MATCH_RULE_KEY: KTP_XLSX_MATCH_RULE_V1,
-                        KTP_XLSX_MATCH_SOURCE_KEY_TOKENS_KEY: ["ada"],
-                        KTP_XLSX_MATCH_SOURCE_KEY_LAST_KEY: "lovelace",
+                        KTP_XLSX_MATCH_NAMEKEY_TOKENS_KEY: ["ada"],
+                        KTP_XLSX_MATCH_NAMEKEY_LAST_KEY: "lovelace",
                         KTP_XLSX_MATCH_FIRST_TOKENS_KEY: ["ada"],
                         KTP_XLSX_MATCH_LAST_NAME_NORM_KEY: "lovelace",
                     }
@@ -352,7 +352,7 @@ def test_partition_review_view_has_specified_order_and_placeholders() -> None:
     partition_rows = pd.DataFrame(
         [
             {
-                KTP_SOURCE_KEY_COL: "xlsx-source",
+                KTP_NAMEKEY_COL: "xlsx-source",
                 KTP_PARTITION_COL: KTP_PARTITION_XLSX_VALUE,
                 KTP_PARTITION_FLAG_XLSX_NON_EXACT_ANY_COL: True,
                 KTP_PARTITION_FLAG_XLSX_ANY_COL: True,
@@ -365,7 +365,7 @@ def test_partition_review_view_has_specified_order_and_placeholders() -> None:
                 KTP_LAST_NAME_COL: "Xlsx",
             },
             {
-                KTP_SOURCE_KEY_COL: "sc-zero-source",
+                KTP_NAMEKEY_COL: "sc-zero-source",
                 KTP_PARTITION_COL: KTP_PARTITION_SSN_VALUE,
                 KTP_PARTITION_FLAG_XLSX_NON_EXACT_ANY_COL: False,
                 KTP_PARTITION_FLAG_XLSX_ANY_COL: True,
@@ -378,7 +378,7 @@ def test_partition_review_view_has_specified_order_and_placeholders() -> None:
                 KTP_LAST_NAME_COL: "ScZero",
             },
             {
-                KTP_SOURCE_KEY_COL: "sc-one-source",
+                KTP_NAMEKEY_COL: "sc-one-source",
                 KTP_PARTITION_COL: KTP_PARTITION_SSN_VALUE,
                 KTP_PARTITION_FLAG_XLSX_NON_EXACT_ANY_COL: False,
                 KTP_PARTITION_FLAG_XLSX_ANY_COL: True,
@@ -391,7 +391,7 @@ def test_partition_review_view_has_specified_order_and_placeholders() -> None:
                 KTP_LAST_NAME_COL: "ScOne",
             },
             {
-                KTP_SOURCE_KEY_COL: "docx-source",
+                KTP_NAMEKEY_COL: "docx-source",
                 KTP_PARTITION_COL: KTP_PARTITION_DOCX_VALUE,
                 KTP_PARTITION_FLAG_XLSX_NON_EXACT_ANY_COL: False,
                 KTP_PARTITION_FLAG_XLSX_ANY_COL: True,
@@ -412,7 +412,7 @@ def test_partition_review_view_has_specified_order_and_placeholders() -> None:
         XLSX_OUTPUT_VIEW,
         [
             {
-                KTP_SOURCE_KEY_COL: "xlsx-source",
+                KTP_NAMEKEY_COL: "xlsx-source",
                 KTP_FILENAME_COL: "hcr.xlsx",
                 KTP_FRAGMENT_COL: "11",
                 KTP_FRAGMENT_TYPE_COL: "excel_row",
@@ -427,7 +427,7 @@ def test_partition_review_view_has_specified_order_and_placeholders() -> None:
                 KTP_XLSX_MATCH_COL: _xlsx_payload(exact=False),
             },
             {
-                KTP_SOURCE_KEY_COL: "sc-zero-source",
+                KTP_NAMEKEY_COL: "sc-zero-source",
                 KTP_FILENAME_COL: "hcr.xlsx",
                 KTP_FRAGMENT_COL: "12",
                 KTP_FRAGMENT_TYPE_COL: "excel_row",
@@ -442,7 +442,7 @@ def test_partition_review_view_has_specified_order_and_placeholders() -> None:
                 KTP_XLSX_MATCH_COL: _xlsx_payload(),
             },
             {
-                KTP_SOURCE_KEY_COL: "sc-one-source",
+                KTP_NAMEKEY_COL: "sc-one-source",
                 KTP_FILENAME_COL: "hcr.xlsx",
                 KTP_FRAGMENT_COL: "13",
                 KTP_FRAGMENT_TYPE_COL: "excel_row",
@@ -458,7 +458,7 @@ def test_partition_review_view_has_specified_order_and_placeholders() -> None:
             },
         ],
         [
-            KTP_SOURCE_KEY_COL,
+            KTP_NAMEKEY_COL,
             KTP_FILENAME_COL,
             KTP_FRAGMENT_COL,
             KTP_FRAGMENT_TYPE_COL,
@@ -478,7 +478,7 @@ def test_partition_review_view_has_specified_order_and_placeholders() -> None:
         PARQUET_OUTPUT_VIEW,
         [
             {
-                KTP_SOURCE_KEY_COL: "xlsx-source",
+                KTP_NAMEKEY_COL: "xlsx-source",
                 KTP_FILENAME_COL: "author_details.parquet",
                 KTP_FRAGMENT_COL: "A-xlsx",
                 KTP_FRAGMENT_TYPE_COL: "author_id",
@@ -495,7 +495,7 @@ def test_partition_review_view_has_specified_order_and_placeholders() -> None:
                 SSNAD_WORKS_API_URL_COL: "https://api.openalex.org/authors/A-xlsx",
             },
             {
-                KTP_SOURCE_KEY_COL: "sc-one-source",
+                KTP_NAMEKEY_COL: "sc-one-source",
                 KTP_FILENAME_COL: "author_details.parquet",
                 KTP_FRAGMENT_COL: "A-sc-one",
                 KTP_FRAGMENT_TYPE_COL: "author_id",
@@ -512,7 +512,7 @@ def test_partition_review_view_has_specified_order_and_placeholders() -> None:
                 SSNAD_WORKS_API_URL_COL: "https://api.openalex.org/authors/A-sc-one",
             },
             {
-                KTP_SOURCE_KEY_COL: "docx-source",
+                KTP_NAMEKEY_COL: "docx-source",
                 KTP_FILENAME_COL: "author_details.parquet",
                 KTP_FRAGMENT_COL: "A-docx",
                 KTP_FRAGMENT_TYPE_COL: "author_id",
@@ -530,7 +530,7 @@ def test_partition_review_view_has_specified_order_and_placeholders() -> None:
             },
         ],
         [
-            KTP_SOURCE_KEY_COL,
+            KTP_NAMEKEY_COL,
             KTP_FILENAME_COL,
             KTP_FRAGMENT_COL,
             KTP_FRAGMENT_TYPE_COL,
@@ -552,7 +552,7 @@ def test_partition_review_view_has_specified_order_and_placeholders() -> None:
         DOCX_OUTPUT_VIEW,
         [
             {
-                KTP_SOURCE_KEY_COL: "docx-source",
+                KTP_NAMEKEY_COL: "docx-source",
                 KTP_FILENAME_COL: "manual.docx",
                 KTP_FRAGMENT_COL: "7",
                 KTP_FRAGMENT_TYPE_COL: "docx_row",
@@ -564,7 +564,7 @@ def test_partition_review_view_has_specified_order_and_placeholders() -> None:
                 "ktp.table_1_affiliation": "Difference Institute",
             },
             {
-                KTP_SOURCE_KEY_COL: "xlsx-source",
+                KTP_NAMEKEY_COL: "xlsx-source",
                 KTP_FILENAME_COL: "manual.docx",
                 KTP_FRAGMENT_COL: "8",
                 KTP_FRAGMENT_TYPE_COL: "docx_row",
@@ -576,7 +576,7 @@ def test_partition_review_view_has_specified_order_and_placeholders() -> None:
                 "ktp.table_1_affiliation": "Xlsx Singleton Institute",
             },
             {
-                KTP_SOURCE_KEY_COL: "sc-zero-source",
+                KTP_NAMEKEY_COL: "sc-zero-source",
                 KTP_FILENAME_COL: "manual.docx",
                 KTP_FRAGMENT_COL: "9",
                 KTP_FRAGMENT_TYPE_COL: "docx_row",
@@ -588,7 +588,7 @@ def test_partition_review_view_has_specified_order_and_placeholders() -> None:
                 "ktp.table_1_affiliation": "ScZero Singleton Institute",
             },
             {
-                KTP_SOURCE_KEY_COL: "sc-one-source",
+                KTP_NAMEKEY_COL: "sc-one-source",
                 KTP_FILENAME_COL: "manual.docx",
                 KTP_FRAGMENT_COL: "10",
                 KTP_FRAGMENT_TYPE_COL: "docx_row",
@@ -601,7 +601,7 @@ def test_partition_review_view_has_specified_order_and_placeholders() -> None:
             },
         ],
         [
-            KTP_SOURCE_KEY_COL,
+            KTP_NAMEKEY_COL,
             KTP_FILENAME_COL,
             KTP_FRAGMENT_COL,
             KTP_FRAGMENT_TYPE_COL,
@@ -623,7 +623,7 @@ def test_partition_review_view_has_specified_order_and_placeholders() -> None:
     ).fetchone() == (4,)
     assert review_df.columns.tolist() == review_columns
     assert review_df.columns.tolist() == [
-        KTP_SOURCE_KEY_COL,
+        KTP_NAMEKEY_COL,
         KTP_PARTITION_COL,
         KTP_FILENAME_COL,
         KTP_FRAGMENT_COL,
@@ -658,7 +658,7 @@ def test_partition_review_view_has_specified_order_and_placeholders() -> None:
         "ktp.table_1_researcher_author",
         "ktp.table_1_affiliation",
     ]
-    assert review_df[KTP_SOURCE_KEY_COL].tolist() == [
+    assert review_df[KTP_NAMEKEY_COL].tolist() == [
         "xlsx-source",
         "sc-zero-source",
         "sc-one-source",
@@ -667,14 +667,14 @@ def test_partition_review_view_has_specified_order_and_placeholders() -> None:
     assert review_df[KTP_FF_DISCARD_COL].isna().all()
     assert review_df[KTP_FF_NOTE_COL].isna().all()
 
-    xlsx_row = review_df[review_df[KTP_SOURCE_KEY_COL] == "xlsx-source"].iloc[0]
+    xlsx_row = review_df[review_df[KTP_NAMEKEY_COL] == "xlsx-source"].iloc[0]
     assert xlsx_row[KTP_FILENAME_COL] == "hcr.xlsx\nauthor_details.parquet\nmanual.docx"
     assert xlsx_row[KTP_FF_AUTHOR_ID_COL] == "A-xlsx"
     assert xlsx_row[SSNAD_DISPLAY_NAME_COL] == "Ada Xlsx OpenAlex"
     assert xlsx_row[KTP_DOCX_MATCH_COL] == "xlsx-docx-match"
     assert xlsx_row["ktp.table_1_affiliation"] == "Xlsx Singleton Institute"
 
-    sc_placeholder = review_df[review_df[KTP_SOURCE_KEY_COL] == "sc-zero-source"].iloc[0]
+    sc_placeholder = review_df[review_df[KTP_NAMEKEY_COL] == "sc-zero-source"].iloc[0]
     assert sc_placeholder[KTP_FILENAME_COL] == "hcr.xlsx\nmanual.docx"
     assert pd.isna(sc_placeholder[KTP_FF_AUTHOR_ID_COL])
     assert pd.isna(sc_placeholder[SSNAD_DISPLAY_NAME_COL])
@@ -682,13 +682,13 @@ def test_partition_review_view_has_specified_order_and_placeholders() -> None:
     assert sc_placeholder[KTP_DOCX_MATCH_COL] == "sc-zero-docx-match"
     assert sc_placeholder[KTP_PARTITION_FLAG_SSN_COUNT_COL] == 0
 
-    sc_row = review_df[review_df[KTP_SOURCE_KEY_COL] == "sc-one-source"].iloc[0]
+    sc_row = review_df[review_df[KTP_NAMEKEY_COL] == "sc-one-source"].iloc[0]
     assert sc_row[KTP_FRAGMENT_COL] == "13\nA-sc-one\n10"
     assert sc_row[KTP_FF_AUTHOR_ID_COL] == "A-sc-one"
     assert sc_row[HCR_CATEGORY_COL] == "ScOne HCR"
     assert sc_row["ktp.table_1_affiliation"] == "ScOne Singleton Institute"
 
-    docx_row = review_df[review_df[KTP_SOURCE_KEY_COL] == "docx-source"].iloc[0]
+    docx_row = review_df[review_df[KTP_NAMEKEY_COL] == "docx-source"].iloc[0]
     assert docx_row[KTP_FILENAME_COL] == "author_details.parquet\nmanual.docx"
     assert docx_row["ktp.table_1_affiliation"] == "Difference Institute"
     assert docx_row[KTP_FF_AUTHOR_ID_COL] == "A-docx"
@@ -701,7 +701,7 @@ def test_partition_review_view_merges_all_available_context_values() -> None:
     partition_rows = pd.DataFrame(
         [
             {
-                KTP_SOURCE_KEY_COL: "xlsx-source",
+                KTP_NAMEKEY_COL: "xlsx-source",
                 KTP_PARTITION_COL: KTP_PARTITION_XLSX_VALUE,
                 KTP_PARTITION_FLAG_XLSX_NON_EXACT_ANY_COL: True,
                 KTP_PARTITION_FLAG_XLSX_ANY_COL: True,
@@ -722,7 +722,7 @@ def test_partition_review_view_merges_all_available_context_values() -> None:
         XLSX_OUTPUT_VIEW,
         [
             {
-                KTP_SOURCE_KEY_COL: "xlsx-source",
+                KTP_NAMEKEY_COL: "xlsx-source",
                 KTP_FILENAME_COL: "hcr.xlsx",
                 KTP_FRAGMENT_COL: "11",
                 KTP_FRAGMENT_TYPE_COL: "excel_row",
@@ -734,7 +734,7 @@ def test_partition_review_view_merges_all_available_context_values() -> None:
             }
         ],
         [
-            KTP_SOURCE_KEY_COL,
+            KTP_NAMEKEY_COL,
             KTP_FILENAME_COL,
             KTP_FRAGMENT_COL,
             KTP_FRAGMENT_TYPE_COL,
@@ -750,14 +750,14 @@ def test_partition_review_view_merges_all_available_context_values() -> None:
         PARQUET_OUTPUT_VIEW,
         [
             {
-                KTP_SOURCE_KEY_COL: "xlsx-source",
+                KTP_NAMEKEY_COL: "xlsx-source",
                 KTP_FILENAME_COL: "author_details.parquet",
                 KTP_FRAGMENT_COL: "A-1",
                 KTP_FRAGMENT_TYPE_COL: "author_id",
                 SSNAD_DISPLAY_NAME_COL: "Ada One",
             },
             {
-                KTP_SOURCE_KEY_COL: "xlsx-source",
+                KTP_NAMEKEY_COL: "xlsx-source",
                 KTP_FILENAME_COL: "author_details.parquet",
                 KTP_FRAGMENT_COL: "A-2",
                 KTP_FRAGMENT_TYPE_COL: "author_id",
@@ -765,7 +765,7 @@ def test_partition_review_view_merges_all_available_context_values() -> None:
             },
         ],
         [
-            KTP_SOURCE_KEY_COL,
+            KTP_NAMEKEY_COL,
             KTP_FILENAME_COL,
             KTP_FRAGMENT_COL,
             KTP_FRAGMENT_TYPE_COL,
@@ -777,14 +777,14 @@ def test_partition_review_view_merges_all_available_context_values() -> None:
         DOCX_OUTPUT_VIEW,
         [
             {
-                KTP_SOURCE_KEY_COL: "xlsx-source",
+                KTP_NAMEKEY_COL: "xlsx-source",
                 KTP_FILENAME_COL: "manual.docx",
                 KTP_FRAGMENT_COL: "1",
                 KTP_FRAGMENT_TYPE_COL: "docx_row",
                 KTP_DOCX_MATCH_COL: "docx-one\nline",
             },
             {
-                KTP_SOURCE_KEY_COL: "xlsx-source",
+                KTP_NAMEKEY_COL: "xlsx-source",
                 KTP_FILENAME_COL: "manual.docx",
                 KTP_FRAGMENT_COL: "2",
                 KTP_FRAGMENT_TYPE_COL: "docx_row",
@@ -792,7 +792,7 @@ def test_partition_review_view_merges_all_available_context_values() -> None:
             },
         ],
         [
-            KTP_SOURCE_KEY_COL,
+            KTP_NAMEKEY_COL,
             KTP_FILENAME_COL,
             KTP_FRAGMENT_COL,
             KTP_FRAGMENT_TYPE_COL,
@@ -813,7 +813,7 @@ def test_partition_review_view_includes_no_resolution_partition_context() -> Non
     partition_rows = pd.DataFrame(
         [
             {
-                KTP_SOURCE_KEY_COL: "subset1-source",
+                KTP_NAMEKEY_COL: "subset1-source",
                 KTP_PARTITION_COL: KTP_PARTITION_NO_RESOLUTION_VALUE,
                 KTP_PARTITION_FLAG_XLSX_NON_EXACT_ANY_COL: False,
                 KTP_PARTITION_FLAG_XLSX_ANY_COL: True,
@@ -834,7 +834,7 @@ def test_partition_review_view_includes_no_resolution_partition_context() -> Non
         XLSX_OUTPUT_VIEW,
         [
             {
-                KTP_SOURCE_KEY_COL: "subset1-source",
+                KTP_NAMEKEY_COL: "subset1-source",
                 KTP_FILENAME_COL: "hcr.xlsx",
                 KTP_FRAGMENT_COL: "21",
                 KTP_FRAGMENT_TYPE_COL: "excel_row",
@@ -843,7 +843,7 @@ def test_partition_review_view_includes_no_resolution_partition_context() -> Non
             }
         ],
         [
-            KTP_SOURCE_KEY_COL,
+            KTP_NAMEKEY_COL,
             KTP_FILENAME_COL,
             KTP_FRAGMENT_COL,
             KTP_FRAGMENT_TYPE_COL,
@@ -856,7 +856,7 @@ def test_partition_review_view_includes_no_resolution_partition_context() -> Non
         PARQUET_OUTPUT_VIEW,
         [
             {
-                KTP_SOURCE_KEY_COL: "subset1-source",
+                KTP_NAMEKEY_COL: "subset1-source",
                 KTP_FILENAME_COL: "author_details.parquet",
                 KTP_FRAGMENT_COL: "A-subset",
                 KTP_FRAGMENT_TYPE_COL: "author_id",
@@ -865,7 +865,7 @@ def test_partition_review_view_includes_no_resolution_partition_context() -> Non
             }
         ],
         [
-            KTP_SOURCE_KEY_COL,
+            KTP_NAMEKEY_COL,
             KTP_FILENAME_COL,
             KTP_FRAGMENT_COL,
             KTP_FRAGMENT_TYPE_COL,
@@ -878,7 +878,7 @@ def test_partition_review_view_includes_no_resolution_partition_context() -> Non
         DOCX_OUTPUT_VIEW,
         [
             {
-                KTP_SOURCE_KEY_COL: "subset1-source",
+                KTP_NAMEKEY_COL: "subset1-source",
                 KTP_FILENAME_COL: "manual.docx",
                 KTP_FRAGMENT_COL: "4",
                 KTP_FRAGMENT_TYPE_COL: "docx_row",
@@ -887,7 +887,7 @@ def test_partition_review_view_includes_no_resolution_partition_context() -> Non
             }
         ],
         [
-            KTP_SOURCE_KEY_COL,
+            KTP_NAMEKEY_COL,
             KTP_FILENAME_COL,
             KTP_FRAGMENT_COL,
             KTP_FRAGMENT_TYPE_COL,
@@ -914,7 +914,7 @@ def test_partition_review_view_merges_json_typed_context_values_as_display_text(
     partition_rows = pd.DataFrame(
         [
             {
-                KTP_SOURCE_KEY_COL: "sc-source",
+                KTP_NAMEKEY_COL: "sc-source",
                 KTP_PARTITION_COL: KTP_PARTITION_SSN_VALUE,
                 KTP_PARTITION_FLAG_XLSX_NON_EXACT_ANY_COL: False,
                 KTP_PARTITION_FLAG_XLSX_ANY_COL: True,
@@ -933,14 +933,14 @@ def test_partition_review_view_merges_json_typed_context_values_as_display_text(
         f"""
         CREATE OR REPLACE VIEW {XLSX_OUTPUT_VIEW} AS
         SELECT
-            'sc-source' AS "{KTP_SOURCE_KEY_COL}",
+            'sc-source' AS "{KTP_NAMEKEY_COL}",
             'hcr.xlsx' AS "{KTP_FILENAME_COL}",
             '1' AS "{KTP_FRAGMENT_COL}",
             'excel_row' AS "{KTP_FRAGMENT_TYPE_COL}",
             json('["United States"]') AS "{KTP_ECONOMIES_COL}"
         UNION ALL
         SELECT
-            'sc-source' AS "{KTP_SOURCE_KEY_COL}",
+            'sc-source' AS "{KTP_NAMEKEY_COL}",
             'hcr.xlsx' AS "{KTP_FILENAME_COL}",
             '2' AS "{KTP_FRAGMENT_COL}",
             'excel_row' AS "{KTP_FRAGMENT_TYPE_COL}",
@@ -950,14 +950,14 @@ def test_partition_review_view_merges_json_typed_context_values_as_display_text(
     conn.execute(
         f"""
         CREATE OR REPLACE VIEW {PARQUET_OUTPUT_VIEW} AS
-        SELECT CAST(NULL AS VARCHAR) AS "{KTP_SOURCE_KEY_COL}"
+        SELECT CAST(NULL AS VARCHAR) AS "{KTP_NAMEKEY_COL}"
         WHERE FALSE
         """
     )
     conn.execute(
         f"""
         CREATE OR REPLACE VIEW {DOCX_OUTPUT_VIEW} AS
-        SELECT CAST(NULL AS VARCHAR) AS "{KTP_SOURCE_KEY_COL}"
+        SELECT CAST(NULL AS VARCHAR) AS "{KTP_NAMEKEY_COL}"
         WHERE FALSE
         """
     )

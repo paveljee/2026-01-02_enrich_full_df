@@ -16,7 +16,7 @@ from src.helpers.schema import (
     INNERDICT_TABLE_SCHEMA,
 )
 from src.helpers.ssn_hit_selection import ssn_sum_hit_1pct_sql
-from src.helpers.vars import DRAW_LABEL, KTP_SOURCE_KEY_COL
+from src.helpers.vars import DRAW_LABEL, KTP_NAMEKEY_COL
 
 
 @pytest.mark.parametrize(
@@ -32,7 +32,7 @@ def test_innerdict_contract_materializes_and_hydrates_ordered_rows(
         conn.execute(
             f'''
             CREATE TABLE {source_relation} (
-                "{KTP_SOURCE_KEY_COL}" VARCHAR,
+                "{KTP_NAMEKEY_COL}" VARCHAR,
                 "{DRAW_LABEL}" VARCHAR,
                 row_order INTEGER,
                 integer_value BIGINT,
@@ -66,7 +66,7 @@ def test_innerdict_contract_materializes_and_hydrates_ordered_rows(
 
         key_a_records = loads_jsonlines(persisted[0][1])
         assert [record["row_order"] for record in key_a_records] == [1, 2]
-        assert all(KTP_SOURCE_KEY_COL not in record for record in key_a_records)
+        assert all(KTP_NAMEKEY_COL not in record for record in key_a_records)
         assert key_a_records[0] == {
             DRAW_LABEL: "7",
             "row_order": 1,
@@ -104,7 +104,7 @@ def test_innerdict_contract_materializes_empty_source() -> None:
         conn.execute(
             f'''
             CREATE TABLE {source_relation} (
-                "{KTP_SOURCE_KEY_COL}" VARCHAR,
+                "{KTP_NAMEKEY_COL}" VARCHAR,
                 row_order INTEGER
             )
             '''
@@ -131,7 +131,7 @@ def test_innerdict_contract_rejects_hugeint_source() -> None:
         conn.execute(
             f'''
             CREATE TABLE {source_relation} (
-                "{KTP_SOURCE_KEY_COL}" VARCHAR,
+                "{KTP_NAMEKEY_COL}" VARCHAR,
                 metric HUGEINT
             )
             '''

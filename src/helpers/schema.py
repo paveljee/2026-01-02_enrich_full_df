@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import re
 
+from .vars import KTP_INNERDICT_JSONLINES_COL, KTP_NAMEKEY_COL
+
 POPULATION_TABLE = "population"
 POPULATION_NAMES_TABLE = "population_names"
 POPULATION_NAMES_VIEW = "population_with_names"
@@ -13,9 +15,9 @@ SAMPLES_VIEW = "samples_with_context"
 SAMPLES_WITH_NAMES_VIEW = "samples_with_names"
 
 OUTERDICT_STUB_TABLE = "outerdict_stub"
-OUTERDICT_NAME_VIEW = "outerdict_name_keys"
+OUTERDICT_NAME_VIEW = "outerdict_namekeys"
 OUTERDICT_EXCLUDED_STUB_TABLE = "outerdict_stub_excluded"
-OUTERDICT_EXCLUDED_NAME_VIEW = "outerdict_name_keys_excluded"
+OUTERDICT_EXCLUDED_NAME_VIEW = "outerdict_namekeys_excluded"
 REGISTERED_RESOURCES_TABLE = "registered_resources"
 
 XLSX_MATCH_VIEW = "xlsx_matches"
@@ -45,11 +47,9 @@ PARQUET_LEGACY_ROWS_INNERDICT_TABLE = "ssn_legacy_rows_innerdicts"
 PARQUET_AUTHOR_OUTPUT_TABLE = "ssn_author_output"
 PARQUET_OUTPUT_VIEW = "ssn_parquet_output"
 
-INNERDICT_NAME_KEY_COL = "name_key"
-INNERDICT_JSONLINES_COL = "innerdicts"
 INNERDICT_TABLE_SCHEMA: tuple[tuple[str, str], ...] = (
-    (INNERDICT_NAME_KEY_COL, "VARCHAR"),
-    (INNERDICT_JSONLINES_COL, "VARCHAR"),
+    (KTP_NAMEKEY_COL, "VARCHAR"),
+    (KTP_INNERDICT_JSONLINES_COL, "VARCHAR"),
 )
 INNERDICT_SOURCE_RELATIONS: dict[str, str] = {
     XLSX_INNERDICT_TABLE: XLSX_MATCH_VIEW,

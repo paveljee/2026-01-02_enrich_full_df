@@ -17,7 +17,8 @@ from src.helpers.schema import (
 )
 from src.helpers.vars import (
     KTP_FRAGMENT_COL,
-    KTP_SOURCE_KEY_COL,
+    KTP_INNERDICT_JSONLINES_COL,
+    KTP_NAMEKEY_COL,
     STEP_BUILD_OUTERDICT,
     STEP_MATCH_PARQUET,
 )
@@ -44,13 +45,16 @@ def test_resume_hydrates_parquet_from_jsonlines_innerdict_table(
 
     conn = duckdb.connect(str(db_file))
     try:
-        conn.execute(f"CREATE TABLE {OUTERDICT_STUB_TABLE} (name_key VARCHAR)")
+        conn.execute(
+            f'CREATE TABLE {OUTERDICT_STUB_TABLE} '
+            f'("{KTP_NAMEKEY_COL}" VARCHAR)'
+        )
         conn.execute(f"INSERT INTO {OUTERDICT_STUB_TABLE} VALUES (?)", [source_key])
         conn.execute(
             f'''
             CREATE TABLE {PARQUET_INNERDICT_TABLE} (
-                name_key VARCHAR,
-                innerdicts VARCHAR
+                "{KTP_NAMEKEY_COL}" VARCHAR,
+                "{KTP_INNERDICT_JSONLINES_COL}" VARCHAR
             )
             '''
         )
@@ -61,7 +65,7 @@ def test_resume_hydrates_parquet_from_jsonlines_innerdict_table(
         conn.execute(
             f'''
             CREATE TABLE {PARQUET_LEGACY_ROWS_INNERDICT_TABLE} (
-                "{KTP_SOURCE_KEY_COL}" VARCHAR,
+                "{KTP_NAMEKEY_COL}" VARCHAR,
                 "{KTP_FRAGMENT_COL}" VARCHAR
             )
             '''

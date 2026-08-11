@@ -28,12 +28,12 @@ from src.helpers.vars import (
     HCR_XLSX_KEY_PREFIX,
     KTP_FILENAME_COL,
     KTP_FRAGMENT_COL,
-    KTP_SOURCE_KEY_COL,
+    KTP_NAMEKEY_COL,
     KTP_XLSX_MATCH_COL,
     KTP_XLSX_MATCH_FIRST_TOKENS_KEY,
     KTP_XLSX_MATCH_LAST_NAME_NORM_KEY,
-    KTP_XLSX_MATCH_SOURCE_KEY_LAST_KEY,
-    KTP_XLSX_MATCH_SOURCE_KEY_TOKENS_KEY,
+    KTP_XLSX_MATCH_NAMEKEY_LAST_KEY,
+    KTP_XLSX_MATCH_NAMEKEY_TOKENS_KEY,
     REQUIRED_FILES_CONFIG_KEYS,
 )
 
@@ -51,8 +51,8 @@ def _name_key(first: str, last: str) -> str:
 def _exact_xlsx_payload(first_tokens: list[str], last_norm: str) -> str:
     return json.dumps(
         {
-            KTP_XLSX_MATCH_SOURCE_KEY_TOKENS_KEY: first_tokens,
-            KTP_XLSX_MATCH_SOURCE_KEY_LAST_KEY: last_norm,
+            KTP_XLSX_MATCH_NAMEKEY_TOKENS_KEY: first_tokens,
+            KTP_XLSX_MATCH_NAMEKEY_LAST_KEY: last_norm,
             KTP_XLSX_MATCH_FIRST_TOKENS_KEY: first_tokens,
             KTP_XLSX_MATCH_LAST_NAME_NORM_KEY: last_norm,
         },
@@ -65,8 +65,8 @@ def _non_exact_xlsx_payload(
 ) -> str:
     return json.dumps(
         {
-            KTP_XLSX_MATCH_SOURCE_KEY_TOKENS_KEY: source_tokens,
-            KTP_XLSX_MATCH_SOURCE_KEY_LAST_KEY: last_norm,
+            KTP_XLSX_MATCH_NAMEKEY_TOKENS_KEY: source_tokens,
+            KTP_XLSX_MATCH_NAMEKEY_LAST_KEY: last_norm,
             KTP_XLSX_MATCH_FIRST_TOKENS_KEY: first_tokens,
             KTP_XLSX_MATCH_LAST_NAME_NORM_KEY: last_norm,
         },
@@ -129,7 +129,7 @@ def _build_fixture_db(path: Path) -> dict[str, int]:
         con.execute(
             f"""
             CREATE TABLE {PARQUET_LEGACY_ROWS_INNERDICT_TABLE} (
-                "{KTP_SOURCE_KEY_COL}" VARCHAR,
+                "{KTP_NAMEKEY_COL}" VARCHAR,
                 "ssnau.p_gf" DOUBLE,
                 "ssnau.inference_counts" BIGINT,
                 "ssnau.inference_sources" BIGINT
@@ -264,7 +264,7 @@ def _build_fixture_db(path: Path) -> dict[str, int]:
         con.executemany(
             (
                 f'INSERT INTO {PARQUET_LEGACY_ROWS_INNERDICT_TABLE} '
-                f'("{KTP_SOURCE_KEY_COL}", "ssnau.p_gf", '
+                f'("{KTP_NAMEKEY_COL}", "ssnau.p_gf", '
                 f'"ssnau.inference_counts", "ssnau.inference_sources") '
                 f"VALUES (?, ?, ?, ?)"
             ),

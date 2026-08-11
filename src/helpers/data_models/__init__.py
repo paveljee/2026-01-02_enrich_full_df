@@ -5,13 +5,13 @@ from .http_request_log import (
     matching_http_request_log_record,
     redact_http_request_log_query,
 )
-from .outer_dict import (
+from .outerdict import (
     InnerDict,
     MatchingProcedure,
     NameKey,
     OuterDict,
 )
-from .source_key import (
+from .sourcekey import (
     Fragment,
     FragmentType,
     RegisteredResource,

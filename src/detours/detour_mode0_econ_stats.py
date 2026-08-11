@@ -46,16 +46,17 @@ from src.helpers.vars import (
     KTP_HCR_PRIMARY_AFFILIATIONS_COL,
     KTP_HCR_ROW_NUMBER_COL,
     KTP_HCR_SECONDARY_AFFILIATIONS_COL,
+    KTP_INNERDICT_JSONLINES_COL,
     KTP_LAST_NAME_COL,
+    KTP_NAMEKEY_COL,
     KTP_POPULATION_INDEX_COL,
     KTP_PRIORITY_COL,
     KTP_PRIORITY_GROUP_COL,
     KTP_PRIORITY_GROUP_LABELS,
-    KTP_SOURCE_KEY_COL,
     KTP_XLSX_MATCH_FIRST_TOKENS_KEY,
     KTP_XLSX_MATCH_LAST_NAME_NORM_KEY,
-    KTP_XLSX_MATCH_SOURCE_KEY_LAST_KEY,
-    KTP_XLSX_MATCH_SOURCE_KEY_TOKENS_KEY,
+    KTP_XLSX_MATCH_NAMEKEY_LAST_KEY,
+    KTP_XLSX_MATCH_NAMEKEY_TOKENS_KEY,
     OGHIST_INCOME_LABELS,
     WORLD_BANK_FORMER_ECONOMY_CODES,
     WORLD_BANK_INCOME_FISCAL_YEAR,
@@ -177,8 +178,8 @@ def _is_exact_xlsx_match_payload(value: object) -> bool:
         return False
     if not isinstance(payload, dict):
         return False
-    source_key_tokens = payload.get(KTP_XLSX_MATCH_SOURCE_KEY_TOKENS_KEY, [])
-    source_key_last = payload.get(KTP_XLSX_MATCH_SOURCE_KEY_LAST_KEY)
+    source_key_tokens = payload.get(KTP_XLSX_MATCH_NAMEKEY_TOKENS_KEY, [])
+    source_key_last = payload.get(KTP_XLSX_MATCH_NAMEKEY_LAST_KEY)
     first_tokens = payload.get(KTP_XLSX_MATCH_FIRST_TOKENS_KEY, [])
     last_name_norm = payload.get(KTP_XLSX_MATCH_LAST_NAME_NORM_KEY)
     if not isinstance(source_key_tokens, list):
@@ -884,7 +885,7 @@ def _xlsx_match_bridge_df(
                 continue
             rows.append(
                 {
-                    KTP_SOURCE_KEY_COL: source_key,
+                    KTP_NAMEKEY_COL: source_key,
                     KTP_FILENAME_COL: filename,
                     KTP_FRAGMENT_COL: fragment,
                     BRIDGE_FIRST_NAME_COL: bridge_first_name,
@@ -895,7 +896,7 @@ def _xlsx_match_bridge_df(
     return pd.DataFrame(
         rows,
         columns=[
-            KTP_SOURCE_KEY_COL,
+            KTP_NAMEKEY_COL,
             KTP_FILENAME_COL,
             KTP_FRAGMENT_COL,
             BRIDGE_FIRST_NAME_COL,
@@ -939,7 +940,7 @@ def _fallback_population_with_economy_rows(
             )
             if dedupe_key in seen:
                 continue
-            rows.append({KTP_SOURCE_KEY_COL: source_key, **inner})
+            rows.append({KTP_NAMEKEY_COL: source_key, **inner})
             seen.add(dedupe_key)
     return pd.DataFrame(rows)
 
@@ -954,15 +955,15 @@ def _parquet_left_join_df(
     elif PARQUET_LEGACY_ROWS_INNERDICT_TABLE in tables:
         source_name = PARQUET_LEGACY_ROWS_INNERDICT_TABLE
     if source_name is None:
-        return pd.DataFrame(columns=[KTP_SOURCE_KEY_COL]), []
+        return pd.DataFrame(columns=[KTP_NAMEKEY_COL]), []
 
     parquet_df = conn.execute(f"SELECT * FROM {source_name}").df()
     join_cols = [col for col in PARQUET_LEFT_JOIN_COLS if col in parquet_df.columns]
-    keep_cols = [col for col in [KTP_SOURCE_KEY_COL, *join_cols] if col in parquet_df.columns]
+    keep_cols = [col for col in [KTP_NAMEKEY_COL, *join_cols] if col in parquet_df.columns]
     if not keep_cols:
-        return pd.DataFrame(columns=[KTP_SOURCE_KEY_COL]), []
+        return pd.DataFrame(columns=[KTP_NAMEKEY_COL]), []
     parquet_df = parquet_df[keep_cols].copy()
-    parquet_df = parquet_df.drop_duplicates(subset=[KTP_SOURCE_KEY_COL], keep="first")
+    parquet_df = parquet_df.drop_duplicates(subset=[KTP_NAMEKEY_COL], keep="first")
     return parquet_df, join_cols
 
 
@@ -1032,7 +1033,7 @@ def _write_population_with_economy_and_parquet_csv(
             )
         else:
             merged_df = base_df.copy()
-            merged_df[KTP_SOURCE_KEY_COL] = None
+            merged_df[KTP_NAMEKEY_COL] = None
     else:
         merged_df = _fallback_population_with_economy_rows(xlsx_rows_by_key)
         if not base_cols:
@@ -1059,10 +1060,10 @@ def _write_population_with_economy_and_parquet_csv(
     parquet_df, parquet_join_cols = _parquet_left_join_df(conn)
     if (
         not parquet_df.empty
-        and KTP_SOURCE_KEY_COL in merged_df.columns
-        and KTP_SOURCE_KEY_COL in parquet_df.columns
+        and KTP_NAMEKEY_COL in merged_df.columns
+        and KTP_NAMEKEY_COL in parquet_df.columns
     ):
-        merged_df = merged_df.merge(parquet_df, how="left", on=KTP_SOURCE_KEY_COL)
+        merged_df = merged_df.merge(parquet_df, how="left", on=KTP_NAMEKEY_COL)
 
     final_cols = [col for col in base_cols if col in merged_df.columns]
     if KTP_ECONOMIES_ISO_COL in merged_df.columns:
@@ -1078,7 +1079,7 @@ def _write_population_with_economy_and_parquet_csv(
         final_cols = [
             col
             for col in merged_df.columns
-            if col != KTP_SOURCE_KEY_COL
+            if col != KTP_NAMEKEY_COL
         ]
 
     final_df = merged_df[final_cols].copy()
@@ -1127,7 +1128,8 @@ def _build_mode0_econ_metadata(
     outer_keys = [
         row[0]
         for row in conn.execute(
-            f"SELECT name_key FROM {OUTERDICT_STUB_TABLE} ORDER BY name_key"
+            f'SELECT "{KTP_NAMEKEY_COL}" FROM {OUTERDICT_STUB_TABLE} '
+            f'ORDER BY "{KTP_NAMEKEY_COL}"'
         ).fetchall()
     ]
     outerdict_keys = len(outer_keys)
@@ -1137,7 +1139,8 @@ def _build_mode0_econ_metadata(
 
     xlsx_rows_by_key: dict[str, list[dict[str, object]]] = defaultdict(list)
     for name_key, inner_blob in conn.execute(
-        f"SELECT name_key, innerdicts FROM {XLSX_INNERDICT_TABLE}"
+        f'SELECT "{KTP_NAMEKEY_COL}", "{KTP_INNERDICT_JSONLINES_COL}" '
+        f"FROM {XLSX_INNERDICT_TABLE}"
     ).fetchall():
         if name_key is None:
             continue

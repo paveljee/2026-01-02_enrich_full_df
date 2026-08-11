@@ -76,7 +76,7 @@ from ..helpers.vars import (
     KTP_LAST_NAME_COL,
     KTP_OPENALEX_MATCH_COL,
     KTP_OPENALEX_REUSED_COL,
-    KTP_SOURCE_KEY_COL,
+    KTP_NAMEKEY_COL,
     KTP_SSN_COUNT_PAPERID_COL,
     KTP_SSN_FIELD_DISPLAY_NAMES_LIST_COL,
     KTP_SSN_MATCH_RULE_KEY,
@@ -699,7 +699,7 @@ def run(context: PipelineContext) -> StepResult:
         CREATE OR REPLACE TABLE {PARQUET_AUTHOR_MATCH_TABLE} AS
         WITH names AS (
             SELECT
-                "{KTP_SOURCE_KEY_COL}" AS name_key,
+                "{KTP_NAMEKEY_COL}" AS name_key,
                 "{KTP_FIRST_NAME_COL}" AS "{KTP_FIRST_NAME_COL}",
                 "{KTP_LAST_NAME_COL}" AS "{KTP_LAST_NAME_COL}",
                 {ktp_match_key_expr} AS match_key_norm
@@ -1313,14 +1313,14 @@ def run(context: PipelineContext) -> StepResult:
         CREATE OR REPLACE TABLE {PARQUET_AUTHOR_OUTPUT_TABLE} AS
         WITH source_draw AS (
             SELECT
-                x."{KTP_SOURCE_KEY_COL}" AS "{KTP_SOURCE_KEY_COL}",
+                x."{KTP_NAMEKEY_COL}" AS "{KTP_NAMEKEY_COL}",
                 x."{DRAW_LABEL}" AS "{DRAW_LABEL}"
             FROM (
                 SELECT
-                    nk."{KTP_SOURCE_KEY_COL}" AS "{KTP_SOURCE_KEY_COL}",
+                    nk."{KTP_NAMEKEY_COL}" AS "{KTP_NAMEKEY_COL}",
                     s."{DRAW_LABEL}" AS "{DRAW_LABEL}",
                     ROW_NUMBER() OVER (
-                        PARTITION BY nk."{KTP_SOURCE_KEY_COL}"
+                        PARTITION BY nk."{KTP_NAMEKEY_COL}"
                         ORDER BY
                             CASE
                                 WHEN starts_with(CAST(s."{DRAW_LABEL}" AS VARCHAR), 'pilot.') THEN 0
@@ -1351,7 +1351,7 @@ def run(context: PipelineContext) -> StepResult:
             WHERE x.draw_rank = 1
         )
         SELECT
-            m.name_key AS "{KTP_SOURCE_KEY_COL}",
+            m.name_key AS "{KTP_NAMEKEY_COL}",
             '{parquet_filename_payload}' AS "{KTP_FILENAME_COL}",
             a."{author_id_col}" AS "{KTP_FRAGMENT_COL}",
             'author_id' AS "{KTP_FRAGMENT_TYPE_COL}",
@@ -1374,7 +1374,7 @@ def run(context: PipelineContext) -> StepResult:
             agg."{KTP_SSN_SUM_HIT_1PCT_COL}"
         FROM {PARQUET_AUTHOR_MATCH_HIT_SELECTED_VIEW} m
         LEFT JOIN source_draw sd
-          ON sd."{KTP_SOURCE_KEY_COL}" = m.name_key
+          ON sd."{KTP_NAMEKEY_COL}" = m.name_key
         JOIN {author_table} a
           ON a."{author_id_col}" = m."{author_id_col}"
         JOIN {authors_table} au
@@ -1694,7 +1694,7 @@ def run(context: PipelineContext) -> StepResult:
         ),
         enriched AS (
             SELECT
-                v."{KTP_SOURCE_KEY_COL}",
+                v."{KTP_NAMEKEY_COL}",
                 v."{KTP_FILENAME_COL}",
                 v."{KTP_FRAGMENT_COL}",
                 v."{KTP_FRAGMENT_TYPE_COL}",
@@ -1703,7 +1703,7 @@ def run(context: PipelineContext) -> StepResult:
                 v."{KTP_LAST_NAME_COL}",
                 v."{KTP_SSNAD_MATCH_COL}",
                 v.* EXCLUDE (
-                    "{KTP_SOURCE_KEY_COL}",
+                    "{KTP_NAMEKEY_COL}",
                     "{KTP_FILENAME_COL}",
                     "{KTP_FRAGMENT_COL}",
                     "{KTP_FRAGMENT_TYPE_COL}",
@@ -1723,16 +1723,16 @@ def run(context: PipelineContext) -> StepResult:
                 cd."{KTP_SSN_FIELD_DISPLAY_NAMES_LIST_COL}"
             FROM {PARQUET_AUTHOR_OUTPUT_TABLE} v
             LEFT JOIN top_papers tp
-              ON tp.name_key = v."{KTP_SOURCE_KEY_COL}"
+              ON tp.name_key = v."{KTP_NAMEKEY_COL}"
              AND CAST(tp.authorid AS VARCHAR) = CAST(v."{author_id_col}" AS VARCHAR)
             LEFT JOIN top_oldest_papers top_old
-              ON top_old.name_key = v."{KTP_SOURCE_KEY_COL}"
+              ON top_old.name_key = v."{KTP_NAMEKEY_COL}"
              AND CAST(top_old.authorid AS VARCHAR) = CAST(v."{author_id_col}" AS VARCHAR)
             LEFT JOIN top_institutions ti
-              ON ti.name_key = v."{KTP_SOURCE_KEY_COL}"
+              ON ti.name_key = v."{KTP_NAMEKEY_COL}"
              AND CAST(ti.authorid AS VARCHAR) = CAST(v."{author_id_col}" AS VARCHAR)
             LEFT JOIN concept_display cd
-              ON cd.name_key = v."{KTP_SOURCE_KEY_COL}"
+              ON cd.name_key = v."{KTP_NAMEKEY_COL}"
              AND CAST(cd.authorid AS VARCHAR) = CAST(v."{author_id_col}" AS VARCHAR)
             WHERE v."{KTP_SSN_SUM_HIT_1PCT_COL}" IS NULL OR v."{KTP_SSN_SUM_HIT_1PCT_COL}" <> 0
         ),
@@ -1740,14 +1740,14 @@ def run(context: PipelineContext) -> StepResult:
             SELECT *
             FROM enriched
         ),
-        {draw_sort_ctes_sql(draw_col=DRAW_LABEL, source_key_col=KTP_SOURCE_KEY_COL)}
+        {draw_sort_ctes_sql(draw_col=DRAW_LABEL, source_key_col=KTP_NAMEKEY_COL)}
         SELECT * EXCLUDE (
             row_draw_group, row_draw_num, source_draw_group, source_draw_num
         )
         FROM ranked
         ORDER BY
             {draw_sort_order_by_sql(
-                source_key_col=KTP_SOURCE_KEY_COL,
+                source_key_col=KTP_NAMEKEY_COL,
                 filename_col=KTP_FILENAME_COL,
                 fragment_col=KTP_FRAGMENT_COL,
             )}
@@ -1791,14 +1791,14 @@ def run(context: PipelineContext) -> StepResult:
             SELECT *
             FROM {PARQUET_LEGACY_ROWS_INNERDICT_TABLE}
         ),
-        {draw_sort_ctes_sql(draw_col=DRAW_LABEL, source_key_col=KTP_SOURCE_KEY_COL)}
+        {draw_sort_ctes_sql(draw_col=DRAW_LABEL, source_key_col=KTP_NAMEKEY_COL)}
         SELECT * EXCLUDE (
             row_draw_group, row_draw_num, source_draw_group, source_draw_num
         )
         FROM ranked
         ORDER BY
             {draw_sort_order_by_sql(
-                source_key_col=KTP_SOURCE_KEY_COL,
+                source_key_col=KTP_NAMEKEY_COL,
                 filename_col=KTP_FILENAME_COL,
                 fragment_col=KTP_FRAGMENT_COL,
             )}

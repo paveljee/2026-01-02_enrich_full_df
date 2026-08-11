@@ -5,12 +5,8 @@ import pandas as pd
 
 from .data_models import InnerDict, OuterDict
 from .jsonlines import dumps_jsonlines, loads_jsonlines
-from .schema import (
-    INNERDICT_JSONLINES_COL,
-    INNERDICT_NAME_KEY_COL,
-    INNERDICT_TABLE_SCHEMA,
-)
-from .vars import KTP_SOURCE_KEY_COL
+from .schema import INNERDICT_TABLE_SCHEMA
+from .vars import KTP_INNERDICT_JSONLINES_COL, KTP_NAMEKEY_COL
 
 
 def duckdb_string_literal(value: str) -> str:
@@ -51,10 +47,10 @@ def materialize_innerdicts_from_rows_table(
         f"DESCRIBE SELECT * FROM {source_relation}"
     ).fetchall()
     source_columns = [str(row[0]) for row in source_schema]
-    if KTP_SOURCE_KEY_COL not in source_columns:
+    if KTP_NAMEKEY_COL not in source_columns:
         raise ValueError(
             f"Innerdict source relation '{source_relation}' is missing "
-            f"'{KTP_SOURCE_KEY_COL}'."
+            f"'{KTP_NAMEKEY_COL}'."
         )
 
     hugeint_columns = [
@@ -69,24 +65,24 @@ def materialize_innerdicts_from_rows_table(
         )
 
     ordered_rows = conn.execute(f"SELECT * FROM {source_relation}").df()
-    if ordered_rows[KTP_SOURCE_KEY_COL].isna().any():
+    if ordered_rows[KTP_NAMEKEY_COL].isna().any():
         raise ValueError(
             f"Innerdict source relation '{source_relation}' contains a NULL "
-            f"'{KTP_SOURCE_KEY_COL}'."
+            f"'{KTP_NAMEKEY_COL}'."
         )
 
     inner_rows: list[dict[str, str]] = []
     for source_key, group in ordered_rows.groupby(
-        KTP_SOURCE_KEY_COL,
+        KTP_NAMEKEY_COL,
         dropna=False,
         sort=False,
     ):
-        payload_df = group.drop(columns=[KTP_SOURCE_KEY_COL]).astype(object)
+        payload_df = group.drop(columns=[KTP_NAMEKEY_COL]).astype(object)
         payload_df = payload_df.where(pd.notna(payload_df), None)
         inner_rows.append(
             {
-                INNERDICT_NAME_KEY_COL: str(source_key),
-                INNERDICT_JSONLINES_COL: dumps_jsonlines(
+                KTP_NAMEKEY_COL: str(source_key),
+                KTP_INNERDICT_JSONLINES_COL: dumps_jsonlines(
                     payload_df.to_dict("records")
                 ),
             }
@@ -128,8 +124,9 @@ def append_innerdicts_from_jsonlines_table(
     required_columns: set[str] | None = None,
 ) -> None:
     rows = conn.execute(
-        f"SELECT {duckdb_quote_identifier(INNERDICT_NAME_KEY_COL)}, "
-        f"{duckdb_quote_identifier(INNERDICT_JSONLINES_COL)} FROM {table_name}"
+        f"SELECT {duckdb_quote_identifier(KTP_NAMEKEY_COL)}, "
+        f"{duckdb_quote_identifier(KTP_INNERDICT_JSONLINES_COL)} "
+        f"FROM {table_name}"
     ).fetchall()
     required = required_columns or set()
     for name_key, payload in rows:

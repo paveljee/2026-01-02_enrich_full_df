@@ -29,12 +29,13 @@ from src.helpers.vars import (
     CARD_BUILD_SUBSET_DESCRIPTIONS,
     KTP_FILENAME_COL,
     KTP_FRAGMENT_COL,
-    KTP_SOURCE_KEY_COL,
+    KTP_INNERDICT_JSONLINES_COL,
+    KTP_NAMEKEY_COL,
     KTP_XLSX_MATCH_COL,
     KTP_XLSX_MATCH_FIRST_TOKENS_KEY,
     KTP_XLSX_MATCH_LAST_NAME_NORM_KEY,
-    KTP_XLSX_MATCH_SOURCE_KEY_LAST_KEY,
-    KTP_XLSX_MATCH_SOURCE_KEY_TOKENS_KEY,
+    KTP_XLSX_MATCH_NAMEKEY_LAST_KEY,
+    KTP_XLSX_MATCH_NAMEKEY_TOKENS_KEY,
 )
 
 console = Console()
@@ -99,8 +100,8 @@ def _is_exact_xlsx_match_payload(value: object) -> bool:
         return False
     if not isinstance(payload, dict):
         return False
-    source_key_tokens = payload.get(KTP_XLSX_MATCH_SOURCE_KEY_TOKENS_KEY, [])
-    source_key_last = payload.get(KTP_XLSX_MATCH_SOURCE_KEY_LAST_KEY)
+    source_key_tokens = payload.get(KTP_XLSX_MATCH_NAMEKEY_TOKENS_KEY, [])
+    source_key_last = payload.get(KTP_XLSX_MATCH_NAMEKEY_LAST_KEY)
     first_tokens = payload.get(KTP_XLSX_MATCH_FIRST_TOKENS_KEY, [])
     last_name_norm = payload.get(KTP_XLSX_MATCH_LAST_NAME_NORM_KEY)
     if not isinstance(source_key_tokens, list):
@@ -278,7 +279,8 @@ def _build_mode3_pgf_metadata(conn: duckdb.DuckDBPyConnection) -> dict[str, Any]
     outer_keys = [
         row[0]
         for row in conn.execute(
-            f"SELECT name_key FROM {OUTERDICT_STUB_TABLE} ORDER BY name_key"
+            f'SELECT "{KTP_NAMEKEY_COL}" FROM {OUTERDICT_STUB_TABLE} '
+            f'ORDER BY "{KTP_NAMEKEY_COL}"'
         ).fetchall()
     ]
     outerdict_keys = len(outer_keys)
@@ -286,7 +288,8 @@ def _build_mode3_pgf_metadata(conn: duckdb.DuckDBPyConnection) -> dict[str, Any]
     xlsx_payloads_by_key: dict[str, list[object]] = defaultdict(list)
     xlsx_population_rows_by_key: dict[str, set[tuple[str, str]]] = defaultdict(set)
     for name_key, inner_blob in conn.execute(
-        f"SELECT name_key, innerdicts FROM {XLSX_INNERDICT_TABLE}"
+        f'SELECT "{KTP_NAMEKEY_COL}", "{KTP_INNERDICT_JSONLINES_COL}" '
+        f"FROM {XLSX_INNERDICT_TABLE}"
     ).fetchall():
         if name_key is None:
             continue
@@ -306,7 +309,7 @@ def _build_mode3_pgf_metadata(conn: duckdb.DuckDBPyConnection) -> dict[str, Any]
     sciscinet_rows_by_key: dict[str, list[sciscinet_row_tuple]] = defaultdict(list)
     for source_key, p_gf, inference_counts, inference_sources in conn.execute(
         (
-            f'SELECT "{KTP_SOURCE_KEY_COL}", "{P_GF_COL}", '
+            f'SELECT "{KTP_NAMEKEY_COL}", "{P_GF_COL}", '
             f'"{INFERENCE_COUNTS_COL}", "{INFERENCE_SOURCES_COL}" '
             f"FROM {PARQUET_LEGACY_ROWS_INNERDICT_TABLE}"
         )

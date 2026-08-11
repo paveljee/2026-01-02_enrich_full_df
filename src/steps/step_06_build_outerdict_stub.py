@@ -20,8 +20,9 @@ from ..helpers.vars import (
     KTP_FILENAME_COL,
     KTP_FIRST_NAME_COL,
     KTP_FRAGMENT_COL,
+    KTP_INNERDICT_JSONLINES_COL,
     KTP_LAST_NAME_COL,
-    KTP_SOURCE_KEY_COL,
+    KTP_NAMEKEY_COL,
     STEP_BUILD_OUTERDICT,
     STEP_BUILD_OUTERDICT_EXCLUDED_LOG_MAX_ROWS,
 )
@@ -121,7 +122,7 @@ def run(context: PipelineContext) -> StepResult:
 
     excluded_stub_df = pd.DataFrame(
         {
-            "name_key": [
+            KTP_NAMEKEY_COL: [
                 _name_key_json(first, last)
                 for first, last in (
                     excluded_pairs_df[[KTP_FIRST_NAME_COL, KTP_LAST_NAME_COL]].itertuples(
@@ -129,7 +130,9 @@ def run(context: PipelineContext) -> StepResult:
                     )
                 )
             ],
-            "innerdicts": ["" for _ in range(len(excluded_pairs_df))],
+            KTP_INNERDICT_JSONLINES_COL: [
+                "" for _ in range(len(excluded_pairs_df))
+            ],
         }
     )
     register_frame(conn, "outerdict_excluded_stub_frame", excluded_stub_df)
@@ -143,9 +146,13 @@ def run(context: PipelineContext) -> StepResult:
         f"""
         CREATE OR REPLACE VIEW {OUTERDICT_EXCLUDED_NAME_VIEW} AS
         SELECT
-            name_key AS "{KTP_SOURCE_KEY_COL}",
-            json_extract_string(name_key, '$.\"{KTP_FIRST_NAME_COL}\"') AS "{KTP_FIRST_NAME_COL}",
-            json_extract_string(name_key, '$.\"{KTP_LAST_NAME_COL}\"') AS "{KTP_LAST_NAME_COL}"
+            "{KTP_NAMEKEY_COL}",
+            json_extract_string(
+                "{KTP_NAMEKEY_COL}", '$.\"{KTP_FIRST_NAME_COL}\"'
+            ) AS "{KTP_FIRST_NAME_COL}",
+            json_extract_string(
+                "{KTP_NAMEKEY_COL}", '$.\"{KTP_LAST_NAME_COL}\"'
+            ) AS "{KTP_LAST_NAME_COL}"
         FROM {OUTERDICT_EXCLUDED_STUB_TABLE}
         """
     )
@@ -173,13 +180,16 @@ def run(context: PipelineContext) -> StepResult:
     outer_dict = OuterDict.from_name_keys(name_keys)
     context.outer_dict = outer_dict
     outer_dict_excluded = OuterDict(
-        data={name_key: [] for name_key in excluded_stub_df["name_key"].astype(str).tolist()}
+        data={
+            name_key: []
+            for name_key in excluded_stub_df[KTP_NAMEKEY_COL].astype(str).tolist()
+        }
     )
 
     stub_df = pd.DataFrame(
         {
-            "name_key": [nk.to_json_key() for nk in name_keys],
-            "innerdicts": ["" for _ in name_keys],
+            KTP_NAMEKEY_COL: [nk.to_json_key() for nk in name_keys],
+            KTP_INNERDICT_JSONLINES_COL: ["" for _ in name_keys],
         }
     )
     register_frame(conn, "outerdict_stub_frame", stub_df)
@@ -191,9 +201,13 @@ def run(context: PipelineContext) -> StepResult:
         f"""
         CREATE OR REPLACE VIEW {OUTERDICT_NAME_VIEW} AS
         SELECT
-            name_key AS "{KTP_SOURCE_KEY_COL}",
-            json_extract_string(name_key, '$.\"{KTP_FIRST_NAME_COL}\"') AS "{KTP_FIRST_NAME_COL}",
-            json_extract_string(name_key, '$.\"{KTP_LAST_NAME_COL}\"') AS "{KTP_LAST_NAME_COL}"
+            "{KTP_NAMEKEY_COL}",
+            json_extract_string(
+                "{KTP_NAMEKEY_COL}", '$.\"{KTP_FIRST_NAME_COL}\"'
+            ) AS "{KTP_FIRST_NAME_COL}",
+            json_extract_string(
+                "{KTP_NAMEKEY_COL}", '$.\"{KTP_LAST_NAME_COL}\"'
+            ) AS "{KTP_LAST_NAME_COL}"
         FROM {OUTERDICT_STUB_TABLE}
         """
     )

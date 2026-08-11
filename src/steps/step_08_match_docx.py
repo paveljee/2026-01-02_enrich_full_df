@@ -47,7 +47,7 @@ from ..helpers.vars import (
     KTP_FRAGMENT_COL,
     KTP_FRAGMENT_TYPE_COL,
     KTP_LAST_NAME_COL,
-    KTP_SOURCE_KEY_COL,
+    KTP_NAMEKEY_COL,
     RIGHT_NAME_COL,
     STEP_MATCH_DOCX,
 )
@@ -168,7 +168,7 @@ def run(context: PipelineContext) -> StepResult:
         f"""
         CREATE OR REPLACE VIEW {DOCX_MATCH_VIEW} AS
         WITH name_draws AS (
-            SELECT nk."{KTP_SOURCE_KEY_COL}",
+            SELECT nk."{KTP_NAMEKEY_COL}",
                    nk."{KTP_FIRST_NAME_COL}" AS "{KTP_FIRST_NAME_COL}",
                    nk."{KTP_LAST_NAME_COL}" AS "{KTP_LAST_NAME_COL}",
                    s."{DRAW_LABEL}" AS "{DRAW_LABEL}"
@@ -196,7 +196,7 @@ def run(context: PipelineContext) -> StepResult:
         ),
         base AS (
             SELECT
-                nd."{KTP_SOURCE_KEY_COL}" AS "{KTP_SOURCE_KEY_COL}",
+                nd."{KTP_NAMEKEY_COL}" AS "{KTP_NAMEKEY_COL}",
                 d."{KTP_FILENAME_COL}" AS "{KTP_FILENAME_COL}",
                 d."{KTP_DOCX_ROW_NUMBER_COL}" AS "{KTP_FRAGMENT_COL}",
                 COALESCE(rr.fragment_type, 'docx_row') AS "{KTP_FRAGMENT_TYPE_COL}",
@@ -218,12 +218,12 @@ def run(context: PipelineContext) -> StepResult:
             WHERE d."{KTP_FILENAME_COL}" IS NOT NULL
         )
         ,
-        {draw_sort_ctes_sql(draw_col=DRAW_LABEL, source_key_col=KTP_SOURCE_KEY_COL)}
+        {draw_sort_ctes_sql(draw_col=DRAW_LABEL, source_key_col=KTP_NAMEKEY_COL)}
         SELECT * EXCLUDE (row_draw_group, row_draw_num, source_draw_group, source_draw_num)
         FROM ranked
         ORDER BY
             {draw_sort_order_by_sql(
-                source_key_col=KTP_SOURCE_KEY_COL,
+                source_key_col=KTP_NAMEKEY_COL,
                 filename_col=KTP_FILENAME_COL,
                 fragment_col=KTP_FRAGMENT_COL,
             )}
@@ -252,12 +252,12 @@ def run(context: PipelineContext) -> StepResult:
             FROM {DOCX_MATCH_VIEW}
             WHERE "{KTP_FILENAME_COL}" IS NOT NULL
         ),
-        {draw_sort_ctes_sql(draw_col=DRAW_LABEL, source_key_col=KTP_SOURCE_KEY_COL)}
+        {draw_sort_ctes_sql(draw_col=DRAW_LABEL, source_key_col=KTP_NAMEKEY_COL)}
         SELECT * EXCLUDE (row_draw_group, row_draw_num, source_draw_group, source_draw_num)
         FROM ranked
         ORDER BY
             {draw_sort_order_by_sql(
-                source_key_col=KTP_SOURCE_KEY_COL,
+                source_key_col=KTP_NAMEKEY_COL,
                 filename_col=KTP_FILENAME_COL,
                 fragment_col=KTP_FRAGMENT_COL,
             )}
