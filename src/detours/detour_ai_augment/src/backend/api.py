@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from random import Random
-from typing import Annotated, Any, Literal, Self, cast
+from typing import Annotated, Any, Callable, Literal, Self, cast
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 from urllib.parse import urlsplit
@@ -195,9 +195,36 @@ SERVER_PORT = 8612
 CONFIG_FILENAME = "config_ai_augment.json"
 MAP_SUBSET_0_TO_BATCH_KEY = "map_subset_0_to_batch"
 MAP_COLUMNS = (DRAW_LABEL, BATCH_LABEL)
-GROUND_TRUTH_RELEASE_BATCHES = frozenset({"subset 1", "subset 5", "subset 6", "subset 7"})
+# ground truth is defined explicitly by released batch, exclusive of dupe
 GROUND_TRUTH_COHORT = SourceCohort.GROUND_TRUTH
+GROUND_TRUTH_RELEASE_BATCHES = frozenset({"subset 1", "subset 5", "subset 6", "subset 7"})
+EXCLUDED_SOURCE_KEY = json.dumps(
+    {KTP_FIRST_NAME_COL: "Mercouri G.", KTP_LAST_NAME_COL: "Kanatzidis"},
+    sort_keys=True,
+)
+GROUND_TRUTH_DEF: Callable[
+    [str, Mapping[str, str], tuple[str, ...]],
+    bool,
+] = (
+    lambda source_key, release_batches, draws: (
+        source_key != EXCLUDED_SOURCE_KEY
+        and any(release_batches.get(draw) in GROUND_TRUTH_RELEASE_BATCHES for draw in draws)
+    )
+)
 NO_GROUND_TRUTH_COHORT = SourceCohort.NO_GROUND_TRUTH
+# no ground truth is defined analytically from all unreleased except some
+NO_GROUND_TRUTH_PARTITION = 4
+NO_GROUND_TRUTH_SSN_COUNT = 1
+NO_GROUND_TRUTH_DEF: Callable[
+    [int, bool, int],
+    bool,
+] = (
+    lambda partition, xlsx_non_exact, ssn_count: (
+        partition == NO_GROUND_TRUTH_PARTITION
+        and not xlsx_non_exact
+        and ssn_count == NO_GROUND_TRUTH_SSN_COUNT
+    )
+)
 EXPECTED_GROUND_TRUTH_RESEARCHERS = 196
 EXPECTED_NO_GROUND_TRUTH_RESEARCHERS = 78
 EXPECTED_ELIGIBLE_RESEARCHERS = 274
@@ -205,8 +232,6 @@ EXPECTED_INELIGIBLE_RESEARCHERS = 33
 EXPECTED_SOURCE_RESEARCHERS = EXPECTED_ELIGIBLE_RESEARCHERS + EXPECTED_INELIGIBLE_RESEARCHERS
 EXPECTED_MULTIDRAW_SOURCE_RESEARCHERS = 5
 RND_START = 1
-NO_GROUND_TRUTH_PARTITION = 4
-NO_GROUND_TRUTH_SSN_COUNT = 1
 INELIGIBLE_COHORT = SourceCohort.INELIGIBLE
 INELIGIBLE_RELEASE_BATCH = "subset 8"
 EXPECTED_INELIGIBILITY_COUNTS = {
@@ -216,10 +241,6 @@ EXPECTED_INELIGIBILITY_COUNTS = {
     IneligibilityCategory.STAGING_PARTITION_4_XLSX_NON_EXACT: 6,
     IneligibilityCategory.STAGING_PARTITION_4_MULTIPLE_SSN: 16,
 }
-EXCLUDED_SOURCE_KEY = json.dumps(
-    {KTP_FIRST_NAME_COL: "Mercouri G.", KTP_LAST_NAME_COL: "Kanatzidis"},
-    sort_keys=True,
-)
 DRAW_VALUE_SEPARATOR = ", "
 DRAW_PILOT_PREFIX = "pilot."
 DRAW_SORT_PART = re.compile(r"\d+|\D+")
@@ -1022,8 +1043,7 @@ def derive_source_population(
     ground_truth = {
         source_key
         for source_key, (_name_key, draws) in source_researchers.items()
-        if source_key != EXCLUDED_SOURCE_KEY
-        and any(release_batches.get(draw) in GROUND_TRUTH_RELEASE_BATCHES for draw in draws)
+        if GROUND_TRUTH_DEF(source_key, release_batches, draws)
     }
     try:
         partition_rows = conn.execute(
@@ -1057,9 +1077,7 @@ def derive_source_population(
     no_ground_truth = {
         source_key
         for source_key, (partition, xlsx_non_exact, ssn_count) in partition_flags.items()
-        if partition == NO_GROUND_TRUTH_PARTITION
-        and not xlsx_non_exact
-        and ssn_count == NO_GROUND_TRUTH_SSN_COUNT
+        if NO_GROUND_TRUTH_DEF(partition, xlsx_non_exact, ssn_count)
     }
     missing_source_keys = no_ground_truth - source_researchers.keys()
     overlap = ground_truth & no_ground_truth
