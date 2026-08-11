@@ -1,3 +1,7 @@
+# =================================
+# Broadly compatible pyproject.toml
+# =================================
+
 [project]
 name = "2026-01-02_enrich_full_df"
 version = "0.1.0"
@@ -21,57 +25,102 @@ dependencies = [
     "pytest-cov>=7.0.0,<8",
     "python-dotenv>=1.2.2,<2",
 ]
+# the below are pip etc compatible groups
+[dependency-groups]
+detour-mode0-econ-stats = [
+  "kaleido==0.2.1",
+  "plotly==6.6.0",
+]
+detour-ai-augment = [
+  "fastapi==0.140.0",
+  "uvicorn==0.51.0",
+  "pydantic==2.13.4",
+  "httpx==0.28.1",
+  "nicegui==3.13.0",
+]
+
+# ============
+# Tool configs
+# ============
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+norecursedirs = [
+    "tests/test_detours",  # can run via `pixi run test tests/test_detours`
+    "src/detours/detour_ai_augment/tests",
+]
+markers = [
+    "slow: long-running integration tests against real config/data",
+    "real_api: live-network tests against external APIs; run explicitly with -m real_api",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+preview = true
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
+[tool.mypy]
+python_version = "3.14"
+ignore_missing_imports = true
+plugins = ["pydantic.mypy"]
+warn_unused_ignores = true
+
+# ==================
+# Pixi Environments
+# ==================
+
+# "default" environment goes without saying
+[tool.pixi.environments.default]
+no-default-feature = false
+features = []
+
+# The features themselves are defined below per detour
+[tool.pixi.environments.detour-mode0-econ-stats]
+no-default-feature = false
+features = [
+  "detour-mode0-econ-stats",
+]
+[tool.pixi.environments.detour-ai-augment]
+no-default-feature = false
+features = [
+  "detour-ai-augment",
+]
+
+# =======================
+# Default: Infrastructure
+# =======================
+
+# Supported deployments
+[tool.pixi.workspace]
+channels = ["conda-forge"]
+platforms = ["osx-arm64", "linux-aarch64", "linux-64"]
 
 # Conda dependencies
 [tool.pixi.dependencies]
 python = "==3.14.2"
 duckdb = "==1.5.1"
 
-[tool.pixi.workspace]
-channels = ["conda-forge"]
-platforms = ["osx-arm64", "linux-aarch64", "linux-64"]
+# ======================
+# Default: Generic tasks
+# ======================
 
 [tool.pixi.tasks.test]  # flexible task for downstream use
 args = [
   { arg = "module_name" },  # required
   { arg = "marker", default = "" },
 ]
-# centralizes -vv -s behaviour
+# centralizes pytest behaviour
 cmd = """
-pytest -vv -s {{ module_name }} \
+pytest -vv -srA {{ module_name }} \
   {% if marker %}-m "{{ marker }}"{% endif %}
 """
 cwd = "."
 
-[tool.pixi.tasks.test-repl]
-depends-on = [
-  { task = "test", args = ["."] },  # whatever is in pytest.ini_options
-  # no slow tests so far - otherwise exits 1 here
-  # { task = "test", args = [".", "slow"] },
-  { task = "test", args = [".", "real_api"] },
-]
-
-[tool.pixi.feature.detour-ai-augment.tasks.test-detour-ai-augment-root]
-cmd = """
-sudo env \
-  APPENDWATCH_SCRIPT="$PIXI_PROJECT_ROOT/src/detours/detour_ai_augment/src/control_centre/appendwatch/appendwatch.py" \
-  APPENDWATCH_PYTHON="/usr/bin/python3" \
-  "$CONDA_PREFIX/bin/python" -m pytest -vv -srA \
-  src/detours/detour_ai_augment/tests
-"""
-cwd = "."
-
-[tool.pixi.tasks.test-detours]
-depends-on = [
-  { task = "test", args = ["tests/test_detours"] },
-  { task = "test", args = ["tests/test_detours", "slow"] },
-  { task = "test-detour-ai-augment-root", environment = "detour-ai-augment" },
-]
-
-[tool.pixi.tasks.cov]
-cmd = "pytest -vv --cov=src --cov-report=term-missing --cov-report=xml"
-cwd = "."
-
+# Mostly unused really
 [tool.pixi.tasks.module]
 args = [
   { arg = "module_name", default = "src.repl" },
@@ -84,6 +133,26 @@ python -m src.repl --config "{{ config_path }}" --new --yes --non-interactive
 """
 cwd = "."
 
+[tool.pixi.tasks.ruff]
+args = [
+  { arg = "module_names", default = "src tests" },
+]
+cmd = "ruff check {{ module_names }}"
+cwd = "."
+
+[tool.pixi.tasks.mypy]
+args = [
+  { arg = "module_names", default = "src tests" },
+]
+cmd = "mypy {{ module_names }}"
+cwd = "."
+
+[tool.pixi.tasks.lint]
+depends-on = ["ruff", "mypy"]  # whatever is default
+
+# ====================================
+# Default: Tasks for actual execution
+# ====================================
 [tool.pixi.tasks.repl]
 args = [
   { arg = "config_path", default = "config.repl.json" },
@@ -131,22 +200,26 @@ input(
 """
 cwd = "."
 
-[tool.pixi.tasks.ruff]
-args = [
-  { arg = "module_names", default = "src tests" },
-]
-cmd = "ruff check {{ module_names }}"
-cwd = "."
+# ===============================
+# Default: Tasks for actual tests
+# ===============================
 
-[tool.pixi.tasks.mypy]
-args = [
-  { arg = "module_names", default = "src tests" },
+[tool.pixi.tasks.test-repl]
+depends-on = [
+  { task = "test", args = ["."] },  # whatever is in pytest.ini_options
+  # no slow tests so far - otherwise exits 1 here
+  # { task = "test", args = [".", "slow"] },
+  { task = "test", args = [".", "real_api"] },
 ]
-cmd = "mypy {{ module_names }}"
-cwd = "."
 
-[tool.pixi.tasks.lint]
-depends-on = ["ruff", "mypy"]  # whatever is default
+# The tasks themselves are specified below per detour
+[tool.pixi.tasks.test-detours]
+depends-on = [
+    "test-detour-step4-breakdown",
+    "test-detour-mode3-pgf-stats",
+    "test-detour-mode0-econ-stats",
+    "test-detour-ai-augment-root",
+]
 
 [tool.pixi.tasks.pre-commit]
 depends-on = [
@@ -161,8 +234,47 @@ depends-on = ["lint", "test-repl"]
 [tool.pixi.tasks.pre-commit-detours]
 depends-on = ["lint", "test-detours"]
 
-[tool.pixi.feature.detour-mode0-econ-stats.dependencies]
-plotly = "==6.6.0"
+[tool.pixi.tasks.cov]
+cmd = "pytest -vv --cov=src --cov-report=term-missing --cov-report=xml"
+cwd = "."
+
+# ========================
+# Detour: Step 4 breakdown
+# ========================
+
+[tool.pixi.tasks.test-detour-step4-breakdown]
+depends-on = [
+  { task = "test", args = ["tests/test_detours/test_detour_step4_breakdown.py"], environment = "default" },
+  # no tests marked slow in other detour tests
+  { task = "test", args = ["tests/test_detours/test_detour_step4_breakdown.py", "slow"], environment = "default" },
+]
+
+# ==========================
+# Detour: Mode 3 P(gf) stats
+# ==========================
+
+[tool.pixi.tasks.test-detour-mode3-pgf-stats]
+depends-on = [
+  { task = "test", args = ["tests/test_detours/test_detour_mode3_pgf_stats.py"], environment = "default" },
+]
+
+# ==========================
+# Detour: Mode 0 econ stats
+# ==========================
+
+[tool.pixi.feature.detour-mode0-econ-stats.tasks]
+test-detour-mode0-econ-stats = [
+  { task = "test", args = ["tests/test_detours/test_detour_mode0_econ_stats.py"], environment = "detour-mode0-econ-stats" },
+]
+
+# ==================
+# Detour: AI Augment
+# ==================
+
+# Feature tasks auto execute in its dedicated environment;
+# above this didn't apply because we were using the "test"
+# task defined within the default feature, and so we needed
+# to specify the environment to use.
 
 [tool.pixi.feature.detour-ai-augment.tasks]
 serve = "python -m src.detours.detour_ai_augment.src.backend.api --config config_ai_augment.json"
@@ -173,45 +285,10 @@ dashboard = "python -m src.detours.detour_ai_augment.src.control_centre.ui"
 #serve = "cd /tmp/detour-api-9a187d3 && uvicorn src.detours.detour_ai_augment.src.backend.api:app --host 0.0.0.0 --port 8000"
 # don't forget to clean up afterwards:
 # rm -f /tmp/detour-api-9a187d3
-
-[tool.pixi.environments]
-detour-mode0-econ-stats = ["detour-mode0-econ-stats"]
-detour-ai-augment = ["detour-ai-augment"]
-
-[tool.pytest.ini_options]
-pythonpath = ["."]
-testpaths = ["tests"]
-norecursedirs = [
-    "tests/test_detours",  # can run via `pixi run test tests/test_detours`
-    "src/detours/detour_ai_augment/tests",
-]
-markers = [
-    "slow: long-running integration tests against real config/data",
-    "real_api: live-network tests against external APIs; run explicitly with -m real_api",
-]
-
-[tool.ruff]
-line-length = 100
-target-version = "py314"
-preview = true
-
-[tool.ruff.lint]
-select = ["E", "F", "I"]
-
-[tool.mypy]
-python_version = "3.14"
-ignore_missing_imports = true
-plugins = ["pydantic.mypy"]
-warn_unused_ignores = true
-
-[dependency-groups]
-detour-mode0-econ-stats = [
-  "kaleido==0.2.1",
-]
-detour-ai-augment = [
-  "fastapi==0.140.0",
-  "uvicorn==0.51.0",
-  "pydantic==2.13.4",
-  "httpx==0.28.1",
-  "nicegui==3.13.0",
-]
+test-detour-ai-augment-root = """
+sudo env \
+  APPENDWATCH_SCRIPT="$PIXI_PROJECT_ROOT/src/detours/detour_ai_augment/src/control_centre/appendwatch/appendwatch.py" \
+  APPENDWATCH_PYTHON="/usr/bin/python3" \
+  "$CONDA_PREFIX/bin/python" -m pytest -vv -srA \
+  src/detours/detour_ai_augment/tests
+"""
