@@ -73,6 +73,9 @@ python_version = "3.14"
 ignore_missing_imports = true
 plugins = ["pydantic.mypy"]
 warn_unused_ignores = true
+exclude = [
+    "src/detours/detour_ai_augment/src/llm_inference_api/sample_deploy",
+]
 
 # ==================
 # Pixi Environments
