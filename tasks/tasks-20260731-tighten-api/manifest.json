@@ -7,92 +7,146 @@
     {
       "line": 1,
       "sha256": "c941c38933bae820270def8c2ad2285203849af6ed3fee8481c23081a4cc5d9d",
-      "build": null
+      "build": {
+        "type": "text",
+        "line": 1
+      }
     },
     {
       "line": 2,
       "sha256": "ee7da915e6fd787a3a4a43ffe0e772277e50fc1541a2f28bc58bc5a81b90b35f",
-      "build": null
+      "build": {
+        "type": "text",
+        "line": 2
+      }
     },
     {
       "line": 3,
       "sha256": "5de2f5328ee6e8050e8aafd8dc869a069cd9584edaaf54fe589d73c3b7dcd799",
-      "build": null
+      "build": {
+        "type": "text",
+        "line": 3
+      }
     },
     {
       "line": 4,
       "sha256": "da949a96d6a2a5644b4ee5eb7c9f12d85cf2d95e21604fd70e71b4199bcbc499",
-      "build": null
+      "build": {
+        "type": "text",
+        "line": 4
+      }
     },
     {
       "line": 5,
       "sha256": "e714c0f9ad0d7aa7d843f549cab13106703406c954e43f16146bbbb587446df8",
-      "build": null
+      "build": {
+        "type": "text",
+        "line": 5
+      }
     },
     {
       "line": 6,
       "sha256": "3613c7997b3980c5540c7f9962ac5e366527324c72e7569fd5155d7984a1fa17",
-      "build": null
+      "build": {
+        "type": "text",
+        "line": 6
+      }
     },
     {
       "line": 7,
       "sha256": "47c06c561d5c327343685268a46b3391f3998eee890d2be51f0d21cc4a53ae6d",
-      "build": null
+      "build": {
+        "type": "text",
+        "line": 7
+      }
     },
     {
       "line": 8,
       "sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
-      "build": null
+      "build": {
+        "type": "ipynb",
+        "cell": 0
+      }
     },
     {
       "line": 9,
       "sha256": "35964eb974b2e12ee81a39636170e33cf3a53e635d7cf98afc45082e01a37aa4",
-      "build": null
+      "build": {
+        "type": "ipynb",
+        "cell": 0
+      }
     },
     {
       "line": 10,
       "sha256": "0940c10eb430e3265c07c04b3641c9166ccd8fddf0b72d5db2e3f0b0ba0eebe6",
-      "build": null
+      "build": {
+        "type": "ipynb",
+        "cell": 0
+      }
     },
     {
       "line": 11,
       "sha256": "df043a5a5009cfa9f7f463f09a84a71197869cc1e4f0ed900fc02ec8c5b28174",
-      "build": null
+      "build": {
+        "type": "ipynb",
+        "cell": 0
+      }
     },
     {
       "line": 12,
       "sha256": "2d33e4f3aa1eb8d925f0205bf422734fd5510c87d348f6791fb0ab49fc4343b2",
-      "build": null
+      "build": {
+        "type": "ipynb",
+        "cell": 0
+      }
     },
     {
       "line": 13,
       "sha256": "388b52ce894601968286f419e7967e64c5c7b3197a70e6474d8193ab62565727",
-      "build": null
+      "build": {
+        "type": "ipynb",
+        "cell": 0
+      }
     },
     {
       "line": 14,
       "sha256": "ca4babdd65b4bceb9bb6675604e975fc67c5aff5e03509a9f1bc3e8fee6f31ff",
-      "build": null
+      "build": {
+        "type": "ipynb",
+        "cell": 0
+      }
     },
     {
       "line": 15,
       "sha256": "d69cf064882538d602aed1510c3072e180909107309a07984d792677b3b88851",
-      "build": null
+      "build": {
+        "type": "ipynb",
+        "cell": 0
+      }
     },
     {
       "line": 16,
       "sha256": "0418348c4e3e9873ad5100fca51b704fbb9007b0e02a46dfd32e5bdf25c69128",
-      "build": null
+      "build": {
+        "type": "ipynb",
+        "cell": 0
+      }
     },
     {
       "line": 17,
       "sha256": "d9cbccc4d57c763a44d6b83da24f434fa84a6daa237c7f96f1168c7bd3384619",
-      "build": null
+      "build": {
+        "type": "ipynb",
+        "cell": 0
+      }
     },
     {
       "line": 18,
       "sha256": "6553e1f34a34f920e6eccbe0a581b7282d540ccfa0bbd1cb069b79a6b9f037c1",
-      "build": null
+      "build": {
+        "type": "ipynb",
+        "cell": 0
+      }
     }
   ]
 }

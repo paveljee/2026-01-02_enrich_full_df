@@ -2,6 +2,33 @@
 
 ## Status
 
+- The executable-spec workflow is authoritative for all post-legacy additions:
+  immutable human source is `src/TASK.md`; exact instruction routing is
+  `build/AGENTS.md`; executable interpretation/evidence is
+  `build/SPEC.ipynb`; and `manifest.json` maps every source line. Validate from
+  the task directory with `pixi run --frozen make validate`.
+- Completed the one final review of `legacy/SPEC.md`'s AI section against only
+  its legacy human lines 3–207. It remains faithful to that legacy contract and
+  approved refinements, required no edit, and is frozen byte-for-byte from now
+  on. Never fold new executable-workflow additions into the legacy file.
+- Current human source has 18 lines and SHA-256
+  `82de7c394c79cfcacbfaafac0d16bf768dd70bdff6c0379359a9fc07bda9cc0a`.
+  Manifest routing sends instruction lines 1–7 to `build/AGENTS.md` and the
+  separating blank plus requirement lines 8–18 to notebook markdown cell 0;
+  all five evidence cells cite that exact contiguous block.
+- New executable requirements are five dedicated roundtrips: underscore-bearing
+  field labels remain literal through TXT/DOCX and NiceGUI; the main grid and
+  researcher card use compact line spacing; a clicked researcher row is visibly
+  highlighted; repeated clicks are idempotent while selection/history persist
+  and a different row changes selection; and clearing search remains empty
+  through timer refresh. The first four are pending implementation. The final
+  behavior and focused test already exist from commit
+  `eeeaeacd8aef6d425c27935d2b00cd8777c196fa` and are wired directly.
+- Latest `make validate`: routing PASS 18/18; notebook PASS (one human cell,
+  five evidence cells); clear-search evidence PASS; four evidence cells FAIL
+  solely because the newly named dedicated roundtrip tests do not yet exist.
+  This is the intentional red executable interpretation before implementation;
+  no production/test implementation was performed in this pass.
 - Current Control Centre source layout is operator-owned and must be preserved:
   `control_centre/dashboard/ui.py` contains the application and local
   `NiceGui` literal owner; `dashboard/helpers/aggrid.py` contains `AgGrid`,
