@@ -491,6 +491,40 @@ async def test_researchers_without_runs_are_shown_as_ready_placeholders(
 
 
 @pytest.mark.anyio
+async def test_cleared_search_stays_empty_during_timer_refresh(
+    tmp_path: Path,
+) -> None:
+    controller = make_test_controller(
+        configuration=SimpleNamespace(),
+        source_repository=FakeSourceRepository((researcher(1),)),
+        detour_repository=FakeDetourRepository(),
+        journal=control_ui.RunJournal(path=tmp_path / "runs.jsonl"),
+        card_renderer=SimpleNamespace(),
+        backend=FakeBackend(),
+        codex=SerialFakeCodex(),
+        control_plane=control_ui.ControlPlane(),
+        reconciler=control_ui.AttemptReconciler(),
+        projector=control_ui.VariableProjector(),
+    )
+    await controller.start()
+    try:
+        page = control_ui.ControlCentrePage(controller=controller)
+        grid_updates: list[None] = []
+        page._handles.grid = SimpleNamespace(
+            options={},
+            update=lambda: grid_updates.append(None),
+        )
+
+        await page.on_search_changed(None)
+        await page.refresh()
+    finally:
+        await controller.shutdown()
+
+    assert page.selection.search_text == ""
+    assert grid_updates == [None]
+
+
+@pytest.mark.anyio
 async def test_ineligible_action_is_disabled_and_cards_are_click_cached(
     tmp_path: Path,
 ) -> None:

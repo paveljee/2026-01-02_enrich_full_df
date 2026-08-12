@@ -3160,9 +3160,9 @@ class ControlCentrePage:
 
     async def on_search_changed(
         self,
-        search_text: str,
+        search_text: str | None,
     ) -> None:
-        self._selection.search_text = search_text
+        self._selection.search_text = "" if search_text is None else search_text
         await self.refresh_grid()
 
     async def on_researcher_selected(
