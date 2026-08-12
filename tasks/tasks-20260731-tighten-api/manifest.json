@@ -1,0 +1,83 @@
+{
+  "source": {
+    "path": "src/TASK.md",
+    "sha256": "d0c49e3363c8dabbeb520887f58fe021ba7c097c212ecc00f0f197b2ed92d17d"
+  },
+  "lines": [
+    {
+      "line": 1,
+      "sha256": "c941c38933bae820270def8c2ad2285203849af6ed3fee8481c23081a4cc5d9d",
+      "build": null
+    },
+    {
+      "line": 2,
+      "sha256": "ee7da915e6fd787a3a4a43ffe0e772277e50fc1541a2f28bc58bc5a81b90b35f",
+      "build": null
+    },
+    {
+      "line": 3,
+      "sha256": "5de2f5328ee6e8050e8aafd8dc869a069cd9584edaaf54fe589d73c3b7dcd799",
+      "build": null
+    },
+    {
+      "line": 4,
+      "sha256": "da949a96d6a2a5644b4ee5eb7c9f12d85cf2d95e21604fd70e71b4199bcbc499",
+      "build": null
+    },
+    {
+      "line": 5,
+      "sha256": "e714c0f9ad0d7aa7d843f549cab13106703406c954e43f16146bbbb587446df8",
+      "build": null
+    },
+    {
+      "line": 6,
+      "sha256": "3613c7997b3980c5540c7f9962ac5e366527324c72e7569fd5155d7984a1fa17",
+      "build": null
+    },
+    {
+      "line": 7,
+      "sha256": "47c06c561d5c327343685268a46b3391f3998eee890d2be51f0d21cc4a53ae6d",
+      "build": null
+    },
+    {
+      "line": 8,
+      "sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+      "build": null
+    },
+    {
+      "line": 9,
+      "sha256": "35964eb974b2e12ee81a39636170e33cf3a53e635d7cf98afc45082e01a37aa4",
+      "build": null
+    },
+    {
+      "line": 10,
+      "sha256": "0940c10eb430e3265c07c04b3641c9166ccd8fddf0b72d5db2e3f0b0ba0eebe6",
+      "build": null
+    },
+    {
+      "line": 11,
+      "sha256": "df043a5a5009cfa9f7f463f09a84a71197869cc1e4f0ed900fc02ec8c5b28174",
+      "build": null
+    },
+    {
+      "line": 12,
+      "sha256": "2d33e4f3aa1eb8d925f0205bf422734fd5510c87d348f6791fb0ab49fc4343b2",
+      "build": null
+    },
+    {
+      "line": 13,
+      "sha256": "a2b4ef1d026b2300d3c73c661def513caca37790ca202f88e05019c862e02ee0",
+      "build": null
+    },
+    {
+      "line": 14,
+      "sha256": "d9cbccc4d57c763a44d6b83da24f434fa84a6daa237c7f96f1168c7bd3384619",
+      "build": null
+    },
+    {
+      "line": 15,
+      "sha256": "6553e1f34a34f920e6eccbe0a581b7282d540ccfa0bbd1cb069b79a6b9f037c1",
+      "build": null
+    }
+  ]
+}

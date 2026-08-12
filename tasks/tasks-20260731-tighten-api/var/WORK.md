@@ -18,10 +18,15 @@
   creation, resolves the remote PID, sends TERM then verified KILL if needed,
   and always terminates/waits the local SSH process. A cancellation during
   session discovery is journaled as canceled rather than failed.
-- Focused Control Centre unit/browser verification is complete: 14 tests pass,
+- Focused Control Centre unit/browser verification is complete: 15 tests pass,
   including explicit card/history/no-redraw assertions. The browser E2E
   preserves child-server diagnostics and removes pytest's NiceGUI screen-test
   sentinel from the child environment.
+- NiceGUI's clearable search input emits `None` when cleared. The page now
+  normalizes that event to the empty string at the UI boundary, preserving the
+  non-null `UiSelection.search_text` invariant. A focused regression exercises
+  the clear event followed by the periodic timer refresh that previously
+  repeated the `None.casefold()` traceback.
 - The operator's canonical source-DB migration to `ktp.namekey` and
   `ktp.innerdicts` is complete and tested. Production and tests use only the
   authoritative columns; no compatibility aliases or fallback queries exist.
@@ -249,16 +254,17 @@
 ## Verification completed
 
 - `pixi run lint` passes: Ruff reports no findings and mypy reports no issues
-  across 79 source files. Test-double casts are confined to tests whose fakes
+  across 77 source files. Test-double casts are confined to tests whose fakes
   intentionally stand in for concrete production dependencies; `Any` is
   confined to the dynamically imported appendwatch fixture boundary where
   `ModuleType` cannot expose the runtime class attributes to mypy.
 - Current Ruff audit passes for `dashboard/ui.py`, both dashboard helper
   modules, the API/parser, and focused unit/browser tests.
-- Focused Control Centre unit/browser suite: 14 passed. It includes workbook/
+- Focused Control Centre unit/browser suite: 15 passed. It includes workbook/
   prompt byte identity, 307 authoritative source rows, ready placeholders,
   disabled categorized ineligible rows, lazy cached cards, stable grid state,
-  native attempt history, cancellation, and responsive browser behavior.
+  native attempt history, cancellation, responsive browser behavior, and
+  clear-search normalization through the next timer refresh.
 - `pixi run test-detour-ai-augment-root`: 89 passed, 1 intentionally skipped
   under the active allow-multiple policy. The root task now passes the invoking
   user's populated Playwright browser cache through `sudo env`; root no longer

@@ -3,7 +3,7 @@
 See prerequisites and setup in
 `tasks/tasks-20260519-review-231/SPEC.md`
 
-Use `./WORK.md` as
+Use `./var/WORK.md` as
 your own workbook for
 recording actions you have in mind and
 recording in progress and completed, or
