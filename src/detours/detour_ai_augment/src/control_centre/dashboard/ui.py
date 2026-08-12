@@ -112,7 +112,7 @@ DEFAULT_CONFIG_PATH: Final = REPOSITORY_ROOT / "config_ai_augment.json"
 
 RUN_JOURNAL_PATH: Final = DETOUR_DATA_DIR / "control_centre_runs.jsonl"
 
-BACKEND_PIXI_ENVIRONMENT: Final = "detour-ai-augment-backend-api"
+BACKEND_PIXI_ENVIRONMENT: Final = "detour-ai-augment"
 BACKEND_PIXI_TASK: Final = "serve"
 BACKEND_COMMAND: Final = (
     "pixi",
