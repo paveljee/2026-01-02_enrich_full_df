@@ -6,6 +6,7 @@ from zipfile import ZipFile
 
 import pytest
 
+from src.helpers import cards as cards_module
 from src.helpers.cards import build_cards, write_cards_zip
 from src.helpers.data_models import InnerDict, NameKey, OuterDict
 from src.helpers.vars import (
@@ -18,6 +19,12 @@ from src.helpers.vars import (
     OPENALEX_TITLE_COL,
     SSNP_DATE_COL,
 )
+
+UNDERSCORE_FIELD_LABEL = "ktp.field_with_underscores_"
+RENDERED_UNDERSCORE_FIELD_LABEL = f"**`{UNDERSCORE_FIELD_LABEL}`**"
+UNDERSCORE_FILENAME = "source_file.xlsx"
+RENDERED_UNDERSCORE_FILENAME = f"#### {KTP_FILENAME_COL}: `{UNDERSCORE_FILENAME}`"
+ROUNDTRIP_CARD_NAME = "1_Ada_Lovelace"
 
 
 class DummyProcedure:
@@ -56,7 +63,7 @@ def test_build_cards_includes_intro_and_fun_fact() -> None:
     assert "Fun fact" in card
     assert "excluded" not in card
     assert "Draw #1 of 10" in card
-    assert f"**{KTP_SSN_TOP_OLDEST_PAPERS_COL}**" in card
+    assert f"**`{KTP_SSN_TOP_OLDEST_PAPERS_COL}`**" in card
     assert "Early work" in card
     assert "https://openalex.org/W1568216332" in card
 
@@ -96,3 +103,71 @@ def test_write_cards_zip_docx_skips_without_pandoc(tmp_path: Path) -> None:
     assert zip_path.exists()
     with ZipFile(zip_path, "r") as zipf:
         assert zipf.namelist() == ["Ada_Lovelace.docx"]
+
+
+def test_underscore_field_labels_round_trip_in_txt_and_docx(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    name_key = NameKey(first_name="Ada", last_name="Lovelace")
+    outer = OuterDict.from_name_keys([name_key])
+    outer.add_inner(
+        name_key,
+        InnerDict.from_mapping(
+            {
+                DRAW_LABEL: 1,
+                KTP_FILENAME_COL: UNDERSCORE_FILENAME,
+                UNDERSCORE_FIELD_LABEL: "literal value",
+            },
+            DummyProcedure(),
+        ),
+    )
+    cards = build_cards(
+        outer,
+        total_draws=1,
+        intro="## Introduction",
+        excluded_cols=set(),
+    )
+    card = cards[ROUNDTRIP_CARD_NAME]
+    assert RENDERED_UNDERSCORE_FIELD_LABEL in card
+    assert RENDERED_UNDERSCORE_FILENAME in card
+
+    txt_zip = write_cards_zip(
+        cards,
+        tmp_path,
+        "cards_txt.zip",
+        output_format="txt",
+        reference_docx=tmp_path / "unused-reference.docx",
+    )
+    with ZipFile(txt_zip) as archive:
+        txt_card = archive.read(f"{ROUNDTRIP_CARD_NAME}.txt").decode("utf-8")
+    assert RENDERED_UNDERSCORE_FIELD_LABEL in txt_card
+    assert RENDERED_UNDERSCORE_FILENAME in txt_card
+
+    captured_markdown: list[str] = []
+
+    def render_docx(
+        md_path: Path,
+        docx_path: Path,
+        _reference_docx: Path,
+    ) -> Path:
+        captured_markdown.append(md_path.read_text(encoding="utf-8"))
+        docx_path.write_bytes(b"docx")
+        return docx_path
+
+    reference_docx = tmp_path / "reference.docx"
+    reference_docx.write_bytes(b"reference")
+    monkeypatch.setattr(cards_module, "_render_docx", render_docx)
+    docx_zip = write_cards_zip(
+        cards,
+        tmp_path,
+        "cards_docx.zip",
+        output_format="docx",
+        reference_docx=reference_docx,
+        docx_workers=1,
+    )
+    assert captured_markdown == [card]
+    assert RENDERED_UNDERSCORE_FIELD_LABEL in captured_markdown[0]
+    assert RENDERED_UNDERSCORE_FILENAME in captured_markdown[0]
+    with ZipFile(docx_zip) as archive:
+        assert archive.namelist() == [f"{ROUNDTRIP_CARD_NAME}.docx"]

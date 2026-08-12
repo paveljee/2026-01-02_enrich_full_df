@@ -10,6 +10,12 @@ class AgGrid:
     GET_ROW_ID_OPTION: Final = ":getRowId"
     ENABLE_CELL_TEXT_SELECTION_OPTION: Final = "enableCellTextSelection"
     ENSURE_DOM_ORDER_OPTION: Final = "ensureDomOrder"
+    ROW_SELECTION_OPTION: Final = "rowSelection"
+    ROW_SELECTION_MODE: Final = "mode"
+    ROW_SELECTION_MODE_SINGLE: Final = "singleRow"
+    ROW_SELECTION_CHECKBOXES: Final = "checkboxes"
+    ROW_SELECTION_ENABLE_CLICK: Final = "enableClickSelection"
+    ROW_SELECTION_ENABLE_ONLY: Final = "enableSelection"
 
     SET_GRID_OPTION_METHOD: Final = "setGridOption"
     UPDATE_DATA_METHOD: Final = "updateData"
@@ -99,4 +105,9 @@ class AgGrid:
             ),
             cls.ENABLE_CELL_TEXT_SELECTION_OPTION: True,
             cls.ENSURE_DOM_ORDER_OPTION: True,
+            cls.ROW_SELECTION_OPTION: {
+                cls.ROW_SELECTION_MODE: cls.ROW_SELECTION_MODE_SINGLE,
+                cls.ROW_SELECTION_CHECKBOXES: False,
+                cls.ROW_SELECTION_ENABLE_CLICK: cls.ROW_SELECTION_ENABLE_ONLY,
+            },
         }

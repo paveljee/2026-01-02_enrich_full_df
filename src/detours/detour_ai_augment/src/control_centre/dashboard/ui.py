@@ -271,6 +271,8 @@ FOOTNOTE_MARKER = re.compile(r"\^(?P<numbers>[0-9]+(?:,[0-9]+)*)\^")
 UI_REFRESH_SECONDS: Final = 1
 GRID_ROW_ID_FIELD: Final = "row_id"
 GRID_SOURCE_KEY_FIELD: Final = "source_key"
+COMPACT_LINE_HEIGHT: Final = 1.25
+CARD_PARAGRAPH_MARGIN_REM: Final = 0
 FULL_WIDTH_STYLE: Final = (
     "width: 100%; max-width: 100%; min-width: 0; "
     "box-sizing: border-box;"
@@ -284,7 +286,8 @@ GRID_STYLE: Final = (
 )
 CARD_CONTAINER_STYLE: Final = f"{FULL_WIDTH_STYLE} overflow: hidden;"
 CARD_MARKDOWN_STYLE: Final = (
-    f"{FULL_WIDTH_STYLE} overflow-wrap: anywhere; word-break: break-word;"
+    f"{FULL_WIDTH_STYLE} overflow-wrap: anywhere; word-break: break-word; "
+    f"line-height: {COMPACT_LINE_HEIGHT};"
 )
 ATTEMPT_HISTORY_STYLE: Final = f"{FULL_WIDTH_STYLE} overflow: hidden;"
 ATTEMPT_HISTORY_TABLE_STYLE: Final = (
@@ -336,12 +339,24 @@ ATTEMPT_HISTORY_PANEL_TEST_ID: Final = "attempt-history-panel"
 ATTEMPT_HISTORY_TABLE_TEST_ID: Final = "attempt-history-table"
 PAGE_FOOTER_TEST_ID: Final = "page-footer"
 CARD_RESPONSIVE_CSS: Final = f"""
-[data-testid=\"{PAGE_FOOTER_TEST_ID}\"] *,
+[data-testid=\"{RESEARCHER_GRID_TEST_ID}\"] .ag-cell-value {{
+    line-height: {COMPACT_LINE_HEIGHT};
+}}
+[data-testid=\"{PAGE_FOOTER_TEST_ID}\"] p {{
+    margin-block: {CARD_PARAGRAPH_MARGIN_REM}rem;
+}}
+[data-testid=\"{PAGE_FOOTER_TEST_ID}\"] .nicegui-markdown {{
+    white-space: normal;
+}}
+[data-testid=\"{PAGE_FOOTER_TEST_ID}\"] .nicegui-markdown *,
 [data-testid=\"{PAGE_FOOTER_TEST_ID}\"] pre,
 [data-testid=\"{PAGE_FOOTER_TEST_ID}\"] code {{
     max-width: 100%;
     overflow-wrap: anywhere;
     word-break: break-word;
+}}
+[data-testid=\"{PAGE_FOOTER_TEST_ID}\"] pre,
+[data-testid=\"{PAGE_FOOTER_TEST_ID}\"] code {{
     white-space: pre-wrap;
 }}
 """
@@ -3101,7 +3116,7 @@ class ControlCentrePage:
         if self._handles.card_markdown is not None:
             self._handles.card_markdown.set_content(card.markdown)
 
-    def toggle_attempt_history(
+    def show_attempt_history(
         self,
         source_key: SourceKey,
     ) -> None:
@@ -3109,10 +3124,6 @@ class ControlCentrePage:
         table = self._handles.attempt_history_table
         row = self._row_views_by_source_key.get(source_key)
         if expansion is None or table is None or row is None:
-            return
-        if self._expanded_history_source_key == source_key and expansion.value:
-            expansion.close()
-            self._expanded_history_source_key = None
             return
         variable = VARIABLE_SPEC_BY_KEY[self._selection.variable_key]
         table.columns = self.attempt_history_column_definitions(variable=variable)
@@ -3139,8 +3150,7 @@ class ControlCentrePage:
         await self.refresh_grid()
         expanded_source_key = self._expanded_history_source_key
         if expanded_source_key is not None:
-            self._expanded_history_source_key = None
-            self.toggle_attempt_history(expanded_source_key)
+            self.show_attempt_history(expanded_source_key)
 
     async def on_status_filter_changed(
         self,
@@ -3300,7 +3310,7 @@ class ControlCentrePage:
             return
         self._selection.selected_source_key = source_key
         self.sync_selected_action((data,))
-        self.toggle_attempt_history(source_key)
+        self.show_attempt_history(source_key)
 
 
 # =============================================================================

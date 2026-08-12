@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import subprocess
 from collections import Counter
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
@@ -11,15 +12,32 @@ from random import Random
 from types import SimpleNamespace
 from typing import cast
 from uuid import UUID, uuid4
+from zipfile import ZipFile
 from zoneinfo import ZoneInfo
 
 import pytest
 
 from src.detours.detour_ai_augment.src.backend import api
 from src.detours.detour_ai_augment.src.control_centre.dashboard import ui as control_ui
+from src.helpers.cards import write_cards_zip
+from src.helpers.vars import KTP_FILENAME_COL
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
 CONFIG_PATH = REPOSITORY_ROOT / "config_ai_augment.json"
+TASK_DATA_DIR = (
+    REPOSITORY_ROOT / "tasks" / "tasks-20260731-tighten-api" / "data"
+)
+SAMPLE_DOCX_PATH = TASK_DATA_DIR / "sample.docx"
+SAMPLE_MARKDOWN_PATH_NAME = "sample.md"
+SAMPLE_ZIP_PATH_NAME = "sample.zip"
+SAMPLE_CARD_ARCHIVE_NAME = "sample.docx"
+PANDOC_PLAIN_COMMAND = ("pandoc", "--to", "plain")
+FULL_CARD_PROCEDURE_NAMES = frozenset({
+    "CodexMatchProcedure",
+    "DocxMatchProcedure",
+    "ParquetMatchProcedure",
+    "XlsxMatchProcedure",
+})
 SESSION_TIMESTAMP = datetime(2026, 8, 7, tzinfo=timezone.utc)
 SESSION_ID = control_ui.SessionId("019fb000-0000-7000-8000-000000000001")
 TERMINATE_RETURN_CODE = -15
@@ -130,6 +148,67 @@ def test_config_registers_verified_release_map_without_writing_source_db() -> No
     assert resource.fragment_type.value == "csv_row"
     assert api.load_release_batches(resource)["125"] == "subset 7"
     assert hashlib.sha256(source_db_path.read_bytes()).hexdigest() == source_hash_before
+
+
+def test_real_database_card_round_trips_identically_through_docx(
+    tmp_path: Path,
+) -> None:
+    configuration = control_ui.RuntimeConfiguration(config_path=CONFIG_PATH)
+    source_repository = control_ui.SourceRepository(configuration=configuration)
+    detour_repository = control_ui.DetourRepository(configuration=configuration)
+    renderer = control_ui.ResearcherCardRenderer(
+        source_repository=source_repository,
+        detour_repository=detour_repository,
+        configuration=configuration,
+    )
+    accepted_attempts = detour_repository.load_accepted_attempts()
+    assert accepted_attempts
+    sample = None
+    for source_key in sorted(accepted_attempts):
+        outer_dict = renderer.build_outer_dict(source_key)
+        inner_dicts = outer_dict.get_inner_by_key(source_key)
+        if {
+            type(inner_dict.procedure).__name__ for inner_dict in inner_dicts
+        } == FULL_CARD_PROCEDURE_NAMES:
+            sample = (source_key, inner_dicts)
+            break
+    assert sample is not None
+    source_key, inner_dicts = sample
+
+    card = renderer.render(source_key)
+    assert all(
+        str(inner_dict.data[KTP_FILENAME_COL]) in card.markdown
+        for inner_dict in inner_dicts
+    )
+    zip_path = write_cards_zip(
+        {SAMPLE_DOCX_PATH.stem: card.markdown},
+        tmp_path,
+        SAMPLE_ZIP_PATH_NAME,
+        output_format="docx",
+        reference_docx=configuration.pipeline_config.pandoc_reference_docx,
+        docx_workers=1,
+    )
+    with ZipFile(zip_path) as archive:
+        assert archive.namelist() == [SAMPLE_CARD_ARCHIVE_NAME]
+        sample_docx = archive.read(SAMPLE_CARD_ARCHIVE_NAME)
+    SAMPLE_DOCX_PATH.parent.mkdir(parents=True, exist_ok=True)
+    SAMPLE_DOCX_PATH.write_bytes(sample_docx)
+
+    markdown_path = tmp_path / SAMPLE_MARKDOWN_PATH_NAME
+    markdown_path.write_text(card.markdown, encoding="utf-8")
+    expected_plain_text = subprocess.run(
+        [*PANDOC_PLAIN_COMMAND, str(markdown_path)],
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+    ).stdout
+    docx_plain_text = subprocess.run(
+        [*PANDOC_PLAIN_COMMAND, str(SAMPLE_DOCX_PATH)],
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+    ).stdout
+    assert docx_plain_text == expected_plain_text
 
 
 @pytest.mark.parametrize("mutation", ["missing", "bad_hash"])

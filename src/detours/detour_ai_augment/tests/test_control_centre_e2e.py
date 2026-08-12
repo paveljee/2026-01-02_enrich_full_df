@@ -6,6 +6,8 @@ import subprocess
 import sys
 import time
 from collections import Counter
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,6 +19,7 @@ from uuid import UUID, uuid4
 from playwright.sync_api import Page, expect, sync_playwright
 
 from src.detours.detour_ai_augment.src.control_centre.dashboard import ui as control_ui
+from src.helpers.vars import KTP_FILENAME_COL
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
 
@@ -39,6 +42,13 @@ PYTEST_CURRENT_TEST_ENV_NAME = "PYTEST_CURRENT_TEST"
 BROWSER_LEADING_RESEARCHER_COUNT = 2
 BROWSER_PILOT_INELIGIBLE_DRAW = "pilot.1"
 BROWSER_PILOT_ELIGIBLE_DRAW = "pilot.2"
+E2E_CARD_FIELD_LABEL = control_ui.VARIABLE_SPECS[0].ai_column
+E2E_CARD_FIELD_VALUE = "literal field value"
+E2E_CARD_SECOND_FIELD_LABEL = control_ui.VARIABLE_SPECS[1].ai_column
+E2E_CARD_SECOND_FIELD_VALUE = "second literal field value"
+E2E_CARD_FILENAME = "source_file.xlsx"
+E2E_LINE_HEIGHT_TOLERANCE = 0.05
+E2E_CARD_BLOCK_GAP_TOLERANCE_PIXELS = 1
 
 GRID_ROW_SELECTOR = ".ag-center-cols-container .ag-row"
 GRID_ROOT_SELECTOR = ".ag-root"
@@ -331,7 +341,12 @@ class BrowserController:
             first_name=researcher.first_name,
             last_name=researcher.last_name,
             markdown=(
-                f"render-count-{render_count}\n\n{E2E_LONG_CARD_TOKEN}"
+                f"#### {KTP_FILENAME_COL}: `{E2E_CARD_FILENAME}`\n\n"
+                f"render-count-{render_count}\n\n"
+                f"**`{E2E_CARD_FIELD_LABEL}`**: {E2E_CARD_FIELD_VALUE}\n\n"
+                f"**`{E2E_CARD_SECOND_FIELD_LABEL}`**: "
+                f"{E2E_CARD_SECOND_FIELD_VALUE}\n\n"
+                f"{E2E_LONG_CARD_TOKEN}"
             ),
         )
 
@@ -423,6 +438,160 @@ def assert_shared_width(page: Page) -> None:
     assert page.evaluate("document.documentElement.scrollWidth") == page.evaluate(
         "document.documentElement.clientWidth"
     )
+
+
+@contextmanager
+def control_centre_browser() -> Iterator[tuple[Page, list[str]]]:
+    server_environment = os.environ.copy()
+    server_environment.pop(PYTEST_CURRENT_TEST_ENV_NAME, None)
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            E2E_SERVER_MODULE,
+            E2E_SERVER_ARGUMENT,
+        ],
+        cwd=REPOSITORY_ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        env=server_environment,
+    )
+    try:
+        wait_for_server(process)
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            page = browser.new_page(viewport=E2E_WIDE_VIEWPORT)
+            errors: list[str] = []
+            page.on(
+                "console",
+                lambda message: (
+                    errors.append(message.text)
+                    if message.type == "error"
+                    else None
+                ),
+            )
+            page.on("pageerror", lambda error: errors.append(str(error)))
+            page.goto(E2E_URL, wait_until="networkidle")
+            page.wait_for_selector(GRID_ROW_SELECTOR)
+            yield page, errors
+            browser.close()
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=E2E_STOP_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=E2E_STOP_TIMEOUT_SECONDS)
+
+
+def test_underscore_field_labels_render_literally_in_researcher_card() -> None:
+    with control_centre_browser() as (page, errors):
+        eligible_row = grid_row_for_draw(page, BROWSER_PILOT_ELIGIBLE_DRAW)
+        eligible_row.click()
+        page.get_by_test_id(control_ui.VIEW_CARD_TEST_ID).click()
+
+        field_label = page.get_by_test_id(
+            control_ui.PAGE_FOOTER_TEST_ID
+        ).locator("code", has_text=E2E_CARD_FIELD_LABEL)
+        filename = page.get_by_test_id(
+            control_ui.PAGE_FOOTER_TEST_ID
+        ).locator("code", has_text=E2E_CARD_FILENAME)
+        expect(field_label).to_have_text(E2E_CARD_FIELD_LABEL)
+        expect(filename).to_have_text(E2E_CARD_FILENAME)
+        assert errors == [], Counter(errors)
+
+
+def test_main_grid_and_researcher_card_use_compact_line_spacing() -> None:
+    with control_centre_browser() as (page, errors):
+        eligible_row = grid_row_for_draw(page, BROWSER_PILOT_ELIGIBLE_DRAW)
+        eligible_row.click()
+        page.get_by_test_id(control_ui.EXECUTE_ACTION_TEST_ID).click()
+
+        history = page.get_by_test_id(control_ui.ATTEMPT_HISTORY_TABLE_TEST_ID)
+        history_cell = history.locator("tbody td").first
+        expect(history_cell).to_be_visible()
+        page.get_by_test_id(control_ui.VIEW_CARD_TEST_ID).click()
+
+        grid_cell = eligible_row.locator(".ag-cell-value").first
+        card_paragraphs = page.get_by_test_id(
+            control_ui.PAGE_FOOTER_TEST_ID
+        ).locator("p")
+        card_paragraph = card_paragraphs.first
+        ratios = [
+            locator.evaluate(
+                "element => {"
+                " const style = getComputedStyle(element);"
+                " return parseFloat(style.lineHeight) / parseFloat(style.fontSize);"
+                "}"
+            )
+            for locator in (grid_cell, card_paragraph, history_cell)
+        ]
+        grid_ratio, card_ratio, history_ratio = ratios
+        maximum_compact_ratio = (
+            control_ui.COMPACT_LINE_HEIGHT + E2E_LINE_HEIGHT_TOLERANCE
+        )
+        assert grid_ratio <= maximum_compact_ratio
+        assert card_ratio <= maximum_compact_ratio
+        assert grid_ratio <= history_ratio
+        assert card_ratio <= history_ratio
+        first_card_box = card_paragraphs.nth(1).bounding_box()
+        second_card_box = card_paragraphs.nth(2).bounding_box()
+        assert first_card_box is not None
+        assert second_card_box is not None
+        first_card_bottom = first_card_box["y"] + first_card_box["height"]
+        assert (
+            second_card_box["y"] - first_card_bottom
+            <= E2E_CARD_BLOCK_GAP_TOLERANCE_PIXELS
+        )
+        assert errors == [], Counter(errors)
+
+
+def test_selected_researcher_row_is_highlighted() -> None:
+    with control_centre_browser() as (page, errors):
+        selected_row = grid_row_for_draw(page, BROWSER_PILOT_ELIGIBLE_DRAW)
+        unselected_row = grid_row_for_draw(page, BROWSER_PILOT_INELIGIBLE_DRAW)
+        selected_row.click()
+
+        expect(selected_row).to_have_class(re.compile(r"\bag-row-selected\b"))
+        expect(selected_row).to_have_attribute("aria-selected", "true")
+        selected_background = selected_row.evaluate(
+            "element => getComputedStyle(element, '::before').backgroundColor"
+        )
+        unselected_background = unselected_row.evaluate(
+            "element => getComputedStyle(element, '::before').backgroundColor"
+        )
+        assert selected_background != unselected_background
+        assert errors == [], Counter(errors)
+
+
+def test_researcher_selection_and_attempt_history_are_idempotent() -> None:
+    with control_centre_browser() as (page, errors):
+        first_row = grid_row_for_draw(page, BROWSER_PILOT_ELIGIBLE_DRAW)
+        second_row = grid_row_for_draw(page, "1")
+        history_panel = page.get_by_test_id(
+            control_ui.ATTEMPT_HISTORY_PANEL_TEST_ID
+        )
+        history_table = page.get_by_test_id(
+            control_ui.ATTEMPT_HISTORY_TABLE_TEST_ID
+        )
+
+        first_row.click()
+        expect(first_row).to_have_class(re.compile(r"\bag-row-selected\b"))
+        expect(history_table).to_be_visible()
+        expect(history_panel).to_contain_text("Pilot Eligible Researcher")
+
+        first_row.click()
+        expect(first_row).to_have_class(re.compile(r"\bag-row-selected\b"))
+        expect(history_table).to_be_visible()
+        expect(history_panel).to_contain_text("Pilot Eligible Researcher")
+
+        second_row.click()
+        expect(second_row).to_have_class(re.compile(r"\bag-row-selected\b"))
+        expect(first_row).not_to_have_class(re.compile(r"\bag-row-selected\b"))
+        expect(history_table).to_be_visible()
+        expect(history_panel).to_contain_text("First 1 Last 1")
+        assert errors == [], Counter(errors)
 
 
 def test_control_centre_browser_contract() -> None:
@@ -552,7 +721,8 @@ def test_control_centre_browser_contract() -> None:
             draw_cell = eligible_row.locator(
                 f'{GRID_CELL_SELECTOR}[col-id="{control_ui.GRID_DRAW_FIELD}"]'
             )
-            box = draw_cell.bounding_box()
+            draw_value = draw_cell.locator(".ag-cell-value")
+            box = draw_value.bounding_box()
             assert box is not None
             page.mouse.move(box["x"] + 4, box["y"] + box["height"] / 2)
             page.mouse.down()

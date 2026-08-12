@@ -11,24 +11,44 @@
   its legacy human lines 3–207. It remains faithful to that legacy contract and
   approved refinements, required no edit, and is frozen byte-for-byte from now
   on. Never fold new executable-workflow additions into the legacy file.
-- Current human source has 18 lines and SHA-256
-  `82de7c394c79cfcacbfaafac0d16bf768dd70bdff6c0379359a9fc07bda9cc0a`.
-  Manifest routing sends instruction lines 1–7 to `build/AGENTS.md` and the
-  separating blank plus requirement lines 8–18 to notebook markdown cell 0;
-  all five evidence cells cite that exact contiguous block.
-- New executable requirements are five dedicated roundtrips: underscore-bearing
-  field labels remain literal through TXT/DOCX and NiceGUI; the main grid and
-  researcher card use compact line spacing; a clicked researcher row is visibly
-  highlighted; repeated clicks are idempotent while selection/history persist
-  and a different row changes selection; and clearing search remains empty
-  through timer refresh. The first four are pending implementation. The final
-  behavior and focused test already exist from commit
-  `eeeaeacd8aef6d425c27935d2b00cd8777c196fa` and are wired directly.
-- Latest `make validate`: routing PASS 18/18; notebook PASS (one human cell,
-  five evidence cells); clear-search evidence PASS; four evidence cells FAIL
-  solely because the newly named dedicated roundtrip tests do not yet exist.
-  This is the intentional red executable interpretation before implementation;
-  no production/test implementation was performed in this pass.
+- Current human source has 39 lines and SHA-256
+  `aca2ef494ec68808fb72defefb5cc9cd84aebacf78a89b03a19d77477a75979d`.
+  Manifest routing sends instruction lines 1–27 and the cross-cutting dedicated-
+  roundtrip rule on line 39 to `build/AGENTS.md`. The six smallest independently
+  verifiable behavior units map to notebook markdown cells 0, 2, 4, 6, 8, and
+  10, each followed immediately by exactly one evidence cell with matching
+  `task_lines`.
+- All six executable additions are implemented with dedicated roundtrips:
+  underscore-bearing field labels and filename subheading values remain
+  literal inline code through TXT, DOCX, and NiceGUI; the main grid and
+  researcher card use compact line spacing with no paragraph block gap; native
+  AG Grid selection visibly highlights the clicked researcher; repeated clicks
+  are idempotent while selection/history persist and a different row changes
+  selection; clearing search remains empty through timer refresh; and a full
+  real-DB researcher card round-trips through production DOCX rendering.
+- The database-backed DOCX evidence deterministically selects the first sorted
+  accepted source key whose assembled card contains XLSX, Codex, DOCX, and SSN
+  procedure sections (currently Sheikh), verifies every source filename, and
+  renders the exact `ResearcherCardRenderer` Markdown used by NiceGUI through
+  `write_cards_zip()` with Pandoc 3.7.0.2 and the configured reference DOCX,
+  saves `data/sample.docx`, and proves complete plain-text equality after the
+  DOCX roundtrip.
+- Latest `make validate`: routing PASS 39/39; notebook PASS (six alternating
+  human/evidence pairs); all six evidence cells PASS.
+- Every evidence cell imports its own dependencies and defines its own
+  prescribed absolute repository path before any derived test path, so
+  `build/SPEC.ipynb` runs standalone and does not depend on validator-injected
+  `REPOSITORY_ROOT` state or another cell's setup.
+- A live Playwright inspection identified the remaining card-spacing cause:
+  NiceGUI's `.nicegui-markdown` computed `white-space: pre-wrap`, so the literal
+  `\n\n` text nodes between marginless Markdown paragraphs occupied two blank
+  lines. The footer now uses normal whitespace for the Markdown container and
+  keeps `pre-wrap` only for `pre`/`code`; the dedicated browser roundtrip
+  measures a 0-pixel gap between consecutive rendered field paragraphs.
+- Filename values containing underscores are now passed through the same
+  literal inline-code renderer as underscore-bearing field labels. TXT/DOCX
+  and browser roundtrips assert both the field label and a filename subheading
+  such as `source_file.xlsx` render as code rather than Markdown emphasis.
 - Current Control Centre source layout is operator-owned and must be preserved:
   `control_centre/dashboard/ui.py` contains the application and local
   `NiceGui` literal owner; `dashboard/helpers/aggrid.py` contains `AgGrid`,
@@ -45,10 +65,11 @@
   creation, resolves the remote PID, sends TERM then verified KILL if needed,
   and always terminates/waits the local SSH process. A cancellation during
   session discovery is journaled as canceled rather than failed.
-- Focused Control Centre unit/browser verification is complete: 15 tests pass,
-  including explicit card/history/no-redraw assertions. The browser E2E
-  preserves child-server diagnostics and removes pytest's NiceGUI screen-test
-  sentinel from the child environment.
+- Current Control Centre unit/browser verification includes explicit literal-
+  label, compact-spacing, native-highlight, persistent-history, selectable-
+  text, card-cache, and no-redraw assertions. The browser E2E preserves child-
+  server diagnostics and removes pytest's NiceGUI screen-test sentinel from
+  the child environment.
 - NiceGUI's clearable search input emits `None` when cleared. The page now
   normalizes that event to the empty string at the UI boundary, preserving the
   non-null `UiSelection.search_text` invariant. A focused regression exercises
@@ -287,15 +308,19 @@
   `ModuleType` cannot expose the runtime class attributes to mypy.
 - Current Ruff audit passes for `dashboard/ui.py`, both dashboard helper
   modules, the API/parser, and focused unit/browser tests.
-- Focused Control Centre unit/browser suite: 15 passed. It includes workbook/
-  prompt byte identity, 307 authoritative source rows, ready placeholders,
-  disabled categorized ineligible rows, lazy cached cards, stable grid state,
-  native attempt history, cancellation, responsive browser behavior, and
-  clear-search normalization through the next timer refresh.
-- `pixi run test-detour-ai-augment-root`: 89 passed, 1 intentionally skipped
-  under the active allow-multiple policy. The root task now passes the invoking
-  user's populated Playwright browser cache through `sudo env`; root no longer
-  looks for an unprovisioned browser below `/root`.
+- Current Control Centre coverage includes workbook/prompt byte identity, 307
+  authoritative source rows, ready placeholders, disabled categorized
+  ineligible rows, lazy cached cards, stable grid state, native highlighted
+  selection and persistent attempt history, cancellation, responsive browser
+  behavior, selectable cell text, and clear-search normalization through the
+  next timer refresh.
+- `pixi run test-detour-ai-augment-root`: 95 passed, 1 intentionally skipped
+  under the active allow-multiple policy. The root task passes the invoking
+  user's populated Playwright browser cache and Pixi `bin` path through
+  `sudo env`, so both Chromium and Pandoc resolve under root.
+- The task Makefile's own test suite passes: 10 manifest tests and 29 validator
+  tests. Final `make validate` passes all 39 routed lines and all six executable
+  evidence cells.
 - A current-code preview from the production `182923` rollout's
   `turn15search2` provenance is one line, escapes source Markdown punctuation,
   retains the bold evidence text, and contains neither a ref ID nor Codex
@@ -313,9 +338,9 @@
   independent multi-item enrichment and unchanged pass-through for unresolved
   turn-refs and direct URL values.
 - The same E2E setup proves a one-character excerpt change and exact-URL change both reject before source DB/ground truth, response, card, or authoritative innerdict writes.
-- Complete non-root detour suite under the required `APPENDWATCH_SCRIPT`
-  environment: 86 passed, 4 skipped (the retained strict multiple-match test
-  plus three root-only watcher cases). The root Pixi task runs those watcher
-  cases and the Playwright E2E: 89 passed, 1 skipped.
+- Earlier complete non-root detour verification under the required
+  `APPENDWATCH_SCRIPT` environment was 86 passed, 4 skipped (the retained
+  strict multiple-match test plus three root-only watcher cases). The current
+  root Pixi task includes the added roundtrips and is 95 passed, 1 skipped.
 - Independent July persistence smoke: 107 physical records; 9 FC, 9 FCO, 9 calls, 155 refs, 5 non-null thumbnails; a second persistence pass is idempotent.
 - Read-only `git diff --cached --check` passes.

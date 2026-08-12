@@ -53,6 +53,7 @@ JULY_THUMBNAIL_REF_IDS = (
     "turn0search20",
     "turn0search24",
 )
+MARKDOWN_LITERAL_FIELD_TEMPLATE = "**`{field}`**"
 
 TEST_ROLLOUT_GUEST_PATH = "/home/ai/.codex/sessions/2026/07/31/rollout-chat.jsonl"
 TEST_ROLLOUT_RELATIVE_PATH = PurePosixPath("2026/07/31/rollout-chat.jsonl")
@@ -1472,13 +1473,28 @@ def test_real_july_push_matches_exact_objects_and_renders_card_end_to_end(
     card_text = "\n".join(context.rendered_cards)
     assert f"#### {api.KTP_FILENAME_COL}: {JULY_ROLLOUT_FILENAME}" in card_text
     assert f"**{api.KTP_FRAGMENT_COL}**: {JULY_ROLLOUT_LINE_COUNT}" in card_text
-    assert f"**{api.KTP_AI_AUGMENT_ATTEMPT_ID_COL}**: {manifest['attempt_id']}" in card_text
-    assert f"**{api.KTP_AI_AUGMENT_FOOTNOTES_COL}**:" in card_text
-    assert f"**{api.KTP_AI_AUGMENT_FOOTNOTE_ARGUMENTS_COL}**:" in card_text
     assert (
-        card_text.index(f"**{api.KTP_AI_AUGMENT_LINKS_COL}**:")
-        < card_text.index(f"**{api.KTP_AI_AUGMENT_COMMENTS_COL}**:")
-        < card_text.index(f"**{api.KTP_AI_AUGMENT_FOOTNOTES_COL}**:")
+        f"{MARKDOWN_LITERAL_FIELD_TEMPLATE.format(field=api.KTP_AI_AUGMENT_ATTEMPT_ID_COL)}: "
+        f"{manifest['attempt_id']}"
+    ) in card_text
+    assert (
+        f"{MARKDOWN_LITERAL_FIELD_TEMPLATE.format(field=api.KTP_AI_AUGMENT_FOOTNOTES_COL)}:"
+        in card_text
+    )
+    assert (
+        f"{MARKDOWN_LITERAL_FIELD_TEMPLATE.format(field=api.KTP_AI_AUGMENT_FOOTNOTE_ARGUMENTS_COL)}:"
+        in card_text
+    )
+    assert (
+        card_text.index(
+            f"{MARKDOWN_LITERAL_FIELD_TEMPLATE.format(field=api.KTP_AI_AUGMENT_LINKS_COL)}:"
+        )
+        < card_text.index(
+            f"{MARKDOWN_LITERAL_FIELD_TEMPLATE.format(field=api.KTP_AI_AUGMENT_COMMENTS_COL)}:"
+        )
+        < card_text.index(
+            f"{MARKDOWN_LITERAL_FIELD_TEMPLATE.format(field=api.KTP_AI_AUGMENT_FOOTNOTES_COL)}:"
+        )
     )
     assert "using arguments^1^" in card_text
     assert "<details>" not in card_text

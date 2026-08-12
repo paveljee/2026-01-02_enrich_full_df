@@ -20,6 +20,15 @@ from .vars import (
     KTP_LAST_NAME_ORIG_COLNAME_COL,
 )
 
+MARKDOWN_CODE_DELIMITER = "`"
+MARKDOWN_LITERAL_LABEL_MARKER = "_"
+
+
+def _markdown_literal(value: str) -> str:
+    if MARKDOWN_LITERAL_LABEL_MARKER not in value:
+        return value
+    return f"{MARKDOWN_CODE_DELIMITER}{value}{MARKDOWN_CODE_DELIMITER}"
+
 
 def build_cards(
     outer_dict: OuterDict,
@@ -75,14 +84,20 @@ def build_cards(
 
         for inner in inner_dicts:
             filename = inner.data.get(KTP_FILENAME_COL, "unknown")
-            card += f"\n\n#### {KTP_FILENAME_COL}: {filename}\n"
+            filename_label = _markdown_literal(KTP_FILENAME_COL)
+            rendered_filename = _markdown_literal(str(filename))
+            card += f"\n\n#### {filename_label}: {rendered_filename}\n"
             for col, val in inner.data.items():
                 if col in excluded_cols or pd.isna(val):
                     continue
+                rendered_col = _markdown_literal(col)
                 if "\n" in str(val):
-                    card += f"**{col}**:\n\n{str(val).replace('\n', '\n\n')}\n\n"
+                    card += (
+                        f"**{rendered_col}**:\n\n"
+                        f"{str(val).replace('\n', '\n\n')}\n\n"
+                    )
                 else:
-                    card += f"**{col}**: {str(val)}\n\n"
+                    card += f"**{rendered_col}**: {str(val)}\n\n"
                 # if want to render null values: ####
                 # if col in excluded_cols:
                 #     continue
