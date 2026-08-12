@@ -1,9 +1,14 @@
 ## human written - ai never touches this
 ### prerequisites and setup
+```bash
+([ "$PWD" = "/Volumes/home/aicode/2026-01-02_enrich_full_df" ] || exit 1)
+TASK_DIR="$PWD/tasks/tasks-20260731-tighten-api"
+```
+
 See prerequisites and setup in
 `tasks/tasks-20260519-review-231/SPEC.md`
 
-Use `./var/WORK.md` as
+Use `$TASK_DIR/var/WORK.md` as
 your own workbook for
 recording actions you have in mind and
 recording in progress and completed, or
