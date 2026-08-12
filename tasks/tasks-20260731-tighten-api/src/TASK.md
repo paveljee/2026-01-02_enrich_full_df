@@ -12,11 +12,15 @@ whose `make validate` will be used to verify AI's work.
 
 > [!IMPORTANT]
 > When writing `$TASK_DIR/build/SPEC.ipynb`, AI should know:
-> - One Markdown cell represents one requirement unit.
-> - A unit may span multiple contiguous TASK lines.
-> - Exactly one code evidence cell must immediately follow each Markdown cell.
-> - Its task_lines must exactly match that Markdown cell’s source lines.
-> - No shared “miscellaneous evidence” code cells or consecutive code cells.
+> - The procedure is called atomic requirement-to-evidence mapping.
+> - One Markdown cell represents one requirement unit:
+>   - A requirement unit is the smallest contiguous set of TASK lines expressing one independently verifiable behavior.
+>   - A unit may span multiple contiguous TASK lines.
+> - An evidence (code) cell must prove only its preceding requirement unit:
+>   - Exactly one evidence cell must immediately follow each Markdown cell.
+>   - Its task_lines must exactly match that Markdown cell’s source lines.
+>   - A code cell must not define paths, test IDs, setup, or assertions for other units.
+>   - No shared “miscellaneous evidence” code cells or consecutive code cells.
 
 ```bash
 sed -n '8,212p' "$TASK_DIR/legacy/SPEC.md"
