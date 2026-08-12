@@ -35,4 +35,5 @@ when clicking on a different row, the selection will change.
 therefore when for the first time a row has been selected, rows never get unselected
 and therefore attempt history persists.
 - in the search box when i remove the value, the search doesn't get reset. **already addressed in commit: `eeeaeacd8aef6d425c27935d2b00cd8777c196fa`. only remains to wire in spec.**
+- a spec that uses the docx card building functionality to build a sample researcher's card from db. the card includes full featured output identical to that on a nicegui card. the spec saves it under `$TASK_DIR/data/sample.docx` for future review of rendering.
 every case above must have a dedicated roundtrip test.
