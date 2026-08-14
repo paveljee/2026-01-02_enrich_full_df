@@ -425,7 +425,7 @@ class StartingCancelableCodex:
         self.canceled.set()
 
     async def wait(self, _handle: control_ui.CodexProcessHandle) -> int:
-        raise AssertionError("a canceled startup must not reach Codex wait")
+        raise AssertionError("a cancelled startup must not reach Codex wait")
 
 
 class FakeBackend:

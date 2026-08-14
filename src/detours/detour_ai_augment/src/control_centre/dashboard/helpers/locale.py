@@ -30,7 +30,7 @@ class Locale:
         "Total {total} · ground truth {ground_truth} · "
         "no ground truth {no_ground_truth} · ineligible {ineligible} · "
         "ready {ready} · queued {queued} · running {running} · "
-        "complete {complete} · failed {failed} · canceled {canceled}"
+        "complete {complete} · failed {failed} · cancelled {canceled}"
     )
     RESEARCHER_SELECTION_TEMPLATE: Final = (
         "{first_name} {last_name} · draw(s) {draw_number}"
@@ -107,7 +107,7 @@ class Locale:
         "detour card reads are suspended while a run is active"
     )
     CODEX_CANCELED_BEFORE_SANCTION: Final = (
-        "Codex run was canceled before sanctioning"
+        "Codex run was cancelled before sanctioning"
     )
     CODEX_HANDLE_MISMATCH: Final = "Codex handle does not match the active run"
     ACCEPTED_SESSION_DUPLICATE: Final = (
