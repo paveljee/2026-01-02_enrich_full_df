@@ -49,11 +49,13 @@ from src.helpers.data_models import (
     RegisteredResource,
     ResourceGroup,
 )
+from src.helpers.duckdb_extensions import load_duckdb_extension
 from src.helpers.duckdb_utils import (
     append_innerdicts_from_jsonlines_table,
     duckdb_quote_identifier,
     materialize_innerdicts_from_rows_table,
 )
+from src.helpers.name_matching import normalized_tokens_sql
 from src.helpers.procedures import DocxMatchProcedure, ParquetMatchProcedure, XlsxMatchProcedure
 from src.helpers.resources import register_resource
 from src.helpers.schema import (
@@ -87,12 +89,7 @@ from src.helpers.vars import (
 )
 
 from .helpers import codex_parse
-from .helpers.locale import (
-    Locale,
-    EVIDENCE_SUBMISSION_EXAMPLE,
-    NULL_SUBMISSION_EXAMPLE,
-    SUBMISSION_EXAMPLE,
-)
+from .helpers.locale import Locale
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[5]
 ENV_PATH = REPOSITORY_ROOT / ".env"
@@ -345,6 +342,34 @@ SUBMISSION_VALUE_KEY = "value"
 SUBMISSION_EVIDENCE_KEY = "web_search_excerpts"
 SUBMISSION_EXCERPT_KEY = "excerpt"
 SUBMISSION_URL_KEY = "url"
+EVIDENCE_WITHDRAWAL_ACTION_KEY = "action"
+EVIDENCE_WITHDRAWAL_REASON_KEY = "reason"
+EVIDENCE_WITHDRAWAL_ATTESTED_KEY = "attested"
+EVIDENCE_WITHDRAWAL_ACTION = "withdraw_unverified_evidence"
+EVIDENCE_WITHDRAWAL_REASON = "not_present_in_web_results"
+EVIDENCE_OUTCOME_V1_EXACT = "v1_exact"
+EVIDENCE_OUTCOME_V2_NEAR = "v2_near"
+EVIDENCE_OUTCOME_UNMATCHED = "unmatched"
+EVIDENCE_OUTCOME_WITHDRAWN = "withdrawn"
+EVIDENCE_ITEMS_ACCEPTED_DEF: Callable[[Sequence[str]], bool] = (
+    lambda outcomes: (
+        EVIDENCE_OUTCOME_V1_EXACT in outcomes
+        and all(
+            outcome
+            in {EVIDENCE_OUTCOME_V1_EXACT, EVIDENCE_OUTCOME_WITHDRAWN}
+            for outcome in outcomes
+        )
+    )
+)
+EVIDENCE_LOCATION_DEF: Callable[[str, int], str] = (
+    lambda field, index: f"{field}.{SUBMISSION_EVIDENCE_KEY}[{index}]"
+)
+EVIDENCE_PROGRESS_PRAISE_DEF: Callable[[Sequence[str]], bool] = (
+    lambda outcomes: (
+        EVIDENCE_OUTCOME_V2_NEAR in outcomes
+        and outcomes.count(EVIDENCE_OUTCOME_V1_EXACT) > len(outcomes) // 2
+    )
+)
 TREE_LINE = re.compile(
     rf"^(?P<{TREE_INDENT_GROUP}>(?:(?:│   )|(?:    ))*)"
     rf"(?:├── |└── )(?P<{TREE_BODY_GROUP}>.*)$"
@@ -423,6 +448,9 @@ CODEX_FC_TABLE = "codex_fc"
 CODEX_FCO_TABLE = "codex_fco"
 CODEX_CALLS_TABLE = "codex_calls"
 CODEX_TURN_REF_TABLE = "codex_turn_ref"
+CODEX_TURN_REF_NORMALIZED_VIEW = "codex_turn_ref_normalized"
+CODEX_RETRY_BASELINE_TABLE = "codex_retry_baselines"
+CODEX_EVIDENCE_AUDIT_TABLE = "codex_evidence_attempts"
 CODEX_OUTPUT_ROWS_TABLE = "codex_output_rows"
 CODEX_OUTPUT_VIEW = "codex_output"
 CODEX_INNERDICT_TABLE = "codex_innerdicts"
@@ -430,6 +458,7 @@ CODEX_FC_ID_SEQUENCE = "codex_fc_id_sequence"
 CODEX_FCO_ID_SEQUENCE = "codex_fco_id_sequence"
 CODEX_CALLS_ID_SEQUENCE = "codex_calls_id_sequence"
 CODEX_TURN_REF_ID_SEQUENCE = "codex_turn_ref_id_sequence"
+CODEX_EVIDENCE_AUDIT_ID_SEQUENCE = "codex_evidence_audit_id_sequence"
 
 CODEX_ID_COL = "id"
 CODEX_FC_TIMESTAMP_COL = "codex.fc_timestamp"
@@ -448,6 +477,19 @@ CODEX_REF_THUMBNAIL_URL_COL = "codex.ref_thumbnail_url"
 CODEX_REF_TITLE_COL = "codex.ref_title"
 CODEX_REF_URL_COL = "codex.ref_url"
 CODEX_CITE_TEXT_COL = "codex.cite_text"
+CODEX_CITE_TOKENS_COL = "codex.cite_tokens"
+CODEX_RETRY_RUN_ID_COL = "run_id"
+CODEX_RETRY_SOURCEKEY_COL = "sourcekey"
+CODEX_RETRY_SESSION_ID_COL = "session_id"
+CODEX_RETRY_ATTEMPT_ID_COL = "attempt_id"
+CODEX_RETRY_CREATED_AT_COL = "created_at"
+CODEX_RETRY_BASELINE_COL = "baseline"
+CODEX_EVIDENCE_SUBMISSION_COL = "submission"
+CODEX_EVIDENCE_ASSESSMENT_COL = "assessment"
+CODEX_EVIDENCE_APPLIED_COL = "applied"
+CODEX_EVIDENCE_ACCEPTED_COL = "accepted"
+CODEX_EVIDENCE_AUDIT_ID_COL = "id"
+CODEX_TOKEN_EXTENSION = "splink_udfs"
 
 AI_AUGMENT_COLUMN_PREFIX = "ktp.ai_augment_"
 KTP_AI_AUGMENT_ATTEMPT_ID_COL = f"{AI_AUGMENT_COLUMN_PREFIX}attempt_id"
@@ -497,6 +539,40 @@ AI_AUGMENT_EVIDENCE_COLUMNS = (
     KTP_AI_AUGMENT_LINKS_COL,
 )
 AI_AUGMENT_COLUMNS = AI_AUGMENT_EVIDENCE_COLUMNS + (KTP_AI_AUGMENT_COMMENTS_COL,)
+SUBMISSION_EXAMPLE: dict[str, object] = {
+    KTP_AI_AUGMENT_RESEARCHER_AUTHOR_COL: Locale.EXAMPLE_RESEARCHER_AUTHOR,
+    KTP_AI_AUGMENT_PLACE_OF_RESIDENCE_COL: Locale.EXAMPLE_PLACE_OF_RESIDENCE,
+    KTP_AI_AUGMENT_GENDER_COL: Locale.EXAMPLE_GENDER,
+    KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL: (
+        Locale.EXAMPLE_AGE_FIRST_PUBLICATION
+    ),
+    KTP_AI_AUGMENT_EDUCATION_COL: Locale.EXAMPLE_EDUCATION,
+    KTP_AI_AUGMENT_ACADEMIC_POSITIONS_COL: Locale.EXAMPLE_ACADEMIC_POSITIONS,
+    KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL: Locale.EXAMPLE_SOCIAL_CAPITAL,
+    KTP_AI_AUGMENT_LINKS_COL: Locale.EXAMPLE_LINKS,
+    KTP_AI_AUGMENT_COMMENTS_COL: Locale.EXAMPLE_COMMENTS,
+}
+NULL_SUBMISSION_EXAMPLE = {
+    KTP_FIRST_NAME_COL: Locale.EXAMPLE_FIRST_NAME,
+    KTP_LAST_NAME_COL: Locale.EXAMPLE_LAST_NAME,
+    **dict.fromkeys(AI_AUGMENT_COLUMNS),
+}
+EVIDENCE_SUBMISSION_EXAMPLE = {
+    column: {
+        SUBMISSION_VALUE_KEY: value,
+        SUBMISSION_EVIDENCE_KEY: [
+            {
+                SUBMISSION_EXCERPT_KEY: Locale.EXAMPLE_EVIDENCE_EXCERPT,
+                SUBMISSION_URL_KEY: Locale.EXAMPLE_EVIDENCE_URL,
+            }
+        ],
+    }
+    for column, value in SUBMISSION_EXAMPLE.items()
+    if column in AI_AUGMENT_EVIDENCE_COLUMNS
+}
+EVIDENCE_SUBMISSION_EXAMPLE[KTP_AI_AUGMENT_COMMENTS_COL] = {
+    SUBMISSION_VALUE_KEY: SUBMISSION_EXAMPLE[KTP_AI_AUGMENT_COMMENTS_COL]
+}
 CODEX_OUTPUT_SCHEMA = (
     (KTP_NAMEKEY_COL, "VARCHAR NOT NULL"),
     (KTP_FILENAME_COL, "VARCHAR NOT NULL"),
@@ -630,11 +706,28 @@ class WebSearchExcerpt(BaseModel):
         return self
 
 
+class EvidenceWithdrawal(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    action: Literal["withdraw_unverified_evidence"]
+    reason: Literal["not_present_in_web_results"]
+    attested: Literal[True]
+
+
+EvidenceSubmission = WebSearchExcerpt | EvidenceWithdrawal
+EvidenceOutcome = Literal[
+    EVIDENCE_OUTCOME_V1_EXACT,
+    EVIDENCE_OUTCOME_V2_NEAR,
+    EVIDENCE_OUTCOME_UNMATCHED,
+    EVIDENCE_OUTCOME_WITHDRAWN,
+]
+
+
 class FieldSubmission(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     value: SubmissionText
-    web_search_excerpts: list[WebSearchExcerpt] = Field(
+    web_search_excerpts: list[EvidenceSubmission] = Field(
         min_length=1,
         max_length=MAX_EXCERPTS_PER_FIELD,
     )
@@ -643,7 +736,11 @@ class FieldSubmission(BaseModel):
     def validate_field(self) -> Self:
         if not self.value.strip():
             raise ValueError(Locale.VALUE_NONBLANK)
-        evidence_pairs = [(evidence.excerpt, evidence.url) for evidence in self.web_search_excerpts]
+        evidence_pairs = [
+            (evidence.excerpt, evidence.url)
+            for evidence in self.web_search_excerpts
+            if isinstance(evidence, WebSearchExcerpt)
+        ]
         if len(set(evidence_pairs)) != len(evidence_pairs):
             raise ValueError(Locale.EXCERPT_PAIRS_UNIQUE)
         return self
@@ -753,6 +850,57 @@ class Submission(BaseModel):
         return values
 
 
+class RetryEvidenceObligation(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    outcome: EvidenceOutcome
+    excerpt: StrictStr | None = None
+    url: StrictStr | None = None
+    normalized_tokens: list[StrictStr] = Field(default_factory=list)
+
+
+class RetryFieldObligation(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    value: StrictStr
+    evidence: list[RetryEvidenceObligation]
+    accepted: bool
+
+
+class RetryObligations(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    fields: dict[StrictStr, RetryFieldObligation]
+
+
+class EvidenceCandidateAudit(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    ref_id: StrictStr
+    call_id: StrictStr
+    cite_text: StrictStr
+    excerpt_position: int
+    url: StrictStr
+
+
+class EvidenceItemAudit(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    field: StrictStr
+    index: int
+    outcome: EvidenceOutcome
+    excerpt: StrictStr | None
+    url: StrictStr | None
+    normalized_tokens: list[StrictStr]
+    candidates: list[EvidenceCandidateAudit]
+
+
+class EvidenceAttemptAudit(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    items: list[EvidenceItemAudit]
+
+
 class CodexTextResult(BaseModel):
     model_config = ConfigDict(extra="ignore", strict=True)
 
@@ -777,6 +925,12 @@ class PushConfigurationError(RuntimeError):
 
 class PushValidationError(RuntimeError):
     pass
+
+
+class EvidenceAssessmentError(PushValidationError):
+    def __init__(self, message: str, *, public_detail: str) -> None:
+        self.public_detail = public_detail
+        super().__init__(message)
 
 
 class MultipleEvidenceMatches(PushValidationError):
@@ -931,6 +1085,52 @@ class EvidenceCandidate:
     url: str
     fco_timestamp: datetime
     arguments_json: object
+
+
+@dataclass(frozen=True)
+class EvidenceItemAssessment:
+    field: str
+    index: int
+    evidence_number: int
+    submission: EvidenceSubmission
+    outcome: EvidenceOutcome
+    match: EvidenceMatch | None
+    normalized_tokens: tuple[str, ...] = ()
+    candidates: tuple[EvidenceCandidate, ...] = ()
+
+
+@dataclass(frozen=True)
+class EvidenceAssessment:
+    items: tuple[EvidenceItemAssessment, ...]
+
+    @property
+    def validated(self) -> ValidatedEvidence:
+        validated: ValidatedEvidence = {
+            field: [] for field in AI_AUGMENT_EVIDENCE_COLUMNS
+        }
+        for item in self.items:
+            if item.match is not None and item.outcome == EVIDENCE_OUTCOME_V1_EXACT:
+                validated[item.field].append(item.match)
+        return validated
+
+    @property
+    def exact_count(self) -> int:
+        return sum(
+            item.outcome == EVIDENCE_OUTCOME_V1_EXACT for item in self.items
+        )
+
+    @property
+    def accepted(self) -> bool:
+        return all(
+            EVIDENCE_ITEMS_ACCEPTED_DEF(
+                tuple(
+                    item.outcome
+                    for item in self.items
+                    if item.field == field
+                )
+            )
+            for field in AI_AUGMENT_EVIDENCE_COLUMNS
+        )
 
 
 @dataclass(frozen=True)
@@ -2394,12 +2594,17 @@ def build_rollout_index(
     )
 
 
-def _create_codex_schema(conn: duckdb.DuckDBPyConnection) -> None:
+def _create_codex_schema(
+    conn: duckdb.DuckDBPyConnection,
+    *,
+    codex_match_version: int = 1,
+) -> None:
     for sequence in (
         CODEX_FC_ID_SEQUENCE,
         CODEX_FCO_ID_SEQUENCE,
         CODEX_CALLS_ID_SEQUENCE,
         CODEX_TURN_REF_ID_SEQUENCE,
+        CODEX_EVIDENCE_AUDIT_ID_SEQUENCE,
     ):
         conn.execute(f"CREATE SEQUENCE IF NOT EXISTS {sequence}")
 
@@ -2413,6 +2618,36 @@ def _create_codex_schema(conn: duckdb.DuckDBPyConnection) -> None:
             {duckdb_quote_identifier(CODEX_FC_NAME_COL)} VARCHAR NOT NULL,
             {duckdb_quote_identifier(CODEX_FC_NAMESPACE_COL)} VARCHAR NOT NULL,
             {duckdb_quote_identifier(CODEX_FC_ARGUMENTS_COL)} JSON NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {CODEX_RETRY_BASELINE_TABLE} (
+            {duckdb_quote_identifier(CODEX_RETRY_RUN_ID_COL)} VARCHAR PRIMARY KEY,
+            {duckdb_quote_identifier(CODEX_RETRY_SOURCEKEY_COL)} VARCHAR NOT NULL,
+            {duckdb_quote_identifier(CODEX_RETRY_SESSION_ID_COL)} VARCHAR NOT NULL,
+            {duckdb_quote_identifier(CODEX_RETRY_ATTEMPT_ID_COL)} VARCHAR NOT NULL,
+            {duckdb_quote_identifier(CODEX_RETRY_CREATED_AT_COL)} TIMESTAMPTZ NOT NULL,
+            {duckdb_quote_identifier(CODEX_RETRY_BASELINE_COL)} JSON NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {CODEX_EVIDENCE_AUDIT_TABLE} (
+            {duckdb_quote_identifier(CODEX_EVIDENCE_AUDIT_ID_COL)}
+                BIGINT PRIMARY KEY
+                DEFAULT nextval('{CODEX_EVIDENCE_AUDIT_ID_SEQUENCE}'),
+            {duckdb_quote_identifier(CODEX_RETRY_ATTEMPT_ID_COL)} VARCHAR NOT NULL UNIQUE,
+            {duckdb_quote_identifier(CODEX_RETRY_RUN_ID_COL)} VARCHAR NOT NULL,
+            {duckdb_quote_identifier(CODEX_RETRY_SOURCEKEY_COL)} VARCHAR NOT NULL,
+            {duckdb_quote_identifier(CODEX_RETRY_SESSION_ID_COL)} VARCHAR NOT NULL,
+            {duckdb_quote_identifier(CODEX_RETRY_CREATED_AT_COL)} TIMESTAMPTZ NOT NULL,
+            {duckdb_quote_identifier(CODEX_EVIDENCE_SUBMISSION_COL)} JSON NOT NULL,
+            {duckdb_quote_identifier(CODEX_EVIDENCE_ASSESSMENT_COL)} JSON NOT NULL,
+            {duckdb_quote_identifier(CODEX_EVIDENCE_APPLIED_COL)} BOOLEAN NOT NULL,
+            {duckdb_quote_identifier(CODEX_EVIDENCE_ACCEPTED_COL)} BOOLEAN NOT NULL
         )
         """
     )
@@ -2455,6 +2690,17 @@ def _create_codex_schema(conn: duckdb.DuckDBPyConnection) -> None:
         )
         """
     )
+    if codex_match_version == 2:
+        conn.execute(
+            f"""
+            CREATE OR REPLACE VIEW {CODEX_TURN_REF_NORMALIZED_VIEW} AS
+            SELECT
+                *,
+                {normalized_tokens_sql(duckdb_quote_identifier(CODEX_CITE_TEXT_COL))}
+                    AS {duckdb_quote_identifier(CODEX_CITE_TOKENS_COL)}
+            FROM {CODEX_TURN_REF_TABLE}
+            """
+        )
 
 
 def _insert_or_validate(
@@ -2494,10 +2740,15 @@ def _datetime_value(timestamp: str) -> datetime:
 def persist_rollout_index(
     conn: duckdb.DuckDBPyConnection,
     rollout_index: RolloutIndex,
+    *,
+    codex_match_version: int = 1,
 ) -> None:
     conn.execute("BEGIN TRANSACTION")
     try:
-        _create_codex_schema(conn)
+        _create_codex_schema(
+            conn,
+            codex_match_version=codex_match_version,
+        )
         current_call_ids = {row.call_id for row in rollout_index.fc_rows}
         existing_call_ids = {
             cast(str, row[0])
@@ -2772,6 +3023,740 @@ def _evidence_candidates(rows: list[tuple[Any, ...]]) -> tuple[EvidenceCandidate
     return tuple(candidates)
 
 
+def _exact_evidence_candidates(
+    conn: duckdb.DuckDBPyConnection,
+    *,
+    rollout_filename: str,
+    excerpt: str,
+) -> tuple[EvidenceCandidate, ...]:
+    rows = conn.execute(
+        f"""
+        SELECT
+            ts.{duckdb_quote_identifier(CODEX_REF_ID_COL)},
+            ts.{duckdb_quote_identifier(CODEX_CALL_ID_COL)},
+            ts.{duckdb_quote_identifier(CODEX_CITE_TEXT_COL)},
+            strpos(ts.{duckdb_quote_identifier(CODEX_CITE_TEXT_COL)}, ?),
+            ts.{duckdb_quote_identifier(CODEX_REF_URL_COL)},
+            fco.{duckdb_quote_identifier(CODEX_FCO_TIMESTAMP_COL)},
+            fc.{duckdb_quote_identifier(CODEX_FC_ARGUMENTS_COL)}
+        FROM {CODEX_TURN_REF_TABLE} ts
+        JOIN {CODEX_CALLS_TABLE} calls
+          ON calls.{duckdb_quote_identifier(CODEX_CALL_ID_COL)} =
+             ts.{duckdb_quote_identifier(CODEX_CALL_ID_COL)}
+        JOIN {CODEX_FCO_TABLE} fco
+          ON fco.{duckdb_quote_identifier(CODEX_FCO_ID_COL)} =
+             calls.{duckdb_quote_identifier(CODEX_FCO_ID_COL)}
+        JOIN {CODEX_FC_TABLE} fc
+          ON fc.{duckdb_quote_identifier(CODEX_FC_ID_COL)} =
+             calls.{duckdb_quote_identifier(CODEX_FC_ID_COL)}
+        WHERE calls.{duckdb_quote_identifier(CODEX_ROLLOUT_FILENAME_COL)} = ?
+          AND strpos(
+              ts.{duckdb_quote_identifier(CODEX_CITE_TEXT_COL)}, ?
+          ) > 0
+        ORDER BY ts.{duckdb_quote_identifier(CODEX_ID_COL)}
+        """,
+        [excerpt, rollout_filename, excerpt],
+    ).fetchall()
+    return _evidence_candidates(rows)
+
+
+def _normalized_evidence_tokens(
+    conn: duckdb.DuckDBPyConnection,
+    excerpt: str,
+) -> tuple[str, ...]:
+    row = conn.execute(
+        f"SELECT {normalized_tokens_sql('?')}",
+        [excerpt],
+    ).fetchone()
+    if row is None or not isinstance(row[0], list):
+        return ()
+    return tuple(cast(list[str], row[0]))
+
+
+def _near_evidence_candidates(
+    conn: duckdb.DuckDBPyConnection,
+    *,
+    rollout_filename: str,
+    url: str,
+    submitted_tokens: tuple[str, ...],
+) -> tuple[EvidenceCandidate, ...]:
+    if not submitted_tokens:
+        return ()
+    rows = conn.execute(
+        f"""
+        WITH submitted(tokens) AS (VALUES (?)),
+        candidate_rows AS (
+            SELECT
+                ts.{duckdb_quote_identifier(CODEX_ID_COL)},
+                ts.{duckdb_quote_identifier(CODEX_REF_ID_COL)},
+                ts.{duckdb_quote_identifier(CODEX_CALL_ID_COL)},
+                ts.{duckdb_quote_identifier(CODEX_CITE_TEXT_COL)},
+                list_position(
+                    list_transform(
+                        range(
+                            1,
+                            len(ts.{duckdb_quote_identifier(CODEX_CITE_TOKENS_COL)})
+                                - len(submitted.tokens) + 2
+                        ),
+                        token_index -> list_slice(
+                            ts.{duckdb_quote_identifier(CODEX_CITE_TOKENS_COL)},
+                            token_index,
+                            token_index + len(submitted.tokens) - 1
+                        ) = submitted.tokens
+                    ),
+                    true
+                ) AS excerpt_position,
+                ts.{duckdb_quote_identifier(CODEX_REF_URL_COL)},
+                fco.{duckdb_quote_identifier(CODEX_FCO_TIMESTAMP_COL)},
+                fc.{duckdb_quote_identifier(CODEX_FC_ARGUMENTS_COL)}
+            FROM {CODEX_TURN_REF_NORMALIZED_VIEW} ts
+            CROSS JOIN submitted
+            JOIN {CODEX_CALLS_TABLE} calls
+              ON calls.{duckdb_quote_identifier(CODEX_CALL_ID_COL)} =
+                 ts.{duckdb_quote_identifier(CODEX_CALL_ID_COL)}
+            JOIN {CODEX_FCO_TABLE} fco
+              ON fco.{duckdb_quote_identifier(CODEX_FCO_ID_COL)} =
+                 calls.{duckdb_quote_identifier(CODEX_FCO_ID_COL)}
+            JOIN {CODEX_FC_TABLE} fc
+              ON fc.{duckdb_quote_identifier(CODEX_FC_ID_COL)} =
+                 calls.{duckdb_quote_identifier(CODEX_FC_ID_COL)}
+            WHERE calls.{duckdb_quote_identifier(CODEX_ROLLOUT_FILENAME_COL)} = ?
+              AND ts.{duckdb_quote_identifier(CODEX_REF_URL_COL)} = ?
+        )
+        SELECT
+            {duckdb_quote_identifier(CODEX_REF_ID_COL)},
+            {duckdb_quote_identifier(CODEX_CALL_ID_COL)},
+            {duckdb_quote_identifier(CODEX_CITE_TEXT_COL)},
+            excerpt_position,
+            {duckdb_quote_identifier(CODEX_REF_URL_COL)},
+            {duckdb_quote_identifier(CODEX_FCO_TIMESTAMP_COL)},
+            {duckdb_quote_identifier(CODEX_FC_ARGUMENTS_COL)}
+        FROM candidate_rows
+        WHERE excerpt_position IS NOT NULL
+        ORDER BY {duckdb_quote_identifier(CODEX_ID_COL)}
+        """,
+        [list(submitted_tokens), rollout_filename, url],
+    ).fetchall()
+    return _evidence_candidates(rows)
+
+
+def _candidate_match(
+    candidate: EvidenceCandidate,
+    *,
+    field: str,
+    evidence_number: int,
+    evidence: WebSearchExcerpt,
+) -> EvidenceMatch:
+    arguments_json = candidate.arguments_json
+    if not isinstance(arguments_json, str):
+        arguments_json = json.dumps(
+            arguments_json,
+            ensure_ascii=False,
+            separators=COMPACT_JSON_SEPARATORS,
+        )
+    return EvidenceMatch(
+        field=field,
+        evidence_number=evidence_number,
+        excerpt=evidence.excerpt,
+        url=evidence.url,
+        ref_id=candidate.ref_id,
+        call_id=candidate.call_id,
+        cite_text=candidate.cite_text,
+        excerpt_position=candidate.excerpt_position - 1,
+        fco_timestamp=_render_fco_timestamp(candidate.fco_timestamp),
+        arguments_json=arguments_json,
+    )
+
+
+def assess_submission_evidence(
+    conn: duckdb.DuckDBPyConnection,
+    submission: Submission,
+    *,
+    rollout_filename: str,
+    codex_match_version: int,
+) -> EvidenceAssessment:
+    assessments: list[EvidenceItemAssessment] = []
+    evidence_number = 0
+    for field, field_submission in submission.evidence_items():
+        for index, evidence in enumerate(field_submission.web_search_excerpts):
+            evidence_number += 1
+            if isinstance(evidence, EvidenceWithdrawal):
+                assessments.append(
+                    EvidenceItemAssessment(
+                        field=field,
+                        index=index,
+                        evidence_number=evidence_number,
+                        submission=evidence,
+                        outcome=EVIDENCE_OUTCOME_WITHDRAWN,
+                        match=None,
+                    )
+                )
+                continue
+
+            exact_candidates = _exact_evidence_candidates(
+                conn,
+                rollout_filename=rollout_filename,
+                excerpt=evidence.excerpt,
+            )
+            exact_url_candidates = tuple(
+                candidate
+                for candidate in exact_candidates
+                if candidate.url == evidence.url
+            )
+            if exact_url_candidates:
+                if (
+                    len(exact_url_candidates) > 1
+                    and not ALLOW_MULTIPLE_EVIDENCE_MATCHES
+                ):
+                    raise MultipleEvidenceMatches(evidence.excerpt)
+                candidate = (
+                    EVIDENCE_RANDOM.choice(exact_url_candidates)
+                    if len(exact_url_candidates) > 1
+                    else exact_url_candidates[0]
+                )
+                assessments.append(
+                    EvidenceItemAssessment(
+                        field=field,
+                        index=index,
+                        evidence_number=evidence_number,
+                        submission=evidence,
+                        outcome=EVIDENCE_OUTCOME_V1_EXACT,
+                        match=_candidate_match(
+                            candidate,
+                            field=field,
+                            evidence_number=evidence_number,
+                            evidence=evidence,
+                        ),
+                        candidates=exact_url_candidates,
+                    )
+                )
+                continue
+
+            normalized_tokens: tuple[str, ...] = ()
+            near_candidates: tuple[EvidenceCandidate, ...] = ()
+            if codex_match_version == 2:
+                normalized_tokens = _normalized_evidence_tokens(conn, evidence.excerpt)
+                near_candidates = _near_evidence_candidates(
+                    conn,
+                    rollout_filename=rollout_filename,
+                    url=evidence.url,
+                    submitted_tokens=normalized_tokens,
+                )
+            assessments.append(
+                EvidenceItemAssessment(
+                    field=field,
+                    index=index,
+                    evidence_number=evidence_number,
+                    submission=evidence,
+                    outcome=(
+                        EVIDENCE_OUTCOME_V2_NEAR
+                        if near_candidates
+                        else EVIDENCE_OUTCOME_UNMATCHED
+                    ),
+                    match=None,
+                    normalized_tokens=normalized_tokens,
+                    candidates=near_candidates or exact_candidates,
+                )
+            )
+    return EvidenceAssessment(items=tuple(assessments))
+
+
+def _retry_evidence_obligation(
+    item: EvidenceItemAssessment,
+) -> RetryEvidenceObligation:
+    if isinstance(item.submission, WebSearchExcerpt):
+        excerpt = item.submission.excerpt
+        url = item.submission.url
+    else:
+        excerpt = None
+        url = None
+    return RetryEvidenceObligation(
+        outcome=item.outcome,
+        excerpt=excerpt,
+        url=url,
+        normalized_tokens=list(item.normalized_tokens),
+    )
+
+
+def _retry_obligations_from_assessment(
+    submission: Submission,
+    assessment: EvidenceAssessment,
+) -> RetryObligations:
+    fields: dict[str, RetryFieldObligation] = {}
+    for field, field_submission in submission.evidence_items():
+        evidence = [
+            _retry_evidence_obligation(item)
+            for item in assessment.items
+            if item.field == field
+        ]
+        fields[field] = RetryFieldObligation(
+            value=field_submission.value,
+            evidence=evidence,
+            accepted=EVIDENCE_ITEMS_ACCEPTED_DEF(
+                tuple(item.outcome for item in evidence)
+            ),
+        )
+    return RetryObligations(fields=fields)
+
+
+def _assessment_audit(assessment: EvidenceAssessment) -> EvidenceAttemptAudit:
+    items: list[EvidenceItemAudit] = []
+    for item in assessment.items:
+        if isinstance(item.submission, WebSearchExcerpt):
+            excerpt = item.submission.excerpt
+            url = item.submission.url
+        else:
+            excerpt = None
+            url = None
+        items.append(
+            EvidenceItemAudit(
+                field=item.field,
+                index=item.index,
+                outcome=item.outcome,
+                excerpt=excerpt,
+                url=url,
+                normalized_tokens=list(item.normalized_tokens),
+                candidates=[
+                    EvidenceCandidateAudit(
+                        ref_id=candidate.ref_id,
+                        call_id=candidate.call_id,
+                        cite_text=candidate.cite_text,
+                        excerpt_position=candidate.excerpt_position,
+                        url=candidate.url,
+                    )
+                    for candidate in item.candidates
+                ],
+            )
+        )
+    return EvidenceAttemptAudit(items=items)
+
+
+def _log_evidence_assessment(
+    assessment: EvidenceAssessment,
+    *,
+    attempt_id: str,
+) -> None:
+    for item in assessment.items:
+        if isinstance(item.submission, WebSearchExcerpt):
+            excerpt = item.submission.excerpt
+            url = item.submission.url
+        else:
+            excerpt = None
+            url = None
+        candidate_diagnostics = tuple(
+            (
+                candidate.ref_id,
+                candidate.call_id,
+                candidate.cite_text,
+                candidate.excerpt_position,
+                candidate.url,
+            )
+            for candidate in item.candidates
+        )
+        logger.info(
+            Locale.EVIDENCE_ITEM_ASSESSMENT_LOG,
+            attempt_id,
+            item.field,
+            item.index,
+            item.outcome,
+            excerpt,
+            url,
+            candidate_diagnostics,
+        )
+
+
+def _assessment_public_detail(
+    assessment: EvidenceAssessment,
+    *,
+    violations: Sequence[str] = (),
+) -> str:
+    total = len(assessment.items)
+    outcomes = tuple(item.outcome for item in assessment.items)
+    progress_template = (
+        Locale.EVIDENCE_GOOD_PROGRESS_TEMPLATE
+        if EVIDENCE_PROGRESS_PRAISE_DEF(outcomes)
+        else Locale.EVIDENCE_PROGRESS_TEMPLATE
+    )
+    lines = [
+        progress_template.format(
+            verified=assessment.exact_count,
+            total=total,
+        ),
+        Locale.EVIDENCE_REVIEW_HEADER,
+    ]
+    for item in assessment.items:
+        location = EVIDENCE_LOCATION_DEF(item.field, item.index)
+        if item.outcome == EVIDENCE_OUTCOME_V2_NEAR:
+            lines.append(Locale.EVIDENCE_NEAR_ITEM_TEMPLATE.format(location=location))
+        elif item.outcome == EVIDENCE_OUTCOME_UNMATCHED:
+            lines.append(
+                Locale.EVIDENCE_UNMATCHED_ITEM_TEMPLATE.format(location=location)
+            )
+        elif item.outcome == EVIDENCE_OUTCOME_WITHDRAWN:
+            lines.append(
+                Locale.EVIDENCE_WITHDRAWN_ITEM_TEMPLATE.format(location=location)
+            )
+    lines.extend(violations)
+    lines.append(Locale.EVIDENCE_RETRY_INSTRUCTION)
+    return "\n".join(lines)
+
+
+def _obligation_item_is_unchanged(
+    previous: RetryEvidenceObligation,
+    current: EvidenceSubmission,
+) -> bool:
+    if previous.outcome == EVIDENCE_OUTCOME_V1_EXACT:
+        return (
+            isinstance(current, WebSearchExcerpt)
+            and current.excerpt == previous.excerpt
+            and current.url == previous.url
+        )
+    return (
+        previous.outcome == EVIDENCE_OUTCOME_WITHDRAWN
+        and isinstance(current, EvidenceWithdrawal)
+    )
+
+
+def _apply_retry_obligations(
+    conn: duckdb.DuckDBPyConnection,
+    submission: Submission,
+    assessment: EvidenceAssessment,
+    previous: RetryObligations,
+) -> tuple[RetryObligations, tuple[str, ...]]:
+    next_fields: dict[str, RetryFieldObligation] = {}
+    violations: list[str] = []
+    assessed_items = {
+        (item.field, item.index): item for item in assessment.items
+    }
+    for field, field_submission in submission.evidence_items():
+        previous_field = previous.fields[field]
+        current_evidence = field_submission.web_search_excerpts
+        if previous_field.accepted:
+            unchanged = (
+                field_submission.value == previous_field.value
+                and len(current_evidence) == len(previous_field.evidence)
+                and all(
+                    _obligation_item_is_unchanged(previous_item, current_item)
+                    for previous_item, current_item in zip(
+                        previous_field.evidence,
+                        current_evidence,
+                        strict=True,
+                    )
+                )
+            )
+            if not unchanged:
+                violations.append(
+                    Locale.EVIDENCE_ACCEPTED_FIELD_IMMUTABLE_TEMPLATE.format(
+                        immutable=field
+                    )
+                )
+            next_fields[field] = previous_field
+            continue
+
+        if len(current_evidence) < len(previous_field.evidence):
+            violations.append(
+                Locale.EVIDENCE_COUNT_DECREASED_TEMPLATE.format(field=field)
+            )
+
+        next_evidence: list[RetryEvidenceObligation] = []
+        withdrew_item = False
+        for index, previous_item in enumerate(previous_field.evidence):
+            if index >= len(current_evidence):
+                next_evidence.append(previous_item)
+                continue
+            current_item = current_evidence[index]
+            assessment_item = assessed_items[(field, index)]
+            location = EVIDENCE_LOCATION_DEF(field, index)
+            if previous_item.outcome == EVIDENCE_OUTCOME_V1_EXACT:
+                if not _obligation_item_is_unchanged(previous_item, current_item):
+                    violations.append(
+                        Locale.EVIDENCE_EXACT_IMMUTABLE_TEMPLATE.format(
+                            immutable=location
+                        )
+                    )
+                next_evidence.append(previous_item)
+                continue
+            if previous_item.outcome == EVIDENCE_OUTCOME_V2_NEAR:
+                if isinstance(current_item, EvidenceWithdrawal):
+                    violations.append(
+                        Locale.EVIDENCE_WITHDRAWAL_NOT_ALLOWED_TEMPLATE.format(
+                            location=location
+                        )
+                    )
+                    next_evidence.append(previous_item)
+                    continue
+                current_tokens = assessment_item.normalized_tokens
+                if assessment_item.outcome == EVIDENCE_OUTCOME_V1_EXACT:
+                    current_tokens = _normalized_evidence_tokens(
+                        conn,
+                        current_item.excerpt,
+                    )
+                if (
+                    current_item.url != previous_item.url
+                    or list(current_tokens) != previous_item.normalized_tokens
+                ):
+                    violations.append(
+                        Locale.EVIDENCE_MINOR_CHANGE_ONLY_TEMPLATE.format(
+                            location=location
+                        )
+                    )
+                    next_evidence.append(previous_item)
+                    continue
+                if assessment_item.outcome not in {
+                    EVIDENCE_OUTCOME_V1_EXACT,
+                    EVIDENCE_OUTCOME_V2_NEAR,
+                }:
+                    violations.append(
+                        Locale.EVIDENCE_MINOR_CHANGE_ONLY_TEMPLATE.format(
+                            location=location
+                        )
+                    )
+                    next_evidence.append(previous_item)
+                    continue
+                next_evidence.append(_retry_evidence_obligation(assessment_item))
+                continue
+            if previous_item.outcome == EVIDENCE_OUTCOME_UNMATCHED:
+                if isinstance(current_item, EvidenceWithdrawal):
+                    withdrew_item = True
+                next_evidence.append(_retry_evidence_obligation(assessment_item))
+                continue
+            if not isinstance(current_item, EvidenceWithdrawal):
+                violations.append(
+                    Locale.EVIDENCE_WITHDRAWAL_NOT_ALLOWED_TEMPLATE.format(
+                        location=location
+                    )
+                )
+            next_evidence.append(previous_item)
+
+        for index in range(len(previous_field.evidence), len(current_evidence)):
+            assessment_item = assessed_items[(field, index)]
+            if isinstance(assessment_item.submission, EvidenceWithdrawal):
+                violations.append(
+                    Locale.EVIDENCE_WITHDRAWAL_WITHOUT_BASELINE
+                )
+            next_evidence.append(_retry_evidence_obligation(assessment_item))
+
+        if withdrew_item and field_submission.value == previous_field.value:
+            violations.append(
+                Locale.EVIDENCE_WITHDRAWAL_VALUE_UNCHANGED_TEMPLATE.format(
+                    field=field
+                )
+            )
+        next_fields[field] = RetryFieldObligation(
+            value=field_submission.value,
+            evidence=next_evidence,
+            accepted=EVIDENCE_ITEMS_ACCEPTED_DEF(
+                tuple(item.outcome for item in next_evidence)
+            ),
+        )
+    return RetryObligations(fields=next_fields), tuple(violations)
+
+
+def _assessment_from_audit(
+    submission: Submission,
+    audit: EvidenceAttemptAudit,
+) -> EvidenceAssessment:
+    submission_fields = dict(submission.evidence_items())
+    items: list[EvidenceItemAssessment] = []
+    for evidence_number, audit_item in enumerate(audit.items, start=1):
+        evidence = submission_fields[audit_item.field].web_search_excerpts[
+            audit_item.index
+        ]
+        items.append(
+            EvidenceItemAssessment(
+                field=audit_item.field,
+                index=audit_item.index,
+                evidence_number=evidence_number,
+                submission=evidence,
+                outcome=audit_item.outcome,
+                match=None,
+                normalized_tokens=tuple(audit_item.normalized_tokens),
+            )
+        )
+    return EvidenceAssessment(items=tuple(items))
+
+
+def _derive_retry_obligations(
+    conn: duckdb.DuckDBPyConnection,
+    *,
+    baseline_json: str,
+    baseline_attempt_id: str,
+    run_id: str,
+) -> RetryObligations:
+    try:
+        obligations = RetryObligations.model_validate_json(baseline_json)
+        rows = conn.execute(
+            f"""
+            SELECT
+                {duckdb_quote_identifier(CODEX_EVIDENCE_SUBMISSION_COL)},
+                {duckdb_quote_identifier(CODEX_EVIDENCE_ASSESSMENT_COL)}
+            FROM {CODEX_EVIDENCE_AUDIT_TABLE}
+            WHERE {duckdb_quote_identifier(CODEX_RETRY_RUN_ID_COL)} = ?
+              AND {duckdb_quote_identifier(CODEX_EVIDENCE_APPLIED_COL)}
+              AND {duckdb_quote_identifier(CODEX_RETRY_ATTEMPT_ID_COL)} <> ?
+            ORDER BY {duckdb_quote_identifier(CODEX_EVIDENCE_AUDIT_ID_COL)}
+            """,
+            [run_id, baseline_attempt_id],
+        ).fetchall()
+        for submission_json, assessment_json in rows:
+            submission = Submission.model_validate_json(cast(str, submission_json))
+            assessment = _assessment_from_audit(
+                submission,
+                EvidenceAttemptAudit.model_validate_json(
+                    cast(str, assessment_json)
+                ),
+            )
+            obligations, violations = _apply_retry_obligations(
+                conn,
+                submission,
+                assessment,
+                obligations,
+            )
+            if violations:
+                raise PushConfigurationError(
+                    Locale.EVIDENCE_AUDIT_REPLAY_FAILED
+                )
+        return obligations
+    except (IndexError, KeyError, ValidationError) as exc:
+        raise PushConfigurationError(
+            Locale.EVIDENCE_AUDIT_REPLAY_FAILED
+        ) from exc
+
+
+def _process_retry_attempt(
+    conn: duckdb.DuckDBPyConnection,
+    *,
+    run_id: UUID,
+    source_key: str,
+    session_id: str,
+    attempt_id: str,
+    attempt_timestamp: datetime,
+    submission: Submission,
+    assessment: EvidenceAssessment,
+) -> tuple[str, ...]:
+    run_id_text = str(run_id)
+    initial_obligations = _retry_obligations_from_assessment(
+        submission,
+        assessment,
+    )
+    submission_json = submission.model_dump_json(by_alias=True)
+    assessment_json = _assessment_audit(assessment).model_dump_json()
+    conn.execute("BEGIN TRANSACTION")
+    try:
+        inserted_baseline = False
+        if not assessment.accepted:
+            inserted_baseline = (
+                conn.execute(
+                    f"""
+                    INSERT INTO {CODEX_RETRY_BASELINE_TABLE} (
+                        {duckdb_quote_identifier(CODEX_RETRY_RUN_ID_COL)},
+                        {duckdb_quote_identifier(CODEX_RETRY_SOURCEKEY_COL)},
+                        {duckdb_quote_identifier(CODEX_RETRY_SESSION_ID_COL)},
+                        {duckdb_quote_identifier(CODEX_RETRY_ATTEMPT_ID_COL)},
+                        {duckdb_quote_identifier(CODEX_RETRY_CREATED_AT_COL)},
+                        {duckdb_quote_identifier(CODEX_RETRY_BASELINE_COL)}
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT DO NOTHING
+                    RETURNING {duckdb_quote_identifier(CODEX_RETRY_RUN_ID_COL)}
+                    """,
+                    [
+                        run_id_text,
+                        source_key,
+                        session_id,
+                        attempt_id,
+                        attempt_timestamp,
+                        initial_obligations.model_dump_json(),
+                    ],
+                ).fetchone()
+                is not None
+            )
+
+        baseline_row = conn.execute(
+            f"""
+            SELECT
+                {duckdb_quote_identifier(CODEX_RETRY_SOURCEKEY_COL)},
+                {duckdb_quote_identifier(CODEX_RETRY_SESSION_ID_COL)},
+                {duckdb_quote_identifier(CODEX_RETRY_ATTEMPT_ID_COL)},
+                {duckdb_quote_identifier(CODEX_RETRY_BASELINE_COL)}
+            FROM {CODEX_RETRY_BASELINE_TABLE}
+            WHERE {duckdb_quote_identifier(CODEX_RETRY_RUN_ID_COL)} = ?
+            """,
+            [run_id_text],
+        ).fetchone()
+
+        violations: tuple[str, ...] = ()
+        if baseline_row is not None:
+            (
+                baseline_source_key,
+                baseline_session_id,
+                baseline_attempt_id,
+                baseline_json,
+            ) = baseline_row
+            if (
+                baseline_source_key != source_key
+                or baseline_session_id != session_id
+            ):
+                raise PushValidationError(
+                    Locale.EVIDENCE_RETRY_IDENTITY_MISMATCH
+                )
+            if inserted_baseline:
+                obligations = initial_obligations
+                violations = tuple(
+                    Locale.EVIDENCE_WITHDRAWAL_WITHOUT_BASELINE
+                    for item in assessment.items
+                    if item.outcome == EVIDENCE_OUTCOME_WITHDRAWN
+                )
+            else:
+                obligations = _derive_retry_obligations(
+                    conn,
+                    baseline_json=cast(str, baseline_json),
+                    baseline_attempt_id=cast(str, baseline_attempt_id),
+                    run_id=run_id_text,
+                )
+                _next_obligations, violations = _apply_retry_obligations(
+                    conn,
+                    submission,
+                    assessment,
+                    obligations,
+                )
+
+        applied = not violations
+        accepted = assessment.accepted and applied
+        conn.execute(
+            f"""
+            INSERT INTO {CODEX_EVIDENCE_AUDIT_TABLE} (
+                {duckdb_quote_identifier(CODEX_RETRY_ATTEMPT_ID_COL)},
+                {duckdb_quote_identifier(CODEX_RETRY_RUN_ID_COL)},
+                {duckdb_quote_identifier(CODEX_RETRY_SOURCEKEY_COL)},
+                {duckdb_quote_identifier(CODEX_RETRY_SESSION_ID_COL)},
+                {duckdb_quote_identifier(CODEX_RETRY_CREATED_AT_COL)},
+                {duckdb_quote_identifier(CODEX_EVIDENCE_SUBMISSION_COL)},
+                {duckdb_quote_identifier(CODEX_EVIDENCE_ASSESSMENT_COL)},
+                {duckdb_quote_identifier(CODEX_EVIDENCE_APPLIED_COL)},
+                {duckdb_quote_identifier(CODEX_EVIDENCE_ACCEPTED_COL)}
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                attempt_id,
+                run_id_text,
+                source_key,
+                session_id,
+                attempt_timestamp,
+                submission_json,
+                assessment_json,
+                applied,
+                accepted,
+            ],
+        )
+        conn.execute("COMMIT")
+        return violations
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+
+
 def _rollout_ref_urls(
     conn: duckdb.DuckDBPyConnection,
     *,
@@ -2809,90 +3794,35 @@ def validate_submission_evidence(
     submission: Submission,
     *,
     rollout_filename: str,
+    codex_match_version: int = 1,
 ) -> ValidatedEvidence:
-    validated: ValidatedEvidence = {}
-    evidence_number = 0
-    for field, field_submission in submission.evidence_items():
-        field_matches: list[EvidenceMatch] = []
-        for evidence in field_submission.web_search_excerpts:
-            evidence_number += 1
-            rows = conn.execute(
-                f"""
-                SELECT
-                    ts.{duckdb_quote_identifier(CODEX_REF_ID_COL)},
-                    ts.{duckdb_quote_identifier(CODEX_CALL_ID_COL)},
-                    ts.{duckdb_quote_identifier(CODEX_CITE_TEXT_COL)},
-                    strpos(ts.{duckdb_quote_identifier(CODEX_CITE_TEXT_COL)}, ?),
-                    ts.{duckdb_quote_identifier(CODEX_REF_URL_COL)},
-                    fco.{duckdb_quote_identifier(CODEX_FCO_TIMESTAMP_COL)},
-                    fc.{duckdb_quote_identifier(CODEX_FC_ARGUMENTS_COL)}
-                FROM {CODEX_TURN_REF_TABLE} ts
-                JOIN {CODEX_CALLS_TABLE} calls
-                  ON calls.{duckdb_quote_identifier(CODEX_CALL_ID_COL)} =
-                     ts.{duckdb_quote_identifier(CODEX_CALL_ID_COL)}
-                JOIN {CODEX_FCO_TABLE} fco
-                  ON fco.{duckdb_quote_identifier(CODEX_FCO_ID_COL)} =
-                     calls.{duckdb_quote_identifier(CODEX_FCO_ID_COL)}
-                JOIN {CODEX_FC_TABLE} fc
-                  ON fc.{duckdb_quote_identifier(CODEX_FC_ID_COL)} =
-                     calls.{duckdb_quote_identifier(CODEX_FC_ID_COL)}
-                WHERE calls.{duckdb_quote_identifier(CODEX_ROLLOUT_FILENAME_COL)} = ?
-                  AND strpos(
-                      ts.{duckdb_quote_identifier(CODEX_CITE_TEXT_COL)}, ?
-                  ) > 0
-                ORDER BY ts.{duckdb_quote_identifier(CODEX_ID_COL)}
-                """,
-                [evidence.excerpt, rollout_filename, evidence.excerpt],
-            ).fetchall()
-            if not rows:
-                raise PushValidationError(
-                    Locale.EVIDENCE_NO_MATCH_TEMPLATE.format(
-                        field=field,
-                        excerpt=evidence.excerpt,
-                        url=evidence.url,
-                    )
-                )
-            candidates = tuple(
-                candidate
-                for candidate in _evidence_candidates(rows)
-                if candidate.url == evidence.url
-            )
-            if not candidates:
-                raise PushValidationError(
-                    Locale.EVIDENCE_URL_MISMATCH_TEMPLATE.format(
-                        field=field,
-                        excerpt=evidence.excerpt,
-                        url=evidence.url,
-                    )
-                )
-            if len(candidates) > 1 and not ALLOW_MULTIPLE_EVIDENCE_MATCHES:
-                raise MultipleEvidenceMatches(evidence.excerpt)
-            candidate = (
-                EVIDENCE_RANDOM.choice(candidates) if len(candidates) > 1 else candidates[0]
-            )
-            arguments_json = candidate.arguments_json
-            if not isinstance(arguments_json, str):
-                arguments_json = json.dumps(
-                    arguments_json,
-                    ensure_ascii=False,
-                    separators=COMPACT_JSON_SEPARATORS,
-                )
-            field_matches.append(
-                EvidenceMatch(
-                    field=field,
-                    evidence_number=evidence_number,
-                    excerpt=evidence.excerpt,
-                    url=evidence.url,
-                    ref_id=candidate.ref_id,
-                    call_id=candidate.call_id,
-                    cite_text=candidate.cite_text,
-                    excerpt_position=candidate.excerpt_position - 1,
-                    fco_timestamp=_render_fco_timestamp(candidate.fco_timestamp),
-                    arguments_json=arguments_json,
-                )
-            )
-        validated[field] = field_matches
-    return validated
+    assessment = assess_submission_evidence(
+        conn,
+        submission,
+        rollout_filename=rollout_filename,
+        codex_match_version=codex_match_version,
+    )
+    if assessment.accepted:
+        return assessment.validated
+    failed = next(
+        item
+        for item in assessment.items
+        if item.outcome != EVIDENCE_OUTCOME_V1_EXACT
+    )
+    if isinstance(failed.submission, EvidenceWithdrawal):
+        raise PushValidationError(Locale.EVIDENCE_WITHDRAWAL_WITHOUT_BASELINE)
+    detail_template = (
+        Locale.EVIDENCE_URL_MISMATCH_TEMPLATE
+        if failed.candidates
+        else Locale.EVIDENCE_NO_MATCH_TEMPLATE
+    )
+    raise PushValidationError(
+        detail_template.format(
+            field=failed.field,
+            excerpt=failed.submission.excerpt,
+            url=failed.submission.url,
+        )
+    )
 
 
 def source_rows() -> Iterator[dict[str, object]]:
@@ -3062,10 +3992,21 @@ def open_source_database(
 def open_detour_database(
     runtime: RuntimeConfiguration,
 ) -> duckdb.DuckDBPyConnection:
+    conn: duckdb.DuckDBPyConnection | None = None
     try:
         runtime.detour_db_path.parent.mkdir(parents=True, exist_ok=True)
-        return duckdb.connect(str(runtime.detour_db_path))
-    except (OSError, duckdb.Error) as exc:
+        conn = duckdb.connect(str(runtime.detour_db_path))
+        if runtime.pipeline.match_rule_version.codex_match == 2:
+            load_duckdb_extension(
+                conn,
+                CODEX_TOKEN_EXTENSION,
+                runtime.pipeline.duckdb_extensions.get(CODEX_TOKEN_EXTENSION),
+                log=None,
+            )
+        return conn
+    except (OSError, RuntimeError, duckdb.Error) as exc:
+        if conn is not None:
+            conn.close()
         raise PushValidationError(Locale.DETOUR_DUCKDB_OPEN_FAILED) from exc
 
 
@@ -3670,7 +4611,11 @@ async def push(request: Request) -> StreamingResponse:
             detour_conn = open_detour_database(runtime)
             source_conn: duckdb.DuckDBPyConnection | None = None
             try:
-                persist_rollout_index(detour_conn, rollout_index)
+                persist_rollout_index(
+                    detour_conn,
+                    rollout_index,
+                    codex_match_version=runtime.pipeline.match_rule_version.codex_match,
+                )
 
                 stage = ATTEMPT_STAGE_PYDANTIC_VALIDATION
                 body = await bounded_request_body(request)
@@ -3678,11 +4623,50 @@ async def push(request: Request) -> StreamingResponse:
 
                 stage = ATTEMPT_STAGE_EVIDENCE_VALIDATION
                 _seed_evidence_random(runtime.pipeline.sample_seed)
-                validated_evidence = validate_submission_evidence(
+                evidence_assessment = assess_submission_evidence(
                     detour_conn,
                     submission,
                     rollout_filename=rollout_index.session.rollout_filename,
+                    codex_match_version=(
+                        runtime.pipeline.match_rule_version.codex_match
+                    ),
                 )
+                _log_evidence_assessment(
+                    evidence_assessment,
+                    attempt_id=attempt_id,
+                )
+                retry_violations: tuple[str, ...] = ()
+                if snapshot.run_id is not None:
+                    if snapshot.source_key is None or snapshot.session_id is None:
+                        raise PushConfigurationError(
+                            Locale.EVIDENCE_RETRY_IDENTITY_MISMATCH
+                        )
+                    retry_violations = _process_retry_attempt(
+                        detour_conn,
+                        run_id=snapshot.run_id,
+                        source_key=snapshot.source_key,
+                        session_id=snapshot.session_id,
+                        attempt_id=attempt_id,
+                        attempt_timestamp=attempt_timestamp,
+                        submission=submission,
+                        assessment=evidence_assessment,
+                    )
+                elif any(
+                    item.outcome == EVIDENCE_OUTCOME_WITHDRAWN
+                    for item in evidence_assessment.items
+                ):
+                    retry_violations = (
+                        Locale.EVIDENCE_WITHDRAWAL_WITHOUT_BASELINE,
+                    )
+                if not evidence_assessment.accepted or retry_violations:
+                    raise EvidenceAssessmentError(
+                        Locale.EVIDENCE_SUBMISSION_REJECTED,
+                        public_detail=_assessment_public_detail(
+                            evidence_assessment,
+                            violations=retry_violations,
+                        ),
+                    )
+                validated_evidence = evidence_assessment.validated
 
                 stage = ATTEMPT_STAGE_RESEARCHER_RESOLUTION
                 source_conn = open_source_database(runtime)
@@ -3804,7 +4788,11 @@ async def push(request: Request) -> StreamingResponse:
         )
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=Locale.VALIDATION_ERROR_DETAIL,
+            detail=(
+                exc.public_detail
+                if isinstance(exc, EvidenceAssessmentError)
+                else Locale.VALIDATION_ERROR_DETAIL
+            ),
         ) from None
     except ValidationError as exc:
         field, reason, failed_input = pydantic_failure(exc)

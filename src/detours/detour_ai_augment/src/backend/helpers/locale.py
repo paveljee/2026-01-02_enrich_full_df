@@ -3,92 +3,6 @@ from __future__ import annotations
 from typing import Final
 
 
-from src.helpers.vars import (
-    KTP_FIRST_NAME_COL,
-    KTP_LAST_NAME_COL,
-)
-
-
-from ..api import (
-    AI_AUGMENT_COLUMNS,
-    AI_AUGMENT_EVIDENCE_COLUMNS,
-    KTP_AI_AUGMENT_RESEARCHER_AUTHOR_COL,
-    KTP_AI_AUGMENT_PLACE_OF_RESIDENCE_COL,
-    KTP_AI_AUGMENT_GENDER_COL,
-    KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL,
-    KTP_AI_AUGMENT_EDUCATION_COL,
-    KTP_AI_AUGMENT_ACADEMIC_POSITIONS_COL,
-    KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL,
-    KTP_AI_AUGMENT_LINKS_COL,
-    KTP_AI_AUGMENT_COMMENTS_COL,
-    SUBMISSION_EVIDENCE_KEY,
-    SUBMISSION_EXCERPT_KEY,
-    SUBMISSION_URL_KEY,
-    SUBMISSION_VALUE_KEY,
-)
-
-
-# Note: generated via chatgpt.com on 2026-07-27 UTC,
-# using GPT-5.6-Sol-High with tools (context lost)
-SUBMISSION_EXAMPLE: dict[str, object] = {
-    KTP_AI_AUGMENT_RESEARCHER_AUTHOR_COL: "Fei-Fei Li; publishes as L. Fei-Fei.",
-    KTP_AI_AUGMENT_PLACE_OF_RESIDENCE_COL: "Stanford campus, Stanford, California.",
-    KTP_AI_AUGMENT_GENDER_COL: "Female.",
-    KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL: (
-        "28–29; born in 1976, with the earliest visible work on the OpenAlex profile dated 2005."
-    ),
-    KTP_AI_AUGMENT_EDUCATION_COL: (
-        "B.A. Physics, Princeton University, 1999; M.S. Electrical "
-        "Engineering, Caltech, 2001; Ph.D. Electrical Engineering, "
-        "Caltech, 2005."
-    ),
-    KTP_AI_AUGMENT_ACADEMIC_POSITIONS_COL: (
-        "Sequoia Capital Professor of Computer Science, Stanford; Senior "
-        "Fellow, Stanford HAI; Professor by courtesy, Stanford Graduate "
-        "School of Business; former Director, Stanford AI Lab, 2013–2018; "
-        "former Vice President and Chief Scientist of AI/ML, Google Cloud, "
-        "2017–2018; Co-founder and CEO, World Labs."
-    ),
-    KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL: (
-        "Founding Co-Director, Stanford HAI; Co-founder and Chair, AI4ALL; "
-        "member of the National Academy of Engineering, National Academy "
-        "of Medicine, American Academy of Arts and Sciences, and Council "
-        "on Foreign Relations; ACM Fellow; UN special adviser."
-    ),
-    KTP_AI_AUGMENT_LINKS_COL: (
-        "Stanford profile: https://profiles.stanford.edu/fei-fei-li; "
-        "OpenAlex: https://openalex.org/A5100450462; "
-        "AI4ALL: https://ai-4-all.org/our-people/fei-fei-li/"
-    ),
-    KTP_AI_AUGMENT_COMMENTS_COL: (
-        "OpenAlex appears to conflate this author with unrelated researchers "
-        "and institutions; age at first publication is therefore provisional."
-    ),
-}
-
-NULL_SUBMISSION_EXAMPLE = {
-    KTP_FIRST_NAME_COL: "L.",
-    KTP_LAST_NAME_COL: "Fei-Fei",
-    **dict.fromkeys(AI_AUGMENT_COLUMNS),
-}
-EVIDENCE_SUBMISSION_EXAMPLE = {
-    column: {
-        SUBMISSION_VALUE_KEY: value,
-        SUBMISSION_EVIDENCE_KEY: [
-            {
-                SUBMISSION_EXCERPT_KEY: "Exact contiguous excerpt from a cited web result.",
-                SUBMISSION_URL_KEY: "https://example.test/result",
-            }
-        ],
-    }
-    for column, value in SUBMISSION_EXAMPLE.items()
-    if column in AI_AUGMENT_EVIDENCE_COLUMNS
-}
-EVIDENCE_SUBMISSION_EXAMPLE[KTP_AI_AUGMENT_COMMENTS_COL] = {
-    SUBMISSION_VALUE_KEY: SUBMISSION_EXAMPLE[KTP_AI_AUGMENT_COMMENTS_COL]
-}
-
-
 class Locale:
     API_TITLE: Final = "Highly-Cited Researcher Annotation API"
     API_DESCRIPTION: Final = (
@@ -105,6 +19,47 @@ class Locale:
     PUSH_DESCRIPTION: Final = "Validates and stores the completed submission."
     PUSH_RESPONSE_DESCRIPTION: Final = "Submission followed by ground truth"
     CLI_DESCRIPTION: Final = "Serve the AI augmentation detour API."
+
+    # Note: generated via chatgpt.com on 2026-07-27 UTC,
+    # using GPT-5.6-Sol-High with tools (context lost)
+    EXAMPLE_FIRST_NAME: Final = "L."
+    EXAMPLE_LAST_NAME: Final = "Fei-Fei"
+    EXAMPLE_RESEARCHER_AUTHOR: Final = "Fei-Fei Li; publishes as L. Fei-Fei."
+    EXAMPLE_PLACE_OF_RESIDENCE: Final = "Stanford campus, Stanford, California."
+    EXAMPLE_GENDER: Final = "Female."
+    EXAMPLE_AGE_FIRST_PUBLICATION: Final = (
+        "28–29; born in 1976, with the earliest visible work on the OpenAlex "
+        "profile dated 2005."
+    )
+    EXAMPLE_EDUCATION: Final = (
+        "B.A. Physics, Princeton University, 1999; M.S. Electrical "
+        "Engineering, Caltech, 2001; Ph.D. Electrical Engineering, "
+        "Caltech, 2005."
+    )
+    EXAMPLE_ACADEMIC_POSITIONS: Final = (
+        "Sequoia Capital Professor of Computer Science, Stanford; Senior "
+        "Fellow, Stanford HAI; Professor by courtesy, Stanford Graduate "
+        "School of Business; former Director, Stanford AI Lab, 2013–2018; "
+        "former Vice President and Chief Scientist of AI/ML, Google Cloud, "
+        "2017–2018; Co-founder and CEO, World Labs."
+    )
+    EXAMPLE_SOCIAL_CAPITAL: Final = (
+        "Founding Co-Director, Stanford HAI; Co-founder and Chair, AI4ALL; "
+        "member of the National Academy of Engineering, National Academy "
+        "of Medicine, American Academy of Arts and Sciences, and Council "
+        "on Foreign Relations; ACM Fellow; UN special adviser."
+    )
+    EXAMPLE_LINKS: Final = (
+        "Stanford profile: https://profiles.stanford.edu/fei-fei-li; "
+        "OpenAlex: https://openalex.org/A5100450462; "
+        "AI4ALL: https://ai-4-all.org/our-people/fei-fei-li/"
+    )
+    EXAMPLE_COMMENTS: Final = (
+        "OpenAlex appears to conflate this author with unrelated researchers "
+        "and institutions; age at first publication is therefore provisional."
+    )
+    EXAMPLE_EVIDENCE_EXCERPT: Final = "Exact contiguous excerpt from a cited web result."
+    EXAMPLE_EVIDENCE_URL: Final = "https://example.test/result"
 
     CONFIGURATION_ERROR_DETAIL: Final = (
         "API is not properly configured. Contact the human operator."
@@ -448,6 +403,67 @@ class Locale:
     EVIDENCE_URL_MISMATCH_TEMPLATE: Final = (
         "{field}: submitted URL does not match; excerpt={excerpt!r} url={url!r}"
     )
+    EVIDENCE_WITHDRAWAL_WITHOUT_BASELINE: Final = (
+        "evidence withdrawal requires a prior unmatched retry item"
+    )
+    EVIDENCE_PROGRESS_TEMPLATE: Final = (
+        "{verified} of {total} evidence items were verified. "
+        "Preserve all verified values and evidence unchanged."
+    )
+    EVIDENCE_GOOD_PROGRESS_TEMPLATE: Final = (
+        "Good progress: {verified} of {total} evidence items were verified. "
+        "Preserve all verified values and evidence unchanged."
+    )
+    EVIDENCE_REVIEW_HEADER: Final = "Review the following flagged excerpts:"
+    EVIDENCE_NEAR_ITEM_TEMPLATE: Final = (
+        "- {location}; its wording appears close to the cited web result but may "
+        "differ in case, accents, punctuation, whitespace, or line breaks."
+    )
+    EVIDENCE_UNMATCHED_ITEM_TEMPLATE: Final = (
+        "- {location}; does not appear to match its cited web result. Verify this "
+        "excerpt and URL against the original web-tool output."
+    )
+    EVIDENCE_WITHDRAWN_ITEM_TEMPLATE: Final = (
+        "- {location}; was withdrawn as not present in the web results and does "
+        "not count as verified evidence."
+    )
+    EVIDENCE_RETRY_INSTRUCTION: Final = (
+        "Compare the flagged evidence items character-for-character with the "
+        "originating web-tool output and resubmit the complete payload after correcting "
+        "only the flagged items."
+    )
+    EVIDENCE_MINOR_CHANGE_ONLY_TEMPLATE: Final = (
+        "{location} may receive only a minor textual correction that preserves its "
+        "wording and cited URL."
+    )
+    EVIDENCE_EXACT_IMMUTABLE_TEMPLATE: Final = (
+        "{immutable} was already verified and must be resubmitted unchanged."
+    )
+    EVIDENCE_ACCEPTED_FIELD_IMMUTABLE_TEMPLATE: Final = (
+        EVIDENCE_EXACT_IMMUTABLE_TEMPLATE +
+        "Preserve its value and complete evidence list unchanged."
+    )
+    EVIDENCE_COUNT_DECREASED_TEMPLATE: Final = (
+        "{field} must retain every prior evidence item; use the explicit audited "
+        "withdrawal object only for a previously unmatched item."
+    )
+    EVIDENCE_WITHDRAWAL_NOT_ALLOWED_TEMPLATE: Final = (
+        "{location} cannot be withdrawn because it was already verified or "
+        "resubmission is pending."
+    )
+    EVIDENCE_WITHDRAWAL_VALUE_UNCHANGED_TEMPLATE: Final = (
+        "{field} withdrew unsupported evidence but did not correct the associated "
+        "field value."
+    )
+    EVIDENCE_RETRY_IDENTITY_MISMATCH: Final = (
+        "stored retry state does not match the sanctioned run identity"
+    )
+    EVIDENCE_AUDIT_REPLAY_FAILED: Final = (
+        "stored evidence attempt audit cannot be replayed from its immutable baseline"
+    )
+    EVIDENCE_SUBMISSION_REJECTED: Final = (
+        "submission contains evidence that is not yet exactly verified"
+    )
 
     SOURCE_OPEN_FAILED_TEMPLATE: Final = "cannot open {source_file}: {error}"
     SOURCE_JSON_INVALID_TEMPLATE: Final = (
@@ -518,6 +534,10 @@ class Locale:
         "push attempt=%s failed stage=%s: excerpt matched multiple rows excerpt=%r"
     )
     PUSH_VALIDATION_FAILED_LOG: Final = "push attempt=%s failed stage=%s: %s"
+    EVIDENCE_ITEM_ASSESSMENT_LOG: Final = (
+        "push attempt=%s evidence field=%s index=%s outcome=%s excerpt=%r url=%r "
+        "candidates=%r"
+    )
     PUSH_PYDANTIC_FAILED_LOG: Final = (
         "push attempt=%s failed stage=%s field=%s value=%r: %s"
     )
