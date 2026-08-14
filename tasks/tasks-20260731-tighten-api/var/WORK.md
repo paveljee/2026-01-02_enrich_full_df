@@ -344,3 +344,40 @@
   root Pixi task includes the added roundtrips and is 95 passed, 1 skipped.
 - Independent July persistence smoke: 107 physical records; 9 FC, 9 FCO, 9 calls, 155 refs, 5 non-null thumbnails; a second persistence pass is idempotent.
 - Read-only `git diff --cached --check` passes.
+
+## Backend locale and protocol-literal centralization
+
+- New interpretation rule: every backend label or message intended for a
+  human belongs to
+  `src/detours/detour_ai_augment/src/backend/helpers/locale.py`.
+- `backend/helpers/locale.py` now owns the API/OpenAPI and CLI labels, public
+  error details, Pydantic/operator diagnostics, archive/rollout/provenance
+  validation text, and backend log templates formerly defined inline in
+  `api.py`; API behavior and rendered wording are preserved.
+- Machine-contract values remain in `api.py`. The inline runtime comparison
+  against `"text_result"` is now backed by the named
+  `CODEX_TEXT_RESULT_TYPE` protocol constant; the remaining occurrence is the
+  Pydantic `Literal["text_result"]` type contract rather than a human label.
+- The complete `api.py` quoted-literal audit centralized repeated or semantic
+  protocol keys/values, rollout and attempt states/stages, path/filename and
+  timestamp formats, regexes, media/header names, text encoding, and the GET
+  and POST HTTP methods. Pydantic declaration syntax, enum members, SQL, file
+  modes, punctuation, SSH command syntax in its one shared helper, and local
+  algorithmic ranks/line offsets intentionally remain beside the code they
+  express; attempts to centralize Pydantic model configs, SSH syntax, and
+  one-use numeric ranks were reviewed and rolled back as less readable.
+- `copy_rollout` reuses the existing connection-option builder, removing a
+  duplicate SSH-option block without changing the command contract.
+- `pixi run lint` passes: Ruff reports no findings and mypy reports no issues
+  across 78 source files. `pixi run git diff --check` also passes.
+- Browser E2E servers now use a fresh ephemeral loopback port passed directly
+  to each child process; readiness therefore cannot accidentally succeed
+  against an earlier test's server. Rendered card paragraphs also receive the
+  intended compact line height directly, so the browser assertion no longer
+  receives CSS `normal`/`NaN`. All five browser E2Es passed three consecutive
+  full-module runs.
+- Current `pixi run test-detour-ai-augment-root`: 89 passed, 1 intentionally
+  skipped, 6 failed. All six failures stop while loading the operator-edited
+  `config_ai_augment.json` because its new `match_rule_version.codex_match`
+  key belongs to the pending evidence-matching revamp and is not yet modeled.
+  No browser E2E failed in this root run.
