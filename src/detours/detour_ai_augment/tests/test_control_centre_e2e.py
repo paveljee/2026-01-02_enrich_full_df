@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import socket
 import subprocess
 import sys
 import time
@@ -28,8 +29,6 @@ E2E_SERVER_MODULE = (
     "src.detours.detour_ai_augment.tests.test_control_centre_e2e"
 )
 E2E_HOST = "127.0.0.1"
-E2E_PORT = 8765
-E2E_URL = f"http://{E2E_HOST}:{E2E_PORT}"
 E2E_START_TIMEOUT_SECONDS = 30
 E2E_STOP_TIMEOUT_SECONDS = 10
 E2E_REFRESH_WAIT_MILLISECONDS = 2_500
@@ -376,7 +375,14 @@ class BrowserController:
         self._status_by_source_key[source_key] = control_ui.RunStatus.CANCELED
 
 
-def serve_e2e_dashboard() -> None:
+def available_e2e_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
+        server_socket.bind((E2E_HOST, 0))
+        _, port = server_socket.getsockname()
+    return int(port)
+
+
+def serve_e2e_dashboard(*, port: int) -> None:
     controller = BrowserController()
     control_ui.SERVICES = cast(
         control_ui.ApplicationServices,
@@ -388,14 +394,14 @@ def serve_e2e_dashboard() -> None:
     control_ui.configure_application_lifecycle()
     control_ui.ui.run(
         host=E2E_HOST,
-        port=E2E_PORT,
+        port=port,
         reload=False,
         show=False,
         show_welcome_message=False,
     )
 
 
-def wait_for_server(process: subprocess.Popen[str]) -> None:
+def wait_for_server(process: subprocess.Popen[str], *, url: str) -> None:
     deadline = time.monotonic() + E2E_START_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
         if process.poll() is not None:
@@ -404,7 +410,7 @@ def wait_for_server(process: subprocess.Popen[str]) -> None:
                 f"Control Centre E2E server exited during startup:\n{output}"
             )
         try:
-            with urllib_request.urlopen(E2E_URL, timeout=1):
+            with urllib_request.urlopen(url, timeout=1):
                 return
         except (OSError, urllib_error.URLError):
             time.sleep(control_ui.BACKEND_READY_POLL_SECONDS)
@@ -442,6 +448,8 @@ def assert_shared_width(page: Page) -> None:
 
 @contextmanager
 def control_centre_browser() -> Iterator[tuple[Page, list[str]]]:
+    port = available_e2e_port()
+    url = f"http://{E2E_HOST}:{port}"
     server_environment = os.environ.copy()
     server_environment.pop(PYTEST_CURRENT_TEST_ENV_NAME, None)
     process = subprocess.Popen(
@@ -450,6 +458,7 @@ def control_centre_browser() -> Iterator[tuple[Page, list[str]]]:
             "-m",
             E2E_SERVER_MODULE,
             E2E_SERVER_ARGUMENT,
+            str(port),
         ],
         cwd=REPOSITORY_ROOT,
         stdout=subprocess.PIPE,
@@ -458,7 +467,7 @@ def control_centre_browser() -> Iterator[tuple[Page, list[str]]]:
         env=server_environment,
     )
     try:
-        wait_for_server(process)
+        wait_for_server(process, url=url)
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(headless=True)
             page = browser.new_page(viewport=E2E_WIDE_VIEWPORT)
@@ -472,7 +481,7 @@ def control_centre_browser() -> Iterator[tuple[Page, list[str]]]:
                 ),
             )
             page.on("pageerror", lambda error: errors.append(str(error)))
-            page.goto(E2E_URL, wait_until="networkidle")
+            page.goto(url, wait_until="networkidle")
             page.wait_for_selector(GRID_ROW_SELECTOR)
             yield page, errors
             browser.close()
@@ -595,6 +604,8 @@ def test_researcher_selection_and_attempt_history_are_idempotent() -> None:
 
 
 def test_control_centre_browser_contract() -> None:
+    port = available_e2e_port()
+    url = f"http://{E2E_HOST}:{port}"
     server_environment = os.environ.copy()
     server_environment.pop(PYTEST_CURRENT_TEST_ENV_NAME, None)
     process = subprocess.Popen(
@@ -603,6 +614,7 @@ def test_control_centre_browser_contract() -> None:
             "-m",
             E2E_SERVER_MODULE,
             E2E_SERVER_ARGUMENT,
+            str(port),
         ],
         cwd=REPOSITORY_ROOT,
         stdout=subprocess.PIPE,
@@ -611,7 +623,7 @@ def test_control_centre_browser_contract() -> None:
         env=server_environment,
     )
     try:
-        wait_for_server(process)
+        wait_for_server(process, url=url)
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(headless=True)
             page = browser.new_page(viewport=E2E_NARROW_VIEWPORT)
@@ -625,7 +637,7 @@ def test_control_centre_browser_contract() -> None:
                 ),
             )
             page.on("pageerror", lambda error: errors.append(str(error)))
-            page.goto(E2E_URL, wait_until="networkidle")
+            page.goto(url, wait_until="networkidle")
             page.wait_for_selector(GRID_ROW_SELECTOR)
 
             summary = page.get_by_test_id(control_ui.PAGE_SUMMARY_TEST_ID)
@@ -802,6 +814,12 @@ def test_control_centre_browser_contract() -> None:
 
 
 if __name__ == "__main__":
-    if sys.argv[1:] != [E2E_SERVER_ARGUMENT]:
-        raise SystemExit(f"expected {E2E_SERVER_ARGUMENT}")
-    serve_e2e_dashboard()
+    try:
+        server_argument, server_port = sys.argv[1:]
+    except ValueError as exc:
+        raise SystemExit(
+            f"expected {E2E_SERVER_ARGUMENT} PORT"
+        ) from exc
+    if server_argument != E2E_SERVER_ARGUMENT:
+        raise SystemExit(f"expected {E2E_SERVER_ARGUMENT} PORT")
+    serve_e2e_dashboard(port=int(server_port))

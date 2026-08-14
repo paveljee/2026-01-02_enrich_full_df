@@ -16,6 +16,7 @@ from pydantic import ValidationError
 
 from src.detours.detour_ai_augment.src.backend import api
 from src.detours.detour_ai_augment.src.backend.helpers import codex_parse
+from src.detours.detour_ai_augment.src.backend.helpers.locale import Locale
 from src.helpers.config import PipelineConfig
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
@@ -958,7 +959,9 @@ def test_multiple_sql_matches_report_the_exact_excerpt() -> None:
                 rollout_filename=TEST_ROLLOUT_FILENAME,
             )
         assert raised.value.excerpt == TEST_EXCERPT
-        assert TEST_EXCERPT in api.MULTIPLE_MATCH_DETAIL.format(excerpt=raised.value.excerpt)
+        assert TEST_EXCERPT in Locale.MULTIPLE_MATCH_DETAIL_TEMPLATE.format(
+            excerpt=raised.value.excerpt
+        )
     finally:
         connection.close()
 
@@ -1535,7 +1538,7 @@ def test_real_july_push_rejects_changed_evidence_before_ground_truth(
     response = context.client.post("/push", json=payload)
 
     assert response.status_code == 422
-    assert response.json() == {"detail": api.VALIDATION_ERROR_DETAIL}
+    assert response.json() == {"detail": Locale.VALIDATION_ERROR_DETAIL}
     assert f"excerpt={evidence['excerpt']!r}" in caplog.text
     assert f"url={evidence['url']!r}" in caplog.text
     assert context.events == [
@@ -1594,10 +1597,10 @@ def test_missing_rollout_is_generic_503_and_pull_fails_closed(
     pull_response = client.get("/pull")
 
     assert push_response.status_code == 503
-    assert push_response.json() == {"detail": api.CONFIGURATION_ERROR_DETAIL}
+    assert push_response.json() == {"detail": Locale.CONFIGURATION_ERROR_DETAIL}
     assert api.ROLLOUT_ENV_NAME in caplog.text
     assert pull_response.status_code == 503
-    assert pull_response.json() == {"detail": api.CONFIGURATION_ERROR_DETAIL}
+    assert pull_response.json() == {"detail": Locale.CONFIGURATION_ERROR_DETAIL}
 
 
 def test_sanctioned_pull_is_dynamic_retryable_and_omits_ground_truth(
@@ -1671,8 +1674,8 @@ def test_control_mode_without_sanction_fails_both_routes_without_env_fallback(
 
     assert pull_response.status_code == 503
     assert push_response.status_code == 503
-    assert pull_response.json() == {"detail": api.CONFIGURATION_ERROR_DETAIL}
-    assert push_response.json() == {"detail": api.CONFIGURATION_ERROR_DETAIL}
+    assert pull_response.json() == {"detail": Locale.CONFIGURATION_ERROR_DETAIL}
+    assert push_response.json() == {"detail": Locale.CONFIGURATION_ERROR_DETAIL}
 
 
 def test_openapi_does_not_disclose_integrity_internals() -> None:
@@ -1680,7 +1683,7 @@ def test_openapi_does_not_disclose_integrity_internals() -> None:
     push_schema = schema["paths"]["/push"]["post"]
     serialized = json.dumps(push_schema).lower()
 
-    assert push_schema["description"] == "Validates and stores the completed submission."
+    assert push_schema["description"] == Locale.PUSH_DESCRIPTION
     assert "appendwatch" not in serialized
     assert "rollout" not in serialized
     assert api.ROLLOUT_ENV_NAME.lower() not in serialized

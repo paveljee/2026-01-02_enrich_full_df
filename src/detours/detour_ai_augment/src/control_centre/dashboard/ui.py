@@ -344,6 +344,7 @@ CARD_RESPONSIVE_CSS: Final = f"""
 }}
 [data-testid=\"{PAGE_FOOTER_TEST_ID}\"] p {{
     margin-block: {CARD_PARAGRAPH_MARGIN_REM}rem;
+    line-height: {COMPACT_LINE_HEIGHT};
 }}
 [data-testid=\"{PAGE_FOOTER_TEST_ID}\"] .nicegui-markdown {{
     white-space: normal;
