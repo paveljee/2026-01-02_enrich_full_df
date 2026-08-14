@@ -87,7 +87,12 @@ from src.helpers.vars import (
 )
 
 from .helpers import codex_parse
-from .helpers.locale import Locale
+from .helpers.locale import (
+    Locale,
+    EVIDENCE_SUBMISSION_EXAMPLE,
+    NULL_SUBMISSION_EXAMPLE,
+    SUBMISSION_EXAMPLE,
+)
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[5]
 ENV_PATH = REPOSITORY_ROOT / ".env"
@@ -519,66 +524,6 @@ CARD_EXCLUDED_COLUMNS = {
 CARD_ZIP_PREFIX = "ai_augment_cards"
 
 MEDIA_TYPE = "application/x-ndjson"
-
-# Note: generated via chatgpt.com on 2026-07-27 UTC,
-# using GPT-5.6-Sol-High with tools (context lost)
-SUBMISSION_EXAMPLE: dict[str, object] = {
-    KTP_AI_AUGMENT_RESEARCHER_AUTHOR_COL: "Fei-Fei Li; publishes as L. Fei-Fei.",
-    KTP_AI_AUGMENT_PLACE_OF_RESIDENCE_COL: "Stanford campus, Stanford, California.",
-    KTP_AI_AUGMENT_GENDER_COL: "Female.",
-    KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL: (
-        "28–29; born in 1976, with the earliest visible work on the OpenAlex profile dated 2005."
-    ),
-    KTP_AI_AUGMENT_EDUCATION_COL: (
-        "B.A. Physics, Princeton University, 1999; M.S. Electrical "
-        "Engineering, Caltech, 2001; Ph.D. Electrical Engineering, "
-        "Caltech, 2005."
-    ),
-    KTP_AI_AUGMENT_ACADEMIC_POSITIONS_COL: (
-        "Sequoia Capital Professor of Computer Science, Stanford; Senior "
-        "Fellow, Stanford HAI; Professor by courtesy, Stanford Graduate "
-        "School of Business; former Director, Stanford AI Lab, 2013–2018; "
-        "former Vice President and Chief Scientist of AI/ML, Google Cloud, "
-        "2017–2018; Co-founder and CEO, World Labs."
-    ),
-    KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL: (
-        "Founding Co-Director, Stanford HAI; Co-founder and Chair, AI4ALL; "
-        "member of the National Academy of Engineering, National Academy "
-        "of Medicine, American Academy of Arts and Sciences, and Council "
-        "on Foreign Relations; ACM Fellow; UN special adviser."
-    ),
-    KTP_AI_AUGMENT_LINKS_COL: (
-        "Stanford profile: https://profiles.stanford.edu/fei-fei-li; "
-        "OpenAlex: https://openalex.org/A5100450462; "
-        "AI4ALL: https://ai-4-all.org/our-people/fei-fei-li/"
-    ),
-    KTP_AI_AUGMENT_COMMENTS_COL: (
-        "OpenAlex appears to conflate this author with unrelated researchers "
-        "and institutions; age at first publication is therefore provisional."
-    ),
-}
-
-NULL_SUBMISSION_EXAMPLE = {
-    KTP_FIRST_NAME_COL: "L.",
-    KTP_LAST_NAME_COL: "Fei-Fei",
-    **dict.fromkeys(AI_AUGMENT_COLUMNS),
-}
-EVIDENCE_SUBMISSION_EXAMPLE = {
-    column: {
-        SUBMISSION_VALUE_KEY: value,
-        SUBMISSION_EVIDENCE_KEY: [
-            {
-                SUBMISSION_EXCERPT_KEY: "Exact contiguous excerpt from a cited web result.",
-                SUBMISSION_URL_KEY: "https://example.test/result",
-            }
-        ],
-    }
-    for column, value in SUBMISSION_EXAMPLE.items()
-    if column in AI_AUGMENT_EVIDENCE_COLUMNS
-}
-EVIDENCE_SUBMISSION_EXAMPLE[KTP_AI_AUGMENT_COMMENTS_COL] = {
-    SUBMISSION_VALUE_KEY: SUBMISSION_EXAMPLE[KTP_AI_AUGMENT_COMMENTS_COL]
-}
 
 
 @asynccontextmanager
