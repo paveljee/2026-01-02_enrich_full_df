@@ -28,7 +28,7 @@ from zoneinfo import ZoneInfo
 import duckdb
 import uvicorn
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from pydantic import (
     BaseModel,
@@ -87,9 +87,11 @@ from src.helpers.vars import (
 )
 
 from .helpers import codex_parse
+from .helpers.locale import Locale
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[5]
-load_dotenv(REPOSITORY_ROOT / ".env")
+ENV_PATH = REPOSITORY_ROOT / ".env"
+load_dotenv(ENV_PATH)
 
 logger = logging.getLogger(__name__)
 
@@ -119,43 +121,55 @@ ROLLOUT_ENV_NAME = "FASTAPI_DETOUR_ROLLOUT_JSONL"
 ROLLOUT_JSONL = os.environ.get(ROLLOUT_ENV_NAME, "")
 CONTROL_URL_ENV_NAME = "FASTAPI_DETOUR_CONTROL_URL"
 CONTROL_BASE_URL = os.environ.get(CONTROL_URL_ENV_NAME, "")
+APPENDWATCH_REPORT_ENV_NAME = "FASTAPI_DETOUR_APPENDWATCH_REPORT"
+AIVM_INSTANCE_ENV_NAME = "FASTAPI_DETOUR_AIVM_INSTANCE"
+AIVM_USER_ENV_NAME = "FASTAPI_DETOUR_AIVM_USER"
+AIVM_SSH_PORT_ENV_NAME = "FASTAPI_DETOUR_AIVM_SSH_PORT"
+AIVM_IDENTITY_FILE_ENV_NAME = "FASTAPI_DETOUR_AIVM_IDENTITY_FILE"
+AIVM_KNOWN_HOSTS_FILE_ENV_NAME = "FASTAPI_DETOUR_AIVM_KNOWN_HOSTS_FILE"
+LIMA_SSH_CONFIG_ENV_NAME = "FASTAPI_DETOUR_LIMA_SSH_CONFIG"
 CONTROL_CURRENT_PATH = "/_control/current"
 CONTROL_ACCEPTED_PATH_TEMPLATE = "/_control/runs/{run_id}/accepted"
 CONTROL_HTTP_TIMEOUT_SECONDS = 10
+CONTROL_SCHEME = "http"
 CONTROL_HOST = "127.0.0.1"
 CONTROL_PORT = 8611
+CONTROL_ROOT_PATHS = frozenset({"", "/"})
 CODEX_SESSIONS_ROOT = PurePosixPath("/home/ai/.codex/sessions")
 APPENDWATCH_REPORT = Path(
     os.environ.get(
-        "FASTAPI_DETOUR_APPENDWATCH_REPORT",
+        APPENDWATCH_REPORT_ENV_NAME,
         "/Volumes/home/aicode/aivm/home/ai/.aivm-control/appendwatch/appendwatch-tree.txt",
     )
 ).expanduser()
 
-AIVM_INSTANCE = os.environ.get("FASTAPI_DETOUR_AIVM_INSTANCE", "aivm")
-AIVM_USER = os.environ.get("FASTAPI_DETOUR_AIVM_USER", "ai")
-AIVM_SSH_PORT = os.environ.get("FASTAPI_DETOUR_AIVM_SSH_PORT", "22022")
+AIVM_INSTANCE = os.environ.get(AIVM_INSTANCE_ENV_NAME, "aivm")
+AIVM_USER = os.environ.get(AIVM_USER_ENV_NAME, "ai")
+AIVM_SSH_PORT = os.environ.get(AIVM_SSH_PORT_ENV_NAME, "22022")
 AIVM_KEY_DIR = Path.home() / ".local" / "share" / "aivm" / ".ssh"
 AIVM_IDENTITY_FILE = Path(
-    os.environ.get("FASTAPI_DETOUR_AIVM_IDENTITY_FILE", AIVM_KEY_DIR / "id_ed25519")
+    os.environ.get(AIVM_IDENTITY_FILE_ENV_NAME, AIVM_KEY_DIR / "id_ed25519")
 ).expanduser()
 AIVM_KNOWN_HOSTS_FILE = Path(
-    os.environ.get("FASTAPI_DETOUR_AIVM_KNOWN_HOSTS_FILE", AIVM_KEY_DIR / "known_hosts")
+    os.environ.get(AIVM_KNOWN_HOSTS_FILE_ENV_NAME, AIVM_KEY_DIR / "known_hosts")
 ).expanduser()
 LIMA_SSH_CONFIG_PATH = Path(
     os.environ.get(
-        "FASTAPI_DETOUR_LIMA_SSH_CONFIG",
+        LIMA_SSH_CONFIG_ENV_NAME,
         Path.home() / ".lima" / AIVM_INSTANCE / "ssh.config",
     )
 ).expanduser()
 AIVM_SSH_TARGET = f"{AIVM_INSTANCE}-{AIVM_USER}"
 AIVM_HOST_KEY_ALIAS = f"lima-{AIVM_INSTANCE}-{AIVM_USER}"
+CURRENT_DIRECTORY = PurePosixPath(".")
+FORBIDDEN_NORMALIZED_PATH_PARTS = frozenset({"", ".", ".."})
 
 MAX_PUSH_BODY_BYTES = 2 * 1024 * 1024
 MAX_VALUE_CHARACTERS = MAX_PUSH_BODY_BYTES
 MAX_EXCERPT_CHARACTERS = MAX_PUSH_BODY_BYTES
 MAX_URL_CHARACTERS = MAX_PUSH_BODY_BYTES
 MAX_EXCERPTS_PER_FIELD = MAX_PUSH_BODY_BYTES
+COMPACT_JSON_SEPARATORS = (",", ":")
 ARCHIVE_HASH_CHUNK_BYTES = 1024 * 1024
 SCP_TIMEOUT_SECONDS = 60
 SSH_TIMEOUT_SECONDS = 60
@@ -165,28 +179,176 @@ CONTROL_CHARACTER_CEILING = 32
 DELETE_CHARACTER_CODEPOINT = 127
 APPENDWATCH_STATUS_WIDTH = 11
 TREE_INDENT_WIDTH = len("│   ")
-APPENDWATCH_OK_PREFIX = f"{'OK':<{APPENDWATCH_STATUS_WIDTH}} "
-APPENDWATCH_COMPROMISED_PREFIX = f"{'COMPROMISED':<{APPENDWATCH_STATUS_WIDTH}} "
-CONFIGURATION_ERROR_DETAIL = "API is not properly configured. Contact the human operator."
-# VALIDATION_ERROR_DETAIL = "Submission did not pass validation. Verify all details and try again."
-VALIDATION_ERROR_DETAIL = (
-    "Submission did not pass validation. Recheck every evidence excerpt and URL before "
-    "retrying. Copy each excerpt verbatim as one contiguous span from the cited web-tool "
-    "output, preserving every character—including repeated spaces, line breaks, punctuation, "
-    "capitalization, and Unicode typography—and copy its associated URL exactly. Do not "
-    "paraphrase, normalize, retype, or join separated text."
+APPENDWATCH_OK_STATUS = "OK"
+APPENDWATCH_COMPROMISED_STATUS = "COMPROMISED"
+APPENDWATCH_STATUS_SEPARATOR = " "
+APPENDWATCH_OK_BODY_PREFIX = f"{APPENDWATCH_OK_STATUS}{APPENDWATCH_STATUS_SEPARATOR}"
+APPENDWATCH_COMPROMISED_BODY_PREFIX = (
+    f"{APPENDWATCH_COMPROMISED_STATUS}{APPENDWATCH_STATUS_SEPARATOR}"
 )
-PYDANTIC_MISSING_INPUT = "<missing>"
-MULTIPLE_MATCH_DETAIL = (
-    "Excerpt matched multiple entries. Resubmit with an excerpt unique across "
-    "the searched web pages: {excerpt}"
+APPENDWATCH_OK_PREFIX = f"{APPENDWATCH_OK_STATUS:<{APPENDWATCH_STATUS_WIDTH}} "
+APPENDWATCH_COMPROMISED_PREFIX = (
+    f"{APPENDWATCH_COMPROMISED_STATUS:<{APPENDWATCH_STATUS_WIDTH}} "
+)
+APPENDWATCH_ROOT_ENTRY = "."
+APPENDWATCH_DIRECTORY_SUFFIX = "/"
+APPENDWATCH_BLANK_LINE = ""
+APPENDWATCH_TREE_START_INDEX = 1
+APPENDWATCH_REMOVED_SECTION_HEADER_LINES = 2
+APPENDWATCH_EXPECTED_TARGET_ENTRIES = 1
+APPENDWATCH_COMPROMISED_ROOT_PREFIX = (
+    f"{APPENDWATCH_ROOT_ENTRY}  [{APPENDWATCH_COMPROMISED_STATUS}:"
+)
+APPENDWATCH_REMOVED_SECTION_HEADER = "removed or replaced (no longer a regular file):"
+APPENDWATCH_ARCHIVE_TEMP_FILENAME = ".appendwatch-tree.tmp"
+APPENDWATCH_ARCHIVE_FILENAME_TEMPLATE = "appendwatch-tree.{attempt_id}.txt"
+TREE_INDENT_GROUP = "indent"
+TREE_BODY_GROUP = "body"
+APPENDWATCH_NAME_GROUP = "name"
+APPENDWATCH_PATH_GROUP = "path"
+APPENDWATCH_COMPROMISED_DIRECTORY_PATTERN = re.compile(
+    rf"{re.escape(APPENDWATCH_COMPROMISED_PREFIX)}"
+    rf"(?P<{APPENDWATCH_NAME_GROUP}>[^/]+)/  \[.+\]"
+)
+APPENDWATCH_OK_FILE_PATTERN = re.compile(
+    rf"{re.escape(APPENDWATCH_OK_PREFIX)}(?P<{APPENDWATCH_NAME_GROUP}>[^/]+)"
+)
+APPENDWATCH_COMPROMISED_FILE_PATTERN = re.compile(
+    rf"{re.escape(APPENDWATCH_COMPROMISED_PREFIX)}"
+    rf"(?P<{APPENDWATCH_NAME_GROUP}>[^/]+?)(?:  \[.*\])?"
+)
+APPENDWATCH_REMOVED_ENTRY_PATTERN = re.compile(
+    rf"    {re.escape(APPENDWATCH_COMPROMISED_PREFIX)}"
+    rf"(?P<{APPENDWATCH_PATH_GROUP}>.+?)(?:  \[.*\])?"
 )
 ALLOW_MULTIPLE_EVIDENCE_MATCHES = True
-ELIGIBLE_WEB_ACTIONS = frozenset({"search_query", "open", "click"})
-TREE_LINE = re.compile(r"^(?P<indent>(?:(?:│   )|(?:    ))*)(?:├── |└── )(?P<body>.*)$")
+WEB_SEARCH_QUERY_ACTION = "search_query"
+WEB_OPEN_ACTION = "open"
+WEB_CLICK_ACTION = "click"
+ELIGIBLE_WEB_ACTIONS = frozenset({
+    WEB_SEARCH_QUERY_ACTION,
+    WEB_OPEN_ACTION,
+    WEB_CLICK_ACTION,
+})
+CODEX_TYPE_KEY = "type"
+CODEX_PAYLOAD_KEY = "payload"
+CODEX_CALL_ID_KEY = "call_id"
+CODEX_ARGUMENTS_KEY = "arguments"
+CODEX_SESSION_ID_KEY = "session_id"
+CODEX_TIMESTAMP_KEY = "timestamp"
+CODEX_MODEL_KEY = "model"
+CODEX_REASONING_EFFORT_KEY = "effort"
+CODEX_ORIGINATOR_KEY = "originator"
+CODEX_SOURCE_KEY = "source"
+CODEX_CLI_VERSION_KEY = "cli_version"
+CODEX_MODEL_PROVIDER_KEY = "model_provider"
+CODEX_OUTPUT_KEY = "output"
+CODEX_TEXT_KEY = "text"
+CODEX_NAMESPACE_KEY = "namespace"
+CODEX_NAME_KEY = "name"
+CODEX_ID_KEY = "id"
+CODEX_RESULTS_KEY = "results"
+CODEX_REF_ID_KEY = "ref_id"
+CODEX_SESSION_META_TYPE = "session_meta"
+CODEX_TURN_CONTEXT_TYPE = "turn_context"
+CODEX_INPUT_TEXT_TYPE = "input_text"
+CODEX_RESPONSE_ITEM_TYPE = "response_item"
+CODEX_EVENT_MESSAGE_TYPE = "event_msg"
+CODEX_FUNCTION_CALL_TYPE = "function_call"
+CODEX_FUNCTION_CALL_OUTPUT_TYPE = "function_call_output"
+CODEX_WEB_SEARCH_END_TYPE = "web_search_end"
+CODEX_WEB_NAMESPACE = "web"
+CODEX_WEB_FUNCTION_NAME = "run"
+CODEX_TEXT_RESULT_TYPE = "text_result"
+CODEX_TURN_REF_PREFIX = "turn"
+SESSION_REASONING_EFFORT_KEY = "reasoning_effort"
+ATTEMPT_STAGE_TRANSPORT = "transport"
+ATTEMPT_STAGE_CONFIGURATION = "configuration"
+ATTEMPT_STAGE_ROLLOUT_COPY = "rollout_copy"
+ATTEMPT_STAGE_WORKBOOK_COPY = "workbook_copy"
+ATTEMPT_STAGE_APPENDWATCH_COPY = "appendwatch_report_copy"
+ATTEMPT_STAGE_APPENDWATCH_VALIDATION = "appendwatch_report_validation"
+ATTEMPT_STAGE_ROLLOUT_INDEX = "rollout_index"
+ATTEMPT_STAGE_PYDANTIC_VALIDATION = "pydantic_validation"
+ATTEMPT_STAGE_EVIDENCE_VALIDATION = "duckdb_evidence_validation"
+ATTEMPT_STAGE_RESEARCHER_RESOLUTION = "researcher_resolution"
+ATTEMPT_STAGE_CARD = "innerdict_and_card"
+ATTEMPT_STAGE_ACCEPTED = "accepted"
+ATTEMPT_RESULT_PENDING = "pending"
+ATTEMPT_RESULT_ACCEPTED = "accepted"
+ATTEMPT_RESULT_CONFIGURATION_ERROR = "configuration_error"
+ATTEMPT_RESULT_REJECTED = "rejected"
+SSH_EXECUTABLE = "ssh"
+SCP_EXECUTABLE = "scp"
+TEXT_ENCODING = "utf-8"
+JSON_MEDIA_TYPE = "application/json"
+HTTP_GET_METHOD = "GET"
+HTTP_POST_METHOD = "POST"
+HTTP_ACCEPT_HEADER = "Accept"
+HTTP_CONTENT_TYPE_HEADER = "Content-Type"
+HTTP_REQUEST_CONTENT_TYPE_HEADER = "content-type"
+HTTP_REQUEST_CONTENT_LENGTH_HEADER = "content-length"
+TEXT_OUTPUT_FORMAT = "txt"
+DOCX_OUTPUT_FORMAT = "docx"
+SUPPORTED_OUTPUT_FORMATS = frozenset({TEXT_OUTPUT_FORMAT, DOCX_OUTPUT_FORMAT})
+ROLLOUT_FILENAME_PREFIX = "rollout-"
+ROLLOUT_FILENAME_SUFFIX = ".jsonl"
+DETOUR_DB_SUFFIX = ".duckdb"
+DETOUR_DB_FILENAME_TEMPLATE = "{stem}__detour_{detour_id}{suffix}"
+WORKBOOK_ARCHIVE_TEMP_FILENAME = ".workbook.tmp"
+WORKBOOK_ARCHIVE_FILENAME_TEMPLATE = "workbook.{attempt_id}.md"
+HOST_WORKBOOK_TEMP_FILENAME_TEMPLATE = ".{filename}.tmp"
+ROLLOUT_ARCHIVE_TEMP_FILENAME = ".rollout.tmp"
+ROLLOUT_ARCHIVE_FILENAME_TEMPLATE = (
+    f"rollout.{{attempt_id}}{ROLLOUT_FILENAME_SUFFIX}"
+)
+ATOMIC_TEMP_FILENAME_TEMPLATE = ".{filename}.{nonce}.tmp"
+RESPONSE_FILENAME = f"response{ROLLOUT_FILENAME_SUFFIX}"
+CARD_ZIP_FILENAME_TEMPLATE = "{prefix}_{attempt_id}.zip"
+ATTEMPT_ID_TIMESTAMP_FORMAT = "%Y%m%dT%H%M%S_%fZ"
+ATTEMPT_ID_SEPARATOR = "_"
+ROLLOUT_TIMESTAMP_FORMAT = "%Y-%m-%dT%H-%M-%S"
+CUMULATIVE_KEY_SEPARATOR = "\0"
+FCO_TIMESTAMP_TIMESPEC = "milliseconds"
+API_VERSION = "1.0.0"
+PULL_PATH = "/pull"
+PUSH_PATH = "/push"
+CONFIG_OPTION = "--config"
+RESOURCE_PATH_KEY = "path"
+RESOURCE_DESCRIPTION_KEY = "desc"
+RESOURCE_SHA256_KEY = "sha256"
+PYDANTIC_ERROR_MESSAGE_KEY = "msg"
+PYDANTIC_ERROR_LOCATION_KEY = "loc"
+PYDANTIC_ERROR_TYPE_KEY = "type"
+PYDANTIC_ERROR_INPUT_KEY = "input"
+PYDANTIC_MISSING_ERROR_TYPE = "missing"
+ARTIFACT_ROLLOUT_KEY = "rollout"
+ARTIFACT_WORKBOOK_KEY = "workbook"
+ARTIFACT_APPENDWATCH_REPORT_KEY = "appendwatch_report"
+ARTIFACT_CARD_ZIP_KEY = "card_zip"
+ARTIFACT_FILENAME_KEY = "filename"
+ARTIFACT_SIZE_KEY = "size"
+ARTIFACT_SHA256_KEY = "sha256"
+ARTIFACT_LINE_COUNT_KEY = "line_count"
+ATTEMPT_ID_KEY = "attempt_id"
+ATTEMPT_STAGE_KEY = "stage"
+ATTEMPT_RESULT_KEY = "result"
+ATTEMPT_UPDATED_AT_KEY = "updated_at"
+ATTEMPT_ARTIFACTS_KEY = "artifacts"
+ATTEMPT_MANIFEST_FILENAME = "attempt.json"
+SUBMISSION_VALUE_KEY = "value"
+SUBMISSION_EVIDENCE_KEY = "web_search_excerpts"
+SUBMISSION_EXCERPT_KEY = "excerpt"
+SUBMISSION_URL_KEY = "url"
+TREE_LINE = re.compile(
+    rf"^(?P<{TREE_INDENT_GROUP}>(?:(?:│   )|(?:    ))*)"
+    rf"(?:├── |└── )(?P<{TREE_BODY_GROUP}>.*)$"
+)
 CODEX_CITE_MARKER_PREFIX = "\ue200cite\ue202"
 CODEX_CITE_MARKER_SUFFIX = "\ue201"
-CODEX_REF_ID_PATTERN = r"turn[0-9]+[A-Za-z_]+[0-9]+"
+CODEX_REF_ID_PATTERN = (
+    rf"{re.escape(CODEX_TURN_REF_PREFIX)}[0-9]+[A-Za-z_]+[0-9]+"
+)
 CODEX_RESULT_SEPARATOR = "-" * 80
 FOOTNOTE_CONTEXT_CHARACTERS = 160
 SERVER_HOST = "127.0.0.1"
@@ -361,36 +523,36 @@ MEDIA_TYPE = "application/x-ndjson"
 # Note: generated via chatgpt.com on 2026-07-27 UTC,
 # using GPT-5.6-Sol-High with tools (context lost)
 SUBMISSION_EXAMPLE: dict[str, object] = {
-    AI_AUGMENT_COLUMNS[0]: "Fei-Fei Li; publishes as L. Fei-Fei.",
-    AI_AUGMENT_COLUMNS[1]: "Stanford campus, Stanford, California.",
-    AI_AUGMENT_COLUMNS[2]: "Female.",
-    AI_AUGMENT_COLUMNS[3]: (
+    KTP_AI_AUGMENT_RESEARCHER_AUTHOR_COL: "Fei-Fei Li; publishes as L. Fei-Fei.",
+    KTP_AI_AUGMENT_PLACE_OF_RESIDENCE_COL: "Stanford campus, Stanford, California.",
+    KTP_AI_AUGMENT_GENDER_COL: "Female.",
+    KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL: (
         "28–29; born in 1976, with the earliest visible work on the OpenAlex profile dated 2005."
     ),
-    AI_AUGMENT_COLUMNS[4]: (
+    KTP_AI_AUGMENT_EDUCATION_COL: (
         "B.A. Physics, Princeton University, 1999; M.S. Electrical "
         "Engineering, Caltech, 2001; Ph.D. Electrical Engineering, "
         "Caltech, 2005."
     ),
-    AI_AUGMENT_COLUMNS[5]: (
+    KTP_AI_AUGMENT_ACADEMIC_POSITIONS_COL: (
         "Sequoia Capital Professor of Computer Science, Stanford; Senior "
         "Fellow, Stanford HAI; Professor by courtesy, Stanford Graduate "
         "School of Business; former Director, Stanford AI Lab, 2013–2018; "
         "former Vice President and Chief Scientist of AI/ML, Google Cloud, "
         "2017–2018; Co-founder and CEO, World Labs."
     ),
-    AI_AUGMENT_COLUMNS[6]: (
+    KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL: (
         "Founding Co-Director, Stanford HAI; Co-founder and Chair, AI4ALL; "
         "member of the National Academy of Engineering, National Academy "
         "of Medicine, American Academy of Arts and Sciences, and Council "
         "on Foreign Relations; ACM Fellow; UN special adviser."
     ),
-    AI_AUGMENT_COLUMNS[7]: (
+    KTP_AI_AUGMENT_LINKS_COL: (
         "Stanford profile: https://profiles.stanford.edu/fei-fei-li; "
         "OpenAlex: https://openalex.org/A5100450462; "
         "AI4ALL: https://ai-4-all.org/our-people/fei-fei-li/"
     ),
-    AI_AUGMENT_COLUMNS[8]: (
+    KTP_AI_AUGMENT_COMMENTS_COL: (
         "OpenAlex appears to conflate this author with unrelated researchers "
         "and institutions; age at first publication is therefore provisional."
     ),
@@ -403,11 +565,11 @@ NULL_SUBMISSION_EXAMPLE = {
 }
 EVIDENCE_SUBMISSION_EXAMPLE = {
     column: {
-        "value": value,
-        "web_search_excerpts": [
+        SUBMISSION_VALUE_KEY: value,
+        SUBMISSION_EVIDENCE_KEY: [
             {
-                "excerpt": "Exact contiguous excerpt from a cited web result.",
-                "url": "https://example.test/result",
+                SUBMISSION_EXCERPT_KEY: "Exact contiguous excerpt from a cited web result.",
+                SUBMISSION_URL_KEY: "https://example.test/result",
             }
         ],
     }
@@ -415,7 +577,7 @@ EVIDENCE_SUBMISSION_EXAMPLE = {
     if column in AI_AUGMENT_EVIDENCE_COLUMNS
 }
 EVIDENCE_SUBMISSION_EXAMPLE[KTP_AI_AUGMENT_COMMENTS_COL] = {
-    "value": SUBMISSION_EXAMPLE[KTP_AI_AUGMENT_COMMENTS_COL]
+    SUBMISSION_VALUE_KEY: SUBMISSION_EXAMPLE[KTP_AI_AUGMENT_COMMENTS_COL]
 }
 
 
@@ -424,7 +586,7 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     try:
         runtime_configuration()
     except PushConfigurationError as exc:
-        logger.error("API startup failed: %s", exc)
+        logger.error(Locale.API_STARTUP_FAILED_LOG, exc)
         raise
     try:
         if _control_base_url() is None:
@@ -432,32 +594,25 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
         else:
             initialize_guest_workbook()
     except PushConfigurationError as exc:
-        logger.error("pull and push are disabled: %s", exc)
+        logger.error(Locale.ROUTES_DISABLED_LOG, exc)
     yield
 
 
 APP_CONFIG: dict[str, Any] = {
-    "title": "Highly-Cited Researcher Annotation API",
-    "description": (
-        "Pull a JSONL annotation task, submit completed values, "
-        "and compare the submission with ground truth."
-    ),
-    "version": "1.0.0",
+    "title": Locale.API_TITLE,
+    "description": Locale.API_DESCRIPTION,
+    "version": API_VERSION,
     "lifespan": lifespan,
 }
 
 PULL_ROUTE: dict[str, Any] = {
-    "path": "/pull",
+    "path": PULL_PATH,
     "response_class": StreamingResponse,
-    "summary": "Pull the annotation task",
-    "description": (
-        "Streams the source JSONL through the selected row. "
-        "The selected row contains only the annotation columns "
-        "with all values replaced by null."
-    ),
+    "summary": Locale.PULL_SUMMARY,
+    "description": Locale.PULL_DESCRIPTION,
     "responses": {
-        200: {
-            "description": "JSON Lines annotation task",
+        status.HTTP_200_OK: {
+            "description": Locale.PULL_RESPONSE_DESCRIPTION,
             "content": {
                 MEDIA_TYPE: {
                     "example": (json.dumps(NULL_SUBMISSION_EXAMPLE, ensure_ascii=False) + "\n"),
@@ -468,13 +623,13 @@ PULL_ROUTE: dict[str, Any] = {
 }
 
 PUSH_ROUTE: dict[str, Any] = {
-    "path": "/push",
+    "path": PUSH_PATH,
     "response_class": StreamingResponse,
-    "summary": "Submit completed annotations",
-    "description": "Validates and stores the completed submission.",
+    "summary": Locale.PUSH_SUMMARY,
+    "description": Locale.PUSH_DESCRIPTION,
     "responses": {
-        200: {
-            "description": "Submission followed by ground truth",
+        status.HTTP_200_OK: {
+            "description": Locale.PUSH_RESPONSE_DESCRIPTION,
             "content": {
                 MEDIA_TYPE: {
                     "example": (
@@ -486,13 +641,17 @@ PUSH_ROUTE: dict[str, Any] = {
                 },
             },
         },
-        422: {"description": VALIDATION_ERROR_DETAIL},
-        503: {"description": CONFIGURATION_ERROR_DETAIL},
+        status.HTTP_422_UNPROCESSABLE_CONTENT: {
+            "description": Locale.VALIDATION_ERROR_DETAIL
+        },
+        status.HTTP_503_SERVICE_UNAVAILABLE: {
+            "description": Locale.CONFIGURATION_ERROR_DETAIL
+        },
     },
     "openapi_extra": {
         "requestBody": {
             "required": True,
-            "content": {"application/json": {"example": EVIDENCE_SUBMISSION_EXAMPLE}},
+            "content": {JSON_MEDIA_TYPE: {"example": EVIDENCE_SUBMISSION_EXAMPLE}},
         }
     },
 }
@@ -522,7 +681,7 @@ class WebSearchExcerpt(BaseModel):
     @model_validator(mode="after")
     def validate_evidence(self) -> Self:
         if not self.excerpt.strip() or not self.url.strip():
-            raise ValueError("excerpt and url must be non-blank")
+            raise ValueError(Locale.EXCERPT_URL_NONBLANK)
         return self
 
 
@@ -538,10 +697,10 @@ class FieldSubmission(BaseModel):
     @model_validator(mode="after")
     def validate_field(self) -> Self:
         if not self.value.strip():
-            raise ValueError("value must be non-blank")
+            raise ValueError(Locale.VALUE_NONBLANK)
         evidence_pairs = [(evidence.excerpt, evidence.url) for evidence in self.web_search_excerpts]
         if len(set(evidence_pairs)) != len(evidence_pairs):
-            raise ValueError("web_search_excerpts must not contain duplicate pairs")
+            raise ValueError(Locale.EXCERPT_PAIRS_UNIQUE)
         return self
 
 
@@ -553,7 +712,7 @@ class CommentSubmission(BaseModel):
     @model_validator(mode="after")
     def validate_comment(self) -> Self:
         if not self.value.strip():
-            raise ValueError("value must be non-blank")
+            raise ValueError(Locale.VALUE_NONBLANK)
         return self
 
 
@@ -572,7 +731,7 @@ class CompactSessionMetadata(BaseModel):
     @model_validator(mode="after")
     def validate_metadata(self) -> Self:
         if any(not value.strip() for value in self.model_dump().values()):
-            raise ValueError("session metadata fields must be non-blank")
+            raise ValueError(Locale.SESSION_METADATA_NONBLANK)
         return self
 
 
@@ -590,7 +749,7 @@ class ControlRun(BaseModel):
             not _valid_nonblank(value)
             for value in (self.source_key, self.session_id, self.rollout_jsonl)
         ):
-            raise ValueError("control run fields must be non-blank and normalized")
+            raise ValueError(Locale.CONTROL_RUN_NORMALIZED)
         return self
 
 
@@ -663,7 +822,7 @@ class CodexTextResult(BaseModel):
     @model_validator(mode="after")
     def validate_result(self) -> Self:
         if not self.ref_id.strip():
-            raise ValueError("web result ref_id must be non-blank")
+            raise ValueError(Locale.WEB_RESULT_REF_ID_NONBLANK)
         return self
 
 
@@ -678,7 +837,9 @@ class PushValidationError(RuntimeError):
 class MultipleEvidenceMatches(PushValidationError):
     def __init__(self, excerpt: str) -> None:
         self.excerpt = excerpt
-        super().__init__(f"excerpt matched multiple indexed results: {excerpt}")
+        super().__init__(
+            Locale.MULTIPLE_EVIDENCE_MATCHES_TEMPLATE.format(excerpt=excerpt)
+        )
 
 
 @dataclass(frozen=True)
@@ -761,7 +922,7 @@ class SessionMetadata:
         return json.dumps(
             self.compact.model_dump(),
             ensure_ascii=False,
-            separators=(",", ":"),
+            separators=COMPACT_JSON_SEPARATORS,
         )
 
 
@@ -863,18 +1024,24 @@ def _valid_nonblank(value: object) -> bool:
 
 def _configuration_file(path: Path, setting: str) -> Path:
     if not path.is_absolute():
-        raise PushConfigurationError(f"{setting} must be an absolute path")
+        raise PushConfigurationError(
+            Locale.SETTING_ABSOLUTE_TEMPLATE.format(setting=setting)
+        )
     if path.is_symlink() or not path.is_file() or not os.access(path, os.R_OK):
         raise PushConfigurationError(
-            f"{setting} is not a readable regular file; rerun deploy.sh or correct .env"
+            Locale.SETTING_READABLE_FILE_TEMPLATE.format(setting=setting)
         )
     return path
 
 
 def _detour_db_path(path: Path) -> Path:
-    suffix = path.suffix or ".duckdb"
+    suffix = path.suffix or DETOUR_DB_SUFFIX
     stem = path.stem if path.suffix else path.name
-    return path.with_name(f"{stem}__detour_{DETOUR_ID}{suffix}")
+    return path.with_name(DETOUR_DB_FILENAME_TEMPLATE.format(
+        stem=stem,
+        detour_id=DETOUR_ID,
+        suffix=suffix,
+    ))
 
 
 def _seed_evidence_random(sample_seed: int) -> None:
@@ -885,30 +1052,37 @@ def registered_release_map(config: PipelineConfig) -> RegisteredResource:
     meta = config.files_config.get(MAP_SUBSET_0_TO_BATCH_KEY)
     if meta is None:
         raise PushConfigurationError(
-            f"files_config is missing required detour resource {MAP_SUBSET_0_TO_BATCH_KEY!r}"
+            Locale.FILES_CONFIG_RESOURCE_MISSING_TEMPLATE.format(
+                resource_key=MAP_SUBSET_0_TO_BATCH_KEY
+            )
         )
     try:
         return register_resource(
-            Path(meta["path"]),
+            Path(meta[RESOURCE_PATH_KEY]),
             group=ResourceGroup.KTP_PIPELINE_ARTIFACT,
             fragment_type=FragmentType.CSV_ROW,
-            description=meta["desc"],
-            expected_hash=meta["sha256"],
+            description=meta[RESOURCE_DESCRIPTION_KEY],
+            expected_hash=meta[RESOURCE_SHA256_KEY],
         )
     except (KeyError, OSError, ValueError) as exc:
         raise PushConfigurationError(
-            f"configured {MAP_SUBSET_0_TO_BATCH_KEY} resource is invalid"
+            Locale.CONFIGURED_RESOURCE_INVALID_TEMPLATE.format(
+                resource_key=MAP_SUBSET_0_TO_BATCH_KEY
+            )
         ) from exc
 
 
 def load_release_batches(resource: RegisteredResource) -> dict[str, str]:
     path = Path(resource)
     try:
-        with path.open(encoding="utf-8", newline="") as stream:
+        with path.open(encoding=TEXT_ENCODING, newline="") as stream:
             reader = csv.DictReader(stream)
             if tuple(reader.fieldnames or ()) != MAP_COLUMNS:
                 raise PushConfigurationError(
-                    f"{MAP_SUBSET_0_TO_BATCH_KEY} must have exactly columns {MAP_COLUMNS!r}"
+                    Locale.MAP_COLUMNS_INVALID_TEMPLATE.format(
+                        resource_key=MAP_SUBSET_0_TO_BATCH_KEY,
+                        columns=MAP_COLUMNS,
+                    )
                 )
             batches: dict[str, str] = {}
             for row_number, row in enumerate(reader, start=2):
@@ -916,21 +1090,33 @@ def load_release_batches(resource: RegisteredResource) -> dict[str, str]:
                 release_batch = row.get(BATCH_LABEL)
                 if not _valid_nonblank(draw_number) or not _valid_nonblank(release_batch):
                     raise PushConfigurationError(
-                        f"{MAP_SUBSET_0_TO_BATCH_KEY} row {row_number} has blank values"
+                        Locale.MAP_ROW_BLANK_TEMPLATE.format(
+                            resource_key=MAP_SUBSET_0_TO_BATCH_KEY,
+                            row_number=row_number,
+                        )
                     )
                 assert isinstance(draw_number, str)
                 assert isinstance(release_batch, str)
                 if draw_number in batches and batches[draw_number] != release_batch:
                     raise PushConfigurationError(
-                        f"{MAP_SUBSET_0_TO_BATCH_KEY} has conflicting draw {draw_number!r}"
+                        Locale.MAP_DRAW_CONFLICT_TEMPLATE.format(
+                            resource_key=MAP_SUBSET_0_TO_BATCH_KEY,
+                            draw_number=draw_number,
+                        )
                     )
                 batches[draw_number] = release_batch
     except (OSError, UnicodeError, csv.Error) as exc:
         raise PushConfigurationError(
-            f"configured {MAP_SUBSET_0_TO_BATCH_KEY} CSV is unreadable or malformed"
+            Locale.MAP_CSV_UNREADABLE_TEMPLATE.format(
+                resource_key=MAP_SUBSET_0_TO_BATCH_KEY
+            )
         ) from exc
     if not batches:
-        raise PushConfigurationError(f"configured {MAP_SUBSET_0_TO_BATCH_KEY} CSV is empty")
+        raise PushConfigurationError(
+            Locale.MAP_CSV_EMPTY_TEMPLATE.format(
+                resource_key=MAP_SUBSET_0_TO_BATCH_KEY
+            )
+        )
     return batches
 
 
@@ -941,18 +1127,31 @@ def _innerdict_json_rows(
     source_key: str,
 ) -> tuple[dict[str, object], ...]:
     if not isinstance(value, str):
-        raise PushConfigurationError(f"{table_name} has non-text innerdicts for {source_key}")
+        raise PushConfigurationError(
+            Locale.INNERDICTS_NON_TEXT_TEMPLATE.format(
+                table_name=table_name,
+                source_key=source_key,
+            )
+        )
     rows: list[dict[str, object]] = []
     for line_number, line in enumerate(value.splitlines(), start=1):
         try:
             row: object = json.loads(line)
         except json.JSONDecodeError as exc:
             raise PushConfigurationError(
-                f"{table_name} has malformed JSONL for {source_key} at line {line_number}"
+                Locale.INNERDICTS_MALFORMED_TEMPLATE.format(
+                    table_name=table_name,
+                    source_key=source_key,
+                    line_number=line_number,
+                )
             ) from exc
         if not isinstance(row, dict):
             raise PushConfigurationError(
-                f"{table_name} has a non-object row for {source_key} at line {line_number}"
+                Locale.INNERDICTS_NON_OBJECT_TEMPLATE.format(
+                    table_name=table_name,
+                    source_key=source_key,
+                    line_number=line_number,
+                )
             )
         rows.append(cast(dict[str, object], row))
     return tuple(rows)
@@ -996,14 +1195,26 @@ def _source_identity_and_draws(
                 f"ORDER BY {duckdb_quote_identifier(KTP_NAMEKEY_COL)}"
             ).fetchall()
         except duckdb.Error as exc:
-            raise PushConfigurationError(f"configured source DuckDB lacks {table_name}") from exc
+            raise PushConfigurationError(
+                Locale.SOURCE_DUCKDB_TABLE_MISSING_TEMPLATE.format(
+                    table_name=table_name
+                )
+            ) from exc
         for raw_source_key, jsonlines in table_rows:
             if not isinstance(raw_source_key, str):
-                raise PushConfigurationError(f"{table_name} contains a non-text name_key")
+                raise PushConfigurationError(
+                    Locale.TABLE_NAMEKEY_NON_TEXT_TEMPLATE.format(
+                        table_name=table_name
+                    )
+                )
             try:
                 name_key = NameKey.from_json_key(raw_source_key)
             except (ValueError, TypeError, json.JSONDecodeError) as exc:
-                raise PushConfigurationError(f"{table_name} contains an invalid name_key") from exc
+                raise PushConfigurationError(
+                    Locale.TABLE_NAMEKEY_INVALID_TEMPLATE.format(
+                        table_name=table_name
+                    )
+                ) from exc
             source_key = name_key.to_json_key()
             names_by_source_key[source_key] = name_key
             source_draws = draws_by_source_key.setdefault(source_key, set())
@@ -1059,7 +1270,9 @@ def derive_source_population(
         ).fetchall()
     except duckdb.Error as exc:
         raise PushConfigurationError(
-            f"configured source DuckDB lacks usable {CARD_PARTITION_TABLE} eligibility flags"
+            Locale.ELIGIBILITY_FLAGS_MISSING_TEMPLATE.format(
+                table_name=CARD_PARTITION_TABLE
+            )
         ) from exc
     partition_flags: dict[str, tuple[int, bool, int]] = {}
     for source_key, partition, xlsx_non_exact, ssn_count in partition_rows:
@@ -1071,7 +1284,9 @@ def derive_source_population(
             or source_key in partition_flags
         ):
             raise PushConfigurationError(
-                f"configured {CARD_PARTITION_TABLE} contains invalid source classifications"
+                Locale.SOURCE_CLASSIFICATIONS_INVALID_TEMPLATE.format(
+                    table_name=CARD_PARTITION_TABLE
+                )
             )
         partition_flags[source_key] = (partition, xlsx_non_exact, ssn_count)
     no_ground_truth = {
@@ -1082,25 +1297,27 @@ def derive_source_population(
     missing_source_keys = no_ground_truth - source_researchers.keys()
     overlap = ground_truth & no_ground_truth
     if missing_source_keys:
-        raise PushConfigurationError("card-partition eligibility contains unknown source keys")
+        raise PushConfigurationError(Locale.CARD_PARTITION_UNKNOWN_SOURCE_KEYS)
     if overlap:
-        raise PushConfigurationError("ground-truth and no-ground-truth cohorts overlap")
+        raise PushConfigurationError(Locale.COHORTS_OVERLAP)
     if len(ground_truth) != EXPECTED_GROUND_TRUTH_RESEARCHERS:
         raise PushConfigurationError(
-            "ground-truth cohort cardinality is invalid: "
-            f"expected {EXPECTED_GROUND_TRUTH_RESEARCHERS}, got {len(ground_truth)}"
+            Locale.GROUND_TRUTH_CARDINALITY_TEMPLATE.format(
+                expected=EXPECTED_GROUND_TRUTH_RESEARCHERS,
+                actual=len(ground_truth),
+            )
         )
     if len(no_ground_truth) != EXPECTED_NO_GROUND_TRUTH_RESEARCHERS:
         raise PushConfigurationError(
-            "no-ground-truth cohort cardinality is invalid: "
-            f"expected {EXPECTED_NO_GROUND_TRUTH_RESEARCHERS}, got {len(no_ground_truth)}"
+            Locale.NO_GROUND_TRUTH_CARDINALITY_TEMPLATE.format(
+                expected=EXPECTED_NO_GROUND_TRUTH_RESEARCHERS,
+                actual=len(no_ground_truth),
+            )
         )
     if len(ground_truth | no_ground_truth) != EXPECTED_ELIGIBLE_RESEARCHERS:
-        raise PushConfigurationError("eligible cohort union cardinality is invalid")
+        raise PushConfigurationError(Locale.ELIGIBLE_COHORT_CARDINALITY_INVALID)
     if set(partition_flags) != set(source_researchers):
-        raise PushConfigurationError(
-            "card-partition source keys do not match innerdict-owned source keys"
-        )
+        raise PushConfigurationError(Locale.CARD_PARTITION_SOURCE_KEYS_MISMATCH)
 
     population: list[SourcePopulationRow] = []
     for source_key, (name_key, draws) in source_researchers.items():
@@ -1137,9 +1354,7 @@ def derive_source_population(
                     IneligibilityCategory.STAGING_PARTITION_4_MULTIPLE_SSN
                 )
             else:
-                raise PushConfigurationError(
-                    "an ineligible source key has no recognized category"
-                )
+                raise PushConfigurationError(Locale.INELIGIBILITY_CATEGORY_UNKNOWN)
         population.append(SourcePopulationRow(
             source_key=source_key,
             rnd=rnd_by_source_key[source_key],
@@ -1167,20 +1382,20 @@ def derive_source_population(
         NO_GROUND_TRUTH_COHORT: EXPECTED_NO_GROUND_TRUTH_RESEARCHERS,
         INELIGIBLE_COHORT: EXPECTED_INELIGIBLE_RESEARCHERS,
     }:
-        raise PushConfigurationError("source population cohort cardinalities are invalid")
+        raise PushConfigurationError(Locale.SOURCE_POPULATION_COHORTS_INVALID)
     if ineligibility_counts != EXPECTED_INELIGIBILITY_COUNTS:
-        raise PushConfigurationError("source population ineligibility categories are invalid")
+        raise PushConfigurationError(Locale.SOURCE_POPULATION_INELIGIBILITY_INVALID)
     if len(population) != EXPECTED_SOURCE_RESEARCHERS:
-        raise PushConfigurationError("source population cardinality is invalid")
+        raise PushConfigurationError(Locale.SOURCE_POPULATION_CARDINALITY_INVALID)
     if {row.rnd for row in population} != set(
         range(RND_START, EXPECTED_SOURCE_RESEARCHERS + RND_START)
     ):
-        raise PushConfigurationError("source population rnd values are invalid")
+        raise PushConfigurationError(Locale.SOURCE_POPULATION_RND_INVALID)
     if (
         sum(len(row.draw_numbers) > 1 for row in population)
         != EXPECTED_MULTIDRAW_SOURCE_RESEARCHERS
     ):
-        raise PushConfigurationError("source population contracted-draw count is invalid")
+        raise PushConfigurationError(Locale.SOURCE_POPULATION_MULTIDRAW_INVALID)
     return tuple(population)
 
 
@@ -1199,20 +1414,28 @@ def _control_base_url() -> str | None:
     if not raw:
         return None
     if raw != raw.strip() or _has_control_character(raw):
-        raise PushConfigurationError(f"{CONTROL_URL_ENV_NAME} is invalid")
+        raise PushConfigurationError(
+            Locale.CONTROL_URL_INVALID_TEMPLATE.format(
+                environment_name=CONTROL_URL_ENV_NAME
+            )
+        )
     parsed = urlsplit(raw)
     if (
-        parsed.scheme != "http"
+        parsed.scheme != CONTROL_SCHEME
         or parsed.hostname != CONTROL_HOST
         or parsed.port != CONTROL_PORT
-        or parsed.path not in {"", "/"}
+        or parsed.path not in CONTROL_ROOT_PATHS
         or parsed.query
         or parsed.fragment
         or parsed.username is not None
         or parsed.password is not None
     ):
         raise PushConfigurationError(
-            f"{CONTROL_URL_ENV_NAME} must be http://{CONTROL_HOST}:{CONTROL_PORT}"
+            Locale.CONTROL_URL_EXPECTED_TEMPLATE.format(
+                environment_name=CONTROL_URL_ENV_NAME,
+                host=CONTROL_HOST,
+                port=CONTROL_PORT,
+            )
         )
     return raw.rstrip("/")
 
@@ -1224,9 +1447,9 @@ def _control_request(
     method: str,
     body: bytes | None = None,
 ) -> bytes:
-    headers = {"Accept": "application/json"}
+    headers = {HTTP_ACCEPT_HEADER: JSON_MEDIA_TYPE}
     if body is not None:
-        headers["Content-Type"] = "application/json"
+        headers[HTTP_CONTENT_TYPE_HEADER] = JSON_MEDIA_TYPE
     request = urllib_request.Request(
         f"{base_url}{path}",
         data=body,
@@ -1237,7 +1460,7 @@ def _control_request(
         with urllib_request.urlopen(request, timeout=CONTROL_HTTP_TIMEOUT_SECONDS) as response:
             return response.read()
     except (OSError, urllib_error.URLError, urllib_error.HTTPError) as exc:
-        raise PushConfigurationError("Control Centre endpoint is unavailable") from exc
+        raise PushConfigurationError(Locale.CONTROL_ENDPOINT_UNAVAILABLE) from exc
 
 
 def sanctioned_snapshot() -> SanctionSnapshot:
@@ -1252,16 +1475,20 @@ def sanctioned_snapshot() -> SanctionSnapshot:
         )
     try:
         snapshot = ControlSnapshot.model_validate_json(
-            _control_request(base_url, CONTROL_CURRENT_PATH, method="GET")
+            _control_request(
+                base_url,
+                CONTROL_CURRENT_PATH,
+                method=HTTP_GET_METHOD,
+            )
         )
     except ValidationError as exc:
-        raise PushConfigurationError("Control Centre returned malformed sanction state") from exc
+        raise PushConfigurationError(Locale.CONTROL_SANCTION_MALFORMED) from exc
     if snapshot.sanctioned_run is None:
-        raise PushConfigurationError("Control Centre has no sanctioned run")
+        raise PushConfigurationError(Locale.CONTROL_SANCTION_MISSING)
     run = snapshot.sanctioned_run
     with CONSUMED_RUN_LOCK:
         if run.run_id in CONSUMED_RUN_IDS:
-            raise PushConfigurationError("Control Centre run sanction has already been consumed")
+            raise PushConfigurationError(Locale.CONTROL_SANCTION_CONSUMED)
     return SanctionSnapshot(
         run_id=run.run_id,
         source_key=run.source_key,
@@ -1287,16 +1514,21 @@ def acknowledge_sanction(snapshot: SanctionSnapshot, attempt_id: str) -> None:
         source_key=snapshot.source_key,
         session_id=snapshot.session_id,
         attempt_id=attempt_id,
-    ).model_dump_json().encode("utf-8")
+    ).model_dump_json().encode(TEXT_ENCODING)
     path = CONTROL_ACCEPTED_PATH_TEMPLATE.format(run_id=snapshot.run_id)
     try:
         response = ControlAcceptedResponse.model_validate_json(
-            _control_request(snapshot.control_base_url, path, method="POST", body=body)
+            _control_request(
+                snapshot.control_base_url,
+                path,
+                method=HTTP_POST_METHOD,
+                body=body,
+            )
         )
     except ValidationError as exc:
-        raise PushConfigurationError("Control Centre returned malformed acknowledgement") from exc
+        raise PushConfigurationError(Locale.CONTROL_ACKNOWLEDGEMENT_MALFORMED) from exc
     if not response.acknowledged:
-        raise PushConfigurationError("Control Centre refused accepted-run acknowledgement")
+        raise PushConfigurationError(Locale.CONTROL_ACKNOWLEDGEMENT_REFUSED)
 
 
 def configure_runtime(config_path: Path) -> RuntimeConfiguration:
@@ -1305,25 +1537,27 @@ def configure_runtime(config_path: Path) -> RuntimeConfiguration:
     try:
         pipeline = PipelineConfig.from_json(config_path)
     except (OSError, ValueError) as exc:
-        raise PushConfigurationError(f"--config is invalid or unreadable: {config_path}") from exc
-    if pipeline.output_format not in {"txt", "docx"}:
-        raise PushConfigurationError("config output_format must be txt or docx")
+        raise PushConfigurationError(
+            Locale.CONFIG_INVALID_TEMPLATE.format(config_path=config_path)
+        ) from exc
+    if pipeline.output_format not in SUPPORTED_OUTPUT_FORMATS:
+        raise PushConfigurationError(Locale.OUTPUT_FORMAT_INVALID)
     if not pipeline.db_file.is_file() or not os.access(pipeline.db_file, os.R_OK):
         raise PushConfigurationError(
-            f"configured source DuckDB is not readable: {pipeline.db_file}"
+            Locale.SOURCE_DUCKDB_UNREADABLE_TEMPLATE.format(
+                db_file=pipeline.db_file
+            )
         )
-    if pipeline.output_format == "docx" and (
+    if pipeline.output_format == DOCX_OUTPUT_FORMAT and (
         not pipeline.pandoc_reference_docx.is_file()
         or not os.access(pipeline.pandoc_reference_docx, os.R_OK)
     ):
-        raise PushConfigurationError(
-            "configured DOCX output requires a readable pandoc_reference_docx"
-        )
+        raise PushConfigurationError(Locale.DOCX_REFERENCE_UNREADABLE)
     try:
         ZoneInfo(pipeline.timezone)
     except (KeyError, ValueError) as exc:
         raise PushConfigurationError(
-            f"configured timezone is invalid: {pipeline.timezone}"
+            Locale.TIMEZONE_INVALID_TEMPLATE.format(timezone=pipeline.timezone)
         ) from exc
 
     release_map = registered_release_map(pipeline)
@@ -1337,14 +1571,14 @@ def configure_runtime(config_path: Path) -> RuntimeConfiguration:
             sample_seed=pipeline.sample_seed,
         )
     except duckdb.Error as exc:
-        raise PushConfigurationError("configured source DuckDB could not be validated") from exc
+        raise PushConfigurationError(Locale.SOURCE_DUCKDB_VALIDATION_FAILED) from exc
     finally:
         if source_conn is not None:
             source_conn.close()
 
     detour_db_path = _detour_db_path(pipeline.db_file)
     if detour_db_path == pipeline.db_file:
-        raise PushConfigurationError("detour DuckDB path must differ from source DuckDB")
+        raise PushConfigurationError(Locale.DETOUR_DB_EQUALS_SOURCE)
     RUNTIME_CONFIGURATION = RuntimeConfiguration(
         pipeline=pipeline,
         detour_db_path=detour_db_path,
@@ -1358,7 +1592,9 @@ def configure_runtime(config_path: Path) -> RuntimeConfiguration:
 def runtime_configuration() -> RuntimeConfiguration:
     if RUNTIME_CONFIGURATION is None:
         raise PushConfigurationError(
-            f"API was not started with required --config {CONFIG_FILENAME}"
+            Locale.API_CONFIG_REQUIRED_TEMPLATE.format(
+                config_filename=CONFIG_FILENAME
+            )
         )
     return RUNTIME_CONFIGURATION
 
@@ -1367,70 +1603,71 @@ def push_configuration(rollout_jsonl: str | None = None) -> PushConfiguration:
     raw_rollout = ROLLOUT_JSONL if rollout_jsonl is None else rollout_jsonl
     if not raw_rollout.strip():
         raise PushConfigurationError(
-            f"{ROLLOUT_ENV_NAME} is not set; add the active chat rollout path "
-            "to the repository-root .env and restart the API"
+            Locale.ROLLOUT_NOT_SET_TEMPLATE.format(
+                environment_name=ROLLOUT_ENV_NAME
+            )
         )
     if raw_rollout != raw_rollout.strip() or _has_control_character(raw_rollout):
         raise PushConfigurationError(
-            f"{ROLLOUT_ENV_NAME} contains whitespace or control characters; "
-            "correct .env and restart the API"
+            Locale.ROLLOUT_WHITESPACE_TEMPLATE.format(
+                environment_name=ROLLOUT_ENV_NAME
+            )
         )
 
     rollout_path = PurePosixPath(raw_rollout)
     if str(rollout_path) != raw_rollout or any(
-        part in {"", ".", ".."} for part in rollout_path.parts
+        part in FORBIDDEN_NORMALIZED_PATH_PARTS for part in rollout_path.parts
     ):
         raise PushConfigurationError(
-            f"{ROLLOUT_ENV_NAME} must be normalized without traversal; "
-            "correct .env and restart the API"
+            Locale.ROLLOUT_NOT_NORMALIZED_TEMPLATE.format(
+                environment_name=ROLLOUT_ENV_NAME
+            )
         )
     try:
         relative_path = rollout_path.relative_to(CODEX_SESSIONS_ROOT)
     except ValueError as exc:
         raise PushConfigurationError(
-            f"{ROLLOUT_ENV_NAME} must be below {CODEX_SESSIONS_ROOT}; "
-            "correct .env and restart the API"
+            Locale.ROLLOUT_OUTSIDE_ROOT_TEMPLATE.format(
+                environment_name=ROLLOUT_ENV_NAME,
+                sessions_root=CODEX_SESSIONS_ROOT,
+            )
         ) from exc
     if (
-        relative_path == PurePosixPath(".")
-        or not relative_path.name.startswith("rollout-")
-        or relative_path.suffix != ".jsonl"
+        relative_path == CURRENT_DIRECTORY
+        or not relative_path.name.startswith(ROLLOUT_FILENAME_PREFIX)
+        or relative_path.suffix != ROLLOUT_FILENAME_SUFFIX
     ):
         raise PushConfigurationError(
-            f"{ROLLOUT_ENV_NAME} must name a rollout-*.jsonl file; correct .env and restart the API"
+            Locale.ROLLOUT_FILENAME_INVALID_TEMPLATE.format(
+                environment_name=ROLLOUT_ENV_NAME
+            )
         )
 
     if not _valid_nonblank(AIVM_INSTANCE):
-        raise PushConfigurationError(
-            "FASTAPI_DETOUR_AIVM_INSTANCE is invalid; correct .env and restart the API"
-        )
+        raise PushConfigurationError(Locale.AIVM_INSTANCE_INVALID)
     if not _valid_nonblank(AIVM_USER):
-        raise PushConfigurationError(
-            "FASTAPI_DETOUR_AIVM_USER is invalid; correct .env and restart the API"
-        )
+        raise PushConfigurationError(Locale.AIVM_USER_INVALID)
     if not AIVM_SSH_PORT.isdecimal() or not MIN_TCP_PORT <= int(AIVM_SSH_PORT) <= MAX_TCP_PORT:
-        raise PushConfigurationError(
-            "FASTAPI_DETOUR_AIVM_SSH_PORT is invalid; correct .env and restart the API"
-        )
+        raise PushConfigurationError(Locale.AIVM_SSH_PORT_INVALID)
 
     return PushConfiguration(
         rollout_guest_path=raw_rollout,
         rollout_relative_path=relative_path,
         appendwatch_report=_configuration_file(
             APPENDWATCH_REPORT,
-            "FASTAPI_DETOUR_APPENDWATCH_REPORT",
+            APPENDWATCH_REPORT_ENV_NAME,
         ),
         lima_ssh_config=_configuration_file(
             LIMA_SSH_CONFIG_PATH,
-            "FASTAPI_DETOUR_LIMA_SSH_CONFIG",
+            LIMA_SSH_CONFIG_ENV_NAME,
         ),
         identity_file=_configuration_file(
             AIVM_IDENTITY_FILE,
-            "FASTAPI_DETOUR_AIVM_IDENTITY_FILE",
+            AIVM_IDENTITY_FILE_ENV_NAME,
         ),
         known_hosts_file=_configuration_file(
             AIVM_KNOWN_HOSTS_FILE,
-            "FASTAPI_DETOUR_AIVM_KNOWN_HOSTS_FILE",
+            AIVM_KNOWN_HOSTS_FILE_ENV_NAME,
         ),
         ssh_target=f"{AIVM_INSTANCE}-{AIVM_USER}",
         host_key_alias=f"lima-{AIVM_INSTANCE}-{AIVM_USER}",
@@ -1439,8 +1676,8 @@ def push_configuration(rollout_jsonl: str | None = None) -> PushConfiguration:
 
 def new_attempt_id(attempt_timestamp: datetime | None = None) -> str:
     current_timestamp = attempt_timestamp or datetime.now(timezone.utc)
-    timestamp_text = current_timestamp.strftime("%Y%m%dT%H%M%S_%fZ")
-    return f"{timestamp_text}_{uuid4().hex}"
+    timestamp_text = current_timestamp.strftime(ATTEMPT_ID_TIMESTAMP_FORMAT)
+    return f"{timestamp_text}{ATTEMPT_ID_SEPARATOR}{uuid4().hex}"
 
 
 def create_attempt(attempt_id: str) -> Path:
@@ -1540,7 +1777,7 @@ def _host_workbook() -> Path:
         or not HOST_WORKBOOK_PATH.is_file()
         or not os.access(HOST_WORKBOOK_PATH, os.R_OK | os.W_OK)
     ):
-        raise PushConfigurationError("host workbook is not a readable writable regular file")
+        raise PushConfigurationError(Locale.HOST_WORKBOOK_INVALID)
     return HOST_WORKBOOK_PATH
 
 
@@ -1550,15 +1787,15 @@ def initialize_guest_workbook() -> None:
     host_workbook = _host_workbook()
     lima_ssh_config = _configuration_file(
         LIMA_SSH_CONFIG_PATH,
-        "FASTAPI_DETOUR_LIMA_SSH_CONFIG",
+        LIMA_SSH_CONFIG_ENV_NAME,
     )
     identity_file = _configuration_file(
         AIVM_IDENTITY_FILE,
-        "FASTAPI_DETOUR_AIVM_IDENTITY_FILE",
+        AIVM_IDENTITY_FILE_ENV_NAME,
     )
     known_hosts_file = _configuration_file(
         AIVM_KNOWN_HOSTS_FILE,
-        "FASTAPI_DETOUR_AIVM_KNOWN_HOSTS_FILE",
+        AIVM_KNOWN_HOSTS_FILE_ENV_NAME,
     )
     options = _aivm_connection_options(
         lima_ssh_config=lima_ssh_config,
@@ -1568,7 +1805,15 @@ def initialize_guest_workbook() -> None:
     )
     try:
         subprocess.run(
-            ["ssh", *options, AIVM_SSH_TARGET, "mkdir", "-p", "--", str(AIVM_WORKDIR)],
+            [
+                SSH_EXECUTABLE,
+                *options,
+                AIVM_SSH_TARGET,
+                "mkdir",
+                "-p",
+                "--",
+                str(AIVM_WORKDIR),
+            ],
             check=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
@@ -1577,7 +1822,7 @@ def initialize_guest_workbook() -> None:
         )
         subprocess.run(
             [
-                "scp",
+                SCP_EXECUTABLE,
                 *options,
                 "--",
                 str(host_workbook),
@@ -1590,9 +1835,7 @@ def initialize_guest_workbook() -> None:
             timeout=SCP_TIMEOUT_SECONDS,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        raise PushConfigurationError(
-            "host workbook could not be initialized in the AIVM workdir"
-        ) from exc
+        raise PushConfigurationError(Locale.HOST_WORKBOOK_INITIALIZATION_FAILED) from exc
     with WORKBOOK_STATE_LOCK:
         WORKBOOK_INITIALIZED = True
 
@@ -1602,8 +1845,10 @@ def copy_guest_workbook(
     attempt_dir: Path,
     attempt_id: str,
 ) -> ArchivedFile:
-    temporary = attempt_dir / ".workbook.tmp"
-    destination = attempt_dir / f"workbook.{attempt_id}.md"
+    temporary = attempt_dir / WORKBOOK_ARCHIVE_TEMP_FILENAME
+    destination = attempt_dir / WORKBOOK_ARCHIVE_FILENAME_TEMPLATE.format(
+        attempt_id=attempt_id
+    )
     options = _aivm_connection_options(
         lima_ssh_config=configuration.lima_ssh_config,
         identity_file=configuration.identity_file,
@@ -1613,7 +1858,7 @@ def copy_guest_workbook(
     try:
         subprocess.run(
             [
-                "scp",
+                SCP_EXECUTABLE,
                 *options,
                 "--",
                 f"{configuration.ssh_target}:{AIVM_WORKBOOK_PATH}",
@@ -1626,9 +1871,13 @@ def copy_guest_workbook(
             timeout=SCP_TIMEOUT_SECONDS,
         )
         if not temporary.is_file() or temporary.is_symlink():
-            raise PushConfigurationError("SCP did not produce a regular workbook archive")
+            raise PushConfigurationError(Locale.SCP_WORKBOOK_ARCHIVE_INVALID)
         archive = _publish_archive(temporary, destination)
-        host_temporary = HOST_WORKBOOK_PATH.with_name(f".{HOST_WORKBOOK_PATH.name}.tmp")
+        host_temporary = HOST_WORKBOOK_PATH.with_name(
+            HOST_WORKBOOK_TEMP_FILENAME_TEMPLATE.format(
+                filename=HOST_WORKBOOK_PATH.name
+            )
+        )
         try:
             shutil.copyfile(archive.path, host_temporary)
             _fsync_file(host_temporary)
@@ -1638,7 +1887,7 @@ def copy_guest_workbook(
             host_temporary.unlink(missing_ok=True)
         return archive
     except (OSError, subprocess.SubprocessError) as exc:
-        raise PushConfigurationError("guest workbook could not be archived") from exc
+        raise PushConfigurationError(Locale.GUEST_WORKBOOK_ARCHIVE_FAILED) from exc
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -1648,40 +1897,19 @@ def copy_rollout(
     attempt_dir: Path,
     attempt_id: str,
 ) -> ArchivedFile:
-    temporary = attempt_dir / ".rollout.tmp"
-    destination = attempt_dir / f"rollout.{attempt_id}.jsonl"
+    temporary = attempt_dir / ROLLOUT_ARCHIVE_TEMP_FILENAME
+    destination = attempt_dir / ROLLOUT_ARCHIVE_FILENAME_TEMPLATE.format(
+        attempt_id=attempt_id
+    )
+    options = _aivm_connection_options(
+        lima_ssh_config=configuration.lima_ssh_config,
+        identity_file=configuration.identity_file,
+        known_hosts_file=configuration.known_hosts_file,
+        host_key_alias=configuration.host_key_alias,
+    )
     command = [
-        "scp",
-        "-F",
-        str(configuration.lima_ssh_config),
-        "-o",
-        f"ProxyJump=lima-{AIVM_INSTANCE}",
-        "-o",
-        "HostName=127.0.0.1",
-        "-o",
-        f"Port={AIVM_SSH_PORT}",
-        "-o",
-        f"User={AIVM_USER}",
-        "-o",
-        f"IdentityFile={configuration.identity_file}",
-        "-o",
-        "IdentitiesOnly=yes",
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "PasswordAuthentication=no",
-        "-o",
-        "KbdInteractiveAuthentication=no",
-        "-o",
-        "ForwardAgent=no",
-        "-o",
-        "ClearAllForwardings=no",
-        "-o",
-        f"UserKnownHostsFile={configuration.known_hosts_file}",
-        "-o",
-        f"HostKeyAlias={configuration.host_key_alias}",
-        "-o",
-        "StrictHostKeyChecking=accept-new",
+        SCP_EXECUTABLE,
+        *options,
         "--",
         f"{configuration.ssh_target}:{configuration.rollout_guest_path}",
         str(temporary),
@@ -1696,14 +1924,10 @@ def copy_rollout(
             timeout=SCP_TIMEOUT_SECONDS,
         )
         if not temporary.is_file() or temporary.is_symlink():
-            raise PushConfigurationError(
-                "SCP did not produce a regular rollout archive; verify AIVM deployment"
-            )
+            raise PushConfigurationError(Locale.SCP_ROLLOUT_ARCHIVE_INVALID)
         return _publish_archive(temporary, destination)
     except (OSError, subprocess.SubprocessError) as exc:
-        raise PushConfigurationError(
-            "rollout SCP failed; verify the configured rollout and AIVM SSH deployment"
-        ) from exc
+        raise PushConfigurationError(Locale.ROLLOUT_SCP_FAILED) from exc
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -1713,15 +1937,15 @@ def copy_appendwatch_report(
     attempt_dir: Path,
     attempt_id: str,
 ) -> ArchivedFile:
-    temporary = attempt_dir / ".appendwatch-tree.tmp"
-    destination = attempt_dir / f"appendwatch-tree.{attempt_id}.txt"
+    temporary = attempt_dir / APPENDWATCH_ARCHIVE_TEMP_FILENAME
+    destination = attempt_dir / APPENDWATCH_ARCHIVE_FILENAME_TEMPLATE.format(
+        attempt_id=attempt_id
+    )
     try:
         shutil.copyfile(configuration.appendwatch_report, temporary)
         return _publish_archive(temporary, destination)
     except OSError as exc:
-        raise PushConfigurationError(
-            "appendwatch status could not be archived; verify deployment and mounted report"
-        ) from exc
+        raise PushConfigurationError(Locale.APPENDWATCH_ARCHIVE_FAILED) from exc
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -1731,122 +1955,123 @@ def parse_appendwatch_report(
     rollout_relative_path: PurePosixPath,
 ) -> None:
     try:
-        report = report_path.read_text(encoding="utf-8")
+        report = report_path.read_text(encoding=TEXT_ENCODING)
     except (OSError, UnicodeError) as exc:
-        raise PushValidationError("archived appendwatch report is unreadable") from exc
+        raise PushValidationError(Locale.APPENDWATCH_REPORT_UNREADABLE) from exc
     if not report.endswith("\n"):
-        raise PushValidationError("archived appendwatch report is incomplete")
+        raise PushValidationError(Locale.APPENDWATCH_REPORT_INCOMPLETE)
 
     lines = report.splitlines()
-    if not lines or lines[0] != ".":
-        if lines and lines[0].startswith(".  [COMPROMISED:"):
-            raise PushValidationError("appendwatch reports global monitoring degradation")
-        raise PushValidationError("archived appendwatch report has a malformed root")
+    if not lines or lines[0] != APPENDWATCH_ROOT_ENTRY:
+        if lines and lines[0].startswith(APPENDWATCH_COMPROMISED_ROOT_PREFIX):
+            raise PushValidationError(Locale.APPENDWATCH_GLOBAL_DEGRADATION)
+        raise PushValidationError(Locale.APPENDWATCH_ROOT_MALFORMED)
 
     target = rollout_relative_path.parts
     directories: list[tuple[str, bool]] = []
     seen_paths: set[tuple[str, ...]] = set()
     target_entries: list[tuple[str, bool]] = []
-    line_index = 1
+    line_index = APPENDWATCH_TREE_START_INDEX
 
-    while line_index < len(lines) and lines[line_index] != "":
+    while line_index < len(lines) and lines[line_index] != APPENDWATCH_BLANK_LINE:
         match = TREE_LINE.fullmatch(lines[line_index])
         if match is None:
-            raise PushValidationError("archived appendwatch report contains a malformed tree line")
-        indent = match.group("indent")
+            raise PushValidationError(Locale.APPENDWATCH_TREE_LINE_MALFORMED)
+        indent = match.group(TREE_INDENT_GROUP)
         depth = len(indent) // TREE_INDENT_WIDTH
         if depth > len(directories):
-            raise PushValidationError("archived appendwatch report contains invalid nesting")
+            raise PushValidationError(Locale.APPENDWATCH_NESTING_INVALID)
         directories = directories[:depth]
         parent_parts = tuple(name for name, _compromised in directories)
         parent_compromised = any(compromised for _name, compromised in directories)
-        body = match.group("body")
+        body = match.group(TREE_BODY_GROUP)
 
-        compromised_directory = re.fullmatch(
-            rf"{re.escape(APPENDWATCH_COMPROMISED_PREFIX)}(?P<name>[^/]+)/  \[.+\]",
-            body,
-        )
+        compromised_directory = APPENDWATCH_COMPROMISED_DIRECTORY_PATTERN.fullmatch(body)
         if compromised_directory is not None:
-            name = compromised_directory.group("name")
+            name = compromised_directory.group(APPENDWATCH_NAME_GROUP)
             path = (*parent_parts, name)
             if path in seen_paths:
-                raise PushValidationError("archived appendwatch report contains a duplicate path")
+                raise PushValidationError(Locale.APPENDWATCH_PATH_DUPLICATE)
             seen_paths.add(path)
             directories.append((name, True))
             line_index += 1
             continue
 
-        if body.endswith("/") and not body.startswith(("OK ", "COMPROMISED ")):
-            name = body[:-1]
-            if not name or "/" in name:
-                raise PushValidationError(
-                    "archived appendwatch report contains a malformed directory"
-                )
+        if body.endswith(APPENDWATCH_DIRECTORY_SUFFIX) and not body.startswith((
+            APPENDWATCH_OK_BODY_PREFIX,
+            APPENDWATCH_COMPROMISED_BODY_PREFIX,
+        )):
+            name = body.removesuffix(APPENDWATCH_DIRECTORY_SUFFIX)
+            if not name or APPENDWATCH_DIRECTORY_SUFFIX in name:
+                raise PushValidationError(Locale.APPENDWATCH_DIRECTORY_MALFORMED)
             path = (*parent_parts, name)
             if path in seen_paths:
-                raise PushValidationError("archived appendwatch report contains a duplicate path")
+                raise PushValidationError(Locale.APPENDWATCH_PATH_DUPLICATE)
             seen_paths.add(path)
             directories.append((name, parent_compromised))
             line_index += 1
             continue
 
-        ok_file = re.fullmatch(
-            rf"{re.escape(APPENDWATCH_OK_PREFIX)}(?P<name>[^/]+)",
-            body,
-        )
-        compromised_file = re.fullmatch(
-            rf"{re.escape(APPENDWATCH_COMPROMISED_PREFIX)}"
-            r"(?P<name>[^/]+?)(?:  \[.*\])?",
-            body,
-        )
+        ok_file = APPENDWATCH_OK_FILE_PATTERN.fullmatch(body)
+        compromised_file = APPENDWATCH_COMPROMISED_FILE_PATTERN.fullmatch(body)
         if ok_file is None and compromised_file is None:
-            raise PushValidationError("archived appendwatch report contains a malformed file entry")
-        name = (ok_file or compromised_file).group("name")  # type: ignore[union-attr]
+            raise PushValidationError(Locale.APPENDWATCH_FILE_ENTRY_MALFORMED)
+        name = (ok_file or compromised_file).group(  # type: ignore[union-attr]
+            APPENDWATCH_NAME_GROUP
+        )
         path = (*parent_parts, name)
         if path in seen_paths:
-            raise PushValidationError("archived appendwatch report contains a duplicate path")
+            raise PushValidationError(Locale.APPENDWATCH_PATH_DUPLICATE)
         seen_paths.add(path)
         if path == target:
             target_entries.append((
-                "OK" if ok_file is not None else "COMPROMISED",
+                (
+                    APPENDWATCH_OK_STATUS
+                    if ok_file is not None
+                    else APPENDWATCH_COMPROMISED_STATUS
+                ),
                 parent_compromised,
             ))
         line_index += 1
 
     if line_index < len(lines):
-        if lines[line_index:] == [""]:
-            raise PushValidationError("archived appendwatch report has a stray blank line")
-        if lines[line_index : line_index + 2] != [
-            "",
-            "removed or replaced (no longer a regular file):",
+        if lines[line_index:] == [APPENDWATCH_BLANK_LINE]:
+            raise PushValidationError(Locale.APPENDWATCH_STRAY_BLANK_LINE)
+        if lines[
+            line_index : line_index + APPENDWATCH_REMOVED_SECTION_HEADER_LINES
+        ] != [
+            APPENDWATCH_BLANK_LINE,
+            APPENDWATCH_REMOVED_SECTION_HEADER,
         ]:
-            raise PushValidationError("archived appendwatch report has a malformed removed section")
-        for removed_line in lines[line_index + 2 :]:
-            removed = re.fullmatch(
-                rf"    {re.escape(APPENDWATCH_COMPROMISED_PREFIX)}"
-                r"(?P<path>.+?)(?:  \[.*\])?",
-                removed_line,
-            )
+            raise PushValidationError(Locale.APPENDWATCH_REMOVED_SECTION_MALFORMED)
+        for removed_line in lines[
+            line_index + APPENDWATCH_REMOVED_SECTION_HEADER_LINES :
+        ]:
+            removed = APPENDWATCH_REMOVED_ENTRY_PATTERN.fullmatch(removed_line)
             if removed is None:
-                raise PushValidationError(
-                    "archived appendwatch report has a malformed removed entry"
-                )
-            if PurePosixPath(removed.group("path")).parts == target:
-                raise PushValidationError("configured rollout was removed or replaced")
+                raise PushValidationError(Locale.APPENDWATCH_REMOVED_ENTRY_MALFORMED)
+            if PurePosixPath(removed.group(APPENDWATCH_PATH_GROUP)).parts == target:
+                raise PushValidationError(Locale.ROLLOUT_REMOVED_OR_REPLACED)
 
-    if len(target_entries) != 1:
-        reason = "missing" if not target_entries else "ambiguous"
-        raise PushValidationError(f"configured rollout status is {reason} in archived report")
+    if len(target_entries) != APPENDWATCH_EXPECTED_TARGET_ENTRIES:
+        reason = (
+            Locale.ROLLOUT_STATUS_MISSING
+            if not target_entries
+            else Locale.ROLLOUT_STATUS_AMBIGUOUS
+        )
+        raise PushValidationError(
+            Locale.ROLLOUT_STATUS_INVALID_TEMPLATE.format(reason=reason)
+        )
     status, compromised_ancestor = target_entries[0]
-    if status != "OK" or compromised_ancestor:
-        raise PushValidationError("configured rollout is not OK beneath monitored ancestors")
+    if status != APPENDWATCH_OK_STATUS or compromised_ancestor:
+        raise PushValidationError(Locale.ROLLOUT_NOT_OK)
 
 
 def parse_rollout(rollout_path: Path) -> tuple[RolloutRecord, ...]:
     try:
         raw_lines = rollout_path.read_bytes().splitlines(keepends=True)
     except OSError as exc:
-        raise PushValidationError("archived rollout is unreadable") from exc
+        raise PushValidationError(Locale.ROLLOUT_UNREADABLE) from exc
 
     records: list[RolloutRecord] = []
     for line_number, raw_line in enumerate(raw_lines, start=1):
@@ -1855,15 +2080,21 @@ def parse_rollout(rollout_path: Path) -> tuple[RolloutRecord, ...]:
         if encoded.endswith(b"\r"):
             encoded = encoded[:-1]
         try:
-            value: object = json.loads(encoded.decode("utf-8"))
+            value: object = json.loads(encoded.decode(TEXT_ENCODING))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             if line_number == len(raw_lines) and not completed:
                 break
             raise PushValidationError(
-                f"archived rollout contains malformed JSONL at line {line_number}"
+                Locale.ROLLOUT_JSONL_MALFORMED_TEMPLATE.format(
+                    line_number=line_number
+                )
             ) from exc
         if not isinstance(value, dict):
-            raise PushValidationError(f"archived rollout line {line_number} is not a JSON object")
+            raise PushValidationError(
+                Locale.ROLLOUT_LINE_NON_OBJECT_TEMPLATE.format(
+                    line_number=line_number
+                )
+            )
         records.append(
             RolloutRecord(
                 line_number=line_number,
@@ -1876,34 +2107,46 @@ def parse_rollout(rollout_path: Path) -> tuple[RolloutRecord, ...]:
 
 def _timestamp(value: object, *, label: str) -> str:
     if not _valid_nonblank(value):
-        raise PushValidationError(f"{label} has an invalid timestamp")
+        raise PushValidationError(Locale.TIMESTAMP_INVALID_TEMPLATE.format(label=label))
     raw = cast(str, value)
     try:
         parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError as exc:
-        raise PushValidationError(f"{label} has an invalid timestamp") from exc
+        raise PushValidationError(
+            Locale.TIMESTAMP_INVALID_TEMPLATE.format(label=label)
+        ) from exc
     if parsed.tzinfo is None:
-        raise PushValidationError(f"{label} timestamp must include a timezone")
+        raise PushValidationError(
+            Locale.TIMESTAMP_TIMEZONE_MISSING_TEMPLATE.format(label=label)
+        )
     return raw
 
 
 def _web_arguments(payload: Mapping[str, object], line_number: int) -> dict[str, object]:
-    call_id = payload.get("call_id")
+    call_id = payload.get(CODEX_CALL_ID_KEY)
     if not _valid_nonblank(call_id):
-        raise PushValidationError(f"web call at rollout line {line_number} has an invalid call_id")
-    arguments = payload.get("arguments")
+        raise PushValidationError(
+            Locale.WEB_CALL_ID_INVALID_TEMPLATE.format(line_number=line_number)
+        )
+    arguments = payload.get(CODEX_ARGUMENTS_KEY)
     if not isinstance(arguments, str):
-        raise PushValidationError(f"web call {call_id} has unsupported arguments")
+        raise PushValidationError(
+            Locale.WEB_CALL_ARGUMENTS_UNSUPPORTED_TEMPLATE.format(call_id=call_id)
+        )
     try:
         decoded: object = json.loads(arguments)
     except json.JSONDecodeError as exc:
-        raise PushValidationError(f"web call {call_id} has malformed arguments") from exc
+        raise PushValidationError(
+            Locale.WEB_CALL_ARGUMENTS_MALFORMED_TEMPLATE.format(call_id=call_id)
+        ) from exc
     if not isinstance(decoded, dict):
-        raise PushValidationError(f"web call {call_id} arguments are not a JSON object")
+        raise PushValidationError(
+            Locale.WEB_CALL_ARGUMENTS_NON_OBJECT_TEMPLATE.format(call_id=call_id)
+        )
     eligible_actions = [action for action in ELIGIBLE_WEB_ACTIONS if decoded.get(action)]
     if len(eligible_actions) != 1:
         raise PushValidationError(
-            f"web call {call_id} must contain exactly one eligible web action"
+            Locale.WEB_CALL_ACTION_COUNT_TEMPLATE.format(call_id=call_id)
         )
     return cast(dict[str, object], decoded)
 
@@ -1914,55 +2157,66 @@ def _session_metadata(
     timezone_name: str,
     configured_rollout_basename: str,
 ) -> SessionMetadata:
-    session_records = [record for record in records if record.value.get("type") == "session_meta"]
+    session_records = [
+        record
+        for record in records
+        if record.value.get(CODEX_TYPE_KEY) == CODEX_SESSION_META_TYPE
+    ]
     if len(session_records) != 1:
-        raise PushValidationError("rollout must contain exactly one session_meta record")
+        raise PushValidationError(Locale.SESSION_META_COUNT_INVALID)
     session_record = session_records[0]
-    payload = session_record.value.get("payload")
+    payload = session_record.value.get(CODEX_PAYLOAD_KEY)
     if not isinstance(payload, dict):
-        raise PushValidationError("session_meta payload is malformed")
-    session_id = payload.get("session_id")
+        raise PushValidationError(Locale.SESSION_META_PAYLOAD_MALFORMED)
+    session_id = payload.get(CODEX_SESSION_ID_KEY)
     if not _valid_nonblank(session_id):
-        raise PushValidationError("session_meta session_id is invalid")
+        raise PushValidationError(Locale.SESSION_META_SESSION_ID_INVALID)
     session_id = cast(str, session_id)
-    payload_timestamp = _timestamp(payload.get("timestamp"), label="session_meta payload")
+    payload_timestamp = _timestamp(
+        payload.get(CODEX_TIMESTAMP_KEY),
+        label=Locale.SESSION_META_PAYLOAD_LABEL,
+    )
     response_timestamp = _timestamp(
-        session_record.value.get("timestamp"),
-        label="session_meta response",
+        session_record.value.get(CODEX_TIMESTAMP_KEY),
+        label=Locale.SESSION_META_RESPONSE_LABEL,
     )
     local_timestamp = datetime.fromisoformat(payload_timestamp.replace("Z", "+00:00")).astimezone(
         ZoneInfo(timezone_name)
     )
-    rollout_filename = f"rollout-{local_timestamp:%Y-%m-%dT%H-%M-%S}-{session_id}.jsonl"
+    rollout_timestamp = local_timestamp.strftime(ROLLOUT_TIMESTAMP_FORMAT)
+    rollout_filename = (
+        f"{ROLLOUT_FILENAME_PREFIX}{rollout_timestamp}-{session_id}"
+        f"{ROLLOUT_FILENAME_SUFFIX}"
+    )
     if rollout_filename != configured_rollout_basename:
-        raise PushValidationError("session metadata does not match the configured rollout basename")
+        raise PushValidationError(Locale.SESSION_META_ROLLOUT_MISMATCH)
 
     turn_context_payload = next(
         (
-            cast(dict[str, object], record.value["payload"])
+            cast(dict[str, object], record.value[CODEX_PAYLOAD_KEY])
             for record in records
-            if record.value.get("type") == "turn_context"
-            and isinstance(record.value.get("payload"), dict)
+            if record.value.get(CODEX_TYPE_KEY) == CODEX_TURN_CONTEXT_TYPE
+            and isinstance(record.value.get(CODEX_PAYLOAD_KEY), dict)
         ),
         None,
     )
     if turn_context_payload is None:
-        raise PushValidationError("rollout has no valid turn_context metadata")
-    model = turn_context_payload.get("model")
-    reasoning_effort = turn_context_payload.get("effort")
+        raise PushValidationError(Locale.TURN_CONTEXT_MISSING)
+    model = turn_context_payload.get(CODEX_MODEL_KEY)
+    reasoning_effort = turn_context_payload.get(CODEX_REASONING_EFFORT_KEY)
     try:
         compact = CompactSessionMetadata.model_validate({
-            "originator": payload.get("originator"),
-            "source": payload.get("source"),
-            "cli_version": payload.get("cli_version"),
-            "model_provider": payload.get("model_provider"),
-            "model": model,
-            "reasoning_effort": reasoning_effort,
-            "session_id": session_id,
-            "timestamp": response_timestamp,
+            CODEX_ORIGINATOR_KEY: payload.get(CODEX_ORIGINATOR_KEY),
+            CODEX_SOURCE_KEY: payload.get(CODEX_SOURCE_KEY),
+            CODEX_CLI_VERSION_KEY: payload.get(CODEX_CLI_VERSION_KEY),
+            CODEX_MODEL_PROVIDER_KEY: payload.get(CODEX_MODEL_PROVIDER_KEY),
+            CODEX_MODEL_KEY: model,
+            SESSION_REASONING_EFFORT_KEY: reasoning_effort,
+            CODEX_SESSION_ID_KEY: session_id,
+            CODEX_TIMESTAMP_KEY: response_timestamp,
         })
     except ValidationError as exc:
-        raise PushValidationError("rollout session metadata fields are incomplete") from exc
+        raise PushValidationError(Locale.SESSION_META_FIELDS_INCOMPLETE) from exc
     return SessionMetadata(
         session_id=session_id,
         timestamp=response_timestamp,
@@ -1972,13 +2226,13 @@ def _session_metadata(
 
 
 def _eligible_fco_text(record: RolloutRecord, payload: Mapping[str, object]) -> str | None:
-    output = payload.get("output")
+    output = payload.get(CODEX_OUTPUT_KEY)
     marker_start = f"{CODEX_CITE_MARKER_PREFIX}turn"
     if isinstance(output, list):
         contains_marker = any(
             isinstance(block, dict)
-            and isinstance(block.get("text"), str)
-            and marker_start in cast(str, block["text"])
+            and isinstance(block.get(CODEX_TEXT_KEY), str)
+            and marker_start in cast(str, block[CODEX_TEXT_KEY])
             for block in output
         )
     else:
@@ -1989,14 +2243,15 @@ def _eligible_fco_text(record: RolloutRecord, payload: Mapping[str, object]) -> 
         not isinstance(output, list)
         or len(output) != 1
         or not isinstance(output[0], dict)
-        or output[0].get("type") != "input_text"
-        or not isinstance(output[0].get("text"), str)
+        or output[0].get(CODEX_TYPE_KEY) != CODEX_INPUT_TEXT_TYPE
+        or not isinstance(output[0].get(CODEX_TEXT_KEY), str)
     ):
         raise PushValidationError(
-            f"cited function output at rollout line {record.line_number} "
-            "must contain exactly one input_text block"
+            Locale.CITED_OUTPUT_BLOCK_INVALID_TEMPLATE.format(
+                line_number=record.line_number
+            )
         )
-    return cast(str, output[0]["text"])
+    return cast(str, output[0][CODEX_TEXT_KEY])
 
 
 def build_rollout_index(
@@ -2016,30 +2271,40 @@ def build_rollout_index(
 
     for record in records:
         value = record.value
-        payload = value.get("payload")
+        payload = value.get(CODEX_PAYLOAD_KEY)
         if not isinstance(payload, dict):
             continue
-        payload_type = payload.get("type")
+        payload_type = payload.get(CODEX_TYPE_KEY)
         if (
-            value.get("type") == "response_item"
-            and payload_type == "function_call"
-            and payload.get("namespace") == "web"
-            and payload.get("name") == "run"
+            value.get(CODEX_TYPE_KEY) == CODEX_RESPONSE_ITEM_TYPE
+            and payload_type == CODEX_FUNCTION_CALL_TYPE
+            and payload.get(CODEX_NAMESPACE_KEY) == CODEX_WEB_NAMESPACE
+            and payload.get(CODEX_NAME_KEY) == CODEX_WEB_FUNCTION_NAME
         ):
-            call_id = payload.get("call_id")
+            call_id = payload.get(CODEX_CALL_ID_KEY)
             if not _valid_nonblank(call_id):
                 raise PushValidationError(
-                    f"web call at rollout line {record.line_number} has an invalid call_id"
+                    Locale.WEB_CALL_ID_INVALID_TEMPLATE.format(
+                        line_number=record.line_number
+                    )
                 )
             calls.setdefault(cast(str, call_id), []).append(record)
-        elif value.get("type") == "event_msg" and payload_type == "web_search_end":
-            call_id = payload.get("call_id")
+        elif (
+            value.get(CODEX_TYPE_KEY) == CODEX_EVENT_MESSAGE_TYPE
+            and payload_type == CODEX_WEB_SEARCH_END_TYPE
+        ):
+            call_id = payload.get(CODEX_CALL_ID_KEY)
             if not _valid_nonblank(call_id):
                 raise PushValidationError(
-                    f"web event at rollout line {record.line_number} has an invalid call_id"
+                    Locale.WEB_EVENT_CALL_ID_INVALID_TEMPLATE.format(
+                        line_number=record.line_number
+                    )
                 )
             events.setdefault(cast(str, call_id), []).append(record)
-        elif value.get("type") == "response_item" and payload_type == "function_call_output":
+        elif (
+            value.get(CODEX_TYPE_KEY) == CODEX_RESPONSE_ITEM_TYPE
+            and payload_type == CODEX_FUNCTION_CALL_OUTPUT_TYPE
+        ):
             text = _eligible_fco_text(record, payload)
             if text is not None:
                 cited_outputs.append((record, payload, text))
@@ -2051,55 +2316,64 @@ def build_rollout_index(
     seen_fco_ids: set[str] = set()
     seen_call_ids: set[str] = set()
     for output_record, output_payload, output_text in cited_outputs:
-        call_id = output_payload.get("call_id")
-        fco_id = output_payload.get("id")
+        call_id = output_payload.get(CODEX_CALL_ID_KEY)
+        fco_id = output_payload.get(CODEX_ID_KEY)
         if not _valid_nonblank(call_id) or not _valid_nonblank(fco_id):
             raise PushValidationError(
-                f"cited function output at rollout line {output_record.line_number} has invalid IDs"
+                Locale.CITED_OUTPUT_IDS_INVALID_TEMPLATE.format(
+                    line_number=output_record.line_number
+                )
             )
         call_id = cast(str, call_id)
         fco_id = cast(str, fco_id)
         if call_id in seen_call_ids or fco_id in seen_fco_ids:
-            raise PushValidationError("cited function output IDs are duplicated")
+            raise PushValidationError(Locale.CITED_OUTPUT_IDS_DUPLICATE)
         seen_call_ids.add(call_id)
         seen_fco_ids.add(fco_id)
         fco_timestamp = _timestamp(
-            output_record.value.get("timestamp"),
-            label=f"function output {fco_id}",
+            output_record.value.get(CODEX_TIMESTAMP_KEY),
+            label=Locale.FUNCTION_OUTPUT_LABEL_TEMPLATE.format(fco_id=fco_id),
         )
 
         matching_calls = calls.get(call_id, [])
         matching_events = events.get(call_id, [])
         if len(matching_calls) != 1 or len(matching_events) != 1:
             raise PushValidationError(
-                f"cited web chain {call_id} must have one function call and one web_search_end"
+                Locale.CITED_WEB_CHAIN_COUNT_TEMPLATE.format(call_id=call_id)
             )
         call_record = matching_calls[0]
         event_record = matching_events[0]
         if not (call_record.line_number < event_record.line_number < output_record.line_number):
-            raise PushValidationError(f"cited web chain {call_id} is out of order")
-        call_payload = cast(dict[str, object], call_record.value["payload"])
-        fc_id = call_payload.get("id")
+            raise PushValidationError(
+                Locale.CITED_WEB_CHAIN_ORDER_TEMPLATE.format(call_id=call_id)
+            )
+        call_payload = cast(
+            dict[str, object],
+            call_record.value[CODEX_PAYLOAD_KEY],
+        )
+        fc_id = call_payload.get(CODEX_ID_KEY)
         if not _valid_nonblank(fc_id) or cast(str, fc_id) in seen_fc_ids:
-            raise PushValidationError(f"web call {call_id} has an invalid or duplicate fc_id")
+            raise PushValidationError(
+                Locale.WEB_CALL_FC_ID_INVALID_TEMPLATE.format(call_id=call_id)
+            )
         fc_id = cast(str, fc_id)
         seen_fc_ids.add(fc_id)
         arguments = _web_arguments(call_payload, call_record.line_number)
         arguments_json = json.dumps(
             arguments,
             ensure_ascii=False,
-            separators=(",", ":"),
+            separators=COMPACT_JSON_SEPARATORS,
         )
         fc_rows.append(
             CodexFcRow(
                 timestamp=_timestamp(
-                    call_record.value.get("timestamp"),
-                    label=f"function call {fc_id}",
+                    call_record.value.get(CODEX_TIMESTAMP_KEY),
+                    label=Locale.FUNCTION_CALL_LABEL_TEMPLATE.format(fc_id=fc_id),
                 ),
                 fc_id=fc_id,
                 call_id=call_id,
-                name="run",
-                namespace="web",
+                name=CODEX_WEB_FUNCTION_NAME,
+                namespace=CODEX_WEB_NAMESPACE,
                 arguments_json=arguments_json,
             )
         )
@@ -2121,27 +2395,36 @@ def build_rollout_index(
             )
         except ValueError as exc:
             raise PushValidationError(str(exc)) from exc
-        event_payload = cast(dict[str, object], event_record.value["payload"])
-        results = event_payload.get("results")
+        event_payload = cast(
+            dict[str, object],
+            event_record.value[CODEX_PAYLOAD_KEY],
+        )
+        results = event_payload.get(CODEX_RESULTS_KEY)
         if not isinstance(results, list):
-            raise PushValidationError(f"web event {call_id} has unsupported results")
+            raise PushValidationError(
+                Locale.WEB_EVENT_RESULTS_UNSUPPORTED_TEMPLATE.format(call_id=call_id)
+            )
         for section in sections:
             matching_results = [
                 result
                 for result in results
                 if isinstance(result, dict)
-                and result.get("type") == "text_result"
-                and result.get("ref_id") == section.ref_id
+                and result.get(CODEX_TYPE_KEY) == CODEX_TEXT_RESULT_TYPE
+                and result.get(CODEX_REF_ID_KEY) == section.ref_id
             ]
             if len(matching_results) != 1:
                 raise PushValidationError(
-                    f"citation {section.ref_id} does not resolve to one event result"
+                    Locale.CITATION_RESULT_COUNT_TEMPLATE.format(
+                        ref_id=section.ref_id
+                    )
                 )
             try:
                 result = CodexTextResult.model_validate(matching_results[0])
             except ValidationError as exc:
                 raise PushValidationError(
-                    f"citation {section.ref_id} has unsupported result metadata"
+                    Locale.CITATION_RESULT_METADATA_UNSUPPORTED_TEMPLATE.format(
+                        ref_id=section.ref_id
+                    )
                 ) from exc
             if not _valid_nonblank(result.url):
                 continue
@@ -2246,7 +2529,10 @@ def _insert_or_validate(
     if existing:
         if len(existing) != 1 or existing[0] != values:
             raise PushValidationError(
-                f"conflicting cumulative rollout row in {table_name} for {key_value}"
+                Locale.CUMULATIVE_ROW_CONFLICT_TEMPLATE.format(
+                    table_name=table_name,
+                    key_value=key_value,
+                )
             )
         return
     placeholders = ", ".join("?" for _column in columns)
@@ -2278,9 +2564,7 @@ def persist_rollout_index(
             ).fetchall()
         }
         if not existing_call_ids.issubset(current_call_ids):
-            raise PushValidationError(
-                "archived rollout prefix is older than its persisted provenance index"
-            )
+            raise PushValidationError(Locale.PROVENANCE_PREFIX_OLDER)
         current_turn_keys = {(row.call_id, row.ref_id) for row in rollout_index.turn_ref_rows}
         existing_turn_keys = {
             (cast(str, row[0]), cast(str, row[1]))
@@ -2297,14 +2581,12 @@ def persist_rollout_index(
             ).fetchall()
         }
         if not existing_turn_keys.issubset(current_turn_keys):
-            raise PushValidationError(
-                "archived rollout prefix is older than its persisted citation index"
-            )
+            raise PushValidationError(Locale.CITATION_PREFIX_OLDER)
 
         fc_by_call = {row.call_id: row for row in rollout_index.fc_rows}
         fco_by_call = {row.call_id: row for row in rollout_index.fco_rows}
         if set(fc_by_call) != current_call_ids or set(fco_by_call) != current_call_ids:
-            raise PushValidationError("normalized rollout call linkages are incomplete")
+            raise PushValidationError(Locale.ROLLOUT_LINKAGES_INCOMPLETE)
         for function_call_row in rollout_index.fc_rows:
             _insert_or_validate(
                 conn,
@@ -2360,7 +2642,9 @@ def persist_rollout_index(
                 ),
             )
         for turn_ref_row in rollout_index.turn_ref_rows:
-            key_value = f"{turn_ref_row.call_id}\0{turn_ref_row.ref_id}"
+            key_value = (
+                f"{turn_ref_row.call_id}{CUMULATIVE_KEY_SEPARATOR}{turn_ref_row.ref_id}"
+            )
             columns = (
                 CODEX_REF_ID_COL,
                 CODEX_CALL_ID_COL,
@@ -2391,8 +2675,10 @@ def persist_rollout_index(
             if existing:
                 if len(existing) != 1 or existing[0] != values:
                     raise PushValidationError(
-                        "conflicting cumulative rollout row in "
-                        f"{CODEX_TURN_REF_TABLE} for {key_value}"
+                        Locale.CUMULATIVE_ROW_CONFLICT_TEMPLATE.format(
+                            table_name=CODEX_TURN_REF_TABLE,
+                            key_value=key_value,
+                        )
                     )
             else:
                 placeholders = ", ".join("?" for _column in columns)
@@ -2429,12 +2715,16 @@ def persist_rollout_index(
             ).fetchone()
             if integrity_row is None:
                 raise PushValidationError(
-                    f"normalized provenance integrity query failed for {table_name}"
+                    Locale.PROVENANCE_INTEGRITY_QUERY_FAILED_TEMPLATE.format(
+                        table_name=table_name
+                    )
                 )
             total, distinct = integrity_row
             if total != distinct:
                 raise PushValidationError(
-                    f"normalized provenance uniqueness failed for {table_name}"
+                    Locale.PROVENANCE_UNIQUENESS_FAILED_TEMPLATE.format(
+                        table_name=table_name
+                    )
                 )
 
         linkage_row = conn.execute(
@@ -2467,10 +2757,10 @@ def persist_rollout_index(
             """
         ).fetchone()
         if linkage_row is None:
-            raise PushValidationError("normalized provenance linkage query failed")
+            raise PushValidationError(Locale.PROVENANCE_LINKAGE_QUERY_FAILED)
         missing_fc_links, missing_fco_links, missing_call_links = linkage_row
         if missing_fc_links or missing_fco_links or missing_call_links:
-            raise PushValidationError("normalized provenance relationships are incomplete")
+            raise PushValidationError(Locale.PROVENANCE_RELATIONSHIPS_INCOMPLETE)
 
         persisted_call_ids = {
             cast(str, row[0])
@@ -2496,9 +2786,7 @@ def persist_rollout_index(
             ).fetchall()
         }
         if persisted_call_ids != current_call_ids or persisted_turn_keys != current_turn_keys:
-            raise PushValidationError(
-                "persisted provenance does not match the current archived rollout prefix"
-            )
+            raise PushValidationError(Locale.PROVENANCE_PREFIX_MISMATCH)
         conn.execute("COMMIT")
     except Exception:
         conn.execute("ROLLBACK")
@@ -2506,7 +2794,11 @@ def persist_rollout_index(
 
 
 def _render_fco_timestamp(value: datetime) -> str:
-    return value.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    return (
+        value.astimezone(timezone.utc)
+        .isoformat(timespec=FCO_TIMESTAMP_TIMESPEC)
+        .replace("+00:00", "Z")
+    )
 
 
 def _evidence_candidates(rows: list[tuple[Any, ...]]) -> tuple[EvidenceCandidate, ...]:
@@ -2609,8 +2901,11 @@ def validate_submission_evidence(
             ).fetchall()
             if not rows:
                 raise PushValidationError(
-                    f"{field}: excerpt has no indexed match; "
-                    f"excerpt={evidence.excerpt!r} url={evidence.url!r}"
+                    Locale.EVIDENCE_NO_MATCH_TEMPLATE.format(
+                        field=field,
+                        excerpt=evidence.excerpt,
+                        url=evidence.url,
+                    )
                 )
             candidates = tuple(
                 candidate
@@ -2619,8 +2914,11 @@ def validate_submission_evidence(
             )
             if not candidates:
                 raise PushValidationError(
-                    f"{field}: submitted URL does not match; "
-                    f"excerpt={evidence.excerpt!r} url={evidence.url!r}"
+                    Locale.EVIDENCE_URL_MISMATCH_TEMPLATE.format(
+                        field=field,
+                        excerpt=evidence.excerpt,
+                        url=evidence.url,
+                    )
                 )
             if len(candidates) > 1 and not ALLOW_MULTIPLE_EVIDENCE_MATCHES:
                 raise MultipleEvidenceMatches(evidence.excerpt)
@@ -2632,7 +2930,7 @@ def validate_submission_evidence(
                 arguments_json = json.dumps(
                     arguments_json,
                     ensure_ascii=False,
-                    separators=(",", ":"),
+                    separators=COMPACT_JSON_SEPARATORS,
                 )
             field_matches.append(
                 EvidenceMatch(
@@ -2654,19 +2952,34 @@ def validate_submission_evidence(
 
 def source_rows() -> Iterator[dict[str, object]]:
     try:
-        source = SOURCE_FILE.open(encoding="utf-8")
+        source = SOURCE_FILE.open(encoding=TEXT_ENCODING)
     except OSError as exc:
-        raise RuntimeError(f"cannot open {SOURCE_FILE}: {exc}") from exc
+        raise RuntimeError(
+            Locale.SOURCE_OPEN_FAILED_TEMPLATE.format(
+                source_file=SOURCE_FILE,
+                error=exc,
+            )
+        ) from exc
 
     with source:
         for line_number, line in enumerate(source, start=1):
             try:
                 value: object = json.loads(line)
             except json.JSONDecodeError as exc:
-                raise RuntimeError(f"invalid JSON in {SOURCE_FILE} at line {line_number}") from exc
+                raise RuntimeError(
+                    Locale.SOURCE_JSON_INVALID_TEMPLATE.format(
+                        source_file=SOURCE_FILE,
+                        line_number=line_number,
+                    )
+                ) from exc
 
             if not isinstance(value, dict):
-                raise RuntimeError(f"expected an object in {SOURCE_FILE} at line {line_number}")
+                raise RuntimeError(
+                    Locale.SOURCE_ROW_NON_OBJECT_TEMPLATE.format(
+                        source_file=SOURCE_FILE,
+                        line_number=line_number,
+                    )
+                )
 
             yield cast(dict[str, object], value)
 
@@ -2675,7 +2988,9 @@ def select_columns(row: Mapping[str, object]) -> dict[str, object]:
     missing = [column for column in DOCX_COLUMNS if column not in row]
 
     if missing:
-        raise RuntimeError(f"target row is missing keys: {', '.join(missing)}")
+        raise RuntimeError(
+            Locale.TARGET_ROW_KEYS_MISSING_TEMPLATE.format(keys=", ".join(missing))
+        )
 
     return {column: row[column] for column in DOCX_COLUMNS}
 
@@ -2685,7 +3000,7 @@ def json_line(row: Mapping[str, object]) -> str:
         json.dumps(
             row,
             ensure_ascii=False,
-            separators=(",", ":"),
+            separators=COMPACT_JSON_SEPARATORS,
         )
         + "\n"
     )
@@ -2700,7 +3015,7 @@ def pull_lines() -> Iterator[str]:
             first_name = row.get(KTP_FIRST_NAME_COL)
             last_name = row.get(KTP_LAST_NAME_COL)
             if not _valid_nonblank(first_name) or not _valid_nonblank(last_name):
-                raise RuntimeError("target row is missing researcher identity")
+                raise RuntimeError(Locale.TARGET_ROW_IDENTITY_MISSING)
             yield json_line({
                 KTP_FIRST_NAME_COL: first_name,
                 KTP_LAST_NAME_COL: last_name,
@@ -2718,7 +3033,7 @@ def ground_truth() -> dict[str, object]:
         ):
             return select_columns(row)
 
-    raise PushValidationError("target draw ground truth was not found")
+    raise PushValidationError(Locale.TARGET_GROUND_TRUTH_MISSING)
 
 
 def selected_task_identity() -> tuple[str, str]:
@@ -2730,15 +3045,18 @@ def selected_task_identity() -> tuple[str, str]:
             first_name = row.get(KTP_FIRST_NAME_COL)
             last_name = row.get(KTP_LAST_NAME_COL)
             if not _valid_nonblank(first_name) or not _valid_nonblank(last_name):
-                raise PushValidationError("selected task identity is incomplete")
+                raise PushValidationError(Locale.TASK_IDENTITY_INCOMPLETE)
             return cast(str, first_name), cast(str, last_name)
-    raise PushValidationError("selected task identity was not found")
+    raise PushValidationError(Locale.TASK_IDENTITY_MISSING)
 
 
 def _atomic_write_text(path: Path, value: str) -> None:
-    temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    temporary = path.with_name(ATOMIC_TEMP_FILENAME_TEMPLATE.format(
+        filename=path.name,
+        nonce=uuid4().hex,
+    ))
     try:
-        with temporary.open("x", encoding="utf-8") as stream:
+        with temporary.open("x", encoding=TEXT_ENCODING) as stream:
             stream.write(value)
             stream.flush()
             os.fsync(stream.fileno())
@@ -2761,28 +3079,28 @@ def record_attempt(
 ) -> None:
     artifacts = {}
     for name, artifact in (
-        ("rollout", rollout_archive),
-        ("workbook", workbook_archive),
-        ("appendwatch_report", report_archive),
-        ("card_zip", card_archive),
+        (ARTIFACT_ROLLOUT_KEY, rollout_archive),
+        (ARTIFACT_WORKBOOK_KEY, workbook_archive),
+        (ARTIFACT_APPENDWATCH_REPORT_KEY, report_archive),
+        (ARTIFACT_CARD_ZIP_KEY, card_archive),
     ):
         if artifact is not None:
             artifacts[name] = {
-                "filename": artifact.path.name,
-                "size": artifact.size,
-                "sha256": artifact.sha256,
+                ARTIFACT_FILENAME_KEY: artifact.path.name,
+                ARTIFACT_SIZE_KEY: artifact.size,
+                ARTIFACT_SHA256_KEY: artifact.sha256,
             }
-            if name == "rollout":
-                artifacts[name]["line_count"] = artifact.line_count
+            if name == ARTIFACT_ROLLOUT_KEY:
+                artifacts[name][ARTIFACT_LINE_COUNT_KEY] = artifact.line_count
     value = {
-        "attempt_id": attempt_id,
-        "stage": stage,
-        "result": result,
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-        "artifacts": artifacts,
+        ATTEMPT_ID_KEY: attempt_id,
+        ATTEMPT_STAGE_KEY: stage,
+        ATTEMPT_RESULT_KEY: result,
+        ATTEMPT_UPDATED_AT_KEY: datetime.now(timezone.utc).isoformat(),
+        ATTEMPT_ARTIFACTS_KEY: artifacts,
     }
     _atomic_write_text(
-        attempt_dir / "attempt.json",
+        attempt_dir / ATTEMPT_MANIFEST_FILENAME,
         json.dumps(value, ensure_ascii=False, indent=2) + "\n",
     )
 
@@ -2793,7 +3111,7 @@ def open_source_database(
     try:
         return duckdb.connect(str(runtime.pipeline.db_file), read_only=True)
     except duckdb.Error as exc:
-        raise PushValidationError("configured source DuckDB could not be opened read-only") from exc
+        raise PushValidationError(Locale.SOURCE_DUCKDB_OPEN_FAILED) from exc
 
 
 def open_detour_database(
@@ -2803,7 +3121,7 @@ def open_detour_database(
         runtime.detour_db_path.parent.mkdir(parents=True, exist_ok=True)
         return duckdb.connect(str(runtime.detour_db_path))
     except (OSError, duckdb.Error) as exc:
-        raise PushValidationError("detour DuckDB could not be opened") from exc
+        raise PushValidationError(Locale.DETOUR_DUCKDB_OPEN_FAILED) from exc
 
 
 def _source_table_rows(
@@ -2820,14 +3138,23 @@ def _source_table_rows(
             [source_key],
         ).fetchall()
     except duckdb.Error as exc:
-        raise PushValidationError(f"configured source DuckDB lacks {table_name}") from exc
+        raise PushValidationError(
+            Locale.SOURCE_DUCKDB_TABLE_MISSING_TEMPLATE.format(
+                table_name=table_name
+            )
+        ) from exc
     if len(rows) > 1:
-        raise PushValidationError(f"{table_name} contains duplicate rows for sanctioned source key")
+        raise PushValidationError(
+            Locale.SANCTIONED_ROWS_DUPLICATE_TEMPLATE.format(
+                table_name=table_name
+            )
+        )
     if not rows:
         return ()
+    (innerdict_jsonlines,) = rows[0]
     try:
         return _innerdict_json_rows(
-            rows[0][0],
+            innerdict_jsonlines,
             table_name=table_name,
             source_key=source_key,
         )
@@ -2843,13 +3170,13 @@ def load_source_researcher(
 ) -> SourceResearcher:
     cohorts = runtime.eligible_cohorts
     if cohorts is None or source_key not in cohorts:
-        raise PushValidationError("sanctioned source key is not eligible for this detour")
+        raise PushValidationError(Locale.SANCTIONED_SOURCE_INELIGIBLE)
     try:
         name_key = NameKey.from_json_key(source_key)
     except (ValueError, TypeError, json.JSONDecodeError) as exc:
-        raise PushValidationError("sanctioned source key is malformed") from exc
+        raise PushValidationError(Locale.SANCTIONED_SOURCE_MALFORMED) from exc
     if name_key.to_json_key() != source_key:
-        raise PushValidationError("sanctioned source key is not canonical")
+        raise PushValidationError(Locale.SANCTIONED_SOURCE_NONCANONICAL)
 
     xlsx_rows = _source_table_rows(
         source_conn,
@@ -2867,14 +3194,14 @@ def load_source_researcher(
         source_key=source_key,
     )
     if not xlsx_rows:
-        raise PushValidationError("sanctioned source key has no xlsx innerdict context")
+        raise PushValidationError(Locale.SANCTIONED_XLSX_CONTEXT_MISSING)
     draw_numbers = tuple(sorted({
         str(row[DRAW_LABEL]).strip()
         for row in (*xlsx_rows, *docx_rows, *ssn_rows)
         if row.get(DRAW_LABEL) is not None and str(row[DRAW_LABEL]).strip()
     }, key=_draw_sort_key))
     if not draw_numbers:
-        raise PushValidationError("sanctioned source key has no innerdict-owned draw")
+        raise PushValidationError(Locale.SANCTIONED_DRAW_MISSING)
     return SourceResearcher(
         source_key=source_key,
         first_name=name_key.first_name,
@@ -2918,7 +3245,7 @@ def ground_truth_for_researcher(researcher: SourceResearcher) -> dict[str, objec
         if all(column in row and bool(str(row[column]).strip()) for column in required_columns)
     ]
     if not complete_rows:
-        raise PushValidationError("ground-truth researcher has no complete docx innerdict")
+        raise PushValidationError(Locale.GROUND_TRUTH_DOCX_INCOMPLETE)
     return select_columns(complete_rows[0])
 
 
@@ -2948,12 +3275,13 @@ def resolve_researcher(
         [first_name, last_name, TARGET_DRAW_NUMBER],
     ).fetchall()
     if len(rows) != 1:
-        raise PushValidationError("selected researcher did not resolve uniquely")
+        raise PushValidationError(Locale.RESEARCHER_NOT_UNIQUE)
+    source_key, draw_number, first_name, last_name = rows[0]
     return ResearcherContext(
-        source_key=cast(str, rows[0][0]),
-        draw_number=str(rows[0][1]),
-        first_name=cast(str, rows[0][2]),
-        last_name=cast(str, rows[0][3]),
+        source_key=cast(str, source_key),
+        draw_number=str(draw_number),
+        first_name=cast(str, first_name),
+        last_name=cast(str, last_name),
     )
 
 
@@ -3035,9 +3363,7 @@ def append_codex_output(
             [row[column] for column in columns],
         )
     except duckdb.ConstraintException as exc:
-        raise PushValidationError(
-            "attempt ID or rollout filename/line-count fragment is already accepted"
-        ) from exc
+        raise PushValidationError(Locale.ACCEPTED_IDENTITY_DUPLICATE) from exc
     conn.execute(
         f"""
         CREATE OR REPLACE VIEW {CODEX_OUTPUT_VIEW} AS
@@ -3112,11 +3438,14 @@ def write_accepted_submission(
     source_researcher: SourceResearcher | None = None,
 ) -> tuple[tuple[str, ...], ArchivedFile]:
     normalized_submission = submission.normalized_values()
-    response_path = attempt_dir / "response.jsonl"
-    zip_name = f"{CARD_ZIP_PREFIX}_{attempt_id}.zip"
+    response_path = attempt_dir / RESPONSE_FILENAME
+    zip_name = CARD_ZIP_FILENAME_TEMPLATE.format(
+        prefix=CARD_ZIP_PREFIX,
+        attempt_id=attempt_id,
+    )
     zip_path = runtime.pipeline.output_dir / zip_name
     if zip_path.exists():
-        raise PushValidationError("attempt card ZIP already exists")
+        raise PushValidationError(Locale.ATTEMPT_CARD_ZIP_EXISTS)
 
     rendered = render_codex_values(
         submission,
@@ -3156,7 +3485,7 @@ def write_accepted_submission(
         )
         outer_dict = selected_card_outer_dict(source_conn, detour_conn, researcher)
         intro_date = attempt_timestamp.astimezone(ZoneInfo(runtime.pipeline.timezone)).strftime(
-            "%B %d, %Y"
+            Locale.CARD_INTRO_DATE_FORMAT
         )
         cards = build_cards(
             outer_dict,
@@ -3165,7 +3494,7 @@ def write_accepted_submission(
             excluded_cols=CARD_EXCLUDED_COLUMNS,
         )
         if len(cards) != 1:
-            raise PushValidationError("selected researcher did not produce exactly one card")
+            raise PushValidationError(Locale.RESEARCHER_CARD_COUNT_INVALID)
         write_cards_zip(
             cards,
             runtime.pipeline.output_dir,
@@ -3184,17 +3513,22 @@ def write_accepted_submission(
 
 
 def validate_transport(request: Request) -> None:
-    content_type = request.headers.get("content-type", "").partition(";")[0].strip().lower()
-    if content_type != "application/json":
-        raise PushValidationError("request Content-Type must be application/json")
-    content_length = request.headers.get("content-length")
+    content_type = (
+        request.headers.get(HTTP_REQUEST_CONTENT_TYPE_HEADER, "")
+        .partition(";")[0]
+        .strip()
+        .lower()
+    )
+    if content_type != JSON_MEDIA_TYPE:
+        raise PushValidationError(Locale.REQUEST_CONTENT_TYPE_INVALID)
+    content_length = request.headers.get(HTTP_REQUEST_CONTENT_LENGTH_HEADER)
     if content_length is not None:
         try:
             declared_length = int(content_length)
         except ValueError as exc:
-            raise PushValidationError("request Content-Length is invalid") from exc
+            raise PushValidationError(Locale.REQUEST_CONTENT_LENGTH_INVALID) from exc
         if declared_length < 0 or declared_length > MAX_PUSH_BODY_BYTES:
-            raise PushValidationError("request body exceeds the configured size limit")
+            raise PushValidationError(Locale.REQUEST_BODY_TOO_LARGE)
 
 
 async def bounded_request_body(request: Request) -> bytes:
@@ -3202,7 +3536,7 @@ async def bounded_request_body(request: Request) -> bytes:
     async for chunk in request.stream():
         body.extend(chunk)
         if len(body) > MAX_PUSH_BODY_BYTES:
-            raise PushValidationError("request body exceeds the configured size limit")
+            raise PushValidationError(Locale.REQUEST_BODY_TOO_LARGE)
     return bytes(body)
 
 
@@ -3213,13 +3547,15 @@ def pydantic_failure(exc: ValidationError) -> tuple[str | None, str, object]:
         include_input=True,
     )
     if not errors:
-        return None, "submission failed Pydantic validation", PYDANTIC_MISSING_INPUT
+        return None, Locale.PYDANTIC_FAILURE, Locale.PYDANTIC_MISSING_INPUT
     error = errors[0]
-    reason = str(error.get("msg", "submission failed Pydantic validation"))
+    reason = str(error.get(PYDANTIC_ERROR_MESSAGE_KEY, Locale.PYDANTIC_FAILURE))
+    error_location = error.get(PYDANTIC_ERROR_LOCATION_KEY)
+    location_items = error_location if isinstance(error_location, tuple) else ()
     field = next(
         (
             item
-            for item in error.get("loc", ())
+            for item in location_items
             if isinstance(item, str) and item in AI_AUGMENT_COLUMNS
         ),
         None,
@@ -3228,11 +3564,11 @@ def pydantic_failure(exc: ValidationError) -> tuple[str | None, str, object]:
         field = next(
             (column for column in AI_AUGMENT_COLUMNS if column in reason),
             None,
-        )
+    )
     failed_input = (
-        PYDANTIC_MISSING_INPUT
-        if error.get("type") == "missing"
-        else error.get("input", PYDANTIC_MISSING_INPUT)
+        Locale.PYDANTIC_MISSING_INPUT
+        if error.get(PYDANTIC_ERROR_TYPE_KEY) == PYDANTIC_MISSING_ERROR_TYPE
+        else error.get(PYDANTIC_ERROR_INPUT_KEY, Locale.PYDANTIC_MISSING_INPUT)
     )
     return field, reason, failed_input
 
@@ -3263,7 +3599,7 @@ def safely_record_attempt(
         )
     except OSError:
         logger.exception(
-            "push attempt=%s could not record stage=%s result=%s",
+            Locale.ATTEMPT_RECORD_FAILED_LOG,
             attempt_id,
             stage,
             result,
@@ -3282,9 +3618,7 @@ def pull() -> StreamingResponse:
         else:
             with WORKBOOK_STATE_LOCK:
                 if not WORKBOOK_INITIALIZED:
-                    raise PushConfigurationError(
-                        "guest workbook was not initialized at backend startup"
-                    )
+                    raise PushConfigurationError(Locale.WORKBOOK_NOT_INITIALIZED)
             assert snapshot.source_key is not None
             source_conn = open_source_database(runtime)
             try:
@@ -3298,8 +3632,11 @@ def pull() -> StreamingResponse:
                 source_conn.close()
         return StreamingResponse(iter(lines), media_type=MEDIA_TYPE)
     except (PushConfigurationError, PushValidationError, OSError, duckdb.Error) as exc:
-        logger.error("pull failed configuration/sanction validation: %s", exc)
-        raise HTTPException(status_code=503, detail=CONFIGURATION_ERROR_DETAIL) from None
+        logger.error(Locale.PULL_FAILED_LOG, exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=Locale.CONFIGURATION_ERROR_DETAIL,
+        ) from None
 
 
 # curl -N \
@@ -3316,55 +3653,53 @@ async def push(request: Request) -> StreamingResponse:
     report_archive: ArchivedFile | None = None
     card_archive: ArchivedFile | None = None
     snapshot: SanctionSnapshot | None = None
-    stage = "transport"
+    stage = ATTEMPT_STAGE_TRANSPORT
 
     try:
         validate_transport(request)
-        stage = "configuration"
+        stage = ATTEMPT_STAGE_CONFIGURATION
         runtime = runtime_configuration()
         snapshot = sanctioned_snapshot()
         configuration = push_configuration(snapshot.rollout_guest_path)
         if snapshot.control_base_url is not None:
             with WORKBOOK_STATE_LOCK:
                 if not WORKBOOK_INITIALIZED:
-                    raise PushConfigurationError(
-                        "guest workbook was not initialized at backend startup"
-                    )
+                    raise PushConfigurationError(Locale.WORKBOOK_NOT_INITIALIZED)
         attempt_dir = create_attempt(attempt_id)
-        record_attempt(attempt_dir, attempt_id, stage, "pending")
+        record_attempt(attempt_dir, attempt_id, stage, ATTEMPT_RESULT_PENDING)
 
-        stage = "rollout_copy"
-        record_attempt(attempt_dir, attempt_id, stage, "pending")
+        stage = ATTEMPT_STAGE_ROLLOUT_COPY
+        record_attempt(attempt_dir, attempt_id, stage, ATTEMPT_RESULT_PENDING)
         rollout_archive = copy_rollout(configuration, attempt_dir, attempt_id)
 
         if snapshot.control_base_url is not None:
-            stage = "workbook_copy"
+            stage = ATTEMPT_STAGE_WORKBOOK_COPY
             record_attempt(
                 attempt_dir,
                 attempt_id,
                 stage,
-                "pending",
+                ATTEMPT_RESULT_PENDING,
                 rollout_archive=rollout_archive,
             )
             workbook_archive = copy_guest_workbook(configuration, attempt_dir, attempt_id)
 
-        stage = "appendwatch_report_copy"
+        stage = ATTEMPT_STAGE_APPENDWATCH_COPY
         record_attempt(
             attempt_dir,
             attempt_id,
             stage,
-            "pending",
+            ATTEMPT_RESULT_PENDING,
             rollout_archive=rollout_archive,
             workbook_archive=workbook_archive,
         )
         report_archive = copy_appendwatch_report(configuration, attempt_dir, attempt_id)
 
-        stage = "appendwatch_report_validation"
+        stage = ATTEMPT_STAGE_APPENDWATCH_VALIDATION
         record_attempt(
             attempt_dir,
             attempt_id,
             stage,
-            "pending",
+            ATTEMPT_RESULT_PENDING,
             rollout_archive=rollout_archive,
             workbook_archive=workbook_archive,
             report_archive=report_archive,
@@ -3374,7 +3709,7 @@ async def push(request: Request) -> StreamingResponse:
             configuration.rollout_relative_path,
         )
 
-        stage = "rollout_index"
+        stage = ATTEMPT_STAGE_ROLLOUT_INDEX
         records = parse_rollout(rollout_archive.path)
         rollout_index = build_rollout_index(
             records,
@@ -3385,18 +3720,18 @@ async def push(request: Request) -> StreamingResponse:
             snapshot.session_id is not None
             and rollout_index.session.session_id != snapshot.session_id
         ):
-            raise PushValidationError("sanctioned session does not match archived rollout")
+            raise PushValidationError(Locale.SANCTIONED_SESSION_MISMATCH)
         with DETOUR_DB_LOCK:
             detour_conn = open_detour_database(runtime)
             source_conn: duckdb.DuckDBPyConnection | None = None
             try:
                 persist_rollout_index(detour_conn, rollout_index)
 
-                stage = "pydantic_validation"
+                stage = ATTEMPT_STAGE_PYDANTIC_VALIDATION
                 body = await bounded_request_body(request)
                 submission = Submission.model_validate_json(body)
 
-                stage = "duckdb_evidence_validation"
+                stage = ATTEMPT_STAGE_EVIDENCE_VALIDATION
                 _seed_evidence_random(runtime.pipeline.sample_seed)
                 validated_evidence = validate_submission_evidence(
                     detour_conn,
@@ -3404,7 +3739,7 @@ async def push(request: Request) -> StreamingResponse:
                     rollout_filename=rollout_index.session.rollout_filename,
                 )
 
-                stage = "researcher_resolution"
+                stage = ATTEMPT_STAGE_RESEARCHER_RESOLUTION
                 source_conn = open_source_database(runtime)
                 source_researcher: SourceResearcher | None = None
                 if snapshot.source_key is None:
@@ -3422,7 +3757,7 @@ async def push(request: Request) -> StreamingResponse:
                     )
                     researcher = researcher_context(source_researcher)
 
-                stage = "innerdict_and_card"
+                stage = ATTEMPT_STAGE_CARD
                 lines, card_archive = write_accepted_submission(
                     detour_conn,
                     source_conn,
@@ -3444,8 +3779,8 @@ async def push(request: Request) -> StreamingResponse:
         record_attempt(
             attempt_dir,
             attempt_id,
-            "accepted",
-            "accepted",
+            ATTEMPT_STAGE_ACCEPTED,
+            ATTEMPT_RESULT_ACCEPTED,
             rollout_archive=rollout_archive,
             workbook_archive=workbook_archive,
             report_archive=report_archive,
@@ -3457,113 +3792,125 @@ async def push(request: Request) -> StreamingResponse:
             acknowledge_sanction(snapshot, attempt_id)
         except PushConfigurationError as exc:
             logger.error(
-                "push attempt=%s accepted but Control Centre acknowledgement failed: %s",
+                Locale.CONTROL_ACKNOWLEDGEMENT_FAILED_LOG,
                 attempt_id,
                 exc,
             )
-        logger.info("push attempt=%s accepted", attempt_id)
+        logger.info(Locale.PUSH_ACCEPTED_LOG, attempt_id)
         return StreamingResponse(iter(lines), media_type=MEDIA_TYPE)
     except PushConfigurationError as exc:
         safely_record_attempt(
             attempt_dir,
             attempt_id,
             stage,
-            "configuration_error",
+            ATTEMPT_RESULT_CONFIGURATION_ERROR,
             rollout_archive=rollout_archive,
             workbook_archive=workbook_archive,
             report_archive=report_archive,
             card_archive=card_archive,
         )
         logger.error(
-            "push attempt=%s failed stage=%s: %s",
+            Locale.PUSH_CONFIGURATION_FAILED_LOG,
             attempt_id,
             stage,
             exc,
         )
-        raise HTTPException(status_code=503, detail=CONFIGURATION_ERROR_DETAIL) from None
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=Locale.CONFIGURATION_ERROR_DETAIL,
+        ) from None
     except MultipleEvidenceMatches as exc:
         safely_record_attempt(
             attempt_dir,
             attempt_id,
             stage,
-            "rejected",
+            ATTEMPT_RESULT_REJECTED,
             rollout_archive=rollout_archive,
             workbook_archive=workbook_archive,
             report_archive=report_archive,
             card_archive=card_archive,
         )
         logger.warning(
-            "push attempt=%s failed stage=%s: excerpt matched multiple rows excerpt=%r",
+            Locale.PUSH_MULTIPLE_MATCHES_LOG,
             attempt_id,
             stage,
             exc.excerpt,
         )
         raise HTTPException(
-            status_code=422,
-            detail=MULTIPLE_MATCH_DETAIL.format(excerpt=exc.excerpt),
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=Locale.MULTIPLE_MATCH_DETAIL_TEMPLATE.format(excerpt=exc.excerpt),
         ) from None
     except PushValidationError as exc:
         safely_record_attempt(
             attempt_dir,
             attempt_id,
             stage,
-            "rejected",
+            ATTEMPT_RESULT_REJECTED,
             rollout_archive=rollout_archive,
             workbook_archive=workbook_archive,
             report_archive=report_archive,
             card_archive=card_archive,
         )
         logger.warning(
-            "push attempt=%s failed stage=%s: %s",
+            Locale.PUSH_VALIDATION_FAILED_LOG,
             attempt_id,
             stage,
             exc,
         )
-        raise HTTPException(status_code=422, detail=VALIDATION_ERROR_DETAIL) from None
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=Locale.VALIDATION_ERROR_DETAIL,
+        ) from None
     except ValidationError as exc:
         field, reason, failed_input = pydantic_failure(exc)
         safely_record_attempt(
             attempt_dir,
             attempt_id,
             stage,
-            "rejected",
+            ATTEMPT_RESULT_REJECTED,
             rollout_archive=rollout_archive,
             workbook_archive=workbook_archive,
             report_archive=report_archive,
             card_archive=card_archive,
         )
         logger.warning(
-            "push attempt=%s failed stage=%s field=%s value=%r: %s",
+            Locale.PUSH_PYDANTIC_FAILED_LOG,
             attempt_id,
             stage,
-            field or "unknown",
+            field or Locale.UNKNOWN_FIELD,
             failed_input,
             reason,
         )
-        raise HTTPException(status_code=422, detail=VALIDATION_ERROR_DETAIL) from None
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=Locale.VALIDATION_ERROR_DETAIL,
+        ) from None
     except (OSError, ValueError, duckdb.Error, subprocess.SubprocessError) as exc:
         safely_record_attempt(
             attempt_dir,
             attempt_id,
             stage,
-            "rejected",
+            ATTEMPT_RESULT_REJECTED,
             rollout_archive=rollout_archive,
             workbook_archive=workbook_archive,
             report_archive=report_archive,
             card_archive=card_archive,
         )
         logger.warning(
-            "push attempt=%s failed stage=%s: %s",
+            Locale.PUSH_UNEXPECTED_FAILED_LOG,
             attempt_id,
             stage,
             exc,
         )
-        raise HTTPException(status_code=422, detail=VALIDATION_ERROR_DETAIL) from None
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=Locale.VALIDATION_ERROR_DETAIL,
+        ) from None
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Serve the AI augmentation detour API.")
-    parser.add_argument("--config", required=True, type=Path)
+    parser = argparse.ArgumentParser(description=Locale.CLI_DESCRIPTION)
+    parser.add_argument(CONFIG_OPTION, required=True, type=Path)
     return parser.parse_args(argv)
 
 
