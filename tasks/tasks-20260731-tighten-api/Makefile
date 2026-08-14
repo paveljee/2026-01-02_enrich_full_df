@@ -18,7 +18,7 @@ PYTHON_STDIN := $(PYTHON) -c \
 TASK := src/TASK.md
 MANIFEST := manifest.json
 AGENTS := build/AGENTS.md
-SPEC := build/SPEC.ipynb
+SPEC := build/SPECS.ipynb
 VERBOSE ?= 0
 
 manifest:
@@ -1043,7 +1043,7 @@ def write_case(case):
 
     (
         build_path
-        / "SPEC.ipynb"
+        / "SPECS.ipynb"
     ).write_text(
         json.dumps(
             case["notebook"],
