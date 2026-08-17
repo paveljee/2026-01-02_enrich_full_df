@@ -39,6 +39,8 @@ detour-ai-augment = [
   "httpx==0.28.1",
   "nicegui==3.13.0",
   "playwright==1.62.0",
+  "pydantic-extra-types==2.11.1",
+  "pycountry==24.6.1",
 ]
 
 # ============

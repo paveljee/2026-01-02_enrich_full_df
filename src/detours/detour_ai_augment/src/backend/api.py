@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from random import Random
-from typing import Annotated, Any, Callable, Literal, Self, cast
+from typing import Any, Callable, Literal, Self, cast
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 from urllib.parse import urlsplit
@@ -35,7 +35,6 @@ from pydantic import (
     ConfigDict,
     Field,
     StrictStr,
-    StringConstraints,
     ValidationError,
     model_validator,
 )
@@ -89,7 +88,41 @@ from src.helpers.vars import (
 )
 
 from .helpers import codex_parse
-from .helpers.locale import Locale
+from .helpers.locale import (
+    AI_AUGMENT_COLUMNS,
+    AI_AUGMENT_EVIDENCE_COLUMNS,
+    EVIDENCE_WITHDRAWAL_ACTION,
+    EVIDENCE_WITHDRAWAL_ACTION_KEY,
+    EVIDENCE_WITHDRAWAL_ATTESTED_KEY,
+    EVIDENCE_WITHDRAWAL_REASON,
+    EVIDENCE_WITHDRAWAL_REASON_KEY,
+    MAX_PUSH_BODY_BYTES,
+    SUBMISSION_EVIDENCE_KEY,
+    SUBMISSION_EXCERPT_KEY,
+    SUBMISSION_STANDARDIZED_VALUE_KEY,
+    SUBMISSION_URL_KEY,
+    SUBMISSION_VALUE_KEY,
+    EvidenceSubmission,
+    EvidenceWithdrawal,
+    KTP_AI_AUGMENT_ACADEMIC_POSITIONS_COL,
+    KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL,
+    KTP_AI_AUGMENT_ATTEMPT_ID_COL,
+    KTP_AI_AUGMENT_COMMENTS_COL,
+    KTP_AI_AUGMENT_EDUCATION_COL,
+    KTP_AI_AUGMENT_FOOTNOTE_ARGUMENTS_COL,
+    KTP_AI_AUGMENT_FOOTNOTES_COL,
+    KTP_AI_AUGMENT_GENDER_COL,
+    KTP_AI_AUGMENT_LINKS_COL,
+    KTP_AI_AUGMENT_PLACE_OF_RESIDENCE_COL,
+    KTP_AI_AUGMENT_RESEARCHER_AUTHOR_COL,
+    KTP_AI_AUGMENT_SESSION_METADATA_COL,
+    KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL,
+    L_FEI_FEI_FIXTURE,
+    Locale,
+    StandardizedValue,
+    Submission,
+    WebSearchExcerpt,
+)
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[5]
 ENV_PATH = REPOSITORY_ROOT / ".env"
@@ -166,11 +199,6 @@ AIVM_HOST_KEY_ALIAS = f"lima-{AIVM_INSTANCE}-{AIVM_USER}"
 CURRENT_DIRECTORY = PurePosixPath(".")
 FORBIDDEN_NORMALIZED_PATH_PARTS = frozenset({"", ".", ".."})
 
-MAX_PUSH_BODY_BYTES = 2 * 1024 * 1024
-MAX_VALUE_CHARACTERS = MAX_PUSH_BODY_BYTES
-MAX_EXCERPT_CHARACTERS = MAX_PUSH_BODY_BYTES
-MAX_URL_CHARACTERS = MAX_PUSH_BODY_BYTES
-MAX_EXCERPTS_PER_FIELD = MAX_PUSH_BODY_BYTES
 COMPACT_JSON_SEPARATORS = (",", ":")
 ARCHIVE_HASH_CHUNK_BYTES = 1024 * 1024
 SCP_TIMEOUT_SECONDS = 60
@@ -189,9 +217,7 @@ APPENDWATCH_COMPROMISED_BODY_PREFIX = (
     f"{APPENDWATCH_COMPROMISED_STATUS}{APPENDWATCH_STATUS_SEPARATOR}"
 )
 APPENDWATCH_OK_PREFIX = f"{APPENDWATCH_OK_STATUS:<{APPENDWATCH_STATUS_WIDTH}} "
-APPENDWATCH_COMPROMISED_PREFIX = (
-    f"{APPENDWATCH_COMPROMISED_STATUS:<{APPENDWATCH_STATUS_WIDTH}} "
-)
+APPENDWATCH_COMPROMISED_PREFIX = f"{APPENDWATCH_COMPROMISED_STATUS:<{APPENDWATCH_STATUS_WIDTH}} "
 APPENDWATCH_ROOT_ENTRY = "."
 APPENDWATCH_DIRECTORY_SUFFIX = "/"
 APPENDWATCH_BLANK_LINE = ""
@@ -301,9 +327,7 @@ WORKBOOK_ARCHIVE_TEMP_FILENAME = ".workbook.tmp"
 WORKBOOK_ARCHIVE_FILENAME_TEMPLATE = "workbook.{attempt_id}.md"
 HOST_WORKBOOK_TEMP_FILENAME_TEMPLATE = ".{filename}.tmp"
 ROLLOUT_ARCHIVE_TEMP_FILENAME = ".rollout.tmp"
-ROLLOUT_ARCHIVE_FILENAME_TEMPLATE = (
-    f"rollout.{{attempt_id}}{ROLLOUT_FILENAME_SUFFIX}"
-)
+ROLLOUT_ARCHIVE_FILENAME_TEMPLATE = f"rollout.{{attempt_id}}{ROLLOUT_FILENAME_SUFFIX}"
 ATOMIC_TEMP_FILENAME_TEMPLATE = ".{filename}.{nonce}.tmp"
 RESPONSE_FILENAME = f"response{ROLLOUT_FILENAME_SUFFIX}"
 CARD_ZIP_FILENAME_TEMPLATE = "{prefix}_{attempt_id}.zip"
@@ -338,37 +362,28 @@ ATTEMPT_RESULT_KEY = "result"
 ATTEMPT_UPDATED_AT_KEY = "updated_at"
 ATTEMPT_ARTIFACTS_KEY = "artifacts"
 ATTEMPT_MANIFEST_FILENAME = "attempt.json"
-SUBMISSION_VALUE_KEY = "value"
-SUBMISSION_EVIDENCE_KEY = "web_search_excerpts"
-SUBMISSION_EXCERPT_KEY = "excerpt"
-SUBMISSION_URL_KEY = "url"
-EVIDENCE_WITHDRAWAL_ACTION_KEY = "action"
-EVIDENCE_WITHDRAWAL_REASON_KEY = "reason"
-EVIDENCE_WITHDRAWAL_ATTESTED_KEY = "attested"
-EVIDENCE_WITHDRAWAL_ACTION = "withdraw_unverified_evidence"
-EVIDENCE_WITHDRAWAL_REASON = "not_present_in_web_results"
 EVIDENCE_OUTCOME_V1_EXACT = "v1_exact"
 EVIDENCE_OUTCOME_V2_NEAR = "v2_near"
 EVIDENCE_OUTCOME_UNMATCHED = "unmatched"
 EVIDENCE_OUTCOME_WITHDRAWN = "withdrawn"
-EVIDENCE_ITEMS_ACCEPTED_DEF: Callable[[Sequence[str]], bool] = (
-    lambda outcomes: (
-        EVIDENCE_OUTCOME_V1_EXACT in outcomes
-        and all(
-            outcome
-            in {EVIDENCE_OUTCOME_V1_EXACT, EVIDENCE_OUTCOME_WITHDRAWN}
-            for outcome in outcomes
-        )
+EvidenceOutcome = Literal[  # type: ignore[valid-type]
+    EVIDENCE_OUTCOME_V1_EXACT,
+    EVIDENCE_OUTCOME_V2_NEAR,
+    EVIDENCE_OUTCOME_UNMATCHED,
+    EVIDENCE_OUTCOME_WITHDRAWN,
+]
+EVIDENCE_ITEMS_ACCEPTED_DEF: Callable[[Sequence[str]], bool] = lambda outcomes: (
+    EVIDENCE_OUTCOME_V1_EXACT in outcomes
+    and all(
+        outcome in {EVIDENCE_OUTCOME_V1_EXACT, EVIDENCE_OUTCOME_WITHDRAWN} for outcome in outcomes
     )
 )
-EVIDENCE_LOCATION_DEF: Callable[[str, int], str] = (
-    lambda field, index: f"{field}.{SUBMISSION_EVIDENCE_KEY}[{index}]"
+EVIDENCE_LOCATION_DEF: Callable[[str, int], str] = lambda field, index: (
+    f"{field}.{SUBMISSION_EVIDENCE_KEY}[{index}]"
 )
-EVIDENCE_PROGRESS_PRAISE_DEF: Callable[[Sequence[str]], bool] = (
-    lambda outcomes: (
-        EVIDENCE_OUTCOME_V2_NEAR in outcomes
-        and outcomes.count(EVIDENCE_OUTCOME_V1_EXACT) > len(outcomes) // 2
-    )
+EVIDENCE_PROGRESS_PRAISE_DEF: Callable[[Sequence[str]], bool] = lambda outcomes: (
+    EVIDENCE_OUTCOME_V2_NEAR in outcomes
+    and outcomes.count(EVIDENCE_OUTCOME_V1_EXACT) > len(outcomes) // 2
 )
 TREE_LINE = re.compile(
     rf"^(?P<{TREE_INDENT_GROUP}>(?:(?:│   )|(?:    ))*)"
@@ -376,9 +391,7 @@ TREE_LINE = re.compile(
 )
 CODEX_CITE_MARKER_PREFIX = "\ue200cite\ue202"
 CODEX_CITE_MARKER_SUFFIX = "\ue201"
-CODEX_REF_ID_PATTERN = (
-    rf"{re.escape(CODEX_TURN_REF_PREFIX)}[0-9]+[A-Za-z_]+[0-9]+"
-)
+CODEX_REF_ID_PATTERN = rf"{re.escape(CODEX_TURN_REF_PREFIX)}[0-9]+[A-Za-z_]+[0-9]+"
 CODEX_RESULT_SEPARATOR = "-" * 80
 FOOTNOTE_CONTEXT_CHARACTERS = 160
 SERVER_HOST = "127.0.0.1"
@@ -397,11 +410,9 @@ EXCLUDED_SOURCE_KEY = json.dumps(
 GROUND_TRUTH_DEF: Callable[
     [str, Mapping[str, str], tuple[str, ...]],
     bool,
-] = (
-    lambda source_key, release_batches, draws: (
-        source_key != EXCLUDED_SOURCE_KEY
-        and any(release_batches.get(draw) in GROUND_TRUTH_RELEASE_BATCHES for draw in draws)
-    )
+] = lambda source_key, release_batches, draws: (
+    source_key != EXCLUDED_SOURCE_KEY
+    and any(release_batches.get(draw) in GROUND_TRUTH_RELEASE_BATCHES for draw in draws)
 )
 NO_GROUND_TRUTH_COHORT = SourceCohort.NO_GROUND_TRUTH
 # no ground truth is defined analytically from all unreleased except some
@@ -410,12 +421,10 @@ NO_GROUND_TRUTH_SSN_COUNT = 1
 NO_GROUND_TRUTH_DEF: Callable[
     [int, bool, int],
     bool,
-] = (
-    lambda partition, xlsx_non_exact, ssn_count: (
-        partition == NO_GROUND_TRUTH_PARTITION
-        and not xlsx_non_exact
-        and ssn_count == NO_GROUND_TRUTH_SSN_COUNT
-    )
+] = lambda partition, xlsx_non_exact, ssn_count: (
+    partition == NO_GROUND_TRUTH_PARTITION
+    and not xlsx_non_exact
+    and ssn_count == NO_GROUND_TRUTH_SSN_COUNT
 )
 EXPECTED_GROUND_TRUTH_RESEARCHERS = 196
 EXPECTED_NO_GROUND_TRUTH_RESEARCHERS = 78
@@ -491,23 +500,6 @@ CODEX_EVIDENCE_ACCEPTED_COL = "accepted"
 CODEX_EVIDENCE_AUDIT_ID_COL = "id"
 CODEX_TOKEN_EXTENSION = "splink_udfs"
 
-AI_AUGMENT_COLUMN_PREFIX = "ktp.ai_augment_"
-KTP_AI_AUGMENT_ATTEMPT_ID_COL = f"{AI_AUGMENT_COLUMN_PREFIX}attempt_id"
-KTP_AI_AUGMENT_SESSION_METADATA_COL = f"{AI_AUGMENT_COLUMN_PREFIX}session_metadata"
-KTP_AI_AUGMENT_FOOTNOTES_COL = f"{AI_AUGMENT_COLUMN_PREFIX}footnotes"
-KTP_AI_AUGMENT_FOOTNOTE_ARGUMENTS_COL = f"{AI_AUGMENT_COLUMN_PREFIX}footnote_arguments"
-KTP_AI_AUGMENT_RESEARCHER_AUTHOR_COL = f"{AI_AUGMENT_COLUMN_PREFIX}researcher_author"
-KTP_AI_AUGMENT_PLACE_OF_RESIDENCE_COL = f"{AI_AUGMENT_COLUMN_PREFIX}place_of_residence"
-KTP_AI_AUGMENT_GENDER_COL = f"{AI_AUGMENT_COLUMN_PREFIX}gender"
-KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL = (
-    f"{AI_AUGMENT_COLUMN_PREFIX}age_first_publication_according_to_openalex_profile"
-)
-KTP_AI_AUGMENT_EDUCATION_COL = f"{AI_AUGMENT_COLUMN_PREFIX}education"
-KTP_AI_AUGMENT_ACADEMIC_POSITIONS_COL = f"{AI_AUGMENT_COLUMN_PREFIX}academic_position_s_"
-KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL = f"{AI_AUGMENT_COLUMN_PREFIX}social_capital"
-KTP_AI_AUGMENT_LINKS_COL = f"{AI_AUGMENT_COLUMN_PREFIX}links_"
-KTP_AI_AUGMENT_COMMENTS_COL = f"{AI_AUGMENT_COLUMN_PREFIX}comments"
-
 DRAW_NUMBER_COLUMN = DRAW_LABEL
 TARGET_DRAW_NUMBER = "146"
 FRAGMENT_TYPE_COLUMN = KTP_FRAGMENT_TYPE_COL
@@ -528,51 +520,6 @@ DOCX_TO_AI_AUGMENT_COLUMNS = (
     ("ktp.table_1_comments", KTP_AI_AUGMENT_COMMENTS_COL),
 )
 DOCX_COLUMNS = tuple(docx_column for docx_column, _ai_column in DOCX_TO_AI_AUGMENT_COLUMNS)
-AI_AUGMENT_EVIDENCE_COLUMNS = (
-    KTP_AI_AUGMENT_RESEARCHER_AUTHOR_COL,
-    KTP_AI_AUGMENT_PLACE_OF_RESIDENCE_COL,
-    KTP_AI_AUGMENT_GENDER_COL,
-    KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL,
-    KTP_AI_AUGMENT_EDUCATION_COL,
-    KTP_AI_AUGMENT_ACADEMIC_POSITIONS_COL,
-    KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL,
-    KTP_AI_AUGMENT_LINKS_COL,
-)
-AI_AUGMENT_COLUMNS = AI_AUGMENT_EVIDENCE_COLUMNS + (KTP_AI_AUGMENT_COMMENTS_COL,)
-SUBMISSION_EXAMPLE: dict[str, object] = {
-    KTP_AI_AUGMENT_RESEARCHER_AUTHOR_COL: Locale.EXAMPLE_RESEARCHER_AUTHOR,
-    KTP_AI_AUGMENT_PLACE_OF_RESIDENCE_COL: Locale.EXAMPLE_PLACE_OF_RESIDENCE,
-    KTP_AI_AUGMENT_GENDER_COL: Locale.EXAMPLE_GENDER,
-    KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL: (
-        Locale.EXAMPLE_AGE_FIRST_PUBLICATION
-    ),
-    KTP_AI_AUGMENT_EDUCATION_COL: Locale.EXAMPLE_EDUCATION,
-    KTP_AI_AUGMENT_ACADEMIC_POSITIONS_COL: Locale.EXAMPLE_ACADEMIC_POSITIONS,
-    KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL: Locale.EXAMPLE_SOCIAL_CAPITAL,
-    KTP_AI_AUGMENT_LINKS_COL: Locale.EXAMPLE_LINKS,
-    KTP_AI_AUGMENT_COMMENTS_COL: Locale.EXAMPLE_COMMENTS,
-}
-NULL_SUBMISSION_EXAMPLE = {
-    KTP_FIRST_NAME_COL: Locale.EXAMPLE_FIRST_NAME,
-    KTP_LAST_NAME_COL: Locale.EXAMPLE_LAST_NAME,
-    **dict.fromkeys(AI_AUGMENT_COLUMNS),
-}
-EVIDENCE_SUBMISSION_EXAMPLE = {
-    column: {
-        SUBMISSION_VALUE_KEY: value,
-        SUBMISSION_EVIDENCE_KEY: [
-            {
-                SUBMISSION_EXCERPT_KEY: Locale.EXAMPLE_EVIDENCE_EXCERPT,
-                SUBMISSION_URL_KEY: Locale.EXAMPLE_EVIDENCE_URL,
-            }
-        ],
-    }
-    for column, value in SUBMISSION_EXAMPLE.items()
-    if column in AI_AUGMENT_EVIDENCE_COLUMNS
-}
-EVIDENCE_SUBMISSION_EXAMPLE[KTP_AI_AUGMENT_COMMENTS_COL] = {
-    SUBMISSION_VALUE_KEY: SUBMISSION_EXAMPLE[KTP_AI_AUGMENT_COMMENTS_COL]
-}
 CODEX_OUTPUT_SCHEMA = (
     (KTP_NAMEKEY_COL, "VARCHAR NOT NULL"),
     (KTP_FILENAME_COL, "VARCHAR NOT NULL"),
@@ -617,145 +564,6 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     except PushConfigurationError as exc:
         logger.error(Locale.ROUTES_DISABLED_LOG, exc)
     yield
-
-
-APP_CONFIG: dict[str, Any] = {
-    "title": Locale.API_TITLE,
-    "description": Locale.API_DESCRIPTION,
-    "version": API_VERSION,
-    "lifespan": lifespan,
-}
-
-PULL_ROUTE: dict[str, Any] = {
-    "path": PULL_PATH,
-    "response_class": StreamingResponse,
-    "summary": Locale.PULL_SUMMARY,
-    "description": Locale.PULL_DESCRIPTION,
-    "responses": {
-        status.HTTP_200_OK: {
-            "description": Locale.PULL_RESPONSE_DESCRIPTION,
-            "content": {
-                MEDIA_TYPE: {
-                    "example": (json.dumps(NULL_SUBMISSION_EXAMPLE, ensure_ascii=False) + "\n"),
-                },
-            },
-        },
-    },
-}
-
-PUSH_ROUTE: dict[str, Any] = {
-    "path": PUSH_PATH,
-    "response_class": StreamingResponse,
-    "summary": Locale.PUSH_SUMMARY,
-    "description": Locale.PUSH_DESCRIPTION,
-    "responses": {
-        status.HTTP_200_OK: {
-            "description": Locale.PUSH_RESPONSE_DESCRIPTION,
-            "content": {
-                MEDIA_TYPE: {
-                    "example": (
-                        json.dumps(SUBMISSION_EXAMPLE, ensure_ascii=False)
-                        + "\n"
-                        + json.dumps(SUBMISSION_EXAMPLE, ensure_ascii=False)
-                        + "\n"
-                    ),
-                },
-            },
-        },
-        status.HTTP_422_UNPROCESSABLE_CONTENT: {
-            "description": Locale.VALIDATION_ERROR_DETAIL
-        },
-        status.HTTP_503_SERVICE_UNAVAILABLE: {
-            "description": Locale.CONFIGURATION_ERROR_DETAIL
-        },
-    },
-    "openapi_extra": {
-        "requestBody": {
-            "required": True,
-            "content": {JSON_MEDIA_TYPE: {"example": EVIDENCE_SUBMISSION_EXAMPLE}},
-        }
-    },
-}
-
-app = FastAPI(**APP_CONFIG)
-
-SubmissionText = Annotated[
-    StrictStr,
-    StringConstraints(min_length=1, max_length=MAX_VALUE_CHARACTERS),
-]
-ExcerptText = Annotated[
-    StrictStr,
-    StringConstraints(min_length=1, max_length=MAX_EXCERPT_CHARACTERS),
-]
-UrlText = Annotated[
-    StrictStr,
-    StringConstraints(min_length=1, max_length=MAX_URL_CHARACTERS),
-]
-
-
-class WebSearchExcerpt(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    excerpt: ExcerptText
-    url: UrlText
-
-    @model_validator(mode="after")
-    def validate_evidence(self) -> Self:
-        if not self.excerpt.strip() or not self.url.strip():
-            raise ValueError(Locale.EXCERPT_URL_NONBLANK)
-        return self
-
-
-class EvidenceWithdrawal(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    action: Literal["withdraw_unverified_evidence"]
-    reason: Literal["not_present_in_web_results"]
-    attested: Literal[True]
-
-
-EvidenceSubmission = WebSearchExcerpt | EvidenceWithdrawal
-EvidenceOutcome = Literal[
-    EVIDENCE_OUTCOME_V1_EXACT,
-    EVIDENCE_OUTCOME_V2_NEAR,
-    EVIDENCE_OUTCOME_UNMATCHED,
-    EVIDENCE_OUTCOME_WITHDRAWN,
-]
-
-
-class FieldSubmission(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    value: SubmissionText
-    web_search_excerpts: list[EvidenceSubmission] = Field(
-        min_length=1,
-        max_length=MAX_EXCERPTS_PER_FIELD,
-    )
-
-    @model_validator(mode="after")
-    def validate_field(self) -> Self:
-        if not self.value.strip():
-            raise ValueError(Locale.VALUE_NONBLANK)
-        evidence_pairs = [
-            (evidence.excerpt, evidence.url)
-            for evidence in self.web_search_excerpts
-            if isinstance(evidence, WebSearchExcerpt)
-        ]
-        if len(set(evidence_pairs)) != len(evidence_pairs):
-            raise ValueError(Locale.EXCERPT_PAIRS_UNIQUE)
-        return self
-
-
-class CommentSubmission(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    value: SubmissionText
-
-    @model_validator(mode="after")
-    def validate_comment(self) -> Self:
-        if not self.value.strip():
-            raise ValueError(Locale.VALUE_NONBLANK)
-        return self
 
 
 class CompactSessionMetadata(BaseModel):
@@ -815,39 +623,73 @@ class ControlAcceptedResponse(BaseModel):
     acknowledged: bool
 
 
-class Submission(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
+EVIDENCE_SUBMISSION_EXAMPLE = L_FEI_FEI_FIXTURE.submission.model_dump(
+    by_alias=True,
+    mode="json",
+)
+SUBMISSION_EXAMPLE: dict[str, object] = L_FEI_FEI_FIXTURE.submission.normalized_values()
+PULL_EXAMPLE_FIRST_NAME, PULL_EXAMPLE_LAST_NAME = L_FEI_FEI_FIXTURE.identity
+NULL_SUBMISSION_EXAMPLE = {
+    KTP_FIRST_NAME_COL: PULL_EXAMPLE_FIRST_NAME,
+    KTP_LAST_NAME_COL: PULL_EXAMPLE_LAST_NAME,
+    **dict.fromkeys(AI_AUGMENT_COLUMNS),
+}
 
-    researcher_author: FieldSubmission = Field(alias=KTP_AI_AUGMENT_RESEARCHER_AUTHOR_COL)
-    place_of_residence: FieldSubmission = Field(alias=KTP_AI_AUGMENT_PLACE_OF_RESIDENCE_COL)
-    gender: FieldSubmission = Field(alias=KTP_AI_AUGMENT_GENDER_COL)
-    age_first_publication: FieldSubmission = Field(alias=KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL)
-    education: FieldSubmission = Field(alias=KTP_AI_AUGMENT_EDUCATION_COL)
-    academic_positions: FieldSubmission = Field(alias=KTP_AI_AUGMENT_ACADEMIC_POSITIONS_COL)
-    social_capital: FieldSubmission = Field(alias=KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL)
-    links: FieldSubmission = Field(alias=KTP_AI_AUGMENT_LINKS_COL)
-    comments: CommentSubmission | None = Field(
-        default=None,
-        alias=KTP_AI_AUGMENT_COMMENTS_COL,
-    )
+APP_CONFIG: dict[str, Any] = {
+    "title": Locale.API_TITLE,
+    "description": Locale.API_DESCRIPTION,
+    "version": API_VERSION,
+    "lifespan": lifespan,
+}
 
-    def evidence_items(self) -> tuple[tuple[str, FieldSubmission], ...]:
-        return (
-            (KTP_AI_AUGMENT_RESEARCHER_AUTHOR_COL, self.researcher_author),
-            (KTP_AI_AUGMENT_PLACE_OF_RESIDENCE_COL, self.place_of_residence),
-            (KTP_AI_AUGMENT_GENDER_COL, self.gender),
-            (KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL, self.age_first_publication),
-            (KTP_AI_AUGMENT_EDUCATION_COL, self.education),
-            (KTP_AI_AUGMENT_ACADEMIC_POSITIONS_COL, self.academic_positions),
-            (KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL, self.social_capital),
-            (KTP_AI_AUGMENT_LINKS_COL, self.links),
-        )
+PULL_ROUTE: dict[str, Any] = {
+    "path": PULL_PATH,
+    "response_class": StreamingResponse,
+    "summary": Locale.PULL_SUMMARY,
+    "description": Locale.PULL_DESCRIPTION,
+    "responses": {
+        status.HTTP_200_OK: {
+            "description": Locale.PULL_RESPONSE_DESCRIPTION,
+            "content": {
+                MEDIA_TYPE: {
+                    "example": (json.dumps(NULL_SUBMISSION_EXAMPLE, ensure_ascii=False) + "\n"),
+                },
+            },
+        },
+    },
+}
 
-    def normalized_values(self) -> dict[str, str]:
-        values = {column: field.value for column, field in self.evidence_items()}
-        if self.comments is not None:
-            values[KTP_AI_AUGMENT_COMMENTS_COL] = self.comments.value
-        return values
+PUSH_ROUTE: dict[str, Any] = {
+    "path": PUSH_PATH,
+    "response_class": StreamingResponse,
+    "summary": Locale.PUSH_SUMMARY,
+    "description": Locale.PUSH_DESCRIPTION,
+    "responses": {
+        status.HTTP_200_OK: {
+            "description": Locale.PUSH_RESPONSE_DESCRIPTION,
+            "content": {
+                MEDIA_TYPE: {
+                    "example": (
+                        json.dumps(SUBMISSION_EXAMPLE, ensure_ascii=False)
+                        + "\n"
+                        + json.dumps(SUBMISSION_EXAMPLE, ensure_ascii=False)
+                        + "\n"
+                    ),
+                },
+            },
+        },
+        status.HTTP_422_UNPROCESSABLE_CONTENT: {"description": Locale.VALIDATION_ERROR_DETAIL},
+        status.HTTP_503_SERVICE_UNAVAILABLE: {"description": Locale.CONFIGURATION_ERROR_DETAIL},
+    },
+    "openapi_extra": {
+        "requestBody": {
+            "required": True,
+            "content": {JSON_MEDIA_TYPE: {"example": EVIDENCE_SUBMISSION_EXAMPLE}},
+        }
+    },
+}
+
+app = FastAPI(**APP_CONFIG)
 
 
 class RetryEvidenceObligation(BaseModel):
@@ -863,6 +705,7 @@ class RetryFieldObligation(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     value: StrictStr
+    standardized_value: StandardizedValue
     evidence: list[RetryEvidenceObligation]
     accepted: bool
 
@@ -936,9 +779,7 @@ class EvidenceAssessmentError(PushValidationError):
 class MultipleEvidenceMatches(PushValidationError):
     def __init__(self, excerpt: str) -> None:
         self.excerpt = excerpt
-        super().__init__(
-            Locale.MULTIPLE_EVIDENCE_MATCHES_TEMPLATE.format(excerpt=excerpt)
-        )
+        super().__init__(Locale.MULTIPLE_EVIDENCE_MATCHES_TEMPLATE.format(excerpt=excerpt))
 
 
 @dataclass(frozen=True)
@@ -1105,9 +946,7 @@ class EvidenceAssessment:
 
     @property
     def validated(self) -> ValidatedEvidence:
-        validated: ValidatedEvidence = {
-            field: [] for field in AI_AUGMENT_EVIDENCE_COLUMNS
-        }
+        validated: ValidatedEvidence = {field: [] for field in AI_AUGMENT_EVIDENCE_COLUMNS}
         for item in self.items:
             if item.match is not None and item.outcome == EVIDENCE_OUTCOME_V1_EXACT:
                 validated[item.field].append(item.match)
@@ -1115,19 +954,13 @@ class EvidenceAssessment:
 
     @property
     def exact_count(self) -> int:
-        return sum(
-            item.outcome == EVIDENCE_OUTCOME_V1_EXACT for item in self.items
-        )
+        return sum(item.outcome == EVIDENCE_OUTCOME_V1_EXACT for item in self.items)
 
     @property
     def accepted(self) -> bool:
         return all(
             EVIDENCE_ITEMS_ACCEPTED_DEF(
-                tuple(
-                    item.outcome
-                    for item in self.items
-                    if item.field == field
-                )
+                tuple(item.outcome for item in self.items if item.field == field)
             )
             for field in AI_AUGMENT_EVIDENCE_COLUMNS
         )
@@ -1169,24 +1002,22 @@ def _valid_nonblank(value: object) -> bool:
 
 def _configuration_file(path: Path, setting: str) -> Path:
     if not path.is_absolute():
-        raise PushConfigurationError(
-            Locale.SETTING_ABSOLUTE_TEMPLATE.format(setting=setting)
-        )
+        raise PushConfigurationError(Locale.SETTING_ABSOLUTE_TEMPLATE.format(setting=setting))
     if path.is_symlink() or not path.is_file() or not os.access(path, os.R_OK):
-        raise PushConfigurationError(
-            Locale.SETTING_READABLE_FILE_TEMPLATE.format(setting=setting)
-        )
+        raise PushConfigurationError(Locale.SETTING_READABLE_FILE_TEMPLATE.format(setting=setting))
     return path
 
 
 def _detour_db_path(path: Path) -> Path:
     suffix = path.suffix or DETOUR_DB_SUFFIX
     stem = path.stem if path.suffix else path.name
-    return path.with_name(DETOUR_DB_FILENAME_TEMPLATE.format(
-        stem=stem,
-        detour_id=DETOUR_ID,
-        suffix=suffix,
-    ))
+    return path.with_name(
+        DETOUR_DB_FILENAME_TEMPLATE.format(
+            stem=stem,
+            detour_id=DETOUR_ID,
+            suffix=suffix,
+        )
+    )
 
 
 def _seed_evidence_random(sample_seed: int) -> None:
@@ -1252,15 +1083,11 @@ def load_release_batches(resource: RegisteredResource) -> dict[str, str]:
                 batches[draw_number] = release_batch
     except (OSError, UnicodeError, csv.Error) as exc:
         raise PushConfigurationError(
-            Locale.MAP_CSV_UNREADABLE_TEMPLATE.format(
-                resource_key=MAP_SUBSET_0_TO_BATCH_KEY
-            )
+            Locale.MAP_CSV_UNREADABLE_TEMPLATE.format(resource_key=MAP_SUBSET_0_TO_BATCH_KEY)
         ) from exc
     if not batches:
         raise PushConfigurationError(
-            Locale.MAP_CSV_EMPTY_TEMPLATE.format(
-                resource_key=MAP_SUBSET_0_TO_BATCH_KEY
-            )
+            Locale.MAP_CSV_EMPTY_TEMPLATE.format(resource_key=MAP_SUBSET_0_TO_BATCH_KEY)
         )
     return batches
 
@@ -1341,24 +1168,18 @@ def _source_identity_and_draws(
             ).fetchall()
         except duckdb.Error as exc:
             raise PushConfigurationError(
-                Locale.SOURCE_DUCKDB_TABLE_MISSING_TEMPLATE.format(
-                    table_name=table_name
-                )
+                Locale.SOURCE_DUCKDB_TABLE_MISSING_TEMPLATE.format(table_name=table_name)
             ) from exc
         for raw_source_key, jsonlines in table_rows:
             if not isinstance(raw_source_key, str):
                 raise PushConfigurationError(
-                    Locale.TABLE_NAMEKEY_NON_TEXT_TEMPLATE.format(
-                        table_name=table_name
-                    )
+                    Locale.TABLE_NAMEKEY_NON_TEXT_TEMPLATE.format(table_name=table_name)
                 )
             try:
                 name_key = NameKey.from_json_key(raw_source_key)
             except (ValueError, TypeError, json.JSONDecodeError) as exc:
                 raise PushConfigurationError(
-                    Locale.TABLE_NAMEKEY_INVALID_TEMPLATE.format(
-                        table_name=table_name
-                    )
+                    Locale.TABLE_NAMEKEY_INVALID_TEMPLATE.format(table_name=table_name)
                 ) from exc
             source_key = name_key.to_json_key()
             names_by_source_key[source_key] = name_key
@@ -1389,13 +1210,9 @@ def derive_source_population(
     sample_seed: int,
 ) -> tuple[SourcePopulationRow, ...]:
     source_researchers = _source_identity_and_draws(conn)
-    rnd_values = list(
-        range(RND_START, len(source_researchers) + RND_START)
-    )
+    rnd_values = list(range(RND_START, len(source_researchers) + RND_START))
     Random(sample_seed).shuffle(rnd_values)
-    rnd_by_source_key = dict(
-        zip(sorted(source_researchers), rnd_values, strict=True)
-    )
+    rnd_by_source_key = dict(zip(sorted(source_researchers), rnd_values, strict=True))
     ground_truth = {
         source_key
         for source_key, (_name_key, draws) in source_researchers.items()
@@ -1403,7 +1220,7 @@ def derive_source_population(
     }
     try:
         partition_rows = conn.execute(
-                f"""
+            f"""
             SELECT
                 {duckdb_quote_identifier(KTP_NAMEKEY_COL)},
                 {duckdb_quote_identifier(KTP_PARTITION_COL)},
@@ -1415,9 +1232,7 @@ def derive_source_population(
         ).fetchall()
     except duckdb.Error as exc:
         raise PushConfigurationError(
-            Locale.ELIGIBILITY_FLAGS_MISSING_TEMPLATE.format(
-                table_name=CARD_PARTITION_TABLE
-            )
+            Locale.ELIGIBILITY_FLAGS_MISSING_TEMPLATE.format(table_name=CARD_PARTITION_TABLE)
         ) from exc
     partition_flags: dict[str, tuple[int, bool, int]] = {}
     for source_key, partition, xlsx_non_exact, ssn_count in partition_rows:
@@ -1475,52 +1290,40 @@ def derive_source_population(
             cohort = INELIGIBLE_COHORT
             partition, xlsx_non_exact, ssn_count = partition_flags[source_key]
             if source_key == EXCLUDED_SOURCE_KEY:
-                ineligibility_category = (
-                    IneligibilityCategory.EXCLUDED_DUPLICATE_SOURCE_KEY
-                )
-            elif any(
-                release_batches.get(draw) == INELIGIBLE_RELEASE_BATCH
-                for draw in draws
-            ):
-                ineligibility_category = (
-                    IneligibilityCategory.RELEASE_BATCH_SUBSET_8
-                )
+                ineligibility_category = IneligibilityCategory.EXCLUDED_DUPLICATE_SOURCE_KEY
+            elif any(release_batches.get(draw) == INELIGIBLE_RELEASE_BATCH for draw in draws):
+                ineligibility_category = IneligibilityCategory.RELEASE_BATCH_SUBSET_8
             elif partition == KTP_PARTITION_SSN_VALUE:
                 ineligibility_category = IneligibilityCategory.STAGING_PARTITION_2
             elif partition == KTP_PARTITION_DOCX_VALUE and xlsx_non_exact:
-                ineligibility_category = (
-                    IneligibilityCategory.STAGING_PARTITION_4_XLSX_NON_EXACT
-                )
-            elif (
-                partition == KTP_PARTITION_DOCX_VALUE
-                and ssn_count > NO_GROUND_TRUTH_SSN_COUNT
-            ):
-                ineligibility_category = (
-                    IneligibilityCategory.STAGING_PARTITION_4_MULTIPLE_SSN
-                )
+                ineligibility_category = IneligibilityCategory.STAGING_PARTITION_4_XLSX_NON_EXACT
+            elif partition == KTP_PARTITION_DOCX_VALUE and ssn_count > NO_GROUND_TRUTH_SSN_COUNT:
+                ineligibility_category = IneligibilityCategory.STAGING_PARTITION_4_MULTIPLE_SSN
             else:
                 raise PushConfigurationError(Locale.INELIGIBILITY_CATEGORY_UNKNOWN)
-        population.append(SourcePopulationRow(
-            source_key=source_key,
-            rnd=rnd_by_source_key[source_key],
-            first_name=name_key.first_name,
-            last_name=name_key.last_name,
-            draw_numbers=tuple(sorted(draws, key=_draw_sort_key)),
-            cohort=cohort,
-            ineligibility_category=ineligibility_category,
-        ))
+        population.append(
+            SourcePopulationRow(
+                source_key=source_key,
+                rnd=rnd_by_source_key[source_key],
+                first_name=name_key.first_name,
+                last_name=name_key.last_name,
+                draw_numbers=tuple(sorted(draws, key=_draw_sort_key)),
+                cohort=cohort,
+                ineligibility_category=ineligibility_category,
+            )
+        )
 
-    population.sort(key=lambda row: (
-        tuple(_draw_sort_key(draw) for draw in row.draw_numbers),
-        row.first_name.casefold(),
-        row.last_name.casefold(),
-        row.source_key,
-    ))
+    population.sort(
+        key=lambda row: (
+            tuple(_draw_sort_key(draw) for draw in row.draw_numbers),
+            row.first_name.casefold(),
+            row.last_name.casefold(),
+            row.source_key,
+        )
+    )
     cohort_counts = Counter(row.cohort for row in population)
     ineligibility_counts = Counter(
-        row.ineligibility_category
-        for row in population
-        if row.ineligibility_category is not None
+        row.ineligibility_category for row in population if row.ineligibility_category is not None
     )
     if cohort_counts != {
         GROUND_TRUTH_COHORT: EXPECTED_GROUND_TRUTH_RESEARCHERS,
@@ -1548,9 +1351,7 @@ def eligible_cohorts(
     source_population: Sequence[SourcePopulationRow],
 ) -> dict[str, str]:
     return {
-        row.source_key: row.cohort
-        for row in source_population
-        if row.cohort != INELIGIBLE_COHORT
+        row.source_key: row.cohort for row in source_population if row.cohort != INELIGIBLE_COHORT
     }
 
 
@@ -1560,9 +1361,7 @@ def _control_base_url() -> str | None:
         return None
     if raw != raw.strip() or _has_control_character(raw):
         raise PushConfigurationError(
-            Locale.CONTROL_URL_INVALID_TEMPLATE.format(
-                environment_name=CONTROL_URL_ENV_NAME
-            )
+            Locale.CONTROL_URL_INVALID_TEMPLATE.format(environment_name=CONTROL_URL_ENV_NAME)
         )
     parsed = urlsplit(raw)
     if (
@@ -1655,11 +1454,15 @@ def acknowledge_sanction(snapshot: SanctionSnapshot, attempt_id: str) -> None:
         return
     assert snapshot.source_key is not None
     assert snapshot.session_id is not None
-    body = ControlAcceptedRequest(
-        source_key=snapshot.source_key,
-        session_id=snapshot.session_id,
-        attempt_id=attempt_id,
-    ).model_dump_json().encode(TEXT_ENCODING)
+    body = (
+        ControlAcceptedRequest(
+            source_key=snapshot.source_key,
+            session_id=snapshot.session_id,
+            attempt_id=attempt_id,
+        )
+        .model_dump_json()
+        .encode(TEXT_ENCODING)
+    )
     path = CONTROL_ACCEPTED_PATH_TEMPLATE.format(run_id=snapshot.run_id)
     try:
         response = ControlAcceptedResponse.model_validate_json(
@@ -1689,9 +1492,7 @@ def configure_runtime(config_path: Path) -> RuntimeConfiguration:
         raise PushConfigurationError(Locale.OUTPUT_FORMAT_INVALID)
     if not pipeline.db_file.is_file() or not os.access(pipeline.db_file, os.R_OK):
         raise PushConfigurationError(
-            Locale.SOURCE_DUCKDB_UNREADABLE_TEMPLATE.format(
-                db_file=pipeline.db_file
-            )
+            Locale.SOURCE_DUCKDB_UNREADABLE_TEMPLATE.format(db_file=pipeline.db_file)
         )
     if pipeline.output_format == DOCX_OUTPUT_FORMAT and (
         not pipeline.pandoc_reference_docx.is_file()
@@ -1737,9 +1538,7 @@ def configure_runtime(config_path: Path) -> RuntimeConfiguration:
 def runtime_configuration() -> RuntimeConfiguration:
     if RUNTIME_CONFIGURATION is None:
         raise PushConfigurationError(
-            Locale.API_CONFIG_REQUIRED_TEMPLATE.format(
-                config_filename=CONFIG_FILENAME
-            )
+            Locale.API_CONFIG_REQUIRED_TEMPLATE.format(config_filename=CONFIG_FILENAME)
         )
     return RUNTIME_CONFIGURATION
 
@@ -1748,15 +1547,11 @@ def push_configuration(rollout_jsonl: str | None = None) -> PushConfiguration:
     raw_rollout = ROLLOUT_JSONL if rollout_jsonl is None else rollout_jsonl
     if not raw_rollout.strip():
         raise PushConfigurationError(
-            Locale.ROLLOUT_NOT_SET_TEMPLATE.format(
-                environment_name=ROLLOUT_ENV_NAME
-            )
+            Locale.ROLLOUT_NOT_SET_TEMPLATE.format(environment_name=ROLLOUT_ENV_NAME)
         )
     if raw_rollout != raw_rollout.strip() or _has_control_character(raw_rollout):
         raise PushConfigurationError(
-            Locale.ROLLOUT_WHITESPACE_TEMPLATE.format(
-                environment_name=ROLLOUT_ENV_NAME
-            )
+            Locale.ROLLOUT_WHITESPACE_TEMPLATE.format(environment_name=ROLLOUT_ENV_NAME)
         )
 
     rollout_path = PurePosixPath(raw_rollout)
@@ -1764,9 +1559,7 @@ def push_configuration(rollout_jsonl: str | None = None) -> PushConfiguration:
         part in FORBIDDEN_NORMALIZED_PATH_PARTS for part in rollout_path.parts
     ):
         raise PushConfigurationError(
-            Locale.ROLLOUT_NOT_NORMALIZED_TEMPLATE.format(
-                environment_name=ROLLOUT_ENV_NAME
-            )
+            Locale.ROLLOUT_NOT_NORMALIZED_TEMPLATE.format(environment_name=ROLLOUT_ENV_NAME)
         )
     try:
         relative_path = rollout_path.relative_to(CODEX_SESSIONS_ROOT)
@@ -1783,9 +1576,7 @@ def push_configuration(rollout_jsonl: str | None = None) -> PushConfiguration:
         or relative_path.suffix != ROLLOUT_FILENAME_SUFFIX
     ):
         raise PushConfigurationError(
-            Locale.ROLLOUT_FILENAME_INVALID_TEMPLATE.format(
-                environment_name=ROLLOUT_ENV_NAME
-            )
+            Locale.ROLLOUT_FILENAME_INVALID_TEMPLATE.format(environment_name=ROLLOUT_ENV_NAME)
         )
 
     if not _valid_nonblank(AIVM_INSTANCE):
@@ -1991,9 +1782,7 @@ def copy_guest_workbook(
     attempt_id: str,
 ) -> ArchivedFile:
     temporary = attempt_dir / WORKBOOK_ARCHIVE_TEMP_FILENAME
-    destination = attempt_dir / WORKBOOK_ARCHIVE_FILENAME_TEMPLATE.format(
-        attempt_id=attempt_id
-    )
+    destination = attempt_dir / WORKBOOK_ARCHIVE_FILENAME_TEMPLATE.format(attempt_id=attempt_id)
     options = _aivm_connection_options(
         lima_ssh_config=configuration.lima_ssh_config,
         identity_file=configuration.identity_file,
@@ -2019,9 +1808,7 @@ def copy_guest_workbook(
             raise PushConfigurationError(Locale.SCP_WORKBOOK_ARCHIVE_INVALID)
         archive = _publish_archive(temporary, destination)
         host_temporary = HOST_WORKBOOK_PATH.with_name(
-            HOST_WORKBOOK_TEMP_FILENAME_TEMPLATE.format(
-                filename=HOST_WORKBOOK_PATH.name
-            )
+            HOST_WORKBOOK_TEMP_FILENAME_TEMPLATE.format(filename=HOST_WORKBOOK_PATH.name)
         )
         try:
             shutil.copyfile(archive.path, host_temporary)
@@ -2043,9 +1830,7 @@ def copy_rollout(
     attempt_id: str,
 ) -> ArchivedFile:
     temporary = attempt_dir / ROLLOUT_ARCHIVE_TEMP_FILENAME
-    destination = attempt_dir / ROLLOUT_ARCHIVE_FILENAME_TEMPLATE.format(
-        attempt_id=attempt_id
-    )
+    destination = attempt_dir / ROLLOUT_ARCHIVE_FILENAME_TEMPLATE.format(attempt_id=attempt_id)
     options = _aivm_connection_options(
         lima_ssh_config=configuration.lima_ssh_config,
         identity_file=configuration.identity_file,
@@ -2083,9 +1868,7 @@ def copy_appendwatch_report(
     attempt_id: str,
 ) -> ArchivedFile:
     temporary = attempt_dir / APPENDWATCH_ARCHIVE_TEMP_FILENAME
-    destination = attempt_dir / APPENDWATCH_ARCHIVE_FILENAME_TEMPLATE.format(
-        attempt_id=attempt_id
-    )
+    destination = attempt_dir / APPENDWATCH_ARCHIVE_FILENAME_TEMPLATE.format(attempt_id=attempt_id)
     try:
         shutil.copyfile(configuration.appendwatch_report, temporary)
         return _publish_archive(temporary, destination)
@@ -2170,11 +1953,7 @@ def parse_appendwatch_report(
         seen_paths.add(path)
         if path == target:
             target_entries.append((
-                (
-                    APPENDWATCH_OK_STATUS
-                    if ok_file is not None
-                    else APPENDWATCH_COMPROMISED_STATUS
-                ),
+                (APPENDWATCH_OK_STATUS if ok_file is not None else APPENDWATCH_COMPROMISED_STATUS),
                 parent_compromised,
             ))
         line_index += 1
@@ -2182,16 +1961,12 @@ def parse_appendwatch_report(
     if line_index < len(lines):
         if lines[line_index:] == [APPENDWATCH_BLANK_LINE]:
             raise PushValidationError(Locale.APPENDWATCH_STRAY_BLANK_LINE)
-        if lines[
-            line_index : line_index + APPENDWATCH_REMOVED_SECTION_HEADER_LINES
-        ] != [
+        if lines[line_index : line_index + APPENDWATCH_REMOVED_SECTION_HEADER_LINES] != [
             APPENDWATCH_BLANK_LINE,
             APPENDWATCH_REMOVED_SECTION_HEADER,
         ]:
             raise PushValidationError(Locale.APPENDWATCH_REMOVED_SECTION_MALFORMED)
-        for removed_line in lines[
-            line_index + APPENDWATCH_REMOVED_SECTION_HEADER_LINES :
-        ]:
+        for removed_line in lines[line_index + APPENDWATCH_REMOVED_SECTION_HEADER_LINES :]:
             removed = APPENDWATCH_REMOVED_ENTRY_PATTERN.fullmatch(removed_line)
             if removed is None:
                 raise PushValidationError(Locale.APPENDWATCH_REMOVED_ENTRY_MALFORMED)
@@ -2200,13 +1975,9 @@ def parse_appendwatch_report(
 
     if len(target_entries) != APPENDWATCH_EXPECTED_TARGET_ENTRIES:
         reason = (
-            Locale.ROLLOUT_STATUS_MISSING
-            if not target_entries
-            else Locale.ROLLOUT_STATUS_AMBIGUOUS
+            Locale.ROLLOUT_STATUS_MISSING if not target_entries else Locale.ROLLOUT_STATUS_AMBIGUOUS
         )
-        raise PushValidationError(
-            Locale.ROLLOUT_STATUS_INVALID_TEMPLATE.format(reason=reason)
-        )
+        raise PushValidationError(Locale.ROLLOUT_STATUS_INVALID_TEMPLATE.format(reason=reason))
     status, compromised_ancestor = target_entries[0]
     if status != APPENDWATCH_OK_STATUS or compromised_ancestor:
         raise PushValidationError(Locale.ROLLOUT_NOT_OK)
@@ -2230,15 +2001,11 @@ def parse_rollout(rollout_path: Path) -> tuple[RolloutRecord, ...]:
             if line_number == len(raw_lines) and not completed:
                 break
             raise PushValidationError(
-                Locale.ROLLOUT_JSONL_MALFORMED_TEMPLATE.format(
-                    line_number=line_number
-                )
+                Locale.ROLLOUT_JSONL_MALFORMED_TEMPLATE.format(line_number=line_number)
             ) from exc
         if not isinstance(value, dict):
             raise PushValidationError(
-                Locale.ROLLOUT_LINE_NON_OBJECT_TEMPLATE.format(
-                    line_number=line_number
-                )
+                Locale.ROLLOUT_LINE_NON_OBJECT_TEMPLATE.format(line_number=line_number)
             )
         records.append(
             RolloutRecord(
@@ -2257,13 +2024,9 @@ def _timestamp(value: object, *, label: str) -> str:
     try:
         parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError as exc:
-        raise PushValidationError(
-            Locale.TIMESTAMP_INVALID_TEMPLATE.format(label=label)
-        ) from exc
+        raise PushValidationError(Locale.TIMESTAMP_INVALID_TEMPLATE.format(label=label)) from exc
     if parsed.tzinfo is None:
-        raise PushValidationError(
-            Locale.TIMESTAMP_TIMEZONE_MISSING_TEMPLATE.format(label=label)
-        )
+        raise PushValidationError(Locale.TIMESTAMP_TIMEZONE_MISSING_TEMPLATE.format(label=label))
     return raw
 
 
@@ -2290,9 +2053,7 @@ def _web_arguments(payload: Mapping[str, object], line_number: int) -> dict[str,
         )
     eligible_actions = [action for action in ELIGIBLE_WEB_ACTIONS if decoded.get(action)]
     if len(eligible_actions) != 1:
-        raise PushValidationError(
-            Locale.WEB_CALL_ACTION_COUNT_TEMPLATE.format(call_id=call_id)
-        )
+        raise PushValidationError(Locale.WEB_CALL_ACTION_COUNT_TEMPLATE.format(call_id=call_id))
     return cast(dict[str, object], decoded)
 
 
@@ -2303,9 +2064,7 @@ def _session_metadata(
     configured_rollout_basename: str,
 ) -> SessionMetadata:
     session_records = [
-        record
-        for record in records
-        if record.value.get(CODEX_TYPE_KEY) == CODEX_SESSION_META_TYPE
+        record for record in records if record.value.get(CODEX_TYPE_KEY) == CODEX_SESSION_META_TYPE
     ]
     if len(session_records) != 1:
         raise PushValidationError(Locale.SESSION_META_COUNT_INVALID)
@@ -2330,8 +2089,7 @@ def _session_metadata(
     )
     rollout_timestamp = local_timestamp.strftime(ROLLOUT_TIMESTAMP_FORMAT)
     rollout_filename = (
-        f"{ROLLOUT_FILENAME_PREFIX}{rollout_timestamp}-{session_id}"
-        f"{ROLLOUT_FILENAME_SUFFIX}"
+        f"{ROLLOUT_FILENAME_PREFIX}{rollout_timestamp}-{session_id}{ROLLOUT_FILENAME_SUFFIX}"
     )
     if rollout_filename != configured_rollout_basename:
         raise PushValidationError(Locale.SESSION_META_ROLLOUT_MISMATCH)
@@ -2392,9 +2150,7 @@ def _eligible_fco_text(record: RolloutRecord, payload: Mapping[str, object]) -> 
         or not isinstance(output[0].get(CODEX_TEXT_KEY), str)
     ):
         raise PushValidationError(
-            Locale.CITED_OUTPUT_BLOCK_INVALID_TEMPLATE.format(
-                line_number=record.line_number
-            )
+            Locale.CITED_OUTPUT_BLOCK_INVALID_TEMPLATE.format(line_number=record.line_number)
         )
     return cast(str, output[0][CODEX_TEXT_KEY])
 
@@ -2429,9 +2185,7 @@ def build_rollout_index(
             call_id = payload.get(CODEX_CALL_ID_KEY)
             if not _valid_nonblank(call_id):
                 raise PushValidationError(
-                    Locale.WEB_CALL_ID_INVALID_TEMPLATE.format(
-                        line_number=record.line_number
-                    )
+                    Locale.WEB_CALL_ID_INVALID_TEMPLATE.format(line_number=record.line_number)
                 )
             calls.setdefault(cast(str, call_id), []).append(record)
         elif (
@@ -2441,9 +2195,7 @@ def build_rollout_index(
             call_id = payload.get(CODEX_CALL_ID_KEY)
             if not _valid_nonblank(call_id):
                 raise PushValidationError(
-                    Locale.WEB_EVENT_CALL_ID_INVALID_TEMPLATE.format(
-                        line_number=record.line_number
-                    )
+                    Locale.WEB_EVENT_CALL_ID_INVALID_TEMPLATE.format(line_number=record.line_number)
                 )
             events.setdefault(cast(str, call_id), []).append(record)
         elif (
@@ -2483,15 +2235,11 @@ def build_rollout_index(
         matching_calls = calls.get(call_id, [])
         matching_events = events.get(call_id, [])
         if len(matching_calls) != 1 or len(matching_events) != 1:
-            raise PushValidationError(
-                Locale.CITED_WEB_CHAIN_COUNT_TEMPLATE.format(call_id=call_id)
-            )
+            raise PushValidationError(Locale.CITED_WEB_CHAIN_COUNT_TEMPLATE.format(call_id=call_id))
         call_record = matching_calls[0]
         event_record = matching_events[0]
         if not (call_record.line_number < event_record.line_number < output_record.line_number):
-            raise PushValidationError(
-                Locale.CITED_WEB_CHAIN_ORDER_TEMPLATE.format(call_id=call_id)
-            )
+            raise PushValidationError(Locale.CITED_WEB_CHAIN_ORDER_TEMPLATE.format(call_id=call_id))
         call_payload = cast(
             dict[str, object],
             call_record.value[CODEX_PAYLOAD_KEY],
@@ -2559,9 +2307,7 @@ def build_rollout_index(
             ]
             if len(matching_results) != 1:
                 raise PushValidationError(
-                    Locale.CITATION_RESULT_COUNT_TEMPLATE.format(
-                        ref_id=section.ref_id
-                    )
+                    Locale.CITATION_RESULT_COUNT_TEMPLATE.format(ref_id=section.ref_id)
                 )
             try:
                 result = CodexTextResult.model_validate(matching_results[0])
@@ -2838,9 +2584,7 @@ def persist_rollout_index(
                 ),
             )
         for turn_ref_row in rollout_index.turn_ref_rows:
-            key_value = (
-                f"{turn_ref_row.call_id}{CUMULATIVE_KEY_SEPARATOR}{turn_ref_row.ref_id}"
-            )
+            key_value = f"{turn_ref_row.call_id}{CUMULATIVE_KEY_SEPARATOR}{turn_ref_row.ref_id}"
             columns = (
                 CODEX_REF_ID_COL,
                 CODEX_CALL_ID_COL,
@@ -2911,16 +2655,12 @@ def persist_rollout_index(
             ).fetchone()
             if integrity_row is None:
                 raise PushValidationError(
-                    Locale.PROVENANCE_INTEGRITY_QUERY_FAILED_TEMPLATE.format(
-                        table_name=table_name
-                    )
+                    Locale.PROVENANCE_INTEGRITY_QUERY_FAILED_TEMPLATE.format(table_name=table_name)
                 )
             total, distinct = integrity_row
             if total != distinct:
                 raise PushValidationError(
-                    Locale.PROVENANCE_UNIQUENESS_FAILED_TEMPLATE.format(
-                        table_name=table_name
-                    )
+                    Locale.PROVENANCE_UNIQUENESS_FAILED_TEMPLATE.format(table_name=table_name)
                 )
 
         linkage_row = conn.execute(
@@ -2991,7 +2731,8 @@ def persist_rollout_index(
 
 def _render_fco_timestamp(value: datetime) -> str:
     return (
-        value.astimezone(timezone.utc)
+        value
+        .astimezone(timezone.utc)
         .isoformat(timespec=FCO_TIMESTAMP_TIMESPEC)
         .replace("+00:00", "Z")
     )
@@ -3199,15 +2940,10 @@ def assess_submission_evidence(
                 excerpt=evidence.excerpt,
             )
             exact_url_candidates = tuple(
-                candidate
-                for candidate in exact_candidates
-                if candidate.url == evidence.url
+                candidate for candidate in exact_candidates if candidate.url == evidence.url
             )
             if exact_url_candidates:
-                if (
-                    len(exact_url_candidates) > 1
-                    and not ALLOW_MULTIPLE_EVIDENCE_MATCHES
-                ):
+                if len(exact_url_candidates) > 1 and not ALLOW_MULTIPLE_EVIDENCE_MATCHES:
                     raise MultipleEvidenceMatches(evidence.excerpt)
                 candidate = (
                     EVIDENCE_RANDOM.choice(exact_url_candidates)
@@ -3249,9 +2985,7 @@ def assess_submission_evidence(
                     evidence_number=evidence_number,
                     submission=evidence,
                     outcome=(
-                        EVIDENCE_OUTCOME_V2_NEAR
-                        if near_candidates
-                        else EVIDENCE_OUTCOME_UNMATCHED
+                        EVIDENCE_OUTCOME_V2_NEAR if near_candidates else EVIDENCE_OUTCOME_UNMATCHED
                     ),
                     match=None,
                     normalized_tokens=normalized_tokens,
@@ -3285,16 +3019,13 @@ def _retry_obligations_from_assessment(
     fields: dict[str, RetryFieldObligation] = {}
     for field, field_submission in submission.evidence_items():
         evidence = [
-            _retry_evidence_obligation(item)
-            for item in assessment.items
-            if item.field == field
+            _retry_evidence_obligation(item) for item in assessment.items if item.field == field
         ]
         fields[field] = RetryFieldObligation(
             value=field_submission.value,
+            standardized_value=field_submission.standardized_value,
             evidence=evidence,
-            accepted=EVIDENCE_ITEMS_ACCEPTED_DEF(
-                tuple(item.outcome for item in evidence)
-            ),
+            accepted=EVIDENCE_ITEMS_ACCEPTED_DEF(tuple(item.outcome for item in evidence)),
         )
     return RetryObligations(fields=fields)
 
@@ -3389,13 +3120,9 @@ def _assessment_public_detail(
         if item.outcome == EVIDENCE_OUTCOME_V2_NEAR:
             lines.append(Locale.EVIDENCE_NEAR_ITEM_TEMPLATE.format(location=location))
         elif item.outcome == EVIDENCE_OUTCOME_UNMATCHED:
-            lines.append(
-                Locale.EVIDENCE_UNMATCHED_ITEM_TEMPLATE.format(location=location)
-            )
+            lines.append(Locale.EVIDENCE_UNMATCHED_ITEM_TEMPLATE.format(location=location))
         elif item.outcome == EVIDENCE_OUTCOME_WITHDRAWN:
-            lines.append(
-                Locale.EVIDENCE_WITHDRAWN_ITEM_TEMPLATE.format(location=location)
-            )
+            lines.append(Locale.EVIDENCE_WITHDRAWN_ITEM_TEMPLATE.format(location=location))
     lines.extend(violations)
     lines.append(Locale.EVIDENCE_RETRY_INSTRUCTION)
     return "\n".join(lines)
@@ -3411,9 +3138,8 @@ def _obligation_item_is_unchanged(
             and current.excerpt == previous.excerpt
             and current.url == previous.url
         )
-    return (
-        previous.outcome == EVIDENCE_OUTCOME_WITHDRAWN
-        and isinstance(current, EvidenceWithdrawal)
+    return previous.outcome == EVIDENCE_OUTCOME_WITHDRAWN and isinstance(
+        current, EvidenceWithdrawal
     )
 
 
@@ -3425,15 +3151,14 @@ def _apply_retry_obligations(
 ) -> tuple[RetryObligations, tuple[str, ...]]:
     next_fields: dict[str, RetryFieldObligation] = {}
     violations: list[str] = []
-    assessed_items = {
-        (item.field, item.index): item for item in assessment.items
-    }
+    assessed_items = {(item.field, item.index): item for item in assessment.items}
     for field, field_submission in submission.evidence_items():
         previous_field = previous.fields[field]
         current_evidence = field_submission.web_search_excerpts
         if previous_field.accepted:
             unchanged = (
                 field_submission.value == previous_field.value
+                and field_submission.standardized_value == previous_field.standardized_value
                 and len(current_evidence) == len(previous_field.evidence)
                 and all(
                     _obligation_item_is_unchanged(previous_item, current_item)
@@ -3446,17 +3171,13 @@ def _apply_retry_obligations(
             )
             if not unchanged:
                 violations.append(
-                    Locale.EVIDENCE_ACCEPTED_FIELD_IMMUTABLE_TEMPLATE.format(
-                        immutable=field
-                    )
+                    Locale.EVIDENCE_ACCEPTED_FIELD_IMMUTABLE_TEMPLATE.format(immutable=field)
                 )
             next_fields[field] = previous_field
             continue
 
         if len(current_evidence) < len(previous_field.evidence):
-            violations.append(
-                Locale.EVIDENCE_COUNT_DECREASED_TEMPLATE.format(field=field)
-            )
+            violations.append(Locale.EVIDENCE_COUNT_DECREASED_TEMPLATE.format(field=field))
 
         next_evidence: list[RetryEvidenceObligation] = []
         withdrew_item = False
@@ -3470,18 +3191,14 @@ def _apply_retry_obligations(
             if previous_item.outcome == EVIDENCE_OUTCOME_V1_EXACT:
                 if not _obligation_item_is_unchanged(previous_item, current_item):
                     violations.append(
-                        Locale.EVIDENCE_EXACT_IMMUTABLE_TEMPLATE.format(
-                            immutable=location
-                        )
+                        Locale.EVIDENCE_EXACT_IMMUTABLE_TEMPLATE.format(immutable=location)
                     )
                 next_evidence.append(previous_item)
                 continue
             if previous_item.outcome == EVIDENCE_OUTCOME_V2_NEAR:
                 if isinstance(current_item, EvidenceWithdrawal):
                     violations.append(
-                        Locale.EVIDENCE_WITHDRAWAL_NOT_ALLOWED_TEMPLATE.format(
-                            location=location
-                        )
+                        Locale.EVIDENCE_WITHDRAWAL_NOT_ALLOWED_TEMPLATE.format(location=location)
                     )
                     next_evidence.append(previous_item)
                     continue
@@ -3496,9 +3213,7 @@ def _apply_retry_obligations(
                     or list(current_tokens) != previous_item.normalized_tokens
                 ):
                     violations.append(
-                        Locale.EVIDENCE_MINOR_CHANGE_ONLY_TEMPLATE.format(
-                            location=location
-                        )
+                        Locale.EVIDENCE_MINOR_CHANGE_ONLY_TEMPLATE.format(location=location)
                     )
                     next_evidence.append(previous_item)
                     continue
@@ -3507,9 +3222,7 @@ def _apply_retry_obligations(
                     EVIDENCE_OUTCOME_V2_NEAR,
                 }:
                     violations.append(
-                        Locale.EVIDENCE_MINOR_CHANGE_ONLY_TEMPLATE.format(
-                            location=location
-                        )
+                        Locale.EVIDENCE_MINOR_CHANGE_ONLY_TEMPLATE.format(location=location)
                     )
                     next_evidence.append(previous_item)
                     continue
@@ -3522,32 +3235,25 @@ def _apply_retry_obligations(
                 continue
             if not isinstance(current_item, EvidenceWithdrawal):
                 violations.append(
-                    Locale.EVIDENCE_WITHDRAWAL_NOT_ALLOWED_TEMPLATE.format(
-                        location=location
-                    )
+                    Locale.EVIDENCE_WITHDRAWAL_NOT_ALLOWED_TEMPLATE.format(location=location)
                 )
             next_evidence.append(previous_item)
 
         for index in range(len(previous_field.evidence), len(current_evidence)):
             assessment_item = assessed_items[(field, index)]
             if isinstance(assessment_item.submission, EvidenceWithdrawal):
-                violations.append(
-                    Locale.EVIDENCE_WITHDRAWAL_WITHOUT_BASELINE
-                )
+                violations.append(Locale.EVIDENCE_WITHDRAWAL_WITHOUT_BASELINE)
             next_evidence.append(_retry_evidence_obligation(assessment_item))
 
         if withdrew_item and field_submission.value == previous_field.value:
             violations.append(
-                Locale.EVIDENCE_WITHDRAWAL_VALUE_UNCHANGED_TEMPLATE.format(
-                    field=field
-                )
+                Locale.EVIDENCE_WITHDRAWAL_VALUE_UNCHANGED_TEMPLATE.format(field=field)
             )
         next_fields[field] = RetryFieldObligation(
             value=field_submission.value,
+            standardized_value=field_submission.standardized_value,
             evidence=next_evidence,
-            accepted=EVIDENCE_ITEMS_ACCEPTED_DEF(
-                tuple(item.outcome for item in next_evidence)
-            ),
+            accepted=EVIDENCE_ITEMS_ACCEPTED_DEF(tuple(item.outcome for item in next_evidence)),
         )
     return RetryObligations(fields=next_fields), tuple(violations)
 
@@ -3559,9 +3265,7 @@ def _assessment_from_audit(
     submission_fields = dict(submission.evidence_items())
     items: list[EvidenceItemAssessment] = []
     for evidence_number, audit_item in enumerate(audit.items, start=1):
-        evidence = submission_fields[audit_item.field].web_search_excerpts[
-            audit_item.index
-        ]
+        evidence = submission_fields[audit_item.field].web_search_excerpts[audit_item.index]
         items.append(
             EvidenceItemAssessment(
                 field=audit_item.field,
@@ -3602,9 +3306,7 @@ def _derive_retry_obligations(
             submission = Submission.model_validate_json(cast(str, submission_json))
             assessment = _assessment_from_audit(
                 submission,
-                EvidenceAttemptAudit.model_validate_json(
-                    cast(str, assessment_json)
-                ),
+                EvidenceAttemptAudit.model_validate_json(cast(str, assessment_json)),
             )
             obligations, violations = _apply_retry_obligations(
                 conn,
@@ -3613,14 +3315,10 @@ def _derive_retry_obligations(
                 obligations,
             )
             if violations:
-                raise PushConfigurationError(
-                    Locale.EVIDENCE_AUDIT_REPLAY_FAILED
-                )
+                raise PushConfigurationError(Locale.EVIDENCE_AUDIT_REPLAY_FAILED)
         return obligations
     except (IndexError, KeyError, ValidationError) as exc:
-        raise PushConfigurationError(
-            Locale.EVIDENCE_AUDIT_REPLAY_FAILED
-        ) from exc
+        raise PushConfigurationError(Locale.EVIDENCE_AUDIT_REPLAY_FAILED) from exc
 
 
 def _process_retry_attempt(
@@ -3693,13 +3391,8 @@ def _process_retry_attempt(
                 baseline_attempt_id,
                 baseline_json,
             ) = baseline_row
-            if (
-                baseline_source_key != source_key
-                or baseline_session_id != session_id
-            ):
-                raise PushValidationError(
-                    Locale.EVIDENCE_RETRY_IDENTITY_MISMATCH
-                )
+            if baseline_source_key != source_key or baseline_session_id != session_id:
+                raise PushValidationError(Locale.EVIDENCE_RETRY_IDENTITY_MISMATCH)
             if inserted_baseline:
                 obligations = initial_obligations
                 violations = tuple(
@@ -3779,9 +3472,7 @@ def _rollout_ref_urls(
     ).fetchall()
     rows_by_ref: dict[str, set[tuple[str, str]]] = {}
     for ref_id, call_id, url in rows:
-        rows_by_ref.setdefault(cast(str, ref_id), set()).add(
-            (cast(str, call_id), cast(str, url))
-        )
+        rows_by_ref.setdefault(cast(str, ref_id), set()).add((cast(str, call_id), cast(str, url)))
     return {
         ref_id: next(iter(ref_rows))[1]
         for ref_id, ref_rows in rows_by_ref.items()
@@ -3804,11 +3495,7 @@ def validate_submission_evidence(
     )
     if assessment.accepted:
         return assessment.validated
-    failed = next(
-        item
-        for item in assessment.items
-        if item.outcome != EVIDENCE_OUTCOME_V1_EXACT
-    )
+    failed = next(item for item in assessment.items if item.outcome != EVIDENCE_OUTCOME_V1_EXACT)
     if isinstance(failed.submission, EvidenceWithdrawal):
         raise PushValidationError(Locale.EVIDENCE_WITHDRAWAL_WITHOUT_BASELINE)
     detail_template = (
@@ -3863,9 +3550,7 @@ def select_columns(row: Mapping[str, object]) -> dict[str, object]:
     missing = [column for column in DOCX_COLUMNS if column not in row]
 
     if missing:
-        raise RuntimeError(
-            Locale.TARGET_ROW_KEYS_MISSING_TEMPLATE.format(keys=", ".join(missing))
-        )
+        raise RuntimeError(Locale.TARGET_ROW_KEYS_MISSING_TEMPLATE.format(keys=", ".join(missing)))
 
     return {column: row[column] for column in DOCX_COLUMNS}
 
@@ -3926,10 +3611,12 @@ def selected_task_identity() -> tuple[str, str]:
 
 
 def _atomic_write_text(path: Path, value: str) -> None:
-    temporary = path.with_name(ATOMIC_TEMP_FILENAME_TEMPLATE.format(
-        filename=path.name,
-        nonce=uuid4().hex,
-    ))
+    temporary = path.with_name(
+        ATOMIC_TEMP_FILENAME_TEMPLATE.format(
+            filename=path.name,
+            nonce=uuid4().hex,
+        )
+    )
     try:
         with temporary.open("x", encoding=TEXT_ENCODING) as stream:
             stream.write(value)
@@ -4025,15 +3712,11 @@ def _source_table_rows(
         ).fetchall()
     except duckdb.Error as exc:
         raise PushValidationError(
-            Locale.SOURCE_DUCKDB_TABLE_MISSING_TEMPLATE.format(
-                table_name=table_name
-            )
+            Locale.SOURCE_DUCKDB_TABLE_MISSING_TEMPLATE.format(table_name=table_name)
         ) from exc
     if len(rows) > 1:
         raise PushValidationError(
-            Locale.SANCTIONED_ROWS_DUPLICATE_TEMPLATE.format(
-                table_name=table_name
-            )
+            Locale.SANCTIONED_ROWS_DUPLICATE_TEMPLATE.format(table_name=table_name)
         )
     if not rows:
         return ()
@@ -4081,11 +3764,16 @@ def load_source_researcher(
     )
     if not xlsx_rows:
         raise PushValidationError(Locale.SANCTIONED_XLSX_CONTEXT_MISSING)
-    draw_numbers = tuple(sorted({
-        str(row[DRAW_LABEL]).strip()
-        for row in (*xlsx_rows, *docx_rows, *ssn_rows)
-        if row.get(DRAW_LABEL) is not None and str(row[DRAW_LABEL]).strip()
-    }, key=_draw_sort_key))
+    draw_numbers = tuple(
+        sorted(
+            {
+                str(row[DRAW_LABEL]).strip()
+                for row in (*xlsx_rows, *docx_rows, *ssn_rows)
+                if row.get(DRAW_LABEL) is not None and str(row[DRAW_LABEL]).strip()
+            },
+            key=_draw_sort_key,
+        )
+    )
     if not draw_numbers:
         raise PushValidationError(Locale.SANCTIONED_DRAW_MISSING)
     return SourceResearcher(
@@ -4364,11 +4052,7 @@ def write_accepted_submission(
             if source_researcher is None
             else ground_truth_for_researcher(source_researcher)
         )
-        response_lines = (
-            (submitted_line,)
-            if truth is None
-            else (submitted_line, json_line(truth))
-        )
+        response_lines = (submitted_line,) if truth is None else (submitted_line, json_line(truth))
         outer_dict = selected_card_outer_dict(source_conn, detour_conn, researcher)
         intro_date = attempt_timestamp.astimezone(ZoneInfo(runtime.pipeline.timezone)).strftime(
             Locale.CARD_INTRO_DATE_FORMAT
@@ -4400,10 +4084,7 @@ def write_accepted_submission(
 
 def validate_transport(request: Request) -> None:
     content_type = (
-        request.headers.get(HTTP_REQUEST_CONTENT_TYPE_HEADER, "")
-        .partition(";")[0]
-        .strip()
-        .lower()
+        request.headers.get(HTTP_REQUEST_CONTENT_TYPE_HEADER, "").partition(";")[0].strip().lower()
     )
     if content_type != JSON_MEDIA_TYPE:
         raise PushValidationError(Locale.REQUEST_CONTENT_TYPE_INVALID)
@@ -4439,18 +4120,14 @@ def pydantic_failure(exc: ValidationError) -> tuple[str | None, str, object]:
     error_location = error.get(PYDANTIC_ERROR_LOCATION_KEY)
     location_items = error_location if isinstance(error_location, tuple) else ()
     field = next(
-        (
-            item
-            for item in location_items
-            if isinstance(item, str) and item in AI_AUGMENT_COLUMNS
-        ),
+        (item for item in location_items if isinstance(item, str) and item in AI_AUGMENT_COLUMNS),
         None,
     )
     if field is None:
         field = next(
             (column for column in AI_AUGMENT_COLUMNS if column in reason),
             None,
-    )
+        )
     failed_input = (
         Locale.PYDANTIC_MISSING_INPUT
         if error.get(PYDANTIC_ERROR_TYPE_KEY) == PYDANTIC_MISSING_ERROR_TYPE
@@ -4627,9 +4304,7 @@ async def push(request: Request) -> StreamingResponse:
                     detour_conn,
                     submission,
                     rollout_filename=rollout_index.session.rollout_filename,
-                    codex_match_version=(
-                        runtime.pipeline.match_rule_version.codex_match
-                    ),
+                    codex_match_version=(runtime.pipeline.match_rule_version.codex_match),
                 )
                 _log_evidence_assessment(
                     evidence_assessment,
@@ -4638,9 +4313,7 @@ async def push(request: Request) -> StreamingResponse:
                 retry_violations: tuple[str, ...] = ()
                 if snapshot.run_id is not None:
                     if snapshot.source_key is None or snapshot.session_id is None:
-                        raise PushConfigurationError(
-                            Locale.EVIDENCE_RETRY_IDENTITY_MISMATCH
-                        )
+                        raise PushConfigurationError(Locale.EVIDENCE_RETRY_IDENTITY_MISMATCH)
                     retry_violations = _process_retry_attempt(
                         detour_conn,
                         run_id=snapshot.run_id,
@@ -4652,12 +4325,9 @@ async def push(request: Request) -> StreamingResponse:
                         assessment=evidence_assessment,
                     )
                 elif any(
-                    item.outcome == EVIDENCE_OUTCOME_WITHDRAWN
-                    for item in evidence_assessment.items
+                    item.outcome == EVIDENCE_OUTCOME_WITHDRAWN for item in evidence_assessment.items
                 ):
-                    retry_violations = (
-                        Locale.EVIDENCE_WITHDRAWAL_WITHOUT_BASELINE,
-                    )
+                    retry_violations = (Locale.EVIDENCE_WITHDRAWAL_WITHOUT_BASELINE,)
                 if not evidence_assessment.accepted or retry_violations:
                     raise EvidenceAssessmentError(
                         Locale.EVIDENCE_SUBMISSION_REJECTED,
