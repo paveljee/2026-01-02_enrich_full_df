@@ -1,11 +1,21 @@
 ## human written - ai never touches this
-### prerequisites and setup
+### environment
 ```bash
 ([ "$PWD" = "/Volumes/home/aicode/2026-01-02_enrich_full_df" ] || exit 1)
 TASK_DIR="$PWD/tasks/tasks-20260731-tighten-api"
 TASK="$TASK_DIR/src/TASK.md"
+WORK="$TASK_DIR/var/WORK.md"
 ```
 
+## after each compaction
+> [!IMPORTANT]
+> Immediately after compaction, refresh TASK/WORK in full.
+
+## always
+> [!IMPORTANT]
+> Remember to keep WORK current at all times - compaction can happen anytime.
+
+### prerequisites and setup
 AI must interpret how it understood this TASK
 as prescribed in `$TASK_DIR/Makefile`,
 whose `make validate` will be used to verify AI's work.
