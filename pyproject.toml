@@ -306,3 +306,42 @@ sudo env \
   "$CONDA_PREFIX/bin/python" -m pytest -vv -srA \
   src/detours/detour_ai_augment/tests
 """
+
+[tool.pixi.feature.detour-ai-augment.tasks.duckdb-export]
+args = [
+  { arg = "input_path", default = "data/scisci_process__detour_ai-augment.duckdb" },
+  { arg = "output_path", default = "data/scisci_process__detour_ai-augment.export" },
+  { arg = "config_path", default = "config_ai_augment.json" },
+]
+cmd = """
+python -c '
+import sys, duckdb
+from pathlib import Path
+from src.helpers.duckdb_extensions import load_duckdb_extension_from_config_path
+
+input_path = sys.argv[1]
+output_path = Path(sys.argv[2])
+config_path = Path(sys.argv[3])
+
+if output_path.exists():
+    sys.exit(f"Export path already exists: {output_path}")
+
+# using chr(39) to avoid conflict with outer single quote
+output_path_str = str(output_path)
+output_path_safe = (
+    chr(39)
+    + output_path_str.replace(chr(39), chr(39) + chr(39))
+    + chr(39)
+)
+
+con = duckdb.connect(input_path, read_only=True)
+try:
+    load_duckdb_extension_from_config_path(con, "splink_udfs", config_path)
+    con.sql(f"EXPORT DATABASE {output_path_safe} (FORMAT csv)")
+finally:
+    con.close()
+
+print(f"Exported {input_path!r} to {str(output_path)!r}")
+' "{{ input_path }}" "{{ output_path }}" "{{ config_path }}"
+"""
+cwd = "."
