@@ -22,6 +22,10 @@ from pydantic import ValidationError
 
 from src.detours.detour_ai_augment.src.backend import api
 from src.detours.detour_ai_augment.src.backend.helpers import codex_parse
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.pydantic_to_paste import (
+    FieldSubmission,
+    WebSearchExcerpt,
+)
 from src.detours.detour_ai_augment.src.backend.helpers.locale import (
     PYDANTIC_TO_PASTE_SOURCE,
     Locale,
@@ -75,6 +79,12 @@ JULY_THUMBNAIL_REF_IDS = (
     "turn0search24",
 )
 MARKDOWN_LITERAL_FIELD_TEMPLATE = "**`{field}`**"
+(
+    FIELD_VALUE_FIELD,
+    FIELD_STANDARDIZED_VALUE_FIELD,
+    FIELD_EVIDENCE_FIELD,
+) = FieldSubmission.model_fields
+EVIDENCE_EXCERPT_FIELD, EVIDENCE_URL_FIELD = WebSearchExcerpt.model_fields
 
 TEST_ROLLOUT_GUEST_PATH = "/home/ai/.codex/sessions/2026/07/31/rollout-chat.jsonl"
 TEST_ROLLOUT_RELATIVE_PATH = PurePosixPath("2026/07/31/rollout-chat.jsonl")
@@ -698,7 +708,7 @@ def historical_haanen_submissions() -> tuple[dict[str, object], dict[str, object
         for column in api.AI_AUGMENT_EVIDENCE_COLUMNS:
             field_submission = submission[column]
             assert isinstance(field_submission, dict)
-            field_submission[api.SUBMISSION_STANDARDIZED_VALUE_KEY] = (
+            field_submission[FIELD_STANDARDIZED_VALUE_FIELD] = (
                 deepcopy(TEST_STANDARDIZED_VALUES[column])
             )
     return rejected_submission, accepted_submission
@@ -2065,29 +2075,29 @@ def test_historical_haanen_retry_preserves_verified_evidence_roundtrip() -> None
             in archived_retry_violations
         )
         assert (
-            original_body[api.KTP_AI_AUGMENT_GENDER_COL][api.SUBMISSION_EVIDENCE_KEY][0][
-                api.SUBMISSION_EXCERPT_KEY
+            original_body[api.KTP_AI_AUGMENT_GENDER_COL][FIELD_EVIDENCE_FIELD][0][
+                EVIDENCE_EXCERPT_FIELD
             ]
             == HAANEN_ORIGINAL_GENDER_EXCERPT
         )
         assert (
-            archived_retry_body[api.KTP_AI_AUGMENT_GENDER_COL][api.SUBMISSION_EVIDENCE_KEY][0][
-                api.SUBMISSION_EXCERPT_KEY
+            archived_retry_body[api.KTP_AI_AUGMENT_GENDER_COL][FIELD_EVIDENCE_FIELD][0][
+                EVIDENCE_EXCERPT_FIELD
             ]
             == HAANEN_RETRY_GENDER_EXCERPT
         )
 
         ideal_retry_body = json.loads(json.dumps(original_body, ensure_ascii=False))
-        ideal_retry_body[api.KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL][api.SUBMISSION_EVIDENCE_KEY][1][
-            api.SUBMISSION_EXCERPT_KEY
+        ideal_retry_body[api.KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL][FIELD_EVIDENCE_FIELD][1][
+            EVIDENCE_EXCERPT_FIELD
         ] = HAANEN_CORRECTED_NEAR_EXCERPT
         changed_items = tuple(
             (field, index)
             for field in api.AI_AUGMENT_EVIDENCE_COLUMNS
             for index, (original, corrected) in enumerate(
                 zip(
-                    original_body[field][api.SUBMISSION_EVIDENCE_KEY],
-                    ideal_retry_body[field][api.SUBMISSION_EVIDENCE_KEY],
+                    original_body[field][FIELD_EVIDENCE_FIELD],
+                    ideal_retry_body[field][FIELD_EVIDENCE_FIELD],
                     strict=True,
                 )
             )

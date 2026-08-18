@@ -75,6 +75,9 @@ class Locale:
     BACKEND_EXITED_EARLY: Final = "backend exited before becoming ready"
     BACKEND_READY_TIMEOUT: Final = "backend did not become ready"
     BACKEND_NOT_RUNNING: Final = "backend is not running"
+    OPENALEX_API_KEY_MISSING: Final = (
+        "OPENALEX_API_KEY is required in the Control Centre environment"
+    )
     AIVM_COMMAND_FAILED_TEMPLATE: Final = (
         "AIVM command failed with exit {return_code}: {stderr}"
     )

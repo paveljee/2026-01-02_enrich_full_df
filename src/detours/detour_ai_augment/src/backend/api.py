@@ -27,7 +27,6 @@ from zoneinfo import ZoneInfo
 
 import duckdb
 import uvicorn
-from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from pydantic import (
@@ -88,22 +87,19 @@ from src.helpers.vars import (
 )
 
 from .helpers import codex_parse
-from .helpers.locale import (
-    AI_AUGMENT_COLUMNS,
-    AI_AUGMENT_EVIDENCE_COLUMNS,
-    EVIDENCE_WITHDRAWAL_ACTION,
-    EVIDENCE_WITHDRAWAL_ACTION_KEY,
-    EVIDENCE_WITHDRAWAL_ATTESTED_KEY,
-    EVIDENCE_WITHDRAWAL_REASON,
-    EVIDENCE_WITHDRAWAL_REASON_KEY,
+from .helpers.data_models.pydantic_to_paste import (
     MAX_PUSH_BODY_BYTES,
-    SUBMISSION_EVIDENCE_KEY,
-    SUBMISSION_EXCERPT_KEY,
-    SUBMISSION_STANDARDIZED_VALUE_KEY,
-    SUBMISSION_URL_KEY,
-    SUBMISSION_VALUE_KEY,
     EvidenceSubmission,
     EvidenceWithdrawal,
+    StandardizedValue,
+    Submission,
+    WebSearchExcerpt,
+)
+from .helpers.data_models.submission_fixture import L_FEI_FEI_FIXTURE
+from .helpers.locale import Locale
+from .helpers.vars import (
+    AI_AUGMENT_COLUMNS,
+    AI_AUGMENT_EVIDENCE_COLUMNS,
     KTP_AI_AUGMENT_ACADEMIC_POSITIONS_COL,
     KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL,
     KTP_AI_AUGMENT_ATTEMPT_ID_COL,
@@ -114,19 +110,11 @@ from .helpers.locale import (
     KTP_AI_AUGMENT_GENDER_COL,
     KTP_AI_AUGMENT_LINKS_COL,
     KTP_AI_AUGMENT_PLACE_OF_RESIDENCE_COL,
+    KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL,
     KTP_AI_AUGMENT_RESEARCHER_AUTHOR_COL,
     KTP_AI_AUGMENT_SESSION_METADATA_COL,
     KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL,
-    L_FEI_FEI_FIXTURE,
-    Locale,
-    StandardizedValue,
-    Submission,
-    WebSearchExcerpt,
 )
-
-REPOSITORY_ROOT = Path(__file__).resolve().parents[5]
-ENV_PATH = REPOSITORY_ROOT / ".env"
-load_dotenv(ENV_PATH)
 
 logger = logging.getLogger(__name__)
 
@@ -379,7 +367,10 @@ EVIDENCE_ITEMS_ACCEPTED_DEF: Callable[[Sequence[str]], bool] = lambda outcomes: 
     )
 )
 EVIDENCE_LOCATION_DEF: Callable[[str, int], str] = lambda field, index: (
-    f"{field}.{SUBMISSION_EVIDENCE_KEY}[{index}]"
+    Locale.EVIDENCE_LOCATION_TEMPLATE.format(
+        field=field,
+        index=index,
+    )
 )
 EVIDENCE_PROGRESS_PRAISE_DEF: Callable[[Sequence[str]], bool] = lambda outcomes: (
     EVIDENCE_OUTCOME_V2_NEAR in outcomes

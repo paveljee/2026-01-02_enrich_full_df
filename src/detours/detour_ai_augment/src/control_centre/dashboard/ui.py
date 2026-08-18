@@ -73,6 +73,7 @@ from ...backend.api import (
     load_source_researcher,
     registered_release_map,
 )
+from ...backend.helpers.vars import OPENALEX_API_KEY_ENV_NAME
 from ...backend.api import (
     RuntimeConfiguration as BackendRuntimeConfiguration,
 )
@@ -202,6 +203,7 @@ CODEX_SESSIONS_ROOT: Final = AIVM_HOME / ".codex" / "sessions"
 CODEX_WORKDIR: Final = AIVM_HOME / "workdir"
 CODEX_WORKBOOK_PATH: Final = CODEX_WORKDIR / "WORKBOOK.md"
 CODEX_PROMPT_PATH: Final = CODEX_WORKDIR / "PROMPT.md"
+CODEX_ENV_PATH: Final = CODEX_WORKDIR / ".openalex.env"
 CODEX_CLI_BIN_PATH: Final = AIVM_HOME / ".local" / "bin" / "codex"
 CODEX_RUN_MARKER_TEMPLATE: Final = ".codex-run-{run_id}.marker"
 CODEX_RUN_PID_TEMPLATE: Final = ".codex-run-{run_id}.pid"
@@ -218,8 +220,10 @@ CODEX_REMOTE_SIGNAL_COMMAND_TEMPLATE: Final = "kill -{signal} -- {remote_pid}"
 CODEX_REMOTE_TERMINATE_SIGNAL: Final = "TERM"
 CODEX_REMOTE_KILL_SIGNAL: Final = "KILL"
 CODEX_REMOTE_EXEC_COMMAND_TEMPLATE: Final = (
-    "printf '%s\\n' \"$$\" > {pid_path}; exec {codex_command} < {prompt_path}"
+    "printf '%s\\n' \"$$\" > {pid_path}; . {environment_path}; "
+    "exec {codex_command} < {prompt_path}"
 )
+CODEX_ENV_EXPORT_TEMPLATE: Final = "export {name}={value}\\n"
 CODEX_REMOTE_WRITE_FILE_COMMAND_TEMPLATE: Final = (
     "mkdir -p -- {parent_path} && umask 077 && cat > {file_path}"
 )
@@ -776,6 +780,9 @@ class RuntimeConfiguration:
         *,
         config_path: Path = DEFAULT_CONFIG_PATH,
     ) -> None:
+        openalex_api_key = os.environ.get(OPENALEX_API_KEY_ENV_NAME, "").strip()
+        if not openalex_api_key:
+            raise RuntimeError(Locale.OPENALEX_API_KEY_MISSING)
         pipeline_config = PipelineConfig.from_json(config_path)
         release_map = registered_release_map(pipeline_config)
         release_batches = load_release_batches(release_map)
@@ -789,6 +796,7 @@ class RuntimeConfiguration:
         finally:
             source_connection.close()
         self._pipeline_config = pipeline_config
+        self._openalex_api_key = openalex_api_key
         self._timezone = ZoneInfo(pipeline_config.timezone)
         self._database_paths = DatabasePaths(
             source_db=pipeline_config.db_file,
@@ -805,6 +813,10 @@ class RuntimeConfiguration:
     @property
     def pipeline_config(self) -> PipelineConfig:
         return self._pipeline_config
+
+    @property
+    def openalex_api_key(self) -> str:
+        return self._openalex_api_key
 
     @property
     def timezone(self) -> ZoneInfo:
@@ -1327,9 +1339,11 @@ class BackendSupervisor:
         *,
         repository_root: Path,
         control_url: str,
+        openalex_api_key: str,
     ) -> None:
         self._repository_root = repository_root
         self._control_url = control_url
+        self._openalex_api_key = openalex_api_key
         self._process: BackendProcessHandle | None = None
         self._status = BackendStatus.STOPPED
 
@@ -1441,6 +1455,7 @@ class BackendSupervisor:
     def environment(self) -> Mapping[str, str]:
         environment = os.environ.copy()
         environment[CONTROL_URL_ENV_NAME] = self._control_url
+        environment[OPENALEX_API_KEY_ENV_NAME] = self._openalex_api_key
         return environment
 
 
@@ -1473,9 +1488,11 @@ class CodexRunner:
         self,
         *,
         timezone: ZoneInfo,
+        openalex_api_key: str,
         openapi_url: str = BACKEND_OPENAPI_URL,
     ) -> None:
         self._timezone = timezone
+        self._openalex_api_key = openalex_api_key
         self._openapi_url = openapi_url
 
     def ssh_connection_command(self) -> tuple[str, ...]:
@@ -1492,6 +1509,7 @@ class CodexRunner:
         pid_path = CODEX_WORKDIR / CODEX_RUN_PID_TEMPLATE.format(run_id=run_id)
         return CODEX_REMOTE_EXEC_COMMAND_TEMPLATE.format(
             pid_path=shlex.quote(str(pid_path)),
+            environment_path=shlex.quote(str(CODEX_ENV_PATH)),
             codex_command=shlex.join(CODEX_EXEC_COMMAND),
             prompt_path=shlex.quote(str(CODEX_PROMPT_PATH)),
         )
@@ -1539,6 +1557,11 @@ class CodexRunner:
             Callable[[CodexProcessHandle], Awaitable[None]] | None
         ) = None,
     ) -> CodexStartResult:
+        environment_bytes = CODEX_ENV_EXPORT_TEMPLATE.format(
+            name=OPENALEX_API_KEY_ENV_NAME,
+            value=shlex.quote(self._openalex_api_key),
+        ).encode(TEXT_ENCODING)
+        await self._write_remote_file(CODEX_ENV_PATH, environment_bytes)
         HOST_WORKBOOK_PATH.parent.mkdir(parents=True, exist_ok=True)
         if not HOST_WORKBOOK_PATH.exists():
             HOST_WORKBOOK_PATH.write_bytes(b"")
@@ -3355,8 +3378,12 @@ def create_services() -> ApplicationServices:
     backend = BackendSupervisor(
         repository_root=REPOSITORY_ROOT,
         control_url=CONTROL_CENTRE_BASE_URL,
+        openalex_api_key=configuration.openalex_api_key,
     )
-    codex = CodexRunner(timezone=configuration.timezone)
+    codex = CodexRunner(
+        timezone=configuration.timezone,
+        openalex_api_key=configuration.openalex_api_key,
+    )
     control_plane = ControlPlane()
     reconciler = AttemptReconciler()
     projector = VariableProjector()

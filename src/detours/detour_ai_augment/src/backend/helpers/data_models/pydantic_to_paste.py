@@ -1,27 +1,29 @@
-from __future__ import annotations
+#!/usr/bin/env python3
 
 # --- pyproject.toml ---
 # [project]
 # requires-python = ">=3.14.2,<3.15"
 # dependencies = [
 #     "pydantic==2.13.4",
-#     "httpx==0.28.1",
 #     "pydantic-extra-types==2.11.1",
 #     "pycountry==24.6.1",
+#     "requests==2.32.5",
 # ]
 
-import httpx
-
+import os
 from datetime import date
 from enum import StrEnum
+from http import HTTPStatus
 from typing import (
     Annotated,
-    Generic,
     Literal,
     Self,
     TypeAlias,
     TypeVar,
+    get_args,
 )
+from urllib.parse import urlsplit
+import requests
 
 from pydantic import (
     AfterValidator,
@@ -36,53 +38,63 @@ from pydantic import (
 )
 
 from pydantic_extra_types.country import CountryAlpha2
+from pydantic_extra_types.language_code import ISO639_3
 
-AI_AUGMENT_COLUMN_PREFIX = "ktp.ai_augment_"
-KTP_AI_AUGMENT_RESEARCHER_AUTHOR_COL = f"{AI_AUGMENT_COLUMN_PREFIX}researcher_author"
-KTP_AI_AUGMENT_PLACE_OF_RESIDENCE_COL = f"{AI_AUGMENT_COLUMN_PREFIX}place_of_residence"
-KTP_AI_AUGMENT_GENDER_COL = f"{AI_AUGMENT_COLUMN_PREFIX}gender"
-KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL = (
-    f"{AI_AUGMENT_COLUMN_PREFIX}age_first_publication_according_to_openalex_profile"
-)
-KTP_AI_AUGMENT_EDUCATION_COL = f"{AI_AUGMENT_COLUMN_PREFIX}education"
-KTP_AI_AUGMENT_ACADEMIC_POSITIONS_COL = f"{AI_AUGMENT_COLUMN_PREFIX}academic_position_s_"
-KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL = f"{AI_AUGMENT_COLUMN_PREFIX}social_capital"
-KTP_AI_AUGMENT_LINKS_COL = f"{AI_AUGMENT_COLUMN_PREFIX}links_"
-KTP_AI_AUGMENT_COMMENTS_COL = f"{AI_AUGMENT_COLUMN_PREFIX}comments"
-AI_AUGMENT_EVIDENCE_COLUMNS = (
-    KTP_AI_AUGMENT_RESEARCHER_AUTHOR_COL,
-    KTP_AI_AUGMENT_PLACE_OF_RESIDENCE_COL,
-    KTP_AI_AUGMENT_GENDER_COL,
-    KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL,
-    KTP_AI_AUGMENT_EDUCATION_COL,
+# OpenAPI hint: patch this
+from ..locale import Locale
+
+# OpenAPI hint: see submission example
+from ..vars import (
     KTP_AI_AUGMENT_ACADEMIC_POSITIONS_COL,
-    KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL,
+    KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL,
+    KTP_AI_AUGMENT_COMMENTS_COL,
+    KTP_AI_AUGMENT_EDUCATION_COL,
+    KTP_AI_AUGMENT_GENDER_COL,
     KTP_AI_AUGMENT_LINKS_COL,
+    KTP_AI_AUGMENT_PLACE_OF_RESIDENCE_COL,
+    KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL,
+    KTP_AI_AUGMENT_RESEARCHER_AUTHOR_COL,
+    KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL,
 )
-AI_AUGMENT_COLUMNS = AI_AUGMENT_EVIDENCE_COLUMNS + (KTP_AI_AUGMENT_COMMENTS_COL,)
 
-SUBMISSION_VALUE_KEY = "value"
-SUBMISSION_STANDARDIZED_VALUE_KEY = "standardized_value"
-SUBMISSION_EVIDENCE_KEY = "web_search_excerpts"
-SUBMISSION_EXCERPT_KEY = "excerpt"
-SUBMISSION_URL_KEY = "url"
-EVIDENCE_WITHDRAWAL_ACTION_KEY = "action"
-EVIDENCE_WITHDRAWAL_REASON_KEY = "reason"
-EVIDENCE_WITHDRAWAL_ATTESTED_KEY = "attested"
-EVIDENCE_WITHDRAWAL_ACTION = "withdraw_unverified_evidence"
-EVIDENCE_WITHDRAWAL_REASON = "not_present_in_web_results"
+MIN_VALUE_CHARACTERS = 1
+MIN_TARGET_WEB_SEARCH_QUERY_LANGUAGES = 1
+MIN_EDUCATION_RECORDS = 1
+MIN_ACADEMIC_POSITIONS = 1
+MIN_SOCIAL_CAPITAL_ITEMS = 1
+MIN_RESEARCHER_LINKS = 1
+MIN_EXCERPT_CHARACTERS = 1
+MIN_URL_CHARACTERS = 1
+MIN_EXCERPTS_PER_FIELD = 1
 
 MAX_PUSH_BODY_BYTES = 2 * 1024 * 1024
 MAX_VALUE_CHARACTERS = MAX_PUSH_BODY_BYTES
 MAX_EXCERPT_CHARACTERS = MAX_PUSH_BODY_BYTES
 MAX_URL_CHARACTERS = MAX_PUSH_BODY_BYTES
 MAX_EXCERPTS_PER_FIELD = MAX_PUSH_BODY_BYTES
+
 EARLIEST_YEAR = 1900
 LATEST_BIRTH_YEAR = 2010  # 2026 minus 16
-EXCERPT_URL_NONBLANK = "excerpt and url must be non-blank"
-VALUE_NONBLANK = "value must be non-blank"
-EXCERPT_PAIRS_UNIQUE = "web_search_excerpts must not contain duplicate pairs"
 
+DEFAULT_TARGET_WEB_SEARCH_QUERY_LANGUAGE = "eng"
+
+OPENALEX_SCHEME = "https"
+OPENALEX_HOST = "api.openalex.org"
+OPENALEX_INSTITUTIONS_PATH = "/institutions"
+EXPORT_OPENALEX_API_KEY = "OPENALEX_API_KEY"
+OPENALEX_PARAMS = {"api_key": None}  # updated later
+OPENALEX_INSTITUTION_NAME_FIELD = "display_name"
+OPENALEX_ROR_FIELD = "ror"
+
+ROR_SCHEME = "https"
+ROR_HOST = "api.ror.org"
+ROR_ORGANIZATIONS_PATH = "/v2/organizations"
+ROR_NAMES_KEY = "names"
+ROR_NAME_VALUE_KEY = "value"
+ROR_NAME_TYPES_KEY = "types"
+ROR_DISPLAY_NAME_TYPE = "ror_display"
+
+INSTITUTION_REQUEST_TIMEOUT_SECONDS = 30.0
 
 T = TypeVar("T")
 
@@ -91,11 +103,14 @@ class StrictModel(BaseModel):
 
 SubmissionText: TypeAlias = Annotated[
     StrictStr,
-    StringConstraints(min_length=1, max_length=MAX_VALUE_CHARACTERS),
+    StringConstraints(
+        min_length=MIN_VALUE_CHARACTERS,
+        max_length=MAX_PUSH_BODY_BYTES,
+    ),
     AfterValidator(
         lambda value: value
         if value.strip()
-        else (_ for _ in ()).throw(ValueError(VALUE_NONBLANK))
+        else (_ for _ in ()).throw(ValueError(Locale.VALUE_NONBLANK))
     ),
 ]
 
@@ -108,13 +123,55 @@ SubmissionValue: TypeAlias = T | NotReported | NotAvailableOrApplicable
 class ResearcherAuthorStandardized(StrictModel):
     first_name: SubmissionValue[SubmissionText]
     last_name: SubmissionValue[SubmissionText]
+    orcid: SubmissionValue[HttpUrl]
+    openalex_id: SubmissionValue[HttpUrl]
 
 
 # KTP_AI_AUGMENT_PLACE_OF_RESIDENCE_COL
+Location: TypeAlias = CountryAlpha2
+
 class PlaceOfResidenceStandardized(StrictModel):
     place: SubmissionValue[SubmissionText]
-    location: SubmissionValue[CountryAlpha2]
+    location: SubmissionValue[Location]
 
+
+# KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL
+Language: TypeAlias = ISO639_3
+
+class CLDRLanguageOfficialStatus(StrEnum):
+    """https://www.unicode.org/cldr/charts/48/supplemental/territory_language_information.html"""
+    OFFICIAL = "official"
+    OFFICIAL_REGIONAL = "official_regional"
+    DE_FACTO_OFFICIAL = "de_facto_official"
+
+class LanguageOfLocation(StrictModel):
+    language: Language
+    official_status: CLDRLanguageOfficialStatus
+    location: Location
+
+LanguagePersonUsesOrUsed: TypeAlias = Language
+LanguagePublicationIsIn: TypeAlias = Language
+LanguageOfPlaceOfResidence: TypeAlias = LanguageOfLocation
+LanguageOfAcademicInstitution: TypeAlias = LanguageOfLocation
+
+TargetWebSearchQueryLanguage: TypeAlias = (
+    LanguagePersonUsesOrUsed
+    | LanguagePublicationIsIn
+    | LanguageOfPlaceOfResidence
+    | LanguageOfAcademicInstitution
+    | Language  # any other relevant
+)
+
+class RaceEthnicityLanguageCultureStandardized(StrictModel):
+    race: NotAvailableOrApplicable  # banned
+    ethnicity: NotAvailableOrApplicable  # banned
+    language: SubmissionValue[
+        list[TargetWebSearchQueryLanguage],
+    ] = Field(
+        min_length=MIN_TARGET_WEB_SEARCH_QUERY_LANGUAGES,
+        default_factory=lambda: [Language(DEFAULT_TARGET_WEB_SEARCH_QUERY_LANGUAGE)],
+    )
+    culture: NotAvailableOrApplicable  # banned
 
 # KTP_AI_AUGMENT_GENDER_COL
 GenderStandardized: TypeAlias = SubmissionValue[
@@ -133,72 +190,104 @@ DateOfBirth: TypeAlias = date
 YearOfFirstPublication: TypeAlias = Year
 DateOfFirstPublication: TypeAlias = date
 AgeStandardized: TypeAlias = SubmissionValue[
-    CurrentAge |
-    YearOfBirth |
-    DateOfBirth |
-    YearOfFirstPublication |
-    DateOfFirstPublication
+    CurrentAge
+    | YearOfBirth
+    | DateOfBirth
+    | YearOfFirstPublication
+    | DateOfFirstPublication
 ]
 
 
 # KTP_AI_AUGMENT_EDUCATION_COL
 class AcademicInstitution(StrictModel):
     organization_name: SubmissionValue[SubmissionText]
-    openalex_id: SubmissionValue[SubmissionText]
-    ror: SubmissionValue[SubmissionText]
+    openalex_id: SubmissionValue[HttpUrl]
+    ror: SubmissionValue[HttpUrl]
 
     @model_validator(mode="after")
     def validate_institution(self) -> Self:
+        nr_or_na = frozenset(
+            get_args(NotReported) + get_args(NotAvailableOrApplicable)
+        )
+
         # OpenAlex
-        if self.openalex_id not in {"NR", "NA"}:
-            r = httpx.get(
-                f"https://api.openalex.org/institutions/{self.openalex_id}",
-                timeout=5,
+        if self.openalex_id not in nr_or_na:
+            OPENALEX_PARAMS.update(
+                api_key=os.getenv(EXPORT_OPENALEX_API_KEY),
             )
-            if r.status_code == 404:
-                raise ValueError(f"unknown OpenAlex institution: {self.openalex_id}")
+            if None in OPENALEX_PARAMS.values():
+                raise ValueError(Locale.OPENALEX_API_KEY_MISSING)
+            openalex_id = (
+                urlsplit(str(self.openalex_id)).path.rstrip("/").rsplit("/", 1)[-1]
+            )
+            r = requests.get(
+                (
+                    f"{OPENALEX_SCHEME}://{OPENALEX_HOST}"
+                    f"{OPENALEX_INSTITUTIONS_PATH}/{openalex_id}"
+                ),
+                params=OPENALEX_PARAMS,
+                timeout=INSTITUTION_REQUEST_TIMEOUT_SECONDS,
+            )
+            if r.status_code == HTTPStatus.NOT_FOUND:
+                raise ValueError(
+                    Locale.OPENALEX_INSTITUTION_UNKNOWN_TEMPLATE.format(
+                        openalex_id=self.openalex_id
+                    )
+                )
             r.raise_for_status()
-
             oa = r.json()
-
             if (
-                self.organization_name not in {"NR", "NA"}
-                and oa["display_name"] != self.organization_name
+                self.organization_name not in nr_or_na
+                and oa[OPENALEX_INSTITUTION_NAME_FIELD] != self.organization_name
             ):
                 raise ValueError(
-                    f"OpenAlex name is {oa['display_name']!r}, "
-                    f"not {self.organization_name!r}"
+                    Locale.OPENALEX_INSTITUTION_NAME_MISMATCH_TEMPLATE.format(
+                        actual=oa[OPENALEX_INSTITUTION_NAME_FIELD],
+                        submitted=self.organization_name,
+                    )
                 )
 
-            if self.ror not in {"NR", "NA"} and oa.get("ror") != self.ror:
+            if (
+                self.ror not in nr_or_na
+                and oa.get(OPENALEX_ROR_FIELD) != str(self.ror)
+            ):
                 raise ValueError(
-                    f"OpenAlex ROR is {oa.get('ror')!r}, not {self.ror!r}"
+                    Locale.OPENALEX_INSTITUTION_ROR_MISMATCH_TEMPLATE.format(
+                        actual=oa.get(OPENALEX_ROR_FIELD),
+                        submitted=self.ror,
+                    )
                 )
 
         # ROR
-        if self.ror not in {"NR", "NA"}:
-            ror_id = self.ror.removeprefix("https://ror.org/")
-            r = httpx.get(
-                f"https://api.ror.org/v2/organizations/{ror_id}",
-                timeout=5,
+        if self.ror not in nr_or_na:
+            ror_id = urlsplit(str(self.ror)).path.rstrip("/").rsplit("/", 1)[-1]
+            r = requests.get(
+                (
+                    f"{ROR_SCHEME}://{ROR_HOST}"
+                    f"{ROR_ORGANIZATIONS_PATH}/{ror_id}"
+                ),
+                timeout=INSTITUTION_REQUEST_TIMEOUT_SECONDS,
             )
-            if r.status_code == 404:
-                raise ValueError(f"unknown ROR institution: {self.ror}")
+            if r.status_code == HTTPStatus.NOT_FOUND:
+                raise ValueError(
+                    Locale.ROR_INSTITUTION_UNKNOWN_TEMPLATE.format(ror=self.ror)
+                )
             r.raise_for_status()
-
             ror = r.json()
             ror_name = next(
-                n["value"]
-                for n in ror["names"]
-                if "ror_display" in n["types"]
+                name[ROR_NAME_VALUE_KEY]
+                for name in ror[ROR_NAMES_KEY]
+                if ROR_DISPLAY_NAME_TYPE in name[ROR_NAME_TYPES_KEY]
             )
-
             if (
-                self.organization_name not in {"NR", "NA"}
+                self.organization_name not in nr_or_na
                 and ror_name != self.organization_name
             ):
                 raise ValueError(
-                    f"ROR name is {ror_name!r}, not {self.organization_name!r}"
+                    Locale.ROR_INSTITUTION_NAME_MISMATCH_TEMPLATE.format(
+                        actual=ror_name,
+                        submitted=self.organization_name,
+                    )
                 )
 
         return self
@@ -223,7 +312,7 @@ class EducationRecord(StrictModel):
 
 EducationStandardized: TypeAlias = SubmissionValue[Annotated[
     list[EducationRecord],
-    Field(min_length=1),
+    Field(min_length=MIN_EDUCATION_RECORDS),
 ]]
 
 
@@ -240,14 +329,14 @@ class CurrentAcademicPosition(StrictModel):
 
 AcademicPositionsStandardized: TypeAlias = SubmissionValue[Annotated[
     list[FormerAcademicPosition | CurrentAcademicPosition],
-    Field(min_length=1),
+    Field(min_length=MIN_ACADEMIC_POSITIONS),
 ]]
 
 
 # KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL
 SocialCapitalStandardized: TypeAlias = SubmissionValue[Annotated[
     list[SubmissionText],
-    Field(min_length=1),
+    Field(min_length=MIN_SOCIAL_CAPITAL_ITEMS),
 ]]
 
 
@@ -258,7 +347,7 @@ class ResearcherLink(StrictModel):
 
 ResearcherLinksStandardized: TypeAlias = SubmissionValue[Annotated[
     list[ResearcherLink],
-    Field(min_length=1),
+    Field(min_length=MIN_RESEARCHER_LINKS),
 ]]
 
 # KTP_AI_AUGMENT_COMMENTS_COL
@@ -267,13 +356,13 @@ ResearcherLinksStandardized: TypeAlias = SubmissionValue[Annotated[
 class WebSearchExcerpt(StrictModel):
     excerpt: StrictStr = Field(
         description="Exact contiguous excerpt copied verbatim from the cited web-tool result.",
-        min_length=1,
+        min_length=MIN_EXCERPT_CHARACTERS,
         max_length=MAX_EXCERPT_CHARACTERS,
         pattern=r"\S",
     )
     url: StrictStr = Field(
         description="Exact URL associated with that web-tool result.",
-        min_length=1,
+        min_length=MIN_URL_CHARACTERS,
         max_length=MAX_URL_CHARACTERS,
         pattern=r"\S",
     )
@@ -281,7 +370,7 @@ class WebSearchExcerpt(StrictModel):
     @model_validator(mode="after")
     def validate_evidence(self) -> Self:
         if not self.excerpt.strip() or not self.url.strip():
-            raise ValueError(EXCERPT_URL_NONBLANK)
+            raise ValueError(Locale.EXCERPT_URL_NONBLANK)
         return self
 
 
@@ -297,6 +386,7 @@ EvidenceSubmission: TypeAlias = WebSearchExcerpt | EvidenceWithdrawal
 StandardizedValue: TypeAlias = (
     ResearcherAuthorStandardized
     | PlaceOfResidenceStandardized
+    | RaceEthnicityLanguageCultureStandardized
     | GenderStandardized
     | AgeStandardized
     | EducationStandardized
@@ -311,7 +401,7 @@ class FieldSubmission(StrictModel):
     value: SubmissionText
     standardized_value: StandardizedValue
     web_search_excerpts: list[EvidenceSubmission] = Field(
-        min_length=1,
+        min_length=MIN_EXCERPTS_PER_FIELD,
         max_length=MAX_EXCERPTS_PER_FIELD,
     )
 
@@ -323,7 +413,7 @@ class FieldSubmission(StrictModel):
             if isinstance(evidence, WebSearchExcerpt)
         ]
         if len(set(evidence_pairs)) != len(evidence_pairs):
-            raise ValueError(EXCERPT_PAIRS_UNIQUE)
+            raise ValueError(Locale.EXCERPT_PAIRS_UNIQUE)
         return self
 
 
@@ -333,6 +423,10 @@ class ResearcherAuthorSubmission(FieldSubmission):
 
 class PlaceOfResidenceSubmission(FieldSubmission):
     standardized_value: PlaceOfResidenceStandardized
+
+
+class RaceEthnicityLanguageCultureSubmission(FieldSubmission):
+    standardized_value: RaceEthnicityLanguageCultureStandardized
 
 
 class GenderSubmission(FieldSubmission):
@@ -372,6 +466,10 @@ class Submission(StrictModel):
         alias=KTP_AI_AUGMENT_PLACE_OF_RESIDENCE_COL,
         description="place of residence from public academic sources.",
     )
+    race_ethnicity_language_culture: RaceEthnicityLanguageCultureSubmission = Field(
+        alias=KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL,
+        description="race/ethnicity/language/culture from public academic sources.",
+    )
     gender: GenderSubmission = Field(
         alias=KTP_AI_AUGMENT_GENDER_COL,
         description="gender from public academic sources.",
@@ -409,6 +507,10 @@ class Submission(StrictModel):
         return (
             (KTP_AI_AUGMENT_RESEARCHER_AUTHOR_COL, self.researcher_author),
             (KTP_AI_AUGMENT_PLACE_OF_RESIDENCE_COL, self.place_of_residence),
+            (
+                KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL,
+                self.race_ethnicity_language_culture,
+            ),
             (KTP_AI_AUGMENT_GENDER_COL, self.gender),
             (KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL, self.age_first_publication),
             (KTP_AI_AUGMENT_EDUCATION_COL, self.education),

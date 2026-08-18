@@ -48,6 +48,7 @@ ROLLOUT_PATH = PurePosixPath(
     "rollout-2026-08-07T00-00-00-019fb000-0000-7000-8000-000000000001.jsonl"
 )
 CONTROL_TIMEZONE = ZoneInfo("UTC")
+TEST_OPENALEX_API_KEY = "test-openalex-api-key"
 
 
 @pytest.fixture
@@ -761,7 +762,10 @@ async def test_cancel_during_codex_startup_stops_the_visible_process(
 async def test_codex_cancel_verifies_remote_and_local_process_exit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    runner = control_ui.CodexRunner(timezone=CONTROL_TIMEZONE)
+    runner = control_ui.CodexRunner(
+        timezone=CONTROL_TIMEZONE,
+        openalex_api_key=TEST_OPENALEX_API_KEY,
+    )
     process = FakeProcess()
     handle = control_ui.CodexProcessHandle(
         run_id=uuid4(),
@@ -827,7 +831,10 @@ async def test_codex_cancel_verifies_remote_and_local_process_exit(
 
 
 def test_codex_ssh_command_has_only_the_approved_reverse_forward() -> None:
-    runner = control_ui.CodexRunner(timezone=CONTROL_TIMEZONE)
+    runner = control_ui.CodexRunner(
+        timezone=CONTROL_TIMEZONE,
+        openalex_api_key=TEST_OPENALEX_API_KEY,
+    )
 
     command = runner.ssh_base_command()
 
@@ -848,7 +855,10 @@ async def test_codex_start_uses_the_same_full_workbook_bytes_in_file_and_prompt(
     workbook_path = tmp_path / "workbook.md"
     workbook_bytes = "First learning.\nUnicode: ’\n".encode()
     workbook_path.write_bytes(workbook_bytes)
-    runner = control_ui.CodexRunner(timezone=CONTROL_TIMEZONE)
+    runner = control_ui.CodexRunner(
+        timezone=CONTROL_TIMEZONE,
+        openalex_api_key=TEST_OPENALEX_API_KEY,
+    )
     remote_writes: list[tuple[PurePosixPath, bytes]] = []
     launched_commands: list[tuple[str, ...]] = []
 
@@ -898,10 +908,31 @@ async def test_codex_start_uses_the_same_full_workbook_bytes_in_file_and_prompt(
     ).encode()
     assert result.session_id == SESSION_ID
     assert remote_writes == [
+        (
+            control_ui.CODEX_ENV_PATH,
+            control_ui.CODEX_ENV_EXPORT_TEMPLATE.format(
+                name=control_ui.OPENALEX_API_KEY_ENV_NAME,
+                value=TEST_OPENALEX_API_KEY,
+            ).encode(),
+        ),
         (control_ui.CODEX_WORKBOOK_PATH, workbook_bytes),
         (control_ui.CODEX_PROMPT_PATH, prompt_bytes),
     ]
     assert len(launched_commands) == 1
     remote_launch = launched_commands[0][-1]
     assert " ".join(control_ui.CODEX_EXEC_COMMAND) in remote_launch
+    assert str(control_ui.CODEX_ENV_PATH) in remote_launch
+    assert TEST_OPENALEX_API_KEY not in remote_launch
     assert str(control_ui.CODEX_PROMPT_PATH) in remote_launch
+
+
+def test_backend_environment_includes_openalex_api_key() -> None:
+    backend = control_ui.BackendSupervisor(
+        repository_root=REPOSITORY_ROOT,
+        control_url=control_ui.CONTROL_CENTRE_BASE_URL,
+        openalex_api_key=TEST_OPENALEX_API_KEY,
+    )
+
+    assert backend.environment()[control_ui.OPENALEX_API_KEY_ENV_NAME] == (
+        TEST_OPENALEX_API_KEY
+    )
