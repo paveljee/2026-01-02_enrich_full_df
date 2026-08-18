@@ -15,6 +15,9 @@ SPECS="$TASK_DIR/build/SPECS.ipynb"
 ## always
 > [!IMPORTANT]
 > Remember to keep WORK current at all times - compaction can happen anytime.
+> WORK should contain sufficient context for what we're currently doing.
+> The TASK/WORK combo should stand alone at all times.
+> WORK should never carry any stale baggage.
 
 ### prerequisites and setup
 AI must interpret how it understood this TASK
