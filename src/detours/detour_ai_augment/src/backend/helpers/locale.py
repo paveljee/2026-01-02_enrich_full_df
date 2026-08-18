@@ -316,6 +316,9 @@ class Locale:
         "evidence-bearing field. Pydantic schema: "
         "\n\n```python\n{}\n```\n\n"
     ).format(PYDANTIC_TO_PASTE_SOURCE)
+    EVIDENCE_RETRY_EXAMPLE_TEMPLATE: Final = (
+        "Complete standardized resubmission example:\n\n```json\n{example}\n```"
+    )
     EVIDENCE_MINOR_CHANGE_ONLY_TEMPLATE: Final = (
         "{location} may receive only a minor textual correction that preserves its "
         "wording and cited URL."

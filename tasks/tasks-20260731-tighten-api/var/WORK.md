@@ -1,417 +1,114 @@
-# Tighten API — planning workbook
+# Tighten API — current handoff
 
-## 2026-08-18 mandatory context refresh
+## Purpose
 
-- After the latest context compaction, re-read `src/TASK.md` in full (137
-  lines), this WORK file in full, the prescribed `legacy/SPEC.md` human slice,
-  the complete prerequisite `tasks/tasks-20260519-review-231/SPEC.md`, the
-  complete task `Makefile`, current `build/AGENTS.md`, `manifest.json`, the
-  operator-staged `manifest.json.old`, current `build/SPECS.ipynb`, and the
-  relevant human decisions/approved UI mockup in the linked architecture chat.
-- The post-legacy evidence-matching revamp is TASK lines 41-137. The current
-  137-line `manifest.json` has null build mappings, while `build/AGENTS.md` and
-  `build/SPECS.ipynb` still represent only the earlier 39-line TASK. They must
-  be rebuilt using atomic requirement-to-evidence units after implementation
-  and focused tests are complete. Do not edit frozen `legacy/SPEC.md`.
-- Detour tests belong only in
-  `src/detours/detour_ai_augment/tests`. The root path
-  `tests/test_detours/test_detour_ai_augment/301_MOVED_PERMANENTLY` explicitly
-  points there, the dedicated Pixi task runs that directory, and pytest excludes
-  it from root discovery. Never move `test_pydantic_to_paste.py` into root
-  `tests/`.
-- Current Pydantic submission-contract files are
-  `backend/helpers/data_models/pydantic_to_paste.py`,
-  `backend/helpers/data_models/submission_fixture.py`, and the detour-local
-  `tests/test_pydantic_to_paste.py`. The static L. Fei-Fei fixture bypasses live
-  institution validation through fixture-only `model_construct`; ordinary
-  `AcademicInstitution.model_validate` retains OpenAlex/ROR checks. Both
-  canonical OpenAlex and ROR URLs are reduced to their terminal URL-path IDs
-  with `urlsplit` before API request URLs are built.
-- Focused verification after the refresh:
-  `pixi run -e detour-ai-augment python -m pytest -q
-  src/detours/detour_ai_augment/tests/test_pydantic_to_paste.py -m 'not
-  real_api'` -> 22 passed, 1 deselected.
-- Git remains read-only. The only current status entry is the operator-owned,
-  staged `A tasks/tasks-20260731-tighten-api/manifest.json.old`; preserve it.
+This file contains only the live context needed to continue the current task after
+compaction. Read this file and `tasks/tasks-20260731-tighten-api/src/TASK.md` in
+full before doing anything else. Together they are the complete handoff; use only
+focused repository lookups for implementation details.
 
-## Status
+## Operating constraints
 
-- The executable-spec workflow is authoritative for all post-legacy additions:
-  immutable human source is `src/TASK.md`; exact instruction routing is
-  `build/AGENTS.md`; executable interpretation/evidence is
-  `build/SPEC.ipynb`; and `manifest.json` maps every source line. Validate from
-  the task directory with `pixi run --frozen make validate`.
-- Completed the one final review of `legacy/SPEC.md`'s AI section against only
-  its legacy human lines 3–207. It remains faithful to that legacy contract and
-  approved refinements, required no edit, and is frozen byte-for-byte from now
-  on. Never fold new executable-workflow additions into the legacy file.
-- Current human source has 39 lines and SHA-256
-  `aca2ef494ec68808fb72defefb5cc9cd84aebacf78a89b03a19d77477a75979d`.
-  Manifest routing sends instruction lines 1–27 and the cross-cutting dedicated-
-  roundtrip rule on line 39 to `build/AGENTS.md`. The six smallest independently
-  verifiable behavior units map to notebook markdown cells 0, 2, 4, 6, 8, and
-  10, each followed immediately by exactly one evidence cell with matching
-  `task_lines`.
-- All six executable additions are implemented with dedicated roundtrips:
-  underscore-bearing field labels and filename subheading values remain
-  literal inline code through TXT, DOCX, and NiceGUI; the main grid and
-  researcher card use compact line spacing with no paragraph block gap; native
-  AG Grid selection visibly highlights the clicked researcher; repeated clicks
-  are idempotent while selection/history persist and a different row changes
-  selection; clearing search remains empty through timer refresh; and a full
-  real-DB researcher card round-trips through production DOCX rendering.
-- The database-backed DOCX evidence deterministically selects the first sorted
-  accepted source key whose assembled card contains XLSX, Codex, DOCX, and SSN
-  procedure sections (currently Sheikh), verifies every source filename, and
-  renders the exact `ResearcherCardRenderer` Markdown used by NiceGUI through
-  `write_cards_zip()` with Pandoc 3.7.0.2 and the configured reference DOCX,
-  saves `data/sample.docx`, and proves complete plain-text equality after the
-  DOCX roundtrip.
-- Latest `make validate`: routing PASS 39/39; notebook PASS (six alternating
-  human/evidence pairs); all six evidence cells PASS.
-- Every evidence cell imports its own dependencies and defines its own
-  prescribed absolute repository path before any derived test path, so
-  `build/SPEC.ipynb` runs standalone and does not depend on validator-injected
-  `REPOSITORY_ROOT` state or another cell's setup.
-- A live Playwright inspection identified the remaining card-spacing cause:
-  NiceGUI's `.nicegui-markdown` computed `white-space: pre-wrap`, so the literal
-  `\n\n` text nodes between marginless Markdown paragraphs occupied two blank
-  lines. The footer now uses normal whitespace for the Markdown container and
-  keeps `pre-wrap` only for `pre`/`code`; the dedicated browser roundtrip
-  measures a 0-pixel gap between consecutive rendered field paragraphs.
-- Filename values containing underscores are now passed through the same
-  literal inline-code renderer as underscore-bearing field labels. TXT/DOCX
-  and browser roundtrips assert both the field label and a filename subheading
-  such as `source_file.xlsx` render as code rather than Markdown emphasis.
-- Current Control Centre source layout is operator-owned and must be preserved:
-  `control_centre/dashboard/ui.py` contains the application and local
-  `NiceGui` literal owner; `dashboard/helpers/aggrid.py` contains `AgGrid`,
-  including AG Grid option/column builders; and
-  `dashboard/helpers/locale.py` contains UI/log/error text. Do not recreate
-  the removed flat `control_centre/ui.py` module or move `NiceGui` again.
-- The latest UI pass uses one stable AG Grid instance and targeted row/column
-  updates, so timer/action updates preserve native search, filters, sorting,
-  cell selection, and scroll state. Researcher cards are loaded only through
-  the explicit View button and cached by source key; responsive card styles
-  wrap long content. Attempt history uses native NiceGUI expansion/table
-  controls, not a custom JavaScript cell renderer or hand-built DOM.
-- Cancellation now registers the SSH/Codex handle immediately after process
-  creation, resolves the remote PID, sends TERM then verified KILL if needed,
-  and always terminates/waits the local SSH process. A cancellation during
-  session discovery is journaled as canceled rather than failed.
-- Current Control Centre unit/browser verification includes explicit literal-
-  label, compact-spacing, native-highlight, persistent-history, selectable-
-  text, card-cache, and no-redraw assertions. The browser E2E preserves child-
-  server diagnostics and removes pytest's NiceGUI screen-test sentinel from
-  the child environment.
-- NiceGUI's clearable search input emits `None` when cleared. The page now
-  normalizes that event to the empty string at the UI boundary, preserving the
-  non-null `UiSelection.search_text` invariant. A focused regression exercises
-  the clear event followed by the periodic timer refresh that previously
-  repeated the `None.casefold()` traceback.
-- The operator's canonical source-DB migration to `ktp.namekey` and
-  `ktp.innerdicts` is complete and tested. Production and tests use only the
-  authoritative columns; no compatibility aliases or fallback queries exist.
-- The operator-authorized canonical rename is wired through the shared data
-  model package (`sourcekey.py`, `outerdict.py`), shared innerdict
-  materializer/loader, detour API/UI, and the removed constant references in
-  source/tests. Logical Python variables and control payload fields named
-  `source_key` remain descriptive protocol/state names; database columns use
-  only `ktp.namekey` and `ktp.innerdicts`.
-- Implementation resumed on 2026-08-07 with the approved SPEC as the active
-  contract. The detour-local map/cohort loader, sanctioned API/workbook flow,
-  Control Centre, and tunnel/dependency wiring are implemented and verified.
-  Existing evidence parsing/indexing and main-pipeline modules remain protected
-  from refactoring.
-- SSH correction from the operator: preserve `ClearAllForwardings=no` in every
-  existing and new detour SSH/SCP command. Do not use
-  `ClearAllForwardings=yes`; it breaks the required forwarding setup.
-- The Control Centre's HTTP comparisons and errors use FastAPI's semantic
-  status constants; route-local or detour-local numeric status-code aliases are
-  not retained. Its Codex CLI argv is likewise centralized in the top-level
-  `CODEX_EXEC_COMMAND` process configuration and shell-joined at use.
-- The detour now has a dedicated `config_ai_augment.json`. Its
-  `files_config["map_subset_0_to_batch"]` entry is required by the detour and
-  must be loaded through `PipelineConfig.from_json()` plus the existing
-  `register_resource()`/`RegisteredResource` seam with
-  `ResourceGroup.KTP_PIPELINE_ARTIFACT`, `FragmentType.CSV_ROW`, and the
-  configured SHA-256. Use the existing imported `DRAW_LABEL` and `BATCH_LABEL`
-  for the CSV schema and reject missing columns or conflicting draw
-  classifications. Identical duplicate draw rows are deduplicated; the real
-  map intentionally contains draw 125 twice as `subset 7`. Keep this
-  requirement detour-local: no edits to `PipelineConfig`, main required-file
-  constants, or main resource loading.
-- Cohort identity and every draw are owned only by common innerdict JSONL.
-  The registered map may classify those innerdict-provided draws but may not
-  supply or replace draws. `card_partitions` supplies only no-ground-truth
-  eligibility flags joined by source key. Verified target invariants are 196
-  ground-truth keys, 78 no-ground-truth keys, no overlap, and 274 total.
-- Source identity is the common innerdict table's canonical `ktp.namekey`.
-  Individual matched innerdict rows may legitimately carry a different name
-  rendering (confirmed for `A. Sheikh`) and must not be required to equal the
-  source-key names; their draw values remain eligible input to the draw set.
-- Production investigation on 2026-08-05: the cumulative 252-line rollout
-  archived by attempt
-  `20260805T200957_806376Z_7d2bb339299a4a9cabe31bec77ca9f87`
-  builds 15 eligible FC/FCO chains and 215 ref rows. Replaying the final eight
-  evidence pairs against a fresh in-memory index gives five valid pairs and
-  three exact-text failures: residence joined `Country of residence` and
-  `Scotland` across separate numbered lines; age used one space before `|`
-  where the source has two; education used ASCII `'` where the source has
-  curly `’`. This is client-side normalization/retyping, not stale indexing or
-  random duplicate selection. Validation stops at residence first.
-- Private server diagnostics now log exact submitted excerpt/URL values for
-  evidence failures and exact rejected input (or `<missing>`) for Pydantic
-  failures. Logging uses repr-safe formatting so line breaks/control
-  characters cannot create misleading log lines. The client 422 body now gives
-  only universal verbatim-copy guidance; it still reveals no failed
-  field/value, expected text, validation order, rollout/index state, or
-  persistence mechanism.
-- Latest rendering clarification: leave the current footnote context/Markdown
-  behavior unchanged. In the human-readable footnote-arguments list only,
-  search calls retain raw arguments. For `open`/`click`, each Codex turn-ref
-  that resolves to one call-scoped row in the current rollout's DuckDB index
-  is preserved and gains its own indexed URL in the same action object. An
-  unresolved/ambiguous turn-ref, direct URL, or other non-turn value passes
-  through unchanged. This is best-effort display enrichment, including for
-  multi-item actions, and never uses the selected output's URL as a substitute.
-  Raw `codex.fc_arguments` provenance remains unchanged in DuckDB.
-- Render `ktp.ai_augment_comments` immediately after `ktp.ai_augment_links_`
-  and before footnotes/arguments by keeping that order in the fresh detour
-  output schema; no compatibility migration is added.
-- Production finding on 2026-08-05: a normal search followed by `open` can
-  place the same exact excerpt and URL in exactly two provenance rows, one
-  `turn...search...` and one `turn...view...`. The latest approved policy
-  allows every multiple match: filter by the submitted exact URL and randomly
-  select one remaining row without action/ref preference. The retained
-  `MultipleEvidenceMatches` path is visibly disabled by the named top-level
-  `ALLOW_MULTIPLE_EVIDENCE_MATCHES = True` switch, not removed; its original
-  test remains present and skipped.
-- Duplicate-evidence random selection uses a dedicated API RNG reseeded inside
-  the serialized push from the required pipeline config's `sample_seed`.
-  Combined with the explicit candidate-ID order and fixed submission
-  traversal, this makes a repeated identical body over a hash-identical
-  rollout select the same provenance rows regardless of prior push history,
-  without mutating the process-global random generator.
-- The accepted production TXT at
-  `data/output/ai_augment_cards_20260805T182923_354844Z_d5ce3bb63b6b477c952728496a99748f/146_A_Sheikh.txt`
-  records the pre-fix behavior: raw cite context rendered source
-  Markdown/newlines and crossed its selected ref marker. The fix is complete at
-  the rendering boundary: preserve raw DuckDB provenance, clamp to the
-  excerpt's side of the selected marker, remove nested Codex citation markup
-  while retaining visible label text, replace line breaks with spaces, and
-  Markdown-escape the source context before applying only the intentional
-  excerpt bold wrapper.
-- Production finding on 2026-08-05: valid direct-web results may omit title,
-  while an `Internal Error` result may omit domain and URL. The authoritative
-  clarification is that only ref ID, ref URL, and cite text are required for an
-  eligible ref; domain/snippet/title/thumbnail are optional provenance.
-- The optional-metadata fix is complete: the typed model and regenerated
-  DuckDB schema preserve nullable domain/snippet/title/thumbnail metadata and
-  skip only no-URL refs. No compatibility path exists for the discarded strict
-  detour DB.
-- Reviewed the major human-contract revamp and updated only the AI-authored section of `SPEC.md`.
-- Reflected the latest sample wording that links each footnote to its numbered raw web-run arguments, FCO timestamp, and exact result URL.
-- Reflected the newer card sample's programmatic `AI-generated text` label, quoted values, footnote placement, and matching comment form.
-- Clarified that each schema `pkey` placeholder means a primary key whose concrete column name is `id`.
-- Latest implementation clarification: the eight non-comment push fields require evidence; comments is optional and accepts only its text value, without web excerpts.
-- The earlier evidence-indexing implementation is complete in `api.py`, new
-  detour-local `codex_parse.py`, Pixi serving-task wiring, and focused
-  `test_api.py` coverage. The specified UI/control/cohort implementation is now
-  present and under final focused verification.
-- `test_api.py` retains the shared `prepare_real_sample_push` setup/flow for accepted and rejected real-rollout cases. Its July excerpts, URLs, and expected FC/FCO/call/ref identities are fixed independently of the production parser.
-- Git use remains read-only. All review commands use `pixi run`.
-- `README.md`, `.env.example`, and sample/ground-truth data remain untouched.
-  Shared-schema edits in the worktree belong to the separately approved
-  canonical-name migration, not a detour compatibility path.
+- `src/TASK.md` is the immutable human specification. Do not edit it.
+- Do not edit the frozen legacy SPEC, README, `.env.example`, sample runs,
+  historical rollout/submission data, or ground-truth data.
+- Every command uses `pixi run`. Git is read-only: do not stage, unstage, commit,
+  reset, checkout, restore, or otherwise mutate Git state.
+- Apply file edits through one complete, reviewable
+  `pixi run apply_patch <<'PATCH' ... PATCH` command.
+- Keep changes surgical. Do not add compatibility fallbacks for discarded
+  schemas/databases and do not create new modules.
+- Human-facing backend wording belongs in
+  `backend/helpers/locale.py`. Tests belong in
+  `src/detours/detour_ai_augment/tests`.
+- Keep this handoff current whenever decisions, staged state, implementation
+  state, or verification results change. Remove superseded material instead of
+  accumulating history.
 
-## Context refreshed
+## Live objective and contract
 
-- After the latest compaction, re-read the complete current SPEC and the complete prerequisite `tasks/tasks-20260519-review-231/SPEC.md` before continuing.
-- Re-read current detour API/parser, deployment/provisioning, appendwatch seams, and the user-restored `test_api.py` baseline; appendwatch/deployment already implement the protected root-run service contract and need no edit absent a failing focused test.
-- Re-read `step_08_match_docx.py`, relevant `docx_parse.py`, `duckdb_utils.py`, common innerdict/data models/procedures, pipeline initialization loaders, `cards.py`, and step 10 card assembly.
-- Re-read `PipelineConfig.from_json()`, `PipelineManager`, `repl_runtime.run_step()`, and the sibling detour-DB derivation/isolation pattern in `detour_step4_breakdown.py`.
-- Confirmed the configured source DuckDB is context only and must remain read-only; Codex relations persist in one separately derived detour DuckDB.
+- Implement all current requirements in TASK, including exhaustive v1/v2 Codex
+  evidence assessment, immutable run-scoped retry baselines, structured
+  withdrawal, standardized retry submissions, persistence/rendering, dedicated
+  roundtrip tests, and executable requirement-to-evidence mapping.
+- A first push is validated with
+  `backend/helpers/data_models/submission.py::Submission`. Its public description
+  and example are the legacy plain contract: every evidence-bearing variable,
+  including race/ethnicity/language/culture, has `value` plus
+  `web_search_excerpts`; optional comments have only `value`.
+- A first Pydantic-valid but evidence-invalid push establishes the immutable
+  baseline. Every later push for that sanctioned run is validated with
+  `pydantic_to_paste.py::StandardizedSubmission`; retry guidance says
+  standardized values are now required and includes that schema plus the full
+  standardized L. Fei-Fei example. Pydantic-invalid first pushes create no
+  baseline.
+- A first push that is fully accepted persists `"NR"` as the standardized value
+  for each evidence-bearing field. This does not require widening the retry
+  schema's object-valued annotations: first-push conversion/persistence and
+  retry validation are separate concerns.
+- Retry immutability applies to raw field values and evidence as specified in
+  TASK. Synthetic first-push NR values must not prevent a retry from supplying
+  required standardized values after an evidence rejection.
+- Each evidence-bearing variable gets a separate
+  `ktp.ai_augment_*_standardized` DuckDB/card field immediately after its plain
+  field. Store deterministic compact JSON for `standardized_value`; attach no
+  duplicate footnotes. Hide only whole null/NA/NR standardized values in card
+  display through a detour-local placeholder extension while retaining them in
+  DuckDB.
+- `pydantic_to_paste.py` remains the standalone schema shown to retrying agents.
+  Ordinary academic-institution validation performs live OpenAlex/ROR checks;
+  static fixture construction alone may bypass those checks with
+  `model_construct`.
+- Standardized scalar/list definitions remain typing aliases. Fixture-only
+  `model_construct` assignments use their underlying validated-compatible
+  scalar/list values directly; do not replace the aliases with Pydantic root
+  models or add generic fixture machinery.
 
-## Repository DB/materialization conventions confirmed
+## Current repository and staged state
 
-- Do **not** use `PipelineManager` for the configured source DB: `connect_db()` opens read/write, sets a memory limit, and loads extensions. Read-only detours instead call `duckdb.connect(path, read_only=True)` and close in `finally`; this is the correct source-DB seam here.
-- Derive exactly one persistent sibling DB per detour with the existing `<source-stem>__detour_<detour-id><suffix>` helper shape. It is cumulative across attempts; never create an attempt-local DB and never detourize/copy the source pipeline DB.
-- The API route is the orchestration owner, analogous to `repl_runtime.run_step()`: it starts/commits/rolls back serialized detour write transactions. Helpers called inside that boundary should not silently own unrelated write transactions.
-- Provenance indexing may commit its own serialized transaction before body validation, as the SPEC explicitly permits rejected attempts to retain appendwatch-approved normalized provenance. Accepted output-row insertion and cumulative `codex_innerdicts` rematerialization must share one later transaction.
-- Follow step 08's SQL-first relation flow and `materialize_innerdicts_from_rows_table()`. The authoritative innerdict table must retain the exact common two-column schema: `ktp.namekey VARCHAR`, `ktp.innerdicts VARCHAR` containing ordered JSONL. The flat source relation must include `ktp.namekey`, contain no HUGEINT columns, and expose deterministic row order before materialization.
-- Load card innerdicts through `append_innerdicts_from_jsonlines_table()` and matching procedures in pipeline order: xlsx, Codex, docx, ssn. Reuse `build_cards()` and `write_cards_zip()` unchanged.
-- Import repository-owned source relation constants (`OUTERDICT_NAME_VIEW`, `SAMPLES_WITH_NAMES_VIEW`, and existing innerdict table constants) from `schema.py`; do not use relation-name string literals or add detour names to main `schema.py`/`vars.py`.
-- Keep the detour writer lock across provenance persistence, evidence lookups, and accepted-output work so a later cumulative prefix cannot enter during current-prefix validation.
+- Current HEAD: `64a06e2 detour ai augment: manually code two fixtures`.
+- Current staged paths:
+  - `backend/helpers/data_models/submission.py`
+  - `backend/helpers/data_models/submission_fixture.py`
+  - `backend/helpers/locale.py`
+  - `backend/helpers/vars.py`
+  - `tasks/tasks-20260731-tighten-api/manifest.json.old`
+  - this WORK file
+- `manifest.json.old` is operator-owned staged history of the former 39-line
+  manifest. Preserve it.
+- Accepted staged model changes currently make comments evidence-free through
+  `CommentsSubmission`, add missing initial researcher-author evidence, add the
+  retry author's ORCID/OpenAlex evidence, add the retry-example locale template,
+  and derive standardized column labels/pairs from the evidence columns.
+- No implementation wiring for the new two-model API flow, standardized
+  persistence, or standardized card rendering has yet been completed.
 
-## Current implementation map and audit findings
+## Current implementation findings
 
-- `api.py` currently has strict Pydantic models for each evidence item/field, a standalone optional evidence-free comments model, explicit eight-field submission aliases, typed compact session metadata, and typed `text_result` metadata.
-- Citation delimiters are named Unicode escapes at the top of `api.py`; detour labels/table names/bounds/context constants are centralized there.
-- Current rollout code reconstructs session filename, accepts only direct `response_item/function_call(name=run, namespace=web)` chains, links unique earlier FC + web-search-end + cited FCO, and builds four normalized row sets.
-- Latest human contract uses generic `codex_turn_ref` provenance for search/open/click refs; preserve optional web-result `thumbnail_url` in its ninth column named exactly `codex.ref_thumbnail_url`. It remains provenance-only.
-- Current DB code creates the four requested normalized relations with stable `id` primary keys/sequences, inserts or byte-compares cumulative IDs transactionally, performs parameterized exact-substring + exact-URL evidence queries with random selection among duplicate exact pairs, and has a flat accepted output backing table/view plus common innerdict materialization.
-- Current card assembly uses the common loaders and intended xlsx -> Codex -> docx -> ssn ordering. Current source connection is read-only and the detour connection is separate/read-write.
-- DB audit corrections are complete: source relations use imported schema constants; persisted call and `(call_id, ref_id)` keys must be a subset of the current prefix; and temporary/real-fixture tests cover JSON/TIMESTAMPTZ round trips, idempotency, exact schemas, and source-DB immutability.
-- Accepted-write ordering now performs output-row insertion and cumulative innerdict materialization before loading ground truth/rendering, while keeping the accepted transaction rollback-capable until ground truth, card ZIP, and response writes all succeed. Any failure removes response/ZIP and rolls back the authoritative row.
-- Pre-revamp API serving enters through the module's required `--config`
-  argument. Its old behavior leaves `/pull` available without a per-chat
-  rollout; the approved control-sanction contract supersedes that behavior and
-  requires both `/pull` and `/push` to fail closed when no run is sanctioned.
-- The real July direct-web rollout is the sole E2E fixture. Do not derive submitted excerpts/URLs or expected FC/FCO/call/ref identities from the production parser. Never mention/use the discarded August rollout and never modify sample data.
+- The operator's latest fixture change preserves standardized typing aliases,
+  assigns their scalar/list values directly under fixture-only
+  `model_construct`, and retains the minimal non-generic `SubmissionFixture`.
+  The previous alias-constructor import failure and generic-annotation mismatch
+  are resolved.
+- The focused Pydantic test currently fails during collection because it unpacks
+  three fields from `schema.FieldSubmission`, which is now the plain two-field
+  first-submission model. Tests must distinguish `FieldSubmission` from the
+  standardized field model.
+- Focused Ruff currently reports 12 findings across the staged files, including
+  import/blank-line formatting and existing long fixture/constant lines. No
+  current lint or test result is green, and no prior count should be relied on.
+- `pixi run git diff --cached --check` passes.
 
-## Revised contract captured in SPEC
+## Next actions
 
-1. Preserve the existing fail-closed order: SCP/publish rollout -> archive and
-   publish the workbook without moving the integrity steps -> copy appendwatch
-   report -> validate copied report -> index approved rollout -> Pydantic/SQL
-   evidence validation -> accepted innerdict/card writes.
-2. Support many `/pull`/`push` cycles in one cumulative rollout. The rollout filename can repeat; each archived physical line count demarcates the prefix used by one attempt.
-3. Keep researcher identity in `ktp.namekey`/draw/name, sourced only from
-   common innerdict records. Store the archive line count in `ktp.fragment`
-   with fragment type `line_number`.
-4. Derive one persistent sibling detour DuckDB from `config.db_file`; open the configured source DB read-only and serialize detour-DB writes.
-5. Pre-index direct `function_call_output` -> unique `web_search_end` -> unique `function_call(name="run", namespace="web")` chains into the four human-specified normalized Codex tables.
-6. Rename current labels to `DOCX_COLUMNS`, add ordered `AI_AUGMENT_COLUMNS`, and require every submitted excerpt to carry its exact result URL.
-7. Validate exact excerpt presence and exact URL equality with parameterized DuckDB queries over the current approved rollout prefix, randomly selecting among multiple rows for that exact pair while the named allow-multiple switch is enabled.
-8. Append one accepted flat Codex row per filename/line-count fragment, then rematerialize cumulative `codex_innerdicts` under the common two-column JSONL contract.
-9. Allow repeated `ktp.namekey` values: multiple accepted attempts for one researcher become multiple Codex sections, distinguished by fragment and explicit attempt ID.
-10. Reuse the existing parser/materializer/card seams: detour-local `codex_parse.py`, step-08-style output/innerdict flow, and `build_cards()`/`write_cards_zip()` with Codex sections between xlsx and docx.
-
-## Approved Control Centre expansion
-
-- Implement the supplied `control_centre/ui.py` skeleton as one NiceGUI + AG
-  Grid operator screen. It owns one serial Codex process, queue/cancel/rerun,
-  UUID run IDs, source-key sanctions, backend lifetime, append-only UI journal,
-  and idle reconciliation against accepted detour-DB rows. `api.py` remains the
-  only detour-DB writer; UI detour reads stop while a sanctioned run can push.
-- Derive runnable researchers from common innerdict `ktp.namekey` values. Collect
-  first/last names and every distinct draw from their JSONL records. Use the
-  verified map only to classify those draws into release batches 1/5/6/7 for
-  the 196 ground-truth keys; explicitly exclude Mercouri G. Kanatzidis. Derive
-  the 78 augmentation keys from card-partition flags joined by source key.
-- The UI control service binds only `127.0.0.1:8611`. It exposes strict current
-  sanction and accepted-acknowledgement routes outside OpenAPI. The API binds
-  `127.0.0.1:8612`; only 8612 is reverse-forwarded to AIVM. Production uses the
-  control endpoint exclusively; `.env` rollout configuration remains only an
-  isolated backend-test fallback when no control URL exists.
-- Each request pins one control snapshot. A missing/invalid/unavailable
-  sanction gives the same generic 503 for both `/pull` and `/push`. Acceptance
-  consumes the sanction; notification failure cannot roll back authoritative
-  accepted output or silently re-enable the run.
-- Dynamic `/pull` emits the sanctioned key's xlsx/ssn context through common
-  loaders, omits docx ground truth and prior Codex attempts, and appends one
-  synthetic null-AI task row. Retries are allowed until one push is accepted.
-- Persist one operator-editable host workbook across runs. Copy it to AIVM at
-  backend initialization and immediately before each Codex execution; use the
-  same full bytes in the AIVM file and prompt. Archive/publish the guest copy
-  with every rollout attempt, but never treat workbook text as evidence.
-- Ground-truth runs return normalized AI values plus mapped DOCX ground truth
-  as two NDJSON lines. No-ground-truth runs return only normalized AI values.
-  Both materialize accepted Codex rows/cards through the existing one-sibling-
-  DuckDB and common loader/materializer/card seams.
-- Required implementation verification covers map registration/hash failure,
-  exact cohort invariants and contracted draws, dynamic pull/no ground-truth
-  leak, queue/journal/reconciliation/workbook behavior, control snapshot and
-  sanction consumption, loopback/tunnel restrictions, conditional response
-  shape, and preservation of the existing July evidence E2E.
-
-## Surgical implementation boundary followed
-
-- Earlier evidence work edited only `api.py`, new detour-local
-  `codex_parse.py`, focused `test_api.py`, AI-authored SPEC/WORK sections, and
-  minimum Pixi serving-task wiring. The task now passes the dedicated
-  `--config config_ai_augment.json` path.
-- `deploy.sh`/`provision.sh` contain only the required protected-service,
-  Codex-installation, and API-tunnel wiring. Appendwatch's monitoring behavior
-  is unchanged; its source/tests received only mechanical lint/type corrections
-  required by the repository-wide lint task.
-- Did not edit `README.md`, `.env.example`, architecture assets, or
-  sample/ground-truth data. The operator-owned canonical-name migration is the
-  only reason shared schema code appears in the surrounding worktree.
-- Keep detour-owned paths, labels, table/view names, citation delimiters, bounds, context setting, and repeated numeric values as named `api.py` globals.
-- Sanctioned dynamic `/pull` is implemented; the former hardcoded task is no
-  longer the production path.
-
-## Verification completed
-
-- `pixi run lint` passes: Ruff reports no findings and mypy reports no issues
-  across 77 source files. Test-double casts are confined to tests whose fakes
-  intentionally stand in for concrete production dependencies; `Any` is
-  confined to the dynamically imported appendwatch fixture boundary where
-  `ModuleType` cannot expose the runtime class attributes to mypy.
-- Current Ruff audit passes for `dashboard/ui.py`, both dashboard helper
-  modules, the API/parser, and focused unit/browser tests.
-- Current Control Centre coverage includes workbook/prompt byte identity, 307
-  authoritative source rows, ready placeholders, disabled categorized
-  ineligible rows, lazy cached cards, stable grid state, native highlighted
-  selection and persistent attempt history, cancellation, responsive browser
-  behavior, selectable cell text, and clear-search normalization through the
-  next timer refresh.
-- `pixi run test-detour-ai-augment-root`: 95 passed, 1 intentionally skipped
-  under the active allow-multiple policy. The root task passes the invoking
-  user's populated Playwright browser cache and Pixi `bin` path through
-  `sudo env`, so both Chromium and Pandoc resolve under root.
-- The task Makefile's own test suite passes: 10 manifest tests and 29 validator
-  tests. Final `make validate` passes all 39 routed lines and all six executable
-  evidence cells.
-- A current-code preview from the production `182923` rollout's
-  `turn15search2` provenance is one line, escapes source Markdown punctuation,
-  retains the bold evidence text, and contains neither a ref ID nor Codex
-  citation markup. The production `175705` finding supplied the concrete
-  duplicate search/view case now covered by random exact-pair selection.
-- The production archive from attempt
-  `20260805T172641_452048Z_ed2407134c944ca08199ac5322303f69` indexes both
-  title-less URL-bearing refs and skips only the cited no-URL internal-error
-  ref.
-- `ruff check` passes for `api.py`, `codex_parse.py`, and `test_api.py`.
-- Focused API suite: 32 passed, 1 skipped. The real July E2E proves 9 FC, 9 FCO, 9 call, and 155 generic ref rows; exact fixed call/ref identities; five preserved thumbnails; output view/common innerdict/card content; two-line response; source-DB byte immutability; and exact accepted-stage order. It exercises TXT and DOCX ZIP selection/reference handling, stubbing only the external Pandoc process for DOCX bytes. Focused coverage includes active random duplicate selection, a file-backed close/reopen roundtrip proving identical config-seeded provenance selection for the same body and candidate rows, the retained/skipped strict multiple-match test, exact private failure-value logging, and copied-report missing/malformed/ambiguous rejection.
-- The same July E2E proves normalized `codex.fc_arguments` remain raw while
-  rendered open/click action objects preserve their turn-ref and add that
-  input ref's call-scoped indexed URL. Renderer coverage also proves
-  independent multi-item enrichment and unchanged pass-through for unresolved
-  turn-refs and direct URL values.
-- The same E2E setup proves a one-character excerpt change and exact-URL change both reject before source DB/ground truth, response, card, or authoritative innerdict writes.
-- Earlier complete non-root detour verification under the required
-  `APPENDWATCH_SCRIPT` environment was 86 passed, 4 skipped (the retained
-  strict multiple-match test plus three root-only watcher cases). The current
-  root Pixi task includes the added roundtrips and is 95 passed, 1 skipped.
-- Independent July persistence smoke: 107 physical records; 9 FC, 9 FCO, 9 calls, 155 refs, 5 non-null thumbnails; a second persistence pass is idempotent.
-- Read-only `git diff --cached --check` passes.
-
-## Backend locale and protocol-literal centralization
-
-- New interpretation rule: every backend label or message intended for a
-  human belongs to
-  `src/detours/detour_ai_augment/src/backend/helpers/locale.py`.
-- `backend/helpers/locale.py` now owns the API/OpenAPI and CLI labels, public
-  error details, Pydantic/operator diagnostics, archive/rollout/provenance
-  validation text, and backend log templates formerly defined inline in
-  `api.py`; API behavior and rendered wording are preserved.
-- Machine-contract values remain in `api.py`. The inline runtime comparison
-  against `"text_result"` is now backed by the named
-  `CODEX_TEXT_RESULT_TYPE` protocol constant; the remaining occurrence is the
-  Pydantic `Literal["text_result"]` type contract rather than a human label.
-- The complete `api.py` quoted-literal audit centralized repeated or semantic
-  protocol keys/values, rollout and attempt states/stages, path/filename and
-  timestamp formats, regexes, media/header names, text encoding, and the GET
-  and POST HTTP methods. Pydantic declaration syntax, enum members, SQL, file
-  modes, punctuation, SSH command syntax in its one shared helper, and local
-  algorithmic ranks/line offsets intentionally remain beside the code they
-  express; attempts to centralize Pydantic model configs, SSH syntax, and
-  one-use numeric ranks were reviewed and rolled back as less readable.
-- `copy_rollout` reuses the existing connection-option builder, removing a
-  duplicate SSH-option block without changing the command contract.
-- `pixi run lint` passes: Ruff reports no findings and mypy reports no issues
-  across 78 source files. `pixi run git diff --check` also passes.
-- Browser E2E servers now use a fresh ephemeral loopback port passed directly
-  to each child process; readiness therefore cannot accidentally succeed
-  against an earlier test's server. Rendered card paragraphs also receive the
-  intended compact line height directly, so the browser assertion no longer
-  receives CSS `normal`/`NaN`. All five browser E2Es passed three consecutive
-  full-module runs.
-- Current `pixi run test-detour-ai-augment-root`: 89 passed, 1 intentionally
-  skipped, 6 failed. All six failures stop while loading the operator-edited
-  `config_ai_augment.json` because its new `match_rule_version.codex_match`
-  key belongs to the pending evidence-matching revamp and is not yet modeled.
-  No browser E2E failed in this root run.
+1. Preserve the operator's accepted fixture/model choices and align the existing
+   focused tests with the separate first/retry models.
+2. Wire baseline-aware plain-versus-standardized body parsing, retry-only public
+   schema/example guidance, and raw-only retry obligations in the existing API.
+3. Add interleaved standardized persistence and placeholder-aware TXT/DOCX/UI
+   card rendering, then implement the remaining TASK evidence-retry behavior.
+4. Run focused tests, `pixi run test-detour-ai-augment-root`, and
+   `pixi run lint`. Record only fresh results here.
+5. Rebuild `build/AGENTS.md`, `build/SPECS.ipynb`, and `manifest.json` under the
+   Makefile's atomic requirement-to-evidence rules, then run
+   `pixi run --frozen make validate` from the task directory.

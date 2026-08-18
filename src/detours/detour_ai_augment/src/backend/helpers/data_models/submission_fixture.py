@@ -9,18 +9,14 @@ from pydantic import BaseModel, HttpUrl
 from ..locale import Locale
 from .pydantic_to_paste import (
     AcademicInstitution,
-    AcademicPositionsStandardized,
     AcademicPositionsSubmission,
     AgeFirstPublicationSubmission,
-    AgeStandardized,
     CommentsSubmission,
     CurrentAcademicPosition,
     EducationRecord,
-    EducationStandardized,
     EducationSubmission,
     FieldSubmission,
     FormerAcademicPosition,
-    GenderStandardized,
     GenderSubmission,
     ISCEDTertiaryLevel,
     PlaceOfResidenceStandardized,
@@ -30,9 +26,7 @@ from .pydantic_to_paste import (
     ResearcherAuthorStandardized,
     ResearcherAuthorSubmission,
     ResearcherLink,
-    ResearcherLinksStandardized,
     ResearcherLinksSubmission,
-    SocialCapitalStandardized,
     SocialCapitalSubmission,
     StandardizedSubmission,
     WebSearchExcerpt,
@@ -86,6 +80,7 @@ L_FEI_FEI_INITIAL_FIXTURE: Final = SubmissionFixture(
     submission=Submission.model_construct(
         researcher_author=FieldSubmission(
             value="Fei-Fei Li; publishes as L. Fei-Fei.",
+            web_search_excerpts=[EVIDENCE_DEF("the name")],
         ),
         place_of_residence=FieldSubmission(
             value="Stanford campus, Stanford, California.",
@@ -183,7 +178,7 @@ L_FEI_FEI_INITIAL_FIXTURE: Final = SubmissionFixture(
                 EVIDENCE_DEF("the AI4ALL link/identifier"),
             ],
         ),
-        comments=FieldSubmission(
+        comments=CommentsSubmission(
             value=(
                 "OpenAlex appears to conflate this author with unrelated researchers "
                 "and institutions; age at first publication is therefore provisional."
@@ -238,6 +233,10 @@ L_FEI_FEI_RETRY_FIXTURE: Final = SubmissionFixture(
 L_FEI_FEI_RETRY_FIXTURE.submission.researcher_author.value += (
     " ORCID 0000-0002-7481-0810; OpenAlex ID A5100450462."
 )
+L_FEI_FEI_RETRY_FIXTURE.submission.researcher_author.web_search_excerpts.extend([
+    EVIDENCE_DEF("the ORCID"),
+    EVIDENCE_DEF("the OpenAlex ID"),
+])
 L_FEI_FEI_RETRY_FIXTURE.submission.researcher_author.standardized_value = ResearcherAuthorStandardized(
     first_name="Fei-Fei",
     last_name="Li",
@@ -254,9 +253,9 @@ L_FEI_FEI_RETRY_FIXTURE.submission.race_ethnicity_language_culture.standardized_
     language=["eng","cmn"],
     culture="NA",
 )
-L_FEI_FEI_RETRY_FIXTURE.submission.gender.standardized_value = GenderStandardized("Woman")
-L_FEI_FEI_RETRY_FIXTURE.submission.age_first_publication.standardized_value = AgeStandardized(1976)
-L_FEI_FEI_RETRY_FIXTURE.submission.education.standardized_value = EducationStandardized([
+L_FEI_FEI_RETRY_FIXTURE.submission.gender.standardized_value = "Woman"
+L_FEI_FEI_RETRY_FIXTURE.submission.age_first_publication.standardized_value = 1976
+L_FEI_FEI_RETRY_FIXTURE.submission.education.standardized_value = [
     EducationRecord.model_construct(
         degree_conferred="B.A. Physics",
         isced_level=ISCEDTertiaryLevel.LEVEL_6,
@@ -275,8 +274,8 @@ L_FEI_FEI_RETRY_FIXTURE.submission.education.standardized_value = EducationStand
         place_conferred=CALTECH,
         year_conferred=2005,
     ),
-])
-L_FEI_FEI_RETRY_FIXTURE.submission.academic_positions.standardized_value = AcademicPositionsStandardized([
+]
+L_FEI_FEI_RETRY_FIXTURE.submission.academic_positions.standardized_value = [
     CurrentAcademicPosition.model_construct(
         academic_position="Sequoia Capital Professor of Computer Science",
         academic_institution=STANFORD,
@@ -305,8 +304,8 @@ L_FEI_FEI_RETRY_FIXTURE.submission.academic_positions.standardized_value = Acade
         academic_position="Co-founder and CEO",
         academic_institution=WORLD_LABS,
     ),
-])
-L_FEI_FEI_RETRY_FIXTURE.submission.social_capital.standardized_value = SocialCapitalStandardized([
+]
+L_FEI_FEI_RETRY_FIXTURE.submission.social_capital.standardized_value = [
     "Founding Co-Director, Stanford HAI",
     "Co-founder and Chair, AI4ALL",
     "Member, National Academy of Engineering",
@@ -315,8 +314,8 @@ L_FEI_FEI_RETRY_FIXTURE.submission.social_capital.standardized_value = SocialCap
     "Member, Council on Foreign Relations",
     "ACM Fellow",
     "United Nations special adviser",
-])
-L_FEI_FEI_RETRY_FIXTURE.submission.links.standardized_value = ResearcherLinksStandardized([
+]
+L_FEI_FEI_RETRY_FIXTURE.submission.links.standardized_value = [
     ResearcherLink(
         url="https://profiles.stanford.edu/fei-fei-li",
         verified_with_orcid=False,
@@ -329,4 +328,4 @@ L_FEI_FEI_RETRY_FIXTURE.submission.links.standardized_value = ResearcherLinksSta
         url="https://ai-4-all.org/our-people/fei-fei-li/",
         verified_with_orcid=False,
     ),
-])
+]

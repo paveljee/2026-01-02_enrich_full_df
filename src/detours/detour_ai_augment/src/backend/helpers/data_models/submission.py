@@ -2,6 +2,7 @@ from pydantic import Field
 
 from .mixin import SubmissionMixin
 from .pydantic_to_paste import (
+    CommentsSubmission,
     FieldSubmission,
     StrictModel,
 )
@@ -61,7 +62,7 @@ class Submission(StrictModel, SubmissionMixin):
     links: FieldSubmission = Field(
         alias=KTP_AI_AUGMENT_LINKS_COL,
     )
-    comments: FieldSubmission | None = Field(
+    comments: CommentsSubmission | None = Field(
         default=None,
         alias=KTP_AI_AUGMENT_COMMENTS_COL,
     )
