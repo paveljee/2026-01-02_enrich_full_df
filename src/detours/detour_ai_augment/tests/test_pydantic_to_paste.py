@@ -16,18 +16,21 @@ pytest.importorskip("pydantic_extra_types")
 from src.detours.detour_ai_augment.src.backend.helpers.data_models import (  # noqa: E402
     pydantic_to_paste as schema,
 )
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.submission import (  # noqa: E402
+    Submission,
+)
 
-REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
 ENV_PATH = REPOSITORY_ROOT / ".env"
 
 TEST_OPENALEX_API_KEY = "test-openalex-api-key"
 TEST_EXCERPT = "Exact cited text."
 TEST_URL = "https://example.test/result"
-(
-    FIELD_VALUE_FIELD,
-    FIELD_STANDARDIZED_VALUE_FIELD,
-    FIELD_EVIDENCE_FIELD,
-) = schema.FieldSubmission.model_fields
+FIELD_VALUE_FIELD, FIELD_EVIDENCE_FIELD = schema.FieldSubmission.model_fields
+(FIELD_STANDARDIZED_VALUE_FIELD,) = (
+    schema.StandardizedFieldSubmission.model_fields.keys()
+    - schema.FieldSubmission.model_fields.keys()
+)
 EVIDENCE_EXCERPT_FIELD, EVIDENCE_URL_FIELD = schema.WebSearchExcerpt.model_fields
 (COMMENTS_VALUE_FIELD,) = schema.CommentsSubmission.model_fields
 TEST_EVIDENCE = [
@@ -274,8 +277,13 @@ def test_l_fei_fei_fixture_builds_without_external_requests(
 
     fixture_module = importlib.reload(fixture_module)
 
-    assert fixture_module.L_FEI_FEI_FIXTURE.identity == ("L.", "Fei-Fei")
-    assert isinstance(fixture_module.L_FEI_FEI_FIXTURE.submission, schema.Submission)
+    assert fixture_module.L_FEI_FEI_INITIAL_FIXTURE.identity == ("L.", "Fei-Fei")
+    assert isinstance(fixture_module.L_FEI_FEI_INITIAL_FIXTURE.submission, Submission)
+    assert fixture_module.L_FEI_FEI_RETRY_FIXTURE.identity == ("L.", "Fei-Fei")
+    assert isinstance(
+        fixture_module.L_FEI_FEI_RETRY_FIXTURE.submission,
+        schema.StandardizedSubmission,
+    )
 
 
 @pytest.mark.real_api

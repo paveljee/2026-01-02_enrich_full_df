@@ -6,6 +6,7 @@ from .vars import (
     PYDANTIC_TO_PASTE_SOURCE,
 )
 
+
 class Locale:
     API_TITLE: Final = "Highly-Cited Researcher Annotation API"
     API_DESCRIPTION: Final = (
@@ -20,7 +21,7 @@ class Locale:
     PULL_RESPONSE_DESCRIPTION: Final = "JSON Lines annotation task"
     PUSH_SUMMARY: Final = "Submit completed annotations"
     PUSH_DESCRIPTION: Final = "Validates and stores the completed submission."
-    PUSH_RESPONSE_DESCRIPTION: Final = "Submission followed by ground truth."
+    PUSH_RESPONSE_DESCRIPTION: Final = "Submission, followed by ground truth if available."
     EXCERPT_URL_NONBLANK = "excerpt and url must be non-blank"
     VALUE_NONBLANK = "value must be non-blank"
     EXCERPT_PAIRS_UNIQUE = "web_search_excerpts must not contain duplicate pairs"

@@ -120,5 +120,15 @@ class Locale:
     SERVICES_NOT_STARTED: Final = "Control Centre services have not started"
 
     READY_LOG_TEMPLATE: Final = "ready at {url}"
+    ARCHIVED_ATTEMPTS_RECONCILED_TEMPLATE: Final = (
+        "archived attempts reconciled into the detour DB: "
+        "inserted {inserted} of {discovered} from {directory}"
+    )
+    ARCHIVED_ATTEMPT_MANIFEST_INVALID_TEMPLATE: Final = (
+        "archived attempt manifest is invalid: {path}"
+    )
+    ARCHIVED_ATTEMPT_ID_MISMATCH_TEMPLATE: Final = (
+        "archived attempt ID does not match its directory: {path}"
+    )
     STOPPING_LOG: Final = "stopping"
     STOPPED_LOG: Final = "stopped"

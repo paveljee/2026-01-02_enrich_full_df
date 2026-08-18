@@ -46,6 +46,9 @@ from src.helpers.vars import (
 
 from ...backend.api import (
     AI_AUGMENT_COLUMNS,
+    ATTEMPT_ID_KEY,
+    ATTEMPT_MANIFEST_FILENAME,
+    ATTEMPTS_DIR,
     CARD_EXCLUDED_COLUMNS,
     CODEX_INNERDICT_TABLE,
     CODEX_OUTPUT_VIEW,
@@ -97,6 +100,16 @@ class NiceGui:
     TEST_ID_PROP_TEMPLATE: Final = "data-testid={test_id}"
 
 
+class ArchivedAttemptManifest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    attempt_id: str
+    stage: str
+    result: str
+    updated_at: str
+    artifacts: dict[str, object]
+
+
 # =============================================================================
 # Paths / process configuration
 # =============================================================================
@@ -112,6 +125,20 @@ DETOUR_DATA_DIR: Final = DETOUR_ROOT / "data"
 DEFAULT_CONFIG_PATH: Final = REPOSITORY_ROOT / "config_ai_augment.json"
 
 RUN_JOURNAL_PATH: Final = DETOUR_DATA_DIR / "control_centre_runs.jsonl"
+ARCHIVED_ATTEMPTS_TABLE: Final = "control_centre_archived_attempts"
+ARCHIVED_ATTEMPT_MANIFEST_COLUMN: Final = "manifest"
+CREATE_ARCHIVED_ATTEMPTS_TABLE_SQL: Final = (
+    f"CREATE TABLE IF NOT EXISTS {ARCHIVED_ATTEMPTS_TABLE} ("
+    f"{ATTEMPT_ID_KEY} VARCHAR PRIMARY KEY, "
+    f"{ARCHIVED_ATTEMPT_MANIFEST_COLUMN} JSON NOT NULL)"
+)
+SELECT_ARCHIVED_ATTEMPT_IDS_SQL: Final = (
+    f"SELECT {ATTEMPT_ID_KEY} FROM {ARCHIVED_ATTEMPTS_TABLE}"
+)
+INSERT_ARCHIVED_ATTEMPT_SQL: Final = (
+    f"INSERT INTO {ARCHIVED_ATTEMPTS_TABLE} "
+    f"({ATTEMPT_ID_KEY}, {ARCHIVED_ATTEMPT_MANIFEST_COLUMN}) VALUES (?, ?)"
+)
 
 BACKEND_PIXI_ENVIRONMENT: Final = "detour-ai-augment"
 BACKEND_PIXI_TASK: Final = "serve"
@@ -1016,6 +1043,88 @@ class DetourRepository:
             str(self._configuration.database_paths.detour_db),
             read_only=True,
         )
+
+    def reconcile_archived_attempts(
+        self,
+        *,
+        attempts_dir: Path = ATTEMPTS_DIR,
+    ) -> tuple[AttemptId, ...]:
+        manifest_paths = tuple(sorted(
+            (
+                path
+                for path in attempts_dir.glob(
+                    f"*/{ATTEMPT_MANIFEST_FILENAME}"
+                )
+                if path.is_file() and not path.is_symlink()
+            ),
+            key=lambda path: path.parent.name,
+        ))
+        manifest_records: list[tuple[ArchivedAttemptManifest, str]] = []
+        for manifest_path in manifest_paths:
+            try:
+                manifest_text = manifest_path.read_text(encoding=TEXT_ENCODING)
+                manifest = ArchivedAttemptManifest.model_validate_json(
+                    manifest_text
+                )
+            except (OSError, ValidationError) as exc:
+                raise RuntimeError(
+                    Locale.ARCHIVED_ATTEMPT_MANIFEST_INVALID_TEMPLATE.format(
+                        path=manifest_path
+                    )
+                ) from exc
+            if manifest.attempt_id != manifest_path.parent.name:
+                raise RuntimeError(
+                    Locale.ARCHIVED_ATTEMPT_ID_MISMATCH_TEMPLATE.format(
+                        path=manifest_path
+                    )
+                )
+            manifest_records.append((manifest, manifest_text))
+
+        connection = duckdb.connect(
+            str(self._configuration.database_paths.detour_db)
+        )
+        try:
+            connection.execute("BEGIN TRANSACTION")
+            connection.execute(CREATE_ARCHIVED_ATTEMPTS_TABLE_SQL)
+            existing_attempt_ids = {
+                str(row[0])
+                for row in connection.execute(
+                    SELECT_ARCHIVED_ATTEMPT_IDS_SQL
+                ).fetchall()
+            }
+            missing_manifest_records = tuple(
+                (manifest, manifest_text)
+                for manifest, manifest_text in manifest_records
+                if manifest.attempt_id not in existing_attempt_ids
+            )
+            if missing_manifest_records:
+                connection.executemany(
+                    INSERT_ARCHIVED_ATTEMPT_SQL,
+                    [
+                        (manifest.attempt_id, manifest_text)
+                        for manifest, manifest_text in missing_manifest_records
+                    ],
+                )
+            connection.execute("COMMIT")
+        except Exception:
+            connection.execute("ROLLBACK")
+            raise
+        finally:
+            connection.close()
+
+        inserted_attempt_ids = tuple(
+            AttemptId(manifest.attempt_id)
+            for manifest, _manifest_text in missing_manifest_records
+        )
+        emit_log(
+            Locale.CONTROL_CENTRE_LOG_PREFIX,
+            Locale.ARCHIVED_ATTEMPTS_RECONCILED_TEMPLATE.format(
+                inserted=len(inserted_attempt_ids),
+                discovered=len(manifest_records),
+                directory=attempts_dir,
+            ),
+        )
+        return inserted_attempt_ids
 
     def load_accepted_attempts(
         self,
@@ -3369,6 +3478,7 @@ def create_services() -> ApplicationServices:
     configuration = RuntimeConfiguration()
     source_repository = SourceRepository(configuration=configuration)
     detour_repository = DetourRepository(configuration=configuration)
+    detour_repository.reconcile_archived_attempts()
     journal = RunJournal()
     card_renderer = ResearcherCardRenderer(
         source_repository=source_repository,

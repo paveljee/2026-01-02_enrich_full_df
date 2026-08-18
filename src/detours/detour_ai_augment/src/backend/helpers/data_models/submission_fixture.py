@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from copy import deepcopy
-from typing import Final
+from typing import Final, Generic, TypeVar
 
 from pydantic import BaseModel, HttpUrl
 
@@ -33,12 +33,14 @@ from .pydantic_to_paste import (
 )
 from .submission import Submission
 
+TSubmission = TypeVar("TSubmission", Submission, StandardizedSubmission)
 
-class SubmissionFixture(BaseModel):
+
+class SubmissionFixture(BaseModel, Generic[TSubmission]):
     """One complete pull identity and its Pydantic-valid push submission."""
 
     identity: tuple[str, str]
-    submission: Submission | StandardizedSubmission
+    submission: TSubmission
 
 
 EVIDENCE_DEF: Final[Callable[[str], WebSearchExcerpt]] = lambda claim: WebSearchExcerpt(
@@ -75,7 +77,7 @@ WORLD_LABS = AcademicInstitution.model_construct(
     openalex_id="NR",
     ror="NR",
 )
-L_FEI_FEI_INITIAL_FIXTURE: Final = SubmissionFixture(
+L_FEI_FEI_INITIAL_FIXTURE: Final[SubmissionFixture[Submission]] = SubmissionFixture(
     identity=("L.", "Fei-Fei"),
     submission=Submission.model_construct(
         researcher_author=FieldSubmission(
@@ -84,12 +86,15 @@ L_FEI_FEI_INITIAL_FIXTURE: Final = SubmissionFixture(
         ),
         place_of_residence=FieldSubmission(
             value="Stanford campus, Stanford, California.",
-            web_search_excerpts=[EVIDENCE_DEF("the value")],
+            web_search_excerpts=[EVIDENCE_DEF("the place of residence")],
         ),
         race_ethnicity_language_culture=FieldSubmission(
             # Note: This variable was not in the original GPT's generation;
             # partially generative and partially manual from later.
-            value="Works primarily in English; Stanford Curriculum Vitae PDF also reports Mandarin. Race, ethnicity, and culture not collected.",
+            value=(
+                "Works primarily in English; Stanford Curriculum Vitae PDF also "
+                "reports Mandarin. Race, ethnicity, and culture not collected."
+            ),
             web_search_excerpts=[
                 EVIDENCE_DEF("English as a target web search language"),
                 EVIDENCE_DEF("Mandarin as a target web search language"),
@@ -97,7 +102,7 @@ L_FEI_FEI_INITIAL_FIXTURE: Final = SubmissionFixture(
         ),
         gender=FieldSubmission(
             value="Female.",
-            web_search_excerpts=[EVIDENCE_DEF("the value")],
+            web_search_excerpts=[EVIDENCE_DEF("the gender")],
         ),
         age_first_publication=FieldSubmission(
             value=(
@@ -157,7 +162,8 @@ L_FEI_FEI_INITIAL_FIXTURE: Final = SubmissionFixture(
                     "the professional membership/honours at the National Academy of Medicine"
                 ),
                 EVIDENCE_DEF(
-                    "the professional membership/honours at the American Academy of Arts and Sciences"
+                    "the professional membership/honours at the American Academy "
+                    "of Arts and Sciences"
                 ),
                 EVIDENCE_DEF(
                     "the professional membership/honours at the Council on Foreign Relations"
@@ -187,7 +193,9 @@ L_FEI_FEI_INITIAL_FIXTURE: Final = SubmissionFixture(
     ),
 )
 # first initialize from initial, then will mutate below
-L_FEI_FEI_RETRY_FIXTURE: Final = SubmissionFixture(
+L_FEI_FEI_RETRY_FIXTURE: Final[
+    SubmissionFixture[StandardizedSubmission]
+] = SubmissionFixture(
     identity=deepcopy(L_FEI_FEI_INITIAL_FIXTURE.identity),
     submission=StandardizedSubmission.model_construct(
         researcher_author=ResearcherAuthorSubmission.model_construct(
@@ -237,21 +245,27 @@ L_FEI_FEI_RETRY_FIXTURE.submission.researcher_author.web_search_excerpts.extend(
     EVIDENCE_DEF("the ORCID"),
     EVIDENCE_DEF("the OpenAlex ID"),
 ])
-L_FEI_FEI_RETRY_FIXTURE.submission.researcher_author.standardized_value = ResearcherAuthorStandardized(
+L_FEI_FEI_RETRY_FIXTURE.submission.researcher_author.standardized_value = (
+    ResearcherAuthorStandardized(
     first_name="Fei-Fei",
     last_name="Li",
-    orcid="https://orcid.org/0000-0002-7481-0810",
-    openalex_id="https://openalex.org/A5100450462",
+    orcid=HttpUrl("https://orcid.org/0000-0002-7481-0810"),
+    openalex_id=HttpUrl("https://openalex.org/A5100450462"),
+    )
 )
-L_FEI_FEI_RETRY_FIXTURE.submission.place_of_residence.standardized_value = PlaceOfResidenceStandardized(
+L_FEI_FEI_RETRY_FIXTURE.submission.place_of_residence.standardized_value = (
+    PlaceOfResidenceStandardized(
     place="Stanford campus, Stanford, California",
     location="US",
+    )
 )
-L_FEI_FEI_RETRY_FIXTURE.submission.race_ethnicity_language_culture.standardized_value = RaceEthnicityLanguageCultureStandardized(
+L_FEI_FEI_RETRY_FIXTURE.submission.race_ethnicity_language_culture.standardized_value = (
+    RaceEthnicityLanguageCultureStandardized(
     race="NA",
     ethnicity="NA",
-    language=["eng","cmn"],
+        language=["eng", "cmn"],
     culture="NA",
+    )
 )
 L_FEI_FEI_RETRY_FIXTURE.submission.gender.standardized_value = "Woman"
 L_FEI_FEI_RETRY_FIXTURE.submission.age_first_publication.standardized_value = 1976
@@ -317,15 +331,15 @@ L_FEI_FEI_RETRY_FIXTURE.submission.social_capital.standardized_value = [
 ]
 L_FEI_FEI_RETRY_FIXTURE.submission.links.standardized_value = [
     ResearcherLink(
-        url="https://profiles.stanford.edu/fei-fei-li",
+        url=HttpUrl("https://profiles.stanford.edu/fei-fei-li"),
         verified_with_orcid=False,
     ),
     ResearcherLink(
-        url="https://openalex.org/A5100450462",
+        url=HttpUrl("https://openalex.org/A5100450462"),
         verified_with_orcid=False,
     ),
     ResearcherLink(
-        url="https://ai-4-all.org/our-people/fei-fei-li/",
+        url=HttpUrl("https://ai-4-all.org/our-people/fei-fei-li/"),
         verified_with_orcid=False,
     ),
 ]

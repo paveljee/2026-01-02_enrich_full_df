@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from random import Random
-from typing import Any, Callable, Literal, Self, cast
+from typing import Any, Callable, Literal, Self, TypeAlias, cast, get_args
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 from urllib.parse import urlsplit
@@ -72,6 +72,7 @@ from src.helpers.vars import (
     DOCX_ROW_INDEX_COL,
     DOCX_TABLE_INDEX_COL,
     DRAW_LABEL,
+    KTP_DOCX_OPTIONAL_EMPTY_COLS,
     KTP_FILENAME_COL,
     KTP_FIRST_NAME_COL,
     KTP_FRAGMENT_COL,
@@ -84,6 +85,7 @@ from src.helpers.vars import (
     KTP_PARTITION_FLAG_SSN_COUNT_COL,
     KTP_PARTITION_FLAG_XLSX_NON_EXACT_ANY_COL,
     KTP_PARTITION_SSN_VALUE,
+    KTP_TABLE_1_EMPTY_VALUE_PLACEHOLDERS,
 )
 
 from .helpers import codex_parse
@@ -91,15 +93,28 @@ from .helpers.data_models.pydantic_to_paste import (
     MAX_PUSH_BODY_BYTES,
     EvidenceSubmission,
     EvidenceWithdrawal,
+    FieldSubmission,
+    NotAvailableOrApplicable,
+    NotReported,
+    PlaceOfResidenceStandardized,
+    RaceEthnicityLanguageCultureStandardized,
+    ResearcherAuthorStandardized,
+    StandardizedFieldSubmission,
+    StandardizedSubmission,
     StandardizedValue,
-    Submission,
     WebSearchExcerpt,
 )
-from .helpers.data_models.submission_fixture import L_FEI_FEI_FIXTURE
+from .helpers.data_models.submission import Submission
+from .helpers.data_models.submission_fixture import (
+    L_FEI_FEI_INITIAL_FIXTURE,
+    L_FEI_FEI_RETRY_FIXTURE,
+)
 from .helpers.locale import Locale
 from .helpers.vars import (
     AI_AUGMENT_COLUMNS,
     AI_AUGMENT_EVIDENCE_COLUMNS,
+    AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS,
+    AI_AUGMENT_STANDARDIZED_COLUMNS,
     KTP_AI_AUGMENT_ACADEMIC_POSITIONS_COL,
     KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL,
     KTP_AI_AUGMENT_ATTEMPT_ID_COL,
@@ -491,6 +506,43 @@ CODEX_EVIDENCE_ACCEPTED_COL = "accepted"
 CODEX_EVIDENCE_AUDIT_ID_COL = "id"
 CODEX_TOKEN_EXTENSION = "splink_udfs"
 
+NOT_REPORTED_VALUE = get_args(NotReported)[0]
+NOT_AVAILABLE_OR_APPLICABLE_VALUE = get_args(NotAvailableOrApplicable)[0]
+STANDARDIZED_VALUE_FIELD = next(
+    field
+    for field in StandardizedFieldSubmission.model_fields
+    if field not in FieldSubmission.model_fields
+)
+INITIAL_STANDARDIZED_VALUES: Mapping[str, StandardizedValue] = {
+    KTP_AI_AUGMENT_RESEARCHER_AUTHOR_COL: ResearcherAuthorStandardized(
+        first_name=NOT_REPORTED_VALUE,
+        last_name=NOT_REPORTED_VALUE,
+        orcid=NOT_REPORTED_VALUE,
+        openalex_id=NOT_REPORTED_VALUE,
+    ),
+    KTP_AI_AUGMENT_PLACE_OF_RESIDENCE_COL: PlaceOfResidenceStandardized(
+        place=NOT_REPORTED_VALUE,
+        location=NOT_REPORTED_VALUE,
+    ),
+    KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL: (
+        RaceEthnicityLanguageCultureStandardized(
+            race=NOT_AVAILABLE_OR_APPLICABLE_VALUE,
+            ethnicity=NOT_AVAILABLE_OR_APPLICABLE_VALUE,
+            language=NOT_REPORTED_VALUE,
+            culture=NOT_AVAILABLE_OR_APPLICABLE_VALUE,
+        )
+    ),
+    KTP_AI_AUGMENT_GENDER_COL: NOT_REPORTED_VALUE,
+    KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL: NOT_REPORTED_VALUE,
+    KTP_AI_AUGMENT_EDUCATION_COL: NOT_REPORTED_VALUE,
+    KTP_AI_AUGMENT_ACADEMIC_POSITIONS_COL: NOT_REPORTED_VALUE,
+    KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL: NOT_REPORTED_VALUE,
+    KTP_AI_AUGMENT_LINKS_COL: NOT_REPORTED_VALUE,
+}
+AI_AUGMENT_CARD_EMPTY_VALUE_PLACEHOLDERS = (
+    KTP_TABLE_1_EMPTY_VALUE_PLACEHOLDERS | {NOT_AVAILABLE_OR_APPLICABLE_VALUE}
+)
+
 DRAW_NUMBER_COLUMN = DRAW_LABEL
 TARGET_DRAW_NUMBER = "146"
 FRAGMENT_TYPE_COLUMN = KTP_FRAGMENT_TYPE_COL
@@ -499,6 +551,10 @@ ROLLOUT_LINE_FRAGMENT_TYPE = FragmentType.LINE_NUMBER.value
 DOCX_TO_AI_AUGMENT_COLUMNS = (
     ("ktp.table_1_researcher_author", KTP_AI_AUGMENT_RESEARCHER_AUTHOR_COL),
     ("ktp.table_1_place_of_residence", KTP_AI_AUGMENT_PLACE_OF_RESIDENCE_COL),
+    (
+        "ktp.table_1_race_ethnicity_language_culture",
+        KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL,
+    ),
     ("ktp.table_1_gender", KTP_AI_AUGMENT_GENDER_COL),
     (
         "ktp.table_1_age_first_publication_according_to_openalex_profile",
@@ -521,7 +577,14 @@ CODEX_OUTPUT_SCHEMA = (
     (KTP_LAST_NAME_COL, "VARCHAR NOT NULL"),
     (KTP_AI_AUGMENT_ATTEMPT_ID_COL, "VARCHAR NOT NULL UNIQUE"),
     (KTP_AI_AUGMENT_SESSION_METADATA_COL, "VARCHAR NOT NULL"),
-    *((column, "VARCHAR NOT NULL") for column in AI_AUGMENT_EVIDENCE_COLUMNS),
+    *(
+        definition
+        for plain_column, standardized_column in AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS
+        for definition in (
+            (plain_column, "VARCHAR NOT NULL"),
+            (standardized_column, "VARCHAR NOT NULL"),
+        )
+    ),
     (KTP_AI_AUGMENT_COMMENTS_COL, "VARCHAR"),
     (KTP_AI_AUGMENT_FOOTNOTES_COL, "VARCHAR NOT NULL"),
     (KTP_AI_AUGMENT_FOOTNOTE_ARGUMENTS_COL, "VARCHAR NOT NULL"),
@@ -614,12 +677,30 @@ class ControlAcceptedResponse(BaseModel):
     acknowledged: bool
 
 
-EVIDENCE_SUBMISSION_EXAMPLE = L_FEI_FEI_FIXTURE.submission.model_dump(
+SubmissionPayload: TypeAlias = Submission | StandardizedSubmission
+
+EVIDENCE_SUBMISSION_EXAMPLE = L_FEI_FEI_INITIAL_FIXTURE.submission.model_dump(
     by_alias=True,
     mode="json",
 )
-SUBMISSION_EXAMPLE: dict[str, object] = L_FEI_FEI_FIXTURE.submission.normalized_values()
-PULL_EXAMPLE_FIRST_NAME, PULL_EXAMPLE_LAST_NAME = L_FEI_FEI_FIXTURE.identity
+RETRY_EVIDENCE_SUBMISSION_EXAMPLE = L_FEI_FEI_RETRY_FIXTURE.submission.model_dump(
+    by_alias=True,
+    mode="json",
+)
+RETRY_SUBMISSION_PUBLIC_GUIDANCE = (
+    Locale.EVIDENCE_RETRY_STANDARDIZED_VALUES
+    + Locale.EVIDENCE_RETRY_EXAMPLE_TEMPLATE.format(
+        example=json.dumps(
+            RETRY_EVIDENCE_SUBMISSION_EXAMPLE,
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+)
+SUBMISSION_EXAMPLE: dict[str, object] = (
+    dict[str, object](L_FEI_FEI_INITIAL_FIXTURE.submission.normalized_values())
+)
+PULL_EXAMPLE_FIRST_NAME, PULL_EXAMPLE_LAST_NAME = L_FEI_FEI_INITIAL_FIXTURE.identity
 NULL_SUBMISSION_EXAMPLE = {
     KTP_FIRST_NAME_COL: PULL_EXAMPLE_FIRST_NAME,
     KTP_LAST_NAME_COL: PULL_EXAMPLE_LAST_NAME,
@@ -696,7 +777,6 @@ class RetryFieldObligation(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     value: StrictStr
-    standardized_value: StandardizedValue
     evidence: list[RetryEvidenceObligation]
     accepted: bool
 
@@ -2902,7 +2982,7 @@ def _candidate_match(
 
 def assess_submission_evidence(
     conn: duckdb.DuckDBPyConnection,
-    submission: Submission,
+    submission: SubmissionPayload,
     *,
     rollout_filename: str,
     codex_match_version: int,
@@ -3004,7 +3084,7 @@ def _retry_evidence_obligation(
 
 
 def _retry_obligations_from_assessment(
-    submission: Submission,
+    submission: SubmissionPayload,
     assessment: EvidenceAssessment,
 ) -> RetryObligations:
     fields: dict[str, RetryFieldObligation] = {}
@@ -3014,7 +3094,6 @@ def _retry_obligations_from_assessment(
         ]
         fields[field] = RetryFieldObligation(
             value=field_submission.value,
-            standardized_value=field_submission.standardized_value,
             evidence=evidence,
             accepted=EVIDENCE_ITEMS_ACCEPTED_DEF(tuple(item.outcome for item in evidence)),
         )
@@ -3091,6 +3170,7 @@ def _assessment_public_detail(
     assessment: EvidenceAssessment,
     *,
     violations: Sequence[str] = (),
+    include_retry_contract: bool = False,
 ) -> str:
     total = len(assessment.items)
     outcomes = tuple(item.outcome for item in assessment.items)
@@ -3116,6 +3196,8 @@ def _assessment_public_detail(
             lines.append(Locale.EVIDENCE_WITHDRAWN_ITEM_TEMPLATE.format(location=location))
     lines.extend(violations)
     lines.append(Locale.EVIDENCE_RETRY_INSTRUCTION)
+    if include_retry_contract:
+        lines.append(RETRY_SUBMISSION_PUBLIC_GUIDANCE)
     return "\n".join(lines)
 
 
@@ -3136,7 +3218,7 @@ def _obligation_item_is_unchanged(
 
 def _apply_retry_obligations(
     conn: duckdb.DuckDBPyConnection,
-    submission: Submission,
+    submission: StandardizedSubmission,
     assessment: EvidenceAssessment,
     previous: RetryObligations,
 ) -> tuple[RetryObligations, tuple[str, ...]]:
@@ -3149,7 +3231,6 @@ def _apply_retry_obligations(
         if previous_field.accepted:
             unchanged = (
                 field_submission.value == previous_field.value
-                and field_submission.standardized_value == previous_field.standardized_value
                 and len(current_evidence) == len(previous_field.evidence)
                 and all(
                     _obligation_item_is_unchanged(previous_item, current_item)
@@ -3242,7 +3323,6 @@ def _apply_retry_obligations(
             )
         next_fields[field] = RetryFieldObligation(
             value=field_submission.value,
-            standardized_value=field_submission.standardized_value,
             evidence=next_evidence,
             accepted=EVIDENCE_ITEMS_ACCEPTED_DEF(tuple(item.outcome for item in next_evidence)),
         )
@@ -3250,7 +3330,7 @@ def _apply_retry_obligations(
 
 
 def _assessment_from_audit(
-    submission: Submission,
+    submission: StandardizedSubmission,
     audit: EvidenceAttemptAudit,
 ) -> EvidenceAssessment:
     submission_fields = dict(submission.evidence_items())
@@ -3294,7 +3374,9 @@ def _derive_retry_obligations(
             [run_id, baseline_attempt_id],
         ).fetchall()
         for submission_json, assessment_json in rows:
-            submission = Submission.model_validate_json(cast(str, submission_json))
+            submission = StandardizedSubmission.model_validate_json(
+                cast(str, submission_json)
+            )
             assessment = _assessment_from_audit(
                 submission,
                 EvidenceAttemptAudit.model_validate_json(cast(str, assessment_json)),
@@ -3320,7 +3402,7 @@ def _process_retry_attempt(
     session_id: str,
     attempt_id: str,
     attempt_timestamp: datetime,
-    submission: Submission,
+    submission: SubmissionPayload,
     assessment: EvidenceAssessment,
 ) -> tuple[str, ...]:
     run_id_text = str(run_id)
@@ -3398,6 +3480,8 @@ def _process_retry_attempt(
                     baseline_attempt_id=cast(str, baseline_attempt_id),
                     run_id=run_id_text,
                 )
+                if not isinstance(submission, StandardizedSubmission):
+                    raise PushConfigurationError(Locale.EVIDENCE_AUDIT_REPLAY_FAILED)
                 _next_obligations, violations = _apply_retry_obligations(
                     conn,
                     submission,
@@ -3441,6 +3525,30 @@ def _process_retry_attempt(
         raise
 
 
+def _retry_baseline_exists(
+    conn: duckdb.DuckDBPyConnection,
+    *,
+    run_id: UUID,
+    source_key: str,
+    session_id: str,
+) -> bool:
+    row = conn.execute(
+        f"""
+        SELECT
+            {duckdb_quote_identifier(CODEX_RETRY_SOURCEKEY_COL)},
+            {duckdb_quote_identifier(CODEX_RETRY_SESSION_ID_COL)}
+        FROM {CODEX_RETRY_BASELINE_TABLE}
+        WHERE {duckdb_quote_identifier(CODEX_RETRY_RUN_ID_COL)} = ?
+        """,
+        [str(run_id)],
+    ).fetchone()
+    if row is None:
+        return False
+    if row != (source_key, session_id):
+        raise PushValidationError(Locale.EVIDENCE_RETRY_IDENTITY_MISMATCH)
+    return True
+
+
 def _rollout_ref_urls(
     conn: duckdb.DuckDBPyConnection,
     *,
@@ -3473,7 +3581,7 @@ def _rollout_ref_urls(
 
 def validate_submission_evidence(
     conn: duckdb.DuckDBPyConnection,
-    submission: Submission,
+    submission: SubmissionPayload,
     *,
     rollout_filename: str,
     codex_match_version: int = 1,
@@ -3803,7 +3911,11 @@ def sanctioned_pull_lines(researcher: SourceResearcher) -> Iterator[str]:
 def ground_truth_for_researcher(researcher: SourceResearcher) -> dict[str, object] | None:
     if researcher.cohort == NO_GROUND_TRUTH_COHORT:
         return None
-    required_columns = DOCX_COLUMNS[:-1]
+    required_columns = tuple(
+        column
+        for column in DOCX_COLUMNS
+        if column not in KTP_DOCX_OPTIONAL_EMPTY_COLS
+    )
     complete_rows = [
         row
         for row in researcher.docx_rows
@@ -3851,7 +3963,7 @@ def resolve_researcher(
 
 
 def render_codex_values(
-    submission: Submission,
+    submission: StandardizedSubmission,
     evidence: ValidatedEvidence,
     *,
     attempt_timestamp: datetime,
@@ -3859,12 +3971,21 @@ def render_codex_values(
 ) -> dict[str, str | None]:
     rendered: dict[str, str | None] = {}
     ordered_matches: list[EvidenceMatch] = []
+    standardized_columns = dict(AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS)
     for column, field_submission in submission.evidence_items():
         matches = evidence[column]
         ordered_matches.extend(matches)
         rendered[column] = codex_parse.render_ai_value(
             field_submission.value,
             tuple(match.evidence_number for match in matches),
+        )
+        standardized_value = field_submission.model_dump(mode="json")[
+            STANDARDIZED_VALUE_FIELD
+        ]
+        rendered[standardized_columns[column]] = json.dumps(
+            standardized_value,
+            ensure_ascii=False,
+            separators=COMPACT_JSON_SEPARATORS,
         )
     rendered[KTP_AI_AUGMENT_FOOTNOTES_COL] = "\n".join(
         codex_parse.render_footnote(
@@ -3982,9 +4103,44 @@ def selected_card_outer_dict(
         outer_dict=outer_dict,
         procedure=ParquetMatchProcedure(),
     )
-    return OuterDict(
-        data={name_key.to_json_key(): list(outer_dict.get_inner_by_key(name_key.to_json_key()))}
+    selected = OuterDict(
+        data={
+            name_key.to_json_key(): [
+                inner.model_copy(deep=True)
+                for inner in outer_dict.get_inner_by_key(name_key.to_json_key())
+            ]
+        }
     )
+    for inner_dicts in selected.values():
+        for inner in inner_dicts:
+            for column in AI_AUGMENT_STANDARDIZED_COLUMNS:
+                value = inner.data.get(column)
+                if not isinstance(value, str):
+                    continue
+                try:
+                    decoded = json.loads(value)
+                except json.JSONDecodeError:
+                    continue
+                if decoded is None or (
+                    isinstance(decoded, str)
+                    and decoded in AI_AUGMENT_CARD_EMPTY_VALUE_PLACEHOLDERS
+                ):
+                    inner.data[column] = None
+    return selected
+
+
+def _standardized_initial_submission(
+    submission: Submission,
+) -> StandardizedSubmission:
+    payload = submission.model_dump(by_alias=True, mode="json")
+    for column, standardized_value in INITIAL_STANDARDIZED_VALUES.items():
+        field_payload = cast(dict[str, object], payload[column])
+        field_payload[STANDARDIZED_VALUE_FIELD] = (
+            standardized_value.model_dump(mode="json")
+            if isinstance(standardized_value, BaseModel)
+            else standardized_value
+        )
+    return StandardizedSubmission.model_validate(payload)
 
 
 def write_accepted_submission(
@@ -3992,7 +4148,7 @@ def write_accepted_submission(
     source_conn: duckdb.DuckDBPyConnection,
     runtime: RuntimeConfiguration,
     *,
-    submission: Submission,
+    submission: StandardizedSubmission,
     evidence: ValidatedEvidence,
     researcher: ResearcherContext,
     rollout_index: RolloutIndex,
@@ -4207,6 +4363,7 @@ async def push(request: Request) -> StreamingResponse:
     report_archive: ArchivedFile | None = None
     card_archive: ArchivedFile | None = None
     snapshot: SanctionSnapshot | None = None
+    retry_submission_expected = False
     stage = ATTEMPT_STAGE_TRANSPORT
 
     try:
@@ -4287,7 +4444,20 @@ async def push(request: Request) -> StreamingResponse:
 
                 stage = ATTEMPT_STAGE_PYDANTIC_VALIDATION
                 body = await bounded_request_body(request)
-                submission = Submission.model_validate_json(body)
+                if snapshot.run_id is not None:
+                    if snapshot.source_key is None or snapshot.session_id is None:
+                        raise PushConfigurationError(Locale.EVIDENCE_RETRY_IDENTITY_MISMATCH)
+                    retry_submission_expected = _retry_baseline_exists(
+                        detour_conn,
+                        run_id=snapshot.run_id,
+                        source_key=snapshot.source_key,
+                        session_id=snapshot.session_id,
+                    )
+                submission: SubmissionPayload = (
+                    StandardizedSubmission.model_validate_json(body)
+                    if retry_submission_expected
+                    else Submission.model_validate_json(body)
+                )
 
                 stage = ATTEMPT_STAGE_EVIDENCE_VALIDATION
                 _seed_evidence_random(runtime.pipeline.sample_seed)
@@ -4325,9 +4495,15 @@ async def push(request: Request) -> StreamingResponse:
                         public_detail=_assessment_public_detail(
                             evidence_assessment,
                             violations=retry_violations,
+                            include_retry_contract=(snapshot.run_id is not None),
                         ),
                     )
                 validated_evidence = evidence_assessment.validated
+                accepted_submission = (
+                    submission
+                    if isinstance(submission, StandardizedSubmission)
+                    else _standardized_initial_submission(submission)
+                )
 
                 stage = ATTEMPT_STAGE_RESEARCHER_RESOLUTION
                 source_conn = open_source_database(runtime)
@@ -4352,7 +4528,7 @@ async def push(request: Request) -> StreamingResponse:
                     detour_conn,
                     source_conn,
                     runtime,
-                    submission=submission,
+                    submission=accepted_submission,
                     evidence=validated_evidence,
                     researcher=researcher,
                     rollout_index=rollout_index,
@@ -4477,7 +4653,10 @@ async def push(request: Request) -> StreamingResponse:
         )
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=Locale.VALIDATION_ERROR_DETAIL,
+            detail=(
+                Locale.VALIDATION_ERROR_DETAIL
+                + (f"\n{RETRY_SUBMISSION_PUBLIC_GUIDANCE}" if retry_submission_expected else "")
+            ),
         ) from None
     except (OSError, ValueError, duckdb.Error, subprocess.SubprocessError) as exc:
         safely_record_attempt(

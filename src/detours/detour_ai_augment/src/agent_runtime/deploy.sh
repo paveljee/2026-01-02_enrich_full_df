@@ -4,8 +4,6 @@ set -e
 SCRIPT_NAME="aivm"
 PROVISION_LIB_NAME="provision.sh"
 APPENDWATCH_LIB_NAME="appendwatch.py"
-INSTALL_PATH="$HOME/.local/bin/$SCRIPT_NAME"
-INSTALL_LIB_DIR="$HOME/.local/lib/$SCRIPT_NAME"
 SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 PROJECT_DIR="/Volumes/home/aicode/aivm/home/ai"
 LIMA_INSTANCE="aivm"
@@ -38,14 +36,13 @@ CODEX_CLI_INSTALL_URL="https://chatgpt.com/codex/install.sh"
 CODEX_CLI_BIN_PATH="$AIVM_HOME/.local/bin/codex"
 CODEX_PATH="$AIVM_HOME/.codex"
 CODEX_CONFIG_PATH="$CODEX_PATH/config.toml"
+CODEX_WORKDIR="$AIVM_HOME/workdir"
+CODEX_ENV_PATH="$CODEX_WORKDIR/.openalex.env"
+OPENALEX_API_KEY_NAME="OPENALEX_API_KEY"
+OPENALEX_API_KEY="${OPENALEX_API_KEY:-}"
 
-if [ "$0" = "$INSTALL_PATH" ]; then
-    PROVISION_SCRIPT="$INSTALL_LIB_DIR/$PROVISION_LIB_NAME"
-    APPENDWATCH_SCRIPT="$INSTALL_LIB_DIR/$APPENDWATCH_LIB_NAME"
-else
-    PROVISION_SCRIPT="${AIVM_PROVISION_SCRIPT:-$SOURCE_DIR/$PROVISION_LIB_NAME}"
-    APPENDWATCH_SCRIPT="${AIVM_APPENDWATCH_SCRIPT:-$SOURCE_DIR/../control_centre/appendwatch/$APPENDWATCH_LIB_NAME}"
-fi
+PROVISION_SCRIPT="${AIVM_PROVISION_SCRIPT:-$SOURCE_DIR/$PROVISION_LIB_NAME}"
+APPENDWATCH_SCRIPT="${AIVM_APPENDWATCH_SCRIPT:-$SOURCE_DIR/../control_centre/appendwatch/$APPENDWATCH_LIB_NAME}"
 
 prepare_mount_paths() {
     AIVM_CONTROL_DIR="$MOUNT_DIR/.aivm-control/appendwatch"
@@ -53,33 +50,6 @@ prepare_mount_paths() {
     GUEST_APPENDWATCH_SCRIPT="$GUEST_CONTROL_DIR/$APPENDWATCH_LIB_NAME"
     GUEST_APPENDWATCH_REPORT="$GUEST_CONTROL_DIR/appendwatch-tree.txt"
     HOST_APPENDWATCH_REPORT="$AIVM_CONTROL_DIR/appendwatch-tree.txt"
-}
-
-# Self-install function
-self_install() {
-    if [ "$0" != "$INSTALL_PATH" ]; then
-        [ -f "$PROVISION_SCRIPT" ] \
-            || { echo "❌ Provisioning script not found: $PROVISION_SCRIPT"; exit 1; }
-        [ -f "$APPENDWATCH_SCRIPT" ] \
-            || { echo "❌ Appendwatch script not found: $APPENDWATCH_SCRIPT"; exit 1; }
-
-        echo "📦 Installing $SCRIPT_NAME to $INSTALL_PATH..."
-        mkdir -p "$HOME/.local/bin" "$INSTALL_LIB_DIR"
-        cp "$0" "$INSTALL_PATH"
-        cp "$PROVISION_SCRIPT" "$INSTALL_LIB_DIR/$PROVISION_LIB_NAME"
-        cp "$APPENDWATCH_SCRIPT" "$INSTALL_LIB_DIR/$APPENDWATCH_LIB_NAME"
-        chmod +x "$INSTALL_PATH" "$INSTALL_LIB_DIR/$PROVISION_LIB_NAME"
-        chmod 600 "$INSTALL_LIB_DIR/$APPENDWATCH_LIB_NAME"
-        echo "✅ Installed! You can now run: $SCRIPT_NAME"
-        echo "💡 Make sure $HOME/.local/bin is in your PATH"
-
-        # Check if in PATH
-        if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
-            echo "⚠️  Add this to your ~/.zshrc or ~/.bashrc:"
-            echo "   export PATH=\"\$HOME/.local/bin:\$PATH\""
-        fi
-        exit 0
-    fi
 }
 
 base64_string() {
@@ -149,10 +119,6 @@ aivm_ssh() {
 # Parse flags in any order
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        --install)
-            self_install
-            shift
-            ;;
         --mount)
             [ -n "${2:-}" ] || { echo "❌ Missing mount path"; exit 1; }
             MOUNT_DIR="$(cd "$2" && pwd -P)"
@@ -167,6 +133,9 @@ while [ "$#" -gt 0 ]; do
 done
 
 prepare_mount_paths
+
+[ -n "$OPENALEX_API_KEY" ] \
+    || { echo "❌ $OPENALEX_API_KEY_NAME is unavailable"; exit 1; }
 
 [ -f "$PROVISION_SCRIPT" ] \
     || { echo "❌ Provisioning script not found: $PROVISION_SCRIPT"; exit 1; }
@@ -443,6 +412,32 @@ verify_instance() {
     [ "$ACTUAL_CODEX_CLI_VERSION" = "codex-cli $CODEX_CLI_VERSION" ] \
         || { echo "❌ Codex CLI $CODEX_CLI_VERSION not found"; return 1; }
     echo "✅ Codex CLI $CODEX_CLI_VERSION installed"
+
+    printf -v CODEX_WORKDIR_Q '%q' "$CODEX_WORKDIR"
+    printf -v CODEX_ENV_PATH_Q '%q' "$CODEX_ENV_PATH"
+    {
+        printf 'export %s=' "$OPENALEX_API_KEY_NAME"
+        printf '%q' "$OPENALEX_API_KEY"
+        printf '\n'
+    } | aivm_ssh \
+        "mkdir -p -- $CODEX_WORKDIR_Q \
+        && umask 077 \
+        && cat > $CODEX_ENV_PATH_Q" \
+        || { echo "❌ $OPENALEX_API_KEY_NAME could not be written into AIVM"; return 1; }
+    HOST_OPENALEX_API_KEY_DIGEST="$(
+        printf '%s' "$OPENALEX_API_KEY" | shasum -a 256 | awk '{print $1}'
+    )"
+    GUEST_OPENALEX_API_KEY_DIGEST="$(
+        aivm_ssh \
+            ". $CODEX_ENV_PATH_Q \
+            && test \"\$(stat -c %a $CODEX_ENV_PATH_Q)\" = 600 \
+            && printf '%s' \"\$$OPENALEX_API_KEY_NAME\" \
+                | sha256sum | cut -d ' ' -f 1"
+    )" \
+        || { echo "❌ $OPENALEX_API_KEY_NAME was not picked up inside AIVM"; return 1; }
+    [ "$GUEST_OPENALEX_API_KEY_DIGEST" = "$HOST_OPENALEX_API_KEY_DIGEST" ] \
+        || { echo "❌ $OPENALEX_API_KEY_NAME changed during the AIVM roundtrip"; return 1; }
+    echo "✅ $OPENALEX_API_KEY_NAME round-trips into the AIVM environment"
 }
 
 # If verified, open shell in the AIVM user's home directory

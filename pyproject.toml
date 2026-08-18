@@ -37,6 +37,7 @@ detour-ai-augment = [
   "uvicorn==0.51.0",
   "pydantic==2.13.4",
   "httpx==0.28.1",
+  "httpx2==2.12.0",  # for starlette
   "nicegui==3.13.0",
   "playwright==1.62.0",
   "pydantic-extra-types==2.11.1",
@@ -290,7 +291,15 @@ test-detour-mode0-econ-stats = [
 
 [tool.pixi.feature.detour-ai-augment.tasks]
 serve = "python -m src.detours.detour_ai_augment.src.backend.api --config config_ai_augment.json"
-dashboard = "python -m src.detours.detour_ai_augment.src.control_centre.dashboard.ui"
+dashboard = """
+OPENALEX_API_KEY="$(python -c '
+import os
+from dotenv import dotenv_values
+
+env_path = os.path.join(os.getenv("PIXI_PROJECT_ROOT"), ".env")
+print(dotenv_values(env_path).get("OPENALEX_API_KEY", ""), end="")
+')" python -m src.detours.detour_ai_augment.src.control_centre.dashboard.ui
+"""
 # provision a worktree first:
 # git worktree add --detach /tmp/detour-api-9a187d3 9a187d3fc497bef6d1568b885b33f0a834607d22
 # cp ./.env /tmp/detour-api-9a187d3; mkdir -p /tmp/detour-api-9a187d3/tmp && cp ./tmp/sheikh.jsonl /tmp/detour-api-9a187d3/tmp/sheikh.jsonl
@@ -304,7 +313,9 @@ sudo env \
   PATH="$CONDA_PREFIX/bin:$PATH" \
   PLAYWRIGHT_BROWSERS_PATH="$HOME/.cache/ms-playwright" \
   "$CONDA_PREFIX/bin/python" -m pytest -vv -srA \
-  src/detours/detour_ai_augment/tests
+  src/detours/detour_ai_augment/tests && \
+"$CONDA_PREFIX/bin/python" -m pytest -vv -srA -m real_api \
+  src/detours/detour_ai_augment/tests/test_pydantic_to_paste.py::test_academic_institution_round_trips_against_real_apis
 """
 
 [tool.pixi.feature.detour-ai-augment.tasks.duckdb-export]

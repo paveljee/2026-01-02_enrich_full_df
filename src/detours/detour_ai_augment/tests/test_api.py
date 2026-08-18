@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import runpy
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import dataclass
@@ -25,6 +24,7 @@ from src.detours.detour_ai_augment.src.backend.helpers import codex_parse
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.pydantic_to_paste import (
     EvidenceWithdrawal,
     FieldSubmission,
+    StandardizedFieldSubmission,
     WebSearchExcerpt,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.locale import (
@@ -48,6 +48,7 @@ PYDANTIC_TO_PASTE_PATH = (
     / "src"
     / "backend"
     / "helpers"
+    / "data_models"
     / "pydantic_to_paste.py"
 )
 JULY_ROLLOUT_RELATIVE_PATH = PurePosixPath(
@@ -80,11 +81,10 @@ JULY_THUMBNAIL_REF_IDS = (
     "turn0search24",
 )
 MARKDOWN_LITERAL_FIELD_TEMPLATE = "**`{field}`**"
-(
-    FIELD_VALUE_FIELD,
-    FIELD_STANDARDIZED_VALUE_FIELD,
-    FIELD_EVIDENCE_FIELD,
-) = FieldSubmission.model_fields
+FIELD_VALUE_FIELD, FIELD_EVIDENCE_FIELD = FieldSubmission.model_fields
+(FIELD_STANDARDIZED_VALUE_FIELD,) = (
+    StandardizedFieldSubmission.model_fields.keys() - FieldSubmission.model_fields.keys()
+)
 EVIDENCE_EXCERPT_FIELD, EVIDENCE_URL_FIELD = WebSearchExcerpt.model_fields
 (
     EVIDENCE_WITHDRAWAL_ACTION_FIELD,
@@ -152,15 +152,28 @@ HAANEN_ORIGINAL_GENDER_EXCERPT = "Geslacht\n\nMan"
 HAANEN_RETRY_GENDER_EXCERPT = "Man"
 HAANEN_ORIGINAL_EVIDENCE_COUNT = 22
 HAANEN_RETRY_EVIDENCE_COUNT = 9
+HAANEN_ARCHIVED_EVIDENCE_COLUMNS = tuple(
+    column
+    for column in api.AI_AUGMENT_EVIDENCE_COLUMNS
+    if column != api.KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL
+)
 HAANEN_JSON_DECODER = json.JSONDecoder()
 TEST_STANDARDIZED_VALUES = {
     api.KTP_AI_AUGMENT_RESEARCHER_AUTHOR_COL: {
         "first_name": "NR",
         "last_name": "NR",
+        "orcid": "NR",
+        "openalex_id": "NR",
     },
     api.KTP_AI_AUGMENT_PLACE_OF_RESIDENCE_COL: {
         "place": "NR",
         "location": "NR",
+    },
+    api.KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL: {
+        "race": "NA",
+        "ethnicity": "NA",
+        "language": "NR",
+        "culture": "NA",
     },
     api.KTP_AI_AUGMENT_GENDER_COL: "NR",
     api.KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL: "NR",
@@ -246,6 +259,19 @@ EXPECTED_EVIDENCE = (
         api.KTP_AI_AUGMENT_PLACE_OF_RESIDENCE_COL,
         "Scotland",
         "Country of residence\nL75:      Scotland",
+        OFFICERS_URL,
+        "turn7view0",
+        "call_SzOsv4AVuruWWBbM0oy5i4M0",
+        "fc_03938c1e0667a7cc016a6783752e2481959e7e365e71c60b20",
+        "fco_019fa459-883b-7480-b82c-b775520d1401",
+        "2026-07-27T16:12:38.843Z",
+        CALL_ARGUMENTS_TURN_7,
+        DISPLAY_ARGUMENTS_TURN_7,
+    ),
+    ExpectedEvidence(
+        api.KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL,
+        "British nationality; race, ethnicity, language, and culture not reported",
+        "Nationality\nL72:      British",
         OFFICERS_URL,
         "turn7view0",
         "call_SzOsv4AVuruWWBbM0oy5i4M0",
@@ -642,11 +668,23 @@ def submission_body_for_evidence(
     return {
         column: {
             "value": column,
-            "standardized_value": deepcopy(TEST_STANDARDIZED_VALUES[column]),
             "web_search_excerpts": [{"excerpt": excerpt, "url": url}],
         }
         for column in api.AI_AUGMENT_EVIDENCE_COLUMNS
     }
+
+
+def standardized_submission_body(
+    plain_body: dict[str, object],
+) -> dict[str, object]:
+    standardized_body = deepcopy(plain_body)
+    for column in api.AI_AUGMENT_EVIDENCE_COLUMNS:
+        field_submission = standardized_body[column]
+        assert isinstance(field_submission, dict)
+        field_submission[FIELD_STANDARDIZED_VALUE_FIELD] = deepcopy(
+            TEST_STANDARDIZED_VALUES[column]
+        )
+    return standardized_body
 
 
 def connect_v2_index(
@@ -716,13 +754,21 @@ def historical_haanen_submissions() -> tuple[dict[str, object], dict[str, object
     accepted_submission = json.loads(accepted_document)
     assert isinstance(rejected_submission, dict)
     assert isinstance(accepted_submission, dict)
-    for submission in (rejected_submission, accepted_submission):
-        for column in api.AI_AUGMENT_EVIDENCE_COLUMNS:
-            field_submission = submission[column]
-            assert isinstance(field_submission, dict)
-            field_submission[FIELD_STANDARDIZED_VALUE_FIELD] = (
-                deepcopy(TEST_STANDARDIZED_VALUES[column])
-            )
+    race_evidence_source = api.KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL
+    rejected_submission[api.KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL] = {
+        FIELD_VALUE_FIELD: "Not present in the archived pre-field submission.",
+        FIELD_EVIDENCE_FIELD: deepcopy(
+            rejected_submission[race_evidence_source][FIELD_EVIDENCE_FIELD][:1]
+        ),
+    }
+    accepted_submission[api.KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL] = (
+        deepcopy(
+            rejected_submission[
+                api.KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL
+            ]
+        )
+    )
+    accepted_submission = standardized_submission_body(accepted_submission)
     return rejected_submission, accepted_submission
 
 
@@ -730,7 +776,6 @@ def valid_submission_body(*, include_comments: bool = True) -> dict[str, object]
     body: dict[str, object] = {
         expected.column: {
             "value": expected.value,
-            "standardized_value": deepcopy(TEST_STANDARDIZED_VALUES[expected.column]),
             "web_search_excerpts": [{"excerpt": expected.excerpt, "url": expected.url}],
         }
         for expected in EXPECTED_EVIDENCE
@@ -1013,7 +1058,7 @@ def test_rollout_parser_rejects_completed_malformed_json_but_ignores_live_tail(
         api.parse_rollout(rollout_path)
 
 
-def test_submission_contract_has_eight_evidence_fields_and_optional_comments() -> None:
+def test_submission_contract_has_nine_evidence_fields_and_optional_comments() -> None:
     without_comments = valid_submission_body(include_comments=False)
     parsed = api.Submission.model_validate(without_comments)
 
@@ -1051,43 +1096,63 @@ def test_submission_contract_has_eight_evidence_fields_and_optional_comments() -
         api.Submission.model_validate(comments_with_evidence)
 
 
+def test_successful_initial_submission_converts_to_retry_model_with_placeholders() -> None:
+    initial = api.Submission.model_validate(api.EVIDENCE_SUBMISSION_EXAMPLE)
+
+    converted = api._standardized_initial_submission(initial)
+
+    assert isinstance(converted, api.StandardizedSubmission)
+    assert converted.normalized_values() == initial.normalized_values()
+    assert converted.comments == initial.comments
+    for (initial_column, initial_field), (converted_column, converted_field) in zip(
+        initial.evidence_items(),
+        converted.evidence_items(),
+        strict=True,
+    ):
+        assert converted_column == initial_column
+        assert converted_field.value == initial_field.value
+        assert converted_field.web_search_excerpts == initial_field.web_search_excerpts
+        assert getattr(converted_field, FIELD_STANDARDIZED_VALUE_FIELD) == (
+            api.INITIAL_STANDARDIZED_VALUES[initial_column]
+        )
+
+
 def test_openapi_example_is_a_complete_pydantic_valid_submission() -> None:
     assert isinstance(
-        api.L_FEI_FEI_FIXTURE.submission,
+        api.L_FEI_FEI_INITIAL_FIXTURE.submission,
         api.Submission,
     )
     assert (
         api.Submission.model_validate_json(json.dumps(api.EVIDENCE_SUBMISSION_EXAMPLE))
-        == api.L_FEI_FEI_FIXTURE.submission
+        == api.L_FEI_FEI_INITIAL_FIXTURE.submission
     )
     assert set(api.EVIDENCE_SUBMISSION_EXAMPLE) == set(api.AI_AUGMENT_COLUMNS)
-    assert api.L_FEI_FEI_FIXTURE.identity == ("L.", "Fei-Fei")
-    assert api.L_FEI_FEI_FIXTURE.submission.gender.standardized_value == "Woman"
-    assert len(api.L_FEI_FEI_FIXTURE.submission.age_first_publication.web_search_excerpts) == 2
-    assert (
-        len({
-            evidence.excerpt
-            for evidence in (
-                api.L_FEI_FEI_FIXTURE.submission.age_first_publication.web_search_excerpts
-            )
-            if isinstance(evidence, api.WebSearchExcerpt)
-        })
-        == 2
+    assert api.L_FEI_FEI_INITIAL_FIXTURE.identity == ("L.", "Fei-Fei")
+    assert isinstance(
+        api.L_FEI_FEI_RETRY_FIXTURE.submission,
+        api.StandardizedSubmission,
+    )
+    assert api.RETRY_EVIDENCE_SUBMISSION_EXAMPLE == (
+        api.L_FEI_FEI_RETRY_FIXTURE.submission.model_dump(by_alias=True, mode="json")
+    )
+    assert all(
+        FIELD_STANDARDIZED_VALUE_FIELD not in field
+        for column, field in api.EVIDENCE_SUBMISSION_EXAMPLE.items()
+        if column in api.AI_AUGMENT_EVIDENCE_COLUMNS and isinstance(field, dict)
+    )
+    assert all(
+        FIELD_STANDARDIZED_VALUE_FIELD in field
+        for column, field in api.RETRY_EVIDENCE_SUBMISSION_EXAMPLE.items()
+        if column in api.AI_AUGMENT_EVIDENCE_COLUMNS and isinstance(field, dict)
     )
     source = PYDANTIC_TO_PASTE_PATH.read_text(encoding="utf-8").rstrip()
-    standalone_namespace = runpy.run_path(str(PYDANTIC_TO_PASTE_PATH))
-    standalone_submission = cast(type[api.Submission], standalone_namespace["Submission"])
-    assert standalone_submission.model_validate_json(
-        json.dumps(api.EVIDENCE_SUBMISSION_EXAMPLE)
-    ).model_dump(
-        by_alias=True,
-        mode="json",
-    ) == api.EVIDENCE_SUBMISSION_EXAMPLE
     assert PYDANTIC_TO_PASTE_SOURCE == source
-    assert Locale.PUSH_RESPONSE_DESCRIPTION == (
-        f"Submission followed by ground truth. Pydantic schema:\n\n```python\n{source}\n```"
-    )
-    assert all(column in source for column in api.AI_AUGMENT_COLUMNS)
+    assert source in api.RETRY_SUBMISSION_PUBLIC_GUIDANCE
+    assert json.dumps(
+        api.RETRY_EVIDENCE_SUBMISSION_EXAMPLE,
+        ensure_ascii=False,
+        indent=2,
+    ) in api.RETRY_SUBMISSION_PUBLIC_GUIDANCE
     assert "CurrentAge: TypeAlias" in source
     assert "YearOfBirth: TypeAlias" in source
     assert "DateOfBirth: TypeAlias" in source
@@ -1120,7 +1185,6 @@ def test_persisted_index_is_idempotent_and_evidence_lookup_is_exact() -> None:
         body = {
             column: {
                 "value": column,
-                "standardized_value": deepcopy(TEST_STANDARDIZED_VALUES[column]),
                 "web_search_excerpts": [{"excerpt": TEST_EXCERPT, "url": TEST_URL}],
             }
             for column in api.AI_AUGMENT_EVIDENCE_COLUMNS
@@ -1377,7 +1441,9 @@ def test_v2_retry_baseline_replays_and_accepts_only_the_exact_correction() -> No
         "web_search_excerpts"
     ][0]["excerpt"] = "Jose Garcia Senior Researcher"
     near_submission = api.Submission.model_validate(near_body)
-    exact_submission = api.Submission.model_validate(submission_body_for_evidence(V2_EXACT_EXCERPT))
+    exact_submission = api.StandardizedSubmission.model_validate(
+        standardized_submission_body(submission_body_for_evidence(V2_EXACT_EXCERPT))
+    )
     try:
         near_assessment = api.assess_submission_evidence(
             connection,
@@ -1448,7 +1514,7 @@ def test_v2_retry_rejects_changed_tokens_and_repeats_near_guidance() -> None:
         "Jose Garcia Senior Researcher"
     )
     changed_body = json.loads(json.dumps(near_body))
-    changed_body[failed_field]["web_search_excerpts"][0]["excerpt"] = (  # type: ignore[index]
+    changed_body[failed_field]["web_search_excerpts"][0]["excerpt"] = (
         "Jose Garcia Lead Researcher"
     )
     try:
@@ -1473,7 +1539,9 @@ def test_v2_retry_rejects_changed_tokens_and_repeats_near_guidance() -> None:
             == ()
         )
 
-        changed_submission = api.Submission.model_validate(changed_body)
+        changed_submission = api.StandardizedSubmission.model_validate(
+            standardized_submission_body(changed_body)
+        )
         changed_assessment = api.assess_submission_evidence(
             connection,
             changed_submission,
@@ -1490,6 +1558,9 @@ def test_v2_retry_rejects_changed_tokens_and_repeats_near_guidance() -> None:
             submission=changed_submission,
             assessment=changed_assessment,
         )
+        near_retry_submission = api.StandardizedSubmission.model_validate(
+            standardized_submission_body(near_body)
+        )
         repeated_violations = api._process_retry_attempt(
             connection,
             run_id=TEST_RUN_ID,
@@ -1497,7 +1568,7 @@ def test_v2_retry_rejects_changed_tokens_and_repeats_near_guidance() -> None:
             session_id=TEST_SESSION_ID,
             attempt_id="attempt-near-again",
             attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
-            submission=near_submission,
+            submission=near_retry_submission,
             assessment=near_assessment,
         )
         applied_rows = connection.execute(
@@ -1529,7 +1600,7 @@ def test_retry_preserves_exact_items_inside_a_rejected_field() -> None:
         {"excerpt": "Jose Garcia Senior Researcher", "url": TEST_URL},
     ]
     changed_body = json.loads(json.dumps(baseline_body))
-    changed_body[field]["web_search_excerpts"][0]["excerpt"] = "García"  # type: ignore[index]
+    changed_body[field]["web_search_excerpts"][0]["excerpt"] = "García"
     try:
         baseline_submission = api.Submission.model_validate(baseline_body)
         baseline_assessment = api.assess_submission_evidence(
@@ -1552,7 +1623,9 @@ def test_retry_preserves_exact_items_inside_a_rejected_field() -> None:
             == ()
         )
 
-        changed_submission = api.Submission.model_validate(changed_body)
+        changed_submission = api.StandardizedSubmission.model_validate(
+            standardized_submission_body(changed_body)
+        )
         changed_assessment = api.assess_submission_evidence(
             connection,
             changed_submission,
@@ -1589,8 +1662,8 @@ def test_retry_preserves_fully_verified_fields_and_complete_evidence_counts() ->
         {"excerpt": "Jose Garcia Senior Researcher", "url": TEST_URL},
     ]
     changed_body = json.loads(json.dumps(baseline_body))
-    changed_body[accepted_field]["value"] = "changed"  # type: ignore[index]
-    changed_body[failed_field]["web_search_excerpts"].pop(0)  # type: ignore[index]
+    changed_body[accepted_field]["value"] = "changed"
+    changed_body[failed_field]["web_search_excerpts"].pop(0)
     try:
         baseline_submission = api.Submission.model_validate(baseline_body)
         baseline_assessment = api.assess_submission_evidence(
@@ -1613,7 +1686,9 @@ def test_retry_preserves_fully_verified_fields_and_complete_evidence_counts() ->
             == ()
         )
 
-        changed_submission = api.Submission.model_validate(changed_body)
+        changed_submission = api.StandardizedSubmission.model_validate(
+            standardized_submission_body(changed_body)
+        )
         changed_assessment = api.assess_submission_evidence(
             connection,
             changed_submission,
@@ -1673,9 +1748,9 @@ def test_unmatched_evidence_can_be_replaced_or_explicitly_withdrawn(
         {"excerpt": "Invented evidence", "url": TEST_URL},
     ]
     retry_body = json.loads(json.dumps(baseline_body))
-    retry_body[field]["web_search_excerpts"][1] = replacement  # type: ignore[index]
+    retry_body[field]["web_search_excerpts"][1] = replacement
     if changed_value:
-        retry_body[field]["value"] = "corrected value"  # type: ignore[index]
+        retry_body[field]["value"] = "corrected value"
     try:
         baseline_submission = api.Submission.model_validate(baseline_body)
         baseline_assessment = api.assess_submission_evidence(
@@ -1698,7 +1773,9 @@ def test_unmatched_evidence_can_be_replaced_or_explicitly_withdrawn(
             == ()
         )
 
-        retry_submission = api.Submission.model_validate(retry_body)
+        retry_submission = api.StandardizedSubmission.model_validate(
+            standardized_submission_body(retry_body)
+        )
         retry_assessment = api.assess_submission_evidence(
             connection,
             retry_submission,
@@ -1732,8 +1809,8 @@ def test_v2_near_evidence_cannot_be_withdrawn() -> None:
         "Jose Garcia Senior Researcher"
     )
     withdrawal_body = json.loads(json.dumps(baseline_body))
-    withdrawal_body[field]["value"] = "corrected value"  # type: ignore[index]
-    withdrawal_body[field]["web_search_excerpts"][0] = {  # type: ignore[index]
+    withdrawal_body[field]["value"] = "corrected value"
+    withdrawal_body[field]["web_search_excerpts"][0] = {
         EVIDENCE_WITHDRAWAL_ACTION_FIELD: EVIDENCE_WITHDRAWAL_ACTION,
         EVIDENCE_WITHDRAWAL_REASON_FIELD: EVIDENCE_WITHDRAWAL_REASON,
         EVIDENCE_WITHDRAWAL_ATTESTED_FIELD: True,
@@ -1760,7 +1837,9 @@ def test_v2_near_evidence_cannot_be_withdrawn() -> None:
             == ()
         )
 
-        withdrawal_submission = api.Submission.model_validate(withdrawal_body)
+        withdrawal_submission = api.StandardizedSubmission.model_validate(
+            standardized_submission_body(withdrawal_body)
+        )
         withdrawal_assessment = api.assess_submission_evidence(
             connection,
             withdrawal_submission,
@@ -1832,8 +1911,10 @@ def test_retry_baselines_survive_restart_and_remain_isolated_by_run(
 
     second_connection = connect_v2_index(index, database_path=database_path)
     try:
-        exact_submission = api.Submission.model_validate(
-            submission_body_for_evidence(V2_EXACT_EXCERPT)
+        exact_submission = api.StandardizedSubmission.model_validate(
+            standardized_submission_body(
+                submission_body_for_evidence(V2_EXACT_EXCERPT)
+            )
         )
         exact_assessment = api.assess_submission_evidence(
             second_connection,
@@ -1897,15 +1978,28 @@ def test_concurrent_first_rejections_cannot_replace_the_baseline(
             log=None,
         )
         try:
-            submission = api.Submission.model_validate(submission_body_for_evidence(excerpt))
-            assessment = api.assess_submission_evidence(
-                connection,
-                submission,
-                rollout_filename=TEST_ROLLOUT_FILENAME,
-                codex_match_version=2,
-            )
+            plain_body = submission_body_for_evidence(excerpt)
             barrier.wait()
             with api.DETOUR_DB_LOCK:
+                retry_expected = api._retry_baseline_exists(
+                    connection,
+                    run_id=TEST_RUN_ID,
+                    source_key=TEST_SOURCE_KEY,
+                    session_id=TEST_SESSION_ID,
+                )
+                submission: api.SubmissionPayload = (
+                    api.StandardizedSubmission.model_validate(
+                        standardized_submission_body(plain_body)
+                    )
+                    if retry_expected
+                    else api.Submission.model_validate(plain_body)
+                )
+                assessment = api.assess_submission_evidence(
+                    connection,
+                    submission,
+                    rollout_filename=TEST_ROLLOUT_FILENAME,
+                    codex_match_version=2,
+                )
                 assert (
                     api._process_retry_attempt(
                         connection,
@@ -1968,13 +2062,25 @@ def test_corrupt_applied_audit_fails_as_configuration_error() -> None:
     ][0]["excerpt"] = "Jose Garcia Senior Researcher"
     submission = api.Submission.model_validate(body)
     try:
-        assessment = api.assess_submission_evidence(
+        api.assess_submission_evidence(
             connection,
             submission,
             rollout_filename=TEST_ROLLOUT_FILENAME,
             codex_match_version=2,
         )
-        for attempt_id in ("audit-baseline", "audit-second"):
+        retry_submission = api.StandardizedSubmission.model_validate(
+            standardized_submission_body(body)
+        )
+        for attempt_id, attempted_submission in (
+            ("audit-baseline", submission),
+            ("audit-second", retry_submission),
+        ):
+            attempted_assessment = api.assess_submission_evidence(
+                connection,
+                attempted_submission,
+                rollout_filename=TEST_ROLLOUT_FILENAME,
+                codex_match_version=2,
+            )
             assert (
                 api._process_retry_attempt(
                     connection,
@@ -1983,8 +2089,8 @@ def test_corrupt_applied_audit_fails_as_configuration_error() -> None:
                     session_id=TEST_SESSION_ID,
                     attempt_id=attempt_id,
                     attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
-                    submission=submission,
-                    assessment=assessment,
+                    submission=attempted_submission,
+                    assessment=attempted_assessment,
                 )
                 == ()
             )
@@ -2008,15 +2114,17 @@ def test_corrupt_applied_audit_fails_as_configuration_error() -> None:
                 session_id=TEST_SESSION_ID,
                 attempt_id="audit-third",
                 attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
-                submission=submission,
-                assessment=assessment,
+                submission=retry_submission,
+                assessment=attempted_assessment,
             )
     finally:
         connection.close()
 
 
 def test_historical_haanen_retry_preserves_verified_evidence_roundtrip() -> None:
-    original_body, archived_retry_body = historical_haanen_submissions()
+    original_body_value, archived_retry_body_value = historical_haanen_submissions()
+    original_body = cast(dict[str, Any], original_body_value)
+    archived_retry_body = cast(dict[str, Any], archived_retry_body_value)
     rollout_index = api.build_rollout_index(
         api.parse_rollout(HAANEN_ACCEPTED_ROLLOUT_PATH),
         timezone_name=TEST_TIMEZONE,
@@ -2031,8 +2139,16 @@ def test_historical_haanen_retry_preserves_verified_evidence_roundtrip() -> None
             rollout_filename=HAANEN_ROLLOUT_FILENAME,
             codex_match_version=2,
         )
-        assert len(original_assessment.items) == HAANEN_ORIGINAL_EVIDENCE_COUNT
-        assert original_assessment.exact_count == HAANEN_ORIGINAL_EVIDENCE_COUNT - 1
+        original_archived_items = tuple(
+            item
+            for item in original_assessment.items
+            if item.field in HAANEN_ARCHIVED_EVIDENCE_COLUMNS
+        )
+        assert len(original_archived_items) == HAANEN_ORIGINAL_EVIDENCE_COUNT
+        assert sum(
+            item.outcome == api.EVIDENCE_OUTCOME_V1_EXACT
+            for item in original_archived_items
+        ) == (HAANEN_ORIGINAL_EVIDENCE_COUNT - 1)
         near_items = tuple(
             item
             for item in original_assessment.items
@@ -2055,14 +2171,20 @@ def test_historical_haanen_retry_preserves_verified_evidence_roundtrip() -> None
             == ()
         )
 
-        archived_retry = api.Submission.model_validate(archived_retry_body)
+        archived_retry = api.StandardizedSubmission.model_validate(
+            archived_retry_body
+        )
         archived_retry_assessment = api.assess_submission_evidence(
             connection,
             archived_retry,
             rollout_filename=HAANEN_ROLLOUT_FILENAME,
             codex_match_version=2,
         )
-        assert len(archived_retry_assessment.items) == HAANEN_RETRY_EVIDENCE_COUNT
+        assert len(tuple(
+            item
+            for item in archived_retry_assessment.items
+            if item.field in HAANEN_ARCHIVED_EVIDENCE_COLUMNS
+        )) == HAANEN_RETRY_EVIDENCE_COUNT
         archived_retry_violations = api._process_retry_attempt(
             connection,
             run_id=HAANEN_RUN_ID,
@@ -2105,7 +2227,7 @@ def test_historical_haanen_retry_preserves_verified_evidence_roundtrip() -> None
         ] = HAANEN_CORRECTED_NEAR_EXCERPT
         changed_items = tuple(
             (field, index)
-            for field in api.AI_AUGMENT_EVIDENCE_COLUMNS
+            for field in HAANEN_ARCHIVED_EVIDENCE_COLUMNS
             for index, (original, corrected) in enumerate(
                 zip(
                     original_body[field][FIELD_EVIDENCE_FIELD],
@@ -2117,15 +2239,25 @@ def test_historical_haanen_retry_preserves_verified_evidence_roundtrip() -> None
         )
         assert changed_items == ((api.KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL, 1),)
 
-        ideal_retry = api.Submission.model_validate(ideal_retry_body)
+        ideal_retry = api.StandardizedSubmission.model_validate(
+            standardized_submission_body(ideal_retry_body)
+        )
         ideal_assessment = api.assess_submission_evidence(
             connection,
             ideal_retry,
             rollout_filename=HAANEN_ROLLOUT_FILENAME,
             codex_match_version=2,
         )
-        assert len(ideal_assessment.items) == HAANEN_ORIGINAL_EVIDENCE_COUNT
-        assert ideal_assessment.exact_count == HAANEN_ORIGINAL_EVIDENCE_COUNT
+        ideal_archived_items = tuple(
+            item
+            for item in ideal_assessment.items
+            if item.field in HAANEN_ARCHIVED_EVIDENCE_COLUMNS
+        )
+        assert len(ideal_archived_items) == HAANEN_ORIGINAL_EVIDENCE_COUNT
+        assert all(
+            item.outcome == api.EVIDENCE_OUTCOME_V1_EXACT
+            for item in ideal_archived_items
+        )
         assert ideal_assessment.accepted is True
         assert (
             api._process_retry_attempt(
@@ -2206,7 +2338,6 @@ def test_multiple_sql_matches_report_the_exact_excerpt() -> None:
         body = {
             column: {
                 "value": column,
-                "standardized_value": deepcopy(TEST_STANDARDIZED_VALUES[column]),
                 "web_search_excerpts": [{"excerpt": TEST_EXCERPT, "url": TEST_URL}],
             }
             for column in api.AI_AUGMENT_EVIDENCE_COLUMNS
@@ -2243,7 +2374,6 @@ def test_multiple_exact_excerpt_and_url_matches_use_random_candidate(
         body = {
             column: {
                 "value": column,
-                "standardized_value": deepcopy(TEST_STANDARDIZED_VALUES[column]),
                 "web_search_excerpts": [{"excerpt": TEST_EXCERPT, "url": TEST_URL}],
             }
             for column in api.AI_AUGMENT_EVIDENCE_COLUMNS
@@ -2270,7 +2400,6 @@ def test_seeded_evidence_selection_round_trips_deterministically(tmp_path: Path)
     submission = api.Submission.model_validate({
         column: {
             "value": column,
-            "standardized_value": deepcopy(TEST_STANDARDIZED_VALUES[column]),
             "web_search_excerpts": [{"excerpt": TEST_EXCERPT, "url": TEST_URL}],
         }
         for column in api.AI_AUGMENT_EVIDENCE_COLUMNS
@@ -2566,6 +2695,10 @@ def test_real_july_push_matches_exact_objects_and_renders_card_end_to_end(
         monkeypatch,
         output_format=output_format,
     )
+    accepted_submission = api._standardized_initial_submission(
+        api.Submission.model_validate(context.payload)
+    )
+    accepted_fields = dict(accepted_submission.evidence_items())
     source_signature = file_signature(SOURCE_DB_PATH)
 
     response = context.client.post("/push", json=context.payload)
@@ -2674,6 +2807,15 @@ def test_real_july_push_matches_exact_objects_and_renders_card_end_to_end(
         output_values = connection.execute(f"SELECT * FROM {api.CODEX_OUTPUT_VIEW}").fetchone()
         assert output_values is not None
         output = dict(zip(output_columns, output_values, strict=True))
+        for plain_column, standardized_column in api.AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS:
+            assert output_columns.index(standardized_column) == (
+                output_columns.index(plain_column) + 1
+            )
+            assert json.loads(output[standardized_column]) == (
+                accepted_fields[plain_column].model_dump(mode="json")[
+                    FIELD_STANDARDIZED_VALUE_FIELD
+                ]
+            )
         assert output[api.KTP_NAMEKEY_COL] == (
             '{"ktp.first_name": "A.", "ktp.last_name": "Sheikh"}'
         )
@@ -2717,6 +2859,9 @@ def test_real_july_push_matches_exact_objects_and_renders_card_end_to_end(
         assert name_key == TEST_SOURCE_KEY
         innerdicts = tuple(json.loads(line) for line in innerdicts_text.splitlines())
         assert len(innerdicts) == 1
+        assert tuple(innerdicts[0]) == tuple(
+            column for column in output_columns if column != api.KTP_NAMEKEY_COL
+        )
         assert innerdicts[0][api.KTP_FILENAME_COL] == JULY_ROLLOUT_FILENAME
         assert innerdicts[0][api.KTP_FRAGMENT_COL] == JULY_ROLLOUT_LINE_COUNT
         assert innerdicts[0][api.KTP_AI_AUGMENT_ATTEMPT_ID_COL] == manifest["attempt_id"]
@@ -2752,6 +2897,21 @@ def test_real_july_push_matches_exact_objects_and_renders_card_end_to_end(
     )
     assert "using arguments^1^" in card_text
     assert "<details>" not in card_text
+    for plain_column, standardized_column in api.AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS:
+        standardized_value = json.loads(output[standardized_column])
+        standardized_label = MARKDOWN_LITERAL_FIELD_TEMPLATE.format(
+            field=standardized_column
+        )
+        if standardized_value == api.NOT_REPORTED_VALUE:
+            assert standardized_label not in card_text
+            continue
+        plain_label = MARKDOWN_LITERAL_FIELD_TEMPLATE.format(field=plain_column)
+        expected_pair = (
+            f'{plain_label}: {output[plain_column]}\n\n'
+            f'{standardized_label}: {output[standardized_column]}\n\n'
+        )
+        assert expected_pair in card_text
+        assert "^" not in f"{standardized_label}: {output[standardized_column]}"
     if output_format == "txt":
         assert read_zip_text(card_path) == card_text
     else:
@@ -2791,7 +2951,7 @@ def test_real_july_push_rejects_changed_evidence_before_ground_truth(
 
     assert response.status_code == 422
     detail = response.json()["detail"]
-    assert "7 of 8 evidence items were verified" in detail
+    assert "8 of 9 evidence items were verified" in detail
     assert f"{first_column}.web_search_excerpts[0]" in detail
     assert TEST_CALL_ID not in detail
     assert TEST_REF_ID not in detail
@@ -2826,6 +2986,59 @@ def test_real_july_push_rejects_changed_evidence_before_ground_truth(
         assert api.CODEX_INNERDICT_TABLE not in tables
     finally:
         connection.close()
+
+
+def test_real_july_rejection_requires_standardized_retry_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = prepare_real_sample_push(tmp_path, monkeypatch)
+    snapshot = api.SanctionSnapshot(
+        run_id=TEST_RUN_ID,
+        source_key=TEST_SOURCE_KEY,
+        session_id=JULY_SESSION_ID,
+        rollout_guest_path=JULY_ROLLOUT_GUEST_PATH,
+        control_base_url=None,
+    )
+    rejected_payload = deepcopy(context.payload)
+    first_column = EXPECTED_EVIDENCE[0].column
+    rejected_evidence = rejected_payload[first_column][FIELD_EVIDENCE_FIELD][0]
+    rejected_evidence[EVIDENCE_EXCERPT_FIELD] += "X"
+    monkeypatch.setattr(api, "sanctioned_snapshot", lambda: snapshot)
+
+    rejected_response = context.client.post("/push", json=rejected_payload)
+    plain_retry_response = context.client.post("/push", json=context.payload)
+
+    assert rejected_response.status_code == 422
+    rejected_detail = rejected_response.json()["detail"]
+    assert f"{first_column}.{FIELD_EVIDENCE_FIELD}[0]" in rejected_detail
+    assert api.RETRY_SUBMISSION_PUBLIC_GUIDANCE in rejected_detail
+    assert plain_retry_response.status_code == 422
+    assert plain_retry_response.json()["detail"] == (
+        f"{Locale.VALIDATION_ERROR_DETAIL}\n{api.RETRY_SUBMISSION_PUBLIC_GUIDANCE}"
+    )
+    assert not tuple(context.runtime.pipeline.output_dir.iterdir())
+    attempt_dirs = tuple(context.attempts_dir.iterdir())
+    assert len(attempt_dirs) == 2
+    assert all(read_json(path / "attempt.json")["result"] == "rejected" for path in attempt_dirs)
+    assert all(not (path / "response.jsonl").exists() for path in attempt_dirs)
+
+    connection = open_readonly_database(context.runtime.detour_db_path)
+    try:
+        baseline_count = connection.execute(
+            f"SELECT COUNT(*) FROM {api.CODEX_RETRY_BASELINE_TABLE}"
+        ).fetchone()
+        audit_count = connection.execute(
+            f"SELECT COUNT(*) FROM {api.CODEX_EVIDENCE_AUDIT_TABLE}"
+        ).fetchone()
+        tables = {row[0] for row in connection.execute("SHOW TABLES").fetchall()}
+    finally:
+        connection.close()
+
+    assert baseline_count == (1,)
+    assert audit_count == (1,)
+    assert api.CODEX_OUTPUT_ROWS_TABLE not in tables
+    assert api.CODEX_INNERDICT_TABLE not in tables
 
 
 def test_missing_rollout_is_generic_503_and_pull_fails_closed(

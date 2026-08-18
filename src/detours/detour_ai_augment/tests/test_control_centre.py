@@ -15,6 +15,7 @@ from uuid import UUID, uuid4
 from zipfile import ZipFile
 from zoneinfo import ZoneInfo
 
+import duckdb
 import pytest
 
 from src.detours.detour_ai_augment.src.backend import api
@@ -49,6 +50,21 @@ ROLLOUT_PATH = PurePosixPath(
 )
 CONTROL_TIMEZONE = ZoneInfo("UTC")
 TEST_OPENALEX_API_KEY = "test-openalex-api-key"
+EARLIER_ARCHIVED_ATTEMPT_ID = (
+    "20260813T141450_027429Z_044215aac8c44200882531b10a2acfa6"
+)
+LATER_ARCHIVED_ATTEMPT_ID = (
+    "20260813T143347_182523Z_733e33fbf8e74c0aaf0aa0139d6a6f45"
+)
+ARCHIVED_ATTEMPT_STAGE_BY_ID = {
+    EARLIER_ARCHIVED_ATTEMPT_ID: "duckdb_evidence_validation",
+    LATER_ARCHIVED_ATTEMPT_ID: "accepted",
+}
+ARCHIVED_ATTEMPT_RESULT_BY_ID = {
+    EARLIER_ARCHIVED_ATTEMPT_ID: "rejected",
+    LATER_ARCHIVED_ATTEMPT_ID: "accepted",
+}
+ARCHIVED_ATTEMPT_UPDATED_AT = "2026-08-13T14:33:47.882063+00:00"
 
 
 @pytest.fixture
@@ -75,7 +91,89 @@ def researcher(
     )
 
 
-def test_real_config_derives_exact_innerdict_owned_cohorts() -> None:
+def test_variable_specs_cover_every_ai_augment_column() -> None:
+    assert tuple(
+        variable.ai_column
+        for variable in control_ui.VARIABLE_SPECS
+    ) == api.AI_AUGMENT_COLUMNS
+
+
+def test_archived_attempt_reconciliation_is_chronological_and_idempotent(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    attempts_dir = tmp_path / "attempts"
+    detour_db_path = tmp_path / "detour.duckdb"
+    for attempt_id in (
+        LATER_ARCHIVED_ATTEMPT_ID,
+        EARLIER_ARCHIVED_ATTEMPT_ID,
+    ):
+        attempt_dir = attempts_dir / attempt_id
+        attempt_dir.mkdir(parents=True)
+        manifest = control_ui.ArchivedAttemptManifest(
+            attempt_id=attempt_id,
+            stage=ARCHIVED_ATTEMPT_STAGE_BY_ID[attempt_id],
+            result=ARCHIVED_ATTEMPT_RESULT_BY_ID[attempt_id],
+            updated_at=ARCHIVED_ATTEMPT_UPDATED_AT,
+            artifacts={},
+        )
+        (attempt_dir / api.ATTEMPT_MANIFEST_FILENAME).write_text(
+            manifest.model_dump_json(),
+            encoding=control_ui.TEXT_ENCODING,
+        )
+    configuration = cast(
+        control_ui.RuntimeConfiguration,
+        SimpleNamespace(
+            database_paths=control_ui.DatabasePaths(
+                source_db=tmp_path / "source.duckdb",
+                detour_db=detour_db_path,
+            )
+        ),
+    )
+    repository = control_ui.DetourRepository(configuration=configuration)
+
+    assert repository.reconcile_archived_attempts(
+        attempts_dir=attempts_dir
+    ) == (
+        control_ui.AttemptId(EARLIER_ARCHIVED_ATTEMPT_ID),
+        control_ui.AttemptId(LATER_ARCHIVED_ATTEMPT_ID),
+    )
+    assert repository.reconcile_archived_attempts(attempts_dir=attempts_dir) == ()
+
+    connection = duckdb.connect(str(detour_db_path), read_only=True)
+    try:
+        stored_manifests = tuple(
+            (
+                str(row[0]),
+                control_ui.ArchivedAttemptManifest.model_validate_json(
+                    str(row[1])
+                ),
+            )
+            for row in connection.execute(
+                f"SELECT {api.ATTEMPT_ID_KEY}, "
+                f"{control_ui.ARCHIVED_ATTEMPT_MANIFEST_COLUMN} "
+                f"FROM {control_ui.ARCHIVED_ATTEMPTS_TABLE} "
+                f"ORDER BY {api.ATTEMPT_ID_KEY}"
+            ).fetchall()
+        )
+    finally:
+        connection.close()
+    assert tuple(
+        (attempt_id, manifest.result)
+        for attempt_id, manifest in stored_manifests
+    ) == (
+        (EARLIER_ARCHIVED_ATTEMPT_ID, "rejected"),
+        (LATER_ARCHIVED_ATTEMPT_ID, "accepted"),
+    )
+    log_output = capsys.readouterr().out
+    assert "inserted 2 of 2" in log_output
+    assert "inserted 0 of 2" in log_output
+
+
+def test_real_config_derives_exact_innerdict_owned_cohorts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(control_ui.EXPORT_OPENALEX_API_KEY, TEST_OPENALEX_API_KEY)
     configuration = control_ui.RuntimeConfiguration(config_path=CONFIG_PATH)
     repository = control_ui.SourceRepository(configuration=configuration)
 
@@ -137,7 +235,10 @@ def test_real_config_derives_exact_innerdict_owned_cohorts() -> None:
     assert all(item.draw_numbers for item in researchers)
 
 
-def test_config_registers_verified_release_map_without_writing_source_db() -> None:
+def test_config_registers_verified_release_map_without_writing_source_db(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(control_ui.EXPORT_OPENALEX_API_KEY, TEST_OPENALEX_API_KEY)
     source_db_path = control_ui.PipelineConfig.from_json(CONFIG_PATH).db_file
     source_hash_before = hashlib.sha256(source_db_path.read_bytes()).hexdigest()
 
@@ -153,7 +254,9 @@ def test_config_registers_verified_release_map_without_writing_source_db() -> No
 
 def test_real_database_card_round_trips_identically_through_docx(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv(control_ui.EXPORT_OPENALEX_API_KEY, TEST_OPENALEX_API_KEY)
     configuration = control_ui.RuntimeConfiguration(config_path=CONFIG_PATH)
     source_repository = control_ui.SourceRepository(configuration=configuration)
     detour_repository = control_ui.DetourRepository(configuration=configuration)
@@ -216,7 +319,9 @@ def test_real_database_card_round_trips_identically_through_docx(
 def test_config_rejects_missing_or_hash_mismatched_release_map(
     tmp_path: Path,
     mutation: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv(control_ui.EXPORT_OPENALEX_API_KEY, TEST_OPENALEX_API_KEY)
     config_value = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
     map_metadata = config_value["files_config"][api.MAP_SUBSET_0_TO_BATCH_KEY]
     if mutation == "missing":

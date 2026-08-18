@@ -23,8 +23,8 @@ from typing import (
     get_args,
 )
 from urllib.parse import urlsplit
-import requests
 
+import requests
 from pydantic import (
     AfterValidator,
     BaseModel,
@@ -36,12 +36,10 @@ from pydantic import (
     StringConstraints,
     model_validator,
 )
-
 from pydantic_extra_types.country import CountryAlpha2
 from pydantic_extra_types.language_code import ISO639_3
 
-# OpenAPI hint: patch these
-from .mixin import SubmissionMixin
+# OpenAPI hint: patch this
 from ..locale import Locale
 
 # OpenAPI hint: see submission example
@@ -57,6 +55,9 @@ from ..vars import (
     KTP_AI_AUGMENT_RESEARCHER_AUTHOR_COL,
     KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL,
 )
+
+# OpenAPI hint: patch this
+from .mixin import SubmissionMixin
 
 MIN_VALUE_CHARACTERS = 1
 MIN_TARGET_WEB_SEARCH_QUERY_LANGUAGES = 1
@@ -83,7 +84,7 @@ OPENALEX_SCHEME = "https"
 OPENALEX_HOST = "api.openalex.org"
 OPENALEX_INSTITUTIONS_PATH = "/institutions"
 EXPORT_OPENALEX_API_KEY = "OPENALEX_API_KEY"
-OPENALEX_PARAMS = {"api_key": None}  # updated later
+OPENALEX_PARAMS: dict[str, str | None] = {"api_key": None}  # updated later
 OPENALEX_INSTITUTION_NAME_FIELD = "display_name"
 OPENALEX_ROR_FIELD = "ror"
 
@@ -99,8 +100,10 @@ INSTITUTION_REQUEST_TIMEOUT_SECONDS = 30.0
 
 T = TypeVar("T")
 
+
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
+
 
 SubmissionText: TypeAlias = Annotated[
     StrictStr,
@@ -131,6 +134,7 @@ class ResearcherAuthorStandardized(StrictModel):
 # KTP_AI_AUGMENT_PLACE_OF_RESIDENCE_COL
 Location: TypeAlias = CountryAlpha2
 
+
 class PlaceOfResidenceStandardized(StrictModel):
     place: SubmissionValue[SubmissionText]
     location: SubmissionValue[Location]
@@ -139,16 +143,20 @@ class PlaceOfResidenceStandardized(StrictModel):
 # KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL
 Language: TypeAlias = ISO639_3
 
+
 class CLDRLanguageOfficialStatus(StrEnum):
     """https://www.unicode.org/cldr/charts/48/supplemental/territory_language_information.html"""
+
     OFFICIAL = "official"
     OFFICIAL_REGIONAL = "official_regional"
     DE_FACTO_OFFICIAL = "de_facto_official"
+
 
 class LanguageOfLocation(StrictModel):
     language: Language
     official_status: CLDRLanguageOfficialStatus
     location: Location
+
 
 LanguagePersonUsesOrUsed: TypeAlias = Language
 LanguagePublicationIsIn: TypeAlias = Language
@@ -163,6 +171,7 @@ TargetWebSearchQueryLanguage: TypeAlias = (
     | Language  # any other relevant
 )
 
+
 class RaceEthnicityLanguageCultureStandardized(StrictModel):
     race: NotAvailableOrApplicable  # banned
     ethnicity: NotAvailableOrApplicable  # banned
@@ -173,6 +182,7 @@ class RaceEthnicityLanguageCultureStandardized(StrictModel):
         default_factory=lambda: [Language(DEFAULT_TARGET_WEB_SEARCH_QUERY_LANGUAGE)],
     )
     culture: NotAvailableOrApplicable  # banned
+
 
 # KTP_AI_AUGMENT_GENDER_COL
 GenderStandardized: TypeAlias = SubmissionValue[
@@ -293,8 +303,10 @@ class AcademicInstitution(StrictModel):
 
         return self
 
+
 class ISCEDTertiaryLevel(StrEnum):
     """https://unesdoc.unesco.org/ark:/48223/pf0000219109_eng"""
+
     # LEVEL_0 = "0"  # Early childhood
     # LEVEL_1 = "1"  # Primary
     # LEVEL_2 = "2"  # Lower secondary
@@ -305,11 +317,13 @@ class ISCEDTertiaryLevel(StrEnum):
     LEVEL_7 = "7"  # Master's or equivalent
     LEVEL_8 = "8"  # Doctoral or equivalent
 
+
 class EducationRecord(StrictModel):
     degree_conferred: SubmissionValue[SubmissionText]
     isced_level: SubmissionValue[ISCEDTertiaryLevel]
     place_conferred: SubmissionValue[AcademicInstitution]
     year_conferred: SubmissionValue[Year]
+
 
 EducationStandardized: TypeAlias = SubmissionValue[Annotated[
     list[EducationRecord],
@@ -324,9 +338,11 @@ class FormerAcademicPosition(StrictModel):
     start: SubmissionValue[Year]
     end: SubmissionValue[Year]
 
+
 class CurrentAcademicPosition(StrictModel):
     academic_position: SubmissionValue[SubmissionText]
     academic_institution: SubmissionValue[AcademicInstitution]
+
 
 AcademicPositionsStandardized: TypeAlias = SubmissionValue[Annotated[
     list[FormerAcademicPosition | CurrentAcademicPosition],
@@ -346,6 +362,7 @@ class ResearcherLink(StrictModel):
     url: SubmissionValue[HttpUrl]
     verified_with_orcid: SubmissionValue[bool]
 
+
 ResearcherLinksStandardized: TypeAlias = SubmissionValue[Annotated[
     list[ResearcherLink],
     Field(min_length=MIN_RESEARCHER_LINKS),
@@ -353,6 +370,7 @@ ResearcherLinksStandardized: TypeAlias = SubmissionValue[Annotated[
 
 # KTP_AI_AUGMENT_COMMENTS_COL
 # no standardized value
+
 
 class WebSearchExcerpt(StrictModel):
     excerpt: StrictStr = Field(
@@ -463,7 +481,8 @@ class CommentsSubmission(StrictModel):
 
 class StandardizedSubmission(
     StrictModel,
-    SubmissionMixin,  # OpenAPI hint: don't worry about it
+    SubmissionMixin[StandardizedFieldSubmission, CommentsSubmission],
+    # OpenAPI hint: don't worry about it
 ):
     researcher_author: ResearcherAuthorSubmission = Field(
         alias=KTP_AI_AUGMENT_RESEARCHER_AUTHOR_COL,

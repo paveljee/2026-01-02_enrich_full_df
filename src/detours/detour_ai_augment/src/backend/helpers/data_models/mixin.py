@@ -1,4 +1,4 @@
-from typing import TypeVar
+from typing import Generic, Protocol, TypeVar
 
 from ..vars import (
     KTP_AI_AUGMENT_ACADEMIC_POSITIONS_COL,
@@ -13,10 +13,17 @@ from ..vars import (
     KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL,
 )
 
-# to be supplied by `pydantic_to_paste` downstream
-TFieldSubmission = TypeVar("TFieldSubmission")
 
-class SubmissionMixin:
+class ValueSubmission(Protocol):
+    value: str
+
+
+# to be supplied by `pydantic_to_paste` downstream
+TFieldSubmission = TypeVar("TFieldSubmission", bound=ValueSubmission)
+TCommentsSubmission = TypeVar("TCommentsSubmission", bound=ValueSubmission)
+
+
+class SubmissionMixin(Generic[TFieldSubmission, TCommentsSubmission]):
     researcher_author: TFieldSubmission
     place_of_residence: TFieldSubmission
     race_ethnicity_language_culture: TFieldSubmission
@@ -26,7 +33,7 @@ class SubmissionMixin:
     academic_positions: TFieldSubmission
     social_capital: TFieldSubmission
     links: TFieldSubmission
-    comments: TFieldSubmission | None
+    comments: TCommentsSubmission | None
 
     def evidence_items(self) -> tuple[tuple[str, "TFieldSubmission"], ...]:
         return (
