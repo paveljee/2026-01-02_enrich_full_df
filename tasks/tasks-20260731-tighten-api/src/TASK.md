@@ -5,6 +5,7 @@
 TASK_DIR="$PWD/tasks/tasks-20260731-tighten-api"
 TASK="$TASK_DIR/src/TASK.md"
 WORK="$TASK_DIR/var/WORK.md"
+SPECS="$TASK_DIR/build/SPECS.ipynb"
 ```
 
 ## after each compaction
@@ -21,7 +22,7 @@ as prescribed in `$TASK_DIR/Makefile`,
 whose `make validate` will be used to verify AI's work.
 
 > [!IMPORTANT]
-> When writing `$TASK_DIR/build/SPEC.ipynb`, AI should know:
+> When writing SPECS, AI should know:
 > - The procedure is called atomic requirement-to-evidence mapping.
 > - One Markdown cell represents one requirement unit:
 >   - A requirement unit is the smallest contiguous set of TASK lines expressing one independently verifiable behavior.
