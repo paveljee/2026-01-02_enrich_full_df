@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from threading import Barrier
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, cast, get_args
 from uuid import UUID
 from zipfile import ZipFile
 
@@ -23,6 +23,7 @@ from pydantic import ValidationError
 from src.detours.detour_ai_augment.src.backend import api
 from src.detours.detour_ai_augment.src.backend.helpers import codex_parse
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.pydantic_to_paste import (
+    EvidenceWithdrawal,
     FieldSubmission,
     WebSearchExcerpt,
 )
@@ -85,6 +86,17 @@ MARKDOWN_LITERAL_FIELD_TEMPLATE = "**`{field}`**"
     FIELD_EVIDENCE_FIELD,
 ) = FieldSubmission.model_fields
 EVIDENCE_EXCERPT_FIELD, EVIDENCE_URL_FIELD = WebSearchExcerpt.model_fields
+(
+    EVIDENCE_WITHDRAWAL_ACTION_FIELD,
+    EVIDENCE_WITHDRAWAL_REASON_FIELD,
+    EVIDENCE_WITHDRAWAL_ATTESTED_FIELD,
+) = EvidenceWithdrawal.model_fields
+EVIDENCE_WITHDRAWAL_ACTION = get_args(
+    EvidenceWithdrawal.model_fields[EVIDENCE_WITHDRAWAL_ACTION_FIELD].annotation
+)[0]
+EVIDENCE_WITHDRAWAL_REASON = get_args(
+    EvidenceWithdrawal.model_fields[EVIDENCE_WITHDRAWAL_REASON_FIELD].annotation
+)[0]
 
 TEST_ROLLOUT_GUEST_PATH = "/home/ai/.codex/sessions/2026/07/31/rollout-chat.jsonl"
 TEST_ROLLOUT_RELATIVE_PATH = PurePosixPath("2026/07/31/rollout-chat.jsonl")
@@ -1638,9 +1650,9 @@ def test_retry_preserves_fully_verified_fields_and_complete_evidence_counts() ->
         ),
         (
             {
-                "action": api.EVIDENCE_WITHDRAWAL_ACTION,
-                "reason": api.EVIDENCE_WITHDRAWAL_REASON,
-                "attested": True,
+                EVIDENCE_WITHDRAWAL_ACTION_FIELD: EVIDENCE_WITHDRAWAL_ACTION,
+                EVIDENCE_WITHDRAWAL_REASON_FIELD: EVIDENCE_WITHDRAWAL_REASON,
+                EVIDENCE_WITHDRAWAL_ATTESTED_FIELD: True,
             },
             True,
             api.EVIDENCE_OUTCOME_WITHDRAWN,
@@ -1722,9 +1734,9 @@ def test_v2_near_evidence_cannot_be_withdrawn() -> None:
     withdrawal_body = json.loads(json.dumps(baseline_body))
     withdrawal_body[field]["value"] = "corrected value"  # type: ignore[index]
     withdrawal_body[field]["web_search_excerpts"][0] = {  # type: ignore[index]
-        "action": api.EVIDENCE_WITHDRAWAL_ACTION,
-        "reason": api.EVIDENCE_WITHDRAWAL_REASON,
-        "attested": True,
+        EVIDENCE_WITHDRAWAL_ACTION_FIELD: EVIDENCE_WITHDRAWAL_ACTION,
+        EVIDENCE_WITHDRAWAL_REASON_FIELD: EVIDENCE_WITHDRAWAL_REASON,
+        EVIDENCE_WITHDRAWAL_ATTESTED_FIELD: True,
     }
     try:
         baseline_submission = api.Submission.model_validate(baseline_body)

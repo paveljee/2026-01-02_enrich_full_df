@@ -40,7 +40,8 @@ from pydantic import (
 from pydantic_extra_types.country import CountryAlpha2
 from pydantic_extra_types.language_code import ISO639_3
 
-# OpenAPI hint: patch this
+# OpenAPI hint: patch these
+from .mixin import SubmissionMixin
 from ..locale import Locale
 
 # OpenAPI hint: see submission example
@@ -399,7 +400,6 @@ StandardizedValue: TypeAlias = (
 
 class FieldSubmission(StrictModel):
     value: SubmissionText
-    standardized_value: StandardizedValue
     web_search_excerpts: list[EvidenceSubmission] = Field(
         min_length=MIN_EXCERPTS_PER_FIELD,
         max_length=MAX_EXCERPTS_PER_FIELD,
@@ -417,39 +417,43 @@ class FieldSubmission(StrictModel):
         return self
 
 
-class ResearcherAuthorSubmission(FieldSubmission):
+class StandardizedFieldSubmission(FieldSubmission):
+    standardized_value: StandardizedValue
+
+
+class ResearcherAuthorSubmission(StandardizedFieldSubmission):
     standardized_value: ResearcherAuthorStandardized
 
 
-class PlaceOfResidenceSubmission(FieldSubmission):
+class PlaceOfResidenceSubmission(StandardizedFieldSubmission):
     standardized_value: PlaceOfResidenceStandardized
 
 
-class RaceEthnicityLanguageCultureSubmission(FieldSubmission):
+class RaceEthnicityLanguageCultureSubmission(StandardizedFieldSubmission):
     standardized_value: RaceEthnicityLanguageCultureStandardized
 
 
-class GenderSubmission(FieldSubmission):
+class GenderSubmission(StandardizedFieldSubmission):
     standardized_value: GenderStandardized
 
 
-class AgeFirstPublicationSubmission(FieldSubmission):
+class AgeFirstPublicationSubmission(StandardizedFieldSubmission):
     standardized_value: AgeStandardized
 
 
-class EducationSubmission(FieldSubmission):
+class EducationSubmission(StandardizedFieldSubmission):
     standardized_value: EducationStandardized
 
 
-class AcademicPositionsSubmission(FieldSubmission):
+class AcademicPositionsSubmission(StandardizedFieldSubmission):
     standardized_value: AcademicPositionsStandardized
 
 
-class SocialCapitalSubmission(FieldSubmission):
+class SocialCapitalSubmission(StandardizedFieldSubmission):
     standardized_value: SocialCapitalStandardized
 
 
-class ResearcherLinksSubmission(FieldSubmission):
+class ResearcherLinksSubmission(StandardizedFieldSubmission):
     standardized_value: ResearcherLinksStandardized
 
 
@@ -457,7 +461,10 @@ class CommentsSubmission(StrictModel):
     value: SubmissionText
 
 
-class Submission(StrictModel):
+class StandardizedSubmission(
+    StrictModel,
+    SubmissionMixin,  # OpenAPI hint: don't worry about it
+):
     researcher_author: ResearcherAuthorSubmission = Field(
         alias=KTP_AI_AUGMENT_RESEARCHER_AUTHOR_COL,
         description="researcher/author from public academic sources.",
@@ -502,25 +509,3 @@ class Submission(StrictModel):
         alias=KTP_AI_AUGMENT_COMMENTS_COL,
         description="comments.",
     )
-
-    def evidence_items(self) -> tuple[tuple[str, FieldSubmission], ...]:
-        return (
-            (KTP_AI_AUGMENT_RESEARCHER_AUTHOR_COL, self.researcher_author),
-            (KTP_AI_AUGMENT_PLACE_OF_RESIDENCE_COL, self.place_of_residence),
-            (
-                KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL,
-                self.race_ethnicity_language_culture,
-            ),
-            (KTP_AI_AUGMENT_GENDER_COL, self.gender),
-            (KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL, self.age_first_publication),
-            (KTP_AI_AUGMENT_EDUCATION_COL, self.education),
-            (KTP_AI_AUGMENT_ACADEMIC_POSITIONS_COL, self.academic_positions),
-            (KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL, self.social_capital),
-            (KTP_AI_AUGMENT_LINKS_COL, self.links),
-        )
-
-    def normalized_values(self) -> dict[str, str]:
-        values = {column: field.value for column, field in self.evidence_items()}
-        if self.comments is not None:
-            values[KTP_AI_AUGMENT_COMMENTS_COL] = self.comments.value
-        return values

@@ -20,10 +20,7 @@ class Locale:
     PULL_RESPONSE_DESCRIPTION: Final = "JSON Lines annotation task"
     PUSH_SUMMARY: Final = "Submit completed annotations"
     PUSH_DESCRIPTION: Final = "Validates and stores the completed submission."
-    PUSH_RESPONSE_DESCRIPTION: Final = (
-        "Submission followed by ground truth. Pydantic schema:\n\n"
-        f"```python\n{PYDANTIC_TO_PASTE_SOURCE}\n```"
-    )
+    PUSH_RESPONSE_DESCRIPTION: Final = "Submission followed by ground truth."
     EXCERPT_URL_NONBLANK = "excerpt and url must be non-blank"
     VALUE_NONBLANK = "value must be non-blank"
     EXCERPT_PAIRS_UNIQUE = "web_search_excerpts must not contain duplicate pairs"
@@ -314,6 +311,11 @@ class Locale:
         "originating web-tool output and resubmit the complete payload after correcting "
         "only the flagged items."
     )
+    EVIDENCE_RETRY_STANDARDIZED_VALUES: Final = (
+        "The resubmission must also supply standardized_value for every "
+        "evidence-bearing field. Pydantic schema: "
+        "\n\n```python\n{}\n```\n\n"
+    ).format(PYDANTIC_TO_PASTE_SOURCE)
     EVIDENCE_MINOR_CHANGE_ONLY_TEMPLATE: Final = (
         "{location} may receive only a minor textual correction that preserves its "
         "wording and cited URL."
@@ -343,6 +345,23 @@ class Locale:
     )
     EVIDENCE_SUBMISSION_REJECTED: Final = (
         "submission contains evidence that is not yet exactly verified"
+    )
+
+    OPENALEX_API_KEY_MISSING: Final = (
+        "OPENALEX_API_KEY is required to validate an OpenAlex institution"
+    )
+    OPENALEX_INSTITUTION_UNKNOWN_TEMPLATE: Final = (
+        "OpenAlex institution was not found: {openalex_id}"
+    )
+    OPENALEX_INSTITUTION_NAME_MISMATCH_TEMPLATE: Final = (
+        "OpenAlex institution name {actual!r} does not match submitted name {submitted!r}"
+    )
+    OPENALEX_INSTITUTION_ROR_MISMATCH_TEMPLATE: Final = (
+        "OpenAlex institution ROR {actual!r} does not match submitted ROR {submitted!r}"
+    )
+    ROR_INSTITUTION_UNKNOWN_TEMPLATE: Final = "ROR institution was not found: {ror}"
+    ROR_INSTITUTION_NAME_MISMATCH_TEMPLATE: Final = (
+        "ROR institution name {actual!r} does not match submitted name {submitted!r}"
     )
 
     SOURCE_OPEN_FAILED_TEMPLATE: Final = "cannot open {source_file}: {error}"

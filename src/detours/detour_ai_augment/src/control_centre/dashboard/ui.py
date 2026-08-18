@@ -45,7 +45,6 @@ from src.helpers.vars import (
 )
 
 from ...backend.api import (
-    AI_AUGMENT_COLUMN_PREFIX,
     AI_AUGMENT_COLUMNS,
     CARD_EXCLUDED_COLUMNS,
     CODEX_INNERDICT_TABLE,
@@ -73,13 +72,14 @@ from ...backend.api import (
     load_source_researcher,
     registered_release_map,
 )
-from ...backend.helpers.vars import OPENALEX_API_KEY_ENV_NAME
 from ...backend.api import (
     RuntimeConfiguration as BackendRuntimeConfiguration,
 )
 from ...backend.api import (
     SourceCohort as ResearcherCohort,
 )
+from ...backend.helpers.data_models.pydantic_to_paste import EXPORT_OPENALEX_API_KEY
+from ...backend.helpers.vars import AI_AUGMENT_COLUMN_PREFIX
 from .helpers.aggrid import AgGrid
 from .helpers.locale import Locale
 
@@ -780,7 +780,7 @@ class RuntimeConfiguration:
         *,
         config_path: Path = DEFAULT_CONFIG_PATH,
     ) -> None:
-        openalex_api_key = os.environ.get(OPENALEX_API_KEY_ENV_NAME, "").strip()
+        openalex_api_key = os.environ.get(EXPORT_OPENALEX_API_KEY, "").strip()
         if not openalex_api_key:
             raise RuntimeError(Locale.OPENALEX_API_KEY_MISSING)
         pipeline_config = PipelineConfig.from_json(config_path)
@@ -1455,7 +1455,7 @@ class BackendSupervisor:
     def environment(self) -> Mapping[str, str]:
         environment = os.environ.copy()
         environment[CONTROL_URL_ENV_NAME] = self._control_url
-        environment[OPENALEX_API_KEY_ENV_NAME] = self._openalex_api_key
+        environment[EXPORT_OPENALEX_API_KEY] = self._openalex_api_key
         return environment
 
 
@@ -1558,7 +1558,7 @@ class CodexRunner:
         ) = None,
     ) -> CodexStartResult:
         environment_bytes = CODEX_ENV_EXPORT_TEMPLATE.format(
-            name=OPENALEX_API_KEY_ENV_NAME,
+            name=EXPORT_OPENALEX_API_KEY,
             value=shlex.quote(self._openalex_api_key),
         ).encode(TEXT_ENCODING)
         await self._write_remote_file(CODEX_ENV_PATH, environment_bytes)

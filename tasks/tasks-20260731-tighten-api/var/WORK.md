@@ -1,5 +1,39 @@
 # Tighten API — planning workbook
 
+## 2026-08-18 mandatory context refresh
+
+- After the latest context compaction, re-read `src/TASK.md` in full (137
+  lines), this WORK file in full, the prescribed `legacy/SPEC.md` human slice,
+  the complete prerequisite `tasks/tasks-20260519-review-231/SPEC.md`, the
+  complete task `Makefile`, current `build/AGENTS.md`, `manifest.json`, the
+  operator-staged `manifest.json.old`, current `build/SPECS.ipynb`, and the
+  relevant human decisions/approved UI mockup in the linked architecture chat.
+- The post-legacy evidence-matching revamp is TASK lines 41-137. The current
+  137-line `manifest.json` has null build mappings, while `build/AGENTS.md` and
+  `build/SPECS.ipynb` still represent only the earlier 39-line TASK. They must
+  be rebuilt using atomic requirement-to-evidence units after implementation
+  and focused tests are complete. Do not edit frozen `legacy/SPEC.md`.
+- Detour tests belong only in
+  `src/detours/detour_ai_augment/tests`. The root path
+  `tests/test_detours/test_detour_ai_augment/301_MOVED_PERMANENTLY` explicitly
+  points there, the dedicated Pixi task runs that directory, and pytest excludes
+  it from root discovery. Never move `test_pydantic_to_paste.py` into root
+  `tests/`.
+- Current Pydantic submission-contract files are
+  `backend/helpers/data_models/pydantic_to_paste.py`,
+  `backend/helpers/data_models/submission_fixture.py`, and the detour-local
+  `tests/test_pydantic_to_paste.py`. The static L. Fei-Fei fixture bypasses live
+  institution validation through fixture-only `model_construct`; ordinary
+  `AcademicInstitution.model_validate` retains OpenAlex/ROR checks. Both
+  canonical OpenAlex and ROR URLs are reduced to their terminal URL-path IDs
+  with `urlsplit` before API request URLs are built.
+- Focused verification after the refresh:
+  `pixi run -e detour-ai-augment python -m pytest -q
+  src/detours/detour_ai_augment/tests/test_pydantic_to_paste.py -m 'not
+  real_api'` -> 22 passed, 1 deselected.
+- Git remains read-only. The only current status entry is the operator-owned,
+  staged `A tasks/tasks-20260731-tighten-api/manifest.json.old`; preserve it.
+
 ## Status
 
 - The executable-spec workflow is authoritative for all post-legacy additions:

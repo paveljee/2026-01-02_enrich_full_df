@@ -911,7 +911,7 @@ async def test_codex_start_uses_the_same_full_workbook_bytes_in_file_and_prompt(
         (
             control_ui.CODEX_ENV_PATH,
             control_ui.CODEX_ENV_EXPORT_TEMPLATE.format(
-                name=control_ui.OPENALEX_API_KEY_ENV_NAME,
+                name=control_ui.EXPORT_OPENALEX_API_KEY,
                 value=TEST_OPENALEX_API_KEY,
             ).encode(),
         ),
@@ -933,6 +933,6 @@ def test_backend_environment_includes_openalex_api_key() -> None:
         openalex_api_key=TEST_OPENALEX_API_KEY,
     )
 
-    assert backend.environment()[control_ui.OPENALEX_API_KEY_ENV_NAME] == (
+    assert backend.environment()[control_ui.EXPORT_OPENALEX_API_KEY] == (
         TEST_OPENALEX_API_KEY
     )
