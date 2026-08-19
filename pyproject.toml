@@ -248,7 +248,7 @@ cwd = "."
 cmd = """
 limactl shell aicode -- bash -c '
   export PATH="$HOME/.pixi/bin:$PATH"
-  script -c "pixi run pre-commit 2>&1" logs/pre-commit.log
+  script -e -c "pixi run pre-commit 2>&1" logs/pre-commit.log &&
   if grep -q "FAILED" logs/pre-commit.log; then
     echo "grep: FAILED found"
     exit 1
