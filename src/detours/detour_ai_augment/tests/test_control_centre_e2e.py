@@ -25,9 +25,7 @@ from src.helpers.vars import KTP_FILENAME_COL
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
 
 E2E_SERVER_ARGUMENT = "--serve"
-E2E_SERVER_MODULE = (
-    "src.detours.detour_ai_augment.tests.test_control_centre_e2e"
-)
+E2E_SERVER_MODULE = "src.detours.detour_ai_augment.tests.test_control_centre_e2e"
 E2E_HOST = "127.0.0.1"
 E2E_START_TIMEOUT_SECONDS = 30
 E2E_STOP_TIMEOUT_SECONDS = 10
@@ -54,9 +52,7 @@ GRID_ROOT_SELECTOR = ".ag-root"
 GRID_HEADER_SELECTOR = ".ag-header-cell"
 GRID_CELL_SELECTOR = ".ag-cell"
 GRID_ARIA_ROW_COUNT_OFFSET = 1
-EXPECTED_GRID_ARIA_ROW_COUNT = (
-    control_ui.EXPECTED_SOURCE_RESEARCHERS + GRID_ARIA_ROW_COUNT_OFFSET
-)
+EXPECTED_GRID_ARIA_ROW_COUNT = control_ui.EXPECTED_SOURCE_RESEARCHERS + GRID_ARIA_ROW_COUNT_OFFSET
 
 
 def browser_researchers() -> tuple[control_ui.Researcher, ...]:
@@ -73,9 +69,7 @@ def browser_researchers() -> tuple[control_ui.Researcher, ...]:
             first_name="Pilot Ineligible",
             last_name="Researcher",
             cohort=control_ui.ResearcherCohort.INELIGIBLE,
-            ineligibility_category=(
-                control_ui.IneligibilityCategory.RELEASE_BATCH_SUBSET_8
-            ),
+            ineligibility_category=(control_ui.IneligibilityCategory.RELEASE_BATCH_SUBSET_8),
         ),
         control_ui.Researcher(
             source_key=control_ui.SourceKey(
@@ -91,16 +85,9 @@ def browser_researchers() -> tuple[control_ui.Researcher, ...]:
             cohort=control_ui.ResearcherCohort.GROUND_TRUTH,
         ),
     ]
-    remaining_ground_truth = (
-        control_ui.EXPECTED_GROUND_TRUTH_RESEARCHERS - 1
-    )
-    remaining_no_ground_truth = (
-        control_ui.EXPECTED_NO_GROUND_TRUTH_RESEARCHERS
-    )
-    remaining_total = (
-        control_ui.EXPECTED_SOURCE_RESEARCHERS
-        - BROWSER_LEADING_RESEARCHER_COUNT
-    )
+    remaining_ground_truth = control_ui.EXPECTED_GROUND_TRUTH_RESEARCHERS - 1
+    remaining_no_ground_truth = control_ui.EXPECTED_NO_GROUND_TRUTH_RESEARCHERS
+    remaining_total = control_ui.EXPECTED_SOURCE_RESEARCHERS - BROWSER_LEADING_RESEARCHER_COUNT
     for index in range(remaining_total):
         if index < remaining_ground_truth:
             cohort = control_ui.ResearcherCohort.GROUND_TRUTH
@@ -110,25 +97,25 @@ def browser_researchers() -> tuple[control_ui.Researcher, ...]:
             ineligibility_category = None
         else:
             cohort = control_ui.ResearcherCohort.INELIGIBLE
-            ineligibility_category = (
-                control_ui.IneligibilityCategory.STAGING_PARTITION_2
-            )
+            ineligibility_category = control_ui.IneligibilityCategory.STAGING_PARTITION_2
         first_name = f"First {index + 1}"
         last_name = f"Last {index + 1}"
-        researchers.append(control_ui.Researcher(
-            source_key=control_ui.SourceKey(
-                control_ui.NameKey(
-                    first_name=first_name,
-                    last_name=last_name,
-                ).to_json_key()
-            ),
-            rnd=index + BROWSER_LEADING_RESEARCHER_COUNT + 1,
-            draw_numbers=(str(index + 1),),
-            first_name=first_name,
-            last_name=last_name,
-            cohort=cohort,
-            ineligibility_category=ineligibility_category,
-        ))
+        researchers.append(
+            control_ui.Researcher(
+                source_key=control_ui.SourceKey(
+                    control_ui.NameKey(
+                        first_name=first_name,
+                        last_name=last_name,
+                    ).to_json_key()
+                ),
+                rnd=index + BROWSER_LEADING_RESEARCHER_COUNT + 1,
+                draw_numbers=(str(index + 1),),
+                first_name=first_name,
+                last_name=last_name,
+                cohort=cohort,
+                ineligibility_category=ineligibility_category,
+            )
+        )
     return tuple(researchers)
 
 
@@ -136,22 +123,23 @@ class BrowserController:
     def __init__(self) -> None:
         self._researchers = browser_researchers()
         self._status_by_source_key = {
-            researcher.source_key: control_ui.RunStatus.READY
-            for researcher in self._researchers
+            researcher.source_key: control_ui.RunStatus.READY for researcher in self._researchers
         }
         self._run_id_by_source_key: dict[control_ui.SourceKey, UUID] = {}
         self._attempt_run_ids_by_source_key: dict[
             control_ui.SourceKey,
             list[UUID],
-        ] = {
-            researcher.source_key: [] for researcher in self._researchers
-        }
+        ] = {researcher.source_key: [] for researcher in self._researchers}
         self._status_by_run_id: dict[UUID, control_ui.RunStatus] = {}
         self._card_render_count: Counter[control_ui.SourceKey] = Counter()
 
     @property
     def active_run_id(self) -> None:
         return None
+
+    @property
+    def codex_busy(self) -> bool:
+        return False
 
     async def start(self) -> None:
         return None
@@ -175,26 +163,20 @@ class BrowserController:
             for researcher in self._researchers
             if researcher.cohort is not control_ui.ResearcherCohort.INELIGIBLE
         )
-        statuses = [
-            self._status_by_source_key[researcher.source_key]
-            for researcher in eligible
-        ]
+        statuses = [self._status_by_source_key[researcher.source_key] for researcher in eligible]
         return control_ui.UiSnapshot(
             counts=control_ui.DashboardCounts(
                 total=len(self._researchers),
                 ground_truth=sum(
-                    researcher.cohort
-                    is control_ui.ResearcherCohort.GROUND_TRUTH
+                    researcher.cohort is control_ui.ResearcherCohort.GROUND_TRUTH
                     for researcher in self._researchers
                 ),
                 no_ground_truth=sum(
-                    researcher.cohort
-                    is control_ui.ResearcherCohort.NO_GROUND_TRUTH
+                    researcher.cohort is control_ui.ResearcherCohort.NO_GROUND_TRUTH
                     for researcher in self._researchers
                 ),
                 ineligible=sum(
-                    researcher.cohort
-                    is control_ui.ResearcherCohort.INELIGIBLE
+                    researcher.cohort is control_ui.ResearcherCohort.INELIGIBLE
                     for researcher in self._researchers
                 ),
                 ready=statuses.count(control_ui.RunStatus.READY),
@@ -248,10 +230,7 @@ class BrowserController:
                 attempt_status=status,
                 action=control_ui.VariableProjector.action_for_status(
                     status,
-                    eligible=(
-                        researcher.cohort
-                        is not control_ui.ResearcherCohort.INELIGIBLE
-                    ),
+                    eligible=(researcher.cohort is not control_ui.ResearcherCohort.INELIGIBLE),
                 ),
             )
         )
@@ -287,9 +266,7 @@ class BrowserController:
             footnotes=f"footnote-{ordinal}",
             footnote_arguments=f"arguments-{ordinal}",
             attempt_id=control_ui.AttemptId(f"attempt-{ordinal}"),
-            attempt_timestamp=(
-                E2E_ATTEMPT_BASE_TIME + timedelta(seconds=attempt_index)
-            ),
+            attempt_timestamp=(E2E_ATTEMPT_BASE_TIME + timedelta(seconds=attempt_index)),
             attempt_status=status,
             action=control_ui.VariableProjector.action_for_status(
                 status,
@@ -306,14 +283,8 @@ class BrowserController:
         status = self._status_by_source_key[researcher.source_key]
         search = selection.search_text.casefold().strip()
         return (
-            (
-                selection.status_filter is None
-                or selection.status_filter is status
-            )
-            and (
-                selection.cohort_filter is None
-                or selection.cohort_filter is researcher.cohort
-            )
+            (selection.status_filter is None or selection.status_filter is status)
+            and (selection.cohort_filter is None or selection.cohort_filter is researcher.cohort)
             and (
                 not search
                 or search in researcher.first_name.casefold()
@@ -329,9 +300,7 @@ class BrowserController:
         *,
         source_key: control_ui.SourceKey,
     ) -> control_ui.ResearcherCardView:
-        researcher = next(
-            item for item in self._researchers if item.source_key == source_key
-        )
+        researcher = next(item for item in self._researchers if item.source_key == source_key)
         self._card_render_count[source_key] += 1
         render_count = self._card_render_count[source_key]
         return control_ui.ResearcherCardView(
@@ -350,9 +319,7 @@ class BrowserController:
         )
 
     async def queue(self, *, source_key: control_ui.SourceKey) -> UUID:
-        researcher = next(
-            item for item in self._researchers if item.source_key == source_key
-        )
+        researcher = next(item for item in self._researchers if item.source_key == source_key)
         if researcher.cohort is control_ui.ResearcherCohort.INELIGIBLE:
             raise ValueError("ineligible source keys cannot be queued")
         run_id = uuid4()
@@ -406,13 +373,11 @@ def wait_for_server(process: subprocess.Popen[str], *, url: str) -> None:
     while time.monotonic() < deadline:
         if process.poll() is not None:
             output, _ = process.communicate()
-            raise RuntimeError(
-                f"Control Centre E2E server exited during startup:\n{output}"
-            )
+            raise RuntimeError(f"Control Centre E2E server exited during startup:\n{output}")
         try:
             with urllib_request.urlopen(url, timeout=1):
                 return
-        except (OSError, urllib_error.URLError):
+        except OSError, urllib_error.URLError:
             time.sleep(control_ui.BACKEND_READY_POLL_SECONDS)
     raise TimeoutError("Control Centre E2E server did not start")
 
@@ -435,9 +400,7 @@ def assert_shared_width(page: Page) -> None:
         control_ui.PAGE_FOOTER_TEST_ID,
     )
     widths = [
-        page.get_by_test_id(test_id).evaluate(
-            "element => element.getBoundingClientRect().width"
-        )
+        page.get_by_test_id(test_id).evaluate("element => element.getBoundingClientRect().width")
         for test_id in test_ids
     ]
     assert max(widths) - min(widths) < 1
@@ -474,11 +437,7 @@ def control_centre_browser() -> Iterator[tuple[Page, list[str]]]:
             errors: list[str] = []
             page.on(
                 "console",
-                lambda message: (
-                    errors.append(message.text)
-                    if message.type == "error"
-                    else None
-                ),
+                lambda message: errors.append(message.text) if message.type == "error" else None,
             )
             page.on("pageerror", lambda error: errors.append(str(error)))
             page.goto(url, wait_until="networkidle")
@@ -500,12 +459,12 @@ def test_underscore_field_labels_render_literally_in_researcher_card() -> None:
         eligible_row.click()
         page.get_by_test_id(control_ui.VIEW_CARD_TEST_ID).click()
 
-        field_label = page.get_by_test_id(
-            control_ui.PAGE_FOOTER_TEST_ID
-        ).locator("code", has_text=E2E_CARD_FIELD_LABEL)
-        filename = page.get_by_test_id(
-            control_ui.PAGE_FOOTER_TEST_ID
-        ).locator("code", has_text=E2E_CARD_FILENAME)
+        field_label = page.get_by_test_id(control_ui.PAGE_FOOTER_TEST_ID).locator(
+            "code", has_text=E2E_CARD_FIELD_LABEL
+        )
+        filename = page.get_by_test_id(control_ui.PAGE_FOOTER_TEST_ID).locator(
+            "code", has_text=E2E_CARD_FILENAME
+        )
         expect(field_label).to_have_text(E2E_CARD_FIELD_LABEL)
         expect(filename).to_have_text(E2E_CARD_FILENAME)
         assert errors == [], Counter(errors)
@@ -523,9 +482,7 @@ def test_main_grid_and_researcher_card_use_compact_line_spacing() -> None:
         page.get_by_test_id(control_ui.VIEW_CARD_TEST_ID).click()
 
         grid_cell = eligible_row.locator(".ag-cell-value").first
-        card_paragraphs = page.get_by_test_id(
-            control_ui.PAGE_FOOTER_TEST_ID
-        ).locator("p")
+        card_paragraphs = page.get_by_test_id(control_ui.PAGE_FOOTER_TEST_ID).locator("p")
         card_paragraph = card_paragraphs.first
         ratios = [
             locator.evaluate(
@@ -537,9 +494,7 @@ def test_main_grid_and_researcher_card_use_compact_line_spacing() -> None:
             for locator in (grid_cell, card_paragraph, history_cell)
         ]
         grid_ratio, card_ratio, history_ratio = ratios
-        maximum_compact_ratio = (
-            control_ui.COMPACT_LINE_HEIGHT + E2E_LINE_HEIGHT_TOLERANCE
-        )
+        maximum_compact_ratio = control_ui.COMPACT_LINE_HEIGHT + E2E_LINE_HEIGHT_TOLERANCE
         assert grid_ratio <= maximum_compact_ratio
         assert card_ratio <= maximum_compact_ratio
         assert grid_ratio <= history_ratio
@@ -549,10 +504,7 @@ def test_main_grid_and_researcher_card_use_compact_line_spacing() -> None:
         assert first_card_box is not None
         assert second_card_box is not None
         first_card_bottom = first_card_box["y"] + first_card_box["height"]
-        assert (
-            second_card_box["y"] - first_card_bottom
-            <= E2E_CARD_BLOCK_GAP_TOLERANCE_PIXELS
-        )
+        assert second_card_box["y"] - first_card_bottom <= E2E_CARD_BLOCK_GAP_TOLERANCE_PIXELS
         assert errors == [], Counter(errors)
 
 
@@ -578,12 +530,8 @@ def test_researcher_selection_and_attempt_history_are_idempotent() -> None:
     with control_centre_browser() as (page, errors):
         first_row = grid_row_for_draw(page, BROWSER_PILOT_ELIGIBLE_DRAW)
         second_row = grid_row_for_draw(page, "1")
-        history_panel = page.get_by_test_id(
-            control_ui.ATTEMPT_HISTORY_PANEL_TEST_ID
-        )
-        history_table = page.get_by_test_id(
-            control_ui.ATTEMPT_HISTORY_TABLE_TEST_ID
-        )
+        history_panel = page.get_by_test_id(control_ui.ATTEMPT_HISTORY_PANEL_TEST_ID)
+        history_table = page.get_by_test_id(control_ui.ATTEMPT_HISTORY_TABLE_TEST_ID)
 
         first_row.click()
         expect(first_row).to_have_class(re.compile(r"\bag-row-selected\b"))
@@ -630,20 +578,14 @@ def test_control_centre_browser_contract() -> None:
             errors: list[str] = []
             page.on(
                 "console",
-                lambda message: (
-                    errors.append(message.text)
-                    if message.type == "error"
-                    else None
-                ),
+                lambda message: errors.append(message.text) if message.type == "error" else None,
             )
             page.on("pageerror", lambda error: errors.append(str(error)))
             page.goto(url, wait_until="networkidle")
             page.wait_for_selector(GRID_ROW_SELECTOR)
 
             summary = page.get_by_test_id(control_ui.PAGE_SUMMARY_TEST_ID)
-            expect(summary).to_contain_text(
-                f"Total {control_ui.EXPECTED_SOURCE_RESEARCHERS}"
-            )
+            expect(summary).to_contain_text(f"Total {control_ui.EXPECTED_SOURCE_RESEARCHERS}")
             expect(summary).to_contain_text(
                 f"ineligible {control_ui.EXPECTED_INELIGIBLE_RESEARCHERS}"
             )
@@ -670,24 +612,18 @@ def test_control_centre_browser_contract() -> None:
             draw_header.click()
             first_row = grid.locator(GRID_ROW_SELECTOR).first
             expect(
-                first_row.locator(
-                    f'{GRID_CELL_SELECTOR}[col-id="{control_ui.GRID_DRAW_FIELD}"]'
-                )
+                first_row.locator(f'{GRID_CELL_SELECTOR}[col-id="{control_ui.GRID_DRAW_FIELD}"]')
             ).to_have_text("pilot.1")
 
             footer = page.get_by_test_id(control_ui.PAGE_FOOTER_TEST_ID)
             assert footer.inner_text().strip() == ""
             ineligible_row = grid_row_for_draw(page, "pilot.1")
             ineligible_row.click()
-            action_button = page.get_by_test_id(
-                control_ui.EXECUTE_ACTION_TEST_ID
-            )
+            action_button = page.get_by_test_id(control_ui.EXECUTE_ACTION_TEST_ID)
             expect(action_button).to_be_disabled()
             expect(action_button).to_have_text(
                 re.compile(
-                    control_ui.ACTION_LABEL_BY_VALUE[
-                        control_ui.RunAction.DISABLED.value
-                    ],
+                    control_ui.ACTION_LABEL_BY_VALUE[control_ui.RunAction.DISABLED.value],
                     re.IGNORECASE,
                 )
             )
@@ -698,15 +634,11 @@ def test_control_centre_browser_contract() -> None:
             expect(action_button).to_be_enabled()
             expect(action_button).to_have_text(
                 re.compile(
-                    control_ui.ACTION_LABEL_BY_VALUE[
-                        control_ui.RunAction.QUEUE.value
-                    ],
+                    control_ui.ACTION_LABEL_BY_VALUE[control_ui.RunAction.QUEUE.value],
                     re.IGNORECASE,
                 )
             )
-            view_card_button = page.get_by_test_id(
-                control_ui.VIEW_CARD_TEST_ID
-            )
+            view_card_button = page.get_by_test_id(control_ui.VIEW_CARD_TEST_ID)
             expect(view_card_button).to_be_enabled()
             assert footer.inner_text().strip() == ""
             view_card_button.click()
@@ -716,9 +648,7 @@ def test_control_centre_browser_contract() -> None:
             view_card_button.click()
             expect(footer).to_contain_text("render-count-1")
             page.set_viewport_size(E2E_NARROW_VIEWPORT)
-            assert footer.evaluate(
-                "element => element.scrollWidth <= element.clientWidth"
-            )
+            assert footer.evaluate("element => element.scrollWidth <= element.clientWidth")
             assert_shared_width(page)
             assert errors == [], Counter(errors)
 
@@ -750,46 +680,36 @@ def test_control_centre_browser_contract() -> None:
                 E2E_GRID_MARKER,
             )
             page.wait_for_timeout(E2E_REFRESH_WAIT_MILLISECONDS)
-            assert grid.locator(GRID_ROOT_SELECTOR).get_attribute(
-                "data-e2e-marker"
-            ) == E2E_GRID_MARKER
+            assert (
+                grid.locator(GRID_ROOT_SELECTOR).get_attribute("data-e2e-marker") == E2E_GRID_MARKER
+            )
 
             action_button.click()
             expect(summary).to_contain_text("queued 1")
             expect(action_button).to_have_text(
                 re.compile(
-                    control_ui.ACTION_LABEL_BY_VALUE[
-                        control_ui.RunAction.CANCEL.value
-                    ],
+                    control_ui.ACTION_LABEL_BY_VALUE[control_ui.RunAction.CANCEL.value],
                     re.IGNORECASE,
                 )
             )
             expect(search_input).to_have_value("pilot.2")
             expect(draw_header).to_have_attribute("aria-sort", "ascending")
-            assert "pilot.2" in page.evaluate(
-                "window.getSelection().toString()"
+            assert "pilot.2" in page.evaluate("window.getSelection().toString()")
+            assert (
+                grid.locator(GRID_ROOT_SELECTOR).get_attribute("data-e2e-marker") == E2E_GRID_MARKER
             )
-            assert grid.locator(GRID_ROOT_SELECTOR).get_attribute(
-                "data-e2e-marker"
-            ) == E2E_GRID_MARKER
 
             eligible_row.click()
-            history = page.get_by_test_id(
-                control_ui.ATTEMPT_HISTORY_TABLE_TEST_ID
-            )
+            history = page.get_by_test_id(control_ui.ATTEMPT_HISTORY_TABLE_TEST_ID)
             history_rows = history.locator("tbody tr")
             expect(history_rows).to_have_count(1)
             expect(history_rows.nth(0)).to_contain_text("attempt-1")
-            expect(history_rows.nth(0)).to_contain_text(
-                control_ui.RunStatus.QUEUED.value
-            )
+            expect(history_rows.nth(0)).to_contain_text(control_ui.RunStatus.QUEUED.value)
 
             action_button.click()
             expect(action_button).to_have_text(
                 re.compile(
-                    control_ui.ACTION_LABEL_BY_VALUE[
-                        control_ui.RunAction.RERUN.value
-                    ],
+                    control_ui.ACTION_LABEL_BY_VALUE[control_ui.RunAction.RERUN.value],
                     re.IGNORECASE,
                 )
             )
@@ -817,9 +737,7 @@ if __name__ == "__main__":
     try:
         server_argument, server_port = sys.argv[1:]
     except ValueError as exc:
-        raise SystemExit(
-            f"expected {E2E_SERVER_ARGUMENT} PORT"
-        ) from exc
+        raise SystemExit(f"expected {E2E_SERVER_ARGUMENT} PORT") from exc
     if server_argument != E2E_SERVER_ARGUMENT:
         raise SystemExit(f"expected {E2E_SERVER_ARGUMENT} PORT")
     serve_e2e_dashboard(port=int(server_port))

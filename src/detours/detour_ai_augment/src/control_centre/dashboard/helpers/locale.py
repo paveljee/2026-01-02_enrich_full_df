@@ -51,6 +51,9 @@ class Locale:
         "researcher ineligibility category invariants failed"
     )
     ACCEPTED_METADATA_INVALID: Final = "accepted output has invalid session metadata"
+    ATTEMPT_DATABASE_INCONSISTENT: Final = (
+        "validated attempt database state is inconsistent"
+    )
     JOURNAL_APPEND_INCOMPLETE: Final = "run journal append was incomplete"
     JOURNAL_MALFORMED_TEMPLATE: Final = (
         "run journal is malformed at line {line_number}"
@@ -121,14 +124,9 @@ class Locale:
 
     READY_LOG_TEMPLATE: Final = "ready at {url}"
     ARCHIVED_ATTEMPTS_RECONCILED_TEMPLATE: Final = (
-        "archived attempts reconciled into the detour DB: "
-        "inserted {inserted} of {discovered} from {directory}"
-    )
-    ARCHIVED_ATTEMPT_MANIFEST_INVALID_TEMPLATE: Final = (
-        "archived attempt manifest is invalid: {path}"
-    )
-    ARCHIVED_ATTEMPT_ID_MISMATCH_TEMPLATE: Final = (
-        "archived attempt ID does not match its directory: {path}"
+        "archived attempts reconciled into the detour DB from {directory}: "
+        "restored {restored}, accepted {accepted}, already present and skipped "
+        "{skipped}, invalid {invalid}, discovered {discovered}"
     )
     STOPPING_LOG: Final = "stopping"
     STOPPED_LOG: Final = "stopped"

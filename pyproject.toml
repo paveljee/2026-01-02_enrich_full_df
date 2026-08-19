@@ -54,6 +54,8 @@ testpaths = ["tests"]
 norecursedirs = [
     "tests/test_detours",  # can run via `pixi run test tests/test_detours`
     "src/detours/detour_ai_augment/tests",
+    # never testing sample deploy here as it's not part of codebase
+    "src/detours/detour_ai_augment/src/llm_inference_api/sample_deploy",
 ]
 markers = [
     "slow: long-running integration tests against real config/data",
@@ -331,6 +333,10 @@ sudo env \
   src/detours/detour_ai_augment/tests && \
 "$CONDA_PREFIX/bin/python" -m pytest -vv -srA -m real_api \
   src/detours/detour_ai_augment/tests/test_pydantic_to_paste.py::test_academic_institution_round_trips_against_real_apis
+"""
+test-detour-ai-augment-operator = """
+"$CONDA_PREFIX/bin/python" -m pytest -vv -srA -m operator \
+  src/detours/detour_ai_augment/tests/test_e2e_operator.py
 """
 
 [tool.pixi.feature.detour-ai-augment.tasks.duckdb-export]

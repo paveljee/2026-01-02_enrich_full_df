@@ -10,6 +10,7 @@ import re
 import shutil
 import subprocess
 import threading
+import time
 from collections import Counter
 from collections.abc import AsyncGenerator, Iterator, Mapping, Sequence
 from contextlib import asynccontextmanager
@@ -47,6 +48,10 @@ from src.helpers.data_models import (
     RegisteredResource,
     ResourceGroup,
 )
+from src.helpers.data_models.http_request_log import (
+    HttpRequestLogRecord,
+    append_http_request_log_record,
+)
 from src.helpers.duckdb_extensions import load_duckdb_extension
 from src.helpers.duckdb_utils import (
     append_innerdicts_from_jsonlines_table,
@@ -77,6 +82,7 @@ from src.helpers.vars import (
     KTP_FIRST_NAME_COL,
     KTP_FRAGMENT_COL,
     KTP_FRAGMENT_TYPE_COL,
+    KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION,
     KTP_INNERDICT_JSONLINES_COL,
     KTP_LAST_NAME_COL,
     KTP_NAMEKEY_COL,
@@ -309,6 +315,11 @@ ATTEMPT_RESULT_PENDING = "pending"
 ATTEMPT_RESULT_ACCEPTED = "accepted"
 ATTEMPT_RESULT_CONFIGURATION_ERROR = "configuration_error"
 ATTEMPT_RESULT_REJECTED = "rejected"
+ATTEMPT_RESULT_RESPONSE_CODE = {
+    ATTEMPT_RESULT_ACCEPTED: status.HTTP_200_OK,
+    ATTEMPT_RESULT_CONFIGURATION_ERROR: status.HTTP_503_SERVICE_UNAVAILABLE,
+    ATTEMPT_RESULT_REJECTED: status.HTTP_422_UNPROCESSABLE_CONTENT,
+}
 SSH_EXECUTABLE = "ssh"
 SCP_EXECUTABLE = "scp"
 TEXT_ENCODING = "utf-8"
@@ -355,6 +366,7 @@ ARTIFACT_ROLLOUT_KEY = "rollout"
 ARTIFACT_WORKBOOK_KEY = "workbook"
 ARTIFACT_APPENDWATCH_REPORT_KEY = "appendwatch_report"
 ARTIFACT_CARD_ZIP_KEY = "card_zip"
+ARTIFACT_HTTP_REQUEST_LOG_KEY = "http_request_log"
 ARTIFACT_FILENAME_KEY = "filename"
 ARTIFACT_SIZE_KEY = "size"
 ARTIFACT_SHA256_KEY = "sha256"
@@ -364,7 +376,12 @@ ATTEMPT_STAGE_KEY = "stage"
 ATTEMPT_RESULT_KEY = "result"
 ATTEMPT_UPDATED_AT_KEY = "updated_at"
 ATTEMPT_ARTIFACTS_KEY = "artifacts"
+ATTEMPT_RUN_ID_KEY = "run_id"
+ATTEMPT_SOURCE_KEY = "source_key"
+ATTEMPT_SESSION_ID_KEY = "session_id"
+ATTEMPT_ROLLOUT_RELATIVE_PATH_KEY = "rollout_relative_path"
 ATTEMPT_MANIFEST_FILENAME = "attempt.json"
+HTTP_REQUEST_LOG_FILENAME_TEMPLATE = "push.{attempt_id}.http.jsonl"
 EVIDENCE_OUTCOME_V1_EXACT = "v1_exact"
 EVIDENCE_OUTCOME_V2_NEAR = "v2_near"
 EVIDENCE_OUTCOME_UNMATCHED = "unmatched"
@@ -474,6 +491,8 @@ CODEX_FCO_ID_SEQUENCE = "codex_fco_id_sequence"
 CODEX_CALLS_ID_SEQUENCE = "codex_calls_id_sequence"
 CODEX_TURN_REF_ID_SEQUENCE = "codex_turn_ref_id_sequence"
 CODEX_EVIDENCE_AUDIT_ID_SEQUENCE = "codex_evidence_audit_id_sequence"
+ARCHIVED_ATTEMPTS_TABLE = "control_centre_archived_attempts"
+ARCHIVED_ATTEMPT_MANIFEST_COLUMN = "manifest"
 
 CODEX_ID_COL = "id"
 CODEX_FC_TIMESTAMP_COL = "codex.fc_timestamp"
@@ -505,6 +524,19 @@ CODEX_EVIDENCE_APPLIED_COL = "applied"
 CODEX_EVIDENCE_ACCEPTED_COL = "accepted"
 CODEX_EVIDENCE_AUDIT_ID_COL = "id"
 CODEX_TOKEN_EXTENSION = "splink_udfs"
+CREATE_ARCHIVED_ATTEMPTS_TABLE_SQL = (
+    f"CREATE TABLE IF NOT EXISTS {ARCHIVED_ATTEMPTS_TABLE} ("
+    f"{ATTEMPT_ID_KEY} VARCHAR PRIMARY KEY, "
+    f"{ARCHIVED_ATTEMPT_MANIFEST_COLUMN} JSON NOT NULL)"
+)
+SELECT_ARCHIVED_ATTEMPT_IDS_SQL = f"SELECT {ATTEMPT_ID_KEY} FROM {ARCHIVED_ATTEMPTS_TABLE}"
+INSERT_ARCHIVED_ATTEMPT_SQL = (
+    f"INSERT INTO {ARCHIVED_ATTEMPTS_TABLE} "
+    f"({ATTEMPT_ID_KEY}, {ARCHIVED_ATTEMPT_MANIFEST_COLUMN}) VALUES (?, ?)"
+)
+HTTP_REQUEST_LOG_RESPONSE_CONTENT_TYPE_HEADER = "content-type"
+HTTP_REQUEST_LOG_RESPONSE_CONTENT_TYPE_JSON = "application/json"
+NANOSECONDS_PER_MICROSECOND = 1_000
 
 NOT_REPORTED_VALUE = get_args(NotReported)[0]
 NOT_AVAILABLE_OR_APPLICABLE_VALUE = get_args(NotAvailableOrApplicable)[0]
@@ -539,9 +571,9 @@ INITIAL_STANDARDIZED_VALUES: Mapping[str, StandardizedValue] = {
     KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL: NOT_REPORTED_VALUE,
     KTP_AI_AUGMENT_LINKS_COL: NOT_REPORTED_VALUE,
 }
-AI_AUGMENT_CARD_EMPTY_VALUE_PLACEHOLDERS = (
-    KTP_TABLE_1_EMPTY_VALUE_PLACEHOLDERS | {NOT_AVAILABLE_OR_APPLICABLE_VALUE}
-)
+AI_AUGMENT_CARD_EMPTY_VALUE_PLACEHOLDERS = KTP_TABLE_1_EMPTY_VALUE_PLACEHOLDERS | {
+    NOT_AVAILABLE_OR_APPLICABLE_VALUE
+}
 
 DRAW_NUMBER_COLUMN = DRAW_LABEL
 TARGET_DRAW_NUMBER = "146"
@@ -601,6 +633,11 @@ CARD_EXCLUDED_COLUMNS = {
 CARD_ZIP_PREFIX = "ai_augment_cards"
 
 MEDIA_TYPE = "application/x-ndjson"
+ATTEMPT_RESPONSE_CONTENT_TYPE = {
+    status.HTTP_200_OK: MEDIA_TYPE,
+    status.HTTP_422_UNPROCESSABLE_CONTENT: JSON_MEDIA_TYPE,
+    status.HTTP_503_SERVICE_UNAVAILABLE: JSON_MEDIA_TYPE,
+}
 
 
 @asynccontextmanager
@@ -697,8 +734,8 @@ RETRY_SUBMISSION_PUBLIC_GUIDANCE = (
         )
     )
 )
-SUBMISSION_EXAMPLE: dict[str, object] = (
-    dict[str, object](L_FEI_FEI_INITIAL_FIXTURE.submission.normalized_values())
+SUBMISSION_EXAMPLE: dict[str, object] = dict[str, object](
+    L_FEI_FEI_INITIAL_FIXTURE.submission.normalized_values()
 )
 PULL_EXAMPLE_FIRST_NAME, PULL_EXAMPLE_LAST_NAME = L_FEI_FEI_INITIAL_FIXTURE.identity
 NULL_SUBMISSION_EXAMPLE = {
@@ -914,6 +951,51 @@ class ArchivedFile:
     line_count: int
 
 
+class ArchivedArtifact(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    filename: StrictStr
+    size: int = Field(ge=0)
+    sha256: StrictStr
+
+
+class ArchivedRolloutArtifact(ArchivedArtifact):
+    line_count: int = Field(ge=1)
+
+
+class ArchivedAttemptArtifacts(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    rollout: ArchivedRolloutArtifact
+    appendwatch_report: ArchivedArtifact
+    workbook: ArchivedArtifact | None = None
+    card_zip: ArchivedArtifact | None = None
+    http_request_log: ArchivedArtifact
+
+
+class ArchivedAttemptManifest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    attempt_id: StrictStr
+    stage: StrictStr
+    result: StrictStr
+    updated_at: StrictStr
+    artifacts: ArchivedAttemptArtifacts
+    rollout_relative_path: StrictStr
+    run_id: UUID | None = None
+    source_key: StrictStr | None = None
+    session_id: StrictStr | None = None
+
+
+@dataclass(frozen=True)
+class ArchivedAttemptRecovery:
+    discovered: int
+    invalid: int
+    restored_attempt_ids: tuple[str, ...]
+    restored_accepted_attempt_ids: tuple[str, ...]
+    skipped_attempt_ids: tuple[str, ...]
+
+
 @dataclass(frozen=True)
 class RolloutRecord:
     line_number: int
@@ -1045,6 +1127,37 @@ class ResearcherContext:
     last_name: str
     cohort: str = GROUND_TRUTH_COHORT
     draw_numbers: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class AttemptReplayInput:
+    attempt_dir: Path
+    attempt_id: str
+    attempt_timestamp: datetime
+    rollout_archive: ArchivedFile
+    report_archive: ArchivedFile
+    rollout_relative_path: PurePosixPath
+    request_body: bytes
+    run_id: UUID | None
+    source_key: str | None
+    session_id: str | None
+    materialize_files: bool
+
+
+@dataclass(frozen=True)
+class AttemptExecution:
+    stage: str
+    result: str
+    response_code: int
+    response_body: str
+    response_detail: str | None
+    response_lines: tuple[str, ...]
+    retry_submission_expected: bool
+    source_key: str | None
+    session_id: str | None
+    card_archive: ArchivedFile | None
+    error: Exception | None
+    commit_database: bool
 
 
 class CodexMatchProcedure:
@@ -2132,7 +2245,7 @@ def _session_metadata(
     records: tuple[RolloutRecord, ...],
     *,
     timezone_name: str,
-    configured_rollout_basename: str,
+    configured_rollout_basename: str | None,
 ) -> SessionMetadata:
     session_records = [
         record for record in records if record.value.get(CODEX_TYPE_KEY) == CODEX_SESSION_META_TYPE
@@ -2162,7 +2275,7 @@ def _session_metadata(
     rollout_filename = (
         f"{ROLLOUT_FILENAME_PREFIX}{rollout_timestamp}-{session_id}{ROLLOUT_FILENAME_SUFFIX}"
     )
-    if rollout_filename != configured_rollout_basename:
+    if configured_rollout_basename is not None and rollout_filename != configured_rollout_basename:
         raise PushValidationError(Locale.SESSION_META_ROLLOUT_MISMATCH)
 
     turn_context_payload = next(
@@ -2230,7 +2343,7 @@ def build_rollout_index(
     records: tuple[RolloutRecord, ...],
     *,
     timezone_name: str,
-    configured_rollout_basename: str,
+    configured_rollout_basename: str | None,
 ) -> RolloutIndex:
     session = _session_metadata(
         records,
@@ -2559,8 +2672,10 @@ def persist_rollout_index(
     rollout_index: RolloutIndex,
     *,
     codex_match_version: int = 1,
+    manage_transaction: bool = True,
 ) -> None:
-    conn.execute("BEGIN TRANSACTION")
+    if manage_transaction:
+        conn.execute("BEGIN TRANSACTION")
     try:
         _create_codex_schema(
             conn,
@@ -2794,9 +2909,11 @@ def persist_rollout_index(
         }
         if persisted_call_ids != current_call_ids or persisted_turn_keys != current_turn_keys:
             raise PushValidationError(Locale.PROVENANCE_PREFIX_MISMATCH)
-        conn.execute("COMMIT")
+        if manage_transaction:
+            conn.execute("COMMIT")
     except Exception:
-        conn.execute("ROLLBACK")
+        if manage_transaction:
+            conn.execute("ROLLBACK")
         raise
 
 
@@ -3374,9 +3491,7 @@ def _derive_retry_obligations(
             [run_id, baseline_attempt_id],
         ).fetchall()
         for submission_json, assessment_json in rows:
-            submission = StandardizedSubmission.model_validate_json(
-                cast(str, submission_json)
-            )
+            submission = StandardizedSubmission.model_validate_json(cast(str, submission_json))
             assessment = _assessment_from_audit(
                 submission,
                 EvidenceAttemptAudit.model_validate_json(cast(str, assessment_json)),
@@ -3404,6 +3519,7 @@ def _process_retry_attempt(
     attempt_timestamp: datetime,
     submission: SubmissionPayload,
     assessment: EvidenceAssessment,
+    manage_transaction: bool = True,
 ) -> tuple[str, ...]:
     run_id_text = str(run_id)
     initial_obligations = _retry_obligations_from_assessment(
@@ -3412,7 +3528,8 @@ def _process_retry_attempt(
     )
     submission_json = submission.model_dump_json(by_alias=True)
     assessment_json = _assessment_audit(assessment).model_dump_json()
-    conn.execute("BEGIN TRANSACTION")
+    if manage_transaction:
+        conn.execute("BEGIN TRANSACTION")
     try:
         inserted_baseline = False
         if not assessment.accepted:
@@ -3518,10 +3635,12 @@ def _process_retry_attempt(
                 accepted,
             ],
         )
-        conn.execute("COMMIT")
+        if manage_transaction:
+            conn.execute("COMMIT")
         return violations
     except Exception:
-        conn.execute("ROLLBACK")
+        if manage_transaction:
+            conn.execute("ROLLBACK")
         raise
 
 
@@ -3727,6 +3846,49 @@ def _atomic_write_text(path: Path, value: str) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def archive_http_request_log(
+    attempt_dir: Path,
+    attempt_id: str,
+    *,
+    request: Request,
+    request_body: bytes,
+    response_code: int,
+    response_headers: Mapping[str, str],
+    response_body: str,
+    started_ns: int,
+) -> ArchivedFile:
+    log_path = attempt_dir / HTTP_REQUEST_LOG_FILENAME_TEMPLATE.format(attempt_id=attempt_id)
+    if log_path.exists():
+        raise PushValidationError(Locale.ATTEMPT_HTTP_LOG_EXISTS)
+    record = HttpRequestLogRecord(
+        schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION,
+        method=HTTP_POST_METHOD,
+        scheme=request.url.scheme,
+        host=request.url.hostname or "",
+        path=request.url.path,
+        query=request.url.query,
+        request_headers=dict(request.headers),
+        request_body=request_body.decode(TEXT_ENCODING),
+        response_code=response_code,
+        response_headers=dict(response_headers),
+        response_body=response_body,
+        received_at_unix_usec=time.time_ns() // NANOSECONDS_PER_MICROSECOND,
+        duration_usec=(time.monotonic_ns() - started_ns) // NANOSECONDS_PER_MICROSECOND,
+    )
+    append_http_request_log_record(log_path=log_path, record=record)
+    _fsync_file(log_path)
+    _fsync_directory(log_path.parent)
+    return _archived_file(log_path)
+
+
+def http_error_response_body(detail: str) -> str:
+    return json.dumps(
+        {"detail": detail},
+        ensure_ascii=False,
+        separators=COMPACT_JSON_SEPARATORS,
+    )
+
+
 def record_attempt(
     attempt_dir: Path,
     attempt_id: str,
@@ -3737,13 +3899,19 @@ def record_attempt(
     workbook_archive: ArchivedFile | None = None,
     report_archive: ArchivedFile | None = None,
     card_archive: ArchivedFile | None = None,
-) -> None:
+    http_request_log_archive: ArchivedFile | None = None,
+    run_id: UUID | None = None,
+    source_key: str | None = None,
+    session_id: str | None = None,
+    rollout_relative_path: PurePosixPath | None = None,
+) -> str:
     artifacts = {}
     for name, artifact in (
         (ARTIFACT_ROLLOUT_KEY, rollout_archive),
         (ARTIFACT_WORKBOOK_KEY, workbook_archive),
         (ARTIFACT_APPENDWATCH_REPORT_KEY, report_archive),
         (ARTIFACT_CARD_ZIP_KEY, card_archive),
+        (ARTIFACT_HTTP_REQUEST_LOG_KEY, http_request_log_archive),
     ):
         if artifact is not None:
             artifacts[name] = {
@@ -3760,10 +3928,20 @@ def record_attempt(
         ATTEMPT_UPDATED_AT_KEY: datetime.now(timezone.utc).isoformat(),
         ATTEMPT_ARTIFACTS_KEY: artifacts,
     }
+    if run_id is not None:
+        value[ATTEMPT_RUN_ID_KEY] = str(run_id)
+    if source_key is not None:
+        value[ATTEMPT_SOURCE_KEY] = source_key
+    if session_id is not None:
+        value[ATTEMPT_SESSION_ID_KEY] = session_id
+    if rollout_relative_path is not None:
+        value[ATTEMPT_ROLLOUT_RELATIVE_PATH_KEY] = str(rollout_relative_path)
+    manifest_text = json.dumps(value, ensure_ascii=False, indent=2) + "\n"
     _atomic_write_text(
         attempt_dir / ATTEMPT_MANIFEST_FILENAME,
-        json.dumps(value, ensure_ascii=False, indent=2) + "\n",
+        manifest_text,
     )
+    return manifest_text
 
 
 def open_source_database(
@@ -3912,9 +4090,7 @@ def ground_truth_for_researcher(researcher: SourceResearcher) -> dict[str, objec
     if researcher.cohort == NO_GROUND_TRUTH_COHORT:
         return None
     required_columns = tuple(
-        column
-        for column in DOCX_COLUMNS
-        if column not in KTP_DOCX_OPTIONAL_EMPTY_COLS
+        column for column in DOCX_COLUMNS if column not in KTP_DOCX_OPTIONAL_EMPTY_COLS
     )
     complete_rows = [
         row
@@ -3979,9 +4155,7 @@ def render_codex_values(
             field_submission.value,
             tuple(match.evidence_number for match in matches),
         )
-        standardized_value = field_submission.model_dump(mode="json")[
-            STANDARDIZED_VALUE_FIELD
-        ]
+        standardized_value = field_submission.model_dump(mode="json")[STANDARDIZED_VALUE_FIELD]
         rendered[standardized_columns[column]] = json.dumps(
             standardized_value,
             ensure_ascii=False,
@@ -4122,8 +4296,7 @@ def selected_card_outer_dict(
                 except json.JSONDecodeError:
                     continue
                 if decoded is None or (
-                    isinstance(decoded, str)
-                    and decoded in AI_AUGMENT_CARD_EMPTY_VALUE_PLACEHOLDERS
+                    isinstance(decoded, str) and decoded in AI_AUGMENT_CARD_EMPTY_VALUE_PLACEHOLDERS
                 ):
                     inner.data[column] = None
     return selected
@@ -4157,7 +4330,9 @@ def write_accepted_submission(
     attempt_id: str,
     attempt_timestamp: datetime,
     source_researcher: SourceResearcher | None = None,
-) -> tuple[tuple[str, ...], ArchivedFile]:
+    manage_transaction: bool = True,
+    materialize_files: bool = True,
+) -> tuple[tuple[str, ...], ArchivedFile | None]:
     normalized_submission = submission.normalized_values()
     response_path = attempt_dir / RESPONSE_FILENAME
     zip_name = CARD_ZIP_FILENAME_TEMPLATE.format(
@@ -4165,7 +4340,7 @@ def write_accepted_submission(
         attempt_id=attempt_id,
     )
     zip_path = runtime.pipeline.output_dir / zip_name
-    if zip_path.exists():
+    if materialize_files and zip_path.exists():
         raise PushValidationError(Locale.ATTEMPT_CARD_ZIP_EXISTS)
 
     rendered = render_codex_values(
@@ -4190,7 +4365,8 @@ def write_accepted_submission(
         **rendered,
     }
 
-    detour_conn.execute("BEGIN TRANSACTION")
+    if manage_transaction:
+        detour_conn.execute("BEGIN TRANSACTION")
     try:
         append_codex_output(detour_conn, output_row)
         submitted_line = json_line(normalized_submission)
@@ -4200,33 +4376,474 @@ def write_accepted_submission(
             else ground_truth_for_researcher(source_researcher)
         )
         response_lines = (submitted_line,) if truth is None else (submitted_line, json_line(truth))
-        outer_dict = selected_card_outer_dict(source_conn, detour_conn, researcher)
-        intro_date = attempt_timestamp.astimezone(ZoneInfo(runtime.pipeline.timezone)).strftime(
-            Locale.CARD_INTRO_DATE_FORMAT
-        )
-        cards = build_cards(
-            outer_dict,
-            total_draws=runtime.pipeline.total_draws,
-            intro=CARD_INTRODUCTION.format(intro_date),
-            excluded_cols=CARD_EXCLUDED_COLUMNS,
-        )
-        if len(cards) != 1:
-            raise PushValidationError(Locale.RESEARCHER_CARD_COUNT_INVALID)
-        write_cards_zip(
-            cards,
-            runtime.pipeline.output_dir,
-            zip_name,
-            output_format=runtime.pipeline.output_format,
-            reference_docx=runtime.pipeline.pandoc_reference_docx,
-        )
-        _atomic_write_text(response_path, "".join(response_lines))
-        detour_conn.execute("COMMIT")
+        if materialize_files:
+            outer_dict = selected_card_outer_dict(source_conn, detour_conn, researcher)
+            intro_date = attempt_timestamp.astimezone(ZoneInfo(runtime.pipeline.timezone)).strftime(
+                Locale.CARD_INTRO_DATE_FORMAT
+            )
+            cards = build_cards(
+                outer_dict,
+                total_draws=runtime.pipeline.total_draws,
+                intro=CARD_INTRODUCTION.format(intro_date),
+                excluded_cols=CARD_EXCLUDED_COLUMNS,
+            )
+            if len(cards) != 1:
+                raise PushValidationError(Locale.RESEARCHER_CARD_COUNT_INVALID)
+            write_cards_zip(
+                cards,
+                runtime.pipeline.output_dir,
+                zip_name,
+                output_format=runtime.pipeline.output_format,
+                reference_docx=runtime.pipeline.pandoc_reference_docx,
+            )
+            _atomic_write_text(response_path, "".join(response_lines))
+        if manage_transaction:
+            detour_conn.execute("COMMIT")
     except Exception:
-        detour_conn.execute("ROLLBACK")
-        response_path.unlink(missing_ok=True)
-        zip_path.unlink(missing_ok=True)
+        if manage_transaction:
+            detour_conn.execute("ROLLBACK")
+        if materialize_files:
+            response_path.unlink(missing_ok=True)
+            zip_path.unlink(missing_ok=True)
         raise
-    return response_lines, _archived_file(zip_path)
+    return response_lines, _archived_file(zip_path) if materialize_files else None
+
+
+def execute_attempt(
+    detour_conn: duckdb.DuckDBPyConnection,
+    runtime: RuntimeConfiguration,
+    replay: AttemptReplayInput,
+) -> AttemptExecution:
+    source_conn: duckdb.DuckDBPyConnection | None = None
+    retry_submission_expected = False
+    session_id = replay.session_id
+    source_key = replay.source_key
+    stage = ATTEMPT_STAGE_APPENDWATCH_VALIDATION
+    try:
+        parse_appendwatch_report(
+            replay.report_archive.path,
+            replay.rollout_relative_path,
+        )
+        stage = ATTEMPT_STAGE_ROLLOUT_INDEX
+        rollout_index = build_rollout_index(
+            parse_rollout(replay.rollout_archive.path),
+            timezone_name=runtime.pipeline.timezone,
+            configured_rollout_basename=replay.rollout_relative_path.name,
+        )
+        if session_id is not None and rollout_index.session.session_id != session_id:
+            raise PushValidationError(Locale.SANCTIONED_SESSION_MISMATCH)
+        session_id = rollout_index.session.session_id
+        persist_rollout_index(
+            detour_conn,
+            rollout_index,
+            codex_match_version=runtime.pipeline.match_rule_version.codex_match,
+            manage_transaction=False,
+        )
+
+        stage = ATTEMPT_STAGE_PYDANTIC_VALIDATION
+        if replay.run_id is not None:
+            if source_key is None or replay.session_id is None:
+                raise PushConfigurationError(Locale.EVIDENCE_RETRY_IDENTITY_MISMATCH)
+            retry_submission_expected = _retry_baseline_exists(
+                detour_conn,
+                run_id=replay.run_id,
+                source_key=source_key,
+                session_id=replay.session_id,
+            )
+        submission: SubmissionPayload = (
+            StandardizedSubmission.model_validate_json(replay.request_body)
+            if retry_submission_expected
+            else Submission.model_validate_json(replay.request_body)
+        )
+
+        stage = ATTEMPT_STAGE_EVIDENCE_VALIDATION
+        _seed_evidence_random(runtime.pipeline.sample_seed)
+        evidence_assessment = assess_submission_evidence(
+            detour_conn,
+            submission,
+            rollout_filename=rollout_index.session.rollout_filename,
+            codex_match_version=runtime.pipeline.match_rule_version.codex_match,
+        )
+        _log_evidence_assessment(
+            evidence_assessment,
+            attempt_id=replay.attempt_id,
+        )
+        retry_violations: tuple[str, ...] = ()
+        if replay.run_id is not None:
+            assert source_key is not None
+            assert replay.session_id is not None
+            retry_violations = _process_retry_attempt(
+                detour_conn,
+                run_id=replay.run_id,
+                source_key=source_key,
+                session_id=replay.session_id,
+                attempt_id=replay.attempt_id,
+                attempt_timestamp=replay.attempt_timestamp,
+                submission=submission,
+                assessment=evidence_assessment,
+                manage_transaction=False,
+            )
+        elif any(item.outcome == EVIDENCE_OUTCOME_WITHDRAWN for item in evidence_assessment.items):
+            retry_violations = (Locale.EVIDENCE_WITHDRAWAL_WITHOUT_BASELINE,)
+        if not evidence_assessment.accepted or retry_violations:
+            raise EvidenceAssessmentError(
+                Locale.EVIDENCE_SUBMISSION_REJECTED,
+                public_detail=_assessment_public_detail(
+                    evidence_assessment,
+                    violations=retry_violations,
+                    include_retry_contract=(replay.run_id is not None),
+                ),
+            )
+        accepted_submission = (
+            submission
+            if isinstance(submission, StandardizedSubmission)
+            else _standardized_initial_submission(submission)
+        )
+
+        stage = ATTEMPT_STAGE_RESEARCHER_RESOLUTION
+        source_conn = open_source_database(runtime)
+        source_researcher: SourceResearcher | None = None
+        if source_key is None:
+            first_name, last_name = selected_task_identity()
+            researcher = resolve_researcher(
+                source_conn,
+                first_name=first_name,
+                last_name=last_name,
+            )
+            source_key = researcher.source_key
+        else:
+            source_researcher = load_source_researcher(
+                source_conn,
+                runtime,
+                source_key=source_key,
+            )
+            researcher = researcher_context(source_researcher)
+
+        stage = ATTEMPT_STAGE_CARD
+        response_lines, card_archive = write_accepted_submission(
+            detour_conn,
+            source_conn,
+            runtime,
+            submission=accepted_submission,
+            evidence=evidence_assessment.validated,
+            researcher=researcher,
+            rollout_index=rollout_index,
+            rollout_archive=replay.rollout_archive,
+            attempt_dir=replay.attempt_dir,
+            attempt_id=replay.attempt_id,
+            attempt_timestamp=replay.attempt_timestamp,
+            source_researcher=source_researcher,
+            manage_transaction=False,
+            materialize_files=replay.materialize_files,
+        )
+        response_body = "".join(response_lines)
+        return AttemptExecution(
+            stage=ATTEMPT_STAGE_ACCEPTED,
+            result=ATTEMPT_RESULT_ACCEPTED,
+            response_code=status.HTTP_200_OK,
+            response_body=response_body,
+            response_detail=None,
+            response_lines=response_lines,
+            retry_submission_expected=retry_submission_expected,
+            source_key=source_key,
+            session_id=session_id,
+            card_archive=card_archive,
+            error=None,
+            commit_database=True,
+        )
+    except PushConfigurationError as exc:
+        detail = Locale.CONFIGURATION_ERROR_DETAIL
+        return AttemptExecution(
+            stage=stage,
+            result=ATTEMPT_RESULT_CONFIGURATION_ERROR,
+            response_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            response_body=http_error_response_body(detail),
+            response_detail=detail,
+            response_lines=(),
+            retry_submission_expected=retry_submission_expected,
+            source_key=source_key,
+            session_id=session_id,
+            card_archive=None,
+            error=exc,
+            commit_database=False,
+        )
+    except MultipleEvidenceMatches as exc:
+        detail = Locale.MULTIPLE_MATCH_DETAIL_TEMPLATE.format(excerpt=exc.excerpt)
+        return AttemptExecution(
+            stage=stage,
+            result=ATTEMPT_RESULT_REJECTED,
+            response_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            response_body=http_error_response_body(detail),
+            response_detail=detail,
+            response_lines=(),
+            retry_submission_expected=retry_submission_expected,
+            source_key=source_key,
+            session_id=session_id,
+            card_archive=None,
+            error=exc,
+            commit_database=(stage == ATTEMPT_STAGE_EVIDENCE_VALIDATION),
+        )
+    except PushValidationError as exc:
+        detail = (
+            exc.public_detail
+            if isinstance(exc, EvidenceAssessmentError)
+            else Locale.VALIDATION_ERROR_DETAIL
+        )
+        return AttemptExecution(
+            stage=stage,
+            result=ATTEMPT_RESULT_REJECTED,
+            response_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            response_body=http_error_response_body(detail),
+            response_detail=detail,
+            response_lines=(),
+            retry_submission_expected=retry_submission_expected,
+            source_key=source_key,
+            session_id=session_id,
+            card_archive=None,
+            error=exc,
+            commit_database=(
+                stage
+                in {
+                    ATTEMPT_STAGE_PYDANTIC_VALIDATION,
+                    ATTEMPT_STAGE_EVIDENCE_VALIDATION,
+                }
+            ),
+        )
+    except ValidationError as exc:
+        detail = Locale.VALIDATION_ERROR_DETAIL + (
+            f"\n{RETRY_SUBMISSION_PUBLIC_GUIDANCE}" if retry_submission_expected else ""
+        )
+        return AttemptExecution(
+            stage=stage,
+            result=ATTEMPT_RESULT_REJECTED,
+            response_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            response_body=http_error_response_body(detail),
+            response_detail=detail,
+            response_lines=(),
+            retry_submission_expected=retry_submission_expected,
+            source_key=source_key,
+            session_id=session_id,
+            card_archive=None,
+            error=exc,
+            commit_database=True,
+        )
+    except (OSError, ValueError, duckdb.Error, subprocess.SubprocessError) as exc:
+        detail = Locale.VALIDATION_ERROR_DETAIL
+        return AttemptExecution(
+            stage=stage,
+            result=ATTEMPT_RESULT_REJECTED,
+            response_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            response_body=http_error_response_body(detail),
+            response_detail=detail,
+            response_lines=(),
+            retry_submission_expected=retry_submission_expected,
+            source_key=source_key,
+            session_id=session_id,
+            card_archive=None,
+            error=exc,
+            commit_database=False,
+        )
+    finally:
+        if source_conn is not None:
+            source_conn.close()
+
+
+def _validated_archived_file(
+    attempt_dir: Path,
+    artifact: ArchivedArtifact,
+    *,
+    expected_filename: str,
+) -> ArchivedFile:
+    artifact_path = attempt_dir / artifact.filename
+    if (
+        artifact.filename != expected_filename
+        or artifact_path.parent != attempt_dir
+        or not artifact_path.is_file()
+        or artifact_path.is_symlink()
+    ):
+        raise PushValidationError(
+            Locale.ARCHIVED_ATTEMPT_ARTIFACT_INVALID_TEMPLATE.format(artifact=expected_filename)
+        )
+    archived_file = _archived_file(artifact_path)
+    if archived_file.size != artifact.size or archived_file.sha256 != artifact.sha256:
+        raise PushValidationError(
+            Locale.ARCHIVED_ATTEMPT_ARTIFACT_INVALID_TEMPLATE.format(artifact=expected_filename)
+        )
+    if (
+        isinstance(artifact, ArchivedRolloutArtifact)
+        and archived_file.line_count != artifact.line_count
+    ):
+        raise PushValidationError(
+            Locale.ARCHIVED_ATTEMPT_ARTIFACT_INVALID_TEMPLATE.format(artifact=expected_filename)
+        )
+    return archived_file
+
+
+def _archived_attempt_replay(
+    attempt_dir: Path,
+) -> tuple[ArchivedAttemptManifest, str, AttemptReplayInput]:
+    if not attempt_dir.is_dir() or attempt_dir.is_symlink():
+        raise PushValidationError(Locale.ARCHIVED_ATTEMPT_PATH_INVALID)
+    manifest_path = attempt_dir / ATTEMPT_MANIFEST_FILENAME
+    if not manifest_path.is_file() or manifest_path.is_symlink():
+        raise PushValidationError(Locale.ARCHIVED_ATTEMPT_MANIFEST_INVALID)
+    try:
+        manifest_text = manifest_path.read_text(encoding=TEXT_ENCODING)
+        manifest = ArchivedAttemptManifest.model_validate_json(manifest_text)
+        timestamp_text, uuid_text = manifest.attempt_id.rsplit(
+            ATTEMPT_ID_SEPARATOR,
+            maxsplit=1,
+        )
+        attempt_timestamp = datetime.strptime(
+            timestamp_text,
+            ATTEMPT_ID_TIMESTAMP_FORMAT,
+        ).replace(tzinfo=timezone.utc)
+        if UUID(hex=uuid_text).hex != uuid_text:
+            raise ValueError(Locale.ARCHIVED_ATTEMPT_MANIFEST_INVALID)
+        datetime.fromisoformat(manifest.updated_at)
+    except (OSError, UnicodeError, ValueError, ValidationError) as exc:
+        raise PushValidationError(Locale.ARCHIVED_ATTEMPT_MANIFEST_INVALID) from exc
+    if manifest.attempt_id != attempt_dir.name:
+        raise PushValidationError(Locale.ARCHIVED_ATTEMPT_MANIFEST_INVALID)
+    expected_response_code = ATTEMPT_RESULT_RESPONSE_CODE.get(manifest.result)
+    if expected_response_code is None:
+        raise PushValidationError(Locale.ARCHIVED_ATTEMPT_MANIFEST_INVALID)
+    if manifest.result == ATTEMPT_RESULT_ACCEPTED and manifest.stage != ATTEMPT_STAGE_ACCEPTED:
+        raise PushValidationError(Locale.ARCHIVED_ATTEMPT_MANIFEST_INVALID)
+    if manifest.run_id is not None and (manifest.source_key is None or manifest.session_id is None):
+        raise PushValidationError(Locale.ARCHIVED_ATTEMPT_MANIFEST_INVALID)
+    if manifest.result == ATTEMPT_RESULT_ACCEPTED and manifest.source_key is None:
+        raise PushValidationError(Locale.ARCHIVED_ATTEMPT_MANIFEST_INVALID)
+
+    rollout_relative_path = PurePosixPath(manifest.rollout_relative_path)
+    if (
+        str(rollout_relative_path) != manifest.rollout_relative_path
+        or rollout_relative_path.is_absolute()
+        or rollout_relative_path == CURRENT_DIRECTORY
+        or any(part in FORBIDDEN_NORMALIZED_PATH_PARTS for part in rollout_relative_path.parts)
+    ):
+        raise PushValidationError(Locale.ARCHIVED_ATTEMPT_MANIFEST_INVALID)
+    rollout_archive = _validated_archived_file(
+        attempt_dir,
+        manifest.artifacts.rollout,
+        expected_filename=ROLLOUT_ARCHIVE_FILENAME_TEMPLATE.format(attempt_id=manifest.attempt_id),
+    )
+    report_archive = _validated_archived_file(
+        attempt_dir,
+        manifest.artifacts.appendwatch_report,
+        expected_filename=APPENDWATCH_ARCHIVE_FILENAME_TEMPLATE.format(
+            attempt_id=manifest.attempt_id
+        ),
+    )
+    http_archive = _validated_archived_file(
+        attempt_dir,
+        manifest.artifacts.http_request_log,
+        expected_filename=HTTP_REQUEST_LOG_FILENAME_TEMPLATE.format(attempt_id=manifest.attempt_id),
+    )
+    try:
+        http_lines = http_archive.path.read_text(encoding=TEXT_ENCODING).splitlines()
+        if len(http_lines) != 1 or http_archive.line_count != 1:
+            raise ValueError(Locale.ARCHIVED_ATTEMPT_HTTP_INVALID)
+        http_record = HttpRequestLogRecord.model_validate_json(http_lines[0])
+        if (
+            http_record.schema_version != KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION
+            or http_record.method != HTTP_POST_METHOD
+            or http_record.path != PUSH_PATH
+            or http_record.query
+            or http_record.response_code != expected_response_code
+            or not isinstance(http_record.request_body, str)
+        ):
+            raise ValueError(Locale.ARCHIVED_ATTEMPT_HTTP_INVALID)
+        request_body = http_record.request_body.encode(TEXT_ENCODING)
+        if len(request_body) > MAX_PUSH_BODY_BYTES:
+            raise ValueError(Locale.ARCHIVED_ATTEMPT_HTTP_INVALID)
+    except (OSError, UnicodeError, ValueError, ValidationError) as exc:
+        raise PushValidationError(Locale.ARCHIVED_ATTEMPT_HTTP_INVALID) from exc
+    return (
+        manifest,
+        manifest_text,
+        AttemptReplayInput(
+            attempt_dir=attempt_dir,
+            attempt_id=manifest.attempt_id,
+            attempt_timestamp=attempt_timestamp,
+            rollout_archive=rollout_archive,
+            report_archive=report_archive,
+            rollout_relative_path=rollout_relative_path,
+            request_body=request_body,
+            run_id=manifest.run_id,
+            source_key=manifest.source_key,
+            session_id=manifest.session_id,
+            materialize_files=False,
+        ),
+    )
+
+
+def restore_archived_attempts(
+    runtime: RuntimeConfiguration,
+    *,
+    attempts_dir: Path = ATTEMPTS_DIR,
+) -> ArchivedAttemptRecovery:
+    attempts_dir.mkdir(parents=True, exist_ok=True)
+    attempt_dirs = tuple(
+        sorted(
+            (path for path in attempts_dir.iterdir() if path.is_dir() or path.is_symlink()),
+            key=lambda path: path.name,
+        )
+    )
+    restored_attempt_ids: list[str] = []
+    restored_accepted_attempt_ids: list[str] = []
+    skipped_attempt_ids: list[str] = []
+    invalid = 0
+    with DETOUR_DB_LOCK:
+        detour_conn = open_detour_database(runtime)
+        try:
+            detour_conn.execute(CREATE_ARCHIVED_ATTEMPTS_TABLE_SQL)
+            existing_attempt_ids = {
+                cast(str, row[0])
+                for row in detour_conn.execute(SELECT_ARCHIVED_ATTEMPT_IDS_SQL).fetchall()
+            }
+            for attempt_dir in attempt_dirs:
+                if attempt_dir.name in existing_attempt_ids:
+                    skipped_attempt_ids.append(attempt_dir.name)
+                    continue
+                transaction_started = False
+                try:
+                    manifest, manifest_text, replay = _archived_attempt_replay(attempt_dir)
+                    detour_conn.execute("BEGIN TRANSACTION")
+                    transaction_started = True
+                    execution = execute_attempt(detour_conn, runtime, replay)
+                    if (
+                        execution.stage != manifest.stage
+                        or execution.result != manifest.result
+                    ):
+                        raise PushValidationError(Locale.ARCHIVED_ATTEMPT_OUTCOME_MISMATCH)
+                    if not execution.commit_database:
+                        detour_conn.execute("ROLLBACK")
+                        transaction_started = False
+                        detour_conn.execute("BEGIN TRANSACTION")
+                        transaction_started = True
+                    detour_conn.execute(
+                        INSERT_ARCHIVED_ATTEMPT_SQL,
+                        [manifest.attempt_id, manifest_text],
+                    )
+                    detour_conn.execute("COMMIT")
+                    transaction_started = False
+                    restored_attempt_ids.append(manifest.attempt_id)
+                    if manifest.result == ATTEMPT_RESULT_ACCEPTED:
+                        restored_accepted_attempt_ids.append(manifest.attempt_id)
+                except Exception:
+                    if transaction_started:
+                        detour_conn.execute("ROLLBACK")
+                    invalid += 1
+        finally:
+            detour_conn.close()
+    return ArchivedAttemptRecovery(
+        discovered=len(attempt_dirs),
+        invalid=invalid,
+        restored_attempt_ids=tuple(restored_attempt_ids),
+        restored_accepted_attempt_ids=tuple(restored_accepted_attempt_ids),
+        skipped_attempt_ids=tuple(skipped_attempt_ids),
+    )
 
 
 def validate_transport(request: Request) -> None:
@@ -4293,10 +4910,35 @@ def safely_record_attempt(
     workbook_archive: ArchivedFile | None = None,
     report_archive: ArchivedFile | None,
     card_archive: ArchivedFile | None,
+    request: Request,
+    request_body: bytes,
+    response_code: int,
+    response_body: str,
+    started_ns: int,
+    http_request_log_archive: ArchivedFile | None = None,
+    run_id: UUID | None = None,
+    source_key: str | None = None,
+    session_id: str | None = None,
+    rollout_relative_path: PurePosixPath | None = None,
 ) -> None:
     if attempt_dir is None:
         return
     try:
+        if http_request_log_archive is None:
+            http_request_log_archive = archive_http_request_log(
+                attempt_dir,
+                attempt_id,
+                request=request,
+                request_body=request_body,
+                response_code=response_code,
+                response_headers={
+                    HTTP_REQUEST_LOG_RESPONSE_CONTENT_TYPE_HEADER: (
+                        ATTEMPT_RESPONSE_CONTENT_TYPE[response_code]
+                    )
+                },
+                response_body=response_body,
+                started_ns=started_ns,
+            )
         record_attempt(
             attempt_dir,
             attempt_id,
@@ -4306,8 +4948,13 @@ def safely_record_attempt(
             workbook_archive=workbook_archive,
             report_archive=report_archive,
             card_archive=card_archive,
+            http_request_log_archive=http_request_log_archive,
+            run_id=run_id,
+            source_key=source_key,
+            session_id=session_id,
+            rollout_relative_path=rollout_relative_path,
         )
-    except OSError:
+    except OSError, PushValidationError:
         logger.exception(
             Locale.ATTEMPT_RECORD_FAILED_LOG,
             attempt_id,
@@ -4355,6 +5002,7 @@ def pull() -> StreamingResponse:
 #  http://127.0.0.1:8000/push
 @app.post(**PUSH_ROUTE)
 async def push(request: Request) -> StreamingResponse:
+    started_ns = time.monotonic_ns()
     attempt_timestamp = datetime.now(timezone.utc)
     attempt_id = new_attempt_id(attempt_timestamp)
     attempt_dir: Path | None = None
@@ -4362,11 +5010,16 @@ async def push(request: Request) -> StreamingResponse:
     workbook_archive: ArchivedFile | None = None
     report_archive: ArchivedFile | None = None
     card_archive: ArchivedFile | None = None
+    http_request_log_archive: ArchivedFile | None = None
+    request_body = b""
     snapshot: SanctionSnapshot | None = None
-    retry_submission_expected = False
+    configuration: PushConfiguration | None = None
     stage = ATTEMPT_STAGE_TRANSPORT
 
     try:
+        attempt_dir = create_attempt(attempt_id)
+        record_attempt(attempt_dir, attempt_id, stage, ATTEMPT_RESULT_PENDING)
+        request_body = await bounded_request_body(request)
         validate_transport(request)
         stage = ATTEMPT_STAGE_CONFIGURATION
         runtime = runtime_configuration()
@@ -4376,11 +5029,22 @@ async def push(request: Request) -> StreamingResponse:
             with WORKBOOK_STATE_LOCK:
                 if not WORKBOOK_INITIALIZED:
                     raise PushConfigurationError(Locale.WORKBOOK_NOT_INITIALIZED)
-        attempt_dir = create_attempt(attempt_id)
-        record_attempt(attempt_dir, attempt_id, stage, ATTEMPT_RESULT_PENDING)
+        record_attempt(
+            attempt_dir,
+            attempt_id,
+            stage,
+            ATTEMPT_RESULT_PENDING,
+            rollout_relative_path=configuration.rollout_relative_path,
+        )
 
         stage = ATTEMPT_STAGE_ROLLOUT_COPY
-        record_attempt(attempt_dir, attempt_id, stage, ATTEMPT_RESULT_PENDING)
+        record_attempt(
+            attempt_dir,
+            attempt_id,
+            stage,
+            ATTEMPT_RESULT_PENDING,
+            rollout_relative_path=configuration.rollout_relative_path,
+        )
         rollout_archive = copy_rollout(configuration, attempt_dir, attempt_id)
 
         if snapshot.control_base_url is not None:
@@ -4391,6 +5055,7 @@ async def push(request: Request) -> StreamingResponse:
                 stage,
                 ATTEMPT_RESULT_PENDING,
                 rollout_archive=rollout_archive,
+                rollout_relative_path=configuration.rollout_relative_path,
             )
             workbook_archive = copy_guest_workbook(configuration, attempt_dir, attempt_id)
 
@@ -4402,6 +5067,7 @@ async def push(request: Request) -> StreamingResponse:
             ATTEMPT_RESULT_PENDING,
             rollout_archive=rollout_archive,
             workbook_archive=workbook_archive,
+            rollout_relative_path=configuration.rollout_relative_path,
         )
         report_archive = copy_appendwatch_report(configuration, attempt_dir, attempt_id)
 
@@ -4414,145 +5080,129 @@ async def push(request: Request) -> StreamingResponse:
             rollout_archive=rollout_archive,
             workbook_archive=workbook_archive,
             report_archive=report_archive,
+            rollout_relative_path=configuration.rollout_relative_path,
         )
-        parse_appendwatch_report(
-            report_archive.path,
-            configuration.rollout_relative_path,
+        replay = AttemptReplayInput(
+            attempt_dir=attempt_dir,
+            attempt_id=attempt_id,
+            attempt_timestamp=attempt_timestamp,
+            rollout_archive=rollout_archive,
+            report_archive=report_archive,
+            rollout_relative_path=configuration.rollout_relative_path,
+            request_body=request_body,
+            run_id=snapshot.run_id,
+            source_key=snapshot.source_key,
+            session_id=snapshot.session_id,
+            materialize_files=True,
         )
-
-        stage = ATTEMPT_STAGE_ROLLOUT_INDEX
-        records = parse_rollout(rollout_archive.path)
-        rollout_index = build_rollout_index(
-            records,
-            timezone_name=runtime.pipeline.timezone,
-            configured_rollout_basename=configuration.rollout_relative_path.name,
-        )
-        if (
-            snapshot.session_id is not None
-            and rollout_index.session.session_id != snapshot.session_id
-        ):
-            raise PushValidationError(Locale.SANCTIONED_SESSION_MISMATCH)
         with DETOUR_DB_LOCK:
             detour_conn = open_detour_database(runtime)
-            source_conn: duckdb.DuckDBPyConnection | None = None
+            transaction_started = False
+            execution: AttemptExecution | None = None
             try:
-                persist_rollout_index(
-                    detour_conn,
-                    rollout_index,
-                    codex_match_version=runtime.pipeline.match_rule_version.codex_match,
+                detour_conn.execute(CREATE_ARCHIVED_ATTEMPTS_TABLE_SQL)
+                detour_conn.execute("BEGIN TRANSACTION")
+                transaction_started = True
+                execution = execute_attempt(detour_conn, runtime, replay)
+                stage = execution.stage
+                card_archive = execution.card_archive
+                if not execution.commit_database:
+                    detour_conn.execute("ROLLBACK")
+                    transaction_started = False
+                http_request_log_archive = archive_http_request_log(
+                    attempt_dir,
+                    attempt_id,
+                    request=request,
+                    request_body=request_body,
+                    response_code=execution.response_code,
+                    response_headers={
+                        HTTP_REQUEST_LOG_RESPONSE_CONTENT_TYPE_HEADER: (
+                            ATTEMPT_RESPONSE_CONTENT_TYPE[execution.response_code]
+                        )
+                    },
+                    response_body=execution.response_body,
+                    started_ns=started_ns,
                 )
-
-                stage = ATTEMPT_STAGE_PYDANTIC_VALIDATION
-                body = await bounded_request_body(request)
-                if snapshot.run_id is not None:
-                    if snapshot.source_key is None or snapshot.session_id is None:
-                        raise PushConfigurationError(Locale.EVIDENCE_RETRY_IDENTITY_MISMATCH)
-                    retry_submission_expected = _retry_baseline_exists(
-                        detour_conn,
-                        run_id=snapshot.run_id,
-                        source_key=snapshot.source_key,
-                        session_id=snapshot.session_id,
-                    )
-                submission: SubmissionPayload = (
-                    StandardizedSubmission.model_validate_json(body)
-                    if retry_submission_expected
-                    else Submission.model_validate_json(body)
-                )
-
-                stage = ATTEMPT_STAGE_EVIDENCE_VALIDATION
-                _seed_evidence_random(runtime.pipeline.sample_seed)
-                evidence_assessment = assess_submission_evidence(
-                    detour_conn,
-                    submission,
-                    rollout_filename=rollout_index.session.rollout_filename,
-                    codex_match_version=(runtime.pipeline.match_rule_version.codex_match),
-                )
-                _log_evidence_assessment(
-                    evidence_assessment,
-                    attempt_id=attempt_id,
-                )
-                retry_violations: tuple[str, ...] = ()
-                if snapshot.run_id is not None:
-                    if snapshot.source_key is None or snapshot.session_id is None:
-                        raise PushConfigurationError(Locale.EVIDENCE_RETRY_IDENTITY_MISMATCH)
-                    retry_violations = _process_retry_attempt(
-                        detour_conn,
-                        run_id=snapshot.run_id,
-                        source_key=snapshot.source_key,
-                        session_id=snapshot.session_id,
-                        attempt_id=attempt_id,
-                        attempt_timestamp=attempt_timestamp,
-                        submission=submission,
-                        assessment=evidence_assessment,
-                    )
-                elif any(
-                    item.outcome == EVIDENCE_OUTCOME_WITHDRAWN for item in evidence_assessment.items
-                ):
-                    retry_violations = (Locale.EVIDENCE_WITHDRAWAL_WITHOUT_BASELINE,)
-                if not evidence_assessment.accepted or retry_violations:
-                    raise EvidenceAssessmentError(
-                        Locale.EVIDENCE_SUBMISSION_REJECTED,
-                        public_detail=_assessment_public_detail(
-                            evidence_assessment,
-                            violations=retry_violations,
-                            include_retry_contract=(snapshot.run_id is not None),
-                        ),
-                    )
-                validated_evidence = evidence_assessment.validated
-                accepted_submission = (
-                    submission
-                    if isinstance(submission, StandardizedSubmission)
-                    else _standardized_initial_submission(submission)
-                )
-
-                stage = ATTEMPT_STAGE_RESEARCHER_RESOLUTION
-                source_conn = open_source_database(runtime)
-                source_researcher: SourceResearcher | None = None
-                if snapshot.source_key is None:
-                    first_name, last_name = selected_task_identity()
-                    researcher = resolve_researcher(
-                        source_conn,
-                        first_name=first_name,
-                        last_name=last_name,
-                    )
-                else:
-                    source_researcher = load_source_researcher(
-                        source_conn,
-                        runtime,
-                        source_key=snapshot.source_key,
-                    )
-                    researcher = researcher_context(source_researcher)
-
-                stage = ATTEMPT_STAGE_CARD
-                lines, card_archive = write_accepted_submission(
-                    detour_conn,
-                    source_conn,
-                    runtime,
-                    submission=accepted_submission,
-                    evidence=validated_evidence,
-                    researcher=researcher,
-                    rollout_index=rollout_index,
+                manifest_text = record_attempt(
+                    attempt_dir,
+                    attempt_id,
+                    execution.stage,
+                    execution.result,
                     rollout_archive=rollout_archive,
-                    attempt_dir=attempt_dir,
-                    attempt_id=attempt_id,
-                    attempt_timestamp=attempt_timestamp,
-                    source_researcher=source_researcher,
+                    workbook_archive=workbook_archive,
+                    report_archive=report_archive,
+                    card_archive=card_archive,
+                    http_request_log_archive=http_request_log_archive,
+                    run_id=snapshot.run_id,
+                    source_key=execution.source_key,
+                    session_id=execution.session_id,
+                    rollout_relative_path=configuration.rollout_relative_path,
                 )
+                if not execution.commit_database:
+                    detour_conn.execute("BEGIN TRANSACTION")
+                    transaction_started = True
+                detour_conn.execute(
+                    INSERT_ARCHIVED_ATTEMPT_SQL,
+                    [attempt_id, manifest_text],
+                )
+                detour_conn.execute("COMMIT")
+                transaction_started = False
+            except Exception:
+                if transaction_started:
+                    detour_conn.execute("ROLLBACK")
+                if execution is not None and execution.card_archive is not None:
+                    (attempt_dir / RESPONSE_FILENAME).unlink(missing_ok=True)
+                    execution.card_archive.path.unlink(missing_ok=True)
+                raise
             finally:
-                if source_conn is not None:
-                    source_conn.close()
                 detour_conn.close()
-        record_attempt(
-            attempt_dir,
-            attempt_id,
-            ATTEMPT_STAGE_ACCEPTED,
-            ATTEMPT_RESULT_ACCEPTED,
-            rollout_archive=rollout_archive,
-            workbook_archive=workbook_archive,
-            report_archive=report_archive,
-            card_archive=card_archive,
-        )
-        assert snapshot is not None
+
+        assert execution is not None
+        if execution.error is not None:
+            if isinstance(execution.error, PushConfigurationError):
+                logger.error(
+                    Locale.PUSH_CONFIGURATION_FAILED_LOG,
+                    attempt_id,
+                    execution.stage,
+                    execution.error,
+                )
+            elif isinstance(execution.error, MultipleEvidenceMatches):
+                logger.warning(
+                    Locale.PUSH_MULTIPLE_MATCHES_LOG,
+                    attempt_id,
+                    execution.stage,
+                    execution.error.excerpt,
+                )
+            elif isinstance(execution.error, ValidationError):
+                field, reason, failed_input = pydantic_failure(execution.error)
+                logger.warning(
+                    Locale.PUSH_PYDANTIC_FAILED_LOG,
+                    attempt_id,
+                    execution.stage,
+                    field or Locale.UNKNOWN_FIELD,
+                    failed_input,
+                    reason,
+                )
+            elif isinstance(execution.error, PushValidationError):
+                logger.warning(
+                    Locale.PUSH_VALIDATION_FAILED_LOG,
+                    attempt_id,
+                    execution.stage,
+                    execution.error,
+                )
+            else:
+                logger.warning(
+                    Locale.PUSH_UNEXPECTED_FAILED_LOG,
+                    attempt_id,
+                    execution.stage,
+                    execution.error,
+                )
+            assert execution.response_detail is not None
+            raise HTTPException(
+                status_code=execution.response_code,
+                detail=execution.response_detail,
+            )
+
         consume_sanction(snapshot)
         try:
             acknowledge_sanction(snapshot, attempt_id)
@@ -4563,8 +5213,9 @@ async def push(request: Request) -> StreamingResponse:
                 exc,
             )
         logger.info(Locale.PUSH_ACCEPTED_LOG, attempt_id)
-        return StreamingResponse(iter(lines), media_type=MEDIA_TYPE)
+        return StreamingResponse(iter(execution.response_lines), media_type=MEDIA_TYPE)
     except PushConfigurationError as exc:
+        response_body = http_error_response_body(Locale.CONFIGURATION_ERROR_DETAIL)
         safely_record_attempt(
             attempt_dir,
             attempt_id,
@@ -4574,6 +5225,18 @@ async def push(request: Request) -> StreamingResponse:
             workbook_archive=workbook_archive,
             report_archive=report_archive,
             card_archive=card_archive,
+            request=request,
+            request_body=request_body,
+            response_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            response_body=response_body,
+            started_ns=started_ns,
+            http_request_log_archive=http_request_log_archive,
+            run_id=None if snapshot is None else snapshot.run_id,
+            source_key=None if snapshot is None else snapshot.source_key,
+            session_id=None if snapshot is None else snapshot.session_id,
+            rollout_relative_path=(
+                None if configuration is None else configuration.rollout_relative_path
+            ),
         )
         logger.error(
             Locale.PUSH_CONFIGURATION_FAILED_LOG,
@@ -4586,6 +5249,7 @@ async def push(request: Request) -> StreamingResponse:
             detail=Locale.CONFIGURATION_ERROR_DETAIL,
         ) from None
     except MultipleEvidenceMatches as exc:
+        detail = Locale.MULTIPLE_MATCH_DETAIL_TEMPLATE.format(excerpt=exc.excerpt)
         safely_record_attempt(
             attempt_dir,
             attempt_id,
@@ -4595,6 +5259,18 @@ async def push(request: Request) -> StreamingResponse:
             workbook_archive=workbook_archive,
             report_archive=report_archive,
             card_archive=card_archive,
+            request=request,
+            request_body=request_body,
+            response_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            response_body=http_error_response_body(detail),
+            started_ns=started_ns,
+            http_request_log_archive=http_request_log_archive,
+            run_id=None if snapshot is None else snapshot.run_id,
+            source_key=None if snapshot is None else snapshot.source_key,
+            session_id=None if snapshot is None else snapshot.session_id,
+            rollout_relative_path=(
+                None if configuration is None else configuration.rollout_relative_path
+            ),
         )
         logger.warning(
             Locale.PUSH_MULTIPLE_MATCHES_LOG,
@@ -4604,9 +5280,14 @@ async def push(request: Request) -> StreamingResponse:
         )
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=Locale.MULTIPLE_MATCH_DETAIL_TEMPLATE.format(excerpt=exc.excerpt),
+            detail=detail,
         ) from None
     except PushValidationError as exc:
+        detail = (
+            exc.public_detail
+            if isinstance(exc, EvidenceAssessmentError)
+            else Locale.VALIDATION_ERROR_DETAIL
+        )
         safely_record_attempt(
             attempt_dir,
             attempt_id,
@@ -4616,6 +5297,18 @@ async def push(request: Request) -> StreamingResponse:
             workbook_archive=workbook_archive,
             report_archive=report_archive,
             card_archive=card_archive,
+            request=request,
+            request_body=request_body,
+            response_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            response_body=http_error_response_body(detail),
+            started_ns=started_ns,
+            http_request_log_archive=http_request_log_archive,
+            run_id=None if snapshot is None else snapshot.run_id,
+            source_key=None if snapshot is None else snapshot.source_key,
+            session_id=None if snapshot is None else snapshot.session_id,
+            rollout_relative_path=(
+                None if configuration is None else configuration.rollout_relative_path
+            ),
         )
         logger.warning(
             Locale.PUSH_VALIDATION_FAILED_LOG,
@@ -4625,14 +5318,11 @@ async def push(request: Request) -> StreamingResponse:
         )
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=(
-                exc.public_detail
-                if isinstance(exc, EvidenceAssessmentError)
-                else Locale.VALIDATION_ERROR_DETAIL
-            ),
+            detail=detail,
         ) from None
     except ValidationError as exc:
         field, reason, failed_input = pydantic_failure(exc)
+        detail = Locale.VALIDATION_ERROR_DETAIL
         safely_record_attempt(
             attempt_dir,
             attempt_id,
@@ -4642,6 +5332,18 @@ async def push(request: Request) -> StreamingResponse:
             workbook_archive=workbook_archive,
             report_archive=report_archive,
             card_archive=card_archive,
+            request=request,
+            request_body=request_body,
+            response_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            response_body=http_error_response_body(detail),
+            started_ns=started_ns,
+            http_request_log_archive=http_request_log_archive,
+            run_id=None if snapshot is None else snapshot.run_id,
+            source_key=None if snapshot is None else snapshot.source_key,
+            session_id=None if snapshot is None else snapshot.session_id,
+            rollout_relative_path=(
+                None if configuration is None else configuration.rollout_relative_path
+            ),
         )
         logger.warning(
             Locale.PUSH_PYDANTIC_FAILED_LOG,
@@ -4653,12 +5355,10 @@ async def push(request: Request) -> StreamingResponse:
         )
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=(
-                Locale.VALIDATION_ERROR_DETAIL
-                + (f"\n{RETRY_SUBMISSION_PUBLIC_GUIDANCE}" if retry_submission_expected else "")
-            ),
+            detail=detail,
         ) from None
     except (OSError, ValueError, duckdb.Error, subprocess.SubprocessError) as exc:
+        detail = Locale.VALIDATION_ERROR_DETAIL
         safely_record_attempt(
             attempt_dir,
             attempt_id,
@@ -4668,6 +5368,18 @@ async def push(request: Request) -> StreamingResponse:
             workbook_archive=workbook_archive,
             report_archive=report_archive,
             card_archive=card_archive,
+            request=request,
+            request_body=request_body,
+            response_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            response_body=http_error_response_body(detail),
+            started_ns=started_ns,
+            http_request_log_archive=http_request_log_archive,
+            run_id=None if snapshot is None else snapshot.run_id,
+            source_key=None if snapshot is None else snapshot.source_key,
+            session_id=None if snapshot is None else snapshot.session_id,
+            rollout_relative_path=(
+                None if configuration is None else configuration.rollout_relative_path
+            ),
         )
         logger.warning(
             Locale.PUSH_UNEXPECTED_FAILED_LOG,
@@ -4677,7 +5389,7 @@ async def push(request: Request) -> StreamingResponse:
         )
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=Locale.VALIDATION_ERROR_DETAIL,
+            detail=detail,
         ) from None
 
 

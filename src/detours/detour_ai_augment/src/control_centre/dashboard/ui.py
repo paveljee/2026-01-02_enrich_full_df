@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import argparse
 import asyncio
 import contextlib
 import json
 import os
 import re
 import shlex
+import sys
 from collections import Counter
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -46,12 +48,17 @@ from src.helpers.vars import (
 
 from ...backend.api import (
     AI_AUGMENT_COLUMNS,
+    ARCHIVED_ATTEMPT_MANIFEST_COLUMN,
+    ARCHIVED_ATTEMPTS_TABLE,
     ATTEMPT_ID_KEY,
-    ATTEMPT_MANIFEST_FILENAME,
+    ATTEMPT_RESULT_ACCEPTED,
+    ATTEMPT_RESULT_CONFIGURATION_ERROR,
+    ATTEMPT_RESULT_REJECTED,
     ATTEMPTS_DIR,
     CARD_EXCLUDED_COLUMNS,
     CODEX_INNERDICT_TABLE,
     CODEX_OUTPUT_VIEW,
+    CONFIG_OPTION,
     DOCX_TO_AI_AUGMENT_COLUMNS,
     DRAW_VALUE_SEPARATOR,
     EXPECTED_GROUND_TRUTH_RESEARCHERS,
@@ -64,6 +71,8 @@ from ...backend.api import (
     KTP_AI_AUGMENT_FOOTNOTE_ARGUMENTS_COL,
     KTP_AI_AUGMENT_FOOTNOTES_COL,
     KTP_AI_AUGMENT_SESSION_METADATA_COL,
+    ArchivedAttemptManifest,
+    ArchivedAttemptRecovery,
     CodexMatchProcedure,
     CompactSessionMetadata,
     IneligibilityCategory,
@@ -74,6 +83,7 @@ from ...backend.api import (
     load_release_batches,
     load_source_researcher,
     registered_release_map,
+    restore_archived_attempts,
 )
 from ...backend.api import (
     RuntimeConfiguration as BackendRuntimeConfiguration,
@@ -100,54 +110,26 @@ class NiceGui:
     TEST_ID_PROP_TEMPLATE: Final = "data-testid={test_id}"
 
 
-class ArchivedAttemptManifest(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
-    attempt_id: str
-    stage: str
-    result: str
-    updated_at: str
-    artifacts: dict[str, object]
-
-
 # =============================================================================
 # Paths / process configuration
 # =============================================================================
 
 REPOSITORY_ROOT_PARENT_INDEX: Final = 6
 DETOUR_ROOT_PARENT_INDEX: Final = 3
-REPOSITORY_ROOT: Final = Path(__file__).resolve().parents[
-    REPOSITORY_ROOT_PARENT_INDEX
-]
+REPOSITORY_ROOT: Final = Path(__file__).resolve().parents[REPOSITORY_ROOT_PARENT_INDEX]
 DETOUR_ROOT: Final = Path(__file__).resolve().parents[DETOUR_ROOT_PARENT_INDEX]
 DETOUR_DATA_DIR: Final = DETOUR_ROOT / "data"
 
 DEFAULT_CONFIG_PATH: Final = REPOSITORY_ROOT / "config_ai_augment.json"
 
 RUN_JOURNAL_PATH: Final = DETOUR_DATA_DIR / "control_centre_runs.jsonl"
-ARCHIVED_ATTEMPTS_TABLE: Final = "control_centre_archived_attempts"
-ARCHIVED_ATTEMPT_MANIFEST_COLUMN: Final = "manifest"
-CREATE_ARCHIVED_ATTEMPTS_TABLE_SQL: Final = (
-    f"CREATE TABLE IF NOT EXISTS {ARCHIVED_ATTEMPTS_TABLE} ("
-    f"{ATTEMPT_ID_KEY} VARCHAR PRIMARY KEY, "
-    f"{ARCHIVED_ATTEMPT_MANIFEST_COLUMN} JSON NOT NULL)"
-)
-SELECT_ARCHIVED_ATTEMPT_IDS_SQL: Final = (
-    f"SELECT {ATTEMPT_ID_KEY} FROM {ARCHIVED_ATTEMPTS_TABLE}"
-)
-INSERT_ARCHIVED_ATTEMPT_SQL: Final = (
-    f"INSERT INTO {ARCHIVED_ATTEMPTS_TABLE} "
-    f"({ATTEMPT_ID_KEY}, {ARCHIVED_ATTEMPT_MANIFEST_COLUMN}) VALUES (?, ?)"
-)
 
-BACKEND_PIXI_ENVIRONMENT: Final = "detour-ai-augment"
-BACKEND_PIXI_TASK: Final = "serve"
-BACKEND_COMMAND: Final = (
-    "pixi",
-    "run",
-    "-e",
-    BACKEND_PIXI_ENVIRONMENT,
-    BACKEND_PIXI_TASK,
+BACKEND_MODULE: Final = "src.detours.detour_ai_augment.src.backend.api"
+BACKEND_COMMAND_PREFIX: Final = (
+    sys.executable,
+    "-m",
+    BACKEND_MODULE,
+    CONFIG_OPTION,
 )
 
 BACKEND_HOST: Final = "127.0.0.1"
@@ -161,15 +143,11 @@ TEXT_ENCODING: Final = "utf-8"
 TEXT_DECODE_ERROR_POLICY: Final = "replace"
 CONTROL_CENTRE_HOST: Final = "127.0.0.1"
 CONTROL_CENTRE_PORT: Final = 8611
-CONTROL_CENTRE_BASE_URL: Final = (
-    f"http://{CONTROL_CENTRE_HOST}:{CONTROL_CENTRE_PORT}"
-)
+CONTROL_CENTRE_BASE_URL: Final = f"http://{CONTROL_CENTRE_HOST}:{CONTROL_CENTRE_PORT}"
 
 CONTROL_API_PREFIX: Final = "/_control"
 CONTROL_CURRENT_PATH: Final = f"{CONTROL_API_PREFIX}/current"
-CONTROL_ACCEPTED_PATH_TEMPLATE: Final = (
-    f"{CONTROL_API_PREFIX}/runs/{{run_id}}/accepted"
-)
+CONTROL_ACCEPTED_PATH_TEMPLATE: Final = f"{CONTROL_API_PREFIX}/runs/{{run_id}}/accepted"
 CHROME_DEVTOOLS_PATH: Final = "/.well-known/appspecific/com.chrome.devtools.json"
 
 CONTROL_URL_ENV_NAME: Final = "FASTAPI_DETOUR_CONTROL_URL"
@@ -238,17 +216,16 @@ CODEX_DISCOVERY_TIMEOUT_SECONDS: Final = 30
 CODEX_DISCOVERY_POLL_SECONDS: Final = 0.1
 CODEX_CANCEL_TIMEOUT_SECONDS: Final = 10
 CODEX_REMOTE_PROCESS_ALIVE_MARKER: Final = "alive"
+CODEX_REMOTE_BUSY_MARKER: Final = "busy"
 CODEX_REMOTE_PID_READ_COMMAND_TEMPLATE: Final = "cat -- {pid_path}"
 CODEX_REMOTE_PROCESS_ALIVE_COMMAND_TEMPLATE: Final = (
-    "if kill -0 -- {remote_pid} 2>/dev/null; then "
-    "printf '%s' {alive_marker}; fi"
+    "if kill -0 -- {remote_pid} 2>/dev/null; then printf '%s' {alive_marker}; fi"
 )
 CODEX_REMOTE_SIGNAL_COMMAND_TEMPLATE: Final = "kill -{signal} -- {remote_pid}"
 CODEX_REMOTE_TERMINATE_SIGNAL: Final = "TERM"
 CODEX_REMOTE_KILL_SIGNAL: Final = "KILL"
 CODEX_REMOTE_EXEC_COMMAND_TEMPLATE: Final = (
-    "printf '%s\\n' \"$$\" > {pid_path}; . {environment_path}; "
-    "exec {codex_command} < {prompt_path}"
+    "printf '%s\\n' \"$$\" > {pid_path}; . {environment_path}; exec {codex_command} < {prompt_path}"
 )
 CODEX_ENV_EXPORT_TEMPLATE: Final = "export {name}={value}\\n"
 CODEX_REMOTE_WRITE_FILE_COMMAND_TEMPLATE: Final = (
@@ -275,9 +252,20 @@ CODEX_EXEC_COMMAND: Final = (
     "--skip-git-repo-check",
     "-",
 )
-CODEX_REMOTE_FORWARD: Final = (
-    f"{BACKEND_HOST}:{BACKEND_PORT}:{BACKEND_HOST}:{BACKEND_PORT}"
+CODEX_REMOTE_PROCESS_PATTERN: Final = " ".join(
+    (
+        str(CODEX_CLI_BIN_PATH.parent / "[c]odex"),
+        *CODEX_EXEC_COMMAND[1:],
+    )
 )
+CODEX_REMOTE_BUSY_COMMAND_TEMPLATE: Final = (
+    "if pgrep -f -- {process_pattern} >/dev/null; then printf '%s' {busy_marker}; fi"
+)
+CODEX_REMOTE_BUSY_COMMAND: Final = CODEX_REMOTE_BUSY_COMMAND_TEMPLATE.format(
+    process_pattern=shlex.quote(CODEX_REMOTE_PROCESS_PATTERN),
+    busy_marker=shlex.quote(CODEX_REMOTE_BUSY_MARKER),
+)
+CODEX_REMOTE_FORWARD: Final = f"{BACKEND_HOST}:{BACKEND_PORT}:{BACKEND_HOST}:{BACKEND_PORT}"
 AIVM_SSH_FORWARD_COMMAND: Final = (
     *AIVM_SSH_CONNECTION_COMMAND,
     SSH_OPTION_FLAG,
@@ -286,15 +274,18 @@ AIVM_SSH_FORWARD_COMMAND: Final = (
     CODEX_REMOTE_FORWARD,
     AIVM_SSH_TARGET,
 )
-DETOUR_VIEW_EXISTS_SQL: Final = (
-    "SELECT count(*) FROM information_schema.views WHERE table_name = ?"
-)
+DETOUR_VIEW_EXISTS_SQL: Final = "SELECT count(*) FROM information_schema.views WHERE table_name = ?"
 DETOUR_TABLE_EXISTS_SQL: Final = (
     "SELECT count(*) FROM information_schema.tables WHERE table_name = ?"
 )
 ACCEPTED_ATTEMPTS_SQL_TEMPLATE: Final = (
-    "SELECT {projection} FROM {output_view} "
-    "ORDER BY {source_key_column}, {attempt_id_column}"
+    "SELECT {projection} FROM {output_view} ORDER BY {source_key_column}, {attempt_id_column}"
+)
+ARCHIVED_ATTEMPT_MANIFESTS_SQL: Final = (
+    f"SELECT {duckdb_quote_identifier(ATTEMPT_ID_KEY)}, "
+    f"{duckdb_quote_identifier(ARCHIVED_ATTEMPT_MANIFEST_COLUMN)} "
+    f"FROM {duckdb_quote_identifier(ARCHIVED_ATTEMPTS_TABLE)} "
+    f"ORDER BY {duckdb_quote_identifier(ATTEMPT_ID_KEY)}"
 )
 SQL_COLUMN_SEPARATOR: Final = ", "
 RECONCILED_RUN_ID_TEMPLATE: Final = "{source_key}:{attempt_id}"
@@ -304,17 +295,10 @@ GRID_ROW_ID_FIELD: Final = "row_id"
 GRID_SOURCE_KEY_FIELD: Final = "source_key"
 COMPACT_LINE_HEIGHT: Final = 1.25
 CARD_PARAGRAPH_MARGIN_REM: Final = 0
-FULL_WIDTH_STYLE: Final = (
-    "width: 100%; max-width: 100%; min-width: 0; "
-    "box-sizing: border-box;"
-)
+FULL_WIDTH_STYLE: Final = "width: 100%; max-width: 100%; min-width: 0; box-sizing: border-box;"
 PAGE_CONTAINER_STYLE: Final = f"{FULL_WIDTH_STYLE} align-items: stretch;"
-RESPONSIVE_ROW_STYLE: Final = (
-    f"{FULL_WIDTH_STYLE} flex-wrap: wrap; align-items: center;"
-)
-GRID_STYLE: Final = (
-    f"{FULL_WIDTH_STYLE} height: 60vh; min-height: 24rem; overflow: hidden;"
-)
+RESPONSIVE_ROW_STYLE: Final = f"{FULL_WIDTH_STYLE} flex-wrap: wrap; align-items: center;"
+GRID_STYLE: Final = f"{FULL_WIDTH_STYLE} height: 60vh; min-height: 24rem; overflow: hidden;"
 CARD_CONTAINER_STYLE: Final = f"{FULL_WIDTH_STYLE} overflow: hidden;"
 CARD_MARKDOWN_STYLE: Final = (
     f"{FULL_WIDTH_STYLE} overflow-wrap: anywhere; word-break: break-word; "
@@ -478,10 +462,7 @@ VARIABLE_SPECS: Final[tuple[VariableSpec, ...]] = tuple(
     for table_1_column, ai_column in DOCX_TO_AI_AUGMENT_COLUMNS
 )
 
-VARIABLE_SPEC_BY_KEY: Final = {
-    variable.key: variable
-    for variable in VARIABLE_SPECS
-}
+VARIABLE_SPEC_BY_KEY: Final = {variable.key: variable for variable in VARIABLE_SPECS}
 
 
 # =============================================================================
@@ -496,6 +477,14 @@ class RunStatus(StrEnum):
     COMPLETE = "complete"
     FAILED = "failed"
     CANCELED = "canceled"
+
+
+LIVE_RUN_STATUSES: Final = frozenset({RunStatus.QUEUED, RunStatus.RUNNING})
+ARCHIVED_ATTEMPT_STATUS_BY_RESULT: Final = {
+    ATTEMPT_RESULT_ACCEPTED: RunStatus.COMPLETE,
+    ATTEMPT_RESULT_CONFIGURATION_ERROR: RunStatus.FAILED,
+    ATTEMPT_RESULT_REJECTED: RunStatus.FAILED,
+}
 
 
 class RunEventKind(StrEnum):
@@ -583,9 +572,8 @@ class AcceptedAttempt:
 # =============================================================================
 # UI-owned run journal
 #
-# Accepted output is authoritative in DuckDB.
-# Failed / canceled / process lifecycle information cannot be recovered from
-# accepted output, so these are represented separately as UI-owned run events.
+# The journal owns only live queued/running process control. Validated terminal
+# attempt history is authoritative in DuckDB.
 # =============================================================================
 
 
@@ -822,6 +810,7 @@ class RuntimeConfiguration:
             )
         finally:
             source_connection.close()
+        self._config_path = config_path
         self._pipeline_config = pipeline_config
         self._openalex_api_key = openalex_api_key
         self._timezone = ZoneInfo(pipeline_config.timezone)
@@ -840,6 +829,10 @@ class RuntimeConfiguration:
     @property
     def pipeline_config(self) -> PipelineConfig:
         return self._pipeline_config
+
+    @property
+    def config_path(self) -> Path:
+        return self._config_path
 
     @property
     def openalex_api_key(self) -> str:
@@ -885,9 +878,7 @@ class SourceRepository:
             Researcher(
                 source_key=SourceKey(source.source_key),
                 rnd=source.rnd,
-                draw_numbers=tuple(
-                    sorted(source.draw_numbers, key=draw_sort_key)
-                ),
+                draw_numbers=tuple(sorted(source.draw_numbers, key=draw_sort_key)),
                 first_name=source.first_name,
                 last_name=source.last_name,
                 cohort=ResearcherCohort(source.cohort),
@@ -922,8 +913,7 @@ class SourceRepository:
         return GroundTruthRecord(
             source_key=source_key,
             values={
-                column: None if value is None else str(value)
-                for column, value in values.items()
+                column: None if value is None else str(value) for column, value in values.items()
             },
         )
 
@@ -988,18 +978,15 @@ class SourceRepository:
     ) -> None:
         source_keys = [researcher.source_key for researcher in researchers]
         ground_truth_count = sum(
-            researcher.cohort is ResearcherCohort.GROUND_TRUTH
-            for researcher in researchers
+            researcher.cohort is ResearcherCohort.GROUND_TRUTH for researcher in researchers
         )
         no_ground_truth_count = sum(
-            researcher.cohort is ResearcherCohort.NO_GROUND_TRUTH
-            for researcher in researchers
+            researcher.cohort is ResearcherCohort.NO_GROUND_TRUTH for researcher in researchers
         )
         if len(set(source_keys)) != len(source_keys):
             raise RuntimeError(Locale.SOURCE_KEYS_NOT_UNIQUE)
         ineligible_count = sum(
-            researcher.cohort is ResearcherCohort.INELIGIBLE
-            for researcher in researchers
+            researcher.cohort is ResearcherCohort.INELIGIBLE for researcher in researchers
         )
         ineligibility_counts = Counter(
             researcher.ineligibility_category
@@ -1048,83 +1035,23 @@ class DetourRepository:
         self,
         *,
         attempts_dir: Path = ATTEMPTS_DIR,
-    ) -> tuple[AttemptId, ...]:
-        manifest_paths = tuple(sorted(
-            (
-                path
-                for path in attempts_dir.glob(
-                    f"*/{ATTEMPT_MANIFEST_FILENAME}"
-                )
-                if path.is_file() and not path.is_symlink()
-            ),
-            key=lambda path: path.parent.name,
-        ))
-        manifest_records: list[tuple[ArchivedAttemptManifest, str]] = []
-        for manifest_path in manifest_paths:
-            try:
-                manifest_text = manifest_path.read_text(encoding=TEXT_ENCODING)
-                manifest = ArchivedAttemptManifest.model_validate_json(
-                    manifest_text
-                )
-            except (OSError, ValidationError) as exc:
-                raise RuntimeError(
-                    Locale.ARCHIVED_ATTEMPT_MANIFEST_INVALID_TEMPLATE.format(
-                        path=manifest_path
-                    )
-                ) from exc
-            if manifest.attempt_id != manifest_path.parent.name:
-                raise RuntimeError(
-                    Locale.ARCHIVED_ATTEMPT_ID_MISMATCH_TEMPLATE.format(
-                        path=manifest_path
-                    )
-                )
-            manifest_records.append((manifest, manifest_text))
-
-        connection = duckdb.connect(
-            str(self._configuration.database_paths.detour_db)
-        )
-        try:
-            connection.execute("BEGIN TRANSACTION")
-            connection.execute(CREATE_ARCHIVED_ATTEMPTS_TABLE_SQL)
-            existing_attempt_ids = {
-                str(row[0])
-                for row in connection.execute(
-                    SELECT_ARCHIVED_ATTEMPT_IDS_SQL
-                ).fetchall()
-            }
-            missing_manifest_records = tuple(
-                (manifest, manifest_text)
-                for manifest, manifest_text in manifest_records
-                if manifest.attempt_id not in existing_attempt_ids
-            )
-            if missing_manifest_records:
-                connection.executemany(
-                    INSERT_ARCHIVED_ATTEMPT_SQL,
-                    [
-                        (manifest.attempt_id, manifest_text)
-                        for manifest, manifest_text in missing_manifest_records
-                    ],
-                )
-            connection.execute("COMMIT")
-        except Exception:
-            connection.execute("ROLLBACK")
-            raise
-        finally:
-            connection.close()
-
-        inserted_attempt_ids = tuple(
-            AttemptId(manifest.attempt_id)
-            for manifest, _manifest_text in missing_manifest_records
+    ) -> ArchivedAttemptRecovery:
+        recovery = restore_archived_attempts(
+            self._configuration.backend_runtime,
+            attempts_dir=attempts_dir,
         )
         emit_log(
             Locale.CONTROL_CENTRE_LOG_PREFIX,
             Locale.ARCHIVED_ATTEMPTS_RECONCILED_TEMPLATE.format(
-                inserted=len(inserted_attempt_ids),
-                discovered=len(manifest_records),
+                restored=len(recovery.restored_attempt_ids),
+                accepted=len(recovery.restored_accepted_attempt_ids),
+                skipped=len(recovery.skipped_attempt_ids),
+                invalid=recovery.invalid,
+                discovered=recovery.discovered,
                 directory=attempts_dir,
             ),
         )
-        return inserted_attempt_ids
+        return recovery
 
     def load_accepted_attempts(
         self,
@@ -1177,34 +1104,71 @@ class DetourRepository:
                 )
             except (ValidationError, ValueError) as exc:
                 raise RuntimeError(Locale.ACCEPTED_METADATA_INVALID) from exc
-            attempts.setdefault(source_key, []).append(AcceptedAttempt(
-                source_key=source_key,
-                attempt_id=AttemptId(str(values[KTP_AI_AUGMENT_ATTEMPT_ID_COL])),
-                session_metadata=metadata,
-                values={
-                    column: None if values[column] is None else str(values[column])
-                    for column in AI_AUGMENT_COLUMNS
-                },
-                footnotes=(
-                    None
-                    if values[KTP_AI_AUGMENT_FOOTNOTES_COL] is None
-                    else str(values[KTP_AI_AUGMENT_FOOTNOTES_COL])
-                ),
-                footnote_arguments=(
-                    None
-                    if values[KTP_AI_AUGMENT_FOOTNOTE_ARGUMENTS_COL] is None
-                    else str(values[KTP_AI_AUGMENT_FOOTNOTE_ARGUMENTS_COL])
-                ),
-            ))
+            attempts.setdefault(source_key, []).append(
+                AcceptedAttempt(
+                    source_key=source_key,
+                    attempt_id=AttemptId(str(values[KTP_AI_AUGMENT_ATTEMPT_ID_COL])),
+                    session_metadata=metadata,
+                    values={
+                        column: None if values[column] is None else str(values[column])
+                        for column in AI_AUGMENT_COLUMNS
+                    },
+                    footnotes=(
+                        None
+                        if values[KTP_AI_AUGMENT_FOOTNOTES_COL] is None
+                        else str(values[KTP_AI_AUGMENT_FOOTNOTES_COL])
+                    ),
+                    footnote_arguments=(
+                        None
+                        if values[KTP_AI_AUGMENT_FOOTNOTE_ARGUMENTS_COL] is None
+                        else str(values[KTP_AI_AUGMENT_FOOTNOTE_ARGUMENTS_COL])
+                    ),
+                )
+            )
         return {
-            source_key: tuple(sorted(
-                source_attempts,
-                key=lambda attempt: (
-                    attempt.session_metadata.timestamp,
-                    attempt.attempt_id,
-                ),
-            ))
+            source_key: tuple(
+                sorted(
+                    source_attempts,
+                    key=lambda attempt: (
+                        attempt.session_metadata.timestamp,
+                        attempt.attempt_id,
+                    ),
+                )
+            )
             for source_key, source_attempts in attempts.items()
+        }
+
+    def load_attempt_manifests(
+        self,
+    ) -> Mapping[SourceKey, tuple[ArchivedAttemptManifest, ...]]:
+        database_path = self._configuration.database_paths.detour_db
+        if not database_path.is_file():
+            return {}
+        connection = self.connect_read_only()
+        try:
+            table_exists = connection.execute(
+                DETOUR_TABLE_EXISTS_SQL,
+                [ARCHIVED_ATTEMPTS_TABLE],
+            ).fetchone()
+            if table_exists is None or table_exists[0] != 1:
+                return {}
+            rows = connection.execute(ARCHIVED_ATTEMPT_MANIFESTS_SQL).fetchall()
+        finally:
+            connection.close()
+
+        manifests: dict[SourceKey, list[ArchivedAttemptManifest]] = {}
+        try:
+            for stored_attempt_id, manifest_json in rows:
+                manifest = ArchivedAttemptManifest.model_validate_json(str(manifest_json))
+                if manifest.attempt_id != stored_attempt_id:
+                    raise ValueError(Locale.ATTEMPT_DATABASE_INCONSISTENT)
+                if manifest.source_key is not None:
+                    manifests.setdefault(SourceKey(manifest.source_key), []).append(manifest)
+        except (ValidationError, ValueError) as exc:
+            raise RuntimeError(Locale.ATTEMPT_DATABASE_INCONSISTENT) from exc
+        return {
+            source_key: tuple(source_manifests)
+            for source_key, source_manifests in manifests.items()
         }
 
     def load_accepted_attempts_for_source_key(
@@ -1281,9 +1245,7 @@ class RunJournal:
                     events.append(RunEvent.model_validate_json(line))
                 except ValidationError as exc:
                     raise RuntimeError(
-                        Locale.JOURNAL_MALFORMED_TEMPLATE.format(
-                            line_number=line_number
-                        )
+                        Locale.JOURNAL_MALFORMED_TEMPLATE.format(line_number=line_number)
                     ) from exc
         return tuple(events)
 
@@ -1306,9 +1268,7 @@ class RunJournal:
             if event.kind is RunEventKind.STARTED:
                 run.status = RunStatus.RUNNING
                 run.started_at = event.at
-                run.remote_pid = (
-                    None if event.remote_pid is None else RemotePid(event.remote_pid)
-                )
+                run.remote_pid = None if event.remote_pid is None else RemotePid(event.remote_pid)
             elif event.kind is RunEventKind.SESSION_DISCOVERED:
                 if event.session_id is None:
                     raise RuntimeError(Locale.JOURNAL_SESSION_ID_MISSING)
@@ -1343,14 +1303,12 @@ class RunJournal:
         self,
         source_key: SourceKey,
     ) -> tuple[RunRecord, ...]:
-        return tuple(sorted(
-            (
-                run
-                for run in self.load_runs().values()
-                if run.source_key == source_key
-            ),
-            key=lambda run: (run.queued_at, str(run.run_id)),
-        ))
+        return tuple(
+            sorted(
+                (run for run in self.load_runs().values() if run.source_key == source_key),
+                key=lambda run: (run.queued_at, str(run.run_id)),
+            )
+        )
 
 
 # =============================================================================
@@ -1380,16 +1338,12 @@ class ResearcherCardRenderer:
         }
         researcher = researchers.get(source_key)
         if researcher is None:
-            raise KeyError(Locale.UNKNOWN_SOURCE_KEY_TEMPLATE.format(
-                source_key=source_key
-            ))
+            raise KeyError(Locale.UNKNOWN_SOURCE_KEY_TEMPLATE.format(source_key=source_key))
         cards = build_cards(
             self.build_outer_dict(source_key),
             total_draws=self._configuration.pipeline_config.total_draws,
             intro=CARD_INTRODUCTION.format(
-                datetime.now(self._configuration.timezone).strftime(
-                    Locale.CARD_INTRO_DATE_FORMAT
-                )
+                datetime.now(self._configuration.timezone).strftime(Locale.CARD_INTRO_DATE_FORMAT)
             ),
             excluded_cols=CARD_EXCLUDED_COLUMNS,
         )
@@ -1420,14 +1374,16 @@ class ResearcherCardRenderer:
         ssn_inners = tuple(
             inner for inner in source_inners if isinstance(inner.procedure, ParquetMatchProcedure)
         )
-        return OuterDict(data={
-            name_key.to_json_key(): [
-                *xlsx_inners,
-                *codex_outer.get_inner_by_key(source_key),
-                *docx_inners,
-                *ssn_inners,
-            ]
-        })
+        return OuterDict(
+            data={
+                name_key.to_json_key(): [
+                    *xlsx_inners,
+                    *codex_outer.get_inner_by_key(source_key),
+                    *docx_inners,
+                    *ssn_inners,
+                ]
+            }
+        )
 
 
 # =============================================================================
@@ -1447,10 +1403,12 @@ class BackendSupervisor:
         self,
         *,
         repository_root: Path,
+        config_path: Path,
         control_url: str,
         openalex_api_key: str,
     ) -> None:
         self._repository_root = repository_root
+        self._config_path = config_path
         self._control_url = control_url
         self._openalex_api_key = openalex_api_key
         self._process: BackendProcessHandle | None = None
@@ -1475,7 +1433,8 @@ class BackendSupervisor:
             return
         self._status = BackendStatus.STARTING
         process = await asyncio.create_subprocess_exec(
-            *BACKEND_COMMAND,
+            *BACKEND_COMMAND_PREFIX,
+            str(self._config_path),
             cwd=self._repository_root,
             env=self.environment(),
             stdout=asyncio.subprocess.PIPE,
@@ -1533,7 +1492,7 @@ class BackendSupervisor:
             try:
                 await asyncio.to_thread(request_openapi)
                 return
-            except (OSError, urllib_error.URLError, urllib_error.HTTPError):
+            except OSError, urllib_error.URLError, urllib_error.HTTPError:
                 await asyncio.sleep(BACKEND_READY_POLL_SECONDS)
         raise TimeoutError(Locale.BACKEND_READY_TIMEOUT)
 
@@ -1658,13 +1617,15 @@ class CodexRunner:
         )
         await self._remote_command(command, input_bytes=content)
 
+    async def is_busy(self) -> bool:
+        output = await self._remote_command(CODEX_REMOTE_BUSY_COMMAND)
+        return output.decode(TEXT_ENCODING) == CODEX_REMOTE_BUSY_MARKER
+
     async def start(
         self,
         *,
         run_id: UUID,
-        on_handle: (
-            Callable[[CodexProcessHandle], Awaitable[None]] | None
-        ) = None,
+        on_handle: (Callable[[CodexProcessHandle], Awaitable[None]] | None) = None,
     ) -> CodexStartResult:
         environment_bytes = CODEX_ENV_EXPORT_TEMPLATE.format(
             name=EXPORT_OPENALEX_API_KEY,
@@ -1735,18 +1696,20 @@ class CodexRunner:
         )
         while loop.time() < deadline:
             pid_text = (
-                await self._remote_command(
-                    CODEX_REMOTE_PID_READ_COMMAND_TEMPLATE.format(
-                        pid_path=shlex.quote(str(pid_path)),
-                    ),
-                    check=False,
+                (
+                    await self._remote_command(
+                        CODEX_REMOTE_PID_READ_COMMAND_TEMPLATE.format(
+                            pid_path=shlex.quote(str(pid_path)),
+                        ),
+                        check=False,
+                    )
                 )
-            ).decode(TEXT_ENCODING).strip()
+                .decode(TEXT_ENCODING)
+                .strip()
+            )
             if pid_text.isdecimal():
                 handle.remote_pid = RemotePid(int(pid_text))
-            rollout_text = (
-                await self._remote_command(find_command)
-            ).decode(TEXT_ENCODING).strip()
+            rollout_text = (await self._remote_command(find_command)).decode(TEXT_ENCODING).strip()
             if rollout_text:
                 rollout_path = PurePosixPath(rollout_text)
                 first_line = (
@@ -1760,10 +1723,8 @@ class CodexRunner:
                     record = json.loads(first_line)
                     payload = record["payload"]
                     session_id = SessionId(str(payload["session_id"]))
-                    session_timestamp = datetime.fromisoformat(
-                        str(payload["timestamp"])
-                    )
-                except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                    session_timestamp = datetime.fromisoformat(str(payload["timestamp"]))
+                except KeyError, TypeError, ValueError, json.JSONDecodeError:
                     await asyncio.sleep(CODEX_DISCOVERY_POLL_SECONDS)
                     continue
                 handle.rollout_jsonl = rollout_path
@@ -1790,11 +1751,7 @@ class CodexRunner:
                 rollout_name=shlex.quote(rollout_name),
             )
         )
-        paths = [
-            PurePosixPath(line)
-            for line in output.decode(TEXT_ENCODING).splitlines()
-            if line
-        ]
+        paths = [PurePosixPath(line) for line in output.decode(TEXT_ENCODING).splitlines() if line]
         if len(paths) != 1:
             raise RuntimeError(Locale.CODEX_ROLLOUT_NOT_UNIQUE)
         return paths[0]
@@ -1836,13 +1793,17 @@ class CodexRunner:
         pid_path = CODEX_WORKDIR / CODEX_RUN_PID_TEMPLATE.format(run_id=handle.run_id)
         while loop.time() < deadline:
             pid_text = (
-                await self._remote_command(
-                    CODEX_REMOTE_PID_READ_COMMAND_TEMPLATE.format(
-                        pid_path=shlex.quote(str(pid_path)),
-                    ),
-                    check=False,
+                (
+                    await self._remote_command(
+                        CODEX_REMOTE_PID_READ_COMMAND_TEMPLATE.format(
+                            pid_path=shlex.quote(str(pid_path)),
+                        ),
+                        check=False,
+                    )
                 )
-            ).decode(TEXT_ENCODING).strip()
+                .decode(TEXT_ENCODING)
+                .strip()
+            )
             if pid_text.isdecimal() and int(pid_text) > 0:
                 handle.remote_pid = RemotePid(int(pid_text))
                 return handle.remote_pid
@@ -1992,70 +1953,91 @@ class AttemptReconciler:
         *,
         researcher: Researcher,
         runs: Sequence[RunRecord],
+        attempt_manifests: Sequence[ArchivedAttemptManifest],
         accepted_attempts: Sequence[AcceptedAttempt],
     ) -> ResearcherView:
-        accepted_by_attempt_id = {
-            attempt.attempt_id: attempt for attempt in accepted_attempts
-        }
-        accepted_by_session_id = {
-            attempt.session_metadata.session_id: attempt for attempt in accepted_attempts
-        }
-        represented_attempt_ids: set[AttemptId] = set()
+        accepted_by_attempt_id = {attempt.attempt_id: attempt for attempt in accepted_attempts}
         attempts: list[AttemptView] = []
-        for run in sorted(runs, key=lambda item: (item.queued_at, str(item.run_id))):
-            accepted = None
-            if run.accepted_attempt_id is not None:
-                accepted = accepted_by_attempt_id.get(run.accepted_attempt_id)
-            if accepted is None and run.session_id is not None:
-                accepted = accepted_by_session_id.get(run.session_id)
-            if accepted is not None:
-                represented_attempt_ids.add(accepted.attempt_id)
-            status = (
-                RunStatus.COMPLETE
-                if accepted is not None and run.exited_at is not None
-                else run.status
+        for manifest in sorted(attempt_manifests, key=lambda item: item.attempt_id):
+            attempt_id = AttemptId(manifest.attempt_id)
+            accepted = accepted_by_attempt_id.pop(attempt_id, None)
+            status = ARCHIVED_ATTEMPT_STATUS_BY_RESULT.get(manifest.result)
+            try:
+                timestamp = datetime.fromisoformat(manifest.updated_at)
+            except ValueError as exc:
+                raise RuntimeError(Locale.ATTEMPT_DATABASE_INCONSISTENT) from exc
+            if (
+                status is None
+                or timestamp.tzinfo is None
+                or manifest.source_key != researcher.source_key
+                or (status is RunStatus.COMPLETE) != (accepted is not None)
+                or (
+                    accepted is not None
+                    and (
+                        manifest.session_id is None
+                        or manifest.session_id != accepted.session_metadata.session_id
+                    )
+                )
+            ):
+                raise RuntimeError(Locale.ATTEMPT_DATABASE_INCONSISTENT)
+            attempts.append(
+                AttemptView(
+                    run_id=(
+                        manifest.run_id
+                        if manifest.run_id is not None
+                        else uuid5(
+                            NAMESPACE_URL,
+                            RECONCILED_RUN_ID_TEMPLATE.format(
+                                source_key=researcher.source_key,
+                                attempt_id=attempt_id,
+                            ),
+                        )
+                    ),
+                    source_key=researcher.source_key,
+                    status=status,
+                    attempt_id=attempt_id,
+                    session_id=(
+                        accepted.session_metadata.session_id
+                        if accepted is not None
+                        else (
+                            None
+                            if manifest.session_id is None
+                            else SessionId(manifest.session_id)
+                        )
+                    ),
+                    timestamp=timestamp,
+                    ended_at=timestamp,
+                    accepted=accepted,
+                    failure_detail=None,
+                )
             )
-            attempts.append(AttemptView(
-                run_id=run.run_id,
-                source_key=researcher.source_key,
-                status=status,
-                attempt_id=(
-                    accepted.attempt_id if accepted is not None else run.accepted_attempt_id
-                ),
-                session_id=(
-                    accepted.session_metadata.session_id
-                    if accepted is not None
-                    else run.session_id
-                ),
-                timestamp=run.started_at or run.queued_at,
-                ended_at=run.exited_at,
-                accepted=accepted,
-                failure_detail=run.failure_detail,
-            ))
-        for accepted in accepted_attempts:
-            if accepted.attempt_id in represented_attempt_ids:
+        for run in sorted(runs, key=lambda item: (item.queued_at, str(item.run_id))):
+            if run.status not in LIVE_RUN_STATUSES:
                 continue
-            attempts.append(AttemptView(
-                run_id=uuid5(
-                    NAMESPACE_URL,
-                    f"{researcher.source_key}:{accepted.attempt_id}",
+            attempts.append(
+                AttemptView(
+                    run_id=run.run_id,
+                    source_key=researcher.source_key,
+                    status=run.status,
+                    attempt_id=run.accepted_attempt_id,
+                    session_id=run.session_id,
+                    timestamp=run.started_at or run.queued_at,
+                    ended_at=run.exited_at,
+                    accepted=None,
+                    failure_detail=run.failure_detail,
+                )
+            )
+        if accepted_by_attempt_id:
+            raise RuntimeError(Locale.ATTEMPT_DATABASE_INCONSISTENT)
+        ordered = tuple(
+            sorted(
+                attempts,
+                key=lambda attempt: (
+                    attempt.timestamp or datetime.min.replace(tzinfo=timezone.utc),
+                    str(attempt.run_id),
                 ),
-                source_key=researcher.source_key,
-                status=RunStatus.COMPLETE,
-                attempt_id=accepted.attempt_id,
-                session_id=accepted.session_metadata.session_id,
-                timestamp=accepted.session_metadata.timestamp,
-                ended_at=accepted.session_metadata.timestamp,
-                accepted=accepted,
-                failure_detail=None,
-            ))
-        ordered = tuple(sorted(
-            attempts,
-            key=lambda attempt: (
-                attempt.timestamp or datetime.min.replace(tzinfo=timezone.utc),
-                str(attempt.run_id),
-            ),
-        ))
+            )
+        )
         latest = ordered[-1] if ordered else None
         return ResearcherView(
             researcher=researcher,
@@ -2069,6 +2051,7 @@ class AttemptReconciler:
         *,
         researchers: Sequence[Researcher],
         runs: Mapping[UUID, RunRecord],
+        attempt_manifests: Mapping[SourceKey, tuple[ArchivedAttemptManifest, ...]],
         accepted_attempts: Mapping[SourceKey, tuple[AcceptedAttempt, ...]],
     ) -> tuple[ResearcherView, ...]:
         runs_by_source_key: dict[SourceKey, list[RunRecord]] = {}
@@ -2078,6 +2061,7 @@ class AttemptReconciler:
             self.reconcile(
                 researcher=researcher,
                 runs=runs_by_source_key.get(researcher.source_key, ()),
+                attempt_manifests=attempt_manifests.get(researcher.source_key, ()),
                 accepted_attempts=accepted_attempts.get(researcher.source_key, ()),
             )
             for researcher in researchers
@@ -2095,13 +2079,14 @@ class VariableProjector:
         status: RunStatus,
         *,
         eligible: bool,
+        codex_busy: bool = False,
     ) -> RunAction:
         if not eligible:
             return RunAction.DISABLED
-        if status is RunStatus.READY:
-            return RunAction.QUEUE
         if status in {RunStatus.QUEUED, RunStatus.RUNNING}:
             return RunAction.CANCEL
+        if status is RunStatus.READY or codex_busy:
+            return RunAction.QUEUE
         return RunAction.RERUN
 
     def project_attempt(
@@ -2111,6 +2096,7 @@ class VariableProjector:
         attempt: AttemptView,
         ground_truth: GroundTruthRecord | None,
         variable: VariableSpec,
+        codex_busy: bool,
     ) -> AttemptVariableProjection:
         accepted = attempt.accepted
         return AttemptVariableProjection(
@@ -2123,9 +2109,7 @@ class VariableProjector:
             ai_value=(None if accepted is None else accepted.values.get(variable.ai_column)),
             table_1_column=variable.table_1_column,
             table_1_value=(
-                None
-                if ground_truth is None
-                else ground_truth.values.get(variable.table_1_column)
+                None if ground_truth is None else ground_truth.values.get(variable.table_1_column)
             ),
             footnotes=(
                 None
@@ -2146,6 +2130,7 @@ class VariableProjector:
             action=self.action_for_status(
                 attempt.status,
                 eligible=researcher.cohort is not ResearcherCohort.INELIGIBLE,
+                codex_busy=codex_busy,
             ),
         )
 
@@ -2155,6 +2140,7 @@ class VariableProjector:
         researcher: Researcher,
         ground_truth: GroundTruthRecord | None,
         variable: VariableSpec,
+        codex_busy: bool,
     ) -> AttemptVariableProjection:
         return AttemptVariableProjection(
             run_id=None,
@@ -2166,9 +2152,7 @@ class VariableProjector:
             ai_value=None,
             table_1_column=variable.table_1_column,
             table_1_value=(
-                None
-                if ground_truth is None
-                else ground_truth.values.get(variable.table_1_column)
+                None if ground_truth is None else ground_truth.values.get(variable.table_1_column)
             ),
             footnotes=None,
             footnote_arguments=None,
@@ -2178,6 +2162,7 @@ class VariableProjector:
             action=self.action_for_status(
                 RunStatus.READY,
                 eligible=researcher.cohort is not ResearcherCohort.INELIGIBLE,
+                codex_busy=codex_busy,
             ),
         )
 
@@ -2187,6 +2172,7 @@ class VariableProjector:
         researcher_view: ResearcherView,
         ground_truth: GroundTruthRecord | None,
         variable: VariableSpec,
+        codex_busy: bool,
     ) -> ResearcherGridRow:
         attempts = tuple(
             self.project_attempt(
@@ -2194,6 +2180,7 @@ class VariableProjector:
                 attempt=attempt,
                 ground_truth=ground_truth,
                 variable=variable,
+                codex_busy=codex_busy,
             )
             for attempt in researcher_view.attempts
         )
@@ -2204,15 +2191,14 @@ class VariableProjector:
                 researcher=researcher_view.researcher,
                 ground_truth=ground_truth,
                 variable=variable,
+                codex_busy=codex_busy,
             )
         )
         return ResearcherGridRow(
             source_key=researcher_view.researcher.source_key,
             rnd=researcher_view.researcher.rnd,
             cohort=researcher_view.researcher.cohort,
-            ineligibility_category=(
-                researcher_view.researcher.ineligibility_category
-            ),
+            ineligibility_category=(researcher_view.researcher.ineligibility_category),
             latest=latest,
             attempts=attempts,
         )
@@ -2302,10 +2288,17 @@ class ControlCentreController:
         self._worker_task: asyncio.Task[None] | None = None
         self._active_run_id: UUID | None = None
         self._active_codex: CodexProcessHandle | None = None
+        self._external_codex_busy = False
+        self._archive_rescan_required = True
+        self._idle_refresh_lock = asyncio.Lock()
         self._runs: dict[UUID, RunRecord] = dict(journal.load_runs())
         self._researchers: tuple[Researcher, ...] = ()
         self._researchers_by_source_key: dict[SourceKey, Researcher] = {}
         self._ground_truth: Mapping[SourceKey, GroundTruthRecord] = {}
+        self._attempt_manifests: Mapping[
+            SourceKey,
+            tuple[ArchivedAttemptManifest, ...],
+        ] = {}
         self._accepted_attempts: Mapping[SourceKey, tuple[AcceptedAttempt, ...]] = {}
 
     @property
@@ -2313,13 +2306,15 @@ class ControlCentreController:
         return self._active_run_id
 
     @property
+    def codex_busy(self) -> bool:
+        return self._active_run_id is not None or self._external_codex_busy
+
+    @property
     def backend_status(self) -> BackendStatus:
         return self._backend.status
 
     async def start(self) -> None:
-        self._researchers = await asyncio.to_thread(
-            self._source_repository.load_researchers
-        )
+        self._researchers = await asyncio.to_thread(self._source_repository.load_researchers)
         self._researchers_by_source_key = {
             researcher.source_key: researcher for researcher in self._researchers
         }
@@ -2329,14 +2324,16 @@ class ControlCentreController:
         restart_time = datetime.now(timezone.utc)
         for run in tuple(self._runs.values()):
             if run.status in {RunStatus.QUEUED, RunStatus.RUNNING}:
-                self._append_run_event(RunEvent(
-                    run_id=run.run_id,
-                    source_key=run.source_key,
-                    at=restart_time,
-                    kind=RunEventKind.FAILED,
-                    detail=Locale.RESTART_INTERRUPTED_RUN,
-                ))
-        await self.refresh_idle_state()
+                self._append_run_event(
+                    RunEvent(
+                        run_id=run.run_id,
+                        source_key=run.source_key,
+                        at=restart_time,
+                        kind=RunEventKind.FAILED,
+                        detail=Locale.RESTART_INTERRUPTED_RUN,
+                    )
+                )
+        await self.refresh_idle_state(reconcile_before_busy_probe=True)
         await self._backend.start()
         self._worker_task = asyncio.create_task(self._worker())
 
@@ -2358,18 +2355,18 @@ class ControlCentreController:
     ) -> UUID:
         researcher = self._researchers_by_source_key.get(source_key)
         if researcher is None:
-            raise KeyError(Locale.UNKNOWN_SOURCE_KEY_TEMPLATE.format(
-                source_key=source_key
-            ))
+            raise KeyError(Locale.UNKNOWN_SOURCE_KEY_TEMPLATE.format(source_key=source_key))
         if researcher.cohort is ResearcherCohort.INELIGIBLE:
             raise ValueError(Locale.INELIGIBLE_QUEUE)
         run_id = uuid4()
-        self._append_run_event(RunEvent(
-            run_id=run_id,
-            source_key=source_key,
-            at=datetime.now(timezone.utc),
-            kind=RunEventKind.QUEUED,
-        ))
+        self._append_run_event(
+            RunEvent(
+                run_id=run_id,
+                source_key=source_key,
+                at=datetime.now(timezone.utc),
+                kind=RunEventKind.QUEUED,
+            )
+        )
         await self._queue.put(run_id)
         return run_id
 
@@ -2390,35 +2387,39 @@ class ControlCentreController:
             raise KeyError(Locale.UNKNOWN_RUN_ID_TEMPLATE.format(run_id=run_id))
         if run.status not in {RunStatus.QUEUED, RunStatus.RUNNING}:
             return
-        self._append_run_event(RunEvent(
-            run_id=run_id,
-            source_key=run.source_key,
-            at=datetime.now(timezone.utc),
-            kind=RunEventKind.CANCEL_REQUESTED,
-        ))
+        self._append_run_event(
+            RunEvent(
+                run_id=run_id,
+                source_key=run.source_key,
+                at=datetime.now(timezone.utc),
+                kind=RunEventKind.CANCEL_REQUESTED,
+            )
+        )
         if self._active_run_id == run_id:
             if self._active_codex is not None:
                 try:
                     await self._codex.cancel(self._active_codex)
                 except Exception as exc:
-                    self._append_run_event(RunEvent(
-                        run_id=run_id,
-                        source_key=run.source_key,
-                        at=datetime.now(timezone.utc),
-                        kind=RunEventKind.FAILED,
-                        detail=Locale.CODEX_CANCEL_FAILED_TEMPLATE.format(
-                            error=exc
-                        ),
-                    ))
+                    self._append_run_event(
+                        RunEvent(
+                            run_id=run_id,
+                            source_key=run.source_key,
+                            at=datetime.now(timezone.utc),
+                            kind=RunEventKind.FAILED,
+                            detail=Locale.CODEX_CANCEL_FAILED_TEMPLATE.format(error=exc),
+                        )
+                    )
                     raise
             return
         if run.status is RunStatus.QUEUED:
-            self._append_run_event(RunEvent(
-                run_id=run_id,
-                source_key=run.source_key,
-                at=datetime.now(timezone.utc),
-                kind=RunEventKind.CANCELED,
-            ))
+            self._append_run_event(
+                RunEvent(
+                    run_id=run_id,
+                    source_key=run.source_key,
+                    at=datetime.now(timezone.utc),
+                    kind=RunEventKind.CANCELED,
+                )
+            )
 
     async def acknowledge_push(
         self,
@@ -2434,20 +2435,45 @@ class ControlCentreController:
             or sanctioned.session_id != request.session_id
         ):
             raise ValueError(Locale.ACCEPTED_PUSH_MISMATCH)
-        self._append_run_event(RunEvent(
-            run_id=run_id,
-            source_key=sanctioned.source_key,
-            at=datetime.now(timezone.utc),
-            kind=RunEventKind.PUSH_ACCEPTED,
-            session_id=sanctioned.session_id,
-            accepted_attempt_id=request.attempt_id,
-        ))
+        self._append_run_event(
+            RunEvent(
+                run_id=run_id,
+                source_key=sanctioned.source_key,
+                at=datetime.now(timezone.utc),
+                kind=RunEventKind.PUSH_ACCEPTED,
+                session_id=sanctioned.session_id,
+                accepted_attempt_id=request.attempt_id,
+            )
+        )
         await self._control_plane.revoke(run_id=run_id)
 
-    async def refresh_idle_state(self) -> None:
-        if self._active_run_id is not None or await self._control_plane.current() is not None:
-            return
-        self._runs = dict(self._journal.load_runs())
+    async def refresh_idle_state(
+        self,
+        *,
+        reconcile_before_busy_probe: bool = False,
+    ) -> None:
+        async with self._idle_refresh_lock:
+            if self._active_run_id is not None or await self._control_plane.current() is not None:
+                return
+            self._runs = dict(self._journal.load_runs())
+            if not reconcile_before_busy_probe:
+                self._external_codex_busy = await self._codex.is_busy()
+                if self._external_codex_busy:
+                    self._archive_rescan_required = True
+                    return
+            if self._archive_rescan_required:
+                await self._reconcile_and_load_attempts()
+            if reconcile_before_busy_probe:
+                self._external_codex_busy = await self._codex.is_busy()
+                if self._external_codex_busy:
+                    self._archive_rescan_required = True
+
+    async def _reconcile_and_load_attempts(self) -> None:
+        await asyncio.to_thread(self._detour_repository.reconcile_archived_attempts)
+        self._archive_rescan_required = False
+        self._attempt_manifests = await asyncio.to_thread(
+            self._detour_repository.load_attempt_manifests
+        )
         self._accepted_attempts = await asyncio.to_thread(
             self._detour_repository.load_accepted_attempts
         )
@@ -2462,6 +2488,7 @@ class ControlCentreController:
         views = self._reconciler.reconcile_all(
             researchers=self._researchers,
             runs=self._runs,
+            attempt_manifests=self._attempt_manifests,
             accepted_attempts=self._accepted_attempts,
         )
         all_rows = tuple(
@@ -2469,6 +2496,7 @@ class ControlCentreController:
                 researcher_view=view,
                 ground_truth=self._ground_truth.get(view.researcher.source_key),
                 variable=variable,
+                codex_busy=self.codex_busy,
             )
             for view in views
         )
@@ -2476,13 +2504,9 @@ class ControlCentreController:
         rows = tuple(
             row
             for row, view in zip(all_rows, views, strict=True)
-            if (
-                selection.status_filter is None
-                or view.current_status is selection.status_filter
-            )
+            if (selection.status_filter is None or view.current_status is selection.status_filter)
             and (
-                selection.cohort_filter is None
-                or view.researcher.cohort is selection.cohort_filter
+                selection.cohort_filter is None or view.researcher.cohort is selection.cohort_filter
             )
             and (
                 not search_text
@@ -2493,8 +2517,7 @@ class ControlCentreController:
                 or search_text in view.researcher.source_key.casefold()
                 or (
                     view.researcher.ineligibility_category is not None
-                    and search_text
-                    in view.researcher.ineligibility_category.value.casefold()
+                    and search_text in view.researcher.ineligibility_category.value.casefold()
                 )
             )
         )
@@ -2509,13 +2532,9 @@ class ControlCentreController:
                 view.researcher.cohort is ResearcherCohort.GROUND_TRUTH for view in views
             ),
             no_ground_truth=sum(
-                view.researcher.cohort is ResearcherCohort.NO_GROUND_TRUTH
-                for view in views
+                view.researcher.cohort is ResearcherCohort.NO_GROUND_TRUTH for view in views
             ),
-            ineligible=sum(
-                view.researcher.cohort is ResearcherCohort.INELIGIBLE
-                for view in views
-            ),
+            ineligible=sum(view.researcher.cohort is ResearcherCohort.INELIGIBLE for view in views),
             ready=statuses.count(RunStatus.READY),
             queued=statuses.count(RunStatus.QUEUED),
             running=statuses.count(RunStatus.RUNNING),
@@ -2535,7 +2554,7 @@ class ControlCentreController:
         *,
         source_key: SourceKey,
     ) -> ResearcherCardView:
-        if self._active_run_id is not None:
+        if self.codex_busy:
             raise RuntimeError(Locale.CARD_READ_SUSPENDED)
         return await asyncio.to_thread(self._card_renderer.render, source_key)
 
@@ -2546,33 +2565,39 @@ class ControlCentreController:
                 run = self._runs[run_id]
                 if run.status is RunStatus.CANCELED:
                     continue
+                if not await self._wait_until_codex_idle(run_id=run_id):
+                    continue
                 self._active_run_id = run_id
                 await self._execute_run(run_id=run_id)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 run = self._runs[run_id]
-                canceled = (
-                    run.cancel_requested_at is not None
-                    and run.failure_detail is None
+                canceled = run.cancel_requested_at is not None and run.failure_detail is None
+                self._append_run_event(
+                    RunEvent(
+                        run_id=run_id,
+                        source_key=run.source_key,
+                        at=datetime.now(timezone.utc),
+                        kind=(RunEventKind.CANCELED if canceled else RunEventKind.FAILED),
+                        detail=None if canceled else str(exc),
+                    )
                 )
-                self._append_run_event(RunEvent(
-                    run_id=run_id,
-                    source_key=run.source_key,
-                    at=datetime.now(timezone.utc),
-                    kind=(
-                        RunEventKind.CANCELED
-                        if canceled
-                        else RunEventKind.FAILED
-                    ),
-                    detail=None if canceled else str(exc),
-                ))
             finally:
                 await self._control_plane.revoke(run_id=run_id)
                 self._active_codex = None
                 self._active_run_id = None
                 self._queue.task_done()
                 await self.refresh_idle_state()
+
+    async def _wait_until_codex_idle(self, *, run_id: UUID) -> bool:
+        while True:
+            await self.refresh_idle_state()
+            if self._runs[run_id].status is RunStatus.CANCELED:
+                return False
+            if not self._external_codex_busy:
+                return True
+            await asyncio.sleep(UI_REFRESH_SECONDS)
 
     async def _execute_run(
         self,
@@ -2588,58 +2613,70 @@ class ControlCentreController:
             await self._codex.cancel(result.handle)
             raise RuntimeError(Locale.CODEX_CANCELED_BEFORE_SANCTION)
         self._active_codex = result.handle
-        self._append_run_event(RunEvent(
-            run_id=run_id,
-            source_key=run.source_key,
-            at=result.session_timestamp,
-            kind=RunEventKind.SESSION_DISCOVERED,
-            session_id=result.session_id,
-        ))
+        self._append_run_event(
+            RunEvent(
+                run_id=run_id,
+                source_key=run.source_key,
+                at=result.session_timestamp,
+                kind=RunEventKind.SESSION_DISCOVERED,
+                session_id=result.session_id,
+            )
+        )
 
-        self._append_run_event(RunEvent(
-            run_id=run_id,
-            source_key=run.source_key,
-            at=datetime.now(timezone.utc),
-            kind=RunEventKind.ROLLOUT_DISCOVERED,
-            session_id=result.session_id,
-            rollout_jsonl=str(result.rollout_jsonl),
-        ))
+        self._append_run_event(
+            RunEvent(
+                run_id=run_id,
+                source_key=run.source_key,
+                at=datetime.now(timezone.utc),
+                kind=RunEventKind.ROLLOUT_DISCOVERED,
+                session_id=result.session_id,
+                rollout_jsonl=str(result.rollout_jsonl),
+            )
+        )
         sanctioned_at = datetime.now(timezone.utc)
-        await self._control_plane.sanction(SanctionedRun(
-            run_id=run_id,
-            source_key=run.source_key,
-            session_id=result.session_id,
-            rollout_jsonl=result.rollout_jsonl,
-            sanctioned_at=sanctioned_at,
-        ))
-        self._append_run_event(RunEvent(
-            run_id=run_id,
-            source_key=run.source_key,
-            at=sanctioned_at,
-            kind=RunEventKind.SANCTIONED,
-            session_id=result.session_id,
-            rollout_jsonl=str(result.rollout_jsonl),
-        ))
+        await self._control_plane.sanction(
+            SanctionedRun(
+                run_id=run_id,
+                source_key=run.source_key,
+                session_id=result.session_id,
+                rollout_jsonl=result.rollout_jsonl,
+                sanctioned_at=sanctioned_at,
+            )
+        )
+        self._append_run_event(
+            RunEvent(
+                run_id=run_id,
+                source_key=run.source_key,
+                at=sanctioned_at,
+                kind=RunEventKind.SANCTIONED,
+                session_id=result.session_id,
+                rollout_jsonl=str(result.rollout_jsonl),
+            )
+        )
         exit_code = await self._codex.wait(result.handle)
-        self._append_run_event(RunEvent(
-            run_id=run_id,
-            source_key=run.source_key,
-            at=datetime.now(timezone.utc),
-            kind=RunEventKind.CODEX_EXITED,
-            codex_exit_code=exit_code,
-        ))
+        self._append_run_event(
+            RunEvent(
+                run_id=run_id,
+                source_key=run.source_key,
+                at=datetime.now(timezone.utc),
+                kind=RunEventKind.CODEX_EXITED,
+                codex_exit_code=exit_code,
+            )
+        )
         await self._control_plane.revoke(run_id=run_id)
         final_status = await self._finalize_run(
             run_id=run_id,
             codex_exit_code=exit_code,
         )
-        self._append_run_event(RunEvent(
-            run_id=run_id,
-            source_key=run.source_key,
-            at=datetime.now(timezone.utc),
-            kind=RunEventKind(final_status.value),
-            codex_exit_code=exit_code,
-        ))
+        self._append_run_event(
+            RunEvent(
+                run_id=run_id,
+                source_key=run.source_key,
+                at=datetime.now(timezone.utc),
+                kind=RunEventKind(final_status.value),
+                codex_exit_code=exit_code,
+            )
+        )
 
     async def _register_active_codex(
         self,
@@ -2649,15 +2686,15 @@ class ControlCentreController:
             raise RuntimeError(Locale.CODEX_HANDLE_MISMATCH)
         self._active_codex = handle
         run = self._runs[handle.run_id]
-        self._append_run_event(RunEvent(
-            run_id=handle.run_id,
-            source_key=run.source_key,
-            at=datetime.now(timezone.utc),
-            kind=RunEventKind.STARTED,
-            remote_pid=(
-                None if handle.remote_pid is None else int(handle.remote_pid)
-            ),
-        ))
+        self._append_run_event(
+            RunEvent(
+                run_id=handle.run_id,
+                source_key=run.source_key,
+                at=datetime.now(timezone.utc),
+                kind=RunEventKind.STARTED,
+                remote_pid=(None if handle.remote_pid is None else int(handle.remote_pid)),
+            )
+        )
         if self._runs[handle.run_id].cancel_requested_at is not None:
             await self._codex.cancel(handle)
 
@@ -2678,14 +2715,16 @@ class ControlCentreController:
                 session_id=run.session_id,
             )
             if accepted is not None:
-                self._append_run_event(RunEvent(
-                    run_id=run_id,
-                    source_key=run.source_key,
-                    at=datetime.now(timezone.utc),
-                    kind=RunEventKind.PUSH_ACCEPTED,
-                    session_id=run.session_id,
-                    accepted_attempt_id=accepted.attempt_id,
-                ))
+                self._append_run_event(
+                    RunEvent(
+                        run_id=run_id,
+                        source_key=run.source_key,
+                        at=datetime.now(timezone.utc),
+                        kind=RunEventKind.PUSH_ACCEPTED,
+                        session_id=run.session_id,
+                        accepted_attempt_id=accepted.attempt_id,
+                    )
+                )
                 return RunStatus.COMPLETE
         return RunStatus.FAILED
 
@@ -2700,9 +2739,7 @@ class ControlCentreController:
             source_key,
         )
         matches = [
-            attempt
-            for attempt in attempts
-            if attempt.session_metadata.session_id == session_id
+            attempt for attempt in attempts if attempt.session_metadata.session_id == session_id
         ]
         if len(matches) > 1:
             raise RuntimeError(Locale.ACCEPTED_SESSION_DUPLICATE)
@@ -2765,11 +2802,10 @@ class ControlCentrePage:
     def build(self) -> None:
         ui.add_css(CARD_RESPONSIVE_CSS)
         with (
-            ui.column()
+            ui
+            .column()
             .style(PAGE_CONTAINER_STYLE)
-            .props(NiceGui.TEST_ID_PROP_TEMPLATE.format(
-                test_id=PAGE_CONTAINER_TEST_ID
-            ))
+            .props(NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=PAGE_CONTAINER_TEST_ID))
         ):
             self.build_header()
             self.build_summary()
@@ -2782,31 +2818,28 @@ class ControlCentrePage:
 
     def build_header(self) -> None:
         with (
-            ui.row()
+            ui
+            .row()
             .style(RESPONSIVE_ROW_STYLE)
-            .props(NiceGui.TEST_ID_PROP_TEMPLATE.format(
-                test_id=PAGE_HEADER_TEST_ID
-            ))
+            .props(NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=PAGE_HEADER_TEST_ID))
         ):
             ui.label(Locale.PAGE_TITLE)
             self._handles.backend_status_label = ui.label(Locale.BACKEND_STARTING)
 
     def build_summary(self) -> None:
         self._handles.summary_label = (
-            ui.label(Locale.SUMMARY_LOADING)
+            ui
+            .label(Locale.SUMMARY_LOADING)
             .style(FULL_WIDTH_STYLE)
-            .props(NiceGui.TEST_ID_PROP_TEMPLATE.format(
-                test_id=PAGE_SUMMARY_TEST_ID
-            ))
+            .props(NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=PAGE_SUMMARY_TEST_ID))
         )
 
     def build_filters(self) -> None:
         with (
-            ui.row()
+            ui
+            .row()
             .style(RESPONSIVE_ROW_STYLE)
-            .props(NiceGui.TEST_ID_PROP_TEMPLATE.format(
-                test_id=PAGE_FILTERS_TEST_ID
-            ))
+            .props(NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=PAGE_FILTERS_TEST_ID))
         ):
             self._handles.variable_select = ui.select(
                 {variable.key: variable.ai_column for variable in VARIABLE_SPECS},
@@ -2839,16 +2872,19 @@ class ControlCentrePage:
 
     def build_grid(self) -> None:
         variable = VARIABLE_SPEC_BY_KEY[self._selection.variable_key]
-        self._handles.grid = ui.aggrid(
-            AgGrid.options(
-                columns=self.grid_column_definitions(variable=variable),
-                rows=[],
-                row_id_field=GRID_ROW_ID_FIELD,
-            ),
-            auto_size_columns=False,
-        ).style(GRID_STYLE).props(NiceGui.TEST_ID_PROP_TEMPLATE.format(
-            test_id=RESEARCHER_GRID_TEST_ID
-        ))
+        self._handles.grid = (
+            ui
+            .aggrid(
+                AgGrid.options(
+                    columns=self.grid_column_definitions(variable=variable),
+                    rows=[],
+                    row_id_field=GRID_ROW_ID_FIELD,
+                ),
+                auto_size_columns=False,
+            )
+            .style(GRID_STYLE)
+            .props(NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=RESEARCHER_GRID_TEST_ID))
+        )
         self._handles.grid.on(
             AgGrid.CELL_CLICKED_EVENT,
             self._on_grid_cell_clicked,
@@ -2856,24 +2892,20 @@ class ControlCentrePage:
 
     def build_action_panel(self) -> None:
         with (
-            ui.row()
+            ui
+            .row()
             .style(RESPONSIVE_ROW_STYLE)
-            .props(NiceGui.TEST_ID_PROP_TEMPLATE.format(
-                test_id=ACTION_PANEL_TEST_ID
-            ))
+            .props(NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=ACTION_PANEL_TEST_ID))
         ):
-            self._handles.selected_researcher_label = ui.label(
-                Locale.NO_RESEARCHER_SELECTED
-            )
+            self._handles.selected_researcher_label = ui.label(Locale.NO_RESEARCHER_SELECTED)
             self._handles.execute_button = (
-                ui.button(
+                ui
+                .button(
                     Locale.ACTION_SELECT_RESEARCHER,
                     on_click=self.on_execute_selected,
                 )
                 .style(ACTION_BUTTON_STYLE)
-                .props(NiceGui.TEST_ID_PROP_TEMPLATE.format(
-                    test_id=EXECUTE_ACTION_TEST_ID
-                ))
+                .props(NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=EXECUTE_ACTION_TEST_ID))
                 .on(
                     NiceGui.MOUSE_DOWN_EVENT,
                     js_handler=NiceGui.PRESERVE_SELECTION_HANDLER,
@@ -2881,14 +2913,13 @@ class ControlCentrePage:
             )
             self._handles.execute_button.disable()
             self._handles.view_card_button = (
-                ui.button(
+                ui
+                .button(
                     Locale.ACTION_VIEW_CARD,
                     on_click=self.refresh_card,
                 )
                 .style(ACTION_BUTTON_STYLE)
-                .props(NiceGui.TEST_ID_PROP_TEMPLATE.format(
-                    test_id=VIEW_CARD_TEST_ID
-                ))
+                .props(NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=VIEW_CARD_TEST_ID))
                 .on(
                     NiceGui.MOUSE_DOWN_EVENT,
                     js_handler=NiceGui.PRESERVE_SELECTION_HANDLER,
@@ -2899,19 +2930,17 @@ class ControlCentrePage:
     def build_attempt_history_panel(self) -> None:
         variable = VARIABLE_SPEC_BY_KEY[self._selection.variable_key]
         self._handles.attempt_history_expansion = (
-            ui.expansion(Locale.ATTEMPT_HISTORY)
+            ui
+            .expansion(Locale.ATTEMPT_HISTORY)
             .style(ATTEMPT_HISTORY_STYLE)
-            .props(NiceGui.TEST_ID_PROP_TEMPLATE.format(
-                test_id=ATTEMPT_HISTORY_PANEL_TEST_ID
-            ))
+            .props(NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=ATTEMPT_HISTORY_PANEL_TEST_ID))
         )
         with self._handles.attempt_history_expansion:
             self._handles.attempt_history_table = (
-                ui.table(
+                ui
+                .table(
                     rows=[],
-                    columns=self.attempt_history_column_definitions(
-                        variable=variable
-                    ),
+                    columns=self.attempt_history_column_definitions(variable=variable),
                     row_key=GRID_ROW_ID_FIELD,
                 )
                 .style(ATTEMPT_HISTORY_TABLE_STYLE)
@@ -2924,16 +2953,13 @@ class ControlCentrePage:
 
     def build_card_panel(self) -> None:
         self._handles.card_container = (
-            ui.card()
+            ui
+            .card()
             .style(CARD_CONTAINER_STYLE)
-            .props(NiceGui.TEST_ID_PROP_TEMPLATE.format(
-                test_id=PAGE_FOOTER_TEST_ID
-            ))
+            .props(NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=PAGE_FOOTER_TEST_ID))
         )
         with self._handles.card_container:
-            self._handles.card_markdown = ui.markdown("").style(
-                CARD_MARKDOWN_STYLE
-            )
+            self._handles.card_markdown = ui.markdown("").style(CARD_MARKDOWN_STYLE)
 
     def grid_column_definitions(
         self,
@@ -3072,18 +3098,14 @@ class ControlCentrePage:
             rows.append({
                 GRID_ROW_ID_FIELD: row.source_key,
                 GRID_SOURCE_KEY_FIELD: row.source_key,
-                GRID_RUN_ID_FIELD: (
-                    None if latest.run_id is None else str(latest.run_id)
-                ),
+                GRID_RUN_ID_FIELD: (None if latest.run_id is None else str(latest.run_id)),
                 GRID_RND_FIELD: row.rnd,
                 GRID_DRAW_FIELD: latest.draw_number,
                 GRID_LAST_NAME_FIELD: latest.last_name,
                 GRID_FIRST_NAME_FIELD: latest.first_name,
                 GRID_COHORT_FIELD: row.cohort.value,
                 GRID_INELIGIBILITY_FIELD: (
-                    None
-                    if row.ineligibility_category is None
-                    else row.ineligibility_category.value
+                    None if row.ineligibility_category is None else row.ineligibility_category.value
                 ),
                 GRID_AI_VALUE_FIELD: latest.ai_value,
                 GRID_TABLE_1_VALUE_FIELD: latest.table_1_value,
@@ -3108,13 +3130,9 @@ class ControlCentrePage:
         return [
             {
                 GRID_ROW_ID_FIELD: str(
-                    attempt.run_id
-                    if attempt.run_id is not None
-                    else attempt.attempt_id
+                    attempt.run_id if attempt.run_id is not None else attempt.attempt_id
                 ),
-                GRID_RUN_ID_FIELD: (
-                    str(attempt.run_id) if attempt.run_id is not None else None
-                ),
+                GRID_RUN_ID_FIELD: (str(attempt.run_id) if attempt.run_id is not None else None),
                 GRID_ATTEMPT_ID_FIELD: attempt.attempt_id,
                 GRID_ATTEMPT_TIMESTAMP_FIELD: (
                     None
@@ -3134,9 +3152,7 @@ class ControlCentrePage:
         snapshot = await self._controller.snapshot(selection=self._selection)
         if self._handles.backend_status_label is not None:
             self._handles.backend_status_label.set_text(
-                Locale.BACKEND_STATUS_TEMPLATE.format(
-                    status=snapshot.backend_status.value
-                )
+                Locale.BACKEND_STATUS_TEMPLATE.format(status=snapshot.backend_status.value)
             )
         if self._handles.summary_label is not None:
             counts = snapshot.counts
@@ -3166,9 +3182,7 @@ class ControlCentrePage:
         if snapshot is None:
             snapshot = await self._controller.snapshot(selection=self._selection)
         variable = VARIABLE_SPEC_BY_KEY[self._selection.variable_key]
-        self._row_views_by_source_key = {
-            row.source_key: row for row in snapshot.rows
-        }
+        self._row_views_by_source_key = {row.source_key: row for row in snapshot.rows}
         self.refresh_attempt_history()
         rows = self.grid_rows(snapshot=snapshot)
         self.sync_selected_action(rows)
@@ -3179,9 +3193,7 @@ class ControlCentrePage:
             )
             self._handles.grid.options.update(options)
             self._handles.grid.update()
-            self._grid_rows_by_id = {
-                str(row[GRID_ROW_ID_FIELD]): row for row in rows
-            }
+            self._grid_rows_by_id = {str(row[GRID_ROW_ID_FIELD]): row for row in rows}
             self._grid_variable_key = self._selection.variable_key
             self._grid_initialized = True
             return
@@ -3192,9 +3204,7 @@ class ControlCentrePage:
                 self.grid_column_definitions(variable=variable),
             )
             self._grid_variable_key = self._selection.variable_key
-        desired_by_id = {
-            str(row[GRID_ROW_ID_FIELD]): row for row in rows
-        }
+        desired_by_id = {str(row[GRID_ROW_ID_FIELD]): row for row in rows}
         if tuple(self._grid_rows_by_id) != tuple(desired_by_id):
             await self._handles.grid.run_grid_method(
                 AgGrid.SET_GRID_OPTION_METHOD,
@@ -3229,7 +3239,7 @@ class ControlCentrePage:
 
     async def refresh_card(self) -> None:
         source_key = self._selection.selected_source_key
-        if source_key is None or self._controller.active_run_id is not None:
+        if source_key is None or self._controller.codex_busy:
             return
         card = self._card_cache.get(source_key)
         if card is None:
@@ -3276,9 +3286,7 @@ class ControlCentrePage:
         variable_key: str,
     ) -> None:
         if variable_key not in VARIABLE_SPEC_BY_KEY:
-            raise KeyError(Locale.UNKNOWN_VARIABLE_TEMPLATE.format(
-                variable_key=variable_key
-            ))
+            raise KeyError(Locale.UNKNOWN_VARIABLE_TEMPLATE.format(variable_key=variable_key))
         self._selection.variable_key = variable_key
         await self.refresh_grid()
         expanded_source_key = self._expanded_history_source_key
@@ -3296,9 +3304,7 @@ class ControlCentrePage:
         self,
         cohort: str | None,
     ) -> None:
-        self._selection.cohort_filter = (
-            None if cohort is None else ResearcherCohort(cohort)
-        )
+        self._selection.cohort_filter = None if cohort is None else ResearcherCohort(cohort)
         await self.refresh_grid()
 
     async def on_search_changed(
@@ -3321,29 +3327,21 @@ class ControlCentrePage:
     ) -> None:
         selected_source_key = self._selection.selected_source_key
         selected = next(
-            (
-                row
-                for row in rows
-                if row.get(GRID_SOURCE_KEY_FIELD) == selected_source_key
-            ),
+            (row for row in rows if row.get(GRID_SOURCE_KEY_FIELD) == selected_source_key),
             None,
         )
         if selected is None:
             self._selection.selected_run_id = None
             self._selection.selected_action = None
             if self._handles.execute_button is not None:
-                self._handles.execute_button.set_text(
-                    Locale.ACTION_SELECT_RESEARCHER
-                )
+                self._handles.execute_button.set_text(Locale.ACTION_SELECT_RESEARCHER)
                 self._handles.execute_button.disable()
             if self._handles.view_card_button is not None:
                 self._handles.view_card_button.disable()
             return
         run_id_value = selected.get(GRID_RUN_ID_FIELD)
         action = RunAction(str(selected[GRID_ACTION_FIELD]))
-        self._selection.selected_run_id = (
-            None if run_id_value is None else UUID(str(run_id_value))
-        )
+        self._selection.selected_run_id = None if run_id_value is None else UUID(str(run_id_value))
         self._selection.selected_action = action
         if self._handles.selected_researcher_label is not None:
             self._handles.selected_researcher_label.set_text(
@@ -3359,9 +3357,7 @@ class ControlCentrePage:
             else:
                 self._handles.view_card_button.disable()
         if self._handles.execute_button is not None:
-            self._handles.execute_button.set_text(
-                ACTION_LABEL_BY_VALUE[action.value]
-            )
+            self._handles.execute_button.set_text(ACTION_LABEL_BY_VALUE[action.value])
             if action is RunAction.DISABLED:
                 self._handles.execute_button.disable()
             else:
@@ -3423,11 +3419,7 @@ class ControlCentrePage:
     async def on_execute_selected(self) -> None:
         source_key = self._selection.selected_source_key
         action = self._selection.selected_action
-        if (
-            source_key is None
-            or action is None
-            or action is RunAction.DISABLED
-        ):
+        if source_key is None or action is None or action is RunAction.DISABLED:
             return
         await self.on_grid_action(
             action=action,
@@ -3472,13 +3464,16 @@ class ApplicationServices:
 
 SERVICES: ApplicationServices | None = None
 APPLICATION_LIFECYCLE_CONFIGURED = False
+APPLICATION_CONFIG_PATH = DEFAULT_CONFIG_PATH
 
 
-def create_services() -> ApplicationServices:
-    configuration = RuntimeConfiguration()
+def create_services(
+    *,
+    config_path: Path = DEFAULT_CONFIG_PATH,
+) -> ApplicationServices:
+    configuration = RuntimeConfiguration(config_path=config_path)
     source_repository = SourceRepository(configuration=configuration)
     detour_repository = DetourRepository(configuration=configuration)
-    detour_repository.reconcile_archived_attempts()
     journal = RunJournal()
     card_renderer = ResearcherCardRenderer(
         source_repository=source_repository,
@@ -3487,6 +3482,7 @@ def create_services() -> ApplicationServices:
     )
     backend = BackendSupervisor(
         repository_root=REPOSITORY_ROOT,
+        config_path=configuration.config_path,
         control_url=CONTROL_CENTRE_BASE_URL,
         openalex_api_key=configuration.openalex_api_key,
     )
@@ -3592,7 +3588,7 @@ async def application_startup() -> None:
     global SERVICES
 
     if SERVICES is None:
-        SERVICES = create_services()
+        SERVICES = create_services(config_path=APPLICATION_CONFIG_PATH)
     await SERVICES.controller.start()
     emit_log(
         Locale.CONTROL_CENTRE_LOG_PREFIX,
@@ -3618,6 +3614,12 @@ def configure_application_lifecycle() -> None:
 
 
 def main() -> None:
+    global APPLICATION_CONFIG_PATH
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument(CONFIG_OPTION, type=Path, default=DEFAULT_CONFIG_PATH)
+    arguments = parser.parse_args()
+    APPLICATION_CONFIG_PATH = arguments.config
     configure_application_lifecycle()
     with contextlib.suppress(KeyboardInterrupt):
         ui.run(

@@ -6,6 +6,7 @@ import json
 import subprocess
 from collections import Counter
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from random import Random
@@ -25,13 +26,15 @@ from src.helpers.vars import KTP_FILENAME_COL
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
 CONFIG_PATH = REPOSITORY_ROOT / "config_ai_augment.json"
-TASK_DATA_DIR = (
-    REPOSITORY_ROOT / "tasks" / "tasks-20260731-tighten-api" / "data"
-)
+TASK_DATA_DIR = REPOSITORY_ROOT / "tasks" / "tasks-20260731-tighten-api" / "data"
 SAMPLE_DOCX_PATH = TASK_DATA_DIR / "sample.docx"
 SAMPLE_MARKDOWN_PATH_NAME = "sample.md"
 SAMPLE_ZIP_PATH_NAME = "sample.zip"
 SAMPLE_CARD_ARCHIVE_NAME = "sample.docx"
+SAMPLE_CARD_DRAW_NUMBER = "146"
+SAMPLE_CARD_ROLLOUT_FILENAME = "sample-rollout.jsonl"
+SAMPLE_CARD_ATTEMPT_ID = "sample-attempt"
+SAMPLE_CARD_FRAGMENT = 1
 PANDOC_PLAIN_COMMAND = ("pandoc", "--to", "plain")
 FULL_CARD_PROCEDURE_NAMES = frozenset({
     "CodexMatchProcedure",
@@ -50,21 +53,14 @@ ROLLOUT_PATH = PurePosixPath(
 )
 CONTROL_TIMEZONE = ZoneInfo("UTC")
 TEST_OPENALEX_API_KEY = "test-openalex-api-key"
-EARLIER_ARCHIVED_ATTEMPT_ID = (
-    "20260813T141450_027429Z_044215aac8c44200882531b10a2acfa6"
-)
-LATER_ARCHIVED_ATTEMPT_ID = (
-    "20260813T143347_182523Z_733e33fbf8e74c0aaf0aa0139d6a6f45"
-)
-ARCHIVED_ATTEMPT_STAGE_BY_ID = {
-    EARLIER_ARCHIVED_ATTEMPT_ID: "duckdb_evidence_validation",
-    LATER_ARCHIVED_ATTEMPT_ID: "accepted",
-}
-ARCHIVED_ATTEMPT_RESULT_BY_ID = {
-    EARLIER_ARCHIVED_ATTEMPT_ID: "rejected",
-    LATER_ARCHIVED_ATTEMPT_ID: "accepted",
-}
-ARCHIVED_ATTEMPT_UPDATED_AT = "2026-08-13T14:33:47.882063+00:00"
+TEST_ASYNC_TIMEOUT_SECONDS = 1
+TEST_BUSY_POLL_SECONDS = 0.01
+TEST_SESSION_METADATA_VALUE = "test"
+EARLIER_ARCHIVED_ATTEMPT_ID = "20260813T141450_027429Z_044215aac8c44200882531b10a2acfa6"
+LATER_ARCHIVED_ATTEMPT_ID = "20260813T143347_182523Z_733e33fbf8e74c0aaf0aa0139d6a6f45"
+TEST_ARCHIVE_FILENAME = "test.jsonl"
+TEST_ARCHIVE_SHA256 = "0" * 64
+TEST_ROLLOUT_RELATIVE_PATH = "2026/08/test.jsonl"
 
 
 @pytest.fixture
@@ -75,9 +71,7 @@ def anyio_backend() -> str:
 def researcher(
     number: int,
     *,
-    cohort: control_ui.ResearcherCohort = (
-        control_ui.ResearcherCohort.NO_GROUND_TRUTH
-    ),
+    cohort: control_ui.ResearcherCohort = (control_ui.ResearcherCohort.NO_GROUND_TRUTH),
     ineligibility_category: control_ui.IneligibilityCategory | None = None,
 ) -> control_ui.Researcher:
     return control_ui.Researcher(
@@ -91,83 +85,125 @@ def researcher(
     )
 
 
+def archived_attempt_manifest(
+    *,
+    researcher_item: control_ui.Researcher,
+    attempt_id: str,
+    run_id: UUID | None = None,
+) -> api.ArchivedAttemptManifest:
+    artifact = api.ArchivedArtifact(
+        filename=TEST_ARCHIVE_FILENAME,
+        size=0,
+        sha256=TEST_ARCHIVE_SHA256,
+    )
+    return api.ArchivedAttemptManifest(
+        attempt_id=attempt_id,
+        stage=api.ATTEMPT_STAGE_ACCEPTED,
+        result=api.ATTEMPT_RESULT_ACCEPTED,
+        updated_at=SESSION_TIMESTAMP.isoformat(),
+        artifacts=api.ArchivedAttemptArtifacts(
+            rollout=api.ArchivedRolloutArtifact(
+                filename=TEST_ARCHIVE_FILENAME,
+                size=0,
+                sha256=TEST_ARCHIVE_SHA256,
+                line_count=1,
+            ),
+            appendwatch_report=artifact,
+            http_request_log=artifact,
+        ),
+        rollout_relative_path=TEST_ROLLOUT_RELATIVE_PATH,
+        run_id=run_id,
+        source_key=researcher_item.source_key,
+        session_id=SESSION_ID,
+    )
+
+
 def test_variable_specs_cover_every_ai_augment_column() -> None:
-    assert tuple(
-        variable.ai_column
-        for variable in control_ui.VARIABLE_SPECS
-    ) == api.AI_AUGMENT_COLUMNS
+    assert (
+        tuple(variable.ai_column for variable in control_ui.VARIABLE_SPECS)
+        == api.AI_AUGMENT_COLUMNS
+    )
 
 
-def test_archived_attempt_reconciliation_is_chronological_and_idempotent(
+def test_archived_attempt_reconciliation_delegates_and_reports_all_counts(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     attempts_dir = tmp_path / "attempts"
+    backend_runtime = cast(api.RuntimeConfiguration, object())
+    expected = api.ArchivedAttemptRecovery(
+        discovered=4,
+        invalid=1,
+        restored_attempt_ids=(
+            EARLIER_ARCHIVED_ATTEMPT_ID,
+            LATER_ARCHIVED_ATTEMPT_ID,
+        ),
+        restored_accepted_attempt_ids=(LATER_ARCHIVED_ATTEMPT_ID,),
+        skipped_attempt_ids=("20260813T150000_000000Z_00000000000000000000000000000000",),
+    )
+    observed: list[tuple[api.RuntimeConfiguration, Path]] = []
+
+    def fake_restore(
+        runtime: api.RuntimeConfiguration,
+        *,
+        attempts_dir: Path,
+    ) -> api.ArchivedAttemptRecovery:
+        observed.append((runtime, attempts_dir))
+        return expected
+
+    monkeypatch.setattr(control_ui, "restore_archived_attempts", fake_restore)
+    configuration = cast(
+        control_ui.RuntimeConfiguration,
+        SimpleNamespace(
+            backend_runtime=backend_runtime,
+        ),
+    )
+    repository = control_ui.DetourRepository(configuration=configuration)
+
+    assert repository.reconcile_archived_attempts(attempts_dir=attempts_dir) == expected
+    assert observed == [(backend_runtime, attempts_dir)]
+    log_output = capsys.readouterr().out
+    assert "restored 2" in log_output
+    assert "accepted 1" in log_output
+    assert "already present and skipped 1" in log_output
+    assert "invalid 1" in log_output
+    assert "discovered 4" in log_output
+
+
+def test_validated_attempt_manifest_round_trips_from_detour_database(
+    tmp_path: Path,
+) -> None:
     detour_db_path = tmp_path / "detour.duckdb"
-    for attempt_id in (
-        LATER_ARCHIVED_ATTEMPT_ID,
-        EARLIER_ARCHIVED_ATTEMPT_ID,
-    ):
-        attempt_dir = attempts_dir / attempt_id
-        attempt_dir.mkdir(parents=True)
-        manifest = control_ui.ArchivedAttemptManifest(
-            attempt_id=attempt_id,
-            stage=ARCHIVED_ATTEMPT_STAGE_BY_ID[attempt_id],
-            result=ARCHIVED_ATTEMPT_RESULT_BY_ID[attempt_id],
-            updated_at=ARCHIVED_ATTEMPT_UPDATED_AT,
-            artifacts={},
+    researcher_item = researcher(1)
+    manifest = archived_attempt_manifest(
+        researcher_item=researcher_item,
+        attempt_id=LATER_ARCHIVED_ATTEMPT_ID,
+    )
+    connection = duckdb.connect(str(detour_db_path))
+    try:
+        connection.execute(api.CREATE_ARCHIVED_ATTEMPTS_TABLE_SQL)
+        connection.execute(
+            api.INSERT_ARCHIVED_ATTEMPT_SQL,
+            [manifest.attempt_id, manifest.model_dump_json()],
         )
-        (attempt_dir / api.ATTEMPT_MANIFEST_FILENAME).write_text(
-            manifest.model_dump_json(),
-            encoding=control_ui.TEXT_ENCODING,
-        )
+    finally:
+        connection.close()
     configuration = cast(
         control_ui.RuntimeConfiguration,
         SimpleNamespace(
             database_paths=control_ui.DatabasePaths(
                 source_db=tmp_path / "source.duckdb",
                 detour_db=detour_db_path,
-            )
+            ),
         ),
     )
-    repository = control_ui.DetourRepository(configuration=configuration)
 
-    assert repository.reconcile_archived_attempts(
-        attempts_dir=attempts_dir
-    ) == (
-        control_ui.AttemptId(EARLIER_ARCHIVED_ATTEMPT_ID),
-        control_ui.AttemptId(LATER_ARCHIVED_ATTEMPT_ID),
-    )
-    assert repository.reconcile_archived_attempts(attempts_dir=attempts_dir) == ()
+    loaded = control_ui.DetourRepository(
+        configuration=configuration,
+    ).load_attempt_manifests()
 
-    connection = duckdb.connect(str(detour_db_path), read_only=True)
-    try:
-        stored_manifests = tuple(
-            (
-                str(row[0]),
-                control_ui.ArchivedAttemptManifest.model_validate_json(
-                    str(row[1])
-                ),
-            )
-            for row in connection.execute(
-                f"SELECT {api.ATTEMPT_ID_KEY}, "
-                f"{control_ui.ARCHIVED_ATTEMPT_MANIFEST_COLUMN} "
-                f"FROM {control_ui.ARCHIVED_ATTEMPTS_TABLE} "
-                f"ORDER BY {api.ATTEMPT_ID_KEY}"
-            ).fetchall()
-        )
-    finally:
-        connection.close()
-    assert tuple(
-        (attempt_id, manifest.result)
-        for attempt_id, manifest in stored_manifests
-    ) == (
-        (EARLIER_ARCHIVED_ATTEMPT_ID, "rejected"),
-        (LATER_ARCHIVED_ATTEMPT_ID, "accepted"),
-    )
-    log_output = capsys.readouterr().out
-    assert "inserted 2 of 2" in log_output
-    assert "inserted 0 of 2" in log_output
+    assert loaded == {researcher_item.source_key: (manifest,)}
 
 
 def test_real_config_derives_exact_innerdict_owned_cohorts(
@@ -184,23 +220,20 @@ def test_real_config_derives_exact_innerdict_owned_cohorts(
 
     assert Counter(item.cohort for item in researchers) == {
         control_ui.ResearcherCohort.GROUND_TRUTH: api.EXPECTED_GROUND_TRUTH_RESEARCHERS,
-        control_ui.ResearcherCohort.NO_GROUND_TRUTH: (
-            api.EXPECTED_NO_GROUND_TRUTH_RESEARCHERS
-        ),
+        control_ui.ResearcherCohort.NO_GROUND_TRUTH: (api.EXPECTED_NO_GROUND_TRUTH_RESEARCHERS),
         control_ui.ResearcherCohort.INELIGIBLE: api.EXPECTED_INELIGIBLE_RESEARCHERS,
     }
-    assert Counter(
-        item.ineligibility_category
-        for item in researchers
-        if item.ineligibility_category is not None
-    ) == api.EXPECTED_INELIGIBILITY_COUNTS
+    assert (
+        Counter(
+            item.ineligibility_category
+            for item in researchers
+            if item.ineligibility_category is not None
+        )
+        == api.EXPECTED_INELIGIBILITY_COUNTS
+    )
     assert len(researchers) == api.EXPECTED_SOURCE_RESEARCHERS
-    assert [
-        (item.source_key, item.rnd)
-        for item in researchers
-    ] == [
-        (item.source_key, item.rnd)
-        for item in repeated_researchers
+    assert [(item.source_key, item.rnd) for item in researchers] == [
+        (item.source_key, item.rnd) for item in repeated_researchers
     ]
     expected_rnd = list(
         range(
@@ -209,10 +242,7 @@ def test_real_config_derives_exact_innerdict_owned_cohorts(
         )
     )
     Random(configuration.pipeline_config.sample_seed).shuffle(expected_rnd)
-    assert {
-        item.source_key: item.rnd
-        for item in researchers
-    } == dict(
+    assert {item.source_key: item.rnd for item in researchers} == dict(
         zip(
             sorted(item.source_key for item in researchers),
             expected_rnd,
@@ -220,9 +250,7 @@ def test_real_config_derives_exact_innerdict_owned_cohorts(
         )
     )
     assert researchers[0].draw_numbers == ("pilot.1",)
-    excluded = next(
-        item for item in researchers if item.source_key == api.EXCLUDED_SOURCE_KEY
-    )
+    excluded = next(item for item in researchers if item.source_key == api.EXCLUDED_SOURCE_KEY)
     assert excluded.cohort is control_ui.ResearcherCohort.INELIGIBLE
     assert (
         excluded.ineligibility_category
@@ -257,39 +285,88 @@ def test_real_database_card_round_trips_identically_through_docx(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv(control_ui.EXPORT_OPENALEX_API_KEY, TEST_OPENALEX_API_KEY)
-    configuration = control_ui.RuntimeConfiguration(config_path=CONFIG_PATH)
+    real_configuration = control_ui.RuntimeConfiguration(config_path=CONFIG_PATH)
+    detour_db_path = tmp_path / "card.duckdb"
+    configuration = cast(
+        control_ui.RuntimeConfiguration,
+        SimpleNamespace(
+            pipeline_config=real_configuration.pipeline_config,
+            timezone=real_configuration.timezone,
+            database_paths=control_ui.DatabasePaths(
+                source_db=real_configuration.database_paths.source_db,
+                detour_db=detour_db_path,
+            ),
+            backend_runtime=replace(
+                real_configuration.backend_runtime,
+                detour_db_path=detour_db_path,
+            ),
+        ),
+    )
     source_repository = control_ui.SourceRepository(configuration=configuration)
     detour_repository = control_ui.DetourRepository(configuration=configuration)
+    researcher = next(
+        item
+        for item in source_repository.load_researchers()
+        if SAMPLE_CARD_DRAW_NUMBER in item.draw_numbers
+    )
+    source_inner_dicts = source_repository.load_source_card_innerdicts(
+        researcher.source_key
+    ).get_inner_by_key(researcher.source_key)
+    assert {
+        type(inner_dict.procedure).__name__ for inner_dict in source_inner_dicts
+    } == FULL_CARD_PROCEDURE_NAMES - {"CodexMatchProcedure"}
+    metadata = api.CompactSessionMetadata(
+        originator=TEST_SESSION_METADATA_VALUE,
+        source=TEST_SESSION_METADATA_VALUE,
+        cli_version=TEST_SESSION_METADATA_VALUE,
+        model_provider=TEST_SESSION_METADATA_VALUE,
+        model=TEST_SESSION_METADATA_VALUE,
+        reasoning_effort=TEST_SESSION_METADATA_VALUE,
+        session_id=str(SESSION_ID),
+        timestamp=SESSION_TIMESTAMP.isoformat(),
+    )
+    output_row: dict[str, object] = {
+        column: TEST_SESSION_METADATA_VALUE for column, _data_type in api.CODEX_OUTPUT_SCHEMA
+    }
+    output_row.update({
+        api.KTP_NAMEKEY_COL: researcher.source_key,
+        api.KTP_FILENAME_COL: SAMPLE_CARD_ROLLOUT_FILENAME,
+        api.KTP_FRAGMENT_COL: SAMPLE_CARD_FRAGMENT,
+        api.KTP_FRAGMENT_TYPE_COL: api.ROLLOUT_LINE_FRAGMENT_TYPE,
+        api.DRAW_LABEL: researcher.draw_number,
+        api.KTP_FIRST_NAME_COL: researcher.first_name,
+        api.KTP_LAST_NAME_COL: researcher.last_name,
+        api.KTP_AI_AUGMENT_ATTEMPT_ID_COL: SAMPLE_CARD_ATTEMPT_ID,
+        api.KTP_AI_AUGMENT_SESSION_METADATA_COL: metadata.model_dump_json(),
+    })
+    connection = duckdb.connect(str(detour_db_path))
+    try:
+        api.append_codex_output(connection, output_row)
+    finally:
+        connection.close()
     renderer = control_ui.ResearcherCardRenderer(
         source_repository=source_repository,
         detour_repository=detour_repository,
         configuration=configuration,
     )
     accepted_attempts = detour_repository.load_accepted_attempts()
-    assert accepted_attempts
-    sample = None
-    for source_key in sorted(accepted_attempts):
-        outer_dict = renderer.build_outer_dict(source_key)
-        inner_dicts = outer_dict.get_inner_by_key(source_key)
-        if {
-            type(inner_dict.procedure).__name__ for inner_dict in inner_dicts
-        } == FULL_CARD_PROCEDURE_NAMES:
-            sample = (source_key, inner_dicts)
-            break
-    assert sample is not None
-    source_key, inner_dicts = sample
+    assert tuple(accepted_attempts) == (researcher.source_key,)
+    source_key = researcher.source_key
+    inner_dicts = renderer.build_outer_dict(source_key).get_inner_by_key(source_key)
+    assert {
+        type(inner_dict.procedure).__name__ for inner_dict in inner_dicts
+    } == FULL_CARD_PROCEDURE_NAMES
 
     card = renderer.render(source_key)
     assert all(
-        str(inner_dict.data[KTP_FILENAME_COL]) in card.markdown
-        for inner_dict in inner_dicts
+        str(inner_dict.data[KTP_FILENAME_COL]) in card.markdown for inner_dict in inner_dicts
     )
     zip_path = write_cards_zip(
         {SAMPLE_DOCX_PATH.stem: card.markdown},
         tmp_path,
         SAMPLE_ZIP_PATH_NAME,
         output_format="docx",
-        reference_docx=configuration.pipeline_config.pandoc_reference_docx,
+        reference_docx=real_configuration.pipeline_config.pandoc_reference_docx,
         docx_workers=1,
     )
     with ZipFile(zip_path) as archive:
@@ -437,16 +514,63 @@ class FakeSourceRepository:
 
 
 class FakeDetourRepository:
+    def __init__(self) -> None:
+        self.archived_attempts: dict[
+            control_ui.SourceKey,
+            tuple[control_ui.AcceptedAttempt, ...],
+        ] = {}
+        self.archived_manifests: dict[
+            control_ui.SourceKey,
+            tuple[api.ArchivedAttemptManifest, ...],
+        ] = {}
+        self.accepted_attempts: dict[
+            control_ui.SourceKey,
+            tuple[control_ui.AcceptedAttempt, ...],
+        ] = {}
+        self.attempt_manifests: dict[
+            control_ui.SourceKey,
+            tuple[api.ArchivedAttemptManifest, ...],
+        ] = {}
+        self.reconcile_calls = 0
+
+    def reconcile_archived_attempts(self) -> api.ArchivedAttemptRecovery:
+        self.reconcile_calls += 1
+        self.accepted_attempts = dict(self.archived_attempts)
+        self.attempt_manifests = dict(self.archived_manifests)
+        restored_attempt_ids = tuple(
+            manifest.attempt_id
+            for manifests in self.archived_manifests.values()
+            for manifest in manifests
+        )
+        restored_accepted_attempt_ids = tuple(
+            manifest.attempt_id
+            for manifests in self.archived_manifests.values()
+            for manifest in manifests
+            if manifest.result == api.ATTEMPT_RESULT_ACCEPTED
+        )
+        return api.ArchivedAttemptRecovery(
+            discovered=len(restored_attempt_ids),
+            invalid=0,
+            restored_attempt_ids=restored_attempt_ids,
+            restored_accepted_attempt_ids=restored_accepted_attempt_ids,
+            skipped_attempt_ids=(),
+        )
+
+    def load_attempt_manifests(
+        self,
+    ) -> dict[control_ui.SourceKey, tuple[api.ArchivedAttemptManifest, ...]]:
+        return dict(self.attempt_manifests)
+
     def load_accepted_attempts(
         self,
     ) -> dict[control_ui.SourceKey, tuple[control_ui.AcceptedAttempt, ...]]:
-        return {}
+        return dict(self.accepted_attempts)
 
     def load_accepted_attempts_for_source_key(
         self,
-        _source_key: control_ui.SourceKey,
+        source_key: control_ui.SourceKey,
     ) -> tuple[control_ui.AcceptedAttempt, ...]:
-        return ()
+        return self.accepted_attempts.get(source_key, ())
 
 
 class CountingCardRenderer:
@@ -510,9 +634,7 @@ class StartingCancelableCodex:
         self,
         *,
         run_id: UUID,
-        on_handle: (
-            Callable[[control_ui.CodexProcessHandle], Awaitable[None]] | None
-        ) = None,
+        on_handle: (Callable[[control_ui.CodexProcessHandle], Awaitable[None]] | None) = None,
     ) -> control_ui.CodexStartResult:
         self.handle = control_ui.CodexProcessHandle(
             run_id=run_id,
@@ -523,6 +645,9 @@ class StartingCancelableCodex:
         self.started.set()
         await self.canceled.wait()
         raise RuntimeError("Codex exited before rollout discovery")
+
+    async def is_busy(self) -> bool:
+        return False
 
     async def cancel(self, handle: control_ui.CodexProcessHandle) -> None:
         assert handle is self.handle
@@ -549,14 +674,16 @@ class SerialFakeCodex:
     def __init__(self) -> None:
         self.started: asyncio.Queue[UUID] = asyncio.Queue()
         self.release: asyncio.Queue[UUID] = asyncio.Queue()
+        self.external_busy = False
+
+    async def is_busy(self) -> bool:
+        return self.external_busy
 
     async def start(
         self,
         *,
         run_id: UUID,
-        on_handle: (
-            Callable[[control_ui.CodexProcessHandle], Awaitable[None]] | None
-        ) = None,
+        on_handle: (Callable[[control_ui.CodexProcessHandle], Awaitable[None]] | None) = None,
     ) -> control_ui.CodexStartResult:
         await self.started.put(run_id)
         handle = control_ui.CodexProcessHandle(
@@ -651,9 +778,7 @@ async def test_researchers_without_runs_are_shown_as_ready_placeholders(
     finally:
         await controller.shutdown()
 
-    assert [row.source_key for row in snapshot.rows] == [
-        item.source_key for item in researchers
-    ]
+    assert [row.source_key for row in snapshot.rows] == [item.source_key for item in researchers]
     assert all(not row.attempts for row in snapshot.rows)
     assert [row["status"] for row in grid_rows] == [
         control_ui.RunStatus.READY.value,
@@ -673,6 +798,114 @@ async def test_researchers_without_runs_are_shown_as_ready_placeholders(
     assert "getRowId" not in grid_options
     assert page._handles.grid.options["theme"] == "quartz"
     assert grid_updates == [None]
+
+
+@pytest.mark.anyio
+async def test_external_codex_busy_queues_then_reconciles_unjournaled_attempt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    external_researcher = researcher(1)
+    queued_researcher = researcher(2)
+    detour_repository = FakeDetourRepository()
+    codex = SerialFakeCodex()
+    codex.external_busy = True
+    controller = make_test_controller(
+        configuration=SimpleNamespace(),
+        source_repository=FakeSourceRepository((external_researcher, queued_researcher)),
+        detour_repository=detour_repository,
+        journal=control_ui.RunJournal(path=tmp_path / "runs.jsonl"),
+        card_renderer=SimpleNamespace(),
+        backend=FakeBackend(),
+        codex=codex,
+        control_plane=control_ui.ControlPlane(),
+        reconciler=control_ui.AttemptReconciler(),
+        projector=control_ui.VariableProjector(),
+    )
+    external_attempt = control_ui.AcceptedAttempt(
+        source_key=external_researcher.source_key,
+        attempt_id=control_ui.AttemptId(LATER_ARCHIVED_ATTEMPT_ID),
+        session_metadata=control_ui.SessionMetadata(
+            originator=TEST_SESSION_METADATA_VALUE,
+            source=TEST_SESSION_METADATA_VALUE,
+            cli_version=TEST_SESSION_METADATA_VALUE,
+            model_provider=TEST_SESSION_METADATA_VALUE,
+            model=TEST_SESSION_METADATA_VALUE,
+            reasoning_effort=TEST_SESSION_METADATA_VALUE,
+            session_id=SESSION_ID,
+            timestamp=SESSION_TIMESTAMP,
+        ),
+        values={
+            control_ui.VARIABLE_SPECS[0].ai_column: TEST_SESSION_METADATA_VALUE,
+        },
+        footnotes=None,
+        footnote_arguments=None,
+    )
+    monkeypatch.setattr(
+        control_ui,
+        "UI_REFRESH_SECONDS",
+        TEST_BUSY_POLL_SECONDS,
+    )
+
+    await controller.start()
+    try:
+        busy_snapshot = await controller.snapshot(
+            selection=control_ui.UiSelection(
+                variable_key=control_ui.VARIABLE_SPECS[0].key,
+            ),
+        )
+        queued_run_id = await controller.queue(source_key=queued_researcher.source_key)
+        await asyncio.sleep(TEST_BUSY_POLL_SECONDS)
+
+        assert controller.codex_busy
+        assert [row.latest.action for row in busy_snapshot.rows] == [
+            control_ui.RunAction.QUEUE,
+            control_ui.RunAction.QUEUE,
+        ]
+        assert codex.started.empty()
+
+        detour_repository.archived_attempts = {
+            external_researcher.source_key: (external_attempt,),
+        }
+        detour_repository.archived_manifests = {
+            external_researcher.source_key: (
+                archived_attempt_manifest(
+                    researcher_item=external_researcher,
+                    attempt_id=LATER_ARCHIVED_ATTEMPT_ID,
+                ),
+            ),
+        }
+        codex.external_busy = False
+        assert (
+            await asyncio.wait_for(
+                codex.started.get(),
+                timeout=TEST_ASYNC_TIMEOUT_SECONDS,
+            )
+            == queued_run_id
+        )
+
+        imported_snapshot = await controller.snapshot(
+            selection=control_ui.UiSelection(
+                variable_key=control_ui.VARIABLE_SPECS[0].key,
+            ),
+        )
+        imported_row = imported_snapshot.rows[0]
+        assert detour_repository.reconcile_calls == 2
+        assert imported_row.latest.attempt_id == external_attempt.attempt_id
+        assert imported_row.latest.attempt_status is control_ui.RunStatus.COMPLETE
+        assert imported_row.latest.action is control_ui.RunAction.QUEUE
+        assert all(
+            run.source_key != external_researcher.source_key
+            for run in controller._journal.load_runs().values()
+        )
+
+        await codex.release.put(queued_run_id)
+        await asyncio.wait_for(
+            controller._queue.join(),
+            timeout=TEST_ASYNC_TIMEOUT_SECONDS,
+        )
+    finally:
+        await controller.shutdown()
 
 
 @pytest.mark.anyio
@@ -717,9 +950,7 @@ async def test_ineligible_action_is_disabled_and_cards_are_click_cached(
     ineligible = researcher(
         2,
         cohort=control_ui.ResearcherCohort.INELIGIBLE,
-        ineligibility_category=(
-            control_ui.IneligibilityCategory.STAGING_PARTITION_4_MULTIPLE_SSN
-        ),
+        ineligibility_category=(control_ui.IneligibilityCategory.STAGING_PARTITION_4_MULTIPLE_SSN),
     )
     card_renderer = CountingCardRenderer()
     controller = make_test_controller(
@@ -755,24 +986,21 @@ async def test_ineligible_action_is_disabled_and_cards_are_click_cached(
             control_ui.RunAction.QUEUE,
             control_ui.RunAction.DISABLED,
         ]
-        assert page.grid_column_definitions(
-            variable=control_ui.VARIABLE_SPECS[0]
-        )[0]["field"] == control_ui.GRID_RND_FIELD
+        assert (
+            page.grid_column_definitions(variable=control_ui.VARIABLE_SPECS[0])[0]["field"]
+            == control_ui.GRID_RND_FIELD
+        )
 
         page.selection.selected_source_key = ineligible.source_key
         page.sync_selected_action(rows)
-        assert button.text == control_ui.ACTION_LABEL_BY_VALUE[
-            control_ui.RunAction.DISABLED.value
-        ]
+        assert button.text == control_ui.ACTION_LABEL_BY_VALUE[control_ui.RunAction.DISABLED.value]
         assert button.disabled
         with pytest.raises(ValueError, match="ineligible"):
             await controller.queue(source_key=ineligible.source_key)
 
         page.selection.selected_source_key = eligible.source_key
         page.sync_selected_action(rows)
-        assert button.text == control_ui.ACTION_LABEL_BY_VALUE[
-            control_ui.RunAction.QUEUE.value
-        ]
+        assert button.text == control_ui.ACTION_LABEL_BY_VALUE[control_ui.RunAction.QUEUE.value]
         assert not button.disabled
         await page.refresh_card()
         await page.refresh_card()
@@ -863,6 +1091,42 @@ async def test_cancel_during_codex_startup_stops_the_visible_process(
     assert controller._journal.load_runs()[run_id].status is control_ui.RunStatus.CANCELED
 
 
+@pytest.mark.parametrize(
+    ("output", "expected"),
+    (
+        (control_ui.CODEX_REMOTE_BUSY_MARKER.encode(), True),
+        (b"", False),
+    ),
+)
+@pytest.mark.anyio
+async def test_codex_busy_uses_the_guest_process_table(
+    output: bytes,
+    expected: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = control_ui.CodexRunner(
+        timezone=CONTROL_TIMEZONE,
+        openalex_api_key=TEST_OPENALEX_API_KEY,
+    )
+    commands: list[str] = []
+
+    async def remote_command(
+        command: str,
+        *,
+        input_bytes: bytes | None = None,
+        check: bool = True,
+    ) -> bytes:
+        assert input_bytes is None
+        assert check
+        commands.append(command)
+        return output
+
+    monkeypatch.setattr(runner, "_remote_command", remote_command)
+
+    assert await runner.is_busy() is expected
+    assert commands == [control_ui.CODEX_REMOTE_BUSY_COMMAND]
+
+
 @pytest.mark.anyio
 async def test_codex_cancel_verifies_remote_and_local_process_exit(
     monkeypatch: pytest.MonkeyPatch,
@@ -899,11 +1163,7 @@ async def test_codex_cancel_verifies_remote_and_local_process_exit(
             remote_pid=int(REMOTE_TEST_PID),
             alive_marker=control_ui.CODEX_REMOTE_PROCESS_ALIVE_MARKER,
         ):
-            return (
-                control_ui.CODEX_REMOTE_PROCESS_ALIVE_MARKER.encode()
-                if remote_alive
-                else b""
-            )
+            return control_ui.CODEX_REMOTE_PROCESS_ALIVE_MARKER.encode() if remote_alive else b""
         return b""
 
     monkeypatch.setattr(control_ui, "CODEX_CANCEL_TIMEOUT_SECONDS", 0)
@@ -1034,10 +1294,9 @@ async def test_codex_start_uses_the_same_full_workbook_bytes_in_file_and_prompt(
 def test_backend_environment_includes_openalex_api_key() -> None:
     backend = control_ui.BackendSupervisor(
         repository_root=REPOSITORY_ROOT,
+        config_path=CONFIG_PATH,
         control_url=control_ui.CONTROL_CENTRE_BASE_URL,
         openalex_api_key=TEST_OPENALEX_API_KEY,
     )
 
-    assert backend.environment()[control_ui.EXPORT_OPENALEX_API_KEY] == (
-        TEST_OPENALEX_API_KEY
-    )
+    assert backend.environment()[control_ui.EXPORT_OPENALEX_API_KEY] == (TEST_OPENALEX_API_KEY)

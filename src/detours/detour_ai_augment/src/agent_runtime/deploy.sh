@@ -40,6 +40,7 @@ CODEX_WORKDIR="$AIVM_HOME/workdir"
 CODEX_ENV_PATH="$CODEX_WORKDIR/.openalex.env"
 OPENALEX_API_KEY_NAME="OPENALEX_API_KEY"
 OPENALEX_API_KEY="${OPENALEX_API_KEY:-}"
+ASSUME_YES=false
 
 PROVISION_SCRIPT="${AIVM_PROVISION_SCRIPT:-$SOURCE_DIR/$PROVISION_LIB_NAME}"
 APPENDWATCH_SCRIPT="${AIVM_APPENDWATCH_SCRIPT:-$SOURCE_DIR/../control_centre/appendwatch/$APPENDWATCH_LIB_NAME}"
@@ -125,6 +126,10 @@ while [ "$#" -gt 0 ]; do
             GUEST_MOUNTPOINT="$MOUNT_DIR"
             shift 2
             ;;
+        --yes)
+            ASSUME_YES=true
+            shift
+            ;;
         *)
             echo "❌ Unknown option: $1"
             exit 1
@@ -148,7 +153,11 @@ cd "$MOUNT_DIR" || { echo "❌ Directory not found: $MOUNT_DIR"; exit 1; }
 # Always recreate the AIVM instance but prompt to be sure
 if limactl list | grep -q "^$LIMA_INSTANCE"; then
     echo "♻️ Recreating Lima instance '$LIMA_INSTANCE'..."
-    read -r -p "⚠️ Delete Lima instance '$LIMA_INSTANCE'? [y/N] " reply
+    if [ "$ASSUME_YES" = true ]; then
+        reply="yes"
+    else
+        read -r -p "⚠️ Delete Lima instance '$LIMA_INSTANCE'? [y/N] " reply
+    fi
     case "$reply" in
         [yY]|[yY][eE][sS])
             limactl delete -f "$LIMA_INSTANCE"
@@ -159,7 +168,7 @@ if limactl list | grep -q "^$LIMA_INSTANCE"; then
             ;;
         *)
             echo "❌ Use existing instance with \`limactl shell $LIMA_INSTANCE\`"
-            exit 0
+            exit 1  # sic! signed-off: human
             ;;
     esac
 fi
@@ -440,9 +449,17 @@ verify_instance() {
     echo "✅ $OPENALEX_API_KEY_NAME round-trips into the AIVM environment"
 }
 
-# If verified, open shell in the AIVM user's home directory
-if verify_instance; then
-    exec "${AIVM_SSH_CMD[@]}" \
-        -t \
-        "$AIVM_SSH_TARGET"
-fi
+# ===============
+# BEGIN: DISABLED
+# ===============
+# # If verified, open shell in the AIVM user's home directory
+# if verify_instance; then
+#     exec "${AIVM_SSH_CMD[@]}" \
+#         -t \
+#         "$AIVM_SSH_TARGET"
+# fi
+# =============
+# END: DISABLED
+# =============
+
+verify_instance

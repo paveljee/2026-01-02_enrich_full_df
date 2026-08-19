@@ -502,6 +502,43 @@ def open_readonly_database(path: Path) -> duckdb.DuckDBPyConnection:
     return duckdb.connect(str(path), read_only=True)
 
 
+def logical_database_snapshot(
+    path: Path,
+) -> dict[str, tuple[str, tuple[tuple[object, ...], ...], tuple[tuple[object, ...], ...]]]:
+    connection = open_readonly_database(path)
+    try:
+        relations = tuple(
+            connection.execute(
+                "SELECT table_name, table_type FROM information_schema.tables "
+                "WHERE table_schema = 'main' ORDER BY table_name"
+            ).fetchall()
+        )
+        return {
+            str(name): (
+                str(relation_type),
+                tuple(
+                    tuple(row)
+                    for row in connection.execute(
+                        "SELECT column_name, data_type, is_nullable "
+                        "FROM information_schema.columns "
+                        "WHERE table_schema = 'main' AND table_name = ? "
+                        "ORDER BY ordinal_position",
+                        [name],
+                    ).fetchall()
+                ),
+                tuple(
+                    tuple(row)
+                    for row in connection.execute(
+                        f"SELECT * FROM {api.duckdb_quote_identifier(str(name))} ORDER BY ALL"
+                    ).fetchall()
+                ),
+            )
+            for name, relation_type in relations
+        }
+    finally:
+        connection.close()
+
+
 def rollout_record(value: dict[str, object], line_number: int) -> api.RolloutRecord:
     raw_line = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode() + b"\n"
     return api.RolloutRecord(
@@ -761,12 +798,8 @@ def historical_haanen_submissions() -> tuple[dict[str, object], dict[str, object
             rejected_submission[race_evidence_source][FIELD_EVIDENCE_FIELD][:1]
         ),
     }
-    accepted_submission[api.KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL] = (
-        deepcopy(
-            rejected_submission[
-                api.KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL
-            ]
-        )
+    accepted_submission[api.KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL] = deepcopy(
+        rejected_submission[api.KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL]
     )
     accepted_submission = standardized_submission_body(accepted_submission)
     return rejected_submission, accepted_submission
@@ -1112,8 +1145,9 @@ def test_successful_initial_submission_converts_to_retry_model_with_placeholders
         assert converted_column == initial_column
         assert converted_field.value == initial_field.value
         assert converted_field.web_search_excerpts == initial_field.web_search_excerpts
-        assert getattr(converted_field, FIELD_STANDARDIZED_VALUE_FIELD) == (
-            api.INITIAL_STANDARDIZED_VALUES[initial_column]
+        assert (
+            getattr(converted_field, FIELD_STANDARDIZED_VALUE_FIELD)
+            == (api.INITIAL_STANDARDIZED_VALUES[initial_column])
         )
 
 
@@ -1148,11 +1182,14 @@ def test_openapi_example_is_a_complete_pydantic_valid_submission() -> None:
     source = PYDANTIC_TO_PASTE_PATH.read_text(encoding="utf-8").rstrip()
     assert PYDANTIC_TO_PASTE_SOURCE == source
     assert source in api.RETRY_SUBMISSION_PUBLIC_GUIDANCE
-    assert json.dumps(
-        api.RETRY_EVIDENCE_SUBMISSION_EXAMPLE,
-        ensure_ascii=False,
-        indent=2,
-    ) in api.RETRY_SUBMISSION_PUBLIC_GUIDANCE
+    assert (
+        json.dumps(
+            api.RETRY_EVIDENCE_SUBMISSION_EXAMPLE,
+            ensure_ascii=False,
+            indent=2,
+        )
+        in api.RETRY_SUBMISSION_PUBLIC_GUIDANCE
+    )
     assert "CurrentAge: TypeAlias" in source
     assert "YearOfBirth: TypeAlias" in source
     assert "DateOfBirth: TypeAlias" in source
@@ -1514,9 +1551,7 @@ def test_v2_retry_rejects_changed_tokens_and_repeats_near_guidance() -> None:
         "Jose Garcia Senior Researcher"
     )
     changed_body = json.loads(json.dumps(near_body))
-    changed_body[failed_field]["web_search_excerpts"][0]["excerpt"] = (
-        "Jose Garcia Lead Researcher"
-    )
+    changed_body[failed_field]["web_search_excerpts"][0]["excerpt"] = "Jose Garcia Lead Researcher"
     try:
         near_submission = api.Submission.model_validate(near_body)
         near_assessment = api.assess_submission_evidence(
@@ -1912,9 +1947,7 @@ def test_retry_baselines_survive_restart_and_remain_isolated_by_run(
     second_connection = connect_v2_index(index, database_path=database_path)
     try:
         exact_submission = api.StandardizedSubmission.model_validate(
-            standardized_submission_body(
-                submission_body_for_evidence(V2_EXACT_EXCERPT)
-            )
+            standardized_submission_body(submission_body_for_evidence(V2_EXACT_EXCERPT))
         )
         exact_assessment = api.assess_submission_evidence(
             second_connection,
@@ -2146,8 +2179,7 @@ def test_historical_haanen_retry_preserves_verified_evidence_roundtrip() -> None
         )
         assert len(original_archived_items) == HAANEN_ORIGINAL_EVIDENCE_COUNT
         assert sum(
-            item.outcome == api.EVIDENCE_OUTCOME_V1_EXACT
-            for item in original_archived_items
+            item.outcome == api.EVIDENCE_OUTCOME_V1_EXACT for item in original_archived_items
         ) == (HAANEN_ORIGINAL_EVIDENCE_COUNT - 1)
         near_items = tuple(
             item
@@ -2171,20 +2203,23 @@ def test_historical_haanen_retry_preserves_verified_evidence_roundtrip() -> None
             == ()
         )
 
-        archived_retry = api.StandardizedSubmission.model_validate(
-            archived_retry_body
-        )
+        archived_retry = api.StandardizedSubmission.model_validate(archived_retry_body)
         archived_retry_assessment = api.assess_submission_evidence(
             connection,
             archived_retry,
             rollout_filename=HAANEN_ROLLOUT_FILENAME,
             codex_match_version=2,
         )
-        assert len(tuple(
-            item
-            for item in archived_retry_assessment.items
-            if item.field in HAANEN_ARCHIVED_EVIDENCE_COLUMNS
-        )) == HAANEN_RETRY_EVIDENCE_COUNT
+        assert (
+            len(
+                tuple(
+                    item
+                    for item in archived_retry_assessment.items
+                    if item.field in HAANEN_ARCHIVED_EVIDENCE_COLUMNS
+                )
+            )
+            == HAANEN_RETRY_EVIDENCE_COUNT
+        )
         archived_retry_violations = api._process_retry_attempt(
             connection,
             run_id=HAANEN_RUN_ID,
@@ -2254,10 +2289,7 @@ def test_historical_haanen_retry_preserves_verified_evidence_roundtrip() -> None
             if item.field in HAANEN_ARCHIVED_EVIDENCE_COLUMNS
         )
         assert len(ideal_archived_items) == HAANEN_ORIGINAL_EVIDENCE_COUNT
-        assert all(
-            item.outcome == api.EVIDENCE_OUTCOME_V1_EXACT
-            for item in ideal_archived_items
-        )
+        assert all(item.outcome == api.EVIDENCE_OUTCOME_V1_EXACT for item in ideal_archived_items)
         assert ideal_assessment.accepted is True
         assert (
             api._process_retry_attempt(
@@ -2811,10 +2843,13 @@ def test_real_july_push_matches_exact_objects_and_renders_card_end_to_end(
             assert output_columns.index(standardized_column) == (
                 output_columns.index(plain_column) + 1
             )
-            assert json.loads(output[standardized_column]) == (
-                accepted_fields[plain_column].model_dump(mode="json")[
-                    FIELD_STANDARDIZED_VALUE_FIELD
-                ]
+            assert (
+                json.loads(output[standardized_column])
+                == (
+                    accepted_fields[plain_column].model_dump(mode="json")[
+                        FIELD_STANDARDIZED_VALUE_FIELD
+                    ]
+                )
             )
         assert output[api.KTP_NAMEKEY_COL] == (
             '{"ktp.first_name": "A.", "ktp.last_name": "Sheikh"}'
@@ -2899,16 +2934,14 @@ def test_real_july_push_matches_exact_objects_and_renders_card_end_to_end(
     assert "<details>" not in card_text
     for plain_column, standardized_column in api.AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS:
         standardized_value = json.loads(output[standardized_column])
-        standardized_label = MARKDOWN_LITERAL_FIELD_TEMPLATE.format(
-            field=standardized_column
-        )
+        standardized_label = MARKDOWN_LITERAL_FIELD_TEMPLATE.format(field=standardized_column)
         if standardized_value == api.NOT_REPORTED_VALUE:
             assert standardized_label not in card_text
             continue
         plain_label = MARKDOWN_LITERAL_FIELD_TEMPLATE.format(field=plain_column)
         expected_pair = (
-            f'{plain_label}: {output[plain_column]}\n\n'
-            f'{standardized_label}: {output[standardized_column]}\n\n'
+            f"{plain_label}: {output[plain_column]}\n\n"
+            f"{standardized_label}: {output[standardized_column]}\n\n"
         )
         assert expected_pair in card_text
         assert "^" not in f"{standardized_label}: {output[standardized_column]}"
@@ -2916,6 +2949,234 @@ def test_real_july_push_matches_exact_objects_and_renders_card_end_to_end(
         assert read_zip_text(card_path) == card_text
     else:
         assert all(name.endswith(".docx") for name in zip_member_names(card_path))
+
+
+def test_archived_attempts_rebuild_database_from_exact_http_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = prepare_real_sample_push(tmp_path, monkeypatch)
+    attempts_dir = context.attempts_dir
+    detour_db_path = context.runtime.detour_db_path
+    output_dir = context.runtime.pipeline.output_dir
+    runtime = api.RuntimeConfiguration(
+        pipeline=context.runtime.pipeline,
+        detour_db_path=detour_db_path,
+        eligible_cohorts={TEST_SOURCE_KEY: api.GROUND_TRUTH_COHORT},
+    )
+    snapshot = api.SanctionSnapshot(
+        run_id=TEST_RUN_ID,
+        source_key=TEST_SOURCE_KEY,
+        session_id=JULY_SESSION_ID,
+        rollout_guest_path=JULY_ROLLOUT_GUEST_PATH,
+        control_base_url=None,
+    )
+    rejected_payload = deepcopy(context.payload)
+    rejected_evidence = rejected_payload[EXPECTED_EVIDENCE[0].column][FIELD_EVIDENCE_FIELD][0]
+    rejected_evidence[EVIDENCE_EXCERPT_FIELD] += "X"
+    accepted_payload = standardized_submission_body(context.payload)
+    rejected_body = json.dumps(
+        rejected_payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    accepted_body = json.dumps(
+        accepted_payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    old_attempt_dir = attempts_dir / HAANEN_REJECTED_ATTEMPT_ID
+    monkeypatch.setattr(api, "runtime_configuration", lambda: runtime)
+    monkeypatch.setattr(api, "sanctioned_snapshot", lambda: snapshot)
+
+    rejected_response = context.client.post(
+        api.PUSH_PATH,
+        content=rejected_body,
+        headers={api.HTTP_CONTENT_TYPE_HEADER: api.JSON_MEDIA_TYPE},
+    )
+    accepted_response = context.client.post(
+        api.PUSH_PATH,
+        content=accepted_body,
+        headers={api.HTTP_CONTENT_TYPE_HEADER: api.JSON_MEDIA_TYPE},
+    )
+    attempt_dirs = tuple(sorted(attempts_dir.iterdir(), key=lambda path: path.name))
+    rejected_attempt_dir, accepted_attempt_dir = attempt_dirs
+    rejected_manifest = read_json(rejected_attempt_dir / api.ATTEMPT_MANIFEST_FILENAME)
+    accepted_manifest = read_json(accepted_attempt_dir / api.ATTEMPT_MANIFEST_FILENAME)
+    rejected_http_path = (
+        rejected_attempt_dir
+        / rejected_manifest[api.ATTEMPT_ARTIFACTS_KEY][api.ARTIFACT_HTTP_REQUEST_LOG_KEY][
+            api.ARTIFACT_FILENAME_KEY
+        ]
+    )
+    accepted_http_path = (
+        accepted_attempt_dir
+        / accepted_manifest[api.ATTEMPT_ARTIFACTS_KEY][api.ARTIFACT_HTTP_REQUEST_LOG_KEY][
+            api.ARTIFACT_FILENAME_KEY
+        ]
+    )
+    rejected_http = api.HttpRequestLogRecord.model_validate_json(read_text(rejected_http_path))
+    accepted_http = api.HttpRequestLogRecord.model_validate_json(read_text(accepted_http_path))
+
+    assert rejected_response.status_code == 422
+    assert accepted_response.status_code == 200
+    assert rejected_http.request_body == rejected_body
+    assert rejected_http.response_code == rejected_response.status_code
+    assert rejected_http.response_body == rejected_response.text
+    assert accepted_http.request_body == accepted_body
+    assert accepted_http.response_code == accepted_response.status_code
+    assert accepted_http.response_body == accepted_response.text
+    assert rejected_manifest[api.ATTEMPT_RUN_ID_KEY] == str(TEST_RUN_ID)
+    assert accepted_manifest[api.ATTEMPT_SOURCE_KEY] == TEST_SOURCE_KEY
+    assert accepted_manifest[api.ATTEMPT_SESSION_ID_KEY] == JULY_SESSION_ID
+    assert accepted_manifest[api.ATTEMPT_ROLLOUT_RELATIVE_PATH_KEY] == str(
+        JULY_ROLLOUT_RELATIVE_PATH
+    )
+
+    before = logical_database_snapshot(detour_db_path)
+    accepted_card_path = (
+        output_dir
+        / accepted_manifest[api.ATTEMPT_ARTIFACTS_KEY][api.ARTIFACT_CARD_ZIP_KEY][
+            api.ARTIFACT_FILENAME_KEY
+        ]
+    )
+    accepted_response_path = accepted_attempt_dir / api.RESPONSE_FILENAME
+    accepted_card_path.unlink()
+    accepted_response_path.unlink()
+    detour_db_path.unlink()
+    old_attempt_dir.mkdir()
+    write_text(
+        old_attempt_dir / api.ATTEMPT_MANIFEST_FILENAME,
+        json.dumps({
+            api.ATTEMPT_ID_KEY: HAANEN_REJECTED_ATTEMPT_ID,
+            api.ATTEMPT_STAGE_KEY: api.ATTEMPT_STAGE_EVIDENCE_VALIDATION,
+            api.ATTEMPT_RESULT_KEY: api.ATTEMPT_RESULT_REJECTED,
+            api.ATTEMPT_UPDATED_AT_KEY: TEST_ATTEMPT_TIMESTAMP.isoformat(),
+            api.ATTEMPT_ARTIFACTS_KEY: {},
+        }),
+    )
+
+    recovery = api.restore_archived_attempts(runtime, attempts_dir=attempts_dir)
+    after = logical_database_snapshot(detour_db_path)
+    repeated = api.restore_archived_attempts(runtime, attempts_dir=attempts_dir)
+
+    restored_attempt_ids = tuple(path.name for path in attempt_dirs)
+    assert recovery == api.ArchivedAttemptRecovery(
+        discovered=3,
+        invalid=1,
+        restored_attempt_ids=restored_attempt_ids,
+        restored_accepted_attempt_ids=(accepted_attempt_dir.name,),
+        skipped_attempt_ids=(),
+    )
+    assert after == before
+    assert repeated == api.ArchivedAttemptRecovery(
+        discovered=3,
+        invalid=1,
+        restored_attempt_ids=(),
+        restored_accepted_attempt_ids=(),
+        skipped_attempt_ids=restored_attempt_ids,
+    )
+    assert not accepted_card_path.exists()
+    assert not accepted_response_path.exists()
+
+    connection = open_readonly_database(detour_db_path)
+    try:
+        relation_names = {
+            row[0]
+            for row in connection.execute(
+                "SELECT table_name FROM information_schema.tables WHERE table_schema = 'main'"
+            ).fetchall()
+        }
+        assert {
+            api.ARCHIVED_ATTEMPTS_TABLE,
+            api.CODEX_RETRY_BASELINE_TABLE,
+            api.CODEX_EVIDENCE_AUDIT_TABLE,
+            api.CODEX_FC_TABLE,
+            api.CODEX_FCO_TABLE,
+            api.CODEX_CALLS_TABLE,
+            api.CODEX_TURN_REF_TABLE,
+            api.CODEX_OUTPUT_ROWS_TABLE,
+            api.CODEX_OUTPUT_VIEW,
+            api.CODEX_INNERDICT_TABLE,
+        } <= relation_names
+        archived_rows = connection.execute(
+            f"SELECT {api.ATTEMPT_ID_KEY}, {api.ARCHIVED_ATTEMPT_MANIFEST_COLUMN} "
+            f"FROM {api.ARCHIVED_ATTEMPTS_TABLE} ORDER BY {api.ATTEMPT_ID_KEY}"
+        ).fetchall()
+        assert tuple(row[0] for row in archived_rows) == restored_attempt_ids
+        assert tuple(json.loads(row[1]) for row in archived_rows) == (
+            rejected_manifest,
+            accepted_manifest,
+        )
+        assert connection.execute(
+            f"SELECT {api.CODEX_RETRY_RUN_ID_COL}, "
+            f"{api.CODEX_RETRY_SOURCEKEY_COL}, "
+            f"{api.CODEX_RETRY_SESSION_ID_COL}, "
+            f"{api.CODEX_RETRY_ATTEMPT_ID_COL} "
+            f"FROM {api.CODEX_RETRY_BASELINE_TABLE}"
+        ).fetchall() == [
+            (
+                str(TEST_RUN_ID),
+                TEST_SOURCE_KEY,
+                JULY_SESSION_ID,
+                rejected_attempt_dir.name,
+            )
+        ]
+        assert connection.execute(
+            f"SELECT {api.CODEX_RETRY_ATTEMPT_ID_COL}, "
+            f"{api.CODEX_EVIDENCE_APPLIED_COL}, "
+            f"{api.CODEX_EVIDENCE_ACCEPTED_COL} "
+            f"FROM {api.CODEX_EVIDENCE_AUDIT_TABLE} "
+            f"ORDER BY {api.CODEX_EVIDENCE_AUDIT_ID_COL}"
+        ).fetchall() == [
+            (rejected_attempt_dir.name, True, False),
+            (accepted_attempt_dir.name, True, True),
+        ]
+        index_counts: dict[str, int] = {}
+        for table_name in (
+            api.CODEX_FC_TABLE,
+            api.CODEX_FCO_TABLE,
+            api.CODEX_CALLS_TABLE,
+            api.CODEX_TURN_REF_TABLE,
+        ):
+            count_row = connection.execute(f"SELECT count(*) FROM {table_name}").fetchone()
+            assert count_row is not None
+            index_counts[table_name] = count_row[0]
+        assert index_counts == {
+            api.CODEX_FC_TABLE: JULY_FC_COUNT,
+            api.CODEX_FCO_TABLE: JULY_FCO_COUNT,
+            api.CODEX_CALLS_TABLE: JULY_CALL_COUNT,
+            api.CODEX_TURN_REF_TABLE: JULY_REF_COUNT,
+        }
+        assert connection.execute(
+            f"SELECT {api.duckdb_quote_identifier(api.KTP_NAMEKEY_COL)}, "
+            f"{api.duckdb_quote_identifier(api.KTP_FILENAME_COL)}, "
+            f"{api.duckdb_quote_identifier(api.KTP_FRAGMENT_COL)}, "
+            f"{api.duckdb_quote_identifier(api.KTP_FRAGMENT_TYPE_COL)}, "
+            f"{api.duckdb_quote_identifier(api.KTP_AI_AUGMENT_ATTEMPT_ID_COL)} "
+            f"FROM {api.CODEX_OUTPUT_VIEW}"
+        ).fetchall() == [
+            (
+                TEST_SOURCE_KEY,
+                JULY_ROLLOUT_FILENAME,
+                JULY_ROLLOUT_LINE_COUNT,
+                api.ROLLOUT_LINE_FRAGMENT_TYPE,
+                accepted_attempt_dir.name,
+            )
+        ]
+        innerdict_rows = connection.execute(
+            f"SELECT {api.duckdb_quote_identifier(api.KTP_NAMEKEY_COL)}, "
+            f"{api.duckdb_quote_identifier(api.KTP_INNERDICT_JSONLINES_COL)} "
+            f"FROM {api.CODEX_INNERDICT_TABLE}"
+        ).fetchall()
+        assert len(innerdict_rows) == 1
+        assert innerdict_rows[0][0] == TEST_SOURCE_KEY
+        assert (
+            json.loads(innerdict_rows[0][1])[api.KTP_AI_AUGMENT_ATTEMPT_ID_COL]
+            == accepted_attempt_dir.name
+        )
+    finally:
+        connection.close()
 
 
 @pytest.mark.parametrize("mutation", ("excerpt", "url"))

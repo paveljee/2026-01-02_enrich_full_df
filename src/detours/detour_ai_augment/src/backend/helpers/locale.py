@@ -394,6 +394,14 @@ class Locale:
         "attempt ID or rollout filename/line-count fragment is already accepted"
     )
     ATTEMPT_CARD_ZIP_EXISTS: Final = "attempt card ZIP already exists"
+    ATTEMPT_HTTP_LOG_EXISTS: Final = "attempt HTTP request log already exists"
+    ARCHIVED_ATTEMPT_PATH_INVALID: Final = "archived attempt path is invalid"
+    ARCHIVED_ATTEMPT_MANIFEST_INVALID: Final = "archived attempt manifest is invalid"
+    ARCHIVED_ATTEMPT_ARTIFACT_INVALID_TEMPLATE: Final = (
+        "archived attempt artifact is invalid: {artifact}"
+    )
+    ARCHIVED_ATTEMPT_HTTP_INVALID: Final = "archived attempt HTTP request log is invalid"
+    ARCHIVED_ATTEMPT_OUTCOME_MISMATCH: Final = "archived attempt result does not match replay"
     RESEARCHER_CARD_COUNT_INVALID: Final = "selected researcher did not produce exactly one card"
     REQUEST_CONTENT_TYPE_INVALID: Final = "request Content-Type must be application/json"
     REQUEST_CONTENT_LENGTH_INVALID: Final = "request Content-Length is invalid"
