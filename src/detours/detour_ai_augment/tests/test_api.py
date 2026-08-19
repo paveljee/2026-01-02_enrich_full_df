@@ -122,6 +122,7 @@ TEST_SOURCE_KEY = '{"ktp.first_name": "A.", "ktp.last_name": "Sheikh"}'
 TEST_RUN_ID = UUID("019fa457-aac5-7652-8669-9d571206e7cb")
 TEST_SECOND_RUN_ID = UUID("019fa457-aac5-7652-8669-9d571206e7cc")
 TEST_ATTEMPT_TIMESTAMP = datetime(2026, 8, 14, tzinfo=timezone.utc)
+TEST_CONTROL_RUN_EVENTS_TOKEN = "test-control-run-events-token"
 
 HAANEN_REJECTED_ATTEMPT_ID = "20260813T141344_678596Z_8ef1f6372b4a48d9a3b1279736356363"
 HAANEN_ACCEPTED_ATTEMPT_ID = "20260813T141450_027429Z_044215aac8c44200882531b10a2acfa6"
@@ -857,7 +858,6 @@ def prepare_real_sample_push(
     output_format: str = "txt",
 ) -> SimpleNamespace:
     deployment_dir = tmp_path / "deployment"
-    attempts_dir = tmp_path / "attempts"
     deployment_dir.mkdir()
     report_path = deployment_dir / "appendwatch-tree.txt"
     identity_path = deployment_dir / "id_ed25519"
@@ -868,6 +868,7 @@ def prepare_real_sample_push(
         write_text(path, "fixture\n")
 
     runtime = runtime_for_test(tmp_path, output_format=output_format)
+    attempts_dir = runtime.attempts_dir
     events: list[str] = []
     rendered_cards: list[str] = []
     monkeypatch.setattr(api, "ROLLOUT_JSONL", JULY_ROLLOUT_GUEST_PATH)
@@ -878,7 +879,6 @@ def prepare_real_sample_push(
     monkeypatch.setattr(api, "AIVM_INSTANCE", "aivm")
     monkeypatch.setattr(api, "AIVM_USER", "ai")
     monkeypatch.setattr(api, "AIVM_SSH_PORT", "22022")
-    monkeypatch.setattr(api, "ATTEMPTS_DIR", attempts_dir)
     monkeypatch.setattr(api, "SOURCE_FILE", SOURCE_JSONL_PATH)
     monkeypatch.setattr(api, "runtime_configuration", lambda: runtime)
 
@@ -3056,6 +3056,15 @@ def test_archived_attempts_rebuild_database_from_exact_http_contract(
         }),
     )
 
+    archive_source_dir = tmp_path / "archive_source"
+    attempts_dir.rename(archive_source_dir)
+    attempts_dir.mkdir(parents=True)
+    for source_attempt in sorted(archive_source_dir.iterdir(), key=lambda path: path.name):
+        (attempts_dir / source_attempt.name).symlink_to(
+            source_attempt,
+            target_is_directory=source_attempt.is_dir(),
+        )
+
     recovery = api.restore_archived_attempts(runtime, attempts_dir=attempts_dir)
     after = logical_database_snapshot(detour_db_path)
     repeated = api.restore_archived_attempts(runtime, attempts_dir=attempts_dir)
@@ -3401,6 +3410,60 @@ def test_control_mode_without_sanction_fails_both_routes_without_env_fallback(
     assert push_response.status_code == 503
     assert pull_response.json() == {"detail": Locale.CONFIGURATION_ERROR_DETAIL}
     assert push_response.json() == {"detail": Locale.CONFIGURATION_ERROR_DETAIL}
+
+
+def test_control_run_events_are_authenticated_and_rebuild_exactly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = runtime_for_test(tmp_path)
+    events = (
+        api.ControlRunEvent(
+            run_id=TEST_RUN_ID,
+            source_key=TEST_SOURCE_KEY,
+            at=TEST_ATTEMPT_TIMESTAMP,
+            kind=api.ControlRunEventKind.QUEUED,
+        ),
+        api.ControlRunEvent(
+            run_id=TEST_RUN_ID,
+            source_key=TEST_SOURCE_KEY,
+            at=TEST_ATTEMPT_TIMESTAMP,
+            kind=api.ControlRunEventKind.FAILED,
+            detail="pre-push configuration failure",
+        ),
+    )
+    payload = api.ControlRunEventsRequest(events=events).model_dump(mode="json")
+    monkeypatch.setattr(api, "CONTROL_RUN_EVENTS_TOKEN", TEST_CONTROL_RUN_EVENTS_TOKEN)
+    monkeypatch.setattr(api, "runtime_configuration", lambda: runtime)
+    client = TestClient(api.app)
+
+    forbidden = client.put(api.CONTROL_RUN_EVENTS_PATH, json=payload)
+    first = client.put(
+        api.CONTROL_RUN_EVENTS_PATH,
+        json=payload,
+        headers={api.CONTROL_RUN_EVENTS_TOKEN_HEADER: TEST_CONTROL_RUN_EVENTS_TOKEN},
+    )
+    repeated = client.put(
+        api.CONTROL_RUN_EVENTS_PATH,
+        json=payload,
+        headers={api.CONTROL_RUN_EVENTS_TOKEN_HEADER: TEST_CONTROL_RUN_EVENTS_TOKEN},
+    )
+
+    assert forbidden.status_code == 403
+    assert first.json() == {"persisted": len(events)}
+    assert repeated.json() == {"persisted": 0}
+    assert api.load_control_run_events(runtime) == events
+    assert api.CONTROL_RUN_EVENTS_PATH not in client.get("/openapi.json").json()["paths"]
+
+    runtime.detour_db_path.unlink()
+    rebuilt = client.put(
+        api.CONTROL_RUN_EVENTS_PATH,
+        json=payload,
+        headers={api.CONTROL_RUN_EVENTS_TOKEN_HEADER: TEST_CONTROL_RUN_EVENTS_TOKEN},
+    )
+
+    assert rebuilt.json() == {"persisted": len(events)}
+    assert api.load_control_run_events(runtime) == events
 
 
 def test_openapi_does_not_disclose_integrity_internals() -> None:

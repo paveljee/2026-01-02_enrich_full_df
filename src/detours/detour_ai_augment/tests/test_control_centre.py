@@ -61,6 +61,7 @@ LATER_ARCHIVED_ATTEMPT_ID = "20260813T143347_182523Z_733e33fbf8e74c0aaf0aa0139d6
 TEST_ARCHIVE_FILENAME = "test.jsonl"
 TEST_ARCHIVE_SHA256 = "0" * 64
 TEST_ROLLOUT_RELATIVE_PATH = "2026/08/test.jsonl"
+TEST_CONTROL_RUN_EVENTS_TOKEN = "test-control-run-events-token"
 
 
 @pytest.fixture
@@ -261,6 +262,32 @@ def test_real_config_derives_exact_innerdict_owned_cohorts(
         == api.EXPECTED_MULTIDRAW_SOURCE_RESEARCHERS
     )
     assert all(item.draw_numbers for item in researchers)
+
+
+def test_lima_appendwatch_topology_is_passed_exactly_to_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(control_ui.EXPORT_OPENALEX_API_KEY, TEST_OPENALEX_API_KEY)
+    configuration = control_ui.RuntimeConfiguration(config_path=CONFIG_PATH)
+    backend = control_ui.BackendSupervisor(
+        repository_root=REPOSITORY_ROOT,
+        config_path=CONFIG_PATH,
+        control_url=control_ui.CONTROL_CENTRE_BASE_URL,
+        openalex_api_key=TEST_OPENALEX_API_KEY,
+        appendwatch_report=configuration.appendwatch_report,
+        control_run_events_token=TEST_CONTROL_RUN_EVENTS_TOKEN,
+    )
+
+    environment = backend.environment()
+
+    assert configuration.appendwatch_report.is_file()
+    assert environment[api.APPENDWATCH_REPORT_ENV_NAME] == str(
+        configuration.appendwatch_report
+    )
+    assert (
+        environment[api.CONTROL_RUN_EVENTS_TOKEN_ENV_NAME]
+        == TEST_CONTROL_RUN_EVENTS_TOKEN
+    )
 
 
 def test_config_registers_verified_release_map_without_writing_source_db(
@@ -531,6 +558,7 @@ class FakeDetourRepository:
             control_ui.SourceKey,
             tuple[api.ArchivedAttemptManifest, ...],
         ] = {}
+        self.control_run_events: tuple[control_ui.RunEvent, ...] = ()
         self.reconcile_calls = 0
 
     def reconcile_archived_attempts(self) -> api.ArchivedAttemptRecovery:
@@ -571,6 +599,19 @@ class FakeDetourRepository:
         source_key: control_ui.SourceKey,
     ) -> tuple[control_ui.AcceptedAttempt, ...]:
         return self.accepted_attempts.get(source_key, ())
+
+    def persist_control_run_events(
+        self,
+        events: tuple[control_ui.RunEvent, ...],
+    ) -> int:
+        if self.control_run_events != events[: len(self.control_run_events)]:
+            raise RuntimeError(control_ui.Locale.CONTROL_RUN_EVENTS_PERSIST_FAILED)
+        persisted = len(events) - len(self.control_run_events)
+        self.control_run_events = tuple(events)
+        return persisted
+
+    def load_control_run_events(self) -> tuple[control_ui.RunEvent, ...]:
+        return self.control_run_events
 
 
 class CountingCardRenderer:
@@ -662,6 +703,8 @@ class StartingCancelableCodex:
 class FakeBackend:
     def __init__(self) -> None:
         self.status = control_ui.BackendStatus.STOPPED
+        self.pull_probes = 0
+        self.persisted_events: tuple[control_ui.RunEvent, ...] = ()
 
     async def start(self) -> None:
         self.status = control_ui.BackendStatus.RUNNING
@@ -669,12 +712,29 @@ class FakeBackend:
     async def stop(self) -> None:
         self.status = control_ui.BackendStatus.STOPPED
 
+    async def probe_pull(self) -> None:
+        self.pull_probes += 1
+
+    def persist_run_events(self, events: tuple[control_ui.RunEvent, ...]) -> int:
+        if self.persisted_events != events[: len(self.persisted_events)]:
+            raise RuntimeError(control_ui.Locale.CONTROL_RUN_EVENTS_PERSIST_FAILED)
+        persisted = len(events) - len(self.persisted_events)
+        self.persisted_events = tuple(events)
+        return persisted
+
+
+class FailingPullBackend(FakeBackend):
+    async def probe_pull(self) -> None:
+        await super().probe_pull()
+        raise RuntimeError(control_ui.Locale.BACKEND_PULL_NOT_READY)
+
 
 class SerialFakeCodex:
     def __init__(self) -> None:
         self.started: asyncio.Queue[UUID] = asyncio.Queue()
         self.release: asyncio.Queue[UUID] = asyncio.Queue()
         self.external_busy = False
+        self.canceled: list[UUID] = []
 
     async def is_busy(self) -> bool:
         return self.external_busy
@@ -707,7 +767,10 @@ class SerialFakeCodex:
         assert await self.release.get() == handle.run_id
         return 0
 
-    async def cancel(self, _handle: control_ui.CodexProcessHandle) -> None:
+    async def cancel(self, handle: control_ui.CodexProcessHandle) -> None:
+        self.canceled.append(handle.run_id)
+
+    async def terminate_abandoned_run(self, _run_id: UUID) -> None:
         return None
 
 
@@ -1058,6 +1121,94 @@ async def test_controller_runs_queue_serially_and_reruns_get_new_ids(
 
 
 @pytest.mark.anyio
+async def test_failed_sanctioned_pull_is_canceled_and_rebuilt_as_terminal_history(
+    tmp_path: Path,
+) -> None:
+    item = researcher(1)
+    repository = FakeDetourRepository()
+    journal = control_ui.RunJournal(path=tmp_path / "runs.jsonl")
+    backend = FailingPullBackend()
+    codex = SerialFakeCodex()
+    controller = make_test_controller(
+        configuration=SimpleNamespace(),
+        source_repository=FakeSourceRepository((item,)),
+        detour_repository=repository,
+        journal=journal,
+        card_renderer=SimpleNamespace(),
+        backend=backend,
+        codex=codex,
+        control_plane=control_ui.ControlPlane(),
+        reconciler=control_ui.AttemptReconciler(),
+        projector=control_ui.VariableProjector(),
+    )
+    await controller.start()
+    run_id = await controller.queue(source_key=item.source_key)
+    await asyncio.wait_for(controller._queue.join(), timeout=TEST_ASYNC_TIMEOUT_SECONDS)
+    await controller.shutdown()
+
+    assert backend.pull_probes == 1
+    assert codex.canceled == [run_id]
+    assert journal.load_runs()[run_id].status is control_ui.RunStatus.FAILED
+
+    restarted = make_test_controller(
+        configuration=SimpleNamespace(),
+        source_repository=FakeSourceRepository((item,)),
+        detour_repository=repository,
+        journal=journal,
+        card_renderer=SimpleNamespace(),
+        backend=FakeBackend(),
+        codex=SerialFakeCodex(),
+        control_plane=control_ui.ControlPlane(),
+        reconciler=control_ui.AttemptReconciler(),
+        projector=control_ui.VariableProjector(),
+    )
+    await restarted.start()
+    try:
+        snapshot = await restarted.snapshot(
+            selection=control_ui.UiSelection(
+                variable_key=control_ui.VARIABLE_SPECS[0].key,
+            )
+        )
+    finally:
+        await restarted.shutdown()
+
+    assert repository.control_run_events == journal.load_events()
+    assert snapshot.rows[0].attempts[-1].run_id == run_id
+    assert snapshot.rows[0].attempts[-1].attempt_status is control_ui.RunStatus.FAILED
+
+
+@pytest.mark.anyio
+async def test_shutdown_during_codex_startup_terminates_and_persists_the_run(
+    tmp_path: Path,
+) -> None:
+    item = researcher(1)
+    codex = StartingCancelableCodex()
+    journal = control_ui.RunJournal(path=tmp_path / "runs.jsonl")
+    controller = make_test_controller(
+        configuration=SimpleNamespace(),
+        source_repository=FakeSourceRepository((item,)),
+        detour_repository=FakeDetourRepository(),
+        journal=journal,
+        card_renderer=SimpleNamespace(),
+        backend=FakeBackend(),
+        codex=codex,
+        control_plane=control_ui.ControlPlane(),
+        reconciler=control_ui.AttemptReconciler(),
+        projector=control_ui.VariableProjector(),
+    )
+    await controller.start()
+    run_id = await controller.queue(source_key=item.source_key)
+    await asyncio.wait_for(codex.started.wait(), timeout=TEST_ASYNC_TIMEOUT_SECONDS)
+
+    await controller.shutdown()
+
+    assert codex.canceled.is_set()
+    assert codex.handle is not None
+    assert codex.handle.process.returncode == TERMINATE_RETURN_CODE
+    assert journal.load_runs()[run_id].status is control_ui.RunStatus.FAILED
+
+
+@pytest.mark.anyio
 async def test_cancel_during_codex_startup_stops_the_visible_process(
     tmp_path: Path,
 ) -> None:
@@ -1297,6 +1448,8 @@ def test_backend_environment_includes_openalex_api_key() -> None:
         config_path=CONFIG_PATH,
         control_url=control_ui.CONTROL_CENTRE_BASE_URL,
         openalex_api_key=TEST_OPENALEX_API_KEY,
+        appendwatch_report=CONFIG_PATH,
+        control_run_events_token=TEST_CONTROL_RUN_EVENTS_TOKEN,
     )
 
     assert backend.environment()[control_ui.EXPORT_OPENALEX_API_KEY] == (TEST_OPENALEX_API_KEY)

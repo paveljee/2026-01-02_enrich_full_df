@@ -1,19 +1,22 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import csv
 import hashlib
+import hmac
 import json
 import logging
 import os
 import re
 import shutil
+import signal
 import subprocess
 import threading
 import time
 from collections import Counter
 from collections.abc import AsyncGenerator, Iterator, Mapping, Sequence
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
@@ -154,6 +157,21 @@ class IneligibilityCategory(StrEnum):
     STAGING_PARTITION_4_MULTIPLE_SSN = "staging_partition_4_multiple_ssn"
 
 
+class ControlRunEventKind(StrEnum):
+    QUEUED = "queued"
+    STARTED = "started"
+    REMOTE_PID_DISCOVERED = "remote_pid_discovered"
+    SESSION_DISCOVERED = "session_discovered"
+    ROLLOUT_DISCOVERED = "rollout_discovered"
+    SANCTIONED = "sanctioned"
+    PUSH_ACCEPTED = "push_accepted"
+    CANCEL_REQUESTED = "cancel_requested"
+    CODEX_EXITED = "codex_exited"
+    COMPLETE = "complete"
+    FAILED = "failed"
+    CANCELED = "canceled"
+
+
 SUBMISSIONS_DIR = Path(__file__).resolve().parents[2] / "data" / "submissions"
 ATTEMPTS_DIR = SUBMISSIONS_DIR / "attempts"
 SOURCE_FILE = Path("tmp/sheikh.jsonl")
@@ -166,6 +184,11 @@ ROLLOUT_JSONL = os.environ.get(ROLLOUT_ENV_NAME, "")
 CONTROL_URL_ENV_NAME = "FASTAPI_DETOUR_CONTROL_URL"
 CONTROL_BASE_URL = os.environ.get(CONTROL_URL_ENV_NAME, "")
 APPENDWATCH_REPORT_ENV_NAME = "FASTAPI_DETOUR_APPENDWATCH_REPORT"
+ALLOW_ARCHIVED_ATTEMPT_SYMLINKS = True  # sic! signed-off: human
+CONTROL_PARENT_PID_ENV_NAME = "FASTAPI_DETOUR_CONTROL_PARENT_PID"
+CONTROL_RUN_EVENTS_TOKEN_ENV_NAME = "FASTAPI_DETOUR_CONTROL_RUN_EVENTS_TOKEN"
+CONTROL_RUN_EVENTS_TOKEN = os.environ.get(CONTROL_RUN_EVENTS_TOKEN_ENV_NAME, "")
+CONTROL_RUN_EVENTS_TOKEN_HEADER = "X-Detour-Control-Token"
 AIVM_INSTANCE_ENV_NAME = "FASTAPI_DETOUR_AIVM_INSTANCE"
 AIVM_USER_ENV_NAME = "FASTAPI_DETOUR_AIVM_USER"
 AIVM_SSH_PORT_ENV_NAME = "FASTAPI_DETOUR_AIVM_SSH_PORT"
@@ -174,18 +197,14 @@ AIVM_KNOWN_HOSTS_FILE_ENV_NAME = "FASTAPI_DETOUR_AIVM_KNOWN_HOSTS_FILE"
 LIMA_SSH_CONFIG_ENV_NAME = "FASTAPI_DETOUR_LIMA_SSH_CONFIG"
 CONTROL_CURRENT_PATH = "/_control/current"
 CONTROL_ACCEPTED_PATH_TEMPLATE = "/_control/runs/{run_id}/accepted"
+CONTROL_RUN_EVENTS_PATH = "/_control/run-events"
 CONTROL_HTTP_TIMEOUT_SECONDS = 10
 CONTROL_SCHEME = "http"
 CONTROL_HOST = "127.0.0.1"
 CONTROL_PORT = 8611
 CONTROL_ROOT_PATHS = frozenset({"", "/"})
 CODEX_SESSIONS_ROOT = PurePosixPath("/home/ai/.codex/sessions")
-APPENDWATCH_REPORT = Path(
-    os.environ.get(
-        APPENDWATCH_REPORT_ENV_NAME,
-        "/Volumes/home/aicode/aivm/home/ai/.aivm-control/appendwatch/appendwatch-tree.txt",
-    )
-).expanduser()
+APPENDWATCH_REPORT = Path(os.environ.get(APPENDWATCH_REPORT_ENV_NAME, "")).expanduser()
 
 AIVM_INSTANCE = os.environ.get(AIVM_INSTANCE_ENV_NAME, "aivm")
 AIVM_USER = os.environ.get(AIVM_USER_ENV_NAME, "ai")
@@ -326,6 +345,7 @@ TEXT_ENCODING = "utf-8"
 JSON_MEDIA_TYPE = "application/json"
 HTTP_GET_METHOD = "GET"
 HTTP_POST_METHOD = "POST"
+HTTP_PUT_METHOD = "PUT"
 HTTP_ACCEPT_HEADER = "Accept"
 HTTP_CONTENT_TYPE_HEADER = "Content-Type"
 HTTP_REQUEST_CONTENT_TYPE_HEADER = "content-type"
@@ -491,8 +511,11 @@ CODEX_FCO_ID_SEQUENCE = "codex_fco_id_sequence"
 CODEX_CALLS_ID_SEQUENCE = "codex_calls_id_sequence"
 CODEX_TURN_REF_ID_SEQUENCE = "codex_turn_ref_id_sequence"
 CODEX_EVIDENCE_AUDIT_ID_SEQUENCE = "codex_evidence_audit_id_sequence"
+CONTROL_RUN_EVENTS_TABLE = "control_centre_run_events"
 ARCHIVED_ATTEMPTS_TABLE = "control_centre_archived_attempts"
 ARCHIVED_ATTEMPT_MANIFEST_COLUMN = "manifest"
+CONTROL_RUN_EVENT_ORDINAL_COLUMN = "event_ordinal"
+CONTROL_RUN_EVENT_PAYLOAD_COLUMN = "event"
 
 CODEX_ID_COL = "id"
 CODEX_FC_TIMESTAMP_COL = "codex.fc_timestamp"
@@ -529,14 +552,29 @@ CREATE_ARCHIVED_ATTEMPTS_TABLE_SQL = (
     f"{ATTEMPT_ID_KEY} VARCHAR PRIMARY KEY, "
     f"{ARCHIVED_ATTEMPT_MANIFEST_COLUMN} JSON NOT NULL)"
 )
+CREATE_CONTROL_RUN_EVENTS_TABLE_SQL = (
+    f"CREATE TABLE IF NOT EXISTS {CONTROL_RUN_EVENTS_TABLE} ("
+    f"{CONTROL_RUN_EVENT_ORDINAL_COLUMN} BIGINT PRIMARY KEY, "
+    f"{CONTROL_RUN_EVENT_PAYLOAD_COLUMN} JSON NOT NULL)"
+)
 SELECT_ARCHIVED_ATTEMPT_IDS_SQL = f"SELECT {ATTEMPT_ID_KEY} FROM {ARCHIVED_ATTEMPTS_TABLE}"
 INSERT_ARCHIVED_ATTEMPT_SQL = (
     f"INSERT INTO {ARCHIVED_ATTEMPTS_TABLE} "
     f"({ATTEMPT_ID_KEY}, {ARCHIVED_ATTEMPT_MANIFEST_COLUMN}) VALUES (?, ?)"
 )
+SELECT_CONTROL_RUN_EVENTS_SQL = (
+    f"SELECT {CONTROL_RUN_EVENT_ORDINAL_COLUMN}, {CONTROL_RUN_EVENT_PAYLOAD_COLUMN} "
+    f"FROM {CONTROL_RUN_EVENTS_TABLE} ORDER BY {CONTROL_RUN_EVENT_ORDINAL_COLUMN}"
+)
+INSERT_CONTROL_RUN_EVENT_SQL = (
+    f"INSERT INTO {CONTROL_RUN_EVENTS_TABLE} "
+    f"({CONTROL_RUN_EVENT_ORDINAL_COLUMN}, {CONTROL_RUN_EVENT_PAYLOAD_COLUMN}) VALUES (?, ?)"
+)
 HTTP_REQUEST_LOG_RESPONSE_CONTENT_TYPE_HEADER = "content-type"
 HTTP_REQUEST_LOG_RESPONSE_CONTENT_TYPE_JSON = "application/json"
 NANOSECONDS_PER_MICROSECOND = 1_000
+CONTROL_RUN_FIRST_ORDINAL = 1
+CONTROL_PARENT_WATCH_SECONDS = 0.1
 
 NOT_REPORTED_VALUE = get_args(NotReported)[0]
 NOT_AVAILABLE_OR_APPLICABLE_VALUE = get_args(NotAvailableOrApplicable)[0]
@@ -642,6 +680,7 @@ ATTEMPT_RESPONSE_CONTENT_TYPE = {
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
+    parent_watch: asyncio.Task[None] | None = None
     try:
         runtime_configuration()
     except PushConfigurationError as exc:
@@ -654,7 +693,26 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
             initialize_guest_workbook()
     except PushConfigurationError as exc:
         logger.error(Locale.ROUTES_DISABLED_LOG, exc)
-    yield
+    parent_pid = os.environ.get(CONTROL_PARENT_PID_ENV_NAME)
+    if parent_pid is not None:
+        if not parent_pid.isdecimal() or int(parent_pid) <= 0:
+            raise PushConfigurationError(Locale.CONTROL_PARENT_PID_INVALID)
+        parent_watch = asyncio.create_task(_watch_control_parent(int(parent_pid)))
+    try:
+        yield
+    finally:
+        if parent_watch is not None:
+            parent_watch.cancel()
+            with suppress(asyncio.CancelledError):
+                await parent_watch
+
+
+async def _watch_control_parent(parent_pid: int) -> None:
+    while True:
+        if os.getppid() != parent_pid:
+            os.kill(os.getpid(), signal.SIGTERM)
+            return
+        await asyncio.sleep(CONTROL_PARENT_WATCH_SECONDS)
 
 
 class CompactSessionMetadata(BaseModel):
@@ -712,6 +770,34 @@ class ControlAcceptedResponse(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
     acknowledged: bool
+
+
+class ControlRunEvent(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal[1] = 1
+    run_id: UUID
+    source_key: str
+    at: datetime
+    kind: ControlRunEventKind
+    session_id: str | None = None
+    rollout_jsonl: str | None = None
+    remote_pid: int | None = Field(default=None, gt=0)
+    accepted_attempt_id: str | None = None
+    codex_exit_code: int | None = None
+    detail: str | None = None
+
+
+class ControlRunEventsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    events: tuple[ControlRunEvent, ...]
+
+
+class ControlRunEventsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    persisted: int = Field(ge=0)
 
 
 SubmissionPayload: TypeAlias = Submission | StandardizedSubmission
@@ -909,6 +995,10 @@ class RuntimeConfiguration:
     release_map: RegisteredResource | None = None
     source_population: tuple[SourcePopulationRow, ...] = ()
     eligible_cohorts: Mapping[str, str] | None = None
+
+    @property
+    def attempts_dir(self) -> Path:
+        return self.detour_db_path.parent / "submissions" / "attempts"
 
 
 @dataclass(frozen=True)
@@ -1800,8 +1890,8 @@ def new_attempt_id(attempt_timestamp: datetime | None = None) -> str:
     return f"{timestamp_text}{ATTEMPT_ID_SEPARATOR}{uuid4().hex}"
 
 
-def create_attempt(attempt_id: str) -> Path:
-    attempt_dir = ATTEMPTS_DIR / attempt_id
+def create_attempt(attempts_dir: Path, attempt_id: str) -> Path:
+    attempt_dir = attempts_dir / attempt_id
     attempt_dir.mkdir(parents=True, exist_ok=False)
     return attempt_dir
 
@@ -4659,7 +4749,10 @@ def _validated_archived_file(
         artifact.filename != expected_filename
         or artifact_path.parent != attempt_dir
         or not artifact_path.is_file()
-        or artifact_path.is_symlink()
+        or (
+            not ALLOW_ARCHIVED_ATTEMPT_SYMLINKS
+            and artifact_path.is_symlink()
+        )
     ):
         raise PushValidationError(
             Locale.ARCHIVED_ATTEMPT_ARTIFACT_INVALID_TEMPLATE.format(artifact=expected_filename)
@@ -4682,10 +4775,22 @@ def _validated_archived_file(
 def _archived_attempt_replay(
     attempt_dir: Path,
 ) -> tuple[ArchivedAttemptManifest, str, AttemptReplayInput]:
-    if not attempt_dir.is_dir() or attempt_dir.is_symlink():
+    if (
+        not attempt_dir.is_dir()
+        or (
+            not ALLOW_ARCHIVED_ATTEMPT_SYMLINKS
+            and attempt_dir.is_symlink()
+        )
+    ):
         raise PushValidationError(Locale.ARCHIVED_ATTEMPT_PATH_INVALID)
     manifest_path = attempt_dir / ATTEMPT_MANIFEST_FILENAME
-    if not manifest_path.is_file() or manifest_path.is_symlink():
+    if (
+        not manifest_path.is_file()
+        or (
+            not ALLOW_ARCHIVED_ATTEMPT_SYMLINKS
+            and manifest_path.is_symlink()
+        )
+    ):
         raise PushValidationError(Locale.ARCHIVED_ATTEMPT_MANIFEST_INVALID)
     try:
         manifest_text = manifest_path.read_text(encoding=TEXT_ENCODING)
@@ -4778,11 +4883,85 @@ def _archived_attempt_replay(
     )
 
 
+def persist_control_run_events(
+    runtime: RuntimeConfiguration,
+    events: Sequence[ControlRunEvent],
+) -> int:
+    with DETOUR_DB_LOCK:
+        detour_conn = open_detour_database(runtime)
+        transaction_started = False
+        try:
+            detour_conn.execute(CREATE_CONTROL_RUN_EVENTS_TABLE_SQL)
+            rows = detour_conn.execute(SELECT_CONTROL_RUN_EVENTS_SQL).fetchall()
+            expected_ordinals = tuple(
+                range(CONTROL_RUN_FIRST_ORDINAL, CONTROL_RUN_FIRST_ORDINAL + len(rows))
+            )
+            if tuple(row[0] for row in rows) != expected_ordinals or len(rows) > len(events):
+                raise PushValidationError(Locale.CONTROL_RUN_EVENTS_INCONSISTENT)
+            try:
+                stored_events = tuple(
+                    ControlRunEvent.model_validate_json(str(row[1])) for row in rows
+                )
+            except ValidationError as exc:
+                raise PushValidationError(Locale.CONTROL_RUN_EVENTS_INCONSISTENT) from exc
+            if stored_events != tuple(events[: len(stored_events)]):
+                raise PushValidationError(Locale.CONTROL_RUN_EVENTS_INCONSISTENT)
+            pending = tuple(
+                enumerate(
+                    events[len(rows) :],
+                    start=CONTROL_RUN_FIRST_ORDINAL + len(rows),
+                )
+            )
+            if not pending:
+                return 0
+            detour_conn.execute("BEGIN TRANSACTION")
+            transaction_started = True
+            detour_conn.executemany(
+                INSERT_CONTROL_RUN_EVENT_SQL,
+                [
+                    [ordinal, event.model_dump_json()]
+                    for ordinal, event in pending
+                ],
+            )
+            detour_conn.execute("COMMIT")
+            transaction_started = False
+            return len(pending)
+        except Exception:
+            if transaction_started:
+                detour_conn.execute("ROLLBACK")
+            raise
+        finally:
+            detour_conn.close()
+
+
+def load_control_run_events(
+    runtime: RuntimeConfiguration,
+) -> tuple[ControlRunEvent, ...]:
+    with DETOUR_DB_LOCK:
+        detour_conn = open_detour_database(runtime)
+        try:
+            detour_conn.execute(CREATE_CONTROL_RUN_EVENTS_TABLE_SQL)
+            rows = detour_conn.execute(SELECT_CONTROL_RUN_EVENTS_SQL).fetchall()
+        finally:
+            detour_conn.close()
+    expected_ordinals = tuple(
+        range(CONTROL_RUN_FIRST_ORDINAL, CONTROL_RUN_FIRST_ORDINAL + len(rows))
+    )
+    if tuple(row[0] for row in rows) != expected_ordinals:
+        raise PushValidationError(Locale.CONTROL_RUN_EVENTS_INCONSISTENT)
+    try:
+        return tuple(ControlRunEvent.model_validate_json(str(row[1])) for row in rows)
+    except ValidationError as exc:
+        raise PushValidationError(Locale.CONTROL_RUN_EVENTS_INCONSISTENT) from exc
+
+
 def restore_archived_attempts(
     runtime: RuntimeConfiguration,
     *,
-    attempts_dir: Path = ATTEMPTS_DIR,
+    attempts_dir: Path | None = None,
 ) -> ArchivedAttemptRecovery:
+    if attempts_dir is None:
+        attempts_dir = runtime.attempts_dir
     attempts_dir.mkdir(parents=True, exist_ok=True)
     attempt_dirs = tuple(
         sorted(
@@ -4963,6 +5142,30 @@ def safely_record_attempt(
         )
 
 
+@app.put(
+    CONTROL_RUN_EVENTS_PATH,
+    response_model=ControlRunEventsResponse,
+    include_in_schema=False,
+)
+def control_run_events(
+    request: Request,
+    payload: ControlRunEventsRequest,
+) -> ControlRunEventsResponse:
+    if not CONTROL_RUN_EVENTS_TOKEN or not hmac.compare_digest(
+        request.headers.get(CONTROL_RUN_EVENTS_TOKEN_HEADER, ""),
+        CONTROL_RUN_EVENTS_TOKEN,
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=Locale.CONTROL_RUN_EVENTS_FORBIDDEN,
+        )
+    runtime = runtime_configuration()
+    restore_archived_attempts(runtime)
+    return ControlRunEventsResponse(
+        persisted=persist_control_run_events(runtime, payload.events)
+    )
+
+
 # curl -N http://127.0.0.1:8000/pull
 @app.get(**PULL_ROUTE)
 def pull() -> StreamingResponse:
@@ -5017,12 +5220,12 @@ async def push(request: Request) -> StreamingResponse:
     stage = ATTEMPT_STAGE_TRANSPORT
 
     try:
-        attempt_dir = create_attempt(attempt_id)
+        runtime = runtime_configuration()
+        attempt_dir = create_attempt(runtime.attempts_dir, attempt_id)
         record_attempt(attempt_dir, attempt_id, stage, ATTEMPT_RESULT_PENDING)
         request_body = await bounded_request_body(request)
         validate_transport(request)
         stage = ATTEMPT_STAGE_CONFIGURATION
-        runtime = runtime_configuration()
         snapshot = sanctioned_snapshot()
         configuration = push_configuration(snapshot.rollout_guest_path)
         if snapshot.control_base_url is not None:

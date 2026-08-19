@@ -14,16 +14,17 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
-from typing import Any, Final, Literal, NewType
+from typing import Any, Final, NewType
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 from zoneinfo import ZoneInfo
 
 import duckdb
+import yaml
 from fastapi import HTTPException, status
 from nicegui import app, ui
-from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from src.helpers.cards import build_cards
 from src.helpers.config import PipelineConfig
@@ -48,17 +49,21 @@ from src.helpers.vars import (
 
 from ...backend.api import (
     AI_AUGMENT_COLUMNS,
+    APPENDWATCH_REPORT_ENV_NAME,
     ARCHIVED_ATTEMPT_MANIFEST_COLUMN,
     ARCHIVED_ATTEMPTS_TABLE,
     ATTEMPT_ID_KEY,
     ATTEMPT_RESULT_ACCEPTED,
     ATTEMPT_RESULT_CONFIGURATION_ERROR,
     ATTEMPT_RESULT_REJECTED,
-    ATTEMPTS_DIR,
     CARD_EXCLUDED_COLUMNS,
     CODEX_INNERDICT_TABLE,
     CODEX_OUTPUT_VIEW,
     CONFIG_OPTION,
+    CONTROL_PARENT_PID_ENV_NAME,
+    CONTROL_RUN_EVENTS_PATH,
+    CONTROL_RUN_EVENTS_TOKEN_ENV_NAME,
+    CONTROL_RUN_EVENTS_TOKEN_HEADER,
     DOCX_TO_AI_AUGMENT_COLUMNS,
     DRAW_VALUE_SEPARATOR,
     EXPECTED_GROUND_TRUTH_RESEARCHERS,
@@ -66,7 +71,12 @@ from ...backend.api import (
     EXPECTED_INELIGIBLE_RESEARCHERS,
     EXPECTED_NO_GROUND_TRUTH_RESEARCHERS,
     EXPECTED_SOURCE_RESEARCHERS,
+    FORBIDDEN_NORMALIZED_PATH_PARTS,
     HOST_WORKBOOK_PATH,
+    HTTP_CONTENT_TYPE_HEADER,
+    HTTP_GET_METHOD,
+    HTTP_PUT_METHOD,
+    JSON_MEDIA_TYPE,
     KTP_AI_AUGMENT_ATTEMPT_ID_COL,
     KTP_AI_AUGMENT_FOOTNOTE_ARGUMENTS_COL,
     KTP_AI_AUGMENT_FOOTNOTES_COL,
@@ -75,15 +85,25 @@ from ...backend.api import (
     ArchivedAttemptRecovery,
     CodexMatchProcedure,
     CompactSessionMetadata,
+    ControlRunEventsRequest,
+    ControlRunEventsResponse,
     IneligibilityCategory,
     _detour_db_path,
     derive_source_population,
     eligible_cohorts,
     ground_truth_for_researcher,
+    load_control_run_events,
     load_release_batches,
     load_source_researcher,
+    persist_control_run_events,
     registered_release_map,
     restore_archived_attempts,
+)
+from ...backend.api import (
+    ControlRunEvent as RunEvent,
+)
+from ...backend.api import (
+    ControlRunEventKind as RunEventKind,
 )
 from ...backend.api import (
     RuntimeConfiguration as BackendRuntimeConfiguration,
@@ -136,6 +156,8 @@ BACKEND_HOST: Final = "127.0.0.1"
 BACKEND_PORT: Final = 8612
 BACKEND_BASE_URL: Final = f"http://{BACKEND_HOST}:{BACKEND_PORT}"
 BACKEND_OPENAPI_URL: Final = f"{BACKEND_BASE_URL}/openapi.json"
+BACKEND_PULL_URL: Final = f"{BACKEND_BASE_URL}/pull"
+BACKEND_CONTROL_RUN_EVENTS_URL: Final = f"{BACKEND_BASE_URL}{CONTROL_RUN_EVENTS_PATH}"
 BACKEND_READY_TIMEOUT_SECONDS: Final = 30
 BACKEND_READY_POLL_SECONDS: Final = 0.1
 PROCESS_STOP_TIMEOUT_SECONDS: Final = 10
@@ -162,7 +184,9 @@ AIVM_SSH_PORT: Final = "22022"
 AIVM_KEY_DIR: Final = Path.home() / ".local" / "share" / "aivm" / ".ssh"
 AIVM_IDENTITY_FILE: Final = AIVM_KEY_DIR / "id_ed25519"
 AIVM_KNOWN_HOSTS_FILE: Final = AIVM_KEY_DIR / "known_hosts"
+LIMA_CONFIG_PATH: Final = Path.home() / ".lima" / AIVM_INSTANCE / "lima.yaml"
 LIMA_SSH_CONFIG_PATH: Final = Path.home() / ".lima" / AIVM_INSTANCE / "ssh.config"
+LIMA_APPENDWATCH_REPORT_PARAM: Final = APPENDWATCH_REPORT_ENV_NAME
 
 AIVM_SSH_TARGET: Final = f"{AIVM_INSTANCE}-{AIVM_USER}"
 AIVM_HOST_KEY_ALIAS: Final = f"lima-{AIVM_INSTANCE}-{AIVM_USER}"
@@ -487,20 +511,6 @@ ARCHIVED_ATTEMPT_STATUS_BY_RESULT: Final = {
 }
 
 
-class RunEventKind(StrEnum):
-    QUEUED = "queued"
-    STARTED = "started"
-    SESSION_DISCOVERED = "session_discovered"
-    ROLLOUT_DISCOVERED = "rollout_discovered"
-    SANCTIONED = "sanctioned"
-    PUSH_ACCEPTED = "push_accepted"
-    CANCEL_REQUESTED = "cancel_requested"
-    CODEX_EXITED = "codex_exited"
-    COMPLETE = "complete"
-    FAILED = "failed"
-    CANCELED = "canceled"
-
-
 class BackendStatus(StrEnum):
     STOPPED = "stopped"
     STARTING = "starting"
@@ -570,30 +580,9 @@ class AcceptedAttempt:
 
 
 # =============================================================================
-# UI-owned run journal
-#
-# The journal owns only live queued/running process control. Validated terminal
-# attempt history is authoritative in DuckDB.
+# UI-owned durable run journal. Its validated DuckDB projection is the only
+# source used to render run history.
 # =============================================================================
-
-
-class RunEvent(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    schema_version: Literal[1] = 1
-
-    run_id: UUID
-    source_key: str
-    at: datetime
-    kind: RunEventKind
-
-    session_id: str | None = None
-    rollout_jsonl: str | None = None
-    remote_pid: int | None = None
-
-    accepted_attempt_id: str | None = None
-    codex_exit_code: int | None = None
-    detail: str | None = None
 
 
 @dataclass(slots=True)
@@ -784,6 +773,20 @@ class UiSnapshot:
     active_run_id: UUID | None
 
 
+class LimaMount(BaseModel):
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    location: str
+    mount_point: str = Field(alias="mountPoint")
+
+
+class LimaConfiguration(BaseModel):
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    param: Mapping[str, str]
+    mounts: tuple[LimaMount, ...]
+
+
 # =============================================================================
 # Configuration / database location
 # =============================================================================
@@ -798,6 +801,52 @@ class RuntimeConfiguration:
         openalex_api_key = os.environ.get(EXPORT_OPENALEX_API_KEY, "").strip()
         if not openalex_api_key:
             raise RuntimeError(Locale.OPENALEX_API_KEY_MISSING)
+        try:
+            if LIMA_CONFIG_PATH.is_symlink() or not LIMA_CONFIG_PATH.is_file():
+                raise OSError(Locale.LIMA_CONFIG_UNREADABLE)
+            lima_value = yaml.safe_load(LIMA_CONFIG_PATH.read_text(encoding=TEXT_ENCODING))
+            lima_configuration = LimaConfiguration.model_validate(lima_value)
+            guest_report_value = lima_configuration.param[LIMA_APPENDWATCH_REPORT_PARAM]
+            guest_report = PurePosixPath(guest_report_value)
+            if (
+                not guest_report.is_absolute()
+                or str(guest_report) != guest_report_value
+                or any(part in FORBIDDEN_NORMALIZED_PATH_PARTS for part in guest_report.parts)
+            ):
+                raise ValueError(Locale.LIMA_APPENDWATCH_PATH_INVALID)
+            host_reports: list[Path] = []
+            for mount in lima_configuration.mounts:
+                host_root = Path(mount.location)
+                guest_root = PurePosixPath(mount.mount_point)
+                if (
+                    not host_root.is_absolute()
+                    or str(host_root) != mount.location
+                    or not guest_root.is_absolute()
+                    or str(guest_root) != mount.mount_point
+                    or any(
+                        part in FORBIDDEN_NORMALIZED_PATH_PARTS
+                        for part in guest_root.parts
+                    )
+                ):
+                    raise ValueError(Locale.LIMA_MOUNT_INVALID)
+                try:
+                    relative_report = guest_report.relative_to(guest_root)
+                except ValueError:
+                    continue
+                host_reports.append(host_root.joinpath(*relative_report.parts))
+        except (
+            KeyError, OSError, UnicodeError, ValueError, ValidationError, yaml.YAMLError
+        ) as exc:
+            raise RuntimeError(Locale.LIMA_CONFIG_INVALID) from exc
+        if len(host_reports) != 1:
+            raise RuntimeError(Locale.LIMA_APPENDWATCH_MOUNT_INVALID)
+        appendwatch_report = host_reports[0]
+        if (
+            appendwatch_report.is_symlink()
+            or not appendwatch_report.is_file()
+            or not os.access(appendwatch_report, os.R_OK)
+        ):
+            raise RuntimeError(Locale.LIMA_APPENDWATCH_REPORT_UNREADABLE)
         pipeline_config = PipelineConfig.from_json(config_path)
         release_map = registered_release_map(pipeline_config)
         release_batches = load_release_batches(release_map)
@@ -813,6 +862,7 @@ class RuntimeConfiguration:
         self._config_path = config_path
         self._pipeline_config = pipeline_config
         self._openalex_api_key = openalex_api_key
+        self._appendwatch_report = appendwatch_report
         self._timezone = ZoneInfo(pipeline_config.timezone)
         self._database_paths = DatabasePaths(
             source_db=pipeline_config.db_file,
@@ -837,6 +887,14 @@ class RuntimeConfiguration:
     @property
     def openalex_api_key(self) -> str:
         return self._openalex_api_key
+
+    @property
+    def appendwatch_report(self) -> Path:
+        return self._appendwatch_report
+
+    @property
+    def run_journal_path(self) -> Path:
+        return self._database_paths.detour_db.parent / RUN_JOURNAL_PATH.name
 
     @property
     def timezone(self) -> ZoneInfo:
@@ -1034,8 +1092,10 @@ class DetourRepository:
     def reconcile_archived_attempts(
         self,
         *,
-        attempts_dir: Path = ATTEMPTS_DIR,
+        attempts_dir: Path | None = None,
     ) -> ArchivedAttemptRecovery:
+        if attempts_dir is None:
+            attempts_dir = self._configuration.backend_runtime.attempts_dir
         recovery = restore_archived_attempts(
             self._configuration.backend_runtime,
             attempts_dir=attempts_dir,
@@ -1052,6 +1112,18 @@ class DetourRepository:
             ),
         )
         return recovery
+
+    def persist_control_run_events(
+        self,
+        events: Sequence[RunEvent],
+    ) -> int:
+        return persist_control_run_events(
+            self._configuration.backend_runtime,
+            events,
+        )
+
+    def load_control_run_events(self) -> tuple[RunEvent, ...]:
+        return load_control_run_events(self._configuration.backend_runtime)
 
     def load_accepted_attempts(
         self,
@@ -1239,7 +1311,7 @@ class RunJournal:
         if not self._path.exists():
             return ()
         events: list[RunEvent] = []
-        with self._path.open(encoding="utf-8") as stream:
+        with self._path.open(encoding=TEXT_ENCODING) as stream:
             for line_number, line in enumerate(stream, start=1):
                 try:
                     events.append(RunEvent.model_validate_json(line))
@@ -1250,8 +1322,12 @@ class RunJournal:
         return tuple(events)
 
     def load_runs(self) -> Mapping[UUID, RunRecord]:
+        return self.replay(self.load_events())
+
+    @staticmethod
+    def replay(events: Sequence[RunEvent]) -> Mapping[UUID, RunRecord]:
         runs: dict[UUID, RunRecord] = {}
-        for event in self.load_events():
+        for event in events:
             if event.kind is RunEventKind.QUEUED:
                 if event.run_id in runs:
                     raise RuntimeError(Locale.JOURNAL_DUPLICATE_RUN_ID)
@@ -1269,6 +1345,10 @@ class RunJournal:
                 run.status = RunStatus.RUNNING
                 run.started_at = event.at
                 run.remote_pid = None if event.remote_pid is None else RemotePid(event.remote_pid)
+            elif event.kind is RunEventKind.REMOTE_PID_DISCOVERED:
+                if event.remote_pid is None:
+                    raise RuntimeError(Locale.JOURNAL_REMOTE_PID_MISSING)
+                run.remote_pid = RemotePid(event.remote_pid)
             elif event.kind is RunEventKind.SESSION_DISCOVERED:
                 if event.session_id is None:
                     raise RuntimeError(Locale.JOURNAL_SESSION_ID_MISSING)
@@ -1406,11 +1486,15 @@ class BackendSupervisor:
         config_path: Path,
         control_url: str,
         openalex_api_key: str,
+        appendwatch_report: Path,
+        control_run_events_token: str,
     ) -> None:
         self._repository_root = repository_root
         self._config_path = config_path
         self._control_url = control_url
         self._openalex_api_key = openalex_api_key
+        self._appendwatch_report = appendwatch_report
+        self._control_run_events_token = control_run_events_token
         self._process: BackendProcessHandle | None = None
         self._status = BackendStatus.STOPPED
 
@@ -1439,6 +1523,7 @@ class BackendSupervisor:
             env=self.environment(),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
+            start_new_session=True,
         )
         log_task = asyncio.create_task(self.forward_output(process))
         self._process = BackendProcessHandle(
@@ -1448,11 +1533,17 @@ class BackendSupervisor:
         )
         try:
             await self.wait_until_ready()
-        except Exception:
+        except (Exception, asyncio.CancelledError):
             self._status = BackendStatus.FAILED
             if process.returncode is None:
                 process.terminate()
-                with contextlib.suppress(ProcessLookupError):
+                try:
+                    await asyncio.wait_for(
+                        process.wait(),
+                        timeout=PROCESS_STOP_TIMEOUT_SECONDS,
+                    )
+                except TimeoutError:
+                    process.kill()
                     await process.wait()
             await log_task
             raise
@@ -1478,7 +1569,7 @@ class BackendSupervisor:
         deadline = loop.time() + BACKEND_READY_TIMEOUT_SECONDS
 
         def request_openapi() -> None:
-            request = urllib_request.Request(BACKEND_OPENAPI_URL, method="GET")
+            request = urllib_request.Request(BACKEND_OPENAPI_URL, method=HTTP_GET_METHOD)
             with urllib_request.urlopen(
                 request,
                 timeout=CONTROL_HTTP_TIMEOUT_SECONDS,
@@ -1495,6 +1586,45 @@ class BackendSupervisor:
             except OSError, urllib_error.URLError, urllib_error.HTTPError:
                 await asyncio.sleep(BACKEND_READY_POLL_SECONDS)
         raise TimeoutError(Locale.BACKEND_READY_TIMEOUT)
+
+    async def probe_pull(self) -> None:
+        def request_pull() -> None:
+            request = urllib_request.Request(BACKEND_PULL_URL, method=HTTP_GET_METHOD)
+            with urllib_request.urlopen(
+                request,
+                timeout=CONTROL_HTTP_TIMEOUT_SECONDS,
+            ) as response:
+                if response.status != status.HTTP_200_OK:
+                    raise RuntimeError(Locale.BACKEND_PULL_NOT_READY)
+                response.read()
+
+        try:
+            await asyncio.to_thread(request_pull)
+        except (OSError, urllib_error.URLError, urllib_error.HTTPError) as exc:
+            raise RuntimeError(Locale.BACKEND_PULL_NOT_READY) from exc
+
+    def persist_run_events(self, events: Sequence[RunEvent]) -> int:
+        body = ControlRunEventsRequest(events=tuple(events)).model_dump_json().encode(
+            TEXT_ENCODING
+        )
+        request = urllib_request.Request(
+            BACKEND_CONTROL_RUN_EVENTS_URL,
+            data=body,
+            headers={
+                HTTP_CONTENT_TYPE_HEADER: JSON_MEDIA_TYPE,
+                CONTROL_RUN_EVENTS_TOKEN_HEADER: self._control_run_events_token,
+            },
+            method=HTTP_PUT_METHOD,
+        )
+        try:
+            with urllib_request.urlopen(
+                request,
+                timeout=CONTROL_HTTP_TIMEOUT_SECONDS,
+            ) as response:
+                result = ControlRunEventsResponse.model_validate_json(response.read())
+        except (OSError, urllib_error.URLError, urllib_error.HTTPError, ValidationError) as exc:
+            raise RuntimeError(Locale.CONTROL_RUN_EVENTS_PERSIST_FAILED) from exc
+        return result.persisted
 
     async def stop(self) -> None:
         if self._process is None:
@@ -1524,6 +1654,9 @@ class BackendSupervisor:
         environment = os.environ.copy()
         environment[CONTROL_URL_ENV_NAME] = self._control_url
         environment[EXPORT_OPENALEX_API_KEY] = self._openalex_api_key
+        environment[APPENDWATCH_REPORT_ENV_NAME] = str(self._appendwatch_report)
+        environment[CONTROL_PARENT_PID_ENV_NAME] = str(os.getpid())
+        environment[CONTROL_RUN_EVENTS_TOKEN_ENV_NAME] = self._control_run_events_token
         return environment
 
 
@@ -1596,8 +1729,13 @@ class CodexRunner:
             stdin=asyncio.subprocess.PIPE if input_bytes is not None else None,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
         )
-        stdout, stderr = await process.communicate(input_bytes)
+        try:
+            stdout, stderr = await process.communicate(input_bytes)
+        except asyncio.CancelledError:
+            await self._stop_process(process)
+            raise
         if check and process.returncode != 0:
             raise RuntimeError(
                 Locale.AIVM_COMMAND_FAILED_TEMPLATE.format(
@@ -1655,12 +1793,15 @@ class CodexRunner:
         process = await asyncio.create_subprocess_exec(
             *self.ssh_base_command(),
             self.codex_remote_command(run_id=run_id),
+            start_new_session=True,
         )
         handle = CodexProcessHandle(run_id=run_id, process=process)
         try:
             if on_handle is not None:
                 await on_handle(handle)
             session_id, session_timestamp = await self.discover_session(handle)
+            if on_handle is not None and handle.remote_pid is not None:
+                await on_handle(handle)
             rollout_jsonl = await self.discover_rollout_path(
                 session_id=session_id,
                 session_timestamp=session_timestamp,
@@ -1877,6 +2018,22 @@ class CodexRunner:
         if not await self._wait_for_remote_pid_exit(remote_pid):
             raise RuntimeError(Locale.CODEX_REMOTE_DID_NOT_EXIT)
 
+    async def terminate_abandoned_run(self, run_id: UUID) -> None:
+        pid_path = CODEX_WORKDIR / CODEX_RUN_PID_TEMPLATE.format(run_id=run_id)
+        pid_text = (
+            await self._remote_command(
+                CODEX_REMOTE_PID_READ_COMMAND_TEMPLATE.format(
+                    pid_path=shlex.quote(str(pid_path)),
+                ),
+                check=False,
+            )
+        ).decode(TEXT_ENCODING).strip()
+        if not pid_text.isdecimal():
+            return
+        remote_pid = RemotePid(int(pid_text))
+        if await self._remote_pid_is_alive(remote_pid):
+            await self.terminate_remote_pid(remote_pid)
+
 
 # =============================================================================
 # Control-plane state
@@ -2012,7 +2169,9 @@ class AttemptReconciler:
                 )
             )
         for run in sorted(runs, key=lambda item: (item.queued_at, str(item.run_id))):
-            if run.status not in LIVE_RUN_STATUSES:
+            if run.accepted_attempt_id in {
+                attempt.attempt_id for attempt in attempts if attempt.attempt_id is not None
+            }:
                 continue
             attempts.append(
                 AttemptView(
@@ -2290,6 +2449,7 @@ class ControlCentreController:
         self._active_codex: CodexProcessHandle | None = None
         self._external_codex_busy = False
         self._archive_rescan_required = True
+        self._shutting_down = False
         self._idle_refresh_lock = asyncio.Lock()
         self._runs: dict[UUID, RunRecord] = dict(journal.load_runs())
         self._researchers: tuple[Researcher, ...] = ()
@@ -2321,10 +2481,12 @@ class ControlCentreController:
         self._ground_truth = await asyncio.to_thread(
             self._source_repository.load_ground_truth_by_source_key
         )
+        await self._reconcile_and_load_attempts()
         restart_time = datetime.now(timezone.utc)
         for run in tuple(self._runs.values()):
             if run.status in {RunStatus.QUEUED, RunStatus.RUNNING}:
-                self._append_run_event(
+                await self._codex.terminate_abandoned_run(run.run_id)
+                await self._append_run_event(
                     RunEvent(
                         run_id=run.run_id,
                         source_key=run.source_key,
@@ -2338,14 +2500,29 @@ class ControlCentreController:
         self._worker_task = asyncio.create_task(self._worker())
 
     async def shutdown(self) -> None:
-        if self._active_codex is not None:
-            await self._codex.cancel(self._active_codex)
-        await self._control_plane.clear()
+        self._shutting_down = True
+        active_codex = self._active_codex
         if self._worker_task is not None:
             self._worker_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._worker_task
             self._worker_task = None
+        if active_codex is not None:
+            with contextlib.suppress(Exception):
+                await self._codex.cancel(active_codex)
+        await self._control_plane.clear()
+        shutdown_time = datetime.now(timezone.utc)
+        for run in tuple(self._runs.values()):
+            if run.status in LIVE_RUN_STATUSES:
+                await self._append_run_event(
+                    RunEvent(
+                        run_id=run.run_id,
+                        source_key=run.source_key,
+                        at=shutdown_time,
+                        kind=RunEventKind.FAILED,
+                        detail=Locale.SHUTDOWN_INTERRUPTED_RUN,
+                    )
+                )
         await self._backend.stop()
 
     async def queue(
@@ -2359,7 +2536,7 @@ class ControlCentreController:
         if researcher.cohort is ResearcherCohort.INELIGIBLE:
             raise ValueError(Locale.INELIGIBLE_QUEUE)
         run_id = uuid4()
-        self._append_run_event(
+        await self._append_run_event(
             RunEvent(
                 run_id=run_id,
                 source_key=source_key,
@@ -2387,7 +2564,7 @@ class ControlCentreController:
             raise KeyError(Locale.UNKNOWN_RUN_ID_TEMPLATE.format(run_id=run_id))
         if run.status not in {RunStatus.QUEUED, RunStatus.RUNNING}:
             return
-        self._append_run_event(
+        await self._append_run_event(
             RunEvent(
                 run_id=run_id,
                 source_key=run.source_key,
@@ -2400,7 +2577,7 @@ class ControlCentreController:
                 try:
                     await self._codex.cancel(self._active_codex)
                 except Exception as exc:
-                    self._append_run_event(
+                    await self._append_run_event(
                         RunEvent(
                             run_id=run_id,
                             source_key=run.source_key,
@@ -2412,7 +2589,7 @@ class ControlCentreController:
                     raise
             return
         if run.status is RunStatus.QUEUED:
-            self._append_run_event(
+            await self._append_run_event(
                 RunEvent(
                     run_id=run_id,
                     source_key=run.source_key,
@@ -2435,7 +2612,7 @@ class ControlCentreController:
             or sanctioned.session_id != request.session_id
         ):
             raise ValueError(Locale.ACCEPTED_PUSH_MISMATCH)
-        self._append_run_event(
+        await self._append_run_event(
             RunEvent(
                 run_id=run_id,
                 source_key=sanctioned.source_key,
@@ -2452,12 +2629,20 @@ class ControlCentreController:
         *,
         reconcile_before_busy_probe: bool = False,
     ) -> None:
+        if self._shutting_down:
+            return
         async with self._idle_refresh_lock:
+            if self._shutting_down:
+                return
             if self._active_run_id is not None or await self._control_plane.current() is not None:
                 return
-            self._runs = dict(self._journal.load_runs())
             if not reconcile_before_busy_probe:
-                self._external_codex_busy = await self._codex.is_busy()
+                try:
+                    self._external_codex_busy = await self._codex.is_busy()
+                except Exception:
+                    if self._shutting_down:
+                        return
+                    raise
                 if self._external_codex_busy:
                     self._archive_rescan_required = True
                     return
@@ -2470,7 +2655,18 @@ class ControlCentreController:
 
     async def _reconcile_and_load_attempts(self) -> None:
         await asyncio.to_thread(self._detour_repository.reconcile_archived_attempts)
+        await asyncio.to_thread(
+            self._detour_repository.persist_control_run_events,
+            self._journal.load_events(),
+        )
+        control_run_events = await asyncio.to_thread(
+            self._detour_repository.load_control_run_events
+        )
+        self._runs = dict(RunJournal.replay(control_run_events))
         self._archive_rescan_required = False
+        await self._load_attempts_from_database()
+
+    async def _load_attempts_from_database(self) -> None:
         self._attempt_manifests = await asyncio.to_thread(
             self._detour_repository.load_attempt_manifests
         )
@@ -2572,9 +2768,12 @@ class ControlCentreController:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                if self._active_codex is not None:
+                    with contextlib.suppress(Exception):
+                        await self._codex.cancel(self._active_codex)
                 run = self._runs[run_id]
                 canceled = run.cancel_requested_at is not None and run.failure_detail is None
-                self._append_run_event(
+                await self._append_run_event(
                     RunEvent(
                         run_id=run_id,
                         source_key=run.source_key,
@@ -2588,7 +2787,9 @@ class ControlCentreController:
                 self._active_codex = None
                 self._active_run_id = None
                 self._queue.task_done()
-                await self.refresh_idle_state()
+                if not self._shutting_down:
+                    await self._load_attempts_from_database()
+                    await self.refresh_idle_state()
 
     async def _wait_until_codex_idle(self, *, run_id: UUID) -> bool:
         while True:
@@ -2613,7 +2814,7 @@ class ControlCentreController:
             await self._codex.cancel(result.handle)
             raise RuntimeError(Locale.CODEX_CANCELED_BEFORE_SANCTION)
         self._active_codex = result.handle
-        self._append_run_event(
+        await self._append_run_event(
             RunEvent(
                 run_id=run_id,
                 source_key=run.source_key,
@@ -2623,7 +2824,7 @@ class ControlCentreController:
             )
         )
 
-        self._append_run_event(
+        await self._append_run_event(
             RunEvent(
                 run_id=run_id,
                 source_key=run.source_key,
@@ -2643,7 +2844,7 @@ class ControlCentreController:
                 sanctioned_at=sanctioned_at,
             )
         )
-        self._append_run_event(
+        await self._append_run_event(
             RunEvent(
                 run_id=run_id,
                 source_key=run.source_key,
@@ -2653,8 +2854,9 @@ class ControlCentreController:
                 rollout_jsonl=str(result.rollout_jsonl),
             )
         )
+        await self._backend.probe_pull()
         exit_code = await self._codex.wait(result.handle)
-        self._append_run_event(
+        await self._append_run_event(
             RunEvent(
                 run_id=run_id,
                 source_key=run.source_key,
@@ -2668,7 +2870,7 @@ class ControlCentreController:
             run_id=run_id,
             codex_exit_code=exit_code,
         )
-        self._append_run_event(
+        await self._append_run_event(
             RunEvent(
                 run_id=run_id,
                 source_key=run.source_key,
@@ -2686,12 +2888,18 @@ class ControlCentreController:
             raise RuntimeError(Locale.CODEX_HANDLE_MISMATCH)
         self._active_codex = handle
         run = self._runs[handle.run_id]
-        self._append_run_event(
+        if run.started_at is None:
+            event_kind = RunEventKind.STARTED
+        elif handle.remote_pid is not None and run.remote_pid != handle.remote_pid:
+            event_kind = RunEventKind.REMOTE_PID_DISCOVERED
+        else:
+            return
+        await self._append_run_event(
             RunEvent(
                 run_id=handle.run_id,
                 source_key=run.source_key,
                 at=datetime.now(timezone.utc),
-                kind=RunEventKind.STARTED,
+                kind=event_kind,
                 remote_pid=(None if handle.remote_pid is None else int(handle.remote_pid)),
             )
         )
@@ -2715,7 +2923,7 @@ class ControlCentreController:
                 session_id=run.session_id,
             )
             if accepted is not None:
-                self._append_run_event(
+                await self._append_run_event(
                     RunEvent(
                         run_id=run_id,
                         source_key=run.source_key,
@@ -2745,12 +2953,24 @@ class ControlCentreController:
             raise RuntimeError(Locale.ACCEPTED_SESSION_DUPLICATE)
         return matches[0] if matches else None
 
-    def _append_run_event(
+    async def _append_run_event(
         self,
         event: RunEvent,
     ) -> None:
         self._journal.append(event)
-        self._runs = dict(self._journal.load_runs())
+        events = self._journal.load_events()
+        if self._backend.status is BackendStatus.RUNNING:
+            await asyncio.to_thread(self._backend.persist_run_events, events)
+            persisted_events = events
+        else:
+            await asyncio.to_thread(
+                self._detour_repository.persist_control_run_events,
+                events,
+            )
+            persisted_events = await asyncio.to_thread(
+                self._detour_repository.load_control_run_events
+            )
+        self._runs = dict(RunJournal.replay(persisted_events))
 
 
 # =============================================================================
@@ -3474,7 +3694,7 @@ def create_services(
     configuration = RuntimeConfiguration(config_path=config_path)
     source_repository = SourceRepository(configuration=configuration)
     detour_repository = DetourRepository(configuration=configuration)
-    journal = RunJournal()
+    journal = RunJournal(path=configuration.run_journal_path)
     card_renderer = ResearcherCardRenderer(
         source_repository=source_repository,
         detour_repository=detour_repository,
@@ -3485,6 +3705,8 @@ def create_services(
         config_path=configuration.config_path,
         control_url=CONTROL_CENTRE_BASE_URL,
         openalex_api_key=configuration.openalex_api_key,
+        appendwatch_report=configuration.appendwatch_report,
+        control_run_events_token=uuid4().hex,
     )
     codex = CodexRunner(
         timezone=configuration.timezone,

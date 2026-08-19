@@ -54,6 +54,11 @@ class Locale:
 
     SESSION_METADATA_NONBLANK: Final = "session metadata fields must be non-blank"
     CONTROL_RUN_NORMALIZED: Final = "control run fields must be non-blank and normalized"
+    CONTROL_PARENT_PID_INVALID: Final = "Control Centre parent PID is invalid"
+    CONTROL_RUN_EVENTS_INCONSISTENT: Final = (
+        "stored Control Centre run events do not match the durable journal"
+    )
+    CONTROL_RUN_EVENTS_FORBIDDEN: Final = "Control Centre run-event write is forbidden"
     WEB_RESULT_REF_ID_NONBLANK: Final = "web result ref_id must be non-blank"
 
     SETTING_ABSOLUTE_TEMPLATE: Final = "{setting} must be an absolute path"

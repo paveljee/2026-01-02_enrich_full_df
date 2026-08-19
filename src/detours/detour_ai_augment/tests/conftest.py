@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -26,6 +27,23 @@ REPOSITORY_ROOT_ENV_NAME = "REPO_DIR"
 AIVM_INSTANCE = "aivm"
 DEPLOY_COMMAND = ("bash", str(DEPLOY_SCRIPT_PATH), "--yes")
 AIVM_PROBE_COMMAND = ("limactl", "shell", "--workdir=/", AIVM_INSTANCE, "true")
+AIVM_APPENDWATCH_PROBE_COMMAND = (
+    "limactl",
+    "shell",
+    "--workdir=/",
+    AIVM_INSTANCE,
+    "sudo",
+    "systemctl",
+    "is-active",
+    "--quiet",
+    "aivm-appendwatch.service",
+)
+TEST_LIMA_CONFIG_FILENAME = "lima.yaml"
+TEST_LIMA_MOUNT_DIRECTORY = "lima-mount"
+TEST_GUEST_MOUNT_POINT = "/home/ai/operator-fixture"
+TEST_APPENDWATCH_RELATIVE_PATH = ".aivm-control/appendwatch/appendwatch-tree.txt"
+TEST_APPENDWATCH_CONTENT = ".\n"
+TEXT_ENCODING = "utf-8"
 OPERATOR_PROMPT = "Redeploy AIVM before each operator test? [y/N] "
 OPERATOR_MARK_DESCRIPTION = "real operator-machine AIVM and full-stack contour"
 OPERATOR_SKIP_REASON = "operator test (run with: pytest -m operator)"
@@ -107,6 +125,39 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 
 
 @pytest.fixture(autouse=True)
+def isolated_lima_configuration(
+    request: pytest.FixtureRequest,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if OPERATOR_MARKER in request.node.keywords:
+        return
+    from src.detours.detour_ai_augment.src.control_centre.dashboard import (
+        ui as control_ui,
+    )
+
+    host_mount = tmp_path / TEST_LIMA_MOUNT_DIRECTORY
+    report_path = host_mount / TEST_APPENDWATCH_RELATIVE_PATH
+    report_path.parent.mkdir(parents=True)
+    report_path.write_text(TEST_APPENDWATCH_CONTENT, encoding=TEXT_ENCODING)
+    guest_report = f"{TEST_GUEST_MOUNT_POINT}/{TEST_APPENDWATCH_RELATIVE_PATH}"
+    lima_config_path = tmp_path / TEST_LIMA_CONFIG_FILENAME
+    lima_config_path.write_text(
+        json.dumps({
+            "param": {
+                control_ui.LIMA_APPENDWATCH_REPORT_PARAM: guest_report,
+            },
+            "mounts": [{
+                "location": str(host_mount),
+                "mountPoint": TEST_GUEST_MOUNT_POINT,
+            }],
+        }),
+        encoding=TEXT_ENCODING,
+    )
+    monkeypatch.setattr(control_ui, "LIMA_CONFIG_PATH", lima_config_path)
+
+
+@pytest.fixture(autouse=True)
 def operator_aivm(
     request: pytest.FixtureRequest,
     monkeypatch: pytest.MonkeyPatch,
@@ -132,6 +183,12 @@ def operator_aivm(
         )
     subprocess.run(
         AIVM_PROBE_COMMAND,
+        cwd=REPOSITORY_ROOT,
+        env=deployment_environment,
+        check=True,
+    )
+    subprocess.run(
+        AIVM_APPENDWATCH_PROBE_COMMAND,
         cwd=REPOSITORY_ROOT,
         env=deployment_environment,
         check=True,

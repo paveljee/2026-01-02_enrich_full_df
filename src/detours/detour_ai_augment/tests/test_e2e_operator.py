@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import signal
 import socket
 import subprocess
@@ -15,10 +16,12 @@ from collections.abc import Generator, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TextIO
 from urllib import error as urllib_error
 from urllib import request as urllib_request
+from uuid import UUID
 
 import duckdb
 import pytest
@@ -43,6 +46,7 @@ CONTROL_CENTRE_COMMAND_PREFIX = (
     backend_api.CONFIG_OPTION,
 )
 CONTROL_CENTRE_URL = control_ui.CONTROL_CENTRE_BASE_URL
+CONTROL_CURRENT_URL = f"{CONTROL_CENTRE_URL}{control_ui.CONTROL_CURRENT_PATH}"
 CONTROL_CENTRE_PORTS = (control_ui.CONTROL_CENTRE_PORT, control_ui.BACKEND_PORT)
 CONTROL_CENTRE_READY_LOG = control_ui.Locale.READY_LOG_TEMPLATE.format(
     url=CONTROL_CENTRE_URL
@@ -57,6 +61,10 @@ TEMP_OUTPUT_DIRECTORY = "output"
 PROCESS_START_TIMEOUT_SECONDS = 300
 PROCESS_STOP_TIMEOUT_SECONDS = 30
 PROCESS_POLL_SECONDS = 0.1
+SANCTION_TIMEOUT_SECONDS = 300
+RUN_TERMINAL_TIMEOUT_SECONDS = 600
+FULL_WORKFLOW_TIMEOUT_SECONDS = 1_800
+REMOTE_COMMAND_TIMEOUT_SECONDS = 30
 LOG_WAIT_TIMEOUT_SECONDS = 10
 BROWSER_ASSERTION_TIMEOUT_MILLISECONDS = 30_000
 BROWSER_CHANNEL = "chrome"
@@ -84,6 +92,25 @@ RECONCILIATION_LOG_PATTERN = re.compile(
     r"invalid (?P<invalid>[0-9]+), discovered (?P<discovered>[0-9]+)"
 )
 EXPECTED_RESEARCHER_COUNT = backend_api.EXPECTED_SOURCE_RESEARCHERS
+OPERATOR_TARGET_DRAW_NUMBER = "146"
+OPERATOR_REBUILD_RUN_ID = UUID("019fa457-aac5-7652-8669-9d571206e7dd")
+OPERATOR_REBUILD_QUEUED_AT = datetime(2026, 8, 19, tzinfo=timezone.utc)
+OPERATOR_REBUILD_FAILURE_DETAIL = "operator reconstruction fixture"
+OPERATOR_SYMLINK_OPT_IN_REQUIRED = (
+    "operator archive replay cannot run while "
+    "backend_api.ALLOW_ARCHIVED_ATTEMPT_SYMLINKS is False"
+)
+TRACEBACK_MARKER = "Traceback"
+TERMINAL_RUN_STATUSES = frozenset({
+    control_ui.RunStatus.COMPLETE,
+    control_ui.RunStatus.FAILED,
+    control_ui.RunStatus.CANCELED,
+})
+CONTROL_TERMINATION_SIGNALS = (
+    signal.SIGINT,
+    signal.SIGTERM,
+    signal.SIGKILL,
+)
 
 pytestmark = pytest.mark.operator
 
@@ -92,6 +119,8 @@ pytestmark = pytest.mark.operator
 class IsolatedRuntime:
     config_path: Path
     detour_db_path: Path
+    attempts_dir: Path
+    run_journal_path: Path
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,6 +194,12 @@ class DashboardProcess:
         if self.process.stdout is not None:
             self.process.stdout.close()
 
+    def wait_until_exit(self) -> None:
+        try:
+            self.process.wait(timeout=PROCESS_STOP_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired as exc:
+            raise TimeoutError("Control Centre did not exit after the operator signal") from exc
+
 
 def _regular_file_digest(path: Path) -> bytes:
     with path.open("rb") as stream:
@@ -217,7 +252,13 @@ def production_data_unchanged(operator_aivm: None) -> Iterator[None]:
     assert after == before
 
 
-def isolated_runtime(tmp_path: Path) -> IsolatedRuntime:
+def isolated_runtime(
+    tmp_path: Path,
+    *,
+    include_archived_attempts: bool = True,
+) -> IsolatedRuntime:
+    if not backend_api.ALLOW_ARCHIVED_ATTEMPT_SYMLINKS:
+        pytest.fail(OPERATOR_SYMLINK_OPT_IN_REQUIRED)
     config = json.loads(REAL_CONFIG_PATH.read_text(encoding=TEXT_ENCODING))
     configured_source_db = Path(config["db_file"])
     source_db = (
@@ -235,9 +276,20 @@ def isolated_runtime(tmp_path: Path) -> IsolatedRuntime:
         json.dumps(config, ensure_ascii=False, indent=2),
         encoding=TEXT_ENCODING,
     )
+    detour_db_path = backend_api._detour_db_path(source_db_link)
+    attempts_dir = detour_db_path.parent / "submissions" / "attempts"
+    attempts_dir.mkdir(parents=True)
+    if include_archived_attempts:
+        for source_attempt in sorted(ATTEMPTS_DIR.iterdir(), key=lambda path: path.name):
+            (attempts_dir / source_attempt.name).symlink_to(
+                source_attempt,
+                target_is_directory=source_attempt.is_dir(),
+            )
     return IsolatedRuntime(
         config_path=config_path,
-        detour_db_path=backend_api._detour_db_path(source_db_link),
+        detour_db_path=detour_db_path,
+        attempts_dir=attempts_dir,
+        run_journal_path=detour_db_path.parent / control_ui.RUN_JOURNAL_PATH.name,
     )
 
 
@@ -252,11 +304,11 @@ def _assert_control_centre_ports_available() -> None:
                 pytest.fail(f"operator test requires unused local port {port}")
 
 
-def _assert_run_journal_idle() -> None:
+def _assert_run_journal_idle(runtime: IsolatedRuntime) -> None:
     active_statuses = {control_ui.RunStatus.QUEUED, control_ui.RunStatus.RUNNING}
     active_runs = tuple(
         run
-        for run in control_ui.RunJournal().load_runs().values()
+        for run in control_ui.RunJournal(path=runtime.run_journal_path).load_runs().values()
         if run.status in active_statuses
     )
     if active_runs:
@@ -264,9 +316,14 @@ def _assert_run_journal_idle() -> None:
 
 
 @contextmanager
-def running_dashboard(runtime: IsolatedRuntime) -> Generator[DashboardProcess]:
+def running_dashboard(
+    runtime: IsolatedRuntime,
+    *,
+    recover_interrupted_runs: bool = False,
+) -> Generator[DashboardProcess]:
     _assert_control_centre_ports_available()
-    _assert_run_journal_idle()
+    if not recover_interrupted_runs:
+        _assert_run_journal_idle(runtime)
     environment = os.environ.copy()
     environment.pop(PYTEST_CURRENT_TEST_ENV_NAME, None)
     environment[PYTHON_UNBUFFERED_ENV_NAME] = PYTHON_UNBUFFERED_VALUE
@@ -443,10 +500,185 @@ def browser_state(
     return state
 
 
-def attempt_directory_count() -> int:
+def operator_target(runtime: IsolatedRuntime) -> BrowserTarget:
+    configuration = control_ui.RuntimeConfiguration(config_path=runtime.config_path)
+    researcher = next(
+        item
+        for item in control_ui.SourceRepository(
+            configuration=configuration
+        ).load_researchers()
+        if OPERATOR_TARGET_DRAW_NUMBER in item.draw_numbers
+        and item.cohort is not control_ui.ResearcherCohort.INELIGIBLE
+    )
+    return BrowserTarget(attempt_id=None, source_key=str(researcher.source_key))
+
+
+def browser_execute_action(
+    *,
+    target: BrowserTarget,
+    action: control_ui.RunAction,
+) -> None:
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            channel=BROWSER_CHANNEL,
+            headless=True,
+        )
+        page = browser.new_page(viewport=BROWSER_VIEWPORT)
+        page.set_default_timeout(BROWSER_ASSERTION_TIMEOUT_MILLISECONDS)
+        browser_errors: list[str] = []
+        page.on(
+            "console",
+            lambda message: (
+                browser_errors.append(message.text) if message.type == "error" else None
+            ),
+        )
+        page.on("pageerror", lambda error: browser_errors.append(str(error)))
+        page.goto(CONTROL_CENTRE_URL, wait_until="networkidle")
+        search = page.get_by_label(control_ui.Locale.SEARCH_FILTER)
+        search.fill(target.source_key)
+        rows = page.get_by_test_id(control_ui.RESEARCHER_GRID_TEST_ID).locator(
+            GRID_ROW_SELECTOR
+        )
+        expect(rows).to_have_count(1)
+        rows.first.click()
+        execute = page.get_by_test_id(control_ui.EXECUTE_ACTION_TEST_ID)
+        action_label = control_ui.ACTION_LABEL_BY_VALUE[action.value]
+        expect(execute).to_be_enabled()
+        expect(execute).to_have_text(action_label)
+        execute.click()
+        expect(execute).not_to_have_text(action_label)
+        browser.close()
+    assert browser_errors == [], Counter(browser_errors)
+
+
+def wait_for_sanction(
+    *,
+    dashboard: DashboardProcess,
+    target: BrowserTarget,
+) -> backend_api.ControlRun:
+    deadline = time.monotonic() + SANCTION_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        if dashboard.process.poll() is not None:
+            raise RuntimeError(
+                "Control Centre exited before sanctioning:\n" + "".join(dashboard.output)
+            )
+        try:
+            request = urllib_request.Request(
+                CONTROL_CURRENT_URL,
+                method=backend_api.HTTP_GET_METHOD,
+            )
+            with urllib_request.urlopen(
+                request,
+                timeout=control_ui.CONTROL_HTTP_TIMEOUT_SECONDS,
+            ) as response:
+                snapshot = backend_api.ControlSnapshot.model_validate_json(response.read())
+        except OSError, urllib_error.URLError:
+            time.sleep(PROCESS_POLL_SECONDS)
+            continue
+        sanctioned = snapshot.sanctioned_run
+        if sanctioned is not None:
+            assert sanctioned.source_key == target.source_key
+            return sanctioned
+        time.sleep(PROCESS_POLL_SECONDS)
+    raise TimeoutError("Control Centre did not sanction the queued operator run")
+
+
+def wait_for_run_status(
+    *,
+    runtime: IsolatedRuntime,
+    run_id: UUID,
+    statuses: frozenset[control_ui.RunStatus] = TERMINAL_RUN_STATUSES,
+    timeout_seconds: int = RUN_TERMINAL_TIMEOUT_SECONDS,
+) -> control_ui.RunRecord:
+    deadline = time.monotonic() + timeout_seconds
+    journal = control_ui.RunJournal(path=runtime.run_journal_path)
+    while time.monotonic() < deadline:
+        run = journal.load_runs().get(run_id)
+        if run is not None and run.status in statuses:
+            return run
+        time.sleep(PROCESS_POLL_SECONDS)
+    raise TimeoutError(
+        f"operator run {run_id} did not reach {sorted(status.value for status in statuses)}"
+    )
+
+
+def aivm_ai_command(command: str, *, check: bool = True) -> str:
+    completed = subprocess.run(
+        (*control_ui.AIVM_SSH_CONNECTION_COMMAND, control_ui.AIVM_SSH_TARGET, command),
+        cwd=REPOSITORY_ROOT,
+        capture_output=True,
+        encoding=TEXT_ENCODING,
+        timeout=REMOTE_COMMAND_TIMEOUT_SECONDS,
+        check=False,
+    )
+    if check and completed.returncode != 0:
+        raise RuntimeError(
+            f"AIVM command failed with {completed.returncode}: {completed.stderr.strip()}"
+        )
+    return completed.stdout.strip()
+
+
+def remote_run_pid(run_id: UUID) -> control_ui.RemotePid:
+    pid_path = control_ui.CODEX_WORKDIR / control_ui.CODEX_RUN_PID_TEMPLATE.format(
+        run_id=run_id
+    )
+    pid_text = aivm_ai_command(
+        control_ui.CODEX_REMOTE_PID_READ_COMMAND_TEMPLATE.format(
+            pid_path=shlex.quote(str(pid_path)),
+        )
+    )
+    if not pid_text.isdecimal():
+        raise AssertionError(f"operator run {run_id} has no remote PID")
+    return control_ui.RemotePid(int(pid_text))
+
+
+def remote_pid_is_alive(remote_pid: control_ui.RemotePid) -> bool:
+    output = aivm_ai_command(
+        control_ui.CODEX_REMOTE_PROCESS_ALIVE_COMMAND_TEMPLATE.format(
+            remote_pid=int(remote_pid),
+            alive_marker=shlex.quote(control_ui.CODEX_REMOTE_PROCESS_ALIVE_MARKER),
+        ),
+        check=False,
+    )
+    return output == control_ui.CODEX_REMOTE_PROCESS_ALIVE_MARKER
+
+
+def kill_remote_pid(remote_pid: control_ui.RemotePid) -> None:
+    aivm_ai_command(
+        control_ui.CODEX_REMOTE_SIGNAL_COMMAND_TEMPLATE.format(
+            signal=control_ui.CODEX_REMOTE_KILL_SIGNAL,
+            remote_pid=int(remote_pid),
+        ),
+        check=False,
+    )
+
+
+def wait_for_control_centre_ports_available() -> None:
+    deadline = time.monotonic() + PROCESS_STOP_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        occupied = False
+        for port in CONTROL_CENTRE_PORTS:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client:
+                occupied = occupied or (
+                    client.connect_ex((control_ui.CONTROL_CENTRE_HOST, port)) == 0
+                )
+        if not occupied:
+            return
+        time.sleep(PROCESS_POLL_SECONDS)
+    raise TimeoutError("Control Centre/backend ports remained occupied after termination")
+
+
+def persisted_control_run_events(
+    runtime: IsolatedRuntime,
+) -> tuple[backend_api.ControlRunEvent, ...]:
+    configuration = control_ui.RuntimeConfiguration(config_path=runtime.config_path)
+    return backend_api.load_control_run_events(configuration.backend_runtime)
+
+
+def attempt_directory_count(runtime: IsolatedRuntime) -> int:
     return sum(
         path.is_dir() or path.is_symlink()
-        for path in ATTEMPTS_DIR.iterdir()
+        for path in runtime.attempts_dir.iterdir()
     )
 
 
@@ -460,7 +692,7 @@ def test_fresh_start_rebuilds_canonical_detour_database(tmp_path: Path) -> None:
     manifests = archived_manifests(runtime.detour_db_path)
 
     assert counts.discovered > 0
-    assert counts.discovered == attempt_directory_count()
+    assert counts.discovered == attempt_directory_count(runtime)
     assert counts.skipped == 0
     assert counts.restored == len(manifests)
     assert counts.accepted == sum(
@@ -512,3 +744,189 @@ def test_restart_is_idempotent_for_database_history_and_card(tmp_path: Path) -> 
     assert second_counts.invalid == first_counts.invalid
     assert second_counts.discovered == first_counts.discovered
     assert third_counts == second_counts
+
+
+def test_existing_aivm_exposes_the_persisted_appendwatch_topology(
+    tmp_path: Path,
+) -> None:
+    runtime = isolated_runtime(tmp_path, include_archived_attempts=False)
+
+    configuration = control_ui.RuntimeConfiguration(config_path=runtime.config_path)
+
+    assert configuration.appendwatch_report.is_file()
+    assert configuration.appendwatch_report.stat().st_size
+
+
+def test_sanctioned_pull_succeeds_through_the_real_dashboard_and_aivm(
+    tmp_path: Path,
+) -> None:
+    runtime = isolated_runtime(tmp_path, include_archived_attempts=False)
+    target = operator_target(runtime)
+
+    with running_dashboard(runtime) as dashboard:
+        browser_execute_action(target=target, action=control_ui.RunAction.QUEUE)
+        sanctioned = wait_for_sanction(dashboard=dashboard, target=target)
+        request = urllib_request.Request(
+            control_ui.BACKEND_PULL_URL,
+            method=backend_api.HTTP_GET_METHOD,
+        )
+        with urllib_request.urlopen(
+            request,
+            timeout=control_ui.CONTROL_HTTP_TIMEOUT_SECONDS,
+        ) as response:
+            pull_rows = tuple(
+                json.loads(line)
+                for line in response.read().decode(TEXT_ENCODING).splitlines()
+            )
+        browser_execute_action(target=target, action=control_ui.RunAction.CANCEL)
+        terminal = wait_for_run_status(runtime=runtime, run_id=sanctioned.run_id)
+
+    name = NameKey.from_json_key(target.source_key)
+    assert pull_rows[-1][backend_api.KTP_FIRST_NAME_COL] == name.first_name
+    assert pull_rows[-1][backend_api.KTP_LAST_NAME_COL] == name.last_name
+    assert terminal.status is control_ui.RunStatus.CANCELED
+    assert persisted_control_run_events(runtime) == control_ui.RunJournal(
+        path=runtime.run_journal_path
+    ).load_events()
+
+
+def test_terminal_pre_push_failure_persists_in_db_and_browser_after_restart(
+    tmp_path: Path,
+) -> None:
+    runtime = isolated_runtime(tmp_path, include_archived_attempts=False)
+    target = operator_target(runtime)
+
+    with running_dashboard(runtime) as dashboard:
+        browser_execute_action(target=target, action=control_ui.RunAction.QUEUE)
+        sanctioned = wait_for_sanction(dashboard=dashboard, target=target)
+        remote_pid = remote_run_pid(sanctioned.run_id)
+        kill_remote_pid(remote_pid)
+        terminal = wait_for_run_status(runtime=runtime, run_id=sanctioned.run_id)
+
+    stored_events = persisted_control_run_events(runtime)
+    with running_dashboard(runtime):
+        restarted_browser = browser_state(target=target)
+
+    assert terminal.status is control_ui.RunStatus.FAILED
+    assert stored_events == control_ui.RunJournal(
+        path=runtime.run_journal_path
+    ).load_events()
+    assert stored_events[-1].run_id == sanctioned.run_id
+    assert stored_events[-1].kind is backend_api.ControlRunEventKind.FAILED
+    assert control_ui.RunStatus.FAILED.value in restarted_browser.attempt_history.casefold()
+
+
+def test_dashboard_rebuilds_exact_db_and_history_after_database_deletion(
+    tmp_path: Path,
+) -> None:
+    runtime = isolated_runtime(tmp_path, include_archived_attempts=False)
+    target = operator_target(runtime)
+    events = (
+        backend_api.ControlRunEvent(
+            run_id=OPERATOR_REBUILD_RUN_ID,
+            source_key=target.source_key,
+            at=OPERATOR_REBUILD_QUEUED_AT,
+            kind=backend_api.ControlRunEventKind.QUEUED,
+        ),
+        backend_api.ControlRunEvent(
+            run_id=OPERATOR_REBUILD_RUN_ID,
+            source_key=target.source_key,
+            at=OPERATOR_REBUILD_QUEUED_AT + timedelta(seconds=1),
+            kind=backend_api.ControlRunEventKind.FAILED,
+            detail=OPERATOR_REBUILD_FAILURE_DETAIL,
+        ),
+    )
+    journal = control_ui.RunJournal(path=runtime.run_journal_path)
+    for event in events:
+        journal.append(event)
+
+    with running_dashboard(runtime):
+        first_browser = browser_state(target=target)
+    first_database = canonical_database_snapshot(runtime.detour_db_path)
+    assert persisted_control_run_events(runtime) == events
+
+    runtime.detour_db_path.unlink()
+
+    with running_dashboard(runtime):
+        rebuilt_browser = browser_state(target=target)
+    rebuilt_database = canonical_database_snapshot(runtime.detour_db_path)
+
+    assert persisted_control_run_events(runtime) == events
+    assert rebuilt_database == first_database
+    assert rebuilt_browser == first_browser
+    assert control_ui.RunStatus.FAILED.value in rebuilt_browser.attempt_history.casefold()
+
+
+@pytest.mark.parametrize(
+    "termination_signal",
+    CONTROL_TERMINATION_SIGNALS,
+    ids=lambda value: signal.Signals(value).name,
+)
+def test_dashboard_signal_chaos_leaves_no_orphans_and_recovers_run_history(
+    termination_signal: signal.Signals,
+    tmp_path: Path,
+) -> None:
+    runtime = isolated_runtime(tmp_path, include_archived_attempts=False)
+    target = operator_target(runtime)
+
+    with running_dashboard(runtime) as dashboard:
+        browser_execute_action(target=target, action=control_ui.RunAction.QUEUE)
+        sanctioned = wait_for_sanction(dashboard=dashboard, target=target)
+        remote_pid = remote_run_pid(sanctioned.run_id)
+        dashboard.process.send_signal(termination_signal)
+        dashboard.wait_until_exit()
+        interrupted_output = "".join(dashboard.output)
+
+    wait_for_control_centre_ports_available()
+    with running_dashboard(
+        runtime,
+        recover_interrupted_runs=(termination_signal == signal.SIGKILL),
+    ) as restarted_dashboard:
+        terminal = wait_for_run_status(runtime=runtime, run_id=sanctioned.run_id)
+        recovered_browser = browser_state(target=target)
+        restarted_output = "".join(restarted_dashboard.output)
+
+    assert terminal.status is control_ui.RunStatus.FAILED
+    assert not remote_pid_is_alive(remote_pid)
+    assert control_ui.RunStatus.FAILED.value in recovered_browser.attempt_history.casefold()
+    assert TRACEBACK_MARKER not in interrupted_output
+    assert TRACEBACK_MARKER not in restarted_output
+
+
+def test_complete_dashboard_aivm_codex_push_db_and_card_workflow(
+    tmp_path: Path,
+) -> None:
+    runtime = isolated_runtime(tmp_path, include_archived_attempts=False)
+    target = operator_target(runtime)
+
+    with running_dashboard(runtime) as dashboard:
+        browser_execute_action(target=target, action=control_ui.RunAction.QUEUE)
+        sanctioned = wait_for_sanction(dashboard=dashboard, target=target)
+        terminal = wait_for_run_status(
+            runtime=runtime,
+            run_id=sanctioned.run_id,
+            timeout_seconds=FULL_WORKFLOW_TIMEOUT_SECONDS,
+        )
+        assert terminal.status is control_ui.RunStatus.COMPLETE, "".join(dashboard.output)
+        assert terminal.accepted_attempt_id is not None
+        accepted_target = BrowserTarget(
+            attempt_id=terminal.accepted_attempt_id,
+            source_key=target.source_key,
+        )
+        completed_browser = browser_state(target=accepted_target)
+
+    manifests = archived_manifests(runtime.detour_db_path)
+    matching_manifests = tuple(
+        manifest
+        for manifest in manifests
+        if manifest[backend_api.ATTEMPT_ID_KEY] == terminal.accepted_attempt_id
+    )
+    with running_dashboard(runtime):
+        restarted_browser = browser_state(target=accepted_target)
+
+    assert len(matching_manifests) == 1
+    assert matching_manifests[0][backend_api.ATTEMPT_RUN_ID_KEY] == str(sanctioned.run_id)
+    assert matching_manifests[0][backend_api.ATTEMPT_SOURCE_KEY] == target.source_key
+    assert completed_browser == restarted_browser
+    assert terminal.accepted_attempt_id in restarted_browser.attempt_history
+    assert restarted_browser.researcher_card.strip()

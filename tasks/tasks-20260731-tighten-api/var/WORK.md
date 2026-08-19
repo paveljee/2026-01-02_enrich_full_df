@@ -20,23 +20,64 @@
 
 ## Current objective
 
-Fix the real Control Centre startup contour and add operator-only, full-stack
-coverage that cannot pass through fakes.
+Implement the six fixes approved after the first real dashboard-launched Codex
+execution: one authoritative appendwatch path shared by deploy/dashboard/backend;
+a sanctioned real `/pull` readiness probe; DB-only persistence and exact rebuild
+of every run ever shown in attempt history, including pre-push failures; complete
+test isolation from production attempts; graceful teardown under Ctrl-C and
+other termination; and focused reconstruction, chaos, and operator E2E tests,
+including one complete dashboard -> AIVM -> Codex -> `/pull`/`/push` -> DuckDB
+-> researcher-card workflow.
+The manually launched VS Code extension remains outside the sanctioned workflow
+and requires no change.
 
-The observed real failure is:
+Archive reconciliation remains one canonical pathway and one centralized
+write-intent boundary: attempt directory -> strict replay -> detour DuckDB ->
+dashboard. Do not add a second loader or read cards/history from archives.
 
-- `pixi run dashboard` starts the real backend and reports the Control Centre
-  ready, but emits no archive-reconciliation summary, creates no detour DuckDB,
-  and cannot show a researcher card.
-- `ControlCentreController.start()` currently probes the broad AIVM process
-  pattern before reconciliation. If any Codex process matches, the method
-  returns before archive replay and DB loading. `researcher_card()` also refuses
-  while that busy state is set. Startup must reconcile/load canonical state
-  before the backend writer starts and before external-busy gating; external
-  busy must still prevent new execution and offer Queue only.
-- Archive reconciliation remains one canonical pathway and one centralized
-  write-intent boundary: attempt directory -> strict replay -> detour DuckDB ->
-  dashboard. Do not add a second loader or read cards/history from archives.
+## Observed real execution failure
+
+- A manually launched VS Code Codex chat reached OpenAPI but was correctly
+  denied `/pull` because it was not a Control Centre-sanctioned run. The later
+  dashboard-launched Sheikh CLI run was separately discovered and sanctioned.
+- Sheikh run `537e7c78-6d50-4476-836b-d05807b9841f`, session
+  `01a01ac7-d2ef-7041-b66e-b73679fdd0f5`, then failed `/pull` because
+  `FASTAPI_DETOUR_APPENDWATCH_REPORT` did not resolve to a readable regular
+  host file. No `/push` occurred.
+- Backend readiness currently proves only that `/openapi.json` responds.
+  `BackendSupervisor` inherits an optional appendwatch environment value, while
+  `api.py` otherwise uses a duplicated hardcoded host path; deployment derives
+  its own report path from its mount. No runtime handshake binds these paths and
+  no preflight checks appendwatch before a Codex process is launched.
+- Approved appendwatch binding: `deploy.sh` writes the non-secret guest report
+  path into Lima's conventional top-level
+  `param.FASTAPI_DETOUR_APPENDWATCH_REPORT` mapping. Provisioning consumes the
+  corresponding `PARAM_...` value once; it is not exposed as an ordinary guest
+  environment variable. Dashboard reads the
+  persisted `~/.lima/aivm/lima.yaml` read-only, maps that guest path through the
+  matching `mounts[].mountPoint` to its host `mounts[].location`, validates the
+  resulting regular report file, and passes it explicitly to backend. Backend
+  has no independent default. Do not use `.env` or a shared runtime handoff
+  file for this topology.
+- The no-redeploy operator fixture proves only `limactl shell ... true`, so the
+  green operator tests did not check appendwatch health or a sanctioned pull.
+- The durable run journal contains Sheikh's queued, started, session-discovered,
+  rollout-discovered, sanctioned, Codex-exited, and failed events. The detour DB
+  contains only an empty `control_centre_archived_attempts` table. The
+  reconciler intentionally includes only queued/running journal records, so a
+  terminal run without a backend push manifest disappears from history.
+- User requirement: every run ever shown in attempt history must remain visible
+  after terminal transition, relaunch, and full DB reconstruction, including
+  pre-push configuration failures. Preserve one validated canonical persistence
+  pathway rather than displaying terminal journal state as a second source.
+- Production archives increased from 149 to 159 invalid attempts before this
+  run. The latest records are `testserver`/`testclient` empty pushes created by
+  `test_missing_rollout_is_generic_503_and_pull_fails_closed` and
+  `test_control_mode_without_sanction_fails_both_routes_without_env_fallback`,
+  which do not isolate `ATTEMPTS_DIR`. Tests must never write production data.
+- Ctrl-C during the active UI timer produced an expected interrupted AIVM probe
+  as an unhandled traceback; shutdown must stop refresh work before tearing down
+  remote/backend processes.
 
 ## Operator test contour
 
@@ -44,8 +85,8 @@ The observed real failure is:
   authorized detour-local test conftest owns the `operator` marker/options,
   prompt, AIVM deployment/probe fixture, and default skip; ordinary test and
   pre-commit runs skip operator tests unless explicitly selected.
-- Add the explicitly authorized
-  `src/detours/detour_ai_augment/tests/test_e2e_operator.py`. Its tests run real
+- The explicitly authorized
+  `src/detours/detour_ai_augment/tests/test_e2e_operator.py` runs real
   dashboard, backend, archive replay, DuckDB, AIVM, and Playwright surfaces.
   Production collaborators must not be replaced by fakes.
 - Cover three independent contours: fresh isolated DB rebuild and aggregate
@@ -57,8 +98,8 @@ The observed real failure is:
 - Isolate writes by using a temporary config and a symlink to the real read-only
   source DB, so the sibling detour DB and output/state paths are temporary.
   Never modify the operator's real detour DB or archived attempts.
-- Add a Pixi task under the `detour-ai-augment` feature that selects all
-  `operator` tests and forwards extra pytest arguments.
+- The Pixi task under the `detour-ai-augment` feature selects all `operator`
+  tests and forwards extra pytest arguments.
 - The operator contour asks whether AIVM should be redeployed before each test,
   with No as the current default. Support `--always-redeploy`,
   `--always-redeploy --yes` for noninteractive confirmation, and an explicit
@@ -96,11 +137,10 @@ The observed real failure is:
   probes the resulting/current `aivm`, and never tears it down. `deploy.sh`
   accepts `--yes`, exits 1 when replacement is declined, and exits 0 after
   verification instead of opening an SSH shell.
-- The new Pixi `test-detour-ai-augment-operator` task selects the three tests in
-  `test_e2e_operator.py`. They cover fresh real archive replay with aggregate
-  counts, real Playwright history/card rendering for a canonical accepted
-  attempt and all 307 researchers, and restart equality of browser state plus
-  every DuckDB table row and sequence. Each test also hashes both production
+- The Pixi `test-detour-ai-augment-operator` task selects the operator tests in
+  `test_e2e_operator.py`. Its existing three tests cover fresh real archive
+  replay, Playwright history/card rendering, and restart equality. Each test
+  also hashes both production
   data trees (`REPOSITORY_ROOT/data` and the detour-local `data`) after optional
   deployment and after test cleanup, asserting exact tree/content equality. The
   complete-tree hashes use concurrent per-file digests combined in sorted path
@@ -112,35 +152,72 @@ The observed real failure is:
 - The canonical archive implementation already performs strict HTTP-log replay,
   chronological restoration, idempotent DuckDB markers, aggregate-only invalid
   logging, and DuckDB-only terminal history. Preserve those contracts.
-- `control_centre_runs.jsonl` is only transient queued/running process state;
-  terminal history comes only from validated DuckDB attempt manifests.
+- `control_centre_runs.jsonl` is the durable reconstruction input for every
+  dashboard-visible control run, including terminal pre-push failures. A
+  validated projection of those runs belongs in DuckDB; the dashboard reads
+  all attempt history from DuckDB and must reconstruct it exactly from the
+  journal after deletion of the detour database. Push manifests remain the
+  canonical reconstruction input for push-attempt payload/response content.
+- The private backend write endpoint used to project run-journal events into
+  DuckDB is authenticated with a per-dashboard-process control token. Port 8612
+  is reverse-forwarded into AIVM, so a hidden route alone would be agent-callable;
+  the token is passed only to the host backend process and is never placed in
+  Lima or exposed through OpenAPI.
 - Preserve all staged/operator-owned changes. Git is read-only and the index
   must not be altered. The proxy static asset and README are out of scope.
 
-## Verification and evidence
+## Current implementation state
 
-- `pixi run pre-commit 2>&1` is green after the operator fixes: Ruff and mypy
-  pass, the detour suite reports 165 passed and 4 skipped (the three operator
-  tests plus the deliberately disabled multiple-evidence-match test), and the
-  separately selected real-API test passes.
-- Real macOS operator runs exposed and then cleared the archive-validity and
-  DuckDB-lock assumptions: current production archives may contain zero
-  current-contract accepted attempts, and direct DB inspection occurs only
-  after dashboard shutdown. With those fixes, the fresh rebuild test passes.
-  The two browser tests stopped before application assertions because their
-  default Playwright launch requested a missing arm64 Chromium headless shell.
-  That shell is not the Google Chrome browser used by the real operator. The
-  operator browser contour now launches the host's installed Google Chrome via
-  Playwright's `chrome` channel in headless mode. The Pixi task is again a
-  direct pytest invocation with no browser-cache diagnostics or installation;
-  Google Chrome is an explicit operator-host prerequisite.
-- Then bring `build/AGENTS.md`, `build/SPECS.ipynb`, and `manifest.json` into
-  atomic requirement-to-evidence alignment with TASK and run
-  `pixi run --frozen make validate` from the task directory.
+- The six approved fixes are implemented. `deploy.sh` persists the appendwatch
+  guest path in Lima's top-level `param` mapping; dashboard maps it read-only
+  through exactly one persisted mount and passes the validated host report to a
+  backend that has no independent path default. The abandoned `.env` and shared
+  runtime-file approaches are absent.
+- A sanctioned `/pull` is probed after sanction and before waiting for Codex.
+  Failure cancels Codex and records durable failed history.
+- The journal is the immutable reconstruction input, while its ordered DuckDB
+  projection is the sole dashboard history source. The authenticated hidden
+  backend endpoint rescans archived attempts before DB writes. Terminal
+  pre-push runs persist, restart, and rebuild exactly after detour-DB deletion;
+  accepted run events deduplicate against accepted attempt manifests.
+- Backend and SSH subprocesses are owned and reaped. Graceful shutdown cancels
+  active Codex work and persists terminal failure; backend watches its dashboard
+  parent; restart terminates abandoned guest PIDs and repairs SIGKILL-interrupted
+  run history.
+- Ordinary tests use temporary Lima topology and runtime-local attempt roots, so
+  they no longer create production attempts. Focused roundtrips cover the hidden
+  authenticated event endpoint, immutable-prefix/idempotent persistence, exact
+  DB reconstruction, appendwatch propagation, failed sanctioned pulls, and
+  shutdown during Codex startup.
+- Production allows archived-attempt symlinks through
+  `ALLOW_ARCHIVED_ATTEMPT_SYMLINKS=True`. Every operator test fails immediately
+  if that setting is False. Archive contours symlink read-only production
+  attempt entries into a temporary attempts root; newly generated attempts are
+  real temporary directories. No test manufactures the disabled mode.
+- `pixi run pre-commit 2>&1` completed successfully after the implementation:
+  ruff, mypy, the main tests, detour tests, and configured real-API test all
+  passed. Operator tests are intentionally separate and have not been executed
+  in this Linux session.
+
+## Current operator E2E boundary
+
+- Proven: isolated detour DB creation, strict production-archive scan and
+  aggregate reconciliation, a real UI summary reporting 307 researchers, one
+  real source row searchable in the grid, source-backed researcher-card
+  rendering, clean browser console, complete DB/browser restart equality,
+  repeatable process restart, AIVM reachability, real backend supervision, and
+  unchanged complete production data trees. The test does not enumerate all
+  307 rows in Chrome.
+- Six additional real operator contours are implemented but await execution on
+  the operator machine: existing-AIVM appendwatch topology; sanctioned `/pull`;
+  terminal pre-push persistence; exact DB/history reconstruction after DB
+  deletion; SIGINT/SIGTERM/SIGKILL recovery; and one complete dashboard -> AIVM
+  -> Codex -> `/pull` -> `/push` -> DuckDB -> researcher-card workflow.
+  Queue/serial dequeue/rerun, evidence retry/withdrawal, and generated TXT/DOCX
+  remain additional operator contours.
 
 ## Immediate next action
 
-Run `pixi run pre-commit 2>&1`, then the operator must rerun
-`pixi run test-detour-ai-augment-operator` on macOS. Address only concrete
-real-contour failures; once it passes, update the TASK evidence artifacts and
-run the prescribed task validation.
+Update the TASK atomic requirement-to-evidence artifacts and run its prescribed
+validation. The operator then runs `pixi run test-detour-ai-augment-operator` on
+the real control machine/AIVM; preserve both production data trees read-only.

@@ -67,6 +67,9 @@ class Locale:
     JOURNAL_SESSION_ID_MISSING: Final = (
         "session-discovered event has no session ID"
     )
+    JOURNAL_REMOTE_PID_MISSING: Final = (
+        "remote-PID-discovered event has no remote PID"
+    )
     JOURNAL_ROLLOUT_PATH_MISSING: Final = (
         "rollout-discovered event has no path"
     )
@@ -75,11 +78,31 @@ class Locale:
     CARD_COUNT_INVALID: Final = "selected researcher did not render exactly one card"
     BACKEND_OUTPUT_PIPE_MISSING: Final = "backend output pipe was not created"
     BACKEND_OPENAPI_NOT_READY: Final = "backend OpenAPI endpoint is not ready"
+    BACKEND_PULL_NOT_READY: Final = "backend cannot serve the sanctioned pull"
     BACKEND_EXITED_EARLY: Final = "backend exited before becoming ready"
     BACKEND_READY_TIMEOUT: Final = "backend did not become ready"
     BACKEND_NOT_RUNNING: Final = "backend is not running"
+    CONTROL_RUN_EVENTS_PERSIST_FAILED: Final = (
+        "Control Centre run history could not be persisted"
+    )
     OPENALEX_API_KEY_MISSING: Final = (
         "OPENALEX_API_KEY is required in the Control Centre environment"
+    )
+    LIMA_CONFIG_UNREADABLE: Final = "Lima instance configuration is unreadable"
+    LIMA_CONFIG_INVALID: Final = (
+        "Lima instance configuration does not contain valid appendwatch topology; "
+        "rerun deploy.sh"
+    )
+    LIMA_APPENDWATCH_PATH_INVALID: Final = (
+        "Lima appendwatch parameter is not one normalized absolute guest path"
+    )
+    LIMA_MOUNT_INVALID: Final = "Lima configuration contains an invalid mount mapping"
+    LIMA_APPENDWATCH_MOUNT_INVALID: Final = (
+        "Lima appendwatch path does not map through exactly one configured mount"
+    )
+    LIMA_APPENDWATCH_REPORT_UNREADABLE: Final = (
+        "Lima appendwatch mount does not expose one readable regular host report; "
+        "rerun deploy.sh"
     )
     AIVM_COMMAND_FAILED_TEMPLATE: Final = (
         "AIVM command failed with exit {return_code}: {stderr}"
@@ -103,6 +126,7 @@ class Locale:
     RESTART_INTERRUPTED_RUN: Final = (
         "Control Centre restarted before the run completed"
     )
+    SHUTDOWN_INTERRUPTED_RUN: Final = "Control Centre stopped before the run completed"
     INELIGIBLE_QUEUE: Final = "ineligible source keys cannot be queued"
     UNKNOWN_RUN_ID_TEMPLATE: Final = "unknown run ID: {run_id}"
     CODEX_CANCEL_FAILED_TEMPLATE: Final = "Codex cancellation failed: {error}"
