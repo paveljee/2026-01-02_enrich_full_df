@@ -3947,6 +3947,12 @@ def archive_http_request_log(
     response_body: str,
     started_ns: int,
 ) -> ArchivedFile:
+    """Archive one final attempted HTTP exchange.
+
+    When push() calls this function directly, it receives the resulting artifact
+    metadata and propagates any archival failure. The best-effort exception-
+    recovery helper may instead log and suppress that failure.
+    """
     log_path = attempt_dir / HTTP_REQUEST_LOG_FILENAME_TEMPLATE.format(attempt_id=attempt_id)
     if log_path.exists():
         raise PushValidationError(Locale.ATTEMPT_HTTP_LOG_EXISTS)
@@ -3995,6 +4001,13 @@ def record_attempt(
     session_id: str | None = None,
     rollout_relative_path: PurePosixPath | None = None,
 ) -> str:
+    """Atomically write one attempt-stage manifest and return its exact text.
+
+    Artifacts referenced by the manifest must already have been archived. This
+    function neither creates the final HTTP log nor inserts the manifest into
+    DuckDB, allowing intermediate stages and strict final-attempt handling to
+    share the same manifest writer.
+    """
     artifacts = {}
     for name, artifact in (
         (ARTIFACT_ROLLOUT_KEY, rollout_archive),
@@ -5100,6 +5113,12 @@ def safely_record_attempt(
     session_id: str | None = None,
     rollout_relative_path: PurePosixPath | None = None,
 ) -> None:
+    """Best-effort archive and manifest recording during exception recovery.
+
+    An existing HTTP-log artifact is reused when available. Recording failures
+    are logged and suppressed so they do not replace the original API failure;
+    the canonical final-attempt path therefore does not use this helper.
+    """
     if attempt_dir is None:
         return
     try:

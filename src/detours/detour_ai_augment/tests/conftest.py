@@ -69,6 +69,12 @@ OPERATOR_REDEPLOY_STASH_KEY = pytest.StashKey[bool]()
 
 
 def _operator_requested(config: pytest.Config) -> bool:
+    """
+    Note: only recognizes exactly `-m operator`, so
+    not intended to be combined with any markers.
+
+    signed off: human
+    """
     return (config.option.markexpr or "").strip() == OPERATOR_MARKER
 
 
@@ -165,10 +171,16 @@ def operator_aivm(
     if OPERATOR_MARKER not in request.node.keywords:
         return
     openalex_api_key = os.environ.get(OPENALEX_API_KEY_ENV_NAME, "").strip()
-    if not openalex_api_key:
-        openalex_api_key = str(
-            dotenv_values(DOTENV_PATH).get(OPENALEX_API_KEY_ENV_NAME) or ""
-        ).strip()
+    # =========================
+    # openalex key must come
+    # explicitly from operator.
+    # therefore commented out.
+    # signed-off: human
+    # =========================
+    # if not openalex_api_key:
+    #     openalex_api_key = str(
+    #         dotenv_values(DOTENV_PATH).get(OPENALEX_API_KEY_ENV_NAME) or ""
+    #     ).strip()
     if not openalex_api_key:
         raise pytest.UsageError(OPERATOR_KEY_MISSING)
     monkeypatch.setenv(OPENALEX_API_KEY_ENV_NAME, openalex_api_key)

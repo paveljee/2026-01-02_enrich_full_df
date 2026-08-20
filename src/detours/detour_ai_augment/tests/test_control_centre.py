@@ -1377,6 +1377,7 @@ async def test_codex_start_uses_the_same_full_workbook_bytes_in_file_and_prompt(
     )
     remote_writes: list[tuple[PurePosixPath, bytes]] = []
     launched_commands: list[tuple[str, ...]] = []
+    launched_new_sessions: list[bool] = []
 
     async def write_remote(path: PurePosixPath, content: bytes) -> None:
         remote_writes.append((path, content))
@@ -1391,8 +1392,12 @@ async def test_codex_start_uses_the_same_full_workbook_bytes_in_file_and_prompt(
         assert check
         return b""
 
-    async def create_process(*command: str) -> SimpleNamespace:
+    async def create_process(
+        *command: str,
+        start_new_session: bool,
+    ) -> SimpleNamespace:
         launched_commands.append(command)
+        launched_new_sessions.append(start_new_session)
         return SimpleNamespace(returncode=None)
 
     async def discover_session(
@@ -1435,6 +1440,7 @@ async def test_codex_start_uses_the_same_full_workbook_bytes_in_file_and_prompt(
         (control_ui.CODEX_PROMPT_PATH, prompt_bytes),
     ]
     assert len(launched_commands) == 1
+    assert launched_new_sessions == [True]
     remote_launch = launched_commands[0][-1]
     assert " ".join(control_ui.CODEX_EXEC_COMMAND) in remote_launch
     assert str(control_ui.CODEX_ENV_PATH) in remote_launch
