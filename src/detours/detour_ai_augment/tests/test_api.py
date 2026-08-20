@@ -32,6 +32,10 @@ from src.detours.detour_ai_augment.src.backend.helpers.locale import (
     Locale,
 )
 from src.helpers.config import PipelineConfig
+from src.helpers.data_models.http_request_log import (
+    HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY,
+    HTTP_REQUEST_LOG_PORT_KEY,
+)
 from src.helpers.duckdb_extensions import load_duckdb_extension_from_config_path
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
@@ -3020,6 +3024,20 @@ def test_archived_attempts_rebuild_database_from_exact_http_contract(
 
     assert rejected_response.status_code == 422
     assert accepted_response.status_code == 200
+    assert rejected_http.schema_version == api.KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V2
+    assert accepted_http.schema_version == api.KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V2
+    assert rejected_http.port is None
+    assert accepted_http.port is None
+    assert rejected_http.coerce_schema_v1 is False
+    assert accepted_http.coerce_schema_v1 is False
+    assert HTTP_REQUEST_LOG_PORT_KEY in json.loads(read_text(rejected_http_path))
+    assert HTTP_REQUEST_LOG_PORT_KEY in json.loads(read_text(accepted_http_path))
+    assert HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY in json.loads(
+        read_text(rejected_http_path)
+    )
+    assert HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY in json.loads(
+        read_text(accepted_http_path)
+    )
     assert rejected_http.request_body == rejected_body
     assert rejected_http.response_code == rejected_response.status_code
     assert rejected_http.response_body == rejected_response.text

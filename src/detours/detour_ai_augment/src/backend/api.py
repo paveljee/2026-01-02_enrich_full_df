@@ -85,7 +85,7 @@ from src.helpers.vars import (
     KTP_FIRST_NAME_COL,
     KTP_FRAGMENT_COL,
     KTP_FRAGMENT_TYPE_COL,
-    KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION,
+    KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V2,
     KTP_INNERDICT_JSONLINES_COL,
     KTP_LAST_NAME_COL,
     KTP_NAMEKEY_COL,
@@ -3957,10 +3957,11 @@ def archive_http_request_log(
     if log_path.exists():
         raise PushValidationError(Locale.ATTEMPT_HTTP_LOG_EXISTS)
     record = HttpRequestLogRecord(
-        schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION,
+        schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V2,
         method=HTTP_POST_METHOD,
         scheme=request.url.scheme,
         host=request.url.hostname or "",
+        port=request.url.port,
         path=request.url.path,
         query=request.url.query,
         request_headers=dict(request.headers),
@@ -4864,7 +4865,7 @@ def _archived_attempt_replay(
             raise ValueError(Locale.ARCHIVED_ATTEMPT_HTTP_INVALID)
         http_record = HttpRequestLogRecord.model_validate_json(http_lines[0])
         if (
-            http_record.schema_version != KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION
+            http_record.schema_version != KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V2
             or http_record.method != HTTP_POST_METHOD
             or http_record.path != PUSH_PATH
             or http_record.query

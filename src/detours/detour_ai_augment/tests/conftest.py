@@ -6,7 +6,6 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from dotenv import dotenv_values
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
 DOTENV_PATH = REPOSITORY_ROOT / ".env"

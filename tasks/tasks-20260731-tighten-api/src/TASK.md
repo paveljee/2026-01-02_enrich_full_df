@@ -153,3 +153,177 @@ every case above must have a dedicated roundtrip test.
 - All existing tests, including XLSX name matching, must remain green after extracting the shared tokenization primitive.
 - A focused equivalence test must prove that the extracted shared tokenization produces exactly the same XLSX v2 tokens as the pre-extraction implementation for all the normalizations applied.
 - The main pipeline remains completely independent of any `src/detours/detour_ai_augment` code.
+
+### revamped logging and db
+- detour's db is considered ephemeral for easy access. it may be deleted any time and should be reconstructible exactly from stored data.
+- stored data consist of a single jsonl append-only log which documents http request/response events (see below) and content-addressable storage that stores _only_ rollout snapshots. everything else is fairly small and goes directly into appropriate http request logs.
+- corrolary of this is that http request/responses (see below) should be architected in such a way that they are _all encompassing for all info needed for replay_ (except for rollout snapshot that is stored in cas).
+- `HttpRequestLogRecord` (with `schema_version = 2`) is the canonical way to store request/response contours. of which we have several:
+- the main component remains backend api which serves /pull and /push. to be able to serve those, it must be sanctioned by someone (usually dashboard, but in principle can be sanctioned by human operator manually - through using same http machinery as dashboard). so /pull in that sense is fully deterministic to the upstream (i.e., sanctioning) http request that backend received. therefore, on backend side we need to store _all_ pushes it _responds_ to.
+- backend api also serves internal push and pull endpoints for dashboard/human operator to sanction researchers (push for sanctioning, pull for polling outcome). a successful internal push endpoint directly and idempotently enables public pull. if server is shut down halfway through the internal push, no worries because the logging boundary here is push requests that backend served. 
+- note that we keep the entire contour strictly sync-only and idempotent in the sense that only one sanctioned record may exist and be served by public pull at a time. backend api is strictly sync therefore and this forces dashboard and agent runtime to be sync (and therefore must be idempotent) too. 
+- so here is how it all works:
+- backend api owns the duckdb connection including any reads and writes to duckdb or to jsonl file. neither duckdb nor jsonl file are never exposed to or used by dashboard or (god forbid) agent runtime client. upon start of backend it does replay its append-only jsonl file, simply in line order, and confirms whether db conflicts with it - what we currently have as a replay logic there. if it finds conflicts it just exits loudly with an informative server log message. and so if all ok, at start of backend api it has duckdb open and synchronized with jsonl files without any conflicts. at first starts it's empty jsonl files and so it's just empty tables. at this point both public pull and public push will return errors because no sanctioning HttpRequestLogRecord will be found in duckdb. note that because backend fully owns both db and jsonl file, it only needs to do the db/jsonl sync check once - at start, and then it trusts db until restart.
+- backend api only always processes one http request at a time (from any client) and all others get denials.
+- though denials do get noticed by asgi middleware tha wraps entire backend api and mechanically dumps the internal/public push ones in the single jsonl (pulls are not logged); the jsonl writer is therefore tightly wired into the middleware and listens to all requests at once and its job is to dump them all to jsonl as fast as possible and so other api.py logic deals with this later and so that only scenario where any response from backend api would be lost would be a very unusual case where it returned but between the lines of return response and dump to jsonl computer shut down or disk broke, so very unusual.
+- dashboard (or human operator manually curl'ing for that matter) can send a sanctioning (i.e., internal push) request. if backend is not ready it'll respond with error (though its middleware will still capture the request/response into jsonl). if it's ready it will serve it. serve it means serve, _write to jsonl succesfully_ and only then actually send it. it's fully transactional - either whole contour from receive request to log succeeds or fails. sending of response to push is out of transaction really because how it's made is that push sender never cares about response to push - it will then poll pull.
+- in line with this, we must ensure the external/public push and pull are designed in same way. agentic runtime sends push and should not rely on response; rather the openapi.json it reads at the beginning should be clear about that after sending it it should poll pull for response to its push. and so how it will look from agent runtime's end is it sends push then polls pull, if push was successful it gets a success confirmation and then upon next pull agent runtime will observe it's been disabled until human sanctions next one.  so public pull either returns as 200 and payload or an error and error message. 
+
+here is about same thing in other words:
+
+1. Ownership and source of truth
+The backend owns all durable state:
+Dashboard ───────┐
+                 │
+External client ─┼──► Backend ──► authoritative.jsonl
+                 │                    │
+                 │                    ▼
+                 └───────────────► DuckDB projection
+authoritative.jsonl is the canonical append-only history. DuckDB is never authoritative; it is a materialized/queryable projection that can be reconstructed from JSONL.
+On startup:
+open/validate JSONL
+      ↓
+compare DuckDB projection checkpoint
+      ↓
+JSONL has new entries → apply them to DuckDB
+      ↓
+mismatch with already-projected prefix → FAIL LOUDLY
+If DuckDB is corrupt or fundamentally disagrees with JSONL, the safe recovery is ultimately to rebuild DuckDB from JSONL rather than modify JSONL to match DuckDB.
+I would store a small projection checkpoint in DuckDB such as the last applied JSONL byte offset/line plus a hash of that last line. That lets you distinguish simply being behind from actual divergence.
+2. Four endpoints
+Conceptually:
+Internal push   Dashboard → Backend
+Internal pull   Dashboard ← Backend
+
+External push   Client → Backend
+External pull   Client ← Backend
+Only the two push endpoints go into the authoritative event log.
+Pulls are queries. They don’t change state, so they don’t need to participate in replay.
+3. Backend state machine
+Something approximately like:
+IDLE
+ │
+ │ internal push / sanction accepted
+ ▼
+SANCTION ACTIVE
+ │
+ │ external pulls may repeatedly observe same sanctioned value
+ │
+ │ correct external push accepted
+ ▼
+IDLE
+The internal push therefore establishes the sanctioned state. That state remains stable until the corresponding valid external push completes it.
+Both pushes should be idempotent. This becomes especially important because an HTTP caller may not know whether a request succeeded.
+I’d give an internal dashboard command an idempotency key, probably in a header. Ideally the external transaction also has a natural transaction/job/sanction identifier.
+4. Serialization
+Use one FastAPI/Uvicorn worker process and one global non-waiting command gate covering the two pushes:
+internal push ─┐
+               ├──► command gate, capacity 1
+external push ─┘
+If another push arrives while one is being processed:
+push arrives
+   ↓
+gate occupied
+   ↓
+immediate BUSY response
+   ↓
+log that response
+   ↓
+send it
+No waiting queue.
+Pulls don’t necessarily need this gate. In fact, keeping internal status/pull readable while a command executes is useful. You just need their read semantics to tolerate seeing either the pre-commit or post-commit state.
+5. Middleware owns logging
+I agree with using middleware now because your rule is structural rather than endpoint-specific:
+Every response produced for either push endpoint must go through the log before leaving the backend.
+For those two routes:
+request
+   ↓
+middleware captures request
+   ↓
+gate / endpoint processing
+   ↓
+complete response produced
+   ↓
+middleware captures complete response
+   ↓
+append one JSONL record
+   ↓
+flush + fsync
+   ↓
+only now send response
+The middleware should therefore buffer the response rather than immediately forwarding http.response.start to the client. For small JSON API responses, that’s perfectly reasonable.
+Use a separate JSONL append lock because a rejected busy request could be getting logged while the active push is still executing.
+6. What gets logged
+Your stated rule now is:
+Every response to an internal or external push is logged.
+So the log contains both successful transactions and rejected attempts:
+{"request": {...}, "response": {"status": 200, ...}, ...}
+{"request": {...}, "response": {"status": 503, ...}, ...}
+{"request": {...}, "response": {"status": 409, ...}, ...}
+That’s fine. DuckDB’s state projection simply applies the entries that actually represent committed state transitions. The others can still exist as audit/history records.
+And because there is now one writer and one file, file order is your canonical order:
+line 1
+line 2
+line 3
+...
+No k-way merge, UUID ordering, monotonic tie-breaking, or sorting is needed.
+7. The crucial commit boundary
+This deserves to be extremely explicit.
+For a successful state-changing request, ideally:
+validate request
+      ↓
+calculate next state + response
+      ↓
+append response/event to JSONL
+      ↓
+fsync                         ← COMMIT
+      ↓
+apply new state / DuckDB projection
+      ↓
+send HTTP response
+Avoid mutating authoritative application state before the JSONL commit if possible.
+Therefore:
+JSONL succeeded
+backend died before HTTP response
+means the transaction happened.
+The caller merely failed to learn about it through that HTTP connection.
+That’s exactly why your dashboard’s new behavior works well.
+8. Dashboard semantics
+The dashboard shouldn’t use the command’s HTTP response as ground truth.
+Instead:
+Dashboard
+   │
+   ├── POST internal push
+   │
+   │      doesn't rely on response for correctness
+   │
+   └── periodically GET internal pull/status
+                 ↓
+             Backend
+                 ↓
+              DuckDB
+If it doesn’t observe the expected result, it can retry the same idempotency key.
+I wouldn’t literally fire the HTTP request and immediately destroy/cancel the connection. Send it normally; simply don’t make receipt of its response part of your correctness model.
+ 
+⸻
+ 
+Failure modes I would explicitly design/test
+There are several important ones.
+Crash before JSONL append. No transaction was committed. On restart there is nothing to replay. Good.
+Crash midway through JSONL append. You can have a partial final line. On startup, validate the tail and truncate an incomplete final record back to the previous newline. This should be an explicit recovery routine.
+Crash after JSONL fsync, before DuckDB update. Transaction is committed. Startup replay discovers JSONL is ahead and applies it to DuckDB. This is one of the main reasons the architecture works.
+Crash after JSONL and DuckDB update, before HTTP response. Transaction is committed. Caller may time out. Dashboard discovers it through status; a retry must be idempotent.
+Disk full / permission error / I/O error during JSONL append. Do not send a successful response. More importantly, don’t let the domain state have already irreversibly changed before this point.
+DuckDB update fails after JSONL committed. This one is subtle: the transaction is already real, because JSONL is authoritative. You cannot pretend it was rolled back. I’d mark the backend unhealthy/fail closed for subsequent state-changing pushes until the projection is repaired, and report the projection error loudly.
+Backend receives a request, but client times out while it is executing. The request can still commit. Client timeout never means “the operation did not happen.” Idempotency + polling handles this.
+Duplicate/retried pushes. Explicitly design idempotency. This is one of the most likely real-world failure cases.
+Framework-generated errors. If you want “every response for these push paths,” test malformed JSON, validation 422, authentication failures, handler exceptions/500, and busy rejection. Make sure your middleware is positioned so the responses you intend to capture actually pass through it.
+Request never reaches your application. Connection failure, port unavailable, server not listening, malformed traffic rejected below your application, etc. cannot appear in your application-owned JSONL. That’s okay; document the boundary as “push requests that reached the backend application and produced a response.”
+Streaming responses. Your design assumes ordinary finite JSON responses. Don’t use streaming for these push endpoints, because “log complete response before sending it” becomes incompatible with true streaming.
+Log manually edited/truncated. Backend can see this because `config_ai_augment.json` contains `detour_ai_augment_backend_api_replay_log` which human operator manually sets at control centre/backend termination/whenever operator wants and so at start of backend this is always verified (using conventional `RegisteredResource` logic) and if it mismatches backend fails to start loudly. If hash matches, backend trusts the log and replays it; any mismatches in duckdb are interpreted as corrupted db and backend api fails loudly with an informative server message that human operator should investigate.
+Two backend processes accidentally start. This is worth guarding against. Your entire single-writer model assumes exactly one backend instance owns that JSONL.
+Consider a process-level lock on startup so a second backend refuses to start against the same data directory.
+Note that in `HttpRequestLogRecord` (with `schema_version = 2`) we use `ready_to_respond_at_unix_usec` rather than `response_received_at` for the obvious reason - we are logging responses we are sending ourselves here rather than ones we receive.
+Overall, the strongest invariant I would write into the design is:
+A push transaction becomes authoritative when its complete request/response entry has been durably appended to JSONL. DuckDB and all other state are projections of that committed log; successful HTTP delivery is notification, not the commit mechanism.
+That one sentence resolves most of the crash and retry questions.

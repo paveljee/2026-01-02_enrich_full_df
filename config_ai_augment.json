@@ -37,6 +37,11 @@
   "pilot_xlsx_name": "2024_HCR.xlsx",
   "total_draws": 310,
   "files_config": {
+    "detour_ai_augment_backend_api_replay_log": "openalex_paper_title_parquet": {
+      "path": "/Volumes/home/aicode/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/data/detour_ai_augment_backend_api_replay_log.jsonl",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "desc": "Detour AI Augment Backend API replay log"
+    },
     "map_subset_0_to_batch": {
       "path": "/Volumes/home/aicode/2026-01-02_enrich_full_df/tmp/map_subset0_to_batch.csv",
       "sha256": "a1cd6f3c4a045eff4a248b11b958c552d3c5520066139ec0102ab65e325a5a7c",

@@ -63,12 +63,11 @@ discussion, not yet an instruction to implement.
 
 ## Open design points to resolve before implementation
 
-- The three mutable append-only logs should be registered with hashes in
-  `config_ai_augment.json`, per the operator's direction. A static configured
-  whole-file hash becomes stale after every append, so the lifecycle must be
-  made explicit: e.g. active versus sealed logs, immutable segments, or another
-  strict scheme that never silently rewrites expected hashes. Do not invent a
-  mutable manifest as a workaround.
+- The three append-only logs follow the established OpenAlex-log checkpoint
+  contract. They may remain mutable while work is active. When the operator is
+  ready to checkpoint, hand off, or publish them, the operator manually records
+  their current SHA-256 values in `config_ai_augment.json`. Runtime code must not
+  rewrite configured hashes or treat them as live synchronization state.
 - The three listed exchanges do not by themselves close a run that dies before
   `/push`, is canceled, or is interrupted during launch/discovery. Preserving
   the prior requirement that every dashboard-visible run reconstruct exactly
@@ -88,14 +87,61 @@ discussion, not yet an instruction to implement.
 ## `HttpRequestLogRecord.host` correction
 
 - Current API logging uses `request.url.hostname`, which drops an explicit port.
-  Fix this without changing the `HttpRequestLogRecord` field set or invalidating
-  historical OpenAlex records such as `host="api.openalex.org"`.
-- The compatible direction is to define `host` as HTTP authority: hostname for
-  ordinary/default-port records and host plus explicit/non-default port for
-  local control exchanges. Preserve valid old values and add regressions for an
-  old OpenAlex line and local 8611/8612 records. Handle IPv6 authority correctly.
+  Add version-2 wire behavior with an explicit `port` field while preserving the
+  version-1 contract and historical OpenAlex records.
+- Keep `KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION = 1` for all main-pipeline producers
+  and domain checks. The active simpler proposal is one versioned
+  `HttpRequestLogRecord` with `schema_version: Literal[1, 2]` and
+  `port: int | None = None`, plus differential wire validation and serialization.
+  Before validation, version 1 rejects the presence of the `port` key even when
+  null. Native version 2 accepts omitted `port` input and defaults it to `None`;
+  `port` remains a declared version-2 schema property and version-2 serialization
+  always includes it, including as null. Version 1 serialization omits `port`, so
+  version 1 remains the exact original 13-field JSON contract.
+- `coerce_schema_v1: bool = False` is an ordinary model field, not a custom
+  `model_validate_json` argument. Like `port`, the field is absent and forbidden
+  in schema version 1; schema version 2 initializes and serializes it. For version
+  2 with coercion true, validation first removes only the two version-2 fields,
+  changes the projected schema version to 1, and fully validates that projection
+  under strict version 1 before completing ordinary version-2 validation. Native
+  version 2 with coercion false skips this projection and still permits
+  `port=None`. The detour API is native version 2 and does not opt into coercion;
+  coercion remains an explicit fallback for a future painless migration.
+  `model_validate_json` remains Pydantic's unmodified routine validator.
+- Version 2 additionally declares
+  `ready_to_respond_at_unix_usec: int | None = None`. Version 1 rejects the field
+  on input and omits it on serialization. A migrated version-1 payload omits the
+  unsupported field, so opt-in version-1 coercion receives the ordinary null
+  default without special mutation. Native version 2 preserves a supplied
+  timestamp and otherwise defaults it to null. No producer, including the detour
+  API, explicitly populates the field yet. Main-pipeline/OpenAlex version-1
+  timing and wire records remain unchanged.
+- Within the Python object, a parsed version-1 instance necessarily has the
+  statically declared `port=None` and `coerce_schema_v1=False` defaults;
+  “undefined” applies to the version-1 wire representation. If the attributes
+  themselves must not exist, two models are required. The one-model JSON Schema
+  will also need explicit
+  conditional/`oneOf` customization if consumers must see the version-dependent
+  required/forbidden rule rather than relying only on runtime validation.
+- Add regressions for an old OpenAlex version-1 line, version-1 serialization,
+  local version-2 8611/8612 records, explicit default ports, no-port URLs, and
+  IPv6 host/port separation.
 - Unique endpoint paths should remain the primary exchange classifier; do not
   rely solely on port identity.
+- A read-only full audit found that all 135 records in
+  `data/openalex_author_search_log.jsonl` and all 167 records in
+  `data/openalex_paper_title_log.jsonl` validate against the strict current
+  model. Every record has the exact 13-field schema-version-1 envelope and uses
+  `host="api.openalex.org"` with no port. The OpenAlex producer and validator use
+  the same `OPENALEX_HOST` constant directly, so authority-aware URL extraction
+  for detour records does not change historical or future OpenAlex records.
+- Keep existing version-1 OpenAlex producers, validators, matching helper, and
+  construction helper on version 1. Their explicit schema-version checks remain
+  unchanged. New detour HTTP ledgers intentionally construct version 2 and
+  populate `host=request.url.hostname` and `port=request.url.port`; Starlette
+  preserves explicitly supplied ports and returns `None` when absent. Any new
+  version-2 matching/reduction compares the port and cannot conflate otherwise
+  identical endpoints on different ports.
 
 ## Pending Lima lifecycle work
 
@@ -114,6 +160,18 @@ discussion, not yet an instruction to implement.
 
 ## Current code/verification state
 
+- The shared `HttpRequestLogRecord` now supports version 1 and version 2 through
+  one strict model. Differential validation forbids all three version-2 fields in
+  version 1; version 2 declares and serializes port, coercion, and response-ready
+  fields while permitting null/defaulted values. With coercion true, the common
+  payload is fully validated under version 1 before version-2 validation
+  completes; a migrated payload defaults its absent response-ready field to null.
+  Differential serialization preserves the exact 13-field version-1 wire format. The main
+  OpenAlex constant and producers remain on version 1. Detour push HTTP archives
+  intentionally write native version 2 with host and optional port; the new
+  response-ready field remains at its null default. Archive replay likewise
+  requires and validates native version-2 records directly. The shared model's
+  opt-in coercion path is not consumed by the detour API.
 - The tree still contains the recently implemented run-event DuckDB projection,
   private event endpoint, attempt manifests/directories, archive restoration,
   appendwatch topology, sanctioned `/pull` probe, shutdown recovery, and six
@@ -121,15 +179,18 @@ discussion, not yet an instruction to implement.
   implemented and will supersede substantial parts of that persistence work.
 - `archive_http_request_log`, `record_attempt`, and `safely_record_attempt` now
   have explanatory docstrings only; function names and behavior are unchanged.
-- A repository-wide pre-commit contour was green before a later macOS failure
-  exposed a stale subprocess test double. The fake now accepts and verifies
-  `start_new_session=True`, but the full contour has not been rerun since that
-  fix and the docstring-only edits because the attempted rerun was declined.
+- The latest `pixi run pre-commit 2>&1` passed Ruff, mypy, all shared HTTP-log
+  regressions (including the V2 response-ready JSON roundtrip), and 162 detour
+  tests. The contour failed seven tests because the current human-edited
+  `config_ai_augment.json` is invalid JSON at line 40, column 79. No config edit
+  was made. Operator-marked tests remain an explicit separate contour on the
+  operator machine.
 
 ## Immediate next action
 
-Finish the concrete three-log schemas, correlation and delivery semantics,
-configured-hash lifecycle, pre-push termination representation, and deterministic
-reducer contract with the operator. Do not implement the architecture until the
-operator approves that contract. Keep the Lima lifecycle as a recorded separate
-follow-up.
+After the operator resolves the current invalid JSON in
+`config_ai_augment.json`, rerun `pixi run pre-commit 2>&1`. Then finish the
+three-log body schemas, correlation and delivery semantics, pre-push termination
+representation, and deterministic reducer contract with the operator. Do not
+implement the wider architecture until the operator approves that contract.
+Keep the Lima lifecycle as a recorded separate follow-up.
