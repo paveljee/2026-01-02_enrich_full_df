@@ -40,10 +40,13 @@ whose `make validate` will be used to verify AI's work.
 
 ```yaml
 feature:
-  name: "KTP HCR Detour: AI Augmentation"
-  slug: detour-ai-augment
-readme: src/detours/detour_ai_augment/README.md  # human-curated
-background: # see below
+  description:
+    name: "KTP HCR Detour: AI Augmentation"
+    pixi: detour-ai-augment
+  background:  # human-curated
+    readme: src/detours/detour_ai_augment/README.md
+    rdf:   src/detours/detour_ai_augment/assets/hcr_augment_agent_architecture.drawrdf.ttl
+    # plus, see below
 # scenarios: []
 ```
 
