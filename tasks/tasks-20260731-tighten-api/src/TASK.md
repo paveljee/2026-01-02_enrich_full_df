@@ -36,6 +36,314 @@ whose `make validate` will be used to verify AI's work.
 >   - A code cell must not define paths, test IDs, setup, or assertions for other units.
 >   - No shared “miscellaneous evidence” code cells or consecutive code cells.
 
+### actual task
+
+```yaml
+feature:
+  name: "KTP HCR Detour: AI Augmentation"
+  slug: detour-ai-augment
+readme: src/detours/detour_ai_augment/README.md  # human-curated
+scenarios: [] # see below
+```
+
+<!--- aislop for review; initially in response to mine, "for a minute, explain me how do you understand currently detour ai augment feature *should* work? in given-when-then scenarios pls. in whole scope."
+
+1. Source population
+
+Given the configured read-only main database and release-map configuration,  
+When the dashboard starts,  
+Then it reads `ktp.innerdicts`, groups researchers by `ktp.namekey`, and derives exactly 307 researcher rows, deterministic `rnd` values 1–307, draw numbers, cohorts, and ineligibility categories.
+
+1. Dashboard source reads
+
+Given the dashboard needs to construct the 307-row researcher population or sanction a researcher,  
+When it loads source information,  
+Then the dashboard reads the main database and Lima/deploy configuration read-only. It does not access the detour DuckDB or authoritative JSONL.
+
+2. Backend durable storage
+
+Given detour state must be stored, queried, or reconstructed,  
+When any detour-DB or authoritative-log operation occurs,  
+Then only `api.py` reads or writes the detour DuckDB and only `api.py` writes the authoritative JSONL.
+
+3. Dashboard–backend communication
+
+Given the dashboard needs to sanction a run or observe durable run state,  
+When it communicates with `api.py`,  
+Then it sends source/run context through authenticated control push and obtains sanctions, attempts, results, history, and cards through authenticated control pull. It never communicates by opening backend-owned storage directly.
+
+1. Dashboard startup
+
+Given no run has been selected,  
+When the dashboard starts,  
+Then all 307 researchers appear, including ineligible researchers. Ineligible rows show their category and cannot be executed; eligible rows are ready.
+
+1. Sanctioning a researcher
+
+Given the operator queues an eligible researcher,  
+When the dashboard discovers the Codex session and rollout,  
+Then it sends an idempotent authenticated control push containing the run identity, `ktp.namekey`, relevant source context, session/rollout metadata, and required Lima-derived information.
+
+1. Public pull before sanction
+
+Given there is no active sanction,  
+When an agent calls `GET /pull`,  
+Then it receives the generic 503 `CONFIGURATION_ERROR_DETAIL`. No internal reason is disclosed.
+
+1. Public pull after sanction
+
+Given a valid sanction has committed,  
+When the agent calls `GET /pull`,  
+Then it receives that researcher’s source JSONL and one annotation row with all AI-augmentation fields null. Ground truth is omitted.
+
+1. Stable pull
+
+Given the sanctioned researcher has not yet been accepted,  
+When `/pull` is called repeatedly,  
+Then it returns the same researcher and, after a rejected push, the applicable retry guidance.
+
+1. Multiple researchers in one rollout
+
+Given one cumulative Codex rollout,  
+When one researcher is accepted and the operator sanctions another,  
+Then another pull/push cycle may occur in the same rollout. Each run and attempt remains distinct by run ID, attempt ID, researcher `ktp.namekey`, session, and rollout line count.
+
+1. First submission contract
+
+Given this is the first Pydantic-valid submission for a run,  
+When the agent calls `POST /push`,  
+Then the simple legacy submission model is used: plain values plus evidence, language included like every other field, comments optional, and no standardized values requested.
+
+1. Successful first submission
+
+Given every required excerpt and URL passes exact validation,  
+When the first submission is accepted,  
+Then standardized fields are explicitly initialized to appropriate `NR` values, and the full standardized model is what ultimately gets stored.
+
+1. Rollout evidence eligibility
+
+Given a submitted excerpt,  
+When validation begins,  
+Then the backend first finds it as plain text within a rollout `function_call_output`, parses that event, requires a valid turn-reference marker, and follows the complete call chain using `call_id`.
+
+1. Web-tool chain
+
+Given a candidate turn reference,  
+When its provenance is reconstructed,  
+Then the original call must be `name="run", namespace="web"`, its queries and `web_search_end` results must agree, and open/click references are resolved within the same `call_id`.
+
+1. Evidence record construction
+
+Given a fully valid chain,  
+When an evidence item is indexed,  
+Then the backend constructs a de novo structured record containing response timestamp, call identity, query text, result URL/ref ID/domain/snippet/thumbnail where present, and the actual cited text.
+
+1. Exact acceptance rule
+
+Given a submitted evidence item,  
+When its excerpt is a case-sensitive, character-for-character contiguous span and its URL exactly equals the indexed URL,  
+Then it is `v1_exact`. Only this rule can accept evidence.
+
+1. Diagnostic near matching
+
+Given exact matching fails and `codex_match=2`,  
+When the normalized submitted token sequence occurs contiguously in one valid citation section under the same URL,  
+Then it is `v2_near`. The XLSX-v2 Unicode-aware tokenization primitive is reused exactly, but this never accepts the evidence.
+
+1. Unmatched evidence
+
+Given neither exact nor diagnostic matching succeeds,  
+When assessment completes,  
+Then the item is `unmatched` and remains rejected.
+
+1. Exhaustive assessment
+
+Given several submitted evidence items,  
+When one fails,  
+Then validation continues through every item. The response reports aggregate verified counts and every failed field/index without revealing candidate text, call IDs, ref IDs, SQL, or internal matching mechanics.
+
+1. Retry baseline
+
+Given the first Pydantic-valid submission is evidence-invalid,  
+When assessment completes,  
+Then an immutable retry baseline is committed for that run. It preserves every value, evidence item, URL, outcome, session, researcher namekey, and attempt audit.
+
+1. Standardized retry contract
+
+Given a retry baseline exists,  
+When the agent retries,  
+Then it must submit the complete `StandardizedSubmission`; the response explains that standardized values are now required and includes the copyable Pydantic schema and full example.
+
+1. Retry immutability
+
+Given baseline items were exact,  
+When a retry arrives,  
+Then exact fields/items, values, excerpts, URLs, and evidence counts must remain unchanged.
+
+1. Near-match retry
+
+Given an item was `v2_near`,  
+When it is retried,  
+Then its URL and normalized token sequence must remain unchanged. Only formatting differences normalized away may be corrected, and the corrected raw excerpt must still pass exact v1 matching before acceptance.
+
+1. Unmatched retry and withdrawal
+
+Given an item was unmatched,  
+When retried,  
+Then it may be replaced freely and reclassified. It may instead be explicitly withdrawn using the structured attestation model, but only if it remains unmatched; near matches cannot be withdrawn, and the field must retain at least one exact supporting item.
+
+1. Private commit
+
+Given public push processing has produced its complete outcome,  
+When backend state is committed,  
+Then the backend invokes its unmounted in-process `PUT /_control/commit`. That body contains the public request, response outcome, appendwatch snapshot, workbook snapshot, rollout CAS reference, retry/audit metadata, and everything necessary for replay.
+
+1. Authoritative ordering
+
+Given one public push transaction,  
+When it completes,  
+Then the private PUT record is durably appended and projected first; the public POST record is appended afterwards. The external push record therefore always follows its corresponding commit record.
+
+1. Authoritative storage
+
+Given any dashboard control push, public push, or private commit,  
+When the backend has completed the response,  
+Then it appends one literal schema-v2 `HttpRequestLogRecord`, flushes and fsyncs it before sending the response. Pulls are read-only and are not logged.
+
+1. Log fields
+
+Given a backend-generated HTTP log record,  
+When serialized,  
+Then it includes schema-v2 `port` and `ready_to_respond_at_unix_usec`, sets `received_at_unix_usec` to null, and otherwise follows the exact shared `HttpRequestLogRecord` contract.
+
+1. Rollout CAS
+
+Given a rollout snapshot is needed,  
+When it is archived,  
+Then only that rollout enters the configured SHA-256 content-addressed store. `rollout_cas_dir` must come from `config_ai_augment.json`; it is never guessed.
+
+1. Detour database projection
+
+Given committed authoritative records,  
+When processing succeeds,  
+Then `api.py` projects them into the ephemeral detour DuckDB. Accepted output, retry state, attempts, sanctions, cards, and control history are all derived from this projection.
+
+1. Accepted submission
+
+Given every required field has only exact evidence and all retry obligations are satisfied,  
+When the private commit succeeds,  
+Then accepted values and standardized values are materialized, a researcher card becomes available, a `PUSH_ACCEPTED` event is recorded, and the sanction is consumed.
+
+1. Post-acceptance pull
+
+Given acceptance consumed the sanction,  
+When `/pull` is called again before another sanction,  
+Then it returns the same generic no-sanction 503 response.
+
+1. Researcher cards
+
+Given accepted attempts exist,  
+When the dashboard requests a card through control pull,  
+Then `api.py` renders it from the source context and detour projection. The dashboard loads cards lazily and caches them; large cards are not transferred until clicked.
+
+1. Card presentation
+
+Given card content is rendered as text, DOCX, or NiceGUI Markdown,  
+When field names or filenames contain underscores,  
+Then literal labels are enclosed in backticks. Plain and standardized values are adjacent, empty `NA`/`NR` standardized values are hidden, comments appear immediately after links, and footnotes/arguments are rendered safely and compactly.
+
+1. Dashboard truth
+
+Given the dashboard is running or restarted,  
+When it refreshes,  
+Then attempts, sanctions, accepted results, and run events come from authenticated control pull—not a local journal, attempt directory, or UI memory.
+
+1. Persistent attempt history
+
+Given any queued, running, failed, canceled, configuration-failed, rejected, or accepted attempt was shown,  
+When the dashboard restarts or the detour DB is rebuilt,  
+Then the same history is reconstructed from the authoritative log and remains visible.
+
+1. External activity
+
+Given a run was initiated outside the dashboard through the same control API,  
+When the dashboard polls control pull,  
+Then it discovers that run. If Codex is already busy, dashboard actions offer queueing rather than starting another process.
+
+1. Concurrency and idempotency
+
+Given one control/public push is active,  
+When another push arrives,  
+Then the shared non-waiting gate immediately returns and logs BUSY. Repeating an already committed idempotency key observes the prior result without duplicating state.
+
+1. Crash recovery
+
+Given the backend crashes before append,  
+When restarted,  
+Then nothing was committed. Given it crashes after fsync but before projection/response, replay applies the committed record exactly once.
+
+1. Replay integrity
+
+Given backend startup,  
+When the configured authoritative log and detour projection are inspected,  
+Then a behind projection catches up in line order. A conflicting prefix, invalid CAS reference, edited log, or corrupt projected state fails startup loudly.
+
+1. Incomplete tail repair
+
+Given the JSONL ends with an incomplete final line,  
+When startup detects it,  
+Then the operator is explicitly prompted before truncation. Refusal or failed repair leaves the log untouched and startup fails.
+
+1. Single writer
+
+Given one backend already owns the authoritative log,  
+When a second backend starts against it,  
+Then process locking makes the second backend fail.
+
+1. Public error privacy
+
+Given any internal backend/configuration failure,  
+When responding to the public agent,  
+Then only `CONFIGURATION_ERROR_DETAIL` is exposed. Operator logs instead show the concrete route, stage, line/gate, failing value, and underlying cause.
+
+1. Cancellation and shutdown
+
+Given Codex or dashboard work is in progress,  
+When the operator cancels, presses Ctrl-C, kills the process, or the control parent disappears,  
+Then processes are terminated as safely as the signal permits, committed history remains valid, and restart reconciliation accurately represents interrupted work.
+
+1. NiceGUI behavior
+
+Given a researcher row is selected,  
+When it is clicked again or refreshed,  
+Then it remains selected and its attempt history remains expanded. Selecting another row changes selection. Filters/search/sort/selection are preserved across action clicks, cell text is selectable, and clearing search resets it.
+
+1. NiceGUI responsiveness
+
+Given different viewport widths,  
+When the dashboard renders,  
+Then header, filters, table, action area, card, and footer share the same responsive width; columns remain usable without zero-width prostheses; cards wrap text with compact line spacing.
+
+1. Sorting
+
+Given pilot and numeric draw numbers,  
+When rows are sorted,  
+Then pilot-prefixed draws come first and all draws use human/natural ordering. First name appears left of last name and original database column labels are preserved.
+
+1. Operator E2E
+
+Given the explicit operator test command on the control-centre machine,  
+When the real contour runs,  
+Then it uses actual backend, dashboard, browser, configured main DB, authoritative log/CAS, and reachable AIVM. Every test hashes both production data trees before and after and proves they are unchanged; Lima is explicitly treated as ephemeral.
+
+1. Test/spec evidence
+
+Given any independently verifiable TASK requirement,  
+When implementation is complete,  
+Then it has a dedicated roundtrip test and one atomic Markdown requirement cell followed immediately by one evidence cell in `SPECS.ipynb`. The sample DOCX is generated for human rendering review, and `make validate` passes.
+--->
+
+<!---stale
 ```bash
 sed -n '8,212p' "$TASK_DIR/legacy/SPEC.md"
 ```
@@ -157,7 +465,7 @@ every case above must have a dedicated roundtrip test.
 ### revamped logging and db
 - detour's db is considered ephemeral for easy access. it may be deleted any time and should be reconstructible exactly from stored data.
 - stored data consist of a single jsonl append-only log which documents http request/response events (see below) and content-addressable storage that stores _only_ rollout snapshots. everything else is fairly small and goes directly into appropriate http request logs.
-- corrolary of this is that http request/responses (see below) should be architected in such a way that they are _all encompassing for all info needed for replay_ (except for rollout snapshot that is stored in cas).
+- corrolary of this is that http request/responses (see below) should be architected in such a way that they are _all encompassing for all info needed for replay_ (except for rollout snapshot that is stored in cas). for this to work for appendwatch and other backend private metadata, we introduce internal control commit endpoint that uses PUT to commit final state; only then public pull give error feedback (if unsuccessful submission) and otherwise will give busy response. so external push and internal commit are a single transaction.
 - `HttpRequestLogRecord` (with `schema_version = 2`) is the canonical way to store request/response contours. of which we have several:
 - the main component remains backend api which serves /pull and /push. to be able to serve those, it must be sanctioned by someone (usually dashboard, but in principle can be sanctioned by human operator manually - through using same http machinery as dashboard). so /pull in that sense is fully deterministic to the upstream (i.e., sanctioning) http request that backend received. therefore, on backend side we need to store _all_ pushes it _responds_ to.
 - backend api also serves internal push and pull endpoints for dashboard/human operator to sanction researchers (push for sanctioning, pull for polling outcome). a successful internal push endpoint directly and idempotently enables public pull. if server is shut down halfway through the internal push, no worries because the logging boundary here is push requests that backend served. 
@@ -166,7 +474,7 @@ every case above must have a dedicated roundtrip test.
 - backend api owns the duckdb connection including any reads and writes to duckdb or to jsonl file. neither duckdb nor jsonl file are never exposed to or used by dashboard or (god forbid) agent runtime client. upon start of backend it does replay its append-only jsonl file, simply in line order, and confirms whether db conflicts with it - what we currently have as a replay logic there. if it finds conflicts it just exits loudly with an informative server log message. and so if all ok, at start of backend api it has duckdb open and synchronized with jsonl files without any conflicts. at first starts it's empty jsonl files and so it's just empty tables. at this point both public pull and public push will return errors because no sanctioning HttpRequestLogRecord will be found in duckdb. note that because backend fully owns both db and jsonl file, it only needs to do the db/jsonl sync check once - at start, and then it trusts db until restart.
 - backend api only always processes one http request at a time (from any client) and all others get denials.
 - though denials do get noticed by asgi middleware tha wraps entire backend api and mechanically dumps the internal/public push ones in the single jsonl (pulls are not logged); the jsonl writer is therefore tightly wired into the middleware and listens to all requests at once and its job is to dump them all to jsonl as fast as possible and so other api.py logic deals with this later and so that only scenario where any response from backend api would be lost would be a very unusual case where it returned but between the lines of return response and dump to jsonl computer shut down or disk broke, so very unusual.
-- dashboard (or human operator manually curl'ing for that matter) can send a sanctioning (i.e., internal push) request. if backend is not ready it'll respond with error (though its middleware will still capture the request/response into jsonl). if it's ready it will serve it. serve it means serve, _write to jsonl succesfully_ and only then actually send it. it's fully transactional - either whole contour from receive request to log succeeds or fails. sending of response to push is out of transaction really because how it's made is that push sender never cares about response to push - it will then poll pull.
+- dashboard (or human operator manually curl'ing for that matter) can send a sanctioning (i.e., internal push) request. dashboard also owns the readonly connection to main db and reading of lima/deploy stuff, which it then communicates through control push to backend. if backend is not ready it'll respond with error (though its middleware will still capture the request/response into jsonl). if it's ready it will serve it. serve it means serve, _write to jsonl succesfully_ and only then actually send it. it's fully transactional - either whole contour from receive request to log succeeds or fails. sending of response to push is out of transaction really because how it's made is that push sender never cares about response to push - it will then poll pull.
 - in line with this, we must ensure the external/public push and pull are designed in same way. agentic runtime sends push and should not rely on response; rather the openapi.json it reads at the beginning should be clear about that after sending it it should poll pull for response to its push. and so how it will look from agent runtime's end is it sends push then polls pull, if push was successful it gets a success confirmation and then upon next pull agent runtime will observe it's been disabled until human sanctions next one.  so public pull either returns as 200 and payload or an error and error message. 
 
 here is about same thing in other words:
@@ -327,3 +635,4 @@ Note that in `HttpRequestLogRecord` (with `schema_version = 2`) we use `ready_to
 Overall, the strongest invariant I would write into the design is:
 A push transaction becomes authoritative when its complete request/response entry has been durably appended to JSONL. DuckDB and all other state are projections of that committed log; successful HTTP delivery is notification, not the commit mechanism.
 That one sentence resolves most of the crash and retry questions.
+--->
