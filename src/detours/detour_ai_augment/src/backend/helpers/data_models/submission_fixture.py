@@ -31,7 +31,7 @@ from .pydantic_to_paste import (
     StandardizedSubmission,
     WebSearchExcerpt,
 )
-from .submission import Submission
+from .submission_init import Submission
 
 TSubmission = TypeVar("TSubmission", Submission, StandardizedSubmission)
 

@@ -12,7 +12,7 @@ from ..vars import (
     KTP_AI_AUGMENT_RESEARCHER_AUTHOR_COL,
     KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL,
 )
-from .mixin import SubmissionMixin
+from .submission_mixin import SubmissionMixin
 from .pydantic_to_paste import (
     CommentsSubmission,
     FieldSubmission,

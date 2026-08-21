@@ -57,7 +57,7 @@ from ..vars import (
 )
 
 # OpenAPI hint: patch this
-from .mixin import SubmissionMixin
+from .submission_mixin import SubmissionMixin
 
 MIN_VALUE_CHARACTERS = 1
 MIN_TARGET_WEB_SEARCH_QUERY_LANGUAGES = 1
