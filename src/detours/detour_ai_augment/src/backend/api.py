@@ -98,6 +98,11 @@ from src.helpers.vars import (
 )
 
 from .helpers import codex_parse
+from .helpers.data_models.ai_augment_config import (
+    MAP_SUBSET_0_TO_BATCH_KEY,
+    REPLAY_LOG_KEY,
+    AiAugmentPipelineConfig,
+)
 from .helpers.data_models.pydantic_to_paste import (
     MAX_PUSH_BODY_BYTES,
     EvidenceSubmission,

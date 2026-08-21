@@ -49,3 +49,9 @@ KTP_AI_AUGMENT_ATTEMPT_ID_COL = f"{AI_AUGMENT_COLUMN_PREFIX}attempt_id"
 KTP_AI_AUGMENT_SESSION_METADATA_COL = f"{AI_AUGMENT_COLUMN_PREFIX}session_metadata"
 KTP_AI_AUGMENT_FOOTNOTES_COL = f"{AI_AUGMENT_COLUMN_PREFIX}footnotes"
 KTP_AI_AUGMENT_FOOTNOTE_ARGUMENTS_COL = f"{AI_AUGMENT_COLUMN_PREFIX}footnote_arguments"
+
+TEXT_ENCODING = "utf-8"
+
+CONFIG_FILENAME = "config_ai_augment.json"
+MAP_SUBSET_0_TO_BATCH_KEY = "map_subset_0_to_batch"
+REPLAY_LOG_KEY = "detour_ai_augment_backend_api_replay_log"
