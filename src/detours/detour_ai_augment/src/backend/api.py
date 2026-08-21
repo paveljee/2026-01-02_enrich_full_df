@@ -101,7 +101,16 @@ from .helpers import codex_parse
 from .helpers.data_models.ai_augment_config import (
     MAP_SUBSET_0_TO_BATCH_KEY,
     REPLAY_LOG_KEY,
-    AiAugmentPipelineConfig,
+    AiAugmentDetourConfig,
+)
+from .helpers.data_models.ai_augment_context import (
+    AiAugmentBackendContext,
+)
+from .helpers.data_models.source_population import (
+    IneligibilityCategory,
+    SourceCohort,
+    SourcePopulationRow,
+    SourceResearcher,
 )
 from .helpers.data_models.pydantic_to_paste import (
     MAX_PUSH_BODY_BYTES,
@@ -118,7 +127,7 @@ from .helpers.data_models.pydantic_to_paste import (
     StandardizedValue,
     WebSearchExcerpt,
 )
-from .helpers.data_models.submission import Submission
+from .helpers.data_models.submission_init import Submission
 from .helpers.data_models.submission_fixture import (
     L_FEI_FEI_INITIAL_FIXTURE,
     L_FEI_FEI_RETRY_FIXTURE,
@@ -129,6 +138,7 @@ from .helpers.vars import (
     AI_AUGMENT_EVIDENCE_COLUMNS,
     AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS,
     AI_AUGMENT_STANDARDIZED_COLUMNS,
+    CONFIG_FILENAME,
     KTP_AI_AUGMENT_ACADEMIC_POSITIONS_COL,
     KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL,
     KTP_AI_AUGMENT_ATTEMPT_ID_COL,
@@ -143,23 +153,10 @@ from .helpers.vars import (
     KTP_AI_AUGMENT_RESEARCHER_AUTHOR_COL,
     KTP_AI_AUGMENT_SESSION_METADATA_COL,
     KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL,
+    TEXT_ENCODING,
 )
 
 logger = logging.getLogger(__name__)
-
-
-class SourceCohort(StrEnum):
-    GROUND_TRUTH = "ground_truth"
-    NO_GROUND_TRUTH = "no_ground_truth"
-    INELIGIBLE = "ineligible"
-
-
-class IneligibilityCategory(StrEnum):
-    EXCLUDED_DUPLICATE_SOURCE_KEY = "excluded_duplicate_source_key"
-    RELEASE_BATCH_SUBSET_8 = "release_batch_subset_8"
-    STAGING_PARTITION_2 = "staging_partition_2"
-    STAGING_PARTITION_4_XLSX_NON_EXACT = "staging_partition_4_xlsx_non_exact"
-    STAGING_PARTITION_4_MULTIPLE_SSN = "staging_partition_4_multiple_ssn"
 
 
 class ControlRunEventKind(StrEnum):
@@ -346,7 +343,7 @@ ATTEMPT_RESULT_RESPONSE_CODE = {
 }
 SSH_EXECUTABLE = "ssh"
 SCP_EXECUTABLE = "scp"
-TEXT_ENCODING = "utf-8"
+BASE64_TEXT_ENCODING = "ascii"
 JSON_MEDIA_TYPE = "application/json"
 HTTP_GET_METHOD = "GET"
 HTTP_POST_METHOD = "POST"
@@ -445,8 +442,6 @@ FOOTNOTE_CONTEXT_CHARACTERS = 160
 SERVER_HOST = "127.0.0.1"
 SERVER_PORT = 8612
 
-CONFIG_FILENAME = "config_ai_augment.json"
-MAP_SUBSET_0_TO_BATCH_KEY = "map_subset_0_to_batch"
 MAP_COLUMNS = (DRAW_LABEL, BATCH_LABEL)
 # ground truth is defined explicitly by released batch, exclusive of dupe
 GROUND_TRUTH_COHORT = SourceCohort.GROUND_TRUTH
@@ -484,7 +479,7 @@ RND_START = 1
 INELIGIBLE_COHORT = SourceCohort.INELIGIBLE
 INELIGIBLE_RELEASE_BATCH = "subset 8"
 EXPECTED_INELIGIBILITY_COUNTS = {
-    IneligibilityCategory.EXCLUDED_DUPLICATE_SOURCE_KEY: 1,
+    IneligibilityCategory.EXCLUDED_DUPLICATE_NAMEKEY: 1,
     IneligibilityCategory.RELEASE_BATCH_SUBSET_8: 3,
     IneligibilityCategory.STAGING_PARTITION_2: 7,
     IneligibilityCategory.STAGING_PARTITION_4_XLSX_NON_EXACT: 6,
@@ -1260,7 +1255,7 @@ class CodexMatchProcedure:
 
 
 ValidatedEvidence = dict[str, list[EvidenceMatch]]
-RUNTIME_CONFIGURATION: RuntimeConfiguration | None = None
+RUNTIME_CONFIGURATION: AiAugmentBackendContext | None = None
 
 
 def _has_control_character(value: str) -> bool:
@@ -1569,7 +1564,7 @@ def derive_source_population(
             cohort = INELIGIBLE_COHORT
             partition, xlsx_non_exact, ssn_count = partition_flags[source_key]
             if source_key == EXCLUDED_SOURCE_KEY:
-                ineligibility_category = IneligibilityCategory.EXCLUDED_DUPLICATE_SOURCE_KEY
+                ineligibility_category = IneligibilityCategory.EXCLUDED_DUPLICATE_NAMEKEY
             elif any(release_batches.get(draw) == INELIGIBLE_RELEASE_BATCH for draw in draws):
                 ineligibility_category = IneligibilityCategory.RELEASE_BATCH_SUBSET_8
             elif partition == KTP_PARTITION_SSN_VALUE:
@@ -1762,7 +1757,7 @@ def configure_runtime(config_path: Path) -> RuntimeConfiguration:
     global RUNTIME_CONFIGURATION
 
     try:
-        pipeline = PipelineConfig.from_json(config_path)
+        pipeline = AiAugmentDetourConfig.from_json(config_path)
     except (OSError, ValueError) as exc:
         raise PushConfigurationError(
             Locale.CONFIG_INVALID_TEMPLATE.format(config_path=config_path)
@@ -1804,9 +1799,11 @@ def configure_runtime(config_path: Path) -> RuntimeConfiguration:
     detour_db_path = _detour_db_path(pipeline.db_file)
     if detour_db_path == pipeline.db_file:
         raise PushConfigurationError(Locale.DETOUR_DB_EQUALS_SOURCE)
-    RUNTIME_CONFIGURATION = RuntimeConfiguration(
+    RUNTIME_CONFIGURATION = AiAugmentBackendContext(
         pipeline=pipeline,
         detour_db_path=detour_db_path,
+        replay_log=replay_log,
+        rollout_cas_dir=pipeline.rollout_cas_dir,
         release_map=release_map,
         source_population=source_population,
         eligible_cohorts=eligible_cohorts(source_population),
@@ -1814,7 +1811,7 @@ def configure_runtime(config_path: Path) -> RuntimeConfiguration:
     return RUNTIME_CONFIGURATION
 
 
-def runtime_configuration() -> RuntimeConfiguration:
+def runtime_configuration() -> AiAugmentBackendContext:
     if RUNTIME_CONFIGURATION is None:
         raise PushConfigurationError(
             Locale.API_CONFIG_REQUIRED_TEMPLATE.format(config_filename=CONFIG_FILENAME)

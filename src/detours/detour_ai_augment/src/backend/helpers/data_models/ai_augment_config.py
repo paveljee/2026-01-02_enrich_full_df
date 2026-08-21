@@ -11,7 +11,7 @@ from ..vars import (
     REPLAY_LOG_KEY,
 )
 
-class AiAugmentPipelineConfig(PipelineConfig):
+class AiAugmentDetourConfig(PipelineConfig):
     rollout_cas_dir: Path
 
     @model_validator(mode="after")
