@@ -135,6 +135,9 @@ TEST_AUTHORITATIVE_RESPONSE_BODY = {"accepted": True}
 TEST_AUTHORITATIVE_RESPONSE_HEADER = "X-Authoritative-Probe"
 TEST_AUTHORITATIVE_RESPONSE_HEADER_VALUE = "preserved"
 TEST_CONTROL_IDEMPOTENCY_KEY = "test-control-idempotency-key"
+TEST_AUTHORITATIVE_LOG_FILENAME = "authoritative.jsonl"
+TEST_DETOUR_DB_FILENAME = "detour.duckdb"
+TEST_ROLLOUT_CAS_DIRECTORY = "rollout-cas"
 
 HAANEN_REJECTED_ATTEMPT_ID = "20260813T141344_678596Z_8ef1f6372b4a48d9a3b1279736356363"
 HAANEN_ACCEPTED_ATTEMPT_ID = "20260813T141450_027429Z_044215aac8c44200882531b10a2acfa6"
@@ -195,146 +198,6 @@ TEST_STANDARDIZED_VALUES = {
     api.KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL: "NR",
     api.KTP_AI_AUGMENT_LINKS_COL: "NR",
 }
-
-
-def test_pure_asgi_middleware_buffers_and_records_finite_control_push(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    records: list[HttpRequestLogRecord] = []
-    probe_app = FastAPI()
-    probe_app.add_middleware(api.AuthoritativeHttpMiddleware)
-
-    @probe_app.post(api.CONTROL_PUSH_PATH)
-    async def probe_control_push() -> JSONResponse:
-        return JSONResponse(
-            content=TEST_AUTHORITATIVE_RESPONSE_BODY,
-            headers={
-                TEST_AUTHORITATIVE_RESPONSE_HEADER: (
-                    TEST_AUTHORITATIVE_RESPONSE_HEADER_VALUE
-                )
-            },
-        )
-
-    monkeypatch.setattr(api, "AUTHORITATIVE_BACKEND_HEALTHY", True)
-    monkeypatch.setattr(api, "AUTHORITATIVE_COMMAND_ACTIVE", False)
-    monkeypatch.setattr(api, "_append_authoritative_record", records.append)
-
-    with TestClient(probe_app) as client:
-        response = client.post(
-            api.CONTROL_PUSH_PATH,
-            content=TEST_AUTHORITATIVE_REQUEST_BODY,
-            headers={api.HTTP_CONTENT_TYPE_HEADER: api.JSON_MEDIA_TYPE},
-        )
-
-    assert any(
-        middleware.cls is api.AuthoritativeHttpMiddleware
-        for middleware in api.app.user_middleware
-    )
-    assert any(
-        middleware.cls is api.AuthoritativeHttpMiddleware
-        for middleware in api.commit_app.user_middleware
-    )
-    assert response.status_code == api.status.HTTP_200_OK
-    assert response.json() == TEST_AUTHORITATIVE_RESPONSE_BODY
-    assert (
-        response.headers[TEST_AUTHORITATIVE_RESPONSE_HEADER]
-        == TEST_AUTHORITATIVE_RESPONSE_HEADER_VALUE
-    )
-    assert len(records) == 1
-    record = records[0]
-    assert record.method == api.HTTP_POST_METHOD
-    assert record.path == api.CONTROL_PUSH_PATH
-    assert record.request_body == TEST_AUTHORITATIVE_REQUEST_BODY.decode(api.TEXT_ENCODING)
-    assert record.response_code == response.status_code
-    assert record.response_body == response.text
-    assert (
-        record.response_headers[TEST_AUTHORITATIVE_RESPONSE_HEADER.lower()]
-        == TEST_AUTHORITATIVE_RESPONSE_HEADER_VALUE
-    )
-    assert record.received_at_unix_usec is None
-    assert record.ready_to_respond_at_unix_usec is not None
-    assert api.AUTHORITATIVE_COMMAND_ACTIVE is False
-
-
-def test_control_push_is_logged_projected_and_replayed_through_real_app(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    replay_log_path = tmp_path / "authoritative.jsonl"
-    detour_db_path = tmp_path / "detour.duckdb"
-    rollout_cas_dir = tmp_path / "rollout-cas"
-    replay_log_path.write_bytes(b"")
-    replay_log = api.RegisteredResource(
-        name=replay_log_path.name,
-        hash=hashlib.sha256(b"").hexdigest(),
-        group=api.ResourceGroup.KTP_PIPELINE_ARTIFACT,
-        fragment_type=api.FragmentType.LINE_NUMBER,
-        url=replay_log_path.as_uri(),
-    )
-    pipeline = cast(
-        api.AiAugmentDetourConfig,
-        SimpleNamespace(match_rule_version=SimpleNamespace(codex_match=1)),
-    )
-    runtime = api.AiAugmentBackendContext(
-        pipeline=pipeline,
-        detour_db_path=detour_db_path,
-        replay_log=replay_log,
-        rollout_cas_dir=rollout_cas_dir,
-        eligible_cohorts={},
-    )
-    event = api.ControlRunEvent(
-        run_id=TEST_RUN_ID,
-        namekey=TEST_NAMEKEY,
-        at=TEST_ATTEMPT_TIMESTAMP,
-        kind=api.ControlRunEventKind.QUEUED,
-    )
-    body = api.ControlPushRequest(event=event).model_dump_json().encode(api.TEXT_ENCODING)
-    headers = {
-        api.CONTROL_RUN_EVENTS_TOKEN_HEADER: TEST_CONTROL_RUN_EVENTS_TOKEN,
-        api.HTTP_CONTENT_TYPE_HEADER: api.JSON_MEDIA_TYPE,
-        api.HTTP_IDEMPOTENCY_KEY_HEADER: TEST_CONTROL_IDEMPOTENCY_KEY,
-    }
-    monkeypatch.setattr(api, "RUNTIME_CONFIGURATION", runtime)
-    monkeypatch.setattr(api, "CONTROL_RUN_EVENTS_TOKEN", TEST_CONTROL_RUN_EVENTS_TOKEN)
-    monkeypatch.setattr(api, "AUTHORITATIVE_LOG_DESCRIPTOR", None)
-    monkeypatch.setattr(api, "AUTHORITATIVE_COMMAND_ACTIVE", False)
-
-    with TestClient(api.app) as client:
-        push_response = client.post(api.CONTROL_PUSH_PATH, content=body, headers=headers)
-        first_pull = api.ControlPullResponse.model_validate_json(
-            client.get(
-                api.CONTROL_PULL_PATH,
-                headers={
-                    api.CONTROL_RUN_EVENTS_TOKEN_HEADER: TEST_CONTROL_RUN_EVENTS_TOKEN,
-                },
-            ).content
-        )
-
-    assert push_response.status_code == api.status.HTTP_200_OK
-    assert api.ControlPushResponse.model_validate_json(push_response.content) == (
-        api.ControlPushResponse(accepted=True, duplicate=False)
-    )
-    assert first_pull.events == (event,)
-    records = tuple(
-        HttpRequestLogRecord.model_validate_json(line)
-        for line in replay_log_path.read_text(encoding=api.TEXT_ENCODING).splitlines()
-    )
-    assert len(records) == 1
-    assert records[0].path == api.CONTROL_PUSH_PATH
-    assert records[0].request_body == body.decode(api.TEXT_ENCODING)
-
-    detour_db_path.unlink()
-    with TestClient(api.app) as client:
-        replayed_pull = api.ControlPullResponse.model_validate_json(
-            client.get(
-                api.CONTROL_PULL_PATH,
-                headers={
-                    api.CONTROL_RUN_EVENTS_TOKEN_HEADER: TEST_CONTROL_RUN_EVENTS_TOKEN,
-                },
-            ).content
-        )
-
-    assert replayed_pull == first_pull
 
 OFFICERS_URL = (
     "https://find-and-update.company-information.service.gov.uk/company/SC621293/officers"
@@ -1082,6 +945,146 @@ def prepare_real_sample_push(
         configuration=configuration,
         rendered_cards=rendered_cards,
     )
+
+
+def test_pure_asgi_middleware_buffers_and_records_finite_control_push(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    records: list[HttpRequestLogRecord] = []
+    probe_app = FastAPI()
+    probe_app.add_middleware(api.AuthoritativeHttpMiddleware)
+
+    @probe_app.post(api.CONTROL_PUSH_PATH)
+    async def probe_control_push() -> JSONResponse:
+        return JSONResponse(
+            content=TEST_AUTHORITATIVE_RESPONSE_BODY,
+            headers={
+                TEST_AUTHORITATIVE_RESPONSE_HEADER: (
+                    TEST_AUTHORITATIVE_RESPONSE_HEADER_VALUE
+                )
+            },
+        )
+
+    monkeypatch.setattr(api, "AUTHORITATIVE_BACKEND_HEALTHY", True)
+    monkeypatch.setattr(api, "AUTHORITATIVE_COMMAND_ACTIVE", False)
+    monkeypatch.setattr(api, "_append_authoritative_record", records.append)
+
+    with TestClient(probe_app) as client:
+        response = client.post(
+            api.CONTROL_PUSH_PATH,
+            content=TEST_AUTHORITATIVE_REQUEST_BODY,
+            headers={api.HTTP_CONTENT_TYPE_HEADER: api.JSON_MEDIA_TYPE},
+        )
+
+    assert any(
+        middleware.cls is api.AuthoritativeHttpMiddleware
+        for middleware in api.app.user_middleware
+    )
+    assert any(
+        middleware.cls is api.AuthoritativeHttpMiddleware
+        for middleware in api.commit_app.user_middleware
+    )
+    assert response.status_code == api.status.HTTP_200_OK
+    assert response.json() == TEST_AUTHORITATIVE_RESPONSE_BODY
+    assert (
+        response.headers[TEST_AUTHORITATIVE_RESPONSE_HEADER]
+        == TEST_AUTHORITATIVE_RESPONSE_HEADER_VALUE
+    )
+    assert len(records) == 1
+    record = records[0]
+    assert record.method == api.HTTP_POST_METHOD
+    assert record.path == api.CONTROL_PUSH_PATH
+    assert record.request_body == TEST_AUTHORITATIVE_REQUEST_BODY.decode(api.TEXT_ENCODING)
+    assert record.response_code == response.status_code
+    assert record.response_body == response.text
+    assert (
+        record.response_headers[TEST_AUTHORITATIVE_RESPONSE_HEADER.lower()]
+        == TEST_AUTHORITATIVE_RESPONSE_HEADER_VALUE
+    )
+    assert record.received_at_unix_usec is None
+    assert record.ready_to_respond_at_unix_usec is not None
+    assert api.AUTHORITATIVE_COMMAND_ACTIVE is False
+
+
+def test_control_push_is_logged_projected_and_replayed_through_real_app(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    replay_log_path = tmp_path / TEST_AUTHORITATIVE_LOG_FILENAME
+    detour_db_path = tmp_path / TEST_DETOUR_DB_FILENAME
+    rollout_cas_dir = tmp_path / TEST_ROLLOUT_CAS_DIRECTORY
+    replay_log_path.write_bytes(b"")
+    replay_log = api.RegisteredResource(
+        name=replay_log_path.name,
+        hash=hashlib.sha256(b"").hexdigest(),
+        group=api.ResourceGroup.KTP_PIPELINE_ARTIFACT,
+        fragment_type=api.FragmentType.LINE_NUMBER,
+        url=replay_log_path.as_uri(),
+    )
+    pipeline = cast(
+        api.AiAugmentDetourConfig,
+        SimpleNamespace(match_rule_version=SimpleNamespace(codex_match=1)),
+    )
+    runtime = api.AiAugmentBackendContext(
+        pipeline=pipeline,
+        detour_db_path=detour_db_path,
+        replay_log=replay_log,
+        rollout_cas_dir=rollout_cas_dir,
+        eligible_cohorts={},
+    )
+    event = api.ControlRunEvent(
+        run_id=TEST_RUN_ID,
+        namekey=TEST_NAMEKEY,
+        at=TEST_ATTEMPT_TIMESTAMP,
+        kind=api.ControlRunEventKind.QUEUED,
+    )
+    body = api.ControlPushRequest(event=event).model_dump_json().encode(api.TEXT_ENCODING)
+    headers = {
+        api.CONTROL_RUN_EVENTS_TOKEN_HEADER: TEST_CONTROL_RUN_EVENTS_TOKEN,
+        api.HTTP_CONTENT_TYPE_HEADER: api.JSON_MEDIA_TYPE,
+        api.HTTP_IDEMPOTENCY_KEY_HEADER: TEST_CONTROL_IDEMPOTENCY_KEY,
+    }
+    monkeypatch.setattr(api, "RUNTIME_CONFIGURATION", runtime)
+    monkeypatch.setattr(api, "CONTROL_RUN_EVENTS_TOKEN", TEST_CONTROL_RUN_EVENTS_TOKEN)
+    monkeypatch.setattr(api, "AUTHORITATIVE_LOG_DESCRIPTOR", None)
+    monkeypatch.setattr(api, "AUTHORITATIVE_COMMAND_ACTIVE", False)
+
+    with TestClient(api.app) as client:
+        push_response = client.post(api.CONTROL_PUSH_PATH, content=body, headers=headers)
+        first_pull = api.ControlPullResponse.model_validate_json(
+            client.get(
+                api.CONTROL_PULL_PATH,
+                headers={
+                    api.CONTROL_RUN_EVENTS_TOKEN_HEADER: TEST_CONTROL_RUN_EVENTS_TOKEN,
+                },
+            ).content
+        )
+
+    assert push_response.status_code == api.status.HTTP_200_OK
+    assert api.ControlPushResponse.model_validate_json(push_response.content) == (
+        api.ControlPushResponse(accepted=True, duplicate=False)
+    )
+    assert first_pull.events == (event,)
+    records = tuple(
+        HttpRequestLogRecord.model_validate_json(line)
+        for line in replay_log_path.read_text(encoding=api.TEXT_ENCODING).splitlines()
+    )
+    assert len(records) == 1
+    assert records[0].path == api.CONTROL_PUSH_PATH
+    assert records[0].request_body == body.decode(api.TEXT_ENCODING)
+
+    detour_db_path.unlink()
+    with TestClient(api.app) as client:
+        replayed_pull = api.ControlPullResponse.model_validate_json(
+            client.get(
+                api.CONTROL_PULL_PATH,
+                headers={
+                    api.CONTROL_RUN_EVENTS_TOKEN_HEADER: TEST_CONTROL_RUN_EVENTS_TOKEN,
+                },
+            ).content
+        )
+
+    assert replayed_pull == first_pull
 
 
 @pytest.mark.parametrize("action", sorted(api.ELIGIBLE_WEB_ACTIONS))

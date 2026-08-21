@@ -197,13 +197,13 @@ but make no unrelated refactors.
   `sourcekey` to `namekey`. Remaining old terminology is confined to tests that
   still assert the removed architecture and must be replaced, not accommodated.
 - The latest `pixi run pre-commit 2>&1` passes Ruff and reaches mypy. The active
-  production modules and `test_e2e_operator.py` are mypy-clean. Mypy stops on
-  203 stale-contract errors confined to `test_api.py`,
-  `test_control_centre.py`, and `test_control_centre_e2e.py`: removed
+  production modules, `test_e2e_operator.py`, and the migrated real-browser
+  `test_control_centre_e2e.py` are mypy-clean. Mypy stops on 170 stale-contract
+  errors confined to `test_api.py` and `test_control_centre.py`: removed
   manifests/attempt directories, callback endpoints, local journal/control
-  plane, and `source_key` UI names. Replace those tests with authoritative-log
-  and namekey/control-boundary roundtrips rather than restoring aliases or
-  compatibility code.
+  plane, and obsolete source-key tests. Replace those stale tests with
+  authoritative-log and namekey/control-boundary roundtrips rather than
+  restoring aliases or compatibility code.
 - Existing appendwatch, evidence matching, retry-baseline, and researcher-card
   behavior remains required inside the new transaction/replay boundary.
 - The human explicitly removed the AIVM workbook/prompt contour after the
@@ -251,8 +251,10 @@ but make no unrelated refactors.
    focused middleware regression; an actual FastAPI control-push -> JSONL ->
    DuckDB -> control-pull roundtrip that deletes and rebuilds the DB from replay;
    and the real NiceGUI/Playwright browser contract, including `QUEUE` ->
-   `CANCEL` while preserving UI state. Run the repository gate, then ask the
-   operator for one rerun of the exact accepted-workflow node. Keep the positive
+   `CANCEL` while preserving UI state. All three focused regressions pass
+   together. The repository gate passes Ruff and stops only on the 170 known
+   stale-test mypy errors documented above. Ask the operator for one rerun of
+   the exact accepted-workflow node. Keep the positive
    `QUEUE`/`RERUN` -> `CANCEL` and `CANCEL` -> `RERUN` assertion. Operator tests
    retain merged dashboard stdout/stderr and tee every line live; the dedicated
    Pixi task uses pytest `tee-sys`.
