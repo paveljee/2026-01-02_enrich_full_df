@@ -42,6 +42,7 @@ detour-ai-augment = [
   "httpx2==2.12.0",  # for starlette
   "nicegui==3.13.0",
   "playwright==1.62.0",
+  "pytest-bdd==8.1.0",
   "pydantic-extra-types==2.11.1",
   "pycountry==24.6.1",
 ]
@@ -333,7 +334,7 @@ sudo env \
   src/detours/detour_ai_augment/tests/test_pydantic_to_paste.py::test_academic_institution_round_trips_against_real_apis
 """
 test-detour-ai-augment-operator = """
-"$CONDA_PREFIX/bin/python" -m pytest -vv -srA -m operator \
+"$CONDA_PREFIX/bin/python" -m pytest -vv -srA --capture=tee-sys -m operator \
   src/detours/detour_ai_augment/tests/test_e2e_operator.py
 """
 

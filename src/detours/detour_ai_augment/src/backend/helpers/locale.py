@@ -74,12 +74,12 @@ class Locale:
     MAP_DRAW_CONFLICT_TEMPLATE: Final = "{resource_key} has conflicting draw {draw_number!r}"
     MAP_CSV_UNREADABLE_TEMPLATE: Final = "configured {resource_key} CSV is unreadable or malformed"
     MAP_CSV_EMPTY_TEMPLATE: Final = "configured {resource_key} CSV is empty"
-    INNERDICTS_NON_TEXT_TEMPLATE: Final = "{table_name} has non-text innerdicts for {source_key}"
+    INNERDICTS_NON_TEXT_TEMPLATE: Final = "{table_name} has non-text innerdicts for {namekey}"
     INNERDICTS_MALFORMED_TEMPLATE: Final = (
-        "{table_name} has malformed JSONL for {source_key} at line {line_number}"
+        "{table_name} has malformed JSONL for {namekey} at line {line_number}"
     )
     INNERDICTS_NON_OBJECT_TEMPLATE: Final = (
-        "{table_name} has a non-object row for {source_key} at line {line_number}"
+        "{table_name} has a non-object row for {namekey} at line {line_number}"
     )
     SOURCE_DUCKDB_TABLE_MISSING_TEMPLATE: Final = "configured source DuckDB lacks {table_name}"
     TABLE_NAMEKEY_NON_TEXT_TEMPLATE: Final = "{table_name} contains a non-text name_key"
@@ -90,8 +90,8 @@ class Locale:
     SOURCE_CLASSIFICATIONS_INVALID_TEMPLATE: Final = (
         "configured {table_name} contains invalid source classifications"
     )
-    CARD_PARTITION_UNKNOWN_SOURCE_KEYS: Final = (
-        "card-partition eligibility contains unknown source keys"
+    CARD_PARTITION_UNKNOWN_NAMEKEYS: Final = (
+        "card-partition eligibility contains unknown namekeys"
     )
     COHORTS_OVERLAP: Final = "ground-truth and no-ground-truth cohorts overlap"
     GROUND_TRUTH_CARDINALITY_TEMPLATE: Final = (
@@ -101,10 +101,10 @@ class Locale:
         "no-ground-truth cohort cardinality is invalid: expected {expected}, got {actual}"
     )
     ELIGIBLE_COHORT_CARDINALITY_INVALID: Final = "eligible cohort union cardinality is invalid"
-    CARD_PARTITION_SOURCE_KEYS_MISMATCH: Final = (
-        "card-partition source keys do not match innerdict-owned source keys"
+    CARD_PARTITION_NAMEKEYS_MISMATCH: Final = (
+        "card-partition namekeys do not match innerdict-owned namekeys"
     )
-    INELIGIBILITY_CATEGORY_UNKNOWN: Final = "an ineligible source key has no recognized category"
+    INELIGIBILITY_CATEGORY_UNKNOWN: Final = "an ineligible namekey has no recognized category"
     SOURCE_POPULATION_COHORTS_INVALID: Final = "source population cohort cardinalities are invalid"
     SOURCE_POPULATION_INELIGIBILITY_INVALID: Final = (
         "source population ineligibility categories are invalid"
@@ -160,12 +160,6 @@ class Locale:
     AIVM_SSH_PORT_INVALID: Final = (
         "FASTAPI_DETOUR_AIVM_SSH_PORT is invalid; correct .env and restart the API"
     )
-    HOST_WORKBOOK_INVALID: Final = "host workbook is not a readable writable regular file"
-    HOST_WORKBOOK_INITIALIZATION_FAILED: Final = (
-        "host workbook could not be initialized in the AIVM workdir"
-    )
-    SCP_WORKBOOK_ARCHIVE_INVALID: Final = "SCP did not produce a regular workbook archive"
-    GUEST_WORKBOOK_ARCHIVE_FAILED: Final = "guest workbook could not be archived"
     SCP_ROLLOUT_ARCHIVE_INVALID: Final = (
         "SCP did not produce a regular rollout archive; verify AIVM deployment"
     )
@@ -356,6 +350,69 @@ class Locale:
         "submission contains evidence that is not yet exactly verified"
     )
 
+    REPLAY_LOG_TAIL_REPAIR_FAILED: Final = "authoritative replay-log tail repair failed"
+    REPLAY_LOG_TAIL_REPAIR_PROMPT_TEMPLATE: Final = (
+        "Authoritative replay log {path} ends with an incomplete record. "
+        "Discard its final {discarded_bytes} byte(s)? [y/N] "
+    )
+    REPLAY_LOG_TAIL_REPAIR_DECLINED: Final = (
+        "operator declined authoritative replay-log tail repair"
+    )
+    REPLAY_LOG_UNREADABLE: Final = "authoritative replay log is unreadable"
+    REPLAY_LOG_ALREADY_LOCKED: Final = (
+        "another backend process already owns the authoritative replay log"
+    )
+    REPLAY_LOG_LINE_INVALID_TEMPLATE: Final = (
+        "authoritative replay log line {line_number} is invalid"
+    )
+    REPLAY_PROJECTION_CONFLICT: Final = (
+        "detour database projection conflicts with the authoritative replay log"
+    )
+    REPLAY_PROJECTION_FAILED: Final = "authoritative replay projection failed"
+    REPLAY_RECORD_BODY_INVALID: Final = "authoritative HTTP record body is invalid"
+    REPLAY_CONTROL_EVENT_INVALID: Final = "authoritative control event is inconsistent"
+    REPLAY_COMMIT_INVALID: Final = "authoritative private commit is inconsistent"
+    REPLAY_PUBLIC_PUSH_INVALID: Final = "authoritative public push audit is inconsistent"
+    ROLLOUT_CAS_CONFLICT: Final = "rollout content-addressed storage contains a conflict"
+    ROLLOUT_CAS_BLOB_INVALID: Final = "committed rollout snapshot is missing or invalid"
+    INTERNAL_COMMIT_API_TITLE: Final = "AI Augmentation Private Commit API"
+    AUTHORITATIVE_RESPONSE_NOT_UTF8: Final = (
+        "backend push responses must be finite UTF-8 payloads"
+    )
+    AUTHORITATIVE_RESPONSE_INCOMPLETE_LOG: Final = (
+        "authoritative %s %s handler produced an incomplete ASGI response"
+    )
+    AUTHORITATIVE_LOG_NOT_OPEN: Final = "authoritative replay log is not open"
+    AUTHORITATIVE_LOG_APPEND_FAILED: Final = "authoritative replay-log append failed"
+    AUTHORITATIVE_COMMAND_BUSY: Final = (
+        "Another state-changing request is in progress; retry by polling first."
+    )
+    AUTHORITATIVE_PROJECTION_FAILED_LOG: Final = (
+        "authoritative log line %s committed but DuckDB projection failed; "
+        "backend is unhealthy: %s"
+    )
+    AUTHORITATIVE_HANDLER_FAILED_LOG: Final = "authoritative %s %s handler failed"
+    AUTHORITATIVE_LOG_APPEND_FAILED_LOG: Final = (
+        "authoritative %s %s response could not be committed to the replay log: %s"
+    )
+    AUTHORITATIVE_BACKEND_UNHEALTHY_LOG: Final = (
+        "rejecting authoritative %s %s because an earlier committed record is not projected"
+    )
+    AUTHORITATIVE_COMMAND_BUSY_LOG: Final = (
+        "rejecting concurrent authoritative %s %s because another push is active"
+    )
+    CONTROL_IDEMPOTENCY_KEY_REQUIRED: Final = (
+        "Control push requires a nonblank Idempotency-Key header"
+    )
+    CONTROL_IDEMPOTENCY_CONFLICT: Final = (
+        "Idempotency-Key was already used for a different control event"
+    )
+    CONTROL_SANCTION_ACTIVE: Final = "another researcher sanction is already active"
+    CONTROL_COMMIT_REFUSED: Final = "private submission commit was refused"
+    CONTROL_COMMIT_FAILED_LOG: Final = (
+        "push attempt=%s private commit failed status=%s body=%r"
+    )
+
     OPENALEX_API_KEY_MISSING: Final = (
         "OPENALEX_API_KEY is required to validate an OpenAlex institution"
     )
@@ -386,13 +443,13 @@ class Locale:
     SOURCE_DUCKDB_OPEN_FAILED: Final = "configured source DuckDB could not be opened read-only"
     DETOUR_DUCKDB_OPEN_FAILED: Final = "detour DuckDB could not be opened"
     SANCTIONED_ROWS_DUPLICATE_TEMPLATE: Final = (
-        "{table_name} contains duplicate rows for sanctioned source key"
+        "{table_name} contains duplicate rows for sanctioned namekey"
     )
-    SANCTIONED_SOURCE_INELIGIBLE: Final = "sanctioned source key is not eligible for this detour"
-    SANCTIONED_SOURCE_MALFORMED: Final = "sanctioned source key is malformed"
-    SANCTIONED_SOURCE_NONCANONICAL: Final = "sanctioned source key is not canonical"
-    SANCTIONED_XLSX_CONTEXT_MISSING: Final = "sanctioned source key has no xlsx innerdict context"
-    SANCTIONED_DRAW_MISSING: Final = "sanctioned source key has no innerdict-owned draw"
+    SANCTIONED_NAMEKEY_INELIGIBLE: Final = "sanctioned namekey is not eligible for this detour"
+    SANCTIONED_NAMEKEY_MALFORMED: Final = "sanctioned namekey is malformed"
+    SANCTIONED_NAMEKEY_NONCANONICAL: Final = "sanctioned namekey is not canonical"
+    SANCTIONED_XLSX_CONTEXT_MISSING: Final = "sanctioned namekey has no xlsx innerdict context"
+    SANCTIONED_DRAW_MISSING: Final = "sanctioned namekey has no innerdict-owned draw"
     GROUND_TRUTH_DOCX_INCOMPLETE: Final = "ground-truth researcher has no complete docx innerdict"
     RESEARCHER_NOT_UNIQUE: Final = "selected researcher did not resolve uniquely"
     ACCEPTED_IDENTITY_DUPLICATE: Final = (
@@ -411,7 +468,6 @@ class Locale:
     REQUEST_CONTENT_TYPE_INVALID: Final = "request Content-Type must be application/json"
     REQUEST_CONTENT_LENGTH_INVALID: Final = "request Content-Length is invalid"
     REQUEST_BODY_TOO_LARGE: Final = "request body exceeds the configured size limit"
-    WORKBOOK_NOT_INITIALIZED: Final = "guest workbook was not initialized at backend startup"
     SANCTIONED_SESSION_MISMATCH: Final = "sanctioned session does not match archived rollout"
     CARD_INTRO_DATE_FORMAT: Final = "%B %d, %Y"
 

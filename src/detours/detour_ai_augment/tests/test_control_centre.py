@@ -1364,13 +1364,9 @@ def test_codex_ssh_command_has_only_the_approved_reverse_forward() -> None:
 
 
 @pytest.mark.anyio
-async def test_codex_start_uses_the_same_full_workbook_bytes_in_file_and_prompt(
-    tmp_path: Path,
+async def test_codex_start_streams_only_the_openapi_url_to_stdin(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    workbook_path = tmp_path / "workbook.md"
-    workbook_bytes = "First learning.\nUnicode: ’\n".encode()
-    workbook_path.write_bytes(workbook_bytes)
     runner = control_ui.CodexRunner(
         timezone=CONTROL_TIMEZONE,
         openalex_api_key=TEST_OPENALEX_API_KEY,
@@ -1378,6 +1374,11 @@ async def test_codex_start_uses_the_same_full_workbook_bytes_in_file_and_prompt(
     remote_writes: list[tuple[PurePosixPath, bytes]] = []
     launched_commands: list[tuple[str, ...]] = []
     launched_new_sessions: list[bool] = []
+    launched_stdin_modes: list[int] = []
+    stdin_writes: list[bytes] = []
+    stdin_drains: list[None] = []
+    stdin_closes: list[None] = []
+    stdin_waits: list[None] = []
 
     async def write_remote(path: PurePosixPath, content: bytes) -> None:
         remote_writes.append((path, content))
@@ -1394,11 +1395,30 @@ async def test_codex_start_uses_the_same_full_workbook_bytes_in_file_and_prompt(
 
     async def create_process(
         *command: str,
+        stdin: int,
         start_new_session: bool,
-    ) -> SimpleNamespace:
+    ) -> asyncio.subprocess.Process:
+        async def drain() -> None:
+            stdin_drains.append(None)
+
+        async def wait_closed() -> None:
+            stdin_waits.append(None)
+
         launched_commands.append(command)
         launched_new_sessions.append(start_new_session)
-        return SimpleNamespace(returncode=None)
+        launched_stdin_modes.append(stdin)
+        return cast(
+            asyncio.subprocess.Process,
+            SimpleNamespace(
+                returncode=None,
+                stdin=SimpleNamespace(
+                    write=stdin_writes.append,
+                    drain=drain,
+                    close=lambda: stdin_closes.append(None),
+                    wait_closed=wait_closed,
+                ),
+            ),
+        )
 
     async def discover_session(
         _handle: control_ui.CodexProcessHandle,
@@ -1414,7 +1434,6 @@ async def test_codex_start_uses_the_same_full_workbook_bytes_in_file_and_prompt(
         assert session_timestamp == SESSION_TIMESTAMP
         return ROLLOUT_PATH
 
-    monkeypatch.setattr(control_ui, "HOST_WORKBOOK_PATH", workbook_path)
     monkeypatch.setattr(runner, "_write_remote_file", write_remote)
     monkeypatch.setattr(runner, "_remote_command", remote_command)
     monkeypatch.setattr(runner, "discover_session", discover_session)
@@ -1423,10 +1442,6 @@ async def test_codex_start_uses_the_same_full_workbook_bytes_in_file_and_prompt(
 
     result = await runner.start(run_id=uuid4())
 
-    prompt_bytes = control_ui.CODEX_PROMPT_TEMPLATE.format(
-        openapi_url=control_ui.BACKEND_OPENAPI_URL,
-        workbook=workbook_bytes.decode(),
-    ).encode()
     assert result.session_id == SESSION_ID
     assert remote_writes == [
         (
@@ -1436,16 +1451,22 @@ async def test_codex_start_uses_the_same_full_workbook_bytes_in_file_and_prompt(
                 value=TEST_OPENALEX_API_KEY,
             ).encode(),
         ),
-        (control_ui.CODEX_WORKBOOK_PATH, workbook_bytes),
-        (control_ui.CODEX_PROMPT_PATH, prompt_bytes),
     ]
     assert len(launched_commands) == 1
     assert launched_new_sessions == [True]
+    assert launched_stdin_modes == [asyncio.subprocess.PIPE]
+    assert stdin_writes == [
+        control_ui.CODEX_INPUT_TEMPLATE.format(
+            openapi_url=control_ui.BACKEND_OPENAPI_URL,
+        ).encode()
+    ]
+    assert stdin_drains == [None]
+    assert stdin_closes == [None]
+    assert stdin_waits == [None]
     remote_launch = launched_commands[0][-1]
     assert " ".join(control_ui.CODEX_EXEC_COMMAND) in remote_launch
     assert str(control_ui.CODEX_ENV_PATH) in remote_launch
     assert TEST_OPENALEX_API_KEY not in remote_launch
-    assert str(control_ui.CODEX_PROMPT_PATH) in remote_launch
 
 
 def test_backend_environment_includes_openalex_api_key() -> None:

@@ -8,7 +8,6 @@ from pathlib import Path
 import pytest
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
-DOTENV_PATH = REPOSITORY_ROOT / ".env"
 DEPLOY_SCRIPT_PATH = (
     REPOSITORY_ROOT
     / "src"
@@ -24,8 +23,27 @@ OPERATOR_YES_OPTION = "operator_yes"
 OPENALEX_API_KEY_ENV_NAME = "OPENALEX_API_KEY"
 REPOSITORY_ROOT_ENV_NAME = "REPO_DIR"
 AIVM_INSTANCE = "aivm"
+AIVM_USER = "ai"
+AIVM_OPENALEX_ENV_PATH = "/home/ai/workdir/.openalex.env"
 DEPLOY_COMMAND = ("bash", str(DEPLOY_SCRIPT_PATH), "--yes")
+AIVM_START_COMMAND = ("limactl", "start", AIVM_INSTANCE)
 AIVM_PROBE_COMMAND = ("limactl", "shell", "--workdir=/", AIVM_INSTANCE, "true")
+AIVM_OPENALEX_KEY_COMMAND = (
+    "limactl",
+    "shell",
+    "--workdir=/",
+    AIVM_INSTANCE,
+    "sudo",
+    "--user",
+    AIVM_USER,
+    "bash",
+    "-lc",
+    f"test -f {AIVM_OPENALEX_ENV_PATH} "
+    f'&& test "$(stat -c %a {AIVM_OPENALEX_ENV_PATH})" = 600 '
+    f"&& . {AIVM_OPENALEX_ENV_PATH} "
+    f'&& test -n "${{{OPENALEX_API_KEY_ENV_NAME}:-}}" '
+    f'&& printf \'%s\' "${OPENALEX_API_KEY_ENV_NAME}"',
+)
 AIVM_APPENDWATCH_PROBE_COMMAND = (
     "limactl",
     "shell",
@@ -44,14 +62,36 @@ TEST_APPENDWATCH_RELATIVE_PATH = ".aivm-control/appendwatch/appendwatch-tree.txt
 TEST_APPENDWATCH_CONTENT = ".\n"
 TEXT_ENCODING = "utf-8"
 OPERATOR_PROMPT = "Redeploy AIVM before each operator test? [y/N] "
+OPERATOR_START_PROMPT = (
+    "AIVM is not reachable. Start it for operator tests? "
+    "Note it will remain running after the tests. [y/N] "
+)
 OPERATOR_MARK_DESCRIPTION = "real operator-machine AIVM and full-stack contour"
 OPERATOR_SKIP_REASON = "operator test (run with: pytest -m operator)"
-OPERATOR_KEY_MISSING = f"{OPENALEX_API_KEY_ENV_NAME} is unavailable in {DOTENV_PATH}"
+OPERATOR_AIVM_UNAVAILABLE = (
+    f"AIVM instance {AIVM_INSTANCE!r} is not running or reachable"
+)
+OPERATOR_AIVM_START_REFUSED = (
+    f"AIVM instance {AIVM_INSTANCE!r} must be running for operator tests"
+)
+OPERATOR_AIVM_START_FAILED = (
+    f"AIVM instance {AIVM_INSTANCE!r} could not be started"
+)
+OPERATOR_DEPLOY_KEY_MISSING = (
+    f"{OPENALEX_API_KEY_ENV_NAME} is required in the operator environment "
+    "when redeploying AIVM"
+)
+OPERATOR_GUEST_KEY_MISSING = (
+    f"{OPENALEX_API_KEY_ENV_NAME} is unavailable through "
+    f"{AIVM_OPENALEX_ENV_PATH} in AIVM instance {AIVM_INSTANCE!r}"
+)
+OPERATOR_APPENDWATCH_UNAVAILABLE = (
+    f"appendwatch is not active in AIVM instance {AIVM_INSTANCE!r}"
+)
 OPERATOR_SANCTUARY_NOTICE = (
-    "Operator sanctuary: repository production access is limited to the read-only "
-    "main database and archived attempts. Every test verifies complete pre/post "
-    "hashes of both production data trees. The Lima aivm instance is ephemeral "
-    "and is outside this preservation guarantee."
+    "Operator sanctuary: repository production access is read-only. Every test "
+    "verifies complete pre/post hashes of both production data trees. The Lima "
+    "aivm instance is ephemeral and is outside this preservation guarantee."
 )
 OPERATOR_REDEPLOY_NOTICE = (
     "Redeploy enabled: before every test, deploy.sh may delete and recreate aivm "
@@ -169,38 +209,94 @@ def operator_aivm(
 ) -> None:
     if OPERATOR_MARKER not in request.node.keywords:
         return
-    openalex_api_key = os.environ.get(OPENALEX_API_KEY_ENV_NAME, "").strip()
-    # =========================
-    # openalex key must come
-    # explicitly from operator.
-    # therefore commented out.
-    # signed-off: human
-    # =========================
+    # ======================================
+    # OpenAlex key must come explicitly
+    # from Human Operator at deploy-time and
+    # from within Agent Runtime at run time.
+    # Therefore, the below is commented out.
+    #
+    # Signed-off: Human Operator
+    # ======================================
+    # openalex_api_key = os.environ.get(OPENALEX_API_KEY_ENV_NAME, "").strip()
+    #
     # if not openalex_api_key:
     #     openalex_api_key = str(
     #         dotenv_values(DOTENV_PATH).get(OPENALEX_API_KEY_ENV_NAME) or ""
     #     ).strip()
-    if not openalex_api_key:
-        raise pytest.UsageError(OPERATOR_KEY_MISSING)
-    monkeypatch.setenv(OPENALEX_API_KEY_ENV_NAME, openalex_api_key)
+    # if not openalex_api_key:
+    #     raise pytest.UsageError(OPERATOR_KEY_MISSING)
+    # monkeypatch.setenv(OPENALEX_API_KEY_ENV_NAME, openalex_api_key)
     deployment_environment = os.environ.copy()
     deployment_environment[REPOSITORY_ROOT_ENV_NAME] = str(REPOSITORY_ROOT)
     if request.config.stash[OPERATOR_REDEPLOY_STASH_KEY]:
+        deploy_key = os.environ.get(OPENALEX_API_KEY_ENV_NAME, "").strip()
+        if not deploy_key:
+            raise pytest.UsageError(OPERATOR_DEPLOY_KEY_MISSING)
+        deployment_environment[OPENALEX_API_KEY_ENV_NAME] = deploy_key
+        try:
+            subprocess.run(
+                DEPLOY_COMMAND,
+                cwd=REPOSITORY_ROOT,
+                env=deployment_environment,
+                check=True,
+            )
+        except (OSError, subprocess.CalledProcessError) as exc:
+            raise pytest.UsageError(str(exc)) from exc
+    probe = subprocess.run(
+        AIVM_PROBE_COMMAND,
+        cwd=REPOSITORY_ROOT,
+        env=deployment_environment,
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    if probe.returncode != 0:
+        if request.config.getoption(OPERATOR_YES_OPTION):
+            start_aivm = True
+        else:
+            try:
+                reply = input(OPERATOR_START_PROMPT).strip().casefold()
+            except EOFError as exc:
+                raise pytest.UsageError(OPERATOR_AIVM_START_REFUSED) from exc
+            start_aivm = reply in {"y", "yes"}
+        if not start_aivm:
+            raise pytest.UsageError(OPERATOR_AIVM_START_REFUSED)
+        try:
+            subprocess.run(
+                AIVM_START_COMMAND,
+                cwd=REPOSITORY_ROOT,
+                env=deployment_environment,
+                check=True,
+            )
+            subprocess.run(
+                AIVM_PROBE_COMMAND,
+                cwd=REPOSITORY_ROOT,
+                env=deployment_environment,
+                check=True,
+            )
+        except (OSError, subprocess.CalledProcessError) as exc:
+            raise pytest.UsageError(OPERATOR_AIVM_START_FAILED) from exc
+    try:
+        guest_key_process = subprocess.run(
+            AIVM_OPENALEX_KEY_COMMAND,
+            cwd=REPOSITORY_ROOT,
+            env=deployment_environment,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise pytest.UsageError(OPERATOR_GUEST_KEY_MISSING) from exc
+    guest_key = guest_key_process.stdout.strip()
+    if not guest_key:
+        raise pytest.UsageError(OPERATOR_GUEST_KEY_MISSING)
+    monkeypatch.setenv(OPENALEX_API_KEY_ENV_NAME, guest_key)
+    try:
         subprocess.run(
-            DEPLOY_COMMAND,
+            AIVM_APPENDWATCH_PROBE_COMMAND,
             cwd=REPOSITORY_ROOT,
             env=deployment_environment,
             check=True,
         )
-    subprocess.run(
-        AIVM_PROBE_COMMAND,
-        cwd=REPOSITORY_ROOT,
-        env=deployment_environment,
-        check=True,
-    )
-    subprocess.run(
-        AIVM_APPENDWATCH_PROBE_COMMAND,
-        cwd=REPOSITORY_ROOT,
-        env=deployment_environment,
-        check=True,
-    )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise pytest.UsageError(OPERATOR_APPENDWATCH_UNAVAILABLE) from exc

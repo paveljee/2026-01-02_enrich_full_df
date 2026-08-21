@@ -16,6 +16,8 @@ from zipfile import ZipFile
 
 import duckdb
 import pytest
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
@@ -35,6 +37,7 @@ from src.helpers.config import PipelineConfig
 from src.helpers.data_models.http_request_log import (
     HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY,
     HTTP_REQUEST_LOG_PORT_KEY,
+    HttpRequestLogRecord,
 )
 from src.helpers.duckdb_extensions import load_duckdb_extension_from_config_path
 
@@ -122,11 +125,16 @@ TEST_EXCERPT = "Professor Example holds the Example Chair."
 TEST_URL = "https://example.test/profile"
 V2_CITE_TEXT = "Profile: José García — Senior\nResearcher"
 V2_EXACT_EXCERPT = "José García — Senior\nResearcher"
-TEST_SOURCE_KEY = '{"ktp.first_name": "A.", "ktp.last_name": "Sheikh"}'
+TEST_NAMEKEY = '{"ktp.first_name": "A.", "ktp.last_name": "Sheikh"}'
 TEST_RUN_ID = UUID("019fa457-aac5-7652-8669-9d571206e7cb")
 TEST_SECOND_RUN_ID = UUID("019fa457-aac5-7652-8669-9d571206e7cc")
 TEST_ATTEMPT_TIMESTAMP = datetime(2026, 8, 14, tzinfo=timezone.utc)
 TEST_CONTROL_RUN_EVENTS_TOKEN = "test-control-run-events-token"
+TEST_AUTHORITATIVE_REQUEST_BODY = b'{"probe":true}'
+TEST_AUTHORITATIVE_RESPONSE_BODY = {"accepted": True}
+TEST_AUTHORITATIVE_RESPONSE_HEADER = "X-Authoritative-Probe"
+TEST_AUTHORITATIVE_RESPONSE_HEADER_VALUE = "preserved"
+TEST_CONTROL_IDEMPOTENCY_KEY = "test-control-idempotency-key"
 
 HAANEN_REJECTED_ATTEMPT_ID = "20260813T141344_678596Z_8ef1f6372b4a48d9a3b1279736356363"
 HAANEN_ACCEPTED_ATTEMPT_ID = "20260813T141450_027429Z_044215aac8c44200882531b10a2acfa6"
@@ -141,7 +149,7 @@ HAANEN_ACCEPTED_ROLLOUT_PATH = (
 HAANEN_ROLLOUT_FILENAME = "rollout-2026-08-13T10-08-12-019ffb73-b72c-7812-9fc4-d56fdf3ea1a2.jsonl"
 HAANEN_SESSION_ID = "019ffb73-b72c-7812-9fc4-d56fdf3ea1a2"
 HAANEN_RUN_ID = UUID("019ffb73-b72c-7812-9fc4-d56fdf3ea1a3")
-HAANEN_SOURCE_KEY = '{"ktp.first_name": "J. B.", "ktp.last_name": "Haanen"}'
+HAANEN_NAMEKEY = '{"ktp.first_name": "J. B.", "ktp.last_name": "Haanen"}'
 HAANEN_TOOL_CALL_TYPE = "custom_tool_call"
 HAANEN_TOOL_INPUT_KEY = "input"
 HAANEN_COMMAND_START = "{cmd:"
@@ -187,6 +195,146 @@ TEST_STANDARDIZED_VALUES = {
     api.KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL: "NR",
     api.KTP_AI_AUGMENT_LINKS_COL: "NR",
 }
+
+
+def test_pure_asgi_middleware_buffers_and_records_finite_control_push(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    records: list[HttpRequestLogRecord] = []
+    probe_app = FastAPI()
+    probe_app.add_middleware(api.AuthoritativeHttpMiddleware)
+
+    @probe_app.post(api.CONTROL_PUSH_PATH)
+    async def probe_control_push() -> JSONResponse:
+        return JSONResponse(
+            content=TEST_AUTHORITATIVE_RESPONSE_BODY,
+            headers={
+                TEST_AUTHORITATIVE_RESPONSE_HEADER: (
+                    TEST_AUTHORITATIVE_RESPONSE_HEADER_VALUE
+                )
+            },
+        )
+
+    monkeypatch.setattr(api, "AUTHORITATIVE_BACKEND_HEALTHY", True)
+    monkeypatch.setattr(api, "AUTHORITATIVE_COMMAND_ACTIVE", False)
+    monkeypatch.setattr(api, "_append_authoritative_record", records.append)
+
+    with TestClient(probe_app) as client:
+        response = client.post(
+            api.CONTROL_PUSH_PATH,
+            content=TEST_AUTHORITATIVE_REQUEST_BODY,
+            headers={api.HTTP_CONTENT_TYPE_HEADER: api.JSON_MEDIA_TYPE},
+        )
+
+    assert any(
+        middleware.cls is api.AuthoritativeHttpMiddleware
+        for middleware in api.app.user_middleware
+    )
+    assert any(
+        middleware.cls is api.AuthoritativeHttpMiddleware
+        for middleware in api.commit_app.user_middleware
+    )
+    assert response.status_code == api.status.HTTP_200_OK
+    assert response.json() == TEST_AUTHORITATIVE_RESPONSE_BODY
+    assert (
+        response.headers[TEST_AUTHORITATIVE_RESPONSE_HEADER]
+        == TEST_AUTHORITATIVE_RESPONSE_HEADER_VALUE
+    )
+    assert len(records) == 1
+    record = records[0]
+    assert record.method == api.HTTP_POST_METHOD
+    assert record.path == api.CONTROL_PUSH_PATH
+    assert record.request_body == TEST_AUTHORITATIVE_REQUEST_BODY.decode(api.TEXT_ENCODING)
+    assert record.response_code == response.status_code
+    assert record.response_body == response.text
+    assert (
+        record.response_headers[TEST_AUTHORITATIVE_RESPONSE_HEADER.lower()]
+        == TEST_AUTHORITATIVE_RESPONSE_HEADER_VALUE
+    )
+    assert record.received_at_unix_usec is None
+    assert record.ready_to_respond_at_unix_usec is not None
+    assert api.AUTHORITATIVE_COMMAND_ACTIVE is False
+
+
+def test_control_push_is_logged_projected_and_replayed_through_real_app(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    replay_log_path = tmp_path / "authoritative.jsonl"
+    detour_db_path = tmp_path / "detour.duckdb"
+    rollout_cas_dir = tmp_path / "rollout-cas"
+    replay_log_path.write_bytes(b"")
+    replay_log = api.RegisteredResource(
+        name=replay_log_path.name,
+        hash=hashlib.sha256(b"").hexdigest(),
+        group=api.ResourceGroup.KTP_PIPELINE_ARTIFACT,
+        fragment_type=api.FragmentType.LINE_NUMBER,
+        url=replay_log_path.as_uri(),
+    )
+    pipeline = cast(
+        api.AiAugmentDetourConfig,
+        SimpleNamespace(match_rule_version=SimpleNamespace(codex_match=1)),
+    )
+    runtime = api.AiAugmentBackendContext(
+        pipeline=pipeline,
+        detour_db_path=detour_db_path,
+        replay_log=replay_log,
+        rollout_cas_dir=rollout_cas_dir,
+        eligible_cohorts={},
+    )
+    event = api.ControlRunEvent(
+        run_id=TEST_RUN_ID,
+        namekey=TEST_NAMEKEY,
+        at=TEST_ATTEMPT_TIMESTAMP,
+        kind=api.ControlRunEventKind.QUEUED,
+    )
+    body = api.ControlPushRequest(event=event).model_dump_json().encode(api.TEXT_ENCODING)
+    headers = {
+        api.CONTROL_RUN_EVENTS_TOKEN_HEADER: TEST_CONTROL_RUN_EVENTS_TOKEN,
+        api.HTTP_CONTENT_TYPE_HEADER: api.JSON_MEDIA_TYPE,
+        api.HTTP_IDEMPOTENCY_KEY_HEADER: TEST_CONTROL_IDEMPOTENCY_KEY,
+    }
+    monkeypatch.setattr(api, "RUNTIME_CONFIGURATION", runtime)
+    monkeypatch.setattr(api, "CONTROL_RUN_EVENTS_TOKEN", TEST_CONTROL_RUN_EVENTS_TOKEN)
+    monkeypatch.setattr(api, "AUTHORITATIVE_LOG_DESCRIPTOR", None)
+    monkeypatch.setattr(api, "AUTHORITATIVE_COMMAND_ACTIVE", False)
+
+    with TestClient(api.app) as client:
+        push_response = client.post(api.CONTROL_PUSH_PATH, content=body, headers=headers)
+        first_pull = api.ControlPullResponse.model_validate_json(
+            client.get(
+                api.CONTROL_PULL_PATH,
+                headers={
+                    api.CONTROL_RUN_EVENTS_TOKEN_HEADER: TEST_CONTROL_RUN_EVENTS_TOKEN,
+                },
+            ).content
+        )
+
+    assert push_response.status_code == api.status.HTTP_200_OK
+    assert api.ControlPushResponse.model_validate_json(push_response.content) == (
+        api.ControlPushResponse(accepted=True, duplicate=False)
+    )
+    assert first_pull.events == (event,)
+    records = tuple(
+        HttpRequestLogRecord.model_validate_json(line)
+        for line in replay_log_path.read_text(encoding=api.TEXT_ENCODING).splitlines()
+    )
+    assert len(records) == 1
+    assert records[0].path == api.CONTROL_PUSH_PATH
+    assert records[0].request_body == body.decode(api.TEXT_ENCODING)
+
+    detour_db_path.unlink()
+    with TestClient(api.app) as client:
+        replayed_pull = api.ControlPullResponse.model_validate_json(
+            client.get(
+                api.CONTROL_PULL_PATH,
+                headers={
+                    api.CONTROL_RUN_EVENTS_TOKEN_HEADER: TEST_CONTROL_RUN_EVENTS_TOKEN,
+                },
+            ).content
+        )
+
+    assert replayed_pull == first_pull
 
 OFFICERS_URL = (
     "https://find-and-update.company-information.service.gov.uk/company/SC621293/officers"
@@ -840,18 +988,32 @@ def runtime_for_test(
     output_format: str = "txt",
 ) -> api.RuntimeConfiguration:
     output_dir = tmp_path / "output"
-    output_dir.mkdir()
-    pipeline = PipelineConfig.from_json(CONFIG_PATH).model_copy(
+    replay_log_path = tmp_path / "authoritative.jsonl"
+    rollout_cas_dir = tmp_path / "rollout-cas"
+    output_dir.mkdir(exist_ok=True)
+    replay_log_path.write_text("", encoding=api.TEXT_ENCODING)
+    pipeline = api.AiAugmentPipelineConfig.from_json(AI_AUGMENT_CONFIG_PATH).model_copy(
         update={
             "db_file": SOURCE_DB_PATH,
             "output_dir": output_dir,
             "output_format": output_format,
             "pandoc_reference_docx": REFERENCE_DOCX_PATH,
+            "rollout_cas_dir": rollout_cas_dir,
         }
+    )
+    replay_log = api.RegisteredResource(
+        name=replay_log_path.name,
+        hash=hashlib.sha256(b"").hexdigest(),
+        group=api.ResourceGroup.KTP_PIPELINE_ARTIFACT,
+        fragment_type=api.FragmentType.LINE_NUMBER,
+        url=replay_log_path.as_uri(),
     )
     return api.RuntimeConfiguration(
         pipeline=pipeline,
         detour_db_path=tmp_path / "detour_ai_augment.duckdb",
+        replay_log=replay_log,
+        rollout_cas_dir=rollout_cas_dir,
+        eligible_cohorts={TEST_NAMEKEY: api.GROUND_TRUTH_COHORT},
     )
 
 
@@ -872,25 +1034,30 @@ def prepare_real_sample_push(
         write_text(path, "fixture\n")
 
     runtime = runtime_for_test(tmp_path, output_format=output_format)
-    attempts_dir = runtime.attempts_dir
-    events: list[str] = []
     rendered_cards: list[str] = []
-    monkeypatch.setattr(api, "ROLLOUT_JSONL", JULY_ROLLOUT_GUEST_PATH)
-    monkeypatch.setattr(api, "APPENDWATCH_REPORT", report_path)
-    monkeypatch.setattr(api, "AIVM_IDENTITY_FILE", identity_path)
-    monkeypatch.setattr(api, "AIVM_KNOWN_HOSTS_FILE", known_hosts_path)
-    monkeypatch.setattr(api, "LIMA_SSH_CONFIG_PATH", lima_config_path)
-    monkeypatch.setattr(api, "AIVM_INSTANCE", "aivm")
-    monkeypatch.setattr(api, "AIVM_USER", "ai")
-    monkeypatch.setattr(api, "AIVM_SSH_PORT", "22022")
-    monkeypatch.setattr(api, "SOURCE_FILE", SOURCE_JSONL_PATH)
+    configuration = api.PushConfiguration(
+        rollout_guest_path=JULY_ROLLOUT_GUEST_PATH,
+        rollout_relative_path=JULY_ROLLOUT_RELATIVE_PATH,
+        appendwatch_report=report_path,
+        lima_ssh_config=lima_config_path,
+        identity_file=identity_path,
+        known_hosts_file=known_hosts_path,
+        ssh_target="aivm-ai",
+        host_key_alias="lima-aivm-ai",
+    )
     monkeypatch.setattr(api, "runtime_configuration", lambda: runtime)
+    monkeypatch.setattr(api, "push_configuration", lambda _rollout=None: configuration)
+    monkeypatch.setattr(api, "CONTROL_RUN_EVENTS_TOKEN", TEST_CONTROL_RUN_EVENTS_TOKEN)
+    monkeypatch.setattr(api, "AUTHORITATIVE_BACKEND_HEALTHY", False)
+    monkeypatch.setattr(api, "AUTHORITATIVE_LOG_DESCRIPTOR", None)
+    monkeypatch.setattr(api, "AUTHORITATIVE_LOG_OFFSET", api.AUTHORITATIVE_EMPTY_OFFSET)
+    monkeypatch.setattr(api, "AUTHORITATIVE_NEXT_LINE_NUMBER", api.AUTHORITATIVE_FIRST_LINE)
 
     def fake_subprocess(command: list[str], **_kwargs: object) -> None:
-        if command[0] == "scp":
-            events.append("scp")
+        if command[0] == api.SCP_EXECUTABLE:
+            destination = Path(command[-1])
             assert command[-2] == f"aivm-ai:{JULY_ROLLOUT_GUEST_PATH}"
-            write_bytes(Path(command[-1]), read_bytes(JULY_ROLLOUT_PATH))
+            write_bytes(destination, read_bytes(JULY_ROLLOUT_PATH))
             return
         assert command[0] == "pandoc"
         output_path = Path(command[command.index("-o") + 1])
@@ -898,76 +1065,21 @@ def prepare_real_sample_push(
 
     monkeypatch.setattr(api.subprocess, "run", fake_subprocess)
 
-    original_copy_report = api.copy_appendwatch_report
-    original_status_check = api.parse_appendwatch_report
-    original_persist = api.persist_rollout_index
-    original_model_validate_json = api.Submission.model_validate_json
-    original_assess_evidence = api.assess_submission_evidence
-    original_append_output = api.append_codex_output
-    original_ground_truth = api.ground_truth
     original_write_cards_zip = api.write_cards_zip
 
-    def tracked_copy_report(*args: object, **kwargs: object) -> api.ArchivedFile:
-        events.append("status_copy")
-        return original_copy_report(*args, **kwargs)  # type: ignore[arg-type]
-
-    def tracked_status_check(*args: object, **kwargs: object) -> None:
-        events.append("status_check")
-        original_status_check(*args, **kwargs)  # type: ignore[arg-type]
-
-    def tracked_persist(*args: object, **kwargs: object) -> None:
-        events.append("rollout_index")
-        original_persist(*args, **kwargs)  # type: ignore[arg-type]
-
-    def tracked_model_validate_json(
-        _cls: type[api.Submission],
-        value: str | bytes | bytearray,
-    ) -> api.Submission:
-        events.append("pydantic")
-        return original_model_validate_json(value)
-
-    def tracked_assess_evidence(
-        *args: object,
-        **kwargs: object,
-    ) -> api.EvidenceAssessment:
-        events.append("evidence")
-        return original_assess_evidence(*args, **kwargs)  # type: ignore[arg-type]
-
-    def tracked_append_output(*args: object, **kwargs: object) -> None:
-        events.append("output")
-        original_append_output(*args, **kwargs)  # type: ignore[arg-type]
-
-    def tracked_ground_truth() -> dict[str, object]:
-        events.append("ground_truth")
-        return original_ground_truth()
-
     def tracked_write_cards_zip(*args: object, **kwargs: object) -> None:
-        events.append("card")
         cards = args[0]
         assert isinstance(cards, dict)
         rendered_cards.extend(cards.values())
         original_write_cards_zip(*args, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(api, "copy_appendwatch_report", tracked_copy_report)
-    monkeypatch.setattr(api, "parse_appendwatch_report", tracked_status_check)
-    monkeypatch.setattr(api, "persist_rollout_index", tracked_persist)
-    monkeypatch.setattr(
-        api.Submission,
-        "model_validate_json",
-        classmethod(tracked_model_validate_json),
-    )
-    monkeypatch.setattr(api, "assess_submission_evidence", tracked_assess_evidence)
-    monkeypatch.setattr(api, "append_codex_output", tracked_append_output)
-    monkeypatch.setattr(api, "ground_truth", tracked_ground_truth)
     monkeypatch.setattr(api, "write_cards_zip", tracked_write_cards_zip)
 
     return SimpleNamespace(
-        client=TestClient(api.app),
         payload=valid_submission_body(),
         runtime=runtime,
-        attempts_dir=attempts_dir,
         report_path=report_path,
-        events=events,
+        configuration=configuration,
         rendered_cards=rendered_cards,
     )
 
@@ -1497,7 +1609,7 @@ def test_v2_retry_baseline_replays_and_accepts_only_the_exact_correction() -> No
             api._process_retry_attempt(
                 connection,
                 run_id=TEST_RUN_ID,
-                source_key=TEST_SOURCE_KEY,
+                namekey=TEST_NAMEKEY,
                 session_id=TEST_SESSION_ID,
                 attempt_id="attempt-near",
                 attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
@@ -1518,7 +1630,7 @@ def test_v2_retry_baseline_replays_and_accepts_only_the_exact_correction() -> No
             api._process_retry_attempt(
                 connection,
                 run_id=TEST_RUN_ID,
-                source_key=TEST_SOURCE_KEY,
+                namekey=TEST_NAMEKEY,
                 session_id=TEST_SESSION_ID,
                 attempt_id="attempt-exact",
                 attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
@@ -1568,7 +1680,7 @@ def test_v2_retry_rejects_changed_tokens_and_repeats_near_guidance() -> None:
             api._process_retry_attempt(
                 connection,
                 run_id=TEST_RUN_ID,
-                source_key=TEST_SOURCE_KEY,
+                namekey=TEST_NAMEKEY,
                 session_id=TEST_SESSION_ID,
                 attempt_id="attempt-near",
                 attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
@@ -1590,7 +1702,7 @@ def test_v2_retry_rejects_changed_tokens_and_repeats_near_guidance() -> None:
         changed_violations = api._process_retry_attempt(
             connection,
             run_id=TEST_RUN_ID,
-            source_key=TEST_SOURCE_KEY,
+            namekey=TEST_NAMEKEY,
             session_id=TEST_SESSION_ID,
             attempt_id="attempt-changed",
             attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
@@ -1603,7 +1715,7 @@ def test_v2_retry_rejects_changed_tokens_and_repeats_near_guidance() -> None:
         repeated_violations = api._process_retry_attempt(
             connection,
             run_id=TEST_RUN_ID,
-            source_key=TEST_SOURCE_KEY,
+            namekey=TEST_NAMEKEY,
             session_id=TEST_SESSION_ID,
             attempt_id="attempt-near-again",
             attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
@@ -1652,7 +1764,7 @@ def test_retry_preserves_exact_items_inside_a_rejected_field() -> None:
             api._process_retry_attempt(
                 connection,
                 run_id=TEST_RUN_ID,
-                source_key=TEST_SOURCE_KEY,
+                namekey=TEST_NAMEKEY,
                 session_id=TEST_SESSION_ID,
                 attempt_id="attempt-baseline",
                 attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
@@ -1674,7 +1786,7 @@ def test_retry_preserves_exact_items_inside_a_rejected_field() -> None:
         violations = api._process_retry_attempt(
             connection,
             run_id=TEST_RUN_ID,
-            source_key=TEST_SOURCE_KEY,
+            namekey=TEST_NAMEKEY,
             session_id=TEST_SESSION_ID,
             attempt_id="attempt-changed",
             attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
@@ -1715,7 +1827,7 @@ def test_retry_preserves_fully_verified_fields_and_complete_evidence_counts() ->
             api._process_retry_attempt(
                 connection,
                 run_id=TEST_RUN_ID,
-                source_key=TEST_SOURCE_KEY,
+                namekey=TEST_NAMEKEY,
                 session_id=TEST_SESSION_ID,
                 attempt_id="attempt-baseline",
                 attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
@@ -1737,7 +1849,7 @@ def test_retry_preserves_fully_verified_fields_and_complete_evidence_counts() ->
         violations = api._process_retry_attempt(
             connection,
             run_id=TEST_RUN_ID,
-            source_key=TEST_SOURCE_KEY,
+            namekey=TEST_NAMEKEY,
             session_id=TEST_SESSION_ID,
             attempt_id="attempt-changed",
             attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
@@ -1802,7 +1914,7 @@ def test_unmatched_evidence_can_be_replaced_or_explicitly_withdrawn(
             api._process_retry_attempt(
                 connection,
                 run_id=TEST_RUN_ID,
-                source_key=TEST_SOURCE_KEY,
+                namekey=TEST_NAMEKEY,
                 session_id=TEST_SESSION_ID,
                 attempt_id="attempt-baseline",
                 attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
@@ -1824,7 +1936,7 @@ def test_unmatched_evidence_can_be_replaced_or_explicitly_withdrawn(
         violations = api._process_retry_attempt(
             connection,
             run_id=TEST_RUN_ID,
-            source_key=TEST_SOURCE_KEY,
+            namekey=TEST_NAMEKEY,
             session_id=TEST_SESSION_ID,
             attempt_id="attempt-retry",
             attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
@@ -1866,7 +1978,7 @@ def test_v2_near_evidence_cannot_be_withdrawn() -> None:
             api._process_retry_attempt(
                 connection,
                 run_id=TEST_RUN_ID,
-                source_key=TEST_SOURCE_KEY,
+                namekey=TEST_NAMEKEY,
                 session_id=TEST_SESSION_ID,
                 attempt_id="attempt-baseline",
                 attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
@@ -1888,7 +2000,7 @@ def test_v2_near_evidence_cannot_be_withdrawn() -> None:
         violations = api._process_retry_attempt(
             connection,
             run_id=TEST_RUN_ID,
-            source_key=TEST_SOURCE_KEY,
+            namekey=TEST_NAMEKEY,
             session_id=TEST_SESSION_ID,
             attempt_id="attempt-withdrawal",
             attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
@@ -1936,7 +2048,7 @@ def test_retry_baselines_survive_restart_and_remain_isolated_by_run(
                 api._process_retry_attempt(
                     first_connection,
                     run_id=run_id,
-                    source_key=TEST_SOURCE_KEY,
+                    namekey=TEST_NAMEKEY,
                     session_id=TEST_SESSION_ID,
                     attempt_id=attempt_id,
                     attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
@@ -1967,7 +2079,7 @@ def test_retry_baselines_survive_restart_and_remain_isolated_by_run(
                 api._process_retry_attempt(
                     second_connection,
                     run_id=run_id,
-                    source_key=TEST_SOURCE_KEY,
+                    namekey=TEST_NAMEKEY,
                     session_id=TEST_SESSION_ID,
                     attempt_id=attempt_id,
                     attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
@@ -2021,7 +2133,7 @@ def test_concurrent_first_rejections_cannot_replace_the_baseline(
                 retry_expected = api._retry_baseline_exists(
                     connection,
                     run_id=TEST_RUN_ID,
-                    source_key=TEST_SOURCE_KEY,
+                    namekey=TEST_NAMEKEY,
                     session_id=TEST_SESSION_ID,
                 )
                 submission: api.SubmissionPayload = (
@@ -2041,7 +2153,7 @@ def test_concurrent_first_rejections_cannot_replace_the_baseline(
                     api._process_retry_attempt(
                         connection,
                         run_id=TEST_RUN_ID,
-                        source_key=TEST_SOURCE_KEY,
+                        namekey=TEST_NAMEKEY,
                         session_id=TEST_SESSION_ID,
                         attempt_id=attempt_id,
                         attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
@@ -2122,7 +2234,7 @@ def test_corrupt_applied_audit_fails_as_configuration_error() -> None:
                 api._process_retry_attempt(
                     connection,
                     run_id=TEST_RUN_ID,
-                    source_key=TEST_SOURCE_KEY,
+                    namekey=TEST_NAMEKEY,
                     session_id=TEST_SESSION_ID,
                     attempt_id=attempt_id,
                     attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
@@ -2147,7 +2259,7 @@ def test_corrupt_applied_audit_fails_as_configuration_error() -> None:
             api._process_retry_attempt(
                 connection,
                 run_id=TEST_RUN_ID,
-                source_key=TEST_SOURCE_KEY,
+                namekey=TEST_NAMEKEY,
                 session_id=TEST_SESSION_ID,
                 attempt_id="audit-third",
                 attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
@@ -2197,7 +2309,7 @@ def test_historical_haanen_retry_preserves_verified_evidence_roundtrip() -> None
             api._process_retry_attempt(
                 connection,
                 run_id=HAANEN_RUN_ID,
-                source_key=HAANEN_SOURCE_KEY,
+                namekey=HAANEN_NAMEKEY,
                 session_id=HAANEN_SESSION_ID,
                 attempt_id=HAANEN_REJECTED_ATTEMPT_ID,
                 attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
@@ -2227,7 +2339,7 @@ def test_historical_haanen_retry_preserves_verified_evidence_roundtrip() -> None
         archived_retry_violations = api._process_retry_attempt(
             connection,
             run_id=HAANEN_RUN_ID,
-            source_key=HAANEN_SOURCE_KEY,
+            namekey=HAANEN_NAMEKEY,
             session_id=HAANEN_SESSION_ID,
             attempt_id=HAANEN_ACCEPTED_ATTEMPT_ID,
             attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
@@ -2299,7 +2411,7 @@ def test_historical_haanen_retry_preserves_verified_evidence_roundtrip() -> None
             api._process_retry_attempt(
                 connection,
                 run_id=HAANEN_RUN_ID,
-                source_key=HAANEN_SOURCE_KEY,
+                namekey=HAANEN_NAMEKEY,
                 session_id=HAANEN_SESSION_ID,
                 attempt_id=f"{HAANEN_ACCEPTED_ATTEMPT_ID}-ideal",
                 attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
@@ -2635,8 +2747,7 @@ def test_scp_uses_pinned_identity_and_counts_physical_lines(
         ssh_target="aivm-ai",
         host_key_alias="lima-aivm-ai",
     )
-    attempt_dir = tmp_path / "attempt"
-    attempt_dir.mkdir()
+    runtime = runtime_for_test(tmp_path)
     captured: dict[str, Any] = {}
 
     def fake_run(command: list[str], **kwargs: object) -> None:
@@ -2645,7 +2756,7 @@ def test_scp_uses_pinned_identity_and_counts_physical_lines(
         write_bytes(Path(command[-1]), b"first\nsecond")
 
     monkeypatch.setattr(api.subprocess, "run", fake_run)
-    archived = api.copy_rollout(configuration, attempt_dir, "attempt-id")
+    archived = api.copy_rollout_to_cas(configuration, runtime)
 
     command = captured["command"]
     assert command[0] == "scp"
@@ -2656,7 +2767,9 @@ def test_scp_uses_pinned_identity_and_counts_physical_lines(
     assert command[-2] == f"aivm-ai:{TEST_ROLLOUT_GUEST_PATH}"
     assert "shell" not in captured["kwargs"]
     assert archived.line_count == 2
-    assert archived.path.name == "rollout.attempt-id.jsonl"
+    assert archived.path == runtime.rollout_cas_dir / api.ROLLOUT_CAS_FILENAME_TEMPLATE.format(
+        sha256=archived.sha256
+    )
 
 
 def test_required_config_and_source_database_are_read_only(tmp_path: Path) -> None:
@@ -2687,7 +2800,7 @@ def test_repeated_researcher_rows_materialize_as_distinct_innerdicts() -> None:
                 column: f"value for {column}" for column, _data_type in api.CODEX_OUTPUT_SCHEMA
             }
             values.update({
-                api.KTP_NAMEKEY_COL: TEST_SOURCE_KEY,
+                api.KTP_NAMEKEY_COL: TEST_NAMEKEY,
                 api.KTP_FILENAME_COL: TEST_ROLLOUT_FILENAME,
                 api.KTP_FRAGMENT_COL: fragment,
                 api.KTP_FRAGMENT_TYPE_COL: api.ROLLOUT_LINE_FRAGMENT_TYPE,
@@ -2895,7 +3008,7 @@ def test_real_july_push_matches_exact_objects_and_renders_card_end_to_end(
         ).fetchone()
         assert innerdicts_row is not None
         name_key, innerdicts_text = innerdicts_row
-        assert name_key == TEST_SOURCE_KEY
+        assert name_key == TEST_NAMEKEY
         innerdicts = tuple(json.loads(line) for line in innerdicts_text.splitlines())
         assert len(innerdicts) == 1
         assert tuple(innerdicts[0]) == tuple(
@@ -2966,11 +3079,11 @@ def test_archived_attempts_rebuild_database_from_exact_http_contract(
     runtime = api.RuntimeConfiguration(
         pipeline=context.runtime.pipeline,
         detour_db_path=detour_db_path,
-        eligible_cohorts={TEST_SOURCE_KEY: api.GROUND_TRUTH_COHORT},
+        eligible_cohorts={TEST_NAMEKEY: api.GROUND_TRUTH_COHORT},
     )
     snapshot = api.SanctionSnapshot(
         run_id=TEST_RUN_ID,
-        source_key=TEST_SOURCE_KEY,
+        source_key=TEST_NAMEKEY,
         session_id=JULY_SESSION_ID,
         rollout_guest_path=JULY_ROLLOUT_GUEST_PATH,
         control_base_url=None,
@@ -3045,7 +3158,7 @@ def test_archived_attempts_rebuild_database_from_exact_http_contract(
     assert accepted_http.response_code == accepted_response.status_code
     assert accepted_http.response_body == accepted_response.text
     assert rejected_manifest[api.ATTEMPT_RUN_ID_KEY] == str(TEST_RUN_ID)
-    assert accepted_manifest[api.ATTEMPT_SOURCE_KEY] == TEST_SOURCE_KEY
+    assert accepted_manifest[api.ATTEMPT_SOURCE_KEY] == TEST_NAMEKEY
     assert accepted_manifest[api.ATTEMPT_SESSION_ID_KEY] == JULY_SESSION_ID
     assert accepted_manifest[api.ATTEMPT_ROLLOUT_RELATIVE_PATH_KEY] == str(
         JULY_ROLLOUT_RELATIVE_PATH
@@ -3144,7 +3257,7 @@ def test_archived_attempts_rebuild_database_from_exact_http_contract(
         ).fetchall() == [
             (
                 str(TEST_RUN_ID),
-                TEST_SOURCE_KEY,
+                TEST_NAMEKEY,
                 JULY_SESSION_ID,
                 rejected_attempt_dir.name,
             )
@@ -3184,7 +3297,7 @@ def test_archived_attempts_rebuild_database_from_exact_http_contract(
             f"FROM {api.CODEX_OUTPUT_VIEW}"
         ).fetchall() == [
             (
-                TEST_SOURCE_KEY,
+                TEST_NAMEKEY,
                 JULY_ROLLOUT_FILENAME,
                 JULY_ROLLOUT_LINE_COUNT,
                 api.ROLLOUT_LINE_FRAGMENT_TYPE,
@@ -3197,7 +3310,7 @@ def test_archived_attempts_rebuild_database_from_exact_http_contract(
             f"FROM {api.CODEX_INNERDICT_TABLE}"
         ).fetchall()
         assert len(innerdict_rows) == 1
-        assert innerdict_rows[0][0] == TEST_SOURCE_KEY
+        assert innerdict_rows[0][0] == TEST_NAMEKEY
         assert (
             json.loads(innerdict_rows[0][1])[api.KTP_AI_AUGMENT_ATTEMPT_ID_COL]
             == accepted_attempt_dir.name
@@ -3283,7 +3396,7 @@ def test_real_july_rejection_requires_standardized_retry_contract(
     context = prepare_real_sample_push(tmp_path, monkeypatch)
     snapshot = api.SanctionSnapshot(
         run_id=TEST_RUN_ID,
-        source_key=TEST_SOURCE_KEY,
+        source_key=TEST_NAMEKEY,
         session_id=JULY_SESSION_ID,
         rollout_guest_path=JULY_ROLLOUT_GUEST_PATH,
         control_base_url=None,
@@ -3383,7 +3496,6 @@ def test_sanctioned_pull_is_dynamic_retryable_and_omits_ground_truth(
     monkeypatch.setattr(api, "runtime_configuration", lambda: runtime)
     monkeypatch.setattr(api, "sanctioned_snapshot", lambda: snapshot)
     monkeypatch.setattr(api, "push_configuration", lambda _rollout: SimpleNamespace())
-    monkeypatch.setattr(api, "WORKBOOK_INITIALIZED", True)
     client = TestClient(api.app)
 
     first_response = client.get("/pull")
@@ -3438,13 +3550,13 @@ def test_control_run_events_are_authenticated_and_rebuild_exactly(
     events = (
         api.ControlRunEvent(
             run_id=TEST_RUN_ID,
-            source_key=TEST_SOURCE_KEY,
+            source_key=TEST_NAMEKEY,
             at=TEST_ATTEMPT_TIMESTAMP,
             kind=api.ControlRunEventKind.QUEUED,
         ),
         api.ControlRunEvent(
             run_id=TEST_RUN_ID,
-            source_key=TEST_SOURCE_KEY,
+            source_key=TEST_NAMEKEY,
             at=TEST_ATTEMPT_TIMESTAMP,
             kind=api.ControlRunEventKind.FAILED,
             detail="pre-push configuration failure",

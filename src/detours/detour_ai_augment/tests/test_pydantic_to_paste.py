@@ -16,7 +16,7 @@ pytest.importorskip("pydantic_extra_types")
 from src.detours.detour_ai_augment.src.backend.helpers.data_models import (  # noqa: E402
     pydantic_to_paste as schema,
 )
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.submission import (  # noqa: E402
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.submission_init import (  # noqa: E402
     Submission,
 )
 

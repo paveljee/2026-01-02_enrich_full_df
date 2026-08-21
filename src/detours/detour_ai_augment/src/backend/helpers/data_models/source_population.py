@@ -1,5 +1,6 @@
-from enum import StrEnum
 from dataclasses import dataclass
+from enum import StrEnum
+
 
 class SourceCohort(StrEnum):
     GROUND_TRUTH = "ground_truth"
@@ -25,6 +26,7 @@ class SourceResearcher:
     docx_rows: tuple[dict[str, object], ...]
     ssn_rows: tuple[dict[str, object], ...]
     cohort: str
+
 
 @dataclass(frozen=True)
 class SourcePopulationRow:

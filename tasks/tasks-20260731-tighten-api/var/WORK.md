@@ -1,196 +1,260 @@
 # Tighten API — current handoff
 
-## Required operating rules
+## Operating rules
 
 - Read this file and `tasks/tasks-20260731-tighten-api/src/TASK.md` in full
-  immediately after every compaction. Together they are the complete context;
-  make only focused code lookups afterward.
-- Keep this file current and standalone throughout the work. Replace superseded
-  content; do not preserve a progress diary.
-- `src/TASK.md` is human-owned and immutable. Do not edit the frozen legacy
-  SPEC, README, `.env.example`, sample runs, historical submissions/rollouts, or
-  ground-truth data.
+  immediately after every compaction; together they are the complete context.
+- Keep this file current and standalone, replacing superseded content rather
+  than retaining a progress diary.
+- `src/TASK.md` is human-owned. Do not edit it, the frozen legacy SPEC, README,
+  `.env.example`, sample runs, historical submissions/rollouts, or ground truth.
 - Run every command through `pixi run`. Git is read-only. Apply edits only with
-  a complete reviewable `pixi run apply_patch <<'PATCH' ... PATCH` command.
-- Use only `pixi run pre-commit 2>&1` for verification; do not run lint or
-  component test contours separately. Operator tests remain a separate explicit
-  contour on the operator machine.
-- Keep changes surgical. Human-facing backend wording belongs in
-  `backend/helpers/locale.py`; tests belong in
+  a complete `pixi run apply_patch <<'PATCH' ... PATCH` command.
+- Never remove or alter inline comments marked as signed off by the human.
+- Put ad hoc investigation artifacts under the repository's `./tmp`, never the
+  filesystem-root `/tmp`, so the human can inspect them easily.
+- Verify only with `pixi run pre-commit 2>&1`; operator tests remain a separate
+  explicit contour on the operator machine.
+- Keep production changes surgical. Human-facing backend wording belongs in
+  `backend/helpers/locale.py`; detour tests belong under
   `src/detours/detour_ai_augment/tests`.
 
 ## Current objective
 
-Replace the loose `ControlRunEvent`/run-journal/per-attempt-manifest/archive-dir
-design with rigorously modelled real HTTP exchanges and content-addressed
-rollout storage. This is currently an approved architectural direction under
-discussion, not yet an instruction to implement.
+Before creating the interface-owned BDD pilot, repair and operator-verify the
+original
+`src/detours/detour_ai_augment/tests/test_e2e_operator.py::test_complete_dashboard_aivm_codex_push_db_and_card_workflow`.
+Preserve its real isolated-runtime, dashboard, Chrome, Lima/AIVM, Codex,
+accepted push, DuckDB, researcher-card, and restart contour, but replace its
+removed attempts-directory, manifest, run-journal, callback, `ControlSnapshot`,
+and `source_key` dependencies with the current authoritative replay JSONL,
+control-pull projection, and `ktp.namekey` contract. Prompt the human operator
+to run the exact node once it is ready. Do not create the BDD feature/test until
+that original node passes.
 
-## Canonical persistence direction
+After operator confirmation, add one whole-feature Gherkin file and one
+adjacent pytest-bdd module under `tasks/tasks-20260731-tighten-api/var`.
+The composed node keeps the exact behavioral name
+`test_e2e_operator_bdd.py::test_complete_dashboard_aivm_codex_push_db_and_card_workflow`,
+which is also the shared tag on every participating Scenario. Add a detour Pixi
+task for the pilot. Declare all 19 TASK interfaces as Rules, populating only the
+scenarios traversed by this accepted-run contour.
 
-- `HttpRequestLogRecord` remains the exact, vetted JSONL envelope. Its field set
-  must not acquire run IDs, attempt IDs, artifact metadata, or other internal
-  fields. Endpoint-specific information belongs only in the actual HTTP request
-  and response bodies, validated by dedicated Pydantic models.
-- Preserve three separate append-only JSONL resources for clarity:
-  1. dashboard -> backend sanction exchanges;
-  2. client -> backend `/push` exchanges, whether valid, invalid, or failed;
-  3. backend -> dashboard submission-processing-result exchanges, regardless of
-     whether dashboard is listening.
-- Each attempted exchange is logged as a complete `HttpRequestLogRecord` with
-  the actual request and observed response. An unreachable recipient is
-  represented honestly by the model's absent response values rather than by a
-  synthetic successful response.
-- The three logs are canonical inputs. DuckDB remains a disposable projection
-  reconstructed from these logs plus the read-only main source database.
-- Replace attempt directories with a content-addressed store containing only
-  cumulative rollout snapshots. Snapshot bytes are addressed and verified by
-  SHA-256. Small private processing inputs/results currently spread across
-  manifests and run events belong in the actual processing-result request body.
-- Restoration must not discover attempts by scanning directories. It parses the
-  three logs, validates endpoint bodies, correlates exchanges, verifies the
-  referenced rollout snapshot, and feeds the same deterministic projection
-  pathway used after live processing.
-- URL/path identifies the exchange category but cannot correlate repeated
-  exchanges. Actual payloads need stable correlation: run identity and hashes of
-  the corresponding sanction exchange, push exchange, and rollout snapshot.
-  JSONL line ordering is storage order only; cross-log timestamps/order may tie
-  or race and must not be treated as causality.
-- `ControlRunEvent`, `RunJournal`, custom per-attempt manifests, archive
-  directory scanning, and the associated symlink policy should disappear once
-  the replacement is complete. Do not try to strengthen the current optional-
-  field event bag as an end state.
+Each populated Rule owns its scenarios, so every Scenario subject is that
+interface's owning node. All participating nodes outside the interface are
+named in Given steps. Every participating Scenario carries the exact test-
+address tag. Steps should refer only to real, vetted Python objects wherever
+possible, including inherited `AiAugmentDetourConfig` fields, and use custom
+pytest-bdd parsing plus `target_fixture` phase outputs so later Given steps
+consume earlier Then states. A deterministic adapter composes the tagged
+interface scenarios into one pytest node; the Pixi task invokes it. This is a
+real corrective pilot: fix concrete code defects encountered in its contour,
+but make no unrelated refactors.
 
-## Open design points to resolve before implementation
+## Canonical researcher/source vocabulary
 
-- The three append-only logs follow the established OpenAlex-log checkpoint
-  contract. They may remain mutable while work is active. When the operator is
-  ready to checkpoint, hand off, or publish them, the operator manually records
-  their current SHA-256 values in `config_ai_augment.json`. Runtime code must not
-  rewrite configured hashes or treat them as live synchronization state.
-- The three listed exchanges do not by themselves close a run that dies before
-  `/push`, is canceled, or is interrupted during launch/discovery. Preserving
-  the prior requirement that every dashboard-visible run reconstruct exactly
-  requires a real dashboard -> backend termination/control exchange (possibly a
-  second typed operation on the same control endpoint), unless the operator
-  explicitly narrows history to sanctioned/pushed runs.
-- Exact asynchronous delivery semantics need definition. A completed HTTP log
-  records an attempted cycle, but a recipient may be absent or a sender may die
-  between remote side effect and durable append. Correlation and idempotent
-  replay are required; clarify whether an undelivered request record is merely
-  audit evidence or a durable command consumers must apply later.
-- The result-notification Pydantic body must contain enough private, small data
-  to rebuild the current detour DB/card exactly without rerunning historical
-  web-evidence validation. It must not expose those private details through the
-  public `/push` response.
+- `SourceKey` in the main data model identifies provenance: one
+  `RegisteredResource` plus one typed fragment. Its persisted components are
+  carried inside an innerdict as `ktp.filename`, `ktp.fragment_type`, and
+  `ktp.fragment`.
+- `KTP_NAMEKEY_COL` (`ktp.namekey`) is the researcher grouping identity: the
+  canonical JSON serialization of `ktp.first_name` and `ktp.last_name`.
+- `KTP_INNERDICT_JSONLINES_COL` (`ktp.innerdicts`) stores zero or more JSONL
+  source-fragment records grouped under one `ktp.namekey`. The read-only main DB
+  has 307 distinct namekeys, and a single namekey can own many XLSX/DOCX/SSN
+  innerdicts.
+- Older detour internals and legacy prose sometimes call the serialized
+  researcher namekey a `source_key`; do not propagate that conflation into the
+  new HTTP contract and never invent `ktp.source_key`. New control-boundary
+  researcher identifiers are namekeys and use the authoritative
+  `KTP_NAMEKEY_COL` definition where a wire/column key is required.
 
-## `HttpRequestLogRecord.host` correction
+## Required target contract
 
-- Current API logging uses `request.url.hostname`, which drops an explicit port.
-  Add version-2 wire behavior with an explicit `port` field while preserving the
-  version-1 contract and historical OpenAlex records.
-- Keep `KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION = 1` for all main-pipeline producers
-  and domain checks. The active simpler proposal is one versioned
-  `HttpRequestLogRecord` with `schema_version: Literal[1, 2]` and
-  `port: int | None = None`, plus differential wire validation and serialization.
-  Before validation, version 1 rejects the presence of the `port` key even when
-  null. Native version 2 accepts omitted `port` input and defaults it to `None`;
-  `port` remains a declared version-2 schema property and version-2 serialization
-  always includes it, including as null. Version 1 serialization omits `port`, so
-  version 1 remains the exact original 13-field JSON contract.
-- `coerce_schema_v1: bool = False` is an ordinary model field, not a custom
-  `model_validate_json` argument. Like `port`, the field is absent and forbidden
-  in schema version 1; schema version 2 initializes and serializes it. For version
-  2 with coercion true, validation first removes only the two version-2 fields,
-  changes the projected schema version to 1, and fully validates that projection
-  under strict version 1 before completing ordinary version-2 validation. Native
-  version 2 with coercion false skips this projection and still permits
-  `port=None`. The detour API is native version 2 and does not opt into coercion;
-  coercion remains an explicit fallback for a future painless migration.
-  `model_validate_json` remains Pydantic's unmodified routine validator.
-- Version 2 additionally declares
-  `ready_to_respond_at_unix_usec: int | None = None`. Version 1 rejects the field
-  on input and omits it on serialization. A migrated version-1 payload omits the
-  unsupported field, so opt-in version-1 coercion receives the ordinary null
-  default without special mutation. Native version 2 preserves a supplied
-  timestamp and otherwise defaults it to null. No producer, including the detour
-  API, explicitly populates the field yet. Main-pipeline/OpenAlex version-1
-  timing and wire records remain unchanged.
-- Within the Python object, a parsed version-1 instance necessarily has the
-  statically declared `port=None` and `coerce_schema_v1=False` defaults;
-  “undefined” applies to the version-1 wire representation. If the attributes
-  themselves must not exist, two models are required. The one-model JSON Schema
-  will also need explicit
-  conditional/`oneOf` customization if consumers must see the version-dependent
-  required/forbidden rule rather than relying only on runtime validation.
-- Add regressions for an old OpenAlex version-1 line, version-1 serialization,
-  local version-2 8611/8612 records, explicit default ports, no-port URLs, and
-  IPv6 host/port separation.
-- Unique endpoint paths should remain the primary exchange classifier; do not
-  rely solely on port identity.
-- A read-only full audit found that all 135 records in
-  `data/openalex_author_search_log.jsonl` and all 167 records in
-  `data/openalex_paper_title_log.jsonl` validate against the strict current
-  model. Every record has the exact 13-field schema-version-1 envelope and uses
-  `host="api.openalex.org"` with no port. The OpenAlex producer and validator use
-  the same `OPENALEX_HOST` constant directly, so authority-aware URL extraction
-  for detour records does not change historical or future OpenAlex records.
-- Keep existing version-1 OpenAlex producers, validators, matching helper, and
-  construction helper on version 1. Their explicit schema-version checks remain
-  unchanged. New detour HTTP ledgers intentionally construct version 2 and
-  populate `host=request.url.hostname` and `port=request.url.port`; Starlette
-  preserves explicitly supplied ports and returns `None` when absent. Any new
-  version-2 matching/reduction compares the port and cannot conflate otherwise
-  identical endpoints on different ports.
+- Backend API exclusively owns one append-only JSONL and the detour DuckDB,
+  including every detour-DB read/write and every authoritative-log write.
+  Dashboard and agent runtime access neither directly. The dashboard owns its
+  read-only main-DB connection and Lima/deploy reads, derives the 307-row source
+  population and ground truth there, and sends/observes durable run state only
+  through authenticated backend control push/pull.
+- The JSONL contains literal schema-V2 `HttpRequestLogRecord` entries for every
+  dashboard sanction push, public submission push, and backend-private control
+  commit exchange. Pulls are read-only queries and are not logged. A public
+  submission and its private PUT commit are one transaction; the private commit
+  body carries appendwatch and all other replay metadata without exposing it to
+  the public client.
+- Rollout snapshots are the only large archived files. Store them in a
+  SHA-256-addressed CAS; all other replay data belongs in typed HTTP bodies.
+  `rollout_cas_dir` is always a required `config_ai_augment.json` value; the
+  backend must fail configuration validation when it is absent and must never
+  define, derive, or guess that path elsewhere.
+- JSONL file order is canonical. DuckDB is an ephemeral projection rebuilt from
+  the read-only main source DB, the authoritative log, and verified CAS blobs.
+  No directory scan, cross-log merge, UUID ordering, or timestamp ordering may
+  reconstruct state.
+- Startup validates the configured
+  `detour_ai_augment_backend_api_replay_log` `RegisteredResource`, repairs only
+  an incomplete final JSONL line only after explicit operator confirmation, and
+  replays in line order. Refusal or unavailable input leaves the log unchanged
+  and fails startup. A projection may be
+  behind and catch up; disagreement with an already projected prefix or an
+  unverifiable CAS reference fails startup loudly. A projection failure after a
+  committed log append makes the backend unhealthy and fail-closed until repair.
+- Guard the data directory/log with a process-level single-writer lock so a
+  second backend refuses to start.
 
-## Pending Lima lifecycle work
+## HTTP/state semantics
 
-- Revisit separately after the HTTP-ledger design. `deploy.sh` currently starts,
-  verifies, and leaves `aivm` running. Desired direction: after successful deploy,
-  stop the Lima instance, perhaps after an operator prompt.
-- Operator tests should own availability: detect whether `aivm` exists/runs;
-  when stopped, prompt to start it (with noninteractive flags for automation),
-  then probe SSH and appendwatch. They may prompt after the contour whether to
-  stop it, but must never delete it except through the already explicit redeploy
-  flow.
-- Current autouse operator fixture merely invokes `limactl shell ... true` with
-  `check=True`; absent/unavailable AIVM therefore raises
-  `subprocess.CalledProcessError` during fixture setup. Replace this with explicit
-  lifecycle handling and human-readable failures when this work resumes.
+- There are five endpoint contours: dashboard sanction push/status pull, public
+  annotation push/task pull, and an unmounted backend-only PUT commit endpoint.
+  The commit is invoked through an in-process HTTP/ASGI transport and cannot be
+  reached through Uvicorn. Its request and response remain literal HTTP fields.
+- One global non-waiting command gate covers both pushes. A concurrent push gets
+  an immediate logged BUSY response; pulls remain readable and tolerate the
+  pre-commit or post-commit state.
+- A successful internal push idempotently establishes exactly one active
+  sanction. External pull repeatedly returns that task; after a failed commit it
+  returns the same task with public retry guidance. A correct external push and
+  commit consume the sanction. Subsequent public pull uses the existing no-
+  sanction 503 configuration response until a human sanctions another run.
+- Both push contours carry stable idempotency/correlation identity. Retrying an
+  already committed request cannot duplicate a transition.
+- Dashboard sends an internal push normally but treats internal pull/status as
+  truth. Agent instructions similarly require external push followed by public
+  pull polling; HTTP push delivery is notification, not the commit mechanism.
+- Push routes use finite buffered JSON responses, not streaming responses.
 
-## Current code/verification state
+## Commit and failure invariants
 
-- The shared `HttpRequestLogRecord` now supports version 1 and version 2 through
-  one strict model. Differential validation forbids all three version-2 fields in
-  version 1; version 2 declares and serializes port, coercion, and response-ready
-  fields while permitting null/defaulted values. With coercion true, the common
-  payload is fully validated under version 1 before version-2 validation
-  completes; a migrated payload defaults its absent response-ready field to null.
-  Differential serialization preserves the exact 13-field version-1 wire format. The main
-  OpenAlex constant and producers remain on version 1. Detour push HTTP archives
-  intentionally write native version 2 with host and optional port; the new
-  response-ready field remains at its null default. Archive replay likewise
-  requires and validates native version-2 records directly. The shared model's
-  opt-in coercion path is not consumed by the detour API.
-- The tree still contains the recently implemented run-event DuckDB projection,
-  private event endpoint, attempt manifests/directories, archive restoration,
-  appendwatch topology, sanctioned `/pull` probe, shutdown recovery, and six
-  operator E2E extensions. The new three-log/CAS architecture has not yet been
-  implemented and will supersede substantial parts of that persistence work.
-- `archive_http_request_log`, `record_attempt`, and `safely_record_attempt` now
-  have explanatory docstrings only; function names and behavior are unchanged.
-- The latest `pixi run pre-commit 2>&1` passed Ruff, mypy, all shared HTTP-log
-  regressions (including the V2 response-ready JSON roundtrip), and 162 detour
-  tests. The contour failed seven tests because the current human-edited
-  `config_ai_augment.json` is invalid JSON at line 40, column 79. No config edit
-  was made. Operator-marked tests remain an explicit separate contour on the
-  operator machine.
+- Middleware structurally captures complete literal exchanges for sanction push,
+  public push, and private commit. The private commit is durably appended and
+  projected before public push can return. Once the public response is complete
+  and ready to send, the public push exchange is appended as audit without
+  duplicating the committed transition. Canonical line order is therefore
+  always private PUT commit before its corresponding public POST push.
+- Authoritative commit order is: validate/calculate response and next state;
+  append complete HTTP record; fsync (commit); apply DuckDB/state projection;
+  send response. Do not irreversibly mutate domain state before the JSONL commit.
+- Crash before append commits nothing. A partial final line is truncated to the
+  prior newline at startup. Crash after fsync is committed and replay catches up
+  DuckDB. Crash after projection but before response remains committed and is
+  discovered by polling/idempotent retry.
+- JSONL append errors cannot return success. DuckDB failure after JSONL commit
+  cannot roll back the transaction and must make the backend unhealthy. Client
+  timeout does not imply failure. Requests that never reach the ASGI application
+  are outside the logging boundary.
+- Every internal backend failure exposed to the public client uses exactly the
+  existing `CONFIGURATION_ERROR_DETAIL`; no other internal wording may leak.
+  Operator-facing server logs are separate: they identify the concrete route,
+  stage/gate/line, and underlying cause granularly and never tell the operator
+  to contact the human operator.
 
-## Immediate next action
+## Shared HTTP model state
 
-After the operator resolves the current invalid JSON in
-`config_ai_augment.json`, rerun `pixi run pre-commit 2>&1`. Then finish the
-three-log body schemas, correlation and delivery semantics, pre-push termination
-representation, and deterministic reducer contract with the operator. Do not
-implement the wider architecture until the operator approves that contract.
-Keep the Lima lifecycle as a recorded separate follow-up.
+- `HttpRequestLogRecord` is one strict model with schema versions 1 and 2.
+  Main-pipeline/OpenAlex producers remain exact schema V1 and historical logs
+  retain their original 13-field wire contract.
+- V2 declares optional `port`, `coerce_schema_v1`, and
+  `ready_to_respond_at_unix_usec`. V1 rejects these keys on input and omits them
+  on serialization. Native V2 preserves supplied values and defaults them to
+  null/false. Opt-in V1 coercion first validates the common projection strictly
+  as V1; an absent response-ready field then receives the normal null V2 default.
+- Detour logging is native V2 and does not use coercion. TASK now requires the
+  backend middleware to populate `ready_to_respond_at_unix_usec` because it logs
+  responses the backend is about to send. These server-side records always set
+  `received_at_unix_usec` to null because the backend is sending, not receiving,
+  the recorded response.
+- Focused shared tests prove V1 rejection/serialization, V2 optional ports,
+  IPv6/default/local ports, V2 schema exposure, coercion, and non-null
+  response-ready JSON roundtrip.
+
+## Current implementation state
+
+- `api.py` now has only the new backend-owned contour: required config-sourced
+  `rollout_cas_dir`, operator-confirmed tail repair, process locking, typed
+  control/attempt/commit models, one transactional record projector, pure-ASGI
+  buffered schema-V2 logging middleware, public/control push-pull routes, and the
+  unmounted private commit app. The old manifest/attempt-directory restore,
+  dashboard callback, unsanctioned sample-row fallback, and renamed/dead legacy
+  routes have been deleted outright; do not reintroduce compatibility paths.
+- The dashboard boundary has now been converted to authenticated backend
+  control push/pull. `ui.py` no longer owns a run journal, detour database,
+  archive reconciler, local sanction plane, researcher-card renderer, or
+  backend-facing NiceGUI callback endpoints. It intentionally retains the
+  read-only main-DB `SourceRepository` and Lima/deploy reads. Backend control
+  snapshots supply run events, attempts, accepted output, sanctions, and lazily
+  requested card Markdown; the UI keeps its source population/ground-truth
+  reads, live queue/process handles, and caches.
+- Backend startup readiness now requires both OpenAPI and a valid authenticated
+  control pull. A public pull is additionally probed after sanctioning, before
+  the Codex run is allowed to proceed.
+- A repository/DB audit established that the detour had conflated researcher
+  namekeys with provenance source keys. The new backend models and processing
+  path are currently being renamed to `namekey`; `ktp.source_key` was removed
+  from the control query and `KTP_NAMEKEY_COL` now supplies the query alias.
+  Active backend and dashboard code now consistently uses `namekey` and
+  `KTP_NAMEKEY_COL`; the retry-baseline database column was also corrected from
+  `sourcekey` to `namekey`. Remaining old terminology is confined to tests that
+  still assert the removed architecture and must be replaced, not accommodated.
+- The latest `pixi run pre-commit 2>&1` passes Ruff and reaches mypy. The active
+  production modules and `test_e2e_operator.py` are mypy-clean. Mypy stops on
+  203 stale-contract errors confined to `test_api.py`,
+  `test_control_centre.py`, and `test_control_centre_e2e.py`: removed
+  manifests/attempt directories, callback endpoints, local journal/control
+  plane, and `source_key` UI names. Replace those tests with authoritative-log
+  and namekey/control-boundary roundtrips rather than restoring aliases or
+  compatibility code.
+- Existing appendwatch, evidence matching, retry-baseline, and researcher-card
+  behavior remains required inside the new transaction/replay boundary.
+- The human explicitly removed the AIVM workbook/prompt contour after the
+  current TASK text was written. Purge `/home/ai/workdir/WORKBOOK.md`,
+  `/home/ai/workdir/PROMPT.md`, host-workbook initialization/synchronization,
+  workbook commit snapshots, and replay materialization. The Control Centre
+  passes only the vetted Backend OpenAPI URL directly to Codex; do not retain a
+  compatibility field or branch for workbook data.
+- Operator-marked tests remain an explicit separate contour.
+- Operator fixture setup probes AIVM liveness before guest-dependent checks.
+  On a reuse run, a stopped/unreachable instance prompts the operator to start
+  it; `--yes` starts it noninteractively, refusal fails clearly, and tests never
+  delete the instance. The instance remains running after the contour. The
+  separate `deploy.sh` stop-after-deploy and optional post-test stop prompts
+  recorded in `var/HUMANS.md` remain pending lifecycle work.
+  Reuse runs source the authoritative `ai`-owned
+  `/home/ai/workdir/.openalex.env` inside Lima and export that value only into
+  the test/dashboard process. A host `OPENALEX_API_KEY` is required only when
+  the operator elects to redeploy; deployment is followed by the same guest
+  roundtrip. Stopped AIVM, missing guest key, and inactive appendwatch have
+  separate setup errors.
+- The human restored the pytest-bdd dependency in project configuration; leave
+  it in place, but do not add the BDD pilot files until the original accepted-
+  run operator node passes.
+- The selected accepted-run operator test now uses a temporary authoritative
+  replay JSONL, rollout CAS, and reconstructed DuckDB. The same test module
+  contains no active attempts-directory, manifest, journal, callback, or
+  `source_key` branch. Sanctioned pull, failure persistence, DB reconstruction,
+  signal chaos, and accepted-run/restart scenarios now use the replay-log
+  contour. Three useful archive-era scenarios are explicitly preserved as
+  commented-out tests with their original names and assertions; do not delete
+  them, and adapt them to authoritative replay fixtures after the accepted-run
+  node is proven.
+
+## Immediate implementation sequence
+
+1. The operator rerun proved the guest-key/lifecycle correction and then exposed
+   a durable action failure: the button remained `QUEUE` for 30 seconds. A real
+   backend/control-client probe under repository `./tmp` identified the cause:
+   decorator-style FastAPI middleware received Starlette's private
+   `_StreamingResponse` and crashed on `response.body` for every control push.
+   The middleware is now a pure ASGI wrapper that buffers the request, captures
+   the untouched finite response messages, commits the complete HTTP exchange,
+   and only then forwards those messages. Three upstream layers are green: a
+   focused middleware regression; an actual FastAPI control-push -> JSONL ->
+   DuckDB -> control-pull roundtrip that deletes and rebuilds the DB from replay;
+   and the real NiceGUI/Playwright browser contract, including `QUEUE` ->
+   `CANCEL` while preserving UI state. Run the repository gate, then ask the
+   operator for one rerun of the exact accepted-workflow node. Keep the positive
+   `QUEUE`/`RERUN` -> `CANCEL` and `CANCEL` -> `RERUN` assertion. Operator tests
+   retain merged dashboard stdout/stderr and tee every line live; the dedicated
+   Pixi task uses pytest `tee-sys`.
+2. Only after it passes, add the whole-feature `.feature`, adjacent BDD test,
+   deterministic tagged-scenario composer, and detour Pixi pilot task.

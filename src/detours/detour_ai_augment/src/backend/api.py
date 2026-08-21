@@ -2,16 +2,18 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import csv
+import fcntl
 import hashlib
 import hmac
 import json
 import logging
 import os
 import re
-import shutil
 import signal
 import subprocess
+import tempfile
 import threading
 import time
 from collections import Counter
@@ -22,17 +24,15 @@ from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from random import Random
-from typing import Any, Callable, Literal, Self, TypeAlias, cast, get_args
-from urllib import error as urllib_error
-from urllib import request as urllib_request
-from urllib.parse import urlsplit
+from typing import Annotated, Any, Callable, Literal, Self, TypeAlias, cast, get_args
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
 import duckdb
+import httpx
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request, status
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, HTTPException, Query, Request, status
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -41,6 +41,8 @@ from pydantic import (
     ValidationError,
     model_validator,
 )
+from starlette.datastructures import Headers
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from src.helpers.cards import build_cards, write_cards_zip
 from src.helpers.config import PipelineConfig
@@ -53,7 +55,6 @@ from src.helpers.data_models import (
 )
 from src.helpers.data_models.http_request_log import (
     HttpRequestLogRecord,
-    append_http_request_log_record,
 )
 from src.helpers.duckdb_extensions import load_duckdb_extension
 from src.helpers.duckdb_utils import (
@@ -67,9 +68,7 @@ from src.helpers.resources import register_resource
 from src.helpers.schema import (
     CARD_PARTITION_TABLE,
     DOCX_INNERDICT_TABLE,
-    OUTERDICT_NAME_VIEW,
     PARQUET_INNERDICT_TABLE,
-    SAMPLES_WITH_NAMES_VIEW,
     XLSX_INNERDICT_TABLE,
 )
 from src.helpers.vars import (
@@ -100,17 +99,11 @@ from src.helpers.vars import (
 from .helpers import codex_parse
 from .helpers.data_models.ai_augment_config import (
     MAP_SUBSET_0_TO_BATCH_KEY,
-    REPLAY_LOG_KEY,
+    # REPLAY_LOG_KEY,
     AiAugmentDetourConfig,
 )
 from .helpers.data_models.ai_augment_context import (
     AiAugmentBackendContext,
-)
-from .helpers.data_models.source_population import (
-    IneligibilityCategory,
-    SourceCohort,
-    SourcePopulationRow,
-    SourceResearcher,
 )
 from .helpers.data_models.pydantic_to_paste import (
     MAX_PUSH_BODY_BYTES,
@@ -127,11 +120,17 @@ from .helpers.data_models.pydantic_to_paste import (
     StandardizedValue,
     WebSearchExcerpt,
 )
-from .helpers.data_models.submission_init import Submission
+from .helpers.data_models.source_population import (
+    IneligibilityCategory,
+    SourceCohort,
+    SourcePopulationRow,
+    SourceResearcher,
+)
 from .helpers.data_models.submission_fixture import (
     L_FEI_FEI_INITIAL_FIXTURE,
     L_FEI_FEI_RETRY_FIXTURE,
 )
+from .helpers.data_models.submission_init import Submission
 from .helpers.locale import Locale
 from .helpers.vars import (
     AI_AUGMENT_COLUMNS,
@@ -174,19 +173,11 @@ class ControlRunEventKind(StrEnum):
     CANCELED = "canceled"
 
 
-SUBMISSIONS_DIR = Path(__file__).resolve().parents[2] / "data" / "submissions"
-ATTEMPTS_DIR = SUBMISSIONS_DIR / "attempts"
-SOURCE_FILE = Path("tmp/sheikh.jsonl")
-HOST_WORKBOOK_PATH = Path(__file__).resolve().parents[2] / "data" / "workbook.md"
 AIVM_WORKDIR = PurePosixPath("/home/ai/workdir")
-AIVM_WORKBOOK_PATH = AIVM_WORKDIR / "WORKBOOK.md"
 
 ROLLOUT_ENV_NAME = "FASTAPI_DETOUR_ROLLOUT_JSONL"
 ROLLOUT_JSONL = os.environ.get(ROLLOUT_ENV_NAME, "")
-CONTROL_URL_ENV_NAME = "FASTAPI_DETOUR_CONTROL_URL"
-CONTROL_BASE_URL = os.environ.get(CONTROL_URL_ENV_NAME, "")
 APPENDWATCH_REPORT_ENV_NAME = "FASTAPI_DETOUR_APPENDWATCH_REPORT"
-ALLOW_ARCHIVED_ATTEMPT_SYMLINKS = True  # sic! signed-off: human
 CONTROL_PARENT_PID_ENV_NAME = "FASTAPI_DETOUR_CONTROL_PARENT_PID"
 CONTROL_RUN_EVENTS_TOKEN_ENV_NAME = "FASTAPI_DETOUR_CONTROL_RUN_EVENTS_TOKEN"
 CONTROL_RUN_EVENTS_TOKEN = os.environ.get(CONTROL_RUN_EVENTS_TOKEN_ENV_NAME, "")
@@ -197,14 +188,9 @@ AIVM_SSH_PORT_ENV_NAME = "FASTAPI_DETOUR_AIVM_SSH_PORT"
 AIVM_IDENTITY_FILE_ENV_NAME = "FASTAPI_DETOUR_AIVM_IDENTITY_FILE"
 AIVM_KNOWN_HOSTS_FILE_ENV_NAME = "FASTAPI_DETOUR_AIVM_KNOWN_HOSTS_FILE"
 LIMA_SSH_CONFIG_ENV_NAME = "FASTAPI_DETOUR_LIMA_SSH_CONFIG"
-CONTROL_CURRENT_PATH = "/_control/current"
-CONTROL_ACCEPTED_PATH_TEMPLATE = "/_control/runs/{run_id}/accepted"
-CONTROL_RUN_EVENTS_PATH = "/_control/run-events"
-CONTROL_HTTP_TIMEOUT_SECONDS = 10
-CONTROL_SCHEME = "http"
-CONTROL_HOST = "127.0.0.1"
-CONTROL_PORT = 8611
-CONTROL_ROOT_PATHS = frozenset({"", "/"})
+CONTROL_PUSH_PATH = "/_control/push"
+CONTROL_PULL_PATH = "/_control/pull"
+CONTROL_COMMIT_PATH = "/_control/commit"
 CODEX_SESSIONS_ROOT = PurePosixPath("/home/ai/.codex/sessions")
 APPENDWATCH_REPORT = Path(os.environ.get(APPENDWATCH_REPORT_ENV_NAME, "")).expanduser()
 
@@ -258,7 +244,6 @@ APPENDWATCH_COMPROMISED_ROOT_PREFIX = (
     f"{APPENDWATCH_ROOT_ENTRY}  [{APPENDWATCH_COMPROMISED_STATUS}:"
 )
 APPENDWATCH_REMOVED_SECTION_HEADER = "removed or replaced (no longer a regular file):"
-APPENDWATCH_ARCHIVE_TEMP_FILENAME = ".appendwatch-tree.tmp"
 APPENDWATCH_ARCHIVE_FILENAME_TEMPLATE = "appendwatch-tree.{attempt_id}.txt"
 TREE_INDENT_GROUP = "indent"
 TREE_BODY_GROUP = "body"
@@ -297,7 +282,7 @@ CODEX_TIMESTAMP_KEY = "timestamp"
 CODEX_MODEL_KEY = "model"
 CODEX_REASONING_EFFORT_KEY = "effort"
 CODEX_ORIGINATOR_KEY = "originator"
-CODEX_SOURCE_KEY = "source"
+CODEX_SOURCE_FIELD = "source"
 CODEX_CLI_VERSION_KEY = "cli_version"
 CODEX_MODEL_PROVIDER_KEY = "model_provider"
 CODEX_OUTPUT_KEY = "output"
@@ -323,7 +308,6 @@ SESSION_REASONING_EFFORT_KEY = "reasoning_effort"
 ATTEMPT_STAGE_TRANSPORT = "transport"
 ATTEMPT_STAGE_CONFIGURATION = "configuration"
 ATTEMPT_STAGE_ROLLOUT_COPY = "rollout_copy"
-ATTEMPT_STAGE_WORKBOOK_COPY = "workbook_copy"
 ATTEMPT_STAGE_APPENDWATCH_COPY = "appendwatch_report_copy"
 ATTEMPT_STAGE_APPENDWATCH_VALIDATION = "appendwatch_report_validation"
 ATTEMPT_STAGE_ROLLOUT_INDEX = "rollout_index"
@@ -332,15 +316,18 @@ ATTEMPT_STAGE_EVIDENCE_VALIDATION = "duckdb_evidence_validation"
 ATTEMPT_STAGE_RESEARCHER_RESOLUTION = "researcher_resolution"
 ATTEMPT_STAGE_CARD = "innerdict_and_card"
 ATTEMPT_STAGE_ACCEPTED = "accepted"
-ATTEMPT_RESULT_PENDING = "pending"
+REPLAY_EXECUTION_STAGES = frozenset({
+    ATTEMPT_STAGE_APPENDWATCH_VALIDATION,
+    ATTEMPT_STAGE_ROLLOUT_INDEX,
+    ATTEMPT_STAGE_PYDANTIC_VALIDATION,
+    ATTEMPT_STAGE_EVIDENCE_VALIDATION,
+    ATTEMPT_STAGE_RESEARCHER_RESOLUTION,
+    ATTEMPT_STAGE_CARD,
+    ATTEMPT_STAGE_ACCEPTED,
+})
 ATTEMPT_RESULT_ACCEPTED = "accepted"
 ATTEMPT_RESULT_CONFIGURATION_ERROR = "configuration_error"
 ATTEMPT_RESULT_REJECTED = "rejected"
-ATTEMPT_RESULT_RESPONSE_CODE = {
-    ATTEMPT_RESULT_ACCEPTED: status.HTTP_200_OK,
-    ATTEMPT_RESULT_CONFIGURATION_ERROR: status.HTTP_503_SERVICE_UNAVAILABLE,
-    ATTEMPT_RESULT_REJECTED: status.HTTP_422_UNPROCESSABLE_CONTENT,
-}
 SSH_EXECUTABLE = "ssh"
 SCP_EXECUTABLE = "scp"
 BASE64_TEXT_ENCODING = "ascii"
@@ -352,6 +339,18 @@ HTTP_ACCEPT_HEADER = "Accept"
 HTTP_CONTENT_TYPE_HEADER = "Content-Type"
 HTTP_REQUEST_CONTENT_TYPE_HEADER = "content-type"
 HTTP_REQUEST_CONTENT_LENGTH_HEADER = "content-length"
+ASGI_TYPE_KEY = "type"
+ASGI_METHOD_KEY = "method"
+ASGI_PATH_KEY = "path"
+ASGI_BODY_KEY = "body"
+ASGI_MORE_BODY_KEY = "more_body"
+ASGI_STATUS_KEY = "status"
+ASGI_HEADERS_KEY = "headers"
+ASGI_HTTP_SCOPE_TYPE = "http"
+ASGI_HTTP_REQUEST_MESSAGE_TYPE = "http.request"
+ASGI_HTTP_DISCONNECT_MESSAGE_TYPE = "http.disconnect"
+ASGI_HTTP_RESPONSE_START_MESSAGE_TYPE = "http.response.start"
+ASGI_HTTP_RESPONSE_BODY_MESSAGE_TYPE = "http.response.body"
 TEXT_OUTPUT_FORMAT = "txt"
 DOCX_OUTPUT_FORMAT = "docx"
 SUPPORTED_OUTPUT_FORMATS = frozenset({TEXT_OUTPUT_FORMAT, DOCX_OUTPUT_FORMAT})
@@ -359,11 +358,6 @@ ROLLOUT_FILENAME_PREFIX = "rollout-"
 ROLLOUT_FILENAME_SUFFIX = ".jsonl"
 DETOUR_DB_SUFFIX = ".duckdb"
 DETOUR_DB_FILENAME_TEMPLATE = "{stem}__detour_{detour_id}{suffix}"
-WORKBOOK_ARCHIVE_TEMP_FILENAME = ".workbook.tmp"
-WORKBOOK_ARCHIVE_FILENAME_TEMPLATE = "workbook.{attempt_id}.md"
-HOST_WORKBOOK_TEMP_FILENAME_TEMPLATE = ".{filename}.tmp"
-ROLLOUT_ARCHIVE_TEMP_FILENAME = ".rollout.tmp"
-ROLLOUT_ARCHIVE_FILENAME_TEMPLATE = f"rollout.{{attempt_id}}{ROLLOUT_FILENAME_SUFFIX}"
 ATOMIC_TEMP_FILENAME_TEMPLATE = ".{filename}.{nonce}.tmp"
 RESPONSE_FILENAME = f"response{ROLLOUT_FILENAME_SUFFIX}"
 CARD_ZIP_FILENAME_TEMPLATE = "{prefix}_{attempt_id}.zip"
@@ -384,26 +378,33 @@ PYDANTIC_ERROR_LOCATION_KEY = "loc"
 PYDANTIC_ERROR_TYPE_KEY = "type"
 PYDANTIC_ERROR_INPUT_KEY = "input"
 PYDANTIC_MISSING_ERROR_TYPE = "missing"
-ARTIFACT_ROLLOUT_KEY = "rollout"
-ARTIFACT_WORKBOOK_KEY = "workbook"
-ARTIFACT_APPENDWATCH_REPORT_KEY = "appendwatch_report"
-ARTIFACT_CARD_ZIP_KEY = "card_zip"
-ARTIFACT_HTTP_REQUEST_LOG_KEY = "http_request_log"
-ARTIFACT_FILENAME_KEY = "filename"
-ARTIFACT_SIZE_KEY = "size"
-ARTIFACT_SHA256_KEY = "sha256"
-ARTIFACT_LINE_COUNT_KEY = "line_count"
 ATTEMPT_ID_KEY = "attempt_id"
 ATTEMPT_STAGE_KEY = "stage"
 ATTEMPT_RESULT_KEY = "result"
 ATTEMPT_UPDATED_AT_KEY = "updated_at"
-ATTEMPT_ARTIFACTS_KEY = "artifacts"
-ATTEMPT_RUN_ID_KEY = "run_id"
-ATTEMPT_SOURCE_KEY = "source_key"
-ATTEMPT_SESSION_ID_KEY = "session_id"
-ATTEMPT_ROLLOUT_RELATIVE_PATH_KEY = "rollout_relative_path"
-ATTEMPT_MANIFEST_FILENAME = "attempt.json"
-HTTP_REQUEST_LOG_FILENAME_TEMPLATE = "push.{attempt_id}.http.jsonl"
+REPLAY_LOG_RESOURCE_KEY = "detour_ai_augment_backend_api_replay_log"
+ROLLOUT_CAS_TEMP_FILENAME_TEMPLATE = ".{nonce}.tmp"
+ROLLOUT_CAS_FILENAME_TEMPLATE = "{sha256}.jsonl"
+HTTP_IDEMPOTENCY_KEY_HEADER = "Idempotency-Key"
+HTTP_TRANSACTION_ID_HEADER = "X-Detour-Transaction-Id"
+HTTP_ETAG_HEADER = "ETag"
+HTTP_ETAG_SHA256_TEMPLATE = '"sha256:{sha256}"'
+HTTP_ETAG_SHA256_PREFIX = '"sha256:'
+HTTP_ETAG_SUFFIX = '"'
+HTTP_INTERNAL_ERROR_RESPONSE = status.HTTP_500_INTERNAL_SERVER_ERROR
+HTTP_BUSY_RESPONSE = status.HTTP_409_CONFLICT
+AUTHORITATIVE_PUBLIC_ROUTES = frozenset({
+    (HTTP_POST_METHOD, PUSH_PATH),
+    (HTTP_POST_METHOD, CONTROL_PUSH_PATH),
+})
+AUTHORITATIVE_COMMIT_ROUTE = (HTTP_PUT_METHOD, CONTROL_COMMIT_PATH)
+AUTHORITATIVE_CHECKPOINT_ID = 1
+AUTHORITATIVE_FIRST_LINE = 1
+AUTHORITATIVE_EMPTY_OFFSET = 0
+AUTHORITATIVE_LOG_BASE64_ENCODING = "base64"
+AUTHORITATIVE_LOG_ENCODING_KEY = "encoding"
+AUTHORITATIVE_LOG_DATA_KEY = "data"
+OPERATOR_CONFIRMATIONS = frozenset({"y", "yes"})
 EVIDENCE_OUTCOME_V1_EXACT = "v1_exact"
 EVIDENCE_OUTCOME_V2_NEAR = "v2_near"
 EVIDENCE_OUTCOME_UNMATCHED = "unmatched"
@@ -441,20 +442,21 @@ CODEX_RESULT_SEPARATOR = "-" * 80
 FOOTNOTE_CONTEXT_CHARACTERS = 160
 SERVER_HOST = "127.0.0.1"
 SERVER_PORT = 8612
+INTERNAL_COMMIT_BASE_URL = "http://backend.internal"
 
 MAP_COLUMNS = (DRAW_LABEL, BATCH_LABEL)
 # ground truth is defined explicitly by released batch, exclusive of dupe
 GROUND_TRUTH_COHORT = SourceCohort.GROUND_TRUTH
 GROUND_TRUTH_RELEASE_BATCHES = frozenset({"subset 1", "subset 5", "subset 6", "subset 7"})
-EXCLUDED_SOURCE_KEY = json.dumps(
+EXCLUDED_NAMEKEY = json.dumps(
     {KTP_FIRST_NAME_COL: "Mercouri G.", KTP_LAST_NAME_COL: "Kanatzidis"},
     sort_keys=True,
 )
 GROUND_TRUTH_DEF: Callable[
     [str, Mapping[str, str], tuple[str, ...]],
     bool,
-] = lambda source_key, release_batches, draws: (
-    source_key != EXCLUDED_SOURCE_KEY
+] = lambda namekey, release_batches, draws: (
+    namekey != EXCLUDED_NAMEKEY
     and any(release_batches.get(draw) in GROUND_TRUTH_RELEASE_BATCHES for draw in draws)
 )
 NO_GROUND_TRUTH_COHORT = SourceCohort.NO_GROUND_TRUTH
@@ -491,10 +493,13 @@ DRAW_SORT_PART = re.compile(r"\d+|\D+")
 
 DETOUR_ID = "ai-augment"
 DETOUR_DB_LOCK = threading.Lock()
-CONSUMED_RUN_LOCK = threading.Lock()
-CONSUMED_RUN_IDS: set[UUID] = set()
-WORKBOOK_STATE_LOCK = threading.Lock()
-WORKBOOK_INITIALIZED = False
+AUTHORITATIVE_APPEND_LOCK = threading.Lock()
+AUTHORITATIVE_COMMAND_STATE_LOCK = threading.Lock()
+AUTHORITATIVE_COMMAND_ACTIVE = False
+AUTHORITATIVE_BACKEND_HEALTHY = True
+AUTHORITATIVE_LOG_DESCRIPTOR: int | None = None
+AUTHORITATIVE_NEXT_LINE_NUMBER = 1
+AUTHORITATIVE_LOG_OFFSET = 0
 EVIDENCE_RANDOM = Random()
 CODEX_FC_TABLE = "codex_fc"
 CODEX_FCO_TABLE = "codex_fco"
@@ -512,10 +517,23 @@ CODEX_CALLS_ID_SEQUENCE = "codex_calls_id_sequence"
 CODEX_TURN_REF_ID_SEQUENCE = "codex_turn_ref_id_sequence"
 CODEX_EVIDENCE_AUDIT_ID_SEQUENCE = "codex_evidence_audit_id_sequence"
 CONTROL_RUN_EVENTS_TABLE = "control_centre_run_events"
-ARCHIVED_ATTEMPTS_TABLE = "control_centre_archived_attempts"
-ARCHIVED_ATTEMPT_MANIFEST_COLUMN = "manifest"
+CONTROL_ATTEMPTS_TABLE = "control_centre_attempts"
+CONTROL_SANCTIONS_TABLE = "control_centre_sanctions"
+AUTHORITATIVE_PROJECTION_TABLE = "detour_authoritative_projection"
+CONTROL_ATTEMPT_RECORD_COLUMN = "record"
+CONTROL_ATTEMPT_REQUEST_SHA256_COLUMN = "request_sha256"
+CONTROL_ATTEMPT_IDEMPOTENCY_KEY_COLUMN = "idempotency_key"
+CONTROL_RUN_EVENT_IDEMPOTENCY_KEY_COLUMN = "idempotency_key"
 CONTROL_RUN_EVENT_ORDINAL_COLUMN = "event_ordinal"
 CONTROL_RUN_EVENT_PAYLOAD_COLUMN = "event"
+CONTROL_SANCTION_RUN_ID_COLUMN = "run_id"
+CONTROL_SANCTION_PAYLOAD_COLUMN = "sanction"
+CONTROL_SANCTION_ACTIVE_COLUMN = "active"
+CONTROL_SANCTION_ACCEPTED_ATTEMPT_ID_COLUMN = "accepted_attempt_id"
+AUTHORITATIVE_PROJECTION_ID_COLUMN = "id"
+AUTHORITATIVE_PROJECTION_LINE_COLUMN = "line_number"
+AUTHORITATIVE_PROJECTION_OFFSET_COLUMN = "byte_offset"
+AUTHORITATIVE_PROJECTION_HASH_COLUMN = "line_sha256"
 
 CODEX_ID_COL = "id"
 CODEX_FC_TIMESTAMP_COL = "codex.fc_timestamp"
@@ -536,7 +554,7 @@ CODEX_REF_URL_COL = "codex.ref_url"
 CODEX_CITE_TEXT_COL = "codex.cite_text"
 CODEX_CITE_TOKENS_COL = "codex.cite_tokens"
 CODEX_RETRY_RUN_ID_COL = "run_id"
-CODEX_RETRY_SOURCEKEY_COL = "sourcekey"
+CODEX_RETRY_NAMEKEY_COL = "namekey"
 CODEX_RETRY_SESSION_ID_COL = "session_id"
 CODEX_RETRY_ATTEMPT_ID_COL = "attempt_id"
 CODEX_RETRY_CREATED_AT_COL = "created_at"
@@ -547,33 +565,46 @@ CODEX_EVIDENCE_APPLIED_COL = "applied"
 CODEX_EVIDENCE_ACCEPTED_COL = "accepted"
 CODEX_EVIDENCE_AUDIT_ID_COL = "id"
 CODEX_TOKEN_EXTENSION = "splink_udfs"
-CREATE_ARCHIVED_ATTEMPTS_TABLE_SQL = (
-    f"CREATE TABLE IF NOT EXISTS {ARCHIVED_ATTEMPTS_TABLE} ("
-    f"{ATTEMPT_ID_KEY} VARCHAR PRIMARY KEY, "
-    f"{ARCHIVED_ATTEMPT_MANIFEST_COLUMN} JSON NOT NULL)"
-)
 CREATE_CONTROL_RUN_EVENTS_TABLE_SQL = (
     f"CREATE TABLE IF NOT EXISTS {CONTROL_RUN_EVENTS_TABLE} ("
     f"{CONTROL_RUN_EVENT_ORDINAL_COLUMN} BIGINT PRIMARY KEY, "
+    f"{CONTROL_RUN_EVENT_IDEMPOTENCY_KEY_COLUMN} VARCHAR NOT NULL UNIQUE, "
     f"{CONTROL_RUN_EVENT_PAYLOAD_COLUMN} JSON NOT NULL)"
 )
-SELECT_ARCHIVED_ATTEMPT_IDS_SQL = f"SELECT {ATTEMPT_ID_KEY} FROM {ARCHIVED_ATTEMPTS_TABLE}"
-INSERT_ARCHIVED_ATTEMPT_SQL = (
-    f"INSERT INTO {ARCHIVED_ATTEMPTS_TABLE} "
-    f"({ATTEMPT_ID_KEY}, {ARCHIVED_ATTEMPT_MANIFEST_COLUMN}) VALUES (?, ?)"
+CREATE_CONTROL_ATTEMPTS_TABLE_SQL = (
+    f"CREATE TABLE IF NOT EXISTS {CONTROL_ATTEMPTS_TABLE} ("
+    f"{ATTEMPT_ID_KEY} VARCHAR PRIMARY KEY, "
+    f"{CONTROL_ATTEMPT_IDEMPOTENCY_KEY_COLUMN} VARCHAR NOT NULL UNIQUE, "
+    f"{CONTROL_ATTEMPT_REQUEST_SHA256_COLUMN} VARCHAR NOT NULL, "
+    f"{CONTROL_ATTEMPT_RECORD_COLUMN} JSON NOT NULL)"
+)
+CREATE_CONTROL_SANCTIONS_TABLE_SQL = (
+    f"CREATE TABLE IF NOT EXISTS {CONTROL_SANCTIONS_TABLE} ("
+    f"{CONTROL_SANCTION_RUN_ID_COLUMN} VARCHAR PRIMARY KEY, "
+    f"{CONTROL_SANCTION_PAYLOAD_COLUMN} JSON NOT NULL, "
+    f"{CONTROL_SANCTION_ACTIVE_COLUMN} BOOLEAN NOT NULL, "
+    f"{CONTROL_SANCTION_ACCEPTED_ATTEMPT_ID_COLUMN} VARCHAR)"
+)
+CREATE_AUTHORITATIVE_PROJECTION_TABLE_SQL = (
+    f"CREATE TABLE IF NOT EXISTS {AUTHORITATIVE_PROJECTION_TABLE} ("
+    f"{AUTHORITATIVE_PROJECTION_ID_COLUMN} INTEGER PRIMARY KEY, "
+    f"{AUTHORITATIVE_PROJECTION_LINE_COLUMN} BIGINT NOT NULL, "
+    f"{AUTHORITATIVE_PROJECTION_OFFSET_COLUMN} BIGINT NOT NULL, "
+    f"{AUTHORITATIVE_PROJECTION_HASH_COLUMN} VARCHAR NOT NULL)"
 )
 SELECT_CONTROL_RUN_EVENTS_SQL = (
-    f"SELECT {CONTROL_RUN_EVENT_ORDINAL_COLUMN}, {CONTROL_RUN_EVENT_PAYLOAD_COLUMN} "
+    f"SELECT {CONTROL_RUN_EVENT_ORDINAL_COLUMN}, "
+    f"{CONTROL_RUN_EVENT_IDEMPOTENCY_KEY_COLUMN}, {CONTROL_RUN_EVENT_PAYLOAD_COLUMN} "
     f"FROM {CONTROL_RUN_EVENTS_TABLE} ORDER BY {CONTROL_RUN_EVENT_ORDINAL_COLUMN}"
 )
 INSERT_CONTROL_RUN_EVENT_SQL = (
     f"INSERT INTO {CONTROL_RUN_EVENTS_TABLE} "
-    f"({CONTROL_RUN_EVENT_ORDINAL_COLUMN}, {CONTROL_RUN_EVENT_PAYLOAD_COLUMN}) VALUES (?, ?)"
+    f"({CONTROL_RUN_EVENT_ORDINAL_COLUMN}, {CONTROL_RUN_EVENT_IDEMPOTENCY_KEY_COLUMN}, "
+    f"{CONTROL_RUN_EVENT_PAYLOAD_COLUMN}) VALUES (?, ?, ?)"
 )
 HTTP_REQUEST_LOG_RESPONSE_CONTENT_TYPE_HEADER = "content-type"
 HTTP_REQUEST_LOG_RESPONSE_CONTENT_TYPE_JSON = "application/json"
 NANOSECONDS_PER_MICROSECOND = 1_000
-CONTROL_RUN_FIRST_ORDINAL = 1
 CONTROL_PARENT_WATCH_SECONDS = 0.1
 
 NOT_REPORTED_VALUE = get_args(NotReported)[0]
@@ -682,17 +713,13 @@ ATTEMPT_RESPONSE_CONTENT_TYPE = {
 async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     parent_watch: asyncio.Task[None] | None = None
     try:
-        runtime_configuration()
+        runtime = runtime_configuration()
+        _acquire_authoritative_process_lock(runtime)
+        synchronize_authoritative_projection(runtime)
     except PushConfigurationError as exc:
         logger.error(Locale.API_STARTUP_FAILED_LOG, exc)
+        _release_authoritative_process_lock()
         raise
-    try:
-        if _control_base_url() is None:
-            push_configuration()
-        else:
-            initialize_guest_workbook()
-    except PushConfigurationError as exc:
-        logger.error(Locale.ROUTES_DISABLED_LOG, exc)
     parent_pid = os.environ.get(CONTROL_PARENT_PID_ENV_NAME)
     if parent_pid is not None:
         if not parent_pid.isdecimal() or int(parent_pid) <= 0:
@@ -705,6 +732,7 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
             parent_watch.cancel()
             with suppress(asyncio.CancelledError):
                 await parent_watch
+        _release_authoritative_process_lock()
 
 
 async def _watch_control_parent(parent_pid: int) -> None:
@@ -738,7 +766,7 @@ class ControlRun(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
     run_id: UUID
-    source_key: StrictStr
+    namekey: StrictStr
     session_id: StrictStr
     rollout_jsonl: StrictStr
 
@@ -746,30 +774,10 @@ class ControlRun(BaseModel):
     def validate_control_run(self) -> Self:
         if any(
             not _valid_nonblank(value)
-            for value in (self.source_key, self.session_id, self.rollout_jsonl)
+            for value in (self.namekey, self.session_id, self.rollout_jsonl)
         ):
             raise ValueError(Locale.CONTROL_RUN_NORMALIZED)
         return self
-
-
-class ControlSnapshot(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
-
-    sanctioned_run: ControlRun | None
-
-
-class ControlAcceptedRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
-
-    source_key: StrictStr
-    session_id: StrictStr
-    attempt_id: StrictStr
-
-
-class ControlAcceptedResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
-
-    acknowledged: bool
 
 
 class ControlRunEvent(BaseModel):
@@ -777,7 +785,7 @@ class ControlRunEvent(BaseModel):
 
     schema_version: Literal[1] = 1
     run_id: UUID
-    source_key: str
+    namekey: str
     at: datetime
     kind: ControlRunEventKind
     session_id: str | None = None
@@ -788,16 +796,101 @@ class ControlRunEvent(BaseModel):
     detail: str | None = None
 
 
-class ControlRunEventsRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    events: tuple[ControlRunEvent, ...]
-
-
-class ControlRunEventsResponse(BaseModel):
+class ControlPushRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
-    persisted: int = Field(ge=0)
+    event: ControlRunEvent
+
+
+class ControlPushResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    accepted: bool
+    duplicate: bool
+
+
+class AttemptRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    attempt_id: StrictStr
+    transaction_id: StrictStr
+    request_sha256: StrictStr
+    stage: StrictStr
+    result: StrictStr
+    updated_at: datetime
+    run_id: UUID | None = None
+    namekey: StrictStr | None = None
+    session_id: StrictStr | None = None
+    rollout_sha256: StrictStr | None = None
+    response_code: int
+    response_body: StrictStr
+    response_detail: StrictStr | None = None
+
+
+class ControlAcceptedAttempt(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    namekey: StrictStr
+    attempt_id: StrictStr
+    session_metadata: CompactSessionMetadata
+    values: dict[StrictStr, StrictStr | None]
+    footnotes: StrictStr | None = None
+    footnote_arguments: StrictStr | None = None
+
+
+class ControlPullResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    sanctioned_run: ControlRun | None
+    events: tuple[ControlRunEvent, ...]
+    attempts: tuple[AttemptRecord, ...]
+    accepted_attempts: tuple[ControlAcceptedAttempt, ...]
+    card_markdown: StrictStr | None = None
+
+
+class RolloutCasReference(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    sha256: StrictStr
+    size: int = Field(ge=0)
+    line_count: int = Field(ge=1)
+    rollout_relative_path: StrictStr
+
+
+class SubmissionCommitOutcome(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    stage: StrictStr
+    result: StrictStr
+    response_code: int
+    response_headers: dict[StrictStr, StrictStr]
+    response_body: StrictStr
+    response_detail: StrictStr | None = None
+    retry_submission_expected: bool
+    namekey: StrictStr | None = None
+    session_id: StrictStr | None = None
+
+
+class SubmissionCommit(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    schema_version: Literal[1] = 1
+    transaction_id: StrictStr
+    attempt_id: StrictStr
+    attempt_timestamp: datetime
+    sanction: ControlRun
+    public_request_body: StrictStr
+    public_request_sha256: StrictStr
+    appendwatch_snapshot: StrictStr | None = None
+    rollout: RolloutCasReference | None = None
+    outcome: SubmissionCommitOutcome
+
+
+class ControlCommitResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    committed: bool
+    duplicate: bool
 
 
 SubmissionPayload: TypeAlias = Submission | StandardizedSubmission
@@ -885,6 +978,13 @@ PUSH_ROUTE: dict[str, Any] = {
 }
 
 app = FastAPI(**APP_CONFIG)
+commit_app = FastAPI(
+    title=Locale.INTERNAL_COMMIT_API_TITLE,
+    lifespan=None,
+    openapi_url=None,
+    docs_url=None,
+    redoc_url=None,
+)
 
 
 class RetryEvidenceObligation(BaseModel):
@@ -989,101 +1089,11 @@ class PushConfiguration:
 
 
 @dataclass(frozen=True)
-class RuntimeConfiguration:
-    pipeline: PipelineConfig
-    detour_db_path: Path
-    release_map: RegisteredResource | None = None
-    source_population: tuple[SourcePopulationRow, ...] = ()
-    eligible_cohorts: Mapping[str, str] | None = None
-
-    @property
-    def attempts_dir(self) -> Path:
-        return self.detour_db_path.parent / "submissions" / "attempts"
-
-
-@dataclass(frozen=True)
-class SanctionSnapshot:
-    run_id: UUID | None
-    source_key: str | None
-    session_id: str | None
-    rollout_guest_path: str
-    control_base_url: str | None
-
-
-@dataclass(frozen=True)
-class SourceResearcher:
-    source_key: str
-    first_name: str
-    last_name: str
-    draw_numbers: tuple[str, ...]
-    xlsx_rows: tuple[dict[str, object], ...]
-    docx_rows: tuple[dict[str, object], ...]
-    ssn_rows: tuple[dict[str, object], ...]
-    cohort: str
-
-
-@dataclass(frozen=True)
-class SourcePopulationRow:
-    source_key: str
-    rnd: int
-    first_name: str
-    last_name: str
-    draw_numbers: tuple[str, ...]
-    cohort: SourceCohort
-    ineligibility_category: IneligibilityCategory | None
-
-
-@dataclass(frozen=True)
 class ArchivedFile:
     path: Path
     size: int
     sha256: str
     line_count: int
-
-
-class ArchivedArtifact(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
-    filename: StrictStr
-    size: int = Field(ge=0)
-    sha256: StrictStr
-
-
-class ArchivedRolloutArtifact(ArchivedArtifact):
-    line_count: int = Field(ge=1)
-
-
-class ArchivedAttemptArtifacts(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
-    rollout: ArchivedRolloutArtifact
-    appendwatch_report: ArchivedArtifact
-    workbook: ArchivedArtifact | None = None
-    card_zip: ArchivedArtifact | None = None
-    http_request_log: ArchivedArtifact
-
-
-class ArchivedAttemptManifest(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
-    attempt_id: StrictStr
-    stage: StrictStr
-    result: StrictStr
-    updated_at: StrictStr
-    artifacts: ArchivedAttemptArtifacts
-    rollout_relative_path: StrictStr
-    run_id: UUID | None = None
-    source_key: StrictStr | None = None
-    session_id: StrictStr | None = None
-
-
-@dataclass(frozen=True)
-class ArchivedAttemptRecovery:
-    discovered: int
-    invalid: int
-    restored_attempt_ids: tuple[str, ...]
-    restored_accepted_attempt_ids: tuple[str, ...]
-    skipped_attempt_ids: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -1211,7 +1221,7 @@ class EvidenceAssessment:
 
 @dataclass(frozen=True)
 class ResearcherContext:
-    source_key: str
+    namekey: str
     draw_number: str
     first_name: str
     last_name: str
@@ -1225,12 +1235,13 @@ class AttemptReplayInput:
     attempt_id: str
     attempt_timestamp: datetime
     rollout_archive: ArchivedFile
-    report_archive: ArchivedFile
+    report_archive: ArchivedFile | None
     rollout_relative_path: PurePosixPath
     request_body: bytes
-    run_id: UUID | None
-    source_key: str | None
-    session_id: str | None
+    run_id: UUID
+    namekey: str
+    session_id: str
+    validate_appendwatch: bool
     materialize_files: bool
 
 
@@ -1243,7 +1254,7 @@ class AttemptExecution:
     response_detail: str | None
     response_lines: tuple[str, ...]
     retry_submission_expected: bool
-    source_key: str | None
+    namekey: str | None
     session_id: str | None
     card_archive: ArchivedFile | None
     error: Exception | None
@@ -1322,6 +1333,61 @@ def registered_release_map(config: PipelineConfig) -> RegisteredResource:
         ) from exc
 
 
+def _repair_incomplete_replay_log_tail(path: Path) -> None:
+    try:
+        with path.open("rb") as stream:
+            value = stream.read()
+        if not value or value.endswith(b"\n"):
+            return
+        previous_newline = value.rfind(b"\n")
+        truncate_at = previous_newline + 1
+        discarded_bytes = len(value) - truncate_at
+        reply = input(
+            Locale.REPLAY_LOG_TAIL_REPAIR_PROMPT_TEMPLATE.format(
+                path=path,
+                discarded_bytes=discarded_bytes,
+            )
+        )
+        if reply.strip().casefold() not in OPERATOR_CONFIRMATIONS:
+            raise PushConfigurationError(Locale.REPLAY_LOG_TAIL_REPAIR_DECLINED)
+        with path.open("r+b") as stream:
+            stream.seek(truncate_at)
+            stream.truncate()
+            stream.flush()
+            os.fsync(stream.fileno())
+        _fsync_directory(path.parent)
+    except (EOFError, OSError) as exc:
+        raise PushConfigurationError(Locale.REPLAY_LOG_TAIL_REPAIR_FAILED) from exc
+
+
+def registered_replay_log(config: PipelineConfig) -> RegisteredResource:
+    meta = config.files_config.get(REPLAY_LOG_RESOURCE_KEY)
+    if meta is None:
+        raise PushConfigurationError(
+            Locale.FILES_CONFIG_RESOURCE_MISSING_TEMPLATE.format(
+                resource_key=REPLAY_LOG_RESOURCE_KEY
+            )
+        )
+    try:
+        path = Path(meta[RESOURCE_PATH_KEY])
+        if path.is_symlink() or not path.is_file() or not os.access(path, os.R_OK | os.W_OK):
+            raise OSError(Locale.REPLAY_LOG_UNREADABLE)
+        _repair_incomplete_replay_log_tail(path)
+        return register_resource(
+            path,
+            group=ResourceGroup.KTP_PIPELINE_ARTIFACT,
+            fragment_type=FragmentType.LINE_NUMBER,
+            description=meta[RESOURCE_DESCRIPTION_KEY],
+            expected_hash=meta[RESOURCE_SHA256_KEY],
+        )
+    except (KeyError, OSError, ValueError) as exc:
+        raise PushConfigurationError(
+            Locale.CONFIGURED_RESOURCE_INVALID_TEMPLATE.format(
+                resource_key=REPLAY_LOG_RESOURCE_KEY
+            )
+        ) from exc
+
+
 def load_release_batches(resource: RegisteredResource) -> dict[str, str]:
     path = Path(resource)
     try:
@@ -1370,13 +1436,13 @@ def _innerdict_json_rows(
     value: object,
     *,
     table_name: str,
-    source_key: str,
+    namekey: str,
 ) -> tuple[dict[str, object], ...]:
     if not isinstance(value, str):
         raise PushConfigurationError(
             Locale.INNERDICTS_NON_TEXT_TEMPLATE.format(
                 table_name=table_name,
-                source_key=source_key,
+                namekey=namekey,
             )
         )
     rows: list[dict[str, object]] = []
@@ -1387,7 +1453,7 @@ def _innerdict_json_rows(
             raise PushConfigurationError(
                 Locale.INNERDICTS_MALFORMED_TEMPLATE.format(
                     table_name=table_name,
-                    source_key=source_key,
+                    namekey=namekey,
                     line_number=line_number,
                 )
             ) from exc
@@ -1395,7 +1461,7 @@ def _innerdict_json_rows(
             raise PushConfigurationError(
                 Locale.INNERDICTS_NON_OBJECT_TEMPLATE.format(
                     table_name=table_name,
-                    source_key=source_key,
+                    namekey=namekey,
                     line_number=line_number,
                 )
             )
@@ -1427,11 +1493,11 @@ def _draw_sort_key(
     return (group, tokens, normalized)
 
 
-def _source_identity_and_draws(
+def _namekeys_and_draws(
     conn: duckdb.DuckDBPyConnection,
 ) -> dict[str, tuple[NameKey, tuple[str, ...]]]:
-    draws_by_source_key: dict[str, set[str]] = {}
-    names_by_source_key: dict[str, NameKey] = {}
+    draws_by_namekey: dict[str, set[str]] = {}
+    names_by_namekey: dict[str, NameKey] = {}
     for table_name in (XLSX_INNERDICT_TABLE, DOCX_INNERDICT_TABLE, PARQUET_INNERDICT_TABLE):
         try:
             table_rows = conn.execute(
@@ -1444,36 +1510,36 @@ def _source_identity_and_draws(
             raise PushConfigurationError(
                 Locale.SOURCE_DUCKDB_TABLE_MISSING_TEMPLATE.format(table_name=table_name)
             ) from exc
-        for raw_source_key, jsonlines in table_rows:
-            if not isinstance(raw_source_key, str):
+        for raw_namekey, jsonlines in table_rows:
+            if not isinstance(raw_namekey, str):
                 raise PushConfigurationError(
                     Locale.TABLE_NAMEKEY_NON_TEXT_TEMPLATE.format(table_name=table_name)
                 )
             try:
-                name_key = NameKey.from_json_key(raw_source_key)
+                name_key = NameKey.from_json_key(raw_namekey)
             except (ValueError, TypeError, json.JSONDecodeError) as exc:
                 raise PushConfigurationError(
                     Locale.TABLE_NAMEKEY_INVALID_TEMPLATE.format(table_name=table_name)
                 ) from exc
-            source_key = name_key.to_json_key()
-            names_by_source_key[source_key] = name_key
-            source_draws = draws_by_source_key.setdefault(source_key, set())
+            namekey = name_key.to_json_key()
+            names_by_namekey[namekey] = name_key
+            namekey_draws = draws_by_namekey.setdefault(namekey, set())
             for row in _innerdict_json_rows(
                 jsonlines,
                 table_name=table_name,
-                source_key=source_key,
+                namekey=namekey,
             ):
                 draw_number = row.get(DRAW_LABEL)
                 if draw_number is not None:
                     draw_text = str(draw_number).strip()
                     if draw_text:
-                        source_draws.add(draw_text)
+                        namekey_draws.add(draw_text)
     return {
-        source_key: (
+        namekey: (
             name_key,
-            tuple(sorted(draws_by_source_key[source_key], key=_draw_sort_key)),
+            tuple(sorted(draws_by_namekey[namekey], key=_draw_sort_key)),
         )
-        for source_key, name_key in names_by_source_key.items()
+        for namekey, name_key in names_by_namekey.items()
     }
 
 
@@ -1483,14 +1549,14 @@ def derive_source_population(
     *,
     sample_seed: int,
 ) -> tuple[SourcePopulationRow, ...]:
-    source_researchers = _source_identity_and_draws(conn)
-    rnd_values = list(range(RND_START, len(source_researchers) + RND_START))
+    researchers_by_namekey = _namekeys_and_draws(conn)
+    rnd_values = list(range(RND_START, len(researchers_by_namekey) + RND_START))
     Random(sample_seed).shuffle(rnd_values)
-    rnd_by_source_key = dict(zip(sorted(source_researchers), rnd_values, strict=True))
+    rnd_by_namekey = dict(zip(sorted(researchers_by_namekey), rnd_values, strict=True))
     ground_truth = {
-        source_key
-        for source_key, (_name_key, draws) in source_researchers.items()
-        if GROUND_TRUTH_DEF(source_key, release_batches, draws)
+        namekey
+        for namekey, (_name_key, draws) in researchers_by_namekey.items()
+        if GROUND_TRUTH_DEF(namekey, release_batches, draws)
     }
     try:
         partition_rows = conn.execute(
@@ -1509,29 +1575,29 @@ def derive_source_population(
             Locale.ELIGIBILITY_FLAGS_MISSING_TEMPLATE.format(table_name=CARD_PARTITION_TABLE)
         ) from exc
     partition_flags: dict[str, tuple[int, bool, int]] = {}
-    for source_key, partition, xlsx_non_exact, ssn_count in partition_rows:
+    for namekey, partition, xlsx_non_exact, ssn_count in partition_rows:
         if (
-            not isinstance(source_key, str)
+            not isinstance(namekey, str)
             or not isinstance(partition, int)
             or not isinstance(xlsx_non_exact, bool)
             or not isinstance(ssn_count, int)
-            or source_key in partition_flags
+            or namekey in partition_flags
         ):
             raise PushConfigurationError(
                 Locale.SOURCE_CLASSIFICATIONS_INVALID_TEMPLATE.format(
                     table_name=CARD_PARTITION_TABLE
                 )
             )
-        partition_flags[source_key] = (partition, xlsx_non_exact, ssn_count)
+        partition_flags[namekey] = (partition, xlsx_non_exact, ssn_count)
     no_ground_truth = {
-        source_key
-        for source_key, (partition, xlsx_non_exact, ssn_count) in partition_flags.items()
+        namekey
+        for namekey, (partition, xlsx_non_exact, ssn_count) in partition_flags.items()
         if NO_GROUND_TRUTH_DEF(partition, xlsx_non_exact, ssn_count)
     }
-    missing_source_keys = no_ground_truth - source_researchers.keys()
+    missing_namekeys = no_ground_truth - researchers_by_namekey.keys()
     overlap = ground_truth & no_ground_truth
-    if missing_source_keys:
-        raise PushConfigurationError(Locale.CARD_PARTITION_UNKNOWN_SOURCE_KEYS)
+    if missing_namekeys:
+        raise PushConfigurationError(Locale.CARD_PARTITION_UNKNOWN_NAMEKEYS)
     if overlap:
         raise PushConfigurationError(Locale.COHORTS_OVERLAP)
     if len(ground_truth) != EXPECTED_GROUND_TRUTH_RESEARCHERS:
@@ -1550,20 +1616,20 @@ def derive_source_population(
         )
     if len(ground_truth | no_ground_truth) != EXPECTED_ELIGIBLE_RESEARCHERS:
         raise PushConfigurationError(Locale.ELIGIBLE_COHORT_CARDINALITY_INVALID)
-    if set(partition_flags) != set(source_researchers):
-        raise PushConfigurationError(Locale.CARD_PARTITION_SOURCE_KEYS_MISMATCH)
+    if set(partition_flags) != set(researchers_by_namekey):
+        raise PushConfigurationError(Locale.CARD_PARTITION_NAMEKEYS_MISMATCH)
 
     population: list[SourcePopulationRow] = []
-    for source_key, (name_key, draws) in source_researchers.items():
+    for namekey, (name_key, draws) in researchers_by_namekey.items():
         ineligibility_category: IneligibilityCategory | None = None
-        if source_key in ground_truth:
+        if namekey in ground_truth:
             cohort = GROUND_TRUTH_COHORT
-        elif source_key in no_ground_truth:
+        elif namekey in no_ground_truth:
             cohort = NO_GROUND_TRUTH_COHORT
         else:
             cohort = INELIGIBLE_COHORT
-            partition, xlsx_non_exact, ssn_count = partition_flags[source_key]
-            if source_key == EXCLUDED_SOURCE_KEY:
+            partition, xlsx_non_exact, ssn_count = partition_flags[namekey]
+            if namekey == EXCLUDED_NAMEKEY:
                 ineligibility_category = IneligibilityCategory.EXCLUDED_DUPLICATE_NAMEKEY
             elif any(release_batches.get(draw) == INELIGIBLE_RELEASE_BATCH for draw in draws):
                 ineligibility_category = IneligibilityCategory.RELEASE_BATCH_SUBSET_8
@@ -1577,8 +1643,8 @@ def derive_source_population(
                 raise PushConfigurationError(Locale.INELIGIBILITY_CATEGORY_UNKNOWN)
         population.append(
             SourcePopulationRow(
-                source_key=source_key,
-                rnd=rnd_by_source_key[source_key],
+                namekey=namekey,
+                rnd=rnd_by_namekey[namekey],
                 first_name=name_key.first_name,
                 last_name=name_key.last_name,
                 draw_numbers=tuple(sorted(draws, key=_draw_sort_key)),
@@ -1592,7 +1658,7 @@ def derive_source_population(
             tuple(_draw_sort_key(draw) for draw in row.draw_numbers),
             row.first_name.casefold(),
             row.last_name.casefold(),
-            row.source_key,
+            row.namekey,
         )
     )
     cohort_counts = Counter(row.cohort for row in population)
@@ -1625,135 +1691,11 @@ def eligible_cohorts(
     source_population: Sequence[SourcePopulationRow],
 ) -> dict[str, str]:
     return {
-        row.source_key: row.cohort for row in source_population if row.cohort != INELIGIBLE_COHORT
+        row.namekey: row.cohort for row in source_population if row.cohort != INELIGIBLE_COHORT
     }
 
 
-def _control_base_url() -> str | None:
-    raw = CONTROL_BASE_URL
-    if not raw:
-        return None
-    if raw != raw.strip() or _has_control_character(raw):
-        raise PushConfigurationError(
-            Locale.CONTROL_URL_INVALID_TEMPLATE.format(environment_name=CONTROL_URL_ENV_NAME)
-        )
-    parsed = urlsplit(raw)
-    if (
-        parsed.scheme != CONTROL_SCHEME
-        or parsed.hostname != CONTROL_HOST
-        or parsed.port != CONTROL_PORT
-        or parsed.path not in CONTROL_ROOT_PATHS
-        or parsed.query
-        or parsed.fragment
-        or parsed.username is not None
-        or parsed.password is not None
-    ):
-        raise PushConfigurationError(
-            Locale.CONTROL_URL_EXPECTED_TEMPLATE.format(
-                environment_name=CONTROL_URL_ENV_NAME,
-                host=CONTROL_HOST,
-                port=CONTROL_PORT,
-            )
-        )
-    return raw.rstrip("/")
-
-
-def _control_request(
-    base_url: str,
-    path: str,
-    *,
-    method: str,
-    body: bytes | None = None,
-) -> bytes:
-    headers = {HTTP_ACCEPT_HEADER: JSON_MEDIA_TYPE}
-    if body is not None:
-        headers[HTTP_CONTENT_TYPE_HEADER] = JSON_MEDIA_TYPE
-    request = urllib_request.Request(
-        f"{base_url}{path}",
-        data=body,
-        headers=headers,
-        method=method,
-    )
-    try:
-        with urllib_request.urlopen(request, timeout=CONTROL_HTTP_TIMEOUT_SECONDS) as response:
-            return response.read()
-    except (OSError, urllib_error.URLError, urllib_error.HTTPError) as exc:
-        raise PushConfigurationError(Locale.CONTROL_ENDPOINT_UNAVAILABLE) from exc
-
-
-def sanctioned_snapshot() -> SanctionSnapshot:
-    base_url = _control_base_url()
-    if base_url is None:
-        return SanctionSnapshot(
-            run_id=None,
-            source_key=None,
-            session_id=None,
-            rollout_guest_path=ROLLOUT_JSONL,
-            control_base_url=None,
-        )
-    try:
-        snapshot = ControlSnapshot.model_validate_json(
-            _control_request(
-                base_url,
-                CONTROL_CURRENT_PATH,
-                method=HTTP_GET_METHOD,
-            )
-        )
-    except ValidationError as exc:
-        raise PushConfigurationError(Locale.CONTROL_SANCTION_MALFORMED) from exc
-    if snapshot.sanctioned_run is None:
-        raise PushConfigurationError(Locale.CONTROL_SANCTION_MISSING)
-    run = snapshot.sanctioned_run
-    with CONSUMED_RUN_LOCK:
-        if run.run_id in CONSUMED_RUN_IDS:
-            raise PushConfigurationError(Locale.CONTROL_SANCTION_CONSUMED)
-    return SanctionSnapshot(
-        run_id=run.run_id,
-        source_key=run.source_key,
-        session_id=run.session_id,
-        rollout_guest_path=run.rollout_jsonl,
-        control_base_url=base_url,
-    )
-
-
-def consume_sanction(snapshot: SanctionSnapshot) -> None:
-    if snapshot.run_id is None:
-        return
-    with CONSUMED_RUN_LOCK:
-        CONSUMED_RUN_IDS.add(snapshot.run_id)
-
-
-def acknowledge_sanction(snapshot: SanctionSnapshot, attempt_id: str) -> None:
-    if snapshot.run_id is None or snapshot.control_base_url is None:
-        return
-    assert snapshot.source_key is not None
-    assert snapshot.session_id is not None
-    body = (
-        ControlAcceptedRequest(
-            source_key=snapshot.source_key,
-            session_id=snapshot.session_id,
-            attempt_id=attempt_id,
-        )
-        .model_dump_json()
-        .encode(TEXT_ENCODING)
-    )
-    path = CONTROL_ACCEPTED_PATH_TEMPLATE.format(run_id=snapshot.run_id)
-    try:
-        response = ControlAcceptedResponse.model_validate_json(
-            _control_request(
-                snapshot.control_base_url,
-                path,
-                method=HTTP_POST_METHOD,
-                body=body,
-            )
-        )
-    except ValidationError as exc:
-        raise PushConfigurationError(Locale.CONTROL_ACKNOWLEDGEMENT_MALFORMED) from exc
-    if not response.acknowledged:
-        raise PushConfigurationError(Locale.CONTROL_ACKNOWLEDGEMENT_REFUSED)
-
-
-def configure_runtime(config_path: Path) -> RuntimeConfiguration:
+def configure_runtime(config_path: Path) -> AiAugmentBackendContext:
     global RUNTIME_CONFIGURATION
 
     try:
@@ -1780,6 +1722,7 @@ def configure_runtime(config_path: Path) -> RuntimeConfiguration:
             Locale.TIMEZONE_INVALID_TEMPLATE.format(timezone=pipeline.timezone)
         ) from exc
 
+    replay_log = registered_replay_log(pipeline)
     release_map = registered_release_map(pipeline)
     release_batches = load_release_batches(release_map)
     source_conn: duckdb.DuckDBPyConnection | None = None
@@ -1790,6 +1733,7 @@ def configure_runtime(config_path: Path) -> RuntimeConfiguration:
             release_batches,
             sample_seed=pipeline.sample_seed,
         )
+        cohorts = eligible_cohorts(source_population)
     except duckdb.Error as exc:
         raise PushConfigurationError(Locale.SOURCE_DUCKDB_VALIDATION_FAILED) from exc
     finally:
@@ -1806,7 +1750,7 @@ def configure_runtime(config_path: Path) -> RuntimeConfiguration:
         rollout_cas_dir=pipeline.rollout_cas_dir,
         release_map=release_map,
         source_population=source_population,
-        eligible_cohorts=eligible_cohorts(source_population),
+        eligible_cohorts=cohorts,
     )
     return RUNTIME_CONFIGURATION
 
@@ -1892,12 +1836,6 @@ def new_attempt_id(attempt_timestamp: datetime | None = None) -> str:
     return f"{timestamp_text}{ATTEMPT_ID_SEPARATOR}{uuid4().hex}"
 
 
-def create_attempt(attempts_dir: Path, attempt_id: str) -> Path:
-    attempt_dir = attempts_dir / attempt_id
-    attempt_dir.mkdir(parents=True, exist_ok=False)
-    return attempt_dir
-
-
 def _fsync_file(path: Path) -> None:
     with path.open("rb") as stream:
         os.fsync(stream.fileno())
@@ -1980,133 +1918,14 @@ def _aivm_connection_options(
     ]
 
 
-def _host_workbook() -> Path:
-    HOST_WORKBOOK_PATH.parent.mkdir(parents=True, exist_ok=True)
-    if not HOST_WORKBOOK_PATH.exists():
-        _atomic_write_text(HOST_WORKBOOK_PATH, "")
-    if (
-        HOST_WORKBOOK_PATH.is_symlink()
-        or not HOST_WORKBOOK_PATH.is_file()
-        or not os.access(HOST_WORKBOOK_PATH, os.R_OK | os.W_OK)
-    ):
-        raise PushConfigurationError(Locale.HOST_WORKBOOK_INVALID)
-    return HOST_WORKBOOK_PATH
-
-
-def initialize_guest_workbook() -> None:
-    global WORKBOOK_INITIALIZED
-
-    host_workbook = _host_workbook()
-    lima_ssh_config = _configuration_file(
-        LIMA_SSH_CONFIG_PATH,
-        LIMA_SSH_CONFIG_ENV_NAME,
-    )
-    identity_file = _configuration_file(
-        AIVM_IDENTITY_FILE,
-        AIVM_IDENTITY_FILE_ENV_NAME,
-    )
-    known_hosts_file = _configuration_file(
-        AIVM_KNOWN_HOSTS_FILE,
-        AIVM_KNOWN_HOSTS_FILE_ENV_NAME,
-    )
-    options = _aivm_connection_options(
-        lima_ssh_config=lima_ssh_config,
-        identity_file=identity_file,
-        known_hosts_file=known_hosts_file,
-        host_key_alias=AIVM_HOST_KEY_ALIAS,
-    )
-    try:
-        subprocess.run(
-            [
-                SSH_EXECUTABLE,
-                *options,
-                AIVM_SSH_TARGET,
-                "mkdir",
-                "-p",
-                "--",
-                str(AIVM_WORKDIR),
-            ],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=SSH_TIMEOUT_SECONDS,
-        )
-        subprocess.run(
-            [
-                SCP_EXECUTABLE,
-                *options,
-                "--",
-                str(host_workbook),
-                f"{AIVM_SSH_TARGET}:{AIVM_WORKBOOK_PATH}",
-            ],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=SCP_TIMEOUT_SECONDS,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise PushConfigurationError(Locale.HOST_WORKBOOK_INITIALIZATION_FAILED) from exc
-    with WORKBOOK_STATE_LOCK:
-        WORKBOOK_INITIALIZED = True
-
-
-def copy_guest_workbook(
+def copy_rollout_to_cas(
     configuration: PushConfiguration,
-    attempt_dir: Path,
-    attempt_id: str,
+    runtime: AiAugmentBackendContext,
 ) -> ArchivedFile:
-    temporary = attempt_dir / WORKBOOK_ARCHIVE_TEMP_FILENAME
-    destination = attempt_dir / WORKBOOK_ARCHIVE_FILENAME_TEMPLATE.format(attempt_id=attempt_id)
-    options = _aivm_connection_options(
-        lima_ssh_config=configuration.lima_ssh_config,
-        identity_file=configuration.identity_file,
-        known_hosts_file=configuration.known_hosts_file,
-        host_key_alias=configuration.host_key_alias,
+    runtime.rollout_cas_dir.mkdir(parents=True, exist_ok=True)
+    temporary = runtime.rollout_cas_dir / ROLLOUT_CAS_TEMP_FILENAME_TEMPLATE.format(
+        nonce=uuid4().hex
     )
-    try:
-        subprocess.run(
-            [
-                SCP_EXECUTABLE,
-                *options,
-                "--",
-                f"{configuration.ssh_target}:{AIVM_WORKBOOK_PATH}",
-                str(temporary),
-            ],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=SCP_TIMEOUT_SECONDS,
-        )
-        if not temporary.is_file() or temporary.is_symlink():
-            raise PushConfigurationError(Locale.SCP_WORKBOOK_ARCHIVE_INVALID)
-        archive = _publish_archive(temporary, destination)
-        host_temporary = HOST_WORKBOOK_PATH.with_name(
-            HOST_WORKBOOK_TEMP_FILENAME_TEMPLATE.format(filename=HOST_WORKBOOK_PATH.name)
-        )
-        try:
-            shutil.copyfile(archive.path, host_temporary)
-            _fsync_file(host_temporary)
-            os.replace(host_temporary, _host_workbook())
-            _fsync_directory(HOST_WORKBOOK_PATH.parent)
-        finally:
-            host_temporary.unlink(missing_ok=True)
-        return archive
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise PushConfigurationError(Locale.GUEST_WORKBOOK_ARCHIVE_FAILED) from exc
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
-def copy_rollout(
-    configuration: PushConfiguration,
-    attempt_dir: Path,
-    attempt_id: str,
-) -> ArchivedFile:
-    temporary = attempt_dir / ROLLOUT_ARCHIVE_TEMP_FILENAME
-    destination = attempt_dir / ROLLOUT_ARCHIVE_FILENAME_TEMPLATE.format(attempt_id=attempt_id)
     options = _aivm_connection_options(
         lima_ssh_config=configuration.lima_ssh_config,
         identity_file=configuration.identity_file,
@@ -2131,25 +1950,18 @@ def copy_rollout(
         )
         if not temporary.is_file() or temporary.is_symlink():
             raise PushConfigurationError(Locale.SCP_ROLLOUT_ARCHIVE_INVALID)
+        archived = _archived_file(temporary)
+        destination = runtime.rollout_cas_dir / ROLLOUT_CAS_FILENAME_TEMPLATE.format(
+            sha256=archived.sha256
+        )
+        if destination.exists():
+            existing = _archived_file(destination)
+            if existing.sha256 != archived.sha256 or existing.size != archived.size:
+                raise PushConfigurationError(Locale.ROLLOUT_CAS_CONFLICT)
+            return existing
         return _publish_archive(temporary, destination)
     except (OSError, subprocess.SubprocessError) as exc:
         raise PushConfigurationError(Locale.ROLLOUT_SCP_FAILED) from exc
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
-def copy_appendwatch_report(
-    configuration: PushConfiguration,
-    attempt_dir: Path,
-    attempt_id: str,
-) -> ArchivedFile:
-    temporary = attempt_dir / APPENDWATCH_ARCHIVE_TEMP_FILENAME
-    destination = attempt_dir / APPENDWATCH_ARCHIVE_FILENAME_TEMPLATE.format(attempt_id=attempt_id)
-    try:
-        shutil.copyfile(configuration.appendwatch_report, temporary)
-        return _publish_archive(temporary, destination)
-    except OSError as exc:
-        raise PushConfigurationError(Locale.APPENDWATCH_ARCHIVE_FAILED) from exc
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -2386,7 +2198,7 @@ def _session_metadata(
     try:
         compact = CompactSessionMetadata.model_validate({
             CODEX_ORIGINATOR_KEY: payload.get(CODEX_ORIGINATOR_KEY),
-            CODEX_SOURCE_KEY: payload.get(CODEX_SOURCE_KEY),
+            CODEX_SOURCE_FIELD: payload.get(CODEX_SOURCE_FIELD),
             CODEX_CLI_VERSION_KEY: payload.get(CODEX_CLI_VERSION_KEY),
             CODEX_MODEL_PROVIDER_KEY: payload.get(CODEX_MODEL_PROVIDER_KEY),
             CODEX_MODEL_KEY: model,
@@ -2647,7 +2459,7 @@ def _create_codex_schema(
         f"""
         CREATE TABLE IF NOT EXISTS {CODEX_RETRY_BASELINE_TABLE} (
             {duckdb_quote_identifier(CODEX_RETRY_RUN_ID_COL)} VARCHAR PRIMARY KEY,
-            {duckdb_quote_identifier(CODEX_RETRY_SOURCEKEY_COL)} VARCHAR NOT NULL,
+            {duckdb_quote_identifier(CODEX_RETRY_NAMEKEY_COL)} VARCHAR NOT NULL,
             {duckdb_quote_identifier(CODEX_RETRY_SESSION_ID_COL)} VARCHAR NOT NULL,
             {duckdb_quote_identifier(CODEX_RETRY_ATTEMPT_ID_COL)} VARCHAR NOT NULL,
             {duckdb_quote_identifier(CODEX_RETRY_CREATED_AT_COL)} TIMESTAMPTZ NOT NULL,
@@ -2663,7 +2475,7 @@ def _create_codex_schema(
                 DEFAULT nextval('{CODEX_EVIDENCE_AUDIT_ID_SEQUENCE}'),
             {duckdb_quote_identifier(CODEX_RETRY_ATTEMPT_ID_COL)} VARCHAR NOT NULL UNIQUE,
             {duckdb_quote_identifier(CODEX_RETRY_RUN_ID_COL)} VARCHAR NOT NULL,
-            {duckdb_quote_identifier(CODEX_RETRY_SOURCEKEY_COL)} VARCHAR NOT NULL,
+            {duckdb_quote_identifier(CODEX_RETRY_NAMEKEY_COL)} VARCHAR NOT NULL,
             {duckdb_quote_identifier(CODEX_RETRY_SESSION_ID_COL)} VARCHAR NOT NULL,
             {duckdb_quote_identifier(CODEX_RETRY_CREATED_AT_COL)} TIMESTAMPTZ NOT NULL,
             {duckdb_quote_identifier(CODEX_EVIDENCE_SUBMISSION_COL)} JSON NOT NULL,
@@ -3605,7 +3417,7 @@ def _process_retry_attempt(
     conn: duckdb.DuckDBPyConnection,
     *,
     run_id: UUID,
-    source_key: str,
+    namekey: str,
     session_id: str,
     attempt_id: str,
     attempt_timestamp: datetime,
@@ -3630,7 +3442,7 @@ def _process_retry_attempt(
                     f"""
                     INSERT INTO {CODEX_RETRY_BASELINE_TABLE} (
                         {duckdb_quote_identifier(CODEX_RETRY_RUN_ID_COL)},
-                        {duckdb_quote_identifier(CODEX_RETRY_SOURCEKEY_COL)},
+                        {duckdb_quote_identifier(CODEX_RETRY_NAMEKEY_COL)},
                         {duckdb_quote_identifier(CODEX_RETRY_SESSION_ID_COL)},
                         {duckdb_quote_identifier(CODEX_RETRY_ATTEMPT_ID_COL)},
                         {duckdb_quote_identifier(CODEX_RETRY_CREATED_AT_COL)},
@@ -3642,7 +3454,7 @@ def _process_retry_attempt(
                     """,
                     [
                         run_id_text,
-                        source_key,
+                        namekey,
                         session_id,
                         attempt_id,
                         attempt_timestamp,
@@ -3655,7 +3467,7 @@ def _process_retry_attempt(
         baseline_row = conn.execute(
             f"""
             SELECT
-                {duckdb_quote_identifier(CODEX_RETRY_SOURCEKEY_COL)},
+                {duckdb_quote_identifier(CODEX_RETRY_NAMEKEY_COL)},
                 {duckdb_quote_identifier(CODEX_RETRY_SESSION_ID_COL)},
                 {duckdb_quote_identifier(CODEX_RETRY_ATTEMPT_ID_COL)},
                 {duckdb_quote_identifier(CODEX_RETRY_BASELINE_COL)}
@@ -3668,12 +3480,12 @@ def _process_retry_attempt(
         violations: tuple[str, ...] = ()
         if baseline_row is not None:
             (
-                baseline_source_key,
+                baseline_namekey,
                 baseline_session_id,
                 baseline_attempt_id,
                 baseline_json,
             ) = baseline_row
-            if baseline_source_key != source_key or baseline_session_id != session_id:
+            if baseline_namekey != namekey or baseline_session_id != session_id:
                 raise PushValidationError(Locale.EVIDENCE_RETRY_IDENTITY_MISMATCH)
             if inserted_baseline:
                 obligations = initial_obligations
@@ -3705,7 +3517,7 @@ def _process_retry_attempt(
             INSERT INTO {CODEX_EVIDENCE_AUDIT_TABLE} (
                 {duckdb_quote_identifier(CODEX_RETRY_ATTEMPT_ID_COL)},
                 {duckdb_quote_identifier(CODEX_RETRY_RUN_ID_COL)},
-                {duckdb_quote_identifier(CODEX_RETRY_SOURCEKEY_COL)},
+                {duckdb_quote_identifier(CODEX_RETRY_NAMEKEY_COL)},
                 {duckdb_quote_identifier(CODEX_RETRY_SESSION_ID_COL)},
                 {duckdb_quote_identifier(CODEX_RETRY_CREATED_AT_COL)},
                 {duckdb_quote_identifier(CODEX_EVIDENCE_SUBMISSION_COL)},
@@ -3718,7 +3530,7 @@ def _process_retry_attempt(
             [
                 attempt_id,
                 run_id_text,
-                source_key,
+                namekey,
                 session_id,
                 attempt_timestamp,
                 submission_json,
@@ -3740,13 +3552,13 @@ def _retry_baseline_exists(
     conn: duckdb.DuckDBPyConnection,
     *,
     run_id: UUID,
-    source_key: str,
+    namekey: str,
     session_id: str,
 ) -> bool:
     row = conn.execute(
         f"""
         SELECT
-            {duckdb_quote_identifier(CODEX_RETRY_SOURCEKEY_COL)},
+            {duckdb_quote_identifier(CODEX_RETRY_NAMEKEY_COL)},
             {duckdb_quote_identifier(CODEX_RETRY_SESSION_ID_COL)}
         FROM {CODEX_RETRY_BASELINE_TABLE}
         WHERE {duckdb_quote_identifier(CODEX_RETRY_RUN_ID_COL)} = ?
@@ -3755,7 +3567,7 @@ def _retry_baseline_exists(
     ).fetchone()
     if row is None:
         return False
-    if row != (source_key, session_id):
+    if row != (namekey, session_id):
         raise PushValidationError(Locale.EVIDENCE_RETRY_IDENTITY_MISMATCH)
     return True
 
@@ -3822,40 +3634,6 @@ def validate_submission_evidence(
     )
 
 
-def source_rows() -> Iterator[dict[str, object]]:
-    try:
-        source = SOURCE_FILE.open(encoding=TEXT_ENCODING)
-    except OSError as exc:
-        raise RuntimeError(
-            Locale.SOURCE_OPEN_FAILED_TEMPLATE.format(
-                source_file=SOURCE_FILE,
-                error=exc,
-            )
-        ) from exc
-
-    with source:
-        for line_number, line in enumerate(source, start=1):
-            try:
-                value: object = json.loads(line)
-            except json.JSONDecodeError as exc:
-                raise RuntimeError(
-                    Locale.SOURCE_JSON_INVALID_TEMPLATE.format(
-                        source_file=SOURCE_FILE,
-                        line_number=line_number,
-                    )
-                ) from exc
-
-            if not isinstance(value, dict):
-                raise RuntimeError(
-                    Locale.SOURCE_ROW_NON_OBJECT_TEMPLATE.format(
-                        source_file=SOURCE_FILE,
-                        line_number=line_number,
-                    )
-                )
-
-            yield cast(dict[str, object], value)
-
-
 def select_columns(row: Mapping[str, object]) -> dict[str, object]:
     missing = [column for column in DOCX_COLUMNS if column not in row]
 
@@ -3876,50 +3654,6 @@ def json_line(row: Mapping[str, object]) -> str:
     )
 
 
-def pull_lines() -> Iterator[str]:
-    for row in source_rows():
-        if (row.get(DRAW_NUMBER_COLUMN) == TARGET_DRAW_NUMBER) and (
-            row.get(FRAGMENT_TYPE_COLUMN) == DOCX_ROW_FRAGMENT_TYPE
-        ):
-            select_columns(row)
-            first_name = row.get(KTP_FIRST_NAME_COL)
-            last_name = row.get(KTP_LAST_NAME_COL)
-            if not _valid_nonblank(first_name) or not _valid_nonblank(last_name):
-                raise RuntimeError(Locale.TARGET_ROW_IDENTITY_MISSING)
-            yield json_line({
-                KTP_FIRST_NAME_COL: first_name,
-                KTP_LAST_NAME_COL: last_name,
-                **dict.fromkeys(AI_AUGMENT_COLUMNS),
-            })
-            return
-
-        yield json_line(row)
-
-
-def ground_truth() -> dict[str, object]:
-    for row in source_rows():
-        if (row.get(DRAW_NUMBER_COLUMN) == TARGET_DRAW_NUMBER) and (
-            row.get(FRAGMENT_TYPE_COLUMN) == DOCX_ROW_FRAGMENT_TYPE
-        ):
-            return select_columns(row)
-
-    raise PushValidationError(Locale.TARGET_GROUND_TRUTH_MISSING)
-
-
-def selected_task_identity() -> tuple[str, str]:
-    for row in source_rows():
-        if (
-            row.get(DRAW_NUMBER_COLUMN) == TARGET_DRAW_NUMBER
-            and row.get(FRAGMENT_TYPE_COLUMN) == DOCX_ROW_FRAGMENT_TYPE
-        ):
-            first_name = row.get(KTP_FIRST_NAME_COL)
-            last_name = row.get(KTP_LAST_NAME_COL)
-            if not _valid_nonblank(first_name) or not _valid_nonblank(last_name):
-                raise PushValidationError(Locale.TASK_IDENTITY_INCOMPLETE)
-            return cast(str, first_name), cast(str, last_name)
-    raise PushValidationError(Locale.TASK_IDENTITY_MISSING)
-
-
 def _atomic_write_text(path: Path, value: str) -> None:
     temporary = path.with_name(
         ATOMIC_TEMP_FILENAME_TEMPLATE.format(
@@ -3938,48 +3672,6 @@ def _atomic_write_text(path: Path, value: str) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def archive_http_request_log(
-    attempt_dir: Path,
-    attempt_id: str,
-    *,
-    request: Request,
-    request_body: bytes,
-    response_code: int,
-    response_headers: Mapping[str, str],
-    response_body: str,
-    started_ns: int,
-) -> ArchivedFile:
-    """Archive one final attempted HTTP exchange.
-
-    When push() calls this function directly, it receives the resulting artifact
-    metadata and propagates any archival failure. The best-effort exception-
-    recovery helper may instead log and suppress that failure.
-    """
-    log_path = attempt_dir / HTTP_REQUEST_LOG_FILENAME_TEMPLATE.format(attempt_id=attempt_id)
-    if log_path.exists():
-        raise PushValidationError(Locale.ATTEMPT_HTTP_LOG_EXISTS)
-    record = HttpRequestLogRecord(
-        schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V2,
-        method=HTTP_POST_METHOD,
-        scheme=request.url.scheme,
-        host=request.url.hostname or "",
-        port=request.url.port,
-        path=request.url.path,
-        query=request.url.query,
-        request_headers=dict(request.headers),
-        request_body=request_body.decode(TEXT_ENCODING),
-        response_code=response_code,
-        response_headers=dict(response_headers),
-        response_body=response_body,
-        received_at_unix_usec=time.time_ns() // NANOSECONDS_PER_MICROSECOND,
-        duration_usec=(time.monotonic_ns() - started_ns) // NANOSECONDS_PER_MICROSECOND,
-    )
-    append_http_request_log_record(log_path=log_path, record=record)
-    _fsync_file(log_path)
-    _fsync_directory(log_path.parent)
-    return _archived_file(log_path)
-
-
 def http_error_response_body(detail: str) -> str:
     return json.dumps(
         {"detail": detail},
@@ -3988,70 +3680,8 @@ def http_error_response_body(detail: str) -> str:
     )
 
 
-def record_attempt(
-    attempt_dir: Path,
-    attempt_id: str,
-    stage: str,
-    result: str,
-    *,
-    rollout_archive: ArchivedFile | None = None,
-    workbook_archive: ArchivedFile | None = None,
-    report_archive: ArchivedFile | None = None,
-    card_archive: ArchivedFile | None = None,
-    http_request_log_archive: ArchivedFile | None = None,
-    run_id: UUID | None = None,
-    source_key: str | None = None,
-    session_id: str | None = None,
-    rollout_relative_path: PurePosixPath | None = None,
-) -> str:
-    """Atomically write one attempt-stage manifest and return its exact text.
-
-    Artifacts referenced by the manifest must already have been archived. This
-    function neither creates the final HTTP log nor inserts the manifest into
-    DuckDB, allowing intermediate stages and strict final-attempt handling to
-    share the same manifest writer.
-    """
-    artifacts = {}
-    for name, artifact in (
-        (ARTIFACT_ROLLOUT_KEY, rollout_archive),
-        (ARTIFACT_WORKBOOK_KEY, workbook_archive),
-        (ARTIFACT_APPENDWATCH_REPORT_KEY, report_archive),
-        (ARTIFACT_CARD_ZIP_KEY, card_archive),
-        (ARTIFACT_HTTP_REQUEST_LOG_KEY, http_request_log_archive),
-    ):
-        if artifact is not None:
-            artifacts[name] = {
-                ARTIFACT_FILENAME_KEY: artifact.path.name,
-                ARTIFACT_SIZE_KEY: artifact.size,
-                ARTIFACT_SHA256_KEY: artifact.sha256,
-            }
-            if name == ARTIFACT_ROLLOUT_KEY:
-                artifacts[name][ARTIFACT_LINE_COUNT_KEY] = artifact.line_count
-    value = {
-        ATTEMPT_ID_KEY: attempt_id,
-        ATTEMPT_STAGE_KEY: stage,
-        ATTEMPT_RESULT_KEY: result,
-        ATTEMPT_UPDATED_AT_KEY: datetime.now(timezone.utc).isoformat(),
-        ATTEMPT_ARTIFACTS_KEY: artifacts,
-    }
-    if run_id is not None:
-        value[ATTEMPT_RUN_ID_KEY] = str(run_id)
-    if source_key is not None:
-        value[ATTEMPT_SOURCE_KEY] = source_key
-    if session_id is not None:
-        value[ATTEMPT_SESSION_ID_KEY] = session_id
-    if rollout_relative_path is not None:
-        value[ATTEMPT_ROLLOUT_RELATIVE_PATH_KEY] = str(rollout_relative_path)
-    manifest_text = json.dumps(value, ensure_ascii=False, indent=2) + "\n"
-    _atomic_write_text(
-        attempt_dir / ATTEMPT_MANIFEST_FILENAME,
-        manifest_text,
-    )
-    return manifest_text
-
-
 def open_source_database(
-    runtime: RuntimeConfiguration,
+    runtime: AiAugmentBackendContext,
 ) -> duckdb.DuckDBPyConnection:
     try:
         return duckdb.connect(str(runtime.pipeline.db_file), read_only=True)
@@ -4060,7 +3690,7 @@ def open_source_database(
 
 
 def open_detour_database(
-    runtime: RuntimeConfiguration,
+    runtime: AiAugmentBackendContext,
 ) -> duckdb.DuckDBPyConnection:
     conn: duckdb.DuckDBPyConnection | None = None
     try:
@@ -4080,18 +3710,815 @@ def open_detour_database(
         raise PushValidationError(Locale.DETOUR_DUCKDB_OPEN_FAILED) from exc
 
 
-def _source_table_rows(
+def _initialize_authoritative_schema(conn: duckdb.DuckDBPyConnection) -> None:
+    conn.execute(CREATE_CONTROL_RUN_EVENTS_TABLE_SQL)
+    conn.execute(CREATE_CONTROL_ATTEMPTS_TABLE_SQL)
+    conn.execute(CREATE_CONTROL_SANCTIONS_TABLE_SQL)
+    conn.execute(CREATE_AUTHORITATIVE_PROJECTION_TABLE_SQL)
+
+
+def _acquire_authoritative_process_lock(runtime: AiAugmentBackendContext) -> None:
+    global AUTHORITATIVE_LOG_DESCRIPTOR
+
+    if AUTHORITATIVE_LOG_DESCRIPTOR is not None:
+        raise PushConfigurationError(Locale.REPLAY_LOG_ALREADY_LOCKED)
+    descriptor = os.open(Path(runtime.replay_log), os.O_RDWR)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        os.close(descriptor)
+        raise PushConfigurationError(Locale.REPLAY_LOG_ALREADY_LOCKED) from exc
+    AUTHORITATIVE_LOG_DESCRIPTOR = descriptor
+
+
+def _release_authoritative_process_lock() -> None:
+    global AUTHORITATIVE_LOG_DESCRIPTOR
+
+    descriptor = AUTHORITATIVE_LOG_DESCRIPTOR
+    AUTHORITATIVE_LOG_DESCRIPTOR = None
+    if descriptor is None:
+        return
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+    finally:
+        os.close(descriptor)
+
+
+def _authoritative_log_records(
+    path: Path,
+) -> tuple[tuple[HttpRequestLogRecord, int, str], ...]:
+    records: list[tuple[HttpRequestLogRecord, int, str]] = []
+    byte_offset = AUTHORITATIVE_EMPTY_OFFSET
+    try:
+        with path.open("rb") as stream:
+            for line_number, line in enumerate(stream, start=AUTHORITATIVE_FIRST_LINE):
+                if not line.endswith(b"\n") or not line.strip():
+                    raise PushValidationError(
+                        Locale.REPLAY_LOG_LINE_INVALID_TEMPLATE.format(line_number=line_number)
+                    )
+                try:
+                    record = HttpRequestLogRecord.model_validate_json(line)
+                except ValidationError as exc:
+                    raise PushValidationError(
+                        Locale.REPLAY_LOG_LINE_INVALID_TEMPLATE.format(line_number=line_number)
+                    ) from exc
+                if (
+                    record.schema_version != KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V2
+                    or (
+                        (record.method, record.path) not in AUTHORITATIVE_PUBLIC_ROUTES
+                        and (record.method, record.path) != AUTHORITATIVE_COMMIT_ROUTE
+                    )
+                ):
+                    raise PushValidationError(
+                        Locale.REPLAY_LOG_LINE_INVALID_TEMPLATE.format(line_number=line_number)
+                    )
+                byte_offset += len(line)
+                records.append((record, byte_offset, hashlib.sha256(line).hexdigest()))
+    except (OSError, UnicodeError) as exc:
+        raise PushConfigurationError(Locale.REPLAY_LOG_UNREADABLE) from exc
+    return tuple(records)
+
+
+def _projection_checkpoint(
+    conn: duckdb.DuckDBPyConnection,
+) -> tuple[int, int, str] | None:
+    row = conn.execute(
+        f"SELECT {AUTHORITATIVE_PROJECTION_LINE_COLUMN}, "
+        f"{AUTHORITATIVE_PROJECTION_OFFSET_COLUMN}, {AUTHORITATIVE_PROJECTION_HASH_COLUMN} "
+        f"FROM {AUTHORITATIVE_PROJECTION_TABLE} "
+        f"WHERE {AUTHORITATIVE_PROJECTION_ID_COLUMN} = ?",
+        [AUTHORITATIVE_CHECKPOINT_ID],
+    ).fetchone()
+    if row is None:
+        return None
+    return int(row[0]), int(row[1]), str(row[2])
+
+
+def _write_projection_checkpoint(
+    conn: duckdb.DuckDBPyConnection,
+    *,
+    line_number: int,
+    byte_offset: int,
+    line_sha256: str,
+) -> None:
+    conn.execute(
+        f"INSERT OR REPLACE INTO {AUTHORITATIVE_PROJECTION_TABLE} VALUES (?, ?, ?, ?)",
+        [
+            AUTHORITATIVE_CHECKPOINT_ID,
+            line_number,
+            byte_offset,
+            line_sha256,
+        ],
+    )
+
+
+def _http_header_value(headers: Mapping[str, object], name: str) -> str | None:
+    normalized_name = name.casefold()
+    for key, value in headers.items():
+        if key.casefold() == normalized_name and isinstance(value, str):
+            return value
+    return None
+
+
+def _authoritative_request_text(record: HttpRequestLogRecord) -> str:
+    if not isinstance(record.request_body, str):
+        raise PushValidationError(Locale.REPLAY_RECORD_BODY_INVALID)
+    return record.request_body
+
+
+def _next_control_event_ordinal(conn: duckdb.DuckDBPyConnection) -> int:
+    row = conn.execute(
+        f"SELECT coalesce(max({CONTROL_RUN_EVENT_ORDINAL_COLUMN}), 0) + 1 "
+        f"FROM {CONTROL_RUN_EVENTS_TABLE}"
+    ).fetchone()
+    if row is None:
+        raise PushValidationError(Locale.REPLAY_CONTROL_EVENT_INVALID)
+    return int(row[0])
+
+
+def _insert_control_event(
+    conn: duckdb.DuckDBPyConnection,
+    *,
+    event: ControlRunEvent,
+    idempotency_key: str,
+) -> None:
+    conn.execute(
+        INSERT_CONTROL_RUN_EVENT_SQL,
+        [
+            _next_control_event_ordinal(conn),
+            idempotency_key,
+            event.model_dump_json(),
+        ],
+    )
+
+
+def _project_control_push(
+    conn: duckdb.DuckDBPyConnection,
+    record: HttpRequestLogRecord,
+) -> None:
+    if record.response_code != status.HTTP_200_OK:
+        return
+    try:
+        request = ControlPushRequest.model_validate_json(_authoritative_request_text(record))
+        response = ControlPushResponse.model_validate_json(record.response_body)
+    except ValidationError as exc:
+        raise PushValidationError(Locale.REPLAY_CONTROL_EVENT_INVALID) from exc
+    idempotency_key = _http_header_value(
+        record.request_headers,
+        HTTP_IDEMPOTENCY_KEY_HEADER,
+    )
+    if not idempotency_key:
+        raise PushValidationError(Locale.REPLAY_CONTROL_EVENT_INVALID)
+    existing = conn.execute(
+        f"SELECT {CONTROL_RUN_EVENT_PAYLOAD_COLUMN} FROM {CONTROL_RUN_EVENTS_TABLE} "
+        f"WHERE {CONTROL_RUN_EVENT_IDEMPOTENCY_KEY_COLUMN} = ?",
+        [idempotency_key],
+    ).fetchone()
+    duplicate = existing is not None
+    if response != ControlPushResponse(accepted=True, duplicate=duplicate):
+        raise PushValidationError(Locale.REPLAY_CONTROL_EVENT_INVALID)
+    if existing is not None:
+        try:
+            stored = ControlRunEvent.model_validate_json(str(existing[0]))
+        except ValidationError as exc:
+            raise PushValidationError(Locale.REPLAY_CONTROL_EVENT_INVALID) from exc
+        if stored != request.event:
+            raise PushValidationError(Locale.REPLAY_CONTROL_EVENT_INVALID)
+        return
+
+    event = request.event
+    if event.kind is ControlRunEventKind.SANCTIONED:
+        if event.session_id is None or event.rollout_jsonl is None:
+            raise PushValidationError(Locale.REPLAY_CONTROL_EVENT_INVALID)
+        sanction = ControlRun(
+            run_id=event.run_id,
+            namekey=event.namekey,
+            session_id=event.session_id,
+            rollout_jsonl=event.rollout_jsonl,
+        )
+        active = conn.execute(
+            f"SELECT {CONTROL_SANCTION_RUN_ID_COLUMN} FROM {CONTROL_SANCTIONS_TABLE} "
+            f"WHERE {CONTROL_SANCTION_ACTIVE_COLUMN}"
+        ).fetchall()
+        if active and active != [(str(event.run_id),)]:
+            raise PushValidationError(Locale.REPLAY_CONTROL_EVENT_INVALID)
+        conn.execute(
+            f"INSERT INTO {CONTROL_SANCTIONS_TABLE} VALUES (?, ?, ?, ?) "
+            f"ON CONFLICT ({CONTROL_SANCTION_RUN_ID_COLUMN}) DO UPDATE SET "
+            f"{CONTROL_SANCTION_PAYLOAD_COLUMN} = excluded.{CONTROL_SANCTION_PAYLOAD_COLUMN}, "
+            f"{CONTROL_SANCTION_ACTIVE_COLUMN} = excluded.{CONTROL_SANCTION_ACTIVE_COLUMN}",
+            [str(event.run_id), sanction.model_dump_json(), True, None],
+        )
+    elif event.kind in {
+        ControlRunEventKind.PUSH_ACCEPTED,
+        ControlRunEventKind.COMPLETE,
+        ControlRunEventKind.FAILED,
+        ControlRunEventKind.CANCELED,
+    }:
+        conn.execute(
+            f"UPDATE {CONTROL_SANCTIONS_TABLE} SET {CONTROL_SANCTION_ACTIVE_COLUMN} = false "
+            f"WHERE {CONTROL_SANCTION_RUN_ID_COLUMN} = ?",
+            [str(event.run_id)],
+        )
+    _insert_control_event(
+        conn,
+        event=event,
+        idempotency_key=idempotency_key,
+    )
+
+
+def _validated_commit_rollout(
+    runtime: AiAugmentBackendContext,
+    reference: RolloutCasReference,
+) -> ArchivedFile:
+    path = runtime.rollout_cas_dir / ROLLOUT_CAS_FILENAME_TEMPLATE.format(
+        sha256=reference.sha256
+    )
+    if path.parent != runtime.rollout_cas_dir or path.is_symlink() or not path.is_file():
+        raise PushValidationError(Locale.ROLLOUT_CAS_BLOB_INVALID)
+    archived = _archived_file(path)
+    if (
+        archived.sha256 != reference.sha256
+        or archived.size != reference.size
+        or archived.line_count != reference.line_count
+    ):
+        raise PushValidationError(Locale.ROLLOUT_CAS_BLOB_INVALID)
+    return archived
+
+
+def _execution_matches_commit(
+    execution: AttemptExecution,
+    outcome: SubmissionCommitOutcome,
+) -> bool:
+    expected_headers = {
+        HTTP_REQUEST_LOG_RESPONSE_CONTENT_TYPE_HEADER: ATTEMPT_RESPONSE_CONTENT_TYPE[
+            execution.response_code
+        ]
+    }
+    return (
+        execution.stage == outcome.stage
+        and execution.result == outcome.result
+        and execution.response_code == outcome.response_code
+        and execution.response_body == outcome.response_body
+        and execution.response_detail == outcome.response_detail
+        and execution.retry_submission_expected == outcome.retry_submission_expected
+        and execution.namekey == outcome.namekey
+        and execution.session_id == outcome.session_id
+        and outcome.response_headers == expected_headers
+    )
+
+
+def _attempt_record_from_commit(commit: SubmissionCommit) -> AttemptRecord:
+    return AttemptRecord(
+        attempt_id=commit.attempt_id,
+        transaction_id=commit.transaction_id,
+        request_sha256=commit.public_request_sha256,
+        stage=commit.outcome.stage,
+        result=commit.outcome.result,
+        updated_at=commit.attempt_timestamp,
+        run_id=commit.sanction.run_id,
+        namekey=commit.outcome.namekey or commit.sanction.namekey,
+        session_id=commit.outcome.session_id or commit.sanction.session_id,
+        rollout_sha256=None if commit.rollout is None else commit.rollout.sha256,
+        response_code=commit.outcome.response_code,
+        response_body=commit.outcome.response_body,
+        response_detail=commit.outcome.response_detail,
+    )
+
+
+def _project_submission_commit(
+    conn: duckdb.DuckDBPyConnection,
+    runtime: AiAugmentBackendContext,
+    record: HttpRequestLogRecord,
+    *,
+    materialize_files: bool,
+) -> None:
+    if record.response_code != status.HTTP_200_OK:
+        return
+    try:
+        commit = SubmissionCommit.model_validate_json(_authoritative_request_text(record))
+        response = ControlCommitResponse.model_validate_json(record.response_body)
+    except ValidationError as exc:
+        raise PushValidationError(Locale.REPLAY_COMMIT_INVALID) from exc
+    if hashlib.sha256(commit.public_request_body.encode(TEXT_ENCODING)).hexdigest() != (
+        commit.public_request_sha256
+    ):
+        raise PushValidationError(Locale.REPLAY_COMMIT_INVALID)
+    expected_record = _attempt_record_from_commit(commit)
+    existing = conn.execute(
+        f"SELECT {CONTROL_ATTEMPT_RECORD_COLUMN} FROM {CONTROL_ATTEMPTS_TABLE} "
+        f"WHERE {CONTROL_ATTEMPT_IDEMPOTENCY_KEY_COLUMN} = ?",
+        [commit.transaction_id],
+    ).fetchone()
+    if existing is not None:
+        try:
+            stored = AttemptRecord.model_validate_json(str(existing[0]))
+        except ValidationError as exc:
+            raise PushValidationError(Locale.REPLAY_COMMIT_INVALID) from exc
+        if stored != expected_record or response != ControlCommitResponse(
+            committed=True,
+            duplicate=True,
+        ):
+            raise PushValidationError(Locale.REPLAY_COMMIT_INVALID)
+        return
+    if response != ControlCommitResponse(committed=True, duplicate=False):
+        raise PushValidationError(Locale.REPLAY_COMMIT_INVALID)
+
+    active = conn.execute(
+        f"SELECT {CONTROL_SANCTION_PAYLOAD_COLUMN} FROM {CONTROL_SANCTIONS_TABLE} "
+        f"WHERE {CONTROL_SANCTION_RUN_ID_COLUMN} = ? AND {CONTROL_SANCTION_ACTIVE_COLUMN}",
+        [str(commit.sanction.run_id)],
+    ).fetchone()
+    if active is None:
+        raise PushValidationError(Locale.REPLAY_COMMIT_INVALID)
+    try:
+        active_sanction = ControlRun.model_validate_json(str(active[0]))
+    except ValidationError as exc:
+        raise PushValidationError(Locale.REPLAY_COMMIT_INVALID) from exc
+    if active_sanction != commit.sanction:
+        raise PushValidationError(Locale.REPLAY_COMMIT_INVALID)
+
+    execution: AttemptExecution | None = None
+    if commit.outcome.stage in REPLAY_EXECUTION_STAGES:
+        if commit.rollout is None or commit.appendwatch_snapshot is None:
+            raise PushValidationError(Locale.REPLAY_COMMIT_INVALID)
+        rollout_archive = _validated_commit_rollout(runtime, commit.rollout)
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            attempt_dir = Path(temporary_directory)
+            report_path = attempt_dir / APPENDWATCH_ARCHIVE_FILENAME_TEMPLATE.format(
+                attempt_id=commit.attempt_id
+            )
+            report_path.write_text(commit.appendwatch_snapshot, encoding=TEXT_ENCODING)
+            report_archive = _archived_file(report_path)
+            execution = execute_attempt(
+                conn,
+                runtime,
+                AttemptReplayInput(
+                    attempt_dir=attempt_dir,
+                    attempt_id=commit.attempt_id,
+                    attempt_timestamp=commit.attempt_timestamp,
+                    rollout_archive=rollout_archive,
+                    report_archive=report_archive,
+                    rollout_relative_path=PurePosixPath(
+                        commit.rollout.rollout_relative_path
+                    ),
+                    request_body=commit.public_request_body.encode(TEXT_ENCODING),
+                    run_id=commit.sanction.run_id,
+                    namekey=commit.sanction.namekey,
+                    session_id=commit.sanction.session_id,
+                    validate_appendwatch=True,
+                    materialize_files=materialize_files,
+                ),
+            )
+        if not _execution_matches_commit(execution, commit.outcome):
+            raise PushValidationError(Locale.REPLAY_COMMIT_INVALID)
+        if not execution.commit_database:
+            conn.execute("ROLLBACK")
+            conn.execute("BEGIN TRANSACTION")
+    elif commit.outcome.result != ATTEMPT_RESULT_CONFIGURATION_ERROR:
+        raise PushValidationError(Locale.REPLAY_COMMIT_INVALID)
+
+    conn.execute(
+        f"INSERT INTO {CONTROL_ATTEMPTS_TABLE} VALUES (?, ?, ?, ?)",
+        [
+            commit.attempt_id,
+            commit.transaction_id,
+            commit.public_request_sha256,
+            expected_record.model_dump_json(),
+        ],
+    )
+    if commit.outcome.result == ATTEMPT_RESULT_ACCEPTED:
+        conn.execute(
+            f"UPDATE {CONTROL_SANCTIONS_TABLE} SET "
+            f"{CONTROL_SANCTION_ACTIVE_COLUMN} = false, "
+            f"{CONTROL_SANCTION_ACCEPTED_ATTEMPT_ID_COLUMN} = ? "
+            f"WHERE {CONTROL_SANCTION_RUN_ID_COLUMN} = ?",
+            [commit.attempt_id, str(commit.sanction.run_id)],
+        )
+        _insert_control_event(
+            conn,
+            event=ControlRunEvent(
+                run_id=commit.sanction.run_id,
+                namekey=commit.sanction.namekey,
+                at=commit.attempt_timestamp,
+                kind=ControlRunEventKind.PUSH_ACCEPTED,
+                session_id=commit.sanction.session_id,
+                rollout_jsonl=commit.sanction.rollout_jsonl,
+                accepted_attempt_id=commit.attempt_id,
+            ),
+            idempotency_key=f"{commit.transaction_id}:{ControlRunEventKind.PUSH_ACCEPTED}",
+        )
+
+
+def _project_public_push_audit(
+    conn: duckdb.DuckDBPyConnection,
+    record: HttpRequestLogRecord,
+) -> None:
+    transaction_id = _http_header_value(
+        record.response_headers,
+        HTTP_TRANSACTION_ID_HEADER,
+    )
+    if transaction_id is None:
+        return
+    existing = conn.execute(
+        f"SELECT {CONTROL_ATTEMPT_RECORD_COLUMN} FROM {CONTROL_ATTEMPTS_TABLE} "
+        f"WHERE {CONTROL_ATTEMPT_IDEMPOTENCY_KEY_COLUMN} = ?",
+        [transaction_id],
+    ).fetchone()
+    if existing is None:
+        raise PushValidationError(Locale.REPLAY_PUBLIC_PUSH_INVALID)
+    try:
+        attempt = AttemptRecord.model_validate_json(str(existing[0]))
+    except ValidationError as exc:
+        raise PushValidationError(Locale.REPLAY_PUBLIC_PUSH_INVALID) from exc
+    if (
+        attempt.response_code != record.response_code
+        or attempt.response_body != record.response_body
+    ):
+        raise PushValidationError(Locale.REPLAY_PUBLIC_PUSH_INVALID)
+
+
+def project_authoritative_record(
+    conn: duckdb.DuckDBPyConnection,
+    runtime: AiAugmentBackendContext,
+    record: HttpRequestLogRecord,
+    *,
+    line_number: int,
+    byte_offset: int,
+    line_sha256: str,
+    materialize_files: bool,
+) -> None:
+    conn.execute("BEGIN TRANSACTION")
+    try:
+        route = (record.method, record.path)
+        if route == (HTTP_POST_METHOD, CONTROL_PUSH_PATH):
+            _project_control_push(conn, record)
+        elif route == AUTHORITATIVE_COMMIT_ROUTE:
+            _project_submission_commit(
+                conn,
+                runtime,
+                record,
+                materialize_files=materialize_files,
+            )
+        elif route == (HTTP_POST_METHOD, PUSH_PATH):
+            _project_public_push_audit(conn, record)
+        else:
+            raise PushValidationError(Locale.REPLAY_LOG_LINE_INVALID_TEMPLATE.format(
+                line_number=line_number
+            ))
+        _write_projection_checkpoint(
+            conn,
+            line_number=line_number,
+            byte_offset=byte_offset,
+            line_sha256=line_sha256,
+        )
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+
+
+def synchronize_authoritative_projection(runtime: AiAugmentBackendContext) -> None:
+    global AUTHORITATIVE_BACKEND_HEALTHY
+    global AUTHORITATIVE_LOG_OFFSET
+    global AUTHORITATIVE_NEXT_LINE_NUMBER
+
+    records = _authoritative_log_records(Path(runtime.replay_log))
+    runtime.rollout_cas_dir.mkdir(parents=True, exist_ok=True)
+    with DETOUR_DB_LOCK:
+        conn = open_detour_database(runtime)
+        try:
+            _initialize_authoritative_schema(conn)
+            checkpoint = _projection_checkpoint(conn)
+            if checkpoint is None:
+                projected_rows = 0
+                for table_name in (
+                    CONTROL_RUN_EVENTS_TABLE,
+                    CONTROL_ATTEMPTS_TABLE,
+                    CONTROL_SANCTIONS_TABLE,
+                ):
+                    count_row = conn.execute(
+                        f"SELECT count(*) FROM {table_name}"
+                    ).fetchone()
+                    if count_row is None:
+                        raise PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT)
+                    projected_rows += int(count_row[0])
+                if projected_rows:
+                    raise PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT)
+                projected_line_count = 0
+            else:
+                projected_line_count, byte_offset, line_sha256 = checkpoint
+                if projected_line_count > len(records):
+                    raise PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT)
+                if projected_line_count:
+                    _, expected_offset, expected_hash = records[projected_line_count - 1]
+                    if byte_offset != expected_offset or line_sha256 != expected_hash:
+                        raise PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT)
+            for line_number, (record, byte_offset, line_sha256) in enumerate(
+                records[projected_line_count:],
+                start=projected_line_count + AUTHORITATIVE_FIRST_LINE,
+            ):
+                project_authoritative_record(
+                    conn,
+                    runtime,
+                    record,
+                    line_number=line_number,
+                    byte_offset=byte_offset,
+                    line_sha256=line_sha256,
+                    materialize_files=False,
+                )
+            AUTHORITATIVE_NEXT_LINE_NUMBER = len(records) + AUTHORITATIVE_FIRST_LINE
+            AUTHORITATIVE_LOG_OFFSET = records[-1][1] if records else AUTHORITATIVE_EMPTY_OFFSET
+            AUTHORITATIVE_BACKEND_HEALTHY = True
+        except (duckdb.Error, PushValidationError, ValidationError) as exc:
+            raise PushConfigurationError(Locale.REPLAY_PROJECTION_FAILED) from exc
+        finally:
+            conn.close()
+
+
+def _request_body_for_authoritative_log(body: bytes) -> str | dict[str, str]:
+    try:
+        return body.decode(TEXT_ENCODING)
+    except UnicodeDecodeError:
+        return {
+            AUTHORITATIVE_LOG_ENCODING_KEY: AUTHORITATIVE_LOG_BASE64_ENCODING,
+            AUTHORITATIVE_LOG_DATA_KEY: base64.b64encode(body).decode(BASE64_TEXT_ENCODING),
+        }
+
+
+def _authoritative_http_record(
+    request: Request,
+    *,
+    request_body: bytes,
+    response_code: int,
+    response_headers: Mapping[str, str],
+    response_body: bytes,
+    started_ns: int,
+    ready_to_respond_at_unix_usec: int,
+) -> HttpRequestLogRecord:
+    try:
+        response_text = response_body.decode(TEXT_ENCODING)
+    except UnicodeDecodeError as exc:
+        raise PushConfigurationError(Locale.AUTHORITATIVE_RESPONSE_NOT_UTF8) from exc
+    return HttpRequestLogRecord(
+        schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V2,
+        method=request.method,
+        scheme=request.url.scheme,
+        host=request.url.hostname or "",
+        port=request.url.port,
+        coerce_schema_v1=False,
+        ready_to_respond_at_unix_usec=ready_to_respond_at_unix_usec,
+        path=request.url.path,
+        query=request.url.query,
+        request_headers=dict(request.headers),
+        request_body=_request_body_for_authoritative_log(request_body),
+        response_code=response_code,
+        response_headers=dict(response_headers),
+        response_body=response_text,
+        received_at_unix_usec=None,
+        duration_usec=(time.monotonic_ns() - started_ns) // NANOSECONDS_PER_MICROSECOND,
+    )
+
+
+def _append_authoritative_record(record: HttpRequestLogRecord) -> None:
+    global AUTHORITATIVE_BACKEND_HEALTHY
+    global AUTHORITATIVE_LOG_OFFSET
+    global AUTHORITATIVE_NEXT_LINE_NUMBER
+
+    line = (record.model_dump_json(ensure_ascii=True) + "\n").encode(TEXT_ENCODING)
+    line_sha256 = hashlib.sha256(line).hexdigest()
+    with AUTHORITATIVE_APPEND_LOCK:
+        descriptor = AUTHORITATIVE_LOG_DESCRIPTOR
+        if descriptor is None:
+            raise PushConfigurationError(Locale.AUTHORITATIVE_LOG_NOT_OPEN)
+        try:
+            end_offset = os.lseek(descriptor, AUTHORITATIVE_EMPTY_OFFSET, os.SEEK_END)
+            if end_offset != AUTHORITATIVE_LOG_OFFSET:
+                raise PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT)
+            written = 0
+            while written < len(line):
+                count = os.write(descriptor, line[written:])
+                if count <= 0:
+                    raise OSError(Locale.AUTHORITATIVE_LOG_APPEND_FAILED)
+                written += count
+            os.fsync(descriptor)
+        except (OSError, PushConfigurationError):
+            AUTHORITATIVE_BACKEND_HEALTHY = False
+            raise
+        line_number = AUTHORITATIVE_NEXT_LINE_NUMBER
+        AUTHORITATIVE_LOG_OFFSET += len(line)
+        AUTHORITATIVE_NEXT_LINE_NUMBER += 1
+        if not AUTHORITATIVE_BACKEND_HEALTHY:
+            return
+        try:
+            runtime = runtime_configuration()
+            with DETOUR_DB_LOCK:
+                conn = open_detour_database(runtime)
+                try:
+                    project_authoritative_record(
+                        conn,
+                        runtime,
+                        record,
+                        line_number=line_number,
+                        byte_offset=AUTHORITATIVE_LOG_OFFSET,
+                        line_sha256=line_sha256,
+                        materialize_files=True,
+                    )
+                finally:
+                    conn.close()
+        except Exception as exc:
+            AUTHORITATIVE_BACKEND_HEALTHY = False
+            logger.exception(Locale.AUTHORITATIVE_PROJECTION_FAILED_LOG, line_number, exc)
+
+
+def _try_acquire_authoritative_command() -> bool:
+    global AUTHORITATIVE_COMMAND_ACTIVE
+
+    with AUTHORITATIVE_COMMAND_STATE_LOCK:
+        if AUTHORITATIVE_COMMAND_ACTIVE:
+            return False
+        AUTHORITATIVE_COMMAND_ACTIVE = True
+        return True
+
+
+def _release_authoritative_command() -> None:
+    global AUTHORITATIVE_COMMAND_ACTIVE
+
+    with AUTHORITATIVE_COMMAND_STATE_LOCK:
+        AUTHORITATIVE_COMMAND_ACTIVE = False
+
+
+class AuthoritativeHttpMiddleware:
+    """Durably record finite push exchanges before forwarding ASGI responses."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(
+        self,
+        scope: Scope,
+        receive: Receive,
+        send: Send,
+    ) -> None:
+        if scope[ASGI_TYPE_KEY] != ASGI_HTTP_SCOPE_TYPE:
+            await self.app(scope, receive, send)
+            return
+        method = cast(str, scope[ASGI_METHOD_KEY])
+        path = cast(str, scope[ASGI_PATH_KEY])
+        route = (method, path)
+        if route not in AUTHORITATIVE_PUBLIC_ROUTES and route != AUTHORITATIVE_COMMIT_ROUTE:
+            await self.app(scope, receive, send)
+            return
+
+        started_ns = time.monotonic_ns()
+        request = Request(scope, receive=receive)
+        request_body = await request.body()
+        request_body_pending = True
+        response_messages: list[Message] = []
+        command_acquired = False
+
+        async def replay_request_body() -> Message:
+            nonlocal request_body_pending
+            if request_body_pending:
+                request_body_pending = False
+                return {
+                    ASGI_TYPE_KEY: ASGI_HTTP_REQUEST_MESSAGE_TYPE,
+                    ASGI_BODY_KEY: request_body,
+                    ASGI_MORE_BODY_KEY: False,
+                }
+            return {ASGI_TYPE_KEY: ASGI_HTTP_DISCONNECT_MESSAGE_TYPE}
+
+        async def capture_response(message: Message) -> None:
+            response_messages.append(message)
+
+        async def replace_response(response: Response) -> None:
+            response_messages.clear()
+            await response(scope, replay_request_body, capture_response)
+
+        try:
+            if route in AUTHORITATIVE_PUBLIC_ROUTES:
+                if not AUTHORITATIVE_BACKEND_HEALTHY:
+                    logger.error(Locale.AUTHORITATIVE_BACKEND_UNHEALTHY_LOG, method, path)
+                    await replace_response(
+                        JSONResponse(
+                            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            content={"detail": Locale.CONFIGURATION_ERROR_DETAIL},
+                        )
+                    )
+                elif not _try_acquire_authoritative_command():
+                    logger.info(Locale.AUTHORITATIVE_COMMAND_BUSY_LOG, method, path)
+                    await replace_response(
+                        JSONResponse(
+                            status_code=HTTP_BUSY_RESPONSE,
+                            content={"detail": Locale.AUTHORITATIVE_COMMAND_BUSY},
+                        )
+                    )
+                else:
+                    command_acquired = True
+                    await self.app(scope, replay_request_body, capture_response)
+            elif not AUTHORITATIVE_BACKEND_HEALTHY:
+                logger.error(Locale.AUTHORITATIVE_BACKEND_UNHEALTHY_LOG, method, path)
+                await replace_response(
+                    JSONResponse(
+                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                        content={"detail": Locale.CONFIGURATION_ERROR_DETAIL},
+                    )
+                )
+            else:
+                await self.app(scope, replay_request_body, capture_response)
+        except Exception:
+            logger.exception(Locale.AUTHORITATIVE_HANDLER_FAILED_LOG, method, path)
+            await replace_response(
+                JSONResponse(
+                    status_code=HTTP_INTERNAL_ERROR_RESPONSE,
+                    content={"detail": Locale.CONFIGURATION_ERROR_DETAIL},
+                )
+            )
+
+        response_start = tuple(
+            message
+            for message in response_messages
+            if message[ASGI_TYPE_KEY] == ASGI_HTTP_RESPONSE_START_MESSAGE_TYPE
+        )
+        response_chunks = tuple(
+            message
+            for message in response_messages
+            if message[ASGI_TYPE_KEY] == ASGI_HTTP_RESPONSE_BODY_MESSAGE_TYPE
+        )
+        if (
+            len(response_start) != 1
+            or not response_chunks
+            or response_chunks[-1].get(ASGI_MORE_BODY_KEY, False)
+        ):
+            logger.error(Locale.AUTHORITATIVE_RESPONSE_INCOMPLETE_LOG, method, path)
+            await replace_response(
+                JSONResponse(
+                    status_code=HTTP_INTERNAL_ERROR_RESPONSE,
+                    content={"detail": Locale.CONFIGURATION_ERROR_DETAIL},
+                )
+            )
+            response_start = tuple(
+                message
+                for message in response_messages
+                if message[ASGI_TYPE_KEY] == ASGI_HTTP_RESPONSE_START_MESSAGE_TYPE
+            )
+            response_chunks = tuple(
+                message
+                for message in response_messages
+                if message[ASGI_TYPE_KEY] == ASGI_HTTP_RESPONSE_BODY_MESSAGE_TYPE
+            )
+
+        start_message = response_start[0]
+        response_body = b"".join(
+            cast(bytes, message.get(ASGI_BODY_KEY, b"")) for message in response_chunks
+        )
+        response_headers = Headers(
+            raw=cast(list[tuple[bytes, bytes]], start_message[ASGI_HEADERS_KEY])
+        )
+        ready_to_respond_at_unix_usec = time.time_ns() // NANOSECONDS_PER_MICROSECOND
+        try:
+            record = _authoritative_http_record(
+                request,
+                request_body=request_body,
+                response_code=cast(int, start_message[ASGI_STATUS_KEY]),
+                response_headers=dict(response_headers.items()),
+                response_body=response_body,
+                started_ns=started_ns,
+                ready_to_respond_at_unix_usec=ready_to_respond_at_unix_usec,
+            )
+            _append_authoritative_record(record)
+        except (OSError, PushConfigurationError) as exc:
+            logger.exception(Locale.AUTHORITATIVE_LOG_APPEND_FAILED_LOG, method, path, exc)
+            await replace_response(
+                JSONResponse(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    content={"detail": Locale.CONFIGURATION_ERROR_DETAIL},
+                )
+            )
+        finally:
+            if command_acquired:
+                _release_authoritative_command()
+
+        for message in response_messages:
+            await send(message)
+
+
+app.add_middleware(AuthoritativeHttpMiddleware)
+commit_app.add_middleware(AuthoritativeHttpMiddleware)
+
+
+def _namekey_innerdict_rows(
     source_conn: duckdb.DuckDBPyConnection,
     *,
     table_name: str,
-    source_key: str,
+    namekey: str,
 ) -> tuple[dict[str, object], ...]:
     try:
         rows = source_conn.execute(
             f"SELECT {duckdb_quote_identifier(KTP_INNERDICT_JSONLINES_COL)} "
             f"FROM {table_name} "
             f"WHERE {duckdb_quote_identifier(KTP_NAMEKEY_COL)} = ?",
-            [source_key],
+            [namekey],
         ).fetchall()
     except duckdb.Error as exc:
         raise PushValidationError(
@@ -4108,7 +4535,7 @@ def _source_table_rows(
         return _innerdict_json_rows(
             innerdict_jsonlines,
             table_name=table_name,
-            source_key=source_key,
+            namekey=namekey,
         )
     except PushConfigurationError as exc:
         raise PushValidationError(str(exc)) from exc
@@ -4116,34 +4543,33 @@ def _source_table_rows(
 
 def load_source_researcher(
     source_conn: duckdb.DuckDBPyConnection,
-    runtime: RuntimeConfiguration,
+    cohorts: Mapping[str, str] | None,
     *,
-    source_key: str,
+    namekey: str,
 ) -> SourceResearcher:
-    cohorts = runtime.eligible_cohorts
-    if cohorts is None or source_key not in cohorts:
-        raise PushValidationError(Locale.SANCTIONED_SOURCE_INELIGIBLE)
+    if cohorts is None or namekey not in cohorts:
+        raise PushValidationError(Locale.SANCTIONED_NAMEKEY_INELIGIBLE)
     try:
-        name_key = NameKey.from_json_key(source_key)
+        name_key = NameKey.from_json_key(namekey)
     except (ValueError, TypeError, json.JSONDecodeError) as exc:
-        raise PushValidationError(Locale.SANCTIONED_SOURCE_MALFORMED) from exc
-    if name_key.to_json_key() != source_key:
-        raise PushValidationError(Locale.SANCTIONED_SOURCE_NONCANONICAL)
+        raise PushValidationError(Locale.SANCTIONED_NAMEKEY_MALFORMED) from exc
+    if name_key.to_json_key() != namekey:
+        raise PushValidationError(Locale.SANCTIONED_NAMEKEY_NONCANONICAL)
 
-    xlsx_rows = _source_table_rows(
+    xlsx_rows = _namekey_innerdict_rows(
         source_conn,
         table_name=XLSX_INNERDICT_TABLE,
-        source_key=source_key,
+        namekey=namekey,
     )
-    docx_rows = _source_table_rows(
+    docx_rows = _namekey_innerdict_rows(
         source_conn,
         table_name=DOCX_INNERDICT_TABLE,
-        source_key=source_key,
+        namekey=namekey,
     )
-    ssn_rows = _source_table_rows(
+    ssn_rows = _namekey_innerdict_rows(
         source_conn,
         table_name=PARQUET_INNERDICT_TABLE,
-        source_key=source_key,
+        namekey=namekey,
     )
     if not xlsx_rows:
         raise PushValidationError(Locale.SANCTIONED_XLSX_CONTEXT_MISSING)
@@ -4160,20 +4586,20 @@ def load_source_researcher(
     if not draw_numbers:
         raise PushValidationError(Locale.SANCTIONED_DRAW_MISSING)
     return SourceResearcher(
-        source_key=source_key,
+        namekey=namekey,
         first_name=name_key.first_name,
         last_name=name_key.last_name,
         draw_numbers=draw_numbers,
         xlsx_rows=xlsx_rows,
         docx_rows=docx_rows,
         ssn_rows=ssn_rows,
-        cohort=cohorts[source_key],
+        cohort=cohorts[namekey],
     )
 
 
 def researcher_context(researcher: SourceResearcher) -> ResearcherContext:
     return ResearcherContext(
-        source_key=researcher.source_key,
+        namekey=researcher.namekey,
         draw_number=DRAW_VALUE_SEPARATOR.join(researcher.draw_numbers),
         first_name=researcher.first_name,
         last_name=researcher.last_name,
@@ -4206,42 +4632,6 @@ def ground_truth_for_researcher(researcher: SourceResearcher) -> dict[str, objec
     if not complete_rows:
         raise PushValidationError(Locale.GROUND_TRUTH_DOCX_INCOMPLETE)
     return select_columns(complete_rows[0])
-
-
-def resolve_researcher(
-    source_conn: duckdb.DuckDBPyConnection,
-    *,
-    first_name: str,
-    last_name: str,
-) -> ResearcherContext:
-    rows = source_conn.execute(
-        f"""
-        SELECT DISTINCT
-            names.{duckdb_quote_identifier(KTP_NAMEKEY_COL)},
-            samples.{duckdb_quote_identifier(DRAW_LABEL)},
-            names.{duckdb_quote_identifier(KTP_FIRST_NAME_COL)},
-            names.{duckdb_quote_identifier(KTP_LAST_NAME_COL)}
-        FROM {OUTERDICT_NAME_VIEW} names
-        JOIN {SAMPLES_WITH_NAMES_VIEW} samples
-          ON names.{duckdb_quote_identifier(KTP_FIRST_NAME_COL)} =
-             samples.{duckdb_quote_identifier(KTP_FIRST_NAME_COL)}
-         AND names.{duckdb_quote_identifier(KTP_LAST_NAME_COL)} =
-             samples.{duckdb_quote_identifier(KTP_LAST_NAME_COL)}
-        WHERE names.{duckdb_quote_identifier(KTP_FIRST_NAME_COL)} = ?
-          AND names.{duckdb_quote_identifier(KTP_LAST_NAME_COL)} = ?
-          AND CAST(samples.{duckdb_quote_identifier(DRAW_LABEL)} AS VARCHAR) = ?
-        """,
-        [first_name, last_name, TARGET_DRAW_NUMBER],
-    ).fetchall()
-    if len(rows) != 1:
-        raise PushValidationError(Locale.RESEARCHER_NOT_UNIQUE)
-    source_key, draw_number, first_name, last_name = rows[0]
-    return ResearcherContext(
-        source_key=cast(str, source_key),
-        draw_number=str(draw_number),
-        first_name=cast(str, first_name),
-        last_name=cast(str, last_name),
-    )
 
 
 def render_codex_values(
@@ -4425,7 +4815,7 @@ def _standardized_initial_submission(
 def write_accepted_submission(
     detour_conn: duckdb.DuckDBPyConnection,
     source_conn: duckdb.DuckDBPyConnection,
-    runtime: RuntimeConfiguration,
+    runtime: AiAugmentBackendContext,
     *,
     submission: StandardizedSubmission,
     evidence: ValidatedEvidence,
@@ -4435,7 +4825,7 @@ def write_accepted_submission(
     attempt_dir: Path,
     attempt_id: str,
     attempt_timestamp: datetime,
-    source_researcher: SourceResearcher | None = None,
+    source_researcher: SourceResearcher,
     manage_transaction: bool = True,
     materialize_files: bool = True,
 ) -> tuple[tuple[str, ...], ArchivedFile | None]:
@@ -4459,7 +4849,7 @@ def write_accepted_submission(
         ),
     )
     output_row: dict[str, object] = {
-        KTP_NAMEKEY_COL: researcher.source_key,
+        KTP_NAMEKEY_COL: researcher.namekey,
         KTP_FILENAME_COL: rollout_index.session.rollout_filename,
         KTP_FRAGMENT_COL: rollout_archive.line_count,
         KTP_FRAGMENT_TYPE_COL: ROLLOUT_LINE_FRAGMENT_TYPE,
@@ -4476,11 +4866,7 @@ def write_accepted_submission(
     try:
         append_codex_output(detour_conn, output_row)
         submitted_line = json_line(normalized_submission)
-        truth = (
-            ground_truth()
-            if source_researcher is None
-            else ground_truth_for_researcher(source_researcher)
-        )
+        truth = ground_truth_for_researcher(source_researcher)
         response_lines = (submitted_line,) if truth is None else (submitted_line, json_line(truth))
         if materialize_files:
             outer_dict = selected_card_outer_dict(source_conn, detour_conn, researcher)
@@ -4517,26 +4903,29 @@ def write_accepted_submission(
 
 def execute_attempt(
     detour_conn: duckdb.DuckDBPyConnection,
-    runtime: RuntimeConfiguration,
+    runtime: AiAugmentBackendContext,
     replay: AttemptReplayInput,
 ) -> AttemptExecution:
     source_conn: duckdb.DuckDBPyConnection | None = None
     retry_submission_expected = False
     session_id = replay.session_id
-    source_key = replay.source_key
+    namekey = replay.namekey
     stage = ATTEMPT_STAGE_APPENDWATCH_VALIDATION
     try:
-        parse_appendwatch_report(
-            replay.report_archive.path,
-            replay.rollout_relative_path,
-        )
+        if replay.validate_appendwatch:
+            if replay.report_archive is None:
+                raise PushConfigurationError(Locale.APPENDWATCH_REPORT_UNREADABLE)
+            parse_appendwatch_report(
+                replay.report_archive.path,
+                replay.rollout_relative_path,
+            )
         stage = ATTEMPT_STAGE_ROLLOUT_INDEX
         rollout_index = build_rollout_index(
             parse_rollout(replay.rollout_archive.path),
             timezone_name=runtime.pipeline.timezone,
             configured_rollout_basename=replay.rollout_relative_path.name,
         )
-        if session_id is not None and rollout_index.session.session_id != session_id:
+        if rollout_index.session.session_id != session_id:
             raise PushValidationError(Locale.SANCTIONED_SESSION_MISMATCH)
         session_id = rollout_index.session.session_id
         persist_rollout_index(
@@ -4547,15 +4936,12 @@ def execute_attempt(
         )
 
         stage = ATTEMPT_STAGE_PYDANTIC_VALIDATION
-        if replay.run_id is not None:
-            if source_key is None or replay.session_id is None:
-                raise PushConfigurationError(Locale.EVIDENCE_RETRY_IDENTITY_MISMATCH)
-            retry_submission_expected = _retry_baseline_exists(
-                detour_conn,
-                run_id=replay.run_id,
-                source_key=source_key,
-                session_id=replay.session_id,
-            )
+        retry_submission_expected = _retry_baseline_exists(
+            detour_conn,
+            run_id=replay.run_id,
+            namekey=namekey,
+            session_id=replay.session_id,
+        )
         submission: SubmissionPayload = (
             StandardizedSubmission.model_validate_json(replay.request_body)
             if retry_submission_expected
@@ -4574,30 +4960,24 @@ def execute_attempt(
             evidence_assessment,
             attempt_id=replay.attempt_id,
         )
-        retry_violations: tuple[str, ...] = ()
-        if replay.run_id is not None:
-            assert source_key is not None
-            assert replay.session_id is not None
-            retry_violations = _process_retry_attempt(
-                detour_conn,
-                run_id=replay.run_id,
-                source_key=source_key,
-                session_id=replay.session_id,
-                attempt_id=replay.attempt_id,
-                attempt_timestamp=replay.attempt_timestamp,
-                submission=submission,
-                assessment=evidence_assessment,
-                manage_transaction=False,
-            )
-        elif any(item.outcome == EVIDENCE_OUTCOME_WITHDRAWN for item in evidence_assessment.items):
-            retry_violations = (Locale.EVIDENCE_WITHDRAWAL_WITHOUT_BASELINE,)
+        retry_violations = _process_retry_attempt(
+            detour_conn,
+            run_id=replay.run_id,
+            namekey=namekey,
+            session_id=replay.session_id,
+            attempt_id=replay.attempt_id,
+            attempt_timestamp=replay.attempt_timestamp,
+            submission=submission,
+            assessment=evidence_assessment,
+            manage_transaction=False,
+        )
         if not evidence_assessment.accepted or retry_violations:
             raise EvidenceAssessmentError(
                 Locale.EVIDENCE_SUBMISSION_REJECTED,
                 public_detail=_assessment_public_detail(
                     evidence_assessment,
                     violations=retry_violations,
-                    include_retry_contract=(replay.run_id is not None),
+                    include_retry_contract=True,
                 ),
             )
         accepted_submission = (
@@ -4608,22 +4988,12 @@ def execute_attempt(
 
         stage = ATTEMPT_STAGE_RESEARCHER_RESOLUTION
         source_conn = open_source_database(runtime)
-        source_researcher: SourceResearcher | None = None
-        if source_key is None:
-            first_name, last_name = selected_task_identity()
-            researcher = resolve_researcher(
-                source_conn,
-                first_name=first_name,
-                last_name=last_name,
-            )
-            source_key = researcher.source_key
-        else:
-            source_researcher = load_source_researcher(
-                source_conn,
-                runtime,
-                source_key=source_key,
-            )
-            researcher = researcher_context(source_researcher)
+        source_researcher = load_source_researcher(
+            source_conn,
+            runtime.eligible_cohorts,
+            namekey=namekey,
+        )
+        researcher = researcher_context(source_researcher)
 
         stage = ATTEMPT_STAGE_CARD
         response_lines, card_archive = write_accepted_submission(
@@ -4651,7 +5021,7 @@ def execute_attempt(
             response_detail=None,
             response_lines=response_lines,
             retry_submission_expected=retry_submission_expected,
-            source_key=source_key,
+            namekey=namekey,
             session_id=session_id,
             card_archive=card_archive,
             error=None,
@@ -4667,7 +5037,7 @@ def execute_attempt(
             response_detail=detail,
             response_lines=(),
             retry_submission_expected=retry_submission_expected,
-            source_key=source_key,
+            namekey=namekey,
             session_id=session_id,
             card_archive=None,
             error=exc,
@@ -4683,7 +5053,7 @@ def execute_attempt(
             response_detail=detail,
             response_lines=(),
             retry_submission_expected=retry_submission_expected,
-            source_key=source_key,
+            namekey=namekey,
             session_id=session_id,
             card_archive=None,
             error=exc,
@@ -4703,7 +5073,7 @@ def execute_attempt(
             response_detail=detail,
             response_lines=(),
             retry_submission_expected=retry_submission_expected,
-            source_key=source_key,
+            namekey=namekey,
             session_id=session_id,
             card_archive=None,
             error=exc,
@@ -4727,7 +5097,7 @@ def execute_attempt(
             response_detail=detail,
             response_lines=(),
             retry_submission_expected=retry_submission_expected,
-            source_key=source_key,
+            namekey=namekey,
             session_id=session_id,
             card_archive=None,
             error=exc,
@@ -4743,7 +5113,7 @@ def execute_attempt(
             response_detail=detail,
             response_lines=(),
             retry_submission_expected=retry_submission_expected,
-            source_key=source_key,
+            namekey=namekey,
             session_id=session_id,
             card_archive=None,
             error=exc,
@@ -4752,293 +5122,6 @@ def execute_attempt(
     finally:
         if source_conn is not None:
             source_conn.close()
-
-
-def _validated_archived_file(
-    attempt_dir: Path,
-    artifact: ArchivedArtifact,
-    *,
-    expected_filename: str,
-) -> ArchivedFile:
-    artifact_path = attempt_dir / artifact.filename
-    if (
-        artifact.filename != expected_filename
-        or artifact_path.parent != attempt_dir
-        or not artifact_path.is_file()
-        or (
-            not ALLOW_ARCHIVED_ATTEMPT_SYMLINKS
-            and artifact_path.is_symlink()
-        )
-    ):
-        raise PushValidationError(
-            Locale.ARCHIVED_ATTEMPT_ARTIFACT_INVALID_TEMPLATE.format(artifact=expected_filename)
-        )
-    archived_file = _archived_file(artifact_path)
-    if archived_file.size != artifact.size or archived_file.sha256 != artifact.sha256:
-        raise PushValidationError(
-            Locale.ARCHIVED_ATTEMPT_ARTIFACT_INVALID_TEMPLATE.format(artifact=expected_filename)
-        )
-    if (
-        isinstance(artifact, ArchivedRolloutArtifact)
-        and archived_file.line_count != artifact.line_count
-    ):
-        raise PushValidationError(
-            Locale.ARCHIVED_ATTEMPT_ARTIFACT_INVALID_TEMPLATE.format(artifact=expected_filename)
-        )
-    return archived_file
-
-
-def _archived_attempt_replay(
-    attempt_dir: Path,
-) -> tuple[ArchivedAttemptManifest, str, AttemptReplayInput]:
-    if (
-        not attempt_dir.is_dir()
-        or (
-            not ALLOW_ARCHIVED_ATTEMPT_SYMLINKS
-            and attempt_dir.is_symlink()
-        )
-    ):
-        raise PushValidationError(Locale.ARCHIVED_ATTEMPT_PATH_INVALID)
-    manifest_path = attempt_dir / ATTEMPT_MANIFEST_FILENAME
-    if (
-        not manifest_path.is_file()
-        or (
-            not ALLOW_ARCHIVED_ATTEMPT_SYMLINKS
-            and manifest_path.is_symlink()
-        )
-    ):
-        raise PushValidationError(Locale.ARCHIVED_ATTEMPT_MANIFEST_INVALID)
-    try:
-        manifest_text = manifest_path.read_text(encoding=TEXT_ENCODING)
-        manifest = ArchivedAttemptManifest.model_validate_json(manifest_text)
-        timestamp_text, uuid_text = manifest.attempt_id.rsplit(
-            ATTEMPT_ID_SEPARATOR,
-            maxsplit=1,
-        )
-        attempt_timestamp = datetime.strptime(
-            timestamp_text,
-            ATTEMPT_ID_TIMESTAMP_FORMAT,
-        ).replace(tzinfo=timezone.utc)
-        if UUID(hex=uuid_text).hex != uuid_text:
-            raise ValueError(Locale.ARCHIVED_ATTEMPT_MANIFEST_INVALID)
-        datetime.fromisoformat(manifest.updated_at)
-    except (OSError, UnicodeError, ValueError, ValidationError) as exc:
-        raise PushValidationError(Locale.ARCHIVED_ATTEMPT_MANIFEST_INVALID) from exc
-    if manifest.attempt_id != attempt_dir.name:
-        raise PushValidationError(Locale.ARCHIVED_ATTEMPT_MANIFEST_INVALID)
-    expected_response_code = ATTEMPT_RESULT_RESPONSE_CODE.get(manifest.result)
-    if expected_response_code is None:
-        raise PushValidationError(Locale.ARCHIVED_ATTEMPT_MANIFEST_INVALID)
-    if manifest.result == ATTEMPT_RESULT_ACCEPTED and manifest.stage != ATTEMPT_STAGE_ACCEPTED:
-        raise PushValidationError(Locale.ARCHIVED_ATTEMPT_MANIFEST_INVALID)
-    if manifest.run_id is not None and (manifest.source_key is None or manifest.session_id is None):
-        raise PushValidationError(Locale.ARCHIVED_ATTEMPT_MANIFEST_INVALID)
-    if manifest.result == ATTEMPT_RESULT_ACCEPTED and manifest.source_key is None:
-        raise PushValidationError(Locale.ARCHIVED_ATTEMPT_MANIFEST_INVALID)
-
-    rollout_relative_path = PurePosixPath(manifest.rollout_relative_path)
-    if (
-        str(rollout_relative_path) != manifest.rollout_relative_path
-        or rollout_relative_path.is_absolute()
-        or rollout_relative_path == CURRENT_DIRECTORY
-        or any(part in FORBIDDEN_NORMALIZED_PATH_PARTS for part in rollout_relative_path.parts)
-    ):
-        raise PushValidationError(Locale.ARCHIVED_ATTEMPT_MANIFEST_INVALID)
-    rollout_archive = _validated_archived_file(
-        attempt_dir,
-        manifest.artifacts.rollout,
-        expected_filename=ROLLOUT_ARCHIVE_FILENAME_TEMPLATE.format(attempt_id=manifest.attempt_id),
-    )
-    report_archive = _validated_archived_file(
-        attempt_dir,
-        manifest.artifacts.appendwatch_report,
-        expected_filename=APPENDWATCH_ARCHIVE_FILENAME_TEMPLATE.format(
-            attempt_id=manifest.attempt_id
-        ),
-    )
-    http_archive = _validated_archived_file(
-        attempt_dir,
-        manifest.artifacts.http_request_log,
-        expected_filename=HTTP_REQUEST_LOG_FILENAME_TEMPLATE.format(attempt_id=manifest.attempt_id),
-    )
-    try:
-        http_lines = http_archive.path.read_text(encoding=TEXT_ENCODING).splitlines()
-        if len(http_lines) != 1 or http_archive.line_count != 1:
-            raise ValueError(Locale.ARCHIVED_ATTEMPT_HTTP_INVALID)
-        http_record = HttpRequestLogRecord.model_validate_json(http_lines[0])
-        if (
-            http_record.schema_version != KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V2
-            or http_record.method != HTTP_POST_METHOD
-            or http_record.path != PUSH_PATH
-            or http_record.query
-            or http_record.response_code != expected_response_code
-            or not isinstance(http_record.request_body, str)
-        ):
-            raise ValueError(Locale.ARCHIVED_ATTEMPT_HTTP_INVALID)
-        request_body = http_record.request_body.encode(TEXT_ENCODING)
-        if len(request_body) > MAX_PUSH_BODY_BYTES:
-            raise ValueError(Locale.ARCHIVED_ATTEMPT_HTTP_INVALID)
-    except (OSError, UnicodeError, ValueError, ValidationError) as exc:
-        raise PushValidationError(Locale.ARCHIVED_ATTEMPT_HTTP_INVALID) from exc
-    return (
-        manifest,
-        manifest_text,
-        AttemptReplayInput(
-            attempt_dir=attempt_dir,
-            attempt_id=manifest.attempt_id,
-            attempt_timestamp=attempt_timestamp,
-            rollout_archive=rollout_archive,
-            report_archive=report_archive,
-            rollout_relative_path=rollout_relative_path,
-            request_body=request_body,
-            run_id=manifest.run_id,
-            source_key=manifest.source_key,
-            session_id=manifest.session_id,
-            materialize_files=False,
-        ),
-    )
-
-
-def persist_control_run_events(
-    runtime: RuntimeConfiguration,
-    events: Sequence[ControlRunEvent],
-) -> int:
-    with DETOUR_DB_LOCK:
-        detour_conn = open_detour_database(runtime)
-        transaction_started = False
-        try:
-            detour_conn.execute(CREATE_CONTROL_RUN_EVENTS_TABLE_SQL)
-            rows = detour_conn.execute(SELECT_CONTROL_RUN_EVENTS_SQL).fetchall()
-            expected_ordinals = tuple(
-                range(CONTROL_RUN_FIRST_ORDINAL, CONTROL_RUN_FIRST_ORDINAL + len(rows))
-            )
-            if tuple(row[0] for row in rows) != expected_ordinals or len(rows) > len(events):
-                raise PushValidationError(Locale.CONTROL_RUN_EVENTS_INCONSISTENT)
-            try:
-                stored_events = tuple(
-                    ControlRunEvent.model_validate_json(str(row[1])) for row in rows
-                )
-            except ValidationError as exc:
-                raise PushValidationError(Locale.CONTROL_RUN_EVENTS_INCONSISTENT) from exc
-            if stored_events != tuple(events[: len(stored_events)]):
-                raise PushValidationError(Locale.CONTROL_RUN_EVENTS_INCONSISTENT)
-            pending = tuple(
-                enumerate(
-                    events[len(rows) :],
-                    start=CONTROL_RUN_FIRST_ORDINAL + len(rows),
-                )
-            )
-            if not pending:
-                return 0
-            detour_conn.execute("BEGIN TRANSACTION")
-            transaction_started = True
-            detour_conn.executemany(
-                INSERT_CONTROL_RUN_EVENT_SQL,
-                [
-                    [ordinal, event.model_dump_json()]
-                    for ordinal, event in pending
-                ],
-            )
-            detour_conn.execute("COMMIT")
-            transaction_started = False
-            return len(pending)
-        except Exception:
-            if transaction_started:
-                detour_conn.execute("ROLLBACK")
-            raise
-        finally:
-            detour_conn.close()
-
-
-def load_control_run_events(
-    runtime: RuntimeConfiguration,
-) -> tuple[ControlRunEvent, ...]:
-    with DETOUR_DB_LOCK:
-        detour_conn = open_detour_database(runtime)
-        try:
-            detour_conn.execute(CREATE_CONTROL_RUN_EVENTS_TABLE_SQL)
-            rows = detour_conn.execute(SELECT_CONTROL_RUN_EVENTS_SQL).fetchall()
-        finally:
-            detour_conn.close()
-    expected_ordinals = tuple(
-        range(CONTROL_RUN_FIRST_ORDINAL, CONTROL_RUN_FIRST_ORDINAL + len(rows))
-    )
-    if tuple(row[0] for row in rows) != expected_ordinals:
-        raise PushValidationError(Locale.CONTROL_RUN_EVENTS_INCONSISTENT)
-    try:
-        return tuple(ControlRunEvent.model_validate_json(str(row[1])) for row in rows)
-    except ValidationError as exc:
-        raise PushValidationError(Locale.CONTROL_RUN_EVENTS_INCONSISTENT) from exc
-
-
-def restore_archived_attempts(
-    runtime: RuntimeConfiguration,
-    *,
-    attempts_dir: Path | None = None,
-) -> ArchivedAttemptRecovery:
-    if attempts_dir is None:
-        attempts_dir = runtime.attempts_dir
-    attempts_dir.mkdir(parents=True, exist_ok=True)
-    attempt_dirs = tuple(
-        sorted(
-            (path for path in attempts_dir.iterdir() if path.is_dir() or path.is_symlink()),
-            key=lambda path: path.name,
-        )
-    )
-    restored_attempt_ids: list[str] = []
-    restored_accepted_attempt_ids: list[str] = []
-    skipped_attempt_ids: list[str] = []
-    invalid = 0
-    with DETOUR_DB_LOCK:
-        detour_conn = open_detour_database(runtime)
-        try:
-            detour_conn.execute(CREATE_ARCHIVED_ATTEMPTS_TABLE_SQL)
-            existing_attempt_ids = {
-                cast(str, row[0])
-                for row in detour_conn.execute(SELECT_ARCHIVED_ATTEMPT_IDS_SQL).fetchall()
-            }
-            for attempt_dir in attempt_dirs:
-                if attempt_dir.name in existing_attempt_ids:
-                    skipped_attempt_ids.append(attempt_dir.name)
-                    continue
-                transaction_started = False
-                try:
-                    manifest, manifest_text, replay = _archived_attempt_replay(attempt_dir)
-                    detour_conn.execute("BEGIN TRANSACTION")
-                    transaction_started = True
-                    execution = execute_attempt(detour_conn, runtime, replay)
-                    if (
-                        execution.stage != manifest.stage
-                        or execution.result != manifest.result
-                    ):
-                        raise PushValidationError(Locale.ARCHIVED_ATTEMPT_OUTCOME_MISMATCH)
-                    if not execution.commit_database:
-                        detour_conn.execute("ROLLBACK")
-                        transaction_started = False
-                        detour_conn.execute("BEGIN TRANSACTION")
-                        transaction_started = True
-                    detour_conn.execute(
-                        INSERT_ARCHIVED_ATTEMPT_SQL,
-                        [manifest.attempt_id, manifest_text],
-                    )
-                    detour_conn.execute("COMMIT")
-                    transaction_started = False
-                    restored_attempt_ids.append(manifest.attempt_id)
-                    if manifest.result == ATTEMPT_RESULT_ACCEPTED:
-                        restored_accepted_attempt_ids.append(manifest.attempt_id)
-                except Exception:
-                    if transaction_started:
-                        detour_conn.execute("ROLLBACK")
-                    invalid += 1
-        finally:
-            detour_conn.close()
-    return ArchivedAttemptRecovery(
-        discovered=len(attempt_dirs),
-        invalid=invalid,
-        restored_attempt_ids=tuple(restored_attempt_ids),
-        restored_accepted_attempt_ids=tuple(restored_accepted_attempt_ids),
-        skipped_attempt_ids=tuple(skipped_attempt_ids),
-    )
 
 
 def validate_transport(request: Request) -> None:
@@ -5095,124 +5178,477 @@ def pydantic_failure(exc: ValidationError) -> tuple[str | None, str, object]:
     return field, reason, failed_input
 
 
-def safely_record_attempt(
-    attempt_dir: Path | None,
-    attempt_id: str,
-    stage: str,
-    result: str,
-    *,
-    rollout_archive: ArchivedFile | None,
-    workbook_archive: ArchivedFile | None = None,
-    report_archive: ArchivedFile | None,
-    card_archive: ArchivedFile | None,
-    request: Request,
-    request_body: bytes,
-    response_code: int,
-    response_body: str,
-    started_ns: int,
-    http_request_log_archive: ArchivedFile | None = None,
-    run_id: UUID | None = None,
-    source_key: str | None = None,
-    session_id: str | None = None,
-    rollout_relative_path: PurePosixPath | None = None,
-) -> None:
-    """Best-effort archive and manifest recording during exception recovery.
-
-    An existing HTTP-log artifact is reused when available. Recording failures
-    are logged and suppressed so they do not replace the original API failure;
-    the canonical final-attempt path therefore does not use this helper.
-    """
-    if attempt_dir is None:
-        return
+def _active_control_run(
+    conn: duckdb.DuckDBPyConnection,
+) -> ControlRun | None:
+    rows = conn.execute(
+        f"SELECT {CONTROL_SANCTION_PAYLOAD_COLUMN} FROM {CONTROL_SANCTIONS_TABLE} "
+        f"WHERE {CONTROL_SANCTION_ACTIVE_COLUMN}"
+    ).fetchall()
+    if len(rows) > 1:
+        raise PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT)
+    if not rows:
+        return None
     try:
-        if http_request_log_archive is None:
-            http_request_log_archive = archive_http_request_log(
-                attempt_dir,
-                attempt_id,
-                request=request,
-                request_body=request_body,
-                response_code=response_code,
-                response_headers={
-                    HTTP_REQUEST_LOG_RESPONSE_CONTENT_TYPE_HEADER: (
-                        ATTEMPT_RESPONSE_CONTENT_TYPE[response_code]
-                    )
+        return ControlRun.model_validate_json(str(rows[0][0]))
+    except ValidationError as exc:
+        raise PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT) from exc
+
+
+def active_control_run(runtime: AiAugmentBackendContext) -> ControlRun:
+    with DETOUR_DB_LOCK:
+        conn = open_detour_database(runtime)
+        try:
+            sanction = _active_control_run(conn)
+        finally:
+            conn.close()
+    if sanction is None:
+        raise PushConfigurationError(Locale.CONTROL_SANCTION_MISSING)
+    return sanction
+
+
+def _control_events(conn: duckdb.DuckDBPyConnection) -> tuple[ControlRunEvent, ...]:
+    rows = conn.execute(SELECT_CONTROL_RUN_EVENTS_SQL).fetchall()
+    try:
+        return tuple(ControlRunEvent.model_validate_json(str(row[2])) for row in rows)
+    except ValidationError as exc:
+        raise PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT) from exc
+
+
+def _attempt_records(conn: duckdb.DuckDBPyConnection) -> tuple[AttemptRecord, ...]:
+    rows = conn.execute(
+        f"SELECT {CONTROL_ATTEMPT_RECORD_COLUMN} FROM {CONTROL_ATTEMPTS_TABLE} "
+        f"ORDER BY {ATTEMPT_ID_KEY}"
+    ).fetchall()
+    try:
+        return tuple(AttemptRecord.model_validate_json(str(row[0])) for row in rows)
+    except ValidationError as exc:
+        raise PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT) from exc
+
+
+def _attempt_by_transaction(
+    conn: duckdb.DuckDBPyConnection,
+    transaction_id: str,
+) -> AttemptRecord | None:
+    row = conn.execute(
+        f"SELECT {CONTROL_ATTEMPT_RECORD_COLUMN} FROM {CONTROL_ATTEMPTS_TABLE} "
+        f"WHERE {CONTROL_ATTEMPT_IDEMPOTENCY_KEY_COLUMN} = ?",
+        [transaction_id],
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        return AttemptRecord.model_validate_json(str(row[0]))
+    except ValidationError as exc:
+        raise PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT) from exc
+
+
+def _latest_attempt_for_run(
+    conn: duckdb.DuckDBPyConnection,
+    run_id: UUID,
+) -> AttemptRecord | None:
+    attempts = tuple(
+        attempt for attempt in _attempt_records(conn) if attempt.run_id == run_id
+    )
+    return attempts[-1] if attempts else None
+
+
+def _accepted_control_attempts(
+    conn: duckdb.DuckDBPyConnection,
+) -> tuple[ControlAcceptedAttempt, ...]:
+    exists = conn.execute(
+        "SELECT count(*) FROM information_schema.tables WHERE table_name = ?",
+        [CODEX_OUTPUT_ROWS_TABLE],
+    ).fetchone()
+    if exists is None or int(exists[0]) == 0:
+        return ()
+    value_columns = tuple(AI_AUGMENT_COLUMNS)
+    projection = ", ".join(
+        duckdb_quote_identifier(column)
+        for column in (
+            KTP_NAMEKEY_COL,
+            KTP_AI_AUGMENT_ATTEMPT_ID_COL,
+            KTP_AI_AUGMENT_SESSION_METADATA_COL,
+            *value_columns,
+            KTP_AI_AUGMENT_FOOTNOTES_COL,
+            KTP_AI_AUGMENT_FOOTNOTE_ARGUMENTS_COL,
+        )
+    )
+    rows = conn.execute(
+        f"SELECT {projection} FROM {CODEX_OUTPUT_ROWS_TABLE} "
+        f"ORDER BY {duckdb_quote_identifier(KTP_AI_AUGMENT_ATTEMPT_ID_COL)}"
+    ).fetchall()
+    accepted: list[ControlAcceptedAttempt] = []
+    for row in rows:
+        namekey, attempt_id, session_json, *remaining = row
+        values = remaining[: len(value_columns)]
+        footnotes, footnote_arguments = remaining[len(value_columns) :]
+        try:
+            session_metadata = CompactSessionMetadata.model_validate_json(str(session_json))
+        except ValidationError as exc:
+            raise PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT) from exc
+        accepted.append(
+            ControlAcceptedAttempt(
+                namekey=cast(str, namekey),
+                attempt_id=cast(str, attempt_id),
+                session_metadata=session_metadata,
+                values={
+                    column: None if value is None else str(value)
+                    for column, value in zip(value_columns, values, strict=True)
                 },
-                response_body=response_body,
-                started_ns=started_ns,
+                footnotes=None if footnotes is None else str(footnotes),
+                footnote_arguments=(
+                    None if footnote_arguments is None else str(footnote_arguments)
+                ),
             )
-        record_attempt(
-            attempt_dir,
-            attempt_id,
-            stage,
-            result,
+        )
+    return tuple(accepted)
+
+
+def _control_card_markdown(
+    runtime: AiAugmentBackendContext,
+    detour_conn: duckdb.DuckDBPyConnection,
+    *,
+    namekey: str,
+) -> str:
+    source_conn = open_source_database(runtime)
+    try:
+        source_researcher = load_source_researcher(
+            source_conn,
+            runtime.eligible_cohorts,
+            namekey=namekey,
+        )
+        cards = build_cards(
+            selected_card_outer_dict(
+                source_conn,
+                detour_conn,
+                researcher_context(source_researcher),
+            ),
+            total_draws=runtime.pipeline.total_draws,
+            intro=CARD_INTRODUCTION.format(
+                datetime.now(ZoneInfo(runtime.pipeline.timezone)).strftime(
+                    Locale.CARD_INTRO_DATE_FORMAT
+                )
+            ),
+            excluded_cols=CARD_EXCLUDED_COLUMNS,
+        )
+    finally:
+        source_conn.close()
+    if len(cards) != 1:
+        raise PushValidationError(Locale.RESEARCHER_CARD_COUNT_INVALID)
+    return next(iter(cards.values()))
+
+
+def _control_token_is_valid(request: Request) -> bool:
+    token = request.headers.get(CONTROL_RUN_EVENTS_TOKEN_HEADER, "")
+    return bool(CONTROL_RUN_EVENTS_TOKEN) and hmac.compare_digest(
+        token,
+        CONTROL_RUN_EVENTS_TOKEN,
+    )
+
+
+def _submission_transaction_id(run_id: UUID, request_sha256: str) -> str:
+    value = f"{run_id}{CUMULATIVE_KEY_SEPARATOR}{request_sha256}"
+    return hashlib.sha256(value.encode(TEXT_ENCODING)).hexdigest()
+
+
+def _capture_appendwatch_snapshot(configuration: PushConfiguration) -> str:
+    try:
+        return configuration.appendwatch_report.read_text(encoding=TEXT_ENCODING)
+    except (OSError, UnicodeError) as exc:
+        raise PushConfigurationError(Locale.APPENDWATCH_ARCHIVE_FAILED) from exc
+
+
+def _submission_outcome(execution: AttemptExecution) -> SubmissionCommitOutcome:
+    return SubmissionCommitOutcome(
+        stage=execution.stage,
+        result=execution.result,
+        response_code=execution.response_code,
+        response_headers={
+            HTTP_REQUEST_LOG_RESPONSE_CONTENT_TYPE_HEADER: ATTEMPT_RESPONSE_CONTENT_TYPE[
+                execution.response_code
+            ]
+        },
+        response_body=execution.response_body,
+        response_detail=execution.response_detail,
+        retry_submission_expected=execution.retry_submission_expected,
+        namekey=execution.namekey,
+        session_id=execution.session_id,
+    )
+
+
+def _configuration_submission_outcome(
+    *,
+    stage: str,
+    sanction: ControlRun,
+) -> SubmissionCommitOutcome:
+    return SubmissionCommitOutcome(
+        stage=stage,
+        result=ATTEMPT_RESULT_CONFIGURATION_ERROR,
+        response_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        response_headers={
+            HTTP_REQUEST_LOG_RESPONSE_CONTENT_TYPE_HEADER: JSON_MEDIA_TYPE,
+        },
+        response_body=http_error_response_body(Locale.CONFIGURATION_ERROR_DETAIL),
+        response_detail=Locale.CONFIGURATION_ERROR_DETAIL,
+        retry_submission_expected=False,
+        namekey=sanction.namekey,
+        session_id=sanction.session_id,
+    )
+
+
+def _preflight_submission(
+    runtime: AiAugmentBackendContext,
+    *,
+    sanction: ControlRun,
+    attempt_id: str,
+    attempt_timestamp: datetime,
+    rollout_archive: ArchivedFile,
+    rollout_relative_path: PurePosixPath,
+    appendwatch_snapshot: str,
+    request_body: bytes,
+) -> AttemptExecution:
+    with tempfile.TemporaryDirectory() as temporary_directory:
+        attempt_dir = Path(temporary_directory)
+        report_path = attempt_dir / APPENDWATCH_ARCHIVE_FILENAME_TEMPLATE.format(
+            attempt_id=attempt_id
+        )
+        report_path.write_text(appendwatch_snapshot, encoding=TEXT_ENCODING)
+        report_archive = _archived_file(report_path)
+        replay = AttemptReplayInput(
+            attempt_dir=attempt_dir,
+            attempt_id=attempt_id,
+            attempt_timestamp=attempt_timestamp,
             rollout_archive=rollout_archive,
-            workbook_archive=workbook_archive,
             report_archive=report_archive,
-            card_archive=card_archive,
-            http_request_log_archive=http_request_log_archive,
-            run_id=run_id,
-            source_key=source_key,
-            session_id=session_id,
             rollout_relative_path=rollout_relative_path,
+            request_body=request_body,
+            run_id=sanction.run_id,
+            namekey=sanction.namekey,
+            session_id=sanction.session_id,
+            validate_appendwatch=True,
+            materialize_files=False,
         )
-    except OSError, PushValidationError:
-        logger.exception(
-            Locale.ATTEMPT_RECORD_FAILED_LOG,
+        with DETOUR_DB_LOCK:
+            conn = open_detour_database(runtime)
+            conn.execute("BEGIN TRANSACTION")
+            try:
+                execution = execute_attempt(conn, runtime, replay)
+            finally:
+                conn.execute("ROLLBACK")
+                conn.close()
+    return execution
+
+
+def _log_attempt_execution(attempt_id: str, execution: AttemptExecution) -> None:
+    error = execution.error
+    if error is None:
+        logger.info(Locale.PUSH_ACCEPTED_LOG, attempt_id)
+    elif isinstance(error, ValidationError):
+        field, reason, failed_input = pydantic_failure(error)
+        logger.warning(
+            Locale.PUSH_PYDANTIC_FAILED_LOG,
             attempt_id,
-            stage,
-            result,
+            execution.stage,
+            field or Locale.UNKNOWN_FIELD,
+            failed_input,
+            reason,
+        )
+    elif isinstance(error, PushConfigurationError):
+        logger.error(
+            Locale.PUSH_CONFIGURATION_FAILED_LOG,
+            attempt_id,
+            execution.stage,
+            error,
+        )
+    elif isinstance(error, PushValidationError):
+        logger.warning(
+            Locale.PUSH_VALIDATION_FAILED_LOG,
+            attempt_id,
+            execution.stage,
+            error,
+        )
+    else:
+        logger.warning(
+            Locale.PUSH_UNEXPECTED_FAILED_LOG,
+            attempt_id,
+            execution.stage,
+            error,
         )
 
 
-@app.put(
-    CONTROL_RUN_EVENTS_PATH,
-    response_model=ControlRunEventsResponse,
+@app.post(
+    CONTROL_PUSH_PATH,
+    response_model=ControlPushResponse,
     include_in_schema=False,
 )
-def control_run_events(
-    request: Request,
-    payload: ControlRunEventsRequest,
-) -> ControlRunEventsResponse:
-    if not CONTROL_RUN_EVENTS_TOKEN or not hmac.compare_digest(
-        request.headers.get(CONTROL_RUN_EVENTS_TOKEN_HEADER, ""),
-        CONTROL_RUN_EVENTS_TOKEN,
-    ):
+def control_push(request: Request, payload: ControlPushRequest) -> ControlPushResponse:
+    if not _control_token_is_valid(request):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=Locale.CONTROL_RUN_EVENTS_FORBIDDEN,
         )
+    idempotency_key = request.headers.get(HTTP_IDEMPOTENCY_KEY_HEADER, "").strip()
+    if not idempotency_key:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=Locale.CONTROL_IDEMPOTENCY_KEY_REQUIRED,
+        )
     runtime = runtime_configuration()
-    restore_archived_attempts(runtime)
-    return ControlRunEventsResponse(
-        persisted=persist_control_run_events(runtime, payload.events)
-    )
+    with DETOUR_DB_LOCK:
+        conn = open_detour_database(runtime)
+        try:
+            existing = conn.execute(
+                f"SELECT {CONTROL_RUN_EVENT_PAYLOAD_COLUMN} "
+                f"FROM {CONTROL_RUN_EVENTS_TABLE} "
+                f"WHERE {CONTROL_RUN_EVENT_IDEMPOTENCY_KEY_COLUMN} = ?",
+                [idempotency_key],
+            ).fetchone()
+            if existing is not None:
+                try:
+                    stored = ControlRunEvent.model_validate_json(str(existing[0]))
+                except ValidationError as exc:
+                    raise HTTPException(
+                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                        detail=Locale.CONFIGURATION_ERROR_DETAIL,
+                    ) from exc
+                if stored != payload.event:
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail=Locale.CONTROL_IDEMPOTENCY_CONFLICT,
+                    )
+                return ControlPushResponse(accepted=True, duplicate=True)
+            if payload.event.kind is ControlRunEventKind.SANCTIONED:
+                if (
+                    payload.event.session_id is None
+                    or payload.event.rollout_jsonl is None
+                    or payload.event.namekey not in (runtime.eligible_cohorts or {})
+                ):
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                        detail=Locale.CONTROL_SANCTION_MALFORMED,
+                    )
+                active = _active_control_run(conn)
+                if active is not None and active.run_id != payload.event.run_id:
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail=Locale.CONTROL_SANCTION_ACTIVE,
+                    )
+        finally:
+            conn.close()
+    return ControlPushResponse(accepted=True, duplicate=False)
 
 
-# curl -N http://127.0.0.1:8000/pull
-@app.get(**PULL_ROUTE)
-def pull() -> StreamingResponse:
-    try:
-        runtime = runtime_configuration()
-        snapshot = sanctioned_snapshot()
-        push_configuration(snapshot.rollout_guest_path)
-        if snapshot.control_base_url is None:
-            lines = tuple(pull_lines())
-        else:
-            with WORKBOOK_STATE_LOCK:
-                if not WORKBOOK_INITIALIZED:
-                    raise PushConfigurationError(Locale.WORKBOOK_NOT_INITIALIZED)
-            assert snapshot.source_key is not None
-            source_conn = open_source_database(runtime)
-            try:
-                researcher = load_source_researcher(
-                    source_conn,
-                    runtime,
-                    source_key=snapshot.source_key,
+@app.get(
+    CONTROL_PULL_PATH,
+    response_model=ControlPullResponse,
+    include_in_schema=False,
+)
+def control_pull(
+    request: Request,
+    namekey: Annotated[
+        str | None,
+        Query(alias=KTP_NAMEKEY_COL),
+    ] = None,
+) -> ControlPullResponse:
+    if not _control_token_is_valid(request):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=Locale.CONTROL_RUN_EVENTS_FORBIDDEN,
+        )
+    if not AUTHORITATIVE_BACKEND_HEALTHY:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=Locale.CONFIGURATION_ERROR_DETAIL,
+        )
+    runtime = runtime_configuration()
+    with DETOUR_DB_LOCK:
+        conn = open_detour_database(runtime)
+        try:
+            return ControlPullResponse(
+                sanctioned_run=_active_control_run(conn),
+                events=_control_events(conn),
+                attempts=_attempt_records(conn),
+                accepted_attempts=_accepted_control_attempts(conn),
+                card_markdown=(
+                    None
+                    if namekey is None
+                    else _control_card_markdown(
+                        runtime,
+                        conn,
+                        namekey=namekey,
+                    )
+                ),
+            )
+        finally:
+            conn.close()
+
+
+@commit_app.put(
+    CONTROL_COMMIT_PATH,
+    response_model=ControlCommitResponse,
+)
+def control_commit(payload: SubmissionCommit) -> ControlCommitResponse:
+    runtime = runtime_configuration()
+    expected = _attempt_record_from_commit(payload)
+    with DETOUR_DB_LOCK:
+        conn = open_detour_database(runtime)
+        try:
+            existing = _attempt_by_transaction(conn, payload.transaction_id)
+            if existing is not None:
+                if existing != expected:
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail=Locale.CONTROL_COMMIT_REFUSED,
+                    )
+                return ControlCommitResponse(committed=True, duplicate=True)
+            if _active_control_run(conn) != payload.sanction:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=Locale.CONTROL_COMMIT_REFUSED,
                 )
-                lines = tuple(sanctioned_pull_lines(researcher))
+        finally:
+            conn.close()
+    return ControlCommitResponse(committed=True, duplicate=False)
+
+
+@app.get(**PULL_ROUTE)
+def authoritative_pull() -> StreamingResponse:
+    try:
+        if not AUTHORITATIVE_BACKEND_HEALTHY:
+            raise PushConfigurationError(Locale.REPLAY_PROJECTION_FAILED)
+        runtime = runtime_configuration()
+        sanction = active_control_run(runtime)
+        push_configuration(sanction.rollout_jsonl)
+        with DETOUR_DB_LOCK:
+            conn = open_detour_database(runtime)
+            try:
+                latest_attempt = _latest_attempt_for_run(conn, sanction.run_id)
             finally:
-                source_conn.close()
+                conn.close()
+        if latest_attempt is not None:
+            if latest_attempt.result == ATTEMPT_RESULT_CONFIGURATION_ERROR:
+                raise PushConfigurationError(Locale.REPLAY_COMMIT_INVALID)
+            if latest_attempt.result == ATTEMPT_RESULT_REJECTED:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail=(
+                        latest_attempt.response_detail or Locale.VALIDATION_ERROR_DETAIL
+                    ),
+                )
+        source_conn = open_source_database(runtime)
+        try:
+            researcher = load_source_researcher(
+                source_conn,
+                runtime.eligible_cohorts,
+                namekey=sanction.namekey,
+            )
+            lines = tuple(sanctioned_pull_lines(researcher))
+        finally:
+            source_conn.close()
         return StreamingResponse(iter(lines), media_type=MEDIA_TYPE)
+    except HTTPException:
+        raise
     except (PushConfigurationError, PushValidationError, OSError, duckdb.Error) as exc:
         logger.error(Locale.PULL_FAILED_LOG, exc)
         raise HTTPException(
@@ -5221,401 +5657,157 @@ def pull() -> StreamingResponse:
         ) from None
 
 
-# curl -N \
-#  -H 'Content-Type: application/json' \
-#  --data @submission.json \
-#  http://127.0.0.1:8000/push
 @app.post(**PUSH_ROUTE)
-async def push(request: Request) -> StreamingResponse:
-    started_ns = time.monotonic_ns()
+async def authoritative_push(request: Request) -> Response:
     attempt_timestamp = datetime.now(timezone.utc)
     attempt_id = new_attempt_id(attempt_timestamp)
-    attempt_dir: Path | None = None
-    rollout_archive: ArchivedFile | None = None
-    workbook_archive: ArchivedFile | None = None
-    report_archive: ArchivedFile | None = None
-    card_archive: ArchivedFile | None = None
-    http_request_log_archive: ArchivedFile | None = None
-    request_body = b""
-    snapshot: SanctionSnapshot | None = None
-    configuration: PushConfiguration | None = None
-    stage = ATTEMPT_STAGE_TRANSPORT
-
+    request_body = await request.body()
     try:
-        runtime = runtime_configuration()
-        attempt_dir = create_attempt(runtime.attempts_dir, attempt_id)
-        record_attempt(attempt_dir, attempt_id, stage, ATTEMPT_RESULT_PENDING)
-        request_body = await bounded_request_body(request)
         validate_transport(request)
-        stage = ATTEMPT_STAGE_CONFIGURATION
-        snapshot = sanctioned_snapshot()
-        configuration = push_configuration(snapshot.rollout_guest_path)
-        if snapshot.control_base_url is not None:
-            with WORKBOOK_STATE_LOCK:
-                if not WORKBOOK_INITIALIZED:
-                    raise PushConfigurationError(Locale.WORKBOOK_NOT_INITIALIZED)
-        record_attempt(
-            attempt_dir,
-            attempt_id,
-            stage,
-            ATTEMPT_RESULT_PENDING,
-            rollout_relative_path=configuration.rollout_relative_path,
-        )
-
-        stage = ATTEMPT_STAGE_ROLLOUT_COPY
-        record_attempt(
-            attempt_dir,
-            attempt_id,
-            stage,
-            ATTEMPT_RESULT_PENDING,
-            rollout_relative_path=configuration.rollout_relative_path,
-        )
-        rollout_archive = copy_rollout(configuration, attempt_dir, attempt_id)
-
-        if snapshot.control_base_url is not None:
-            stage = ATTEMPT_STAGE_WORKBOOK_COPY
-            record_attempt(
-                attempt_dir,
-                attempt_id,
-                stage,
-                ATTEMPT_RESULT_PENDING,
-                rollout_archive=rollout_archive,
-                rollout_relative_path=configuration.rollout_relative_path,
-            )
-            workbook_archive = copy_guest_workbook(configuration, attempt_dir, attempt_id)
-
-        stage = ATTEMPT_STAGE_APPENDWATCH_COPY
-        record_attempt(
-            attempt_dir,
-            attempt_id,
-            stage,
-            ATTEMPT_RESULT_PENDING,
-            rollout_archive=rollout_archive,
-            workbook_archive=workbook_archive,
-            rollout_relative_path=configuration.rollout_relative_path,
-        )
-        report_archive = copy_appendwatch_report(configuration, attempt_dir, attempt_id)
-
-        stage = ATTEMPT_STAGE_APPENDWATCH_VALIDATION
-        record_attempt(
-            attempt_dir,
-            attempt_id,
-            stage,
-            ATTEMPT_RESULT_PENDING,
-            rollout_archive=rollout_archive,
-            workbook_archive=workbook_archive,
-            report_archive=report_archive,
-            rollout_relative_path=configuration.rollout_relative_path,
-        )
-        replay = AttemptReplayInput(
-            attempt_dir=attempt_dir,
-            attempt_id=attempt_id,
-            attempt_timestamp=attempt_timestamp,
-            rollout_archive=rollout_archive,
-            report_archive=report_archive,
-            rollout_relative_path=configuration.rollout_relative_path,
-            request_body=request_body,
-            run_id=snapshot.run_id,
-            source_key=snapshot.source_key,
-            session_id=snapshot.session_id,
-            materialize_files=True,
-        )
-        with DETOUR_DB_LOCK:
-            detour_conn = open_detour_database(runtime)
-            transaction_started = False
-            execution: AttemptExecution | None = None
-            try:
-                detour_conn.execute(CREATE_ARCHIVED_ATTEMPTS_TABLE_SQL)
-                detour_conn.execute("BEGIN TRANSACTION")
-                transaction_started = True
-                execution = execute_attempt(detour_conn, runtime, replay)
-                stage = execution.stage
-                card_archive = execution.card_archive
-                if not execution.commit_database:
-                    detour_conn.execute("ROLLBACK")
-                    transaction_started = False
-                http_request_log_archive = archive_http_request_log(
-                    attempt_dir,
-                    attempt_id,
-                    request=request,
-                    request_body=request_body,
-                    response_code=execution.response_code,
-                    response_headers={
-                        HTTP_REQUEST_LOG_RESPONSE_CONTENT_TYPE_HEADER: (
-                            ATTEMPT_RESPONSE_CONTENT_TYPE[execution.response_code]
-                        )
-                    },
-                    response_body=execution.response_body,
-                    started_ns=started_ns,
-                )
-                manifest_text = record_attempt(
-                    attempt_dir,
-                    attempt_id,
-                    execution.stage,
-                    execution.result,
-                    rollout_archive=rollout_archive,
-                    workbook_archive=workbook_archive,
-                    report_archive=report_archive,
-                    card_archive=card_archive,
-                    http_request_log_archive=http_request_log_archive,
-                    run_id=snapshot.run_id,
-                    source_key=execution.source_key,
-                    session_id=execution.session_id,
-                    rollout_relative_path=configuration.rollout_relative_path,
-                )
-                if not execution.commit_database:
-                    detour_conn.execute("BEGIN TRANSACTION")
-                    transaction_started = True
-                detour_conn.execute(
-                    INSERT_ARCHIVED_ATTEMPT_SQL,
-                    [attempt_id, manifest_text],
-                )
-                detour_conn.execute("COMMIT")
-                transaction_started = False
-            except Exception:
-                if transaction_started:
-                    detour_conn.execute("ROLLBACK")
-                if execution is not None and execution.card_archive is not None:
-                    (attempt_dir / RESPONSE_FILENAME).unlink(missing_ok=True)
-                    execution.card_archive.path.unlink(missing_ok=True)
-                raise
-            finally:
-                detour_conn.close()
-
-        assert execution is not None
-        if execution.error is not None:
-            if isinstance(execution.error, PushConfigurationError):
-                logger.error(
-                    Locale.PUSH_CONFIGURATION_FAILED_LOG,
-                    attempt_id,
-                    execution.stage,
-                    execution.error,
-                )
-            elif isinstance(execution.error, MultipleEvidenceMatches):
-                logger.warning(
-                    Locale.PUSH_MULTIPLE_MATCHES_LOG,
-                    attempt_id,
-                    execution.stage,
-                    execution.error.excerpt,
-                )
-            elif isinstance(execution.error, ValidationError):
-                field, reason, failed_input = pydantic_failure(execution.error)
-                logger.warning(
-                    Locale.PUSH_PYDANTIC_FAILED_LOG,
-                    attempt_id,
-                    execution.stage,
-                    field or Locale.UNKNOWN_FIELD,
-                    failed_input,
-                    reason,
-                )
-            elif isinstance(execution.error, PushValidationError):
-                logger.warning(
-                    Locale.PUSH_VALIDATION_FAILED_LOG,
-                    attempt_id,
-                    execution.stage,
-                    execution.error,
-                )
-            else:
-                logger.warning(
-                    Locale.PUSH_UNEXPECTED_FAILED_LOG,
-                    attempt_id,
-                    execution.stage,
-                    execution.error,
-                )
-            assert execution.response_detail is not None
-            raise HTTPException(
-                status_code=execution.response_code,
-                detail=execution.response_detail,
-            )
-
-        consume_sanction(snapshot)
-        try:
-            acknowledge_sanction(snapshot, attempt_id)
-        except PushConfigurationError as exc:
-            logger.error(
-                Locale.CONTROL_ACKNOWLEDGEMENT_FAILED_LOG,
-                attempt_id,
-                exc,
-            )
-        logger.info(Locale.PUSH_ACCEPTED_LOG, attempt_id)
-        return StreamingResponse(iter(execution.response_lines), media_type=MEDIA_TYPE)
-    except PushConfigurationError as exc:
-        response_body = http_error_response_body(Locale.CONFIGURATION_ERROR_DETAIL)
-        safely_record_attempt(
-            attempt_dir,
-            attempt_id,
-            stage,
-            ATTEMPT_RESULT_CONFIGURATION_ERROR,
-            rollout_archive=rollout_archive,
-            workbook_archive=workbook_archive,
-            report_archive=report_archive,
-            card_archive=card_archive,
-            request=request,
-            request_body=request_body,
-            response_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            response_body=response_body,
-            started_ns=started_ns,
-            http_request_log_archive=http_request_log_archive,
-            run_id=None if snapshot is None else snapshot.run_id,
-            source_key=None if snapshot is None else snapshot.source_key,
-            session_id=None if snapshot is None else snapshot.session_id,
-            rollout_relative_path=(
-                None if configuration is None else configuration.rollout_relative_path
-            ),
-        )
-        logger.error(
-            Locale.PUSH_CONFIGURATION_FAILED_LOG,
-            attempt_id,
-            stage,
-            exc,
-        )
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=Locale.CONFIGURATION_ERROR_DETAIL,
-        ) from None
-    except MultipleEvidenceMatches as exc:
-        detail = Locale.MULTIPLE_MATCH_DETAIL_TEMPLATE.format(excerpt=exc.excerpt)
-        safely_record_attempt(
-            attempt_dir,
-            attempt_id,
-            stage,
-            ATTEMPT_RESULT_REJECTED,
-            rollout_archive=rollout_archive,
-            workbook_archive=workbook_archive,
-            report_archive=report_archive,
-            card_archive=card_archive,
-            request=request,
-            request_body=request_body,
-            response_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            response_body=http_error_response_body(detail),
-            started_ns=started_ns,
-            http_request_log_archive=http_request_log_archive,
-            run_id=None if snapshot is None else snapshot.run_id,
-            source_key=None if snapshot is None else snapshot.source_key,
-            session_id=None if snapshot is None else snapshot.session_id,
-            rollout_relative_path=(
-                None if configuration is None else configuration.rollout_relative_path
-            ),
-        )
-        logger.warning(
-            Locale.PUSH_MULTIPLE_MATCHES_LOG,
-            attempt_id,
-            stage,
-            exc.excerpt,
-        )
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=detail,
-        ) from None
-    except PushValidationError as exc:
-        detail = (
-            exc.public_detail
-            if isinstance(exc, EvidenceAssessmentError)
-            else Locale.VALIDATION_ERROR_DETAIL
-        )
-        safely_record_attempt(
-            attempt_dir,
-            attempt_id,
-            stage,
-            ATTEMPT_RESULT_REJECTED,
-            rollout_archive=rollout_archive,
-            workbook_archive=workbook_archive,
-            report_archive=report_archive,
-            card_archive=card_archive,
-            request=request,
-            request_body=request_body,
-            response_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            response_body=http_error_response_body(detail),
-            started_ns=started_ns,
-            http_request_log_archive=http_request_log_archive,
-            run_id=None if snapshot is None else snapshot.run_id,
-            source_key=None if snapshot is None else snapshot.source_key,
-            session_id=None if snapshot is None else snapshot.session_id,
-            rollout_relative_path=(
-                None if configuration is None else configuration.rollout_relative_path
-            ),
-        )
+        if len(request_body) > MAX_PUSH_BODY_BYTES:
+            raise PushValidationError(Locale.REQUEST_BODY_TOO_LARGE)
+        request_text = request_body.decode(TEXT_ENCODING)
+    except (PushValidationError, UnicodeDecodeError) as exc:
         logger.warning(
             Locale.PUSH_VALIDATION_FAILED_LOG,
             attempt_id,
-            stage,
+            ATTEMPT_STAGE_TRANSPORT,
             exc,
         )
-        raise HTTPException(
+        return JSONResponse(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=detail,
-        ) from None
+            content={"detail": Locale.VALIDATION_ERROR_DETAIL},
+        )
+
+    try:
+        runtime = runtime_configuration()
+        sanction = active_control_run(runtime)
+    except (PushConfigurationError, PushValidationError, duckdb.Error) as exc:
+        logger.error(
+            Locale.PUSH_CONFIGURATION_FAILED_LOG,
+            attempt_id,
+            ATTEMPT_STAGE_CONFIGURATION,
+            exc,
+        )
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={"detail": Locale.CONFIGURATION_ERROR_DETAIL},
+        )
+
+    request_sha256 = hashlib.sha256(request_body).hexdigest()
+    transaction_id = _submission_transaction_id(sanction.run_id, request_sha256)
+    with DETOUR_DB_LOCK:
+        conn = open_detour_database(runtime)
+        try:
+            existing = _attempt_by_transaction(conn, transaction_id)
+        finally:
+            conn.close()
+    if existing is not None:
+        return Response(
+            content=existing.response_body,
+            status_code=existing.response_code,
+            media_type=ATTEMPT_RESPONSE_CONTENT_TYPE[existing.response_code],
+            headers={HTTP_TRANSACTION_ID_HEADER: transaction_id},
+        )
+
+    stage = ATTEMPT_STAGE_CONFIGURATION
+    rollout_archive: ArchivedFile | None = None
+    rollout_reference: RolloutCasReference | None = None
+    appendwatch_snapshot: str | None = None
+    try:
+        configuration = push_configuration(sanction.rollout_jsonl)
+        stage = ATTEMPT_STAGE_ROLLOUT_COPY
+        rollout_archive = copy_rollout_to_cas(configuration, runtime)
+        rollout_reference = RolloutCasReference(
+            sha256=rollout_archive.sha256,
+            size=rollout_archive.size,
+            line_count=rollout_archive.line_count,
+            rollout_relative_path=str(configuration.rollout_relative_path),
+        )
+        stage = ATTEMPT_STAGE_APPENDWATCH_COPY
+        appendwatch_snapshot = _capture_appendwatch_snapshot(configuration)
+        stage = ATTEMPT_STAGE_APPENDWATCH_VALIDATION
+        execution = _preflight_submission(
+            runtime,
+            sanction=sanction,
+            attempt_id=attempt_id,
+            attempt_timestamp=attempt_timestamp,
+            rollout_archive=rollout_archive,
+            rollout_relative_path=configuration.rollout_relative_path,
+            appendwatch_snapshot=appendwatch_snapshot,
+            request_body=request_body,
+        )
+        _log_attempt_execution(attempt_id, execution)
+        outcome = _submission_outcome(execution)
+    except PushConfigurationError as exc:
+        logger.error(Locale.PUSH_CONFIGURATION_FAILED_LOG, attempt_id, stage, exc)
+        outcome = _configuration_submission_outcome(stage=stage, sanction=sanction)
+
+    commit = SubmissionCommit(
+        transaction_id=transaction_id,
+        attempt_id=attempt_id,
+        attempt_timestamp=attempt_timestamp,
+        sanction=sanction,
+        public_request_body=request_text,
+        public_request_sha256=request_sha256,
+        appendwatch_snapshot=appendwatch_snapshot,
+        rollout=rollout_reference,
+        outcome=outcome,
+    )
+    transport = httpx.ASGITransport(app=commit_app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url=INTERNAL_COMMIT_BASE_URL,
+    ) as client:
+        commit_response = await client.put(
+            CONTROL_COMMIT_PATH,
+            content=commit.model_dump_json(),
+            headers={
+                HTTP_CONTENT_TYPE_HEADER: JSON_MEDIA_TYPE,
+                HTTP_IDEMPOTENCY_KEY_HEADER: transaction_id,
+            },
+        )
+    if commit_response.status_code != status.HTTP_200_OK or not AUTHORITATIVE_BACKEND_HEALTHY:
+        logger.error(
+            Locale.CONTROL_COMMIT_FAILED_LOG,
+            attempt_id,
+            commit_response.status_code,
+            commit_response.text,
+        )
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={"detail": Locale.CONFIGURATION_ERROR_DETAIL},
+        )
+    try:
+        committed = ControlCommitResponse.model_validate_json(commit_response.content)
     except ValidationError as exc:
-        field, reason, failed_input = pydantic_failure(exc)
-        detail = Locale.VALIDATION_ERROR_DETAIL
-        safely_record_attempt(
-            attempt_dir,
+        logger.error(
+            Locale.CONTROL_COMMIT_FAILED_LOG,
             attempt_id,
-            stage,
-            ATTEMPT_RESULT_REJECTED,
-            rollout_archive=rollout_archive,
-            workbook_archive=workbook_archive,
-            report_archive=report_archive,
-            card_archive=card_archive,
-            request=request,
-            request_body=request_body,
-            response_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            response_body=http_error_response_body(detail),
-            started_ns=started_ns,
-            http_request_log_archive=http_request_log_archive,
-            run_id=None if snapshot is None else snapshot.run_id,
-            source_key=None if snapshot is None else snapshot.source_key,
-            session_id=None if snapshot is None else snapshot.session_id,
-            rollout_relative_path=(
-                None if configuration is None else configuration.rollout_relative_path
-            ),
-        )
-        logger.warning(
-            Locale.PUSH_PYDANTIC_FAILED_LOG,
-            attempt_id,
-            stage,
-            field or Locale.UNKNOWN_FIELD,
-            failed_input,
-            reason,
-        )
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=detail,
-        ) from None
-    except (OSError, ValueError, duckdb.Error, subprocess.SubprocessError) as exc:
-        detail = Locale.VALIDATION_ERROR_DETAIL
-        safely_record_attempt(
-            attempt_dir,
-            attempt_id,
-            stage,
-            ATTEMPT_RESULT_REJECTED,
-            rollout_archive=rollout_archive,
-            workbook_archive=workbook_archive,
-            report_archive=report_archive,
-            card_archive=card_archive,
-            request=request,
-            request_body=request_body,
-            response_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            response_body=http_error_response_body(detail),
-            started_ns=started_ns,
-            http_request_log_archive=http_request_log_archive,
-            run_id=None if snapshot is None else snapshot.run_id,
-            source_key=None if snapshot is None else snapshot.source_key,
-            session_id=None if snapshot is None else snapshot.session_id,
-            rollout_relative_path=(
-                None if configuration is None else configuration.rollout_relative_path
-            ),
-        )
-        logger.warning(
-            Locale.PUSH_UNEXPECTED_FAILED_LOG,
-            attempt_id,
-            stage,
+            commit_response.status_code,
             exc,
         )
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=detail,
-        ) from None
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={"detail": Locale.CONFIGURATION_ERROR_DETAIL},
+        )
+    if not committed.committed:
+        logger.error(
+            Locale.CONTROL_COMMIT_FAILED_LOG,
+            attempt_id,
+            commit_response.status_code,
+            commit_response.text,
+        )
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={"detail": Locale.CONFIGURATION_ERROR_DETAIL},
+        )
+    return Response(
+        content=outcome.response_body,
+        status_code=outcome.response_code,
+        media_type=outcome.response_headers[HTTP_REQUEST_LOG_RESPONSE_CONTENT_TYPE_HEADER],
+        headers={HTTP_TRANSACTION_ID_HEADER: transaction_id},
+    )
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

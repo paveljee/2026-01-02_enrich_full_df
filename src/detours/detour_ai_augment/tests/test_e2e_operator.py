@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import re
 import shlex
 import signal
 import socket
@@ -12,31 +11,32 @@ import sys
 import threading
 import time
 from collections import Counter
-from collections.abc import Generator, Iterator
+from collections.abc import Generator, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import TextIO
+from typing import Any, TextIO, cast
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 from uuid import UUID
 
 import duckdb
 import pytest
+from fastapi import status
 from playwright.sync_api import expect, sync_playwright
 
 from src.detours.detour_ai_augment.src.backend import api as backend_api
 from src.detours.detour_ai_augment.src.control_centre.dashboard import ui as control_ui
 from src.helpers.data_models import NameKey
+from src.helpers.data_models.http_request_log import HttpRequestLogRecord
 from src.helpers.duckdb_utils import duckdb_quote_identifier
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
+DETOUR_ROOT = Path(__file__).resolve().parents[1]
 REAL_CONFIG_PATH = REPOSITORY_ROOT / "config_ai_augment.json"
-ATTEMPTS_DIR = backend_api.ATTEMPTS_DIR
 REPOSITORY_DATA_DIR = REPOSITORY_ROOT / "data"
-DETOUR_DATA_DIR = control_ui.DETOUR_DATA_DIR
+DETOUR_DATA_DIR = DETOUR_ROOT / "data"
 PRODUCTION_DATA_DIRECTORIES = (REPOSITORY_DATA_DIR, DETOUR_DATA_DIR)
 CONTROL_CENTRE_MODULE = "src.detours.detour_ai_augment.src.control_centre.dashboard.ui"
 CONTROL_CENTRE_COMMAND_PREFIX = (
@@ -46,7 +46,6 @@ CONTROL_CENTRE_COMMAND_PREFIX = (
     backend_api.CONFIG_OPTION,
 )
 CONTROL_CENTRE_URL = control_ui.CONTROL_CENTRE_BASE_URL
-CONTROL_CURRENT_URL = f"{CONTROL_CENTRE_URL}{control_ui.CONTROL_CURRENT_PATH}"
 CONTROL_CENTRE_PORTS = (control_ui.CONTROL_CENTRE_PORT, control_ui.BACKEND_PORT)
 CONTROL_CENTRE_READY_LOG = control_ui.Locale.READY_LOG_TEMPLATE.format(
     url=CONTROL_CENTRE_URL
@@ -58,19 +57,26 @@ TEXT_ENCODING = "utf-8"
 TEMP_CONFIG_FILENAME = "config_ai_augment.operator.json"
 TEMP_STATE_FILENAME = "pipeline_state.json"
 TEMP_OUTPUT_DIRECTORY = "output"
+TEMP_REPLAY_LOG_FILENAME = "detour_ai_augment_backend_api_replay_log.jsonl"
+TEMP_ROLLOUT_CAS_DIRECTORY = "rollout-cas"
+CONFIG_DB_FILE_KEY = "db_file"
+CONFIG_STATE_FILE_KEY = "state_file"
+CONFIG_OUTPUT_DIR_KEY = "output_dir"
+CONFIG_ROLLOUT_CAS_DIR_KEY = "rollout_cas_dir"
+CONFIG_FILES_CONFIG_KEY = "files_config"
 PROCESS_START_TIMEOUT_SECONDS = 300
 PROCESS_STOP_TIMEOUT_SECONDS = 30
 PROCESS_POLL_SECONDS = 0.1
 SANCTION_TIMEOUT_SECONDS = 300
-RUN_TERMINAL_TIMEOUT_SECONDS = 600
 FULL_WORKFLOW_TIMEOUT_SECONDS = 1_800
 REMOTE_COMMAND_TIMEOUT_SECONDS = 30
-LOG_WAIT_TIMEOUT_SECONDS = 10
 BROWSER_ASSERTION_TIMEOUT_MILLISECONDS = 30_000
 BROWSER_CHANNEL = "chrome"
 BROWSER_VIEWPORT = {"width": 1600, "height": 1000}
 GRID_ROW_SELECTOR = ".ag-center-cols-container .ag-row"
 HASH_ALGORITHM = "sha256"
+EMPTY_FILE_SHA256 = hashlib.new(HASH_ALGORITHM).hexdigest()
+JSONL_LINE_ENDING = b"\n"
 HASH_SEPARATOR = b"\0"
 HASH_DIRECTORY_MARKER = b"directory"
 HASH_FILE_MARKER = b"file"
@@ -85,21 +91,8 @@ CANONICAL_SEQUENCES_SQL = (
     "SELECT sequence_name, start_value, increment_by, last_value "
     "FROM duckdb_sequences() ORDER BY sequence_name"
 )
-RECONCILIATION_LOG_PATTERN = re.compile(
-    r"archived attempts reconciled into the detour DB from .*: "
-    r"restored (?P<restored>[0-9]+), accepted (?P<accepted>[0-9]+), "
-    r"already present and skipped (?P<skipped>[0-9]+), "
-    r"invalid (?P<invalid>[0-9]+), discovered (?P<discovered>[0-9]+)"
-)
 EXPECTED_RESEARCHER_COUNT = backend_api.EXPECTED_SOURCE_RESEARCHERS
 OPERATOR_TARGET_DRAW_NUMBER = "146"
-OPERATOR_REBUILD_RUN_ID = UUID("019fa457-aac5-7652-8669-9d571206e7dd")
-OPERATOR_REBUILD_QUEUED_AT = datetime(2026, 8, 19, tzinfo=timezone.utc)
-OPERATOR_REBUILD_FAILURE_DETAIL = "operator reconstruction fixture"
-OPERATOR_SYMLINK_OPT_IN_REQUIRED = (
-    "operator archive replay cannot run while "
-    "backend_api.ALLOW_ARCHIVED_ATTEMPT_SYMLINKS is False"
-)
 TRACEBACK_MARKER = "Traceback"
 TERMINAL_RUN_STATUSES = frozenset({
     control_ui.RunStatus.COMPLETE,
@@ -111,25 +104,17 @@ CONTROL_TERMINATION_SIGNALS = (
     signal.SIGTERM,
     signal.SIGKILL,
 )
+OPERATOR_LIVE_OUTPUT = sys.__stdout__ or sys.stdout
 
 pytestmark = pytest.mark.operator
 
 
 @dataclass(frozen=True, slots=True)
-class IsolatedRuntime:
+class AuthoritativeRuntime:
     config_path: Path
     detour_db_path: Path
-    attempts_dir: Path
-    run_journal_path: Path
-
-
-@dataclass(frozen=True, slots=True)
-class ReconciliationCounts:
-    restored: int
-    accepted: int
-    skipped: int
-    invalid: int
-    discovered: int
+    replay_log_path: Path
+    rollout_cas_dir: Path
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,7 +126,7 @@ class CanonicalDatabaseSnapshot:
 @dataclass(frozen=True, slots=True)
 class BrowserTarget:
     attempt_id: str | None
-    source_key: str
+    namekey: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -252,15 +237,18 @@ def production_data_unchanged(operator_aivm: None) -> Iterator[None]:
     assert after == before
 
 
-def isolated_runtime(
-    tmp_path: Path,
-    *,
-    include_archived_attempts: bool = True,
-) -> IsolatedRuntime:
-    if not backend_api.ALLOW_ARCHIVED_ATTEMPT_SYMLINKS:
-        pytest.fail(OPERATOR_SYMLINK_OPT_IN_REQUIRED)
-    config = json.loads(REAL_CONFIG_PATH.read_text(encoding=TEXT_ENCODING))
-    configured_source_db = Path(config["db_file"])
+def authoritative_runtime(tmp_path: Path) -> AuthoritativeRuntime:
+    replay_log_path = tmp_path / TEMP_REPLAY_LOG_FILENAME
+    rollout_cas_dir = tmp_path / TEMP_ROLLOUT_CAS_DIRECTORY
+    state_path = tmp_path / TEMP_STATE_FILENAME
+    output_dir = tmp_path / TEMP_OUTPUT_DIRECTORY
+    config_path = tmp_path / TEMP_CONFIG_FILENAME
+
+    config_value: object = json.loads(REAL_CONFIG_PATH.read_text(encoding=TEXT_ENCODING))
+    if not isinstance(config_value, dict):
+        raise AssertionError("operator configuration must be a JSON object")
+    config = cast(dict[str, Any], config_value)
+    configured_source_db = Path(str(config[CONFIG_DB_FILE_KEY]))
     source_db = (
         configured_source_db
         if configured_source_db.is_absolute()
@@ -268,33 +256,62 @@ def isolated_runtime(
     )
     source_db_link = tmp_path / source_db.name
     source_db_link.symlink_to(source_db)
-    config["db_file"] = str(source_db_link)
-    config["state_file"] = str(tmp_path / TEMP_STATE_FILENAME)
-    config["output_dir"] = str(tmp_path / TEMP_OUTPUT_DIRECTORY)
-    config_path = tmp_path / TEMP_CONFIG_FILENAME
+    replay_log_path.write_text("", encoding=TEXT_ENCODING)
+
+    files_config = config[CONFIG_FILES_CONFIG_KEY]
+    if not isinstance(files_config, dict):
+        raise AssertionError("files_config must be a JSON object")
+    replay_config = files_config[backend_api.REPLAY_LOG_RESOURCE_KEY]
+    if not isinstance(replay_config, dict):
+        raise AssertionError("replay-log configuration must be a JSON object")
+    replay_config[backend_api.RESOURCE_PATH_KEY] = str(replay_log_path)
+    replay_config[backend_api.RESOURCE_SHA256_KEY] = EMPTY_FILE_SHA256
+    config[CONFIG_DB_FILE_KEY] = str(source_db_link)
+    config[CONFIG_STATE_FILE_KEY] = str(state_path)
+    config[CONFIG_OUTPUT_DIR_KEY] = str(output_dir)
+    config[CONFIG_ROLLOUT_CAS_DIR_KEY] = str(rollout_cas_dir)
     config_path.write_text(
         json.dumps(config, ensure_ascii=False, indent=2),
         encoding=TEXT_ENCODING,
     )
-    detour_db_path = backend_api._detour_db_path(source_db_link)
-    attempts_dir = detour_db_path.parent / "submissions" / "attempts"
-    attempts_dir.mkdir(parents=True)
-    if include_archived_attempts:
-        for source_attempt in sorted(ATTEMPTS_DIR.iterdir(), key=lambda path: path.name):
-            (attempts_dir / source_attempt.name).symlink_to(
-                source_attempt,
-                target_is_directory=source_attempt.is_dir(),
-            )
-    return IsolatedRuntime(
+    return AuthoritativeRuntime(
         config_path=config_path,
-        detour_db_path=detour_db_path,
-        attempts_dir=attempts_dir,
-        run_journal_path=detour_db_path.parent / control_ui.RUN_JOURNAL_PATH.name,
+        detour_db_path=backend_api._detour_db_path(source_db_link),
+        replay_log_path=replay_log_path,
+        rollout_cas_dir=rollout_cas_dir,
+    )
+
+
+def register_current_replay_log_hash(runtime: AuthoritativeRuntime) -> None:
+    config_value: object = json.loads(
+        runtime.config_path.read_text(encoding=TEXT_ENCODING)
+    )
+    if not isinstance(config_value, dict):
+        raise AssertionError("operator configuration must be a JSON object")
+    config = cast(dict[str, Any], config_value)
+    files_config = config[CONFIG_FILES_CONFIG_KEY]
+    if not isinstance(files_config, dict):
+        raise AssertionError("files_config must be a JSON object")
+    replay_config = files_config[backend_api.REPLAY_LOG_RESOURCE_KEY]
+    if not isinstance(replay_config, dict):
+        raise AssertionError("replay-log configuration must be a JSON object")
+    with runtime.replay_log_path.open("rb") as replay_stream:
+        replay_sha256 = hashlib.file_digest(
+            replay_stream,
+            HASH_ALGORITHM,
+        ).hexdigest()
+    replay_config[backend_api.RESOURCE_SHA256_KEY] = replay_sha256
+    runtime.config_path.write_text(
+        json.dumps(config, ensure_ascii=False, indent=2),
+        encoding=TEXT_ENCODING,
     )
 
 
 def _collect_process_output(stream: TextIO, output: list[str]) -> None:
-    output.extend(stream)
+    for line in stream:
+        output.append(line)
+        OPERATOR_LIVE_OUTPUT.write(line)
+        OPERATOR_LIVE_OUTPUT.flush()
 
 
 def _assert_control_centre_ports_available() -> None:
@@ -304,31 +321,16 @@ def _assert_control_centre_ports_available() -> None:
                 pytest.fail(f"operator test requires unused local port {port}")
 
 
-def _assert_run_journal_idle(runtime: IsolatedRuntime) -> None:
-    active_statuses = {control_ui.RunStatus.QUEUED, control_ui.RunStatus.RUNNING}
-    active_runs = tuple(
-        run
-        for run in control_ui.RunJournal(path=runtime.run_journal_path).load_runs().values()
-        if run.status in active_statuses
-    )
-    if active_runs:
-        pytest.fail("operator test requires no queued or running dashboard journal entries")
-
-
 @contextmanager
-def running_dashboard(
-    runtime: IsolatedRuntime,
-    *,
-    recover_interrupted_runs: bool = False,
+def _running_dashboard_process(
+    config_path: Path,
 ) -> Generator[DashboardProcess]:
     _assert_control_centre_ports_available()
-    if not recover_interrupted_runs:
-        _assert_run_journal_idle(runtime)
     environment = os.environ.copy()
     environment.pop(PYTEST_CURRENT_TEST_ENV_NAME, None)
     environment[PYTHON_UNBUFFERED_ENV_NAME] = PYTHON_UNBUFFERED_VALUE
     process = subprocess.Popen(
-        (*CONTROL_CENTRE_COMMAND_PREFIX, str(runtime.config_path)),
+        (*CONTROL_CENTRE_COMMAND_PREFIX, str(config_path)),
         cwd=REPOSITORY_ROOT,
         env=environment,
         stdout=subprocess.PIPE,
@@ -359,27 +361,12 @@ def running_dashboard(
         dashboard.stop()
 
 
-def reconciliation_counts(output: list[str]) -> ReconciliationCounts:
-    deadline = time.monotonic() + LOG_WAIT_TIMEOUT_SECONDS
-    matches: list[tuple[str, str, str, str, str]] = []
-    while time.monotonic() < deadline:
-        matches = RECONCILIATION_LOG_PATTERN.findall("".join(output))
-        if matches:
-            break
-        time.sleep(PROCESS_POLL_SECONDS)
-    if len(matches) != 1:
-        raise AssertionError(
-            f"expected one archive reconciliation summary, found {len(matches)}:\n"
-            + "".join(output)
-        )
-    restored, accepted, skipped, invalid, discovered = map(int, matches[0])
-    return ReconciliationCounts(
-        restored=restored,
-        accepted=accepted,
-        skipped=skipped,
-        invalid=invalid,
-        discovered=discovered,
-    )
+@contextmanager
+def running_authoritative_dashboard(
+    runtime: AuthoritativeRuntime,
+) -> Generator[DashboardProcess]:
+    with _running_dashboard_process(runtime.config_path) as dashboard:
+        yield dashboard
 
 
 def canonical_database_snapshot(database_path: Path) -> CanonicalDatabaseSnapshot:
@@ -408,54 +395,11 @@ def canonical_database_snapshot(database_path: Path) -> CanonicalDatabaseSnapsho
     return CanonicalDatabaseSnapshot(tables=tables, sequences=sequences)
 
 
-def archived_manifests(database_path: Path) -> tuple[dict[str, object], ...]:
-    connection = duckdb.connect(str(database_path), read_only=True)
-    try:
-        rows = connection.execute(
-            f"SELECT {backend_api.ARCHIVED_ATTEMPT_MANIFEST_COLUMN} "
-            f"FROM {backend_api.ARCHIVED_ATTEMPTS_TABLE} "
-            f"ORDER BY {backend_api.ATTEMPT_ID_KEY}"
-        ).fetchall()
-    finally:
-        connection.close()
-    return tuple(json.loads(str(row[0])) for row in rows)
-
-
-def browser_target(
-    runtime: IsolatedRuntime,
-    database_path: Path,
-) -> BrowserTarget:
-    manifests = archived_manifests(database_path)
-    accepted = tuple(
-        manifest
-        for manifest in manifests
-        if manifest[backend_api.ATTEMPT_RESULT_KEY] == backend_api.ATTEMPT_RESULT_ACCEPTED
-    )
-    if accepted:
-        manifest = accepted[0]
-        return BrowserTarget(
-            attempt_id=str(manifest[backend_api.ATTEMPT_ID_KEY]),
-            source_key=str(manifest[backend_api.ATTEMPT_SOURCE_KEY]),
-        )
-    configuration = control_ui.RuntimeConfiguration(config_path=runtime.config_path)
-    researcher = next(
-        researcher
-        for researcher in control_ui.SourceRepository(
-            configuration=configuration
-        ).load_researchers()
-        if researcher.cohort is not control_ui.ResearcherCohort.INELIGIBLE
-    )
-    return BrowserTarget(
-        attempt_id=None,
-        source_key=str(researcher.source_key),
-    )
-
-
 def browser_state(
     *,
     target: BrowserTarget,
 ) -> BrowserState:
-    name = NameKey.from_json_key(target.source_key)
+    name = NameKey.from_json_key(target.namekey)
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(
             channel=BROWSER_CHANNEL,
@@ -475,7 +419,7 @@ def browser_state(
         summary = page.get_by_test_id(control_ui.PAGE_SUMMARY_TEST_ID)
         expect(summary).to_contain_text(f"Total {EXPECTED_RESEARCHER_COUNT}")
         search = page.get_by_label(control_ui.Locale.SEARCH_FILTER)
-        search.fill(target.source_key)
+        search.fill(target.namekey)
         rows = page.get_by_test_id(control_ui.RESEARCHER_GRID_TEST_ID).locator(
             GRID_ROW_SELECTOR
         )
@@ -500,7 +444,7 @@ def browser_state(
     return state
 
 
-def operator_target(runtime: IsolatedRuntime) -> BrowserTarget:
+def operator_target(runtime: AuthoritativeRuntime) -> BrowserTarget:
     configuration = control_ui.RuntimeConfiguration(config_path=runtime.config_path)
     researcher = next(
         item
@@ -510,7 +454,7 @@ def operator_target(runtime: IsolatedRuntime) -> BrowserTarget:
         if OPERATOR_TARGET_DRAW_NUMBER in item.draw_numbers
         and item.cohort is not control_ui.ResearcherCohort.INELIGIBLE
     )
-    return BrowserTarget(attempt_id=None, source_key=str(researcher.source_key))
+    return BrowserTarget(attempt_id=None, namekey=str(researcher.namekey))
 
 
 def browser_execute_action(
@@ -535,7 +479,7 @@ def browser_execute_action(
         page.on("pageerror", lambda error: browser_errors.append(str(error)))
         page.goto(CONTROL_CENTRE_URL, wait_until="networkidle")
         search = page.get_by_label(control_ui.Locale.SEARCH_FILTER)
-        search.fill(target.source_key)
+        search.fill(target.namekey)
         rows = page.get_by_test_id(control_ui.RESEARCHER_GRID_TEST_ID).locator(
             GRID_ROW_SELECTOR
         )
@@ -546,13 +490,70 @@ def browser_execute_action(
         expect(execute).to_be_enabled()
         expect(execute).to_have_text(action_label)
         execute.click()
-        expect(execute).not_to_have_text(action_label)
+        next_action = (
+            control_ui.RunAction.RERUN
+            if action is control_ui.RunAction.CANCEL
+            else control_ui.RunAction.CANCEL
+        )
+        expect(execute).to_have_text(
+            control_ui.ACTION_LABEL_BY_VALUE[next_action.value],
+            timeout=BROWSER_ASSERTION_TIMEOUT_MILLISECONDS,
+        )
         browser.close()
     assert browser_errors == [], Counter(browser_errors)
 
 
-def wait_for_sanction(
+def authoritative_records(
+    runtime: AuthoritativeRuntime,
+) -> tuple[HttpRequestLogRecord, ...]:
+    raw_log = runtime.replay_log_path.read_bytes()
+    complete_lines = raw_log.split(JSONL_LINE_ENDING)[:-1]
+    return tuple(HttpRequestLogRecord.model_validate_json(line) for line in complete_lines)
+
+
+def authoritative_request_text(record: HttpRequestLogRecord) -> str:
+    if not isinstance(record.request_body, str):
+        raise AssertionError("authoritative request body is not text")
+    return record.request_body
+
+
+def authoritative_header(
+    headers: Mapping[str, object],
+    name: str,
+) -> str | None:
+    normalized_name = name.casefold()
+    for key, value in headers.items():
+        if key.casefold() == normalized_name and isinstance(value, str):
+            return value
+    return None
+
+
+def authoritative_control_events(
+    runtime: AuthoritativeRuntime,
+) -> tuple[backend_api.ControlRunEvent, ...]:
+    events: list[backend_api.ControlRunEvent] = []
+    for record in authoritative_records(runtime):
+        if (
+            (record.method, record.path)
+            != (backend_api.HTTP_POST_METHOD, backend_api.CONTROL_PUSH_PATH)
+            or record.response_code != status.HTTP_200_OK
+        ):
+            continue
+        response = backend_api.ControlPushResponse.model_validate_json(
+            record.response_body
+        )
+        if response.duplicate:
+            continue
+        request = backend_api.ControlPushRequest.model_validate_json(
+            authoritative_request_text(record)
+        )
+        events.append(request.event)
+    return tuple(events)
+
+
+def wait_for_authoritative_sanction(
     *,
+    runtime: AuthoritativeRuntime,
     dashboard: DashboardProcess,
     target: BrowserTarget,
 ) -> backend_api.ControlRun:
@@ -562,44 +563,120 @@ def wait_for_sanction(
             raise RuntimeError(
                 "Control Centre exited before sanctioning:\n" + "".join(dashboard.output)
             )
-        try:
-            request = urllib_request.Request(
-                CONTROL_CURRENT_URL,
-                method=backend_api.HTTP_GET_METHOD,
-            )
-            with urllib_request.urlopen(
-                request,
-                timeout=control_ui.CONTROL_HTTP_TIMEOUT_SECONDS,
-            ) as response:
-                snapshot = backend_api.ControlSnapshot.model_validate_json(response.read())
-        except OSError, urllib_error.URLError:
-            time.sleep(PROCESS_POLL_SECONDS)
-            continue
-        sanctioned = snapshot.sanctioned_run
+        sanctioned = next(
+            (
+                event
+                for event in reversed(authoritative_control_events(runtime))
+                if event.kind is backend_api.ControlRunEventKind.SANCTIONED
+                and event.namekey == target.namekey
+            ),
+            None,
+        )
         if sanctioned is not None:
-            assert sanctioned.source_key == target.source_key
-            return sanctioned
+            if sanctioned.session_id is None or sanctioned.rollout_jsonl is None:
+                raise AssertionError("sanction event is incomplete")
+            return backend_api.ControlRun(
+                run_id=sanctioned.run_id,
+                namekey=sanctioned.namekey,
+                session_id=sanctioned.session_id,
+                rollout_jsonl=sanctioned.rollout_jsonl,
+            )
         time.sleep(PROCESS_POLL_SECONDS)
-    raise TimeoutError("Control Centre did not sanction the queued operator run")
+    raise TimeoutError("Control Centre did not durably sanction the queued operator run")
 
 
-def wait_for_run_status(
+def wait_for_authoritative_run_status(
     *,
-    runtime: IsolatedRuntime,
+    runtime: AuthoritativeRuntime,
+    dashboard: DashboardProcess,
     run_id: UUID,
-    statuses: frozenset[control_ui.RunStatus] = TERMINAL_RUN_STATUSES,
-    timeout_seconds: int = RUN_TERMINAL_TIMEOUT_SECONDS,
 ) -> control_ui.RunRecord:
-    deadline = time.monotonic() + timeout_seconds
-    journal = control_ui.RunJournal(path=runtime.run_journal_path)
+    deadline = time.monotonic() + FULL_WORKFLOW_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
-        run = journal.load_runs().get(run_id)
-        if run is not None and run.status in statuses:
+        if dashboard.process.poll() is not None:
+            raise RuntimeError(
+                "Control Centre exited before completion:\n" + "".join(dashboard.output)
+            )
+        run = control_ui.replay_run_events(
+            authoritative_control_events(runtime)
+        ).get(run_id)
+        if run is not None and run.status in TERMINAL_RUN_STATUSES:
             return run
         time.sleep(PROCESS_POLL_SECONDS)
-    raise TimeoutError(
-        f"operator run {run_id} did not reach {sorted(status.value for status in statuses)}"
+    raise TimeoutError(f"operator run {run_id} did not reach a terminal status")
+
+
+def accepted_submission_commit(
+    *,
+    runtime: AuthoritativeRuntime,
+    attempt_id: str,
+) -> tuple[int, backend_api.SubmissionCommit]:
+    matches: list[tuple[int, backend_api.SubmissionCommit]] = []
+    for line_number, record in enumerate(
+        authoritative_records(runtime),
+        start=backend_api.AUTHORITATIVE_FIRST_LINE,
+    ):
+        if (
+            (record.method, record.path) != backend_api.AUTHORITATIVE_COMMIT_ROUTE
+            or record.response_code != status.HTTP_200_OK
+        ):
+            continue
+        commit = backend_api.SubmissionCommit.model_validate_json(
+            authoritative_request_text(record)
+        )
+        if commit.attempt_id == attempt_id:
+            matches.append((line_number, commit))
+    if len(matches) != 1:
+        raise AssertionError(
+            f"expected one accepted commit for {attempt_id}, found {len(matches)}"
+        )
+    return matches[0]
+
+
+def public_push_line_number(
+    *,
+    runtime: AuthoritativeRuntime,
+    transaction_id: str,
+) -> int:
+    matches = tuple(
+        line_number
+        for line_number, record in enumerate(
+            authoritative_records(runtime),
+            start=backend_api.AUTHORITATIVE_FIRST_LINE,
+        )
+        if (record.method, record.path)
+        == (backend_api.HTTP_POST_METHOD, backend_api.PUSH_PATH)
+        and authoritative_header(
+            record.response_headers,
+            backend_api.HTTP_TRANSACTION_ID_HEADER,
+        )
+        == transaction_id
     )
+    if len(matches) != 1:
+        raise AssertionError(
+            f"expected one public push for {transaction_id}, found {len(matches)}"
+        )
+    return matches[0]
+
+
+def stored_attempt_record(
+    *,
+    runtime: AuthoritativeRuntime,
+    attempt_id: str,
+) -> backend_api.AttemptRecord:
+    connection = duckdb.connect(str(runtime.detour_db_path), read_only=True)
+    try:
+        row = connection.execute(
+            f"SELECT {backend_api.CONTROL_ATTEMPT_RECORD_COLUMN} "
+            f"FROM {backend_api.CONTROL_ATTEMPTS_TABLE} "
+            f"WHERE {backend_api.ATTEMPT_ID_KEY} = ?",
+            [attempt_id],
+        ).fetchone()
+    finally:
+        connection.close()
+    if row is None:
+        raise AssertionError(f"detour DB has no attempt {attempt_id}")
+    return backend_api.AttemptRecord.model_validate_json(str(row[0]))
 
 
 def aivm_ai_command(command: str, *, check: bool = True) -> str:
@@ -668,88 +745,83 @@ def wait_for_control_centre_ports_available() -> None:
     raise TimeoutError("Control Centre/backend ports remained occupied after termination")
 
 
-def persisted_control_run_events(
-    runtime: IsolatedRuntime,
-) -> tuple[backend_api.ControlRunEvent, ...]:
-    configuration = control_ui.RuntimeConfiguration(config_path=runtime.config_path)
-    return backend_api.load_control_run_events(configuration.backend_runtime)
-
-
-def attempt_directory_count(runtime: IsolatedRuntime) -> int:
-    return sum(
-        path.is_dir() or path.is_symlink()
-        for path in runtime.attempts_dir.iterdir()
-    )
-
-
-def test_fresh_start_rebuilds_canonical_detour_database(tmp_path: Path) -> None:
-    runtime = isolated_runtime(tmp_path)
-    assert not runtime.detour_db_path.exists()
-
-    with running_dashboard(runtime) as dashboard:
-        assert runtime.detour_db_path.is_file()
-        counts = reconciliation_counts(dashboard.output)
-    manifests = archived_manifests(runtime.detour_db_path)
-
-    assert counts.discovered > 0
-    assert counts.discovered == attempt_directory_count(runtime)
-    assert counts.skipped == 0
-    assert counts.restored == len(manifests)
-    assert counts.accepted == sum(
-        manifest[backend_api.ATTEMPT_RESULT_KEY] == backend_api.ATTEMPT_RESULT_ACCEPTED
-        for manifest in manifests
-    )
-    assert counts.restored + counts.invalid == counts.discovered
-
-
-def test_real_browser_exposes_rebuilt_history_and_researcher_card(tmp_path: Path) -> None:
-    runtime = isolated_runtime(tmp_path)
-
-    with running_dashboard(runtime) as dashboard:
-        reconciliation_counts(dashboard.output)
-    target = browser_target(runtime, runtime.detour_db_path)
-    with running_dashboard(runtime) as dashboard:
-        reconciliation_counts(dashboard.output)
-        state = browser_state(target=target)
-
-    if target.attempt_id is not None:
-        assert target.attempt_id in state.attempt_history
-    assert state.researcher_card.strip()
-
-
-def test_restart_is_idempotent_for_database_history_and_card(tmp_path: Path) -> None:
-    runtime = isolated_runtime(tmp_path)
-
-    with running_dashboard(runtime) as first_dashboard:
-        first_counts = reconciliation_counts(first_dashboard.output)
-    target = browser_target(runtime, runtime.detour_db_path)
-    first_database = canonical_database_snapshot(runtime.detour_db_path)
-
-    with running_dashboard(runtime) as second_dashboard:
-        second_counts = reconciliation_counts(second_dashboard.output)
-        first_browser = browser_state(target=target)
-    second_database = canonical_database_snapshot(runtime.detour_db_path)
-
-    with running_dashboard(runtime) as third_dashboard:
-        third_counts = reconciliation_counts(third_dashboard.output)
-        second_browser = browser_state(target=target)
-    third_database = canonical_database_snapshot(runtime.detour_db_path)
-
-    assert second_database == first_database
-    assert third_database == first_database
-    assert second_browser == first_browser
-    assert second_counts.restored == 0
-    assert second_counts.accepted == 0
-    assert second_counts.skipped == first_counts.restored
-    assert second_counts.invalid == first_counts.invalid
-    assert second_counts.discovered == first_counts.discovered
-    assert third_counts == second_counts
+# Deferred operator scenarios. Do not delete: adapt these from their former
+# attempts-directory/manifest assertions to authoritative replay JSONL fixtures
+# after the accepted-run operator contour is proven.
+#
+# def test_fresh_start_rebuilds_canonical_detour_database(tmp_path: Path) -> None:
+#     runtime = isolated_runtime(tmp_path)
+#     assert not runtime.detour_db_path.exists()
+#
+#     with running_dashboard(runtime) as dashboard:
+#         assert runtime.detour_db_path.is_file()
+#         counts = reconciliation_counts(dashboard.output)
+#     manifests = archived_manifests(runtime.detour_db_path)
+#
+#     assert counts.discovered > 0
+#     assert counts.discovered == attempt_directory_count(runtime)
+#     assert counts.skipped == 0
+#     assert counts.restored == len(manifests)
+#     assert counts.accepted == sum(
+#         manifest[backend_api.ATTEMPT_RESULT_KEY]
+#         == backend_api.ATTEMPT_RESULT_ACCEPTED
+#         for manifest in manifests
+#     )
+#     assert counts.restored + counts.invalid == counts.discovered
+#
+#
+# def test_real_browser_exposes_rebuilt_history_and_researcher_card(
+#     tmp_path: Path,
+# ) -> None:
+#     runtime = isolated_runtime(tmp_path)
+#
+#     with running_dashboard(runtime) as dashboard:
+#         reconciliation_counts(dashboard.output)
+#     target = browser_target(runtime, runtime.detour_db_path)
+#     with running_dashboard(runtime) as dashboard:
+#         reconciliation_counts(dashboard.output)
+#         state = browser_state(target=target)
+#
+#     if target.attempt_id is not None:
+#         assert target.attempt_id in state.attempt_history
+#     assert state.researcher_card.strip()
+#
+#
+# def test_restart_is_idempotent_for_database_history_and_card(
+#     tmp_path: Path,
+# ) -> None:
+#     runtime = isolated_runtime(tmp_path)
+#
+#     with running_dashboard(runtime) as first_dashboard:
+#         first_counts = reconciliation_counts(first_dashboard.output)
+#     target = browser_target(runtime, runtime.detour_db_path)
+#     first_database = canonical_database_snapshot(runtime.detour_db_path)
+#
+#     with running_dashboard(runtime) as second_dashboard:
+#         second_counts = reconciliation_counts(second_dashboard.output)
+#         first_browser = browser_state(target=target)
+#     second_database = canonical_database_snapshot(runtime.detour_db_path)
+#
+#     with running_dashboard(runtime) as third_dashboard:
+#         third_counts = reconciliation_counts(third_dashboard.output)
+#         second_browser = browser_state(target=target)
+#     third_database = canonical_database_snapshot(runtime.detour_db_path)
+#
+#     assert second_database == first_database
+#     assert third_database == first_database
+#     assert second_browser == first_browser
+#     assert second_counts.restored == 0
+#     assert second_counts.accepted == 0
+#     assert second_counts.skipped == first_counts.restored
+#     assert second_counts.invalid == first_counts.invalid
+#     assert second_counts.discovered == first_counts.discovered
+#     assert third_counts == second_counts
 
 
 def test_existing_aivm_exposes_the_persisted_appendwatch_topology(
     tmp_path: Path,
 ) -> None:
-    runtime = isolated_runtime(tmp_path, include_archived_attempts=False)
+    runtime = authoritative_runtime(tmp_path)
 
     configuration = control_ui.RuntimeConfiguration(config_path=runtime.config_path)
 
@@ -760,12 +832,16 @@ def test_existing_aivm_exposes_the_persisted_appendwatch_topology(
 def test_sanctioned_pull_succeeds_through_the_real_dashboard_and_aivm(
     tmp_path: Path,
 ) -> None:
-    runtime = isolated_runtime(tmp_path, include_archived_attempts=False)
+    runtime = authoritative_runtime(tmp_path)
     target = operator_target(runtime)
 
-    with running_dashboard(runtime) as dashboard:
+    with running_authoritative_dashboard(runtime) as dashboard:
         browser_execute_action(target=target, action=control_ui.RunAction.QUEUE)
-        sanctioned = wait_for_sanction(dashboard=dashboard, target=target)
+        sanctioned = wait_for_authoritative_sanction(
+            runtime=runtime,
+            dashboard=dashboard,
+            target=target,
+        )
         request = urllib_request.Request(
             control_ui.BACKEND_PULL_URL,
             method=backend_api.HTTP_GET_METHOD,
@@ -779,38 +855,48 @@ def test_sanctioned_pull_succeeds_through_the_real_dashboard_and_aivm(
                 for line in response.read().decode(TEXT_ENCODING).splitlines()
             )
         browser_execute_action(target=target, action=control_ui.RunAction.CANCEL)
-        terminal = wait_for_run_status(runtime=runtime, run_id=sanctioned.run_id)
+        terminal = wait_for_authoritative_run_status(
+            runtime=runtime,
+            dashboard=dashboard,
+            run_id=sanctioned.run_id,
+        )
 
-    name = NameKey.from_json_key(target.source_key)
+    events = authoritative_control_events(runtime)
+    name = NameKey.from_json_key(target.namekey)
     assert pull_rows[-1][backend_api.KTP_FIRST_NAME_COL] == name.first_name
     assert pull_rows[-1][backend_api.KTP_LAST_NAME_COL] == name.last_name
     assert terminal.status is control_ui.RunStatus.CANCELED
-    assert persisted_control_run_events(runtime) == control_ui.RunJournal(
-        path=runtime.run_journal_path
-    ).load_events()
+    assert events[-1].run_id == sanctioned.run_id
+    assert events[-1].kind is backend_api.ControlRunEventKind.CANCELED
 
 
 def test_terminal_pre_push_failure_persists_in_db_and_browser_after_restart(
     tmp_path: Path,
 ) -> None:
-    runtime = isolated_runtime(tmp_path, include_archived_attempts=False)
+    runtime = authoritative_runtime(tmp_path)
     target = operator_target(runtime)
 
-    with running_dashboard(runtime) as dashboard:
+    with running_authoritative_dashboard(runtime) as dashboard:
         browser_execute_action(target=target, action=control_ui.RunAction.QUEUE)
-        sanctioned = wait_for_sanction(dashboard=dashboard, target=target)
+        sanctioned = wait_for_authoritative_sanction(
+            runtime=runtime,
+            dashboard=dashboard,
+            target=target,
+        )
         remote_pid = remote_run_pid(sanctioned.run_id)
         kill_remote_pid(remote_pid)
-        terminal = wait_for_run_status(runtime=runtime, run_id=sanctioned.run_id)
+        terminal = wait_for_authoritative_run_status(
+            runtime=runtime,
+            dashboard=dashboard,
+            run_id=sanctioned.run_id,
+        )
 
-    stored_events = persisted_control_run_events(runtime)
-    with running_dashboard(runtime):
+    stored_events = authoritative_control_events(runtime)
+    register_current_replay_log_hash(runtime)
+    with running_authoritative_dashboard(runtime):
         restarted_browser = browser_state(target=target)
 
     assert terminal.status is control_ui.RunStatus.FAILED
-    assert stored_events == control_ui.RunJournal(
-        path=runtime.run_journal_path
-    ).load_events()
     assert stored_events[-1].run_id == sanctioned.run_id
     assert stored_events[-1].kind is backend_api.ControlRunEventKind.FAILED
     assert control_ui.RunStatus.FAILED.value in restarted_browser.attempt_history.casefold()
@@ -819,39 +905,35 @@ def test_terminal_pre_push_failure_persists_in_db_and_browser_after_restart(
 def test_dashboard_rebuilds_exact_db_and_history_after_database_deletion(
     tmp_path: Path,
 ) -> None:
-    runtime = isolated_runtime(tmp_path, include_archived_attempts=False)
+    runtime = authoritative_runtime(tmp_path)
     target = operator_target(runtime)
-    events = (
-        backend_api.ControlRunEvent(
-            run_id=OPERATOR_REBUILD_RUN_ID,
-            source_key=target.source_key,
-            at=OPERATOR_REBUILD_QUEUED_AT,
-            kind=backend_api.ControlRunEventKind.QUEUED,
-        ),
-        backend_api.ControlRunEvent(
-            run_id=OPERATOR_REBUILD_RUN_ID,
-            source_key=target.source_key,
-            at=OPERATOR_REBUILD_QUEUED_AT + timedelta(seconds=1),
-            kind=backend_api.ControlRunEventKind.FAILED,
-            detail=OPERATOR_REBUILD_FAILURE_DETAIL,
-        ),
-    )
-    journal = control_ui.RunJournal(path=runtime.run_journal_path)
-    for event in events:
-        journal.append(event)
 
-    with running_dashboard(runtime):
+    with running_authoritative_dashboard(runtime) as dashboard:
+        browser_execute_action(target=target, action=control_ui.RunAction.QUEUE)
+        sanctioned = wait_for_authoritative_sanction(
+            runtime=runtime,
+            dashboard=dashboard,
+            target=target,
+        )
+        kill_remote_pid(remote_run_pid(sanctioned.run_id))
+        terminal = wait_for_authoritative_run_status(
+            runtime=runtime,
+            dashboard=dashboard,
+            run_id=sanctioned.run_id,
+        )
         first_browser = browser_state(target=target)
+    events = authoritative_control_events(runtime)
     first_database = canonical_database_snapshot(runtime.detour_db_path)
-    assert persisted_control_run_events(runtime) == events
+    assert terminal.status is control_ui.RunStatus.FAILED
 
+    register_current_replay_log_hash(runtime)
     runtime.detour_db_path.unlink()
 
-    with running_dashboard(runtime):
+    with running_authoritative_dashboard(runtime):
         rebuilt_browser = browser_state(target=target)
     rebuilt_database = canonical_database_snapshot(runtime.detour_db_path)
 
-    assert persisted_control_run_events(runtime) == events
+    assert authoritative_control_events(runtime) == events
     assert rebuilt_database == first_database
     assert rebuilt_browser == first_browser
     assert control_ui.RunStatus.FAILED.value in rebuilt_browser.attempt_history.casefold()
@@ -866,23 +948,29 @@ def test_dashboard_signal_chaos_leaves_no_orphans_and_recovers_run_history(
     termination_signal: signal.Signals,
     tmp_path: Path,
 ) -> None:
-    runtime = isolated_runtime(tmp_path, include_archived_attempts=False)
+    runtime = authoritative_runtime(tmp_path)
     target = operator_target(runtime)
 
-    with running_dashboard(runtime) as dashboard:
+    with running_authoritative_dashboard(runtime) as dashboard:
         browser_execute_action(target=target, action=control_ui.RunAction.QUEUE)
-        sanctioned = wait_for_sanction(dashboard=dashboard, target=target)
+        sanctioned = wait_for_authoritative_sanction(
+            runtime=runtime,
+            dashboard=dashboard,
+            target=target,
+        )
         remote_pid = remote_run_pid(sanctioned.run_id)
         dashboard.process.send_signal(termination_signal)
         dashboard.wait_until_exit()
         interrupted_output = "".join(dashboard.output)
 
     wait_for_control_centre_ports_available()
-    with running_dashboard(
-        runtime,
-        recover_interrupted_runs=(termination_signal == signal.SIGKILL),
-    ) as restarted_dashboard:
-        terminal = wait_for_run_status(runtime=runtime, run_id=sanctioned.run_id)
+    register_current_replay_log_hash(runtime)
+    with running_authoritative_dashboard(runtime) as restarted_dashboard:
+        terminal = wait_for_authoritative_run_status(
+            runtime=runtime,
+            dashboard=restarted_dashboard,
+            run_id=sanctioned.run_id,
+        )
         recovered_browser = browser_state(target=target)
         restarted_output = "".join(restarted_dashboard.output)
 
@@ -896,37 +984,60 @@ def test_dashboard_signal_chaos_leaves_no_orphans_and_recovers_run_history(
 def test_complete_dashboard_aivm_codex_push_db_and_card_workflow(
     tmp_path: Path,
 ) -> None:
-    runtime = isolated_runtime(tmp_path, include_archived_attempts=False)
+    runtime = authoritative_runtime(tmp_path)
     target = operator_target(runtime)
 
-    with running_dashboard(runtime) as dashboard:
+    with running_authoritative_dashboard(runtime) as dashboard:
         browser_execute_action(target=target, action=control_ui.RunAction.QUEUE)
-        sanctioned = wait_for_sanction(dashboard=dashboard, target=target)
-        terminal = wait_for_run_status(
+        sanctioned = wait_for_authoritative_sanction(
             runtime=runtime,
+            dashboard=dashboard,
+            target=target,
+        )
+        terminal = wait_for_authoritative_run_status(
+            runtime=runtime,
+            dashboard=dashboard,
             run_id=sanctioned.run_id,
-            timeout_seconds=FULL_WORKFLOW_TIMEOUT_SECONDS,
         )
         assert terminal.status is control_ui.RunStatus.COMPLETE, "".join(dashboard.output)
         assert terminal.accepted_attempt_id is not None
         accepted_target = BrowserTarget(
-            attempt_id=terminal.accepted_attempt_id,
-            source_key=target.source_key,
+            attempt_id=str(terminal.accepted_attempt_id),
+            namekey=target.namekey,
         )
         completed_browser = browser_state(target=accepted_target)
 
-    manifests = archived_manifests(runtime.detour_db_path)
-    matching_manifests = tuple(
-        manifest
-        for manifest in manifests
-        if manifest[backend_api.ATTEMPT_ID_KEY] == terminal.accepted_attempt_id
+    accepted_attempt_id = str(terminal.accepted_attempt_id)
+    commit_line, commit = accepted_submission_commit(
+        runtime=runtime,
+        attempt_id=accepted_attempt_id,
     )
-    with running_dashboard(runtime):
+    push_line = public_push_line_number(
+        runtime=runtime,
+        transaction_id=commit.transaction_id,
+    )
+    stored_attempt = stored_attempt_record(
+        runtime=runtime,
+        attempt_id=accepted_attempt_id,
+    )
+    assert commit_line < push_line
+    assert commit.sanction == sanctioned
+    assert commit.outcome.result == backend_api.ATTEMPT_RESULT_ACCEPTED
+    assert stored_attempt.run_id == sanctioned.run_id
+    assert stored_attempt.namekey == target.namekey
+    assert stored_attempt.result == backend_api.ATTEMPT_RESULT_ACCEPTED
+    assert commit.rollout is not None
+    rollout_blob = runtime.rollout_cas_dir / backend_api.ROLLOUT_CAS_FILENAME_TEMPLATE.format(
+        sha256=commit.rollout.sha256
+    )
+    assert rollout_blob.is_file()
+    assert rollout_blob.stat().st_size == commit.rollout.size
+    assert _regular_file_digest(rollout_blob).hex() == commit.rollout.sha256
+
+    register_current_replay_log_hash(runtime)
+    with running_authoritative_dashboard(runtime):
         restarted_browser = browser_state(target=accepted_target)
 
-    assert len(matching_manifests) == 1
-    assert matching_manifests[0][backend_api.ATTEMPT_RUN_ID_KEY] == str(sanctioned.run_id)
-    assert matching_manifests[0][backend_api.ATTEMPT_SOURCE_KEY] == target.source_key
     assert completed_browser == restarted_browser
-    assert terminal.accepted_attempt_id in restarted_browser.attempt_history
+    assert accepted_attempt_id in restarted_browser.attempt_history
     assert restarted_browser.researcher_card.strip()

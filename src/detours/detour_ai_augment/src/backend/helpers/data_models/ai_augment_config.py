@@ -6,10 +6,11 @@ from pydantic import model_validator
 from src.helpers.config import PipelineConfig
 
 from ..vars import (
-    TEXT_ENCODING,
     MAP_SUBSET_0_TO_BATCH_KEY,
     REPLAY_LOG_KEY,
+    TEXT_ENCODING,
 )
+
 
 class AiAugmentDetourConfig(PipelineConfig):
     rollout_cas_dir: Path

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -17,30 +18,17 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Final, NewType
 from urllib import error as urllib_error
 from urllib import request as urllib_request
-from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
+from urllib.parse import urlencode
+from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
 import duckdb
 import yaml
-from fastapi import HTTPException, status
+from fastapi import status
 from nicegui import app, ui
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from src.helpers.cards import build_cards
-from src.helpers.config import PipelineConfig
-from src.helpers.data_models import NameKey, OuterDict
-from src.helpers.duckdb_utils import (
-    append_innerdicts_from_jsonlines_table,
-    duckdb_quote_identifier,
-)
-from src.helpers.procedures import DocxMatchProcedure, ParquetMatchProcedure, XlsxMatchProcedure
-from src.helpers.schema import (
-    DOCX_INNERDICT_TABLE,
-    PARQUET_INNERDICT_TABLE,
-    XLSX_INNERDICT_TABLE,
-)
 from src.helpers.vars import (
-    CARD_INTRODUCTION,
     DRAW_LABEL,
     KTP_FIRST_NAME_COL,
     KTP_LAST_NAME_COL,
@@ -48,20 +36,14 @@ from src.helpers.vars import (
 )
 
 from ...backend.api import (
-    AI_AUGMENT_COLUMNS,
     APPENDWATCH_REPORT_ENV_NAME,
-    ARCHIVED_ATTEMPT_MANIFEST_COLUMN,
-    ARCHIVED_ATTEMPTS_TABLE,
-    ATTEMPT_ID_KEY,
     ATTEMPT_RESULT_ACCEPTED,
     ATTEMPT_RESULT_CONFIGURATION_ERROR,
     ATTEMPT_RESULT_REJECTED,
-    CARD_EXCLUDED_COLUMNS,
-    CODEX_INNERDICT_TABLE,
-    CODEX_OUTPUT_VIEW,
     CONFIG_OPTION,
     CONTROL_PARENT_PID_ENV_NAME,
-    CONTROL_RUN_EVENTS_PATH,
+    CONTROL_PULL_PATH,
+    CONTROL_PUSH_PATH,
     CONTROL_RUN_EVENTS_TOKEN_ENV_NAME,
     CONTROL_RUN_EVENTS_TOKEN_HEADER,
     DOCX_TO_AI_AUGMENT_COLUMNS,
@@ -72,32 +54,25 @@ from ...backend.api import (
     EXPECTED_NO_GROUND_TRUTH_RESEARCHERS,
     EXPECTED_SOURCE_RESEARCHERS,
     FORBIDDEN_NORMALIZED_PATH_PARTS,
-    HOST_WORKBOOK_PATH,
     HTTP_CONTENT_TYPE_HEADER,
     HTTP_GET_METHOD,
-    HTTP_PUT_METHOD,
+    HTTP_IDEMPOTENCY_KEY_HEADER,
+    HTTP_POST_METHOD,
     JSON_MEDIA_TYPE,
-    KTP_AI_AUGMENT_ATTEMPT_ID_COL,
-    KTP_AI_AUGMENT_FOOTNOTE_ARGUMENTS_COL,
-    KTP_AI_AUGMENT_FOOTNOTES_COL,
-    KTP_AI_AUGMENT_SESSION_METADATA_COL,
-    ArchivedAttemptManifest,
-    ArchivedAttemptRecovery,
-    CodexMatchProcedure,
-    CompactSessionMetadata,
-    ControlRunEventsRequest,
-    ControlRunEventsResponse,
+    AiAugmentDetourConfig,
+    AttemptRecord,
+    ControlPullResponse,
+    ControlPushRequest,
+    ControlPushResponse,
+    ControlRun,
     IneligibilityCategory,
-    _detour_db_path,
+    SourcePopulationRow,
     derive_source_population,
     eligible_cohorts,
     ground_truth_for_researcher,
-    load_control_run_events,
     load_release_batches,
     load_source_researcher,
-    persist_control_run_events,
     registered_release_map,
-    restore_archived_attempts,
 )
 from ...backend.api import (
     ControlRunEvent as RunEvent,
@@ -106,13 +81,15 @@ from ...backend.api import (
     ControlRunEventKind as RunEventKind,
 )
 from ...backend.api import (
-    RuntimeConfiguration as BackendRuntimeConfiguration,
-)
-from ...backend.api import (
     SourceCohort as ResearcherCohort,
 )
 from ...backend.helpers.data_models.pydantic_to_paste import EXPORT_OPENALEX_API_KEY
-from ...backend.helpers.vars import AI_AUGMENT_COLUMN_PREFIX
+from ...backend.helpers.vars import (
+    AI_AUGMENT_COLUMN_PREFIX,
+    KTP_AI_AUGMENT_ATTEMPT_ID_COL,
+    KTP_AI_AUGMENT_FOOTNOTE_ARGUMENTS_COL,
+    KTP_AI_AUGMENT_FOOTNOTES_COL,
+)
 from .helpers.aggrid import AgGrid
 from .helpers.locale import Locale
 
@@ -135,14 +112,9 @@ class NiceGui:
 # =============================================================================
 
 REPOSITORY_ROOT_PARENT_INDEX: Final = 6
-DETOUR_ROOT_PARENT_INDEX: Final = 3
 REPOSITORY_ROOT: Final = Path(__file__).resolve().parents[REPOSITORY_ROOT_PARENT_INDEX]
-DETOUR_ROOT: Final = Path(__file__).resolve().parents[DETOUR_ROOT_PARENT_INDEX]
-DETOUR_DATA_DIR: Final = DETOUR_ROOT / "data"
 
 DEFAULT_CONFIG_PATH: Final = REPOSITORY_ROOT / "config_ai_augment.json"
-
-RUN_JOURNAL_PATH: Final = DETOUR_DATA_DIR / "control_centre_runs.jsonl"
 
 BACKEND_MODULE: Final = "src.detours.detour_ai_augment.src.backend.api"
 BACKEND_COMMAND_PREFIX: Final = (
@@ -157,7 +129,8 @@ BACKEND_PORT: Final = 8612
 BACKEND_BASE_URL: Final = f"http://{BACKEND_HOST}:{BACKEND_PORT}"
 BACKEND_OPENAPI_URL: Final = f"{BACKEND_BASE_URL}/openapi.json"
 BACKEND_PULL_URL: Final = f"{BACKEND_BASE_URL}/pull"
-BACKEND_CONTROL_RUN_EVENTS_URL: Final = f"{BACKEND_BASE_URL}{CONTROL_RUN_EVENTS_PATH}"
+BACKEND_CONTROL_PUSH_URL: Final = f"{BACKEND_BASE_URL}{CONTROL_PUSH_PATH}"
+BACKEND_CONTROL_PULL_URL: Final = f"{BACKEND_BASE_URL}{CONTROL_PULL_PATH}"
 BACKEND_READY_TIMEOUT_SECONDS: Final = 30
 BACKEND_READY_POLL_SECONDS: Final = 0.1
 PROCESS_STOP_TIMEOUT_SECONDS: Final = 10
@@ -167,14 +140,9 @@ CONTROL_CENTRE_HOST: Final = "127.0.0.1"
 CONTROL_CENTRE_PORT: Final = 8611
 CONTROL_CENTRE_BASE_URL: Final = f"http://{CONTROL_CENTRE_HOST}:{CONTROL_CENTRE_PORT}"
 
-CONTROL_API_PREFIX: Final = "/_control"
-CONTROL_CURRENT_PATH: Final = f"{CONTROL_API_PREFIX}/current"
-CONTROL_ACCEPTED_PATH_TEMPLATE: Final = f"{CONTROL_API_PREFIX}/runs/{{run_id}}/accepted"
 CHROME_DEVTOOLS_PATH: Final = "/.well-known/appspecific/com.chrome.devtools.json"
 
-CONTROL_URL_ENV_NAME: Final = "FASTAPI_DETOUR_CONTROL_URL"
 CONTROL_HTTP_TIMEOUT_SECONDS: Final = 10
-RUN_JOURNAL_FILE_MODE: Final = 0o600
 
 AIVM_INSTANCE: Final = "aivm"
 AIVM_USER: Final = "ai"
@@ -230,8 +198,6 @@ AIVM_SSH_CONNECTION_COMMAND: Final = (
 
 CODEX_SESSIONS_ROOT: Final = AIVM_HOME / ".codex" / "sessions"
 CODEX_WORKDIR: Final = AIVM_HOME / "workdir"
-CODEX_WORKBOOK_PATH: Final = CODEX_WORKDIR / "WORKBOOK.md"
-CODEX_PROMPT_PATH: Final = CODEX_WORKDIR / "PROMPT.md"
 CODEX_ENV_PATH: Final = CODEX_WORKDIR / ".openalex.env"
 CODEX_CLI_BIN_PATH: Final = AIVM_HOME / ".local" / "bin" / "codex"
 CODEX_RUN_MARKER_TEMPLATE: Final = ".codex-run-{run_id}.marker"
@@ -249,7 +215,7 @@ CODEX_REMOTE_SIGNAL_COMMAND_TEMPLATE: Final = "kill -{signal} -- {remote_pid}"
 CODEX_REMOTE_TERMINATE_SIGNAL: Final = "TERM"
 CODEX_REMOTE_KILL_SIGNAL: Final = "KILL"
 CODEX_REMOTE_EXEC_COMMAND_TEMPLATE: Final = (
-    "printf '%s\\n' \"$$\" > {pid_path}; . {environment_path}; exec {codex_command} < {prompt_path}"
+    "printf '%s\\n' \"$$\" > {pid_path}; . {environment_path}; exec {codex_command}"
 )
 CODEX_ENV_EXPORT_TEMPLATE: Final = "export {name}={value}\\n"
 CODEX_REMOTE_WRITE_FILE_COMMAND_TEMPLATE: Final = (
@@ -269,7 +235,7 @@ CODEX_REMOTE_FIND_ROLLOUT_COMMAND_TEMPLATE: Final = (
 CODEX_ROLLOUT_FILENAME_TEMPLATE: Final = (
     "rollout-{local_timestamp:%Y-%m-%dT%H-%M-%S}-{session_id}.jsonl"
 )
-CODEX_PROMPT_TEMPLATE: Final = "{openapi_url}\n\n{workbook}"
+CODEX_INPUT_TEMPLATE: Final = "{openapi_url}\n"
 CODEX_EXEC_COMMAND: Final = (
     str(CODEX_CLI_BIN_PATH),
     "exec",
@@ -298,25 +264,10 @@ AIVM_SSH_FORWARD_COMMAND: Final = (
     CODEX_REMOTE_FORWARD,
     AIVM_SSH_TARGET,
 )
-DETOUR_VIEW_EXISTS_SQL: Final = "SELECT count(*) FROM information_schema.views WHERE table_name = ?"
-DETOUR_TABLE_EXISTS_SQL: Final = (
-    "SELECT count(*) FROM information_schema.tables WHERE table_name = ?"
-)
-ACCEPTED_ATTEMPTS_SQL_TEMPLATE: Final = (
-    "SELECT {projection} FROM {output_view} ORDER BY {source_key_column}, {attempt_id_column}"
-)
-ARCHIVED_ATTEMPT_MANIFESTS_SQL: Final = (
-    f"SELECT {duckdb_quote_identifier(ATTEMPT_ID_KEY)}, "
-    f"{duckdb_quote_identifier(ARCHIVED_ATTEMPT_MANIFEST_COLUMN)} "
-    f"FROM {duckdb_quote_identifier(ARCHIVED_ATTEMPTS_TABLE)} "
-    f"ORDER BY {duckdb_quote_identifier(ATTEMPT_ID_KEY)}"
-)
-SQL_COLUMN_SEPARATOR: Final = ", "
-RECONCILED_RUN_ID_TEMPLATE: Final = "{source_key}:{attempt_id}"
 FOOTNOTE_MARKER = re.compile(r"\^(?P<numbers>[0-9]+(?:,[0-9]+)*)\^")
 UI_REFRESH_SECONDS: Final = 1
 GRID_ROW_ID_FIELD: Final = "row_id"
-GRID_SOURCE_KEY_FIELD: Final = "source_key"
+GRID_NAMEKEY_FIELD: Final = KTP_NAMEKEY_COL
 COMPACT_LINE_HEIGHT: Final = 1.25
 CARD_PARAGRAPH_MARGIN_REM: Final = 0
 FULL_WIDTH_STYLE: Final = "width: 100%; max-width: 100%; min-width: 0; box-sizing: border-box;"
@@ -405,7 +356,7 @@ CARD_RESPONSIVE_CSS: Final = f"""
 # Strong-ish scalar identities
 # =============================================================================
 
-SourceKey = NewType("SourceKey", str)
+Namekey = NewType("Namekey", str)
 SessionId = NewType("SessionId", str)
 AttemptId = NewType("AttemptId", str)
 RemotePid = NewType("RemotePid", int)
@@ -441,13 +392,13 @@ def researcher_sort_key(
     tuple[tuple[int, tuple[tuple[int, int | str], ...], str], ...],
     str,
     str,
-    SourceKey,
+    Namekey,
 ]:
     return (
         tuple(draw_sort_key(draw) for draw in researcher.draw_numbers),
         researcher.first_name.casefold(),
         researcher.last_name.casefold(),
-        researcher.source_key,
+        researcher.namekey,
     )
 
 
@@ -531,14 +482,8 @@ class RunAction(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
-class DatabasePaths:
-    source_db: Path
-    detour_db: Path
-
-
-@dataclass(frozen=True, slots=True)
 class Researcher:
-    source_key: SourceKey
+    namekey: Namekey
     rnd: int
     draw_numbers: tuple[str, ...]
     first_name: str
@@ -553,7 +498,7 @@ class Researcher:
 
 @dataclass(frozen=True, slots=True)
 class GroundTruthRecord:
-    source_key: SourceKey
+    namekey: Namekey
     values: Mapping[str, str | None]
 
 
@@ -571,7 +516,7 @@ class SessionMetadata:
 
 @dataclass(frozen=True, slots=True)
 class AcceptedAttempt:
-    source_key: SourceKey
+    namekey: Namekey
     attempt_id: AttemptId
     session_metadata: SessionMetadata
     values: Mapping[str, str | None]
@@ -580,15 +525,14 @@ class AcceptedAttempt:
 
 
 # =============================================================================
-# UI-owned durable run journal. Its validated DuckDB projection is the only
-# source used to render run history.
+# Backend-owned run history projected from the authoritative HTTP log.
 # =============================================================================
 
 
 @dataclass(slots=True)
 class RunRecord:
     run_id: UUID
-    source_key: SourceKey
+    namekey: Namekey
     status: RunStatus
 
     queued_at: datetime
@@ -612,46 +556,7 @@ class RunRecord:
 
     failure_detail: str | None = None
 
-
-# =============================================================================
-# Control-plane protocol exposed by NiceGUI's FastAPI application
-# =============================================================================
-
-
-class ControlRunResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
-    run_id: UUID
-    source_key: str
-    session_id: str
-    rollout_jsonl: str
-
-
-class ControlSnapshotResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
-    sanctioned_run: ControlRunResponse | None
-
-
-class PushAcceptedRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
-    source_key: str
-    session_id: str
-    attempt_id: str
-
-    @field_validator("source_key", "session_id", "attempt_id")
-    @classmethod
-    def normalized_nonblank(cls, value: str) -> str:
-        if not value or value != value.strip():
-            raise ValueError(Locale.ACCEPTED_IDENTIFIERS_INVALID)
-        return value
-
-
-class PushAcceptedResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
-    acknowledged: bool
+    dashboard_owned: bool = True
 
 
 # =============================================================================
@@ -662,7 +567,7 @@ class PushAcceptedResponse(BaseModel):
 @dataclass(frozen=True, slots=True)
 class AttemptView:
     run_id: UUID
-    source_key: SourceKey
+    namekey: Namekey
 
     status: RunStatus
 
@@ -694,7 +599,7 @@ class ResearcherView:
 class AttemptVariableProjection:
     run_id: UUID | None
 
-    source_key: SourceKey
+    namekey: Namekey
     draw_number: str
     first_name: str
     last_name: str
@@ -717,7 +622,7 @@ class AttemptVariableProjection:
 
 @dataclass(frozen=True, slots=True)
 class ResearcherGridRow:
-    source_key: SourceKey
+    namekey: Namekey
     rnd: int
     cohort: ResearcherCohort
     ineligibility_category: IneligibilityCategory | None
@@ -731,7 +636,7 @@ class ResearcherGridRow:
 
 @dataclass(frozen=True, slots=True)
 class ResearcherCardView:
-    source_key: SourceKey
+    namekey: Namekey
     draw_number: str
     first_name: str
     last_name: str
@@ -760,7 +665,7 @@ class UiSelection:
     cohort_filter: ResearcherCohort | None = None
     search_text: str = ""
 
-    selected_source_key: SourceKey | None = None
+    selected_namekey: Namekey | None = None
     selected_run_id: UUID | None = None
     selected_action: RunAction | None = None
 
@@ -847,7 +752,7 @@ class RuntimeConfiguration:
             or not os.access(appendwatch_report, os.R_OK)
         ):
             raise RuntimeError(Locale.LIMA_APPENDWATCH_REPORT_UNREADABLE)
-        pipeline_config = PipelineConfig.from_json(config_path)
+        pipeline_config = AiAugmentDetourConfig.from_json(config_path)
         release_map = registered_release_map(pipeline_config)
         release_batches = load_release_batches(release_map)
         source_connection = duckdb.connect(str(pipeline_config.db_file), read_only=True)
@@ -864,20 +769,11 @@ class RuntimeConfiguration:
         self._openalex_api_key = openalex_api_key
         self._appendwatch_report = appendwatch_report
         self._timezone = ZoneInfo(pipeline_config.timezone)
-        self._database_paths = DatabasePaths(
-            source_db=pipeline_config.db_file,
-            detour_db=_detour_db_path(pipeline_config.db_file),
-        )
-        self._backend_runtime = BackendRuntimeConfiguration(
-            pipeline=pipeline_config,
-            detour_db_path=self._database_paths.detour_db,
-            release_map=release_map,
-            source_population=source_population,
-            eligible_cohorts=eligible_cohorts(source_population),
-        )
+        self._source_population = source_population
+        self._eligible_cohorts = eligible_cohorts(source_population)
 
     @property
-    def pipeline_config(self) -> PipelineConfig:
+    def pipeline_config(self) -> AiAugmentDetourConfig:
         return self._pipeline_config
 
     @property
@@ -893,20 +789,20 @@ class RuntimeConfiguration:
         return self._appendwatch_report
 
     @property
-    def run_journal_path(self) -> Path:
-        return self._database_paths.detour_db.parent / RUN_JOURNAL_PATH.name
-
-    @property
     def timezone(self) -> ZoneInfo:
         return self._timezone
 
     @property
-    def database_paths(self) -> DatabasePaths:
-        return self._database_paths
+    def source_db_path(self) -> Path:
+        return self._pipeline_config.db_file
 
     @property
-    def backend_runtime(self) -> BackendRuntimeConfiguration:
-        return self._backend_runtime
+    def source_population(self) -> tuple[SourcePopulationRow, ...]:
+        return self._source_population
+
+    @property
+    def eligible_cohorts(self) -> Mapping[str, str]:
+        return self._eligible_cohorts
 
 
 # =============================================================================
@@ -927,14 +823,14 @@ class SourceRepository:
 
     def connect(self) -> duckdb.DuckDBPyConnection:
         return duckdb.connect(
-            str(self._configuration.database_paths.source_db),
+            str(self._configuration.source_db_path),
             read_only=True,
         )
 
     def load_researchers(self) -> tuple[Researcher, ...]:
         result = tuple(
             Researcher(
-                source_key=SourceKey(source.source_key),
+                namekey=Namekey(source.namekey),
                 rnd=source.rnd,
                 draw_numbers=tuple(sorted(source.draw_numbers, key=draw_sort_key)),
                 first_name=source.first_name,
@@ -946,7 +842,7 @@ class SourceRepository:
                     else IneligibilityCategory(source.ineligibility_category)
                 ),
             )
-            for source in self._configuration.backend_runtime.source_population
+            for source in self._configuration.source_population
         )
         result = tuple(sorted(result, key=researcher_sort_key))
         self.assert_population_invariants(result)
@@ -954,14 +850,14 @@ class SourceRepository:
 
     def load_ground_truth(
         self,
-        source_key: SourceKey,
+        namekey: Namekey,
     ) -> GroundTruthRecord | None:
         connection = self.connect()
         try:
             researcher = load_source_researcher(
                 connection,
-                self._configuration.backend_runtime,
-                source_key=source_key,
+                self._configuration.eligible_cohorts,
+                namekey=namekey,
             )
             values = ground_truth_for_researcher(researcher)
         finally:
@@ -969,35 +865,33 @@ class SourceRepository:
         if values is None:
             return None
         return GroundTruthRecord(
-            source_key=source_key,
+            namekey=namekey,
             values={
                 column: None if value is None else str(value) for column, value in values.items()
             },
         )
 
-    def load_ground_truth_by_source_key(
+    def load_ground_truth_by_namekey(
         self,
-    ) -> Mapping[SourceKey, GroundTruthRecord]:
-        result: dict[SourceKey, GroundTruthRecord] = {}
-        cohorts = self._configuration.backend_runtime.eligible_cohorts
-        if cohorts is None:
-            raise RuntimeError(Locale.ELIGIBLE_COHORTS_NOT_CONFIGURED)
+    ) -> Mapping[Namekey, GroundTruthRecord]:
+        result: dict[Namekey, GroundTruthRecord] = {}
+        cohorts = self._configuration.eligible_cohorts
         connection = self.connect()
         try:
-            for source_key, cohort in sorted(cohorts.items()):
+            for namekey, cohort in sorted(cohorts.items()):
                 if ResearcherCohort(cohort) is not ResearcherCohort.GROUND_TRUTH:
                     continue
                 researcher = load_source_researcher(
                     connection,
-                    self._configuration.backend_runtime,
-                    source_key=source_key,
+                    self._configuration.eligible_cohorts,
+                    namekey=namekey,
                 )
                 values = ground_truth_for_researcher(researcher)
                 if values is None:
                     raise RuntimeError(Locale.GROUND_TRUTH_MISSING)
-                typed_source_key = SourceKey(source_key)
-                result[typed_source_key] = GroundTruthRecord(
-                    source_key=typed_source_key,
+                typed_namekey = Namekey(namekey)
+                result[typed_namekey] = GroundTruthRecord(
+                    namekey=typed_namekey,
                     values={
                         column: None if value is None else str(value)
                         for column, value in values.items()
@@ -1007,42 +901,19 @@ class SourceRepository:
             connection.close()
         return result
 
-    def load_source_card_innerdicts(
-        self,
-        source_key: SourceKey,
-    ) -> OuterDict:
-        name_key = NameKey.from_json_key(source_key)
-        outer_dict = OuterDict.from_name_keys([name_key])
-        connection = self.connect()
-        try:
-            for table_name, procedure in (
-                (XLSX_INNERDICT_TABLE, XlsxMatchProcedure()),
-                (DOCX_INNERDICT_TABLE, DocxMatchProcedure()),
-                (PARQUET_INNERDICT_TABLE, ParquetMatchProcedure()),
-            ):
-                append_innerdicts_from_jsonlines_table(
-                    connection,
-                    table_name=table_name,
-                    outer_dict=outer_dict,
-                    procedure=procedure,
-                )
-        finally:
-            connection.close()
-        return outer_dict
-
     def assert_population_invariants(
         self,
         researchers: Sequence[Researcher],
     ) -> None:
-        source_keys = [researcher.source_key for researcher in researchers]
+        namekeys = [researcher.namekey for researcher in researchers]
         ground_truth_count = sum(
             researcher.cohort is ResearcherCohort.GROUND_TRUTH for researcher in researchers
         )
         no_ground_truth_count = sum(
             researcher.cohort is ResearcherCohort.NO_GROUND_TRUTH for researcher in researchers
         )
-        if len(set(source_keys)) != len(source_keys):
-            raise RuntimeError(Locale.SOURCE_KEYS_NOT_UNIQUE)
+        if len(set(namekeys)) != len(namekeys):
+            raise RuntimeError(Locale.NAMEKEYS_NOT_UNIQUE)
         ineligible_count = sum(
             researcher.cohort is ResearcherCohort.INELIGIBLE for researcher in researchers
         )
@@ -1068,402 +939,159 @@ class SourceRepository:
 
 
 # =============================================================================
-# Detour DuckDB reads
-#
-# These calls are permitted only while no Codex/backend write transaction can
-# be active. ControlCentreController owns that scheduling invariant.
+# Backend control client
 # =============================================================================
 
 
-class DetourRepository:
+class BackendControlClient:
     def __init__(
         self,
         *,
-        configuration: RuntimeConfiguration,
+        base_url: str,
+        token: str,
     ) -> None:
-        self._configuration = configuration
+        self._push_url = f"{base_url}{CONTROL_PUSH_PATH}"
+        self._pull_url = f"{base_url}{CONTROL_PULL_PATH}"
+        self._token = token
+        self._card_cache: dict[Namekey, str] = {}
 
-    def connect_read_only(self) -> duckdb.DuckDBPyConnection:
-        return duckdb.connect(
-            str(self._configuration.database_paths.detour_db),
-            read_only=True,
-        )
-
-    def reconcile_archived_attempts(
+    def _request(
         self,
         *,
-        attempts_dir: Path | None = None,
-    ) -> ArchivedAttemptRecovery:
-        if attempts_dir is None:
-            attempts_dir = self._configuration.backend_runtime.attempts_dir
-        recovery = restore_archived_attempts(
-            self._configuration.backend_runtime,
-            attempts_dir=attempts_dir,
+        url: str,
+        method: str,
+        body: bytes | None = None,
+        headers: Mapping[str, str] | None = None,
+    ) -> bytes:
+        request_headers = {
+            CONTROL_RUN_EVENTS_TOKEN_HEADER: self._token,
+            **({} if headers is None else headers),
+        }
+        request = urllib_request.Request(
+            url,
+            data=body,
+            headers=request_headers,
+            method=method,
         )
-        emit_log(
-            Locale.CONTROL_CENTRE_LOG_PREFIX,
-            Locale.ARCHIVED_ATTEMPTS_RECONCILED_TEMPLATE.format(
-                restored=len(recovery.restored_attempt_ids),
-                accepted=len(recovery.restored_accepted_attempt_ids),
-                skipped=len(recovery.skipped_attempt_ids),
-                invalid=recovery.invalid,
-                discovered=recovery.discovered,
-                directory=attempts_dir,
-            ),
-        )
-        return recovery
-
-    def persist_control_run_events(
-        self,
-        events: Sequence[RunEvent],
-    ) -> int:
-        return persist_control_run_events(
-            self._configuration.backend_runtime,
-            events,
-        )
-
-    def load_control_run_events(self) -> tuple[RunEvent, ...]:
-        return load_control_run_events(self._configuration.backend_runtime)
-
-    def load_accepted_attempts(
-        self,
-    ) -> Mapping[SourceKey, tuple[AcceptedAttempt, ...]]:
-        database_path = self._configuration.database_paths.detour_db
-        if not database_path.is_file():
-            return {}
-        connection = self.connect_read_only()
         try:
-            view_exists = connection.execute(
-                "SELECT count(*) FROM information_schema.views WHERE table_name = ?",
-                [CODEX_OUTPUT_VIEW],
-            ).fetchone()
-            if view_exists is None or view_exists[0] != 1:
-                return {}
-            columns = (
-                KTP_NAMEKEY_COL,
-                KTP_AI_AUGMENT_ATTEMPT_ID_COL,
-                KTP_AI_AUGMENT_SESSION_METADATA_COL,
-                *AI_AUGMENT_COLUMNS,
-                KTP_AI_AUGMENT_FOOTNOTES_COL,
-                KTP_AI_AUGMENT_FOOTNOTE_ARGUMENTS_COL,
-            )
-            projection = ", ".join(duckdb_quote_identifier(column) for column in columns)
-            rows = connection.execute(
-                f"SELECT {projection} FROM {CODEX_OUTPUT_VIEW} "
-                f"ORDER BY {duckdb_quote_identifier(KTP_NAMEKEY_COL)}, "
-                f"{duckdb_quote_identifier(KTP_AI_AUGMENT_ATTEMPT_ID_COL)}"
-            ).fetchall()
-        finally:
-            connection.close()
+            with urllib_request.urlopen(
+                request,
+                timeout=CONTROL_HTTP_TIMEOUT_SECONDS,
+            ) as response:
+                return response.read()
+        except (OSError, urllib_error.URLError, urllib_error.HTTPError) as exc:
+            raise RuntimeError(Locale.BACKEND_CONTROL_REQUEST_FAILED) from exc
 
-        attempts: dict[SourceKey, list[AcceptedAttempt]] = {}
-        for row in rows:
-            values = dict(zip(columns, row, strict=True))
-            source_key = SourceKey(str(values[KTP_NAMEKEY_COL]))
-            try:
-                metadata_value = CompactSessionMetadata.model_validate_json(
-                    str(values[KTP_AI_AUGMENT_SESSION_METADATA_COL])
-                )
-                metadata = SessionMetadata(
-                    originator=metadata_value.originator,
-                    source=metadata_value.source,
-                    cli_version=metadata_value.cli_version,
-                    model_provider=metadata_value.model_provider,
-                    model=metadata_value.model,
-                    reasoning_effort=metadata_value.reasoning_effort,
-                    session_id=SessionId(metadata_value.session_id),
-                    timestamp=datetime.fromisoformat(metadata_value.timestamp),
-                )
-            except (ValidationError, ValueError) as exc:
-                raise RuntimeError(Locale.ACCEPTED_METADATA_INVALID) from exc
-            attempts.setdefault(source_key, []).append(
-                AcceptedAttempt(
-                    source_key=source_key,
-                    attempt_id=AttemptId(str(values[KTP_AI_AUGMENT_ATTEMPT_ID_COL])),
-                    session_metadata=metadata,
-                    values={
-                        column: None if values[column] is None else str(values[column])
-                        for column in AI_AUGMENT_COLUMNS
+    def push(self, event: RunEvent) -> ControlPushResponse:
+        body = ControlPushRequest(event=event).model_dump_json().encode(TEXT_ENCODING)
+        idempotency_key = hashlib.sha256(body).hexdigest()
+        try:
+            return ControlPushResponse.model_validate_json(
+                self._request(
+                    url=self._push_url,
+                    method=HTTP_POST_METHOD,
+                    body=body,
+                    headers={
+                        HTTP_CONTENT_TYPE_HEADER: JSON_MEDIA_TYPE,
+                        HTTP_IDEMPOTENCY_KEY_HEADER: idempotency_key,
                     },
-                    footnotes=(
-                        None
-                        if values[KTP_AI_AUGMENT_FOOTNOTES_COL] is None
-                        else str(values[KTP_AI_AUGMENT_FOOTNOTES_COL])
-                    ),
-                    footnote_arguments=(
-                        None
-                        if values[KTP_AI_AUGMENT_FOOTNOTE_ARGUMENTS_COL] is None
-                        else str(values[KTP_AI_AUGMENT_FOOTNOTE_ARGUMENTS_COL])
-                    ),
                 )
             )
-        return {
-            source_key: tuple(
-                sorted(
-                    source_attempts,
-                    key=lambda attempt: (
-                        attempt.session_metadata.timestamp,
-                        attempt.attempt_id,
-                    ),
-                )
+        except ValidationError as exc:
+            raise RuntimeError(Locale.BACKEND_CONTROL_RESPONSE_INVALID) from exc
+
+    def pull(self, namekey: Namekey | None = None) -> ControlPullResponse:
+        url = self._pull_url
+        if namekey is not None:
+            url = f"{url}?{urlencode({KTP_NAMEKEY_COL: namekey})}"
+        try:
+            return ControlPullResponse.model_validate_json(
+                self._request(url=url, method=HTTP_GET_METHOD)
             )
-            for source_key, source_attempts in attempts.items()
-        }
+        except ValidationError as exc:
+            raise RuntimeError(Locale.BACKEND_CONTROL_RESPONSE_INVALID) from exc
 
-    def load_attempt_manifests(
-        self,
-    ) -> Mapping[SourceKey, tuple[ArchivedAttemptManifest, ...]]:
-        database_path = self._configuration.database_paths.detour_db
-        if not database_path.is_file():
-            return {}
-        connection = self.connect_read_only()
-        try:
-            table_exists = connection.execute(
-                DETOUR_TABLE_EXISTS_SQL,
-                [ARCHIVED_ATTEMPTS_TABLE],
-            ).fetchone()
-            if table_exists is None or table_exists[0] != 1:
-                return {}
-            rows = connection.execute(ARCHIVED_ATTEMPT_MANIFESTS_SQL).fetchall()
-        finally:
-            connection.close()
-
-        manifests: dict[SourceKey, list[ArchivedAttemptManifest]] = {}
-        try:
-            for stored_attempt_id, manifest_json in rows:
-                manifest = ArchivedAttemptManifest.model_validate_json(str(manifest_json))
-                if manifest.attempt_id != stored_attempt_id:
-                    raise ValueError(Locale.ATTEMPT_DATABASE_INCONSISTENT)
-                if manifest.source_key is not None:
-                    manifests.setdefault(SourceKey(manifest.source_key), []).append(manifest)
-        except (ValidationError, ValueError) as exc:
-            raise RuntimeError(Locale.ATTEMPT_DATABASE_INCONSISTENT) from exc
-        return {
-            source_key: tuple(source_manifests)
-            for source_key, source_manifests in manifests.items()
-        }
-
-    def load_accepted_attempts_for_source_key(
-        self,
-        source_key: SourceKey,
-    ) -> tuple[AcceptedAttempt, ...]:
-        return self.load_accepted_attempts().get(source_key, ())
-
-    def load_codex_card_innerdicts(
-        self,
-        source_key: SourceKey,
-    ) -> OuterDict:
-        name_key = NameKey.from_json_key(source_key)
-        outer_dict = OuterDict.from_name_keys([name_key])
-        database_path = self._configuration.database_paths.detour_db
-        if not database_path.is_file():
-            return outer_dict
-        connection = self.connect_read_only()
-        try:
-            table_exists = connection.execute(
-                "SELECT count(*) FROM information_schema.tables WHERE table_name = ?",
-                [CODEX_INNERDICT_TABLE],
-            ).fetchone()
-            if table_exists is not None and table_exists[0] == 1:
-                append_innerdicts_from_jsonlines_table(
-                    connection,
-                    table_name=CODEX_INNERDICT_TABLE,
-                    outer_dict=outer_dict,
-                    procedure=CodexMatchProcedure(),
-                )
-        finally:
-            connection.close()
-        return outer_dict
-
+    def card(self, namekey: Namekey) -> str:
+        cached = self._card_cache.get(namekey)
+        if cached is not None:
+            return cached
+        markdown = self.pull(namekey=namekey).card_markdown
+        if markdown is None:
+            raise RuntimeError(Locale.BACKEND_CARD_MISSING)
+        self._card_cache[namekey] = markdown
+        return markdown
 
 # =============================================================================
-# Run journal
+# Backend event projection
 # =============================================================================
 
 
-class RunJournal:
-    def __init__(
-        self,
-        *,
-        path: Path = RUN_JOURNAL_PATH,
-    ) -> None:
-        self._path = path
-
-    def append(
-        self,
-        event: RunEvent,
-    ) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        payload = (event.model_dump_json() + "\n").encode(TEXT_ENCODING)
-        descriptor = os.open(
-            self._path,
-            os.O_APPEND | os.O_CREAT | os.O_WRONLY,
-            RUN_JOURNAL_FILE_MODE,
-        )
-        try:
-            if os.write(descriptor, payload) != len(payload):
-                raise OSError(Locale.JOURNAL_APPEND_INCOMPLETE)
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
-
-    def load_events(self) -> tuple[RunEvent, ...]:
-        if not self._path.exists():
-            return ()
-        events: list[RunEvent] = []
-        with self._path.open(encoding=TEXT_ENCODING) as stream:
-            for line_number, line in enumerate(stream, start=1):
-                try:
-                    events.append(RunEvent.model_validate_json(line))
-                except ValidationError as exc:
-                    raise RuntimeError(
-                        Locale.JOURNAL_MALFORMED_TEMPLATE.format(line_number=line_number)
-                    ) from exc
-        return tuple(events)
-
-    def load_runs(self) -> Mapping[UUID, RunRecord]:
-        return self.replay(self.load_events())
-
-    @staticmethod
-    def replay(events: Sequence[RunEvent]) -> Mapping[UUID, RunRecord]:
-        runs: dict[UUID, RunRecord] = {}
-        for event in events:
-            if event.kind is RunEventKind.QUEUED:
-                if event.run_id in runs:
-                    raise RuntimeError(Locale.JOURNAL_DUPLICATE_RUN_ID)
-                runs[event.run_id] = RunRecord(
-                    run_id=event.run_id,
-                    source_key=SourceKey(event.source_key),
-                    status=RunStatus.QUEUED,
-                    queued_at=event.at,
-                )
-                continue
-            run = runs.get(event.run_id)
-            if run is None or run.source_key != event.source_key:
+def replay_run_events(events: Sequence[RunEvent]) -> Mapping[UUID, RunRecord]:
+    runs: dict[UUID, RunRecord] = {}
+    for event in events:
+        run = runs.get(event.run_id)
+        if run is None:
+            if event.kind not in {RunEventKind.QUEUED, RunEventKind.SANCTIONED}:
                 raise RuntimeError(Locale.JOURNAL_EVENT_WITHOUT_RUN)
-            if event.kind is RunEventKind.STARTED:
-                run.status = RunStatus.RUNNING
-                run.started_at = event.at
-                run.remote_pid = None if event.remote_pid is None else RemotePid(event.remote_pid)
-            elif event.kind is RunEventKind.REMOTE_PID_DISCOVERED:
-                if event.remote_pid is None:
-                    raise RuntimeError(Locale.JOURNAL_REMOTE_PID_MISSING)
-                run.remote_pid = RemotePid(event.remote_pid)
-            elif event.kind is RunEventKind.SESSION_DISCOVERED:
-                if event.session_id is None:
-                    raise RuntimeError(Locale.JOURNAL_SESSION_ID_MISSING)
-                run.session_id = SessionId(event.session_id)
-                run.session_timestamp = event.at
-            elif event.kind is RunEventKind.ROLLOUT_DISCOVERED:
-                if event.rollout_jsonl is None:
-                    raise RuntimeError(Locale.JOURNAL_ROLLOUT_PATH_MISSING)
-                run.rollout_jsonl = PurePosixPath(event.rollout_jsonl)
-            elif event.kind is RunEventKind.SANCTIONED:
-                run.sanctioned_at = event.at
-            elif event.kind is RunEventKind.PUSH_ACCEPTED:
-                if event.accepted_attempt_id is None:
-                    raise RuntimeError(Locale.JOURNAL_ATTEMPT_ID_MISSING)
-                run.accepted_attempt_id = AttemptId(event.accepted_attempt_id)
-                run.accepted_at = event.at
-            elif event.kind is RunEventKind.CANCEL_REQUESTED:
-                run.cancel_requested_at = event.at
-            elif event.kind is RunEventKind.CODEX_EXITED:
-                run.codex_exit_code = event.codex_exit_code
-                run.exited_at = event.at
-            elif event.kind is RunEventKind.COMPLETE:
-                run.status = RunStatus.COMPLETE
-            elif event.kind is RunEventKind.FAILED:
-                run.status = RunStatus.FAILED
-                run.failure_detail = event.detail
-            elif event.kind is RunEventKind.CANCELED:
-                run.status = RunStatus.CANCELED
-        return runs
-
-    def runs_for_source_key(
-        self,
-        source_key: SourceKey,
-    ) -> tuple[RunRecord, ...]:
-        return tuple(
-            sorted(
-                (run for run in self.load_runs().values() if run.source_key == source_key),
-                key=lambda run: (run.queued_at, str(run.run_id)),
+            run = RunRecord(
+                run_id=event.run_id,
+                namekey=Namekey(event.namekey),
+                status=(
+                    RunStatus.QUEUED
+                    if event.kind is RunEventKind.QUEUED
+                    else RunStatus.RUNNING
+                ),
+                queued_at=event.at,
+                dashboard_owned=event.kind is RunEventKind.QUEUED,
             )
-        )
+            runs[event.run_id] = run
+        elif run.namekey != event.namekey:
+            raise RuntimeError(Locale.JOURNAL_EVENT_WITHOUT_RUN)
+        elif event.kind is RunEventKind.QUEUED:
+            raise RuntimeError(Locale.JOURNAL_DUPLICATE_RUN_ID)
 
-
-# =============================================================================
-# Card rendering
-# =============================================================================
-
-
-class ResearcherCardRenderer:
-    def __init__(
-        self,
-        *,
-        source_repository: SourceRepository,
-        detour_repository: DetourRepository,
-        configuration: RuntimeConfiguration,
-    ) -> None:
-        self._source_repository = source_repository
-        self._detour_repository = detour_repository
-        self._configuration = configuration
-
-    def render(
-        self,
-        source_key: SourceKey,
-    ) -> ResearcherCardView:
-        researchers = {
-            researcher.source_key: researcher
-            for researcher in self._source_repository.load_researchers()
-        }
-        researcher = researchers.get(source_key)
-        if researcher is None:
-            raise KeyError(Locale.UNKNOWN_SOURCE_KEY_TEMPLATE.format(source_key=source_key))
-        cards = build_cards(
-            self.build_outer_dict(source_key),
-            total_draws=self._configuration.pipeline_config.total_draws,
-            intro=CARD_INTRODUCTION.format(
-                datetime.now(self._configuration.timezone).strftime(Locale.CARD_INTRO_DATE_FORMAT)
-            ),
-            excluded_cols=CARD_EXCLUDED_COLUMNS,
-        )
-        if len(cards) != 1:
-            raise RuntimeError(Locale.CARD_COUNT_INVALID)
-        return ResearcherCardView(
-            source_key=source_key,
-            draw_number=researcher.draw_number,
-            first_name=researcher.first_name,
-            last_name=researcher.last_name,
-            markdown=next(iter(cards.values())),
-        )
-
-    def build_outer_dict(
-        self,
-        source_key: SourceKey,
-    ) -> OuterDict:
-        name_key = NameKey.from_json_key(source_key)
-        source_outer = self._source_repository.load_source_card_innerdicts(source_key)
-        codex_outer = self._detour_repository.load_codex_card_innerdicts(source_key)
-        source_inners = source_outer.get_inner_by_key(source_key)
-        xlsx_inners = tuple(
-            inner for inner in source_inners if isinstance(inner.procedure, XlsxMatchProcedure)
-        )
-        docx_inners = tuple(
-            inner for inner in source_inners if isinstance(inner.procedure, DocxMatchProcedure)
-        )
-        ssn_inners = tuple(
-            inner for inner in source_inners if isinstance(inner.procedure, ParquetMatchProcedure)
-        )
-        return OuterDict(
-            data={
-                name_key.to_json_key(): [
-                    *xlsx_inners,
-                    *codex_outer.get_inner_by_key(source_key),
-                    *docx_inners,
-                    *ssn_inners,
-                ]
-            }
-        )
+        if event.kind is RunEventKind.STARTED:
+            run.status = RunStatus.RUNNING
+            run.started_at = event.at
+            run.remote_pid = None if event.remote_pid is None else RemotePid(event.remote_pid)
+        elif event.kind is RunEventKind.REMOTE_PID_DISCOVERED:
+            if event.remote_pid is None:
+                raise RuntimeError(Locale.JOURNAL_REMOTE_PID_MISSING)
+            run.remote_pid = RemotePid(event.remote_pid)
+        elif event.kind is RunEventKind.SESSION_DISCOVERED:
+            if event.session_id is None:
+                raise RuntimeError(Locale.JOURNAL_SESSION_ID_MISSING)
+            run.session_id = SessionId(event.session_id)
+            run.session_timestamp = event.at
+        elif event.kind is RunEventKind.ROLLOUT_DISCOVERED:
+            if event.rollout_jsonl is None:
+                raise RuntimeError(Locale.JOURNAL_ROLLOUT_PATH_MISSING)
+            run.rollout_jsonl = PurePosixPath(event.rollout_jsonl)
+        elif event.kind is RunEventKind.SANCTIONED:
+            if event.session_id is None or event.rollout_jsonl is None:
+                raise RuntimeError(Locale.JOURNAL_SANCTION_INVALID)
+            run.status = RunStatus.RUNNING
+            run.session_id = SessionId(event.session_id)
+            run.rollout_jsonl = PurePosixPath(event.rollout_jsonl)
+            run.sanctioned_at = event.at
+        elif event.kind is RunEventKind.PUSH_ACCEPTED:
+            if event.accepted_attempt_id is None:
+                raise RuntimeError(Locale.JOURNAL_ATTEMPT_ID_MISSING)
+            run.accepted_attempt_id = AttemptId(event.accepted_attempt_id)
+            run.accepted_at = event.at
+        elif event.kind is RunEventKind.CANCEL_REQUESTED:
+            run.cancel_requested_at = event.at
+        elif event.kind is RunEventKind.CODEX_EXITED:
+            run.codex_exit_code = event.codex_exit_code
+            run.exited_at = event.at
+        elif event.kind is RunEventKind.COMPLETE:
+            run.status = RunStatus.COMPLETE
+        elif event.kind is RunEventKind.FAILED:
+            run.status = RunStatus.FAILED
+            run.failure_detail = event.detail
+        elif event.kind is RunEventKind.CANCELED:
+            run.status = RunStatus.CANCELED
+    return runs
 
 
 # =============================================================================
@@ -1484,14 +1112,12 @@ class BackendSupervisor:
         *,
         repository_root: Path,
         config_path: Path,
-        control_url: str,
         openalex_api_key: str,
         appendwatch_report: Path,
         control_run_events_token: str,
     ) -> None:
         self._repository_root = repository_root
         self._config_path = config_path
-        self._control_url = control_url
         self._openalex_api_key = openalex_api_key
         self._appendwatch_report = appendwatch_report
         self._control_run_events_token = control_run_events_token
@@ -1568,7 +1194,7 @@ class BackendSupervisor:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + BACKEND_READY_TIMEOUT_SECONDS
 
-        def request_openapi() -> None:
+        def request_backend() -> None:
             request = urllib_request.Request(BACKEND_OPENAPI_URL, method=HTTP_GET_METHOD)
             with urllib_request.urlopen(
                 request,
@@ -1576,14 +1202,33 @@ class BackendSupervisor:
             ) as response:
                 if response.status != status.HTTP_200_OK:
                     raise RuntimeError(Locale.BACKEND_OPENAPI_NOT_READY)
+            control_request = urllib_request.Request(
+                BACKEND_CONTROL_PULL_URL,
+                headers={
+                    CONTROL_RUN_EVENTS_TOKEN_HEADER: self._control_run_events_token,
+                },
+                method=HTTP_GET_METHOD,
+            )
+            with urllib_request.urlopen(
+                control_request,
+                timeout=CONTROL_HTTP_TIMEOUT_SECONDS,
+            ) as response:
+                if response.status != status.HTTP_200_OK:
+                    raise RuntimeError(Locale.BACKEND_CONTROL_NOT_READY)
+                ControlPullResponse.model_validate_json(response.read())
 
         while loop.time() < deadline:
             if self._process is None or self._process.process.returncode is not None:
                 raise RuntimeError(Locale.BACKEND_EXITED_EARLY)
             try:
-                await asyncio.to_thread(request_openapi)
+                await asyncio.to_thread(request_backend)
                 return
-            except OSError, urllib_error.URLError, urllib_error.HTTPError:
+            except (
+                OSError,
+                ValidationError,
+                urllib_error.URLError,
+                urllib_error.HTTPError,
+            ):
                 await asyncio.sleep(BACKEND_READY_POLL_SECONDS)
         raise TimeoutError(Locale.BACKEND_READY_TIMEOUT)
 
@@ -1602,29 +1247,6 @@ class BackendSupervisor:
             await asyncio.to_thread(request_pull)
         except (OSError, urllib_error.URLError, urllib_error.HTTPError) as exc:
             raise RuntimeError(Locale.BACKEND_PULL_NOT_READY) from exc
-
-    def persist_run_events(self, events: Sequence[RunEvent]) -> int:
-        body = ControlRunEventsRequest(events=tuple(events)).model_dump_json().encode(
-            TEXT_ENCODING
-        )
-        request = urllib_request.Request(
-            BACKEND_CONTROL_RUN_EVENTS_URL,
-            data=body,
-            headers={
-                HTTP_CONTENT_TYPE_HEADER: JSON_MEDIA_TYPE,
-                CONTROL_RUN_EVENTS_TOKEN_HEADER: self._control_run_events_token,
-            },
-            method=HTTP_PUT_METHOD,
-        )
-        try:
-            with urllib_request.urlopen(
-                request,
-                timeout=CONTROL_HTTP_TIMEOUT_SECONDS,
-            ) as response:
-                result = ControlRunEventsResponse.model_validate_json(response.read())
-        except (OSError, urllib_error.URLError, urllib_error.HTTPError, ValidationError) as exc:
-            raise RuntimeError(Locale.CONTROL_RUN_EVENTS_PERSIST_FAILED) from exc
-        return result.persisted
 
     async def stop(self) -> None:
         if self._process is None:
@@ -1652,7 +1274,6 @@ class BackendSupervisor:
 
     def environment(self) -> Mapping[str, str]:
         environment = os.environ.copy()
-        environment[CONTROL_URL_ENV_NAME] = self._control_url
         environment[EXPORT_OPENALEX_API_KEY] = self._openalex_api_key
         environment[APPENDWATCH_REPORT_ENV_NAME] = str(self._appendwatch_report)
         environment[CONTROL_PARENT_PID_ENV_NAME] = str(os.getpid())
@@ -1712,7 +1333,6 @@ class CodexRunner:
             pid_path=shlex.quote(str(pid_path)),
             environment_path=shlex.quote(str(CODEX_ENV_PATH)),
             codex_command=shlex.join(CODEX_EXEC_COMMAND),
-            prompt_path=shlex.quote(str(CODEX_PROMPT_PATH)),
         )
 
     async def _remote_command(
@@ -1770,17 +1390,6 @@ class CodexRunner:
             value=shlex.quote(self._openalex_api_key),
         ).encode(TEXT_ENCODING)
         await self._write_remote_file(CODEX_ENV_PATH, environment_bytes)
-        HOST_WORKBOOK_PATH.parent.mkdir(parents=True, exist_ok=True)
-        if not HOST_WORKBOOK_PATH.exists():
-            HOST_WORKBOOK_PATH.write_bytes(b"")
-        workbook_bytes = HOST_WORKBOOK_PATH.read_bytes()
-        workbook_text = workbook_bytes.decode(TEXT_ENCODING)
-        await self._write_remote_file(CODEX_WORKBOOK_PATH, workbook_bytes)
-        prompt_bytes = CODEX_PROMPT_TEMPLATE.format(
-            openapi_url=self._openapi_url,
-            workbook=workbook_text,
-        ).encode(TEXT_ENCODING)
-        await self._write_remote_file(CODEX_PROMPT_PATH, prompt_bytes)
         marker_path = CODEX_WORKDIR / CODEX_RUN_MARKER_TEMPLATE.format(run_id=run_id)
         pid_path = CODEX_WORKDIR / CODEX_RUN_PID_TEMPLATE.format(run_id=run_id)
         await self._remote_command(
@@ -1793,10 +1402,21 @@ class CodexRunner:
         process = await asyncio.create_subprocess_exec(
             *self.ssh_base_command(),
             self.codex_remote_command(run_id=run_id),
+            stdin=asyncio.subprocess.PIPE,
             start_new_session=True,
         )
         handle = CodexProcessHandle(run_id=run_id, process=process)
         try:
+            if process.stdin is None:
+                raise RuntimeError(Locale.CODEX_STDIN_UNAVAILABLE)
+            process.stdin.write(
+                CODEX_INPUT_TEMPLATE.format(openapi_url=self._openapi_url).encode(
+                    TEXT_ENCODING
+                )
+            )
+            await process.stdin.drain()
+            process.stdin.close()
+            await process.stdin.wait_closed()
             if on_handle is not None:
                 await on_handle(handle)
             session_id, session_timestamp = await self.discover_session(handle)
@@ -2036,71 +1656,7 @@ class CodexRunner:
 
 
 # =============================================================================
-# Control-plane state
-#
-# This is the authoritative current human sanction presented to api.py.
-# It is intentionally independent of the durable accepted-output database.
-# =============================================================================
-
-
-@dataclass(frozen=True, slots=True)
-class SanctionedRun:
-    run_id: UUID
-    source_key: SourceKey
-    session_id: SessionId
-    rollout_jsonl: PurePosixPath
-    sanctioned_at: datetime
-
-
-class ControlPlane:
-    def __init__(self) -> None:
-        self._lock = asyncio.Lock()
-        self._sanctioned_run: SanctionedRun | None = None
-
-    async def sanction(
-        self,
-        run: SanctionedRun,
-    ) -> None:
-        async with self._lock:
-            if self._sanctioned_run is not None:
-                raise RuntimeError(Locale.SANCTION_ALREADY_ACTIVE)
-            self._sanctioned_run = run
-
-    async def revoke(
-        self,
-        *,
-        run_id: UUID,
-    ) -> None:
-        async with self._lock:
-            if self._sanctioned_run is not None and self._sanctioned_run.run_id == run_id:
-                self._sanctioned_run = None
-
-    async def clear(self) -> None:
-        async with self._lock:
-            self._sanctioned_run = None
-
-    async def current(self) -> SanctionedRun | None:
-        async with self._lock:
-            return self._sanctioned_run
-
-    async def snapshot(self) -> ControlSnapshotResponse:
-        run = await self.current()
-        return ControlSnapshotResponse(
-            sanctioned_run=(
-                None
-                if run is None
-                else ControlRunResponse(
-                    run_id=run.run_id,
-                    source_key=run.source_key,
-                    session_id=run.session_id,
-                    rollout_jsonl=str(run.rollout_jsonl),
-                )
-            )
-        )
-
-
-# =============================================================================
-# Reconciliation of local runs with authoritative accepted DuckDB output
+# Reconciliation of backend-projected runs and accepted output
 # =============================================================================
 
 
@@ -2110,62 +1666,52 @@ class AttemptReconciler:
         *,
         researcher: Researcher,
         runs: Sequence[RunRecord],
-        attempt_manifests: Sequence[ArchivedAttemptManifest],
+        attempt_records: Sequence[AttemptRecord],
         accepted_attempts: Sequence[AcceptedAttempt],
     ) -> ResearcherView:
         accepted_by_attempt_id = {attempt.attempt_id: attempt for attempt in accepted_attempts}
         attempts: list[AttemptView] = []
-        for manifest in sorted(attempt_manifests, key=lambda item: item.attempt_id):
-            attempt_id = AttemptId(manifest.attempt_id)
+        for record in sorted(
+            attempt_records,
+            key=lambda item: (item.updated_at, item.attempt_id),
+        ):
+            attempt_id = AttemptId(record.attempt_id)
             accepted = accepted_by_attempt_id.pop(attempt_id, None)
-            status = ARCHIVED_ATTEMPT_STATUS_BY_RESULT.get(manifest.result)
-            try:
-                timestamp = datetime.fromisoformat(manifest.updated_at)
-            except ValueError as exc:
-                raise RuntimeError(Locale.ATTEMPT_DATABASE_INCONSISTENT) from exc
+            attempt_status = ARCHIVED_ATTEMPT_STATUS_BY_RESULT.get(record.result)
             if (
-                status is None
-                or timestamp.tzinfo is None
-                or manifest.source_key != researcher.source_key
-                or (status is RunStatus.COMPLETE) != (accepted is not None)
+                attempt_status is None
+                or record.run_id is None
+                or record.updated_at.tzinfo is None
+                or record.namekey != researcher.namekey
+                or (attempt_status is RunStatus.COMPLETE) != (accepted is not None)
                 or (
                     accepted is not None
                     and (
-                        manifest.session_id is None
-                        or manifest.session_id != accepted.session_metadata.session_id
+                        record.session_id is None
+                        or record.session_id != accepted.session_metadata.session_id
                     )
                 )
             ):
                 raise RuntimeError(Locale.ATTEMPT_DATABASE_INCONSISTENT)
             attempts.append(
                 AttemptView(
-                    run_id=(
-                        manifest.run_id
-                        if manifest.run_id is not None
-                        else uuid5(
-                            NAMESPACE_URL,
-                            RECONCILED_RUN_ID_TEMPLATE.format(
-                                source_key=researcher.source_key,
-                                attempt_id=attempt_id,
-                            ),
-                        )
-                    ),
-                    source_key=researcher.source_key,
-                    status=status,
+                    run_id=record.run_id,
+                    namekey=researcher.namekey,
+                    status=attempt_status,
                     attempt_id=attempt_id,
                     session_id=(
                         accepted.session_metadata.session_id
                         if accepted is not None
                         else (
                             None
-                            if manifest.session_id is None
-                            else SessionId(manifest.session_id)
+                            if record.session_id is None
+                            else SessionId(record.session_id)
                         )
                     ),
-                    timestamp=timestamp,
-                    ended_at=timestamp,
+                    timestamp=record.updated_at,
+                    ended_at=record.updated_at,
                     accepted=accepted,
-                    failure_detail=None,
+                    failure_detail=record.response_detail,
                 )
             )
         for run in sorted(runs, key=lambda item: (item.queued_at, str(item.run_id))):
@@ -2176,7 +1722,7 @@ class AttemptReconciler:
             attempts.append(
                 AttemptView(
                     run_id=run.run_id,
-                    source_key=researcher.source_key,
+                    namekey=researcher.namekey,
                     status=run.status,
                     attempt_id=run.accepted_attempt_id,
                     session_id=run.session_id,
@@ -2210,18 +1756,18 @@ class AttemptReconciler:
         *,
         researchers: Sequence[Researcher],
         runs: Mapping[UUID, RunRecord],
-        attempt_manifests: Mapping[SourceKey, tuple[ArchivedAttemptManifest, ...]],
-        accepted_attempts: Mapping[SourceKey, tuple[AcceptedAttempt, ...]],
+        attempt_records: Mapping[Namekey, tuple[AttemptRecord, ...]],
+        accepted_attempts: Mapping[Namekey, tuple[AcceptedAttempt, ...]],
     ) -> tuple[ResearcherView, ...]:
-        runs_by_source_key: dict[SourceKey, list[RunRecord]] = {}
+        runs_by_namekey: dict[Namekey, list[RunRecord]] = {}
         for run in runs.values():
-            runs_by_source_key.setdefault(run.source_key, []).append(run)
+            runs_by_namekey.setdefault(run.namekey, []).append(run)
         return tuple(
             self.reconcile(
                 researcher=researcher,
-                runs=runs_by_source_key.get(researcher.source_key, ()),
-                attempt_manifests=attempt_manifests.get(researcher.source_key, ()),
-                accepted_attempts=accepted_attempts.get(researcher.source_key, ()),
+                runs=runs_by_namekey.get(researcher.namekey, ()),
+                attempt_records=attempt_records.get(researcher.namekey, ()),
+                accepted_attempts=accepted_attempts.get(researcher.namekey, ()),
             )
             for researcher in researchers
         )
@@ -2260,7 +1806,7 @@ class VariableProjector:
         accepted = attempt.accepted
         return AttemptVariableProjection(
             run_id=attempt.run_id,
-            source_key=researcher.source_key,
+            namekey=researcher.namekey,
             draw_number=researcher.draw_number,
             first_name=researcher.first_name,
             last_name=researcher.last_name,
@@ -2303,7 +1849,7 @@ class VariableProjector:
     ) -> AttemptVariableProjection:
         return AttemptVariableProjection(
             run_id=None,
-            source_key=researcher.source_key,
+            namekey=researcher.namekey,
             draw_number=researcher.draw_number,
             first_name=researcher.first_name,
             last_name=researcher.last_name,
@@ -2354,7 +1900,7 @@ class VariableProjector:
             )
         )
         return ResearcherGridRow(
-            source_key=researcher_view.researcher.source_key,
+            namekey=researcher_view.researcher.namekey,
             rnd=researcher_view.researcher.rnd,
             cohort=researcher_view.researcher.cohort,
             ineligibility_category=(researcher_view.researcher.ineligibility_category),
@@ -2410,11 +1956,8 @@ class VariableProjector:
 #
 # Exactly one Codex attempt may be running at a time.
 #
-# During that attempt:
-#   - source DB reads remain allowed;
-#   - detour DB reads from this process are suspended;
-#   - api.py remains the only detour DB writer;
-#   - current sanction is served from ControlPlane.
+# The backend is the sole owner of durable run history, sanctions, attempts,
+# accepted output, cards, the authoritative log, and the detour database.
 # =============================================================================
 
 
@@ -2422,25 +1965,17 @@ class ControlCentreController:
     def __init__(
         self,
         *,
-        configuration: RuntimeConfiguration,
         source_repository: SourceRepository,
-        detour_repository: DetourRepository,
-        journal: RunJournal,
-        card_renderer: ResearcherCardRenderer,
         backend: BackendSupervisor,
+        backend_control: BackendControlClient,
         codex: CodexRunner,
-        control_plane: ControlPlane,
         reconciler: AttemptReconciler,
         projector: VariableProjector,
     ) -> None:
-        self._configuration = configuration
         self._source_repository = source_repository
-        self._detour_repository = detour_repository
-        self._journal = journal
-        self._card_renderer = card_renderer
         self._backend = backend
+        self._backend_control = backend_control
         self._codex = codex
-        self._control_plane = control_plane
         self._reconciler = reconciler
         self._projector = projector
         self._queue: asyncio.Queue[UUID] = asyncio.Queue()
@@ -2448,18 +1983,15 @@ class ControlCentreController:
         self._active_run_id: UUID | None = None
         self._active_codex: CodexProcessHandle | None = None
         self._external_codex_busy = False
-        self._archive_rescan_required = True
         self._shutting_down = False
         self._idle_refresh_lock = asyncio.Lock()
-        self._runs: dict[UUID, RunRecord] = dict(journal.load_runs())
+        self._runs: dict[UUID, RunRecord] = {}
+        self._sanctioned_run: ControlRun | None = None
         self._researchers: tuple[Researcher, ...] = ()
-        self._researchers_by_source_key: dict[SourceKey, Researcher] = {}
-        self._ground_truth: Mapping[SourceKey, GroundTruthRecord] = {}
-        self._attempt_manifests: Mapping[
-            SourceKey,
-            tuple[ArchivedAttemptManifest, ...],
-        ] = {}
-        self._accepted_attempts: Mapping[SourceKey, tuple[AcceptedAttempt, ...]] = {}
+        self._researchers_by_namekey: dict[Namekey, Researcher] = {}
+        self._ground_truth: Mapping[Namekey, GroundTruthRecord] = {}
+        self._attempt_records: Mapping[Namekey, tuple[AttemptRecord, ...]] = {}
+        self._accepted_attempts: Mapping[Namekey, tuple[AcceptedAttempt, ...]] = {}
 
     @property
     def active_run_id(self) -> UUID | None:
@@ -2475,28 +2007,28 @@ class ControlCentreController:
 
     async def start(self) -> None:
         self._researchers = await asyncio.to_thread(self._source_repository.load_researchers)
-        self._researchers_by_source_key = {
-            researcher.source_key: researcher for researcher in self._researchers
+        self._researchers_by_namekey = {
+            researcher.namekey: researcher for researcher in self._researchers
         }
         self._ground_truth = await asyncio.to_thread(
-            self._source_repository.load_ground_truth_by_source_key
+            self._source_repository.load_ground_truth_by_namekey
         )
-        await self._reconcile_and_load_attempts()
+        await self._backend.start()
+        await self._refresh_backend_state()
         restart_time = datetime.now(timezone.utc)
         for run in tuple(self._runs.values()):
-            if run.status in {RunStatus.QUEUED, RunStatus.RUNNING}:
+            if run.dashboard_owned and run.status in LIVE_RUN_STATUSES:
                 await self._codex.terminate_abandoned_run(run.run_id)
                 await self._append_run_event(
                     RunEvent(
                         run_id=run.run_id,
-                        source_key=run.source_key,
+                        namekey=run.namekey,
                         at=restart_time,
                         kind=RunEventKind.FAILED,
                         detail=Locale.RESTART_INTERRUPTED_RUN,
                     )
                 )
-        await self.refresh_idle_state(reconcile_before_busy_probe=True)
-        await self._backend.start()
+        await self.refresh_idle_state()
         self._worker_task = asyncio.create_task(self._worker())
 
     async def shutdown(self) -> None:
@@ -2510,14 +2042,13 @@ class ControlCentreController:
         if active_codex is not None:
             with contextlib.suppress(Exception):
                 await self._codex.cancel(active_codex)
-        await self._control_plane.clear()
         shutdown_time = datetime.now(timezone.utc)
         for run in tuple(self._runs.values()):
-            if run.status in LIVE_RUN_STATUSES:
+            if run.dashboard_owned and run.status in LIVE_RUN_STATUSES:
                 await self._append_run_event(
                     RunEvent(
                         run_id=run.run_id,
-                        source_key=run.source_key,
+                        namekey=run.namekey,
                         at=shutdown_time,
                         kind=RunEventKind.FAILED,
                         detail=Locale.SHUTDOWN_INTERRUPTED_RUN,
@@ -2528,18 +2059,18 @@ class ControlCentreController:
     async def queue(
         self,
         *,
-        source_key: SourceKey,
+        namekey: Namekey,
     ) -> UUID:
-        researcher = self._researchers_by_source_key.get(source_key)
+        researcher = self._researchers_by_namekey.get(namekey)
         if researcher is None:
-            raise KeyError(Locale.UNKNOWN_SOURCE_KEY_TEMPLATE.format(source_key=source_key))
+            raise KeyError(Locale.UNKNOWN_NAMEKEY_TEMPLATE.format(namekey=namekey))
         if researcher.cohort is ResearcherCohort.INELIGIBLE:
             raise ValueError(Locale.INELIGIBLE_QUEUE)
         run_id = uuid4()
         await self._append_run_event(
             RunEvent(
                 run_id=run_id,
-                source_key=source_key,
+                namekey=namekey,
                 at=datetime.now(timezone.utc),
                 kind=RunEventKind.QUEUED,
             )
@@ -2550,9 +2081,9 @@ class ControlCentreController:
     async def rerun(
         self,
         *,
-        source_key: SourceKey,
+        namekey: Namekey,
     ) -> UUID:
-        return await self.queue(source_key=source_key)
+        return await self.queue(namekey=namekey)
 
     async def cancel(
         self,
@@ -2567,7 +2098,7 @@ class ControlCentreController:
         await self._append_run_event(
             RunEvent(
                 run_id=run_id,
-                source_key=run.source_key,
+                namekey=run.namekey,
                 at=datetime.now(timezone.utc),
                 kind=RunEventKind.CANCEL_REQUESTED,
             )
@@ -2580,7 +2111,7 @@ class ControlCentreController:
                     await self._append_run_event(
                         RunEvent(
                             run_id=run_id,
-                            source_key=run.source_key,
+                            namekey=run.namekey,
                             at=datetime.now(timezone.utc),
                             kind=RunEventKind.FAILED,
                             detail=Locale.CODEX_CANCEL_FAILED_TEMPLATE.format(error=exc),
@@ -2592,87 +2123,74 @@ class ControlCentreController:
             await self._append_run_event(
                 RunEvent(
                     run_id=run_id,
-                    source_key=run.source_key,
+                    namekey=run.namekey,
                     at=datetime.now(timezone.utc),
                     kind=RunEventKind.CANCELED,
                 )
             )
 
-    async def acknowledge_push(
-        self,
-        *,
-        run_id: UUID,
-        request: PushAcceptedRequest,
-    ) -> None:
-        sanctioned = await self._control_plane.current()
-        if (
-            sanctioned is None
-            or sanctioned.run_id != run_id
-            or sanctioned.source_key != request.source_key
-            or sanctioned.session_id != request.session_id
-        ):
-            raise ValueError(Locale.ACCEPTED_PUSH_MISMATCH)
-        await self._append_run_event(
-            RunEvent(
-                run_id=run_id,
-                source_key=sanctioned.source_key,
-                at=datetime.now(timezone.utc),
-                kind=RunEventKind.PUSH_ACCEPTED,
-                session_id=sanctioned.session_id,
-                accepted_attempt_id=request.attempt_id,
-            )
-        )
-        await self._control_plane.revoke(run_id=run_id)
-
-    async def refresh_idle_state(
-        self,
-        *,
-        reconcile_before_busy_probe: bool = False,
-    ) -> None:
+    async def refresh_idle_state(self) -> None:
         if self._shutting_down:
             return
         async with self._idle_refresh_lock:
             if self._shutting_down:
                 return
-            if self._active_run_id is not None or await self._control_plane.current() is not None:
+            await self._refresh_backend_state()
+            if self._active_run_id is not None:
+                self._external_codex_busy = False
                 return
-            if not reconcile_before_busy_probe:
-                try:
-                    self._external_codex_busy = await self._codex.is_busy()
-                except Exception:
-                    if self._shutting_down:
-                        return
-                    raise
-                if self._external_codex_busy:
-                    self._archive_rescan_required = True
+            try:
+                self._external_codex_busy = (
+                    self._sanctioned_run is not None or await self._codex.is_busy()
+                )
+            except Exception:
+                if self._shutting_down:
                     return
-            if self._archive_rescan_required:
-                await self._reconcile_and_load_attempts()
-            if reconcile_before_busy_probe:
-                self._external_codex_busy = await self._codex.is_busy()
-                if self._external_codex_busy:
-                    self._archive_rescan_required = True
+                raise
 
-    async def _reconcile_and_load_attempts(self) -> None:
-        await asyncio.to_thread(self._detour_repository.reconcile_archived_attempts)
-        await asyncio.to_thread(
-            self._detour_repository.persist_control_run_events,
-            self._journal.load_events(),
-        )
-        control_run_events = await asyncio.to_thread(
-            self._detour_repository.load_control_run_events
-        )
-        self._runs = dict(RunJournal.replay(control_run_events))
-        self._archive_rescan_required = False
-        await self._load_attempts_from_database()
+    async def _refresh_backend_state(self) -> None:
+        snapshot = await asyncio.to_thread(self._backend_control.pull)
+        self._sanctioned_run = snapshot.sanctioned_run
+        self._runs = dict(replay_run_events(snapshot.events))
 
-    async def _load_attempts_from_database(self) -> None:
-        self._attempt_manifests = await asyncio.to_thread(
-            self._detour_repository.load_attempt_manifests
-        )
-        self._accepted_attempts = await asyncio.to_thread(
-            self._detour_repository.load_accepted_attempts
-        )
+        attempt_records: dict[Namekey, list[AttemptRecord]] = {}
+        for record in snapshot.attempts:
+            if record.namekey is None:
+                raise RuntimeError(Locale.ATTEMPT_DATABASE_INCONSISTENT)
+            attempt_records.setdefault(Namekey(record.namekey), []).append(record)
+        self._attempt_records = {
+            namekey: tuple(records) for namekey, records in attempt_records.items()
+        }
+
+        accepted_attempts: dict[Namekey, list[AcceptedAttempt]] = {}
+        for attempt in snapshot.accepted_attempts:
+            metadata = attempt.session_metadata
+            timestamp = datetime.fromisoformat(metadata.timestamp)
+            if timestamp.tzinfo is None:
+                raise RuntimeError(Locale.ATTEMPT_DATABASE_INCONSISTENT)
+            namekey = Namekey(attempt.namekey)
+            accepted_attempts.setdefault(namekey, []).append(
+                AcceptedAttempt(
+                    namekey=namekey,
+                    attempt_id=AttemptId(attempt.attempt_id),
+                    session_metadata=SessionMetadata(
+                        originator=metadata.originator,
+                        source=metadata.source,
+                        cli_version=metadata.cli_version,
+                        model_provider=metadata.model_provider,
+                        model=metadata.model,
+                        reasoning_effort=metadata.reasoning_effort,
+                        session_id=SessionId(metadata.session_id),
+                        timestamp=timestamp,
+                    ),
+                    values=attempt.values,
+                    footnotes=attempt.footnotes,
+                    footnote_arguments=attempt.footnote_arguments,
+                )
+            )
+        self._accepted_attempts = {
+            namekey: tuple(attempts) for namekey, attempts in accepted_attempts.items()
+        }
 
     async def snapshot(
         self,
@@ -2684,19 +2202,19 @@ class ControlCentreController:
         views = self._reconciler.reconcile_all(
             researchers=self._researchers,
             runs=self._runs,
-            attempt_manifests=self._attempt_manifests,
+            attempt_records=self._attempt_records,
             accepted_attempts=self._accepted_attempts,
         )
         all_rows = tuple(
             self._projector.project_researcher(
                 researcher_view=view,
-                ground_truth=self._ground_truth.get(view.researcher.source_key),
+                ground_truth=self._ground_truth.get(view.researcher.namekey),
                 variable=variable,
                 codex_busy=self.codex_busy,
             )
             for view in views
         )
-        search_text = selection.search_text.casefold().strip()
+        search_text = (selection.search_text or "").casefold().strip()
         rows = tuple(
             row
             for row, view in zip(all_rows, views, strict=True)
@@ -2710,7 +2228,7 @@ class ControlCentreController:
                 or search_text in view.researcher.last_name.casefold()
                 or search_text in view.researcher.draw_number.casefold()
                 or search_text == str(view.researcher.rnd)
-                or search_text in view.researcher.source_key.casefold()
+                or search_text in view.researcher.namekey.casefold()
                 or (
                     view.researcher.ineligibility_category is not None
                     and search_text in view.researcher.ineligibility_category.value.casefold()
@@ -2748,11 +2266,19 @@ class ControlCentreController:
     async def researcher_card(
         self,
         *,
-        source_key: SourceKey,
+        namekey: Namekey,
     ) -> ResearcherCardView:
-        if self.codex_busy:
-            raise RuntimeError(Locale.CARD_READ_SUSPENDED)
-        return await asyncio.to_thread(self._card_renderer.render, source_key)
+        researcher = self._researchers_by_namekey.get(namekey)
+        if researcher is None:
+            raise KeyError(Locale.UNKNOWN_NAMEKEY_TEMPLATE.format(namekey=namekey))
+        markdown = await asyncio.to_thread(self._backend_control.card, namekey)
+        return ResearcherCardView(
+            namekey=namekey,
+            draw_number=researcher.draw_number,
+            first_name=researcher.first_name,
+            last_name=researcher.last_name,
+            markdown=markdown,
+        )
 
     async def _worker(self) -> None:
         while True:
@@ -2776,19 +2302,17 @@ class ControlCentreController:
                 await self._append_run_event(
                     RunEvent(
                         run_id=run_id,
-                        source_key=run.source_key,
+                        namekey=run.namekey,
                         at=datetime.now(timezone.utc),
                         kind=(RunEventKind.CANCELED if canceled else RunEventKind.FAILED),
                         detail=None if canceled else str(exc),
                     )
                 )
             finally:
-                await self._control_plane.revoke(run_id=run_id)
                 self._active_codex = None
                 self._active_run_id = None
                 self._queue.task_done()
                 if not self._shutting_down:
-                    await self._load_attempts_from_database()
                     await self.refresh_idle_state()
 
     async def _wait_until_codex_idle(self, *, run_id: UUID) -> bool:
@@ -2817,7 +2341,7 @@ class ControlCentreController:
         await self._append_run_event(
             RunEvent(
                 run_id=run_id,
-                source_key=run.source_key,
+                namekey=run.namekey,
                 at=result.session_timestamp,
                 kind=RunEventKind.SESSION_DISCOVERED,
                 session_id=result.session_id,
@@ -2827,7 +2351,7 @@ class ControlCentreController:
         await self._append_run_event(
             RunEvent(
                 run_id=run_id,
-                source_key=run.source_key,
+                namekey=run.namekey,
                 at=datetime.now(timezone.utc),
                 kind=RunEventKind.ROLLOUT_DISCOVERED,
                 session_id=result.session_id,
@@ -2835,19 +2359,10 @@ class ControlCentreController:
             )
         )
         sanctioned_at = datetime.now(timezone.utc)
-        await self._control_plane.sanction(
-            SanctionedRun(
-                run_id=run_id,
-                source_key=run.source_key,
-                session_id=result.session_id,
-                rollout_jsonl=result.rollout_jsonl,
-                sanctioned_at=sanctioned_at,
-            )
-        )
         await self._append_run_event(
             RunEvent(
                 run_id=run_id,
-                source_key=run.source_key,
+                namekey=run.namekey,
                 at=sanctioned_at,
                 kind=RunEventKind.SANCTIONED,
                 session_id=result.session_id,
@@ -2859,13 +2374,12 @@ class ControlCentreController:
         await self._append_run_event(
             RunEvent(
                 run_id=run_id,
-                source_key=run.source_key,
+                namekey=run.namekey,
                 at=datetime.now(timezone.utc),
                 kind=RunEventKind.CODEX_EXITED,
                 codex_exit_code=exit_code,
             )
         )
-        await self._control_plane.revoke(run_id=run_id)
         final_status = await self._finalize_run(
             run_id=run_id,
             codex_exit_code=exit_code,
@@ -2873,7 +2387,7 @@ class ControlCentreController:
         await self._append_run_event(
             RunEvent(
                 run_id=run_id,
-                source_key=run.source_key,
+                namekey=run.namekey,
                 at=datetime.now(timezone.utc),
                 kind=RunEventKind(final_status.value),
                 codex_exit_code=exit_code,
@@ -2897,7 +2411,7 @@ class ControlCentreController:
         await self._append_run_event(
             RunEvent(
                 run_id=handle.run_id,
-                source_key=run.source_key,
+                namekey=run.namekey,
                 at=datetime.now(timezone.utc),
                 kind=event_kind,
                 remote_pid=(None if handle.remote_pid is None else int(handle.remote_pid)),
@@ -2919,14 +2433,14 @@ class ControlCentreController:
             return RunStatus.COMPLETE
         if run.session_id is not None:
             accepted = await self._accepted_attempt_for_session(
-                source_key=run.source_key,
+                namekey=run.namekey,
                 session_id=run.session_id,
             )
             if accepted is not None:
                 await self._append_run_event(
                     RunEvent(
                         run_id=run_id,
-                        source_key=run.source_key,
+                        namekey=run.namekey,
                         at=datetime.now(timezone.utc),
                         kind=RunEventKind.PUSH_ACCEPTED,
                         session_id=run.session_id,
@@ -2939,13 +2453,11 @@ class ControlCentreController:
     async def _accepted_attempt_for_session(
         self,
         *,
-        source_key: SourceKey,
+        namekey: Namekey,
         session_id: SessionId,
     ) -> AcceptedAttempt | None:
-        attempts = await asyncio.to_thread(
-            self._detour_repository.load_accepted_attempts_for_source_key,
-            source_key,
-        )
+        await self._refresh_backend_state()
+        attempts = self._accepted_attempts.get(namekey, ())
         matches = [
             attempt for attempt in attempts if attempt.session_metadata.session_id == session_id
         ]
@@ -2957,20 +2469,8 @@ class ControlCentreController:
         self,
         event: RunEvent,
     ) -> None:
-        self._journal.append(event)
-        events = self._journal.load_events()
-        if self._backend.status is BackendStatus.RUNNING:
-            await asyncio.to_thread(self._backend.persist_run_events, events)
-            persisted_events = events
-        else:
-            await asyncio.to_thread(
-                self._detour_repository.persist_control_run_events,
-                events,
-            )
-            persisted_events = await asyncio.to_thread(
-                self._detour_repository.load_control_run_events
-            )
-        self._runs = dict(RunJournal.replay(persisted_events))
+        await asyncio.to_thread(self._backend_control.push, event)
+        await self._refresh_backend_state()
 
 
 # =============================================================================
@@ -3011,9 +2511,9 @@ class ControlCentrePage:
         self._grid_initialized = False
         self._grid_variable_key = self._selection.variable_key
         self._grid_rows_by_id: dict[str, dict[str, Any]] = {}
-        self._row_views_by_source_key: dict[SourceKey, ResearcherGridRow] = {}
-        self._expanded_history_source_key: SourceKey | None = None
-        self._card_cache: dict[SourceKey, ResearcherCardView] = {}
+        self._row_views_by_namekey: dict[Namekey, ResearcherGridRow] = {}
+        self._expanded_history_namekey: Namekey | None = None
+        self._card_cache: dict[Namekey, ResearcherCardView] = {}
 
     @property
     def selection(self) -> UiSelection:
@@ -3316,8 +2816,8 @@ class ControlCentrePage:
         for row in snapshot.rows:
             latest = row.latest
             rows.append({
-                GRID_ROW_ID_FIELD: row.source_key,
-                GRID_SOURCE_KEY_FIELD: row.source_key,
+                GRID_ROW_ID_FIELD: row.namekey,
+                GRID_NAMEKEY_FIELD: row.namekey,
                 GRID_RUN_ID_FIELD: (None if latest.run_id is None else str(latest.run_id)),
                 GRID_RND_FIELD: row.rnd,
                 GRID_DRAW_FIELD: latest.draw_number,
@@ -3402,7 +2902,7 @@ class ControlCentrePage:
         if snapshot is None:
             snapshot = await self._controller.snapshot(selection=self._selection)
         variable = VARIABLE_SPEC_BY_KEY[self._selection.variable_key]
-        self._row_views_by_source_key = {row.source_key: row for row in snapshot.rows}
+        self._row_views_by_namekey = {row.namekey: row for row in snapshot.rows}
         self.refresh_attempt_history()
         rows = self.grid_rows(snapshot=snapshot)
         self.sync_selected_action(rows)
@@ -3445,11 +2945,11 @@ class ControlCentrePage:
         self._grid_rows_by_id = desired_by_id
 
     def refresh_attempt_history(self) -> None:
-        source_key = self._expanded_history_source_key
+        namekey = self._expanded_history_namekey
         table = self._handles.attempt_history_table
-        if source_key is None or table is None:
+        if namekey is None or table is None:
             return
-        row = self._row_views_by_source_key.get(source_key)
+        row = self._row_views_by_namekey.get(namekey)
         if row is None:
             return
         table.update_rows(
@@ -3458,13 +2958,13 @@ class ControlCentrePage:
         )
 
     async def refresh_card(self) -> None:
-        source_key = self._selection.selected_source_key
-        if source_key is None or self._controller.codex_busy:
+        namekey = self._selection.selected_namekey
+        if namekey is None:
             return
-        card = self._card_cache.get(source_key)
+        card = self._card_cache.get(namekey)
         if card is None:
-            card = await self._controller.researcher_card(source_key=source_key)
-            self._card_cache[source_key] = card
+            card = await self._controller.researcher_card(namekey=namekey)
+            self._card_cache[namekey] = card
         await self._show_card(card)
 
     async def _show_card(self, card: ResearcherCardView) -> None:
@@ -3481,11 +2981,11 @@ class ControlCentrePage:
 
     def show_attempt_history(
         self,
-        source_key: SourceKey,
+        namekey: Namekey,
     ) -> None:
         expansion = self._handles.attempt_history_expansion
         table = self._handles.attempt_history_table
-        row = self._row_views_by_source_key.get(source_key)
+        row = self._row_views_by_namekey.get(namekey)
         if expansion is None or table is None or row is None:
             return
         variable = VARIABLE_SPEC_BY_KEY[self._selection.variable_key]
@@ -3499,7 +2999,7 @@ class ControlCentrePage:
         )
         expansion.set_visibility(True)
         expansion.open()
-        self._expanded_history_source_key = source_key
+        self._expanded_history_namekey = namekey
 
     async def on_variable_changed(
         self,
@@ -3509,9 +3009,9 @@ class ControlCentrePage:
             raise KeyError(Locale.UNKNOWN_VARIABLE_TEMPLATE.format(variable_key=variable_key))
         self._selection.variable_key = variable_key
         await self.refresh_grid()
-        expanded_source_key = self._expanded_history_source_key
-        if expanded_source_key is not None:
-            self.show_attempt_history(expanded_source_key)
+        expanded_namekey = self._expanded_history_namekey
+        if expanded_namekey is not None:
+            self.show_attempt_history(expanded_namekey)
 
     async def on_status_filter_changed(
         self,
@@ -3536,18 +3036,18 @@ class ControlCentrePage:
 
     async def on_researcher_selected(
         self,
-        source_key: SourceKey,
+        namekey: Namekey,
     ) -> None:
-        self._selection.selected_source_key = source_key
+        self._selection.selected_namekey = namekey
         await self.refresh_card()
 
     def sync_selected_action(
         self,
         rows: Sequence[Mapping[str, object]],
     ) -> None:
-        selected_source_key = self._selection.selected_source_key
+        selected_namekey = self._selection.selected_namekey
         selected = next(
-            (row for row in rows if row.get(GRID_SOURCE_KEY_FIELD) == selected_source_key),
+            (row for row in rows if row.get(GRID_NAMEKEY_FIELD) == selected_namekey),
             None,
         )
         if selected is None:
@@ -3585,20 +3085,20 @@ class ControlCentrePage:
 
     async def on_queue(
         self,
-        source_key: SourceKey,
+        namekey: Namekey,
     ) -> None:
-        self._card_cache.pop(source_key, None)
-        run_id = await self._controller.queue(source_key=source_key)
+        self._card_cache.pop(namekey, None)
+        run_id = await self._controller.queue(namekey=namekey)
         self._selection.selected_run_id = run_id
         self._selection.selected_action = RunAction.CANCEL
         self.update_execute_button()
 
     async def on_rerun(
         self,
-        source_key: SourceKey,
+        namekey: Namekey,
     ) -> None:
-        self._card_cache.pop(source_key, None)
-        run_id = await self._controller.rerun(source_key=source_key)
+        self._card_cache.pop(namekey, None)
+        run_id = await self._controller.rerun(namekey=namekey)
         self._selection.selected_run_id = run_id
         self._selection.selected_action = RunAction.CANCEL
         self.update_execute_button()
@@ -3626,36 +3126,36 @@ class ControlCentrePage:
         self,
         *,
         action: RunAction,
-        source_key: SourceKey,
+        namekey: Namekey,
         run_id: UUID | None,
     ) -> None:
         if action is RunAction.QUEUE:
-            await self.on_queue(source_key)
+            await self.on_queue(namekey)
         elif action is RunAction.RERUN:
-            await self.on_rerun(source_key)
+            await self.on_rerun(namekey)
         elif action is RunAction.CANCEL and run_id is not None:
             await self.on_cancel(run_id)
 
     async def on_execute_selected(self) -> None:
-        source_key = self._selection.selected_source_key
+        namekey = self._selection.selected_namekey
         action = self._selection.selected_action
-        if source_key is None or action is None or action is RunAction.DISABLED:
+        if namekey is None or action is None or action is RunAction.DISABLED:
             return
         await self.on_grid_action(
             action=action,
-            source_key=source_key,
+            namekey=namekey,
             run_id=self._selection.selected_run_id,
         )
 
     async def _on_grid_cell_clicked(self, event: Any) -> None:
         arguments = event.args
         data = arguments.get(AgGrid.EVENT_DATA, {})
-        source_key = SourceKey(str(data.get(GRID_SOURCE_KEY_FIELD, "")))
-        if not source_key:
+        namekey = Namekey(str(data.get(GRID_NAMEKEY_FIELD, "")))
+        if not namekey:
             return
-        self._selection.selected_source_key = source_key
+        self._selection.selected_namekey = namekey
         self.sync_selected_action((data,))
-        self.show_attempt_history(source_key)
+        self.show_attempt_history(namekey)
 
 
 # =============================================================================
@@ -3668,13 +3168,10 @@ class ApplicationServices:
     configuration: RuntimeConfiguration
 
     source_repository: SourceRepository
-    detour_repository: DetourRepository
-    journal: RunJournal
-    card_renderer: ResearcherCardRenderer
 
     backend: BackendSupervisor
+    backend_control: BackendControlClient
     codex: CodexRunner
-    control_plane: ControlPlane
 
     reconciler: AttemptReconciler
     projector: VariableProjector
@@ -3693,49 +3190,38 @@ def create_services(
 ) -> ApplicationServices:
     configuration = RuntimeConfiguration(config_path=config_path)
     source_repository = SourceRepository(configuration=configuration)
-    detour_repository = DetourRepository(configuration=configuration)
-    journal = RunJournal(path=configuration.run_journal_path)
-    card_renderer = ResearcherCardRenderer(
-        source_repository=source_repository,
-        detour_repository=detour_repository,
-        configuration=configuration,
-    )
+    control_token = uuid4().hex
     backend = BackendSupervisor(
         repository_root=REPOSITORY_ROOT,
         config_path=configuration.config_path,
-        control_url=CONTROL_CENTRE_BASE_URL,
         openalex_api_key=configuration.openalex_api_key,
         appendwatch_report=configuration.appendwatch_report,
-        control_run_events_token=uuid4().hex,
+        control_run_events_token=control_token,
+    )
+    backend_control = BackendControlClient(
+        base_url=BACKEND_BASE_URL,
+        token=control_token,
     )
     codex = CodexRunner(
         timezone=configuration.timezone,
         openalex_api_key=configuration.openalex_api_key,
     )
-    control_plane = ControlPlane()
     reconciler = AttemptReconciler()
     projector = VariableProjector()
     controller = ControlCentreController(
-        configuration=configuration,
         source_repository=source_repository,
-        detour_repository=detour_repository,
-        journal=journal,
-        card_renderer=card_renderer,
         backend=backend,
+        backend_control=backend_control,
         codex=codex,
-        control_plane=control_plane,
         reconciler=reconciler,
         projector=projector,
     )
     return ApplicationServices(
         configuration=configuration,
         source_repository=source_repository,
-        detour_repository=detour_repository,
-        journal=journal,
-        card_renderer=card_renderer,
         backend=backend,
+        backend_control=backend_control,
         codex=codex,
-        control_plane=control_plane,
         reconciler=reconciler,
         projector=projector,
         controller=controller,
@@ -3746,42 +3232,6 @@ def require_services() -> ApplicationServices:
     if SERVICES is None:
         raise RuntimeError(Locale.SERVICES_NOT_STARTED)
     return SERVICES
-
-
-# =============================================================================
-# Backend-facing loopback control API
-# =============================================================================
-
-
-@app.get(
-    CONTROL_CURRENT_PATH,
-    response_model=ControlSnapshotResponse,
-    include_in_schema=False,
-)
-async def control_current() -> ControlSnapshotResponse:
-    return await require_services().control_plane.snapshot()
-
-
-@app.post(
-    CONTROL_ACCEPTED_PATH_TEMPLATE,
-    response_model=PushAcceptedResponse,
-    include_in_schema=False,
-)
-async def control_push_accepted(
-    run_id: UUID,
-    request: PushAcceptedRequest,
-) -> PushAcceptedResponse:
-    try:
-        await require_services().controller.acknowledge_push(
-            run_id=run_id,
-            request=request,
-        )
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=str(exc),
-        ) from None
-    return PushAcceptedResponse(acknowledged=True)
 
 
 @app.get(CHROME_DEVTOOLS_PATH, include_in_schema=False)

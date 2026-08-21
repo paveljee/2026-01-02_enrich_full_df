@@ -20,6 +20,7 @@ from uuid import UUID, uuid4
 from playwright.sync_api import Page, expect, sync_playwright
 
 from src.detours.detour_ai_augment.src.control_centre.dashboard import ui as control_ui
+from src.helpers.data_models import NameKey
 from src.helpers.vars import KTP_FILENAME_COL
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
@@ -58,8 +59,8 @@ EXPECTED_GRID_ARIA_ROW_COUNT = control_ui.EXPECTED_SOURCE_RESEARCHERS + GRID_ARI
 def browser_researchers() -> tuple[control_ui.Researcher, ...]:
     researchers = [
         control_ui.Researcher(
-            source_key=control_ui.SourceKey(
-                control_ui.NameKey(
+            namekey=control_ui.Namekey(
+                NameKey(
                     first_name="Pilot Ineligible",
                     last_name="Researcher",
                 ).to_json_key()
@@ -72,8 +73,8 @@ def browser_researchers() -> tuple[control_ui.Researcher, ...]:
             ineligibility_category=(control_ui.IneligibilityCategory.RELEASE_BATCH_SUBSET_8),
         ),
         control_ui.Researcher(
-            source_key=control_ui.SourceKey(
-                control_ui.NameKey(
+            namekey=control_ui.Namekey(
+                NameKey(
                     first_name="Pilot Eligible",
                     last_name="Researcher",
                 ).to_json_key()
@@ -102,8 +103,8 @@ def browser_researchers() -> tuple[control_ui.Researcher, ...]:
         last_name = f"Last {index + 1}"
         researchers.append(
             control_ui.Researcher(
-                source_key=control_ui.SourceKey(
-                    control_ui.NameKey(
+                namekey=control_ui.Namekey(
+                    NameKey(
                         first_name=first_name,
                         last_name=last_name,
                     ).to_json_key()
@@ -122,16 +123,16 @@ def browser_researchers() -> tuple[control_ui.Researcher, ...]:
 class BrowserController:
     def __init__(self) -> None:
         self._researchers = browser_researchers()
-        self._status_by_source_key = {
-            researcher.source_key: control_ui.RunStatus.READY for researcher in self._researchers
+        self._status_by_namekey = {
+            researcher.namekey: control_ui.RunStatus.READY for researcher in self._researchers
         }
-        self._run_id_by_source_key: dict[control_ui.SourceKey, UUID] = {}
-        self._attempt_run_ids_by_source_key: dict[
-            control_ui.SourceKey,
+        self._run_id_by_namekey: dict[control_ui.Namekey, UUID] = {}
+        self._attempt_run_ids_by_namekey: dict[
+            control_ui.Namekey,
             list[UUID],
-        ] = {researcher.source_key: [] for researcher in self._researchers}
+        ] = {researcher.namekey: [] for researcher in self._researchers}
         self._status_by_run_id: dict[UUID, control_ui.RunStatus] = {}
-        self._card_render_count: Counter[control_ui.SourceKey] = Counter()
+        self._card_render_count: Counter[control_ui.Namekey] = Counter()
 
     @property
     def active_run_id(self) -> None:
@@ -163,7 +164,7 @@ class BrowserController:
             for researcher in self._researchers
             if researcher.cohort is not control_ui.ResearcherCohort.INELIGIBLE
         )
-        statuses = [self._status_by_source_key[researcher.source_key] for researcher in eligible]
+        statuses = [self._status_by_namekey[researcher.namekey] for researcher in eligible]
         return control_ui.UiSnapshot(
             counts=control_ui.DashboardCounts(
                 total=len(self._researchers),
@@ -197,8 +198,8 @@ class BrowserController:
         researcher: control_ui.Researcher,
         variable: control_ui.VariableSpec,
     ) -> control_ui.ResearcherGridRow:
-        status = self._status_by_source_key[researcher.source_key]
-        run_id = self._run_id_by_source_key.get(researcher.source_key)
+        status = self._status_by_namekey[researcher.namekey]
+        run_id = self._run_id_by_namekey.get(researcher.namekey)
         attempts = tuple(
             self._attempt_projection(
                 researcher=researcher,
@@ -207,7 +208,7 @@ class BrowserController:
                 attempt_index=attempt_index,
             )
             for attempt_index, attempt_run_id in enumerate(
-                self._attempt_run_ids_by_source_key[researcher.source_key]
+                self._attempt_run_ids_by_namekey[researcher.namekey]
             )
         )
         projection = (
@@ -215,7 +216,7 @@ class BrowserController:
             if attempts
             else control_ui.AttemptVariableProjection(
                 run_id=run_id,
-                source_key=researcher.source_key,
+                namekey=researcher.namekey,
                 draw_number=researcher.draw_number,
                 first_name=researcher.first_name,
                 last_name=researcher.last_name,
@@ -235,7 +236,7 @@ class BrowserController:
             )
         )
         return control_ui.ResearcherGridRow(
-            source_key=researcher.source_key,
+            namekey=researcher.namekey,
             rnd=researcher.rnd,
             cohort=researcher.cohort,
             ineligibility_category=researcher.ineligibility_category,
@@ -255,7 +256,7 @@ class BrowserController:
         ordinal = attempt_index + 1
         return control_ui.AttemptVariableProjection(
             run_id=run_id,
-            source_key=researcher.source_key,
+            namekey=researcher.namekey,
             draw_number=researcher.draw_number,
             first_name=researcher.first_name,
             last_name=researcher.last_name,
@@ -280,7 +281,7 @@ class BrowserController:
         researcher: control_ui.Researcher,
         selection: control_ui.UiSelection,
     ) -> bool:
-        status = self._status_by_source_key[researcher.source_key]
+        status = self._status_by_namekey[researcher.namekey]
         search = selection.search_text.casefold().strip()
         return (
             (selection.status_filter is None or selection.status_filter is status)
@@ -291,20 +292,20 @@ class BrowserController:
                 or search in researcher.last_name.casefold()
                 or search in researcher.draw_number.casefold()
                 or search == str(researcher.rnd)
-                or search in researcher.source_key.casefold()
+                or search in researcher.namekey.casefold()
             )
         )
 
     async def researcher_card(
         self,
         *,
-        source_key: control_ui.SourceKey,
+        namekey: control_ui.Namekey,
     ) -> control_ui.ResearcherCardView:
-        researcher = next(item for item in self._researchers if item.source_key == source_key)
-        self._card_render_count[source_key] += 1
-        render_count = self._card_render_count[source_key]
+        researcher = next(item for item in self._researchers if item.namekey == namekey)
+        self._card_render_count[namekey] += 1
+        render_count = self._card_render_count[namekey]
         return control_ui.ResearcherCardView(
-            source_key=source_key,
+            namekey=namekey,
             draw_number=researcher.draw_number,
             first_name=researcher.first_name,
             last_name=researcher.last_name,
@@ -318,28 +319,28 @@ class BrowserController:
             ),
         )
 
-    async def queue(self, *, source_key: control_ui.SourceKey) -> UUID:
-        researcher = next(item for item in self._researchers if item.source_key == source_key)
+    async def queue(self, *, namekey: control_ui.Namekey) -> UUID:
+        researcher = next(item for item in self._researchers if item.namekey == namekey)
         if researcher.cohort is control_ui.ResearcherCohort.INELIGIBLE:
-            raise ValueError("ineligible source keys cannot be queued")
+            raise ValueError("ineligible namekeys cannot be queued")
         run_id = uuid4()
-        self._run_id_by_source_key[source_key] = run_id
-        self._attempt_run_ids_by_source_key[source_key].append(run_id)
+        self._run_id_by_namekey[namekey] = run_id
+        self._attempt_run_ids_by_namekey[namekey].append(run_id)
         self._status_by_run_id[run_id] = control_ui.RunStatus.QUEUED
-        self._status_by_source_key[source_key] = control_ui.RunStatus.QUEUED
+        self._status_by_namekey[namekey] = control_ui.RunStatus.QUEUED
         return run_id
 
-    async def rerun(self, *, source_key: control_ui.SourceKey) -> UUID:
-        return await self.queue(source_key=source_key)
+    async def rerun(self, *, namekey: control_ui.Namekey) -> UUID:
+        return await self.queue(namekey=namekey)
 
     async def cancel(self, *, run_id: UUID) -> None:
-        source_key = next(
+        namekey = next(
             source
-            for source, candidate in self._run_id_by_source_key.items()
+            for source, candidate in self._run_id_by_namekey.items()
             if candidate == run_id
         )
         self._status_by_run_id[run_id] = control_ui.RunStatus.CANCELED
-        self._status_by_source_key[source_key] = control_ui.RunStatus.CANCELED
+        self._status_by_namekey[namekey] = control_ui.RunStatus.CANCELED
 
 
 def available_e2e_port() -> int:
@@ -353,10 +354,7 @@ def serve_e2e_dashboard(*, port: int) -> None:
     controller = BrowserController()
     control_ui.SERVICES = cast(
         control_ui.ApplicationServices,
-        SimpleNamespace(
-            controller=controller,
-            control_plane=control_ui.ControlPlane(),
-        ),
+        SimpleNamespace(controller=controller),
     )
     control_ui.configure_application_lifecycle()
     control_ui.ui.run(
