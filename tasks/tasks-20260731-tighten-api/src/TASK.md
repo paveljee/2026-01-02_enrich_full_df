@@ -19,6 +19,10 @@ SPECS="$TASK_DIR/build/SPECS.ipynb"
 > The TASK/WORK combo should stand alone at all times.
 > WORK should never carry any stale baggage.
 
+## never
+never remove inline comments
+marked as signed-off by human.
+
 ### prerequisites and setup
 AI must interpret how it understood this TASK
 as prescribed in `$TASK_DIR/Makefile`,
