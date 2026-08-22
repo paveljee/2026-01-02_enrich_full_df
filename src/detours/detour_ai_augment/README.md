@@ -4,34 +4,70 @@
 > This document contains minimal AI-generated text and was primarily written by [@paveljee][paveljee]
 
 A reproducible architecture for running an isolated AI agent against a task-oriented backend API.
-
 The AI Agent Runtime pulls work from the Backend, uses an LLM Inference API to complete it, and pushes the result back. A Human Operator deploys, operates, and reviews the system through a Control Centre.
+This is a **feature** in the KTP HCR project.
 
 ## Architecture
 
+The architecture is described in [Acme][acme-1997]-ish terms,
+the "ish" being due to the fact that
+the description does not necessarily subscribe to Acme in full complete faith
+but rather reuses some of the basic primitives from the 1997 paper.
+A specific formal implementation,
+perhaps at an even higher level of abstraction than Acme, is
+the [RDF/Turtle file](./assets/hcr_augment_agent_architecture.drawrdf.ttl)
+from which the below diagram was [programmatically derived][giacomociti-rdf2dot].
+
 ![HCR Augment Agent Architecture](./assets/hcr_augment_agent_architecture.svg)
 
-_Figure 1. Architecture of the AI Augmentation Detour of the KTP HCR Pipeline. `owl:NamedIndividual` indicates that each node is declared as an individually identifiable entity in the ontology._
+_Figure 1. Architecture of the AI Augmentation Detour of the KTP HCR Pipeline. `owl:NamedIndividual` indicates that each graph node is declared as an individually identifiable entity in the ontology._
 
 **Abbreviations:** AI, artificial intelligence; API, application programming interface; DB, database; HCR, [Highly-Cited Researcher][clarivate-hcr]; KTP, [Knowledge Translation Program][ktp]; LLM, [large language model][google-kg-llm]; OWL, [Web Ontology Language][owl2]; RDF, [Resource Description Framework][rdf11].
 
 ----
 
-The architecture contains five separate entities (Figure 1).
+The architecture contains five **components** (Figure 1).
 
-* **Human Operator** — operates the Control Centre, AI Agent Runtime, and Backend. The operator may also operate the Inference API when it is self-hosted.
-* **Control Centre** — orchestrates the AI Agent Runtime and Backend.
-* **AI Agent Runtime** — runs the agent and acts as an API client of the Backend.
-* **LLM Inference API** — provides large language model (LLM) inference to the AI Agent Runtime. OpenAI is the default provider (some alternatives: OpenRouter, Ollama).
-* **Backend** — exposes the task API and stores application data, logs, and submissions.
+* **Human Operator** — operates
+  the Control Centre, AI Agent Runtime, and Backend.
+  The operator may also operate the Inference API when it is self-hosted.
+* **Control Centre** — orchestrates
+  the AI Agent Runtime and Backend.
+* **AI Agent Runtime** — runs
+  the agent and acts as an API client of the Backend.
+* **LLM Inference API** — provides
+  large language model (LLM) inference to the AI Agent Runtime.
+  OpenAI is the default provider (some alternatives: OpenRouter, Ollama).
+* **Backend** — exposes
+  the task API and stores application data, logs, and submissions.
 
-The AI Agent Runtime and Backend must be deployed as separate systems. The Backend may run on the Control Centre host or on another server, but it must not run inside the AI Agent Runtime. The AI Agent Runtime must not run on the Control Centre host except as a guest virtual machine (VM, e.g., Lima on macOS).
+The AI Agent Runtime and Backend must be deployed as separate systems.
+The Backend may run on the Control Centre host or on another server,
+but it must not run inside the AI Agent Runtime.
+The AI Agent Runtime must not run on the Control Centre host
+except as a guest virtual machine (VM, e.g., Lima on macOS).
 
-The LLM Inference API accesses the Backend API by operating the AI Agent Runtime; more precisely, the API calls are invoked by the Runtime itself whereas generative outputs of _some_ of these calls trigger tools on the Runtime as in routine [LLM function calling][openai-function-calling].
+The LLM Inference API accesses the Backend API by operating the AI Agent Runtime;
+more precisely, the API calls are invoked by the Runtime itself
+whereas generative outputs of _some_ of these calls trigger tools on the Runtime
+as in routine [LLM function calling][openai-function-calling].
 
-The LLM Inference API and the AI Agent Runtime are not authorized to access the Backend proper except via the exposed Backend API.
+The LLM Inference API and the AI Agent Runtime are
+not authorized to access the Backend proper
+except via the exposed Backend API.
 
-Neither the LLM Inference API nor the AI Agent Runtime is authorized to access the Control Centre.
+Neither the LLM Inference API
+nor the AI Agent Runtime is
+authorized to access the Control Centre.
+
+The specific **component ports** as well as
+the **connectors** and **connector roles**
+to complete the Acme-ish description of 
+the **system** architecture of the feature
+may be prescribed elsewhere, e.g., in
+`tasks/tasks-20260731-tighten-api/src/TASK.md`,
+where the description of **connector properties** is
+given as [Gherkin][gherkin-docs]-ish **scenarios**.
 
 ## Workflow
 
@@ -406,6 +442,8 @@ Even when the Codex sandbox is configured with unrestricted local access, that a
 
 [paveljee]: https://github.com/paveljee "paveljee (Pavel Zhelnov) | GitHub"
 
+[acme-1997]: https://dl.acm.org/doi/abs/10.5555/782010.782017 "David Garlan, Robert Monroe, and David Wile. 1997. Acme: an architecture description interchange language. In Proceedings of the 1997 conference of the Centre for Advanced Studies on Collaborative research (CASCON '97). IBM Press, 7."
+
 [ktp]: https://knowledgetranslation.net/featured-project-research-integrity-project-exploring-diversity-in-clarivates-highly-cited-researchers-list/ "Knowledge Translation Program"
 
 [clarivate-hcr]: https://clarivate.com/highly-cited-researchers/ "Clarivate Highly Cited Researchers"
@@ -413,6 +451,10 @@ Even when the Codex sandbox is configured with unrestricted local access, that a
 [owl2]: http://www.w3.org/TR/owl2-overview/ "OWL 2 Web Ontology Language Document Overview: W3C Recommendation"
 
 [rdf11]: http://www.w3.org/TR/rdf11-concepts/ "RDF 1.1 Concepts and Abstract Syntax: W3C Recommendation"
+
+[giacomociti-rdf2dot]: https://giacomociti.github.io/rdf2dot/ "giacomociti/rdf2dot | A simple RDF visualization tool based on GraphViz"
+
+[gherkin-docs]: https://cucumber.io/docs/gherkin/reference "Gherkin Reference | Cucumber"
 
 [google-kg-llm]: https://www.google.com/search?kgmid=/g/11kc9956b3 "Large language model - Google Knowledge Graph ID"
 
