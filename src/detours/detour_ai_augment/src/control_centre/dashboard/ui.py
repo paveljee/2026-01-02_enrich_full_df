@@ -23,10 +23,9 @@ from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
 import duckdb
-import yaml
 from fastapi import status
 from nicegui import app, ui
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import ValidationError
 
 from src.helpers.vars import (
     DRAW_LABEL,
@@ -53,26 +52,19 @@ from ...backend.api import (
     EXPECTED_INELIGIBLE_RESEARCHERS,
     EXPECTED_NO_GROUND_TRUTH_RESEARCHERS,
     EXPECTED_SOURCE_RESEARCHERS,
-    FORBIDDEN_NORMALIZED_PATH_PARTS,
     HTTP_CONTENT_TYPE_HEADER,
     HTTP_GET_METHOD,
     HTTP_IDEMPOTENCY_KEY_HEADER,
     HTTP_POST_METHOD,
     JSON_MEDIA_TYPE,
-    AiAugmentDetourConfig,
     AttemptRecord,
     ControlPullResponse,
     ControlPushRequest,
     ControlPushResponse,
     ControlRun,
     IneligibilityCategory,
-    SourcePopulationRow,
-    derive_source_population,
-    eligible_cohorts,
     ground_truth_for_researcher,
-    load_release_batches,
     load_source_researcher,
-    registered_release_map,
 )
 from ...backend.api import (
     ControlRunEvent as RunEvent,
@@ -91,7 +83,57 @@ from ...backend.helpers.vars import (
     KTP_AI_AUGMENT_FOOTNOTES_COL,
 )
 from .helpers.aggrid import AgGrid
+from .helpers.data_models.ai_augment_context import (
+    AiAugmentCtlCtrContext,
+)
 from .helpers.locale import Locale
+from .helpers.vars import (
+    AIVM_SSH_CONNECTION_COMMAND,
+    AIVM_SSH_FORWARD_COMMAND,
+    AIVM_SSH_TARGET,
+    BACKEND_BASE_URL,
+    BACKEND_MODULE,
+    BACKEND_OPENAPI_URL,
+    BACKEND_PULL_URL,
+    BACKEND_READY_POLL_SECONDS,
+    BACKEND_READY_TIMEOUT_SECONDS,
+    CHROME_DEVTOOLS_PATH,
+    CODEX_CANCEL_TIMEOUT_SECONDS,
+    CODEX_DISCOVERY_POLL_SECONDS,
+    CODEX_DISCOVERY_TIMEOUT_SECONDS,
+    CODEX_ENV_EXPORT_TEMPLATE,
+    CODEX_ENV_PATH,
+    CODEX_EXEC_COMMAND,
+    CODEX_INPUT_TEMPLATE,
+    CODEX_REMOTE_BUSY_COMMAND,
+    CODEX_REMOTE_BUSY_MARKER,
+    CODEX_REMOTE_EXEC_COMMAND_TEMPLATE,
+    CODEX_REMOTE_FIND_NEW_ROLLOUT_COMMAND_TEMPLATE,
+    CODEX_REMOTE_FIND_ROLLOUT_COMMAND_TEMPLATE,
+    CODEX_REMOTE_FIRST_LINE_COMMAND_TEMPLATE,
+    CODEX_REMOTE_KILL_SIGNAL,
+    CODEX_REMOTE_PID_READ_COMMAND_TEMPLATE,
+    CODEX_REMOTE_PREPARE_RUN_COMMAND_TEMPLATE,
+    CODEX_REMOTE_PROCESS_ALIVE_COMMAND_TEMPLATE,
+    CODEX_REMOTE_PROCESS_ALIVE_MARKER,
+    CODEX_REMOTE_SIGNAL_COMMAND_TEMPLATE,
+    CODEX_REMOTE_TERMINATE_SIGNAL,
+    CODEX_REMOTE_WRITE_FILE_COMMAND_TEMPLATE,
+    CODEX_ROLLOUT_FILENAME_TEMPLATE,
+    CODEX_RUN_MARKER_TEMPLATE,
+    CODEX_RUN_PID_TEMPLATE,
+    CODEX_SESSIONS_ROOT,
+    CODEX_WORKDIR,
+    CONTROL_CENTRE_BASE_URL,
+    CONTROL_CENTRE_HOST,
+    CONTROL_CENTRE_PORT,
+    CONTROL_HTTP_TIMEOUT_SECONDS,
+    DEFAULT_CONFIG_PATH,
+    PROCESS_STOP_TIMEOUT_SECONDS,
+    REPOSITORY_ROOT,
+    TEXT_DECODE_ERROR_POLICY,
+    TEXT_ENCODING,
+)
 
 
 class NiceGui:
@@ -111,12 +153,7 @@ class NiceGui:
 # Paths / process configuration
 # =============================================================================
 
-REPOSITORY_ROOT_PARENT_INDEX: Final = 6
-REPOSITORY_ROOT: Final = Path(__file__).resolve().parents[REPOSITORY_ROOT_PARENT_INDEX]
 
-DEFAULT_CONFIG_PATH: Final = REPOSITORY_ROOT / "config_ai_augment.json"
-
-BACKEND_MODULE: Final = "src.detours.detour_ai_augment.src.backend.api"
 BACKEND_COMMAND_PREFIX: Final = (
     sys.executable,
     "-m",
@@ -124,146 +161,11 @@ BACKEND_COMMAND_PREFIX: Final = (
     CONFIG_OPTION,
 )
 
-BACKEND_HOST: Final = "127.0.0.1"
-BACKEND_PORT: Final = 8612
-BACKEND_BASE_URL: Final = f"http://{BACKEND_HOST}:{BACKEND_PORT}"
-BACKEND_OPENAPI_URL: Final = f"{BACKEND_BASE_URL}/openapi.json"
-BACKEND_PULL_URL: Final = f"{BACKEND_BASE_URL}/pull"
 BACKEND_CONTROL_PUSH_URL: Final = f"{BACKEND_BASE_URL}{CONTROL_PUSH_PATH}"
 BACKEND_CONTROL_PULL_URL: Final = f"{BACKEND_BASE_URL}{CONTROL_PULL_PATH}"
-BACKEND_READY_TIMEOUT_SECONDS: Final = 30
-BACKEND_READY_POLL_SECONDS: Final = 0.1
-PROCESS_STOP_TIMEOUT_SECONDS: Final = 10
-TEXT_ENCODING: Final = "utf-8"
-TEXT_DECODE_ERROR_POLICY: Final = "replace"
-CONTROL_CENTRE_HOST: Final = "127.0.0.1"
-CONTROL_CENTRE_PORT: Final = 8611
-CONTROL_CENTRE_BASE_URL: Final = f"http://{CONTROL_CENTRE_HOST}:{CONTROL_CENTRE_PORT}"
 
-CHROME_DEVTOOLS_PATH: Final = "/.well-known/appspecific/com.chrome.devtools.json"
-
-CONTROL_HTTP_TIMEOUT_SECONDS: Final = 10
-
-AIVM_INSTANCE: Final = "aivm"
-AIVM_USER: Final = "ai"
-AIVM_HOME: Final = PurePosixPath("/home/ai")
-AIVM_SSH_PORT: Final = "22022"
-
-AIVM_KEY_DIR: Final = Path.home() / ".local" / "share" / "aivm" / ".ssh"
-AIVM_IDENTITY_FILE: Final = AIVM_KEY_DIR / "id_ed25519"
-AIVM_KNOWN_HOSTS_FILE: Final = AIVM_KEY_DIR / "known_hosts"
-LIMA_CONFIG_PATH: Final = Path.home() / ".lima" / AIVM_INSTANCE / "lima.yaml"
-LIMA_SSH_CONFIG_PATH: Final = Path.home() / ".lima" / AIVM_INSTANCE / "ssh.config"
 LIMA_APPENDWATCH_REPORT_PARAM: Final = APPENDWATCH_REPORT_ENV_NAME
 
-AIVM_SSH_TARGET: Final = f"{AIVM_INSTANCE}-{AIVM_USER}"
-AIVM_HOST_KEY_ALIAS: Final = f"lima-{AIVM_INSTANCE}-{AIVM_USER}"
-SSH_EXECUTABLE: Final = "ssh"
-SSH_CONFIG_FLAG: Final = "-F"
-SSH_OPTION_FLAG: Final = "-o"
-SSH_REMOTE_FORWARD_FLAG: Final = "-R"
-AIVM_SSH_CONNECTION_COMMAND: Final = (
-    SSH_EXECUTABLE,
-    SSH_CONFIG_FLAG,
-    str(LIMA_SSH_CONFIG_PATH),
-    SSH_OPTION_FLAG,
-    f"ProxyJump=lima-{AIVM_INSTANCE}",
-    SSH_OPTION_FLAG,
-    "HostName=127.0.0.1",
-    SSH_OPTION_FLAG,
-    f"Port={AIVM_SSH_PORT}",
-    SSH_OPTION_FLAG,
-    f"User={AIVM_USER}",
-    SSH_OPTION_FLAG,
-    f"IdentityFile={AIVM_IDENTITY_FILE}",
-    SSH_OPTION_FLAG,
-    "IdentitiesOnly=yes",
-    SSH_OPTION_FLAG,
-    "BatchMode=yes",
-    SSH_OPTION_FLAG,
-    "PasswordAuthentication=no",
-    SSH_OPTION_FLAG,
-    "KbdInteractiveAuthentication=no",
-    SSH_OPTION_FLAG,
-    "ForwardAgent=no",
-    SSH_OPTION_FLAG,
-    "ClearAllForwardings=no",
-    SSH_OPTION_FLAG,
-    f"UserKnownHostsFile={AIVM_KNOWN_HOSTS_FILE}",
-    SSH_OPTION_FLAG,
-    f"HostKeyAlias={AIVM_HOST_KEY_ALIAS}",
-    SSH_OPTION_FLAG,
-    "StrictHostKeyChecking=accept-new",
-)
-
-CODEX_SESSIONS_ROOT: Final = AIVM_HOME / ".codex" / "sessions"
-CODEX_WORKDIR: Final = AIVM_HOME / "workdir"
-CODEX_ENV_PATH: Final = CODEX_WORKDIR / ".openalex.env"
-CODEX_CLI_BIN_PATH: Final = AIVM_HOME / ".local" / "bin" / "codex"
-CODEX_RUN_MARKER_TEMPLATE: Final = ".codex-run-{run_id}.marker"
-CODEX_RUN_PID_TEMPLATE: Final = ".codex-run-{run_id}.pid"
-CODEX_DISCOVERY_TIMEOUT_SECONDS: Final = 30
-CODEX_DISCOVERY_POLL_SECONDS: Final = 0.1
-CODEX_CANCEL_TIMEOUT_SECONDS: Final = 10
-CODEX_REMOTE_PROCESS_ALIVE_MARKER: Final = "alive"
-CODEX_REMOTE_BUSY_MARKER: Final = "busy"
-CODEX_REMOTE_PID_READ_COMMAND_TEMPLATE: Final = "cat -- {pid_path}"
-CODEX_REMOTE_PROCESS_ALIVE_COMMAND_TEMPLATE: Final = (
-    "if kill -0 -- {remote_pid} 2>/dev/null; then printf '%s' {alive_marker}; fi"
-)
-CODEX_REMOTE_SIGNAL_COMMAND_TEMPLATE: Final = "kill -{signal} -- {remote_pid}"
-CODEX_REMOTE_TERMINATE_SIGNAL: Final = "TERM"
-CODEX_REMOTE_KILL_SIGNAL: Final = "KILL"
-CODEX_REMOTE_EXEC_COMMAND_TEMPLATE: Final = (
-    "printf '%s\\n' \"$$\" > {pid_path}; . {environment_path}; exec {codex_command}"
-)
-CODEX_ENV_EXPORT_TEMPLATE: Final = "export {name}={value}\\n"
-CODEX_REMOTE_WRITE_FILE_COMMAND_TEMPLATE: Final = (
-    "mkdir -p -- {parent_path} && umask 077 && cat > {file_path}"
-)
-CODEX_REMOTE_PREPARE_RUN_COMMAND_TEMPLATE: Final = (
-    "mkdir -p -- {workdir} && rm -f -- {pid_path} && touch -- {marker_path}"
-)
-CODEX_REMOTE_FIND_NEW_ROLLOUT_COMMAND_TEMPLATE: Final = (
-    "find {sessions_root} -type f -name 'rollout-*.jsonl' "
-    "-newer {marker_path} -print | LC_ALL=C sort | tail -n 1"
-)
-CODEX_REMOTE_FIRST_LINE_COMMAND_TEMPLATE: Final = "head -n 1 -- {rollout_path}"
-CODEX_REMOTE_FIND_ROLLOUT_COMMAND_TEMPLATE: Final = (
-    "find {sessions_root} -type f -name {rollout_name} -print | LC_ALL=C sort"
-)
-CODEX_ROLLOUT_FILENAME_TEMPLATE: Final = (
-    "rollout-{local_timestamp:%Y-%m-%dT%H-%M-%S}-{session_id}.jsonl"
-)
-CODEX_INPUT_TEMPLATE: Final = "{openapi_url}\n"
-CODEX_EXEC_COMMAND: Final = (
-    str(CODEX_CLI_BIN_PATH),
-    "exec",
-    "--skip-git-repo-check",
-    "-",
-)
-CODEX_REMOTE_PROCESS_PATTERN: Final = " ".join(
-    (
-        str(CODEX_CLI_BIN_PATH.parent / "[c]odex"),
-        *CODEX_EXEC_COMMAND[1:],
-    )
-)
-CODEX_REMOTE_BUSY_COMMAND_TEMPLATE: Final = (
-    "if pgrep -f -- {process_pattern} >/dev/null; then printf '%s' {busy_marker}; fi"
-)
-CODEX_REMOTE_BUSY_COMMAND: Final = CODEX_REMOTE_BUSY_COMMAND_TEMPLATE.format(
-    process_pattern=shlex.quote(CODEX_REMOTE_PROCESS_PATTERN),
-    busy_marker=shlex.quote(CODEX_REMOTE_BUSY_MARKER),
-)
-CODEX_REMOTE_FORWARD: Final = f"{BACKEND_HOST}:{BACKEND_PORT}:{BACKEND_HOST}:{BACKEND_PORT}"
-AIVM_SSH_FORWARD_COMMAND: Final = (
-    *AIVM_SSH_CONNECTION_COMMAND,
-    SSH_OPTION_FLAG,
-    "ExitOnForwardFailure=yes",
-    SSH_REMOTE_FORWARD_FLAG,
-    CODEX_REMOTE_FORWARD,
-    AIVM_SSH_TARGET,
-)
 FOOTNOTE_MARKER = re.compile(r"\^(?P<numbers>[0-9]+(?:,[0-9]+)*)\^")
 UI_REFRESH_SECONDS: Final = 1
 GRID_ROW_ID_FIELD: Final = "row_id"
@@ -678,133 +580,6 @@ class UiSnapshot:
     active_run_id: UUID | None
 
 
-class LimaMount(BaseModel):
-    model_config = ConfigDict(extra="ignore", frozen=True)
-
-    location: str
-    mount_point: str = Field(alias="mountPoint")
-
-
-class LimaConfiguration(BaseModel):
-    model_config = ConfigDict(extra="ignore", frozen=True)
-
-    param: Mapping[str, str]
-    mounts: tuple[LimaMount, ...]
-
-
-# =============================================================================
-# Configuration / database location
-# =============================================================================
-
-
-class RuntimeConfiguration:
-    def __init__(
-        self,
-        *,
-        config_path: Path = DEFAULT_CONFIG_PATH,
-    ) -> None:
-        openalex_api_key = os.environ.get(EXPORT_OPENALEX_API_KEY, "").strip()
-        if not openalex_api_key:
-            raise RuntimeError(Locale.OPENALEX_API_KEY_MISSING)
-        try:
-            if LIMA_CONFIG_PATH.is_symlink() or not LIMA_CONFIG_PATH.is_file():
-                raise OSError(Locale.LIMA_CONFIG_UNREADABLE)
-            lima_value = yaml.safe_load(LIMA_CONFIG_PATH.read_text(encoding=TEXT_ENCODING))
-            lima_configuration = LimaConfiguration.model_validate(lima_value)
-            guest_report_value = lima_configuration.param[LIMA_APPENDWATCH_REPORT_PARAM]
-            guest_report = PurePosixPath(guest_report_value)
-            if (
-                not guest_report.is_absolute()
-                or str(guest_report) != guest_report_value
-                or any(part in FORBIDDEN_NORMALIZED_PATH_PARTS for part in guest_report.parts)
-            ):
-                raise ValueError(Locale.LIMA_APPENDWATCH_PATH_INVALID)
-            host_reports: list[Path] = []
-            for mount in lima_configuration.mounts:
-                host_root = Path(mount.location)
-                guest_root = PurePosixPath(mount.mount_point)
-                if (
-                    not host_root.is_absolute()
-                    or str(host_root) != mount.location
-                    or not guest_root.is_absolute()
-                    or str(guest_root) != mount.mount_point
-                    or any(
-                        part in FORBIDDEN_NORMALIZED_PATH_PARTS
-                        for part in guest_root.parts
-                    )
-                ):
-                    raise ValueError(Locale.LIMA_MOUNT_INVALID)
-                try:
-                    relative_report = guest_report.relative_to(guest_root)
-                except ValueError:
-                    continue
-                host_reports.append(host_root.joinpath(*relative_report.parts))
-        except (
-            KeyError, OSError, UnicodeError, ValueError, ValidationError, yaml.YAMLError
-        ) as exc:
-            raise RuntimeError(Locale.LIMA_CONFIG_INVALID) from exc
-        if len(host_reports) != 1:
-            raise RuntimeError(Locale.LIMA_APPENDWATCH_MOUNT_INVALID)
-        appendwatch_report = host_reports[0]
-        if (
-            appendwatch_report.is_symlink()
-            or not appendwatch_report.is_file()
-            or not os.access(appendwatch_report, os.R_OK)
-        ):
-            raise RuntimeError(Locale.LIMA_APPENDWATCH_REPORT_UNREADABLE)
-        pipeline_config = AiAugmentDetourConfig.from_json(config_path)
-        release_map = registered_release_map(pipeline_config)
-        release_batches = load_release_batches(release_map)
-        source_connection = duckdb.connect(str(pipeline_config.db_file), read_only=True)
-        try:
-            source_population = derive_source_population(
-                source_connection,
-                release_batches,
-                sample_seed=pipeline_config.sample_seed,
-            )
-        finally:
-            source_connection.close()
-        self._config_path = config_path
-        self._pipeline_config = pipeline_config
-        self._openalex_api_key = openalex_api_key
-        self._appendwatch_report = appendwatch_report
-        self._timezone = ZoneInfo(pipeline_config.timezone)
-        self._source_population = source_population
-        self._eligible_cohorts = eligible_cohorts(source_population)
-
-    @property
-    def pipeline_config(self) -> AiAugmentDetourConfig:
-        return self._pipeline_config
-
-    @property
-    def config_path(self) -> Path:
-        return self._config_path
-
-    @property
-    def openalex_api_key(self) -> str:
-        return self._openalex_api_key
-
-    @property
-    def appendwatch_report(self) -> Path:
-        return self._appendwatch_report
-
-    @property
-    def timezone(self) -> ZoneInfo:
-        return self._timezone
-
-    @property
-    def source_db_path(self) -> Path:
-        return self._pipeline_config.db_file
-
-    @property
-    def source_population(self) -> tuple[SourcePopulationRow, ...]:
-        return self._source_population
-
-    @property
-    def eligible_cohorts(self) -> Mapping[str, str]:
-        return self._eligible_cohorts
-
-
 # =============================================================================
 # Source DuckDB reads
 #
@@ -817,7 +592,7 @@ class SourceRepository:
     def __init__(
         self,
         *,
-        configuration: RuntimeConfiguration,
+        configuration: AiAugmentCtlCtrContext,
     ) -> None:
         self._configuration = configuration
 
@@ -3165,7 +2940,7 @@ class ControlCentrePage:
 
 @dataclass(frozen=True, slots=True)
 class ApplicationServices:
-    configuration: RuntimeConfiguration
+    configuration: AiAugmentCtlCtrContext
 
     source_repository: SourceRepository
 
@@ -3188,7 +2963,7 @@ def create_services(
     *,
     config_path: Path = DEFAULT_CONFIG_PATH,
 ) -> ApplicationServices:
-    configuration = RuntimeConfiguration(config_path=config_path)
+    configuration = AiAugmentCtlCtrContext(config_path=config_path)
     source_repository = SourceRepository(configuration=configuration)
     control_token = uuid4().hex
     backend = BackendSupervisor(
