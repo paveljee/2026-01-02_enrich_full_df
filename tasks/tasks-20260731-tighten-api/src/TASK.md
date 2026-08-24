@@ -1,7 +1,7 @@
 ## human written - ai never touches this
 ### environment
 ```bash
-([ "$PWD" = "/Volumes/home/aicode/2026-01-02_enrich_full_df" ] || exit 1)
+[ "$PWD" = "/Volumes/home/aicode/2026-01-02_enrich_full_df" ] || exit 1
 TASK_DIR="$PWD/tasks/tasks-20260731-tighten-api"
 TASK="$TASK_DIR/src/TASK.md"
 WORK="$TASK_DIR/var/WORK.md"
