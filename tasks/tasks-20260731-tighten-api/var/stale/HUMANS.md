@@ -1,5 +1,18 @@
 ## human written - ai never touches this
-hi humans. this file will be used for any notes or other important things as we move forward with this. it's sort of like AI's `WORK.md` but for us.
+### environment
+```bash
+[ "$PWD" = "/Volumes/home/aicode/2026-01-02_enrich_full_df" ] || exit 1
+TASK_DIR="$PWD/tasks/tasks-20260731-tighten-api"
+```
+
+### description
+hi humans.
+this file `$TASK_DIR/var/stale/HUMANS.md` will be used for
+any notes or other important things as we move forward with this.
+it's sort of like AI's `$TASK_DIR/var/WORK.md` but for us,
+yet it's also _unlike_ `WORK.md` in the sense that
+it's not some actively maintained doc.
+Hence, it's stored unded `var/stale/`.
 
 ### 2026-08-21 - pytest-bdd proposal
 from codex, after a conversation -
