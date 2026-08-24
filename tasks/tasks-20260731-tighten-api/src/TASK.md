@@ -63,8 +63,8 @@ feature:
 
 #### background
 As given in `readme`,
-the feature's infrastructure
-consists of five main nodes:
+the feature's Acme ADL architecture
+consists of five main components:
 
 - Human Operator
 - Control Centre
@@ -93,21 +93,9 @@ aliases and examples:
   e.g., FastAPI
 
 As given in `readme`,
-
-- Human Operator
-  has 4 connections
-- Control Centre
-  has 3 connections
-- Inference API
-  has 2 connections
-- Agent Runtime
-  has 4 connections
-- Backend
-  has 3 connections
-
-As given in `readme`,
-these connections reuse
-the following 8 interfaces:
+in particular in `rdf`,
+the following 8 connectors
+are defined:
 
 - Human Operator <-> Control Centre
 - Human Operator <-> Inference API
@@ -118,71 +106,46 @@ the following 8 interfaces:
 - Inference API <-> Agent Runtime
 - Agent Runtime <-> Backend
 
-Therefore,
-the number of connections is
-twice the number of interfaces.
-
-It is helpful to note that:
-- Human Operator
-  has connections with all 4 remaining nodes,
-  reusing 4 of 8 interfaces
-- Agent Runtime
-  has connections with all 4 remaining nodes,
-  reusing 4 of 8 interfaces
-- Control Centre
-  has connections with 3 nodes,
-  except Inference API,
-  reusing 3 of 8 interfaces
-- Backend
-  has connections with 3 nodes,
-  except Inference API,
-  reusing 3 of 8 interfaces
-- Inference API
-  has connections with 2 nodes,
-  namely Agent Runtime and
-  (optionally) Human Operator,
-  reusing 2 of 8 interfaces.
-
 We proceed to describing
 the feature lifecycle
-from two perspectives:
-
-1. Describe each interface
-1. Describe how each node uses each interface
+by describing the behaviours
+each connector is required
+to demonstrate, grouped by
+the attached component.
 
 But prior to proceeding,
 there is room to reduce complexity:
 
-- Human Operator may be omitted as a node
+- Human Operator may be omitted as a component
   because we do not prescribe the behaviour
   of the human operator in this description
   of the feature behaviour.
 - Inference API, in this set-up,
   only interfaces with Agent Runtime, and
-  therefore it may be omitted as a node;
+  therefore it may be omitted as a component;
   it will be sufficient to describe the
-  Inference API – Agent Runtime interface
+  Inference API – Agent Runtime connector
   and how Agent Runtime uses it, as
   Inference API is not controlled or
   described in this feature description.
-- Note that interfaces are two-way,
+- Note that connectors are two-way,
   so they may as well be grouped
-  under the dominating node, or the
-  node "owning" the interface may
+  by the dominating component, or the
+  component "owning" the connector may
   be designated.
 
 Therefore, this is tentatively reduced
 to, ordered from higher to lower priority
 in the feature's lifecycle:
 
-- Part 1: Backend-owned Interfaces
+- Part 1: Backend-owned Connectors
   - 1.1. Backend <-> Control Centre
   - 1.2. Backend <-> Agent Runtime
   - 1.3. Backend <-> Human Operator
-- Part 2: Control Centre-owned Interfaces
+- Part 2: Control Centre-owned Connectors
   - 2.1. Control Centre <-> Human Operator
   - 2.2. Control Centre <-> Agent Runtime
-- Part 3: Agent Runtime-owned Interfaces
+- Part 3: Agent Runtime-owned Connectors
   - 3.1. Agent Runtime <-> Inference API
   - 3.2. Agent Runtime <-> Human Operator
 - Omitted:
@@ -190,8 +153,8 @@ in the feature's lifecycle:
 
 As this is insufficient to
 fully describe the feature's lifecycle,
-several lower-level nodes need to be noted
-and the interfaces prescribed:
+several lower-level components need to
+be noted and the connectors prescribed:
 
 - config file\* (`PipelineConfig`, `AiAugmentDetourConfig`). interfaces with human (omitted), with backend (read-only, owned by backend), with control centre (read-only, owned by control centre).
 - main db (`PipelineConfig.db_file`). interfaces with human (omitted), with config file (read-only, owned by config file), with control centre (read-only, owned by control centre).
@@ -208,7 +171,7 @@ and supporting code, owned by the detour
 (`src/detours/detour_ai_augment/src/backend/helpers/data_models/ai_augment_config.py::AiAugmentDetourConfig`).
 This is reflective of
 the **Architectural Rule** in this repo
-that **sets** that detour logic is owned by the detour
+that **requires** that detour logic is owned by the detour
 and must not spill over onto the main pipeline.
 For the purpose of this breakdown,
 it is helpful to separate the fields offered
@@ -218,7 +181,7 @@ the detour introduces for itself.
 Further,
 it is important to mention internal interfacing
 that happens between inner components of
-the detour-owned nodes:
+the detour-owned components:
 
 - Backend <-> Backend
 - Control Centre <-> Control Centre
@@ -226,7 +189,7 @@ the detour-owned nodes:
 
 It is therefore helpful to revise and extend the above breakdown:
 
-- Part 1: Backend-owned Interfaces
+- Part 1: Backend-owned Connectors
   - I001.01. Backend <-> `PipelineConfig` (read-only)
   - I001.02. Backend <-> `AiAugmentDetourConfig` (read-only)
   - I001.03. Backend <-> Detour DB
@@ -237,36 +200,36 @@ It is therefore helpful to revise and extend the above breakdown:
   - I001.08. Backend <-> Agent Runtime
   - I001.09. Backend <-> Human Operator
   - I001.10. Backend <-> Backend
-- Part 2: Control Centre-owned Interfaces
+- Part 2: Control Centre-owned Connectors
   - I002.01. Control Centre <-> `PipelineConfig` (read-only)
   - I002.02. Control Centre <-> `AiAugmentDetourConfig` (read-only)
   - I002.03. Control Centre <-> Main DB (read-only)
   - I002.04. Control Centre <-> Human Operator
   - I002.05. Control Centre <-> Agent Runtime
   - I002.06. Control Centre <-> Control Centre
-- Part 3: Agent Runtime-owned Interfaces
+- Part 3: Agent Runtime-owned Connectors
   - I003.01. Agent Runtime <-> Human Operator
   - I003.02. Agent Runtime <-> Inference API
   - I003.03. Agent Runtime <-> Agent Runtime
 - Omitted:
-  - Most Human Operator's interfaces
+  - Most Human Operator's connectors
   - `PipelineConfig` <-> Main DB
     (outside of detour scope,
     as this is prescribed in the main pipeline)
   - `PipelineConfig` <-> Detour output directory
     (outside of detour scope,
     as this is prescribed in the main pipeline)
-  - Interfaces between
-    lower-level detour-owned nodes
+  - Connectors between
+    lower-level detour-owned components
     (as all of them are fully prescribed
-    as part of the above-listed interfaces)
+    as part of the above-listed connectors)
 
 Total:
-  19 prescribed interfaces
+  19 prescribed connectors
 
 It is also helpful to
 illustrate the **communication methods**
-that may be employed by the interfaces:
+that may be employed by the connectors:
 
 - HTTP protocol
 - SSH protocol
