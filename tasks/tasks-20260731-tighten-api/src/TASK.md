@@ -7,6 +7,24 @@ TASK="$TASK_DIR/src/TASK.md"
 WORK="$TASK_DIR/var/WORK.md"
 ```
 
+### prerequisites and setup
+Use `$TASK_DIR/var/WORK.md` as
+your own workbook for
+recording actions you have in mind and
+recording in progress and completed, or
+any other notes you feel you need.
+Write as if for a
+busy tech lead and
+also to be helpful for the executor, so
+lean concise text that 
+contains all relevant info inplace but is
+focused and very well organized.
+
+If `apply_patch` does not work,
+use the `env` workaround.
+
+AI only uses git readonly.
+
 ## after each compaction
 > [!IMPORTANT]
 > Immediately after compaction, refresh TASK/WORK in full.
