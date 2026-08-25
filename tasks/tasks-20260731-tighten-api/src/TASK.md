@@ -25,6 +25,8 @@ use the `env` workaround.
 
 AI only uses git readonly.
 
+Use `pixi run -e detour-ai-augment` for everything.
+
 ## after each compaction
 > [!IMPORTANT]
 > Immediately after compaction, refresh TASK/WORK in full.
