@@ -35,6 +35,7 @@ The architecture contains five **components** (Figure 1).
   the AI Agent Runtime and Backend.
 * **AI Agent Runtime** — runs
   the agent and acts as an API client of the Backend.
+  OpenAI Codex is used as the agent in this set-up.
 * **LLM Inference API** — provides
   large language model (LLM) inference to the AI Agent Runtime.
   OpenAI is the default provider (some alternatives: OpenRouter, Ollama).
@@ -71,17 +72,19 @@ given as [Gherkin][gherkin-docs]-ish **scenarios**.
 
 ## Workflow
 
-1. The Human Operator deploys\* the Backend API.
 1. The Human Operator provisions\* or starts the AI Agent Runtime.
-1. The Human Operator connects\* to the AI Agent Runtime over the SSH (Secure Shell) protocol and initiates\* a request to the LLM Inference API (e.g., by sending a prompt into the chat interface of the [OpenAI Codex Visual Studio Code extension][codex-vsce]).
-1. The AI Agent Runtime, operated by the LLM Inference API, retrieves a task (e.g., a highly-cited researcher profile to augment) from the Backend API `/pull` endpoint.
+1. The Human Operator connects\* to the AI Agent Runtime over the SSH (Secure Shell) protocol and configures it. This includes provisioning a Codex session and any environment variables required by the AI Agent Runtime.
+1. The Human Operator deploys\* the Backend API. This includes configuring a highly-cited researcher (HCR) profile to augment and any environment variables required by the Backend API.
+1. The Human Operator initiates\* a request to the LLM Inference API (e.g., by sending a prompt into the chat interface of the [OpenAI Codex Visual Studio Code extension][codex-vsce]).
+1. The AI Agent Runtime, operated by the LLM Inference API, retrieves a task (e.g., the HCR profile to augment) from the Backend API `GET /pull` endpoint.
+1. Under a happy path, `GET /pull` responds `200 OK` with `Content-Type: text/markdown; charset=utf-8` instructions and a strong `ETag` made available by the Backend API to the AI Agent Runtime at this time. Requests with `If-None-Match` and a matching `ETag` receive a `304 Not Modified`. Error codes: `500 Internal Server Error` for any error, kept opaque to the AI Agnet Runtime with a message to contact the Human Operator.
 1. The AI Agent Runtime works on the task by dispatching sequential\*\* requests to the LLM Inference API while the Inference API triggers tools (e.g., Linux shell commands) on the Runtime at its discretion.
-1. At some point during the rollout, the AI Agent Runtime is expected to push the result to the Backend API.
-1. Upon receipt of a `/push` payload, the Backend API records receipt, validates the payload, and communicates an automated response to the AI Agent Runtime.
-1. The rollout continues until the AI Agent Runtime hits a `task_complete` event, as triggered by the LLM Inference API.
-1. Once the Agent Runtime has marked the task as completed, it stops operation and remains idle until rehydrated by the Human Operator.
+1. At some point during the rollout, the AI Agent Runtime is expected to push the result to the Backend API at `POST /push`. Of note, it is ultimately at the discretion of the LLM Inference API whether it chooses to.
+1. Under a happy path, the Backend API responds to a push with `202 Accepted` and `Location: /pull`, validates the payload, and makes an updated `text/markdown` and `ETag` available to the AI Agent Runtime at `GET /pull`. Error codes: `409 Conflict` if still busy processing a previous push; `500 Internal Server Error` if otherwise unavailable, kept opaque to the AI Agnet Runtime with a message to contact the Human Operator. Note that server-side validation errors are therefore made available at `GET /pull` and do not affect `/push` responses.
+1. The rollout continues until the AI Agent Runtime hits a `410 Gone` response at `GET /pull` and/or at `POST /push`, as triggered by the LLM Inference API. The response instructs the AI Agent Runtime to stop operation and remain idle until rehydrated by the Human Operator. Of note, it is ultimately at the discretion of the LLM Inference API when it chooses to stop operation.
 1. The Human Operator reviews Backend logs and submissions and repeats or adjusts the workflow as necessary.
-1. Multiple tasks (e.g., HCR profiles) may be passed by the Human Operator to the AI Agent Runtime in a single batch; in this instance the rollout is expected to continue and only trigger a `task_complete` even once the batch is exhausted, though this is ultimately at the discretion of the LLM Inference API.
+1.  The full AI Agent Runtime workflow is therefore limited to a single configured HCR profile.
+<!---Multiple tasks (e.g., HCR profiles) may be passed by the Human Operator to the AI Agent Runtime in a single batch; in this instance the rollout is expected to continue and only trigger a `410 Gone` response once the batch is exhausted.--->
 
 \* Either manually or via orchestration through the Control Centre.
 
