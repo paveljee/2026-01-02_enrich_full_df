@@ -190,27 +190,27 @@ the detour-owned components:
 It is therefore helpful to revise and extend the above breakdown:
 
 - Part 1: Backend-owned Connectors
-  - I001.01. Backend <-> `PipelineConfig` (read-only)
-  - I001.02. Backend <-> `AiAugmentDetourConfig` (read-only)
-  - I001.03. Backend <-> Detour DB
-  - I001.04. Backend <-> Detour output directory
-  - I001.05. Backend <-> Detour replay JSONL
-  - I001.06. Backend <-> Rollout CAS
-  - I001.07. Backend <-> Control Centre
-  - I001.08. Backend <-> Agent Runtime
-  - I001.09. Backend <-> Human Operator
-  - I001.10. Backend <-> Backend
+  - C001.01. Backend <-> `PipelineConfig` (read-only)
+  - C001.02. Backend <-> `AiAugmentDetourConfig` (read-only)
+  - C001.03. Backend <-> Detour DB
+  - C001.04. Backend <-> Detour output directory
+  - C001.05. Backend <-> Detour replay JSONL
+  - C001.06. Backend <-> Rollout CAS
+  - C001.07. Backend <-> Control Centre
+  - C001.08. Backend <-> Agent Runtime
+  - C001.09. Backend <-> Human Operator
+  - C001.10. Backend <-> Backend
 - Part 2: Control Centre-owned Connectors
-  - I002.01. Control Centre <-> `PipelineConfig` (read-only)
-  - I002.02. Control Centre <-> `AiAugmentDetourConfig` (read-only)
-  - I002.03. Control Centre <-> Main DB (read-only)
-  - I002.04. Control Centre <-> Human Operator
-  - I002.05. Control Centre <-> Agent Runtime
-  - I002.06. Control Centre <-> Control Centre
+  - C002.01. Control Centre <-> `PipelineConfig` (read-only)
+  - C002.02. Control Centre <-> `AiAugmentDetourConfig` (read-only)
+  - C002.03. Control Centre <-> Main DB (read-only)
+  - C002.04. Control Centre <-> Human Operator
+  - C002.05. Control Centre <-> Agent Runtime
+  - C002.06. Control Centre <-> Control Centre
 - Part 3: Agent Runtime-owned Connectors
-  - I003.01. Agent Runtime <-> Human Operator
-  - I003.02. Agent Runtime <-> Inference API
-  - I003.03. Agent Runtime <-> Agent Runtime
+  - C003.01. Agent Runtime <-> Human Operator
+  - C003.02. Agent Runtime <-> Inference API
+  - C003.03. Agent Runtime <-> Agent Runtime
 - Omitted:
   - Most Human Operator's connectors
   - `PipelineConfig` <-> Main DB
@@ -242,51 +242,51 @@ that may be employed by the connectors:
 - Unix shell
 
 #### scenarios
-##### I001.01. Backend <-> `PipelineConfig` (read-only)
+##### C001.01. Backend <-> `PipelineConfig` (read-only)
 Human Operator — interfaces with Control Centre via CLI/HTTP: `pixi run dashboard`; `http://127.0.0.1:8611`
 
-##### I001.02. Backend <-> `AiAugmentDetourConfig` (read-only)
+##### C001.02. Backend <-> `AiAugmentDetourConfig` (read-only)
 
-##### I001.03. Backend <-> Detour DB
+##### C001.03. Backend <-> Detour DB
 Backend — interfaces with detour DB via SQL/DuckDB API: derived detour `.duckdb` opened read/write
 
-##### I001.04. Backend <-> Detour output directory
+##### C001.04. Backend <-> Detour output directory
 Backend — interfaces with filesystem via POSIX: configured `output_dir`
 
-##### I001.05. Backend <-> Detour replay JSONL
+##### C001.05. Backend <-> Detour replay JSONL
 Backend — interfaces with filesystem via POSIX: authoritative `detour_ai_augment_backend_api_replay_log`
 
-##### I001.06. Backend <-> Rollout CAS
+##### C001.06. Backend <-> Rollout CAS
 Backend — interfaces with filesystem via POSIX: configured `rollout_cas_dir`
 
-##### I001.07. Backend <-> Control Centre
+##### C001.07. Backend <-> Control Centre
 Control Centre — interfaces with Backend via HTTP: `POST /_control/push`; `GET /_control/pull`
 
-##### I001.08. Backend <-> Agent Runtime
+##### C001.08. Backend <-> Agent Runtime
 Agent Runtime — interfaces with Backend via HTTP: `GET /openapi.json`; `GET /pull`; `POST /push`
 
-##### I001.09. Backend <-> Human Operator
+##### C001.09. Backend <-> Human Operator
 
-##### I001.10. Backend <-> Backend
+##### C001.10. Backend <-> Backend
 Backend — interfaces with itself via in-process HTTP/ASGI: `PUT /_control/commit` 
 
-##### I002.01. Control Centre <-> `PipelineConfig` (read-only)
+##### C002.01. Control Centre <-> `PipelineConfig` (read-only)
 
-##### I002.02. Control Centre <-> `AiAugmentDetourConfig` (read-only)
+##### C002.02. Control Centre <-> `AiAugmentDetourConfig` (read-only)
 
-##### I002.03. Control Centre <-> Main DB (read-only)
+##### C002.03. Control Centre <-> Main DB (read-only)
 Control Centre — interfaces with main DB via SQL/DuckDB API: configured `db_file`, `read_only=True`
 
-##### I002.04. Control Centre <-> Human Operator
+##### C002.04. Control Centre <-> Human Operator
 
-##### I002.05. Control Centre <-> Agent Runtime
+##### C002.05. Control Centre <-> Agent Runtime
 Control Centre — interfaces with Agent Runtime via SSH: `ssh -F ~/.lima/aivm/ssh.config … aivm-ai`
 
-##### I002.06. Control Centre <-> Control Centre
+##### C002.06. Control Centre <-> Control Centre
 
-##### I003.01. Agent Runtime <-> Human Operator
+##### C003.01. Agent Runtime <-> Human Operator
 Agent Runtime — interfaces with guest OS via POSIX: `/home/ai/workdir`; `/home/ai/.codex/sessions`
 
-##### I003.02. Agent Runtime <-> Inference API
+##### C003.02. Agent Runtime <-> Inference API
 
-##### I003.03. Agent Runtime <-> Agent Runtime
+##### C003.03. Agent Runtime <-> Agent Runtime
