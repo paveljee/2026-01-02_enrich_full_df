@@ -72,10 +72,25 @@ given as [Gherkin][gherkin-docs]-ish **scenarios**.
 
 ## Workflow
 
-1. The Human Operator provisions\* or starts the AI Agent Runtime.
-1. The Human Operator connects\* to the AI Agent Runtime over the SSH (Secure Shell) protocol and configures it. This includes provisioning a Codex session and any environment variables required by the AI Agent Runtime.
-1. The Human Operator deploys\* the Backend API. This includes configuring a highly-cited researcher (HCR) profile to augment and any environment variables required by the Backend API.
-1. The Human Operator initiates\* a request to the LLM Inference API (e.g., by sending a prompt into the chat interface of the [OpenAI Codex Visual Studio Code extension][codex-vsce]).
+> [!NOTE]
+> The Human Operator acts either manually
+> or via orchestration through the Control Centre.
+
+1. The Human Operator provisions or starts the AI Agent Runtime.
+1. At provisioning, the Human Operator starts an `appendwatch` daemon as a root user on the guest machine on which the AI Agent Runtime is running. This daemon monitors data integrity of rollouts in the Codex sessions directory and writes findings into the `APPENDWATCH_REPORT`, unavailable to the AI Agent Runtime.
+1. At provisioning, the Human Operator issues SSH (Secure Shell) protocol credentials at `AIVM_KEY_DIR` for own use downstream to connect to the AI Agent Runtime.
+1. At provisioning, the Human Operator connects to the AI Agent Runtime using the SSH credentials and ensures that `OPENALEX_API_KEY` is exported as an environment variable on the guest machine on which the AI Agent Runtime is running. This key will be used downstream by the Backend and may be used by the AI Agent Runtime.
+1. Given the AI Agent Runtime is provisioned and has started, the Human Operator connects to it using the SSH credentials, initializes a new Codex session\*, and records its ID.
+1. The Human Operator starts the Backend API. In the startup server logs, the Backend API proves that it has read-only access to the `APPENDWATCH_REPORT`, that it has read-only access to the Codex sessions directory, and that it exposes a `PUT /sessions/<session_id>` endpoint over a private Unix socket accessible to the Human Operator, where `<session_id>` is an arbitrary UUID Version 7 the socket HTTP client supplies upon sending requests.
+1. The Human Operator selects a highly-cited researcher (HCR) `namekey` to augment (e.g., `{"ktp.first_name": "A.", "ktp.last_name": "Sheikh"}`) and sends it to the private Unix socket HTTP endpoint `PUT /sessions/<session_id>`, with `<session_id>` set to the previously recorded Codex session ID. The Human Operator may send it manually. Alternatively, the Human Operator may use the dashboard module of the Control Centre.
+1. Given the Human Operator started the dashboard module of the Control Centre, the module establishes a read-only connection to the main pipeline database, fetches `SourcePopulationRow`s and the linked information, and makes the namekeys differentially available for queuing depending on the `IneligibilityCategory`.
+1. Given the Backend API's ASGI middleware received a `PUT /sessions/<session_id>`, it validates it using `HttpRequestLogRecord(schema_version=2)`. If successful, the ASGI middleware appends it to `AiAugmentBackendContext.replay_log` on disk and if successful, responds `202 Accepted` with `Location: /sessions/<session_id>`. Failure modes: `400 Bad Request` on `pydantic.ValidationError`; `409 Conflict` if a namekey has already been assigned to this `<session_id>`; `500 Internal Server Error` on other errors, including disk write failures. Error messages are detailed and only shown to the Human Operator in server logs. Failed `PUT /sessions/<session_id>` are not appended to `AiAugmentBackendContext.replay_log`.
+
+**WIP**
+
+establishes a read-only connection to the main pipeline database, looks up the namekey, and selects the corresponding `innerdicts`.
+1. At this point, the Backend API has all the information it needs to configure downstream `GET /pull` endpoint access for the AI Agent Runtime.
+1. The Human Operator initiates a request to the LLM Inference API by sending a prompt into the Codex session\*.
 1. The AI Agent Runtime, operated by the LLM Inference API, retrieves a task (e.g., the HCR profile to augment) from the Backend API `GET /pull` endpoint.
 1. Under a happy path, `GET /pull` responds `200 OK` with `Content-Type: text/markdown; charset=utf-8` instructions and a strong `ETag` made available by the Backend API to the AI Agent Runtime at this time. Requests with `If-None-Match` and a matching `ETag` receive a `304 Not Modified`. Error codes: `500 Internal Server Error` for any error, kept opaque to the AI Agent Runtime with a message to contact the Human Operator.
 1. The AI Agent Runtime works on the task by dispatching sequential\*\* requests to the LLM Inference API while the Inference API triggers tools (e.g., Linux shell commands) on the Runtime at its discretion.
@@ -86,9 +101,13 @@ given as [Gherkin][gherkin-docs]-ish **scenarios**.
 1.  The full AI Agent Runtime workflow is therefore limited to a single configured HCR profile.
 <!---Multiple tasks (e.g., HCR profiles) may be passed by the Human Operator to the AI Agent Runtime in a single batch; in this instance the rollout is expected to continue and only trigger a `410 Gone` response once the batch is exhausted.--->
 
-\* Either manually or via orchestration through the Control Centre.
+\* The workflow supports both interactive (e.g., in the chat interface of the [OpenAI Codex Visual Studio Code Extension][codex-vsce]) and non-interactive (e.g., `codex exec`) sessions.
 
-\*\* Note that the [Multi-agent mode][openai-multi-agent] is disabled in this AI Agent Runtime.
+\* Note that the [Multi-agent mode][openai-multi-agent] is disabled in this AI Agent Runtime.
+
+## Implementation constraints
+- The detour features a replayable JSON Lines log of all public `/push` events ever observed by the ASGI middleware wrapping the Backend API. This generic middleware records each event before forwarding the request downstream to FastAPI, reducing the risk of event loss.
+- The Control Centre features a dashboard UI that facilitates queueing of HCR profiles. Queueing is implemented as HTTP interactions via a private Unix socket. On the socket, the Backend API exposes `POST /socket/push`
 
 ## Directory contents and lockfile
 
