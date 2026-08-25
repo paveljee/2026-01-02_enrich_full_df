@@ -157,7 +157,7 @@ several lower-level components need to
 be noted and the connectors prescribed:
 
 - config file\* (`PipelineConfig`, `AiAugmentDetourConfig`). interfaces with human (omitted), with backend (read-only, owned by backend), with control centre (read-only, owned by control centre).
-- main db (`PipelineConfig.db_file`). interfaces with human (omitted), with config file (read-only, owned by config file), with control centre (read-only, owned by control centre).
+- main db (`PipelineConfig.db_file`). interfaces with human (omitted), with config file (read-only, owned by config file), with control centre (read-only, owned by control centre), with backend (read-only, owned by backend).
 - output dir (`PipelineConfig.output_dir`). interfaces with config file (read-only, owned by config file), with backend (write, owned by backend).
 - rollout CAS (`AiAugmentDetourConfig.rollout_cas_dir`). interfaces with config file (read-only, owned by config file), with backend (write, owned by backend).
 - detour db (`AiAugmentBackendContext.detour_db_path`). interfaces with human (omitted), with config file (read-only, owned by config file), with backend (owned by backend).
@@ -200,6 +200,7 @@ It is therefore helpful to revise and extend the above breakdown:
   - C001.08. Backend <-> Agent Runtime
   - C001.09. Backend <-> Human Operator
   - C001.10. Backend <-> Backend
+  - C001.11. Backend <-> Main DB (read-only)
 - Part 2: Control Centre-owned Connectors
   - C002.01. Control Centre <-> `PipelineConfig` (read-only)
   - C002.02. Control Centre <-> `AiAugmentDetourConfig` (read-only)
@@ -245,6 +246,13 @@ that may be employed by the connectors:
 ##### C001.01. Backend <-> `PipelineConfig` (read-only)
 Human Operator — interfaces with Control Centre via CLI/HTTP: `pixi run dashboard`; `http://127.0.0.1:8611`
 
+```gherkin
+Given `--config` is passed
+When it is a valid `PipelineConfig`
+* it is a valid `AiAugmentDetourConfig`
+Then `Backend` is properly configured
+```
+
 ##### C001.02. Backend <-> `AiAugmentDetourConfig` (read-only)
 
 ##### C001.03. Backend <-> Detour DB
@@ -269,6 +277,8 @@ Agent Runtime — interfaces with Backend via HTTP: `GET /openapi.json`; `GET /p
 
 ##### C001.10. Backend <-> Backend
 Backend — interfaces with itself via in-process HTTP/ASGI: `PUT /_control/commit` 
+##### C001.11. Backend <-> Main DB (read-only)
+Backend — interfaces with main DB via SQL/DuckDB API: configured `db_file`, `read_only=True`
 
 ##### C002.01. Control Centre <-> `PipelineConfig` (read-only)
 
