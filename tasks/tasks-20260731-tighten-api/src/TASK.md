@@ -268,7 +268,6 @@ Backend — interfaces with filesystem via POSIX: authoritative `detour_ai_augme
 Backend — interfaces with filesystem via POSIX: configured `rollout_cas_dir`
 
 ##### C001.07. Backend <-> Control Centre
-Control Centre — interfaces with Backend via HTTP: `POST /_control/push`; `GET /_control/pull`
 
 ##### C001.08. Backend <-> Agent Runtime
 Agent Runtime — interfaces with Backend via HTTP: `GET /openapi.json`; `GET /pull`; `POST /push`
@@ -276,7 +275,7 @@ Agent Runtime — interfaces with Backend via HTTP: `GET /openapi.json`; `GET /p
 ##### C001.09. Backend <-> Human Operator
 
 ##### C001.10. Backend <-> Backend
-Backend — interfaces with itself via in-process HTTP/ASGI: `PUT /_control/commit` 
+
 ##### C001.11. Backend <-> Main DB (read-only)
 Backend — interfaces with main DB via SQL/DuckDB API: configured `db_file`, `read_only=True`
 
