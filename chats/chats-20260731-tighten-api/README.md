@@ -10,8 +10,9 @@ the interaction with OpenAI Codex
 (i.e., a Codex rollout) in relation to the
 implemention of this task specification:
 `tasks/tasks-20260731-tighten-api/SPEC.md`.
-This includes the rollout
-`rollout-2026-07-31T14-42-27-019fb97c-1e5a-7830-9244-bd5a10a9cb73.jsonl`.
+This includes the rollouts
+`rollout-2026-07-31T14-42-27-019fb97c-1e5a-7830-9244-bd5a10a9cb73.jsonl.tgz` and
+`rollout-2026-08-25T11-41-35-01a03995-83f2-7af2-a86c-993cd594207f.jsonl`.
 
 While the rollout is a
 plain text file
