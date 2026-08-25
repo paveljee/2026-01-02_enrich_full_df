@@ -119,4 +119,12 @@ Detours are isolated at four levels:
 4. Each detour uses its own DB and never touches main CLI DB state or another detour DB.
 
 ### actual task
-ask human operator.
+The detour codebase at
+`src/detours/detour_ai_augment/src` and
+`src/detours/detour_ai_augment/tests`
+is partially stale and not aligned with
+the current, authoritative state of
+`src/detours/detour_ai_augment/README.md`.
+Your TASK is to fix this.
+
+talk to human operator for details.
