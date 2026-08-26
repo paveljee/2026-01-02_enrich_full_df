@@ -81,6 +81,11 @@ given as [Gherkin][gherkin-docs]-ish **scenarios**.
 > interactive (e.g., in the chat interface of the [OpenAI Codex Visual Studio Code Extension][codex-vsce])
 > and non-interactive (e.g., `codex exec`) OpenAI Codex sessions.
 
+> [!NOTE]
+> In this AI Agent Runtime,
+> the [Multi-agent mode][openai-multi-agent]
+> is disabled.
+
 > [!IMPORTANT]
 > The Backend API keeps its HTTP error messages
 > opaque to the client and instructs the client
@@ -113,7 +118,7 @@ given as [Gherkin][gherkin-docs]-ish **scenarios**.
 1. The Human Operator records the Codex session ID and passes the recorded session ID to the running Backend API's stdin. 
 1. Therefore, the Codex session ID is not known to the Backend API at the time when the Codex executable within the AI Agent Runtime starts operation. The Backend API requires the Codex session ID to properly configure its `POST /push` endpoint downstream. The Backend API receive
 1. The AI Agent Runtime, operated by the LLM Inference API, retrieves a task (e.g., the HCR profile to augment) from the Backend API `GET /pull` endpoint. At this point, under a happy path, `GET /pull` responds `200 OK` with `Content-Type: application/x-ndjson; charset=utf-8` innerdicts for augmentation. Error codes: `500 Internal Server Error` for any error.
-1. The AI Agent Runtime works on the task by dispatching sequential\* requests to the LLM Inference API while the Inference API triggers tools (e.g., Linux shell commands) on the Runtime at its discretion.
+1. The AI Agent Runtime works on the task by dispatching sequential requests to the LLM Inference API while the Inference API triggers tools (e.g., Linux shell commands) on the Runtime at its discretion.
 1. At some point during the rollout, the AI Agent Runtime is expected to push the result to the Backend API at `POST /push`. Of note, it is ultimately at the discretion of the LLM Inference API whether it chooses to.
 1. Under the happy path, the Backend API responds to a push with `202 Accepted` and `Location: /pull`. Before responding, the Backend API changes its internal state to busy, which is important downstream. Also, before responding, the Backend API exposes `503 Service Unavailable` with `Retry-After: 1` at `GET /pull`. Error codes for a push: `409 Conflict` if the Backend API was busy prior to receiving the request; `500 Internal Server Error` if any other error.
 1. Given the `HttpRequestLogRecord(schema_version=2)` validation passed, the Backend API reads the session ID from its stdin and copies the corresponding Codex session rollout file from the guest machine to `AiAugmentBackendContext.rollout_cas_dir`; of note, the Backend API trusts stdin to supply the rollout path corresponding to the accepted push. If unsuccessful, the Backend API exposes `500 Internal Server Error` at `GET /pull`.
@@ -130,8 +135,6 @@ given as [Gherkin][gherkin-docs]-ish **scenarios**.
 1. The Human Operator reviews Backend logs and submissions and repeats or adjusts the workflow as necessary.
 1.  The full AI Agent Runtime workflow is therefore limited to a single configured HCR profile.
 <!---Multiple tasks (e.g., HCR profiles) may be passed by the Human Operator to the AI Agent Runtime in a single batch; in this instance the rollout is expected to continue and only trigger a `410 Gone` response once the batch is exhausted.--->
-
-\* Note that the [Multi-agent mode][openai-multi-agent] is disabled in this AI Agent Runtime.
 
 ## Implementation constraints
 - The detour features a replayable JSON Lines log of all public `/push` events ever observed by the ASGI middleware wrapping the Backend API. This generic middleware records each event before forwarding the request downstream to FastAPI, reducing the risk of event loss.
