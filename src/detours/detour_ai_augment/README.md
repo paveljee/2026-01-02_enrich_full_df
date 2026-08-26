@@ -77,15 +77,24 @@ given as [Gherkin][gherkin-docs]-ish **scenarios**.
 > or via orchestration through the Control Centre.
 
 > [!NOTE]
-> HTTP error messages are kept opaque to the client
-> and instruct the client to contact the Human Operator;
-> detailed, differentiated error messages
-> are shown to the Human Operator in the server logs.
-
-> [!NOTE]
 > The workflow supports both
 > interactive (e.g., in the chat interface of the [OpenAI Codex Visual Studio Code Extension][codex-vsce])
 > and non-interactive (e.g., `codex exec`) OpenAI Codex sessions.
+
+> [!IMPORTANT]
+> The Backend API keeps its HTTP error messages
+> opaque to the client and instructs the client
+> to contact the Human Operator;
+> it shows detailed, differentiated error messages
+> to the Human Operator in the server logs.
+
+> [!IMPORTANT]
+> Before responding to any HTTP request,
+> the Backend API validates the request/response
+> against the `HttpRequestLogRecord(schema_version=2)`
+> Pydantic model; if valid, it serializes and appends it
+> to the `AiAugmentBackendContext.replay_log`;
+> else the Backend API `exit(1)`s loudly.
 
 1. The Human Operator provisions or starts the AI Agent Runtime.
 1. At provisioning, the Human Operator starts an `appendwatch` daemon as a root user on the guest machine on which the AI Agent Runtime is running. This daemon monitors data integrity of rollouts in the Codex sessions directory and writes findings into the `APPENDWATCH_REPORT`, unavailable to the AI Agent Runtime.
@@ -106,11 +115,11 @@ given as [Gherkin][gherkin-docs]-ish **scenarios**.
 1. The AI Agent Runtime, operated by the LLM Inference API, retrieves a task (e.g., the HCR profile to augment) from the Backend API `GET /pull` endpoint. At this point, under a happy path, `GET /pull` responds `200 OK` with `Content-Type: application/x-ndjson; charset=utf-8` innerdicts for augmentation. Error codes: `500 Internal Server Error` for any error.
 1. The AI Agent Runtime works on the task by dispatching sequential\* requests to the LLM Inference API while the Inference API triggers tools (e.g., Linux shell commands) on the Runtime at its discretion.
 1. At some point during the rollout, the AI Agent Runtime is expected to push the result to the Backend API at `POST /push`. Of note, it is ultimately at the discretion of the LLM Inference API whether it chooses to.
-1. Under the happy path, the Backend API responds to a push with `202 Accepted` and `Location: /pull`. Before responding, the Backend API validates the response against the `HttpRequestLogRecord(schema_version=2)` Pydantic model. If valid, the Backend API appends the validated response to `AiAugmentBackendContext.replay_log`. Also, before responding, the Backend API changes its internal state to busy, which is important downstream. Also, before responding, the Backend API exposes `503 Service Unavailable` with `Retry-After: 1` on `GET /pull`. Error codes for a push: `409 Conflict` if busy; `500 Internal Server Error` if any other error.
-1. Given the `HttpRequestLogRecord(schema_version=2)` validation passed, the Backend API reads the session ID from its stdin and copies the corresponding Codex session rollout file from the guest machine to `AiAugmentBackendContext.rollout_cas_dir`. If unsuccessful, the Backend API exposes `500 Internal Server Error` at `GET /pull`.
+1. Under the happy path, the Backend API responds to a push with `202 Accepted` and `Location: /pull`. Before responding, the Backend API changes its internal state to busy, which is important downstream. Also, before responding, the Backend API exposes `503 Service Unavailable` with `Retry-After: 1` at `GET /pull`. Error codes for a push: `409 Conflict` if the Backend API was busy prior to receiving the request; `500 Internal Server Error` if any other error.
+1. Given the `HttpRequestLogRecord(schema_version=2)` validation passed, the Backend API reads the session ID from its stdin and copies the corresponding Codex session rollout file from the guest machine to `AiAugmentBackendContext.rollout_cas_dir`; of note, the Backend API trusts stdin to supply the rollout path corresponding to the accepted push. If unsuccessful, the Backend API exposes `500 Internal Server Error` at `GET /pull`.
 1.  Given the `HttpRequestLogRecord(schema_version=2)` validation passed, and given the rollout file is successfully accessible by its hash from the `AiAugmentBackendContext.rollout_cas_dir`, the Backend API reads the `APPENDWATCH_REPORT` file from the guest machine into a variable. If unsuccessful, the Backend API exposes `500 Internal Server Error` at `GET /pull`.
-1. Given the `APPENDWATCH_REPORT` has been read, the Backend API validates the request against the rollout read by its hash from the `AiAugmentBackendContext.rollout_cas_dir` and against the `APPENDWATCH_REPORT` variable. If the `appendwatch` status for this rollout is `OK`, the Backend API constructs an `HttpRequestLogRecord(schema_version=2)` object with a `200 OK` response code. Else if the `appendwatch` status for this rollout is `COMPROMISED`, the Backend API constructs an `HttpRequestLogRecord(schema_version=2)` object with a `    422 Unprocessable Content` response code. In either case, the object's request body and any headers are empty. Also, in either case, the object's `HttpRequestLogRecord.path` is `"/sessions/<session_id>"` where `<session_id>` is the rollout hash in the `AiAugmentBackendContext.rollout_cas_dir`. Also, in either case, the object's method is `PUT`. Also, in either case, the object's response body contains the bitwise exact contents of the `APPENDWATCH_REPORT` variable with the `Content-Type: text/plain; charset=utf-8`. Also, in either case, the Backend API uses the current timestamp and an internal, nonexistent, static URL to construct the rest of the object. The Backend API appends the serialized object to `AiAugmentBackendContext.replay_log`. In case of any errors, the Backend API exposes `500 Internal Server Error` at `GET /pull`.
-1. Given the Backend API is busy, and given the `HttpRequestLogRecord(schema_version=2)` validation passed and the request was successfully persisted in the `AiAugmentBackendContext.replay_log`, the Backend API validates the request against the `Submission` Pydantic model. If invalid, the Backend API exposes `500 Internal Server Error` at `GET /pull`.
+1. Given the `APPENDWATCH_REPORT` has been read, the Backend API validates the request against the rollout read by its hash from the `AiAugmentBackendContext.rollout_cas_dir` and against the `APPENDWATCH_REPORT` variable. If the `appendwatch` status for this rollout is `OK`, the Backend API constructs an `HttpRequestLogRecord(schema_version=2)` object with a `200 OK` response code. Else if the `appendwatch` status for this rollout is `COMPROMISED`, the Backend API constructs an `HttpRequestLogRecord(schema_version=2)` object with a `422 Unprocessable Content` response code. Else, including in case of any exception, the Backend API constructs an `HttpRequestLogRecord(schema_version=2)` object with a `500 Internal Server Error` response code. In any case, the object represents the act of `appendwatch` validation regardless of its outcome as though an HTTP interaction had occurred: `{"schema_version": 2, "method": "GET", "scheme": "http", "host": "detour-ai-augment", "path": "/validate_appendwatch", "query": "codex_session_id=<codex_session_id>", "request_headers": {}, "request_body": null, "response_code": <response_code>, "response_headers": {}, "response_body": "<APPENDWATCH_REPORT>", "ready_to_respond_at_unix_usec": <timestamp>, "duration_usec": <duration>}`, where `<codex_session_id>` is the Codex session ID extracted from the rollout, `<response_code>` is as specified above, `<APPENDWATCH_REPORT>` is the bitwise exact contents of the `APPENDWATCH_REPORT` variable, `<timestamp>` is the current timestamp, and `<duration>` is the time difference between this `<timestamp>` and the `ready_to_respond_at_unix_usec` of the accepted push. Also, in any case, the Backend API appends the serialized object to `AiAugmentBackendContext.replay_log`. In case of any errors, the Backend API also exposes `500 Internal Server Error` at `GET /pull`.
+1. Given both the accepted push and the appendwatch validation are successfully persisted in the `AiAugmentBackendContext.replay_log`, and given the appendwatch validation responded `200 OK`, the Backend API validates the request against the `Submission` Pydantic model. If valid, the Backend API exposes `500 Internal Server Error` at `GET /pull`.
  
  and makes instructions to the AI Agent Runtime available as `Content-Type: text/markdown; charset=utf-8` at `GET /pull`. Error codes: `409 Conflict` if still busy processing a previous push; `500 Internal Server Error` if otherwise unavailable, kept opaque to the AI Agent Runtime with a message to contact the Human Operator. Note that server-side validation errors are therefore made available at `GET /pull` and do not affect `/push` responses.
 2. 
