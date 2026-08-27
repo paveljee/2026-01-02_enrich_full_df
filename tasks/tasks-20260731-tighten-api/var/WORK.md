@@ -15,10 +15,12 @@ with `coerce_schema_v1` acting only as an explicit v1-to-v2 migration request.
 | invalid v1 | true | reject before migration |
 | v2 | true/false/absent | validate as v2; flag value has no effect |
 
-Schema v1 must retain its original wire behavior: v2-only fields are absent on
-serialization and produce native field-level Pydantic `extra_forbidden` errors
-on input. Its non-null `response_body: str` rule must produce Pydantic's native
-`string_type` error. Schema v2 permits a null response body.
+Schema v1 must retain its original wire behavior: v2-only `port` and
+`ready_to_respond_at_unix_usec` fields are absent on serialization and produce
+native field-level Pydantic `extra_forbidden` errors on input. Explicit
+`coerce_schema_v1=False` is accepted as migration control but omitted from the
+v1 wire output. The non-null v1 `response_body: str` rule produces Pydantic's
+native `string_type` error. Schema v2 permits a null response body.
 
 ## Implementation state
 
@@ -29,7 +31,10 @@ on input. Its non-null `response_body: str` rule must produce Pydantic's native
 - Native v2 no longer undergoes any v1 projection, regardless of the flag.
 - Version-specific v1 errors use `ValidationError.from_exception_data()` with
   native `extra_forbidden` and `string_type` error details and field locations,
-  replacing root-level custom `ValueError` messages.
+  replacing root-level custom `ValueError` messages. Ordinary field errors are
+  combined with version-specific errors rather than hidden by pre-validation.
+- The wrap serializer remains necessary to remove all v2-only/defaulted fields
+  from v1 output; its internal name is now `serialize_versioned_fields`.
 - Focused tests cover every matrix row, migration round-trip, invalid v1 before
   migration, and invalid v2 with the flag absent/false/true.
 - Two v1-only OpenAlex consumers now assert their already-guaranteed non-null
@@ -39,9 +44,9 @@ on input. Its non-null `response_body: str` rule must produce Pydantic's native
 
 ## Verification state
 
-- Focused test suite: 21 passed.
-- Focused Ruff: passed before the final small test additions; rerun pending.
-- Focused mypy previously exposed only the two now-fixed OpenAlex narrowings;
-  rerun pending.
-- `git diff --check`: passed before final small edits; rerun pending.
-- Final repository-prescribed verification contour remains pending.
+- Focused test suite: 23 passed after the behavior/error-matrix changes and
+  before the behavior-neutral serializer-method rename.
+- Focused Ruff, mypy, and `git diff --check` passed before the final combined
+  error regression and serializer-method rename.
+- A final focused rerun and the repository `pre-commit` contour were attempted,
+  but command execution was rejected/interrupted by the user; neither completed.

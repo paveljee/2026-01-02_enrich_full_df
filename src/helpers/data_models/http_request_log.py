@@ -124,7 +124,7 @@ class HttpRequestLogRecord(BaseModel):
         return value
 
     @model_serializer(mode="wrap")
-    def serialize_versioned_port(
+    def serialize_versioned_fields(
         self,
         handler: SerializerFunctionWrapHandler,
     ) -> dict[str, Any]:
