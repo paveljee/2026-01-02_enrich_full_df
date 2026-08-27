@@ -14,6 +14,7 @@ from pydantic import (
     model_serializer,
     model_validator,
 )
+from pydantic_core import InitErrorDetails
 
 from src.helpers.vars import (
     KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION,
@@ -26,15 +27,7 @@ HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY: Final = "coerce_schema_v1"
 HTTP_REQUEST_LOG_READY_TO_RESPOND_AT_UNIX_USEC_KEY: Final = (
     "ready_to_respond_at_unix_usec"
 )
-HTTP_REQUEST_LOG_V1_PORT_FORBIDDEN: Final = (
-    "{} is not defined in schema version 1"
-).format(HTTP_REQUEST_LOG_PORT_KEY)
-HTTP_REQUEST_LOG_V1_COERCION_FORBIDDEN: Final = (
-    "{} is not defined in schema version 1"
-).format(HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY)
-HTTP_REQUEST_LOG_V1_READY_TO_RESPOND_FORBIDDEN: Final = (
-    "{} is not defined in schema version 1"
-).format(HTTP_REQUEST_LOG_READY_TO_RESPOND_AT_UNIX_USEC_KEY)
+HTTP_REQUEST_LOG_RESPONSE_BODY_KEY: Final = "response_body"
 HttpRequestLogSchemaVersion = Literal[1, 2]
 
 
@@ -56,7 +49,7 @@ class HttpRequestLogRecord(BaseModel):
     request_body: Any | None = None
     response_code: int | None
     response_headers: dict[str, Any] = Field(default_factory=dict)
-    response_body: str
+    response_body: str | None
     received_at_unix_usec: int | None
     duration_usec: int
 
@@ -66,31 +59,68 @@ class HttpRequestLogRecord(BaseModel):
         if not isinstance(value, Mapping):
             return value
         schema_version = value.get(HTTP_REQUEST_LOG_SCHEMA_VERSION_KEY)
-        has_port = HTTP_REQUEST_LOG_PORT_KEY in value
-        has_coerce_schema_v1 = HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY in value
-        has_ready_to_respond = (
-            HTTP_REQUEST_LOG_READY_TO_RESPOND_AT_UNIX_USEC_KEY in value
+        coerce_schema_v1 = (
+            value.get(HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY) is True
         )
         if schema_version == KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION:
-            if has_port:
-                raise ValueError(HTTP_REQUEST_LOG_V1_PORT_FORBIDDEN)
-            if has_coerce_schema_v1:
-                raise ValueError(HTTP_REQUEST_LOG_V1_COERCION_FORBIDDEN)
-            if has_ready_to_respond:
-                raise ValueError(HTTP_REQUEST_LOG_V1_READY_TO_RESPOND_FORBIDDEN)
-            return value
-        if (
-            schema_version == KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V2
-            and value.get(HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY, False) is True
-        ):
-            version_1 = dict(value)
-            version_1[HTTP_REQUEST_LOG_SCHEMA_VERSION_KEY] = (
-                KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION
+            if coerce_schema_v1:
+                version_1 = dict(value)
+                version_1.pop(HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY, None)
+                cls.model_validate(version_1)
+                version_2 = dict(value)
+                version_2[HTTP_REQUEST_LOG_SCHEMA_VERSION_KEY] = (
+                    KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V2
+                )
+                return version_2
+            version_1_errors: list[InitErrorDetails] = []
+            # disallow legacy typing
+            if (
+                HTTP_REQUEST_LOG_RESPONSE_BODY_KEY in value
+                and value[HTTP_REQUEST_LOG_RESPONSE_BODY_KEY] is None
+            ):
+                version_1_errors.append(
+                    InitErrorDetails(
+                        type="string_type",
+                        loc=(HTTP_REQUEST_LOG_RESPONSE_BODY_KEY,),
+                        input=None,
+                    )
+                )
+            # disallow extra fields
+            for field in (
+                HTTP_REQUEST_LOG_PORT_KEY,
+                HTTP_REQUEST_LOG_READY_TO_RESPOND_AT_UNIX_USEC_KEY,
+                # HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY,  # but allow coercion field
+            ):
+                if field in value:
+                    version_1_errors.append(
+                        InitErrorDetails(
+                            type="extra_forbidden",
+                            loc=(field,),
+                            input=value[field],
+                        )
+                    )
+            version_2 = dict(value)
+            version_2[HTTP_REQUEST_LOG_SCHEMA_VERSION_KEY] = (
+                KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V2
             )
-            version_1.pop(HTTP_REQUEST_LOG_PORT_KEY, None)
-            version_1.pop(HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY, None)
-            version_1.pop(HTTP_REQUEST_LOG_READY_TO_RESPOND_AT_UNIX_USEC_KEY, None)
-            cls.model_validate(version_1)
+            version_2.pop(HTTP_REQUEST_LOG_PORT_KEY, None)
+            version_2.pop(
+                HTTP_REQUEST_LOG_READY_TO_RESPOND_AT_UNIX_USEC_KEY,
+                None,
+            )
+            ordinary_errors: list[Any] = []
+            try:
+                cls.model_validate(version_2)
+            except ValidationError as exc:
+                ordinary_errors = exc.errors(include_url=False)
+            # raise
+            line_errors = ordinary_errors + version_1_errors
+            if line_errors:
+                raise ValidationError.from_exception_data(
+                    cls.__name__,
+                    line_errors,
+                )
+            return value
         return value
 
     @model_serializer(mode="wrap")

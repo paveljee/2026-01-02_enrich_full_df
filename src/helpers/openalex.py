@@ -256,6 +256,7 @@ def openalex_work_title_rows_from_log(
                 record,
                 line_number=line_number,
             )
+            assert record.response_body is not None  # type safety - HttpRequestLogRecord v1
             titles = parse_openalex_work_titles_response(
                 record.response_body,
                 requested_paperids=paperids,
@@ -435,6 +436,7 @@ def _result_from_record(
     record: HttpRequestLogRecord,
     reused: bool,
 ) -> OpenAlexAuthorCheckResult:
+    assert record.response_body is not None  # type safety - HttpRequestLogRecord v1
     top_author_id = parse_openalex_top_author_id(record.response_body)
     return OpenAlexAuthorCheckResult(
         source_key=source_key,

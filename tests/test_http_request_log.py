@@ -100,21 +100,28 @@ def test_http_request_log_schema_version_1_omits_and_rejects_v2_fields() -> None
     assert HTTP_REQUEST_LOG_PORT_KEY not in serialized
     assert HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY not in serialized
     assert HTTP_REQUEST_LOG_READY_TO_RESPOND_AT_UNIX_USEC_KEY not in serialized
-    with pytest.raises(ValidationError, match="port is not defined"):
-        HttpRequestLogRecord.model_validate(
-            serialized | {HTTP_REQUEST_LOG_PORT_KEY: None}
-        )
-    with pytest.raises(ValidationError, match="coerce_schema_v1 is not defined"):
-        HttpRequestLogRecord.model_validate(
-            serialized | {HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY: False}
-        )
-    with pytest.raises(
-        ValidationError,
-        match="ready_to_respond_at_unix_usec is not defined",
+    for field in (
+        HTTP_REQUEST_LOG_PORT_KEY,
+        HTTP_REQUEST_LOG_READY_TO_RESPOND_AT_UNIX_USEC_KEY,
     ):
-        HttpRequestLogRecord.model_validate(
-            serialized | {HTTP_REQUEST_LOG_READY_TO_RESPOND_AT_UNIX_USEC_KEY: None}
-        )
+        with pytest.raises(ValidationError) as raised:
+            HttpRequestLogRecord.model_validate(serialized | {field: None})
+
+        assert raised.value.errors(include_url=False) == [
+            {
+                "type": "extra_forbidden",
+                "loc": (field,),
+                "msg": "Extra inputs are not permitted",
+                "input": None,
+            }
+        ]
+    explicit_false = HttpRequestLogRecord.model_validate(
+        serialized | {HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY: False}
+    )
+
+    assert explicit_false.schema_version == KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION
+    assert explicit_false.coerce_schema_v1 is False
+    assert explicit_false.model_dump() == serialized
 
 
 @pytest.mark.parametrize(
@@ -158,7 +165,7 @@ def test_http_request_log_schema_version_2_roundtrips_optional_port(
     assert restored.model_dump() == expected_version_2
 
 
-def test_http_request_log_schema_version_2_defaults_port_and_coerces_v1() -> None:
+def test_http_request_log_schema_version_1_is_promoted_only_with_opt_in() -> None:
     version_1 = http_request_log_record(
         schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION,
         method="GET",
@@ -175,6 +182,7 @@ def test_http_request_log_schema_version_2_defaults_port_and_coerces_v1() -> Non
         HTTP_REQUEST_LOG_SCHEMA_VERSION_KEY: KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V2
     }
 
+    native_version_1 = HttpRequestLogRecord.model_validate(version_1)
     native = HttpRequestLogRecord.model_validate_json(
         HttpRequestLogRecord.model_validate(
             version_2
@@ -186,7 +194,10 @@ def test_http_request_log_schema_version_2_defaults_port_and_coerces_v1() -> Non
         ).model_dump_json()
     )
     coerced = HttpRequestLogRecord.model_validate(
-        version_2 | {HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY: True}
+        version_1 | {HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY: True}
+    )
+    restored_coerced = HttpRequestLogRecord.model_validate_json(
+        coerced.model_dump_json()
     )
     json_schema = HttpRequestLogRecord.model_json_schema()
 
@@ -200,6 +211,11 @@ def test_http_request_log_schema_version_2_defaults_port_and_coerces_v1() -> Non
         HTTP_REQUEST_LOG_READY_TO_RESPOND_AT_UNIX_USEC_KEY
         not in json_schema["required"]
     )
+    assert (
+        native_version_1.schema_version
+        == KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION
+    )
+    assert HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY not in native_version_1.model_dump()
     assert native.port is None
     assert native.coerce_schema_v1 is False
     assert (
@@ -207,10 +223,85 @@ def test_http_request_log_schema_version_2_defaults_port_and_coerces_v1() -> Non
         == TEST_HTTP_READY_TO_RESPOND_AT_UNIX_USEC
     )
     assert native.model_dump()[HTTP_REQUEST_LOG_PORT_KEY] is None
+    assert coerced.schema_version == KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V2
     assert coerced.port is None
     assert coerced.coerce_schema_v1 is True
     assert coerced.ready_to_respond_at_unix_usec is None
     assert coerced.model_dump()[HTTP_REQUEST_LOG_PORT_KEY] is None
+    assert restored_coerced == coerced
+
+
+def test_invalid_schema_version_1_is_rejected_before_opt_in_migration() -> None:
+    version_1 = http_request_log_record(
+        schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION,
+        method="GET",
+        scheme="https",
+        host=TEST_HTTP_HOST,
+        path="/works/W123",
+        redacted_query="select=title&api_key=REDACTED",
+        response_code=200,
+        response_body='{"title":"A Fine Paper"}',
+        received_at_unix_usec=123456,
+        duration_usec=789,
+    ).model_dump()
+    version_1["method"] = 1
+
+    with pytest.raises(ValidationError) as raised:
+        HttpRequestLogRecord.model_validate(
+            version_1 | {HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY: True}
+        )
+
+    assert raised.value.errors(include_url=False) == [
+        {
+            "type": "string_type",
+            "loc": ("method",),
+            "msg": "Input should be a valid string",
+            "input": 1,
+        }
+    ]
+
+
+def test_schema_version_1_reports_ordinary_and_versioned_pydantic_errors() -> None:
+    version_1 = http_request_log_record(
+        schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION,
+        method="GET",
+        scheme="https",
+        host=TEST_HTTP_HOST,
+        path="/works/W123",
+        redacted_query="select=title&api_key=REDACTED",
+        response_code=200,
+        response_body="response",
+        received_at_unix_usec=123456,
+        duration_usec=789,
+    ).model_dump() | {
+        "method": 1,
+        "response_body": None,
+        HTTP_REQUEST_LOG_PORT_KEY: None,
+    }
+
+    with pytest.raises(ValidationError) as raised:
+        HttpRequestLogRecord.model_validate(version_1)
+
+    assert raised.value.errors(include_url=False) == [
+        {
+            "type": "string_type",
+            "loc": ("method",),
+            "msg": "Input should be a valid string",
+            "input": 1,
+        },
+        {
+            "type": "string_type",
+            "loc": ("response_body",),
+            "msg": "Input should be a valid string",
+            "input": None,
+        },
+        {
+            "type": "extra_forbidden",
+            "loc": (HTTP_REQUEST_LOG_PORT_KEY,),
+            "msg": "Extra inputs are not permitted",
+            "input": None,
+        },
+    ]
 
 
 def test_redact_http_request_log_query_can_preserve_filter_separators() -> None:
@@ -219,3 +310,152 @@ def test_redact_http_request_log_query_can_preserve_filter_separators() -> None:
     assert redact_http_request_log_query(query, safe=":|") == (
         "filter=openalex_id:W123|W456&select=title&api_key=REDACTED"
     )
+
+
+@pytest.mark.parametrize(
+    (
+        "schema_version",
+        "response_body",
+        "coerce_schema_v1",
+        "valid",
+        "expected_schema_version",
+    ),
+    [
+        # Schema v1 requires a string response body.
+        (
+            KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION,
+            "response",
+            None,
+            True,
+            KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION,
+        ),
+        (
+            KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION,
+            "response",
+            False,
+            True,
+            KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION,
+        ),
+        (KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION, None, None, False, None),
+        # Opt-in migration promotes only valid v1 input.
+        (
+            KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION,
+            "response",
+            True,
+            True,
+            KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V2,
+        ),
+        (KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION, None, True, False, None),
+        # Native schema v2 allows either string or null.
+        (
+            KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V2,
+            "response",
+            False,
+            True,
+            KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V2,
+        ),
+        (
+            KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V2,
+            None,
+            False,
+            True,
+            KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V2,
+        ),
+        # Schema v2 ignores the migration flag.
+        (
+            KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V2,
+            "response",
+            True,
+            True,
+            KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V2,
+        ),
+        (
+            KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V2,
+            None,
+            True,
+            True,
+            KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V2,
+        ),
+    ],
+)
+def test_http_request_log_response_body_is_required_in_v1_and_nullable_in_v2(
+    schema_version: int,
+    response_body: str | None,
+    coerce_schema_v1: bool | None,
+    valid: bool,
+    expected_schema_version: int | None,
+) -> None:
+    value = http_request_log_record(
+        schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION,
+        method="GET",
+        scheme="https",
+        host=TEST_HTTP_HOST,
+        path="/works/W123",
+        redacted_query="select=title&api_key=REDACTED",
+        response_code=200,
+        response_body="response",
+        received_at_unix_usec=123456,
+        duration_usec=789,
+    ).model_dump()
+
+    value[HTTP_REQUEST_LOG_SCHEMA_VERSION_KEY] = schema_version
+    value["response_body"] = response_body
+
+    if coerce_schema_v1 is not None:
+        value[HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY] = coerce_schema_v1
+
+    if valid:
+        record = HttpRequestLogRecord.model_validate(value)
+        restored = HttpRequestLogRecord.model_validate_json(
+            record.model_dump_json()
+        )
+
+        assert restored.response_body == response_body
+        assert restored.schema_version == expected_schema_version
+    else:
+        with pytest.raises(ValidationError) as raised:
+            HttpRequestLogRecord.model_validate(value)
+
+        assert raised.value.errors(include_url=False) == [
+            {
+                "type": "string_type",
+                "loc": ("response_body",),
+                "msg": "Input should be a valid string",
+                "input": None,
+            }
+        ]
+
+
+@pytest.mark.parametrize("coerce_schema_v1", [None, False, True])
+def test_invalid_schema_version_2_ignores_v1_coercion_flag(
+    coerce_schema_v1: bool | None,
+) -> None:
+    value = http_request_log_record(
+        schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION,
+        method="GET",
+        scheme="https",
+        host=TEST_HTTP_HOST,
+        path="/works/W123",
+        redacted_query="select=title&api_key=REDACTED",
+        response_code=200,
+        response_body="response",
+        received_at_unix_usec=123456,
+        duration_usec=789,
+    ).model_dump() | {
+        HTTP_REQUEST_LOG_SCHEMA_VERSION_KEY: KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V2,
+        HTTP_REQUEST_LOG_PORT_KEY: "8612",
+    }
+    if coerce_schema_v1 is not None:
+        value[HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY] = coerce_schema_v1
+
+    with pytest.raises(ValidationError) as raised:
+        HttpRequestLogRecord.model_validate(value)
+
+    assert raised.value.errors(include_url=False) == [
+        {
+            "type": "int_type",
+            "loc": ("port",),
+            "msg": "Input should be a valid integer",
+            "input": "8612",
+        }
+    ]
