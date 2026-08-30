@@ -1,0 +1,35 @@
+# alternative config for autonomous async work
+model = "gpt-5.6-sol"
+model_reasoning_effort = "xhigh"
+model_reasoning_summary = "detailed"
+personality = "none"
+web_search = "disabled"
+# unused to be customized below
+#sandbox_mode = "danger-full-access"
+approval_policy = "never"
+service_tier = "default"
+approvals_reviewer = "user"
+# arbitrary name below
+default_permissions = "full-local-no-net"
+
+[permissions.full-local-no-net.filesystem]
+":root" = "write"  # assume Unix DAC non-sudo
+
+[permissions.full-local-no-net.network]
+enabled = false
+
+[features]
+plugins = false
+remote_plugin = false
+plugin_sharing = false
+recommended_plugins = false
+apps = false
+skill_mcp_dependency_install = false
+
+[apps._default]
+enabled = false
+destructive_enabled = false
+open_world_enabled = false
+
+[agents]
+enabled = false

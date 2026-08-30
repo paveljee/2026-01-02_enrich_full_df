@@ -7,6 +7,7 @@ from src.helpers.data_models.http_request_log import (
     HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY,
     HTTP_REQUEST_LOG_PORT_KEY,
     HTTP_REQUEST_LOG_READY_TO_RESPOND_AT_UNIX_USEC_KEY,
+    HTTP_REQUEST_LOG_RECORD_ID_KEY,
     HTTP_REQUEST_LOG_SCHEMA_VERSION_KEY,
     HttpRequestLogRecord,
     append_http_request_log_record,
@@ -24,6 +25,33 @@ TEST_HTTP_IPV6_HOST = "::1"
 TEST_HTTP_DEFAULT_HTTPS_PORT = 443
 TEST_HTTP_LOCAL_PORT = 8612
 TEST_HTTP_READY_TO_RESPOND_AT_UNIX_USEC = 123457
+
+
+def test_http_request_log_record_id_defaults_to_unique_uuid7_in_v2() -> None:
+    version_1 = http_request_log_record(
+        schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION,
+        method="GET",
+        scheme="https",
+        host="api.openalex.org",
+        path="/works/W123",
+        redacted_query="select=title&api_key=REDACTED",
+        response_code=200,
+        response_body='{"title":"A Fine Paper"}',
+        received_at_unix_usec=123456,
+        duration_usec=789,
+    ).model_dump()
+    version_2 = version_1 | {
+        HTTP_REQUEST_LOG_SCHEMA_VERSION_KEY: KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V2
+    }
+    record = HttpRequestLogRecord.model_validate(version_2)
+    another = HttpRequestLogRecord.model_validate(version_2)
+    restored = HttpRequestLogRecord.model_validate_json(record.model_dump_json())
+
+    assert HTTP_REQUEST_LOG_RECORD_ID_KEY not in version_1
+    assert record.record_id.version == 7
+    assert another.record_id.version == 7
+    assert another.record_id != record.record_id
+    assert restored.record_id == record.record_id
 
 
 def test_append_http_request_log_record_writes_escaped_unicode_jsonl(
@@ -97,10 +125,12 @@ def test_http_request_log_schema_version_1_omits_and_rejects_v2_fields() -> None
     )
     serialized = record.model_dump()
 
+    assert HTTP_REQUEST_LOG_RECORD_ID_KEY not in serialized
     assert HTTP_REQUEST_LOG_PORT_KEY not in serialized
     assert HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY not in serialized
     assert HTTP_REQUEST_LOG_READY_TO_RESPOND_AT_UNIX_USEC_KEY not in serialized
     for field in (
+        HTTP_REQUEST_LOG_RECORD_ID_KEY,
         HTTP_REQUEST_LOG_PORT_KEY,
         HTTP_REQUEST_LOG_READY_TO_RESPOND_AT_UNIX_USEC_KEY,
     ):
@@ -158,11 +188,13 @@ def test_http_request_log_schema_version_2_roundtrips_optional_port(
         HTTP_REQUEST_LOG_READY_TO_RESPOND_AT_UNIX_USEC_KEY: None,
     }
 
-    restored = HttpRequestLogRecord.model_validate_json(
-        HttpRequestLogRecord.model_validate(version_2).model_dump_json()
-    )
+    record = HttpRequestLogRecord.model_validate(version_2)
+    restored = HttpRequestLogRecord.model_validate_json(record.model_dump_json())
 
-    assert restored.model_dump() == expected_version_2
+    assert restored.model_dump(exclude={HTTP_REQUEST_LOG_RECORD_ID_KEY}) == (
+        expected_version_2
+    )
+    assert restored.record_id == record.record_id
 
 
 def test_http_request_log_schema_version_1_is_promoted_only_with_opt_in() -> None:
@@ -201,6 +233,8 @@ def test_http_request_log_schema_version_1_is_promoted_only_with_opt_in() -> Non
     )
     json_schema = HttpRequestLogRecord.model_json_schema()
 
+    assert HTTP_REQUEST_LOG_RECORD_ID_KEY in json_schema["properties"]
+    assert HTTP_REQUEST_LOG_RECORD_ID_KEY not in json_schema["required"]
     assert HTTP_REQUEST_LOG_PORT_KEY in json_schema["properties"]
     assert HTTP_REQUEST_LOG_PORT_KEY not in json_schema["required"]
     assert (
@@ -215,6 +249,7 @@ def test_http_request_log_schema_version_1_is_promoted_only_with_opt_in() -> Non
         native_version_1.schema_version
         == KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION
     )
+    assert HTTP_REQUEST_LOG_RECORD_ID_KEY not in native_version_1.model_dump()
     assert HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY not in native_version_1.model_dump()
     assert native.port is None
     assert native.coerce_schema_v1 is False
@@ -224,6 +259,8 @@ def test_http_request_log_schema_version_1_is_promoted_only_with_opt_in() -> Non
     )
     assert native.model_dump()[HTTP_REQUEST_LOG_PORT_KEY] is None
     assert coerced.schema_version == KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V2
+    assert coerced.record_id.version == 7
+    assert HTTP_REQUEST_LOG_RECORD_ID_KEY in coerced.model_dump()
     assert coerced.port is None
     assert coerced.coerce_schema_v1 is True
     assert coerced.ready_to_respond_at_unix_usec is None

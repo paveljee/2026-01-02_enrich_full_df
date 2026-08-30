@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Final, Literal, cast
 from urllib.parse import parse_qsl, quote, urlencode
+from uuid import UUID, uuid7
 
 from pydantic import (
     BaseModel,
@@ -22,6 +23,7 @@ from src.helpers.vars import (
 )
 
 HTTP_REQUEST_LOG_SCHEMA_VERSION_KEY: Final = "schema_version"
+HTTP_REQUEST_LOG_RECORD_ID_KEY: Final = "record_id"
 HTTP_REQUEST_LOG_PORT_KEY: Final = "port"
 HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY: Final = "coerce_schema_v1"
 HTTP_REQUEST_LOG_READY_TO_RESPOND_AT_UNIX_USEC_KEY: Final = (
@@ -37,6 +39,7 @@ class HttpRequestLogRecord(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     schema_version: HttpRequestLogSchemaVersion
+    record_id: UUID = Field(default_factory=uuid7)
     method: str
     scheme: str
     host: str
@@ -87,6 +90,7 @@ class HttpRequestLogRecord(BaseModel):
                 )
             # disallow extra fields
             for field in (
+                HTTP_REQUEST_LOG_RECORD_ID_KEY,
                 HTTP_REQUEST_LOG_PORT_KEY,
                 HTTP_REQUEST_LOG_READY_TO_RESPOND_AT_UNIX_USEC_KEY,
                 # HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY,  # but allow coercion field
@@ -103,6 +107,7 @@ class HttpRequestLogRecord(BaseModel):
             version_2[HTTP_REQUEST_LOG_SCHEMA_VERSION_KEY] = (
                 KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V2
             )
+            version_2.pop(HTTP_REQUEST_LOG_RECORD_ID_KEY, None)
             version_2.pop(HTTP_REQUEST_LOG_PORT_KEY, None)
             version_2.pop(
                 HTTP_REQUEST_LOG_READY_TO_RESPOND_AT_UNIX_USEC_KEY,
@@ -130,6 +135,7 @@ class HttpRequestLogRecord(BaseModel):
     ) -> dict[str, Any]:
         serialized = cast(dict[str, Any], handler(self))
         if self.schema_version == KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION:
+            serialized.pop(HTTP_REQUEST_LOG_RECORD_ID_KEY, None)
             serialized.pop(HTTP_REQUEST_LOG_PORT_KEY, None)
             serialized.pop(HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY, None)
             serialized.pop(HTTP_REQUEST_LOG_READY_TO_RESPOND_AT_UNIX_USEC_KEY, None)
