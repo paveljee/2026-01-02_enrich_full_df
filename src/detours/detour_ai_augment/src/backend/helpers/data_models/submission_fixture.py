@@ -5,6 +5,8 @@ from copy import deepcopy
 from typing import Final, Generic, TypeVar
 
 from pydantic import BaseModel, HttpUrl
+from pydantic_extra_types.country import CountryAlpha2
+from pydantic_extra_types.language_code import ISO639_3
 
 from ..locale import Locale
 from .pydantic_to_paste import (
@@ -256,14 +258,14 @@ L_FEI_FEI_RETRY_FIXTURE.submission.researcher_author.standardized_value = (
 L_FEI_FEI_RETRY_FIXTURE.submission.place_of_residence.standardized_value = (
     PlaceOfResidenceStandardized(
     place="Stanford campus, Stanford, California",
-    location="US",
+    location=CountryAlpha2("US"),
     )
 )
 L_FEI_FEI_RETRY_FIXTURE.submission.race_ethnicity_language_culture.standardized_value = (
     RaceEthnicityLanguageCultureStandardized(
     race="NA",
     ethnicity="NA",
-        language=["eng", "cmn"],
+        language=[ISO639_3("eng"), ISO639_3("cmn")],
     culture="NA",
     )
 )

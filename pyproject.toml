@@ -38,7 +38,6 @@ detour-ai-augment = [
   "fastapi==0.140.0",
   "uvicorn==0.51.0",
   "pydantic==2.13.4",
-  "httpx==0.28.1",
   "httpx2==2.12.0",  # for starlette
   "nicegui==3.13.0",
   "playwright==1.62.0",

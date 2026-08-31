@@ -52,10 +52,11 @@ class Locale:
         "validated attempt database state is inconsistent"
     )
     JOURNAL_DUPLICATE_RUN_ID: Final = (
-        "backend run events contain a duplicate queued run ID"
+        "dashboard run events contain a duplicate queued run ID"
     )
+    JOURNAL_STORAGE_INVALID: Final = "dashboard run journal storage is invalid"
     JOURNAL_EVENT_WITHOUT_RUN: Final = (
-        "backend run event has no matching run"
+        "dashboard run event has no matching run"
     )
     JOURNAL_SESSION_ID_MISSING: Final = (
         "session-discovered event has no session ID"
@@ -66,16 +67,16 @@ class Locale:
     JOURNAL_ROLLOUT_PATH_MISSING: Final = (
         "rollout-discovered event has no path"
     )
-    JOURNAL_SANCTION_INVALID: Final = "sanctioned event has incomplete run identity"
     JOURNAL_ATTEMPT_ID_MISSING: Final = "push-accepted event has no attempt ID"
     UNKNOWN_NAMEKEY_TEMPLATE: Final = "unknown namekey: {namekey}"
     BACKEND_OUTPUT_PIPE_MISSING: Final = "backend output pipe was not created"
     BACKEND_OPENAPI_NOT_READY: Final = "backend OpenAPI endpoint is not ready"
     BACKEND_CONTROL_NOT_READY: Final = "backend control state is not ready"
-    BACKEND_PULL_NOT_READY: Final = "backend cannot serve the sanctioned pull"
+    BACKEND_PULL_NOT_READY: Final = "backend cannot serve the configured pull"
     BACKEND_EXITED_EARLY: Final = "backend exited before becoming ready"
     BACKEND_READY_TIMEOUT: Final = "backend did not become ready"
     BACKEND_NOT_RUNNING: Final = "backend is not running"
+    BACKEND_STDIN_MISSING: Final = "backend stdin pipe is unavailable"
     BACKEND_CONTROL_REQUEST_FAILED: Final = "backend control request failed"
     BACKEND_CONTROL_RESPONSE_INVALID: Final = "backend control response is invalid"
     BACKEND_CARD_MISSING: Final = "backend returned no researcher card"
@@ -124,8 +125,8 @@ class Locale:
     INELIGIBLE_QUEUE: Final = "ineligible namekeys cannot be queued"
     UNKNOWN_RUN_ID_TEMPLATE: Final = "unknown run ID: {run_id}"
     CODEX_CANCEL_FAILED_TEMPLATE: Final = "Codex cancellation failed: {error}"
-    CODEX_CANCELED_BEFORE_SANCTION: Final = (
-        "Codex run was cancelled before sanctioning"
+    CODEX_CANCELED_BEFORE_SESSION_HANDOFF: Final = (
+        "Codex run was cancelled before session handoff"
     )
     CODEX_HANDLE_MISMATCH: Final = "Codex handle does not match the active run"
     ACCEPTED_SESSION_DUPLICATE: Final = (

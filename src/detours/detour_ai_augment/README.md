@@ -182,7 +182,7 @@ This effect on the session log is particularly unfortunate because it forces the
 This vulnerability was countered by the Control Centre implementing a series of measures:
 
 - The deployment script `./src/agent_runtime/deploy.sh` provisions a non-root user account under which VS Code Server and Codex extension are installed and executed. This effectively limits the scope of system permissions, such as passwordless sudo.
-- Before launching Codex, under a root user (inside the virtual machine), a watcher `./src/agent_runtime/appendwatch/appendwatch.py` is running that monitors events within the `$CODEX_HOME/sessions` directory, where the Codex app stores session logs.
+- Before launching Codex, under a root user (inside the virtual machine), a watcher `./src/control_centre/appendwatch/appendwatch.py` is running that monitors events within the `$CODEX_HOME/sessions` directory, where the Codex app stores session logs.
 The watcher tracks changes applied to session files using `inotify` and permanently flags any rollouts on which non-append-only changes were observed.
 - Both the watcher and the report it maintains are persisted beyond Codex’s user account (i.e., under root-only permissions), placing them out of reach of the AI Agent Runtime.
 

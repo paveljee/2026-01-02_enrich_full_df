@@ -11,8 +11,10 @@ import json
 import logging
 import os
 import re
+import shlex
 import signal
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -29,7 +31,6 @@ from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
 import duckdb
-import httpx
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse, Response, StreamingResponse
@@ -164,7 +165,6 @@ class ControlRunEventKind(StrEnum):
     REMOTE_PID_DISCOVERED = "remote_pid_discovered"
     SESSION_DISCOVERED = "session_discovered"
     ROLLOUT_DISCOVERED = "rollout_discovered"
-    SANCTIONED = "sanctioned"
     PUSH_ACCEPTED = "push_accepted"
     CANCEL_REQUESTED = "cancel_requested"
     CODEX_EXITED = "codex_exited"
@@ -173,11 +173,21 @@ class ControlRunEventKind(StrEnum):
     CANCELED = "canceled"
 
 
+class BackendWorkflowStatus(StrEnum):
+    READY = "ready"
+    BUSY = "busy"
+    RETRY = "retry"
+    COMPLETE = "complete"
+    FAILED = "failed"
+
+
 AIVM_WORKDIR = PurePosixPath("/home/ai/workdir")
 
 ROLLOUT_ENV_NAME = "FASTAPI_DETOUR_ROLLOUT_JSONL"
 ROLLOUT_JSONL = os.environ.get(ROLLOUT_ENV_NAME, "")
 APPENDWATCH_REPORT_ENV_NAME = "FASTAPI_DETOUR_APPENDWATCH_REPORT"
+NAMEKEY_ENV_NAME = "FASTAPI_DETOUR_NAMEKEY"
+CODEX_SESSIONS_ROOT_ENV_NAME = "FASTAPI_DETOUR_CODEX_SESSIONS_DIR"
 CONTROL_PARENT_PID_ENV_NAME = "FASTAPI_DETOUR_CONTROL_PARENT_PID"
 CONTROL_RUN_EVENTS_TOKEN_ENV_NAME = "FASTAPI_DETOUR_CONTROL_RUN_EVENTS_TOKEN"
 CONTROL_RUN_EVENTS_TOKEN = os.environ.get(CONTROL_RUN_EVENTS_TOKEN_ENV_NAME, "")
@@ -188,10 +198,11 @@ AIVM_SSH_PORT_ENV_NAME = "FASTAPI_DETOUR_AIVM_SSH_PORT"
 AIVM_IDENTITY_FILE_ENV_NAME = "FASTAPI_DETOUR_AIVM_IDENTITY_FILE"
 AIVM_KNOWN_HOSTS_FILE_ENV_NAME = "FASTAPI_DETOUR_AIVM_KNOWN_HOSTS_FILE"
 LIMA_SSH_CONFIG_ENV_NAME = "FASTAPI_DETOUR_LIMA_SSH_CONFIG"
-CONTROL_PUSH_PATH = "/_control/push"
 CONTROL_PULL_PATH = "/_control/pull"
-CONTROL_COMMIT_PATH = "/_control/commit"
-CODEX_SESSIONS_ROOT = PurePosixPath("/home/ai/.codex/sessions")
+COMMIT_PATH = "/commit"
+CODEX_SESSIONS_ROOT = PurePosixPath(
+    os.environ.get(CODEX_SESSIONS_ROOT_ENV_NAME, "/home/ai/.codex/sessions")
+)
 APPENDWATCH_REPORT = Path(os.environ.get(APPENDWATCH_REPORT_ENV_NAME, "")).expanduser()
 
 AIVM_INSTANCE = os.environ.get(AIVM_INSTANCE_ENV_NAME, "aivm")
@@ -316,15 +327,6 @@ ATTEMPT_STAGE_EVIDENCE_VALIDATION = "duckdb_evidence_validation"
 ATTEMPT_STAGE_RESEARCHER_RESOLUTION = "researcher_resolution"
 ATTEMPT_STAGE_CARD = "innerdict_and_card"
 ATTEMPT_STAGE_ACCEPTED = "accepted"
-REPLAY_EXECUTION_STAGES = frozenset({
-    ATTEMPT_STAGE_APPENDWATCH_VALIDATION,
-    ATTEMPT_STAGE_ROLLOUT_INDEX,
-    ATTEMPT_STAGE_PYDANTIC_VALIDATION,
-    ATTEMPT_STAGE_EVIDENCE_VALIDATION,
-    ATTEMPT_STAGE_RESEARCHER_RESOLUTION,
-    ATTEMPT_STAGE_CARD,
-    ATTEMPT_STAGE_ACCEPTED,
-})
 ATTEMPT_RESULT_ACCEPTED = "accepted"
 ATTEMPT_RESULT_CONFIGURATION_ERROR = "configuration_error"
 ATTEMPT_RESULT_REJECTED = "rejected"
@@ -385,8 +387,6 @@ ATTEMPT_UPDATED_AT_KEY = "updated_at"
 REPLAY_LOG_RESOURCE_KEY = "detour_ai_augment_backend_api_replay_log"
 ROLLOUT_CAS_TEMP_FILENAME_TEMPLATE = ".{nonce}.tmp"
 ROLLOUT_CAS_FILENAME_TEMPLATE = "{sha256}.jsonl"
-HTTP_IDEMPOTENCY_KEY_HEADER = "Idempotency-Key"
-HTTP_TRANSACTION_ID_HEADER = "X-Detour-Transaction-Id"
 HTTP_ETAG_HEADER = "ETag"
 HTTP_ETAG_SHA256_TEMPLATE = '"sha256:{sha256}"'
 HTTP_ETAG_SHA256_PREFIX = '"sha256:'
@@ -394,10 +394,10 @@ HTTP_ETAG_SUFFIX = '"'
 HTTP_INTERNAL_ERROR_RESPONSE = status.HTTP_500_INTERNAL_SERVER_ERROR
 HTTP_BUSY_RESPONSE = status.HTTP_409_CONFLICT
 AUTHORITATIVE_PUBLIC_ROUTES = frozenset({
+    (HTTP_GET_METHOD, PULL_PATH),
     (HTTP_POST_METHOD, PUSH_PATH),
-    (HTTP_POST_METHOD, CONTROL_PUSH_PATH),
 })
-AUTHORITATIVE_COMMIT_ROUTE = (HTTP_PUT_METHOD, CONTROL_COMMIT_PATH)
+AUTHORITATIVE_COMMIT_ROUTE = (HTTP_POST_METHOD, COMMIT_PATH)
 AUTHORITATIVE_CHECKPOINT_ID = 1
 AUTHORITATIVE_FIRST_LINE = 1
 AUTHORITATIVE_EMPTY_OFFSET = 0
@@ -442,7 +442,14 @@ CODEX_RESULT_SEPARATOR = "-" * 80
 FOOTNOTE_CONTEXT_CHARACTERS = 160
 SERVER_HOST = "127.0.0.1"
 SERVER_PORT = 8612
-INTERNAL_COMMIT_BASE_URL = "http://backend.internal"
+SYNTHETIC_COMMIT_SCHEME = "http"
+SYNTHETIC_COMMIT_HOST = "invalid"
+SOURCE_KEY_HEADER = "Source-Key"
+NAME_KEY_HEADER = "Name-Key"
+RETRY_AFTER_HEADER = "Retry-After"
+LOCATION_HEADER = "Location"
+RETRY_AFTER_SECONDS = "1"
+MARKDOWN_MEDIA_TYPE = "text/markdown"
 
 MAP_COLUMNS = (DRAW_LABEL, BATCH_LABEL)
 # ground truth is defined explicitly by released batch, exclusive of dupe
@@ -494,12 +501,17 @@ DRAW_SORT_PART = re.compile(r"\d+|\D+")
 DETOUR_ID = "ai-augment"
 DETOUR_DB_LOCK = threading.Lock()
 AUTHORITATIVE_APPEND_LOCK = threading.Lock()
-AUTHORITATIVE_COMMAND_STATE_LOCK = threading.Lock()
-AUTHORITATIVE_COMMAND_ACTIVE = False
 AUTHORITATIVE_BACKEND_HEALTHY = True
 AUTHORITATIVE_LOG_DESCRIPTOR: int | None = None
 AUTHORITATIVE_NEXT_LINE_NUMBER = 1
 AUTHORITATIVE_LOG_OFFSET = 0
+AUTHORITATIVE_BACKGROUND_TASKS: set[asyncio.Task[None]] = set()
+BACKEND_WORKFLOW_STATE_LOCK = threading.Lock()
+BACKEND_WORKFLOW_STATUS = BackendWorkflowStatus.READY
+BACKEND_WORKFLOW_OUTCOME: ProjectedValidationOutcome | None = None
+BACKEND_CURRENT_PULL_RECORD_ID: UUID | None = None
+BACKEND_PENDING_PULL_RECORD_ID: UUID | None = None
+BACKEND_SESSION_ID: str | None = None
 EVIDENCE_RANDOM = Random()
 CODEX_FC_TABLE = "codex_fc"
 CODEX_FCO_TABLE = "codex_fco"
@@ -516,24 +528,24 @@ CODEX_FCO_ID_SEQUENCE = "codex_fco_id_sequence"
 CODEX_CALLS_ID_SEQUENCE = "codex_calls_id_sequence"
 CODEX_TURN_REF_ID_SEQUENCE = "codex_turn_ref_id_sequence"
 CODEX_EVIDENCE_AUDIT_ID_SEQUENCE = "codex_evidence_audit_id_sequence"
-CONTROL_RUN_EVENTS_TABLE = "control_centre_run_events"
 CONTROL_ATTEMPTS_TABLE = "control_centre_attempts"
-CONTROL_SANCTIONS_TABLE = "control_centre_sanctions"
 AUTHORITATIVE_PROJECTION_TABLE = "detour_authoritative_projection"
 CONTROL_ATTEMPT_RECORD_COLUMN = "record"
 CONTROL_ATTEMPT_REQUEST_SHA256_COLUMN = "request_sha256"
 CONTROL_ATTEMPT_IDEMPOTENCY_KEY_COLUMN = "idempotency_key"
-CONTROL_RUN_EVENT_IDEMPOTENCY_KEY_COLUMN = "idempotency_key"
-CONTROL_RUN_EVENT_ORDINAL_COLUMN = "event_ordinal"
-CONTROL_RUN_EVENT_PAYLOAD_COLUMN = "event"
-CONTROL_SANCTION_RUN_ID_COLUMN = "run_id"
-CONTROL_SANCTION_PAYLOAD_COLUMN = "sanction"
-CONTROL_SANCTION_ACTIVE_COLUMN = "active"
-CONTROL_SANCTION_ACCEPTED_ATTEMPT_ID_COLUMN = "accepted_attempt_id"
 AUTHORITATIVE_PROJECTION_ID_COLUMN = "id"
 AUTHORITATIVE_PROJECTION_LINE_COLUMN = "line_number"
 AUTHORITATIVE_PROJECTION_OFFSET_COLUMN = "byte_offset"
 AUTHORITATIVE_PROJECTION_HASH_COLUMN = "line_sha256"
+AUTHORITATIVE_RECORDS_TABLE = "detour_http_records"
+AUTHORITATIVE_RECORD_ORDINAL_COLUMN = "record_ordinal"
+AUTHORITATIVE_RECORD_ID_COLUMN = "record_id"
+AUTHORITATIVE_RECORD_METHOD_COLUMN = "method"
+AUTHORITATIVE_RECORD_PATH_COLUMN = "path"
+AUTHORITATIVE_RECORD_PAYLOAD_COLUMN = "record"
+AUTHORITATIVE_OUTCOMES_TABLE = "detour_validation_outcomes"
+AUTHORITATIVE_OUTCOME_COMMIT_ID_COLUMN = "commit_record_id"
+AUTHORITATIVE_OUTCOME_PAYLOAD_COLUMN = "outcome"
 
 CODEX_ID_COL = "id"
 CODEX_FC_TIMESTAMP_COL = "codex.fc_timestamp"
@@ -565,25 +577,12 @@ CODEX_EVIDENCE_APPLIED_COL = "applied"
 CODEX_EVIDENCE_ACCEPTED_COL = "accepted"
 CODEX_EVIDENCE_AUDIT_ID_COL = "id"
 CODEX_TOKEN_EXTENSION = "splink_udfs"
-CREATE_CONTROL_RUN_EVENTS_TABLE_SQL = (
-    f"CREATE TABLE IF NOT EXISTS {CONTROL_RUN_EVENTS_TABLE} ("
-    f"{CONTROL_RUN_EVENT_ORDINAL_COLUMN} BIGINT PRIMARY KEY, "
-    f"{CONTROL_RUN_EVENT_IDEMPOTENCY_KEY_COLUMN} VARCHAR NOT NULL UNIQUE, "
-    f"{CONTROL_RUN_EVENT_PAYLOAD_COLUMN} JSON NOT NULL)"
-)
 CREATE_CONTROL_ATTEMPTS_TABLE_SQL = (
     f"CREATE TABLE IF NOT EXISTS {CONTROL_ATTEMPTS_TABLE} ("
     f"{ATTEMPT_ID_KEY} VARCHAR PRIMARY KEY, "
     f"{CONTROL_ATTEMPT_IDEMPOTENCY_KEY_COLUMN} VARCHAR NOT NULL UNIQUE, "
     f"{CONTROL_ATTEMPT_REQUEST_SHA256_COLUMN} VARCHAR NOT NULL, "
     f"{CONTROL_ATTEMPT_RECORD_COLUMN} JSON NOT NULL)"
-)
-CREATE_CONTROL_SANCTIONS_TABLE_SQL = (
-    f"CREATE TABLE IF NOT EXISTS {CONTROL_SANCTIONS_TABLE} ("
-    f"{CONTROL_SANCTION_RUN_ID_COLUMN} VARCHAR PRIMARY KEY, "
-    f"{CONTROL_SANCTION_PAYLOAD_COLUMN} JSON NOT NULL, "
-    f"{CONTROL_SANCTION_ACTIVE_COLUMN} BOOLEAN NOT NULL, "
-    f"{CONTROL_SANCTION_ACCEPTED_ATTEMPT_ID_COLUMN} VARCHAR)"
 )
 CREATE_AUTHORITATIVE_PROJECTION_TABLE_SQL = (
     f"CREATE TABLE IF NOT EXISTS {AUTHORITATIVE_PROJECTION_TABLE} ("
@@ -592,15 +591,18 @@ CREATE_AUTHORITATIVE_PROJECTION_TABLE_SQL = (
     f"{AUTHORITATIVE_PROJECTION_OFFSET_COLUMN} BIGINT NOT NULL, "
     f"{AUTHORITATIVE_PROJECTION_HASH_COLUMN} VARCHAR NOT NULL)"
 )
-SELECT_CONTROL_RUN_EVENTS_SQL = (
-    f"SELECT {CONTROL_RUN_EVENT_ORDINAL_COLUMN}, "
-    f"{CONTROL_RUN_EVENT_IDEMPOTENCY_KEY_COLUMN}, {CONTROL_RUN_EVENT_PAYLOAD_COLUMN} "
-    f"FROM {CONTROL_RUN_EVENTS_TABLE} ORDER BY {CONTROL_RUN_EVENT_ORDINAL_COLUMN}"
+CREATE_AUTHORITATIVE_RECORDS_TABLE_SQL = (
+    f"CREATE TABLE IF NOT EXISTS {AUTHORITATIVE_RECORDS_TABLE} ("
+    f"{AUTHORITATIVE_RECORD_ORDINAL_COLUMN} BIGINT PRIMARY KEY, "
+    f"{AUTHORITATIVE_RECORD_ID_COLUMN} VARCHAR NOT NULL UNIQUE, "
+    f"{AUTHORITATIVE_RECORD_METHOD_COLUMN} VARCHAR NOT NULL, "
+    f"{AUTHORITATIVE_RECORD_PATH_COLUMN} VARCHAR NOT NULL, "
+    f"{AUTHORITATIVE_RECORD_PAYLOAD_COLUMN} JSON NOT NULL)"
 )
-INSERT_CONTROL_RUN_EVENT_SQL = (
-    f"INSERT INTO {CONTROL_RUN_EVENTS_TABLE} "
-    f"({CONTROL_RUN_EVENT_ORDINAL_COLUMN}, {CONTROL_RUN_EVENT_IDEMPOTENCY_KEY_COLUMN}, "
-    f"{CONTROL_RUN_EVENT_PAYLOAD_COLUMN}) VALUES (?, ?, ?)"
+CREATE_AUTHORITATIVE_OUTCOMES_TABLE_SQL = (
+    f"CREATE TABLE IF NOT EXISTS {AUTHORITATIVE_OUTCOMES_TABLE} ("
+    f"{AUTHORITATIVE_OUTCOME_COMMIT_ID_COLUMN} VARCHAR PRIMARY KEY, "
+    f"{AUTHORITATIVE_OUTCOME_PAYLOAD_COLUMN} JSON NOT NULL)"
 )
 HTTP_REQUEST_LOG_RESPONSE_CONTENT_TYPE_HEADER = "content-type"
 HTTP_REQUEST_LOG_RESPONSE_CONTENT_TYPE_JSON = "application/json"
@@ -702,11 +704,6 @@ CARD_EXCLUDED_COLUMNS = {
 CARD_ZIP_PREFIX = "ai_augment_cards"
 
 MEDIA_TYPE = "application/x-ndjson"
-ATTEMPT_RESPONSE_CONTENT_TYPE = {
-    status.HTTP_200_OK: MEDIA_TYPE,
-    status.HTTP_422_UNPROCESSABLE_CONTENT: JSON_MEDIA_TYPE,
-    status.HTTP_503_SERVICE_UNAVAILABLE: JSON_MEDIA_TYPE,
-}
 
 
 @asynccontextmanager
@@ -714,8 +711,21 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     parent_watch: asyncio.Task[None] | None = None
     try:
         runtime = runtime_configuration()
+        with BACKEND_WORKFLOW_STATE_LOCK:
+            global BACKEND_CURRENT_PULL_RECORD_ID
+            global BACKEND_PENDING_PULL_RECORD_ID
+            global BACKEND_SESSION_ID
+            global BACKEND_WORKFLOW_OUTCOME
+            global BACKEND_WORKFLOW_STATUS
+            BACKEND_CURRENT_PULL_RECORD_ID = None
+            BACKEND_PENDING_PULL_RECORD_ID = None
+            BACKEND_SESSION_ID = None
+            BACKEND_WORKFLOW_OUTCOME = None
+            BACKEND_WORKFLOW_STATUS = BackendWorkflowStatus.READY
+        prove_workflow_inputs_readable()
         _acquire_authoritative_process_lock(runtime)
         synchronize_authoritative_projection(runtime)
+        start_backend_session_reader()
     except PushConfigurationError as exc:
         logger.error(Locale.API_STARTUP_FAILED_LOG, exc)
         _release_authoritative_process_lock()
@@ -728,6 +738,11 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     try:
         yield
     finally:
+        if AUTHORITATIVE_BACKGROUND_TASKS:
+            await asyncio.gather(
+                *tuple(AUTHORITATIVE_BACKGROUND_TASKS),
+                return_exceptions=True,
+            )
         if parent_watch is not None:
             parent_watch.cancel()
             with suppress(asyncio.CancelledError):
@@ -762,24 +777,6 @@ class CompactSessionMetadata(BaseModel):
         return self
 
 
-class ControlRun(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
-
-    run_id: UUID
-    namekey: StrictStr
-    session_id: StrictStr
-    rollout_jsonl: StrictStr
-
-    @model_validator(mode="after")
-    def validate_control_run(self) -> Self:
-        if any(
-            not _valid_nonblank(value)
-            for value in (self.namekey, self.session_id, self.rollout_jsonl)
-        ):
-            raise ValueError(Locale.CONTROL_RUN_NORMALIZED)
-        return self
-
-
 class ControlRunEvent(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -794,19 +791,6 @@ class ControlRunEvent(BaseModel):
     accepted_attempt_id: str | None = None
     codex_exit_code: int | None = None
     detail: str | None = None
-
-
-class ControlPushRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
-    event: ControlRunEvent
-
-
-class ControlPushResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
-    accepted: bool
-    duplicate: bool
 
 
 class AttemptRecord(BaseModel):
@@ -841,56 +825,51 @@ class ControlAcceptedAttempt(BaseModel):
 class ControlPullResponse(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
-    sanctioned_run: ControlRun | None
-    events: tuple[ControlRunEvent, ...]
     attempts: tuple[AttemptRecord, ...]
     accepted_attempts: tuple[ControlAcceptedAttempt, ...]
     card_markdown: StrictStr | None = None
 
 
-class RolloutCasReference(BaseModel):
+class ReplayRolloutReference(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     sha256: StrictStr
     size: int = Field(ge=0)
     line_count: int = Field(ge=1)
-    rollout_relative_path: StrictStr
 
 
-class SubmissionCommitOutcome(BaseModel):
+class Base64Artifact(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
+    encoding: Literal["base64"]
+    data: StrictStr
+
+
+class ReplayCommit(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    schema_version: Literal[1] = 1
+    pull_record_id: UUID
+    push_record_id: UUID
+    rollout: ReplayRolloutReference
+    appendwatch_report: Base64Artifact
+
+
+class ProjectedValidationOutcome(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    commit_record_id: UUID
+    pull_record_id: UUID
+    push_record_id: UUID
+    attempt_id: StrictStr
     stage: StrictStr
     result: StrictStr
     response_code: int
     response_headers: dict[StrictStr, StrictStr]
     response_body: StrictStr
     response_detail: StrictStr | None = None
-    retry_submission_expected: bool
-    namekey: StrictStr | None = None
+    namekey: StrictStr
     session_id: StrictStr | None = None
-
-
-class SubmissionCommit(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
-    schema_version: Literal[1] = 1
-    transaction_id: StrictStr
-    attempt_id: StrictStr
-    attempt_timestamp: datetime
-    sanction: ControlRun
-    public_request_body: StrictStr
-    public_request_sha256: StrictStr
-    appendwatch_snapshot: StrictStr | None = None
-    rollout: RolloutCasReference | None = None
-    outcome: SubmissionCommitOutcome
-
-
-class ControlCommitResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
-    committed: bool
-    duplicate: bool
 
 
 SubmissionPayload: TypeAlias = Submission | StandardizedSubmission
@@ -932,7 +911,7 @@ APP_CONFIG: dict[str, Any] = {
 
 PULL_ROUTE: dict[str, Any] = {
     "path": PULL_PATH,
-    "response_class": StreamingResponse,
+    "response_class": Response,
     "summary": Locale.PULL_SUMMARY,
     "description": Locale.PULL_DESCRIPTION,
     "responses": {
@@ -942,6 +921,28 @@ PULL_ROUTE: dict[str, Any] = {
                 MEDIA_TYPE: {
                     "example": (json.dumps(NULL_SUBMISSION_EXAMPLE, ensure_ascii=False) + "\n"),
                 },
+                MARKDOWN_MEDIA_TYPE: {
+                    "example": Locale.VALIDATION_ERROR_DETAIL + "\n",
+                },
+            },
+        },
+        status.HTTP_410_GONE: {
+            "description": "Accepted submission, followed by ground truth if available.",
+            "content": {
+                MEDIA_TYPE: {
+                    "example": json.dumps(SUBMISSION_EXAMPLE, ensure_ascii=False) + "\n",
+                },
+            },
+        },
+        status.HTTP_500_INTERNAL_SERVER_ERROR: {
+            "description": Locale.CONFIGURATION_ERROR_DETAIL,
+        },
+        status.HTTP_503_SERVICE_UNAVAILABLE: {
+            "description": "Accepted submission is still being processed; retry after one second.",
+            "headers": {
+                RETRY_AFTER_HEADER: {
+                    "schema": {"type": "string", "example": RETRY_AFTER_SECONDS},
+                },
             },
         },
     },
@@ -949,25 +950,23 @@ PULL_ROUTE: dict[str, Any] = {
 
 PUSH_ROUTE: dict[str, Any] = {
     "path": PUSH_PATH,
-    "response_class": StreamingResponse,
+    "response_class": Response,
+    "status_code": status.HTTP_202_ACCEPTED,
     "summary": Locale.PUSH_SUMMARY,
     "description": Locale.PUSH_DESCRIPTION,
     "responses": {
-        status.HTTP_200_OK: {
+        status.HTTP_202_ACCEPTED: {
             "description": Locale.PUSH_RESPONSE_DESCRIPTION,
-            "content": {
-                MEDIA_TYPE: {
-                    "example": (
-                        json.dumps(SUBMISSION_EXAMPLE, ensure_ascii=False)
-                        + "\n"
-                        + json.dumps(SUBMISSION_EXAMPLE, ensure_ascii=False)
-                        + "\n"
-                    ),
+            "headers": {
+                LOCATION_HEADER: {
+                    "schema": {"type": "string", "example": PULL_PATH},
                 },
             },
         },
-        status.HTTP_422_UNPROCESSABLE_CONTENT: {"description": Locale.VALIDATION_ERROR_DETAIL},
-        status.HTTP_503_SERVICE_UNAVAILABLE: {"description": Locale.CONFIGURATION_ERROR_DETAIL},
+        status.HTTP_409_CONFLICT: {"description": "A submission is already being processed."},
+        status.HTTP_500_INTERNAL_SERVER_ERROR: {
+            "description": Locale.CONFIGURATION_ERROR_DETAIL,
+        },
     },
     "openapi_extra": {
         "requestBody": {
@@ -978,13 +977,6 @@ PUSH_ROUTE: dict[str, Any] = {
 }
 
 app = FastAPI(**APP_CONFIG)
-commit_app = FastAPI(
-    title=Locale.INTERNAL_COMMIT_API_TITLE,
-    lifespan=None,
-    openapi_url=None,
-    docs_url=None,
-    redoc_url=None,
-)
 
 
 class RetryEvidenceObligation(BaseModel):
@@ -1378,13 +1370,10 @@ def registered_replay_log(config: PipelineConfig) -> RegisteredResource:
             group=ResourceGroup.KTP_PIPELINE_ARTIFACT,
             fragment_type=FragmentType.LINE_NUMBER,
             description=meta[RESOURCE_DESCRIPTION_KEY],
-            expected_hash=meta[RESOURCE_SHA256_KEY],
         )
     except (KeyError, OSError, ValueError) as exc:
         raise PushConfigurationError(
-            Locale.CONFIGURED_RESOURCE_INVALID_TEMPLATE.format(
-                resource_key=REPLAY_LOG_RESOURCE_KEY
-            )
+            Locale.CONFIGURED_RESOURCE_INVALID_TEMPLATE.format(resource_key=REPLAY_LOG_RESOURCE_KEY)
         ) from exc
 
 
@@ -1690,9 +1679,7 @@ def derive_source_population(
 def eligible_cohorts(
     source_population: Sequence[SourcePopulationRow],
 ) -> dict[str, str]:
-    return {
-        row.namekey: row.cohort for row in source_population if row.cohort != INELIGIBLE_COHORT
-    }
+    return {row.namekey: row.cohort for row in source_population if row.cohort != INELIGIBLE_COHORT}
 
 
 def configure_runtime(config_path: Path) -> AiAugmentBackendContext:
@@ -1722,6 +1709,18 @@ def configure_runtime(config_path: Path) -> AiAugmentBackendContext:
             Locale.TIMEZONE_INVALID_TEMPLATE.format(timezone=pipeline.timezone)
         ) from exc
 
+    configured_namekey = os.environ.get(NAMEKEY_ENV_NAME, "")
+    if not _valid_nonblank(configured_namekey):
+        raise PushConfigurationError(
+            Locale.NAMEKEY_NOT_SET_TEMPLATE.format(environment_name=NAMEKEY_ENV_NAME)
+        )
+    try:
+        parsed_namekey = NameKey.from_json_key(configured_namekey)
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        raise PushConfigurationError(Locale.CONFIGURED_NAMEKEY_MALFORMED) from exc
+    if parsed_namekey.to_json_key() != configured_namekey:
+        raise PushConfigurationError(Locale.CONFIGURED_NAMEKEY_NONCANONICAL)
+
     replay_log = registered_replay_log(pipeline)
     release_map = registered_release_map(pipeline)
     release_batches = load_release_batches(release_map)
@@ -1743,11 +1742,14 @@ def configure_runtime(config_path: Path) -> AiAugmentBackendContext:
     detour_db_path = _detour_db_path(pipeline.db_file)
     if detour_db_path == pipeline.db_file:
         raise PushConfigurationError(Locale.DETOUR_DB_EQUALS_SOURCE)
+    if configured_namekey not in cohorts:
+        raise PushConfigurationError(Locale.CONFIGURED_NAMEKEY_INELIGIBLE)
     RUNTIME_CONFIGURATION = AiAugmentBackendContext(
         pipeline=pipeline,
         detour_db_path=detour_db_path,
         replay_log=replay_log,
         rollout_cas_dir=pipeline.rollout_cas_dir,
+        namekey=configured_namekey,
         release_map=release_map,
         source_population=source_population,
         eligible_cohorts=cohorts,
@@ -1828,6 +1830,130 @@ def push_configuration(rollout_jsonl: str | None = None) -> PushConfiguration:
         ssh_target=f"{AIVM_INSTANCE}-{AIVM_USER}",
         host_key_alias=f"lima-{AIVM_INSTANCE}-{AIVM_USER}",
     )
+
+
+def set_backend_session_id(value: str) -> None:
+    global BACKEND_SESSION_ID
+
+    normalized = value.strip()
+    try:
+        session_id = UUID(normalized)
+    except ValueError as exc:
+        raise PushConfigurationError(Locale.SESSION_ID_STDIN_INVALID) from exc
+    if str(session_id) != normalized:
+        raise PushConfigurationError(Locale.SESSION_ID_STDIN_INVALID)
+    with BACKEND_WORKFLOW_STATE_LOCK:
+        if BACKEND_SESSION_ID is not None and BACKEND_SESSION_ID != normalized:
+            raise PushConfigurationError(Locale.SESSION_ID_STDIN_CONFLICT)
+        BACKEND_SESSION_ID = normalized
+
+
+def read_backend_session_id(stream: Any = None) -> None:
+    input_stream = sys.stdin if stream is None else stream
+    value = input_stream.readline()
+    if not value:
+        raise PushConfigurationError(Locale.SESSION_ID_STDIN_MISSING)
+    set_backend_session_id(value)
+    logger.info(Locale.SESSION_ID_STDIN_ACCEPTED_LOG, value.strip())
+
+
+def start_backend_session_reader() -> threading.Thread:
+    def read_or_fail() -> None:
+        try:
+            read_backend_session_id()
+        except Exception as exc:
+            logger.exception(Locale.SESSION_ID_STDIN_FAILED_LOG, exc)
+            _mark_workflow_failed(exc)
+
+    reader = threading.Thread(
+        target=read_or_fail,
+        name="detour-ai-augment-session-reader",
+        daemon=True,
+    )
+    reader.start()
+    return reader
+
+
+def push_configuration_for_session(session_id: str) -> PushConfiguration:
+    placeholder = (
+        CODEX_SESSIONS_ROOT / f"{ROLLOUT_FILENAME_PREFIX}{session_id}{ROLLOUT_FILENAME_SUFFIX}"
+    )
+    base = push_configuration(str(placeholder))
+    options = _aivm_connection_options(
+        lima_ssh_config=base.lima_ssh_config,
+        identity_file=base.identity_file,
+        known_hosts_file=base.known_hosts_file,
+        host_key_alias=base.host_key_alias,
+    )
+    try:
+        completed = subprocess.run(
+            [
+                SSH_EXECUTABLE,
+                *options,
+                "--",
+                base.ssh_target,
+                "find",
+                str(CODEX_SESSIONS_ROOT),
+                "-type",
+                "f",
+                "-name",
+                f"*{session_id}{ROLLOUT_FILENAME_SUFFIX}",
+                "-print",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=SSH_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise PushConfigurationError(Locale.ROLLOUT_DISCOVERY_FAILED) from exc
+    matches = tuple(line for line in completed.stdout.splitlines() if line)
+    if len(matches) != 1:
+        raise PushConfigurationError(Locale.ROLLOUT_DISCOVERY_NOT_UNIQUE)
+    return push_configuration(matches[0])
+
+
+def prove_workflow_inputs_readable() -> None:
+    probe_rollout = CODEX_SESSIONS_ROOT / (
+        f"{ROLLOUT_FILENAME_PREFIX}startup-readability-probe{ROLLOUT_FILENAME_SUFFIX}"
+    )
+    configuration = push_configuration(str(probe_rollout))
+    try:
+        configuration.appendwatch_report.read_bytes()
+    except OSError as exc:
+        raise PushConfigurationError(Locale.APPENDWATCH_REPORT_UNREADABLE) from exc
+    logger.info(Locale.APPENDWATCH_READABLE_LOG, configuration.appendwatch_report)
+    options = _aivm_connection_options(
+        lima_ssh_config=configuration.lima_ssh_config,
+        identity_file=configuration.identity_file,
+        known_hosts_file=configuration.known_hosts_file,
+        host_key_alias=configuration.host_key_alias,
+    )
+    remote_command = shlex.join([
+        "test",
+        "-d",
+        str(CODEX_SESSIONS_ROOT),
+        "-a",
+        "-r",
+        str(CODEX_SESSIONS_ROOT),
+    ])
+    try:
+        subprocess.run(
+            [
+                SSH_EXECUTABLE,
+                *options,
+                "--",
+                configuration.ssh_target,
+                remote_command,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=SSH_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise PushConfigurationError(Locale.CODEX_SESSIONS_UNREADABLE) from exc
+    logger.info(Locale.CODEX_SESSIONS_READABLE_LOG, CODEX_SESSIONS_ROOT)
 
 
 def new_attempt_id(attempt_timestamp: datetime | None = None) -> str:
@@ -1984,6 +2110,7 @@ def parse_appendwatch_report(
         raise PushValidationError(Locale.APPENDWATCH_ROOT_MALFORMED)
 
     target = rollout_relative_path.parts
+    match_target_by_filename = len(target) == 1
     directories: list[tuple[str, bool]] = []
     seen_paths: set[tuple[str, ...]] = set()
     target_entries: list[tuple[str, bool]] = []
@@ -2039,7 +2166,7 @@ def parse_appendwatch_report(
         if path in seen_paths:
             raise PushValidationError(Locale.APPENDWATCH_PATH_DUPLICATE)
         seen_paths.add(path)
-        if path == target:
+        if path == target or (match_target_by_filename and path[-1:] == target):
             target_entries.append((
                 (APPENDWATCH_OK_STATUS if ok_file is not None else APPENDWATCH_COMPROMISED_STATUS),
                 parent_compromised,
@@ -2058,7 +2185,10 @@ def parse_appendwatch_report(
             removed = APPENDWATCH_REMOVED_ENTRY_PATTERN.fullmatch(removed_line)
             if removed is None:
                 raise PushValidationError(Locale.APPENDWATCH_REMOVED_ENTRY_MALFORMED)
-            if PurePosixPath(removed.group(APPENDWATCH_PATH_GROUP)).parts == target:
+            removed_parts = PurePosixPath(removed.group(APPENDWATCH_PATH_GROUP)).parts
+            if removed_parts == target or (
+                match_target_by_filename and removed_parts[-1:] == target
+            ):
                 raise PushValidationError(Locale.ROLLOUT_REMOVED_OR_REPLACED)
 
     if len(target_entries) != APPENDWATCH_EXPECTED_TARGET_ENTRIES:
@@ -3710,13 +3840,6 @@ def open_detour_database(
         raise PushValidationError(Locale.DETOUR_DUCKDB_OPEN_FAILED) from exc
 
 
-def _initialize_authoritative_schema(conn: duckdb.DuckDBPyConnection) -> None:
-    conn.execute(CREATE_CONTROL_RUN_EVENTS_TABLE_SQL)
-    conn.execute(CREATE_CONTROL_ATTEMPTS_TABLE_SQL)
-    conn.execute(CREATE_CONTROL_SANCTIONS_TABLE_SQL)
-    conn.execute(CREATE_AUTHORITATIVE_PROJECTION_TABLE_SQL)
-
-
 def _acquire_authoritative_process_lock(runtime: AiAugmentBackendContext) -> None:
     global AUTHORITATIVE_LOG_DESCRIPTOR
 
@@ -3742,41 +3865,6 @@ def _release_authoritative_process_lock() -> None:
         fcntl.flock(descriptor, fcntl.LOCK_UN)
     finally:
         os.close(descriptor)
-
-
-def _authoritative_log_records(
-    path: Path,
-) -> tuple[tuple[HttpRequestLogRecord, int, str], ...]:
-    records: list[tuple[HttpRequestLogRecord, int, str]] = []
-    byte_offset = AUTHORITATIVE_EMPTY_OFFSET
-    try:
-        with path.open("rb") as stream:
-            for line_number, line in enumerate(stream, start=AUTHORITATIVE_FIRST_LINE):
-                if not line.endswith(b"\n") or not line.strip():
-                    raise PushValidationError(
-                        Locale.REPLAY_LOG_LINE_INVALID_TEMPLATE.format(line_number=line_number)
-                    )
-                try:
-                    record = HttpRequestLogRecord.model_validate_json(line)
-                except ValidationError as exc:
-                    raise PushValidationError(
-                        Locale.REPLAY_LOG_LINE_INVALID_TEMPLATE.format(line_number=line_number)
-                    ) from exc
-                if (
-                    record.schema_version != KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
-                    or (
-                        (record.method, record.path) not in AUTHORITATIVE_PUBLIC_ROUTES
-                        and (record.method, record.path) != AUTHORITATIVE_COMMIT_ROUTE
-                    )
-                ):
-                    raise PushValidationError(
-                        Locale.REPLAY_LOG_LINE_INVALID_TEMPLATE.format(line_number=line_number)
-                    )
-                byte_offset += len(line)
-                records.append((record, byte_offset, hashlib.sha256(line).hexdigest()))
-    except (OSError, UnicodeError) as exc:
-        raise PushConfigurationError(Locale.REPLAY_LOG_UNREADABLE) from exc
-    return tuple(records)
 
 
 def _projection_checkpoint(
@@ -3818,422 +3906,6 @@ def _http_header_value(headers: Mapping[str, object], name: str) -> str | None:
         if key.casefold() == normalized_name and isinstance(value, str):
             return value
     return None
-
-
-def _authoritative_request_text(record: HttpRequestLogRecord) -> str:
-    if not isinstance(record.request_body, str):
-        raise PushValidationError(Locale.REPLAY_RECORD_BODY_INVALID)
-    return record.request_body
-
-
-def _next_control_event_ordinal(conn: duckdb.DuckDBPyConnection) -> int:
-    row = conn.execute(
-        f"SELECT coalesce(max({CONTROL_RUN_EVENT_ORDINAL_COLUMN}), 0) + 1 "
-        f"FROM {CONTROL_RUN_EVENTS_TABLE}"
-    ).fetchone()
-    if row is None:
-        raise PushValidationError(Locale.REPLAY_CONTROL_EVENT_INVALID)
-    return int(row[0])
-
-
-def _insert_control_event(
-    conn: duckdb.DuckDBPyConnection,
-    *,
-    event: ControlRunEvent,
-    idempotency_key: str,
-) -> None:
-    conn.execute(
-        INSERT_CONTROL_RUN_EVENT_SQL,
-        [
-            _next_control_event_ordinal(conn),
-            idempotency_key,
-            event.model_dump_json(),
-        ],
-    )
-
-
-def _project_control_push(
-    conn: duckdb.DuckDBPyConnection,
-    record: HttpRequestLogRecord,
-) -> None:
-    if record.response_code != status.HTTP_200_OK:
-        return
-    try:
-        request = ControlPushRequest.model_validate_json(_authoritative_request_text(record))
-        response = ControlPushResponse.model_validate_json(record.response_body)
-    except ValidationError as exc:
-        raise PushValidationError(Locale.REPLAY_CONTROL_EVENT_INVALID) from exc
-    idempotency_key = _http_header_value(
-        record.request_headers,
-        HTTP_IDEMPOTENCY_KEY_HEADER,
-    )
-    if not idempotency_key:
-        raise PushValidationError(Locale.REPLAY_CONTROL_EVENT_INVALID)
-    existing = conn.execute(
-        f"SELECT {CONTROL_RUN_EVENT_PAYLOAD_COLUMN} FROM {CONTROL_RUN_EVENTS_TABLE} "
-        f"WHERE {CONTROL_RUN_EVENT_IDEMPOTENCY_KEY_COLUMN} = ?",
-        [idempotency_key],
-    ).fetchone()
-    duplicate = existing is not None
-    if response != ControlPushResponse(accepted=True, duplicate=duplicate):
-        raise PushValidationError(Locale.REPLAY_CONTROL_EVENT_INVALID)
-    if existing is not None:
-        try:
-            stored = ControlRunEvent.model_validate_json(str(existing[0]))
-        except ValidationError as exc:
-            raise PushValidationError(Locale.REPLAY_CONTROL_EVENT_INVALID) from exc
-        if stored != request.event:
-            raise PushValidationError(Locale.REPLAY_CONTROL_EVENT_INVALID)
-        return
-
-    event = request.event
-    if event.kind is ControlRunEventKind.SANCTIONED:
-        if event.session_id is None or event.rollout_jsonl is None:
-            raise PushValidationError(Locale.REPLAY_CONTROL_EVENT_INVALID)
-        sanction = ControlRun(
-            run_id=event.run_id,
-            namekey=event.namekey,
-            session_id=event.session_id,
-            rollout_jsonl=event.rollout_jsonl,
-        )
-        active = conn.execute(
-            f"SELECT {CONTROL_SANCTION_RUN_ID_COLUMN} FROM {CONTROL_SANCTIONS_TABLE} "
-            f"WHERE {CONTROL_SANCTION_ACTIVE_COLUMN}"
-        ).fetchall()
-        if active and active != [(str(event.run_id),)]:
-            raise PushValidationError(Locale.REPLAY_CONTROL_EVENT_INVALID)
-        conn.execute(
-            f"INSERT INTO {CONTROL_SANCTIONS_TABLE} VALUES (?, ?, ?, ?) "
-            f"ON CONFLICT ({CONTROL_SANCTION_RUN_ID_COLUMN}) DO UPDATE SET "
-            f"{CONTROL_SANCTION_PAYLOAD_COLUMN} = excluded.{CONTROL_SANCTION_PAYLOAD_COLUMN}, "
-            f"{CONTROL_SANCTION_ACTIVE_COLUMN} = excluded.{CONTROL_SANCTION_ACTIVE_COLUMN}",
-            [str(event.run_id), sanction.model_dump_json(), True, None],
-        )
-    elif event.kind in {
-        ControlRunEventKind.PUSH_ACCEPTED,
-        ControlRunEventKind.COMPLETE,
-        ControlRunEventKind.FAILED,
-        ControlRunEventKind.CANCELED,
-    }:
-        conn.execute(
-            f"UPDATE {CONTROL_SANCTIONS_TABLE} SET {CONTROL_SANCTION_ACTIVE_COLUMN} = false "
-            f"WHERE {CONTROL_SANCTION_RUN_ID_COLUMN} = ?",
-            [str(event.run_id)],
-        )
-    _insert_control_event(
-        conn,
-        event=event,
-        idempotency_key=idempotency_key,
-    )
-
-
-def _validated_commit_rollout(
-    runtime: AiAugmentBackendContext,
-    reference: RolloutCasReference,
-) -> ArchivedFile:
-    path = runtime.rollout_cas_dir / ROLLOUT_CAS_FILENAME_TEMPLATE.format(
-        sha256=reference.sha256
-    )
-    if path.parent != runtime.rollout_cas_dir or path.is_symlink() or not path.is_file():
-        raise PushValidationError(Locale.ROLLOUT_CAS_BLOB_INVALID)
-    archived = _archived_file(path)
-    if (
-        archived.sha256 != reference.sha256
-        or archived.size != reference.size
-        or archived.line_count != reference.line_count
-    ):
-        raise PushValidationError(Locale.ROLLOUT_CAS_BLOB_INVALID)
-    return archived
-
-
-def _execution_matches_commit(
-    execution: AttemptExecution,
-    outcome: SubmissionCommitOutcome,
-) -> bool:
-    expected_headers = {
-        HTTP_REQUEST_LOG_RESPONSE_CONTENT_TYPE_HEADER: ATTEMPT_RESPONSE_CONTENT_TYPE[
-            execution.response_code
-        ]
-    }
-    return (
-        execution.stage == outcome.stage
-        and execution.result == outcome.result
-        and execution.response_code == outcome.response_code
-        and execution.response_body == outcome.response_body
-        and execution.response_detail == outcome.response_detail
-        and execution.retry_submission_expected == outcome.retry_submission_expected
-        and execution.namekey == outcome.namekey
-        and execution.session_id == outcome.session_id
-        and outcome.response_headers == expected_headers
-    )
-
-
-def _attempt_record_from_commit(commit: SubmissionCommit) -> AttemptRecord:
-    return AttemptRecord(
-        attempt_id=commit.attempt_id,
-        transaction_id=commit.transaction_id,
-        request_sha256=commit.public_request_sha256,
-        stage=commit.outcome.stage,
-        result=commit.outcome.result,
-        updated_at=commit.attempt_timestamp,
-        run_id=commit.sanction.run_id,
-        namekey=commit.outcome.namekey or commit.sanction.namekey,
-        session_id=commit.outcome.session_id or commit.sanction.session_id,
-        rollout_sha256=None if commit.rollout is None else commit.rollout.sha256,
-        response_code=commit.outcome.response_code,
-        response_body=commit.outcome.response_body,
-        response_detail=commit.outcome.response_detail,
-    )
-
-
-def _project_submission_commit(
-    conn: duckdb.DuckDBPyConnection,
-    runtime: AiAugmentBackendContext,
-    record: HttpRequestLogRecord,
-    *,
-    materialize_files: bool,
-) -> None:
-    if record.response_code != status.HTTP_200_OK:
-        return
-    try:
-        commit = SubmissionCommit.model_validate_json(_authoritative_request_text(record))
-        response = ControlCommitResponse.model_validate_json(record.response_body)
-    except ValidationError as exc:
-        raise PushValidationError(Locale.REPLAY_COMMIT_INVALID) from exc
-    if hashlib.sha256(commit.public_request_body.encode(TEXT_ENCODING)).hexdigest() != (
-        commit.public_request_sha256
-    ):
-        raise PushValidationError(Locale.REPLAY_COMMIT_INVALID)
-    expected_record = _attempt_record_from_commit(commit)
-    existing = conn.execute(
-        f"SELECT {CONTROL_ATTEMPT_RECORD_COLUMN} FROM {CONTROL_ATTEMPTS_TABLE} "
-        f"WHERE {CONTROL_ATTEMPT_IDEMPOTENCY_KEY_COLUMN} = ?",
-        [commit.transaction_id],
-    ).fetchone()
-    if existing is not None:
-        try:
-            stored = AttemptRecord.model_validate_json(str(existing[0]))
-        except ValidationError as exc:
-            raise PushValidationError(Locale.REPLAY_COMMIT_INVALID) from exc
-        if stored != expected_record or response != ControlCommitResponse(
-            committed=True,
-            duplicate=True,
-        ):
-            raise PushValidationError(Locale.REPLAY_COMMIT_INVALID)
-        return
-    if response != ControlCommitResponse(committed=True, duplicate=False):
-        raise PushValidationError(Locale.REPLAY_COMMIT_INVALID)
-
-    active = conn.execute(
-        f"SELECT {CONTROL_SANCTION_PAYLOAD_COLUMN} FROM {CONTROL_SANCTIONS_TABLE} "
-        f"WHERE {CONTROL_SANCTION_RUN_ID_COLUMN} = ? AND {CONTROL_SANCTION_ACTIVE_COLUMN}",
-        [str(commit.sanction.run_id)],
-    ).fetchone()
-    if active is None:
-        raise PushValidationError(Locale.REPLAY_COMMIT_INVALID)
-    try:
-        active_sanction = ControlRun.model_validate_json(str(active[0]))
-    except ValidationError as exc:
-        raise PushValidationError(Locale.REPLAY_COMMIT_INVALID) from exc
-    if active_sanction != commit.sanction:
-        raise PushValidationError(Locale.REPLAY_COMMIT_INVALID)
-
-    execution: AttemptExecution | None = None
-    if commit.outcome.stage in REPLAY_EXECUTION_STAGES:
-        if commit.rollout is None or commit.appendwatch_snapshot is None:
-            raise PushValidationError(Locale.REPLAY_COMMIT_INVALID)
-        rollout_archive = _validated_commit_rollout(runtime, commit.rollout)
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            attempt_dir = Path(temporary_directory)
-            report_path = attempt_dir / APPENDWATCH_ARCHIVE_FILENAME_TEMPLATE.format(
-                attempt_id=commit.attempt_id
-            )
-            report_path.write_text(commit.appendwatch_snapshot, encoding=TEXT_ENCODING)
-            report_archive = _archived_file(report_path)
-            execution = execute_attempt(
-                conn,
-                runtime,
-                AttemptReplayInput(
-                    attempt_dir=attempt_dir,
-                    attempt_id=commit.attempt_id,
-                    attempt_timestamp=commit.attempt_timestamp,
-                    rollout_archive=rollout_archive,
-                    report_archive=report_archive,
-                    rollout_relative_path=PurePosixPath(
-                        commit.rollout.rollout_relative_path
-                    ),
-                    request_body=commit.public_request_body.encode(TEXT_ENCODING),
-                    run_id=commit.sanction.run_id,
-                    namekey=commit.sanction.namekey,
-                    session_id=commit.sanction.session_id,
-                    validate_appendwatch=True,
-                    materialize_files=materialize_files,
-                ),
-            )
-        if not _execution_matches_commit(execution, commit.outcome):
-            raise PushValidationError(Locale.REPLAY_COMMIT_INVALID)
-        if not execution.commit_database:
-            conn.execute("ROLLBACK")
-            conn.execute("BEGIN TRANSACTION")
-    elif commit.outcome.result != ATTEMPT_RESULT_CONFIGURATION_ERROR:
-        raise PushValidationError(Locale.REPLAY_COMMIT_INVALID)
-
-    conn.execute(
-        f"INSERT INTO {CONTROL_ATTEMPTS_TABLE} VALUES (?, ?, ?, ?)",
-        [
-            commit.attempt_id,
-            commit.transaction_id,
-            commit.public_request_sha256,
-            expected_record.model_dump_json(),
-        ],
-    )
-    if commit.outcome.result == ATTEMPT_RESULT_ACCEPTED:
-        conn.execute(
-            f"UPDATE {CONTROL_SANCTIONS_TABLE} SET "
-            f"{CONTROL_SANCTION_ACTIVE_COLUMN} = false, "
-            f"{CONTROL_SANCTION_ACCEPTED_ATTEMPT_ID_COLUMN} = ? "
-            f"WHERE {CONTROL_SANCTION_RUN_ID_COLUMN} = ?",
-            [commit.attempt_id, str(commit.sanction.run_id)],
-        )
-        _insert_control_event(
-            conn,
-            event=ControlRunEvent(
-                run_id=commit.sanction.run_id,
-                namekey=commit.sanction.namekey,
-                at=commit.attempt_timestamp,
-                kind=ControlRunEventKind.PUSH_ACCEPTED,
-                session_id=commit.sanction.session_id,
-                rollout_jsonl=commit.sanction.rollout_jsonl,
-                accepted_attempt_id=commit.attempt_id,
-            ),
-            idempotency_key=f"{commit.transaction_id}:{ControlRunEventKind.PUSH_ACCEPTED}",
-        )
-
-
-def _project_public_push_audit(
-    conn: duckdb.DuckDBPyConnection,
-    record: HttpRequestLogRecord,
-) -> None:
-    transaction_id = _http_header_value(
-        record.response_headers,
-        HTTP_TRANSACTION_ID_HEADER,
-    )
-    if transaction_id is None:
-        return
-    existing = conn.execute(
-        f"SELECT {CONTROL_ATTEMPT_RECORD_COLUMN} FROM {CONTROL_ATTEMPTS_TABLE} "
-        f"WHERE {CONTROL_ATTEMPT_IDEMPOTENCY_KEY_COLUMN} = ?",
-        [transaction_id],
-    ).fetchone()
-    if existing is None:
-        raise PushValidationError(Locale.REPLAY_PUBLIC_PUSH_INVALID)
-    try:
-        attempt = AttemptRecord.model_validate_json(str(existing[0]))
-    except ValidationError as exc:
-        raise PushValidationError(Locale.REPLAY_PUBLIC_PUSH_INVALID) from exc
-    if (
-        attempt.response_code != record.response_code
-        or attempt.response_body != record.response_body
-    ):
-        raise PushValidationError(Locale.REPLAY_PUBLIC_PUSH_INVALID)
-
-
-def project_authoritative_record(
-    conn: duckdb.DuckDBPyConnection,
-    runtime: AiAugmentBackendContext,
-    record: HttpRequestLogRecord,
-    *,
-    line_number: int,
-    byte_offset: int,
-    line_sha256: str,
-    materialize_files: bool,
-) -> None:
-    conn.execute("BEGIN TRANSACTION")
-    try:
-        route = (record.method, record.path)
-        if route == (HTTP_POST_METHOD, CONTROL_PUSH_PATH):
-            _project_control_push(conn, record)
-        elif route == AUTHORITATIVE_COMMIT_ROUTE:
-            _project_submission_commit(
-                conn,
-                runtime,
-                record,
-                materialize_files=materialize_files,
-            )
-        elif route == (HTTP_POST_METHOD, PUSH_PATH):
-            _project_public_push_audit(conn, record)
-        else:
-            raise PushValidationError(Locale.REPLAY_LOG_LINE_INVALID_TEMPLATE.format(
-                line_number=line_number
-            ))
-        _write_projection_checkpoint(
-            conn,
-            line_number=line_number,
-            byte_offset=byte_offset,
-            line_sha256=line_sha256,
-        )
-        conn.execute("COMMIT")
-    except Exception:
-        conn.execute("ROLLBACK")
-        raise
-
-
-def synchronize_authoritative_projection(runtime: AiAugmentBackendContext) -> None:
-    global AUTHORITATIVE_BACKEND_HEALTHY
-    global AUTHORITATIVE_LOG_OFFSET
-    global AUTHORITATIVE_NEXT_LINE_NUMBER
-
-    records = _authoritative_log_records(Path(runtime.replay_log))
-    runtime.rollout_cas_dir.mkdir(parents=True, exist_ok=True)
-    with DETOUR_DB_LOCK:
-        conn = open_detour_database(runtime)
-        try:
-            _initialize_authoritative_schema(conn)
-            checkpoint = _projection_checkpoint(conn)
-            if checkpoint is None:
-                projected_rows = 0
-                for table_name in (
-                    CONTROL_RUN_EVENTS_TABLE,
-                    CONTROL_ATTEMPTS_TABLE,
-                    CONTROL_SANCTIONS_TABLE,
-                ):
-                    count_row = conn.execute(
-                        f"SELECT count(*) FROM {table_name}"
-                    ).fetchone()
-                    if count_row is None:
-                        raise PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT)
-                    projected_rows += int(count_row[0])
-                if projected_rows:
-                    raise PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT)
-                projected_line_count = 0
-            else:
-                projected_line_count, byte_offset, line_sha256 = checkpoint
-                if projected_line_count > len(records):
-                    raise PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT)
-                if projected_line_count:
-                    _, expected_offset, expected_hash = records[projected_line_count - 1]
-                    if byte_offset != expected_offset or line_sha256 != expected_hash:
-                        raise PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT)
-            for line_number, (record, byte_offset, line_sha256) in enumerate(
-                records[projected_line_count:],
-                start=projected_line_count + AUTHORITATIVE_FIRST_LINE,
-            ):
-                project_authoritative_record(
-                    conn,
-                    runtime,
-                    record,
-                    line_number=line_number,
-                    byte_offset=byte_offset,
-                    line_sha256=line_sha256,
-                    materialize_files=False,
-                )
-            AUTHORITATIVE_NEXT_LINE_NUMBER = len(records) + AUTHORITATIVE_FIRST_LINE
-            AUTHORITATIVE_LOG_OFFSET = records[-1][1] if records else AUTHORITATIVE_EMPTY_OFFSET
-            AUTHORITATIVE_BACKEND_HEALTHY = True
-        except (duckdb.Error, PushValidationError, ValidationError) as exc:
-            raise PushConfigurationError(Locale.REPLAY_PROJECTION_FAILED) from exc
-        finally:
-            conn.close()
 
 
 def _request_body_for_authoritative_log(body: bytes) -> str | dict[str, str]:
@@ -4280,76 +3952,8 @@ def _authoritative_http_record(
     )
 
 
-def _append_authoritative_record(record: HttpRequestLogRecord) -> None:
-    global AUTHORITATIVE_BACKEND_HEALTHY
-    global AUTHORITATIVE_LOG_OFFSET
-    global AUTHORITATIVE_NEXT_LINE_NUMBER
-
-    line = (record.model_dump_json(ensure_ascii=True) + "\n").encode(TEXT_ENCODING)
-    line_sha256 = hashlib.sha256(line).hexdigest()
-    with AUTHORITATIVE_APPEND_LOCK:
-        descriptor = AUTHORITATIVE_LOG_DESCRIPTOR
-        if descriptor is None:
-            raise PushConfigurationError(Locale.AUTHORITATIVE_LOG_NOT_OPEN)
-        try:
-            end_offset = os.lseek(descriptor, AUTHORITATIVE_EMPTY_OFFSET, os.SEEK_END)
-            if end_offset != AUTHORITATIVE_LOG_OFFSET:
-                raise PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT)
-            written = 0
-            while written < len(line):
-                count = os.write(descriptor, line[written:])
-                if count <= 0:
-                    raise OSError(Locale.AUTHORITATIVE_LOG_APPEND_FAILED)
-                written += count
-            os.fsync(descriptor)
-        except (OSError, PushConfigurationError):
-            AUTHORITATIVE_BACKEND_HEALTHY = False
-            raise
-        line_number = AUTHORITATIVE_NEXT_LINE_NUMBER
-        AUTHORITATIVE_LOG_OFFSET += len(line)
-        AUTHORITATIVE_NEXT_LINE_NUMBER += 1
-        if not AUTHORITATIVE_BACKEND_HEALTHY:
-            return
-        try:
-            runtime = runtime_configuration()
-            with DETOUR_DB_LOCK:
-                conn = open_detour_database(runtime)
-                try:
-                    project_authoritative_record(
-                        conn,
-                        runtime,
-                        record,
-                        line_number=line_number,
-                        byte_offset=AUTHORITATIVE_LOG_OFFSET,
-                        line_sha256=line_sha256,
-                        materialize_files=True,
-                    )
-                finally:
-                    conn.close()
-        except Exception as exc:
-            AUTHORITATIVE_BACKEND_HEALTHY = False
-            logger.exception(Locale.AUTHORITATIVE_PROJECTION_FAILED_LOG, line_number, exc)
-
-
-def _try_acquire_authoritative_command() -> bool:
-    global AUTHORITATIVE_COMMAND_ACTIVE
-
-    with AUTHORITATIVE_COMMAND_STATE_LOCK:
-        if AUTHORITATIVE_COMMAND_ACTIVE:
-            return False
-        AUTHORITATIVE_COMMAND_ACTIVE = True
-        return True
-
-
-def _release_authoritative_command() -> None:
-    global AUTHORITATIVE_COMMAND_ACTIVE
-
-    with AUTHORITATIVE_COMMAND_STATE_LOCK:
-        AUTHORITATIVE_COMMAND_ACTIVE = False
-
-
 class AuthoritativeHttpMiddleware:
-    """Durably record finite push exchanges before forwarding ASGI responses."""
+    """Durably record finite public exchanges before forwarding ASGI responses."""
 
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
@@ -4366,7 +3970,7 @@ class AuthoritativeHttpMiddleware:
         method = cast(str, scope[ASGI_METHOD_KEY])
         path = cast(str, scope[ASGI_PATH_KEY])
         route = (method, path)
-        if route not in AUTHORITATIVE_PUBLIC_ROUTES and route != AUTHORITATIVE_COMMIT_ROUTE:
+        if route not in AUTHORITATIVE_PUBLIC_ROUTES:
             await self.app(scope, receive, send)
             return
 
@@ -4375,7 +3979,6 @@ class AuthoritativeHttpMiddleware:
         request_body = await request.body()
         request_body_pending = True
         response_messages: list[Message] = []
-        command_acquired = False
 
         async def replay_request_body() -> Message:
             nonlocal request_body_pending
@@ -4396,27 +3999,7 @@ class AuthoritativeHttpMiddleware:
             await response(scope, replay_request_body, capture_response)
 
         try:
-            if route in AUTHORITATIVE_PUBLIC_ROUTES:
-                if not AUTHORITATIVE_BACKEND_HEALTHY:
-                    logger.error(Locale.AUTHORITATIVE_BACKEND_UNHEALTHY_LOG, method, path)
-                    await replace_response(
-                        JSONResponse(
-                            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                            content={"detail": Locale.CONFIGURATION_ERROR_DETAIL},
-                        )
-                    )
-                elif not _try_acquire_authoritative_command():
-                    logger.info(Locale.AUTHORITATIVE_COMMAND_BUSY_LOG, method, path)
-                    await replace_response(
-                        JSONResponse(
-                            status_code=HTTP_BUSY_RESPONSE,
-                            content={"detail": Locale.AUTHORITATIVE_COMMAND_BUSY},
-                        )
-                    )
-                else:
-                    command_acquired = True
-                    await self.app(scope, replay_request_body, capture_response)
-            elif not AUTHORITATIVE_BACKEND_HEALTHY:
+            if not AUTHORITATIVE_BACKEND_HEALTHY:
                 logger.error(Locale.AUTHORITATIVE_BACKEND_UNHEALTHY_LOG, method, path)
                 await replace_response(
                     JSONResponse(
@@ -4487,24 +4070,821 @@ class AuthoritativeHttpMiddleware:
                 ready_to_respond_at_unix_usec=ready_to_respond_at_unix_usec,
             )
             _append_authoritative_record(record)
-        except (OSError, PushConfigurationError) as exc:
+            await _after_authoritative_public_record(record)
+        except Exception as exc:
             logger.exception(Locale.AUTHORITATIVE_LOG_APPEND_FAILED_LOG, method, path, exc)
-            await replace_response(
-                JSONResponse(
-                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    content={"detail": Locale.CONFIGURATION_ERROR_DETAIL},
-                )
-            )
-        finally:
-            if command_acquired:
-                _release_authoritative_command()
+            raise SystemExit(1) from exc
 
         for message in response_messages:
             await send(message)
 
 
 app.add_middleware(AuthoritativeHttpMiddleware)
-commit_app.add_middleware(AuthoritativeHttpMiddleware)
+
+
+def _initialize_readme_authoritative_schema(
+    conn: duckdb.DuckDBPyConnection,
+) -> None:
+    conn.execute(CREATE_AUTHORITATIVE_RECORDS_TABLE_SQL)
+    conn.execute(CREATE_AUTHORITATIVE_OUTCOMES_TABLE_SQL)
+    conn.execute(CREATE_CONTROL_ATTEMPTS_TABLE_SQL)
+    conn.execute(CREATE_AUTHORITATIVE_PROJECTION_TABLE_SQL)
+
+
+def _validated_readme_record(record: HttpRequestLogRecord) -> HttpRequestLogRecord:
+    validated = HttpRequestLogRecord.model_validate_json(record.model_dump_json())
+    if (
+        validated.schema_version != KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
+        or validated.record_id.version != 7
+    ):
+        raise PushValidationError(Locale.REPLAY_RECORD_CONTOUR_INVALID)
+    route = (validated.method, validated.path)
+    if route in AUTHORITATIVE_PUBLIC_ROUTES:
+        if (
+            validated.response_code is None
+            or validated.response_body is None
+            or validated.ready_to_respond_at_unix_usec is None
+        ):
+            raise PushValidationError(Locale.REPLAY_RECORD_CONTOUR_INVALID)
+        return validated
+    if route != AUTHORITATIVE_COMMIT_ROUTE:
+        raise PushValidationError(Locale.REPLAY_RECORD_CONTOUR_INVALID)
+    if (
+        validated.scheme != SYNTHETIC_COMMIT_SCHEME
+        or validated.host != SYNTHETIC_COMMIT_HOST
+        or validated.port is not None
+        or validated.coerce_schema_v1
+        or validated.ready_to_respond_at_unix_usec is not None
+        or validated.query
+        or set(validated.request_headers) != {SOURCE_KEY_HEADER, NAME_KEY_HEADER}
+        or not isinstance(validated.request_body, dict)
+        or validated.response_code is not None
+        or validated.response_headers
+        or validated.response_body is not None
+        or validated.received_at_unix_usec is not None
+        or validated.duration_usec != 0
+    ):
+        raise PushValidationError(Locale.REPLAY_COMMIT_INVALID)
+    try:
+        commit = _replay_commit(validated.request_body)
+        report_bytes = base64.b64decode(
+            commit.appendwatch_report.data,
+            validate=True,
+        )
+    except (ValidationError, ValueError) as exc:
+        raise PushValidationError(Locale.REPLAY_COMMIT_INVALID) from exc
+    if base64.b64encode(report_bytes).decode(BASE64_TEXT_ENCODING) != (
+        commit.appendwatch_report.data
+    ):
+        raise PushValidationError(Locale.REPLAY_COMMIT_INVALID)
+    return validated
+
+
+def _replay_commit(value: object) -> ReplayCommit:
+    return ReplayCommit.model_validate_json(
+        json.dumps(value, ensure_ascii=False, separators=COMPACT_JSON_SEPARATORS)
+    )
+
+
+def _authoritative_log_records(
+    path: Path,
+) -> tuple[tuple[HttpRequestLogRecord, int, str], ...]:
+    records: list[tuple[HttpRequestLogRecord, int, str]] = []
+    byte_offset = AUTHORITATIVE_EMPTY_OFFSET
+    try:
+        with path.open("rb") as stream:
+            for line_number, line in enumerate(stream, start=AUTHORITATIVE_FIRST_LINE):
+                if not line.endswith(b"\n") or not line.strip():
+                    raise PushValidationError(
+                        Locale.REPLAY_LOG_LINE_INVALID_TEMPLATE.format(line_number=line_number)
+                    )
+                try:
+                    record = _validated_readme_record(
+                        HttpRequestLogRecord.model_validate_json(line)
+                    )
+                except (ValidationError, PushValidationError) as exc:
+                    raise PushValidationError(
+                        Locale.REPLAY_LOG_LINE_INVALID_TEMPLATE.format(line_number=line_number)
+                    ) from exc
+                byte_offset += len(line)
+                records.append((record, byte_offset, hashlib.sha256(line).hexdigest()))
+    except (OSError, UnicodeError) as exc:
+        raise PushConfigurationError(Locale.REPLAY_LOG_UNREADABLE) from exc
+    return tuple(records)
+
+
+def _projected_http_record(
+    conn: duckdb.DuckDBPyConnection,
+    record_id: UUID,
+) -> tuple[int, HttpRequestLogRecord]:
+    row = conn.execute(
+        f"SELECT {AUTHORITATIVE_RECORD_ORDINAL_COLUMN}, "
+        f"{AUTHORITATIVE_RECORD_PAYLOAD_COLUMN} "
+        f"FROM {AUTHORITATIVE_RECORDS_TABLE} "
+        f"WHERE {AUTHORITATIVE_RECORD_ID_COLUMN} = ?",
+        [str(record_id)],
+    ).fetchone()
+    if row is None:
+        raise PushValidationError(Locale.REPLAY_COMMIT_LINK_MISSING)
+    try:
+        return int(row[0]), HttpRequestLogRecord.model_validate_json(str(row[1]))
+    except ValidationError as exc:
+        raise PushValidationError(Locale.REPLAY_COMMIT_LINK_MISSING) from exc
+
+
+STRUCTURED_FIELD_JSON_STRING = r'"(?:\\.|[^"\\])*"'
+SOURCE_KEY_PATTERN = re.compile(
+    rf"^ktp\.filename=(?P<filename>{STRUCTURED_FIELD_JSON_STRING}), "
+    rf"ktp\.fragment=(?P<fragment>[0-9]+), "
+    rf'ktp\.fragment_type="line_number"$'
+)
+NAME_KEY_PATTERN = re.compile(
+    rf"^ktp\.first_name=(?P<first>{STRUCTURED_FIELD_JSON_STRING}), "
+    rf"ktp\.last_name=(?P<last>{STRUCTURED_FIELD_JSON_STRING})$"
+)
+
+
+def _source_key_header(filename: str, line_count: int) -> str:
+    return (
+        f"{KTP_FILENAME_COL}={json.dumps(filename, ensure_ascii=False)}, "
+        f"{KTP_FRAGMENT_COL}={line_count}, "
+        f'{KTP_FRAGMENT_TYPE_COL}="{ROLLOUT_LINE_FRAGMENT_TYPE}"'
+    )
+
+
+def _parse_source_key_header(value: object) -> tuple[str, int]:
+    if not isinstance(value, str):
+        raise PushValidationError(Locale.REPLAY_COMMIT_SOURCE_KEY_INVALID)
+    matched = SOURCE_KEY_PATTERN.fullmatch(value)
+    if matched is None:
+        raise PushValidationError(Locale.REPLAY_COMMIT_SOURCE_KEY_INVALID)
+    try:
+        filename = json.loads(matched.group("filename"))
+        line_count = int(matched.group("fragment"))
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise PushValidationError(Locale.REPLAY_COMMIT_SOURCE_KEY_INVALID) from exc
+    if (
+        not isinstance(filename, str)
+        or not filename
+        or PurePosixPath(filename).name != filename
+        or line_count < 1
+        or value != _source_key_header(filename, line_count)
+    ):
+        raise PushValidationError(Locale.REPLAY_COMMIT_SOURCE_KEY_INVALID)
+    return filename, line_count
+
+
+def _name_key_header(namekey: str) -> str:
+    name_key = NameKey.from_json_key(namekey)
+    return (
+        f"{KTP_FIRST_NAME_COL}="
+        f"{json.dumps(name_key.first_name, ensure_ascii=False)}, "
+        f"{KTP_LAST_NAME_COL}={json.dumps(name_key.last_name, ensure_ascii=False)}"
+    )
+
+
+def _parse_name_key_header(value: object) -> str:
+    if not isinstance(value, str):
+        raise PushValidationError(Locale.REPLAY_COMMIT_NAME_KEY_INVALID)
+    matched = NAME_KEY_PATTERN.fullmatch(value)
+    if matched is None:
+        raise PushValidationError(Locale.REPLAY_COMMIT_NAME_KEY_INVALID)
+    try:
+        name_key = NameKey(**{
+            KTP_FIRST_NAME_COL: json.loads(matched.group("first")),
+            KTP_LAST_NAME_COL: json.loads(matched.group("last")),
+        })
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise PushValidationError(Locale.REPLAY_COMMIT_NAME_KEY_INVALID) from exc
+    namekey = name_key.to_json_key()
+    if value != _name_key_header(namekey):
+        raise PushValidationError(Locale.REPLAY_COMMIT_NAME_KEY_INVALID)
+    return namekey
+
+
+def _response_content_type(record: HttpRequestLogRecord) -> str:
+    return (
+        (
+            _http_header_value(
+                record.response_headers,
+                HTTP_REQUEST_LOG_RESPONSE_CONTENT_TYPE_HEADER,
+            )
+            or ""
+        )
+        .partition(";")[0]
+        .strip()
+        .casefold()
+    )
+
+
+def _root_pull_record_id(
+    conn: duckdb.DuckDBPyConnection,
+    pull_record_id: UUID,
+) -> UUID:
+    pull_ordinal, pull = _projected_http_record(conn, pull_record_id)
+    if (pull.method, pull.path) != (HTTP_GET_METHOD, PULL_PATH):
+        raise PushValidationError(Locale.REPLAY_COMMIT_PULL_INVALID)
+    if _response_content_type(pull) != MARKDOWN_MEDIA_TYPE:
+        return pull_record_id
+    row = conn.execute(
+        f"SELECT records.{AUTHORITATIVE_RECORD_PAYLOAD_COLUMN} "
+        f"FROM {AUTHORITATIVE_RECORDS_TABLE} AS records "
+        f"JOIN {AUTHORITATIVE_OUTCOMES_TABLE} AS outcomes "
+        f"ON records.{AUTHORITATIVE_RECORD_ID_COLUMN} = "
+        f"outcomes.{AUTHORITATIVE_OUTCOME_COMMIT_ID_COLUMN} "
+        f"WHERE records.{AUTHORITATIVE_RECORD_ORDINAL_COLUMN} < ? "
+        f"ORDER BY records.{AUTHORITATIVE_RECORD_ORDINAL_COLUMN} DESC LIMIT 1",
+        [pull_ordinal],
+    ).fetchone()
+    if row is None:
+        raise PushValidationError(Locale.REPLAY_COMMIT_PULL_INVALID)
+    try:
+        prior_record = HttpRequestLogRecord.model_validate_json(str(row[0]))
+        prior_commit = _replay_commit(prior_record.request_body)
+    except ValidationError as exc:
+        raise PushValidationError(Locale.REPLAY_COMMIT_PULL_INVALID) from exc
+    return _root_pull_record_id(conn, prior_commit.pull_record_id)
+
+
+def _namekey_from_pull(
+    conn: duckdb.DuckDBPyConnection,
+    pull_record_id: UUID,
+) -> str:
+    root_record_id = _root_pull_record_id(conn, pull_record_id)
+    _ordinal, pull = _projected_http_record(conn, root_record_id)
+    if (
+        pull.response_code != status.HTTP_200_OK
+        or _response_content_type(pull) != MEDIA_TYPE
+        or not pull.response_body
+    ):
+        raise PushValidationError(Locale.REPLAY_COMMIT_PULL_INVALID)
+    try:
+        lines = tuple(json.loads(line) for line in pull.response_body.splitlines())
+        identity = next(
+            line
+            for line in reversed(lines)
+            if isinstance(line, dict) and KTP_FIRST_NAME_COL in line and KTP_LAST_NAME_COL in line
+        )
+        return NameKey(**{
+            KTP_FIRST_NAME_COL: identity[KTP_FIRST_NAME_COL],
+            KTP_LAST_NAME_COL: identity[KTP_LAST_NAME_COL],
+        }).to_json_key()
+    except (StopIteration, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise PushValidationError(Locale.REPLAY_COMMIT_PULL_INVALID) from exc
+
+
+def _session_id_from_rollout_filename(filename: str) -> str:
+    session_text = Path(filename).stem[-36:]
+    try:
+        session_id = UUID(session_text)
+    except ValueError as exc:
+        raise PushValidationError(Locale.SESSION_META_ROLLOUT_MISMATCH) from exc
+    if str(session_id) != session_text:
+        raise PushValidationError(Locale.SESSION_META_ROLLOUT_MISMATCH)
+    return session_text
+
+
+def _validated_replay_rollout(
+    runtime: AiAugmentBackendContext,
+    reference: ReplayRolloutReference,
+) -> ArchivedFile:
+    path = runtime.rollout_cas_dir / ROLLOUT_CAS_FILENAME_TEMPLATE.format(sha256=reference.sha256)
+    if path.parent != runtime.rollout_cas_dir or path.is_symlink() or not path.is_file():
+        raise PushValidationError(Locale.ROLLOUT_CAS_BLOB_INVALID)
+    archived = _archived_file(path)
+    if (
+        archived.sha256 != reference.sha256
+        or archived.size != reference.size
+        or archived.line_count != reference.line_count
+    ):
+        raise PushValidationError(Locale.ROLLOUT_CAS_BLOB_INVALID)
+    return archived
+
+
+def _failure_validation_outcome(
+    *,
+    commit_record_id: UUID,
+    commit: ReplayCommit,
+    namekey: str,
+    stage: str,
+    error: Exception,
+) -> ProjectedValidationOutcome:
+    logger.error(Locale.POST_COMMIT_VALIDATION_FAILED_LOG, commit_record_id, stage, error)
+    detail = Locale.CONFIGURATION_ERROR_DETAIL
+    return ProjectedValidationOutcome(
+        commit_record_id=commit_record_id,
+        pull_record_id=commit.pull_record_id,
+        push_record_id=commit.push_record_id,
+        attempt_id=str(commit.push_record_id),
+        stage=stage,
+        result=ATTEMPT_RESULT_CONFIGURATION_ERROR,
+        response_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        response_headers={
+            HTTP_REQUEST_LOG_RESPONSE_CONTENT_TYPE_HEADER: JSON_MEDIA_TYPE,
+        },
+        response_body=http_error_response_body(detail),
+        response_detail=detail,
+        namekey=namekey,
+        session_id=None,
+    )
+
+
+def _outcome_from_execution(
+    *,
+    record: HttpRequestLogRecord,
+    commit: ReplayCommit,
+    namekey: str,
+    execution: AttemptExecution,
+) -> ProjectedValidationOutcome:
+    if execution.result == ATTEMPT_RESULT_ACCEPTED:
+        response_code = status.HTTP_410_GONE
+        response_headers = {
+            HTTP_REQUEST_LOG_RESPONSE_CONTENT_TYPE_HEADER: MEDIA_TYPE,
+        }
+        response_body = execution.response_body
+    elif execution.result == ATTEMPT_RESULT_REJECTED and execution.stage in {
+        ATTEMPT_STAGE_PYDANTIC_VALIDATION,
+        ATTEMPT_STAGE_EVIDENCE_VALIDATION,
+    }:
+        response_code = status.HTTP_200_OK
+        response_headers = {
+            HTTP_REQUEST_LOG_RESPONSE_CONTENT_TYPE_HEADER: MARKDOWN_MEDIA_TYPE,
+        }
+        response_body = (
+            execution.response_detail or Locale.VALIDATION_ERROR_DETAIL
+        ).rstrip() + "\n"
+    else:
+        response_code = status.HTTP_500_INTERNAL_SERVER_ERROR
+        response_headers = {
+            HTTP_REQUEST_LOG_RESPONSE_CONTENT_TYPE_HEADER: JSON_MEDIA_TYPE,
+        }
+        response_body = http_error_response_body(Locale.CONFIGURATION_ERROR_DETAIL)
+    return ProjectedValidationOutcome(
+        commit_record_id=record.record_id,
+        pull_record_id=commit.pull_record_id,
+        push_record_id=commit.push_record_id,
+        attempt_id=str(commit.push_record_id),
+        stage=execution.stage,
+        result=execution.result,
+        response_code=response_code,
+        response_headers=response_headers,
+        response_body=response_body,
+        response_detail=execution.response_detail,
+        namekey=namekey,
+        session_id=execution.session_id,
+    )
+
+
+def _validate_projected_commit(
+    conn: duckdb.DuckDBPyConnection,
+    runtime: AiAugmentBackendContext,
+    record: HttpRequestLogRecord,
+    *,
+    materialize_files: bool,
+) -> tuple[ProjectedValidationOutcome, bool]:
+    commit = _replay_commit(record.request_body)
+    namekey = runtime.namekey or ""
+    stage = ATTEMPT_STAGE_CONFIGURATION
+    try:
+        namekey = _parse_name_key_header(record.request_headers.get(NAME_KEY_HEADER))
+        pull_ordinal, pull = _projected_http_record(conn, commit.pull_record_id)
+        push_ordinal, push = _projected_http_record(conn, commit.push_record_id)
+        commit_ordinal, _commit_record = _projected_http_record(conn, record.record_id)
+        if not (
+            pull_ordinal < push_ordinal < commit_ordinal
+            and (pull.method, pull.path) == (HTTP_GET_METHOD, PULL_PATH)
+            and pull.response_code == status.HTTP_200_OK
+            and (push.method, push.path) == (HTTP_POST_METHOD, PUSH_PATH)
+            and push.response_code == status.HTTP_202_ACCEPTED
+            and isinstance(push.request_body, str)
+        ):
+            raise PushValidationError(Locale.REPLAY_COMMIT_LINK_INVALID)
+        if _namekey_from_pull(conn, commit.pull_record_id) != namekey:
+            raise PushValidationError(Locale.REPLAY_COMMIT_NAME_KEY_INVALID)
+        filename, source_line_count = _parse_source_key_header(
+            record.request_headers.get(SOURCE_KEY_HEADER)
+        )
+        if source_line_count != commit.rollout.line_count:
+            raise PushValidationError(Locale.REPLAY_COMMIT_SOURCE_KEY_INVALID)
+        stage = ATTEMPT_STAGE_ROLLOUT_INDEX
+        rollout_archive = _validated_replay_rollout(runtime, commit.rollout)
+        session_id = _session_id_from_rollout_filename(filename)
+        stage = ATTEMPT_STAGE_APPENDWATCH_VALIDATION
+        report_bytes = base64.b64decode(
+            commit.appendwatch_report.data,
+            validate=True,
+        )
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            attempt_dir = Path(temporary_directory)
+            report_path = attempt_dir / APPENDWATCH_ARCHIVE_FILENAME_TEMPLATE.format(
+                attempt_id=commit.push_record_id
+            )
+            report_path.write_bytes(report_bytes)
+            replay = AttemptReplayInput(
+                attempt_dir=attempt_dir,
+                attempt_id=str(commit.push_record_id),
+                attempt_timestamp=datetime.fromtimestamp(
+                    record.record_id.time / 1_000,
+                    tz=timezone.utc,
+                ),
+                rollout_archive=rollout_archive,
+                report_archive=_archived_file(report_path),
+                rollout_relative_path=PurePosixPath(filename),
+                request_body=push.request_body.encode(TEXT_ENCODING),
+                run_id=_root_pull_record_id(conn, commit.pull_record_id),
+                namekey=namekey,
+                session_id=session_id,
+                validate_appendwatch=True,
+                materialize_files=materialize_files,
+            )
+            execution = execute_attempt(conn, runtime, replay)
+        _log_attempt_execution(str(commit.push_record_id), execution)
+        return (
+            _outcome_from_execution(
+                record=record,
+                commit=commit,
+                namekey=namekey,
+                execution=execution,
+            ),
+            execution.commit_database,
+        )
+    except Exception as exc:
+        return (
+            _failure_validation_outcome(
+                commit_record_id=record.record_id,
+                commit=commit,
+                namekey=namekey,
+                stage=stage,
+                error=exc,
+            ),
+            False,
+        )
+
+
+def _insert_projected_http_record(
+    conn: duckdb.DuckDBPyConnection,
+    record: HttpRequestLogRecord,
+    *,
+    line_number: int,
+) -> None:
+    conn.execute(
+        f"INSERT INTO {AUTHORITATIVE_RECORDS_TABLE} VALUES (?, ?, ?, ?, ?)",
+        [
+            line_number,
+            str(record.record_id),
+            record.method,
+            record.path,
+            record.model_dump_json(),
+        ],
+    )
+
+
+def _insert_projected_outcome(
+    conn: duckdb.DuckDBPyConnection,
+    record: HttpRequestLogRecord,
+    outcome: ProjectedValidationOutcome,
+) -> None:
+    conn.execute(
+        f"INSERT INTO {AUTHORITATIVE_OUTCOMES_TABLE} VALUES (?, ?)",
+        [str(record.record_id), outcome.model_dump_json()],
+    )
+    try:
+        run_id = _root_pull_record_id(conn, outcome.pull_record_id)
+    except PushValidationError:
+        run_id = outcome.pull_record_id
+    request_body = json.dumps(
+        record.request_body,
+        ensure_ascii=False,
+        separators=COMPACT_JSON_SEPARATORS,
+        sort_keys=True,
+    )
+    commit = _replay_commit(record.request_body)
+    attempt = AttemptRecord(
+        attempt_id=outcome.attempt_id,
+        transaction_id=str(outcome.commit_record_id),
+        request_sha256=hashlib.sha256(request_body.encode(TEXT_ENCODING)).hexdigest(),
+        stage=outcome.stage,
+        result=outcome.result,
+        updated_at=datetime.fromtimestamp(record.record_id.time / 1_000, tz=timezone.utc),
+        run_id=run_id,
+        namekey=outcome.namekey,
+        session_id=outcome.session_id,
+        rollout_sha256=commit.rollout.sha256,
+        response_code=outcome.response_code,
+        response_body=outcome.response_body,
+        response_detail=outcome.response_detail,
+    )
+    conn.execute(
+        f"INSERT INTO {CONTROL_ATTEMPTS_TABLE} VALUES (?, ?, ?, ?)",
+        [
+            attempt.attempt_id,
+            str(outcome.commit_record_id),
+            attempt.request_sha256,
+            attempt.model_dump_json(),
+        ],
+    )
+
+
+def _project_readme_record(
+    conn: duckdb.DuckDBPyConnection,
+    runtime: AiAugmentBackendContext,
+    record: HttpRequestLogRecord,
+    *,
+    line_number: int,
+    byte_offset: int,
+    line_sha256: str,
+    materialize_files: bool,
+) -> None:
+    conn.execute("BEGIN TRANSACTION")
+    try:
+        _insert_projected_http_record(
+            conn,
+            record,
+            line_number=line_number,
+        )
+        if (record.method, record.path) == AUTHORITATIVE_COMMIT_ROUTE:
+            outcome, commit_database = _validate_projected_commit(
+                conn,
+                runtime,
+                record,
+                materialize_files=materialize_files,
+            )
+            if not commit_database:
+                conn.execute("ROLLBACK")
+                conn.execute("BEGIN TRANSACTION")
+                _insert_projected_http_record(
+                    conn,
+                    record,
+                    line_number=line_number,
+                )
+            _insert_projected_outcome(conn, record, outcome)
+        _write_projection_checkpoint(
+            conn,
+            line_number=line_number,
+            byte_offset=byte_offset,
+            line_sha256=line_sha256,
+        )
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+
+
+def synchronize_authoritative_projection(runtime: AiAugmentBackendContext) -> None:
+    global AUTHORITATIVE_BACKEND_HEALTHY
+    global AUTHORITATIVE_LOG_OFFSET
+    global AUTHORITATIVE_NEXT_LINE_NUMBER
+
+    records = _authoritative_log_records(Path(runtime.replay_log))
+    runtime.rollout_cas_dir.mkdir(parents=True, exist_ok=True)
+    with DETOUR_DB_LOCK:
+        conn = open_detour_database(runtime)
+        try:
+            _initialize_readme_authoritative_schema(conn)
+            checkpoint = _projection_checkpoint(conn)
+            projected_count_row = conn.execute(
+                f"SELECT count(*) FROM {AUTHORITATIVE_RECORDS_TABLE}"
+            ).fetchone()
+            projected_count = 0 if projected_count_row is None else int(projected_count_row[0])
+            if checkpoint is None:
+                if projected_count:
+                    raise PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT)
+                projected_line_count = 0
+            else:
+                projected_line_count, byte_offset, line_sha256 = checkpoint
+                if projected_line_count != projected_count or projected_line_count > len(records):
+                    raise PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT)
+                if projected_line_count:
+                    _, expected_offset, expected_hash = records[projected_line_count - 1]
+                    if byte_offset != expected_offset or line_sha256 != expected_hash:
+                        raise PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT)
+            for line_number, (record, byte_offset, line_sha256) in enumerate(
+                records[projected_line_count:],
+                start=projected_line_count + AUTHORITATIVE_FIRST_LINE,
+            ):
+                _project_readme_record(
+                    conn,
+                    runtime,
+                    record,
+                    line_number=line_number,
+                    byte_offset=byte_offset,
+                    line_sha256=line_sha256,
+                    materialize_files=False,
+                )
+            AUTHORITATIVE_NEXT_LINE_NUMBER = len(records) + AUTHORITATIVE_FIRST_LINE
+            AUTHORITATIVE_LOG_OFFSET = records[-1][1] if records else AUTHORITATIVE_EMPTY_OFFSET
+            AUTHORITATIVE_BACKEND_HEALTHY = True
+        except (duckdb.Error, PushValidationError, ValidationError) as exc:
+            AUTHORITATIVE_BACKEND_HEALTHY = False
+            raise PushConfigurationError(Locale.REPLAY_PROJECTION_FAILED) from exc
+        finally:
+            conn.close()
+
+
+def _append_authoritative_record(record: HttpRequestLogRecord) -> None:
+    global AUTHORITATIVE_BACKEND_HEALTHY
+    global AUTHORITATIVE_LOG_OFFSET
+    global AUTHORITATIVE_NEXT_LINE_NUMBER
+
+    validated = _validated_readme_record(record)
+    line = (validated.model_dump_json(ensure_ascii=True) + "\n").encode(TEXT_ENCODING)
+    line_sha256 = hashlib.sha256(line).hexdigest()
+    with AUTHORITATIVE_APPEND_LOCK:
+        descriptor = AUTHORITATIVE_LOG_DESCRIPTOR
+        if descriptor is None:
+            raise PushConfigurationError(Locale.AUTHORITATIVE_LOG_NOT_OPEN)
+        try:
+            end_offset = os.lseek(descriptor, AUTHORITATIVE_EMPTY_OFFSET, os.SEEK_END)
+            if end_offset != AUTHORITATIVE_LOG_OFFSET:
+                raise PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT)
+            written = 0
+            while written < len(line):
+                count = os.write(descriptor, line[written:])
+                if count <= 0:
+                    raise OSError(Locale.AUTHORITATIVE_LOG_APPEND_FAILED)
+                written += count
+            os.fsync(descriptor)
+            line_number = AUTHORITATIVE_NEXT_LINE_NUMBER
+            AUTHORITATIVE_LOG_OFFSET += len(line)
+            AUTHORITATIVE_NEXT_LINE_NUMBER += 1
+            runtime = runtime_configuration()
+            with DETOUR_DB_LOCK:
+                conn = open_detour_database(runtime)
+                try:
+                    _initialize_readme_authoritative_schema(conn)
+                    _project_readme_record(
+                        conn,
+                        runtime,
+                        validated,
+                        line_number=line_number,
+                        byte_offset=AUTHORITATIVE_LOG_OFFSET,
+                        line_sha256=line_sha256,
+                        materialize_files=True,
+                    )
+                finally:
+                    conn.close()
+        except Exception:
+            AUTHORITATIVE_BACKEND_HEALTHY = False
+            raise
+
+
+def _projected_outcome(
+    runtime: AiAugmentBackendContext,
+    commit_record_id: UUID,
+) -> ProjectedValidationOutcome:
+    with DETOUR_DB_LOCK:
+        conn = open_detour_database(runtime)
+        try:
+            row = conn.execute(
+                f"SELECT {AUTHORITATIVE_OUTCOME_PAYLOAD_COLUMN} "
+                f"FROM {AUTHORITATIVE_OUTCOMES_TABLE} "
+                f"WHERE {AUTHORITATIVE_OUTCOME_COMMIT_ID_COLUMN} = ?",
+                [str(commit_record_id)],
+            ).fetchone()
+        finally:
+            conn.close()
+    if row is None:
+        raise PushConfigurationError(Locale.REPLAY_COMMIT_INVALID)
+    try:
+        return ProjectedValidationOutcome.model_validate_json(str(row[0]))
+    except ValidationError as exc:
+        raise PushConfigurationError(Locale.REPLAY_COMMIT_INVALID) from exc
+
+
+def _read_appendwatch_bytes(configuration: PushConfiguration) -> bytes:
+    try:
+        return configuration.appendwatch_report.read_bytes()
+    except OSError as exc:
+        raise PushConfigurationError(Locale.APPENDWATCH_ARCHIVE_FAILED) from exc
+
+
+def _synthetic_commit_record(
+    *,
+    pull_record_id: UUID,
+    push_record_id: UUID,
+    rollout_archive: ArchivedFile,
+    rollout_filename: str,
+    appendwatch_report: bytes,
+    namekey: str,
+) -> HttpRequestLogRecord:
+    commit = ReplayCommit(
+        pull_record_id=pull_record_id,
+        push_record_id=push_record_id,
+        rollout=ReplayRolloutReference(
+            sha256=rollout_archive.sha256,
+            size=rollout_archive.size,
+            line_count=rollout_archive.line_count,
+        ),
+        appendwatch_report=Base64Artifact(
+            encoding="base64",
+            data=base64.b64encode(appendwatch_report).decode(BASE64_TEXT_ENCODING),
+        ),
+    )
+    return HttpRequestLogRecord(
+        schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
+        method=HTTP_POST_METHOD,
+        scheme=SYNTHETIC_COMMIT_SCHEME,
+        host=SYNTHETIC_COMMIT_HOST,
+        port=None,
+        coerce_schema_v1=False,
+        ready_to_respond_at_unix_usec=None,
+        path=COMMIT_PATH,
+        query="",
+        request_headers={
+            SOURCE_KEY_HEADER: _source_key_header(
+                rollout_filename,
+                rollout_archive.line_count,
+            ),
+            NAME_KEY_HEADER: _name_key_header(namekey),
+        },
+        request_body=commit.model_dump(mode="json"),
+        response_code=None,
+        response_headers={},
+        response_body=None,
+        received_at_unix_usec=None,
+        duration_usec=0,
+    )
+
+
+def _apply_projected_outcome(outcome: ProjectedValidationOutcome) -> None:
+    global BACKEND_WORKFLOW_OUTCOME
+    global BACKEND_WORKFLOW_STATUS
+
+    with BACKEND_WORKFLOW_STATE_LOCK:
+        BACKEND_WORKFLOW_OUTCOME = outcome
+        if outcome.response_code == status.HTTP_200_OK:
+            BACKEND_WORKFLOW_STATUS = BackendWorkflowStatus.RETRY
+        elif outcome.response_code == status.HTTP_410_GONE:
+            BACKEND_WORKFLOW_STATUS = BackendWorkflowStatus.COMPLETE
+        else:
+            BACKEND_WORKFLOW_STATUS = BackendWorkflowStatus.FAILED
+
+
+def _mark_workflow_failed(error: Exception) -> None:
+    global BACKEND_WORKFLOW_OUTCOME
+    global BACKEND_WORKFLOW_STATUS
+
+    logger.error(Locale.POST_ACCEPT_PROCESSING_FAILED_LOG, error)
+    with BACKEND_WORKFLOW_STATE_LOCK:
+        BACKEND_WORKFLOW_OUTCOME = None
+        BACKEND_WORKFLOW_STATUS = BackendWorkflowStatus.FAILED
+
+
+def _commit_accepted_push(record: HttpRequestLogRecord) -> None:
+    runtime = runtime_configuration()
+    with BACKEND_WORKFLOW_STATE_LOCK:
+        pull_record_id = BACKEND_PENDING_PULL_RECORD_ID
+        session_id = BACKEND_SESSION_ID
+    if pull_record_id is None or session_id is None or runtime.namekey is None:
+        _mark_workflow_failed(PushConfigurationError(Locale.PUSH_LINKAGE_MISSING))
+        return
+    try:
+        configuration = push_configuration_for_session(session_id)
+        rollout_archive = copy_rollout_to_cas(configuration, runtime)
+        report_bytes = _read_appendwatch_bytes(configuration)
+    except (OSError, PushConfigurationError) as exc:
+        _mark_workflow_failed(exc)
+        return
+    commit_record = _synthetic_commit_record(
+        pull_record_id=pull_record_id,
+        push_record_id=record.record_id,
+        rollout_archive=rollout_archive,
+        rollout_filename=configuration.rollout_relative_path.name,
+        appendwatch_report=report_bytes,
+        namekey=runtime.namekey,
+    )
+    try:
+        _append_authoritative_record(commit_record)
+        _apply_projected_outcome(_projected_outcome(runtime, commit_record.record_id))
+    except Exception as exc:
+        logger.critical(Locale.COMMIT_APPEND_FATAL_LOG, exc)
+        raise SystemExit(1) from exc
+
+
+def _authoritative_background_finished(task: asyncio.Task[None]) -> None:
+    AUTHORITATIVE_BACKGROUND_TASKS.discard(task)
+    if task.cancelled():
+        return
+    failure = task.exception()
+    if failure is not None:
+        logger.critical(Locale.COMMIT_APPEND_FATAL_LOG, failure)
+        os._exit(1)
+
+
+async def _after_authoritative_public_record(record: HttpRequestLogRecord) -> None:
+    global BACKEND_CURRENT_PULL_RECORD_ID
+
+    route = (record.method, record.path)
+    if route == (HTTP_GET_METHOD, PULL_PATH):
+        if record.response_code == status.HTTP_200_OK:
+            with BACKEND_WORKFLOW_STATE_LOCK:
+                BACKEND_CURRENT_PULL_RECORD_ID = record.record_id
+        return
+    if route != (HTTP_POST_METHOD, PUSH_PATH) or (record.response_code != status.HTTP_202_ACCEPTED):
+        return
+    task = asyncio.create_task(asyncio.to_thread(_commit_accepted_push, record))
+    AUTHORITATIVE_BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_authoritative_background_finished)
 
 
 def _namekey_innerdict_rows(
@@ -4526,7 +4906,7 @@ def _namekey_innerdict_rows(
         ) from exc
     if len(rows) > 1:
         raise PushValidationError(
-            Locale.SANCTIONED_ROWS_DUPLICATE_TEMPLATE.format(table_name=table_name)
+            Locale.CONFIGURED_ROWS_DUPLICATE_TEMPLATE.format(table_name=table_name)
         )
     if not rows:
         return ()
@@ -4548,13 +4928,13 @@ def load_source_researcher(
     namekey: str,
 ) -> SourceResearcher:
     if cohorts is None or namekey not in cohorts:
-        raise PushValidationError(Locale.SANCTIONED_NAMEKEY_INELIGIBLE)
+        raise PushValidationError(Locale.CONFIGURED_NAMEKEY_INELIGIBLE)
     try:
         name_key = NameKey.from_json_key(namekey)
     except (ValueError, TypeError, json.JSONDecodeError) as exc:
-        raise PushValidationError(Locale.SANCTIONED_NAMEKEY_MALFORMED) from exc
+        raise PushValidationError(Locale.CONFIGURED_NAMEKEY_MALFORMED) from exc
     if name_key.to_json_key() != namekey:
-        raise PushValidationError(Locale.SANCTIONED_NAMEKEY_NONCANONICAL)
+        raise PushValidationError(Locale.CONFIGURED_NAMEKEY_NONCANONICAL)
 
     xlsx_rows = _namekey_innerdict_rows(
         source_conn,
@@ -4572,7 +4952,7 @@ def load_source_researcher(
         namekey=namekey,
     )
     if not xlsx_rows:
-        raise PushValidationError(Locale.SANCTIONED_XLSX_CONTEXT_MISSING)
+        raise PushValidationError(Locale.CONFIGURED_XLSX_CONTEXT_MISSING)
     draw_numbers = tuple(
         sorted(
             {
@@ -4584,7 +4964,7 @@ def load_source_researcher(
         )
     )
     if not draw_numbers:
-        raise PushValidationError(Locale.SANCTIONED_DRAW_MISSING)
+        raise PushValidationError(Locale.CONFIGURED_DRAW_MISSING)
     return SourceResearcher(
         namekey=namekey,
         first_name=name_key.first_name,
@@ -4608,7 +4988,7 @@ def researcher_context(researcher: SourceResearcher) -> ResearcherContext:
     )
 
 
-def sanctioned_pull_lines(researcher: SourceResearcher) -> Iterator[str]:
+def configured_pull_lines(researcher: SourceResearcher) -> Iterator[str]:
     for row in (*researcher.xlsx_rows, *researcher.ssn_rows):
         yield json_line(row)
     yield json_line({
@@ -4926,7 +5306,7 @@ def execute_attempt(
             configured_rollout_basename=replay.rollout_relative_path.name,
         )
         if rollout_index.session.session_id != session_id:
-            raise PushValidationError(Locale.SANCTIONED_SESSION_MISMATCH)
+            raise PushValidationError(Locale.CONFIGURED_SESSION_MISMATCH)
         session_id = rollout_index.session.session_id
         persist_rollout_index(
             detour_conn,
@@ -5178,43 +5558,6 @@ def pydantic_failure(exc: ValidationError) -> tuple[str | None, str, object]:
     return field, reason, failed_input
 
 
-def _active_control_run(
-    conn: duckdb.DuckDBPyConnection,
-) -> ControlRun | None:
-    rows = conn.execute(
-        f"SELECT {CONTROL_SANCTION_PAYLOAD_COLUMN} FROM {CONTROL_SANCTIONS_TABLE} "
-        f"WHERE {CONTROL_SANCTION_ACTIVE_COLUMN}"
-    ).fetchall()
-    if len(rows) > 1:
-        raise PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT)
-    if not rows:
-        return None
-    try:
-        return ControlRun.model_validate_json(str(rows[0][0]))
-    except ValidationError as exc:
-        raise PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT) from exc
-
-
-def active_control_run(runtime: AiAugmentBackendContext) -> ControlRun:
-    with DETOUR_DB_LOCK:
-        conn = open_detour_database(runtime)
-        try:
-            sanction = _active_control_run(conn)
-        finally:
-            conn.close()
-    if sanction is None:
-        raise PushConfigurationError(Locale.CONTROL_SANCTION_MISSING)
-    return sanction
-
-
-def _control_events(conn: duckdb.DuckDBPyConnection) -> tuple[ControlRunEvent, ...]:
-    rows = conn.execute(SELECT_CONTROL_RUN_EVENTS_SQL).fetchall()
-    try:
-        return tuple(ControlRunEvent.model_validate_json(str(row[2])) for row in rows)
-    except ValidationError as exc:
-        raise PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT) from exc
-
-
 def _attempt_records(conn: duckdb.DuckDBPyConnection) -> tuple[AttemptRecord, ...]:
     rows = conn.execute(
         f"SELECT {CONTROL_ATTEMPT_RECORD_COLUMN} FROM {CONTROL_ATTEMPTS_TABLE} "
@@ -5224,33 +5567,6 @@ def _attempt_records(conn: duckdb.DuckDBPyConnection) -> tuple[AttemptRecord, ..
         return tuple(AttemptRecord.model_validate_json(str(row[0])) for row in rows)
     except ValidationError as exc:
         raise PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT) from exc
-
-
-def _attempt_by_transaction(
-    conn: duckdb.DuckDBPyConnection,
-    transaction_id: str,
-) -> AttemptRecord | None:
-    row = conn.execute(
-        f"SELECT {CONTROL_ATTEMPT_RECORD_COLUMN} FROM {CONTROL_ATTEMPTS_TABLE} "
-        f"WHERE {CONTROL_ATTEMPT_IDEMPOTENCY_KEY_COLUMN} = ?",
-        [transaction_id],
-    ).fetchone()
-    if row is None:
-        return None
-    try:
-        return AttemptRecord.model_validate_json(str(row[0]))
-    except ValidationError as exc:
-        raise PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT) from exc
-
-
-def _latest_attempt_for_run(
-    conn: duckdb.DuckDBPyConnection,
-    run_id: UUID,
-) -> AttemptRecord | None:
-    attempts = tuple(
-        attempt for attempt in _attempt_records(conn) if attempt.run_id == run_id
-    )
-    return attempts[-1] if attempts else None
 
 
 def _accepted_control_attempts(
@@ -5347,99 +5663,6 @@ def _control_token_is_valid(request: Request) -> bool:
     )
 
 
-def _submission_transaction_id(run_id: UUID, request_sha256: str) -> str:
-    value = f"{run_id}{CUMULATIVE_KEY_SEPARATOR}{request_sha256}"
-    return hashlib.sha256(value.encode(TEXT_ENCODING)).hexdigest()
-
-
-def _capture_appendwatch_snapshot(configuration: PushConfiguration) -> str:
-    try:
-        return configuration.appendwatch_report.read_text(encoding=TEXT_ENCODING)
-    except (OSError, UnicodeError) as exc:
-        raise PushConfigurationError(Locale.APPENDWATCH_ARCHIVE_FAILED) from exc
-
-
-def _submission_outcome(execution: AttemptExecution) -> SubmissionCommitOutcome:
-    return SubmissionCommitOutcome(
-        stage=execution.stage,
-        result=execution.result,
-        response_code=execution.response_code,
-        response_headers={
-            HTTP_REQUEST_LOG_RESPONSE_CONTENT_TYPE_HEADER: ATTEMPT_RESPONSE_CONTENT_TYPE[
-                execution.response_code
-            ]
-        },
-        response_body=execution.response_body,
-        response_detail=execution.response_detail,
-        retry_submission_expected=execution.retry_submission_expected,
-        namekey=execution.namekey,
-        session_id=execution.session_id,
-    )
-
-
-def _configuration_submission_outcome(
-    *,
-    stage: str,
-    sanction: ControlRun,
-) -> SubmissionCommitOutcome:
-    return SubmissionCommitOutcome(
-        stage=stage,
-        result=ATTEMPT_RESULT_CONFIGURATION_ERROR,
-        response_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-        response_headers={
-            HTTP_REQUEST_LOG_RESPONSE_CONTENT_TYPE_HEADER: JSON_MEDIA_TYPE,
-        },
-        response_body=http_error_response_body(Locale.CONFIGURATION_ERROR_DETAIL),
-        response_detail=Locale.CONFIGURATION_ERROR_DETAIL,
-        retry_submission_expected=False,
-        namekey=sanction.namekey,
-        session_id=sanction.session_id,
-    )
-
-
-def _preflight_submission(
-    runtime: AiAugmentBackendContext,
-    *,
-    sanction: ControlRun,
-    attempt_id: str,
-    attempt_timestamp: datetime,
-    rollout_archive: ArchivedFile,
-    rollout_relative_path: PurePosixPath,
-    appendwatch_snapshot: str,
-    request_body: bytes,
-) -> AttemptExecution:
-    with tempfile.TemporaryDirectory() as temporary_directory:
-        attempt_dir = Path(temporary_directory)
-        report_path = attempt_dir / APPENDWATCH_ARCHIVE_FILENAME_TEMPLATE.format(
-            attempt_id=attempt_id
-        )
-        report_path.write_text(appendwatch_snapshot, encoding=TEXT_ENCODING)
-        report_archive = _archived_file(report_path)
-        replay = AttemptReplayInput(
-            attempt_dir=attempt_dir,
-            attempt_id=attempt_id,
-            attempt_timestamp=attempt_timestamp,
-            rollout_archive=rollout_archive,
-            report_archive=report_archive,
-            rollout_relative_path=rollout_relative_path,
-            request_body=request_body,
-            run_id=sanction.run_id,
-            namekey=sanction.namekey,
-            session_id=sanction.session_id,
-            validate_appendwatch=True,
-            materialize_files=False,
-        )
-        with DETOUR_DB_LOCK:
-            conn = open_detour_database(runtime)
-            conn.execute("BEGIN TRANSACTION")
-            try:
-                execution = execute_attempt(conn, runtime, replay)
-            finally:
-                conn.execute("ROLLBACK")
-                conn.close()
-    return execution
-
-
 def _log_attempt_execution(attempt_id: str, execution: AttemptExecution) -> None:
     error = execution.error
     if error is None:
@@ -5477,68 +5700,6 @@ def _log_attempt_execution(attempt_id: str, execution: AttemptExecution) -> None
         )
 
 
-@app.post(
-    CONTROL_PUSH_PATH,
-    response_model=ControlPushResponse,
-    include_in_schema=False,
-)
-def control_push(request: Request, payload: ControlPushRequest) -> ControlPushResponse:
-    if not _control_token_is_valid(request):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=Locale.CONTROL_RUN_EVENTS_FORBIDDEN,
-        )
-    idempotency_key = request.headers.get(HTTP_IDEMPOTENCY_KEY_HEADER, "").strip()
-    if not idempotency_key:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=Locale.CONTROL_IDEMPOTENCY_KEY_REQUIRED,
-        )
-    runtime = runtime_configuration()
-    with DETOUR_DB_LOCK:
-        conn = open_detour_database(runtime)
-        try:
-            existing = conn.execute(
-                f"SELECT {CONTROL_RUN_EVENT_PAYLOAD_COLUMN} "
-                f"FROM {CONTROL_RUN_EVENTS_TABLE} "
-                f"WHERE {CONTROL_RUN_EVENT_IDEMPOTENCY_KEY_COLUMN} = ?",
-                [idempotency_key],
-            ).fetchone()
-            if existing is not None:
-                try:
-                    stored = ControlRunEvent.model_validate_json(str(existing[0]))
-                except ValidationError as exc:
-                    raise HTTPException(
-                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                        detail=Locale.CONFIGURATION_ERROR_DETAIL,
-                    ) from exc
-                if stored != payload.event:
-                    raise HTTPException(
-                        status_code=status.HTTP_409_CONFLICT,
-                        detail=Locale.CONTROL_IDEMPOTENCY_CONFLICT,
-                    )
-                return ControlPushResponse(accepted=True, duplicate=True)
-            if payload.event.kind is ControlRunEventKind.SANCTIONED:
-                if (
-                    payload.event.session_id is None
-                    or payload.event.rollout_jsonl is None
-                    or payload.event.namekey not in (runtime.eligible_cohorts or {})
-                ):
-                    raise HTTPException(
-                        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                        detail=Locale.CONTROL_SANCTION_MALFORMED,
-                    )
-                active = _active_control_run(conn)
-                if active is not None and active.run_id != payload.event.run_id:
-                    raise HTTPException(
-                        status_code=status.HTTP_409_CONFLICT,
-                        detail=Locale.CONTROL_SANCTION_ACTIVE,
-                    )
-        finally:
-            conn.close()
-    return ControlPushResponse(accepted=True, duplicate=False)
-
-
 @app.get(
     CONTROL_PULL_PATH,
     response_model=ControlPullResponse,
@@ -5566,8 +5727,6 @@ def control_pull(
         conn = open_detour_database(runtime)
         try:
             return ControlPullResponse(
-                sanctioned_run=_active_control_run(conn),
-                events=_control_events(conn),
                 attempts=_attempt_records(conn),
                 accepted_attempts=_accepted_control_attempts(conn),
                 card_markdown=(
@@ -5584,229 +5743,87 @@ def control_pull(
             conn.close()
 
 
-@commit_app.put(
-    CONTROL_COMMIT_PATH,
-    response_model=ControlCommitResponse,
-)
-def control_commit(payload: SubmissionCommit) -> ControlCommitResponse:
-    runtime = runtime_configuration()
-    expected = _attempt_record_from_commit(payload)
-    with DETOUR_DB_LOCK:
-        conn = open_detour_database(runtime)
-        try:
-            existing = _attempt_by_transaction(conn, payload.transaction_id)
-            if existing is not None:
-                if existing != expected:
-                    raise HTTPException(
-                        status_code=status.HTTP_409_CONFLICT,
-                        detail=Locale.CONTROL_COMMIT_REFUSED,
-                    )
-                return ControlCommitResponse(committed=True, duplicate=True)
-            if _active_control_run(conn) != payload.sanction:
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail=Locale.CONTROL_COMMIT_REFUSED,
-                )
-        finally:
-            conn.close()
-    return ControlCommitResponse(committed=True, duplicate=False)
-
-
 @app.get(**PULL_ROUTE)
-def authoritative_pull() -> StreamingResponse:
+def authoritative_pull() -> Response:
+    runtime = runtime_configuration()
+    with BACKEND_WORKFLOW_STATE_LOCK:
+        workflow_status = BACKEND_WORKFLOW_STATUS
+        outcome = BACKEND_WORKFLOW_OUTCOME
+    if workflow_status is BackendWorkflowStatus.BUSY:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=Locale.CONFIGURATION_ERROR_DETAIL,
+            headers={RETRY_AFTER_HEADER: RETRY_AFTER_SECONDS},
+        )
+    if workflow_status is BackendWorkflowStatus.FAILED:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=Locale.CONFIGURATION_ERROR_DETAIL,
+        )
+    if workflow_status in {BackendWorkflowStatus.RETRY, BackendWorkflowStatus.COMPLETE}:
+        if outcome is None:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=Locale.CONFIGURATION_ERROR_DETAIL,
+            )
+        return Response(
+            content=outcome.response_body,
+            status_code=outcome.response_code,
+            media_type=outcome.response_headers[HTTP_REQUEST_LOG_RESPONSE_CONTENT_TYPE_HEADER],
+        )
     try:
-        if not AUTHORITATIVE_BACKEND_HEALTHY:
-            raise PushConfigurationError(Locale.REPLAY_PROJECTION_FAILED)
-        runtime = runtime_configuration()
-        sanction = active_control_run(runtime)
-        push_configuration(sanction.rollout_jsonl)
-        with DETOUR_DB_LOCK:
-            conn = open_detour_database(runtime)
-            try:
-                latest_attempt = _latest_attempt_for_run(conn, sanction.run_id)
-            finally:
-                conn.close()
-        if latest_attempt is not None:
-            if latest_attempt.result == ATTEMPT_RESULT_CONFIGURATION_ERROR:
-                raise PushConfigurationError(Locale.REPLAY_COMMIT_INVALID)
-            if latest_attempt.result == ATTEMPT_RESULT_REJECTED:
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                    detail=(
-                        latest_attempt.response_detail or Locale.VALIDATION_ERROR_DETAIL
-                    ),
-                )
+        if runtime.namekey is None:
+            raise PushConfigurationError(Locale.PUSH_LINKAGE_MISSING)
         source_conn = open_source_database(runtime)
         try:
             researcher = load_source_researcher(
                 source_conn,
                 runtime.eligible_cohorts,
-                namekey=sanction.namekey,
+                namekey=runtime.namekey,
             )
-            lines = tuple(sanctioned_pull_lines(researcher))
+            lines = tuple(configured_pull_lines(researcher))
         finally:
             source_conn.close()
         return StreamingResponse(iter(lines), media_type=MEDIA_TYPE)
-    except HTTPException:
-        raise
     except (PushConfigurationError, PushValidationError, OSError, duckdb.Error) as exc:
         logger.error(Locale.PULL_FAILED_LOG, exc)
         raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=Locale.CONFIGURATION_ERROR_DETAIL,
         ) from None
 
 
 @app.post(**PUSH_ROUTE)
 async def authoritative_push(request: Request) -> Response:
-    attempt_timestamp = datetime.now(timezone.utc)
-    attempt_id = new_attempt_id(attempt_timestamp)
-    request_body = await request.body()
-    try:
-        validate_transport(request)
-        if len(request_body) > MAX_PUSH_BODY_BYTES:
-            raise PushValidationError(Locale.REQUEST_BODY_TOO_LARGE)
-        request_text = request_body.decode(TEXT_ENCODING)
-    except (PushValidationError, UnicodeDecodeError) as exc:
-        logger.warning(
-            Locale.PUSH_VALIDATION_FAILED_LOG,
-            attempt_id,
-            ATTEMPT_STAGE_TRANSPORT,
-            exc,
-        )
-        return JSONResponse(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            content={"detail": Locale.VALIDATION_ERROR_DETAIL},
-        )
+    del request
+    global BACKEND_CURRENT_PULL_RECORD_ID
+    global BACKEND_PENDING_PULL_RECORD_ID
+    global BACKEND_WORKFLOW_OUTCOME
+    global BACKEND_WORKFLOW_STATUS
 
-    try:
-        runtime = runtime_configuration()
-        sanction = active_control_run(runtime)
-    except (PushConfigurationError, PushValidationError, duckdb.Error) as exc:
-        logger.error(
-            Locale.PUSH_CONFIGURATION_FAILED_LOG,
-            attempt_id,
-            ATTEMPT_STAGE_CONFIGURATION,
-            exc,
-        )
-        return JSONResponse(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            content={"detail": Locale.CONFIGURATION_ERROR_DETAIL},
-        )
-
-    request_sha256 = hashlib.sha256(request_body).hexdigest()
-    transaction_id = _submission_transaction_id(sanction.run_id, request_sha256)
-    with DETOUR_DB_LOCK:
-        conn = open_detour_database(runtime)
-        try:
-            existing = _attempt_by_transaction(conn, transaction_id)
-        finally:
-            conn.close()
-    if existing is not None:
-        return Response(
-            content=existing.response_body,
-            status_code=existing.response_code,
-            media_type=ATTEMPT_RESPONSE_CONTENT_TYPE[existing.response_code],
-            headers={HTTP_TRANSACTION_ID_HEADER: transaction_id},
-        )
-
-    stage = ATTEMPT_STAGE_CONFIGURATION
-    rollout_archive: ArchivedFile | None = None
-    rollout_reference: RolloutCasReference | None = None
-    appendwatch_snapshot: str | None = None
-    try:
-        configuration = push_configuration(sanction.rollout_jsonl)
-        stage = ATTEMPT_STAGE_ROLLOUT_COPY
-        rollout_archive = copy_rollout_to_cas(configuration, runtime)
-        rollout_reference = RolloutCasReference(
-            sha256=rollout_archive.sha256,
-            size=rollout_archive.size,
-            line_count=rollout_archive.line_count,
-            rollout_relative_path=str(configuration.rollout_relative_path),
-        )
-        stage = ATTEMPT_STAGE_APPENDWATCH_COPY
-        appendwatch_snapshot = _capture_appendwatch_snapshot(configuration)
-        stage = ATTEMPT_STAGE_APPENDWATCH_VALIDATION
-        execution = _preflight_submission(
-            runtime,
-            sanction=sanction,
-            attempt_id=attempt_id,
-            attempt_timestamp=attempt_timestamp,
-            rollout_archive=rollout_archive,
-            rollout_relative_path=configuration.rollout_relative_path,
-            appendwatch_snapshot=appendwatch_snapshot,
-            request_body=request_body,
-        )
-        _log_attempt_execution(attempt_id, execution)
-        outcome = _submission_outcome(execution)
-    except PushConfigurationError as exc:
-        logger.error(Locale.PUSH_CONFIGURATION_FAILED_LOG, attempt_id, stage, exc)
-        outcome = _configuration_submission_outcome(stage=stage, sanction=sanction)
-
-    commit = SubmissionCommit(
-        transaction_id=transaction_id,
-        attempt_id=attempt_id,
-        attempt_timestamp=attempt_timestamp,
-        sanction=sanction,
-        public_request_body=request_text,
-        public_request_sha256=request_sha256,
-        appendwatch_snapshot=appendwatch_snapshot,
-        rollout=rollout_reference,
-        outcome=outcome,
-    )
-    transport = httpx.ASGITransport(app=commit_app, raise_app_exceptions=False)
-    async with httpx.AsyncClient(
-        transport=transport,
-        base_url=INTERNAL_COMMIT_BASE_URL,
-    ) as client:
-        commit_response = await client.put(
-            CONTROL_COMMIT_PATH,
-            content=commit.model_dump_json(),
-            headers={
-                HTTP_CONTENT_TYPE_HEADER: JSON_MEDIA_TYPE,
-                HTTP_IDEMPOTENCY_KEY_HEADER: transaction_id,
-            },
-        )
-    if commit_response.status_code != status.HTTP_200_OK or not AUTHORITATIVE_BACKEND_HEALTHY:
-        logger.error(
-            Locale.CONTROL_COMMIT_FAILED_LOG,
-            attempt_id,
-            commit_response.status_code,
-            commit_response.text,
-        )
-        return JSONResponse(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            content={"detail": Locale.CONFIGURATION_ERROR_DETAIL},
-        )
-    try:
-        committed = ControlCommitResponse.model_validate_json(commit_response.content)
-    except ValidationError as exc:
-        logger.error(
-            Locale.CONTROL_COMMIT_FAILED_LOG,
-            attempt_id,
-            commit_response.status_code,
-            exc,
-        )
-        return JSONResponse(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            content={"detail": Locale.CONFIGURATION_ERROR_DETAIL},
-        )
-    if not committed.committed:
-        logger.error(
-            Locale.CONTROL_COMMIT_FAILED_LOG,
-            attempt_id,
-            commit_response.status_code,
-            commit_response.text,
-        )
-        return JSONResponse(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            content={"detail": Locale.CONFIGURATION_ERROR_DETAIL},
-        )
+    with BACKEND_WORKFLOW_STATE_LOCK:
+        if BACKEND_WORKFLOW_STATUS is BackendWorkflowStatus.BUSY:
+            return JSONResponse(
+                status_code=status.HTTP_409_CONFLICT,
+                content={"detail": Locale.CONFIGURATION_ERROR_DETAIL},
+            )
+        if (
+            BACKEND_WORKFLOW_STATUS
+            not in {BackendWorkflowStatus.READY, BackendWorkflowStatus.RETRY}
+            or BACKEND_CURRENT_PULL_RECORD_ID is None
+            or BACKEND_SESSION_ID is None
+        ):
+            return JSONResponse(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                content={"detail": Locale.CONFIGURATION_ERROR_DETAIL},
+            )
+        BACKEND_PENDING_PULL_RECORD_ID = BACKEND_CURRENT_PULL_RECORD_ID
+        BACKEND_CURRENT_PULL_RECORD_ID = None
+        BACKEND_WORKFLOW_OUTCOME = None
+        BACKEND_WORKFLOW_STATUS = BackendWorkflowStatus.BUSY
     return Response(
-        content=outcome.response_body,
-        status_code=outcome.response_code,
-        media_type=outcome.response_headers[HTTP_REQUEST_LOG_RESPONSE_CONTENT_TYPE_HEADER],
-        headers={HTTP_TRANSACTION_ID_HEADER: transaction_id},
+        status_code=status.HTTP_202_ACCEPTED,
+        headers={LOCATION_HEADER: PULL_PATH},
     )
 
 

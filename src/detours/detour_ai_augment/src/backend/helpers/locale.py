@@ -15,13 +15,15 @@ class Locale:
     )
     PULL_SUMMARY: Final = "Pull the annotation task"
     PULL_DESCRIPTION: Final = (
-        "Streams the source JSONL through the selected row. The selected row contains "
-        "only the annotation columns with all values replaced by null."
+        "Returns the configured JSON Lines annotation task, Markdown resubmission "
+        "instructions, the accepted result, or the current processing state."
     )
-    PULL_RESPONSE_DESCRIPTION: Final = "JSON Lines annotation task"
+    PULL_RESPONSE_DESCRIPTION: Final = "JSON Lines annotation task or Markdown retry"
     PUSH_SUMMARY: Final = "Submit completed annotations"
-    PUSH_DESCRIPTION: Final = "Validates and stores the completed submission."
-    PUSH_RESPONSE_DESCRIPTION: Final = "Submission, followed by ground truth if available."
+    PUSH_DESCRIPTION: Final = (
+        "Durably accepts the submission before asynchronous validation."
+    )
+    PUSH_RESPONSE_DESCRIPTION: Final = "Submission durably accepted; poll Location for outcome."
     EXCERPT_URL_NONBLANK = "excerpt and url must be non-blank"
     VALUE_NONBLANK = "value must be non-blank"
     EXCERPT_PAIRS_UNIQUE = "web_search_excerpts must not contain duplicate pairs"
@@ -53,6 +55,14 @@ class Locale:
     UNKNOWN_FIELD: Final = "unknown"
 
     SESSION_METADATA_NONBLANK: Final = "session metadata fields must be non-blank"
+    SESSION_ID_STDIN_INVALID: Final = "Backend stdin session ID is not a canonical UUID"
+    SESSION_ID_STDIN_CONFLICT: Final = "Backend stdin supplied conflicting session IDs"
+    SESSION_ID_STDIN_MISSING: Final = "Backend stdin closed before supplying a session ID"
+    SESSION_ID_STDIN_ACCEPTED_LOG: Final = "Backend stdin accepted Codex session ID %s"
+    SESSION_ID_STDIN_FAILED_LOG: Final = "Backend stdin session-ID reader failed: %s"
+    APPENDWATCH_READABLE_LOG: Final = "proved APPENDWATCH_REPORT readable: %s"
+    CODEX_SESSIONS_READABLE_LOG: Final = "proved Codex sessions directory readable: %s"
+    CODEX_SESSIONS_UNREADABLE: Final = "Codex sessions directory is not readable"
     CONTROL_RUN_NORMALIZED: Final = "control run fields must be non-blank and normalized"
     CONTROL_PARENT_PID_INVALID: Final = "Control Centre parent PID is invalid"
     CONTROL_RUN_EVENTS_INCONSISTENT: Final = (
@@ -117,11 +127,6 @@ class Locale:
     CONTROL_URL_INVALID_TEMPLATE: Final = "{environment_name} is invalid"
     CONTROL_URL_EXPECTED_TEMPLATE: Final = "{environment_name} must be http://{host}:{port}"
     CONTROL_ENDPOINT_UNAVAILABLE: Final = "Control Centre endpoint is unavailable"
-    CONTROL_SANCTION_MALFORMED: Final = "Control Centre returned malformed sanction state"
-    CONTROL_SANCTION_MISSING: Final = "Control Centre has no sanctioned run"
-    CONTROL_SANCTION_CONSUMED: Final = "Control Centre run sanction has already been consumed"
-    CONTROL_ACKNOWLEDGEMENT_MALFORMED: Final = "Control Centre returned malformed acknowledgement"
-    CONTROL_ACKNOWLEDGEMENT_REFUSED: Final = "Control Centre refused accepted-run acknowledgement"
     CONFIG_INVALID_TEMPLATE: Final = "--config is invalid or unreadable: {config_path}"
     OUTPUT_FORMAT_INVALID: Final = "config output_format must be txt or docx"
     SOURCE_DUCKDB_UNREADABLE_TEMPLATE: Final = "configured source DuckDB is not readable: {db_file}"
@@ -165,6 +170,10 @@ class Locale:
     )
     ROLLOUT_SCP_FAILED: Final = (
         "rollout SCP failed; verify the configured rollout and AIVM SSH deployment"
+    )
+    ROLLOUT_DISCOVERY_FAILED: Final = "rollout discovery on the Agent Runtime failed"
+    ROLLOUT_DISCOVERY_NOT_UNIQUE: Final = (
+        "Codex session ID did not resolve to exactly one rollout"
     )
     APPENDWATCH_ARCHIVE_FAILED: Final = (
         "appendwatch status could not be archived; verify deployment and mounted report"
@@ -341,7 +350,7 @@ class Locale:
         "{field} withdrew unsupported evidence but did not correct the associated field value."
     )
     EVIDENCE_RETRY_IDENTITY_MISMATCH: Final = (
-        "stored retry state does not match the sanctioned run identity"
+        "stored retry state does not match the configured namekey/session identity"
     )
     EVIDENCE_AUDIT_REPLAY_FAILED: Final = (
         "stored evidence attempt audit cannot be replayed from its immutable baseline"
@@ -370,8 +379,14 @@ class Locale:
     )
     REPLAY_PROJECTION_FAILED: Final = "authoritative replay projection failed"
     REPLAY_RECORD_BODY_INVALID: Final = "authoritative HTTP record body is invalid"
+    REPLAY_RECORD_CONTOUR_INVALID: Final = "authoritative HTTP record contour is invalid"
     REPLAY_CONTROL_EVENT_INVALID: Final = "authoritative control event is inconsistent"
     REPLAY_COMMIT_INVALID: Final = "authoritative private commit is inconsistent"
+    REPLAY_COMMIT_LINK_MISSING: Final = "private commit references a missing HTTP record"
+    REPLAY_COMMIT_LINK_INVALID: Final = "private commit references an invalid HTTP exchange"
+    REPLAY_COMMIT_PULL_INVALID: Final = "private commit references an invalid pull"
+    REPLAY_COMMIT_SOURCE_KEY_INVALID: Final = "private commit Source-Key is invalid"
+    REPLAY_COMMIT_NAME_KEY_INVALID: Final = "private commit Name-Key is invalid"
     REPLAY_PUBLIC_PUSH_INVALID: Final = "authoritative public push audit is inconsistent"
     ROLLOUT_CAS_CONFLICT: Final = "rollout content-addressed storage contains a conflict"
     ROLLOUT_CAS_BLOB_INVALID: Final = "committed rollout snapshot is missing or invalid"
@@ -398,20 +413,12 @@ class Locale:
     AUTHORITATIVE_BACKEND_UNHEALTHY_LOG: Final = (
         "rejecting authoritative %s %s because an earlier committed record is not projected"
     )
-    AUTHORITATIVE_COMMAND_BUSY_LOG: Final = (
-        "rejecting concurrent authoritative %s %s because another push is active"
+    POST_COMMIT_VALIDATION_FAILED_LOG: Final = (
+        "post-commit validation commit=%s stage=%s failed: %s"
     )
-    CONTROL_IDEMPOTENCY_KEY_REQUIRED: Final = (
-        "Control push requires a nonblank Idempotency-Key header"
-    )
-    CONTROL_IDEMPOTENCY_CONFLICT: Final = (
-        "Idempotency-Key was already used for a different control event"
-    )
-    CONTROL_SANCTION_ACTIVE: Final = "another researcher sanction is already active"
-    CONTROL_COMMIT_REFUSED: Final = "private submission commit was refused"
-    CONTROL_COMMIT_FAILED_LOG: Final = (
-        "push attempt=%s private commit failed status=%s body=%r"
-    )
+    PUSH_LINKAGE_MISSING: Final = "accepted push has no current pull or Codex session"
+    POST_ACCEPT_PROCESSING_FAILED_LOG: Final = "accepted push post-processing failed: %s"
+    COMMIT_APPEND_FATAL_LOG: Final = "private commit append failed fatally: %s"
 
     OPENALEX_API_KEY_MISSING: Final = (
         "OPENALEX_API_KEY is required to validate an OpenAlex institution"
@@ -442,14 +449,15 @@ class Locale:
     TASK_IDENTITY_MISSING: Final = "selected task identity was not found"
     SOURCE_DUCKDB_OPEN_FAILED: Final = "configured source DuckDB could not be opened read-only"
     DETOUR_DUCKDB_OPEN_FAILED: Final = "detour DuckDB could not be opened"
-    SANCTIONED_ROWS_DUPLICATE_TEMPLATE: Final = (
-        "{table_name} contains duplicate rows for sanctioned namekey"
+    CONFIGURED_ROWS_DUPLICATE_TEMPLATE: Final = (
+        "{table_name} contains duplicate rows for configured namekey"
     )
-    SANCTIONED_NAMEKEY_INELIGIBLE: Final = "sanctioned namekey is not eligible for this detour"
-    SANCTIONED_NAMEKEY_MALFORMED: Final = "sanctioned namekey is malformed"
-    SANCTIONED_NAMEKEY_NONCANONICAL: Final = "sanctioned namekey is not canonical"
-    SANCTIONED_XLSX_CONTEXT_MISSING: Final = "sanctioned namekey has no xlsx innerdict context"
-    SANCTIONED_DRAW_MISSING: Final = "sanctioned namekey has no innerdict-owned draw"
+    CONFIGURED_NAMEKEY_INELIGIBLE: Final = "configured namekey is not eligible for this detour"
+    CONFIGURED_NAMEKEY_MALFORMED: Final = "configured namekey is malformed"
+    CONFIGURED_NAMEKEY_NONCANONICAL: Final = "configured namekey is not canonical"
+    NAMEKEY_NOT_SET_TEMPLATE: Final = "namekey is not set in {environment_name}"
+    CONFIGURED_XLSX_CONTEXT_MISSING: Final = "configured namekey has no xlsx innerdict context"
+    CONFIGURED_DRAW_MISSING: Final = "configured namekey has no innerdict-owned draw"
     GROUND_TRUTH_DOCX_INCOMPLETE: Final = "ground-truth researcher has no complete docx innerdict"
     RESEARCHER_NOT_UNIQUE: Final = "selected researcher did not resolve uniquely"
     ACCEPTED_IDENTITY_DUPLICATE: Final = (
@@ -468,17 +476,14 @@ class Locale:
     REQUEST_CONTENT_TYPE_INVALID: Final = "request Content-Type must be application/json"
     REQUEST_CONTENT_LENGTH_INVALID: Final = "request Content-Length is invalid"
     REQUEST_BODY_TOO_LARGE: Final = "request body exceeds the configured size limit"
-    SANCTIONED_SESSION_MISMATCH: Final = "sanctioned session does not match archived rollout"
+    CONFIGURED_SESSION_MISMATCH: Final = "configured session does not match archived rollout"
     CARD_INTRO_DATE_FORMAT: Final = "%B %d, %Y"
 
     API_STARTUP_FAILED_LOG: Final = "API startup failed: %s"
     ROUTES_DISABLED_LOG: Final = "pull and push are disabled: %s"
     ATTEMPT_RECORD_FAILED_LOG: Final = "push attempt=%s could not record stage=%s result=%s"
-    PULL_FAILED_LOG: Final = "pull failed configuration/sanction validation: %s"
+    PULL_FAILED_LOG: Final = "pull failed configuration validation: %s"
     PUSH_ACCEPTED_LOG: Final = "push attempt=%s accepted"
-    CONTROL_ACKNOWLEDGEMENT_FAILED_LOG: Final = (
-        "push attempt=%s accepted but Control Centre acknowledgement failed: %s"
-    )
     PUSH_CONFIGURATION_FAILED_LOG: Final = "push attempt=%s failed stage=%s: %s"
     PUSH_MULTIPLE_MATCHES_LOG: Final = (
         "push attempt=%s failed stage=%s: excerpt matched multiple rows excerpt=%r"

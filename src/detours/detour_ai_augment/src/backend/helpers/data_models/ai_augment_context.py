@@ -18,6 +18,7 @@ class AiAugmentBackendContext:
     detour_db_path: Path
     replay_log: RegisteredResource
     rollout_cas_dir: Path
+    namekey: str | None = None
     release_map: RegisteredResource | None = None
     source_population: tuple[SourcePopulationRow, ...] = ()
     eligible_cohorts: Mapping[str, str] | None = None
