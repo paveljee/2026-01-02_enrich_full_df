@@ -138,6 +138,7 @@ given as [Gherkin][gherkin-docs]-ish **scenarios**.
 1. The rollout continues until the AI Agent Runtime hits a `410 Gone` response at `GET /pull`, as triggered by the LLM Inference API. The response instructs the AI Agent Runtime to stop operation and remain idle until rehydrated by the Human Operator. Of note, it is ultimately at the discretion of the LLM Inference API when it chooses to stop operation.
 1. The Human Operator reviews Backend logs and submissions and repeats or adjusts the workflow as necessary.
 1.  The full AI Agent Runtime workflow is therefore limited to a single configured HCR profile.
+1. The Backend API always owns the detour DB connection for both reading and writing. Therefore, the dashboard module of the Control Centre only executes SELECT queries towards the detour DB by Inter-Process Communication to the Backend API. For this, the Backend API exposes a Unix socket through a separate Flask application that is unrelated to the FastAPI application serving the Backend API logic except for the fact that they share the same detour DB connection. The Unix socket does not require authentication from the Control Centre because it is private to the host machine and inaccessible to the AI Agent Runtime anyway.
  
 <!---RETIRED, DO NOT USE
 (BUT DO NOT DELETE)
