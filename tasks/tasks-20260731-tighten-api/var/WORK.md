@@ -26,7 +26,9 @@ continue to accept integer `1` as the same v1 schema.
 
 The 1.1 conversion is complete across the active shared model/constants,
 Backend producer/reader, tests, and README workflow. Historical task records
-remain unchanged.
+remain unchanged. The workflow's full inline private-commit HTTP record JSON
+contour is restored with schema `"1.1"`, every current model field, the complete
+nested commit body, and the existing Structured Field header values.
 
 Passing through Pixi:
 
