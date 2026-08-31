@@ -3140,8 +3140,14 @@ def test_archived_attempts_rebuild_database_from_exact_http_contract(
 
     assert rejected_response.status_code == 422
     assert accepted_response.status_code == 200
-    assert rejected_http.schema_version == api.KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V2
-    assert accepted_http.schema_version == api.KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V2
+    assert (
+        rejected_http.schema_version
+        == api.KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
+    )
+    assert (
+        accepted_http.schema_version
+        == api.KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
+    )
     assert rejected_http.port is None
     assert accepted_http.port is None
     assert rejected_http.coerce_schema_v1 is False

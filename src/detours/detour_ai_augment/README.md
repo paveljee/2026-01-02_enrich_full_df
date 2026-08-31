@@ -96,9 +96,9 @@ given as [Gherkin][gherkin-docs]-ish **scenarios**.
 > [!IMPORTANT]
 > Before returning any `GET /pull` or `POST /push` response,
 > the Backend API validates the complete exchange against
-> the `HttpRequestLogRecord(schema_version=2)` Pydantic model.
-> If valid, the Backend API serializes, appends,
-> and `fsync`s the validated record to
+> the `HttpRequestLogRecord(schema_version="1.1")` Pydantic model.
+> If valid, the Backend API issues a UUIDv7 `record_id`,
+> serializes, appends, and `fsync`s the validated record to
 > `AiAugmentBackendContext.replay_log` through one shared function,
 > which private commit requests also use;
 > else the Backend API `exit(1)`s loudly.
@@ -125,7 +125,7 @@ given as [Gherkin][gherkin-docs]-ish **scenarios**.
 1. Under the happy path, the Backend API responds to a push with `202 Accepted` and `Location: /pull`. Before responding, the Backend API changes its internal state to busy, which is important downstream. Also, before responding, the Backend API exposes `503 Service Unavailable` with `Retry-After: 1` at `GET /pull`. Error codes for a push: `409 Conflict` if the Backend API was busy prior to receiving the request; `500 Internal Server Error` if any other error.
 1. Given the accepted push record is persisted, the Backend API reads the session ID from stdin and copies the corresponding Codex rollout file from the guest machine to `AiAugmentBackendContext.rollout_cas_dir`, addressed by SHA-256 and recorded with its byte size and line count; of note, the Backend API trusts stdin to supply the rollout path corresponding to the accepted push. If unsuccessful, the Backend API exposes `500 Internal Server Error` at `GET /pull`.
 1. Given the rollout file is successfully accessible by its hash from `AiAugmentBackendContext.rollout_cas_dir`, the Backend API reads the bitwise exact contents of the `APPENDWATCH_REPORT` file as bytes into a variable. If unsuccessful, the Backend API exposes `500 Internal Server Error` at `GET /pull`.
-1. Given the `APPENDWATCH_REPORT` has been read, the Backend API prepares but does not send `POST http://invalid/commit`. The request has an empty query and null response and is represented by `HttpRequestLogRecord(schema_version=2)` with a Backend-issued UUIDv7 `record_id`.
+1. Given the `APPENDWATCH_REPORT` has been read, the Backend API prepares but does not send `POST http://invalid/commit`. The request has an empty query and null response and is represented by `HttpRequestLogRecord(schema_version="1.1")` with a Backend-issued UUIDv7 `record_id`.
 1. The commit request's `Source-Key` Structured Field header is `ktp.filename="<rollout filename>", ktp.fragment=<line count>, ktp.fragment_type="line_number"`; its `Name-Key` Structured Field header is `ktp.first_name="<first name>", ktp.last_name="<last name>"`. Its JSON body is `{"schema_version":1,"pull_record_id":"<pull UUID>","push_record_id":"<push UUID>","rollout":{"sha256":"<SHA-256>","size":<byte size>,"line_count":<line count>},"appendwatch_report":{"encoding":"base64","data":"<base64 report bytes>"}}`.
 1. The Backend API appends and `fsync`s the commit request through the shared replay-log function. This completes commit. No appendwatch, rollout-content, submission, or evidence validation precedes commit. If unsuccessful, the Backend API `exit(1)`s loudly.
 1. Given commit has completed, the Backend API invokes validation. Before the detour DuckDB database is otherwise used, the Backend API synchronizes it by projecting every unprojected replay-log record in append order.

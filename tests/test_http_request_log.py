@@ -10,6 +10,8 @@ from src.helpers.data_models.http_request_log import (
     HTTP_REQUEST_LOG_RECORD_ID_KEY,
     HTTP_REQUEST_LOG_SCHEMA_VERSION_KEY,
     HttpRequestLogRecord,
+    HttpRequestLogSchemaVersion,
+    HttpRequestLogSchemaVersionV1,
     append_http_request_log_record,
     http_request_log_record,
     matching_http_request_log_record,
@@ -17,7 +19,7 @@ from src.helpers.data_models.http_request_log import (
 )
 from src.helpers.vars import (
     KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION,
-    KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V2,
+    KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
 )
 
 TEST_HTTP_HOST = "api.openalex.org"
@@ -27,7 +29,51 @@ TEST_HTTP_LOCAL_PORT = 8612
 TEST_HTTP_READY_TO_RESPOND_AT_UNIX_USEC = 123457
 
 
-def test_http_request_log_record_id_defaults_to_unique_uuid7_in_v2() -> None:
+def test_http_request_log_schema_version_uses_strings_and_legacy_v1_int() -> None:
+    version_1 = http_request_log_record(
+        schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION,
+        method="GET",
+        scheme="https",
+        host=TEST_HTTP_HOST,
+        path="/works/W123",
+        redacted_query="select=title&api_key=REDACTED",
+        response_code=200,
+        response_body='{"title":"A Fine Paper"}',
+        received_at_unix_usec=123456,
+        duration_usec=789,
+    ).model_dump()
+    version_1_1 = HttpRequestLogRecord.model_validate(
+        version_1
+        | {
+            HTTP_REQUEST_LOG_SCHEMA_VERSION_KEY: (
+                KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
+            )
+        }
+    )
+    legacy_version_1 = HttpRequestLogRecord.model_validate(
+        version_1 | {HTTP_REQUEST_LOG_SCHEMA_VERSION_KEY: 1}
+    )
+    restored_legacy_version_1 = HttpRequestLogRecord.model_validate_json(
+        legacy_version_1.model_dump_json()
+    )
+
+    assert version_1[HTTP_REQUEST_LOG_SCHEMA_VERSION_KEY] == "1"
+    assert isinstance(version_1[HTTP_REQUEST_LOG_SCHEMA_VERSION_KEY], str)
+    assert legacy_version_1.schema_version == 1
+    assert isinstance(legacy_version_1.schema_version, int)
+    assert HTTP_REQUEST_LOG_RECORD_ID_KEY not in legacy_version_1.model_dump()
+    assert restored_legacy_version_1.schema_version == 1
+    assert version_1_1.schema_version == "1.1"
+    assert isinstance(version_1_1.schema_version, str)
+    for invalid_schema_version in ("1.0", 1.1, 2):
+        with pytest.raises(ValidationError):
+            HttpRequestLogRecord.model_validate(
+                version_1
+                | {HTTP_REQUEST_LOG_SCHEMA_VERSION_KEY: invalid_schema_version}
+            )
+
+
+def test_http_request_log_record_id_defaults_to_unique_uuid7_in_v1_1() -> None:
     version_1 = http_request_log_record(
         schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION,
         method="GET",
@@ -40,11 +86,11 @@ def test_http_request_log_record_id_defaults_to_unique_uuid7_in_v2() -> None:
         received_at_unix_usec=123456,
         duration_usec=789,
     ).model_dump()
-    version_2 = version_1 | {
-        HTTP_REQUEST_LOG_SCHEMA_VERSION_KEY: KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V2
+    version_1_1 = version_1 | {
+        HTTP_REQUEST_LOG_SCHEMA_VERSION_KEY: KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
     }
-    record = HttpRequestLogRecord.model_validate(version_2)
-    another = HttpRequestLogRecord.model_validate(version_2)
+    record = HttpRequestLogRecord.model_validate(version_1_1)
+    another = HttpRequestLogRecord.model_validate(version_1_1)
     restored = HttpRequestLogRecord.model_validate_json(record.model_dump_json())
 
     assert HTTP_REQUEST_LOG_RECORD_ID_KEY not in version_1
@@ -98,7 +144,7 @@ def test_appended_http_request_log_record_roundtrips_unicode(tmp_path) -> None:
 
     restored = matching_http_request_log_record(
         log_path=log_path,
-        schema_version=1,
+        schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION,
         method="GET",
         scheme="https",
         host="api.openalex.org",
@@ -110,7 +156,7 @@ def test_appended_http_request_log_record_roundtrips_unicode(tmp_path) -> None:
     assert restored.response_body == '{"title":"A Fine Paper 你好"}'
 
 
-def test_http_request_log_schema_version_1_omits_and_rejects_v2_fields() -> None:
+def test_http_request_log_schema_version_1_omits_and_rejects_v1_1_fields() -> None:
     record = http_request_log_record(
         schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION,
         method="GET",
@@ -163,7 +209,7 @@ def test_http_request_log_schema_version_1_omits_and_rejects_v2_fields() -> None
         (TEST_HTTP_IPV6_HOST, TEST_HTTP_LOCAL_PORT),
     ],
 )
-def test_http_request_log_schema_version_2_roundtrips_optional_port(
+def test_http_request_log_schema_version_1_1_roundtrips_optional_port(
     host: str,
     port: int | None,
 ) -> None:
@@ -179,25 +225,28 @@ def test_http_request_log_schema_version_2_roundtrips_optional_port(
         received_at_unix_usec=123456,
         duration_usec=789,
     ).model_dump()
-    version_2 = version_1 | {
-        HTTP_REQUEST_LOG_SCHEMA_VERSION_KEY: KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V2,
+    version_1_1 = version_1 | {
+        HTTP_REQUEST_LOG_SCHEMA_VERSION_KEY: KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
         HTTP_REQUEST_LOG_PORT_KEY: port,
     }
-    expected_version_2 = version_2 | {
+    expected_version_1_1 = version_1_1 | {
         HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY: False,
         HTTP_REQUEST_LOG_READY_TO_RESPOND_AT_UNIX_USEC_KEY: None,
     }
 
-    record = HttpRequestLogRecord.model_validate(version_2)
+    record = HttpRequestLogRecord.model_validate(version_1_1)
     restored = HttpRequestLogRecord.model_validate_json(record.model_dump_json())
 
     assert restored.model_dump(exclude={HTTP_REQUEST_LOG_RECORD_ID_KEY}) == (
-        expected_version_2
+        expected_version_1_1
     )
     assert restored.record_id == record.record_id
 
 
-def test_http_request_log_schema_version_1_is_promoted_only_with_opt_in() -> None:
+@pytest.mark.parametrize("schema_version", [1, "1"])
+def test_http_request_log_schema_version_1_is_promoted_only_with_opt_in(
+    schema_version: HttpRequestLogSchemaVersionV1,
+) -> None:
     version_1 = http_request_log_record(
         schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION,
         method="GET",
@@ -210,14 +259,15 @@ def test_http_request_log_schema_version_1_is_promoted_only_with_opt_in() -> Non
         received_at_unix_usec=123456,
         duration_usec=789,
     ).model_dump()
-    version_2 = version_1 | {
-        HTTP_REQUEST_LOG_SCHEMA_VERSION_KEY: KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V2
+    version_1[HTTP_REQUEST_LOG_SCHEMA_VERSION_KEY] = schema_version
+    version_1_1 = version_1 | {
+        HTTP_REQUEST_LOG_SCHEMA_VERSION_KEY: KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
     }
 
     native_version_1 = HttpRequestLogRecord.model_validate(version_1)
     native = HttpRequestLogRecord.model_validate_json(
         HttpRequestLogRecord.model_validate(
-            version_2
+            version_1_1
             | {
                 HTTP_REQUEST_LOG_READY_TO_RESPOND_AT_UNIX_USEC_KEY: (
                     TEST_HTTP_READY_TO_RESPOND_AT_UNIX_USEC
@@ -247,7 +297,7 @@ def test_http_request_log_schema_version_1_is_promoted_only_with_opt_in() -> Non
     )
     assert (
         native_version_1.schema_version
-        == KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION
+        == schema_version
     )
     assert HTTP_REQUEST_LOG_RECORD_ID_KEY not in native_version_1.model_dump()
     assert HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY not in native_version_1.model_dump()
@@ -258,7 +308,7 @@ def test_http_request_log_schema_version_1_is_promoted_only_with_opt_in() -> Non
         == TEST_HTTP_READY_TO_RESPOND_AT_UNIX_USEC
     )
     assert native.model_dump()[HTTP_REQUEST_LOG_PORT_KEY] is None
-    assert coerced.schema_version == KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V2
+    assert coerced.schema_version == KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
     assert coerced.record_id.version == 7
     assert HTTP_REQUEST_LOG_RECORD_ID_KEY in coerced.model_dump()
     assert coerced.port is None
@@ -380,47 +430,47 @@ def test_redact_http_request_log_query_can_preserve_filter_separators() -> None:
             "response",
             True,
             True,
-            KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V2,
+            KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
         ),
         (KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION, None, True, False, None),
-        # Native schema v2 allows either string or null.
+        # Native schema v1.1 allows either string or null.
         (
-            KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V2,
+            KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
             "response",
             False,
             True,
-            KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V2,
+            KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
         ),
         (
-            KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V2,
+            KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
             None,
             False,
             True,
-            KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V2,
+            KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
         ),
-        # Schema v2 ignores the migration flag.
+        # Schema v1.1 ignores the migration flag.
         (
-            KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V2,
+            KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
             "response",
             True,
             True,
-            KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V2,
+            KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
         ),
         (
-            KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V2,
+            KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
             None,
             True,
             True,
-            KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V2,
+            KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
         ),
     ],
 )
-def test_http_request_log_response_body_is_required_in_v1_and_nullable_in_v2(
-    schema_version: int,
+def test_http_request_log_response_body_is_required_in_v1_and_nullable_in_v1_1(
+    schema_version: HttpRequestLogSchemaVersion,
     response_body: str | None,
     coerce_schema_v1: bool | None,
     valid: bool,
-    expected_schema_version: int | None,
+    expected_schema_version: HttpRequestLogSchemaVersion | None,
 ) -> None:
     value = http_request_log_record(
         schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION,
@@ -464,7 +514,7 @@ def test_http_request_log_response_body_is_required_in_v1_and_nullable_in_v2(
 
 
 @pytest.mark.parametrize("coerce_schema_v1", [None, False, True])
-def test_invalid_schema_version_2_ignores_v1_coercion_flag(
+def test_invalid_schema_version_1_1_ignores_v1_coercion_flag(
     coerce_schema_v1: bool | None,
 ) -> None:
     value = http_request_log_record(
@@ -479,7 +529,7 @@ def test_invalid_schema_version_2_ignores_v1_coercion_flag(
         received_at_unix_usec=123456,
         duration_usec=789,
     ).model_dump() | {
-        HTTP_REQUEST_LOG_SCHEMA_VERSION_KEY: KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V2,
+        HTTP_REQUEST_LOG_SCHEMA_VERSION_KEY: KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
         HTTP_REQUEST_LOG_PORT_KEY: "8612",
     }
     if coerce_schema_v1 is not None:

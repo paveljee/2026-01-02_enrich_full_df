@@ -19,7 +19,7 @@ from pydantic_core import InitErrorDetails
 
 from src.helpers.vars import (
     KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION,
-    KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V2,
+    KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
 )
 
 HTTP_REQUEST_LOG_SCHEMA_VERSION_KEY: Final = "schema_version"
@@ -30,7 +30,14 @@ HTTP_REQUEST_LOG_READY_TO_RESPOND_AT_UNIX_USEC_KEY: Final = (
     "ready_to_respond_at_unix_usec"
 )
 HTTP_REQUEST_LOG_RESPONSE_BODY_KEY: Final = "response_body"
-HttpRequestLogSchemaVersion = Literal[1, 2]
+HttpRequestLogSchemaVersionV1 = Literal[1, "1"]
+HttpRequestLogSchemaVersion = Literal[1, "1", "1.1"]
+
+
+def _is_http_request_log_schema_version_1(value: object) -> bool:
+    return value == KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION or (
+        isinstance(value, int) and not isinstance(value, bool) and value == 1
+    )
 
 
 class HttpRequestLogRecord(BaseModel):
@@ -65,16 +72,16 @@ class HttpRequestLogRecord(BaseModel):
         coerce_schema_v1 = (
             value.get(HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY) is True
         )
-        if schema_version == KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION:
+        if _is_http_request_log_schema_version_1(schema_version):
             if coerce_schema_v1:
                 version_1 = dict(value)
                 version_1.pop(HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY, None)
                 cls.model_validate(version_1)
-                version_2 = dict(value)
-                version_2[HTTP_REQUEST_LOG_SCHEMA_VERSION_KEY] = (
-                    KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V2
+                version_1_1 = dict(value)
+                version_1_1[HTTP_REQUEST_LOG_SCHEMA_VERSION_KEY] = (
+                    KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
                 )
-                return version_2
+                return version_1_1
             version_1_errors: list[InitErrorDetails] = []
             # disallow legacy typing
             if (
@@ -103,19 +110,19 @@ class HttpRequestLogRecord(BaseModel):
                             input=value[field],
                         )
                     )
-            version_2 = dict(value)
-            version_2[HTTP_REQUEST_LOG_SCHEMA_VERSION_KEY] = (
-                KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V2
+            version_1_1 = dict(value)
+            version_1_1[HTTP_REQUEST_LOG_SCHEMA_VERSION_KEY] = (
+                KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
             )
-            version_2.pop(HTTP_REQUEST_LOG_RECORD_ID_KEY, None)
-            version_2.pop(HTTP_REQUEST_LOG_PORT_KEY, None)
-            version_2.pop(
+            version_1_1.pop(HTTP_REQUEST_LOG_RECORD_ID_KEY, None)
+            version_1_1.pop(HTTP_REQUEST_LOG_PORT_KEY, None)
+            version_1_1.pop(
                 HTTP_REQUEST_LOG_READY_TO_RESPOND_AT_UNIX_USEC_KEY,
                 None,
             )
             ordinary_errors: list[Any] = []
             try:
-                cls.model_validate(version_2)
+                cls.model_validate(version_1_1)
             except ValidationError as exc:
                 ordinary_errors = exc.errors(include_url=False)
             # raise
@@ -134,7 +141,7 @@ class HttpRequestLogRecord(BaseModel):
         handler: SerializerFunctionWrapHandler,
     ) -> dict[str, Any]:
         serialized = cast(dict[str, Any], handler(self))
-        if self.schema_version == KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION:
+        if _is_http_request_log_schema_version_1(self.schema_version):
             serialized.pop(HTTP_REQUEST_LOG_RECORD_ID_KEY, None)
             serialized.pop(HTTP_REQUEST_LOG_PORT_KEY, None)
             serialized.pop(HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY, None)
@@ -162,7 +169,7 @@ def redact_http_request_log_query(
 def matching_http_request_log_record(
     *,
     log_path: Path,
-    schema_version: int,
+    schema_version: HttpRequestLogSchemaVersion,
     method: str,
     scheme: str,
     host: str,
@@ -182,7 +189,13 @@ def matching_http_request_log_record(
             except ValidationError:
                 continue
             if (
-                record.schema_version == schema_version
+                (
+                    record.schema_version == schema_version
+                    or (
+                        _is_http_request_log_schema_version_1(record.schema_version)
+                        and _is_http_request_log_schema_version_1(schema_version)
+                    )
+                )
                 and record.method == method
                 and record.scheme == scheme
                 and record.host == host
@@ -195,7 +208,7 @@ def matching_http_request_log_record(
 
 def http_request_log_record(
     *,
-    schema_version: Literal[1],
+    schema_version: HttpRequestLogSchemaVersionV1,
     method: str,
     scheme: str,
     host: str,

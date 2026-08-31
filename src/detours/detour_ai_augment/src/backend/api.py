@@ -84,7 +84,7 @@ from src.helpers.vars import (
     KTP_FIRST_NAME_COL,
     KTP_FRAGMENT_COL,
     KTP_FRAGMENT_TYPE_COL,
-    KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V2,
+    KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
     KTP_INNERDICT_JSONLINES_COL,
     KTP_LAST_NAME_COL,
     KTP_NAMEKEY_COL,
@@ -3763,7 +3763,7 @@ def _authoritative_log_records(
                         Locale.REPLAY_LOG_LINE_INVALID_TEMPLATE.format(line_number=line_number)
                     ) from exc
                 if (
-                    record.schema_version != KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V2
+                    record.schema_version != KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
                     or (
                         (record.method, record.path) not in AUTHORITATIVE_PUBLIC_ROUTES
                         and (record.method, record.path) != AUTHORITATIVE_COMMIT_ROUTE
@@ -4261,7 +4261,7 @@ def _authoritative_http_record(
     except UnicodeDecodeError as exc:
         raise PushConfigurationError(Locale.AUTHORITATIVE_RESPONSE_NOT_UTF8) from exc
     return HttpRequestLogRecord(
-        schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V2,
+        schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
         method=request.method,
         scheme=request.url.scheme,
         host=request.url.hostname or "",
