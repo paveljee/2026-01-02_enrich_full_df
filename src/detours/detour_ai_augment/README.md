@@ -97,8 +97,8 @@ given as [Gherkin][gherkin-docs]-ish **scenarios**.
 > Before returning any `GET /pull` or `POST /push` response,
 > the Backend API validates the complete exchange against
 > the `HttpRequestLogRecord(schema_version=2)` Pydantic model.
-> If valid, the Backend API issues a UUIDv7 `record_id`,
-> serializes, appends, and `fsync`s the validated record to
+> If valid, the Backend API serializes, appends,
+> and `fsync`s the validated record to
 > `AiAugmentBackendContext.replay_log` through one shared function,
 > which private commit requests also use;
 > else the Backend API `exit(1)`s loudly.
