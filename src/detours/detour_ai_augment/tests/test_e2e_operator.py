@@ -155,8 +155,9 @@ class DashboardProcess:
             raise RuntimeError(f"operator child processes did not stop: {pids}")
 
 
-def _operator_log(message: str) -> None:
-    OPERATOR_LIVE_OUTPUT.write(f"[operator-test] {message}\n")
+def _operator_log(message: str, *, separate: bool = False) -> None:
+    separator = "\n" if separate else ""
+    OPERATOR_LIVE_OUTPUT.write(f"{separator}[operator-test] {message}\n")
     OPERATOR_LIVE_OUTPUT.flush()
 
 
@@ -190,7 +191,7 @@ def production_data_unchanged(operator_aivm: None) -> Iterator[None]:
     before = {path: _tree_digest(path) for path in PRODUCTION_DATA_DIRECTORIES}
     _operator_log("production-data pre-test hashes completed")
     yield
-    _operator_log("verifying production data remains unchanged")
+    _operator_log("verifying production data remains unchanged", separate=True)
     assert {path: _tree_digest(path) for path in PRODUCTION_DATA_DIRECTORIES} == before
     _operator_log("production data is unchanged")
 
@@ -246,6 +247,10 @@ def _assert_ports_available() -> None:
     for port in CONTROL_CENTRE_PORTS:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client:
             if client.connect_ex((control_ui.CONTROL_CENTRE_HOST, port)) == 0:
+                _operator_log(
+                    f"local port {port} is already in use; no operator-owned "
+                    "Control Centre or Backend process was started"
+                )
                 pytest.fail(f"operator test requires unused local port {port}")
 
 
@@ -302,11 +307,13 @@ def running_dashboard(runtime: OperatorRuntime) -> Generator[DashboardProcess]:
         yield dashboard
     finally:
         if dashboard is None:
+            _operator_log("stopping partially started Control Centre process")
             if process.poll() is None:
                 process.kill()
                 process.wait(timeout=PROCESS_STOP_TIMEOUT_SECONDS)
             if process.stdout is not None:
                 process.stdout.close()
+            _operator_log("partially started Control Centre process stopped")
         else:
             dashboard.stop()
 
