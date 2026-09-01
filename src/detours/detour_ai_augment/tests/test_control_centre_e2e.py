@@ -17,7 +17,8 @@ from urllib import error as urllib_error
 from urllib import request as urllib_request
 from uuid import UUID, uuid4
 
-from playwright.sync_api import Page, expect, sync_playwright
+import pytest
+from playwright.sync_api import Page, ViewportSize, expect, sync_playwright
 
 from src.detours.detour_ai_augment.src.control_centre.dashboard import ui as control_ui
 from src.helpers.data_models import NameKey
@@ -31,8 +32,8 @@ E2E_HOST = "127.0.0.1"
 E2E_START_TIMEOUT_SECONDS = 30
 E2E_STOP_TIMEOUT_SECONDS = 10
 E2E_REFRESH_WAIT_MILLISECONDS = 2_500
-E2E_NARROW_VIEWPORT = {"width": 915, "height": 1_000}
-E2E_WIDE_VIEWPORT = {"width": 1_600, "height": 1_000}
+E2E_NARROW_VIEWPORT: ViewportSize = {"width": 915, "height": 1_000}
+E2E_WIDE_VIEWPORT: ViewportSize = {"width": 1_600, "height": 1_000}
 E2E_GRID_MARKER = "preserved"
 E2E_ATTEMPT_BASE_TIME = datetime(2026, 8, 10, tzinfo=timezone.utc)
 E2E_LONG_CARD_TOKEN = "responsive-card-content-" * 40
@@ -344,9 +345,12 @@ class BrowserController:
 
 
 def available_e2e_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
-        server_socket.bind((E2E_HOST, 0))
-        _, port = server_socket.getsockname()
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
+            server_socket.bind((E2E_HOST, 0))
+            _, port = server_socket.getsockname()
+    except PermissionError:
+        pytest.skip("local sockets are unavailable in this execution environment")
     return int(port)
 
 

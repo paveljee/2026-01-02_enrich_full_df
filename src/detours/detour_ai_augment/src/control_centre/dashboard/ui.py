@@ -150,9 +150,10 @@ BACKEND_COMMAND_PREFIX: Final = (
     BACKEND_MODULE,
     CONFIG_OPTION,
 )
+BACKEND_PORT: Final = SERVER_PORT
 
-BACKEND_CONTROL_PUSH_URL: Final = f"{BACKEND_BASE_URL}{CONTROL_PUSH_PATH}"
-BACKEND_CONTROL_PULL_URL: Final = f"{BACKEND_BASE_URL}{CONTROL_PULL_PATH}"
+QUEUE_STORAGE_KEY: Final = "detour_ai_augment_queue"
+RUN_EVENTS_STORAGE_KEY: Final = "detour_ai_augment_run_events"
 
 LIMA_APPENDWATCH_REPORT_PARAM: Final = APPENDWATCH_REPORT_ENV_NAME
 
@@ -417,7 +418,7 @@ class AcceptedAttempt:
 
 
 # =============================================================================
-# Backend-owned run history projected from the authoritative HTTP log.
+# Dashboard-owned run history persisted in NiceGUI general storage.
 # =============================================================================
 
 
@@ -435,8 +436,6 @@ class RunRecord:
     session_timestamp: datetime | None = None
     rollout_jsonl: PurePosixPath | None = None
     remote_pid: RemotePid | None = None
-
-    sanctioned_at: datetime | None = None
 
     accepted_attempt_id: AttemptId | None = None
     accepted_at: datetime | None = None
@@ -704,77 +703,58 @@ class SourceRepository:
 
 
 # =============================================================================
-# Backend control client
+# Backend database IPC client
 # =============================================================================
 
 
-class BackendControlClient:
+class UnixSocketHttpConnection(http.client.HTTPConnection):
     def __init__(
         self,
         *,
-        base_url: str,
-        token: str,
+        socket_path: Path,
+        timeout: float,
     ) -> None:
-        self._push_url = f"{base_url}{CONTROL_PUSH_PATH}"
-        self._pull_url = f"{base_url}{CONTROL_PULL_PATH}"
-        self._token = token
+        super().__init__("localhost", timeout=timeout)
+        self._socket_path = socket_path
+
+    def connect(self) -> None:
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(self.timeout)
+        self.sock.connect(str(self._socket_path))
+
+
+class BackendDatabaseClient:
+    def __init__(self, *, socket_path: Path) -> None:
+        self._socket_path = socket_path
         self._card_cache: dict[Namekey, str] = {}
 
-    def _request(
-        self,
-        *,
-        url: str,
-        method: str,
-        body: bytes | None = None,
-        headers: Mapping[str, str] | None = None,
-    ) -> bytes:
-        request_headers = {
-            CONTROL_RUN_EVENTS_TOKEN_HEADER: self._token,
-            **({} if headers is None else headers),
-        }
-        request = urllib_request.Request(
-            url,
-            data=body,
-            headers=request_headers,
-            method=method,
+    def _request(self, *, target: str) -> bytes:
+        connection = UnixSocketHttpConnection(
+            socket_path=self._socket_path,
+            timeout=CONTROL_HTTP_TIMEOUT_SECONDS,
         )
         try:
-            with urllib_request.urlopen(
-                request,
-                timeout=CONTROL_HTTP_TIMEOUT_SECONDS,
-            ) as response:
-                return response.read()
-        except (OSError, urllib_error.URLError, urllib_error.HTTPError) as exc:
-            raise RuntimeError(Locale.BACKEND_CONTROL_REQUEST_FAILED) from exc
+            connection.request(HTTP_GET_METHOD, target)
+            response = connection.getresponse()
+            body = response.read()
+            if response.status != status.HTTP_200_OK:
+                raise RuntimeError(Locale.BACKEND_DATABASE_REQUEST_FAILED)
+            return body
+        except (OSError, http.client.HTTPException) as exc:
+            raise RuntimeError(Locale.BACKEND_DATABASE_REQUEST_FAILED) from exc
+        finally:
+            connection.close()
 
-    def push(self, event: RunEvent) -> ControlPushResponse:
-        body = ControlPushRequest(event=event).model_dump_json().encode(TEXT_ENCODING)
-        idempotency_key = hashlib.sha256(body).hexdigest()
-        try:
-            return ControlPushResponse.model_validate_json(
-                self._request(
-                    url=self._push_url,
-                    method=HTTP_POST_METHOD,
-                    body=body,
-                    headers={
-                        HTTP_CONTENT_TYPE_HEADER: JSON_MEDIA_TYPE,
-                        HTTP_IDEMPOTENCY_KEY_HEADER: idempotency_key,
-                    },
-                )
-            )
-        except ValidationError as exc:
-            raise RuntimeError(Locale.BACKEND_CONTROL_RESPONSE_INVALID) from exc
-
-    def pull(self, namekey: Namekey | None = None) -> ControlPullResponse:
-        url = self._pull_url
+    def pull(self, namekey: Namekey | None = None) -> DashboardQueryResponse:
+        target = DASHBOARD_QUERY_PATH
         if namekey is not None:
-            url = f"{url}?{urlencode({KTP_NAMEKEY_COL: namekey})}"
+            target = f"{target}?{urlencode({KTP_NAMEKEY_COL: namekey})}"
         try:
-            return ControlPullResponse.model_validate_json(
-                self._request(url=url, method=HTTP_GET_METHOD)
+            return DashboardQueryResponse.model_validate_json(
+                self._request(target=target)
             )
         except ValidationError as exc:
-            raise RuntimeError(Locale.BACKEND_CONTROL_RESPONSE_INVALID) from exc
+            raise RuntimeError(Locale.BACKEND_DATABASE_RESPONSE_INVALID) from exc
 
     def card(self, namekey: Namekey) -> str:
         cached = self._card_cache.get(namekey)
@@ -796,18 +776,14 @@ def replay_run_events(events: Sequence[RunEvent]) -> Mapping[UUID, RunRecord]:
     for event in events:
         run = runs.get(event.run_id)
         if run is None:
-            if event.kind not in {RunEventKind.QUEUED, RunEventKind.SANCTIONED}:
+            if event.kind is not RunEventKind.QUEUED:
                 raise RuntimeError(Locale.JOURNAL_EVENT_WITHOUT_RUN)
             run = RunRecord(
                 run_id=event.run_id,
                 namekey=Namekey(event.namekey),
-                status=(
-                    RunStatus.QUEUED
-                    if event.kind is RunEventKind.QUEUED
-                    else RunStatus.RUNNING
-                ),
+                status=RunStatus.QUEUED,
                 queued_at=event.at,
-                dashboard_owned=event.kind is RunEventKind.QUEUED,
+                dashboard_owned=True,
             )
             runs[event.run_id] = run
         elif run.namekey != event.namekey:
@@ -832,13 +808,6 @@ def replay_run_events(events: Sequence[RunEvent]) -> Mapping[UUID, RunRecord]:
             if event.rollout_jsonl is None:
                 raise RuntimeError(Locale.JOURNAL_ROLLOUT_PATH_MISSING)
             run.rollout_jsonl = PurePosixPath(event.rollout_jsonl)
-        elif event.kind is RunEventKind.SANCTIONED:
-            if event.session_id is None or event.rollout_jsonl is None:
-                raise RuntimeError(Locale.JOURNAL_SANCTION_INVALID)
-            run.status = RunStatus.RUNNING
-            run.session_id = SessionId(event.session_id)
-            run.rollout_jsonl = PurePosixPath(event.rollout_jsonl)
-            run.sanctioned_at = event.at
         elif event.kind is RunEventKind.PUSH_ACCEPTED:
             if event.accepted_attempt_id is None:
                 raise RuntimeError(Locale.JOURNAL_ATTEMPT_ID_MISSING)
@@ -879,13 +848,13 @@ class BackendSupervisor:
         config_path: Path,
         openalex_api_key: str,
         appendwatch_report: Path,
-        control_run_events_token: str,
+        dashboard_socket_path: Path,
     ) -> None:
         self._repository_root = repository_root
         self._config_path = config_path
         self._openalex_api_key = openalex_api_key
         self._appendwatch_report = appendwatch_report
-        self._control_run_events_token = control_run_events_token
+        self._dashboard_socket_path = dashboard_socket_path
         self._process: BackendProcessHandle | None = None
         self._status = BackendStatus.STOPPED
 
@@ -903,15 +872,16 @@ class BackendSupervisor:
     def process(self) -> BackendProcessHandle | None:
         return self._process
 
-    async def start(self) -> None:
-        if self._process is not None and self._process.process.returncode is None:
-            return
+    async def start(self, *, namekey: Namekey) -> None:
+        if self._process is not None:
+            await self.stop()
         self._status = BackendStatus.STARTING
         process = await asyncio.create_subprocess_exec(
             *BACKEND_COMMAND_PREFIX,
             str(self._config_path),
             cwd=self._repository_root,
-            env=self.environment(),
+            env=self.environment(namekey=namekey),
+            stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             start_new_session=True,
@@ -967,20 +937,15 @@ class BackendSupervisor:
             ) as response:
                 if response.status != status.HTTP_200_OK:
                     raise RuntimeError(Locale.BACKEND_OPENAPI_NOT_READY)
-            control_request = urllib_request.Request(
-                BACKEND_CONTROL_PULL_URL,
-                headers={
-                    CONTROL_RUN_EVENTS_TOKEN_HEADER: self._control_run_events_token,
-                },
-                method=HTTP_GET_METHOD,
-            )
+            pull_request = urllib_request.Request(BACKEND_PULL_URL, method=HTTP_GET_METHOD)
             with urllib_request.urlopen(
-                control_request,
+                pull_request,
                 timeout=CONTROL_HTTP_TIMEOUT_SECONDS,
             ) as response:
                 if response.status != status.HTTP_200_OK:
-                    raise RuntimeError(Locale.BACKEND_CONTROL_NOT_READY)
-                ControlPullResponse.model_validate_json(response.read())
+                    raise RuntimeError(Locale.BACKEND_PULL_NOT_READY)
+                response.read()
+            BackendDatabaseClient(socket_path=self._dashboard_socket_path).pull()
 
         while loop.time() < deadline:
             if self._process is None or self._process.process.returncode is not None:
@@ -990,6 +955,7 @@ class BackendSupervisor:
                 return
             except (
                 OSError,
+                RuntimeError,
                 ValidationError,
                 urllib_error.URLError,
                 urllib_error.HTTPError,
@@ -1032,17 +998,30 @@ class BackendSupervisor:
         self._process = None
         self._status = BackendStatus.STOPPED
 
+    async def supply_session_id(self, session_id: SessionId) -> None:
+        if self._process is None or self._process.process.returncode is not None:
+            raise RuntimeError(Locale.BACKEND_NOT_RUNNING)
+        stream = self._process.process.stdin
+        if stream is None:
+            raise RuntimeError(Locale.BACKEND_STDIN_MISSING)
+        stream.write(f"{session_id}\n".encode(TEXT_ENCODING))
+        await stream.drain()
+        stream.close()
+        await stream.wait_closed()
+
     async def wait(self) -> int:
         if self._process is None:
             raise RuntimeError(Locale.BACKEND_NOT_RUNNING)
         return await self._process.process.wait()
 
-    def environment(self) -> Mapping[str, str]:
+    def environment(self, *, namekey: Namekey) -> Mapping[str, str]:
         environment = os.environ.copy()
         environment[EXPORT_OPENALEX_API_KEY] = self._openalex_api_key
         environment[APPENDWATCH_REPORT_ENV_NAME] = str(self._appendwatch_report)
         environment[CONTROL_PARENT_PID_ENV_NAME] = str(os.getpid())
-        environment[CONTROL_RUN_EVENTS_TOKEN_ENV_NAME] = self._control_run_events_token
+        environment[DASHBOARD_SOCKET_PATH_ENV_NAME] = str(self._dashboard_socket_path)
+        environment[NAMEKEY_ENV_NAME] = str(namekey)
+        environment[CODEX_SESSIONS_ROOT_ENV_NAME] = str(CODEX_SESSIONS_ROOT)
         return environment
 
 
@@ -1721,8 +1700,8 @@ class VariableProjector:
 #
 # Exactly one Codex attempt may be running at a time.
 #
-# The backend is the sole owner of durable run history, sanctions, attempts,
-# accepted output, cards, the authoritative log, and the detour database.
+# The dashboard owns queue/run history in NiceGUI storage. Backend owns
+# attempts, accepted output, cards, the authoritative log, and the detour DB.
 # =============================================================================
 
 
@@ -1732,14 +1711,14 @@ class ControlCentreController:
         *,
         source_repository: SourceRepository,
         backend: BackendSupervisor,
-        backend_control: BackendControlClient,
+        backend_database: BackendDatabaseClient,
         codex: CodexRunner,
         reconciler: AttemptReconciler,
         projector: VariableProjector,
     ) -> None:
         self._source_repository = source_repository
         self._backend = backend
-        self._backend_control = backend_control
+        self._backend_database = backend_database
         self._codex = codex
         self._reconciler = reconciler
         self._projector = projector
@@ -1750,8 +1729,8 @@ class ControlCentreController:
         self._external_codex_busy = False
         self._shutting_down = False
         self._idle_refresh_lock = asyncio.Lock()
+        self._events: list[RunEvent] = []
         self._runs: dict[UUID, RunRecord] = {}
-        self._sanctioned_run: ControlRun | None = None
         self._researchers: tuple[Researcher, ...] = ()
         self._researchers_by_namekey: dict[Namekey, Researcher] = {}
         self._ground_truth: Mapping[Namekey, GroundTruthRecord] = {}
@@ -1778,11 +1757,10 @@ class ControlCentreController:
         self._ground_truth = await asyncio.to_thread(
             self._source_repository.load_ground_truth_by_namekey
         )
-        await self._backend.start()
-        await self._refresh_backend_state()
+        self._load_dashboard_storage()
         restart_time = datetime.now(timezone.utc)
         for run in tuple(self._runs.values()):
-            if run.dashboard_owned and run.status in LIVE_RUN_STATUSES:
+            if run.dashboard_owned and run.status is RunStatus.RUNNING:
                 await self._codex.terminate_abandoned_run(run.run_id)
                 await self._append_run_event(
                     RunEvent(
@@ -1793,7 +1771,11 @@ class ControlCentreController:
                         detail=Locale.RESTART_INTERRUPTED_RUN,
                     )
                 )
-        await self.refresh_idle_state()
+        for value in app.storage.general.get(QUEUE_STORAGE_KEY, []):
+            run_id = UUID(str(value))
+            queued_run = self._runs.get(run_id)
+            if queued_run is not None and queued_run.status is RunStatus.QUEUED:
+                await self._queue.put(run_id)
         self._worker_task = asyncio.create_task(self._worker())
 
     async def shutdown(self) -> None:
@@ -1809,7 +1791,7 @@ class ControlCentreController:
                 await self._codex.cancel(active_codex)
         shutdown_time = datetime.now(timezone.utc)
         for run in tuple(self._runs.values()):
-            if run.dashboard_owned and run.status in LIVE_RUN_STATUSES:
+            if run.dashboard_owned and run.status is RunStatus.RUNNING:
                 await self._append_run_event(
                     RunEvent(
                         run_id=run.run_id,
@@ -1840,6 +1822,9 @@ class ControlCentreController:
                 kind=RunEventKind.QUEUED,
             )
         )
+        queued = list(app.storage.general.get(QUEUE_STORAGE_KEY, []))
+        queued.append(str(run_id))
+        app.storage.general[QUEUE_STORAGE_KEY] = queued
         await self._queue.put(run_id)
         return run_id
 
@@ -1900,23 +1885,23 @@ class ControlCentreController:
         async with self._idle_refresh_lock:
             if self._shutting_down:
                 return
-            await self._refresh_backend_state()
+            if self._backend.status is BackendStatus.RUNNING:
+                await self._refresh_backend_state()
+            else:
+                self._runs = dict(replay_run_events(self._events))
             if self._active_run_id is not None:
                 self._external_codex_busy = False
                 return
             try:
-                self._external_codex_busy = (
-                    self._sanctioned_run is not None or await self._codex.is_busy()
-                )
+                self._external_codex_busy = await self._codex.is_busy()
             except Exception:
                 if self._shutting_down:
                     return
                 raise
 
     async def _refresh_backend_state(self) -> None:
-        snapshot = await asyncio.to_thread(self._backend_control.pull)
-        self._sanctioned_run = snapshot.sanctioned_run
-        self._runs = dict(replay_run_events(snapshot.events))
+        snapshot = await asyncio.to_thread(self._backend_database.pull)
+        self._runs = dict(replay_run_events(self._events))
 
         attempt_records: dict[Namekey, list[AttemptRecord]] = {}
         for record in snapshot.attempts:
@@ -2036,7 +2021,7 @@ class ControlCentreController:
         researcher = self._researchers_by_namekey.get(namekey)
         if researcher is None:
             raise KeyError(Locale.UNKNOWN_NAMEKEY_TEMPLATE.format(namekey=namekey))
-        markdown = await asyncio.to_thread(self._backend_control.card, namekey)
+        markdown = await asyncio.to_thread(self._backend_database.card, namekey)
         return ResearcherCardView(
             namekey=namekey,
             draw_number=researcher.draw_number,
@@ -2049,6 +2034,10 @@ class ControlCentreController:
         while True:
             run_id = await self._queue.get()
             try:
+                queued = list(app.storage.general.get(QUEUE_STORAGE_KEY, []))
+                if str(run_id) in queued:
+                    queued.remove(str(run_id))
+                    app.storage.general[QUEUE_STORAGE_KEY] = queued
                 run = self._runs[run_id]
                 if run.status is RunStatus.CANCELED:
                     continue
@@ -2095,13 +2084,14 @@ class ControlCentreController:
         run_id: UUID,
     ) -> None:
         run = self._runs[run_id]
+        await self._backend.start(namekey=run.namekey)
         result = await self._codex.start(
             run_id=run_id,
             on_handle=self._register_active_codex,
         )
         if self._runs[run_id].cancel_requested_at is not None:
             await self._codex.cancel(result.handle)
-            raise RuntimeError(Locale.CODEX_CANCELED_BEFORE_SANCTION)
+            raise RuntimeError(Locale.CODEX_CANCELED_BEFORE_SESSION_HANDOFF)
         self._active_codex = result.handle
         await self._append_run_event(
             RunEvent(
@@ -2123,18 +2113,7 @@ class ControlCentreController:
                 rollout_jsonl=str(result.rollout_jsonl),
             )
         )
-        sanctioned_at = datetime.now(timezone.utc)
-        await self._append_run_event(
-            RunEvent(
-                run_id=run_id,
-                namekey=run.namekey,
-                at=sanctioned_at,
-                kind=RunEventKind.SANCTIONED,
-                session_id=result.session_id,
-                rollout_jsonl=str(result.rollout_jsonl),
-            )
-        )
-        await self._backend.probe_pull()
+        await self._backend.supply_session_id(result.session_id)
         exit_code = await self._codex.wait(result.handle)
         await self._append_run_event(
             RunEvent(
@@ -2234,8 +2213,21 @@ class ControlCentreController:
         self,
         event: RunEvent,
     ) -> None:
-        await asyncio.to_thread(self._backend_control.push, event)
-        await self._refresh_backend_state()
+        self._events.append(event)
+        app.storage.general[RUN_EVENTS_STORAGE_KEY] = [
+            item.model_dump(mode="json") for item in self._events
+        ]
+        self._runs = dict(replay_run_events(self._events))
+
+    def _load_dashboard_storage(self) -> None:
+        raw_events = app.storage.general.get(RUN_EVENTS_STORAGE_KEY, [])
+        if not isinstance(raw_events, list):
+            raise RuntimeError(Locale.JOURNAL_STORAGE_INVALID)
+        try:
+            self._events = [RunEvent.model_validate(value) for value in raw_events]
+        except ValidationError as exc:
+            raise RuntimeError(Locale.JOURNAL_STORAGE_INVALID) from exc
+        self._runs = dict(replay_run_events(self._events))
 
 
 # =============================================================================
@@ -2935,7 +2927,7 @@ class ApplicationServices:
     source_repository: SourceRepository
 
     backend: BackendSupervisor
-    backend_control: BackendControlClient
+    backend_database: BackendDatabaseClient
     codex: CodexRunner
 
     reconciler: AttemptReconciler
@@ -2955,18 +2947,14 @@ def create_services(
 ) -> ApplicationServices:
     configuration = AiAugmentCtlCtrContext(config_path=config_path)
     source_repository = SourceRepository(configuration=configuration)
-    control_token = uuid4().hex
     backend = BackendSupervisor(
         repository_root=REPOSITORY_ROOT,
         config_path=configuration.config_path,
         openalex_api_key=configuration.openalex_api_key,
         appendwatch_report=configuration.appendwatch_report,
-        control_run_events_token=control_token,
+        dashboard_socket_path=DASHBOARD_SOCKET_PATH,
     )
-    backend_control = BackendControlClient(
-        base_url=BACKEND_BASE_URL,
-        token=control_token,
-    )
+    backend_database = BackendDatabaseClient(socket_path=DASHBOARD_SOCKET_PATH)
     codex = CodexRunner(
         timezone=configuration.timezone,
         openalex_api_key=configuration.openalex_api_key,
@@ -2976,7 +2964,7 @@ def create_services(
     controller = ControlCentreController(
         source_repository=source_repository,
         backend=backend,
-        backend_control=backend_control,
+        backend_database=backend_database,
         codex=codex,
         reconciler=reconciler,
         projector=projector,
@@ -2985,7 +2973,7 @@ def create_services(
         configuration=configuration,
         source_repository=source_repository,
         backend=backend,
-        backend_control=backend_control,
+        backend_database=backend_database,
         codex=codex,
         reconciler=reconciler,
         projector=projector,
