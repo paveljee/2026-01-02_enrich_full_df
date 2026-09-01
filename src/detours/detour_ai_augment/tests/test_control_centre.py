@@ -454,6 +454,63 @@ async def test_backend_supervisor_replaces_process_per_namekey_and_uses_stdin(
 
 
 @pytest.mark.anyio
+async def test_backend_readiness_fails_immediately_after_pull_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requested_urls: list[str] = []
+
+    class FakeResponse:
+        def __init__(self, response_status: int) -> None:
+            self.status = response_status
+
+        def __enter__(self) -> FakeResponse:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        @staticmethod
+        def read() -> bytes:
+            return b""
+
+    def urlopen(request: object, *, timeout: float) -> FakeResponse:
+        assert timeout == control_ui.CONTROL_HTTP_TIMEOUT_SECONDS
+        url = cast(Any, request).full_url
+        requested_urls.append(url)
+        return FakeResponse(
+            api.status.HTTP_200_OK
+            if url == control_ui.BACKEND_OPENAPI_URL
+            else api.status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+    async def to_thread(function: Any, *args: object, **kwargs: object) -> Any:
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(control_ui.urllib_request, "urlopen", urlopen)
+    monkeypatch.setattr(control_ui.asyncio, "to_thread", to_thread)
+    subject = control_ui.BackendSupervisor(
+        repository_root=tmp_path,
+        config_path=tmp_path / "config.json",
+        openalex_api_key="key",
+        appendwatch_report=tmp_path / "appendwatch.txt",
+        dashboard_socket_path=tmp_path / "dashboard.sock",
+    )
+    subject._process = cast(
+        Any,
+        SimpleNamespace(process=SimpleNamespace(returncode=None)),
+    )
+
+    with pytest.raises(RuntimeError, match=control_ui.Locale.BACKEND_PULL_NOT_READY):
+        await asyncio.wait_for(subject.wait_until_ready(), timeout=1)
+
+    assert requested_urls == [
+        control_ui.BACKEND_OPENAPI_URL,
+        control_ui.BACKEND_PULL_URL,
+    ]
+
+
+@pytest.mark.anyio
 async def test_codex_runner_starts_fresh_exec_process_and_sends_only_openapi_url(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

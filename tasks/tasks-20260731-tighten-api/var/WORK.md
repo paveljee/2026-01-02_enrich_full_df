@@ -1,5 +1,29 @@
 # Tighten API: complete
 
+## Latest operator E2E failure resolved
+
+- The macOS operator contour now starts Backend and its short Unix socket, but
+  every readiness `GET /pull` returns 500 with an incomplete-ASGI-response log.
+- Root cause: `AuthoritativeHttpMiddleware` replayed the consumed request once,
+  then fabricated `http.disconnect`. Starlette `StreamingResponse` interpreted
+  that as a real client disconnect and canceled `/pull` before its final body
+  frame.
+- Patched request replay to delegate to the original ASGI `receive` after the
+  buffered body. Added an exact streaming-response regression test.
+- Split readiness into a retrying OpenAPI-startup phase followed by definitive
+  pull and Unix-IPC probes. Once Uvicorn is up, a pull/IPC failure now fails
+  immediately instead of generating hundreds of retries for 30 seconds.
+- Operator replay progress now reports response-shape transitions and periodic
+  heartbeats, suppressing runs of identical record-count messages.
+- Added upstream coverage for both the streaming response and immediate
+  post-startup pull failure behavior.
+- Verification passed: focused regressions **2 passed**; complete Backend and
+  Control Centre modules **59 passed, 36 skipped**; full non-root detour task
+  **120 passed, 47 skipped, 3 deselected**, followed by the expected real-API
+  skip because `OPENALEX_API_KEY` is unavailable; Ruff and mypy over 95 files,
+  `pixi lock --check`, and cached-diff whitespace checks all passed. The real
+  macOS/AIVM operator contour remains for the Human Operator to rerun.
+
 ## Objective and disposition
 
 Aligned `src/detours/detour_ai_augment/src` and its tests with the latest

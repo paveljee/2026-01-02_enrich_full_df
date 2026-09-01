@@ -394,7 +394,9 @@ def wait_for_terminal_pull(
     started_at = time.monotonic()
     deadline = time.monotonic() + FULL_WORKFLOW_TIMEOUT_SECONDS
     next_heartbeat = started_at + OPERATOR_HEARTBEAT_SECONDS
-    previous_record_count = -1
+    previous_record_count = 0
+    previous_exchange: tuple[str, str, int | None] | None = None
+    _operator_log("authoritative request log initially contains 0 record(s)")
     while time.monotonic() < deadline:
         if dashboard.process.poll() is not None:
             raise RuntimeError("dashboard exited:\n" + "".join(dashboard.output))
@@ -404,9 +406,19 @@ def wait_for_terminal_pull(
         if failed_run_lines:
             raise RuntimeError("workflow failed:\n" + "".join(failed_run_lines))
         records = authoritative_records(runtime.replay_log_path)
-        if len(records) != previous_record_count:
-            _operator_log(f"authoritative request log contains {len(records)} record(s)")
-            previous_record_count = len(records)
+        for record in records[previous_record_count:]:
+            exchange = (record.method, record.path, record.response_code)
+            if exchange != previous_exchange:
+                response = (
+                    "no response"
+                    if record.response_code is None
+                    else str(record.response_code)
+                )
+                _operator_log(
+                    f"observed authoritative {record.method} {record.path} -> {response}"
+                )
+                previous_exchange = exchange
+        previous_record_count = len(records)
         if any(
             (record.method, record.path, record.response_code)
             == (

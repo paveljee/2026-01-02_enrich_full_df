@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import dataclass
@@ -1041,6 +1041,94 @@ def test_pure_asgi_middleware_records_every_public_exchange_before_send(
     record_ids = [record_id for kind, record_id in events if kind == "append"]
     assert len(set(record_ids)) == 2
     assert all(record_id.version == 7 for record_id in record_ids)
+
+
+def test_authoritative_middleware_preserves_streaming_response_until_complete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response_body = b'{"task":"streamed"}\n'
+    records: list[HttpRequestLogRecord] = []
+
+    async def body() -> AsyncIterator[bytes]:
+        yield response_body
+
+    async def streaming_app(
+        scope: dict[str, object],
+        receive: Any,
+        send: Any,
+    ) -> None:
+        await api.StreamingResponse(
+            body(),
+            media_type=api.MEDIA_TYPE,
+        )(cast(Any, scope), receive, send)
+
+    async def after(_record: HttpRequestLogRecord) -> None:
+        return None
+
+    monkeypatch.setattr(api, "AUTHORITATIVE_BACKEND_HEALTHY", True)
+    monkeypatch.setattr(api, "_append_authoritative_record", records.append)
+    monkeypatch.setattr(api, "_after_authoritative_public_record", after)
+
+    async def exchange() -> list[dict[str, object]]:
+        request_pending = True
+        disconnected = asyncio.Event()
+        sent: list[dict[str, object]] = []
+
+        async def receive() -> dict[str, object]:
+            nonlocal request_pending
+            if request_pending:
+                request_pending = False
+                return {
+                    api.ASGI_TYPE_KEY: api.ASGI_HTTP_REQUEST_MESSAGE_TYPE,
+                    api.ASGI_BODY_KEY: b"",
+                    api.ASGI_MORE_BODY_KEY: False,
+                }
+            await disconnected.wait()
+            return {api.ASGI_TYPE_KEY: api.ASGI_HTTP_DISCONNECT_MESSAGE_TYPE}
+
+        async def send(message: dict[str, object]) -> None:
+            sent.append(message)
+
+        scope = {
+            api.ASGI_TYPE_KEY: api.ASGI_HTTP_SCOPE_TYPE,
+            api.ASGI_METHOD_KEY: api.HTTP_GET_METHOD,
+            api.ASGI_PATH_KEY: api.PULL_PATH,
+            "asgi": {"version": "3.0", "spec_version": "2.3"},
+            "raw_path": api.PULL_PATH.encode(),
+            "query_string": b"",
+            "headers": [],
+            "scheme": "http",
+            "server": ("testserver", 80),
+            "client": ("127.0.0.1", 1234),
+            "http_version": "1.1",
+            "root_path": "",
+        }
+        await asyncio.wait_for(
+            api.AuthoritativeHttpMiddleware(cast(Any, streaming_app))(
+                cast(Any, scope),
+                receive,
+                cast(Any, send),
+            ),
+            timeout=1,
+        )
+        return sent
+
+    messages = asyncio.run(exchange())
+    response_chunks = [
+        message
+        for message in messages
+        if message[api.ASGI_TYPE_KEY] == api.ASGI_HTTP_RESPONSE_BODY_MESSAGE_TYPE
+    ]
+
+    assert messages[0][api.ASGI_STATUS_KEY] == api.status.HTTP_200_OK
+    assert response_chunks[-1].get(api.ASGI_MORE_BODY_KEY, False) is False
+    assert b"".join(
+        cast(bytes, message.get(api.ASGI_BODY_KEY, b""))
+        for message in response_chunks
+    ) == response_body
+    assert len(records) == 1
+    assert records[0].response_code == api.status.HTTP_200_OK
+    assert records[0].response_body == response_body.decode()
 
 
 def test_synthetic_commit_matches_the_readme_contour_exactly(tmp_path: Path) -> None:

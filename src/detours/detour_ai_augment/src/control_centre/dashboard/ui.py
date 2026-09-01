@@ -929,7 +929,7 @@ class BackendSupervisor:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + BACKEND_READY_TIMEOUT_SECONDS
 
-        def request_backend() -> None:
+        def request_openapi() -> None:
             request = urllib_request.Request(BACKEND_OPENAPI_URL, method=HTTP_GET_METHOD)
             with urllib_request.urlopen(
                 request,
@@ -937,31 +937,30 @@ class BackendSupervisor:
             ) as response:
                 if response.status != status.HTTP_200_OK:
                     raise RuntimeError(Locale.BACKEND_OPENAPI_NOT_READY)
-            pull_request = urllib_request.Request(BACKEND_PULL_URL, method=HTTP_GET_METHOD)
-            with urllib_request.urlopen(
-                pull_request,
-                timeout=CONTROL_HTTP_TIMEOUT_SECONDS,
-            ) as response:
-                if response.status != status.HTTP_200_OK:
-                    raise RuntimeError(Locale.BACKEND_PULL_NOT_READY)
-                response.read()
-            BackendDatabaseClient(socket_path=self._dashboard_socket_path).pull()
 
         while loop.time() < deadline:
             if self._process is None or self._process.process.returncode is not None:
                 raise RuntimeError(Locale.BACKEND_EXITED_EARLY)
             try:
-                await asyncio.to_thread(request_backend)
-                return
+                await asyncio.to_thread(request_openapi)
+                break
             except (
                 OSError,
                 RuntimeError,
-                ValidationError,
                 urllib_error.URLError,
                 urllib_error.HTTPError,
             ):
                 await asyncio.sleep(BACKEND_READY_POLL_SECONDS)
-        raise TimeoutError(Locale.BACKEND_READY_TIMEOUT)
+        else:
+            raise TimeoutError(Locale.BACKEND_READY_TIMEOUT)
+
+        await self.probe_pull()
+        try:
+            await asyncio.to_thread(
+                BackendDatabaseClient(socket_path=self._dashboard_socket_path).pull
+            )
+        except (OSError, RuntimeError, ValidationError) as exc:
+            raise RuntimeError(Locale.BACKEND_DATABASE_REQUEST_FAILED) from exc
 
     async def probe_pull(self) -> None:
         def request_pull() -> None:

@@ -4006,7 +4006,7 @@ class AuthoritativeHttpMiddleware:
                     ASGI_BODY_KEY: request_body,
                     ASGI_MORE_BODY_KEY: False,
                 }
-            return {ASGI_TYPE_KEY: ASGI_HTTP_DISCONNECT_MESSAGE_TYPE}
+            return await receive()
 
         async def capture_response(message: Message) -> None:
             response_messages.append(message)
