@@ -70,14 +70,14 @@ may be prescribed elsewhere, e.g., in
 where the description of **connector properties** is
 given as [Gherkin][gherkin-docs]-ish **scenarios**.
 
-## Workflow
+## Lifecycle
 
 > [!NOTE]
 > The Human Operator acts either manually
 > or via orchestration through the Control Centre.
 
 > [!NOTE]
-> The workflow supports both
+> The detour supports both
 > interactive (e.g., in the chat interface of the [OpenAI Codex Visual Studio Code Extension][codex-vsce])
 > and non-interactive (e.g., `codex exec`) OpenAI Codex sessions.
 
@@ -114,7 +114,7 @@ given as [Gherkin][gherkin-docs]-ish **scenarios**.
 1. At provisioning, the Human Operator issues SSH (Secure Shell) protocol credentials at `AIVM_KEY_DIR` for own use downstream to connect to the AI Agent Runtime.
 1. At provisioning, the Human Operator connects to the AI Agent Runtime using the SSH credentials and ensures that `OPENALEX_API_KEY` is exported as an environment variable on the guest machine on which the AI Agent Runtime is running. This key will be used downstream by the Backend and may be used by the AI Agent Runtime.
 1. The Human Operator starts the Backend API such that they may write to the Backend API's stdin. This will be necessary downstream for communicating the Codex session ID. Also, before startup, the Human Operator starts `ssh-agent` using **root** SSH credentials so the Backend API inherits the `SSH_AUTH_SOCK` environment variable and has uncomplicated read access on the guest machine on which the AI Agent Runtime is running. Also, at startup, the Human Operator selects a highly-cited researcher (HCR) `ktp.namekey` to augment (e.g., `{"ktp.first_name": "A.", "ktp.last_name": "Sheikh"}`) and passes it to the Backend API as an environment variable. Also, at startup, the Human Operator passes the following environment variables to the Backend API: `APPENDWATCH_REPORT` path on the guest machine; Codex sessions directory path on the guest machine. The Human Operator may start the Backend API manually. Alternatively, the Human Operator may start it using the dashboard module of the Control Centre. 
-1. At startup, the Backend API applies a `fcntl.flock` to itself or exits on error. This ensures that only one instance of the Backend API can be running at the same time, which the downstream workflow assumes.
+1. At startup, the Backend API applies a `fcntl.flock` to itself or exits on error. This ensures that only one instance of the Backend API can be running at the same time, which the downstream steps assume.
 1. At startup, the Backend API proves in the server logs that both the `APPENDWATCH_REPORT` path and the Codex sessions directory path are readable to it on the guest machine.
 1. At startup, the Backend API establishes a read-only connection to the main pipeline database, looks up the namekey passed prior, and selects the corresponding `ktp.innerdicts`.
 1. At this point, the Backend API has all the information it needs to configure downstream `GET /pull` endpoint access for the AI Agent Runtime, so it does it. At startup, the endpoint must respond `200 OK` or `500 Internal Server Error` in case of any error.
@@ -136,8 +136,8 @@ given as [Gherkin][gherkin-docs]-ish **scenarios**.
 1. Given commit has completed, the Backend API invokes post-commit validation. The validation function resolves the committed pull and push from the detour DuckDB database, verifies the rollout SHA-256, byte size, and line count, and parses the rollout filename and Codex session ID. It requires the committed `Source-Key` to match the referenced rollout and the committed `Name-Key` to match the referenced pull. The validation function also decodes the committed appendwatch report, requires exactly one report leaf whose filename equals the committed `Source-Key`'s `ktp.filename`, and rejects a missing or duplicate leaf, a `COMPROMISED` leaf, or a `COMPROMISED` ancestor. The report itself is therefore the durable appendwatch validation result; no separate appendwatch response is persisted. Given appendwatch validation passed, the post-commit validation function selects the `Submission` Pydantic model for a push referring to the original `200 OK` pull with `Content-Type: application/x-ndjson`; the post-commit validation function selects the `StandardizedSubmission` Pydantic mode for a push referring to a follow-up `200 OK` pull with `Content-Type: text/markdown`, then validates the committed push against the selected Pydantic model as well as against the committed rollout. Post-commit validation ends by making its result available at `GET /pull`. A failure of validation against the Pydantic model or against the rollout content makes appropriate resubmission instructions available as `200 OK` with `Content-Type: text/markdown; charset=utf-8`; this pull therefore becomes the pull referenced by the next push; the Backend API also makes the `POST /push` endpoint available for submission again. Any other failure, including appendwatch `COMPROMISED`, makes an `500 Internal Server Error` available; the preceding `202 Accepted` push response remains unaltered. Successful validation writes the validated innerdict into the detour DuckDB database for the namekey-sourcekey pair and makes `410 Gone` available at `GET /pull` with `Content-Type: application/x-ndjson; charset=utf-8`. The first response line is the accepted innerdict; the optional second line is ground truth.
 1. When replayed, a persisted `410 Gone` pull response reconstructs the final innerdict and links it to the pull, push, commit, rollout, and appendwatch report.
 1. The rollout continues until the AI Agent Runtime hits a `410 Gone` response at `GET /pull`, as triggered by the LLM Inference API. The response instructs the AI Agent Runtime to stop operation and remain idle until rehydrated by the Human Operator. Of note, it is ultimately at the discretion of the LLM Inference API when it chooses to stop operation.
-1. The Human Operator reviews Backend logs and submissions and repeats or adjusts the workflow as necessary.
-1.  The full AI Agent Runtime workflow is therefore limited to a single configured HCR profile.
+1. The Human Operator reviews Backend logs and submissions and repeats or adjusts the lifecycle as necessary.
+1.  The full AI Agent Runtime lifecycle is therefore limited to a single configured HCR profile.
 1. The Backend API always owns the detour DB connection for both reading and writing. Therefore, the dashboard module of the Control Centre only executes SELECT queries towards the detour DB by Inter-Process Communication to the Backend API. For this, the Backend API exposes a Unix socket through a separate Flask application that is unrelated to the FastAPI application serving the Backend API logic except for the fact that they share the same detour DB connection. The Unix socket does not require authentication from the Control Centre because it is private to the host machine and inaccessible to the AI Agent Runtime anyway.
  
 <!---RETIRED, DO NOT USE
@@ -147,14 +147,14 @@ Multiple tasks (e.g., HCR profiles) may be passed by the Human Operator to the A
 
 ## Directory contents and lockfile
 
-This section is intended to capture the specifics of the workflow operation in sufficient detail to be reproduced.
+This section is intended to capture the specifics of the detour operation in sufficient detail to be reproduced.
 
 > [!NOTE]
 > Note that the behaviour of the LLM Inference API, unless self-hosted and specially provisioned (not by default), is fundamentally irreproducible. As such, it is only recorded as observed as an audit trail (e.g., as a OpenAI Codex JSON Lines rollout).
 >
 > The decision not to self-host an LLM Inference API was driven by the fact that the augmentation pipeline depends heavily on web search and web page retrieval, which are inherently irreproducible as usually implemented. For example, the open source [Tongyi Deep Research][tongyi] pipeline, while supporting open-weight models, still relies on third-party services such as Serper for web search or Jina for web page retrieval, substantially relaxing end-to-end reproducibility guarantees in general. Additionally, frontier agentic set-ups such as OpenAI Codex often offer [superior][artificial-analysis-coding-agents] performance on tasks such as software engineering, as well as across the board.
 
-**Control Centre:** Requires no specialized infrastructure beyond a computer capable of operating the workflow components, including sufficient computing resources and internet access. The test set-up (hereafter: the main host) used a Mac16,12 Macbook Air (Apple M4 chip) in a 10-core, 24 GB RAM, 512 GB SSD configuration, running macOS Sequoia 15.6.1 and Visual Studio Code 1.130.0, though these versions were not pinned and may have been updated moving forward.
+**Control Centre:** Requires no specialized infrastructure beyond a computer capable of operating the detour components, including sufficient computing resources and internet access. The test set-up (hereafter: the main host) used a Mac16,12 Macbook Air (Apple M4 chip) in a 10-core, 24 GB RAM, 512 GB SSD configuration, running macOS Sequoia 15.6.1 and Visual Studio Code 1.130.0, though these versions were not pinned and may have been updated moving forward.
 
 **Backend:** Deployed on the host machine using `./src/backend/api.py` in this (i.e., the `detour_ai_augment` “detour” of the KTP HCR pipeline) environment.
 `pixi.lock` and `pyproject.toml` in the repository root provide the pinned Python config.
