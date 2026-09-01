@@ -18,6 +18,7 @@ DEPLOY_SCRIPT_PATH = (
     / "deploy.sh"
 )
 OPERATOR_MARKER = "operator"
+NEEDS_SUDO_MARKER = "needs_sudo"
 OPERATOR_REDEPLOY_OPTION = "always_redeploy"
 OPERATOR_YES_OPTION = "operator_yes"
 OPENALEX_API_KEY_ENV_NAME = "OPENALEX_API_KEY"
@@ -67,6 +68,7 @@ OPERATOR_START_PROMPT = (
     "Note it will remain running after the tests. [y/N] "
 )
 OPERATOR_MARK_DESCRIPTION = "real operator-machine AIVM and full-stack contour"
+NEEDS_SUDO_MARK_DESCRIPTION = "requires pytest to run with root privileges"
 OPERATOR_SKIP_REASON = "operator test (run with: pytest -m operator)"
 OPERATOR_AIVM_UNAVAILABLE = (
     f"AIVM instance {AIVM_INSTANCE!r} is not running or reachable"
@@ -142,6 +144,10 @@ def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
         "markers",
         f"{OPERATOR_MARKER}: {OPERATOR_MARK_DESCRIPTION}",
+    )
+    config.addinivalue_line(
+        "markers",
+        f"{NEEDS_SUDO_MARKER}: {NEEDS_SUDO_MARK_DESCRIPTION}",
     )
     redeploy = bool(config.getoption(OPERATOR_REDEPLOY_OPTION))
     operator_requested = _operator_requested(config)

@@ -1032,6 +1032,7 @@ def _permission_test_tree() -> tuple[Path, Path, Path, int, int]:
     return base, root, report_dir / "tree.txt", uid, gid
 
 
+@pytest.mark.needs_sudo
 def test_cli_static_eacces_is_scoped_and_recovered_files_fail_closed(
     running_watchers: list[RunningWatcher],
 ) -> None:
@@ -1069,6 +1070,7 @@ def test_cli_static_eacces_is_scoped_and_recovered_files_fail_closed(
         shutil.rmtree(base, ignore_errors=True)
 
 
+@pytest.mark.needs_sudo
 def test_cli_dynamic_eacces_existing_watch_is_detected_and_scoped(
     running_watchers: list[RunningWatcher],
 ) -> None:
@@ -1114,6 +1116,7 @@ def test_cli_dynamic_eacces_existing_watch_is_detected_and_scoped(
         shutil.rmtree(base, ignore_errors=True)
 
 
+@pytest.mark.needs_sudo
 def test_cli_shutdown_reconcile_marks_files_from_unwatched_root_interval(
     running_watchers: list[RunningWatcher],
 ) -> None:

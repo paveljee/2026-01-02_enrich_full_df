@@ -29,6 +29,10 @@ host-private Flask/Unix-socket IPC. Both gaps are resolved.
   typing without an extra named helper.
 - The operator contour uses a per-run socket and asserts socket type, 0600 mode
   and shutdown cleanup on the production host.
+- Registered `needs_sudo` in the detour conftest and applied it only to the
+  three real appendwatch EACCES tests. The existing root task runs every test
+  carrying that marker from the whole detour test directory; a sibling task
+  runs the remaining aggregate suite and real-API contour unprivileged.
 - Rechecked the full synthetic commit contract. `coerce_schema_v1` is an input
   migration flag and is always excluded from serialization after validation,
   exactly matching README; schema 1 (`1` and `"1"`) and explicit v1 coercion
@@ -56,6 +60,8 @@ host-private Flask/Unix-socket IPC. Both gaps are resolved.
   legacy schema-version spellings, with and without requested coercion.
 - Evidence Markdown versus rollout-index/appendwatch 500 classification.
 - Operator production-host Unix-socket assertions.
+- Exact three-test `needs_sudo` selection and unprivileged aggregate-suite
+  exclusion.
 
 ## Verification
 
@@ -64,13 +70,17 @@ host-private Flask/Unix-socket IPC. Both gaps are resolved.
   skipped because this managed Linux sandbox denies AF_UNIX `bind(2)` with
   `EPERM`; Flask behavior and failure handling pass hermetically, while the
   operator test retains the real production-host round trip/assertions.
-- Complete non-root detour suite: **116 passed, 50 skipped**.
+- Complete non-root detour suite excluding `needs_sudo`: **116 passed, 47
+  skipped, 3 deselected**; the isolated marker contour selected exactly three
+  tests and skipped them without root.
 - Explicit detour real-API test: skipped because `OPENALEX_API_KEY` is absent.
 - `pixi lock --check`: passed.
 - `git diff --check`: passed.
 - Final schema refinements: HTTP schema tests **28 passed**; Backend API tests
   **47 passed, 36 skipped**; complete detour suite **116 passed, 50 skipped**;
   lint passed again.
+- Sudo-task split: `pixi lock --check`, Pixi task-graph dry run, Ruff and mypy
+  over 95 files all passed.
 
 The official `pixi run -e detour-ai-augment pre-commit` was invoked but Pixi
 still cannot resolve cross-feature task `test-detour-mode0-econ-stats` from the
@@ -84,8 +94,9 @@ AI-augment environment. Its contour was therefore executed manually:
 - step-4 detour: **4 failed, 1 skipped**, all from unavailable `splink_udfs`;
 - mode-0 detour: **2 passed, 2 failed**, both because managed sandboxing blocks
   Kaleido/Chromium `shutdown(2)`;
-- official AI-augment root task cannot enter `sudo` under the container's
-  no-new-privileges flag; its equivalent non-root suite passed as above.
+- the root marker contour cannot enter `sudo` under the container's
+  no-new-privileges flag; its exact three-test selection is verified, and the
+  remaining aggregate suite passed unprivileged as above.
 
 These are task-graph/execution-environment limitations, not failures in the
 AI-augment implementation. TASK is complete pending the normal human-operated
