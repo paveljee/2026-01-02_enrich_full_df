@@ -20,7 +20,7 @@ from typing import Any, Final, NewType
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 from urllib.parse import urlencode
-from uuid import UUID, uuid4
+from uuid import UUID, uuid7
 from zoneinfo import ZoneInfo
 
 import duckdb
@@ -1853,7 +1853,7 @@ class ControlCentreController:
             raise KeyError(Locale.UNKNOWN_NAMEKEY_TEMPLATE.format(namekey=namekey))
         if researcher.cohort is ResearcherCohort.INELIGIBLE:
             raise ValueError(Locale.INELIGIBLE_QUEUE)
-        run_id = uuid4()
+        run_id = uuid7()
         await self._append_run_event(
             RunEvent(
                 run_id=run_id,

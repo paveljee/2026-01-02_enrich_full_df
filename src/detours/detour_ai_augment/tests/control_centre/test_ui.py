@@ -282,6 +282,7 @@ async def test_queue_is_persisted_only_in_nicegui_general_storage() -> None:
 
     run_id = await subject.queue(namekey=source.namekey)
 
+    assert run_id.version == 7
     assert app.storage.general[control_ui.QUEUE_STORAGE_KEY] == [str(run_id)]
     stored_events = app.storage.general[control_ui.RUN_EVENTS_STORAGE_KEY]
     assert [event["kind"] for event in stored_events] == [
