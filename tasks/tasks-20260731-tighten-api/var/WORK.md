@@ -29,6 +29,16 @@ host-private Flask/Unix-socket IPC. Both gaps are resolved.
   typing without an extra named helper.
 - The operator contour uses a per-run socket and asserts socket type, 0600 mode
   and shutdown cleanup on the production host.
+- Corrected the Control Centre repository-root parent index so its supervised
+  Backend starts from the repository and can import the `src` package on the
+  production macOS contour.
+- Operator AIVM reachability, guest-key and appendwatch probes now have
+  ten-second bounds and streamed preflight status. The full-workflow contour
+  emits step/heartbeat/record-count progress and fails immediately when the
+  Control Centre records a failed run.
+- Operator teardown isolates the Control Centre from the terminal's Ctrl+C,
+  then stops it explicitly, reaps surviving local descendants, verifies both
+  service ports were released, and closes Playwright in a `finally` block.
 - Registered `needs_sudo` in the detour conftest and applied it only to the
   three real appendwatch EACCES tests. The existing root task runs every test
   carrying that marker from the whole detour test directory; a sibling task
@@ -62,6 +72,8 @@ host-private Flask/Unix-socket IPC. Both gaps are resolved.
 - Operator production-host Unix-socket assertions.
 - Exact three-test `needs_sudo` selection and unprivileged aggregate-suite
   exclusion.
+- Dashboard repository-root resolution and failed-run log emission used by the
+  operator fail-fast contour.
 
 ## Verification
 
@@ -81,6 +93,11 @@ host-private Flask/Unix-socket IPC. Both gaps are resolved.
   lint passed again.
 - Sudo-task split: `pixi lock --check`, Pixi task-graph dry run, Ruff and mypy
   over 95 files all passed.
+- Operator hardening: complete non-root detour task **118 passed, 47 skipped,
+  3 deselected**; its explicit real-API follow-up skipped because the key is
+  absent. Repo-wide Ruff and mypy passed. In the managed Linux environment,
+  the operator entry point reported missing `limactl` during preflight before
+  entering the first test; the full production contour remains host-only.
 
 The official `pixi run -e detour-ai-augment pre-commit` was invoked but Pixi
 still cannot resolve cross-feature task `test-detour-mode0-econ-stats` from the

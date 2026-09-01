@@ -13,6 +13,9 @@ from nicegui import app
 
 from src.detours.detour_ai_augment.src.backend import api
 from src.detours.detour_ai_augment.src.control_centre.dashboard import ui as control_ui
+from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers import (
+    vars as control_vars,
+)
 
 NAMEKEY = control_ui.Namekey("Jane Doe [1]")
 SECOND_NAMEKEY = control_ui.Namekey("John Doe [2]")
@@ -151,6 +154,46 @@ def controller(
 def test_variable_specs_cover_every_ai_augment_column() -> None:
     assert tuple(item.ai_column for item in control_ui.VARIABLE_SPECS) == (
         api.AI_AUGMENT_COLUMNS
+    )
+
+
+def test_dashboard_paths_resolve_from_repository_root() -> None:
+    repository_root = Path(__file__).resolve().parents[4]
+
+    assert control_vars.REPOSITORY_ROOT == repository_root
+    assert control_ui.REPOSITORY_ROOT == repository_root
+    assert control_vars.DEFAULT_CONFIG_PATH == repository_root / "config_ai_augment.json"
+
+
+@pytest.mark.anyio
+async def test_failed_run_events_are_logged(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    subject = controller()
+    run_id = uuid4()
+    await subject._append_run_event(
+        control_ui.RunEvent(
+            run_id=run_id,
+            namekey=NAMEKEY,
+            at=SESSION_TIMESTAMP,
+            kind=control_ui.RunEventKind.QUEUED,
+        )
+    )
+    capsys.readouterr()
+    event = control_ui.RunEvent(
+        run_id=run_id,
+        namekey=NAMEKEY,
+        at=SESSION_TIMESTAMP,
+        kind=control_ui.RunEventKind.FAILED,
+        detail=control_ui.Locale.BACKEND_EXITED_EARLY,
+    )
+
+    await subject._append_run_event(event)
+
+    assert capsys.readouterr().out == (
+        f"{control_ui.Locale.CONTROL_CENTRE_LOG_PREFIX} run failed: "
+        f"run_id={event.run_id} namekey={NAMEKEY} "
+        f"detail={control_ui.Locale.BACKEND_EXITED_EARLY}\n"
     )
 
 
@@ -392,6 +435,7 @@ async def test_backend_supervisor_replaces_process_per_namekey_and_uses_stdin(
     second_options = calls[1][1]
     first_environment = cast(dict[str, str], first_options["env"])
     second_environment = cast(dict[str, str], second_options["env"])
+    assert first_options["cwd"] == tmp_path
     assert first_options["stdin"] is asyncio.subprocess.PIPE
     assert first_options["start_new_session"] is True
     assert first_environment[api.NAMEKEY_ENV_NAME] == NAMEKEY

@@ -135,5 +135,8 @@ class Locale:
     SERVICES_NOT_STARTED: Final = "Control Centre services have not started"
 
     READY_LOG_TEMPLATE: Final = "ready at {url}"
+    RUN_FAILED_LOG_TEMPLATE: Final = (
+        "run failed: run_id={run_id} namekey={namekey} detail={detail}"
+    )
     STOPPING_LOG: Final = "stopping"
     STOPPED_LOG: Final = "stopped"

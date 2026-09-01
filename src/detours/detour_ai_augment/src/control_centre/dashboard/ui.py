@@ -2218,6 +2218,15 @@ class ControlCentreController:
             item.model_dump(mode="json") for item in self._events
         ]
         self._runs = dict(replay_run_events(self._events))
+        if event.kind is RunEventKind.FAILED:
+            emit_log(
+                Locale.CONTROL_CENTRE_LOG_PREFIX,
+                Locale.RUN_FAILED_LOG_TEMPLATE.format(
+                    run_id=event.run_id,
+                    namekey=event.namekey,
+                    detail=event.detail or "unspecified",
+                ),
+            )
 
     def _load_dashboard_storage(self) -> None:
         raw_events = app.storage.general.get(RUN_EVENTS_STORAGE_KEY, [])

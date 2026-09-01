@@ -11,7 +11,7 @@ import sys
 import threading
 import time
 from collections.abc import Generator, Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TextIO, cast
@@ -19,6 +19,7 @@ from urllib import error as urllib_error
 from urllib import request as urllib_request
 
 import duckdb
+import psutil
 import pytest
 from playwright.sync_api import ViewportSize, expect, sync_playwright
 
@@ -53,6 +54,7 @@ PROCESS_START_TIMEOUT_SECONDS = 300
 PROCESS_STOP_TIMEOUT_SECONDS = 30
 PROCESS_POLL_SECONDS = 0.1
 FULL_WORKFLOW_TIMEOUT_SECONDS = 1_800
+OPERATOR_HEARTBEAT_SECONDS = 10
 BROWSER_ASSERTION_TIMEOUT_MILLISECONDS = 30_000
 BROWSER_VIEWPORT: ViewportSize = {"width": 1_600, "height": 1_000}
 BROWSER_CHANNEL = "chrome"
@@ -60,6 +62,7 @@ GRID_ROW_SELECTOR = ".ag-center-cols-container .ag-row"
 OPERATOR_TARGET_DRAW_NUMBER = "146"
 PYTEST_CURRENT_TEST_ENV_NAME = "PYTEST_CURRENT_TEST"
 OPERATOR_LIVE_OUTPUT = sys.__stdout__ or sys.stdout
+FAILED_RUN_LOG_PREFIX = f"{control_ui.Locale.CONTROL_CENTRE_LOG_PREFIX} run failed:"
 
 pytestmark = pytest.mark.operator
 
@@ -80,7 +83,10 @@ class DashboardProcess:
     output_thread: threading.Thread
 
     def wait_until_ready(self) -> None:
+        _operator_log("waiting for Control Centre readiness")
+        started_at = time.monotonic()
         deadline = time.monotonic() + PROCESS_START_TIMEOUT_SECONDS
+        next_heartbeat = started_at + OPERATOR_HEARTBEAT_SECONDS
         while time.monotonic() < deadline:
             if self.process.poll() is not None:
                 raise RuntimeError(
@@ -94,12 +100,21 @@ class DashboardProcess:
                     CONTROL_CENTRE_URL,
                     timeout=control_ui.CONTROL_HTTP_TIMEOUT_SECONDS,
                 ):
+                    _operator_log("Control Centre is ready")
                     return
             except (OSError, urllib_error.URLError):
                 time.sleep(PROCESS_POLL_SECONDS)
+            now = time.monotonic()
+            if now >= next_heartbeat:
+                _operator_log(
+                    f"still waiting for Control Centre ({now - started_at:.0f}s elapsed)"
+                )
+                next_heartbeat = now + OPERATOR_HEARTBEAT_SECONDS
         raise TimeoutError("Control Centre did not become ready:\n" + "".join(self.output))
 
     def stop(self) -> None:
+        _operator_log("stopping Control Centre and its child processes")
+        descendants = self._descendants()
         if self.process.poll() is None:
             self.process.send_signal(signal.SIGINT)
             try:
@@ -111,9 +126,38 @@ class DashboardProcess:
                 except subprocess.TimeoutExpired:
                     self.process.kill()
                     self.process.wait(timeout=PROCESS_STOP_TIMEOUT_SECONDS)
+        self._stop_descendants(descendants)
         self.output_thread.join(timeout=PROCESS_STOP_TIMEOUT_SECONDS)
         if self.process.stdout is not None:
             self.process.stdout.close()
+        _wait_for_ports_released()
+        _operator_log("Control Centre and child processes stopped")
+
+    def _descendants(self) -> list[psutil.Process]:
+        try:
+            return psutil.Process(self.process.pid).children(recursive=True)
+        except (psutil.AccessDenied, psutil.NoSuchProcess):
+            return []
+
+    @staticmethod
+    def _stop_descendants(descendants: list[psutil.Process]) -> None:
+        _, alive = psutil.wait_procs(descendants, timeout=0)
+        for process in alive:
+            with suppress(psutil.AccessDenied, psutil.NoSuchProcess):
+                process.terminate()
+        _, alive = psutil.wait_procs(alive, timeout=PROCESS_STOP_TIMEOUT_SECONDS)
+        for process in alive:
+            with suppress(psutil.AccessDenied, psutil.NoSuchProcess):
+                process.kill()
+        _, alive = psutil.wait_procs(alive, timeout=PROCESS_STOP_TIMEOUT_SECONDS)
+        if alive:
+            pids = ", ".join(str(process.pid) for process in alive)
+            raise RuntimeError(f"operator child processes did not stop: {pids}")
+
+
+def _operator_log(message: str) -> None:
+    OPERATOR_LIVE_OUTPUT.write(f"[operator-test] {message}\n")
+    OPERATOR_LIVE_OUTPUT.flush()
 
 
 def _file_digest(path: Path) -> bytes:
@@ -142,9 +186,13 @@ def _tree_digest(directory: Path) -> str:
 
 @pytest.fixture(autouse=True)
 def production_data_unchanged(operator_aivm: None) -> Iterator[None]:
+    _operator_log("hashing production data before the test")
     before = {path: _tree_digest(path) for path in PRODUCTION_DATA_DIRECTORIES}
+    _operator_log("production-data pre-test hashes completed")
     yield
+    _operator_log("verifying production data remains unchanged")
     assert {path: _tree_digest(path) for path in PRODUCTION_DATA_DIRECTORIES} == before
+    _operator_log("production data is unchanged")
 
 
 def operator_runtime(tmp_path: Path) -> OperatorRuntime:
@@ -201,8 +249,24 @@ def _assert_ports_available() -> None:
                 pytest.fail(f"operator test requires unused local port {port}")
 
 
+def _wait_for_ports_released() -> None:
+    deadline = time.monotonic() + PROCESS_STOP_TIMEOUT_SECONDS
+    occupied: list[int] = []
+    while time.monotonic() < deadline:
+        occupied = []
+        for port in CONTROL_CENTRE_PORTS:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client:
+                if client.connect_ex((control_ui.CONTROL_CENTRE_HOST, port)) == 0:
+                    occupied.append(port)
+        if not occupied:
+            return
+        time.sleep(PROCESS_POLL_SECONDS)
+    raise RuntimeError(f"operator processes retained local ports: {occupied}")
+
+
 @contextmanager
 def running_dashboard(runtime: OperatorRuntime) -> Generator[DashboardProcess]:
+    _operator_log("checking that Control Centre and Backend ports are free")
     _assert_ports_available()
     environment = os.environ.copy()
     environment.pop(PYTEST_CURRENT_TEST_ENV_NAME, None)
@@ -219,28 +283,38 @@ def running_dashboard(runtime: OperatorRuntime) -> Generator[DashboardProcess]:
         text=True,
         encoding=TEXT_ENCODING,
         bufsize=1,
+        start_new_session=True,
     )
-    if process.stdout is None:
-        process.kill()
-        raise RuntimeError("Control Centre output pipe is unavailable")
-    output: list[str] = []
-    output_thread = threading.Thread(
-        target=_collect_output,
-        args=(process.stdout, output),
-        daemon=True,
-    )
-    output_thread.start()
-    dashboard = DashboardProcess(process, output, output_thread)
+    dashboard: DashboardProcess | None = None
     try:
+        _operator_log(f"started Control Centre process {process.pid}")
+        if process.stdout is None:
+            raise RuntimeError("Control Centre output pipe is unavailable")
+        output: list[str] = []
+        output_thread = threading.Thread(
+            target=_collect_output,
+            args=(process.stdout, output),
+            daemon=True,
+        )
+        output_thread.start()
+        dashboard = DashboardProcess(process, output, output_thread)
         dashboard.wait_until_ready()
         yield dashboard
     finally:
-        dashboard.stop()
+        if dashboard is None:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=PROCESS_STOP_TIMEOUT_SECONDS)
+            if process.stdout is not None:
+                process.stdout.close()
+        else:
+            dashboard.stop()
 
 
 def target_namekey(runtime: OperatorRuntime) -> control_ui.Namekey:
+    _operator_log("selecting the operator workflow target")
     configuration = control_ui.AiAugmentCtlCtrContext(config_path=runtime.config_path)
-    return next(
+    namekey = next(
         item.namekey
         for item in control_ui.SourceRepository(
             configuration=configuration
@@ -248,24 +322,33 @@ def target_namekey(runtime: OperatorRuntime) -> control_ui.Namekey:
         if OPERATOR_TARGET_DRAW_NUMBER in item.draw_numbers
         and item.cohort is not control_ui.ResearcherCohort.INELIGIBLE
     )
+    _operator_log(f"selected workflow target {namekey}")
+    return namekey
 
 
 def queue_in_browser(namekey: control_ui.Namekey) -> None:
+    _operator_log("opening the Control Centre in Playwright")
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(channel=BROWSER_CHANNEL, headless=True)
-        page = browser.new_page(viewport=BROWSER_VIEWPORT)
-        page.set_default_timeout(BROWSER_ASSERTION_TIMEOUT_MILLISECONDS)
-        page.goto(CONTROL_CENTRE_URL, wait_until="networkidle")
-        page.get_by_label(control_ui.Locale.SEARCH_FILTER).fill(namekey)
-        rows = page.get_by_test_id(control_ui.RESEARCHER_GRID_TEST_ID).locator(
-            GRID_ROW_SELECTOR
-        )
-        expect(rows).to_have_count(1)
-        rows.first.click()
-        execute = page.get_by_test_id(control_ui.EXECUTE_ACTION_TEST_ID)
-        expect(execute).to_be_enabled()
-        execute.click()
-        browser.close()
+        browser = None
+        try:
+            browser = playwright.chromium.launch(channel=BROWSER_CHANNEL, headless=True)
+            page = browser.new_page(viewport=BROWSER_VIEWPORT)
+            page.set_default_timeout(BROWSER_ASSERTION_TIMEOUT_MILLISECONDS)
+            page.goto(CONTROL_CENTRE_URL, wait_until="networkidle")
+            page.get_by_label(control_ui.Locale.SEARCH_FILTER).fill(namekey)
+            rows = page.get_by_test_id(control_ui.RESEARCHER_GRID_TEST_ID).locator(
+                GRID_ROW_SELECTOR
+            )
+            expect(rows).to_have_count(1)
+            rows.first.click()
+            execute = page.get_by_test_id(control_ui.EXECUTE_ACTION_TEST_ID)
+            expect(execute).to_be_enabled()
+            execute.click()
+            _operator_log("queued the workflow through the browser")
+        finally:
+            if browser is not None:
+                browser.close()
+            _operator_log("closed the operator-test browser")
 
 
 def authoritative_records(path: Path) -> tuple[HttpRequestLogRecord, ...]:
@@ -282,11 +365,23 @@ def wait_for_terminal_pull(
     runtime: OperatorRuntime,
     dashboard: DashboardProcess,
 ) -> tuple[HttpRequestLogRecord, ...]:
+    _operator_log("waiting for the Backend terminal pull")
+    started_at = time.monotonic()
     deadline = time.monotonic() + FULL_WORKFLOW_TIMEOUT_SECONDS
+    next_heartbeat = started_at + OPERATOR_HEARTBEAT_SECONDS
+    previous_record_count = -1
     while time.monotonic() < deadline:
         if dashboard.process.poll() is not None:
             raise RuntimeError("dashboard exited:\n" + "".join(dashboard.output))
+        failed_run_lines = [
+            line for line in dashboard.output if line.startswith(FAILED_RUN_LOG_PREFIX)
+        ]
+        if failed_run_lines:
+            raise RuntimeError("workflow failed:\n" + "".join(failed_run_lines))
         records = authoritative_records(runtime.replay_log_path)
+        if len(records) != previous_record_count:
+            _operator_log(f"authoritative request log contains {len(records)} record(s)")
+            previous_record_count = len(records)
         if any(
             (record.method, record.path, record.response_code)
             == (
@@ -296,7 +391,15 @@ def wait_for_terminal_pull(
             )
             for record in records
         ):
+            _operator_log("Backend reached the terminal pull")
             return records
+        now = time.monotonic()
+        if now >= next_heartbeat:
+            _operator_log(
+                f"workflow is still running ({now - started_at:.0f}s elapsed, "
+                f"{len(records)} request-log record(s))"
+            )
+            next_heartbeat = now + OPERATOR_HEARTBEAT_SECONDS
         time.sleep(PROCESS_POLL_SECONDS)
     raise TimeoutError("workflow did not reach terminal pull:\n" + "".join(dashboard.output))
 
@@ -313,17 +416,21 @@ def _record_ordinal(
 def test_existing_aivm_exposes_the_persisted_appendwatch_topology(
     tmp_path: Path,
 ) -> None:
+    _operator_log("preparing isolated topology-test runtime")
     runtime = operator_runtime(tmp_path)
 
+    _operator_log("loading the deployed appendwatch topology")
     configuration = control_ui.AiAugmentCtlCtrContext(config_path=runtime.config_path)
 
     assert configuration.appendwatch_report.is_file()
     assert configuration.appendwatch_report.stat().st_size
+    _operator_log("deployed appendwatch topology is readable")
 
 
 def test_complete_dashboard_backend_codex_commit_and_replay_workflow(
     tmp_path: Path,
 ) -> None:
+    _operator_log("preparing isolated full-workflow runtime")
     runtime = operator_runtime(tmp_path)
     namekey = target_namekey(runtime)
 
@@ -333,6 +440,7 @@ def test_complete_dashboard_backend_codex_commit_and_replay_workflow(
         assert stat.S_ISSOCK(runtime.dashboard_socket_path.stat().st_mode)
         assert stat.S_IMODE(runtime.dashboard_socket_path.stat().st_mode) == 0o600
 
+    _operator_log("validating authoritative workflow artifacts")
     assert not runtime.dashboard_socket_path.exists()
 
     assert all(record.schema_version == "1.1" for record in records)
@@ -393,3 +501,4 @@ def test_complete_dashboard_backend_codex_commit_and_replay_workflow(
     assert len(rollout_blob.read_bytes().splitlines()) == commit.rollout.line_count
     assert terminal_pull.response_body
     assert json.loads(terminal_pull.response_body.splitlines()[0])
+    _operator_log("full operator workflow contract validated")

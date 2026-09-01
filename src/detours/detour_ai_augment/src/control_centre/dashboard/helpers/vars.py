@@ -6,7 +6,7 @@ from typing import Final
 # Paths / process configuration
 # =============================================================================
 
-REPOSITORY_ROOT_PARENT_INDEX: Final = 8
+REPOSITORY_ROOT_PARENT_INDEX: Final = 7
 PATH_TO_THIS_MODULE = Path(__file__).resolve()
 REPOSITORY_ROOT: Final = PATH_TO_THIS_MODULE.parents[REPOSITORY_ROOT_PARENT_INDEX]
 

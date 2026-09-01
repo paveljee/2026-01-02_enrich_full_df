@@ -62,6 +62,9 @@ TEST_GUEST_MOUNT_POINT = "/home/ai/operator-fixture"
 TEST_APPENDWATCH_RELATIVE_PATH = ".aivm-control/appendwatch/appendwatch-tree.txt"
 TEST_APPENDWATCH_CONTENT = ".\n"
 TEXT_ENCODING = "utf-8"
+OPERATOR_PROBE_TIMEOUT_SECONDS = 10
+OPERATOR_START_TIMEOUT_SECONDS = 300
+OPERATOR_DEPLOY_TIMEOUT_SECONDS = 1_800
 OPERATOR_PROMPT = "Redeploy AIVM before each operator test? [y/N] "
 OPERATOR_START_PROMPT = (
     "AIVM is not reachable. Start it for operator tests? "
@@ -107,6 +110,10 @@ OPERATOR_REUSE_NOTICE = (
     "test."
 )
 OPERATOR_REDEPLOY_STASH_KEY = pytest.StashKey[bool]()
+
+
+def _operator_log(message: str) -> None:
+    print(f"[operator-preflight] {message}", flush=True)
 
 
 def _operator_requested(config: pytest.Config) -> bool:
@@ -238,28 +245,40 @@ def operator_aivm(
     deployment_environment = os.environ.copy()
     deployment_environment[REPOSITORY_ROOT_ENV_NAME] = str(REPOSITORY_ROOT)
     if request.config.stash[OPERATOR_REDEPLOY_STASH_KEY]:
+        _operator_log("validating host deployment requirements")
         deploy_key = os.environ.get(OPENALEX_API_KEY_ENV_NAME, "").strip()
         if not deploy_key:
             raise pytest.UsageError(OPERATOR_DEPLOY_KEY_MISSING)
         deployment_environment[OPENALEX_API_KEY_ENV_NAME] = deploy_key
+        _operator_log("redeploying AIVM")
         try:
             subprocess.run(
                 DEPLOY_COMMAND,
                 cwd=REPOSITORY_ROOT,
                 env=deployment_environment,
                 check=True,
+                timeout=OPERATOR_DEPLOY_TIMEOUT_SECONDS,
             )
-        except (OSError, subprocess.CalledProcessError) as exc:
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
             raise pytest.UsageError(str(exc)) from exc
-    probe = subprocess.run(
-        AIVM_PROBE_COMMAND,
-        cwd=REPOSITORY_ROOT,
-        env=deployment_environment,
-        check=False,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        _operator_log("AIVM redeploy completed")
+    _operator_log(
+        f"probing AIVM reachability (timeout {OPERATOR_PROBE_TIMEOUT_SECONDS}s)"
     )
+    try:
+        probe = subprocess.run(
+            AIVM_PROBE_COMMAND,
+            cwd=REPOSITORY_ROOT,
+            env=deployment_environment,
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=OPERATOR_PROBE_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise pytest.UsageError(OPERATOR_AIVM_UNAVAILABLE) from exc
     if probe.returncode != 0:
+        _operator_log("AIVM is not reachable")
         if request.config.getoption(OPERATOR_YES_OPTION):
             start_aivm = True
         else:
@@ -270,21 +289,28 @@ def operator_aivm(
             start_aivm = reply in {"y", "yes"}
         if not start_aivm:
             raise pytest.UsageError(OPERATOR_AIVM_START_REFUSED)
+        _operator_log("starting AIVM")
         try:
             subprocess.run(
                 AIVM_START_COMMAND,
                 cwd=REPOSITORY_ROOT,
                 env=deployment_environment,
                 check=True,
+                timeout=OPERATOR_START_TIMEOUT_SECONDS,
             )
             subprocess.run(
                 AIVM_PROBE_COMMAND,
                 cwd=REPOSITORY_ROOT,
                 env=deployment_environment,
                 check=True,
+                timeout=OPERATOR_PROBE_TIMEOUT_SECONDS,
             )
-        except (OSError, subprocess.CalledProcessError) as exc:
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
             raise pytest.UsageError(OPERATOR_AIVM_START_FAILED) from exc
+        _operator_log("AIVM started and is reachable")
+    else:
+        _operator_log("AIVM is reachable")
+    _operator_log("checking the guest OpenAlex credential")
     try:
         guest_key_process = subprocess.run(
             AIVM_OPENALEX_KEY_COMMAND,
@@ -293,19 +319,24 @@ def operator_aivm(
             check=True,
             capture_output=True,
             text=True,
+            timeout=OPERATOR_PROBE_TIMEOUT_SECONDS,
         )
-    except (OSError, subprocess.CalledProcessError) as exc:
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
         raise pytest.UsageError(OPERATOR_GUEST_KEY_MISSING) from exc
     guest_key = guest_key_process.stdout.strip()
     if not guest_key:
         raise pytest.UsageError(OPERATOR_GUEST_KEY_MISSING)
     monkeypatch.setenv(OPENALEX_API_KEY_ENV_NAME, guest_key)
+    _operator_log("guest OpenAlex credential is available")
+    _operator_log("checking appendwatch service health")
     try:
         subprocess.run(
             AIVM_APPENDWATCH_PROBE_COMMAND,
             cwd=REPOSITORY_ROOT,
             env=deployment_environment,
             check=True,
+            timeout=OPERATOR_PROBE_TIMEOUT_SECONDS,
         )
-    except (OSError, subprocess.CalledProcessError) as exc:
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
         raise pytest.UsageError(OPERATOR_APPENDWATCH_UNAVAILABLE) from exc
+    _operator_log("operator AIVM preflight completed")
