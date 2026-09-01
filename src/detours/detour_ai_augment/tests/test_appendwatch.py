@@ -36,7 +36,14 @@ import pytest
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="appendwatch uses Linux inotify")
 
 SCRIPT = Path(
-    os.environ.get("APPENDWATCH_SCRIPT", Path(__file__).with_name("appendwatch.py"))
+    os.environ.get(
+        "APPENDWATCH_SCRIPT",
+        Path(__file__).parents[1]
+        / "src"
+        / "control_centre"
+        / "appendwatch"
+        / "appendwatch.py",
+    )
 ).resolve()
 
 WATCHER_PYTHON = os.environ.get("APPENDWATCH_PYTHON", sys.executable)
@@ -397,8 +404,15 @@ def test_new_file_moved_into_tree_is_accepted_as_initial_baseline(
 
 
 def _replace_with_socket(path: Path) -> socket.socket:
-    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    sock.bind(str(path))
+    sock: socket.socket | None = None
+    try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.bind(str(path))
+    except PermissionError:
+        if sock is not None:
+            sock.close()
+        pytest.skip("Unix sockets are unavailable in this execution environment")
+    assert sock is not None
     return sock
 
 

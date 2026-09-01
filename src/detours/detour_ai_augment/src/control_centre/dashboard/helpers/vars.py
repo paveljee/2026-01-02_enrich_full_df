@@ -1,5 +1,5 @@
-from pathlib import Path, PurePosixPath
 import shlex
+from pathlib import Path, PurePosixPath
 from typing import Final
 
 # =============================================================================

@@ -14,7 +14,8 @@ This includes the rollouts:
 
 - `rollout-2026-07-31T14-42-27-019fb97c-1e5a-7830-9244-bd5a10a9cb73.jsonl.tgz`,
 - `rollout-2026-08-25T11-41-35-01a03995-83f2-7af2-a86c-993cd594207f.jsonl`,
-- `rollout-2026-08-25T13-53-00-01a03a0d-d666-7b20-a9b5-347565643915.jsonl`.
+- `rollout-2026-08-25T13-53-00-01a03a0d-d666-7b20-a9b5-347565643915.jsonl`,
+- `rollout-2026-08-30T00-14-51-01a05004-dd48-7832-9a10-1d082459a759.jsonl`.
 
 While the rollout is a
 plain text file

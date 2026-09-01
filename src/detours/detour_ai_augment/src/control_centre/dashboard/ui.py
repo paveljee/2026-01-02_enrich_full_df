@@ -3,11 +3,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
-import hashlib
+import http.client
 import json
 import os
 import re
 import shlex
+import socket
 import sys
 from collections import Counter
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -39,12 +40,12 @@ from ...backend.api import (
     ATTEMPT_RESULT_ACCEPTED,
     ATTEMPT_RESULT_CONFIGURATION_ERROR,
     ATTEMPT_RESULT_REJECTED,
+    CODEX_SESSIONS_ROOT_ENV_NAME,
     CONFIG_OPTION,
     CONTROL_PARENT_PID_ENV_NAME,
-    CONTROL_PULL_PATH,
-    CONTROL_PUSH_PATH,
-    CONTROL_RUN_EVENTS_TOKEN_ENV_NAME,
-    CONTROL_RUN_EVENTS_TOKEN_HEADER,
+    DASHBOARD_QUERY_PATH,
+    DASHBOARD_SOCKET_PATH,
+    DASHBOARD_SOCKET_PATH_ENV_NAME,
     DOCX_TO_AI_AUGMENT_COLUMNS,
     DRAW_VALUE_SEPARATOR,
     EXPECTED_GROUND_TRUTH_RESEARCHERS,
@@ -52,25 +53,14 @@ from ...backend.api import (
     EXPECTED_INELIGIBLE_RESEARCHERS,
     EXPECTED_NO_GROUND_TRUTH_RESEARCHERS,
     EXPECTED_SOURCE_RESEARCHERS,
-    HTTP_CONTENT_TYPE_HEADER,
     HTTP_GET_METHOD,
-    HTTP_IDEMPOTENCY_KEY_HEADER,
-    HTTP_POST_METHOD,
-    JSON_MEDIA_TYPE,
+    NAMEKEY_ENV_NAME,
+    SERVER_PORT,
     AttemptRecord,
-    ControlPullResponse,
-    ControlPushRequest,
-    ControlPushResponse,
-    ControlRun,
+    DashboardQueryResponse,
     IneligibilityCategory,
     ground_truth_for_researcher,
     load_source_researcher,
-)
-from ...backend.api import (
-    ControlRunEvent as RunEvent,
-)
-from ...backend.api import (
-    ControlRunEventKind as RunEventKind,
 )
 from ...backend.api import (
     SourceCohort as ResearcherCohort,
@@ -86,12 +76,12 @@ from .helpers.aggrid import AgGrid
 from .helpers.data_models.ai_augment_context import (
     AiAugmentCtlCtrContext,
 )
+from .helpers.data_models.run_event import RunEvent, RunEventKind
 from .helpers.locale import Locale
 from .helpers.vars import (
     AIVM_SSH_CONNECTION_COMMAND,
     AIVM_SSH_FORWARD_COMMAND,
     AIVM_SSH_TARGET,
-    BACKEND_BASE_URL,
     BACKEND_MODULE,
     BACKEND_OPENAPI_URL,
     BACKEND_PULL_URL,

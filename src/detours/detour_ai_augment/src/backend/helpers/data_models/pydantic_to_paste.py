@@ -20,6 +20,7 @@ from typing import (
     Self,
     TypeAlias,
     TypeVar,
+    cast,
     get_args,
 )
 from urllib.parse import urlsplit
@@ -179,7 +180,10 @@ class RaceEthnicityLanguageCultureStandardized(StrictModel):
         list[TargetWebSearchQueryLanguage],
     ] = Field(
         min_length=MIN_TARGET_WEB_SEARCH_QUERY_LANGUAGES,
-        default_factory=lambda: [Language(DEFAULT_TARGET_WEB_SEARCH_QUERY_LANGUAGE)],
+        default_factory=lambda: cast(
+            list[TargetWebSearchQueryLanguage],
+            [Language(DEFAULT_TARGET_WEB_SEARCH_QUERY_LANGUAGE)],
+        ),
     )
     culture: NotAvailableOrApplicable  # banned
 

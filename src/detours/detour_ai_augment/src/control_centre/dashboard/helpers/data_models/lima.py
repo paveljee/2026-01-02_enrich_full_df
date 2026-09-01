@@ -2,6 +2,7 @@ from typing import Mapping
 
 from pydantic import BaseModel, ConfigDict, Field
 
+
 class LimaMount(BaseModel):
     model_config = ConfigDict(extra="ignore", frozen=True)
 

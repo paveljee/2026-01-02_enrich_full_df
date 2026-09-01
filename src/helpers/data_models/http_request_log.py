@@ -30,6 +30,8 @@ HTTP_REQUEST_LOG_READY_TO_RESPOND_AT_UNIX_USEC_KEY: Final = (
     "ready_to_respond_at_unix_usec"
 )
 HTTP_REQUEST_LOG_RESPONSE_BODY_KEY: Final = "response_body"
+HTTP_REQUEST_LOG_RESPONSE_HEADERS_KEY: Final = "response_headers"
+HTTP_REQUEST_LOG_DURATION_USEC_KEY: Final = "duration_usec"
 HttpRequestLogSchemaVersionV1 = Literal[1, "1"]
 HttpRequestLogSchemaVersion = Literal[1, "1", "1.1"]
 
@@ -51,17 +53,17 @@ class HttpRequestLogRecord(BaseModel):
     scheme: str
     host: str
     port: int | None = None
-    coerce_schema_v1: bool = False
+    coerce_schema_v1: bool = Field(default=False, exclude=True)
     ready_to_respond_at_unix_usec: int | None = None
     path: str
     query: str
     request_headers: dict[str, Any] = Field(default_factory=dict)
     request_body: Any | None = None
     response_code: int | None
-    response_headers: dict[str, Any] = Field(default_factory=dict)
+    response_headers: dict[str, Any] | None = Field(default_factory=dict)
     response_body: str | None
     received_at_unix_usec: int | None
-    duration_usec: int
+    duration_usec: int | None
 
     @model_validator(mode="before")
     @classmethod
@@ -84,17 +86,19 @@ class HttpRequestLogRecord(BaseModel):
                 return version_1_1
             version_1_errors: list[InitErrorDetails] = []
             # disallow legacy typing
-            if (
-                HTTP_REQUEST_LOG_RESPONSE_BODY_KEY in value
-                and value[HTTP_REQUEST_LOG_RESPONSE_BODY_KEY] is None
+            for field, error_type in (
+                (HTTP_REQUEST_LOG_RESPONSE_BODY_KEY, "string_type"),
+                (HTTP_REQUEST_LOG_RESPONSE_HEADERS_KEY, "dict_type"),
+                (HTTP_REQUEST_LOG_DURATION_USEC_KEY, "int_type"),
             ):
-                version_1_errors.append(
-                    InitErrorDetails(
-                        type="string_type",
-                        loc=(HTTP_REQUEST_LOG_RESPONSE_BODY_KEY,),
-                        input=None,
+                if field in value and value[field] is None:
+                    version_1_errors.append(
+                        InitErrorDetails(
+                            type=error_type,
+                            loc=(field,),
+                            input=None,
+                        )
                     )
-                )
             # disallow extra fields
             for field in (
                 HTTP_REQUEST_LOG_RECORD_ID_KEY,
@@ -144,7 +148,6 @@ class HttpRequestLogRecord(BaseModel):
         if _is_http_request_log_schema_version_1(self.schema_version):
             serialized.pop(HTTP_REQUEST_LOG_RECORD_ID_KEY, None)
             serialized.pop(HTTP_REQUEST_LOG_PORT_KEY, None)
-            serialized.pop(HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY, None)
             serialized.pop(HTTP_REQUEST_LOG_READY_TO_RESPOND_AT_UNIX_USEC_KEY, None)
         return serialized
 

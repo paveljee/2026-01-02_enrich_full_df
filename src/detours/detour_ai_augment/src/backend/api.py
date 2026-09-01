@@ -6,7 +6,6 @@ import base64
 import csv
 import fcntl
 import hashlib
-import hmac
 import json
 import logging
 import os
@@ -20,19 +19,19 @@ import threading
 import time
 from collections import Counter
 from collections.abc import AsyncGenerator, Iterator, Mapping, Sequence
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager, contextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from random import Random
-from typing import Annotated, Any, Callable, Literal, Self, TypeAlias, cast, get_args
+from typing import Any, Callable, Literal, Self, TypeAlias, cast, get_args
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
 import duckdb
 import uvicorn
-from fastapi import FastAPI, HTTPException, Query, Request, status
+from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import (
     BaseModel,
@@ -159,20 +158,6 @@ from .helpers.vars import (
 logger = logging.getLogger(__name__)
 
 
-class ControlRunEventKind(StrEnum):
-    QUEUED = "queued"
-    STARTED = "started"
-    REMOTE_PID_DISCOVERED = "remote_pid_discovered"
-    SESSION_DISCOVERED = "session_discovered"
-    ROLLOUT_DISCOVERED = "rollout_discovered"
-    PUSH_ACCEPTED = "push_accepted"
-    CANCEL_REQUESTED = "cancel_requested"
-    CODEX_EXITED = "codex_exited"
-    COMPLETE = "complete"
-    FAILED = "failed"
-    CANCELED = "canceled"
-
-
 class BackendWorkflowStatus(StrEnum):
     READY = "ready"
     BUSY = "busy"
@@ -189,21 +174,25 @@ APPENDWATCH_REPORT_ENV_NAME = "FASTAPI_DETOUR_APPENDWATCH_REPORT"
 NAMEKEY_ENV_NAME = "FASTAPI_DETOUR_NAMEKEY"
 CODEX_SESSIONS_ROOT_ENV_NAME = "FASTAPI_DETOUR_CODEX_SESSIONS_DIR"
 CONTROL_PARENT_PID_ENV_NAME = "FASTAPI_DETOUR_CONTROL_PARENT_PID"
-CONTROL_RUN_EVENTS_TOKEN_ENV_NAME = "FASTAPI_DETOUR_CONTROL_RUN_EVENTS_TOKEN"
-CONTROL_RUN_EVENTS_TOKEN = os.environ.get(CONTROL_RUN_EVENTS_TOKEN_ENV_NAME, "")
-CONTROL_RUN_EVENTS_TOKEN_HEADER = "X-Detour-Control-Token"
+DASHBOARD_SOCKET_PATH_ENV_NAME = "FASTAPI_DETOUR_DASHBOARD_SOCKET"
+DASHBOARD_QUERY_PATH = "/query"
 AIVM_INSTANCE_ENV_NAME = "FASTAPI_DETOUR_AIVM_INSTANCE"
 AIVM_USER_ENV_NAME = "FASTAPI_DETOUR_AIVM_USER"
 AIVM_SSH_PORT_ENV_NAME = "FASTAPI_DETOUR_AIVM_SSH_PORT"
 AIVM_IDENTITY_FILE_ENV_NAME = "FASTAPI_DETOUR_AIVM_IDENTITY_FILE"
 AIVM_KNOWN_HOSTS_FILE_ENV_NAME = "FASTAPI_DETOUR_AIVM_KNOWN_HOSTS_FILE"
 LIMA_SSH_CONFIG_ENV_NAME = "FASTAPI_DETOUR_LIMA_SSH_CONFIG"
-CONTROL_PULL_PATH = "/_control/pull"
 COMMIT_PATH = "/commit"
 CODEX_SESSIONS_ROOT = PurePosixPath(
     os.environ.get(CODEX_SESSIONS_ROOT_ENV_NAME, "/home/ai/.codex/sessions")
 )
 APPENDWATCH_REPORT = Path(os.environ.get(APPENDWATCH_REPORT_ENV_NAME, "")).expanduser()
+DEFAULT_DASHBOARD_SOCKET_PATH = (
+    Path(tempfile.gettempdir()) / f"ktp-hcr-detour-ai-augment-{os.getuid()}.sock"
+)
+DASHBOARD_SOCKET_PATH = Path(
+    os.environ.get(DASHBOARD_SOCKET_PATH_ENV_NAME, DEFAULT_DASHBOARD_SOCKET_PATH)
+).expanduser()
 
 AIVM_INSTANCE = os.environ.get(AIVM_INSTANCE_ENV_NAME, "aivm")
 AIVM_USER = os.environ.get(AIVM_USER_ENV_NAME, "ai")
@@ -500,6 +489,8 @@ DRAW_SORT_PART = re.compile(r"\d+|\D+")
 
 DETOUR_ID = "ai-augment"
 DETOUR_DB_LOCK = threading.Lock()
+DETOUR_DB_CONNECTION: duckdb.DuckDBPyConnection | None = None
+DETOUR_DB_CONNECTION_PATH: Path | None = None
 AUTHORITATIVE_APPEND_LOCK = threading.Lock()
 AUTHORITATIVE_BACKEND_HEALTHY = True
 AUTHORITATIVE_LOG_DESCRIPTOR: int | None = None
@@ -708,6 +699,7 @@ MEDIA_TYPE = "application/x-ndjson"
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
+    dashboard_query_server: object | None = None
     parent_watch: asyncio.Task[None] | None = None
     try:
         runtime = runtime_configuration()
@@ -725,16 +717,20 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
         prove_workflow_inputs_readable()
         _acquire_authoritative_process_lock(runtime)
         synchronize_authoritative_projection(runtime)
+        dashboard_query_server = start_dashboard_query_server()
         start_backend_session_reader()
-    except PushConfigurationError as exc:
+        parent_pid = os.environ.get(CONTROL_PARENT_PID_ENV_NAME)
+        if parent_pid is not None:
+            if not parent_pid.isdecimal() or int(parent_pid) <= 0:
+                raise PushConfigurationError(Locale.CONTROL_PARENT_PID_INVALID)
+            parent_watch = asyncio.create_task(_watch_control_parent(int(parent_pid)))
+    except Exception as exc:
         logger.error(Locale.API_STARTUP_FAILED_LOG, exc)
+        if dashboard_query_server is not None:
+            stop_dashboard_query_server(dashboard_query_server)
+        close_backend_detour_database()
         _release_authoritative_process_lock()
         raise
-    parent_pid = os.environ.get(CONTROL_PARENT_PID_ENV_NAME)
-    if parent_pid is not None:
-        if not parent_pid.isdecimal() or int(parent_pid) <= 0:
-            raise PushConfigurationError(Locale.CONTROL_PARENT_PID_INVALID)
-        parent_watch = asyncio.create_task(_watch_control_parent(int(parent_pid)))
     try:
         yield
     finally:
@@ -747,6 +743,9 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
             parent_watch.cancel()
             with suppress(asyncio.CancelledError):
                 await parent_watch
+        if dashboard_query_server is not None:
+            stop_dashboard_query_server(dashboard_query_server)
+        close_backend_detour_database()
         _release_authoritative_process_lock()
 
 
@@ -777,22 +776,6 @@ class CompactSessionMetadata(BaseModel):
         return self
 
 
-class ControlRunEvent(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    schema_version: Literal[1] = 1
-    run_id: UUID
-    namekey: str
-    at: datetime
-    kind: ControlRunEventKind
-    session_id: str | None = None
-    rollout_jsonl: str | None = None
-    remote_pid: int | None = Field(default=None, gt=0)
-    accepted_attempt_id: str | None = None
-    codex_exit_code: int | None = None
-    detail: str | None = None
-
-
 class AttemptRecord(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
@@ -811,7 +794,7 @@ class AttemptRecord(BaseModel):
     response_detail: StrictStr | None = None
 
 
-class ControlAcceptedAttempt(BaseModel):
+class DashboardAcceptedAttempt(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     namekey: StrictStr
@@ -822,11 +805,11 @@ class ControlAcceptedAttempt(BaseModel):
     footnote_arguments: StrictStr | None = None
 
 
-class ControlPullResponse(BaseModel):
+class DashboardQueryResponse(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     attempts: tuple[AttemptRecord, ...]
-    accepted_attempts: tuple[ControlAcceptedAttempt, ...]
+    accepted_attempts: tuple[DashboardAcceptedAttempt, ...]
     card_markdown: StrictStr | None = None
 
 
@@ -3840,6 +3823,36 @@ def open_detour_database(
         raise PushValidationError(Locale.DETOUR_DUCKDB_OPEN_FAILED) from exc
 
 
+def _backend_detour_database(
+    runtime: AiAugmentBackendContext,
+) -> duckdb.DuckDBPyConnection:
+    global DETOUR_DB_CONNECTION
+    global DETOUR_DB_CONNECTION_PATH
+
+    if (
+        DETOUR_DB_CONNECTION is not None
+        and DETOUR_DB_CONNECTION_PATH == runtime.detour_db_path
+    ):
+        return DETOUR_DB_CONNECTION
+    if DETOUR_DB_CONNECTION is not None:
+        DETOUR_DB_CONNECTION.close()
+    DETOUR_DB_CONNECTION = open_detour_database(runtime)
+    DETOUR_DB_CONNECTION_PATH = runtime.detour_db_path
+    return DETOUR_DB_CONNECTION
+
+
+def close_backend_detour_database() -> None:
+    global DETOUR_DB_CONNECTION
+    global DETOUR_DB_CONNECTION_PATH
+
+    with DETOUR_DB_LOCK:
+        connection = DETOUR_DB_CONNECTION
+        DETOUR_DB_CONNECTION = None
+        DETOUR_DB_CONNECTION_PATH = None
+        if connection is not None:
+            connection.close()
+
+
 def _acquire_authoritative_process_lock(runtime: AiAugmentBackendContext) -> None:
     global AUTHORITATIVE_LOG_DESCRIPTOR
 
@@ -3900,7 +3913,12 @@ def _write_projection_checkpoint(
     )
 
 
-def _http_header_value(headers: Mapping[str, object], name: str) -> str | None:
+def _http_header_value(
+    headers: Mapping[str, object] | None,
+    name: str,
+) -> str | None:
+    if headers is None:
+        return None
     normalized_name = name.casefold()
     for key, value in headers.items():
         if key.casefold() == normalized_name and isinstance(value, str):
@@ -3938,7 +3956,6 @@ def _authoritative_http_record(
         scheme=request.url.scheme,
         host=request.url.hostname or "",
         port=request.url.port,
-        coerce_schema_v1=False,
         ready_to_respond_at_unix_usec=ready_to_respond_at_unix_usec,
         path=request.url.path,
         query=request.url.query,
@@ -4102,8 +4119,10 @@ def _validated_readme_record(record: HttpRequestLogRecord) -> HttpRequestLogReco
     if route in AUTHORITATIVE_PUBLIC_ROUTES:
         if (
             validated.response_code is None
+            or validated.response_headers is None
             or validated.response_body is None
             or validated.ready_to_respond_at_unix_usec is None
+            or validated.duration_usec is None
         ):
             raise PushValidationError(Locale.REPLAY_RECORD_CONTOUR_INVALID)
         return validated
@@ -4113,16 +4132,15 @@ def _validated_readme_record(record: HttpRequestLogRecord) -> HttpRequestLogReco
         validated.scheme != SYNTHETIC_COMMIT_SCHEME
         or validated.host != SYNTHETIC_COMMIT_HOST
         or validated.port is not None
-        or validated.coerce_schema_v1
         or validated.ready_to_respond_at_unix_usec is not None
         or validated.query
         or set(validated.request_headers) != {SOURCE_KEY_HEADER, NAME_KEY_HEADER}
         or not isinstance(validated.request_body, dict)
         or validated.response_code is not None
-        or validated.response_headers
+        or validated.response_headers is not None
         or validated.response_body is not None
         or validated.received_at_unix_usec is not None
-        or validated.duration_usec != 0
+        or validated.duration_usec is not None
     ):
         raise PushValidationError(Locale.REPLAY_COMMIT_INVALID)
     try:
@@ -4630,55 +4648,70 @@ def _project_readme_record(
         raise
 
 
-def synchronize_authoritative_projection(runtime: AiAugmentBackendContext) -> None:
+def _synchronize_authoritative_projection_locked(
+    runtime: AiAugmentBackendContext,
+    conn: duckdb.DuckDBPyConnection,
+) -> None:
     global AUTHORITATIVE_BACKEND_HEALTHY
     global AUTHORITATIVE_LOG_OFFSET
     global AUTHORITATIVE_NEXT_LINE_NUMBER
 
-    records = _authoritative_log_records(Path(runtime.replay_log))
-    runtime.rollout_cas_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        records = _authoritative_log_records(Path(runtime.replay_log))
+        runtime.rollout_cas_dir.mkdir(parents=True, exist_ok=True)
+        _initialize_readme_authoritative_schema(conn)
+        checkpoint = _projection_checkpoint(conn)
+        projected_count_row = conn.execute(
+            f"SELECT count(*) FROM {AUTHORITATIVE_RECORDS_TABLE}"
+        ).fetchone()
+        projected_count = 0 if projected_count_row is None else int(projected_count_row[0])
+        if checkpoint is None:
+            if projected_count:
+                raise PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT)
+            projected_line_count = 0
+        else:
+            projected_line_count, byte_offset, line_sha256 = checkpoint
+            if projected_line_count != projected_count or projected_line_count > len(records):
+                raise PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT)
+            if projected_line_count:
+                _, expected_offset, expected_hash = records[projected_line_count - 1]
+                if byte_offset != expected_offset or line_sha256 != expected_hash:
+                    raise PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT)
+        for line_number, (record, byte_offset, line_sha256) in enumerate(
+            records[projected_line_count:],
+            start=projected_line_count + AUTHORITATIVE_FIRST_LINE,
+        ):
+            _project_readme_record(
+                conn,
+                runtime,
+                record,
+                line_number=line_number,
+                byte_offset=byte_offset,
+                line_sha256=line_sha256,
+                materialize_files=False,
+            )
+        AUTHORITATIVE_NEXT_LINE_NUMBER = len(records) + AUTHORITATIVE_FIRST_LINE
+        AUTHORITATIVE_LOG_OFFSET = records[-1][1] if records else AUTHORITATIVE_EMPTY_OFFSET
+        AUTHORITATIVE_BACKEND_HEALTHY = True
+    except Exception as exc:
+        AUTHORITATIVE_BACKEND_HEALTHY = False
+        raise PushConfigurationError(Locale.REPLAY_PROJECTION_FAILED) from exc
+
+
+def synchronize_authoritative_projection(runtime: AiAugmentBackendContext) -> None:
     with DETOUR_DB_LOCK:
-        conn = open_detour_database(runtime)
-        try:
-            _initialize_readme_authoritative_schema(conn)
-            checkpoint = _projection_checkpoint(conn)
-            projected_count_row = conn.execute(
-                f"SELECT count(*) FROM {AUTHORITATIVE_RECORDS_TABLE}"
-            ).fetchone()
-            projected_count = 0 if projected_count_row is None else int(projected_count_row[0])
-            if checkpoint is None:
-                if projected_count:
-                    raise PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT)
-                projected_line_count = 0
-            else:
-                projected_line_count, byte_offset, line_sha256 = checkpoint
-                if projected_line_count != projected_count or projected_line_count > len(records):
-                    raise PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT)
-                if projected_line_count:
-                    _, expected_offset, expected_hash = records[projected_line_count - 1]
-                    if byte_offset != expected_offset or line_sha256 != expected_hash:
-                        raise PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT)
-            for line_number, (record, byte_offset, line_sha256) in enumerate(
-                records[projected_line_count:],
-                start=projected_line_count + AUTHORITATIVE_FIRST_LINE,
-            ):
-                _project_readme_record(
-                    conn,
-                    runtime,
-                    record,
-                    line_number=line_number,
-                    byte_offset=byte_offset,
-                    line_sha256=line_sha256,
-                    materialize_files=False,
-                )
-            AUTHORITATIVE_NEXT_LINE_NUMBER = len(records) + AUTHORITATIVE_FIRST_LINE
-            AUTHORITATIVE_LOG_OFFSET = records[-1][1] if records else AUTHORITATIVE_EMPTY_OFFSET
-            AUTHORITATIVE_BACKEND_HEALTHY = True
-        except (duckdb.Error, PushValidationError, ValidationError) as exc:
-            AUTHORITATIVE_BACKEND_HEALTHY = False
-            raise PushConfigurationError(Locale.REPLAY_PROJECTION_FAILED) from exc
-        finally:
-            conn.close()
+        conn = _backend_detour_database(runtime)
+        _synchronize_authoritative_projection_locked(runtime, conn)
+
+
+@contextmanager
+def synchronized_detour_database(
+    runtime: AiAugmentBackendContext,
+) -> Iterator[duckdb.DuckDBPyConnection]:
+    with DETOUR_DB_LOCK:
+        conn = _backend_detour_database(runtime)
+        _synchronize_authoritative_projection_locked(runtime, conn)
+        yield conn
 
 
 def _append_authoritative_record(record: HttpRequestLogRecord) -> None:
@@ -4690,39 +4723,36 @@ def _append_authoritative_record(record: HttpRequestLogRecord) -> None:
     line = (validated.model_dump_json(ensure_ascii=True) + "\n").encode(TEXT_ENCODING)
     line_sha256 = hashlib.sha256(line).hexdigest()
     with AUTHORITATIVE_APPEND_LOCK:
-        descriptor = AUTHORITATIVE_LOG_DESCRIPTOR
-        if descriptor is None:
-            raise PushConfigurationError(Locale.AUTHORITATIVE_LOG_NOT_OPEN)
         try:
-            end_offset = os.lseek(descriptor, AUTHORITATIVE_EMPTY_OFFSET, os.SEEK_END)
-            if end_offset != AUTHORITATIVE_LOG_OFFSET:
-                raise PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT)
-            written = 0
-            while written < len(line):
-                count = os.write(descriptor, line[written:])
-                if count <= 0:
-                    raise OSError(Locale.AUTHORITATIVE_LOG_APPEND_FAILED)
-                written += count
-            os.fsync(descriptor)
-            line_number = AUTHORITATIVE_NEXT_LINE_NUMBER
-            AUTHORITATIVE_LOG_OFFSET += len(line)
-            AUTHORITATIVE_NEXT_LINE_NUMBER += 1
             runtime = runtime_configuration()
             with DETOUR_DB_LOCK:
-                conn = open_detour_database(runtime)
-                try:
-                    _initialize_readme_authoritative_schema(conn)
-                    _project_readme_record(
-                        conn,
-                        runtime,
-                        validated,
-                        line_number=line_number,
-                        byte_offset=AUTHORITATIVE_LOG_OFFSET,
-                        line_sha256=line_sha256,
-                        materialize_files=True,
-                    )
-                finally:
-                    conn.close()
+                conn = _backend_detour_database(runtime)
+                _synchronize_authoritative_projection_locked(runtime, conn)
+                descriptor = AUTHORITATIVE_LOG_DESCRIPTOR
+                if descriptor is None:
+                    raise PushConfigurationError(Locale.AUTHORITATIVE_LOG_NOT_OPEN)
+                end_offset = os.lseek(descriptor, AUTHORITATIVE_EMPTY_OFFSET, os.SEEK_END)
+                if end_offset != AUTHORITATIVE_LOG_OFFSET:
+                    raise PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT)
+                written = 0
+                while written < len(line):
+                    count = os.write(descriptor, line[written:])
+                    if count <= 0:
+                        raise OSError(Locale.AUTHORITATIVE_LOG_APPEND_FAILED)
+                    written += count
+                os.fsync(descriptor)
+                line_number = AUTHORITATIVE_NEXT_LINE_NUMBER
+                AUTHORITATIVE_LOG_OFFSET += len(line)
+                AUTHORITATIVE_NEXT_LINE_NUMBER += 1
+                _project_readme_record(
+                    conn,
+                    runtime,
+                    validated,
+                    line_number=line_number,
+                    byte_offset=AUTHORITATIVE_LOG_OFFSET,
+                    line_sha256=line_sha256,
+                    materialize_files=True,
+                )
         except Exception:
             AUTHORITATIVE_BACKEND_HEALTHY = False
             raise
@@ -4732,17 +4762,13 @@ def _projected_outcome(
     runtime: AiAugmentBackendContext,
     commit_record_id: UUID,
 ) -> ProjectedValidationOutcome:
-    with DETOUR_DB_LOCK:
-        conn = open_detour_database(runtime)
-        try:
-            row = conn.execute(
-                f"SELECT {AUTHORITATIVE_OUTCOME_PAYLOAD_COLUMN} "
-                f"FROM {AUTHORITATIVE_OUTCOMES_TABLE} "
-                f"WHERE {AUTHORITATIVE_OUTCOME_COMMIT_ID_COLUMN} = ?",
-                [str(commit_record_id)],
-            ).fetchone()
-        finally:
-            conn.close()
+    with synchronized_detour_database(runtime) as conn:
+        row = conn.execute(
+            f"SELECT {AUTHORITATIVE_OUTCOME_PAYLOAD_COLUMN} "
+            f"FROM {AUTHORITATIVE_OUTCOMES_TABLE} "
+            f"WHERE {AUTHORITATIVE_OUTCOME_COMMIT_ID_COLUMN} = ?",
+            [str(commit_record_id)],
+        ).fetchone()
     if row is None:
         raise PushConfigurationError(Locale.REPLAY_COMMIT_INVALID)
     try:
@@ -4786,7 +4812,6 @@ def _synthetic_commit_record(
         scheme=SYNTHETIC_COMMIT_SCHEME,
         host=SYNTHETIC_COMMIT_HOST,
         port=None,
-        coerce_schema_v1=False,
         ready_to_respond_at_unix_usec=None,
         path=COMMIT_PATH,
         query="",
@@ -4799,10 +4824,10 @@ def _synthetic_commit_record(
         },
         request_body=commit.model_dump(mode="json"),
         response_code=None,
-        response_headers={},
+        response_headers=None,
         response_body=None,
         received_at_unix_usec=None,
-        duration_usec=0,
+        duration_usec=None,
     )
 
 
@@ -5571,7 +5596,7 @@ def _attempt_records(conn: duckdb.DuckDBPyConnection) -> tuple[AttemptRecord, ..
 
 def _accepted_control_attempts(
     conn: duckdb.DuckDBPyConnection,
-) -> tuple[ControlAcceptedAttempt, ...]:
+) -> tuple[DashboardAcceptedAttempt, ...]:
     exists = conn.execute(
         "SELECT count(*) FROM information_schema.tables WHERE table_name = ?",
         [CODEX_OUTPUT_ROWS_TABLE],
@@ -5594,7 +5619,7 @@ def _accepted_control_attempts(
         f"SELECT {projection} FROM {CODEX_OUTPUT_ROWS_TABLE} "
         f"ORDER BY {duckdb_quote_identifier(KTP_AI_AUGMENT_ATTEMPT_ID_COL)}"
     ).fetchall()
-    accepted: list[ControlAcceptedAttempt] = []
+    accepted: list[DashboardAcceptedAttempt] = []
     for row in rows:
         namekey, attempt_id, session_json, *remaining = row
         values = remaining[: len(value_columns)]
@@ -5604,7 +5629,7 @@ def _accepted_control_attempts(
         except ValidationError as exc:
             raise PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT) from exc
         accepted.append(
-            ControlAcceptedAttempt(
+            DashboardAcceptedAttempt(
                 namekey=cast(str, namekey),
                 attempt_id=cast(str, attempt_id),
                 session_metadata=session_metadata,
@@ -5621,7 +5646,7 @@ def _accepted_control_attempts(
     return tuple(accepted)
 
 
-def _control_card_markdown(
+def _dashboard_card_markdown(
     runtime: AiAugmentBackendContext,
     detour_conn: duckdb.DuckDBPyConnection,
     *,
@@ -5653,14 +5678,6 @@ def _control_card_markdown(
     if len(cards) != 1:
         raise PushValidationError(Locale.RESEARCHER_CARD_COUNT_INVALID)
     return next(iter(cards.values()))
-
-
-def _control_token_is_valid(request: Request) -> bool:
-    token = request.headers.get(CONTROL_RUN_EVENTS_TOKEN_HEADER, "")
-    return bool(CONTROL_RUN_EVENTS_TOKEN) and hmac.compare_digest(
-        token,
-        CONTROL_RUN_EVENTS_TOKEN,
-    )
 
 
 def _log_attempt_execution(attempt_id: str, execution: AttemptExecution) -> None:
@@ -5700,47 +5717,40 @@ def _log_attempt_execution(attempt_id: str, execution: AttemptExecution) -> None
         )
 
 
-@app.get(
-    CONTROL_PULL_PATH,
-    response_model=ControlPullResponse,
-    include_in_schema=False,
-)
-def control_pull(
-    request: Request,
-    namekey: Annotated[
-        str | None,
-        Query(alias=KTP_NAMEKEY_COL),
-    ] = None,
-) -> ControlPullResponse:
-    if not _control_token_is_valid(request):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=Locale.CONTROL_RUN_EVENTS_FORBIDDEN,
-        )
-    if not AUTHORITATIVE_BACKEND_HEALTHY:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=Locale.CONFIGURATION_ERROR_DETAIL,
-        )
+def dashboard_query_payload(namekey: str | None = None) -> str:
     runtime = runtime_configuration()
-    with DETOUR_DB_LOCK:
-        conn = open_detour_database(runtime)
-        try:
-            return ControlPullResponse(
-                attempts=_attempt_records(conn),
-                accepted_attempts=_accepted_control_attempts(conn),
-                card_markdown=(
-                    None
-                    if namekey is None
-                    else _control_card_markdown(
-                        runtime,
-                        conn,
-                        namekey=namekey,
-                    )
-                ),
-            )
-        finally:
-            conn.close()
+    with synchronized_detour_database(runtime) as conn:
+        response = DashboardQueryResponse(
+            attempts=_attempt_records(conn),
+            accepted_attempts=_accepted_control_attempts(conn),
+            card_markdown=(
+                None
+                if namekey is None
+                else _dashboard_card_markdown(
+                    runtime,
+                    conn,
+                    namekey=namekey,
+                )
+            ),
+        )
+    return response.model_dump_json()
+
+
+def start_dashboard_query_server() -> object:
+    from .dashboard_ipc import create_dashboard_query_app, start_dashboard_ipc_server
+
+    dashboard_app = create_dashboard_query_app(
+        dashboard_query_payload,
+        namekey_parameter=KTP_NAMEKEY_COL,
+        query_path=DASHBOARD_QUERY_PATH,
+    )
+    return start_dashboard_ipc_server(DASHBOARD_SOCKET_PATH, dashboard_app)
+
+
+def stop_dashboard_query_server(handle: object) -> None:
+    from .dashboard_ipc import stop_dashboard_ipc_server
+
+    stop_dashboard_ipc_server(cast(Any, handle))
 
 
 @app.get(**PULL_ROUTE)

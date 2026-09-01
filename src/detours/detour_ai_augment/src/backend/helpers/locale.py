@@ -63,12 +63,7 @@ class Locale:
     APPENDWATCH_READABLE_LOG: Final = "proved APPENDWATCH_REPORT readable: %s"
     CODEX_SESSIONS_READABLE_LOG: Final = "proved Codex sessions directory readable: %s"
     CODEX_SESSIONS_UNREADABLE: Final = "Codex sessions directory is not readable"
-    CONTROL_RUN_NORMALIZED: Final = "control run fields must be non-blank and normalized"
     CONTROL_PARENT_PID_INVALID: Final = "Control Centre parent PID is invalid"
-    CONTROL_RUN_EVENTS_INCONSISTENT: Final = (
-        "stored Control Centre run events do not match the durable journal"
-    )
-    CONTROL_RUN_EVENTS_FORBIDDEN: Final = "Control Centre run-event write is forbidden"
     WEB_RESULT_REF_ID_NONBLANK: Final = "web result ref_id must be non-blank"
 
     SETTING_ABSOLUTE_TEMPLATE: Final = "{setting} must be an absolute path"
@@ -124,9 +119,6 @@ class Locale:
     SOURCE_POPULATION_MULTIDRAW_INVALID: Final = (
         "source population contracted-draw count is invalid"
     )
-    CONTROL_URL_INVALID_TEMPLATE: Final = "{environment_name} is invalid"
-    CONTROL_URL_EXPECTED_TEMPLATE: Final = "{environment_name} must be http://{host}:{port}"
-    CONTROL_ENDPOINT_UNAVAILABLE: Final = "Control Centre endpoint is unavailable"
     CONFIG_INVALID_TEMPLATE: Final = "--config is invalid or unreadable: {config_path}"
     OUTPUT_FORMAT_INVALID: Final = "config output_format must be txt or docx"
     SOURCE_DUCKDB_UNREADABLE_TEMPLATE: Final = "configured source DuckDB is not readable: {db_file}"
@@ -378,9 +370,7 @@ class Locale:
         "detour database projection conflicts with the authoritative replay log"
     )
     REPLAY_PROJECTION_FAILED: Final = "authoritative replay projection failed"
-    REPLAY_RECORD_BODY_INVALID: Final = "authoritative HTTP record body is invalid"
     REPLAY_RECORD_CONTOUR_INVALID: Final = "authoritative HTTP record contour is invalid"
-    REPLAY_CONTROL_EVENT_INVALID: Final = "authoritative control event is inconsistent"
     REPLAY_COMMIT_INVALID: Final = "authoritative private commit is inconsistent"
     REPLAY_COMMIT_LINK_MISSING: Final = "private commit references a missing HTTP record"
     REPLAY_COMMIT_LINK_INVALID: Final = "private commit references an invalid HTTP exchange"

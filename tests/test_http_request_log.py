@@ -5,9 +5,11 @@ from pydantic import ValidationError
 
 from src.helpers.data_models.http_request_log import (
     HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY,
+    HTTP_REQUEST_LOG_DURATION_USEC_KEY,
     HTTP_REQUEST_LOG_PORT_KEY,
     HTTP_REQUEST_LOG_READY_TO_RESPOND_AT_UNIX_USEC_KEY,
     HTTP_REQUEST_LOG_RECORD_ID_KEY,
+    HTTP_REQUEST_LOG_RESPONSE_HEADERS_KEY,
     HTTP_REQUEST_LOG_SCHEMA_VERSION_KEY,
     HttpRequestLogRecord,
     HttpRequestLogSchemaVersion,
@@ -62,6 +64,8 @@ def test_http_request_log_schema_version_uses_strings_and_legacy_v1_int() -> Non
     assert legacy_version_1.schema_version == 1
     assert isinstance(legacy_version_1.schema_version, int)
     assert HTTP_REQUEST_LOG_RECORD_ID_KEY not in legacy_version_1.model_dump()
+    assert HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY not in legacy_version_1.model_dump()
+    assert restored_legacy_version_1.model_dump() == legacy_version_1.model_dump()
     assert restored_legacy_version_1.schema_version == 1
     assert version_1_1.schema_version == "1.1"
     assert isinstance(version_1_1.schema_version, str)
@@ -97,6 +101,8 @@ def test_http_request_log_record_id_defaults_to_unique_uuid7_in_v1_1() -> None:
     assert record.record_id.version == 7
     assert another.record_id.version == 7
     assert another.record_id != record.record_id
+    assert HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY not in record.model_dump()
+    assert restored == record
     assert restored.record_id == record.record_id
 
 
@@ -230,7 +236,6 @@ def test_http_request_log_schema_version_1_1_roundtrips_optional_port(
         HTTP_REQUEST_LOG_PORT_KEY: port,
     }
     expected_version_1_1 = version_1_1 | {
-        HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY: False,
         HTTP_REQUEST_LOG_READY_TO_RESPOND_AT_UNIX_USEC_KEY: None,
     }
 
@@ -265,6 +270,9 @@ def test_http_request_log_schema_version_1_is_promoted_only_with_opt_in(
     }
 
     native_version_1 = HttpRequestLogRecord.model_validate(version_1)
+    restored_native_version_1 = HttpRequestLogRecord.model_validate_json(
+        native_version_1.model_dump_json()
+    )
     native = HttpRequestLogRecord.model_validate_json(
         HttpRequestLogRecord.model_validate(
             version_1_1
@@ -301,6 +309,7 @@ def test_http_request_log_schema_version_1_is_promoted_only_with_opt_in(
     )
     assert HTTP_REQUEST_LOG_RECORD_ID_KEY not in native_version_1.model_dump()
     assert HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY not in native_version_1.model_dump()
+    assert restored_native_version_1.model_dump() == native_version_1.model_dump()
     assert native.port is None
     assert native.coerce_schema_v1 is False
     assert (
@@ -308,14 +317,18 @@ def test_http_request_log_schema_version_1_is_promoted_only_with_opt_in(
         == TEST_HTTP_READY_TO_RESPOND_AT_UNIX_USEC
     )
     assert native.model_dump()[HTTP_REQUEST_LOG_PORT_KEY] is None
+    assert HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY not in native.model_dump()
     assert coerced.schema_version == KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
     assert coerced.record_id.version == 7
     assert HTTP_REQUEST_LOG_RECORD_ID_KEY in coerced.model_dump()
+    assert HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY not in coerced.model_dump()
     assert coerced.port is None
     assert coerced.coerce_schema_v1 is True
     assert coerced.ready_to_respond_at_unix_usec is None
     assert coerced.model_dump()[HTTP_REQUEST_LOG_PORT_KEY] is None
-    assert restored_coerced == coerced
+    assert restored_coerced == coerced.model_copy(
+        update={HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY: False}
+    )
 
 
 def test_invalid_schema_version_1_is_rejected_before_opt_in_migration() -> None:
@@ -499,6 +512,8 @@ def test_http_request_log_response_body_is_required_in_v1_and_nullable_in_v1_1(
 
         assert restored.response_body == response_body
         assert restored.schema_version == expected_schema_version
+        assert HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY not in record.model_dump()
+        assert restored.coerce_schema_v1 is False
     else:
         with pytest.raises(ValidationError) as raised:
             HttpRequestLogRecord.model_validate(value)
@@ -511,6 +526,68 @@ def test_http_request_log_response_body_is_required_in_v1_and_nullable_in_v1_1(
                 "input": None,
             }
         ]
+
+
+@pytest.mark.parametrize(
+    ("field", "error_type", "error_message"),
+    [
+        (
+            HTTP_REQUEST_LOG_RESPONSE_HEADERS_KEY,
+            "dict_type",
+            "Input should be a valid dictionary",
+        ),
+        (
+            HTTP_REQUEST_LOG_DURATION_USEC_KEY,
+            "int_type",
+            "Input should be a valid integer",
+        ),
+    ],
+)
+def test_http_request_log_response_metadata_is_nonnull_in_v1_and_nullable_in_v1_1(
+    field: str,
+    error_type: str,
+    error_message: str,
+) -> None:
+    version_1 = http_request_log_record(
+        schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION,
+        method="GET",
+        scheme="https",
+        host=TEST_HTTP_HOST,
+        path="/works/W123",
+        redacted_query="select=title&api_key=REDACTED",
+        response_code=200,
+        response_body="response",
+        received_at_unix_usec=123456,
+        duration_usec=789,
+    ).model_dump()
+    nullable_version_1_1 = version_1 | {
+        HTTP_REQUEST_LOG_SCHEMA_VERSION_KEY: KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
+        field: None,
+    }
+
+    record = HttpRequestLogRecord.model_validate(nullable_version_1_1)
+    restored = HttpRequestLogRecord.model_validate_json(record.model_dump_json())
+
+    assert record.model_dump()[field] is None
+    assert restored == record
+    for schema_version in (1, "1"):
+        for coerce_schema_v1 in (False, True):
+            invalid_version_1 = version_1 | {
+                HTTP_REQUEST_LOG_SCHEMA_VERSION_KEY: schema_version,
+                HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY: coerce_schema_v1,
+                field: None,
+            }
+            with pytest.raises(ValidationError) as raised:
+                HttpRequestLogRecord.model_validate(invalid_version_1)
+
+            assert raised.value.errors(include_url=False) == [
+                {
+                    "type": error_type,
+                    "loc": (field,),
+                    "msg": error_message,
+                    "input": None,
+                }
+            ]
 
 
 @pytest.mark.parametrize("coerce_schema_v1", [None, False, True])

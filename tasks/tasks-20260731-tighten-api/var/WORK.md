@@ -1,95 +1,92 @@
-# Tighten API: completion record
+# Tighten API: complete
 
-## Objective
+## Objective and disposition
 
-Bring `src/detours/detour_ai_augment/src` and its detour tests into full
-alignment with the reviewed, authoritative README workflow.
-
-## Constraints observed
-
-- Every command was run through `pixi run -e detour-ai-augment`.
-- `src.repl` was never run or imported; no data artifacts were inspected.
-- Git use remained read-only; nothing was staged or unstaged.
-- Human-signed inline comments were preserved.
-- Main-pipeline tests and schema-1 behavior were not changed.
+Aligned `src/detours/detour_ai_augment/src` and its tests with the latest
+authoritative README. The post-pull re-audit reopened TASK because Backend did
+not synchronize replay before every detour-DuckDB access and Dashboard DB reads
+used a hidden token-authenticated FastAPI route instead of the required
+host-private Flask/Unix-socket IPC. Both gaps are resolved.
 
 ## Completed implementation
 
-- **HTTP contract:** every finite public `GET /pull` and `POST /push`
-  exchange is assigned a Backend UUIDv7, validated as
-  `HttpRequestLogRecord(schema_version="1.1")`, and appended/fsynced before
-  send through the same durable function used for synthetic commit.
-- **Push state:** accepted push changes state to busy, persists `202` with
-  `Location: /pull`, exposes persisted `503`/ `Retry-After: 1` pulls while
-  busy, and starts post-accept processing only after the accepted record is
-  durable. The session UUID is read from stdin and required by the first push.
-- **Commit:** Backend copies the discovered session rollout to SHA-256 CAS,
-  reads exact appendwatch bytes, creates the exact unsent null-response
-  `POST http://invalid/commit` README contour, and appends/fsyncs it before
-  any domain, appendwatch, rollout-content, submission, or evidence validation.
-  A commit-append failure terminates the Backend process.
-- **Replay projection:** DuckDB synchronizes from replay JSONL plus referenced
-  rollout CAS, validates linkage and exact Structured Field headers, and
-  transactionally projects records, attempts, outcomes, and accepted domain
-  effects. Failed domain effects roll back while their committed record and
-  opaque outcome remain projected.
-- **Outcome pulls:** expected submission/evidence rejection produces persisted
-  `200 text/markdown` retry linkage; integrity/configuration/unexpected
-  failure produces persisted opaque `500`; acceptance produces persisted
-  `410 application/x-ndjson` with accepted innerdict first and optional
-  ground truth second.
-- **Startup:** fresh Backend state canonicalizes the selected environment
-  namekey, proves local appendwatch-report and remote Codex-session-directory
-  readability, acquires the replay lock, synchronizes projection, then starts
-  the stdin session reader.
-- **Dashboard:** queue and run events live only in NiceGUI
-  `app.storage.general`. Dequeue starts/replaces a namekey-configured fresh
-  Backend, starts a fresh `codex exec`, then supplies the discovered session
-  UUID to Backend stdin while Codex is already working. Backend sanction,
-  control-push, and control-commit machinery was removed.
-- **Surface:** OpenAPI advertises only public `/pull` and `/push`, including
-  async/poll statuses, and does not expose integrity internals. The hidden
-  read-only dashboard endpoint remains for attempt/card views.
-- **Documentation:** corrected the reviewed README appendwatch path to
-  `src/control_centre/appendwatch/appendwatch.py`.
+- Backend owns one persistent detour-DuckDB connection. Startup, replay append,
+  projected-outcome reads and Dashboard reads all pass through one locked
+  synchronization boundary that projects every unprojected replay record in
+  append order. Synchronization/recording failures fail Backend loudly.
+- Removed hidden `GET /_control/pull`, its bearer-style token and Backend-owned
+  Dashboard event models. Public FastAPI exposes only `/pull` and `/push`.
+- Added a separate Flask query application served on a mode-0600 Unix-domain
+  socket. Query failure calls `os._exit(1)`; startup/shutdown clean up the
+  server, socket, persistent DB connection and replay lock.
+- Dashboard uses an unauthenticated AF_UNIX HTTP client for Backend-owned
+  SELECT results. Backend readiness now proves both public pull and private
+  database IPC. Dashboard queue/run events remain NiceGUI-storage-only models.
+- Added Flask 3.1.2 to the detour feature and refreshed `pixi.lock` (Flask,
+  Werkzeug and Blinker present; `pixi lock --check` passes).
+- Kept the default web-search-language factory inline, with an explicit
+  `cast(list[TargetWebSearchQueryLanguage], ...)` to satisfy invariant-list
+  typing without an extra named helper.
+- The operator contour uses a per-run socket and asserts socket type, 0600 mode
+  and shutdown cleanup on the production host.
+- Rechecked the full synthetic commit contract. `coerce_schema_v1` is an input
+  migration flag and is always excluded from serialization after validation,
+  exactly matching README; schema 1 (`1` and `"1"`) and explicit v1 coercion
+  remain intact.
+- Schema 1.1 now permits nullable `response_headers` and `duration_usec`. The
+  unsent synthetic commit serializes both as null, completed public exchanges
+  still require both values, and schema 1 preserves its non-null contract.
+- Rechecked outcome classification: Pydantic and evidence-against-rollout
+  failures produce Markdown retry; rollout-index/integrity and appendwatch
+  failures remain opaque 500s.
+- Preserved human-signed comments and user staging. No stage/unstage command
+  was used; no main-pipeline behavior outside the HTTP schema contract changed.
 
-## Regression coverage
+## Added regression coverage
 
-- Durable before-send public recording and UUIDv7 identity.
-- Exact synthetic commit contour and strict header/base64 parsing.
-- Push busy/linkage/session behavior and background fatal handling.
-- Transaction rollback plus replay restart/projection synchronization.
-- Post-commit Markdown, opaque 500, and terminal 410 outcomes.
-- Startup input-readability proof and stdin session handoff.
-- Exact appendwatch filename/duplicate/ancestor-compromise behavior.
-- OpenAPI route/status contract.
-- Dashboard-only persisted queue, fresh Backend/Codex ordering, process
-  replacement, and stdin handoff.
-- Operator E2E contour rewritten to assert replay linkage, CAS metadata,
-  appendwatch topology, terminal output, and unchanged production data.
+- Persistent connection identity and synchronization of newly appended replay
+  before every Dashboard SELECT.
+- Absence of Dashboard query and `/_control` from public FastAPI.
+- Unauthenticated AF_UNIX Dashboard request.
+- Separate Flask app response, fatal query failure, real UDS round trip/mode/
+  cleanup, and refusal to overwrite a non-socket path.
+- Exact synthetic commit JSON contour and schema-1.1 serialization.
+- Explicit no-flag v1/v1.1 round trips and consumed coercion-flag round trip.
+- Native v1.1 null response-metadata round trips and v1 rejection for both
+  legacy schema-version spellings, with and without requested coercion.
+- Evidence Markdown versus rollout-index/appendwatch 500 classification.
+- Operator production-host Unix-socket assertions.
 
 ## Verification
 
-- `pixi run -e detour-ai-augment lint`: passed (Ruff; mypy over 92 files).
-- Non-root complete detour suite: **108 passed, 49 skipped**.
-- Real-API test: correctly skipped because `OPENALEX_API_KEY` is unavailable.
+- `pixi run -e detour-ai-augment lint`: passed (Ruff; mypy over 95 files).
+- Flask IPC module: **3 passed, 1 skipped**. Only the real bind round trip is
+  skipped because this managed Linux sandbox denies AF_UNIX `bind(2)` with
+  `EPERM`; Flask behavior and failure handling pass hermetically, while the
+  operator test retains the real production-host round trip/assertions.
+- Complete non-root detour suite: **116 passed, 50 skipped**.
+- Explicit detour real-API test: skipped because `OPENALEX_API_KEY` is absent.
+- `pixi lock --check`: passed.
 - `git diff --check`: passed.
-- Full `pre-commit` task was invoked but Pixi cannot resolve
-  `test-detour-mode0-econ-stats` from the `detour-ai-augment` feature
-  environment, despite that task existing only in its own feature.
-- Manual full-contour audit:
-  - repo lint passed;
-  - mode-3 detour: 6 passed;
-  - main pytest contour: 100 passed, 4 skipped, 34 environment failures from
-    unavailable `splink_udfs`/network and a host-only `/Volumes/...` fixture;
-  - step-4 failures likewise require unavailable `splink_udfs`;
-  - mode-0: 2 passed, 2 failed because managed sandboxing blocks the
-    Kaleido/Chromium `shutdown` syscall;
-  - official AI-augment root task cannot enter `sudo` under the container's
-    no-new-privileges flag; its equivalent non-root suite passed as above.
+- Final schema refinements: HTTP schema tests **28 passed**; Backend API tests
+  **47 passed, 36 skipped**; complete detour suite **116 passed, 50 skipped**;
+  lint passed again.
 
-## Status
+The official `pixi run -e detour-ai-augment pre-commit` was invoked but Pixi
+still cannot resolve cross-feature task `test-detour-mode0-econ-stats` from the
+AI-augment environment. Its contour was therefore executed manually:
 
-Implementation and change-related verification are complete. Remaining
-pre-commit failures are task-graph or execution-environment limitations, not
-failures in the detour changes.
+- repo lint: passed;
+- main tests: **100 passed, 4 skipped, 34 failed**; failures require unavailable
+  network/`splink_udfs`, except one host-only `/Volumes/...` fixture;
+- main real-API contour: **1 skipped, 137 deselected** (API key absent);
+- mode-3 detour: **6 passed**;
+- step-4 detour: **4 failed, 1 skipped**, all from unavailable `splink_udfs`;
+- mode-0 detour: **2 passed, 2 failed**, both because managed sandboxing blocks
+  Kaleido/Chromium `shutdown(2)`;
+- official AI-augment root task cannot enter `sudo` under the container's
+  no-new-privileges flag; its equivalent non-root suite passed as above.
+
+These are task-graph/execution-environment limitations, not failures in the
+AI-augment implementation. TASK is complete pending the normal human-operated
+operator E2E on its provisioned macOS/AIVM environment.

@@ -180,6 +180,9 @@ def isolated_lima_configuration(
     from src.detours.detour_ai_augment.src.control_centre.dashboard import (
         ui as control_ui,
     )
+    from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models import (
+        ai_augment_context,
+    )
 
     host_mount = tmp_path / TEST_LIMA_MOUNT_DIRECTORY
     report_path = host_mount / TEST_APPENDWATCH_RELATIVE_PATH
@@ -199,7 +202,7 @@ def isolated_lima_configuration(
         }),
         encoding=TEXT_ENCODING,
     )
-    monkeypatch.setattr(control_ui, "LIMA_CONFIG_PATH", lima_config_path)
+    monkeypatch.setattr(ai_augment_context, "LIMA_CONFIG_PATH", lima_config_path)
 
 
 @pytest.fixture(autouse=True)
