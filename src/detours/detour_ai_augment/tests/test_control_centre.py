@@ -354,6 +354,12 @@ async def test_execution_starts_fresh_backend_before_codex_and_hands_off_session
     assert [event.kind for event in subject._events].count(
         control_ui.RunEventKind.SESSION_DISCOVERED
     ) == 1
+    assert [event.kind for event in subject._events][-2:] == [
+        control_ui.RunEventKind.CODEX_EXITED,
+        control_ui.RunEventKind.COMPLETE,
+    ]
+    assert subject._runs[run_id].codex_exit_code == 0
+    assert subject._runs[run_id].status is control_ui.RunStatus.COMPLETE
 
 
 class FakeInputStream:

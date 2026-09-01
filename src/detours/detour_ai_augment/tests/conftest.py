@@ -18,9 +18,11 @@ DEPLOY_SCRIPT_PATH = (
     / "deploy.sh"
 )
 OPERATOR_MARKER = "operator"
+EXCLUDED_FROM_SUITES_MARKER = "excluded_from_suites"
 NEEDS_SUDO_MARKER = "needs_sudo"
 OPERATOR_REDEPLOY_OPTION = "always_redeploy"
 OPERATOR_YES_OPTION = "operator_yes"
+RUN_EXCLUDED_FROM_SUITES_OPTION = "run_excluded_from_suites"
 OPENALEX_API_KEY_ENV_NAME = "OPENALEX_API_KEY"
 REPOSITORY_ROOT_ENV_NAME = "REPO_DIR"
 AIVM_INSTANCE = "aivm"
@@ -71,8 +73,15 @@ OPERATOR_START_PROMPT = (
     "Note it will remain running after the tests. [y/N] "
 )
 OPERATOR_MARK_DESCRIPTION = "real operator-machine AIVM and full-stack contour"
+EXCLUDED_FROM_SUITES_MARK_DESCRIPTION = (
+    "excluded from default test suites; run only when explicitly requested"
+)
 NEEDS_SUDO_MARK_DESCRIPTION = "requires pytest to run with root privileges"
 OPERATOR_SKIP_REASON = "operator test (run with: pytest -m operator)"
+EXCLUDED_FROM_SUITES_SKIP_REASON = (
+    "excluded from default suites (run its node ID with "
+    "--run-excluded-from-suites and any required suite marker)"
+)
 OPERATOR_AIVM_UNAVAILABLE = (
     f"AIVM instance {AIVM_INSTANCE!r} is not running or reachable"
 )
@@ -145,12 +154,22 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         dest=OPERATOR_YES_OPTION,
         default=False,
     )
+    group.addoption(
+        "--run-excluded-from-suites",
+        action="store_true",
+        dest=RUN_EXCLUDED_FROM_SUITES_OPTION,
+        default=False,
+    )
 
 
 def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
         "markers",
         f"{OPERATOR_MARKER}: {OPERATOR_MARK_DESCRIPTION}",
+    )
+    config.addinivalue_line(
+        "markers",
+        f"{EXCLUDED_FROM_SUITES_MARKER}: {EXCLUDED_FROM_SUITES_MARK_DESCRIPTION}",
     )
     config.addinivalue_line(
         "markers",
@@ -174,6 +193,11 @@ def pytest_configure(config: pytest.Config) -> None:
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    if not config.getoption(RUN_EXCLUDED_FROM_SUITES_OPTION):
+        skip_excluded = pytest.mark.skip(reason=EXCLUDED_FROM_SUITES_SKIP_REASON)
+        for item in items:
+            if EXCLUDED_FROM_SUITES_MARKER in item.keywords:
+                item.add_marker(skip_excluded)
     if _operator_requested(config):
         return
     skip_operator = pytest.mark.skip(reason=OPERATOR_SKIP_REASON)

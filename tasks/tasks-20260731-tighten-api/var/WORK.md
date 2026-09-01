@@ -1,5 +1,28 @@
 # Tighten API: complete
 
+## Operator completion contour completed
+
+- README Workflow re-audit confirms that a persisted terminal `GET /pull ->
+  410 Gone` is not the final runtime boundary: the rollout continues until the
+  AI Agent Runtime actually encounters that response and stops.
+- Preserved the existing full-workflow test as `excluded_from_suites`; it
+  is skipped by default and can be selected explicitly with its node ID plus
+  `-m operator --run-excluded-from-suites`.
+- Added the default completion contour. It reuses the checkpoint's complete
+  queue/pull/push/commit/replay and artifact assertions, then waits for the
+  Control Centre grid to project `complete`, which follows Codex process exit.
+- A fresh Playwright session verifies the accepted attempt ID, attempt history,
+  rerun action, enabled card action, and nonempty rendered researcher card. The
+  test emits the full visible card text captured from the DOM between explicit
+  delimiters and reports queue-to-final-Playwright elapsed time.
+- Extended hermetic Control Centre coverage to require `CODEX_EXITED` directly
+  before `COMPLETE` and verify the projected exit code/final status.
+- Verification: targeted Control Centre modules **12 passed, 5 skipped**;
+  full unprivileged Detour task **121 passed, 48 skipped, 3 deselected** with
+  the expected no-key real-API skip; Ruff and mypy over 95 files, `pixi lock
+  --check`, and cached/uncached diff whitespace checks passed. The production
+  macOS/AIVM completion contour remains for the Human Operator to execute.
+
 ## Operator shutdown observability completed
 
 - Clarify and expose both shutdown layers: Control Centre's graceful ownership

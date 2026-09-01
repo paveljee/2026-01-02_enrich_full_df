@@ -22,7 +22,7 @@ from urllib import request as urllib_request
 import duckdb
 import psutil
 import pytest
-from playwright.sync_api import ViewportSize, expect, sync_playwright
+from playwright.sync_api import Locator, Page, ViewportSize, expect, sync_playwright
 
 from src.detours.detour_ai_augment.src.backend import api as backend_api
 from src.detours.detour_ai_augment.src.control_centre.dashboard import ui as control_ui
@@ -60,11 +60,14 @@ BROWSER_ASSERTION_TIMEOUT_MILLISECONDS = 30_000
 BROWSER_VIEWPORT: ViewportSize = {"width": 1_600, "height": 1_000}
 BROWSER_CHANNEL = "chrome"
 GRID_ROW_SELECTOR = ".ag-center-cols-container .ag-row"
+ATTEMPT_HISTORY_ROW_SELECTOR = "tbody tr"
 OPERATOR_TARGET_DRAW_NUMBER = "146"
 DARWIN_AF_UNIX_PATH_CAPACITY_BYTES = 104
 PYTEST_CURRENT_TEST_ENV_NAME = "PYTEST_CURRENT_TEST"
 OPERATOR_LIVE_OUTPUT = sys.__stdout__ or sys.stdout
 FAILED_RUN_LOG_PREFIX = f"{control_ui.Locale.CONTROL_CENTRE_LOG_PREFIX} run failed:"
+RESEARCHER_CARD_BEGIN = "Playwright researcher card begin"
+RESEARCHER_CARD_END = "Playwright researcher card end"
 
 pytestmark = pytest.mark.operator
 
@@ -76,6 +79,12 @@ class OperatorRuntime:
     replay_log_path: Path
     rollout_cas_dir: Path
     dashboard_socket_path: Path
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalWorkflowCheckpoint:
+    records: tuple[HttpRequestLogRecord, ...]
+    queued_at_monotonic: float
 
 
 @dataclass(slots=True)
@@ -448,8 +457,9 @@ def target_namekey(runtime: OperatorRuntime) -> control_ui.Namekey:
     return namekey
 
 
-def queue_in_browser(namekey: control_ui.Namekey) -> None:
+def queue_in_browser(namekey: control_ui.Namekey) -> float:
     _operator_log("opening the Control Centre in Playwright")
+    queued_at_monotonic: float | None = None
     with sync_playwright() as playwright:
         browser = None
         try:
@@ -465,12 +475,16 @@ def queue_in_browser(namekey: control_ui.Namekey) -> None:
             rows.first.click()
             execute = page.get_by_test_id(control_ui.EXECUTE_ACTION_TEST_ID)
             expect(execute).to_be_enabled()
+            queued_at_monotonic = time.monotonic()
             execute.click()
             _operator_log("queued the workflow through the browser")
         finally:
             if browser is not None:
                 browser.close()
             _operator_log("closed the operator-test browser")
+    if queued_at_monotonic is None:
+        raise RuntimeError("operator workflow was not queued")
+    return queued_at_monotonic
 
 
 def authoritative_records(path: Path) -> tuple[HttpRequestLogRecord, ...]:
@@ -481,6 +495,16 @@ def authoritative_records(path: Path) -> tuple[HttpRequestLogRecord, ...]:
         for line in path.read_bytes().splitlines()
         if line
     )
+
+
+def raise_for_dashboard_failure(dashboard: DashboardProcess) -> None:
+    if dashboard.process.poll() is not None:
+        raise RuntimeError("dashboard exited:\n" + "".join(dashboard.output))
+    failed_run_lines = [
+        line for line in dashboard.output if line.startswith(FAILED_RUN_LOG_PREFIX)
+    ]
+    if failed_run_lines:
+        raise RuntimeError("workflow failed:\n" + "".join(failed_run_lines))
 
 
 def wait_for_terminal_pull(
@@ -495,13 +519,7 @@ def wait_for_terminal_pull(
     previous_exchange: tuple[str, str, int | None] | None = None
     _operator_log("authoritative request log initially contains 0 record(s)")
     while time.monotonic() < deadline:
-        if dashboard.process.poll() is not None:
-            raise RuntimeError("dashboard exited:\n" + "".join(dashboard.output))
-        failed_run_lines = [
-            line for line in dashboard.output if line.startswith(FAILED_RUN_LOG_PREFIX)
-        ]
-        if failed_run_lines:
-            raise RuntimeError("workflow failed:\n" + "".join(failed_run_lines))
+        raise_for_dashboard_failure(dashboard)
         records = authoritative_records(runtime.replay_log_path)
         for record in records[previous_record_count:]:
             exchange = (record.method, record.path, record.response_code)
@@ -538,6 +556,138 @@ def wait_for_terminal_pull(
     raise TimeoutError("workflow did not reach terminal pull:\n" + "".join(dashboard.output))
 
 
+def run_workflow_to_terminal_pull(
+    runtime: OperatorRuntime,
+    dashboard: DashboardProcess,
+    namekey: control_ui.Namekey,
+) -> TerminalWorkflowCheckpoint:
+    queued_at_monotonic = queue_in_browser(namekey)
+    records = wait_for_terminal_pull(runtime, dashboard)
+    assert stat.S_ISSOCK(runtime.dashboard_socket_path.stat().st_mode)
+    assert stat.S_IMODE(runtime.dashboard_socket_path.stat().st_mode) == 0o600
+    return TerminalWorkflowCheckpoint(
+        records=records,
+        queued_at_monotonic=queued_at_monotonic,
+    )
+
+
+def wait_for_completed_grid_row(
+    page: Page,
+    dashboard: DashboardProcess,
+    *,
+    queued_at_monotonic: float,
+) -> Locator:
+    rows = page.get_by_test_id(control_ui.RESEARCHER_GRID_TEST_ID).locator(
+        GRID_ROW_SELECTOR
+    )
+    expect(rows).to_have_count(1)
+    row = rows.first
+    status_cell = row.locator(f'[col-id="{control_ui.GRID_STATUS_FIELD}"]')
+    expect(status_cell).to_be_visible()
+    deadline = queued_at_monotonic + FULL_WORKFLOW_TIMEOUT_SECONDS
+    next_heartbeat = time.monotonic() + OPERATOR_HEARTBEAT_SECONDS
+    previous_status: str | None = None
+    while time.monotonic() < deadline:
+        raise_for_dashboard_failure(dashboard)
+        current_status = status_cell.inner_text().strip()
+        if current_status != previous_status:
+            _operator_log(f"Control Centre grid reports workflow status {current_status!r}")
+            previous_status = current_status
+        if current_status == control_ui.RunStatus.COMPLETE.value:
+            _operator_log("Control Centre projected the completed post-Codex run")
+            return row
+        if current_status in {
+            control_ui.RunStatus.FAILED.value,
+            control_ui.RunStatus.CANCELED.value,
+        }:
+            raise RuntimeError(
+                f"Control Centre projected terminal workflow status {current_status!r}"
+            )
+        now = time.monotonic()
+        if now >= next_heartbeat:
+            _operator_log(
+                "waiting for Codex to exit and Control Centre to complete the run "
+                f"({now - queued_at_monotonic:.0f}s elapsed)"
+            )
+            next_heartbeat = now + OPERATOR_HEARTBEAT_SECONDS
+        page.wait_for_timeout(round(PROCESS_POLL_SECONDS * 1_000))
+    raise TimeoutError(
+        "workflow did not reach the completed Control Centre state:\n"
+        + "".join(dashboard.output)
+    )
+
+
+def capture_completed_researcher_card(
+    dashboard: DashboardProcess,
+    *,
+    namekey: control_ui.Namekey,
+    queued_at_monotonic: float,
+) -> str:
+    _operator_log("opening the completed workflow in Playwright")
+    with sync_playwright() as playwright:
+        browser = None
+        try:
+            browser = playwright.chromium.launch(channel=BROWSER_CHANNEL, headless=True)
+            page = browser.new_page(viewport=BROWSER_VIEWPORT)
+            page.set_default_timeout(BROWSER_ASSERTION_TIMEOUT_MILLISECONDS)
+            browser_errors: list[str] = []
+            page.on(
+                "console",
+                lambda message: (
+                    browser_errors.append(message.text)
+                    if message.type == "error"
+                    else None
+                ),
+            )
+            page.on("pageerror", lambda error: browser_errors.append(str(error)))
+            page.goto(CONTROL_CENTRE_URL, wait_until="networkidle")
+            page.get_by_label(control_ui.Locale.SEARCH_FILTER).fill(namekey)
+            row = wait_for_completed_grid_row(
+                page,
+                dashboard,
+                queued_at_monotonic=queued_at_monotonic,
+            )
+            attempt_id = row.locator(
+                f'[col-id="{control_ui.GRID_ATTEMPT_ID_FIELD}"]'
+            ).inner_text().strip()
+            if not attempt_id:
+                raise RuntimeError("completed Control Centre row has no accepted attempt ID")
+            row.click()
+            history = page.get_by_test_id(control_ui.ATTEMPT_HISTORY_TABLE_TEST_ID)
+            expect(history).to_be_visible()
+            expect(history.locator(ATTEMPT_HISTORY_ROW_SELECTOR)).not_to_have_count(0)
+            execute = page.get_by_test_id(control_ui.EXECUTE_ACTION_TEST_ID)
+            expect(execute).to_have_text(
+                control_ui.ACTION_LABEL_BY_VALUE[control_ui.RunAction.RERUN.value]
+            )
+            view_card = page.get_by_test_id(control_ui.VIEW_CARD_TEST_ID)
+            expect(view_card).to_be_enabled()
+            view_card.click()
+            card = page.get_by_test_id(control_ui.PAGE_FOOTER_TEST_ID)
+            expect(card).not_to_have_text("")
+            card_text = card.inner_text().strip()
+            if not card_text:
+                raise RuntimeError("Playwright captured an empty researcher card")
+            assert browser_errors == []
+            _operator_log(
+                "Playwright confirmed the completed attempt and captured its researcher card"
+            )
+            return card_text
+        finally:
+            if browser is not None:
+                browser.close()
+            _operator_log("closed the completed-workflow browser")
+
+
+def emit_researcher_card(card_text: str) -> None:
+    OPERATOR_LIVE_OUTPUT.write(
+        f"\n[operator-test] {RESEARCHER_CARD_BEGIN}\n"
+        f"{card_text}\n"
+        f"[operator-test] {RESEARCHER_CARD_END}\n"
+    )
+    OPERATOR_LIVE_OUTPUT.flush()
+
+
 def _record_ordinal(
     records: Sequence[HttpRequestLogRecord],
     record_id: object,
@@ -562,18 +712,10 @@ def test_existing_aivm_exposes_the_persisted_appendwatch_topology(
     _operator_log("deployed appendwatch topology is readable")
 
 
-def test_complete_dashboard_backend_codex_commit_and_replay_workflow(
+def validate_workflow_artifacts(
     operator_runtime: OperatorRuntime,
+    records: Sequence[HttpRequestLogRecord],
 ) -> None:
-    _operator_log("preparing isolated full-workflow runtime")
-    namekey = target_namekey(operator_runtime)
-
-    with running_dashboard(operator_runtime) as dashboard:
-        queue_in_browser(namekey)
-        records = wait_for_terminal_pull(operator_runtime, dashboard)
-        assert stat.S_ISSOCK(operator_runtime.dashboard_socket_path.stat().st_mode)
-        assert stat.S_IMODE(operator_runtime.dashboard_socket_path.stat().st_mode) == 0o600
-
     _operator_log("validating authoritative workflow artifacts")
     assert not operator_runtime.dashboard_socket_path.exists()
 
@@ -637,3 +779,47 @@ def test_complete_dashboard_backend_codex_commit_and_replay_workflow(
     assert terminal_pull.response_body
     assert json.loads(terminal_pull.response_body.splitlines()[0])
     _operator_log("full operator workflow contract validated")
+
+
+@pytest.mark.excluded_from_suites
+def test_complete_dashboard_backend_codex_commit_and_replay_workflow(
+    operator_runtime: OperatorRuntime,
+) -> None:
+    _operator_log("preparing isolated durable-410 checkpoint runtime")
+    namekey = target_namekey(operator_runtime)
+
+    with running_dashboard(operator_runtime) as dashboard:
+        checkpoint = run_workflow_to_terminal_pull(
+            operator_runtime,
+            dashboard,
+            namekey,
+        )
+
+    validate_workflow_artifacts(operator_runtime, checkpoint.records)
+
+
+def test_completed_dashboard_backend_codex_workflow_renders_researcher_card(
+    operator_runtime: OperatorRuntime,
+) -> None:
+    _operator_log("preparing isolated completed-workflow runtime")
+    namekey = target_namekey(operator_runtime)
+
+    with running_dashboard(operator_runtime) as dashboard:
+        checkpoint = run_workflow_to_terminal_pull(
+            operator_runtime,
+            dashboard,
+            namekey,
+        )
+        card_text = capture_completed_researcher_card(
+            dashboard,
+            namekey=namekey,
+            queued_at_monotonic=checkpoint.queued_at_monotonic,
+        )
+        elapsed_seconds = time.monotonic() - checkpoint.queued_at_monotonic
+
+    validate_workflow_artifacts(operator_runtime, checkpoint.records)
+    emit_researcher_card(card_text)
+    _operator_log(
+        "full end-to-end execution elapsed time from queue submission through "
+        f"final Playwright verification: {elapsed_seconds:.3f}s"
+    )
