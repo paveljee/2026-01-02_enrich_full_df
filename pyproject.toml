@@ -236,11 +236,17 @@ depends-on = [
     "test-detour-step4-breakdown",
     "test-detour-mode3-pgf-stats",
     "test-detour-mode0-econ-stats",
-    "test-detour-ai-augment-non-root",
+    "test-detour-ai-augment",
     "test-detour-ai-augment-root",
 ]
 
 [tool.pixi.tasks.pre-commit]
+# note that the below cmd is only
+# executed if all depends-on pass
+cmd = """
+echo "NOTE: Operator tests need to be run separately \
+with pre-commit-operator"
+"""
 depends-on = [
   { task = "lint" },  # lint all across repo
   { task = "test-repl" },
@@ -323,14 +329,19 @@ print(dotenv_values(env_path).get("OPENALEX_API_KEY", ""), end="")
 #serve = "cd /tmp/detour-api-9a187d3 && uvicorn src.detours.detour_ai_augment.src.backend.api:app --host 0.0.0.0 --port 8000"
 # don't forget to clean up afterwards:
 # rm -f /tmp/detour-api-9a187d3
-test-detour-ai-augment-non-root = """
-APPENDWATCH_SCRIPT="$PIXI_PROJECT_ROOT/src/detours/detour_ai_augment/src/control_centre/appendwatch/appendwatch.py" \
-APPENDWATCH_PYTHON="/usr/bin/python3" \
-PLAYWRIGHT_BROWSERS_PATH="$HOME/.cache/ms-playwright" \
+test-detour-ai-augment = """
+bash -c '
+export APPENDWATCH_SCRIPT="$PIXI_PROJECT_ROOT/src/detours/detour_ai_augment/src/control_centre/appendwatch/appendwatch.py"
+export APPENDWATCH_PYTHON="/usr/bin/python3"
+export PLAYWRIGHT_BROWSERS_PATH="$HOME/.cache/ms-playwright"
 "$CONDA_PREFIX/bin/python" -m pytest -vv -srA -m "not needs_sudo" \
   src/detours/detour_ai_augment/tests && \
 "$CONDA_PREFIX/bin/python" -m pytest -vv -srA -m real_api \
   src/detours/detour_ai_augment/tests/test_pydantic_to_paste.py::test_academic_institution_round_trips_against_real_apis
+status=$?
+echo "NOTE: root tests need to be run separately with test-detour-ai-augment-root"
+exit "$status"
+'
 """
 test-detour-ai-augment-root = """
 sudo env \
