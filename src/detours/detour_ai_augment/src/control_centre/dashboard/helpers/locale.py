@@ -138,5 +138,23 @@ class Locale:
     RUN_FAILED_LOG_TEMPLATE: Final = (
         "run failed: run_id={run_id} namekey={namekey} detail={detail}"
     )
+    BACKEND_STOPPING_LOG_TEMPLATE: Final = "stopping Backend process: pid={pid}"
+    BACKEND_STOPPED_LOG_TEMPLATE: Final = (
+        "Backend process stopped: pid={pid} return_code={return_code}"
+    )
+    CODEX_REMOTE_STOPPING_LOG_TEMPLATE: Final = (
+        "stopping recorded remote Codex process: run_id={run_id} "
+        "session_id={session_id} remote_pid={remote_pid}"
+    )
+    CODEX_REMOTE_STOPPED_LOG_TEMPLATE: Final = (
+        "recorded remote Codex process stopped: run_id={run_id} remote_pid={remote_pid}"
+    )
+    CODEX_SSH_STOPPING_LOG_TEMPLATE: Final = (
+        "stopping local Codex SSH process: run_id={run_id} pid={pid}"
+    )
+    CODEX_SSH_STOPPED_LOG_TEMPLATE: Final = (
+        "local Codex SSH process stopped: run_id={run_id} pid={pid} "
+        "return_code={return_code}"
+    )
     STOPPING_LOG: Final = "stopping"
     STOPPED_LOG: Final = "stopped"

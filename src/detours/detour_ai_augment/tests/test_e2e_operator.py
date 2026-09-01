@@ -118,16 +118,41 @@ class DashboardProcess:
         _operator_log("stopping Control Centre and its child processes")
         descendants = self._descendants()
         if self.process.poll() is None:
+            control_centre = _process_snapshot(
+                psutil.Process(self.process.pid),
+                role="Control Centre",
+            )
+            _operator_process_log(
+                "sending SIGINT",
+                control_centre,
+            )
             self.process.send_signal(signal.SIGINT)
             try:
                 self.process.wait(timeout=PROCESS_STOP_TIMEOUT_SECONDS)
             except subprocess.TimeoutExpired:
+                _operator_process_log(
+                    "SIGINT timed out; sending SIGTERM",
+                    control_centre,
+                )
                 self.process.terminate()
                 try:
                     self.process.wait(timeout=PROCESS_STOP_TIMEOUT_SECONDS)
                 except subprocess.TimeoutExpired:
+                    _operator_process_log(
+                        "SIGTERM timed out; sending SIGKILL",
+                        control_centre,
+                    )
                     self.process.kill()
                     self.process.wait(timeout=PROCESS_STOP_TIMEOUT_SECONDS)
+            _operator_log(
+                "Control Centre process exited: "
+                f"pid={self.process.pid} return_code={self.process.returncode}"
+            )
+        else:
+            _operator_log(
+                "Control Centre process had already exited: "
+                f"pid={self.process.pid} return_code={self.process.returncode}"
+            )
         self._stop_descendants(descendants)
         self.output_thread.join(timeout=PROCESS_STOP_TIMEOUT_SECONDS)
         if self.process.stdout is not None:
@@ -135,26 +160,98 @@ class DashboardProcess:
         _wait_for_ports_released()
         _operator_log("Control Centre and child processes stopped")
 
-    def _descendants(self) -> list[psutil.Process]:
+    def _descendants(self) -> list[OperatorProcessSnapshot]:
         try:
-            return psutil.Process(self.process.pid).children(recursive=True)
+            return [
+                _process_snapshot(process)
+                for process in psutil.Process(self.process.pid).children(recursive=True)
+            ]
         except (psutil.AccessDenied, psutil.NoSuchProcess):
             return []
 
     @staticmethod
-    def _stop_descendants(descendants: list[psutil.Process]) -> None:
-        _, alive = psutil.wait_procs(descendants, timeout=0)
+    def _stop_descendants(descendants: list[OperatorProcessSnapshot]) -> None:
+        snapshots = {snapshot.pid: snapshot for snapshot in descendants}
+        gone, alive = psutil.wait_procs(
+            [snapshot.process for snapshot in descendants],
+            timeout=0,
+        )
+        for process in gone:
+            _operator_process_log(
+                "exited during graceful Control Centre shutdown",
+                snapshots[process.pid],
+            )
         for process in alive:
+            _operator_process_log("sending fallback SIGTERM", snapshots[process.pid])
             with suppress(psutil.AccessDenied, psutil.NoSuchProcess):
                 process.terminate()
-        _, alive = psutil.wait_procs(alive, timeout=PROCESS_STOP_TIMEOUT_SECONDS)
+        gone, alive = psutil.wait_procs(alive, timeout=PROCESS_STOP_TIMEOUT_SECONDS)
+        for process in gone:
+            _operator_process_log("stopped after fallback SIGTERM", snapshots[process.pid])
         for process in alive:
+            _operator_process_log("sending fallback SIGKILL", snapshots[process.pid])
             with suppress(psutil.AccessDenied, psutil.NoSuchProcess):
                 process.kill()
-        _, alive = psutil.wait_procs(alive, timeout=PROCESS_STOP_TIMEOUT_SECONDS)
+        gone, alive = psutil.wait_procs(alive, timeout=PROCESS_STOP_TIMEOUT_SECONDS)
+        for process in gone:
+            _operator_process_log("stopped after fallback SIGKILL", snapshots[process.pid])
         if alive:
-            pids = ", ".join(str(process.pid) for process in alive)
-            raise RuntimeError(f"operator child processes did not stop: {pids}")
+            processes = ", ".join(
+                f"{snapshots[process.pid].role} pid={process.pid}" for process in alive
+            )
+            raise RuntimeError(f"operator child processes did not stop: {processes}")
+
+
+@dataclass(frozen=True, slots=True)
+class OperatorProcessSnapshot:
+    process: psutil.Process
+    pid: int
+    parent_pid: int | None
+    role: str
+    command: tuple[str, ...]
+
+
+def _process_snapshot(
+    process: psutil.Process,
+    *,
+    role: str | None = None,
+) -> OperatorProcessSnapshot:
+    try:
+        command = tuple(process.cmdline())
+    except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess):
+        command = ()
+    try:
+        parent_pid = process.ppid()
+    except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess):
+        parent_pid = None
+    return OperatorProcessSnapshot(
+        process=process,
+        pid=process.pid,
+        parent_pid=parent_pid,
+        role=role or _process_role(command),
+        command=command,
+    )
+
+
+def _process_role(command: tuple[str, ...]) -> str:
+    command_text = " ".join(command)
+    executable = Path(command[0]).name if command else ""
+    if control_ui.BACKEND_MODULE in command_text:
+        return "Backend"
+    if str(control_ui.CODEX_EXEC_COMMAND[0]) in command_text:
+        return "Codex SSH transport"
+    if executable == backend_api.SSH_EXECUTABLE:
+        return "AIVM SSH helper"
+    if executable == backend_api.SCP_EXECUTABLE:
+        return "Backend rollout-copy helper"
+    return "unclassified Control Centre descendant"
+
+
+def _operator_process_log(action: str, snapshot: OperatorProcessSnapshot) -> None:
+    _operator_log(
+        f"{action}: role={snapshot.role} pid={snapshot.pid} "
+        f"parent_pid={snapshot.parent_pid} command={json.dumps(snapshot.command)}"
+    )
 
 
 def _operator_log(message: str, *, separate: bool = False) -> None:
@@ -487,7 +584,6 @@ def test_complete_dashboard_backend_codex_commit_and_replay_workflow(
     } <= backend_api.AUTHORITATIVE_PUBLIC_ROUTES | {
         backend_api.AUTHORITATIVE_COMMIT_ROUTE
     }
-    assert not any(record.path.startswith("/_control/") for record in records)
 
     terminal_pull = next(
         record

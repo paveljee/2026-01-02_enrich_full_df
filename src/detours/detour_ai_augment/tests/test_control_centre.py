@@ -384,6 +384,7 @@ class EmptyAsyncLines:
 
 class FakeProcess:
     def __init__(self) -> None:
+        self.pid = 12345
         self.stdin = FakeInputStream()
         self.stdout = EmptyAsyncLines()
         self.returncode: int | None = None
@@ -569,3 +570,44 @@ async def test_codex_runner_starts_fresh_exec_process_and_sends_only_openapi_url
         [f"{control_ui.BACKEND_OPENAPI_URL}\n".encode()],
         [f"{control_ui.BACKEND_OPENAPI_URL}\n".encode()],
     ]
+
+
+@pytest.mark.anyio
+async def test_codex_cancel_logs_recorded_remote_and_local_processes(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    run_id = UUID("019fb000-0000-7000-8000-000000000002")
+    remote_pid = control_ui.RemotePid(67890)
+    process = FakeProcess()
+    runner = control_ui.CodexRunner(
+        timezone=ZoneInfo("UTC"),
+        openalex_api_key="key",
+    )
+
+    async def terminate_remote_pid(value: control_ui.RemotePid) -> None:
+        assert value == remote_pid
+
+    monkeypatch.setattr(runner, "terminate_remote_pid", terminate_remote_pid)
+    handle = control_ui.CodexProcessHandle(
+        run_id=run_id,
+        process=cast(Any, process),
+        remote_pid=remote_pid,
+        session_id=SESSION_ID,
+    )
+
+    await runner.cancel(handle)
+
+    assert capsys.readouterr().out == (
+        f"{control_ui.Locale.CONTROL_CENTRE_LOG_PREFIX} "
+        "stopping recorded remote Codex process: "
+        f"run_id={run_id} session_id={SESSION_ID} remote_pid={remote_pid}\n"
+        f"{control_ui.Locale.CONTROL_CENTRE_LOG_PREFIX} "
+        "recorded remote Codex process stopped: "
+        f"run_id={run_id} remote_pid={remote_pid}\n"
+        f"{control_ui.Locale.CONTROL_CENTRE_LOG_PREFIX} "
+        f"stopping local Codex SSH process: run_id={run_id} pid={process.pid}\n"
+        f"{control_ui.Locale.CONTROL_CENTRE_LOG_PREFIX} "
+        f"local Codex SSH process stopped: run_id={run_id} pid={process.pid} "
+        f"return_code={process.returncode}\n"
+    )

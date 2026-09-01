@@ -1,5 +1,19 @@
 # Tighten API: complete
 
+## Operator shutdown observability completed
+
+- Clarify and expose both shutdown layers: Control Centre's graceful ownership
+  of Backend and the active recorded Codex run, followed by the operator
+  harness's host-descendant fallback cleanup.
+- Add PID/role/command logs for the Control Centre and every snapshotted local
+  descendant, plus run/session/local-SSH/remote-PID logs for Codex cancellation.
+- Preserve the fact that Lima/AIVM is not stopped and Playwright is closed by a
+  separate browser-finally path.
+- Added an exact unit test for recorded remote-Codex/local-SSH cancellation
+  logs. Control Centre tests **12 passed**; full non-root detour task **121
+  passed, 47 skipped, 3 deselected**, followed by the expected real-API skip;
+  Ruff and mypy over 95 files passed.
+
 ## Latest operator E2E failure resolved
 
 - The macOS operator contour now starts Backend and its short Unix socket, but

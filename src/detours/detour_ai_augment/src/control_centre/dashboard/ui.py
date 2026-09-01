@@ -983,6 +983,10 @@ class BackendSupervisor:
             self._status = BackendStatus.STOPPED
             return
         process = self._process.process
+        emit_log(
+            Locale.CONTROL_CENTRE_LOG_PREFIX,
+            Locale.BACKEND_STOPPING_LOG_TEMPLATE.format(pid=process.pid),
+        )
         if process.returncode is None:
             process.terminate()
             try:
@@ -994,6 +998,13 @@ class BackendSupervisor:
                 process.kill()
                 await process.wait()
         await self._process.log_task
+        emit_log(
+            Locale.CONTROL_CENTRE_LOG_PREFIX,
+            Locale.BACKEND_STOPPED_LOG_TEMPLATE.format(
+                pid=process.pid,
+                return_code=process.returncode,
+            ),
+        )
         self._process = None
         self._status = BackendStatus.STOPPED
 
@@ -1274,13 +1285,43 @@ class CodexRunner:
         try:
             remote_pid = await self._remote_pid_for_cancel(handle)
             if remote_pid is not None:
+                emit_log(
+                    Locale.CONTROL_CENTRE_LOG_PREFIX,
+                    Locale.CODEX_REMOTE_STOPPING_LOG_TEMPLATE.format(
+                        run_id=handle.run_id,
+                        session_id=handle.session_id,
+                        remote_pid=remote_pid,
+                    ),
+                )
                 await self.terminate_remote_pid(remote_pid)
+                emit_log(
+                    Locale.CONTROL_CENTRE_LOG_PREFIX,
+                    Locale.CODEX_REMOTE_STOPPED_LOG_TEMPLATE.format(
+                        run_id=handle.run_id,
+                        remote_pid=remote_pid,
+                    ),
+                )
             elif handle.process.returncode is None:
                 raise RuntimeError(Locale.CODEX_REMOTE_PID_MISSING)
         except Exception as exc:
             remote_error = exc
         finally:
+            emit_log(
+                Locale.CONTROL_CENTRE_LOG_PREFIX,
+                Locale.CODEX_SSH_STOPPING_LOG_TEMPLATE.format(
+                    run_id=handle.run_id,
+                    pid=handle.process.pid,
+                ),
+            )
             await self._stop_process(handle.process)
+            emit_log(
+                Locale.CONTROL_CENTRE_LOG_PREFIX,
+                Locale.CODEX_SSH_STOPPED_LOG_TEMPLATE.format(
+                    run_id=handle.run_id,
+                    pid=handle.process.pid,
+                    return_code=handle.process.returncode,
+                ),
+            )
         if handle.process.returncode is None:
             raise RuntimeError(Locale.CODEX_SSH_DID_NOT_EXIT)
         if remote_error is not None:
