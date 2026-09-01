@@ -5737,7 +5737,7 @@ def dashboard_query_payload(namekey: str | None = None) -> str:
 
 
 def start_dashboard_query_server() -> object:
-    from .dashboard_ipc import create_dashboard_query_app, start_dashboard_ipc_server
+    from .ipc import create_dashboard_query_app, start_dashboard_ipc_server
 
     dashboard_app = create_dashboard_query_app(
         dashboard_query_payload,
@@ -5748,7 +5748,7 @@ def start_dashboard_query_server() -> object:
 
 
 def stop_dashboard_query_server(handle: object) -> None:
-    from .dashboard_ipc import stop_dashboard_ipc_server
+    from .ipc import stop_dashboard_ipc_server
 
     stop_dashboard_ipc_server(cast(Any, handle))
 

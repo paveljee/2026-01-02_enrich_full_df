@@ -7,7 +7,7 @@ from typing import NoReturn
 import pytest
 
 from src.detours.detour_ai_augment.src.backend import api
-from src.detours.detour_ai_augment.src.backend.dashboard_ipc import (
+from src.detours.detour_ai_augment.src.backend.ipc import (
     JSON_MEDIA_TYPE,
     SOCKET_PERMISSIONS,
     create_dashboard_query_app,
