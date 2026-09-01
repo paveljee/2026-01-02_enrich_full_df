@@ -2,6 +2,9 @@
 
 ## Operator completion contour completed
 
+- The operator Pixi task now passes the repository `.env` OpenAlex key into
+  pytest for host-side AIVM redeployment. Runtime preflight still independently
+  reads and verifies the provisioned guest key.
 - README Workflow re-audit confirms that a persisted terminal `GET /pull ->
   410 Gone` is not the final runtime boundary: the rollout continues until the
   AI Agent Runtime actually encounters that response and stops.

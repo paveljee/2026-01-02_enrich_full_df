@@ -411,7 +411,13 @@ sudo env \
   src/detours/detour_ai_augment/tests
 """
 test-detour-ai-augment-operator = """
-"$CONDA_PREFIX/bin/python" -m pytest -vv -srA --capture=tee-sys -m operator \
+OPENALEX_API_KEY="$(python -c '
+import os
+from dotenv import dotenv_values
+
+env_path = os.path.join(os.getenv("PIXI_PROJECT_ROOT"), ".env")
+print(dotenv_values(env_path).get("OPENALEX_API_KEY", ""), end="")
+')" "$CONDA_PREFIX/bin/python" -m pytest -vv -srA --capture=tee-sys -m operator \
   src/detours/detour_ai_augment/tests/test_e2e_operator.py
 """
 
