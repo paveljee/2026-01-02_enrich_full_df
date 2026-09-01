@@ -277,19 +277,49 @@ depends-on = [
     "test-detour-ai-augment-operator",
 ]
 
+[tool.pixi.tasks.pre-commit-extra-operator]
+cwd = "."
+# run all in lima except operator tests.
+# using bash -c so that pixi does not
+# exit on first failed command.
+cmd = """
+bash -c '
+  limactl shell aicode -- bash -c '"'"'
+    export PATH="$HOME/.pixi/bin:$PATH"
+    script -e -c "
+      {
+        pixi run test-repl-extra &&
+        pixi run test-detour-ai-augment-root
+      } 2>&1
+    " logs/pre-commit-extra.log &&
+    grep -q "FAILED" logs/pre-commit.log &&
+    echo "grep: no FAILED"
+  '"'"'
+  # note the use of BSD-style script on macOS
+  script -a \
+    logs/pre-commit-extra.log \
+    bash -c '"'"'pixi run test-detour-ai-augment-operator 2>&1'"'"'
+'
+"""
+
 [tool.pixi.tasks.pre-commit-operator]
 cwd = "."
+# run all in lima except operator tests.
+# using bash -c so that pixi does not
+# exit on first failed command.
 cmd = """
-limactl shell aicode -- bash -c '
-  export PATH="$HOME/.pixi/bin:$PATH"
-  script -e -c "
-    {
-      pixi run pre-commit &&
-      pixi run pre-commit-extra
-    } 2>&1
-  " logs/pre-commit.log &&
-  grep -q "FAILED" logs/pre-commit.log &&
-  echo "grep: no FAILED"
+bash -c '
+  limactl shell aicode -- bash -c '"'"'
+    export PATH="$HOME/.pixi/bin:$PATH"
+    script -e -c "
+      {
+        pixi run pre-commit
+      } 2>&1
+    " logs/pre-commit.log &&
+    grep -q "FAILED" logs/pre-commit.log &&
+    echo "grep: no FAILED"
+  '"'"'
+  pixi run pre-commit-extra-operator
 '
 """
 
