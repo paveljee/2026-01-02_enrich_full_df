@@ -39,6 +39,10 @@ host-private Flask/Unix-socket IPC. Both gaps are resolved.
 - Operator teardown isolates the Control Centre from the terminal's Ctrl+C,
   then stops it explicitly, reaps surviving local descendants, verifies both
   service ports were released, and closes Playwright in a `finally` block.
+- Operator dashboard IPC now uses a unique short mode-0700 directory beneath
+  `/tmp`, keeping its socket address below Darwin's AF_UNIX path capacity while
+  preserving the normal-shutdown socket-removal assertion and failure/Ctrl+C
+  cleanup.
 - Registered `needs_sudo` in the detour conftest and applied it only to the
   three real appendwatch EACCES tests. The existing root task runs every test
   carrying that marker from the whole detour test directory; a sibling task

@@ -8,6 +8,7 @@ import socket
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections.abc import Generator, Iterator, Sequence
@@ -60,6 +61,7 @@ BROWSER_VIEWPORT: ViewportSize = {"width": 1_600, "height": 1_000}
 BROWSER_CHANNEL = "chrome"
 GRID_ROW_SELECTOR = ".ag-center-cols-container .ag-row"
 OPERATOR_TARGET_DRAW_NUMBER = "146"
+DARWIN_AF_UNIX_PATH_CAPACITY_BYTES = 104
 PYTEST_CURRENT_TEST_ENV_NAME = "PYTEST_CURRENT_TEST"
 OPERATOR_LIVE_OUTPUT = sys.__stdout__ or sys.stdout
 FAILED_RUN_LOG_PREFIX = f"{control_ui.Locale.CONTROL_CENTRE_LOG_PREFIX} run failed:"
@@ -196,7 +198,11 @@ def production_data_unchanged(operator_aivm: None) -> Iterator[None]:
     _operator_log("production data is unchanged")
 
 
-def operator_runtime(tmp_path: Path) -> OperatorRuntime:
+def _operator_runtime(
+    tmp_path: Path,
+    *,
+    dashboard_socket_path: Path,
+) -> OperatorRuntime:
     replay_log_path = tmp_path / "backend-replay.jsonl"
     rollout_cas_dir = tmp_path / "rollout-cas"
     config_path = tmp_path / "config.operator.json"
@@ -232,8 +238,20 @@ def operator_runtime(tmp_path: Path) -> OperatorRuntime:
         detour_db_path=backend_api._detour_db_path(source_link),
         replay_log_path=replay_log_path,
         rollout_cas_dir=rollout_cas_dir,
-        dashboard_socket_path=tmp_path / "dashboard.sock",
+        dashboard_socket_path=dashboard_socket_path,
     )
+
+
+@pytest.fixture
+def operator_runtime(tmp_path: Path) -> Iterator[OperatorRuntime]:
+    with tempfile.TemporaryDirectory(prefix="detour-operator-", dir="/tmp") as directory:
+        dashboard_socket_path = Path(directory) / "dashboard.sock"
+        if len(os.fsencode(dashboard_socket_path)) >= DARWIN_AF_UNIX_PATH_CAPACITY_BYTES:
+            raise RuntimeError("operator dashboard socket path exceeds Darwin AF_UNIX capacity")
+        yield _operator_runtime(
+            tmp_path,
+            dashboard_socket_path=dashboard_socket_path,
+        )
 
 
 def _collect_output(stream: TextIO, output: list[str]) -> None:
@@ -421,13 +439,14 @@ def _record_ordinal(
 
 
 def test_existing_aivm_exposes_the_persisted_appendwatch_topology(
-    tmp_path: Path,
+    operator_runtime: OperatorRuntime,
 ) -> None:
     _operator_log("preparing isolated topology-test runtime")
-    runtime = operator_runtime(tmp_path)
 
     _operator_log("loading the deployed appendwatch topology")
-    configuration = control_ui.AiAugmentCtlCtrContext(config_path=runtime.config_path)
+    configuration = control_ui.AiAugmentCtlCtrContext(
+        config_path=operator_runtime.config_path
+    )
 
     assert configuration.appendwatch_report.is_file()
     assert configuration.appendwatch_report.stat().st_size
@@ -435,20 +454,19 @@ def test_existing_aivm_exposes_the_persisted_appendwatch_topology(
 
 
 def test_complete_dashboard_backend_codex_commit_and_replay_workflow(
-    tmp_path: Path,
+    operator_runtime: OperatorRuntime,
 ) -> None:
     _operator_log("preparing isolated full-workflow runtime")
-    runtime = operator_runtime(tmp_path)
-    namekey = target_namekey(runtime)
+    namekey = target_namekey(operator_runtime)
 
-    with running_dashboard(runtime) as dashboard:
+    with running_dashboard(operator_runtime) as dashboard:
         queue_in_browser(namekey)
-        records = wait_for_terminal_pull(runtime, dashboard)
-        assert stat.S_ISSOCK(runtime.dashboard_socket_path.stat().st_mode)
-        assert stat.S_IMODE(runtime.dashboard_socket_path.stat().st_mode) == 0o600
+        records = wait_for_terminal_pull(operator_runtime, dashboard)
+        assert stat.S_ISSOCK(operator_runtime.dashboard_socket_path.stat().st_mode)
+        assert stat.S_IMODE(operator_runtime.dashboard_socket_path.stat().st_mode) == 0o600
 
     _operator_log("validating authoritative workflow artifacts")
-    assert not runtime.dashboard_socket_path.exists()
+    assert not operator_runtime.dashboard_socket_path.exists()
 
     assert all(record.schema_version == "1.1" for record in records)
     assert all(record.record_id.version == 7 for record in records)
@@ -474,7 +492,9 @@ def test_complete_dashboard_backend_codex_commit_and_replay_workflow(
         if (record.method, record.path) != backend_api.AUTHORITATIVE_COMMIT_ROUTE:
             continue
         commit = backend_api._replay_commit(record.request_body)
-        with duckdb.connect(str(runtime.detour_db_path), read_only=True) as connection:
+        with duckdb.connect(
+            str(operator_runtime.detour_db_path), read_only=True
+        ) as connection:
             row = connection.execute(
                 f"SELECT {backend_api.AUTHORITATIVE_OUTCOME_PAYLOAD_COLUMN} "
                 f"FROM {backend_api.AUTHORITATIVE_OUTCOMES_TABLE} "
@@ -497,7 +517,7 @@ def test_complete_dashboard_backend_codex_commit_and_replay_workflow(
     assert push_record.response_code == backend_api.status.HTTP_202_ACCEPTED
     assert push_record.response_headers is not None
     assert push_record.response_headers["location"] == backend_api.PULL_PATH
-    rollout_blob = runtime.rollout_cas_dir / (
+    rollout_blob = operator_runtime.rollout_cas_dir / (
         backend_api.ROLLOUT_CAS_FILENAME_TEMPLATE.format(
             sha256=commit.rollout.sha256
         )
