@@ -225,10 +225,11 @@ cwd = "."
 [tool.pixi.tasks.test-repl]
 depends-on = [
   { task = "test", args = ["."] },  # whatever is in pytest.ini_options
-  # no slow tests so far - otherwise exits 1 here
-  # { task = "test", args = [".", "slow"] },
-  { task = "test", args = [".", "real_api"] },
 ]
+# note that the below cmd is only executed if all depends-on pass
+cmd = """
+echo "NOTE: slow and real_api tests need to be run separately"
+"""
 
 # The tasks themselves are specified below per detour
 [tool.pixi.tasks.test-detours]
@@ -237,20 +238,43 @@ depends-on = [
     "test-detour-mode3-pgf-stats",
     "test-detour-mode0-econ-stats",
     "test-detour-ai-augment",
-    "test-detour-ai-augment-root",
 ]
 
 [tool.pixi.tasks.pre-commit]
-# note that the below cmd is only
-# executed if all depends-on pass
-cmd = """
-echo "NOTE: Operator tests need to be run separately \
-with pre-commit-operator"
-"""
 depends-on = [
   { task = "lint" },  # lint all across repo
   { task = "test-repl" },
   { task = "test-detours" },
+]
+
+[tool.pixi.tasks.pre-commit-repl]
+depends-on = ["lint", "test-repl"]
+
+[tool.pixi.tasks.pre-commit-detours]
+depends-on = ["lint", "test-detours"]
+
+# note that all the above tasks
+# do not include extra tests for
+# smooth non-interactive execution
+
+[tool.pixi.tasks.test-repl-extra]
+depends-on = [
+  # no slow tests so far - otherwise exits 1 here
+  # { task = "test", args = [".", "slow"] },
+  { task = "test", args = [".", "real_api"] },
+]
+
+[tool.pixi.tasks.test-repl-operator]
+depends-on = [
+    "test-repl",
+    "test-repl-extra",
+]
+
+[tool.pixi.tasks.pre-commit-extra]
+depends-on = [
+    "test-repl-extra",
+    "test-detour-ai-augment-root",
+    "test-detour-ai-augment-operator",
 ]
 
 [tool.pixi.tasks.pre-commit-operator]
@@ -258,17 +282,20 @@ cwd = "."
 cmd = """
 limactl shell aicode -- bash -c '
   export PATH="$HOME/.pixi/bin:$PATH"
-  script -e -c "pixi run pre-commit 2>&1" logs/pre-commit.log &&
+  script -e -c "
+    {
+      pixi run pre-commit &&
+      pixi run pre-commit-extra
+    } 2>&1
+  " logs/pre-commit.log &&
   grep -q "FAILED" logs/pre-commit.log &&
   echo "grep: no FAILED"
 '
 """
 
-[tool.pixi.tasks.pre-commit-repl]
-depends-on = ["lint", "test-repl"]
-
-[tool.pixi.tasks.pre-commit-detours]
-depends-on = ["lint", "test-detours"]
+# =======================
+# Default: Test coverage
+# =======================
 
 [tool.pixi.tasks.cov]
 cmd = "pytest -vv --cov=src --cov-report=term-missing --cov-report=xml"
@@ -340,6 +367,7 @@ export PLAYWRIGHT_BROWSERS_PATH="$HOME/.cache/ms-playwright"
   src/detours/detour_ai_augment/tests/test_pydantic_to_paste.py::test_academic_institution_round_trips_against_real_apis
 status=$?
 echo "NOTE: root tests need to be run separately with test-detour-ai-augment-root"
+echo "NOTE: operator tests need to be run separately with test-detour-ai-augment-operator"
 exit "$status"
 '
 """
