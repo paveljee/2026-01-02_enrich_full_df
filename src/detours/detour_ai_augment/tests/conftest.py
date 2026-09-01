@@ -18,6 +18,7 @@ DEPLOY_SCRIPT_PATH = (
     / "deploy.sh"
 )
 OPERATOR_MARKER = "operator"
+REQUIRES_CODEX_AUTH_MARKER = "requires_codex_auth"
 EXCLUDED_FROM_SUITES_MARKER = "excluded_from_suites"
 NEEDS_SUDO_MARKER = "needs_sudo"
 OPERATOR_REDEPLOY_OPTION = "always_redeploy"
@@ -27,10 +28,28 @@ OPENALEX_API_KEY_ENV_NAME = "OPENALEX_API_KEY"
 REPOSITORY_ROOT_ENV_NAME = "REPO_DIR"
 AIVM_INSTANCE = "aivm"
 AIVM_USER = "ai"
+AIVM_CODEX_BIN_PATH = "/home/ai/.local/bin/codex"
 AIVM_OPENALEX_ENV_PATH = "/home/ai/workdir/.openalex.env"
 DEPLOY_COMMAND = ("bash", str(DEPLOY_SCRIPT_PATH), "--yes")
 AIVM_START_COMMAND = ("limactl", "start", AIVM_INSTANCE)
 AIVM_PROBE_COMMAND = ("limactl", "shell", "--workdir=/", AIVM_INSTANCE, "true")
+AIVM_CODEX_COMMAND_PREFIX = (
+    "limactl",
+    "shell",
+    "--workdir=/",
+    AIVM_INSTANCE,
+    "sudo",
+    "--user",
+    AIVM_USER,
+    "--set-home",
+    AIVM_CODEX_BIN_PATH,
+)
+AIVM_CODEX_AUTH_STATUS_COMMAND = (*AIVM_CODEX_COMMAND_PREFIX, "login", "status")
+AIVM_CODEX_DEVICE_AUTH_COMMAND = (
+    *AIVM_CODEX_COMMAND_PREFIX,
+    "login",
+    "--device-auth",
+)
 AIVM_OPENALEX_KEY_COMMAND = (
     "limactl",
     "shell",
@@ -67,12 +86,20 @@ TEXT_ENCODING = "utf-8"
 OPERATOR_PROBE_TIMEOUT_SECONDS = 10
 OPERATOR_START_TIMEOUT_SECONDS = 300
 OPERATOR_DEPLOY_TIMEOUT_SECONDS = 1_800
+OPERATOR_CODEX_AUTH_TIMEOUT_SECONDS = 900
 OPERATOR_PROMPT = "Redeploy AIVM before each operator test? [y/N] "
 OPERATOR_START_PROMPT = (
     "AIVM is not reachable. Start it for operator tests? "
     "Note it will remain running after the tests. [y/N] "
 )
+OPERATOR_CODEX_AUTH_PROMPT = (
+    "Codex is not authenticated inside AIVM. Run "
+    "`codex login --device-auth` now? [y/N] "
+)
 OPERATOR_MARK_DESCRIPTION = "real operator-machine AIVM and full-stack contour"
+REQUIRES_CODEX_AUTH_MARK_DESCRIPTION = (
+    "requires an authenticated Codex CLI in the AI Agent Runtime"
+)
 EXCLUDED_FROM_SUITES_MARK_DESCRIPTION = (
     "excluded from default test suites; run only when explicitly requested"
 )
@@ -101,6 +128,12 @@ OPERATOR_GUEST_KEY_MISSING = (
 )
 OPERATOR_APPENDWATCH_UNAVAILABLE = (
     f"appendwatch is not active in AIVM instance {AIVM_INSTANCE!r}"
+)
+OPERATOR_CODEX_AUTH_REQUIRED = (
+    f"Codex authentication is required in AIVM instance {AIVM_INSTANCE!r}"
+)
+OPERATOR_CODEX_AUTH_FAILED = (
+    f"Codex device authentication failed in AIVM instance {AIVM_INSTANCE!r}"
 )
 OPERATOR_SANCTUARY_NOTICE = (
     "Operator sanctuary: repository production access is read-only. Every test "
@@ -133,6 +166,50 @@ def _operator_requested(config: pytest.Config) -> bool:
     signed off: human
     """
     return (config.option.markexpr or "").strip() == OPERATOR_MARKER
+
+
+def _codex_is_authenticated(deployment_environment: dict[str, str]) -> bool:
+    try:
+        result = subprocess.run(
+            AIVM_CODEX_AUTH_STATUS_COMMAND,
+            cwd=REPOSITORY_ROOT,
+            env=deployment_environment,
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=OPERATOR_PROBE_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise pytest.UsageError(OPERATOR_CODEX_AUTH_REQUIRED) from exc
+    return result.returncode == 0
+
+
+def _ensure_codex_is_authenticated(deployment_environment: dict[str, str]) -> None:
+    _operator_log("checking guest Codex authentication")
+    if _codex_is_authenticated(deployment_environment):
+        _operator_log("guest Codex authentication is available")
+        return
+    _operator_log("guest Codex authentication is unavailable")
+    try:
+        reply = input(OPERATOR_CODEX_AUTH_PROMPT).strip().casefold()
+    except EOFError as exc:
+        raise pytest.UsageError(OPERATOR_CODEX_AUTH_REQUIRED) from exc
+    if reply not in {"y", "yes"}:
+        raise pytest.UsageError(OPERATOR_CODEX_AUTH_REQUIRED)
+    _operator_log("starting guest Codex device authentication")
+    try:
+        subprocess.run(
+            AIVM_CODEX_DEVICE_AUTH_COMMAND,
+            cwd=REPOSITORY_ROOT,
+            env=deployment_environment,
+            check=True,
+            timeout=OPERATOR_CODEX_AUTH_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        raise pytest.UsageError(OPERATOR_CODEX_AUTH_FAILED) from exc
+    if not _codex_is_authenticated(deployment_environment):
+        raise pytest.UsageError(OPERATOR_CODEX_AUTH_FAILED)
+    _operator_log("guest Codex device authentication completed")
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -169,6 +246,10 @@ def pytest_configure(config: pytest.Config) -> None:
     )
     config.addinivalue_line(
         "markers",
+        f"{REQUIRES_CODEX_AUTH_MARKER}: {REQUIRES_CODEX_AUTH_MARK_DESCRIPTION}",
+    )
+    config.addinivalue_line(
+        "markers",
         f"{EXCLUDED_FROM_SUITES_MARKER}: {EXCLUDED_FROM_SUITES_MARK_DESCRIPTION}",
     )
     config.addinivalue_line(
@@ -196,13 +277,13 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     if not config.getoption(RUN_EXCLUDED_FROM_SUITES_OPTION):
         skip_excluded = pytest.mark.skip(reason=EXCLUDED_FROM_SUITES_SKIP_REASON)
         for item in items:
-            if EXCLUDED_FROM_SUITES_MARKER in item.keywords:
+            if item.get_closest_marker(EXCLUDED_FROM_SUITES_MARKER) is not None:
                 item.add_marker(skip_excluded)
     if _operator_requested(config):
         return
     skip_operator = pytest.mark.skip(reason=OPERATOR_SKIP_REASON)
     for item in items:
-        if OPERATOR_MARKER in item.keywords:
+        if item.get_closest_marker(OPERATOR_MARKER) is not None:
             item.add_marker(skip_operator)
 
 
@@ -212,7 +293,7 @@ def isolated_lima_configuration(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    if OPERATOR_MARKER in request.node.keywords:
+    if request.node.get_closest_marker(OPERATOR_MARKER) is not None:
         return
     from src.detours.detour_ai_augment.src.control_centre.dashboard import (
         ui as control_ui,
@@ -247,7 +328,7 @@ def operator_aivm(
     request: pytest.FixtureRequest,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    if OPERATOR_MARKER not in request.node.keywords:
+    if request.node.get_closest_marker(OPERATOR_MARKER) is None:
         return
     # ======================================
     # OpenAlex key must come explicitly
@@ -363,4 +444,6 @@ def operator_aivm(
         )
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
         raise pytest.UsageError(OPERATOR_APPENDWATCH_UNAVAILABLE) from exc
+    if request.node.get_closest_marker(REQUIRES_CODEX_AUTH_MARKER) is not None:
+        _ensure_codex_is_authenticated(deployment_environment)
     _operator_log("operator AIVM preflight completed")

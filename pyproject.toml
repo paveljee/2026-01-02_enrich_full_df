@@ -394,7 +394,7 @@ export PLAYWRIGHT_BROWSERS_PATH="$HOME/.cache/ms-playwright"
 "$CONDA_PREFIX/bin/python" -m pytest -vv -srA -m "not needs_sudo" \
   src/detours/detour_ai_augment/tests && \
 "$CONDA_PREFIX/bin/python" -m pytest -vv -srA -m real_api \
-  src/detours/detour_ai_augment/tests/test_pydantic_to_paste.py::test_academic_institution_round_trips_against_real_apis
+  src/detours/detour_ai_augment/tests/backend/test_pydantic_to_paste.py::test_academic_institution_round_trips_against_real_apis
 status=$?
 echo "NOTE: root tests need to be run separately with test-detour-ai-augment-root"
 echo "NOTE: operator tests need to be run separately with test-detour-ai-augment-operator"
@@ -418,7 +418,7 @@ from dotenv import dotenv_values
 env_path = os.path.join(os.getenv("PIXI_PROJECT_ROOT"), ".env")
 print(dotenv_values(env_path).get("OPENALEX_API_KEY", ""), end="")
 ')" "$CONDA_PREFIX/bin/python" -m pytest -vv -srA --capture=tee-sys -m operator \
-  src/detours/detour_ai_augment/tests/test_e2e_operator.py
+  src/detours/detour_ai_augment/tests/operator/test_operator_e2e.py
 """
 
 [tool.pixi.feature.detour-ai-augment.tasks.duckdb-export]

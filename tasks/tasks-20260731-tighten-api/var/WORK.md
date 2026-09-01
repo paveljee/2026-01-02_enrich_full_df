@@ -1,5 +1,46 @@
 # Tighten API: complete
 
+## Nested Detour test tree reviewed and adapted
+
+- Preserved the Human Operator's readability split into `backend/`,
+  `control_centre/`, and `operator/` test directories.
+- Updated every moved test's repository/detour-root derivation, the Control
+  Centre browser-test subprocess module, and the two hard-coded Pixi task node
+  paths for the Backend real-API and operator contours.
+- Replaced `item.keywords`/`request.node.keywords` marker detection with actual
+  `get_closest_marker()` checks. This is required because the `operator/`
+  directory name itself appears in pytest keywords; it had caused the three
+  unmarked hermetic operator-preflight tests to be skipped and treated as real
+  operator tests.
+- Verification: all **175 tests collected**; default preflight selection **3
+  passed**; `-m operator --no-redeploy --collect-only` selected exactly the
+  three real E2Es and deselected the three hermetic preflight tests; complete
+  unprivileged Detour task **124 passed, 48 skipped, 3 deselected**, followed by
+  the expected no-key real-API skip; Ruff/mypy over 96 files, lock consistency,
+  import/root assertions, and diff whitespace checks passed.
+
+## UUIDv7, IPC naming, and operator Codex authentication completed
+
+- Control Centre queue/run identifiers now use stdlib `uuid7()` instead of
+  `uuid4()`; focused coverage requires the produced run ID to be UUID version 7.
+- Renamed Backend `dashboard_ipc.py` to `ipc.py`, renamed its corresponding
+  test module to `test_ipc.py`, and updated Backend/test imports without changing
+  the IPC implementation.
+- Added a `requires_codex_auth` marker only to the two operator workflow tests.
+  Their AIVM preflight now runs guest `codex login status`; an existing login is
+  reused, while a missing login prompts the Human Operator to run live
+  `codex login --device-auth` as the `ai` user and verifies status again before
+  allowing the expensive E2E to start. The topology-only test remains
+  independent of Codex authentication.
+- Added hermetic preflight tests for existing authentication, successful
+  prompted device authentication plus recheck, and refused authentication
+  failing fast.
+- Verification: focused tests **7 passed, 1 skipped**; complete unprivileged
+  Detour task **124 passed, 48 skipped, 3 deselected**, followed by the expected
+  no-key real-API skip; Ruff and mypy over 96 files, `pixi lock --check`, and
+  diff whitespace checks passed. The real device-auth/operator contour remains
+  for the Human Operator's macOS/AIVM run.
+
 ## Operator completion contour completed
 
 - The operator Pixi task now passes the repository `.env` OpenAlex key into
