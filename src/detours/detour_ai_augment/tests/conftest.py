@@ -198,8 +198,9 @@ def _ensure_codex_is_authenticated(
         _operator_log("guest Codex authentication is available")
         return
     _operator_log("guest Codex authentication is unavailable")
+    _operator_log(OPERATOR_CODEX_AUTH_PROMPT.rstrip())
     try:
-        reply = input(OPERATOR_CODEX_AUTH_PROMPT).strip().casefold()
+        reply = input().strip().casefold()
     except EOFError as exc:
         raise pytest.UsageError(OPERATOR_CODEX_AUTH_REQUIRED) from exc
     if reply not in {"y", "yes"}:

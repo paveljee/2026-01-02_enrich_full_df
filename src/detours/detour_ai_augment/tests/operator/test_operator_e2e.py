@@ -709,11 +709,9 @@ def _record_ordinal(
     )
 
 
-def test_existing_aivm_exposes_the_persisted_appendwatch_topology(
+def _assert_deployed_appendwatch_topology(
     operator_runtime: OperatorRuntime,
 ) -> None:
-    _operator_log("preparing isolated topology-test runtime")
-
     _operator_log("loading the deployed appendwatch topology")
     configuration = control_ui.AiAugmentCtlCtrContext(
         config_path=operator_runtime.config_path
@@ -722,6 +720,14 @@ def test_existing_aivm_exposes_the_persisted_appendwatch_topology(
     assert configuration.appendwatch_report.is_file()
     assert configuration.appendwatch_report.stat().st_size
     _operator_log("deployed appendwatch topology is readable")
+
+
+@pytest.mark.excluded_from_suites
+def test_existing_aivm_exposes_the_persisted_appendwatch_topology(
+    operator_runtime: OperatorRuntime,
+) -> None:
+    _operator_log("preparing isolated topology-test runtime")
+    _assert_deployed_appendwatch_topology(operator_runtime)
 
 
 def validate_workflow_artifacts(
@@ -798,6 +804,7 @@ def validate_workflow_artifacts(
 def test_complete_dashboard_backend_codex_commit_and_replay_workflow(
     operator_runtime: OperatorRuntime,
 ) -> None:
+    _assert_deployed_appendwatch_topology(operator_runtime)
     _operator_log("preparing isolated durable-410 checkpoint runtime")
     namekey = target_namekey(operator_runtime)
 
@@ -815,6 +822,7 @@ def test_complete_dashboard_backend_codex_commit_and_replay_workflow(
 def test_completed_dashboard_backend_codex_workflow_renders_researcher_card(
     operator_runtime: OperatorRuntime,
 ) -> None:
+    _assert_deployed_appendwatch_topology(operator_runtime)
     _operator_log("preparing isolated completed-workflow runtime")
     namekey = target_namekey(operator_runtime)
 

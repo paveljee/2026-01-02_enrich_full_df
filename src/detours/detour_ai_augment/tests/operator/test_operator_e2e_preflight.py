@@ -21,7 +21,7 @@ def test_existing_codex_authentication_does_not_prompt(
         observed.append(command)
         return subprocess.CompletedProcess(command, 0)
 
-    def unexpected_input(_prompt: str) -> str:
+    def unexpected_input() -> str:
         pytest.fail("existing Codex authentication must not prompt")
 
     monkeypatch.setattr(operator_preflight.subprocess, "run", run)
@@ -36,6 +36,7 @@ def test_existing_codex_authentication_does_not_prompt(
 
 
 def test_missing_codex_authentication_runs_device_auth_and_rechecks(
+    capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
     repository_root: Path,
 ) -> None:
@@ -54,8 +55,15 @@ def test_missing_codex_authentication_runs_device_auth_and_rechecks(
         )
         return subprocess.CompletedProcess(command, return_code)
 
+    def approve_authentication() -> str:
+        assert capsys.readouterr().out.endswith(
+            "[operator-preflight] "
+            f"{operator_preflight.OPERATOR_CODEX_AUTH_PROMPT.rstrip()}\n"
+        )
+        return "yes"
+
     monkeypatch.setattr(operator_preflight.subprocess, "run", run)
-    monkeypatch.setattr("builtins.input", lambda _prompt: "yes")
+    monkeypatch.setattr("builtins.input", approve_authentication)
 
     operator_preflight._ensure_codex_is_authenticated(
         {},
@@ -80,7 +88,7 @@ def test_missing_codex_authentication_refusal_fails_fast(
         return subprocess.CompletedProcess(command, 1)
 
     monkeypatch.setattr(operator_preflight.subprocess, "run", run)
-    monkeypatch.setattr("builtins.input", lambda _prompt: "no")
+    monkeypatch.setattr("builtins.input", lambda: "no")
 
     with pytest.raises(
         pytest.UsageError,

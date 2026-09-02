@@ -1,5 +1,35 @@
 # Tighten API: complete
 
+## Visible operator Codex-auth prompt completed
+
+- Production macOS operator feedback showed Codex auth status correctly
+  returned unavailable, then pytest hid the non-newline `input(prompt)` text
+  while waiting indefinitely for the Human Operator; the prompt appeared only
+  when Ctrl+C unwound capture.
+- The auth question now goes through the existing newline-terminated, flushed
+  operator-log path before bare stdin is read. Hermetic preflight coverage
+  requires the question to be emitted before input is consumed.
+- Verification: focused auth tests **3 passed**; complete unprivileged Detour
+  task **124 passed, 48 skipped, 3 deselected**, followed by the expected
+  no-key real-API skip; official Ruff/mypy over 96 files and diff whitespace
+  checks passed.
+
+## Operator-topology preflight deduplication completed
+
+- The standalone topology test proves more than the shared preflight (it
+  resolves the deployed Lima mount/report and requires a readable, nonempty
+  report), but the completed workflow necessarily exercises this contour again
+  through Backend startup, commit capture, and appendwatch validation.
+- The standalone topology diagnostic is now `excluded_from_suites`. Its report
+  resolution/readability assertions live in one helper invoked first by both
+  downstream workflow tests, preserving fail-fast behavior without a second
+  default operator test or AIVM redeploy.
+- Marker audit selects exactly the two standalone excluded diagnostics and
+  exactly one default operator completion test. Hermetic auth preflight tests
+  **3 passed**; complete unprivileged Detour task **124 passed, 48 skipped, 3
+  deselected**, followed by the expected no-key real-API skip; official
+  Ruff/mypy over 96 files and diff whitespace checks passed.
+
 ## Pytest-root path cleanup completed
 
 - Removed every numeric `Path(__file__).parents[...]` traversal from the Detour
