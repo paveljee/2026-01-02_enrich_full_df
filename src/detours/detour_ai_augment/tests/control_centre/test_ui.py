@@ -157,9 +157,7 @@ def test_variable_specs_cover_every_ai_augment_column() -> None:
     )
 
 
-def test_dashboard_paths_resolve_from_repository_root() -> None:
-    repository_root = Path(__file__).resolve().parents[5]
-
+def test_dashboard_paths_resolve_from_repository_root(repository_root: Path) -> None:
     assert control_vars.REPOSITORY_ROOT == repository_root
     assert control_ui.REPOSITORY_ROOT == repository_root
     assert control_vars.DEFAULT_CONFIG_PATH == repository_root / "config_ai_augment.json"

@@ -37,36 +37,21 @@ from src.helpers.data_models.http_request_log import (
 )
 from src.helpers.duckdb_extensions import load_duckdb_extension_from_config_path
 
-REPOSITORY_ROOT = Path(__file__).resolve().parents[5]
-CONFIG_PATH = REPOSITORY_ROOT / "config.repl.json"
-AI_AUGMENT_CONFIG_PATH = REPOSITORY_ROOT / "config_ai_augment.json"
-SOURCE_DB_PATH = REPOSITORY_ROOT / "data" / "scisci_process.duckdb"
-SOURCE_JSONL_PATH = REPOSITORY_ROOT / "tmp" / "sheikh.jsonl"
-REFERENCE_DOCX_PATH = REPOSITORY_ROOT / "resources" / "pandoc-custom-reference.docx"
-PYDANTIC_TO_PASTE_PATH = (
-    REPOSITORY_ROOT
-    / "src"
-    / "detours"
-    / "detour_ai_augment"
-    / "src"
-    / "backend"
-    / "helpers"
-    / "data_models"
-    / "pydantic_to_paste.py"
-)
+
+@dataclass(frozen=True, slots=True)
+class BackendTestPaths:
+    config: Path
+    ai_augment_config: Path
+    source_database: Path
+    reference_docx: Path
+    pydantic_to_paste: Path
+    july_rollout: Path
+    haanen_rejected_rollout: Path
+    haanen_accepted_rollout: Path
+
+
 JULY_ROLLOUT_RELATIVE_PATH = PurePosixPath(
     "2026/07/27/rollout-2026-07-27T12-10-36-019fa457-aac5-7652-8669-9d571206e7cb.jsonl"
-)
-JULY_ROLLOUT_PATH = (
-    REPOSITORY_ROOT
-    / "src"
-    / "detours"
-    / "detour_ai_augment"
-    / "data"
-    / "sample_run"
-    / ".codex"
-    / "sessions"
-    / Path(*JULY_ROLLOUT_RELATIVE_PATH.parts)
 )
 JULY_ROLLOUT_GUEST_PATH = f"{api.CODEX_SESSIONS_ROOT}/{JULY_ROLLOUT_RELATIVE_PATH}"
 JULY_ROLLOUT_FILENAME = JULY_ROLLOUT_RELATIVE_PATH.name
@@ -135,14 +120,6 @@ TEST_ROLLOUT_CAS_DIRECTORY = "rollout-cas"
 
 HAANEN_REJECTED_ATTEMPT_ID = "20260813T141344_678596Z_8ef1f6372b4a48d9a3b1279736356363"
 HAANEN_ACCEPTED_ATTEMPT_ID = "20260813T141450_027429Z_044215aac8c44200882531b10a2acfa6"
-HAANEN_REJECTED_ATTEMPT_DIR = REPOSITORY_ROOT / "tmp" / HAANEN_REJECTED_ATTEMPT_ID
-HAANEN_ACCEPTED_ATTEMPT_DIR = REPOSITORY_ROOT / "tmp" / HAANEN_ACCEPTED_ATTEMPT_ID
-HAANEN_REJECTED_ROLLOUT_PATH = (
-    HAANEN_REJECTED_ATTEMPT_DIR / f"rollout.{HAANEN_REJECTED_ATTEMPT_ID}.jsonl"
-)
-HAANEN_ACCEPTED_ROLLOUT_PATH = (
-    HAANEN_ACCEPTED_ATTEMPT_DIR / f"rollout.{HAANEN_ACCEPTED_ATTEMPT_ID}.jsonl"
-)
 HAANEN_ROLLOUT_FILENAME = "rollout-2026-08-13T10-08-12-019ffb73-b72c-7812-9fc4-d56fdf3ea1a2.jsonl"
 HAANEN_SESSION_ID = "019ffb73-b72c-7812-9fc4-d56fdf3ea1a2"
 HAANEN_RUN_ID = UUID("019ffb73-b72c-7812-9fc4-d56fdf3ea1a3")
@@ -192,6 +169,43 @@ TEST_STANDARDIZED_VALUES = {
     api.KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL: "NR",
     api.KTP_AI_AUGMENT_LINKS_COL: "NR",
 }
+
+
+@pytest.fixture(scope="session")
+def backend_test_paths(
+    repository_root: Path,
+    detour_root: Path,
+) -> BackendTestPaths:
+    haanen_rejected_attempt = repository_root / "tmp" / HAANEN_REJECTED_ATTEMPT_ID
+    haanen_accepted_attempt = repository_root / "tmp" / HAANEN_ACCEPTED_ATTEMPT_ID
+    return BackendTestPaths(
+        config=repository_root / "config.repl.json",
+        ai_augment_config=repository_root / "config_ai_augment.json",
+        source_database=repository_root / "data" / "scisci_process.duckdb",
+        reference_docx=repository_root / "resources" / "pandoc-custom-reference.docx",
+        pydantic_to_paste=(
+            detour_root
+            / "src"
+            / "backend"
+            / "helpers"
+            / "data_models"
+            / "pydantic_to_paste.py"
+        ),
+        july_rollout=(
+            detour_root
+            / "data"
+            / "sample_run"
+            / ".codex"
+            / "sessions"
+            / Path(*JULY_ROLLOUT_RELATIVE_PATH.parts)
+        ),
+        haanen_rejected_rollout=(
+            haanen_rejected_attempt / f"rollout.{HAANEN_REJECTED_ATTEMPT_ID}.jsonl"
+        ),
+        haanen_accepted_rollout=(
+            haanen_accepted_attempt / f"rollout.{HAANEN_ACCEPTED_ATTEMPT_ID}.jsonl"
+        ),
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -745,6 +759,7 @@ def standardized_submission_body(
 def connect_v2_index(
     index: api.RolloutIndex,
     *,
+    config_path: Path,
     database_path: Path | None = None,
 ) -> duckdb.DuckDBPyConnection:
     connection = duckdb.connect(str(database_path) if database_path is not None else ":memory:")
@@ -752,7 +767,7 @@ def connect_v2_index(
         load_duckdb_extension_from_config_path(
             connection,
             api.CODEX_TOKEN_EXTENSION,
-            CONFIG_PATH,
+            config_path,
             log=None,
         )
     except RuntimeError as exc:
@@ -766,11 +781,16 @@ def connect_v2_index(
     return connection
 
 
-def historical_haanen_submissions() -> tuple[dict[str, object], dict[str, object]]:
-    if not HAANEN_REJECTED_ROLLOUT_PATH.is_file() or not HAANEN_ACCEPTED_ROLLOUT_PATH.is_file():
+def historical_haanen_submissions(
+    paths: BackendTestPaths,
+) -> tuple[dict[str, object], dict[str, object]]:
+    if (
+        not paths.haanen_rejected_rollout.is_file()
+        or not paths.haanen_accepted_rollout.is_file()
+    ):
         pytest.skip("optional historical Haanen rollout fixtures are unavailable")
-    rejected_stream = HAANEN_REJECTED_ROLLOUT_PATH.open("r", encoding="utf-8")
-    accepted_stream = HAANEN_ACCEPTED_ROLLOUT_PATH.open("r", encoding="utf-8")
+    rejected_stream = paths.haanen_rejected_rollout.open("r", encoding="utf-8")
+    accepted_stream = paths.haanen_accepted_rollout.open("r", encoding="utf-8")
     tool_inputs: list[list[str]] = []
     for stream in (rejected_stream, accepted_stream):
         inputs: list[str] = []
@@ -855,6 +875,7 @@ def report_for_rollout(relative_path: PurePosixPath) -> str:
 
 def runtime_for_test(
     tmp_path: Path,
+    paths: BackendTestPaths,
     *,
     output_format: str = "txt",
 ) -> api.AiAugmentBackendContext:
@@ -863,12 +884,12 @@ def runtime_for_test(
     rollout_cas_dir = tmp_path / "rollout-cas"
     output_dir.mkdir(exist_ok=True)
     replay_log_path.write_text("", encoding=api.TEXT_ENCODING)
-    pipeline = api.AiAugmentDetourConfig.from_json(AI_AUGMENT_CONFIG_PATH).model_copy(
+    pipeline = api.AiAugmentDetourConfig.from_json(paths.ai_augment_config).model_copy(
         update={
-            "db_file": SOURCE_DB_PATH,
+            "db_file": paths.source_database,
             "output_dir": output_dir,
             "output_format": output_format,
-            "pandoc_reference_docx": REFERENCE_DOCX_PATH,
+            "pandoc_reference_docx": paths.reference_docx,
             "rollout_cas_dir": rollout_cas_dir,
         }
     )
@@ -891,6 +912,7 @@ def runtime_for_test(
 def prepare_real_sample_push(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    paths: BackendTestPaths,
     *,
     output_format: str = "txt",
 ) -> SimpleNamespace:
@@ -904,7 +926,7 @@ def prepare_real_sample_push(
     for path in (identity_path, known_hosts_path, lima_config_path):
         write_text(path, "fixture\n")
 
-    runtime = runtime_for_test(tmp_path, output_format=output_format)
+    runtime = runtime_for_test(tmp_path, paths, output_format=output_format)
     rendered_cards: list[str] = []
     configuration = api.PushConfiguration(
         rollout_guest_path=JULY_ROLLOUT_GUEST_PATH,
@@ -928,7 +950,7 @@ def prepare_real_sample_push(
         if command[0] == api.SCP_EXECUTABLE:
             destination = Path(command[-1])
             assert command[-2] == f"aivm-ai:{JULY_ROLLOUT_GUEST_PATH}"
-            write_bytes(destination, read_bytes(JULY_ROLLOUT_PATH))
+            write_bytes(destination, read_bytes(paths.july_rollout))
             return
         assert command[0] == "pandoc"
         output_path = Path(command[command.index("-o") + 1])
@@ -1444,7 +1466,9 @@ def test_successful_initial_submission_converts_to_retry_model_with_placeholders
         )
 
 
-def test_openapi_example_is_a_complete_pydantic_valid_submission() -> None:
+def test_openapi_example_is_a_complete_pydantic_valid_submission(
+    backend_test_paths: BackendTestPaths,
+) -> None:
     assert isinstance(
         api.L_FEI_FEI_INITIAL_FIXTURE.submission,
         api.Submission,
@@ -1472,7 +1496,7 @@ def test_openapi_example_is_a_complete_pydantic_valid_submission() -> None:
         for column, field in api.RETRY_EVIDENCE_SUBMISSION_EXAMPLE.items()
         if column in api.AI_AUGMENT_EVIDENCE_COLUMNS and isinstance(field, dict)
     )
-    source = PYDANTIC_TO_PASTE_PATH.read_text(encoding="utf-8").rstrip()
+    source = backend_test_paths.pydantic_to_paste.read_text(encoding="utf-8").rstrip()
     assert PYDANTIC_TO_PASTE_SOURCE == source
     assert source in api.RETRY_SUBMISSION_PUBLIC_GUIDANCE
     assert (
@@ -1568,8 +1592,12 @@ def test_persisted_index_is_idempotent_and_evidence_lookup_is_exact() -> None:
 def test_codex_v2_classifies_normalized_variants_without_accepting_them(
     excerpt: str,
     expected_outcome: str,
+    backend_test_paths: BackendTestPaths,
 ) -> None:
-    connection = connect_v2_index(build_citation_index(((TEST_URL, V2_CITE_TEXT),)))
+    connection = connect_v2_index(
+        build_citation_index(((TEST_URL, V2_CITE_TEXT),)),
+        config_path=backend_test_paths.config,
+    )
     try:
         assessment = api.assess_submission_evidence(
             connection,
@@ -1613,8 +1641,12 @@ def test_codex_v2_classifies_normalized_variants_without_accepting_them(
 def test_codex_v2_normalizer_preserves_non_latin_scripts(
     value: str,
     expected_tokens: tuple[str, ...],
+    backend_test_paths: BackendTestPaths,
 ) -> None:
-    connection = connect_v2_index(build_citation_index(((TEST_URL, value),)))
+    connection = connect_v2_index(
+        build_citation_index(((TEST_URL, value),)),
+        config_path=backend_test_paths.config,
+    )
     try:
         assert api._normalized_evidence_tokens(connection, value) == expected_tokens
     finally:
@@ -1646,8 +1678,12 @@ def test_codex_v2_matches_non_latin_token_sequences_conservatively(
     cite_text: str,
     excerpt: str,
     expected_outcome: str,
+    backend_test_paths: BackendTestPaths,
 ) -> None:
-    connection = connect_v2_index(build_citation_index(((TEST_URL, cite_text),)))
+    connection = connect_v2_index(
+        build_citation_index(((TEST_URL, cite_text),)),
+        config_path=backend_test_paths.config,
+    )
     try:
         assessment = api.assess_submission_evidence(
             connection,
@@ -1674,8 +1710,12 @@ def test_codex_v2_matches_non_latin_token_sequences_conservatively(
 )
 def test_codex_v2_rejects_noncontiguous_or_empty_token_sequences(
     excerpt: str,
+    backend_test_paths: BackendTestPaths,
 ) -> None:
-    connection = connect_v2_index(build_citation_index(((TEST_URL, "Alpha Beta Gamma Delta"),)))
+    connection = connect_v2_index(
+        build_citation_index(((TEST_URL, "Alpha Beta Gamma Delta"),)),
+        config_path=backend_test_paths.config,
+    )
     try:
         assessment = api.assess_submission_evidence(
             connection,
@@ -1690,12 +1730,15 @@ def test_codex_v2_rejects_noncontiguous_or_empty_token_sequences(
     assert assessment.accepted is False
 
 
-def test_codex_v2_cannot_join_tokens_across_citation_sections() -> None:
+def test_codex_v2_cannot_join_tokens_across_citation_sections(
+    backend_test_paths: BackendTestPaths,
+) -> None:
     connection = connect_v2_index(
         build_citation_index((
             (TEST_URL, "Alpha Beta"),
             (TEST_URL, "Gamma Delta"),
-        ))
+        )),
+        config_path=backend_test_paths.config,
     )
     try:
         assessment = api.assess_submission_evidence(
@@ -1710,8 +1753,13 @@ def test_codex_v2_cannot_join_tokens_across_citation_sections() -> None:
     assert {item.outcome for item in assessment.items} == {api.EVIDENCE_OUTCOME_UNMATCHED}
 
 
-def test_codex_v2_requires_the_exact_candidate_url() -> None:
-    connection = connect_v2_index(build_citation_index(((TEST_URL, V2_CITE_TEXT),)))
+def test_codex_v2_requires_the_exact_candidate_url(
+    backend_test_paths: BackendTestPaths,
+) -> None:
+    connection = connect_v2_index(
+        build_citation_index(((TEST_URL, V2_CITE_TEXT),)),
+        config_path=backend_test_paths.config,
+    )
     try:
         assessment = api.assess_submission_evidence(
             connection,
@@ -1735,13 +1783,18 @@ def test_empty_excerpt_is_rejected_before_codex_v2_matching() -> None:
         api.Submission.model_validate(submission_body_for_evidence(""))
 
 
-def test_evidence_assessment_is_exhaustive_and_public_guidance_is_nonrevealing() -> None:
+def test_evidence_assessment_is_exhaustive_and_public_guidance_is_nonrevealing(
+    backend_test_paths: BackendTestPaths,
+) -> None:
     body = submission_body_for_evidence(V2_EXACT_EXCERPT)
     failed_field = api.AI_AUGMENT_EVIDENCE_COLUMNS[0]
     body[failed_field]["web_search_excerpts"][0]["excerpt"] = (  # type: ignore[index]
         "Jose Garcia Senior Researcher"
     )
-    connection = connect_v2_index(build_citation_index(((TEST_URL, V2_CITE_TEXT),)))
+    connection = connect_v2_index(
+        build_citation_index(((TEST_URL, V2_CITE_TEXT),)),
+        config_path=backend_test_paths.config,
+    )
     try:
         assessment = api.assess_submission_evidence(
             connection,
@@ -1764,8 +1817,13 @@ def test_evidence_assessment_is_exhaustive_and_public_guidance_is_nonrevealing()
     assert V2_CITE_TEXT not in detail
 
 
-def test_v2_retry_baseline_replays_and_accepts_only_the_exact_correction() -> None:
-    connection = connect_v2_index(build_citation_index(((TEST_URL, V2_CITE_TEXT),)))
+def test_v2_retry_baseline_replays_and_accepts_only_the_exact_correction(
+    backend_test_paths: BackendTestPaths,
+) -> None:
+    connection = connect_v2_index(
+        build_citation_index(((TEST_URL, V2_CITE_TEXT),)),
+        config_path=backend_test_paths.config,
+    )
     near_body = submission_body_for_evidence(V2_EXACT_EXCERPT)
     near_body[api.AI_AUGMENT_EVIDENCE_COLUMNS[0]][  # type: ignore[index]
         "web_search_excerpts"
@@ -1836,8 +1894,13 @@ def test_v2_retry_baseline_replays_and_accepts_only_the_exact_correction() -> No
     assert audit_rows == [(True, False), (True, True)]
 
 
-def test_v2_retry_rejects_changed_tokens_and_repeats_near_guidance() -> None:
-    connection = connect_v2_index(build_citation_index(((TEST_URL, V2_CITE_TEXT),)))
+def test_v2_retry_rejects_changed_tokens_and_repeats_near_guidance(
+    backend_test_paths: BackendTestPaths,
+) -> None:
+    connection = connect_v2_index(
+        build_citation_index(((TEST_URL, V2_CITE_TEXT),)),
+        config_path=backend_test_paths.config,
+    )
     near_body = submission_body_for_evidence(V2_EXACT_EXCERPT)
     failed_field = api.AI_AUGMENT_EVIDENCE_COLUMNS[0]
     near_body[failed_field]["web_search_excerpts"][0]["excerpt"] = (  # type: ignore[index]
@@ -1919,8 +1982,13 @@ def test_v2_retry_rejects_changed_tokens_and_repeats_near_guidance() -> None:
     assert applied_rows == [(True,), (False,), (True,)]
 
 
-def test_retry_preserves_exact_items_inside_a_rejected_field() -> None:
-    connection = connect_v2_index(build_citation_index(((TEST_URL, V2_CITE_TEXT),)))
+def test_retry_preserves_exact_items_inside_a_rejected_field(
+    backend_test_paths: BackendTestPaths,
+) -> None:
+    connection = connect_v2_index(
+        build_citation_index(((TEST_URL, V2_CITE_TEXT),)),
+        config_path=backend_test_paths.config,
+    )
     field = api.AI_AUGMENT_EVIDENCE_COLUMNS[0]
     baseline_body = submission_body_for_evidence(V2_EXACT_EXCERPT)
     baseline_body[field]["web_search_excerpts"] = [  # type: ignore[index]
@@ -1980,8 +2048,13 @@ def test_retry_preserves_exact_items_inside_a_rejected_field() -> None:
     )
 
 
-def test_retry_preserves_fully_verified_fields_and_complete_evidence_counts() -> None:
-    connection = connect_v2_index(build_citation_index(((TEST_URL, V2_CITE_TEXT),)))
+def test_retry_preserves_fully_verified_fields_and_complete_evidence_counts(
+    backend_test_paths: BackendTestPaths,
+) -> None:
+    connection = connect_v2_index(
+        build_citation_index(((TEST_URL, V2_CITE_TEXT),)),
+        config_path=backend_test_paths.config,
+    )
     failed_field = api.AI_AUGMENT_EVIDENCE_COLUMNS[0]
     accepted_field = api.AI_AUGMENT_EVIDENCE_COLUMNS[1]
     baseline_body = submission_body_for_evidence(V2_EXACT_EXCERPT)
@@ -2067,8 +2140,12 @@ def test_unmatched_evidence_can_be_replaced_or_explicitly_withdrawn(
     replacement: dict[str, object],
     changed_value: bool,
     expected_outcome: str,
+    backend_test_paths: BackendTestPaths,
 ) -> None:
-    connection = connect_v2_index(build_citation_index(((TEST_URL, V2_CITE_TEXT),)))
+    connection = connect_v2_index(
+        build_citation_index(((TEST_URL, V2_CITE_TEXT),)),
+        config_path=backend_test_paths.config,
+    )
     field = api.AI_AUGMENT_EVIDENCE_COLUMNS[0]
     baseline_body = submission_body_for_evidence(V2_EXACT_EXCERPT)
     baseline_body[field]["web_search_excerpts"] = [  # type: ignore[index]
@@ -2129,8 +2206,13 @@ def test_unmatched_evidence_can_be_replaced_or_explicitly_withdrawn(
     assert violations == ()
 
 
-def test_v2_near_evidence_cannot_be_withdrawn() -> None:
-    connection = connect_v2_index(build_citation_index(((TEST_URL, V2_CITE_TEXT),)))
+def test_v2_near_evidence_cannot_be_withdrawn(
+    backend_test_paths: BackendTestPaths,
+) -> None:
+    connection = connect_v2_index(
+        build_citation_index(((TEST_URL, V2_CITE_TEXT),)),
+        config_path=backend_test_paths.config,
+    )
     field = api.AI_AUGMENT_EVIDENCE_COLUMNS[0]
     baseline_body = submission_body_for_evidence(V2_EXACT_EXCERPT)
     baseline_body[field]["web_search_excerpts"][0]["excerpt"] = (  # type: ignore[index]
@@ -2196,6 +2278,7 @@ def test_v2_near_evidence_cannot_be_withdrawn() -> None:
 
 def test_retry_baselines_survive_restart_and_remain_isolated_by_run(
     tmp_path: Path,
+    backend_test_paths: BackendTestPaths,
 ) -> None:
     database_path = tmp_path / "retry.duckdb"
     index = build_citation_index(((TEST_URL, V2_CITE_TEXT),))
@@ -2208,7 +2291,11 @@ def test_retry_baselines_survive_restart_and_remain_isolated_by_run(
         "web_search_excerpts"
     ][0]["excerpt"] = "Invented evidence"
 
-    first_connection = connect_v2_index(index, database_path=database_path)
+    first_connection = connect_v2_index(
+        index,
+        config_path=backend_test_paths.config,
+        database_path=database_path,
+    )
     try:
         for run_id, attempt_id, body in (
             (TEST_RUN_ID, "run-one-baseline", near_body),
@@ -2237,7 +2324,11 @@ def test_retry_baselines_survive_restart_and_remain_isolated_by_run(
     finally:
         first_connection.close()
 
-    second_connection = connect_v2_index(index, database_path=database_path)
+    second_connection = connect_v2_index(
+        index,
+        config_path=backend_test_paths.config,
+        database_path=database_path,
+    )
     try:
         exact_submission = api.StandardizedSubmission.model_validate(
             standardized_submission_body(submission_body_for_evidence(V2_EXACT_EXCERPT))
@@ -2288,10 +2379,15 @@ def test_retry_baselines_survive_restart_and_remain_isolated_by_run(
 
 def test_concurrent_first_rejections_cannot_replace_the_baseline(
     tmp_path: Path,
+    backend_test_paths: BackendTestPaths,
 ) -> None:
     database_path = tmp_path / "concurrent.duckdb"
     index = build_citation_index(((TEST_URL, V2_CITE_TEXT),))
-    setup_connection = connect_v2_index(index, database_path=database_path)
+    setup_connection = connect_v2_index(
+        index,
+        config_path=backend_test_paths.config,
+        database_path=database_path,
+    )
     setup_connection.close()
     barrier = Barrier(2)
 
@@ -2300,7 +2396,7 @@ def test_concurrent_first_rejections_cannot_replace_the_baseline(
         load_duckdb_extension_from_config_path(
             connection,
             api.CODEX_TOKEN_EXTENSION,
-            CONFIG_PATH,
+            backend_test_paths.config,
             log=None,
         )
         try:
@@ -2380,8 +2476,13 @@ def test_concurrent_first_rejections_cannot_replace_the_baseline(
     assert baseline_attempt == audit_attempts[0]
 
 
-def test_corrupt_applied_audit_fails_as_configuration_error() -> None:
-    connection = connect_v2_index(build_citation_index(((TEST_URL, V2_CITE_TEXT),)))
+def test_corrupt_applied_audit_fails_as_configuration_error(
+    backend_test_paths: BackendTestPaths,
+) -> None:
+    connection = connect_v2_index(
+        build_citation_index(((TEST_URL, V2_CITE_TEXT),)),
+        config_path=backend_test_paths.config,
+    )
     body = submission_body_for_evidence(V2_EXACT_EXCERPT)
     body[api.AI_AUGMENT_EVIDENCE_COLUMNS[0]][  # type: ignore[index]
         "web_search_excerpts"
@@ -2447,16 +2548,23 @@ def test_corrupt_applied_audit_fails_as_configuration_error() -> None:
         connection.close()
 
 
-def test_historical_haanen_retry_preserves_verified_evidence_roundtrip() -> None:
-    original_body_value, archived_retry_body_value = historical_haanen_submissions()
+def test_historical_haanen_retry_preserves_verified_evidence_roundtrip(
+    backend_test_paths: BackendTestPaths,
+) -> None:
+    original_body_value, archived_retry_body_value = historical_haanen_submissions(
+        backend_test_paths
+    )
     original_body = cast(dict[str, Any], original_body_value)
     archived_retry_body = cast(dict[str, Any], archived_retry_body_value)
     rollout_index = api.build_rollout_index(
-        api.parse_rollout(HAANEN_ACCEPTED_ROLLOUT_PATH),
+        api.parse_rollout(backend_test_paths.haanen_accepted_rollout),
         timezone_name=TEST_TIMEZONE,
         configured_rollout_basename=HAANEN_ROLLOUT_FILENAME,
     )
-    connection = connect_v2_index(rollout_index)
+    connection = connect_v2_index(
+        rollout_index,
+        config_path=backend_test_paths.config,
+    )
     try:
         original_submission = api.Submission.model_validate(original_body)
         original_assessment = api.assess_submission_evidence(
@@ -2719,7 +2827,10 @@ def test_multiple_exact_excerpt_and_url_matches_use_random_candidate(
         connection.close()
 
 
-def test_seeded_evidence_selection_round_trips_deterministically(tmp_path: Path) -> None:
+def test_seeded_evidence_selection_round_trips_deterministically(
+    tmp_path: Path,
+    backend_test_paths: BackendTestPaths,
+) -> None:
     database_path = tmp_path / "evidence.duckdb"
     index = build_duplicate_evidence_index()
     submission = api.Submission.model_validate({
@@ -2729,7 +2840,7 @@ def test_seeded_evidence_selection_round_trips_deterministically(tmp_path: Path)
         }
         for column in api.AI_AUGMENT_EVIDENCE_COLUMNS
     })
-    sample_seed = PipelineConfig.from_json(CONFIG_PATH).sample_seed
+    sample_seed = PipelineConfig.from_json(backend_test_paths.config).sample_seed
     selections: list[tuple[tuple[str, int, str, str], ...]] = []
 
     for _roundtrip in range(2):
@@ -2930,6 +3041,7 @@ def test_rollout_configuration_is_confined(
 def test_scp_uses_pinned_identity_and_counts_physical_lines(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    backend_test_paths: BackendTestPaths,
 ) -> None:
     report_path = tmp_path / "report.txt"
     identity_path = tmp_path / "identity"
@@ -2947,7 +3059,7 @@ def test_scp_uses_pinned_identity_and_counts_physical_lines(
         ssh_target="aivm-ai",
         host_key_alias="lima-aivm-ai",
     )
-    runtime = runtime_for_test(tmp_path)
+    runtime = runtime_for_test(tmp_path, backend_test_paths)
     captured: dict[str, Any] = {}
 
     def fake_run(command: list[str], **kwargs: object) -> None:
@@ -2972,23 +3084,31 @@ def test_scp_uses_pinned_identity_and_counts_physical_lines(
     )
 
 
-def test_required_config_and_source_database_are_read_only(tmp_path: Path) -> None:
+def test_required_config_and_source_database_are_read_only(
+    tmp_path: Path,
+    backend_test_paths: BackendTestPaths,
+) -> None:
     with pytest.raises(SystemExit):
         api.parse_args([])
-    assert api.parse_args(["--config", str(CONFIG_PATH)]).config == CONFIG_PATH
-    assert api._detour_db_path(SOURCE_DB_PATH) == SOURCE_DB_PATH.with_name(
+    assert (
+        api.parse_args(["--config", str(backend_test_paths.config)]).config
+        == backend_test_paths.config
+    )
+    assert api._detour_db_path(
+        backend_test_paths.source_database
+    ) == backend_test_paths.source_database.with_name(
         "scisci_process__detour_ai-augment.duckdb"
     )
 
-    runtime = runtime_for_test(tmp_path)
-    before = file_signature(SOURCE_DB_PATH)
+    runtime = runtime_for_test(tmp_path, backend_test_paths)
+    before = file_signature(backend_test_paths.source_database)
     connection = api.open_source_database(runtime)
     try:
         with pytest.raises(duckdb.Error):
             connection.execute("CREATE TABLE forbidden_write (id INTEGER)")
     finally:
         connection.close()
-    assert file_signature(SOURCE_DB_PATH) == before
+    assert file_signature(backend_test_paths.source_database) == before
 
 
 def test_repeated_researcher_rows_materialize_as_distinct_innerdicts() -> None:
@@ -3333,8 +3453,9 @@ def test_openapi_does_not_disclose_integrity_internals() -> None:
 def test_dashboard_query_uses_one_backend_owned_connection_and_synchronizes_each_use(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    backend_test_paths: BackendTestPaths,
 ) -> None:
-    runtime = runtime_for_test(tmp_path)
+    runtime = runtime_for_test(tmp_path, backend_test_paths)
     synchronized_connections: list[duckdb.DuckDBPyConnection] = []
     original_synchronize = api._synchronize_authoritative_projection_locked
     monkeypatch.setattr(api, "load_duckdb_extension", lambda *_args, **_kwargs: None)

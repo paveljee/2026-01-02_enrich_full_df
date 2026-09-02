@@ -35,14 +35,16 @@ import pytest
 
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="appendwatch uses Linux inotify")
 
+APPENDWATCH_MODULE = (
+    "src.detours.detour_ai_augment.src.control_centre.appendwatch.appendwatch"
+)
+APPENDWATCH_MODULE_SPEC = importlib.util.find_spec(APPENDWATCH_MODULE)
+if APPENDWATCH_MODULE_SPEC is None or APPENDWATCH_MODULE_SPEC.origin is None:
+    raise RuntimeError(f"cannot locate {APPENDWATCH_MODULE}")
 SCRIPT = Path(
     os.environ.get(
         "APPENDWATCH_SCRIPT",
-        Path(__file__).parents[2]
-        / "src"
-        / "control_centre"
-        / "appendwatch"
-        / "appendwatch.py",
+        APPENDWATCH_MODULE_SPEC.origin,
     )
 ).resolve()
 

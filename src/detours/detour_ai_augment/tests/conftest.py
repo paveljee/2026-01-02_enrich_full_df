@@ -7,10 +7,8 @@ from pathlib import Path
 
 import pytest
 
-REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
-DEPLOY_SCRIPT_PATH = (
-    REPOSITORY_ROOT
-    / "src"
+DEPLOY_SCRIPT_RELATIVE_PATH = (
+    Path("src")
     / "detours"
     / "detour_ai_augment"
     / "src"
@@ -30,7 +28,6 @@ AIVM_INSTANCE = "aivm"
 AIVM_USER = "ai"
 AIVM_CODEX_BIN_PATH = "/home/ai/.local/bin/codex"
 AIVM_OPENALEX_ENV_PATH = "/home/ai/workdir/.openalex.env"
-DEPLOY_COMMAND = ("bash", str(DEPLOY_SCRIPT_PATH), "--yes")
 AIVM_START_COMMAND = ("limactl", "start", AIVM_INSTANCE)
 AIVM_PROBE_COMMAND = ("limactl", "shell", "--workdir=/", AIVM_INSTANCE, "true")
 AIVM_CODEX_COMMAND_PREFIX = (
@@ -168,11 +165,15 @@ def _operator_requested(config: pytest.Config) -> bool:
     return (config.option.markexpr or "").strip() == OPERATOR_MARKER
 
 
-def _codex_is_authenticated(deployment_environment: dict[str, str]) -> bool:
+def _codex_is_authenticated(
+    deployment_environment: dict[str, str],
+    *,
+    repository_root: Path,
+) -> bool:
     try:
         result = subprocess.run(
             AIVM_CODEX_AUTH_STATUS_COMMAND,
-            cwd=REPOSITORY_ROOT,
+            cwd=repository_root,
             env=deployment_environment,
             check=False,
             stdout=subprocess.DEVNULL,
@@ -184,9 +185,16 @@ def _codex_is_authenticated(deployment_environment: dict[str, str]) -> bool:
     return result.returncode == 0
 
 
-def _ensure_codex_is_authenticated(deployment_environment: dict[str, str]) -> None:
+def _ensure_codex_is_authenticated(
+    deployment_environment: dict[str, str],
+    *,
+    repository_root: Path,
+) -> None:
     _operator_log("checking guest Codex authentication")
-    if _codex_is_authenticated(deployment_environment):
+    if _codex_is_authenticated(
+        deployment_environment,
+        repository_root=repository_root,
+    ):
         _operator_log("guest Codex authentication is available")
         return
     _operator_log("guest Codex authentication is unavailable")
@@ -200,14 +208,17 @@ def _ensure_codex_is_authenticated(deployment_environment: dict[str, str]) -> No
     try:
         subprocess.run(
             AIVM_CODEX_DEVICE_AUTH_COMMAND,
-            cwd=REPOSITORY_ROOT,
+            cwd=repository_root,
             env=deployment_environment,
             check=True,
             timeout=OPERATOR_CODEX_AUTH_TIMEOUT_SECONDS,
         )
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
         raise pytest.UsageError(OPERATOR_CODEX_AUTH_FAILED) from exc
-    if not _codex_is_authenticated(deployment_environment):
+    if not _codex_is_authenticated(
+        deployment_environment,
+        repository_root=repository_root,
+    ):
         raise pytest.UsageError(OPERATOR_CODEX_AUTH_FAILED)
     _operator_log("guest Codex device authentication completed")
 
@@ -287,6 +298,16 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
             item.add_marker(skip_operator)
 
 
+@pytest.fixture(scope="session")
+def repository_root(pytestconfig: pytest.Config) -> Path:
+    return pytestconfig.rootpath
+
+
+@pytest.fixture(scope="session")
+def detour_root(repository_root: Path) -> Path:
+    return repository_root / "src" / "detours" / "detour_ai_augment"
+
+
 @pytest.fixture(autouse=True)
 def isolated_lima_configuration(
     request: pytest.FixtureRequest,
@@ -327,6 +348,7 @@ def isolated_lima_configuration(
 def operator_aivm(
     request: pytest.FixtureRequest,
     monkeypatch: pytest.MonkeyPatch,
+    repository_root: Path,
 ) -> None:
     if request.node.get_closest_marker(OPERATOR_MARKER) is None:
         return
@@ -348,7 +370,7 @@ def operator_aivm(
     #     raise pytest.UsageError(OPERATOR_KEY_MISSING)
     # monkeypatch.setenv(OPENALEX_API_KEY_ENV_NAME, openalex_api_key)
     deployment_environment = os.environ.copy()
-    deployment_environment[REPOSITORY_ROOT_ENV_NAME] = str(REPOSITORY_ROOT)
+    deployment_environment[REPOSITORY_ROOT_ENV_NAME] = str(repository_root)
     if request.config.stash[OPERATOR_REDEPLOY_STASH_KEY]:
         _operator_log("validating host deployment requirements")
         deploy_key = os.environ.get(OPENALEX_API_KEY_ENV_NAME, "").strip()
@@ -358,8 +380,8 @@ def operator_aivm(
         _operator_log("redeploying AIVM")
         try:
             subprocess.run(
-                DEPLOY_COMMAND,
-                cwd=REPOSITORY_ROOT,
+                ("bash", str(repository_root / DEPLOY_SCRIPT_RELATIVE_PATH), "--yes"),
+                cwd=repository_root,
                 env=deployment_environment,
                 check=True,
                 timeout=OPERATOR_DEPLOY_TIMEOUT_SECONDS,
@@ -373,7 +395,7 @@ def operator_aivm(
     try:
         probe = subprocess.run(
             AIVM_PROBE_COMMAND,
-            cwd=REPOSITORY_ROOT,
+            cwd=repository_root,
             env=deployment_environment,
             check=False,
             stdout=subprocess.DEVNULL,
@@ -398,14 +420,14 @@ def operator_aivm(
         try:
             subprocess.run(
                 AIVM_START_COMMAND,
-                cwd=REPOSITORY_ROOT,
+                cwd=repository_root,
                 env=deployment_environment,
                 check=True,
                 timeout=OPERATOR_START_TIMEOUT_SECONDS,
             )
             subprocess.run(
                 AIVM_PROBE_COMMAND,
-                cwd=REPOSITORY_ROOT,
+                cwd=repository_root,
                 env=deployment_environment,
                 check=True,
                 timeout=OPERATOR_PROBE_TIMEOUT_SECONDS,
@@ -419,7 +441,7 @@ def operator_aivm(
     try:
         guest_key_process = subprocess.run(
             AIVM_OPENALEX_KEY_COMMAND,
-            cwd=REPOSITORY_ROOT,
+            cwd=repository_root,
             env=deployment_environment,
             check=True,
             capture_output=True,
@@ -437,7 +459,7 @@ def operator_aivm(
     try:
         subprocess.run(
             AIVM_APPENDWATCH_PROBE_COMMAND,
-            cwd=REPOSITORY_ROOT,
+            cwd=repository_root,
             env=deployment_environment,
             check=True,
             timeout=OPERATOR_PROBE_TIMEOUT_SECONDS,
@@ -445,5 +467,8 @@ def operator_aivm(
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
         raise pytest.UsageError(OPERATOR_APPENDWATCH_UNAVAILABLE) from exc
     if request.node.get_closest_marker(REQUIRES_CODEX_AUTH_MARKER) is not None:
-        _ensure_codex_is_authenticated(deployment_environment)
+        _ensure_codex_is_authenticated(
+            deployment_environment,
+            repository_root=repository_root,
+        )
     _operator_log("operator AIVM preflight completed")

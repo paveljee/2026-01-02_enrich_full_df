@@ -28,13 +28,6 @@ from src.detours.detour_ai_augment.src.backend import api as backend_api
 from src.detours.detour_ai_augment.src.control_centre.dashboard import ui as control_ui
 from src.helpers.data_models.http_request_log import HttpRequestLogRecord
 
-REPOSITORY_ROOT = Path(__file__).resolve().parents[5]
-DETOUR_ROOT = Path(__file__).resolve().parents[2]
-REAL_CONFIG_PATH = REPOSITORY_ROOT / "config_ai_augment.json"
-PRODUCTION_DATA_DIRECTORIES = (
-    REPOSITORY_ROOT / "data",
-    DETOUR_ROOT / "data",
-)
 CONTROL_CENTRE_MODULE = "src.detours.detour_ai_augment.src.control_centre.dashboard.ui"
 CONTROL_CENTRE_COMMAND_PREFIX = (
     sys.executable,
@@ -74,6 +67,7 @@ pytestmark = pytest.mark.operator
 
 @dataclass(frozen=True, slots=True)
 class OperatorRuntime:
+    repository_root: Path
     config_path: Path
     detour_db_path: Path
     replay_log_path: Path
@@ -294,25 +288,38 @@ def _tree_digest(directory: Path) -> str:
 
 
 @pytest.fixture(autouse=True)
-def production_data_unchanged(operator_aivm: None) -> Iterator[None]:
+def production_data_unchanged(
+    operator_aivm: None,
+    repository_root: Path,
+    detour_root: Path,
+) -> Iterator[None]:
+    production_data_directories = (
+        repository_root / "data",
+        detour_root / "data",
+    )
     _operator_log("hashing production data before the test")
-    before = {path: _tree_digest(path) for path in PRODUCTION_DATA_DIRECTORIES}
+    before = {path: _tree_digest(path) for path in production_data_directories}
     _operator_log("production-data pre-test hashes completed")
     yield
     _operator_log("verifying production data remains unchanged", separate=True)
-    assert {path: _tree_digest(path) for path in PRODUCTION_DATA_DIRECTORIES} == before
+    assert {path: _tree_digest(path) for path in production_data_directories} == before
     _operator_log("production data is unchanged")
 
 
 def _operator_runtime(
     tmp_path: Path,
     *,
+    repository_root: Path,
     dashboard_socket_path: Path,
 ) -> OperatorRuntime:
     replay_log_path = tmp_path / "backend-replay.jsonl"
     rollout_cas_dir = tmp_path / "rollout-cas"
     config_path = tmp_path / "config.operator.json"
-    config_value: object = json.loads(REAL_CONFIG_PATH.read_text(encoding=TEXT_ENCODING))
+    config_value: object = json.loads(
+        (repository_root / "config_ai_augment.json").read_text(
+            encoding=TEXT_ENCODING
+        )
+    )
     if not isinstance(config_value, dict):
         raise AssertionError("operator configuration must be a JSON object")
     config = cast(dict[str, Any], config_value)
@@ -320,7 +327,7 @@ def _operator_runtime(
     source = (
         configured_source
         if configured_source.is_absolute()
-        else REPOSITORY_ROOT / configured_source
+        else repository_root / configured_source
     )
     source_link = tmp_path / source.name
     source_link.symlink_to(source)
@@ -340,6 +347,7 @@ def _operator_runtime(
     })
     config_path.write_text(json.dumps(config, indent=2), encoding=TEXT_ENCODING)
     return OperatorRuntime(
+        repository_root=repository_root,
         config_path=config_path,
         detour_db_path=backend_api._detour_db_path(source_link),
         replay_log_path=replay_log_path,
@@ -349,13 +357,17 @@ def _operator_runtime(
 
 
 @pytest.fixture
-def operator_runtime(tmp_path: Path) -> Iterator[OperatorRuntime]:
+def operator_runtime(
+    tmp_path: Path,
+    repository_root: Path,
+) -> Iterator[OperatorRuntime]:
     with tempfile.TemporaryDirectory(prefix="detour-operator-", dir="/tmp") as directory:
         dashboard_socket_path = Path(directory) / "dashboard.sock"
         if len(os.fsencode(dashboard_socket_path)) >= DARWIN_AF_UNIX_PATH_CAPACITY_BYTES:
             raise RuntimeError("operator dashboard socket path exceeds Darwin AF_UNIX capacity")
         yield _operator_runtime(
             tmp_path,
+            repository_root=repository_root,
             dashboard_socket_path=dashboard_socket_path,
         )
 
@@ -405,7 +417,7 @@ def running_dashboard(runtime: OperatorRuntime) -> Generator[DashboardProcess]:
     )
     process = subprocess.Popen(
         (*CONTROL_CENTRE_COMMAND_PREFIX, str(runtime.config_path)),
-        cwd=REPOSITORY_ROOT,
+        cwd=runtime.repository_root,
         env=environment,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,

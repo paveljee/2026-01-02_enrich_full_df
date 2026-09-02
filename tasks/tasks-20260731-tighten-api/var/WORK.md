@@ -1,5 +1,23 @@
 # Tighten API: complete
 
+## Pytest-root path cleanup completed
+
+- Removed every numeric `Path(__file__).parents[...]` traversal from the Detour
+  tests. Session fixtures now expose `repository_root` from
+  `pytestconfig.rootpath` and its derived `detour_root`.
+- Root-dependent helpers and subprocess launchers receive the resolved root
+  explicitly. Backend's numerous fixture paths are grouped in a typed
+  `BackendTestPaths` fixture; appendwatch resolves its importable module when
+  no explicit script environment variable is supplied.
+- The standalone browser server remains root-independent; only its test
+  launcher receives the repository root as subprocess `cwd`.
+- Verification: all **175 tests collected**; focused shared-root/preflight/
+  appendwatch checks **5 passed**; complete unprivileged Detour task **124
+  passed, 48 skipped, 3 deselected**, followed by the expected no-key real-API
+  skip; the sudo-marker contour selected exactly three tests and skipped them
+  without root. Official Ruff/mypy over 96 files, `pixi lock --check`, diff
+  whitespace, and removal-of-parent-traversal audits passed.
+
 ## Nested Detour test tree reviewed and adapted
 
 - Preserved the Human Operator's readability split into `backend/`,

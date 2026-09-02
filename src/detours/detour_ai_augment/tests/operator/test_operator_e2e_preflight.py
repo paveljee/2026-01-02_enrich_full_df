@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -9,6 +10,7 @@ from src.detours.detour_ai_augment.tests import conftest as operator_preflight
 
 def test_existing_codex_authentication_does_not_prompt(
     monkeypatch: pytest.MonkeyPatch,
+    repository_root: Path,
 ) -> None:
     observed: list[tuple[str, ...]] = []
 
@@ -25,13 +27,17 @@ def test_existing_codex_authentication_does_not_prompt(
     monkeypatch.setattr(operator_preflight.subprocess, "run", run)
     monkeypatch.setattr("builtins.input", unexpected_input)
 
-    operator_preflight._ensure_codex_is_authenticated({})
+    operator_preflight._ensure_codex_is_authenticated(
+        {},
+        repository_root=repository_root,
+    )
 
     assert observed == [operator_preflight.AIVM_CODEX_AUTH_STATUS_COMMAND]
 
 
 def test_missing_codex_authentication_runs_device_auth_and_rechecks(
     monkeypatch: pytest.MonkeyPatch,
+    repository_root: Path,
 ) -> None:
     observed: list[tuple[str, ...]] = []
     status_return_codes = iter((1, 0))
@@ -51,7 +57,10 @@ def test_missing_codex_authentication_runs_device_auth_and_rechecks(
     monkeypatch.setattr(operator_preflight.subprocess, "run", run)
     monkeypatch.setattr("builtins.input", lambda _prompt: "yes")
 
-    operator_preflight._ensure_codex_is_authenticated({})
+    operator_preflight._ensure_codex_is_authenticated(
+        {},
+        repository_root=repository_root,
+    )
 
     assert observed == [
         operator_preflight.AIVM_CODEX_AUTH_STATUS_COMMAND,
@@ -62,6 +71,7 @@ def test_missing_codex_authentication_runs_device_auth_and_rechecks(
 
 def test_missing_codex_authentication_refusal_fails_fast(
     monkeypatch: pytest.MonkeyPatch,
+    repository_root: Path,
 ) -> None:
     def run(
         command: tuple[str, ...],
@@ -76,4 +86,7 @@ def test_missing_codex_authentication_refusal_fails_fast(
         pytest.UsageError,
         match=operator_preflight.OPERATOR_CODEX_AUTH_REQUIRED,
     ):
-        operator_preflight._ensure_codex_is_authenticated({})
+        operator_preflight._ensure_codex_is_authenticated(
+            {},
+            repository_root=repository_root,
+        )

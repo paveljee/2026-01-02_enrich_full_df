@@ -24,8 +24,6 @@ from src.detours.detour_ai_augment.src.control_centre.dashboard import ui as con
 from src.helpers.data_models import NameKey
 from src.helpers.vars import KTP_FILENAME_COL
 
-REPOSITORY_ROOT = Path(__file__).resolve().parents[5]
-
 E2E_SERVER_ARGUMENT = "--serve"
 E2E_SERVER_MODULE = (
     "src.detours.detour_ai_augment.tests.control_centre.test_ui_e2e"
@@ -414,7 +412,9 @@ def assert_shared_width(page: Page) -> None:
 
 
 @contextmanager
-def control_centre_browser() -> Iterator[tuple[Page, list[str]]]:
+def control_centre_browser(
+    repository_root: Path,
+) -> Iterator[tuple[Page, list[str]]]:
     port = available_e2e_port()
     url = f"http://{E2E_HOST}:{port}"
     server_environment = os.environ.copy()
@@ -427,7 +427,7 @@ def control_centre_browser() -> Iterator[tuple[Page, list[str]]]:
             E2E_SERVER_ARGUMENT,
             str(port),
         ],
-        cwd=REPOSITORY_ROOT,
+        cwd=repository_root,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -457,8 +457,10 @@ def control_centre_browser() -> Iterator[tuple[Page, list[str]]]:
             process.wait(timeout=E2E_STOP_TIMEOUT_SECONDS)
 
 
-def test_underscore_field_labels_render_literally_in_researcher_card() -> None:
-    with control_centre_browser() as (page, errors):
+def test_underscore_field_labels_render_literally_in_researcher_card(
+    repository_root: Path,
+) -> None:
+    with control_centre_browser(repository_root) as (page, errors):
         eligible_row = grid_row_for_draw(page, BROWSER_PILOT_ELIGIBLE_DRAW)
         eligible_row.click()
         page.get_by_test_id(control_ui.VIEW_CARD_TEST_ID).click()
@@ -474,8 +476,10 @@ def test_underscore_field_labels_render_literally_in_researcher_card() -> None:
         assert errors == [], Counter(errors)
 
 
-def test_main_grid_and_researcher_card_use_compact_line_spacing() -> None:
-    with control_centre_browser() as (page, errors):
+def test_main_grid_and_researcher_card_use_compact_line_spacing(
+    repository_root: Path,
+) -> None:
+    with control_centre_browser(repository_root) as (page, errors):
         eligible_row = grid_row_for_draw(page, BROWSER_PILOT_ELIGIBLE_DRAW)
         eligible_row.click()
         page.get_by_test_id(control_ui.EXECUTE_ACTION_TEST_ID).click()
@@ -512,8 +516,8 @@ def test_main_grid_and_researcher_card_use_compact_line_spacing() -> None:
         assert errors == [], Counter(errors)
 
 
-def test_selected_researcher_row_is_highlighted() -> None:
-    with control_centre_browser() as (page, errors):
+def test_selected_researcher_row_is_highlighted(repository_root: Path) -> None:
+    with control_centre_browser(repository_root) as (page, errors):
         selected_row = grid_row_for_draw(page, BROWSER_PILOT_ELIGIBLE_DRAW)
         unselected_row = grid_row_for_draw(page, BROWSER_PILOT_INELIGIBLE_DRAW)
         selected_row.click()
@@ -530,8 +534,10 @@ def test_selected_researcher_row_is_highlighted() -> None:
         assert errors == [], Counter(errors)
 
 
-def test_researcher_selection_and_attempt_history_are_idempotent() -> None:
-    with control_centre_browser() as (page, errors):
+def test_researcher_selection_and_attempt_history_are_idempotent(
+    repository_root: Path,
+) -> None:
+    with control_centre_browser(repository_root) as (page, errors):
         first_row = grid_row_for_draw(page, BROWSER_PILOT_ELIGIBLE_DRAW)
         second_row = grid_row_for_draw(page, "1")
         history_panel = page.get_by_test_id(control_ui.ATTEMPT_HISTORY_PANEL_TEST_ID)
@@ -555,7 +561,7 @@ def test_researcher_selection_and_attempt_history_are_idempotent() -> None:
         assert errors == [], Counter(errors)
 
 
-def test_control_centre_browser_contract() -> None:
+def test_control_centre_browser_contract(repository_root: Path) -> None:
     port = available_e2e_port()
     url = f"http://{E2E_HOST}:{port}"
     server_environment = os.environ.copy()
@@ -568,7 +574,7 @@ def test_control_centre_browser_contract() -> None:
             E2E_SERVER_ARGUMENT,
             str(port),
         ],
-        cwd=REPOSITORY_ROOT,
+        cwd=repository_root,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,

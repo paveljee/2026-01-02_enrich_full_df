@@ -20,9 +20,6 @@ from src.detours.detour_ai_augment.src.backend.helpers.data_models.submission_in
     Submission,
 )
 
-REPOSITORY_ROOT = Path(__file__).resolve().parents[5]
-ENV_PATH = REPOSITORY_ROOT / ".env"
-
 TEST_OPENALEX_API_KEY = "test-openalex-api-key"
 TEST_EXCERPT = "Exact cited text."
 TEST_URL = "https://example.test/result"
@@ -289,9 +286,10 @@ def test_l_fei_fei_fixture_builds_without_external_requests(
 @pytest.mark.real_api
 def test_academic_institution_round_trips_against_real_apis(
     monkeypatch: pytest.MonkeyPatch,
+    repository_root: Path,
 ) -> None:
     api_key = os.environ.get(schema.EXPORT_OPENALEX_API_KEY) or dotenv_values(
-        ENV_PATH
+        repository_root / ".env"
     ).get(schema.EXPORT_OPENALEX_API_KEY)
     if not api_key:
         pytest.skip(f"{schema.EXPORT_OPENALEX_API_KEY} is unavailable")
