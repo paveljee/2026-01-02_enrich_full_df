@@ -1,4 +1,79 @@
-# Tighten API: complete
+# Tighten API: reopened — accepted-410 Dashboard finalization regression
+
+## Current Human Operator evidence (2026-09-03)
+
+- The real macOS/AIVM contour accepted the supplied 292-line Aziz Sheikh
+  `Submission`, persisted the push and synthetic commit, projected the final
+  output, and served the terminal `GET /pull -> 410 Gone`. The first 410 NDJSON
+  line contains the accepted AI values and the optional second line contains
+  ground truth.
+- Backend private `/query` returned 200 repeatedly. The fresh Playwright page
+  showed the accepted AI value and global counts `running 0 · complete 1`, so
+  Backend-to-Dashboard database projection worked.
+- The operator test failed at
+  `row.locator('[col-id="status"]')`: the grid's `status` and `attempt_id`
+  columns are far to the right and AG Grid column virtualization leaves them
+  absent from the DOM until horizontally scrolled. This is a brittle test
+  locator, not evidence that the row or accepted projection was missing.
+- The subsequent `Control Centre stopped before the run completed` failure was
+  teardown after the Playwright assertion aborted. At that instant the remote
+  Codex/local SSH process was still alive, so the Control Centre had not yet
+  journaled `CODEX_EXITED`, `PUSH_ACCEPTED`, and `COMPLETE`.
+
+## Additional state-model gap exposed
+
+- Before Codex exits, Backend can already expose an accepted attempt while the
+  Dashboard-owned run is still `RUNNING`. `AttemptReconciler` currently sorts
+  the later Backend attempt after the live run, causing summary/filter/grid
+  status to say `complete` prematurely. This contradicts the intended operator
+  contract recorded below: Dashboard completion must follow Codex exit and run
+  finalization.
+- Consequently, merely replacing the missing-cell locator with another way of
+  reading the accepted attempt's `complete` value would preserve a false
+  positive. The regression must control Codex exit and distinguish durable
+  Backend acceptance/410 from completed Control Centre execution.
+
+## Accepted-410 regression completed
+
+1. Preserved the Human Operator's exact accepted 292-line Aziz Sheikh
+   `POST /push` body as a tracked fixture. The captured terminal body contains
+   production ground truth and was moved to ignored repository `tmp/`: its
+   accepted-values line is reproduced exactly from the push's ten `value`
+   fields, while its non-derivable ground-truth line is synthetic in tests.
+2. Added an isolated Backend pull/reject/retry/accept/terminal contour using
+   that exact push. Backend creates the private synthetic
+   `POST http://invalid/commit`; the regression proves record-ID linkage,
+   accepted projection, an exact dynamically constructed terminal 410,
+   private Dashboard query response, and a nonempty researcher card. No
+   external `/commit` is fabricated by the test.
+3. Added controlled Control Centre coverage proving that durable Backend
+   acceptance does not make a Dashboard-owned run complete while Codex is
+   still alive. Reconciliation now keeps that run `running` until Codex exits,
+   after which the journal ends `CODEX_EXITED`, `PUSH_ACCEPTED`, `COMPLETE` and
+   the accepted Backend attempt becomes visible.
+4. Added hermetic browser coverage for the stable, visible attempt-history and
+   card controls. The real operator test now reads completion and accepted
+   attempt ID there instead of depending on AG Grid's virtualized off-screen
+   `status` and `attempt_id` cells.
+5. The Human Operator's real contour remains the final macOS/Lima confirmation;
+   it was not rerun in this Linux execution environment.
+
+## Verification and disposition
+
+- Focused accepted-push and reconciliation regressions: **2 passed**.
+- Complete Backend module: **49 passed, 36 skipped**; complete Control Centre
+  unit module: **13 passed**.
+- Complete unprivileged Detour task: **126 passed, 49 skipped, 3 deselected**;
+  the separate real-API check skipped because `OPENALEX_API_KEY` is unavailable.
+  Browser tests that require local sockets also skip in this restricted
+  environment.
+- Repository Ruff and mypy checks passed over all 96 source files; diff
+  whitespace checks passed.
+- The full standard `pixi run pre-commit` was attempted. Its root-test stage
+  stopped at **102 passed, 34 failed, 4 skipped** because this environment could
+  neither download nor load the configured DuckDB `splink_udfs`/`httpfs`
+  extensions. The HTTP request-log tests all passed, and the complete Detour
+  task was run separately and passed as recorded above.
 
 ## Visible operator Codex-auth prompt completed
 

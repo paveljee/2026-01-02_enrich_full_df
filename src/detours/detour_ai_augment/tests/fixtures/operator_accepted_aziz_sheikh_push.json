@@ -1,0 +1,292 @@
+{
+  "ktp.ai_augment_researcher_author": {
+    "value": "Professor Sir Aziz Sheikh OBE (also indexed as Aziz Sheikh and A. Sheikh), a primary-care epidemiologist; ORCID 0000-0001-7022-3056; OpenAlex A5026215303.",
+    "web_search_excerpts": [
+      {
+        "excerpt": "Professor Sir Aziz Sheikh",
+        "url": "https://www.phc.ox.ac.uk/team/aziz-sheikh"
+      },
+      {
+        "excerpt": "ORCID: https://orcid.org/0000-0001-7022-3056",
+        "url": "https://pubmed.ncbi.nlm.nih.gov/32685684/"
+      },
+      {
+        "excerpt": "Sheikh A. Quiet room is needed in hospitals for prayer and reflection. BMJ 1997; 315: 1625.",
+        "url": "https://journals.sagepub.com/doi/10.1177/014107689809100307"
+      }
+    ],
+    "standardized_value": {
+      "first_name": "Aziz",
+      "last_name": "Sheikh",
+      "orcid": "https://orcid.org/0000-0001-7022-3056",
+      "openalex_id": "https://openalex.org/A5026215303"
+    }
+  },
+  "ktp.ai_augment_place_of_residence": {
+    "value": "Current public professional location: Oxford, England, United Kingdom. A 2022 honours record listed Lasswade, City of Edinburgh. His exact current private residence is not established.",
+    "web_search_excerpts": [
+      {
+        "excerpt": "Oxford, England, United Kingdom",
+        "url": "https://uk.linkedin.com/in/profazizsheikh"
+      },
+      {
+        "excerpt": "Chair, Primary Care Research and Development, University of Edinburgh. For services to Covid-19 Research and Policy (Lasswade, City of Edinburgh)",
+        "url": "https://mcb.org.uk/queens-birthday-honours-list-june-2022/"
+      }
+    ],
+    "standardized_value": {
+      "place": "Oxford, England, United Kingdom",
+      "location": "GB"
+    }
+  },
+  "ktp.ai_augment_race_ethnicity_language_culture": {
+    "value": "Muslim; professional/publication language English. Race, ethnicity, and other languages were not located in reliable self-identification and are not inferred.",
+    "web_search_excerpts": [
+      {
+        "excerpt": "Competing interests: AS, ARG, US, and SS are Muslims and have (voluntary) positions with the Muslim Council of Britain.",
+        "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC516671/"
+      },
+      {
+        "excerpt": "Languages\n\n  * eng",
+        "url": "https://pubmed.ncbi.nlm.nih.gov/32685684/"
+      }
+    ],
+    "standardized_value": {
+      "race": "NA",
+      "ethnicity": "NA",
+      "language": [
+        "eng"
+      ],
+      "culture": "NA"
+    }
+  },
+  "ktp.ai_augment_gender": {
+    "value": "Man; institutional and professional biographies use he/him pronouns.",
+    "web_search_excerpts": [
+      {
+        "excerpt": "He is a world leader in asthma care and in primary care and has helped lead the COVID response in Scotland.",
+        "url": "https://nam.edu/news-and-insights/national-academy-of-medicine-elects-100-new-members-6/"
+      }
+    ],
+    "standardized_value": "Man"
+  },
+  "ktp.ai_augment_age_first_publication_according_to_openalex_profile": {
+    "value": "Approximately 28–29 at the earliest credible OpenAlex-linked publication: reported birth date 15 December 1968; 'Quiet room is needed in hospitals for prayer and reflection' was published in December 1997. Provisional because the OpenAlex author cluster also contains impossible earlier works.",
+    "web_search_excerpts": [
+      {
+        "excerpt": "Sunday, December 15, 1968",
+        "url": "https://www.ask-oracle.com/birth-chart/aziz-sheikh/"
+      },
+      {
+        "excerpt": "Quiet room is needed in hospitals for prayer and reflection\n\nArticle\n\n  * Dec 1997\n  * Br Med J\n\n  * Aziz Sheikh",
+        "url": "https://www.researchgate.net/publication/6582383_Should_Muslims_have_faith_based_health_services"
+      }
+    ],
+    "standardized_value": 1968
+  },
+  "ktp.ai_augment_education": {
+    "value": "BSc Physiology, University College London (1990); MBBS Medicine, University College London (1993).",
+    "web_search_excerpts": [
+      {
+        "excerpt": "Aziz trained in Physiology and Medicine, graduating from University College, London in 1990 and 1993.",
+        "url": "https://www.anaphylaxis.org.uk/healthcare/media-centre/case-studies/professor-aziz-shiekh/"
+      },
+      {
+        "action": "withdraw_unverified_evidence",
+        "reason": "not_present_in_web_results",
+        "attested": true
+      },
+      {
+        "action": "withdraw_unverified_evidence",
+        "reason": "not_present_in_web_results",
+        "attested": true
+      },
+      {
+        "action": "withdraw_unverified_evidence",
+        "reason": "not_present_in_web_results",
+        "attested": true
+      }
+    ],
+    "standardized_value": [
+      {
+        "degree_conferred": "BSc Physiology",
+        "isced_level": "6",
+        "place_conferred": {
+          "organization_name": "University College London",
+          "openalex_id": "https://openalex.org/I45129253",
+          "ror": "https://ror.org/02jx3x895"
+        },
+        "year_conferred": 1990
+      },
+      {
+        "degree_conferred": "MBBS",
+        "isced_level": "7",
+        "place_conferred": {
+          "organization_name": "University College London",
+          "openalex_id": "https://openalex.org/I45129253",
+          "ror": "https://ror.org/02jx3x895"
+        },
+        "year_conferred": 1993
+      }
+    ]
+  },
+  "ktp.ai_augment_academic_position_s_": {
+    "value": "University of Oxford: Pro-Vice-Chancellor; Head of the Nuffield Department of Primary Care Health Sciences; Nuffield Professor of Primary Care Health Sciences; Professorial Fellow, Harris Manchester College; NIHR Senior Investigator. Previously at the University of Edinburgh: Chair of Primary Care Research and Development, Director of the Usher Institute, and Dean of Data.",
+    "web_search_excerpts": [
+      {
+        "excerpt": "Pro-Vice-Chancellor, Head of Department and Nuffield Professor of Primary Care Health Sciences",
+        "url": "https://www.phc.ox.ac.uk/team/aziz-sheikh"
+      },
+      {
+        "excerpt": "NIHR Senior Investigator",
+        "url": "https://www.phc.ox.ac.uk/team/aziz-sheikh"
+      },
+      {
+        "excerpt": "Prior to joining the University of Oxford, I held the Chair of Primary Care Research and Development at the University of Edinburgh where I also served as Director of the Usher Institute and on the University’s Executive as its Dean of Data.",
+        "url": "https://www.phc.ox.ac.uk/team/aziz-sheikh"
+      },
+      {
+        "excerpt": "He is Professorial Fellow at Harris Manchester \nCollege, University of Oxford and Honorary Consultant with the UK Health Security \nAgency and Public Health Scotland.",
+        "url": "https://www.camsoxford.ox.ac.uk/files/Files/oxford-university-bios.pdf/%40%40download"
+      }
+    ],
+    "standardized_value": [
+      {
+        "academic_position": "Pro-Vice-Chancellor",
+        "academic_institution": {
+          "organization_name": "University of Oxford",
+          "openalex_id": "https://openalex.org/I40120149",
+          "ror": "https://ror.org/052gg0110"
+        }
+      },
+      {
+        "academic_position": "Head of the Nuffield Department of Primary Care Health Sciences",
+        "academic_institution": {
+          "organization_name": "University of Oxford",
+          "openalex_id": "https://openalex.org/I40120149",
+          "ror": "https://ror.org/052gg0110"
+        }
+      },
+      {
+        "academic_position": "Nuffield Professor of Primary Care Health Sciences",
+        "academic_institution": {
+          "organization_name": "University of Oxford",
+          "openalex_id": "https://openalex.org/I40120149",
+          "ror": "https://ror.org/052gg0110"
+        }
+      },
+      {
+        "academic_position": "Professorial Fellow, Harris Manchester College",
+        "academic_institution": {
+          "organization_name": "University of Oxford",
+          "openalex_id": "https://openalex.org/I40120149",
+          "ror": "https://ror.org/052gg0110"
+        }
+      },
+      {
+        "academic_position": "Chair of Primary Care Research and Development",
+        "academic_institution": {
+          "organization_name": "University of Edinburgh",
+          "openalex_id": "https://openalex.org/I98677209",
+          "ror": "https://ror.org/01nrxwf90"
+        },
+        "start": "NR",
+        "end": "NR"
+      },
+      {
+        "academic_position": "Director of the Usher Institute",
+        "academic_institution": {
+          "organization_name": "University of Edinburgh",
+          "openalex_id": "https://openalex.org/I98677209",
+          "ror": "https://ror.org/01nrxwf90"
+        },
+        "start": "NR",
+        "end": "NR"
+      },
+      {
+        "academic_position": "Dean of Data",
+        "academic_institution": {
+          "organization_name": "University of Edinburgh",
+          "openalex_id": "https://openalex.org/I98677209",
+          "ror": "https://ror.org/01nrxwf90"
+        },
+        "start": "NR",
+        "end": "NR"
+      }
+    ]
+  },
+  "ktp.ai_augment_social_capital": {
+    "value": "Knight Bachelor (2022) and OBE (2014); FRSE and FMedSci; elected to the U.S. National Academy of Medicine (2024); fellow of ten learned societies; governmental/intergovernmental work with the World Bank, WHO and WISH; service on Academy of Medical Sciences and Royal Society committees.",
+    "web_search_excerpts": [
+      {
+        "excerpt": "I was made an Officer of the Order of the British Empire for ‘Services to Medicine and Health Care’ in 2014 and a Knight Bachelor in 2022 for ‘Services to COVID-19 Research and Policy’.",
+        "url": "https://www.phc.ox.ac.uk/team/aziz-sheikh"
+      },
+      {
+        "excerpt": "We are delighted to share that Professor Sir Aziz Sheikh OBE, NDPCHS Head of Department and Nuffield Professor of Primary Care Health Sciences, has been elected to the esteemed National Academy of Medicine (NAM) in the United States.",
+        "url": "https://www.phc.ox.ac.uk/news/professor-sir-aziz-sheikh-head-of-department-elected-to-prestigious-u-s-national-academy-of-medicine"
+      },
+      {
+        "excerpt": "He has been awarded fellowships from 10 learned societies, including most recently \nthe US’ National Academy of Medicine.",
+        "url": "https://www.camsoxford.ox.ac.uk/files/Files/oxford-university-bios.pdf/%40%40download"
+      },
+      {
+        "excerpt": "I have had the privilege of working on a number of governmental and inter-governmental bodies, including with the World Bank, World Health Organization (WHO) and the World Innovation Summit for Health, and serving on the committees of leading scientific bodies, including the Academy of Medical Sciences and the Royal Society.",
+        "url": "https://www.phc.ox.ac.uk/team/aziz-sheikh"
+      }
+    ],
+    "standardized_value": [
+      "Knight Bachelor (2022)",
+      "Officer of the Order of the British Empire (2014)",
+      "Fellow of the Royal Society of Edinburgh (FRSE)",
+      "Fellow of the Academy of Medical Sciences (FMedSci)",
+      "Member of the U.S. National Academy of Medicine (2024)",
+      "Fellow of ten learned societies",
+      "NIHR Senior Investigator",
+      "Governmental and intergovernmental work with the World Bank, World Health Organization, and World Innovation Summit for Health",
+      "Committee service with the Academy of Medical Sciences and the Royal Society"
+    ]
+  },
+  "ktp.ai_augment_links_": {
+    "value": "Oxford profile: https://www.phc.ox.ac.uk/team/aziz-sheikh; ORCID: https://orcid.org/0000-0001-7022-3056; OpenAlex: https://openalex.org/A5026215303; National Academy of Medicine announcement: https://nam.edu/news-and-insights/national-academy-of-medicine-elects-100-new-members-6/; Royal Society of Edinburgh: https://rse.org.uk/fellowship/fellow/professor-sir-aziz-sheikh-8912/",
+    "web_search_excerpts": [
+      {
+        "excerpt": "https://orcid.org/0000-0001-7022-3056",
+        "url": "https://www.phc.ox.ac.uk/team/aziz-sheikh"
+      },
+      {
+        "excerpt": "Aziz Sheikh, OBE, FRSE, FMedSci,\u00a0Nuffield Professor of Primary Care Health Sciences and head, Nuffield Department of Primary Care Health Sciences, University of Oxford",
+        "url": "https://nam.edu/news-and-insights/national-academy-of-medicine-elects-100-new-members-6/"
+      },
+      {
+        "excerpt": "Professor Sir Aziz Sheikh FRSE",
+        "url": "https://rse.org.uk/fellowship/fellow/professor-sir-aziz-sheikh-8912/"
+      }
+    ],
+    "standardized_value": [
+      {
+        "url": "https://www.phc.ox.ac.uk/team/aziz-sheikh",
+        "verified_with_orcid": true
+      },
+      {
+        "url": "https://orcid.org/0000-0001-7022-3056",
+        "verified_with_orcid": true
+      },
+      {
+        "url": "https://openalex.org/A5026215303",
+        "verified_with_orcid": true
+      },
+      {
+        "url": "https://nam.edu/news-and-insights/national-academy-of-medicine-elects-100-new-members-6/",
+        "verified_with_orcid": false
+      },
+      {
+        "url": "https://rse.org.uk/fellowship/fellow/professor-sir-aziz-sheikh-8912/",
+        "verified_with_orcid": false
+      }
+    ]
+  },
+  "ktp.ai_augment_comments": {
+    "value": "OpenAlex's author cluster is conflated: it assigns a 1962 article to this person through the raw name 'A. Sheikh', six years before the reported 1968 birth date. Its publication counts, affiliations, fields, and literal first-publication year are therefore unreliable. The December 1997 first-author item is the earliest credible matched publication found, so the age-at-first-publication result is provisional."
+  }
+}

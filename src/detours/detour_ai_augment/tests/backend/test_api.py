@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import dataclass
@@ -21,6 +21,9 @@ from pydantic import ValidationError
 
 from src.detours.detour_ai_augment.src.backend import api
 from src.detours.detour_ai_augment.src.backend.helpers import codex_parse
+from src.detours.detour_ai_augment.src.backend.helpers.data_models import (
+    pydantic_to_paste,
+)
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.pydantic_to_paste import (
     EvidenceWithdrawal,
     FieldSubmission,
@@ -117,6 +120,9 @@ TEST_AUTHORITATIVE_RESPONSE_HEADER_VALUE = "preserved"
 TEST_AUTHORITATIVE_LOG_FILENAME = "authoritative.jsonl"
 TEST_DETOUR_DB_FILENAME = "detour.duckdb"
 TEST_ROLLOUT_CAS_DIRECTORY = "rollout-cas"
+OPERATOR_ACCEPTED_PUSH_FIXTURE = "operator_accepted_aziz_sheikh_push.json"
+OPERATOR_CAPTURED_SESSION_ID = "01a068a7-1179-7d62-8dde-4720457e3808"
+OPERATOR_CAPTURED_SESSION_TIMESTAMP = "2026-09-03T19:16:00.000Z"
 
 HAANEN_REJECTED_ATTEMPT_ID = "20260813T141344_678596Z_8ef1f6372b4a48d9a3b1279736356363"
 HAANEN_ACCEPTED_ATTEMPT_ID = "20260813T141450_027429Z_044215aac8c44200882531b10a2acfa6"
@@ -878,19 +884,30 @@ def runtime_for_test(
     paths: BackendTestPaths,
     *,
     output_format: str = "txt",
+    source_database: Path | None = None,
+    namekey: str | None = None,
+    codex_match_version: int | None = None,
 ) -> api.AiAugmentBackendContext:
     output_dir = tmp_path / "output"
     replay_log_path = tmp_path / "authoritative.jsonl"
     rollout_cas_dir = tmp_path / "rollout-cas"
     output_dir.mkdir(exist_ok=True)
     replay_log_path.write_text("", encoding=api.TEXT_ENCODING)
-    pipeline = api.AiAugmentDetourConfig.from_json(paths.ai_augment_config).model_copy(
+    configured_pipeline = api.AiAugmentDetourConfig.from_json(paths.ai_augment_config)
+    pipeline = configured_pipeline.model_copy(
         update={
-            "db_file": paths.source_database,
+            "db_file": source_database or paths.source_database,
             "output_dir": output_dir,
             "output_format": output_format,
             "pandoc_reference_docx": paths.reference_docx,
             "rollout_cas_dir": rollout_cas_dir,
+            "match_rule_version": (
+                configured_pipeline.match_rule_version
+                if codex_match_version is None
+                else configured_pipeline.match_rule_version.model_copy(
+                    update={"codex_match": codex_match_version}
+                )
+            ),
         }
     )
     replay_log = api.RegisteredResource(
@@ -905,6 +922,7 @@ def runtime_for_test(
         detour_db_path=tmp_path / "detour_ai_augment.duckdb",
         replay_log=replay_log,
         rollout_cas_dir=rollout_cas_dir,
+        namekey=namekey,
         eligible_cohorts={TEST_NAMEKEY: api.GROUND_TRUTH_COHORT},
     )
 
@@ -975,6 +993,475 @@ def prepare_real_sample_push(
         configuration=configuration,
         rendered_cards=rendered_cards,
     )
+
+
+def operator_capture_fixture(detour_root: Path, filename: str) -> Path:
+    return detour_root / "tests" / "fixtures" / filename
+
+
+def operator_retry_baseline(
+    accepted_push: dict[str, object],
+) -> dict[str, object]:
+    baseline = deepcopy(accepted_push)
+    for column in api.AI_AUGMENT_EVIDENCE_COLUMNS:
+        field = baseline[column]
+        assert isinstance(field, dict)
+        field.pop(FIELD_STANDARDIZED_VALUE_FIELD)
+
+    education = baseline[api.KTP_AI_AUGMENT_EDUCATION_COL]
+    assert isinstance(education, dict)
+    education[FIELD_VALUE_FIELD] = (
+        "BSc Physiology, University College London (1990); MBBS Medicine, "
+        "University College London (1993); three additional unverified credentials."
+    )
+    evidence = education[FIELD_EVIDENCE_FIELD]
+    assert isinstance(evidence, list)
+    evidence[1:] = [
+        {
+            EVIDENCE_EXCERPT_FIELD: f"Unverified captured credential {index}",
+            EVIDENCE_URL_FIELD: f"https://unverified.invalid/credential-{index}",
+        }
+        for index in range(1, 4)
+    ]
+    return baseline
+
+
+def operator_capture_rollout(accepted_push: dict[str, object]) -> bytes:
+    records: list[dict[str, object]] = [
+        {
+            "timestamp": OPERATOR_CAPTURED_SESSION_TIMESTAMP,
+            "type": "session_meta",
+            "payload": {
+                "session_id": OPERATOR_CAPTURED_SESSION_ID,
+                "timestamp": OPERATOR_CAPTURED_SESSION_TIMESTAMP,
+                "originator": "codex_cli_rs",
+                "source": "exec",
+                "cli_version": "0.146.0-alpha.3.1",
+                "model_provider": "openai",
+            },
+        },
+        {
+            "timestamp": OPERATOR_CAPTURED_SESSION_TIMESTAMP,
+            "type": "turn_context",
+            "payload": {"model": "gpt-5.6-sol", "effort": "xhigh"},
+        },
+    ]
+    evidence_index = 0
+    for column in api.AI_AUGMENT_EVIDENCE_COLUMNS:
+        field = accepted_push[column]
+        assert isinstance(field, dict)
+        evidence = field[FIELD_EVIDENCE_FIELD]
+        assert isinstance(evidence, list)
+        for item in evidence:
+            assert isinstance(item, dict)
+            if EVIDENCE_WITHDRAWAL_ACTION_FIELD in item:
+                continue
+            excerpt = item[EVIDENCE_EXCERPT_FIELD]
+            url = item[EVIDENCE_URL_FIELD]
+            assert isinstance(excerpt, str)
+            assert isinstance(url, str)
+            call_id = f"call_operator_{evidence_index}"
+            ref_id = f"turn0search{evidence_index}"
+            timestamp = f"2026-09-03T19:16:{evidence_index + 1:02d}.000Z"
+            arguments = {
+                "search_query": [{"q": f"captured operator evidence {evidence_index}"}],
+                "response_length": "long",
+            }
+            records.extend((
+                {
+                    "timestamp": timestamp,
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call",
+                        "id": f"fc_operator_{evidence_index}",
+                        "name": "run",
+                        "namespace": "web",
+                        "arguments": json.dumps(arguments, separators=(",", ":")),
+                        "call_id": call_id,
+                    },
+                },
+                {
+                    "timestamp": timestamp,
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "web_search_end",
+                        "call_id": call_id,
+                        "results": [
+                            {
+                                "type": "text_result",
+                                "domain": "captured.operator.test",
+                                "ref_id": ref_id,
+                                "snippet": excerpt,
+                                "thumbnail_url": None,
+                                "title": f"Captured operator evidence {evidence_index}",
+                                "url": url,
+                            }
+                        ],
+                    },
+                },
+                {
+                    "timestamp": timestamp,
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call_output",
+                        "id": f"fco_operator_{evidence_index}",
+                        "call_id": call_id,
+                        "output": [
+                            {
+                                "type": "input_text",
+                                "text": (
+                                    "Captured result\n"
+                                    f"{api.CODEX_CITE_MARKER_PREFIX}{ref_id}"
+                                    f"{api.CODEX_CITE_MARKER_SUFFIX}\n{excerpt}"
+                                ),
+                            }
+                        ],
+                    },
+                },
+            ))
+            evidence_index += 1
+    return b"".join(
+        json.dumps(record, ensure_ascii=False, separators=(",", ":")).encode()
+        + b"\n"
+        for record in records
+    )
+
+
+def create_operator_capture_source_database(
+    path: Path,
+    ground_truth: Mapping[str, object],
+) -> None:
+    xlsx_row = {
+        api.KTP_NAMEKEY_COL: TEST_NAMEKEY,
+        api.KTP_FILENAME_COL: "operator-capture.xlsx",
+        api.KTP_FRAGMENT_COL: 148,
+        api.KTP_FRAGMENT_TYPE_COL: "csv_row",
+        api.DRAW_LABEL: "146",
+        api.KTP_FIRST_NAME_COL: "A.",
+        api.KTP_LAST_NAME_COL: "Sheikh",
+    }
+    docx_row = {
+        api.KTP_NAMEKEY_COL: TEST_NAMEKEY,
+        api.KTP_FILENAME_COL: "operator-capture.docx",
+        api.KTP_FRAGMENT_COL: 1,
+        api.KTP_FRAGMENT_TYPE_COL: "docx_table",
+        api.DRAW_LABEL: "146",
+        **ground_truth,
+    }
+    connection = duckdb.connect(str(path))
+    try:
+        for table_name in (
+            api.XLSX_INNERDICT_TABLE,
+            api.DOCX_INNERDICT_TABLE,
+            api.PARQUET_INNERDICT_TABLE,
+        ):
+            connection.execute(
+                f"CREATE TABLE {api.duckdb_quote_identifier(table_name)} ("
+                f"{api.duckdb_quote_identifier(api.KTP_NAMEKEY_COL)} VARCHAR PRIMARY KEY, "
+                f"{api.duckdb_quote_identifier(api.KTP_INNERDICT_JSONLINES_COL)} VARCHAR NOT NULL)"
+            )
+        connection.execute(
+            f"INSERT INTO {api.duckdb_quote_identifier(api.XLSX_INNERDICT_TABLE)} "
+            "VALUES (?, ?)",
+            [TEST_NAMEKEY, api.json_line(xlsx_row)],
+        )
+        connection.execute(
+            f"INSERT INTO {api.duckdb_quote_identifier(api.DOCX_INNERDICT_TABLE)} "
+            "VALUES (?, ?)",
+            [TEST_NAMEKEY, api.json_line(docx_row)],
+        )
+    finally:
+        connection.close()
+
+
+async def authoritative_api_exchange(
+    method: str,
+    path: str,
+    body: bytes = b"",
+) -> tuple[int, bytes]:
+    async def public_endpoint(
+        scope: dict[str, object],
+        receive: Any,
+        send: Any,
+    ) -> None:
+        request = api.Request(cast(Any, scope), receive=receive)
+        response = (
+            api.authoritative_pull()
+            if method == api.HTTP_GET_METHOD
+            else await api.authoritative_push(request)
+        )
+        await response(cast(Any, scope), receive, send)
+
+    request_pending = True
+    never_disconnect = asyncio.Event()
+    sent: list[dict[str, object]] = []
+
+    async def receive() -> dict[str, object]:
+        nonlocal request_pending
+        if request_pending:
+            request_pending = False
+            return {
+                api.ASGI_TYPE_KEY: api.ASGI_HTTP_REQUEST_MESSAGE_TYPE,
+                api.ASGI_BODY_KEY: body,
+                api.ASGI_MORE_BODY_KEY: False,
+            }
+        await never_disconnect.wait()
+        return {api.ASGI_TYPE_KEY: api.ASGI_HTTP_DISCONNECT_MESSAGE_TYPE}
+
+    async def send(message: dict[str, object]) -> None:
+        sent.append(message)
+
+    headers = [(b"content-type", b"application/json")]
+    if body:
+        headers.append((b"content-length", str(len(body)).encode()))
+    scope = {
+        api.ASGI_TYPE_KEY: api.ASGI_HTTP_SCOPE_TYPE,
+        api.ASGI_METHOD_KEY: method,
+        api.ASGI_PATH_KEY: path,
+        "asgi": {"version": "3.0", "spec_version": "2.4"},
+        "raw_path": path.encode(),
+        "query_string": b"",
+        "headers": headers,
+        "scheme": "http",
+        "server": ("testserver", 80),
+        "client": ("127.0.0.1", 1234),
+        "http_version": "1.1",
+        "root_path": "",
+    }
+    await asyncio.wait_for(
+        api.AuthoritativeHttpMiddleware(cast(Any, public_endpoint))(
+            cast(Any, scope),
+            receive,
+            cast(Any, send),
+        ),
+        timeout=5,
+    )
+    response_start = next(
+        message
+        for message in sent
+        if message[api.ASGI_TYPE_KEY] == api.ASGI_HTTP_RESPONSE_START_MESSAGE_TYPE
+    )
+    response_body = b"".join(
+        cast(bytes, message.get(api.ASGI_BODY_KEY, b""))
+        for message in sent
+        if message[api.ASGI_TYPE_KEY] == api.ASGI_HTTP_RESPONSE_BODY_MESSAGE_TYPE
+    )
+    return cast(int, response_start[api.ASGI_STATUS_KEY]), response_body
+
+
+def test_captured_operator_push_generates_commit_and_exact_terminal_410(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    backend_test_paths: BackendTestPaths,
+    detour_root: Path,
+) -> None:
+    accepted_push_path = operator_capture_fixture(
+        detour_root,
+        OPERATOR_ACCEPTED_PUSH_FIXTURE,
+    )
+    accepted_push = read_json(accepted_push_path)
+    accepted_values: dict[str, object] = {}
+    for column in api.AI_AUGMENT_COLUMNS:
+        field = accepted_push[column]
+        assert isinstance(field, dict)
+        accepted_values[column] = field[FIELD_VALUE_FIELD]
+    ground_truth = {
+        column: f"synthetic operator ground truth {index}"
+        for index, column in enumerate(api.DOCX_COLUMNS, start=1)
+    }
+    terminal_text = api.json_line(accepted_values) + api.json_line(ground_truth)
+
+    source_database = tmp_path / "operator-capture-source.duckdb"
+    create_operator_capture_source_database(source_database, ground_truth)
+    runtime = runtime_for_test(
+        tmp_path,
+        backend_test_paths,
+        source_database=source_database,
+        namekey=TEST_NAMEKEY,
+        codex_match_version=1,
+    )
+    rollout_relative_path = PurePosixPath(
+        "2026/09/03/"
+        f"rollout-2026-09-03T15-16-00-{OPERATOR_CAPTURED_SESSION_ID}.jsonl"
+    )
+    rollout_path = tmp_path / rollout_relative_path.name
+    write_bytes(rollout_path, operator_capture_rollout(accepted_push))
+    deployment_dir = tmp_path / "operator-capture-deployment"
+    deployment_dir.mkdir()
+    report_path = deployment_dir / "appendwatch-tree.txt"
+    write_text(report_path, report_for_rollout(rollout_relative_path))
+    identity_path = deployment_dir / "id_ed25519"
+    known_hosts_path = deployment_dir / "known_hosts"
+    lima_config_path = deployment_dir / "ssh.config"
+    for path in (identity_path, known_hosts_path, lima_config_path):
+        write_text(path, "fixture\n")
+    configuration = api.PushConfiguration(
+        rollout_guest_path=f"{api.CODEX_SESSIONS_ROOT}/{rollout_relative_path}",
+        rollout_relative_path=rollout_relative_path,
+        appendwatch_report=report_path,
+        lima_ssh_config=lima_config_path,
+        identity_file=identity_path,
+        known_hosts_file=known_hosts_path,
+        ssh_target="aivm-ai",
+        host_key_alias="lima-aivm-ai",
+    )
+
+    institution_names = {
+        "I45129253": ("University College London", "https://ror.org/02jx3x895"),
+        "I40120149": ("University of Oxford", "https://ror.org/052gg0110"),
+        "I98677209": ("University of Edinburgh", "https://ror.org/01nrxwf90"),
+    }
+    ror_names = {
+        "02jx3x895": "University College London",
+        "052gg0110": "University of Oxford",
+        "01nrxwf90": "University of Edinburgh",
+    }
+
+    def fake_institution_get(url: str, **_kwargs: object) -> SimpleNamespace:
+        identifier = url.rstrip("/").rsplit("/", 1)[-1]
+        if url.startswith("https://api.openalex.org/"):
+            organization_name, ror = institution_names[identifier]
+            payload: dict[str, object] = {"display_name": organization_name, "ror": ror}
+        else:
+            payload = {
+                "names": [{"value": ror_names[identifier], "types": ["ror_display"]}]
+            }
+        return SimpleNamespace(
+            status_code=200,
+            json=lambda: payload,
+            raise_for_status=lambda: None,
+        )
+
+    def fake_subprocess_run(command: list[str], **_kwargs: object) -> None:
+        assert command[0] == api.SCP_EXECUTABLE
+        assert command[-2] == f"aivm-ai:{configuration.rollout_guest_path}"
+        write_bytes(Path(command[-1]), read_bytes(rollout_path))
+
+    original_after_authoritative_record = api._after_authoritative_public_record
+
+    async def commit_inline_after_authoritative_record(
+        record: HttpRequestLogRecord,
+    ) -> None:
+        if (record.method, record.path) == (api.HTTP_POST_METHOD, api.PUSH_PATH):
+            assert record.response_code == api.status.HTTP_202_ACCEPTED
+            api._commit_accepted_push(record)
+            return
+        await original_after_authoritative_record(record)
+
+    monkeypatch.setenv(pydantic_to_paste.EXPORT_OPENALEX_API_KEY, "operator-fixture-key")
+    monkeypatch.setattr(pydantic_to_paste.requests, "get", fake_institution_get)
+    monkeypatch.setattr(api, "runtime_configuration", lambda: runtime)
+    monkeypatch.setattr(
+        api,
+        "StreamingResponse",
+        lambda content, *, media_type: api.Response(
+            content="".join(content),
+            media_type=media_type,
+        ),
+    )
+    monkeypatch.setattr(
+        api,
+        "push_configuration_for_session",
+        lambda session_id: (
+            configuration if session_id == OPERATOR_CAPTURED_SESSION_ID else pytest.fail()
+        ),
+    )
+    monkeypatch.setattr(api.subprocess, "run", fake_subprocess_run)
+    monkeypatch.setattr(
+        api,
+        "_after_authoritative_public_record",
+        commit_inline_after_authoritative_record,
+    )
+    monkeypatch.setattr(api, "BACKEND_CURRENT_PULL_RECORD_ID", None)
+    monkeypatch.setattr(api, "BACKEND_PENDING_PULL_RECORD_ID", None)
+    monkeypatch.setattr(api, "BACKEND_SESSION_ID", OPERATOR_CAPTURED_SESSION_ID)
+    monkeypatch.setattr(api, "BACKEND_WORKFLOW_OUTCOME", None)
+    monkeypatch.setattr(api, "BACKEND_WORKFLOW_STATUS", api.BackendWorkflowStatus.READY)
+    api._acquire_authoritative_process_lock(runtime)
+    try:
+        api.synchronize_authoritative_projection(runtime)
+
+        async def run_captured_contour() -> tuple[
+            tuple[int, bytes],
+            tuple[int, bytes],
+            tuple[int, bytes],
+            tuple[int, bytes],
+            tuple[int, bytes],
+        ]:
+            initial_pull = await authoritative_api_exchange(
+                api.HTTP_GET_METHOD,
+                api.PULL_PATH,
+            )
+            baseline_push = await authoritative_api_exchange(
+                api.HTTP_POST_METHOD,
+                api.PUSH_PATH,
+                json.dumps(operator_retry_baseline(accepted_push)).encode(),
+            )
+            retry_pull = await authoritative_api_exchange(
+                api.HTTP_GET_METHOD,
+                api.PULL_PATH,
+            )
+            accepted = await authoritative_api_exchange(
+                api.HTTP_POST_METHOD,
+                api.PUSH_PATH,
+                read_bytes(accepted_push_path),
+            )
+            terminal_pull = await authoritative_api_exchange(
+                api.HTTP_GET_METHOD,
+                api.PULL_PATH,
+            )
+            return initial_pull, baseline_push, retry_pull, accepted, terminal_pull
+
+        initial_pull, baseline_push, retry_pull, accepted, terminal_pull = asyncio.run(
+            run_captured_contour()
+        )
+        assert initial_pull[0] == api.status.HTTP_200_OK
+        assert baseline_push[0] == api.status.HTTP_202_ACCEPTED
+        assert retry_pull[0] == api.status.HTTP_200_OK
+        assert accepted[0] == api.status.HTTP_202_ACCEPTED
+        assert terminal_pull == (api.status.HTTP_410_GONE, terminal_text.encode())
+
+        authoritative_records = tuple(
+            record
+            for record, _byte_offset, _line_sha256 in api._authoritative_log_records(
+                Path(runtime.replay_log)
+            )
+        )
+        pushes = tuple(
+            record
+            for record in authoritative_records
+            if (record.method, record.path) == (api.HTTP_POST_METHOD, api.PUSH_PATH)
+        )
+        commits = tuple(
+            record
+            for record in authoritative_records
+            if (record.method, record.path) == api.AUTHORITATIVE_COMMIT_ROUTE
+        )
+        assert len(pushes) == len(commits) == 2
+        assert isinstance(pushes[-1].request_body, str)
+        assert pushes[-1].request_body == read_text(accepted_push_path)
+        accepted_commit = api._replay_commit(commits[-1].request_body)
+        assert accepted_commit.push_record_id == pushes[-1].record_id
+        assert accepted_commit.pull_record_id == next(
+            record.record_id
+            for record in reversed(authoritative_records)
+            if (record.method, record.path) == (api.HTTP_GET_METHOD, api.PULL_PATH)
+            and record.response_code == api.status.HTTP_200_OK
+        )
+
+        query = api.DashboardQueryResponse.model_validate_json(
+            api.dashboard_query_payload(TEST_NAMEKEY)
+        )
+        assert len(query.attempts) == 2
+        assert query.attempts[-1].result == api.ATTEMPT_RESULT_ACCEPTED
+        assert query.attempts[-1].attempt_id == str(pushes[-1].record_id)
+        assert len(query.accepted_attempts) == 1
+        assert query.accepted_attempts[0].attempt_id == str(pushes[-1].record_id)
+        assert query.card_markdown is not None
+        assert "Professor Sir Aziz Sheikh OBE" in query.card_markdown
+    finally:
+        api.close_backend_detour_database()
+        api._release_authoritative_process_lock()
 
 
 def test_pure_asgi_middleware_records_every_public_exchange_before_send(

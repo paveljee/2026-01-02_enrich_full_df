@@ -1454,6 +1454,11 @@ class AttemptReconciler:
         accepted_attempts: Sequence[AcceptedAttempt],
     ) -> ResearcherView:
         accepted_by_attempt_id = {attempt.attempt_id: attempt for attempt in accepted_attempts}
+        live_dashboard_run_ids = {
+            run.run_id
+            for run in runs
+            if run.dashboard_owned and run.status in LIVE_RUN_STATUSES
+        }
         attempts: list[AttemptView] = []
         for record in sorted(
             attempt_records,
@@ -1522,6 +1527,7 @@ class AttemptReconciler:
             sorted(
                 attempts,
                 key=lambda attempt: (
+                    attempt.run_id in live_dashboard_run_ids,
                     attempt.timestamp or datetime.min.replace(tzinfo=timezone.utc),
                     str(attempt.run_id),
                 ),

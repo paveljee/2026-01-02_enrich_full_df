@@ -41,6 +41,7 @@ PYTEST_CURRENT_TEST_ENV_NAME = "PYTEST_CURRENT_TEST"
 BROWSER_LEADING_RESEARCHER_COUNT = 2
 BROWSER_PILOT_INELIGIBLE_DRAW = "pilot.1"
 BROWSER_PILOT_ELIGIBLE_DRAW = "pilot.2"
+BROWSER_COMPLETED_DRAW = "1"
 E2E_CARD_FIELD_LABEL = control_ui.VARIABLE_SPECS[0].ai_column
 E2E_CARD_FIELD_VALUE = "literal field value"
 E2E_CARD_SECOND_FIELD_LABEL = control_ui.VARIABLE_SPECS[1].ai_column
@@ -134,6 +135,12 @@ class BrowserController:
         ] = {researcher.namekey: [] for researcher in self._researchers}
         self._status_by_run_id: dict[UUID, control_ui.RunStatus] = {}
         self._card_render_count: Counter[control_ui.Namekey] = Counter()
+        completed = self._researchers[BROWSER_LEADING_RESEARCHER_COUNT]
+        completed_run_id = uuid4()
+        self._status_by_namekey[completed.namekey] = control_ui.RunStatus.COMPLETE
+        self._run_id_by_namekey[completed.namekey] = completed_run_id
+        self._attempt_run_ids_by_namekey[completed.namekey].append(completed_run_id)
+        self._status_by_run_id[completed_run_id] = control_ui.RunStatus.COMPLETE
 
     @property
     def active_run_id(self) -> None:
@@ -558,6 +565,42 @@ def test_researcher_selection_and_attempt_history_are_idempotent(
         expect(first_row).not_to_have_class(re.compile(r"\bag-row-selected\b"))
         expect(history_table).to_be_visible()
         expect(history_panel).to_contain_text("First 1 Last 1")
+        assert errors == [], Counter(errors)
+
+
+def test_completed_researcher_metadata_is_available_in_visible_attempt_history(
+    repository_root: Path,
+) -> None:
+    with control_centre_browser(repository_root) as (page, errors):
+        page.set_viewport_size(E2E_NARROW_VIEWPORT)
+        completed_namekey = browser_researchers()[BROWSER_LEADING_RESEARCHER_COUNT].namekey
+        page.get_by_label(control_ui.Locale.SEARCH_FILTER).fill(completed_namekey)
+        grid = page.get_by_test_id(control_ui.RESEARCHER_GRID_TEST_ID)
+        expect(grid.locator(GRID_ROW_SELECTOR)).to_have_count(1)
+        completed_row = grid_row_for_draw(page, BROWSER_COMPLETED_DRAW)
+
+        expect(
+            completed_row.locator(
+                f'{GRID_CELL_SELECTOR}[col-id="{control_ui.GRID_STATUS_FIELD}"]'
+            )
+        ).to_have_count(0)
+        completed_row.click()
+
+        history = page.get_by_test_id(control_ui.ATTEMPT_HISTORY_TABLE_TEST_ID)
+        history_rows = history.locator("tbody tr")
+        expect(history_rows).to_have_count(1)
+        history_cells = history_rows.first.locator("td")
+        expect(history_cells.nth(1)).to_have_text(control_ui.RunStatus.COMPLETE.value)
+        expect(history_cells.nth(2)).to_have_text("attempt-1")
+        expect(page.get_by_test_id(control_ui.EXECUTE_ACTION_TEST_ID)).to_have_text(
+            control_ui.ACTION_LABEL_BY_VALUE[control_ui.RunAction.RERUN.value]
+        )
+        view_card = page.get_by_test_id(control_ui.VIEW_CARD_TEST_ID)
+        expect(view_card).to_be_enabled()
+        view_card.click()
+        expect(page.get_by_test_id(control_ui.PAGE_FOOTER_TEST_ID)).to_contain_text(
+            E2E_CARD_FIELD_VALUE
+        )
         assert errors == [], Counter(errors)
 
 

@@ -588,26 +588,47 @@ def wait_for_completed_grid_row(
     dashboard: DashboardProcess,
     *,
     queued_at_monotonic: float,
-) -> Locator:
+) -> tuple[Locator, str]:
     rows = page.get_by_test_id(control_ui.RESEARCHER_GRID_TEST_ID).locator(
         GRID_ROW_SELECTOR
     )
     expect(rows).to_have_count(1)
     row = rows.first
-    status_cell = row.locator(f'[col-id="{control_ui.GRID_STATUS_FIELD}"]')
-    expect(status_cell).to_be_visible()
+    row.click()
+    history = page.get_by_test_id(control_ui.ATTEMPT_HISTORY_TABLE_TEST_ID)
+    expect(history).to_be_visible()
+    history_rows = history.locator(ATTEMPT_HISTORY_ROW_SELECTOR)
+    execute = page.get_by_test_id(control_ui.EXECUTE_ACTION_TEST_ID)
+    view_card = page.get_by_test_id(control_ui.VIEW_CARD_TEST_ID)
     deadline = queued_at_monotonic + FULL_WORKFLOW_TIMEOUT_SECONDS
     next_heartbeat = time.monotonic() + OPERATOR_HEARTBEAT_SECONDS
     previous_status: str | None = None
     while time.monotonic() < deadline:
         raise_for_dashboard_failure(dashboard)
-        current_status = status_cell.inner_text().strip()
+        history_count = history_rows.count()
+        current_status = (
+            ""
+            if history_count == 0
+            else history_rows.nth(history_count - 1).locator("td").nth(1).inner_text().strip()
+        )
         if current_status != previous_status:
-            _operator_log(f"Control Centre grid reports workflow status {current_status!r}")
+            _operator_log(
+                f"Control Centre attempt history reports workflow status {current_status!r}"
+            )
             previous_status = current_status
-        if current_status == control_ui.RunStatus.COMPLETE.value:
+        if (
+            current_status == control_ui.RunStatus.COMPLETE.value
+            and execute.inner_text().strip()
+            == control_ui.ACTION_LABEL_BY_VALUE[control_ui.RunAction.RERUN.value]
+            and view_card.is_enabled()
+        ):
+            attempt_id = (
+                history_rows.nth(history_count - 1).locator("td").nth(2).inner_text().strip()
+            )
+            if not attempt_id:
+                raise RuntimeError("completed Control Centre history has no accepted attempt ID")
             _operator_log("Control Centre projected the completed post-Codex run")
-            return row
+            return row, attempt_id
         if current_status in {
             control_ui.RunStatus.FAILED.value,
             control_ui.RunStatus.CANCELED.value,
@@ -654,20 +675,15 @@ def capture_completed_researcher_card(
             page.on("pageerror", lambda error: browser_errors.append(str(error)))
             page.goto(CONTROL_CENTRE_URL, wait_until="networkidle")
             page.get_by_label(control_ui.Locale.SEARCH_FILTER).fill(namekey)
-            row = wait_for_completed_grid_row(
+            _row, attempt_id = wait_for_completed_grid_row(
                 page,
                 dashboard,
                 queued_at_monotonic=queued_at_monotonic,
             )
-            attempt_id = row.locator(
-                f'[col-id="{control_ui.GRID_ATTEMPT_ID_FIELD}"]'
-            ).inner_text().strip()
-            if not attempt_id:
-                raise RuntimeError("completed Control Centre row has no accepted attempt ID")
-            row.click()
             history = page.get_by_test_id(control_ui.ATTEMPT_HISTORY_TABLE_TEST_ID)
             expect(history).to_be_visible()
             expect(history.locator(ATTEMPT_HISTORY_ROW_SELECTOR)).not_to_have_count(0)
+            expect(history).to_contain_text(attempt_id)
             execute = page.get_by_test_id(control_ui.EXECUTE_ACTION_TEST_ID)
             expect(execute).to_have_text(
                 control_ui.ACTION_LABEL_BY_VALUE[control_ui.RunAction.RERUN.value]

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 from typing import Any, cast
@@ -359,6 +359,126 @@ async def test_execution_starts_fresh_backend_before_codex_and_hands_off_session
     ]
     assert subject._runs[run_id].codex_exit_code == 0
     assert subject._runs[run_id].status is control_ui.RunStatus.COMPLETE
+
+
+@pytest.mark.anyio
+async def test_backend_acceptance_remains_running_until_codex_exits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id = uuid4()
+    backend_run_id = uuid4()
+    accepted_attempt_id = "01a068a7-0721-72e9-9439-dbdcd8ffc855"
+    accepted_value = "Professor Sir Aziz Sheikh OBE"
+    variable = control_ui.VARIABLE_SPECS[0]
+    codex_waiting = asyncio.Event()
+    allow_codex_exit = asyncio.Event()
+
+    class BlockingCodex(FakeCodex):
+        async def wait(self, _handle: object) -> int:
+            self.order.append("codex-wait")
+            codex_waiting.set()
+            await allow_codex_exit.wait()
+            return 0
+
+    subject = controller(
+        backend=FakeBackend(),
+        codex=BlockingCodex(),
+    )
+    source = researcher()
+    subject._researchers = (source,)
+    subject._researchers_by_namekey = {source.namekey: source}
+    accepted = control_ui.AcceptedAttempt(
+        namekey=NAMEKEY,
+        attempt_id=control_ui.AttemptId(accepted_attempt_id),
+        session_metadata=control_ui.SessionMetadata(
+            originator="codex_cli_rs",
+            source="exec",
+            cli_version="test",
+            model_provider="openai",
+            model="test-model",
+            reasoning_effort="high",
+            session_id=SESSION_ID,
+            timestamp=SESSION_TIMESTAMP,
+        ),
+        values={variable.ai_column: accepted_value},
+        footnotes=None,
+        footnote_arguments=None,
+    )
+    subject._attempt_records = {
+        NAMEKEY: (
+            api.AttemptRecord(
+                attempt_id=accepted_attempt_id,
+                transaction_id=str(uuid4()),
+                request_sha256="0" * 64,
+                stage=api.ATTEMPT_STAGE_ACCEPTED,
+                result=api.ATTEMPT_RESULT_ACCEPTED,
+                updated_at=datetime.now(timezone.utc) + timedelta(minutes=1),
+                run_id=backend_run_id,
+                namekey=NAMEKEY,
+                session_id=SESSION_ID,
+                rollout_sha256="1" * 64,
+                response_code=api.status.HTTP_410_GONE,
+                response_body="accepted\n",
+            ),
+        )
+    }
+    subject._accepted_attempts = {NAMEKEY: (accepted,)}
+
+    async def preserve_backend_snapshot() -> None:
+        return None
+
+    async def accepted_attempt_for_session(
+        *,
+        namekey: control_ui.Namekey,
+        session_id: control_ui.SessionId,
+    ) -> control_ui.AcceptedAttempt | None:
+        assert namekey == NAMEKEY
+        assert session_id == SESSION_ID
+        return accepted
+
+    monkeypatch.setattr(subject, "refresh_idle_state", preserve_backend_snapshot)
+    monkeypatch.setattr(
+        subject,
+        "_accepted_attempt_for_session",
+        accepted_attempt_for_session,
+    )
+    await subject._append_run_event(
+        control_ui.RunEvent(
+            run_id=run_id,
+            namekey=NAMEKEY,
+            at=SESSION_TIMESTAMP,
+            kind=control_ui.RunEventKind.QUEUED,
+        )
+    )
+    subject._active_run_id = run_id
+
+    execution = asyncio.create_task(subject._execute_run(run_id=run_id))
+    await codex_waiting.wait()
+    running = await subject.snapshot(
+        selection=control_ui.UiSelection(variable_key=variable.key)
+    )
+
+    assert running.counts.running == 1
+    assert running.counts.complete == 0
+    assert len(running.rows) == 1
+    assert running.rows[0].latest.attempt_status is control_ui.RunStatus.RUNNING
+    assert running.rows[0].latest.ai_value is None
+
+    allow_codex_exit.set()
+    await execution
+    completed = await subject.snapshot(
+        selection=control_ui.UiSelection(variable_key=variable.key)
+    )
+
+    assert completed.counts.running == 0
+    assert completed.counts.complete == 1
+    assert completed.rows[0].latest.attempt_status is control_ui.RunStatus.COMPLETE
+    assert completed.rows[0].latest.ai_value == accepted_value
+    assert [event.kind for event in subject._events][-3:] == [
+        control_ui.RunEventKind.CODEX_EXITED,
+        control_ui.RunEventKind.PUSH_ACCEPTED,
+        control_ui.RunEventKind.COMPLETE,
+    ]
 
 
 class FakeInputStream:
