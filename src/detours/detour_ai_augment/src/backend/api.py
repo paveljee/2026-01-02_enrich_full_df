@@ -1665,6 +1665,18 @@ def eligible_cohorts(
     return {row.namekey: row.cohort for row in source_population if row.cohort != INELIGIBLE_COHORT}
 
 
+def _configured_namekey() -> str:
+    raw_namekey = os.environ.get(NAMEKEY_ENV_NAME, "")
+    if not _valid_nonblank(raw_namekey):
+        raise PushConfigurationError(
+            Locale.NAMEKEY_NOT_SET_TEMPLATE.format(environment_name=NAMEKEY_ENV_NAME)
+        )
+    try:
+        return NameKey.from_json_key(raw_namekey).to_json_key()
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        raise PushConfigurationError(Locale.CONFIGURED_NAMEKEY_MALFORMED) from exc
+
+
 def configure_runtime(config_path: Path) -> AiAugmentBackendContext:
     global RUNTIME_CONFIGURATION
 
@@ -1692,17 +1704,7 @@ def configure_runtime(config_path: Path) -> AiAugmentBackendContext:
             Locale.TIMEZONE_INVALID_TEMPLATE.format(timezone=pipeline.timezone)
         ) from exc
 
-    configured_namekey = os.environ.get(NAMEKEY_ENV_NAME, "")
-    if not _valid_nonblank(configured_namekey):
-        raise PushConfigurationError(
-            Locale.NAMEKEY_NOT_SET_TEMPLATE.format(environment_name=NAMEKEY_ENV_NAME)
-        )
-    try:
-        parsed_namekey = NameKey.from_json_key(configured_namekey)
-    except (ValueError, TypeError, json.JSONDecodeError) as exc:
-        raise PushConfigurationError(Locale.CONFIGURED_NAMEKEY_MALFORMED) from exc
-    if parsed_namekey.to_json_key() != configured_namekey:
-        raise PushConfigurationError(Locale.CONFIGURED_NAMEKEY_NONCANONICAL)
+    configured_namekey = _configured_namekey()
 
     replay_log = registered_replay_log(pipeline)
     release_map = registered_release_map(pipeline)

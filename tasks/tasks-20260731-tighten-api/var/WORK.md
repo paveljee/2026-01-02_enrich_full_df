@@ -1,5 +1,20 @@
 # Tighten API: reopened — accepted-410 Dashboard finalization regression
 
+## Configured namekey boundary normalization completed
+
+- The main pipeline's canonical JSON string remains the sole internal
+  `ktp.namekey` representation for cohort membership, database joins, and
+  persistence. Backend startup now parses any equivalent valid JSON supplied
+  through `FASTAPI_DETOUR_NAMEKEY` and immediately stores its canonical form,
+  instead of requiring the Human Operator to reproduce Python's exact JSON
+  whitespace and property order.
+- The downstream `load_source_researcher` canonicality check remains as an
+  internal invariant. Malformed, incomplete, blank, or control-character input
+  remains rejected.
+- Focused normalization coverage: **6 passed**. Complete unprivileged Detour
+  task: **132 passed, 49 skipped, 3 deselected**, followed by the expected
+  no-key real-API skip. Ruff, mypy, and diff whitespace checks passed.
+
 ## Current Human Operator evidence (2026-09-03)
 
 - The real macOS/AIVM contour accepted the supplied 292-line Aziz Sheikh

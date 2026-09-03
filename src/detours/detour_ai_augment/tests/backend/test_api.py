@@ -3571,6 +3571,44 @@ def test_scp_uses_pinned_identity_and_counts_physical_lines(
     )
 
 
+@pytest.mark.parametrize(
+    "raw_namekey",
+    (
+        TEST_NAMEKEY,
+        '{"ktp.first_name":"A.","ktp.last_name":"Sheikh"}',
+        '{"ktp.last_name":"Sheikh","ktp.first_name":"A."}',
+        '{  "ktp.first_name" : "A." ,  "ktp.last_name" : "Sheikh"  }',
+    ),
+)
+def test_configured_namekey_normalizes_equivalent_json(
+    monkeypatch: pytest.MonkeyPatch,
+    raw_namekey: str,
+) -> None:
+    monkeypatch.setenv(api.NAMEKEY_ENV_NAME, raw_namekey)
+
+    assert api._configured_namekey() == TEST_NAMEKEY
+
+
+@pytest.mark.parametrize(
+    "raw_namekey",
+    (
+        "not-json",
+        '{"ktp.first_name":"A."}',
+    ),
+)
+def test_configured_namekey_rejects_malformed_or_incomplete_json(
+    monkeypatch: pytest.MonkeyPatch,
+    raw_namekey: str,
+) -> None:
+    monkeypatch.setenv(api.NAMEKEY_ENV_NAME, raw_namekey)
+
+    with pytest.raises(
+        api.PushConfigurationError,
+        match=Locale.CONFIGURED_NAMEKEY_MALFORMED,
+    ):
+        api._configured_namekey()
+
+
 def test_required_config_and_source_database_are_read_only(
     tmp_path: Path,
     backend_test_paths: BackendTestPaths,
