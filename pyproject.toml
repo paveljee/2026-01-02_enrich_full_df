@@ -370,7 +370,36 @@ test-detour-mode0-econ-stats = [
 # to specify the environment to use.
 
 [tool.pixi.feature.detour-ai-augment.tasks]
-serve = "python -m src.detours.detour_ai_augment.src.backend.api --config config_ai_augment.json"
+serve = """
+bash -c '
+  set -e
+  NAMEKEY="$1"
+  test -n "$NAMEKEY" || {
+    echo "ERROR: namekey argument is required" >&2
+    echo "Usage: pixi run -e detour-ai-augment serve '"'"'{\\\"ktp.first_name\\\":\\\"A.\\\",\\\"ktp.last_name\\\":\\\"Sheikh\\\"}'"'"'" >&2
+    exit 1
+  }
+  export OPENALEX_API_KEY="$(
+    pixi run -e detour-ai-augment python -c '"'"'
+  import os
+  from dotenv import dotenv_values
+  path = os.path.join(os.environ["PIXI_PROJECT_ROOT"], ".env")
+  print(dotenv_values(path).get("OPENALEX_API_KEY", ""), end="")
+  '"'"'
+  )"
+  test -n "$OPENALEX_API_KEY" || {
+    echo "ERROR: OPENALEX_API_KEY is missing from .env" >&2
+    exit 1
+  }
+  export FASTAPI_DETOUR_NAMEKEY="$NAMEKEY"
+  export FASTAPI_DETOUR_APPENDWATCH_REPORT='"'"'/Volumes/home/aicode/aivm/home/ai/.aivm-control/appendwatch/appendwatch-tree.txt'"'"'
+  export FASTAPI_DETOUR_CODEX_SESSIONS_DIR='"'"'/home/ai/.codex/sessions'"'"'
+  export FASTAPI_DETOUR_DASHBOARD_SOCKET="/tmp/detour-manual-${UID}.sock"
+  pixi run -e detour-ai-augment \
+    python -m src.detours.detour_ai_augment.src.backend.api \
+    --config config_ai_augment.json
+' --
+"""
 dashboard = """
 OPENALEX_API_KEY="$(python -c '
 import os
