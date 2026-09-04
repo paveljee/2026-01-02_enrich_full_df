@@ -70,6 +70,9 @@ class Locale:
     SETTING_READABLE_FILE_TEMPLATE: Final = (
         "{setting} is not a readable regular file; rerun deploy.sh or correct .env"
     )
+    SETTING_GUEST_PATH_TEMPLATE: Final = (
+        "{setting} must be a normalized absolute guest path"
+    )
     FILES_CONFIG_RESOURCE_MISSING_TEMPLATE: Final = (
         "files_config is missing required detour resource {resource_key!r}"
     )
@@ -151,24 +154,24 @@ class Locale:
     AIVM_INSTANCE_INVALID: Final = (
         "FASTAPI_DETOUR_AIVM_INSTANCE is invalid; correct .env and restart the API"
     )
-    AIVM_USER_INVALID: Final = (
-        "FASTAPI_DETOUR_AIVM_USER is invalid; correct .env and restart the API"
+    AIVM_AUDIT_USER_INVALID: Final = (
+        "FASTAPI_DETOUR_AIVM_AUDIT_USER is invalid; correct .env and restart the API"
     )
     AIVM_SSH_PORT_INVALID: Final = (
         "FASTAPI_DETOUR_AIVM_SSH_PORT is invalid; correct .env and restart the API"
     )
-    SCP_ROLLOUT_ARCHIVE_INVALID: Final = (
-        "SCP did not produce a regular rollout archive; verify AIVM deployment"
+    AUDIT_ROLLOUT_ARCHIVE_INVALID: Final = (
+        "the audit read did not produce a regular rollout archive; verify AIVM deployment"
     )
-    ROLLOUT_SCP_FAILED: Final = (
-        "rollout SCP failed; verify the configured rollout and AIVM SSH deployment"
+    ROLLOUT_COPY_FAILED: Final = (
+        "rollout audit read failed; verify the configured rollout and AIVM SSH deployment"
     )
     ROLLOUT_DISCOVERY_FAILED: Final = "rollout discovery on the Agent Runtime failed"
     ROLLOUT_DISCOVERY_NOT_UNIQUE: Final = (
         "Codex session ID did not resolve to exactly one rollout"
     )
     APPENDWATCH_ARCHIVE_FAILED: Final = (
-        "appendwatch status could not be archived; verify deployment and mounted report"
+        "appendwatch status could not be read through the AIVM audit principal"
     )
 
     APPENDWATCH_REPORT_UNREADABLE: Final = "archived appendwatch report is unreadable"
@@ -286,14 +289,21 @@ class Locale:
         "evidence withdrawal requires a prior unmatched retry item"
     )
     EVIDENCE_PROGRESS_TEMPLATE: Final = (
-        "{verified} of {total} evidence items were verified. "
-        "Preserve all verified values and evidence unchanged."
+        "{exact} of {total} current evidence items exactly match our records."
     )
     EVIDENCE_GOOD_PROGRESS_TEMPLATE: Final = (
-        "Good progress: {verified} of {total} evidence items were verified. "
-        "Preserve all verified values and evidence unchanged."
+        "Good progress: {exact} of {total} current evidence items exactly match "
+        "our records."
     )
-    EVIDENCE_REVIEW_HEADER: Final = "Review the following flagged excerpts:"
+    EVIDENCE_REVIEW_HEADER: Final = (
+        "Evidence items that do not yet exactly match our records:"
+    )
+    EVIDENCE_RETRY_VIOLATION_HEADER: Final = (
+        "1 retry-contract violation remains; it is independently blocking:"
+    )
+    EVIDENCE_RETRY_VIOLATIONS_HEADER_TEMPLATE: Final = (
+        "{count} retry-contract violations remain; each is independently blocking:"
+    )
     EVIDENCE_LOCATION_TEMPLATE: Final = "{field}.web_search_excerpts[{index}]"
     EVIDENCE_NEAR_ITEM_TEMPLATE: Final = (
         "- {location}; its wording appears close to the cited web result but may "
@@ -308,9 +318,10 @@ class Locale:
         "not count as verified evidence."
     )
     EVIDENCE_RETRY_INSTRUCTION: Final = (
-        "Compare the flagged evidence items character-for-character with the "
-        "originating web-tool output and resubmit the complete payload after correcting "
-        "only the flagged items."
+        "Compare any non-exact evidence item character-for-character with the "
+        "originating web-tool output, resolve every retry-contract violation above, "
+        "and resubmit the complete payload. Change only items that the guidance "
+        "explicitly permits changing."
     )
     EVIDENCE_RETRY_STANDARDIZED_VALUES: Final = (
         "The resubmission must also supply standardized_value for every "
@@ -321,15 +332,16 @@ class Locale:
         "Complete standardized resubmission example:\n\n```json\n{example}\n```"
     )
     EVIDENCE_MINOR_CHANGE_ONLY_TEMPLATE: Final = (
-        "{location} may receive only a minor textual correction that preserves its "
-        "wording and cited URL."
+        "{location} changed beyond the permitted correction; restore its prior "
+        "normalized wording and cited URL. Only case, accents, punctuation, whitespace, "
+        "or line breaks may differ."
     )
     EVIDENCE_EXACT_IMMUTABLE_TEMPLATE: Final = (
         "{immutable} was already verified and must be resubmitted unchanged."
     )
     EVIDENCE_ACCEPTED_FIELD_IMMUTABLE_TEMPLATE: Final = (
         EVIDENCE_EXACT_IMMUTABLE_TEMPLATE
-        + "Preserve its value and complete evidence list unchanged."
+        + " Preserve its value and complete evidence list unchanged."
     )
     EVIDENCE_COUNT_DECREASED_TEMPLATE: Final = (
         "{field} must retain every prior evidence item; use the explicit audited "
@@ -481,6 +493,10 @@ class Locale:
     ATTEMPT_RECORD_FAILED_LOG: Final = "push attempt=%s could not record stage=%s result=%s"
     PULL_FAILED_LOG: Final = "pull failed configuration validation: %s"
     PUSH_ACCEPTED_LOG: Final = "push attempt=%s accepted"
+    PUSH_CURRENT_PULL_REQUIRED_LOG: Final = (
+        "push rejected before acceptance: no current persisted pull record; "
+        "client must GET /pull before submitting"
+    )
     PUSH_CONFIGURATION_FAILED_LOG: Final = "push attempt=%s failed stage=%s: %s"
     PUSH_MULTIPLE_MATCHES_LOG: Final = (
         "push attempt=%s failed stage=%s: excerpt matched multiple rows excerpt=%r"

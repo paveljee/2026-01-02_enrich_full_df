@@ -4,6 +4,7 @@ set -e
 SCRIPT_NAME="aivm"
 PROVISION_LIB_NAME="provision.sh"
 APPENDWATCH_LIB_NAME="appendwatch.py"
+AUDIT_READ_LIB_NAME="audit_read.py"
 SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 PROJECT_DIR="/Volumes/home/aicode/aivm/home/ai"
 LIMA_INSTANCE="aivm"
@@ -13,6 +14,8 @@ DEFAULT_MOUNTPOINT="$PROJECT_DIR"
 GUEST_MOUNTPOINT="$DEFAULT_MOUNTPOINT"
 AIVM_USER="ai"
 AIVM_HOME="/home/$AIVM_USER"
+AIVM_AUDIT_USER="aivm-audit"
+AIVM_AUDIT_HOME="/var/lib/$AIVM_AUDIT_USER"
 AIVM_SSH_PORT="22022"
 AIVM_BACKEND_PORT="8612"
 AIVM_KEY_DIR="$HOME/.local/share/$SCRIPT_NAME/.ssh"
@@ -21,7 +24,10 @@ AIVM_KNOWN_HOSTS_FILE="$AIVM_KEY_DIR/known_hosts"
 LIMA_APPENDWATCH_REPORT_PARAM="FASTAPI_DETOUR_APPENDWATCH_REPORT"
 AIVM_SSH_TARGET="$LIMA_INSTANCE-$AIVM_USER"
 AIVM_HOST_KEY_ALIAS="lima-$LIMA_INSTANCE-$AIVM_USER"
+AIVM_AUDIT_SSH_TARGET="$LIMA_INSTANCE-$AIVM_AUDIT_USER"
+AIVM_AUDIT_HOST_KEY_ALIAS="lima-$LIMA_INSTANCE-$AIVM_AUDIT_USER"
 AIVM_SSH_CMD=()
+AIVM_AUDIT_SSH_CMD=()
 
 # Codex etc. config to ship with AIVM
 VSCODE_VERSION="1.130.0"
@@ -45,11 +51,14 @@ ASSUME_YES=false
 
 PROVISION_SCRIPT="${AIVM_PROVISION_SCRIPT:-$SOURCE_DIR/$PROVISION_LIB_NAME}"
 APPENDWATCH_SCRIPT="${AIVM_APPENDWATCH_SCRIPT:-$SOURCE_DIR/../control_centre/appendwatch/$APPENDWATCH_LIB_NAME}"
+AUDIT_READ_SCRIPT="${AIVM_AUDIT_READ_SCRIPT:-$SOURCE_DIR/../control_centre/appendwatch/$AUDIT_READ_LIB_NAME}"
 
 prepare_mount_paths() {
     AIVM_CONTROL_DIR="$MOUNT_DIR/.aivm-control/appendwatch"
     GUEST_CONTROL_DIR="$GUEST_MOUNTPOINT/.aivm-control/appendwatch"
     GUEST_APPENDWATCH_SCRIPT="$GUEST_CONTROL_DIR/$APPENDWATCH_LIB_NAME"
+    GUEST_AUDIT_READ_SCRIPT="$GUEST_CONTROL_DIR/$AUDIT_READ_LIB_NAME"
+    GUEST_AUDIT_READ_CONFIG="$GUEST_CONTROL_DIR/audit-read.json"
     GUEST_APPENDWATCH_REPORT="$GUEST_CONTROL_DIR/appendwatch-tree.txt"
     HOST_APPENDWATCH_REPORT="$AIVM_CONTROL_DIR/appendwatch-tree.txt"
 }
@@ -112,10 +121,32 @@ prepare_aivm_ssh() {
         -o "HostKeyAlias=$AIVM_HOST_KEY_ALIAS"
         -o "StrictHostKeyChecking=accept-new"
     )
+    AIVM_AUDIT_SSH_CMD=(
+        ssh
+        -F "$LIMA_SSH_CONFIG_PATH"
+        -o "ProxyJump=lima-$LIMA_INSTANCE"
+        -o "HostName=127.0.0.1"
+        -o "Port=$AIVM_SSH_PORT"
+        -o "User=$AIVM_AUDIT_USER"
+        -o "IdentityFile=$AIVM_IDENTITY_FILE"
+        -o "IdentitiesOnly=yes"
+        -o "BatchMode=yes"
+        -o "PasswordAuthentication=no"
+        -o "KbdInteractiveAuthentication=no"
+        -o "ForwardAgent=no"
+        -o "ClearAllForwardings=no"
+        -o "UserKnownHostsFile=$AIVM_KNOWN_HOSTS_FILE"
+        -o "HostKeyAlias=$AIVM_AUDIT_HOST_KEY_ALIAS"
+        -o "StrictHostKeyChecking=accept-new"
+    )
 }
 
 aivm_ssh() {
     "${AIVM_SSH_CMD[@]}" "$AIVM_SSH_TARGET" "$@"
+}
+
+aivm_audit_ssh() {
+    "${AIVM_AUDIT_SSH_CMD[@]}" "$AIVM_AUDIT_SSH_TARGET" "$@"
 }
 
 # Parse flags in any order
@@ -147,6 +178,8 @@ prepare_mount_paths
     || { echo "❌ Provisioning script not found: $PROVISION_SCRIPT"; exit 1; }
 [ -f "$APPENDWATCH_SCRIPT" ] \
     || { echo "❌ Appendwatch script not found: $APPENDWATCH_SCRIPT"; exit 1; }
+[ -f "$AUDIT_READ_SCRIPT" ] \
+    || { echo "❌ Audit read script not found: $AUDIT_READ_SCRIPT"; exit 1; }
 
 # Navigate to project directory
 cd "$MOUNT_DIR" || { echo "❌ Directory not found: $MOUNT_DIR"; exit 1; }
@@ -164,7 +197,7 @@ if limactl list | grep -q "^$LIMA_INSTANCE"; then
             limactl delete -f "$LIMA_INSTANCE"
             echo "🗑️ Removed instance '$LIMA_INSTANCE' from Lima"
             remove_aivm_key
-            echo "🗑️ Removed '$AIVM_KEY_DIR' containing '$AIVM_USER' SSH key"
+            echo "🗑️ Removed '$AIVM_KEY_DIR' containing the AIVM operator SSH key"
 
             ;;
         *)
@@ -178,8 +211,10 @@ mkdir -p "$AIVM_CONTROL_DIR"
 chmod 700 "$AIVM_CONTROL_DIR"
 cp "$APPENDWATCH_SCRIPT" "$AIVM_CONTROL_DIR/$APPENDWATCH_LIB_NAME"
 chmod 600 "$AIVM_CONTROL_DIR/$APPENDWATCH_LIB_NAME"
+cp "$AUDIT_READ_SCRIPT" "$AIVM_CONTROL_DIR/$AUDIT_READ_LIB_NAME"
+chmod 600 "$AIVM_CONTROL_DIR/$AUDIT_READ_LIB_NAME"
 
-echo "🔑 Generating a dedicated SSH key for '$AIVM_USER' into '$AIVM_KEY_DIR'..."
+echo "🔑 Generating one dedicated operator SSH key for '$AIVM_USER' and '$AIVM_AUDIT_USER' into '$AIVM_KEY_DIR'..."
 generate_aivm_key
 
 echo "🚀 Creating new Lima instance '$LIMA_INSTANCE'..."
@@ -187,6 +222,8 @@ echo "🚀 Creating new Lima instance '$LIMA_INSTANCE'..."
 PROVISION_SCRIPT_B64="$(base64_file "$PROVISION_SCRIPT")"
 AIVM_USER_B64="$(base64_string "$AIVM_USER")"
 AIVM_HOME_B64="$(base64_string "$AIVM_HOME")"
+AIVM_AUDIT_USER_B64="$(base64_string "$AIVM_AUDIT_USER")"
+AIVM_AUDIT_HOME_B64="$(base64_string "$AIVM_AUDIT_HOME")"
 AIVM_AUTHORIZED_KEY_B64="$(base64_file "$AIVM_IDENTITY_FILE.pub")"
 AIVM_RESTRICTED_PATH_B64="$(base64_string "$GUEST_MOUNTPOINT")"
 AIVM_SSH_PORT_B64="$(base64_string "$AIVM_SSH_PORT")"
@@ -204,6 +241,7 @@ CODEX_CLI_BIN_PATH_B64="$(base64_string "$CODEX_CLI_BIN_PATH")"
 CODEX_PATH_B64="$(base64_string "$CODEX_PATH")"
 CODEX_CONFIG_PATH_B64="$(base64_string "$CODEX_CONFIG_PATH")"
 APPENDWATCH_SCRIPT_B64="$(base64_string "$GUEST_APPENDWATCH_SCRIPT")"
+AUDIT_READ_SCRIPT_B64="$(base64_string "$GUEST_AUDIT_READ_SCRIPT")"
 
 MOUNT_DIR_YAML="$(yaml_escape "$MOUNT_DIR")"
 GUEST_MOUNTPOINT_YAML="$(yaml_escape "$GUEST_MOUNTPOINT")"
@@ -259,6 +297,8 @@ provision:
 
       export AIVM_USER="\$(decode "$AIVM_USER_B64")"
       export AIVM_HOME="\$(decode "$AIVM_HOME_B64")"
+      export AIVM_AUDIT_USER="\$(decode "$AIVM_AUDIT_USER_B64")"
+      export AIVM_AUDIT_HOME="\$(decode "$AIVM_AUDIT_HOME_B64")"
       export AIVM_AUTHORIZED_KEY="\$(decode "$AIVM_AUTHORIZED_KEY_B64")"
       export AIVM_RESTRICTED_PATH="\$(decode "$AIVM_RESTRICTED_PATH_B64")"
       export AIVM_SSH_PORT="\$(decode "$AIVM_SSH_PORT_B64")"
@@ -276,6 +316,7 @@ provision:
       export AIVM_CODEX_PATH="\$(decode "$CODEX_PATH_B64")"
       export AIVM_CODEX_CONFIG_PATH="\$(decode "$CODEX_CONFIG_PATH_B64")"
       export AIVM_APPENDWATCH_SCRIPT="\$(decode "$APPENDWATCH_SCRIPT_B64")"
+      export AIVM_AUDIT_READ_SCRIPT="\$(decode "$AUDIT_READ_SCRIPT_B64")"
       export AIVM_APPENDWATCH_REPORT="\$PARAM_$LIMA_APPENDWATCH_REPORT_PARAM"
 
       "\$PROVISION_SCRIPT_PATH"
@@ -303,6 +344,16 @@ verify_instance() {
     aivm_ssh true \
         || { echo "❌ SSH access to '$AIVM_USER' through jump host failed"; return 1; }
     echo "✅ SSH access to '$AIVM_USER' through jump host works"
+
+    aivm_audit_ssh probe \
+        || { echo "❌ SSH access to '$AIVM_AUDIT_USER' audit protocol failed"; return 1; }
+    echo "✅ SSH access to '$AIVM_AUDIT_USER' audit protocol works"
+
+    if aivm_audit_ssh 'id -un' >/dev/null 2>&1; then
+        echo "❌ '$AIVM_AUDIT_USER' accepted a command outside its read protocol"
+        return 1
+    fi
+    echo "✅ '$AIVM_AUDIT_USER' rejects commands outside its read protocol"
 
     [ "$(aivm_ssh 'id -un')" = "$AIVM_USER" ] \
         || { echo "❌ Connected as the wrong user"; return 1; }
@@ -355,18 +406,31 @@ verify_instance() {
         || { echo "❌ Appendwatch service is not active"; return 1; }
     printf -v GUEST_CONTROL_DIR_Q '%q' "$GUEST_CONTROL_DIR"
     printf -v GUEST_APPENDWATCH_SCRIPT_Q '%q' "$GUEST_APPENDWATCH_SCRIPT"
+    printf -v GUEST_AUDIT_READ_SCRIPT_Q '%q' "$GUEST_AUDIT_READ_SCRIPT"
+    printf -v GUEST_AUDIT_READ_CONFIG_Q '%q' "$GUEST_AUDIT_READ_CONFIG"
     printf -v GUEST_APPENDWATCH_REPORT_Q '%q' "$GUEST_APPENDWATCH_REPORT"
     limactl shell --workdir=/ "$LIMA_INSTANCE" \
         sudo -n sh -c "test -r $GUEST_APPENDWATCH_SCRIPT_Q \
+            && test -r $GUEST_AUDIT_READ_SCRIPT_Q \
+            && test -r $GUEST_AUDIT_READ_CONFIG_Q \
             && test -s $GUEST_APPENDWATCH_REPORT_Q \
-            && test \"\$(stat -c %a $GUEST_CONTROL_DIR_Q)\" = 700 \
+            && test \"\$(stat -c %a $GUEST_CONTROL_DIR_Q)\" = 2710 \
+            && test \"\$(stat -c %G $GUEST_CONTROL_DIR_Q)\" = $AIVM_AUDIT_USER \
             && test \"\$(stat -c %a $GUEST_APPENDWATCH_SCRIPT_Q)\" = 600 \
-            && test \"\$(stat -c %a $GUEST_APPENDWATCH_REPORT_Q)\" = 600 \
+            && test \"\$(stat -c %a $GUEST_AUDIT_READ_SCRIPT_Q)\" = 600 \
+            && test \"\$(stat -c %a $GUEST_AUDIT_READ_CONFIG_Q)\" = 600 \
+            && test \"\$(stat -c %a $GUEST_APPENDWATCH_REPORT_Q)\" = 640 \
+            && test \"\$(stat -c %G $GUEST_APPENDWATCH_REPORT_Q)\" = $AIVM_AUDIT_USER \
             && test \"\$(cat $GUEST_APPENDWATCH_REPORT_Q)\" = ." \
         || { echo "❌ Appendwatch source or report is unavailable to root"; return 1; }
     [ -r "$HOST_APPENDWATCH_REPORT" ] \
         && [ "$(cat "$HOST_APPENDWATCH_REPORT")" = . ] \
         || { echo "❌ Appendwatch report is unavailable on the host"; return 1; }
+    printf -v AUDIT_READ_APPENDWATCH_REPORT_Q \
+        'read-appendwatch-report %q' \
+        "$GUEST_APPENDWATCH_REPORT"
+    [ "$(aivm_audit_ssh "$AUDIT_READ_APPENDWATCH_REPORT_Q")" = . ] \
+        || { echo "❌ Appendwatch report is unavailable through '$AIVM_AUDIT_USER'"; return 1; }
     if limactl shell --workdir=/ "$LIMA_INSTANCE" \
         sudo -n find "$GUEST_CONTROL_DIR" -type f \
             \( -name '*.pyc' -o -name '*.pyo' \) -print -quit |
@@ -380,12 +444,19 @@ verify_instance() {
         "ls -la -- $GUEST_CONTROL_DIR_Q"
         "stat -- $GUEST_CONTROL_DIR_Q"
         "stat -- $GUEST_APPENDWATCH_SCRIPT_Q"
+        "stat -- $GUEST_AUDIT_READ_SCRIPT_Q"
+        "stat -- $GUEST_AUDIT_READ_CONFIG_Q"
         "stat -- $GUEST_APPENDWATCH_REPORT_Q"
         "cat -- $GUEST_APPENDWATCH_SCRIPT_Q"
+        "cat -- $GUEST_AUDIT_READ_SCRIPT_Q"
+        "cat -- $GUEST_AUDIT_READ_CONFIG_Q"
         "cat -- $GUEST_APPENDWATCH_REPORT_Q"
         "cp -- $GUEST_APPENDWATCH_SCRIPT_Q /dev/null"
+        "cp -- $GUEST_AUDIT_READ_SCRIPT_Q /dev/null"
+        "cp -- $GUEST_AUDIT_READ_CONFIG_Q /dev/null"
         "cp -- $GUEST_APPENDWATCH_REPORT_Q /dev/null"
         "/usr/bin/python3 -B $GUEST_APPENDWATCH_SCRIPT_Q --help"
+        "/usr/bin/python3 -B $GUEST_AUDIT_READ_SCRIPT_Q"
         "find $GUEST_CONTROL_DIR_Q -print"
     )
     for protected_probe in "${protected_probes[@]}"; do
@@ -395,6 +466,7 @@ verify_instance() {
         fi
     done
     echo "✅ Appendwatch is active and inaccessible to '$AIVM_USER'"
+    echo "✅ Appendwatch report is readable only through '$AIVM_AUDIT_USER' audit protocol"
 
     printf -v CODEX_CONFIG_PATH_Q '%q' "$CODEX_CONFIG_PATH"
     aivm_ssh "test -f $CODEX_CONFIG_PATH_Q" \

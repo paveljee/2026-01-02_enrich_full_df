@@ -91,7 +91,7 @@ pixi run -e detour-ai-augment \
 
 Leave this terminal open. Backend is deliberately waiting for one line on stdin containing the Codex session UUID, while already serving requests.
 
-The appendwatch path above is the current default deployment path. If AIVM was deployed with a custom `--mount`, substitute the corresponding host-side report path.
+The appendwatch path above is the current default guest deployment path. If AIVM was deployed with a custom `--mount`, substitute the corresponding path below that guest mount point. Backend reads this path through the forced `aivm-audit` SSH protocol using the same host-held identity file as the `ai` connection.
 
 ## 3. Start Codex with the reverse tunnel — terminal 2
 

@@ -547,7 +547,7 @@ async def test_backend_supervisor_replaces_process_per_namekey_and_uses_stdin(
         repository_root=tmp_path,
         config_path=tmp_path / "config.json",
         openalex_api_key="key",
-        appendwatch_report=tmp_path / "appendwatch.txt",
+        appendwatch_report=PurePosixPath("/mounted/appendwatch.txt"),
         dashboard_socket_path=tmp_path / "dashboard.sock",
     )
 
@@ -568,6 +568,9 @@ async def test_backend_supervisor_replaces_process_per_namekey_and_uses_stdin(
     assert second_environment[api.NAMEKEY_ENV_NAME] == SECOND_NAMEKEY
     assert second_environment[api.CODEX_SESSIONS_ROOT_ENV_NAME] == str(
         control_ui.CODEX_SESSIONS_ROOT
+    )
+    assert second_environment[api.APPENDWATCH_REPORT_ENV_NAME] == (
+        "/mounted/appendwatch.txt"
     )
     assert second_environment[api.DASHBOARD_SOCKET_PATH_ENV_NAME] == str(
         tmp_path / "dashboard.sock"
@@ -619,7 +622,7 @@ async def test_backend_readiness_fails_immediately_after_pull_error(
         repository_root=tmp_path,
         config_path=tmp_path / "config.json",
         openalex_api_key="key",
-        appendwatch_report=tmp_path / "appendwatch.txt",
+        appendwatch_report=PurePosixPath("/mounted/appendwatch.txt"),
         dashboard_socket_path=tmp_path / "dashboard.sock",
     )
     subject._process = cast(

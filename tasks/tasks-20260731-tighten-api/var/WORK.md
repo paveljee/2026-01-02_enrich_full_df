@@ -1,5 +1,104 @@
 # Tighten API: reopened — accepted-410 Dashboard finalization regression
 
+## Push sequencing and retry guidance completed
+
+- The 2026-09-04 Gaoquan Shi manual run exposed two upstream UX gaps. A push
+  submitted after a busy `503` but before a successful retry pull was persisted
+  received a misleading `500`; the identical body was accepted after the pull.
+  Treat this missing-current-pull state as `409 Conflict`, return
+  `Location: /pull`, preserve workflow state, and log the exact operator-only
+  reason. Busy remains `409`; missing session or failed state remains `500`.
+- The same run reached 30/30 current exact rollout matches while two historical
+  retry-contract violations remained. Retry output must state those as separate
+  blocking counts, bullet the violations, avoid calling the submission accepted,
+  and explain that a near-match correction must preserve prior normalized
+  wording and URL. Keep public evidence provenance nonrevealing.
+- Implemented the missing-current-pull conflict as an opaque `409` with
+  `Location: /pull`, without mutating retry state. A persisted `200` pull then
+  supplies the linkage for the identical push to receive `202`. Busy conflicts
+  now carry the same polling location; missing-session and failed-state cases
+  remain `500`.
+- Retry output now separates the current exact-match count from independently
+  blocking persisted violations, bullets each violation, and tells the caller
+  to restore the prior normalized wording and URL after an over-broad near-item
+  correction. The authoritative Lifecycle and OpenAPI response contract match.
+- Hermetic regressions cover both production contours, the OpenAPI contract,
+  and the preserved `500` cases. Focused tests passed (**6 passed**); the
+  complete Backend module passed (**65 passed, 36 skipped**); and the non-root,
+  non-operator, non-real-API
+  detour suite passed (**153 passed, 45 skipped, 7 deselected**). Ruff and mypy
+  passed for all touched Python files; unavailable optional DuckDB extensions,
+  historical fixtures, and local sockets account for the environment skips.
+
+## Lifecycle BDD executable-spec scoping in progress
+
+- The authoritative README Lifecycle comprises six normative preamble
+  invariants and 30 ordered lifecycle items. There is currently no pytest-bdd
+  feature/module; the behavior is distributed across Backend, appendwatch,
+  Control Centre unit/browser, and real operator tests.
+- Coverage is strongest for Dashboard queue ownership, Backend push/commit/
+  validation/replay, appendwatch integrity semantics, Unix-socket Dashboard
+  IPC, and the non-interactive real operator happy path. Provisioning is
+  strongly checked only when the operator chooses AIVM redeployment.
+- Principal additions needed for statement-level coverage are explicit process
+  locking, fsync/fatal-validation negatives, the immediate busy `GET /pull ->
+  503` contract, push/configuration `500` opacity plus differentiated logs,
+  one-profile confinement, Codex configuration (`agents.enabled = false`), and
+  traceability for every README clause. Interactive Codex and discretionary
+  LLM/Human actions can only be proven as supported/observed boundaries, not
+  made deterministic.
+- The former Lifecycle conflict around a root-credential `ssh-agent` and
+  inherited `SSH_AUTH_SOCK` is reconciled: the documented and implemented
+  contract uses one host-held key, pinned identity/known-hosts paths, and
+  separate `ai` and restricted `aivm-audit` guest authorizations.
+- Proposed shape: one Gherkin feature plus
+  `tests/test_detour_ai_augment_bdd.py`, grouped into hermetic contract,
+  Linux/root appendwatch, and macOS/AIVM operator scenarios. Reuse production
+  entry points and extract/import existing test support rather than calling
+  pytest test functions. A Pixi meta-task should run the same module in the
+  environments/marker passes already required by `pre-commit-operator`.
+
+## Guest audit principal implementation completed
+
+- Human Operator authorized replacing the stale root-credential `ssh-agent`
+  Lifecycle clause with the existing host-pinned AIVM key used through two
+  guest authorizations: ordinary `ai` access for operating Codex and a new
+  `aivm-audit` principal for Backend reads.
+- Keep the private Ed25519 key exclusively at `AIVM_KEY_DIR`; no agent
+  forwarding and no private-key copy into AIVM. The `ai` runtime receives only
+  the public key and must remain unable to read appendwatch state.
+- Preserve `APPENDWATCH_REPORT` in the Lima `--mount` control directory. The
+  generic watcher continues to replace reports with mode `0600`; AIVM
+  deployment opts into `0640` and an `aivm-audit` group so the report remains
+  root-owned and read-only to that principal while `ai` remains denied. The
+  source helper lives beside appendwatch under `src/control_centre/appendwatch`;
+  its non-secret protected configuration is deployed beside the report in the
+  same mounted control directory and selected only by a root-owned fixed
+  dispatcher.
+- The audit principal is restricted to a forced, root-owned read protocol for
+  probing, uniquely locating/streaming rollout JSONL under
+  `/home/ai/.codex/sessions`, and streaming the one fixed report; it receives
+  no interactive shell, forwarding, write operation, or access to the rest of
+  `/home/ai/.codex` (notably authentication material).
+- Backend uses the audit principal and same pinned identity for startup
+  readability probes, rollout discovery/copy, and exact report-byte capture.
+  Control Centre continues to use `ai` for Codex execution and passes guest
+  paths to Backend. Provision/deploy verification, hermetic protocol/Backend
+  regressions, operator preflight, manual instructions, Pixi `serve`, and the
+  authoritative Lifecycle wording moved together.
+- `audit-read.json` is generated with mode `0600` beside the report under the
+  mounted `.aivm-control/appendwatch` directory. The SSH entry point cannot
+  select it: a root-owned dispatcher supplies that exact deployed path to the
+  root-only helper.
+- Verification passed for shell syntax, Ruff, mypy, the audit protocol,
+  Backend/Control Centre regressions, appendwatch mode behavior, the captured
+  accepted-push regression, and the complete AI-augment suite (**149 passed,
+  49 skipped, 3 deselected**). A real deployment remains intentionally covered
+  by the macOS/Lima operator contour.
+- Final validation after relocating the configuration passed Ruff, mypy over
+  98 source files, shell syntax, and the combined affected regression set
+  (**121 passed, 41 skipped**).
+
 ## Configured namekey population diagnostics completed
 
 - Backend startup now distinguishes a namekey absent from the complete source

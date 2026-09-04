@@ -3,6 +3,8 @@ set -euo pipefail
 
 AIVM_USER="${AIVM_USER:-ai}"
 AIVM_HOME="${AIVM_HOME:-/home/$AIVM_USER}"
+AIVM_AUDIT_USER="${AIVM_AUDIT_USER:-aivm-audit}"
+AIVM_AUDIT_HOME="${AIVM_AUDIT_HOME:-/var/lib/$AIVM_AUDIT_USER}"
 AIVM_AUTHORIZED_KEY="${AIVM_AUTHORIZED_KEY:-}"
 AIVM_RESTRICTED_PATH="${AIVM_RESTRICTED_PATH:-}"
 AIVM_SSH_PORT="${AIVM_SSH_PORT:-22022}"
@@ -26,7 +28,13 @@ AIVM_CODEX_SESSIONS_PATH="$AIVM_CODEX_PATH/sessions"
 AIVM_CODEX_CONFIG_PATH="${AIVM_CODEX_CONFIG_PATH:-$AIVM_CODEX_PATH/config.toml}"
 AIVM_APPENDWATCH_SCRIPT="${AIVM_APPENDWATCH_SCRIPT:-}"
 AIVM_APPENDWATCH_REPORT="${AIVM_APPENDWATCH_REPORT:-}"
+AIVM_AUDIT_READ_SCRIPT="${AIVM_AUDIT_READ_SCRIPT:-}"
 APPENDWATCH_DIR="$(dirname "$AIVM_APPENDWATCH_SCRIPT")"
+AIVM_AUDIT_READ_BIN="/usr/local/libexec/aivm-audit-read"
+AIVM_AUDIT_DISPATCH="/usr/local/libexec/aivm-audit-dispatch"
+AIVM_AUDIT_ENTRYPOINT="/usr/local/libexec/aivm-audit-entrypoint"
+AIVM_AUDIT_CONFIG="$APPENDWATCH_DIR/audit-read.json"
+AIVM_AUDIT_SUDOERS="/etc/sudoers.d/aivm-audit-read"
 AIVM_APPENDWATCH_SERVICE_NAME="aivm-appendwatch.service"
 AIVM_APPENDWATCH_SERVICE_DESCRIPTION="AIVM Codex rollout append-only watcher"
 AIVM_APPENDWATCH_REPORT_WAIT_ATTEMPTS="50"
@@ -42,6 +50,8 @@ Usage:
 Options:
   --user NAME
   --home PATH
+  --audit-user NAME
+  --audit-home PATH
   --authorized-key KEY
   --authorized-key-file PATH
   --restricted-path PATH
@@ -60,6 +70,16 @@ while [ "$#" -gt 0 ]; do
         --home)
             [ -n "${2:-}" ] || { echo "❌ Missing home"; exit 1; }
             AIVM_HOME="$2"
+            shift 2
+            ;;
+        --audit-user)
+            [ -n "${2:-}" ] || { echo "❌ Missing audit user"; exit 1; }
+            AIVM_AUDIT_USER="$2"
+            shift 2
+            ;;
+        --audit-home)
+            [ -n "${2:-}" ] || { echo "❌ Missing audit home"; exit 1; }
+            AIVM_AUDIT_HOME="$2"
             shift 2
             ;;
         --authorized-key)
@@ -104,10 +124,19 @@ done
 
 [[ "$AIVM_USER" =~ ^[a-z_][a-z0-9_-]*\$?$ ]] \
     || { echo "❌ Invalid user name: $AIVM_USER"; exit 1; }
+[[ "$AIVM_AUDIT_USER" =~ ^[a-z_][a-z0-9_-]*\$?$ ]] \
+    || { echo "❌ Invalid audit user name: $AIVM_AUDIT_USER"; exit 1; }
+[ "$AIVM_AUDIT_USER" != "$AIVM_USER" ] \
+    || { echo "❌ Audit user must differ from the AIVM user"; exit 1; }
 
 case "$AIVM_HOME" in
     /*) ;;
     *) echo "❌ Home must be an absolute path: $AIVM_HOME"; exit 1 ;;
+esac
+
+case "$AIVM_AUDIT_HOME" in
+    /*) ;;
+    *) echo "❌ Audit home must be an absolute path: $AIVM_AUDIT_HOME"; exit 1 ;;
 esac
 
 case "$AIVM_RESTRICTED_PATH" in
@@ -126,6 +155,12 @@ case "$AIVM_APPENDWATCH_REPORT" in
     "$AIVM_RESTRICTED_PATH"/*) ;;
     "") echo "❌ Appendwatch report path is required"; exit 1 ;;
     *) echo "❌ Appendwatch report must be below the restricted path"; exit 1 ;;
+esac
+
+case "$AIVM_AUDIT_READ_SCRIPT" in
+    "$AIVM_RESTRICTED_PATH"/*) ;;
+    "") echo "❌ Audit read script path is required"; exit 1 ;;
+    *) echo "❌ Audit read script must be below the restricted path"; exit 1 ;;
 esac
 
 case "$AIVM_AUTHORIZED_KEY" in
@@ -160,6 +195,7 @@ command -v setfacl >/dev/null 2>&1 || packages+=(acl)
 command -v sshd >/dev/null 2>&1 || packages+=(openssh-server)
 command -v curl >/dev/null 2>&1 || packages+=(curl)
 command -v openssl >/dev/null 2>&1 || packages+=(openssl)
+command -v sudo >/dev/null 2>&1 || packages+=(sudo)
 [ -f /etc/ssl/certs/ca-certificates.crt ] || packages+=(ca-certificates)
 
 if [ "${#packages[@]}" -gt 0 ]; then
@@ -188,28 +224,54 @@ fi
 
 AIVM_GROUP="$(id -gn "$AIVM_USER")"
 
-# Keep the AIVM user non-sudo.
+if ! getent group "$AIVM_AUDIT_USER" >/dev/null; then
+    groupadd "$AIVM_AUDIT_USER"
+fi
+
+if ! id -u "$AIVM_AUDIT_USER" >/dev/null 2>&1; then
+    useradd \
+        --no-create-home \
+        --home-dir "$AIVM_AUDIT_HOME" \
+        --shell /bin/bash \
+        --gid "$AIVM_AUDIT_USER" \
+        "$AIVM_AUDIT_USER"
+else
+    usermod \
+        --home "$AIVM_AUDIT_HOME" \
+        --shell /bin/bash \
+        "$AIVM_AUDIT_USER"
+fi
+
+# Keep both accounts outside administrative groups.
 for group in sudo admin wheel; do
     if getent group "$group" >/dev/null; then
         gpasswd -d "$AIVM_USER" "$group" >/dev/null 2>&1 || true
+        gpasswd -d "$AIVM_AUDIT_USER" "$group" >/dev/null 2>&1 || true
     fi
 done
 rm -f "/etc/sudoers.d/$AIVM_USER"
+rm -f "$AIVM_AUDIT_SUDOERS"
 
 # Keep the account unlocked for public-key SSH, but assign an unknown random
 # password while password authentication remains disabled.
-AIVM_RANDOM_PASSWORD="$(
-    head -c 48 /dev/urandom |
-        base64 |
-        tr -d '\n'
-)"
-AIVM_PASSWORD_HASH="$(
-    printf '%s' "$AIVM_RANDOM_PASSWORD" |
-        openssl passwd -6 -stdin
-)"
-unset AIVM_RANDOM_PASSWORD
-usermod --password "$AIVM_PASSWORD_HASH" "$AIVM_USER"
-unset AIVM_PASSWORD_HASH
+set_random_password() {
+    local account="$1"
+    local random_password
+    local password_hash
+    random_password="$(
+        head -c 48 /dev/urandom |
+            base64 |
+            tr -d '\n'
+    )"
+    password_hash="$(
+        printf '%s' "$random_password" |
+            openssl passwd -6 -stdin
+    )"
+    usermod --password "$password_hash" "$account"
+}
+
+set_random_password "$AIVM_USER"
+set_random_password "$AIVM_AUDIT_USER"
 
 install -d \
     -m 0700 \
@@ -226,6 +288,17 @@ install -d \
 printf '%s\n' "$AIVM_AUTHORIZED_KEY" > "$AIVM_HOME/.ssh/authorized_keys"
 chown "$AIVM_USER:$AIVM_GROUP" "$AIVM_HOME/.ssh/authorized_keys"
 chmod 0600 "$AIVM_HOME/.ssh/authorized_keys"
+
+# The audit account has no writable home and every SSH request is forced
+# through the root-owned read protocol installed below.
+install -d -m 0755 -o root -g root "$AIVM_AUDIT_HOME"
+install -d -m 0755 -o root -g root "$AIVM_AUDIT_HOME/.ssh"
+printf 'restrict,command="%s" %s\n' \
+    "$AIVM_AUDIT_ENTRYPOINT" \
+    "$AIVM_AUTHORIZED_KEY" \
+    > "$AIVM_AUDIT_HOME/.ssh/authorized_keys"
+chown root:root "$AIVM_AUDIT_HOME/.ssh/authorized_keys"
+chmod 0600 "$AIVM_AUDIT_HOME/.ssh/authorized_keys"
 
 # Preserve the normal Lima mount, but deny this user even directory traversal.
 mkdir -p "$RESTRICTED_GATE"
@@ -244,9 +317,73 @@ install -d \
     "$AIVM_CODEX_PATH" \
     "$AIVM_CODEX_SESSIONS_PATH"
 
+install -D \
+    -m 0755 \
+    -o root \
+    -g root \
+    "$AIVM_AUDIT_READ_SCRIPT" \
+    "$AIVM_AUDIT_READ_BIN"
+
+/usr/bin/python3 - \
+    "$AIVM_AUDIT_CONFIG" \
+    "$AIVM_USER" \
+    "$AIVM_AUDIT_USER" \
+    "$AIVM_CODEX_SESSIONS_PATH" \
+    "$AIVM_APPENDWATCH_REPORT" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+config_path, runtime_user, audit_user, sessions_root, appendwatch_report = sys.argv[1:]
+Path(config_path).write_text(
+    json.dumps(
+        {
+            "runtime_user": runtime_user,
+            "audit_user": audit_user,
+            "sessions_root": sessions_root,
+            "appendwatch_report": appendwatch_report,
+        },
+        separators=(",", ":"),
+    )
+    + "\n",
+    encoding="utf-8",
+)
+os.chmod(config_path, 0o600)
+PY
+
+cat > "$AIVM_AUDIT_ENTRYPOINT" <<EOF
+#!/bin/bash
+set -euo pipefail
+exec sudo -n "$AIVM_AUDIT_DISPATCH" "\${SSH_ORIGINAL_COMMAND:-}"
+EOF
+chown root:root "$AIVM_AUDIT_ENTRYPOINT"
+chmod 0755 "$AIVM_AUDIT_ENTRYPOINT"
+
+printf -v AIVM_AUDIT_READ_BIN_Q '%q' "$AIVM_AUDIT_READ_BIN"
+printf -v AIVM_AUDIT_CONFIG_Q '%q' "$AIVM_AUDIT_CONFIG"
+cat > "$AIVM_AUDIT_DISPATCH" <<EOF
+#!/bin/bash
+set -euo pipefail
+[ "\$#" -eq 1 ] || exit 2
+exec $AIVM_AUDIT_READ_BIN_Q --configuration $AIVM_AUDIT_CONFIG_Q "\$1"
+EOF
+chown root:root "$AIVM_AUDIT_DISPATCH"
+chmod 0755 "$AIVM_AUDIT_DISPATCH"
+
+printf '%s ALL=(root) NOPASSWD: %s *\n' \
+    "$AIVM_AUDIT_USER" \
+    "$AIVM_AUDIT_DISPATCH" \
+    > "$AIVM_AUDIT_SUDOERS"
+chmod 0440 "$AIVM_AUDIT_SUDOERS"
+visudo -cf "$AIVM_AUDIT_SUDOERS" >/dev/null
+
 # Start appendwatch before anything Codex-capable runs as the AIVM user.
-chmod 0700 "$APPENDWATCH_DIR"
+chown root:"$AIVM_AUDIT_USER" "$APPENDWATCH_DIR"
+chmod 2710 "$APPENDWATCH_DIR"
 chmod 0600 "$AIVM_APPENDWATCH_SCRIPT"
+chmod 0600 "$AIVM_AUDIT_READ_SCRIPT"
+chmod 0600 "$AIVM_AUDIT_CONFIG"
 
 cat > "/etc/systemd/system/$AIVM_APPENDWATCH_SERVICE_NAME" <<EOF
 [Unit]
@@ -258,7 +395,7 @@ RequiresMountsFor="$AIVM_APPENDWATCH_SCRIPT" "$AIVM_CODEX_SESSIONS_PATH"
 Type=simple
 UMask=0077
 Environment=PYTHONDONTWRITEBYTECODE=1
-ExecStart=/usr/bin/python3 -B "$AIVM_APPENDWATCH_SCRIPT" "$AIVM_CODEX_SESSIONS_PATH" --report "$AIVM_APPENDWATCH_REPORT"
+ExecStart=/usr/bin/python3 -B "$AIVM_APPENDWATCH_SCRIPT" "$AIVM_CODEX_SESSIONS_PATH" --report "$AIVM_APPENDWATCH_REPORT" --report-mode 0640
 Restart=on-failure
 RestartSec=$AIVM_SERVICE_RESTART_SECONDS
 
@@ -337,16 +474,16 @@ curl -fsSL "$AIVM_CODEX_CLI_INSTALL_URL" |
     "codex-cli $AIVM_CODEX_CLI_VERSION" ]
 AIVM_USER_PROVISION
 
-# The normal Lima sshd must never accept this account.
+# The normal Lima sshd must never accept either private AIVM account.
 cat > /etc/ssh/sshd_config.d/90-aivm-deny.conf <<EOF
-DenyUsers $AIVM_USER
+DenyUsers $AIVM_USER $AIVM_AUDIT_USER
 EOF
 
 /usr/sbin/sshd -t
 systemctl reload ssh.service 2>/dev/null \
     || systemctl reload sshd.service
 
-# Run a second sshd only on guest loopback for the AIVM account.
+# Run a second sshd only on guest loopback for the private AIVM accounts.
 install -d -m 0700 /etc/ssh/aivm
 if [ ! -f /etc/ssh/aivm/ssh_host_ed25519_key ]; then
     ssh-keygen \
@@ -368,13 +505,13 @@ UsePAM yes
 StrictModes yes
 PubkeyAuthentication yes
 AuthenticationMethods publickey
-AuthorizedKeysFile $AIVM_HOME/.ssh/authorized_keys
+AuthorizedKeysFile %h/.ssh/authorized_keys
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 ChallengeResponseAuthentication no
 PermitEmptyPasswords no
 PermitRootLogin no
-AllowUsers $AIVM_USER
+AllowUsers $AIVM_USER $AIVM_AUDIT_USER
 
 AllowAgentForwarding no
 # For VS Code to be able to connect
@@ -392,6 +529,11 @@ PrintMotd no
 PrintLastLog yes
 TCPKeepAlive yes
 Subsystem sftp internal-sftp
+
+Match User $AIVM_AUDIT_USER
+    DisableForwarding yes
+    PermitTTY no
+    ForceCommand $AIVM_AUDIT_ENTRYPOINT
 EOF
 
 cat > "/etc/systemd/system/$AIVM_SSH_SERVER_NAME" <<EOF
@@ -423,4 +565,9 @@ if command -v sudo >/dev/null 2>&1 \
     exit 1
 fi
 
-echo "✅ Provisioned '$AIVM_USER' with private SSH access on 127.0.0.1:$AIVM_SSH_PORT"
+if runuser -u "$AIVM_AUDIT_USER" -- sudo -n true >/dev/null 2>&1; then
+    echo "❌ '$AIVM_AUDIT_USER' unexpectedly has unrestricted passwordless sudo"
+    exit 1
+fi
+
+echo "✅ Provisioned '$AIVM_USER' and read-only '$AIVM_AUDIT_USER' with private SSH access on 127.0.0.1:$AIVM_SSH_PORT"

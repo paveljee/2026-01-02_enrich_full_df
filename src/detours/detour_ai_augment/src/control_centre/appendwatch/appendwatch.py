@@ -190,9 +190,16 @@ class Inotify:
 
 
 class AppendWatch:
-    def __init__(self, root: str, report: str, debounce_ms: int) -> None:
+    def __init__(
+        self,
+        root: str,
+        report: str,
+        debounce_ms: int,
+        report_mode: int = 0o600,
+    ) -> None:
         self.root = os.path.realpath(root)
         self.report = report
+        self.report_mode = report_mode
         self.debounce = debounce_ms / 1000.0
         self.records: Dict[str, Record] = {}
         self.ino = Inotify()
@@ -651,12 +658,17 @@ class AppendWatch:
             prefix=f".{os.path.basename(self.report_abs)}.tmp.", dir=directory, text=True
         )
         try:
-            with os.fdopen(fd, "w", encoding="utf-8", errors="backslashreplace") as f:
+            os.fchmod(fd, self.report_mode)
+            stream = os.fdopen(fd, "w", encoding="utf-8", errors="backslashreplace")
+            fd = -1
+            with stream as f:
                 f.write(text)
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp, self.report_abs)
         finally:
+            if fd >= 0:
+                os.close(fd)
             try:
                 os.unlink(tmp)
             except FileNotFoundError:
@@ -783,6 +795,17 @@ class AppendWatch:
 
 
 def parse_args() -> argparse.Namespace:
+    def report_mode(value: str) -> int:
+        try:
+            mode = int(value, 8)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError("must be an octal file mode") from exc
+        if mode & ~0o777 or mode & 0o022 or mode & 0o600 != 0o600:
+            raise argparse.ArgumentTypeError(
+                "must grant owner read/write without group or other write"
+            )
+        return mode
+
     parser = argparse.ArgumentParser(
         description="Flag files whose observed history is not append-only. Linux only."
     )
@@ -791,6 +814,12 @@ def parse_args() -> argparse.Namespace:
         "--report",
         default="-",
         help="atomically rewrite this tree report; '-' prints snapshots to stdout",
+    )
+    parser.add_argument(
+        "--report-mode",
+        type=report_mode,
+        default=0o600,
+        help="octal mode for report replacements (default: 0600)",
     )
     parser.add_argument(
         "--debounce-ms",
@@ -806,7 +835,12 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    watcher = AppendWatch(args.directory, args.report, args.debounce_ms)
+    watcher = AppendWatch(
+        args.directory,
+        args.report,
+        args.debounce_ms,
+        args.report_mode,
+    )
 
     def stop(_signum: int, _frame: object) -> None:
         watcher.stop = True

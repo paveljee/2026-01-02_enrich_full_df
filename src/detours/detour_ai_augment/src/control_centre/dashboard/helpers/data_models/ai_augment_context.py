@@ -62,39 +62,10 @@ class AiAugmentCtlCtrContext:
                 or any(part in FORBIDDEN_NORMALIZED_PATH_PARTS for part in guest_report.parts)
             ):
                 raise ValueError(Locale.LIMA_APPENDWATCH_PATH_INVALID)
-            host_reports: list[Path] = []
-            for mount in lima_configuration.mounts:
-                host_root = Path(mount.location)
-                guest_root = PurePosixPath(mount.mount_point)
-                if (
-                    not host_root.is_absolute()
-                    or str(host_root) != mount.location
-                    or not guest_root.is_absolute()
-                    or str(guest_root) != mount.mount_point
-                    or any(
-                        part in FORBIDDEN_NORMALIZED_PATH_PARTS
-                        for part in guest_root.parts
-                    )
-                ):
-                    raise ValueError(Locale.LIMA_MOUNT_INVALID)
-                try:
-                    relative_report = guest_report.relative_to(guest_root)
-                except ValueError:
-                    continue
-                host_reports.append(host_root.joinpath(*relative_report.parts))
         except (
             KeyError, OSError, UnicodeError, ValueError, ValidationError, yaml.YAMLError
         ) as exc:
             raise RuntimeError(Locale.LIMA_CONFIG_INVALID) from exc
-        if len(host_reports) != 1:
-            raise RuntimeError(Locale.LIMA_APPENDWATCH_MOUNT_INVALID)
-        appendwatch_report = host_reports[0]
-        if (
-            appendwatch_report.is_symlink()
-            or not appendwatch_report.is_file()
-            or not os.access(appendwatch_report, os.R_OK)
-        ):
-            raise RuntimeError(Locale.LIMA_APPENDWATCH_REPORT_UNREADABLE)
         pipeline_config = AiAugmentDetourConfig.from_json(config_path)
         release_map = registered_release_map(pipeline_config)
         release_batches = load_release_batches(release_map)
@@ -110,7 +81,7 @@ class AiAugmentCtlCtrContext:
         self._config_path = config_path
         self._pipeline_config = pipeline_config
         self._openalex_api_key = openalex_api_key
-        self._appendwatch_report = appendwatch_report
+        self._appendwatch_report = guest_report
         self._timezone = ZoneInfo(pipeline_config.timezone)
         self._source_population = source_population
         self._eligible_cohorts = eligible_cohorts(source_population)
@@ -128,7 +99,7 @@ class AiAugmentCtlCtrContext:
         return self._openalex_api_key
 
     @property
-    def appendwatch_report(self) -> Path:
+    def appendwatch_report(self) -> PurePosixPath:
         return self._appendwatch_report
 
     @property
@@ -146,5 +117,4 @@ class AiAugmentCtlCtrContext:
     @property
     def eligible_cohorts(self) -> Mapping[str, str]:
         return self._eligible_cohorts
-
 

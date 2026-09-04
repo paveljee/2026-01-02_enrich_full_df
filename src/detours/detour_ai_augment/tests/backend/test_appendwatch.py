@@ -71,11 +71,22 @@ def aw() -> ModuleType:
 def watcher_factory(aw: ModuleType, tmp_path: Path) -> Iterator[Callable[..., Any]]:
     opened: list[Any] = []
 
-    def make(*, root: Path | None = None, report: Path | str | None = None, debounce_ms: int = 0):
+    def make(
+        *,
+        root: Path | None = None,
+        report: Path | str | None = None,
+        debounce_ms: int = 0,
+        report_mode: int = 0o600,
+    ):
         actual_root = root or (tmp_path / f"root-{len(opened)}")
         actual_root.mkdir(parents=True, exist_ok=True)
         actual_report = report if report is not None else tmp_path / f"report-{len(opened)}.txt"
-        watcher = aw.AppendWatch(str(actual_root), str(actual_report), debounce_ms)
+        watcher = aw.AppendWatch(
+            str(actual_root),
+            str(actual_report),
+            debounce_ms,
+            report_mode,
+        )
         opened.append(watcher)
         return watcher
 
@@ -246,7 +257,9 @@ def test_default_debounce_is_zero(
     root = tmp_path / "root"
     root.mkdir()
     monkeypatch.setattr(sys, "argv", [str(SCRIPT), str(root)])
-    assert aw.parse_args().debounce_ms == 0
+    args = aw.parse_args()
+    assert args.debounce_ms == 0
+    assert args.report_mode == 0o600
 
 
 def test_negative_debounce_is_rejected(
@@ -585,6 +598,22 @@ def test_report_and_atomic_temp_files_are_excluded(
     assert "data.log" in text
     assert "tree.txt" not in text
     assert not list(root.glob(".tree.txt.tmp.*"))
+
+
+@pytest.mark.parametrize("report_mode", (0o600, 0o640))
+def test_atomic_report_replacements_preserve_configured_mode(
+    watcher_factory: Callable[..., Any],
+    tmp_path: Path,
+    report_mode: int,
+) -> None:
+    report = tmp_path / "tree.txt"
+    watcher = watcher_factory(report=report, report_mode=report_mode)
+
+    watcher.write_report()
+    assert stat.S_IMODE(report.stat().st_mode) == report_mode
+
+    watcher.write_report()
+    assert stat.S_IMODE(report.stat().st_mode) == report_mode
 
 
 # ---------------------------------------------------------------------------

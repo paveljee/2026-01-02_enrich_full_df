@@ -949,12 +949,13 @@ def prepare_real_sample_push(
     configuration = api.PushConfiguration(
         rollout_guest_path=JULY_ROLLOUT_GUEST_PATH,
         rollout_relative_path=JULY_ROLLOUT_RELATIVE_PATH,
-        appendwatch_report=report_path,
+        appendwatch_report=PurePosixPath("/mounted/appendwatch-tree.txt"),
         lima_ssh_config=lima_config_path,
         identity_file=identity_path,
         known_hosts_file=known_hosts_path,
-        ssh_target="aivm-ai",
-        host_key_alias="lima-aivm-ai",
+        ssh_user="aivm-audit",
+        ssh_target="aivm-aivm-audit",
+        host_key_alias="lima-aivm-aivm-audit",
     )
     monkeypatch.setattr(api, "runtime_configuration", lambda: runtime)
     monkeypatch.setattr(api, "load_duckdb_extension", lambda *_args, **_kwargs: None)
@@ -964,15 +965,30 @@ def prepare_real_sample_push(
     monkeypatch.setattr(api, "AUTHORITATIVE_LOG_OFFSET", api.AUTHORITATIVE_EMPTY_OFFSET)
     monkeypatch.setattr(api, "AUTHORITATIVE_NEXT_LINE_NUMBER", api.AUTHORITATIVE_FIRST_LINE)
 
-    def fake_subprocess(command: list[str], **_kwargs: object) -> None:
-        if command[0] == api.SCP_EXECUTABLE:
-            destination = Path(command[-1])
-            assert command[-2] == f"aivm-ai:{JULY_ROLLOUT_GUEST_PATH}"
-            write_bytes(destination, read_bytes(paths.july_rollout))
-            return
+    def fake_subprocess(
+        command: list[str],
+        **kwargs: object,
+    ) -> SimpleNamespace:
+        if command[0] == api.SSH_EXECUTABLE:
+            assert command[-2] == configuration.ssh_target
+            if command[-1] == (
+                f"{api.AUDIT_READ_ROLLOUT_COMMAND} {JULY_ROLLOUT_RELATIVE_PATH}"
+            ):
+                cast(Any, kwargs["stdout"]).write(read_bytes(paths.july_rollout))
+                return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+            assert command[-1] == (
+                f"{api.AUDIT_READ_APPENDWATCH_REPORT_COMMAND} "
+                f"{configuration.appendwatch_report}"
+            )
+            return SimpleNamespace(
+                returncode=0,
+                stdout=read_bytes(report_path),
+                stderr=b"",
+            )
         assert command[0] == "pandoc"
         output_path = Path(command[command.index("-o") + 1])
         write_bytes(output_path, b"test DOCX renderer output")
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
 
     monkeypatch.setattr(api.subprocess, "run", fake_subprocess)
 
@@ -1298,12 +1314,13 @@ def test_captured_operator_push_generates_commit_and_exact_terminal_410(
     configuration = api.PushConfiguration(
         rollout_guest_path=f"{api.CODEX_SESSIONS_ROOT}/{rollout_relative_path}",
         rollout_relative_path=rollout_relative_path,
-        appendwatch_report=report_path,
+        appendwatch_report=PurePosixPath("/mounted/appendwatch-tree.txt"),
         lima_ssh_config=lima_config_path,
         identity_file=identity_path,
         known_hosts_file=known_hosts_path,
-        ssh_target="aivm-ai",
-        host_key_alias="lima-aivm-ai",
+        ssh_user="aivm-audit",
+        ssh_target="aivm-aivm-audit",
+        host_key_alias="lima-aivm-aivm-audit",
     )
 
     institution_names = {
@@ -1332,10 +1349,26 @@ def test_captured_operator_push_generates_commit_and_exact_terminal_410(
             raise_for_status=lambda: None,
         )
 
-    def fake_subprocess_run(command: list[str], **_kwargs: object) -> None:
-        assert command[0] == api.SCP_EXECUTABLE
-        assert command[-2] == f"aivm-ai:{configuration.rollout_guest_path}"
-        write_bytes(Path(command[-1]), read_bytes(rollout_path))
+    def fake_subprocess_run(
+        command: list[str],
+        **kwargs: object,
+    ) -> SimpleNamespace:
+        assert command[0] == api.SSH_EXECUTABLE
+        assert command[-2] == configuration.ssh_target
+        if command[-1] == (
+            f"{api.AUDIT_READ_ROLLOUT_COMMAND} {configuration.rollout_relative_path}"
+        ):
+            cast(Any, kwargs["stdout"]).write(read_bytes(rollout_path))
+            return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+        assert command[-1] == (
+            f"{api.AUDIT_READ_APPENDWATCH_REPORT_COMMAND} "
+            f"{configuration.appendwatch_report}"
+        )
+        return SimpleNamespace(
+            returncode=0,
+            stdout=read_bytes(report_path),
+            stderr=b"",
+        )
 
     original_after_authoritative_record = api._after_authoritative_public_record
 
@@ -2302,6 +2335,42 @@ def test_evidence_assessment_is_exhaustive_and_public_guidance_is_nonrevealing(
     assert TEST_CALL_ID not in detail
     assert TEST_REF_ID not in detail
     assert V2_CITE_TEXT not in detail
+
+
+def test_retry_guidance_separates_exact_progress_from_blocking_contract_violations() -> None:
+    submission = api.StandardizedSubmission.model_validate(
+        standardized_submission_body(submission_body_for_evidence(V2_EXACT_EXCERPT))
+    )
+    assessment = api.EvidenceAssessment(
+        items=tuple(
+            api.EvidenceItemAssessment(
+                field=field,
+                index=0,
+                evidence_number=evidence_number,
+                submission=field_submission.web_search_excerpts[0],
+                outcome=api.EVIDENCE_OUTCOME_V1_EXACT,
+                match=None,
+            )
+            for evidence_number, (field, field_submission) in enumerate(
+                submission.evidence_items(),
+                start=1,
+            )
+        )
+    )
+    total = len(api.AI_AUGMENT_EVIDENCE_COLUMNS)
+    location = f"{api.AI_AUGMENT_EVIDENCE_COLUMNS[0]}.web_search_excerpts[0]"
+    violation = Locale.EVIDENCE_MINOR_CHANGE_ONLY_TEMPLATE.format(location=location)
+    detail = api._assessment_public_detail(assessment, violations=(violation,))
+
+    assert assessment.exact_count == total
+    assert assessment.accepted is True
+    assert detail.splitlines()[0] == (
+        f"{total} of {total} current evidence items exactly match our records."
+    )
+    assert "archived rollout" not in detail
+    assert Locale.EVIDENCE_REVIEW_HEADER not in detail
+    assert Locale.EVIDENCE_RETRY_VIOLATION_HEADER in detail
+    assert f"- {violation}" in detail
 
 
 def test_v2_retry_baseline_replays_and_accepts_only_the_exact_correction(
@@ -3525,7 +3594,42 @@ def test_rollout_configuration_is_confined(
         api.push_configuration()
 
 
-def test_scp_uses_pinned_identity_and_counts_physical_lines(
+def test_session_rollout_discovery_uses_restricted_audit_principal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_id = "019fa457-aac5-7652-8669-9d571206e7cb"
+    rollout = api.CODEX_SESSIONS_ROOT / JULY_ROLLOUT_RELATIVE_PATH
+    deployment_files = [
+        tmp_path / "identity",
+        tmp_path / "known-hosts",
+        tmp_path / "ssh.config",
+    ]
+    for path in deployment_files:
+        write_text(path, "fixture\n")
+    monkeypatch.setattr(api, "APPENDWATCH_REPORT", "/mounted/appendwatch-tree.txt")
+    monkeypatch.setattr(api, "AIVM_IDENTITY_FILE", deployment_files[0])
+    monkeypatch.setattr(api, "AIVM_KNOWN_HOSTS_FILE", deployment_files[1])
+    monkeypatch.setattr(api, "LIMA_SSH_CONFIG_PATH", deployment_files[2])
+    observed: list[str] = []
+
+    def run(command: list[str], **kwargs: object) -> SimpleNamespace:
+        observed.extend(command)
+        assert kwargs["check"] is True
+        return SimpleNamespace(stdout=f"{rollout}\n", stderr="", returncode=0)
+
+    monkeypatch.setattr(api.subprocess, "run", run)
+
+    configured = api.push_configuration_for_session(session_id)
+
+    assert configured.ssh_user == api.AIVM_AUDIT_USER
+    assert configured.ssh_target == f"{api.AIVM_INSTANCE}-{api.AIVM_AUDIT_USER}"
+    assert f"User={api.AIVM_AUDIT_USER}" in observed
+    assert observed[-1] == f"{api.AUDIT_FIND_ROLLOUT_COMMAND} {session_id}"
+    assert configured.rollout_guest_path == str(rollout)
+
+
+def test_audit_ssh_uses_pinned_identity_and_counts_physical_lines(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     backend_test_paths: BackendTestPaths,
@@ -3539,12 +3643,13 @@ def test_scp_uses_pinned_identity_and_counts_physical_lines(
     configuration = api.PushConfiguration(
         rollout_guest_path=TEST_ROLLOUT_GUEST_PATH,
         rollout_relative_path=TEST_ROLLOUT_RELATIVE_PATH,
-        appendwatch_report=report_path,
+        appendwatch_report=PurePosixPath("/mounted/appendwatch-tree.txt"),
         lima_ssh_config=lima_config_path,
         identity_file=identity_path,
         known_hosts_file=known_hosts_path,
-        ssh_target="aivm-ai",
-        host_key_alias="lima-aivm-ai",
+        ssh_user="aivm-audit",
+        ssh_target="aivm-aivm-audit",
+        host_key_alias="lima-aivm-aivm-audit",
     )
     runtime = runtime_for_test(tmp_path, backend_test_paths)
     captured: dict[str, Any] = {}
@@ -3552,18 +3657,22 @@ def test_scp_uses_pinned_identity_and_counts_physical_lines(
     def fake_run(command: list[str], **kwargs: object) -> None:
         captured["command"] = command
         captured["kwargs"] = kwargs
-        write_bytes(Path(command[-1]), b"first\nsecond")
+        cast(Any, kwargs["stdout"]).write(b"first\nsecond")
 
     monkeypatch.setattr(api.subprocess, "run", fake_run)
     archived = api.copy_rollout_to_cas(configuration, runtime)
 
     command = captured["command"]
-    assert command[0] == "scp"
+    assert command[0] == api.SSH_EXECUTABLE
     assert f"IdentityFile={identity_path}" in command
     assert f"UserKnownHostsFile={known_hosts_path}" in command
+    assert f"User={configuration.ssh_user}" in command
     assert f"HostKeyAlias={configuration.host_key_alias}" in command
     assert "StrictHostKeyChecking=accept-new" in command
-    assert command[-2] == f"aivm-ai:{TEST_ROLLOUT_GUEST_PATH}"
+    assert command[-2] == configuration.ssh_target
+    assert command[-1] == (
+        f"{api.AUDIT_READ_ROLLOUT_COMMAND} {TEST_ROLLOUT_RELATIVE_PATH}"
+    )
     assert "shell" not in captured["kwargs"]
     assert archived.line_count == 2
     assert archived.path == runtime.rollout_cas_dir / api.ROLLOUT_CAS_FILENAME_TEMPLATE.format(
@@ -3764,12 +3873,16 @@ def test_repeated_researcher_rows_materialize_as_distinct_innerdicts() -> None:
         connection.close()
 
 
-def test_push_acceptance_changes_state_before_post_commit_work() -> None:
+def test_push_acceptance_changes_state_before_post_commit_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     pull_record_id = UUID("019d0000-0000-7000-8000-000000000010")
     session_id = "019d0000-0000-7000-8000-000000000011"
-    api.BACKEND_WORKFLOW_STATUS = api.BackendWorkflowStatus.READY
-    api.BACKEND_CURRENT_PULL_RECORD_ID = pull_record_id
-    api.BACKEND_SESSION_ID = session_id
+    monkeypatch.setattr(api, "BACKEND_WORKFLOW_STATUS", api.BackendWorkflowStatus.READY)
+    monkeypatch.setattr(api, "BACKEND_CURRENT_PULL_RECORD_ID", pull_record_id)
+    monkeypatch.setattr(api, "BACKEND_PENDING_PULL_RECORD_ID", None)
+    monkeypatch.setattr(api, "BACKEND_WORKFLOW_OUTCOME", None)
+    monkeypatch.setattr(api, "BACKEND_SESSION_ID", session_id)
 
     response = asyncio.run(api.authoritative_push(cast(Any, None)))
 
@@ -3782,6 +3895,94 @@ def test_push_acceptance_changes_state_before_post_commit_work() -> None:
     duplicate = asyncio.run(api.authoritative_push(cast(Any, None)))
 
     assert duplicate.status_code == api.status.HTTP_409_CONFLICT
+    assert duplicate.headers[api.LOCATION_HEADER] == api.PULL_PATH
+
+
+def test_retry_push_requires_a_persisted_current_pull_before_acceptance(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    prior_pending_pull_record_id = UUID("019d0000-0000-7000-8000-000000000030")
+    current_pull_record_id = UUID("019d0000-0000-7000-8000-000000000031")
+    session_id = "019d0000-0000-7000-8000-000000000032"
+    prior_outcome = cast(api.ProjectedValidationOutcome, object())
+    monkeypatch.setattr(api, "BACKEND_WORKFLOW_STATUS", api.BackendWorkflowStatus.RETRY)
+    monkeypatch.setattr(api, "BACKEND_CURRENT_PULL_RECORD_ID", None)
+    monkeypatch.setattr(
+        api,
+        "BACKEND_PENDING_PULL_RECORD_ID",
+        prior_pending_pull_record_id,
+    )
+    monkeypatch.setattr(api, "BACKEND_WORKFLOW_OUTCOME", prior_outcome)
+    monkeypatch.setattr(api, "BACKEND_SESSION_ID", session_id)
+    request = cast(Any, object())
+
+    premature = asyncio.run(api.authoritative_push(request))
+
+    assert premature.status_code == api.status.HTTP_409_CONFLICT
+    assert premature.headers[api.LOCATION_HEADER] == api.PULL_PATH
+    assert json.loads(premature.body) == {"detail": Locale.CONFIGURATION_ERROR_DETAIL}
+    assert api.BACKEND_WORKFLOW_STATUS is api.BackendWorkflowStatus.RETRY
+    assert api.BACKEND_CURRENT_PULL_RECORD_ID is None
+    assert api.BACKEND_PENDING_PULL_RECORD_ID == prior_pending_pull_record_id
+    assert api.BACKEND_WORKFLOW_OUTCOME is prior_outcome
+    assert Locale.PUSH_CURRENT_PULL_REQUIRED_LOG in caplog.messages
+
+    persisted_pull = HttpRequestLogRecord(
+        schema_version="1.1",
+        record_id=current_pull_record_id,
+        method=api.HTTP_GET_METHOD,
+        scheme="http",
+        host="testserver",
+        path=api.PULL_PATH,
+        query="",
+        request_headers={},
+        request_body="",
+        response_code=api.status.HTTP_200_OK,
+        response_headers={"content-type": api.MARKDOWN_MEDIA_TYPE},
+        response_body="retry\n",
+        received_at_unix_usec=1,
+        ready_to_respond_at_unix_usec=2,
+        duration_usec=1,
+    )
+    asyncio.run(api._after_authoritative_public_record(persisted_pull))
+
+    assert api.BACKEND_CURRENT_PULL_RECORD_ID == current_pull_record_id
+    accepted = asyncio.run(api.authoritative_push(request))
+    assert accepted.status_code == api.status.HTTP_202_ACCEPTED
+    assert accepted.headers[api.LOCATION_HEADER] == api.PULL_PATH
+    assert api.BACKEND_WORKFLOW_STATUS is api.BackendWorkflowStatus.BUSY
+    assert api.BACKEND_CURRENT_PULL_RECORD_ID is None
+    assert api.BACKEND_PENDING_PULL_RECORD_ID == current_pull_record_id
+    assert api.BACKEND_WORKFLOW_OUTCOME is None
+
+
+@pytest.mark.parametrize(
+    ("workflow_status", "session_id"),
+    (
+        (api.BackendWorkflowStatus.READY, None),
+        (api.BackendWorkflowStatus.FAILED, TEST_SESSION_ID),
+    ),
+)
+def test_push_configuration_failures_remain_internal_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    workflow_status: api.BackendWorkflowStatus,
+    session_id: str | None,
+) -> None:
+    pull_record_id = UUID("019d0000-0000-7000-8000-000000000040")
+    monkeypatch.setattr(api, "BACKEND_WORKFLOW_STATUS", workflow_status)
+    monkeypatch.setattr(api, "BACKEND_CURRENT_PULL_RECORD_ID", pull_record_id)
+    monkeypatch.setattr(api, "BACKEND_PENDING_PULL_RECORD_ID", None)
+    monkeypatch.setattr(api, "BACKEND_WORKFLOW_OUTCOME", None)
+    monkeypatch.setattr(api, "BACKEND_SESSION_ID", session_id)
+
+    response = asyncio.run(api.authoritative_push(cast(Any, None)))
+
+    assert response.status_code == api.status.HTTP_500_INTERNAL_SERVER_ERROR
+    assert api.LOCATION_HEADER not in response.headers
+    assert api.BACKEND_WORKFLOW_STATUS is workflow_status
+    assert api.BACKEND_CURRENT_PULL_RECORD_ID == pull_record_id
+    assert api.BACKEND_PENDING_PULL_RECORD_ID is None
 
 
 def test_accepted_push_is_committed_only_after_its_public_record(
@@ -3972,10 +4173,11 @@ def test_startup_proves_report_and_remote_sessions_readable(
     report_path = tmp_path / "appendwatch.txt"
     report_path.write_bytes(b"appendwatch\n")
     configuration = SimpleNamespace(
-        appendwatch_report=report_path,
+        appendwatch_report=PurePosixPath("/mounted/appendwatch.txt"),
         lima_ssh_config=tmp_path / "ssh.conf",
         identity_file=tmp_path / "identity",
         known_hosts_file=tmp_path / "known-hosts",
+        ssh_user="aivm-audit",
         host_key_alias="alias",
         ssh_target="guest",
     )
@@ -3984,16 +4186,23 @@ def test_startup_proves_report_and_remote_sessions_readable(
     def run(command: list[str], **kwargs: object) -> SimpleNamespace:
         assert kwargs["check"] is True
         observed.append(command)
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
+        stdout = b"appendwatch\n" if command[-1].startswith(
+            api.AUDIT_READ_APPENDWATCH_REPORT_COMMAND
+        ) else ""
+        return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
 
     monkeypatch.setattr(api, "push_configuration", lambda _path: configuration)
     monkeypatch.setattr(api.subprocess, "run", run)
 
     api.prove_workflow_inputs_readable()
 
-    assert len(observed) == 1
-    assert observed[0][-2] == configuration.ssh_target
-    assert str(api.CODEX_SESSIONS_ROOT) in observed[0][-1]
+    assert len(observed) == 2
+    assert all(command[-2] == configuration.ssh_target for command in observed)
+    assert observed[0][-1] == (
+        f"{api.AUDIT_READ_APPENDWATCH_REPORT_COMMAND} "
+        f"{configuration.appendwatch_report}"
+    )
+    assert observed[1][-1] == api.AUDIT_PROBE_COMMAND
 
 
 def test_background_commit_failure_exits_backend(
@@ -4053,6 +4262,9 @@ def test_openapi_does_not_disclose_integrity_internals() -> None:
     assert "rollout" not in serialized
     assert api.ROLLOUT_ENV_NAME.lower() not in serialized
     assert set(push_schema["responses"]) == {"202", "409", "500"}
+    conflict_schema = push_schema["responses"]["409"]
+    assert "current pull must be retrieved" in conflict_schema["description"]
+    assert set(conflict_schema["headers"]) == {api.LOCATION_HEADER}
     assert set(schema["paths"]["/pull"]["get"]["responses"]) == {
         "200",
         "410",

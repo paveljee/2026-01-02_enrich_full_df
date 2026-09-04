@@ -847,7 +847,7 @@ class BackendSupervisor:
         repository_root: Path,
         config_path: Path,
         openalex_api_key: str,
-        appendwatch_report: Path,
+        appendwatch_report: PurePosixPath,
         dashboard_socket_path: Path,
     ) -> None:
         self._repository_root = repository_root

@@ -177,7 +177,7 @@ CONTROL_PARENT_PID_ENV_NAME = "FASTAPI_DETOUR_CONTROL_PARENT_PID"
 DASHBOARD_SOCKET_PATH_ENV_NAME = "FASTAPI_DETOUR_DASHBOARD_SOCKET"
 DASHBOARD_QUERY_PATH = "/query"
 AIVM_INSTANCE_ENV_NAME = "FASTAPI_DETOUR_AIVM_INSTANCE"
-AIVM_USER_ENV_NAME = "FASTAPI_DETOUR_AIVM_USER"
+AIVM_AUDIT_USER_ENV_NAME = "FASTAPI_DETOUR_AIVM_AUDIT_USER"
 AIVM_SSH_PORT_ENV_NAME = "FASTAPI_DETOUR_AIVM_SSH_PORT"
 AIVM_IDENTITY_FILE_ENV_NAME = "FASTAPI_DETOUR_AIVM_IDENTITY_FILE"
 AIVM_KNOWN_HOSTS_FILE_ENV_NAME = "FASTAPI_DETOUR_AIVM_KNOWN_HOSTS_FILE"
@@ -186,7 +186,7 @@ COMMIT_PATH = "/commit"
 CODEX_SESSIONS_ROOT = PurePosixPath(
     os.environ.get(CODEX_SESSIONS_ROOT_ENV_NAME, "/home/ai/.codex/sessions")
 )
-APPENDWATCH_REPORT = Path(os.environ.get(APPENDWATCH_REPORT_ENV_NAME, "")).expanduser()
+APPENDWATCH_REPORT = os.environ.get(APPENDWATCH_REPORT_ENV_NAME, "")
 DEFAULT_DASHBOARD_SOCKET_PATH = (
     Path(tempfile.gettempdir()) / f"ktp-hcr-detour-ai-augment-{os.getuid()}.sock"
 )
@@ -195,7 +195,7 @@ DASHBOARD_SOCKET_PATH = Path(
 ).expanduser()
 
 AIVM_INSTANCE = os.environ.get(AIVM_INSTANCE_ENV_NAME, "aivm")
-AIVM_USER = os.environ.get(AIVM_USER_ENV_NAME, "ai")
+AIVM_AUDIT_USER = os.environ.get(AIVM_AUDIT_USER_ENV_NAME, "aivm-audit")
 AIVM_SSH_PORT = os.environ.get(AIVM_SSH_PORT_ENV_NAME, "22022")
 AIVM_KEY_DIR = Path.home() / ".local" / "share" / "aivm" / ".ssh"
 AIVM_IDENTITY_FILE = Path(
@@ -210,14 +210,12 @@ LIMA_SSH_CONFIG_PATH = Path(
         Path.home() / ".lima" / AIVM_INSTANCE / "ssh.config",
     )
 ).expanduser()
-AIVM_SSH_TARGET = f"{AIVM_INSTANCE}-{AIVM_USER}"
-AIVM_HOST_KEY_ALIAS = f"lima-{AIVM_INSTANCE}-{AIVM_USER}"
 CURRENT_DIRECTORY = PurePosixPath(".")
 FORBIDDEN_NORMALIZED_PATH_PARTS = frozenset({"", ".", ".."})
 
 COMPACT_JSON_SEPARATORS = (",", ":")
 ARCHIVE_HASH_CHUNK_BYTES = 1024 * 1024
-SCP_TIMEOUT_SECONDS = 60
+AUDIT_COPY_TIMEOUT_SECONDS = 60
 SSH_TIMEOUT_SECONDS = 60
 MIN_TCP_PORT = 1
 MAX_TCP_PORT = 65_535
@@ -320,7 +318,10 @@ ATTEMPT_RESULT_ACCEPTED = "accepted"
 ATTEMPT_RESULT_CONFIGURATION_ERROR = "configuration_error"
 ATTEMPT_RESULT_REJECTED = "rejected"
 SSH_EXECUTABLE = "ssh"
-SCP_EXECUTABLE = "scp"
+AUDIT_PROBE_COMMAND = "probe"
+AUDIT_FIND_ROLLOUT_COMMAND = "find-rollout"
+AUDIT_READ_ROLLOUT_COMMAND = "read-rollout"
+AUDIT_READ_APPENDWATCH_REPORT_COMMAND = "read-appendwatch-report"
 BASE64_TEXT_ENCODING = "ascii"
 JSON_MEDIA_TYPE = "application/json"
 HTTP_GET_METHOD = "GET"
@@ -946,7 +947,17 @@ PUSH_ROUTE: dict[str, Any] = {
                 },
             },
         },
-        status.HTTP_409_CONFLICT: {"description": "A submission is already being processed."},
+        status.HTTP_409_CONFLICT: {
+            "description": (
+                "A submission is already being processed, or the current pull must be "
+                "retrieved before submitting."
+            ),
+            "headers": {
+                LOCATION_HEADER: {
+                    "schema": {"type": "string", "example": PULL_PATH},
+                },
+            },
+        },
         status.HTTP_500_INTERNAL_SERVER_ERROR: {
             "description": Locale.CONFIGURATION_ERROR_DETAIL,
         },
@@ -1055,10 +1066,11 @@ class MultipleEvidenceMatches(PushValidationError):
 class PushConfiguration:
     rollout_guest_path: str
     rollout_relative_path: PurePosixPath
-    appendwatch_report: Path
+    appendwatch_report: PurePosixPath
     lima_ssh_config: Path
     identity_file: Path
     known_hosts_file: Path
+    ssh_user: str
     ssh_target: str
     host_key_alias: str
 
@@ -1265,6 +1277,21 @@ def _configuration_file(path: Path, setting: str) -> Path:
         raise PushConfigurationError(Locale.SETTING_ABSOLUTE_TEMPLATE.format(setting=setting))
     if path.is_symlink() or not path.is_file() or not os.access(path, os.R_OK):
         raise PushConfigurationError(Locale.SETTING_READABLE_FILE_TEMPLATE.format(setting=setting))
+    return path
+
+
+def _configuration_guest_path(value: str, setting: str) -> PurePosixPath:
+    path = PurePosixPath(value)
+    if (
+        not value
+        or not path.is_absolute()
+        or str(path) != value
+        or any(part in FORBIDDEN_NORMALIZED_PATH_PARTS for part in path.parts)
+        or _has_control_character(value)
+    ):
+        raise PushConfigurationError(
+            Locale.SETTING_GUEST_PATH_TEMPLATE.format(setting=setting)
+        )
     return path
 
 
@@ -1821,15 +1848,15 @@ def push_configuration(rollout_jsonl: str | None = None) -> PushConfiguration:
 
     if not _valid_nonblank(AIVM_INSTANCE):
         raise PushConfigurationError(Locale.AIVM_INSTANCE_INVALID)
-    if not _valid_nonblank(AIVM_USER):
-        raise PushConfigurationError(Locale.AIVM_USER_INVALID)
+    if not _valid_nonblank(AIVM_AUDIT_USER):
+        raise PushConfigurationError(Locale.AIVM_AUDIT_USER_INVALID)
     if not AIVM_SSH_PORT.isdecimal() or not MIN_TCP_PORT <= int(AIVM_SSH_PORT) <= MAX_TCP_PORT:
         raise PushConfigurationError(Locale.AIVM_SSH_PORT_INVALID)
 
     return PushConfiguration(
         rollout_guest_path=raw_rollout,
         rollout_relative_path=relative_path,
-        appendwatch_report=_configuration_file(
+        appendwatch_report=_configuration_guest_path(
             APPENDWATCH_REPORT,
             APPENDWATCH_REPORT_ENV_NAME,
         ),
@@ -1845,8 +1872,9 @@ def push_configuration(rollout_jsonl: str | None = None) -> PushConfiguration:
             AIVM_KNOWN_HOSTS_FILE,
             AIVM_KNOWN_HOSTS_FILE_ENV_NAME,
         ),
-        ssh_target=f"{AIVM_INSTANCE}-{AIVM_USER}",
-        host_key_alias=f"lima-{AIVM_INSTANCE}-{AIVM_USER}",
+        ssh_user=AIVM_AUDIT_USER,
+        ssh_target=f"{AIVM_INSTANCE}-{AIVM_AUDIT_USER}",
+        host_key_alias=f"lima-{AIVM_INSTANCE}-{AIVM_AUDIT_USER}",
     )
 
 
@@ -1901,6 +1929,7 @@ def push_configuration_for_session(session_id: str) -> PushConfiguration:
         lima_ssh_config=base.lima_ssh_config,
         identity_file=base.identity_file,
         known_hosts_file=base.known_hosts_file,
+        ssh_user=base.ssh_user,
         host_key_alias=base.host_key_alias,
     )
     try:
@@ -1910,13 +1939,7 @@ def push_configuration_for_session(session_id: str) -> PushConfiguration:
                 *options,
                 "--",
                 base.ssh_target,
-                "find",
-                str(CODEX_SESSIONS_ROOT),
-                "-type",
-                "f",
-                "-name",
-                f"*{session_id}{ROLLOUT_FILENAME_SUFFIX}",
-                "-print",
+                shlex.join([AUDIT_FIND_ROLLOUT_COMMAND, session_id]),
             ],
             check=True,
             capture_output=True,
@@ -1937,24 +1960,17 @@ def prove_workflow_inputs_readable() -> None:
     )
     configuration = push_configuration(str(probe_rollout))
     try:
-        configuration.appendwatch_report.read_bytes()
-    except OSError as exc:
+        _read_appendwatch_bytes(configuration)
+    except PushConfigurationError as exc:
         raise PushConfigurationError(Locale.APPENDWATCH_REPORT_UNREADABLE) from exc
     logger.info(Locale.APPENDWATCH_READABLE_LOG, configuration.appendwatch_report)
     options = _aivm_connection_options(
         lima_ssh_config=configuration.lima_ssh_config,
         identity_file=configuration.identity_file,
         known_hosts_file=configuration.known_hosts_file,
+        ssh_user=configuration.ssh_user,
         host_key_alias=configuration.host_key_alias,
     )
-    remote_command = shlex.join([
-        "test",
-        "-d",
-        str(CODEX_SESSIONS_ROOT),
-        "-a",
-        "-r",
-        str(CODEX_SESSIONS_ROOT),
-    ])
     try:
         subprocess.run(
             [
@@ -1962,7 +1978,7 @@ def prove_workflow_inputs_readable() -> None:
                 *options,
                 "--",
                 configuration.ssh_target,
-                remote_command,
+                AUDIT_PROBE_COMMAND,
             ],
             check=True,
             capture_output=True,
@@ -2026,6 +2042,7 @@ def _aivm_connection_options(
     lima_ssh_config: Path,
     identity_file: Path,
     known_hosts_file: Path,
+    ssh_user: str,
     host_key_alias: str,
 ) -> list[str]:
     return [
@@ -2038,7 +2055,7 @@ def _aivm_connection_options(
         "-o",
         f"Port={AIVM_SSH_PORT}",
         "-o",
-        f"User={AIVM_USER}",
+        f"User={ssh_user}",
         "-o",
         f"IdentityFile={identity_file}",
         "-o",
@@ -2074,26 +2091,30 @@ def copy_rollout_to_cas(
         lima_ssh_config=configuration.lima_ssh_config,
         identity_file=configuration.identity_file,
         known_hosts_file=configuration.known_hosts_file,
+        ssh_user=configuration.ssh_user,
         host_key_alias=configuration.host_key_alias,
     )
     command = [
-        SCP_EXECUTABLE,
+        SSH_EXECUTABLE,
         *options,
         "--",
-        f"{configuration.ssh_target}:{configuration.rollout_guest_path}",
-        str(temporary),
+        configuration.ssh_target,
+        shlex.join([
+            AUDIT_READ_ROLLOUT_COMMAND,
+            str(configuration.rollout_relative_path),
+        ]),
     ]
     try:
-        subprocess.run(
-            command,
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=SCP_TIMEOUT_SECONDS,
-        )
+        with temporary.open("wb") as output:
+            subprocess.run(
+                command,
+                check=True,
+                stdout=output,
+                stderr=subprocess.PIPE,
+                timeout=AUDIT_COPY_TIMEOUT_SECONDS,
+            )
         if not temporary.is_file() or temporary.is_symlink():
-            raise PushConfigurationError(Locale.SCP_ROLLOUT_ARCHIVE_INVALID)
+            raise PushConfigurationError(Locale.AUDIT_ROLLOUT_ARCHIVE_INVALID)
         archived = _archived_file(temporary)
         destination = runtime.rollout_cas_dir / ROLLOUT_CAS_FILENAME_TEMPLATE.format(
             sha256=archived.sha256
@@ -2105,7 +2126,7 @@ def copy_rollout_to_cas(
             return existing
         return _publish_archive(temporary, destination)
     except (OSError, subprocess.SubprocessError) as exc:
-        raise PushConfigurationError(Locale.ROLLOUT_SCP_FAILED) from exc
+        raise PushConfigurationError(Locale.ROLLOUT_COPY_FAILED) from exc
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -3350,12 +3371,16 @@ def _assessment_public_detail(
     )
     lines = [
         progress_template.format(
-            verified=assessment.exact_count,
+            exact=assessment.exact_count,
             total=total,
-        ),
-        Locale.EVIDENCE_REVIEW_HEADER,
+        )
     ]
-    for item in assessment.items:
+    non_exact_items = tuple(
+        item for item in assessment.items if item.outcome != EVIDENCE_OUTCOME_V1_EXACT
+    )
+    if non_exact_items:
+        lines.append(Locale.EVIDENCE_REVIEW_HEADER)
+    for item in non_exact_items:
         location = EVIDENCE_LOCATION_DEF(item.field, item.index)
         if item.outcome == EVIDENCE_OUTCOME_V2_NEAR:
             lines.append(Locale.EVIDENCE_NEAR_ITEM_TEMPLATE.format(location=location))
@@ -3363,7 +3388,13 @@ def _assessment_public_detail(
             lines.append(Locale.EVIDENCE_UNMATCHED_ITEM_TEMPLATE.format(location=location))
         elif item.outcome == EVIDENCE_OUTCOME_WITHDRAWN:
             lines.append(Locale.EVIDENCE_WITHDRAWN_ITEM_TEMPLATE.format(location=location))
-    lines.extend(violations)
+    if violations:
+        lines.append(
+            Locale.EVIDENCE_RETRY_VIOLATION_HEADER
+            if len(violations) == 1
+            else Locale.EVIDENCE_RETRY_VIOLATIONS_HEADER_TEMPLATE.format(count=len(violations))
+        )
+        lines.extend(f"- {violation}" for violation in violations)
     lines.append(Locale.EVIDENCE_RETRY_INSTRUCTION)
     if include_retry_contract:
         lines.append(RETRY_SUBMISSION_PUBLIC_GUIDANCE)
@@ -4813,10 +4844,32 @@ def _projected_outcome(
 
 
 def _read_appendwatch_bytes(configuration: PushConfiguration) -> bytes:
+    options = _aivm_connection_options(
+        lima_ssh_config=configuration.lima_ssh_config,
+        identity_file=configuration.identity_file,
+        known_hosts_file=configuration.known_hosts_file,
+        ssh_user=configuration.ssh_user,
+        host_key_alias=configuration.host_key_alias,
+    )
     try:
-        return configuration.appendwatch_report.read_bytes()
-    except OSError as exc:
+        completed = subprocess.run(
+            [
+                SSH_EXECUTABLE,
+                *options,
+                "--",
+                configuration.ssh_target,
+                shlex.join([
+                    AUDIT_READ_APPENDWATCH_REPORT_COMMAND,
+                    str(configuration.appendwatch_report),
+                ]),
+            ],
+            check=True,
+            capture_output=True,
+            timeout=SSH_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
         raise PushConfigurationError(Locale.APPENDWATCH_ARCHIVE_FAILED) from exc
+    return completed.stdout
 
 
 def _synthetic_commit_record(
@@ -5851,16 +5904,23 @@ async def authoritative_push(request: Request) -> Response:
             return JSONResponse(
                 status_code=status.HTTP_409_CONFLICT,
                 content={"detail": Locale.CONFIGURATION_ERROR_DETAIL},
+                headers={LOCATION_HEADER: PULL_PATH},
             )
         if (
             BACKEND_WORKFLOW_STATUS
             not in {BackendWorkflowStatus.READY, BackendWorkflowStatus.RETRY}
-            or BACKEND_CURRENT_PULL_RECORD_ID is None
             or BACKEND_SESSION_ID is None
         ):
             return JSONResponse(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 content={"detail": Locale.CONFIGURATION_ERROR_DETAIL},
+            )
+        if BACKEND_CURRENT_PULL_RECORD_ID is None:
+            logger.warning(Locale.PUSH_CURRENT_PULL_REQUIRED_LOG)
+            return JSONResponse(
+                status_code=status.HTTP_409_CONFLICT,
+                content={"detail": Locale.CONFIGURATION_ERROR_DETAIL},
+                headers={LOCATION_HEADER: PULL_PATH},
             )
         BACKEND_PENDING_PULL_RECORD_ID = BACKEND_CURRENT_PULL_RECORD_ID
         BACKEND_CURRENT_PULL_RECORD_ID = None

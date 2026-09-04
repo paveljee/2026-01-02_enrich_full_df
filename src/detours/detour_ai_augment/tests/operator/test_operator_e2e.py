@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shlex
 import signal
 import socket
 import stat
@@ -244,9 +245,17 @@ def _process_role(command: tuple[str, ...]) -> str:
     if str(control_ui.CODEX_EXEC_COMMAND[0]) in command_text:
         return "Codex SSH transport"
     if executable == backend_api.SSH_EXECUTABLE:
+        if any(
+            command in command_text
+            for command in (
+                backend_api.AUDIT_FIND_ROLLOUT_COMMAND,
+                backend_api.AUDIT_READ_ROLLOUT_COMMAND,
+                backend_api.AUDIT_READ_APPENDWATCH_REPORT_COMMAND,
+                backend_api.AUDIT_PROBE_COMMAND,
+            )
+        ):
+            return "Backend audit reader"
         return "AIVM SSH helper"
-    if executable == backend_api.SCP_EXECUTABLE:
-        return "Backend rollout-copy helper"
     return "unclassified Control Centre descendant"
 
 
@@ -732,9 +741,32 @@ def _assert_deployed_appendwatch_topology(
     configuration = control_ui.AiAugmentCtlCtrContext(
         config_path=operator_runtime.config_path
     )
-
-    assert configuration.appendwatch_report.is_file()
-    assert configuration.appendwatch_report.stat().st_size
+    assert configuration.appendwatch_report.is_absolute()
+    options = backend_api._aivm_connection_options(
+        lima_ssh_config=backend_api.LIMA_SSH_CONFIG_PATH,
+        identity_file=backend_api.AIVM_IDENTITY_FILE,
+        known_hosts_file=backend_api.AIVM_KNOWN_HOSTS_FILE,
+        ssh_user=backend_api.AIVM_AUDIT_USER,
+        host_key_alias=(
+            f"lima-{backend_api.AIVM_INSTANCE}-{backend_api.AIVM_AUDIT_USER}"
+        ),
+    )
+    completed = subprocess.run(
+        [
+            backend_api.SSH_EXECUTABLE,
+            *options,
+            "--",
+            f"{backend_api.AIVM_INSTANCE}-{backend_api.AIVM_AUDIT_USER}",
+            shlex.join([
+                backend_api.AUDIT_READ_APPENDWATCH_REPORT_COMMAND,
+                str(configuration.appendwatch_report),
+            ]),
+        ],
+        check=True,
+        capture_output=True,
+        timeout=backend_api.SSH_TIMEOUT_SECONDS,
+    )
+    assert completed.stdout
     _operator_log("deployed appendwatch topology is readable")
 
 
