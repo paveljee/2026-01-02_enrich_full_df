@@ -1,5 +1,24 @@
 # Tighten API: reopened — accepted-410 Dashboard finalization regression
 
+## Configured namekey population diagnostics completed
+
+- Backend startup now distinguishes a namekey absent from the complete source
+  population from an exact source row that is ineligible. Exact ineligible
+  rows report their derived ineligibility category instead of being collapsed
+  into the former generic error.
+- Exact namekey matching remains mandatory. When an unknown key differs from
+  one or more source keys only by leading or trailing whitespace in the parsed
+  first/last names, the not-found error offers the sorted full canonical
+  namekey(s) as `did you mean` suggestions; it never substitutes one. Case,
+  punctuation, internal whitespace, and Unicode remain untouched.
+- This addresses the observed draw-120 source identity whose XLSX-derived
+  first name is `"Gaoquan "`: supplying `"Gaoquan"` now points the Human
+  Operator to the exact trailing-space key rather than calling it ineligible.
+- Focused configured-namekey coverage: **11 passed**. Complete unprivileged
+  Detour task: **137 passed, 49 skipped, 3 deselected**, followed by the
+  expected no-key real-API skip. Repository Ruff and mypy over all 96 source
+  files, lock consistency, and diff whitespace checks passed.
+
 ## Configured namekey boundary normalization completed
 
 - The main pipeline's canonical JSON string remains the sole internal

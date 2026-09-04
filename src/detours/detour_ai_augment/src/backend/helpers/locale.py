@@ -443,8 +443,15 @@ class Locale:
         "{table_name} contains duplicate rows for configured namekey"
     )
     CONFIGURED_NAMEKEY_INELIGIBLE: Final = "configured namekey is not eligible for this detour"
+    CONFIGURED_NAMEKEY_INELIGIBLE_TEMPLATE: Final = (
+        "configured namekey is ineligible for this detour: {category}"
+    )
     CONFIGURED_NAMEKEY_MALFORMED: Final = "configured namekey is malformed"
     CONFIGURED_NAMEKEY_NONCANONICAL: Final = "configured namekey is not canonical"
+    CONFIGURED_NAMEKEY_NOT_FOUND: Final = "configured namekey was not found"
+    CONFIGURED_NAMEKEY_NOT_FOUND_SUGGESTIONS_TEMPLATE: Final = (
+        "configured namekey was not found; did you mean {suggestions}?"
+    )
     NAMEKEY_NOT_SET_TEMPLATE: Final = "namekey is not set in {environment_name}"
     CONFIGURED_XLSX_CONTEXT_MISSING: Final = "configured namekey has no xlsx innerdict context"
     CONFIGURED_DRAW_MISSING: Final = "configured namekey has no innerdict-owned draw"

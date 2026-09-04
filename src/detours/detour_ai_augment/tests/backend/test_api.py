@@ -3609,6 +3609,92 @@ def test_configured_namekey_rejects_malformed_or_incomplete_json(
         api._configured_namekey()
 
 
+def source_population_row(
+    first_name: str,
+    last_name: str,
+    *,
+    cohort: api.SourceCohort = api.GROUND_TRUTH_COHORT,
+    ineligibility_category: api.IneligibilityCategory | None = None,
+) -> api.SourcePopulationRow:
+    namekey = json.dumps(
+        {
+            api.KTP_FIRST_NAME_COL: first_name,
+            api.KTP_LAST_NAME_COL: last_name,
+        },
+        sort_keys=True,
+    )
+    return api.SourcePopulationRow(
+        namekey=namekey,
+        rnd=1,
+        first_name=first_name,
+        last_name=last_name,
+        draw_numbers=("1",),
+        cohort=cohort,
+        ineligibility_category=ineligibility_category,
+    )
+
+
+def test_configured_namekey_population_accepts_exact_eligible_match() -> None:
+    row = source_population_row("Gaoquan ", "Shi")
+
+    api._validate_configured_namekey_population(row.namekey, (row,))
+
+
+def test_configured_namekey_population_reports_exact_ineligibility_category() -> None:
+    category = api.IneligibilityCategory.STAGING_PARTITION_2
+    row = source_population_row(
+        "Gaoquan ",
+        "Shi",
+        cohort=api.INELIGIBLE_COHORT,
+        ineligibility_category=category,
+    )
+
+    with pytest.raises(api.PushConfigurationError) as exc_info:
+        api._validate_configured_namekey_population(row.namekey, (row,))
+
+    assert str(exc_info.value) == Locale.CONFIGURED_NAMEKEY_INELIGIBLE_TEMPLATE.format(
+        category=category.value
+    )
+
+
+def test_configured_namekey_population_suggests_exact_trailing_space_match() -> None:
+    row = source_population_row("Gaoquan ", "Shi")
+    configured_namekey = source_population_row("Gaoquan", "Shi").namekey
+
+    with pytest.raises(api.PushConfigurationError) as exc_info:
+        api._validate_configured_namekey_population(configured_namekey, (row,))
+
+    assert str(exc_info.value) == Locale.CONFIGURED_NAMEKEY_NOT_FOUND_SUGGESTIONS_TEMPLATE.format(
+        suggestions=row.namekey
+    )
+
+
+def test_configured_namekey_population_sorts_multiple_whitespace_suggestions() -> None:
+    rows = (
+        source_population_row("Gaoquan ", "Shi"),
+        source_population_row(" Gaoquan", "Shi"),
+    )
+    configured_namekey = source_population_row("Gaoquan", "Shi").namekey
+    suggestions = " or ".join(sorted(row.namekey for row in rows))
+
+    with pytest.raises(api.PushConfigurationError) as exc_info:
+        api._validate_configured_namekey_population(configured_namekey, rows)
+
+    assert str(exc_info.value) == Locale.CONFIGURED_NAMEKEY_NOT_FOUND_SUGGESTIONS_TEMPLATE.format(
+        suggestions=suggestions
+    )
+
+
+def test_configured_namekey_population_reports_unrelated_unknown_without_suggestion() -> None:
+    row = source_population_row("Gaoquan ", "Shi")
+    configured_namekey = source_population_row("Gaoquan", "Shih").namekey
+
+    with pytest.raises(api.PushConfigurationError) as exc_info:
+        api._validate_configured_namekey_population(configured_namekey, (row,))
+
+    assert str(exc_info.value) == Locale.CONFIGURED_NAMEKEY_NOT_FOUND
+
+
 def test_required_config_and_source_database_are_read_only(
     tmp_path: Path,
     backend_test_paths: BackendTestPaths,

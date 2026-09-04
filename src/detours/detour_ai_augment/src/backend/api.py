@@ -1665,6 +1665,40 @@ def eligible_cohorts(
     return {row.namekey: row.cohort for row in source_population if row.cohort != INELIGIBLE_COHORT}
 
 
+def _validate_configured_namekey_population(
+    configured_namekey: str,
+    source_population: Sequence[SourcePopulationRow],
+) -> None:
+    configured_row = next(
+        (row for row in source_population if row.namekey == configured_namekey),
+        None,
+    )
+    if configured_row is not None:
+        if configured_row.cohort != INELIGIBLE_COHORT:
+            return
+        category = configured_row.ineligibility_category
+        if category is None:
+            raise PushConfigurationError(Locale.INELIGIBILITY_CATEGORY_UNKNOWN)
+        raise PushConfigurationError(
+            Locale.CONFIGURED_NAMEKEY_INELIGIBLE_TEMPLATE.format(category=category.value)
+        )
+
+    name_key = NameKey.from_json_key(configured_namekey)
+    stripped_identity = (name_key.first_name.strip(), name_key.last_name.strip())
+    suggestions = sorted({
+        row.namekey
+        for row in source_population
+        if (row.first_name.strip(), row.last_name.strip()) == stripped_identity
+    })
+    if suggestions:
+        raise PushConfigurationError(
+            Locale.CONFIGURED_NAMEKEY_NOT_FOUND_SUGGESTIONS_TEMPLATE.format(
+                suggestions=" or ".join(suggestions)
+            )
+        )
+    raise PushConfigurationError(Locale.CONFIGURED_NAMEKEY_NOT_FOUND)
+
+
 def _configured_namekey() -> str:
     raw_namekey = os.environ.get(NAMEKEY_ENV_NAME, "")
     if not _valid_nonblank(raw_namekey):
@@ -1727,8 +1761,7 @@ def configure_runtime(config_path: Path) -> AiAugmentBackendContext:
     detour_db_path = _detour_db_path(pipeline.db_file)
     if detour_db_path == pipeline.db_file:
         raise PushConfigurationError(Locale.DETOUR_DB_EQUALS_SOURCE)
-    if configured_namekey not in cohorts:
-        raise PushConfigurationError(Locale.CONFIGURED_NAMEKEY_INELIGIBLE)
+    _validate_configured_namekey_population(configured_namekey, source_population)
     RUNTIME_CONFIGURATION = AiAugmentBackendContext(
         pipeline=pipeline,
         detour_db_path=detour_db_path,
