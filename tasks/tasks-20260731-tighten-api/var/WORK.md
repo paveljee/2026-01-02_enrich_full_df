@@ -1,5 +1,25 @@
 # Tighten API: reopened — accepted-410 Dashboard finalization regression
 
+## Explicit Backend audit credential and Lifecycle review completed
+
+- Reread the authoritative cached Detour README in full, including the revised
+  Lifecycle provisions for independent guest/host OpenAlex credentials,
+  Dashboard-owned queue execution, and the shared host-held SSH credential.
+- Removed the Backend's silent audit-identity default. The
+  `FASTAPI_DETOUR_AIVM_IDENTITY_FILE` setting is now mandatory, and the manual,
+  Dashboard, and operator Pixi launch contours each supply the provisioned
+  `AIVM_KEY_DIR/id_ed25519` path explicitly.
+- Control Centre finalizes a run only after Codex exits. It then refreshes the
+  Backend-owned projection once and marks the run complete if that session has
+  an accepted attempt; otherwise it marks the run failed. Backend remains alive
+  until replaced by a later run or stopped with Control Centre. The one-shot
+  refresh leaves a narrow acceptance/finalization race to call out separately.
+- Added focused missing-identity coverage. The complete Backend module passed
+  (**66 passed, 36 skipped**), and the full unprivileged Detour task passed
+  (**154 passed, 49 skipped, 3 deselected**) followed by the expected no-key
+  real-API skip. Repository Ruff and mypy over 98 source files, lock
+  consistency, TOML parsing, and diff whitespace checks passed.
+
 ## Push sequencing and retry guidance completed
 
 - The 2026-09-04 Gaoquan Shi manual run exposed two upstream UX gaps. A push

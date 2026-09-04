@@ -738,13 +738,15 @@ def _assert_deployed_appendwatch_topology(
     operator_runtime: OperatorRuntime,
 ) -> None:
     _operator_log("loading the deployed appendwatch topology")
+    identity_file = backend_api.AIVM_IDENTITY_FILE
+    assert identity_file is not None
     configuration = control_ui.AiAugmentCtlCtrContext(
         config_path=operator_runtime.config_path
     )
     assert configuration.appendwatch_report.is_absolute()
     options = backend_api._aivm_connection_options(
         lima_ssh_config=backend_api.LIMA_SSH_CONFIG_PATH,
-        identity_file=backend_api.AIVM_IDENTITY_FILE,
+        identity_file=identity_file,
         known_hosts_file=backend_api.AIVM_KNOWN_HOSTS_FILE,
         ssh_user=backend_api.AIVM_AUDIT_USER,
         host_key_alias=(

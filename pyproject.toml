@@ -394,6 +394,7 @@ bash -c '
   export FASTAPI_DETOUR_NAMEKEY="$NAMEKEY"
   export FASTAPI_DETOUR_APPENDWATCH_REPORT='"'"'/Volumes/home/aicode/aivm/home/ai/.aivm-control/appendwatch/appendwatch-tree.txt'"'"'
   export FASTAPI_DETOUR_CODEX_SESSIONS_DIR='"'"'/home/ai/.codex/sessions'"'"'
+  export FASTAPI_DETOUR_AIVM_IDENTITY_FILE="$HOME/.local/share/aivm/.ssh/id_ed25519"
   export FASTAPI_DETOUR_DASHBOARD_SOCKET="/tmp/detour-manual-${UID}.sock"
   pixi run -e detour-ai-augment \
     python -m src.detours.detour_ai_augment.src.backend.api \
@@ -401,6 +402,7 @@ bash -c '
 ' --
 """
 dashboard = """
+FASTAPI_DETOUR_AIVM_IDENTITY_FILE="$HOME/.local/share/aivm/.ssh/id_ed25519" \
 OPENALEX_API_KEY="$(python -c '
 import os
 from dotenv import dotenv_values
@@ -440,6 +442,7 @@ sudo env \
   src/detours/detour_ai_augment/tests
 """
 test-detour-ai-augment-operator = """
+FASTAPI_DETOUR_AIVM_IDENTITY_FILE="$HOME/.local/share/aivm/.ssh/id_ed25519" \
 OPENALEX_API_KEY="$(python -c '
 import os
 from dotenv import dotenv_values

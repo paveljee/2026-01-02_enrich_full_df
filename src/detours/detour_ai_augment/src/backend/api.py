@@ -198,9 +198,12 @@ AIVM_INSTANCE = os.environ.get(AIVM_INSTANCE_ENV_NAME, "aivm")
 AIVM_AUDIT_USER = os.environ.get(AIVM_AUDIT_USER_ENV_NAME, "aivm-audit")
 AIVM_SSH_PORT = os.environ.get(AIVM_SSH_PORT_ENV_NAME, "22022")
 AIVM_KEY_DIR = Path.home() / ".local" / "share" / "aivm" / ".ssh"
-AIVM_IDENTITY_FILE = Path(
-    os.environ.get(AIVM_IDENTITY_FILE_ENV_NAME, AIVM_KEY_DIR / "id_ed25519")
-).expanduser()
+_AIVM_IDENTITY_FILE_VALUE = os.environ.get(AIVM_IDENTITY_FILE_ENV_NAME)
+AIVM_IDENTITY_FILE = (
+    None
+    if not _AIVM_IDENTITY_FILE_VALUE
+    else Path(_AIVM_IDENTITY_FILE_VALUE).expanduser()
+)
 AIVM_KNOWN_HOSTS_FILE = Path(
     os.environ.get(AIVM_KNOWN_HOSTS_FILE_ENV_NAME, AIVM_KEY_DIR / "known_hosts")
 ).expanduser()
@@ -1272,7 +1275,9 @@ def _valid_nonblank(value: object) -> bool:
     )
 
 
-def _configuration_file(path: Path, setting: str) -> Path:
+def _configuration_file(path: Path | None, setting: str) -> Path:
+    if path is None:
+        raise PushConfigurationError(Locale.SETTING_REQUIRED_TEMPLATE.format(setting=setting))
     if not path.is_absolute():
         raise PushConfigurationError(Locale.SETTING_ABSOLUTE_TEMPLATE.format(setting=setting))
     if path.is_symlink() or not path.is_file() or not os.access(path, os.R_OK):

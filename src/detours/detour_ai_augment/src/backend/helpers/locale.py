@@ -66,6 +66,7 @@ class Locale:
     CONTROL_PARENT_PID_INVALID: Final = "Control Centre parent PID is invalid"
     WEB_RESULT_REF_ID_NONBLANK: Final = "web result ref_id must be non-blank"
 
+    SETTING_REQUIRED_TEMPLATE: Final = "{setting} is required"
     SETTING_ABSOLUTE_TEMPLATE: Final = "{setting} must be an absolute path"
     SETTING_READABLE_FILE_TEMPLATE: Final = (
         "{setting} is not a readable regular file; rerun deploy.sh or correct .env"

@@ -3594,6 +3594,23 @@ def test_rollout_configuration_is_confined(
         api.push_configuration()
 
 
+def test_aivm_identity_file_must_be_configured_explicitly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lima_config = tmp_path / "ssh.config"
+    write_text(lima_config, "fixture\n")
+    monkeypatch.setattr(api, "APPENDWATCH_REPORT", "/mounted/appendwatch-tree.txt")
+    monkeypatch.setattr(api, "LIMA_SSH_CONFIG_PATH", lima_config)
+    monkeypatch.setattr(api, "AIVM_IDENTITY_FILE", None)
+
+    with pytest.raises(
+        api.PushConfigurationError,
+        match=api.AIVM_IDENTITY_FILE_ENV_NAME,
+    ):
+        api.push_configuration(TEST_ROLLOUT_GUEST_PATH)
+
+
 def test_session_rollout_discovery_uses_restricted_audit_principal(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
