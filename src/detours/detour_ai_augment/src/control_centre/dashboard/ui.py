@@ -93,7 +93,6 @@ from .helpers.vars import (
     CODEX_CANCEL_TIMEOUT_SECONDS,
     CODEX_DISCOVERY_POLL_SECONDS,
     CODEX_DISCOVERY_TIMEOUT_SECONDS,
-    CODEX_ENV_EXPORT_TEMPLATE,
     CODEX_ENV_PATH,
     CODEX_EXEC_COMMAND,
     CODEX_INPUT_TEMPLATE,
@@ -110,7 +109,6 @@ from .helpers.vars import (
     CODEX_REMOTE_PROCESS_ALIVE_MARKER,
     CODEX_REMOTE_SIGNAL_COMMAND_TEMPLATE,
     CODEX_REMOTE_TERMINATE_SIGNAL,
-    CODEX_REMOTE_WRITE_FILE_COMMAND_TEMPLATE,
     CODEX_ROLLOUT_FILENAME_TEMPLATE,
     CODEX_RUN_MARKER_TEMPLATE,
     CODEX_RUN_PID_TEMPLATE,
@@ -881,7 +879,7 @@ class BackendSupervisor:
 
     async def start(self, *, namekey: Namekey) -> None:
         if self._process is not None:
-            await self.stop()
+            raise RuntimeError(Locale.BACKEND_ALREADY_OWNED)
         self._status = BackendStatus.STARTING
         process = await asyncio.create_subprocess_exec(
             *BACKEND_COMMAND_PREFIX,
@@ -1071,11 +1069,9 @@ class CodexRunner:
         self,
         *,
         timezone: ZoneInfo,
-        openalex_api_key: str,
         openapi_url: str = BACKEND_OPENAPI_URL,
     ) -> None:
         self._timezone = timezone
-        self._openalex_api_key = openalex_api_key
         self._openapi_url = openapi_url
 
     def ssh_connection_command(self) -> tuple[str, ...]:
@@ -1129,13 +1125,6 @@ class CodexRunner:
             )
         return stdout
 
-    async def _write_remote_file(self, path: PurePosixPath, content: bytes) -> None:
-        command = CODEX_REMOTE_WRITE_FILE_COMMAND_TEMPLATE.format(
-            parent_path=shlex.quote(str(path.parent)),
-            file_path=shlex.quote(str(path)),
-        )
-        await self._remote_command(command, input_bytes=content)
-
     async def is_busy(self) -> bool:
         output = await self._remote_command(CODEX_REMOTE_BUSY_COMMAND)
         return output.decode(TEXT_ENCODING) == CODEX_REMOTE_BUSY_MARKER
@@ -1146,11 +1135,6 @@ class CodexRunner:
         run_id: UUID,
         on_handle: (Callable[[CodexProcessHandle], Awaitable[None]] | None) = None,
     ) -> CodexStartResult:
-        environment_bytes = CODEX_ENV_EXPORT_TEMPLATE.format(
-            name=EXPORT_OPENALEX_API_KEY,
-            value=shlex.quote(self._openalex_api_key),
-        ).encode(TEXT_ENCODING)
-        await self._write_remote_file(CODEX_ENV_PATH, environment_bytes)
         marker_path = CODEX_WORKDIR / CODEX_RUN_MARKER_TEMPLATE.format(run_id=run_id)
         pid_path = CODEX_WORKDIR / CODEX_RUN_PID_TEMPLATE.format(run_id=run_id)
         await self._remote_command(
@@ -1833,15 +1817,12 @@ class ControlCentreController:
 
     async def shutdown(self) -> None:
         self._shutting_down = True
-        active_codex = self._active_codex
         if self._worker_task is not None:
             self._worker_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._worker_task
             self._worker_task = None
-        if active_codex is not None:
-            with contextlib.suppress(Exception):
-                await self._codex.cancel(active_codex)
+        await self._wind_down_owned_run_processes()
         shutdown_time = datetime.now(timezone.utc)
         for run in tuple(self._runs.values()):
             if run.dashboard_owned and run.status is RunStatus.RUNNING:
@@ -1854,7 +1835,6 @@ class ControlCentreController:
                         detail=Locale.SHUTDOWN_INTERRUPTED_RUN,
                     )
                 )
-        await self._backend.stop()
 
     async def queue(
         self,
@@ -1923,6 +1903,10 @@ class ControlCentreController:
                     raise
             return
         if run.status is RunStatus.QUEUED:
+            queued = list(app.storage.general.get(QUEUE_STORAGE_KEY, []))
+            if str(run_id) in queued:
+                queued.remove(str(run_id))
+                app.storage.general[QUEUE_STORAGE_KEY] = queued
             await self._append_run_event(
                 RunEvent(
                     run_id=run_id,
@@ -2086,26 +2070,31 @@ class ControlCentreController:
     async def _worker(self) -> None:
         while True:
             run_id = await self._queue.get()
-            try:
-                queued = list(app.storage.general.get(QUEUE_STORAGE_KEY, []))
-                if str(run_id) in queued:
-                    queued.remove(str(run_id))
-                    app.storage.general[QUEUE_STORAGE_KEY] = queued
-                run = self._runs[run_id]
-                if run.status is RunStatus.CANCELED:
-                    continue
-                if not await self._wait_until_codex_idle(run_id=run_id):
-                    continue
-                self._active_run_id = run_id
-                await self._execute_run(run_id=run_id)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                if self._active_codex is not None:
-                    with contextlib.suppress(Exception):
-                        await self._codex.cancel(self._active_codex)
-                run = self._runs[run_id]
-                canceled = run.cancel_requested_at is not None and run.failure_detail is None
+            await self._process_queued_run(run_id)
+
+    async def _process_queued_run(self, run_id: UUID) -> None:
+        try:
+            queued = list(app.storage.general.get(QUEUE_STORAGE_KEY, []))
+            if str(run_id) in queued:
+                queued.remove(str(run_id))
+                app.storage.general[QUEUE_STORAGE_KEY] = queued
+            run = self._runs[run_id]
+            if run.status is RunStatus.CANCELED:
+                return
+            if not await self._wait_until_codex_idle(run_id=run_id):
+                return
+            self._active_run_id = run_id
+            await self._execute_run(run_id=run_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            run = self._runs[run_id]
+            canceled = run.cancel_requested_at is not None and run.failure_detail is None
+            if run.status not in {
+                RunStatus.COMPLETE,
+                RunStatus.FAILED,
+                RunStatus.CANCELED,
+            }:
                 await self._append_run_event(
                     RunEvent(
                         run_id=run_id,
@@ -2115,12 +2104,52 @@ class ControlCentreController:
                         detail=None if canceled else str(exc),
                     )
                 )
+        finally:
+            cleanup_error: Exception | None = None
+            try:
+                await self._wind_down_owned_run_processes()
+            except Exception as exc:
+                cleanup_error = exc
+            try:
+                if cleanup_error is not None:
+                    run = self._runs[run_id]
+                    await self._append_run_event(
+                        RunEvent(
+                            run_id=run_id,
+                            namekey=run.namekey,
+                            at=datetime.now(timezone.utc),
+                            kind=RunEventKind.FAILED,
+                            detail=Locale.RUN_PROCESS_CLEANUP_FAILED_TEMPLATE.format(
+                                error=cleanup_error
+                            ),
+                        )
+                    )
             finally:
                 self._active_codex = None
                 self._active_run_id = None
                 self._queue.task_done()
                 if not self._shutting_down:
                     await self.refresh_idle_state()
+
+    async def _wind_down_owned_run_processes(self) -> None:
+        codex_error: Exception | None = None
+        active_codex = self._active_codex
+        if active_codex is not None and active_codex.process.returncode is None:
+            try:
+                await self._codex.cancel(active_codex)
+            except Exception as exc:
+                codex_error = exc
+        try:
+            await self._backend.stop()
+        except Exception as backend_error:
+            if codex_error is not None:
+                raise ExceptionGroup(
+                    "Codex and Backend cleanup failed",
+                    (codex_error, backend_error),
+                )
+            raise
+        if codex_error is not None:
+            raise codex_error
 
     async def _wait_until_codex_idle(self, *, run_id: UUID) -> bool:
         while True:
@@ -3090,7 +3119,6 @@ def create_services(
     backend_database = BackendDatabaseClient(socket_path=DASHBOARD_SOCKET_PATH)
     codex = CodexRunner(
         timezone=configuration.timezone,
-        openalex_api_key=configuration.openalex_api_key,
     )
     reconciler = AttemptReconciler()
     projector = VariableProjector()

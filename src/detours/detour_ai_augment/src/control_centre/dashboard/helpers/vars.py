@@ -1,4 +1,3 @@
-import shlex
 from pathlib import Path, PurePosixPath
 from typing import Final
 
@@ -117,10 +116,6 @@ CODEX_REMOTE_KILL_SIGNAL: Final = "KILL"
 CODEX_REMOTE_EXEC_COMMAND_TEMPLATE: Final = (
     "printf '%s\\n' \"$$\" > {pid_path}; . {environment_path}; exec {codex_command}"
 )
-CODEX_ENV_EXPORT_TEMPLATE: Final = "export {name}={value}\\n"
-CODEX_REMOTE_WRITE_FILE_COMMAND_TEMPLATE: Final = (
-    "mkdir -p -- {parent_path} && umask 077 && cat > {file_path}"
-)
 CODEX_REMOTE_PREPARE_RUN_COMMAND_TEMPLATE: Final = (
     "mkdir -p -- {workdir} && rm -f -- {pid_path} && touch -- {marker_path}"
 )
@@ -142,17 +137,7 @@ CODEX_EXEC_COMMAND: Final = (
     "--skip-git-repo-check",
     "-",
 )
-CODEX_REMOTE_PROCESS_PATTERN: Final = " ".join(
-    (
-        str(CODEX_CLI_BIN_PATH.parent / "[c]odex"),
-        *CODEX_EXEC_COMMAND[1:],
-    )
-)
-CODEX_REMOTE_BUSY_COMMAND_TEMPLATE: Final = (
-    "if pgrep -f -- {process_pattern} >/dev/null; then printf '%s' {busy_marker}; fi"
-)
-
-CODEX_REMOTE_BUSY_COMMAND: Final = CODEX_REMOTE_BUSY_COMMAND_TEMPLATE.format(
-    process_pattern=shlex.quote(CODEX_REMOTE_PROCESS_PATTERN),
-    busy_marker=shlex.quote(CODEX_REMOTE_BUSY_MARKER),
+CODEX_REMOTE_BUSY_COMMAND: Final = (
+    'if pgrep -u "$(id -u)" -x codex >/dev/null; '
+    f"then printf '%s' {CODEX_REMOTE_BUSY_MARKER}; fi"
 )

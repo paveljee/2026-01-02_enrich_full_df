@@ -75,6 +75,9 @@ class Locale:
     BACKEND_PULL_NOT_READY: Final = "backend cannot serve the configured pull"
     BACKEND_EXITED_EARLY: Final = "backend exited before becoming ready"
     BACKEND_READY_TIMEOUT: Final = "backend did not become ready"
+    BACKEND_ALREADY_OWNED: Final = (
+        "Control Centre already owns a Backend process"
+    )
     BACKEND_NOT_RUNNING: Final = "backend is not running"
     BACKEND_STDIN_MISSING: Final = "backend stdin pipe is unavailable"
     BACKEND_DATABASE_REQUEST_FAILED: Final = "backend database IPC query failed"
@@ -130,6 +133,7 @@ class Locale:
         "Codex run was cancelled before session handoff"
     )
     CODEX_HANDLE_MISMATCH: Final = "Codex handle does not match the active run"
+    RUN_PROCESS_CLEANUP_FAILED_TEMPLATE: Final = "run process cleanup failed: {error}"
     ACCEPTED_SESSION_DUPLICATE: Final = (
         "accepted output contains duplicate session attempts"
     )

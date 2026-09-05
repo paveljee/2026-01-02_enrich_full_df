@@ -454,7 +454,6 @@ def operator_aivm(
     guest_key = guest_key_process.stdout.strip()
     if not guest_key:
         raise pytest.UsageError(OPERATOR_GUEST_KEY_MISSING)
-    monkeypatch.setenv(OPENALEX_API_KEY_ENV_NAME, guest_key)
     _operator_log("guest OpenAlex credential is available")
     _operator_log("checking appendwatch service health")
     try:

@@ -16,6 +16,9 @@ from src.detours.detour_ai_augment.src.control_centre.dashboard import ui as con
 from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers import (
     vars as control_vars,
 )
+from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models import (
+    ai_augment_context as context_models,
+)
 
 NAMEKEY = control_ui.Namekey("Jane Doe [1]")
 SECOND_NAMEKEY = control_ui.Namekey("John Doe [2]")
@@ -90,6 +93,7 @@ class FakeBackend:
         self.supplied_session_ids.append(session_id)
 
     async def stop(self) -> None:
+        self.order.append("backend-stop")
         self.status = control_ui.BackendStatus.STOPPED
 
 
@@ -121,12 +125,14 @@ class FakeCodex:
             rollout_jsonl=ROLLOUT_PATH,
         )
 
-    async def wait(self, _handle: object) -> int:
+    async def wait(self, handle: object) -> int:
         self.order.append("codex-wait")
+        cast(Any, handle).process.returncode = 0
         return 0
 
-    async def cancel(self, _handle: object) -> None:
-        return None
+    async def cancel(self, handle: object) -> None:
+        self.order.append("codex-cancel")
+        cast(Any, handle).process.returncode = -15
 
     async def terminate_abandoned_run(self, _run_id: UUID) -> None:
         return None
@@ -244,6 +250,115 @@ def test_dashboard_paths_resolve_from_repository_root(repository_root: Path) -> 
     assert control_vars.REPOSITORY_ROOT == repository_root
     assert control_ui.REPOSITORY_ROOT == repository_root
     assert control_vars.DEFAULT_CONFIG_PATH == repository_root / "config_ai_augment.json"
+
+
+def test_dashboard_context_prepares_source_population_from_read_only_database(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lima_config_path = tmp_path / "lima.yaml"
+    lima_config_path.write_text(
+        '{"param":{"FASTAPI_DETOUR_APPENDWATCH_REPORT":'
+        '"/home/ai/.aivm-control/appendwatch/appendwatch-tree.txt"},"mounts":[]}',
+        encoding="utf-8",
+    )
+    source_db_path = tmp_path / "source.duckdb"
+    pipeline_config = SimpleNamespace(
+        db_file=source_db_path,
+        sample_seed=42,
+        timezone="UTC",
+    )
+    source_population = cast(tuple[Any, ...], (object(),))
+    connection = SimpleNamespace(close=lambda: None)
+    calls: list[tuple[str, bool]] = []
+
+    def connect(path: str, *, read_only: bool) -> SimpleNamespace:
+        calls.append((path, read_only))
+        return connection
+
+    def derive(
+        supplied_connection: object,
+        release_batches: object,
+        *,
+        sample_seed: int,
+    ) -> tuple[Any, ...]:
+        assert supplied_connection is connection
+        assert release_batches == "release-batches"
+        assert sample_seed == 42
+        return source_population
+
+    monkeypatch.setenv(context_models.EXPORT_OPENALEX_API_KEY, "host-openalex-key")
+    monkeypatch.setattr(context_models, "LIMA_CONFIG_PATH", lima_config_path)
+    monkeypatch.setattr(
+        context_models.AiAugmentDetourConfig,
+        "from_json",
+        lambda _path: pipeline_config,
+    )
+    monkeypatch.setattr(context_models, "registered_release_map", lambda _config: {})
+    monkeypatch.setattr(
+        context_models,
+        "load_release_batches",
+        lambda _release_map: "release-batches",
+    )
+    monkeypatch.setattr(context_models, "derive_source_population", derive)
+    monkeypatch.setattr(
+        context_models,
+        "eligible_cohorts",
+        lambda population: {} if population is source_population else None,
+    )
+    monkeypatch.setattr(context_models.duckdb, "connect", connect)
+
+    context = context_models.AiAugmentCtlCtrContext(config_path=tmp_path / "config.json")
+
+    assert context.source_population is source_population
+    assert context.source_db_path == source_db_path
+    assert calls == [(str(source_db_path), True)]
+
+
+@pytest.mark.anyio
+async def test_dashboard_start_prepares_population_and_ground_truth_before_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = researcher()
+    ground_truth = control_ui.GroundTruthRecord(namekey=source.namekey, values={})
+    order: list[str] = []
+
+    class ObservedSourceRepository(FakeSourceRepository):
+        def load_researchers(self) -> tuple[control_ui.Researcher, ...]:
+            order.append("source-population")
+            return (source,)
+
+        def load_ground_truth_by_namekey(
+            self,
+        ) -> dict[control_ui.Namekey, control_ui.GroundTruthRecord]:
+            order.append("linked-ground-truth")
+            return {source.namekey: ground_truth}
+
+    subject = control_ui.ControlCentreController(
+        source_repository=cast(control_ui.SourceRepository, ObservedSourceRepository()),
+        backend=cast(control_ui.BackendSupervisor, FakeBackend(order)),
+        backend_database=cast(control_ui.BackendDatabaseClient, FakeBackendDatabase()),
+        codex=cast(control_ui.CodexRunner, FakeCodex(order)),
+        reconciler=control_ui.AttemptReconciler(),
+        projector=control_ui.VariableProjector(),
+    )
+
+    async def in_event_loop(function: Any, /, *args: object, **kwargs: object) -> Any:
+        return function(*args, **kwargs)
+
+    async def observed_worker() -> None:
+        order.append("worker")
+
+    monkeypatch.setattr(asyncio, "to_thread", in_event_loop)
+    monkeypatch.setattr(subject, "_worker", observed_worker)
+
+    await subject.start()
+    await asyncio.sleep(0)
+    await subject.shutdown()
+
+    assert order[:3] == ["source-population", "linked-ground-truth", "worker"]
+    assert subject._researchers == (source,)
+    assert subject._ground_truth == {source.namekey: ground_truth}
 
 
 @pytest.mark.anyio
@@ -372,6 +487,23 @@ async def test_queue_is_persisted_only_in_nicegui_general_storage() -> None:
     assert backend_database.pull_calls == 0
 
 
+@pytest.mark.anyio
+async def test_queued_cancellation_removes_persisted_queue_without_starting_processes() -> None:
+    backend = FakeBackend()
+    codex = FakeCodex()
+    subject = controller(backend=backend, codex=codex)
+    source = researcher()
+    subject._researchers_by_namekey = {source.namekey: source}
+    run_id = await subject.queue(namekey=source.namekey)
+
+    await subject.cancel(run_id=run_id)
+
+    assert app.storage.general[control_ui.QUEUE_STORAGE_KEY] == []
+    assert subject._runs[run_id].status is control_ui.RunStatus.CANCELED
+    assert backend.started_namekeys == []
+    assert codex.order == []
+
+
 def test_dashboard_queue_and_journal_survive_controller_reconstruction() -> None:
     run_id = uuid4()
     event = control_ui.RunEvent(
@@ -442,6 +574,224 @@ async def test_execution_starts_fresh_backend_before_codex_and_hands_off_session
     ]
     assert subject._runs[run_id].codex_exit_code == 0
     assert subject._runs[run_id].status is control_ui.RunStatus.COMPLETE
+
+
+@pytest.mark.anyio
+async def test_worker_stops_backend_before_starting_next_queued_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    order: list[str] = []
+    backend = FakeBackend(order)
+    codex = FakeCodex(order)
+    subject = controller(backend=backend, codex=codex)
+    first = researcher()
+    second = researcher(SECOND_NAMEKEY)
+    subject._researchers_by_namekey = {
+        first.namekey: first,
+        second.namekey: second,
+    }
+
+    async def complete_run(
+        _subject: control_ui.ControlCentreController,
+        *,
+        run_id: UUID,
+        codex_exit_code: int,
+    ) -> control_ui.RunStatus:
+        assert run_id in subject._runs
+        assert codex_exit_code == 0
+        return control_ui.RunStatus.COMPLETE
+
+    monkeypatch.setattr(control_ui.ControlCentreController, "_finalize_run", complete_run)
+    first_run_id = await subject.queue(namekey=first.namekey)
+    second_run_id = await subject.queue(namekey=second.namekey)
+
+    assert await subject._queue.get() == first_run_id
+    await subject._process_queued_run(first_run_id)
+    assert await subject._queue.get() == second_run_id
+    await subject._process_queued_run(second_run_id)
+
+    assert backend.started_namekeys == [first.namekey, second.namekey]
+    assert order == [
+        "backend-start",
+        "codex-start",
+        "backend-session",
+        "codex-wait",
+        "backend-stop",
+        "backend-start",
+        "codex-start",
+        "backend-session",
+        "codex-wait",
+        "backend-stop",
+    ]
+
+
+@pytest.mark.anyio
+async def test_backend_start_failure_still_winds_down_owned_processes() -> None:
+    order: list[str] = []
+
+    class FailingBackend(FakeBackend):
+        async def start(self, *, namekey: control_ui.Namekey) -> None:
+            self.order.append("backend-start")
+            self.started_namekeys.append(namekey)
+            raise RuntimeError("backend start failed")
+
+    backend = FailingBackend(order)
+    subject = controller(backend=backend, codex=FakeCodex(order))
+    source = researcher()
+    subject._researchers_by_namekey = {source.namekey: source}
+    run_id = await subject.queue(namekey=source.namekey)
+
+    assert await subject._queue.get() == run_id
+    await subject._process_queued_run(run_id)
+
+    assert subject._runs[run_id].status is control_ui.RunStatus.FAILED
+    assert order == ["backend-start", "backend-stop"]
+
+
+@pytest.mark.anyio
+async def test_codex_start_failure_stops_registered_codex_then_backend() -> None:
+    order: list[str] = []
+
+    class FailingCodex(FakeCodex):
+        async def start(
+            self,
+            *,
+            run_id: UUID,
+            on_handle: Any = None,
+        ) -> SimpleNamespace:
+            self.order.append("codex-start")
+            handle = SimpleNamespace(
+                run_id=run_id,
+                remote_pid=None,
+                process=SimpleNamespace(returncode=None),
+            )
+            assert on_handle is not None
+            await on_handle(handle)
+            raise RuntimeError("Codex start failed")
+
+    backend = FakeBackend(order)
+    subject = controller(backend=backend, codex=FailingCodex(order))
+    source = researcher()
+    subject._researchers_by_namekey = {source.namekey: source}
+    run_id = await subject.queue(namekey=source.namekey)
+
+    assert await subject._queue.get() == run_id
+    await subject._process_queued_run(run_id)
+
+    assert subject._runs[run_id].status is control_ui.RunStatus.FAILED
+    assert order == [
+        "backend-start",
+        "codex-start",
+        "codex-cancel",
+        "backend-stop",
+    ]
+
+
+@pytest.mark.anyio
+async def test_failed_finalization_stops_backend_after_terminal_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    order: list[str] = []
+    backend = FakeBackend(order)
+    subject = controller(backend=backend, codex=FakeCodex(order))
+    source = researcher()
+    subject._researchers_by_namekey = {source.namekey: source}
+
+    async def fail_run(
+        _subject: control_ui.ControlCentreController,
+        *,
+        run_id: UUID,
+        codex_exit_code: int,
+    ) -> control_ui.RunStatus:
+        assert run_id in subject._runs
+        assert codex_exit_code == 0
+        assert backend.status is control_ui.BackendStatus.RUNNING
+        return control_ui.RunStatus.FAILED
+
+    monkeypatch.setattr(control_ui.ControlCentreController, "_finalize_run", fail_run)
+    run_id = await subject.queue(namekey=source.namekey)
+
+    assert await subject._queue.get() == run_id
+    await subject._process_queued_run(run_id)
+
+    assert subject._runs[run_id].status is control_ui.RunStatus.FAILED
+    assert [event.kind for event in subject._events][-2:] == [
+        control_ui.RunEventKind.CODEX_EXITED,
+        control_ui.RunEventKind.FAILED,
+    ]
+    assert order[-1] == "backend-stop"
+
+
+@pytest.mark.anyio
+async def test_active_cancellation_stops_codex_then_backend() -> None:
+    order: list[str] = []
+    codex_waiting = asyncio.Event()
+    codex_stopped = asyncio.Event()
+    backend_stopped = asyncio.Event()
+
+    class BlockingCodex(FakeCodex):
+        async def wait(self, handle: object) -> int:
+            self.order.append("codex-wait")
+            codex_waiting.set()
+            await codex_stopped.wait()
+            return cast(int, cast(Any, handle).process.returncode)
+
+        async def cancel(self, handle: object) -> None:
+            await super().cancel(handle)
+            codex_stopped.set()
+
+    class ObservedBackend(FakeBackend):
+        async def stop(self) -> None:
+            await super().stop()
+            backend_stopped.set()
+
+    backend = ObservedBackend(order)
+    subject = controller(backend=backend, codex=BlockingCodex(order))
+    source = researcher()
+    subject._researchers_by_namekey = {source.namekey: source}
+    run_id = await subject.queue(namekey=source.namekey)
+    worker = asyncio.create_task(subject._worker())
+    try:
+        await asyncio.wait_for(codex_waiting.wait(), timeout=1)
+        await subject.cancel(run_id=run_id)
+        await asyncio.wait_for(backend_stopped.wait(), timeout=1)
+        await asyncio.wait_for(subject._queue.join(), timeout=1)
+    finally:
+        subject._shutting_down = True
+        worker.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await worker
+
+    assert subject._runs[run_id].status is control_ui.RunStatus.CANCELED
+    assert order[-2:] == ["codex-cancel", "backend-stop"]
+
+
+@pytest.mark.anyio
+async def test_dashboard_shutdown_stops_inflight_codex_and_backend() -> None:
+    order: list[str] = []
+    codex_waiting = asyncio.Event()
+
+    class BlockingCodex(FakeCodex):
+        async def wait(self, _handle: object) -> int:
+            self.order.append("codex-wait")
+            codex_waiting.set()
+            await asyncio.Event().wait()
+            return 0
+
+    backend = FakeBackend(order)
+    subject = controller(backend=backend, codex=BlockingCodex(order))
+    source = researcher()
+    subject._researchers_by_namekey = {source.namekey: source}
+    run_id = await subject.queue(namekey=source.namekey)
+    subject._worker_task = asyncio.create_task(subject._worker())
+
+    await asyncio.wait_for(codex_waiting.wait(), timeout=1)
+    await subject.shutdown()
+
+    assert subject._runs[run_id].status is control_ui.RunStatus.FAILED
+    assert order.index("codex-cancel") < order.index("backend-stop")
+    assert order[-1] == "backend-stop"
+    assert backend.status is control_ui.BackendStatus.STOPPED
 
 
 @pytest.mark.anyio
@@ -610,7 +960,7 @@ class FakeProcess:
 
 
 @pytest.mark.anyio
-async def test_backend_supervisor_replaces_process_per_namekey_and_uses_stdin(
+async def test_backend_supervisor_refuses_replacement_and_uses_stdin(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -637,6 +987,12 @@ async def test_backend_supervisor_replaces_process_per_namekey_and_uses_stdin(
     await subject.start(namekey=NAMEKEY)
     first_process = calls[0][2]
     await subject.supply_session_id(SESSION_ID)
+    with pytest.raises(RuntimeError, match=control_ui.Locale.BACKEND_ALREADY_OWNED):
+        await subject.start(namekey=SECOND_NAMEKEY)
+
+    assert len(calls) == 1
+    assert first_process.returncode is None
+    await subject.stop()
     await subject.start(namekey=SECOND_NAMEKEY)
 
     assert len(calls) == 2
@@ -735,9 +1091,6 @@ async def test_codex_runner_starts_fresh_exec_process_and_sends_only_openapi_url
         processes.append(process)
         return process
 
-    async def write_remote_file(_path: PurePosixPath, _content: bytes) -> None:
-        return None
-
     async def remote_command(
         _command: str,
         *,
@@ -765,9 +1118,7 @@ async def test_codex_runner_starts_fresh_exec_process_and_sends_only_openapi_url
     monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
     runner = control_ui.CodexRunner(
         timezone=ZoneInfo("UTC"),
-        openalex_api_key="key",
     )
-    monkeypatch.setattr(runner, "_write_remote_file", write_remote_file)
     monkeypatch.setattr(runner, "_remote_command", remote_command)
     monkeypatch.setattr(runner, "discover_session", discover_session)
     monkeypatch.setattr(runner, "discover_rollout_path", discover_rollout_path)
@@ -777,10 +1128,44 @@ async def test_codex_runner_starts_fresh_exec_process_and_sends_only_openapi_url
 
     assert len(process_calls) == 2
     assert all("resume" not in " ".join(map(str, call)) for call in process_calls)
+    assert all(str(control_ui.CODEX_ENV_PATH) in str(call[-1]) for call in process_calls)
+    assert all("key" not in str(call[-1]) for call in process_calls)
     assert [process.stdin.writes for process in processes] == [
         [f"{control_ui.BACKEND_OPENAPI_URL}\n".encode()],
         [f"{control_ui.BACKEND_OPENAPI_URL}\n".encode()],
     ]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("remote_output", "expected"),
+    ((b"busy", True), (b"", False)),
+)
+async def test_codex_busy_probe_covers_every_runtime_account_codex_process(
+    monkeypatch: pytest.MonkeyPatch,
+    remote_output: bytes,
+    expected: bool,
+) -> None:
+    commands: list[str] = []
+    runner = control_ui.CodexRunner(timezone=ZoneInfo("UTC"))
+
+    async def remote_command(
+        command: str,
+        *,
+        input_bytes: bytes | None = None,
+        check: bool = True,
+    ) -> bytes:
+        assert input_bytes is None
+        assert check is True
+        commands.append(command)
+        return remote_output
+
+    monkeypatch.setattr(runner, "_remote_command", remote_command)
+
+    assert await runner.is_busy() is expected
+    assert commands == [control_ui.CODEX_REMOTE_BUSY_COMMAND]
+    assert 'pgrep -u "$(id -u)" -x codex' in commands[0]
+    assert "codex exec" not in commands[0]
 
 
 @pytest.mark.anyio
@@ -793,7 +1178,6 @@ async def test_codex_cancel_logs_recorded_remote_and_local_processes(
     process = FakeProcess()
     runner = control_ui.CodexRunner(
         timezone=ZoneInfo("UTC"),
-        openalex_api_key="key",
     )
 
     async def terminate_remote_pid(value: control_ui.RemotePid) -> None:
