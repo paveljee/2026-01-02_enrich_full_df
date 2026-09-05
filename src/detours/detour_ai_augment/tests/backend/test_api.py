@@ -925,6 +925,17 @@ def runtime_for_test(
         fragment_type=api.FragmentType.LINE_NUMBER,
         url=replay_log_path.as_uri(),
     )
+    source_researcher: api.SourceResearcher | None = None
+    if namekey is not None:
+        source_connection = duckdb.connect(str(pipeline.db_file), read_only=True)
+        try:
+            source_researcher = api.load_source_researcher(
+                source_connection,
+                {TEST_NAMEKEY: api.GROUND_TRUTH_COHORT},
+                namekey=namekey,
+            )
+        finally:
+            source_connection.close()
     return api.AiAugmentBackendContext(
         pipeline=pipeline,
         detour_db_path=tmp_path / "detour_ai_augment.duckdb",
@@ -932,6 +943,7 @@ def runtime_for_test(
         rollout_cas_dir=rollout_cas_dir,
         namekey=namekey,
         eligible_cohorts={TEST_NAMEKEY: api.GROUND_TRUTH_COHORT},
+        source_researcher=source_researcher,
     )
 
 
@@ -3808,6 +3820,86 @@ def test_backend_singleton_lock_is_independent_of_replay_log(
     assert api.BACKEND_PROCESS_LOCK_DESCRIPTOR is None
 
 
+def test_backend_startup_prepares_source_rows_for_initial_pull(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    backend_test_paths: BackendTestPaths,
+) -> None:
+    base_runtime = runtime_for_test(tmp_path, backend_test_paths)
+    row = source_population_row("A.", "Sheikh")
+    source_researcher = api.SourceResearcher(
+        namekey=TEST_NAMEKEY,
+        first_name="A.",
+        last_name="Sheikh",
+        draw_numbers=("146",),
+        xlsx_rows=({api.KTP_NAMEKEY_COL: TEST_NAMEKEY, api.DRAW_LABEL: "146"},),
+        docx_rows=(),
+        ssn_rows=(),
+        cohort=api.GROUND_TRUTH_COHORT,
+    )
+    closed = False
+
+    class SourceConnection:
+        def close(self) -> None:
+            nonlocal closed
+            closed = True
+
+    source_connection = SourceConnection()
+
+    def connect(path: str, *, read_only: bool) -> SourceConnection:
+        assert path == str(base_runtime.pipeline.db_file)
+        assert read_only is True
+        return source_connection
+
+    def load_prepared_source(
+        connection: object,
+        cohorts: Mapping[str, str] | None,
+        *,
+        namekey: str,
+    ) -> api.SourceResearcher:
+        assert connection is source_connection
+        assert cohorts == {TEST_NAMEKEY: api.GROUND_TRUTH_COHORT}
+        assert namekey == TEST_NAMEKEY
+        return source_researcher
+
+    monkeypatch.setenv(api.NAMEKEY_ENV_NAME, TEST_NAMEKEY)
+    monkeypatch.setattr(
+        api.AiAugmentDetourConfig,
+        "from_json",
+        lambda _path: base_runtime.pipeline,
+    )
+    monkeypatch.setattr(api, "registered_replay_log", lambda _pipeline: base_runtime.replay_log)
+    monkeypatch.setattr(api, "registered_release_map", lambda _pipeline: base_runtime.replay_log)
+    monkeypatch.setattr(api, "load_release_batches", lambda _resource: {})
+    monkeypatch.setattr(api.duckdb, "connect", connect)
+    monkeypatch.setattr(api, "derive_source_population", lambda *_args, **_kwargs: (row,))
+    monkeypatch.setattr(api, "load_source_researcher", load_prepared_source)
+
+    runtime = api.configure_runtime(backend_test_paths.ai_augment_config)
+
+    assert closed is True
+    assert runtime.source_researcher is source_researcher
+
+    def unexpected_source_reopen(_runtime: api.AiAugmentBackendContext) -> None:
+        pytest.fail("initial pull must consume source rows prepared at Backend startup")
+
+    monkeypatch.setattr(api, "runtime_configuration", lambda: runtime)
+    monkeypatch.setattr(api, "open_source_database", unexpected_source_reopen)
+    monkeypatch.setattr(
+        api,
+        "StreamingResponse",
+        lambda content, *, media_type: api.Response(
+            content="".join(content),
+            media_type=media_type,
+        ),
+    )
+    monkeypatch.setattr(api, "BACKEND_WORKFLOW_STATUS", api.BackendWorkflowStatus.READY)
+    response = api.authoritative_pull()
+
+    assert response.status_code == api.status.HTTP_200_OK
+    assert response.body == "".join(api.configured_pull_lines(source_researcher)).encode()
+
+
 def test_configured_namekey_population_accepts_exact_eligible_match() -> None:
     row = source_population_row("Gaoquan ", "Shi")
 
@@ -4129,7 +4221,7 @@ def test_accepted_push_is_committed_only_after_its_public_record(
             api.ATTEMPT_RESULT_ACCEPTED,
             api.ATTEMPT_STAGE_ACCEPTED,
             410,
-            api.MEDIA_TYPE,
+            api.MEDIA_TYPE_WITH_CHARSET,
         ),
         (
             api.ATTEMPT_RESULT_REJECTED,

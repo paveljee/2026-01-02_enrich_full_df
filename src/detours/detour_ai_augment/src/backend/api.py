@@ -703,6 +703,7 @@ CARD_EXCLUDED_COLUMNS = {
 CARD_ZIP_PREFIX = "ai_augment_cards"
 
 MEDIA_TYPE = "application/x-ndjson"
+MEDIA_TYPE_WITH_CHARSET = f"{MEDIA_TYPE}; charset=utf-8"
 
 
 @asynccontextmanager
@@ -1796,6 +1797,15 @@ def configure_runtime(config_path: Path) -> AiAugmentBackendContext:
             sample_seed=pipeline.sample_seed,
         )
         cohorts = eligible_cohorts(source_population)
+        _validate_configured_namekey_population(configured_namekey, source_population)
+        try:
+            source_researcher = load_source_researcher(
+                source_conn,
+                cohorts,
+                namekey=configured_namekey,
+            )
+        except PushValidationError as exc:
+            raise PushConfigurationError(str(exc)) from exc
     except duckdb.Error as exc:
         raise PushConfigurationError(Locale.SOURCE_DUCKDB_VALIDATION_FAILED) from exc
     finally:
@@ -1805,7 +1815,6 @@ def configure_runtime(config_path: Path) -> AiAugmentBackendContext:
     detour_db_path = _detour_db_path(pipeline.db_file)
     if detour_db_path == pipeline.db_file:
         raise PushConfigurationError(Locale.DETOUR_DB_EQUALS_SOURCE)
-    _validate_configured_namekey_population(configured_namekey, source_population)
     RUNTIME_CONFIGURATION = AiAugmentBackendContext(
         pipeline=pipeline,
         detour_db_path=detour_db_path,
@@ -1815,6 +1824,7 @@ def configure_runtime(config_path: Path) -> AiAugmentBackendContext:
         release_map=release_map,
         source_population=source_population,
         eligible_cohorts=cohorts,
+        source_researcher=source_researcher,
     )
     return RUNTIME_CONFIGURATION
 
@@ -4535,7 +4545,7 @@ def _outcome_from_execution(
     if execution.result == ATTEMPT_RESULT_ACCEPTED:
         response_code = status.HTTP_410_GONE
         response_headers = {
-            HTTP_REQUEST_LOG_RESPONSE_CONTENT_TYPE_HEADER: MEDIA_TYPE,
+            HTTP_REQUEST_LOG_RESPONSE_CONTENT_TYPE_HEADER: MEDIA_TYPE_WITH_CHARSET,
         }
         response_body = execution.response_body
     elif execution.result == ATTEMPT_RESULT_REJECTED and execution.stage in {
@@ -5924,17 +5934,11 @@ def authoritative_pull() -> Response:
     try:
         if runtime.namekey is None:
             raise PushConfigurationError(Locale.PUSH_LINKAGE_MISSING)
-        source_conn = open_source_database(runtime)
-        try:
-            researcher = load_source_researcher(
-                source_conn,
-                runtime.eligible_cohorts,
-                namekey=runtime.namekey,
-            )
-            lines = tuple(configured_pull_lines(researcher))
-        finally:
-            source_conn.close()
-        return StreamingResponse(iter(lines), media_type=MEDIA_TYPE)
+        researcher = runtime.source_researcher
+        if researcher is None:
+            raise PushConfigurationError(Locale.PUSH_LINKAGE_MISSING)
+        lines = tuple(configured_pull_lines(researcher))
+        return StreamingResponse(iter(lines), media_type=MEDIA_TYPE_WITH_CHARSET)
     except (PushConfigurationError, PushValidationError, OSError, duckdb.Error) as exc:
         logger.error(Locale.PULL_FAILED_LOG, exc)
         raise HTTPException(

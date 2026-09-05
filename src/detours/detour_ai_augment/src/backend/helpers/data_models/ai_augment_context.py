@@ -9,6 +9,7 @@ from src.helpers.resources import (
 from .ai_augment_config import AiAugmentDetourConfig
 from .source_population import (
     SourcePopulationRow,
+    SourceResearcher,
 )
 
 
@@ -22,3 +23,4 @@ class AiAugmentBackendContext:
     release_map: RegisteredResource | None = None
     source_population: tuple[SourcePopulationRow, ...] = ()
     eligible_cohorts: Mapping[str, str] | None = None
+    source_researcher: SourceResearcher | None = None
