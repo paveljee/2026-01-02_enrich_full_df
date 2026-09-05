@@ -1064,7 +1064,7 @@ def _permission_test_tree() -> tuple[Path, Path, Path, int, int]:
 
 
 @pytest.mark.needs_sudo
-def test_cli_static_eacces_is_scoped_and_recovered_files_fail_closed(
+def assert_static_eacces_is_scoped_and_recovered_files_fail_closed(
     running_watchers: list[RunningWatcher],
 ) -> None:
     base, root, report, uid, gid = _permission_test_tree()
@@ -1099,6 +1099,13 @@ def test_cli_static_eacces_is_scoped_and_recovered_files_fail_closed(
         assert "COMPROMISED appeared.log" in text
     finally:
         shutil.rmtree(base, ignore_errors=True)
+
+
+@pytest.mark.needs_sudo
+def test_cli_static_eacces_is_scoped_and_recovered_files_fail_closed(
+    running_watchers: list[RunningWatcher],
+) -> None:
+    assert_static_eacces_is_scoped_and_recovered_files_fail_closed(running_watchers)
 
 
 @pytest.mark.needs_sudo

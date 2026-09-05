@@ -868,8 +868,7 @@ def test_complete_dashboard_backend_codex_commit_and_replay_workflow(
     validate_workflow_artifacts(operator_runtime, checkpoint.records)
 
 
-@pytest.mark.requires_codex_auth
-def test_completed_dashboard_backend_codex_workflow_renders_researcher_card(
+def assert_completed_dashboard_backend_codex_workflow_renders_researcher_card(
     operator_runtime: OperatorRuntime,
 ) -> None:
     _assert_deployed_appendwatch_topology(operator_runtime)
@@ -894,4 +893,13 @@ def test_completed_dashboard_backend_codex_workflow_renders_researcher_card(
     _operator_log(
         "full end-to-end execution elapsed time from queue submission through "
         f"final Playwright verification: {elapsed_seconds:.3f}s"
+    )
+
+
+@pytest.mark.requires_codex_auth
+def test_completed_dashboard_backend_codex_workflow_renders_researcher_card(
+    operator_runtime: OperatorRuntime,
+) -> None:
+    assert_completed_dashboard_backend_codex_workflow_renders_researcher_card(
+        operator_runtime
     )

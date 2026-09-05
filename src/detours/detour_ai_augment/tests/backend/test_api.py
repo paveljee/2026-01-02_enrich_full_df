@@ -1285,7 +1285,7 @@ async def authoritative_api_exchange(
     return cast(int, response_start[api.ASGI_STATUS_KEY]), response_body
 
 
-def test_captured_operator_push_generates_commit_and_exact_terminal_410(
+def assert_captured_operator_push_contour(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     backend_test_paths: BackendTestPaths,
@@ -1515,6 +1515,20 @@ def test_captured_operator_push_generates_commit_and_exact_terminal_410(
     finally:
         api.close_backend_detour_database()
         api._release_authoritative_process_lock()
+
+
+def test_captured_operator_push_generates_commit_and_exact_terminal_410(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    backend_test_paths: BackendTestPaths,
+    detour_root: Path,
+) -> None:
+    assert_captured_operator_push_contour(
+        tmp_path,
+        monkeypatch,
+        backend_test_paths,
+        detour_root,
+    )
 
 
 def test_pure_asgi_middleware_records_every_public_exchange_before_send(

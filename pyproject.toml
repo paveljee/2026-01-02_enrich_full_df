@@ -452,6 +452,42 @@ print(dotenv_values(env_path).get("OPENALEX_API_KEY", ""), end="")
 ')" "$CONDA_PREFIX/bin/python" -m pytest -vv -srA --capture=tee-sys -m operator \
   src/detours/detour_ai_augment/tests/operator/test_operator_e2e.py
 """
+test-detour-ai-augment-bdd-hermetic = """
+"$CONDA_PREFIX/bin/python" -m pytest -vv -srA \
+  -m "not needs_sudo and not operator" \
+  src/detours/detour_ai_augment/tests/test_detour_ai_augment_bdd.py
+"""
+test-detour-ai-augment-bdd-root = """
+sudo env \
+  APPENDWATCH_SCRIPT="$PIXI_PROJECT_ROOT/src/detours/detour_ai_augment/src/control_centre/appendwatch/appendwatch.py" \
+  APPENDWATCH_PYTHON="/usr/bin/python3" \
+  PATH="$CONDA_PREFIX/bin:$PATH" \
+  "$CONDA_PREFIX/bin/python" -m pytest -vv -srA -m needs_sudo \
+  src/detours/detour_ai_augment/tests/test_detour_ai_augment_bdd.py
+"""
+test-detour-ai-augment-bdd-operator = """
+FASTAPI_DETOUR_AIVM_IDENTITY_FILE="$HOME/.local/share/aivm/.ssh/id_ed25519" \
+OPENALEX_API_KEY="$(python -c '
+import os
+from dotenv import dotenv_values
+
+env_path = os.path.join(os.getenv("PIXI_PROJECT_ROOT"), ".env")
+print(dotenv_values(env_path).get("OPENALEX_API_KEY", ""), end="")
+')" "$CONDA_PREFIX/bin/python" -m pytest -vv -srA --capture=tee-sys -m operator \
+  src/detours/detour_ai_augment/tests/test_detour_ai_augment_bdd.py
+"""
+test-detour-ai-augment-bdd = """
+bash -c '
+set -e
+limactl shell aicode -- bash -c '"'"'
+  set -e
+  export PATH="$HOME/.pixi/bin:$PATH"
+  pixi run -e detour-ai-augment test-detour-ai-augment-bdd-hermetic
+  pixi run -e detour-ai-augment test-detour-ai-augment-bdd-root
+'"'"'
+pixi run -e detour-ai-augment test-detour-ai-augment-bdd-operator
+'
+"""
 
 [tool.pixi.feature.detour-ai-augment.tasks.duckdb-export]
 args = [
