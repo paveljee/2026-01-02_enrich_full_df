@@ -190,6 +190,9 @@ APPENDWATCH_REPORT = os.environ.get(APPENDWATCH_REPORT_ENV_NAME, "")
 DEFAULT_DASHBOARD_SOCKET_PATH = (
     Path(tempfile.gettempdir()) / f"ktp-hcr-detour-ai-augment-{os.getuid()}.sock"
 )
+BACKEND_PROCESS_LOCK_PATH = (
+    Path(tempfile.gettempdir()) / "ktp-hcr-detour-ai-augment-backend.lock"
+)
 DASHBOARD_SOCKET_PATH = Path(
     os.environ.get(DASHBOARD_SOCKET_PATH_ENV_NAME, DEFAULT_DASHBOARD_SOCKET_PATH)
 ).expanduser()
@@ -497,6 +500,7 @@ DETOUR_DB_CONNECTION: duckdb.DuckDBPyConnection | None = None
 DETOUR_DB_CONNECTION_PATH: Path | None = None
 AUTHORITATIVE_APPEND_LOCK = threading.Lock()
 AUTHORITATIVE_BACKEND_HEALTHY = True
+BACKEND_PROCESS_LOCK_DESCRIPTOR: int | None = None
 AUTHORITATIVE_LOG_DESCRIPTOR: int | None = None
 AUTHORITATIVE_NEXT_LINE_NUMBER = 1
 AUTHORITATIVE_LOG_OFFSET = 0
@@ -705,6 +709,7 @@ MEDIA_TYPE = "application/x-ndjson"
 async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     dashboard_query_server: object | None = None
     parent_watch: asyncio.Task[None] | None = None
+    acquired_backend_process_lock = False
     try:
         runtime = runtime_configuration()
         with BACKEND_WORKFLOW_STATE_LOCK:
@@ -718,8 +723,11 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
             BACKEND_SESSION_ID = None
             BACKEND_WORKFLOW_OUTCOME = None
             BACKEND_WORKFLOW_STATUS = BackendWorkflowStatus.READY
-        prove_workflow_inputs_readable()
+        if BACKEND_PROCESS_LOCK_DESCRIPTOR is None:
+            _acquire_backend_process_lock()
+            acquired_backend_process_lock = True
         _acquire_authoritative_process_lock(runtime)
+        prove_workflow_inputs_readable()
         synchronize_authoritative_projection(runtime)
         dashboard_query_server = start_dashboard_query_server()
         start_backend_session_reader()
@@ -734,6 +742,8 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
             stop_dashboard_query_server(dashboard_query_server)
         close_backend_detour_database()
         _release_authoritative_process_lock()
+        if acquired_backend_process_lock:
+            _release_backend_process_lock()
         raise
     try:
         yield
@@ -751,6 +761,8 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
             stop_dashboard_query_server(dashboard_query_server)
         close_backend_detour_database()
         _release_authoritative_process_lock()
+        if acquired_backend_process_lock:
+            _release_backend_process_lock()
 
 
 async def _watch_control_parent(parent_pid: int) -> None:
@@ -3924,6 +3936,41 @@ def close_backend_detour_database() -> None:
             connection.close()
 
 
+def _acquire_backend_process_lock() -> None:
+    global BACKEND_PROCESS_LOCK_DESCRIPTOR
+
+    if BACKEND_PROCESS_LOCK_DESCRIPTOR is not None:
+        raise PushConfigurationError(Locale.BACKEND_ALREADY_RUNNING)
+    flags = (
+        os.O_CREAT
+        | os.O_RDWR
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(BACKEND_PROCESS_LOCK_PATH, flags, 0o600)
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        if descriptor is not None:
+            os.close(descriptor)
+        raise PushConfigurationError(Locale.BACKEND_ALREADY_RUNNING) from exc
+    BACKEND_PROCESS_LOCK_DESCRIPTOR = descriptor
+
+
+def _release_backend_process_lock() -> None:
+    global BACKEND_PROCESS_LOCK_DESCRIPTOR
+
+    descriptor = BACKEND_PROCESS_LOCK_DESCRIPTOR
+    BACKEND_PROCESS_LOCK_DESCRIPTOR = None
+    if descriptor is None:
+        return
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+    finally:
+        os.close(descriptor)
+
+
 def _acquire_authoritative_process_lock(runtime: AiAugmentBackendContext) -> None:
     global AUTHORITATIVE_LOG_DESCRIPTOR
 
@@ -5945,8 +5992,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
-    configure_runtime(args.config)
-    uvicorn.run(app, host=SERVER_HOST, port=SERVER_PORT)
+    _acquire_backend_process_lock()
+    try:
+        configure_runtime(args.config)
+        uvicorn.run(app, host=SERVER_HOST, port=SERVER_PORT)
+    finally:
+        _release_backend_process_lock()
 
 
 if __name__ == "__main__":

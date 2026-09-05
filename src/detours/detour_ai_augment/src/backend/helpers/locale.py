@@ -376,6 +376,7 @@ class Locale:
     REPLAY_LOG_ALREADY_LOCKED: Final = (
         "another backend process already owns the authoritative replay log"
     )
+    BACKEND_ALREADY_RUNNING: Final = "another Backend API process is already running"
     REPLAY_LOG_LINE_INVALID_TEMPLATE: Final = (
         "authoritative replay log line {line_number} is invalid"
     )

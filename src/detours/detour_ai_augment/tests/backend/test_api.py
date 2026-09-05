@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import subprocess
+import sys
 from collections.abc import AsyncIterator, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
@@ -215,10 +217,16 @@ def backend_test_paths(
 
 
 @pytest.fixture(autouse=True)
-def isolated_backend_detour_connection() -> Iterator[None]:
+def isolated_backend_detour_connection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[None]:
+    monkeypatch.setattr(api, "BACKEND_PROCESS_LOCK_PATH", tmp_path / "backend.lock")
+    api._release_backend_process_lock()
     api.close_backend_detour_database()
     yield
     api.close_backend_detour_database()
+    api._release_backend_process_lock()
 
 
 OFFICERS_URL = (
@@ -3758,6 +3766,46 @@ def source_population_row(
         cohort=cohort,
         ineligibility_category=ineligibility_category,
     )
+
+
+def test_backend_singleton_lock_is_independent_of_replay_log(
+    tmp_path: Path,
+) -> None:
+    lock_path = api.BACKEND_PROCESS_LOCK_PATH
+    holder = subprocess.Popen(
+        (
+            sys.executable,
+            "-c",
+            (
+                "import fcntl, os, sys; "
+                "descriptor = os.open(sys.argv[1], os.O_CREAT | os.O_RDWR, 0o600); "
+                "fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB); "
+                "print('locked', flush=True); sys.stdin.read(1)"
+            ),
+            str(lock_path),
+        ),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    assert holder.stdout is not None
+    assert holder.stdout.readline().strip() == "locked"
+    try:
+        with pytest.raises(
+            api.PushConfigurationError,
+            match=api.Locale.BACKEND_ALREADY_RUNNING,
+        ):
+            api._acquire_backend_process_lock()
+    finally:
+        assert holder.stdin is not None
+        holder.stdin.write("\n")
+        holder.stdin.flush()
+        holder.wait(timeout=5)
+
+    api._acquire_backend_process_lock()
+    assert api.BACKEND_PROCESS_LOCK_DESCRIPTOR is not None
+    api._release_backend_process_lock()
+    assert api.BACKEND_PROCESS_LOCK_DESCRIPTOR is None
 
 
 def test_configured_namekey_population_accepts_exact_eligible_match() -> None:
