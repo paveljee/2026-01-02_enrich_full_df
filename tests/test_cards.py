@@ -7,7 +7,12 @@ from zipfile import ZipFile
 import pytest
 
 from src.helpers import cards as cards_module
-from src.helpers.cards import build_cards, write_cards_zip
+from src.helpers.cards import (
+    build_cards,
+    card_filename,
+    render_docx_bytes,
+    write_cards_zip,
+)
 from src.helpers.data_models import InnerDict, NameKey, OuterDict
 from src.helpers.vars import (
     DRAW_LABEL,
@@ -29,6 +34,46 @@ ROUNDTRIP_CARD_NAME = "1_Ada_Lovelace"
 
 class DummyProcedure:
     dataset_id_field = "ktp.source_key"
+
+
+def test_card_filename_matches_card_archive_member_stem() -> None:
+    assert (
+        card_filename(
+            draw_label="1, pilot.2",
+            first_name="Ada",
+            last_name="Lovelace-Smith",
+        )
+        == "1_pilot2_Ada_LovelaceSmith"
+    )
+
+
+def test_render_docx_bytes_uses_exact_markdown_and_cleans_temporary_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    markdown = "## Exact card\n\nLine with _underscores_ and UTF-8: naïve\n"
+    expected_docx = b"PK\x03\x04canonical-docx"
+    reference_docx = tmp_path / "reference.docx"
+    reference_docx.write_bytes(b"reference")
+    temporary_paths: tuple[Path, Path] | None = None
+
+    def render_docx(
+        md_path: Path,
+        docx_path: Path,
+        supplied_reference_docx: Path,
+    ) -> Path:
+        nonlocal temporary_paths
+        temporary_paths = (md_path, docx_path)
+        assert md_path.read_bytes() == markdown.encode("utf-8")
+        assert supplied_reference_docx == reference_docx
+        docx_path.write_bytes(expected_docx)
+        return docx_path
+
+    monkeypatch.setattr(cards_module, "_render_docx", render_docx)
+
+    assert render_docx_bytes(markdown, reference_docx) == expected_docx
+    assert temporary_paths is not None
+    assert all(not path.exists() for path in temporary_paths)
 
 
 def test_build_cards_includes_intro_and_fun_fact() -> None:

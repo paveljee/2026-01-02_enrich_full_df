@@ -30,6 +30,24 @@ def _markdown_literal(value: str) -> str:
     return f"{MARKDOWN_CODE_DELIMITER}{value}{MARKDOWN_CODE_DELIMITER}"
 
 
+def card_filename(
+    *,
+    draw_label: str,
+    first_name: str,
+    last_name: str,
+) -> str:
+    minified_card = (
+        f"{draw_label}: {first_name} {last_name}"
+        if draw_label
+        else f"{first_name} {last_name}"
+    )
+    return re.sub(
+        r"\s+",
+        "_",
+        re.sub(r"[^A-Za-z0-9\s]+", "", minified_card),
+    ).strip("_")
+
+
 def build_cards(
     outer_dict: OuterDict,
     *,
@@ -71,16 +89,11 @@ def build_cards(
                 break
         card = header + (fun_fact + "\n" if fun_fact else "")
 
-        minified_card = (
-            f"{draw_label}: {name_key.first_name} {name_key.last_name}"
-            if draw_label
-            else f"{name_key.first_name} {name_key.last_name}"
+        docx_filename = card_filename(
+            draw_label=draw_label,
+            first_name=name_key.first_name,
+            last_name=name_key.last_name,
         )
-        docx_filename = re.sub(
-            r"\s+",
-            "_",
-            re.sub(r"[^A-Za-z0-9\s]+", "", minified_card),
-        ).strip("_")
 
         for inner in inner_dicts:
             filename = inner.data.get(KTP_FILENAME_COL, "unknown")
@@ -125,6 +138,15 @@ def _render_docx(md_path: Path, docx_path: Path, reference_docx: Path) -> Path:
         check=True,
     )
     return docx_path
+
+
+def render_docx_bytes(markdown: str, reference_docx: Path) -> bytes:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        md_path = Path(tmpdir) / "card.md"
+        docx_path = Path(tmpdir) / "card.docx"
+        md_path.write_text(markdown, encoding="utf-8", newline="\n")
+        _render_docx(md_path, docx_path, reference_docx)
+        return docx_path.read_bytes()
 
 
 def write_cards_zip(

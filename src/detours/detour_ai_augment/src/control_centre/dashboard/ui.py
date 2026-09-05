@@ -9,6 +9,7 @@ import os
 import re
 import shlex
 import socket
+import subprocess
 import sys
 from collections import Counter
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -28,6 +29,7 @@ from fastapi import status
 from nicegui import app, ui
 from pydantic import ValidationError
 
+from src.helpers.cards import card_filename, render_docx_bytes
 from src.helpers.vars import (
     DRAW_LABEL,
     KTP_FIRST_NAME_COL,
@@ -178,6 +180,9 @@ ATTEMPT_HISTORY_TABLE_STYLE: Final = (
 )
 ATTEMPT_HISTORY_TABLE_PROPS: Final = "flat bordered wrap-cells"
 ACTION_BUTTON_STYLE: Final = "min-width: 10rem;"
+DOCX_MEDIA_TYPE: Final = (
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+)
 GRID_DRAW_COLUMN_WIDTH: Final = 110
 GRID_RND_COLUMN_WIDTH: Final = 90
 GRID_NAME_COLUMN_WIDTH: Final = 150
@@ -218,6 +223,8 @@ RESEARCHER_GRID_TEST_ID: Final = "researcher-grid"
 ACTION_PANEL_TEST_ID: Final = "action-panel"
 EXECUTE_ACTION_TEST_ID: Final = "execute-action"
 VIEW_CARD_TEST_ID: Final = "view-researcher-card"
+DOWNLOAD_CARD_TEST_ID: Final = "download-researcher-card"
+CARD_MARKDOWN_TEST_ID: Final = "researcher-card-markdown"
 ATTEMPT_HISTORY_PANEL_TEST_ID: Final = "attempt-history-panel"
 ATTEMPT_HISTORY_TABLE_TEST_ID: Final = "attempt-history-table"
 PAGE_FOOTER_TEST_ID: Final = "page-footer"
@@ -2309,6 +2316,7 @@ class UiHandles:
     attempt_history_table: Any | None = None
     card_container: Any | None = None
     card_markdown: Any | None = None
+    download_card_button: Any | None = None
 
 
 class ControlCentrePage:
@@ -2316,8 +2324,10 @@ class ControlCentrePage:
         self,
         *,
         controller: ControlCentreController,
+        reference_docx: Path,
     ) -> None:
         self._controller = controller
+        self._reference_docx = reference_docx
         self._selection = UiSelection(variable_key=VARIABLE_SPECS[0].key)
         self._handles = UiHandles()
         self._grid_initialized = False
@@ -2326,6 +2336,7 @@ class ControlCentrePage:
         self._row_views_by_namekey: dict[Namekey, ResearcherGridRow] = {}
         self._expanded_history_namekey: Namekey | None = None
         self._card_cache: dict[Namekey, ResearcherCardView] = {}
+        self._displayed_card: ResearcherCardView | None = None
 
     @property
     def selection(self) -> UiSelection:
@@ -2491,7 +2502,22 @@ class ControlCentrePage:
             .props(NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=PAGE_FOOTER_TEST_ID))
         )
         with self._handles.card_container:
-            self._handles.card_markdown = ui.markdown("").style(CARD_MARKDOWN_STYLE)
+            self._handles.download_card_button = (
+                ui
+                .button(
+                    Locale.ACTION_DOWNLOAD_DOCX,
+                    on_click=self.download_displayed_card,
+                )
+                .style(ACTION_BUTTON_STYLE)
+                .props(NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=DOWNLOAD_CARD_TEST_ID))
+            )
+            self._handles.download_card_button.disable()
+            self._handles.card_markdown = (
+                ui
+                .markdown("")
+                .style(CARD_MARKDOWN_STYLE)
+                .props(NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=CARD_MARKDOWN_TEST_ID))
+            )
 
     def grid_column_definitions(
         self,
@@ -2790,6 +2816,55 @@ class ControlCentrePage:
             )
         if self._handles.card_markdown is not None:
             self._handles.card_markdown.set_content(card.markdown)
+        self._displayed_card = card if card.markdown else None
+        if self._handles.download_card_button is not None:
+            if card.markdown:
+                self._handles.download_card_button.enable()
+            else:
+                self._handles.download_card_button.disable()
+
+    def _clear_displayed_card(self) -> None:
+        self._displayed_card = None
+        if self._handles.card_markdown is not None:
+            self._handles.card_markdown.set_content("")
+        if self._handles.download_card_button is not None:
+            self._handles.download_card_button.disable()
+
+    def _invalidate_card(self, namekey: Namekey) -> None:
+        self._card_cache.pop(namekey, None)
+        if self._displayed_card is not None and self._displayed_card.namekey == namekey:
+            self._clear_displayed_card()
+
+    async def download_displayed_card(self) -> None:
+        card = self._displayed_card
+        if card is None or not card.markdown:
+            return
+        button = self._handles.download_card_button
+        if button is not None:
+            button.disable()
+        try:
+            docx = await asyncio.to_thread(
+                render_docx_bytes,
+                card.markdown,
+                self._reference_docx,
+            )
+            ui.download(
+                docx,
+                filename=(
+                    card_filename(
+                        draw_label=card.draw_number,
+                        first_name=card.first_name,
+                        last_name=card.last_name,
+                    )
+                    + ".docx"
+                ),
+                media_type=DOCX_MEDIA_TYPE,
+            )
+        except (OSError, subprocess.SubprocessError):
+            ui.notify(Locale.DOCX_DOWNLOAD_FAILED, type="negative")
+        finally:
+            if button is not None and self._displayed_card is card:
+                button.enable()
 
     def show_attempt_history(
         self,
@@ -2870,7 +2945,10 @@ class ControlCentrePage:
                 self._handles.execute_button.disable()
             if self._handles.view_card_button is not None:
                 self._handles.view_card_button.disable()
+            self._clear_displayed_card()
             return
+        if self._displayed_card is not None and self._displayed_card.namekey != selected_namekey:
+            self._clear_displayed_card()
         run_id_value = selected.get(GRID_RUN_ID_FIELD)
         action = RunAction(str(selected[GRID_ACTION_FIELD]))
         self._selection.selected_run_id = None if run_id_value is None else UUID(str(run_id_value))
@@ -2899,7 +2977,7 @@ class ControlCentrePage:
         self,
         namekey: Namekey,
     ) -> None:
-        self._card_cache.pop(namekey, None)
+        self._invalidate_card(namekey)
         run_id = await self._controller.queue(namekey=namekey)
         self._selection.selected_run_id = run_id
         self._selection.selected_action = RunAction.CANCEL
@@ -2909,7 +2987,7 @@ class ControlCentrePage:
         self,
         namekey: Namekey,
     ) -> None:
-        self._card_cache.pop(namekey, None)
+        self._invalidate_card(namekey)
         run_id = await self._controller.rerun(namekey=namekey)
         self._selection.selected_run_id = run_id
         self._selection.selected_action = RunAction.CANCEL
@@ -3054,7 +3132,11 @@ async def chrome_devtools_probe() -> dict[str, object]:
 
 @ui.page("/")
 async def control_centre_page() -> None:
-    page = ControlCentrePage(controller=require_services().controller)
+    services = require_services()
+    page = ControlCentrePage(
+        controller=services.controller,
+        reference_docx=services.configuration.pipeline_config.pandoc_reference_docx,
+    )
     page.build()
     await page.refresh()
 

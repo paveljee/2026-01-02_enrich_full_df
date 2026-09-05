@@ -16,6 +16,7 @@ from typing import cast
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 from uuid import UUID, uuid4
+from zipfile import ZipFile
 
 import pytest
 from playwright.sync_api import Page, ViewportSize, expect, sync_playwright
@@ -47,6 +48,8 @@ E2E_CARD_FIELD_VALUE = "literal field value"
 E2E_CARD_SECOND_FIELD_LABEL = control_ui.VARIABLE_SPECS[1].ai_column
 E2E_CARD_SECOND_FIELD_VALUE = "second literal field value"
 E2E_CARD_FILENAME = "source_file.xlsx"
+E2E_REFERENCE_DOCX = Path("resources/pandoc-custom-reference.docx")
+E2E_DOWNLOADED_DOCX_FILENAME = "pilot2_Pilot_Eligible_Researcher.docx"
 E2E_LINE_HEIGHT_TOLERANCE = 0.05
 E2E_CARD_BLOCK_GAP_TOLERANCE_PIXELS = 1
 
@@ -365,7 +368,14 @@ def serve_e2e_dashboard(*, port: int) -> None:
     controller = BrowserController()
     control_ui.SERVICES = cast(
         control_ui.ApplicationServices,
-        SimpleNamespace(controller=controller),
+        SimpleNamespace(
+            controller=controller,
+            configuration=SimpleNamespace(
+                pipeline_config=SimpleNamespace(
+                    pandoc_reference_docx=E2E_REFERENCE_DOCX,
+                )
+            ),
+        ),
     )
     control_ui.configure_application_lifecycle()
     control_ui.ui.run(
@@ -604,6 +614,37 @@ def test_completed_researcher_metadata_is_available_in_visible_attempt_history(
         assert errors == [], Counter(errors)
 
 
+def test_displayed_researcher_card_downloads_as_docx(repository_root: Path) -> None:
+    with control_centre_browser(repository_root) as (page, errors):
+        download_button = page.get_by_test_id(control_ui.DOWNLOAD_CARD_TEST_ID)
+        card_markdown = page.get_by_test_id(control_ui.CARD_MARKDOWN_TEST_ID)
+        expect(download_button).to_be_disabled()
+
+        eligible_row = grid_row_for_draw(page, BROWSER_PILOT_ELIGIBLE_DRAW)
+        eligible_row.click()
+        expect(download_button).to_be_disabled()
+        page.get_by_test_id(control_ui.VIEW_CARD_TEST_ID).click()
+        expect(card_markdown).to_contain_text(E2E_CARD_FIELD_VALUE)
+        expect(download_button).to_be_enabled()
+
+        with page.expect_download() as download_info:
+            download_button.click()
+        download = download_info.value
+        assert download.suggested_filename == E2E_DOWNLOADED_DOCX_FILENAME
+        downloaded_path = download.path()
+        assert downloaded_path is not None
+        with ZipFile(downloaded_path) as archive:
+            assert "[Content_Types].xml" in archive.namelist()
+            document_xml = archive.read("word/document.xml").decode("utf-8")
+        assert E2E_CARD_FIELD_VALUE in document_xml
+        expect(download_button).to_be_enabled()
+
+        grid_row_for_draw(page, BROWSER_PILOT_INELIGIBLE_DRAW).click()
+        expect(card_markdown).to_be_empty()
+        expect(download_button).to_be_disabled()
+        assert errors == [], Counter(errors)
+
+
 def test_control_centre_browser_contract(repository_root: Path) -> None:
     port = available_e2e_port()
     url = f"http://{E2E_HOST}:{port}"
@@ -669,7 +710,8 @@ def test_control_centre_browser_contract(repository_root: Path) -> None:
             ).to_have_text("pilot.1")
 
             footer = page.get_by_test_id(control_ui.PAGE_FOOTER_TEST_ID)
-            assert footer.inner_text().strip() == ""
+            card_markdown = page.get_by_test_id(control_ui.CARD_MARKDOWN_TEST_ID)
+            expect(card_markdown).to_be_empty()
             ineligible_row = grid_row_for_draw(page, "pilot.1")
             ineligible_row.click()
             action_button = page.get_by_test_id(control_ui.EXECUTE_ACTION_TEST_ID)
@@ -693,7 +735,7 @@ def test_control_centre_browser_contract(repository_root: Path) -> None:
             )
             view_card_button = page.get_by_test_id(control_ui.VIEW_CARD_TEST_ID)
             expect(view_card_button).to_be_enabled()
-            assert footer.inner_text().strip() == ""
+            expect(card_markdown).to_be_empty()
             view_card_button.click()
             expect(footer).to_contain_text("render-count-1")
             ineligible_row.click()

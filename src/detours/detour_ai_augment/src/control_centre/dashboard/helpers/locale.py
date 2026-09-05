@@ -13,6 +13,7 @@ class Locale:
     ACTION_DISABLED: Final = "Ineligible"
     ACTION_SELECT_RESEARCHER: Final = "Select a researcher"
     ACTION_VIEW_CARD: Final = "View researcher card"
+    ACTION_DOWNLOAD_DOCX: Final = "Download DOCX"
 
     PAGE_TITLE: Final = "AI augmentation Control Centre"
     BACKEND_STARTING: Final = "Backend: starting"
@@ -79,6 +80,7 @@ class Locale:
     BACKEND_DATABASE_REQUEST_FAILED: Final = "backend database IPC query failed"
     BACKEND_DATABASE_RESPONSE_INVALID: Final = "backend database IPC response is invalid"
     BACKEND_CARD_MISSING: Final = "backend returned no researcher card"
+    DOCX_DOWNLOAD_FAILED: Final = "Researcher card DOCX generation failed"
     OPENALEX_API_KEY_MISSING: Final = (
         "OPENALEX_API_KEY is required in the Control Centre environment"
     )

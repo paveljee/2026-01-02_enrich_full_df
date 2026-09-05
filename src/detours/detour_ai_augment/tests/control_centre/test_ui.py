@@ -157,6 +157,89 @@ def test_variable_specs_cover_every_ai_augment_column() -> None:
     )
 
 
+@pytest.mark.anyio
+async def test_displayed_card_download_uses_exact_markdown_and_shared_filename(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Button:
+        enabled = False
+
+        def enable(self) -> None:
+            self.enabled = True
+
+        def disable(self) -> None:
+            self.enabled = False
+
+    class Markdown:
+        content = ""
+
+        def set_content(self, content: str) -> None:
+            self.content = content
+
+    button = Button()
+    markdown = Markdown()
+    reference_docx = tmp_path / "reference.docx"
+    card = control_ui.ResearcherCardView(
+        namekey=NAMEKEY,
+        draw_number="1, pilot.2",
+        first_name="Jane",
+        last_name="Doe-Smith",
+        markdown="## Exact displayed card\n\nbody\n",
+    )
+    subject = control_ui.ControlCentrePage(
+        controller=cast(control_ui.ControlCentreController, object()),
+        reference_docx=reference_docx,
+    )
+    subject._handles.download_card_button = button
+    subject._handles.card_markdown = markdown
+    rendered: list[tuple[str, Path]] = []
+    downloads: list[tuple[bytes, str | None, str]] = []
+
+    def render(markdown_value: str, supplied_reference: Path) -> bytes:
+        assert not button.enabled
+        rendered.append((markdown_value, supplied_reference))
+        return b"PK\x03\x04docx"
+
+    def download(
+        source: bytes,
+        filename: str | None = None,
+        media_type: str = "",
+    ) -> None:
+        downloads.append((source, filename, media_type))
+
+    async def in_event_loop(
+        function: Any,
+        *args: object,
+        **kwargs: object,
+    ) -> Any:
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(control_ui, "render_docx_bytes", render)
+    monkeypatch.setattr(control_ui.ui, "download", download)
+    monkeypatch.setattr(control_ui.asyncio, "to_thread", in_event_loop)
+
+    await subject._show_card(card)
+    assert markdown.content == card.markdown
+    assert button.enabled
+
+    await subject.download_displayed_card()
+
+    assert rendered == [(card.markdown, reference_docx)]
+    assert downloads == [
+        (
+            b"PK\x03\x04docx",
+            "1_pilot2_Jane_DoeSmith.docx",
+            control_ui.DOCX_MEDIA_TYPE,
+        )
+    ]
+    assert button.enabled
+
+    subject._clear_displayed_card()
+    assert markdown.content == ""
+    assert not button.enabled
+
+
 def test_dashboard_paths_resolve_from_repository_root(repository_root: Path) -> None:
     assert control_vars.REPOSITORY_ROOT == repository_root
     assert control_ui.REPOSITORY_ROOT == repository_root
