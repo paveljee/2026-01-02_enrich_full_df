@@ -91,6 +91,17 @@ After production alignment and focused regressions:
 
 ## Progress
 
+- Rewired the restored task Makefile away from `src/TASK.md`: manifest,
+  validation, and their embedded tests now receive the active Detour README **Lifecycle** contract from
+  `nl -ba $(TASK) | sed -n '82,159p'`. `TASK` retains file provenance,
+  while `TASK_CMD` alone selects the text and emits its absolute source
+  line numbers; the tests do not override either variable. Internal Python
+  consistently names the configured path `task_path`. The explicitly retired block beginning at line 161 is
+  excluded. Embedded Makefile verification passes: **10 manifest tests** and
+  **29 validator tests**; a disposable real-README generation confirmed all
+  **78** entries and the selected-task hash. Task-related Python identifiers,
+  diagnostics, and execution summaries consistently use `task` terminology;
+  `"source"` remains only where required by the manifest and notebook schemas.
 - Completed the Control Centre **Download DOCX** follow-up without expanding
   Backend IPC. The page passes the exact displayed Markdown to a shared wrapper
   around the established Pandoc/reference-DOCX renderer, reuses the canonical

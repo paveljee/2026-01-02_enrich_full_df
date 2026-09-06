@@ -15,7 +15,8 @@ PYTHON ?= pixi run --frozen -e detour-ai-augment python
 PYTHON_STDIN := $(PYTHON) -c \
     'import sys; exec(compile(sys.stdin.read(), sys.argv[1], "exec"))'
 
-TASK := src/TASK.md
+TASK := ../../src/detours/detour_ai_augment/README.md
+TASK_CMD = nl -ba $(TASK) | sed -n '82,159p'
 MANIFEST := manifest.json
 AGENTS := build/AGENTS.md
 SPEC := build/SPECS.ipynb
@@ -74,14 +75,24 @@ test-validate:
 define MANIFEST_PY
 import hashlib
 import json
+import subprocess
 from pathlib import Path
 
 task_path = Path("$(TASK)")
 manifest_path = Path("$(MANIFEST)")
 
-raw = task_path.read_bytes()
-text = raw.decode("utf-8")
-lines = text.splitlines(keepends=True)
+task_path.stat()
+command_output = subprocess.check_output("$(TASK_CMD)", shell=True)
+numbered_lines = [
+    (int(number), line)
+    for number, line in (
+        output_line.split("\t", maxsplit=1)
+        for output_line in command_output.decode("utf-8").splitlines(
+            keepends=True
+        )
+    )
+]
+raw = "".join(line for _, line in numbered_lines).encode("utf-8")
 
 manifest = {
     "source": {
@@ -94,7 +105,7 @@ manifest = {
             "sha256": hashlib.sha256(line.encode("utf-8")).hexdigest(),
             "build": None,
         }
-        for number, line in enumerate(lines, start=1)
+        for number, line in numbered_lines
     ],
 }
 
@@ -106,6 +117,7 @@ define VALIDATE_PY
 import hashlib
 import json
 import os
+import subprocess
 import time
 import traceback
 from collections import defaultdict
@@ -117,26 +129,38 @@ manifest_path = Path("$(MANIFEST)")
 agents_path = Path("$(AGENTS)")
 spec_path = Path("$(SPEC)")
 
-raw = task_path.read_bytes()
-task_text = raw.decode("utf-8")
-task_lines = task_text.splitlines(keepends=True)
+task_path.stat()
+command_output = subprocess.check_output("$(TASK_CMD)", shell=True)
+numbered_lines = [
+    (int(number), line)
+    for number, line in (
+        output_line.split("\t", maxsplit=1)
+        for output_line in command_output.decode("utf-8").splitlines(
+            keepends=True
+        )
+    )
+]
+task_lines = [line for _, line in numbered_lines]
+task_text = "".join(task_lines)
+raw = task_text.encode("utf-8")
+task_start_line = numbered_lines[0][0]
 
 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
 assert (
     manifest["source"]["path"] == str(task_path)
 ), (
-    "source path mismatch: "
+    "task path mismatch: "
     f"expected {str(task_path)!r}, "
     f"got {manifest['source']['path']!r}"
 )
 
-expected_source_sha256 = hashlib.sha256(raw).hexdigest()
+expected_task_sha256 = hashlib.sha256(raw).hexdigest()
 assert (
-    manifest["source"]["sha256"] == expected_source_sha256
+    manifest["source"]["sha256"] == expected_task_sha256
 ), (
-    "source sha256 mismatch: "
-    f"expected {expected_source_sha256!r}, "
+    "task sha256 mismatch: "
+    f"expected {expected_task_sha256!r}, "
     f"got {manifest['source']['sha256']!r}"
 )
 
@@ -147,19 +171,19 @@ assert (
 ), (
     "line count mismatch: "
     f"manifest has {len(entries)} entries, "
-    f"TASK has {len(task_lines)} lines"
+    f"task selection has {len(task_lines)} lines"
 )
 
 assert (
     [entry["line"] for entry in entries]
-    == list(range(1, len(task_lines) + 1))
+    == [number for number, _ in numbered_lines]
 ), (
-    "line numbers must be consecutive and start at 1"
+    "line numbers must match TASK_CMD output"
 )
 
-for entry, source_line in zip(entries, task_lines, strict=True):
+for entry, task_line in zip(entries, task_lines, strict=True):
     expected_line_sha256 = hashlib.sha256(
-        source_line.encode("utf-8")
+        task_line.encode("utf-8")
     ).hexdigest()
 
     assert (
@@ -217,7 +241,7 @@ assert (
         for entry in text_entries_by_destination
     )
 ), (
-    "text source lines must preserve source order"
+    "text task lines must preserve task order"
 )
 
 for entry in text_entries:
@@ -240,9 +264,9 @@ for entry in text_entries:
 
     assert (
         agents_lines[destination_line - 1]
-        == task_lines[entry["line"] - 1]
+        == task_lines[entry["line"] - task_start_line]
     ), (
-        f"text content mismatch for source line "
+        f"text content mismatch for task line "
         f"{entry['line']} at destination line "
         f"{destination_line}"
     )
@@ -287,14 +311,14 @@ for entry in ipynb_entries:
     assert (
         isinstance(cell, int)
     ), (
-        f"cell index for source line {entry['line']} "
+        f"cell index for task line {entry['line']} "
         f"must be an integer, got {cell!r}"
     )
 
     assert (
         0 <= cell < len(cells)
     ), (
-        f"cell index {cell} for source line "
+        f"cell index {cell} for task line "
         f"{entry['line']} is outside notebook "
         f"with {len(cells)} cells"
     )
@@ -337,7 +361,7 @@ assert (
     f"got {cells[0]['cell_type']!r}"
 )
 
-previous_source_number = 0
+previous_task_number = task_start_line - 1
 
 for cell_index in sorted(by_cell):
     cell_entries = by_cell[cell_index]
@@ -350,44 +374,44 @@ for cell_index in sorted(by_cell):
         f"got {cell['cell_type']!r}"
     )
 
-    source_numbers = sorted(
+    task_numbers = sorted(
         entry["line"] for entry in cell_entries
     )
 
     assert (
-        source_numbers
+        task_numbers
         == list(
             range(
-                source_numbers[0],
-                source_numbers[-1] + 1,
+                task_numbers[0],
+                task_numbers[-1] + 1,
             )
         )
     ), (
-        f"markdown cell {cell_index} source lines "
-        f"must be contiguous, got {source_numbers}"
+        f"markdown cell {cell_index} task lines "
+        f"must be contiguous, got {task_numbers}"
     )
 
     assert (
-        source_numbers[0] > previous_source_number
+        task_numbers[0] > previous_task_number
     ), (
-        "markdown source blocks must preserve source order: "
+        "markdown task blocks must preserve task order: "
         f"cell {cell_index} starts at line "
-        f"{source_numbers[0]} after "
-        f"{previous_source_number}"
+        f"{task_numbers[0]} after "
+        f"{previous_task_number}"
     )
 
-    previous_source_number = source_numbers[-1]
+    previous_task_number = task_numbers[-1]
 
     expected = "".join(
-        task_lines[number - 1]
-        for number in source_numbers
+        task_lines[number - task_start_line]
+        for number in task_numbers
     )
 
     assert (
         cell_source(cell) == expected
     ), (
         f"markdown content mismatch in cell {cell_index} "
-        f"for task lines {source_numbers}"
+        f"for task lines {task_numbers}"
     )
 
     next_markdown = min(
@@ -428,23 +452,23 @@ for cell_index in sorted(by_cell):
 
         assert (
             evidence_cell["metadata"].get("task_lines")
-            == source_numbers
+            == task_numbers
         ), (
             f"evidence task_lines mismatch after "
             f"markdown cell {cell_index}: "
-            f"expected {source_numbers}, got "
+            f"expected {task_numbers}, got "
             f"{evidence_cell['metadata'].get('task_lines')!r}"
         )
 
 reconstructed = [""] * len(task_lines)
 
 for entry in text_entries:
-    reconstructed[entry["line"] - 1] = agents_lines[
+    reconstructed[entry["line"] - task_start_line] = agents_lines[
         entry["build"]["line"] - 1
     ]
 
 for cell_index, cell_entries in by_cell.items():
-    source_numbers = sorted(
+    task_numbers = sorted(
         entry["line"] for entry in cell_entries
     )
 
@@ -453,26 +477,26 @@ for cell_index, cell_entries in by_cell.items():
     ).splitlines(keepends=True)
 
     assert (
-        len(cell_lines) == len(source_numbers)
+        len(cell_lines) == len(task_numbers)
     ), (
         f"markdown cell {cell_index} line count mismatch: "
         f"cell has {len(cell_lines)} lines, "
-        f"manifest maps {len(source_numbers)}"
+        f"manifest maps {len(task_numbers)}"
     )
 
     for number, line in zip(
-        source_numbers,
+        task_numbers,
         cell_lines,
         strict=True,
     ):
-        reconstructed[number - 1] = line
+        reconstructed[number - task_start_line] = line
 
 reconstructed_text = "".join(reconstructed)
 
 assert (
     reconstructed_text == task_text
 ), (
-    "reconstructed task text does not match source task text"
+    "reconstructed task text does not match selected task text"
 )
 
 reconstructed_sha256 = hashlib.sha256(
@@ -529,7 +553,7 @@ print(
 
 print()
 
-task_root = task_path.resolve().parent.parent
+task_root = Path.cwd().resolve()
 repository_root = task_root.parents[1]
 
 namespace = {
@@ -647,7 +671,7 @@ for (
     )
 
     print(
-        f"TASK {line_range:<7} "
+        f"TASK   {line_range:<7} "
         f"{results['passed']} passed, "
         f"{results['failed']} failed"
     )
@@ -687,28 +711,38 @@ import pytest
 
 
 MANIFEST_MODULE = os.environ["MANIFEST_MODULE"]
+TASK_PATH = Path("$(TASK)")
+TASK_PREFIX = b"prefix\n" * 81
+TASK_FIRST_LINE = 82
+
+
+def prepare_task(tmp_path, raw):
+    work = tmp_path / "repo" / "tasks" / "case"
+    work.mkdir(parents=True)
+    task_path = (work / TASK_PATH).resolve()
+    task_path.parent.mkdir(parents=True)
+    task_path.write_bytes(TASK_PREFIX + raw)
+    return work, task_path
 
 
 def run_manifest(tmp_path, raw=b"first\nsecond\n"):
-    task_path = tmp_path / "src" / "TASK.md"
-    task_path.parent.mkdir(parents=True)
-    task_path.write_bytes(raw)
+    work, task_path = prepare_task(tmp_path, raw)
 
     previous_cwd = Path.cwd()
     try:
-        os.chdir(tmp_path)
+        os.chdir(work)
         runpy.run_path(MANIFEST_MODULE)
     finally:
         os.chdir(previous_cwd)
 
-    return task_path, tmp_path / "manifest.json"
+    return task_path, work / "manifest.json"
 
 
 def read_manifest(path):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def test_manifest_source_and_lines(tmp_path):
+def test_manifest_task_and_lines(tmp_path):
     raw = b"first\nsecond\n"
 
     task_path, manifest_path = run_manifest(
@@ -719,20 +753,20 @@ def test_manifest_source_and_lines(tmp_path):
     manifest = read_manifest(manifest_path)
 
     assert manifest["source"] == {
-        "path": "src/TASK.md",
+        "path": str(TASK_PATH),
         "sha256": hashlib.sha256(raw).hexdigest(),
     }
 
     assert manifest["lines"] == [
         {
-            "line": 1,
+            "line": TASK_FIRST_LINE,
             "sha256": hashlib.sha256(
                 b"first\n"
             ).hexdigest(),
             "build": None,
         },
         {
-            "line": 2,
+            "line": TASK_FIRST_LINE + 1,
             "sha256": hashlib.sha256(
                 b"second\n"
             ).hexdigest(),
@@ -750,7 +784,7 @@ def test_manifest_source_and_lines(tmp_path):
         ),
         (
             b"one",
-            [b"one"],
+            [b"one\n"],
         ),
         (
             b"one\n",
@@ -760,7 +794,7 @@ def test_manifest_source_and_lines(tmp_path):
             b"one\r\ntwo",
             [
                 b"one\r\n",
-                b"two",
+                b"two\n",
             ],
         ),
         (
@@ -794,7 +828,7 @@ def test_manifest_preserves_line_bytes(
             expected_lines,
             strict=True,
         ),
-        start=1,
+        start=TASK_FIRST_LINE,
     ):
         assert entry == {
             "line": number,
@@ -808,14 +842,9 @@ def test_manifest_preserves_line_bytes(
 def test_manifest_refuses_overwrite_and_preserves_existing_file(
     tmp_path,
 ):
-    task_path = tmp_path / "src" / "TASK.md"
-    task_path.parent.mkdir(parents=True)
-    task_path.write_text(
-        "hello\n",
-        encoding="utf-8",
-    )
+    work, _ = prepare_task(tmp_path, b"hello\n")
 
-    manifest_path = tmp_path / "manifest.json"
+    manifest_path = work / "manifest.json"
     manifest_path.write_text(
         "do not replace me\n",
         encoding="utf-8",
@@ -823,7 +852,7 @@ def test_manifest_refuses_overwrite_and_preserves_existing_file(
 
     previous_cwd = Path.cwd()
     try:
-        os.chdir(tmp_path)
+        os.chdir(work)
 
         with pytest.raises(FileExistsError):
             runpy.run_path(MANIFEST_MODULE)
@@ -838,13 +867,11 @@ def test_manifest_refuses_overwrite_and_preserves_existing_file(
 def test_manifest_rejects_invalid_utf8_without_creating_manifest(
     tmp_path,
 ):
-    task_path = tmp_path / "src" / "TASK.md"
-    task_path.parent.mkdir(parents=True)
-    task_path.write_bytes(b"\xff")
+    work, _ = prepare_task(tmp_path, b"\xff")
 
     previous_cwd = Path.cwd()
     try:
-        os.chdir(tmp_path)
+        os.chdir(work)
 
         with pytest.raises(UnicodeDecodeError):
             runpy.run_path(MANIFEST_MODULE)
@@ -852,16 +879,17 @@ def test_manifest_rejects_invalid_utf8_without_creating_manifest(
         os.chdir(previous_cwd)
 
     assert not (
-        tmp_path / "manifest.json"
+        work / "manifest.json"
     ).exists()
 
 
 def test_manifest_requires_task_file(tmp_path):
-    (tmp_path / "src").mkdir()
+    work = tmp_path / "repo" / "tasks" / "case"
+    work.mkdir(parents=True)
 
     previous_cwd = Path.cwd()
     try:
-        os.chdir(tmp_path)
+        os.chdir(work)
 
         with pytest.raises(FileNotFoundError):
             runpy.run_path(MANIFEST_MODULE)
@@ -869,7 +897,7 @@ def test_manifest_requires_task_file(tmp_path):
         os.chdir(previous_cwd)
 
     assert not (
-        tmp_path / "manifest.json"
+        work / "manifest.json"
     ).exists()
 
 
@@ -895,11 +923,14 @@ import pytest
 
 
 VALIDATE_MODULE = os.environ["VALIDATE_MODULE"]
+TASK_PATH = Path("$(TASK)")
+TASK_PREFIX = b"prefix\n" * 81
+TASK_FIRST_LINE = 82
 
 
 def line_entry(number, line, build):
     return {
-        "line": number,
+        "line": TASK_FIRST_LINE + number - 1,
         "sha256": hashlib.sha256(
             line.encode("utf-8")
         ).hexdigest(),
@@ -928,7 +959,10 @@ def evidence(
         "metadata": {
             "evidence_id": evidence_id,
             "summary": summary,
-            "task_lines": task_lines,
+            "task_lines": [
+                TASK_FIRST_LINE + number - 1
+                for number in task_lines
+            ],
         },
         "source": source,
     }
@@ -959,7 +993,7 @@ def make_case(tmp_path):
         "agents_text": task_lines[0],
         "manifest": {
             "source": {
-                "path": "src/TASK.md",
+                "path": str(TASK_PATH),
                 "sha256": hashlib.sha256(
                     raw
                 ).hexdigest(),
@@ -1003,15 +1037,14 @@ def write_case(case):
 
     task_path = (
         work
-        / "src"
-        / "TASK.md"
-    )
+        / TASK_PATH
+    ).resolve()
     task_path.parent.mkdir(
         parents=True,
         exist_ok=True,
     )
     task_path.write_bytes(
-        case["task_raw"]
+        TASK_PREFIX + case["task_raw"]
     )
 
     manifest_path = (
@@ -1097,7 +1130,7 @@ def set_case(
 
     case["manifest"] = {
         "source": {
-            "path": "src/TASK.md",
+            "path": str(TASK_PATH),
             "sha256": hashlib.sha256(
                 raw
             ).hexdigest(),
@@ -1177,7 +1210,7 @@ def test_validate_accepts_list_form_cell_sources(
     run_validate(case)
 
 
-def test_validate_rejects_wrong_source_path(
+def test_validate_rejects_wrong_task_path(
     tmp_path,
 ):
     case = make_case(tmp_path)
@@ -1188,11 +1221,11 @@ def test_validate_rejects_wrong_source_path(
 
     assert_validation_error(
         case,
-        "source path",
+        "task path",
     )
 
 
-def test_validate_rejects_wrong_source_hash(
+def test_validate_rejects_wrong_task_hash(
     tmp_path,
 ):
     case = make_case(tmp_path)
@@ -1301,7 +1334,7 @@ def test_validate_rejects_text_content_mismatch(
     )
 
 
-def test_validate_rejects_reordered_text_source_lines(
+def test_validate_rejects_reordered_text_task_lines(
     tmp_path,
 ):
     case = make_case(tmp_path)
@@ -1449,7 +1482,7 @@ def test_validate_requires_first_cell_to_be_markdown(
     )
 
 
-def test_validate_rejects_noncontiguous_source_lines_in_markdown(
+def test_validate_rejects_noncontiguous_task_lines_in_markdown(
     tmp_path,
 ):
     case = make_case(tmp_path)
@@ -1499,7 +1532,7 @@ def test_validate_rejects_noncontiguous_source_lines_in_markdown(
     )
 
 
-def test_validate_rejects_markdown_blocks_out_of_source_order(
+def test_validate_rejects_markdown_blocks_out_of_task_order(
     tmp_path,
 ):
     case = make_case(tmp_path)
