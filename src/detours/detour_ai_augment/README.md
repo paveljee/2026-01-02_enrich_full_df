@@ -74,8 +74,7 @@ The specific **component ports** as well as
 the **connectors** and **connector roles**
 to complete the Acme-ish description of 
 the **system** architecture of the feature
-may be prescribed elsewhere, e.g., in
-`tasks/tasks-20260731-tighten-api/src/TASK.md`,
+are prescribed in [lifecycle](#lifecycle) below,
 where the description of **connector properties** is
 given as [Gherkin][gherkin-docs]-ish **scenarios**.
 
