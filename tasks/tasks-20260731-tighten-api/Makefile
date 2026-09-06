@@ -16,7 +16,7 @@ PYTHON_STDIN := $(PYTHON) -c \
     'import sys; exec(compile(sys.stdin.read(), sys.argv[1], "exec"))'
 
 TASK := ../../src/detours/detour_ai_augment/README.md
-TASK_CMD = nl -ba $(TASK) | sed -n '82,159p'
+TASK_CMD = nl -ba $(TASK) | sed -n '81,158p'
 MANIFEST := manifest.json
 AGENTS := build/AGENTS.md
 SPEC := build/SPECS.ipynb
