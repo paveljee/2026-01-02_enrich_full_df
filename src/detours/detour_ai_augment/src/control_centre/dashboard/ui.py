@@ -27,7 +27,7 @@ from zoneinfo import ZoneInfo
 import duckdb
 from fastapi import status
 from nicegui import app, ui
-from pydantic import ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from src.helpers.cards import card_filename, render_docx_bytes
 from src.helpers.vars import (
@@ -63,11 +63,14 @@ from ...backend.api import (
     IneligibilityCategory,
     ground_truth_for_researcher,
     load_source_researcher,
+    registered_release_map,
 )
 from ...backend.api import (
     SourceCohort as ResearcherCohort,
 )
+from ...backend.helpers.data_models.ai_augment_config import AiAugmentDetourConfig
 from ...backend.helpers.data_models.pydantic_to_paste import EXPORT_OPENALEX_API_KEY
+from ...backend.helpers.data_models.source_population import SourcePopulationRow
 from ...backend.helpers.vars import (
     AI_AUGMENT_COLUMN_PREFIX,
     KTP_AI_AUGMENT_ATTEMPT_ID_COL,
@@ -84,6 +87,7 @@ from .helpers.vars import (
     AIVM_SSH_CONNECTION_COMMAND,
     AIVM_SSH_FORWARD_COMMAND,
     AIVM_SSH_TARGET,
+    BACKEND_AVAILABILITY_TIMEOUT_SECONDS,
     BACKEND_MODULE,
     BACKEND_OPENAPI_URL,
     BACKEND_PULL_URL,
@@ -155,6 +159,8 @@ BACKEND_PORT: Final = SERVER_PORT
 QUEUE_STORAGE_KEY: Final = "detour_ai_augment_queue"
 RUN_EVENTS_STORAGE_KEY: Final = "detour_ai_augment_run_events"
 BACKEND_DATABASE_STORAGE_KEY: Final = "detour_ai_augment_backend_database"
+SOURCE_DATA_STORAGE_KEY: Final = "detour_ai_augment_source_data"
+SOURCE_DATA_CACHE_SCHEMA_VERSION: Final = 1
 
 LIMA_APPENDWATCH_REPORT_PARAM: Final = APPENDWATCH_REPORT_ENV_NAME
 
@@ -411,6 +417,95 @@ class GroundTruthRecord:
     values: Mapping[str, str | None]
 
 
+class SourceInputFingerprint(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: int
+    source_database_path: str
+    source_database_size: int
+    source_database_mtime_ns: int
+    source_database_ctime_ns: int
+    source_database_device: int
+    source_database_inode: int
+    release_map_sha256: str
+    sample_seed: int
+
+
+class CachedSourceData(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    fingerprint: SourceInputFingerprint
+    source_population: tuple[SourcePopulationRow, ...]
+    ground_truth_values: dict[str, dict[str, str | None]]
+
+    def ground_truth_by_namekey(self) -> Mapping[Namekey, GroundTruthRecord]:
+        expected_namekeys = {
+            row.namekey
+            for row in self.source_population
+            if row.cohort is ResearcherCohort.GROUND_TRUTH
+        }
+        if set(self.ground_truth_values) != expected_namekeys:
+            raise ValueError(Locale.GROUND_TRUTH_MISSING)
+        return {
+            Namekey(namekey): GroundTruthRecord(
+                namekey=Namekey(namekey),
+                values=values,
+            )
+            for namekey, values in self.ground_truth_values.items()
+        }
+
+
+def source_input_fingerprint(config_path: Path) -> SourceInputFingerprint:
+    pipeline_config = AiAugmentDetourConfig.from_json(config_path)
+    release_map = registered_release_map(pipeline_config)
+    source_database_path = pipeline_config.db_file.resolve(strict=True)
+    source_database_stat = source_database_path.stat()
+    return SourceInputFingerprint(
+        schema_version=SOURCE_DATA_CACHE_SCHEMA_VERSION,
+        source_database_path=str(source_database_path),
+        source_database_size=source_database_stat.st_size,
+        source_database_mtime_ns=source_database_stat.st_mtime_ns,
+        source_database_ctime_ns=source_database_stat.st_ctime_ns,
+        source_database_device=source_database_stat.st_dev,
+        source_database_inode=source_database_stat.st_ino,
+        release_map_sha256=release_map.hash,
+        sample_seed=pipeline_config.sample_seed,
+    )
+
+
+def load_cached_source_data(
+    config_path: Path,
+) -> tuple[SourceInputFingerprint, CachedSourceData | None]:
+    fingerprint = source_input_fingerprint(config_path)
+    raw_cache = app.storage.general.get(SOURCE_DATA_STORAGE_KEY)
+    try:
+        cache = CachedSourceData.model_validate(raw_cache)
+        cache.ground_truth_by_namekey()
+    except (TypeError, ValueError, ValidationError):
+        return fingerprint, None
+    if cache.fingerprint != fingerprint:
+        return fingerprint, None
+    return fingerprint, cache
+
+
+def store_cached_source_data(
+    *,
+    fingerprint: SourceInputFingerprint,
+    source_population: tuple[SourcePopulationRow, ...],
+    ground_truth_by_namekey: Mapping[Namekey, GroundTruthRecord],
+) -> None:
+    cache = CachedSourceData(
+        fingerprint=fingerprint,
+        source_population=source_population,
+        ground_truth_values={
+            str(namekey): dict(record.values)
+            for namekey, record in ground_truth_by_namekey.items()
+        },
+    )
+    cache.ground_truth_by_namekey()
+    app.storage.general[SOURCE_DATA_STORAGE_KEY] = cache.model_dump(mode="json")
+
+
 @dataclass(frozen=True, slots=True)
 class SessionMetadata:
     originator: str
@@ -599,8 +694,22 @@ class SourceRepository:
         self,
         *,
         configuration: AiAugmentCtlCtrContext,
+        ground_truth_by_namekey: Mapping[Namekey, GroundTruthRecord] | None = None,
     ) -> None:
         self._configuration = configuration
+        self._ground_truth_by_namekey = (
+            None if ground_truth_by_namekey is None else dict(ground_truth_by_namekey)
+        )
+
+    @property
+    def source_population(self) -> tuple[SourcePopulationRow, ...]:
+        return self._configuration.source_population
+
+    @property
+    def ground_truth_by_namekey(self) -> Mapping[Namekey, GroundTruthRecord]:
+        if self._ground_truth_by_namekey is None:
+            raise RuntimeError(Locale.GROUND_TRUTH_MISSING)
+        return self._ground_truth_by_namekey
 
     def connect(self) -> duckdb.DuckDBPyConnection:
         return duckdb.connect(
@@ -633,6 +742,8 @@ class SourceRepository:
         self,
         namekey: Namekey,
     ) -> GroundTruthRecord | None:
+        if self._ground_truth_by_namekey is not None:
+            return self._ground_truth_by_namekey.get(namekey)
         connection = self.connect()
         try:
             researcher = load_source_researcher(
@@ -655,6 +766,8 @@ class SourceRepository:
     def load_ground_truth_by_namekey(
         self,
     ) -> Mapping[Namekey, GroundTruthRecord]:
+        if self._ground_truth_by_namekey is not None:
+            return self._ground_truth_by_namekey
         result: dict[Namekey, GroundTruthRecord] = {}
         cohorts = self._configuration.eligible_cohorts
         connection = self.connect()
@@ -680,7 +793,8 @@ class SourceRepository:
                 )
         finally:
             connection.close()
-        return result
+        self._ground_truth_by_namekey = result
+        return self._ground_truth_by_namekey
 
     def assert_population_invariants(
         self,
@@ -776,7 +890,7 @@ class BackendDatabaseClient:
     def available(self) -> bool:
         connection = UnixSocketHttpConnection(
             socket_path=self._socket_path,
-            timeout=CONTROL_HTTP_TIMEOUT_SECONDS,
+            timeout=BACKEND_AVAILABILITY_TIMEOUT_SECONDS,
         )
         try:
             connection.request(HTTP_OPTIONS_METHOD, DASHBOARD_QUERY_PATH)
@@ -909,7 +1023,7 @@ class BackendSupervisor:
         try:
             with urllib_request.urlopen(
                 request,
-                timeout=CONTROL_HTTP_TIMEOUT_SECONDS,
+                timeout=BACKEND_AVAILABILITY_TIMEOUT_SECONDS,
             ) as response:
                 return response.status == status.HTTP_200_OK
         except (OSError, urllib_error.URLError, urllib_error.HTTPError):
@@ -1838,6 +1952,10 @@ class ControlCentreController:
         return self._backend_availability
 
     async def detect_backend_availability(self) -> BackendAvailability:
+        emit_log(
+            Locale.CONTROL_CENTRE_LOG_PREFIX,
+            Locale.BACKEND_AVAILABILITY_CHECK_LOG,
+        )
         full_api_available, ipc_available = await asyncio.gather(
             asyncio.to_thread(self._backend.full_api_available),
             asyncio.to_thread(self._backend_database.available),
@@ -1846,17 +1964,58 @@ class ControlCentreController:
             full_api_available=full_api_available,
             ipc_available=ipc_available,
         )
+        emit_log(
+            Locale.CONTROL_CENTRE_LOG_PREFIX,
+            Locale.BACKEND_AVAILABILITY_READY_LOG_TEMPLATE.format(
+                api_status=(
+                    Locale.IPC_AVAILABLE
+                    if full_api_available
+                    else Locale.IPC_UNAVAILABLE
+                ),
+                ipc_status=(
+                    Locale.IPC_AVAILABLE if ipc_available else Locale.IPC_UNAVAILABLE
+                ),
+            ),
+        )
         return self._backend_availability
 
     async def start(self) -> None:
+        emit_log(
+            Locale.CONTROL_CENTRE_LOG_PREFIX,
+            Locale.SOURCE_POPULATION_LOADING_LOG,
+        )
         self._researchers = await asyncio.to_thread(self._source_repository.load_researchers)
         self._researchers_by_namekey = {
             researcher.namekey: researcher for researcher in self._researchers
         }
+        emit_log(
+            Locale.CONTROL_CENTRE_LOG_PREFIX,
+            Locale.SOURCE_POPULATION_READY_LOG_TEMPLATE.format(
+                count=len(self._researchers),
+            ),
+        )
+        emit_log(
+            Locale.CONTROL_CENTRE_LOG_PREFIX,
+            Locale.GROUND_TRUTH_LOADING_LOG,
+        )
         self._ground_truth = await asyncio.to_thread(
             self._source_repository.load_ground_truth_by_namekey
         )
+        emit_log(
+            Locale.CONTROL_CENTRE_LOG_PREFIX,
+            Locale.GROUND_TRUTH_READY_LOG_TEMPLATE.format(
+                count=len(self._ground_truth),
+            ),
+        )
+        emit_log(
+            Locale.CONTROL_CENTRE_LOG_PREFIX,
+            Locale.DASHBOARD_STORAGE_LOADING_LOG,
+        )
         self._load_dashboard_storage()
+        emit_log(
+            Locale.CONTROL_CENTRE_LOG_PREFIX,
+            Locale.DASHBOARD_STORAGE_READY_LOG,
+        )
         restart_time = datetime.now(timezone.utc)
         for run in tuple(self._runs.values()):
             if run.dashboard_owned and run.status is RunStatus.RUNNING:
@@ -1877,6 +2036,10 @@ class ControlCentreController:
                 await self._queue.put(run_id)
         await self.detect_backend_availability()
         self._worker_task = asyncio.create_task(self._worker())
+        emit_log(
+            Locale.CONTROL_CENTRE_LOG_PREFIX,
+            Locale.QUEUE_WORKER_READY_LOG,
+        )
 
     async def shutdown(self) -> None:
         self._shutting_down = True
@@ -2505,6 +2668,7 @@ class ControlCentrePage:
         ui.timer(UI_REFRESH_SECONDS, self.refresh)
 
     def build_header(self) -> None:
+        backend_availability = self._controller.backend_availability
         with (
             ui
             .row()
@@ -2512,10 +2676,22 @@ class ControlCentrePage:
             .props(NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=PAGE_HEADER_TEST_ID))
         ):
             ui.label(Locale.PAGE_TITLE)
-            self._handles.backend_status_label = ui.label(Locale.BACKEND_STARTING)
+            self._handles.backend_status_label = ui.label(
+                Locale.BACKEND_STATUS_TEMPLATE.format(
+                    status=self._controller.backend_status.value
+                )
+            )
             self._handles.backend_ipc_status_label = (
                 ui
-                .label(Locale.IPC_DETECTING)
+                .label(
+                    Locale.IPC_STATUS_TEMPLATE.format(
+                        status=(
+                            Locale.IPC_AVAILABLE
+                            if backend_availability.ipc_available
+                            else Locale.IPC_UNAVAILABLE
+                        )
+                    )
+                )
                 .props(
                     NiceGui.TEST_ID_PROP_TEMPLATE.format(
                         test_id=BACKEND_IPC_STATUS_TEST_ID
@@ -2531,7 +2707,8 @@ class ControlCentrePage:
                     )
                 )
             )
-            self._handles.backend_refresh_button.disable()
+            if not backend_availability.ipc_available:
+                self._handles.backend_refresh_button.disable()
 
     def build_summary(self) -> None:
         self._handles.summary_label = (
@@ -3266,9 +3443,22 @@ APPLICATION_CONFIG_PATH = DEFAULT_CONFIG_PATH
 def create_services(
     *,
     config_path: Path = DEFAULT_CONFIG_PATH,
+    source_data_cache: CachedSourceData | None = None,
 ) -> ApplicationServices:
-    configuration = AiAugmentCtlCtrContext(config_path=config_path)
-    source_repository = SourceRepository(configuration=configuration)
+    configuration = AiAugmentCtlCtrContext(
+        config_path=config_path,
+        source_population=(
+            None if source_data_cache is None else source_data_cache.source_population
+        ),
+    )
+    source_repository = SourceRepository(
+        configuration=configuration,
+        ground_truth_by_namekey=(
+            None
+            if source_data_cache is None
+            else source_data_cache.ground_truth_by_namekey()
+        ),
+    )
     backend = BackendSupervisor(
         repository_root=REPOSITORY_ROOT,
         config_path=configuration.config_path,
@@ -3321,6 +3511,7 @@ async def chrome_devtools_probe() -> dict[str, object]:
 @ui.page("/")
 async def control_centre_page() -> None:
     services = require_services()
+    await services.controller.detect_backend_availability()
     page = ControlCentrePage(
         controller=services.controller,
         reference_docx=services.configuration.pipeline_config.pandoc_reference_docx,
@@ -3337,9 +3528,46 @@ async def control_centre_page() -> None:
 async def application_startup() -> None:
     global SERVICES
 
-    if SERVICES is None:
-        SERVICES = create_services(config_path=APPLICATION_CONFIG_PATH)
-    await SERVICES.controller.start()
+    if SERVICES is not None:
+        await SERVICES.controller.start()
+    else:
+        emit_log(
+            Locale.CONTROL_CENTRE_LOG_PREFIX,
+            Locale.SOURCE_CACHE_CHECK_LOG,
+        )
+        fingerprint, source_data_cache = load_cached_source_data(
+            APPLICATION_CONFIG_PATH
+        )
+        emit_log(
+            Locale.CONTROL_CENTRE_LOG_PREFIX,
+            (
+                Locale.SOURCE_CACHE_HIT_LOG
+                if source_data_cache is not None
+                else Locale.SOURCE_CACHE_MISS_LOG
+            ),
+        )
+        services = create_services(
+            config_path=APPLICATION_CONFIG_PATH,
+            source_data_cache=source_data_cache,
+        )
+        try:
+            await services.controller.start()
+        except BaseException:
+            await services.controller.shutdown()
+            raise
+        if source_data_cache is None:
+            store_cached_source_data(
+                fingerprint=fingerprint,
+                source_population=services.source_repository.source_population,
+                ground_truth_by_namekey=(
+                    services.source_repository.ground_truth_by_namekey
+                ),
+            )
+            emit_log(
+                Locale.CONTROL_CENTRE_LOG_PREFIX,
+                Locale.SOURCE_CACHE_UPDATED_LOG,
+            )
+        SERVICES = services
     emit_log(
         Locale.CONTROL_CENTRE_LOG_PREFIX,
         Locale.READY_LOG_TEMPLATE.format(url=CONTROL_CENTRE_BASE_URL),

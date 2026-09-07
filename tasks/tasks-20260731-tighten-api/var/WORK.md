@@ -1,5 +1,45 @@
 # Tighten API — active Lifecycle alignment and executable specification
 
+## Active Dashboard startup refinement (2026-09-07)
+
+- Human Operator reports that recent availability refactors exposed slow
+  Dashboard startup and wants source data cached across starts.
+- Implement surgically: derive a cheap, correctness-scoped identity for the
+  configured source inputs; on a matching NiceGUI cache restore both prepared
+  source population and linked ground truth without reopening the main DB; on
+  a miss rebuild from the read-only source DB and replace the cache.
+- Dashboard startup must log its material stages and expose page services only
+  after source state, persisted Dashboard state, availability observations, and
+  the queue worker are ready.
+- Full-API and IPC startup/page-load availability probes must use a dedicated
+  short fail-fast timeout. They remain observations only and never hydrate
+  attempts implicitly.
+- Added focused regressions for cache hit/miss, no-DB cache restoration,
+  readiness publication/order/logging, and short probes.
+- Implemented a versioned NiceGUI source-data cache containing the exact
+  `SourcePopulationRow` tuple and linked ground-truth mapping. Its startup
+  fingerprint covers DB path/size/mtime/ctime/device/inode, the verified
+  release-map SHA-256, and `sample_seed`; this avoids hashing the 554 MB DB on
+  every start while invalidating ordinary content writes and replacements.
+- A cache hit supplies source population to `AiAugmentCtlCtrContext` and ground
+  truth to `SourceRepository`, so startup does not open the source DuckDB or
+  issue its prior 588 linked-row queries. A miss retains the established
+  read-only derivation and stores the validated result.
+- Production-created `ApplicationServices` remain unpublished until controller
+  startup and cache replacement finish. Startup now logs source/cache,
+  persisted-state, concurrent availability-probe, worker, and final-ready
+  stages. Full-API and IPC observations use a dedicated 250 ms timeout; normal
+  Backend requests retain their existing 10 s timeout.
+- Focused source/cache/readiness/probe regressions pass: **41 passed**; with the
+  browser module: **41 passed, 7 environment skips**. The broad applicable
+  Detour suite excluding the separately unreviewed BDD module passes **189
+  passed, 46 skipped, 7 deselected**. Whole-repository Ruff and mypy (**99
+  source files**) and `git diff --check HEAD` are clean.
+- The initial broad run otherwise reached **195 passed** and exposed one
+  unrelated pre-existing BDD failure: current README Lifecycle parsing yields
+  35 numbered items while `test_detour_ai_augment_bdd.py` still hard-codes 32.
+  This startup patch does not alter that separately stashed/unreviewed BDD work.
+
 ## Dashboard hydration gap implementation (2026-09-07)
 
 - A manually operated Gaoquan Shi lifecycle reached a persisted `410 Gone`.
@@ -30,7 +70,18 @@
   snapshots read the cached result. Owned Backend state remains authoritative for
   starting/running/failed status, while successful and failed IPC queries and
   known owned-process start/stop transitions update the same availability value.
-  Focused controller/UI tests pass with **33 passed, 7 environment skips**.
+  Focused controller/UI tests pass with **34 passed, 7 environment skips**.
+- Completed the page-load/shutdown follow-up: removed static `starting` and
+  `detecting` placeholders. Each browser page load now reruns only the full-API
+  and IPC availability probes before constructing the header, so a later IPC-only
+  server is observed and Refresh becomes enabled without querying history. The
+  existing short UI timer remains free of endpoint-probe/access-log churn.
+  IPC-only Ctrl+C now consumes the expected `KeyboardInterrupt`, stops/closes the
+  Flask server and socket, closes any lazy database, and returns through normal
+  singleton-lock release. Focused Ctrl+C and late-availability regressions pass.
+  This container rejected the real IPC-only CLI smoke with `Operation not
+  permitted` before the socket startup message, so live signal confirmation
+  remains for the Human Operator's host.
 - Removed the redundant query-server start/stop wrappers from `api.py`.
   `ipc.py` now owns typed Flask application construction and Unix-socket server
   lifecycle; `api.py` injects either `dashboard_query_payload` or the IPC-only
@@ -38,8 +89,8 @@
 - Added focused coverage for lazy/no-namekey IPC configuration, CLI mode
   separation, non-querying `OPTIONS` detection, startup mode reporting, explicit
   attempt hydration/cache restoration, and the browser status/Refresh interaction.
-  Ruff and mypy pass; focused Backend/Control Centre tests pass with **107 passed,
-  44 skipped**. The complete broad hermetic suite passes with **180 passed, 46
+  Ruff and mypy pass; focused Backend/Control Centre tests pass with **109 passed,
+  44 skipped**. The complete broad hermetic suite passes with **182 passed, 46
   skipped, 7 deselected**. An earlier run exposed a pre-existing appendwatch
   test race: a fixed 250 ms sleep did not prove the appended six-byte baseline
   was processed, while `Path.write_bytes` separately exposed an unintended

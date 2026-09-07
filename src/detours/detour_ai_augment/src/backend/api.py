@@ -5928,6 +5928,8 @@ def serve_dashboard_query_only(config_path: Path) -> None:
     )
     try:
         server.thread.join()
+    except KeyboardInterrupt:
+        pass
     finally:
         stop_dashboard_query_server(server)
         close_backend_detour_database()

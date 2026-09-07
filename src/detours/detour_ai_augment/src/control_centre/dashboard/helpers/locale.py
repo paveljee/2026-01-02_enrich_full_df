@@ -17,8 +17,6 @@ class Locale:
     ACTION_REFRESH: Final = "Refresh"
 
     PAGE_TITLE: Final = "AI augmentation Control Centre"
-    BACKEND_STARTING: Final = "Backend API: starting"
-    IPC_DETECTING: Final = "IPC: detecting"
     SUMMARY_LOADING: Final = "Loading researcher state…"
     VARIABLE_FILTER: Final = "Variable"
     STATUS_FILTER: Final = "Status"
@@ -146,6 +144,27 @@ class Locale:
     UNKNOWN_VARIABLE_TEMPLATE: Final = "unknown variable: {variable_key}"
     SERVICES_NOT_STARTED: Final = "Control Centre services have not started"
 
+    SOURCE_CACHE_CHECK_LOG: Final = "checking cached source data"
+    SOURCE_CACHE_HIT_LOG: Final = "cached source data matches configured inputs"
+    SOURCE_CACHE_MISS_LOG: Final = (
+        "cached source data is unavailable or stale; reading the source database"
+    )
+    SOURCE_CACHE_UPDATED_LOG: Final = "cached source data updated"
+    SOURCE_POPULATION_LOADING_LOG: Final = "preparing source population"
+    SOURCE_POPULATION_READY_LOG_TEMPLATE: Final = (
+        "source population ready: {count} researcher(s)"
+    )
+    GROUND_TRUTH_LOADING_LOG: Final = "preparing linked ground truth"
+    GROUND_TRUTH_READY_LOG_TEMPLATE: Final = (
+        "linked ground truth ready: {count} researcher(s)"
+    )
+    DASHBOARD_STORAGE_LOADING_LOG: Final = "restoring persisted Dashboard state"
+    DASHBOARD_STORAGE_READY_LOG: Final = "persisted Dashboard state restored"
+    BACKEND_AVAILABILITY_CHECK_LOG: Final = "checking Backend API and IPC availability"
+    BACKEND_AVAILABILITY_READY_LOG_TEMPLATE: Final = (
+        "Backend API {api_status}; IPC {ipc_status}"
+    )
+    QUEUE_WORKER_READY_LOG: Final = "queue worker ready"
     READY_LOG_TEMPLATE: Final = "ready at {url}"
     RUN_FAILED_LOG_TEMPLATE: Final = (
         "run failed: run_id={run_id} namekey={namekey} detail={detail}"

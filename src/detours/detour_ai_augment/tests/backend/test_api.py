@@ -4096,6 +4096,41 @@ def test_main_ipc_only_runs_only_the_dashboard_query_server(
     assert calls == ["acquire", ("ipc", config_path), "release"]
 
 
+def test_ipc_only_ctrl_c_stops_server_and_closes_database(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.json"
+    calls: list[object] = []
+
+    class InterruptibleThread:
+        @staticmethod
+        def join() -> None:
+            calls.append("wait")
+            raise KeyboardInterrupt
+
+    server = SimpleNamespace(thread=InterruptibleThread())
+    monkeypatch.setattr(
+        api,
+        "start_dashboard_query_server",
+        lambda *_args, **_kwargs: server,
+    )
+    monkeypatch.setattr(
+        api,
+        "stop_dashboard_query_server",
+        lambda handle: calls.append(("stop", handle)),
+    )
+    monkeypatch.setattr(
+        api,
+        "close_backend_detour_database",
+        lambda: calls.append("close-database"),
+    )
+
+    api.serve_dashboard_query_only(config_path)
+
+    assert calls == ["wait", ("stop", server), "close-database"]
+
+
 def test_repeated_researcher_rows_materialize_as_distinct_innerdicts() -> None:
     connection = duckdb.connect(":memory:")
     try:

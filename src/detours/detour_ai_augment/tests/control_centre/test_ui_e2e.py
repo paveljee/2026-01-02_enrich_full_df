@@ -158,11 +158,24 @@ class BrowserController:
     def codex_busy(self) -> bool:
         return False
 
+    @property
+    def backend_status(self) -> control_ui.BackendStatus:
+        return self._backend_status
+
+    @property
+    def backend_availability(self) -> control_ui.BackendAvailability:
+        return self._backend_availability
+
     async def start(self) -> None:
         return None
 
     async def shutdown(self) -> None:
         return None
+
+    async def detect_backend_availability(
+        self,
+    ) -> control_ui.BackendAvailability:
+        return self._backend_availability
 
     async def refresh_from_ipc(self) -> None:
         self._backend_status = control_ui.BackendStatus.STOPPED

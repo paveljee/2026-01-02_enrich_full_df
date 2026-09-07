@@ -51,6 +51,35 @@ def researcher(namekey: control_ui.Namekey = NAMEKEY) -> control_ui.Researcher:
     )
 
 
+def cached_source_population_row() -> control_ui.SourcePopulationRow:
+    return control_ui.SourcePopulationRow(
+        namekey=NAMEKEY,
+        rnd=1,
+        first_name="Jane",
+        last_name="Doe",
+        draw_numbers=("1",),
+        cohort=control_ui.ResearcherCohort.GROUND_TRUTH,
+        ineligibility_category=None,
+    )
+
+
+def source_input_fingerprint(
+    *,
+    mtime_ns: int = 2,
+) -> control_ui.SourceInputFingerprint:
+    return control_ui.SourceInputFingerprint(
+        schema_version=control_ui.SOURCE_DATA_CACHE_SCHEMA_VERSION,
+        source_database_path="/source.duckdb",
+        source_database_size=1,
+        source_database_mtime_ns=mtime_ns,
+        source_database_ctime_ns=3,
+        source_database_device=4,
+        source_database_inode=5,
+        release_map_sha256="0" * 64,
+        sample_seed=42,
+    )
+
+
 class FakeSourceRepository:
     def __init__(self) -> None:
         self.researchers = (researcher(),)
@@ -332,9 +361,161 @@ def test_dashboard_context_prepares_source_population_from_read_only_database(
     assert calls == [(str(source_db_path), True)]
 
 
+def test_dashboard_context_accepts_cached_population_without_opening_source_database(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lima_config_path = tmp_path / "lima.yaml"
+    lima_config_path.write_text(
+        '{"param":{"FASTAPI_DETOUR_APPENDWATCH_REPORT":'
+        '"/home/ai/.aivm-control/appendwatch/appendwatch-tree.txt"},"mounts":[]}',
+        encoding="utf-8",
+    )
+    pipeline_config = SimpleNamespace(
+        db_file=tmp_path / "source.duckdb",
+        timezone="UTC",
+    )
+    source_population = (cached_source_population_row(),)
+
+    monkeypatch.setenv(context_models.EXPORT_OPENALEX_API_KEY, "host-openalex-key")
+    monkeypatch.setattr(context_models, "LIMA_CONFIG_PATH", lima_config_path)
+    monkeypatch.setattr(
+        context_models.AiAugmentDetourConfig,
+        "from_json",
+        lambda _path: pipeline_config,
+    )
+    monkeypatch.setattr(
+        context_models,
+        "registered_release_map",
+        lambda _config: pytest.fail("release map should not be reloaded on a cache hit"),
+    )
+    monkeypatch.setattr(
+        context_models.duckdb,
+        "connect",
+        lambda *_args, **_kwargs: pytest.fail(
+            "source database should not be opened on a cache hit"
+        ),
+    )
+
+    context = context_models.AiAugmentCtlCtrContext(
+        config_path=tmp_path / "config.json",
+        source_population=source_population,
+    )
+
+    assert context.source_population == source_population
+
+
+def test_cached_source_data_round_trips_and_rejects_a_stale_fingerprint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fingerprint = source_input_fingerprint()
+    source_population = (cached_source_population_row(),)
+    ground_truth = control_ui.GroundTruthRecord(
+        namekey=NAMEKEY,
+        values={"ktp.table_1_researcher_author": "Jane Doe"},
+    )
+    control_ui.store_cached_source_data(
+        fingerprint=fingerprint,
+        source_population=source_population,
+        ground_truth_by_namekey={NAMEKEY: ground_truth},
+    )
+    monkeypatch.setattr(
+        control_ui,
+        "source_input_fingerprint",
+        lambda _path: fingerprint,
+    )
+
+    observed_fingerprint, cache = control_ui.load_cached_source_data(
+        tmp_path / "config.json"
+    )
+
+    assert observed_fingerprint == fingerprint
+    assert cache is not None
+    assert cache.source_population == source_population
+    assert cache.ground_truth_by_namekey() == {NAMEKEY: ground_truth}
+
+    stale_fingerprint = source_input_fingerprint(mtime_ns=99)
+    monkeypatch.setattr(
+        control_ui,
+        "source_input_fingerprint",
+        lambda _path: stale_fingerprint,
+    )
+
+    observed_fingerprint, cache = control_ui.load_cached_source_data(
+        tmp_path / "config.json"
+    )
+
+    assert observed_fingerprint == stale_fingerprint
+    assert cache is None
+
+
+def test_source_input_fingerprint_stats_database_without_reading_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_database = tmp_path / "source.duckdb"
+    source_database.write_bytes(b"source")
+    pipeline_config = SimpleNamespace(db_file=source_database, sample_seed=42)
+    monkeypatch.setattr(
+        control_ui.AiAugmentDetourConfig,
+        "from_json",
+        lambda _path: pipeline_config,
+    )
+    monkeypatch.setattr(
+        control_ui,
+        "registered_release_map",
+        lambda _config: SimpleNamespace(hash="a" * 64),
+    )
+    monkeypatch.setattr(
+        Path,
+        "open",
+        lambda *_args, **_kwargs: pytest.fail(
+            "the source database must not be read for its startup fingerprint"
+        ),
+    )
+
+    fingerprint = control_ui.source_input_fingerprint(tmp_path / "config.json")
+
+    source_database_stat = source_database.stat()
+    assert fingerprint.source_database_path == str(source_database.resolve())
+    assert fingerprint.source_database_size == source_database_stat.st_size
+    assert fingerprint.source_database_mtime_ns == source_database_stat.st_mtime_ns
+    assert fingerprint.release_map_sha256 == "a" * 64
+    assert fingerprint.sample_seed == 42
+
+
+def test_source_repository_uses_cached_ground_truth_without_opening_database(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_population = (cached_source_population_row(),)
+    ground_truth = control_ui.GroundTruthRecord(namekey=NAMEKEY, values={})
+    configuration = cast(
+        control_ui.AiAugmentCtlCtrContext,
+        SimpleNamespace(
+            source_population=source_population,
+            source_db_path=Path("/source.duckdb"),
+            eligible_cohorts={NAMEKEY: control_ui.ResearcherCohort.GROUND_TRUTH},
+        ),
+    )
+    subject = control_ui.SourceRepository(
+        configuration=configuration,
+        ground_truth_by_namekey={NAMEKEY: ground_truth},
+    )
+    monkeypatch.setattr(
+        subject,
+        "connect",
+        lambda: pytest.fail("cached ground truth should not open the source database"),
+    )
+
+    assert subject.load_ground_truth_by_namekey() == {NAMEKEY: ground_truth}
+    assert subject.load_ground_truth(NAMEKEY) == ground_truth
+
+
 @pytest.mark.anyio
 async def test_dashboard_start_prepares_population_and_ground_truth_before_worker(
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     source = researcher()
     ground_truth = control_ui.GroundTruthRecord(namekey=source.namekey, values={})
@@ -376,6 +557,145 @@ async def test_dashboard_start_prepares_population_and_ground_truth_before_worke
     assert order[:3] == ["source-population", "linked-ground-truth", "worker"]
     assert subject._researchers == (source,)
     assert subject._ground_truth == {source.namekey: ground_truth}
+    startup_log = capsys.readouterr().out
+    logged_stages = [
+        "preparing source population",
+        "source population ready: 1 researcher(s)",
+        "preparing linked ground truth",
+        "linked ground truth ready: 1 researcher(s)",
+        "restoring persisted Dashboard state",
+        "persisted Dashboard state restored",
+        "checking Backend API and IPC availability",
+        "Backend API unavailable; IPC unavailable",
+        "queue worker ready",
+    ]
+    offsets = [startup_log.index(stage) for stage in logged_stages]
+    assert offsets == sorted(offsets)
+
+
+@pytest.mark.anyio
+async def test_application_startup_publishes_cached_services_only_after_ready(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    fingerprint = source_input_fingerprint()
+    source_population = (cached_source_population_row(),)
+    source_data_cache = control_ui.CachedSourceData(
+        fingerprint=fingerprint,
+        source_population=source_population,
+        ground_truth_values={NAMEKEY: {}},
+    )
+    order: list[str] = []
+
+    class FakeController:
+        async def start(self) -> None:
+            assert control_ui.SERVICES is None
+            order.append("controller-ready")
+
+        async def shutdown(self) -> None:
+            order.append("controller-stopped")
+
+    services = cast(
+        control_ui.ApplicationServices,
+        SimpleNamespace(
+            controller=FakeController(),
+            source_repository=SimpleNamespace(
+                source_population=source_population,
+                ground_truth_by_namekey=source_data_cache.ground_truth_by_namekey(),
+            ),
+        ),
+    )
+    monkeypatch.setattr(control_ui, "SERVICES", None)
+    monkeypatch.setattr(control_ui, "APPLICATION_CONFIG_PATH", tmp_path / "config.json")
+    monkeypatch.setattr(
+        control_ui,
+        "load_cached_source_data",
+        lambda _path: (fingerprint, source_data_cache),
+    )
+
+    def create_services(
+        *,
+        config_path: Path,
+        source_data_cache: control_ui.CachedSourceData | None,
+    ) -> control_ui.ApplicationServices:
+        assert config_path == tmp_path / "config.json"
+        assert source_data_cache is not None
+        order.append("services-created")
+        return services
+
+    monkeypatch.setattr(control_ui, "create_services", create_services)
+    monkeypatch.setattr(
+        control_ui,
+        "store_cached_source_data",
+        lambda **_kwargs: pytest.fail("a matching cache must not be replaced"),
+    )
+
+    await control_ui.application_startup()
+
+    assert order == ["services-created", "controller-ready"]
+    assert control_ui.SERVICES is services
+    assert capsys.readouterr().out.splitlines() == [
+        "[control-centre] checking cached source data",
+        "[control-centre] cached source data matches configured inputs",
+        f"[control-centre] ready at {control_ui.CONTROL_CENTRE_BASE_URL}",
+    ]
+
+
+@pytest.mark.anyio
+async def test_application_startup_updates_source_cache_before_publishing_services(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fingerprint = source_input_fingerprint()
+    source_population = (cached_source_population_row(),)
+    ground_truth = {
+        NAMEKEY: control_ui.GroundTruthRecord(namekey=NAMEKEY, values={})
+    }
+    order: list[str] = []
+
+    class FakeController:
+        async def start(self) -> None:
+            assert control_ui.SERVICES is None
+            order.append("controller-ready")
+
+        async def shutdown(self) -> None:
+            order.append("controller-stopped")
+
+    services = cast(
+        control_ui.ApplicationServices,
+        SimpleNamespace(
+            controller=FakeController(),
+            source_repository=SimpleNamespace(
+                source_population=source_population,
+                ground_truth_by_namekey=ground_truth,
+            ),
+        ),
+    )
+    monkeypatch.setattr(control_ui, "SERVICES", None)
+    monkeypatch.setattr(control_ui, "APPLICATION_CONFIG_PATH", tmp_path / "config.json")
+    monkeypatch.setattr(
+        control_ui,
+        "load_cached_source_data",
+        lambda _path: (fingerprint, None),
+    )
+    monkeypatch.setattr(control_ui, "create_services", lambda **_kwargs: services)
+
+    def store_cache(**kwargs: object) -> None:
+        assert control_ui.SERVICES is None
+        assert kwargs == {
+            "fingerprint": fingerprint,
+            "source_population": source_population,
+            "ground_truth_by_namekey": ground_truth,
+        }
+        order.append("cache-updated")
+
+    monkeypatch.setattr(control_ui, "store_cached_source_data", store_cache)
+
+    await control_ui.application_startup()
+
+    assert order == ["controller-ready", "cache-updated"]
+    assert control_ui.SERVICES is services
 
 
 @pytest.mark.anyio
@@ -413,6 +733,39 @@ async def test_dashboard_start_detects_backend_availability_without_querying_his
             full_api_available=full_api_available,
             ipc_available=ipc_available,
         )
+        assert backend_database.pull_calls == 0
+    finally:
+        await subject.shutdown()
+
+
+@pytest.mark.anyio
+async def test_backend_availability_redetection_observes_later_ipc_without_querying(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def in_event_loop(function: Any, /, *args: object, **kwargs: object) -> Any:
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "to_thread", in_event_loop)
+    backend = FakeBackend()
+    backend_database = FakeBackendDatabase()
+    subject = controller(backend=backend, backend_database=backend_database)
+
+    await subject.start()
+    try:
+        assert subject.backend_availability == control_ui.BackendAvailability(
+            full_api_available=False,
+            ipc_available=False,
+        )
+
+        backend.api_available = True
+        backend_database.ipc_available = True
+        availability = await subject.detect_backend_availability()
+
+        assert availability == control_ui.BackendAvailability(
+            full_api_available=True,
+            ipc_available=True,
+        )
+        assert subject.backend_status is control_ui.BackendStatus.RUNNING_EXTERNALLY
         assert backend_database.pull_calls == 0
     finally:
         await subject.shutdown()
@@ -700,7 +1053,7 @@ def test_backend_database_client_queries_unix_socket_without_authentication(
     assert calls == [
         (
             socket_path,
-            control_ui.CONTROL_HTTP_TIMEOUT_SECONDS,
+            control_ui.BACKEND_AVAILABILITY_TIMEOUT_SECONDS,
             control_ui.HTTP_OPTIONS_METHOD,
             api.DASHBOARD_QUERY_PATH,
         ),
@@ -711,6 +1064,39 @@ def test_backend_database_client_queries_unix_socket_without_authentication(
             api.DASHBOARD_QUERY_PATH,
         )
     ]
+
+
+def test_backend_api_availability_uses_short_fail_fast_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed_timeouts: list[float] = []
+
+    class FakeResponse:
+        status = api.status.HTTP_200_OK
+
+        def __enter__(self) -> FakeResponse:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    def urlopen(_request: object, *, timeout: float) -> FakeResponse:
+        observed_timeouts.append(timeout)
+        return FakeResponse()
+
+    monkeypatch.setattr(control_ui.urllib_request, "urlopen", urlopen)
+    subject = control_ui.BackendSupervisor(
+        repository_root=tmp_path,
+        config_path=tmp_path / "config.json",
+        openalex_api_key="key",
+        appendwatch_report=PurePosixPath("/mounted/appendwatch.txt"),
+        dashboard_socket_path=tmp_path / "dashboard.sock",
+    )
+
+    assert subject.full_api_available() is True
+    assert observed_timeouts == [control_ui.BACKEND_AVAILABILITY_TIMEOUT_SECONDS]
+    assert control_ui.BACKEND_AVAILABILITY_TIMEOUT_SECONDS < 1
 
 
 def test_run_event_replay_keeps_dashboard_queue_ownership() -> None:

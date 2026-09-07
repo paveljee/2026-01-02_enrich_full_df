@@ -45,6 +45,7 @@ class AiAugmentCtlCtrContext:
         self,
         *,
         config_path: Path = DEFAULT_CONFIG_PATH,
+        source_population: tuple[SourcePopulationRow, ...] | None = None,
     ) -> None:
         openalex_api_key = os.environ.get(EXPORT_OPENALEX_API_KEY, "").strip()
         if not openalex_api_key:
@@ -67,17 +68,18 @@ class AiAugmentCtlCtrContext:
         ) as exc:
             raise RuntimeError(Locale.LIMA_CONFIG_INVALID) from exc
         pipeline_config = AiAugmentDetourConfig.from_json(config_path)
-        release_map = registered_release_map(pipeline_config)
-        release_batches = load_release_batches(release_map)
-        source_connection = duckdb.connect(str(pipeline_config.db_file), read_only=True)
-        try:
-            source_population = derive_source_population(
-                source_connection,
-                release_batches,
-                sample_seed=pipeline_config.sample_seed,
-            )
-        finally:
-            source_connection.close()
+        if source_population is None:
+            release_map = registered_release_map(pipeline_config)
+            release_batches = load_release_batches(release_map)
+            source_connection = duckdb.connect(str(pipeline_config.db_file), read_only=True)
+            try:
+                source_population = derive_source_population(
+                    source_connection,
+                    release_batches,
+                    sample_seed=pipeline_config.sample_seed,
+                )
+            finally:
+                source_connection.close()
         self._config_path = config_path
         self._pipeline_config = pipeline_config
         self._openalex_api_key = openalex_api_key
@@ -117,4 +119,3 @@ class AiAugmentCtlCtrContext:
     @property
     def eligible_cohorts(self) -> Mapping[str, str]:
         return self._eligible_cohorts
-
