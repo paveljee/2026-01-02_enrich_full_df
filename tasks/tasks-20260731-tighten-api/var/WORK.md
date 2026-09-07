@@ -18,6 +18,11 @@
   with 169 passed, 50 environment-dependent skips, and 3 deselected (excluding
   the separate, stashed/unreviewed BDD collector). Fresh-Lima deployment remains
   for operator confirmation on macOS.
+- Operator confirmation proved provisioning and private `ai` SSH now complete,
+  then exposed a separate audit authentication defect: the root-owned audit
+  `authorized_keys` was mode 0600, so sshd could not read it with the target
+  account's privileges. Keep it root-owned but mode 0644: the public keys are
+  readable while `aivm-audit` still cannot modify its authorization.
 
 ## Authority and constraints
 

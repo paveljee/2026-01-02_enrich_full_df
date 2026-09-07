@@ -145,6 +145,8 @@ def test_runtime_provisioning_preserves_reverse_sshfs_ownership(
     assert 'chown root:"$AIVM_AUDIT_USER" "$APPENDWATCH_DIR"' not in provision
     assert 'chmod 0700 "$APPENDWATCH_DIR"' in provision
     assert '--report-mode 0640' in provision
+    assert 'chown root:root "$AIVM_AUDIT_HOME/.ssh/authorized_keys"' in provision
+    assert 'chmod 0644 "$AIVM_AUDIT_HOME/.ssh/authorized_keys"' in provision
     assert 'stat -c %a $GUEST_CONTROL_DIR_Q)\\\" = 700' in deploy
     assert 'stat -c %G $GUEST_CONTROL_DIR_Q' not in deploy
     assert 'stat -c %G $GUEST_APPENDWATCH_REPORT_Q' not in deploy

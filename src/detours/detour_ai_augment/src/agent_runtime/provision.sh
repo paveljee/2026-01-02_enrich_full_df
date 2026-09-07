@@ -298,7 +298,9 @@ printf 'restrict,command="%s" %s\n' \
     "$AIVM_AUTHORIZED_KEY" \
     > "$AIVM_AUDIT_HOME/.ssh/authorized_keys"
 chown root:root "$AIVM_AUDIT_HOME/.ssh/authorized_keys"
-chmod 0600 "$AIVM_AUDIT_HOME/.ssh/authorized_keys"
+# sshd reads authorized_keys with the target user's privileges. Keep this
+# public-key file root-owned and non-writable by the audit account, but readable.
+chmod 0644 "$AIVM_AUDIT_HOME/.ssh/authorized_keys"
 
 # Preserve the normal Lima mount, but deny this user even directory traversal.
 mkdir -p "$RESTRICTED_GATE"
