@@ -3948,33 +3948,145 @@ def test_ipc_only_runtime_prepares_projection_without_a_namekey(
     assert runtime.eligible_cohorts == {row.namekey: row.cohort}
 
 
-def test_ipc_only_query_defers_configuration_until_first_request(
+def test_ipc_only_query_defers_configuration_and_uses_read_only_database(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    backend_test_paths: BackendTestPaths,
 ) -> None:
     config_path = tmp_path / "config.json"
-    calls: list[tuple[object, ...]] = []
+    runtime = runtime_for_test(tmp_path, backend_test_paths)
+    calls: list[object] = []
+
+    class ReadOnlyConnection:
+        def close(self) -> None:
+            calls.append("close")
+
+    connection = cast(duckdb.DuckDBPyConnection, ReadOnlyConnection())
 
     def configure(selected_path: Path, *, require_namekey: bool) -> None:
         calls.append(("configure", selected_path, require_namekey))
 
-    def payload(namekey: str | None = None) -> str:
-        calls.append(("query", namekey))
-        return "payload"
+    def open_database(
+        selected_runtime: api.AiAugmentBackendContext,
+        *,
+        read_only: bool = False,
+    ) -> duckdb.DuckDBPyConnection:
+        assert selected_runtime is runtime
+        calls.append(("open", read_only))
+        return connection
+
+    def configured_runtime() -> api.AiAugmentBackendContext:
+        calls.append("runtime")
+        return runtime
+
+    def attempts(
+        selected_connection: duckdb.DuckDBPyConnection,
+    ) -> tuple[api.AttemptRecord, ...]:
+        calls.append(("attempts", selected_connection))
+        return ()
+
+    def accepted_attempts(
+        selected_connection: duckdb.DuckDBPyConnection,
+    ) -> tuple[api.DashboardAcceptedAttempt, ...]:
+        calls.append(("accepted", selected_connection))
+        return ()
+
+    def card(
+        selected_runtime: api.AiAugmentBackendContext,
+        selected_connection: duckdb.DuckDBPyConnection,
+        *,
+        namekey: str,
+    ) -> str:
+        calls.append(("card", selected_runtime, selected_connection, namekey))
+        return "card"
 
     monkeypatch.setattr(api, "configure_runtime", configure)
-    monkeypatch.setattr(api, "dashboard_query_payload", payload)
+    monkeypatch.setattr(api, "runtime_configuration", configured_runtime)
+    monkeypatch.setattr(api, "open_detour_database", open_database)
+    monkeypatch.setattr(api, "_attempt_records", attempts)
+    monkeypatch.setattr(api, "_accepted_control_attempts", accepted_attempts)
+    monkeypatch.setattr(api, "_dashboard_card_markdown", card)
 
     query = api.build_ipc_only_dashboard_query_payload_callback(config_path)
 
     assert calls == []
-    assert query(None) == "payload"
-    assert query(TEST_NAMEKEY) == "payload"
+    first = api.DashboardQueryResponse.model_validate_json(query(None))
+    second = api.DashboardQueryResponse.model_validate_json(query(TEST_NAMEKEY))
+    assert first.card_markdown is None
+    assert second.card_markdown == "card"
     assert calls == [
         ("configure", config_path, False),
-        ("query", None),
-        ("query", TEST_NAMEKEY),
+        "runtime",
+        ("open", True),
+        ("attempts", connection),
+        ("accepted", connection),
+        "close",
+        "runtime",
+        ("open", True),
+        ("attempts", connection),
+        ("accepted", connection),
+        ("card", runtime, connection, TEST_NAMEKEY),
+        "close",
     ]
+
+
+def test_detour_database_open_modes_are_explicit_and_reported(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    backend_test_paths: BackendTestPaths,
+) -> None:
+    runtime = runtime_for_test(tmp_path, backend_test_paths)
+    connection = cast(
+        duckdb.DuckDBPyConnection,
+        SimpleNamespace(close=lambda: None),
+    )
+    calls: list[tuple[str, bool]] = []
+    extension_calls: list[tuple[duckdb.DuckDBPyConnection, str, object, object]] = []
+
+    def connect(path: str, *, read_only: bool) -> duckdb.DuckDBPyConnection:
+        calls.append((path, read_only))
+        if not read_only:
+            raise duckdb.IOException("permission denied")
+        return connection
+
+    def load_extension(
+        selected_connection: duckdb.DuckDBPyConnection,
+        extension: str,
+        config: object,
+        *,
+        log: object,
+    ) -> None:
+        extension_calls.append((selected_connection, extension, config, log))
+
+    monkeypatch.setattr(api.duckdb, "connect", connect)
+    monkeypatch.setattr(api, "load_duckdb_extension", load_extension)
+
+    assert api.open_detour_database(runtime, read_only=True) is connection
+    with pytest.raises(api.PushValidationError) as exc_info:
+        api.open_detour_database(runtime)
+
+    assert calls == [
+        (str(runtime.detour_db_path), True),
+        (str(runtime.detour_db_path), False),
+    ]
+    assert extension_calls == [
+        (
+            connection,
+            api.CODEX_TOKEN_EXTENSION,
+            runtime.pipeline.duckdb_extensions.get(api.CODEX_TOKEN_EXTENSION),
+            None,
+        )
+    ]
+    assert str(exc_info.value) == Locale.DETOUR_DUCKDB_OPEN_FAILED
+    assert "read/write mode" in str(exc_info.value)
+
+    def denied_connect(*_args: object, **_kwargs: object) -> None:
+        raise duckdb.IOException("permission denied")
+
+    monkeypatch.setattr(api.duckdb, "connect", denied_connect)
+    with pytest.raises(api.PushValidationError) as read_only_exc_info:
+        api.open_detour_database(runtime, read_only=True)
+    assert str(read_only_exc_info.value) == Locale.DETOUR_DUCKDB_READ_ONLY_OPEN_FAILED
 
 
 def test_configured_namekey_population_accepts_exact_eligible_match() -> None:

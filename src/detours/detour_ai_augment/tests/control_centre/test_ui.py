@@ -900,7 +900,7 @@ async def test_dashboard_refresh_explicitly_hydrates_attempts_from_ipc(
 
 
 @pytest.mark.anyio
-async def test_dashboard_refresh_preserves_api_observation_when_ipc_query_fails(
+async def test_dashboard_refresh_preserves_availability_when_ipc_query_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def in_event_loop(function: Any, /, *args: object, **kwargs: object) -> Any:
@@ -928,7 +928,7 @@ async def test_dashboard_refresh_preserves_api_observation_when_ipc_query_fails(
 
         assert subject.backend_availability == control_ui.BackendAvailability(
             full_api_available=True,
-            ipc_available=False,
+            ipc_available=True,
         )
         assert subject.backend_status is control_ui.BackendStatus.RUNNING_EXTERNALLY
     finally:

@@ -452,7 +452,12 @@ class Locale:
     TASK_IDENTITY_INCOMPLETE: Final = "selected task identity is incomplete"
     TASK_IDENTITY_MISSING: Final = "selected task identity was not found"
     SOURCE_DUCKDB_OPEN_FAILED: Final = "configured source DuckDB could not be opened read-only"
-    DETOUR_DUCKDB_OPEN_FAILED: Final = "detour DuckDB could not be opened"
+    DETOUR_DUCKDB_OPEN_FAILED: Final = (
+        "detour DuckDB could not be opened in read/write mode"
+    )
+    DETOUR_DUCKDB_READ_ONLY_OPEN_FAILED: Final = (
+        "detour DuckDB could not be opened read-only"
+    )
     CONFIGURED_ROWS_DUPLICATE_TEMPLATE: Final = (
         "{table_name} contains duplicate rows for configured namekey"
     )

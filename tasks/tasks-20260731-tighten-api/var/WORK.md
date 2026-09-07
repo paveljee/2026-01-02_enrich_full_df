@@ -1,5 +1,40 @@
 # Tighten API — active Lifecycle alignment and executable specification
 
+## Active IPC-only read-only database fix (2026-09-07)
+
+- Human Operator smoke-tested the startup/cache contour successfully, then
+  reproduced Refresh failure when the persisted Detour DuckDB was deliberately
+  read-only. IPC-only `/query` currently reuses the full Backend's writable,
+  replay-synchronizing connection path.
+- Fix surgically: IPC-only queries open the existing Detour DuckDB read-only,
+  do not project/write the authoritative replay log, and close the query
+  connection deterministically. Full Backend operation retains its existing
+  read/write and synchronization semantics.
+- Per Human Operator direction, both read-only and read/write Detour database
+  openings continue loading the configured Codex-token DuckDB extension.
+- Clarify the full-mode failure as inability to open the Detour DuckDB in
+  read/write mode; add a distinct read-only failure message and focused mode
+  regressions.
+- A failed `/query` currently overwrites a successful `OPTIONS` observation by
+  marking IPC unavailable. Preserve the latest explicit availability result on
+  query/application failure while still reporting that failure; successful
+  queries may continue confirming availability.
+- Implemented: `open_detour_database(..., read_only=True)` skips directory
+  creation, opens DuckDB read-only, still loads the configured Codex-token
+  extension, and has a distinct read-only failure. The default full path remains
+  writable/replay-synchronizing and now reports read/write mode explicitly.
+- `build_ipc_only_dashboard_query_payload_callback` retains only its reviewed
+  one-time lazy configuration. It delegates to the explicitly named
+  `ipc_only_dashboard_query_payload`, which performs locked read-only
+  open/query/close without replay projection.
+- Dashboard `/query` failures no longer overwrite a successful explicit IPC
+  availability observation; the error remains visible to the operator.
+- Focused Backend and Dashboard verification: **114 passed, 36 environment
+  skips**. Broad applicable Detour verification excluding the separately
+  unreviewed BDD module: **190 passed, 46 skipped, 7 deselected**.
+  Whole-repository Ruff and mypy (**99 source files**) and
+  `git diff --check HEAD` pass.
+
 ## Active Dashboard startup refinement (2026-09-07)
 
 - Human Operator reports that recent availability refactors exposed slow

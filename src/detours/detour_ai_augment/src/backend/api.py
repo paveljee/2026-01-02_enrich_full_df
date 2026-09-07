@@ -3914,11 +3914,14 @@ def open_source_database(
 
 def open_detour_database(
     runtime: AiAugmentBackendContext,
+    *,
+    read_only: bool = False,
 ) -> duckdb.DuckDBPyConnection:
     conn: duckdb.DuckDBPyConnection | None = None
     try:
-        runtime.detour_db_path.parent.mkdir(parents=True, exist_ok=True)
-        conn = duckdb.connect(str(runtime.detour_db_path))
+        if not read_only:
+            runtime.detour_db_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = duckdb.connect(str(runtime.detour_db_path), read_only=read_only)
         if runtime.pipeline.match_rule_version.codex_match == 2:
             load_duckdb_extension(
                 conn,
@@ -3930,7 +3933,12 @@ def open_detour_database(
     except (OSError, RuntimeError, duckdb.Error) as exc:
         if conn is not None:
             conn.close()
-        raise PushValidationError(Locale.DETOUR_DUCKDB_OPEN_FAILED) from exc
+        detail = (
+            Locale.DETOUR_DUCKDB_READ_ONLY_OPEN_FAILED
+            if read_only
+            else Locale.DETOUR_DUCKDB_OPEN_FAILED
+        )
+        raise PushValidationError(detail) from exc
 
 
 def _backend_detour_database(
@@ -5903,6 +5911,29 @@ def dashboard_query_payload(namekey: str | None = None) -> str:
     return response.model_dump_json()
 
 
+def ipc_only_dashboard_query_payload(namekey: str | None = None) -> str:
+    runtime = runtime_configuration()
+    with DETOUR_DB_LOCK:
+        conn = open_detour_database(runtime, read_only=True)
+        try:
+            response = DashboardQueryResponse(
+                attempts=_attempt_records(conn),
+                accepted_attempts=_accepted_control_attempts(conn),
+                card_markdown=(
+                    None
+                    if namekey is None
+                    else _dashboard_card_markdown(
+                        runtime,
+                        conn,
+                        namekey=namekey,
+                    )
+                ),
+            )
+        finally:
+            conn.close()
+    return response.model_dump_json()
+
+
 def build_ipc_only_dashboard_query_payload_callback(
     config_path: Path,
 ) -> Callable[[str | None], str]:
@@ -5914,7 +5945,7 @@ def build_ipc_only_dashboard_query_payload_callback(
         if not configured:
             configure_runtime(config_path, require_namekey=False)
             configured = True
-        return dashboard_query_payload(namekey)
+        return ipc_only_dashboard_query_payload(namekey)
 
     return query
 

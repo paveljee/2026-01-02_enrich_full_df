@@ -2169,14 +2169,7 @@ class ControlCentreController:
                 raise
 
     async def _refresh_backend_state(self) -> None:
-        try:
-            snapshot = await asyncio.to_thread(self._backend_database.pull)
-        except (OSError, RuntimeError, ValidationError):
-            self._backend_availability = replace(
-                self._backend_availability,
-                ipc_available=False,
-            )
-            raise
+        snapshot = await asyncio.to_thread(self._backend_database.pull)
         self._backend_availability = replace(
             self._backend_availability,
             ipc_available=True,
