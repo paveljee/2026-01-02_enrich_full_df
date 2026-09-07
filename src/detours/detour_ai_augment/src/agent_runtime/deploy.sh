@@ -414,13 +414,11 @@ verify_instance() {
             && test -r $GUEST_AUDIT_READ_SCRIPT_Q \
             && test -r $GUEST_AUDIT_READ_CONFIG_Q \
             && test -s $GUEST_APPENDWATCH_REPORT_Q \
-            && test \"\$(stat -c %a $GUEST_CONTROL_DIR_Q)\" = 2710 \
-            && test \"\$(stat -c %G $GUEST_CONTROL_DIR_Q)\" = $AIVM_AUDIT_USER \
+            && test \"\$(stat -c %a $GUEST_CONTROL_DIR_Q)\" = 700 \
             && test \"\$(stat -c %a $GUEST_APPENDWATCH_SCRIPT_Q)\" = 600 \
             && test \"\$(stat -c %a $GUEST_AUDIT_READ_SCRIPT_Q)\" = 600 \
             && test \"\$(stat -c %a $GUEST_AUDIT_READ_CONFIG_Q)\" = 600 \
             && test \"\$(stat -c %a $GUEST_APPENDWATCH_REPORT_Q)\" = 640 \
-            && test \"\$(stat -c %G $GUEST_APPENDWATCH_REPORT_Q)\" = $AIVM_AUDIT_USER \
             && test \"\$(cat $GUEST_APPENDWATCH_REPORT_Q)\" = ." \
         || { echo "❌ Appendwatch source or report is unavailable to root"; return 1; }
     [ -r "$HOST_APPENDWATCH_REPORT" ] \

@@ -1,5 +1,24 @@
 # Tighten API — active Lifecycle alignment and executable specification
 
+## Completed deploy regression (2026-09-07)
+
+- Fresh macOS deployment reaches `Lima instance created` and proves a normal
+  session to the Lima jump account, but the first private `ai` connection fails
+  with `Stdio forwarding request failed: Session open refused by peer`.
+- Live inspection proved that private `aivm-sshd.service` did not exist because
+  `cloud-final.service` aborted first: guest `chown root:aivm-audit` was denied
+  on the macOS reverse-SSHFS-mounted appendwatch directory. The ProxyJump error
+  was only the downstream symptom.
+- Preserve the mounted directory's host ownership and mode 0700. The restricted
+  audit authorization already invokes only its root-owned dispatcher through
+  narrowly scoped passwordless sudo, so the audit account needs no direct DAC
+  ownership of the mounted tree. Keep the approved appendwatch `0640` opt-in.
+- Added a hermetic regression rejecting mounted-tree `chown`; `bash -n`, Ruff,
+  mypy, and all 10 audit-read tests pass. The broader non-root detour suite passes
+  with 169 passed, 50 environment-dependent skips, and 3 deselected (excluding
+  the separate, stashed/unreviewed BDD collector). Fresh-Lima deployment remains
+  for operator confirmation on macOS.
+
 ## Authority and constraints
 
 - Authoritative contract: indexed

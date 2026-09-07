@@ -4,6 +4,7 @@ import io
 import json
 import os
 import pwd
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -123,3 +124,30 @@ def test_audit_configuration_must_be_protected_and_has_exact_shape(
     path.chmod(0o620)
     with pytest.raises(audit_read.AuditReadError):
         audit_read.load_configuration(path)
+
+
+def test_runtime_provisioning_preserves_reverse_sshfs_ownership(
+    pytestconfig: pytest.Config,
+) -> None:
+    runtime_root = (
+        pytestconfig.rootpath
+        / "src"
+        / "detours"
+        / "detour_ai_augment"
+        / "src"
+        / "agent_runtime"
+    )
+    provision_path = runtime_root / "provision.sh"
+    deploy_path = runtime_root / "deploy.sh"
+    provision = provision_path.read_text(encoding="utf-8")
+    deploy = deploy_path.read_text(encoding="utf-8")
+
+    assert 'chown root:"$AIVM_AUDIT_USER" "$APPENDWATCH_DIR"' not in provision
+    assert 'chmod 0700 "$APPENDWATCH_DIR"' in provision
+    assert '--report-mode 0640' in provision
+    assert 'stat -c %a $GUEST_CONTROL_DIR_Q)\\\" = 700' in deploy
+    assert 'stat -c %G $GUEST_CONTROL_DIR_Q' not in deploy
+    assert 'stat -c %G $GUEST_APPENDWATCH_REPORT_Q' not in deploy
+
+    for script in (provision_path, deploy_path):
+        subprocess.run(["bash", "-n", str(script)], check=True)

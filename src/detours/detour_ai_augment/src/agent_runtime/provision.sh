@@ -379,8 +379,10 @@ chmod 0440 "$AIVM_AUDIT_SUDOERS"
 visudo -cf "$AIVM_AUDIT_SUDOERS" >/dev/null
 
 # Start appendwatch before anything Codex-capable runs as the AIVM user.
-chown root:"$AIVM_AUDIT_USER" "$APPENDWATCH_DIR"
-chmod 2710 "$APPENDWATCH_DIR"
+# The directory is reverse-SSHFS-mounted from macOS, where guest-side chown is
+# unsupported. The restricted audit protocol reads it through its root-only
+# dispatcher, so it does not need direct guest ownership of the mounted tree.
+chmod 0700 "$APPENDWATCH_DIR"
 chmod 0600 "$AIVM_APPENDWATCH_SCRIPT"
 chmod 0600 "$AIVM_AUDIT_READ_SCRIPT"
 chmod 0600 "$AIVM_AUDIT_CONFIG"

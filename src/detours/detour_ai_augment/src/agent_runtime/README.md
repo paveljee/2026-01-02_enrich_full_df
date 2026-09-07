@@ -24,8 +24,10 @@ forwarding and accepts only the installed read protocol for Codex rollout
 discovery/streaming and the configured appendwatch report. The report and the
 protected audit configuration remain under the Lima `--mount` control
 directory. Appendwatch retains its generic `0600` report default; this
-deployment opts into `0640` so only the dedicated audit group can additionally
-read the atomically replaced report.
+deployment opts into `0640`. Because reverse SSHFS does not support assigning
+guest ownership to this host-mounted directory, `aivm-audit` reads the
+atomically replaced report only through its forced, narrowly scoped root
+dispatcher rather than through direct filesystem access.
 
 ## OpenAI's official guide on reasoning effort
 Captured from 
