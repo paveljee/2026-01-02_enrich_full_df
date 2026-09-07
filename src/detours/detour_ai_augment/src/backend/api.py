@@ -154,6 +154,11 @@ from .helpers.vars import (
     KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL,
     TEXT_ENCODING,
 )
+from .ipc import (
+    DashboardIpcServer,
+    start_dashboard_query_server,
+    stop_dashboard_query_server,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -333,6 +338,7 @@ JSON_MEDIA_TYPE = "application/json"
 HTTP_GET_METHOD = "GET"
 HTTP_POST_METHOD = "POST"
 HTTP_PUT_METHOD = "PUT"
+IPC_ONLY_OPTION = "--ipc-only"
 HTTP_ACCEPT_HEADER = "Accept"
 HTTP_CONTENT_TYPE_HEADER = "Content-Type"
 HTTP_REQUEST_CONTENT_TYPE_HEADER = "content-type"
@@ -708,7 +714,7 @@ MEDIA_TYPE_WITH_CHARSET = f"{MEDIA_TYPE}; charset=utf-8"
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
-    dashboard_query_server: object | None = None
+    dashboard_query_server: DashboardIpcServer | None = None
     parent_watch: asyncio.Task[None] | None = None
     acquired_backend_process_lock = False
     try:
@@ -730,7 +736,12 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
         _acquire_authoritative_process_lock(runtime)
         prove_workflow_inputs_readable()
         synchronize_authoritative_projection(runtime)
-        dashboard_query_server = start_dashboard_query_server()
+        dashboard_query_server = start_dashboard_query_server(
+            DASHBOARD_SOCKET_PATH,
+            dashboard_query_payload,
+            namekey_parameter=KTP_NAMEKEY_COL,
+            query_path=DASHBOARD_QUERY_PATH,
+        )
         start_backend_session_reader()
         parent_pid = os.environ.get(CONTROL_PARENT_PID_ENV_NAME)
         if parent_pid is not None:
@@ -1756,7 +1767,11 @@ def _configured_namekey() -> str:
         raise PushConfigurationError(Locale.CONFIGURED_NAMEKEY_MALFORMED) from exc
 
 
-def configure_runtime(config_path: Path) -> AiAugmentBackendContext:
+def configure_runtime(
+    config_path: Path,
+    *,
+    require_namekey: bool = True,
+) -> AiAugmentBackendContext:
     global RUNTIME_CONFIGURATION
 
     try:
@@ -1783,7 +1798,7 @@ def configure_runtime(config_path: Path) -> AiAugmentBackendContext:
             Locale.TIMEZONE_INVALID_TEMPLATE.format(timezone=pipeline.timezone)
         ) from exc
 
-    configured_namekey = _configured_namekey()
+    configured_namekey = _configured_namekey() if require_namekey else None
 
     replay_log = registered_replay_log(pipeline)
     release_map = registered_release_map(pipeline)
@@ -1797,15 +1812,17 @@ def configure_runtime(config_path: Path) -> AiAugmentBackendContext:
             sample_seed=pipeline.sample_seed,
         )
         cohorts = eligible_cohorts(source_population)
-        _validate_configured_namekey_population(configured_namekey, source_population)
-        try:
-            source_researcher = load_source_researcher(
-                source_conn,
-                cohorts,
-                namekey=configured_namekey,
-            )
-        except PushValidationError as exc:
-            raise PushConfigurationError(str(exc)) from exc
+        source_researcher: SourceResearcher | None = None
+        if configured_namekey is not None:
+            _validate_configured_namekey_population(configured_namekey, source_population)
+            try:
+                source_researcher = load_source_researcher(
+                    source_conn,
+                    cohorts,
+                    namekey=configured_namekey,
+                )
+            except PushValidationError as exc:
+                raise PushConfigurationError(str(exc)) from exc
     except duckdb.Error as exc:
         raise PushConfigurationError(Locale.SOURCE_DUCKDB_VALIDATION_FAILED) from exc
     finally:
@@ -5886,21 +5903,34 @@ def dashboard_query_payload(namekey: str | None = None) -> str:
     return response.model_dump_json()
 
 
-def start_dashboard_query_server() -> object:
-    from .ipc import create_dashboard_query_app, start_dashboard_ipc_server
+def build_ipc_only_dashboard_query_payload_callback(
+    config_path: Path,
+) -> Callable[[str | None], str]:
+    configured = False
 
-    dashboard_app = create_dashboard_query_app(
-        dashboard_query_payload,
+    def query(namekey: str | None) -> str:
+        nonlocal configured
+
+        if not configured:
+            configure_runtime(config_path, require_namekey=False)
+            configured = True
+        return dashboard_query_payload(namekey)
+
+    return query
+
+
+def serve_dashboard_query_only(config_path: Path) -> None:
+    server = start_dashboard_query_server(
+        DASHBOARD_SOCKET_PATH,
+        build_ipc_only_dashboard_query_payload_callback(config_path),
         namekey_parameter=KTP_NAMEKEY_COL,
         query_path=DASHBOARD_QUERY_PATH,
     )
-    return start_dashboard_ipc_server(DASHBOARD_SOCKET_PATH, dashboard_app)
-
-
-def stop_dashboard_query_server(handle: object) -> None:
-    from .ipc import stop_dashboard_ipc_server
-
-    stop_dashboard_ipc_server(cast(Any, handle))
+    try:
+        server.thread.join()
+    finally:
+        stop_dashboard_query_server(server)
+        close_backend_detour_database()
 
 
 @app.get(**PULL_ROUTE)
@@ -5991,6 +6021,7 @@ async def authoritative_push(request: Request) -> Response:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=Locale.CLI_DESCRIPTION)
     parser.add_argument(CONFIG_OPTION, required=True, type=Path)
+    parser.add_argument(IPC_ONLY_OPTION, action="store_true")
     return parser.parse_args(argv)
 
 
@@ -5998,8 +6029,11 @@ def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     _acquire_backend_process_lock()
     try:
-        configure_runtime(args.config)
-        uvicorn.run(app, host=SERVER_HOST, port=SERVER_PORT)
+        if args.ipc_only:
+            serve_dashboard_query_only(args.config)
+        else:
+            configure_runtime(args.config)
+            uvicorn.run(app, host=SERVER_HOST, port=SERVER_PORT)
     finally:
         _release_backend_process_lock()
 

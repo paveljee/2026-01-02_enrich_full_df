@@ -1,5 +1,44 @@
 # Tighten API — active Lifecycle alignment and executable specification
 
+## Dashboard hydration gap implementation (2026-09-07)
+
+- A manually operated Gaoquan Shi lifecycle reached a persisted `410 Gone`.
+  Read-only inspection of the exported `control_centre_attempts` records found
+  18 canonical-namekey attempts across two runs: 17 rejected and the newest
+  accepted with response code 410.
+- A subsequently opened dashboard nevertheless showed no attempts. This was not
+  data loss or namekey mismatch: after the manually operated Backend closed,
+  there was no IPC server from which the dashboard could load persisted state.
+- Implemented the authorized surgical contour: `serve --ipc-only` holds only
+  the lazy Flask Unix-socket query application, constructed by the explicitly
+  named `build_ipc_only_dashboard_query_payload_callback`; dashboard startup
+  detects full external and IPC-only modes without hydration; the adjacent **Refresh** action
+  re-detects and explicitly queries `/query`. A successful refresh persists the
+  validated response in NiceGUI `app.storage.general`; dashboard restart restores
+  that cache without querying. IPC-only launch has no namekey or OpenAlex-key
+  startup prerequisite. Normal Backend orchestration and process ownership remain
+  unchanged.
+- Removed the redundant query-server start/stop wrappers from `api.py`.
+  `ipc.py` now owns typed Flask application construction and Unix-socket server
+  lifecycle; `api.py` injects either `dashboard_query_payload` or the IPC-only
+  lazy payload callback directly at its two call sites.
+- Added focused coverage for lazy/no-namekey IPC configuration, CLI mode
+  separation, non-querying `OPTIONS` detection, startup mode reporting, explicit
+  attempt hydration/cache restoration, and the browser status/Refresh interaction.
+  Ruff and mypy pass; focused Backend/Control Centre tests pass with **104 passed,
+  37 skipped**. A complete broad hermetic rerun passes with **177 passed, 46
+  skipped, 7 deselected**. The preceding run exposed a pre-existing appendwatch
+  test race: a fixed 250 ms sleep did not prove the appended six-byte baseline
+  was processed, while `Path.write_bytes` separately exposed an unintended
+  truncate-to-zero transition. Replaced both with an observable inotify-ordering
+  barrier and an explicit `ftruncate` from six to three bytes, preserving the
+  exact production invariant and assertion; the regression passes **10/10**
+  fresh subprocess runs. The configured all-Detour task
+  currently cannot collect the separate, stashed/unreviewed BDD module because
+  `pytest_bdd` is absent from this Pixi environment. This environment lacks the
+  Playwright browser runtime, so the browser module skips here; its focused
+  production command was supplied to the Human Operator.
+
 ## Completed deploy regression (2026-09-07)
 
 - Fresh macOS deployment reaches `Lima instance created` and proves a normal
@@ -23,6 +62,10 @@
   `authorized_keys` was mode 0600, so sshd could not read it with the target
   account's privileges. Keep it root-owned but mode 0644: the public keys are
   readable while `aivm-audit` still cannot modify its authorization.
+- A subsequent clean macOS/Lima redeployment passed every deployment check,
+  including `ai` SSH, the forced `aivm-audit` protocol and command rejection,
+  mount isolation, appendwatch access controls, Codex/VS Code installation, and
+  guest `OPENALEX_API_KEY` round-trip. The deploy regression is operator-confirmed.
 
 ## Authority and constraints
 

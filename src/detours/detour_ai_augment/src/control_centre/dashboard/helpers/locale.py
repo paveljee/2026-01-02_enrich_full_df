@@ -14,6 +14,7 @@ class Locale:
     ACTION_SELECT_RESEARCHER: Final = "Select a researcher"
     ACTION_VIEW_CARD: Final = "View researcher card"
     ACTION_DOWNLOAD_DOCX: Final = "Download DOCX"
+    ACTION_REFRESH: Final = "Refresh"
 
     PAGE_TITLE: Final = "AI augmentation Control Centre"
     BACKEND_STARTING: Final = "Backend: starting"
@@ -81,6 +82,7 @@ class Locale:
     BACKEND_NOT_RUNNING: Final = "backend is not running"
     BACKEND_STDIN_MISSING: Final = "backend stdin pipe is unavailable"
     BACKEND_DATABASE_REQUEST_FAILED: Final = "backend database IPC query failed"
+    BACKEND_DATABASE_UNAVAILABLE: Final = "backend database IPC is unavailable"
     BACKEND_DATABASE_RESPONSE_INVALID: Final = "backend database IPC response is invalid"
     BACKEND_CARD_MISSING: Final = "backend returned no researcher card"
     DOCX_DOWNLOAD_FAILED: Final = "Researcher card DOCX generation failed"

@@ -3914,6 +3914,69 @@ def test_backend_startup_prepares_source_rows_for_initial_pull(
     assert response.body == "".join(api.configured_pull_lines(source_researcher)).encode()
 
 
+def test_ipc_only_runtime_prepares_projection_without_a_namekey(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    backend_test_paths: BackendTestPaths,
+) -> None:
+    base_runtime = runtime_for_test(tmp_path, backend_test_paths)
+    row = source_population_row("A.", "Sheikh")
+    monkeypatch.delenv(api.NAMEKEY_ENV_NAME, raising=False)
+    monkeypatch.setattr(
+        api.AiAugmentDetourConfig,
+        "from_json",
+        lambda _path: base_runtime.pipeline,
+    )
+    monkeypatch.setattr(api, "registered_replay_log", lambda _pipeline: base_runtime.replay_log)
+    monkeypatch.setattr(api, "registered_release_map", lambda _pipeline: base_runtime.replay_log)
+    monkeypatch.setattr(api, "load_release_batches", lambda _resource: {})
+    monkeypatch.setattr(api, "derive_source_population", lambda *_args, **_kwargs: (row,))
+
+    def unexpected_source_researcher(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("IPC-only configuration must not select one workflow researcher")
+
+    monkeypatch.setattr(api, "load_source_researcher", unexpected_source_researcher)
+
+    runtime = api.configure_runtime(
+        backend_test_paths.ai_augment_config,
+        require_namekey=False,
+    )
+
+    assert runtime.namekey is None
+    assert runtime.source_researcher is None
+    assert runtime.source_population == (row,)
+    assert runtime.eligible_cohorts == {row.namekey: row.cohort}
+
+
+def test_ipc_only_query_defers_configuration_until_first_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.json"
+    calls: list[tuple[object, ...]] = []
+
+    def configure(selected_path: Path, *, require_namekey: bool) -> None:
+        calls.append(("configure", selected_path, require_namekey))
+
+    def payload(namekey: str | None = None) -> str:
+        calls.append(("query", namekey))
+        return "payload"
+
+    monkeypatch.setattr(api, "configure_runtime", configure)
+    monkeypatch.setattr(api, "dashboard_query_payload", payload)
+
+    query = api.build_ipc_only_dashboard_query_payload_callback(config_path)
+
+    assert calls == []
+    assert query(None) == "payload"
+    assert query(TEST_NAMEKEY) == "payload"
+    assert calls == [
+        ("configure", config_path, False),
+        ("query", None),
+        ("query", TEST_NAMEKEY),
+    ]
+
+
 def test_configured_namekey_population_accepts_exact_eligible_match() -> None:
     row = source_population_row("Gaoquan ", "Shi")
 
@@ -3981,10 +4044,12 @@ def test_required_config_and_source_database_are_read_only(
 ) -> None:
     with pytest.raises(SystemExit):
         api.parse_args([])
-    assert (
-        api.parse_args(["--config", str(backend_test_paths.config)]).config
-        == backend_test_paths.config
-    )
+    arguments = api.parse_args(["--config", str(backend_test_paths.config)])
+    assert arguments.config == backend_test_paths.config
+    assert arguments.ipc_only is False
+    assert api.parse_args(
+        ["--config", str(backend_test_paths.config), api.IPC_ONLY_OPTION]
+    ).ipc_only is True
     assert api._detour_db_path(
         backend_test_paths.source_database
     ) == backend_test_paths.source_database.with_name(
@@ -4000,6 +4065,35 @@ def test_required_config_and_source_database_are_read_only(
     finally:
         connection.close()
     assert file_signature(backend_test_paths.source_database) == before
+
+
+def test_main_ipc_only_runs_only_the_dashboard_query_server(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.json"
+    calls: list[object] = []
+    monkeypatch.setattr(api, "_acquire_backend_process_lock", lambda: calls.append("acquire"))
+    monkeypatch.setattr(api, "_release_backend_process_lock", lambda: calls.append("release"))
+    monkeypatch.setattr(
+        api,
+        "serve_dashboard_query_only",
+        lambda selected_path: calls.append(("ipc", selected_path)),
+    )
+    monkeypatch.setattr(
+        api,
+        "configure_runtime",
+        lambda *_args, **_kwargs: pytest.fail("full Backend configuration must not start"),
+    )
+    monkeypatch.setattr(
+        api.uvicorn,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail("Uvicorn must not start in IPC-only mode"),
+    )
+
+    api.main(["--config", str(config_path), api.IPC_ONLY_OPTION])
+
+    assert calls == ["acquire", ("ipc", config_path), "release"]
 
 
 def test_repeated_researcher_rows_materialize_as_distinct_innerdicts() -> None:

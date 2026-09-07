@@ -59,10 +59,18 @@ def _unlink_stale_socket(path: Path) -> None:
     path.unlink()
 
 
-def start_dashboard_ipc_server(
+def start_dashboard_query_server(
     socket_path: Path,
-    app: Flask,
+    query: Callable[[str | None], str],
+    *,
+    namekey_parameter: str,
+    query_path: str,
 ) -> DashboardIpcServer:
+    app = create_dashboard_query_app(
+        query,
+        namekey_parameter=namekey_parameter,
+        query_path=query_path,
+    )
     if not socket_path.is_absolute():
         raise RuntimeError(f"dashboard IPC path is not absolute: {socket_path}")
     socket_path.parent.mkdir(parents=True, exist_ok=True)
@@ -94,7 +102,7 @@ def start_dashboard_ipc_server(
         raise
 
 
-def stop_dashboard_ipc_server(handle: DashboardIpcServer) -> None:
+def stop_dashboard_query_server(handle: DashboardIpcServer) -> None:
     handle.server.shutdown()
     handle.thread.join()
     handle.server.server_close()

@@ -154,6 +154,7 @@ BACKEND_PORT: Final = SERVER_PORT
 
 QUEUE_STORAGE_KEY: Final = "detour_ai_augment_queue"
 RUN_EVENTS_STORAGE_KEY: Final = "detour_ai_augment_run_events"
+BACKEND_DATABASE_STORAGE_KEY: Final = "detour_ai_augment_backend_database"
 
 LIMA_APPENDWATCH_REPORT_PARAM: Final = APPENDWATCH_REPORT_ENV_NAME
 
@@ -178,6 +179,7 @@ ATTEMPT_HISTORY_TABLE_STYLE: Final = (
 )
 ATTEMPT_HISTORY_TABLE_PROPS: Final = "flat bordered wrap-cells"
 ACTION_BUTTON_STYLE: Final = "min-width: 10rem;"
+HTTP_OPTIONS_METHOD: Final = "OPTIONS"
 DOCX_MEDIA_TYPE: Final = (
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 )
@@ -215,6 +217,7 @@ GRID_STATUS_FIELD: Final = "status"
 GRID_ACTION_FIELD: Final = "action"
 PAGE_CONTAINER_TEST_ID: Final = "page-container"
 PAGE_HEADER_TEST_ID: Final = "page-header"
+BACKEND_REFRESH_TEST_ID: Final = "backend-refresh"
 PAGE_SUMMARY_TEST_ID: Final = "page-summary"
 PAGE_FILTERS_TEST_ID: Final = "page-filters"
 RESEARCHER_GRID_TEST_ID: Final = "researcher-grid"
@@ -364,6 +367,8 @@ class BackendStatus(StrEnum):
     STOPPED = "stopped"
     STARTING = "starting"
     RUNNING = "running"
+    RUNNING_EXTERNALLY = "running externally"
+    IPC_ONLY = "IPC only"
     FAILED = "failed"
 
 
@@ -761,6 +766,21 @@ class BackendDatabaseClient:
         except ValidationError as exc:
             raise RuntimeError(Locale.BACKEND_DATABASE_RESPONSE_INVALID) from exc
 
+    def available(self) -> bool:
+        connection = UnixSocketHttpConnection(
+            socket_path=self._socket_path,
+            timeout=CONTROL_HTTP_TIMEOUT_SECONDS,
+        )
+        try:
+            connection.request(HTTP_OPTIONS_METHOD, DASHBOARD_QUERY_PATH)
+            response = connection.getresponse()
+            response.read()
+            return response.status == status.HTTP_200_OK
+        except (OSError, http.client.HTTPException):
+            return False
+        finally:
+            connection.close()
+
     def card(self, namekey: Namekey) -> str:
         cached = self._card_cache.get(namekey)
         if cached is not None:
@@ -876,6 +896,17 @@ class BackendSupervisor:
     @property
     def process(self) -> BackendProcessHandle | None:
         return self._process
+
+    def full_api_available(self) -> bool:
+        request = urllib_request.Request(BACKEND_OPENAPI_URL, method=HTTP_GET_METHOD)
+        try:
+            with urllib_request.urlopen(
+                request,
+                timeout=CONTROL_HTTP_TIMEOUT_SECONDS,
+            ) as response:
+                return response.status == status.HTTP_200_OK
+        except (OSError, urllib_error.URLError, urllib_error.HTTPError):
+            return False
 
     async def start(self, *, namekey: Namekey) -> None:
         if self._process is not None:
@@ -1773,6 +1804,8 @@ class ControlCentreController:
         self._ground_truth: Mapping[Namekey, GroundTruthRecord] = {}
         self._attempt_records: Mapping[Namekey, tuple[AttemptRecord, ...]] = {}
         self._accepted_attempts: Mapping[Namekey, tuple[AcceptedAttempt, ...]] = {}
+        self._observed_backend_status = BackendStatus.STOPPED
+        self._observed_ipc_available = False
 
     @property
     def active_run_id(self) -> UUID | None:
@@ -1784,7 +1817,24 @@ class ControlCentreController:
 
     @property
     def backend_status(self) -> BackendStatus:
-        return self._backend.status
+        owned_status = self._backend.status
+        if owned_status is not BackendStatus.STOPPED:
+            return owned_status
+        return self._observed_backend_status
+
+    async def detect_backend_status(self) -> BackendStatus:
+        full_api_available, ipc_available = await asyncio.gather(
+            asyncio.to_thread(self._backend.full_api_available),
+            asyncio.to_thread(self._backend_database.available),
+        )
+        self._observed_ipc_available = ipc_available
+        if full_api_available:
+            self._observed_backend_status = BackendStatus.RUNNING_EXTERNALLY
+        elif ipc_available:
+            self._observed_backend_status = BackendStatus.IPC_ONLY
+        else:
+            self._observed_backend_status = BackendStatus.STOPPED
+        return self.backend_status
 
     async def start(self) -> None:
         self._researchers = await asyncio.to_thread(self._source_repository.load_researchers)
@@ -1813,6 +1863,7 @@ class ControlCentreController:
             queued_run = self._runs.get(run_id)
             if queued_run is not None and queued_run.status is RunStatus.QUEUED:
                 await self._queue.put(run_id)
+        await self.detect_backend_status()
         self._worker_task = asyncio.create_task(self._worker())
 
     async def shutdown(self) -> None:
@@ -1938,6 +1989,10 @@ class ControlCentreController:
 
     async def _refresh_backend_state(self) -> None:
         snapshot = await asyncio.to_thread(self._backend_database.pull)
+        self._apply_backend_snapshot(snapshot)
+        app.storage.general[BACKEND_DATABASE_STORAGE_KEY] = snapshot.model_dump(mode="json")
+
+    def _apply_backend_snapshot(self, snapshot: DashboardQueryResponse) -> None:
         self._runs = dict(replay_run_events(self._events))
 
         attempt_records: dict[Namekey, list[AttemptRecord]] = {}
@@ -1978,6 +2033,12 @@ class ControlCentreController:
         self._accepted_attempts = {
             namekey: tuple(attempts) for namekey, attempts in accepted_attempts.items()
         }
+
+    async def refresh_from_ipc(self) -> None:
+        await self.detect_backend_status()
+        if not self._observed_ipc_available:
+            raise RuntimeError(Locale.BACKEND_DATABASE_UNAVAILABLE)
+        await self._refresh_backend_state()
 
     async def snapshot(
         self,
@@ -2166,6 +2227,8 @@ class ControlCentreController:
         run_id: UUID,
     ) -> None:
         run = self._runs[run_id]
+        self._observed_backend_status = BackendStatus.STOPPED
+        self._observed_ipc_available = False
         await self._backend.start(namekey=run.namekey)
         result = await self._codex.start(
             run_id=run_id,
@@ -2320,6 +2383,17 @@ class ControlCentreController:
             raise RuntimeError(Locale.JOURNAL_STORAGE_INVALID) from exc
         self._runs = dict(replay_run_events(self._events))
 
+        raw_backend_snapshot = app.storage.general.get(BACKEND_DATABASE_STORAGE_KEY)
+        if raw_backend_snapshot is None:
+            return
+        try:
+            snapshot = DashboardQueryResponse.model_validate_json(
+                json.dumps(raw_backend_snapshot)
+            )
+        except (TypeError, ValueError, ValidationError) as exc:
+            raise RuntimeError(Locale.BACKEND_DATABASE_RESPONSE_INVALID) from exc
+        self._apply_backend_snapshot(snapshot)
+
 
 # =============================================================================
 # NiceGUI page
@@ -2329,6 +2403,7 @@ class ControlCentreController:
 @dataclass(slots=True)
 class UiHandles:
     backend_status_label: Any | None = None
+    backend_refresh_button: Any | None = None
     summary_label: Any | None = None
 
     variable_select: Any | None = None
@@ -2397,6 +2472,15 @@ class ControlCentrePage:
         ):
             ui.label(Locale.PAGE_TITLE)
             self._handles.backend_status_label = ui.label(Locale.BACKEND_STARTING)
+            self._handles.backend_refresh_button = (
+                ui
+                .button(Locale.ACTION_REFRESH, on_click=self.refresh_from_ipc)
+                .props(
+                    NiceGui.TEST_ID_PROP_TEMPLATE.format(
+                        test_id=BACKEND_REFRESH_TEST_ID
+                    )
+                )
+            )
 
     def build_summary(self) -> None:
         self._handles.summary_label = (
@@ -2758,6 +2842,16 @@ class ControlCentrePage:
                 )
             )
         await self.refresh_grid(snapshot=snapshot)
+
+    async def refresh_from_ipc(self) -> None:
+        try:
+            await self._controller.refresh_from_ipc()
+        except RuntimeError:
+            ui.notify(Locale.BACKEND_DATABASE_REQUEST_FAILED, type="negative")
+        else:
+            self._card_cache.clear()
+            self._clear_displayed_card()
+        await self.refresh()
 
     async def refresh_grid(
         self,

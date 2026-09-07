@@ -65,20 +65,37 @@ class FakeSourceRepository:
 
 
 class FakeBackendDatabase:
-    def __init__(self) -> None:
+    def __init__(self, *, available: bool = False) -> None:
         self.pull_calls = 0
+        self.ipc_available = available
+        self.response = api.DashboardQueryResponse(
+            attempts=(),
+            accepted_attempts=(),
+        )
 
-    def pull(self) -> SimpleNamespace:
+    def pull(self) -> api.DashboardQueryResponse:
         self.pull_calls += 1
-        return SimpleNamespace(attempts=(), accepted_attempts=())
+        return self.response
+
+    def available(self) -> bool:
+        return self.ipc_available
 
 
 class FakeBackend:
-    def __init__(self, order: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        order: list[str] | None = None,
+        *,
+        full_api_available: bool = False,
+    ) -> None:
         self.order = [] if order is None else order
         self.started_namekeys: list[control_ui.Namekey] = []
         self.supplied_session_ids: list[control_ui.SessionId] = []
         self.status = control_ui.BackendStatus.STOPPED
+        self.api_available = full_api_available
+
+    def full_api_available(self) -> bool:
+        return self.api_available
 
     async def start(self, *, namekey: control_ui.Namekey) -> None:
         self.order.append("backend-start")
@@ -362,6 +379,117 @@ async def test_dashboard_start_prepares_population_and_ground_truth_before_worke
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("full_api_available", "ipc_available", "expected_status"),
+    (
+        (True, True, control_ui.BackendStatus.RUNNING_EXTERNALLY),
+        (False, True, control_ui.BackendStatus.IPC_ONLY),
+        (False, False, control_ui.BackendStatus.STOPPED),
+    ),
+)
+async def test_dashboard_start_detects_backend_mode_without_querying_history(
+    monkeypatch: pytest.MonkeyPatch,
+    full_api_available: bool,
+    ipc_available: bool,
+    expected_status: control_ui.BackendStatus,
+) -> None:
+    async def in_event_loop(function: Any, /, *args: object, **kwargs: object) -> Any:
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "to_thread", in_event_loop)
+    backend = FakeBackend(full_api_available=full_api_available)
+    backend_database = FakeBackendDatabase(available=ipc_available)
+    subject = controller(backend=backend, backend_database=backend_database)
+
+    await subject.start()
+    try:
+        assert subject.backend_status is expected_status
+        assert backend_database.pull_calls == 0
+    finally:
+        await subject.shutdown()
+
+
+@pytest.mark.anyio
+async def test_dashboard_refresh_explicitly_hydrates_attempts_from_ipc(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def in_event_loop(function: Any, /, *args: object, **kwargs: object) -> Any:
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "to_thread", in_event_loop)
+    backend_database = FakeBackendDatabase(available=True)
+    attempt = api.AttemptRecord(
+        attempt_id="attempt-1",
+        transaction_id=str(uuid4()),
+        request_sha256="0" * 64,
+        stage=api.ATTEMPT_STAGE_ACCEPTED,
+        result=api.ATTEMPT_RESULT_ACCEPTED,
+        updated_at=SESSION_TIMESTAMP,
+        namekey=NAMEKEY,
+        session_id=SESSION_ID,
+        response_code=api.status.HTTP_410_GONE,
+        response_body="accepted\n",
+    )
+    backend_database.response = api.DashboardQueryResponse(
+        attempts=(attempt,),
+        accepted_attempts=(),
+    )
+    subject = controller(backend_database=backend_database)
+
+    await subject.start()
+    try:
+        assert subject.backend_status is control_ui.BackendStatus.IPC_ONLY
+        assert backend_database.pull_calls == 0
+
+        await subject.refresh_from_ipc()
+
+        assert backend_database.pull_calls == 1
+        assert subject._attempt_records == {NAMEKEY: (attempt,)}
+        assert app.storage.general[control_ui.BACKEND_DATABASE_STORAGE_KEY] == (
+            backend_database.response.model_dump(mode="json")
+        )
+    finally:
+        await subject.shutdown()
+
+
+@pytest.mark.anyio
+async def test_dashboard_start_restores_refreshed_backend_data_without_querying(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def in_event_loop(function: Any, /, *args: object, **kwargs: object) -> Any:
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "to_thread", in_event_loop)
+    attempt = api.AttemptRecord(
+        attempt_id="attempt-1",
+        transaction_id=str(uuid4()),
+        request_sha256="0" * 64,
+        stage=api.ATTEMPT_STAGE_ACCEPTED,
+        result=api.ATTEMPT_RESULT_ACCEPTED,
+        updated_at=SESSION_TIMESTAMP,
+        namekey=NAMEKEY,
+        session_id=SESSION_ID,
+        response_code=api.status.HTTP_410_GONE,
+        response_body="accepted\n",
+    )
+    app.storage.general[control_ui.BACKEND_DATABASE_STORAGE_KEY] = (
+        api.DashboardQueryResponse(
+            attempts=(attempt,),
+            accepted_attempts=(),
+        ).model_dump(mode="json")
+    )
+    backend_database = FakeBackendDatabase()
+    subject = controller(backend_database=backend_database)
+
+    await subject.start()
+    try:
+        assert backend_database.pull_calls == 0
+        assert subject._attempt_records == {NAMEKEY: (attempt,)}
+    finally:
+        await subject.shutdown()
+
+
+@pytest.mark.anyio
 async def test_failed_run_events_are_logged(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -429,8 +557,10 @@ def test_backend_database_client_queries_unix_socket_without_authentication(
 
     monkeypatch.setattr(control_ui, "UnixSocketHttpConnection", FakeConnection)
     socket_path = tmp_path / "dashboard.sock"
+    client = control_ui.BackendDatabaseClient(socket_path=socket_path)
 
-    response = control_ui.BackendDatabaseClient(socket_path=socket_path).pull()
+    assert client.available() is True
+    response = client.pull()
 
     assert response == api.DashboardQueryResponse(
         attempts=(),
@@ -438,6 +568,12 @@ def test_backend_database_client_queries_unix_socket_without_authentication(
         card_markdown=None,
     )
     assert calls == [
+        (
+            socket_path,
+            control_ui.CONTROL_HTTP_TIMEOUT_SECONDS,
+            control_ui.HTTP_OPTIONS_METHOD,
+            api.DASHBOARD_QUERY_PATH,
+        ),
         (
             socket_path,
             control_ui.CONTROL_HTTP_TIMEOUT_SECONDS,

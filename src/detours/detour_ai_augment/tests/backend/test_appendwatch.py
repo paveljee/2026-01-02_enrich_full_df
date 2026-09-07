@@ -993,10 +993,16 @@ def test_cli_append_then_shrink_proves_append_baseline_was_processed(
     with path.open("ab", buffering=0) as stream:
         stream.write(b"def")
         os.fsync(stream.fileno())
-    # An OK append does not rewrite the report, so allow the close-write event
-    # to be consumed before shrinking back to the original length.
-    time.sleep(0.25)
-    path.write_bytes(b"abc")
+    # An OK append does not rewrite the report. A subsequent directory-create
+    # event is an observable inotify-ordering barrier: appendwatch processes the
+    # preceding close-write before reconciliation publishes this directory.
+    barrier = root / "append-processed"
+    barrier.mkdir()
+    (barrier / "ready").write_bytes(b"")
+    runner.wait_for("OK          ready")
+    with path.open("r+b", buffering=0) as stream:
+        stream.truncate(3)
+        os.fsync(stream.fileno())
     text = runner.wait_for("file shrank from 6 to 3 bytes")
     assert "COMPROMISED app.log" in text
 
