@@ -80,7 +80,10 @@ def test_dashboard_query_failure_exits_loudly() -> None:
     assert exit_codes == [1]
 
 
-def test_dashboard_client_queries_real_mode_0600_unix_socket(tmp_path: Path) -> None:
+def test_dashboard_client_queries_real_mode_0600_unix_socket(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     socket_path = tmp_path / "dashboard.sock"
     observed: list[str | None] = []
     payload = api.DashboardQueryResponse(
@@ -105,6 +108,9 @@ def test_dashboard_client_queries_real_mode_0600_unix_socket(tmp_path: Path) -> 
     try:
         assert stat.S_ISSOCK(socket_path.stat().st_mode)
         assert stat.S_IMODE(socket_path.stat().st_mode) == SOCKET_PERMISSIONS
+        assert capsys.readouterr().out == (
+            f"Dashboard IPC running on unix://{socket_path}\n"
+        )
         client = BackendDatabaseClient(socket_path=socket_path)
         assert client.available() is True
         assert observed == []

@@ -17,7 +17,8 @@ class Locale:
     ACTION_REFRESH: Final = "Refresh"
 
     PAGE_TITLE: Final = "AI augmentation Control Centre"
-    BACKEND_STARTING: Final = "Backend: starting"
+    BACKEND_STARTING: Final = "Backend API: starting"
+    IPC_DETECTING: Final = "IPC: detecting"
     SUMMARY_LOADING: Final = "Loading researcher state…"
     VARIABLE_FILTER: Final = "Variable"
     STATUS_FILTER: Final = "Status"
@@ -27,7 +28,10 @@ class Locale:
     ALL_COHORTS: Final = "All cohorts"
     NO_RESEARCHER_SELECTED: Final = "No researcher selected"
     ATTEMPT_HISTORY: Final = "Attempt history"
-    BACKEND_STATUS_TEMPLATE: Final = "Backend: {status}"
+    BACKEND_STATUS_TEMPLATE: Final = "Backend API: {status}"
+    IPC_STATUS_TEMPLATE: Final = "IPC: {status}"
+    IPC_AVAILABLE: Final = "available"
+    IPC_UNAVAILABLE: Final = "unavailable"
     SUMMARY_TEMPLATE: Final = (
         "Total {total} · ground truth {ground_truth} · "
         "no ground truth {no_ground_truth} · ineligible {ineligible} · "

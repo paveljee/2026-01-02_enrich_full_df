@@ -380,14 +380,19 @@ async def test_dashboard_start_prepares_population_and_ground_truth_before_worke
 
 @pytest.mark.anyio
 @pytest.mark.parametrize(
-    ("full_api_available", "ipc_available", "expected_status"),
+    (
+        "full_api_available",
+        "ipc_available",
+        "expected_status",
+    ),
     (
         (True, True, control_ui.BackendStatus.RUNNING_EXTERNALLY),
-        (False, True, control_ui.BackendStatus.IPC_ONLY),
+        (True, False, control_ui.BackendStatus.RUNNING_EXTERNALLY),
+        (False, True, control_ui.BackendStatus.STOPPED),
         (False, False, control_ui.BackendStatus.STOPPED),
     ),
 )
-async def test_dashboard_start_detects_backend_mode_without_querying_history(
+async def test_dashboard_start_detects_backend_availability_without_querying_history(
     monkeypatch: pytest.MonkeyPatch,
     full_api_available: bool,
     ipc_available: bool,
@@ -404,9 +409,94 @@ async def test_dashboard_start_detects_backend_mode_without_querying_history(
     await subject.start()
     try:
         assert subject.backend_status is expected_status
+        assert subject.backend_availability == control_ui.BackendAvailability(
+            full_api_available=full_api_available,
+            ipc_available=ipc_available,
+        )
         assert backend_database.pull_calls == 0
     finally:
         await subject.shutdown()
+
+
+@pytest.mark.anyio
+async def test_page_shows_backend_and_ipc_separately_and_gates_refresh() -> None:
+    class Label:
+        text = ""
+
+        def set_text(self, value: str) -> None:
+            self.text = value
+
+    class Button:
+        enabled = True
+
+        def enable(self) -> None:
+            self.enabled = True
+
+        def disable(self) -> None:
+            self.enabled = False
+
+    class Controller:
+        backend_availability = control_ui.BackendAvailability(
+            full_api_available=True,
+            ipc_available=False,
+        )
+
+        async def snapshot(
+            self,
+            *,
+            selection: control_ui.UiSelection,
+        ) -> control_ui.UiSnapshot:
+            del selection
+            return control_ui.UiSnapshot(
+                counts=control_ui.DashboardCounts(
+                    total=0,
+                    ground_truth=0,
+                    no_ground_truth=0,
+                    ineligible=0,
+                    ready=0,
+                    queued=0,
+                    running=0,
+                    complete=0,
+                    failed=0,
+                    canceled=0,
+                ),
+                rows=(),
+                backend_status=(
+                    control_ui.BackendStatus.RUNNING_EXTERNALLY
+                    if self.backend_availability.full_api_available
+                    else control_ui.BackendStatus.STOPPED
+                ),
+                backend_availability=self.backend_availability,
+                active_run_id=None,
+            )
+
+    controller = Controller()
+    backend_label = Label()
+    ipc_label = Label()
+    refresh_button = Button()
+    subject = control_ui.ControlCentrePage(
+        controller=cast(control_ui.ControlCentreController, controller),
+        reference_docx=Path("unused.docx"),
+    )
+    subject._handles.backend_status_label = backend_label
+    subject._handles.backend_ipc_status_label = ipc_label
+    subject._handles.backend_refresh_button = refresh_button
+
+    await subject.refresh()
+
+    assert backend_label.text == "Backend API: running externally"
+    assert ipc_label.text == "IPC: unavailable"
+    assert refresh_button.enabled is False
+
+    controller.backend_availability = control_ui.BackendAvailability(
+        full_api_available=False,
+        ipc_available=True,
+    )
+    await subject.refresh()
+
+    assert backend_label.text == "Backend API: stopped"
+    assert ipc_label.text == "IPC: available"
+    assert refresh_button.enabled is True
 
 
 @pytest.mark.anyio
@@ -438,7 +528,11 @@ async def test_dashboard_refresh_explicitly_hydrates_attempts_from_ipc(
 
     await subject.start()
     try:
-        assert subject.backend_status is control_ui.BackendStatus.IPC_ONLY
+        assert subject.backend_status is control_ui.BackendStatus.STOPPED
+        assert subject.backend_availability == control_ui.BackendAvailability(
+            full_api_available=False,
+            ipc_available=True,
+        )
         assert backend_database.pull_calls == 0
 
         await subject.refresh_from_ipc()
@@ -448,6 +542,42 @@ async def test_dashboard_refresh_explicitly_hydrates_attempts_from_ipc(
         assert app.storage.general[control_ui.BACKEND_DATABASE_STORAGE_KEY] == (
             backend_database.response.model_dump(mode="json")
         )
+    finally:
+        await subject.shutdown()
+
+
+@pytest.mark.anyio
+async def test_dashboard_refresh_preserves_api_observation_when_ipc_query_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def in_event_loop(function: Any, /, *args: object, **kwargs: object) -> Any:
+        return function(*args, **kwargs)
+
+    class FailingBackendDatabase(FakeBackendDatabase):
+        def pull(self) -> api.DashboardQueryResponse:
+            raise OSError("IPC query failed")
+
+    monkeypatch.setattr(asyncio, "to_thread", in_event_loop)
+    subject = controller(
+        backend=FakeBackend(full_api_available=True),
+        backend_database=FailingBackendDatabase(available=True),
+    )
+
+    await subject.start()
+    try:
+        assert subject.backend_availability == control_ui.BackendAvailability(
+            full_api_available=True,
+            ipc_available=True,
+        )
+
+        with pytest.raises(OSError, match="IPC query failed"):
+            await subject.refresh_from_ipc()
+
+        assert subject.backend_availability == control_ui.BackendAvailability(
+            full_api_available=True,
+            ipc_available=False,
+        )
+        assert subject.backend_status is control_ui.BackendStatus.RUNNING_EXTERNALLY
     finally:
         await subject.shutdown()
 

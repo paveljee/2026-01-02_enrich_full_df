@@ -12,12 +12,25 @@
 - Implemented the authorized surgical contour: `serve --ipc-only` holds only
   the lazy Flask Unix-socket query application, constructed by the explicitly
   named `build_ipc_only_dashboard_query_payload_callback`; dashboard startup
-  detects full external and IPC-only modes without hydration; the adjacent **Refresh** action
-  re-detects and explicitly queries `/query`. A successful refresh persists the
+  detects the full API and IPC independently without hydration. The header renders
+  separate `Backend API` and `IPC` states; the adjacent **Refresh** action is
+  enabled only when the latest IPC probe succeeded, then re-detects and explicitly
+  queries `/query`. A successful refresh persists the
   validated response in NiceGUI `app.storage.general`; dashboard restart restores
   that cache without querying. IPC-only launch has no namekey or OpenAlex-key
   startup prerequisite. Normal Backend orchestration and process ownership remain
   unchanged.
+- IPC transport construction, startup, shutdown, and the concrete
+  `DashboardIpcServer` type now live wholly in `ipc.py`; `api.py` explicitly injects
+  either the full or lazy IPC-only payload callback. Once the Unix socket is bound
+  and its serving thread started, IPC logs the exact `unix://` address.
+- Consolidated Dashboard reachability observations into one immutable
+  `BackendAvailability`. Explicit asynchronous detection probes full FastAPI and
+  IPC concurrently, then replaces that value atomically; cheap properties and UI
+  snapshots read the cached result. Owned Backend state remains authoritative for
+  starting/running/failed status, while successful and failed IPC queries and
+  known owned-process start/stop transitions update the same availability value.
+  Focused controller/UI tests pass with **33 passed, 7 environment skips**.
 - Removed the redundant query-server start/stop wrappers from `api.py`.
   `ipc.py` now owns typed Flask application construction and Unix-socket server
   lifecycle; `api.py` injects either `dashboard_query_payload` or the IPC-only
@@ -25,9 +38,9 @@
 - Added focused coverage for lazy/no-namekey IPC configuration, CLI mode
   separation, non-querying `OPTIONS` detection, startup mode reporting, explicit
   attempt hydration/cache restoration, and the browser status/Refresh interaction.
-  Ruff and mypy pass; focused Backend/Control Centre tests pass with **104 passed,
-  37 skipped**. A complete broad hermetic rerun passes with **177 passed, 46
-  skipped, 7 deselected**. The preceding run exposed a pre-existing appendwatch
+  Ruff and mypy pass; focused Backend/Control Centre tests pass with **107 passed,
+  44 skipped**. The complete broad hermetic suite passes with **180 passed, 46
+  skipped, 7 deselected**. An earlier run exposed a pre-existing appendwatch
   test race: a fixed 250 ms sleep did not prove the appended six-byte baseline
   was processed, while `Path.write_bytes` separately exposed an unintended
   truncate-to-zero transition. Replaced both with an observable inotify-ordering
@@ -232,3 +245,5 @@ After production alignment and focused regressions:
   The complete AI-Augment suite and all static checks pass.
 - Final audit preserved the Human Operator's staged/unstaged README state and
   made no staging changes.
+- Availability-state follow-up verification is clean: the configured Ruff task,
+  mypy over **99 source files**, and `git diff --check HEAD` pass.

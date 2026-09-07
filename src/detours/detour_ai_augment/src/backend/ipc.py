@@ -90,6 +90,7 @@ def start_dashboard_query_server(
             daemon=True,
         )
         thread.start()
+        print(f"Dashboard IPC running on unix://{socket_path}", flush=True)
         return DashboardIpcServer(
             socket_path=socket_path,
             server=server,

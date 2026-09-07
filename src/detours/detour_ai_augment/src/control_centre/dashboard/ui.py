@@ -13,7 +13,7 @@ import subprocess
 import sys
 from collections import Counter
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
@@ -217,6 +217,7 @@ GRID_STATUS_FIELD: Final = "status"
 GRID_ACTION_FIELD: Final = "action"
 PAGE_CONTAINER_TEST_ID: Final = "page-container"
 PAGE_HEADER_TEST_ID: Final = "page-header"
+BACKEND_IPC_STATUS_TEST_ID: Final = "backend-ipc-status"
 BACKEND_REFRESH_TEST_ID: Final = "backend-refresh"
 PAGE_SUMMARY_TEST_ID: Final = "page-summary"
 PAGE_FILTERS_TEST_ID: Final = "page-filters"
@@ -368,7 +369,6 @@ class BackendStatus(StrEnum):
     STARTING = "starting"
     RUNNING = "running"
     RUNNING_EXTERNALLY = "running externally"
-    IPC_ONLY = "IPC only"
     FAILED = "failed"
 
 
@@ -382,6 +382,12 @@ class RunAction(StrEnum):
 # =============================================================================
 # Source / database domain models
 # =============================================================================
+
+
+@dataclass(frozen=True, slots=True)
+class BackendAvailability:
+    full_api_available: bool
+    ipc_available: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -576,6 +582,7 @@ class UiSnapshot:
     counts: DashboardCounts
     rows: tuple[ResearcherGridRow, ...]
     backend_status: BackendStatus
+    backend_availability: BackendAvailability
     active_run_id: UUID | None
 
 
@@ -1804,8 +1811,10 @@ class ControlCentreController:
         self._ground_truth: Mapping[Namekey, GroundTruthRecord] = {}
         self._attempt_records: Mapping[Namekey, tuple[AttemptRecord, ...]] = {}
         self._accepted_attempts: Mapping[Namekey, tuple[AcceptedAttempt, ...]] = {}
-        self._observed_backend_status = BackendStatus.STOPPED
-        self._observed_ipc_available = False
+        self._backend_availability = BackendAvailability(
+            full_api_available=False,
+            ipc_available=False,
+        )
 
     @property
     def active_run_id(self) -> UUID | None:
@@ -1820,21 +1829,24 @@ class ControlCentreController:
         owned_status = self._backend.status
         if owned_status is not BackendStatus.STOPPED:
             return owned_status
-        return self._observed_backend_status
+        if self._backend_availability.full_api_available:
+            return BackendStatus.RUNNING_EXTERNALLY
+        return BackendStatus.STOPPED
 
-    async def detect_backend_status(self) -> BackendStatus:
+    @property
+    def backend_availability(self) -> BackendAvailability:
+        return self._backend_availability
+
+    async def detect_backend_availability(self) -> BackendAvailability:
         full_api_available, ipc_available = await asyncio.gather(
             asyncio.to_thread(self._backend.full_api_available),
             asyncio.to_thread(self._backend_database.available),
         )
-        self._observed_ipc_available = ipc_available
-        if full_api_available:
-            self._observed_backend_status = BackendStatus.RUNNING_EXTERNALLY
-        elif ipc_available:
-            self._observed_backend_status = BackendStatus.IPC_ONLY
-        else:
-            self._observed_backend_status = BackendStatus.STOPPED
-        return self.backend_status
+        self._backend_availability = BackendAvailability(
+            full_api_available=full_api_available,
+            ipc_available=ipc_available,
+        )
+        return self._backend_availability
 
     async def start(self) -> None:
         self._researchers = await asyncio.to_thread(self._source_repository.load_researchers)
@@ -1863,7 +1875,7 @@ class ControlCentreController:
             queued_run = self._runs.get(run_id)
             if queued_run is not None and queued_run.status is RunStatus.QUEUED:
                 await self._queue.put(run_id)
-        await self.detect_backend_status()
+        await self.detect_backend_availability()
         self._worker_task = asyncio.create_task(self._worker())
 
     async def shutdown(self) -> None:
@@ -1973,10 +1985,16 @@ class ControlCentreController:
         async with self._idle_refresh_lock:
             if self._shutting_down:
                 return
-            if self._backend.status is BackendStatus.RUNNING:
+            backend_status = self._backend.status
+            if backend_status is BackendStatus.RUNNING:
                 await self._refresh_backend_state()
             else:
                 self._runs = dict(replay_run_events(self._events))
+                if backend_status is BackendStatus.FAILED:
+                    self._backend_availability = BackendAvailability(
+                        full_api_available=False,
+                        ipc_available=False,
+                    )
             if self._active_run_id is not None:
                 self._external_codex_busy = False
                 return
@@ -1988,7 +2006,18 @@ class ControlCentreController:
                 raise
 
     async def _refresh_backend_state(self) -> None:
-        snapshot = await asyncio.to_thread(self._backend_database.pull)
+        try:
+            snapshot = await asyncio.to_thread(self._backend_database.pull)
+        except (OSError, RuntimeError, ValidationError):
+            self._backend_availability = replace(
+                self._backend_availability,
+                ipc_available=False,
+            )
+            raise
+        self._backend_availability = replace(
+            self._backend_availability,
+            ipc_available=True,
+        )
         self._apply_backend_snapshot(snapshot)
         app.storage.general[BACKEND_DATABASE_STORAGE_KEY] = snapshot.model_dump(mode="json")
 
@@ -2035,8 +2064,8 @@ class ControlCentreController:
         }
 
     async def refresh_from_ipc(self) -> None:
-        await self.detect_backend_status()
-        if not self._observed_ipc_available:
+        availability = await self.detect_backend_availability()
+        if not availability.ipc_available:
             raise RuntimeError(Locale.BACKEND_DATABASE_UNAVAILABLE)
         await self._refresh_backend_state()
 
@@ -2108,6 +2137,7 @@ class ControlCentreController:
             counts=counts,
             rows=rows,
             backend_status=self.backend_status,
+            backend_availability=self.backend_availability,
             active_run_id=self.active_run_id,
         )
 
@@ -2202,6 +2232,10 @@ class ControlCentreController:
                 codex_error = exc
         try:
             await self._backend.stop()
+            self._backend_availability = BackendAvailability(
+                full_api_available=False,
+                ipc_available=False,
+            )
         except Exception as backend_error:
             if codex_error is not None:
                 raise ExceptionGroup(
@@ -2227,9 +2261,15 @@ class ControlCentreController:
         run_id: UUID,
     ) -> None:
         run = self._runs[run_id]
-        self._observed_backend_status = BackendStatus.STOPPED
-        self._observed_ipc_available = False
+        self._backend_availability = BackendAvailability(
+            full_api_available=False,
+            ipc_available=False,
+        )
         await self._backend.start(namekey=run.namekey)
+        self._backend_availability = BackendAvailability(
+            full_api_available=True,
+            ipc_available=True,
+        )
         result = await self._codex.start(
             run_id=run_id,
             on_handle=self._register_active_codex,
@@ -2403,6 +2443,7 @@ class ControlCentreController:
 @dataclass(slots=True)
 class UiHandles:
     backend_status_label: Any | None = None
+    backend_ipc_status_label: Any | None = None
     backend_refresh_button: Any | None = None
     summary_label: Any | None = None
 
@@ -2472,6 +2513,15 @@ class ControlCentrePage:
         ):
             ui.label(Locale.PAGE_TITLE)
             self._handles.backend_status_label = ui.label(Locale.BACKEND_STARTING)
+            self._handles.backend_ipc_status_label = (
+                ui
+                .label(Locale.IPC_DETECTING)
+                .props(
+                    NiceGui.TEST_ID_PROP_TEMPLATE.format(
+                        test_id=BACKEND_IPC_STATUS_TEST_ID
+                    )
+                )
+            )
             self._handles.backend_refresh_button = (
                 ui
                 .button(Locale.ACTION_REFRESH, on_click=self.refresh_from_ipc)
@@ -2481,6 +2531,7 @@ class ControlCentrePage:
                     )
                 )
             )
+            self._handles.backend_refresh_button.disable()
 
     def build_summary(self) -> None:
         self._handles.summary_label = (
@@ -2825,6 +2876,21 @@ class ControlCentrePage:
             self._handles.backend_status_label.set_text(
                 Locale.BACKEND_STATUS_TEMPLATE.format(status=snapshot.backend_status.value)
             )
+        if self._handles.backend_ipc_status_label is not None:
+            self._handles.backend_ipc_status_label.set_text(
+                Locale.IPC_STATUS_TEMPLATE.format(
+                    status=(
+                        Locale.IPC_AVAILABLE
+                        if snapshot.backend_availability.ipc_available
+                        else Locale.IPC_UNAVAILABLE
+                    )
+                )
+            )
+        if self._handles.backend_refresh_button is not None:
+            if snapshot.backend_availability.ipc_available:
+                self._handles.backend_refresh_button.enable()
+            else:
+                self._handles.backend_refresh_button.disable()
         if self._handles.summary_label is not None:
             counts = snapshot.counts
             self._handles.summary_label.set_text(

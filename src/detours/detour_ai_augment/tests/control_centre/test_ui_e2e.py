@@ -139,6 +139,10 @@ class BrowserController:
         self._status_by_run_id: dict[UUID, control_ui.RunStatus] = {}
         self._card_render_count: Counter[control_ui.Namekey] = Counter()
         self._backend_status = control_ui.BackendStatus.RUNNING
+        self._backend_availability = control_ui.BackendAvailability(
+            full_api_available=True,
+            ipc_available=True,
+        )
         completed = self._researchers[BROWSER_LEADING_RESEARCHER_COUNT]
         completed_run_id = uuid4()
         self._status_by_namekey[completed.namekey] = control_ui.RunStatus.COMPLETE
@@ -161,7 +165,11 @@ class BrowserController:
         return None
 
     async def refresh_from_ipc(self) -> None:
-        self._backend_status = control_ui.BackendStatus.IPC_ONLY
+        self._backend_status = control_ui.BackendStatus.STOPPED
+        self._backend_availability = control_ui.BackendAvailability(
+            full_api_available=False,
+            ipc_available=True,
+        )
 
     async def snapshot(
         self,
@@ -204,6 +212,7 @@ class BrowserController:
             ),
             rows=rows,
             backend_status=self._backend_status,
+            backend_availability=self._backend_availability,
             active_run_id=None,
         )
 
@@ -684,17 +693,22 @@ def test_control_centre_browser_contract(repository_root: Path) -> None:
 
             backend_status = page.get_by_test_id(
                 control_ui.PAGE_HEADER_TEST_ID
-            ).get_by_text("Backend:")
+            ).get_by_text("Backend API:")
+            ipc_status = page.get_by_test_id(control_ui.BACKEND_IPC_STATUS_TEST_ID)
             backend_refresh = page.get_by_test_id(control_ui.BACKEND_REFRESH_TEST_ID)
-            expect(backend_status).to_have_text("Backend: running")
+            expect(backend_status).to_have_text("Backend API: running")
+            expect(ipc_status).to_have_text("IPC: available")
             expect(backend_refresh).to_have_text(control_ui.Locale.ACTION_REFRESH)
+            expect(backend_refresh).to_be_enabled()
             status_box = backend_status.bounding_box()
             refresh_box = backend_refresh.bounding_box()
             assert status_box is not None
             assert refresh_box is not None
             assert refresh_box["x"] >= status_box["x"] + status_box["width"]
             backend_refresh.click()
-            expect(backend_status).to_have_text("Backend: IPC only")
+            expect(backend_status).to_have_text("Backend API: stopped")
+            expect(ipc_status).to_have_text("IPC: available")
+            expect(backend_refresh).to_be_enabled()
 
             summary = page.get_by_test_id(control_ui.PAGE_SUMMARY_TEST_ID)
             expect(summary).to_contain_text(f"Total {control_ui.EXPECTED_SOURCE_RESEARCHERS}")
