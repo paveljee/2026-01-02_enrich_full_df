@@ -29,39 +29,6 @@ guest ownership to this host-mounted directory, `aivm-audit` reads the
 atomically replaced report only through its forced, narrowly scoped root
 dispatcher rather than through direct filesystem access.
 
-## Closing a manually operated session
-
-Before ending or killing a manually operated Codex session or its full Backend,
-the Human Operator sends the corresponding terminal request to the Backend's
-Unix socket: `/completed`, `/failed`, or `/cancelled`. The request has an empty
-body and the configured `Name-Key` header. For example, from the host repository
-root, while the full Backend is still running:
-
-```bash
-NAMEKEY='{"ktp.first_name": "A.", "ktp.last_name": "Sheikh"}'
-SOCKET_PATH="/tmp/detour-manual-${UID}.sock"
-OUTCOME="completed"
-NAME_KEY_HEADER="$(
-  pixi run -e detour-ai-augment python -c '
-import sys
-from src.detours.detour_ai_augment.src.backend.api import name_key_header
-print(name_key_header(sys.argv[1]), end="")
-' "$NAMEKEY"
-)"
-
-curl --silent --show-error --include \
-  --unix-socket "$SOCKET_PATH" \
-  --request POST \
-  --header "Name-Key: $NAME_KEY_HEADER" \
-  "http://invalid/$OUTCOME"
-```
-
-Send `/cancelled` before killing Codex. On natural completion, send `/completed`
-after Codex exits and before stopping Backend. `200 OK` confirms a complete
-terminal rollout and appendwatch snapshot; `500 Internal Server Error` reports
-a partial snapshot, whose actual response is still preserved in the replay log
-while authoritative logging remains operational.
-
 ## OpenAI's official guide on reasoning effort
 Captured from 
 `https://developers.openai.com/api/docs/guides/reasoning.md` on

@@ -3,9 +3,9 @@ from __future__ import annotations
 from typing import Protocol
 from uuid import UUID
 
-from .acme_protocol import ComponentProtocol
-
 from src.helpers.data_models import HttpRequestLogRecord, NameKey
+
+from .acme_protocol import ComponentProtocol
 
 
 class BackendComponent(

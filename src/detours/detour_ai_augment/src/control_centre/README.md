@@ -1,5 +1,6 @@
 > [!NOTE]
-> Generated using Codex CLI
+> Originally generated
+> using Codex CLI
 > gpt-5.6-sol xhigh
 > on 2026-09-03;
 > see corresponding rollout
@@ -12,6 +13,13 @@
 > Signed-off: Pavel
 
 # How to manually reproduce the operator full workflow
+Compared to `pixi run test-detour-ai-augment-operator`,
+this manual contour omits only the
+Dashboard queue,
+Playwright interaction,
+Control Centre process supervision, and the
+operator test’s isolated-data sanctuary.
+
 Use the following sequence.
 
 > **Important:** using `config_ai_augment.json` operates on the real configured detour outputs. Unlike the operator test, this does not construct an isolated temporary database/replay/CAS environment.
@@ -147,7 +155,7 @@ This timing is intentional:
 3. The session ID only needs to be known before Codex’s first `POST /push`.
 4. Backend finds the corresponding rollout JSONL from the supplied session UUID.
 
-## 5. Let the workflow finish and record the terminal snapshot
+## 5. Let the workflow finish
 
 Codex should repeatedly:
 
@@ -157,8 +165,16 @@ Codex should repeatedly:
 4. follow the returned `Location`
 5. continue until Backend returns `410 Gone`
 
-On normal completion, the Codex/SSH command exits. Before stopping Backend,
-open a third host terminal and send the terminal request while Backend's Unix
+On normal completion, the Codex/SSH command exits.
+
+For a cancellation, send the `OUTCOME="cancelled"`
+request in **terminal 3** (see below)
+**before** terminating Codex.
+
+## 6. Record the run-outcome snapshot — terminal 3
+
+Before stopping Backend,
+open a third host terminal and send the run-outcome request while Backend's Unix
 socket is still available:
 
 ```bash
@@ -182,11 +198,15 @@ curl --silent --show-error --include \
   "http://invalid/$OUTCOME"
 ```
 
-Use `OUTCOME="failed"` after an unsuccessful run. For a cancellation, use
-`OUTCOME="cancelled"` and send the request **before** terminating Codex. A
-`200 OK` response confirms that Backend captured the session rollout and
-appendwatch report; `500 Internal Server Error` means the logged terminal
-snapshot is partial and should be reviewed in Backend logs.
+Use `OUTCOME="failed"` after an unsuccessful run.
+A `200 OK` response confirms that
+Backend captured the session rollout
+and appendwatch report;
+`500 Internal Server Error` means the
+logged run-outcome snapshot is partial
+and should be reviewed in Backend logs.
+
+## 7. Wind down gracefully
 
 After this request, stop Backend with `Ctrl+C`.
 
@@ -195,5 +215,3 @@ To mirror the operator test, leave AIVM running. Otherwise stop it explicitly:
 ```bash
 pixi run -e detour-ai-augment limactl stop aivm
 ```
-
-This manual contour omits only the Dashboard queue, Playwright interaction, Control Centre process supervision, and the operator test’s isolated-data sanctuary.
