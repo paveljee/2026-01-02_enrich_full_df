@@ -79,9 +79,15 @@ ignore = [
 
 [tool.mypy]
 python_version = "3.14"
-ignore_missing_imports = true
+# don't remember what third-party libs we had
+# that necessitated this setting, so disabling
+# for now;
+# signed off: human
+#ignore_missing_imports = true
 plugins = ["pydantic.mypy"]
-warn_unused_ignores = true
+# let's try strict;
+# signed off: human
+strict = true
 exclude = [
     "src/detours/detour_ai_augment/src/llm_inference_api/sample_deploy",
 ]
