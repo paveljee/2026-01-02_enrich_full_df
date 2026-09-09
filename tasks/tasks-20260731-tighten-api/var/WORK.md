@@ -1,335 +1,156 @@
-# Tighten API — active Lifecycle alignment and executable specification
-
-## Active IPC-only read-only database fix (2026-09-07)
-
-- Human Operator smoke-tested the startup/cache contour successfully, then
-  reproduced Refresh failure when the persisted Detour DuckDB was deliberately
-  read-only. IPC-only `/query` currently reuses the full Backend's writable,
-  replay-synchronizing connection path.
-- Fix surgically: IPC-only queries open the existing Detour DuckDB read-only,
-  do not project/write the authoritative replay log, and close the query
-  connection deterministically. Full Backend operation retains its existing
-  read/write and synchronization semantics.
-- Per Human Operator direction, both read-only and read/write Detour database
-  openings continue loading the configured Codex-token DuckDB extension.
-- Clarify the full-mode failure as inability to open the Detour DuckDB in
-  read/write mode; add a distinct read-only failure message and focused mode
-  regressions.
-- A failed `/query` currently overwrites a successful `OPTIONS` observation by
-  marking IPC unavailable. Preserve the latest explicit availability result on
-  query/application failure while still reporting that failure; successful
-  queries may continue confirming availability.
-- Implemented: `open_detour_database(..., read_only=True)` skips directory
-  creation, opens DuckDB read-only, still loads the configured Codex-token
-  extension, and has a distinct read-only failure. The default full path remains
-  writable/replay-synchronizing and now reports read/write mode explicitly.
-- `build_ipc_only_dashboard_query_payload_callback` retains only its reviewed
-  one-time lazy configuration. It delegates to the explicitly named
-  `ipc_only_dashboard_query_payload`, which performs locked read-only
-  open/query/close without replay projection.
-- Dashboard `/query` failures no longer overwrite a successful explicit IPC
-  availability observation; the error remains visible to the operator.
-- Focused Backend and Dashboard verification: **114 passed, 36 environment
-  skips**. Broad applicable Detour verification excluding the separately
-  unreviewed BDD module: **190 passed, 46 skipped, 7 deselected**.
-  Whole-repository Ruff and mypy (**99 source files**) and
-  `git diff --check HEAD` pass.
-
-## Active Dashboard startup refinement (2026-09-07)
-
-- Human Operator reports that recent availability refactors exposed slow
-  Dashboard startup and wants source data cached across starts.
-- Implement surgically: derive a cheap, correctness-scoped identity for the
-  configured source inputs; on a matching NiceGUI cache restore both prepared
-  source population and linked ground truth without reopening the main DB; on
-  a miss rebuild from the read-only source DB and replace the cache.
-- Dashboard startup must log its material stages and expose page services only
-  after source state, persisted Dashboard state, availability observations, and
-  the queue worker are ready.
-- Full-API and IPC startup/page-load availability probes must use a dedicated
-  short fail-fast timeout. They remain observations only and never hydrate
-  attempts implicitly.
-- Added focused regressions for cache hit/miss, no-DB cache restoration,
-  readiness publication/order/logging, and short probes.
-- Implemented a versioned NiceGUI source-data cache containing the exact
-  `SourcePopulationRow` tuple and linked ground-truth mapping. Its startup
-  fingerprint covers DB path/size/mtime/ctime/device/inode, the verified
-  release-map SHA-256, and `sample_seed`; this avoids hashing the 554 MB DB on
-  every start while invalidating ordinary content writes and replacements.
-- A cache hit supplies source population to `AiAugmentCtlCtrContext` and ground
-  truth to `SourceRepository`, so startup does not open the source DuckDB or
-  issue its prior 588 linked-row queries. A miss retains the established
-  read-only derivation and stores the validated result.
-- Production-created `ApplicationServices` remain unpublished until controller
-  startup and cache replacement finish. Startup now logs source/cache,
-  persisted-state, concurrent availability-probe, worker, and final-ready
-  stages. Full-API and IPC observations use a dedicated 250 ms timeout; normal
-  Backend requests retain their existing 10 s timeout.
-- Focused source/cache/readiness/probe regressions pass: **41 passed**; with the
-  browser module: **41 passed, 7 environment skips**. The broad applicable
-  Detour suite excluding the separately unreviewed BDD module passes **189
-  passed, 46 skipped, 7 deselected**. Whole-repository Ruff and mypy (**99
-  source files**) and `git diff --check HEAD` are clean.
-- The initial broad run otherwise reached **195 passed** and exposed one
-  unrelated pre-existing BDD failure: current README Lifecycle parsing yields
-  35 numbered items while `test_detour_ai_augment_bdd.py` still hard-codes 32.
-  This startup patch does not alter that separately stashed/unreviewed BDD work.
-
-## Dashboard hydration gap implementation (2026-09-07)
-
-- A manually operated Gaoquan Shi lifecycle reached a persisted `410 Gone`.
-  Read-only inspection of the exported `control_centre_attempts` records found
-  18 canonical-namekey attempts across two runs: 17 rejected and the newest
-  accepted with response code 410.
-- A subsequently opened dashboard nevertheless showed no attempts. This was not
-  data loss or namekey mismatch: after the manually operated Backend closed,
-  there was no IPC server from which the dashboard could load persisted state.
-- Implemented the authorized surgical contour: `serve --ipc-only` holds only
-  the lazy Flask Unix-socket query application, constructed by the explicitly
-  named `build_ipc_only_dashboard_query_payload_callback`; dashboard startup
-  detects the full API and IPC independently without hydration. The header renders
-  separate `Backend API` and `IPC` states; the adjacent **Refresh** action is
-  enabled only when the latest IPC probe succeeded, then re-detects and explicitly
-  queries `/query`. A successful refresh persists the
-  validated response in NiceGUI `app.storage.general`; dashboard restart restores
-  that cache without querying. IPC-only launch has no namekey or OpenAlex-key
-  startup prerequisite. Normal Backend orchestration and process ownership remain
-  unchanged.
-- IPC transport construction, startup, shutdown, and the concrete
-  `DashboardIpcServer` type now live wholly in `ipc.py`; `api.py` explicitly injects
-  either the full or lazy IPC-only payload callback. Once the Unix socket is bound
-  and its serving thread started, IPC logs the exact `unix://` address.
-- Consolidated Dashboard reachability observations into one immutable
-  `BackendAvailability`. Explicit asynchronous detection probes full FastAPI and
-  IPC concurrently, then replaces that value atomically; cheap properties and UI
-  snapshots read the cached result. Owned Backend state remains authoritative for
-  starting/running/failed status, while successful and failed IPC queries and
-  known owned-process start/stop transitions update the same availability value.
-  Focused controller/UI tests pass with **34 passed, 7 environment skips**.
-- Completed the page-load/shutdown follow-up: removed static `starting` and
-  `detecting` placeholders. Each browser page load now reruns only the full-API
-  and IPC availability probes before constructing the header, so a later IPC-only
-  server is observed and Refresh becomes enabled without querying history. The
-  existing short UI timer remains free of endpoint-probe/access-log churn.
-  IPC-only Ctrl+C now consumes the expected `KeyboardInterrupt`, stops/closes the
-  Flask server and socket, closes any lazy database, and returns through normal
-  singleton-lock release. Focused Ctrl+C and late-availability regressions pass.
-  This container rejected the real IPC-only CLI smoke with `Operation not
-  permitted` before the socket startup message, so live signal confirmation
-  remains for the Human Operator's host.
-- Removed the redundant query-server start/stop wrappers from `api.py`.
-  `ipc.py` now owns typed Flask application construction and Unix-socket server
-  lifecycle; `api.py` injects either `dashboard_query_payload` or the IPC-only
-  lazy payload callback directly at its two call sites.
-- Added focused coverage for lazy/no-namekey IPC configuration, CLI mode
-  separation, non-querying `OPTIONS` detection, startup mode reporting, explicit
-  attempt hydration/cache restoration, and the browser status/Refresh interaction.
-  Ruff and mypy pass; focused Backend/Control Centre tests pass with **109 passed,
-  44 skipped**. The complete broad hermetic suite passes with **182 passed, 46
-  skipped, 7 deselected**. An earlier run exposed a pre-existing appendwatch
-  test race: a fixed 250 ms sleep did not prove the appended six-byte baseline
-  was processed, while `Path.write_bytes` separately exposed an unintended
-  truncate-to-zero transition. Replaced both with an observable inotify-ordering
-  barrier and an explicit `ftruncate` from six to three bytes, preserving the
-  exact production invariant and assertion; the regression passes **10/10**
-  fresh subprocess runs. The configured all-Detour task
-  currently cannot collect the separate, stashed/unreviewed BDD module because
-  `pytest_bdd` is absent from this Pixi environment. This environment lacks the
-  Playwright browser runtime, so the browser module skips here; its focused
-  production command was supplied to the Human Operator.
-
-## Completed deploy regression (2026-09-07)
-
-- Fresh macOS deployment reaches `Lima instance created` and proves a normal
-  session to the Lima jump account, but the first private `ai` connection fails
-  with `Stdio forwarding request failed: Session open refused by peer`.
-- Live inspection proved that private `aivm-sshd.service` did not exist because
-  `cloud-final.service` aborted first: guest `chown root:aivm-audit` was denied
-  on the macOS reverse-SSHFS-mounted appendwatch directory. The ProxyJump error
-  was only the downstream symptom.
-- Preserve the mounted directory's host ownership and mode 0700. The restricted
-  audit authorization already invokes only its root-owned dispatcher through
-  narrowly scoped passwordless sudo, so the audit account needs no direct DAC
-  ownership of the mounted tree. Keep the approved appendwatch `0640` opt-in.
-- Added a hermetic regression rejecting mounted-tree `chown`; `bash -n`, Ruff,
-  mypy, and all 10 audit-read tests pass. The broader non-root detour suite passes
-  with 169 passed, 50 environment-dependent skips, and 3 deselected (excluding
-  the separate, stashed/unreviewed BDD collector). Fresh-Lima deployment remains
-  for operator confirmation on macOS.
-- Operator confirmation proved provisioning and private `ai` SSH now complete,
-  then exposed a separate audit authentication defect: the root-owned audit
-  `authorized_keys` was mode 0600, so sshd could not read it with the target
-  account's privileges. Keep it root-owned but mode 0644: the public keys are
-  readable while `aivm-audit` still cannot modify its authorization.
-- A subsequent clean macOS/Lima redeployment passed every deployment check,
-  including `ai` SSH, the forced `aivm-audit` protocol and command rejection,
-  mount isolation, appendwatch access controls, Codex/VS Code installation, and
-  guest `OPENALEX_API_KEY` round-trip. The deploy regression is operator-confirmed.
+# Tighten API — current work
 
 ## Authority and constraints
 
-- Authoritative contract: indexed
+- Authoritative behavior is
   `src/detours/detour_ai_augment/README.md`, especially **Lifecycle**.
-- Follow `tasks/tasks-20260731-tighten-api/src/TASK.md`; preserve every
-  Human-Operator-signed-off comment.
-- All commands run through `pixi run -e detour-ai-augment`.
-- Git is read-only; never stage or unstage. Main pipeline DB is read-only and
-  `src.repl` must never be run.
-- Changes remain surgical, piecemeal, incremental, and protected upstream
-  before the Human Operator runs costly real E2E tests.
+- Follow `tasks/tasks-20260731-tighten-api/src/TASK.md`.
+- Run every command through the `detour-ai-augment` Pixi environment.
+- Git is read-only: never stage or unstage. Preserve all Human Operator staged
+  edits, including the `RunEventKind` spelling changes in `run_event.py`.
+- Never run `src.repl`; the main pipeline database is read-only.
+- Keep changes surgical. Do not add migrations, aliases, fallbacks, or
+  compatibility handling for a contract that was incorrect.
+- Protect the expensive Human-operated E2E contour with hermetic regressions.
 
-## Indexed README review
+## Current objective
 
-- The revised architecture coherently documents this implementation as a
-  same-host Control Centre/Backend adapter while permitting other remote
-  adapters.
-- Dashboard source preparation already occurs during application startup:
-  `AiAugmentCtlCtrContext` opens the main DB read-only and derives
-  `SourcePopulationRow`s; `ControlCentreController.start` loads researchers
-  and linked ground truth before starting the worker. Add explicit coverage;
-  do not rewrite this production path.
-- Residual prose caveats reported to the Human Operator: Dashboard starts a
-  Codex process inside an already-running Runtime, not the Runtime itself;
-  graceful cleanup cannot execute after SIGKILL/host loss; and an error that
-  prevents server startup cannot expose an HTTP 500.
+Audit and then correct the accepted-commit, persisted HTTP-record, attempt, and
+Dashboard run models to one authoritative contract:
 
-## Authorized production patches
+- The replay commit request body is unversioned. Only the enclosing
+  `HttpRequestLogRecord` retains a schema version; all body-version fields,
+  branches, tests, and documentation are removed outright.
+- The corrected shared HTTP-log shape enforces `dict[str, str]` request and
+  response headers and `str | None` request and response bodies for all newly
+  validated records. Do not preserve the incorrect permissive v1 field types
+  from `aicode/staging`; failures there belong to that implementation.
+- `ReplayCommit` is replaced by the clearer unversioned
+  `CommitRequestBody` and `RunOutcomeResponseBody` models.
+- A new `CodexSessionRecord` contains the authoritative session UUID supplied
+  through Backend stdin plus `CodexRolloutRecord` and
+  `AppendwatchReportRecord`. The session UUID is never inferred from a filename
+  or another artifact.
+- `CommitLogRecord` and `RunOutcomeLogRecord` inherit
+  `HttpRequestLogRecord` and add their respective Lifecycle restrictions, so
+  each serialized subtype remains valid as the base HTTP record.
+- `AttemptRecord` carries the complete `CommitLogRecord`, one nested
+  `PostCommitValidation`, and the complete actual result-bearing `GET /pull`
+  `HttpRequestLogRecord`; HTTP code, headers, and body are derived from that
+  pull rather than duplicated.
+- Dashboard helpers own one authoritative Pydantic `Run` model and its
+  completed/failed/cancelled `RunOutcome`. Run lifecycle state is distinct
+  from outcome; `status` is never used as a synonym for outcome. All authored
+  code, documentation, tests, fields, and messages use this vocabulary.
+- Audit all Pydantic models and dataclasses in `backend/api.py` and Dashboard
+  `ui.py`; centralize only duplicated protocol/domain models, retaining local
+  algorithmic, persisted-storage, presentation, and process-handle models when
+  they have a concrete purpose.
 
-1. Separate guest/host OpenAlex credentials. Dashboard must pass the host key
-   only to Backend; Codex must source the independently provisioned guest env.
-   Operator preflight verifies the guest key without overwriting the host key.
-2. Add one fixed Backend-host singleton `fcntl.flock`, independent of config
-   and replay-log path, while retaining the replay-log descriptor/lock used for
-   authoritative append/fsync. Release both on startup failure and shutdown.
-3. During Backend configuration, load and retain the configured
-   `SourceResearcher`/innerdicts through the read-only source connection.
-   Initial `/pull` consumes this Backend-owned prepared state.
-4. `BackendSupervisor.start` must fail if it already owns a process; it must
-   never silently replace one.
-5. A Dashboard run finalizes through Backend IPC after Codex exits, records a
-   terminal status, and then winds down owned Codex/SSH and Backend processes
-   before `task_done` or the next queue item.
-6. Apply the same idempotent teardown on startup errors, execution exceptions,
-   active cancellation, queued cancellation, and catchable Dashboard shutdown.
-   Queued cancellation immediately removes persisted queue membership and
-   becomes canceled without starting Backend/Codex.
-7. Guest-idle detection must cover any relevant Codex process owned by the
-   Runtime account, not only the exact Dashboard `codex exec` command line.
+## Audit conclusions
 
-## Regression obligations
+- Current `ReplayCommit` mixes two versioned body shapes, flattens
+  session/artifact fields, and contains normalization and serialization
+  branches that the corrected contract removes.
+- Current commit replay derives the session UUID from the rollout filename.
+  That derivation must become validation against the stdin-authoritative UUID,
+  never the source of identity.
+- Current `AttemptRecord` and `ProjectedValidationOutcome` duplicate commit
+  IDs, pull/push provenance, session, rollout hash, response data, and timing.
+- Backend query DTOs are re-wrapped into duplicate Dashboard DTOs. The Backend
+  protocol models can be consumed directly after validation.
+- Dashboard run state is currently split between `RunStatus`, mutable
+  `RunRecord`, `RunEvent`, and separate saved-snapshot models. Run ownership and
+  the three mutually exclusive outcomes belong in Dashboard helpers.
+- `RunEvent` remains valuable as the append-only storage/recovery format; the
+  staged Human Operator spelling must be retained.
+- Persisted NiceGUI cache models, replay-validation models, UI presentation
+  models, and operational process handles each serve distinct purposes and
+  should not be collapsed merely to reduce class count.
+- `AttemptRecord` should retain the full `CommitLogRecord`, nested
+  `PostCommitValidation`, and full result-bearing pull record. Commit UUID/time,
+  push and source provenance, namekey, session UUID, rollout hash, HTTP response
+  code/headers/body, and canonical request hash are derivable and should not be
+  duplicated.
+- `PostCommitValidation` centralizes `stage`, `result`, and `detail`, with strict
+  `PostCommitValidationStage` and `PostCommitValidationResult` enums replacing the
+  scattered string constants.
+- `ProjectedValidationOutcome` overlaps `AttemptRecord`, but the Backend still
+  needs a transient prepared-pull value between validation and the client's
+  actual `GET /pull`. It must not fabricate an HTTP record. The persisted
+  `AttemptRecord.pull` is formed only from the complete exchange emitted by the
+  shared authoritative HTTP logger.
+- Both `CommitLogRecord.request_body` and
+  `RunOutcomeLogRecord.response_body` remain JSON strings, as required by the
+  corrected base HTTP model, and each subtype validates its decoded body
+  without serializing an extra parsed field.
+- `CompactSessionMetadata` is a real persisted boundary and should remain,
+  with stronger UUID/datetime typing if changed. Backend rollout parsing has a
+  distinct richer internal session object. The Dashboard's duplicate session
+  and accepted-attempt wrappers can be removed in favor of the validated IPC
+  models.
+- Retry obligations, evidence audit objects, and `CodexTextResult` validate
+  persisted or untrusted JSON and remain justified. Backend algorithmic
+  dataclasses remain justified as transient execution/index structures.
+- Dashboard source-cache Pydantic models remain justified because they validate
+  persisted NiceGUI storage. Researcher/view/selection and process-handle
+  dataclasses remain useful local projections or ownership handles.
+- Dashboard presentation should use explicit run phase and run outcome fields.
+  `ready` is researcher availability, not a run phase or outcome. Existing UI
+  filters/columns that combine these concepts should be labeled and modeled as
+  a presentation union rather than calling all values a status.
+- The Backend keeps no dependency on Control Centre models. IPC path-to-outcome
+  mapping stays at the Dashboard boundary; Backend IPC uses outcome vocabulary
+  without importing the Dashboard's authoritative `Run` model.
 
-- Host/guest OpenAlex values may differ and are never copied over one another.
-- A second Backend with a different config/replay log cannot acquire the
-  singleton; lock release permits a later Backend.
-- Backend startup prepares source rows once; initial pull does not reopen the
-  source DB.
-- Normal complete, failed finalization, Backend-start failure, Codex-start
-  failure, active cancellation, queued cancellation, Dashboard shutdown, and
-  two sequential queue items all prove correct process ownership and ordering.
-- Dashboard startup explicitly proves read-only source population and linked
-  ground-truth preparation.
-- Broad Codex busy detection prevents a new session from starting.
+## Contract edge under review
 
-## Pytest-BDD phase
+Run-outcome capture may happen before stdin supplies a session UUID, while the
+appendwatch report can still be captured. To preserve that evidence without
+inventing identity, the proposed strict shape is a present
+`CodexSessionRecord` whose `session_id`, `rollout`, and `appendwatch_report` are
+individually nullable in `RunOutcomeResponseBody`; `CommitRequestBody` adds
+validation requiring all of them. `RunOutcomeLogRecord` keeps the HTTP response
+body as a JSON string and validates its decoded value as
+`RunOutcomeResponseBody`.
 
-After production alignment and focused regressions:
+The Architecture section introduces a stronger ownership distinction that must
+precede implementation:
 
-- Create
-  `src/detours/detour_ai_augment/tests/features/detour_ai_augment_lifecycle.feature`.
-- Create
-  `src/detours/detour_ai_augment/tests/test_detour_ai_augment_bdd.py`.
-- Trace all Lifecycle preamble invariants and numbered items. Reuse production
-  entry points and extracted/shared test support; do not call pytest test
-  functions from other tests.
-- Separate hermetic, Linux/root `needs_sudo`, and macOS/AIVM `operator`
-  scenarios using existing markers. Add a Pixi meta-task that executes the
-  module in the required passes, analogous to the current operator suite.
-- Interactive Human/LLM discretion is specified as a supported/observed
-  boundary; deterministic claims are tested at the surrounding interfaces.
+- `AgentRuntimeAttempt` means one AI Agent Runtime/Codex-session effort for one
+  configured HCR, whether initiated manually or orchestrated by the Control
+  Centre; it may contain multiple pull/push/commit cycles.
+- `ControlCentreRun` means the Control Centre's orchestration record around an
+  Agent Runtime attempt. The Dashboard is the current Control Centre adapter,
+  not the definition of a run.
+- The Backend's current row-per-commit `AttemptRecord` is therefore misnamed.
+  The proposed `{commit, post_commit_validation, pull}` model is a Backend commit-result
+  projection, not an Agent Runtime attempt. Its final name and the aggregate
+  `AgentRuntimeAttempt` shape must be settled before implementation.
+- Connector records (`HttpRequestLogRecord`, `CommitLogRecord`, and
+  `RunOutcomeLogRecord`) remain distinct from component-owned state. Dashboard
+  code should use explicit `ControlCentreRun*` names; Backend/query code should
+  not call a single committed push an attempt or a run.
+This is the sole material contract choice awaiting Human Operator confirmation.
 
-## Verification
+## Existing verified foundation
 
-- Run focused tests after each atomic patch.
-- Then run complete Detour tests, Ruff, mypy, lock/TOML/diff checks, the new BDD
-  runner, and the full applicable pre-commit suite through Pixi.
-- Real macOS/Lima operator execution remains the final Human-Operator proof if
-  unavailable in this Linux environment; report that limitation exactly.
+- `/completed`, `/failed`, and `/cancelled` are Flask Unix-socket IPC routes in
+  `backend/ipc.py`; `api.py` owns reusable persistence/domain operations only.
+- `backend/server.py` composes full API plus IPC, or read-only IPC-only mode.
+- Dashboard-first startup, later API/IPC detection, explicit Refresh hydration,
+  source-data caching, and read-only IPC-only database access were smoke-tested
+  by the Human Operator.
+- Restricted `aivm-audit` rollout/report access and clean deploy were confirmed
+  on macOS/Lima.
+- The accepted Aziz Sheikh push fixture is the non-production regression
+  source; no final `410 Gone` production fixture is required.
 
-## Progress
+## Next actions
 
-- Rewired the restored task Makefile away from `src/TASK.md`: manifest,
-  validation, and their embedded tests now receive the active Detour README **Lifecycle** contract from
-  `nl -ba $(TASK) | sed -n '82,159p'`. `TASK` retains file provenance,
-  while `TASK_CMD` alone selects the text and emits its absolute source
-  line numbers; the tests do not override either variable. Internal Python
-  consistently names the configured path `task_path`. The explicitly retired block beginning at line 161 is
-  excluded. Embedded Makefile verification passes: **10 manifest tests** and
-  **29 validator tests**; a disposable real-README generation confirmed all
-  **78** entries and the selected-task hash. Task-related Python identifiers,
-  diagnostics, and execution summaries consistently use `task` terminology;
-  `"source"` remains only where required by the manifest and notebook schemas.
-- Completed the Control Centre **Download DOCX** follow-up without expanding
-  Backend IPC. The page passes the exact displayed Markdown to a shared wrapper
-  around the established Pandoc/reference-DOCX renderer, reuses the canonical
-  card filename transformation, and delivers the resulting bytes through
-  NiceGUI. The button is disabled until a nonempty card is displayed, remains
-  disabled during rendering, reports render failures, and is cleared when its
-  card becomes stale through selection, queue, or rerun changes.
-- Added focused helper/UI coverage and a real Playwright regression that opens
-  a displayed card, downloads the browser artifact, checks its exact suggested
-  filename and DOCX package/content, then proves stale-card clearing. The
-  socket-backed Playwright test collects but is skipped in this container;
-  direct execution of the same Pandoc/reference path produced a valid 12,631
-  byte DOCX containing the supplied literal card text.
-
-- Completed guest/host OpenAlex separation: `CodexRunner` no longer rewrites
-  the provisioned guest environment, and operator preflight no longer replaces
-  the host Backend key with the observed guest value. Focused Ruff passed;
-  focused Control Centre and operator-preflight tests: **5 passed**.
-- Completed Backend lifecycle alignment: one fixed host-wide singleton flock,
-  retained replay-log lock, startup-time read-only source/namekey preparation,
-  and initial pull consumption of the prepared researcher. Backend module:
-  **68 passed, 36 skipped**; focused Ruff/mypy passed.
-- Completed Dashboard lifecycle alignment: it refuses an already-owned Backend,
-  serializes queue items through terminal status and owned-process teardown,
-  cleans up startup/finalization/cancellation/shutdown paths, removes canceled
-  queued items, leaves the guest OpenAlex environment untouched, and detects
-  every runtime-account `codex` process. Dashboard module: **24 passed**;
-  focused Ruff/mypy passed.
-- Added explicit regressions that Dashboard context derives source population
-  through a read-only DB connection and that controller startup prepares both
-  source rows and linked ground truth before starting its worker.
-- Completed the executable Lifecycle specification: a 9-scenario Gherkin
-  feature and pytest-bdd module trace every preamble invariant and all 32
-  numbered Lifecycle items. Seven hermetic scenarios pass; the extracted
-  `needs_sudo` and `operator` contours are independently marked and collect.
-- Added serial Pixi BDD tasks for hermetic, root, and operator passes plus the
-  `test-detour-ai-augment-bdd` meta-runner. The root pass cannot execute in this
-  Linux container because its no-new-privileges policy prevents sudo; the real
-  macOS/Lima operator pass remains Human-Operator execution.
-- Enforced the documented UTF-8 NDJSON response content type exactly for the
-  initial and terminal `/pull` responses, with regression coverage.
-- Verification completed for the work in scope:
-  - BDD hermetic pass: **7 passed, 2 deselected**; root and operator scenarios
-    collect independently.
-  - Complete non-root AI-Augment suite: **175 passed, 51 skipped, 4
-    deselected**; separate real-API check skipped because this worker has no
-    `OPENALEX_API_KEY`.
-  - Card and Control Centre unit modules: **31 passed**. The new Playwright
-    regression and complete seven-test UI E2E module skip only because local
-    sockets are unavailable in this execution environment.
-  - Whole-repository Ruff and mypy: clean (**99 source files** checked by
-    mypy). Mode-3 detour: **6 passed**. Pixi lock and staged/unstaged diff
-    checks: clean.
-- Environment-limited verification is recorded, not hidden: this container's
-  no-new-privileges policy prevents the root BDD pass; it has no macOS/Lima
-  operator contour; DuckDB cannot download `splink_udfs` and configured binary
-  paths point outside this container; Kaleido/Chromium cannot start under its
-  process sandbox. The latest top-level pre-commit attempt therefore stopped in
-  its main-pipeline pytest leg with **34 failures** caused by unavailable
-  `splink_udfs`/absolute external fixture paths; its Ruff and mypy legs passed.
-  The complete AI-Augment suite and all static checks pass.
-- Final audit preserved the Human Operator's staged/unstaged README state and
-  made no staging changes.
-- Availability-state follow-up verification is clean: the configured Ruff task,
-  mypy over **99 source files**, and `git diff --check HEAD` pass.
+1. Settle the architecture-owned `AgentRuntimeAttempt`, `ControlCentreRun`, and
+   per-commit result vocabulary and shapes with the Human Operator; no broad
+   implementation is authorized yet.
+2. After approval, update staged Lifecycle wording first where necessary,
+   implement direct replacements, add hermetic regressions, and run focused
+   then complete Detour verification.

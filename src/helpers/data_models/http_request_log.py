@@ -57,10 +57,10 @@ class HttpRequestLogRecord(BaseModel):
     ready_to_respond_at_unix_usec: int | None = None
     path: str
     query: str
-    request_headers: dict[str, Any] = Field(default_factory=dict)
-    request_body: Any | None = None
+    request_headers: dict[str, str] = Field(default_factory=dict)
+    request_body: str | None = None
     response_code: int | None
-    response_headers: dict[str, Any] | None = Field(default_factory=dict)
+    response_headers: dict[str, str] | None = Field(default_factory=dict)
     response_body: str | None
     received_at_unix_usec: int | None
     duration_usec: int | None

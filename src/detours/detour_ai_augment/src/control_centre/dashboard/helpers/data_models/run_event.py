@@ -15,9 +15,9 @@ class RunEventKind(StrEnum):
     PUSH_ACCEPTED = "push_accepted"
     CANCEL_REQUESTED = "cancel_requested"
     CODEX_EXITED = "codex_exited"
-    COMPLETE = "complete"
+    COMPLETED = "completed"
     FAILED = "failed"
-    CANCELED = "canceled"
+    CANCELLED = "cancelled"
 
 
 class RunEvent(BaseModel):
@@ -31,6 +31,6 @@ class RunEvent(BaseModel):
     session_id: str | None = None
     rollout_jsonl: str | None = None
     remote_pid: int | None = Field(default=None, gt=0)
-    accepted_attempt_id: str | None = None
+    accepted_commit_record_id: str | None = None
     codex_exit_code: int | None = None
     detail: str | None = None

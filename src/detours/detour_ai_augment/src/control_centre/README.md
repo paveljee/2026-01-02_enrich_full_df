@@ -83,9 +83,10 @@ export FASTAPI_DETOUR_NAMEKEY='{"ktp.first_name":"A.","ktp.last_name":"Sheikh"}'
 export FASTAPI_DETOUR_APPENDWATCH_REPORT='/Volumes/home/aicode/aivm/home/ai/.aivm-control/appendwatch/appendwatch-tree.txt'
 export FASTAPI_DETOUR_CODEX_SESSIONS_DIR='/home/ai/.codex/sessions'
 export FASTAPI_DETOUR_DASHBOARD_SOCKET="/tmp/detour-manual-${UID}.sock"
+export FASTAPI_DETOUR_AIVM_IDENTITY_FILE="$HOME/.local/share/aivm/.ssh/id_ed25519"
 
 pixi run -e detour-ai-augment \
-  python -m src.detours.detour_ai_augment.src.backend.api \
+  python -m src.detours.detour_ai_augment.src.backend.server \
   --config config_ai_augment.json
 ```
 
@@ -146,7 +147,7 @@ This timing is intentional:
 3. The session ID only needs to be known before Codex’s first `POST /push`.
 4. Backend finds the corresponding rollout JSONL from the supplied session UUID.
 
-## 5. Let the workflow finish
+## 5. Let the workflow finish and record the terminal snapshot
 
 Codex should repeatedly:
 
@@ -156,7 +157,38 @@ Codex should repeatedly:
 4. follow the returned `Location`
 5. continue until Backend returns `410 Gone`
 
-On normal completion, the Codex/SSH command exits. Then stop Backend with `Ctrl+C`.
+On normal completion, the Codex/SSH command exits. Before stopping Backend,
+open a third host terminal and send the terminal request while Backend's Unix
+socket is still available:
+
+```bash
+cd /Volumes/home/aicode/2026-01-02_enrich_full_df
+
+NAMEKEY='{"ktp.first_name":"A.","ktp.last_name":"Sheikh"}'
+SOCKET_PATH="/tmp/detour-manual-${UID}.sock"
+OUTCOME="completed"
+NAME_KEY_HEADER="$(
+  pixi run -e detour-ai-augment python -c '
+import sys
+from src.detours.detour_ai_augment.src.backend.api import name_key_header
+print(name_key_header(sys.argv[1]), end="")
+' "$NAMEKEY"
+)"
+
+curl --silent --show-error --include \
+  --unix-socket "$SOCKET_PATH" \
+  --request POST \
+  --header "Name-Key: $NAME_KEY_HEADER" \
+  "http://invalid/$OUTCOME"
+```
+
+Use `OUTCOME="failed"` after an unsuccessful run. For a cancellation, use
+`OUTCOME="cancelled"` and send the request **before** terminating Codex. A
+`200 OK` response confirms that Backend captured the session rollout and
+appendwatch report; `500 Internal Server Error` means the logged terminal
+snapshot is partial and should be reviewed in Backend logs.
+
+After this request, stop Backend with `Ctrl+C`.
 
 To mirror the operator test, leave AIVM running. Otherwise stop it explicitly:
 

@@ -590,6 +590,39 @@ def test_http_request_log_response_metadata_is_nonnull_in_v1_and_nullable_in_v1_
             ]
 
 
+@pytest.mark.parametrize("field", ["request_headers", "response_headers"])
+def test_http_request_log_schema_version_1_1_requires_string_header_values(
+    field: str,
+) -> None:
+    value = http_request_log_record(
+        schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION,
+        method="GET",
+        scheme="https",
+        host=TEST_HTTP_HOST,
+        path="/works/W123",
+        redacted_query="select=title&api_key=REDACTED",
+        response_code=200,
+        response_body="response",
+        received_at_unix_usec=123456,
+        duration_usec=789,
+    ).model_dump() | {
+        HTTP_REQUEST_LOG_SCHEMA_VERSION_KEY: KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
+        field: {"x-test-header": 1},
+    }
+
+    with pytest.raises(ValidationError) as raised:
+        HttpRequestLogRecord.model_validate(value)
+
+    assert raised.value.errors(include_url=False) == [
+        {
+            "type": "string_type",
+            "loc": (field, "x-test-header"),
+            "msg": "Input should be a valid string",
+            "input": 1,
+        }
+    ]
+
+
 @pytest.mark.parametrize("coerce_schema_v1", [None, False, True])
 def test_invalid_schema_version_1_1_ignores_v1_coercion_flag(
     coerce_schema_v1: bool | None,

@@ -23,7 +23,7 @@ class EntityProtocol(Protocol):
     
     ```python
     if TYPE_CHECKING:
-        concrete = cast(Some, SomeProtocol)
+        protocol_check: SomeProtocol = cast(Some, None)
     ```
 
     This class serves architectural
