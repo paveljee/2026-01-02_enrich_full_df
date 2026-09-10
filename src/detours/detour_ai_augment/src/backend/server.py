@@ -13,6 +13,7 @@ from .helpers.locale import Locale
 
 CONFIG_OPTION = "--config"
 IPC_ONLY_OPTION = "--ipc-only"
+DANGER_NO_VERIFY_HASH_OPTION = "--danger-no-verify-hash"
 
 
 @asynccontextmanager
@@ -34,17 +35,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=Locale.CLI_DESCRIPTION)
     parser.add_argument(CONFIG_OPTION, required=True, type=Path)
     parser.add_argument(IPC_ONLY_OPTION, action="store_true")
+    parser.add_argument(DANGER_NO_VERIFY_HASH_OPTION, action="store_true")
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
+    verify_hash_on_init = not args.danger_no_verify_hash
     api._acquire_backend_process_lock()
     try:
         if args.ipc_only:
-            ipc.serve_dashboard_query_only(args.config)
+            ipc.serve_dashboard_query_only(
+                args.config,
+                verify_hash_on_init=verify_hash_on_init,
+            )
         else:
-            api.configure_runtime(args.config)
+            api.configure_runtime(
+                args.config,
+                verify_hash_on_init=verify_hash_on_init,
+            )
             uvicorn.run(
                 full_backend_application(),
                 host=api.SERVER_HOST,

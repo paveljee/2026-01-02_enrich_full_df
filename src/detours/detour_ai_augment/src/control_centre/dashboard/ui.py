@@ -30,7 +30,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from src.helpers.architecture import implements
 from src.helpers.cards import build_cards, card_filename, render_docx_bytes
-from src.helpers.data_models import NameKey
+from src.helpers.data_models import NameKey, RegisteredResource
 from src.helpers.vars import (
     CARD_INTRODUCTION,
     DRAW_LABEL,
@@ -58,6 +58,7 @@ from ...backend.api import (
     parse_name_key_header,
     parse_source_key_header,
     registered_release_map,
+    registered_replay_log,
     selected_card_outer_dict,
 )
 from ...backend.helpers.data_models.ai_augment_context import (
@@ -99,7 +100,7 @@ from ...backend.ipc import (
     DASHBOARD_SOCKET_PATH,
     DASHBOARD_SOCKET_PATH_ENV_NAME,
 )
-from ...backend.server import CONFIG_OPTION
+from ...backend.server import CONFIG_OPTION, DANGER_NO_VERIFY_HASH_OPTION
 from .helpers.aggrid import AgGrid
 from .helpers.data_models.ai_augment_context import (
     AiAugmentControlCentreContext,
@@ -499,9 +500,10 @@ class _CachedSourceData(BaseModel):
         )
 
 
-def source_input_fingerprint(config_path: Path) -> _SourceInputFingerprint:
-    pipeline_config = AiAugmentDetourConfig.from_json(config_path)
-    release_map = registered_release_map(pipeline_config)
+def source_input_fingerprint(
+    pipeline_config: AiAugmentDetourConfig,
+    release_map: RegisteredResource,
+) -> _SourceInputFingerprint:
     source_database_path = pipeline_config.db_file.resolve(strict=True)
     source_database_stat = source_database_path.stat()
     return _SourceInputFingerprint(
@@ -519,17 +521,23 @@ def source_input_fingerprint(config_path: Path) -> _SourceInputFingerprint:
 
 def load_cached_source_data(
     config_path: Path,
-) -> tuple[_SourceInputFingerprint, _CachedSourceData | None]:
-    fingerprint = source_input_fingerprint(config_path)
+) -> tuple[
+    _SourceInputFingerprint,
+    _CachedSourceData | None,
+    RegisteredResource,
+]:
+    pipeline_config = AiAugmentDetourConfig.from_json(config_path)
+    release_map = registered_release_map(pipeline_config)
+    fingerprint = source_input_fingerprint(pipeline_config, release_map)
     raw_cache = app.storage.general.get(SOURCE_DATA_STORAGE_KEY)
     try:
         cache = _CachedSourceData.model_validate(raw_cache)
         cache.outerdicts()
     except TypeError, ValueError, ValidationError:
-        return fingerprint, None
+        return fingerprint, None, release_map
     if cache.fingerprint != fingerprint:
-        return fingerprint, None
-    return fingerprint, cache
+        return fingerprint, None, release_map
+    return fingerprint, cache, release_map
 
 
 def store_cached_source_data(
@@ -1102,6 +1110,7 @@ class _BackendSupervisor:
         process = await asyncio.create_subprocess_exec(
             *BACKEND_COMMAND_PREFIX,
             str(self._config_path),
+            DANGER_NO_VERIFY_HASH_OPTION,
             cwd=self._repository_root,
             env=self.environment(namekey=namekey),
             stdin=asyncio.subprocess.PIPE,
@@ -3699,9 +3708,15 @@ def create_services(
     *,
     config_path: Path = DEFAULT_CONFIG_PATH,
     source_data_cache: _CachedSourceData | None = None,
+    release_map: RegisteredResource | None = None,
 ) -> _ApplicationServices:
     pipeline_config = AiAugmentDetourConfig.from_json(config_path)
-    pipeline_config.release_map = registered_release_map(pipeline_config)
+    pipeline_config.release_map = (
+        registered_release_map(pipeline_config)
+        if release_map is None
+        else release_map
+    )
+    pipeline_config.replay_log = registered_replay_log(pipeline_config)
     configuration = AiAugmentControlCentreContext(
         pipeline_config=pipeline_config,
         cached_ai_augment_outerdicts=(
@@ -3714,6 +3729,7 @@ def create_services(
     source_repository = _SourceRepository(configuration=configuration)
     backend = _BackendSupervisor(
         repository_root=REPOSITORY_ROOT,
+        config_path=config_path,
         openalex_api_key=configuration.openalex_api_key,
         appendwatch_report=PurePosixPath(
             configuration.lima_configuration.param[
@@ -3795,7 +3811,9 @@ async def application_startup() -> None:
             Locale.CONTROL_CENTRE_LOG_PREFIX,
             Locale.SOURCE_CACHE_CHECK_LOG,
         )
-        fingerprint, source_data_cache = load_cached_source_data(APPLICATION_CONFIG_PATH)
+        fingerprint, source_data_cache, release_map = load_cached_source_data(
+            APPLICATION_CONFIG_PATH
+        )
         emit_log(
             Locale.CONTROL_CENTRE_LOG_PREFIX,
             (
@@ -3807,6 +3825,7 @@ async def application_startup() -> None:
         services = create_services(
             config_path=APPLICATION_CONFIG_PATH,
             source_data_cache=source_data_cache,
+            release_map=release_map,
         )
         try:
             await services.controller.start()

@@ -108,6 +108,8 @@ def ipc_only_dashboard_query_payload(namekey: str | None = None) -> str:
 
 def build_ipc_only_dashboard_query_payload_callback(
     config_path: Path,
+    *,
+    verify_hash_on_init: bool = True,
 ) -> Callable[[str | None], str]:
     configured = False
 
@@ -115,7 +117,11 @@ def build_ipc_only_dashboard_query_payload_callback(
         nonlocal configured
 
         if not configured:
-            api.configure_runtime(config_path, require_namekey=False)
+            api.configure_runtime(
+                config_path,
+                require_namekey=False,
+                verify_hash_on_init=verify_hash_on_init,
+            )
             configured = True
         return ipc_only_dashboard_query_payload(namekey)
 
@@ -325,10 +331,17 @@ def start_full_dashboard_query_server() -> _DashboardIpcServer:
     )
 
 
-def serve_dashboard_query_only(config_path: Path) -> None:
+def serve_dashboard_query_only(
+    config_path: Path,
+    *,
+    verify_hash_on_init: bool = True,
+) -> None:
     server = start_dashboard_query_server(
         DASHBOARD_SOCKET_PATH,
-        build_ipc_only_dashboard_query_payload_callback(config_path),
+        build_ipc_only_dashboard_query_payload_callback(
+            config_path,
+            verify_hash_on_init=verify_hash_on_init,
+        ),
         namekey_parameter=KTP_NAMEKEY_COL,
         query_path=DASHBOARD_QUERY_PATH,
     )

@@ -60,7 +60,6 @@ from src.helpers.duckdb_utils import (
     materialize_innerdicts_from_rows_table,
 )
 from src.helpers.name_matching import normalized_tokens_sql
-from src.helpers.resources import register_resource
 from src.helpers.vars import (
     CARD_INTRODUCTION,
     CSV_ROW_INDEX_COL,
@@ -1111,7 +1110,11 @@ def _seed_evidence_random(sample_seed: int) -> None:
     EVIDENCE_RANDOM.seed(sample_seed)
 
 
-def registered_release_map(config: PipelineConfig) -> RegisteredResource:
+def registered_release_map(
+    config: PipelineConfig,
+    *,
+    verify_hash_on_init: bool = True,
+) -> RegisteredResource:
     meta = config.files_config.get(MAP_SUBSET_0_TO_BATCH_KEY)
     if meta is None:
         raise _PushConfigurationError(
@@ -1120,12 +1123,15 @@ def registered_release_map(config: PipelineConfig) -> RegisteredResource:
             )
         )
     try:
-        return register_resource(
-            Path(meta[RESOURCE_PATH_KEY]),
+        path = Path(meta[RESOURCE_PATH_KEY])
+        return RegisteredResource(
+            name=path.name,
+            hash=meta[RESOURCE_SHA256_KEY],
             group=ResourceGroup.KTP_PIPELINE_ARTIFACT,
             fragment_type=FragmentType.CSV_ROW,
             description=meta[RESOURCE_DESCRIPTION_KEY],
-            expected_hash=meta[RESOURCE_SHA256_KEY],
+            url=path.resolve().as_uri(),
+            verify_hash_on_init=verify_hash_on_init,
         )
     except (KeyError, OSError, ValueError) as exc:
         raise _PushConfigurationError(
@@ -1162,7 +1168,11 @@ def _repair_incomplete_replay_log_tail(path: Path) -> None:
         raise _PushConfigurationError(Locale.REPLAY_LOG_TAIL_REPAIR_FAILED) from exc
 
 
-def registered_replay_log(config: PipelineConfig) -> RegisteredResource:
+def registered_replay_log(
+    config: PipelineConfig,
+    *,
+    verify_hash_on_init: bool = True,
+) -> RegisteredResource:
     meta = config.files_config.get(REPLAY_LOG_RESOURCE_KEY)
     if meta is None:
         raise _PushConfigurationError(
@@ -1175,11 +1185,14 @@ def registered_replay_log(config: PipelineConfig) -> RegisteredResource:
         if path.is_symlink() or not path.is_file() or not os.access(path, os.R_OK | os.W_OK):
             raise OSError(Locale.REPLAY_LOG_UNREADABLE)
         _repair_incomplete_replay_log_tail(path)
-        return register_resource(
-            path,
+        return RegisteredResource(
+            name=path.name,
+            hash=meta[RESOURCE_SHA256_KEY],
             group=ResourceGroup.KTP_PIPELINE_ARTIFACT,
             fragment_type=FragmentType.LINE_NUMBER,
             description=meta[RESOURCE_DESCRIPTION_KEY],
+            url=path.resolve().as_uri(),
+            verify_hash_on_init=verify_hash_on_init,
         )
     except (KeyError, OSError, ValueError) as exc:
         raise _PushConfigurationError(
@@ -1243,6 +1256,7 @@ def configure_runtime(
     config_path: Path,
     *,
     require_namekey: bool = True,
+    verify_hash_on_init: bool = True,
 ) -> AiAugmentBackendContext:
     global RUNTIME_CONFIGURATION
 
@@ -1272,8 +1286,14 @@ def configure_runtime(
 
     configured_namekey = _configured_namekey() if require_namekey else None
 
-    registered_replay_log(pipeline)
-    pipeline.release_map = registered_release_map(pipeline)
+    pipeline.replay_log = registered_replay_log(
+        pipeline,
+        verify_hash_on_init=verify_hash_on_init,
+    )
+    pipeline.release_map = registered_release_map(
+        pipeline,
+        verify_hash_on_init=verify_hash_on_init,
+    )
     runtime = AiAugmentBackendContext(
         pipeline_config=pipeline,
         configured_namekey=configured_namekey,

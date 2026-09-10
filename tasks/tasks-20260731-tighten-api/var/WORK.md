@@ -91,6 +91,29 @@
   integer and does not derive population identity itself.
 - `api.py` and `ui.py` no longer own or call an outer-dict derivation function.
 
+## Completed dashboard-owned hash verification
+
+- Added Backend CLI option `--danger-no-verify-hash`. Its only semantic effect
+  is to pass `verify_hash_on_init=False` to the detour's configured
+  `RegisteredResource` constructions. Manual full and IPC-only Backend starts
+  retain verified construction by default.
+- The Control Centre verifies its configured release-map and replay-log
+  resources once during startup. Its source-cache path retains the verified
+  release-map object, and every full Backend process it owns receives the
+  danger flag so the child does not repeat content hashing.
+- The replay log now receives its configured SHA-256 instead of silently using
+  its current hash. Both detour configured SHA-256 values are enforced only by
+  `RegisteredResource` initialization; no detour-local direct configured-hash
+  comparison exists. Runtime rollout CAS and replay-projection hashes remain
+  unaffected.
+- The shared main-pipeline resource helper was deliberately left unchanged;
+  this implementation is contained under the AI-augment detour.
+- Focused `py_compile` passed for all four edited production modules. Ruff
+  passes for `backend/server.py` and `backend/ipc.py`; whole-file Ruff/import
+  checks for `api.py` and `ui.py` remain blocked by the already-recorded stale
+  event-model split (`PreparedPullResponse`, removed outcome-table constants,
+  and `server_event` imports). Tests remain untouched as directed.
+
 ## Parked production work
 - Finish `AiAugmentDetourConfig` ownership: configured release map and replay
   log, human-maintained startup SHA-256 validation, derived Detour DB path, and
