@@ -42,11 +42,13 @@ from pydantic import (
 from starlette.datastructures import Headers
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from src.helpers.architecture import implements
 from src.helpers.cards import build_cards, write_cards_zip
 from src.helpers.config import PipelineConfig
 from src.helpers.data_models import (
     FragmentType,
     InnerDict,
+    MatchingProcedure,
     NameKey,
     OuterDict,
     RegisteredResource,
@@ -57,7 +59,6 @@ from src.helpers.data_models.http_request_log import (
 )
 from src.helpers.duckdb_extensions import load_duckdb_extension
 from src.helpers.duckdb_utils import (
-    append_innerdicts_from_jsonlines_table,
     duckdb_quote_identifier,
     materialize_innerdicts_from_rows_table,
 )
@@ -95,7 +96,7 @@ from src.helpers.vars import (
     KTP_TABLE_1_EMPTY_VALUE_PLACEHOLDERS,
 )
 
-from ..architecture import BackendComponent, implements
+from ..architecture import BackendComponent
 from ..control_centre.dashboard.helpers.data_models.run_outcome import (
     NAME_KEY_HEADER,
     name_key_from_header_value,
@@ -105,6 +106,11 @@ from .helpers import codex_parse
 from .helpers.data_models.ai_augment_config import AiAugmentDetourConfig
 from .helpers.data_models.ai_augment_context import (
     AiAugmentBackendContext,
+    AiAugmentCohort,
+    AiAugmentIneligibilityCategory,
+    AiAugmentOuterDict,
+    CommittedInnerDict,
+    QueryResponse,
 )
 from .helpers.data_models.pydantic_to_paste import (
     MAX_PUSH_BODY_BYTES,
@@ -124,7 +130,6 @@ from .helpers.data_models.pydantic_to_paste import (
 from .helpers.data_models.server_event import (
     COMMIT_PATH,
     SOURCE_KEY_HEADER,
-    AcceptedInnerDictSummary,
     AgentRuntimeAttempt,
     AppendwatchReportEncoding,
     AppendwatchReportRecord,
@@ -136,17 +141,10 @@ from .helpers.data_models.server_event import (
     PostCommitValidationResult,
     PostCommitValidationStage,
     PreparedPullResponse,
-    QueryResponse,
     RunOutcomeResponse,
     RunOutcomeResponseBody,
     source_key_from_header_value,
     source_key_header_value,
-)
-from .helpers.data_models.source_population import (
-    IneligibilityCategory,
-    SourceCohort,
-    SourcePopulationRow,
-    SourceResearcher,
 )
 from .helpers.data_models.submission_fixture import (
     L_FEI_FEI_INITIAL_FIXTURE,
@@ -446,7 +444,6 @@ MARKDOWN_MEDIA_TYPE = "text/markdown"
 
 MAP_COLUMNS = (DRAW_LABEL, BATCH_LABEL)
 # ground truth is defined explicitly by released batch, exclusive of dupe
-GROUND_TRUTH_COHORT = SourceCohort.GROUND_TRUTH
 GROUND_TRUTH_RELEASE_BATCHES = frozenset({"subset 1", "subset 5", "subset 6", "subset 7"})
 EXCLUDED_NAMEKEY = json.dumps(
     {KTP_FIRST_NAME_COL: "Mercouri G.", KTP_LAST_NAME_COL: "Kanatzidis"},
@@ -459,7 +456,6 @@ GROUND_TRUTH_DEF: Callable[
     namekey != EXCLUDED_NAMEKEY
     and any(release_batches.get(draw) in GROUND_TRUTH_RELEASE_BATCHES for draw in draws)
 )
-NO_GROUND_TRUTH_COHORT = SourceCohort.NO_GROUND_TRUTH
 # no ground truth is defined analytically from all unreleased except some
 NO_GROUND_TRUTH_PARTITION = 4
 NO_GROUND_TRUTH_SSN_COUNT = 1
@@ -478,14 +474,13 @@ EXPECTED_INELIGIBLE_RESEARCHERS = 33
 EXPECTED_SOURCE_RESEARCHERS = EXPECTED_ELIGIBLE_RESEARCHERS + EXPECTED_INELIGIBLE_RESEARCHERS
 EXPECTED_MULTIDRAW_SOURCE_RESEARCHERS = 5
 RND_START = 1
-INELIGIBLE_COHORT = SourceCohort.INELIGIBLE
 INELIGIBLE_RELEASE_BATCH = "subset 8"
 EXPECTED_INELIGIBILITY_COUNTS = {
-    IneligibilityCategory.EXCLUDED_DUPLICATE_NAMEKEY: 1,
-    IneligibilityCategory.RELEASE_BATCH_SUBSET_8: 3,
-    IneligibilityCategory.STAGING_PARTITION_2: 7,
-    IneligibilityCategory.STAGING_PARTITION_4_XLSX_NON_EXACT: 6,
-    IneligibilityCategory.STAGING_PARTITION_4_MULTIPLE_SSN: 16,
+    AiAugmentIneligibilityCategory.EXCLUDED_DUPLICATE_NAMEKEY: 1,
+    AiAugmentIneligibilityCategory.RELEASE_BATCH_SUBSET_8: 3,
+    AiAugmentIneligibilityCategory.STAGING_PARTITION_2: 7,
+    AiAugmentIneligibilityCategory.STAGING_PARTITION_4_XLSX_NON_EXACT: 6,
+    AiAugmentIneligibilityCategory.STAGING_PARTITION_4_MULTIPLE_SSN: 16,
 }
 DRAW_VALUE_SEPARATOR = ", "
 DRAW_PILOT_PREFIX = "pilot."
@@ -1100,16 +1095,6 @@ class _EvidenceAssessment:
         )
 
 
-@dataclass(frozen=True)
-class _ResearcherContext:
-    namekey: str
-    draw_number: str
-    first_name: str
-    last_name: str
-    cohort: str = GROUND_TRUTH_COHORT
-    draw_numbers: tuple[str, ...] = ()
-
-
 class _CodexMatchProcedure:
     dataset_id_field = KTP_NAMEKEY_COL
 
@@ -1354,43 +1339,61 @@ def _draw_sort_key(
     return (group, tokens, normalized)
 
 
-def _namekeys_and_draws(
+def _source_innerdicts_by_namekey(
     conn: duckdb.DuckDBPyConnection,
-) -> dict[str, tuple[NameKey, tuple[str, ...]]]:
-    draws_by_namekey: dict[str, set[str]] = {}
-    names_by_namekey: dict[str, NameKey] = {}
-    for table_name in (XLSX_INNERDICT_TABLE, DOCX_INNERDICT_TABLE, PARQUET_INNERDICT_TABLE):
-        try:
-            table_rows = conn.execute(
-                f"SELECT {duckdb_quote_identifier(KTP_NAMEKEY_COL)}, "
-                f"{duckdb_quote_identifier(KTP_INNERDICT_JSONLINES_COL)} "
-                f"FROM {table_name} "
-                f"ORDER BY {duckdb_quote_identifier(KTP_NAMEKEY_COL)}"
-            ).fetchall()
-        except duckdb.Error as exc:
+    *,
+    table_name: str,
+    procedure: MatchingProcedure,
+) -> dict[str, tuple[InnerDict, ...]]:
+    try:
+        table_rows = conn.execute(
+            f"SELECT {duckdb_quote_identifier(KTP_NAMEKEY_COL)}, "
+            f"{duckdb_quote_identifier(KTP_INNERDICT_JSONLINES_COL)} "
+            f"FROM {table_name} "
+            f"ORDER BY {duckdb_quote_identifier(KTP_NAMEKEY_COL)}"
+        ).fetchall()
+    except duckdb.Error as exc:
+        raise _PushConfigurationError(
+            Locale.SOURCE_DUCKDB_TABLE_MISSING_TEMPLATE.format(table_name=table_name)
+        ) from exc
+    innerdicts_by_namekey: dict[str, tuple[InnerDict, ...]] = {}
+    for raw_namekey, jsonlines in table_rows:
+        if not isinstance(raw_namekey, str):
             raise _PushConfigurationError(
-                Locale.SOURCE_DUCKDB_TABLE_MISSING_TEMPLATE.format(table_name=table_name)
+                Locale.TABLE_NAMEKEY_NON_TEXT_TEMPLATE.format(table_name=table_name)
+            )
+        try:
+            namekey = NameKey.from_json_key(raw_namekey).to_json_key()
+        except (ValueError, TypeError, json.JSONDecodeError) as exc:
+            raise _PushConfigurationError(
+                Locale.TABLE_NAMEKEY_INVALID_TEMPLATE.format(table_name=table_name)
             ) from exc
-        for raw_namekey, jsonlines in table_rows:
-            if not isinstance(raw_namekey, str):
-                raise _PushConfigurationError(
-                    Locale.TABLE_NAMEKEY_NON_TEXT_TEMPLATE.format(table_name=table_name)
-                )
-            try:
-                name_key = NameKey.from_json_key(raw_namekey)
-            except (ValueError, TypeError, json.JSONDecodeError) as exc:
-                raise _PushConfigurationError(
-                    Locale.TABLE_NAMEKEY_INVALID_TEMPLATE.format(table_name=table_name)
-                ) from exc
-            namekey = name_key.to_json_key()
-            names_by_namekey[namekey] = name_key
-            namekey_draws = draws_by_namekey.setdefault(namekey, set())
+        if namekey in innerdicts_by_namekey:
+            raise _PushConfigurationError(
+                Locale.CONFIGURED_ROWS_DUPLICATE_TEMPLATE.format(table_name=table_name)
+            )
+        innerdicts_by_namekey[namekey] = tuple(
+            InnerDict.from_mapping(row, procedure)
             for row in _innerdict_json_rows(
                 jsonlines,
                 table_name=table_name,
                 namekey=namekey,
-            ):
-                draw_number = row.get(DRAW_LABEL)
+            )
+        )
+    return innerdicts_by_namekey
+
+
+def _namekeys_and_draws(
+    *source_innerdicts: Mapping[str, tuple[InnerDict, ...]],
+) -> dict[str, tuple[NameKey, tuple[str, ...]]]:
+    draws_by_namekey: dict[str, set[str]] = {}
+    names_by_namekey: dict[str, NameKey] = {}
+    for innerdicts_by_namekey in source_innerdicts:
+        for namekey, innerdicts in innerdicts_by_namekey.items():
+            names_by_namekey[namekey] = NameKey.from_json_key(namekey)
+            namekey_draws = draws_by_namekey.setdefault(namekey, set())
+            for innerdict in innerdicts:
+                draw_number = innerdict.data.get(DRAW_LABEL)
                 if draw_number is not None:
                     draw_text = str(draw_number).strip()
                     if draw_text:
@@ -1404,13 +1407,32 @@ def _namekeys_and_draws(
     }
 
 
-def derive_source_population(
+def derive_ai_augment_outerdicts(
     conn: duckdb.DuckDBPyConnection,
     release_batches: Mapping[str, str],
     *,
     sample_seed: int,
-) -> tuple[SourcePopulationRow, ...]:
-    researchers_by_namekey = _namekeys_and_draws(conn)
+) -> tuple[AiAugmentOuterDict, ...]:
+    xlsx_innerdicts = _source_innerdicts_by_namekey(
+        conn,
+        table_name=XLSX_INNERDICT_TABLE,
+        procedure=XlsxMatchProcedure(),
+    )
+    ssn_innerdicts = _source_innerdicts_by_namekey(
+        conn,
+        table_name=PARQUET_INNERDICT_TABLE,
+        procedure=ParquetMatchProcedure(),
+    )
+    docx_innerdicts = _source_innerdicts_by_namekey(
+        conn,
+        table_name=DOCX_INNERDICT_TABLE,
+        procedure=DocxMatchProcedure(),
+    )
+    researchers_by_namekey = _namekeys_and_draws(
+        xlsx_innerdicts,
+        ssn_innerdicts,
+        docx_innerdicts,
+    )
     rnd_values = list(range(RND_START, len(researchers_by_namekey) + RND_START))
     Random(sample_seed).shuffle(rnd_values)
     rnd_by_namekey = dict(zip(sorted(researchers_by_namekey), rnd_values, strict=True))
@@ -1480,104 +1502,117 @@ def derive_source_population(
     if set(partition_flags) != set(researchers_by_namekey):
         raise _PushConfigurationError(Locale.CARD_PARTITION_NAMEKEYS_MISMATCH)
 
-    population: list[SourcePopulationRow] = []
+    outerdicts: list[AiAugmentOuterDict] = []
     for namekey, (name_key, draws) in researchers_by_namekey.items():
-        ineligibility_category: IneligibilityCategory | None = None
+        ineligibility_category: AiAugmentIneligibilityCategory | None = None
         if namekey in ground_truth:
-            cohort = GROUND_TRUTH_COHORT
+            cohort = AiAugmentCohort.GROUND_TRUTH
         elif namekey in no_ground_truth:
-            cohort = NO_GROUND_TRUTH_COHORT
+            cohort = AiAugmentCohort.NO_GROUND_TRUTH
         else:
-            cohort = INELIGIBLE_COHORT
+            cohort = AiAugmentCohort.INELIGIBLE
             partition, xlsx_non_exact, ssn_count = partition_flags[namekey]
             if namekey == EXCLUDED_NAMEKEY:
-                ineligibility_category = IneligibilityCategory.EXCLUDED_DUPLICATE_NAMEKEY
+                ineligibility_category = (
+                    AiAugmentIneligibilityCategory.EXCLUDED_DUPLICATE_NAMEKEY
+                )
             elif any(release_batches.get(draw) == INELIGIBLE_RELEASE_BATCH for draw in draws):
-                ineligibility_category = IneligibilityCategory.RELEASE_BATCH_SUBSET_8
+                ineligibility_category = (
+                    AiAugmentIneligibilityCategory.RELEASE_BATCH_SUBSET_8
+                )
             elif partition == KTP_PARTITION_SSN_VALUE:
-                ineligibility_category = IneligibilityCategory.STAGING_PARTITION_2
+                ineligibility_category = (
+                    AiAugmentIneligibilityCategory.STAGING_PARTITION_2
+                )
             elif partition == KTP_PARTITION_DOCX_VALUE and xlsx_non_exact:
-                ineligibility_category = IneligibilityCategory.STAGING_PARTITION_4_XLSX_NON_EXACT
+                ineligibility_category = (
+                    AiAugmentIneligibilityCategory.STAGING_PARTITION_4_XLSX_NON_EXACT
+                )
             elif partition == KTP_PARTITION_DOCX_VALUE and ssn_count > NO_GROUND_TRUTH_SSN_COUNT:
-                ineligibility_category = IneligibilityCategory.STAGING_PARTITION_4_MULTIPLE_SSN
+                ineligibility_category = (
+                    AiAugmentIneligibilityCategory.STAGING_PARTITION_4_MULTIPLE_SSN
+                )
             else:
                 raise _PushConfigurationError(Locale.INELIGIBILITY_CATEGORY_UNKNOWN)
-        population.append(
-            SourcePopulationRow(
-                namekey=namekey,
-                rnd=rnd_by_namekey[namekey],
-                first_name=name_key.first_name,
-                last_name=name_key.last_name,
-                draw_numbers=tuple(sorted(draws, key=_draw_sort_key)),
-                cohort=cohort,
-                ineligibility_category=ineligibility_category,
+        outerdicts.append(
+            AiAugmentOuterDict(
+                namekey=name_key,
+                xlsx_innerdicts=xlsx_innerdicts.get(namekey, ()),
+                ssn_innerdicts=ssn_innerdicts.get(namekey, ()),
+                docx_innerdicts=docx_innerdicts.get(namekey, ()),
+                committed_innerdicts=(),
+                ai_augment_rnd=rnd_by_namekey[namekey],
+                ai_augment_cohort=cohort,
+                ai_augment_ineligibility_category=ineligibility_category,
             )
         )
 
-    population.sort(
-        key=lambda row: (
-            tuple(_draw_sort_key(draw) for draw in row.draw_numbers),
-            row.first_name.casefold(),
-            row.last_name.casefold(),
-            row.namekey,
+    outerdicts.sort(
+        key=lambda outerdict: (
+            tuple(_draw_sort_key(draw) for draw in outerdict.draw_numbers),
+            outerdict.namekey.first_name.casefold(),
+            outerdict.namekey.last_name.casefold(),
+            outerdict.namekey.to_json_key(),
         )
     )
-    cohort_counts = Counter(row.cohort for row in population)
+    cohort_counts = Counter(outerdict.ai_augment_cohort for outerdict in outerdicts)
     ineligibility_counts = Counter(
-        row.ineligibility_category for row in population if row.ineligibility_category is not None
+        outerdict.ai_augment_ineligibility_category
+        for outerdict in outerdicts
+        if outerdict.ai_augment_ineligibility_category is not None
     )
     if cohort_counts != {
-        GROUND_TRUTH_COHORT: EXPECTED_GROUND_TRUTH_RESEARCHERS,
-        NO_GROUND_TRUTH_COHORT: EXPECTED_NO_GROUND_TRUTH_RESEARCHERS,
-        INELIGIBLE_COHORT: EXPECTED_INELIGIBLE_RESEARCHERS,
+        AiAugmentCohort.GROUND_TRUTH: EXPECTED_GROUND_TRUTH_RESEARCHERS,
+        AiAugmentCohort.NO_GROUND_TRUTH: EXPECTED_NO_GROUND_TRUTH_RESEARCHERS,
+        AiAugmentCohort.INELIGIBLE: EXPECTED_INELIGIBLE_RESEARCHERS,
     }:
         raise _PushConfigurationError(Locale.SOURCE_POPULATION_COHORTS_INVALID)
     if ineligibility_counts != EXPECTED_INELIGIBILITY_COUNTS:
         raise _PushConfigurationError(Locale.SOURCE_POPULATION_INELIGIBILITY_INVALID)
-    if len(population) != EXPECTED_SOURCE_RESEARCHERS:
+    if len(outerdicts) != EXPECTED_SOURCE_RESEARCHERS:
         raise _PushConfigurationError(Locale.SOURCE_POPULATION_CARDINALITY_INVALID)
-    if {row.rnd for row in population} != set(
+    if {outerdict.ai_augment_rnd for outerdict in outerdicts} != set(
         range(RND_START, EXPECTED_SOURCE_RESEARCHERS + RND_START)
     ):
         raise _PushConfigurationError(Locale.SOURCE_POPULATION_RND_INVALID)
     if (
-        sum(len(row.draw_numbers) > 1 for row in population)
+        sum(len(outerdict.draw_numbers) > 1 for outerdict in outerdicts)
         != EXPECTED_MULTIDRAW_SOURCE_RESEARCHERS
     ):
         raise _PushConfigurationError(Locale.SOURCE_POPULATION_MULTIDRAW_INVALID)
-    return tuple(population)
+    return tuple(outerdicts)
 
 
-def eligible_cohorts(
-    source_population: Sequence[SourcePopulationRow],
-) -> dict[str, str]:
-    return {row.namekey: row.cohort for row in source_population if row.cohort != INELIGIBLE_COHORT}
-
-
-def _validate_configured_namekey_population(
-    configured_namekey: str,
-    source_population: Sequence[SourcePopulationRow],
-) -> None:
-    configured_row = next(
-        (row for row in source_population if row.namekey == configured_namekey),
+def _configured_ai_augment_outerdict(
+    configured_namekey: NameKey,
+    outerdicts: Sequence[AiAugmentOuterDict],
+) -> AiAugmentOuterDict:
+    configured = next(
+        (outerdict for outerdict in outerdicts if outerdict.namekey == configured_namekey),
         None,
     )
-    if configured_row is not None:
-        if configured_row.cohort != INELIGIBLE_COHORT:
-            return
-        category = configured_row.ineligibility_category
+    if configured is not None:
+        if configured.ai_augment_cohort is not AiAugmentCohort.INELIGIBLE:
+            return configured
+        category = configured.ai_augment_ineligibility_category
         if category is None:
             raise _PushConfigurationError(Locale.INELIGIBILITY_CATEGORY_UNKNOWN)
         raise _PushConfigurationError(
             Locale.CONFIGURED_NAMEKEY_INELIGIBLE_TEMPLATE.format(category=category.value)
         )
 
-    name_key = NameKey.from_json_key(configured_namekey)
-    stripped_identity = (name_key.first_name.strip(), name_key.last_name.strip())
+    stripped_identity = (
+        configured_namekey.first_name.strip(),
+        configured_namekey.last_name.strip(),
+    )
     suggestions = sorted({
-        row.namekey
-        for row in source_population
-        if (row.first_name.strip(), row.last_name.strip()) == stripped_identity
+        outerdict.namekey.to_json_key()
+        for outerdict in outerdicts
+        if (
+            outerdict.namekey.first_name.strip(),
+            outerdict.namekey.last_name.strip(),
+        )
+        == stripped_identity
     })
     if suggestions:
         raise _PushConfigurationError(
@@ -1588,14 +1623,14 @@ def _validate_configured_namekey_population(
     raise _PushConfigurationError(Locale.CONFIGURED_NAMEKEY_NOT_FOUND)
 
 
-def _configured_namekey() -> str:
+def _configured_namekey() -> NameKey:
     raw_namekey = os.environ.get(NAMEKEY_ENV_NAME, "")
     if not _valid_nonblank(raw_namekey):
         raise _PushConfigurationError(
             Locale.NAMEKEY_NOT_SET_TEMPLATE.format(environment_name=NAMEKEY_ENV_NAME)
         )
     try:
-        return NameKey.from_json_key(raw_namekey).to_json_key()
+        return NameKey.from_json_key(raw_namekey)
     except (ValueError, TypeError, json.JSONDecodeError) as exc:
         raise _PushConfigurationError(Locale.CONFIGURED_NAMEKEY_MALFORMED) from exc
 
@@ -1639,23 +1674,16 @@ def configure_runtime(
     source_conn: duckdb.DuckDBPyConnection | None = None
     try:
         source_conn = duckdb.connect(str(pipeline.db_file), read_only=True)
-        source_population = derive_source_population(
+        ai_augment_outerdicts = derive_ai_augment_outerdicts(
             source_conn,
             release_batches,
             sample_seed=pipeline.sample_seed,
         )
-        cohorts = eligible_cohorts(source_population)
-        source_researcher: SourceResearcher | None = None
         if configured_namekey is not None:
-            _validate_configured_namekey_population(configured_namekey, source_population)
-            try:
-                source_researcher = load_source_researcher(
-                    source_conn,
-                    cohorts,
-                    namekey=configured_namekey,
-                )
-            except _PushValidationError as exc:
-                raise _PushConfigurationError(str(exc)) from exc
+            _configured_ai_augment_outerdict(
+                configured_namekey,
+                ai_augment_outerdicts,
+            )
     except duckdb.Error as exc:
         raise _PushConfigurationError(Locale.SOURCE_DUCKDB_VALIDATION_FAILED) from exc
     finally:
@@ -1670,11 +1698,9 @@ def configure_runtime(
         detour_db_path=detour_db_path,
         replay_log=replay_log,
         rollout_cas_dir=pipeline.rollout_cas_dir,
-        namekey=configured_namekey,
+        configured_namekey=configured_namekey,
         release_map=release_map,
-        source_population=source_population,
-        eligible_cohorts=cohorts,
-        source_researcher=source_researcher,
+        ai_augment_outerdicts=ai_augment_outerdicts,
     )
     return RUNTIME_CONFIGURATION
 
@@ -4419,11 +4445,7 @@ def _validate_projected_commit(
     stage = PostCommitValidationStage.CONFIGURATION
     try:
         commit_record = _backend_commit_record(conn, record)
-        commit = CommitRequestBody(
-            pull_record=commit_record.pull_record,
-            push_record=commit_record.push_record,
-            codex_session_record=commit_record.codex_session_record,
-        )
+        commit = commit_record.commit_request_body
         pull = commit.pull_record
         push = commit.push_record
         session_id = commit.codex_session_record.session_id
@@ -4765,9 +4787,7 @@ def _synthetic_commit_record(
         response_body=None,
         received_at_unix_usec=None,
         duration_usec=None,
-        pull_record=pull_record,
-        push_record=push_record,
-        codex_session_record=codex_session_record,
+        commit_request_body=commit,
     )
 
 
@@ -4863,7 +4883,11 @@ def _commit_accepted_push(record: HttpRequestLogRecord) -> None:
     with BACKEND_WORKFLOW_STATE_LOCK:
         pull_record_id = BACKEND_PENDING_PULL_RECORD_ID
         session_id = BACKEND_SESSION_ID
-    if pull_record_id is None or session_id is None or runtime.namekey is None:
+    if (
+        pull_record_id is None
+        or session_id is None
+        or runtime.configured_namekey is None
+    ):
         _mark_workflow_failed(_PushConfigurationError(Locale.PUSH_LINKAGE_MISSING))
         return
     try:
@@ -4885,7 +4909,7 @@ def _commit_accepted_push(record: HttpRequestLogRecord) -> None:
         rollout_archive=rollout_archive,
         rollout_filename=configuration.rollout_relative_path.name,
         appendwatch_report=report_bytes,
-        namekey=runtime.namekey,
+        namekey=runtime.configured_namekey.to_json_key(),
     )
     try:
         append_authoritative_record(commit_record)
@@ -4926,127 +4950,32 @@ async def _after_authoritative_public_record(record: HttpRequestLogRecord) -> No
     task.add_done_callback(_authoritative_background_finished)
 
 
-def _namekey_innerdict_rows(
-    source_conn: duckdb.DuckDBPyConnection,
-    *,
-    table_name: str,
-    namekey: str,
-) -> tuple[dict[str, object], ...]:
-    try:
-        rows = source_conn.execute(
-            f"SELECT {duckdb_quote_identifier(KTP_INNERDICT_JSONLINES_COL)} "
-            f"FROM {table_name} "
-            f"WHERE {duckdb_quote_identifier(KTP_NAMEKEY_COL)} = ?",
-            [namekey],
-        ).fetchall()
-    except duckdb.Error as exc:
-        raise _PushValidationError(
-            Locale.SOURCE_DUCKDB_TABLE_MISSING_TEMPLATE.format(table_name=table_name)
-        ) from exc
-    if len(rows) > 1:
-        raise _PushValidationError(
-            Locale.CONFIGURED_ROWS_DUPLICATE_TEMPLATE.format(table_name=table_name)
-        )
-    if not rows:
-        return ()
-    (innerdict_jsonlines,) = rows[0]
-    try:
-        return _innerdict_json_rows(
-            innerdict_jsonlines,
-            table_name=table_name,
-            namekey=namekey,
-        )
-    except _PushConfigurationError as exc:
-        raise _PushValidationError(str(exc)) from exc
-
-
-def load_source_researcher(
-    source_conn: duckdb.DuckDBPyConnection,
-    cohorts: Mapping[str, str] | None,
-    *,
-    namekey: str,
-) -> SourceResearcher:
-    if cohorts is None or namekey not in cohorts:
-        raise _PushValidationError(Locale.CONFIGURED_NAMEKEY_INELIGIBLE)
-    try:
-        name_key = NameKey.from_json_key(namekey)
-    except (ValueError, TypeError, json.JSONDecodeError) as exc:
-        raise _PushValidationError(Locale.CONFIGURED_NAMEKEY_MALFORMED) from exc
-    if name_key.to_json_key() != namekey:
-        raise _PushValidationError(Locale.CONFIGURED_NAMEKEY_NONCANONICAL)
-
-    xlsx_rows = _namekey_innerdict_rows(
-        source_conn,
-        table_name=XLSX_INNERDICT_TABLE,
-        namekey=namekey,
-    )
-    docx_rows = _namekey_innerdict_rows(
-        source_conn,
-        table_name=DOCX_INNERDICT_TABLE,
-        namekey=namekey,
-    )
-    ssn_rows = _namekey_innerdict_rows(
-        source_conn,
-        table_name=PARQUET_INNERDICT_TABLE,
-        namekey=namekey,
-    )
-    if not xlsx_rows:
-        raise _PushValidationError(Locale.CONFIGURED_XLSX_CONTEXT_MISSING)
-    draw_numbers = tuple(
-        sorted(
-            {
-                str(row[DRAW_LABEL]).strip()
-                for row in (*xlsx_rows, *docx_rows, *ssn_rows)
-                if row.get(DRAW_LABEL) is not None and str(row[DRAW_LABEL]).strip()
-            },
-            key=_draw_sort_key,
-        )
-    )
-    if not draw_numbers:
-        raise _PushValidationError(Locale.CONFIGURED_DRAW_MISSING)
-    return SourceResearcher(
-        namekey=namekey,
-        first_name=name_key.first_name,
-        last_name=name_key.last_name,
-        draw_numbers=draw_numbers,
-        xlsx_rows=xlsx_rows,
-        docx_rows=docx_rows,
-        ssn_rows=ssn_rows,
-        cohort=cohorts[namekey],
-    )
-
-
-def researcher_context(researcher: SourceResearcher) -> _ResearcherContext:
-    return _ResearcherContext(
-        namekey=researcher.namekey,
-        draw_number=DRAW_VALUE_SEPARATOR.join(researcher.draw_numbers),
-        first_name=researcher.first_name,
-        last_name=researcher.last_name,
-        cohort=researcher.cohort,
-        draw_numbers=researcher.draw_numbers,
-    )
-
-
-def configured_pull_lines(researcher: SourceResearcher) -> Iterator[str]:
-    for row in (*researcher.xlsx_rows, *researcher.ssn_rows):
-        yield json_line(row)
+def configured_pull_lines(outerdict: AiAugmentOuterDict) -> Iterator[str]:
+    for innerdict in (*outerdict.xlsx_innerdicts, *outerdict.ssn_innerdicts):
+        yield json_line(innerdict.data)
     yield json_line({
-        KTP_FIRST_NAME_COL: researcher.first_name,
-        KTP_LAST_NAME_COL: researcher.last_name,
+        KTP_FIRST_NAME_COL: outerdict.namekey.first_name,
+        KTP_LAST_NAME_COL: outerdict.namekey.last_name,
         **dict.fromkeys(AI_AUGMENT_COLUMNS),
     })
 
 
-def ground_truth_for_researcher(researcher: SourceResearcher) -> dict[str, object] | None:
-    if researcher.cohort == NO_GROUND_TRUTH_COHORT:
+def ground_truth_for_researcher(
+    outerdict: AiAugmentOuterDict,
+) -> dict[str, object] | None:
+    if outerdict.ai_augment_cohort is AiAugmentCohort.NO_GROUND_TRUTH:
         return None
     required_columns = tuple(
         column for column in DOCX_COLUMNS if column not in KTP_DOCX_OPTIONAL_EMPTY_COLS
     )
     complete_rows = [
-        row
-        for row in researcher.docx_rows
-        if all(column in row and bool(str(row[column]).strip()) for column in required_columns)
+        innerdict.data
+        for innerdict in outerdict.docx_innerdicts
+        if all(
+            column in innerdict.data
+            and bool(str(innerdict.data[column]).strip())
+            for column in required_columns
+        )
     ]
     if not complete_rows:
         raise _PushValidationError(Locale.GROUND_TRUTH_DOCX_INCOMPLETE)
@@ -5165,45 +5094,18 @@ def append_codex_output(
 
 
 def selected_card_outer_dict(
-    source_conn: duckdb.DuckDBPyConnection,
-    detour_conn: duckdb.DuckDBPyConnection,
-    researcher: _ResearcherContext,
+    outerdict: AiAugmentOuterDict,
 ) -> OuterDict:
-    name_key = NameKey(**{
-        KTP_FIRST_NAME_COL: researcher.first_name,
-        KTP_LAST_NAME_COL: researcher.last_name,
-    })
-    outer_dict = OuterDict.from_name_keys([name_key])
-    append_innerdicts_from_jsonlines_table(
-        source_conn,
-        table_name=XLSX_INNERDICT_TABLE,
-        outer_dict=outer_dict,
-        procedure=XlsxMatchProcedure(),
-    )
-    append_innerdicts_from_jsonlines_table(
-        detour_conn,
-        table_name=CODEX_INNERDICT_TABLE,
-        outer_dict=outer_dict,
-        procedure=_CodexMatchProcedure(),
-        required_columns={KTP_FILENAME_COL, KTP_FRAGMENT_COL},
-    )
-    append_innerdicts_from_jsonlines_table(
-        source_conn,
-        table_name=DOCX_INNERDICT_TABLE,
-        outer_dict=outer_dict,
-        procedure=DocxMatchProcedure(),
-    )
-    append_innerdicts_from_jsonlines_table(
-        source_conn,
-        table_name=PARQUET_INNERDICT_TABLE,
-        outer_dict=outer_dict,
-        procedure=ParquetMatchProcedure(),
-    )
     selected = OuterDict(
         data={
-            name_key.to_json_key(): [
+            outerdict.namekey.to_json_key(): [
                 inner.model_copy(deep=True)
-                for inner in outer_dict.get_inner_by_key(name_key.to_json_key())
+                for inner in (
+                    *outerdict.xlsx_innerdicts,
+                    *(item.innerdict for item in outerdict.committed_innerdicts),
+                    *outerdict.docx_innerdicts,
+                    *outerdict.ssn_innerdicts,
+                )
             ]
         }
     )
@@ -5240,22 +5142,22 @@ def _standardized_initial_submission(
 
 def write_accepted_submission(
     detour_conn: duckdb.DuckDBPyConnection,
-    source_conn: duckdb.DuckDBPyConnection,
     runtime: AiAugmentBackendContext,
     *,
     submission: StandardizedSubmission,
     evidence: ValidatedEvidence,
-    researcher: _ResearcherContext,
+    outerdict: AiAugmentOuterDict,
     rollout_index: _RolloutIndex,
     rollout_archive: _ArchivedFile,
     attempt_dir: Path,
-    commit_record_id: str,
-    commit_request_body: str,
+    commit_record: BackendCommitRecord,
     attempt_timestamp: datetime,
-    source_researcher: SourceResearcher,
     manage_transaction: bool = True,
     materialize_files: bool = True,
 ) -> tuple[tuple[str, ...], _ArchivedFile | None]:
+    commit_request_body = commit_record.request_body
+    assert commit_request_body is not None
+    commit_record_id = str(commit_record.record_id)
     normalized_submission = submission.normalized_values()
     response_path = attempt_dir / RESPONSE_FILENAME
     zip_name = CARD_ZIP_FILENAME_TEMPLATE.format(
@@ -5276,13 +5178,13 @@ def write_accepted_submission(
         ),
     )
     output_row: dict[str, object] = {
-        KTP_NAMEKEY_COL: researcher.namekey,
+        KTP_NAMEKEY_COL: outerdict.namekey.to_json_key(),
         KTP_FILENAME_COL: rollout_index.session.rollout_filename,
         KTP_FRAGMENT_COL: rollout_archive.line_count,
         KTP_FRAGMENT_TYPE_COL: ROLLOUT_LINE_FRAGMENT_TYPE,
-        DRAW_LABEL: researcher.draw_number,
-        KTP_FIRST_NAME_COL: researcher.first_name,
-        KTP_LAST_NAME_COL: researcher.last_name,
+        DRAW_LABEL: outerdict.draw_number,
+        KTP_FIRST_NAME_COL: outerdict.namekey.first_name,
+        KTP_LAST_NAME_COL: outerdict.namekey.last_name,
         KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL: commit_record_id,
         KTP_AI_AUGMENT_COMMIT_REQUEST_BODY_COL: commit_request_body,
         KTP_AI_AUGMENT_SESSION_METADATA_COL: rollout_index.session.summary_json,
@@ -5294,15 +5196,27 @@ def write_accepted_submission(
     try:
         append_codex_output(detour_conn, output_row)
         submitted_line = json_line(normalized_submission)
-        truth = ground_truth_for_researcher(source_researcher)
+        truth = ground_truth_for_researcher(outerdict)
         response_lines = (submitted_line,) if truth is None else (submitted_line, json_line(truth))
         if materialize_files:
-            outer_dict = selected_card_outer_dict(source_conn, detour_conn, researcher)
+            committed_innerdicts = tuple(
+                committed
+                for committed in _committed_innerdicts(detour_conn)
+                if name_key_from_header_value(
+                    committed.commit_record.request_headers.get(NAME_KEY_HEADER)
+                )
+                == outerdict.namekey
+            )
+            card_outer_dict = selected_card_outer_dict(
+                outerdict.model_copy(
+                    update={"committed_innerdicts": committed_innerdicts}
+                )
+            )
             intro_date = attempt_timestamp.astimezone(ZoneInfo(runtime.pipeline.timezone)).strftime(
                 Locale.CARD_INTRO_DATE_FORMAT
             )
             cards = build_cards(
-                outer_dict,
+                card_outer_dict,
                 total_draws=runtime.pipeline.total_draws,
                 intro=CARD_INTRODUCTION.format(intro_date),
                 excluded_cols=CARD_EXCLUDED_COLUMNS,
@@ -5342,8 +5256,9 @@ def _execute_attempt(
     materialize_files: bool,
 ) -> tuple[PreparedPullResponse, bool]:
     commit_request_body = commit_record.request_body
-    push_request_body = commit_record.push_record.request_body
-    session_id = commit_record.codex_session_record.session_id
+    body = commit_record.commit_request_body
+    push_request_body = body.push_record.request_body
+    session_id = body.codex_session_record.session_id
     assert commit_request_body is not None
     assert push_request_body is not None
     assert session_id is not None
@@ -5370,7 +5285,7 @@ def _execute_attempt(
             detail=detail,
         )
         _log_post_commit_validation(
-            str(commit_record.push_record.record_id),
+            str(body.push_record.record_id),
             post_commit_validation,
             error,
         )
@@ -5383,7 +5298,6 @@ def _execute_attempt(
             commit_database,
         )
 
-    source_conn: duckdb.DuckDBPyConnection | None = None
     with tempfile.TemporaryDirectory() as temporary_directory:
         attempt_dir = Path(temporary_directory)
         try:
@@ -5462,29 +5376,23 @@ def _execute_attempt(
             )
 
             stage = PostCommitValidationStage.RESEARCHER_RESOLUTION
-            source_conn = open_source_database(runtime)
-            source_researcher = load_source_researcher(
-                source_conn,
-                runtime.eligible_cohorts,
-                namekey=canonical_namekey,
+            outerdict = _configured_ai_augment_outerdict(
+                namekey,
+                runtime.ai_augment_outerdicts,
             )
-            researcher = researcher_context(source_researcher)
 
             stage = PostCommitValidationStage.INNERDICT_AND_CARD
             response_lines, _card_archive = write_accepted_submission(
                 detour_conn,
-                source_conn,
                 runtime,
                 submission=accepted_submission,
                 evidence=evidence_assessment.validated,
-                researcher=researcher,
+                outerdict=outerdict,
                 rollout_index=rollout_index,
                 rollout_archive=rollout_archive,
                 attempt_dir=attempt_dir,
-                commit_record_id=str(commit_record.record_id),
-                commit_request_body=commit_request_body,
+                commit_record=commit_record,
                 attempt_timestamp=attempt_timestamp,
-                source_researcher=source_researcher,
                 manage_transaction=False,
                 materialize_files=materialize_files,
             )
@@ -5542,9 +5450,6 @@ def _execute_attempt(
                 error=exc,
                 commit_database=False,
             )
-        finally:
-            if source_conn is not None:
-                source_conn.close()
 
 
 def validate_transport(request: Request) -> None:
@@ -5621,7 +5526,7 @@ def _attempt_records(
             prepared_pull_response = PreparedPullResponse.model_validate_json(str(response_json))
             attempts.append(
                 AgentRuntimeAttempt(
-                    pull_record=commit_record.pull_record,
+                    pull_record=commit_record.commit_request_body.pull_record,
                     commit_record=commit_record,
                     post_commit_validation=(prepared_pull_response.post_commit_validation),
                 )
@@ -5631,9 +5536,9 @@ def _attempt_records(
         raise _PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT) from exc
 
 
-def _accepted_innerdict_summaries(
+def _committed_innerdicts(
     conn: duckdb.DuckDBPyConnection,
-) -> tuple[AcceptedInnerDictSummary, ...]:
+) -> tuple[CommittedInnerDict, ...]:
     exists = conn.execute(
         "SELECT count(*) FROM information_schema.tables WHERE table_name = ?",
         [CODEX_OUTPUT_ROWS_TABLE],
@@ -5646,52 +5551,30 @@ def _accepted_innerdict_summaries(
     )
     column_names = tuple(column[0] for column in result.description)
     rows = result.fetchall()
-    accepted: list[AcceptedInnerDictSummary] = []
+    committed_innerdicts: list[CommittedInnerDict] = []
     for row in rows:
-        innerdict = dict(zip(column_names, row, strict=True))
+        values = dict(zip(column_names, row, strict=True))
         try:
-            accepted.append(
-                AcceptedInnerDictSummary.from_innerdict(
-                    InnerDict.from_mapping(innerdict, _CodexMatchProcedure())
+            commit_record_id = UUID(str(values[KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL]))
+            _ordinal, http_record = _projected_http_record(conn, commit_record_id)
+            committed_innerdicts.append(
+                CommittedInnerDict(
+                    innerdict=InnerDict.from_mapping(
+                        values,
+                        _CodexMatchProcedure(),
+                    ),
+                    commit_record=_backend_commit_record(conn, http_record),
                 )
             )
-        except ValidationError as exc:
+        except (
+            KeyError,
+            TypeError,
+            ValidationError,
+            ValueError,
+            _PushValidationError,
+        ) as exc:
             raise _PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT) from exc
-    return tuple(accepted)
-
-
-def _dashboard_card_markdown(
-    runtime: AiAugmentBackendContext,
-    detour_conn: duckdb.DuckDBPyConnection,
-    *,
-    namekey: str,
-) -> str:
-    source_conn = open_source_database(runtime)
-    try:
-        source_researcher = load_source_researcher(
-            source_conn,
-            runtime.eligible_cohorts,
-            namekey=namekey,
-        )
-        cards = build_cards(
-            selected_card_outer_dict(
-                source_conn,
-                detour_conn,
-                researcher_context(source_researcher),
-            ),
-            total_draws=runtime.pipeline.total_draws,
-            intro=CARD_INTRODUCTION.format(
-                datetime.now(ZoneInfo(runtime.pipeline.timezone)).strftime(
-                    Locale.CARD_INTRO_DATE_FORMAT
-                )
-            ),
-            excluded_cols=CARD_EXCLUDED_COLUMNS,
-        )
-    finally:
-        source_conn.close()
-    if len(cards) != 1:
-        raise _PushValidationError(Locale.RESEARCHER_CARD_COUNT_INVALID)
-    return next(iter(cards.values()))
+    return tuple(committed_innerdicts)
 
 
 def _log_post_commit_validation(
@@ -5741,19 +5624,27 @@ def dashboard_query_response(
     namekey: str | None,
     run_outcome_records: tuple[RunOutcomeResponse, ...],
 ) -> QueryResponse:
+    committed_by_namekey: dict[str, list[CommittedInnerDict]] = {}
+    for committed in _committed_innerdicts(conn):
+        committed_namekey = name_key_from_header_value(
+            committed.commit_record.request_headers.get(NAME_KEY_HEADER)
+        ).to_json_key()
+        committed_by_namekey.setdefault(committed_namekey, []).append(committed)
+    selected_outerdicts = tuple(
+        outerdict.model_copy(
+            update={
+                "committed_innerdicts": tuple(
+                    committed_by_namekey.get(outerdict.namekey.to_json_key(), ())
+                )
+            }
+        )
+        for outerdict in runtime.ai_augment_outerdicts
+        if namekey is None or outerdict.namekey.to_json_key() == namekey
+    )
     return QueryResponse(
         attempts=_attempt_records(conn),
-        accepted_innerdict_summaries=_accepted_innerdict_summaries(conn),
+        ai_augment_outerdicts=selected_outerdicts,
         run_outcome_records=run_outcome_records,
-        card_markdown=(
-            None
-            if namekey is None
-            else _dashboard_card_markdown(
-                runtime,
-                conn,
-                namekey=namekey,
-            )
-        ),
     )
 
 
@@ -5788,12 +5679,10 @@ def authoritative_pull() -> Response:
             ],
         )
     try:
-        if runtime.namekey is None:
+        outerdict = runtime.configured_ai_augment_outerdict
+        if outerdict is None:
             raise _PushConfigurationError(Locale.PUSH_LINKAGE_MISSING)
-        researcher = runtime.source_researcher
-        if researcher is None:
-            raise _PushConfigurationError(Locale.PUSH_LINKAGE_MISSING)
-        lines = tuple(configured_pull_lines(researcher))
+        lines = tuple(configured_pull_lines(outerdict))
         return StreamingResponse(iter(lines), media_type=MEDIA_TYPE_WITH_CHARSET)
     except (_PushConfigurationError, _PushValidationError, OSError, duckdb.Error) as exc:
         logger.error(Locale.PULL_FAILED_LOG, exc)

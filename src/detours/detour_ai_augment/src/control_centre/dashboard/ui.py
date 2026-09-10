@@ -24,27 +24,28 @@ from urllib.parse import urlencode
 from uuid import UUID, uuid7
 from zoneinfo import ZoneInfo
 
-import duckdb
 from fastapi import status
 from nicegui import app, ui
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from src.helpers.cards import card_filename, render_docx_bytes
+from src.helpers.architecture import implements
+from src.helpers.cards import build_cards, card_filename, render_docx_bytes
 from src.helpers.data_models import NameKey
 from src.helpers.vars import (
+    CARD_INTRODUCTION,
     DRAW_LABEL,
     KTP_FIRST_NAME_COL,
     KTP_LAST_NAME_COL,
     KTP_NAMEKEY_COL,
 )
 
-from ...architecture import ControlCentreComponent, implements
+from ...architecture import ControlCentreComponent
 from ...backend.api import (
     APPENDWATCH_REPORT_ENV_NAME,
+    CARD_EXCLUDED_COLUMNS,
     CODEX_SESSIONS_ROOT_ENV_NAME,
     CONTROL_PARENT_PID_ENV_NAME,
     DOCX_TO_AI_AUGMENT_COLUMNS,
-    DRAW_VALUE_SEPARATOR,
     EXPECTED_GROUND_TRUTH_RESEARCHERS,
     EXPECTED_INELIGIBILITY_COUNTS,
     EXPECTED_INELIGIBLE_RESEARCHERS,
@@ -56,29 +57,27 @@ from ...backend.api import (
     SERVER_PORT,
     _PushValidationError,
     ground_truth_for_researcher,
-    load_source_researcher,
     parse_appendwatch_report_bytes,
     parse_name_key_header,
     parse_source_key_header,
     registered_release_map,
+    selected_card_outer_dict,
 )
 from ...backend.helpers.data_models.ai_augment_config import AiAugmentDetourConfig
+from ...backend.helpers.data_models.ai_augment_context import (
+    AiAugmentCohort,
+    AiAugmentIneligibilityCategory,
+    AiAugmentOuterDict,
+    CommittedInnerDict,
+    QueryResponse,
+)
 from ...backend.helpers.data_models.pydantic_to_paste import EXPORT_OPENALEX_API_KEY
 from ...backend.helpers.data_models.server_event import (
     SOURCE_KEY_HEADER,
-    AcceptedInnerDictSummary,
     AgentRuntimeAttempt,
     PostCommitValidationResult,
-    QueryResponse,
     RunOutcomeResponse,
     RunOutcomeResponseBody,
-)
-from ...backend.helpers.data_models.source_population import (
-    IneligibilityCategory,
-    SourcePopulationRow,
-)
-from ...backend.helpers.data_models.source_population import (
-    SourceCohort as ResearcherCohort,
 )
 from ...backend.helpers.vars import (
     AI_AUGMENT_COLUMN_PREFIX,
@@ -95,7 +94,7 @@ from ...backend.ipc import (
 from ...backend.server import CONFIG_OPTION
 from .helpers.aggrid import AgGrid
 from .helpers.data_models.ai_augment_context import (
-    AiAugmentCtlCtrContext,
+    AiAugmentControlCentreContext,
 )
 from .helpers.data_models.run_event import (
     Run,
@@ -329,7 +328,7 @@ def draw_sort_key(
 
 
 def researcher_sort_key(
-    researcher: _Researcher,
+    researcher: AiAugmentOuterDict,
 ) -> tuple[
     tuple[tuple[int, tuple[tuple[int, int | str], ...], str], ...],
     str,
@@ -338,9 +337,9 @@ def researcher_sort_key(
 ]:
     return (
         tuple(draw_sort_key(draw) for draw in researcher.draw_numbers),
-        researcher.first_name.casefold(),
-        researcher.last_name.casefold(),
-        researcher.namekey,
+        researcher.namekey.first_name.casefold(),
+        researcher.namekey.last_name.casefold(),
+        Namekey(researcher.namekey.to_json_key()),
     )
 
 
@@ -458,21 +457,6 @@ class _BackendAvailability:
 
 
 @dataclass(frozen=True, slots=True)
-class _Researcher:
-    namekey: Namekey
-    rnd: int
-    draw_numbers: tuple[str, ...]
-    first_name: str
-    last_name: str
-    cohort: ResearcherCohort
-    ineligibility_category: IneligibilityCategory | None = None
-
-    @property
-    def draw_number(self) -> str:
-        return DRAW_VALUE_SEPARATOR.join(self.draw_numbers)
-
-
-@dataclass(frozen=True, slots=True)
 class _GroundTruthRecord:
     namekey: Namekey
     values: Mapping[str, str | None]
@@ -496,24 +480,13 @@ class _CachedSourceData(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     fingerprint: _SourceInputFingerprint
-    source_population: tuple[SourcePopulationRow, ...]
-    ground_truth_values: dict[str, dict[str, str | None]]
+    ai_augment_outerdicts: tuple[dict[str, object], ...]
 
-    def ground_truth_by_namekey(self) -> Mapping[Namekey, _GroundTruthRecord]:
-        expected_namekeys = {
-            row.namekey
-            for row in self.source_population
-            if row.cohort is ResearcherCohort.GROUND_TRUTH
-        }
-        if set(self.ground_truth_values) != expected_namekeys:
-            raise ValueError(Locale.GROUND_TRUTH_MISSING)
-        return {
-            Namekey(namekey): _GroundTruthRecord(
-                namekey=Namekey(namekey),
-                values=values,
-            )
-            for namekey, values in self.ground_truth_values.items()
-        }
+    def outerdicts(self) -> tuple[AiAugmentOuterDict, ...]:
+        return tuple(
+            AiAugmentOuterDict.from_serialized(value)
+            for value in self.ai_augment_outerdicts
+        )
 
 
 def source_input_fingerprint(config_path: Path) -> _SourceInputFingerprint:
@@ -541,7 +514,7 @@ def load_cached_source_data(
     raw_cache = app.storage.general.get(SOURCE_DATA_STORAGE_KEY)
     try:
         cache = _CachedSourceData.model_validate(raw_cache)
-        cache.ground_truth_by_namekey()
+        cache.outerdicts()
     except TypeError, ValueError, ValidationError:
         return fingerprint, None
     if cache.fingerprint != fingerprint:
@@ -552,17 +525,15 @@ def load_cached_source_data(
 def store_cached_source_data(
     *,
     fingerprint: _SourceInputFingerprint,
-    source_population: tuple[SourcePopulationRow, ...],
-    ground_truth_by_namekey: Mapping[Namekey, _GroundTruthRecord],
+    ai_augment_outerdicts: tuple[AiAugmentOuterDict, ...],
 ) -> None:
     cache = _CachedSourceData(
         fingerprint=fingerprint,
-        source_population=source_population,
-        ground_truth_values={
-            str(namekey): dict(record.values) for namekey, record in ground_truth_by_namekey.items()
-        },
+        ai_augment_outerdicts=tuple(
+            outerdict.serialize() for outerdict in ai_augment_outerdicts
+        ),
     )
-    cache.ground_truth_by_namekey()
+    cache.outerdicts()
     app.storage.general[SOURCE_DATA_STORAGE_KEY] = cache.model_dump(mode="json")
 
 
@@ -590,7 +561,7 @@ class _AttemptView:
     timestamp: datetime | None
     ended_at: datetime | None
 
-    accepted: AcceptedInnerDictSummary | None
+    accepted: CommittedInnerDict | None
 
     run_outcome_response: RunOutcomeResponse | None
 
@@ -638,7 +609,7 @@ class _AttemptView:
 
 @dataclass(frozen=True, slots=True)
 class _ResearcherView:
-    researcher: _Researcher
+    researcher: AiAugmentOuterDict
 
     # Oldest -> newest.
     attempts: tuple[_AttemptView, ...]
@@ -680,8 +651,8 @@ class _AttemptVariableProjection:
 class _ResearcherGridRow:
     namekey: Namekey
     rnd: int
-    cohort: ResearcherCohort
-    ineligibility_category: IneligibilityCategory | None
+    cohort: AiAugmentCohort
+    ineligibility_category: AiAugmentIneligibilityCategory | None
 
     # Collapsed row: latest attempt projection, or synthetic ready projection.
     latest: _AttemptVariableProjection
@@ -718,7 +689,7 @@ class _DashboardCounts:
 class _UiSelection:
     variable_key: str
     activity_filter: _ResearcherActivity | None = None
-    cohort_filter: ResearcherCohort | None = None
+    cohort_filter: AiAugmentCohort | None = None
     search_text: str = ""
 
     selected_namekey: Namekey | None = None
@@ -747,48 +718,25 @@ class _SourceRepository:
     def __init__(
         self,
         *,
-        configuration: AiAugmentCtlCtrContext,
-        ground_truth_by_namekey: Mapping[Namekey, _GroundTruthRecord] | None = None,
+        configuration: AiAugmentControlCentreContext,
     ) -> None:
         self._configuration = configuration
-        self._ground_truth_by_namekey = (
-            None if ground_truth_by_namekey is None else dict(ground_truth_by_namekey)
-        )
 
     @property
-    def source_population(self) -> tuple[SourcePopulationRow, ...]:
-        return self._configuration.source_population
+    def ai_augment_outerdicts(self) -> tuple[AiAugmentOuterDict, ...]:
+        return self._configuration.ai_augment_outerdicts
 
     @property
     def ground_truth_by_namekey(self) -> Mapping[Namekey, _GroundTruthRecord]:
-        if self._ground_truth_by_namekey is None:
-            raise RuntimeError(Locale.GROUND_TRUTH_MISSING)
-        return self._ground_truth_by_namekey
+        return self.load_ground_truth_by_namekey()
 
-    def connect(self) -> duckdb.DuckDBPyConnection:
-        return duckdb.connect(
-            str(self._configuration.source_db_path),
-            read_only=True,
-        )
-
-    def load_researchers(self) -> tuple[_Researcher, ...]:
+    def load_researchers(self) -> tuple[AiAugmentOuterDict, ...]:
         result = tuple(
-            _Researcher(
-                namekey=Namekey(source.namekey),
-                rnd=source.rnd,
-                draw_numbers=tuple(sorted(source.draw_numbers, key=draw_sort_key)),
-                first_name=source.first_name,
-                last_name=source.last_name,
-                cohort=ResearcherCohort(source.cohort),
-                ineligibility_category=(
-                    None
-                    if source.ineligibility_category is None
-                    else IneligibilityCategory(source.ineligibility_category)
-                ),
+            sorted(
+                self._configuration.ai_augment_outerdicts,
+                key=researcher_sort_key,
             )
-            for source in self._configuration.source_population
         )
-        result = tuple(sorted(result, key=researcher_sort_key))
         self.assert_population_invariants(result)
         return result
 
@@ -796,18 +744,14 @@ class _SourceRepository:
         self,
         namekey: Namekey,
     ) -> _GroundTruthRecord | None:
-        if self._ground_truth_by_namekey is not None:
-            return self._ground_truth_by_namekey.get(namekey)
-        connection = self.connect()
-        try:
-            researcher = load_source_researcher(
-                connection,
-                self._configuration.eligible_cohorts,
-                namekey=namekey,
-            )
-            values = ground_truth_for_researcher(researcher)
-        finally:
-            connection.close()
+        matches = tuple(
+            outerdict
+            for outerdict in self._configuration.ai_augment_outerdicts
+            if outerdict.namekey.to_json_key() == namekey
+        )
+        if len(matches) != 1:
+            raise RuntimeError(Locale.GROUND_TRUTH_MISSING)
+        values = ground_truth_for_researcher(matches[0])
         if values is None:
             return None
         return _GroundTruthRecord(
@@ -820,56 +764,46 @@ class _SourceRepository:
     def load_ground_truth_by_namekey(
         self,
     ) -> Mapping[Namekey, _GroundTruthRecord]:
-        if self._ground_truth_by_namekey is not None:
-            return self._ground_truth_by_namekey
         result: dict[Namekey, _GroundTruthRecord] = {}
-        cohorts = self._configuration.eligible_cohorts
-        connection = self.connect()
-        try:
-            for namekey, cohort in sorted(cohorts.items()):
-                if ResearcherCohort(cohort) is not ResearcherCohort.GROUND_TRUTH:
-                    continue
-                researcher = load_source_researcher(
-                    connection,
-                    self._configuration.eligible_cohorts,
-                    namekey=namekey,
-                )
-                values = ground_truth_for_researcher(researcher)
-                if values is None:
-                    raise RuntimeError(Locale.GROUND_TRUTH_MISSING)
-                typed_namekey = Namekey(namekey)
-                result[typed_namekey] = _GroundTruthRecord(
-                    namekey=typed_namekey,
-                    values={
-                        column: None if value is None else str(value)
-                        for column, value in values.items()
-                    },
-                )
-        finally:
-            connection.close()
-        self._ground_truth_by_namekey = result
-        return self._ground_truth_by_namekey
+        for outerdict in self._configuration.ai_augment_outerdicts:
+            if outerdict.ai_augment_cohort is not AiAugmentCohort.GROUND_TRUTH:
+                continue
+            namekey = Namekey(outerdict.namekey.to_json_key())
+            values = ground_truth_for_researcher(outerdict)
+            if values is None:
+                raise RuntimeError(Locale.GROUND_TRUTH_MISSING)
+            result[namekey] = _GroundTruthRecord(
+                namekey=namekey,
+                values={
+                    column: None if value is None else str(value)
+                    for column, value in values.items()
+                },
+            )
+        return result
 
     def assert_population_invariants(
         self,
-        researchers: Sequence[_Researcher],
+        researchers: Sequence[AiAugmentOuterDict],
     ) -> None:
-        namekeys = [researcher.namekey for researcher in researchers]
+        namekeys = [researcher.namekey.to_json_key() for researcher in researchers]
         ground_truth_count = sum(
-            researcher.cohort is ResearcherCohort.GROUND_TRUTH for researcher in researchers
+            researcher.ai_augment_cohort is AiAugmentCohort.GROUND_TRUTH
+            for researcher in researchers
         )
         no_ground_truth_count = sum(
-            researcher.cohort is ResearcherCohort.NO_GROUND_TRUTH for researcher in researchers
+            researcher.ai_augment_cohort is AiAugmentCohort.NO_GROUND_TRUTH
+            for researcher in researchers
         )
         if len(set(namekeys)) != len(namekeys):
             raise RuntimeError(Locale.NAMEKEYS_NOT_UNIQUE)
         ineligible_count = sum(
-            researcher.cohort is ResearcherCohort.INELIGIBLE for researcher in researchers
+            researcher.ai_augment_cohort is AiAugmentCohort.INELIGIBLE
+            for researcher in researchers
         )
         ineligibility_counts = Counter(
-            researcher.ineligibility_category
+            researcher.ai_augment_ineligibility_category
             for researcher in researchers
-            if researcher.ineligibility_category is not None
+            if researcher.ai_augment_ineligibility_category is not None
         )
         if (
             ground_truth_count,
@@ -915,8 +849,14 @@ class _UnixSocketHttpConnection(http.client.HTTPConnection):
 
 
 class _BackendDatabaseClient:
-    def __init__(self, *, socket_path: Path) -> None:
+    def __init__(
+        self,
+        *,
+        socket_path: Path,
+        pipeline_config: AiAugmentDetourConfig,
+    ) -> None:
         self._socket_path = socket_path
+        self._pipeline_config = pipeline_config
         self._card_cache: dict[Namekey, str] = {}
 
     def _request(self, *, target: str) -> bytes:
@@ -1002,9 +942,22 @@ class _BackendDatabaseClient:
         cached = self._card_cache.get(namekey)
         if cached is not None:
             return cached
-        markdown = self.pull(namekey=namekey).card_markdown
-        if markdown is None:
+        outerdicts = self.pull(namekey=namekey).ai_augment_outerdicts
+        if len(outerdicts) != 1:
             raise RuntimeError(Locale.BACKEND_CARD_MISSING)
+        cards = build_cards(
+            selected_card_outer_dict(outerdicts[0]),
+            total_draws=self._pipeline_config.total_draws,
+            intro=CARD_INTRODUCTION.format(
+                datetime.now(ZoneInfo(self._pipeline_config.timezone)).strftime(
+                    Locale.CARD_INTRO_DATE_FORMAT
+                )
+            ),
+            excluded_cols=CARD_EXCLUDED_COLUMNS,
+        )
+        if len(cards) != 1:
+            raise RuntimeError(Locale.BACKEND_CARD_MISSING)
+        markdown = next(iter(cards.values()))
         self._card_cache[namekey] = markdown
         return markdown
 
@@ -1096,12 +1049,14 @@ class _BackendSupervisor:
         openalex_api_key: str,
         appendwatch_report: PurePosixPath,
         dashboard_socket_path: Path,
+        pipeline_config: AiAugmentDetourConfig,
     ) -> None:
         self._repository_root = repository_root
         self._config_path = config_path
         self._openalex_api_key = openalex_api_key
         self._appendwatch_report = appendwatch_report
         self._dashboard_socket_path = dashboard_socket_path
+        self._pipeline_config = pipeline_config
         self._process: _BackendProcessHandle | None = None
         self._status = _BackendStatus.STOPPED
 
@@ -1215,7 +1170,10 @@ class _BackendSupervisor:
         await self.probe_pull()
         try:
             await asyncio.to_thread(
-                _BackendDatabaseClient(socket_path=self._dashboard_socket_path).pull
+                _BackendDatabaseClient(
+                    socket_path=self._dashboard_socket_path,
+                    pipeline_config=self._pipeline_config,
+                ).pull
             )
         except (OSError, RuntimeError, ValidationError) as exc:
             raise RuntimeError(Locale.BACKEND_DATABASE_REQUEST_FAILED) from exc
@@ -1694,15 +1652,15 @@ class _AttemptReconciler:
     def reconcile(
         self,
         *,
-        researcher: _Researcher,
+        researcher: AiAugmentOuterDict,
         runs: Sequence[Run],
         attempt_records: Sequence[AgentRuntimeAttempt],
-        accepted_innerdict_summaries: Sequence[AcceptedInnerDictSummary],
+        committed_innerdicts: Sequence[CommittedInnerDict],
         run_outcome_responses: Sequence[RunOutcomeResponse],
     ) -> _ResearcherView:
         accepted_by_commit_record_id = {
-            accepted.commit_record_id: accepted
-            for accepted in accepted_innerdict_summaries
+            committed.commit_record.record_id: committed
+            for committed in committed_innerdicts
         }
         run_outcome_by_session_id = {
             session_id: response
@@ -1743,19 +1701,25 @@ class _AttemptReconciler:
             namekey = Namekey(
                 parse_name_key_header(commit_record.request_headers.get(NAME_KEY_HEADER))
             )
-            session_id = commit_record.codex_session_record.session_id
+            session_id = commit_record.commit_request_body.codex_session_record.session_id
+            researcher_namekey = Namekey(researcher.namekey.to_json_key())
             attempt_timestamp = datetime.fromtimestamp(
                 commit_record_id.time / 1_000,
                 tz=timezone.utc,
             )
             if (
                 attempt_activity is None
-                or namekey != researcher.namekey
+                or namekey != researcher_namekey
                 or (attempt_activity is _ResearcherActivity.COMPLETE) != (accepted is not None)
                 or (
                     accepted is not None
                     and (
-                        session_id is None or session_id != accepted.codex_session_id
+                        session_id is None
+                        or session_id
+                        != (
+                            accepted.commit_record.commit_request_body
+                            .codex_session_record.session_id
+                        )
                     )
                 )
             ):
@@ -1764,7 +1728,7 @@ class _AttemptReconciler:
                 _AttemptView(
                     row_id=commit_record_id,
                     run_id=None,
-                    namekey=researcher.namekey,
+                    namekey=researcher_namekey,
                     activity=attempt_activity,
                     commit_record_id=commit_record_id,
                     session_id=session_id,
@@ -1798,7 +1762,7 @@ class _AttemptReconciler:
                 _AttemptView(
                     row_id=run.run_id,
                     run_id=run.run_id,
-                    namekey=researcher.namekey,
+                    namekey=Namekey(researcher.namekey.to_json_key()),
                     activity=researcher_activity_for_run(run),
                     commit_record_id=run.accepted_commit_record_id,
                     session_id=run.session_id,
@@ -1832,12 +1796,12 @@ class _AttemptReconciler:
     def reconcile_all(
         self,
         *,
-        researchers: Sequence[_Researcher],
+        researchers: Sequence[AiAugmentOuterDict],
         runs: Mapping[UUID, Run],
         attempt_records: Mapping[Namekey, tuple[AgentRuntimeAttempt, ...]],
-        accepted_innerdict_summaries: Mapping[
+        committed_innerdicts: Mapping[
             Namekey,
-            tuple[AcceptedInnerDictSummary, ...],
+            tuple[CommittedInnerDict, ...],
         ],
         run_outcome_responses: Mapping[Namekey, tuple[RunOutcomeResponse, ...]],
     ) -> tuple[_ResearcherView, ...]:
@@ -1847,13 +1811,19 @@ class _AttemptReconciler:
         return tuple(
             self.reconcile(
                 researcher=researcher,
-                runs=runs_by_namekey.get(researcher.namekey, ()),
-                attempt_records=attempt_records.get(researcher.namekey, ()),
-                accepted_innerdict_summaries=accepted_innerdict_summaries.get(
-                    researcher.namekey,
+                runs=runs_by_namekey.get(Namekey(researcher.namekey.to_json_key()), ()),
+                attempt_records=attempt_records.get(
+                    Namekey(researcher.namekey.to_json_key()),
                     (),
                 ),
-                run_outcome_responses=run_outcome_responses.get(researcher.namekey, ()),
+                committed_innerdicts=committed_innerdicts.get(
+                    Namekey(researcher.namekey.to_json_key()),
+                    (),
+                ),
+                run_outcome_responses=run_outcome_responses.get(
+                    Namekey(researcher.namekey.to_json_key()),
+                    (),
+                ),
             )
             for researcher in researchers
         )
@@ -1883,7 +1853,7 @@ class _VariableProjector:
     def project_attempt(
         self,
         *,
-        researcher: _Researcher,
+        researcher: AiAugmentOuterDict,
         attempt: _AttemptView,
         ground_truth: _GroundTruthRecord | None,
         variable: _VariableSpec,
@@ -1892,10 +1862,10 @@ class _VariableProjector:
         accepted = attempt.accepted
         return _AttemptVariableProjection(
             run_id=attempt.run_id,
-            namekey=researcher.namekey,
+            namekey=Namekey(researcher.namekey.to_json_key()),
             draw_number=researcher.draw_number,
-            first_name=researcher.first_name,
-            last_name=researcher.last_name,
+            first_name=researcher.namekey.first_name,
+            last_name=researcher.namekey.last_name,
             ai_column=variable.ai_column,
             ai_value=(
                 None if accepted is None else accepted.text(variable.ai_column)
@@ -1932,7 +1902,9 @@ class _VariableProjector:
             session_status=attempt.run_outcome_session_status,
             action=self.action_for_status(
                 attempt.activity,
-                eligible=researcher.cohort is not ResearcherCohort.INELIGIBLE,
+                eligible=(
+                    researcher.ai_augment_cohort is not AiAugmentCohort.INELIGIBLE
+                ),
                 codex_busy=codex_busy,
             ),
         )
@@ -1940,17 +1912,17 @@ class _VariableProjector:
     def project_ready_researcher(
         self,
         *,
-        researcher: _Researcher,
+        researcher: AiAugmentOuterDict,
         ground_truth: _GroundTruthRecord | None,
         variable: _VariableSpec,
         codex_busy: bool,
     ) -> _AttemptVariableProjection:
         return _AttemptVariableProjection(
             run_id=None,
-            namekey=researcher.namekey,
+            namekey=Namekey(researcher.namekey.to_json_key()),
             draw_number=researcher.draw_number,
-            first_name=researcher.first_name,
-            last_name=researcher.last_name,
+            first_name=researcher.namekey.first_name,
+            last_name=researcher.namekey.last_name,
             ai_column=variable.ai_column,
             ai_value=None,
             table_1_column=variable.table_1_column,
@@ -1966,7 +1938,9 @@ class _VariableProjector:
             session_status=None,
             action=self.action_for_status(
                 _ResearcherActivity.READY,
-                eligible=researcher.cohort is not ResearcherCohort.INELIGIBLE,
+                eligible=(
+                    researcher.ai_augment_cohort is not AiAugmentCohort.INELIGIBLE
+                ),
                 codex_busy=codex_busy,
             ),
         )
@@ -2000,10 +1974,12 @@ class _VariableProjector:
             )
         )
         return _ResearcherGridRow(
-            namekey=researcher_view.researcher.namekey,
-            rnd=researcher_view.researcher.rnd,
-            cohort=researcher_view.researcher.cohort,
-            ineligibility_category=(researcher_view.researcher.ineligibility_category),
+            namekey=Namekey(researcher_view.researcher.namekey.to_json_key()),
+            rnd=researcher_view.researcher.ai_augment_rnd,
+            cohort=researcher_view.researcher.ai_augment_cohort,
+            ineligibility_category=(
+                researcher_view.researcher.ai_augment_ineligibility_category
+            ),
             latest=latest,
             attempts=attempts,
         )
@@ -2011,7 +1987,7 @@ class _VariableProjector:
     def footnotes_for_variable(
         self,
         *,
-        attempt: AcceptedInnerDictSummary,
+        attempt: CommittedInnerDict,
         variable: _VariableSpec,
     ) -> str | None:
         numbers = self._footnote_numbers(attempt, variable)
@@ -2023,7 +1999,7 @@ class _VariableProjector:
     def footnote_arguments_for_variable(
         self,
         *,
-        attempt: AcceptedInnerDictSummary,
+        attempt: CommittedInnerDict,
         variable: _VariableSpec,
     ) -> str | None:
         numbers = self._footnote_numbers(attempt, variable)
@@ -2034,7 +2010,7 @@ class _VariableProjector:
 
     @staticmethod
     def _footnote_numbers(
-        attempt: AcceptedInnerDictSummary,
+        attempt: CommittedInnerDict,
         variable: _VariableSpec,
     ) -> tuple[int, ...]:
         value = attempt.text(variable.ai_column)
@@ -2093,13 +2069,13 @@ class _ControlCentreController:
         self._idle_refresh_lock = asyncio.Lock()
         self._events: list[RunEvent] = []
         self._runs: dict[UUID, Run] = {}
-        self._researchers: tuple[_Researcher, ...] = ()
-        self._researchers_by_namekey: dict[Namekey, _Researcher] = {}
+        self._researchers: tuple[AiAugmentOuterDict, ...] = ()
+        self._researchers_by_namekey: dict[Namekey, AiAugmentOuterDict] = {}
         self._ground_truth: Mapping[Namekey, _GroundTruthRecord] = {}
         self._attempt_records: Mapping[Namekey, tuple[AgentRuntimeAttempt, ...]] = {}
-        self._accepted_innerdict_summaries: Mapping[
+        self._committed_innerdicts: Mapping[
             Namekey,
-            tuple[AcceptedInnerDictSummary, ...],
+            tuple[CommittedInnerDict, ...],
         ] = {}
         self._run_outcome_responses: Mapping[
             Namekey,
@@ -2163,7 +2139,8 @@ class _ControlCentreController:
         )
         self._researchers = await asyncio.to_thread(self._source_repository.load_researchers)
         self._researchers_by_namekey = {
-            researcher.namekey: researcher for researcher in self._researchers
+            Namekey(researcher.namekey.to_json_key()): researcher
+            for researcher in self._researchers
         }
         emit_log(
             Locale.CONTROL_CENTRE_LOG_PREFIX,
@@ -2247,7 +2224,7 @@ class _ControlCentreController:
         researcher = self._researchers_by_namekey.get(namekey)
         if researcher is None:
             raise KeyError(Locale.UNKNOWN_NAMEKEY_TEMPLATE.format(namekey=namekey))
-        if researcher.cohort is ResearcherCohort.INELIGIBLE:
+        if researcher.ai_augment_cohort is AiAugmentCohort.INELIGIBLE:
             raise ValueError(Locale.INELIGIBLE_QUEUE)
         run_id = uuid7()
         await self._append_run_event(
@@ -2378,16 +2355,24 @@ class _ControlCentreController:
             namekey: tuple(records) for namekey, records in attempt_records.items()
         }
 
-        accepted_innerdict_summaries: dict[
+        committed_innerdicts: dict[
             Namekey,
-            list[AcceptedInnerDictSummary],
+            list[CommittedInnerDict],
         ] = {}
-        for accepted in snapshot.accepted_innerdict_summaries:
-            namekey = Namekey(accepted.namekey.to_json_key())
-            accepted_innerdict_summaries.setdefault(namekey, []).append(accepted)
-        self._accepted_innerdict_summaries = {
-            namekey: tuple(attempts)
-            for namekey, attempts in accepted_innerdict_summaries.items()
+        for returned_outerdict in snapshot.ai_augment_outerdicts:
+            namekey = Namekey(returned_outerdict.namekey.to_json_key())
+            maintained_outerdict = self._researchers_by_namekey.get(namekey)
+            if maintained_outerdict is None:
+                raise RuntimeError(Locale.ATTEMPT_DATABASE_INCONSISTENT)
+            maintained_outerdict.committed_innerdicts = (
+                returned_outerdict.committed_innerdicts
+            )
+            committed_innerdicts[namekey] = list(
+                maintained_outerdict.committed_innerdicts
+            )
+        self._committed_innerdicts = {
+            namekey: tuple(innerdicts)
+            for namekey, innerdicts in committed_innerdicts.items()
         }
 
         run_outcome_responses: dict[Namekey, list[RunOutcomeResponse]] = {}
@@ -2419,13 +2404,15 @@ class _ControlCentreController:
             researchers=self._researchers,
             runs=self._runs,
             attempt_records=self._attempt_records,
-            accepted_innerdict_summaries=self._accepted_innerdict_summaries,
+            committed_innerdicts=self._committed_innerdicts,
             run_outcome_responses=self._run_outcome_responses,
         )
         all_rows = tuple(
             self._projector.project_researcher(
                 researcher_view=view,
-                ground_truth=self._ground_truth.get(view.researcher.namekey),
+                ground_truth=self._ground_truth.get(
+                    Namekey(view.researcher.namekey.to_json_key())
+                ),
                 variable=variable,
                 codex_busy=self.codex_busy,
             )
@@ -2440,35 +2427,42 @@ class _ControlCentreController:
                 or view.current_activity is selection.activity_filter
             )
             and (
-                selection.cohort_filter is None or view.researcher.cohort is selection.cohort_filter
+                selection.cohort_filter is None
+                or view.researcher.ai_augment_cohort is selection.cohort_filter
             )
             and (
                 not search_text
-                or search_text in view.researcher.first_name.casefold()
-                or search_text in view.researcher.last_name.casefold()
+                or search_text in view.researcher.namekey.first_name.casefold()
+                or search_text in view.researcher.namekey.last_name.casefold()
                 or search_text in view.researcher.draw_number.casefold()
-                or search_text == str(view.researcher.rnd)
-                or search_text in view.researcher.namekey.casefold()
+                or search_text == str(view.researcher.ai_augment_rnd)
+                or search_text in view.researcher.namekey.to_json_key().casefold()
                 or (
-                    view.researcher.ineligibility_category is not None
-                    and search_text in view.researcher.ineligibility_category.value.casefold()
+                    view.researcher.ai_augment_ineligibility_category is not None
+                    and search_text
+                    in view.researcher.ai_augment_ineligibility_category.value.casefold()
                 )
             )
         )
         statuses = [
             view.current_activity
             for view in views
-            if view.researcher.cohort is not ResearcherCohort.INELIGIBLE
+            if view.researcher.ai_augment_cohort is not AiAugmentCohort.INELIGIBLE
         ]
         counts = _DashboardCounts(
             total=len(views),
             ground_truth=sum(
-                view.researcher.cohort is ResearcherCohort.GROUND_TRUTH for view in views
+                view.researcher.ai_augment_cohort is AiAugmentCohort.GROUND_TRUTH
+                for view in views
             ),
             no_ground_truth=sum(
-                view.researcher.cohort is ResearcherCohort.NO_GROUND_TRUTH for view in views
+                view.researcher.ai_augment_cohort is AiAugmentCohort.NO_GROUND_TRUTH
+                for view in views
             ),
-            ineligible=sum(view.researcher.cohort is ResearcherCohort.INELIGIBLE for view in views),
+            ineligible=sum(
+                view.researcher.ai_augment_cohort is AiAugmentCohort.INELIGIBLE
+                for view in views
+            ),
             ready=statuses.count(_ResearcherActivity.READY),
             queued=statuses.count(_ResearcherActivity.QUEUED),
             running=statuses.count(_ResearcherActivity.RUNNING),
@@ -2496,8 +2490,8 @@ class _ControlCentreController:
         return _ResearcherCardView(
             namekey=namekey,
             draw_number=researcher.draw_number,
-            first_name=researcher.first_name,
-            last_name=researcher.last_name,
+            first_name=researcher.namekey.first_name,
+            last_name=researcher.namekey.last_name,
             markdown=markdown,
         )
 
@@ -2726,7 +2720,7 @@ class _ControlCentreController:
                         occurred_at_unix_usec=datetime_to_unix_usec(datetime.now(timezone.utc)),
                         kind=RunEventKind.PUSH_ACCEPTED,
                         session_id=run.session_id,
-                        accepted_commit_record_id=accepted.commit_record_id,
+                        accepted_commit_record_id=accepted.commit_record.record_id,
                     )
                 )
                 return RunOutcome.COMPLETED
@@ -2786,11 +2780,14 @@ class _ControlCentreController:
         *,
         namekey: Namekey,
         session_id: UUID,
-    ) -> AcceptedInnerDictSummary | None:
+    ) -> CommittedInnerDict | None:
         await self._refresh_backend_state()
-        attempts = self._accepted_innerdict_summaries.get(namekey, ())
+        attempts = self._committed_innerdicts.get(namekey, ())
         matches = [
-            attempt for attempt in attempts if attempt.codex_session_id == session_id
+            attempt
+            for attempt in attempts
+            if attempt.commit_record.commit_request_body.codex_session_record.session_id
+            == session_id
         ]
         if len(matches) > 1:
             raise RuntimeError(Locale.ACCEPTED_SESSION_DUPLICATE)
@@ -2964,7 +2961,7 @@ class _ControlCentrePage:
             self._handles.cohort_select = ui.select(
                 {
                     "": Locale.ALL_COHORTS,
-                    **{cohort.value: cohort.value for cohort in ResearcherCohort},
+                    **{cohort.value: cohort.value for cohort in AiAugmentCohort},
                 },
                 value="",
                 label=Locale.COHORT_FILTER,
@@ -3523,7 +3520,7 @@ class _ControlCentrePage:
         self,
         cohort: str | None,
     ) -> None:
-        self._selection.cohort_filter = None if cohort is None else ResearcherCohort(cohort)
+        self._selection.cohort_filter = None if cohort is None else AiAugmentCohort(cohort)
         await self.refresh_grid()
 
     async def on_search_changed(
@@ -3667,7 +3664,7 @@ class _ControlCentrePage:
 
 @dataclass(frozen=True, slots=True)
 class _ApplicationServices:
-    configuration: AiAugmentCtlCtrContext
+    configuration: AiAugmentControlCentreContext
 
     source_repository: _SourceRepository
 
@@ -3691,28 +3688,26 @@ def create_services(
     config_path: Path = DEFAULT_CONFIG_PATH,
     source_data_cache: _CachedSourceData | None = None,
 ) -> _ApplicationServices:
-    configuration = AiAugmentCtlCtrContext(
+    configuration = AiAugmentControlCentreContext.load(
         config_path=config_path,
-        source_population=(
-            None if source_data_cache is None else source_data_cache.source_population
+        ai_augment_outerdicts=(
+            None if source_data_cache is None else source_data_cache.outerdicts()
         ),
     )
-    source_repository = _SourceRepository(
-        configuration=configuration,
-        ground_truth_by_namekey=(
-            None if source_data_cache is None else source_data_cache.ground_truth_by_namekey()
-        ),
-    )
+    source_repository = _SourceRepository(configuration=configuration)
     backend = _BackendSupervisor(
         repository_root=REPOSITORY_ROOT,
-        config_path=configuration.config_path,
         openalex_api_key=configuration.openalex_api_key,
         appendwatch_report=configuration.appendwatch_report,
         dashboard_socket_path=DASHBOARD_SOCKET_PATH,
+        pipeline_config=configuration.pipeline_config,
     )
-    backend_database = _BackendDatabaseClient(socket_path=DASHBOARD_SOCKET_PATH)
+    backend_database = _BackendDatabaseClient(
+        socket_path=DASHBOARD_SOCKET_PATH,
+        pipeline_config=configuration.pipeline_config,
+    )
     codex = _CodexRunner(
-        timezone=configuration.timezone,
+        timezone=ZoneInfo(configuration.pipeline_config.timezone),
     )
     reconciler = _AttemptReconciler()
     projector = _VariableProjector()
@@ -3800,8 +3795,9 @@ async def application_startup() -> None:
         if source_data_cache is None:
             store_cached_source_data(
                 fingerprint=fingerprint,
-                source_population=services.source_repository.source_population,
-                ground_truth_by_namekey=(services.source_repository.ground_truth_by_namekey),
+                ai_augment_outerdicts=(
+                    services.source_repository.ai_augment_outerdicts
+                ),
             )
             emit_log(
                 Locale.CONTROL_CENTRE_LOG_PREFIX,

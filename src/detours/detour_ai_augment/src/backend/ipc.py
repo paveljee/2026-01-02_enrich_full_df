@@ -126,7 +126,10 @@ def handle_dashboard_run_outcome_request(
     ipc_request: RunOutcomeRequest,
 ) -> RunOutcomeResponse:
     runtime = api.runtime_configuration()
-    if runtime.namekey is None or ipc_request.namekey.to_json_key() != runtime.namekey:
+    if (
+        runtime.configured_namekey is None
+        or ipc_request.namekey != runtime.configured_namekey
+    ):
         raise api._PushValidationError(Locale.REPLAY_RECORD_CONTOUR_INVALID)
 
     snapshot, rollout_filename, failures = api.capture_run_outcome_snapshot(runtime)

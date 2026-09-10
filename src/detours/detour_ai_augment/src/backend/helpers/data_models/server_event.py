@@ -18,28 +18,20 @@ from pydantic import (
     model_validator,
 )
 
-from src.helpers.data_models import FragmentType, HttpRequestLogRecord, InnerDict, NameKey
+from src.helpers.architecture import implements
+from src.helpers.data_models import FragmentType, HttpRequestLogRecord
 from src.helpers.vars import (
     KTP_FILENAME_COL,
     KTP_FRAGMENT_COL,
     KTP_FRAGMENT_TYPE_COL,
     KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
-    KTP_NAMEKEY_COL,
 )
 
-from ....architecture import (
-    AgentRuntimeComponent,
-    BackendComponent,
-    implements,
-)
+from ....architecture import AgentRuntimeComponent, BackendComponent
 from ....control_centre.dashboard.helpers.data_models.run_outcome import (
     NAME_KEY_HEADER,
     RunOutcome,
     RunOutcomeRequest,
-)
-from ..vars import (
-    KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL,
-    KTP_AI_AUGMENT_SESSION_METADATA_COL,
 )
 
 COMMIT_PATH = "/commit"
@@ -322,9 +314,11 @@ class CommitRequestBody(BaseModel):
 
 @implements[BackendComponent.CommitRecordProperty]()
 class BackendCommitRecord(HttpRequestLogRecord):
-    pull_record: HttpRequestLogRecord = Field(exclude=True)
-    push_record: HttpRequestLogRecord = Field(exclude=True)
-    codex_session_record: CodexSessionRecord = Field(exclude=True)
+    commit_request_body: CommitRequestBody = Field(exclude=True)
+
+    @property
+    def http_request_log_record(self) -> HttpRequestLogRecord:
+        return HttpRequestLogRecord.model_validate(self.model_dump())
 
     def validate_commit_record(self) -> Self:
         if (
@@ -346,16 +340,12 @@ class BackendCommitRecord(HttpRequestLogRecord):
             or self.duration_usec is not None
         ):
             raise ValueError("commit HTTP record has an invalid contour")
-        expected = CommitRequestBody(
-            pull_record=self.pull_record,
-            push_record=self.push_record,
-            codex_session_record=self.codex_session_record,
-        )
+        expected = self.commit_request_body
         parsed = CommitRequestBody.from_serialized_json(
             self.request_body,
             resolve_http_record=lambda record_id: {
-                self.pull_record.record_id: self.pull_record,
-                self.push_record.record_id: self.push_record,
+                expected.pull_record.record_id: expected.pull_record,
+                expected.push_record.record_id: expected.push_record,
             }[record_id],
         )
         if parsed != expected:
@@ -381,9 +371,7 @@ class BackendCommitRecord(HttpRequestLogRecord):
         )
         return cls(
             **record.model_dump(),
-            pull_record=body.pull_record,
-            push_record=body.push_record,
-            codex_session_record=body.codex_session_record,
+            commit_request_body=body,
         )
 
 
@@ -415,58 +403,6 @@ class AgentRuntimeAttempt(BaseModel):
     pull_record: HttpRequestLogRecord
     commit_record: BackendCommitRecord
     post_commit_validation: PostCommitValidation
-
-
-@implements[BackendComponent.ControlCentrePort.AcceptedInnerDictSummaryProperty]()
-class AcceptedInnerDictSummary(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
-    innerdict: InnerDict
-
-    def text(self, column: str) -> str | None:
-        value = self.innerdict.data.get(column)
-        if value is not None and not isinstance(value, str):
-            raise ValueError("accepted innerdict text value is invalid")
-        return value
-
-    def _required_text(self, column: str) -> str:
-        value = self.text(column)
-        if value is None:
-            raise ValueError("accepted innerdict required text value is missing")
-        return value
-
-    @property
-    def namekey(self) -> NameKey:
-        serialized = self._required_text(KTP_NAMEKEY_COL)
-        namekey = NameKey.from_json_key(serialized)
-        if namekey.to_json_key() != serialized:
-            raise ValueError("accepted innerdict namekey is not canonical")
-        return namekey
-
-    @property
-    def commit_record_id(self) -> UUID:
-        return UUID(self._required_text(KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL))
-
-    @property
-    def codex_session_id(self) -> UUID:
-        summary = CodexRolloutRecord.parse_summary_json(
-            self._required_text(KTP_AI_AUGMENT_SESSION_METADATA_COL)
-        )
-        return UUID(summary["session_id"])
-
-    def validate_accepted_innerdict(self) -> Self:
-        self.namekey
-        self.commit_record_id
-        self.codex_session_id
-        return self
-
-    @model_validator(mode="after")
-    def _validate_accepted_innerdict(self) -> Self:
-        return self.validate_accepted_innerdict()
-
-    @classmethod
-    def from_innerdict(cls, innerdict: InnerDict) -> Self:
-        return cls(innerdict=innerdict)
 
 
 class _RunOutcomeResponseBodyJson(BaseModel):
@@ -646,94 +582,6 @@ class RunOutcomeResponse(HttpRequestLogRecord):
         )
 
 
-@implements[BackendComponent.ControlCentrePort.QueryResponseProperty]()
-class QueryResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
-    attempts: tuple[AgentRuntimeAttempt, ...]
-    accepted_innerdict_summaries: tuple[AcceptedInnerDictSummary, ...]
-    run_outcome_records: tuple[RunOutcomeResponse, ...] = ()
-    card_markdown: StrictStr | None = None
-
-    @classmethod
-    def from_serialized_json(cls, value: str | bytes) -> Self:
-        serialized = _QueryResponseJson.model_validate_json(value)
-        attempts: list[AgentRuntimeAttempt] = []
-        for attempt in serialized.attempts:
-            commit = attempt.commit_record
-            commit_record = BackendCommitRecord(
-                **commit.http_record.model_dump(),
-                pull_record=commit.pull_record,
-                push_record=commit.push_record,
-                codex_session_record=commit.codex_session_record,
-            )
-            attempts.append(
-                AgentRuntimeAttempt(
-                    pull_record=attempt.pull_record,
-                    commit_record=commit_record,
-                    post_commit_validation=attempt.post_commit_validation,
-                )
-            )
-        return cls(
-            attempts=tuple(attempts),
-            accepted_innerdict_summaries=tuple(
-                AcceptedInnerDictSummary.from_innerdict(
-                    InnerDict.from_mapping(
-                        innerdict,
-                        _CodexInnerDictProcedure(),
-                    )
-                )
-                for innerdict in serialized.accepted_innerdict_summaries
-            ),
-            run_outcome_records=tuple(
-                RunOutcomeResponse.from_http_request_log_record(record)
-                for record in serialized.run_outcome_records
-            ),
-            card_markdown=serialized.card_markdown,
-        )
-
-    def serialize(self) -> dict[str, object]:
-        return {
-            "attempts": tuple(
-                _AgentRuntimeAttemptJson(
-                    pull_record=attempt.pull_record,
-                    commit_record=_BackendCommitRecordJson(
-                        http_record=HttpRequestLogRecord.model_validate(
-                            attempt.commit_record.model_dump()
-                        ),
-                        pull_record=attempt.commit_record.pull_record,
-                        push_record=attempt.commit_record.push_record,
-                        codex_session_record=(attempt.commit_record.codex_session_record),
-                    ),
-                    post_commit_validation=attempt.post_commit_validation,
-                )
-                for attempt in self.attempts
-            ),
-            "accepted_innerdict_summaries": tuple(
-                accepted.innerdict.data
-                for accepted in self.accepted_innerdict_summaries
-            ),
-            "run_outcome_records": tuple(
-                record.http_request_log_record
-                for record in self.run_outcome_records
-            ),
-            "card_markdown": self.card_markdown,
-        }
-
-    @model_serializer
-    def _serialize(self) -> dict[str, object]:
-        return self.serialize()
-
-
-class _BackendCommitRecordJson(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
-    http_record: HttpRequestLogRecord
-    pull_record: HttpRequestLogRecord
-    push_record: HttpRequestLogRecord
-    codex_session_record: CodexSessionRecord
-
-
 class _AgentRuntimeAttemptJson(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
@@ -742,14 +590,67 @@ class _AgentRuntimeAttemptJson(BaseModel):
     post_commit_validation: PostCommitValidation
 
 
-class _CodexInnerDictProcedure:
-    dataset_id_field = KTP_NAMEKEY_COL
-
-
 class _QueryResponseJson(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     attempts: tuple[_AgentRuntimeAttemptJson, ...]
-    accepted_innerdict_summaries: tuple[dict[str, object], ...]
-    run_outcome_records: tuple[HttpRequestLogRecord, ...] = ()
-    card_markdown: StrictStr | None = None
+    ai_augment_outerdicts: tuple[_AiAugmentOuterDictJson, ...]
+    run_outcome_records: tuple[HttpRequestLogRecord, ...]
+
+
+@implements[BackendComponent.ControlCentrePort.QueryResponseProperty]()
+class QueryResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    attempts: tuple[AgentRuntimeAttempt, ...]
+    ai_augment_outerdicts: tuple[AiAugmentOuterDict, ...]
+    run_outcome_records: tuple[RunOutcomeResponse, ...] = ()
+
+    @classmethod
+    def from_serialized_json(cls, value: str | bytes) -> Self:
+        serialized = _QueryResponseJson.model_validate_json(value)
+        return cls(
+            attempts=tuple(
+                AgentRuntimeAttempt(
+                    pull_record=attempt.pull_record,
+                    commit_record=attempt.commit_record.to_commit_record(),
+                    post_commit_validation=attempt.post_commit_validation,
+                )
+                for attempt in serialized.attempts
+            ),
+            ai_augment_outerdicts=tuple(
+                AiAugmentOuterDict.from_serialized(outerdict.model_dump(mode="json"))
+                for outerdict in serialized.ai_augment_outerdicts
+            ),
+            run_outcome_records=tuple(
+                RunOutcomeResponse.from_http_request_log_record(record)
+                for record in serialized.run_outcome_records
+            ),
+        )
+
+    def serialize(self) -> dict[str, object]:
+        serialized = _QueryResponseJson(
+            attempts=tuple(
+                _AgentRuntimeAttemptJson(
+                    pull_record=attempt.pull_record,
+                    commit_record=_BackendCommitRecordJson.from_commit_record(
+                        attempt.commit_record
+                    ),
+                    post_commit_validation=attempt.post_commit_validation,
+                )
+                for attempt in self.attempts
+            ),
+            ai_augment_outerdicts=tuple(
+                _AiAugmentOuterDictJson.from_ai_augment_outerdict(outerdict)
+                for outerdict in self.ai_augment_outerdicts
+            ),
+            run_outcome_records=tuple(
+                record.http_request_log_record
+                for record in self.run_outcome_records
+            ),
+        )
+        return serialized.model_dump(mode="json")
+
+    @model_serializer
+    def _serialize(self) -> dict[str, object]:
+        return self.serialize()

@@ -8,6 +8,7 @@ from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
+from src.helpers.architecture import implements
 from src.helpers.data_models import HttpRequestLogRecord, NameKey
 from src.helpers.vars import (
     KTP_FIRST_NAME_COL,
@@ -15,7 +16,7 @@ from src.helpers.vars import (
     KTP_LAST_NAME_COL,
 )
 
-from .....architecture import ControlCentreComponent, implements
+from .....architecture import ControlCentreComponent
 
 type RunOutcomeValue = Literal["completed", "failed", "cancelled"]
 type RunOutcomePath = Literal["/completed", "/failed", "/cancelled"]

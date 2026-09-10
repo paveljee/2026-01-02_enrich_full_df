@@ -8,9 +8,10 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from src.helpers.architecture import implements
 from src.helpers.data_models import NameKey
 
-from .....architecture import ControlCentreComponent, implements
+from .....architecture import ControlCentreComponent
 from .....backend.helpers.data_models.server_event import (
     AgentRuntimeAttempt,
     RunOutcomeResponse,

@@ -194,18 +194,77 @@ diagnostics; Ruff only reports import ordering left by the in-progress edits.
 - Flask remains a transport adapter. One closed outcome/path mapping and the
   canonical Name-Key codec define the request wire shape; no aliases,
   migrations, or compatibility logic will be added.
-- Current implementation task: remove both redundant UI wrappers; retain and
-  reconcile exact `RunOutcomeResponse` objects; immediately refresh persisted
-  Backend query state after posting a run outcome and before Backend shutdown;
-  align concrete `QueryResponse` and all callers with the finalized
-  `accepted_innerdict_summaries` property; then run Ruff, strict mypy, focused
-  Backend/Control Centre regressions, broader Detour checks, and
-  `git diff --check`.
-- After that correction is verified, rerun the complete AST/class audit across
-  the Detour, compare protocol coverage and architectural classification with
-  the preceding 189-class/17-implementation audit, and report concrete progress
-  plus every remaining candidate and whether it merits a protocol,
-  simplification, merger, privacy, or no architectural treatment.
+- The rejected `_BackendRunOutcomeResponse` and `_RunOutcomeSnapshot` wrappers
+  are removed. `_AttemptView` retains the exact Backend-owned
+  `RunOutcomeResponse`; savedness, Codex session identity, and appendwatch
+  display status are derived directly as view properties. The Control Centre
+  posts a run outcome, marks that post once acknowledged, and immediately
+  refreshes Backend query state before owned-process shutdown; it never creates
+  a substitute response locally. Concrete `QueryResponse`, its wire shape, and
+  every caller now use the finalized `accepted_innerdict_summaries` contract.
+- Verification is green: Ruff passes; strict mypy with imported out-of-scope
+  modules silent checks 37 Detour source/test files with no issues; Control
+  Centre unit tests are 46 passed; focused Backend API/IPC tests are 86 passed
+  and 37 environment skips; the broader non-root/non-operator/non-real-API
+  suite (excluding the pre-existing uncollectable BDD module) is 205 passed,
+  46 environment skips, and 7 deselections; `git diff --check` passes. Whole
+  Detour collection still stops at the pre-existing missing BDD feature file.
+
+## Repeated complete class/protocol audit
+
+- AST inventory now finds 192 class declarations under the Detour `src` tree:
+  35 Acme/protocol declarations, 22 explicit `@implements[...]()` concrete
+  implementations, and 135 other classes. The preceding audit found
+  189/29/17/143 respectively, so formal declarations increased by six,
+  concrete checked implementations increased by five, and unclassified
+  concrete classes decreased by eight despite three net new declarations.
+  Another 48 classes under the ordinary Detour test tree are test-local and do
+  not warrant architecture protocols.
+- The authoritative replay/IPC/run core is now well covered: Backend workflow,
+  commit, post-commit validation, Codex and appendwatch capture, Agent Runtime
+  attempts, accepted innerdict summaries, query responses, run-outcome response
+  bodies/responses, Control Centre runs/events/phases/outcomes, and query and
+  run-outcome requests all have explicit static conformance checks. Compact
+  session metadata is correctly internalized as
+  `_CodexRolloutRecordSummaryJson` behind `CodexRolloutRecord` methods rather
+  than remaining a competing architectural entity.
+- Remaining durable Backend candidates are the retry obligation family,
+  evidence-audit family, `PreparedPullResponse`, indexed rollout/FC/FCO/
+  turn-reference rows, `_EvidenceMatch`, `SourceResearcher`, and the shared
+  `AiAugmentDetourConfig`. `_ResearcherContext`, `_ArchivedFile`, and overlapping
+  `_SessionMetadata`/`_RolloutIndex` intermediates should preferentially be
+  merged into existing rich models instead of receiving parallel protocols.
+- Remaining Control Centre durable/UI candidates are `SourceCohort`,
+  `IneligibilityCategory`, `SourcePopulationRow`, `_SourceInputFingerprint`,
+  `_CachedSourceData`, `_GroundTruthRecord`, `_VariableSpec`, the displayed
+  activity/API/action/availability enums and record, and the direct selection,
+  attempt projection, grid row, card, counts, and UI snapshot models. Internal
+  `_Researcher`/`_ResearcherView`/`_AttemptView` assembly should stay private or
+  be consolidated; protocol coverage belongs on the direct Human Operator-port
+  inputs and outputs.
+- Remaining deployment/guest candidates are appendwatch `Record`,
+  `AuditReadConfiguration`, `LimaMount`, and `LimaConfiguration`. The
+  illustrative LLM Inference API still has two durable SQLite projections,
+  `PriceQuote` and `LogEvent`, requiring component ownership if that sample is
+  kept in architecture scope.
+- Canonical `pydantic_to_paste` submission models and main-pipeline entities
+  already own their contracts and require no duplicate protocols. Private JSON
+  serializers, exceptions/locales, transient validation aggregates, process
+  handles, framework adapters, connector service implementations, UI handles,
+  and test doubles likewise should remain unprotocolled. The larger structural
+  gap is that `architecture.py` still names only Backend, Agent Runtime, and
+  Control Centre components; formal Human Operator and LLM Inference API ports
+  are prerequisites for correctly owning the remaining direct UI and sample
+  inference contracts.
+
+## Current protocol-decoration pass
+
+- Audit every existing `architecture.py` property protocol against concrete
+  Detour implementations. Add the exact colocated `@implements[...]()`
+  decorator wherever a concrete implementation exists but lacks it; do not
+  manufacture implementations for component/port namespace protocols. Verify
+  completeness mechanically, then run Ruff, strict Detour mypy, focused tests,
+  and `git diff --check`.
 - After this surgical correction is verified, rerun the full AST audit of every
   class defined under `src/detours/detour_ai_augment/src`. Compare it with the
   previous 189-class/17-implementation audit using the approved criteria:
@@ -213,3 +272,53 @@ diagnostics; Ruff only reports import ordering left by the in-progress edits.
   traffic across README architecture component boundaries. Report concrete
   progress and classify every remaining justified protocol gap versus private
   implementation detail/overengineering.
+- Added Human Operator scope: perform the previously proposed consolidation
+  where private intermediate classes duplicate existing rich architectural
+  models. Keep this surgical: preserve genuinely distinct UI projections and
+  do not use consolidation as authority to add the remaining new protocols.
+
+## Current unified outer-dict pass
+
+- Human Operator replaced the source-wrapper/committed-outerdict split with
+  one maintained Detour-local `AiAugmentOuterDict` per canonical namekey.
+  It owns XLSX, SSN, and DOCX innerdict tuples separately; provenance-expanded
+  committed innerdicts; and `ai_augment_rnd`, `ai_augment_cohort`, and
+  `ai_augment_ineligibility_category`.
+- `QueryResponse` is to expose attempts, `ai_augment_outerdicts`, and run-outcome
+  records. The Control Centre maintains the 307 per-namekey aggregates and
+  reconciles Backend-returned committed state into those existing references;
+  310 remains a sample/draw reference, not a design-level outer-dict count.
+- Remove the superseded source population/researcher, dashboard researcher,
+  accepted-summary, and separate committed-outerdict projections. Preserve
+  explicit protocol implementations and add exact `@implements[...]()` checks
+  for the newly concrete contracts. No migration or compatibility layer.
+- Tighten commit provenance at the same boundary: `CommitRequestBody` alone
+  owns the typed pull, push, and Codex-session members. `BackendCommitRecord`
+  remains the specialized durable HTTP record and exposes one validated
+  `commit_request_body` projection instead of duplicating those three members.
+- Complete and verify the Detour production implementation before making any
+  further test changes. The partially migrated tests remain parked until the
+  Human Operator explicitly authorizes the test-fix pass.
+
+## Deferred Detour configuration correction
+
+- Preserve the main `PipelineConfig` contract and add Detour-specific static
+  computed configuration on `AiAugmentDetourConfig`: the configured
+  `map_subset_0_to_batch` resource, Backend replay-log resource, and derived
+  Detour DuckDB path belong to that child model rather than being independently
+  reinterpreted as runtime configuration.
+- At startup, resolve each configured resource with its human-maintained
+  SHA-256 and fail on mismatch exactly as the main pipeline does. Do not replace
+  the configured replay-log hash with its observed hash; the Human Operator
+  updates the configuration explicitly.
+- The Control Centre performs these static hash checks once and passes the
+  validated configuration to each Backend process it starts, avoiding repeated
+  verification over its start/stop cycle. A Backend started manually performs
+  the checks on each startup. During execution, use the startup-validated
+  resource objects without rechecking their hashes.
+## Deferred AI-augment RND ownership correction
+
+- Move `ai_augment_rnd` generation into the `AiAugmentOuterDict` BaseModel as
+  model-owned default-factory behavior. Remove the separate RND assignment from
+  `derive_ai_augment_outerdicts`; callers should not manufacture a property
+  whose construction belongs to the aggregate model.

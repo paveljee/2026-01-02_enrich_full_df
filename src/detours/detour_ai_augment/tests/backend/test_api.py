@@ -38,6 +38,10 @@ from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_co
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_context import (
     AiAugmentBackendContext,
+    AiAugmentCohort,
+    AiAugmentIneligibilityCategory,
+    AiAugmentOuterDict,
+    QueryResponse,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.pydantic_to_paste import (
     EvidenceWithdrawal,
@@ -48,7 +52,6 @@ from src.detours.detour_ai_augment.src.backend.helpers.data_models.pydantic_to_p
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.server_event import (
     SOURCE_KEY_HEADER,
-    AcceptedInnerDictSummary,
     AgentRuntimeAttempt,
     AppendwatchReportEncoding,
     AppendwatchReportRecord,
@@ -59,15 +62,8 @@ from src.detours.detour_ai_augment.src.backend.helpers.data_models.server_event 
     PostCommitValidationResult,
     PostCommitValidationStage,
     PreparedPullResponse,
-    QueryResponse,
     RunOutcomeResponse,
     RunOutcomeResponseBody,
-)
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.source_population import (
-    IneligibilityCategory,
-    SourceCohort,
-    SourcePopulationRow,
-    SourceResearcher,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.submission_fixture import (
     L_FEI_FEI_INITIAL_FIXTURE,
@@ -98,14 +94,25 @@ from src.detours.detour_ai_augment.src.backend.helpers.vars import (
 from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models import (
     run_outcome as run_outcome_models,
 )
-from src.helpers.cards import write_cards_zip
+from src.helpers.cards import build_cards, write_cards_zip
 from src.helpers.config import PipelineConfig
-from src.helpers.data_models import FragmentType, RegisteredResource, ResourceGroup
+from src.helpers.data_models import (
+    FragmentType,
+    InnerDict,
+    NameKey,
+    RegisteredResource,
+    ResourceGroup,
+)
 from src.helpers.data_models.http_request_log import (
     HttpRequestLogRecord,
 )
 from src.helpers.duckdb_extensions import load_duckdb_extension_from_config_path
 from src.helpers.duckdb_utils import duckdb_quote_identifier
+from src.helpers.procedures import (
+    DocxMatchProcedure,
+    ParquetMatchProcedure,
+    XlsxMatchProcedure,
+)
 from src.helpers.schema import (
     DOCX_INNERDICT_TABLE,
     PARQUET_INNERDICT_TABLE,
@@ -1028,14 +1035,36 @@ def runtime_for_test(
         fragment_type=FragmentType.LINE_NUMBER,
         url=replay_log_path.as_uri(),
     )
-    source_researcher: SourceResearcher | None = None
+    ai_augment_outerdicts: tuple[AiAugmentOuterDict, ...] = ()
+    configured_namekey: NameKey | None = None
     if namekey is not None:
+        configured_namekey = NameKey.from_json_key(namekey)
         source_connection = duckdb.connect(str(pipeline.db_file), read_only=True)
         try:
-            source_researcher = api.load_source_researcher(
+            xlsx = api._source_innerdicts_by_namekey(
                 source_connection,
-                {TEST_NAMEKEY: api.GROUND_TRUTH_COHORT},
-                namekey=namekey,
+                table_name=XLSX_INNERDICT_TABLE,
+                procedure=XlsxMatchProcedure(),
+            )
+            ssn = api._source_innerdicts_by_namekey(
+                source_connection,
+                table_name=PARQUET_INNERDICT_TABLE,
+                procedure=ParquetMatchProcedure(),
+            )
+            docx = api._source_innerdicts_by_namekey(
+                source_connection,
+                table_name=DOCX_INNERDICT_TABLE,
+                procedure=DocxMatchProcedure(),
+            )
+            ai_augment_outerdicts = (
+                AiAugmentOuterDict(
+                    namekey=configured_namekey,
+                    xlsx_innerdicts=xlsx[namekey],
+                    ssn_innerdicts=ssn.get(namekey, ()),
+                    docx_innerdicts=docx.get(namekey, ()),
+                    ai_augment_rnd=1,
+                    ai_augment_cohort=AiAugmentCohort.GROUND_TRUTH,
+                ),
             )
         finally:
             source_connection.close()
@@ -1044,9 +1073,8 @@ def runtime_for_test(
         detour_db_path=tmp_path / "detour_ai_augment.duckdb",
         replay_log=replay_log,
         rollout_cas_dir=rollout_cas_dir,
-        namekey=namekey,
-        eligible_cohorts={TEST_NAMEKEY: api.GROUND_TRUTH_COHORT},
-        source_researcher=source_researcher,
+        configured_namekey=configured_namekey,
+        ai_augment_outerdicts=ai_augment_outerdicts,
     )
 
 
@@ -1606,23 +1634,36 @@ def assert_captured_operator_push_contour(
             query.attempts[-1].post_commit_validation.result is PostCommitValidationResult.ACCEPTED
         )
         assert query.attempts[-1].commit_record.record_id == commits[-1].record_id
-        assert query.attempts[-1].commit_record.push_record.record_id == pushes[-1].record_id
-        assert len(query.accepted_innerdict_summaries) == 1
-        assert query.accepted_innerdict_summaries[0].commit_record_id == commits[-1].record_id
-        assert query.accepted_innerdict_summaries[0].text(
+        assert (
+            query.attempts[-1].commit_record.commit_request_body.push_record.record_id
+            == pushes[-1].record_id
+        )
+        assert len(query.ai_augment_outerdicts) == 1
+        selected_outerdict = query.ai_augment_outerdicts[0]
+        assert len(selected_outerdict.committed_innerdicts) == 1
+        committed = selected_outerdict.committed_innerdicts[0]
+        assert committed.commit_record.record_id == commits[-1].record_id
+        assert committed.text(
             KTP_AI_AUGMENT_COMMIT_REQUEST_BODY_COL
         ) == (
             accepted_commit.model_dump_json()
         )
-        assert query.card_markdown is not None
-        assert "Professor Sir Aziz Sheikh OBE" in query.card_markdown
-        commit_record_id_position = query.card_markdown.index(KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL)
-        commit_request_body_position = query.card_markdown.index(
+        cards = build_cards(
+            api.selected_card_outer_dict(selected_outerdict),
+            total_draws=runtime.pipeline.total_draws,
+            intro="",
+            excluded_cols=api.CARD_EXCLUDED_COLUMNS,
+        )
+        assert len(cards) == 1
+        card_markdown = next(iter(cards.values()))
+        assert "Professor Sir Aziz Sheikh OBE" in card_markdown
+        commit_record_id_position = card_markdown.index(KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL)
+        commit_request_body_position = card_markdown.index(
             KTP_AI_AUGMENT_COMMIT_REQUEST_BODY_COL
         )
         assert commit_record_id_position < commit_request_body_position
-        assert str(commits[-1].record_id) in query.card_markdown
-        assert accepted_commit.model_dump_json() in query.card_markdown
+        assert str(commits[-1].record_id) in card_markdown
+        assert accepted_commit.model_dump_json() in card_markdown
     finally:
         api.close_backend_detour_database()
         api._release_authoritative_process_lock()
@@ -1897,9 +1938,9 @@ def test_synthetic_commit_matches_the_readme_contour_exactly(tmp_path: Path) -> 
             },
         },
     }
-    assert record.pull_record is pull_record
-    assert record.push_record is push_record
-    assert record.codex_session_record.session_id == session_id
+    assert record.commit_request_body.pull_record is pull_record
+    assert record.commit_request_body.push_record is push_record
+    assert record.commit_request_body.codex_session_record.session_id == session_id
 
 
 def test_commit_request_body_contract_is_strict_canonical_and_losslessly_resolved() -> None:
@@ -2107,7 +2148,7 @@ def test_run_outcome_http_exchange_is_logged_and_replays_as_raw_history(
 ) -> None:
     runtime = cast(
         AiAugmentBackendContext,
-        SimpleNamespace(namekey=TEST_NAMEKEY),
+        SimpleNamespace(configured_namekey=NameKey.from_json_key(TEST_NAMEKEY)),
     )
     appended: list[HttpRequestLogRecord] = []
     monkeypatch.setattr(api, "runtime_configuration", lambda: runtime)
@@ -2257,7 +2298,12 @@ def test_failed_post_commit_work_projects_atomically_without_domain_changes(
     try:
         api._project_readme_record(
             connection,
-            cast(AiAugmentBackendContext, SimpleNamespace(namekey=TEST_NAMEKEY)),
+            cast(
+                AiAugmentBackendContext,
+                SimpleNamespace(
+                    configured_namekey=NameKey.from_json_key(TEST_NAMEKEY)
+                ),
+            ),
             record,
             line_number=1,
             byte_offset=123,
@@ -4176,7 +4222,7 @@ def test_configured_namekey_normalizes_equivalent_json(
 ) -> None:
     monkeypatch.setenv(api.NAMEKEY_ENV_NAME, raw_namekey)
 
-    assert api._configured_namekey() == TEST_NAMEKEY
+    assert api._configured_namekey() == NameKey.from_json_key(TEST_NAMEKEY)
 
 
 @pytest.mark.parametrize(
@@ -4199,28 +4245,31 @@ def test_configured_namekey_rejects_malformed_or_incomplete_json(
         api._configured_namekey()
 
 
-def source_population_row(
+def ai_augment_outerdict(
     first_name: str,
     last_name: str,
     *,
-    cohort: SourceCohort = api.GROUND_TRUTH_COHORT,
-    ineligibility_category: IneligibilityCategory | None = None,
-) -> SourcePopulationRow:
-    namekey = json.dumps(
+    cohort: AiAugmentCohort = AiAugmentCohort.GROUND_TRUTH,
+    ineligibility_category: AiAugmentIneligibilityCategory | None = None,
+) -> AiAugmentOuterDict:
+    namekey = NameKey(first_name=first_name, last_name=last_name)
+    xlsx_innerdict = InnerDict.from_mapping(
         {
+            KTP_NAMEKEY_COL: namekey.to_json_key(),
             KTP_FIRST_NAME_COL: first_name,
             KTP_LAST_NAME_COL: last_name,
+            DRAW_LABEL: "1",
         },
-        sort_keys=True,
+        XlsxMatchProcedure(),
     )
-    return SourcePopulationRow(
+    return AiAugmentOuterDict(
         namekey=namekey,
-        rnd=1,
-        first_name=first_name,
-        last_name=last_name,
-        draw_numbers=("1",),
-        cohort=cohort,
-        ineligibility_category=ineligibility_category,
+        xlsx_innerdicts=(xlsx_innerdict,),
+        ssn_innerdicts=(),
+        docx_innerdicts=(),
+        ai_augment_rnd=1,
+        ai_augment_cohort=cohort,
+        ai_augment_ineligibility_category=ineligibility_category,
     )
 
 
@@ -4270,17 +4319,7 @@ def test_backend_startup_prepares_source_rows_for_initial_pull(
     backend_test_paths: BackendTestPaths,
 ) -> None:
     base_runtime = runtime_for_test(tmp_path, backend_test_paths)
-    row = source_population_row("A.", "Sheikh")
-    source_researcher = SourceResearcher(
-        namekey=TEST_NAMEKEY,
-        first_name="A.",
-        last_name="Sheikh",
-        draw_numbers=("146",),
-        xlsx_rows=({KTP_NAMEKEY_COL: TEST_NAMEKEY, DRAW_LABEL: "146"},),
-        docx_rows=(),
-        ssn_rows=(),
-        cohort=api.GROUND_TRUTH_COHORT,
-    )
+    outerdict = ai_augment_outerdict("A.", "Sheikh")
     closed = False
 
     class SourceConnection:
@@ -4295,17 +4334,6 @@ def test_backend_startup_prepares_source_rows_for_initial_pull(
         assert read_only is True
         return source_connection
 
-    def load_prepared_source(
-        connection: object,
-        cohorts: Mapping[str, str] | None,
-        *,
-        namekey: str,
-    ) -> SourceResearcher:
-        assert connection is source_connection
-        assert cohorts == {TEST_NAMEKEY: api.GROUND_TRUTH_COHORT}
-        assert namekey == TEST_NAMEKEY
-        return source_researcher
-
     monkeypatch.setenv(api.NAMEKEY_ENV_NAME, TEST_NAMEKEY)
     monkeypatch.setattr(
         AiAugmentDetourConfig,
@@ -4316,13 +4344,16 @@ def test_backend_startup_prepares_source_rows_for_initial_pull(
     monkeypatch.setattr(api, "registered_release_map", lambda _pipeline: base_runtime.replay_log)
     monkeypatch.setattr(api, "load_release_batches", lambda _resource: {})
     monkeypatch.setattr(duckdb, "connect", connect)
-    monkeypatch.setattr(api, "derive_source_population", lambda *_args, **_kwargs: (row,))
-    monkeypatch.setattr(api, "load_source_researcher", load_prepared_source)
+    monkeypatch.setattr(
+        api,
+        "derive_ai_augment_outerdicts",
+        lambda *_args, **_kwargs: (outerdict,),
+    )
 
     runtime = api.configure_runtime(backend_test_paths.ai_augment_config)
 
     assert closed is True
-    assert runtime.source_researcher is source_researcher
+    assert runtime.configured_ai_augment_outerdict is outerdict
 
     def unexpected_source_reopen(_runtime: AiAugmentBackendContext) -> None:
         pytest.fail("initial pull must consume source rows prepared at Backend startup")
@@ -4341,7 +4372,7 @@ def test_backend_startup_prepares_source_rows_for_initial_pull(
     response = api.authoritative_pull()
 
     assert response.status_code == status.HTTP_200_OK
-    assert response.body == "".join(api.configured_pull_lines(source_researcher)).encode()
+    assert response.body == "".join(api.configured_pull_lines(outerdict)).encode()
 
 
 def test_ipc_only_runtime_prepares_projection_without_a_namekey(
@@ -4350,7 +4381,7 @@ def test_ipc_only_runtime_prepares_projection_without_a_namekey(
     backend_test_paths: BackendTestPaths,
 ) -> None:
     base_runtime = runtime_for_test(tmp_path, backend_test_paths)
-    row = source_population_row("A.", "Sheikh")
+    outerdict = ai_augment_outerdict("A.", "Sheikh")
     monkeypatch.delenv(api.NAMEKEY_ENV_NAME, raising=False)
     monkeypatch.setattr(
         AiAugmentDetourConfig,
@@ -4360,22 +4391,20 @@ def test_ipc_only_runtime_prepares_projection_without_a_namekey(
     monkeypatch.setattr(api, "registered_replay_log", lambda _pipeline: base_runtime.replay_log)
     monkeypatch.setattr(api, "registered_release_map", lambda _pipeline: base_runtime.replay_log)
     monkeypatch.setattr(api, "load_release_batches", lambda _resource: {})
-    monkeypatch.setattr(api, "derive_source_population", lambda *_args, **_kwargs: (row,))
-
-    def unexpected_source_researcher(*_args: object, **_kwargs: object) -> None:
-        pytest.fail("IPC-only configuration must not select one workflow researcher")
-
-    monkeypatch.setattr(api, "load_source_researcher", unexpected_source_researcher)
+    monkeypatch.setattr(
+        api,
+        "derive_ai_augment_outerdicts",
+        lambda *_args, **_kwargs: (outerdict,),
+    )
 
     runtime = api.configure_runtime(
         backend_test_paths.ai_augment_config,
         require_namekey=False,
     )
 
-    assert runtime.namekey is None
-    assert runtime.source_researcher is None
-    assert runtime.source_population == (row,)
-    assert runtime.eligible_cohorts == {row.namekey: row.cohort}
+    assert runtime.configured_namekey is None
+    assert runtime.configured_ai_augment_outerdict is None
+    assert runtime.ai_augment_outerdicts == (outerdict,)
 
 
 def test_ipc_only_query_defers_configuration_and_uses_read_only_database(
@@ -4384,7 +4413,10 @@ def test_ipc_only_query_defers_configuration_and_uses_read_only_database(
     backend_test_paths: BackendTestPaths,
 ) -> None:
     config_path = tmp_path / "config.json"
-    runtime = runtime_for_test(tmp_path, backend_test_paths)
+    outerdict = ai_augment_outerdict("A.", "Sheikh")
+    runtime = runtime_for_test(tmp_path, backend_test_paths).model_copy(
+        update={"ai_augment_outerdicts": (outerdict,)}
+    )
     calls: list[object] = []
 
     class ReadOnlyConnection:
@@ -4415,52 +4447,37 @@ def test_ipc_only_query_defers_configuration_and_uses_read_only_database(
         calls.append(("attempts", selected_connection))
         return ()
 
-    def accepted_innerdict_summaries(
+    def committed_innerdicts(
         selected_connection: duckdb.DuckDBPyConnection,
-    ) -> tuple[AcceptedInnerDictSummary, ...]:
-        calls.append(("accepted", selected_connection))
+    ) -> tuple[object, ...]:
+        calls.append(("committed", selected_connection))
         return ()
-
-    def card(
-        selected_runtime: AiAugmentBackendContext,
-        selected_connection: duckdb.DuckDBPyConnection,
-        *,
-        namekey: str,
-    ) -> str:
-        calls.append(("card", selected_runtime, selected_connection, namekey))
-        return "card"
 
     monkeypatch.setattr(api, "configure_runtime", configure)
     monkeypatch.setattr(api, "runtime_configuration", configured_runtime)
     monkeypatch.setattr(api, "open_detour_database", open_database)
     monkeypatch.setattr(api, "_attempt_records", attempts)
-    monkeypatch.setattr(
-        api,
-        "_accepted_innerdict_summaries",
-        accepted_innerdict_summaries,
-    )
+    monkeypatch.setattr(api, "_committed_innerdicts", committed_innerdicts)
     monkeypatch.setattr(ipc, "_run_outcome_records", lambda _connection: ())
-    monkeypatch.setattr(api, "_dashboard_card_markdown", card)
 
     query = ipc.build_ipc_only_dashboard_query_payload_callback(config_path)
 
     assert calls == []
     first = QueryResponse.from_serialized_json(query(None))
     second = QueryResponse.from_serialized_json(query(TEST_NAMEKEY))
-    assert first.card_markdown is None
-    assert second.card_markdown == "card"
+    assert first.ai_augment_outerdicts == (outerdict,)
+    assert second.ai_augment_outerdicts == (outerdict,)
     assert calls == [
         ("configure", config_path, False),
         "runtime",
         ("open", True),
         ("attempts", connection),
-        ("accepted", connection),
+        ("committed", connection),
         "close",
         "runtime",
         ("open", True),
         ("attempts", connection),
-        ("accepted", connection),
-        ("card", runtime, connection, TEST_NAMEKEY),
+        ("committed", connection),
         "close",
     ]
 
@@ -4525,22 +4542,28 @@ def test_detour_database_open_modes_are_explicit_and_reported(
 
 
 def test_configured_namekey_population_accepts_exact_eligible_match() -> None:
-    row = source_population_row("Gaoquan ", "Shi")
+    outerdict = ai_augment_outerdict("Gaoquan ", "Shi")
 
-    api._validate_configured_namekey_population(row.namekey, (row,))
+    assert api._configured_ai_augment_outerdict(
+        outerdict.namekey,
+        (outerdict,),
+    ) is outerdict
 
 
 def test_configured_namekey_population_reports_exact_ineligibility_category() -> None:
-    category = IneligibilityCategory.STAGING_PARTITION_2
-    row = source_population_row(
+    category = AiAugmentIneligibilityCategory.STAGING_PARTITION_2
+    outerdict = ai_augment_outerdict(
         "Gaoquan ",
         "Shi",
-        cohort=api.INELIGIBLE_COHORT,
+        cohort=AiAugmentCohort.INELIGIBLE,
         ineligibility_category=category,
     )
 
     with pytest.raises(api._PushConfigurationError) as exc_info:
-        api._validate_configured_namekey_population(row.namekey, (row,))
+        api._configured_ai_augment_outerdict(
+            outerdict.namekey,
+            (outerdict,),
+        )
 
     assert str(exc_info.value) == Locale.CONFIGURED_NAMEKEY_INELIGIBLE_TEMPLATE.format(
         category=category.value
@@ -4548,27 +4571,29 @@ def test_configured_namekey_population_reports_exact_ineligibility_category() ->
 
 
 def test_configured_namekey_population_suggests_exact_trailing_space_match() -> None:
-    row = source_population_row("Gaoquan ", "Shi")
-    configured_namekey = source_population_row("Gaoquan", "Shi").namekey
+    outerdict = ai_augment_outerdict("Gaoquan ", "Shi")
+    configured_namekey = ai_augment_outerdict("Gaoquan", "Shi").namekey
 
     with pytest.raises(api._PushConfigurationError) as exc_info:
-        api._validate_configured_namekey_population(configured_namekey, (row,))
+        api._configured_ai_augment_outerdict(configured_namekey, (outerdict,))
 
     assert str(exc_info.value) == Locale.CONFIGURED_NAMEKEY_NOT_FOUND_SUGGESTIONS_TEMPLATE.format(
-        suggestions=row.namekey
+        suggestions=outerdict.namekey.to_json_key()
     )
 
 
 def test_configured_namekey_population_sorts_multiple_whitespace_suggestions() -> None:
-    rows = (
-        source_population_row("Gaoquan ", "Shi"),
-        source_population_row(" Gaoquan", "Shi"),
+    outerdicts = (
+        ai_augment_outerdict("Gaoquan ", "Shi"),
+        ai_augment_outerdict(" Gaoquan", "Shi"),
     )
-    configured_namekey = source_population_row("Gaoquan", "Shi").namekey
-    suggestions = " or ".join(sorted(row.namekey for row in rows))
+    configured_namekey = ai_augment_outerdict("Gaoquan", "Shi").namekey
+    suggestions = " or ".join(
+        sorted(outerdict.namekey.to_json_key() for outerdict in outerdicts)
+    )
 
     with pytest.raises(api._PushConfigurationError) as exc_info:
-        api._validate_configured_namekey_population(configured_namekey, rows)
+        api._configured_ai_augment_outerdict(configured_namekey, outerdicts)
 
     assert str(exc_info.value) == Locale.CONFIGURED_NAMEKEY_NOT_FOUND_SUGGESTIONS_TEMPLATE.format(
         suggestions=suggestions
@@ -4576,11 +4601,11 @@ def test_configured_namekey_population_sorts_multiple_whitespace_suggestions() -
 
 
 def test_configured_namekey_population_reports_unrelated_unknown_without_suggestion() -> None:
-    row = source_population_row("Gaoquan ", "Shi")
-    configured_namekey = source_population_row("Gaoquan", "Shih").namekey
+    outerdict = ai_augment_outerdict("Gaoquan ", "Shi")
+    configured_namekey = ai_augment_outerdict("Gaoquan", "Shih").namekey
 
     with pytest.raises(api._PushConfigurationError) as exc_info:
-        api._validate_configured_namekey_population(configured_namekey, (row,))
+        api._configured_ai_augment_outerdict(configured_namekey, (outerdict,))
 
     assert str(exc_info.value) == Locale.CONFIGURED_NAMEKEY_NOT_FOUND
 
@@ -4916,7 +4941,7 @@ def test_accepted_push_is_committed_only_after_its_public_record(
     )
     runtime = cast(
         AiAugmentBackendContext,
-        SimpleNamespace(namekey=TEST_NAMEKEY),
+        SimpleNamespace(configured_namekey=NameKey.from_json_key(TEST_NAMEKEY)),
     )
     appended: list[HttpRequestLogRecord] = []
     api.BACKEND_PENDING_PULL_RECORD_ID = pull_record_id
@@ -5261,8 +5286,8 @@ def test_dashboard_query_uses_one_backend_owned_connection_and_synchronizes_each
         == second
         == QueryResponse(
             attempts=(),
-            accepted_innerdict_summaries=(),
-            card_markdown=None,
+            ai_augment_outerdicts=(),
+            run_outcome_records=(),
         )
     )
     assert len(synchronized_connections) == 2

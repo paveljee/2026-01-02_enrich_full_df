@@ -13,7 +13,10 @@ from ..vars import (
 
 
 class AiAugmentDetourConfig(PipelineConfig):
+    detour_db_path: Path
     rollout_cas_dir: Path
+    replay_log: RegisteredResource
+    release_map: RegisteredResource | None = None
 
     @model_validator(mode="after")
     def _validate_ai_augment_files_config(self) -> Self:

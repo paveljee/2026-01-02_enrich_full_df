@@ -183,6 +183,21 @@ This section is intended to capture the specifics of the detour operation in suf
 >
 > The decision not to self-host an LLM Inference API was driven by the fact that the augmentation pipeline depends heavily on web search and web page retrieval, which are inherently irreproducible as usually implemented. For example, the open source [Tongyi Deep Research][tongyi] pipeline, while supporting open-weight models, still relies on third-party services such as Serper for web search or Jina for web page retrieval, substantially relaxing end-to-end reproducibility guarantees in general. Additionally, frontier agentic set-ups such as OpenAI Codex often offer [superior][artificial-analysis-coding-agents] performance on tasks such as software engineering, as well as across the board.
 
+> [!IMPORTANT]
+> The detour root tree is organized in a conventional way:
+>
+> - `./src/` contains the source code;
+> - `./tests/` contains tests and fixtures;
+> - `./assets/` contains static media.
+>
+> That said, some files reside in the `./protected/`
+> subdirectory. It mirrors the root tree and
+> hosts files that are maintained with
+> **an elevated level of care and scrutiny**
+> and/or were heavily edited or reviewed manually.
+> **Extra discretion is advised before writing**
+> **into `./protected/`.**
+
 **Control Centre:** Requires no specialized infrastructure beyond a computer capable of operating the detour components, including sufficient computing resources and internet access. The test set-up (hereafter: the main host) used a Mac16,12 Macbook Air (Apple M4 chip) in a 10-core, 24 GB RAM, 512 GB SSD configuration, running macOS Sequoia 15.6.1 and Visual Studio Code 1.130.0, though these versions were not pinned and may have been updated moving forward.
 
 **Backend:** Deployed on the host machine using `./src/backend/server.py` in this (i.e., the `detour_ai_augment` “detour” of the KTP HCR pipeline) environment.

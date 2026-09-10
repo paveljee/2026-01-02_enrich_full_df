@@ -11,9 +11,14 @@ import pytest
 from fastapi import status
 
 from src.detours.detour_ai_augment.src.backend import api, ipc, server
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_config import (
+    AiAugmentDetourConfig,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_context import (
+    QueryResponse,
+)
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.server_event import (
     CodexSessionRecord,
-    QueryResponse,
     RunOutcomeResponse,
     RunOutcomeResponseBody,
 )
@@ -101,8 +106,7 @@ def test_dashboard_query_flask_application_is_separate_and_unauthenticated() -> 
     observed: list[str | None] = []
     payload = QueryResponse(
         attempts=(),
-        accepted_innerdict_summaries=(),
-        card_markdown=None,
+        ai_augment_outerdicts=(),
     ).model_dump_json()
 
     def query(namekey: str | None) -> str:
@@ -241,8 +245,7 @@ def test_dashboard_client_queries_real_mode_0600_unix_socket(
     observed: list[str | None] = []
     payload = QueryResponse(
         attempts=(),
-        accepted_innerdict_summaries=(),
-        card_markdown="card",
+        ai_augment_outerdicts=(),
     ).model_dump_json()
 
     def query(namekey: str | None) -> str:
@@ -262,13 +265,15 @@ def test_dashboard_client_queries_real_mode_0600_unix_socket(
         assert stat.S_ISSOCK(socket_path.stat().st_mode)
         assert stat.S_IMODE(socket_path.stat().st_mode) == SOCKET_PERMISSIONS
         assert capsys.readouterr().out == (f"Dashboard IPC running on unix://{socket_path}\n")
-        client = _BackendDatabaseClient(socket_path=socket_path)
+        client = _BackendDatabaseClient(
+            socket_path=socket_path,
+            pipeline_config=AiAugmentDetourConfig.model_construct(),
+        )
         assert client.available() is True
         assert observed == []
         assert client.pull(Namekey("researcher")) == QueryResponse(
             attempts=(),
-            accepted_innerdict_summaries=(),
-            card_markdown="card",
+            ai_augment_outerdicts=(),
         )
         assert observed == ["researcher"]
     finally:

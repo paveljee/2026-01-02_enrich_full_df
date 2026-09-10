@@ -20,50 +20,6 @@ from src.helpers.data_models import (
 from .acme_protocol import ComponentProtocol
 
 
-class implements[Proto]:
-    """
-    Generic decorator for statically asserting that a concrete class
-    structurally implements a `Protocol`.
-
-    When `Proto` is a `Protocol` class, applying `@implements[Proto]()`
-    to a concrete class causes a static type checker such as mypy
-    to check that the class structurally satisfies `type[Proto]`,
-    in particular `Proto`'s read-only `@property` definitions.
-
-    For a concrete class `C`, this decorator imposes essentially
-    the same static compatibility check as:
-
-    ```python
-    _check: type[Proto] = C
-    ```
-
-    Normal mypy protocol compatibility rules apply, including
-    compatibility of member signatures and nested member types.
-
-    At runtime, no conformance check is performed.
-
-    Returns the original class unchanged.
-
-    Note 1: The static type checker neither asserts nor enforces
-    that `Proto` is a `Protocol` class; rather, this is mandated
-    as a convention in this code base.
-
-    Note 2: Even though not enforced by the static type checker,
-    unintended use (i.e., where `Proto` is not a `Protocol` class)
-    may tend to fail for other reasons, e.g.:
-
-    - mypy's `[empty-body]` error if `Proto` has properties
-    defined with only a signature and `...`);
-    - mypy's `[arg-type]` error if `C` does not nominally
-    inherit from `Proto`.
-
-    signed off: human (credit to gpt-6-astra-pro for conceiving)
-    """
-
-    def __call__(self, cls: type[Proto]) -> type[Proto]:
-        return cls
-
-
 class BackendComponent(
     ComponentProtocol,
     Protocol,
@@ -142,13 +98,12 @@ class BackendComponent(
         Protocol,
     ):
         @property
-        def pull_record(self) -> HttpRequestLogRecord: ...
+        def http_request_log_record(self) -> HttpRequestLogRecord: ...
 
         @property
-        def push_record(self) -> HttpRequestLogRecord: ...
-
-        @property
-        def codex_session_record(self) -> BackendComponent.CodexSessionRecordProperty: ...
+        def commit_request_body(
+            self,
+        ) -> BackendComponent.CommitRequestBodyProperty: ...
 
         def validate_commit_record(self) -> Self: ...
 
@@ -270,7 +225,35 @@ class BackendComponent(
     ):
         """Serves the Backend - Control Centre Connector."""
 
-        class AcceptedInnerDictSummaryProperty(
+        class AiAugmentCohortProperty(
+            ComponentProtocol.PortProtocol.PropertyProtocol,
+            Protocol,
+        ):
+            @property
+            def value(
+                self,
+            ) -> Literal[
+                "ground_truth",
+                "no_ground_truth",
+                "ineligible",
+            ]: ...
+
+        class AiAugmentIneligibilityCategoryProperty(
+            ComponentProtocol.PortProtocol.PropertyProtocol,
+            Protocol,
+        ):
+            @property
+            def value(
+                self,
+            ) -> Literal[
+                "excluded_duplicate_namekey",
+                "release_batch_subset_8",
+                "staging_partition_2",
+                "staging_partition_4_xlsx_non_exact",
+                "staging_partition_4_multiple_ssn",
+            ]: ...
+
+        class CommittedInnerDictProperty(
             ComponentProtocol.PortProtocol.PropertyProtocol,
             Protocol,
         ):
@@ -278,20 +261,67 @@ class BackendComponent(
             def innerdict(self) -> InnerDict: ...
 
             @property
-            def namekey(self) -> NameKey: ...
-
-            @property
-            def commit_record_id(self) -> UUID: ...
-
-            @property
-            def codex_session_id(self) -> UUID: ...
+            def commit_record(self) -> BackendComponent.CommitRecordProperty: ...
 
             def text(self, column: str) -> str | None: ...
 
-            def validate_accepted_innerdict(self) -> Self: ...
+            def validate_committed_innerdict(self) -> Self: ...
 
             @classmethod
-            def from_innerdict(cls, innerdict: InnerDict) -> Self: ...
+            def from_serialized(
+                cls,
+                value: Mapping[str, object],
+            ) -> Self: ...
+
+            def serialize(self) -> dict[str, object]: ...
+
+        class AiAugmentOuterDictProperty(
+            ComponentProtocol.PortProtocol.PropertyProtocol,
+            Protocol,
+        ):
+            @property
+            def namekey(self) -> NameKey: ...
+
+            @property
+            def xlsx_innerdicts(self) -> tuple[InnerDict, ...]: ...
+
+            @property
+            def ssn_innerdicts(self) -> tuple[InnerDict, ...]: ...
+
+            @property
+            def docx_innerdicts(self) -> tuple[InnerDict, ...]: ...
+
+            @property
+            def committed_innerdicts(self) -> tuple[
+                BackendComponent.ControlCentrePort.CommittedInnerDictProperty,
+                ...
+            ]: ...
+
+            @property
+            def ai_augment_rnd(self) -> int: ...
+
+            @property
+            def ai_augment_cohort(
+                self,
+            ) -> BackendComponent.ControlCentrePort.AiAugmentCohortProperty: ...
+
+            @property
+            def ai_augment_ineligibility_category(
+                self,
+            ) -> (
+                BackendComponent.ControlCentrePort.AiAugmentIneligibilityCategoryProperty
+                | None
+            ): ...
+
+            def validate_ai_augment_outerdict(self) -> Self: ...
+
+            @classmethod
+            def from_serialized(
+                cls,
+                value: Mapping[str, object],
+            ) -> Self: ...
+
+            def serialize(self) -> dict[str, object]: ...
 
         class RunOutcomeResponseBodyProperty(
             ComponentProtocol.PortProtocol.PropertyProtocol,
@@ -359,10 +389,10 @@ class BackendComponent(
             ]: ...
 
             @property
-            def accepted_innerdict_summaries(
+            def ai_augment_outerdicts(
                 self,
             ) -> tuple[
-                BackendComponent.ControlCentrePort.AcceptedInnerDictSummaryProperty,
+                BackendComponent.ControlCentrePort.AiAugmentOuterDictProperty,
                 ...,
             ]: ...
 
@@ -373,9 +403,6 @@ class BackendComponent(
                 BackendComponent.ControlCentrePort.RunOutcomeResponseProperty,
                 ...,
             ]: ...
-
-            @property
-            def card_markdown(self) -> str | None: ...
 
             @classmethod
             def from_serialized_json(
