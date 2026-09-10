@@ -18,10 +18,6 @@ class implements[Proto]:
     to check that the class structurally satisfies `type[Proto]`,
     in particular `Proto`'s read-only `@property` definitions.
 
-    Note that the static type checker neither asserts nor enforces
-    that `Proto` is a `Protocol` class; rather, this is mandated
-    as a convention in this code base.
-
     For a concrete class `C`, this decorator imposes essentially
     the same static compatibility check as:
 
@@ -36,9 +32,21 @@ class implements[Proto]:
     
     Returns the original class unchanged.
 
+    Note 1: The static type checker neither asserts nor enforces
+    that `Proto` is a `Protocol` class; rather, this is mandated
+    as a convention in this code base.
+
+    Note 2: Even though not enforced by the static type checker,
+    unintended use (i.e., where `Proto` is not a `Protocol` class)
+    may tend to fail for other reasons, e.g.:
+
+    - mypy's `[empty-body]` error if `Proto` has properties
+    defined with only a signature and `...`);
+    - mypy's `[arg-type]` error if `C` does not nominally
+    inherit from `Proto`.
+
     signed off: human (credit to gpt-6-astra-pro for conceiving)
     """
-
 
     def __call__(self, cls: type[Proto]) -> type[Proto]:
         return cls
