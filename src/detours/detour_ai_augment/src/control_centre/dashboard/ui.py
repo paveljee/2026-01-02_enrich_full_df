@@ -603,6 +603,14 @@ class _AttemptView:
         return self.run_outcome_response.response_code == status.HTTP_200_OK
 
     @property
+    def run_outcome_session_id(self) -> UUID | None:
+        if self.run_outcome_response is None:
+            return None
+        return (
+            self.run_outcome_response.run_outcome_response_body.codex_session_record.session_id
+        )
+
+    @property
     def run_outcome_session_status(self) -> str | None:
         response = self.run_outcome_response
         if response is None:
