@@ -174,6 +174,10 @@ class Locale:
     APPENDWATCH_ARCHIVE_FAILED: Final = (
         "appendwatch status could not be read through the AIVM audit principal"
     )
+    RUN_OUTCOME_SNAPSHOT_FAILED_LOG: Final = "run-outcome snapshot %s was partial: %s"
+    RUN_OUTCOME_SNAPSHOT_APPEND_FATAL_LOG: Final = (
+        "run-outcome snapshot %s could not be durably logged: %s"
+    )
 
     APPENDWATCH_REPORT_UNREADABLE: Final = "archived appendwatch report is unreadable"
     APPENDWATCH_REPORT_INCOMPLETE: Final = "archived appendwatch report is incomplete"
@@ -477,7 +481,7 @@ class Locale:
     GROUND_TRUTH_DOCX_INCOMPLETE: Final = "ground-truth researcher has no complete docx innerdict"
     RESEARCHER_NOT_UNIQUE: Final = "selected researcher did not resolve uniquely"
     ACCEPTED_IDENTITY_DUPLICATE: Final = (
-        "attempt ID or rollout filename/line-count fragment is already accepted"
+        "commit record ID or rollout filename/line-count fragment is already accepted"
     )
     ATTEMPT_CARD_ZIP_EXISTS: Final = "attempt card ZIP already exists"
     ATTEMPT_HTTP_LOG_EXISTS: Final = "attempt HTTP request log already exists"

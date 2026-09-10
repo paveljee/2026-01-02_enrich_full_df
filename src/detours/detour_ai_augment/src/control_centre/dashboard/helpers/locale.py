@@ -71,7 +71,9 @@ class Locale:
     JOURNAL_ROLLOUT_PATH_MISSING: Final = (
         "rollout-discovered event has no path"
     )
-    JOURNAL_ATTEMPT_ID_MISSING: Final = "push-accepted event has no attempt ID"
+    JOURNAL_COMMIT_RECORD_ID_MISSING: Final = (
+        "push-accepted event has no commit record ID"
+    )
     UNKNOWN_NAMEKEY_TEMPLATE: Final = "unknown namekey: {namekey}"
     BACKEND_OUTPUT_PIPE_MISSING: Final = "backend output pipe was not created"
     BACKEND_OPENAPI_NOT_READY: Final = "backend OpenAPI endpoint is not ready"
@@ -87,6 +89,28 @@ class Locale:
     BACKEND_DATABASE_UNAVAILABLE: Final = "backend database IPC is unavailable"
     BACKEND_DATABASE_RESPONSE_INVALID: Final = "backend database IPC response is invalid"
     BACKEND_CARD_MISSING: Final = "backend returned no researcher card"
+    RUN_OUTCOME_SNAPSHOT_REQUEST_FAILED: Final = (
+        "Backend run-outcome snapshot request failed"
+    )
+    RUN_OUTCOME_SNAPSHOT_INVALID: Final = (
+        "Backend run-outcome snapshot record is invalid"
+    )
+    RUN_OUTCOME_SNAPSHOT_SAVED: Final = "saved"
+    RUN_OUTCOME_SNAPSHOT_FAILED: Final = "not saved"
+    RUN_OUTCOME_SNAPSHOT_REQUEST_FAILED_TEMPLATE: Final = (
+        "run {run_id} run-outcome snapshot request failed: {error}"
+    )
+    RUN_OUTCOME_RESPONSE_REFRESH_FAILED_TEMPLATE: Final = (
+        "run {run_id} was recorded, but its exact Backend response could not be "
+        "refreshed: {error}"
+    )
+    RUN_OUTCOME_SNAPSHOT_PARTIAL_TEMPLATE: Final = (
+        "run {run_id} was marked {outcome}, but Backend returned 500 while saving "
+        "its run-outcome snapshot"
+    )
+    SESSION_STATUS_OK: Final = "OK"
+    SESSION_STATUS_UNAVAILABLE: Final = "unavailable"
+    SESSION_STATUS_NOT_OK_TEMPLATE: Final = "NOT OK: {detail}"
     DOCX_DOWNLOAD_FAILED: Final = "Researcher card DOCX generation failed"
     OPENALEX_API_KEY_MISSING: Final = (
         "OPENALEX_API_KEY is required in the Control Centre environment"

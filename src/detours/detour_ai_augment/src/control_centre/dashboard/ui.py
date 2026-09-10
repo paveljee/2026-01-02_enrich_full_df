@@ -30,6 +30,7 @@ from nicegui import app, ui
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from src.helpers.cards import card_filename, render_docx_bytes
+from src.helpers.data_models import NameKey
 from src.helpers.vars import (
     DRAW_LABEL,
     KTP_FIRST_NAME_COL,
@@ -37,17 +38,11 @@ from src.helpers.vars import (
     KTP_NAMEKEY_COL,
 )
 
+from ...architecture import ControlCentreComponent, implements
 from ...backend.api import (
     APPENDWATCH_REPORT_ENV_NAME,
-    ATTEMPT_RESULT_ACCEPTED,
-    ATTEMPT_RESULT_CONFIGURATION_ERROR,
-    ATTEMPT_RESULT_REJECTED,
     CODEX_SESSIONS_ROOT_ENV_NAME,
-    CONFIG_OPTION,
     CONTROL_PARENT_PID_ENV_NAME,
-    DASHBOARD_QUERY_PATH,
-    DASHBOARD_SOCKET_PATH,
-    DASHBOARD_SOCKET_PATH_ENV_NAME,
     DOCX_TO_AI_AUGMENT_COLUMNS,
     DRAW_VALUE_SEPARATOR,
     EXPECTED_GROUND_TRUTH_RESEARCHERS,
@@ -56,32 +51,63 @@ from ...backend.api import (
     EXPECTED_NO_GROUND_TRUTH_RESEARCHERS,
     EXPECTED_SOURCE_RESEARCHERS,
     HTTP_GET_METHOD,
+    HTTP_POST_METHOD,
     NAMEKEY_ENV_NAME,
     SERVER_PORT,
-    AttemptRecord,
-    DashboardQueryResponse,
-    IneligibilityCategory,
+    _PushValidationError,
     ground_truth_for_researcher,
     load_source_researcher,
+    parse_appendwatch_report_bytes,
+    parse_name_key_header,
+    parse_source_key_header,
     registered_release_map,
-)
-from ...backend.api import (
-    SourceCohort as ResearcherCohort,
 )
 from ...backend.helpers.data_models.ai_augment_config import AiAugmentDetourConfig
 from ...backend.helpers.data_models.pydantic_to_paste import EXPORT_OPENALEX_API_KEY
-from ...backend.helpers.data_models.source_population import SourcePopulationRow
+from ...backend.helpers.data_models.server_event import (
+    SOURCE_KEY_HEADER,
+    AcceptedInnerDictSummary,
+    AgentRuntimeAttempt,
+    PostCommitValidationResult,
+    QueryResponse,
+    RunOutcomeResponse,
+    RunOutcomeResponseBody,
+)
+from ...backend.helpers.data_models.source_population import (
+    IneligibilityCategory,
+    SourcePopulationRow,
+)
+from ...backend.helpers.data_models.source_population import (
+    SourceCohort as ResearcherCohort,
+)
 from ...backend.helpers.vars import (
     AI_AUGMENT_COLUMN_PREFIX,
-    KTP_AI_AUGMENT_ATTEMPT_ID_COL,
+    KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL,
     KTP_AI_AUGMENT_FOOTNOTE_ARGUMENTS_COL,
     KTP_AI_AUGMENT_FOOTNOTES_COL,
 )
+from ...backend.ipc import (
+    DASHBOARD_IPC_HOST,
+    DASHBOARD_QUERY_PATH,
+    DASHBOARD_SOCKET_PATH,
+    DASHBOARD_SOCKET_PATH_ENV_NAME,
+)
+from ...backend.server import CONFIG_OPTION
 from .helpers.aggrid import AgGrid
 from .helpers.data_models.ai_augment_context import (
     AiAugmentCtlCtrContext,
 )
-from .helpers.data_models.run_event import RunEvent, RunEventKind
+from .helpers.data_models.run_event import (
+    Run,
+    RunEvent,
+    RunEventKind,
+    RunPhase,
+)
+from .helpers.data_models.run_outcome import (
+    NAME_KEY_HEADER,
+    RunOutcome,
+    RunOutcomeRequest,
+)
 from .helpers.locale import Locale
 from .helpers.vars import (
     AIVM_SSH_CONNECTION_COMMAND,
@@ -130,7 +156,7 @@ from .helpers.vars import (
 )
 
 
-class NiceGui:
+class _NiceGui:
     TABLE_COLUMN_NAME: Final = "name"
     TABLE_COLUMN_LABEL: Final = "label"
     TABLE_COLUMN_FIELD: Final = "field"
@@ -186,9 +212,7 @@ ATTEMPT_HISTORY_TABLE_STYLE: Final = (
 ATTEMPT_HISTORY_TABLE_PROPS: Final = "flat bordered wrap-cells"
 ACTION_BUTTON_STYLE: Final = "min-width: 10rem;"
 HTTP_OPTIONS_METHOD: Final = "OPTIONS"
-DOCX_MEDIA_TYPE: Final = (
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-)
+DOCX_MEDIA_TYPE: Final = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 GRID_DRAW_COLUMN_WIDTH: Final = 110
 GRID_RND_COLUMN_WIDTH: Final = 90
 GRID_NAME_COLUMN_WIDTH: Final = 150
@@ -217,9 +241,11 @@ GRID_AI_VALUE_FIELD: Final = "ai_value"
 GRID_TABLE_1_VALUE_FIELD: Final = "table_1_value"
 GRID_FOOTNOTES_FIELD: Final = "footnotes"
 GRID_FOOTNOTE_ARGUMENTS_FIELD: Final = "footnote_arguments"
-GRID_ATTEMPT_ID_FIELD: Final = "attempt_id"
+GRID_COMMIT_RECORD_ID_FIELD: Final = "commit_record_id"
 GRID_ATTEMPT_TIMESTAMP_FIELD: Final = "attempt_timestamp"
 GRID_STATUS_FIELD: Final = "status"
+GRID_RUN_OUTCOME_SNAPSHOT_FIELD: Final = "run_outcome_snapshot"
+GRID_SESSION_STATUS_FIELD: Final = "session_status"
 GRID_ACTION_FIELD: Final = "action"
 PAGE_CONTAINER_TEST_ID: Final = "page-container"
 PAGE_HEADER_TEST_ID: Final = "page-header"
@@ -265,9 +291,17 @@ CARD_RESPONSIVE_CSS: Final = f"""
 # =============================================================================
 
 Namekey = NewType("Namekey", str)
-SessionId = NewType("SessionId", str)
-AttemptId = NewType("AttemptId", str)
 RemotePid = NewType("RemotePid", int)
+
+
+def namekey_model(namekey: Namekey) -> NameKey:
+    return NameKey.from_json_key(namekey)
+
+
+def datetime_to_unix_usec(value: datetime) -> int:
+    if value.tzinfo is None:
+        raise ValueError("run-event time must be timezone-aware")
+    return int(value.timestamp() * 1_000_000)
 
 
 def emit_log(prefix: str, message: str) -> None:
@@ -295,7 +329,7 @@ def draw_sort_key(
 
 
 def researcher_sort_key(
-    researcher: Researcher,
+    researcher: _Researcher,
 ) -> tuple[
     tuple[tuple[int, tuple[tuple[int, int | str], ...], str], ...],
     str,
@@ -316,11 +350,11 @@ def nicegui_table_column(
     label: str,
 ) -> dict[str, object]:
     return {
-        NiceGui.TABLE_COLUMN_NAME: field,
-        NiceGui.TABLE_COLUMN_LABEL: label,
-        NiceGui.TABLE_COLUMN_FIELD: field,
-        NiceGui.TABLE_COLUMN_ALIGN: NiceGui.TABLE_LEFT_ALIGNMENT,
-        NiceGui.TABLE_COLUMN_SORTABLE: True,
+        _NiceGui.TABLE_COLUMN_NAME: field,
+        _NiceGui.TABLE_COLUMN_LABEL: label,
+        _NiceGui.TABLE_COLUMN_FIELD: field,
+        _NiceGui.TABLE_COLUMN_ALIGN: _NiceGui.TABLE_LEFT_ALIGNMENT,
+        _NiceGui.TABLE_COLUMN_SORTABLE: True,
     }
 
 
@@ -330,14 +364,14 @@ def nicegui_table_column(
 
 
 @dataclass(frozen=True, slots=True)
-class VariableSpec:
+class _VariableSpec:
     key: str
     ai_column: str
     table_1_column: str
 
 
-VARIABLE_SPECS: Final[tuple[VariableSpec, ...]] = tuple(
-    VariableSpec(
+VARIABLE_SPECS: Final[tuple[_VariableSpec, ...]] = tuple(
+    _VariableSpec(
         key=ai_column.removeprefix(AI_AUGMENT_COLUMN_PREFIX),
         ai_column=ai_column,
         table_1_column=table_1_column,
@@ -353,7 +387,7 @@ VARIABLE_SPEC_BY_KEY: Final = {variable.key: variable for variable in VARIABLE_S
 # =============================================================================
 
 
-class RunStatus(StrEnum):
+class _ResearcherActivity(StrEnum):
     READY = "ready"
     QUEUED = "queued"
     RUNNING = "running"
@@ -362,15 +396,42 @@ class RunStatus(StrEnum):
     CANCELED = "canceled"
 
 
-LIVE_RUN_STATUSES: Final = frozenset({RunStatus.QUEUED, RunStatus.RUNNING})
-ARCHIVED_ATTEMPT_STATUS_BY_RESULT: Final = {
-    ATTEMPT_RESULT_ACCEPTED: RunStatus.COMPLETE,
-    ATTEMPT_RESULT_CONFIGURATION_ERROR: RunStatus.FAILED,
-    ATTEMPT_RESULT_REJECTED: RunStatus.FAILED,
+LIVE_RESEARCHER_ACTIVITIES: Final = frozenset({
+    _ResearcherActivity.QUEUED,
+    _ResearcherActivity.RUNNING,
+})
+AGENT_RUNTIME_ATTEMPT_ACTIVITY_BY_RESULT: Final = {
+    PostCommitValidationResult.ACCEPTED: _ResearcherActivity.COMPLETE,
+    PostCommitValidationResult.CONFIGURATION_ERROR: _ResearcherActivity.FAILED,
+    PostCommitValidationResult.REJECTED: _ResearcherActivity.FAILED,
+}
+RUN_EVENT_KIND_BY_OUTCOME: Final = {
+    RunOutcome.COMPLETED: RunEventKind.COMPLETED,
+    RunOutcome.FAILED: RunEventKind.FAILED,
+    RunOutcome.CANCELLED: RunEventKind.CANCELLED,
+}
+RESEARCHER_ACTIVITY_BY_RUN_OUTCOME: Final = {
+    RunOutcome.COMPLETED: _ResearcherActivity.COMPLETE,
+    RunOutcome.FAILED: _ResearcherActivity.FAILED,
+    RunOutcome.CANCELLED: _ResearcherActivity.CANCELED,
 }
 
 
-class BackendStatus(StrEnum):
+def researcher_activity_for_run(run: Run) -> _ResearcherActivity:
+    if run.phase is RunPhase.QUEUED:
+        return _ResearcherActivity.QUEUED
+    if run.phase is RunPhase.RUNNING:
+        return _ResearcherActivity.RUNNING
+    if run.outcome is None:
+        raise RuntimeError(Locale.JOURNAL_EVENT_WITHOUT_RUN)
+    return RESEARCHER_ACTIVITY_BY_RUN_OUTCOME[run.outcome]
+
+
+def run_namekey(run: Run) -> Namekey:
+    return Namekey(run.namekey.to_json_key())
+
+
+class _BackendStatus(StrEnum):
     STOPPED = "stopped"
     STARTING = "starting"
     RUNNING = "running"
@@ -378,7 +439,7 @@ class BackendStatus(StrEnum):
     FAILED = "failed"
 
 
-class RunAction(StrEnum):
+class _RunAction(StrEnum):
     QUEUE = "queue"
     CANCEL = "cancel"
     RERUN = "rerun"
@@ -391,13 +452,13 @@ class RunAction(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
-class BackendAvailability:
+class _BackendAvailability:
     full_api_available: bool
     ipc_available: bool
 
 
 @dataclass(frozen=True, slots=True)
-class Researcher:
+class _Researcher:
     namekey: Namekey
     rnd: int
     draw_numbers: tuple[str, ...]
@@ -412,12 +473,12 @@ class Researcher:
 
 
 @dataclass(frozen=True, slots=True)
-class GroundTruthRecord:
+class _GroundTruthRecord:
     namekey: Namekey
     values: Mapping[str, str | None]
 
 
-class SourceInputFingerprint(BaseModel):
+class _SourceInputFingerprint(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     schema_version: int
@@ -431,14 +492,14 @@ class SourceInputFingerprint(BaseModel):
     sample_seed: int
 
 
-class CachedSourceData(BaseModel):
+class _CachedSourceData(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    fingerprint: SourceInputFingerprint
+    fingerprint: _SourceInputFingerprint
     source_population: tuple[SourcePopulationRow, ...]
     ground_truth_values: dict[str, dict[str, str | None]]
 
-    def ground_truth_by_namekey(self) -> Mapping[Namekey, GroundTruthRecord]:
+    def ground_truth_by_namekey(self) -> Mapping[Namekey, _GroundTruthRecord]:
         expected_namekeys = {
             row.namekey
             for row in self.source_population
@@ -447,7 +508,7 @@ class CachedSourceData(BaseModel):
         if set(self.ground_truth_values) != expected_namekeys:
             raise ValueError(Locale.GROUND_TRUTH_MISSING)
         return {
-            Namekey(namekey): GroundTruthRecord(
+            Namekey(namekey): _GroundTruthRecord(
                 namekey=Namekey(namekey),
                 values=values,
             )
@@ -455,12 +516,12 @@ class CachedSourceData(BaseModel):
         }
 
 
-def source_input_fingerprint(config_path: Path) -> SourceInputFingerprint:
+def source_input_fingerprint(config_path: Path) -> _SourceInputFingerprint:
     pipeline_config = AiAugmentDetourConfig.from_json(config_path)
     release_map = registered_release_map(pipeline_config)
     source_database_path = pipeline_config.db_file.resolve(strict=True)
     source_database_stat = source_database_path.stat()
-    return SourceInputFingerprint(
+    return _SourceInputFingerprint(
         schema_version=SOURCE_DATA_CACHE_SCHEMA_VERSION,
         source_database_path=str(source_database_path),
         source_database_size=source_database_stat.st_size,
@@ -475,13 +536,13 @@ def source_input_fingerprint(config_path: Path) -> SourceInputFingerprint:
 
 def load_cached_source_data(
     config_path: Path,
-) -> tuple[SourceInputFingerprint, CachedSourceData | None]:
+) -> tuple[_SourceInputFingerprint, _CachedSourceData | None]:
     fingerprint = source_input_fingerprint(config_path)
     raw_cache = app.storage.general.get(SOURCE_DATA_STORAGE_KEY)
     try:
-        cache = CachedSourceData.model_validate(raw_cache)
+        cache = _CachedSourceData.model_validate(raw_cache)
         cache.ground_truth_by_namekey()
-    except (TypeError, ValueError, ValidationError):
+    except TypeError, ValueError, ValidationError:
         return fingerprint, None
     if cache.fingerprint != fingerprint:
         return fingerprint, None
@@ -490,75 +551,24 @@ def load_cached_source_data(
 
 def store_cached_source_data(
     *,
-    fingerprint: SourceInputFingerprint,
+    fingerprint: _SourceInputFingerprint,
     source_population: tuple[SourcePopulationRow, ...],
-    ground_truth_by_namekey: Mapping[Namekey, GroundTruthRecord],
+    ground_truth_by_namekey: Mapping[Namekey, _GroundTruthRecord],
 ) -> None:
-    cache = CachedSourceData(
+    cache = _CachedSourceData(
         fingerprint=fingerprint,
         source_population=source_population,
         ground_truth_values={
-            str(namekey): dict(record.values)
-            for namekey, record in ground_truth_by_namekey.items()
+            str(namekey): dict(record.values) for namekey, record in ground_truth_by_namekey.items()
         },
     )
     cache.ground_truth_by_namekey()
     app.storage.general[SOURCE_DATA_STORAGE_KEY] = cache.model_dump(mode="json")
 
 
-@dataclass(frozen=True, slots=True)
-class SessionMetadata:
-    originator: str
-    source: str
-    cli_version: str
-    model_provider: str
-    model: str
-    reasoning_effort: str
-    session_id: SessionId
-    timestamp: datetime
-
-
-@dataclass(frozen=True, slots=True)
-class AcceptedAttempt:
-    namekey: Namekey
-    attempt_id: AttemptId
-    session_metadata: SessionMetadata
-    values: Mapping[str, str | None]
-    footnotes: str | None
-    footnote_arguments: str | None
-
-
 # =============================================================================
 # Dashboard-owned run history persisted in NiceGUI general storage.
 # =============================================================================
-
-
-@dataclass(slots=True)
-class RunRecord:
-    run_id: UUID
-    namekey: Namekey
-    status: RunStatus
-
-    queued_at: datetime
-
-    started_at: datetime | None = None
-
-    session_id: SessionId | None = None
-    session_timestamp: datetime | None = None
-    rollout_jsonl: PurePosixPath | None = None
-    remote_pid: RemotePid | None = None
-
-    accepted_attempt_id: AttemptId | None = None
-    accepted_at: datetime | None = None
-
-    cancel_requested_at: datetime | None = None
-
-    codex_exit_code: int | None = None
-    exited_at: datetime | None = None
-
-    failure_detail: str | None = None
-
-    dashboard_owned: bool = True
 
 
 # =============================================================================
@@ -567,38 +577,72 @@ class RunRecord:
 
 
 @dataclass(frozen=True, slots=True)
-class AttemptView:
-    run_id: UUID
+class _AttemptView:
+    row_id: UUID
+    run_id: UUID | None
     namekey: Namekey
 
-    status: RunStatus
+    activity: _ResearcherActivity
 
-    attempt_id: AttemptId | None
-    session_id: SessionId | None
+    commit_record_id: UUID | None
+    session_id: UUID | None
 
     timestamp: datetime | None
     ended_at: datetime | None
 
-    accepted: AcceptedAttempt | None
+    accepted: AcceptedInnerDictSummary | None
+
+    run_outcome_response: RunOutcomeResponse | None
 
     failure_detail: str | None
 
+    @property
+    def run_outcome_saved(self) -> bool | None:
+        if self.run_outcome_response is None:
+            return None
+        return self.run_outcome_response.response_code == status.HTTP_200_OK
+
+    @property
+    def run_outcome_session_status(self) -> str | None:
+        response = self.run_outcome_response
+        if response is None:
+            return None
+        session = response.run_outcome_response_body.codex_session_record
+        report = session.appendwatch_report_record
+        rollout = session.codex_rollout_record
+        if report is None:
+            return None
+        source_key = (response.response_headers or {}).get(SOURCE_KEY_HEADER)
+        if rollout is None or source_key is None:
+            return Locale.SESSION_STATUS_UNAVAILABLE
+        try:
+            filename, line_count = parse_source_key_header(source_key)
+            if line_count != rollout.line_count:
+                raise _PushValidationError(Locale.RUN_OUTCOME_SNAPSHOT_INVALID)
+            parse_appendwatch_report_bytes(
+                report.decoded_bytes(),
+                PurePosixPath(filename),
+            )
+        except (_PushValidationError, ValueError) as exc:
+            return Locale.SESSION_STATUS_NOT_OK_TEMPLATE.format(detail=exc)
+        return Locale.SESSION_STATUS_OK
+
 
 @dataclass(frozen=True, slots=True)
-class ResearcherView:
-    researcher: Researcher
+class _ResearcherView:
+    researcher: _Researcher
 
     # Oldest -> newest.
-    attempts: tuple[AttemptView, ...]
+    attempts: tuple[_AttemptView, ...]
 
     # Same object as attempts[-1], or None when never attempted.
-    latest_attempt: AttemptView | None
+    latest_attempt: _AttemptView | None
 
-    current_status: RunStatus
+    current_activity: _ResearcherActivity
 
 
 @dataclass(frozen=True, slots=True)
-class AttemptVariableProjection:
+class _AttemptVariableProjection:
     run_id: UUID | None
 
     namekey: Namekey
@@ -615,29 +659,31 @@ class AttemptVariableProjection:
     footnotes: str | None
     footnote_arguments: str | None
 
-    attempt_id: AttemptId | None
+    commit_record_id: UUID | None
     attempt_timestamp: datetime | None
-    attempt_status: RunStatus
+    attempt_activity: _ResearcherActivity
+    run_outcome_snapshot_savedness: str | None
+    session_status: str | None
 
-    action: RunAction
+    action: _RunAction
 
 
 @dataclass(frozen=True, slots=True)
-class ResearcherGridRow:
+class _ResearcherGridRow:
     namekey: Namekey
     rnd: int
     cohort: ResearcherCohort
     ineligibility_category: IneligibilityCategory | None
 
     # Collapsed row: latest attempt projection, or synthetic ready projection.
-    latest: AttemptVariableProjection
+    latest: _AttemptVariableProjection
 
     # Expanded row content: every attempt, oldest -> newest.
-    attempts: tuple[AttemptVariableProjection, ...]
+    attempts: tuple[_AttemptVariableProjection, ...]
 
 
 @dataclass(frozen=True, slots=True)
-class ResearcherCardView:
+class _ResearcherCardView:
     namekey: Namekey
     draw_number: str
     first_name: str
@@ -646,7 +692,7 @@ class ResearcherCardView:
 
 
 @dataclass(frozen=True, slots=True)
-class DashboardCounts:
+class _DashboardCounts:
     total: int
     ground_truth: int
     no_ground_truth: int
@@ -661,23 +707,23 @@ class DashboardCounts:
 
 
 @dataclass(slots=True)
-class UiSelection:
+class _UiSelection:
     variable_key: str
-    status_filter: RunStatus | None = None
+    activity_filter: _ResearcherActivity | None = None
     cohort_filter: ResearcherCohort | None = None
     search_text: str = ""
 
     selected_namekey: Namekey | None = None
     selected_run_id: UUID | None = None
-    selected_action: RunAction | None = None
+    selected_action: _RunAction | None = None
 
 
 @dataclass(frozen=True, slots=True)
-class UiSnapshot:
-    counts: DashboardCounts
-    rows: tuple[ResearcherGridRow, ...]
-    backend_status: BackendStatus
-    backend_availability: BackendAvailability
+class _UiSnapshot:
+    counts: _DashboardCounts
+    rows: tuple[_ResearcherGridRow, ...]
+    backend_status: _BackendStatus
+    backend_availability: _BackendAvailability
     active_run_id: UUID | None
 
 
@@ -689,12 +735,12 @@ class UiSnapshot:
 # =============================================================================
 
 
-class SourceRepository:
+class _SourceRepository:
     def __init__(
         self,
         *,
         configuration: AiAugmentCtlCtrContext,
-        ground_truth_by_namekey: Mapping[Namekey, GroundTruthRecord] | None = None,
+        ground_truth_by_namekey: Mapping[Namekey, _GroundTruthRecord] | None = None,
     ) -> None:
         self._configuration = configuration
         self._ground_truth_by_namekey = (
@@ -706,7 +752,7 @@ class SourceRepository:
         return self._configuration.source_population
 
     @property
-    def ground_truth_by_namekey(self) -> Mapping[Namekey, GroundTruthRecord]:
+    def ground_truth_by_namekey(self) -> Mapping[Namekey, _GroundTruthRecord]:
         if self._ground_truth_by_namekey is None:
             raise RuntimeError(Locale.GROUND_TRUTH_MISSING)
         return self._ground_truth_by_namekey
@@ -717,9 +763,9 @@ class SourceRepository:
             read_only=True,
         )
 
-    def load_researchers(self) -> tuple[Researcher, ...]:
+    def load_researchers(self) -> tuple[_Researcher, ...]:
         result = tuple(
-            Researcher(
+            _Researcher(
                 namekey=Namekey(source.namekey),
                 rnd=source.rnd,
                 draw_numbers=tuple(sorted(source.draw_numbers, key=draw_sort_key)),
@@ -741,7 +787,7 @@ class SourceRepository:
     def load_ground_truth(
         self,
         namekey: Namekey,
-    ) -> GroundTruthRecord | None:
+    ) -> _GroundTruthRecord | None:
         if self._ground_truth_by_namekey is not None:
             return self._ground_truth_by_namekey.get(namekey)
         connection = self.connect()
@@ -756,7 +802,7 @@ class SourceRepository:
             connection.close()
         if values is None:
             return None
-        return GroundTruthRecord(
+        return _GroundTruthRecord(
             namekey=namekey,
             values={
                 column: None if value is None else str(value) for column, value in values.items()
@@ -765,10 +811,10 @@ class SourceRepository:
 
     def load_ground_truth_by_namekey(
         self,
-    ) -> Mapping[Namekey, GroundTruthRecord]:
+    ) -> Mapping[Namekey, _GroundTruthRecord]:
         if self._ground_truth_by_namekey is not None:
             return self._ground_truth_by_namekey
-        result: dict[Namekey, GroundTruthRecord] = {}
+        result: dict[Namekey, _GroundTruthRecord] = {}
         cohorts = self._configuration.eligible_cohorts
         connection = self.connect()
         try:
@@ -784,7 +830,7 @@ class SourceRepository:
                 if values is None:
                     raise RuntimeError(Locale.GROUND_TRUTH_MISSING)
                 typed_namekey = Namekey(namekey)
-                result[typed_namekey] = GroundTruthRecord(
+                result[typed_namekey] = _GroundTruthRecord(
                     namekey=typed_namekey,
                     values={
                         column: None if value is None else str(value)
@@ -798,7 +844,7 @@ class SourceRepository:
 
     def assert_population_invariants(
         self,
-        researchers: Sequence[Researcher],
+        researchers: Sequence[_Researcher],
     ) -> None:
         namekeys = [researcher.namekey for researcher in researchers]
         ground_truth_count = sum(
@@ -838,14 +884,20 @@ class SourceRepository:
 # =============================================================================
 
 
-class UnixSocketHttpConnection(http.client.HTTPConnection):
+@implements[ControlCentreComponent.BackendPort.QueryRequestProperty]()
+@dataclass(frozen=True, slots=True)
+class QueryRequest:
+    namekey: NameKey | None
+
+
+class _UnixSocketHttpConnection(http.client.HTTPConnection):
     def __init__(
         self,
         *,
         socket_path: Path,
         timeout: float,
     ) -> None:
-        super().__init__("localhost", timeout=timeout)
+        super().__init__(DASHBOARD_IPC_HOST, timeout=timeout)
         self._socket_path = socket_path
 
     def connect(self) -> None:
@@ -854,13 +906,13 @@ class UnixSocketHttpConnection(http.client.HTTPConnection):
         self.sock.connect(str(self._socket_path))
 
 
-class BackendDatabaseClient:
+class _BackendDatabaseClient:
     def __init__(self, *, socket_path: Path) -> None:
         self._socket_path = socket_path
         self._card_cache: dict[Namekey, str] = {}
 
     def _request(self, *, target: str) -> bytes:
-        connection = UnixSocketHttpConnection(
+        connection = _UnixSocketHttpConnection(
             socket_path=self._socket_path,
             timeout=CONTROL_HTTP_TIMEOUT_SECONDS,
         )
@@ -876,19 +928,55 @@ class BackendDatabaseClient:
         finally:
             connection.close()
 
-    def pull(self, namekey: Namekey | None = None) -> DashboardQueryResponse:
+    def pull(self, namekey: Namekey | None = None) -> QueryResponse:
+        request = QueryRequest(namekey=None if namekey is None else namekey_model(namekey))
         target = DASHBOARD_QUERY_PATH
-        if namekey is not None:
-            target = f"{target}?{urlencode({KTP_NAMEKEY_COL: namekey})}"
+        if request.namekey is not None:
+            target = f"{target}?{urlencode({KTP_NAMEKEY_COL: request.namekey.to_json_key()})}"
         try:
-            return DashboardQueryResponse.model_validate_json(
-                self._request(target=target)
-            )
+            return QueryResponse.from_serialized_json(self._request(target=target))
         except ValidationError as exc:
             raise RuntimeError(Locale.BACKEND_DATABASE_RESPONSE_INVALID) from exc
 
+    def record_run_outcome(
+        self,
+        *,
+        run_outcome: RunOutcome,
+        namekey: Namekey,
+    ) -> int:
+        request_path, request_headers = RunOutcomeRequest.outbound_http(
+            run_outcome=run_outcome,
+            namekey=namekey_model(namekey),
+        )
+        connection = _UnixSocketHttpConnection(
+            socket_path=self._socket_path,
+            timeout=CONTROL_HTTP_TIMEOUT_SECONDS,
+        )
+        try:
+            connection.request(
+                HTTP_POST_METHOD,
+                request_path,
+                headers=dict(request_headers),
+            )
+            response = connection.getresponse()
+            body = response.read()
+            if response.status not in {
+                status.HTTP_200_OK,
+                status.HTTP_500_INTERNAL_SERVER_ERROR,
+            }:
+                raise RuntimeError(Locale.RUN_OUTCOME_SNAPSHOT_REQUEST_FAILED)
+            try:
+                RunOutcomeResponseBody.from_serialized_json(body)
+            except ValidationError as exc:
+                raise RuntimeError(Locale.BACKEND_DATABASE_RESPONSE_INVALID) from exc
+            return response.status
+        except (OSError, http.client.HTTPException) as exc:
+            raise RuntimeError(Locale.RUN_OUTCOME_SNAPSHOT_REQUEST_FAILED) from exc
+        finally:
+            connection.close()
+
     def available(self) -> bool:
-        connection = UnixSocketHttpConnection(
+        connection = _UnixSocketHttpConnection(
             socket_path=self._socket_path,
             timeout=BACKEND_AVAILABILITY_TIMEOUT_SECONDS,
         )
@@ -897,7 +985,7 @@ class BackendDatabaseClient:
             response = connection.getresponse()
             response.read()
             return response.status == status.HTTP_200_OK
-        except (OSError, http.client.HTTPException):
+        except OSError, http.client.HTTPException:
             return False
         finally:
             connection.close()
@@ -912,23 +1000,24 @@ class BackendDatabaseClient:
         self._card_cache[namekey] = markdown
         return markdown
 
+
 # =============================================================================
-# Backend event projection
+# Control Centre run projection
 # =============================================================================
 
 
-def replay_run_events(events: Sequence[RunEvent]) -> Mapping[UUID, RunRecord]:
-    runs: dict[UUID, RunRecord] = {}
+def replay_run_events(events: Sequence[RunEvent]) -> Mapping[UUID, Run]:
+    runs: dict[UUID, Run] = {}
     for event in events:
         run = runs.get(event.run_id)
         if run is None:
             if event.kind is not RunEventKind.QUEUED:
                 raise RuntimeError(Locale.JOURNAL_EVENT_WITHOUT_RUN)
-            run = RunRecord(
+            run = Run(
                 run_id=event.run_id,
-                namekey=Namekey(event.namekey),
-                status=RunStatus.QUEUED,
-                queued_at=event.at,
+                namekey=event.namekey,
+                phase=RunPhase.QUEUED,
+                queued_at=event.occurred_at,
                 dashboard_owned=True,
             )
             runs[event.run_id] = run
@@ -938,39 +1027,43 @@ def replay_run_events(events: Sequence[RunEvent]) -> Mapping[UUID, RunRecord]:
             raise RuntimeError(Locale.JOURNAL_DUPLICATE_RUN_ID)
 
         if event.kind is RunEventKind.STARTED:
-            run.status = RunStatus.RUNNING
-            run.started_at = event.at
-            run.remote_pid = None if event.remote_pid is None else RemotePid(event.remote_pid)
+            run.phase = RunPhase.RUNNING
+            run.started_at = event.occurred_at
+            run.remote_pid = event.remote_pid
         elif event.kind is RunEventKind.REMOTE_PID_DISCOVERED:
             if event.remote_pid is None:
                 raise RuntimeError(Locale.JOURNAL_REMOTE_PID_MISSING)
-            run.remote_pid = RemotePid(event.remote_pid)
+            run.remote_pid = event.remote_pid
         elif event.kind is RunEventKind.SESSION_DISCOVERED:
             if event.session_id is None:
                 raise RuntimeError(Locale.JOURNAL_SESSION_ID_MISSING)
-            run.session_id = SessionId(event.session_id)
-            run.session_timestamp = event.at
+            run.session_id = event.session_id
+            run.session_timestamp = event.occurred_at
         elif event.kind is RunEventKind.ROLLOUT_DISCOVERED:
             if event.rollout_jsonl is None:
                 raise RuntimeError(Locale.JOURNAL_ROLLOUT_PATH_MISSING)
             run.rollout_jsonl = PurePosixPath(event.rollout_jsonl)
         elif event.kind is RunEventKind.PUSH_ACCEPTED:
-            if event.accepted_attempt_id is None:
-                raise RuntimeError(Locale.JOURNAL_ATTEMPT_ID_MISSING)
-            run.accepted_attempt_id = AttemptId(event.accepted_attempt_id)
-            run.accepted_at = event.at
+            if event.accepted_commit_record_id is None:
+                raise RuntimeError(Locale.JOURNAL_COMMIT_RECORD_ID_MISSING)
+            run.accepted_commit_record_id = event.accepted_commit_record_id
+            run.accepted_at = event.occurred_at
         elif event.kind is RunEventKind.CANCEL_REQUESTED:
-            run.cancel_requested_at = event.at
+            run.cancel_requested_at = event.occurred_at
         elif event.kind is RunEventKind.CODEX_EXITED:
             run.codex_exit_code = event.codex_exit_code
-            run.exited_at = event.at
-        elif event.kind is RunEventKind.COMPLETE:
-            run.status = RunStatus.COMPLETE
+            run.exited_at = event.occurred_at
+        elif event.kind is RunEventKind.COMPLETED:
+            run.phase = RunPhase.FINISHED
+            run.outcome = RunOutcome.COMPLETED
         elif event.kind is RunEventKind.FAILED:
-            run.status = RunStatus.FAILED
+            run.phase = RunPhase.FINISHED
+            run.outcome = RunOutcome.FAILED
             run.failure_detail = event.detail
-        elif event.kind is RunEventKind.CANCELED:
-            run.status = RunStatus.CANCELED
+        elif event.kind is RunEventKind.CANCELLED:
+            run.phase = RunPhase.FINISHED
+            run.outcome = RunOutcome.CANCELLED
+        run.events += (event,)
     return runs
 
 
@@ -980,13 +1073,13 @@ def replay_run_events(events: Sequence[RunEvent]) -> Mapping[UUID, RunRecord]:
 
 
 @dataclass(slots=True)
-class BackendProcessHandle:
+class _BackendProcessHandle:
     process: asyncio.subprocess.Process
     started_at: datetime
     log_task: asyncio.Task[None]
 
 
-class BackendSupervisor:
+class _BackendSupervisor:
     def __init__(
         self,
         *,
@@ -1001,21 +1094,21 @@ class BackendSupervisor:
         self._openalex_api_key = openalex_api_key
         self._appendwatch_report = appendwatch_report
         self._dashboard_socket_path = dashboard_socket_path
-        self._process: BackendProcessHandle | None = None
-        self._status = BackendStatus.STOPPED
+        self._process: _BackendProcessHandle | None = None
+        self._status = _BackendStatus.STOPPED
 
     @property
-    def status(self) -> BackendStatus:
+    def status(self) -> _BackendStatus:
         if (
             self._process is not None
             and self._process.process.returncode is not None
-            and self._status is BackendStatus.RUNNING
+            and self._status is _BackendStatus.RUNNING
         ):
-            self._status = BackendStatus.FAILED
+            self._status = _BackendStatus.FAILED
         return self._status
 
     @property
-    def process(self) -> BackendProcessHandle | None:
+    def process(self) -> _BackendProcessHandle | None:
         return self._process
 
     def full_api_available(self) -> bool:
@@ -1025,14 +1118,14 @@ class BackendSupervisor:
                 request,
                 timeout=BACKEND_AVAILABILITY_TIMEOUT_SECONDS,
             ) as response:
-                return response.status == status.HTTP_200_OK
-        except (OSError, urllib_error.URLError, urllib_error.HTTPError):
+                return int(response.status) == status.HTTP_200_OK
+        except OSError, urllib_error.URLError, urllib_error.HTTPError:
             return False
 
     async def start(self, *, namekey: Namekey) -> None:
         if self._process is not None:
             raise RuntimeError(Locale.BACKEND_ALREADY_OWNED)
-        self._status = BackendStatus.STARTING
+        self._status = _BackendStatus.STARTING
         process = await asyncio.create_subprocess_exec(
             *BACKEND_COMMAND_PREFIX,
             str(self._config_path),
@@ -1044,15 +1137,15 @@ class BackendSupervisor:
             start_new_session=True,
         )
         log_task = asyncio.create_task(self.forward_output(process))
-        self._process = BackendProcessHandle(
+        self._process = _BackendProcessHandle(
             process=process,
             started_at=datetime.now(timezone.utc),
             log_task=log_task,
         )
         try:
             await self.wait_until_ready()
-        except (Exception, asyncio.CancelledError):
-            self._status = BackendStatus.FAILED
+        except Exception, asyncio.CancelledError:
+            self._status = _BackendStatus.FAILED
             if process.returncode is None:
                 process.terminate()
                 try:
@@ -1065,7 +1158,7 @@ class BackendSupervisor:
                     await process.wait()
             await log_task
             raise
-        self._status = BackendStatus.RUNNING
+        self._status = _BackendStatus.RUNNING
 
     async def forward_output(
         self,
@@ -1114,7 +1207,7 @@ class BackendSupervisor:
         await self.probe_pull()
         try:
             await asyncio.to_thread(
-                BackendDatabaseClient(socket_path=self._dashboard_socket_path).pull
+                _BackendDatabaseClient(socket_path=self._dashboard_socket_path).pull
             )
         except (OSError, RuntimeError, ValidationError) as exc:
             raise RuntimeError(Locale.BACKEND_DATABASE_REQUEST_FAILED) from exc
@@ -1137,7 +1230,7 @@ class BackendSupervisor:
 
     async def stop(self) -> None:
         if self._process is None:
-            self._status = BackendStatus.STOPPED
+            self._status = _BackendStatus.STOPPED
             return
         process = self._process.process
         emit_log(
@@ -1163,9 +1256,9 @@ class BackendSupervisor:
             ),
         )
         self._process = None
-        self._status = BackendStatus.STOPPED
+        self._status = _BackendStatus.STOPPED
 
-    async def supply_session_id(self, session_id: SessionId) -> None:
+    async def supply_session_id(self, session_id: UUID) -> None:
         if self._process is None or self._process.process.returncode is not None:
             raise RuntimeError(Locale.BACKEND_NOT_RUNNING)
         stream = self._process.process.stdin
@@ -1198,25 +1291,25 @@ class BackendSupervisor:
 
 
 @dataclass(slots=True)
-class CodexProcessHandle:
+class _CodexProcessHandle:
     run_id: UUID
     process: asyncio.subprocess.Process
 
     remote_pid: RemotePid | None = None
-    session_id: SessionId | None = None
+    session_id: UUID | None = None
     session_timestamp: datetime | None = None
     rollout_jsonl: PurePosixPath | None = None
 
 
 @dataclass(frozen=True, slots=True)
-class CodexStartResult:
-    handle: CodexProcessHandle
-    session_id: SessionId
+class _CodexStartResult:
+    handle: _CodexProcessHandle
+    session_id: UUID
     session_timestamp: datetime
     rollout_jsonl: PurePosixPath
 
 
-class CodexRunner:
+class _CodexRunner:
     def __init__(
         self,
         *,
@@ -1285,8 +1378,8 @@ class CodexRunner:
         self,
         *,
         run_id: UUID,
-        on_handle: (Callable[[CodexProcessHandle], Awaitable[None]] | None) = None,
-    ) -> CodexStartResult:
+        on_handle: (Callable[[_CodexProcessHandle], Awaitable[None]] | None) = None,
+    ) -> _CodexStartResult:
         marker_path = CODEX_WORKDIR / CODEX_RUN_MARKER_TEMPLATE.format(run_id=run_id)
         pid_path = CODEX_WORKDIR / CODEX_RUN_PID_TEMPLATE.format(run_id=run_id)
         await self._remote_command(
@@ -1302,14 +1395,12 @@ class CodexRunner:
             stdin=asyncio.subprocess.PIPE,
             start_new_session=True,
         )
-        handle = CodexProcessHandle(run_id=run_id, process=process)
+        handle = _CodexProcessHandle(run_id=run_id, process=process)
         try:
             if process.stdin is None:
                 raise RuntimeError(Locale.CODEX_STDIN_UNAVAILABLE)
             process.stdin.write(
-                CODEX_INPUT_TEMPLATE.format(openapi_url=self._openapi_url).encode(
-                    TEXT_ENCODING
-                )
+                CODEX_INPUT_TEMPLATE.format(openapi_url=self._openapi_url).encode(TEXT_ENCODING)
             )
             await process.stdin.drain()
             process.stdin.close()
@@ -1333,7 +1424,7 @@ class CodexRunner:
         handle.session_id = session_id
         handle.session_timestamp = session_timestamp
         handle.rollout_jsonl = rollout_jsonl
-        return CodexStartResult(
+        return _CodexStartResult(
             handle=handle,
             session_id=session_id,
             session_timestamp=session_timestamp,
@@ -1342,8 +1433,8 @@ class CodexRunner:
 
     async def discover_session(
         self,
-        handle: CodexProcessHandle,
-    ) -> tuple[SessionId, datetime]:
+        handle: _CodexProcessHandle,
+    ) -> tuple[UUID, datetime]:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + CODEX_DISCOVERY_TIMEOUT_SECONDS
         marker_path = CODEX_WORKDIR / CODEX_RUN_MARKER_TEMPLATE.format(run_id=handle.run_id)
@@ -1380,7 +1471,7 @@ class CodexRunner:
                 try:
                     record = json.loads(first_line)
                     payload = record["payload"]
-                    session_id = SessionId(str(payload["session_id"]))
+                    session_id = UUID(str(payload["session_id"]))
                     session_timestamp = datetime.fromisoformat(str(payload["timestamp"]))
                 except KeyError, TypeError, ValueError, json.JSONDecodeError:
                     await asyncio.sleep(CODEX_DISCOVERY_POLL_SECONDS)
@@ -1395,7 +1486,7 @@ class CodexRunner:
     async def discover_rollout_path(
         self,
         *,
-        session_id: SessionId,
+        session_id: UUID,
         session_timestamp: datetime,
     ) -> PurePosixPath:
         local_timestamp = session_timestamp.astimezone(self._timezone)
@@ -1416,13 +1507,13 @@ class CodexRunner:
 
     async def wait(
         self,
-        handle: CodexProcessHandle,
+        handle: _CodexProcessHandle,
     ) -> int:
         return await handle.process.wait()
 
     async def cancel(
         self,
-        handle: CodexProcessHandle,
+        handle: _CodexProcessHandle,
     ) -> None:
         remote_error: Exception | None = None
         try:
@@ -1472,7 +1563,7 @@ class CodexRunner:
 
     async def _remote_pid_for_cancel(
         self,
-        handle: CodexProcessHandle,
+        handle: _CodexProcessHandle,
     ) -> RemotePid | None:
         if handle.remote_pid is not None:
             return handle.remote_pid
@@ -1568,13 +1659,17 @@ class CodexRunner:
     async def terminate_abandoned_run(self, run_id: UUID) -> None:
         pid_path = CODEX_WORKDIR / CODEX_RUN_PID_TEMPLATE.format(run_id=run_id)
         pid_text = (
-            await self._remote_command(
-                CODEX_REMOTE_PID_READ_COMMAND_TEMPLATE.format(
-                    pid_path=shlex.quote(str(pid_path)),
-                ),
-                check=False,
+            (
+                await self._remote_command(
+                    CODEX_REMOTE_PID_READ_COMMAND_TEMPLATE.format(
+                        pid_path=shlex.quote(str(pid_path)),
+                    ),
+                    check=False,
+                )
             )
-        ).decode(TEXT_ENCODING).strip()
+            .decode(TEXT_ENCODING)
+            .strip()
+        )
         if not pid_text.isdecimal():
             return
         remote_pid = RemotePid(int(pid_text))
@@ -1583,88 +1678,130 @@ class CodexRunner:
 
 
 # =============================================================================
-# Reconciliation of backend-projected runs and accepted output
+# Reconciliation of Backend-projected runs and accepted innerdicts
 # =============================================================================
 
 
-class AttemptReconciler:
+class _AttemptReconciler:
     def reconcile(
         self,
         *,
-        researcher: Researcher,
-        runs: Sequence[RunRecord],
-        attempt_records: Sequence[AttemptRecord],
-        accepted_attempts: Sequence[AcceptedAttempt],
-    ) -> ResearcherView:
-        accepted_by_attempt_id = {attempt.attempt_id: attempt for attempt in accepted_attempts}
+        researcher: _Researcher,
+        runs: Sequence[Run],
+        attempt_records: Sequence[AgentRuntimeAttempt],
+        accepted_innerdict_summaries: Sequence[AcceptedInnerDictSummary],
+        run_outcome_responses: Sequence[RunOutcomeResponse],
+    ) -> _ResearcherView:
+        accepted_by_commit_record_id = {
+            accepted.commit_record_id: accepted
+            for accepted in accepted_innerdict_summaries
+        }
+        run_outcome_by_session_id = {
+            session_id: response
+            for response in run_outcome_responses
+            if (
+                session_id := response.run_outcome_response_body.codex_session_record.session_id
+            )
+            is not None
+        }
+        run_outcome_without_session_by_outcome = {
+            outcome: [
+                response
+                for response in run_outcome_responses
+                if (
+                    response.run_outcome_response_body.codex_session_record.session_id
+                    is None
+                    and response.run_outcome is outcome
+                )
+            ]
+            for outcome in RunOutcome
+        }
         live_dashboard_run_ids = {
             run.run_id
             for run in runs
-            if run.dashboard_owned and run.status in LIVE_RUN_STATUSES
+            if run.dashboard_owned
+            and researcher_activity_for_run(run) in LIVE_RESEARCHER_ACTIVITIES
         }
-        attempts: list[AttemptView] = []
+        attempts: list[_AttemptView] = []
         for record in sorted(
             attempt_records,
-            key=lambda item: (item.updated_at, item.attempt_id),
+            key=lambda item: item.commit_record.record_id,
         ):
-            attempt_id = AttemptId(record.attempt_id)
-            accepted = accepted_by_attempt_id.pop(attempt_id, None)
-            attempt_status = ARCHIVED_ATTEMPT_STATUS_BY_RESULT.get(record.result)
+            commit_record = record.commit_record
+            commit_record_id = commit_record.record_id
+            accepted = accepted_by_commit_record_id.pop(commit_record_id, None)
+            validation = record.post_commit_validation
+            attempt_activity = AGENT_RUNTIME_ATTEMPT_ACTIVITY_BY_RESULT.get(validation.result)
+            namekey = Namekey(
+                parse_name_key_header(commit_record.request_headers.get(NAME_KEY_HEADER))
+            )
+            session_id = commit_record.codex_session_record.session_id
+            attempt_timestamp = datetime.fromtimestamp(
+                commit_record_id.time / 1_000,
+                tz=timezone.utc,
+            )
             if (
-                attempt_status is None
-                or record.run_id is None
-                or record.updated_at.tzinfo is None
-                or record.namekey != researcher.namekey
-                or (attempt_status is RunStatus.COMPLETE) != (accepted is not None)
+                attempt_activity is None
+                or namekey != researcher.namekey
+                or (attempt_activity is _ResearcherActivity.COMPLETE) != (accepted is not None)
                 or (
                     accepted is not None
                     and (
-                        record.session_id is None
-                        or record.session_id != accepted.session_metadata.session_id
+                        session_id is None or session_id != accepted.codex_session_id
                     )
                 )
             ):
                 raise RuntimeError(Locale.ATTEMPT_DATABASE_INCONSISTENT)
             attempts.append(
-                AttemptView(
-                    run_id=record.run_id,
+                _AttemptView(
+                    row_id=commit_record_id,
+                    run_id=None,
                     namekey=researcher.namekey,
-                    status=attempt_status,
-                    attempt_id=attempt_id,
-                    session_id=(
-                        accepted.session_metadata.session_id
-                        if accepted is not None
-                        else (
-                            None
-                            if record.session_id is None
-                            else SessionId(record.session_id)
-                        )
-                    ),
-                    timestamp=record.updated_at,
-                    ended_at=record.updated_at,
+                    activity=attempt_activity,
+                    commit_record_id=commit_record_id,
+                    session_id=session_id,
+                    timestamp=attempt_timestamp,
+                    ended_at=attempt_timestamp,
                     accepted=accepted,
-                    failure_detail=record.response_detail,
+                    run_outcome_response=(
+                        None if session_id is None else run_outcome_by_session_id.get(session_id)
+                    ),
+                    failure_detail=validation.detail,
                 )
             )
         for run in sorted(runs, key=lambda item: (item.queued_at, str(item.run_id))):
-            if run.accepted_attempt_id in {
-                attempt.attempt_id for attempt in attempts if attempt.attempt_id is not None
+            if run.accepted_commit_record_id in {
+                attempt.commit_record_id
+                for attempt in attempts
+                if attempt.commit_record_id is not None
             }:
                 continue
+            run_outcome_response = (
+                None if run.session_id is None else run_outcome_by_session_id.get(run.session_id)
+            )
+            if run_outcome_response is None and run.session_id is None and run.outcome is not None:
+                run_outcome_without_session = run_outcome_without_session_by_outcome.get(
+                    run.outcome,
+                    [],
+                )
+                if run_outcome_without_session:
+                    run_outcome_response = run_outcome_without_session.pop(0)
             attempts.append(
-                AttemptView(
+                _AttemptView(
+                    row_id=run.run_id,
                     run_id=run.run_id,
                     namekey=researcher.namekey,
-                    status=run.status,
-                    attempt_id=run.accepted_attempt_id,
+                    activity=researcher_activity_for_run(run),
+                    commit_record_id=run.accepted_commit_record_id,
                     session_id=run.session_id,
                     timestamp=run.started_at or run.queued_at,
                     ended_at=run.exited_at,
                     accepted=None,
+                    run_outcome_response=run_outcome_response,
                     failure_detail=run.failure_detail,
                 )
             )
-        if accepted_by_attempt_id:
+        if accepted_by_commit_record_id:
             raise RuntimeError(Locale.ATTEMPT_DATABASE_INCONSISTENT)
         ordered = tuple(
             sorted(
@@ -1672,35 +1809,43 @@ class AttemptReconciler:
                 key=lambda attempt: (
                     attempt.run_id in live_dashboard_run_ids,
                     attempt.timestamp or datetime.min.replace(tzinfo=timezone.utc),
-                    str(attempt.run_id),
+                    str(attempt.row_id),
                 ),
             )
         )
         latest = ordered[-1] if ordered else None
-        return ResearcherView(
+        return _ResearcherView(
             researcher=researcher,
             attempts=ordered,
             latest_attempt=latest,
-            current_status=RunStatus.READY if latest is None else latest.status,
+            current_activity=(_ResearcherActivity.READY if latest is None else latest.activity),
         )
 
     def reconcile_all(
         self,
         *,
-        researchers: Sequence[Researcher],
-        runs: Mapping[UUID, RunRecord],
-        attempt_records: Mapping[Namekey, tuple[AttemptRecord, ...]],
-        accepted_attempts: Mapping[Namekey, tuple[AcceptedAttempt, ...]],
-    ) -> tuple[ResearcherView, ...]:
-        runs_by_namekey: dict[Namekey, list[RunRecord]] = {}
+        researchers: Sequence[_Researcher],
+        runs: Mapping[UUID, Run],
+        attempt_records: Mapping[Namekey, tuple[AgentRuntimeAttempt, ...]],
+        accepted_innerdict_summaries: Mapping[
+            Namekey,
+            tuple[AcceptedInnerDictSummary, ...],
+        ],
+        run_outcome_responses: Mapping[Namekey, tuple[RunOutcomeResponse, ...]],
+    ) -> tuple[_ResearcherView, ...]:
+        runs_by_namekey: dict[Namekey, list[Run]] = {}
         for run in runs.values():
-            runs_by_namekey.setdefault(run.namekey, []).append(run)
+            runs_by_namekey.setdefault(run_namekey(run), []).append(run)
         return tuple(
             self.reconcile(
                 researcher=researcher,
                 runs=runs_by_namekey.get(researcher.namekey, ()),
                 attempt_records=attempt_records.get(researcher.namekey, ()),
-                accepted_attempts=accepted_attempts.get(researcher.namekey, ()),
+                accepted_innerdict_summaries=accepted_innerdict_summaries.get(
+                    researcher.namekey,
+                    (),
+                ),
+                run_outcome_responses=run_outcome_responses.get(researcher.namekey, ()),
             )
             for researcher in researchers
         )
@@ -1711,40 +1856,42 @@ class AttemptReconciler:
 # =============================================================================
 
 
-class VariableProjector:
+class _VariableProjector:
     @staticmethod
     def action_for_status(
-        status: RunStatus,
+        status: _ResearcherActivity,
         *,
         eligible: bool,
         codex_busy: bool = False,
-    ) -> RunAction:
+    ) -> _RunAction:
         if not eligible:
-            return RunAction.DISABLED
-        if status in {RunStatus.QUEUED, RunStatus.RUNNING}:
-            return RunAction.CANCEL
-        if status is RunStatus.READY or codex_busy:
-            return RunAction.QUEUE
-        return RunAction.RERUN
+            return _RunAction.DISABLED
+        if status in {_ResearcherActivity.QUEUED, _ResearcherActivity.RUNNING}:
+            return _RunAction.CANCEL
+        if status is _ResearcherActivity.READY or codex_busy:
+            return _RunAction.QUEUE
+        return _RunAction.RERUN
 
     def project_attempt(
         self,
         *,
-        researcher: Researcher,
-        attempt: AttemptView,
-        ground_truth: GroundTruthRecord | None,
-        variable: VariableSpec,
+        researcher: _Researcher,
+        attempt: _AttemptView,
+        ground_truth: _GroundTruthRecord | None,
+        variable: _VariableSpec,
         codex_busy: bool,
-    ) -> AttemptVariableProjection:
+    ) -> _AttemptVariableProjection:
         accepted = attempt.accepted
-        return AttemptVariableProjection(
+        return _AttemptVariableProjection(
             run_id=attempt.run_id,
             namekey=researcher.namekey,
             draw_number=researcher.draw_number,
             first_name=researcher.first_name,
             last_name=researcher.last_name,
             ai_column=variable.ai_column,
-            ai_value=(None if accepted is None else accepted.values.get(variable.ai_column)),
+            ai_value=(
+                None if accepted is None else accepted.text(variable.ai_column)
+            ),
             table_1_column=variable.table_1_column,
             table_1_value=(
                 None if ground_truth is None else ground_truth.values.get(variable.table_1_column)
@@ -1762,11 +1909,21 @@ class VariableProjector:
                     variable=variable,
                 )
             ),
-            attempt_id=attempt.attempt_id,
+            commit_record_id=attempt.commit_record_id,
             attempt_timestamp=attempt.timestamp,
-            attempt_status=attempt.status,
+            attempt_activity=attempt.activity,
+            run_outcome_snapshot_savedness=(
+                None
+                if attempt.run_outcome_saved is None
+                else (
+                    Locale.RUN_OUTCOME_SNAPSHOT_SAVED
+                    if attempt.run_outcome_saved
+                    else Locale.RUN_OUTCOME_SNAPSHOT_FAILED
+                )
+            ),
+            session_status=attempt.run_outcome_session_status,
             action=self.action_for_status(
-                attempt.status,
+                attempt.activity,
                 eligible=researcher.cohort is not ResearcherCohort.INELIGIBLE,
                 codex_busy=codex_busy,
             ),
@@ -1775,12 +1932,12 @@ class VariableProjector:
     def project_ready_researcher(
         self,
         *,
-        researcher: Researcher,
-        ground_truth: GroundTruthRecord | None,
-        variable: VariableSpec,
+        researcher: _Researcher,
+        ground_truth: _GroundTruthRecord | None,
+        variable: _VariableSpec,
         codex_busy: bool,
-    ) -> AttemptVariableProjection:
-        return AttemptVariableProjection(
+    ) -> _AttemptVariableProjection:
+        return _AttemptVariableProjection(
             run_id=None,
             namekey=researcher.namekey,
             draw_number=researcher.draw_number,
@@ -1794,11 +1951,13 @@ class VariableProjector:
             ),
             footnotes=None,
             footnote_arguments=None,
-            attempt_id=None,
+            commit_record_id=None,
             attempt_timestamp=None,
-            attempt_status=RunStatus.READY,
+            attempt_activity=_ResearcherActivity.READY,
+            run_outcome_snapshot_savedness=None,
+            session_status=None,
             action=self.action_for_status(
-                RunStatus.READY,
+                _ResearcherActivity.READY,
                 eligible=researcher.cohort is not ResearcherCohort.INELIGIBLE,
                 codex_busy=codex_busy,
             ),
@@ -1807,11 +1966,11 @@ class VariableProjector:
     def project_researcher(
         self,
         *,
-        researcher_view: ResearcherView,
-        ground_truth: GroundTruthRecord | None,
-        variable: VariableSpec,
+        researcher_view: _ResearcherView,
+        ground_truth: _GroundTruthRecord | None,
+        variable: _VariableSpec,
         codex_busy: bool,
-    ) -> ResearcherGridRow:
+    ) -> _ResearcherGridRow:
         attempts = tuple(
             self.project_attempt(
                 researcher=researcher_view.researcher,
@@ -1832,7 +1991,7 @@ class VariableProjector:
                 codex_busy=codex_busy,
             )
         )
-        return ResearcherGridRow(
+        return _ResearcherGridRow(
             namekey=researcher_view.researcher.namekey,
             rnd=researcher_view.researcher.rnd,
             cohort=researcher_view.researcher.cohort,
@@ -1844,27 +2003,33 @@ class VariableProjector:
     def footnotes_for_variable(
         self,
         *,
-        attempt: AcceptedAttempt,
-        variable: VariableSpec,
+        attempt: AcceptedInnerDictSummary,
+        variable: _VariableSpec,
     ) -> str | None:
         numbers = self._footnote_numbers(attempt, variable)
-        return self._matching_numbered_lines(attempt.footnotes, numbers)
+        return self._matching_numbered_lines(
+            attempt.text(KTP_AI_AUGMENT_FOOTNOTES_COL),
+            numbers,
+        )
 
     def footnote_arguments_for_variable(
         self,
         *,
-        attempt: AcceptedAttempt,
-        variable: VariableSpec,
+        attempt: AcceptedInnerDictSummary,
+        variable: _VariableSpec,
     ) -> str | None:
         numbers = self._footnote_numbers(attempt, variable)
-        return self._matching_numbered_lines(attempt.footnote_arguments, numbers)
+        return self._matching_numbered_lines(
+            attempt.text(KTP_AI_AUGMENT_FOOTNOTE_ARGUMENTS_COL),
+            numbers,
+        )
 
     @staticmethod
     def _footnote_numbers(
-        attempt: AcceptedAttempt,
-        variable: VariableSpec,
+        attempt: AcceptedInnerDictSummary,
+        variable: _VariableSpec,
     ) -> tuple[int, ...]:
-        value = attempt.values.get(variable.ai_column)
+        value = attempt.text(variable.ai_column)
         if value is None:
             return ()
         match = FOOTNOTE_MARKER.search(value)
@@ -1894,16 +2059,16 @@ class VariableProjector:
 # =============================================================================
 
 
-class ControlCentreController:
+class _ControlCentreController:
     def __init__(
         self,
         *,
-        source_repository: SourceRepository,
-        backend: BackendSupervisor,
-        backend_database: BackendDatabaseClient,
-        codex: CodexRunner,
-        reconciler: AttemptReconciler,
-        projector: VariableProjector,
+        source_repository: _SourceRepository,
+        backend: _BackendSupervisor,
+        backend_database: _BackendDatabaseClient,
+        codex: _CodexRunner,
+        reconciler: _AttemptReconciler,
+        projector: _VariableProjector,
     ) -> None:
         self._source_repository = source_repository
         self._backend = backend
@@ -1914,18 +2079,28 @@ class ControlCentreController:
         self._queue: asyncio.Queue[UUID] = asyncio.Queue()
         self._worker_task: asyncio.Task[None] | None = None
         self._active_run_id: UUID | None = None
-        self._active_codex: CodexProcessHandle | None = None
+        self._active_codex: _CodexProcessHandle | None = None
         self._external_codex_busy = False
         self._shutting_down = False
         self._idle_refresh_lock = asyncio.Lock()
         self._events: list[RunEvent] = []
-        self._runs: dict[UUID, RunRecord] = {}
-        self._researchers: tuple[Researcher, ...] = ()
-        self._researchers_by_namekey: dict[Namekey, Researcher] = {}
-        self._ground_truth: Mapping[Namekey, GroundTruthRecord] = {}
-        self._attempt_records: Mapping[Namekey, tuple[AttemptRecord, ...]] = {}
-        self._accepted_attempts: Mapping[Namekey, tuple[AcceptedAttempt, ...]] = {}
-        self._backend_availability = BackendAvailability(
+        self._runs: dict[UUID, Run] = {}
+        self._researchers: tuple[_Researcher, ...] = ()
+        self._researchers_by_namekey: dict[Namekey, _Researcher] = {}
+        self._ground_truth: Mapping[Namekey, _GroundTruthRecord] = {}
+        self._attempt_records: Mapping[Namekey, tuple[AgentRuntimeAttempt, ...]] = {}
+        self._accepted_innerdict_summaries: Mapping[
+            Namekey,
+            tuple[AcceptedInnerDictSummary, ...],
+        ] = {}
+        self._run_outcome_responses: Mapping[
+            Namekey,
+            tuple[RunOutcomeResponse, ...],
+        ] = {}
+        self._run_outcome_recorded_run_ids: set[UUID] = set()
+        self._run_outcome_lock = asyncio.Lock()
+        self._notifications: list[str] = []
+        self._backend_availability = _BackendAvailability(
             full_api_available=False,
             ipc_available=False,
         )
@@ -1939,19 +2114,19 @@ class ControlCentreController:
         return self._active_run_id is not None or self._external_codex_busy
 
     @property
-    def backend_status(self) -> BackendStatus:
+    def backend_status(self) -> _BackendStatus:
         owned_status = self._backend.status
-        if owned_status is not BackendStatus.STOPPED:
+        if owned_status is not _BackendStatus.STOPPED:
             return owned_status
         if self._backend_availability.full_api_available:
-            return BackendStatus.RUNNING_EXTERNALLY
-        return BackendStatus.STOPPED
+            return _BackendStatus.RUNNING_EXTERNALLY
+        return _BackendStatus.STOPPED
 
     @property
-    def backend_availability(self) -> BackendAvailability:
+    def backend_availability(self) -> _BackendAvailability:
         return self._backend_availability
 
-    async def detect_backend_availability(self) -> BackendAvailability:
+    async def detect_backend_availability(self) -> _BackendAvailability:
         emit_log(
             Locale.CONTROL_CENTRE_LOG_PREFIX,
             Locale.BACKEND_AVAILABILITY_CHECK_LOG,
@@ -1960,21 +2135,15 @@ class ControlCentreController:
             asyncio.to_thread(self._backend.full_api_available),
             asyncio.to_thread(self._backend_database.available),
         )
-        self._backend_availability = BackendAvailability(
+        self._backend_availability = _BackendAvailability(
             full_api_available=full_api_available,
             ipc_available=ipc_available,
         )
         emit_log(
             Locale.CONTROL_CENTRE_LOG_PREFIX,
             Locale.BACKEND_AVAILABILITY_READY_LOG_TEMPLATE.format(
-                api_status=(
-                    Locale.IPC_AVAILABLE
-                    if full_api_available
-                    else Locale.IPC_UNAVAILABLE
-                ),
-                ipc_status=(
-                    Locale.IPC_AVAILABLE if ipc_available else Locale.IPC_UNAVAILABLE
-                ),
+                api_status=(Locale.IPC_AVAILABLE if full_api_available else Locale.IPC_UNAVAILABLE),
+                ipc_status=(Locale.IPC_AVAILABLE if ipc_available else Locale.IPC_UNAVAILABLE),
             ),
         )
         return self._backend_availability
@@ -2018,13 +2187,13 @@ class ControlCentreController:
         )
         restart_time = datetime.now(timezone.utc)
         for run in tuple(self._runs.values()):
-            if run.dashboard_owned and run.status is RunStatus.RUNNING:
+            if run.dashboard_owned and run.phase is RunPhase.RUNNING:
                 await self._codex.terminate_abandoned_run(run.run_id)
                 await self._append_run_event(
                     RunEvent(
                         run_id=run.run_id,
                         namekey=run.namekey,
-                        at=restart_time,
+                        occurred_at_unix_usec=datetime_to_unix_usec(restart_time),
                         kind=RunEventKind.FAILED,
                         detail=Locale.RESTART_INTERRUPTED_RUN,
                     )
@@ -2032,7 +2201,7 @@ class ControlCentreController:
         for value in app.storage.general.get(QUEUE_STORAGE_KEY, []):
             run_id = UUID(str(value))
             queued_run = self._runs.get(run_id)
-            if queued_run is not None and queued_run.status is RunStatus.QUEUED:
+            if queued_run is not None and queued_run.phase is RunPhase.QUEUED:
                 await self._queue.put(run_id)
         await self.detect_backend_availability()
         self._worker_task = asyncio.create_task(self._worker())
@@ -2051,12 +2220,12 @@ class ControlCentreController:
         await self._wind_down_owned_run_processes()
         shutdown_time = datetime.now(timezone.utc)
         for run in tuple(self._runs.values()):
-            if run.dashboard_owned and run.status is RunStatus.RUNNING:
+            if run.dashboard_owned and run.phase is RunPhase.RUNNING:
                 await self._append_run_event(
                     RunEvent(
                         run_id=run.run_id,
                         namekey=run.namekey,
-                        at=shutdown_time,
+                        occurred_at_unix_usec=datetime_to_unix_usec(shutdown_time),
                         kind=RunEventKind.FAILED,
                         detail=Locale.SHUTDOWN_INTERRUPTED_RUN,
                     )
@@ -2076,8 +2245,8 @@ class ControlCentreController:
         await self._append_run_event(
             RunEvent(
                 run_id=run_id,
-                namekey=namekey,
-                at=datetime.now(timezone.utc),
+                namekey=namekey_model(namekey),
+                occurred_at_unix_usec=datetime_to_unix_usec(datetime.now(timezone.utc)),
                 kind=RunEventKind.QUEUED,
             )
         )
@@ -2102,33 +2271,39 @@ class ControlCentreController:
         run = self._runs.get(run_id)
         if run is None:
             raise KeyError(Locale.UNKNOWN_RUN_ID_TEMPLATE.format(run_id=run_id))
-        if run.status not in {RunStatus.QUEUED, RunStatus.RUNNING}:
+        if run.phase is RunPhase.FINISHED:
             return
         await self._append_run_event(
             RunEvent(
                 run_id=run_id,
                 namekey=run.namekey,
-                at=datetime.now(timezone.utc),
+                occurred_at_unix_usec=datetime_to_unix_usec(datetime.now(timezone.utc)),
                 kind=RunEventKind.CANCEL_REQUESTED,
             )
         )
         if self._active_run_id == run_id:
-            if self._active_codex is not None:
-                try:
-                    await self._codex.cancel(self._active_codex)
-                except Exception as exc:
-                    await self._append_run_event(
-                        RunEvent(
-                            run_id=run_id,
-                            namekey=run.namekey,
-                            at=datetime.now(timezone.utc),
-                            kind=RunEventKind.FAILED,
-                            detail=Locale.CODEX_CANCEL_FAILED_TEMPLATE.format(error=exc),
-                        )
+            active_codex = self._active_codex
+            if active_codex is None:
+                return
+            await self._record_run_outcome(
+                run_id=run_id,
+                run_outcome=RunOutcome.CANCELLED,
+            )
+            try:
+                await self._codex.cancel(active_codex)
+            except Exception as exc:
+                await self._append_run_event(
+                    RunEvent(
+                        run_id=run_id,
+                        namekey=run.namekey,
+                        occurred_at_unix_usec=datetime_to_unix_usec(datetime.now(timezone.utc)),
+                        kind=RunEventKind.FAILED,
+                        detail=Locale.CODEX_CANCEL_FAILED_TEMPLATE.format(error=exc),
                     )
-                    raise
+                )
+                raise
             return
-        if run.status is RunStatus.QUEUED:
+        if run.phase is RunPhase.QUEUED:
             queued = list(app.storage.general.get(QUEUE_STORAGE_KEY, []))
             if str(run_id) in queued:
                 queued.remove(str(run_id))
@@ -2137,8 +2312,8 @@ class ControlCentreController:
                 RunEvent(
                     run_id=run_id,
                     namekey=run.namekey,
-                    at=datetime.now(timezone.utc),
-                    kind=RunEventKind.CANCELED,
+                    occurred_at_unix_usec=datetime_to_unix_usec(datetime.now(timezone.utc)),
+                    kind=RunEventKind.CANCELLED,
                 )
             )
 
@@ -2149,12 +2324,12 @@ class ControlCentreController:
             if self._shutting_down:
                 return
             backend_status = self._backend.status
-            if backend_status is BackendStatus.RUNNING:
+            if backend_status is _BackendStatus.RUNNING:
                 await self._refresh_backend_state()
             else:
                 self._runs = dict(replay_run_events(self._events))
-                if backend_status is BackendStatus.FAILED:
-                    self._backend_availability = BackendAvailability(
+                if backend_status is _BackendStatus.FAILED:
+                    self._backend_availability = _BackendAvailability(
                         full_api_available=False,
                         ipc_available=False,
                     )
@@ -2177,46 +2352,46 @@ class ControlCentreController:
         self._apply_backend_snapshot(snapshot)
         app.storage.general[BACKEND_DATABASE_STORAGE_KEY] = snapshot.model_dump(mode="json")
 
-    def _apply_backend_snapshot(self, snapshot: DashboardQueryResponse) -> None:
+    def _apply_backend_snapshot(self, snapshot: QueryResponse) -> None:
         self._runs = dict(replay_run_events(self._events))
 
-        attempt_records: dict[Namekey, list[AttemptRecord]] = {}
+        attempt_records: dict[Namekey, list[AgentRuntimeAttempt]] = {}
         for record in snapshot.attempts:
-            if record.namekey is None:
+            try:
+                namekey = Namekey(
+                    parse_name_key_header(record.commit_record.request_headers.get(NAME_KEY_HEADER))
+                )
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(Locale.ATTEMPT_DATABASE_INCONSISTENT) from exc
+            if namekey not in self._researchers_by_namekey:
                 raise RuntimeError(Locale.ATTEMPT_DATABASE_INCONSISTENT)
-            attempt_records.setdefault(Namekey(record.namekey), []).append(record)
+            attempt_records.setdefault(namekey, []).append(record)
         self._attempt_records = {
             namekey: tuple(records) for namekey, records in attempt_records.items()
         }
 
-        accepted_attempts: dict[Namekey, list[AcceptedAttempt]] = {}
-        for attempt in snapshot.accepted_attempts:
-            metadata = attempt.session_metadata
-            timestamp = datetime.fromisoformat(metadata.timestamp)
-            if timestamp.tzinfo is None:
-                raise RuntimeError(Locale.ATTEMPT_DATABASE_INCONSISTENT)
-            namekey = Namekey(attempt.namekey)
-            accepted_attempts.setdefault(namekey, []).append(
-                AcceptedAttempt(
-                    namekey=namekey,
-                    attempt_id=AttemptId(attempt.attempt_id),
-                    session_metadata=SessionMetadata(
-                        originator=metadata.originator,
-                        source=metadata.source,
-                        cli_version=metadata.cli_version,
-                        model_provider=metadata.model_provider,
-                        model=metadata.model,
-                        reasoning_effort=metadata.reasoning_effort,
-                        session_id=SessionId(metadata.session_id),
-                        timestamp=timestamp,
-                    ),
-                    values=attempt.values,
-                    footnotes=attempt.footnotes,
-                    footnote_arguments=attempt.footnote_arguments,
-                )
-            )
-        self._accepted_attempts = {
-            namekey: tuple(attempts) for namekey, attempts in accepted_attempts.items()
+        accepted_innerdict_summaries: dict[
+            Namekey,
+            list[AcceptedInnerDictSummary],
+        ] = {}
+        for accepted in snapshot.accepted_innerdict_summaries:
+            namekey = Namekey(accepted.namekey.to_json_key())
+            accepted_innerdict_summaries.setdefault(namekey, []).append(accepted)
+        self._accepted_innerdict_summaries = {
+            namekey: tuple(attempts)
+            for namekey, attempts in accepted_innerdict_summaries.items()
+        }
+
+        run_outcome_responses: dict[Namekey, list[RunOutcomeResponse]] = {}
+        for response in snapshot.run_outcome_records:
+            namekey = Namekey(response.run_outcome_request.namekey.to_json_key())
+            run_outcome_responses.setdefault(
+                namekey,
+                [],
+            ).append(response)
+        self._run_outcome_responses = {
+            namekey: tuple(responses)
+            for namekey, responses in run_outcome_responses.items()
         }
 
     async def refresh_from_ipc(self) -> None:
@@ -2228,15 +2403,16 @@ class ControlCentreController:
     async def snapshot(
         self,
         *,
-        selection: UiSelection,
-    ) -> UiSnapshot:
+        selection: _UiSelection,
+    ) -> _UiSnapshot:
         await self.refresh_idle_state()
         variable = VARIABLE_SPEC_BY_KEY[selection.variable_key]
         views = self._reconciler.reconcile_all(
             researchers=self._researchers,
             runs=self._runs,
             attempt_records=self._attempt_records,
-            accepted_attempts=self._accepted_attempts,
+            accepted_innerdict_summaries=self._accepted_innerdict_summaries,
+            run_outcome_responses=self._run_outcome_responses,
         )
         all_rows = tuple(
             self._projector.project_researcher(
@@ -2251,7 +2427,10 @@ class ControlCentreController:
         rows = tuple(
             row
             for row, view in zip(all_rows, views, strict=True)
-            if (selection.status_filter is None or view.current_status is selection.status_filter)
+            if (
+                selection.activity_filter is None
+                or view.current_activity is selection.activity_filter
+            )
             and (
                 selection.cohort_filter is None or view.researcher.cohort is selection.cohort_filter
             )
@@ -2269,11 +2448,11 @@ class ControlCentreController:
             )
         )
         statuses = [
-            view.current_status
+            view.current_activity
             for view in views
             if view.researcher.cohort is not ResearcherCohort.INELIGIBLE
         ]
-        counts = DashboardCounts(
+        counts = _DashboardCounts(
             total=len(views),
             ground_truth=sum(
                 view.researcher.cohort is ResearcherCohort.GROUND_TRUTH for view in views
@@ -2282,14 +2461,14 @@ class ControlCentreController:
                 view.researcher.cohort is ResearcherCohort.NO_GROUND_TRUTH for view in views
             ),
             ineligible=sum(view.researcher.cohort is ResearcherCohort.INELIGIBLE for view in views),
-            ready=statuses.count(RunStatus.READY),
-            queued=statuses.count(RunStatus.QUEUED),
-            running=statuses.count(RunStatus.RUNNING),
-            complete=statuses.count(RunStatus.COMPLETE),
-            failed=statuses.count(RunStatus.FAILED),
-            canceled=statuses.count(RunStatus.CANCELED),
+            ready=statuses.count(_ResearcherActivity.READY),
+            queued=statuses.count(_ResearcherActivity.QUEUED),
+            running=statuses.count(_ResearcherActivity.RUNNING),
+            complete=statuses.count(_ResearcherActivity.COMPLETE),
+            failed=statuses.count(_ResearcherActivity.FAILED),
+            canceled=statuses.count(_ResearcherActivity.CANCELED),
         )
-        return UiSnapshot(
+        return _UiSnapshot(
             counts=counts,
             rows=rows,
             backend_status=self.backend_status,
@@ -2301,12 +2480,12 @@ class ControlCentreController:
         self,
         *,
         namekey: Namekey,
-    ) -> ResearcherCardView:
+    ) -> _ResearcherCardView:
         researcher = self._researchers_by_namekey.get(namekey)
         if researcher is None:
             raise KeyError(Locale.UNKNOWN_NAMEKEY_TEMPLATE.format(namekey=namekey))
         markdown = await asyncio.to_thread(self._backend_database.card, namekey)
-        return ResearcherCardView(
+        return _ResearcherCardView(
             namekey=namekey,
             draw_number=researcher.draw_number,
             first_name=researcher.first_name,
@@ -2326,28 +2505,37 @@ class ControlCentreController:
                 queued.remove(str(run_id))
                 app.storage.general[QUEUE_STORAGE_KEY] = queued
             run = self._runs[run_id]
-            if run.status is RunStatus.CANCELED:
+            if run.outcome is RunOutcome.CANCELLED:
                 return
             if not await self._wait_until_codex_idle(run_id=run_id):
                 return
             self._active_run_id = run_id
             await self._execute_run(run_id=run_id)
         except asyncio.CancelledError:
+            run = self._runs[run_id]
+            if run.phase is RunPhase.RUNNING:
+                await asyncio.shield(
+                    self._record_run_outcome(
+                        run_id=run_id,
+                        run_outcome=RunOutcome.FAILED,
+                    )
+                )
             raise
         except Exception as exc:
             run = self._runs[run_id]
             canceled = run.cancel_requested_at is not None and run.failure_detail is None
-            if run.status not in {
-                RunStatus.COMPLETE,
-                RunStatus.FAILED,
-                RunStatus.CANCELED,
-            }:
+            if run.phase is not RunPhase.FINISHED:
+                run_outcome = RunOutcome.CANCELLED if canceled else RunOutcome.FAILED
+                await self._record_run_outcome(
+                    run_id=run_id,
+                    run_outcome=run_outcome,
+                )
                 await self._append_run_event(
                     RunEvent(
                         run_id=run_id,
                         namekey=run.namekey,
-                        at=datetime.now(timezone.utc),
-                        kind=(RunEventKind.CANCELED if canceled else RunEventKind.FAILED),
+                        occurred_at_unix_usec=datetime_to_unix_usec(datetime.now(timezone.utc)),
+                        kind=RUN_EVENT_KIND_BY_OUTCOME[run_outcome],
                         detail=None if canceled else str(exc),
                     )
                 )
@@ -2364,7 +2552,7 @@ class ControlCentreController:
                         RunEvent(
                             run_id=run_id,
                             namekey=run.namekey,
-                            at=datetime.now(timezone.utc),
+                            occurred_at_unix_usec=datetime_to_unix_usec(datetime.now(timezone.utc)),
                             kind=RunEventKind.FAILED,
                             detail=Locale.RUN_PROCESS_CLEANUP_FAILED_TEMPLATE.format(
                                 error=cleanup_error
@@ -2388,7 +2576,7 @@ class ControlCentreController:
                 codex_error = exc
         try:
             await self._backend.stop()
-            self._backend_availability = BackendAvailability(
+            self._backend_availability = _BackendAvailability(
                 full_api_available=False,
                 ipc_available=False,
             )
@@ -2405,7 +2593,7 @@ class ControlCentreController:
     async def _wait_until_codex_idle(self, *, run_id: UUID) -> bool:
         while True:
             await self.refresh_idle_state()
-            if self._runs[run_id].status is RunStatus.CANCELED:
+            if self._runs[run_id].outcome is RunOutcome.CANCELLED:
                 return False
             if not self._external_codex_busy:
                 return True
@@ -2417,12 +2605,12 @@ class ControlCentreController:
         run_id: UUID,
     ) -> None:
         run = self._runs[run_id]
-        self._backend_availability = BackendAvailability(
+        self._backend_availability = _BackendAvailability(
             full_api_available=False,
             ipc_available=False,
         )
-        await self._backend.start(namekey=run.namekey)
-        self._backend_availability = BackendAvailability(
+        await self._backend.start(namekey=run_namekey(run))
+        self._backend_availability = _BackendAvailability(
             full_api_available=True,
             ipc_available=True,
         )
@@ -2430,15 +2618,12 @@ class ControlCentreController:
             run_id=run_id,
             on_handle=self._register_active_codex,
         )
-        if self._runs[run_id].cancel_requested_at is not None:
-            await self._codex.cancel(result.handle)
-            raise RuntimeError(Locale.CODEX_CANCELED_BEFORE_SESSION_HANDOFF)
         self._active_codex = result.handle
         await self._append_run_event(
             RunEvent(
                 run_id=run_id,
                 namekey=run.namekey,
-                at=result.session_timestamp,
+                occurred_at_unix_usec=datetime_to_unix_usec(result.session_timestamp),
                 kind=RunEventKind.SESSION_DISCOVERED,
                 session_id=result.session_id,
             )
@@ -2448,40 +2633,47 @@ class ControlCentreController:
             RunEvent(
                 run_id=run_id,
                 namekey=run.namekey,
-                at=datetime.now(timezone.utc),
+                occurred_at_unix_usec=datetime_to_unix_usec(datetime.now(timezone.utc)),
                 kind=RunEventKind.ROLLOUT_DISCOVERED,
                 session_id=result.session_id,
                 rollout_jsonl=str(result.rollout_jsonl),
             )
         )
         await self._backend.supply_session_id(result.session_id)
+        if self._runs[run_id].cancel_requested_at is not None:
+            await self._record_run_outcome(
+                run_id=run_id,
+                run_outcome=RunOutcome.CANCELLED,
+            )
+            await self._codex.cancel(result.handle)
         exit_code = await self._codex.wait(result.handle)
         await self._append_run_event(
             RunEvent(
                 run_id=run_id,
                 namekey=run.namekey,
-                at=datetime.now(timezone.utc),
+                occurred_at_unix_usec=datetime_to_unix_usec(datetime.now(timezone.utc)),
                 kind=RunEventKind.CODEX_EXITED,
                 codex_exit_code=exit_code,
             )
         )
-        final_status = await self._finalize_run(
+        run_outcome = await self._finalize_run(run_id=run_id)
+        await self._record_run_outcome(
             run_id=run_id,
-            codex_exit_code=exit_code,
+            run_outcome=run_outcome,
         )
         await self._append_run_event(
             RunEvent(
                 run_id=run_id,
                 namekey=run.namekey,
-                at=datetime.now(timezone.utc),
-                kind=RunEventKind(final_status.value),
+                occurred_at_unix_usec=datetime_to_unix_usec(datetime.now(timezone.utc)),
+                kind=RUN_EVENT_KIND_BY_OUTCOME[run_outcome],
                 codex_exit_code=exit_code,
             )
         )
 
     async def _register_active_codex(
         self,
-        handle: CodexProcessHandle,
+        handle: _CodexProcessHandle,
     ) -> None:
         if self._active_run_id != handle.run_id:
             raise RuntimeError(Locale.CODEX_HANDLE_MISMATCH)
@@ -2497,28 +2689,25 @@ class ControlCentreController:
             RunEvent(
                 run_id=handle.run_id,
                 namekey=run.namekey,
-                at=datetime.now(timezone.utc),
+                occurred_at_unix_usec=datetime_to_unix_usec(datetime.now(timezone.utc)),
                 kind=event_kind,
                 remote_pid=(None if handle.remote_pid is None else int(handle.remote_pid)),
             )
         )
-        if self._runs[handle.run_id].cancel_requested_at is not None:
-            await self._codex.cancel(handle)
 
     async def _finalize_run(
         self,
         *,
         run_id: UUID,
-        codex_exit_code: int,
-    ) -> RunStatus:
+    ) -> RunOutcome:
         run = self._runs[run_id]
         if run.cancel_requested_at is not None:
-            return RunStatus.CANCELED
-        if run.accepted_attempt_id is not None:
-            return RunStatus.COMPLETE
+            return RunOutcome.CANCELLED
+        if run.accepted_commit_record_id is not None:
+            return RunOutcome.COMPLETED
         if run.session_id is not None:
             accepted = await self._accepted_attempt_for_session(
-                namekey=run.namekey,
+                namekey=run_namekey(run),
                 session_id=run.session_id,
             )
             if accepted is not None:
@@ -2526,25 +2715,74 @@ class ControlCentreController:
                     RunEvent(
                         run_id=run_id,
                         namekey=run.namekey,
-                        at=datetime.now(timezone.utc),
+                        occurred_at_unix_usec=datetime_to_unix_usec(datetime.now(timezone.utc)),
                         kind=RunEventKind.PUSH_ACCEPTED,
                         session_id=run.session_id,
-                        accepted_attempt_id=accepted.attempt_id,
+                        accepted_commit_record_id=accepted.commit_record_id,
                     )
                 )
-                return RunStatus.COMPLETE
-        return RunStatus.FAILED
+                return RunOutcome.COMPLETED
+        return RunOutcome.FAILED
+
+    async def _record_run_outcome(
+        self,
+        *,
+        run_id: UUID,
+        run_outcome: RunOutcome,
+    ) -> None:
+        async with self._run_outcome_lock:
+            if run_id in self._run_outcome_recorded_run_ids:
+                return
+            if self._backend.status is not _BackendStatus.RUNNING:
+                return
+            run = self._runs[run_id]
+            try:
+                response_code = await asyncio.to_thread(
+                    self._backend_database.record_run_outcome,
+                    run_outcome=run_outcome,
+                    namekey=run_namekey(run),
+                )
+            except RuntimeError as exc:
+                message = Locale.RUN_OUTCOME_SNAPSHOT_REQUEST_FAILED_TEMPLATE.format(
+                    run_id=run_id,
+                    error=exc,
+                )
+                self._notifications.append(message)
+                emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, message)
+                return
+            self._run_outcome_recorded_run_ids.add(run_id)
+            try:
+                await self._refresh_backend_state()
+            except RuntimeError as exc:
+                message = Locale.RUN_OUTCOME_RESPONSE_REFRESH_FAILED_TEMPLATE.format(
+                    run_id=run_id,
+                    error=exc,
+                )
+                self._notifications.append(message)
+                emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, message)
+            if response_code == status.HTTP_500_INTERNAL_SERVER_ERROR:
+                message = Locale.RUN_OUTCOME_SNAPSHOT_PARTIAL_TEMPLATE.format(
+                    run_id=run_id,
+                    outcome=run_outcome.value,
+                )
+                self._notifications.append(message)
+                emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, message)
+
+    def drain_notifications(self) -> tuple[str, ...]:
+        notifications = tuple(self._notifications)
+        self._notifications.clear()
+        return notifications
 
     async def _accepted_attempt_for_session(
         self,
         *,
         namekey: Namekey,
-        session_id: SessionId,
-    ) -> AcceptedAttempt | None:
+        session_id: UUID,
+    ) -> AcceptedInnerDictSummary | None:
         await self._refresh_backend_state()
-        attempts = self._accepted_attempts.get(namekey, ())
+        attempts = self._accepted_innerdict_summaries.get(namekey, ())
         matches = [
-            attempt for attempt in attempts if attempt.session_metadata.session_id == session_id
+            attempt for attempt in attempts if attempt.codex_session_id == session_id
         ]
         if len(matches) > 1:
             raise RuntimeError(Locale.ACCEPTED_SESSION_DUPLICATE)
@@ -2583,9 +2821,7 @@ class ControlCentreController:
         if raw_backend_snapshot is None:
             return
         try:
-            snapshot = DashboardQueryResponse.model_validate_json(
-                json.dumps(raw_backend_snapshot)
-            )
+            snapshot = QueryResponse.from_serialized_json(json.dumps(raw_backend_snapshot))
         except (TypeError, ValueError, ValidationError) as exc:
             raise RuntimeError(Locale.BACKEND_DATABASE_RESPONSE_INVALID) from exc
         self._apply_backend_snapshot(snapshot)
@@ -2597,7 +2833,7 @@ class ControlCentreController:
 
 
 @dataclass(slots=True)
-class UiHandles:
+class _UiHandles:
     backend_status_label: Any | None = None
     backend_ipc_status_label: Any | None = None
     backend_refresh_button: Any | None = None
@@ -2620,27 +2856,27 @@ class UiHandles:
     download_card_button: Any | None = None
 
 
-class ControlCentrePage:
+class _ControlCentrePage:
     def __init__(
         self,
         *,
-        controller: ControlCentreController,
+        controller: _ControlCentreController,
         reference_docx: Path,
     ) -> None:
         self._controller = controller
         self._reference_docx = reference_docx
-        self._selection = UiSelection(variable_key=VARIABLE_SPECS[0].key)
-        self._handles = UiHandles()
+        self._selection = _UiSelection(variable_key=VARIABLE_SPECS[0].key)
+        self._handles = _UiHandles()
         self._grid_initialized = False
         self._grid_variable_key = self._selection.variable_key
         self._grid_rows_by_id: dict[str, dict[str, Any]] = {}
-        self._row_views_by_namekey: dict[Namekey, ResearcherGridRow] = {}
+        self._row_views_by_namekey: dict[Namekey, _ResearcherGridRow] = {}
         self._expanded_history_namekey: Namekey | None = None
-        self._card_cache: dict[Namekey, ResearcherCardView] = {}
-        self._displayed_card: ResearcherCardView | None = None
+        self._card_cache: dict[Namekey, _ResearcherCardView] = {}
+        self._displayed_card: _ResearcherCardView | None = None
 
     @property
-    def selection(self) -> UiSelection:
+    def selection(self) -> _UiSelection:
         return self._selection
 
     def build(self) -> None:
@@ -2649,7 +2885,7 @@ class ControlCentrePage:
             ui
             .column()
             .style(PAGE_CONTAINER_STYLE)
-            .props(NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=PAGE_CONTAINER_TEST_ID))
+            .props(_NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=PAGE_CONTAINER_TEST_ID))
         ):
             self.build_header()
             self.build_summary()
@@ -2666,40 +2902,24 @@ class ControlCentrePage:
             ui
             .row()
             .style(RESPONSIVE_ROW_STYLE)
-            .props(NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=PAGE_HEADER_TEST_ID))
+            .props(_NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=PAGE_HEADER_TEST_ID))
         ):
             ui.label(Locale.PAGE_TITLE)
             self._handles.backend_status_label = ui.label(
-                Locale.BACKEND_STATUS_TEMPLATE.format(
-                    status=self._controller.backend_status.value
-                )
+                Locale.BACKEND_STATUS_TEMPLATE.format(status=self._controller.backend_status.value)
             )
-            self._handles.backend_ipc_status_label = (
-                ui
-                .label(
-                    Locale.IPC_STATUS_TEMPLATE.format(
-                        status=(
-                            Locale.IPC_AVAILABLE
-                            if backend_availability.ipc_available
-                            else Locale.IPC_UNAVAILABLE
-                        )
+            self._handles.backend_ipc_status_label = ui.label(
+                Locale.IPC_STATUS_TEMPLATE.format(
+                    status=(
+                        Locale.IPC_AVAILABLE
+                        if backend_availability.ipc_available
+                        else Locale.IPC_UNAVAILABLE
                     )
                 )
-                .props(
-                    NiceGui.TEST_ID_PROP_TEMPLATE.format(
-                        test_id=BACKEND_IPC_STATUS_TEST_ID
-                    )
-                )
-            )
-            self._handles.backend_refresh_button = (
-                ui
-                .button(Locale.ACTION_REFRESH, on_click=self.refresh_from_ipc)
-                .props(
-                    NiceGui.TEST_ID_PROP_TEMPLATE.format(
-                        test_id=BACKEND_REFRESH_TEST_ID
-                    )
-                )
-            )
+            ).props(_NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=BACKEND_IPC_STATUS_TEST_ID))
+            self._handles.backend_refresh_button = ui.button(
+                Locale.ACTION_REFRESH, on_click=self.refresh_from_ipc
+            ).props(_NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=BACKEND_REFRESH_TEST_ID))
             if not backend_availability.ipc_available:
                 self._handles.backend_refresh_button.disable()
 
@@ -2708,7 +2928,7 @@ class ControlCentrePage:
             ui
             .label(Locale.SUMMARY_LOADING)
             .style(FULL_WIDTH_STYLE)
-            .props(NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=PAGE_SUMMARY_TEST_ID))
+            .props(_NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=PAGE_SUMMARY_TEST_ID))
         )
 
     def build_filters(self) -> None:
@@ -2716,7 +2936,7 @@ class ControlCentrePage:
             ui
             .row()
             .style(RESPONSIVE_ROW_STYLE)
-            .props(NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=PAGE_FILTERS_TEST_ID))
+            .props(_NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=PAGE_FILTERS_TEST_ID))
         ):
             self._handles.variable_select = ui.select(
                 {variable.key: variable.ai_column for variable in VARIABLE_SPECS},
@@ -2727,11 +2947,11 @@ class ControlCentrePage:
             self._handles.status_select = ui.select(
                 {
                     "": Locale.ALL_STATUSES,
-                    **{status.value: status.value for status in RunStatus},
+                    **{status.value: status.value for status in _ResearcherActivity},
                 },
                 value="",
                 label=Locale.STATUS_FILTER,
-                on_change=lambda event: self.on_status_filter_changed(event.value or None),
+                on_change=lambda event: self.on_activity_filter_changed(event.value or None),
             )
             self._handles.cohort_select = ui.select(
                 {
@@ -2745,7 +2965,7 @@ class ControlCentrePage:
             self._handles.search_input = ui.input(
                 label=Locale.SEARCH_FILTER,
                 on_change=lambda event: self.on_search_changed(event.value),
-            ).props(NiceGui.CLEARABLE_PROP)
+            ).props(_NiceGui.CLEARABLE_PROP)
 
     def build_grid(self) -> None:
         variable = VARIABLE_SPEC_BY_KEY[self._selection.variable_key]
@@ -2760,7 +2980,7 @@ class ControlCentrePage:
                 auto_size_columns=False,
             )
             .style(GRID_STYLE)
-            .props(NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=RESEARCHER_GRID_TEST_ID))
+            .props(_NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=RESEARCHER_GRID_TEST_ID))
         )
         self._handles.grid.on(
             AgGrid.CELL_CLICKED_EVENT,
@@ -2772,7 +2992,7 @@ class ControlCentrePage:
             ui
             .row()
             .style(RESPONSIVE_ROW_STYLE)
-            .props(NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=ACTION_PANEL_TEST_ID))
+            .props(_NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=ACTION_PANEL_TEST_ID))
         ):
             self._handles.selected_researcher_label = ui.label(Locale.NO_RESEARCHER_SELECTED)
             self._handles.execute_button = (
@@ -2782,10 +3002,10 @@ class ControlCentrePage:
                     on_click=self.on_execute_selected,
                 )
                 .style(ACTION_BUTTON_STYLE)
-                .props(NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=EXECUTE_ACTION_TEST_ID))
+                .props(_NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=EXECUTE_ACTION_TEST_ID))
                 .on(
-                    NiceGui.MOUSE_DOWN_EVENT,
-                    js_handler=NiceGui.PRESERVE_SELECTION_HANDLER,
+                    _NiceGui.MOUSE_DOWN_EVENT,
+                    js_handler=_NiceGui.PRESERVE_SELECTION_HANDLER,
                 )
             )
             self._handles.execute_button.disable()
@@ -2796,10 +3016,10 @@ class ControlCentrePage:
                     on_click=self.refresh_card,
                 )
                 .style(ACTION_BUTTON_STYLE)
-                .props(NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=VIEW_CARD_TEST_ID))
+                .props(_NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=VIEW_CARD_TEST_ID))
                 .on(
-                    NiceGui.MOUSE_DOWN_EVENT,
-                    js_handler=NiceGui.PRESERVE_SELECTION_HANDLER,
+                    _NiceGui.MOUSE_DOWN_EVENT,
+                    js_handler=_NiceGui.PRESERVE_SELECTION_HANDLER,
                 )
             )
             self._handles.view_card_button.disable()
@@ -2810,7 +3030,7 @@ class ControlCentrePage:
             ui
             .expansion(Locale.ATTEMPT_HISTORY)
             .style(ATTEMPT_HISTORY_STYLE)
-            .props(NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=ATTEMPT_HISTORY_PANEL_TEST_ID))
+            .props(_NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=ATTEMPT_HISTORY_PANEL_TEST_ID))
         )
         with self._handles.attempt_history_expansion:
             self._handles.attempt_history_table = (
@@ -2823,7 +3043,7 @@ class ControlCentrePage:
                 .style(ATTEMPT_HISTORY_TABLE_STYLE)
                 .props(
                     f"{ATTEMPT_HISTORY_TABLE_PROPS} "
-                    f"{NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=ATTEMPT_HISTORY_TABLE_TEST_ID)}"
+                    f"{_NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=ATTEMPT_HISTORY_TABLE_TEST_ID)}"
                 )
             )
         self._handles.attempt_history_expansion.set_visibility(False)
@@ -2833,7 +3053,7 @@ class ControlCentrePage:
             ui
             .card()
             .style(CARD_CONTAINER_STYLE)
-            .props(NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=PAGE_FOOTER_TEST_ID))
+            .props(_NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=PAGE_FOOTER_TEST_ID))
         )
         with self._handles.card_container:
             self._handles.download_card_button = (
@@ -2843,20 +3063,20 @@ class ControlCentrePage:
                     on_click=self.download_displayed_card,
                 )
                 .style(ACTION_BUTTON_STYLE)
-                .props(NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=DOWNLOAD_CARD_TEST_ID))
+                .props(_NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=DOWNLOAD_CARD_TEST_ID))
             )
             self._handles.download_card_button.disable()
             self._handles.card_markdown = (
                 ui
                 .markdown("")
                 .style(CARD_MARKDOWN_STYLE)
-                .props(NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=CARD_MARKDOWN_TEST_ID))
+                .props(_NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=CARD_MARKDOWN_TEST_ID))
             )
 
     def grid_column_definitions(
         self,
         *,
-        variable: VariableSpec,
+        variable: _VariableSpec,
     ) -> list[dict[str, Any]]:
         return [
             AgGrid.column(
@@ -2915,8 +3135,8 @@ class ControlCentrePage:
                 wrap_text=True,
             ),
             AgGrid.column(
-                field=GRID_ATTEMPT_ID_FIELD,
-                header=KTP_AI_AUGMENT_ATTEMPT_ID_COL,
+                field=GRID_COMMIT_RECORD_ID_FIELD,
+                header=KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL,
                 width=GRID_ATTEMPT_COLUMN_WIDTH,
             ),
             AgGrid.column(
@@ -2929,12 +3149,23 @@ class ControlCentrePage:
                 header=GRID_STATUS_FIELD,
                 width=GRID_STATUS_COLUMN_WIDTH,
             ),
+            AgGrid.column(
+                field=GRID_RUN_OUTCOME_SNAPSHOT_FIELD,
+                header=GRID_RUN_OUTCOME_SNAPSHOT_FIELD,
+                width=GRID_STATUS_COLUMN_WIDTH,
+            ),
+            AgGrid.column(
+                field=GRID_SESSION_STATUS_FIELD,
+                header=GRID_SESSION_STATUS_FIELD,
+                width=GRID_CONTENT_COLUMN_WIDTH,
+                wrap_text=True,
+            ),
         ]
 
     def attempt_history_column_definitions(
         self,
         *,
-        variable: VariableSpec,
+        variable: _VariableSpec,
     ) -> list[dict[str, Any]]:
         return [
             nicegui_table_column(
@@ -2946,8 +3177,16 @@ class ControlCentrePage:
                 label=GRID_STATUS_FIELD,
             ),
             nicegui_table_column(
-                field=GRID_ATTEMPT_ID_FIELD,
-                label=KTP_AI_AUGMENT_ATTEMPT_ID_COL,
+                field=GRID_COMMIT_RECORD_ID_FIELD,
+                label=KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL,
+            ),
+            nicegui_table_column(
+                field=GRID_RUN_OUTCOME_SNAPSHOT_FIELD,
+                label=GRID_RUN_OUTCOME_SNAPSHOT_FIELD,
+            ),
+            nicegui_table_column(
+                field=GRID_SESSION_STATUS_FIELD,
+                label=GRID_SESSION_STATUS_FIELD,
             ),
             nicegui_table_column(
                 field=GRID_AI_VALUE_FIELD,
@@ -2970,8 +3209,8 @@ class ControlCentrePage:
     def grid_options(
         self,
         *,
-        snapshot: UiSnapshot,
-        variable: VariableSpec,
+        snapshot: _UiSnapshot,
+        variable: _VariableSpec,
     ) -> dict[str, Any]:
         return AgGrid.options(
             columns=self.grid_column_definitions(variable=variable),
@@ -2982,7 +3221,7 @@ class ControlCentrePage:
     def grid_rows(
         self,
         *,
-        snapshot: UiSnapshot,
+        snapshot: _UiSnapshot,
     ) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         for row in snapshot.rows:
@@ -3003,13 +3242,15 @@ class ControlCentrePage:
                 GRID_TABLE_1_VALUE_FIELD: latest.table_1_value,
                 GRID_FOOTNOTES_FIELD: latest.footnotes,
                 GRID_FOOTNOTE_ARGUMENTS_FIELD: latest.footnote_arguments,
-                GRID_ATTEMPT_ID_FIELD: latest.attempt_id,
+                GRID_COMMIT_RECORD_ID_FIELD: latest.commit_record_id,
                 GRID_ATTEMPT_TIMESTAMP_FIELD: (
                     None
                     if latest.attempt_timestamp is None
                     else latest.attempt_timestamp.isoformat()
                 ),
-                GRID_STATUS_FIELD: latest.attempt_status.value,
+                GRID_STATUS_FIELD: latest.attempt_activity.value,
+                GRID_RUN_OUTCOME_SNAPSHOT_FIELD: latest.run_outcome_snapshot_savedness,
+                GRID_SESSION_STATUS_FIELD: latest.session_status,
                 GRID_ACTION_FIELD: latest.action.value,
             })
         return rows
@@ -3017,21 +3258,23 @@ class ControlCentrePage:
     def attempt_detail_rows(
         self,
         *,
-        row: ResearcherGridRow,
+        row: _ResearcherGridRow,
     ) -> list[dict[str, Any]]:
         return [
             {
                 GRID_ROW_ID_FIELD: str(
-                    attempt.run_id if attempt.run_id is not None else attempt.attempt_id
+                    attempt.run_id if attempt.run_id is not None else attempt.commit_record_id
                 ),
                 GRID_RUN_ID_FIELD: (str(attempt.run_id) if attempt.run_id is not None else None),
-                GRID_ATTEMPT_ID_FIELD: attempt.attempt_id,
+                GRID_COMMIT_RECORD_ID_FIELD: attempt.commit_record_id,
                 GRID_ATTEMPT_TIMESTAMP_FIELD: (
                     None
                     if attempt.attempt_timestamp is None
                     else attempt.attempt_timestamp.isoformat()
                 ),
-                GRID_STATUS_FIELD: attempt.attempt_status.value,
+                GRID_STATUS_FIELD: attempt.attempt_activity.value,
+                GRID_RUN_OUTCOME_SNAPSHOT_FIELD: attempt.run_outcome_snapshot_savedness,
+                GRID_SESSION_STATUS_FIELD: attempt.session_status,
                 GRID_AI_VALUE_FIELD: attempt.ai_value,
                 GRID_TABLE_1_VALUE_FIELD: attempt.table_1_value,
                 GRID_FOOTNOTES_FIELD: attempt.footnotes,
@@ -3042,6 +3285,8 @@ class ControlCentrePage:
 
     async def refresh(self) -> None:
         snapshot = await self._controller.snapshot(selection=self._selection)
+        for message in self._controller.drain_notifications():
+            ui.notify(message, type="negative")
         if self._handles.backend_status_label is not None:
             self._handles.backend_status_label.set_text(
                 Locale.BACKEND_STATUS_TEMPLATE.format(status=snapshot.backend_status.value)
@@ -3092,7 +3337,7 @@ class ControlCentrePage:
     async def refresh_grid(
         self,
         *,
-        snapshot: UiSnapshot | None = None,
+        snapshot: _UiSnapshot | None = None,
     ) -> None:
         if self._handles.grid is None:
             return
@@ -3164,7 +3409,7 @@ class ControlCentrePage:
             self._card_cache[namekey] = card
         await self._show_card(card)
 
-    async def _show_card(self, card: ResearcherCardView) -> None:
+    async def _show_card(self, card: _ResearcherCardView) -> None:
         if self._handles.selected_researcher_label is not None:
             self._handles.selected_researcher_label.set_text(
                 Locale.RESEARCHER_SELECTION_TEMPLATE.format(
@@ -3219,7 +3464,7 @@ class ControlCentrePage:
                 ),
                 media_type=DOCX_MEDIA_TYPE,
             )
-        except (OSError, subprocess.SubprocessError):
+        except OSError, subprocess.SubprocessError:
             ui.notify(Locale.DOCX_DOWNLOAD_FAILED, type="negative")
         finally:
             if button is not None and self._displayed_card is card:
@@ -3259,11 +3504,11 @@ class ControlCentrePage:
         if expanded_namekey is not None:
             self.show_attempt_history(expanded_namekey)
 
-    async def on_status_filter_changed(
+    async def on_activity_filter_changed(
         self,
         status: str | None,
     ) -> None:
-        self._selection.status_filter = None if status is None else RunStatus(status)
+        self._selection.activity_filter = None if status is None else _ResearcherActivity(status)
         await self.refresh_grid()
 
     async def on_cohort_filter_changed(
@@ -3309,7 +3554,7 @@ class ControlCentrePage:
         if self._displayed_card is not None and self._displayed_card.namekey != selected_namekey:
             self._clear_displayed_card()
         run_id_value = selected.get(GRID_RUN_ID_FIELD)
-        action = RunAction(str(selected[GRID_ACTION_FIELD]))
+        action = _RunAction(str(selected[GRID_ACTION_FIELD]))
         self._selection.selected_run_id = None if run_id_value is None else UUID(str(run_id_value))
         self._selection.selected_action = action
         if self._handles.selected_researcher_label is not None:
@@ -3327,7 +3572,7 @@ class ControlCentrePage:
                 self._handles.view_card_button.disable()
         if self._handles.execute_button is not None:
             self._handles.execute_button.set_text(ACTION_LABEL_BY_VALUE[action.value])
-            if action is RunAction.DISABLED:
+            if action is _RunAction.DISABLED:
                 self._handles.execute_button.disable()
             else:
                 self._handles.execute_button.enable()
@@ -3339,7 +3584,7 @@ class ControlCentrePage:
         self._invalidate_card(namekey)
         run_id = await self._controller.queue(namekey=namekey)
         self._selection.selected_run_id = run_id
-        self._selection.selected_action = RunAction.CANCEL
+        self._selection.selected_action = _RunAction.CANCEL
         self.update_execute_button()
 
     async def on_rerun(
@@ -3349,7 +3594,7 @@ class ControlCentrePage:
         self._invalidate_card(namekey)
         run_id = await self._controller.rerun(namekey=namekey)
         self._selection.selected_run_id = run_id
-        self._selection.selected_action = RunAction.CANCEL
+        self._selection.selected_action = _RunAction.CANCEL
         self.update_execute_button()
 
     async def on_cancel(
@@ -3357,7 +3602,7 @@ class ControlCentrePage:
         run_id: UUID,
     ) -> None:
         await self._controller.cancel(run_id=run_id)
-        self._selection.selected_action = RunAction.RERUN
+        self._selection.selected_action = _RunAction.RERUN
         self.update_execute_button()
 
     def update_execute_button(self) -> None:
@@ -3366,7 +3611,7 @@ class ControlCentrePage:
         if button is None or action is None:
             return
         button.set_text(ACTION_LABEL_BY_VALUE[action.value])
-        if action is RunAction.DISABLED:
+        if action is _RunAction.DISABLED:
             button.disable()
         else:
             button.enable()
@@ -3374,21 +3619,21 @@ class ControlCentrePage:
     async def on_grid_action(
         self,
         *,
-        action: RunAction,
+        action: _RunAction,
         namekey: Namekey,
         run_id: UUID | None,
     ) -> None:
-        if action is RunAction.QUEUE:
+        if action is _RunAction.QUEUE:
             await self.on_queue(namekey)
-        elif action is RunAction.RERUN:
+        elif action is _RunAction.RERUN:
             await self.on_rerun(namekey)
-        elif action is RunAction.CANCEL and run_id is not None:
+        elif action is _RunAction.CANCEL and run_id is not None:
             await self.on_cancel(run_id)
 
     async def on_execute_selected(self) -> None:
         namekey = self._selection.selected_namekey
         action = self._selection.selected_action
-        if namekey is None or action is None or action is RunAction.DISABLED:
+        if namekey is None or action is None or action is _RunAction.DISABLED:
             return
         await self.on_grid_action(
             action=action,
@@ -3413,22 +3658,22 @@ class ControlCentrePage:
 
 
 @dataclass(frozen=True, slots=True)
-class ApplicationServices:
+class _ApplicationServices:
     configuration: AiAugmentCtlCtrContext
 
-    source_repository: SourceRepository
+    source_repository: _SourceRepository
 
-    backend: BackendSupervisor
-    backend_database: BackendDatabaseClient
-    codex: CodexRunner
+    backend: _BackendSupervisor
+    backend_database: _BackendDatabaseClient
+    codex: _CodexRunner
 
-    reconciler: AttemptReconciler
-    projector: VariableProjector
+    reconciler: _AttemptReconciler
+    projector: _VariableProjector
 
-    controller: ControlCentreController
+    controller: _ControlCentreController
 
 
-SERVICES: ApplicationServices | None = None
+SERVICES: _ApplicationServices | None = None
 APPLICATION_LIFECYCLE_CONFIGURED = False
 APPLICATION_CONFIG_PATH = DEFAULT_CONFIG_PATH
 
@@ -3436,36 +3681,34 @@ APPLICATION_CONFIG_PATH = DEFAULT_CONFIG_PATH
 def create_services(
     *,
     config_path: Path = DEFAULT_CONFIG_PATH,
-    source_data_cache: CachedSourceData | None = None,
-) -> ApplicationServices:
+    source_data_cache: _CachedSourceData | None = None,
+) -> _ApplicationServices:
     configuration = AiAugmentCtlCtrContext(
         config_path=config_path,
         source_population=(
             None if source_data_cache is None else source_data_cache.source_population
         ),
     )
-    source_repository = SourceRepository(
+    source_repository = _SourceRepository(
         configuration=configuration,
         ground_truth_by_namekey=(
-            None
-            if source_data_cache is None
-            else source_data_cache.ground_truth_by_namekey()
+            None if source_data_cache is None else source_data_cache.ground_truth_by_namekey()
         ),
     )
-    backend = BackendSupervisor(
+    backend = _BackendSupervisor(
         repository_root=REPOSITORY_ROOT,
         config_path=configuration.config_path,
         openalex_api_key=configuration.openalex_api_key,
         appendwatch_report=configuration.appendwatch_report,
         dashboard_socket_path=DASHBOARD_SOCKET_PATH,
     )
-    backend_database = BackendDatabaseClient(socket_path=DASHBOARD_SOCKET_PATH)
-    codex = CodexRunner(
+    backend_database = _BackendDatabaseClient(socket_path=DASHBOARD_SOCKET_PATH)
+    codex = _CodexRunner(
         timezone=configuration.timezone,
     )
-    reconciler = AttemptReconciler()
-    projector = VariableProjector()
-    controller = ControlCentreController(
+    reconciler = _AttemptReconciler()
+    projector = _VariableProjector()
+    controller = _ControlCentreController(
         source_repository=source_repository,
         backend=backend,
         backend_database=backend_database,
@@ -3473,7 +3716,7 @@ def create_services(
         reconciler=reconciler,
         projector=projector,
     )
-    return ApplicationServices(
+    return _ApplicationServices(
         configuration=configuration,
         source_repository=source_repository,
         backend=backend,
@@ -3485,7 +3728,7 @@ def create_services(
     )
 
 
-def require_services() -> ApplicationServices:
+def require_services() -> _ApplicationServices:
     if SERVICES is None:
         raise RuntimeError(Locale.SERVICES_NOT_STARTED)
     return SERVICES
@@ -3505,7 +3748,7 @@ async def chrome_devtools_probe() -> dict[str, object]:
 async def control_centre_page() -> None:
     services = require_services()
     await services.controller.detect_backend_availability()
-    page = ControlCentrePage(
+    page = _ControlCentrePage(
         controller=services.controller,
         reference_docx=services.configuration.pipeline_config.pandoc_reference_docx,
     )
@@ -3528,9 +3771,7 @@ async def application_startup() -> None:
             Locale.CONTROL_CENTRE_LOG_PREFIX,
             Locale.SOURCE_CACHE_CHECK_LOG,
         )
-        fingerprint, source_data_cache = load_cached_source_data(
-            APPLICATION_CONFIG_PATH
-        )
+        fingerprint, source_data_cache = load_cached_source_data(APPLICATION_CONFIG_PATH)
         emit_log(
             Locale.CONTROL_CENTRE_LOG_PREFIX,
             (
@@ -3552,9 +3793,7 @@ async def application_startup() -> None:
             store_cached_source_data(
                 fingerprint=fingerprint,
                 source_population=services.source_repository.source_population,
-                ground_truth_by_namekey=(
-                    services.source_repository.ground_truth_by_namekey
-                ),
+                ground_truth_by_namekey=(services.source_repository.ground_truth_by_namekey),
             )
             emit_log(
                 Locale.CONTROL_CENTRE_LOG_PREFIX,

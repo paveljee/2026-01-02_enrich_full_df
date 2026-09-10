@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
 
-from src.helpers.resources import (
+from src.helpers.data_models import (
     RegisteredResource,
 )
 

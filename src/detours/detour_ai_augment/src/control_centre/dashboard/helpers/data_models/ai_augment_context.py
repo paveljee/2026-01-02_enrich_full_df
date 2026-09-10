@@ -15,7 +15,7 @@ from .....backend.api import (
     load_release_batches,
     registered_release_map,
 )
-from .....backend.helpers.data_models.ai_augment_context import (
+from .....backend.helpers.data_models.ai_augment_config import (
     AiAugmentDetourConfig,
 )
 from .....backend.helpers.data_models.pydantic_to_paste import (

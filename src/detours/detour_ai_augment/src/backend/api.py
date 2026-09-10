@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 import asyncio
 import base64
 import csv
@@ -26,11 +25,10 @@ from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from random import Random
 from typing import Any, Callable, Literal, Self, TypeAlias, cast, get_args
-from uuid import UUID, uuid4
+from uuid import UUID, uuid7
 from zoneinfo import ZoneInfo
 
 import duckdb
-import uvicorn
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import (
@@ -48,6 +46,7 @@ from src.helpers.cards import build_cards, write_cards_zip
 from src.helpers.config import PipelineConfig
 from src.helpers.data_models import (
     FragmentType,
+    InnerDict,
     NameKey,
     OuterDict,
     RegisteredResource,
@@ -96,12 +95,14 @@ from src.helpers.vars import (
     KTP_TABLE_1_EMPTY_VALUE_PLACEHOLDERS,
 )
 
-from .helpers import codex_parse
-from .helpers.data_models.ai_augment_config import (
-    MAP_SUBSET_0_TO_BATCH_KEY,
-    # REPLAY_LOG_KEY,
-    AiAugmentDetourConfig,
+from ..architecture import BackendComponent, implements
+from ..control_centre.dashboard.helpers.data_models.run_outcome import (
+    NAME_KEY_HEADER,
+    name_key_from_header_value,
+    name_key_header_value,
 )
+from .helpers import codex_parse
+from .helpers.data_models.ai_augment_config import AiAugmentDetourConfig
 from .helpers.data_models.ai_augment_context import (
     AiAugmentBackendContext,
 )
@@ -119,6 +120,27 @@ from .helpers.data_models.pydantic_to_paste import (
     StandardizedSubmission,
     StandardizedValue,
     WebSearchExcerpt,
+)
+from .helpers.data_models.server_event import (
+    COMMIT_PATH,
+    SOURCE_KEY_HEADER,
+    AcceptedInnerDictSummary,
+    AgentRuntimeAttempt,
+    AppendwatchReportEncoding,
+    AppendwatchReportRecord,
+    BackendCommitRecord,
+    CodexRolloutRecord,
+    CodexSessionRecord,
+    CommitRequestBody,
+    PostCommitValidation,
+    PostCommitValidationResult,
+    PostCommitValidationStage,
+    PreparedPullResponse,
+    QueryResponse,
+    RunOutcomeResponse,
+    RunOutcomeResponseBody,
+    source_key_from_header_value,
+    source_key_header_value,
 )
 from .helpers.data_models.source_population import (
     IneligibilityCategory,
@@ -140,8 +162,9 @@ from .helpers.vars import (
     CONFIG_FILENAME,
     KTP_AI_AUGMENT_ACADEMIC_POSITIONS_COL,
     KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL,
-    KTP_AI_AUGMENT_ATTEMPT_ID_COL,
     KTP_AI_AUGMENT_COMMENTS_COL,
+    KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL,
+    KTP_AI_AUGMENT_COMMIT_REQUEST_BODY_COL,
     KTP_AI_AUGMENT_EDUCATION_COL,
     KTP_AI_AUGMENT_FOOTNOTE_ARGUMENTS_COL,
     KTP_AI_AUGMENT_FOOTNOTES_COL,
@@ -152,18 +175,23 @@ from .helpers.vars import (
     KTP_AI_AUGMENT_RESEARCHER_AUTHOR_COL,
     KTP_AI_AUGMENT_SESSION_METADATA_COL,
     KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL,
+    MAP_SUBSET_0_TO_BATCH_KEY,
     TEXT_ENCODING,
-)
-from .ipc import (
-    DashboardIpcServer,
-    start_dashboard_query_server,
-    stop_dashboard_query_server,
 )
 
 logger = logging.getLogger(__name__)
 
 
+@implements[BackendComponent.WorkflowStatusProperty]()
 class BackendWorkflowStatus(StrEnum):
+    value: Literal[
+        "ready",
+        "busy",
+        "retry",
+        "complete",
+        "failed",
+    ]
+
     READY = "ready"
     BUSY = "busy"
     RETRY = "retry"
@@ -179,28 +207,17 @@ APPENDWATCH_REPORT_ENV_NAME = "FASTAPI_DETOUR_APPENDWATCH_REPORT"
 NAMEKEY_ENV_NAME = "FASTAPI_DETOUR_NAMEKEY"
 CODEX_SESSIONS_ROOT_ENV_NAME = "FASTAPI_DETOUR_CODEX_SESSIONS_DIR"
 CONTROL_PARENT_PID_ENV_NAME = "FASTAPI_DETOUR_CONTROL_PARENT_PID"
-DASHBOARD_SOCKET_PATH_ENV_NAME = "FASTAPI_DETOUR_DASHBOARD_SOCKET"
-DASHBOARD_QUERY_PATH = "/query"
 AIVM_INSTANCE_ENV_NAME = "FASTAPI_DETOUR_AIVM_INSTANCE"
 AIVM_AUDIT_USER_ENV_NAME = "FASTAPI_DETOUR_AIVM_AUDIT_USER"
 AIVM_SSH_PORT_ENV_NAME = "FASTAPI_DETOUR_AIVM_SSH_PORT"
 AIVM_IDENTITY_FILE_ENV_NAME = "FASTAPI_DETOUR_AIVM_IDENTITY_FILE"
 AIVM_KNOWN_HOSTS_FILE_ENV_NAME = "FASTAPI_DETOUR_AIVM_KNOWN_HOSTS_FILE"
 LIMA_SSH_CONFIG_ENV_NAME = "FASTAPI_DETOUR_LIMA_SSH_CONFIG"
-COMMIT_PATH = "/commit"
 CODEX_SESSIONS_ROOT = PurePosixPath(
     os.environ.get(CODEX_SESSIONS_ROOT_ENV_NAME, "/home/ai/.codex/sessions")
 )
 APPENDWATCH_REPORT = os.environ.get(APPENDWATCH_REPORT_ENV_NAME, "")
-DEFAULT_DASHBOARD_SOCKET_PATH = (
-    Path(tempfile.gettempdir()) / f"ktp-hcr-detour-ai-augment-{os.getuid()}.sock"
-)
-BACKEND_PROCESS_LOCK_PATH = (
-    Path(tempfile.gettempdir()) / "ktp-hcr-detour-ai-augment-backend.lock"
-)
-DASHBOARD_SOCKET_PATH = Path(
-    os.environ.get(DASHBOARD_SOCKET_PATH_ENV_NAME, DEFAULT_DASHBOARD_SOCKET_PATH)
-).expanduser()
+BACKEND_PROCESS_LOCK_PATH = Path(tempfile.gettempdir()) / "ktp-hcr-detour-ai-augment-backend.lock"
 
 AIVM_INSTANCE = os.environ.get(AIVM_INSTANCE_ENV_NAME, "aivm")
 AIVM_AUDIT_USER = os.environ.get(AIVM_AUDIT_USER_ENV_NAME, "aivm-audit")
@@ -208,9 +225,7 @@ AIVM_SSH_PORT = os.environ.get(AIVM_SSH_PORT_ENV_NAME, "22022")
 AIVM_KEY_DIR = Path.home() / ".local" / "share" / "aivm" / ".ssh"
 _AIVM_IDENTITY_FILE_VALUE = os.environ.get(AIVM_IDENTITY_FILE_ENV_NAME)
 AIVM_IDENTITY_FILE = (
-    None
-    if not _AIVM_IDENTITY_FILE_VALUE
-    else Path(_AIVM_IDENTITY_FILE_VALUE).expanduser()
+    None if not _AIVM_IDENTITY_FILE_VALUE else Path(_AIVM_IDENTITY_FILE_VALUE).expanduser()
 )
 AIVM_KNOWN_HOSTS_FILE = Path(
     os.environ.get(AIVM_KNOWN_HOSTS_FILE_ENV_NAME, AIVM_KEY_DIR / "known_hosts")
@@ -314,20 +329,6 @@ CODEX_WEB_FUNCTION_NAME = "run"
 CODEX_TEXT_RESULT_TYPE = "text_result"
 CODEX_TURN_REF_PREFIX = "turn"
 SESSION_REASONING_EFFORT_KEY = "reasoning_effort"
-ATTEMPT_STAGE_TRANSPORT = "transport"
-ATTEMPT_STAGE_CONFIGURATION = "configuration"
-ATTEMPT_STAGE_ROLLOUT_COPY = "rollout_copy"
-ATTEMPT_STAGE_APPENDWATCH_COPY = "appendwatch_report_copy"
-ATTEMPT_STAGE_APPENDWATCH_VALIDATION = "appendwatch_report_validation"
-ATTEMPT_STAGE_ROLLOUT_INDEX = "rollout_index"
-ATTEMPT_STAGE_PYDANTIC_VALIDATION = "pydantic_validation"
-ATTEMPT_STAGE_EVIDENCE_VALIDATION = "duckdb_evidence_validation"
-ATTEMPT_STAGE_RESEARCHER_RESOLUTION = "researcher_resolution"
-ATTEMPT_STAGE_CARD = "innerdict_and_card"
-ATTEMPT_STAGE_ACCEPTED = "accepted"
-ATTEMPT_RESULT_ACCEPTED = "accepted"
-ATTEMPT_RESULT_CONFIGURATION_ERROR = "configuration_error"
-ATTEMPT_RESULT_REJECTED = "rejected"
 SSH_EXECUTABLE = "ssh"
 AUDIT_PROBE_COMMAND = "probe"
 AUDIT_FIND_ROLLOUT_COMMAND = "find-rollout"
@@ -338,7 +339,6 @@ JSON_MEDIA_TYPE = "application/json"
 HTTP_GET_METHOD = "GET"
 HTTP_POST_METHOD = "POST"
 HTTP_PUT_METHOD = "PUT"
-IPC_ONLY_OPTION = "--ipc-only"
 HTTP_ACCEPT_HEADER = "Accept"
 HTTP_CONTENT_TYPE_HEADER = "Content-Type"
 HTTP_REQUEST_CONTENT_TYPE_HEADER = "content-type"
@@ -365,15 +365,12 @@ DETOUR_DB_FILENAME_TEMPLATE = "{stem}__detour_{detour_id}{suffix}"
 ATOMIC_TEMP_FILENAME_TEMPLATE = ".{filename}.{nonce}.tmp"
 RESPONSE_FILENAME = f"response{ROLLOUT_FILENAME_SUFFIX}"
 CARD_ZIP_FILENAME_TEMPLATE = "{prefix}_{attempt_id}.zip"
-ATTEMPT_ID_TIMESTAMP_FORMAT = "%Y%m%dT%H%M%S_%fZ"
-ATTEMPT_ID_SEPARATOR = "_"
 ROLLOUT_TIMESTAMP_FORMAT = "%Y-%m-%dT%H-%M-%S"
 CUMULATIVE_KEY_SEPARATOR = "\0"
 FCO_TIMESTAMP_TIMESPEC = "milliseconds"
 API_VERSION = "1.0.0"
 PULL_PATH = "/pull"
 PUSH_PATH = "/push"
-CONFIG_OPTION = "--config"
 RESOURCE_PATH_KEY = "path"
 RESOURCE_DESCRIPTION_KEY = "desc"
 RESOURCE_SHA256_KEY = "sha256"
@@ -382,10 +379,6 @@ PYDANTIC_ERROR_LOCATION_KEY = "loc"
 PYDANTIC_ERROR_TYPE_KEY = "type"
 PYDANTIC_ERROR_INPUT_KEY = "input"
 PYDANTIC_MISSING_ERROR_TYPE = "missing"
-ATTEMPT_ID_KEY = "attempt_id"
-ATTEMPT_STAGE_KEY = "stage"
-ATTEMPT_RESULT_KEY = "result"
-ATTEMPT_UPDATED_AT_KEY = "updated_at"
 REPLAY_LOG_RESOURCE_KEY = "detour_ai_augment_backend_api_replay_log"
 ROLLOUT_CAS_TEMP_FILENAME_TEMPLATE = ".{nonce}.tmp"
 ROLLOUT_CAS_FILENAME_TEMPLATE = "{sha256}.jsonl"
@@ -395,7 +388,7 @@ HTTP_ETAG_SHA256_PREFIX = '"sha256:'
 HTTP_ETAG_SUFFIX = '"'
 HTTP_INTERNAL_ERROR_RESPONSE = status.HTTP_500_INTERNAL_SERVER_ERROR
 HTTP_BUSY_RESPONSE = status.HTTP_409_CONFLICT
-AUTHORITATIVE_PUBLIC_ROUTES = frozenset({
+AUTHORITATIVE_FASTAPI_ROUTES = frozenset({
     (HTTP_GET_METHOD, PULL_PATH),
     (HTTP_POST_METHOD, PUSH_PATH),
 })
@@ -446,8 +439,6 @@ SERVER_HOST = "127.0.0.1"
 SERVER_PORT = 8612
 SYNTHETIC_COMMIT_SCHEME = "http"
 SYNTHETIC_COMMIT_HOST = "invalid"
-SOURCE_KEY_HEADER = "Source-Key"
-NAME_KEY_HEADER = "Name-Key"
 RETRY_AFTER_HEADER = "Retry-After"
 LOCATION_HEADER = "Location"
 RETRY_AFTER_SECONDS = "1"
@@ -513,9 +504,10 @@ AUTHORITATIVE_LOG_OFFSET = 0
 AUTHORITATIVE_BACKGROUND_TASKS: set[asyncio.Task[None]] = set()
 BACKEND_WORKFLOW_STATE_LOCK = threading.Lock()
 BACKEND_WORKFLOW_STATUS = BackendWorkflowStatus.READY
-BACKEND_WORKFLOW_OUTCOME: ProjectedValidationOutcome | None = None
+BACKEND_PREPARED_PULL_RESPONSE: PreparedPullResponse | None = None
 BACKEND_CURRENT_PULL_RECORD_ID: UUID | None = None
 BACKEND_PENDING_PULL_RECORD_ID: UUID | None = None
+BACKEND_LATEST_PUSH_RECORD_ID: UUID | None = None
 BACKEND_SESSION_ID: str | None = None
 EVIDENCE_RANDOM = Random()
 CODEX_FC_TABLE = "codex_fc"
@@ -533,11 +525,7 @@ CODEX_FCO_ID_SEQUENCE = "codex_fco_id_sequence"
 CODEX_CALLS_ID_SEQUENCE = "codex_calls_id_sequence"
 CODEX_TURN_REF_ID_SEQUENCE = "codex_turn_ref_id_sequence"
 CODEX_EVIDENCE_AUDIT_ID_SEQUENCE = "codex_evidence_audit_id_sequence"
-CONTROL_ATTEMPTS_TABLE = "control_centre_attempts"
 AUTHORITATIVE_PROJECTION_TABLE = "detour_authoritative_projection"
-CONTROL_ATTEMPT_RECORD_COLUMN = "record"
-CONTROL_ATTEMPT_REQUEST_SHA256_COLUMN = "request_sha256"
-CONTROL_ATTEMPT_IDEMPOTENCY_KEY_COLUMN = "idempotency_key"
 AUTHORITATIVE_PROJECTION_ID_COLUMN = "id"
 AUTHORITATIVE_PROJECTION_LINE_COLUMN = "line_number"
 AUTHORITATIVE_PROJECTION_OFFSET_COLUMN = "byte_offset"
@@ -582,13 +570,6 @@ CODEX_EVIDENCE_APPLIED_COL = "applied"
 CODEX_EVIDENCE_ACCEPTED_COL = "accepted"
 CODEX_EVIDENCE_AUDIT_ID_COL = "id"
 CODEX_TOKEN_EXTENSION = "splink_udfs"
-CREATE_CONTROL_ATTEMPTS_TABLE_SQL = (
-    f"CREATE TABLE IF NOT EXISTS {CONTROL_ATTEMPTS_TABLE} ("
-    f"{ATTEMPT_ID_KEY} VARCHAR PRIMARY KEY, "
-    f"{CONTROL_ATTEMPT_IDEMPOTENCY_KEY_COLUMN} VARCHAR NOT NULL UNIQUE, "
-    f"{CONTROL_ATTEMPT_REQUEST_SHA256_COLUMN} VARCHAR NOT NULL, "
-    f"{CONTROL_ATTEMPT_RECORD_COLUMN} JSON NOT NULL)"
-)
 CREATE_AUTHORITATIVE_PROJECTION_TABLE_SQL = (
     f"CREATE TABLE IF NOT EXISTS {AUTHORITATIVE_PROJECTION_TABLE} ("
     f"{AUTHORITATIVE_PROJECTION_ID_COLUMN} INTEGER PRIMARY KEY, "
@@ -683,7 +664,8 @@ CODEX_OUTPUT_SCHEMA = (
     (DRAW_LABEL, "VARCHAR NOT NULL"),
     (KTP_FIRST_NAME_COL, "VARCHAR NOT NULL"),
     (KTP_LAST_NAME_COL, "VARCHAR NOT NULL"),
-    (KTP_AI_AUGMENT_ATTEMPT_ID_COL, "VARCHAR NOT NULL UNIQUE"),
+    (KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL, "VARCHAR NOT NULL UNIQUE"),
+    (KTP_AI_AUGMENT_COMMIT_REQUEST_BODY_COL, "VARCHAR NOT NULL"),
     (KTP_AI_AUGMENT_SESSION_METADATA_COL, "VARCHAR NOT NULL"),
     *(
         definition
@@ -714,21 +696,22 @@ MEDIA_TYPE_WITH_CHARSET = f"{MEDIA_TYPE}; charset=utf-8"
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
-    dashboard_query_server: DashboardIpcServer | None = None
     parent_watch: asyncio.Task[None] | None = None
     acquired_backend_process_lock = False
     try:
         runtime = runtime_configuration()
         with BACKEND_WORKFLOW_STATE_LOCK:
             global BACKEND_CURRENT_PULL_RECORD_ID
+            global BACKEND_LATEST_PUSH_RECORD_ID
             global BACKEND_PENDING_PULL_RECORD_ID
             global BACKEND_SESSION_ID
-            global BACKEND_WORKFLOW_OUTCOME
+            global BACKEND_PREPARED_PULL_RESPONSE
             global BACKEND_WORKFLOW_STATUS
             BACKEND_CURRENT_PULL_RECORD_ID = None
             BACKEND_PENDING_PULL_RECORD_ID = None
+            BACKEND_LATEST_PUSH_RECORD_ID = None
             BACKEND_SESSION_ID = None
-            BACKEND_WORKFLOW_OUTCOME = None
+            BACKEND_PREPARED_PULL_RESPONSE = None
             BACKEND_WORKFLOW_STATUS = BackendWorkflowStatus.READY
         if BACKEND_PROCESS_LOCK_DESCRIPTOR is None:
             _acquire_backend_process_lock()
@@ -736,22 +719,14 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
         _acquire_authoritative_process_lock(runtime)
         prove_workflow_inputs_readable()
         synchronize_authoritative_projection(runtime)
-        dashboard_query_server = start_dashboard_query_server(
-            DASHBOARD_SOCKET_PATH,
-            dashboard_query_payload,
-            namekey_parameter=KTP_NAMEKEY_COL,
-            query_path=DASHBOARD_QUERY_PATH,
-        )
         start_backend_session_reader()
         parent_pid = os.environ.get(CONTROL_PARENT_PID_ENV_NAME)
         if parent_pid is not None:
             if not parent_pid.isdecimal() or int(parent_pid) <= 0:
-                raise PushConfigurationError(Locale.CONTROL_PARENT_PID_INVALID)
+                raise _PushConfigurationError(Locale.CONTROL_PARENT_PID_INVALID)
             parent_watch = asyncio.create_task(_watch_control_parent(int(parent_pid)))
     except Exception as exc:
         logger.error(Locale.API_STARTUP_FAILED_LOG, exc)
-        if dashboard_query_server is not None:
-            stop_dashboard_query_server(dashboard_query_server)
         close_backend_detour_database()
         _release_authoritative_process_lock()
         if acquired_backend_process_lock:
@@ -769,8 +744,6 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
             parent_watch.cancel()
             with suppress(asyncio.CancelledError):
                 await parent_watch
-        if dashboard_query_server is not None:
-            stop_dashboard_query_server(dashboard_query_server)
         close_backend_detour_database()
         _release_authoritative_process_lock()
         if acquired_backend_process_lock:
@@ -783,104 +756,6 @@ async def _watch_control_parent(parent_pid: int) -> None:
             os.kill(os.getpid(), signal.SIGTERM)
             return
         await asyncio.sleep(CONTROL_PARENT_WATCH_SECONDS)
-
-
-class CompactSessionMetadata(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    originator: StrictStr
-    source: StrictStr
-    cli_version: StrictStr
-    model_provider: StrictStr
-    model: StrictStr
-    reasoning_effort: StrictStr
-    session_id: StrictStr
-    timestamp: StrictStr
-
-    @model_validator(mode="after")
-    def validate_metadata(self) -> Self:
-        if any(not value.strip() for value in self.model_dump().values()):
-            raise ValueError(Locale.SESSION_METADATA_NONBLANK)
-        return self
-
-
-class AttemptRecord(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
-    attempt_id: StrictStr
-    transaction_id: StrictStr
-    request_sha256: StrictStr
-    stage: StrictStr
-    result: StrictStr
-    updated_at: datetime
-    run_id: UUID | None = None
-    namekey: StrictStr | None = None
-    session_id: StrictStr | None = None
-    rollout_sha256: StrictStr | None = None
-    response_code: int
-    response_body: StrictStr
-    response_detail: StrictStr | None = None
-
-
-class DashboardAcceptedAttempt(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
-    namekey: StrictStr
-    attempt_id: StrictStr
-    session_metadata: CompactSessionMetadata
-    values: dict[StrictStr, StrictStr | None]
-    footnotes: StrictStr | None = None
-    footnote_arguments: StrictStr | None = None
-
-
-class DashboardQueryResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
-    attempts: tuple[AttemptRecord, ...]
-    accepted_attempts: tuple[DashboardAcceptedAttempt, ...]
-    card_markdown: StrictStr | None = None
-
-
-class ReplayRolloutReference(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
-    sha256: StrictStr
-    size: int = Field(ge=0)
-    line_count: int = Field(ge=1)
-
-
-class Base64Artifact(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
-    encoding: Literal["base64"]
-    data: StrictStr
-
-
-class ReplayCommit(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
-    schema_version: Literal[1] = 1
-    pull_record_id: UUID
-    push_record_id: UUID
-    rollout: ReplayRolloutReference
-    appendwatch_report: Base64Artifact
-
-
-class ProjectedValidationOutcome(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
-    commit_record_id: UUID
-    pull_record_id: UUID
-    push_record_id: UUID
-    attempt_id: StrictStr
-    stage: StrictStr
-    result: StrictStr
-    response_code: int
-    response_headers: dict[StrictStr, StrictStr]
-    response_body: StrictStr
-    response_detail: StrictStr | None = None
-    namekey: StrictStr
-    session_id: StrictStr | None = None
 
 
 SubmissionPayload: TypeAlias = Submission | StandardizedSubmission
@@ -1000,7 +875,7 @@ PUSH_ROUTE: dict[str, Any] = {
 app = FastAPI(**APP_CONFIG)
 
 
-class RetryEvidenceObligation(BaseModel):
+class _RetryEvidenceObligation(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     outcome: EvidenceOutcome
@@ -1009,21 +884,21 @@ class RetryEvidenceObligation(BaseModel):
     normalized_tokens: list[StrictStr] = Field(default_factory=list)
 
 
-class RetryFieldObligation(BaseModel):
+class _RetryFieldObligation(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     value: StrictStr
-    evidence: list[RetryEvidenceObligation]
+    evidence: list[_RetryEvidenceObligation]
     accepted: bool
 
 
-class RetryObligations(BaseModel):
+class _RetryObligations(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    fields: dict[StrictStr, RetryFieldObligation]
+    fields: dict[StrictStr, _RetryFieldObligation]
 
 
-class EvidenceCandidateAudit(BaseModel):
+class _EvidenceCandidateAudit(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     ref_id: StrictStr
@@ -1033,7 +908,7 @@ class EvidenceCandidateAudit(BaseModel):
     url: StrictStr
 
 
-class EvidenceItemAudit(BaseModel):
+class _EvidenceItemAudit(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     field: StrictStr
@@ -1042,16 +917,16 @@ class EvidenceItemAudit(BaseModel):
     excerpt: StrictStr | None
     url: StrictStr | None
     normalized_tokens: list[StrictStr]
-    candidates: list[EvidenceCandidateAudit]
+    candidates: list[_EvidenceCandidateAudit]
 
 
-class EvidenceAttemptAudit(BaseModel):
+class _EvidenceAttemptAudit(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    items: list[EvidenceItemAudit]
+    items: list[_EvidenceItemAudit]
 
 
-class CodexTextResult(BaseModel):
+class _CodexTextResult(BaseModel):
     model_config = ConfigDict(extra="ignore", strict=True)
 
     type: Literal["text_result"]
@@ -1069,28 +944,28 @@ class CodexTextResult(BaseModel):
         return self
 
 
-class PushConfigurationError(RuntimeError):
+class _PushConfigurationError(RuntimeError):
     pass
 
 
-class PushValidationError(RuntimeError):
+class _PushValidationError(RuntimeError):
     pass
 
 
-class EvidenceAssessmentError(PushValidationError):
+class _EvidenceAssessmentError(_PushValidationError):
     def __init__(self, message: str, *, public_detail: str) -> None:
         self.public_detail = public_detail
         super().__init__(message)
 
 
-class MultipleEvidenceMatches(PushValidationError):
+class _MultipleEvidenceMatches(_PushValidationError):
     def __init__(self, excerpt: str) -> None:
         self.excerpt = excerpt
         super().__init__(Locale.MULTIPLE_EVIDENCE_MATCHES_TEMPLATE.format(excerpt=excerpt))
 
 
 @dataclass(frozen=True)
-class PushConfiguration:
+class _PushConfiguration:
     rollout_guest_path: str
     rollout_relative_path: PurePosixPath
     appendwatch_report: PurePosixPath
@@ -1103,7 +978,7 @@ class PushConfiguration:
 
 
 @dataclass(frozen=True)
-class ArchivedFile:
+class _ArchivedFile:
     path: Path
     size: int
     sha256: str
@@ -1111,30 +986,22 @@ class ArchivedFile:
 
 
 @dataclass(frozen=True)
-class RolloutRecord:
+class _RolloutRecord:
     line_number: int
     line_sha256: str
     value: dict[str, object]
 
 
 @dataclass(frozen=True)
-class SessionMetadata:
+class _SessionMetadata:
     session_id: str
     timestamp: str
     rollout_filename: str
-    compact: CompactSessionMetadata
-
-    @property
-    def compact_json(self) -> str:
-        return json.dumps(
-            self.compact.model_dump(),
-            ensure_ascii=False,
-            separators=COMPACT_JSON_SEPARATORS,
-        )
+    summary_json: str
 
 
 @dataclass(frozen=True)
-class CodexFcRow:
+class _CodexFcRow:
     timestamp: str
     fc_id: str
     call_id: str
@@ -1144,14 +1011,14 @@ class CodexFcRow:
 
 
 @dataclass(frozen=True)
-class CodexFcoRow:
+class _CodexFcoRow:
     timestamp: str
     fco_id: str
     call_id: str
 
 
 @dataclass(frozen=True)
-class CodexTurnRefRow:
+class _CodexTurnRefRow:
     ref_id: str
     call_id: str
     domain: str | None
@@ -1163,15 +1030,15 @@ class CodexTurnRefRow:
 
 
 @dataclass(frozen=True)
-class RolloutIndex:
-    session: SessionMetadata
-    fc_rows: tuple[CodexFcRow, ...]
-    fco_rows: tuple[CodexFcoRow, ...]
-    turn_ref_rows: tuple[CodexTurnRefRow, ...]
+class _RolloutIndex:
+    session: _SessionMetadata
+    fc_rows: tuple[_CodexFcRow, ...]
+    fco_rows: tuple[_CodexFcoRow, ...]
+    turn_ref_rows: tuple[_CodexTurnRefRow, ...]
 
 
 @dataclass(frozen=True)
-class EvidenceMatch:
+class _EvidenceMatch:
     field: str
     evidence_number: int
     excerpt: str
@@ -1185,7 +1052,7 @@ class EvidenceMatch:
 
 
 @dataclass(frozen=True)
-class EvidenceCandidate:
+class _EvidenceCandidate:
     ref_id: str
     call_id: str
     cite_text: str
@@ -1196,20 +1063,20 @@ class EvidenceCandidate:
 
 
 @dataclass(frozen=True)
-class EvidenceItemAssessment:
+class _EvidenceItemAssessment:
     field: str
     index: int
     evidence_number: int
     submission: EvidenceSubmission
     outcome: EvidenceOutcome
-    match: EvidenceMatch | None
+    match: _EvidenceMatch | None
     normalized_tokens: tuple[str, ...] = ()
-    candidates: tuple[EvidenceCandidate, ...] = ()
+    candidates: tuple[_EvidenceCandidate, ...] = ()
 
 
 @dataclass(frozen=True)
-class EvidenceAssessment:
-    items: tuple[EvidenceItemAssessment, ...]
+class _EvidenceAssessment:
+    items: tuple[_EvidenceItemAssessment, ...]
 
     @property
     def validated(self) -> ValidatedEvidence:
@@ -1234,7 +1101,7 @@ class EvidenceAssessment:
 
 
 @dataclass(frozen=True)
-class ResearcherContext:
+class _ResearcherContext:
     namekey: str
     draw_number: str
     first_name: str
@@ -1243,43 +1110,11 @@ class ResearcherContext:
     draw_numbers: tuple[str, ...] = ()
 
 
-@dataclass(frozen=True)
-class AttemptReplayInput:
-    attempt_dir: Path
-    attempt_id: str
-    attempt_timestamp: datetime
-    rollout_archive: ArchivedFile
-    report_archive: ArchivedFile | None
-    rollout_relative_path: PurePosixPath
-    request_body: bytes
-    run_id: UUID
-    namekey: str
-    session_id: str
-    validate_appendwatch: bool
-    materialize_files: bool
-
-
-@dataclass(frozen=True)
-class AttemptExecution:
-    stage: str
-    result: str
-    response_code: int
-    response_body: str
-    response_detail: str | None
-    response_lines: tuple[str, ...]
-    retry_submission_expected: bool
-    namekey: str | None
-    session_id: str | None
-    card_archive: ArchivedFile | None
-    error: Exception | None
-    commit_database: bool
-
-
-class CodexMatchProcedure:
+class _CodexMatchProcedure:
     dataset_id_field = KTP_NAMEKEY_COL
 
 
-ValidatedEvidence = dict[str, list[EvidenceMatch]]
+ValidatedEvidence = dict[str, list[_EvidenceMatch]]
 RUNTIME_CONFIGURATION: AiAugmentBackendContext | None = None
 
 
@@ -1301,11 +1136,11 @@ def _valid_nonblank(value: object) -> bool:
 
 def _configuration_file(path: Path | None, setting: str) -> Path:
     if path is None:
-        raise PushConfigurationError(Locale.SETTING_REQUIRED_TEMPLATE.format(setting=setting))
+        raise _PushConfigurationError(Locale.SETTING_REQUIRED_TEMPLATE.format(setting=setting))
     if not path.is_absolute():
-        raise PushConfigurationError(Locale.SETTING_ABSOLUTE_TEMPLATE.format(setting=setting))
+        raise _PushConfigurationError(Locale.SETTING_ABSOLUTE_TEMPLATE.format(setting=setting))
     if path.is_symlink() or not path.is_file() or not os.access(path, os.R_OK):
-        raise PushConfigurationError(Locale.SETTING_READABLE_FILE_TEMPLATE.format(setting=setting))
+        raise _PushConfigurationError(Locale.SETTING_READABLE_FILE_TEMPLATE.format(setting=setting))
     return path
 
 
@@ -1318,9 +1153,7 @@ def _configuration_guest_path(value: str, setting: str) -> PurePosixPath:
         or any(part in FORBIDDEN_NORMALIZED_PATH_PARTS for part in path.parts)
         or _has_control_character(value)
     ):
-        raise PushConfigurationError(
-            Locale.SETTING_GUEST_PATH_TEMPLATE.format(setting=setting)
-        )
+        raise _PushConfigurationError(Locale.SETTING_GUEST_PATH_TEMPLATE.format(setting=setting))
     return path
 
 
@@ -1343,7 +1176,7 @@ def _seed_evidence_random(sample_seed: int) -> None:
 def registered_release_map(config: PipelineConfig) -> RegisteredResource:
     meta = config.files_config.get(MAP_SUBSET_0_TO_BATCH_KEY)
     if meta is None:
-        raise PushConfigurationError(
+        raise _PushConfigurationError(
             Locale.FILES_CONFIG_RESOURCE_MISSING_TEMPLATE.format(
                 resource_key=MAP_SUBSET_0_TO_BATCH_KEY
             )
@@ -1357,7 +1190,7 @@ def registered_release_map(config: PipelineConfig) -> RegisteredResource:
             expected_hash=meta[RESOURCE_SHA256_KEY],
         )
     except (KeyError, OSError, ValueError) as exc:
-        raise PushConfigurationError(
+        raise _PushConfigurationError(
             Locale.CONFIGURED_RESOURCE_INVALID_TEMPLATE.format(
                 resource_key=MAP_SUBSET_0_TO_BATCH_KEY
             )
@@ -1380,7 +1213,7 @@ def _repair_incomplete_replay_log_tail(path: Path) -> None:
             )
         )
         if reply.strip().casefold() not in OPERATOR_CONFIRMATIONS:
-            raise PushConfigurationError(Locale.REPLAY_LOG_TAIL_REPAIR_DECLINED)
+            raise _PushConfigurationError(Locale.REPLAY_LOG_TAIL_REPAIR_DECLINED)
         with path.open("r+b") as stream:
             stream.seek(truncate_at)
             stream.truncate()
@@ -1388,13 +1221,13 @@ def _repair_incomplete_replay_log_tail(path: Path) -> None:
             os.fsync(stream.fileno())
         _fsync_directory(path.parent)
     except (EOFError, OSError) as exc:
-        raise PushConfigurationError(Locale.REPLAY_LOG_TAIL_REPAIR_FAILED) from exc
+        raise _PushConfigurationError(Locale.REPLAY_LOG_TAIL_REPAIR_FAILED) from exc
 
 
 def registered_replay_log(config: PipelineConfig) -> RegisteredResource:
     meta = config.files_config.get(REPLAY_LOG_RESOURCE_KEY)
     if meta is None:
-        raise PushConfigurationError(
+        raise _PushConfigurationError(
             Locale.FILES_CONFIG_RESOURCE_MISSING_TEMPLATE.format(
                 resource_key=REPLAY_LOG_RESOURCE_KEY
             )
@@ -1411,7 +1244,7 @@ def registered_replay_log(config: PipelineConfig) -> RegisteredResource:
             description=meta[RESOURCE_DESCRIPTION_KEY],
         )
     except (KeyError, OSError, ValueError) as exc:
-        raise PushConfigurationError(
+        raise _PushConfigurationError(
             Locale.CONFIGURED_RESOURCE_INVALID_TEMPLATE.format(resource_key=REPLAY_LOG_RESOURCE_KEY)
         ) from exc
 
@@ -1422,7 +1255,7 @@ def load_release_batches(resource: RegisteredResource) -> dict[str, str]:
         with path.open(encoding=TEXT_ENCODING, newline="") as stream:
             reader = csv.DictReader(stream)
             if tuple(reader.fieldnames or ()) != MAP_COLUMNS:
-                raise PushConfigurationError(
+                raise _PushConfigurationError(
                     Locale.MAP_COLUMNS_INVALID_TEMPLATE.format(
                         resource_key=MAP_SUBSET_0_TO_BATCH_KEY,
                         columns=MAP_COLUMNS,
@@ -1433,7 +1266,7 @@ def load_release_batches(resource: RegisteredResource) -> dict[str, str]:
                 draw_number = row.get(DRAW_LABEL)
                 release_batch = row.get(BATCH_LABEL)
                 if not _valid_nonblank(draw_number) or not _valid_nonblank(release_batch):
-                    raise PushConfigurationError(
+                    raise _PushConfigurationError(
                         Locale.MAP_ROW_BLANK_TEMPLATE.format(
                             resource_key=MAP_SUBSET_0_TO_BATCH_KEY,
                             row_number=row_number,
@@ -1442,7 +1275,7 @@ def load_release_batches(resource: RegisteredResource) -> dict[str, str]:
                 assert isinstance(draw_number, str)
                 assert isinstance(release_batch, str)
                 if draw_number in batches and batches[draw_number] != release_batch:
-                    raise PushConfigurationError(
+                    raise _PushConfigurationError(
                         Locale.MAP_DRAW_CONFLICT_TEMPLATE.format(
                             resource_key=MAP_SUBSET_0_TO_BATCH_KEY,
                             draw_number=draw_number,
@@ -1450,11 +1283,11 @@ def load_release_batches(resource: RegisteredResource) -> dict[str, str]:
                     )
                 batches[draw_number] = release_batch
     except (OSError, UnicodeError, csv.Error) as exc:
-        raise PushConfigurationError(
+        raise _PushConfigurationError(
             Locale.MAP_CSV_UNREADABLE_TEMPLATE.format(resource_key=MAP_SUBSET_0_TO_BATCH_KEY)
         ) from exc
     if not batches:
-        raise PushConfigurationError(
+        raise _PushConfigurationError(
             Locale.MAP_CSV_EMPTY_TEMPLATE.format(resource_key=MAP_SUBSET_0_TO_BATCH_KEY)
         )
     return batches
@@ -1467,7 +1300,7 @@ def _innerdict_json_rows(
     namekey: str,
 ) -> tuple[dict[str, object], ...]:
     if not isinstance(value, str):
-        raise PushConfigurationError(
+        raise _PushConfigurationError(
             Locale.INNERDICTS_NON_TEXT_TEMPLATE.format(
                 table_name=table_name,
                 namekey=namekey,
@@ -1478,7 +1311,7 @@ def _innerdict_json_rows(
         try:
             row: object = json.loads(line)
         except json.JSONDecodeError as exc:
-            raise PushConfigurationError(
+            raise _PushConfigurationError(
                 Locale.INNERDICTS_MALFORMED_TEMPLATE.format(
                     table_name=table_name,
                     namekey=namekey,
@@ -1486,7 +1319,7 @@ def _innerdict_json_rows(
                 )
             ) from exc
         if not isinstance(row, dict):
-            raise PushConfigurationError(
+            raise _PushConfigurationError(
                 Locale.INNERDICTS_NON_OBJECT_TEMPLATE.format(
                     table_name=table_name,
                     namekey=namekey,
@@ -1535,18 +1368,18 @@ def _namekeys_and_draws(
                 f"ORDER BY {duckdb_quote_identifier(KTP_NAMEKEY_COL)}"
             ).fetchall()
         except duckdb.Error as exc:
-            raise PushConfigurationError(
+            raise _PushConfigurationError(
                 Locale.SOURCE_DUCKDB_TABLE_MISSING_TEMPLATE.format(table_name=table_name)
             ) from exc
         for raw_namekey, jsonlines in table_rows:
             if not isinstance(raw_namekey, str):
-                raise PushConfigurationError(
+                raise _PushConfigurationError(
                     Locale.TABLE_NAMEKEY_NON_TEXT_TEMPLATE.format(table_name=table_name)
                 )
             try:
                 name_key = NameKey.from_json_key(raw_namekey)
             except (ValueError, TypeError, json.JSONDecodeError) as exc:
-                raise PushConfigurationError(
+                raise _PushConfigurationError(
                     Locale.TABLE_NAMEKEY_INVALID_TEMPLATE.format(table_name=table_name)
                 ) from exc
             namekey = name_key.to_json_key()
@@ -1599,7 +1432,7 @@ def derive_source_population(
             """
         ).fetchall()
     except duckdb.Error as exc:
-        raise PushConfigurationError(
+        raise _PushConfigurationError(
             Locale.ELIGIBILITY_FLAGS_MISSING_TEMPLATE.format(table_name=CARD_PARTITION_TABLE)
         ) from exc
     partition_flags: dict[str, tuple[int, bool, int]] = {}
@@ -1611,7 +1444,7 @@ def derive_source_population(
             or not isinstance(ssn_count, int)
             or namekey in partition_flags
         ):
-            raise PushConfigurationError(
+            raise _PushConfigurationError(
                 Locale.SOURCE_CLASSIFICATIONS_INVALID_TEMPLATE.format(
                     table_name=CARD_PARTITION_TABLE
                 )
@@ -1625,27 +1458,27 @@ def derive_source_population(
     missing_namekeys = no_ground_truth - researchers_by_namekey.keys()
     overlap = ground_truth & no_ground_truth
     if missing_namekeys:
-        raise PushConfigurationError(Locale.CARD_PARTITION_UNKNOWN_NAMEKEYS)
+        raise _PushConfigurationError(Locale.CARD_PARTITION_UNKNOWN_NAMEKEYS)
     if overlap:
-        raise PushConfigurationError(Locale.COHORTS_OVERLAP)
+        raise _PushConfigurationError(Locale.COHORTS_OVERLAP)
     if len(ground_truth) != EXPECTED_GROUND_TRUTH_RESEARCHERS:
-        raise PushConfigurationError(
+        raise _PushConfigurationError(
             Locale.GROUND_TRUTH_CARDINALITY_TEMPLATE.format(
                 expected=EXPECTED_GROUND_TRUTH_RESEARCHERS,
                 actual=len(ground_truth),
             )
         )
     if len(no_ground_truth) != EXPECTED_NO_GROUND_TRUTH_RESEARCHERS:
-        raise PushConfigurationError(
+        raise _PushConfigurationError(
             Locale.NO_GROUND_TRUTH_CARDINALITY_TEMPLATE.format(
                 expected=EXPECTED_NO_GROUND_TRUTH_RESEARCHERS,
                 actual=len(no_ground_truth),
             )
         )
     if len(ground_truth | no_ground_truth) != EXPECTED_ELIGIBLE_RESEARCHERS:
-        raise PushConfigurationError(Locale.ELIGIBLE_COHORT_CARDINALITY_INVALID)
+        raise _PushConfigurationError(Locale.ELIGIBLE_COHORT_CARDINALITY_INVALID)
     if set(partition_flags) != set(researchers_by_namekey):
-        raise PushConfigurationError(Locale.CARD_PARTITION_NAMEKEYS_MISMATCH)
+        raise _PushConfigurationError(Locale.CARD_PARTITION_NAMEKEYS_MISMATCH)
 
     population: list[SourcePopulationRow] = []
     for namekey, (name_key, draws) in researchers_by_namekey.items():
@@ -1668,7 +1501,7 @@ def derive_source_population(
             elif partition == KTP_PARTITION_DOCX_VALUE and ssn_count > NO_GROUND_TRUTH_SSN_COUNT:
                 ineligibility_category = IneligibilityCategory.STAGING_PARTITION_4_MULTIPLE_SSN
             else:
-                raise PushConfigurationError(Locale.INELIGIBILITY_CATEGORY_UNKNOWN)
+                raise _PushConfigurationError(Locale.INELIGIBILITY_CATEGORY_UNKNOWN)
         population.append(
             SourcePopulationRow(
                 namekey=namekey,
@@ -1698,20 +1531,20 @@ def derive_source_population(
         NO_GROUND_TRUTH_COHORT: EXPECTED_NO_GROUND_TRUTH_RESEARCHERS,
         INELIGIBLE_COHORT: EXPECTED_INELIGIBLE_RESEARCHERS,
     }:
-        raise PushConfigurationError(Locale.SOURCE_POPULATION_COHORTS_INVALID)
+        raise _PushConfigurationError(Locale.SOURCE_POPULATION_COHORTS_INVALID)
     if ineligibility_counts != EXPECTED_INELIGIBILITY_COUNTS:
-        raise PushConfigurationError(Locale.SOURCE_POPULATION_INELIGIBILITY_INVALID)
+        raise _PushConfigurationError(Locale.SOURCE_POPULATION_INELIGIBILITY_INVALID)
     if len(population) != EXPECTED_SOURCE_RESEARCHERS:
-        raise PushConfigurationError(Locale.SOURCE_POPULATION_CARDINALITY_INVALID)
+        raise _PushConfigurationError(Locale.SOURCE_POPULATION_CARDINALITY_INVALID)
     if {row.rnd for row in population} != set(
         range(RND_START, EXPECTED_SOURCE_RESEARCHERS + RND_START)
     ):
-        raise PushConfigurationError(Locale.SOURCE_POPULATION_RND_INVALID)
+        raise _PushConfigurationError(Locale.SOURCE_POPULATION_RND_INVALID)
     if (
         sum(len(row.draw_numbers) > 1 for row in population)
         != EXPECTED_MULTIDRAW_SOURCE_RESEARCHERS
     ):
-        raise PushConfigurationError(Locale.SOURCE_POPULATION_MULTIDRAW_INVALID)
+        raise _PushConfigurationError(Locale.SOURCE_POPULATION_MULTIDRAW_INVALID)
     return tuple(population)
 
 
@@ -1734,8 +1567,8 @@ def _validate_configured_namekey_population(
             return
         category = configured_row.ineligibility_category
         if category is None:
-            raise PushConfigurationError(Locale.INELIGIBILITY_CATEGORY_UNKNOWN)
-        raise PushConfigurationError(
+            raise _PushConfigurationError(Locale.INELIGIBILITY_CATEGORY_UNKNOWN)
+        raise _PushConfigurationError(
             Locale.CONFIGURED_NAMEKEY_INELIGIBLE_TEMPLATE.format(category=category.value)
         )
 
@@ -1747,24 +1580,24 @@ def _validate_configured_namekey_population(
         if (row.first_name.strip(), row.last_name.strip()) == stripped_identity
     })
     if suggestions:
-        raise PushConfigurationError(
+        raise _PushConfigurationError(
             Locale.CONFIGURED_NAMEKEY_NOT_FOUND_SUGGESTIONS_TEMPLATE.format(
                 suggestions=" or ".join(suggestions)
             )
         )
-    raise PushConfigurationError(Locale.CONFIGURED_NAMEKEY_NOT_FOUND)
+    raise _PushConfigurationError(Locale.CONFIGURED_NAMEKEY_NOT_FOUND)
 
 
 def _configured_namekey() -> str:
     raw_namekey = os.environ.get(NAMEKEY_ENV_NAME, "")
     if not _valid_nonblank(raw_namekey):
-        raise PushConfigurationError(
+        raise _PushConfigurationError(
             Locale.NAMEKEY_NOT_SET_TEMPLATE.format(environment_name=NAMEKEY_ENV_NAME)
         )
     try:
         return NameKey.from_json_key(raw_namekey).to_json_key()
     except (ValueError, TypeError, json.JSONDecodeError) as exc:
-        raise PushConfigurationError(Locale.CONFIGURED_NAMEKEY_MALFORMED) from exc
+        raise _PushConfigurationError(Locale.CONFIGURED_NAMEKEY_MALFORMED) from exc
 
 
 def configure_runtime(
@@ -1777,24 +1610,24 @@ def configure_runtime(
     try:
         pipeline = AiAugmentDetourConfig.from_json(config_path)
     except (OSError, ValueError) as exc:
-        raise PushConfigurationError(
+        raise _PushConfigurationError(
             Locale.CONFIG_INVALID_TEMPLATE.format(config_path=config_path)
         ) from exc
     if pipeline.output_format not in SUPPORTED_OUTPUT_FORMATS:
-        raise PushConfigurationError(Locale.OUTPUT_FORMAT_INVALID)
+        raise _PushConfigurationError(Locale.OUTPUT_FORMAT_INVALID)
     if not pipeline.db_file.is_file() or not os.access(pipeline.db_file, os.R_OK):
-        raise PushConfigurationError(
+        raise _PushConfigurationError(
             Locale.SOURCE_DUCKDB_UNREADABLE_TEMPLATE.format(db_file=pipeline.db_file)
         )
     if pipeline.output_format == DOCX_OUTPUT_FORMAT and (
         not pipeline.pandoc_reference_docx.is_file()
         or not os.access(pipeline.pandoc_reference_docx, os.R_OK)
     ):
-        raise PushConfigurationError(Locale.DOCX_REFERENCE_UNREADABLE)
+        raise _PushConfigurationError(Locale.DOCX_REFERENCE_UNREADABLE)
     try:
         ZoneInfo(pipeline.timezone)
     except (KeyError, ValueError) as exc:
-        raise PushConfigurationError(
+        raise _PushConfigurationError(
             Locale.TIMEZONE_INVALID_TEMPLATE.format(timezone=pipeline.timezone)
         ) from exc
 
@@ -1821,17 +1654,17 @@ def configure_runtime(
                     cohorts,
                     namekey=configured_namekey,
                 )
-            except PushValidationError as exc:
-                raise PushConfigurationError(str(exc)) from exc
+            except _PushValidationError as exc:
+                raise _PushConfigurationError(str(exc)) from exc
     except duckdb.Error as exc:
-        raise PushConfigurationError(Locale.SOURCE_DUCKDB_VALIDATION_FAILED) from exc
+        raise _PushConfigurationError(Locale.SOURCE_DUCKDB_VALIDATION_FAILED) from exc
     finally:
         if source_conn is not None:
             source_conn.close()
 
     detour_db_path = _detour_db_path(pipeline.db_file)
     if detour_db_path == pipeline.db_file:
-        raise PushConfigurationError(Locale.DETOUR_DB_EQUALS_SOURCE)
+        raise _PushConfigurationError(Locale.DETOUR_DB_EQUALS_SOURCE)
     RUNTIME_CONFIGURATION = AiAugmentBackendContext(
         pipeline=pipeline,
         detour_db_path=detour_db_path,
@@ -1848,20 +1681,20 @@ def configure_runtime(
 
 def runtime_configuration() -> AiAugmentBackendContext:
     if RUNTIME_CONFIGURATION is None:
-        raise PushConfigurationError(
+        raise _PushConfigurationError(
             Locale.API_CONFIG_REQUIRED_TEMPLATE.format(config_filename=CONFIG_FILENAME)
         )
     return RUNTIME_CONFIGURATION
 
 
-def push_configuration(rollout_jsonl: str | None = None) -> PushConfiguration:
+def push_configuration(rollout_jsonl: str | None = None) -> _PushConfiguration:
     raw_rollout = ROLLOUT_JSONL if rollout_jsonl is None else rollout_jsonl
     if not raw_rollout.strip():
-        raise PushConfigurationError(
+        raise _PushConfigurationError(
             Locale.ROLLOUT_NOT_SET_TEMPLATE.format(environment_name=ROLLOUT_ENV_NAME)
         )
     if raw_rollout != raw_rollout.strip() or _has_control_character(raw_rollout):
-        raise PushConfigurationError(
+        raise _PushConfigurationError(
             Locale.ROLLOUT_WHITESPACE_TEMPLATE.format(environment_name=ROLLOUT_ENV_NAME)
         )
 
@@ -1869,13 +1702,13 @@ def push_configuration(rollout_jsonl: str | None = None) -> PushConfiguration:
     if str(rollout_path) != raw_rollout or any(
         part in FORBIDDEN_NORMALIZED_PATH_PARTS for part in rollout_path.parts
     ):
-        raise PushConfigurationError(
+        raise _PushConfigurationError(
             Locale.ROLLOUT_NOT_NORMALIZED_TEMPLATE.format(environment_name=ROLLOUT_ENV_NAME)
         )
     try:
         relative_path = rollout_path.relative_to(CODEX_SESSIONS_ROOT)
     except ValueError as exc:
-        raise PushConfigurationError(
+        raise _PushConfigurationError(
             Locale.ROLLOUT_OUTSIDE_ROOT_TEMPLATE.format(
                 environment_name=ROLLOUT_ENV_NAME,
                 sessions_root=CODEX_SESSIONS_ROOT,
@@ -1886,18 +1719,18 @@ def push_configuration(rollout_jsonl: str | None = None) -> PushConfiguration:
         or not relative_path.name.startswith(ROLLOUT_FILENAME_PREFIX)
         or relative_path.suffix != ROLLOUT_FILENAME_SUFFIX
     ):
-        raise PushConfigurationError(
+        raise _PushConfigurationError(
             Locale.ROLLOUT_FILENAME_INVALID_TEMPLATE.format(environment_name=ROLLOUT_ENV_NAME)
         )
 
     if not _valid_nonblank(AIVM_INSTANCE):
-        raise PushConfigurationError(Locale.AIVM_INSTANCE_INVALID)
+        raise _PushConfigurationError(Locale.AIVM_INSTANCE_INVALID)
     if not _valid_nonblank(AIVM_AUDIT_USER):
-        raise PushConfigurationError(Locale.AIVM_AUDIT_USER_INVALID)
+        raise _PushConfigurationError(Locale.AIVM_AUDIT_USER_INVALID)
     if not AIVM_SSH_PORT.isdecimal() or not MIN_TCP_PORT <= int(AIVM_SSH_PORT) <= MAX_TCP_PORT:
-        raise PushConfigurationError(Locale.AIVM_SSH_PORT_INVALID)
+        raise _PushConfigurationError(Locale.AIVM_SSH_PORT_INVALID)
 
-    return PushConfiguration(
+    return _PushConfiguration(
         rollout_guest_path=raw_rollout,
         rollout_relative_path=relative_path,
         appendwatch_report=_configuration_guest_path(
@@ -1929,12 +1762,12 @@ def set_backend_session_id(value: str) -> None:
     try:
         session_id = UUID(normalized)
     except ValueError as exc:
-        raise PushConfigurationError(Locale.SESSION_ID_STDIN_INVALID) from exc
+        raise _PushConfigurationError(Locale.SESSION_ID_STDIN_INVALID) from exc
     if str(session_id) != normalized:
-        raise PushConfigurationError(Locale.SESSION_ID_STDIN_INVALID)
+        raise _PushConfigurationError(Locale.SESSION_ID_STDIN_INVALID)
     with BACKEND_WORKFLOW_STATE_LOCK:
         if BACKEND_SESSION_ID is not None and BACKEND_SESSION_ID != normalized:
-            raise PushConfigurationError(Locale.SESSION_ID_STDIN_CONFLICT)
+            raise _PushConfigurationError(Locale.SESSION_ID_STDIN_CONFLICT)
         BACKEND_SESSION_ID = normalized
 
 
@@ -1942,7 +1775,7 @@ def read_backend_session_id(stream: Any = None) -> None:
     input_stream = sys.stdin if stream is None else stream
     value = input_stream.readline()
     if not value:
-        raise PushConfigurationError(Locale.SESSION_ID_STDIN_MISSING)
+        raise _PushConfigurationError(Locale.SESSION_ID_STDIN_MISSING)
     set_backend_session_id(value)
     logger.info(Locale.SESSION_ID_STDIN_ACCEPTED_LOG, value.strip())
 
@@ -1964,7 +1797,7 @@ def start_backend_session_reader() -> threading.Thread:
     return reader
 
 
-def push_configuration_for_session(session_id: str) -> PushConfiguration:
+def push_configuration_for_session(session_id: str) -> _PushConfiguration:
     placeholder = (
         CODEX_SESSIONS_ROOT / f"{ROLLOUT_FILENAME_PREFIX}{session_id}{ROLLOUT_FILENAME_SUFFIX}"
     )
@@ -1991,10 +1824,10 @@ def push_configuration_for_session(session_id: str) -> PushConfiguration:
             timeout=SSH_TIMEOUT_SECONDS,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        raise PushConfigurationError(Locale.ROLLOUT_DISCOVERY_FAILED) from exc
+        raise _PushConfigurationError(Locale.ROLLOUT_DISCOVERY_FAILED) from exc
     matches = tuple(line for line in completed.stdout.splitlines() if line)
     if len(matches) != 1:
-        raise PushConfigurationError(Locale.ROLLOUT_DISCOVERY_NOT_UNIQUE)
+        raise _PushConfigurationError(Locale.ROLLOUT_DISCOVERY_NOT_UNIQUE)
     return push_configuration(matches[0])
 
 
@@ -2005,8 +1838,8 @@ def prove_workflow_inputs_readable() -> None:
     configuration = push_configuration(str(probe_rollout))
     try:
         _read_appendwatch_bytes(configuration)
-    except PushConfigurationError as exc:
-        raise PushConfigurationError(Locale.APPENDWATCH_REPORT_UNREADABLE) from exc
+    except _PushConfigurationError as exc:
+        raise _PushConfigurationError(Locale.APPENDWATCH_REPORT_UNREADABLE) from exc
     logger.info(Locale.APPENDWATCH_READABLE_LOG, configuration.appendwatch_report)
     options = _aivm_connection_options(
         lima_ssh_config=configuration.lima_ssh_config,
@@ -2030,14 +1863,8 @@ def prove_workflow_inputs_readable() -> None:
             timeout=SSH_TIMEOUT_SECONDS,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        raise PushConfigurationError(Locale.CODEX_SESSIONS_UNREADABLE) from exc
+        raise _PushConfigurationError(Locale.CODEX_SESSIONS_UNREADABLE) from exc
     logger.info(Locale.CODEX_SESSIONS_READABLE_LOG, CODEX_SESSIONS_ROOT)
-
-
-def new_attempt_id(attempt_timestamp: datetime | None = None) -> str:
-    current_timestamp = attempt_timestamp or datetime.now(timezone.utc)
-    timestamp_text = current_timestamp.strftime(ATTEMPT_ID_TIMESTAMP_FORMAT)
-    return f"{timestamp_text}{ATTEMPT_ID_SEPARATOR}{uuid4().hex}"
 
 
 def _fsync_file(path: Path) -> None:
@@ -2053,7 +1880,7 @@ def _fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
-def _archived_file(path: Path) -> ArchivedFile:
+def _archived_file(path: Path) -> _ArchivedFile:
     digest = hashlib.sha256()
     size = 0
     line_count = 0
@@ -2066,7 +1893,7 @@ def _archived_file(path: Path) -> ArchivedFile:
             final_byte = chunk[-1:]
     if size and final_byte != b"\n":
         line_count += 1
-    return ArchivedFile(
+    return _ArchivedFile(
         path=path,
         size=size,
         sha256=digest.hexdigest(),
@@ -2074,7 +1901,7 @@ def _archived_file(path: Path) -> ArchivedFile:
     )
 
 
-def _publish_archive(temporary: Path, destination: Path) -> ArchivedFile:
+def _publish_archive(temporary: Path, destination: Path) -> _ArchivedFile:
     _fsync_file(temporary)
     os.replace(temporary, destination)
     _fsync_directory(destination.parent)
@@ -2124,12 +1951,12 @@ def _aivm_connection_options(
 
 
 def copy_rollout_to_cas(
-    configuration: PushConfiguration,
+    configuration: _PushConfiguration,
     runtime: AiAugmentBackendContext,
-) -> ArchivedFile:
+) -> _ArchivedFile:
     runtime.rollout_cas_dir.mkdir(parents=True, exist_ok=True)
     temporary = runtime.rollout_cas_dir / ROLLOUT_CAS_TEMP_FILENAME_TEMPLATE.format(
-        nonce=uuid4().hex
+        nonce=uuid7().hex
     )
     options = _aivm_connection_options(
         lima_ssh_config=configuration.lima_ssh_config,
@@ -2158,7 +1985,7 @@ def copy_rollout_to_cas(
                 timeout=AUDIT_COPY_TIMEOUT_SECONDS,
             )
         if not temporary.is_file() or temporary.is_symlink():
-            raise PushConfigurationError(Locale.AUDIT_ROLLOUT_ARCHIVE_INVALID)
+            raise _PushConfigurationError(Locale.AUDIT_ROLLOUT_ARCHIVE_INVALID)
         archived = _archived_file(temporary)
         destination = runtime.rollout_cas_dir / ROLLOUT_CAS_FILENAME_TEMPLATE.format(
             sha256=archived.sha256
@@ -2166,11 +1993,11 @@ def copy_rollout_to_cas(
         if destination.exists():
             existing = _archived_file(destination)
             if existing.sha256 != archived.sha256 or existing.size != archived.size:
-                raise PushConfigurationError(Locale.ROLLOUT_CAS_CONFLICT)
+                raise _PushConfigurationError(Locale.ROLLOUT_CAS_CONFLICT)
             return existing
         return _publish_archive(temporary, destination)
     except (OSError, subprocess.SubprocessError) as exc:
-        raise PushConfigurationError(Locale.ROLLOUT_COPY_FAILED) from exc
+        raise _PushConfigurationError(Locale.ROLLOUT_COPY_FAILED) from exc
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -2180,17 +2007,28 @@ def parse_appendwatch_report(
     rollout_relative_path: PurePosixPath,
 ) -> None:
     try:
-        report = report_path.read_text(encoding=TEXT_ENCODING)
-    except (OSError, UnicodeError) as exc:
-        raise PushValidationError(Locale.APPENDWATCH_REPORT_UNREADABLE) from exc
+        report = report_path.read_bytes()
+    except OSError as exc:
+        raise _PushValidationError(Locale.APPENDWATCH_REPORT_UNREADABLE) from exc
+    parse_appendwatch_report_bytes(report, rollout_relative_path)
+
+
+def parse_appendwatch_report_bytes(
+    report_bytes: bytes,
+    rollout_relative_path: PurePosixPath,
+) -> None:
+    try:
+        report = report_bytes.decode(TEXT_ENCODING)
+    except UnicodeError as exc:
+        raise _PushValidationError(Locale.APPENDWATCH_REPORT_UNREADABLE) from exc
     if not report.endswith("\n"):
-        raise PushValidationError(Locale.APPENDWATCH_REPORT_INCOMPLETE)
+        raise _PushValidationError(Locale.APPENDWATCH_REPORT_INCOMPLETE)
 
     lines = report.splitlines()
     if not lines or lines[0] != APPENDWATCH_ROOT_ENTRY:
         if lines and lines[0].startswith(APPENDWATCH_COMPROMISED_ROOT_PREFIX):
-            raise PushValidationError(Locale.APPENDWATCH_GLOBAL_DEGRADATION)
-        raise PushValidationError(Locale.APPENDWATCH_ROOT_MALFORMED)
+            raise _PushValidationError(Locale.APPENDWATCH_GLOBAL_DEGRADATION)
+        raise _PushValidationError(Locale.APPENDWATCH_ROOT_MALFORMED)
 
     target = rollout_relative_path.parts
     match_target_by_filename = len(target) == 1
@@ -2202,11 +2040,11 @@ def parse_appendwatch_report(
     while line_index < len(lines) and lines[line_index] != APPENDWATCH_BLANK_LINE:
         match = TREE_LINE.fullmatch(lines[line_index])
         if match is None:
-            raise PushValidationError(Locale.APPENDWATCH_TREE_LINE_MALFORMED)
+            raise _PushValidationError(Locale.APPENDWATCH_TREE_LINE_MALFORMED)
         indent = match.group(TREE_INDENT_GROUP)
         depth = len(indent) // TREE_INDENT_WIDTH
         if depth > len(directories):
-            raise PushValidationError(Locale.APPENDWATCH_NESTING_INVALID)
+            raise _PushValidationError(Locale.APPENDWATCH_NESTING_INVALID)
         directories = directories[:depth]
         parent_parts = tuple(name for name, _compromised in directories)
         parent_compromised = any(compromised for _name, compromised in directories)
@@ -2217,7 +2055,7 @@ def parse_appendwatch_report(
             name = compromised_directory.group(APPENDWATCH_NAME_GROUP)
             path = (*parent_parts, name)
             if path in seen_paths:
-                raise PushValidationError(Locale.APPENDWATCH_PATH_DUPLICATE)
+                raise _PushValidationError(Locale.APPENDWATCH_PATH_DUPLICATE)
             seen_paths.add(path)
             directories.append((name, True))
             line_index += 1
@@ -2229,10 +2067,10 @@ def parse_appendwatch_report(
         )):
             name = body.removesuffix(APPENDWATCH_DIRECTORY_SUFFIX)
             if not name or APPENDWATCH_DIRECTORY_SUFFIX in name:
-                raise PushValidationError(Locale.APPENDWATCH_DIRECTORY_MALFORMED)
+                raise _PushValidationError(Locale.APPENDWATCH_DIRECTORY_MALFORMED)
             path = (*parent_parts, name)
             if path in seen_paths:
-                raise PushValidationError(Locale.APPENDWATCH_PATH_DUPLICATE)
+                raise _PushValidationError(Locale.APPENDWATCH_PATH_DUPLICATE)
             seen_paths.add(path)
             directories.append((name, parent_compromised))
             line_index += 1
@@ -2241,13 +2079,13 @@ def parse_appendwatch_report(
         ok_file = APPENDWATCH_OK_FILE_PATTERN.fullmatch(body)
         compromised_file = APPENDWATCH_COMPROMISED_FILE_PATTERN.fullmatch(body)
         if ok_file is None and compromised_file is None:
-            raise PushValidationError(Locale.APPENDWATCH_FILE_ENTRY_MALFORMED)
+            raise _PushValidationError(Locale.APPENDWATCH_FILE_ENTRY_MALFORMED)
         name = (ok_file or compromised_file).group(  # type: ignore[union-attr]
             APPENDWATCH_NAME_GROUP
         )
         path = (*parent_parts, name)
         if path in seen_paths:
-            raise PushValidationError(Locale.APPENDWATCH_PATH_DUPLICATE)
+            raise _PushValidationError(Locale.APPENDWATCH_PATH_DUPLICATE)
         seen_paths.add(path)
         if path == target or (match_target_by_filename and path[-1:] == target):
             target_entries.append((
@@ -2258,39 +2096,39 @@ def parse_appendwatch_report(
 
     if line_index < len(lines):
         if lines[line_index:] == [APPENDWATCH_BLANK_LINE]:
-            raise PushValidationError(Locale.APPENDWATCH_STRAY_BLANK_LINE)
+            raise _PushValidationError(Locale.APPENDWATCH_STRAY_BLANK_LINE)
         if lines[line_index : line_index + APPENDWATCH_REMOVED_SECTION_HEADER_LINES] != [
             APPENDWATCH_BLANK_LINE,
             APPENDWATCH_REMOVED_SECTION_HEADER,
         ]:
-            raise PushValidationError(Locale.APPENDWATCH_REMOVED_SECTION_MALFORMED)
+            raise _PushValidationError(Locale.APPENDWATCH_REMOVED_SECTION_MALFORMED)
         for removed_line in lines[line_index + APPENDWATCH_REMOVED_SECTION_HEADER_LINES :]:
             removed = APPENDWATCH_REMOVED_ENTRY_PATTERN.fullmatch(removed_line)
             if removed is None:
-                raise PushValidationError(Locale.APPENDWATCH_REMOVED_ENTRY_MALFORMED)
+                raise _PushValidationError(Locale.APPENDWATCH_REMOVED_ENTRY_MALFORMED)
             removed_parts = PurePosixPath(removed.group(APPENDWATCH_PATH_GROUP)).parts
             if removed_parts == target or (
                 match_target_by_filename and removed_parts[-1:] == target
             ):
-                raise PushValidationError(Locale.ROLLOUT_REMOVED_OR_REPLACED)
+                raise _PushValidationError(Locale.ROLLOUT_REMOVED_OR_REPLACED)
 
     if len(target_entries) != APPENDWATCH_EXPECTED_TARGET_ENTRIES:
         reason = (
             Locale.ROLLOUT_STATUS_MISSING if not target_entries else Locale.ROLLOUT_STATUS_AMBIGUOUS
         )
-        raise PushValidationError(Locale.ROLLOUT_STATUS_INVALID_TEMPLATE.format(reason=reason))
+        raise _PushValidationError(Locale.ROLLOUT_STATUS_INVALID_TEMPLATE.format(reason=reason))
     status, compromised_ancestor = target_entries[0]
     if status != APPENDWATCH_OK_STATUS or compromised_ancestor:
-        raise PushValidationError(Locale.ROLLOUT_NOT_OK)
+        raise _PushValidationError(Locale.ROLLOUT_NOT_OK)
 
 
-def parse_rollout(rollout_path: Path) -> tuple[RolloutRecord, ...]:
+def parse_rollout(rollout_path: Path) -> tuple[_RolloutRecord, ...]:
     try:
         raw_lines = rollout_path.read_bytes().splitlines(keepends=True)
     except OSError as exc:
-        raise PushValidationError(Locale.ROLLOUT_UNREADABLE) from exc
+        raise _PushValidationError(Locale.ROLLOUT_UNREADABLE) from exc
 
-    records: list[RolloutRecord] = []
+    records: list[_RolloutRecord] = []
     for line_number, raw_line in enumerate(raw_lines, start=1):
         completed = raw_line.endswith(b"\n")
         encoded = raw_line[:-1] if completed else raw_line
@@ -2301,15 +2139,15 @@ def parse_rollout(rollout_path: Path) -> tuple[RolloutRecord, ...]:
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             if line_number == len(raw_lines) and not completed:
                 break
-            raise PushValidationError(
+            raise _PushValidationError(
                 Locale.ROLLOUT_JSONL_MALFORMED_TEMPLATE.format(line_number=line_number)
             ) from exc
         if not isinstance(value, dict):
-            raise PushValidationError(
+            raise _PushValidationError(
                 Locale.ROLLOUT_LINE_NON_OBJECT_TEMPLATE.format(line_number=line_number)
             )
         records.append(
-            RolloutRecord(
+            _RolloutRecord(
                 line_number=line_number,
                 line_sha256=hashlib.sha256(raw_line).hexdigest(),
                 value=cast(dict[str, object], value),
@@ -2320,62 +2158,62 @@ def parse_rollout(rollout_path: Path) -> tuple[RolloutRecord, ...]:
 
 def _timestamp(value: object, *, label: str) -> str:
     if not _valid_nonblank(value):
-        raise PushValidationError(Locale.TIMESTAMP_INVALID_TEMPLATE.format(label=label))
+        raise _PushValidationError(Locale.TIMESTAMP_INVALID_TEMPLATE.format(label=label))
     raw = cast(str, value)
     try:
         parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError as exc:
-        raise PushValidationError(Locale.TIMESTAMP_INVALID_TEMPLATE.format(label=label)) from exc
+        raise _PushValidationError(Locale.TIMESTAMP_INVALID_TEMPLATE.format(label=label)) from exc
     if parsed.tzinfo is None:
-        raise PushValidationError(Locale.TIMESTAMP_TIMEZONE_MISSING_TEMPLATE.format(label=label))
+        raise _PushValidationError(Locale.TIMESTAMP_TIMEZONE_MISSING_TEMPLATE.format(label=label))
     return raw
 
 
 def _web_arguments(payload: Mapping[str, object], line_number: int) -> dict[str, object]:
     call_id = payload.get(CODEX_CALL_ID_KEY)
     if not _valid_nonblank(call_id):
-        raise PushValidationError(
+        raise _PushValidationError(
             Locale.WEB_CALL_ID_INVALID_TEMPLATE.format(line_number=line_number)
         )
     arguments = payload.get(CODEX_ARGUMENTS_KEY)
     if not isinstance(arguments, str):
-        raise PushValidationError(
+        raise _PushValidationError(
             Locale.WEB_CALL_ARGUMENTS_UNSUPPORTED_TEMPLATE.format(call_id=call_id)
         )
     try:
         decoded: object = json.loads(arguments)
     except json.JSONDecodeError as exc:
-        raise PushValidationError(
+        raise _PushValidationError(
             Locale.WEB_CALL_ARGUMENTS_MALFORMED_TEMPLATE.format(call_id=call_id)
         ) from exc
     if not isinstance(decoded, dict):
-        raise PushValidationError(
+        raise _PushValidationError(
             Locale.WEB_CALL_ARGUMENTS_NON_OBJECT_TEMPLATE.format(call_id=call_id)
         )
     eligible_actions = [action for action in ELIGIBLE_WEB_ACTIONS if decoded.get(action)]
     if len(eligible_actions) != 1:
-        raise PushValidationError(Locale.WEB_CALL_ACTION_COUNT_TEMPLATE.format(call_id=call_id))
+        raise _PushValidationError(Locale.WEB_CALL_ACTION_COUNT_TEMPLATE.format(call_id=call_id))
     return cast(dict[str, object], decoded)
 
 
 def _session_metadata(
-    records: tuple[RolloutRecord, ...],
+    records: tuple[_RolloutRecord, ...],
     *,
     timezone_name: str,
     configured_rollout_basename: str | None,
-) -> SessionMetadata:
+) -> _SessionMetadata:
     session_records = [
         record for record in records if record.value.get(CODEX_TYPE_KEY) == CODEX_SESSION_META_TYPE
     ]
     if len(session_records) != 1:
-        raise PushValidationError(Locale.SESSION_META_COUNT_INVALID)
+        raise _PushValidationError(Locale.SESSION_META_COUNT_INVALID)
     session_record = session_records[0]
     payload = session_record.value.get(CODEX_PAYLOAD_KEY)
     if not isinstance(payload, dict):
-        raise PushValidationError(Locale.SESSION_META_PAYLOAD_MALFORMED)
+        raise _PushValidationError(Locale.SESSION_META_PAYLOAD_MALFORMED)
     session_id = payload.get(CODEX_SESSION_ID_KEY)
     if not _valid_nonblank(session_id):
-        raise PushValidationError(Locale.SESSION_META_SESSION_ID_INVALID)
+        raise _PushValidationError(Locale.SESSION_META_SESSION_ID_INVALID)
     session_id = cast(str, session_id)
     payload_timestamp = _timestamp(
         payload.get(CODEX_TIMESTAMP_KEY),
@@ -2393,7 +2231,7 @@ def _session_metadata(
         f"{ROLLOUT_FILENAME_PREFIX}{rollout_timestamp}-{session_id}{ROLLOUT_FILENAME_SUFFIX}"
     )
     if configured_rollout_basename is not None and rollout_filename != configured_rollout_basename:
-        raise PushValidationError(Locale.SESSION_META_ROLLOUT_MISMATCH)
+        raise _PushValidationError(Locale.SESSION_META_ROLLOUT_MISMATCH)
 
     turn_context_payload = next(
         (
@@ -2405,11 +2243,11 @@ def _session_metadata(
         None,
     )
     if turn_context_payload is None:
-        raise PushValidationError(Locale.TURN_CONTEXT_MISSING)
+        raise _PushValidationError(Locale.TURN_CONTEXT_MISSING)
     model = turn_context_payload.get(CODEX_MODEL_KEY)
     reasoning_effort = turn_context_payload.get(CODEX_REASONING_EFFORT_KEY)
     try:
-        compact = CompactSessionMetadata.model_validate({
+        summary_json = CodexRolloutRecord.build_summary_json({
             CODEX_ORIGINATOR_KEY: payload.get(CODEX_ORIGINATOR_KEY),
             CODEX_SOURCE_FIELD: payload.get(CODEX_SOURCE_FIELD),
             CODEX_CLI_VERSION_KEY: payload.get(CODEX_CLI_VERSION_KEY),
@@ -2420,16 +2258,16 @@ def _session_metadata(
             CODEX_TIMESTAMP_KEY: response_timestamp,
         })
     except ValidationError as exc:
-        raise PushValidationError(Locale.SESSION_META_FIELDS_INCOMPLETE) from exc
-    return SessionMetadata(
+        raise _PushValidationError(Locale.SESSION_META_FIELDS_INCOMPLETE) from exc
+    return _SessionMetadata(
         session_id=session_id,
         timestamp=response_timestamp,
         rollout_filename=rollout_filename,
-        compact=compact,
+        summary_json=summary_json,
     )
 
 
-def _eligible_fco_text(record: RolloutRecord, payload: Mapping[str, object]) -> str | None:
+def _eligible_fco_text(record: _RolloutRecord, payload: Mapping[str, object]) -> str | None:
     output = payload.get(CODEX_OUTPUT_KEY)
     marker_start = f"{CODEX_CITE_MARKER_PREFIX}turn"
     if isinstance(output, list):
@@ -2450,26 +2288,26 @@ def _eligible_fco_text(record: RolloutRecord, payload: Mapping[str, object]) -> 
         or output[0].get(CODEX_TYPE_KEY) != CODEX_INPUT_TEXT_TYPE
         or not isinstance(output[0].get(CODEX_TEXT_KEY), str)
     ):
-        raise PushValidationError(
+        raise _PushValidationError(
             Locale.CITED_OUTPUT_BLOCK_INVALID_TEMPLATE.format(line_number=record.line_number)
         )
     return cast(str, output[0][CODEX_TEXT_KEY])
 
 
 def build_rollout_index(
-    records: tuple[RolloutRecord, ...],
+    records: tuple[_RolloutRecord, ...],
     *,
     timezone_name: str,
     configured_rollout_basename: str | None,
-) -> RolloutIndex:
+) -> _RolloutIndex:
     session = _session_metadata(
         records,
         timezone_name=timezone_name,
         configured_rollout_basename=configured_rollout_basename,
     )
-    calls: dict[str, list[RolloutRecord]] = {}
-    events: dict[str, list[RolloutRecord]] = {}
-    cited_outputs: list[tuple[RolloutRecord, dict[str, object], str]] = []
+    calls: dict[str, list[_RolloutRecord]] = {}
+    events: dict[str, list[_RolloutRecord]] = {}
+    cited_outputs: list[tuple[_RolloutRecord, dict[str, object], str]] = []
 
     for record in records:
         value = record.value
@@ -2485,7 +2323,7 @@ def build_rollout_index(
         ):
             call_id = payload.get(CODEX_CALL_ID_KEY)
             if not _valid_nonblank(call_id):
-                raise PushValidationError(
+                raise _PushValidationError(
                     Locale.WEB_CALL_ID_INVALID_TEMPLATE.format(line_number=record.line_number)
                 )
             calls.setdefault(cast(str, call_id), []).append(record)
@@ -2495,7 +2333,7 @@ def build_rollout_index(
         ):
             call_id = payload.get(CODEX_CALL_ID_KEY)
             if not _valid_nonblank(call_id):
-                raise PushValidationError(
+                raise _PushValidationError(
                     Locale.WEB_EVENT_CALL_ID_INVALID_TEMPLATE.format(line_number=record.line_number)
                 )
             events.setdefault(cast(str, call_id), []).append(record)
@@ -2507,9 +2345,9 @@ def build_rollout_index(
             if text is not None:
                 cited_outputs.append((record, payload, text))
 
-    fc_rows: list[CodexFcRow] = []
-    fco_rows: list[CodexFcoRow] = []
-    turn_ref_rows: list[CodexTurnRefRow] = []
+    fc_rows: list[_CodexFcRow] = []
+    fco_rows: list[_CodexFcoRow] = []
+    turn_ref_rows: list[_CodexTurnRefRow] = []
     seen_fc_ids: set[str] = set()
     seen_fco_ids: set[str] = set()
     seen_call_ids: set[str] = set()
@@ -2517,7 +2355,7 @@ def build_rollout_index(
         call_id = output_payload.get(CODEX_CALL_ID_KEY)
         fco_id = output_payload.get(CODEX_ID_KEY)
         if not _valid_nonblank(call_id) or not _valid_nonblank(fco_id):
-            raise PushValidationError(
+            raise _PushValidationError(
                 Locale.CITED_OUTPUT_IDS_INVALID_TEMPLATE.format(
                     line_number=output_record.line_number
                 )
@@ -2525,7 +2363,7 @@ def build_rollout_index(
         call_id = cast(str, call_id)
         fco_id = cast(str, fco_id)
         if call_id in seen_call_ids or fco_id in seen_fco_ids:
-            raise PushValidationError(Locale.CITED_OUTPUT_IDS_DUPLICATE)
+            raise _PushValidationError(Locale.CITED_OUTPUT_IDS_DUPLICATE)
         seen_call_ids.add(call_id)
         seen_fco_ids.add(fco_id)
         fco_timestamp = _timestamp(
@@ -2536,18 +2374,22 @@ def build_rollout_index(
         matching_calls = calls.get(call_id, [])
         matching_events = events.get(call_id, [])
         if len(matching_calls) != 1 or len(matching_events) != 1:
-            raise PushValidationError(Locale.CITED_WEB_CHAIN_COUNT_TEMPLATE.format(call_id=call_id))
+            raise _PushValidationError(
+                Locale.CITED_WEB_CHAIN_COUNT_TEMPLATE.format(call_id=call_id)
+            )
         call_record = matching_calls[0]
         event_record = matching_events[0]
         if not (call_record.line_number < event_record.line_number < output_record.line_number):
-            raise PushValidationError(Locale.CITED_WEB_CHAIN_ORDER_TEMPLATE.format(call_id=call_id))
+            raise _PushValidationError(
+                Locale.CITED_WEB_CHAIN_ORDER_TEMPLATE.format(call_id=call_id)
+            )
         call_payload = cast(
             dict[str, object],
             call_record.value[CODEX_PAYLOAD_KEY],
         )
         fc_id = call_payload.get(CODEX_ID_KEY)
         if not _valid_nonblank(fc_id) or cast(str, fc_id) in seen_fc_ids:
-            raise PushValidationError(
+            raise _PushValidationError(
                 Locale.WEB_CALL_FC_ID_INVALID_TEMPLATE.format(call_id=call_id)
             )
         fc_id = cast(str, fc_id)
@@ -2559,7 +2401,7 @@ def build_rollout_index(
             separators=COMPACT_JSON_SEPARATORS,
         )
         fc_rows.append(
-            CodexFcRow(
+            _CodexFcRow(
                 timestamp=_timestamp(
                     call_record.value.get(CODEX_TIMESTAMP_KEY),
                     label=Locale.FUNCTION_CALL_LABEL_TEMPLATE.format(fc_id=fc_id),
@@ -2572,7 +2414,7 @@ def build_rollout_index(
             )
         )
         fco_rows.append(
-            CodexFcoRow(
+            _CodexFcoRow(
                 timestamp=fco_timestamp,
                 fco_id=fco_id,
                 call_id=call_id,
@@ -2588,14 +2430,14 @@ def build_rollout_index(
                 result_separator=CODEX_RESULT_SEPARATOR,
             )
         except ValueError as exc:
-            raise PushValidationError(str(exc)) from exc
+            raise _PushValidationError(str(exc)) from exc
         event_payload = cast(
             dict[str, object],
             event_record.value[CODEX_PAYLOAD_KEY],
         )
         results = event_payload.get(CODEX_RESULTS_KEY)
         if not isinstance(results, list):
-            raise PushValidationError(
+            raise _PushValidationError(
                 Locale.WEB_EVENT_RESULTS_UNSUPPORTED_TEMPLATE.format(call_id=call_id)
             )
         for section in sections:
@@ -2607,13 +2449,13 @@ def build_rollout_index(
                 and result.get(CODEX_REF_ID_KEY) == section.ref_id
             ]
             if len(matching_results) != 1:
-                raise PushValidationError(
+                raise _PushValidationError(
                     Locale.CITATION_RESULT_COUNT_TEMPLATE.format(ref_id=section.ref_id)
                 )
             try:
-                result = CodexTextResult.model_validate(matching_results[0])
+                result = _CodexTextResult.model_validate(matching_results[0])
             except ValidationError as exc:
-                raise PushValidationError(
+                raise _PushValidationError(
                     Locale.CITATION_RESULT_METADATA_UNSUPPORTED_TEMPLATE.format(
                         ref_id=section.ref_id
                     )
@@ -2621,7 +2463,7 @@ def build_rollout_index(
             if not _valid_nonblank(result.url):
                 continue
             turn_ref_rows.append(
-                CodexTurnRefRow(
+                _CodexTurnRefRow(
                     ref_id=section.ref_id,
                     call_id=call_id,
                     domain=result.domain,
@@ -2633,7 +2475,7 @@ def build_rollout_index(
                 )
             )
 
-    return RolloutIndex(
+    return _RolloutIndex(
         session=session,
         fc_rows=tuple(fc_rows),
         fco_rows=tuple(fco_rows),
@@ -2766,7 +2608,7 @@ def _insert_or_validate(
     ).fetchall()
     if existing:
         if len(existing) != 1 or existing[0] != values:
-            raise PushValidationError(
+            raise _PushValidationError(
                 Locale.CUMULATIVE_ROW_CONFLICT_TEMPLATE.format(
                     table_name=table_name,
                     key_value=key_value,
@@ -2786,7 +2628,7 @@ def _datetime_value(timestamp: str) -> datetime:
 
 def persist_rollout_index(
     conn: duckdb.DuckDBPyConnection,
-    rollout_index: RolloutIndex,
+    rollout_index: _RolloutIndex,
     *,
     codex_match_version: int = 1,
     manage_transaction: bool = True,
@@ -2809,7 +2651,7 @@ def persist_rollout_index(
             ).fetchall()
         }
         if not existing_call_ids.issubset(current_call_ids):
-            raise PushValidationError(Locale.PROVENANCE_PREFIX_OLDER)
+            raise _PushValidationError(Locale.PROVENANCE_PREFIX_OLDER)
         current_turn_keys = {(row.call_id, row.ref_id) for row in rollout_index.turn_ref_rows}
         existing_turn_keys = {
             (cast(str, row[0]), cast(str, row[1]))
@@ -2826,12 +2668,12 @@ def persist_rollout_index(
             ).fetchall()
         }
         if not existing_turn_keys.issubset(current_turn_keys):
-            raise PushValidationError(Locale.CITATION_PREFIX_OLDER)
+            raise _PushValidationError(Locale.CITATION_PREFIX_OLDER)
 
         fc_by_call = {row.call_id: row for row in rollout_index.fc_rows}
         fco_by_call = {row.call_id: row for row in rollout_index.fco_rows}
         if set(fc_by_call) != current_call_ids or set(fco_by_call) != current_call_ids:
-            raise PushValidationError(Locale.ROLLOUT_LINKAGES_INCOMPLETE)
+            raise _PushValidationError(Locale.ROLLOUT_LINKAGES_INCOMPLETE)
         for function_call_row in rollout_index.fc_rows:
             _insert_or_validate(
                 conn,
@@ -2917,7 +2759,7 @@ def persist_rollout_index(
             )
             if existing:
                 if len(existing) != 1 or existing[0] != values:
-                    raise PushValidationError(
+                    raise _PushValidationError(
                         Locale.CUMULATIVE_ROW_CONFLICT_TEMPLATE.format(
                             table_name=CODEX_TURN_REF_TABLE,
                             key_value=key_value,
@@ -2957,12 +2799,12 @@ def persist_rollout_index(
                 f"SELECT COUNT(*), COUNT(DISTINCT {distinct_expression}) FROM {table_name}"
             ).fetchone()
             if integrity_row is None:
-                raise PushValidationError(
+                raise _PushValidationError(
                     Locale.PROVENANCE_INTEGRITY_QUERY_FAILED_TEMPLATE.format(table_name=table_name)
                 )
             total, distinct = integrity_row
             if total != distinct:
-                raise PushValidationError(
+                raise _PushValidationError(
                     Locale.PROVENANCE_UNIQUENESS_FAILED_TEMPLATE.format(table_name=table_name)
                 )
 
@@ -2996,10 +2838,10 @@ def persist_rollout_index(
             """
         ).fetchone()
         if linkage_row is None:
-            raise PushValidationError(Locale.PROVENANCE_LINKAGE_QUERY_FAILED)
+            raise _PushValidationError(Locale.PROVENANCE_LINKAGE_QUERY_FAILED)
         missing_fc_links, missing_fco_links, missing_call_links = linkage_row
         if missing_fc_links or missing_fco_links or missing_call_links:
-            raise PushValidationError(Locale.PROVENANCE_RELATIONSHIPS_INCOMPLETE)
+            raise _PushValidationError(Locale.PROVENANCE_RELATIONSHIPS_INCOMPLETE)
 
         persisted_call_ids = {
             cast(str, row[0])
@@ -3025,7 +2867,7 @@ def persist_rollout_index(
             ).fetchall()
         }
         if persisted_call_ids != current_call_ids or persisted_turn_keys != current_turn_keys:
-            raise PushValidationError(Locale.PROVENANCE_PREFIX_MISMATCH)
+            raise _PushValidationError(Locale.PROVENANCE_PREFIX_MISMATCH)
         if manage_transaction:
             conn.execute("COMMIT")
     except Exception:
@@ -3043,8 +2885,8 @@ def _render_fco_timestamp(value: datetime) -> str:
     )
 
 
-def _evidence_candidates(rows: list[tuple[Any, ...]]) -> tuple[EvidenceCandidate, ...]:
-    candidates: list[EvidenceCandidate] = []
+def _evidence_candidates(rows: list[tuple[Any, ...]]) -> tuple[_EvidenceCandidate, ...]:
+    candidates: list[_EvidenceCandidate] = []
     for row in rows:
         (
             ref_id,
@@ -3056,7 +2898,7 @@ def _evidence_candidates(rows: list[tuple[Any, ...]]) -> tuple[EvidenceCandidate
             arguments_json,
         ) = row
         candidates.append(
-            EvidenceCandidate(
+            _EvidenceCandidate(
                 ref_id=cast(str, ref_id),
                 call_id=cast(str, call_id),
                 cite_text=cast(str, cite_text),
@@ -3074,7 +2916,7 @@ def _exact_evidence_candidates(
     *,
     rollout_filename: str,
     excerpt: str,
-) -> tuple[EvidenceCandidate, ...]:
+) -> tuple[_EvidenceCandidate, ...]:
     rows = conn.execute(
         f"""
         SELECT
@@ -3125,7 +2967,7 @@ def _near_evidence_candidates(
     rollout_filename: str,
     url: str,
     submitted_tokens: tuple[str, ...],
-) -> tuple[EvidenceCandidate, ...]:
+) -> tuple[_EvidenceCandidate, ...]:
     if not submitted_tokens:
         return ()
     rows = conn.execute(
@@ -3187,12 +3029,12 @@ def _near_evidence_candidates(
 
 
 def _candidate_match(
-    candidate: EvidenceCandidate,
+    candidate: _EvidenceCandidate,
     *,
     field: str,
     evidence_number: int,
     evidence: WebSearchExcerpt,
-) -> EvidenceMatch:
+) -> _EvidenceMatch:
     arguments_json = candidate.arguments_json
     if not isinstance(arguments_json, str):
         arguments_json = json.dumps(
@@ -3200,7 +3042,7 @@ def _candidate_match(
             ensure_ascii=False,
             separators=COMPACT_JSON_SEPARATORS,
         )
-    return EvidenceMatch(
+    return _EvidenceMatch(
         field=field,
         evidence_number=evidence_number,
         excerpt=evidence.excerpt,
@@ -3220,15 +3062,15 @@ def assess_submission_evidence(
     *,
     rollout_filename: str,
     codex_match_version: int,
-) -> EvidenceAssessment:
-    assessments: list[EvidenceItemAssessment] = []
+) -> _EvidenceAssessment:
+    assessments: list[_EvidenceItemAssessment] = []
     evidence_number = 0
     for field, field_submission in submission.evidence_items():
         for index, evidence in enumerate(field_submission.web_search_excerpts):
             evidence_number += 1
             if isinstance(evidence, EvidenceWithdrawal):
                 assessments.append(
-                    EvidenceItemAssessment(
+                    _EvidenceItemAssessment(
                         field=field,
                         index=index,
                         evidence_number=evidence_number,
@@ -3249,14 +3091,14 @@ def assess_submission_evidence(
             )
             if exact_url_candidates:
                 if len(exact_url_candidates) > 1 and not ALLOW_MULTIPLE_EVIDENCE_MATCHES:
-                    raise MultipleEvidenceMatches(evidence.excerpt)
+                    raise _MultipleEvidenceMatches(evidence.excerpt)
                 candidate = (
                     EVIDENCE_RANDOM.choice(exact_url_candidates)
                     if len(exact_url_candidates) > 1
                     else exact_url_candidates[0]
                 )
                 assessments.append(
-                    EvidenceItemAssessment(
+                    _EvidenceItemAssessment(
                         field=field,
                         index=index,
                         evidence_number=evidence_number,
@@ -3274,7 +3116,7 @@ def assess_submission_evidence(
                 continue
 
             normalized_tokens: tuple[str, ...] = ()
-            near_candidates: tuple[EvidenceCandidate, ...] = ()
+            near_candidates: tuple[_EvidenceCandidate, ...] = ()
             if codex_match_version == 2:
                 normalized_tokens = _normalized_evidence_tokens(conn, evidence.excerpt)
                 near_candidates = _near_evidence_candidates(
@@ -3284,7 +3126,7 @@ def assess_submission_evidence(
                     submitted_tokens=normalized_tokens,
                 )
             assessments.append(
-                EvidenceItemAssessment(
+                _EvidenceItemAssessment(
                     field=field,
                     index=index,
                     evidence_number=evidence_number,
@@ -3297,19 +3139,19 @@ def assess_submission_evidence(
                     candidates=near_candidates or exact_candidates,
                 )
             )
-    return EvidenceAssessment(items=tuple(assessments))
+    return _EvidenceAssessment(items=tuple(assessments))
 
 
 def _retry_evidence_obligation(
-    item: EvidenceItemAssessment,
-) -> RetryEvidenceObligation:
+    item: _EvidenceItemAssessment,
+) -> _RetryEvidenceObligation:
     if isinstance(item.submission, WebSearchExcerpt):
         excerpt = item.submission.excerpt
         url = item.submission.url
     else:
         excerpt = None
         url = None
-    return RetryEvidenceObligation(
+    return _RetryEvidenceObligation(
         outcome=item.outcome,
         excerpt=excerpt,
         url=url,
@@ -3319,23 +3161,23 @@ def _retry_evidence_obligation(
 
 def _retry_obligations_from_assessment(
     submission: SubmissionPayload,
-    assessment: EvidenceAssessment,
-) -> RetryObligations:
-    fields: dict[str, RetryFieldObligation] = {}
+    assessment: _EvidenceAssessment,
+) -> _RetryObligations:
+    fields: dict[str, _RetryFieldObligation] = {}
     for field, field_submission in submission.evidence_items():
         evidence = [
             _retry_evidence_obligation(item) for item in assessment.items if item.field == field
         ]
-        fields[field] = RetryFieldObligation(
+        fields[field] = _RetryFieldObligation(
             value=field_submission.value,
             evidence=evidence,
             accepted=EVIDENCE_ITEMS_ACCEPTED_DEF(tuple(item.outcome for item in evidence)),
         )
-    return RetryObligations(fields=fields)
+    return _RetryObligations(fields=fields)
 
 
-def _assessment_audit(assessment: EvidenceAssessment) -> EvidenceAttemptAudit:
-    items: list[EvidenceItemAudit] = []
+def _assessment_audit(assessment: _EvidenceAssessment) -> _EvidenceAttemptAudit:
+    items: list[_EvidenceItemAudit] = []
     for item in assessment.items:
         if isinstance(item.submission, WebSearchExcerpt):
             excerpt = item.submission.excerpt
@@ -3344,7 +3186,7 @@ def _assessment_audit(assessment: EvidenceAssessment) -> EvidenceAttemptAudit:
             excerpt = None
             url = None
         items.append(
-            EvidenceItemAudit(
+            _EvidenceItemAudit(
                 field=item.field,
                 index=item.index,
                 outcome=item.outcome,
@@ -3352,7 +3194,7 @@ def _assessment_audit(assessment: EvidenceAssessment) -> EvidenceAttemptAudit:
                 url=url,
                 normalized_tokens=list(item.normalized_tokens),
                 candidates=[
-                    EvidenceCandidateAudit(
+                    _EvidenceCandidateAudit(
                         ref_id=candidate.ref_id,
                         call_id=candidate.call_id,
                         cite_text=candidate.cite_text,
@@ -3363,11 +3205,11 @@ def _assessment_audit(assessment: EvidenceAssessment) -> EvidenceAttemptAudit:
                 ],
             )
         )
-    return EvidenceAttemptAudit(items=items)
+    return _EvidenceAttemptAudit(items=items)
 
 
 def _log_evidence_assessment(
-    assessment: EvidenceAssessment,
+    assessment: _EvidenceAssessment,
     *,
     attempt_id: str,
 ) -> None:
@@ -3401,7 +3243,7 @@ def _log_evidence_assessment(
 
 
 def _assessment_public_detail(
-    assessment: EvidenceAssessment,
+    assessment: _EvidenceAssessment,
     *,
     violations: Sequence[str] = (),
     include_retry_contract: bool = False,
@@ -3446,7 +3288,7 @@ def _assessment_public_detail(
 
 
 def _obligation_item_is_unchanged(
-    previous: RetryEvidenceObligation,
+    previous: _RetryEvidenceObligation,
     current: EvidenceSubmission,
 ) -> bool:
     if previous.outcome == EVIDENCE_OUTCOME_V1_EXACT:
@@ -3463,10 +3305,10 @@ def _obligation_item_is_unchanged(
 def _apply_retry_obligations(
     conn: duckdb.DuckDBPyConnection,
     submission: StandardizedSubmission,
-    assessment: EvidenceAssessment,
-    previous: RetryObligations,
-) -> tuple[RetryObligations, tuple[str, ...]]:
-    next_fields: dict[str, RetryFieldObligation] = {}
+    assessment: _EvidenceAssessment,
+    previous: _RetryObligations,
+) -> tuple[_RetryObligations, tuple[str, ...]]:
+    next_fields: dict[str, _RetryFieldObligation] = {}
     violations: list[str] = []
     assessed_items = {(item.field, item.index): item for item in assessment.items}
     for field, field_submission in submission.evidence_items():
@@ -3495,7 +3337,7 @@ def _apply_retry_obligations(
         if len(current_evidence) < len(previous_field.evidence):
             violations.append(Locale.EVIDENCE_COUNT_DECREASED_TEMPLATE.format(field=field))
 
-        next_evidence: list[RetryEvidenceObligation] = []
+        next_evidence: list[_RetryEvidenceObligation] = []
         withdrew_item = False
         for index, previous_item in enumerate(previous_field.evidence):
             if index >= len(current_evidence):
@@ -3565,24 +3407,24 @@ def _apply_retry_obligations(
             violations.append(
                 Locale.EVIDENCE_WITHDRAWAL_VALUE_UNCHANGED_TEMPLATE.format(field=field)
             )
-        next_fields[field] = RetryFieldObligation(
+        next_fields[field] = _RetryFieldObligation(
             value=field_submission.value,
             evidence=next_evidence,
             accepted=EVIDENCE_ITEMS_ACCEPTED_DEF(tuple(item.outcome for item in next_evidence)),
         )
-    return RetryObligations(fields=next_fields), tuple(violations)
+    return _RetryObligations(fields=next_fields), tuple(violations)
 
 
 def _assessment_from_audit(
     submission: StandardizedSubmission,
-    audit: EvidenceAttemptAudit,
-) -> EvidenceAssessment:
+    audit: _EvidenceAttemptAudit,
+) -> _EvidenceAssessment:
     submission_fields = dict(submission.evidence_items())
-    items: list[EvidenceItemAssessment] = []
+    items: list[_EvidenceItemAssessment] = []
     for evidence_number, audit_item in enumerate(audit.items, start=1):
         evidence = submission_fields[audit_item.field].web_search_excerpts[audit_item.index]
         items.append(
-            EvidenceItemAssessment(
+            _EvidenceItemAssessment(
                 field=audit_item.field,
                 index=audit_item.index,
                 evidence_number=evidence_number,
@@ -3592,7 +3434,7 @@ def _assessment_from_audit(
                 normalized_tokens=tuple(audit_item.normalized_tokens),
             )
         )
-    return EvidenceAssessment(items=tuple(items))
+    return _EvidenceAssessment(items=tuple(items))
 
 
 def _derive_retry_obligations(
@@ -3601,9 +3443,9 @@ def _derive_retry_obligations(
     baseline_json: str,
     baseline_attempt_id: str,
     run_id: str,
-) -> RetryObligations:
+) -> _RetryObligations:
     try:
-        obligations = RetryObligations.model_validate_json(baseline_json)
+        obligations = _RetryObligations.model_validate_json(baseline_json)
         rows = conn.execute(
             f"""
             SELECT
@@ -3621,7 +3463,7 @@ def _derive_retry_obligations(
             submission = StandardizedSubmission.model_validate_json(cast(str, submission_json))
             assessment = _assessment_from_audit(
                 submission,
-                EvidenceAttemptAudit.model_validate_json(cast(str, assessment_json)),
+                _EvidenceAttemptAudit.model_validate_json(cast(str, assessment_json)),
             )
             obligations, violations = _apply_retry_obligations(
                 conn,
@@ -3630,10 +3472,10 @@ def _derive_retry_obligations(
                 obligations,
             )
             if violations:
-                raise PushConfigurationError(Locale.EVIDENCE_AUDIT_REPLAY_FAILED)
+                raise _PushConfigurationError(Locale.EVIDENCE_AUDIT_REPLAY_FAILED)
         return obligations
     except (IndexError, KeyError, ValidationError) as exc:
-        raise PushConfigurationError(Locale.EVIDENCE_AUDIT_REPLAY_FAILED) from exc
+        raise _PushConfigurationError(Locale.EVIDENCE_AUDIT_REPLAY_FAILED) from exc
 
 
 def _process_retry_attempt(
@@ -3645,7 +3487,7 @@ def _process_retry_attempt(
     attempt_id: str,
     attempt_timestamp: datetime,
     submission: SubmissionPayload,
-    assessment: EvidenceAssessment,
+    assessment: _EvidenceAssessment,
     manage_transaction: bool = True,
 ) -> tuple[str, ...]:
     run_id_text = str(run_id)
@@ -3709,7 +3551,7 @@ def _process_retry_attempt(
                 baseline_json,
             ) = baseline_row
             if baseline_namekey != namekey or baseline_session_id != session_id:
-                raise PushValidationError(Locale.EVIDENCE_RETRY_IDENTITY_MISMATCH)
+                raise _PushValidationError(Locale.EVIDENCE_RETRY_IDENTITY_MISMATCH)
             if inserted_baseline:
                 obligations = initial_obligations
                 violations = tuple(
@@ -3725,7 +3567,7 @@ def _process_retry_attempt(
                     run_id=run_id_text,
                 )
                 if not isinstance(submission, StandardizedSubmission):
-                    raise PushConfigurationError(Locale.EVIDENCE_AUDIT_REPLAY_FAILED)
+                    raise _PushConfigurationError(Locale.EVIDENCE_AUDIT_REPLAY_FAILED)
                 _next_obligations, violations = _apply_retry_obligations(
                     conn,
                     submission,
@@ -3791,7 +3633,7 @@ def _retry_baseline_exists(
     if row is None:
         return False
     if row != (namekey, session_id):
-        raise PushValidationError(Locale.EVIDENCE_RETRY_IDENTITY_MISMATCH)
+        raise _PushValidationError(Locale.EVIDENCE_RETRY_IDENTITY_MISMATCH)
     return True
 
 
@@ -3842,13 +3684,13 @@ def validate_submission_evidence(
         return assessment.validated
     failed = next(item for item in assessment.items if item.outcome != EVIDENCE_OUTCOME_V1_EXACT)
     if isinstance(failed.submission, EvidenceWithdrawal):
-        raise PushValidationError(Locale.EVIDENCE_WITHDRAWAL_WITHOUT_BASELINE)
+        raise _PushValidationError(Locale.EVIDENCE_WITHDRAWAL_WITHOUT_BASELINE)
     detail_template = (
         Locale.EVIDENCE_URL_MISMATCH_TEMPLATE
         if failed.candidates
         else Locale.EVIDENCE_NO_MATCH_TEMPLATE
     )
-    raise PushValidationError(
+    raise _PushValidationError(
         detail_template.format(
             field=failed.field,
             excerpt=failed.submission.excerpt,
@@ -3881,7 +3723,7 @@ def _atomic_write_text(path: Path, value: str) -> None:
     temporary = path.with_name(
         ATOMIC_TEMP_FILENAME_TEMPLATE.format(
             filename=path.name,
-            nonce=uuid4().hex,
+            nonce=uuid7().hex,
         )
     )
     try:
@@ -3909,7 +3751,7 @@ def open_source_database(
     try:
         return duckdb.connect(str(runtime.pipeline.db_file), read_only=True)
     except duckdb.Error as exc:
-        raise PushValidationError(Locale.SOURCE_DUCKDB_OPEN_FAILED) from exc
+        raise _PushValidationError(Locale.SOURCE_DUCKDB_OPEN_FAILED) from exc
 
 
 def open_detour_database(
@@ -3938,7 +3780,7 @@ def open_detour_database(
             if read_only
             else Locale.DETOUR_DUCKDB_OPEN_FAILED
         )
-        raise PushValidationError(detail) from exc
+        raise _PushValidationError(detail) from exc
 
 
 def _backend_detour_database(
@@ -3947,10 +3789,7 @@ def _backend_detour_database(
     global DETOUR_DB_CONNECTION
     global DETOUR_DB_CONNECTION_PATH
 
-    if (
-        DETOUR_DB_CONNECTION is not None
-        and DETOUR_DB_CONNECTION_PATH == runtime.detour_db_path
-    ):
+    if DETOUR_DB_CONNECTION is not None and DETOUR_DB_CONNECTION_PATH == runtime.detour_db_path:
         return DETOUR_DB_CONNECTION
     if DETOUR_DB_CONNECTION is not None:
         DETOUR_DB_CONNECTION.close()
@@ -3975,13 +3814,8 @@ def _acquire_backend_process_lock() -> None:
     global BACKEND_PROCESS_LOCK_DESCRIPTOR
 
     if BACKEND_PROCESS_LOCK_DESCRIPTOR is not None:
-        raise PushConfigurationError(Locale.BACKEND_ALREADY_RUNNING)
-    flags = (
-        os.O_CREAT
-        | os.O_RDWR
-        | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-    )
+        raise _PushConfigurationError(Locale.BACKEND_ALREADY_RUNNING)
+    flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     descriptor: int | None = None
     try:
         descriptor = os.open(BACKEND_PROCESS_LOCK_PATH, flags, 0o600)
@@ -3989,7 +3823,7 @@ def _acquire_backend_process_lock() -> None:
     except OSError as exc:
         if descriptor is not None:
             os.close(descriptor)
-        raise PushConfigurationError(Locale.BACKEND_ALREADY_RUNNING) from exc
+        raise _PushConfigurationError(Locale.BACKEND_ALREADY_RUNNING) from exc
     BACKEND_PROCESS_LOCK_DESCRIPTOR = descriptor
 
 
@@ -4010,13 +3844,13 @@ def _acquire_authoritative_process_lock(runtime: AiAugmentBackendContext) -> Non
     global AUTHORITATIVE_LOG_DESCRIPTOR
 
     if AUTHORITATIVE_LOG_DESCRIPTOR is not None:
-        raise PushConfigurationError(Locale.REPLAY_LOG_ALREADY_LOCKED)
+        raise _PushConfigurationError(Locale.REPLAY_LOG_ALREADY_LOCKED)
     descriptor = os.open(Path(runtime.replay_log), os.O_RDWR)
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError as exc:
         os.close(descriptor)
-        raise PushConfigurationError(Locale.REPLAY_LOG_ALREADY_LOCKED) from exc
+        raise _PushConfigurationError(Locale.REPLAY_LOG_ALREADY_LOCKED) from exc
     AUTHORITATIVE_LOG_DESCRIPTOR = descriptor
 
 
@@ -4079,14 +3913,18 @@ def _http_header_value(
     return None
 
 
-def _request_body_for_authoritative_log(body: bytes) -> str | dict[str, str]:
+def _request_body_for_authoritative_log(body: bytes) -> str:
     try:
         return body.decode(TEXT_ENCODING)
     except UnicodeDecodeError:
-        return {
-            AUTHORITATIVE_LOG_ENCODING_KEY: AUTHORITATIVE_LOG_BASE64_ENCODING,
-            AUTHORITATIVE_LOG_DATA_KEY: base64.b64encode(body).decode(BASE64_TEXT_ENCODING),
-        }
+        return json.dumps(
+            {
+                AUTHORITATIVE_LOG_ENCODING_KEY: AUTHORITATIVE_LOG_BASE64_ENCODING,
+                AUTHORITATIVE_LOG_DATA_KEY: base64.b64encode(body).decode(BASE64_TEXT_ENCODING),
+            },
+            ensure_ascii=False,
+            separators=COMPACT_JSON_SEPARATORS,
+        )
 
 
 def _authoritative_http_record(
@@ -4102,7 +3940,7 @@ def _authoritative_http_record(
     try:
         response_text = response_body.decode(TEXT_ENCODING)
     except UnicodeDecodeError as exc:
-        raise PushConfigurationError(Locale.AUTHORITATIVE_RESPONSE_NOT_UTF8) from exc
+        raise _PushConfigurationError(Locale.AUTHORITATIVE_RESPONSE_NOT_UTF8) from exc
     return HttpRequestLogRecord(
         schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
         method=request.method,
@@ -4122,7 +3960,7 @@ def _authoritative_http_record(
     )
 
 
-class AuthoritativeHttpMiddleware:
+class _AuthoritativeHttpMiddleware:
     """Durably record finite public exchanges before forwarding ASGI responses."""
 
     def __init__(self, app: ASGIApp) -> None:
@@ -4140,7 +3978,7 @@ class AuthoritativeHttpMiddleware:
         method = cast(str, scope[ASGI_METHOD_KEY])
         path = cast(str, scope[ASGI_PATH_KEY])
         route = (method, path)
-        if route not in AUTHORITATIVE_PUBLIC_ROUTES:
+        if route not in AUTHORITATIVE_FASTAPI_ROUTES:
             await self.app(scope, receive, send)
             return
 
@@ -4239,7 +4077,7 @@ class AuthoritativeHttpMiddleware:
                 started_ns=started_ns,
                 ready_to_respond_at_unix_usec=ready_to_respond_at_unix_usec,
             )
-            _append_authoritative_record(record)
+            append_authoritative_record(record)
             await _after_authoritative_public_record(record)
         except Exception as exc:
             logger.exception(Locale.AUTHORITATIVE_LOG_APPEND_FAILED_LOG, method, path, exc)
@@ -4249,7 +4087,7 @@ class AuthoritativeHttpMiddleware:
             await send(message)
 
 
-app.add_middleware(AuthoritativeHttpMiddleware)
+app.add_middleware(_AuthoritativeHttpMiddleware)
 
 
 def _initialize_readme_authoritative_schema(
@@ -4257,7 +4095,6 @@ def _initialize_readme_authoritative_schema(
 ) -> None:
     conn.execute(CREATE_AUTHORITATIVE_RECORDS_TABLE_SQL)
     conn.execute(CREATE_AUTHORITATIVE_OUTCOMES_TABLE_SQL)
-    conn.execute(CREATE_CONTROL_ATTEMPTS_TABLE_SQL)
     conn.execute(CREATE_AUTHORITATIVE_PROJECTION_TABLE_SQL)
 
 
@@ -4267,9 +4104,9 @@ def _validated_readme_record(record: HttpRequestLogRecord) -> HttpRequestLogReco
         validated.schema_version != KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
         or validated.record_id.version != 7
     ):
-        raise PushValidationError(Locale.REPLAY_RECORD_CONTOUR_INVALID)
+        raise _PushValidationError(Locale.REPLAY_RECORD_CONTOUR_INVALID)
     route = (validated.method, validated.path)
-    if route in AUTHORITATIVE_PUBLIC_ROUTES:
+    if route != AUTHORITATIVE_COMMIT_ROUTE:
         if (
             validated.response_code is None
             or validated.response_headers is None
@@ -4277,10 +4114,8 @@ def _validated_readme_record(record: HttpRequestLogRecord) -> HttpRequestLogReco
             or validated.ready_to_respond_at_unix_usec is None
             or validated.duration_usec is None
         ):
-            raise PushValidationError(Locale.REPLAY_RECORD_CONTOUR_INVALID)
+            raise _PushValidationError(Locale.REPLAY_RECORD_CONTOUR_INVALID)
         return validated
-    if route != AUTHORITATIVE_COMMIT_ROUTE:
-        raise PushValidationError(Locale.REPLAY_RECORD_CONTOUR_INVALID)
     if (
         validated.scheme != SYNTHETIC_COMMIT_SCHEME
         or validated.host != SYNTHETIC_COMMIT_HOST
@@ -4288,33 +4123,53 @@ def _validated_readme_record(record: HttpRequestLogRecord) -> HttpRequestLogReco
         or validated.ready_to_respond_at_unix_usec is not None
         or validated.query
         or set(validated.request_headers) != {SOURCE_KEY_HEADER, NAME_KEY_HEADER}
-        or not isinstance(validated.request_body, dict)
+        or not isinstance(validated.request_body, str)
         or validated.response_code is not None
         or validated.response_headers is not None
         or validated.response_body is not None
         or validated.received_at_unix_usec is not None
         or validated.duration_usec is not None
     ):
-        raise PushValidationError(Locale.REPLAY_COMMIT_INVALID)
+        raise _PushValidationError(Locale.REPLAY_COMMIT_INVALID)
     try:
-        commit = _replay_commit(validated.request_body)
-        report_bytes = base64.b64decode(
-            commit.appendwatch_report.data,
-            validate=True,
-        )
+        CommitRequestBody.validate_serialized_json(validated.request_body)
     except (ValidationError, ValueError) as exc:
-        raise PushValidationError(Locale.REPLAY_COMMIT_INVALID) from exc
-    if base64.b64encode(report_bytes).decode(BASE64_TEXT_ENCODING) != (
-        commit.appendwatch_report.data
-    ):
-        raise PushValidationError(Locale.REPLAY_COMMIT_INVALID)
+        raise _PushValidationError(Locale.REPLAY_COMMIT_INVALID) from exc
     return validated
 
 
-def _replay_commit(value: object) -> ReplayCommit:
-    return ReplayCommit.model_validate_json(
-        json.dumps(value, ensure_ascii=False, separators=COMPACT_JSON_SEPARATORS)
-    )
+def _commit_request_body(
+    conn: duckdb.DuckDBPyConnection,
+    value: object,
+) -> CommitRequestBody:
+    if not isinstance(value, str):
+        raise _PushValidationError(Locale.REPLAY_COMMIT_INVALID)
+    try:
+        return CommitRequestBody.from_serialized_json(
+            value,
+            resolve_http_record=lambda record_id: _projected_http_record(
+                conn,
+                record_id,
+            )[1],
+        )
+    except (KeyError, ValidationError, ValueError) as exc:
+        raise _PushValidationError(Locale.REPLAY_COMMIT_INVALID) from exc
+
+
+def _backend_commit_record(
+    conn: duckdb.DuckDBPyConnection,
+    record: HttpRequestLogRecord,
+) -> BackendCommitRecord:
+    try:
+        return BackendCommitRecord.from_http_request_log_record(
+            record,
+            resolve_http_record=lambda record_id: _projected_http_record(
+                conn,
+                record_id,
+            )[1],
+        )
+    except (KeyError, ValidationError, ValueError) as exc:
+        raise _PushValidationError(Locale.REPLAY_COMMIT_INVALID) from exc
 
 
 def _authoritative_log_records(
@@ -4326,21 +4181,21 @@ def _authoritative_log_records(
         with path.open("rb") as stream:
             for line_number, line in enumerate(stream, start=AUTHORITATIVE_FIRST_LINE):
                 if not line.endswith(b"\n") or not line.strip():
-                    raise PushValidationError(
+                    raise _PushValidationError(
                         Locale.REPLAY_LOG_LINE_INVALID_TEMPLATE.format(line_number=line_number)
                     )
                 try:
                     record = _validated_readme_record(
                         HttpRequestLogRecord.model_validate_json(line)
                     )
-                except (ValidationError, PushValidationError) as exc:
-                    raise PushValidationError(
+                except (ValidationError, _PushValidationError) as exc:
+                    raise _PushValidationError(
                         Locale.REPLAY_LOG_LINE_INVALID_TEMPLATE.format(line_number=line_number)
                     ) from exc
                 byte_offset += len(line)
                 records.append((record, byte_offset, hashlib.sha256(line).hexdigest()))
     except (OSError, UnicodeError) as exc:
-        raise PushConfigurationError(Locale.REPLAY_LOG_UNREADABLE) from exc
+        raise _PushConfigurationError(Locale.REPLAY_LOG_UNREADABLE) from exc
     return tuple(records)
 
 
@@ -4356,81 +4211,45 @@ def _projected_http_record(
         [str(record_id)],
     ).fetchone()
     if row is None:
-        raise PushValidationError(Locale.REPLAY_COMMIT_LINK_MISSING)
+        raise _PushValidationError(Locale.REPLAY_COMMIT_LINK_MISSING)
     try:
         return int(row[0]), HttpRequestLogRecord.model_validate_json(str(row[1]))
     except ValidationError as exc:
-        raise PushValidationError(Locale.REPLAY_COMMIT_LINK_MISSING) from exc
-
-
-STRUCTURED_FIELD_JSON_STRING = r'"(?:\\.|[^"\\])*"'
-SOURCE_KEY_PATTERN = re.compile(
-    rf"^ktp\.filename=(?P<filename>{STRUCTURED_FIELD_JSON_STRING}), "
-    rf"ktp\.fragment=(?P<fragment>[0-9]+), "
-    rf'ktp\.fragment_type="line_number"$'
-)
-NAME_KEY_PATTERN = re.compile(
-    rf"^ktp\.first_name=(?P<first>{STRUCTURED_FIELD_JSON_STRING}), "
-    rf"ktp\.last_name=(?P<last>{STRUCTURED_FIELD_JSON_STRING})$"
-)
+        raise _PushValidationError(Locale.REPLAY_COMMIT_LINK_MISSING) from exc
 
 
 def _source_key_header(filename: str, line_count: int) -> str:
-    return (
-        f"{KTP_FILENAME_COL}={json.dumps(filename, ensure_ascii=False)}, "
-        f"{KTP_FRAGMENT_COL}={line_count}, "
-        f'{KTP_FRAGMENT_TYPE_COL}="{ROLLOUT_LINE_FRAGMENT_TYPE}"'
-    )
+    return source_key_header_value(filename, line_count)
 
 
 def _parse_source_key_header(value: object) -> tuple[str, int]:
-    if not isinstance(value, str):
-        raise PushValidationError(Locale.REPLAY_COMMIT_SOURCE_KEY_INVALID)
-    matched = SOURCE_KEY_PATTERN.fullmatch(value)
-    if matched is None:
-        raise PushValidationError(Locale.REPLAY_COMMIT_SOURCE_KEY_INVALID)
     try:
-        filename = json.loads(matched.group("filename"))
-        line_count = int(matched.group("fragment"))
-    except (json.JSONDecodeError, ValueError) as exc:
-        raise PushValidationError(Locale.REPLAY_COMMIT_SOURCE_KEY_INVALID) from exc
-    if (
-        not isinstance(filename, str)
-        or not filename
-        or PurePosixPath(filename).name != filename
-        or line_count < 1
-        or value != _source_key_header(filename, line_count)
-    ):
-        raise PushValidationError(Locale.REPLAY_COMMIT_SOURCE_KEY_INVALID)
-    return filename, line_count
+        return source_key_from_header_value(value)
+    except ValueError as exc:
+        raise _PushValidationError(Locale.REPLAY_COMMIT_SOURCE_KEY_INVALID) from exc
 
 
 def _name_key_header(namekey: str) -> str:
-    name_key = NameKey.from_json_key(namekey)
-    return (
-        f"{KTP_FIRST_NAME_COL}="
-        f"{json.dumps(name_key.first_name, ensure_ascii=False)}, "
-        f"{KTP_LAST_NAME_COL}={json.dumps(name_key.last_name, ensure_ascii=False)}"
-    )
+    return name_key_header_value(NameKey.from_json_key(namekey))
+
+
+def name_key_header(namekey: str) -> str:
+    return _name_key_header(namekey)
 
 
 def _parse_name_key_header(value: object) -> str:
-    if not isinstance(value, str):
-        raise PushValidationError(Locale.REPLAY_COMMIT_NAME_KEY_INVALID)
-    matched = NAME_KEY_PATTERN.fullmatch(value)
-    if matched is None:
-        raise PushValidationError(Locale.REPLAY_COMMIT_NAME_KEY_INVALID)
     try:
-        name_key = NameKey(**{
-            KTP_FIRST_NAME_COL: json.loads(matched.group("first")),
-            KTP_LAST_NAME_COL: json.loads(matched.group("last")),
-        })
-    except (json.JSONDecodeError, TypeError, ValueError) as exc:
-        raise PushValidationError(Locale.REPLAY_COMMIT_NAME_KEY_INVALID) from exc
-    namekey = name_key.to_json_key()
-    if value != _name_key_header(namekey):
-        raise PushValidationError(Locale.REPLAY_COMMIT_NAME_KEY_INVALID)
-    return namekey
+        return name_key_from_header_value(value).to_json_key()
+    except ValueError as exc:
+        raise _PushValidationError(Locale.REPLAY_COMMIT_NAME_KEY_INVALID) from exc
+
+
+def parse_name_key_header(value: object) -> str:
+    return _parse_name_key_header(value)
+
+
+def parse_source_key_header(value: object) -> tuple[str, int]:
+    return _parse_source_key_header(value)
 
 
 def _response_content_type(record: HttpRequestLogRecord) -> str:
@@ -4454,7 +4273,7 @@ def _root_pull_record_id(
 ) -> UUID:
     pull_ordinal, pull = _projected_http_record(conn, pull_record_id)
     if (pull.method, pull.path) != (HTTP_GET_METHOD, PULL_PATH):
-        raise PushValidationError(Locale.REPLAY_COMMIT_PULL_INVALID)
+        raise _PushValidationError(Locale.REPLAY_COMMIT_PULL_INVALID)
     if _response_content_type(pull) != MARKDOWN_MEDIA_TYPE:
         return pull_record_id
     row = conn.execute(
@@ -4468,13 +4287,17 @@ def _root_pull_record_id(
         [pull_ordinal],
     ).fetchone()
     if row is None:
-        raise PushValidationError(Locale.REPLAY_COMMIT_PULL_INVALID)
+        raise _PushValidationError(Locale.REPLAY_COMMIT_PULL_INVALID)
     try:
         prior_record = HttpRequestLogRecord.model_validate_json(str(row[0]))
-        prior_commit = _replay_commit(prior_record.request_body)
-    except ValidationError as exc:
-        raise PushValidationError(Locale.REPLAY_COMMIT_PULL_INVALID) from exc
-    return _root_pull_record_id(conn, prior_commit.pull_record_id)
+        if prior_record.request_body is None:
+            raise _PushValidationError(Locale.REPLAY_COMMIT_PULL_INVALID)
+        prior_pull_record_id, _prior_push_record_id = (
+            CommitRequestBody.record_ids_from_serialized_json(prior_record.request_body)
+        )
+    except (ValidationError, ValueError) as exc:
+        raise _PushValidationError(Locale.REPLAY_COMMIT_PULL_INVALID) from exc
+    return _root_pull_record_id(conn, prior_pull_record_id)
 
 
 def _namekey_from_pull(
@@ -4488,7 +4311,7 @@ def _namekey_from_pull(
         or _response_content_type(pull) != MEDIA_TYPE
         or not pull.response_body
     ):
-        raise PushValidationError(Locale.REPLAY_COMMIT_PULL_INVALID)
+        raise _PushValidationError(Locale.REPLAY_COMMIT_PULL_INVALID)
     try:
         lines = tuple(json.loads(line) for line in pull.response_body.splitlines())
         identity = next(
@@ -4501,88 +4324,75 @@ def _namekey_from_pull(
             KTP_LAST_NAME_COL: identity[KTP_LAST_NAME_COL],
         }).to_json_key()
     except (StopIteration, TypeError, ValueError, json.JSONDecodeError) as exc:
-        raise PushValidationError(Locale.REPLAY_COMMIT_PULL_INVALID) from exc
-
-
-def _session_id_from_rollout_filename(filename: str) -> str:
-    session_text = Path(filename).stem[-36:]
-    try:
-        session_id = UUID(session_text)
-    except ValueError as exc:
-        raise PushValidationError(Locale.SESSION_META_ROLLOUT_MISMATCH) from exc
-    if str(session_id) != session_text:
-        raise PushValidationError(Locale.SESSION_META_ROLLOUT_MISMATCH)
-    return session_text
+        raise _PushValidationError(Locale.REPLAY_COMMIT_PULL_INVALID) from exc
 
 
 def _validated_replay_rollout(
     runtime: AiAugmentBackendContext,
-    reference: ReplayRolloutReference,
-) -> ArchivedFile:
+    reference: CodexRolloutRecord,
+) -> _ArchivedFile:
     path = runtime.rollout_cas_dir / ROLLOUT_CAS_FILENAME_TEMPLATE.format(sha256=reference.sha256)
     if path.parent != runtime.rollout_cas_dir or path.is_symlink() or not path.is_file():
-        raise PushValidationError(Locale.ROLLOUT_CAS_BLOB_INVALID)
+        raise _PushValidationError(Locale.ROLLOUT_CAS_BLOB_INVALID)
     archived = _archived_file(path)
     if (
         archived.sha256 != reference.sha256
         or archived.size != reference.size
         or archived.line_count != reference.line_count
     ):
-        raise PushValidationError(Locale.ROLLOUT_CAS_BLOB_INVALID)
+        raise _PushValidationError(Locale.ROLLOUT_CAS_BLOB_INVALID)
     return archived
 
 
-def _failure_validation_outcome(
+def _failed_prepared_pull_response(
     *,
     commit_record_id: UUID,
-    commit: ReplayCommit,
-    namekey: str,
-    stage: str,
+    stage: PostCommitValidationStage,
     error: Exception,
-) -> ProjectedValidationOutcome:
+) -> PreparedPullResponse:
     logger.error(Locale.POST_COMMIT_VALIDATION_FAILED_LOG, commit_record_id, stage, error)
     detail = Locale.CONFIGURATION_ERROR_DETAIL
-    return ProjectedValidationOutcome(
+    return PreparedPullResponse(
         commit_record_id=commit_record_id,
-        pull_record_id=commit.pull_record_id,
-        push_record_id=commit.push_record_id,
-        attempt_id=str(commit.push_record_id),
-        stage=stage,
-        result=ATTEMPT_RESULT_CONFIGURATION_ERROR,
+        post_commit_validation=PostCommitValidation(
+            stage=stage,
+            result=PostCommitValidationResult.CONFIGURATION_ERROR,
+            detail=detail,
+        ),
         response_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         response_headers={
             HTTP_REQUEST_LOG_RESPONSE_CONTENT_TYPE_HEADER: JSON_MEDIA_TYPE,
         },
         response_body=http_error_response_body(detail),
-        response_detail=detail,
-        namekey=namekey,
-        session_id=None,
     )
 
 
-def _outcome_from_execution(
+def _prepared_pull_response_from_validation(
     *,
     record: HttpRequestLogRecord,
-    commit: ReplayCommit,
-    namekey: str,
-    execution: AttemptExecution,
-) -> ProjectedValidationOutcome:
-    if execution.result == ATTEMPT_RESULT_ACCEPTED:
+    post_commit_validation: PostCommitValidation,
+    accepted_response_body: str = "",
+) -> PreparedPullResponse:
+    if post_commit_validation.result is PostCommitValidationResult.ACCEPTED:
         response_code = status.HTTP_410_GONE
         response_headers = {
             HTTP_REQUEST_LOG_RESPONSE_CONTENT_TYPE_HEADER: MEDIA_TYPE_WITH_CHARSET,
         }
-        response_body = execution.response_body
-    elif execution.result == ATTEMPT_RESULT_REJECTED and execution.stage in {
-        ATTEMPT_STAGE_PYDANTIC_VALIDATION,
-        ATTEMPT_STAGE_EVIDENCE_VALIDATION,
-    }:
+        response_body = accepted_response_body
+    elif (
+        post_commit_validation.result is PostCommitValidationResult.REJECTED
+        and post_commit_validation.stage
+        in {
+            PostCommitValidationStage.PYDANTIC_VALIDATION,
+            PostCommitValidationStage.DUCKDB_EVIDENCE_VALIDATION,
+        }
+    ):
         response_code = status.HTTP_200_OK
         response_headers = {
             HTTP_REQUEST_LOG_RESPONSE_CONTENT_TYPE_HEADER: MARKDOWN_MEDIA_TYPE,
         }
         response_body = (
-            execution.response_detail or Locale.VALIDATION_ERROR_DETAIL
+            post_commit_validation.detail or Locale.VALIDATION_ERROR_DETAIL
         ).rstrip() + "\n"
     else:
         response_code = status.HTTP_500_INTERNAL_SERVER_ERROR
@@ -4590,19 +4400,12 @@ def _outcome_from_execution(
             HTTP_REQUEST_LOG_RESPONSE_CONTENT_TYPE_HEADER: JSON_MEDIA_TYPE,
         }
         response_body = http_error_response_body(Locale.CONFIGURATION_ERROR_DETAIL)
-    return ProjectedValidationOutcome(
+    return PreparedPullResponse(
         commit_record_id=record.record_id,
-        pull_record_id=commit.pull_record_id,
-        push_record_id=commit.push_record_id,
-        attempt_id=str(commit.push_record_id),
-        stage=execution.stage,
-        result=execution.result,
+        post_commit_validation=post_commit_validation,
         response_code=response_code,
         response_headers=response_headers,
         response_body=response_body,
-        response_detail=execution.response_detail,
-        namekey=namekey,
-        session_id=execution.session_id,
     )
 
 
@@ -4612,14 +4415,28 @@ def _validate_projected_commit(
     record: HttpRequestLogRecord,
     *,
     materialize_files: bool,
-) -> tuple[ProjectedValidationOutcome, bool]:
-    commit = _replay_commit(record.request_body)
-    namekey = runtime.namekey or ""
-    stage = ATTEMPT_STAGE_CONFIGURATION
+) -> tuple[PreparedPullResponse, bool]:
+    stage = PostCommitValidationStage.CONFIGURATION
     try:
-        namekey = _parse_name_key_header(record.request_headers.get(NAME_KEY_HEADER))
-        pull_ordinal, pull = _projected_http_record(conn, commit.pull_record_id)
-        push_ordinal, push = _projected_http_record(conn, commit.push_record_id)
+        commit_record = _backend_commit_record(conn, record)
+        commit = CommitRequestBody(
+            pull_record=commit_record.pull_record,
+            push_record=commit_record.push_record,
+            codex_session_record=commit_record.codex_session_record,
+        )
+        pull = commit.pull_record
+        push = commit.push_record
+        session_id = commit.codex_session_record.session_id
+        rollout = commit.codex_session_record.codex_rollout_record
+        appendwatch_report = commit.codex_session_record.appendwatch_report_record
+        assert session_id is not None
+        assert rollout is not None
+        assert appendwatch_report is not None
+        namekey = NameKey.from_json_key(
+            _parse_name_key_header(record.request_headers.get(NAME_KEY_HEADER))
+        )
+        pull_ordinal, _pull = _projected_http_record(conn, pull.record_id)
+        push_ordinal, _push = _projected_http_record(conn, push.record_id)
         commit_ordinal, _commit_record = _projected_http_record(conn, record.record_id)
         if not (
             pull_ordinal < push_ordinal < commit_ordinal
@@ -4629,62 +4446,33 @@ def _validate_projected_commit(
             and push.response_code == status.HTTP_202_ACCEPTED
             and isinstance(push.request_body, str)
         ):
-            raise PushValidationError(Locale.REPLAY_COMMIT_LINK_INVALID)
-        if _namekey_from_pull(conn, commit.pull_record_id) != namekey:
-            raise PushValidationError(Locale.REPLAY_COMMIT_NAME_KEY_INVALID)
+            raise _PushValidationError(Locale.REPLAY_COMMIT_LINK_INVALID)
+        if _namekey_from_pull(conn, pull.record_id) != namekey.to_json_key():
+            raise _PushValidationError(Locale.REPLAY_COMMIT_NAME_KEY_INVALID)
         filename, source_line_count = _parse_source_key_header(
             record.request_headers.get(SOURCE_KEY_HEADER)
         )
-        if source_line_count != commit.rollout.line_count:
-            raise PushValidationError(Locale.REPLAY_COMMIT_SOURCE_KEY_INVALID)
-        stage = ATTEMPT_STAGE_ROLLOUT_INDEX
-        rollout_archive = _validated_replay_rollout(runtime, commit.rollout)
-        session_id = _session_id_from_rollout_filename(filename)
-        stage = ATTEMPT_STAGE_APPENDWATCH_VALIDATION
-        report_bytes = base64.b64decode(
-            commit.appendwatch_report.data,
-            validate=True,
+        if source_line_count != rollout.line_count:
+            raise _PushValidationError(Locale.REPLAY_COMMIT_SOURCE_KEY_INVALID)
+        stage = PostCommitValidationStage.ROLLOUT_INDEX
+        rollout_archive = _validated_replay_rollout(runtime, rollout)
+        stage = PostCommitValidationStage.APPENDWATCH_REPORT_VALIDATION
+        prepared_pull_response, commit_database = _execute_attempt(
+            conn,
+            runtime,
+            commit_record=commit_record,
+            rollout_archive=rollout_archive,
+            appendwatch_report=appendwatch_report,
+            rollout_relative_path=PurePosixPath(filename),
+            run_id=_root_pull_record_id(conn, pull.record_id),
+            namekey=namekey,
+            materialize_files=materialize_files,
         )
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            attempt_dir = Path(temporary_directory)
-            report_path = attempt_dir / APPENDWATCH_ARCHIVE_FILENAME_TEMPLATE.format(
-                attempt_id=commit.push_record_id
-            )
-            report_path.write_bytes(report_bytes)
-            replay = AttemptReplayInput(
-                attempt_dir=attempt_dir,
-                attempt_id=str(commit.push_record_id),
-                attempt_timestamp=datetime.fromtimestamp(
-                    record.record_id.time / 1_000,
-                    tz=timezone.utc,
-                ),
-                rollout_archive=rollout_archive,
-                report_archive=_archived_file(report_path),
-                rollout_relative_path=PurePosixPath(filename),
-                request_body=push.request_body.encode(TEXT_ENCODING),
-                run_id=_root_pull_record_id(conn, commit.pull_record_id),
-                namekey=namekey,
-                session_id=session_id,
-                validate_appendwatch=True,
-                materialize_files=materialize_files,
-            )
-            execution = execute_attempt(conn, runtime, replay)
-        _log_attempt_execution(str(commit.push_record_id), execution)
-        return (
-            _outcome_from_execution(
-                record=record,
-                commit=commit,
-                namekey=namekey,
-                execution=execution,
-            ),
-            execution.commit_database,
-        )
+        return prepared_pull_response, commit_database
     except Exception as exc:
         return (
-            _failure_validation_outcome(
+            _failed_prepared_pull_response(
                 commit_record_id=record.record_id,
-                commit=commit,
-                namekey=namekey,
                 stage=stage,
                 error=exc,
             ),
@@ -4710,49 +4498,14 @@ def _insert_projected_http_record(
     )
 
 
-def _insert_projected_outcome(
+def _insert_prepared_pull_response(
     conn: duckdb.DuckDBPyConnection,
     record: HttpRequestLogRecord,
-    outcome: ProjectedValidationOutcome,
+    prepared_pull_response: PreparedPullResponse,
 ) -> None:
     conn.execute(
         f"INSERT INTO {AUTHORITATIVE_OUTCOMES_TABLE} VALUES (?, ?)",
-        [str(record.record_id), outcome.model_dump_json()],
-    )
-    try:
-        run_id = _root_pull_record_id(conn, outcome.pull_record_id)
-    except PushValidationError:
-        run_id = outcome.pull_record_id
-    request_body = json.dumps(
-        record.request_body,
-        ensure_ascii=False,
-        separators=COMPACT_JSON_SEPARATORS,
-        sort_keys=True,
-    )
-    commit = _replay_commit(record.request_body)
-    attempt = AttemptRecord(
-        attempt_id=outcome.attempt_id,
-        transaction_id=str(outcome.commit_record_id),
-        request_sha256=hashlib.sha256(request_body.encode(TEXT_ENCODING)).hexdigest(),
-        stage=outcome.stage,
-        result=outcome.result,
-        updated_at=datetime.fromtimestamp(record.record_id.time / 1_000, tz=timezone.utc),
-        run_id=run_id,
-        namekey=outcome.namekey,
-        session_id=outcome.session_id,
-        rollout_sha256=commit.rollout.sha256,
-        response_code=outcome.response_code,
-        response_body=outcome.response_body,
-        response_detail=outcome.response_detail,
-    )
-    conn.execute(
-        f"INSERT INTO {CONTROL_ATTEMPTS_TABLE} VALUES (?, ?, ?, ?)",
-        [
-            attempt.attempt_id,
-            str(outcome.commit_record_id),
-            attempt.request_sha256,
-            attempt.model_dump_json(),
-        ],
+        [str(record.record_id), prepared_pull_response.model_dump_json()],
     )
 
 
@@ -4774,7 +4527,7 @@ def _project_readme_record(
             line_number=line_number,
         )
         if (record.method, record.path) == AUTHORITATIVE_COMMIT_ROUTE:
-            outcome, commit_database = _validate_projected_commit(
+            prepared_pull_response, commit_database = _validate_projected_commit(
                 conn,
                 runtime,
                 record,
@@ -4788,7 +4541,11 @@ def _project_readme_record(
                     record,
                     line_number=line_number,
                 )
-            _insert_projected_outcome(conn, record, outcome)
+            _insert_prepared_pull_response(
+                conn,
+                record,
+                prepared_pull_response,
+            )
         _write_projection_checkpoint(
             conn,
             line_number=line_number,
@@ -4820,16 +4577,16 @@ def _synchronize_authoritative_projection_locked(
         projected_count = 0 if projected_count_row is None else int(projected_count_row[0])
         if checkpoint is None:
             if projected_count:
-                raise PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT)
+                raise _PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT)
             projected_line_count = 0
         else:
             projected_line_count, byte_offset, line_sha256 = checkpoint
             if projected_line_count != projected_count or projected_line_count > len(records):
-                raise PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT)
+                raise _PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT)
             if projected_line_count:
                 _, expected_offset, expected_hash = records[projected_line_count - 1]
                 if byte_offset != expected_offset or line_sha256 != expected_hash:
-                    raise PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT)
+                    raise _PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT)
         for line_number, (record, byte_offset, line_sha256) in enumerate(
             records[projected_line_count:],
             start=projected_line_count + AUTHORITATIVE_FIRST_LINE,
@@ -4848,7 +4605,7 @@ def _synchronize_authoritative_projection_locked(
         AUTHORITATIVE_BACKEND_HEALTHY = True
     except Exception as exc:
         AUTHORITATIVE_BACKEND_HEALTHY = False
-        raise PushConfigurationError(Locale.REPLAY_PROJECTION_FAILED) from exc
+        raise _PushConfigurationError(Locale.REPLAY_PROJECTION_FAILED) from exc
 
 
 def synchronize_authoritative_projection(runtime: AiAugmentBackendContext) -> None:
@@ -4867,7 +4624,7 @@ def synchronized_detour_database(
         yield conn
 
 
-def _append_authoritative_record(record: HttpRequestLogRecord) -> None:
+def append_authoritative_record(record: HttpRequestLogRecord) -> None:
     global AUTHORITATIVE_BACKEND_HEALTHY
     global AUTHORITATIVE_LOG_OFFSET
     global AUTHORITATIVE_NEXT_LINE_NUMBER
@@ -4883,10 +4640,10 @@ def _append_authoritative_record(record: HttpRequestLogRecord) -> None:
                 _synchronize_authoritative_projection_locked(runtime, conn)
                 descriptor = AUTHORITATIVE_LOG_DESCRIPTOR
                 if descriptor is None:
-                    raise PushConfigurationError(Locale.AUTHORITATIVE_LOG_NOT_OPEN)
+                    raise _PushConfigurationError(Locale.AUTHORITATIVE_LOG_NOT_OPEN)
                 end_offset = os.lseek(descriptor, AUTHORITATIVE_EMPTY_OFFSET, os.SEEK_END)
                 if end_offset != AUTHORITATIVE_LOG_OFFSET:
-                    raise PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT)
+                    raise _PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT)
                 written = 0
                 while written < len(line):
                     count = os.write(descriptor, line[written:])
@@ -4911,10 +4668,10 @@ def _append_authoritative_record(record: HttpRequestLogRecord) -> None:
             raise
 
 
-def _projected_outcome(
+def _projected_prepared_pull_response(
     runtime: AiAugmentBackendContext,
     commit_record_id: UUID,
-) -> ProjectedValidationOutcome:
+) -> PreparedPullResponse:
     with synchronized_detour_database(runtime) as conn:
         row = conn.execute(
             f"SELECT {AUTHORITATIVE_OUTCOME_PAYLOAD_COLUMN} "
@@ -4923,14 +4680,14 @@ def _projected_outcome(
             [str(commit_record_id)],
         ).fetchone()
     if row is None:
-        raise PushConfigurationError(Locale.REPLAY_COMMIT_INVALID)
+        raise _PushConfigurationError(Locale.REPLAY_COMMIT_INVALID)
     try:
-        return ProjectedValidationOutcome.model_validate_json(str(row[0]))
+        return PreparedPullResponse.model_validate_json(str(row[0]))
     except ValidationError as exc:
-        raise PushConfigurationError(Locale.REPLAY_COMMIT_INVALID) from exc
+        raise _PushConfigurationError(Locale.REPLAY_COMMIT_INVALID) from exc
 
 
-def _read_appendwatch_bytes(configuration: PushConfiguration) -> bytes:
+def _read_appendwatch_bytes(configuration: _PushConfiguration) -> bytes:
     options = _aivm_connection_options(
         lima_ssh_config=configuration.lima_ssh_config,
         identity_file=configuration.identity_file,
@@ -4955,33 +4712,38 @@ def _read_appendwatch_bytes(configuration: PushConfiguration) -> bytes:
             timeout=SSH_TIMEOUT_SECONDS,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        raise PushConfigurationError(Locale.APPENDWATCH_ARCHIVE_FAILED) from exc
+        raise _PushConfigurationError(Locale.APPENDWATCH_ARCHIVE_FAILED) from exc
     return completed.stdout
 
 
 def _synthetic_commit_record(
     *,
-    pull_record_id: UUID,
-    push_record_id: UUID,
-    rollout_archive: ArchivedFile,
+    pull_record: HttpRequestLogRecord,
+    push_record: HttpRequestLogRecord,
+    session_id: UUID,
+    rollout_archive: _ArchivedFile,
     rollout_filename: str,
     appendwatch_report: bytes,
     namekey: str,
-) -> HttpRequestLogRecord:
-    commit = ReplayCommit(
-        pull_record_id=pull_record_id,
-        push_record_id=push_record_id,
-        rollout=ReplayRolloutReference(
+) -> BackendCommitRecord:
+    codex_session_record = CodexSessionRecord(
+        session_id=session_id,
+        codex_rollout_record=CodexRolloutRecord(
             sha256=rollout_archive.sha256,
             size=rollout_archive.size,
             line_count=rollout_archive.line_count,
         ),
-        appendwatch_report=Base64Artifact(
-            encoding="base64",
+        appendwatch_report_record=AppendwatchReportRecord(
+            encoding=AppendwatchReportEncoding.BASE64,
             data=base64.b64encode(appendwatch_report).decode(BASE64_TEXT_ENCODING),
         ),
     )
-    return HttpRequestLogRecord(
+    commit = CommitRequestBody(
+        pull_record=pull_record,
+        push_record=push_record,
+        codex_session_record=codex_session_record,
+    )
+    return BackendCommitRecord(
         schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
         method=HTTP_POST_METHOD,
         scheme=SYNTHETIC_COMMIT_SCHEME,
@@ -4997,36 +4759,102 @@ def _synthetic_commit_record(
             ),
             NAME_KEY_HEADER: _name_key_header(namekey),
         },
-        request_body=commit.model_dump(mode="json"),
+        request_body=commit.model_dump_json(),
         response_code=None,
         response_headers=None,
         response_body=None,
         received_at_unix_usec=None,
         duration_usec=None,
+        pull_record=pull_record,
+        push_record=push_record,
+        codex_session_record=codex_session_record,
     )
 
 
-def _apply_projected_outcome(outcome: ProjectedValidationOutcome) -> None:
-    global BACKEND_WORKFLOW_OUTCOME
+def _run_outcome_snapshot_configuration(session_id: str | None) -> _PushConfiguration:
+    rollout_name = (
+        f"{ROLLOUT_FILENAME_PREFIX}{session_id or 'run-outcome-snapshot'}{ROLLOUT_FILENAME_SUFFIX}"
+    )
+    return push_configuration(str(CODEX_SESSIONS_ROOT / rollout_name))
+
+
+def capture_run_outcome_snapshot(
+    runtime: AiAugmentBackendContext,
+) -> tuple[RunOutcomeResponseBody, str | None, tuple[Exception, ...]]:
+    with BACKEND_WORKFLOW_STATE_LOCK:
+        session_id = BACKEND_SESSION_ID
+        pull_record_id = BACKEND_PENDING_PULL_RECORD_ID or BACKEND_CURRENT_PULL_RECORD_ID
+        push_record_id = BACKEND_LATEST_PUSH_RECORD_ID
+
+    rollout_archive: _ArchivedFile | None = None
+    rollout_filename: str | None = None
+    appendwatch_report: bytes | None = None
+    failures: list[Exception] = []
+
+    if session_id is not None:
+        try:
+            rollout_configuration = push_configuration_for_session(session_id)
+            rollout_archive = copy_rollout_to_cas(rollout_configuration, runtime)
+            rollout_filename = rollout_configuration.rollout_relative_path.name
+        except (OSError, _PushConfigurationError) as exc:
+            failures.append(exc)
+
+    try:
+        appendwatch_configuration = _run_outcome_snapshot_configuration(session_id)
+        appendwatch_report = _read_appendwatch_bytes(appendwatch_configuration)
+    except (OSError, _PushConfigurationError) as exc:
+        failures.append(exc)
+
+    snapshot = RunOutcomeResponseBody(
+        pull_record_id=pull_record_id,
+        push_record_id=push_record_id,
+        codex_session_record=CodexSessionRecord(
+            session_id=None if session_id is None else UUID(session_id),
+            codex_rollout_record=(
+                None
+                if rollout_archive is None
+                else CodexRolloutRecord(
+                    sha256=rollout_archive.sha256,
+                    size=rollout_archive.size,
+                    line_count=rollout_archive.line_count,
+                )
+            ),
+            appendwatch_report_record=(
+                None
+                if appendwatch_report is None
+                else AppendwatchReportRecord(
+                    encoding=AppendwatchReportEncoding.BASE64,
+                    data=base64.b64encode(appendwatch_report).decode(BASE64_TEXT_ENCODING),
+                )
+            ),
+        ),
+    )
+    return snapshot, rollout_filename, tuple(failures)
+
+
+def _apply_prepared_pull_response(
+    prepared_pull_response: PreparedPullResponse,
+) -> None:
+    global BACKEND_PREPARED_PULL_RESPONSE
     global BACKEND_WORKFLOW_STATUS
 
     with BACKEND_WORKFLOW_STATE_LOCK:
-        BACKEND_WORKFLOW_OUTCOME = outcome
-        if outcome.response_code == status.HTTP_200_OK:
+        BACKEND_PREPARED_PULL_RESPONSE = prepared_pull_response
+        if prepared_pull_response.response_code == status.HTTP_200_OK:
             BACKEND_WORKFLOW_STATUS = BackendWorkflowStatus.RETRY
-        elif outcome.response_code == status.HTTP_410_GONE:
+        elif prepared_pull_response.response_code == status.HTTP_410_GONE:
             BACKEND_WORKFLOW_STATUS = BackendWorkflowStatus.COMPLETE
         else:
             BACKEND_WORKFLOW_STATUS = BackendWorkflowStatus.FAILED
 
 
 def _mark_workflow_failed(error: Exception) -> None:
-    global BACKEND_WORKFLOW_OUTCOME
+    global BACKEND_PREPARED_PULL_RESPONSE
     global BACKEND_WORKFLOW_STATUS
 
     logger.error(Locale.POST_ACCEPT_PROCESSING_FAILED_LOG, error)
     with BACKEND_WORKFLOW_STATE_LOCK:
-        BACKEND_WORKFLOW_OUTCOME = None
+        BACKEND_PREPARED_PULL_RESPONSE = None
         BACKEND_WORKFLOW_STATUS = BackendWorkflowStatus.FAILED
 
 
@@ -5036,26 +4864,34 @@ def _commit_accepted_push(record: HttpRequestLogRecord) -> None:
         pull_record_id = BACKEND_PENDING_PULL_RECORD_ID
         session_id = BACKEND_SESSION_ID
     if pull_record_id is None or session_id is None or runtime.namekey is None:
-        _mark_workflow_failed(PushConfigurationError(Locale.PUSH_LINKAGE_MISSING))
+        _mark_workflow_failed(_PushConfigurationError(Locale.PUSH_LINKAGE_MISSING))
         return
     try:
         configuration = push_configuration_for_session(session_id)
         rollout_archive = copy_rollout_to_cas(configuration, runtime)
         report_bytes = _read_appendwatch_bytes(configuration)
-    except (OSError, PushConfigurationError) as exc:
+    except (OSError, _PushConfigurationError) as exc:
         _mark_workflow_failed(exc)
         return
+    with synchronized_detour_database(runtime) as connection:
+        _pull_ordinal, pull_record = _projected_http_record(
+            connection,
+            pull_record_id,
+        )
     commit_record = _synthetic_commit_record(
-        pull_record_id=pull_record_id,
-        push_record_id=record.record_id,
+        pull_record=pull_record,
+        push_record=record,
+        session_id=UUID(session_id),
         rollout_archive=rollout_archive,
         rollout_filename=configuration.rollout_relative_path.name,
         appendwatch_report=report_bytes,
         namekey=runtime.namekey,
     )
     try:
-        _append_authoritative_record(commit_record)
-        _apply_projected_outcome(_projected_outcome(runtime, commit_record.record_id))
+        append_authoritative_record(commit_record)
+        _apply_prepared_pull_response(
+            _projected_prepared_pull_response(runtime, commit_record.record_id)
+        )
     except Exception as exc:
         logger.critical(Locale.COMMIT_APPEND_FATAL_LOG, exc)
         raise SystemExit(1) from exc
@@ -5073,6 +4909,7 @@ def _authoritative_background_finished(task: asyncio.Task[None]) -> None:
 
 async def _after_authoritative_public_record(record: HttpRequestLogRecord) -> None:
     global BACKEND_CURRENT_PULL_RECORD_ID
+    global BACKEND_LATEST_PUSH_RECORD_ID
 
     route = (record.method, record.path)
     if route == (HTTP_GET_METHOD, PULL_PATH):
@@ -5082,6 +4919,8 @@ async def _after_authoritative_public_record(record: HttpRequestLogRecord) -> No
         return
     if route != (HTTP_POST_METHOD, PUSH_PATH) or (record.response_code != status.HTTP_202_ACCEPTED):
         return
+    with BACKEND_WORKFLOW_STATE_LOCK:
+        BACKEND_LATEST_PUSH_RECORD_ID = record.record_id
     task = asyncio.create_task(asyncio.to_thread(_commit_accepted_push, record))
     AUTHORITATIVE_BACKGROUND_TASKS.add(task)
     task.add_done_callback(_authoritative_background_finished)
@@ -5101,11 +4940,11 @@ def _namekey_innerdict_rows(
             [namekey],
         ).fetchall()
     except duckdb.Error as exc:
-        raise PushValidationError(
+        raise _PushValidationError(
             Locale.SOURCE_DUCKDB_TABLE_MISSING_TEMPLATE.format(table_name=table_name)
         ) from exc
     if len(rows) > 1:
-        raise PushValidationError(
+        raise _PushValidationError(
             Locale.CONFIGURED_ROWS_DUPLICATE_TEMPLATE.format(table_name=table_name)
         )
     if not rows:
@@ -5117,8 +4956,8 @@ def _namekey_innerdict_rows(
             table_name=table_name,
             namekey=namekey,
         )
-    except PushConfigurationError as exc:
-        raise PushValidationError(str(exc)) from exc
+    except _PushConfigurationError as exc:
+        raise _PushValidationError(str(exc)) from exc
 
 
 def load_source_researcher(
@@ -5128,13 +4967,13 @@ def load_source_researcher(
     namekey: str,
 ) -> SourceResearcher:
     if cohorts is None or namekey not in cohorts:
-        raise PushValidationError(Locale.CONFIGURED_NAMEKEY_INELIGIBLE)
+        raise _PushValidationError(Locale.CONFIGURED_NAMEKEY_INELIGIBLE)
     try:
         name_key = NameKey.from_json_key(namekey)
     except (ValueError, TypeError, json.JSONDecodeError) as exc:
-        raise PushValidationError(Locale.CONFIGURED_NAMEKEY_MALFORMED) from exc
+        raise _PushValidationError(Locale.CONFIGURED_NAMEKEY_MALFORMED) from exc
     if name_key.to_json_key() != namekey:
-        raise PushValidationError(Locale.CONFIGURED_NAMEKEY_NONCANONICAL)
+        raise _PushValidationError(Locale.CONFIGURED_NAMEKEY_NONCANONICAL)
 
     xlsx_rows = _namekey_innerdict_rows(
         source_conn,
@@ -5152,7 +4991,7 @@ def load_source_researcher(
         namekey=namekey,
     )
     if not xlsx_rows:
-        raise PushValidationError(Locale.CONFIGURED_XLSX_CONTEXT_MISSING)
+        raise _PushValidationError(Locale.CONFIGURED_XLSX_CONTEXT_MISSING)
     draw_numbers = tuple(
         sorted(
             {
@@ -5164,7 +5003,7 @@ def load_source_researcher(
         )
     )
     if not draw_numbers:
-        raise PushValidationError(Locale.CONFIGURED_DRAW_MISSING)
+        raise _PushValidationError(Locale.CONFIGURED_DRAW_MISSING)
     return SourceResearcher(
         namekey=namekey,
         first_name=name_key.first_name,
@@ -5177,8 +5016,8 @@ def load_source_researcher(
     )
 
 
-def researcher_context(researcher: SourceResearcher) -> ResearcherContext:
-    return ResearcherContext(
+def researcher_context(researcher: SourceResearcher) -> _ResearcherContext:
+    return _ResearcherContext(
         namekey=researcher.namekey,
         draw_number=DRAW_VALUE_SEPARATOR.join(researcher.draw_numbers),
         first_name=researcher.first_name,
@@ -5210,7 +5049,7 @@ def ground_truth_for_researcher(researcher: SourceResearcher) -> dict[str, objec
         if all(column in row and bool(str(row[column]).strip()) for column in required_columns)
     ]
     if not complete_rows:
-        raise PushValidationError(Locale.GROUND_TRUTH_DOCX_INCOMPLETE)
+        raise _PushValidationError(Locale.GROUND_TRUTH_DOCX_INCOMPLETE)
     return select_columns(complete_rows[0])
 
 
@@ -5222,7 +5061,7 @@ def render_codex_values(
     argument_ref_urls: Mapping[str, str],
 ) -> dict[str, str | None]:
     rendered: dict[str, str | None] = {}
-    ordered_matches: list[EvidenceMatch] = []
+    ordered_matches: list[_EvidenceMatch] = []
     standardized_columns = dict(AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS)
     for column, field_submission in submission.evidence_items():
         matches = evidence[column]
@@ -5285,6 +5124,28 @@ def _create_codex_output_schema(conn: duckdb.DuckDBPyConnection) -> None:
     )
 
 
+def _replace_codex_output_view(conn: duckdb.DuckDBPyConnection) -> None:
+    projection = ", ".join(
+        duckdb_quote_identifier(column) for column, _data_type in CODEX_OUTPUT_SCHEMA
+    )
+    conn.execute(
+        f"""
+        CREATE OR REPLACE VIEW {CODEX_OUTPUT_VIEW} AS
+        SELECT {projection}
+        FROM {CODEX_OUTPUT_ROWS_TABLE}
+        ORDER BY
+            {duckdb_quote_identifier(KTP_FILENAME_COL)},
+            {duckdb_quote_identifier(KTP_FRAGMENT_COL)},
+            {duckdb_quote_identifier(KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL)}
+        """
+    )
+    materialize_innerdicts_from_rows_table(
+        conn,
+        source_relation=CODEX_OUTPUT_VIEW,
+        table_name=CODEX_INNERDICT_TABLE,
+    )
+
+
 def append_codex_output(
     conn: duckdb.DuckDBPyConnection,
     row: Mapping[str, object],
@@ -5299,29 +5160,14 @@ def append_codex_output(
             [row[column] for column in columns],
         )
     except duckdb.ConstraintException as exc:
-        raise PushValidationError(Locale.ACCEPTED_IDENTITY_DUPLICATE) from exc
-    conn.execute(
-        f"""
-        CREATE OR REPLACE VIEW {CODEX_OUTPUT_VIEW} AS
-        SELECT {projection}
-        FROM {CODEX_OUTPUT_ROWS_TABLE}
-        ORDER BY
-            {duckdb_quote_identifier(KTP_FILENAME_COL)},
-            {duckdb_quote_identifier(KTP_FRAGMENT_COL)},
-            {duckdb_quote_identifier(KTP_AI_AUGMENT_ATTEMPT_ID_COL)}
-        """
-    )
-    materialize_innerdicts_from_rows_table(
-        conn,
-        source_relation=CODEX_OUTPUT_VIEW,
-        table_name=CODEX_INNERDICT_TABLE,
-    )
+        raise _PushValidationError(Locale.ACCEPTED_IDENTITY_DUPLICATE) from exc
+    _replace_codex_output_view(conn)
 
 
 def selected_card_outer_dict(
     source_conn: duckdb.DuckDBPyConnection,
     detour_conn: duckdb.DuckDBPyConnection,
-    researcher: ResearcherContext,
+    researcher: _ResearcherContext,
 ) -> OuterDict:
     name_key = NameKey(**{
         KTP_FIRST_NAME_COL: researcher.first_name,
@@ -5338,7 +5184,7 @@ def selected_card_outer_dict(
         detour_conn,
         table_name=CODEX_INNERDICT_TABLE,
         outer_dict=outer_dict,
-        procedure=CodexMatchProcedure(),
+        procedure=_CodexMatchProcedure(),
         required_columns={KTP_FILENAME_COL, KTP_FRAGMENT_COL},
     )
     append_innerdicts_from_jsonlines_table(
@@ -5399,25 +5245,26 @@ def write_accepted_submission(
     *,
     submission: StandardizedSubmission,
     evidence: ValidatedEvidence,
-    researcher: ResearcherContext,
-    rollout_index: RolloutIndex,
-    rollout_archive: ArchivedFile,
+    researcher: _ResearcherContext,
+    rollout_index: _RolloutIndex,
+    rollout_archive: _ArchivedFile,
     attempt_dir: Path,
-    attempt_id: str,
+    commit_record_id: str,
+    commit_request_body: str,
     attempt_timestamp: datetime,
     source_researcher: SourceResearcher,
     manage_transaction: bool = True,
     materialize_files: bool = True,
-) -> tuple[tuple[str, ...], ArchivedFile | None]:
+) -> tuple[tuple[str, ...], _ArchivedFile | None]:
     normalized_submission = submission.normalized_values()
     response_path = attempt_dir / RESPONSE_FILENAME
     zip_name = CARD_ZIP_FILENAME_TEMPLATE.format(
         prefix=CARD_ZIP_PREFIX,
-        attempt_id=attempt_id,
+        attempt_id=commit_record_id,
     )
     zip_path = runtime.pipeline.output_dir / zip_name
     if materialize_files and zip_path.exists():
-        raise PushValidationError(Locale.ATTEMPT_CARD_ZIP_EXISTS)
+        raise _PushValidationError(Locale.ATTEMPT_CARD_ZIP_EXISTS)
 
     rendered = render_codex_values(
         submission,
@@ -5436,8 +5283,9 @@ def write_accepted_submission(
         DRAW_LABEL: researcher.draw_number,
         KTP_FIRST_NAME_COL: researcher.first_name,
         KTP_LAST_NAME_COL: researcher.last_name,
-        KTP_AI_AUGMENT_ATTEMPT_ID_COL: attempt_id,
-        KTP_AI_AUGMENT_SESSION_METADATA_COL: rollout_index.session.compact_json,
+        KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL: commit_record_id,
+        KTP_AI_AUGMENT_COMMIT_REQUEST_BODY_COL: commit_request_body,
+        KTP_AI_AUGMENT_SESSION_METADATA_COL: rollout_index.session.summary_json,
         **rendered,
     }
 
@@ -5460,7 +5308,7 @@ def write_accepted_submission(
                 excluded_cols=CARD_EXCLUDED_COLUMNS,
             )
             if len(cards) != 1:
-                raise PushValidationError(Locale.RESEARCHER_CARD_COUNT_INVALID)
+                raise _PushValidationError(Locale.RESEARCHER_CARD_COUNT_INVALID)
             write_cards_zip(
                 cards,
                 runtime.pipeline.output_dir,
@@ -5481,227 +5329,222 @@ def write_accepted_submission(
     return response_lines, _archived_file(zip_path) if materialize_files else None
 
 
-def execute_attempt(
+def _execute_attempt(
     detour_conn: duckdb.DuckDBPyConnection,
     runtime: AiAugmentBackendContext,
-    replay: AttemptReplayInput,
-) -> AttemptExecution:
-    source_conn: duckdb.DuckDBPyConnection | None = None
+    *,
+    commit_record: BackendCommitRecord,
+    rollout_archive: _ArchivedFile,
+    appendwatch_report: AppendwatchReportRecord,
+    rollout_relative_path: PurePosixPath,
+    run_id: UUID,
+    namekey: NameKey,
+    materialize_files: bool,
+) -> tuple[PreparedPullResponse, bool]:
+    commit_request_body = commit_record.request_body
+    push_request_body = commit_record.push_record.request_body
+    session_id = commit_record.codex_session_record.session_id
+    assert commit_request_body is not None
+    assert push_request_body is not None
+    assert session_id is not None
+
+    attempt_timestamp = datetime.fromtimestamp(
+        commit_record.record_id.time / 1_000,
+        tz=timezone.utc,
+    )
+    canonical_namekey = namekey.to_json_key()
     retry_submission_expected = False
-    session_id = replay.session_id
-    namekey = replay.namekey
-    stage = ATTEMPT_STAGE_APPENDWATCH_VALIDATION
-    try:
-        if replay.validate_appendwatch:
-            if replay.report_archive is None:
-                raise PushConfigurationError(Locale.APPENDWATCH_REPORT_UNREADABLE)
-            parse_appendwatch_report(
-                replay.report_archive.path,
-                replay.rollout_relative_path,
+    stage = PostCommitValidationStage.APPENDWATCH_REPORT_VALIDATION
+
+    def result(
+        *,
+        validation_result: PostCommitValidationResult,
+        detail: str | None,
+        error: Exception | None,
+        commit_database: bool,
+        accepted_response_body: str = "",
+    ) -> tuple[PreparedPullResponse, bool]:
+        post_commit_validation = PostCommitValidation(
+            stage=stage,
+            result=validation_result,
+            detail=detail,
+        )
+        _log_post_commit_validation(
+            str(commit_record.push_record.record_id),
+            post_commit_validation,
+            error,
+        )
+        return (
+            _prepared_pull_response_from_validation(
+                record=commit_record,
+                post_commit_validation=post_commit_validation,
+                accepted_response_body=accepted_response_body,
+            ),
+            commit_database,
+        )
+
+    source_conn: duckdb.DuckDBPyConnection | None = None
+    with tempfile.TemporaryDirectory() as temporary_directory:
+        attempt_dir = Path(temporary_directory)
+        try:
+            report_path = attempt_dir / APPENDWATCH_ARCHIVE_FILENAME_TEMPLATE.format(
+                attempt_id=commit_record.record_id
             )
-        stage = ATTEMPT_STAGE_ROLLOUT_INDEX
-        rollout_index = build_rollout_index(
-            parse_rollout(replay.rollout_archive.path),
-            timezone_name=runtime.pipeline.timezone,
-            configured_rollout_basename=replay.rollout_relative_path.name,
-        )
-        if rollout_index.session.session_id != session_id:
-            raise PushValidationError(Locale.CONFIGURED_SESSION_MISMATCH)
-        session_id = rollout_index.session.session_id
-        persist_rollout_index(
-            detour_conn,
-            rollout_index,
-            codex_match_version=runtime.pipeline.match_rule_version.codex_match,
-            manage_transaction=False,
-        )
+            report_path.write_bytes(appendwatch_report.decoded_bytes())
+            parse_appendwatch_report(
+                report_path,
+                rollout_relative_path,
+            )
+            stage = PostCommitValidationStage.ROLLOUT_INDEX
+            rollout_index = build_rollout_index(
+                parse_rollout(rollout_archive.path),
+                timezone_name=runtime.pipeline.timezone,
+                configured_rollout_basename=rollout_relative_path.name,
+            )
+            if rollout_index.session.session_id != str(session_id):
+                raise _PushValidationError(Locale.CONFIGURED_SESSION_MISMATCH)
+            persist_rollout_index(
+                detour_conn,
+                rollout_index,
+                codex_match_version=runtime.pipeline.match_rule_version.codex_match,
+                manage_transaction=False,
+            )
 
-        stage = ATTEMPT_STAGE_PYDANTIC_VALIDATION
-        retry_submission_expected = _retry_baseline_exists(
-            detour_conn,
-            run_id=replay.run_id,
-            namekey=namekey,
-            session_id=replay.session_id,
-        )
-        submission: SubmissionPayload = (
-            StandardizedSubmission.model_validate_json(replay.request_body)
-            if retry_submission_expected
-            else Submission.model_validate_json(replay.request_body)
-        )
+            stage = PostCommitValidationStage.PYDANTIC_VALIDATION
+            retry_submission_expected = _retry_baseline_exists(
+                detour_conn,
+                run_id=run_id,
+                namekey=canonical_namekey,
+                session_id=str(session_id),
+            )
+            submission: SubmissionPayload = (
+                StandardizedSubmission.model_validate_json(push_request_body)
+                if retry_submission_expected
+                else Submission.model_validate_json(push_request_body)
+            )
 
-        stage = ATTEMPT_STAGE_EVIDENCE_VALIDATION
-        _seed_evidence_random(runtime.pipeline.sample_seed)
-        evidence_assessment = assess_submission_evidence(
-            detour_conn,
-            submission,
-            rollout_filename=rollout_index.session.rollout_filename,
-            codex_match_version=runtime.pipeline.match_rule_version.codex_match,
-        )
-        _log_evidence_assessment(
-            evidence_assessment,
-            attempt_id=replay.attempt_id,
-        )
-        retry_violations = _process_retry_attempt(
-            detour_conn,
-            run_id=replay.run_id,
-            namekey=namekey,
-            session_id=replay.session_id,
-            attempt_id=replay.attempt_id,
-            attempt_timestamp=replay.attempt_timestamp,
-            submission=submission,
-            assessment=evidence_assessment,
-            manage_transaction=False,
-        )
-        if not evidence_assessment.accepted or retry_violations:
-            raise EvidenceAssessmentError(
-                Locale.EVIDENCE_SUBMISSION_REJECTED,
-                public_detail=_assessment_public_detail(
-                    evidence_assessment,
-                    violations=retry_violations,
-                    include_retry_contract=True,
+            stage = PostCommitValidationStage.DUCKDB_EVIDENCE_VALIDATION
+            _seed_evidence_random(runtime.pipeline.sample_seed)
+            evidence_assessment = assess_submission_evidence(
+                detour_conn,
+                submission,
+                rollout_filename=rollout_index.session.rollout_filename,
+                codex_match_version=runtime.pipeline.match_rule_version.codex_match,
+            )
+            _log_evidence_assessment(
+                evidence_assessment,
+                attempt_id=str(commit_record.record_id),
+            )
+            retry_violations = _process_retry_attempt(
+                detour_conn,
+                run_id=run_id,
+                namekey=canonical_namekey,
+                session_id=str(session_id),
+                attempt_id=str(commit_record.record_id),
+                attempt_timestamp=attempt_timestamp,
+                submission=submission,
+                assessment=evidence_assessment,
+                manage_transaction=False,
+            )
+            if not evidence_assessment.accepted or retry_violations:
+                raise _EvidenceAssessmentError(
+                    Locale.EVIDENCE_SUBMISSION_REJECTED,
+                    public_detail=_assessment_public_detail(
+                        evidence_assessment,
+                        violations=retry_violations,
+                        include_retry_contract=True,
+                    ),
+                )
+            accepted_submission = (
+                submission
+                if isinstance(submission, StandardizedSubmission)
+                else _standardized_initial_submission(submission)
+            )
+
+            stage = PostCommitValidationStage.RESEARCHER_RESOLUTION
+            source_conn = open_source_database(runtime)
+            source_researcher = load_source_researcher(
+                source_conn,
+                runtime.eligible_cohorts,
+                namekey=canonical_namekey,
+            )
+            researcher = researcher_context(source_researcher)
+
+            stage = PostCommitValidationStage.INNERDICT_AND_CARD
+            response_lines, _card_archive = write_accepted_submission(
+                detour_conn,
+                source_conn,
+                runtime,
+                submission=accepted_submission,
+                evidence=evidence_assessment.validated,
+                researcher=researcher,
+                rollout_index=rollout_index,
+                rollout_archive=rollout_archive,
+                attempt_dir=attempt_dir,
+                commit_record_id=str(commit_record.record_id),
+                commit_request_body=commit_request_body,
+                attempt_timestamp=attempt_timestamp,
+                source_researcher=source_researcher,
+                manage_transaction=False,
+                materialize_files=materialize_files,
+            )
+            stage = PostCommitValidationStage.ACCEPTED
+            return result(
+                validation_result=PostCommitValidationResult.ACCEPTED,
+                detail=None,
+                error=None,
+                commit_database=True,
+                accepted_response_body="".join(response_lines),
+            )
+        except _PushConfigurationError as exc:
+            return result(
+                validation_result=PostCommitValidationResult.CONFIGURATION_ERROR,
+                detail=Locale.CONFIGURATION_ERROR_DETAIL,
+                error=exc,
+                commit_database=False,
+            )
+        except _MultipleEvidenceMatches as exc:
+            return result(
+                validation_result=PostCommitValidationResult.REJECTED,
+                detail=Locale.MULTIPLE_MATCH_DETAIL_TEMPLATE.format(excerpt=exc.excerpt),
+                error=exc,
+                commit_database=(stage is PostCommitValidationStage.DUCKDB_EVIDENCE_VALIDATION),
+            )
+        except _PushValidationError as exc:
+            return result(
+                validation_result=PostCommitValidationResult.REJECTED,
+                detail=(
+                    exc.public_detail
+                    if isinstance(exc, _EvidenceAssessmentError)
+                    else Locale.VALIDATION_ERROR_DETAIL
+                ),
+                error=exc,
+                commit_database=(
+                    stage
+                    in {
+                        PostCommitValidationStage.PYDANTIC_VALIDATION,
+                        PostCommitValidationStage.DUCKDB_EVIDENCE_VALIDATION,
+                    }
                 ),
             )
-        accepted_submission = (
-            submission
-            if isinstance(submission, StandardizedSubmission)
-            else _standardized_initial_submission(submission)
-        )
-
-        stage = ATTEMPT_STAGE_RESEARCHER_RESOLUTION
-        source_conn = open_source_database(runtime)
-        source_researcher = load_source_researcher(
-            source_conn,
-            runtime.eligible_cohorts,
-            namekey=namekey,
-        )
-        researcher = researcher_context(source_researcher)
-
-        stage = ATTEMPT_STAGE_CARD
-        response_lines, card_archive = write_accepted_submission(
-            detour_conn,
-            source_conn,
-            runtime,
-            submission=accepted_submission,
-            evidence=evidence_assessment.validated,
-            researcher=researcher,
-            rollout_index=rollout_index,
-            rollout_archive=replay.rollout_archive,
-            attempt_dir=replay.attempt_dir,
-            attempt_id=replay.attempt_id,
-            attempt_timestamp=replay.attempt_timestamp,
-            source_researcher=source_researcher,
-            manage_transaction=False,
-            materialize_files=replay.materialize_files,
-        )
-        response_body = "".join(response_lines)
-        return AttemptExecution(
-            stage=ATTEMPT_STAGE_ACCEPTED,
-            result=ATTEMPT_RESULT_ACCEPTED,
-            response_code=status.HTTP_200_OK,
-            response_body=response_body,
-            response_detail=None,
-            response_lines=response_lines,
-            retry_submission_expected=retry_submission_expected,
-            namekey=namekey,
-            session_id=session_id,
-            card_archive=card_archive,
-            error=None,
-            commit_database=True,
-        )
-    except PushConfigurationError as exc:
-        detail = Locale.CONFIGURATION_ERROR_DETAIL
-        return AttemptExecution(
-            stage=stage,
-            result=ATTEMPT_RESULT_CONFIGURATION_ERROR,
-            response_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            response_body=http_error_response_body(detail),
-            response_detail=detail,
-            response_lines=(),
-            retry_submission_expected=retry_submission_expected,
-            namekey=namekey,
-            session_id=session_id,
-            card_archive=None,
-            error=exc,
-            commit_database=False,
-        )
-    except MultipleEvidenceMatches as exc:
-        detail = Locale.MULTIPLE_MATCH_DETAIL_TEMPLATE.format(excerpt=exc.excerpt)
-        return AttemptExecution(
-            stage=stage,
-            result=ATTEMPT_RESULT_REJECTED,
-            response_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            response_body=http_error_response_body(detail),
-            response_detail=detail,
-            response_lines=(),
-            retry_submission_expected=retry_submission_expected,
-            namekey=namekey,
-            session_id=session_id,
-            card_archive=None,
-            error=exc,
-            commit_database=(stage == ATTEMPT_STAGE_EVIDENCE_VALIDATION),
-        )
-    except PushValidationError as exc:
-        detail = (
-            exc.public_detail
-            if isinstance(exc, EvidenceAssessmentError)
-            else Locale.VALIDATION_ERROR_DETAIL
-        )
-        return AttemptExecution(
-            stage=stage,
-            result=ATTEMPT_RESULT_REJECTED,
-            response_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            response_body=http_error_response_body(detail),
-            response_detail=detail,
-            response_lines=(),
-            retry_submission_expected=retry_submission_expected,
-            namekey=namekey,
-            session_id=session_id,
-            card_archive=None,
-            error=exc,
-            commit_database=(
-                stage
-                in {
-                    ATTEMPT_STAGE_PYDANTIC_VALIDATION,
-                    ATTEMPT_STAGE_EVIDENCE_VALIDATION,
-                }
-            ),
-        )
-    except ValidationError as exc:
-        detail = Locale.VALIDATION_ERROR_DETAIL + (
-            f"\n{RETRY_SUBMISSION_PUBLIC_GUIDANCE}" if retry_submission_expected else ""
-        )
-        return AttemptExecution(
-            stage=stage,
-            result=ATTEMPT_RESULT_REJECTED,
-            response_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            response_body=http_error_response_body(detail),
-            response_detail=detail,
-            response_lines=(),
-            retry_submission_expected=retry_submission_expected,
-            namekey=namekey,
-            session_id=session_id,
-            card_archive=None,
-            error=exc,
-            commit_database=True,
-        )
-    except (OSError, ValueError, duckdb.Error, subprocess.SubprocessError) as exc:
-        detail = Locale.VALIDATION_ERROR_DETAIL
-        return AttemptExecution(
-            stage=stage,
-            result=ATTEMPT_RESULT_REJECTED,
-            response_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            response_body=http_error_response_body(detail),
-            response_detail=detail,
-            response_lines=(),
-            retry_submission_expected=retry_submission_expected,
-            namekey=namekey,
-            session_id=session_id,
-            card_archive=None,
-            error=exc,
-            commit_database=False,
-        )
-    finally:
-        if source_conn is not None:
-            source_conn.close()
+        except ValidationError as exc:
+            return result(
+                validation_result=PostCommitValidationResult.REJECTED,
+                detail=Locale.VALIDATION_ERROR_DETAIL
+                + (f"\n{RETRY_SUBMISSION_PUBLIC_GUIDANCE}" if retry_submission_expected else ""),
+                error=exc,
+                commit_database=True,
+            )
+        except (OSError, ValueError, duckdb.Error, subprocess.SubprocessError) as exc:
+            return result(
+                validation_result=PostCommitValidationResult.REJECTED,
+                detail=Locale.VALIDATION_ERROR_DETAIL,
+                error=exc,
+                commit_database=False,
+            )
+        finally:
+            if source_conn is not None:
+                source_conn.close()
 
 
 def validate_transport(request: Request) -> None:
@@ -5709,15 +5552,15 @@ def validate_transport(request: Request) -> None:
         request.headers.get(HTTP_REQUEST_CONTENT_TYPE_HEADER, "").partition(";")[0].strip().lower()
     )
     if content_type != JSON_MEDIA_TYPE:
-        raise PushValidationError(Locale.REQUEST_CONTENT_TYPE_INVALID)
+        raise _PushValidationError(Locale.REQUEST_CONTENT_TYPE_INVALID)
     content_length = request.headers.get(HTTP_REQUEST_CONTENT_LENGTH_HEADER)
     if content_length is not None:
         try:
             declared_length = int(content_length)
         except ValueError as exc:
-            raise PushValidationError(Locale.REQUEST_CONTENT_LENGTH_INVALID) from exc
+            raise _PushValidationError(Locale.REQUEST_CONTENT_LENGTH_INVALID) from exc
         if declared_length < 0 or declared_length > MAX_PUSH_BODY_BYTES:
-            raise PushValidationError(Locale.REQUEST_BODY_TOO_LARGE)
+            raise _PushValidationError(Locale.REQUEST_BODY_TOO_LARGE)
 
 
 async def bounded_request_body(request: Request) -> bytes:
@@ -5725,7 +5568,7 @@ async def bounded_request_body(request: Request) -> bytes:
     async for chunk in request.stream():
         body.extend(chunk)
         if len(body) > MAX_PUSH_BODY_BYTES:
-            raise PushValidationError(Locale.REQUEST_BODY_TOO_LARGE)
+            raise _PushValidationError(Locale.REQUEST_BODY_TOO_LARGE)
     return bytes(body)
 
 
@@ -5758,66 +5601,62 @@ def pydantic_failure(exc: ValidationError) -> tuple[str | None, str, object]:
     return field, reason, failed_input
 
 
-def _attempt_records(conn: duckdb.DuckDBPyConnection) -> tuple[AttemptRecord, ...]:
+def _attempt_records(
+    conn: duckdb.DuckDBPyConnection,
+) -> tuple[AgentRuntimeAttempt, ...]:
     rows = conn.execute(
-        f"SELECT {CONTROL_ATTEMPT_RECORD_COLUMN} FROM {CONTROL_ATTEMPTS_TABLE} "
-        f"ORDER BY {ATTEMPT_ID_KEY}"
+        f"SELECT records.{AUTHORITATIVE_RECORD_PAYLOAD_COLUMN}, "
+        f"results.{AUTHORITATIVE_OUTCOME_PAYLOAD_COLUMN} "
+        f"FROM {AUTHORITATIVE_RECORDS_TABLE} AS records "
+        f"JOIN {AUTHORITATIVE_OUTCOMES_TABLE} AS results "
+        f"ON records.{AUTHORITATIVE_RECORD_ID_COLUMN} = "
+        f"results.{AUTHORITATIVE_OUTCOME_COMMIT_ID_COLUMN} "
+        f"ORDER BY records.{AUTHORITATIVE_RECORD_ORDINAL_COLUMN}"
     ).fetchall()
     try:
-        return tuple(AttemptRecord.model_validate_json(str(row[0])) for row in rows)
-    except ValidationError as exc:
-        raise PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT) from exc
+        attempts: list[AgentRuntimeAttempt] = []
+        for record_json, response_json in rows:
+            record = HttpRequestLogRecord.model_validate_json(str(record_json))
+            commit_record = _backend_commit_record(conn, record)
+            prepared_pull_response = PreparedPullResponse.model_validate_json(str(response_json))
+            attempts.append(
+                AgentRuntimeAttempt(
+                    pull_record=commit_record.pull_record,
+                    commit_record=commit_record,
+                    post_commit_validation=(prepared_pull_response.post_commit_validation),
+                )
+            )
+        return tuple(attempts)
+    except (_PushValidationError, ValidationError, ValueError) as exc:
+        raise _PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT) from exc
 
 
-def _accepted_control_attempts(
+def _accepted_innerdict_summaries(
     conn: duckdb.DuckDBPyConnection,
-) -> tuple[DashboardAcceptedAttempt, ...]:
+) -> tuple[AcceptedInnerDictSummary, ...]:
     exists = conn.execute(
         "SELECT count(*) FROM information_schema.tables WHERE table_name = ?",
         [CODEX_OUTPUT_ROWS_TABLE],
     ).fetchone()
     if exists is None or int(exists[0]) == 0:
         return ()
-    value_columns = tuple(AI_AUGMENT_COLUMNS)
-    projection = ", ".join(
-        duckdb_quote_identifier(column)
-        for column in (
-            KTP_NAMEKEY_COL,
-            KTP_AI_AUGMENT_ATTEMPT_ID_COL,
-            KTP_AI_AUGMENT_SESSION_METADATA_COL,
-            *value_columns,
-            KTP_AI_AUGMENT_FOOTNOTES_COL,
-            KTP_AI_AUGMENT_FOOTNOTE_ARGUMENTS_COL,
-        )
+    result = conn.execute(
+        f"SELECT * FROM {CODEX_OUTPUT_ROWS_TABLE} "
+        f"ORDER BY {duckdb_quote_identifier(KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL)}"
     )
-    rows = conn.execute(
-        f"SELECT {projection} FROM {CODEX_OUTPUT_ROWS_TABLE} "
-        f"ORDER BY {duckdb_quote_identifier(KTP_AI_AUGMENT_ATTEMPT_ID_COL)}"
-    ).fetchall()
-    accepted: list[DashboardAcceptedAttempt] = []
+    column_names = tuple(column[0] for column in result.description)
+    rows = result.fetchall()
+    accepted: list[AcceptedInnerDictSummary] = []
     for row in rows:
-        namekey, attempt_id, session_json, *remaining = row
-        values = remaining[: len(value_columns)]
-        footnotes, footnote_arguments = remaining[len(value_columns) :]
+        innerdict = dict(zip(column_names, row, strict=True))
         try:
-            session_metadata = CompactSessionMetadata.model_validate_json(str(session_json))
-        except ValidationError as exc:
-            raise PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT) from exc
-        accepted.append(
-            DashboardAcceptedAttempt(
-                namekey=cast(str, namekey),
-                attempt_id=cast(str, attempt_id),
-                session_metadata=session_metadata,
-                values={
-                    column: None if value is None else str(value)
-                    for column, value in zip(value_columns, values, strict=True)
-                },
-                footnotes=None if footnotes is None else str(footnotes),
-                footnote_arguments=(
-                    None if footnote_arguments is None else str(footnote_arguments)
-                ),
+            accepted.append(
+                AcceptedInnerDictSummary.from_innerdict(
+                    InnerDict.from_mapping(innerdict, _CodexMatchProcedure())
+                )
             )
-        )
+        except ValidationError as exc:
+            raise _PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT) from exc
     return tuple(accepted)
 
 
@@ -5851,12 +5690,15 @@ def _dashboard_card_markdown(
     finally:
         source_conn.close()
     if len(cards) != 1:
-        raise PushValidationError(Locale.RESEARCHER_CARD_COUNT_INVALID)
+        raise _PushValidationError(Locale.RESEARCHER_CARD_COUNT_INVALID)
     return next(iter(cards.values()))
 
 
-def _log_attempt_execution(attempt_id: str, execution: AttemptExecution) -> None:
-    error = execution.error
+def _log_post_commit_validation(
+    attempt_id: str,
+    post_commit_validation: PostCommitValidation,
+    error: Exception | None,
+) -> None:
     if error is None:
         logger.info(Locale.PUSH_ACCEPTED_LOG, attempt_id)
     elif isinstance(error, ValidationError):
@@ -5864,106 +5706,55 @@ def _log_attempt_execution(attempt_id: str, execution: AttemptExecution) -> None
         logger.warning(
             Locale.PUSH_PYDANTIC_FAILED_LOG,
             attempt_id,
-            execution.stage,
+            post_commit_validation.stage,
             field or Locale.UNKNOWN_FIELD,
             failed_input,
             reason,
         )
-    elif isinstance(error, PushConfigurationError):
+    elif isinstance(error, _PushConfigurationError):
         logger.error(
             Locale.PUSH_CONFIGURATION_FAILED_LOG,
             attempt_id,
-            execution.stage,
+            post_commit_validation.stage,
             error,
         )
-    elif isinstance(error, PushValidationError):
+    elif isinstance(error, _PushValidationError):
         logger.warning(
             Locale.PUSH_VALIDATION_FAILED_LOG,
             attempt_id,
-            execution.stage,
+            post_commit_validation.stage,
             error,
         )
     else:
         logger.warning(
             Locale.PUSH_UNEXPECTED_FAILED_LOG,
             attempt_id,
-            execution.stage,
+            post_commit_validation.stage,
             error,
         )
 
 
-def dashboard_query_payload(namekey: str | None = None) -> str:
-    runtime = runtime_configuration()
-    with synchronized_detour_database(runtime) as conn:
-        response = DashboardQueryResponse(
-            attempts=_attempt_records(conn),
-            accepted_attempts=_accepted_control_attempts(conn),
-            card_markdown=(
-                None
-                if namekey is None
-                else _dashboard_card_markdown(
-                    runtime,
-                    conn,
-                    namekey=namekey,
-                )
-            ),
-        )
-    return response.model_dump_json()
-
-
-def ipc_only_dashboard_query_payload(namekey: str | None = None) -> str:
-    runtime = runtime_configuration()
-    with DETOUR_DB_LOCK:
-        conn = open_detour_database(runtime, read_only=True)
-        try:
-            response = DashboardQueryResponse(
-                attempts=_attempt_records(conn),
-                accepted_attempts=_accepted_control_attempts(conn),
-                card_markdown=(
-                    None
-                    if namekey is None
-                    else _dashboard_card_markdown(
-                        runtime,
-                        conn,
-                        namekey=namekey,
-                    )
-                ),
+def dashboard_query_response(
+    runtime: AiAugmentBackendContext,
+    conn: duckdb.DuckDBPyConnection,
+    *,
+    namekey: str | None,
+    run_outcome_records: tuple[RunOutcomeResponse, ...],
+) -> QueryResponse:
+    return QueryResponse(
+        attempts=_attempt_records(conn),
+        accepted_innerdict_summaries=_accepted_innerdict_summaries(conn),
+        run_outcome_records=run_outcome_records,
+        card_markdown=(
+            None
+            if namekey is None
+            else _dashboard_card_markdown(
+                runtime,
+                conn,
+                namekey=namekey,
             )
-        finally:
-            conn.close()
-    return response.model_dump_json()
-
-
-def build_ipc_only_dashboard_query_payload_callback(
-    config_path: Path,
-) -> Callable[[str | None], str]:
-    configured = False
-
-    def query(namekey: str | None) -> str:
-        nonlocal configured
-
-        if not configured:
-            configure_runtime(config_path, require_namekey=False)
-            configured = True
-        return ipc_only_dashboard_query_payload(namekey)
-
-    return query
-
-
-def serve_dashboard_query_only(config_path: Path) -> None:
-    server = start_dashboard_query_server(
-        DASHBOARD_SOCKET_PATH,
-        build_ipc_only_dashboard_query_payload_callback(config_path),
-        namekey_parameter=KTP_NAMEKEY_COL,
-        query_path=DASHBOARD_QUERY_PATH,
+        ),
     )
-    try:
-        server.thread.join()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        stop_dashboard_query_server(server)
-        close_backend_detour_database()
 
 
 @app.get(**PULL_ROUTE)
@@ -5971,7 +5762,7 @@ def authoritative_pull() -> Response:
     runtime = runtime_configuration()
     with BACKEND_WORKFLOW_STATE_LOCK:
         workflow_status = BACKEND_WORKFLOW_STATUS
-        outcome = BACKEND_WORKFLOW_OUTCOME
+        prepared_pull_response = BACKEND_PREPARED_PULL_RESPONSE
     if workflow_status is BackendWorkflowStatus.BUSY:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -5984,25 +5775,27 @@ def authoritative_pull() -> Response:
             detail=Locale.CONFIGURATION_ERROR_DETAIL,
         )
     if workflow_status in {BackendWorkflowStatus.RETRY, BackendWorkflowStatus.COMPLETE}:
-        if outcome is None:
+        if prepared_pull_response is None:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=Locale.CONFIGURATION_ERROR_DETAIL,
             )
         return Response(
-            content=outcome.response_body,
-            status_code=outcome.response_code,
-            media_type=outcome.response_headers[HTTP_REQUEST_LOG_RESPONSE_CONTENT_TYPE_HEADER],
+            content=prepared_pull_response.response_body,
+            status_code=prepared_pull_response.response_code,
+            media_type=prepared_pull_response.response_headers[
+                HTTP_REQUEST_LOG_RESPONSE_CONTENT_TYPE_HEADER
+            ],
         )
     try:
         if runtime.namekey is None:
-            raise PushConfigurationError(Locale.PUSH_LINKAGE_MISSING)
+            raise _PushConfigurationError(Locale.PUSH_LINKAGE_MISSING)
         researcher = runtime.source_researcher
         if researcher is None:
-            raise PushConfigurationError(Locale.PUSH_LINKAGE_MISSING)
+            raise _PushConfigurationError(Locale.PUSH_LINKAGE_MISSING)
         lines = tuple(configured_pull_lines(researcher))
         return StreamingResponse(iter(lines), media_type=MEDIA_TYPE_WITH_CHARSET)
-    except (PushConfigurationError, PushValidationError, OSError, duckdb.Error) as exc:
+    except (_PushConfigurationError, _PushValidationError, OSError, duckdb.Error) as exc:
         logger.error(Locale.PULL_FAILED_LOG, exc)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -6015,7 +5808,7 @@ async def authoritative_push(request: Request) -> Response:
     del request
     global BACKEND_CURRENT_PULL_RECORD_ID
     global BACKEND_PENDING_PULL_RECORD_ID
-    global BACKEND_WORKFLOW_OUTCOME
+    global BACKEND_PREPARED_PULL_RESPONSE
     global BACKEND_WORKFLOW_STATUS
 
     with BACKEND_WORKFLOW_STATE_LOCK:
@@ -6043,33 +5836,9 @@ async def authoritative_push(request: Request) -> Response:
             )
         BACKEND_PENDING_PULL_RECORD_ID = BACKEND_CURRENT_PULL_RECORD_ID
         BACKEND_CURRENT_PULL_RECORD_ID = None
-        BACKEND_WORKFLOW_OUTCOME = None
+        BACKEND_PREPARED_PULL_RESPONSE = None
         BACKEND_WORKFLOW_STATUS = BackendWorkflowStatus.BUSY
     return Response(
         status_code=status.HTTP_202_ACCEPTED,
         headers={LOCATION_HEADER: PULL_PATH},
     )
-
-
-def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=Locale.CLI_DESCRIPTION)
-    parser.add_argument(CONFIG_OPTION, required=True, type=Path)
-    parser.add_argument(IPC_ONLY_OPTION, action="store_true")
-    return parser.parse_args(argv)
-
-
-def main(argv: list[str] | None = None) -> None:
-    args = parse_args(argv)
-    _acquire_backend_process_lock()
-    try:
-        if args.ipc_only:
-            serve_dashboard_query_only(args.config)
-        else:
-            configure_runtime(args.config)
-            uvicorn.run(app, host=SERVER_HOST, port=SERVER_PORT)
-    finally:
-        _release_backend_process_lock()
-
-
-if __name__ == "__main__":
-    main()

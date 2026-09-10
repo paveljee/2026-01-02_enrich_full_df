@@ -69,7 +69,7 @@ BACKEND_BASE_URL: Final = f"http://{BACKEND_HOST}:{BACKEND_PORT}"
 BACKEND_OPENAPI_URL: Final = f"{BACKEND_BASE_URL}/openapi.json"
 BACKEND_PULL_URL: Final = f"{BACKEND_BASE_URL}/pull"
 
-BACKEND_MODULE: Final = "src.detours.detour_ai_augment.src.backend.api"
+BACKEND_MODULE: Final = "src.detours.detour_ai_augment.src.backend.server"
 
 BACKEND_READY_TIMEOUT_SECONDS: Final = 30
 BACKEND_READY_POLL_SECONDS: Final = 0.1

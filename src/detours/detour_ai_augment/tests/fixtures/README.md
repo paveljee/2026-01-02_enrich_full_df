@@ -8,12 +8,12 @@ for `'{"ktp.first_name":"A.","ktp.last_name":"Sheikh"}'`.
 
 It anchors the regression covering Backend validation,
 synthetic commit linkage, projection, and
-the terminal `GET /pull -> 410 Gone` response.
+the final `GET /pull -> 410 Gone` response.
 
 The content of this was copied and pasted by
 the Human Operator manually from shell output.
 
-The captured terminal response is not tracked
+The captured final response is not tracked
 because its optional second line contained production ground truth.
 The regression derives its accepted-values line exactly from this fixture
 and supplies synthetic ground truth instead.
