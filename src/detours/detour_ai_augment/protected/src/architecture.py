@@ -11,19 +11,57 @@ from typing import (
 )
 from uuid import UUID
 
+from src.helpers.config import PipelineConfig
 from src.helpers.data_models import (
     HttpRequestLogRecord,
     InnerDict,
+    MatchingProcedure,
     NameKey,
 )
 
 from .acme_protocol import ComponentProtocol
+from .backend.helpers.data_models.pydantic_to_paste import StandardizedSubmission
+from .backend.helpers.data_models.submission_init import Submission
+from .backend.helpers.vars import (
+    AiAugmentCohort,
+    AiAugmentIneligibilityCategory,
+)
+from .control_centre.dashboard.helpers.data_models.lima import LimaConfiguration
 
 
 class BackendComponent(
     ComponentProtocol,
     Protocol,
 ):
+    class ContextProperty(
+        ComponentProtocol.PropertyProtocol,
+        Protocol,
+    ):
+        @property
+        def pipeline_config(self) -> PipelineConfig: ...
+
+        @property
+        def configured_namekey(self) -> NameKey | None: ...
+
+        def ai_augment_outerdicts_factory(
+            self,
+        ) -> tuple[
+            BackendComponent.ControlCentrePort.AiAugmentOuterDictProperty,
+            ...,
+        ]: ...
+
+        @property
+        def ai_augment_outerdicts(
+            self,
+        ) -> tuple[
+            BackendComponent.ControlCentrePort.AiAugmentOuterDictProperty,
+            ...,
+        ]: ...
+
+        def configured_ai_augment_outerdict(
+            self,
+        ) -> BackendComponent.ControlCentrePort.AiAugmentOuterDictProperty | None: ...
+
     class WorkflowStatusProperty(
         ComponentProtocol.PropertyProtocol,
         Protocol,
@@ -171,6 +209,31 @@ class BackendComponent(
     ):
         """Serves the Backend - AI Agent Runtime Connector."""
 
+        class AttemptRecordProperty(
+            ComponentProtocol.PortProtocol.PropertyProtocol,
+            Protocol,
+        ):
+            @property
+            def attempt(self) -> AgentRuntimeComponent.AttemptProperty: ...
+
+            @property
+            def submission(
+                self,
+            ) -> Submission | StandardizedSubmission | None: ...
+
+            @property
+            def ground_truth_innerdict(self) -> InnerDict | None: ...
+
+            @classmethod
+            def from_serialized_json(
+                cls,
+                value: str | bytes,
+                *,
+                procedure: MatchingProcedure | None,
+            ) -> Self: ...
+
+            def serialize(self) -> dict[str, object]: ...
+
         class CodexRolloutRecordProperty(
             ComponentProtocol.PortProtocol.PropertyProtocol,
             Protocol,
@@ -225,34 +288,6 @@ class BackendComponent(
     ):
         """Serves the Backend - Control Centre Connector."""
 
-        class AiAugmentCohortProperty(
-            ComponentProtocol.PortProtocol.PropertyProtocol,
-            Protocol,
-        ):
-            @property
-            def value(
-                self,
-            ) -> Literal[
-                "ground_truth",
-                "no_ground_truth",
-                "ineligible",
-            ]: ...
-
-        class AiAugmentIneligibilityCategoryProperty(
-            ComponentProtocol.PortProtocol.PropertyProtocol,
-            Protocol,
-        ):
-            @property
-            def value(
-                self,
-            ) -> Literal[
-                "excluded_duplicate_namekey",
-                "release_batch_subset_8",
-                "staging_partition_2",
-                "staging_partition_4_xlsx_non_exact",
-                "staging_partition_4_multiple_ssn",
-            ]: ...
-
         class CommittedInnerDictProperty(
             ComponentProtocol.PortProtocol.PropertyProtocol,
             Protocol,
@@ -303,15 +338,12 @@ class BackendComponent(
             @property
             def ai_augment_cohort(
                 self,
-            ) -> BackendComponent.ControlCentrePort.AiAugmentCohortProperty: ...
+            ) -> AiAugmentCohort: ...
 
             @property
             def ai_augment_ineligibility_category(
                 self,
-            ) -> (
-                BackendComponent.ControlCentrePort.AiAugmentIneligibilityCategoryProperty
-                | None
-            ): ...
+            ) -> AiAugmentIneligibilityCategory | None: ...
 
             def validate_ai_augment_outerdict(self) -> Self: ...
 
@@ -384,7 +416,7 @@ class BackendComponent(
             def attempts(
                 self,
             ) -> tuple[
-                AgentRuntimeComponent.AttemptProperty,
+                BackendComponent.AgentRuntimePort.AttemptRecordProperty,
                 ...,
             ]: ...
 
@@ -437,6 +469,19 @@ class ControlCentreComponent(
     ComponentProtocol,
     Protocol,
 ):
+    class ContextProperty(
+        BackendComponent.ContextProperty,
+        ComponentProtocol.PropertyProtocol,
+        Protocol,
+    ):
+        @property
+        def openalex_api_key(self) -> str: ...
+
+        @property
+        def lima_configuration(
+            self,
+        ) -> LimaConfiguration: ...
+
     class RunEventKindProperty(
         ComponentProtocol.PropertyProtocol,
         Protocol,
@@ -557,7 +602,12 @@ class ControlCentreComponent(
         ]: ...
 
         @property
-        def attempts(self) -> tuple[AgentRuntimeComponent.AttemptProperty, ...]: ...
+        def attempts(
+            self,
+        ) -> tuple[
+            AgentRuntimeComponent.AttemptProperty,
+            ...,
+        ]: ...
 
         @property
         def run_outcome_record(

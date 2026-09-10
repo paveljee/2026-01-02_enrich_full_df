@@ -4,6 +4,7 @@ from typing import Self
 from pydantic import model_validator
 
 from src.helpers.config import PipelineConfig
+from src.helpers.data_models import RegisteredResource
 
 from ..vars import (
     MAP_SUBSET_0_TO_BATCH_KEY,

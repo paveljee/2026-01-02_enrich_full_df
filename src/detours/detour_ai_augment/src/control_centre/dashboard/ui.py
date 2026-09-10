@@ -39,18 +39,15 @@ from src.helpers.vars import (
     KTP_NAMEKEY_COL,
 )
 
-from ...architecture import ControlCentreComponent
+from src.detours.detour_ai_augment.protected.src.architecture import (
+    ControlCentreComponent,
+)
 from ...backend.api import (
     APPENDWATCH_REPORT_ENV_NAME,
     CARD_EXCLUDED_COLUMNS,
     CODEX_SESSIONS_ROOT_ENV_NAME,
     CONTROL_PARENT_PID_ENV_NAME,
     DOCX_TO_AI_AUGMENT_COLUMNS,
-    EXPECTED_GROUND_TRUTH_RESEARCHERS,
-    EXPECTED_INELIGIBILITY_COUNTS,
-    EXPECTED_INELIGIBLE_RESEARCHERS,
-    EXPECTED_NO_GROUND_TRUTH_RESEARCHERS,
-    EXPECTED_SOURCE_RESEARCHERS,
     HTTP_GET_METHOD,
     HTTP_POST_METHOD,
     NAMEKEY_ENV_NAME,
@@ -63,27 +60,38 @@ from ...backend.api import (
     registered_release_map,
     selected_card_outer_dict,
 )
-from ...backend.helpers.data_models.ai_augment_config import AiAugmentDetourConfig
 from ...backend.helpers.data_models.ai_augment_context import (
+    EXPECTED_GROUND_TRUTH_RESEARCHERS,
+    EXPECTED_INELIGIBILITY_COUNTS,
+    EXPECTED_INELIGIBLE_RESEARCHERS,
+    EXPECTED_NO_GROUND_TRUTH_RESEARCHERS,
+    EXPECTED_SOURCE_RESEARCHERS,
+)
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_augment_config import (
+    AiAugmentDetourConfig,
+)
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.pydantic_to_paste import (
+    EXPORT_OPENALEX_API_KEY,
+)
+from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     AiAugmentCohort,
     AiAugmentIneligibilityCategory,
+    AI_AUGMENT_COLUMN_PREFIX,
+    KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL,
+    KTP_AI_AUGMENT_FOOTNOTE_ARGUMENTS_COL,
+    KTP_AI_AUGMENT_FOOTNOTES_COL,
+)
+from ...backend.helpers.data_models.ai_augment_outer_dict import (
     AiAugmentOuterDict,
     CommittedInnerDict,
     QueryResponse,
 )
-from ...backend.helpers.data_models.pydantic_to_paste import EXPORT_OPENALEX_API_KEY
 from ...backend.helpers.data_models.server_event import (
     SOURCE_KEY_HEADER,
     AgentRuntimeAttempt,
     PostCommitValidationResult,
     RunOutcomeResponse,
     RunOutcomeResponseBody,
-)
-from ...backend.helpers.vars import (
-    AI_AUGMENT_COLUMN_PREFIX,
-    KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL,
-    KTP_AI_AUGMENT_FOOTNOTE_ARGUMENTS_COL,
-    KTP_AI_AUGMENT_FOOTNOTES_COL,
 )
 from ...backend.ipc import (
     DASHBOARD_IPC_HOST,
@@ -107,8 +115,10 @@ from .helpers.data_models.run_outcome import (
     RunOutcome,
     RunOutcomeRequest,
 )
-from .helpers.locale import Locale
-from .helpers.vars import (
+from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helpers.locale import (
+    Locale,
+)
+from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helpers.vars import (
     AIVM_SSH_CONNECTION_COMMAND,
     AIVM_SSH_FORWARD_COMMAND,
     AIVM_SSH_TARGET,
@@ -2826,7 +2836,9 @@ class _ControlCentreController:
         if raw_backend_snapshot is None:
             return
         try:
-            snapshot = QueryResponse.from_serialized_json(json.dumps(raw_backend_snapshot))
+            snapshot = QueryResponse.from_serialized_json(
+                json.dumps(raw_backend_snapshot)
+            )
         except (TypeError, ValueError, ValidationError) as exc:
             raise RuntimeError(Locale.BACKEND_DATABASE_RESPONSE_INVALID) from exc
         self._apply_backend_snapshot(snapshot)
@@ -3688,17 +3700,26 @@ def create_services(
     config_path: Path = DEFAULT_CONFIG_PATH,
     source_data_cache: _CachedSourceData | None = None,
 ) -> _ApplicationServices:
-    configuration = AiAugmentControlCentreContext.load(
-        config_path=config_path,
-        ai_augment_outerdicts=(
-            None if source_data_cache is None else source_data_cache.outerdicts()
+    pipeline_config = AiAugmentDetourConfig.from_json(config_path)
+    pipeline_config.release_map = registered_release_map(pipeline_config)
+    configuration = AiAugmentControlCentreContext(
+        pipeline_config=pipeline_config,
+        cached_ai_augment_outerdicts=(
+            None
+            if source_data_cache is None
+            else source_data_cache.outerdicts()
         ),
     )
+    _ = configuration.ai_augment_outerdicts
     source_repository = _SourceRepository(configuration=configuration)
     backend = _BackendSupervisor(
         repository_root=REPOSITORY_ROOT,
         openalex_api_key=configuration.openalex_api_key,
-        appendwatch_report=configuration.appendwatch_report,
+        appendwatch_report=PurePosixPath(
+            configuration.lima_configuration.param[
+                LIMA_APPENDWATCH_REPORT_PARAM
+            ]
+        ),
         dashboard_socket_path=DASHBOARD_SOCKET_PATH,
         pipeline_config=configuration.pipeline_config,
     )

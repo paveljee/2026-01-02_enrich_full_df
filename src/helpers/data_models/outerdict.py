@@ -34,7 +34,11 @@ class InnerDict(BaseModel):
     """Wrapper for dataset rows with validation of the matching procedure."""
 
     data: dict[str, Any]
-    procedure: Any
+    # must pass an appropriate procedure
+    # upon `.from_mapping()` as this is not
+    # serialized with `exclude=True`;
+    # signed off: human
+    procedure: Any = Field(exclude=True)
 
     @model_validator(mode="after")
     def validate_procedure(self) -> "InnerDict":

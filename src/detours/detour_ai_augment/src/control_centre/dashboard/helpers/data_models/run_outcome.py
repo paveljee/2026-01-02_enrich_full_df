@@ -16,7 +16,9 @@ from src.helpers.vars import (
     KTP_LAST_NAME_COL,
 )
 
-from .....architecture import ControlCentreComponent
+from src.detours.detour_ai_augment.protected.src.architecture import (
+    ControlCentreComponent,
+)
 
 type RunOutcomeValue = Literal["completed", "failed", "cancelled"]
 type RunOutcomePath = Literal["/completed", "/failed", "/cancelled"]

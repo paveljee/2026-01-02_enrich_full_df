@@ -2,9 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from enum import StrEnum
-from pathlib import Path
-from typing import Any, Literal, Self
+from typing import Any, Self
 from uuid import UUID
 
 from pydantic import (
@@ -20,7 +18,6 @@ from src.helpers.data_models import (
     HttpRequestLogRecord,
     InnerDict,
     NameKey,
-    RegisteredResource,
 )
 from src.helpers.procedures import (
     DocxMatchProcedure,
@@ -29,24 +26,25 @@ from src.helpers.procedures import (
 )
 from src.helpers.vars import DRAW_LABEL, KTP_NAMEKEY_COL
 
-from ....architecture import BackendComponent
+from src.detours.detour_ai_augment.protected.src.architecture import (
+    BackendComponent,
+)
+from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
+    AiAugmentCohort,
+    AiAugmentIneligibilityCategory,
+    KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL,
+    KTP_AI_AUGMENT_SESSION_METADATA_COL,
+)
+
 from ....control_centre.dashboard.helpers.data_models.run_outcome import (
     NAME_KEY_HEADER,
     name_key_from_header_value,
 )
-from ..vars import (
-    KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL,
-    KTP_AI_AUGMENT_SESSION_METADATA_COL,
-)
-from .ai_augment_config import AiAugmentDetourConfig
-from .server_event import (
-    AgentRuntimeAttempt,
+from .commit_event import (
     BackendCommitRecord,
     CodexRolloutRecord,
     CodexSessionRecord,
     CommitRequestBody,
-    PostCommitValidation,
-    RunOutcomeResponse,
 )
 
 

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import csv
 import fcntl
 import hashlib
 import json
@@ -16,7 +15,6 @@ import sys
 import tempfile
 import threading
 import time
-from collections import Counter
 from collections.abc import AsyncGenerator, Iterator, Mapping, Sequence
 from contextlib import asynccontextmanager, contextmanager, suppress
 from dataclasses import dataclass
@@ -48,7 +46,6 @@ from src.helpers.config import PipelineConfig
 from src.helpers.data_models import (
     FragmentType,
     InnerDict,
-    MatchingProcedure,
     NameKey,
     OuterDict,
     RegisteredResource,
@@ -63,16 +60,8 @@ from src.helpers.duckdb_utils import (
     materialize_innerdicts_from_rows_table,
 )
 from src.helpers.name_matching import normalized_tokens_sql
-from src.helpers.procedures import DocxMatchProcedure, ParquetMatchProcedure, XlsxMatchProcedure
 from src.helpers.resources import register_resource
-from src.helpers.schema import (
-    CARD_PARTITION_TABLE,
-    DOCX_INNERDICT_TABLE,
-    PARQUET_INNERDICT_TABLE,
-    XLSX_INNERDICT_TABLE,
-)
 from src.helpers.vars import (
-    BATCH_LABEL,
     CARD_INTRODUCTION,
     CSV_ROW_INDEX_COL,
     DOCX_FRAGMENT_COL,
@@ -85,34 +74,19 @@ from src.helpers.vars import (
     KTP_FRAGMENT_COL,
     KTP_FRAGMENT_TYPE_COL,
     KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
-    KTP_INNERDICT_JSONLINES_COL,
     KTP_LAST_NAME_COL,
     KTP_NAMEKEY_COL,
-    KTP_PARTITION_COL,
-    KTP_PARTITION_DOCX_VALUE,
-    KTP_PARTITION_FLAG_SSN_COUNT_COL,
-    KTP_PARTITION_FLAG_XLSX_NON_EXACT_ANY_COL,
-    KTP_PARTITION_SSN_VALUE,
     KTP_TABLE_1_EMPTY_VALUE_PLACEHOLDERS,
 )
 
-from ..architecture import BackendComponent
-from ..control_centre.dashboard.helpers.data_models.run_outcome import (
-    NAME_KEY_HEADER,
-    name_key_from_header_value,
-    name_key_header_value,
+from src.detours.detour_ai_augment.protected.src.architecture import (
+    BackendComponent,
 )
-from .helpers import codex_parse
-from .helpers.data_models.ai_augment_config import AiAugmentDetourConfig
-from .helpers.data_models.ai_augment_context import (
-    AiAugmentBackendContext,
-    AiAugmentCohort,
-    AiAugmentIneligibilityCategory,
-    AiAugmentOuterDict,
-    CommittedInnerDict,
-    QueryResponse,
+from src.detours.detour_ai_augment.protected.src.backend.helpers import codex_parse
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_augment_config import (
+    AiAugmentDetourConfig,
 )
-from .helpers.data_models.pydantic_to_paste import (
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.pydantic_to_paste import (
     MAX_PUSH_BODY_BYTES,
     EvidenceSubmission,
     EvidenceWithdrawal,
@@ -127,32 +101,15 @@ from .helpers.data_models.pydantic_to_paste import (
     StandardizedValue,
     WebSearchExcerpt,
 )
-from .helpers.data_models.server_event import (
-    COMMIT_PATH,
-    SOURCE_KEY_HEADER,
-    AgentRuntimeAttempt,
-    AppendwatchReportEncoding,
-    AppendwatchReportRecord,
-    BackendCommitRecord,
-    CodexRolloutRecord,
-    CodexSessionRecord,
-    CommitRequestBody,
-    PostCommitValidation,
-    PostCommitValidationResult,
-    PostCommitValidationStage,
-    PreparedPullResponse,
-    RunOutcomeResponse,
-    RunOutcomeResponseBody,
-    source_key_from_header_value,
-    source_key_header_value,
-)
-from .helpers.data_models.submission_fixture import (
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.submission_fixture import (
     L_FEI_FEI_INITIAL_FIXTURE,
     L_FEI_FEI_RETRY_FIXTURE,
 )
-from .helpers.data_models.submission_init import Submission
-from .helpers.locale import Locale
-from .helpers.vars import (
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.submission_init import (
+    Submission,
+)
+from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
+from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     AI_AUGMENT_COLUMNS,
     AI_AUGMENT_EVIDENCE_COLUMNS,
     AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS,
@@ -175,6 +132,44 @@ from .helpers.vars import (
     KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL,
     MAP_SUBSET_0_TO_BATCH_KEY,
     TEXT_ENCODING,
+    AiAugmentCohort,
+)
+
+from ..control_centre.dashboard.helpers.data_models.run_outcome import (
+    NAME_KEY_HEADER,
+    name_key_from_header_value,
+    name_key_header_value,
+)
+from .helpers.data_models.ai_augment_context import (
+    AiAugmentBackendContext,
+)
+from .helpers.data_models.ai_augment_outer_dict import (
+    AiAugmentOuterDict,
+    CommittedInnerDict,
+)
+from .helpers.data_models.commit_event import (
+    COMMIT_PATH,
+    SOURCE_KEY_HEADER,
+    AppendwatchReportEncoding,
+    AppendwatchReportRecord,
+    BackendCommitRecord,
+    CodexRolloutRecord,
+    CodexSessionRecord,
+    CommitRequestBody,
+    PostCommitValidation,
+    PostCommitValidationResult,
+    PostCommitValidationStage,
+    source_key_from_header_value,
+    source_key_header_value,
+)
+from .helpers.data_models.query_response import (
+    AgentRuntimeAttempt,
+    AgentRuntimeAttemptRecord,
+    QueryResponse,
+)
+from .helpers.data_models.run_outcome_response import (
+    RunOutcomeResponse,
+    RunOutcomeResponseBody,
 )
 
 logger = logging.getLogger(__name__)
@@ -442,49 +437,7 @@ LOCATION_HEADER = "Location"
 RETRY_AFTER_SECONDS = "1"
 MARKDOWN_MEDIA_TYPE = "text/markdown"
 
-MAP_COLUMNS = (DRAW_LABEL, BATCH_LABEL)
-# ground truth is defined explicitly by released batch, exclusive of dupe
-GROUND_TRUTH_RELEASE_BATCHES = frozenset({"subset 1", "subset 5", "subset 6", "subset 7"})
-EXCLUDED_NAMEKEY = json.dumps(
-    {KTP_FIRST_NAME_COL: "Mercouri G.", KTP_LAST_NAME_COL: "Kanatzidis"},
-    sort_keys=True,
-)
-GROUND_TRUTH_DEF: Callable[
-    [str, Mapping[str, str], tuple[str, ...]],
-    bool,
-] = lambda namekey, release_batches, draws: (
-    namekey != EXCLUDED_NAMEKEY
-    and any(release_batches.get(draw) in GROUND_TRUTH_RELEASE_BATCHES for draw in draws)
-)
-# no ground truth is defined analytically from all unreleased except some
-NO_GROUND_TRUTH_PARTITION = 4
-NO_GROUND_TRUTH_SSN_COUNT = 1
-NO_GROUND_TRUTH_DEF: Callable[
-    [int, bool, int],
-    bool,
-] = lambda partition, xlsx_non_exact, ssn_count: (
-    partition == NO_GROUND_TRUTH_PARTITION
-    and not xlsx_non_exact
-    and ssn_count == NO_GROUND_TRUTH_SSN_COUNT
-)
-EXPECTED_GROUND_TRUTH_RESEARCHERS = 196
-EXPECTED_NO_GROUND_TRUTH_RESEARCHERS = 78
-EXPECTED_ELIGIBLE_RESEARCHERS = 274
-EXPECTED_INELIGIBLE_RESEARCHERS = 33
-EXPECTED_SOURCE_RESEARCHERS = EXPECTED_ELIGIBLE_RESEARCHERS + EXPECTED_INELIGIBLE_RESEARCHERS
-EXPECTED_MULTIDRAW_SOURCE_RESEARCHERS = 5
-RND_START = 1
-INELIGIBLE_RELEASE_BATCH = "subset 8"
-EXPECTED_INELIGIBILITY_COUNTS = {
-    AiAugmentIneligibilityCategory.EXCLUDED_DUPLICATE_NAMEKEY: 1,
-    AiAugmentIneligibilityCategory.RELEASE_BATCH_SUBSET_8: 3,
-    AiAugmentIneligibilityCategory.STAGING_PARTITION_2: 7,
-    AiAugmentIneligibilityCategory.STAGING_PARTITION_4_XLSX_NON_EXACT: 6,
-    AiAugmentIneligibilityCategory.STAGING_PARTITION_4_MULTIPLE_SSN: 16,
-}
 DRAW_VALUE_SEPARATOR = ", "
-DRAW_PILOT_PREFIX = "pilot."
-DRAW_SORT_PART = re.compile(r"\d+|\D+")
 
 DETOUR_ID = "ai-augment"
 DETOUR_DB_LOCK = threading.Lock()
@@ -499,7 +452,7 @@ AUTHORITATIVE_LOG_OFFSET = 0
 AUTHORITATIVE_BACKGROUND_TASKS: set[asyncio.Task[None]] = set()
 BACKEND_WORKFLOW_STATE_LOCK = threading.Lock()
 BACKEND_WORKFLOW_STATUS = BackendWorkflowStatus.READY
-BACKEND_PREPARED_PULL_RESPONSE: PreparedPullResponse | None = None
+BACKEND_ATTEMPT_RECORD: AgentRuntimeAttemptRecord | None = None
 BACKEND_CURRENT_PULL_RECORD_ID: UUID | None = None
 BACKEND_PENDING_PULL_RECORD_ID: UUID | None = None
 BACKEND_LATEST_PUSH_RECORD_ID: UUID | None = None
@@ -531,9 +484,9 @@ AUTHORITATIVE_RECORD_ID_COLUMN = "record_id"
 AUTHORITATIVE_RECORD_METHOD_COLUMN = "method"
 AUTHORITATIVE_RECORD_PATH_COLUMN = "path"
 AUTHORITATIVE_RECORD_PAYLOAD_COLUMN = "record"
-AUTHORITATIVE_OUTCOMES_TABLE = "detour_validation_outcomes"
-AUTHORITATIVE_OUTCOME_COMMIT_ID_COLUMN = "commit_record_id"
-AUTHORITATIVE_OUTCOME_PAYLOAD_COLUMN = "outcome"
+AUTHORITATIVE_ATTEMPTS_TABLE = "detour_agent_runtime_attempt_records"
+AUTHORITATIVE_ATTEMPT_COMMIT_ID_COLUMN = "commit_record_id"
+AUTHORITATIVE_ATTEMPT_PAYLOAD_COLUMN = "attempt_record"
 
 CODEX_ID_COL = "id"
 CODEX_FC_TIMESTAMP_COL = "codex.fc_timestamp"
@@ -580,10 +533,10 @@ CREATE_AUTHORITATIVE_RECORDS_TABLE_SQL = (
     f"{AUTHORITATIVE_RECORD_PATH_COLUMN} VARCHAR NOT NULL, "
     f"{AUTHORITATIVE_RECORD_PAYLOAD_COLUMN} JSON NOT NULL)"
 )
-CREATE_AUTHORITATIVE_OUTCOMES_TABLE_SQL = (
-    f"CREATE TABLE IF NOT EXISTS {AUTHORITATIVE_OUTCOMES_TABLE} ("
-    f"{AUTHORITATIVE_OUTCOME_COMMIT_ID_COLUMN} VARCHAR PRIMARY KEY, "
-    f"{AUTHORITATIVE_OUTCOME_PAYLOAD_COLUMN} JSON NOT NULL)"
+CREATE_AUTHORITATIVE_ATTEMPTS_TABLE_SQL = (
+    f"CREATE TABLE IF NOT EXISTS {AUTHORITATIVE_ATTEMPTS_TABLE} ("
+    f"{AUTHORITATIVE_ATTEMPT_COMMIT_ID_COLUMN} VARCHAR PRIMARY KEY, "
+    f"{AUTHORITATIVE_ATTEMPT_PAYLOAD_COLUMN} JSON NOT NULL)"
 )
 HTTP_REQUEST_LOG_RESPONSE_CONTENT_TYPE_HEADER = "content-type"
 HTTP_REQUEST_LOG_RESPONSE_CONTENT_TYPE_JSON = "application/json"
@@ -700,13 +653,13 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
             global BACKEND_LATEST_PUSH_RECORD_ID
             global BACKEND_PENDING_PULL_RECORD_ID
             global BACKEND_SESSION_ID
-            global BACKEND_PREPARED_PULL_RESPONSE
+            global BACKEND_ATTEMPT_RECORD
             global BACKEND_WORKFLOW_STATUS
             BACKEND_CURRENT_PULL_RECORD_ID = None
             BACKEND_PENDING_PULL_RECORD_ID = None
             BACKEND_LATEST_PUSH_RECORD_ID = None
             BACKEND_SESSION_ID = None
-            BACKEND_PREPARED_PULL_RESPONSE = None
+            BACKEND_ATTEMPT_RECORD = None
             BACKEND_WORKFLOW_STATUS = BackendWorkflowStatus.READY
         if BACKEND_PROCESS_LOCK_DESCRIPTOR is None:
             _acquire_backend_process_lock()
@@ -1234,355 +1187,6 @@ def registered_replay_log(config: PipelineConfig) -> RegisteredResource:
         ) from exc
 
 
-def load_release_batches(resource: RegisteredResource) -> dict[str, str]:
-    path = Path(resource)
-    try:
-        with path.open(encoding=TEXT_ENCODING, newline="") as stream:
-            reader = csv.DictReader(stream)
-            if tuple(reader.fieldnames or ()) != MAP_COLUMNS:
-                raise _PushConfigurationError(
-                    Locale.MAP_COLUMNS_INVALID_TEMPLATE.format(
-                        resource_key=MAP_SUBSET_0_TO_BATCH_KEY,
-                        columns=MAP_COLUMNS,
-                    )
-                )
-            batches: dict[str, str] = {}
-            for row_number, row in enumerate(reader, start=2):
-                draw_number = row.get(DRAW_LABEL)
-                release_batch = row.get(BATCH_LABEL)
-                if not _valid_nonblank(draw_number) or not _valid_nonblank(release_batch):
-                    raise _PushConfigurationError(
-                        Locale.MAP_ROW_BLANK_TEMPLATE.format(
-                            resource_key=MAP_SUBSET_0_TO_BATCH_KEY,
-                            row_number=row_number,
-                        )
-                    )
-                assert isinstance(draw_number, str)
-                assert isinstance(release_batch, str)
-                if draw_number in batches and batches[draw_number] != release_batch:
-                    raise _PushConfigurationError(
-                        Locale.MAP_DRAW_CONFLICT_TEMPLATE.format(
-                            resource_key=MAP_SUBSET_0_TO_BATCH_KEY,
-                            draw_number=draw_number,
-                        )
-                    )
-                batches[draw_number] = release_batch
-    except (OSError, UnicodeError, csv.Error) as exc:
-        raise _PushConfigurationError(
-            Locale.MAP_CSV_UNREADABLE_TEMPLATE.format(resource_key=MAP_SUBSET_0_TO_BATCH_KEY)
-        ) from exc
-    if not batches:
-        raise _PushConfigurationError(
-            Locale.MAP_CSV_EMPTY_TEMPLATE.format(resource_key=MAP_SUBSET_0_TO_BATCH_KEY)
-        )
-    return batches
-
-
-def _innerdict_json_rows(
-    value: object,
-    *,
-    table_name: str,
-    namekey: str,
-) -> tuple[dict[str, object], ...]:
-    if not isinstance(value, str):
-        raise _PushConfigurationError(
-            Locale.INNERDICTS_NON_TEXT_TEMPLATE.format(
-                table_name=table_name,
-                namekey=namekey,
-            )
-        )
-    rows: list[dict[str, object]] = []
-    for line_number, line in enumerate(value.splitlines(), start=1):
-        try:
-            row: object = json.loads(line)
-        except json.JSONDecodeError as exc:
-            raise _PushConfigurationError(
-                Locale.INNERDICTS_MALFORMED_TEMPLATE.format(
-                    table_name=table_name,
-                    namekey=namekey,
-                    line_number=line_number,
-                )
-            ) from exc
-        if not isinstance(row, dict):
-            raise _PushConfigurationError(
-                Locale.INNERDICTS_NON_OBJECT_TEMPLATE.format(
-                    table_name=table_name,
-                    namekey=namekey,
-                    line_number=line_number,
-                )
-            )
-        rows.append(cast(dict[str, object], row))
-    return tuple(rows)
-
-
-def _draw_sort_key(
-    value: str,
-) -> tuple[int, tuple[tuple[int, int | str], ...], str]:
-    raw = value.strip()
-    normalized = raw.casefold()
-    if normalized.startswith(DRAW_PILOT_PREFIX):
-        group = 0
-        sortable = normalized.removeprefix(DRAW_PILOT_PREFIX)
-    elif raw.isdecimal():
-        group = 1
-        sortable = normalized
-    elif raw:
-        group = 2
-        sortable = normalized
-    else:
-        group = 3
-        sortable = normalized
-    tokens = tuple(
-        (0, int(part)) if part.isdecimal() else (1, part)
-        for part in DRAW_SORT_PART.findall(sortable)
-    )
-    return (group, tokens, normalized)
-
-
-def _source_innerdicts_by_namekey(
-    conn: duckdb.DuckDBPyConnection,
-    *,
-    table_name: str,
-    procedure: MatchingProcedure,
-) -> dict[str, tuple[InnerDict, ...]]:
-    try:
-        table_rows = conn.execute(
-            f"SELECT {duckdb_quote_identifier(KTP_NAMEKEY_COL)}, "
-            f"{duckdb_quote_identifier(KTP_INNERDICT_JSONLINES_COL)} "
-            f"FROM {table_name} "
-            f"ORDER BY {duckdb_quote_identifier(KTP_NAMEKEY_COL)}"
-        ).fetchall()
-    except duckdb.Error as exc:
-        raise _PushConfigurationError(
-            Locale.SOURCE_DUCKDB_TABLE_MISSING_TEMPLATE.format(table_name=table_name)
-        ) from exc
-    innerdicts_by_namekey: dict[str, tuple[InnerDict, ...]] = {}
-    for raw_namekey, jsonlines in table_rows:
-        if not isinstance(raw_namekey, str):
-            raise _PushConfigurationError(
-                Locale.TABLE_NAMEKEY_NON_TEXT_TEMPLATE.format(table_name=table_name)
-            )
-        try:
-            namekey = NameKey.from_json_key(raw_namekey).to_json_key()
-        except (ValueError, TypeError, json.JSONDecodeError) as exc:
-            raise _PushConfigurationError(
-                Locale.TABLE_NAMEKEY_INVALID_TEMPLATE.format(table_name=table_name)
-            ) from exc
-        if namekey in innerdicts_by_namekey:
-            raise _PushConfigurationError(
-                Locale.CONFIGURED_ROWS_DUPLICATE_TEMPLATE.format(table_name=table_name)
-            )
-        innerdicts_by_namekey[namekey] = tuple(
-            InnerDict.from_mapping(row, procedure)
-            for row in _innerdict_json_rows(
-                jsonlines,
-                table_name=table_name,
-                namekey=namekey,
-            )
-        )
-    return innerdicts_by_namekey
-
-
-def _namekeys_and_draws(
-    *source_innerdicts: Mapping[str, tuple[InnerDict, ...]],
-) -> dict[str, tuple[NameKey, tuple[str, ...]]]:
-    draws_by_namekey: dict[str, set[str]] = {}
-    names_by_namekey: dict[str, NameKey] = {}
-    for innerdicts_by_namekey in source_innerdicts:
-        for namekey, innerdicts in innerdicts_by_namekey.items():
-            names_by_namekey[namekey] = NameKey.from_json_key(namekey)
-            namekey_draws = draws_by_namekey.setdefault(namekey, set())
-            for innerdict in innerdicts:
-                draw_number = innerdict.data.get(DRAW_LABEL)
-                if draw_number is not None:
-                    draw_text = str(draw_number).strip()
-                    if draw_text:
-                        namekey_draws.add(draw_text)
-    return {
-        namekey: (
-            name_key,
-            tuple(sorted(draws_by_namekey[namekey], key=_draw_sort_key)),
-        )
-        for namekey, name_key in names_by_namekey.items()
-    }
-
-
-def derive_ai_augment_outerdicts(
-    conn: duckdb.DuckDBPyConnection,
-    release_batches: Mapping[str, str],
-    *,
-    sample_seed: int,
-) -> tuple[AiAugmentOuterDict, ...]:
-    xlsx_innerdicts = _source_innerdicts_by_namekey(
-        conn,
-        table_name=XLSX_INNERDICT_TABLE,
-        procedure=XlsxMatchProcedure(),
-    )
-    ssn_innerdicts = _source_innerdicts_by_namekey(
-        conn,
-        table_name=PARQUET_INNERDICT_TABLE,
-        procedure=ParquetMatchProcedure(),
-    )
-    docx_innerdicts = _source_innerdicts_by_namekey(
-        conn,
-        table_name=DOCX_INNERDICT_TABLE,
-        procedure=DocxMatchProcedure(),
-    )
-    researchers_by_namekey = _namekeys_and_draws(
-        xlsx_innerdicts,
-        ssn_innerdicts,
-        docx_innerdicts,
-    )
-    rnd_values = list(range(RND_START, len(researchers_by_namekey) + RND_START))
-    Random(sample_seed).shuffle(rnd_values)
-    rnd_by_namekey = dict(zip(sorted(researchers_by_namekey), rnd_values, strict=True))
-    ground_truth = {
-        namekey
-        for namekey, (_name_key, draws) in researchers_by_namekey.items()
-        if GROUND_TRUTH_DEF(namekey, release_batches, draws)
-    }
-    try:
-        partition_rows = conn.execute(
-            f"""
-            SELECT
-                {duckdb_quote_identifier(KTP_NAMEKEY_COL)},
-                {duckdb_quote_identifier(KTP_PARTITION_COL)},
-                {duckdb_quote_identifier(KTP_PARTITION_FLAG_XLSX_NON_EXACT_ANY_COL)},
-                {duckdb_quote_identifier(KTP_PARTITION_FLAG_SSN_COUNT_COL)}
-            FROM {CARD_PARTITION_TABLE}
-            ORDER BY {duckdb_quote_identifier(KTP_NAMEKEY_COL)}
-            """
-        ).fetchall()
-    except duckdb.Error as exc:
-        raise _PushConfigurationError(
-            Locale.ELIGIBILITY_FLAGS_MISSING_TEMPLATE.format(table_name=CARD_PARTITION_TABLE)
-        ) from exc
-    partition_flags: dict[str, tuple[int, bool, int]] = {}
-    for namekey, partition, xlsx_non_exact, ssn_count in partition_rows:
-        if (
-            not isinstance(namekey, str)
-            or not isinstance(partition, int)
-            or not isinstance(xlsx_non_exact, bool)
-            or not isinstance(ssn_count, int)
-            or namekey in partition_flags
-        ):
-            raise _PushConfigurationError(
-                Locale.SOURCE_CLASSIFICATIONS_INVALID_TEMPLATE.format(
-                    table_name=CARD_PARTITION_TABLE
-                )
-            )
-        partition_flags[namekey] = (partition, xlsx_non_exact, ssn_count)
-    no_ground_truth = {
-        namekey
-        for namekey, (partition, xlsx_non_exact, ssn_count) in partition_flags.items()
-        if NO_GROUND_TRUTH_DEF(partition, xlsx_non_exact, ssn_count)
-    }
-    missing_namekeys = no_ground_truth - researchers_by_namekey.keys()
-    overlap = ground_truth & no_ground_truth
-    if missing_namekeys:
-        raise _PushConfigurationError(Locale.CARD_PARTITION_UNKNOWN_NAMEKEYS)
-    if overlap:
-        raise _PushConfigurationError(Locale.COHORTS_OVERLAP)
-    if len(ground_truth) != EXPECTED_GROUND_TRUTH_RESEARCHERS:
-        raise _PushConfigurationError(
-            Locale.GROUND_TRUTH_CARDINALITY_TEMPLATE.format(
-                expected=EXPECTED_GROUND_TRUTH_RESEARCHERS,
-                actual=len(ground_truth),
-            )
-        )
-    if len(no_ground_truth) != EXPECTED_NO_GROUND_TRUTH_RESEARCHERS:
-        raise _PushConfigurationError(
-            Locale.NO_GROUND_TRUTH_CARDINALITY_TEMPLATE.format(
-                expected=EXPECTED_NO_GROUND_TRUTH_RESEARCHERS,
-                actual=len(no_ground_truth),
-            )
-        )
-    if len(ground_truth | no_ground_truth) != EXPECTED_ELIGIBLE_RESEARCHERS:
-        raise _PushConfigurationError(Locale.ELIGIBLE_COHORT_CARDINALITY_INVALID)
-    if set(partition_flags) != set(researchers_by_namekey):
-        raise _PushConfigurationError(Locale.CARD_PARTITION_NAMEKEYS_MISMATCH)
-
-    outerdicts: list[AiAugmentOuterDict] = []
-    for namekey, (name_key, draws) in researchers_by_namekey.items():
-        ineligibility_category: AiAugmentIneligibilityCategory | None = None
-        if namekey in ground_truth:
-            cohort = AiAugmentCohort.GROUND_TRUTH
-        elif namekey in no_ground_truth:
-            cohort = AiAugmentCohort.NO_GROUND_TRUTH
-        else:
-            cohort = AiAugmentCohort.INELIGIBLE
-            partition, xlsx_non_exact, ssn_count = partition_flags[namekey]
-            if namekey == EXCLUDED_NAMEKEY:
-                ineligibility_category = (
-                    AiAugmentIneligibilityCategory.EXCLUDED_DUPLICATE_NAMEKEY
-                )
-            elif any(release_batches.get(draw) == INELIGIBLE_RELEASE_BATCH for draw in draws):
-                ineligibility_category = (
-                    AiAugmentIneligibilityCategory.RELEASE_BATCH_SUBSET_8
-                )
-            elif partition == KTP_PARTITION_SSN_VALUE:
-                ineligibility_category = (
-                    AiAugmentIneligibilityCategory.STAGING_PARTITION_2
-                )
-            elif partition == KTP_PARTITION_DOCX_VALUE and xlsx_non_exact:
-                ineligibility_category = (
-                    AiAugmentIneligibilityCategory.STAGING_PARTITION_4_XLSX_NON_EXACT
-                )
-            elif partition == KTP_PARTITION_DOCX_VALUE and ssn_count > NO_GROUND_TRUTH_SSN_COUNT:
-                ineligibility_category = (
-                    AiAugmentIneligibilityCategory.STAGING_PARTITION_4_MULTIPLE_SSN
-                )
-            else:
-                raise _PushConfigurationError(Locale.INELIGIBILITY_CATEGORY_UNKNOWN)
-        outerdicts.append(
-            AiAugmentOuterDict(
-                namekey=name_key,
-                xlsx_innerdicts=xlsx_innerdicts.get(namekey, ()),
-                ssn_innerdicts=ssn_innerdicts.get(namekey, ()),
-                docx_innerdicts=docx_innerdicts.get(namekey, ()),
-                committed_innerdicts=(),
-                ai_augment_rnd=rnd_by_namekey[namekey],
-                ai_augment_cohort=cohort,
-                ai_augment_ineligibility_category=ineligibility_category,
-            )
-        )
-
-    outerdicts.sort(
-        key=lambda outerdict: (
-            tuple(_draw_sort_key(draw) for draw in outerdict.draw_numbers),
-            outerdict.namekey.first_name.casefold(),
-            outerdict.namekey.last_name.casefold(),
-            outerdict.namekey.to_json_key(),
-        )
-    )
-    cohort_counts = Counter(outerdict.ai_augment_cohort for outerdict in outerdicts)
-    ineligibility_counts = Counter(
-        outerdict.ai_augment_ineligibility_category
-        for outerdict in outerdicts
-        if outerdict.ai_augment_ineligibility_category is not None
-    )
-    if cohort_counts != {
-        AiAugmentCohort.GROUND_TRUTH: EXPECTED_GROUND_TRUTH_RESEARCHERS,
-        AiAugmentCohort.NO_GROUND_TRUTH: EXPECTED_NO_GROUND_TRUTH_RESEARCHERS,
-        AiAugmentCohort.INELIGIBLE: EXPECTED_INELIGIBLE_RESEARCHERS,
-    }:
-        raise _PushConfigurationError(Locale.SOURCE_POPULATION_COHORTS_INVALID)
-    if ineligibility_counts != EXPECTED_INELIGIBILITY_COUNTS:
-        raise _PushConfigurationError(Locale.SOURCE_POPULATION_INELIGIBILITY_INVALID)
-    if len(outerdicts) != EXPECTED_SOURCE_RESEARCHERS:
-        raise _PushConfigurationError(Locale.SOURCE_POPULATION_CARDINALITY_INVALID)
-    if {outerdict.ai_augment_rnd for outerdict in outerdicts} != set(
-        range(RND_START, EXPECTED_SOURCE_RESEARCHERS + RND_START)
-    ):
-        raise _PushConfigurationError(Locale.SOURCE_POPULATION_RND_INVALID)
-    if (
-        sum(len(outerdict.draw_numbers) > 1 for outerdict in outerdicts)
-        != EXPECTED_MULTIDRAW_SOURCE_RESEARCHERS
-    ):
-        raise _PushConfigurationError(Locale.SOURCE_POPULATION_MULTIDRAW_INVALID)
-    return tuple(outerdicts)
-
-
 def _configured_ai_augment_outerdict(
     configured_namekey: NameKey,
     outerdicts: Sequence[AiAugmentOuterDict],
@@ -1668,40 +1272,25 @@ def configure_runtime(
 
     configured_namekey = _configured_namekey() if require_namekey else None
 
-    replay_log = registered_replay_log(pipeline)
-    release_map = registered_release_map(pipeline)
-    release_batches = load_release_batches(release_map)
-    source_conn: duckdb.DuckDBPyConnection | None = None
+    registered_replay_log(pipeline)
+    pipeline.release_map = registered_release_map(pipeline)
+    runtime = AiAugmentBackendContext(
+        pipeline_config=pipeline,
+        configured_namekey=configured_namekey,
+    )
     try:
-        source_conn = duckdb.connect(str(pipeline.db_file), read_only=True)
-        ai_augment_outerdicts = derive_ai_augment_outerdicts(
-            source_conn,
-            release_batches,
-            sample_seed=pipeline.sample_seed,
-        )
+        ai_augment_outerdicts = runtime.ai_augment_outerdicts
         if configured_namekey is not None:
             _configured_ai_augment_outerdict(
                 configured_namekey,
                 ai_augment_outerdicts,
             )
-    except duckdb.Error as exc:
-        raise _PushConfigurationError(Locale.SOURCE_DUCKDB_VALIDATION_FAILED) from exc
-    finally:
-        if source_conn is not None:
-            source_conn.close()
+    except ValueError as exc:
+        raise _PushConfigurationError(str(exc)) from exc
 
-    detour_db_path = _detour_db_path(pipeline.db_file)
-    if detour_db_path == pipeline.db_file:
+    if pipeline.detour_db_path == pipeline.db_file:
         raise _PushConfigurationError(Locale.DETOUR_DB_EQUALS_SOURCE)
-    RUNTIME_CONFIGURATION = AiAugmentBackendContext(
-        pipeline=pipeline,
-        detour_db_path=detour_db_path,
-        replay_log=replay_log,
-        rollout_cas_dir=pipeline.rollout_cas_dir,
-        configured_namekey=configured_namekey,
-        release_map=release_map,
-        ai_augment_outerdicts=ai_augment_outerdicts,
-    )
+    RUNTIME_CONFIGURATION = runtime
     return RUNTIME_CONFIGURATION
 
 
@@ -1980,8 +1569,8 @@ def copy_rollout_to_cas(
     configuration: _PushConfiguration,
     runtime: AiAugmentBackendContext,
 ) -> _ArchivedFile:
-    runtime.rollout_cas_dir.mkdir(parents=True, exist_ok=True)
-    temporary = runtime.rollout_cas_dir / ROLLOUT_CAS_TEMP_FILENAME_TEMPLATE.format(
+    runtime.pipeline_config.rollout_cas_dir.mkdir(parents=True, exist_ok=True)
+    temporary = runtime.pipeline_config.rollout_cas_dir / ROLLOUT_CAS_TEMP_FILENAME_TEMPLATE.format(
         nonce=uuid7().hex
     )
     options = _aivm_connection_options(
@@ -2013,7 +1602,7 @@ def copy_rollout_to_cas(
         if not temporary.is_file() or temporary.is_symlink():
             raise _PushConfigurationError(Locale.AUDIT_ROLLOUT_ARCHIVE_INVALID)
         archived = _archived_file(temporary)
-        destination = runtime.rollout_cas_dir / ROLLOUT_CAS_FILENAME_TEMPLATE.format(
+        destination = runtime.pipeline_config.rollout_cas_dir / ROLLOUT_CAS_FILENAME_TEMPLATE.format(
             sha256=archived.sha256
         )
         if destination.exists():
@@ -3775,7 +3364,7 @@ def open_source_database(
     runtime: AiAugmentBackendContext,
 ) -> duckdb.DuckDBPyConnection:
     try:
-        return duckdb.connect(str(runtime.pipeline.db_file), read_only=True)
+        return duckdb.connect(str(runtime.pipeline_config.db_file), read_only=True)
     except duckdb.Error as exc:
         raise _PushValidationError(Locale.SOURCE_DUCKDB_OPEN_FAILED) from exc
 
@@ -3788,13 +3377,16 @@ def open_detour_database(
     conn: duckdb.DuckDBPyConnection | None = None
     try:
         if not read_only:
-            runtime.detour_db_path.parent.mkdir(parents=True, exist_ok=True)
-        conn = duckdb.connect(str(runtime.detour_db_path), read_only=read_only)
-        if runtime.pipeline.match_rule_version.codex_match == 2:
+            runtime.pipeline_config.detour_db_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = duckdb.connect(
+            str(runtime.pipeline_config.detour_db_path),
+            read_only=read_only,
+        )
+        if runtime.pipeline_config.match_rule_version.codex_match == 2:
             load_duckdb_extension(
                 conn,
                 CODEX_TOKEN_EXTENSION,
-                runtime.pipeline.duckdb_extensions.get(CODEX_TOKEN_EXTENSION),
+                runtime.pipeline_config.duckdb_extensions.get(CODEX_TOKEN_EXTENSION),
                 log=None,
             )
         return conn
@@ -3815,12 +3407,15 @@ def _backend_detour_database(
     global DETOUR_DB_CONNECTION
     global DETOUR_DB_CONNECTION_PATH
 
-    if DETOUR_DB_CONNECTION is not None and DETOUR_DB_CONNECTION_PATH == runtime.detour_db_path:
+    if (
+        DETOUR_DB_CONNECTION is not None
+        and DETOUR_DB_CONNECTION_PATH == runtime.pipeline_config.detour_db_path
+    ):
         return DETOUR_DB_CONNECTION
     if DETOUR_DB_CONNECTION is not None:
         DETOUR_DB_CONNECTION.close()
     DETOUR_DB_CONNECTION = open_detour_database(runtime)
-    DETOUR_DB_CONNECTION_PATH = runtime.detour_db_path
+    DETOUR_DB_CONNECTION_PATH = runtime.pipeline_config.detour_db_path
     return DETOUR_DB_CONNECTION
 
 
@@ -3871,7 +3466,7 @@ def _acquire_authoritative_process_lock(runtime: AiAugmentBackendContext) -> Non
 
     if AUTHORITATIVE_LOG_DESCRIPTOR is not None:
         raise _PushConfigurationError(Locale.REPLAY_LOG_ALREADY_LOCKED)
-    descriptor = os.open(Path(runtime.replay_log), os.O_RDWR)
+    descriptor = os.open(Path(runtime.pipeline_config.replay_log), os.O_RDWR)
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError as exc:
@@ -4357,8 +3952,14 @@ def _validated_replay_rollout(
     runtime: AiAugmentBackendContext,
     reference: CodexRolloutRecord,
 ) -> _ArchivedFile:
-    path = runtime.rollout_cas_dir / ROLLOUT_CAS_FILENAME_TEMPLATE.format(sha256=reference.sha256)
-    if path.parent != runtime.rollout_cas_dir or path.is_symlink() or not path.is_file():
+    path = runtime.pipeline_config.rollout_cas_dir / ROLLOUT_CAS_FILENAME_TEMPLATE.format(
+        sha256=reference.sha256
+    )
+    if (
+        path.parent != runtime.pipeline_config.rollout_cas_dir
+        or path.is_symlink()
+        or not path.is_file()
+    ):
         raise _PushValidationError(Locale.ROLLOUT_CAS_BLOB_INVALID)
     archived = _archived_file(path)
     if (
@@ -4589,8 +4190,8 @@ def _synchronize_authoritative_projection_locked(
     global AUTHORITATIVE_NEXT_LINE_NUMBER
 
     try:
-        records = _authoritative_log_records(Path(runtime.replay_log))
-        runtime.rollout_cas_dir.mkdir(parents=True, exist_ok=True)
+        records = _authoritative_log_records(Path(runtime.pipeline_config.replay_log))
+        runtime.pipeline_config.rollout_cas_dir.mkdir(parents=True, exist_ok=True)
         _initialize_readme_authoritative_schema(conn)
         checkpoint = _projection_checkpoint(conn)
         projected_count_row = conn.execute(
@@ -5164,7 +4765,7 @@ def write_accepted_submission(
         prefix=CARD_ZIP_PREFIX,
         attempt_id=commit_record_id,
     )
-    zip_path = runtime.pipeline.output_dir / zip_name
+    zip_path = runtime.pipeline_config.output_dir / zip_name
     if materialize_files and zip_path.exists():
         raise _PushValidationError(Locale.ATTEMPT_CARD_ZIP_EXISTS)
 
@@ -5212,12 +4813,14 @@ def write_accepted_submission(
                     update={"committed_innerdicts": committed_innerdicts}
                 )
             )
-            intro_date = attempt_timestamp.astimezone(ZoneInfo(runtime.pipeline.timezone)).strftime(
+            intro_date = attempt_timestamp.astimezone(
+                ZoneInfo(runtime.pipeline_config.timezone)
+            ).strftime(
                 Locale.CARD_INTRO_DATE_FORMAT
             )
             cards = build_cards(
                 card_outer_dict,
-                total_draws=runtime.pipeline.total_draws,
+                total_draws=runtime.pipeline_config.total_draws,
                 intro=CARD_INTRODUCTION.format(intro_date),
                 excluded_cols=CARD_EXCLUDED_COLUMNS,
             )
@@ -5225,10 +4828,10 @@ def write_accepted_submission(
                 raise _PushValidationError(Locale.RESEARCHER_CARD_COUNT_INVALID)
             write_cards_zip(
                 cards,
-                runtime.pipeline.output_dir,
+                runtime.pipeline_config.output_dir,
                 zip_name,
-                output_format=runtime.pipeline.output_format,
-                reference_docx=runtime.pipeline.pandoc_reference_docx,
+                output_format=runtime.pipeline_config.output_format,
+                reference_docx=runtime.pipeline_config.pandoc_reference_docx,
             )
             _atomic_write_text(response_path, "".join(response_lines))
         if manage_transaction:
@@ -5312,7 +4915,7 @@ def _execute_attempt(
             stage = PostCommitValidationStage.ROLLOUT_INDEX
             rollout_index = build_rollout_index(
                 parse_rollout(rollout_archive.path),
-                timezone_name=runtime.pipeline.timezone,
+                timezone_name=runtime.pipeline_config.timezone,
                 configured_rollout_basename=rollout_relative_path.name,
             )
             if rollout_index.session.session_id != str(session_id):
@@ -5320,7 +4923,9 @@ def _execute_attempt(
             persist_rollout_index(
                 detour_conn,
                 rollout_index,
-                codex_match_version=runtime.pipeline.match_rule_version.codex_match,
+                codex_match_version=(
+                    runtime.pipeline_config.match_rule_version.codex_match
+                ),
                 manage_transaction=False,
             )
 
@@ -5338,12 +4943,14 @@ def _execute_attempt(
             )
 
             stage = PostCommitValidationStage.DUCKDB_EVIDENCE_VALIDATION
-            _seed_evidence_random(runtime.pipeline.sample_seed)
+            _seed_evidence_random(runtime.pipeline_config.sample_seed)
             evidence_assessment = assess_submission_evidence(
                 detour_conn,
                 submission,
                 rollout_filename=rollout_index.session.rollout_filename,
-                codex_match_version=runtime.pipeline.match_rule_version.codex_match,
+                codex_match_version=(
+                    runtime.pipeline_config.match_rule_version.codex_match
+                ),
             )
             _log_evidence_assessment(
                 evidence_assessment,
@@ -5679,7 +5286,7 @@ def authoritative_pull() -> Response:
             ],
         )
     try:
-        outerdict = runtime.configured_ai_augment_outerdict
+        outerdict = runtime.configured_ai_augment_outerdict()
         if outerdict is None:
             raise _PushConfigurationError(Locale.PUSH_LINKAGE_MISSING)
         lines = tuple(configured_pull_lines(outerdict))
