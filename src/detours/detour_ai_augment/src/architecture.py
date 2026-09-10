@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Protocol
+from typing import Literal, Protocol
 from uuid import UUID
 
 from src.helpers.data_models import HttpRequestLogRecord, NameKey
@@ -120,17 +120,57 @@ class BackendComponent(
         ):
             ...
 
+    class PostCommitValidationStageProperty(
+        ComponentProtocol
+        .PropertyProtocol,
+        Protocol,
+    ):
+        @property
+        def value(self) -> Literal[
+            "transport",
+            "configuration",
+            "rollout_copy",
+            "appendwatch_report_copy",
+            "appendwatch_report_validation",
+            "rollout_index",
+            "pydantic_validation",
+            "duckdb_evidence_validation",
+            "researcher_resolution",
+            "innerdict_and_card",
+            "accepted",
+        ]:
+            ...
+
+    class PostCommitValidationResultProperty(
+        ComponentProtocol
+        .PropertyProtocol,
+        Protocol,
+    ):
+        @property
+        def value(self) -> Literal[
+            "accepted",
+            "configuration_error",
+            "rejected",
+        ]:
+            ...
+
     class PostCommitValidationProperty(
         ComponentProtocol
         .PropertyProtocol,
         Protocol,
     ):
         @property
-        def stage(self) -> str:
+        def stage(self) -> (
+            BackendComponent
+            .PostCommitValidationStageProperty
+        ):
             ...
 
         @property
-        def result(self) -> str:
+        def result(self) -> (
+            BackendComponent
+            .PostCommitValidationResultProperty
+        ):
             ...
 
         @property
@@ -161,6 +201,16 @@ class BackendComponent(
             def line_count(self) -> int:
                 ...
 
+        class AppendwatchReportEncodingProperty(
+            ComponentProtocol
+            .PortProtocol
+            .PropertyProtocol,
+            Protocol,
+        ):
+            @property
+            def value(self) -> Literal["base64"]:
+                ...
+
         class AppendwatchReportRecordProperty(
             ComponentProtocol
             .PortProtocol
@@ -168,11 +218,64 @@ class BackendComponent(
             Protocol,
         ):
             @property
-            def encoding(self) -> str:
+            def encoding(self) -> (
+                BackendComponent
+                .AgentRuntimePort
+                .AppendwatchReportEncodingProperty
+            ):
                 ...
 
             @property
             def data(self) -> str:
+                ...
+
+    class ControlCentrePort(
+        ComponentProtocol.PortProtocol,
+        Protocol,
+    ):
+        """Serves the Backend - Control Centre Connector."""
+
+        class RunOutcomeResponseBodyProperty(
+            ComponentProtocol
+            .PortProtocol
+            .PropertyProtocol,
+            Protocol,
+        ):
+            @property
+            def pull_record_id(self) -> UUID | None:
+                ...
+
+            @property
+            def push_record_id(self) -> UUID | None:
+                ...
+
+            @property
+            def codex_session_record(
+                self,
+            ) -> (
+                BackendComponent
+                .CodexSessionRecordProperty
+            ):
+                ...
+
+        class RunOutcomeRecordProperty(
+            ComponentProtocol
+            .PortProtocol
+            .PropertyProtocol,
+            Protocol,
+        ):
+            @property
+            def run_outcome(self) -> str:
+                ...
+
+            @property
+            def run_outcome_response_body(
+                self,
+            ) -> (
+                BackendComponent
+                .ControlCentrePort
+                .RunOutcomeResponseBodyProperty
+            ):
                 ...
 
 
@@ -212,44 +315,51 @@ class ControlCentreComponent(
     Protocol,
 ):
 
-    class RunProperty(
+    class RunPhaseProperty(
         ComponentProtocol
         .PropertyProtocol,
         Protocol,
     ):
         @property
-        def run_id(self) -> UUID:
-            ...
-
-        @property
-        def namekey(self) -> NameKey:
-            ...
-
-        @property
-        def phase(self) -> str:
-            ...
-
-        @property
-        def outcome(self) -> str | None:
-            ...
-
-        @property
-        def attempts(self) -> tuple[
-            AgentRuntimeComponent
-            .AttemptProperty,
-            ...
+        def value(self) -> Literal[
+            "queued",
+            "running",
+            "finished",
         ]:
             ...
 
+    class RunOutcomeProperty(
+        ComponentProtocol
+        .PropertyProtocol,
+        Protocol,
+    ):
         @property
-        def run_outcome_record(
-            self,
-        ) -> (
-            ControlCentreComponent
-            .BackendPort
-            .RunOutcomeRecordProperty
-            | None
-        ):
+        def value(self) -> Literal[
+            "completed",
+            "failed",
+            "cancelled",
+        ]:
+            ...
+
+    class RunEventKindProperty(
+        ComponentProtocol
+        .PropertyProtocol,
+        Protocol,
+    ):
+        @property
+        def value(self) -> Literal[
+            "queued",
+            "started",
+            "remote_pid_discovered",
+            "session_discovered",
+            "rollout_discovered",
+            "push_accepted",
+            "cancel_requested",
+            "codex_exited",
+            "completed",
+            "failed",
+            "cancelled",
+        ]:
             ...
 
     class RunEventProperty(
@@ -270,7 +380,10 @@ class ControlCentreComponent(
             ...
 
         @property
-        def kind(self) -> str:
+        def kind(self) -> (
+            ControlCentreComponent
+            .RunEventKindProperty
+        ):
             ...
 
         @property
@@ -297,51 +410,57 @@ class ControlCentreComponent(
         def detail(self) -> str | None:
             ...
 
-    class BackendPort(
-        ComponentProtocol.PortProtocol,
+    class RunProperty(
+        ComponentProtocol
+        .PropertyProtocol,
         Protocol,
     ):
-        """Serves the Control Centre - Backend Connector."""
+        @property
+        def run_id(self) -> UUID:
+            ...
 
-        class RunOutcomeResponseBodyProperty(
-            ComponentProtocol
-            .PortProtocol
-            .PropertyProtocol,
-            Protocol,
+        @property
+        def namekey(self) -> NameKey:
+            ...
+
+        @property
+        def phase(self) -> (
+            ControlCentreComponent
+            .RunPhaseProperty
         ):
-            @property
-            def pull_record_id(self) -> UUID | None:
-                ...
+            ...
 
-            @property
-            def push_record_id(self) -> UUID | None:
-                ...
-
-            @property
-            def codex_session_record(
-                self,
-            ) -> (
-                BackendComponent
-                .CodexSessionRecordProperty
-            ):
-                ...
-
-        class RunOutcomeRecordProperty(
-            ComponentProtocol
-            .PortProtocol
-            .PropertyProtocol,
-            Protocol,
+        @property
+        def outcome(self) -> (
+            ControlCentreComponent
+            .RunOutcomeProperty
+            | None
         ):
-            @property
-            def run_outcome(self) -> str:
-                ...
+            ...
 
-            @property
-            def run_outcome_response_body(
-                self,
-            ) -> (
-                ControlCentreComponent
-                .BackendPort
-                .RunOutcomeResponseBodyProperty
-            ):
-                ...
+        @property
+        def events(self) -> tuple[
+            ControlCentreComponent
+            .RunEventProperty,
+            ...,
+        ]:
+            ...
+
+        @property
+        def attempts(self) -> tuple[
+            AgentRuntimeComponent
+            .AttemptProperty,
+            ...
+        ]:
+            ...
+
+        @property
+        def run_outcome_record(
+            self,
+        ) -> (
+            BackendComponent
+            .ControlCentrePort
+            .RunOutcomeRecordProperty
+            | None
+        ):
+            ...
