@@ -4,6 +4,7 @@ import asyncio
 import inspect
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -18,12 +19,26 @@ from zoneinfo import ZoneInfo
 
 import pytest
 from fastapi import HTTPException, status
+from fastapi.responses import Response
 from nicegui import app
 from pytest_bdd import given, scenario, then, when
 
-from src.detours.detour_ai_augment.src.backend import api
+from src.detours.detour_ai_augment.src.backend import api, ipc
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_context import (
+    AiAugmentBackendContext,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.server_event import (
+    QueryResponse,
+)
 from src.detours.detour_ai_augment.src.backend.helpers.locale import Locale as BackendLocale
+from src.detours.detour_ai_augment.src.backend.helpers.vars import AI_AUGMENT_COLUMNS
 from src.detours.detour_ai_augment.src.control_centre.dashboard import ui as control_ui
+from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers import (
+    vars as control_vars,
+)
+from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models import (
+    run_outcome as run_outcome_models,
+)
 from src.detours.detour_ai_augment.tests.backend import test_api as backend_support
 from src.detours.detour_ai_augment.tests.backend import (
     test_appendwatch as appendwatch_support,
@@ -70,7 +85,7 @@ class LifecycleState:
     lifecycle_text: str = ""
     lifecycle_items: tuple[str, ...] = ()
     provisioning_files: dict[str, str] | None = None
-    runtime: api.AiAugmentBackendContext | None = None
+    runtime: AiAugmentBackendContext | None = None
     backend_observations: dict[str, Any] | None = None
     dashboard_observations: dict[str, Any] | None = None
     session_observations: dict[str, Any] | None = None
@@ -117,12 +132,7 @@ def lifecycle_backend_paths(
         source_database=repository_root / "data" / "scisci_process.duckdb",
         reference_docx=repository_root / "resources" / "pandoc-custom-reference.docx",
         pydantic_to_paste=(
-            detour_root
-            / "src"
-            / "backend"
-            / "helpers"
-            / "data_models"
-            / "pydantic_to_paste.py"
+            detour_root / "src" / "backend" / "helpers" / "data_models" / "pydantic_to_paste.py"
         ),
         july_rollout=(
             detour_root
@@ -257,9 +267,12 @@ def given_authoritative_lifecycle(
 @then("every Lifecycle preamble invariant is assigned executable evidence")
 def then_preamble_is_traced(lifecycle_state: LifecycleState) -> None:
     assert all(phrase in lifecycle_state.lifecycle_text for phrase in PREAMBLE_PHRASES)
-    feature_text = Path(__file__).with_name("features").joinpath(
-        "detour_ai_augment_lifecycle.feature"
-    ).read_text(encoding=TEXT_ENCODING)
+    feature_text = (
+        Path(__file__)
+        .with_name("features")
+        .joinpath("detour_ai_augment_lifecycle.feature")
+        .read_text(encoding=TEXT_ENCODING)
+    )
     assert all(scenario_name in feature_text for scenario_name in TRACEABILITY_SCENARIOS)
 
 
@@ -293,7 +306,7 @@ def then_runtime_modes_are_supported(lifecycle_state: LifecycleState) -> None:
     deploy = files["deploy.sh"]
     provision = files["provision.sh"]
     assert "limactl" in deploy
-    assert "AIVM_USER=\"ai\"" in deploy
+    assert 'AIVM_USER="ai"' in deploy
     assert "AIVM_CODEX_VSCE" in provision
     assert "AIVM_CODEX_CLI_BIN_PATH" in provision
 
@@ -326,8 +339,8 @@ def then_openalex_credentials_are_separate(lifecycle_state: LifecycleState) -> N
     assert files is not None
     deploy = files["deploy.sh"]
     assert "OPENALEX_API_KEY" in deploy
-    assert not hasattr(control_ui.CodexRunner(timezone=ZoneInfo("UTC")), "_openalex_api_key")
-    backend_environment_source = inspect.getsource(control_ui.BackendSupervisor.environment)
+    assert not hasattr(control_ui._CodexRunner(timezone=ZoneInfo("UTC")), "_openalex_api_key")
+    backend_environment_source = inspect.getsource(control_ui._BackendSupervisor.environment)
     assert "EXPORT_OPENALEX_API_KEY" in backend_environment_source
 
 
@@ -358,7 +371,10 @@ def when_backend_startup_is_evaluated(
     assert runtime is not None
     api._acquire_backend_process_lock()
     try:
-        with pytest.raises(api.PushConfigurationError, match=BackendLocale.BACKEND_ALREADY_RUNNING):
+        with pytest.raises(
+            api._PushConfigurationError,
+            match=BackendLocale.BACKEND_ALREADY_RUNNING,
+        ):
             api._acquire_backend_process_lock()
     finally:
         api._release_backend_process_lock()
@@ -387,11 +403,11 @@ def when_backend_startup_is_evaluated(
         return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
 
     monkeypatch.setattr(api, "push_configuration", lambda _path=None: configuration)
-    monkeypatch.setattr(api.subprocess, "run", run)
+    monkeypatch.setattr(subprocess, "run", run)
     monkeypatch.setattr(
         api,
         "StreamingResponse",
-        lambda content, *, media_type: api.Response(
+        lambda content, *, media_type: Response(
             content="".join(content),
             media_type=media_type,
         ),
@@ -471,17 +487,17 @@ def when_dashboard_runs_are_processed(
     second = dashboard_support.researcher(dashboard_support.SECOND_NAMEKEY)
     third_namekey = control_ui.Namekey("Third Researcher [3]")
     third = dashboard_support.researcher(third_namekey)
-    ground_truth = control_ui.GroundTruthRecord(namekey=first.namekey, values={})
+    ground_truth = control_ui._GroundTruthRecord(namekey=first.namekey, values={})
 
     class Source:
         @staticmethod
-        def load_researchers() -> tuple[control_ui.Researcher, ...]:
+        def load_researchers() -> tuple[control_ui._Researcher, ...]:
             order.append("source-population")
             return first, second, third
 
         @staticmethod
         def load_ground_truth_by_namekey() -> dict[
-            control_ui.Namekey, control_ui.GroundTruthRecord
+            control_ui.Namekey, control_ui._GroundTruthRecord
         ]:
             order.append("linked-ground-truth")
             return {first.namekey: ground_truth}
@@ -489,13 +505,13 @@ def when_dashboard_runs_are_processed(
     backend = dashboard_support.FakeBackend(order)
     backend_database = dashboard_support.FakeBackendDatabase()
     codex = dashboard_support.FakeCodex(order)
-    subject = control_ui.ControlCentreController(
-        source_repository=cast(control_ui.SourceRepository, Source()),
-        backend=cast(control_ui.BackendSupervisor, backend),
-        backend_database=cast(control_ui.BackendDatabaseClient, backend_database),
-        codex=cast(control_ui.CodexRunner, codex),
-        reconciler=control_ui.AttemptReconciler(),
-        projector=control_ui.VariableProjector(),
+    subject = control_ui._ControlCentreController(
+        source_repository=cast(control_ui._SourceRepository, Source()),
+        backend=cast(control_ui._BackendSupervisor, backend),
+        backend_database=cast(control_ui._BackendDatabaseClient, backend_database),
+        codex=cast(control_ui._CodexRunner, codex),
+        reconciler=control_ui._AttemptReconciler(),
+        projector=control_ui._VariableProjector(),
     )
 
     async def in_event_loop(function: Any, /, *args: object, **kwargs: object) -> Any:
@@ -505,18 +521,16 @@ def when_dashboard_runs_are_processed(
         order.append("worker-started")
 
     async def complete_run(
-        _subject: control_ui.ControlCentreController,
+        _subject: control_ui._ControlCentreController,
         *,
         run_id: UUID,
-        codex_exit_code: int,
-    ) -> control_ui.RunStatus:
+    ) -> run_outcome_models.RunOutcome:
         assert run_id in subject._runs
-        assert codex_exit_code == 0
-        return control_ui.RunStatus.COMPLETE
+        return run_outcome_models.RunOutcome.COMPLETED
 
     monkeypatch.setattr(asyncio, "to_thread", in_event_loop)
     monkeypatch.setattr(subject, "_worker", completed_worker)
-    monkeypatch.setattr(control_ui.ControlCentreController, "_finalize_run", complete_run)
+    monkeypatch.setattr(control_ui._ControlCentreController, "_finalize_run", complete_run)
 
     async def exercise() -> tuple[UUID, UUID, UUID, list[str]]:
         await subject.start()
@@ -538,11 +552,15 @@ def when_dashboard_runs_are_processed(
     first_run, second_run, canceled_run, persisted_before = asyncio.run(exercise())
 
     socket_calls: list[tuple[Path, str, str]] = []
-    response_body = api.DashboardQueryResponse(
-        attempts=(),
-        accepted_attempts=(),
-        card_markdown=None,
-    ).model_dump_json().encode(TEXT_ENCODING)
+    response_body = (
+        QueryResponse(
+            attempts=(),
+            accepted_innerdict_summaries=(),
+            card_markdown=None,
+        )
+        .model_dump_json()
+        .encode(TEXT_ENCODING)
+    )
 
     class Response:
         status = status.HTTP_200_OK
@@ -567,9 +585,9 @@ def when_dashboard_runs_are_processed(
         def close() -> None:
             return None
 
-    monkeypatch.setattr(control_ui, "UnixSocketHttpConnection", UnixConnection)
+    monkeypatch.setattr(control_ui, "_UnixSocketHttpConnection", UnixConnection)
     socket_path = Path("/tmp/lifecycle-dashboard.sock")
-    control_ui.BackendDatabaseClient(socket_path=socket_path).pull()
+    control_ui._BackendDatabaseClient(socket_path=socket_path).pull()
 
     lifecycle_state.dashboard_observations = {
         "controller": subject,
@@ -593,7 +611,10 @@ def then_queue_is_dashboard_private(lifecycle_state: LifecycleState) -> None:
         str(canceled_run),
     ]
     assert app.storage.general[control_ui.QUEUE_STORAGE_KEY] == []
-    assert observations["controller"]._runs[canceled_run].status is control_ui.RunStatus.CANCELED
+    assert (
+        observations["controller"]._runs[canceled_run].outcome
+        is run_outcome_models.RunOutcome.CANCELLED
+    )
     assert observations["backend_database"].pull_calls == 0
 
 
@@ -620,9 +641,9 @@ def then_dashboard_uses_private_ipc(lifecycle_state: LifecycleState) -> None:
     observations = lifecycle_state.dashboard_observations
     assert observations is not None
     assert observations["socket_calls"] == [
-        (Path("/tmp/lifecycle-dashboard.sock"), api.HTTP_GET_METHOD, api.DASHBOARD_QUERY_PATH)
+        (Path("/tmp/lifecycle-dashboard.sock"), api.HTTP_GET_METHOD, ipc.DASHBOARD_QUERY_PATH)
     ]
-    assert api.DASHBOARD_QUERY_PATH not in {
+    assert ipc.DASHBOARD_QUERY_PATH not in {
         getattr(route, "path", None) for route in api.app.routes
     }
 
@@ -643,7 +664,7 @@ def given_backend_before_session_handoff(
     monkeypatch.setattr(
         api,
         "StreamingResponse",
-        lambda content, *, media_type: api.Response(
+        lambda content, *, media_type: Response(
             content="".join(content),
             media_type=media_type,
         ),
@@ -659,14 +680,14 @@ def when_pull_precedes_session_handoff(lifecycle_state: LifecycleState) -> None:
     pull_body = response.body
     session_id = "019d0000-0000-7000-8000-000000000040"
     api.read_backend_session_id(StringIO(session_id + "\n"))
-    runner = control_ui.CodexRunner(timezone=ZoneInfo("UTC"))
+    runner = control_ui._CodexRunner(timezone=ZoneInfo("UTC"))
     run_id = UUID("019d0000-0000-7000-8000-000000000041")
     lifecycle_state.session_observations = {
         "response": response,
         "pull_body": pull_body,
         "session_id": session_id,
-        "prompt": control_ui.CODEX_INPUT_TEMPLATE.format(
-            openapi_url=control_ui.BACKEND_OPENAPI_URL
+        "prompt": control_vars.CODEX_INPUT_TEMPLATE.format(
+            openapi_url=control_vars.BACKEND_OPENAPI_URL
         ),
         "remote_command": runner.codex_remote_command(run_id=run_id),
     }
@@ -677,9 +698,7 @@ def then_pull_precedes_handoff(lifecycle_state: LifecycleState) -> None:
     observations = lifecycle_state.session_observations
     assert observations is not None
     assert observations["response"].status_code == status.HTTP_200_OK
-    assert observations["response"].headers["content-type"] == (
-        f"{api.MEDIA_TYPE}; charset=utf-8"
-    )
+    assert observations["response"].headers["content-type"] == (f"{api.MEDIA_TYPE}; charset=utf-8")
     assert observations["pull_body"].endswith(b"\n")
     assert api.BACKEND_SESSION_ID == observations["session_id"]
 
@@ -688,9 +707,9 @@ def then_pull_precedes_handoff(lifecycle_state: LifecycleState) -> None:
 def then_codex_receives_openapi_prompt(lifecycle_state: LifecycleState) -> None:
     observations = lifecycle_state.session_observations
     assert observations is not None
-    assert observations["prompt"] == f"{control_ui.BACKEND_OPENAPI_URL}\n"
+    assert observations["prompt"] == f"{control_vars.BACKEND_OPENAPI_URL}\n"
     command = observations["remote_command"]
-    assert str(control_ui.CODEX_ENV_PATH) in command
+    assert str(control_vars.CODEX_ENV_PATH) in command
     assert "exec" in command
     assert "resume" not in command
 
@@ -702,7 +721,7 @@ def then_agent_discretion_is_bounded(lifecycle_state: LifecycleState) -> None:
     prompt = observations["prompt"]
     assert api.PUSH_PATH not in prompt
     assert api.PULL_PATH not in prompt
-    assert control_ui.CODEX_EXEC_COMMAND[-1] == "-"
+    assert control_vars.CODEX_EXEC_COMMAND[-1] == "-"
 
 
 @given("a complete public HTTP exchange")
@@ -715,7 +734,7 @@ def when_middleware_records_exchange(
     lifecycle_state: LifecycleState,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    authoritative_append_source = inspect.getsource(api._append_authoritative_record)
+    authoritative_append_source = inspect.getsource(api.append_authoritative_record)
     events: list[str] = []
     records: list[HttpRequestLogRecord] = []
     sent: list[dict[str, object]] = []
@@ -772,14 +791,14 @@ def when_middleware_records_exchange(
             "http_version": "1.1",
             "root_path": "",
         }
-        await api.AuthoritativeHttpMiddleware(cast(Any, endpoint))(
+        await api._AuthoritativeHttpMiddleware(cast(Any, endpoint))(
             cast(Any, scope),
             receive,
             cast(Any, send),
         )
 
     monkeypatch.setattr(api, "AUTHORITATIVE_BACKEND_HEALTHY", True)
-    monkeypatch.setattr(api, "_append_authoritative_record", append)
+    monkeypatch.setattr(api, "append_authoritative_record", append)
     monkeypatch.setattr(api, "_after_authoritative_public_record", after)
     asyncio.run(exchange())
 
@@ -794,7 +813,7 @@ def when_middleware_records_exchange(
         ),
     )
     with api.synchronized_detour_database(
-        cast(api.AiAugmentBackendContext, SimpleNamespace())
+        cast(AiAugmentBackendContext, SimpleNamespace())
     ) as supplied:
         assert supplied is connection
         synchronized.append("use")
@@ -829,7 +848,9 @@ def then_errors_are_opaque() -> None:
     assert "Contact the human operator" in public_detail
     assert BackendLocale.SOURCE_DUCKDB_OPEN_FAILED not in public_detail
     assert BackendLocale.APPENDWATCH_REPORT_UNREADABLE not in public_detail
-    assert BackendLocale.SOURCE_DUCKDB_OPEN_FAILED != BackendLocale.APPENDWATCH_REPORT_UNREADABLE
+    assert str(BackendLocale.SOURCE_DUCKDB_OPEN_FAILED) != str(
+        BackendLocale.APPENDWATCH_REPORT_UNREADABLE
+    )
 
 
 @then("detour database access synchronizes replay records first")
@@ -841,14 +862,9 @@ def then_projection_precedes_database_use(lifecycle_state: LifecycleState) -> No
 
 @given("the accepted production-captured push fixture")
 def given_captured_push(detour_root: Path) -> None:
-    fixture = (
-        detour_root
-        / "tests"
-        / "fixtures"
-        / backend_support.OPERATOR_ACCEPTED_PUSH_FIXTURE
-    )
+    fixture = detour_root / "tests" / "fixtures" / backend_support.OPERATOR_ACCEPTED_PUSH_FIXTURE
     value = json.loads(fixture.read_text(encoding=TEXT_ENCODING))
-    assert set(api.AI_AUGMENT_COLUMNS) <= set(value)
+    assert set(AI_AUGMENT_COLUMNS) <= set(value)
 
 
 @when("the captured push contour is replayed against an isolated Backend")

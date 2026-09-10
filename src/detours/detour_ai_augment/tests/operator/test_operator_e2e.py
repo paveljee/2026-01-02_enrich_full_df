@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -15,7 +16,7 @@ import time
 from collections.abc import Generator, Iterator, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, TextIO, cast
 from urllib import error as urllib_error
 from urllib import request as urllib_request
@@ -23,10 +24,33 @@ from urllib import request as urllib_request
 import duckdb
 import psutil
 import pytest
+from fastapi import status
 from playwright.sync_api import Locator, Page, ViewportSize, expect, sync_playwright
 
 from src.detours.detour_ai_augment.src.backend import api as backend_api
+from src.detours.detour_ai_augment.src.backend import ipc as backend_ipc
+from src.detours.detour_ai_augment.src.backend import server as backend_server
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.server_event import (
+    SOURCE_KEY_HEADER,
+    BackendCommitRecord,
+    PostCommitValidationResult,
+    PreparedPullResponse,
+    RunOutcomeResponse,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.source_population import (
+    SourceCohort as ResearcherCohort,
+)
 from src.detours.detour_ai_augment.src.control_centre.dashboard import ui as control_ui
+from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers import (
+    vars as control_vars,
+)
+from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models import (
+    ai_augment_context as context_models,
+)
+from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models import (
+    run_outcome as run_outcome_models,
+)
+from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.locale import Locale
 from src.helpers.data_models.http_request_log import HttpRequestLogRecord
 
 CONTROL_CENTRE_MODULE = "src.detours.detour_ai_augment.src.control_centre.dashboard.ui"
@@ -34,13 +58,13 @@ CONTROL_CENTRE_COMMAND_PREFIX = (
     sys.executable,
     "-m",
     CONTROL_CENTRE_MODULE,
-    backend_api.CONFIG_OPTION,
+    backend_server.CONFIG_OPTION,
 )
-CONTROL_CENTRE_URL = control_ui.CONTROL_CENTRE_BASE_URL
-CONTROL_CENTRE_READY_LOG = control_ui.Locale.READY_LOG_TEMPLATE.format(
+CONTROL_CENTRE_URL = control_vars.CONTROL_CENTRE_BASE_URL
+CONTROL_CENTRE_READY_LOG = Locale.READY_LOG_TEMPLATE.format(
     url=CONTROL_CENTRE_URL
 )
-CONTROL_CENTRE_PORTS = (control_ui.CONTROL_CENTRE_PORT, control_ui.BACKEND_PORT)
+CONTROL_CENTRE_PORTS = (control_vars.CONTROL_CENTRE_PORT, control_vars.BACKEND_PORT)
 TEXT_ENCODING = "utf-8"
 HASH_ALGORITHM = "sha256"
 HASH_SEPARATOR = b"\0"
@@ -59,7 +83,7 @@ OPERATOR_TARGET_DRAW_NUMBER = "146"
 DARWIN_AF_UNIX_PATH_CAPACITY_BYTES = 104
 PYTEST_CURRENT_TEST_ENV_NAME = "PYTEST_CURRENT_TEST"
 OPERATOR_LIVE_OUTPUT = sys.__stdout__ or sys.stdout
-FAILED_RUN_LOG_PREFIX = f"{control_ui.Locale.CONTROL_CENTRE_LOG_PREFIX} run failed:"
+FAILED_RUN_LOG_PREFIX = f"{Locale.CONTROL_CENTRE_LOG_PREFIX} run failed:"
 RESEARCHER_CARD_BEGIN = "Playwright researcher card begin"
 RESEARCHER_CARD_END = "Playwright researcher card end"
 
@@ -77,8 +101,7 @@ class OperatorRuntime:
 
 
 @dataclass(frozen=True, slots=True)
-class TerminalWorkflowCheckpoint:
-    records: tuple[HttpRequestLogRecord, ...]
+class WorkflowCheckpoint:
     queued_at_monotonic: float
 
 
@@ -104,7 +127,7 @@ class DashboardProcess:
             try:
                 with urllib_request.urlopen(
                     CONTROL_CENTRE_URL,
-                    timeout=control_ui.CONTROL_HTTP_TIMEOUT_SECONDS,
+                    timeout=control_vars.CONTROL_HTTP_TIMEOUT_SECONDS,
                 ):
                     _operator_log("Control Centre is ready")
                     return
@@ -240,9 +263,9 @@ def _process_snapshot(
 def _process_role(command: tuple[str, ...]) -> str:
     command_text = " ".join(command)
     executable = Path(command[0]).name if command else ""
-    if control_ui.BACKEND_MODULE in command_text:
+    if control_vars.BACKEND_MODULE in command_text:
         return "Backend"
-    if str(control_ui.CODEX_EXEC_COMMAND[0]) in command_text:
+    if str(control_vars.CODEX_EXEC_COMMAND[0]) in command_text:
         return "Codex SSH transport"
     if executable == backend_api.SSH_EXECUTABLE:
         if any(
@@ -391,7 +414,7 @@ def _collect_output(stream: TextIO, output: list[str]) -> None:
 def _assert_ports_available() -> None:
     for port in CONTROL_CENTRE_PORTS:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client:
-            if client.connect_ex((control_ui.CONTROL_CENTRE_HOST, port)) == 0:
+            if client.connect_ex((control_vars.CONTROL_CENTRE_HOST, port)) == 0:
                 _operator_log(
                     f"local port {port} is already in use; no operator-owned "
                     "Control Centre or Backend process was started"
@@ -406,7 +429,7 @@ def _wait_for_ports_released() -> None:
         occupied = []
         for port in CONTROL_CENTRE_PORTS:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client:
-                if client.connect_ex((control_ui.CONTROL_CENTRE_HOST, port)) == 0:
+                if client.connect_ex((control_vars.CONTROL_CENTRE_HOST, port)) == 0:
                     occupied.append(port)
         if not occupied:
             return
@@ -421,7 +444,7 @@ def running_dashboard(runtime: OperatorRuntime) -> Generator[DashboardProcess]:
     environment = os.environ.copy()
     environment.pop(PYTEST_CURRENT_TEST_ENV_NAME, None)
     environment["PYTHONUNBUFFERED"] = "1"
-    environment[backend_api.DASHBOARD_SOCKET_PATH_ENV_NAME] = str(
+    environment[backend_ipc.DASHBOARD_SOCKET_PATH_ENV_NAME] = str(
         runtime.dashboard_socket_path
     )
     process = subprocess.Popen(
@@ -465,14 +488,14 @@ def running_dashboard(runtime: OperatorRuntime) -> Generator[DashboardProcess]:
 
 def target_namekey(runtime: OperatorRuntime) -> control_ui.Namekey:
     _operator_log("selecting the operator workflow target")
-    configuration = control_ui.AiAugmentCtlCtrContext(config_path=runtime.config_path)
+    configuration = context_models.AiAugmentCtlCtrContext(config_path=runtime.config_path)
     namekey = next(
         item.namekey
-        for item in control_ui.SourceRepository(
+        for item in control_ui._SourceRepository(
             configuration=configuration
         ).load_researchers()
         if OPERATOR_TARGET_DRAW_NUMBER in item.draw_numbers
-        and item.cohort is not control_ui.ResearcherCohort.INELIGIBLE
+        and item.cohort is not ResearcherCohort.INELIGIBLE
     )
     _operator_log(f"selected workflow target {namekey}")
     return namekey
@@ -488,7 +511,7 @@ def queue_in_browser(namekey: control_ui.Namekey) -> float:
             page = browser.new_page(viewport=BROWSER_VIEWPORT)
             page.set_default_timeout(BROWSER_ASSERTION_TIMEOUT_MILLISECONDS)
             page.goto(CONTROL_CENTRE_URL, wait_until="networkidle")
-            page.get_by_label(control_ui.Locale.SEARCH_FILTER).fill(namekey)
+            page.get_by_label(Locale.SEARCH_FILTER).fill(namekey)
             rows = page.get_by_test_id(control_ui.RESEARCHER_GRID_TEST_ID).locator(
                 GRID_ROW_SELECTOR
             )
@@ -528,11 +551,11 @@ def raise_for_dashboard_failure(dashboard: DashboardProcess) -> None:
         raise RuntimeError("workflow failed:\n" + "".join(failed_run_lines))
 
 
-def wait_for_terminal_pull(
+def wait_for_gone_pull(
     runtime: OperatorRuntime,
     dashboard: DashboardProcess,
 ) -> tuple[HttpRequestLogRecord, ...]:
-    _operator_log("waiting for the Backend terminal pull")
+    _operator_log("waiting for Backend GET /pull -> 410 Gone")
     started_at = time.monotonic()
     deadline = time.monotonic() + FULL_WORKFLOW_TIMEOUT_SECONDS
     next_heartbeat = started_at + OPERATOR_HEARTBEAT_SECONDS
@@ -560,11 +583,11 @@ def wait_for_terminal_pull(
             == (
                 backend_api.HTTP_GET_METHOD,
                 backend_api.PULL_PATH,
-                backend_api.status.HTTP_410_GONE,
+                status.HTTP_410_GONE,
             )
             for record in records
         ):
-            _operator_log("Backend reached the terminal pull")
+            _operator_log("Backend reached GET /pull -> 410 Gone")
             return records
         now = time.monotonic()
         if now >= next_heartbeat:
@@ -574,20 +597,22 @@ def wait_for_terminal_pull(
             )
             next_heartbeat = now + OPERATOR_HEARTBEAT_SECONDS
         time.sleep(PROCESS_POLL_SECONDS)
-    raise TimeoutError("workflow did not reach terminal pull:\n" + "".join(dashboard.output))
+    raise TimeoutError(
+        "workflow did not reach GET /pull -> 410 Gone:\n"
+        + "".join(dashboard.output)
+    )
 
 
-def run_workflow_to_terminal_pull(
+def run_workflow_to_gone_pull(
     runtime: OperatorRuntime,
     dashboard: DashboardProcess,
     namekey: control_ui.Namekey,
-) -> TerminalWorkflowCheckpoint:
+) -> WorkflowCheckpoint:
     queued_at_monotonic = queue_in_browser(namekey)
-    records = wait_for_terminal_pull(runtime, dashboard)
+    wait_for_gone_pull(runtime, dashboard)
     assert stat.S_ISSOCK(runtime.dashboard_socket_path.stat().st_mode)
     assert stat.S_IMODE(runtime.dashboard_socket_path.stat().st_mode) == 0o600
-    return TerminalWorkflowCheckpoint(
-        records=records,
+    return WorkflowCheckpoint(
         queued_at_monotonic=queued_at_monotonic,
     )
 
@@ -626,24 +651,42 @@ def wait_for_completed_grid_row(
             )
             previous_status = current_status
         if (
-            current_status == control_ui.RunStatus.COMPLETE.value
+            current_status == control_ui._ResearcherActivity.COMPLETE.value
             and execute.inner_text().strip()
-            == control_ui.ACTION_LABEL_BY_VALUE[control_ui.RunAction.RERUN.value]
+            == control_ui.ACTION_LABEL_BY_VALUE[control_ui._RunAction.RERUN.value]
             and view_card.is_enabled()
         ):
-            attempt_id = (
+            commit_record_id = (
                 history_rows.nth(history_count - 1).locator("td").nth(2).inner_text().strip()
             )
-            if not attempt_id:
-                raise RuntimeError("completed Control Centre history has no accepted attempt ID")
+            run_outcome_savedness = (
+                history_rows.nth(history_count - 1).locator("td").nth(3).inner_text().strip()
+            )
+            session_status = (
+                history_rows.nth(history_count - 1).locator("td").nth(4).inner_text().strip()
+            )
+            if not commit_record_id:
+                raise RuntimeError("completed Control Centre history has no commit record ID")
+            if (
+                run_outcome_savedness
+                != Locale.RUN_OUTCOME_SNAPSHOT_SAVED
+            ):
+                page.wait_for_timeout(round(PROCESS_POLL_SECONDS * 1_000))
+                continue
+            if session_status != Locale.SESSION_STATUS_OK:
+                raise RuntimeError(
+                    "completed Control Centre history has non-OK run-outcome "
+                    "session status: "
+                    f"{session_status!r}"
+                )
             _operator_log("Control Centre projected the completed post-Codex run")
-            return row, attempt_id
+            return row, commit_record_id
         if current_status in {
-            control_ui.RunStatus.FAILED.value,
-            control_ui.RunStatus.CANCELED.value,
+            control_ui._ResearcherActivity.FAILED.value,
+            control_ui._ResearcherActivity.CANCELED.value,
         }:
             raise RuntimeError(
-                f"Control Centre projected terminal workflow status {current_status!r}"
+                f"Control Centre projected failed run activity {current_status!r}"
             )
         now = time.monotonic()
         if now >= next_heartbeat:
@@ -683,8 +726,8 @@ def capture_completed_researcher_card(
             )
             page.on("pageerror", lambda error: browser_errors.append(str(error)))
             page.goto(CONTROL_CENTRE_URL, wait_until="networkidle")
-            page.get_by_label(control_ui.Locale.SEARCH_FILTER).fill(namekey)
-            _row, attempt_id = wait_for_completed_grid_row(
+            page.get_by_label(Locale.SEARCH_FILTER).fill(namekey)
+            _row, commit_record_id = wait_for_completed_grid_row(
                 page,
                 dashboard,
                 queued_at_monotonic=queued_at_monotonic,
@@ -692,10 +735,14 @@ def capture_completed_researcher_card(
             history = page.get_by_test_id(control_ui.ATTEMPT_HISTORY_TABLE_TEST_ID)
             expect(history).to_be_visible()
             expect(history.locator(ATTEMPT_HISTORY_ROW_SELECTOR)).not_to_have_count(0)
-            expect(history).to_contain_text(attempt_id)
+            expect(history).to_contain_text(commit_record_id)
+            expect(history).to_contain_text(
+                Locale.RUN_OUTCOME_SNAPSHOT_SAVED
+            )
+            expect(history).to_contain_text(Locale.SESSION_STATUS_OK)
             execute = page.get_by_test_id(control_ui.EXECUTE_ACTION_TEST_ID)
             expect(execute).to_have_text(
-                control_ui.ACTION_LABEL_BY_VALUE[control_ui.RunAction.RERUN.value]
+                control_ui.ACTION_LABEL_BY_VALUE[control_ui._RunAction.RERUN.value]
             )
             view_card = page.get_by_test_id(control_ui.VIEW_CARD_TEST_ID)
             expect(view_card).to_be_enabled()
@@ -740,7 +787,7 @@ def _assert_deployed_appendwatch_topology(
     _operator_log("loading the deployed appendwatch topology")
     identity_file = backend_api.AIVM_IDENTITY_FILE
     assert identity_file is not None
-    configuration = control_ui.AiAugmentCtlCtrContext(
+    configuration = context_models.AiAugmentCtlCtrContext(
         config_path=operator_runtime.config_path
     )
     assert configuration.appendwatch_report.is_absolute()
@@ -782,34 +829,45 @@ def test_existing_aivm_exposes_the_persisted_appendwatch_topology(
 
 def validate_workflow_artifacts(
     operator_runtime: OperatorRuntime,
-    records: Sequence[HttpRequestLogRecord],
+    *,
+    namekey: control_ui.Namekey,
+    expected_run_outcome_path: str | None = None,
+    card_text: str | None = None,
 ) -> None:
     _operator_log("validating authoritative workflow artifacts")
     assert not operator_runtime.dashboard_socket_path.exists()
+    records = authoritative_records(operator_runtime.replay_log_path)
 
     assert all(record.schema_version == "1.1" for record in records)
     assert all(record.record_id.version == 7 for record in records)
     assert {
         (record.method, record.path) for record in records
-    } <= backend_api.AUTHORITATIVE_PUBLIC_ROUTES | {
+    } <= backend_api.AUTHORITATIVE_FASTAPI_ROUTES | {
+        (backend_api.HTTP_POST_METHOD, path)
+        for path in run_outcome_models.RUN_OUTCOME_PATHS
+    } | {
         backend_api.AUTHORITATIVE_COMMIT_ROUTE
     }
 
-    terminal_pull = next(
+    gone_pull = next(
         record
         for record in reversed(records)
         if (record.method, record.path, record.response_code)
         == (
             backend_api.HTTP_GET_METHOD,
             backend_api.PULL_PATH,
-            backend_api.status.HTTP_410_GONE,
+            status.HTTP_410_GONE,
         )
     )
-    accepted_commits: list[tuple[HttpRequestLogRecord, backend_api.ReplayCommit]] = []
+    records_by_id = {record.record_id: record for record in records}
+    accepted_commits: list[BackendCommitRecord] = []
     for record in records:
         if (record.method, record.path) != backend_api.AUTHORITATIVE_COMMIT_ROUTE:
             continue
-        commit = backend_api._replay_commit(record.request_body)
+        commit_record = BackendCommitRecord.from_http_request_log_record(
+            record,
+            resolve_http_record=records_by_id.__getitem__,
+        )
         with duckdb.connect(
             str(operator_runtime.detour_db_path), read_only=True
         ) as connection:
@@ -820,32 +878,109 @@ def validate_workflow_artifacts(
                 [str(record.record_id)],
             ).fetchone()
         if row is not None:
-            outcome = backend_api.ProjectedValidationOutcome.model_validate_json(str(row[0]))
-            if outcome.result == backend_api.ATTEMPT_RESULT_ACCEPTED:
-                accepted_commits.append((record, commit))
+            prepared_pull = PreparedPullResponse.model_validate_json(str(row[0]))
+            if (
+                prepared_pull.post_commit_validation.result
+                is PostCommitValidationResult.ACCEPTED
+            ):
+                accepted_commits.append(commit_record)
     assert len(accepted_commits) == 1
-    commit_record, commit = accepted_commits[0]
+    commit_record = accepted_commits[0]
     assert backend_api._validated_readme_record(commit_record) == commit_record
-    pull_ordinal = _record_ordinal(records, commit.pull_record_id)
-    push_ordinal = _record_ordinal(records, commit.push_record_id)
+    session = commit_record.codex_session_record
+    assert session.session_id is not None
+    assert session.codex_rollout_record is not None
+    assert session.appendwatch_report_record is not None
+    rollout = session.codex_rollout_record
+    pull_ordinal = _record_ordinal(records, commit_record.pull_record.record_id)
+    push_ordinal = _record_ordinal(records, commit_record.push_record.record_id)
     commit_ordinal = _record_ordinal(records, commit_record.record_id)
-    terminal_ordinal = _record_ordinal(records, terminal_pull.record_id)
-    assert pull_ordinal < push_ordinal < commit_ordinal < terminal_ordinal
+    gone_pull_ordinal = _record_ordinal(records, gone_pull.record_id)
+    assert pull_ordinal < push_ordinal < commit_ordinal < gone_pull_ordinal
     push_record = records[push_ordinal]
-    assert push_record.response_code == backend_api.status.HTTP_202_ACCEPTED
+    assert push_record.response_code == status.HTTP_202_ACCEPTED
     assert push_record.response_headers is not None
     assert push_record.response_headers["location"] == backend_api.PULL_PATH
     rollout_blob = operator_runtime.rollout_cas_dir / (
         backend_api.ROLLOUT_CAS_FILENAME_TEMPLATE.format(
-            sha256=commit.rollout.sha256
+            sha256=rollout.sha256
         )
     )
     assert rollout_blob.is_file()
-    assert rollout_blob.stat().st_size == commit.rollout.size
-    assert _file_digest(rollout_blob).hex() == commit.rollout.sha256
-    assert len(rollout_blob.read_bytes().splitlines()) == commit.rollout.line_count
-    assert terminal_pull.response_body
-    assert json.loads(terminal_pull.response_body.splitlines()[0])
+    assert rollout_blob.stat().st_size == rollout.size
+    assert _file_digest(rollout_blob).hex() == rollout.sha256
+    assert len(rollout_blob.read_bytes().splitlines()) == rollout.line_count
+    assert gone_pull.response_body
+    assert json.loads(gone_pull.response_body.splitlines()[0])
+
+    run_outcome_records = tuple(
+        record
+        for record in records
+        if (record.method, record.path)
+        in {
+            (backend_api.HTTP_POST_METHOD, path)
+            for path in run_outcome_models.RUN_OUTCOME_PATHS
+        }
+    )
+    assert run_outcome_records
+    run_outcome_record = run_outcome_records[-1]
+    if expected_run_outcome_path is not None:
+        assert run_outcome_record.path == expected_run_outcome_path
+        assert run_outcome_record.response_code == status.HTTP_200_OK
+    assert gone_pull_ordinal < _record_ordinal(records, run_outcome_record.record_id)
+    assert run_outcome_record.request_body is None
+    assert backend_api._parse_name_key_header(
+        backend_api._http_header_value(
+            run_outcome_record.request_headers,
+            run_outcome_models.NAME_KEY_HEADER,
+        )
+    ) == str(namekey)
+    assert backend_api._http_header_value(
+        run_outcome_record.request_headers,
+        SOURCE_KEY_HEADER,
+    ) is None
+    validated_run_outcome = RunOutcomeResponse.from_http_request_log_record(
+        run_outcome_record
+    )
+    run_outcome_snapshot = validated_run_outcome.run_outcome_response_body
+    run_outcome_session = run_outcome_snapshot.codex_session_record
+    if run_outcome_record.response_code == status.HTTP_200_OK:
+        assert run_outcome_session.session_id is not None
+        assert run_outcome_session.codex_rollout_record is not None
+        assert run_outcome_session.appendwatch_report_record is not None
+        run_outcome_rollout = run_outcome_session.codex_rollout_record
+        run_outcome_report = run_outcome_session.appendwatch_report_record
+        run_outcome_source_key = backend_api._http_header_value(
+            run_outcome_record.response_headers,
+            SOURCE_KEY_HEADER,
+        )
+        run_outcome_filename, run_outcome_line_count = (
+            backend_api._parse_source_key_header(run_outcome_source_key)
+        )
+        assert run_outcome_line_count == run_outcome_rollout.line_count
+        run_outcome_rollout_blob = operator_runtime.rollout_cas_dir / (
+            backend_api.ROLLOUT_CAS_FILENAME_TEMPLATE.format(
+                sha256=run_outcome_rollout.sha256
+            )
+        )
+        assert run_outcome_rollout_blob.is_file()
+        assert run_outcome_rollout_blob.stat().st_size == run_outcome_rollout.size
+        assert (
+            _file_digest(run_outcome_rollout_blob).hex()
+            == run_outcome_rollout.sha256
+        )
+        backend_api.parse_appendwatch_report_bytes(
+            base64.b64decode(
+                run_outcome_report.data,
+                validate=True,
+            ),
+            PurePosixPath(run_outcome_filename),
+        )
+    if card_text is not None:
+        commit_record_id_position = card_text.index(str(commit_record.record_id))
+        assert commit_record.request_body is not None
+        commit_request_body_position = card_text.index(commit_record.request_body)
+        assert commit_record_id_position < commit_request_body_position
     _operator_log("full operator workflow contract validated")
 
 
@@ -859,13 +994,13 @@ def test_complete_dashboard_backend_codex_commit_and_replay_workflow(
     namekey = target_namekey(operator_runtime)
 
     with running_dashboard(operator_runtime) as dashboard:
-        checkpoint = run_workflow_to_terminal_pull(
+        run_workflow_to_gone_pull(
             operator_runtime,
             dashboard,
             namekey,
         )
 
-    validate_workflow_artifacts(operator_runtime, checkpoint.records)
+    validate_workflow_artifacts(operator_runtime, namekey=namekey)
 
 
 def assert_completed_dashboard_backend_codex_workflow_renders_researcher_card(
@@ -876,7 +1011,7 @@ def assert_completed_dashboard_backend_codex_workflow_renders_researcher_card(
     namekey = target_namekey(operator_runtime)
 
     with running_dashboard(operator_runtime) as dashboard:
-        checkpoint = run_workflow_to_terminal_pull(
+        checkpoint = run_workflow_to_gone_pull(
             operator_runtime,
             dashboard,
             namekey,
@@ -888,7 +1023,12 @@ def assert_completed_dashboard_backend_codex_workflow_renders_researcher_card(
         )
         elapsed_seconds = time.monotonic() - checkpoint.queued_at_monotonic
 
-    validate_workflow_artifacts(operator_runtime, checkpoint.records)
+    validate_workflow_artifacts(
+        operator_runtime,
+        namekey=namekey,
+        expected_run_outcome_path=run_outcome_models.COMPLETED_PATH,
+        card_text=card_text,
+    )
     emit_researcher_card(card_text)
     _operator_log(
         "full end-to-end execution elapsed time from queue submission through "

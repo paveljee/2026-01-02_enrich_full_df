@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import requests
 from dotenv import dotenv_values
 from pydantic import BaseModel, ValidationError
 
@@ -205,7 +206,7 @@ def test_academic_institution_skips_external_validation_for_nr_identifiers(
     def unexpected_get(*_args: object, **_kwargs: object) -> None:
         pytest.fail("NR identifiers must not make external requests")
 
-    monkeypatch.setattr(schema.requests, "get", unexpected_get)
+    monkeypatch.setattr(requests, "get", unexpected_get)
 
     institution = schema.AcademicInstitution.model_validate({
         "organization_name": "Caltech",
@@ -248,7 +249,7 @@ def test_academic_institution_validates_openalex_and_ror_together(
         return responses[url]
 
     monkeypatch.setenv(schema.EXPORT_OPENALEX_API_KEY, TEST_OPENALEX_API_KEY)
-    monkeypatch.setattr(schema.requests, "get", fake_get)
+    monkeypatch.setattr(requests, "get", fake_get)
 
     institution = schema.AcademicInstitution.model_validate({
         "organization_name": STANFORD_NAME,
@@ -270,7 +271,7 @@ def test_l_fei_fei_fixture_builds_without_external_requests(
         "src.detours.detour_ai_augment.src.backend.helpers.data_models.submission_fixture"
     )
     fixture_module = importlib.import_module(module_name)
-    monkeypatch.setattr(schema.requests, "get", unexpected_get)
+    monkeypatch.setattr(requests, "get", unexpected_get)
 
     fixture_module = importlib.reload(fixture_module)
 

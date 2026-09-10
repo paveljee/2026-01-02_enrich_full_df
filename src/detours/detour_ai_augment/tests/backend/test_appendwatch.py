@@ -77,7 +77,7 @@ def watcher_factory(aw: ModuleType, tmp_path: Path) -> Iterator[Callable[..., An
         report: Path | str | None = None,
         debounce_ms: int = 0,
         report_mode: int = 0o600,
-    ):
+    ) -> Any:
         actual_root = root or (tmp_path / f"root-{len(opened)}")
         actual_root.mkdir(parents=True, exist_ok=True)
         actual_report = report if report is not None else tmp_path / f"report-{len(opened)}.txt"
@@ -726,7 +726,7 @@ def test_read_suppresses_unknown_ignored_but_preserves_queue_overflow(
     aw: ModuleType, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     ino = make_fake_inotify(aw, FakeLibc())
-    packets = [
+    packets: list[bytes] = [
         aw.EVENT.pack(1234, aw.IN_IGNORED, 0, 0)
         + aw.EVENT.pack(-1, aw.IN_Q_OVERFLOW, 0, 0)
     ]
@@ -807,7 +807,7 @@ def test_existing_watch_dynamic_scandir_failure_sets_and_clears_marker(
 
     real_scandir = os.scandir
 
-    def denied(path: str | os.PathLike[str]):
+    def denied(path: str | os.PathLike[str]) -> Iterator[os.DirEntry[str]]:
         if os.path.realpath(path) == os.path.realpath(vault):
             raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), str(path))
         return real_scandir(path)

@@ -15,15 +15,27 @@ from types import SimpleNamespace
 from typing import cast
 from urllib import error as urllib_error
 from urllib import request as urllib_request
-from uuid import UUID, uuid4
+from uuid import UUID, uuid7
 from zipfile import ZipFile
 
 import pytest
-from playwright.sync_api import Page, ViewportSize, expect, sync_playwright
+from nicegui import ui
+from playwright.sync_api import Locator, Page, ViewportSize, expect, sync_playwright
 
+from src.detours.detour_ai_augment.src.backend import api
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.source_population import (
+    IneligibilityCategory,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.source_population import (
+    SourceCohort as ResearcherCohort,
+)
 from src.detours.detour_ai_augment.src.control_centre.dashboard import ui as control_ui
+from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers import (
+    vars as control_vars,
+)
+from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.locale import Locale
 from src.helpers.data_models import NameKey
-from src.helpers.vars import KTP_FILENAME_COL
+from src.helpers.vars import DRAW_LABEL, KTP_FILENAME_COL
 
 E2E_SERVER_ARGUMENT = "--serve"
 E2E_SERVER_MODULE = (
@@ -58,12 +70,12 @@ GRID_ROOT_SELECTOR = ".ag-root"
 GRID_HEADER_SELECTOR = ".ag-header-cell"
 GRID_CELL_SELECTOR = ".ag-cell"
 GRID_ARIA_ROW_COUNT_OFFSET = 1
-EXPECTED_GRID_ARIA_ROW_COUNT = control_ui.EXPECTED_SOURCE_RESEARCHERS + GRID_ARIA_ROW_COUNT_OFFSET
+EXPECTED_GRID_ARIA_ROW_COUNT = api.EXPECTED_SOURCE_RESEARCHERS + GRID_ARIA_ROW_COUNT_OFFSET
 
 
-def browser_researchers() -> tuple[control_ui.Researcher, ...]:
+def browser_researchers() -> tuple[control_ui._Researcher, ...]:
     researchers = [
-        control_ui.Researcher(
+        control_ui._Researcher(
             namekey=control_ui.Namekey(
                 NameKey(
                     first_name="Pilot Ineligible",
@@ -74,10 +86,10 @@ def browser_researchers() -> tuple[control_ui.Researcher, ...]:
             draw_numbers=(BROWSER_PILOT_INELIGIBLE_DRAW,),
             first_name="Pilot Ineligible",
             last_name="Researcher",
-            cohort=control_ui.ResearcherCohort.INELIGIBLE,
-            ineligibility_category=(control_ui.IneligibilityCategory.RELEASE_BATCH_SUBSET_8),
+            cohort=ResearcherCohort.INELIGIBLE,
+            ineligibility_category=(IneligibilityCategory.RELEASE_BATCH_SUBSET_8),
         ),
-        control_ui.Researcher(
+        control_ui._Researcher(
             namekey=control_ui.Namekey(
                 NameKey(
                     first_name="Pilot Eligible",
@@ -88,26 +100,26 @@ def browser_researchers() -> tuple[control_ui.Researcher, ...]:
             draw_numbers=(BROWSER_PILOT_ELIGIBLE_DRAW,),
             first_name="Pilot Eligible",
             last_name="Researcher",
-            cohort=control_ui.ResearcherCohort.GROUND_TRUTH,
+            cohort=ResearcherCohort.GROUND_TRUTH,
         ),
     ]
-    remaining_ground_truth = control_ui.EXPECTED_GROUND_TRUTH_RESEARCHERS - 1
-    remaining_no_ground_truth = control_ui.EXPECTED_NO_GROUND_TRUTH_RESEARCHERS
-    remaining_total = control_ui.EXPECTED_SOURCE_RESEARCHERS - BROWSER_LEADING_RESEARCHER_COUNT
+    remaining_ground_truth = api.EXPECTED_GROUND_TRUTH_RESEARCHERS - 1
+    remaining_no_ground_truth = api.EXPECTED_NO_GROUND_TRUTH_RESEARCHERS
+    remaining_total = api.EXPECTED_SOURCE_RESEARCHERS - BROWSER_LEADING_RESEARCHER_COUNT
     for index in range(remaining_total):
         if index < remaining_ground_truth:
-            cohort = control_ui.ResearcherCohort.GROUND_TRUTH
+            cohort = ResearcherCohort.GROUND_TRUTH
             ineligibility_category = None
         elif index < remaining_ground_truth + remaining_no_ground_truth:
-            cohort = control_ui.ResearcherCohort.NO_GROUND_TRUTH
+            cohort = ResearcherCohort.NO_GROUND_TRUTH
             ineligibility_category = None
         else:
-            cohort = control_ui.ResearcherCohort.INELIGIBLE
-            ineligibility_category = control_ui.IneligibilityCategory.STAGING_PARTITION_2
+            cohort = ResearcherCohort.INELIGIBLE
+            ineligibility_category = IneligibilityCategory.STAGING_PARTITION_2
         first_name = f"First {index + 1}"
         last_name = f"Last {index + 1}"
         researchers.append(
-            control_ui.Researcher(
+            control_ui._Researcher(
                 namekey=control_ui.Namekey(
                     NameKey(
                         first_name=first_name,
@@ -128,27 +140,32 @@ def browser_researchers() -> tuple[control_ui.Researcher, ...]:
 class BrowserController:
     def __init__(self) -> None:
         self._researchers = browser_researchers()
-        self._status_by_namekey = {
-            researcher.namekey: control_ui.RunStatus.READY for researcher in self._researchers
+        self._activity_by_namekey = {
+            researcher.namekey: control_ui._ResearcherActivity.READY
+            for researcher in self._researchers
         }
         self._run_id_by_namekey: dict[control_ui.Namekey, UUID] = {}
         self._attempt_run_ids_by_namekey: dict[
             control_ui.Namekey,
             list[UUID],
         ] = {researcher.namekey: [] for researcher in self._researchers}
-        self._status_by_run_id: dict[UUID, control_ui.RunStatus] = {}
+        self._activity_by_run_id: dict[UUID, control_ui._ResearcherActivity] = {}
         self._card_render_count: Counter[control_ui.Namekey] = Counter()
-        self._backend_status = control_ui.BackendStatus.RUNNING
-        self._backend_availability = control_ui.BackendAvailability(
+        self._backend_status = control_ui._BackendStatus.RUNNING
+        self._backend_availability = control_ui._BackendAvailability(
             full_api_available=True,
             ipc_available=True,
         )
         completed = self._researchers[BROWSER_LEADING_RESEARCHER_COUNT]
-        completed_run_id = uuid4()
-        self._status_by_namekey[completed.namekey] = control_ui.RunStatus.COMPLETE
+        completed_run_id = uuid7()
+        self._activity_by_namekey[
+            completed.namekey
+        ] = control_ui._ResearcherActivity.COMPLETE
         self._run_id_by_namekey[completed.namekey] = completed_run_id
         self._attempt_run_ids_by_namekey[completed.namekey].append(completed_run_id)
-        self._status_by_run_id[completed_run_id] = control_ui.RunStatus.COMPLETE
+        self._activity_by_run_id[
+            completed_run_id
+        ] = control_ui._ResearcherActivity.COMPLETE
 
     @property
     def active_run_id(self) -> None:
@@ -159,11 +176,11 @@ class BrowserController:
         return False
 
     @property
-    def backend_status(self) -> control_ui.BackendStatus:
+    def backend_status(self) -> control_ui._BackendStatus:
         return self._backend_status
 
     @property
-    def backend_availability(self) -> control_ui.BackendAvailability:
+    def backend_availability(self) -> control_ui._BackendAvailability:
         return self._backend_availability
 
     async def start(self) -> None:
@@ -174,12 +191,12 @@ class BrowserController:
 
     async def detect_backend_availability(
         self,
-    ) -> control_ui.BackendAvailability:
+    ) -> control_ui._BackendAvailability:
         return self._backend_availability
 
     async def refresh_from_ipc(self) -> None:
-        self._backend_status = control_ui.BackendStatus.STOPPED
-        self._backend_availability = control_ui.BackendAvailability(
+        self._backend_status = control_ui._BackendStatus.STOPPED
+        self._backend_availability = control_ui._BackendAvailability(
             full_api_available=False,
             ipc_available=True,
         )
@@ -187,8 +204,8 @@ class BrowserController:
     async def snapshot(
         self,
         *,
-        selection: control_ui.UiSelection,
-    ) -> control_ui.UiSnapshot:
+        selection: control_ui._UiSelection,
+    ) -> control_ui._UiSnapshot:
         variable = control_ui.VARIABLE_SPEC_BY_KEY[selection.variable_key]
         rows = tuple(
             self._project(researcher=researcher, variable=variable)
@@ -198,30 +215,32 @@ class BrowserController:
         eligible = tuple(
             researcher
             for researcher in self._researchers
-            if researcher.cohort is not control_ui.ResearcherCohort.INELIGIBLE
+            if researcher.cohort is not ResearcherCohort.INELIGIBLE
         )
-        statuses = [self._status_by_namekey[researcher.namekey] for researcher in eligible]
-        return control_ui.UiSnapshot(
-            counts=control_ui.DashboardCounts(
+        activities = [
+            self._activity_by_namekey[researcher.namekey] for researcher in eligible
+        ]
+        return control_ui._UiSnapshot(
+            counts=control_ui._DashboardCounts(
                 total=len(self._researchers),
                 ground_truth=sum(
-                    researcher.cohort is control_ui.ResearcherCohort.GROUND_TRUTH
+                    researcher.cohort is ResearcherCohort.GROUND_TRUTH
                     for researcher in self._researchers
                 ),
                 no_ground_truth=sum(
-                    researcher.cohort is control_ui.ResearcherCohort.NO_GROUND_TRUTH
+                    researcher.cohort is ResearcherCohort.NO_GROUND_TRUTH
                     for researcher in self._researchers
                 ),
                 ineligible=sum(
-                    researcher.cohort is control_ui.ResearcherCohort.INELIGIBLE
+                    researcher.cohort is ResearcherCohort.INELIGIBLE
                     for researcher in self._researchers
                 ),
-                ready=statuses.count(control_ui.RunStatus.READY),
-                queued=statuses.count(control_ui.RunStatus.QUEUED),
-                running=statuses.count(control_ui.RunStatus.RUNNING),
-                complete=statuses.count(control_ui.RunStatus.COMPLETE),
-                failed=statuses.count(control_ui.RunStatus.FAILED),
-                canceled=statuses.count(control_ui.RunStatus.CANCELED),
+                ready=activities.count(control_ui._ResearcherActivity.READY),
+                queued=activities.count(control_ui._ResearcherActivity.QUEUED),
+                running=activities.count(control_ui._ResearcherActivity.RUNNING),
+                complete=activities.count(control_ui._ResearcherActivity.COMPLETE),
+                failed=activities.count(control_ui._ResearcherActivity.FAILED),
+                canceled=activities.count(control_ui._ResearcherActivity.CANCELED),
             ),
             rows=rows,
             backend_status=self._backend_status,
@@ -232,10 +251,10 @@ class BrowserController:
     def _project(
         self,
         *,
-        researcher: control_ui.Researcher,
-        variable: control_ui.VariableSpec,
-    ) -> control_ui.ResearcherGridRow:
-        status = self._status_by_namekey[researcher.namekey]
+        researcher: control_ui._Researcher,
+        variable: control_ui._VariableSpec,
+    ) -> control_ui._ResearcherGridRow:
+        activity = self._activity_by_namekey[researcher.namekey]
         run_id = self._run_id_by_namekey.get(researcher.namekey)
         attempts = tuple(
             self._attempt_projection(
@@ -251,7 +270,7 @@ class BrowserController:
         projection = (
             attempts[-1]
             if attempts
-            else control_ui.AttemptVariableProjection(
+            else control_ui._AttemptVariableProjection(
                 run_id=run_id,
                 namekey=researcher.namekey,
                 draw_number=researcher.draw_number,
@@ -263,16 +282,18 @@ class BrowserController:
                 table_1_value=None,
                 footnotes=None,
                 footnote_arguments=None,
-                attempt_id=None,
+                commit_record_id=None,
                 attempt_timestamp=None,
-                attempt_status=status,
-                action=control_ui.VariableProjector.action_for_status(
-                    status,
-                    eligible=(researcher.cohort is not control_ui.ResearcherCohort.INELIGIBLE),
+                attempt_activity=activity,
+                run_outcome_snapshot_savedness=None,
+                session_status=None,
+                action=control_ui._VariableProjector.action_for_status(
+                    activity,
+                    eligible=(researcher.cohort is not ResearcherCohort.INELIGIBLE),
                 ),
             )
         )
-        return control_ui.ResearcherGridRow(
+        return control_ui._ResearcherGridRow(
             namekey=researcher.namekey,
             rnd=researcher.rnd,
             cohort=researcher.cohort,
@@ -284,14 +305,19 @@ class BrowserController:
     def _attempt_projection(
         self,
         *,
-        researcher: control_ui.Researcher,
-        variable: control_ui.VariableSpec,
+        researcher: control_ui._Researcher,
+        variable: control_ui._VariableSpec,
         run_id: UUID,
         attempt_index: int,
-    ) -> control_ui.AttemptVariableProjection:
-        status = self._status_by_run_id[run_id]
+    ) -> control_ui._AttemptVariableProjection:
+        activity = self._activity_by_run_id[run_id]
         ordinal = attempt_index + 1
-        return control_ui.AttemptVariableProjection(
+        has_run_outcome = activity in {
+            control_ui._ResearcherActivity.COMPLETE,
+            control_ui._ResearcherActivity.FAILED,
+            control_ui._ResearcherActivity.CANCELED,
+        }
+        return control_ui._AttemptVariableProjection(
             run_id=run_id,
             namekey=researcher.namekey,
             draw_number=researcher.draw_number,
@@ -303,11 +329,19 @@ class BrowserController:
             table_1_value=None,
             footnotes=f"footnote-{ordinal}",
             footnote_arguments=f"arguments-{ordinal}",
-            attempt_id=control_ui.AttemptId(f"attempt-{ordinal}"),
+            commit_record_id=run_id,
             attempt_timestamp=(E2E_ATTEMPT_BASE_TIME + timedelta(seconds=attempt_index)),
-            attempt_status=status,
-            action=control_ui.VariableProjector.action_for_status(
-                status,
+            attempt_activity=activity,
+            run_outcome_snapshot_savedness=(
+                Locale.RUN_OUTCOME_SNAPSHOT_SAVED
+                if has_run_outcome
+                else None
+            ),
+            session_status=(
+                Locale.SESSION_STATUS_OK if has_run_outcome else None
+            ),
+            action=control_ui._VariableProjector.action_for_status(
+                activity,
                 eligible=True,
             ),
         )
@@ -315,13 +349,16 @@ class BrowserController:
     def _matches(
         self,
         *,
-        researcher: control_ui.Researcher,
-        selection: control_ui.UiSelection,
+        researcher: control_ui._Researcher,
+        selection: control_ui._UiSelection,
     ) -> bool:
-        status = self._status_by_namekey[researcher.namekey]
+        activity = self._activity_by_namekey[researcher.namekey]
         search = selection.search_text.casefold().strip()
         return (
-            (selection.status_filter is None or selection.status_filter is status)
+            (
+                selection.activity_filter is None
+                or selection.activity_filter is activity
+            )
             and (selection.cohort_filter is None or selection.cohort_filter is researcher.cohort)
             and (
                 not search
@@ -337,11 +374,11 @@ class BrowserController:
         self,
         *,
         namekey: control_ui.Namekey,
-    ) -> control_ui.ResearcherCardView:
+    ) -> control_ui._ResearcherCardView:
         researcher = next(item for item in self._researchers if item.namekey == namekey)
         self._card_render_count[namekey] += 1
         render_count = self._card_render_count[namekey]
-        return control_ui.ResearcherCardView(
+        return control_ui._ResearcherCardView(
             namekey=namekey,
             draw_number=researcher.draw_number,
             first_name=researcher.first_name,
@@ -358,13 +395,13 @@ class BrowserController:
 
     async def queue(self, *, namekey: control_ui.Namekey) -> UUID:
         researcher = next(item for item in self._researchers if item.namekey == namekey)
-        if researcher.cohort is control_ui.ResearcherCohort.INELIGIBLE:
+        if researcher.cohort is ResearcherCohort.INELIGIBLE:
             raise ValueError("ineligible namekeys cannot be queued")
-        run_id = uuid4()
+        run_id = uuid7()
         self._run_id_by_namekey[namekey] = run_id
         self._attempt_run_ids_by_namekey[namekey].append(run_id)
-        self._status_by_run_id[run_id] = control_ui.RunStatus.QUEUED
-        self._status_by_namekey[namekey] = control_ui.RunStatus.QUEUED
+        self._activity_by_run_id[run_id] = control_ui._ResearcherActivity.QUEUED
+        self._activity_by_namekey[namekey] = control_ui._ResearcherActivity.QUEUED
         return run_id
 
     async def rerun(self, *, namekey: control_ui.Namekey) -> UUID:
@@ -376,8 +413,8 @@ class BrowserController:
             for source, candidate in self._run_id_by_namekey.items()
             if candidate == run_id
         )
-        self._status_by_run_id[run_id] = control_ui.RunStatus.CANCELED
-        self._status_by_namekey[namekey] = control_ui.RunStatus.CANCELED
+        self._activity_by_run_id[run_id] = control_ui._ResearcherActivity.CANCELED
+        self._activity_by_namekey[namekey] = control_ui._ResearcherActivity.CANCELED
 
 
 def available_e2e_port() -> int:
@@ -393,7 +430,7 @@ def available_e2e_port() -> int:
 def serve_e2e_dashboard(*, port: int) -> None:
     controller = BrowserController()
     control_ui.SERVICES = cast(
-        control_ui.ApplicationServices,
+        control_ui._ApplicationServices,
         SimpleNamespace(
             controller=controller,
             configuration=SimpleNamespace(
@@ -404,7 +441,7 @@ def serve_e2e_dashboard(*, port: int) -> None:
         ),
     )
     control_ui.configure_application_lifecycle()
-    control_ui.ui.run(
+    ui.run(
         host=E2E_HOST,
         port=port,
         reload=False,
@@ -423,11 +460,11 @@ def wait_for_server(process: subprocess.Popen[str], *, url: str) -> None:
             with urllib_request.urlopen(url, timeout=1):
                 return
         except OSError, urllib_error.URLError:
-            time.sleep(control_ui.BACKEND_READY_POLL_SECONDS)
+            time.sleep(control_vars.BACKEND_READY_POLL_SECONDS)
     raise TimeoutError("Control Centre E2E server did not start")
 
 
-def grid_row_for_draw(page: Page, draw: str):
+def grid_row_for_draw(page: Page, draw: str) -> Locator:
     cell = page.locator(
         f'{GRID_CELL_SELECTOR}[col-id="{control_ui.GRID_DRAW_FIELD}"]',
         has_text=re.compile(rf"^{re.escape(draw)}$"),
@@ -610,7 +647,7 @@ def test_completed_researcher_metadata_is_available_in_visible_attempt_history(
     with control_centre_browser(repository_root) as (page, errors):
         page.set_viewport_size(E2E_NARROW_VIEWPORT)
         completed_namekey = browser_researchers()[BROWSER_LEADING_RESEARCHER_COUNT].namekey
-        page.get_by_label(control_ui.Locale.SEARCH_FILTER).fill(completed_namekey)
+        page.get_by_label(Locale.SEARCH_FILTER).fill(completed_namekey)
         grid = page.get_by_test_id(control_ui.RESEARCHER_GRID_TEST_ID)
         expect(grid.locator(GRID_ROW_SELECTOR)).to_have_count(1)
         completed_row = grid_row_for_draw(page, BROWSER_COMPLETED_DRAW)
@@ -626,10 +663,16 @@ def test_completed_researcher_metadata_is_available_in_visible_attempt_history(
         history_rows = history.locator("tbody tr")
         expect(history_rows).to_have_count(1)
         history_cells = history_rows.first.locator("td")
-        expect(history_cells.nth(1)).to_have_text(control_ui.RunStatus.COMPLETE.value)
+        expect(history_cells.nth(1)).to_have_text(
+            control_ui._ResearcherActivity.COMPLETE.value
+        )
         expect(history_cells.nth(2)).to_have_text("attempt-1")
+        expect(history_cells.nth(3)).to_have_text(
+            Locale.RUN_OUTCOME_SNAPSHOT_SAVED
+        )
+        expect(history_cells.nth(4)).to_have_text(Locale.SESSION_STATUS_OK)
         expect(page.get_by_test_id(control_ui.EXECUTE_ACTION_TEST_ID)).to_have_text(
-            control_ui.ACTION_LABEL_BY_VALUE[control_ui.RunAction.RERUN.value]
+            control_ui.ACTION_LABEL_BY_VALUE[control_ui._RunAction.RERUN.value]
         )
         view_card = page.get_by_test_id(control_ui.VIEW_CARD_TEST_ID)
         expect(view_card).to_be_enabled()
@@ -711,7 +754,7 @@ def test_control_centre_browser_contract(repository_root: Path) -> None:
             backend_refresh = page.get_by_test_id(control_ui.BACKEND_REFRESH_TEST_ID)
             expect(backend_status).to_have_text("Backend API: running")
             expect(ipc_status).to_have_text("IPC: available")
-            expect(backend_refresh).to_have_text(control_ui.Locale.ACTION_REFRESH)
+            expect(backend_refresh).to_have_text(Locale.ACTION_REFRESH)
             expect(backend_refresh).to_be_enabled()
             status_box = backend_status.bounding_box()
             refresh_box = backend_refresh.bounding_box()
@@ -724,9 +767,9 @@ def test_control_centre_browser_contract(repository_root: Path) -> None:
             expect(backend_refresh).to_be_enabled()
 
             summary = page.get_by_test_id(control_ui.PAGE_SUMMARY_TEST_ID)
-            expect(summary).to_contain_text(f"Total {control_ui.EXPECTED_SOURCE_RESEARCHERS}")
+            expect(summary).to_contain_text(f"Total {api.EXPECTED_SOURCE_RESEARCHERS}")
             expect(summary).to_contain_text(
-                f"ineligible {control_ui.EXPECTED_INELIGIBLE_RESEARCHERS}"
+                f"ineligible {api.EXPECTED_INELIGIBLE_RESEARCHERS}"
             )
             grid = page.get_by_test_id(control_ui.RESEARCHER_GRID_TEST_ID)
             expect(grid.locator('[role="grid"]')).to_have_attribute(
@@ -735,7 +778,7 @@ def test_control_centre_browser_contract(repository_root: Path) -> None:
             )
             headers = grid.locator(GRID_HEADER_SELECTOR)
             expect(headers.nth(0)).to_contain_text(control_ui.GRID_RND_FIELD)
-            expect(headers.nth(1)).to_contain_text(control_ui.DRAW_LABEL)
+            expect(headers.nth(1)).to_contain_text(DRAW_LABEL)
             assert_shared_width(page)
 
             page.set_viewport_size(E2E_WIDE_VIEWPORT)
@@ -763,7 +806,7 @@ def test_control_centre_browser_contract(repository_root: Path) -> None:
             expect(action_button).to_be_disabled()
             expect(action_button).to_have_text(
                 re.compile(
-                    control_ui.ACTION_LABEL_BY_VALUE[control_ui.RunAction.DISABLED.value],
+                    control_ui.ACTION_LABEL_BY_VALUE[control_ui._RunAction.DISABLED.value],
                     re.IGNORECASE,
                 )
             )
@@ -774,7 +817,7 @@ def test_control_centre_browser_contract(repository_root: Path) -> None:
             expect(action_button).to_be_enabled()
             expect(action_button).to_have_text(
                 re.compile(
-                    control_ui.ACTION_LABEL_BY_VALUE[control_ui.RunAction.QUEUE.value],
+                    control_ui.ACTION_LABEL_BY_VALUE[control_ui._RunAction.QUEUE.value],
                     re.IGNORECASE,
                 )
             )
@@ -793,7 +836,7 @@ def test_control_centre_browser_contract(repository_root: Path) -> None:
             assert errors == [], Counter(errors)
 
             page.set_viewport_size(E2E_WIDE_VIEWPORT)
-            search_input = page.get_by_label(control_ui.Locale.SEARCH_FILTER)
+            search_input = page.get_by_label(Locale.SEARCH_FILTER)
             search_input.fill("pilot.2")
             expect(grid.locator(GRID_ROW_SELECTOR)).to_have_count(1)
             expect(search_input).to_have_value("pilot.2")
@@ -828,7 +871,7 @@ def test_control_centre_browser_contract(repository_root: Path) -> None:
             expect(summary).to_contain_text("queued 1")
             expect(action_button).to_have_text(
                 re.compile(
-                    control_ui.ACTION_LABEL_BY_VALUE[control_ui.RunAction.CANCEL.value],
+                    control_ui.ACTION_LABEL_BY_VALUE[control_ui._RunAction.CANCEL.value],
                     re.IGNORECASE,
                 )
             )
@@ -844,12 +887,14 @@ def test_control_centre_browser_contract(repository_root: Path) -> None:
             history_rows = history.locator("tbody tr")
             expect(history_rows).to_have_count(1)
             expect(history_rows.nth(0)).to_contain_text("attempt-1")
-            expect(history_rows.nth(0)).to_contain_text(control_ui.RunStatus.QUEUED.value)
+            expect(history_rows.nth(0)).to_contain_text(
+                control_ui._ResearcherActivity.QUEUED.value
+            )
 
             action_button.click()
             expect(action_button).to_have_text(
                 re.compile(
-                    control_ui.ACTION_LABEL_BY_VALUE[control_ui.RunAction.RERUN.value],
+                    control_ui.ACTION_LABEL_BY_VALUE[control_ui._RunAction.RERUN.value],
                     re.IGNORECASE,
                 )
             )
