@@ -208,7 +208,13 @@ The version of pixi is locked in `.tool-versions`.
 
 More needs to be said about the Control Centre – AI Agent Runtime dynamics, so there is a separate section dedicated to this down below.
 
-## Control Centre vs. AI Agent Runtime – Harnessing software that also has agency
+## Known failure modes
+### Out of disk space
+If the machine on which the AI Agent Runtime is running
+runs out of disk space during `codex` execution,
+the rollout may be corrupted or partially lost.
+
+### Control Centre vs. AI Agent Runtime – Harnessing software that also has agency
 As described above, the AI Agent Runtime is co-operated by the Human Operator and the LLM Inference API.
 While the Human assumes a more supervisory role, principal operations are undeniably handed over to the LLM Inference API.
 This status quo is peculiar because this AI Agent Runtime both orchestrates and authorizes tool calls such as Linux shell commands.
