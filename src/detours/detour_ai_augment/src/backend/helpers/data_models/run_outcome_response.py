@@ -19,7 +19,7 @@ from src.detours.detour_ai_augment.protected.src.architecture import (
     BackendComponent,
 )
 from ....control_centre.dashboard.helpers.data_models.run_outcome import (
-    RunOutcome,
+    RunLifecycle,
     RunOutcomeRequest,
 )
 from .commit_event import (
@@ -84,10 +84,10 @@ class RunOutcomeResponse(HttpRequestLogRecord):
 
     @property
     def http_request_log_record(self) -> HttpRequestLogRecord:
-        return HttpRequestLogRecord.model_validate(self.model_dump())
+        return self
 
     @property
-    def run_outcome(self) -> RunOutcome:
+    def run_outcome(self) -> RunLifecycle:
         return self.run_outcome_request.run_outcome
 
     @classmethod

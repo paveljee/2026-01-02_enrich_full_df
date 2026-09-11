@@ -20,21 +20,20 @@ from src.detours.detour_ai_augment.protected.src.architecture import (
     ControlCentreComponent,
 )
 
-type RunOutcomeValue = Literal["completed", "failed", "cancelled"]
-type RunOutcomePath = Literal["/completed", "/failed", "/cancelled"]
 
-COMPLETED_PATH: RunOutcomePath = "/completed"
-FAILED_PATH: RunOutcomePath = "/failed"
-CANCELLED_PATH: RunOutcomePath = "/cancelled"
-RUN_OUTCOME_BY_PATH: dict[RunOutcomePath, RunOutcomeValue] = {
-    COMPLETED_PATH: "completed",
-    FAILED_PATH: "failed",
-    CANCELLED_PATH: "cancelled",
-}
-RUN_OUTCOME_PATH_BY_VALUE: dict[RunOutcomeValue, RunOutcomePath] = {
-    run_outcome: path for path, run_outcome in RUN_OUTCOME_BY_PATH.items()
-}
-RUN_OUTCOME_PATHS = frozenset(RUN_OUTCOME_BY_PATH)
+@implements[ControlCentreComponent.BackendPort.RunOutcomePathProperty]()
+class RunOutcomePath(StrEnum):
+    value: Literal["/completed", "/failed", "/cancelled"]
+
+    COMPLETED = "/completed"
+    FAILED = "/failed"
+    CANCELLED = "/cancelled"
+
+
+COMPLETED_PATH = RunOutcomePath.COMPLETED
+FAILED_PATH = RunOutcomePath.FAILED
+CANCELLED_PATH = RunOutcomePath.CANCELLED
+RUN_OUTCOME_PATHS: frozenset[RunOutcomePath] = frozenset(RunOutcomePath)
 
 HTTP_POST_METHOD = "POST"
 SYNTHETIC_SCHEME = "http"
@@ -74,28 +73,72 @@ def name_key_from_header_value(value: object) -> NameKey:
     return namekey
 
 
-@implements[ControlCentreComponent.RunOutcomeProperty]()
-class RunOutcome(StrEnum):
-    value: RunOutcomeValue
+@implements[ControlCentreComponent.LifecycleProperty]()
+class RunLifecycle(StrEnum):
+    value: Literal[
+        "ready",
+        "queued",
+        "running",
+        "started",
+        "remote_pid_discovered",
+        "session_discovered",
+        "rollout_discovered",
+        "push_accepted",
+        "cancel_requested",
+        "codex_exited",
+        "completed",
+        "failed",
+        "cancelled",
+    ]
 
+    READY = "ready"
+    QUEUED = "queued"
+    RUNNING = "running"
+    STARTED = "started"
+    REMOTE_PID_DISCOVERED = "remote_pid_discovered"
+    SESSION_DISCOVERED = "session_discovered"
+    ROLLOUT_DISCOVERED = "rollout_discovered"
+    PUSH_ACCEPTED = "push_accepted"
+    CANCEL_REQUESTED = "cancel_requested"
+    CODEX_EXITED = "codex_exited"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
 
-    def to_path(self) -> RunOutcomePath:
-        return RUN_OUTCOME_PATH_BY_VALUE[self.value]
+    def is_run_outcome(self) -> bool:
+        return self in {
+            RunLifecycle.COMPLETED,
+            RunLifecycle.FAILED,
+            RunLifecycle.CANCELLED,
+        }
+
+    def to_run_outcome_path(
+        self,
+    ) -> RunOutcomePath:
+        if self is RunLifecycle.COMPLETED:
+            return COMPLETED_PATH
+        if self is RunLifecycle.FAILED:
+            return FAILED_PATH
+        if self is RunLifecycle.CANCELLED:
+            return CANCELLED_PATH
+        raise ValueError("run lifecycle has no run-outcome HTTP request path")
 
     @classmethod
-    def from_path(cls, path: str) -> Self:
+    def from_run_outcome_path(
+        cls,
+        path: str,
+    ) -> Self:
         try:
-            run_outcome_value = next(
-                run_outcome
-                for run_outcome_path, run_outcome in RUN_OUTCOME_BY_PATH.items()
-                if run_outcome_path == path
-            )
-        except StopIteration as exc:
+            run_outcome_path = RunOutcomePath(path)
+        except ValueError as exc:
             raise ValueError("run-outcome HTTP request path is invalid") from exc
-        return cls(run_outcome_value)
+        if run_outcome_path is COMPLETED_PATH:
+            return cls.COMPLETED
+        if run_outcome_path is FAILED_PATH:
+            return cls.FAILED
+        if run_outcome_path is CANCELLED_PATH:
+            return cls.CANCELLED
+        raise ValueError("run-outcome HTTP request path is invalid")
 
 
 def _http_header_value(
@@ -113,13 +156,13 @@ def _http_header_value(
 class RunOutcomeRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
-    run_outcome: RunOutcome
+    run_outcome: RunLifecycle
     namekey: NameKey
     http_request_log_record: HttpRequestLogRecord
 
     @property
     def path(self) -> RunOutcomePath:
-        return self.run_outcome.to_path()
+        return self.run_outcome.to_run_outcome_path()
 
     @property
     def request_headers(self) -> Mapping[str, str]:
@@ -129,11 +172,14 @@ class RunOutcomeRequest(BaseModel):
     def outbound_http(
         cls,
         *,
-        run_outcome: RunOutcome,
+        run_outcome: RunLifecycle,
         namekey: NameKey,
-    ) -> tuple[RunOutcomePath, Mapping[str, str]]:
+    ) -> tuple[
+        RunOutcomePath,
+        Mapping[str, str],
+    ]:
         return (
-            run_outcome.to_path(),
+            run_outcome.to_run_outcome_path(),
             {NAME_KEY_HEADER: name_key_header_value(namekey)},
         )
 
@@ -180,7 +226,7 @@ class RunOutcomeRequest(BaseModel):
         cls,
         record: HttpRequestLogRecord,
     ) -> Self:
-        run_outcome = RunOutcome.from_path(record.path)
+        run_outcome = RunLifecycle.from_run_outcome_path(record.path)
         return cls(
             run_outcome=run_outcome,
             namekey=name_key_from_header_value(

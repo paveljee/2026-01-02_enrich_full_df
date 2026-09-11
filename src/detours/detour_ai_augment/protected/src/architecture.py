@@ -62,7 +62,7 @@ class BackendComponent(
             self,
         ) -> BackendComponent.ControlCentrePort.AiAugmentOuterDictProperty | None: ...
 
-    class WorkflowStatusProperty(
+    class LifecycleProperty(
         ComponentProtocol.PropertyProtocol,
         Protocol,
     ):
@@ -72,10 +72,24 @@ class BackendComponent(
         ) -> Literal[
             "ready",
             "busy",
+            "configuration",
+            "appendwatch_report_validation",
+            "rollout_index",
+            "pydantic_validation",
+            "duckdb_evidence_validation",
+            "researcher_resolution",
+            "innerdict_and_card",
+            "accepted",
+            "configuration_error",
+            "rejected",
             "retry",
             "complete",
             "failed",
         ]: ...
+
+        def is_post_commit_validation_stage(self) -> bool: ...
+
+        def is_post_commit_validation_result(self) -> bool: ...
 
     class CodexSessionRecordProperty(
         ComponentProtocol.PropertyProtocol,
@@ -111,12 +125,6 @@ class BackendComponent(
 
         @classmethod
         def validate_serialized_json(cls, value: str) -> None: ...
-
-        @classmethod
-        def record_ids_from_serialized_json(
-            cls,
-            value: str,
-        ) -> tuple[UUID, UUID]: ...
 
         @classmethod
         def from_serialized_json(
@@ -156,52 +164,20 @@ class BackendComponent(
             ],
         ) -> Self: ...
 
-    class PostCommitValidationStageProperty(
-        ComponentProtocol.PropertyProtocol,
-        Protocol,
-    ):
-        @property
-        def value(
-            self,
-        ) -> Literal[
-            "transport",
-            "configuration",
-            "rollout_copy",
-            "appendwatch_report_copy",
-            "appendwatch_report_validation",
-            "rollout_index",
-            "pydantic_validation",
-            "duckdb_evidence_validation",
-            "researcher_resolution",
-            "innerdict_and_card",
-            "accepted",
-        ]: ...
-
-    class PostCommitValidationResultProperty(
-        ComponentProtocol.PropertyProtocol,
-        Protocol,
-    ):
-        @property
-        def value(
-            self,
-        ) -> Literal[
-            "accepted",
-            "configuration_error",
-            "rejected",
-        ]: ...
-
     class PostCommitValidationProperty(
         ComponentProtocol.PropertyProtocol,
         Protocol,
     ):
         @property
-        def stage(self) -> BackendComponent.PostCommitValidationStageProperty: ...
+        def stage(self) -> BackendComponent.LifecycleProperty: ...
 
         @property
-        def result(self) -> BackendComponent.PostCommitValidationResultProperty: ...
+        def result(self) -> BackendComponent.LifecycleProperty: ...
 
         @property
         def detail(self) -> str | None: ...
+
+        def validate_lifecycle(self) -> Self: ...
 
     class AgentRuntimePort(
         ComponentProtocol.PortProtocol,
@@ -347,6 +323,8 @@ class BackendComponent(
 
             def validate_ai_augment_outerdict(self) -> Self: ...
 
+            def ground_truth_innerdict(self) -> InnerDict | None: ...
+
             @classmethod
             def from_serialized(
                 cls,
@@ -398,7 +376,7 @@ class BackendComponent(
             @property
             def run_outcome(
                 self,
-            ) -> ControlCentreComponent.RunOutcomeProperty: ...
+            ) -> ControlCentreComponent.LifecycleProperty: ...
 
             def validate_run_outcome_response(self) -> Self: ...
 
@@ -482,7 +460,7 @@ class ControlCentreComponent(
             self,
         ) -> LimaConfiguration: ...
 
-    class RunEventKindProperty(
+    class LifecycleProperty(
         ComponentProtocol.PropertyProtocol,
         Protocol,
     ):
@@ -490,7 +468,9 @@ class ControlCentreComponent(
         def value(
             self,
         ) -> Literal[
+            "ready",
             "queued",
+            "running",
             "started",
             "remote_pid_discovered",
             "session_discovered",
@@ -502,6 +482,18 @@ class ControlCentreComponent(
             "failed",
             "cancelled",
         ]: ...
+
+        def is_run_outcome(self) -> bool: ...
+
+        def to_run_outcome_path(
+            self,
+        ) -> ControlCentreComponent.BackendPort.RunOutcomePathProperty: ...
+
+        @classmethod
+        def from_run_outcome_path(
+            cls,
+            path: str,
+        ) -> Self: ...
 
     class RunEventProperty(
         ComponentProtocol.PropertyProtocol,
@@ -517,7 +509,7 @@ class ControlCentreComponent(
         def occurred_at_unix_usec(self) -> int: ...
 
         @property
-        def kind(self) -> ControlCentreComponent.RunEventKindProperty: ...
+        def lifecycle(self) -> ControlCentreComponent.LifecycleProperty: ...
 
         @property
         def session_id(self) -> UUID | None: ...
@@ -540,43 +532,6 @@ class ControlCentreComponent(
         @property
         def occurred_at(self) -> datetime: ...
 
-    class RunPhaseProperty(
-        ComponentProtocol.PropertyProtocol,
-        Protocol,
-    ):
-        @property
-        def value(
-            self,
-        ) -> Literal[
-            "queued",
-            "running",
-            "finished",
-        ]: ...
-
-    class RunOutcomeProperty(
-        ComponentProtocol.PropertyProtocol,
-        Protocol,
-    ):
-        @property
-        def value(
-            self,
-        ) -> Literal[
-            "completed",
-            "failed",
-            "cancelled",
-        ]: ...
-
-        def to_path(
-            self,
-        ) -> Literal[
-            "/completed",
-            "/failed",
-            "/cancelled",
-        ]: ...
-
-        @classmethod
-        def from_path(cls, path: str) -> Self: ...
-
     class RunProperty(
         ComponentProtocol.PropertyProtocol,
         Protocol,
@@ -588,10 +543,18 @@ class ControlCentreComponent(
         def namekey(self) -> NameKey: ...
 
         @property
-        def phase(self) -> ControlCentreComponent.RunPhaseProperty: ...
+        def lifecycle(self) -> ControlCentreComponent.LifecycleProperty: ...
 
         @property
-        def outcome(self) -> ControlCentreComponent.RunOutcomeProperty | None: ...
+        def run_outcome(
+            self,
+        ) -> ControlCentreComponent.LifecycleProperty | None: ...
+
+        def is_queued(self) -> bool: ...
+
+        def is_running(self) -> bool: ...
+
+        def is_finished(self) -> bool: ...
 
         @property
         def events(
@@ -620,6 +583,19 @@ class ControlCentreComponent(
     ):
         """Serves the Control Centre - Backend Connector."""
 
+        class RunOutcomePathProperty(
+            ComponentProtocol.PortProtocol.PropertyProtocol,
+            Protocol,
+        ):
+            @property
+            def value(
+                self,
+            ) -> Literal[
+                "/completed",
+                "/failed",
+                "/cancelled",
+            ]: ...
+
         class QueryRequestProperty(
             ComponentProtocol.PortProtocol.PropertyProtocol,
             Protocol,
@@ -632,7 +608,7 @@ class ControlCentreComponent(
             Protocol,
         ):
             @property
-            def run_outcome(self) -> ControlCentreComponent.RunOutcomeProperty: ...
+            def run_outcome(self) -> ControlCentreComponent.LifecycleProperty: ...
 
             @property
             def namekey(self) -> NameKey: ...
@@ -641,7 +617,9 @@ class ControlCentreComponent(
             def http_request_log_record(self) -> HttpRequestLogRecord: ...
 
             @property
-            def path(self) -> str: ...
+            def path(
+                self,
+            ) -> ControlCentreComponent.BackendPort.RunOutcomePathProperty: ...
 
             @property
             def request_headers(self) -> Mapping[str, str]: ...

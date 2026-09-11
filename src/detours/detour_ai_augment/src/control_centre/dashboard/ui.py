@@ -30,7 +30,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from src.helpers.architecture import implements
 from src.helpers.cards import build_cards, card_filename, render_docx_bytes
-from src.helpers.data_models import NameKey, RegisteredResource
+from src.helpers.data_models import NameKey
 from src.helpers.vars import (
     CARD_INTRODUCTION,
     DRAW_LABEL,
@@ -47,18 +47,14 @@ from ...backend.api import (
     CARD_EXCLUDED_COLUMNS,
     CODEX_SESSIONS_ROOT_ENV_NAME,
     CONTROL_PARENT_PID_ENV_NAME,
-    DOCX_TO_AI_AUGMENT_COLUMNS,
     HTTP_GET_METHOD,
     HTTP_POST_METHOD,
     NAMEKEY_ENV_NAME,
     SERVER_PORT,
     _PushValidationError,
-    ground_truth_for_researcher,
     parse_appendwatch_report_bytes,
     parse_name_key_header,
     parse_source_key_header,
-    registered_release_map,
-    registered_replay_log,
     selected_card_outer_dict,
 )
 from ...backend.helpers.data_models.ai_augment_context import (
@@ -78,6 +74,8 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     AiAugmentCohort,
     AiAugmentIneligibilityCategory,
     AI_AUGMENT_COLUMN_PREFIX,
+    DOCX_COLUMNS,
+    DOCX_TO_AI_AUGMENT_COLUMNS,
     KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL,
     KTP_AI_AUGMENT_FOOTNOTE_ARGUMENTS_COL,
     KTP_AI_AUGMENT_FOOTNOTES_COL,
@@ -85,12 +83,16 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
 from ...backend.helpers.data_models.ai_augment_outer_dict import (
     AiAugmentOuterDict,
     CommittedInnerDict,
+)
+from ...backend.helpers.data_models.commit_event import (
+    SOURCE_KEY_HEADER,
+    BackendLifecycle,
+)
+from ...backend.helpers.data_models.query_response import (
+    AgentRuntimeAttemptRecord,
     QueryResponse,
 )
-from ...backend.helpers.data_models.server_event import (
-    SOURCE_KEY_HEADER,
-    AgentRuntimeAttempt,
-    PostCommitValidationResult,
+from ...backend.helpers.data_models.run_outcome_response import (
     RunOutcomeResponse,
     RunOutcomeResponseBody,
 )
@@ -108,12 +110,10 @@ from .helpers.data_models.ai_augment_context import (
 from .helpers.data_models.run_event import (
     Run,
     RunEvent,
-    RunEventKind,
-    RunPhase,
 )
 from .helpers.data_models.run_outcome import (
     NAME_KEY_HEADER,
-    RunOutcome,
+    RunLifecycle,
     RunOutcomeRequest,
 )
 from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helpers.locale import (
@@ -297,15 +297,10 @@ CARD_RESPONSIVE_CSS: Final = f"""
 """
 
 # =============================================================================
-# Strong-ish scalar identities
+# Scalar identities
 # =============================================================================
 
-Namekey = NewType("Namekey", str)
 RemotePid = NewType("RemotePid", int)
-
-
-def namekey_model(namekey: Namekey) -> NameKey:
-    return NameKey.from_json_key(namekey)
 
 
 def datetime_to_unix_usec(value: datetime) -> int:
@@ -344,13 +339,13 @@ def researcher_sort_key(
     tuple[tuple[int, tuple[tuple[int, int | str], ...], str], ...],
     str,
     str,
-    Namekey,
+    str,
 ]:
     return (
         tuple(draw_sort_key(draw) for draw in researcher.draw_numbers),
         researcher.namekey.first_name.casefold(),
         researcher.namekey.last_name.casefold(),
-        Namekey(researcher.namekey.to_json_key()),
+        researcher.namekey.to_json_key(),
     )
 
 
@@ -397,48 +392,27 @@ VARIABLE_SPEC_BY_KEY: Final = {variable.key: variable for variable in VARIABLE_S
 # =============================================================================
 
 
-class _ResearcherActivity(StrEnum):
-    READY = "ready"
-    QUEUED = "queued"
-    RUNNING = "running"
-    COMPLETE = "complete"
-    FAILED = "failed"
-    CANCELED = "canceled"
-
-
-LIVE_RESEARCHER_ACTIVITIES: Final = frozenset({
-    _ResearcherActivity.QUEUED,
-    _ResearcherActivity.RUNNING,
+RESEARCHER_LIFECYCLES: Final = (
+    RunLifecycle.READY,
+    RunLifecycle.QUEUED,
+    RunLifecycle.RUNNING,
+    RunLifecycle.COMPLETED,
+    RunLifecycle.FAILED,
+    RunLifecycle.CANCELLED,
+)
+LIVE_RESEARCHER_LIFECYCLES: Final = frozenset({
+    RunLifecycle.QUEUED,
+    RunLifecycle.RUNNING,
 })
-AGENT_RUNTIME_ATTEMPT_ACTIVITY_BY_RESULT: Final = {
-    PostCommitValidationResult.ACCEPTED: _ResearcherActivity.COMPLETE,
-    PostCommitValidationResult.CONFIGURATION_ERROR: _ResearcherActivity.FAILED,
-    PostCommitValidationResult.REJECTED: _ResearcherActivity.FAILED,
-}
-RUN_EVENT_KIND_BY_OUTCOME: Final = {
-    RunOutcome.COMPLETED: RunEventKind.COMPLETED,
-    RunOutcome.FAILED: RunEventKind.FAILED,
-    RunOutcome.CANCELLED: RunEventKind.CANCELLED,
-}
-RESEARCHER_ACTIVITY_BY_RUN_OUTCOME: Final = {
-    RunOutcome.COMPLETED: _ResearcherActivity.COMPLETE,
-    RunOutcome.FAILED: _ResearcherActivity.FAILED,
-    RunOutcome.CANCELLED: _ResearcherActivity.CANCELED,
+AGENT_RUNTIME_ATTEMPT_LIFECYCLE_BY_RESULT: Final = {
+    BackendLifecycle.ACCEPTED: RunLifecycle.COMPLETED,
+    BackendLifecycle.CONFIGURATION_ERROR: RunLifecycle.FAILED,
+    BackendLifecycle.REJECTED: RunLifecycle.FAILED,
 }
 
 
-def researcher_activity_for_run(run: Run) -> _ResearcherActivity:
-    if run.phase is RunPhase.QUEUED:
-        return _ResearcherActivity.QUEUED
-    if run.phase is RunPhase.RUNNING:
-        return _ResearcherActivity.RUNNING
-    if run.outcome is None:
-        raise RuntimeError(Locale.JOURNAL_EVENT_WITHOUT_RUN)
-    return RESEARCHER_ACTIVITY_BY_RUN_OUTCOME[run.outcome]
-
-
-def run_namekey(run: Run) -> Namekey:
-    return Namekey(run.namekey.to_json_key())
+def run_namekey(run: Run) -> NameKey:
+    return run.namekey
 
 
 class _BackendStatus(StrEnum):
@@ -469,7 +443,7 @@ class _BackendAvailability:
 
 @dataclass(frozen=True, slots=True)
 class _GroundTruthRecord:
-    namekey: Namekey
+    namekey: NameKey
     values: Mapping[str, str | None]
 
 
@@ -502,7 +476,6 @@ class _CachedSourceData(BaseModel):
 
 def source_input_fingerprint(
     pipeline_config: AiAugmentDetourConfig,
-    release_map: RegisteredResource,
 ) -> _SourceInputFingerprint:
     source_database_path = pipeline_config.db_file.resolve(strict=True)
     source_database_stat = source_database_path.stat()
@@ -514,30 +487,29 @@ def source_input_fingerprint(
         source_database_ctime_ns=source_database_stat.st_ctime_ns,
         source_database_device=source_database_stat.st_dev,
         source_database_inode=source_database_stat.st_ino,
-        release_map_sha256=release_map.hash,
+        release_map_sha256=pipeline_config.resources.release_map.hash,
         sample_seed=pipeline_config.sample_seed,
     )
 
 
 def load_cached_source_data(
-    config_path: Path,
+    pipeline_config: AiAugmentDetourConfig,
 ) -> tuple[
     _SourceInputFingerprint,
-    _CachedSourceData | None,
-    RegisteredResource,
+    tuple[AiAugmentOuterDict, ...] | None,
 ]:
-    pipeline_config = AiAugmentDetourConfig.from_json(config_path)
-    release_map = registered_release_map(pipeline_config)
-    fingerprint = source_input_fingerprint(pipeline_config, release_map)
+    fingerprint = source_input_fingerprint(pipeline_config)
     raw_cache = app.storage.general.get(SOURCE_DATA_STORAGE_KEY)
     try:
         cache = _CachedSourceData.model_validate(raw_cache)
-        cache.outerdicts()
     except TypeError, ValueError, ValidationError:
-        return fingerprint, None, release_map
+        return fingerprint, None
     if cache.fingerprint != fingerprint:
-        return fingerprint, None, release_map
-    return fingerprint, cache, release_map
+        return fingerprint, None
+    try:
+        return fingerprint, cache.outerdicts()
+    except TypeError, ValueError, ValidationError:
+        return fingerprint, None
 
 
 def store_cached_source_data(
@@ -551,7 +523,6 @@ def store_cached_source_data(
             outerdict.serialize() for outerdict in ai_augment_outerdicts
         ),
     )
-    cache.outerdicts()
     app.storage.general[SOURCE_DATA_STORAGE_KEY] = cache.model_dump(mode="json")
 
 
@@ -567,37 +538,76 @@ def store_cached_source_data(
 
 @dataclass(frozen=True, slots=True)
 class _AttemptView:
-    row_id: UUID
-    run_id: UUID | None
-    namekey: Namekey
-
-    activity: _ResearcherActivity
-
-    commit_record_id: UUID | None
-    session_id: UUID | None
-
-    timestamp: datetime | None
-    ended_at: datetime | None
-
+    attempt_record: AgentRuntimeAttemptRecord | None
+    run: Run | None
     accepted: CommittedInnerDict | None
-
     run_outcome_response: RunOutcomeResponse | None
 
-    failure_detail: str | None
+    def __post_init__(self) -> None:
+        if (self.attempt_record is None) == (self.run is None):
+            raise ValueError("attempt view requires exactly one source record")
+
+    @property
+    def row_id(self) -> UUID:
+        if self.attempt_record is not None:
+            return self.attempt_record.attempt.commit_record.record_id
+        assert self.run is not None
+        return self.run.run_id
+
+    @property
+    def run_id(self) -> UUID | None:
+        return None if self.run is None else self.run.run_id
+
+    @property
+    def lifecycle(self) -> RunLifecycle:
+        if self.attempt_record is not None:
+            result = self.attempt_record.attempt.post_commit_validation.result
+            lifecycle = AGENT_RUNTIME_ATTEMPT_LIFECYCLE_BY_RESULT.get(result)
+            if lifecycle is None:
+                raise RuntimeError(Locale.ATTEMPT_DATABASE_INCONSISTENT)
+            return lifecycle
+        assert self.run is not None
+        if self.run.is_queued():
+            return RunLifecycle.QUEUED
+        if self.run.is_running():
+            return RunLifecycle.RUNNING
+        if self.run.run_outcome is RunLifecycle.COMPLETED:
+            return RunLifecycle.COMPLETED
+        if self.run.run_outcome is RunLifecycle.FAILED:
+            return RunLifecycle.FAILED
+        if self.run.run_outcome is RunLifecycle.CANCELLED:
+            return RunLifecycle.CANCELLED
+        raise RuntimeError(Locale.ATTEMPT_DATABASE_INCONSISTENT)
+
+    @property
+    def commit_record_id(self) -> UUID | None:
+        if self.attempt_record is not None:
+            return self.attempt_record.attempt.commit_record.record_id
+        assert self.run is not None
+        return self.run.accepted_commit_record_id
+
+    @property
+    def timestamp(self) -> datetime:
+        if self.attempt_record is not None:
+            return datetime.fromtimestamp(
+                self.attempt_record.attempt.commit_record.record_id.time / 1_000,
+                tz=timezone.utc,
+            )
+        assert self.run is not None
+        return self.run.started_at or self.run.queued_at
+
+    @property
+    def failure_detail(self) -> str | None:
+        if self.attempt_record is not None:
+            return self.attempt_record.attempt.post_commit_validation.detail
+        assert self.run is not None
+        return self.run.failure_detail
 
     @property
     def run_outcome_saved(self) -> bool | None:
         if self.run_outcome_response is None:
             return None
         return self.run_outcome_response.response_code == status.HTTP_200_OK
-
-    @property
-    def run_outcome_session_id(self) -> UUID | None:
-        if self.run_outcome_response is None:
-            return None
-        return (
-            self.run_outcome_response.run_outcome_response_body.codex_session_record.session_id
-        )
 
     @property
     def run_outcome_session_status(self) -> str | None:
@@ -635,14 +645,14 @@ class _ResearcherView:
     # Same object as attempts[-1], or None when never attempted.
     latest_attempt: _AttemptView | None
 
-    current_activity: _ResearcherActivity
+    current_lifecycle: RunLifecycle
 
 
 @dataclass(frozen=True, slots=True)
 class _AttemptVariableProjection:
     run_id: UUID | None
 
-    namekey: Namekey
+    namekey: NameKey
     draw_number: str
     first_name: str
     last_name: str
@@ -658,7 +668,7 @@ class _AttemptVariableProjection:
 
     commit_record_id: UUID | None
     attempt_timestamp: datetime | None
-    attempt_activity: _ResearcherActivity
+    attempt_lifecycle: RunLifecycle
     run_outcome_snapshot_savedness: str | None
     session_status: str | None
 
@@ -667,7 +677,7 @@ class _AttemptVariableProjection:
 
 @dataclass(frozen=True, slots=True)
 class _ResearcherGridRow:
-    namekey: Namekey
+    namekey: NameKey
     rnd: int
     cohort: AiAugmentCohort
     ineligibility_category: AiAugmentIneligibilityCategory | None
@@ -681,7 +691,7 @@ class _ResearcherGridRow:
 
 @dataclass(frozen=True, slots=True)
 class _ResearcherCardView:
-    namekey: Namekey
+    namekey: NameKey
     draw_number: str
     first_name: str
     last_name: str
@@ -700,17 +710,17 @@ class _DashboardCounts:
     running: int
     complete: int
     failed: int
-    canceled: int
+    cancelled: int
 
 
 @dataclass(slots=True)
 class _UiSelection:
     variable_key: str
-    activity_filter: _ResearcherActivity | None = None
+    lifecycle_filter: RunLifecycle | None = None
     cohort_filter: AiAugmentCohort | None = None
     search_text: str = ""
 
-    selected_namekey: Namekey | None = None
+    selected_namekey: NameKey | None = None
     selected_run_id: UUID | None = None
     selected_action: _RunAction | None = None
 
@@ -745,7 +755,7 @@ class _SourceRepository:
         return self._configuration.ai_augment_outerdicts
 
     @property
-    def ground_truth_by_namekey(self) -> Mapping[Namekey, _GroundTruthRecord]:
+    def ground_truth_by_namekey(self) -> Mapping[str, _GroundTruthRecord]:
         return self.load_ground_truth_by_namekey()
 
     def load_researchers(self) -> tuple[AiAugmentOuterDict, ...]:
@@ -760,41 +770,42 @@ class _SourceRepository:
 
     def load_ground_truth(
         self,
-        namekey: Namekey,
+        namekey: NameKey,
     ) -> _GroundTruthRecord | None:
         matches = tuple(
             outerdict
             for outerdict in self._configuration.ai_augment_outerdicts
-            if outerdict.namekey.to_json_key() == namekey
+            if outerdict.namekey == namekey
         )
         if len(matches) != 1:
             raise RuntimeError(Locale.GROUND_TRUTH_MISSING)
-        values = ground_truth_for_researcher(matches[0])
-        if values is None:
+        innerdict = matches[0].ground_truth_innerdict()
+        if innerdict is None:
             return None
         return _GroundTruthRecord(
             namekey=namekey,
             values={
-                column: None if value is None else str(value) for column, value in values.items()
+                column: None if (value := innerdict.data[column]) is None else str(value)
+                for column in DOCX_COLUMNS
             },
         )
 
     def load_ground_truth_by_namekey(
         self,
-    ) -> Mapping[Namekey, _GroundTruthRecord]:
-        result: dict[Namekey, _GroundTruthRecord] = {}
+    ) -> Mapping[str, _GroundTruthRecord]:
+        result: dict[str, _GroundTruthRecord] = {}
         for outerdict in self._configuration.ai_augment_outerdicts:
             if outerdict.ai_augment_cohort is not AiAugmentCohort.GROUND_TRUTH:
                 continue
-            namekey = Namekey(outerdict.namekey.to_json_key())
-            values = ground_truth_for_researcher(outerdict)
-            if values is None:
+            namekey = outerdict.namekey
+            innerdict = outerdict.ground_truth_innerdict()
+            if innerdict is None:
                 raise RuntimeError(Locale.GROUND_TRUTH_MISSING)
-            result[namekey] = _GroundTruthRecord(
+            result[namekey.to_json_key()] = _GroundTruthRecord(
                 namekey=namekey,
                 values={
-                    column: None if value is None else str(value)
-                    for column, value in values.items()
+                    column: None if (value := innerdict.data[column]) is None else str(value)
+                    for column in DOCX_COLUMNS
                 },
             )
         return result
@@ -875,7 +886,7 @@ class _BackendDatabaseClient:
     ) -> None:
         self._socket_path = socket_path
         self._pipeline_config = pipeline_config
-        self._card_cache: dict[Namekey, str] = {}
+        self._card_cache: dict[str, str] = {}
 
     def _request(self, *, target: str) -> bytes:
         connection = _UnixSocketHttpConnection(
@@ -894,8 +905,8 @@ class _BackendDatabaseClient:
         finally:
             connection.close()
 
-    def pull(self, namekey: Namekey | None = None) -> QueryResponse:
-        request = QueryRequest(namekey=None if namekey is None else namekey_model(namekey))
+    def pull(self, namekey: NameKey | None = None) -> QueryResponse:
+        request = QueryRequest(namekey=namekey)
         target = DASHBOARD_QUERY_PATH
         if request.namekey is not None:
             target = f"{target}?{urlencode({KTP_NAMEKEY_COL: request.namekey.to_json_key()})}"
@@ -907,12 +918,12 @@ class _BackendDatabaseClient:
     def record_run_outcome(
         self,
         *,
-        run_outcome: RunOutcome,
-        namekey: Namekey,
+        run_outcome: RunLifecycle,
+        namekey: NameKey,
     ) -> int:
         request_path, request_headers = RunOutcomeRequest.outbound_http(
             run_outcome=run_outcome,
-            namekey=namekey_model(namekey),
+            namekey=namekey,
         )
         connection = _UnixSocketHttpConnection(
             socket_path=self._socket_path,
@@ -956,8 +967,9 @@ class _BackendDatabaseClient:
         finally:
             connection.close()
 
-    def card(self, namekey: Namekey) -> str:
-        cached = self._card_cache.get(namekey)
+    def card(self, namekey: NameKey) -> str:
+        namekey_json = namekey.to_json_key()
+        cached = self._card_cache.get(namekey_json)
         if cached is not None:
             return cached
         outerdicts = self.pull(namekey=namekey).ai_augment_outerdicts
@@ -976,7 +988,7 @@ class _BackendDatabaseClient:
         if len(cards) != 1:
             raise RuntimeError(Locale.BACKEND_CARD_MISSING)
         markdown = next(iter(cards.values()))
-        self._card_cache[namekey] = markdown
+        self._card_cache[namekey_json] = markdown
         return markdown
 
 
@@ -985,64 +997,64 @@ class _BackendDatabaseClient:
 # =============================================================================
 
 
+def apply_run_event(run: Run | None, event: RunEvent) -> Run:
+    if run is None:
+        if event.lifecycle is not RunLifecycle.QUEUED:
+            raise RuntimeError(Locale.JOURNAL_EVENT_WITHOUT_RUN)
+        run = Run(
+            run_id=event.run_id,
+            namekey=event.namekey,
+            lifecycle=RunLifecycle.QUEUED,
+            queued_at=event.occurred_at,
+            dashboard_owned=True,
+        )
+    elif run.namekey != event.namekey:
+        raise RuntimeError(Locale.JOURNAL_EVENT_WITHOUT_RUN)
+    elif event.lifecycle is RunLifecycle.QUEUED:
+        raise RuntimeError(Locale.JOURNAL_DUPLICATE_RUN_ID)
+
+    if event.lifecycle is RunLifecycle.STARTED:
+        run.started_at = event.occurred_at
+        run.remote_pid = event.remote_pid
+    elif event.lifecycle is RunLifecycle.REMOTE_PID_DISCOVERED:
+        if event.remote_pid is None:
+            raise RuntimeError(Locale.JOURNAL_REMOTE_PID_MISSING)
+        run.remote_pid = event.remote_pid
+    elif event.lifecycle is RunLifecycle.SESSION_DISCOVERED:
+        if event.session_id is None:
+            raise RuntimeError(Locale.JOURNAL_SESSION_ID_MISSING)
+        run.session_id = event.session_id
+        run.session_timestamp = event.occurred_at
+    elif event.lifecycle is RunLifecycle.ROLLOUT_DISCOVERED:
+        if event.rollout_jsonl is None:
+            raise RuntimeError(Locale.JOURNAL_ROLLOUT_PATH_MISSING)
+        run.rollout_jsonl = PurePosixPath(event.rollout_jsonl)
+    elif event.lifecycle is RunLifecycle.PUSH_ACCEPTED:
+        if event.accepted_commit_record_id is None:
+            raise RuntimeError(Locale.JOURNAL_COMMIT_RECORD_ID_MISSING)
+        run.accepted_commit_record_id = event.accepted_commit_record_id
+        run.accepted_at = event.occurred_at
+    elif event.lifecycle is RunLifecycle.CANCEL_REQUESTED:
+        run.cancel_requested_at = event.occurred_at
+    elif event.lifecycle is RunLifecycle.CODEX_EXITED:
+        run.codex_exit_code = event.codex_exit_code
+        run.exited_at = event.occurred_at
+    elif event.lifecycle is RunLifecycle.COMPLETED:
+        run.run_outcome = RunLifecycle.COMPLETED
+    elif event.lifecycle is RunLifecycle.FAILED:
+        run.run_outcome = RunLifecycle.FAILED
+        run.failure_detail = event.detail
+    elif event.lifecycle is RunLifecycle.CANCELLED:
+        run.run_outcome = RunLifecycle.CANCELLED
+    run.lifecycle = event.lifecycle
+    run.events += (event,)
+    return run
+
+
 def replay_run_events(events: Sequence[RunEvent]) -> Mapping[UUID, Run]:
     runs: dict[UUID, Run] = {}
     for event in events:
-        run = runs.get(event.run_id)
-        if run is None:
-            if event.kind is not RunEventKind.QUEUED:
-                raise RuntimeError(Locale.JOURNAL_EVENT_WITHOUT_RUN)
-            run = Run(
-                run_id=event.run_id,
-                namekey=event.namekey,
-                phase=RunPhase.QUEUED,
-                queued_at=event.occurred_at,
-                dashboard_owned=True,
-            )
-            runs[event.run_id] = run
-        elif run.namekey != event.namekey:
-            raise RuntimeError(Locale.JOURNAL_EVENT_WITHOUT_RUN)
-        elif event.kind is RunEventKind.QUEUED:
-            raise RuntimeError(Locale.JOURNAL_DUPLICATE_RUN_ID)
-
-        if event.kind is RunEventKind.STARTED:
-            run.phase = RunPhase.RUNNING
-            run.started_at = event.occurred_at
-            run.remote_pid = event.remote_pid
-        elif event.kind is RunEventKind.REMOTE_PID_DISCOVERED:
-            if event.remote_pid is None:
-                raise RuntimeError(Locale.JOURNAL_REMOTE_PID_MISSING)
-            run.remote_pid = event.remote_pid
-        elif event.kind is RunEventKind.SESSION_DISCOVERED:
-            if event.session_id is None:
-                raise RuntimeError(Locale.JOURNAL_SESSION_ID_MISSING)
-            run.session_id = event.session_id
-            run.session_timestamp = event.occurred_at
-        elif event.kind is RunEventKind.ROLLOUT_DISCOVERED:
-            if event.rollout_jsonl is None:
-                raise RuntimeError(Locale.JOURNAL_ROLLOUT_PATH_MISSING)
-            run.rollout_jsonl = PurePosixPath(event.rollout_jsonl)
-        elif event.kind is RunEventKind.PUSH_ACCEPTED:
-            if event.accepted_commit_record_id is None:
-                raise RuntimeError(Locale.JOURNAL_COMMIT_RECORD_ID_MISSING)
-            run.accepted_commit_record_id = event.accepted_commit_record_id
-            run.accepted_at = event.occurred_at
-        elif event.kind is RunEventKind.CANCEL_REQUESTED:
-            run.cancel_requested_at = event.occurred_at
-        elif event.kind is RunEventKind.CODEX_EXITED:
-            run.codex_exit_code = event.codex_exit_code
-            run.exited_at = event.occurred_at
-        elif event.kind is RunEventKind.COMPLETED:
-            run.phase = RunPhase.FINISHED
-            run.outcome = RunOutcome.COMPLETED
-        elif event.kind is RunEventKind.FAILED:
-            run.phase = RunPhase.FINISHED
-            run.outcome = RunOutcome.FAILED
-            run.failure_detail = event.detail
-        elif event.kind is RunEventKind.CANCELLED:
-            run.phase = RunPhase.FINISHED
-            run.outcome = RunOutcome.CANCELLED
-        run.events += (event,)
+        runs[event.run_id] = apply_run_event(runs.get(event.run_id), event)
     return runs
 
 
@@ -1103,7 +1115,12 @@ class _BackendSupervisor:
         except OSError, urllib_error.URLError, urllib_error.HTTPError:
             return False
 
-    async def start(self, *, namekey: Namekey) -> None:
+    async def start(self, *, namekey: NameKey) -> None:
+        if not all(
+            resource.verify_hash_on_init
+            for resource in self._pipeline_config.resources.registered_resources
+        ):
+            raise RuntimeError(Locale.BACKEND_RESOURCES_NOT_VERIFIED)
         if self._process is not None:
             raise RuntimeError(Locale.BACKEND_ALREADY_OWNED)
         self._status = _BackendStatus.STARTING
@@ -1259,13 +1276,13 @@ class _BackendSupervisor:
             raise RuntimeError(Locale.BACKEND_NOT_RUNNING)
         return await self._process.process.wait()
 
-    def environment(self, *, namekey: Namekey) -> Mapping[str, str]:
+    def environment(self, *, namekey: NameKey) -> Mapping[str, str]:
         environment = os.environ.copy()
         environment[EXPORT_OPENALEX_API_KEY] = self._openalex_api_key
         environment[APPENDWATCH_REPORT_ENV_NAME] = str(self._appendwatch_report)
         environment[CONTROL_PARENT_PID_ENV_NAME] = str(os.getpid())
         environment[DASHBOARD_SOCKET_PATH_ENV_NAME] = str(self._dashboard_socket_path)
-        environment[NAMEKEY_ENV_NAME] = str(namekey)
+        environment[NAMEKEY_ENV_NAME] = namekey.to_json_key()
         environment[CODEX_SESSIONS_ROOT_ENV_NAME] = str(CODEX_SESSIONS_ROOT)
         return environment
 
@@ -1277,7 +1294,7 @@ class _BackendSupervisor:
 
 @dataclass(slots=True)
 class _CodexProcessHandle:
-    run_id: UUID
+    run: Run
     process: asyncio.subprocess.Process
 
     remote_pid: RemotePid | None = None
@@ -1313,9 +1330,9 @@ class _CodexRunner:
     def codex_remote_command(
         self,
         *,
-        run_id: UUID,
+        run: Run,
     ) -> str:
-        pid_path = CODEX_WORKDIR / CODEX_RUN_PID_TEMPLATE.format(run_id=run_id)
+        pid_path = CODEX_WORKDIR / CODEX_RUN_PID_TEMPLATE.format(run_id=run.run_id)
         return CODEX_REMOTE_EXEC_COMMAND_TEMPLATE.format(
             pid_path=shlex.quote(str(pid_path)),
             environment_path=shlex.quote(str(CODEX_ENV_PATH)),
@@ -1362,11 +1379,11 @@ class _CodexRunner:
     async def start(
         self,
         *,
-        run_id: UUID,
+        run: Run,
         on_handle: (Callable[[_CodexProcessHandle], Awaitable[None]] | None) = None,
     ) -> _CodexStartResult:
-        marker_path = CODEX_WORKDIR / CODEX_RUN_MARKER_TEMPLATE.format(run_id=run_id)
-        pid_path = CODEX_WORKDIR / CODEX_RUN_PID_TEMPLATE.format(run_id=run_id)
+        marker_path = CODEX_WORKDIR / CODEX_RUN_MARKER_TEMPLATE.format(run_id=run.run_id)
+        pid_path = CODEX_WORKDIR / CODEX_RUN_PID_TEMPLATE.format(run_id=run.run_id)
         await self._remote_command(
             CODEX_REMOTE_PREPARE_RUN_COMMAND_TEMPLATE.format(
                 workdir=shlex.quote(str(CODEX_WORKDIR)),
@@ -1376,11 +1393,11 @@ class _CodexRunner:
         )
         process = await asyncio.create_subprocess_exec(
             *self.ssh_base_command(),
-            self.codex_remote_command(run_id=run_id),
+            self.codex_remote_command(run=run),
             stdin=asyncio.subprocess.PIPE,
             start_new_session=True,
         )
-        handle = _CodexProcessHandle(run_id=run_id, process=process)
+        handle = _CodexProcessHandle(run=run, process=process)
         try:
             if process.stdin is None:
                 raise RuntimeError(Locale.CODEX_STDIN_UNAVAILABLE)
@@ -1422,8 +1439,10 @@ class _CodexRunner:
     ) -> tuple[UUID, datetime]:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + CODEX_DISCOVERY_TIMEOUT_SECONDS
-        marker_path = CODEX_WORKDIR / CODEX_RUN_MARKER_TEMPLATE.format(run_id=handle.run_id)
-        pid_path = CODEX_WORKDIR / CODEX_RUN_PID_TEMPLATE.format(run_id=handle.run_id)
+        marker_path = CODEX_WORKDIR / CODEX_RUN_MARKER_TEMPLATE.format(
+            run_id=handle.run.run_id
+        )
+        pid_path = CODEX_WORKDIR / CODEX_RUN_PID_TEMPLATE.format(run_id=handle.run.run_id)
         find_command = CODEX_REMOTE_FIND_NEW_ROLLOUT_COMMAND_TEMPLATE.format(
             sessions_root=shlex.quote(str(CODEX_SESSIONS_ROOT)),
             marker_path=shlex.quote(str(marker_path)),
@@ -1507,7 +1526,7 @@ class _CodexRunner:
                 emit_log(
                     Locale.CONTROL_CENTRE_LOG_PREFIX,
                     Locale.CODEX_REMOTE_STOPPING_LOG_TEMPLATE.format(
-                        run_id=handle.run_id,
+                        run_id=handle.run.run_id,
                         session_id=handle.session_id,
                         remote_pid=remote_pid,
                     ),
@@ -1516,7 +1535,7 @@ class _CodexRunner:
                 emit_log(
                     Locale.CONTROL_CENTRE_LOG_PREFIX,
                     Locale.CODEX_REMOTE_STOPPED_LOG_TEMPLATE.format(
-                        run_id=handle.run_id,
+                        run_id=handle.run.run_id,
                         remote_pid=remote_pid,
                     ),
                 )
@@ -1528,7 +1547,7 @@ class _CodexRunner:
             emit_log(
                 Locale.CONTROL_CENTRE_LOG_PREFIX,
                 Locale.CODEX_SSH_STOPPING_LOG_TEMPLATE.format(
-                    run_id=handle.run_id,
+                    run_id=handle.run.run_id,
                     pid=handle.process.pid,
                 ),
             )
@@ -1536,7 +1555,7 @@ class _CodexRunner:
             emit_log(
                 Locale.CONTROL_CENTRE_LOG_PREFIX,
                 Locale.CODEX_SSH_STOPPED_LOG_TEMPLATE.format(
-                    run_id=handle.run_id,
+                    run_id=handle.run.run_id,
                     pid=handle.process.pid,
                     return_code=handle.process.returncode,
                 ),
@@ -1554,7 +1573,7 @@ class _CodexRunner:
             return handle.remote_pid
         loop = asyncio.get_running_loop()
         deadline = loop.time() + CODEX_CANCEL_TIMEOUT_SECONDS
-        pid_path = CODEX_WORKDIR / CODEX_RUN_PID_TEMPLATE.format(run_id=handle.run_id)
+        pid_path = CODEX_WORKDIR / CODEX_RUN_PID_TEMPLATE.format(run_id=handle.run.run_id)
         while loop.time() < deadline:
             pid_text = (
                 (
@@ -1641,8 +1660,8 @@ class _CodexRunner:
         if not await self._wait_for_remote_pid_exit(remote_pid):
             raise RuntimeError(Locale.CODEX_REMOTE_DID_NOT_EXIT)
 
-    async def terminate_abandoned_run(self, run_id: UUID) -> None:
-        pid_path = CODEX_WORKDIR / CODEX_RUN_PID_TEMPLATE.format(run_id=run_id)
+    async def terminate_abandoned_run(self, run: Run) -> None:
+        pid_path = CODEX_WORKDIR / CODEX_RUN_PID_TEMPLATE.format(run_id=run.run_id)
         pid_text = (
             (
                 await self._remote_command(
@@ -1673,7 +1692,7 @@ class _AttemptReconciler:
         *,
         researcher: AiAugmentOuterDict,
         runs: Sequence[Run],
-        attempt_records: Sequence[AgentRuntimeAttempt],
+        attempt_records: Sequence[AgentRuntimeAttemptRecord],
         committed_innerdicts: Sequence[CommittedInnerDict],
         run_outcome_responses: Sequence[RunOutcomeResponse],
     ) -> _ResearcherView:
@@ -1699,37 +1718,40 @@ class _AttemptReconciler:
                     and response.run_outcome is outcome
                 )
             ]
-            for outcome in RunOutcome
+            for outcome in (
+                RunLifecycle.COMPLETED,
+                RunLifecycle.FAILED,
+                RunLifecycle.CANCELLED,
+            )
         }
         live_dashboard_run_ids = {
             run.run_id
             for run in runs
-            if run.dashboard_owned
-            and researcher_activity_for_run(run) in LIVE_RESEARCHER_ACTIVITIES
+            if run.dashboard_owned and not run.is_finished()
         }
         attempts: list[_AttemptView] = []
         for record in sorted(
             attempt_records,
-            key=lambda item: item.commit_record.record_id,
+            key=lambda item: item.attempt.commit_record.record_id,
         ):
-            commit_record = record.commit_record
+            attempt = record.attempt
+            commit_record = attempt.commit_record
             commit_record_id = commit_record.record_id
             accepted = accepted_by_commit_record_id.pop(commit_record_id, None)
-            validation = record.post_commit_validation
-            attempt_activity = AGENT_RUNTIME_ATTEMPT_ACTIVITY_BY_RESULT.get(validation.result)
-            namekey = Namekey(
-                parse_name_key_header(commit_record.request_headers.get(NAME_KEY_HEADER))
+            validation = attempt.post_commit_validation
+            attempt_lifecycle = AGENT_RUNTIME_ATTEMPT_LIFECYCLE_BY_RESULT.get(
+                validation.result
+            )
+            namekey = parse_name_key_header(
+                commit_record.request_headers.get(NAME_KEY_HEADER)
             )
             session_id = commit_record.commit_request_body.codex_session_record.session_id
-            researcher_namekey = Namekey(researcher.namekey.to_json_key())
-            attempt_timestamp = datetime.fromtimestamp(
-                commit_record_id.time / 1_000,
-                tz=timezone.utc,
-            )
+            researcher_namekey = researcher.namekey
             if (
-                attempt_activity is None
+                attempt_lifecycle is None
                 or namekey != researcher_namekey
-                or (attempt_activity is _ResearcherActivity.COMPLETE) != (accepted is not None)
+                or (attempt_lifecycle is RunLifecycle.COMPLETED)
+                != (accepted is not None)
                 or (
                     accepted is not None
                     and (
@@ -1745,19 +1767,12 @@ class _AttemptReconciler:
                 raise RuntimeError(Locale.ATTEMPT_DATABASE_INCONSISTENT)
             attempts.append(
                 _AttemptView(
-                    row_id=commit_record_id,
-                    run_id=None,
-                    namekey=researcher_namekey,
-                    activity=attempt_activity,
-                    commit_record_id=commit_record_id,
-                    session_id=session_id,
-                    timestamp=attempt_timestamp,
-                    ended_at=attempt_timestamp,
+                    attempt_record=record,
+                    run=None,
                     accepted=accepted,
                     run_outcome_response=(
                         None if session_id is None else run_outcome_by_session_id.get(session_id)
                     ),
-                    failure_detail=validation.detail,
                 )
             )
         for run in sorted(runs, key=lambda item: (item.queued_at, str(item.run_id))):
@@ -1770,26 +1785,23 @@ class _AttemptReconciler:
             run_outcome_response = (
                 None if run.session_id is None else run_outcome_by_session_id.get(run.session_id)
             )
-            if run_outcome_response is None and run.session_id is None and run.outcome is not None:
+            if (
+                run_outcome_response is None
+                and run.session_id is None
+                and run.run_outcome is not None
+            ):
                 run_outcome_without_session = run_outcome_without_session_by_outcome.get(
-                    run.outcome,
+                    run.run_outcome,
                     [],
                 )
                 if run_outcome_without_session:
                     run_outcome_response = run_outcome_without_session.pop(0)
             attempts.append(
                 _AttemptView(
-                    row_id=run.run_id,
-                    run_id=run.run_id,
-                    namekey=Namekey(researcher.namekey.to_json_key()),
-                    activity=researcher_activity_for_run(run),
-                    commit_record_id=run.accepted_commit_record_id,
-                    session_id=run.session_id,
-                    timestamp=run.started_at or run.queued_at,
-                    ended_at=run.exited_at,
+                    attempt_record=None,
+                    run=run,
                     accepted=None,
                     run_outcome_response=run_outcome_response,
-                    failure_detail=run.failure_detail,
                 )
             )
         if accepted_by_commit_record_id:
@@ -1799,7 +1811,7 @@ class _AttemptReconciler:
                 attempts,
                 key=lambda attempt: (
                     attempt.run_id in live_dashboard_run_ids,
-                    attempt.timestamp or datetime.min.replace(tzinfo=timezone.utc),
+                    attempt.timestamp,
                     str(attempt.row_id),
                 ),
             )
@@ -1809,7 +1821,9 @@ class _AttemptReconciler:
             researcher=researcher,
             attempts=ordered,
             latest_attempt=latest,
-            current_activity=(_ResearcherActivity.READY if latest is None else latest.activity),
+            current_lifecycle=(
+                RunLifecycle.READY if latest is None else latest.lifecycle
+            ),
         )
 
     def reconcile_all(
@@ -1817,30 +1831,30 @@ class _AttemptReconciler:
         *,
         researchers: Sequence[AiAugmentOuterDict],
         runs: Mapping[UUID, Run],
-        attempt_records: Mapping[Namekey, tuple[AgentRuntimeAttempt, ...]],
+        attempt_records: Mapping[str, tuple[AgentRuntimeAttemptRecord, ...]],
         committed_innerdicts: Mapping[
-            Namekey,
+            str,
             tuple[CommittedInnerDict, ...],
         ],
-        run_outcome_responses: Mapping[Namekey, tuple[RunOutcomeResponse, ...]],
+        run_outcome_responses: Mapping[str, tuple[RunOutcomeResponse, ...]],
     ) -> tuple[_ResearcherView, ...]:
-        runs_by_namekey: dict[Namekey, list[Run]] = {}
+        runs_by_namekey: dict[str, list[Run]] = {}
         for run in runs.values():
-            runs_by_namekey.setdefault(run_namekey(run), []).append(run)
+            runs_by_namekey.setdefault(run.namekey.to_json_key(), []).append(run)
         return tuple(
             self.reconcile(
                 researcher=researcher,
-                runs=runs_by_namekey.get(Namekey(researcher.namekey.to_json_key()), ()),
+                runs=runs_by_namekey.get(researcher.namekey.to_json_key(), ()),
                 attempt_records=attempt_records.get(
-                    Namekey(researcher.namekey.to_json_key()),
+                    researcher.namekey.to_json_key(),
                     (),
                 ),
                 committed_innerdicts=committed_innerdicts.get(
-                    Namekey(researcher.namekey.to_json_key()),
+                    researcher.namekey.to_json_key(),
                     (),
                 ),
                 run_outcome_responses=run_outcome_responses.get(
-                    Namekey(researcher.namekey.to_json_key()),
+                    researcher.namekey.to_json_key(),
                     (),
                 ),
             )
@@ -1855,17 +1869,17 @@ class _AttemptReconciler:
 
 class _VariableProjector:
     @staticmethod
-    def action_for_status(
-        status: _ResearcherActivity,
+    def action_for_lifecycle(
+        lifecycle: RunLifecycle,
         *,
         eligible: bool,
         codex_busy: bool = False,
     ) -> _RunAction:
         if not eligible:
             return _RunAction.DISABLED
-        if status in {_ResearcherActivity.QUEUED, _ResearcherActivity.RUNNING}:
+        if lifecycle in LIVE_RESEARCHER_LIFECYCLES:
             return _RunAction.CANCEL
-        if status is _ResearcherActivity.READY or codex_busy:
+        if lifecycle is RunLifecycle.READY or codex_busy:
             return _RunAction.QUEUE
         return _RunAction.RERUN
 
@@ -1881,7 +1895,7 @@ class _VariableProjector:
         accepted = attempt.accepted
         return _AttemptVariableProjection(
             run_id=attempt.run_id,
-            namekey=Namekey(researcher.namekey.to_json_key()),
+            namekey=researcher.namekey,
             draw_number=researcher.draw_number,
             first_name=researcher.namekey.first_name,
             last_name=researcher.namekey.last_name,
@@ -1908,7 +1922,7 @@ class _VariableProjector:
             ),
             commit_record_id=attempt.commit_record_id,
             attempt_timestamp=attempt.timestamp,
-            attempt_activity=attempt.activity,
+            attempt_lifecycle=attempt.lifecycle,
             run_outcome_snapshot_savedness=(
                 None
                 if attempt.run_outcome_saved is None
@@ -1919,8 +1933,8 @@ class _VariableProjector:
                 )
             ),
             session_status=attempt.run_outcome_session_status,
-            action=self.action_for_status(
-                attempt.activity,
+            action=self.action_for_lifecycle(
+                attempt.lifecycle,
                 eligible=(
                     researcher.ai_augment_cohort is not AiAugmentCohort.INELIGIBLE
                 ),
@@ -1938,7 +1952,7 @@ class _VariableProjector:
     ) -> _AttemptVariableProjection:
         return _AttemptVariableProjection(
             run_id=None,
-            namekey=Namekey(researcher.namekey.to_json_key()),
+            namekey=researcher.namekey,
             draw_number=researcher.draw_number,
             first_name=researcher.namekey.first_name,
             last_name=researcher.namekey.last_name,
@@ -1952,11 +1966,11 @@ class _VariableProjector:
             footnote_arguments=None,
             commit_record_id=None,
             attempt_timestamp=None,
-            attempt_activity=_ResearcherActivity.READY,
+            attempt_lifecycle=RunLifecycle.READY,
             run_outcome_snapshot_savedness=None,
             session_status=None,
-            action=self.action_for_status(
-                _ResearcherActivity.READY,
+            action=self.action_for_lifecycle(
+                RunLifecycle.READY,
                 eligible=(
                     researcher.ai_augment_cohort is not AiAugmentCohort.INELIGIBLE
                 ),
@@ -1993,7 +2007,7 @@ class _VariableProjector:
             )
         )
         return _ResearcherGridRow(
-            namekey=Namekey(researcher_view.researcher.namekey.to_json_key()),
+            namekey=researcher_view.researcher.namekey,
             rnd=researcher_view.researcher.ai_augment_rnd,
             cohort=researcher_view.researcher.ai_augment_cohort,
             ineligibility_category=(
@@ -2079,9 +2093,9 @@ class _ControlCentreController:
         self._codex = codex
         self._reconciler = reconciler
         self._projector = projector
-        self._queue: asyncio.Queue[UUID] = asyncio.Queue()
+        self._queue: asyncio.Queue[Run] = asyncio.Queue()
         self._worker_task: asyncio.Task[None] | None = None
-        self._active_run_id: UUID | None = None
+        self._active_run: Run | None = None
         self._active_codex: _CodexProcessHandle | None = None
         self._external_codex_busy = False
         self._shutting_down = False
@@ -2089,15 +2103,18 @@ class _ControlCentreController:
         self._events: list[RunEvent] = []
         self._runs: dict[UUID, Run] = {}
         self._researchers: tuple[AiAugmentOuterDict, ...] = ()
-        self._researchers_by_namekey: dict[Namekey, AiAugmentOuterDict] = {}
-        self._ground_truth: Mapping[Namekey, _GroundTruthRecord] = {}
-        self._attempt_records: Mapping[Namekey, tuple[AgentRuntimeAttempt, ...]] = {}
+        self._researchers_by_namekey: dict[str, AiAugmentOuterDict] = {}
+        self._ground_truth: Mapping[str, _GroundTruthRecord] = {}
+        self._attempt_records: Mapping[
+            str,
+            tuple[AgentRuntimeAttemptRecord, ...],
+        ] = {}
         self._committed_innerdicts: Mapping[
-            Namekey,
+            str,
             tuple[CommittedInnerDict, ...],
         ] = {}
         self._run_outcome_responses: Mapping[
-            Namekey,
+            str,
             tuple[RunOutcomeResponse, ...],
         ] = {}
         self._run_outcome_recorded_run_ids: set[UUID] = set()
@@ -2110,11 +2127,11 @@ class _ControlCentreController:
 
     @property
     def active_run_id(self) -> UUID | None:
-        return self._active_run_id
+        return None if self._active_run is None else self._active_run.run_id
 
     @property
     def codex_busy(self) -> bool:
-        return self._active_run_id is not None or self._external_codex_busy
+        return self._active_run is not None or self._external_codex_busy
 
     @property
     def backend_status(self) -> _BackendStatus:
@@ -2158,7 +2175,7 @@ class _ControlCentreController:
         )
         self._researchers = await asyncio.to_thread(self._source_repository.load_researchers)
         self._researchers_by_namekey = {
-            Namekey(researcher.namekey.to_json_key()): researcher
+            researcher.namekey.to_json_key(): researcher
             for researcher in self._researchers
         }
         emit_log(
@@ -2191,22 +2208,22 @@ class _ControlCentreController:
         )
         restart_time = datetime.now(timezone.utc)
         for run in tuple(self._runs.values()):
-            if run.dashboard_owned and run.phase is RunPhase.RUNNING:
-                await self._codex.terminate_abandoned_run(run.run_id)
+            if run.dashboard_owned and run.is_running():
+                await self._codex.terminate_abandoned_run(run)
                 await self._append_run_event(
                     RunEvent(
                         run_id=run.run_id,
                         namekey=run.namekey,
                         occurred_at_unix_usec=datetime_to_unix_usec(restart_time),
-                        kind=RunEventKind.FAILED,
+                        lifecycle=RunLifecycle.FAILED,
                         detail=Locale.RESTART_INTERRUPTED_RUN,
                     )
                 )
         for value in app.storage.general.get(QUEUE_STORAGE_KEY, []):
             run_id = UUID(str(value))
             queued_run = self._runs.get(run_id)
-            if queued_run is not None and queued_run.phase is RunPhase.QUEUED:
-                await self._queue.put(run_id)
+            if queued_run is not None and queued_run.is_queued():
+                await self._queue.put(queued_run)
         await self.detect_backend_availability()
         self._worker_task = asyncio.create_task(self._worker())
         emit_log(
@@ -2224,13 +2241,13 @@ class _ControlCentreController:
         await self._wind_down_owned_run_processes()
         shutdown_time = datetime.now(timezone.utc)
         for run in tuple(self._runs.values()):
-            if run.dashboard_owned and run.phase is RunPhase.RUNNING:
+            if run.dashboard_owned and run.is_running():
                 await self._append_run_event(
                     RunEvent(
                         run_id=run.run_id,
                         namekey=run.namekey,
                         occurred_at_unix_usec=datetime_to_unix_usec(shutdown_time),
-                        kind=RunEventKind.FAILED,
+                        lifecycle=RunLifecycle.FAILED,
                         detail=Locale.SHUTDOWN_INTERRUPTED_RUN,
                     )
                 )
@@ -2238,32 +2255,32 @@ class _ControlCentreController:
     async def queue(
         self,
         *,
-        namekey: Namekey,
+        namekey: NameKey,
     ) -> UUID:
-        researcher = self._researchers_by_namekey.get(namekey)
+        researcher = self._researchers_by_namekey.get(namekey.to_json_key())
         if researcher is None:
             raise KeyError(Locale.UNKNOWN_NAMEKEY_TEMPLATE.format(namekey=namekey))
         if researcher.ai_augment_cohort is AiAugmentCohort.INELIGIBLE:
             raise ValueError(Locale.INELIGIBLE_QUEUE)
         run_id = uuid7()
-        await self._append_run_event(
+        run = await self._append_run_event(
             RunEvent(
                 run_id=run_id,
-                namekey=namekey_model(namekey),
+                namekey=namekey,
                 occurred_at_unix_usec=datetime_to_unix_usec(datetime.now(timezone.utc)),
-                kind=RunEventKind.QUEUED,
+                lifecycle=RunLifecycle.QUEUED,
             )
         )
         queued = list(app.storage.general.get(QUEUE_STORAGE_KEY, []))
         queued.append(str(run_id))
         app.storage.general[QUEUE_STORAGE_KEY] = queued
-        await self._queue.put(run_id)
+        await self._queue.put(run)
         return run_id
 
     async def rerun(
         self,
         *,
-        namekey: Namekey,
+        namekey: NameKey,
     ) -> UUID:
         return await self.queue(namekey=namekey)
 
@@ -2275,23 +2292,23 @@ class _ControlCentreController:
         run = self._runs.get(run_id)
         if run is None:
             raise KeyError(Locale.UNKNOWN_RUN_ID_TEMPLATE.format(run_id=run_id))
-        if run.phase is RunPhase.FINISHED:
+        if run.is_finished():
             return
         await self._append_run_event(
             RunEvent(
                 run_id=run_id,
                 namekey=run.namekey,
                 occurred_at_unix_usec=datetime_to_unix_usec(datetime.now(timezone.utc)),
-                kind=RunEventKind.CANCEL_REQUESTED,
+                lifecycle=RunLifecycle.CANCEL_REQUESTED,
             )
         )
-        if self._active_run_id == run_id:
+        if self._active_run is run:
             active_codex = self._active_codex
             if active_codex is None:
                 return
             await self._record_run_outcome(
-                run_id=run_id,
-                run_outcome=RunOutcome.CANCELLED,
+                run=run,
+                run_outcome=RunLifecycle.CANCELLED,
             )
             try:
                 await self._codex.cancel(active_codex)
@@ -2301,13 +2318,13 @@ class _ControlCentreController:
                         run_id=run_id,
                         namekey=run.namekey,
                         occurred_at_unix_usec=datetime_to_unix_usec(datetime.now(timezone.utc)),
-                        kind=RunEventKind.FAILED,
+                        lifecycle=RunLifecycle.FAILED,
                         detail=Locale.CODEX_CANCEL_FAILED_TEMPLATE.format(error=exc),
                     )
                 )
                 raise
             return
-        if run.phase is RunPhase.QUEUED:
+        if run.is_queued():
             queued = list(app.storage.general.get(QUEUE_STORAGE_KEY, []))
             if str(run_id) in queued:
                 queued.remove(str(run_id))
@@ -2317,7 +2334,7 @@ class _ControlCentreController:
                     run_id=run_id,
                     namekey=run.namekey,
                     occurred_at_unix_usec=datetime_to_unix_usec(datetime.now(timezone.utc)),
-                    kind=RunEventKind.CANCELLED,
+                    lifecycle=RunLifecycle.CANCELLED,
                 )
             )
 
@@ -2331,13 +2348,12 @@ class _ControlCentreController:
             if backend_status is _BackendStatus.RUNNING:
                 await self._refresh_backend_state()
             else:
-                self._runs = dict(replay_run_events(self._events))
                 if backend_status is _BackendStatus.FAILED:
                     self._backend_availability = _BackendAvailability(
                         full_api_available=False,
                         ipc_available=False,
                     )
-            if self._active_run_id is not None:
+            if self._active_run is not None:
                 self._external_codex_busy = False
                 return
             try:
@@ -2357,36 +2373,37 @@ class _ControlCentreController:
         app.storage.general[BACKEND_DATABASE_STORAGE_KEY] = snapshot.model_dump(mode="json")
 
     def _apply_backend_snapshot(self, snapshot: QueryResponse) -> None:
-        self._runs = dict(replay_run_events(self._events))
-
-        attempt_records: dict[Namekey, list[AgentRuntimeAttempt]] = {}
+        attempt_records: dict[str, list[AgentRuntimeAttemptRecord]] = {}
         for record in snapshot.attempts:
             try:
-                namekey = Namekey(
-                    parse_name_key_header(record.commit_record.request_headers.get(NAME_KEY_HEADER))
+                namekey = parse_name_key_header(
+                    record.attempt.commit_record.request_headers.get(
+                        NAME_KEY_HEADER
+                    )
                 )
             except (TypeError, ValueError) as exc:
                 raise RuntimeError(Locale.ATTEMPT_DATABASE_INCONSISTENT) from exc
-            if namekey not in self._researchers_by_namekey:
+            namekey_json = namekey.to_json_key()
+            if namekey_json not in self._researchers_by_namekey:
                 raise RuntimeError(Locale.ATTEMPT_DATABASE_INCONSISTENT)
-            attempt_records.setdefault(namekey, []).append(record)
+            attempt_records.setdefault(namekey_json, []).append(record)
         self._attempt_records = {
             namekey: tuple(records) for namekey, records in attempt_records.items()
         }
 
         committed_innerdicts: dict[
-            Namekey,
+            str,
             list[CommittedInnerDict],
         ] = {}
         for returned_outerdict in snapshot.ai_augment_outerdicts:
-            namekey = Namekey(returned_outerdict.namekey.to_json_key())
-            maintained_outerdict = self._researchers_by_namekey.get(namekey)
+            namekey_json = returned_outerdict.namekey.to_json_key()
+            maintained_outerdict = self._researchers_by_namekey.get(namekey_json)
             if maintained_outerdict is None:
                 raise RuntimeError(Locale.ATTEMPT_DATABASE_INCONSISTENT)
             maintained_outerdict.committed_innerdicts = (
                 returned_outerdict.committed_innerdicts
             )
-            committed_innerdicts[namekey] = list(
+            committed_innerdicts[namekey_json] = list(
                 maintained_outerdict.committed_innerdicts
             )
         self._committed_innerdicts = {
@@ -2394,11 +2411,11 @@ class _ControlCentreController:
             for namekey, innerdicts in committed_innerdicts.items()
         }
 
-        run_outcome_responses: dict[Namekey, list[RunOutcomeResponse]] = {}
+        run_outcome_responses: dict[str, list[RunOutcomeResponse]] = {}
         for response in snapshot.run_outcome_records:
-            namekey = Namekey(response.run_outcome_request.namekey.to_json_key())
+            namekey_json = response.run_outcome_request.namekey.to_json_key()
             run_outcome_responses.setdefault(
-                namekey,
+                namekey_json,
                 [],
             ).append(response)
         self._run_outcome_responses = {
@@ -2430,7 +2447,7 @@ class _ControlCentreController:
             self._projector.project_researcher(
                 researcher_view=view,
                 ground_truth=self._ground_truth.get(
-                    Namekey(view.researcher.namekey.to_json_key())
+                    view.researcher.namekey.to_json_key()
                 ),
                 variable=variable,
                 codex_busy=self.codex_busy,
@@ -2442,8 +2459,8 @@ class _ControlCentreController:
             row
             for row, view in zip(all_rows, views, strict=True)
             if (
-                selection.activity_filter is None
-                or view.current_activity is selection.activity_filter
+                selection.lifecycle_filter is None
+                or view.current_lifecycle is selection.lifecycle_filter
             )
             and (
                 selection.cohort_filter is None
@@ -2463,8 +2480,8 @@ class _ControlCentreController:
                 )
             )
         )
-        statuses = [
-            view.current_activity
+        lifecycles = [
+            view.current_lifecycle
             for view in views
             if view.researcher.ai_augment_cohort is not AiAugmentCohort.INELIGIBLE
         ]
@@ -2482,12 +2499,12 @@ class _ControlCentreController:
                 view.researcher.ai_augment_cohort is AiAugmentCohort.INELIGIBLE
                 for view in views
             ),
-            ready=statuses.count(_ResearcherActivity.READY),
-            queued=statuses.count(_ResearcherActivity.QUEUED),
-            running=statuses.count(_ResearcherActivity.RUNNING),
-            complete=statuses.count(_ResearcherActivity.COMPLETE),
-            failed=statuses.count(_ResearcherActivity.FAILED),
-            canceled=statuses.count(_ResearcherActivity.CANCELED),
+            ready=lifecycles.count(RunLifecycle.READY),
+            queued=lifecycles.count(RunLifecycle.QUEUED),
+            running=lifecycles.count(RunLifecycle.RUNNING),
+            complete=lifecycles.count(RunLifecycle.COMPLETED),
+            failed=lifecycles.count(RunLifecycle.FAILED),
+            cancelled=lifecycles.count(RunLifecycle.CANCELLED),
         )
         return _UiSnapshot(
             counts=counts,
@@ -2500,9 +2517,9 @@ class _ControlCentreController:
     async def researcher_card(
         self,
         *,
-        namekey: Namekey,
+        namekey: NameKey,
     ) -> _ResearcherCardView:
-        researcher = self._researchers_by_namekey.get(namekey)
+        researcher = self._researchers_by_namekey.get(namekey.to_json_key())
         if researcher is None:
             raise KeyError(Locale.UNKNOWN_NAMEKEY_TEMPLATE.format(namekey=namekey))
         markdown = await asyncio.to_thread(self._backend_database.card, namekey)
@@ -2516,48 +2533,47 @@ class _ControlCentreController:
 
     async def _worker(self) -> None:
         while True:
-            run_id = await self._queue.get()
-            await self._process_queued_run(run_id)
+            run = await self._queue.get()
+            await self._process_queued_run(run)
 
-    async def _process_queued_run(self, run_id: UUID) -> None:
+    async def _process_queued_run(self, run: Run) -> None:
         try:
             queued = list(app.storage.general.get(QUEUE_STORAGE_KEY, []))
-            if str(run_id) in queued:
-                queued.remove(str(run_id))
+            if str(run.run_id) in queued:
+                queued.remove(str(run.run_id))
                 app.storage.general[QUEUE_STORAGE_KEY] = queued
-            run = self._runs[run_id]
-            if run.outcome is RunOutcome.CANCELLED:
+            if run.run_outcome is RunLifecycle.CANCELLED:
                 return
-            if not await self._wait_until_codex_idle(run_id=run_id):
+            if not await self._wait_until_codex_idle(run=run):
                 return
-            self._active_run_id = run_id
-            await self._execute_run(run_id=run_id)
+            self._active_run = run
+            await self._execute_run(run=run)
         except asyncio.CancelledError:
-            run = self._runs[run_id]
-            if run.phase is RunPhase.RUNNING:
+            if run.is_running():
                 await asyncio.shield(
                     self._record_run_outcome(
-                        run_id=run_id,
-                        run_outcome=RunOutcome.FAILED,
+                        run=run,
+                        run_outcome=RunLifecycle.FAILED,
                     )
                 )
             raise
         except Exception as exc:
-            run = self._runs[run_id]
-            canceled = run.cancel_requested_at is not None and run.failure_detail is None
-            if run.phase is not RunPhase.FINISHED:
-                run_outcome = RunOutcome.CANCELLED if canceled else RunOutcome.FAILED
+            cancelled = run.cancel_requested_at is not None and run.failure_detail is None
+            if not run.is_finished():
+                run_outcome = (
+                    RunLifecycle.CANCELLED if cancelled else RunLifecycle.FAILED
+                )
                 await self._record_run_outcome(
-                    run_id=run_id,
+                    run=run,
                     run_outcome=run_outcome,
                 )
                 await self._append_run_event(
                     RunEvent(
-                        run_id=run_id,
+                        run_id=run.run_id,
                         namekey=run.namekey,
                         occurred_at_unix_usec=datetime_to_unix_usec(datetime.now(timezone.utc)),
-                        kind=RUN_EVENT_KIND_BY_OUTCOME[run_outcome],
-                        detail=None if canceled else str(exc),
+                        lifecycle=run_outcome,
+                        detail=None if cancelled else str(exc),
                     )
                 )
         finally:
@@ -2568,13 +2584,12 @@ class _ControlCentreController:
                 cleanup_error = exc
             try:
                 if cleanup_error is not None:
-                    run = self._runs[run_id]
                     await self._append_run_event(
                         RunEvent(
-                            run_id=run_id,
+                            run_id=run.run_id,
                             namekey=run.namekey,
                             occurred_at_unix_usec=datetime_to_unix_usec(datetime.now(timezone.utc)),
-                            kind=RunEventKind.FAILED,
+                            lifecycle=RunLifecycle.FAILED,
                             detail=Locale.RUN_PROCESS_CLEANUP_FAILED_TEMPLATE.format(
                                 error=cleanup_error
                             ),
@@ -2582,7 +2597,7 @@ class _ControlCentreController:
                     )
             finally:
                 self._active_codex = None
-                self._active_run_id = None
+                self._active_run = None
                 self._queue.task_done()
                 if not self._shutting_down:
                     await self.refresh_idle_state()
@@ -2611,10 +2626,10 @@ class _ControlCentreController:
         if codex_error is not None:
             raise codex_error
 
-    async def _wait_until_codex_idle(self, *, run_id: UUID) -> bool:
+    async def _wait_until_codex_idle(self, *, run: Run) -> bool:
         while True:
             await self.refresh_idle_state()
-            if self._runs[run_id].outcome is RunOutcome.CANCELLED:
+            if run.run_outcome is RunLifecycle.CANCELLED:
                 return False
             if not self._external_codex_busy:
                 return True
@@ -2623,9 +2638,8 @@ class _ControlCentreController:
     async def _execute_run(
         self,
         *,
-        run_id: UUID,
+        run: Run,
     ) -> None:
-        run = self._runs[run_id]
         self._backend_availability = _BackendAvailability(
             full_api_available=False,
             ipc_available=False,
@@ -2636,58 +2650,58 @@ class _ControlCentreController:
             ipc_available=True,
         )
         result = await self._codex.start(
-            run_id=run_id,
+            run=run,
             on_handle=self._register_active_codex,
         )
         self._active_codex = result.handle
         await self._append_run_event(
             RunEvent(
-                run_id=run_id,
+                run_id=run.run_id,
                 namekey=run.namekey,
                 occurred_at_unix_usec=datetime_to_unix_usec(result.session_timestamp),
-                kind=RunEventKind.SESSION_DISCOVERED,
+                lifecycle=RunLifecycle.SESSION_DISCOVERED,
                 session_id=result.session_id,
             )
         )
 
         await self._append_run_event(
             RunEvent(
-                run_id=run_id,
+                run_id=run.run_id,
                 namekey=run.namekey,
                 occurred_at_unix_usec=datetime_to_unix_usec(datetime.now(timezone.utc)),
-                kind=RunEventKind.ROLLOUT_DISCOVERED,
+                lifecycle=RunLifecycle.ROLLOUT_DISCOVERED,
                 session_id=result.session_id,
                 rollout_jsonl=str(result.rollout_jsonl),
             )
         )
         await self._backend.supply_session_id(result.session_id)
-        if self._runs[run_id].cancel_requested_at is not None:
+        if run.cancel_requested_at is not None:
             await self._record_run_outcome(
-                run_id=run_id,
-                run_outcome=RunOutcome.CANCELLED,
+                run=run,
+                run_outcome=RunLifecycle.CANCELLED,
             )
             await self._codex.cancel(result.handle)
         exit_code = await self._codex.wait(result.handle)
         await self._append_run_event(
             RunEvent(
-                run_id=run_id,
+                run_id=run.run_id,
                 namekey=run.namekey,
                 occurred_at_unix_usec=datetime_to_unix_usec(datetime.now(timezone.utc)),
-                kind=RunEventKind.CODEX_EXITED,
+                lifecycle=RunLifecycle.CODEX_EXITED,
                 codex_exit_code=exit_code,
             )
         )
-        run_outcome = await self._finalize_run(run_id=run_id)
+        run_outcome = await self._finalize_run(run=run)
         await self._record_run_outcome(
-            run_id=run_id,
+            run=run,
             run_outcome=run_outcome,
         )
         await self._append_run_event(
             RunEvent(
-                run_id=run_id,
+                run_id=run.run_id,
                 namekey=run.namekey,
                 occurred_at_unix_usec=datetime_to_unix_usec(datetime.now(timezone.utc)),
-                kind=RUN_EVENT_KIND_BY_OUTCOME[run_outcome],
+                lifecycle=run_outcome,
                 codex_exit_code=exit_code,
             )
         )
@@ -2696,22 +2710,22 @@ class _ControlCentreController:
         self,
         handle: _CodexProcessHandle,
     ) -> None:
-        if self._active_run_id != handle.run_id:
+        if self._active_run is not handle.run:
             raise RuntimeError(Locale.CODEX_HANDLE_MISMATCH)
         self._active_codex = handle
-        run = self._runs[handle.run_id]
+        run = handle.run
         if run.started_at is None:
-            event_kind = RunEventKind.STARTED
+            lifecycle = RunLifecycle.STARTED
         elif handle.remote_pid is not None and run.remote_pid != handle.remote_pid:
-            event_kind = RunEventKind.REMOTE_PID_DISCOVERED
+            lifecycle = RunLifecycle.REMOTE_PID_DISCOVERED
         else:
             return
         await self._append_run_event(
             RunEvent(
-                run_id=handle.run_id,
+                run_id=run.run_id,
                 namekey=run.namekey,
                 occurred_at_unix_usec=datetime_to_unix_usec(datetime.now(timezone.utc)),
-                kind=event_kind,
+                lifecycle=lifecycle,
                 remote_pid=(None if handle.remote_pid is None else int(handle.remote_pid)),
             )
         )
@@ -2719,13 +2733,12 @@ class _ControlCentreController:
     async def _finalize_run(
         self,
         *,
-        run_id: UUID,
-    ) -> RunOutcome:
-        run = self._runs[run_id]
+        run: Run,
+    ) -> RunLifecycle:
         if run.cancel_requested_at is not None:
-            return RunOutcome.CANCELLED
+            return RunLifecycle.CANCELLED
         if run.accepted_commit_record_id is not None:
-            return RunOutcome.COMPLETED
+            return RunLifecycle.COMPLETED
         if run.session_id is not None:
             accepted = await self._accepted_attempt_for_session(
                 namekey=run_namekey(run),
@@ -2734,29 +2747,28 @@ class _ControlCentreController:
             if accepted is not None:
                 await self._append_run_event(
                     RunEvent(
-                        run_id=run_id,
+                        run_id=run.run_id,
                         namekey=run.namekey,
                         occurred_at_unix_usec=datetime_to_unix_usec(datetime.now(timezone.utc)),
-                        kind=RunEventKind.PUSH_ACCEPTED,
+                        lifecycle=RunLifecycle.PUSH_ACCEPTED,
                         session_id=run.session_id,
                         accepted_commit_record_id=accepted.commit_record.record_id,
                     )
                 )
-                return RunOutcome.COMPLETED
-        return RunOutcome.FAILED
+                return RunLifecycle.COMPLETED
+        return RunLifecycle.FAILED
 
     async def _record_run_outcome(
         self,
         *,
-        run_id: UUID,
-        run_outcome: RunOutcome,
+        run: Run,
+        run_outcome: RunLifecycle,
     ) -> None:
         async with self._run_outcome_lock:
-            if run_id in self._run_outcome_recorded_run_ids:
+            if run.run_id in self._run_outcome_recorded_run_ids:
                 return
             if self._backend.status is not _BackendStatus.RUNNING:
                 return
-            run = self._runs[run_id]
             try:
                 response_code = await asyncio.to_thread(
                     self._backend_database.record_run_outcome,
@@ -2765,25 +2777,25 @@ class _ControlCentreController:
                 )
             except RuntimeError as exc:
                 message = Locale.RUN_OUTCOME_SNAPSHOT_REQUEST_FAILED_TEMPLATE.format(
-                    run_id=run_id,
+                    run_id=run.run_id,
                     error=exc,
                 )
                 self._notifications.append(message)
                 emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, message)
                 return
-            self._run_outcome_recorded_run_ids.add(run_id)
+            self._run_outcome_recorded_run_ids.add(run.run_id)
             try:
                 await self._refresh_backend_state()
             except RuntimeError as exc:
                 message = Locale.RUN_OUTCOME_RESPONSE_REFRESH_FAILED_TEMPLATE.format(
-                    run_id=run_id,
+                    run_id=run.run_id,
                     error=exc,
                 )
                 self._notifications.append(message)
                 emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, message)
             if response_code == status.HTTP_500_INTERNAL_SERVER_ERROR:
                 message = Locale.RUN_OUTCOME_SNAPSHOT_PARTIAL_TEMPLATE.format(
-                    run_id=run_id,
+                    run_id=run.run_id,
                     outcome=run_outcome.value,
                 )
                 self._notifications.append(message)
@@ -2797,11 +2809,11 @@ class _ControlCentreController:
     async def _accepted_attempt_for_session(
         self,
         *,
-        namekey: Namekey,
+        namekey: NameKey,
         session_id: UUID,
     ) -> CommittedInnerDict | None:
         await self._refresh_backend_state()
-        attempts = self._committed_innerdicts.get(namekey, ())
+        attempts = self._committed_innerdicts.get(namekey.to_json_key(), ())
         matches = [
             attempt
             for attempt in attempts
@@ -2815,13 +2827,14 @@ class _ControlCentreController:
     async def _append_run_event(
         self,
         event: RunEvent,
-    ) -> None:
+    ) -> Run:
         self._events.append(event)
         app.storage.general[RUN_EVENTS_STORAGE_KEY] = [
             item.model_dump(mode="json") for item in self._events
         ]
-        self._runs = dict(replay_run_events(self._events))
-        if event.kind is RunEventKind.FAILED:
+        run = apply_run_event(self._runs.get(event.run_id), event)
+        self._runs[event.run_id] = run
+        if event.lifecycle is RunLifecycle.FAILED:
             emit_log(
                 Locale.CONTROL_CENTRE_LOG_PREFIX,
                 Locale.RUN_FAILED_LOG_TEMPLATE.format(
@@ -2830,6 +2843,7 @@ class _ControlCentreController:
                     detail=event.detail or "unspecified",
                 ),
             )
+        return run
 
     def _load_dashboard_storage(self) -> None:
         raw_events = app.storage.general.get(RUN_EVENTS_STORAGE_KEY, [])
@@ -2896,9 +2910,9 @@ class _ControlCentrePage:
         self._grid_initialized = False
         self._grid_variable_key = self._selection.variable_key
         self._grid_rows_by_id: dict[str, dict[str, Any]] = {}
-        self._row_views_by_namekey: dict[Namekey, _ResearcherGridRow] = {}
-        self._expanded_history_namekey: Namekey | None = None
-        self._card_cache: dict[Namekey, _ResearcherCardView] = {}
+        self._row_views_by_namekey: dict[str, _ResearcherGridRow] = {}
+        self._expanded_history_namekey: NameKey | None = None
+        self._card_cache: dict[str, _ResearcherCardView] = {}
         self._displayed_card: _ResearcherCardView | None = None
 
     @property
@@ -2973,11 +2987,16 @@ class _ControlCentrePage:
             self._handles.status_select = ui.select(
                 {
                     "": Locale.ALL_STATUSES,
-                    **{status.value: status.value for status in _ResearcherActivity},
+                    **{
+                        lifecycle.value: lifecycle.value
+                        for lifecycle in RESEARCHER_LIFECYCLES
+                    },
                 },
                 value="",
                 label=Locale.STATUS_FILTER,
-                on_change=lambda event: self.on_activity_filter_changed(event.value or None),
+                on_change=lambda event: self.on_lifecycle_filter_changed(
+                    None if not event.value else RunLifecycle(event.value)
+                ),
             )
             self._handles.cohort_select = ui.select(
                 {
@@ -3253,8 +3272,8 @@ class _ControlCentrePage:
         for row in snapshot.rows:
             latest = row.latest
             rows.append({
-                GRID_ROW_ID_FIELD: row.namekey,
-                GRID_NAMEKEY_FIELD: row.namekey,
+                GRID_ROW_ID_FIELD: row.namekey.to_json_key(),
+                GRID_NAMEKEY_FIELD: row.namekey.to_json_key(),
                 GRID_RUN_ID_FIELD: (None if latest.run_id is None else str(latest.run_id)),
                 GRID_RND_FIELD: row.rnd,
                 GRID_DRAW_FIELD: latest.draw_number,
@@ -3274,7 +3293,7 @@ class _ControlCentrePage:
                     if latest.attempt_timestamp is None
                     else latest.attempt_timestamp.isoformat()
                 ),
-                GRID_STATUS_FIELD: latest.attempt_activity.value,
+                GRID_STATUS_FIELD: latest.attempt_lifecycle.value,
                 GRID_RUN_OUTCOME_SNAPSHOT_FIELD: latest.run_outcome_snapshot_savedness,
                 GRID_SESSION_STATUS_FIELD: latest.session_status,
                 GRID_ACTION_FIELD: latest.action.value,
@@ -3298,7 +3317,7 @@ class _ControlCentrePage:
                     if attempt.attempt_timestamp is None
                     else attempt.attempt_timestamp.isoformat()
                 ),
-                GRID_STATUS_FIELD: attempt.attempt_activity.value,
+                GRID_STATUS_FIELD: attempt.attempt_lifecycle.value,
                 GRID_RUN_OUTCOME_SNAPSHOT_FIELD: attempt.run_outcome_snapshot_savedness,
                 GRID_SESSION_STATUS_FIELD: attempt.session_status,
                 GRID_AI_VALUE_FIELD: attempt.ai_value,
@@ -3345,7 +3364,7 @@ class _ControlCentrePage:
                     running=counts.running,
                     complete=counts.complete,
                     failed=counts.failed,
-                    canceled=counts.canceled,
+                    cancelled=counts.cancelled,
                 )
             )
         await self.refresh_grid(snapshot=snapshot)
@@ -3370,7 +3389,9 @@ class _ControlCentrePage:
         if snapshot is None:
             snapshot = await self._controller.snapshot(selection=self._selection)
         variable = VARIABLE_SPEC_BY_KEY[self._selection.variable_key]
-        self._row_views_by_namekey = {row.namekey: row for row in snapshot.rows}
+        self._row_views_by_namekey = {
+            row.namekey.to_json_key(): row for row in snapshot.rows
+        }
         self.refresh_attempt_history()
         rows = self.grid_rows(snapshot=snapshot)
         self.sync_selected_action(rows)
@@ -3417,7 +3438,7 @@ class _ControlCentrePage:
         table = self._handles.attempt_history_table
         if namekey is None or table is None:
             return
-        row = self._row_views_by_namekey.get(namekey)
+        row = self._row_views_by_namekey.get(namekey.to_json_key())
         if row is None:
             return
         table.update_rows(
@@ -3429,10 +3450,11 @@ class _ControlCentrePage:
         namekey = self._selection.selected_namekey
         if namekey is None:
             return
-        card = self._card_cache.get(namekey)
+        namekey_json = namekey.to_json_key()
+        card = self._card_cache.get(namekey_json)
         if card is None:
             card = await self._controller.researcher_card(namekey=namekey)
-            self._card_cache[namekey] = card
+            self._card_cache[namekey_json] = card
         await self._show_card(card)
 
     async def _show_card(self, card: _ResearcherCardView) -> None:
@@ -3460,8 +3482,8 @@ class _ControlCentrePage:
         if self._handles.download_card_button is not None:
             self._handles.download_card_button.disable()
 
-    def _invalidate_card(self, namekey: Namekey) -> None:
-        self._card_cache.pop(namekey, None)
+    def _invalidate_card(self, namekey: NameKey) -> None:
+        self._card_cache.pop(namekey.to_json_key(), None)
         if self._displayed_card is not None and self._displayed_card.namekey == namekey:
             self._clear_displayed_card()
 
@@ -3498,11 +3520,11 @@ class _ControlCentrePage:
 
     def show_attempt_history(
         self,
-        namekey: Namekey,
+        namekey: NameKey,
     ) -> None:
         expansion = self._handles.attempt_history_expansion
         table = self._handles.attempt_history_table
-        row = self._row_views_by_namekey.get(namekey)
+        row = self._row_views_by_namekey.get(namekey.to_json_key())
         if expansion is None or table is None or row is None:
             return
         variable = VARIABLE_SPEC_BY_KEY[self._selection.variable_key]
@@ -3530,11 +3552,11 @@ class _ControlCentrePage:
         if expanded_namekey is not None:
             self.show_attempt_history(expanded_namekey)
 
-    async def on_activity_filter_changed(
+    async def on_lifecycle_filter_changed(
         self,
-        status: str | None,
+        lifecycle: RunLifecycle | None,
     ) -> None:
-        self._selection.activity_filter = None if status is None else _ResearcherActivity(status)
+        self._selection.lifecycle_filter = lifecycle
         await self.refresh_grid()
 
     async def on_cohort_filter_changed(
@@ -3553,7 +3575,7 @@ class _ControlCentrePage:
 
     async def on_researcher_selected(
         self,
-        namekey: Namekey,
+        namekey: NameKey,
     ) -> None:
         self._selection.selected_namekey = namekey
         await self.refresh_card()
@@ -3563,8 +3585,15 @@ class _ControlCentrePage:
         rows: Sequence[Mapping[str, object]],
     ) -> None:
         selected_namekey = self._selection.selected_namekey
+        selected_namekey_json = (
+            None if selected_namekey is None else selected_namekey.to_json_key()
+        )
         selected = next(
-            (row for row in rows if row.get(GRID_NAMEKEY_FIELD) == selected_namekey),
+            (
+                row
+                for row in rows
+                if row.get(GRID_NAMEKEY_FIELD) == selected_namekey_json
+            ),
             None,
         )
         if selected is None:
@@ -3605,7 +3634,7 @@ class _ControlCentrePage:
 
     async def on_queue(
         self,
-        namekey: Namekey,
+        namekey: NameKey,
     ) -> None:
         self._invalidate_card(namekey)
         run_id = await self._controller.queue(namekey=namekey)
@@ -3615,7 +3644,7 @@ class _ControlCentrePage:
 
     async def on_rerun(
         self,
-        namekey: Namekey,
+        namekey: NameKey,
     ) -> None:
         self._invalidate_card(namekey)
         run_id = await self._controller.rerun(namekey=namekey)
@@ -3646,7 +3675,7 @@ class _ControlCentrePage:
         self,
         *,
         action: _RunAction,
-        namekey: Namekey,
+        namekey: NameKey,
         run_id: UUID | None,
     ) -> None:
         if action is _RunAction.QUEUE:
@@ -3670,9 +3699,10 @@ class _ControlCentrePage:
     async def _on_grid_cell_clicked(self, event: Any) -> None:
         arguments = event.args
         data = arguments.get(AgGrid.EVENT_DATA, {})
-        namekey = Namekey(str(data.get(GRID_NAMEKEY_FIELD, "")))
-        if not namekey:
+        namekey_json = str(data.get(GRID_NAMEKEY_FIELD, ""))
+        if not namekey_json:
             return
+        namekey = NameKey.from_json_key(namekey_json)
         self._selection.selected_namekey = namekey
         self.sync_selected_action((data,))
         self.show_attempt_history(namekey)
@@ -3706,24 +3736,17 @@ APPLICATION_CONFIG_PATH = DEFAULT_CONFIG_PATH
 
 def create_services(
     *,
-    config_path: Path = DEFAULT_CONFIG_PATH,
-    source_data_cache: _CachedSourceData | None = None,
-    release_map: RegisteredResource | None = None,
-) -> _ApplicationServices:
+    config_path: Path,
+) -> tuple[
+    _ApplicationServices,
+    _SourceInputFingerprint,
+    tuple[AiAugmentOuterDict, ...] | None,
+]:
     pipeline_config = AiAugmentDetourConfig.from_json(config_path)
-    pipeline_config.release_map = (
-        registered_release_map(pipeline_config)
-        if release_map is None
-        else release_map
-    )
-    pipeline_config.replay_log = registered_replay_log(pipeline_config)
+    fingerprint, cached_outerdicts = load_cached_source_data(pipeline_config)
     configuration = AiAugmentControlCentreContext(
         pipeline_config=pipeline_config,
-        cached_ai_augment_outerdicts=(
-            None
-            if source_data_cache is None
-            else source_data_cache.outerdicts()
-        ),
+        cached_ai_augment_outerdicts=cached_outerdicts,
     )
     _ = configuration.ai_augment_outerdicts
     source_repository = _SourceRepository(configuration=configuration)
@@ -3756,7 +3779,7 @@ def create_services(
         reconciler=reconciler,
         projector=projector,
     )
-    return _ApplicationServices(
+    services = _ApplicationServices(
         configuration=configuration,
         source_repository=source_repository,
         backend=backend,
@@ -3766,6 +3789,7 @@ def create_services(
         projector=projector,
         controller=controller,
     )
+    return services, fingerprint, cached_outerdicts
 
 
 def require_services() -> _ApplicationServices:
@@ -3811,28 +3835,23 @@ async def application_startup() -> None:
             Locale.CONTROL_CENTRE_LOG_PREFIX,
             Locale.SOURCE_CACHE_CHECK_LOG,
         )
-        fingerprint, source_data_cache, release_map = load_cached_source_data(
-            APPLICATION_CONFIG_PATH
+        services, fingerprint, cached_outerdicts = create_services(
+            config_path=APPLICATION_CONFIG_PATH,
         )
         emit_log(
             Locale.CONTROL_CENTRE_LOG_PREFIX,
             (
                 Locale.SOURCE_CACHE_HIT_LOG
-                if source_data_cache is not None
+                if cached_outerdicts is not None
                 else Locale.SOURCE_CACHE_MISS_LOG
             ),
-        )
-        services = create_services(
-            config_path=APPLICATION_CONFIG_PATH,
-            source_data_cache=source_data_cache,
-            release_map=release_map,
         )
         try:
             await services.controller.start()
         except BaseException:
             await services.controller.shutdown()
             raise
-        if source_data_cache is None:
+        if cached_outerdicts is None:
             store_cached_source_data(
                 fingerprint=fingerprint,
                 ai_augment_outerdicts=(
@@ -3871,7 +3890,7 @@ def main() -> None:
     global APPLICATION_CONFIG_PATH
 
     parser = argparse.ArgumentParser()
-    parser.add_argument(CONFIG_OPTION, type=Path, default=DEFAULT_CONFIG_PATH)
+    parser.add_argument(CONFIG_OPTION, required=True, type=Path)
     arguments = parser.parse_args()
     APPLICATION_CONFIG_PATH = arguments.config
     configure_application_lifecycle()

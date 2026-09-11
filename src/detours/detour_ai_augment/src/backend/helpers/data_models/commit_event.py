@@ -6,7 +6,7 @@ import re
 from collections.abc import Callable, Mapping
 from enum import StrEnum
 from pathlib import PurePosixPath
-from typing import Literal, Self
+from typing import Final, Literal, Self
 from uuid import UUID
 
 from pydantic import (
@@ -86,13 +86,12 @@ class AppendwatchReportEncoding(StrEnum):
     BASE64 = "base64"
 
 
-@implements[BackendComponent.PostCommitValidationStageProperty]()
-class PostCommitValidationStage(StrEnum):
+@implements[BackendComponent.LifecycleProperty]()
+class BackendLifecycle(StrEnum):
     value: Literal[
-        "transport",
+        "ready",
+        "busy",
         "configuration",
-        "rollout_copy",
-        "appendwatch_report_copy",
         "appendwatch_report_validation",
         "rollout_index",
         "pydantic_validation",
@@ -100,12 +99,16 @@ class PostCommitValidationStage(StrEnum):
         "researcher_resolution",
         "innerdict_and_card",
         "accepted",
+        "configuration_error",
+        "rejected",
+        "retry",
+        "complete",
+        "failed",
     ]
 
-    TRANSPORT = "transport"
+    READY = "ready"
+    BUSY = "busy"
     CONFIGURATION = "configuration"
-    ROLLOUT_COPY = "rollout_copy"
-    APPENDWATCH_REPORT_COPY = "appendwatch_report_copy"
     APPENDWATCH_REPORT_VALIDATION = "appendwatch_report_validation"
     ROLLOUT_INDEX = "rollout_index"
     PYDANTIC_VALIDATION = "pydantic_validation"
@@ -113,19 +116,34 @@ class PostCommitValidationStage(StrEnum):
     RESEARCHER_RESOLUTION = "researcher_resolution"
     INNERDICT_AND_CARD = "innerdict_and_card"
     ACCEPTED = "accepted"
-
-
-@implements[BackendComponent.PostCommitValidationResultProperty]()
-class PostCommitValidationResult(StrEnum):
-    value: Literal[
-        "accepted",
-        "configuration_error",
-        "rejected",
-    ]
-
-    ACCEPTED = "accepted"
     CONFIGURATION_ERROR = "configuration_error"
     REJECTED = "rejected"
+    RETRY = "retry"
+    COMPLETE = "complete"
+    FAILED = "failed"
+
+    def is_post_commit_validation_stage(self) -> bool:
+        return self in POST_COMMIT_VALIDATION_STAGES
+
+    def is_post_commit_validation_result(self) -> bool:
+        return self in POST_COMMIT_VALIDATION_RESULTS
+
+
+POST_COMMIT_VALIDATION_STAGES: Final = frozenset({
+    BackendLifecycle.CONFIGURATION,
+    BackendLifecycle.APPENDWATCH_REPORT_VALIDATION,
+    BackendLifecycle.ROLLOUT_INDEX,
+    BackendLifecycle.PYDANTIC_VALIDATION,
+    BackendLifecycle.DUCKDB_EVIDENCE_VALIDATION,
+    BackendLifecycle.RESEARCHER_RESOLUTION,
+    BackendLifecycle.INNERDICT_AND_CARD,
+    BackendLifecycle.ACCEPTED,
+})
+POST_COMMIT_VALIDATION_RESULTS: Final = frozenset({
+    BackendLifecycle.ACCEPTED,
+    BackendLifecycle.CONFIGURATION_ERROR,
+    BackendLifecycle.REJECTED,
+})
 
 
 class _CodexRolloutRecordSummaryJson(BaseModel):
@@ -267,11 +285,6 @@ class CommitRequestBody(BaseModel):
         _CommitRequestBodyJson.model_validate_json(value)
 
     @classmethod
-    def record_ids_from_serialized_json(cls, value: str) -> tuple[UUID, UUID]:
-        serialized = _CommitRequestBodyJson.model_validate_json(value)
-        return serialized.pull_record_id, serialized.push_record_id
-
-    @classmethod
     def from_serialized_json(
         cls,
         value: str,
@@ -318,7 +331,7 @@ class BackendCommitRecord(HttpRequestLogRecord):
 
     @property
     def http_request_log_record(self) -> HttpRequestLogRecord:
-        return HttpRequestLogRecord.model_validate(self.model_dump())
+        return self
 
     def validate_commit_record(self) -> Self:
         if (
@@ -379,6 +392,21 @@ class BackendCommitRecord(HttpRequestLogRecord):
 class PostCommitValidation(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
-    stage: PostCommitValidationStage
-    result: PostCommitValidationResult
+    stage: BackendLifecycle
+    result: BackendLifecycle
     detail: StrictStr | None = None
+
+    def validate_lifecycle(self) -> Self:
+        if not self.stage.is_post_commit_validation_stage():
+            raise ValueError("invalid post-commit validation stage")
+        if not self.result.is_post_commit_validation_result():
+            raise ValueError("invalid post-commit validation result")
+        if (self.stage is BackendLifecycle.ACCEPTED) != (
+            self.result is BackendLifecycle.ACCEPTED
+        ):
+            raise ValueError("accepted validation stage and result must agree")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_lifecycle(self) -> Self:
+        return self.validate_lifecycle()

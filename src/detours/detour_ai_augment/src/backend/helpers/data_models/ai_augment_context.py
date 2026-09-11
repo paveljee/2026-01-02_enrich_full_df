@@ -8,7 +8,6 @@ from collections.abc import Mapping
 from functools import cached_property
 from pathlib import Path
 from random import Random
-from typing import cast
 
 import duckdb
 from pydantic import BaseModel, ConfigDict, Field, computed_field
@@ -144,16 +143,18 @@ def _innerdict_json_rows(
     value: object,
     *,
     table_name: str,
-    namekey: str,
-) -> tuple[dict[str, object], ...]:
+    namekey: NameKey,
+    procedure: MatchingProcedure,
+) -> tuple[InnerDict, ...]:
+    namekey_json = namekey.to_json_key()
     if not isinstance(value, str):
         raise ValueError(
             Locale.INNERDICTS_NON_TEXT_TEMPLATE.format(
                 table_name=table_name,
-                namekey=namekey,
+                namekey=namekey_json,
             )
         )
-    rows: list[dict[str, object]] = []
+    rows: list[InnerDict] = []
     for line_number, line in enumerate(value.splitlines(), start=1):
         try:
             row: object = json.loads(line)
@@ -161,7 +162,7 @@ def _innerdict_json_rows(
             raise ValueError(
                 Locale.INNERDICTS_MALFORMED_TEMPLATE.format(
                     table_name=table_name,
-                    namekey=namekey,
+                    namekey=namekey_json,
                     line_number=line_number,
                 )
             ) from exc
@@ -169,11 +170,22 @@ def _innerdict_json_rows(
             raise ValueError(
                 Locale.INNERDICTS_NON_OBJECT_TEMPLATE.format(
                     table_name=table_name,
-                    namekey=namekey,
+                    namekey=namekey_json,
                     line_number=line_number,
                 )
             )
-        rows.append(cast(dict[str, object], row))
+        typed_row: dict[str, object] = {}
+        for key, item in row.items():
+            if not isinstance(key, str):
+                raise ValueError(
+                    Locale.INNERDICTS_NON_OBJECT_TEMPLATE.format(
+                        table_name=table_name,
+                        namekey=namekey_json,
+                        line_number=line_number,
+                    )
+                )
+            typed_row[key] = item
+        rows.append(InnerDict.from_mapping(typed_row, procedure))
     return tuple(rows)
 
 
@@ -225,22 +237,21 @@ def _source_innerdicts_by_namekey(
                 Locale.TABLE_NAMEKEY_NON_TEXT_TEMPLATE.format(table_name=table_name)
             )
         try:
-            namekey = NameKey.from_json_key(raw_namekey).to_json_key()
+            namekey = NameKey.from_json_key(raw_namekey)
         except (ValueError, TypeError, json.JSONDecodeError) as exc:
             raise ValueError(
                 Locale.TABLE_NAMEKEY_INVALID_TEMPLATE.format(table_name=table_name)
             ) from exc
-        if namekey in innerdicts_by_namekey:
+        namekey_json = namekey.to_json_key()
+        if namekey_json in innerdicts_by_namekey:
             raise ValueError(
                 Locale.CONFIGURED_ROWS_DUPLICATE_TEMPLATE.format(table_name=table_name)
             )
-        innerdicts_by_namekey[namekey] = tuple(
-            InnerDict.from_mapping(row, procedure)
-            for row in _innerdict_json_rows(
-                jsonlines,
-                table_name=table_name,
-                namekey=namekey,
-            )
+        innerdicts_by_namekey[namekey_json] = _innerdict_json_rows(
+            jsonlines,
+            table_name=table_name,
+            namekey=namekey,
+            procedure=procedure,
         )
     return innerdicts_by_namekey
 
@@ -481,13 +492,7 @@ class AiAugmentBackendContext(BaseModel):
     def ai_augment_outerdicts_factory(self) -> tuple[AiAugmentOuterDict, ...]:
         if self.cached_ai_augment_outerdicts is not None:
             return self.cached_ai_augment_outerdicts
-        release_map = self.pipeline_config.release_map
-        if release_map is None:
-            raise ValueError(
-                Locale.FILES_CONFIG_RESOURCE_MISSING_TEMPLATE.format(
-                    resource_key=MAP_SUBSET_0_TO_BATCH_KEY
-                )
-            )
+        release_map = self.pipeline_config.resources.release_map
         release_batches = _load_release_batches(Path(release_map))
         source_conn: duckdb.DuckDBPyConnection | None = None
         try:

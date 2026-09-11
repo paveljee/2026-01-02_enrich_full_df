@@ -24,14 +24,22 @@ from src.helpers.procedures import (
     ParquetMatchProcedure,
     XlsxMatchProcedure,
 )
-from src.helpers.vars import DRAW_LABEL, KTP_NAMEKEY_COL
+from src.helpers.vars import (
+    DRAW_LABEL,
+    KTP_DOCX_OPTIONAL_EMPTY_COLS,
+    KTP_NAMEKEY_COL,
+)
 
 from src.detours.detour_ai_augment.protected.src.architecture import (
     BackendComponent,
 )
+from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import (
+    Locale,
+)
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     AiAugmentCohort,
     AiAugmentIneligibilityCategory,
+    DOCX_COLUMNS,
     KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL,
     KTP_AI_AUGMENT_SESSION_METADATA_COL,
 )
@@ -264,6 +272,27 @@ class AiAugmentOuterDict(BaseModel):
             if committed_namekey != self.namekey:
                 raise ValueError("AI augment committed innerdict has another namekey")
         return self
+
+    def ground_truth_innerdict(self) -> InnerDict | None:
+        if self.ai_augment_cohort is AiAugmentCohort.NO_GROUND_TRUTH:
+            return None
+        required_columns = tuple(
+            column
+            for column in DOCX_COLUMNS
+            if column not in KTP_DOCX_OPTIONAL_EMPTY_COLS
+        )
+        complete_rows = tuple(
+            innerdict
+            for innerdict in self.docx_innerdicts
+            if all(
+                column in innerdict.data
+                and bool(str(innerdict.data[column]).strip())
+                for column in required_columns
+            )
+        )
+        if not complete_rows:
+            raise ValueError(Locale.GROUND_TRUTH_DOCX_INCOMPLETE)
+        return complete_rows[0]
 
     @model_validator(mode="after")
     def _validate_ai_augment_outerdict(self) -> Self:

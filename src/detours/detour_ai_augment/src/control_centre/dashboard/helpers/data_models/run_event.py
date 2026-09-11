@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from enum import StrEnum
 from pathlib import PurePosixPath
-from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -14,55 +12,11 @@ from src.helpers.data_models import NameKey
 from src.detours.detour_ai_augment.protected.src.architecture import (
     ControlCentreComponent,
 )
-from .....backend.helpers.data_models.server_event import (
-    AgentRuntimeAttempt,
-    RunOutcomeResponse,
-)
-from .run_outcome import RunOutcome
+from .....backend.helpers.data_models.query_response import AgentRuntimeAttempt
+from .....backend.helpers.data_models.run_outcome_response import RunOutcomeResponse
+from .run_outcome import RunLifecycle
 
 MICROSECONDS_PER_SECOND = 1_000_000
-
-
-@implements[ControlCentreComponent.RunPhaseProperty]()
-class RunPhase(StrEnum):
-    value: Literal[
-        "queued",
-        "running",
-        "finished",
-    ]
-
-    QUEUED = "queued"
-    RUNNING = "running"
-    FINISHED = "finished"
-
-
-@implements[ControlCentreComponent.RunEventKindProperty]()
-class RunEventKind(StrEnum):
-    value: Literal[
-        "queued",
-        "started",
-        "remote_pid_discovered",
-        "session_discovered",
-        "rollout_discovered",
-        "push_accepted",
-        "cancel_requested",
-        "codex_exited",
-        "completed",
-        "failed",
-        "cancelled",
-    ]
-
-    QUEUED = "queued"
-    STARTED = "started"
-    REMOTE_PID_DISCOVERED = "remote_pid_discovered"
-    SESSION_DISCOVERED = "session_discovered"
-    ROLLOUT_DISCOVERED = "rollout_discovered"
-    PUSH_ACCEPTED = "push_accepted"
-    CANCEL_REQUESTED = "cancel_requested"
-    CODEX_EXITED = "codex_exited"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    CANCELLED = "cancelled"
 
 
 @implements[ControlCentreComponent.RunProperty]()
@@ -75,8 +29,8 @@ class Run(BaseModel):
 
     run_id: UUID
     namekey: NameKey
-    phase: RunPhase
-    outcome: RunOutcome | None = None
+    lifecycle: RunLifecycle
+    run_outcome: RunLifecycle | None = None
     events: tuple[RunEvent, ...] = ()
     attempts: tuple[AgentRuntimeAttempt, ...] = ()
     run_outcome_record: RunOutcomeResponse | None = None
@@ -95,6 +49,15 @@ class Run(BaseModel):
     failure_detail: str | None = None
     dashboard_owned: bool = True
 
+    def is_queued(self) -> bool:
+        return self.lifecycle is RunLifecycle.QUEUED and self.run_outcome is None
+
+    def is_running(self) -> bool:
+        return self.lifecycle is not RunLifecycle.QUEUED and self.run_outcome is None
+
+    def is_finished(self) -> bool:
+        return self.run_outcome is not None
+
 
 @implements[ControlCentreComponent.RunEventProperty]()
 class RunEvent(BaseModel):
@@ -103,7 +66,7 @@ class RunEvent(BaseModel):
     run_id: UUID
     namekey: NameKey
     occurred_at_unix_usec: int
-    kind: RunEventKind
+    lifecycle: RunLifecycle
     session_id: UUID | None = None
     rollout_jsonl: str | None = None
     remote_pid: int | None = Field(default=None, gt=0)

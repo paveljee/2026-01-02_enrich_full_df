@@ -8,8 +8,9 @@ from pathlib import Path
 import uvicorn
 from fastapi import FastAPI
 
+from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
+
 from . import api, ipc
-from .helpers.locale import Locale
 
 CONFIG_OPTION = "--config"
 IPC_ONLY_OPTION = "--ipc-only"

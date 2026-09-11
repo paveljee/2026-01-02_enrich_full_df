@@ -34,7 +34,7 @@ class Locale:
         "Total {total} · ground truth {ground_truth} · "
         "no ground truth {no_ground_truth} · ineligible {ineligible} · "
         "ready {ready} · queued {queued} · running {running} · "
-        "complete {complete} · failed {failed} · cancelled {canceled}"
+        "complete {complete} · failed {failed} · cancelled {cancelled}"
     )
     RESEARCHER_SELECTION_TEMPLATE: Final = (
         "{first_name} {last_name} · draw(s) {draw_number}"
@@ -82,6 +82,9 @@ class Locale:
     BACKEND_READY_TIMEOUT: Final = "backend did not become ready"
     BACKEND_ALREADY_OWNED: Final = (
         "Control Centre already owns a Backend process"
+    )
+    BACKEND_RESOURCES_NOT_VERIFIED: Final = (
+        "Control Centre Backend resources were not verified at startup"
     )
     BACKEND_NOT_RUNNING: Final = "backend is not running"
     BACKEND_STDIN_MISSING: Final = "backend stdin pipe is unavailable"
@@ -157,7 +160,7 @@ class Locale:
     INELIGIBLE_QUEUE: Final = "ineligible namekeys cannot be queued"
     UNKNOWN_RUN_ID_TEMPLATE: Final = "unknown run ID: {run_id}"
     CODEX_CANCEL_FAILED_TEMPLATE: Final = "Codex cancellation failed: {error}"
-    CODEX_CANCELED_BEFORE_SESSION_HANDOFF: Final = (
+    CODEX_CANCELLED_BEFORE_SESSION_HANDOFF: Final = (
         "Codex run was cancelled before session handoff"
     )
     CODEX_HANDLE_MISMATCH: Final = "Codex handle does not match the active run"

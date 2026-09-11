@@ -18,20 +18,22 @@ from flask import Flask, Response, request
 from pydantic import ValidationError
 from werkzeug.serving import BaseWSGIServer, make_server
 
+from src.helpers.data_models import NameKey
 from src.helpers.data_models.http_request_log import HttpRequestLogRecord
 from src.helpers.vars import KTP_NAMEKEY_COL
+
+from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
+from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
+    TEXT_ENCODING,
+)
 
 from ..control_centre.dashboard.helpers.data_models.run_outcome import (
     RUN_OUTCOME_PATHS,
     RunOutcomeRequest,
 )
 from . import api
-from .helpers.data_models.server_event import (
-    SOURCE_KEY_HEADER,
-    RunOutcomeResponse,
-)
-from .helpers.locale import Locale
-from .helpers.vars import TEXT_ENCODING
+from .helpers.data_models.commit_event import SOURCE_KEY_HEADER
+from .helpers.data_models.run_outcome_response import RunOutcomeResponse
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +80,7 @@ def _run_outcome_records(
         raise api._PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT) from exc
 
 
-def dashboard_query_payload(namekey: str | None = None) -> str:
+def dashboard_query_payload(namekey: NameKey | None) -> str:
     runtime = api.runtime_configuration()
     with api.synchronized_detour_database(runtime) as connection:
         response = api.dashboard_query_response(
@@ -90,7 +92,7 @@ def dashboard_query_payload(namekey: str | None = None) -> str:
     return response.model_dump_json()
 
 
-def ipc_only_dashboard_query_payload(namekey: str | None = None) -> str:
+def ipc_only_dashboard_query_payload(namekey: NameKey | None) -> str:
     runtime = api.runtime_configuration()
     with api.DETOUR_DB_LOCK:
         connection = api.open_detour_database(runtime, read_only=True)
@@ -110,10 +112,10 @@ def build_ipc_only_dashboard_query_payload_callback(
     config_path: Path,
     *,
     verify_hash_on_init: bool = True,
-) -> Callable[[str | None], str]:
+) -> Callable[[NameKey | None], str]:
     configured = False
 
-    def query(namekey: str | None) -> str:
+    def query(namekey: NameKey | None) -> str:
         nonlocal configured
 
         if not configured:
@@ -185,7 +187,7 @@ def handle_dashboard_run_outcome_request(
 
 
 def create_dashboard_query_app(
-    query: Callable[[str | None], str],
+    query: Callable[[NameKey | None], str],
     *,
     namekey_parameter: str,
     query_path: str,
@@ -198,7 +200,13 @@ def create_dashboard_query_app(
     @app.get(query_path)
     def dashboard_query() -> Response:
         try:
-            payload = query(request.args.get(namekey_parameter))
+            namekey_json = request.args.get(namekey_parameter)
+            namekey = (
+                None
+                if namekey_json is None
+                else NameKey.from_json_key(namekey_json)
+            )
+            payload = query(namekey)
         except BaseException:
             app.logger.exception("dashboard query failed fatally")
             fatal_exit(1)
@@ -267,7 +275,7 @@ def _unlink_stale_socket(path: Path) -> None:
 
 def start_dashboard_query_server(
     socket_path: Path,
-    query: Callable[[str | None], str],
+    query: Callable[[NameKey | None], str],
     *,
     namekey_parameter: str,
     query_path: str,

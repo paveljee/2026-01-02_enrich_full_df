@@ -59,6 +59,28 @@ KTP_AI_AUGMENT_SESSION_METADATA_COL = f"{AI_AUGMENT_COLUMN_PREFIX}session_metada
 KTP_AI_AUGMENT_FOOTNOTES_COL = f"{AI_AUGMENT_COLUMN_PREFIX}footnotes"
 KTP_AI_AUGMENT_FOOTNOTE_ARGUMENTS_COL = f"{AI_AUGMENT_COLUMN_PREFIX}footnote_arguments"
 
+DOCX_TO_AI_AUGMENT_COLUMNS = (
+    ("ktp.table_1_researcher_author", KTP_AI_AUGMENT_RESEARCHER_AUTHOR_COL),
+    ("ktp.table_1_place_of_residence", KTP_AI_AUGMENT_PLACE_OF_RESIDENCE_COL),
+    (
+        "ktp.table_1_race_ethnicity_language_culture",
+        KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL,
+    ),
+    ("ktp.table_1_gender", KTP_AI_AUGMENT_GENDER_COL),
+    (
+        "ktp.table_1_age_first_publication_according_to_openalex_profile",
+        KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL,
+    ),
+    ("ktp.table_1_education", KTP_AI_AUGMENT_EDUCATION_COL),
+    ("ktp.table_1_academic_position_s_", KTP_AI_AUGMENT_ACADEMIC_POSITIONS_COL),
+    ("ktp.table_1_social_capital", KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL),
+    ("ktp.table_1_links_", KTP_AI_AUGMENT_LINKS_COL),
+    ("ktp.table_1_comments", KTP_AI_AUGMENT_COMMENTS_COL),
+)
+DOCX_COLUMNS = tuple(
+    docx_column for docx_column, _ai_column in DOCX_TO_AI_AUGMENT_COLUMNS
+)
+
 TEXT_ENCODING = "utf-8"
 
 AI_AUGMENT_RND_START = 1
