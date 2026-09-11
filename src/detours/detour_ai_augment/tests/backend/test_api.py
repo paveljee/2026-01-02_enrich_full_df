@@ -1959,6 +1959,78 @@ def test_authoritative_middleware_preserves_streaming_response_until_complete(
     assert records[0].response_body == response_body.decode()
 
 
+def test_private_metadata_headers_are_canonical_structured_fields() -> None:
+    namekey = NameKey(first_name='A. "Ada"', last_name=r"Back\slash")
+    name_key_header = api.name_key_header(namekey)
+    source_key_header = api._source_key_header("rollout-2xxxx.jsonl", 82)
+
+    assert name_key_header == (
+        r'ktp.first_name="A. \"Ada\"", ktp.last_name="Back\\slash"'
+    )
+    assert api.parse_name_key_header(name_key_header) == namekey
+    assert source_key_header == (
+        'ktp.filename="rollout-2xxxx.jsonl", '
+        'ktp.fragment;type="line_number";line_number="82"'
+    )
+    assert api.parse_source_key_header(source_key_header) == (
+        "rollout-2xxxx.jsonl",
+        82,
+    )
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        (
+            'ktp.filename="rollout.jsonl", '
+            'ktp.fragment;type="line_number";line_number=82'
+        ),
+        (
+            'ktp.filename="rollout.jsonl", '
+            'ktp.fragment;line_number="82";type="line_number"'
+        ),
+        (
+            'ktp.filename="rollout.jsonl", '
+            'ktp.fragment;type="line_number";line_number="082"'
+        ),
+        (
+            'ktp.filename="rollout.jsonl", '
+            'ktp.fragment;type="line_number";line_number="0"'
+        ),
+        (
+            'ktp.filename="nested/rollout.jsonl", '
+            'ktp.fragment;type="line_number";line_number="82"'
+        ),
+        (
+            'ktp.filename="rollout.jsonl", '
+            'ktp.fragment;type="line_number";line_number="82", extra'
+        ),
+    ),
+)
+def test_source_key_header_parser_requires_the_canonical_dictionary(value: str) -> None:
+    with pytest.raises(
+        api._PushValidationError,
+        match=Locale.REPLAY_COMMIT_SOURCE_KEY_INVALID,
+    ):
+        api.parse_source_key_header(value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        'ktp.first_name="A.",ktp.last_name="Sheikh"',
+        'ktp.last_name="Sheikh", ktp.first_name="A."',
+        'ktp.first_name="A.", ktp.last_name="Sheikh", extra',
+    ),
+)
+def test_name_key_header_parser_requires_the_canonical_dictionary(value: str) -> None:
+    with pytest.raises(
+        api._PushValidationError,
+        match=Locale.REPLAY_COMMIT_NAME_KEY_INVALID,
+    ):
+        api.parse_name_key_header(value)
+
+
 def test_synthetic_commit_matches_the_readme_contour_exactly(tmp_path: Path) -> None:
     rollout_path = tmp_path / TEST_ROLLOUT_FILENAME
     rollout_path.write_bytes(b'{"one":1}\n{"two":2}\n')
@@ -2008,11 +2080,11 @@ def test_synthetic_commit_matches_the_readme_contour_exactly(tmp_path: Path) -> 
         "path": "/commit",
         "query": "",
         "request_headers": {
-            "Source-Key": (
-                f'ktp.filename="{TEST_ROLLOUT_FILENAME}", ktp.fragment=2, '
-                'ktp.fragment_type="line_number"'
+            "SourceKey": (
+                f'ktp.filename="{TEST_ROLLOUT_FILENAME}", '
+                'ktp.fragment;type="line_number";line_number="2"'
             ),
-            "Name-Key": 'ktp.first_name="A.", ktp.last_name="Sheikh"',
+            "NameKey": 'ktp.first_name="A.", ktp.last_name="Sheikh"',
         },
         "request_body": record.request_body,
         "response_code": None,

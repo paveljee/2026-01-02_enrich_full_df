@@ -12,12 +12,12 @@ from pydantic import (
     model_validator,
 )
 
-from src.helpers.architecture import implements
-from src.helpers.data_models import HttpRequestLogRecord
-
 from src.detours.detour_ai_augment.protected.src.architecture import (
     BackendComponent,
 )
+from src.helpers.architecture import implements
+from src.helpers.data_models import HttpRequestLogRecord
+
 from ....control_centre.dashboard.helpers.data_models.run_outcome import (
     RunLifecycle,
     RunOutcomeRequest,
@@ -29,6 +29,7 @@ from .commit_event import (
     source_key_from_header_value,
     source_key_header_value,
 )
+
 
 class _RunOutcomeResponseBodyJson(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
@@ -144,12 +145,12 @@ class RunOutcomeResponse(HttpRequestLogRecord):
             expected_response_headers = None
         else:
             if self.response_headers is None:
-                raise ValueError("run-outcome Source-Key response header is missing")
+                raise ValueError("run-outcome SourceKey response header is missing")
             filename, line_count = source_key_from_header_value(
                 self.response_headers.get(SOURCE_KEY_HEADER)
             )
             if line_count != rollout.line_count:
-                raise ValueError("run-outcome Source-Key line count is inconsistent")
+                raise ValueError("run-outcome SourceKey line count is inconsistent")
             expected_response_headers = {
                 SOURCE_KEY_HEADER: source_key_header_value(filename, line_count)
             }

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import base64
-import json
 import re
 from collections.abc import Callable, Mapping
 from enum import StrEnum
@@ -18,64 +17,65 @@ from pydantic import (
     model_validator,
 )
 
+from src.detours.detour_ai_augment.protected.src.architecture import (
+    BackendComponent,
+)
 from src.helpers.architecture import implements
 from src.helpers.data_models import FragmentType, HttpRequestLogRecord
 from src.helpers.vars import (
     KTP_FILENAME_COL,
     KTP_FRAGMENT_COL,
-    KTP_FRAGMENT_TYPE_COL,
     KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
 )
 
-from src.detours.detour_ai_augment.protected.src.architecture import (
-    BackendComponent,
-)
 from ....control_centre.dashboard.helpers.data_models.run_outcome import (
     NAME_KEY_HEADER,
+    STRUCTURED_FIELD_STRING,
+    structured_field_string,
+    structured_field_string_value,
 )
 
 COMMIT_PATH = "/commit"
 HTTP_POST_METHOD = "POST"
 SYNTHETIC_SCHEME = "http"
 SYNTHETIC_HOST = "invalid"
-SOURCE_KEY_HEADER = "Source-Key"
+SOURCE_KEY_HEADER = "SourceKey"
 BASE64_TEXT_ENCODING = "ascii"
 ROLLOUT_LINE_FRAGMENT_TYPE = FragmentType.LINE_NUMBER.value
-STRUCTURED_FIELD_JSON_STRING = r'"(?:\\.|[^"\\])*"'
 SOURCE_KEY_PATTERN = re.compile(
-    rf"^{re.escape(KTP_FILENAME_COL)}=(?P<filename>{STRUCTURED_FIELD_JSON_STRING}), "
-    rf"{re.escape(KTP_FRAGMENT_COL)}=(?P<fragment>[0-9]+), "
-    rf'{re.escape(KTP_FRAGMENT_TYPE_COL)}="{ROLLOUT_LINE_FRAGMENT_TYPE}"$'
+    rf"^{re.escape(KTP_FILENAME_COL)}=(?P<filename>{STRUCTURED_FIELD_STRING}), "
+    rf'{re.escape(KTP_FRAGMENT_COL)};type="{ROLLOUT_LINE_FRAGMENT_TYPE}";'
+    rf"{ROLLOUT_LINE_FRAGMENT_TYPE}=(?P<fragment>{STRUCTURED_FIELD_STRING})$"
 )
 
 
 def source_key_header_value(filename: str, line_count: int) -> str:
     return (
-        f"{KTP_FILENAME_COL}={json.dumps(filename, ensure_ascii=False)}, "
-        f"{KTP_FRAGMENT_COL}={line_count}, "
-        f'{KTP_FRAGMENT_TYPE_COL}="{ROLLOUT_LINE_FRAGMENT_TYPE}"'
+        f"{KTP_FILENAME_COL}={structured_field_string(filename)}, "
+        f'{KTP_FRAGMENT_COL};type="{ROLLOUT_LINE_FRAGMENT_TYPE}";'
+        f"{ROLLOUT_LINE_FRAGMENT_TYPE}={structured_field_string(str(line_count))}"
     )
 
 
 def source_key_from_header_value(value: object) -> tuple[str, int]:
     if not isinstance(value, str):
-        raise ValueError("Source-Key header is missing")
+        raise ValueError("SourceKey header is missing")
     matched = SOURCE_KEY_PATTERN.fullmatch(value)
     if matched is None:
-        raise ValueError("Source-Key header is malformed")
+        raise ValueError("SourceKey header is malformed")
     try:
-        filename = json.loads(matched.group("filename"))
-        line_count = int(matched.group("fragment"))
-    except (json.JSONDecodeError, ValueError) as exc:
-        raise ValueError("Source-Key header is malformed") from exc
+        filename = structured_field_string_value(matched.group("filename"))
+        fragment = structured_field_string_value(matched.group("fragment"))
+        line_count = int(fragment)
+    except ValueError as exc:
+        raise ValueError("SourceKey header is malformed") from exc
     if (
-        not isinstance(filename, str)
-        or not filename
+        not filename
         or PurePosixPath(filename).name != filename
         or line_count < 1
         or value != source_key_header_value(filename, line_count)
     ):
-        raise ValueError("Source-Key header is not canonical")
+        raise ValueError("SourceKey header is not canonical")
     return filename, line_count
 
 

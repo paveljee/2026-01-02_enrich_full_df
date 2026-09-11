@@ -245,9 +245,11 @@ def agent_runtime_attempt(
         path="/commit",
         query="",
         request_headers={
-            "Source-Key": 'ktp.filename="rollout.jsonl", ktp.fragment=1, '
-            'ktp.fragment_type="line_number"',
-            "Name-Key": 'ktp.first_name="Jane", ktp.last_name="Doe"',
+            "SourceKey": (
+                'ktp.filename="rollout.jsonl", '
+                'ktp.fragment;type="line_number";line_number="1"'
+            ),
+            "NameKey": 'ktp.first_name="Jane", ktp.last_name="Doe"',
         },
         request_body=commit_body.model_dump_json(),
         response_code=None,

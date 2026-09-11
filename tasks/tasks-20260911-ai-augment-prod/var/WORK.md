@@ -225,3 +225,144 @@ docstrings and inline comments.
 | `detour_step4_breakdown` | 333 / 281 | 672 / 564 | 1,005 / 845 |
 | Shared detour package initializer | 3 / 2 | 0 / 0 | 3 / 2 |
 | **Total** | **33,450 / 29,974** | **22,808 / 20,167** | **56,258 / 50,141** |
+
+## Current operator request — forward-compatible private headers
+
+Implement a surgical AI-augment change requested by the
+`[!NOTE]` in `tasks/tasks-20260810-outerdict-mask/src/TASK.md`:
+
+- `Name-Key` -> `NameKey`, retaining the canonical value
+  `ktp.first_name="...", ktp.last_name="..."`.
+- `Source-Key` -> `SourceKey`, changing the single-rollout value to
+  `ktp.filename="...", ktp.fragment;type="line_number";line_number="..."`.
+
+### Findings and recommendation
+
+- Agree with doing this now. These are private synthetic `/commit` request
+  headers and Unix-socket run-outcome request/response headers, not public
+  `/pull` or `/push`; no production replay epoch has started, so compatibility
+  risk is low and this avoids persisting the soon-obsolete source-key grammar.
+- Behavioral production changes can remain concentrated in
+  `commit_event.py` and `run_outcome.py`: header constants and canonical
+  source-key formatting/parsing. Existing imports propagate them through API,
+  IPC, run-outcome response, query/outerdict validation, and dashboard.
+- Update the authoritative README, protected operator instructions, locale
+  wording, and exact-shape tests/fixtures. The new shape is the sole
+  authoritative definition: production code, docs, and tests must contain no
+  fallback, compatibility branch, legacy terminology, or regression fixture
+  memorializing the superseded spelling.
+- Keep this patch limited to AI augment's one filename plus `line_number`
+  fragment. Do not prematurely implement the upcoming task's general
+  multi-filename `SourceKey`, source resolution, or main-pipeline
+  `ktp.fragment` migration. The future shared model must decide tuple ordering,
+  duplicate handling, resource resolution, and fragment value typing.
+- Add focused tests for exact commit and run-outcome exchanges, round trips,
+  malformed/noncanonical fragments, filename basename validation, and
+  case-insensitive inbound HTTP field-name handling. Then run the non-BDD suite;
+  BDD remains the separately documented stale contour.
+- This is another durable replay-shape break under HTTP record schema `1.1`.
+  It is acceptable before production, but should be finalized before the first
+  durable run; later changes would require versioning or migration.
+- Human clarified that RFC 8941 is obsolete in favor of RFC 9651. The pointed
+  `tmp/rfc-9651.md` currently exists but is empty (0 bytes and untracked), so no
+  local text could be cited. Under RFC 9651 semantics, the proposed examples
+  are Structured Fields Dictionaries: scalar `ktp.filename` is a String,
+  plural filenames form an Inner List, and bare `ktp.fragment` has `type` plus
+  fragment-value Parameters. The key dots/underscores and shown spacing are
+  compatible with that grammar.
+- RFC 9651 plain Strings are visible ASCII. A read-only query of the sole source
+  DB confirms all 307 current first/last-name pairs contain only visible ASCII,
+  so this does not raise current-cohort risk. A future general shared model must
+  explicitly support RFC 9651 Display Strings for Unicode or reject unsupported
+  values; it should not rely on JSON-only escapes while claiming Structured
+  Fields conformance.
+
+### Replay/projection effect of a header-only patch
+
+- Authoritative replay record classes are initial/retry/terminal `GET /pull`,
+  `POST /push`, synthetic `POST /commit`, and IPC `POST
+  /completed|/failed|/cancelled`. After the proposed patch, the old source-key
+  grammar and `ktp.fragment_type` disappear from commit and outcome headers.
+- `ktp.fragment_type` remains in the initial 200 pull response because
+  `configured_pull_lines()` serializes existing XLSX and SSN innerdicts. Push
+  bodies, commit bodies, retry markdown, terminal 410 normalized submission +
+  selected DOCX ground truth, and run-outcome bodies do not add that field.
+- Current replay logic does not interpret the pull's source-key fields when
+  validating a commit: `_namekey_from_original_pull()` extracts only first and
+  last name. The new header parser can still return `(filename, line_count)`,
+  which is the only interface consumed by rollout and appendwatch validation.
+  Therefore the mixed interim representations do not break current behavior.
+- The replayed detour DB will still contain `ktp.fragment_type` in rebuildable
+  projections: raw `detour_http_records` mirrors the initial pull; serialized
+  agent-runtime attempts embed their pull and, for applicable cohorts, a full
+  ground-truth innerdict; and `codex_output_rows` explicitly writes a
+  `ktp.fragment_type = line_number` column which flows to `codex_output` and
+  `codex_innerdicts`. This is independent of commit-header parsing.
+- This does not defeat the forward-looking goal. The authoritative fact needed
+  to recreate accepted AI output is the new commit `SourceKey` plus commit body,
+  rollout, push, and source context. A later main-pipeline migration can change
+  the output schema/materialization and rebuild the disposable detour DB. The
+  immutable old pull payload will remain historical raw input; future replay
+  code must continue treating it as opaque except for identity, or explicitly
+  normalize it if it starts validating every historical innerdict.
+
+### RFC 9651 confirmation
+
+- The local RFC is now populated (1,686 lines) and confirms that RFC 9651
+  obsoletes RFC 8941. Both headers must be defined as whole Dictionary
+  Structured Fields; parsing must fail as a unit, with field-specific semantic
+  constraints applied after generic parsing.
+- The proposed serialization follows RFC 9651's recommended form: ordered
+  dictionary members use `, `; a Boolean-true dictionary member omits `=?1`
+  and carries `;` parameters; lowercase keys may contain digits, `_`, `-`, `.`,
+  and `*`; an Inner List uses parentheses and space-delimited items; and String
+  escaping is limited to DQUOTE and backslash.
+- Implementation scope contains no historical-format recognition or rejection
+  test. Strictness means parsing the complete new Dictionary shape, validating
+  exact required member/value/parameter types and semantics, and accepting only
+  the chosen canonical serialization for this private authoritative record.
+
+### Implementation status
+
+- Core patch is implemented in the existing commit/run-outcome header models.
+  Header field names are now `NameKey` and `SourceKey`; the source value is the
+  exact canonical scalar-filename plus parameterized `line_number` Dictionary.
+- Serialization/parsing now uses RFC 9651 String escaping: only DQUOTE and
+  backslash are escaped, and values outside visible ASCII fail. Parsers consume
+  the full selected canonical serialization, enforce basename and positive
+  decimal line-count semantics, and do not contain compatibility logic.
+- Shared main-pipeline `SourceKey`, pull payloads, output projection, database
+  schema, public API bodies, and replay schema version are unchanged.
+- Updated the authoritative lifecycle README, protected operator curl command,
+  locale text, exact synthetic commit fixture, and dashboard commit fixture.
+- Added exact `NameKey` and `SourceKey` round trips (including RFC String
+  escaping) plus strict malformed/noncanonical tests written only against the
+  authoritative new grammar.
+- Focused verification is green: Ruff checks pass; selected Backend header,
+  synthetic-commit, and run-outcome tests report 13 passed / 112 deselected;
+  Backend IPC tests report 7 passed / 1 skipped; full dashboard UI tests report
+  46 passed.
+- Focused strict mypy traversed unchanged main-pipeline dependencies and found
+  five existing errors in `jsonlines.py`, `sourcekey.py`, `duckdb_utils.py`, and
+  `pipeline_manager.py`; it reported none in the three changed production
+  modules themselves. Ruff reports all changed Python files clean.
+- The Human Operator emphasized the future multi-file contour. RFC 9651
+  confirms that a Dictionary value containing filenames is an Inner List whose
+  serialized Strings are space-delimited inside parentheses. Read-only queries
+  against the main DB confirm current SSN/parquet innerdicts encode an ordered
+  JSON-text list of nine filenames and use an `author_id` fragment. The future
+  HTTP conversion must serialize those as
+  `ktp.filename=("file1.parquet" "file2.parquet")`, never as a quoted JSON
+  array. The present AI-augment parser remains intentionally scalar because a
+  Codex rollout snapshot has exactly one source filename; the String helper can
+  serialize each future Inner List member.
+- Standard non-BDD AI-augment suite is green: 215 passed, 47 skipped, and 3
+  root-only tests deselected; the separately selected real-API test skipped
+  because `OPENALEX_API_KEY` is unavailable. Root, real operator, and the known
+  stale BDD contours were not run.
+- Final audit is clean: Ruff passes all changed Python files, `git diff
+  HEAD --check` passes, and current detour production/docs/tests contain no
+  superseded header field names. The protected operator header-generation
+  snippet was executed successfully and emits the canonical `NameKey` value.
+- Implementation is complete. No database, replay log, shared `SourceKey`,
+  pull shape, or output projection was modified.

@@ -187,14 +187,15 @@ NAME_KEY_HEADER="$(
   pixi run -e detour-ai-augment python -c '
 import sys
 from src.detours.detour_ai_augment.src.backend.api import name_key_header
-print(name_key_header(sys.argv[1]), end="")
+from src.helpers.data_models import NameKey
+print(name_key_header(NameKey.from_json_key(sys.argv[1])), end="")
 ' "$NAMEKEY"
 )"
 
 curl --silent --show-error --include \
   --unix-socket "$SOCKET_PATH" \
   --request POST \
-  --header "Name-Key: $NAME_KEY_HEADER" \
+  --header "NameKey: $NAME_KEY_HEADER" \
   "http://invalid/$OUTCOME"
 ```
 

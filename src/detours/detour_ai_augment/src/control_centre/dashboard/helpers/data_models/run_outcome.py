@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import re
 from collections.abc import Mapping
 from enum import StrEnum
@@ -8,16 +7,15 @@ from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
+from src.detours.detour_ai_augment.protected.src.architecture import (
+    ControlCentreComponent,
+)
 from src.helpers.architecture import implements
 from src.helpers.data_models import HttpRequestLogRecord, NameKey
 from src.helpers.vars import (
     KTP_FIRST_NAME_COL,
     KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
     KTP_LAST_NAME_COL,
-)
-
-from src.detours.detour_ai_augment.protected.src.architecture import (
-    ControlCentreComponent,
 )
 
 
@@ -38,38 +36,63 @@ RUN_OUTCOME_PATHS: frozenset[RunOutcomePath] = frozenset(RunOutcomePath)
 HTTP_POST_METHOD = "POST"
 SYNTHETIC_SCHEME = "http"
 SYNTHETIC_HOST = "invalid"
-SOURCE_KEY_HEADER = "Source-Key"
-NAME_KEY_HEADER = "Name-Key"
-STRUCTURED_FIELD_JSON_STRING = r'"(?:\\.|[^"\\])*"'
+SOURCE_KEY_HEADER = "SourceKey"
+NAME_KEY_HEADER = "NameKey"
+STRUCTURED_FIELD_STRING = r'"(?:[\x20-\x21\x23-\x5b\x5d-\x7e]|\\["\\])*"'
 NAME_KEY_PATTERN = re.compile(
-    rf"^{re.escape(KTP_FIRST_NAME_COL)}=(?P<first>{STRUCTURED_FIELD_JSON_STRING}), "
-    rf"{re.escape(KTP_LAST_NAME_COL)}=(?P<last>{STRUCTURED_FIELD_JSON_STRING})$"
+    rf"^{re.escape(KTP_FIRST_NAME_COL)}=(?P<first>{STRUCTURED_FIELD_STRING}), "
+    rf"{re.escape(KTP_LAST_NAME_COL)}=(?P<last>{STRUCTURED_FIELD_STRING})$"
 )
+
+
+def structured_field_string(value: str) -> str:
+    if any(
+        ord(character) < 0x20 or ord(character) > 0x7E for character in value
+    ):
+        raise ValueError(
+            "Structured Field String contains a non-printable-ASCII value"
+        )
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def structured_field_string_value(value: str) -> str:
+    if re.fullmatch(STRUCTURED_FIELD_STRING, value) is None:
+        raise ValueError("Structured Field String is malformed")
+    decoded: list[str] = []
+    index = 1
+    while index < len(value) - 1:
+        character = value[index]
+        if character == "\\":
+            index += 1
+            character = value[index]
+        decoded.append(character)
+        index += 1
+    return "".join(decoded)
 
 
 def name_key_header_value(namekey: NameKey) -> str:
     return (
         f"{KTP_FIRST_NAME_COL}="
-        f"{json.dumps(namekey.first_name, ensure_ascii=False)}, "
-        f"{KTP_LAST_NAME_COL}={json.dumps(namekey.last_name, ensure_ascii=False)}"
+        f"{structured_field_string(namekey.first_name)}, "
+        f"{KTP_LAST_NAME_COL}={structured_field_string(namekey.last_name)}"
     )
 
 
 def name_key_from_header_value(value: object) -> NameKey:
     if not isinstance(value, str):
-        raise ValueError("Name-Key header is missing")
+        raise ValueError("NameKey header is missing")
     matched = NAME_KEY_PATTERN.fullmatch(value)
     if matched is None:
-        raise ValueError("Name-Key header is malformed")
+        raise ValueError("NameKey header is malformed")
     try:
         namekey = NameKey(**{
-            KTP_FIRST_NAME_COL: json.loads(matched.group("first")),
-            KTP_LAST_NAME_COL: json.loads(matched.group("last")),
+            KTP_FIRST_NAME_COL: structured_field_string_value(matched.group("first")),
+            KTP_LAST_NAME_COL: structured_field_string_value(matched.group("last")),
         })
-    except (json.JSONDecodeError, TypeError, ValueError) as exc:
-        raise ValueError("Name-Key header is malformed") from exc
+    except (TypeError, ValueError) as exc:
+        raise ValueError("NameKey header is malformed") from exc
     if value != name_key_header_value(namekey):
-        raise ValueError("Name-Key header is not canonical")
+        raise ValueError("NameKey header is not canonical")
     return namekey
 
 
@@ -260,7 +283,7 @@ class RunOutcomeRequest(BaseModel):
             raise ValueError("run-outcome HTTP request has an invalid contour")
         namekey = name_key_from_header_value(record.request_headers[NAME_KEY_HEADER])
         if namekey != self.namekey:
-            raise ValueError("run-outcome Name-Key does not match its request")
+            raise ValueError("run-outcome NameKey does not match its request")
         return self
 
     @model_validator(mode="after")
