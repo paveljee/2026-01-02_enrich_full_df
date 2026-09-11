@@ -1,13 +1,52 @@
+# ======================================
+# main config. for autonomous async work.
+########################################
+############## DANGER! #################
+########################################
+# ONLY suitable for an isolated virtual
+# environment such as a non-sudo account
+# on an isolated machine, as this has
+# FULL system access under the user
+# account under which this is run, 
+# including full read and WRITE access
+# to ANY locations accessible to that
+# user. this NEVER asks for approvals.
+# no web access - but only as guarded
+# by the native codex configuration
+# options below.
+# ======================================
+
 model = "gpt-5.6-sol"
 model_reasoning_effort = "xhigh"
+model_reasoning_summary = "detailed"
 personality = "none"
 web_search = "disabled"
-sandbox_mode = "workspace-write"
-approval_policy = "untrusted"
+# unused to be customized below
+#sandbox_mode = "danger-full-access"
+approval_policy = "never"
 service_tier = "default"
+approvals_reviewer = "user"
+# arbitrary name below
+default_permissions = "full-local-no-net"
+
+[permissions.full-local-no-net.filesystem]
+":root" = "write"  # assume Unix DAC non-sudo
+
+[permissions.full-local-no-net.network]
+enabled = false
+
+[features]
+plugins = false
+remote_plugin = false
+plugin_sharing = false
+recommended_plugins = false
+apps = false
+skill_mcp_dependency_install = false
+
+[apps._default]
+enabled = false
+destructive_enabled = false
+open_world_enabled = false
 
 [agents]
 enabled = false
-
-[sandbox_workspace_write]
-network_access = false

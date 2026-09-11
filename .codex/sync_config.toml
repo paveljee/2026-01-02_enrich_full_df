@@ -1,0 +1,15 @@
+# alternative config for sync work
+model = "gpt-5.6-sol"
+model_reasoning_effort = "xhigh"
+personality = "none"
+web_search = "disabled"
+sandbox_mode = "workspace-write"
+# untrusted may no longer be supported
+approval_policy = "untrusted"
+service_tier = "default"
+
+[agents]
+enabled = false
+
+[sandbox_workspace_write]
+network_access = false
