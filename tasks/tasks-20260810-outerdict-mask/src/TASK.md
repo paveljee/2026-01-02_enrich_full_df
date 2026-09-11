@@ -123,6 +123,15 @@ look, readonly, at:
 `./tmp/manual_outerdict_mask.json`.
 we need to properly wire this into main pipeline.
 
+> [!NOTE]
+> with the proposed shape,
+> detour ai augment HTTP header shape would be:
+> `NameKey: ktp.first_name="Gaoquan ", ktp.last_name="Shi"`
+> `SourceKey: ktp.filename="rollout-2xxxx.jsonl", ktp.fragment;type="line_number";line_number="82"`
+>
+> of note, multiple filenames in principle also are supported, e.g.:
+> `SourceKey: ktp.filename=("a.parquet" "b.parquet"), ktp.fragment;type="author_id";author_id="A5049493168"`
+
 the intended behaviour:
 
 - that's a mask so if something is missing there, we don't pick up cancellations; we only pick up signal.
