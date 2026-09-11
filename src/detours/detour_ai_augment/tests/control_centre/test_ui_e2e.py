@@ -22,20 +22,38 @@ import pytest
 from nicegui import ui
 from playwright.sync_api import Locator, Page, ViewportSize, expect, sync_playwright
 
-from src.detours.detour_ai_augment.src.backend import api
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.source_population import (
-    IneligibilityCategory,
+from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
+    AiAugmentCohort,
+    AiAugmentIneligibilityCategory,
 )
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.source_population import (
-    SourceCohort as ResearcherCohort,
-)
-from src.detours.detour_ai_augment.src.control_centre.dashboard import ui as control_ui
-from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers import (
+from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helpers import (
     vars as control_vars,
 )
-from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.locale import Locale
-from src.helpers.data_models import NameKey
-from src.helpers.vars import DRAW_LABEL, KTP_FILENAME_COL
+from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helpers.locale import (
+    Locale,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_context import (
+    EXPECTED_GROUND_TRUTH_RESEARCHERS,
+    EXPECTED_INELIGIBLE_RESEARCHERS,
+    EXPECTED_NO_GROUND_TRUTH_RESEARCHERS,
+    EXPECTED_SOURCE_RESEARCHERS,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_outer_dict import (
+    AiAugmentOuterDict,
+)
+from src.detours.detour_ai_augment.src.control_centre.dashboard import ui as control_ui
+from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.run_outcome import (  # noqa: E501
+    RunLifecycle,
+)
+from src.helpers.data_models import InnerDict, NameKey
+from src.helpers.procedures import XlsxMatchProcedure
+from src.helpers.vars import (
+    DRAW_LABEL,
+    KTP_FILENAME_COL,
+    KTP_FIRST_NAME_COL,
+    KTP_LAST_NAME_COL,
+    KTP_NAMEKEY_COL,
+)
 
 E2E_SERVER_ARGUMENT = "--serve"
 E2E_SERVER_MODULE = (
@@ -70,66 +88,83 @@ GRID_ROOT_SELECTOR = ".ag-root"
 GRID_HEADER_SELECTOR = ".ag-header-cell"
 GRID_CELL_SELECTOR = ".ag-cell"
 GRID_ARIA_ROW_COUNT_OFFSET = 1
-EXPECTED_GRID_ARIA_ROW_COUNT = api.EXPECTED_SOURCE_RESEARCHERS + GRID_ARIA_ROW_COUNT_OFFSET
+EXPECTED_GRID_ARIA_ROW_COUNT = EXPECTED_SOURCE_RESEARCHERS + GRID_ARIA_ROW_COUNT_OFFSET
 
 
-def browser_researchers() -> tuple[control_ui._Researcher, ...]:
-    researchers = [
-        control_ui._Researcher(
-            namekey=control_ui.Namekey(
-                NameKey(
-                    first_name="Pilot Ineligible",
-                    last_name="Researcher",
-                ).to_json_key()
+def browser_researcher(
+    *,
+    first_name: str,
+    last_name: str,
+    rnd: int,
+    draw_number: str,
+    cohort: AiAugmentCohort,
+    ineligibility_category: AiAugmentIneligibilityCategory | None = None,
+) -> AiAugmentOuterDict:
+    namekey = NameKey(first_name=first_name, last_name=last_name)
+    return AiAugmentOuterDict(
+        namekey=namekey,
+        xlsx_innerdicts=(
+            InnerDict.from_mapping(
+                {
+                    KTP_NAMEKEY_COL: namekey.to_json_key(),
+                    KTP_FIRST_NAME_COL: first_name,
+                    KTP_LAST_NAME_COL: last_name,
+                    DRAW_LABEL: draw_number,
+                },
+                XlsxMatchProcedure(),
             ),
-            rnd=1,
-            draw_numbers=(BROWSER_PILOT_INELIGIBLE_DRAW,),
+        ),
+        ssn_innerdicts=(),
+        docx_innerdicts=(),
+        ai_augment_rnd=rnd,
+        ai_augment_cohort=cohort,
+        ai_augment_ineligibility_category=ineligibility_category,
+    )
+
+
+def browser_researchers() -> tuple[AiAugmentOuterDict, ...]:
+    researchers = [
+        browser_researcher(
             first_name="Pilot Ineligible",
             last_name="Researcher",
-            cohort=ResearcherCohort.INELIGIBLE,
-            ineligibility_category=(IneligibilityCategory.RELEASE_BATCH_SUBSET_8),
-        ),
-        control_ui._Researcher(
-            namekey=control_ui.Namekey(
-                NameKey(
-                    first_name="Pilot Eligible",
-                    last_name="Researcher",
-                ).to_json_key()
+            rnd=1,
+            draw_number=BROWSER_PILOT_INELIGIBLE_DRAW,
+            cohort=AiAugmentCohort.INELIGIBLE,
+            ineligibility_category=(
+                AiAugmentIneligibilityCategory.RELEASE_BATCH_SUBSET_8
             ),
-            rnd=2,
-            draw_numbers=(BROWSER_PILOT_ELIGIBLE_DRAW,),
+        ),
+        browser_researcher(
             first_name="Pilot Eligible",
             last_name="Researcher",
-            cohort=ResearcherCohort.GROUND_TRUTH,
+            rnd=2,
+            draw_number=BROWSER_PILOT_ELIGIBLE_DRAW,
+            cohort=AiAugmentCohort.GROUND_TRUTH,
         ),
     ]
-    remaining_ground_truth = api.EXPECTED_GROUND_TRUTH_RESEARCHERS - 1
-    remaining_no_ground_truth = api.EXPECTED_NO_GROUND_TRUTH_RESEARCHERS
-    remaining_total = api.EXPECTED_SOURCE_RESEARCHERS - BROWSER_LEADING_RESEARCHER_COUNT
+    remaining_ground_truth = EXPECTED_GROUND_TRUTH_RESEARCHERS - 1
+    remaining_no_ground_truth = EXPECTED_NO_GROUND_TRUTH_RESEARCHERS
+    remaining_total = EXPECTED_SOURCE_RESEARCHERS - BROWSER_LEADING_RESEARCHER_COUNT
     for index in range(remaining_total):
         if index < remaining_ground_truth:
-            cohort = ResearcherCohort.GROUND_TRUTH
+            cohort = AiAugmentCohort.GROUND_TRUTH
             ineligibility_category = None
         elif index < remaining_ground_truth + remaining_no_ground_truth:
-            cohort = ResearcherCohort.NO_GROUND_TRUTH
+            cohort = AiAugmentCohort.NO_GROUND_TRUTH
             ineligibility_category = None
         else:
-            cohort = ResearcherCohort.INELIGIBLE
-            ineligibility_category = IneligibilityCategory.STAGING_PARTITION_2
+            cohort = AiAugmentCohort.INELIGIBLE
+            ineligibility_category = (
+                AiAugmentIneligibilityCategory.STAGING_PARTITION_2
+            )
         first_name = f"First {index + 1}"
         last_name = f"Last {index + 1}"
         researchers.append(
-            control_ui._Researcher(
-                namekey=control_ui.Namekey(
-                    NameKey(
-                        first_name=first_name,
-                        last_name=last_name,
-                    ).to_json_key()
-                ),
-                rnd=index + BROWSER_LEADING_RESEARCHER_COUNT + 1,
-                draw_numbers=(str(index + 1),),
+            browser_researcher(
                 first_name=first_name,
                 last_name=last_name,
+                rnd=index + BROWSER_LEADING_RESEARCHER_COUNT + 1,
+                draw_number=str(index + 1),
                 cohort=cohort,
                 ineligibility_category=ineligibility_category,
             )
@@ -141,16 +176,16 @@ class BrowserController:
     def __init__(self) -> None:
         self._researchers = browser_researchers()
         self._activity_by_namekey = {
-            researcher.namekey: control_ui._ResearcherActivity.READY
+            researcher.namekey.to_json_key(): RunLifecycle.READY
             for researcher in self._researchers
         }
-        self._run_id_by_namekey: dict[control_ui.Namekey, UUID] = {}
+        self._run_id_by_namekey: dict[str, UUID] = {}
         self._attempt_run_ids_by_namekey: dict[
-            control_ui.Namekey,
+            str,
             list[UUID],
-        ] = {researcher.namekey: [] for researcher in self._researchers}
-        self._activity_by_run_id: dict[UUID, control_ui._ResearcherActivity] = {}
-        self._card_render_count: Counter[control_ui.Namekey] = Counter()
+        ] = {researcher.namekey.to_json_key(): [] for researcher in self._researchers}
+        self._activity_by_run_id: dict[UUID, RunLifecycle] = {}
+        self._card_render_count: Counter[str] = Counter()
         self._backend_status = control_ui._BackendStatus.RUNNING
         self._backend_availability = control_ui._BackendAvailability(
             full_api_available=True,
@@ -158,14 +193,11 @@ class BrowserController:
         )
         completed = self._researchers[BROWSER_LEADING_RESEARCHER_COUNT]
         completed_run_id = uuid7()
-        self._activity_by_namekey[
-            completed.namekey
-        ] = control_ui._ResearcherActivity.COMPLETE
-        self._run_id_by_namekey[completed.namekey] = completed_run_id
-        self._attempt_run_ids_by_namekey[completed.namekey].append(completed_run_id)
-        self._activity_by_run_id[
-            completed_run_id
-        ] = control_ui._ResearcherActivity.COMPLETE
+        completed_namekey = completed.namekey.to_json_key()
+        self._activity_by_namekey[completed_namekey] = RunLifecycle.COMPLETED
+        self._run_id_by_namekey[completed_namekey] = completed_run_id
+        self._attempt_run_ids_by_namekey[completed_namekey].append(completed_run_id)
+        self._activity_by_run_id[completed_run_id] = RunLifecycle.COMPLETED
 
     @property
     def active_run_id(self) -> None:
@@ -215,32 +247,33 @@ class BrowserController:
         eligible = tuple(
             researcher
             for researcher in self._researchers
-            if researcher.cohort is not ResearcherCohort.INELIGIBLE
+            if researcher.ai_augment_cohort is not AiAugmentCohort.INELIGIBLE
         )
         activities = [
-            self._activity_by_namekey[researcher.namekey] for researcher in eligible
+            self._activity_by_namekey[researcher.namekey.to_json_key()]
+            for researcher in eligible
         ]
         return control_ui._UiSnapshot(
             counts=control_ui._DashboardCounts(
                 total=len(self._researchers),
                 ground_truth=sum(
-                    researcher.cohort is ResearcherCohort.GROUND_TRUTH
+                    researcher.ai_augment_cohort is AiAugmentCohort.GROUND_TRUTH
                     for researcher in self._researchers
                 ),
                 no_ground_truth=sum(
-                    researcher.cohort is ResearcherCohort.NO_GROUND_TRUTH
+                    researcher.ai_augment_cohort is AiAugmentCohort.NO_GROUND_TRUTH
                     for researcher in self._researchers
                 ),
                 ineligible=sum(
-                    researcher.cohort is ResearcherCohort.INELIGIBLE
+                    researcher.ai_augment_cohort is AiAugmentCohort.INELIGIBLE
                     for researcher in self._researchers
                 ),
-                ready=activities.count(control_ui._ResearcherActivity.READY),
-                queued=activities.count(control_ui._ResearcherActivity.QUEUED),
-                running=activities.count(control_ui._ResearcherActivity.RUNNING),
-                complete=activities.count(control_ui._ResearcherActivity.COMPLETE),
-                failed=activities.count(control_ui._ResearcherActivity.FAILED),
-                canceled=activities.count(control_ui._ResearcherActivity.CANCELED),
+                ready=activities.count(RunLifecycle.READY),
+                queued=activities.count(RunLifecycle.QUEUED),
+                running=activities.count(RunLifecycle.RUNNING),
+                complete=activities.count(RunLifecycle.COMPLETED),
+                failed=activities.count(RunLifecycle.FAILED),
+                cancelled=activities.count(RunLifecycle.CANCELLED),
             ),
             rows=rows,
             backend_status=self._backend_status,
@@ -251,11 +284,12 @@ class BrowserController:
     def _project(
         self,
         *,
-        researcher: control_ui._Researcher,
+        researcher: AiAugmentOuterDict,
         variable: control_ui._VariableSpec,
     ) -> control_ui._ResearcherGridRow:
-        activity = self._activity_by_namekey[researcher.namekey]
-        run_id = self._run_id_by_namekey.get(researcher.namekey)
+        namekey_json = researcher.namekey.to_json_key()
+        activity = self._activity_by_namekey[namekey_json]
+        run_id = self._run_id_by_namekey.get(namekey_json)
         attempts = tuple(
             self._attempt_projection(
                 researcher=researcher,
@@ -264,7 +298,7 @@ class BrowserController:
                 attempt_index=attempt_index,
             )
             for attempt_index, attempt_run_id in enumerate(
-                self._attempt_run_ids_by_namekey[researcher.namekey]
+                self._attempt_run_ids_by_namekey[namekey_json]
             )
         )
         projection = (
@@ -274,8 +308,8 @@ class BrowserController:
                 run_id=run_id,
                 namekey=researcher.namekey,
                 draw_number=researcher.draw_number,
-                first_name=researcher.first_name,
-                last_name=researcher.last_name,
+                first_name=researcher.namekey.first_name,
+                last_name=researcher.namekey.last_name,
                 ai_column=variable.ai_column,
                 ai_value=None,
                 table_1_column=variable.table_1_column,
@@ -284,20 +318,20 @@ class BrowserController:
                 footnote_arguments=None,
                 commit_record_id=None,
                 attempt_timestamp=None,
-                attempt_activity=activity,
+                attempt_lifecycle=activity,
                 run_outcome_snapshot_savedness=None,
                 session_status=None,
-                action=control_ui._VariableProjector.action_for_status(
+                action=control_ui._VariableProjector.action_for_lifecycle(
                     activity,
-                    eligible=(researcher.cohort is not ResearcherCohort.INELIGIBLE),
+                    eligible=(
+                        researcher.ai_augment_cohort
+                        is not AiAugmentCohort.INELIGIBLE
+                    ),
                 ),
             )
         )
         return control_ui._ResearcherGridRow(
-            namekey=researcher.namekey,
-            rnd=researcher.rnd,
-            cohort=researcher.cohort,
-            ineligibility_category=researcher.ineligibility_category,
+            researcher=researcher,
             latest=projection,
             attempts=attempts,
         )
@@ -305,7 +339,7 @@ class BrowserController:
     def _attempt_projection(
         self,
         *,
-        researcher: control_ui._Researcher,
+        researcher: AiAugmentOuterDict,
         variable: control_ui._VariableSpec,
         run_id: UUID,
         attempt_index: int,
@@ -313,16 +347,16 @@ class BrowserController:
         activity = self._activity_by_run_id[run_id]
         ordinal = attempt_index + 1
         has_run_outcome = activity in {
-            control_ui._ResearcherActivity.COMPLETE,
-            control_ui._ResearcherActivity.FAILED,
-            control_ui._ResearcherActivity.CANCELED,
+            RunLifecycle.COMPLETED,
+            RunLifecycle.FAILED,
+            RunLifecycle.CANCELLED,
         }
         return control_ui._AttemptVariableProjection(
             run_id=run_id,
             namekey=researcher.namekey,
             draw_number=researcher.draw_number,
-            first_name=researcher.first_name,
-            last_name=researcher.last_name,
+            first_name=researcher.namekey.first_name,
+            last_name=researcher.namekey.last_name,
             ai_column=variable.ai_column,
             ai_value=f"ai-value-{ordinal}",
             table_1_column=variable.table_1_column,
@@ -331,7 +365,7 @@ class BrowserController:
             footnote_arguments=f"arguments-{ordinal}",
             commit_record_id=run_id,
             attempt_timestamp=(E2E_ATTEMPT_BASE_TIME + timedelta(seconds=attempt_index)),
-            attempt_activity=activity,
+            attempt_lifecycle=activity,
             run_outcome_snapshot_savedness=(
                 Locale.RUN_OUTCOME_SNAPSHOT_SAVED
                 if has_run_outcome
@@ -340,7 +374,7 @@ class BrowserController:
             session_status=(
                 Locale.SESSION_STATUS_OK if has_run_outcome else None
             ),
-            action=control_ui._VariableProjector.action_for_status(
+            action=control_ui._VariableProjector.action_for_lifecycle(
                 activity,
                 eligible=True,
             ),
@@ -349,40 +383,41 @@ class BrowserController:
     def _matches(
         self,
         *,
-        researcher: control_ui._Researcher,
+        researcher: AiAugmentOuterDict,
         selection: control_ui._UiSelection,
     ) -> bool:
-        activity = self._activity_by_namekey[researcher.namekey]
+        activity = self._activity_by_namekey[researcher.namekey.to_json_key()]
         search = selection.search_text.casefold().strip()
         return (
             (
-                selection.activity_filter is None
-                or selection.activity_filter is activity
+                selection.lifecycle_filter is None
+                or selection.lifecycle_filter is activity
             )
-            and (selection.cohort_filter is None or selection.cohort_filter is researcher.cohort)
+            and (
+                selection.cohort_filter is None
+                or selection.cohort_filter is researcher.ai_augment_cohort
+            )
             and (
                 not search
-                or search in researcher.first_name.casefold()
-                or search in researcher.last_name.casefold()
+                or search in researcher.namekey.first_name.casefold()
+                or search in researcher.namekey.last_name.casefold()
                 or search in researcher.draw_number.casefold()
-                or search == str(researcher.rnd)
-                or search in researcher.namekey.casefold()
+                or search == str(researcher.ai_augment_rnd)
+                or search in researcher.namekey.to_json_key().casefold()
             )
         )
 
     async def researcher_card(
         self,
         *,
-        namekey: control_ui.Namekey,
+        namekey: NameKey,
     ) -> control_ui._ResearcherCardView:
         researcher = next(item for item in self._researchers if item.namekey == namekey)
-        self._card_render_count[namekey] += 1
-        render_count = self._card_render_count[namekey]
+        namekey_json = namekey.to_json_key()
+        self._card_render_count[namekey_json] += 1
+        render_count = self._card_render_count[namekey_json]
         return control_ui._ResearcherCardView(
-            namekey=namekey,
-            draw_number=researcher.draw_number,
-            first_name=researcher.first_name,
-            last_name=researcher.last_name,
+            researcher=researcher,
             markdown=(
                 f"#### {KTP_FILENAME_COL}: `{E2E_CARD_FILENAME}`\n\n"
                 f"render-count-{render_count}\n\n"
@@ -393,18 +428,19 @@ class BrowserController:
             ),
         )
 
-    async def queue(self, *, namekey: control_ui.Namekey) -> UUID:
+    async def queue(self, *, namekey: NameKey) -> UUID:
         researcher = next(item for item in self._researchers if item.namekey == namekey)
-        if researcher.cohort is ResearcherCohort.INELIGIBLE:
+        if researcher.ai_augment_cohort is AiAugmentCohort.INELIGIBLE:
             raise ValueError("ineligible namekeys cannot be queued")
         run_id = uuid7()
-        self._run_id_by_namekey[namekey] = run_id
-        self._attempt_run_ids_by_namekey[namekey].append(run_id)
-        self._activity_by_run_id[run_id] = control_ui._ResearcherActivity.QUEUED
-        self._activity_by_namekey[namekey] = control_ui._ResearcherActivity.QUEUED
+        namekey_json = namekey.to_json_key()
+        self._run_id_by_namekey[namekey_json] = run_id
+        self._attempt_run_ids_by_namekey[namekey_json].append(run_id)
+        self._activity_by_run_id[run_id] = RunLifecycle.QUEUED
+        self._activity_by_namekey[namekey_json] = RunLifecycle.QUEUED
         return run_id
 
-    async def rerun(self, *, namekey: control_ui.Namekey) -> UUID:
+    async def rerun(self, *, namekey: NameKey) -> UUID:
         return await self.queue(namekey=namekey)
 
     async def cancel(self, *, run_id: UUID) -> None:
@@ -413,8 +449,8 @@ class BrowserController:
             for source, candidate in self._run_id_by_namekey.items()
             if candidate == run_id
         )
-        self._activity_by_run_id[run_id] = control_ui._ResearcherActivity.CANCELED
-        self._activity_by_namekey[namekey] = control_ui._ResearcherActivity.CANCELED
+        self._activity_by_run_id[run_id] = RunLifecycle.CANCELLED
+        self._activity_by_namekey[namekey] = RunLifecycle.CANCELLED
 
 
 def available_e2e_port() -> int:
@@ -538,9 +574,9 @@ def control_centre_browser(
 
 
 def test_underscore_field_labels_render_literally_in_researcher_card(
-    repository_root: Path,
+    pytestconfig: pytest.Config,
 ) -> None:
-    with control_centre_browser(repository_root) as (page, errors):
+    with control_centre_browser(pytestconfig.rootpath) as (page, errors):
         eligible_row = grid_row_for_draw(page, BROWSER_PILOT_ELIGIBLE_DRAW)
         eligible_row.click()
         page.get_by_test_id(control_ui.VIEW_CARD_TEST_ID).click()
@@ -557,9 +593,9 @@ def test_underscore_field_labels_render_literally_in_researcher_card(
 
 
 def test_main_grid_and_researcher_card_use_compact_line_spacing(
-    repository_root: Path,
+    pytestconfig: pytest.Config,
 ) -> None:
-    with control_centre_browser(repository_root) as (page, errors):
+    with control_centre_browser(pytestconfig.rootpath) as (page, errors):
         eligible_row = grid_row_for_draw(page, BROWSER_PILOT_ELIGIBLE_DRAW)
         eligible_row.click()
         page.get_by_test_id(control_ui.EXECUTE_ACTION_TEST_ID).click()
@@ -596,8 +632,10 @@ def test_main_grid_and_researcher_card_use_compact_line_spacing(
         assert errors == [], Counter(errors)
 
 
-def test_selected_researcher_row_is_highlighted(repository_root: Path) -> None:
-    with control_centre_browser(repository_root) as (page, errors):
+def test_selected_researcher_row_is_highlighted(
+    pytestconfig: pytest.Config,
+) -> None:
+    with control_centre_browser(pytestconfig.rootpath) as (page, errors):
         selected_row = grid_row_for_draw(page, BROWSER_PILOT_ELIGIBLE_DRAW)
         unselected_row = grid_row_for_draw(page, BROWSER_PILOT_INELIGIBLE_DRAW)
         selected_row.click()
@@ -615,9 +653,9 @@ def test_selected_researcher_row_is_highlighted(repository_root: Path) -> None:
 
 
 def test_researcher_selection_and_attempt_history_are_idempotent(
-    repository_root: Path,
+    pytestconfig: pytest.Config,
 ) -> None:
-    with control_centre_browser(repository_root) as (page, errors):
+    with control_centre_browser(pytestconfig.rootpath) as (page, errors):
         first_row = grid_row_for_draw(page, BROWSER_PILOT_ELIGIBLE_DRAW)
         second_row = grid_row_for_draw(page, "1")
         history_panel = page.get_by_test_id(control_ui.ATTEMPT_HISTORY_PANEL_TEST_ID)
@@ -642,12 +680,14 @@ def test_researcher_selection_and_attempt_history_are_idempotent(
 
 
 def test_completed_researcher_metadata_is_available_in_visible_attempt_history(
-    repository_root: Path,
+    pytestconfig: pytest.Config,
 ) -> None:
-    with control_centre_browser(repository_root) as (page, errors):
+    with control_centre_browser(pytestconfig.rootpath) as (page, errors):
         page.set_viewport_size(E2E_NARROW_VIEWPORT)
         completed_namekey = browser_researchers()[BROWSER_LEADING_RESEARCHER_COUNT].namekey
-        page.get_by_label(Locale.SEARCH_FILTER).fill(completed_namekey)
+        page.get_by_label(Locale.SEARCH_FILTER).fill(
+            completed_namekey.to_json_key()
+        )
         grid = page.get_by_test_id(control_ui.RESEARCHER_GRID_TEST_ID)
         expect(grid.locator(GRID_ROW_SELECTOR)).to_have_count(1)
         completed_row = grid_row_for_draw(page, BROWSER_COMPLETED_DRAW)
@@ -664,7 +704,7 @@ def test_completed_researcher_metadata_is_available_in_visible_attempt_history(
         expect(history_rows).to_have_count(1)
         history_cells = history_rows.first.locator("td")
         expect(history_cells.nth(1)).to_have_text(
-            control_ui._ResearcherActivity.COMPLETE.value
+            RunLifecycle.COMPLETED.value
         )
         expect(history_cells.nth(2)).to_have_text("attempt-1")
         expect(history_cells.nth(3)).to_have_text(
@@ -683,8 +723,10 @@ def test_completed_researcher_metadata_is_available_in_visible_attempt_history(
         assert errors == [], Counter(errors)
 
 
-def test_displayed_researcher_card_downloads_as_docx(repository_root: Path) -> None:
-    with control_centre_browser(repository_root) as (page, errors):
+def test_displayed_researcher_card_downloads_as_docx(
+    pytestconfig: pytest.Config,
+) -> None:
+    with control_centre_browser(pytestconfig.rootpath) as (page, errors):
         download_button = page.get_by_test_id(control_ui.DOWNLOAD_CARD_TEST_ID)
         card_markdown = page.get_by_test_id(control_ui.CARD_MARKDOWN_TEST_ID)
         expect(download_button).to_be_disabled()
@@ -714,7 +756,8 @@ def test_displayed_researcher_card_downloads_as_docx(repository_root: Path) -> N
         assert errors == [], Counter(errors)
 
 
-def test_control_centre_browser_contract(repository_root: Path) -> None:
+def test_control_centre_browser_contract(pytestconfig: pytest.Config) -> None:
+    repository_root = pytestconfig.rootpath
     port = available_e2e_port()
     url = f"http://{E2E_HOST}:{port}"
     server_environment = os.environ.copy()
@@ -767,9 +810,9 @@ def test_control_centre_browser_contract(repository_root: Path) -> None:
             expect(backend_refresh).to_be_enabled()
 
             summary = page.get_by_test_id(control_ui.PAGE_SUMMARY_TEST_ID)
-            expect(summary).to_contain_text(f"Total {api.EXPECTED_SOURCE_RESEARCHERS}")
+            expect(summary).to_contain_text(f"Total {EXPECTED_SOURCE_RESEARCHERS}")
             expect(summary).to_contain_text(
-                f"ineligible {api.EXPECTED_INELIGIBLE_RESEARCHERS}"
+                f"ineligible {EXPECTED_INELIGIBLE_RESEARCHERS}"
             )
             grid = page.get_by_test_id(control_ui.RESEARCHER_GRID_TEST_ID)
             expect(grid.locator('[role="grid"]')).to_have_attribute(
@@ -888,7 +931,7 @@ def test_control_centre_browser_contract(repository_root: Path) -> None:
             expect(history_rows).to_have_count(1)
             expect(history_rows.nth(0)).to_contain_text("attempt-1")
             expect(history_rows.nth(0)).to_contain_text(
-                control_ui._ResearcherActivity.QUEUED.value
+                RunLifecycle.QUEUED.value
             )
 
             action_button.click()

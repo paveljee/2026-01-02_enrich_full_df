@@ -15,47 +15,60 @@ import pytest
 from fastapi import status
 from nicegui import app, ui
 
-from src.detours.detour_ai_augment.src.backend import api, ipc
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_config import (
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_augment_config import (  # noqa: E501
     AiAugmentDetourConfig,
 )
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.pydantic_to_paste import (
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.pydantic_to_paste import (  # noqa: E501
     EXPORT_OPENALEX_API_KEY,
 )
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.server_event import (
-    SOURCE_KEY_HEADER,
-    AcceptedInnerDictSummary,
-    AgentRuntimeAttempt,
-    AppendwatchReportEncoding,
-    AppendwatchReportRecord,
-    BackendCommitRecord,
-    CodexRolloutRecord,
-    CodexSessionRecord,
-    CommitRequestBody,
-    PostCommitValidation,
-    PostCommitValidationResult,
-    PostCommitValidationStage,
-    QueryResponse,
-    RunOutcomeResponse,
-    RunOutcomeResponseBody,
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.submission_init import (  # noqa: E501
+    Submission,
 )
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.source_population import (
-    SourceCohort as ResearcherCohort,
-)
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.source_population import (
-    SourcePopulationRow,
-)
-from src.detours.detour_ai_augment.src.backend.helpers.vars import (
+from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     AI_AUGMENT_COLUMNS,
+    DOCX_COLUMNS,
     KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL,
     KTP_AI_AUGMENT_FOOTNOTE_ARGUMENTS_COL,
     KTP_AI_AUGMENT_FOOTNOTES_COL,
     KTP_AI_AUGMENT_SESSION_METADATA_COL,
+    AiAugmentCohort,
+    AiAugmentIneligibilityCategory,
 )
-from src.detours.detour_ai_augment.src.control_centre.dashboard import ui as control_ui
-from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers import (
+from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helpers import (
     vars as control_vars,
 )
+from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helpers.locale import (
+    Locale,
+)
+from src.detours.detour_ai_augment.src.backend import api, ipc
+from src.detours.detour_ai_augment.src.backend.helpers.data_models import (
+    ai_augment_context as backend_context_models,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_outer_dict import (
+    AiAugmentOuterDict,
+    CommittedInnerDict,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.commit_event import (
+    SOURCE_KEY_HEADER,
+    AppendwatchReportEncoding,
+    AppendwatchReportRecord,
+    BackendCommitRecord,
+    BackendLifecycle,
+    CodexRolloutRecord,
+    CodexSessionRecord,
+    CommitRequestBody,
+    PostCommitValidation,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.query_response import (
+    AgentRuntimeAttempt,
+    AgentRuntimeAttemptRecord,
+    QueryResponse,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.run_outcome_response import (
+    RunOutcomeResponse,
+    RunOutcomeResponseBody,
+)
+from src.detours.detour_ai_augment.src.control_centre.dashboard import ui as control_ui
 from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models import (
     ai_augment_context as context_models,
 )
@@ -65,22 +78,38 @@ from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_mod
 from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models import (
     run_outcome as run_outcome_models,
 )
-from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.locale import Locale
 from src.helpers.data_models import HttpRequestLogRecord, InnerDict, NameKey
-from src.helpers.vars import KTP_NAMEKEY_COL
+from src.helpers.procedures import DocxMatchProcedure, XlsxMatchProcedure
+from src.helpers.vars import (
+    DRAW_LABEL,
+    KTP_FIRST_NAME_COL,
+    KTP_LAST_NAME_COL,
+    KTP_NAMEKEY_COL,
+)
 
 RunEvent = run_event_models.RunEvent
-RunEventKind = run_event_models.RunEventKind
-RunPhase = run_event_models.RunPhase
+RunLifecycle = run_outcome_models.RunLifecycle
 
-NAMEKEY = control_ui.Namekey('{"ktp.first_name": "Jane", "ktp.last_name": "Doe"}')
-SECOND_NAMEKEY = control_ui.Namekey('{"ktp.first_name": "John", "ktp.last_name": "Doe"}')
+NAMEKEY = NameKey(first_name="Jane", last_name="Doe")
+SECOND_NAMEKEY = NameKey(first_name="John", last_name="Doe")
 SESSION_ID = UUID("019fb000-0000-7000-8000-000000000001")
 SESSION_TIMESTAMP = datetime(2026, 8, 7, tzinfo=timezone.utc)
 ROLLOUT_PATH = PurePosixPath(
     "/home/ai/.codex/sessions/2026/08/07/"
     "rollout-2026-08-07T00-00-00-019fb000-0000-7000-8000-000000000001.jsonl"
 )
+
+
+def configured_pipeline_config() -> AiAugmentDetourConfig:
+    return AiAugmentDetourConfig.model_construct(  # type: ignore[call-arg]
+        total_draws=1,
+        timezone="UTC",
+        resources=SimpleNamespace(  # type: ignore[arg-type]
+            registered_resources=(
+                SimpleNamespace(verify_hash_on_init=True),
+            )
+        ),
+    )
 
 
 def http_record(
@@ -112,8 +141,8 @@ def http_record(
 
 def run_outcome_response(
     *,
-    namekey: control_ui.Namekey = NAMEKEY,
-    run_outcome: run_outcome_models.RunOutcome = run_outcome_models.RunOutcome.COMPLETED,
+    namekey: NameKey = NAMEKEY,
+    run_outcome: RunLifecycle = RunLifecycle.COMPLETED,
     response_code: int = status.HTTP_200_OK,
 ) -> RunOutcomeResponse:
     request = run_outcome_models.RunOutcomeRequest.from_http_request(
@@ -122,10 +151,10 @@ def run_outcome_response(
         scheme="http",
         host="invalid",
         port=None,
-        path=run_outcome.to_path(),
+        path=run_outcome.to_run_outcome_path(),
         query="",
         request_headers={
-            run_outcome_models.NAME_KEY_HEADER: api._name_key_header(str(namekey))
+            run_outcome_models.NAME_KEY_HEADER: api._name_key_header(namekey)
         },
         request_body=b"",
     )
@@ -173,10 +202,10 @@ def run_outcome_response(
 
 def agent_runtime_attempt(
     *,
-    result: PostCommitValidationResult = PostCommitValidationResult.ACCEPTED,
+    result: BackendLifecycle = BackendLifecycle.ACCEPTED,
     commit_record_id: UUID | None = None,
     session_id: UUID = SESSION_ID,
-) -> AgentRuntimeAttempt:
+) -> AgentRuntimeAttemptRecord:
     pull_record = http_record(
         method=api.HTTP_GET_METHOD,
         path=api.PULL_PATH,
@@ -226,22 +255,28 @@ def agent_runtime_attempt(
         response_body=None,
         received_at_unix_usec=None,
         duration_usec=None,
-        pull_record=pull_record,
-        push_record=push_record,
-        codex_session_record=codex_session_record,
+        commit_request_body=commit_body,
     )
-    return AgentRuntimeAttempt(
-        pull_record=pull_record,
-        commit_record=commit_record,
-        post_commit_validation=PostCommitValidation(
-            stage=(
-                PostCommitValidationStage.ACCEPTED
-                if result is PostCommitValidationResult.ACCEPTED
-                else PostCommitValidationStage.PYDANTIC_VALIDATION
+    return AgentRuntimeAttemptRecord(
+        attempt=AgentRuntimeAttempt(
+            pull_record=pull_record,
+            commit_record=commit_record,
+            post_commit_validation=PostCommitValidation(
+                stage=(
+                    BackendLifecycle.ACCEPTED
+                    if result is BackendLifecycle.ACCEPTED
+                    else BackendLifecycle.PYDANTIC_VALIDATION
+                ),
+                result=result,
+                detail=None if result is BackendLifecycle.ACCEPTED else "failed",
             ),
-            result=result,
-            detail=None if result is PostCommitValidationResult.ACCEPTED else "failed",
         ),
+        submission=(
+            Submission.model_validate(api.EVIDENCE_SUBMISSION_EXAMPLE)
+            if result is BackendLifecycle.ACCEPTED
+            else None
+        ),
+        ground_truth_innerdict=None,
     )
 
 
@@ -255,26 +290,60 @@ def anyio_backend() -> str:
     return "asyncio"
 
 
-def researcher(namekey: control_ui.Namekey = NAMEKEY) -> control_ui._Researcher:
-    return control_ui._Researcher(
+def researcher(
+    namekey: NameKey = NAMEKEY,
+    *,
+    cohort: AiAugmentCohort = AiAugmentCohort.NO_GROUND_TRUTH,
+    ineligibility_category: AiAugmentIneligibilityCategory | None = None,
+) -> AiAugmentOuterDict:
+    xlsx_innerdict = InnerDict.from_mapping(
+        {
+            KTP_NAMEKEY_COL: namekey.to_json_key(),
+            KTP_FIRST_NAME_COL: namekey.first_name,
+            KTP_LAST_NAME_COL: namekey.last_name,
+            DRAW_LABEL: "1",
+        },
+        XlsxMatchProcedure(),
+    )
+    docx_innerdicts: tuple[InnerDict, ...] = ()
+    if cohort is AiAugmentCohort.GROUND_TRUTH:
+        docx_innerdicts = (
+            InnerDict.from_mapping(
+                {
+                    KTP_NAMEKEY_COL: namekey.to_json_key(),
+                    KTP_FIRST_NAME_COL: namekey.first_name,
+                    KTP_LAST_NAME_COL: namekey.last_name,
+                    DRAW_LABEL: "1",
+                    **{column: "value" for column in DOCX_COLUMNS},
+                },
+                DocxMatchProcedure(),
+            ),
+        )
+    return AiAugmentOuterDict(
         namekey=namekey,
-        rnd=1,
-        draw_numbers=("1",),
-        first_name="Jane",
-        last_name="Doe",
-        cohort=ResearcherCohort.NO_GROUND_TRUTH,
+        xlsx_innerdicts=(xlsx_innerdict,),
+        ssn_innerdicts=(),
+        docx_innerdicts=docx_innerdicts,
+        ai_augment_rnd=1,
+        ai_augment_cohort=cohort,
+        ai_augment_ineligibility_category=ineligibility_category,
     )
 
 
-def cached_source_population_row() -> SourcePopulationRow:
-    return SourcePopulationRow(
-        namekey=NAMEKEY,
-        rnd=1,
-        first_name="Jane",
-        last_name="Doe",
-        draw_numbers=("1",),
-        cohort=ResearcherCohort.GROUND_TRUTH,
-        ineligibility_category=None,
+def cached_source_population_row() -> AiAugmentOuterDict:
+    return researcher(cohort=AiAugmentCohort.GROUND_TRUTH)
+
+
+def queued_run(
+    run_id: UUID | None = None,
+    *,
+    namekey: NameKey = NAMEKEY,
+) -> run_event_models.Run:
+    return run_event_models.Run(
+        run_id=run_id or uuid7(),
+        namekey=namekey,
+        lifecycle=RunLifecycle.QUEUED,
+        queued_at=SESSION_TIMESTAMP,
     )
 
 
@@ -299,12 +368,12 @@ class FakeSourceRepository:
     def __init__(self) -> None:
         self.researchers = (researcher(),)
 
-    def load_researchers(self) -> tuple[control_ui._Researcher, ...]:
+    def load_researchers(self) -> tuple[AiAugmentOuterDict, ...]:
         return self.researchers
 
     def load_ground_truth_by_namekey(
         self,
-    ) -> dict[control_ui.Namekey, control_ui._GroundTruthRecord]:
+    ) -> dict[str, InnerDict]:
         return {}
 
 
@@ -318,12 +387,12 @@ class FakeBackendDatabase:
         self.order = [] if order is None else order
         self.pull_calls = 0
         self.run_outcome_calls: list[
-            tuple[run_outcome_models.RunOutcome, control_ui.Namekey]
+            tuple[RunLifecycle, NameKey]
         ] = []
         self.ipc_available = available
         self.response = QueryResponse(
             attempts=(),
-            accepted_innerdict_summaries=(),
+            ai_augment_outerdicts=(),
         )
 
     def pull(self) -> QueryResponse:
@@ -336,10 +405,12 @@ class FakeBackendDatabase:
     def record_run_outcome(
         self,
         *,
-        run_outcome: run_outcome_models.RunOutcome,
-        namekey: control_ui.Namekey,
+        run_outcome: RunLifecycle,
+        namekey: NameKey,
     ) -> int:
-        self.order.append(f"run-outcome:{run_outcome.to_path()}")
+        self.order.append(
+            f"run-outcome:{run_outcome.to_run_outcome_path()}"
+        )
         self.run_outcome_calls.append((run_outcome, namekey))
         response = run_outcome_response(
             namekey=namekey,
@@ -362,7 +433,7 @@ class FakeBackend:
         full_api_available: bool = False,
     ) -> None:
         self.order = [] if order is None else order
-        self.started_namekeys: list[control_ui.Namekey] = []
+        self.started_namekeys: list[NameKey] = []
         self.supplied_session_ids: list[UUID] = []
         self.status = control_ui._BackendStatus.STOPPED
         self.api_available = full_api_available
@@ -370,7 +441,7 @@ class FakeBackend:
     def full_api_available(self) -> bool:
         return self.api_available
 
-    async def start(self, *, namekey: control_ui.Namekey) -> None:
+    async def start(self, *, namekey: NameKey) -> None:
         self.order.append("backend-start")
         self.started_namekeys.append(namekey)
         self.status = control_ui._BackendStatus.RUNNING
@@ -397,12 +468,12 @@ class FakeCodex:
     async def start(
         self,
         *,
-        run_id: UUID,
+        run: run_event_models.Run,
         on_handle: Any = None,
     ) -> SimpleNamespace:
         self.order.append("codex-start")
         handle = SimpleNamespace(
-            run_id=run_id,
+            run=run,
             remote_pid=None,
             process=SimpleNamespace(returncode=None),
         )
@@ -424,7 +495,7 @@ class FakeCodex:
         self.order.append("codex-cancel")
         cast(Any, handle).process.returncode = -15
 
-    async def terminate_abandoned_run(self, _run_id: UUID) -> None:
+    async def terminate_abandoned_run(self, _run: run_event_models.Run) -> None:
         return None
 
 
@@ -484,10 +555,26 @@ async def test_displayed_card_download_uses_exact_markdown_and_shared_filename(
     markdown = Markdown()
     reference_docx = tmp_path / "reference.docx"
     card = control_ui._ResearcherCardView(
-        namekey=NAMEKEY,
-        draw_number="1, pilot.2",
-        first_name="Jane",
-        last_name="Doe-Smith",
+        researcher=researcher(
+            NameKey(first_name="Jane", last_name="Doe-Smith")
+        ).model_copy(
+            update={
+                "xlsx_innerdicts": (
+                    InnerDict.from_mapping(
+                        {
+                            KTP_NAMEKEY_COL: NameKey(
+                                first_name="Jane",
+                                last_name="Doe-Smith",
+                            ).to_json_key(),
+                            KTP_FIRST_NAME_COL: "Jane",
+                            KTP_LAST_NAME_COL: "Doe-Smith",
+                            DRAW_LABEL: "1, pilot.2",
+                        },
+                        XlsxMatchProcedure(),
+                    ),
+                )
+            }
+        ),
         markdown="## Exact displayed card\n\nbody\n",
     )
     subject = control_ui._ControlCentrePage(
@@ -543,7 +630,10 @@ async def test_displayed_card_download_uses_exact_markdown_and_shared_filename(
     assert not button.enabled
 
 
-def test_dashboard_paths_resolve_from_repository_root(repository_root: Path) -> None:
+def test_dashboard_paths_resolve_from_repository_root(
+    pytestconfig: pytest.Config,
+) -> None:
+    repository_root = pytestconfig.rootpath
     assert control_vars.REPOSITORY_ROOT == repository_root
     assert control_vars.REPOSITORY_ROOT == repository_root
     assert control_vars.DEFAULT_CONFIG_PATH == repository_root / "config_ai_augment.json"
@@ -560,12 +650,15 @@ def test_dashboard_context_prepares_source_population_from_read_only_database(
         encoding="utf-8",
     )
     source_db_path = tmp_path / "source.duckdb"
-    pipeline_config = SimpleNamespace(
+    pipeline_config = AiAugmentDetourConfig.model_construct(  # type: ignore[call-arg]
         db_file=source_db_path,
         sample_seed=42,
         timezone="UTC",
+        resources=SimpleNamespace(  # type: ignore[arg-type]
+            release_map=Path("/release-map.csv")
+        ),
     )
-    source_population = cast(tuple[Any, ...], (object(),))
+    source_population = (researcher(),)
     connection = SimpleNamespace(close=lambda: None)
     calls: list[tuple[str, bool]] = []
 
@@ -587,28 +680,18 @@ def test_dashboard_context_prepares_source_population_from_read_only_database(
     monkeypatch.setenv(EXPORT_OPENALEX_API_KEY, "host-openalex-key")
     monkeypatch.setattr(context_models, "LIMA_CONFIG_PATH", lima_config_path)
     monkeypatch.setattr(
-        AiAugmentDetourConfig,
-        "from_json",
-        lambda _path: pipeline_config,
-    )
-    monkeypatch.setattr(context_models, "registered_release_map", lambda _config: {})
-    monkeypatch.setattr(
-        context_models,
-        "load_release_batches",
+        backend_context_models,
+        "_load_release_batches",
         lambda _release_map: "release-batches",
     )
-    monkeypatch.setattr(context_models, "derive_source_population", derive)
-    monkeypatch.setattr(
-        context_models,
-        "eligible_cohorts",
-        lambda population: {} if population is source_population else None,
-    )
+    monkeypatch.setattr(backend_context_models, "_derive_ai_augment_outerdicts", derive)
     monkeypatch.setattr(duckdb, "connect", connect)
 
-    context = context_models.AiAugmentCtlCtrContext(config_path=tmp_path / "config.json")
+    context = context_models.AiAugmentControlCentreContext.model_construct(
+        pipeline_config=pipeline_config
+    )
 
-    assert context.source_population is source_population
-    assert context.source_db_path == source_db_path
+    assert context.ai_augment_outerdicts is source_population
     assert calls == [(str(source_db_path), True)]
 
 
@@ -622,7 +705,7 @@ def test_dashboard_context_accepts_cached_population_without_opening_source_data
         '"/home/ai/.aivm-control/appendwatch/appendwatch-tree.txt"},"mounts":[]}',
         encoding="utf-8",
     )
-    pipeline_config = SimpleNamespace(
+    pipeline_config = AiAugmentDetourConfig.model_construct(  # type: ignore[call-arg]
         db_file=tmp_path / "source.duckdb",
         timezone="UTC",
     )
@@ -631,16 +714,6 @@ def test_dashboard_context_accepts_cached_population_without_opening_source_data
     monkeypatch.setenv(EXPORT_OPENALEX_API_KEY, "host-openalex-key")
     monkeypatch.setattr(context_models, "LIMA_CONFIG_PATH", lima_config_path)
     monkeypatch.setattr(
-        AiAugmentDetourConfig,
-        "from_json",
-        lambda _path: pipeline_config,
-    )
-    monkeypatch.setattr(
-        context_models,
-        "registered_release_map",
-        lambda _config: pytest.fail("release map should not be reloaded on a cache hit"),
-    )
-    monkeypatch.setattr(
         duckdb,
         "connect",
         lambda *_args, **_kwargs: pytest.fail(
@@ -648,12 +721,12 @@ def test_dashboard_context_accepts_cached_population_without_opening_source_data
         ),
     )
 
-    context = context_models.AiAugmentCtlCtrContext(
-        config_path=tmp_path / "config.json",
-        source_population=source_population,
+    context = context_models.AiAugmentControlCentreContext.model_construct(
+        pipeline_config=pipeline_config,
+        cached_ai_augment_outerdicts=source_population,
     )
 
-    assert context.source_population == source_population
+    assert context.ai_augment_outerdicts == source_population
 
 
 def test_cached_source_data_round_trips_and_rejects_a_stale_fingerprint(
@@ -662,39 +735,36 @@ def test_cached_source_data_round_trips_and_rejects_a_stale_fingerprint(
 ) -> None:
     fingerprint = source_input_fingerprint()
     source_population = (cached_source_population_row(),)
-    ground_truth = control_ui._GroundTruthRecord(
-        namekey=NAMEKEY,
-        values={"ktp.table_1_researcher_author": "Jane Doe"},
-    )
     control_ui.store_cached_source_data(
         fingerprint=fingerprint,
-        source_population=source_population,
-        ground_truth_by_namekey={NAMEKEY: ground_truth},
+        ai_augment_outerdicts=source_population,
     )
     monkeypatch.setattr(
         control_ui,
         "source_input_fingerprint",
-        lambda _path: fingerprint,
+        lambda _config: fingerprint,
     )
 
-    observed_fingerprint, cache = control_ui.load_cached_source_data(tmp_path / "config.json")
+    pipeline_config = AiAugmentDetourConfig.model_construct()  # type: ignore[call-arg]
+    observed_fingerprint, cached = control_ui.load_cached_source_data(pipeline_config)
 
     assert observed_fingerprint == fingerprint
-    assert cache is not None
-    assert cache.source_population == source_population
-    assert cache.ground_truth_by_namekey() == {NAMEKEY: ground_truth}
+    assert cached is not None
+    assert tuple(value.serialize() for value in cached) == tuple(
+        value.serialize() for value in source_population
+    )
 
     stale_fingerprint = source_input_fingerprint(mtime_ns=99)
     monkeypatch.setattr(
         control_ui,
         "source_input_fingerprint",
-        lambda _path: stale_fingerprint,
+        lambda _config: stale_fingerprint,
     )
 
-    observed_fingerprint, cache = control_ui.load_cached_source_data(tmp_path / "config.json")
+    observed_fingerprint, cached = control_ui.load_cached_source_data(pipeline_config)
 
     assert observed_fingerprint == stale_fingerprint
-    assert cache is None
+    assert cached is None
 
 
 def test_source_input_fingerprint_stats_database_without_reading_it(
@@ -703,16 +773,12 @@ def test_source_input_fingerprint_stats_database_without_reading_it(
 ) -> None:
     source_database = tmp_path / "source.duckdb"
     source_database.write_bytes(b"source")
-    pipeline_config = SimpleNamespace(db_file=source_database, sample_seed=42)
-    monkeypatch.setattr(
-        AiAugmentDetourConfig,
-        "from_json",
-        lambda _path: pipeline_config,
-    )
-    monkeypatch.setattr(
-        control_ui,
-        "registered_release_map",
-        lambda _config: SimpleNamespace(hash="a" * 64),
+    pipeline_config = AiAugmentDetourConfig.model_construct(  # type: ignore[call-arg]
+        db_file=source_database,
+        sample_seed=42,
+        resources=SimpleNamespace(  # type: ignore[arg-type]
+            release_map=SimpleNamespace(hash="a" * 64),
+        ),
     )
     monkeypatch.setattr(
         Path,
@@ -722,7 +788,7 @@ def test_source_input_fingerprint_stats_database_without_reading_it(
         ),
     )
 
-    fingerprint = control_ui.source_input_fingerprint(tmp_path / "config.json")
+    fingerprint = control_ui.source_input_fingerprint(pipeline_config)
 
     source_database_stat = source_database.stat()
     assert fingerprint.source_database_path == str(source_database.resolve())
@@ -736,26 +802,19 @@ def test_source_repository_uses_cached_ground_truth_without_opening_database(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source_population = (cached_source_population_row(),)
-    ground_truth = control_ui._GroundTruthRecord(namekey=NAMEKEY, values={})
-    configuration = cast(
-        context_models.AiAugmentCtlCtrContext,
-        SimpleNamespace(
-            source_population=source_population,
-            source_db_path=Path("/source.duckdb"),
-            eligible_cohorts={NAMEKEY: ResearcherCohort.GROUND_TRUTH},
-        ),
+    ground_truth = source_population[0].ground_truth_innerdict()
+    assert ground_truth is not None
+    configuration = context_models.AiAugmentControlCentreContext.model_construct(
+        pipeline_config=AiAugmentDetourConfig.model_construct(),  # type: ignore[call-arg]
+        cached_ai_augment_outerdicts=source_population,
     )
     subject = control_ui._SourceRepository(
         configuration=configuration,
-        ground_truth_by_namekey={NAMEKEY: ground_truth},
-    )
-    monkeypatch.setattr(
-        subject,
-        "connect",
-        lambda: pytest.fail("cached ground truth should not open the source database"),
     )
 
-    assert subject.load_ground_truth_by_namekey() == {NAMEKEY: ground_truth}
+    assert subject.load_ground_truth_by_namekey() == {
+        NAMEKEY.to_json_key(): ground_truth
+    }
     assert subject.load_ground_truth(NAMEKEY) == ground_truth
 
 
@@ -764,20 +823,22 @@ async def test_dashboard_start_prepares_population_and_ground_truth_before_worke
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    source = researcher()
-    ground_truth = control_ui._GroundTruthRecord(namekey=source.namekey, values={})
+    source = researcher(cohort=AiAugmentCohort.GROUND_TRUTH)
+    ground_truth = source.ground_truth_innerdict()
+    assert ground_truth is not None
+    required_ground_truth = ground_truth
     order: list[str] = []
 
     class ObservedSourceRepository(FakeSourceRepository):
-        def load_researchers(self) -> tuple[control_ui._Researcher, ...]:
+        def load_researchers(self) -> tuple[AiAugmentOuterDict, ...]:
             order.append("source-population")
             return (source,)
 
         def load_ground_truth_by_namekey(
             self,
-        ) -> dict[control_ui.Namekey, control_ui._GroundTruthRecord]:
+        ) -> dict[str, InnerDict]:
             order.append("linked-ground-truth")
-            return {source.namekey: ground_truth}
+            return {source.namekey.to_json_key(): required_ground_truth}
 
     subject = control_ui._ControlCentreController(
         source_repository=cast(control_ui._SourceRepository, ObservedSourceRepository()),
@@ -803,7 +864,7 @@ async def test_dashboard_start_prepares_population_and_ground_truth_before_worke
 
     assert order[:3] == ["source-population", "linked-ground-truth", "worker"]
     assert subject._researchers == (source,)
-    assert subject._ground_truth == {source.namekey: ground_truth}
+    assert subject._ground_truth == {source.namekey.to_json_key(): ground_truth}
     startup_log = capsys.readouterr().out
     logged_stages = [
         "preparing source population",
@@ -828,11 +889,6 @@ async def test_application_startup_publishes_cached_services_only_after_ready(
 ) -> None:
     fingerprint = source_input_fingerprint()
     source_population = (cached_source_population_row(),)
-    source_data_cache = control_ui._CachedSourceData(
-        fingerprint=fingerprint,
-        source_population=source_population,
-        ground_truth_values={NAMEKEY: {}},
-    )
     order: list[str] = []
 
     class FakeController:
@@ -848,28 +904,24 @@ async def test_application_startup_publishes_cached_services_only_after_ready(
         SimpleNamespace(
             controller=FakeController(),
             source_repository=SimpleNamespace(
-                source_population=source_population,
-                ground_truth_by_namekey=source_data_cache.ground_truth_by_namekey(),
+                ai_augment_outerdicts=source_population,
             ),
         ),
     )
     monkeypatch.setattr(control_ui, "SERVICES", None)
     monkeypatch.setattr(control_ui, "APPLICATION_CONFIG_PATH", tmp_path / "config.json")
-    monkeypatch.setattr(
-        control_ui,
-        "load_cached_source_data",
-        lambda _path: (fingerprint, source_data_cache),
-    )
 
     def create_services(
         *,
         config_path: Path,
-        source_data_cache: control_ui._CachedSourceData | None,
-    ) -> control_ui._ApplicationServices:
+    ) -> tuple[
+        control_ui._ApplicationServices,
+        control_ui._SourceInputFingerprint,
+        tuple[AiAugmentOuterDict, ...],
+    ]:
         assert config_path == tmp_path / "config.json"
-        assert source_data_cache is not None
         order.append("services-created")
-        return services
+        return services, fingerprint, source_population
 
     monkeypatch.setattr(control_ui, "create_services", create_services)
     monkeypatch.setattr(
@@ -896,7 +948,6 @@ async def test_application_startup_updates_source_cache_before_publishing_servic
 ) -> None:
     fingerprint = source_input_fingerprint()
     source_population = (cached_source_population_row(),)
-    ground_truth = {NAMEKEY: control_ui._GroundTruthRecord(namekey=NAMEKEY, values={})}
     order: list[str] = []
 
     class FakeController:
@@ -912,8 +963,7 @@ async def test_application_startup_updates_source_cache_before_publishing_servic
         SimpleNamespace(
             controller=FakeController(),
             source_repository=SimpleNamespace(
-                source_population=source_population,
-                ground_truth_by_namekey=ground_truth,
+                ai_augment_outerdicts=source_population,
             ),
         ),
     )
@@ -921,17 +971,15 @@ async def test_application_startup_updates_source_cache_before_publishing_servic
     monkeypatch.setattr(control_ui, "APPLICATION_CONFIG_PATH", tmp_path / "config.json")
     monkeypatch.setattr(
         control_ui,
-        "load_cached_source_data",
-        lambda _path: (fingerprint, None),
+        "create_services",
+        lambda **_kwargs: (services, fingerprint, None),
     )
-    monkeypatch.setattr(control_ui, "create_services", lambda **_kwargs: services)
 
     def store_cache(**kwargs: object) -> None:
         assert control_ui.SERVICES is None
         assert kwargs == {
             "fingerprint": fingerprint,
-            "source_population": source_population,
-            "ground_truth_by_namekey": ground_truth,
+            "ai_augment_outerdicts": source_population,
         }
         order.append("cache-updated")
 
@@ -1056,7 +1104,7 @@ async def test_page_shows_backend_and_ipc_separately_and_gates_refresh() -> None
                     running=0,
                     complete=0,
                     failed=0,
-                    canceled=0,
+                    cancelled=0,
                 ),
                 rows=(),
                 backend_status=(
@@ -1113,7 +1161,7 @@ async def test_dashboard_refresh_explicitly_hydrates_attempts_from_ipc(
     attempt = agent_runtime_attempt()
     backend_database.response = QueryResponse(
         attempts=(attempt,),
-        accepted_innerdict_summaries=(),
+        ai_augment_outerdicts=(),
     )
     subject = controller(backend_database=backend_database)
 
@@ -1129,7 +1177,7 @@ async def test_dashboard_refresh_explicitly_hydrates_attempts_from_ipc(
         await subject.refresh_from_ipc()
 
         assert backend_database.pull_calls == 1
-        assert subject._attempt_records == {NAMEKEY: (attempt,)}
+        assert subject._attempt_records == {NAMEKEY.to_json_key(): (attempt,)}
         assert app.storage.general[control_ui.BACKEND_DATABASE_STORAGE_KEY] == (
             backend_database.response.model_dump(mode="json")
         )
@@ -1184,7 +1232,7 @@ async def test_dashboard_start_restores_refreshed_backend_data_without_querying(
     attempt = agent_runtime_attempt()
     app.storage.general[control_ui.BACKEND_DATABASE_STORAGE_KEY] = QueryResponse(
         attempts=(attempt,),
-        accepted_innerdict_summaries=(),
+        ai_augment_outerdicts=(),
     ).model_dump(mode="json")
     backend_database = FakeBackendDatabase()
     subject = controller(backend_database=backend_database)
@@ -1192,7 +1240,7 @@ async def test_dashboard_start_restores_refreshed_backend_data_without_querying(
     await subject.start()
     try:
         assert backend_database.pull_calls == 0
-        assert subject._attempt_records == {NAMEKEY: (attempt,)}
+        assert subject._attempt_records == {NAMEKEY.to_json_key(): (attempt,)}
     finally:
         await subject.shutdown()
 
@@ -1206,17 +1254,17 @@ async def test_failed_run_events_are_logged(
     await subject._append_run_event(
         RunEvent(
             run_id=run_id,
-            namekey=control_ui.namekey_model(NAMEKEY),
+            namekey=NAMEKEY,
             occurred_at_unix_usec=control_ui.datetime_to_unix_usec(SESSION_TIMESTAMP),
-            kind=RunEventKind.QUEUED,
+            lifecycle=RunLifecycle.QUEUED,
         )
     )
     capsys.readouterr()
     event = RunEvent(
         run_id=run_id,
-        namekey=control_ui.namekey_model(NAMEKEY),
+        namekey=NAMEKEY,
         occurred_at_unix_usec=control_ui.datetime_to_unix_usec(SESSION_TIMESTAMP),
-        kind=RunEventKind.FAILED,
+        lifecycle=RunLifecycle.FAILED,
         detail=Locale.BACKEND_EXITED_EARLY,
     )
 
@@ -1224,7 +1272,7 @@ async def test_failed_run_events_are_logged(
 
     assert capsys.readouterr().out == (
         f"{Locale.CONTROL_CENTRE_LOG_PREFIX} run failed: "
-        f"run_id={event.run_id} namekey={control_ui.namekey_model(NAMEKEY)} "
+        f"run_id={event.run_id} namekey={NAMEKEY} "
         f"detail={Locale.BACKEND_EXITED_EARLY}\n"
     )
 
@@ -1237,8 +1285,7 @@ def test_backend_database_client_queries_unix_socket_without_authentication(
     response_body = (
         QueryResponse(
             attempts=(),
-            accepted_innerdict_summaries=(),
-            card_markdown=None,
+            ai_augment_outerdicts=(),
         )
         .model_dump_json()
         .encode()
@@ -1269,15 +1316,17 @@ def test_backend_database_client_queries_unix_socket_without_authentication(
 
     monkeypatch.setattr(control_ui, "_UnixSocketHttpConnection", FakeConnection)
     socket_path = tmp_path / "dashboard.sock"
-    client = control_ui._BackendDatabaseClient(socket_path=socket_path)
+    client = control_ui._BackendDatabaseClient(
+        socket_path=socket_path,
+        pipeline_config=configured_pipeline_config(),
+    )
 
     assert client.available() is True
     response = client.pull()
 
     assert response == QueryResponse(
         attempts=(),
-        accepted_innerdict_summaries=(),
-        card_markdown=None,
+        ai_augment_outerdicts=(),
     )
     assert calls == [
         (
@@ -1309,7 +1358,7 @@ def test_backend_database_client_posts_exact_run_outcome_request(
     expected_saved: bool,
 ) -> None:
     calls: list[tuple[str, str, dict[str, str]]] = []
-    namekey = control_ui.Namekey(NameKey(first_name="Jane", last_name="Doe").to_json_key())
+    namekey = NameKey(first_name="Jane", last_name="Doe")
     session_id = UUID(str(SESSION_ID))
     rollout_filename = f"{api.ROLLOUT_FILENAME_PREFIX}{session_id}.jsonl"
     report = f".\n└── {api.APPENDWATCH_OK_PREFIX}{rollout_filename}\n".encode()
@@ -1369,10 +1418,13 @@ def test_backend_database_client_posts_exact_run_outcome_request(
             return None
 
     monkeypatch.setattr(control_ui, "_UnixSocketHttpConnection", FakeConnection)
-    client = control_ui._BackendDatabaseClient(socket_path=tmp_path / "dashboard.sock")
+    client = control_ui._BackendDatabaseClient(
+        socket_path=tmp_path / "dashboard.sock",
+        pipeline_config=configured_pipeline_config(),
+    )
 
     response_code = client.record_run_outcome(
-        run_outcome=run_outcome_models.RunOutcome.COMPLETED,
+        run_outcome=RunLifecycle.COMPLETED,
         namekey=namekey,
     )
 
@@ -1381,9 +1433,7 @@ def test_backend_database_client_posts_exact_run_outcome_request(
             api.HTTP_POST_METHOD,
             run_outcome_models.COMPLETED_PATH,
             {
-                run_outcome_models.NAME_KEY_HEADER: api._name_key_header(
-                    str(namekey)
-                )
+                run_outcome_models.NAME_KEY_HEADER: api._name_key_header(namekey)
             },
         )
     ]
@@ -1393,25 +1443,28 @@ def test_backend_database_client_posts_exact_run_outcome_request(
 def test_run_outcome_snapshot_decodes_appendwatch_for_display_only() -> None:
     response = run_outcome_response(
         namekey=NAMEKEY,
-        run_outcome=run_outcome_models.RunOutcome.COMPLETED,
+        run_outcome=RunLifecycle.COMPLETED,
     )
     attempt = control_ui._AttemptView(
-        row_id=response.record_id,
-        run_id=None,
-        namekey=NAMEKEY,
-        activity=control_ui._ResearcherActivity.COMPLETE,
-        commit_record_id=None,
-        session_id=SESSION_ID,
-        timestamp=None,
-        ended_at=None,
+        attempt_record=None,
+        run=run_event_models.Run(
+            run_id=uuid7(),
+            namekey=NAMEKEY,
+            lifecycle=RunLifecycle.COMPLETED,
+            run_outcome=RunLifecycle.COMPLETED,
+            queued_at=SESSION_TIMESTAMP,
+            session_id=SESSION_ID,
+        ),
         accepted=None,
         run_outcome_response=response,
-        failure_detail=None,
     )
 
     assert attempt.run_outcome_response is response
     assert attempt.run_outcome_saved is True
-    assert attempt.run_outcome_session_id == SESSION_ID
+    assert (
+        response.run_outcome_response_body.codex_session_record.session_id
+        == SESSION_ID
+    )
     assert attempt.run_outcome_session_status == Locale.SESSION_STATUS_OK
 
 
@@ -1423,8 +1476,8 @@ async def test_run_outcome_snapshot_500_is_kept_separate_from_run_outcome(
         def record_run_outcome(
             self,
             *,
-            run_outcome: run_outcome_models.RunOutcome,
-            namekey: control_ui.Namekey,
+            run_outcome: RunLifecycle,
+            namekey: NameKey,
         ) -> int:
             self.run_outcome_calls.append((run_outcome, namekey))
             response = run_outcome_response(
@@ -1450,47 +1503,47 @@ async def test_run_outcome_snapshot_500_is_kept_separate_from_run_outcome(
     await subject._append_run_event(
         RunEvent(
             run_id=run_id,
-            namekey=control_ui.namekey_model(NAMEKEY),
+            namekey=NAMEKEY,
             occurred_at_unix_usec=control_ui.datetime_to_unix_usec(SESSION_TIMESTAMP),
-            kind=RunEventKind.QUEUED,
+            lifecycle=RunLifecycle.QUEUED,
         )
     )
 
     await subject._record_run_outcome(
-        run_id=run_id,
-        run_outcome=run_outcome_models.RunOutcome.FAILED,
+        run=subject._runs[run_id],
+        run_outcome=RunLifecycle.FAILED,
     )
 
-    assert subject._runs[run_id].phase is RunPhase.QUEUED
+    assert subject._runs[run_id].lifecycle is RunLifecycle.QUEUED
     assert backend_database.run_outcome_calls == [
-        (run_outcome_models.RunOutcome.FAILED, NAMEKEY)
+        (RunLifecycle.FAILED, NAMEKEY)
     ]
-    response = subject._run_outcome_responses[NAMEKEY][-1]
-    assert response.run_outcome is run_outcome_models.RunOutcome.FAILED
+    response = subject._run_outcome_responses[NAMEKEY.to_json_key()][-1]
+    assert response.run_outcome is RunLifecycle.FAILED
     assert response.response_code == status.HTTP_500_INTERNAL_SERVER_ERROR
     await subject._append_run_event(
         RunEvent(
             run_id=run_id,
-            namekey=control_ui.namekey_model(NAMEKEY),
+            namekey=NAMEKEY,
             occurred_at_unix_usec=control_ui.datetime_to_unix_usec(SESSION_TIMESTAMP),
-            kind=RunEventKind.FAILED,
+            lifecycle=RunLifecycle.FAILED,
         )
     )
     reconciled = control_ui._AttemptReconciler().reconcile(
         researcher=researcher(),
         runs=tuple(subject._runs.values()),
         attempt_records=(),
-        accepted_innerdict_summaries=(),
-        run_outcome_responses=subject._run_outcome_responses[NAMEKEY],
+        committed_innerdicts=(),
+        run_outcome_responses=subject._run_outcome_responses[NAMEKEY.to_json_key()],
     )
     assert reconciled.latest_attempt is not None
-    assert reconciled.latest_attempt.activity is control_ui._ResearcherActivity.FAILED
+    assert reconciled.latest_attempt.lifecycle is RunLifecycle.FAILED
     assert reconciled.latest_attempt.run_outcome_response is response
     assert reconciled.latest_attempt.run_outcome_saved is False
     assert subject.drain_notifications() == (
         Locale.RUN_OUTCOME_SNAPSHOT_PARTIAL_TEMPLATE.format(
             run_id=run_id,
-            outcome=run_outcome_models.RunOutcome.FAILED.value,
+            outcome=RunLifecycle.FAILED.value,
         ),
     )
 
@@ -1521,6 +1574,7 @@ def test_backend_api_availability_uses_short_fail_fast_timeout(
         openalex_api_key="key",
         appendwatch_report=PurePosixPath("/mounted/appendwatch.txt"),
         dashboard_socket_path=tmp_path / "dashboard.sock",
+        pipeline_config=configured_pipeline_config(),
     )
 
     assert subject.full_api_available() is True
@@ -1532,22 +1586,22 @@ def test_run_event_replay_keeps_dashboard_queue_ownership() -> None:
     run_id = uuid7()
     queued = RunEvent(
         run_id=run_id,
-        namekey=control_ui.namekey_model(NAMEKEY),
+        namekey=NAMEKEY,
         occurred_at_unix_usec=control_ui.datetime_to_unix_usec(SESSION_TIMESTAMP),
-        kind=RunEventKind.QUEUED,
+        lifecycle=RunLifecycle.QUEUED,
     )
     started = RunEvent(
         run_id=run_id,
-        namekey=control_ui.namekey_model(NAMEKEY),
+        namekey=NAMEKEY,
         occurred_at_unix_usec=control_ui.datetime_to_unix_usec(SESSION_TIMESTAMP),
-        kind=RunEventKind.STARTED,
+        lifecycle=RunLifecycle.STARTED,
     )
 
     run = control_ui.replay_run_events((queued, started))[run_id]
 
     assert run.dashboard_owned is True
-    assert run.phase is RunPhase.RUNNING
-    assert run.outcome is None
+    assert run.is_running()
+    assert run.run_outcome is None
     assert run.events == (queued, started)
     assert run.started_at == SESSION_TIMESTAMP
 
@@ -1557,14 +1611,16 @@ async def test_queue_is_persisted_only_in_nicegui_general_storage() -> None:
     backend_database = FakeBackendDatabase()
     subject = controller(backend_database=backend_database)
     source = researcher()
-    subject._researchers_by_namekey = {source.namekey: source}
+    subject._researchers_by_namekey = {source.namekey.to_json_key(): source}
 
     run_id = await subject.queue(namekey=source.namekey)
 
     assert run_id.version == 7
     assert app.storage.general[control_ui.QUEUE_STORAGE_KEY] == [str(run_id)]
     stored_events = app.storage.general[control_ui.RUN_EVENTS_STORAGE_KEY]
-    assert [event["kind"] for event in stored_events] == [RunEventKind.QUEUED.value]
+    assert [event["lifecycle"] for event in stored_events] == [
+        RunLifecycle.QUEUED.value
+    ]
     assert backend_database.pull_calls == 0
 
 
@@ -1574,14 +1630,14 @@ async def test_queued_cancellation_removes_persisted_queue_without_starting_proc
     codex = FakeCodex()
     subject = controller(backend=backend, codex=codex)
     source = researcher()
-    subject._researchers_by_namekey = {source.namekey: source}
+    subject._researchers_by_namekey = {source.namekey.to_json_key(): source}
     run_id = await subject.queue(namekey=source.namekey)
 
     await subject.cancel(run_id=run_id)
 
     assert app.storage.general[control_ui.QUEUE_STORAGE_KEY] == []
-    assert subject._runs[run_id].phase is RunPhase.FINISHED
-    assert subject._runs[run_id].outcome is run_outcome_models.RunOutcome.CANCELLED
+    assert subject._runs[run_id].is_finished()
+    assert subject._runs[run_id].run_outcome is RunLifecycle.CANCELLED
     assert backend.started_namekeys == []
     assert codex.order == []
 
@@ -1590,9 +1646,9 @@ def test_dashboard_queue_and_journal_survive_controller_reconstruction() -> None
     run_id = uuid7()
     event = RunEvent(
         run_id=run_id,
-        namekey=control_ui.namekey_model(NAMEKEY),
+        namekey=NAMEKEY,
         occurred_at_unix_usec=control_ui.datetime_to_unix_usec(SESSION_TIMESTAMP),
-        kind=RunEventKind.QUEUED,
+        lifecycle=RunLifecycle.QUEUED,
     )
     app.storage.general[control_ui.RUN_EVENTS_STORAGE_KEY] = [event.model_dump(mode="json")]
     app.storage.general[control_ui.QUEUE_STORAGE_KEY] = [str(run_id)]
@@ -1600,8 +1656,8 @@ def test_dashboard_queue_and_journal_survive_controller_reconstruction() -> None
 
     subject._load_dashboard_storage()
 
-    assert subject._runs[run_id].phase is RunPhase.QUEUED
-    assert subject._runs[run_id].outcome is None
+    assert subject._runs[run_id].lifecycle is RunLifecycle.QUEUED
+    assert subject._runs[run_id].run_outcome is None
     assert app.storage.general[control_ui.QUEUE_STORAGE_KEY] == [str(run_id)]
 
 
@@ -1623,24 +1679,25 @@ async def test_execution_starts_fresh_backend_before_codex_and_hands_off_session
     await subject._append_run_event(
         RunEvent(
             run_id=run_id,
-            namekey=control_ui.namekey_model(NAMEKEY),
+            namekey=NAMEKEY,
             occurred_at_unix_usec=control_ui.datetime_to_unix_usec(SESSION_TIMESTAMP),
-            kind=RunEventKind.QUEUED,
+            lifecycle=RunLifecycle.QUEUED,
         )
     )
-    subject._active_run_id = run_id
+    run = subject._runs[run_id]
+    subject._active_run = run
 
     async def complete_run(
         _subject: control_ui._ControlCentreController,
         *,
-        run_id: UUID,
-    ) -> run_outcome_models.RunOutcome:
-        assert run_id
-        return run_outcome_models.RunOutcome.COMPLETED
+        run: run_event_models.Run,
+    ) -> RunLifecycle:
+        assert run.run_id == run_id
+        return RunLifecycle.COMPLETED
 
     monkeypatch.setattr(control_ui._ControlCentreController, "_finalize_run", complete_run)
 
-    await subject._execute_run(run_id=run_id)
+    await subject._execute_run(run=run)
 
     assert order == [
         "backend-start",
@@ -1650,18 +1707,20 @@ async def test_execution_starts_fresh_backend_before_codex_and_hands_off_session
         f"run-outcome:{run_outcome_models.COMPLETED_PATH}",
     ]
     assert backend_database.run_outcome_calls == [
-        (run_outcome_models.RunOutcome.COMPLETED, NAMEKEY)
+        (RunLifecycle.COMPLETED, NAMEKEY)
     ]
     assert backend.started_namekeys == [NAMEKEY]
     assert backend.supplied_session_ids == [SESSION_ID]
-    assert [event.kind for event in subject._events].count(RunEventKind.SESSION_DISCOVERED) == 1
-    assert [event.kind for event in subject._events][-2:] == [
-        RunEventKind.CODEX_EXITED,
-        RunEventKind.COMPLETED,
+    assert [event.lifecycle for event in subject._events].count(
+        RunLifecycle.SESSION_DISCOVERED
+    ) == 1
+    assert [event.lifecycle for event in subject._events][-2:] == [
+        RunLifecycle.CODEX_EXITED,
+        RunLifecycle.COMPLETED,
     ]
     assert subject._runs[run_id].codex_exit_code == 0
-    assert subject._runs[run_id].phase is RunPhase.FINISHED
-    assert subject._runs[run_id].outcome is run_outcome_models.RunOutcome.COMPLETED
+    assert subject._runs[run_id].is_finished()
+    assert subject._runs[run_id].run_outcome is RunLifecycle.COMPLETED
 
 
 @pytest.mark.anyio
@@ -1680,26 +1739,28 @@ async def test_worker_stops_backend_before_starting_next_queued_run(
     first = researcher()
     second = researcher(SECOND_NAMEKEY)
     subject._researchers_by_namekey = {
-        first.namekey: first,
-        second.namekey: second,
+        first.namekey.to_json_key(): first,
+        second.namekey.to_json_key(): second,
     }
 
     async def complete_run(
         _subject: control_ui._ControlCentreController,
         *,
-        run_id: UUID,
-    ) -> run_outcome_models.RunOutcome:
-        assert run_id in subject._runs
-        return run_outcome_models.RunOutcome.COMPLETED
+        run: run_event_models.Run,
+    ) -> RunLifecycle:
+        assert run.run_id in subject._runs
+        return RunLifecycle.COMPLETED
 
     monkeypatch.setattr(control_ui._ControlCentreController, "_finalize_run", complete_run)
     first_run_id = await subject.queue(namekey=first.namekey)
     second_run_id = await subject.queue(namekey=second.namekey)
 
-    assert await subject._queue.get() == first_run_id
-    await subject._process_queued_run(first_run_id)
-    assert await subject._queue.get() == second_run_id
-    await subject._process_queued_run(second_run_id)
+    first_run = await subject._queue.get()
+    assert first_run.run_id == first_run_id
+    await subject._process_queued_run(first_run)
+    second_run = await subject._queue.get()
+    assert second_run.run_id == second_run_id
+    await subject._process_queued_run(second_run)
 
     assert backend.started_namekeys == [first.namekey, second.namekey]
     assert order == [
@@ -1723,7 +1784,7 @@ async def test_backend_start_failure_still_winds_down_owned_processes() -> None:
     order: list[str] = []
 
     class FailingBackend(FakeBackend):
-        async def start(self, *, namekey: control_ui.Namekey) -> None:
+        async def start(self, *, namekey: NameKey) -> None:
             self.order.append("backend-start")
             self.started_namekeys.append(namekey)
             raise RuntimeError("backend start failed")
@@ -1731,14 +1792,15 @@ async def test_backend_start_failure_still_winds_down_owned_processes() -> None:
     backend = FailingBackend(order)
     subject = controller(backend=backend, codex=FakeCodex(order))
     source = researcher()
-    subject._researchers_by_namekey = {source.namekey: source}
+    subject._researchers_by_namekey = {source.namekey.to_json_key(): source}
     run_id = await subject.queue(namekey=source.namekey)
 
-    assert await subject._queue.get() == run_id
-    await subject._process_queued_run(run_id)
+    run = await subject._queue.get()
+    assert run.run_id == run_id
+    await subject._process_queued_run(run)
 
-    assert subject._runs[run_id].phase is RunPhase.FINISHED
-    assert subject._runs[run_id].outcome is run_outcome_models.RunOutcome.FAILED
+    assert subject._runs[run_id].is_finished()
+    assert subject._runs[run_id].run_outcome is RunLifecycle.FAILED
     assert order == ["backend-start", "backend-stop"]
 
 
@@ -1752,12 +1814,12 @@ async def test_codex_start_failure_stops_registered_codex_then_backend(
         async def start(
             self,
             *,
-            run_id: UUID,
+            run: run_event_models.Run,
             on_handle: Any = None,
         ) -> SimpleNamespace:
             self.order.append("codex-start")
             handle = SimpleNamespace(
-                run_id=run_id,
+                run=run,
                 remote_pid=None,
                 process=SimpleNamespace(returncode=None),
             )
@@ -1772,14 +1834,15 @@ async def test_codex_start_failure_stops_registered_codex_then_backend(
         codex=FailingCodex(order),
     )
     source = researcher()
-    subject._researchers_by_namekey = {source.namekey: source}
+    subject._researchers_by_namekey = {source.namekey.to_json_key(): source}
     run_id = await subject.queue(namekey=source.namekey)
 
-    assert await subject._queue.get() == run_id
-    await subject._process_queued_run(run_id)
+    run = await subject._queue.get()
+    assert run.run_id == run_id
+    await subject._process_queued_run(run)
 
-    assert subject._runs[run_id].phase is RunPhase.FINISHED
-    assert subject._runs[run_id].outcome is run_outcome_models.RunOutcome.FAILED
+    assert subject._runs[run_id].is_finished()
+    assert subject._runs[run_id].run_outcome is RunLifecycle.FAILED
     assert order == [
         "backend-start",
         "codex-start",
@@ -1802,28 +1865,29 @@ async def test_failed_finalization_stops_backend_after_run_outcome_event(
         codex=FakeCodex(order),
     )
     source = researcher()
-    subject._researchers_by_namekey = {source.namekey: source}
+    subject._researchers_by_namekey = {source.namekey.to_json_key(): source}
 
     async def fail_run(
         _subject: control_ui._ControlCentreController,
         *,
-        run_id: UUID,
-    ) -> run_outcome_models.RunOutcome:
-        assert run_id in subject._runs
+        run: run_event_models.Run,
+    ) -> RunLifecycle:
+        assert run.run_id in subject._runs
         assert backend.status is control_ui._BackendStatus.RUNNING
-        return run_outcome_models.RunOutcome.FAILED
+        return RunLifecycle.FAILED
 
     monkeypatch.setattr(control_ui._ControlCentreController, "_finalize_run", fail_run)
     run_id = await subject.queue(namekey=source.namekey)
 
-    assert await subject._queue.get() == run_id
-    await subject._process_queued_run(run_id)
+    run = await subject._queue.get()
+    assert run.run_id == run_id
+    await subject._process_queued_run(run)
 
-    assert subject._runs[run_id].phase is RunPhase.FINISHED
-    assert subject._runs[run_id].outcome is run_outcome_models.RunOutcome.FAILED
-    assert [event.kind for event in subject._events][-2:] == [
-        RunEventKind.CODEX_EXITED,
-        RunEventKind.FAILED,
+    assert subject._runs[run_id].is_finished()
+    assert subject._runs[run_id].run_outcome is RunLifecycle.FAILED
+    assert [event.lifecycle for event in subject._events][-2:] == [
+        RunLifecycle.CODEX_EXITED,
+        RunLifecycle.FAILED,
     ]
     assert order[-2:] == [
         f"run-outcome:{run_outcome_models.FAILED_PATH}",
@@ -1863,18 +1927,19 @@ async def test_active_cancellation_stops_codex_then_backend(
         codex=BlockingCodex(order),
     )
     source = researcher()
-    subject._researchers_by_namekey = {source.namekey: source}
+    subject._researchers_by_namekey = {source.namekey.to_json_key(): source}
     run_id = await subject.queue(namekey=source.namekey)
-    assert await subject._queue.get() == run_id
-    execution = asyncio.create_task(subject._process_queued_run(run_id))
+    run = await subject._queue.get()
+    assert run.run_id == run_id
+    execution = asyncio.create_task(subject._process_queued_run(run))
 
     await asyncio.wait_for(codex_waiting.wait(), timeout=1)
     await subject.cancel(run_id=run_id)
     await asyncio.wait_for(execution, timeout=1)
 
     assert backend_stopped.is_set()
-    assert subject._runs[run_id].phase is RunPhase.FINISHED
-    assert subject._runs[run_id].outcome is run_outcome_models.RunOutcome.CANCELLED
+    assert subject._runs[run_id].is_finished()
+    assert subject._runs[run_id].run_outcome is RunLifecycle.CANCELLED
     assert order[-3:] == [
         f"run-outcome:{run_outcome_models.CANCELLED_PATH}",
         "codex-cancel",
@@ -1897,12 +1962,12 @@ async def test_cancellation_waits_for_codex_handle_before_run_outcome_snapshot()
     await subject._append_run_event(
         RunEvent(
             run_id=run_id,
-            namekey=control_ui.namekey_model(NAMEKEY),
+            namekey=NAMEKEY,
             occurred_at_unix_usec=control_ui.datetime_to_unix_usec(SESSION_TIMESTAMP),
-            kind=RunEventKind.QUEUED,
+            lifecycle=RunLifecycle.QUEUED,
         )
     )
-    subject._active_run_id = run_id
+    subject._active_run = subject._runs[run_id]
 
     await subject.cancel(run_id=run_id)
 
@@ -1932,15 +1997,15 @@ async def test_dashboard_shutdown_stops_inflight_codex_and_backend(
         codex=BlockingCodex(order),
     )
     source = researcher()
-    subject._researchers_by_namekey = {source.namekey: source}
+    subject._researchers_by_namekey = {source.namekey.to_json_key(): source}
     run_id = await subject.queue(namekey=source.namekey)
     subject._worker_task = asyncio.create_task(subject._worker())
 
     await asyncio.wait_for(codex_waiting.wait(), timeout=1)
     await subject.shutdown()
 
-    assert subject._runs[run_id].phase is RunPhase.FINISHED
-    assert subject._runs[run_id].outcome is run_outcome_models.RunOutcome.FAILED
+    assert subject._runs[run_id].is_finished()
+    assert subject._runs[run_id].run_outcome is RunLifecycle.FAILED
     assert order.index(f"run-outcome:{run_outcome_models.FAILED_PATH}") < order.index(
         "codex-cancel"
     )
@@ -1977,7 +2042,7 @@ async def test_backend_acceptance_remains_running_until_codex_exits(
     )
     source = researcher()
     subject._researchers = (source,)
-    subject._researchers_by_namekey = {source.namekey: source}
+    subject._researchers_by_namekey = {source.namekey.to_json_key(): source}
     session_metadata = CodexRolloutRecord.build_summary_json({
         "originator": "codex_cli_rs",
         "source": "exec",
@@ -1988,10 +2053,14 @@ async def test_backend_acceptance_remains_running_until_codex_exits(
         "session_id": str(SESSION_ID),
         "timestamp": SESSION_TIMESTAMP.isoformat(),
     })
-    accepted = AcceptedInnerDictSummary.from_innerdict(
-        InnerDict.from_mapping(
+    accepted_attempt = agent_runtime_attempt(
+        commit_record_id=accepted_commit_record_id,
+        session_id=SESSION_ID,
+    )
+    accepted = CommittedInnerDict(
+        innerdict=InnerDict.from_mapping(
             {
-                KTP_NAMEKEY_COL: str(NAMEKEY),
+                KTP_NAMEKEY_COL: NAMEKEY.to_json_key(),
                 KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL: str(accepted_commit_record_id),
                 KTP_AI_AUGMENT_SESSION_METADATA_COL: session_metadata,
                 variable.ai_column: accepted_value,
@@ -1999,17 +2068,15 @@ async def test_backend_acceptance_remains_running_until_codex_exits(
                 KTP_AI_AUGMENT_FOOTNOTE_ARGUMENTS_COL: None,
             },
             api._CodexMatchProcedure(),
-        )
+        ),
+        commit_record=accepted_attempt.attempt.commit_record,
     )
-    accepted_attempt = agent_runtime_attempt(
-        commit_record_id=accepted_commit_record_id,
-        session_id=SESSION_ID,
-    )
-    subject._attempt_records = {NAMEKEY: (accepted_attempt,)}
-    subject._accepted_innerdict_summaries = {NAMEKEY: (accepted,)}
+    source.committed_innerdicts = (accepted,)
+    subject._attempt_records = {NAMEKEY.to_json_key(): (accepted_attempt,)}
+    subject._committed_innerdicts = {NAMEKEY.to_json_key(): (accepted,)}
     backend_database.response = QueryResponse(
         attempts=(accepted_attempt,),
-        accepted_innerdict_summaries=(accepted,),
+        ai_augment_outerdicts=(source,),
     )
 
     async def preserve_backend_snapshot() -> None:
@@ -2017,9 +2084,9 @@ async def test_backend_acceptance_remains_running_until_codex_exits(
 
     async def accepted_attempt_for_session(
         *,
-        namekey: control_ui.Namekey,
+        namekey: NameKey,
         session_id: UUID,
-    ) -> AcceptedInnerDictSummary | None:
+    ) -> CommittedInnerDict | None:
         assert namekey == NAMEKEY
         assert session_id == SESSION_ID
         return accepted
@@ -2033,21 +2100,22 @@ async def test_backend_acceptance_remains_running_until_codex_exits(
     await subject._append_run_event(
         RunEvent(
             run_id=run_id,
-            namekey=control_ui.namekey_model(NAMEKEY),
+            namekey=NAMEKEY,
             occurred_at_unix_usec=control_ui.datetime_to_unix_usec(SESSION_TIMESTAMP),
-            kind=RunEventKind.QUEUED,
+            lifecycle=RunLifecycle.QUEUED,
         )
     )
-    subject._active_run_id = run_id
+    run = subject._runs[run_id]
+    subject._active_run = run
 
-    execution = asyncio.create_task(subject._execute_run(run_id=run_id))
+    execution = asyncio.create_task(subject._execute_run(run=run))
     await codex_waiting.wait()
     running = await subject.snapshot(selection=control_ui._UiSelection(variable_key=variable.key))
 
     assert running.counts.running == 1
     assert running.counts.complete == 0
     assert len(running.rows) == 1
-    assert running.rows[0].latest.attempt_activity is control_ui._ResearcherActivity.RUNNING
+    assert running.rows[0].latest.attempt_lifecycle is RunLifecycle.RUNNING
     assert running.rows[0].latest.ai_value is None
 
     allow_codex_exit.set()
@@ -2056,12 +2124,12 @@ async def test_backend_acceptance_remains_running_until_codex_exits(
 
     assert completed.counts.running == 0
     assert completed.counts.complete == 1
-    assert completed.rows[0].latest.attempt_activity is control_ui._ResearcherActivity.COMPLETE
+    assert completed.rows[0].latest.attempt_lifecycle is RunLifecycle.COMPLETED
     assert completed.rows[0].latest.ai_value == accepted_value
-    assert [event.kind for event in subject._events][-3:] == [
-        RunEventKind.CODEX_EXITED,
-        RunEventKind.PUSH_ACCEPTED,
-        RunEventKind.COMPLETED,
+    assert [event.lifecycle for event in subject._events][-3:] == [
+        RunLifecycle.CODEX_EXITED,
+        RunLifecycle.PUSH_ACCEPTED,
+        RunLifecycle.COMPLETED,
     ]
     assert order[-1] == f"run-outcome:{run_outcome_models.COMPLETED_PATH}"
 
@@ -2134,6 +2202,7 @@ async def test_backend_supervisor_refuses_replacement_and_uses_stdin(
         openalex_api_key="key",
         appendwatch_report=PurePosixPath("/mounted/appendwatch.txt"),
         dashboard_socket_path=tmp_path / "dashboard.sock",
+        pipeline_config=configured_pipeline_config(),
     )
 
     await subject.start(namekey=NAMEKEY)
@@ -2155,8 +2224,8 @@ async def test_backend_supervisor_refuses_replacement_and_uses_stdin(
     assert first_options["cwd"] == tmp_path
     assert first_options["stdin"] is asyncio.subprocess.PIPE
     assert first_options["start_new_session"] is True
-    assert first_environment[api.NAMEKEY_ENV_NAME] == NAMEKEY
-    assert second_environment[api.NAMEKEY_ENV_NAME] == SECOND_NAMEKEY
+    assert first_environment[api.NAMEKEY_ENV_NAME] == NAMEKEY.to_json_key()
+    assert second_environment[api.NAMEKEY_ENV_NAME] == SECOND_NAMEKEY.to_json_key()
     assert second_environment[api.CODEX_SESSIONS_ROOT_ENV_NAME] == str(
         control_vars.CODEX_SESSIONS_ROOT
     )
@@ -2213,6 +2282,7 @@ async def test_backend_readiness_fails_immediately_after_pull_error(
         openalex_api_key="key",
         appendwatch_report=PurePosixPath("/mounted/appendwatch.txt"),
         dashboard_socket_path=tmp_path / "dashboard.sock",
+        pipeline_config=configured_pipeline_config(),
     )
     subject._process = cast(
         Any,
@@ -2273,8 +2343,8 @@ async def test_codex_runner_starts_fresh_exec_process_and_sends_only_openapi_url
     monkeypatch.setattr(runner, "discover_session", discover_session)
     monkeypatch.setattr(runner, "discover_rollout_path", discover_rollout_path)
 
-    await runner.start(run_id=uuid7())
-    await runner.start(run_id=uuid7())
+    await runner.start(run=queued_run())
+    await runner.start(run=queued_run())
 
     assert len(process_calls) == 2
     assert all("resume" not in " ".join(map(str, call)) for call in process_calls)
@@ -2335,7 +2405,7 @@ async def test_codex_cancel_logs_recorded_remote_and_local_processes(
 
     monkeypatch.setattr(runner, "terminate_remote_pid", terminate_remote_pid)
     handle = control_ui._CodexProcessHandle(
-        run_id=run_id,
+        run=queued_run(run_id),
         process=cast(Any, process),
         remote_pid=remote_pid,
         session_id=SESSION_ID,

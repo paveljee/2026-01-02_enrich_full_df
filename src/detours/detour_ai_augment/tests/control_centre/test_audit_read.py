@@ -134,6 +134,7 @@ def test_runtime_provisioning_preserves_reverse_sshfs_ownership(
         / "src"
         / "detours"
         / "detour_ai_augment"
+        / "protected"
         / "src"
         / "agent_runtime"
     )

@@ -27,31 +27,48 @@ import pytest
 from fastapi import status
 from playwright.sync_api import Locator, Page, ViewportSize, expect, sync_playwright
 
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_augment_config import (  # noqa: E501
+    RESOURCE_PATH_KEY,
+    RESOURCE_SHA256_KEY,
+    AiAugmentDetourConfig,
+)
+from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
+    REPLAY_LOG_KEY,
+    AiAugmentCohort,
+)
+from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helpers import (
+    vars as control_vars,
+)
+from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helpers.locale import (
+    Locale,
+)
 from src.detours.detour_ai_augment.src.backend import api as backend_api
 from src.detours.detour_ai_augment.src.backend import ipc as backend_ipc
 from src.detours.detour_ai_augment.src.backend import server as backend_server
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.server_event import (
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_context import (
+    AiAugmentBackendContext,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.commit_event import (
     SOURCE_KEY_HEADER,
     BackendCommitRecord,
-    PostCommitValidationResult,
-    PreparedPullResponse,
+    BackendLifecycle,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.run_outcome_response import (
     RunOutcomeResponse,
 )
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.source_population import (
-    SourceCohort as ResearcherCohort,
-)
 from src.detours.detour_ai_augment.src.control_centre.dashboard import ui as control_ui
-from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers import (
-    vars as control_vars,
-)
-from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models import (
-    ai_augment_context as context_models,
-)
 from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models import (
     run_outcome as run_outcome_models,
 )
-from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.locale import Locale
-from src.helpers.data_models.http_request_log import HttpRequestLogRecord
+from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.ai_augment_context import (  # noqa: E501
+    LIMA_APPENDWATCH_REPORT_PARAM,
+    AiAugmentControlCentreContext,
+)
+from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.run_outcome import (  # noqa: E501
+    RunLifecycle,
+    RunOutcomePath,
+)
+from src.helpers.data_models import HttpRequestLogRecord, NameKey
 
 CONTROL_CENTRE_MODULE = "src.detours.detour_ai_augment.src.control_centre.dashboard.ui"
 CONTROL_CENTRE_COMMAND_PREFIX = (
@@ -365,12 +382,9 @@ def _operator_runtime(
     source_link.symlink_to(source)
     replay_log_path.write_bytes(b"")
     files_config = cast(dict[str, Any], config["files_config"])
-    replay_config = cast(
-        dict[str, Any],
-        files_config[backend_api.REPLAY_LOG_RESOURCE_KEY],
-    )
-    replay_config[backend_api.RESOURCE_PATH_KEY] = str(replay_log_path)
-    replay_config[backend_api.RESOURCE_SHA256_KEY] = EMPTY_FILE_SHA256
+    replay_config = cast(dict[str, Any], files_config[REPLAY_LOG_KEY])
+    replay_config[RESOURCE_PATH_KEY] = str(replay_log_path)
+    replay_config[RESOURCE_SHA256_KEY] = EMPTY_FILE_SHA256
     config.update({
         "db_file": str(source_link),
         "state_file": str(tmp_path / "state.json"),
@@ -381,7 +395,10 @@ def _operator_runtime(
     return OperatorRuntime(
         repository_root=repository_root,
         config_path=config_path,
-        detour_db_path=backend_api._detour_db_path(source_link),
+        detour_db_path=AiAugmentDetourConfig.from_json(
+            config_path,
+            verify_hash_on_init=False,
+        ).detour_db_path,
         replay_log_path=replay_log_path,
         rollout_cas_dir=rollout_cas_dir,
         dashboard_socket_path=dashboard_socket_path,
@@ -486,22 +503,27 @@ def running_dashboard(runtime: OperatorRuntime) -> Generator[DashboardProcess]:
             dashboard.stop()
 
 
-def target_namekey(runtime: OperatorRuntime) -> control_ui.Namekey:
+def target_namekey(runtime: OperatorRuntime) -> NameKey:
     _operator_log("selecting the operator workflow target")
-    configuration = context_models.AiAugmentCtlCtrContext(config_path=runtime.config_path)
+    configuration = AiAugmentControlCentreContext(
+        pipeline_config=AiAugmentDetourConfig.from_json(
+            runtime.config_path,
+            verify_hash_on_init=False,
+        )
+    )
     namekey = next(
         item.namekey
         for item in control_ui._SourceRepository(
             configuration=configuration
         ).load_researchers()
         if OPERATOR_TARGET_DRAW_NUMBER in item.draw_numbers
-        and item.cohort is not ResearcherCohort.INELIGIBLE
+        and item.ai_augment_cohort is not AiAugmentCohort.INELIGIBLE
     )
     _operator_log(f"selected workflow target {namekey}")
     return namekey
 
 
-def queue_in_browser(namekey: control_ui.Namekey) -> float:
+def queue_in_browser(namekey: NameKey) -> float:
     _operator_log("opening the Control Centre in Playwright")
     queued_at_monotonic: float | None = None
     with sync_playwright() as playwright:
@@ -511,7 +533,7 @@ def queue_in_browser(namekey: control_ui.Namekey) -> float:
             page = browser.new_page(viewport=BROWSER_VIEWPORT)
             page.set_default_timeout(BROWSER_ASSERTION_TIMEOUT_MILLISECONDS)
             page.goto(CONTROL_CENTRE_URL, wait_until="networkidle")
-            page.get_by_label(Locale.SEARCH_FILTER).fill(namekey)
+            page.get_by_label(Locale.SEARCH_FILTER).fill(namekey.to_json_key())
             rows = page.get_by_test_id(control_ui.RESEARCHER_GRID_TEST_ID).locator(
                 GRID_ROW_SELECTOR
             )
@@ -606,7 +628,7 @@ def wait_for_gone_pull(
 def run_workflow_to_gone_pull(
     runtime: OperatorRuntime,
     dashboard: DashboardProcess,
-    namekey: control_ui.Namekey,
+    namekey: NameKey,
 ) -> WorkflowCheckpoint:
     queued_at_monotonic = queue_in_browser(namekey)
     wait_for_gone_pull(runtime, dashboard)
@@ -651,7 +673,7 @@ def wait_for_completed_grid_row(
             )
             previous_status = current_status
         if (
-            current_status == control_ui._ResearcherActivity.COMPLETE.value
+            current_status == RunLifecycle.COMPLETED.value
             and execute.inner_text().strip()
             == control_ui.ACTION_LABEL_BY_VALUE[control_ui._RunAction.RERUN.value]
             and view_card.is_enabled()
@@ -682,8 +704,8 @@ def wait_for_completed_grid_row(
             _operator_log("Control Centre projected the completed post-Codex run")
             return row, commit_record_id
         if current_status in {
-            control_ui._ResearcherActivity.FAILED.value,
-            control_ui._ResearcherActivity.CANCELED.value,
+            RunLifecycle.FAILED.value,
+            RunLifecycle.CANCELLED.value,
         }:
             raise RuntimeError(
                 f"Control Centre projected failed run activity {current_status!r}"
@@ -705,7 +727,7 @@ def wait_for_completed_grid_row(
 def capture_completed_researcher_card(
     dashboard: DashboardProcess,
     *,
-    namekey: control_ui.Namekey,
+    namekey: NameKey,
     queued_at_monotonic: float,
 ) -> str:
     _operator_log("opening the completed workflow in Playwright")
@@ -726,7 +748,7 @@ def capture_completed_researcher_card(
             )
             page.on("pageerror", lambda error: browser_errors.append(str(error)))
             page.goto(CONTROL_CENTRE_URL, wait_until="networkidle")
-            page.get_by_label(Locale.SEARCH_FILTER).fill(namekey)
+            page.get_by_label(Locale.SEARCH_FILTER).fill(namekey.to_json_key())
             _row, commit_record_id = wait_for_completed_grid_row(
                 page,
                 dashboard,
@@ -787,10 +809,16 @@ def _assert_deployed_appendwatch_topology(
     _operator_log("loading the deployed appendwatch topology")
     identity_file = backend_api.AIVM_IDENTITY_FILE
     assert identity_file is not None
-    configuration = context_models.AiAugmentCtlCtrContext(
-        config_path=operator_runtime.config_path
+    configuration = AiAugmentControlCentreContext(
+        pipeline_config=AiAugmentDetourConfig.from_json(
+            operator_runtime.config_path,
+            verify_hash_on_init=False,
+        )
     )
-    assert configuration.appendwatch_report.is_absolute()
+    appendwatch_report = PurePosixPath(
+        configuration.lima_configuration.param[LIMA_APPENDWATCH_REPORT_PARAM]
+    )
+    assert appendwatch_report.is_absolute()
     options = backend_api._aivm_connection_options(
         lima_ssh_config=backend_api.LIMA_SSH_CONFIG_PATH,
         identity_file=identity_file,
@@ -808,7 +836,7 @@ def _assert_deployed_appendwatch_topology(
             f"{backend_api.AIVM_INSTANCE}-{backend_api.AIVM_AUDIT_USER}",
             shlex.join([
                 backend_api.AUDIT_READ_APPENDWATCH_REPORT_COMMAND,
-                str(configuration.appendwatch_report),
+                str(appendwatch_report),
             ]),
         ],
         check=True,
@@ -830,8 +858,8 @@ def test_existing_aivm_exposes_the_persisted_appendwatch_topology(
 def validate_workflow_artifacts(
     operator_runtime: OperatorRuntime,
     *,
-    namekey: control_ui.Namekey,
-    expected_run_outcome_path: str | None = None,
+    namekey: NameKey,
+    expected_run_outcome_path: RunOutcomePath | None = None,
     card_text: str | None = None,
 ) -> None:
     _operator_log("validating authoritative workflow artifacts")
@@ -860,6 +888,12 @@ def validate_workflow_artifacts(
         )
     )
     records_by_id = {record.record_id: record for record in records}
+    runtime = AiAugmentBackendContext(
+        pipeline_config=AiAugmentDetourConfig.from_json(
+            operator_runtime.config_path,
+            verify_hash_on_init=False,
+        )
+    )
     accepted_commits: list[BackendCommitRecord] = []
     for record in records:
         if (record.method, record.path) != backend_api.AUTHORITATIVE_COMMIT_ROUTE:
@@ -872,28 +906,36 @@ def validate_workflow_artifacts(
             str(operator_runtime.detour_db_path), read_only=True
         ) as connection:
             row = connection.execute(
-                f"SELECT {backend_api.AUTHORITATIVE_OUTCOME_PAYLOAD_COLUMN} "
-                f"FROM {backend_api.AUTHORITATIVE_OUTCOMES_TABLE} "
-                f"WHERE {backend_api.AUTHORITATIVE_OUTCOME_COMMIT_ID_COLUMN} = ?",
+                f"SELECT {backend_api.AUTHORITATIVE_ATTEMPT_PAYLOAD_COLUMN} "
+                f"FROM {backend_api.AUTHORITATIVE_ATTEMPTS_TABLE} "
+                f"WHERE {backend_api.AUTHORITATIVE_ATTEMPT_COMMIT_ID_COLUMN} = ?",
                 [str(record.record_id)],
             ).fetchone()
         if row is not None:
-            prepared_pull = PreparedPullResponse.model_validate_json(str(row[0]))
+            attempt_record = backend_api._attempt_record_from_serialized_json(
+                runtime,
+                str(row[0]),
+                commit_http_record=record,
+            )
             if (
-                prepared_pull.post_commit_validation.result
-                is PostCommitValidationResult.ACCEPTED
+                attempt_record.attempt.post_commit_validation.result
+                is BackendLifecycle.ACCEPTED
             ):
                 accepted_commits.append(commit_record)
     assert len(accepted_commits) == 1
     commit_record = accepted_commits[0]
-    assert backend_api._validated_readme_record(commit_record) == commit_record
-    session = commit_record.codex_session_record
+    assert (
+        backend_api._validated_readme_record(commit_record).model_dump()
+        == commit_record.model_dump()
+    )
+    commit_request_body = commit_record.commit_request_body
+    session = commit_request_body.codex_session_record
     assert session.session_id is not None
     assert session.codex_rollout_record is not None
     assert session.appendwatch_report_record is not None
     rollout = session.codex_rollout_record
-    pull_ordinal = _record_ordinal(records, commit_record.pull_record.record_id)
-    push_ordinal = _record_ordinal(records, commit_record.push_record.record_id)
+    pull_ordinal = _record_ordinal(records, commit_request_body.pull_record.record_id)
+    push_ordinal = _record_ordinal(records, commit_request_body.push_record.record_id)
     commit_ordinal = _record_ordinal(records, commit_record.record_id)
     gone_pull_ordinal = _record_ordinal(records, gone_pull.record_id)
     assert pull_ordinal < push_ordinal < commit_ordinal < gone_pull_ordinal
@@ -934,7 +976,7 @@ def validate_workflow_artifacts(
             run_outcome_record.request_headers,
             run_outcome_models.NAME_KEY_HEADER,
         )
-    ) == str(namekey)
+    ) == namekey
     assert backend_api._http_header_value(
         run_outcome_record.request_headers,
         SOURCE_KEY_HEADER,

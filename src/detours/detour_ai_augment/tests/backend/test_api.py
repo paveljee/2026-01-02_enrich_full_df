@@ -9,10 +9,10 @@ import subprocess
 import sys
 from collections.abc import AsyncIterator, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from io import StringIO
 from pathlib import Path, PurePosixPath
 from threading import Barrier
 from types import SimpleNamespace
@@ -24,58 +24,39 @@ import duckdb
 import pytest
 import requests
 import uvicorn
-from fastapi import FastAPI, Request, status
+from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import Response, StreamingResponse
 from pydantic import ValidationError
 
-from src.detours.detour_ai_augment.src.backend import api, ipc, server
-from src.detours.detour_ai_augment.src.backend.helpers import codex_parse
-from src.detours.detour_ai_augment.src.backend.helpers.data_models import (
+from src.detours.detour_ai_augment.protected.src.backend.helpers import codex_parse
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models import (
     pydantic_to_paste,
 )
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_config import (
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_augment_config import (  # noqa: E501
+    RESOURCE_DESCRIPTION_KEY,
+    RESOURCE_PATH_KEY,
+    RESOURCE_SHA256_KEY,
     AiAugmentDetourConfig,
 )
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_context import (
-    AiAugmentBackendContext,
-    AiAugmentCohort,
-    AiAugmentIneligibilityCategory,
-    AiAugmentOuterDict,
-    QueryResponse,
-)
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.pydantic_to_paste import (
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.pydantic_to_paste import (  # noqa: E501
     EvidenceWithdrawal,
     FieldSubmission,
     StandardizedFieldSubmission,
     StandardizedSubmission,
     WebSearchExcerpt,
 )
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.server_event import (
-    SOURCE_KEY_HEADER,
-    AgentRuntimeAttempt,
-    AppendwatchReportEncoding,
-    AppendwatchReportRecord,
-    CodexRolloutRecord,
-    CodexSessionRecord,
-    CommitRequestBody,
-    PostCommitValidation,
-    PostCommitValidationResult,
-    PostCommitValidationStage,
-    PreparedPullResponse,
-    RunOutcomeResponse,
-    RunOutcomeResponseBody,
-)
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.submission_fixture import (
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.submission_fixture import (  # noqa: E501
     L_FEI_FEI_INITIAL_FIXTURE,
     L_FEI_FEI_RETRY_FIXTURE,
 )
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.submission_init import (
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.submission_init import (  # noqa: E501
     Submission,
 )
-from src.detours.detour_ai_augment.src.backend.helpers.locale import Locale
-from src.detours.detour_ai_augment.src.backend.helpers.vars import (
+from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
+from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     AI_AUGMENT_COLUMNS,
     AI_AUGMENT_EVIDENCE_COLUMNS,
+    DOCX_COLUMNS,
     KTP_AI_AUGMENT_ACADEMIC_POSITIONS_COL,
     KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL,
     KTP_AI_AUGMENT_COMMENTS_COL,
@@ -88,8 +69,40 @@ from src.detours.detour_ai_augment.src.backend.helpers.vars import (
     KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL,
     KTP_AI_AUGMENT_RESEARCHER_AUTHOR_COL,
     KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL,
+    MAP_SUBSET_0_TO_BATCH_KEY,
     PYDANTIC_TO_PASTE_SOURCE,
+    REPLAY_LOG_KEY,
     TEXT_ENCODING,
+    AiAugmentCohort,
+    AiAugmentIneligibilityCategory,
+)
+from src.detours.detour_ai_augment.src.backend import api, ipc, server
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_context import (
+    AiAugmentBackendContext,
+    _source_innerdicts_by_namekey,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_outer_dict import (
+    AiAugmentOuterDict,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.commit_event import (
+    SOURCE_KEY_HEADER,
+    AppendwatchReportEncoding,
+    AppendwatchReportRecord,
+    BackendCommitRecord,
+    BackendLifecycle,
+    CodexRolloutRecord,
+    CodexSessionRecord,
+    CommitRequestBody,
+    PostCommitValidation,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.query_response import (
+    AgentRuntimeAttempt,
+    AgentRuntimeAttemptRecord,
+    QueryResponse,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.run_outcome_response import (
+    RunOutcomeResponse,
+    RunOutcomeResponseBody,
 )
 from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models import (
     run_outcome as run_outcome_models,
@@ -97,11 +110,8 @@ from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_mod
 from src.helpers.cards import build_cards, write_cards_zip
 from src.helpers.config import PipelineConfig
 from src.helpers.data_models import (
-    FragmentType,
     InnerDict,
     NameKey,
-    RegisteredResource,
-    ResourceGroup,
 )
 from src.helpers.data_models.http_request_log import (
     HttpRequestLogRecord,
@@ -181,9 +191,9 @@ EVIDENCE_WITHDRAWAL_REASON = get_args(
 TEST_ROLLOUT_GUEST_PATH = "/home/ai/.codex/sessions/2026/07/31/rollout-chat.jsonl"
 TEST_ROLLOUT_RELATIVE_PATH = PurePosixPath("2026/07/31/rollout-chat.jsonl")
 TEST_TIMEZONE = "America/Toronto"
-TEST_SESSION_ID = "session-test"
+TEST_SESSION_ID = UUID("019d0000-0000-7000-8000-000000000001")
 TEST_SESSION_TIMESTAMP = "2026-07-31T16:10:36.000Z"
-TEST_ROLLOUT_FILENAME = "rollout-2026-07-31T12-10-36-session-test.jsonl"
+TEST_ROLLOUT_FILENAME = f"rollout-2026-07-31T12-10-36-{TEST_SESSION_ID}.jsonl"
 TEST_CALL_ID = "call_test"
 TEST_FC_ID = "fc_test"
 TEST_FCO_ID = "fco_test"
@@ -199,6 +209,7 @@ TEST_URL = "https://example.test/profile"
 V2_CITE_TEXT = "Profile: José García — Senior\nResearcher"
 V2_EXACT_EXCERPT = "José García — Senior\nResearcher"
 TEST_NAMEKEY = '{"ktp.first_name": "A.", "ktp.last_name": "Sheikh"}'
+TEST_NAMEKEY_MODEL = NameKey.from_json_key(TEST_NAMEKEY)
 TEST_RUN_ID = UUID("019fa457-aac5-7652-8669-9d571206e7cb")
 TEST_SECOND_RUN_ID = UUID("019fa457-aac5-7652-8669-9d571206e7cc")
 TEST_ATTEMPT_TIMESTAMP = datetime(2026, 8, 14, tzinfo=timezone.utc)
@@ -244,12 +255,83 @@ def persisted_http_record(
     )
 
 
+def deterministic_uuid7(value: str) -> UUID:
+    return UUID(
+        bytes=hashlib.sha256(value.encode(TEXT_ENCODING)).digest()[:16],
+        version=7,
+    )
+
+
+def retry_attempt_records(
+    *,
+    run_id: UUID,
+    session_id: UUID,
+    attempt_id: str,
+) -> tuple[HttpRequestLogRecord, BackendCommitRecord]:
+    pull_record = persisted_http_record(
+        record_id=run_id,
+        method=api.HTTP_GET_METHOD,
+        path=api.PULL_PATH,
+        response_code=status.HTTP_200_OK,
+    )
+    push_record = persisted_http_record(
+        record_id=deterministic_uuid7(attempt_id + "-push"),
+        method=api.HTTP_POST_METHOD,
+        path=api.PUSH_PATH,
+        response_code=status.HTTP_202_ACCEPTED,
+        request_body="{}",
+    )
+    commit_record = api._synthetic_commit_record(
+        pull_record=pull_record,
+        push_record=push_record,
+        session_id=session_id,
+        rollout_archive=api._ArchivedFile(
+            path=Path("unused-test-rollout.jsonl"),
+            size=3,
+            sha256=hashlib.sha256(b"{}\n").hexdigest(),
+            line_count=1,
+        ),
+        rollout_filename=f"rollout-{session_id}.jsonl",
+        appendwatch_report=b".\n",
+        namekey=TEST_NAMEKEY_MODEL,
+    ).model_copy(update={"record_id": deterministic_uuid7(attempt_id)})
+    return pull_record, commit_record
+
+
+def process_retry_attempt_for_test(
+    conn: duckdb.DuckDBPyConnection,
+    *,
+    run_id: UUID,
+    namekey: NameKey,
+    session_id: UUID,
+    attempt_id: str,
+    attempt_timestamp: datetime,
+    submission_payload: Submission | StandardizedSubmission,
+    assessment: api._EvidenceAssessment,
+) -> tuple[str, ...]:
+    original_pull, commit_record = retry_attempt_records(
+        run_id=run_id,
+        session_id=session_id,
+        attempt_id=attempt_id,
+    )
+    return api._process_retry_attempt(
+        conn,
+        original_pull=original_pull,
+        commit_record=commit_record,
+        namekey=namekey,
+        attempt_timestamp=attempt_timestamp,
+        submission_payload=submission_payload,
+        assessment=assessment,
+    )
+
+
 HAANEN_REJECTED_ATTEMPT_ID = "20260813T141344_678596Z_8ef1f6372b4a48d9a3b1279736356363"
 HAANEN_ACCEPTED_ATTEMPT_ID = "20260813T141450_027429Z_044215aac8c44200882531b10a2acfa6"
 HAANEN_ROLLOUT_FILENAME = "rollout-2026-08-13T10-08-12-019ffb73-b72c-7812-9fc4-d56fdf3ea1a2.jsonl"
-HAANEN_SESSION_ID = "019ffb73-b72c-7812-9fc4-d56fdf3ea1a2"
+HAANEN_SESSION_ID = UUID("019ffb73-b72c-7812-9fc4-d56fdf3ea1a2")
 HAANEN_RUN_ID = UUID("019ffb73-b72c-7812-9fc4-d56fdf3ea1a3")
 HAANEN_NAMEKEY = '{"ktp.first_name": "J. B.", "ktp.last_name": "Haanen"}'
+HAANEN_NAMEKEY_MODEL = NameKey.from_json_key(HAANEN_NAMEKEY)
 HAANEN_TOOL_CALL_TYPE = "custom_tool_call"
 HAANEN_TOOL_INPUT_KEY = "input"
 HAANEN_COMMAND_START = "{cmd:"
@@ -299,9 +381,10 @@ TEST_STANDARDIZED_VALUES = {
 
 @pytest.fixture(scope="session")
 def backend_test_paths(
-    repository_root: Path,
-    detour_root: Path,
+    pytestconfig: pytest.Config,
 ) -> BackendTestPaths:
+    repository_root = pytestconfig.rootpath
+    detour_root = repository_root / "src" / "detours" / "detour_ai_augment"
     haanen_rejected_attempt = repository_root / "tmp" / HAANEN_REJECTED_ATTEMPT_ID
     haanen_accepted_attempt = repository_root / "tmp" / HAANEN_ACCEPTED_ATTEMPT_ID
     return BackendTestPaths(
@@ -310,7 +393,13 @@ def backend_test_paths(
         source_database=repository_root / "data" / "scisci_process.duckdb",
         reference_docx=repository_root / "resources" / "pandoc-custom-reference.docx",
         pydantic_to_paste=(
-            detour_root / "src" / "backend" / "helpers" / "data_models" / "pydantic_to_paste.py"
+            detour_root
+            / "protected"
+            / "src"
+            / "backend"
+            / "helpers"
+            / "data_models"
+            / "pydantic_to_paste.py"
         ),
         july_rollout=(
             detour_root
@@ -722,7 +811,7 @@ def minimal_rollout_records(action: str = "search_query") -> tuple[api._RolloutR
             "timestamp": TEST_SESSION_TIMESTAMP,
             "type": "session_meta",
             "payload": {
-                "session_id": TEST_SESSION_ID,
+                "session_id": str(TEST_SESSION_ID),
                 "timestamp": TEST_SESSION_TIMESTAMP,
                 "originator": "codex_vscode",
                 "source": "vscode",
@@ -1011,13 +1100,23 @@ def runtime_for_test(
     rollout_cas_dir = tmp_path / "rollout-cas"
     output_dir.mkdir(exist_ok=True)
     replay_log_path.write_text("", encoding=TEXT_ENCODING)
-    configured_pipeline = AiAugmentDetourConfig.from_json(paths.ai_augment_config)
+    config_data = json.loads(paths.ai_augment_config.read_text(encoding=TEXT_ENCODING))
+    config_data["files_config"][REPLAY_LOG_KEY] = {
+        "path": str(replay_log_path),
+        "sha256": hashlib.sha256(b"").hexdigest(),
+        "desc": "isolated Backend test replay log",
+    }
+    configured_pipeline = AiAugmentDetourConfig.model_validate(
+        config_data,
+        context={"verify_hash_on_init": False},
+    )
     pipeline = configured_pipeline.model_copy(
         update={
             "db_file": source_database or paths.source_database,
             "output_dir": output_dir,
             "output_format": output_format,
             "pandoc_reference_docx": paths.reference_docx,
+            "detour_db_path": tmp_path / "detour_ai_augment.duckdb",
             "rollout_cas_dir": rollout_cas_dir,
             "match_rule_version": (
                 configured_pipeline.match_rule_version
@@ -1028,30 +1127,23 @@ def runtime_for_test(
             ),
         }
     )
-    replay_log = RegisteredResource(
-        name=replay_log_path.name,
-        hash=hashlib.sha256(b"").hexdigest(),
-        group=ResourceGroup.KTP_PIPELINE_ARTIFACT,
-        fragment_type=FragmentType.LINE_NUMBER,
-        url=replay_log_path.as_uri(),
-    )
     ai_augment_outerdicts: tuple[AiAugmentOuterDict, ...] = ()
     configured_namekey: NameKey | None = None
     if namekey is not None:
         configured_namekey = NameKey.from_json_key(namekey)
         source_connection = duckdb.connect(str(pipeline.db_file), read_only=True)
         try:
-            xlsx = api._source_innerdicts_by_namekey(
+            xlsx = _source_innerdicts_by_namekey(
                 source_connection,
                 table_name=XLSX_INNERDICT_TABLE,
                 procedure=XlsxMatchProcedure(),
             )
-            ssn = api._source_innerdicts_by_namekey(
+            ssn = _source_innerdicts_by_namekey(
                 source_connection,
                 table_name=PARQUET_INNERDICT_TABLE,
                 procedure=ParquetMatchProcedure(),
             )
-            docx = api._source_innerdicts_by_namekey(
+            docx = _source_innerdicts_by_namekey(
                 source_connection,
                 table_name=DOCX_INNERDICT_TABLE,
                 procedure=DocxMatchProcedure(),
@@ -1069,12 +1161,9 @@ def runtime_for_test(
         finally:
             source_connection.close()
     return AiAugmentBackendContext(
-        pipeline=pipeline,
-        detour_db_path=tmp_path / "detour_ai_augment.duckdb",
-        replay_log=replay_log,
-        rollout_cas_dir=rollout_cas_dir,
+        pipeline_config=pipeline,
         configured_namekey=configured_namekey,
-        ai_augment_outerdicts=ai_augment_outerdicts,
+        cached_ai_augment_outerdicts=ai_augment_outerdicts,
     )
 
 
@@ -1160,7 +1249,7 @@ def prepare_real_sample_push(
 
 
 def operator_capture_fixture(detour_root: Path, filename: str) -> Path:
-    return detour_root / "tests" / "fixtures" / filename
+    return detour_root / "protected" / "tests" / "fixtures" / filename
 
 
 def operator_retry_baseline(
@@ -1428,7 +1517,7 @@ def assert_captured_operator_push_contour(
         accepted_values[column] = field[FIELD_VALUE_FIELD]
     ground_truth = {
         column: f"synthetic operator ground truth {index}"
-        for index, column in enumerate(api.DOCX_COLUMNS, start=1)
+        for index, column in enumerate(DOCX_COLUMNS, start=1)
     }
     gone_response_text = api.json_line(accepted_values) + api.json_line(ground_truth)
 
@@ -1537,7 +1626,9 @@ def assert_captured_operator_push_contour(
         api,
         "push_configuration_for_session",
         lambda session_id: (
-            configuration if session_id == OPERATOR_CAPTURED_SESSION_ID else pytest.fail()
+            configuration
+            if session_id == UUID(OPERATOR_CAPTURED_SESSION_ID)
+            else pytest.fail()
         ),
     )
     monkeypatch.setattr(subprocess, "run", fake_subprocess_run)
@@ -1546,11 +1637,12 @@ def assert_captured_operator_push_contour(
         "_after_authoritative_public_record",
         commit_inline_after_authoritative_record,
     )
-    monkeypatch.setattr(api, "BACKEND_CURRENT_PULL_RECORD_ID", None)
-    monkeypatch.setattr(api, "BACKEND_PENDING_PULL_RECORD_ID", None)
-    monkeypatch.setattr(api, "BACKEND_SESSION_ID", OPERATOR_CAPTURED_SESSION_ID)
-    monkeypatch.setattr(api, "BACKEND_PREPARED_PULL_RESPONSE", None)
-    monkeypatch.setattr(api, "BACKEND_WORKFLOW_STATUS", api.BackendWorkflowStatus.READY)
+    monkeypatch.setattr(api, "BACKEND_CURRENT_PULL_RECORD", None)
+    monkeypatch.setattr(api, "BACKEND_PENDING_PULL_RECORD", None)
+    monkeypatch.setattr(api, "BACKEND_LATEST_PUSH_RECORD", None)
+    monkeypatch.setattr(api, "BACKEND_SESSION_ID", UUID(OPERATOR_CAPTURED_SESSION_ID))
+    monkeypatch.setattr(api, "BACKEND_ATTEMPT_RECORD", None)
+    monkeypatch.setattr(api, "BACKEND_LIFECYCLE", BackendLifecycle.READY)
     api._acquire_authoritative_process_lock(runtime)
     try:
         api.synchronize_authoritative_projection(runtime)
@@ -1598,7 +1690,7 @@ def assert_captured_operator_push_contour(
         authoritative_records = tuple(
             record
             for record, _byte_offset, _line_sha256 in api._authoritative_log_records(
-                Path(runtime.replay_log)
+                Path(runtime.pipeline_config.resources.replay_log)
             )
         )
         pushes = tuple(
@@ -1628,14 +1720,21 @@ def assert_captured_operator_push_contour(
             and record.response_code == status.HTTP_200_OK
         )
 
-        query = QueryResponse.from_serialized_json(ipc.dashboard_query_payload(TEST_NAMEKEY))
+        query = QueryResponse.from_serialized_json(
+            ipc.dashboard_query_payload(TEST_NAMEKEY_MODEL)
+        )
         assert len(query.attempts) == 2
         assert (
-            query.attempts[-1].post_commit_validation.result is PostCommitValidationResult.ACCEPTED
+            query.attempts[-1].attempt.post_commit_validation.result
+            is BackendLifecycle.ACCEPTED
         )
-        assert query.attempts[-1].commit_record.record_id == commits[-1].record_id
         assert (
-            query.attempts[-1].commit_record.commit_request_body.push_record.record_id
+            query.attempts[-1].attempt.commit_record.record_id
+            == commits[-1].record_id
+        )
+        assert (
+            query.attempts[-1]
+            .attempt.commit_record.commit_request_body.push_record.record_id
             == pushes[-1].record_id
         )
         assert len(query.ai_augment_outerdicts) == 1
@@ -1650,7 +1749,7 @@ def assert_captured_operator_push_contour(
         )
         cards = build_cards(
             api.selected_card_outer_dict(selected_outerdict),
-            total_draws=runtime.pipeline.total_draws,
+            total_draws=runtime.pipeline_config.total_draws,
             intro="",
             excluded_cols=api.CARD_EXCLUDED_COLUMNS,
         )
@@ -1673,8 +1772,9 @@ def test_captured_operator_push_generates_commit_and_exact_410_response(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     backend_test_paths: BackendTestPaths,
-    detour_root: Path,
+    pytestconfig: pytest.Config,
 ) -> None:
+    detour_root = pytestconfig.rootpath / "src" / "detours" / "detour_ai_augment"
     assert_captured_operator_push_contour(
         tmp_path,
         monkeypatch,
@@ -1892,7 +1992,7 @@ def test_synthetic_commit_matches_the_readme_contour_exactly(tmp_path: Path) -> 
         rollout_archive=rollout,
         rollout_filename=TEST_ROLLOUT_FILENAME,
         appendwatch_report=report,
-        namekey=TEST_NAMEKEY,
+        namekey=TEST_NAMEKEY_MODEL,
     )
 
     assert api._validated_readme_record(record).model_dump() == record.model_dump()
@@ -2023,7 +2123,7 @@ def test_run_outcome_snapshot_captures_fresh_rollout_and_appendwatch(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    session_id = "019d0000-0000-7000-8000-000000000011"
+    session_id = UUID("019d0000-0000-7000-8000-000000000011")
     pull_record_id = UUID("019d0000-0000-7000-8000-000000000012")
     push_record_id = UUID("019d0000-0000-7000-8000-000000000013")
     rollout_filename = f"{api.ROLLOUT_FILENAME_PREFIX}{session_id}.jsonl"
@@ -2043,7 +2143,7 @@ def test_run_outcome_snapshot_captures_fresh_rollout_and_appendwatch(
         calls.append("appendwatch")
         return b".\n"
 
-    def select_rollout(selected_session_id: str) -> api._PushConfiguration:
+    def select_rollout(selected_session_id: UUID) -> api._PushConfiguration:
         calls.append(("rollout", selected_session_id))
         return configuration
 
@@ -2055,9 +2155,22 @@ def test_run_outcome_snapshot_captures_fresh_rollout_and_appendwatch(
         return archive
 
     monkeypatch.setattr(api, "BACKEND_SESSION_ID", session_id)
-    monkeypatch.setattr(api, "BACKEND_CURRENT_PULL_RECORD_ID", pull_record_id)
-    monkeypatch.setattr(api, "BACKEND_PENDING_PULL_RECORD_ID", None)
-    monkeypatch.setattr(api, "BACKEND_LATEST_PUSH_RECORD_ID", push_record_id)
+    pull_record = persisted_http_record(
+        record_id=pull_record_id,
+        method=api.HTTP_GET_METHOD,
+        path=api.PULL_PATH,
+        response_code=status.HTTP_200_OK,
+    )
+    push_record = persisted_http_record(
+        record_id=push_record_id,
+        method=api.HTTP_POST_METHOD,
+        path=api.PUSH_PATH,
+        response_code=status.HTTP_202_ACCEPTED,
+        request_body="{}",
+    )
+    monkeypatch.setattr(api, "BACKEND_CURRENT_PULL_RECORD", pull_record)
+    monkeypatch.setattr(api, "BACKEND_PENDING_PULL_RECORD", None)
+    monkeypatch.setattr(api, "BACKEND_LATEST_PUSH_RECORD", push_record)
     monkeypatch.setattr(
         api,
         "_run_outcome_snapshot_configuration",
@@ -2077,7 +2190,7 @@ def test_run_outcome_snapshot_captures_fresh_rollout_and_appendwatch(
         pull_record_id=pull_record_id,
         push_record_id=push_record_id,
         codex_session_record=CodexSessionRecord(
-            session_id=UUID(session_id),
+            session_id=session_id,
             codex_rollout_record=CodexRolloutRecord(
                 sha256=archive.sha256,
                 size=archive.size,
@@ -2170,7 +2283,9 @@ def test_run_outcome_http_exchange_is_logged_and_replays_as_raw_history(
         query="",
         ready_to_respond_at_unix_usec=None,
         request_headers={
-            run_outcome_models.NAME_KEY_HEADER: api.name_key_header(TEST_NAMEKEY)
+            run_outcome_models.NAME_KEY_HEADER: api.name_key_header(
+                TEST_NAMEKEY_MODEL
+            )
         },
         request_body=None,
         response_code=None,
@@ -2232,8 +2347,8 @@ def test_run_outcome_http_exchange_is_logged_and_replays_as_raw_history(
         assert replayed_responses[0].run_outcome_request == outcome_request
         assert replayed_responses[0].run_outcome_response_body == snapshot
         assert connection.execute(
-            f"SELECT count(*) FROM {api.AUTHORITATIVE_OUTCOMES_TABLE}"
-        ).fetchone() == (0,)
+            f"SELECT count(*) FROM {api.AUTHORITATIVE_RECORDS_TABLE}"
+        ).fetchone() == (1,)
     finally:
         connection.close()
 
@@ -2266,18 +2381,12 @@ def test_failed_post_commit_work_projects_atomically_without_domain_changes(
         rollout_archive=api._archived_file(rollout_path),
         rollout_filename=TEST_ROLLOUT_FILENAME,
         appendwatch_report=b".\n",
-        namekey=TEST_NAMEKEY,
+        namekey=TEST_NAMEKEY_MODEL,
     )
-    prepared_pull_response = PreparedPullResponse(
-        commit_record_id=record.record_id,
-        post_commit_validation=PostCommitValidation(
-            stage=PostCommitValidationStage.APPENDWATCH_REPORT_VALIDATION,
-            result=PostCommitValidationResult.CONFIGURATION_ERROR,
-            detail=Locale.CONFIGURATION_ERROR_DETAIL,
-        ),
-        response_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        response_headers={"content-type": api.JSON_MEDIA_TYPE},
-        response_body=api.http_error_response_body(Locale.CONFIGURATION_ERROR_DETAIL),
+    failed_attempt_record = api._failed_attempt_record(
+        commit_record=record,
+        stage=BackendLifecycle.APPENDWATCH_REPORT_VALIDATION,
+        error=RuntimeError("post-commit validation failed"),
     )
     connection = duckdb.connect(":memory:")
     connection.execute("CREATE TABLE domain_probe (value INTEGER)")
@@ -2289,10 +2398,10 @@ def test_failed_post_commit_work_projects_atomically_without_domain_changes(
         _record: HttpRequestLogRecord,
         *,
         materialize_files: bool,
-    ) -> tuple[PreparedPullResponse, bool]:
+    ) -> tuple[AgentRuntimeAttemptRecord, bool]:
         assert materialize_files is True
         conn.execute("INSERT INTO domain_probe VALUES (1)")
-        return prepared_pull_response, False
+        return failed_attempt_record, False
 
     monkeypatch.setattr(api, "_validate_projected_commit", fail_after_domain_write)
     try:
@@ -2314,9 +2423,6 @@ def test_failed_post_commit_work_projects_atomically_without_domain_changes(
         assert connection.execute("SELECT * FROM domain_probe").fetchall() == []
         assert connection.execute(
             f"SELECT count(*) FROM {api.AUTHORITATIVE_RECORDS_TABLE}"
-        ).fetchone() == (1,)
-        assert connection.execute(
-            f"SELECT count(*) FROM {api.AUTHORITATIVE_OUTCOMES_TABLE}"
         ).fetchone() == (1,)
         assert api._projection_checkpoint(connection) == (1, 123, "a" * 64)
     finally:
@@ -2915,14 +3021,14 @@ def test_v2_retry_baseline_replays_and_accepts_only_the_exact_correction(
         )
         assert near_assessment.accepted is False
         assert (
-            api._process_retry_attempt(
+            process_retry_attempt_for_test(
                 connection,
                 run_id=TEST_RUN_ID,
-                namekey=TEST_NAMEKEY,
+                namekey=TEST_NAMEKEY_MODEL,
                 session_id=TEST_SESSION_ID,
                 attempt_id="attempt-near",
                 attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
-                submission=near_submission,
+                submission_payload=near_submission,
                 assessment=near_assessment,
             )
             == ()
@@ -2936,14 +3042,14 @@ def test_v2_retry_baseline_replays_and_accepts_only_the_exact_correction(
         )
         assert exact_assessment.accepted is True
         assert (
-            api._process_retry_attempt(
+            process_retry_attempt_for_test(
                 connection,
                 run_id=TEST_RUN_ID,
-                namekey=TEST_NAMEKEY,
+                namekey=TEST_NAMEKEY_MODEL,
                 session_id=TEST_SESSION_ID,
                 attempt_id="attempt-exact",
                 attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
-                submission=exact_submission,
+                submission_payload=exact_submission,
                 assessment=exact_assessment,
             )
             == ()
@@ -2991,14 +3097,14 @@ def test_v2_retry_rejects_changed_tokens_and_repeats_near_guidance(
             codex_match_version=2,
         )
         assert (
-            api._process_retry_attempt(
+            process_retry_attempt_for_test(
                 connection,
                 run_id=TEST_RUN_ID,
-                namekey=TEST_NAMEKEY,
+                namekey=TEST_NAMEKEY_MODEL,
                 session_id=TEST_SESSION_ID,
                 attempt_id="attempt-near",
                 attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
-                submission=near_submission,
+                submission_payload=near_submission,
                 assessment=near_assessment,
             )
             == ()
@@ -3013,27 +3119,27 @@ def test_v2_retry_rejects_changed_tokens_and_repeats_near_guidance(
             rollout_filename=TEST_ROLLOUT_FILENAME,
             codex_match_version=2,
         )
-        changed_violations = api._process_retry_attempt(
+        changed_violations = process_retry_attempt_for_test(
             connection,
             run_id=TEST_RUN_ID,
-            namekey=TEST_NAMEKEY,
+            namekey=TEST_NAMEKEY_MODEL,
             session_id=TEST_SESSION_ID,
             attempt_id="attempt-changed",
             attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
-            submission=changed_submission,
+            submission_payload=changed_submission,
             assessment=changed_assessment,
         )
         near_retry_submission = StandardizedSubmission.model_validate(
             standardized_submission_body(near_body)
         )
-        repeated_violations = api._process_retry_attempt(
+        repeated_violations = process_retry_attempt_for_test(
             connection,
             run_id=TEST_RUN_ID,
-            namekey=TEST_NAMEKEY,
+            namekey=TEST_NAMEKEY_MODEL,
             session_id=TEST_SESSION_ID,
             attempt_id="attempt-near-again",
             attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
-            submission=near_retry_submission,
+            submission_payload=near_retry_submission,
             assessment=near_assessment,
         )
         applied_rows = connection.execute(
@@ -3080,14 +3186,14 @@ def test_retry_preserves_exact_items_inside_a_rejected_field(
             codex_match_version=2,
         )
         assert (
-            api._process_retry_attempt(
+            process_retry_attempt_for_test(
                 connection,
                 run_id=TEST_RUN_ID,
-                namekey=TEST_NAMEKEY,
+                namekey=TEST_NAMEKEY_MODEL,
                 session_id=TEST_SESSION_ID,
                 attempt_id="attempt-baseline",
                 attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
-                submission=baseline_submission,
+                submission_payload=baseline_submission,
                 assessment=baseline_assessment,
             )
             == ()
@@ -3102,14 +3208,14 @@ def test_retry_preserves_exact_items_inside_a_rejected_field(
             rollout_filename=TEST_ROLLOUT_FILENAME,
             codex_match_version=2,
         )
-        violations = api._process_retry_attempt(
+        violations = process_retry_attempt_for_test(
             connection,
             run_id=TEST_RUN_ID,
-            namekey=TEST_NAMEKEY,
+            namekey=TEST_NAMEKEY_MODEL,
             session_id=TEST_SESSION_ID,
             attempt_id="attempt-changed",
             attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
-            submission=changed_submission,
+            submission_payload=changed_submission,
             assessment=changed_assessment,
         )
     finally:
@@ -3148,14 +3254,14 @@ def test_retry_preserves_fully_verified_fields_and_complete_evidence_counts(
             codex_match_version=2,
         )
         assert (
-            api._process_retry_attempt(
+            process_retry_attempt_for_test(
                 connection,
                 run_id=TEST_RUN_ID,
-                namekey=TEST_NAMEKEY,
+                namekey=TEST_NAMEKEY_MODEL,
                 session_id=TEST_SESSION_ID,
                 attempt_id="attempt-baseline",
                 attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
-                submission=baseline_submission,
+                submission_payload=baseline_submission,
                 assessment=baseline_assessment,
             )
             == ()
@@ -3170,14 +3276,14 @@ def test_retry_preserves_fully_verified_fields_and_complete_evidence_counts(
             rollout_filename=TEST_ROLLOUT_FILENAME,
             codex_match_version=2,
         )
-        violations = api._process_retry_attempt(
+        violations = process_retry_attempt_for_test(
             connection,
             run_id=TEST_RUN_ID,
-            namekey=TEST_NAMEKEY,
+            namekey=TEST_NAMEKEY_MODEL,
             session_id=TEST_SESSION_ID,
             attempt_id="attempt-changed",
             attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
-            submission=changed_submission,
+            submission_payload=changed_submission,
             assessment=changed_assessment,
         )
     finally:
@@ -3239,14 +3345,14 @@ def test_unmatched_evidence_can_be_replaced_or_explicitly_withdrawn(
             codex_match_version=2,
         )
         assert (
-            api._process_retry_attempt(
+            process_retry_attempt_for_test(
                 connection,
                 run_id=TEST_RUN_ID,
-                namekey=TEST_NAMEKEY,
+                namekey=TEST_NAMEKEY_MODEL,
                 session_id=TEST_SESSION_ID,
                 attempt_id="attempt-baseline",
                 attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
-                submission=baseline_submission,
+                submission_payload=baseline_submission,
                 assessment=baseline_assessment,
             )
             == ()
@@ -3261,14 +3367,14 @@ def test_unmatched_evidence_can_be_replaced_or_explicitly_withdrawn(
             rollout_filename=TEST_ROLLOUT_FILENAME,
             codex_match_version=2,
         )
-        violations = api._process_retry_attempt(
+        violations = process_retry_attempt_for_test(
             connection,
             run_id=TEST_RUN_ID,
-            namekey=TEST_NAMEKEY,
+            namekey=TEST_NAMEKEY_MODEL,
             session_id=TEST_SESSION_ID,
             attempt_id="attempt-retry",
             attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
-            submission=retry_submission,
+            submission_payload=retry_submission,
             assessment=retry_assessment,
         )
     finally:
@@ -3308,14 +3414,14 @@ def test_v2_near_evidence_cannot_be_withdrawn(
             codex_match_version=2,
         )
         assert (
-            api._process_retry_attempt(
+            process_retry_attempt_for_test(
                 connection,
                 run_id=TEST_RUN_ID,
-                namekey=TEST_NAMEKEY,
+                namekey=TEST_NAMEKEY_MODEL,
                 session_id=TEST_SESSION_ID,
                 attempt_id="attempt-baseline",
                 attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
-                submission=baseline_submission,
+                submission_payload=baseline_submission,
                 assessment=baseline_assessment,
             )
             == ()
@@ -3330,14 +3436,14 @@ def test_v2_near_evidence_cannot_be_withdrawn(
             rollout_filename=TEST_ROLLOUT_FILENAME,
             codex_match_version=2,
         )
-        violations = api._process_retry_attempt(
+        violations = process_retry_attempt_for_test(
             connection,
             run_id=TEST_RUN_ID,
-            namekey=TEST_NAMEKEY,
+            namekey=TEST_NAMEKEY_MODEL,
             session_id=TEST_SESSION_ID,
             attempt_id="attempt-withdrawal",
             attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
-            submission=withdrawal_submission,
+            submission_payload=withdrawal_submission,
             assessment=withdrawal_assessment,
         )
     finally:
@@ -3383,14 +3489,14 @@ def test_retry_baselines_survive_restart_and_remain_isolated_by_run(
                 codex_match_version=2,
             )
             assert (
-                api._process_retry_attempt(
+                process_retry_attempt_for_test(
                     first_connection,
                     run_id=run_id,
-                    namekey=TEST_NAMEKEY,
+                    namekey=TEST_NAMEKEY_MODEL,
                     session_id=TEST_SESSION_ID,
                     attempt_id=attempt_id,
                     attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
-                    submission=submission,
+                    submission_payload=submission,
                     assessment=assessment,
                 )
                 == ()
@@ -3418,14 +3524,14 @@ def test_retry_baselines_survive_restart_and_remain_isolated_by_run(
             (TEST_SECOND_RUN_ID, "run-two-exact"),
         ):
             assert (
-                api._process_retry_attempt(
+                process_retry_attempt_for_test(
                     second_connection,
                     run_id=run_id,
-                    namekey=TEST_NAMEKEY,
+                    namekey=TEST_NAMEKEY_MODEL,
                     session_id=TEST_SESSION_ID,
                     attempt_id=attempt_id,
                     attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
-                    submission=exact_submission,
+                    submission_payload=exact_submission,
                     assessment=exact_assessment,
                 )
                 == ()
@@ -3477,13 +3583,18 @@ def test_concurrent_first_rejections_cannot_replace_the_baseline(
             plain_body = submission_body_for_evidence(excerpt)
             barrier.wait()
             with api.DETOUR_DB_LOCK:
+                original_pull, _commit_record = retry_attempt_records(
+                    run_id=TEST_RUN_ID,
+                    session_id=TEST_SESSION_ID,
+                    attempt_id=attempt_id,
+                )
                 retry_expected = api._retry_baseline_exists(
                     connection,
-                    run_id=TEST_RUN_ID,
-                    namekey=TEST_NAMEKEY,
+                    original_pull=original_pull,
+                    namekey=TEST_NAMEKEY_MODEL,
                     session_id=TEST_SESSION_ID,
                 )
-                submission: api.SubmissionPayload = (
+                submission: Submission | StandardizedSubmission = (
                     StandardizedSubmission.model_validate(standardized_submission_body(plain_body))
                     if retry_expected
                     else Submission.model_validate(plain_body)
@@ -3495,14 +3606,14 @@ def test_concurrent_first_rejections_cannot_replace_the_baseline(
                     codex_match_version=2,
                 )
                 assert (
-                    api._process_retry_attempt(
+                    process_retry_attempt_for_test(
                         connection,
                         run_id=TEST_RUN_ID,
-                        namekey=TEST_NAMEKEY,
+                        namekey=TEST_NAMEKEY_MODEL,
                         session_id=TEST_SESSION_ID,
                         attempt_id=attempt_id,
                         attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
-                        submission=submission,
+                        submission_payload=submission,
                         assessment=assessment,
                     )
                     == ()
@@ -3579,14 +3690,14 @@ def test_corrupt_applied_audit_fails_as_configuration_error(
                 codex_match_version=2,
             )
             assert (
-                api._process_retry_attempt(
+                process_retry_attempt_for_test(
                     connection,
                     run_id=TEST_RUN_ID,
-                    namekey=TEST_NAMEKEY,
+                    namekey=TEST_NAMEKEY_MODEL,
                     session_id=TEST_SESSION_ID,
                     attempt_id=attempt_id,
                     attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
-                    submission=attempted_submission,
+                    submission_payload=attempted_submission,
                     assessment=attempted_assessment,
                 )
                 == ()
@@ -3597,21 +3708,21 @@ def test_corrupt_applied_audit_fails_as_configuration_error(
             SET {api.CODEX_EVIDENCE_ASSESSMENT_COL} = ?
             WHERE {api.CODEX_RETRY_ATTEMPT_ID_COL} = ?
             """,
-            ["{}", "audit-second"],
+            ["{}", str(deterministic_uuid7("audit-second"))],
         )
 
         with pytest.raises(
             api._PushConfigurationError,
             match=Locale.EVIDENCE_AUDIT_REPLAY_FAILED,
         ):
-            api._process_retry_attempt(
+            process_retry_attempt_for_test(
                 connection,
                 run_id=TEST_RUN_ID,
-                namekey=TEST_NAMEKEY,
+                namekey=TEST_NAMEKEY_MODEL,
                 session_id=TEST_SESSION_ID,
                 attempt_id="audit-third",
                 attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
-                submission=retry_submission,
+                submission_payload=retry_submission,
                 assessment=attempted_assessment,
             )
     finally:
@@ -3661,14 +3772,14 @@ def test_historical_haanen_retry_preserves_verified_evidence_roundtrip(
             (KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL, 1),
         )
         assert (
-            api._process_retry_attempt(
+            process_retry_attempt_for_test(
                 connection,
                 run_id=HAANEN_RUN_ID,
-                namekey=HAANEN_NAMEKEY,
+                namekey=HAANEN_NAMEKEY_MODEL,
                 session_id=HAANEN_SESSION_ID,
                 attempt_id=HAANEN_REJECTED_ATTEMPT_ID,
                 attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
-                submission=original_submission,
+                submission_payload=original_submission,
                 assessment=original_assessment,
             )
             == ()
@@ -3691,14 +3802,14 @@ def test_historical_haanen_retry_preserves_verified_evidence_roundtrip(
             )
             == HAANEN_RETRY_EVIDENCE_COUNT
         )
-        archived_retry_violations = api._process_retry_attempt(
+        archived_retry_violations = process_retry_attempt_for_test(
             connection,
             run_id=HAANEN_RUN_ID,
-            namekey=HAANEN_NAMEKEY,
+            namekey=HAANEN_NAMEKEY_MODEL,
             session_id=HAANEN_SESSION_ID,
             attempt_id=HAANEN_ACCEPTED_ATTEMPT_ID,
             attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
-            submission=archived_retry,
+            submission_payload=archived_retry,
             assessment=archived_retry_assessment,
         )
         assert archived_retry_violations
@@ -3761,14 +3872,14 @@ def test_historical_haanen_retry_preserves_verified_evidence_roundtrip(
         assert all(item.outcome == api.EVIDENCE_OUTCOME_V1_EXACT for item in ideal_archived_items)
         assert ideal_assessment.accepted is True
         assert (
-            api._process_retry_attempt(
+            process_retry_attempt_for_test(
                 connection,
                 run_id=HAANEN_RUN_ID,
-                namekey=HAANEN_NAMEKEY,
+                namekey=HAANEN_NAMEKEY_MODEL,
                 session_id=HAANEN_SESSION_ID,
                 attempt_id=f"{HAANEN_ACCEPTED_ATTEMPT_ID}-ideal",
                 attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
-                submission=ideal_retry,
+                submission_payload=ideal_retry,
                 assessment=ideal_assessment,
             )
             == ()
@@ -3788,9 +3899,13 @@ def test_historical_haanen_retry_preserves_verified_evidence_roundtrip(
         connection.close()
 
     assert audit_rows == [
-        (HAANEN_REJECTED_ATTEMPT_ID, True, False),
-        (HAANEN_ACCEPTED_ATTEMPT_ID, False, False),
-        (f"{HAANEN_ACCEPTED_ATTEMPT_ID}-ideal", True, True),
+        (str(deterministic_uuid7(HAANEN_REJECTED_ATTEMPT_ID)), True, False),
+        (str(deterministic_uuid7(HAANEN_ACCEPTED_ATTEMPT_ID)), False, False),
+        (
+            str(deterministic_uuid7(f"{HAANEN_ACCEPTED_ATTEMPT_ID}-ideal")),
+            True,
+            True,
+        ),
     ]
 
 
@@ -4063,27 +4178,37 @@ def test_copied_report_missing_malformed_or_ambiguous_fails_closed(
         api.parse_appendwatch_report(report_path, TEST_ROLLOUT_RELATIVE_PATH)
 
 
-def test_mutable_replay_log_registers_its_current_hash_on_each_backend_start(
+def test_configured_replay_log_hash_is_enforced_on_each_backend_start(
     tmp_path: Path,
+    backend_test_paths: BackendTestPaths,
 ) -> None:
+    release_map = tmp_path / "release-map.csv"
     replay_log = tmp_path / "replay.jsonl"
+    release_map.write_text("draw,batch\n1,1\n", encoding=TEXT_ENCODING)
     replay_log.write_text('{"first":true}\n', encoding=TEXT_ENCODING)
-    config = cast(
-        PipelineConfig,
-        SimpleNamespace(
-            files_config={
-                api.REPLAY_LOG_RESOURCE_KEY: {
-                    api.RESOURCE_PATH_KEY: str(replay_log),
-                    api.RESOURCE_DESCRIPTION_KEY: "mutable authoritative log",
-                    api.RESOURCE_SHA256_KEY: "0" * 64,
-                }
-            }
-        ),
+    config_data = json.loads(
+        backend_test_paths.ai_augment_config.read_text(encoding=TEXT_ENCODING)
     )
+    config_data["files_config"][MAP_SUBSET_0_TO_BATCH_KEY] = {
+        RESOURCE_PATH_KEY: str(release_map),
+        RESOURCE_SHA256_KEY: hashlib.sha256(release_map.read_bytes()).hexdigest(),
+        RESOURCE_DESCRIPTION_KEY: "isolated release map",
+    }
+    config_data["files_config"][REPLAY_LOG_KEY] = {
+        RESOURCE_PATH_KEY: str(replay_log),
+        RESOURCE_SHA256_KEY: hashlib.sha256(replay_log.read_bytes()).hexdigest(),
+        RESOURCE_DESCRIPTION_KEY: "isolated authoritative log",
+    }
 
-    resource = api.registered_replay_log(config)
+    configured = AiAugmentDetourConfig.model_validate(config_data)
 
-    assert resource.hash == hashlib.sha256(replay_log.read_bytes()).hexdigest()
+    assert all(
+        resource.verify_hash_on_init
+        for resource in configured.resources.registered_resources
+    )
+    replay_log.write_text('{"changed":true}\n', encoding=TEXT_ENCODING)
+    with pytest.raises(ValidationError):
+        AiAugmentDetourConfig.model_validate(config_data)
 
 
 @pytest.mark.parametrize(
@@ -4127,7 +4252,7 @@ def test_session_rollout_discovery_uses_restricted_audit_principal(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    session_id = "019fa457-aac5-7652-8669-9d571206e7cb"
+    session_id = UUID("019fa457-aac5-7652-8669-9d571206e7cb")
     rollout = api.CODEX_SESSIONS_ROOT / JULY_ROLLOUT_RELATIVE_PATH
     deployment_files = [
         tmp_path / "identity",
@@ -4202,8 +4327,9 @@ def test_audit_ssh_uses_pinned_identity_and_counts_physical_lines(
     assert command[-1] == (f"{api.AUDIT_READ_ROLLOUT_COMMAND} {TEST_ROLLOUT_RELATIVE_PATH}")
     assert "shell" not in captured["kwargs"]
     assert archived.line_count == 2
-    assert archived.path == runtime.rollout_cas_dir / api.ROLLOUT_CAS_FILENAME_TEMPLATE.format(
-        sha256=archived.sha256
+    assert archived.path == (
+        runtime.pipeline_config.rollout_cas_dir
+        / api.ROLLOUT_CAS_FILENAME_TEMPLATE.format(sha256=archived.sha256)
     )
 
 
@@ -4320,46 +4446,32 @@ def test_backend_startup_prepares_source_rows_for_initial_pull(
 ) -> None:
     base_runtime = runtime_for_test(tmp_path, backend_test_paths)
     outerdict = ai_augment_outerdict("A.", "Sheikh")
-    closed = False
+    factory_calls: list[AiAugmentBackendContext] = []
 
-    class SourceConnection:
-        def close(self) -> None:
-            nonlocal closed
-            closed = True
-
-    source_connection = SourceConnection()
-
-    def connect(path: str, *, read_only: bool) -> SourceConnection:
-        assert path == str(base_runtime.pipeline.db_file)
-        assert read_only is True
-        return source_connection
+    def outerdicts_factory(
+        context: AiAugmentBackendContext,
+    ) -> tuple[AiAugmentOuterDict, ...]:
+        factory_calls.append(context)
+        return (outerdict,)
 
     monkeypatch.setenv(api.NAMEKEY_ENV_NAME, TEST_NAMEKEY)
     monkeypatch.setattr(
         AiAugmentDetourConfig,
         "from_json",
-        lambda _path: base_runtime.pipeline,
+        lambda _path, *, verify_hash_on_init=True: base_runtime.pipeline_config,
     )
-    monkeypatch.setattr(api, "registered_replay_log", lambda _pipeline: base_runtime.replay_log)
-    monkeypatch.setattr(api, "registered_release_map", lambda _pipeline: base_runtime.replay_log)
-    monkeypatch.setattr(api, "load_release_batches", lambda _resource: {})
-    monkeypatch.setattr(duckdb, "connect", connect)
     monkeypatch.setattr(
-        api,
-        "derive_ai_augment_outerdicts",
-        lambda *_args, **_kwargs: (outerdict,),
+        AiAugmentBackendContext,
+        "ai_augment_outerdicts_factory",
+        outerdicts_factory,
     )
 
     runtime = api.configure_runtime(backend_test_paths.ai_augment_config)
 
-    assert closed is True
-    assert runtime.configured_ai_augment_outerdict is outerdict
-
-    def unexpected_source_reopen(_runtime: AiAugmentBackendContext) -> None:
-        pytest.fail("initial pull must consume source rows prepared at Backend startup")
+    assert factory_calls == [runtime]
+    assert runtime.configured_ai_augment_outerdict() is outerdict
 
     monkeypatch.setattr(api, "runtime_configuration", lambda: runtime)
-    monkeypatch.setattr(api, "open_source_database", unexpected_source_reopen)
     monkeypatch.setattr(
         api,
         "StreamingResponse",
@@ -4368,9 +4480,10 @@ def test_backend_startup_prepares_source_rows_for_initial_pull(
             media_type=media_type,
         ),
     )
-    monkeypatch.setattr(api, "BACKEND_WORKFLOW_STATUS", api.BackendWorkflowStatus.READY)
+    monkeypatch.setattr(api, "BACKEND_LIFECYCLE", BackendLifecycle.READY)
     response = api.authoritative_pull()
 
+    assert factory_calls == [runtime]
     assert response.status_code == status.HTTP_200_OK
     assert response.body == "".join(api.configured_pull_lines(outerdict)).encode()
 
@@ -4386,14 +4499,11 @@ def test_ipc_only_runtime_prepares_projection_without_a_namekey(
     monkeypatch.setattr(
         AiAugmentDetourConfig,
         "from_json",
-        lambda _path: base_runtime.pipeline,
+        lambda _path, *, verify_hash_on_init=True: base_runtime.pipeline_config,
     )
-    monkeypatch.setattr(api, "registered_replay_log", lambda _pipeline: base_runtime.replay_log)
-    monkeypatch.setattr(api, "registered_release_map", lambda _pipeline: base_runtime.replay_log)
-    monkeypatch.setattr(api, "load_release_batches", lambda _resource: {})
     monkeypatch.setattr(
-        api,
-        "derive_ai_augment_outerdicts",
+        AiAugmentBackendContext,
+        "ai_augment_outerdicts_factory",
         lambda *_args, **_kwargs: (outerdict,),
     )
 
@@ -4403,7 +4513,7 @@ def test_ipc_only_runtime_prepares_projection_without_a_namekey(
     )
 
     assert runtime.configured_namekey is None
-    assert runtime.configured_ai_augment_outerdict is None
+    assert runtime.configured_ai_augment_outerdict() is None
     assert runtime.ai_augment_outerdicts == (outerdict,)
 
 
@@ -4415,7 +4525,7 @@ def test_ipc_only_query_defers_configuration_and_uses_read_only_database(
     config_path = tmp_path / "config.json"
     outerdict = ai_augment_outerdict("A.", "Sheikh")
     runtime = runtime_for_test(tmp_path, backend_test_paths).model_copy(
-        update={"ai_augment_outerdicts": (outerdict,)}
+        update={"cached_ai_augment_outerdicts": (outerdict,)}
     )
     calls: list[object] = []
 
@@ -4425,8 +4535,15 @@ def test_ipc_only_query_defers_configuration_and_uses_read_only_database(
 
     connection = cast(duckdb.DuckDBPyConnection, ReadOnlyConnection())
 
-    def configure(selected_path: Path, *, require_namekey: bool) -> None:
-        calls.append(("configure", selected_path, require_namekey))
+    def configure(
+        selected_path: Path,
+        *,
+        require_namekey: bool,
+        verify_hash_on_init: bool,
+    ) -> None:
+        calls.append(
+            ("configure", selected_path, require_namekey, verify_hash_on_init)
+        )
 
     def open_database(
         selected_runtime: AiAugmentBackendContext,
@@ -4442,8 +4559,13 @@ def test_ipc_only_query_defers_configuration_and_uses_read_only_database(
         return runtime
 
     def attempts(
+        selected_runtime: AiAugmentBackendContext,
         selected_connection: duckdb.DuckDBPyConnection,
-    ) -> tuple[AgentRuntimeAttempt, ...]:
+        *,
+        namekey: NameKey | None,
+    ) -> tuple[AgentRuntimeAttemptRecord, ...]:
+        assert selected_runtime is runtime
+        assert namekey is None or namekey == TEST_NAMEKEY_MODEL
         calls.append(("attempts", selected_connection))
         return ()
 
@@ -4464,20 +4586,24 @@ def test_ipc_only_query_defers_configuration_and_uses_read_only_database(
 
     assert calls == []
     first = QueryResponse.from_serialized_json(query(None))
-    second = QueryResponse.from_serialized_json(query(TEST_NAMEKEY))
-    assert first.ai_augment_outerdicts == (outerdict,)
-    assert second.ai_augment_outerdicts == (outerdict,)
+    second = QueryResponse.from_serialized_json(query(TEST_NAMEKEY_MODEL))
+    assert tuple(
+        value.serialize() for value in first.ai_augment_outerdicts
+    ) == (outerdict.serialize(),)
+    assert tuple(
+        value.serialize() for value in second.ai_augment_outerdicts
+    ) == (outerdict.serialize(),)
     assert calls == [
-        ("configure", config_path, False),
+        ("configure", config_path, False, True),
         "runtime",
         ("open", True),
-        ("attempts", connection),
         ("committed", connection),
+        ("attempts", connection),
         "close",
         "runtime",
         ("open", True),
-        ("attempts", connection),
         ("committed", connection),
+        ("attempts", connection),
         "close",
     ]
 
@@ -4518,14 +4644,14 @@ def test_detour_database_open_modes_are_explicit_and_reported(
         api.open_detour_database(runtime)
 
     assert calls == [
-        (str(runtime.detour_db_path), True),
-        (str(runtime.detour_db_path), False),
+        (str(runtime.pipeline_config.detour_db_path), True),
+        (str(runtime.pipeline_config.detour_db_path), False),
     ]
     assert extension_calls == [
         (
             connection,
             api.CODEX_TOKEN_EXTENSION,
-            runtime.pipeline.duckdb_extensions.get(api.CODEX_TOKEN_EXTENSION),
+            runtime.pipeline_config.duckdb_extensions.get(api.CODEX_TOKEN_EXTENSION),
             None,
         )
     ]
@@ -4627,9 +4753,24 @@ def test_required_config_and_source_database_are_read_only(
         ]).ipc_only
         is True
     )
-    assert api._detour_db_path(
-        backend_test_paths.source_database
-    ) == backend_test_paths.source_database.with_name("scisci_process__detour_ai-augment.duckdb")
+    replay_log = tmp_path / "configured-replay.jsonl"
+    replay_log.write_text("", encoding=TEXT_ENCODING)
+    config_data = json.loads(
+        backend_test_paths.ai_augment_config.read_text(encoding=TEXT_ENCODING)
+    )
+    config_data["db_file"] = str(backend_test_paths.source_database)
+    config_data["files_config"][REPLAY_LOG_KEY] = {
+        RESOURCE_PATH_KEY: str(replay_log),
+        RESOURCE_SHA256_KEY: hashlib.sha256(b"").hexdigest(),
+        RESOURCE_DESCRIPTION_KEY: "isolated authoritative log",
+    }
+    configured = AiAugmentDetourConfig.model_validate(
+        config_data,
+        context={"verify_hash_on_init": False},
+    )
+    assert configured.detour_db_path == backend_test_paths.source_database.with_name(
+        "scisci_process__detour_ai-augment.duckdb"
+    )
 
     runtime = runtime_for_test(tmp_path, backend_test_paths)
     before = file_signature(backend_test_paths.source_database)
@@ -4654,7 +4795,9 @@ def test_main_ipc_only_runs_only_the_dashboard_query_server(
     monkeypatch.setattr(
         ipc,
         "serve_dashboard_query_only",
-        lambda selected_path: calls.append(("ipc", selected_path)),
+        lambda selected_path, *, verify_hash_on_init: calls.append(
+            ("ipc", selected_path, verify_hash_on_init)
+        ),
     )
     monkeypatch.setattr(
         api,
@@ -4669,7 +4812,7 @@ def test_main_ipc_only_runs_only_the_dashboard_query_server(
 
     server.main(["--config", str(config_path), server.IPC_ONLY_OPTION])
 
-    assert calls == ["acquire", ("ipc", config_path), "release"]
+    assert calls == ["acquire", ("ipc", config_path, True), "release"]
 
 
 def test_main_full_mode_configures_and_runs_composed_backend(
@@ -4688,7 +4831,9 @@ def test_main_full_mode_configures_and_runs_composed_backend(
     monkeypatch.setattr(
         api,
         "configure_runtime",
-        lambda selected_path: calls.append(("configure", selected_path)),
+        lambda selected_path, *, verify_hash_on_init: calls.append(
+            ("configure", selected_path, verify_hash_on_init)
+        ),
     )
     monkeypatch.setattr(
         server,
@@ -4705,7 +4850,7 @@ def test_main_full_mode_configures_and_runs_composed_backend(
 
     assert calls == [
         "acquire",
-        ("configure", config_path),
+        ("configure", config_path, True),
         "compose",
         ("serve", api.app, api.SERVER_HOST, api.SERVER_PORT),
         "release",
@@ -4793,20 +4938,26 @@ def test_push_acceptance_changes_state_before_post_commit_work(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     pull_record_id = UUID("019d0000-0000-7000-8000-000000000010")
-    session_id = "019d0000-0000-7000-8000-000000000011"
-    monkeypatch.setattr(api, "BACKEND_WORKFLOW_STATUS", api.BackendWorkflowStatus.READY)
-    monkeypatch.setattr(api, "BACKEND_CURRENT_PULL_RECORD_ID", pull_record_id)
-    monkeypatch.setattr(api, "BACKEND_PENDING_PULL_RECORD_ID", None)
-    monkeypatch.setattr(api, "BACKEND_PREPARED_PULL_RESPONSE", None)
+    pull_record = persisted_http_record(
+        record_id=pull_record_id,
+        method=api.HTTP_GET_METHOD,
+        path=api.PULL_PATH,
+        response_code=status.HTTP_200_OK,
+    )
+    session_id = UUID("019d0000-0000-7000-8000-000000000011")
+    monkeypatch.setattr(api, "BACKEND_LIFECYCLE", BackendLifecycle.READY)
+    monkeypatch.setattr(api, "BACKEND_CURRENT_PULL_RECORD", pull_record)
+    monkeypatch.setattr(api, "BACKEND_PENDING_PULL_RECORD", None)
+    monkeypatch.setattr(api, "BACKEND_ATTEMPT_RECORD", None)
     monkeypatch.setattr(api, "BACKEND_SESSION_ID", session_id)
 
     response = asyncio.run(api.authoritative_push(cast(Any, None)))
 
     assert response.status_code == status.HTTP_202_ACCEPTED
     assert response.headers[api.LOCATION_HEADER] == api.PULL_PATH
-    assert api.BACKEND_WORKFLOW_STATUS is api.BackendWorkflowStatus.BUSY
-    assert api.BACKEND_PENDING_PULL_RECORD_ID == pull_record_id
-    assert api.BACKEND_CURRENT_PULL_RECORD_ID is None
+    assert api.BACKEND_LIFECYCLE is BackendLifecycle.BUSY
+    assert api.BACKEND_PENDING_PULL_RECORD is pull_record
+    assert api.BACKEND_CURRENT_PULL_RECORD is None
 
     duplicate = asyncio.run(api.authoritative_push(cast(Any, None)))
 
@@ -4820,16 +4971,33 @@ def test_retry_push_requires_a_persisted_current_pull_before_acceptance(
 ) -> None:
     prior_pending_pull_record_id = UUID("019d0000-0000-7000-8000-000000000030")
     current_pull_record_id = UUID("019d0000-0000-7000-8000-000000000031")
-    session_id = "019d0000-0000-7000-8000-000000000032"
-    prior_response = cast(PreparedPullResponse, object())
-    monkeypatch.setattr(api, "BACKEND_WORKFLOW_STATUS", api.BackendWorkflowStatus.RETRY)
-    monkeypatch.setattr(api, "BACKEND_CURRENT_PULL_RECORD_ID", None)
+    session_id = UUID("019d0000-0000-7000-8000-000000000032")
+    prior_pending_pull, prior_commit = retry_attempt_records(
+        run_id=prior_pending_pull_record_id,
+        session_id=session_id,
+        attempt_id="prior-retry",
+    )
+    prior_attempt_record = AgentRuntimeAttemptRecord(
+        attempt=AgentRuntimeAttempt(
+            pull_record=prior_pending_pull,
+            commit_record=prior_commit,
+            post_commit_validation=PostCommitValidation(
+                stage=BackendLifecycle.PYDANTIC_VALIDATION,
+                result=BackendLifecycle.REJECTED,
+                detail="retry",
+            ),
+        ),
+        submission=None,
+        ground_truth_innerdict=None,
+    )
+    monkeypatch.setattr(api, "BACKEND_LIFECYCLE", BackendLifecycle.RETRY)
+    monkeypatch.setattr(api, "BACKEND_CURRENT_PULL_RECORD", None)
     monkeypatch.setattr(
         api,
-        "BACKEND_PENDING_PULL_RECORD_ID",
-        prior_pending_pull_record_id,
+        "BACKEND_PENDING_PULL_RECORD",
+        prior_pending_pull,
     )
-    monkeypatch.setattr(api, "BACKEND_PREPARED_PULL_RESPONSE", prior_response)
+    monkeypatch.setattr(api, "BACKEND_ATTEMPT_RECORD", prior_attempt_record)
     monkeypatch.setattr(api, "BACKEND_SESSION_ID", session_id)
     request = cast(Any, object())
 
@@ -4838,10 +5006,10 @@ def test_retry_push_requires_a_persisted_current_pull_before_acceptance(
     assert premature.status_code == status.HTTP_409_CONFLICT
     assert premature.headers[api.LOCATION_HEADER] == api.PULL_PATH
     assert json.loads(bytes(premature.body)) == {"detail": Locale.CONFIGURATION_ERROR_DETAIL}
-    assert api.BACKEND_WORKFLOW_STATUS is api.BackendWorkflowStatus.RETRY
-    assert api.BACKEND_CURRENT_PULL_RECORD_ID is None
-    assert api.BACKEND_PENDING_PULL_RECORD_ID == prior_pending_pull_record_id
-    assert api.BACKEND_PREPARED_PULL_RESPONSE is prior_response
+    assert api.BACKEND_LIFECYCLE is BackendLifecycle.RETRY
+    assert api.BACKEND_CURRENT_PULL_RECORD is None
+    assert api.BACKEND_PENDING_PULL_RECORD is prior_pending_pull
+    assert api.BACKEND_ATTEMPT_RECORD is prior_attempt_record
     assert Locale.PUSH_CURRENT_PULL_REQUIRED_LOG in caplog.messages
 
     persisted_pull = HttpRequestLogRecord(
@@ -4863,53 +5031,55 @@ def test_retry_push_requires_a_persisted_current_pull_before_acceptance(
     )
     asyncio.run(api._after_authoritative_public_record(persisted_pull))
 
-    assert api.BACKEND_CURRENT_PULL_RECORD_ID == current_pull_record_id
+    assert api.BACKEND_CURRENT_PULL_RECORD is persisted_pull
     accepted = asyncio.run(api.authoritative_push(request))
     assert accepted.status_code == status.HTTP_202_ACCEPTED
     assert accepted.headers[api.LOCATION_HEADER] == api.PULL_PATH
-    current_workflow_status = cast(
-        api.BackendWorkflowStatus,
-        getattr(api, "BACKEND_WORKFLOW_STATUS"),
-    )
-    assert current_workflow_status is api.BackendWorkflowStatus.BUSY
-    assert api.BACKEND_CURRENT_PULL_RECORD_ID is None
-    assert api.BACKEND_PENDING_PULL_RECORD_ID == current_pull_record_id
-    assert api.BACKEND_PREPARED_PULL_RESPONSE is None
+    assert api.BACKEND_LIFECYCLE is BackendLifecycle.BUSY
+    assert api.BACKEND_CURRENT_PULL_RECORD is None
+    assert api.BACKEND_PENDING_PULL_RECORD is persisted_pull
+    assert api.BACKEND_ATTEMPT_RECORD is None
 
 
 @pytest.mark.parametrize(
     ("workflow_status", "session_id"),
     (
-        (api.BackendWorkflowStatus.READY, None),
-        (api.BackendWorkflowStatus.FAILED, TEST_SESSION_ID),
+        (BackendLifecycle.READY, None),
+        (BackendLifecycle.FAILED, TEST_SESSION_ID),
     ),
 )
 def test_push_configuration_failures_remain_internal_errors(
     monkeypatch: pytest.MonkeyPatch,
-    workflow_status: api.BackendWorkflowStatus,
-    session_id: str | None,
+    workflow_status: BackendLifecycle,
+    session_id: UUID | None,
 ) -> None:
     pull_record_id = UUID("019d0000-0000-7000-8000-000000000040")
-    monkeypatch.setattr(api, "BACKEND_WORKFLOW_STATUS", workflow_status)
-    monkeypatch.setattr(api, "BACKEND_CURRENT_PULL_RECORD_ID", pull_record_id)
-    monkeypatch.setattr(api, "BACKEND_PENDING_PULL_RECORD_ID", None)
-    monkeypatch.setattr(api, "BACKEND_PREPARED_PULL_RESPONSE", None)
+    pull_record = persisted_http_record(
+        record_id=pull_record_id,
+        method=api.HTTP_GET_METHOD,
+        path=api.PULL_PATH,
+        response_code=status.HTTP_200_OK,
+    )
+    monkeypatch.setattr(api, "BACKEND_LIFECYCLE", workflow_status)
+    monkeypatch.setattr(api, "BACKEND_CURRENT_PULL_RECORD", pull_record)
+    monkeypatch.setattr(api, "BACKEND_PENDING_PULL_RECORD", None)
+    monkeypatch.setattr(api, "BACKEND_ATTEMPT_RECORD", None)
     monkeypatch.setattr(api, "BACKEND_SESSION_ID", session_id)
 
     response = asyncio.run(api.authoritative_push(cast(Any, None)))
 
     assert response.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
     assert api.LOCATION_HEADER not in response.headers
-    assert api.BACKEND_WORKFLOW_STATUS is workflow_status
-    assert api.BACKEND_CURRENT_PULL_RECORD_ID == pull_record_id
-    assert api.BACKEND_PENDING_PULL_RECORD_ID is None
+    assert api.BACKEND_LIFECYCLE is workflow_status
+    assert api.BACKEND_CURRENT_PULL_RECORD is pull_record
+    assert api.BACKEND_PENDING_PULL_RECORD is None
 
 
 def test_accepted_push_is_committed_only_after_its_public_record(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    session_id = "019d0000-0000-7000-8000-000000000021"
+    session_id = UUID("019d0000-0000-7000-8000-000000000021")
     pull_record_id = UUID("019d0000-0000-7000-8000-000000000020")
     pull_record = persisted_http_record(
         record_id=pull_record_id,
@@ -4933,7 +5103,7 @@ def test_accepted_push_is_committed_only_after_its_public_record(
         ready_to_respond_at_unix_usec=1,
         duration_usec=1,
     )
-    rollout_path = tmp_path / ("rollout-2026-08-31T00-00-00-" + session_id + ".jsonl")
+    rollout_path = tmp_path / f"rollout-2026-08-31T00-00-00-{session_id}.jsonl"
     rollout_path.write_text("{}\n", encoding=TEXT_ENCODING)
     rollout = api._archived_file(rollout_path)
     configuration = SimpleNamespace(
@@ -4943,8 +5113,8 @@ def test_accepted_push_is_committed_only_after_its_public_record(
         AiAugmentBackendContext,
         SimpleNamespace(configured_namekey=NameKey.from_json_key(TEST_NAMEKEY)),
     )
-    appended: list[HttpRequestLogRecord] = []
-    api.BACKEND_PENDING_PULL_RECORD_ID = pull_record_id
+    appended: list[BackendCommitRecord] = []
+    api.BACKEND_PENDING_PULL_RECORD = pull_record
     api.BACKEND_SESSION_ID = session_id
     monkeypatch.setattr(api, "runtime_configuration", lambda: runtime)
     monkeypatch.setattr(
@@ -4954,40 +5124,25 @@ def test_accepted_push_is_committed_only_after_its_public_record(
     )
     monkeypatch.setattr(api, "copy_rollout_to_cas", lambda *_args: rollout)
     monkeypatch.setattr(api, "_read_appendwatch_bytes", lambda *_args: b".\n")
-    monkeypatch.setattr(api, "append_authoritative_record", appended.append)
-    expected = PreparedPullResponse(
-        commit_record_id=UUID("019d0000-0000-7000-8000-000000000022"),
-        post_commit_validation=PostCommitValidation(
-            stage=PostCommitValidationStage.PYDANTIC_VALIDATION,
-            result=PostCommitValidationResult.REJECTED,
-            detail="retry",
-        ),
-        response_code=200,
-        response_headers={"content-type": api.MARKDOWN_MEDIA_TYPE},
-        response_body="retry\n",
-    )
 
-    @contextmanager
-    def synchronized_database(
-        _runtime: AiAugmentBackendContext,
-    ) -> Iterator[duckdb.DuckDBPyConnection]:
-        yield cast(duckdb.DuckDBPyConnection, object())
+    def append_commit(record: HttpRequestLogRecord) -> AgentRuntimeAttemptRecord:
+        assert isinstance(record, BackendCommitRecord)
+        appended.append(record)
+        return AgentRuntimeAttemptRecord(
+            attempt=AgentRuntimeAttempt(
+                pull_record=pull_record,
+                commit_record=record,
+                post_commit_validation=PostCommitValidation(
+                    stage=BackendLifecycle.PYDANTIC_VALIDATION,
+                    result=BackendLifecycle.REJECTED,
+                    detail="retry",
+                ),
+            ),
+            submission=None,
+            ground_truth_innerdict=None,
+        )
 
-    monkeypatch.setattr(api, "synchronized_detour_database", synchronized_database)
-    monkeypatch.setattr(
-        api,
-        "_projected_http_record",
-        lambda _connection, selected_id: (
-            (1, pull_record) if selected_id == pull_record_id else pytest.fail()
-        ),
-    )
-    monkeypatch.setattr(
-        api,
-        "_projected_prepared_pull_response",
-        lambda _runtime, commit_record_id: expected.model_copy(
-            update={"commit_record_id": commit_record_id}
-        ),
-    )
+    monkeypatch.setattr(api, "append_authoritative_record", append_commit)
 
     api._commit_accepted_push(push_record)
 
@@ -5005,7 +5160,7 @@ def test_accepted_push_is_committed_only_after_its_public_record(
     assert commit.push_record is push_record
     assert commit.codex_session_record.codex_rollout_record is not None
     assert commit.codex_session_record.codex_rollout_record.sha256 == rollout.sha256
-    assert api.BACKEND_WORKFLOW_STATUS is api.BackendWorkflowStatus.RETRY
+    assert api.BACKEND_LIFECYCLE is BackendLifecycle.RETRY
 
 
 @pytest.mark.anyio
@@ -5028,7 +5183,7 @@ async def test_persisted_push_becomes_latest_run_outcome_snapshot_provenance(
         ready_to_respond_at_unix_usec=2,
         duration_usec=1,
     )
-    monkeypatch.setattr(api, "BACKEND_LATEST_PUSH_RECORD_ID", None)
+    monkeypatch.setattr(api, "BACKEND_LATEST_PUSH_RECORD", None)
     monkeypatch.setattr(api, "AUTHORITATIVE_BACKGROUND_TASKS", set())
     monkeypatch.setattr(api, "_commit_accepted_push", lambda _record: None)
 
@@ -5040,91 +5195,112 @@ async def test_persisted_push_becomes_latest_run_outcome_snapshot_provenance(
     background_tasks = tuple(api.AUTHORITATIVE_BACKGROUND_TASKS)
     await asyncio.gather(*background_tasks)
 
-    assert api.BACKEND_LATEST_PUSH_RECORD_ID == push_record.record_id
+    assert api.BACKEND_LATEST_PUSH_RECORD is push_record
 
 
 @pytest.mark.parametrize(
     ("result", "stage", "expected_code", "expected_media_type"),
     (
         (
-            PostCommitValidationResult.ACCEPTED,
-            PostCommitValidationStage.ACCEPTED,
+            BackendLifecycle.ACCEPTED,
+            BackendLifecycle.ACCEPTED,
             410,
             api.MEDIA_TYPE_WITH_CHARSET,
         ),
         (
-            PostCommitValidationResult.REJECTED,
-            PostCommitValidationStage.PYDANTIC_VALIDATION,
+            BackendLifecycle.REJECTED,
+            BackendLifecycle.PYDANTIC_VALIDATION,
             200,
             api.MARKDOWN_MEDIA_TYPE,
         ),
         (
-            PostCommitValidationResult.REJECTED,
-            PostCommitValidationStage.DUCKDB_EVIDENCE_VALIDATION,
+            BackendLifecycle.REJECTED,
+            BackendLifecycle.DUCKDB_EVIDENCE_VALIDATION,
             200,
             api.MARKDOWN_MEDIA_TYPE,
         ),
         (
-            PostCommitValidationResult.REJECTED,
-            PostCommitValidationStage.ROLLOUT_INDEX,
+            BackendLifecycle.REJECTED,
+            BackendLifecycle.ROLLOUT_INDEX,
             500,
             api.JSON_MEDIA_TYPE,
         ),
         (
-            PostCommitValidationResult.REJECTED,
-            PostCommitValidationStage.APPENDWATCH_REPORT_VALIDATION,
+            BackendLifecycle.REJECTED,
+            BackendLifecycle.APPENDWATCH_REPORT_VALIDATION,
             500,
             api.JSON_MEDIA_TYPE,
         ),
     ),
 )
 def test_post_commit_result_is_exposed_only_by_follow_up_pull(
-    result: PostCommitValidationResult,
-    stage: PostCommitValidationStage,
+    monkeypatch: pytest.MonkeyPatch,
+    result: BackendLifecycle,
+    stage: BackendLifecycle,
     expected_code: int,
     expected_media_type: str,
 ) -> None:
-    commit_record = HttpRequestLogRecord(
-        schema_version="1.1",
-        method="POST",
-        scheme="http",
-        host="invalid",
-        path="/commit",
-        query="",
-        request_headers={},
-        request_body="{}",
-        response_code=None,
-        response_headers=None,
-        response_body=None,
-        received_at_unix_usec=None,
-        duration_usec=None,
+    monkeypatch.setattr(
+        api,
+        "runtime_configuration",
+        lambda: cast(AiAugmentBackendContext, SimpleNamespace()),
     )
-    post_commit_validation = PostCommitValidation(
-        stage=stage,
-        result=result,
-        detail="retry details",
+    pull_record, commit_record = retry_attempt_records(
+        run_id=UUID("019d0000-0000-7000-8000-000000000050"),
+        session_id=UUID("019d0000-0000-7000-8000-000000000051"),
+        attempt_id=f"{result.value}-{stage.value}",
     )
+    submission = (
+        StandardizedSubmission.model_validate(
+            standardized_submission_body(valid_submission_body())
+        )
+        if result is BackendLifecycle.ACCEPTED
+        else None
+    )
+    api.BACKEND_ATTEMPT_RECORD = AgentRuntimeAttemptRecord(
+        attempt=AgentRuntimeAttempt(
+            pull_record=pull_record,
+            commit_record=commit_record,
+            post_commit_validation=PostCommitValidation(
+                stage=stage,
+                result=result,
+                detail="retry details",
+            ),
+        ),
+        submission=submission,
+        ground_truth_innerdict=None,
+    )
+    if result is BackendLifecycle.ACCEPTED:
+        api.BACKEND_LIFECYCLE = BackendLifecycle.COMPLETE
+    elif stage in {
+        BackendLifecycle.PYDANTIC_VALIDATION,
+        BackendLifecycle.DUCKDB_EVIDENCE_VALIDATION,
+    }:
+        api.BACKEND_LIFECYCLE = BackendLifecycle.RETRY
+    else:
+        api.BACKEND_LIFECYCLE = BackendLifecycle.FAILED
 
-    outcome = api._prepared_pull_response_from_validation(
-        record=commit_record,
-        post_commit_validation=post_commit_validation,
-        accepted_response_body='{"accepted":true}\n',
-    )
+    if api.BACKEND_LIFECYCLE is BackendLifecycle.FAILED:
+        with pytest.raises(HTTPException) as exc_info:
+            api.authoritative_pull()
+        assert exc_info.value.status_code == expected_code
+        return
 
-    assert outcome.response_code == expected_code
-    assert outcome.response_headers["content-type"] == expected_media_type
+    response = api.authoritative_pull()
+    assert response.status_code == expected_code
+    assert response.headers["content-type"].startswith(expected_media_type)
 
 
 def test_backend_stdin_accepts_one_canonical_session_id() -> None:
     api.BACKEND_SESSION_ID = None
     session_id = "019d0000-0000-7000-8000-000000000040"
 
-    api.read_backend_session_id(SimpleNamespace(readline=lambda: session_id + "\n"))
+    api.read_backend_session_id(StringIO(session_id + "\n"))
 
-    assert api.BACKEND_SESSION_ID == session_id
+    assert api.BACKEND_SESSION_ID == UUID(session_id)
     with pytest.raises(api._PushConfigurationError):
         api.read_backend_session_id(
-            SimpleNamespace(readline=lambda: "019d0000-0000-7000-8000-000000000041\n")
+            StringIO("019d0000-0000-7000-8000-000000000041\n")
         )
 
 
@@ -5257,7 +5433,7 @@ def test_dashboard_query_uses_one_backend_owned_connection_and_synchronizes_each
         tracked_synchronize,
     )
 
-    first = QueryResponse.from_serialized_json(ipc.dashboard_query_payload())
+    first = QueryResponse.from_serialized_json(ipc.dashboard_query_payload(None))
     replayed_pull = HttpRequestLogRecord(
         schema_version="1.1",
         method=api.HTTP_GET_METHOD,
@@ -5275,11 +5451,11 @@ def test_dashboard_query_uses_one_backend_owned_connection_and_synchronizes_each
         received_at_unix_usec=None,
         duration_usec=1,
     )
-    Path(runtime.replay_log).write_text(
+    Path(runtime.pipeline_config.resources.replay_log).write_text(
         replayed_pull.model_dump_json() + "\n",
         encoding=TEXT_ENCODING,
     )
-    second = QueryResponse.from_serialized_json(ipc.dashboard_query_payload())
+    second = QueryResponse.from_serialized_json(ipc.dashboard_query_payload(None))
 
     assert (
         first

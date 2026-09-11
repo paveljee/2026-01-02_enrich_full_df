@@ -10,19 +10,23 @@ from typing import NoReturn
 import pytest
 from fastapi import status
 
-from src.detours.detour_ai_augment.src.backend import api, ipc, server
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_config import (
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_augment_config import (  # noqa: E501
     AiAugmentDetourConfig,
 )
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_context import (
+from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
+    TEXT_ENCODING,
+)
+from src.detours.detour_ai_augment.src.backend import api, ipc, server
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.commit_event import (
+    CodexSessionRecord,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.query_response import (
     QueryResponse,
 )
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.server_event import (
-    CodexSessionRecord,
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.run_outcome_response import (
     RunOutcomeResponse,
     RunOutcomeResponseBody,
 )
-from src.detours.detour_ai_augment.src.backend.helpers.vars import TEXT_ENCODING
 from src.detours.detour_ai_augment.src.backend.ipc import (
     DASHBOARD_IPC_HOST,
     DASHBOARD_IPC_SCHEME,
@@ -37,7 +41,6 @@ from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_mod
     run_outcome as run_outcome_models,
 )
 from src.detours.detour_ai_augment.src.control_centre.dashboard.ui import (
-    Namekey,
     _BackendDatabaseClient,
 )
 from src.helpers.data_models import NameKey
@@ -103,13 +106,13 @@ def test_full_backend_composition_stops_ipc_before_domain_shutdown(
 
 
 def test_dashboard_query_flask_application_is_separate_and_unauthenticated() -> None:
-    observed: list[str | None] = []
+    observed: list[NameKey | None] = []
     payload = QueryResponse(
         attempts=(),
         ai_augment_outerdicts=(),
     ).model_dump_json()
 
-    def query(namekey: str | None) -> str:
+    def query(namekey: NameKey | None) -> str:
         observed.append(namekey)
         return payload
 
@@ -120,16 +123,17 @@ def test_dashboard_query_flask_application_is_separate_and_unauthenticated() -> 
     )
 
     availability_response = app.test_client().options(DASHBOARD_QUERY_PATH)
+    namekey = NameKey.from_json_key(TEST_NAMEKEY)
     response = app.test_client().get(
         DASHBOARD_QUERY_PATH,
-        query_string={KTP_NAMEKEY_COL: "researcher"},
+        query_string={KTP_NAMEKEY_COL: namekey.to_json_key()},
     )
 
     assert availability_response.status_code == 200
     assert response.status_code == 200
     assert response.content_type == JSON_MEDIA_TYPE
     assert response.get_data(as_text=True) == payload
-    assert observed == ["researcher"]
+    assert observed == [namekey]
     assert id(app) != id(api.app)
 
 
@@ -139,7 +143,7 @@ def test_dashboard_query_failure_exits_loudly() -> None:
     class FatalDashboardQuery(RuntimeError):
         pass
 
-    def failed_query(_namekey: str | None) -> str:
+    def failed_query(_namekey: NameKey | None) -> str:
         raise RuntimeError("projection failed")
 
     def fatal_exit(code: int) -> NoReturn:
@@ -198,7 +202,9 @@ def test_full_backend_ipc_forwards_run_outcome_http_exchange_exactly() -> None:
         run_outcome_models.FAILED_PATH,
         base_url=f"{DASHBOARD_IPC_SCHEME}://{DASHBOARD_IPC_HOST}",
         headers={
-            run_outcome_models.NAME_KEY_HEADER: api.name_key_header(TEST_NAMEKEY)
+            run_outcome_models.NAME_KEY_HEADER: api.name_key_header(
+                NameKey.from_json_key(TEST_NAMEKEY)
+            )
         },
     )
 
@@ -207,7 +213,7 @@ def test_full_backend_ipc_forwards_run_outcome_http_exchange_exactly() -> None:
     assert response.data == response_body
     assert len(observed) == 1
     request = observed[0]
-    assert request.run_outcome is run_outcome_models.RunOutcome.FAILED
+    assert request.run_outcome is run_outcome_models.RunLifecycle.FAILED
     assert request.namekey == NameKey.from_json_key(TEST_NAMEKEY)
     request_record = request.http_request_log_record
     assert request_record.received_at_unix_usec is not None
@@ -220,7 +226,7 @@ def test_full_backend_ipc_forwards_run_outcome_http_exchange_exactly() -> None:
     assert request_record.query == ""
     assert request_record.request_headers[
         run_outcome_models.NAME_KEY_HEADER
-    ] == api.name_key_header(TEST_NAMEKEY)
+    ] == api.name_key_header(NameKey.from_json_key(TEST_NAMEKEY))
     assert request_record.request_body is None
 
 
@@ -242,13 +248,13 @@ def test_dashboard_client_queries_real_mode_0600_unix_socket(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     socket_path = tmp_path / "dashboard.sock"
-    observed: list[str | None] = []
+    observed: list[NameKey | None] = []
     payload = QueryResponse(
         attempts=(),
         ai_augment_outerdicts=(),
     ).model_dump_json()
 
-    def query(namekey: str | None) -> str:
+    def query(namekey: NameKey | None) -> str:
         observed.append(namekey)
         return payload
 
@@ -267,15 +273,16 @@ def test_dashboard_client_queries_real_mode_0600_unix_socket(
         assert capsys.readouterr().out == (f"Dashboard IPC running on unix://{socket_path}\n")
         client = _BackendDatabaseClient(
             socket_path=socket_path,
-            pipeline_config=AiAugmentDetourConfig.model_construct(),
+            pipeline_config=AiAugmentDetourConfig.model_construct(),  # type: ignore[call-arg]
         )
         assert client.available() is True
         assert observed == []
-        assert client.pull(Namekey("researcher")) == QueryResponse(
+        namekey = NameKey.from_json_key(TEST_NAMEKEY)
+        assert client.pull(namekey) == QueryResponse(
             attempts=(),
             ai_augment_outerdicts=(),
         )
-        assert observed == ["researcher"]
+        assert observed == [namekey]
     finally:
         stop_dashboard_query_server(server)
 
