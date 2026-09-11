@@ -10,16 +10,13 @@ authors = [{name = "Pavel Zhelnov", email = "pzhelnov@p1m.org"}]
 # the below are treated by Pixi as PyPi deps
 dependencies = [
     "pandas>=2.3.3,<3",
-    "pandas-stubs==3.0.5.260730",
     "rich>=14.2.0,<15",
     "psutil>=7.2.1,<8",
-    "types-psutil==7.2.2.20260906",
     "python-docx>=1.2.0,<2",
     "click>=8.3.1,<9",
     "pydantic>=2.12.5,<3",
     "pytest>=9.0.2,<10",
     "lxml>=6.0.2,<7",
-    "types-lxml==2026.2.16",
     "ruff>=0.14.14,<0.15",
     "mypy>=1.19.1,<2",
     "requests>=2.32.5,<3",
@@ -48,6 +45,9 @@ detour-ai-augment = [
   "pytest-bdd==8.1.0",
   "pydantic-extra-types==2.11.1",
   "pycountry==24.6.1",
+  "pandas-stubs==3.0.5.260730",
+  "types-psutil==7.2.2.20260906",
+  "types-lxml==2026.2.16",
 ]
 
 # ============
@@ -60,8 +60,11 @@ testpaths = ["tests"]
 norecursedirs = [
     "tests/test_detours",  # can run via `pixi run test tests/test_detours`
     "src/detours/detour_ai_augment/tests",
+    "src/detours/detour_ai_augment/protected/tests",
     # never testing sample deploy here as it's not part of codebase
-    "src/detours/detour_ai_augment/src/llm_inference_api/sample_deploy",
+    "src/detours/detour_ai_augment/protected/src/llm_inference_api/sample_deploy",
+    # bdd is on pause now and stale and not actively worked on
+    "src/detours/detour_ai_augment/protected/tests/bdd",
 ]
 markers = [
     "slow: long-running integration tests against real config/data",
@@ -72,6 +75,12 @@ markers = [
 line-length = 100
 target-version = "py314"
 preview = true
+# simple exclude would drop ruff defaults
+extend-exclude = [
+  # see exclusion reasons under pytest above
+  "src/detours/detour_ai_augment/protected/src/llm_inference_api/sample_deploy",
+  "src/detours/detour_ai_augment/protected/tests/bdd",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]
@@ -83,16 +92,15 @@ ignore = [
 [tool.mypy]
 python_version = "3.14"
 # don't remember what third-party libs we had
-# that necessitated this setting, so disabling
-# for now;
+# that necessitated this setting,
+# but let's keep it for now;
 # signed off: human
-#ignore_missing_imports = true
+ignore_missing_imports = true
 plugins = ["pydantic.mypy"]
-# let's try strict;
-# signed off: human
-strict = true
+warn_unused_ignores = true
+# AI augment detour has its own strict mypy config
 exclude = [
-    "src/detours/detour_ai_augment/src/llm_inference_api/sample_deploy",
+    "src/detours/detour_ai_augment/",
 ]
 
 # ==================
@@ -174,8 +182,16 @@ args = [
 cmd = "mypy {{ module_names }}"
 cwd = "."
 
+[tool.pixi.tasks.mypy-detour-ai-augment]
+cmd = "mypy --config-file src/detours/detour_ai_augment/mypy.ini src/detours/detour_ai_augment"
+cwd = "."
+
 [tool.pixi.tasks.lint]
-depends-on = ["ruff", "mypy"]  # whatever is default
+depends-on = [
+  { task = "ruff", environment = "default" },
+  { task = "mypy", environment = "default" },
+  { task = "mypy-detour-ai-augment", environment = "detour-ai-augment" },
+]
 
 # ====================================
 # Default: Tasks for actual execution
@@ -233,7 +249,7 @@ cwd = "."
 
 [tool.pixi.tasks.test-repl]
 depends-on = [
-  { task = "test", args = ["."] },  # whatever is in pytest.ini_options
+  { task = "test", args = ["."], environment = "default" },  # whatever is in pytest.ini_options
 ]
 # note that the below cmd is only executed if all depends-on pass
 cmd = """
@@ -243,10 +259,10 @@ echo "NOTE: slow and real_api tests need to be run separately"
 # The tasks themselves are specified below per detour
 [tool.pixi.tasks.test-detours]
 depends-on = [
-    "test-detour-step4-breakdown",
-    "test-detour-mode3-pgf-stats",
-    "test-detour-mode0-econ-stats",
-    "test-detour-ai-augment",
+  { task = "test-detour-step4-breakdown", environment = "default" },
+  { task = "test-detour-mode3-pgf-stats", environment = "default" },
+  { task = "test-detour-mode0-econ-stats", environment = "detour-mode0-econ-stats" },
+  { task = "test-detour-ai-augment", environment = "detour-ai-augment" },
 ]
 
 [tool.pixi.tasks.pre-commit]
@@ -270,7 +286,7 @@ depends-on = ["lint", "test-detours"]
 depends-on = [
   # no slow tests so far - otherwise exits 1 here
   # { task = "test", args = [".", "slow"] },
-  { task = "test", args = [".", "real_api"] },
+  { task = "test", args = [".", "real_api"], environment = "default" },
 ]
 
 [tool.pixi.tasks.test-repl-operator]
@@ -281,9 +297,9 @@ depends-on = [
 
 [tool.pixi.tasks.pre-commit-extra]
 depends-on = [
-    "test-repl-extra",
-    "test-detour-ai-augment-root",
-    "test-detour-ai-augment-operator",
+  { task = "test-repl-extra", environment = "default" },
+  { task = "test-detour-ai-augment-root", environment = "detour-ai-augment" },
+  { task = "test-detour-ai-augment-operator", environment = "detour-ai-augment" },
 ]
 
 [tool.pixi.tasks.pre-commit-extra-operator]

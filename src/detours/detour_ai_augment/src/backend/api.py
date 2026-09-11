@@ -39,6 +39,67 @@ from pydantic import (
 from starlette.datastructures import Headers
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from src.detours.detour_ai_augment.protected.src.backend.helpers import codex_parse
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_augment_config import (  # noqa: E501
+    AiAugmentDetourConfig,
+)
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.pydantic_to_paste import (  # noqa: E501
+    MAX_PUSH_BODY_BYTES,
+    AcademicPositionsSubmission,
+    AgeFirstPublicationSubmission,
+    EducationSubmission,
+    EvidenceSubmission,
+    EvidenceWithdrawal,
+    FieldSubmission,
+    GenderSubmission,
+    NotAvailableOrApplicable,
+    NotReported,
+    PlaceOfResidenceStandardized,
+    PlaceOfResidenceSubmission,
+    RaceEthnicityLanguageCultureStandardized,
+    RaceEthnicityLanguageCultureSubmission,
+    ResearcherAuthorStandardized,
+    ResearcherAuthorSubmission,
+    ResearcherLinksSubmission,
+    SocialCapitalSubmission,
+    StandardizedFieldSubmission,
+    StandardizedSubmission,
+    StandardizedValue,
+    WebSearchExcerpt,
+)
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.submission_fixture import (  # noqa: E501
+    L_FEI_FEI_INITIAL_FIXTURE,
+    L_FEI_FEI_RETRY_FIXTURE,
+)
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.submission_init import (  # noqa: E501
+    Submission,
+)
+from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
+from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
+    AI_AUGMENT_COLUMNS,
+    AI_AUGMENT_EVIDENCE_COLUMNS,
+    AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS,
+    AI_AUGMENT_STANDARDIZED_COLUMNS,
+    CONFIG_FILENAME,
+    DOCX_COLUMNS,
+    KTP_AI_AUGMENT_ACADEMIC_POSITIONS_COL,
+    KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL,
+    KTP_AI_AUGMENT_COMMENTS_COL,
+    KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL,
+    KTP_AI_AUGMENT_COMMIT_REQUEST_BODY_COL,
+    KTP_AI_AUGMENT_EDUCATION_COL,
+    KTP_AI_AUGMENT_FOOTNOTE_ARGUMENTS_COL,
+    KTP_AI_AUGMENT_FOOTNOTES_COL,
+    KTP_AI_AUGMENT_GENDER_COL,
+    KTP_AI_AUGMENT_LINKS_COL,
+    KTP_AI_AUGMENT_PLACE_OF_RESIDENCE_COL,
+    KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL,
+    KTP_AI_AUGMENT_RESEARCHER_AUTHOR_COL,
+    KTP_AI_AUGMENT_SESSION_METADATA_COL,
+    KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL,
+    TEXT_ENCODING,
+    AiAugmentCohort,
+)
 from src.helpers.cards import build_cards, write_cards_zip
 from src.helpers.data_models import (
     FragmentType,
@@ -70,68 +131,6 @@ from src.helpers.vars import (
     KTP_LAST_NAME_COL,
     KTP_NAMEKEY_COL,
     KTP_TABLE_1_EMPTY_VALUE_PLACEHOLDERS,
-)
-
-from src.detours.detour_ai_augment.protected.src.backend.helpers import codex_parse
-from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_augment_config import (
-    AiAugmentDetourConfig,
-)
-from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.pydantic_to_paste import (
-    MAX_PUSH_BODY_BYTES,
-    AcademicPositionsSubmission,
-    AgeFirstPublicationSubmission,
-    EducationSubmission,
-    EvidenceSubmission,
-    EvidenceWithdrawal,
-    FieldSubmission,
-    GenderSubmission,
-    NotAvailableOrApplicable,
-    NotReported,
-    PlaceOfResidenceSubmission,
-    PlaceOfResidenceStandardized,
-    RaceEthnicityLanguageCultureSubmission,
-    RaceEthnicityLanguageCultureStandardized,
-    ResearcherAuthorSubmission,
-    ResearcherAuthorStandardized,
-    ResearcherLinksSubmission,
-    SocialCapitalSubmission,
-    StandardizedFieldSubmission,
-    StandardizedSubmission,
-    StandardizedValue,
-    WebSearchExcerpt,
-)
-from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.submission_fixture import (
-    L_FEI_FEI_INITIAL_FIXTURE,
-    L_FEI_FEI_RETRY_FIXTURE,
-)
-from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.submission_init import (
-    Submission,
-)
-from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
-from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
-    AI_AUGMENT_COLUMNS,
-    AI_AUGMENT_EVIDENCE_COLUMNS,
-    AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS,
-    AI_AUGMENT_STANDARDIZED_COLUMNS,
-    DOCX_COLUMNS,
-    CONFIG_FILENAME,
-    KTP_AI_AUGMENT_ACADEMIC_POSITIONS_COL,
-    KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL,
-    KTP_AI_AUGMENT_COMMENTS_COL,
-    KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL,
-    KTP_AI_AUGMENT_COMMIT_REQUEST_BODY_COL,
-    KTP_AI_AUGMENT_EDUCATION_COL,
-    KTP_AI_AUGMENT_FOOTNOTE_ARGUMENTS_COL,
-    KTP_AI_AUGMENT_FOOTNOTES_COL,
-    KTP_AI_AUGMENT_GENDER_COL,
-    KTP_AI_AUGMENT_LINKS_COL,
-    KTP_AI_AUGMENT_PLACE_OF_RESIDENCE_COL,
-    KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL,
-    KTP_AI_AUGMENT_RESEARCHER_AUTHOR_COL,
-    KTP_AI_AUGMENT_SESSION_METADATA_COL,
-    KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL,
-    TEXT_ENCODING,
-    AiAugmentCohort,
 )
 
 from ..control_centre.dashboard.helpers.data_models.run_outcome import (
@@ -663,6 +662,7 @@ async def _watch_control_parent(parent_pid: int) -> None:
             os.kill(os.getpid(), signal.SIGTERM)
             return
         await asyncio.sleep(CONTROL_PARENT_WATCH_SECONDS)
+
 
 EVIDENCE_SUBMISSION_EXAMPLE = L_FEI_FEI_INITIAL_FIXTURE.submission.model_dump(
     by_alias=True,
@@ -1484,8 +1484,8 @@ def copy_rollout_to_cas(
         if not temporary.is_file() or temporary.is_symlink():
             raise _PushConfigurationError(Locale.AUDIT_ROLLOUT_ARCHIVE_INVALID)
         archived = _archived_file(temporary)
-        destination = runtime.pipeline_config.rollout_cas_dir / ROLLOUT_CAS_FILENAME_TEMPLATE.format(
-            sha256=archived.sha256
+        destination = runtime.pipeline_config.rollout_cas_dir / (
+            ROLLOUT_CAS_FILENAME_TEMPLATE.format(sha256=archived.sha256)
         )
         if destination.exists():
             existing = _archived_file(destination)

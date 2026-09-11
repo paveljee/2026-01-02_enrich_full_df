@@ -3,6 +3,7 @@ from typing import TypeVar
 # Reusable generic type variable
 T = TypeVar("T")
 
+
 class implements[Proto]:
     """
     Generic decorator for statically asserting that a concrete class

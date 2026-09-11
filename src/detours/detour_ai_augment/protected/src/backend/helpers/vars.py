@@ -116,6 +116,7 @@ NO_GROUND_TRUTH_DEF: Callable[
 
 INELIGIBLE_RELEASE_BATCH = "subset 8"
 
+
 class AiAugmentCohort(StrEnum):
     GROUND_TRUTH = "ground_truth"
     NO_GROUND_TRUTH = "no_ground_truth"

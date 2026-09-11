@@ -13,6 +13,19 @@ from pydantic import (
     model_validator,
 )
 
+from src.detours.detour_ai_augment.protected.src.architecture import (
+    BackendComponent,
+)
+from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import (
+    Locale,
+)
+from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
+    DOCX_COLUMNS,
+    KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL,
+    KTP_AI_AUGMENT_SESSION_METADATA_COL,
+    AiAugmentCohort,
+    AiAugmentIneligibilityCategory,
+)
 from src.helpers.architecture import implements
 from src.helpers.data_models import (
     HttpRequestLogRecord,
@@ -28,20 +41,6 @@ from src.helpers.vars import (
     DRAW_LABEL,
     KTP_DOCX_OPTIONAL_EMPTY_COLS,
     KTP_NAMEKEY_COL,
-)
-
-from src.detours.detour_ai_augment.protected.src.architecture import (
-    BackendComponent,
-)
-from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import (
-    Locale,
-)
-from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
-    AiAugmentCohort,
-    AiAugmentIneligibilityCategory,
-    DOCX_COLUMNS,
-    KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL,
-    KTP_AI_AUGMENT_SESSION_METADATA_COL,
 )
 
 from ....control_centre.dashboard.helpers.data_models.run_outcome import (
