@@ -10,8 +10,9 @@
 - Do not touch the main pipeline database or invoke `src.repl`.
 - Preserve all Human Operator edits and signed-off comments. Add no migration,
   compatibility, alias, or legacy behavior for superseded contracts.
-- Complete production code before touching tests. The Human Operator has not
-  authorized the parked test-fix pass or operator execution.
+- Production code was completed before the Human Operator authorized the
+  ordinary test-adaptation pass. Real operator execution remains reserved for
+  the Human Operator.
 - `protected/` may be edited only deliberately and with elevated scrutiny.
 
 ## Completed context and source-population pass
@@ -114,92 +115,41 @@
   state. Production spelling is consistently `cancelled`.
 - Production modules compile. Focused Ruff undefined/unused-name checks pass;
   focused strict mypy reports no detour errors and only the five recorded
-  errors in four shared modules outside this detour. Tests remain untouched as
-  directed.
+  errors in four shared modules outside this detour.
 
-## Active architecture audit
+## Completed architecture audit
 
-- After the current surgical model wiring, repeat the requested audit of all
-  classes defined under `src/detours/detour_ai_augment/src` and report progress
-  against the previous audit.
-- Add `@implements[...]()` wherever an architecture interface exists but its
-  downstream implementation lacks the decorator.
-- Classes that are persisted, visualized to the Human Operator, or exchanged
-  between architecture components are the classes to consider for interfaces;
-  consolidate incidental implementation classes rather than over-model them.
-- Keep module-local classes private with a leading underscore unless they live
-  under `data_models` or implement an interface from `architecture.py`.
-- Audit every production type annotation under the detour's `src/` and
-  `protected/src/` trees that uses a plain Python type instead of an available
-  domain or architecture model. Each retained primitive, generic container,
-  `Any`, `object`, or bare identity type must be justified as an actual parsing,
-  validation, transport, serialization, operating-system, or storage boundary;
-  replace unjustified uses with the established model and pass that object by
-  reference.
-- Scrutinize the detour for unwarranted recreation of objects. Ideally, create
-  each object once within a process lifecycle, pass it by reference efficiently
-  throughout that lifecycle, and mutate it deliberately where necessary.
-- Completed the first object-identity pass: removed the temporary response-file
-  DTO/path; the live commit path retains its projected attempt; configured and
-  cached source objects are constructed once per process; query projection
-  updates the Backend-owned outerdict objects and reuses the population tuple;
-  and HTTP-record subclasses now expose themselves rather than rebuilding an
-  equivalent base model. Reconstruction remains only at explicit HTTP, JSONL,
-  DuckDB, CAS-metadata, or NiceGUI-storage boundaries.
-- Variables holding `Submission | StandardizedSubmission` are named
-  `submission_payload`. Backend namekeys are `NameKey` models after one parse at
-  the HTTP boundary; serialized strings are produced only for headers/storage.
-  Removed the local `SubmissionPayload` alias; annotations spell out the two
-  approved submission models.
-- Every interface currently declared in `architecture.py` has a concrete
-  `@implements[...]()` implementation, and focused mypy reports no detour
-  conformance errors. The class audit still needs Human Operator direction on
-  whether to expand protected architecture for Backend-private durable
-  retry/evidence projection records and Control Centre-private durable source
-  cache records. Transient parser, process, controller, and UI-rendering helper
-  classes remain private implementation details.
-- Retry-chain traversal now accepts and returns complete
-  `HttpRequestLogRecord` models through `_original_pull_record`; commit
-  validation resolves the original pull once and extracts its `record_id` only
-  at the retry-table boundary. Removed every `cast()` from Backend `api.py`:
-  required rollout/JSON text is extracted by a validated-value helper that
-  returns `str` or raises the call site's specific error, while DuckDB and ASGI
-  boundary values carry concrete annotations. Focused mypy has no detour errors
-  after the change.
-- `_process_retry_attempt` now receives the complete original pull and
-  `BackendCommitRecord`; it derives the retry-table key, attempt key, and Codex
-  session value only while constructing SQL values.
-  `_attempt_record_from_serialized_json` now receives the complete commit HTTP
-  record already held by its caller instead of accepting its UUID and querying
-  the same record again.
-- UUID typing audit:
-  - Retain UUIDs that are the values themselves: Codex session identity;
-    Control Centre `Run`/`RunEvent` identity and durable event references;
-    required commit/run-outcome serialized ID fields; UUID-keyed indexes and
-    deduplication sets; and parsing/generation at JSONL, IPC, browser, shell, or
-    SQL boundaries. Resolver callbacks and `_projected_http_record` are explicit
-    ID-to-record rehydration boundaries.
-  - Backend workflow state now retains current/pending pull and latest push as
-    complete `HttpRequestLogRecord` objects and the Codex session as `UUID`.
-    `_retry_baseline_exists` receives the original pull record and extracts its
-    ID only at the retry-table boundary.
-  - Removed the unused
-    `CommitRequestBody.record_ids_from_serialized_json` bare-ID projection and
-    its architecture declaration.
-  - Control Centre startup replay remains the storage rehydration boundary.
-    Thereafter each run is one maintained mutable `Run`: the queue, active-run
-    state, Codex handle, runner, and orchestration methods pass that object by
-    reference, and appending an event mutates it incrementally instead of
-    rebuilding all runs. UUID-keyed indexes and persisted/browser IDs remain
-    explicit boundaries.
-  - Dashboard attempt views now retain either the complete Backend
-    `AgentRuntimeAttemptRecord` or the complete Control Centre `Run` and derive
-    identity, timestamps, activity, and failure details from that source.
-- Replaced `ground_truth_for_researcher` with
-  `AiAugmentOuterDict.ground_truth_innerdict() -> InnerDict | None`. The source
-  selector and the durable attempt field intentionally represent the same
-  domain object at different lifecycle stages; only `/pull` and dashboard-view
-  construction flatten `.data`.
+- Re-audited the production classes after the context, event-model, and
+  lifecycle refactors. Every interface currently declared in
+  `architecture.py` has a concrete `@implements[...]()` implementation; focused
+  strict mypy reports no detour errors. Transient parser, process, controller,
+  HTTP-adapter, and UI-rendering classes remain private implementation details.
+- Human Operator declined additional architecture properties for the private
+  Backend retry/evidence/provenance projections and Control Centre source cache
+  or queue representation. These are implementation-owned persistence and
+  caching details, not component properties or connector contracts. Their
+  existing private classes are intentional; the queue's durable representation
+  likewise remains private while its lifecycle behavior stays prescribed by
+  README.md and the existing `Run`/`RunEvent` contracts.
+- Tightened `RunEvent.rollout_jsonl` to `PurePosixPath | None` in both its
+  interface and implementation. Pydantic JSON-mode persistence retains the
+  existing string representation.
+- Removed `_GroundTruthRecord`; source and projection paths now retain the
+  existing `InnerDict`. `_ResearcherGridRow` and `_ResearcherCardView` retain
+  their existing `AiAugmentOuterDict` instead of copying its
+  identity/classification fields.
+- Tightened IPC run-outcome route collections to the existing
+  `RunOutcomePath` model, converting to strings only at SQL and Flask
+  boundaries.
+- Other retained primitive/generic annotations are at actual JSON, HTTP, ASGI,
+  DuckDB, NiceGUI, operating-system, subprocess, or rendered-UI boundaries.
+  Existing full models are passed by reference within each process. Model
+  reconstruction remains confined to explicit transport/storage rehydration.
+- The optional protected LLM inference sample deployment is not part of the
+  implemented default lifecycle and is excluded from this production-interface
+  expansion. Appendwatch daemon internals remain implementation details; the
+  durable captured report is already formalized by
+  `AppendwatchReportRecordProperty`.
 
 ## Completed dashboard-owned hash verification
 
@@ -225,7 +175,7 @@
 - The stale event-model imports and removed-table references are resolved.
   Focused `py_compile`, detour-wide Ruff F821, and production-module imports
   pass. Focused strict mypy reports only the recorded errors in four shared
-  modules outside this detour. Tests remain untouched as directed.
+  modules outside this detour.
 - Centralized the detour's registered resources under the frozen
   `AiAugmentDetourConfig.resources` registry. Its resource objects are also
   frozen, preserving each initialization-time verification result. Backend
@@ -251,26 +201,44 @@
   rehydrates a matching cached outer-dict tuple once and passes that same tuple
   into the Control Centre context.
 
-## Parked verification and test work
+## Completed verification and test adaptation
 
-- Complete production code first. Then, only after the Human Operator
-  authorizes test work, adapt the detour tests and run focused static, mypy,
-  hermetic, root, and operator checks. Do not alter main-pipeline tests.
-- Rebuild `tasks/tasks-20260731-tighten-api/build/SPECS.ipynb` as the
-  authoritative, human-readable executable evidence for every selected README
-  Lifecycle line and make it pass the task Makefile's `validate` target.
-- Every notebook code cell must be independently executable in VS Code through
-  an ipykernel and must expose the actual behavioral logic, not breadcrumbs or
-  opaque wrappers. Notebook-specific helpers belong in explicit notebook
-  cells; genuinely reusable test helpers may remain in existing detour test
-  modules. Create no additional helper modules and keep `conftest.py` shallow
-  without autouse machinery.
-- Automatic Makefile execution covers hermetic evidence only. Evidence that
-  genuinely requires root or a Human Operator uses the existing `needs_sudo`
-  or `operator` marks and is run manually; use `operator` only where automatic
-  execution cannot prove the behavior. The finished manifest/notebook must
-  pass `make validate`.
-- Preserve ordinary pytest execution and, barring unavoidable contract
-  changes, its collected test count/results: behavioral logic may be projected
-  from the authoritative notebook into existing tests without introducing a
-  separate pytest-bdd/Gherkin layer.
+- Adapted the ordinary Backend, IPC, Control Centre, appendwatch, audit-read,
+  UI, Playwright, and operator-preflight tests to the current paths, identities,
+  nested records, and component lifecycles. No main-pipeline test was changed.
+- Adapted the protected real-operator harness without executing a real
+  operator contour. Its three tests collect successfully; the hermetic
+  operator-preflight module passes all three tests.
+- Updated the non-BDD Pixi test tasks and moved-path documentation/scripts.
+  BDD/notebook work remains explicitly outside scope: its WIP stays in the Git
+  stash, and the stale protected BDD test and BDD task wiring remain untouched.
+- `pixi run -e detour-ai-augment test-detour-ai-augment` succeeds with 205
+  passed, 47 environment-dependent or intentional skips, and three root-only
+  tests deselected. Its separately selected live-API test skips because this
+  environment has no `OPENALEX_API_KEY`.
+- The three root-only appendwatch tests collect successfully and remain for the
+  Human Operator to execute with the required privilege. No real operator,
+  manual Backend, or dashboard contour was executed here.
+- Ruff E/F/I checks and Python compilation pass across the adapted detour
+  files. Strict mypy reports no detour production or test errors; its only five
+  findings are in shared modules outside the detour and outside this task's
+  write scope.
+- Git remained read-only. The main database and `src.repl` were not touched.
+
+## Human Operator handoff
+
+- The codebase and non-BDD test harness are ready for the Human Operator's
+  root-only appendwatch test, real operator suite, and manual full/IPC-only
+  dashboard smoke contours on real namekeys.
+
+## Completed shared protected pytest configuration
+
+- The fixture and hook implementation remains protected in
+  `protected/tests/pytest_plugin.py`. Thin `conftest.py` registration points in
+  both the protected and unprotected test roots load that same plugin, so both
+  trees receive the protected fixtures and autouse behavior without duplicate
+  registration during combined collection.
+- The protected operator-preflight regression imports its directly exercised
+  implementation helpers from the protected plugin. Combined protected and
+  unprotected collection succeeds, and pytest resolves the unprotected UI E2E
+  suite's `repository_root` fixture from the protected plugin.

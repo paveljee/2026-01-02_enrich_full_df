@@ -5,7 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from src.detours.detour_ai_augment.tests import conftest as operator_preflight
+from src.detours.detour_ai_augment.protected.tests import (
+    pytest_plugin as operator_preflight,
+)
 
 
 def test_existing_codex_authentication_does_not_prompt(

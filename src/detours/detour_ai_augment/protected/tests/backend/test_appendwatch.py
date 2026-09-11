@@ -36,7 +36,7 @@ import pytest
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="appendwatch uses Linux inotify")
 
 APPENDWATCH_MODULE = (
-    "src.detours.detour_ai_augment.src.control_centre.appendwatch.appendwatch"
+    "src.detours.detour_ai_augment.protected.src.control_centre.appendwatch.appendwatch"
 )
 APPENDWATCH_MODULE_SPEC = importlib.util.find_spec(APPENDWATCH_MODULE)
 if APPENDWATCH_MODULE_SPEC is None or APPENDWATCH_MODULE_SPEC.origin is None:

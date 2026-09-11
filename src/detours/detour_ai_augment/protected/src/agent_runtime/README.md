@@ -3,7 +3,7 @@
 ```shell
 REPO_DIR="/path/to/this/repo"
 ENV_FILE_PATH="$REPO_DIR/.env"
-DEPLOY_SCRIPT="$REPO_DIR/src/detours/detour_ai_augment/src/agent_runtime/deploy.sh"
+DEPLOY_SCRIPT="$REPO_DIR/src/detours/detour_ai_augment/protected/src/agent_runtime/deploy.sh"
 
 cat >> ~/.zshrc <<EOF
 
@@ -34,7 +34,7 @@ Captured from
 `https://developers.openai.com/api/docs/guides/reasoning.md` on
 2026-09-04 11:37:43 UTC-4
 and available at
-`src/detours/detour_ai_augment/src/agent_runtime/docs/reasoning.md`.
+`src/detours/detour_ai_augment/protected/src/agent_runtime/docs/reasoning.md`.
 
 Based on this guide,
 `high` seems to be

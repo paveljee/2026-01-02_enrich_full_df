@@ -18,17 +18,17 @@ from flask import Flask, Response, request
 from pydantic import ValidationError
 from werkzeug.serving import BaseWSGIServer, make_server
 
-from src.helpers.data_models import NameKey
-from src.helpers.data_models.http_request_log import HttpRequestLogRecord
-from src.helpers.vars import KTP_NAMEKEY_COL
-
 from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     TEXT_ENCODING,
 )
+from src.helpers.data_models import NameKey
+from src.helpers.data_models.http_request_log import HttpRequestLogRecord
+from src.helpers.vars import KTP_NAMEKEY_COL
 
 from ..control_centre.dashboard.helpers.data_models.run_outcome import (
     RUN_OUTCOME_PATHS,
+    RunOutcomePath,
     RunOutcomeRequest,
 )
 from . import api
@@ -68,7 +68,7 @@ def _run_outcome_records(
         f"WHERE {api.AUTHORITATIVE_RECORD_METHOD_COLUMN} = ? "
         f"AND {api.AUTHORITATIVE_RECORD_PATH_COLUMN} IN ({placeholders}) "
         f"ORDER BY {api.AUTHORITATIVE_RECORD_ORDINAL_COLUMN}",
-        [api.HTTP_POST_METHOD, *sorted(RUN_OUTCOME_PATHS)],
+        [api.HTTP_POST_METHOD, *(path.value for path in sorted(RUN_OUTCOME_PATHS))],
     ).fetchall()
     try:
         records = tuple(HttpRequestLogRecord.model_validate_json(str(row[0])) for row in rows)
@@ -192,7 +192,7 @@ def create_dashboard_query_app(
     namekey_parameter: str,
     query_path: str,
     run_outcome_handler: RunOutcomeHandler | None = None,
-    run_outcome_paths: frozenset[str] = frozenset(),
+    run_outcome_paths: frozenset[RunOutcomePath] = frozenset(),
     fatal_exit: Callable[[int], NoReturn] = os._exit,
 ) -> Flask:
     app = Flask("detour-ai-augment-dashboard-query")
@@ -216,7 +216,7 @@ def create_dashboard_query_app(
             content_type=JSON_MEDIA_TYPE,
         )
 
-    def run_outcome_request(path: str) -> Response:
+    def run_outcome_request(path: RunOutcomePath) -> Response:
         if run_outcome_handler is None:
             raise RuntimeError("run-outcome IPC handler is unavailable")
         received_at_unix_usec = time.time_ns() // NANOSECONDS_PER_MICROSECOND
@@ -247,7 +247,7 @@ def create_dashboard_query_app(
 
     for run_outcome_path in sorted(run_outcome_paths):
         app.add_url_rule(
-            run_outcome_path,
+            run_outcome_path.value,
             endpoint=f"run-outcome-{run_outcome_path.removeprefix('/')}",
             view_func=lambda path=run_outcome_path: run_outcome_request(path),
             methods=["POST"],
@@ -280,7 +280,7 @@ def start_dashboard_query_server(
     namekey_parameter: str,
     query_path: str,
     run_outcome_handler: RunOutcomeHandler | None = None,
-    run_outcome_paths: frozenset[str] = frozenset(),
+    run_outcome_paths: frozenset[RunOutcomePath] = frozenset(),
 ) -> _DashboardIpcServer:
     app = create_dashboard_query_app(
         query,

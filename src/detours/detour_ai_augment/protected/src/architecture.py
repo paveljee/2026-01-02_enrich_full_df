@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from datetime import datetime
+from pathlib import PurePosixPath
 from typing import (
     Literal,
     Protocol,
@@ -515,7 +516,7 @@ class ControlCentreComponent(
         def session_id(self) -> UUID | None: ...
 
         @property
-        def rollout_jsonl(self) -> str | None: ...
+        def rollout_jsonl(self) -> PurePosixPath | None: ...
 
         @property
         def remote_pid(self) -> int | None: ...

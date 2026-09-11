@@ -63,7 +63,7 @@ print(dotenv_values(path).get("OPENALEX_API_KEY", ""), end="")
 )"
 
 pixi run -e detour-ai-augment \
-  bash src/detours/detour_ai_augment/src/agent_runtime/deploy.sh
+  bash src/detours/detour_ai_augment/protected/src/agent_runtime/deploy.sh
 ```
 
 That deployment script may delete and recreate the existing `aivm`.

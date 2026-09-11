@@ -6,12 +6,12 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from src.helpers.architecture import implements
-from src.helpers.data_models import NameKey
-
 from src.detours.detour_ai_augment.protected.src.architecture import (
     ControlCentreComponent,
 )
+from src.helpers.architecture import implements
+from src.helpers.data_models import NameKey
+
 from .....backend.helpers.data_models.query_response import AgentRuntimeAttempt
 from .....backend.helpers.data_models.run_outcome_response import RunOutcomeResponse
 from .run_outcome import RunLifecycle
@@ -68,7 +68,7 @@ class RunEvent(BaseModel):
     occurred_at_unix_usec: int
     lifecycle: RunLifecycle
     session_id: UUID | None = None
-    rollout_jsonl: str | None = None
+    rollout_jsonl: PurePosixPath | None = None
     remote_pid: int | None = Field(default=None, gt=0)
     accepted_commit_record_id: UUID | None = None
     codex_exit_code: int | None = None

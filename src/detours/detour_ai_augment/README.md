@@ -80,7 +80,7 @@ where the descriptions are given as
 [Gherkin][gherkin-docs]-ish **scenarios**.
 A lower-level **representation** of these
 as Python `Protocol`s is available from
-`src/detours/detour_ai_augment/src/architecture.py`.
+`src/detours/detour_ai_augment/protected/src/architecture.py`.
 
 ## Lifecycle
 
@@ -204,7 +204,7 @@ This section is intended to capture the specifics of the detour operation in suf
 `pixi.lock` and `pyproject.toml` in the repository root provide the pinned Python config.
 The version of pixi is locked in `.tool-versions`.
 
-**AI Agent Runtime:** Deployed under the main host to a [Lima virtual machine version 2.2.0][lima220] using `./src/agent_runtime/deploy.sh`.
+**AI Agent Runtime:** Deployed under the main host to a [Lima virtual machine version 2.2.0][lima220] using `./protected/src/agent_runtime/deploy.sh`.
 
 More needs to be said about the Control Centre – AI Agent Runtime dynamics, so there is a separate section dedicated to this down below.
 
@@ -225,8 +225,8 @@ This effect on the session log is particularly unfortunate because it forces the
 
 This vulnerability was countered by the Control Centre implementing a series of measures:
 
-- The deployment script `./src/agent_runtime/deploy.sh` provisions a non-root user account under which VS Code Server and Codex extension are installed and executed. This effectively limits the scope of system permissions, such as passwordless sudo.
-- Before launching Codex, under a root user (inside the virtual machine), a watcher `./src/control_centre/appendwatch/appendwatch.py` is running that monitors events within the `$CODEX_HOME/sessions` directory, where the Codex app stores session logs.
+- The deployment script `./protected/src/agent_runtime/deploy.sh` provisions a non-root user account under which VS Code Server and Codex extension are installed and executed. This effectively limits the scope of system permissions, such as passwordless sudo.
+- Before launching Codex, under a root user (inside the virtual machine), a watcher `./protected/src/control_centre/appendwatch/appendwatch.py` is running that monitors events within the `$CODEX_HOME/sessions` directory, where the Codex app stores session logs.
 The watcher tracks changes applied to session files using `inotify` and permanently flags any rollouts on which non-append-only changes were observed.
 - Both the watcher and the report it maintains are persisted beyond Codex’s user account (i.e., only authorized under root; the report is also authorized under the `aivm-audit` account), placing them out of reach of the AI Agent Runtime.
 
@@ -247,11 +247,11 @@ This caveat was an important reason behind the decision to go with OpenAI on thi
 
 To smoke-test the feasibility of this, on August 6^th^, 2026, UTC-4, a Human Operator completed the following steps:
 
-* Deployed a virtual machine using `src/detours/detour_ai_augment/src/agent_runtime/deploy.sh` under [Lima 2.2.0][lima220] under an arm64 macOS host as [specified above](#directory-contents-and-lockfile).
+* Deployed a virtual machine using `src/detours/detour_ai_augment/protected/src/agent_runtime/deploy.sh` under [Lima 2.2.0][lima220] under an arm64 macOS host as [specified above](#directory-contents-and-lockfile).
 * SSH’d into it  as `$AIVM_USER` and opened a session with GNU bash version 5.2.21(1).
 * Installed a standalone instance of codex-cli `VERSION="0.146.0-alpha.3.1"` using this command: `curl -fsSL https://chatgpt.com/codex/install.sh | sh -s -- --release "$VERSION"`
 * Logged in using Human Operator’s ChatGPT Plus credentials.
-* Note that the `~/.codex/config.toml` file was automatically picked up as provisioned at deploy from `src/detours/detour_ai_augment/src/agent_runtime/provision.sh`.
+* Note that the `~/.codex/config.toml` file was automatically picked up as provisioned at deploy from `src/detours/detour_ai_augment/protected/src/agent_runtime/provision.sh`.
 * Replaced the `model` definition in `config.toml` with the following:
 
     ```toml
@@ -269,7 +269,7 @@ To smoke-test the feasibility of this, on August 6^th^, 2026, UTC-4, a Human Ope
     > [!NOTE]
     > Some of the earlier releases did not support all Codex features used in this set-up, for example, `"name":"run","namespace":"web"` for `function_call`’s, which is relied on _heavily_ when validating submissions in `src/detours/detour_ai_augment/src/backend/api.py`.
 * Removed macOS Gatekeeper’s quarantine on the downloaded package to enable execution: `LLAMA_RELEASE="10295" && /usr/bin/xattr -d com.apple.quarantine "$HOME/Downloads/llama-b${LLAMA_RELEASE}-bin-macos-arm64.tar.gz"`
-* Deployed llama.cpp on the macOS host. A sample deployment, particularly llama.cpp configurations used, is documented here: `src/detours/detour_ai_augment/src/llm_inference_api/sample_deploy/`
+* Deployed llama.cpp on the macOS host. A sample deployment, particularly llama.cpp configurations used, is documented here: `src/detours/detour_ai_augment/protected/src/llm_inference_api/sample_deploy/`
     * Note that llama.cpp was deployed in a non-router mode, hence the `default` model name in `config.toml` above.
     * Note also that the proxy server that is used there is completely optional and provided for illustrative purposes.
 * On the macOS host, launched the detour Backend API (i.e., using `pixi run serve`).
@@ -279,12 +279,12 @@ To smoke-test the feasibility of this, on August 6^th^, 2026, UTC-4, a Human Ope
 * Codex CLI was prompted in a non-interactive mode: `codex exec --skip-git-repo-check "http://192.168.5.2:8612/openapi.json"`
     * Note that the URL here is _the_ prompt.
 
-Two sample rollouts from these runs are provided for reference from these runs at `src/detours/detour_ai_augment/src/llm_inference_api/sample_rollouts`:
+Two sample rollouts from these runs are provided for reference from these runs at `src/detours/detour_ai_augment/protected/src/llm_inference_api/sample_rollouts`:
 
 * `gemma-4-e4b-it-Q4_K_M-reasoning-off.jsonl` documents the performance of [Gemma 4 E4B][google-gemma-4-model-card] (in the `ggml-org/gemma-4-E4B-it-GGUF` variant, as of [commit 6b352c5][gemma-4-E4B-it-GGUF-6b352c5], `Q4_K_M` quantized) with reasoning turned off; 
 * `gpt-oss-20b-mxfp4-reasoning-high.jsonl` documents the performance of [GPT OSS 20B][arxiv-gpt-oss-model-card] (in the `ggml-org/gpt-oss-20b-GGUF` variant, as of [commit e1dc459][gpt-oss-20b-GGUF-e1dc459], `MXFP4` quantized) with reasoning set to `high` (in the llama.cpp server config; the value from `config.toml` was ignored).
 
-See the exact llama.cpp server configurations used for both models at `src/detours/detour_ai_augment/src/llm_inference_api/sample_deploy/`
+See the exact llama.cpp server configurations used for both models at `src/detours/detour_ai_augment/protected/src/llm_inference_api/sample_deploy/`
 
 The rollouts can be reviewed with this tool: `src/github.com/simonw/tools/blob/266b40cbefe398ec5a03b695f107cab7a5713529/codex-timeline.html`
 

@@ -14,10 +14,10 @@ from pydantic import BaseModel, ValidationError
 
 pytest.importorskip("pydantic_extra_types")
 
-from src.detours.detour_ai_augment.src.backend.helpers.data_models import (  # noqa: E402
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models import (  # noqa: E402
     pydantic_to_paste as schema,
 )
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.submission_init import (  # noqa: E402
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.submission_init import (  # noqa: E402, E501
     Submission,
 )
 
@@ -268,7 +268,8 @@ def test_l_fei_fei_fixture_builds_without_external_requests(
         pytest.fail("the static submission fixture must not make external requests")
 
     module_name = (
-        "src.detours.detour_ai_augment.src.backend.helpers.data_models.submission_fixture"
+        "src.detours.detour_ai_augment.protected.src.backend.helpers.data_models."
+        "submission_fixture"
     )
     fixture_module = importlib.import_module(module_name)
     monkeypatch.setattr(requests, "get", unexpected_get)

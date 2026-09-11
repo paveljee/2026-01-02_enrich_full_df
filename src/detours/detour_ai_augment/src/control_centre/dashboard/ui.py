@@ -28,93 +28,22 @@ from fastapi import status
 from nicegui import app, ui
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from src.helpers.architecture import implements
-from src.helpers.cards import build_cards, card_filename, render_docx_bytes
-from src.helpers.data_models import NameKey
-from src.helpers.vars import (
-    CARD_INTRODUCTION,
-    DRAW_LABEL,
-    KTP_FIRST_NAME_COL,
-    KTP_LAST_NAME_COL,
-    KTP_NAMEKEY_COL,
-)
-
 from src.detours.detour_ai_augment.protected.src.architecture import (
     ControlCentreComponent,
 )
-from ...backend.api import (
-    APPENDWATCH_REPORT_ENV_NAME,
-    CARD_EXCLUDED_COLUMNS,
-    CODEX_SESSIONS_ROOT_ENV_NAME,
-    CONTROL_PARENT_PID_ENV_NAME,
-    HTTP_GET_METHOD,
-    HTTP_POST_METHOD,
-    NAMEKEY_ENV_NAME,
-    SERVER_PORT,
-    _PushValidationError,
-    parse_appendwatch_report_bytes,
-    parse_name_key_header,
-    parse_source_key_header,
-    selected_card_outer_dict,
-)
-from ...backend.helpers.data_models.ai_augment_context import (
-    EXPECTED_GROUND_TRUTH_RESEARCHERS,
-    EXPECTED_INELIGIBILITY_COUNTS,
-    EXPECTED_INELIGIBLE_RESEARCHERS,
-    EXPECTED_NO_GROUND_TRUTH_RESEARCHERS,
-    EXPECTED_SOURCE_RESEARCHERS,
-)
-from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_augment_config import (
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_augment_config import (  # noqa: E501
     AiAugmentDetourConfig,
 )
-from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.pydantic_to_paste import (
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.pydantic_to_paste import (  # noqa: E501
     EXPORT_OPENALEX_API_KEY,
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
-    AiAugmentCohort,
-    AiAugmentIneligibilityCategory,
     AI_AUGMENT_COLUMN_PREFIX,
-    DOCX_COLUMNS,
     DOCX_TO_AI_AUGMENT_COLUMNS,
     KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL,
     KTP_AI_AUGMENT_FOOTNOTE_ARGUMENTS_COL,
     KTP_AI_AUGMENT_FOOTNOTES_COL,
-)
-from ...backend.helpers.data_models.ai_augment_outer_dict import (
-    AiAugmentOuterDict,
-    CommittedInnerDict,
-)
-from ...backend.helpers.data_models.commit_event import (
-    SOURCE_KEY_HEADER,
-    BackendLifecycle,
-)
-from ...backend.helpers.data_models.query_response import (
-    AgentRuntimeAttemptRecord,
-    QueryResponse,
-)
-from ...backend.helpers.data_models.run_outcome_response import (
-    RunOutcomeResponse,
-    RunOutcomeResponseBody,
-)
-from ...backend.ipc import (
-    DASHBOARD_IPC_HOST,
-    DASHBOARD_QUERY_PATH,
-    DASHBOARD_SOCKET_PATH,
-    DASHBOARD_SOCKET_PATH_ENV_NAME,
-)
-from ...backend.server import CONFIG_OPTION, DANGER_NO_VERIFY_HASH_OPTION
-from .helpers.aggrid import AgGrid
-from .helpers.data_models.ai_augment_context import (
-    AiAugmentControlCentreContext,
-)
-from .helpers.data_models.run_event import (
-    Run,
-    RunEvent,
-)
-from .helpers.data_models.run_outcome import (
-    NAME_KEY_HEADER,
-    RunLifecycle,
-    RunOutcomeRequest,
+    AiAugmentCohort,
 )
 from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helpers.locale import (
     Locale,
@@ -163,6 +92,75 @@ from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helper
     REPOSITORY_ROOT,
     TEXT_DECODE_ERROR_POLICY,
     TEXT_ENCODING,
+)
+from src.helpers.architecture import implements
+from src.helpers.cards import build_cards, card_filename, render_docx_bytes
+from src.helpers.data_models import InnerDict, NameKey
+from src.helpers.vars import (
+    CARD_INTRODUCTION,
+    DRAW_LABEL,
+    KTP_FIRST_NAME_COL,
+    KTP_LAST_NAME_COL,
+    KTP_NAMEKEY_COL,
+)
+
+from ...backend.api import (
+    APPENDWATCH_REPORT_ENV_NAME,
+    CARD_EXCLUDED_COLUMNS,
+    CODEX_SESSIONS_ROOT_ENV_NAME,
+    CONTROL_PARENT_PID_ENV_NAME,
+    HTTP_GET_METHOD,
+    HTTP_POST_METHOD,
+    NAMEKEY_ENV_NAME,
+    SERVER_PORT,
+    _PushValidationError,
+    parse_appendwatch_report_bytes,
+    parse_name_key_header,
+    parse_source_key_header,
+    selected_card_outer_dict,
+)
+from ...backend.helpers.data_models.ai_augment_context import (
+    EXPECTED_GROUND_TRUTH_RESEARCHERS,
+    EXPECTED_INELIGIBILITY_COUNTS,
+    EXPECTED_INELIGIBLE_RESEARCHERS,
+    EXPECTED_NO_GROUND_TRUTH_RESEARCHERS,
+    EXPECTED_SOURCE_RESEARCHERS,
+)
+from ...backend.helpers.data_models.ai_augment_outer_dict import (
+    AiAugmentOuterDict,
+    CommittedInnerDict,
+)
+from ...backend.helpers.data_models.commit_event import (
+    SOURCE_KEY_HEADER,
+    BackendLifecycle,
+)
+from ...backend.helpers.data_models.query_response import (
+    AgentRuntimeAttemptRecord,
+    QueryResponse,
+)
+from ...backend.helpers.data_models.run_outcome_response import (
+    RunOutcomeResponse,
+    RunOutcomeResponseBody,
+)
+from ...backend.ipc import (
+    DASHBOARD_IPC_HOST,
+    DASHBOARD_QUERY_PATH,
+    DASHBOARD_SOCKET_PATH,
+    DASHBOARD_SOCKET_PATH_ENV_NAME,
+)
+from ...backend.server import CONFIG_OPTION, DANGER_NO_VERIFY_HASH_OPTION
+from .helpers.aggrid import AgGrid
+from .helpers.data_models.ai_augment_context import (
+    AiAugmentControlCentreContext,
+)
+from .helpers.data_models.run_event import (
+    Run,
+    RunEvent,
+)
+from .helpers.data_models.run_outcome import (
+    NAME_KEY_HEADER,
+    RunLifecycle,
+    RunOutcomeRequest,
 )
 
 
@@ -441,12 +439,6 @@ class _BackendAvailability:
     ipc_available: bool
 
 
-@dataclass(frozen=True, slots=True)
-class _GroundTruthRecord:
-    namekey: NameKey
-    values: Mapping[str, str | None]
-
-
 class _SourceInputFingerprint(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -677,10 +669,7 @@ class _AttemptVariableProjection:
 
 @dataclass(frozen=True, slots=True)
 class _ResearcherGridRow:
-    namekey: NameKey
-    rnd: int
-    cohort: AiAugmentCohort
-    ineligibility_category: AiAugmentIneligibilityCategory | None
+    researcher: AiAugmentOuterDict
 
     # Collapsed row: latest attempt projection, or synthetic ready projection.
     latest: _AttemptVariableProjection
@@ -691,10 +680,7 @@ class _ResearcherGridRow:
 
 @dataclass(frozen=True, slots=True)
 class _ResearcherCardView:
-    namekey: NameKey
-    draw_number: str
-    first_name: str
-    last_name: str
+    researcher: AiAugmentOuterDict
     markdown: str
 
 
@@ -755,7 +741,7 @@ class _SourceRepository:
         return self._configuration.ai_augment_outerdicts
 
     @property
-    def ground_truth_by_namekey(self) -> Mapping[str, _GroundTruthRecord]:
+    def ground_truth_by_namekey(self) -> Mapping[str, InnerDict]:
         return self.load_ground_truth_by_namekey()
 
     def load_researchers(self) -> tuple[AiAugmentOuterDict, ...]:
@@ -771,7 +757,7 @@ class _SourceRepository:
     def load_ground_truth(
         self,
         namekey: NameKey,
-    ) -> _GroundTruthRecord | None:
+    ) -> InnerDict | None:
         matches = tuple(
             outerdict
             for outerdict in self._configuration.ai_augment_outerdicts
@@ -779,21 +765,12 @@ class _SourceRepository:
         )
         if len(matches) != 1:
             raise RuntimeError(Locale.GROUND_TRUTH_MISSING)
-        innerdict = matches[0].ground_truth_innerdict()
-        if innerdict is None:
-            return None
-        return _GroundTruthRecord(
-            namekey=namekey,
-            values={
-                column: None if (value := innerdict.data[column]) is None else str(value)
-                for column in DOCX_COLUMNS
-            },
-        )
+        return matches[0].ground_truth_innerdict()
 
     def load_ground_truth_by_namekey(
         self,
-    ) -> Mapping[str, _GroundTruthRecord]:
-        result: dict[str, _GroundTruthRecord] = {}
+    ) -> Mapping[str, InnerDict]:
+        result: dict[str, InnerDict] = {}
         for outerdict in self._configuration.ai_augment_outerdicts:
             if outerdict.ai_augment_cohort is not AiAugmentCohort.GROUND_TRUTH:
                 continue
@@ -801,13 +778,7 @@ class _SourceRepository:
             innerdict = outerdict.ground_truth_innerdict()
             if innerdict is None:
                 raise RuntimeError(Locale.GROUND_TRUTH_MISSING)
-            result[namekey.to_json_key()] = _GroundTruthRecord(
-                namekey=namekey,
-                values={
-                    column: None if (value := innerdict.data[column]) is None else str(value)
-                    for column in DOCX_COLUMNS
-                },
-            )
+            result[namekey.to_json_key()] = innerdict
         return result
 
     def assert_population_invariants(
@@ -1028,7 +999,7 @@ def apply_run_event(run: Run | None, event: RunEvent) -> Run:
     elif event.lifecycle is RunLifecycle.ROLLOUT_DISCOVERED:
         if event.rollout_jsonl is None:
             raise RuntimeError(Locale.JOURNAL_ROLLOUT_PATH_MISSING)
-        run.rollout_jsonl = PurePosixPath(event.rollout_jsonl)
+        run.rollout_jsonl = event.rollout_jsonl
     elif event.lifecycle is RunLifecycle.PUSH_ACCEPTED:
         if event.accepted_commit_record_id is None:
             raise RuntimeError(Locale.JOURNAL_COMMIT_RECORD_ID_MISSING)
@@ -1888,7 +1859,7 @@ class _VariableProjector:
         *,
         researcher: AiAugmentOuterDict,
         attempt: _AttemptView,
-        ground_truth: _GroundTruthRecord | None,
+        ground_truth: InnerDict | None,
         variable: _VariableSpec,
         codex_busy: bool,
     ) -> _AttemptVariableProjection:
@@ -1905,7 +1876,10 @@ class _VariableProjector:
             ),
             table_1_column=variable.table_1_column,
             table_1_value=(
-                None if ground_truth is None else ground_truth.values.get(variable.table_1_column)
+                None
+                if ground_truth is None
+                or (value := ground_truth.data[variable.table_1_column]) is None
+                else str(value)
             ),
             footnotes=(
                 None
@@ -1946,7 +1920,7 @@ class _VariableProjector:
         self,
         *,
         researcher: AiAugmentOuterDict,
-        ground_truth: _GroundTruthRecord | None,
+        ground_truth: InnerDict | None,
         variable: _VariableSpec,
         codex_busy: bool,
     ) -> _AttemptVariableProjection:
@@ -1960,7 +1934,10 @@ class _VariableProjector:
             ai_value=None,
             table_1_column=variable.table_1_column,
             table_1_value=(
-                None if ground_truth is None else ground_truth.values.get(variable.table_1_column)
+                None
+                if ground_truth is None
+                or (value := ground_truth.data[variable.table_1_column]) is None
+                else str(value)
             ),
             footnotes=None,
             footnote_arguments=None,
@@ -1982,7 +1959,7 @@ class _VariableProjector:
         self,
         *,
         researcher_view: _ResearcherView,
-        ground_truth: _GroundTruthRecord | None,
+        ground_truth: InnerDict | None,
         variable: _VariableSpec,
         codex_busy: bool,
     ) -> _ResearcherGridRow:
@@ -2007,12 +1984,7 @@ class _VariableProjector:
             )
         )
         return _ResearcherGridRow(
-            namekey=researcher_view.researcher.namekey,
-            rnd=researcher_view.researcher.ai_augment_rnd,
-            cohort=researcher_view.researcher.ai_augment_cohort,
-            ineligibility_category=(
-                researcher_view.researcher.ai_augment_ineligibility_category
-            ),
+            researcher=researcher_view.researcher,
             latest=latest,
             attempts=attempts,
         )
@@ -2104,7 +2076,7 @@ class _ControlCentreController:
         self._runs: dict[UUID, Run] = {}
         self._researchers: tuple[AiAugmentOuterDict, ...] = ()
         self._researchers_by_namekey: dict[str, AiAugmentOuterDict] = {}
-        self._ground_truth: Mapping[str, _GroundTruthRecord] = {}
+        self._ground_truth: Mapping[str, InnerDict] = {}
         self._attempt_records: Mapping[
             str,
             tuple[AgentRuntimeAttemptRecord, ...],
@@ -2294,6 +2266,7 @@ class _ControlCentreController:
             raise KeyError(Locale.UNKNOWN_RUN_ID_TEMPLATE.format(run_id=run_id))
         if run.is_finished():
             return
+        was_queued = run.is_queued()
         await self._append_run_event(
             RunEvent(
                 run_id=run_id,
@@ -2324,7 +2297,7 @@ class _ControlCentreController:
                 )
                 raise
             return
-        if run.is_queued():
+        if was_queued:
             queued = list(app.storage.general.get(QUEUE_STORAGE_KEY, []))
             if str(run_id) in queued:
                 queued.remove(str(run_id))
@@ -2524,10 +2497,7 @@ class _ControlCentreController:
             raise KeyError(Locale.UNKNOWN_NAMEKEY_TEMPLATE.format(namekey=namekey))
         markdown = await asyncio.to_thread(self._backend_database.card, namekey)
         return _ResearcherCardView(
-            namekey=namekey,
-            draw_number=researcher.draw_number,
-            first_name=researcher.namekey.first_name,
-            last_name=researcher.namekey.last_name,
+            researcher=researcher,
             markdown=markdown,
         )
 
@@ -2671,7 +2641,7 @@ class _ControlCentreController:
                 occurred_at_unix_usec=datetime_to_unix_usec(datetime.now(timezone.utc)),
                 lifecycle=RunLifecycle.ROLLOUT_DISCOVERED,
                 session_id=result.session_id,
-                rollout_jsonl=str(result.rollout_jsonl),
+                rollout_jsonl=result.rollout_jsonl,
             )
         )
         await self._backend.supply_session_id(result.session_id)
@@ -3270,18 +3240,21 @@ class _ControlCentrePage:
     ) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         for row in snapshot.rows:
+            researcher = row.researcher
             latest = row.latest
             rows.append({
-                GRID_ROW_ID_FIELD: row.namekey.to_json_key(),
-                GRID_NAMEKEY_FIELD: row.namekey.to_json_key(),
+                GRID_ROW_ID_FIELD: researcher.namekey.to_json_key(),
+                GRID_NAMEKEY_FIELD: researcher.namekey.to_json_key(),
                 GRID_RUN_ID_FIELD: (None if latest.run_id is None else str(latest.run_id)),
-                GRID_RND_FIELD: row.rnd,
+                GRID_RND_FIELD: researcher.ai_augment_rnd,
                 GRID_DRAW_FIELD: latest.draw_number,
                 GRID_LAST_NAME_FIELD: latest.last_name,
                 GRID_FIRST_NAME_FIELD: latest.first_name,
-                GRID_COHORT_FIELD: row.cohort.value,
+                GRID_COHORT_FIELD: researcher.ai_augment_cohort.value,
                 GRID_INELIGIBILITY_FIELD: (
-                    None if row.ineligibility_category is None else row.ineligibility_category.value
+                    None
+                    if researcher.ai_augment_ineligibility_category is None
+                    else researcher.ai_augment_ineligibility_category.value
                 ),
                 GRID_AI_VALUE_FIELD: latest.ai_value,
                 GRID_TABLE_1_VALUE_FIELD: latest.table_1_value,
@@ -3390,7 +3363,7 @@ class _ControlCentrePage:
             snapshot = await self._controller.snapshot(selection=self._selection)
         variable = VARIABLE_SPEC_BY_KEY[self._selection.variable_key]
         self._row_views_by_namekey = {
-            row.namekey.to_json_key(): row for row in snapshot.rows
+            row.researcher.namekey.to_json_key(): row for row in snapshot.rows
         }
         self.refresh_attempt_history()
         rows = self.grid_rows(snapshot=snapshot)
@@ -3461,9 +3434,9 @@ class _ControlCentrePage:
         if self._handles.selected_researcher_label is not None:
             self._handles.selected_researcher_label.set_text(
                 Locale.RESEARCHER_SELECTION_TEMPLATE.format(
-                    first_name=card.first_name,
-                    last_name=card.last_name,
-                    draw_number=card.draw_number,
+                    first_name=card.researcher.namekey.first_name,
+                    last_name=card.researcher.namekey.last_name,
+                    draw_number=card.researcher.draw_number,
                 )
             )
         if self._handles.card_markdown is not None:
@@ -3484,7 +3457,10 @@ class _ControlCentrePage:
 
     def _invalidate_card(self, namekey: NameKey) -> None:
         self._card_cache.pop(namekey.to_json_key(), None)
-        if self._displayed_card is not None and self._displayed_card.namekey == namekey:
+        if (
+            self._displayed_card is not None
+            and self._displayed_card.researcher.namekey == namekey
+        ):
             self._clear_displayed_card()
 
     async def download_displayed_card(self) -> None:
@@ -3504,9 +3480,9 @@ class _ControlCentrePage:
                 docx,
                 filename=(
                     card_filename(
-                        draw_label=card.draw_number,
-                        first_name=card.first_name,
-                        last_name=card.last_name,
+                        draw_label=card.researcher.draw_number,
+                        first_name=card.researcher.namekey.first_name,
+                        last_name=card.researcher.namekey.last_name,
                     )
                     + ".docx"
                 ),
@@ -3606,7 +3582,10 @@ class _ControlCentrePage:
                 self._handles.view_card_button.disable()
             self._clear_displayed_card()
             return
-        if self._displayed_card is not None and self._displayed_card.namekey != selected_namekey:
+        if (
+            self._displayed_card is not None
+            and self._displayed_card.researcher.namekey != selected_namekey
+        ):
             self._clear_displayed_card()
         run_id_value = selected.get(GRID_RUN_ID_FIELD)
         action = _RunAction(str(selected[GRID_ACTION_FIELD]))

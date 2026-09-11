@@ -32,7 +32,7 @@ fi
 
 SCRIPT_PATH="${BASH_SOURCE[0]}"  # this script
 WORK_REPO_DIR="$(dirname "$(dirname "$SCRIPT_PATH")")"  # one level up
-SUBREPO_PATH="src/detours/detour_ai_augment/src/llm_inference_api/sample_deploy"
+SUBREPO_PATH="src/detours/detour_ai_augment/protected/src/llm_inference_api/sample_deploy"
 PROXY_PY="$WORK_REPO_DIR/$SUBREPO_PATH/proxy.py"  # as of now
 [[ -f "$PROXY_PY" ]] || { echo "proxy script not found: $PROXY_PY" >&2; exit 1; }
 

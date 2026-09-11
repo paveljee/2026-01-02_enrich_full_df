@@ -10,20 +10,23 @@ from pydantic import (
     model_validator,
 )
 
-from src.helpers.architecture import implements
-from src.helpers.data_models import HttpRequestLogRecord, InnerDict, MatchingProcedure
-
 from src.detours.detour_ai_augment.protected.src.architecture import (
     AgentRuntimeComponent,
     BackendComponent,
 )
-from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.pydantic_to_paste import (
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.pydantic_to_paste import (  # noqa: E501
     StandardizedSubmission,
 )
-from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.submission_init import (
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.submission_init import (  # noqa: E501
     Submission,
 )
+from src.helpers.architecture import implements
+from src.helpers.data_models import HttpRequestLogRecord, InnerDict, MatchingProcedure
 
+from ....control_centre.dashboard.helpers.data_models.run_outcome import (
+    NAME_KEY_HEADER,
+    name_key_from_header_value,
+)
 from .ai_augment_outer_dict import (
     AiAugmentOuterDict,
     _AiAugmentOuterDictJson,
@@ -31,10 +34,6 @@ from .ai_augment_outer_dict import (
 )
 from .commit_event import BackendCommitRecord, PostCommitValidation
 from .run_outcome_response import RunOutcomeResponse
-from ....control_centre.dashboard.helpers.data_models.run_outcome import (
-    NAME_KEY_HEADER,
-    name_key_from_header_value,
-)
 
 
 @implements[AgentRuntimeComponent.AttemptProperty]()
@@ -77,6 +76,18 @@ class _AgentRuntimeAttemptRecordJson(BaseModel):
     attempt: _AgentRuntimeAttemptJson
     submission: Submission | StandardizedSubmission | None
     ground_truth_innerdict: dict[str, Any] | None
+
+    @classmethod
+    def from_attempt_record(cls, value: AgentRuntimeAttemptRecord) -> Self:
+        return cls(
+            attempt=_AgentRuntimeAttemptJson.from_attempt(value.attempt),
+            submission=value.submission,
+            ground_truth_innerdict=(
+                None
+                if value.ground_truth_innerdict is None
+                else value.ground_truth_innerdict.model_dump(mode="json")
+            ),
+        )
 
 
 @implements[BackendComponent.AgentRuntimePort.AttemptRecordProperty]()
@@ -130,15 +141,10 @@ class AgentRuntimeAttemptRecord(BaseModel):
         )
 
     def serialize(self) -> dict[str, object]:
-        return _AgentRuntimeAttemptRecordJson(
-            attempt=_AgentRuntimeAttemptJson.from_attempt(self.attempt),
-            submission=self.submission,
-            ground_truth_innerdict=(
-                None
-                if self.ground_truth_innerdict is None
-                else self.ground_truth_innerdict.model_dump(mode="json")
-            ),
-        ).model_dump(mode="json")
+        return _AgentRuntimeAttemptRecordJson.from_attempt_record(self).model_dump(
+            mode="json",
+            by_alias=True,
+        )
 
     @model_serializer
     def _serialize(self) -> dict[str, object]:
@@ -192,7 +198,7 @@ class QueryResponse(BaseModel):
                 procedure = outerdict.docx_innerdicts[0].procedure
             attempts.append(
                 AgentRuntimeAttemptRecord.from_serialized_json(
-                    attempt.model_dump_json(),
+                    attempt.model_dump_json(by_alias=True),
                     procedure=procedure,
                 )
             )
@@ -208,7 +214,7 @@ class QueryResponse(BaseModel):
     def serialize(self) -> dict[str, object]:
         return _QueryResponseJson(
             attempts=tuple(
-                _AgentRuntimeAttemptRecordJson.model_validate(attempt.serialize())
+                _AgentRuntimeAttemptRecordJson.from_attempt_record(attempt)
                 for attempt in self.attempts
             ),
             ai_augment_outerdicts=tuple(
@@ -219,7 +225,7 @@ class QueryResponse(BaseModel):
                 record.http_request_log_record
                 for record in self.run_outcome_records
             ),
-        ).model_dump(mode="json")
+        ).model_dump(mode="json", by_alias=True)
 
     @model_serializer
     def _serialize(self) -> dict[str, object]:
