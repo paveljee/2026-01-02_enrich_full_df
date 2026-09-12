@@ -435,6 +435,7 @@ bash -c '
 ' --
 """
 dashboard = """
+FASTAPI_DETOUR_DASHBOARD_SOCKET="/tmp/detour-manual-$(id -u).sock" \
 FASTAPI_DETOUR_AIVM_IDENTITY_FILE="$HOME/.local/share/aivm/.ssh/id_ed25519" \
 OPENALEX_API_KEY="$(python -c '
 import os
