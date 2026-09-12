@@ -34,7 +34,7 @@ class Locale:
         "Total {total} · ground truth {ground_truth} · "
         "no ground truth {no_ground_truth} · ineligible {ineligible} · "
         "ready {ready} · queued {queued} · running {running} · "
-        "complete {complete} · failed {failed} · cancelled {cancelled}"
+        "completed {completed} · failed {failed} · cancelled {cancelled}"
     )
     RESEARCHER_SELECTION_TEMPLATE: Final = (
         "{first_name} {last_name} · draw(s) {draw_number}"

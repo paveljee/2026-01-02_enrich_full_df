@@ -75,8 +75,9 @@ workflow based on the Human Operator's captured logs.
   and after. The suite checks deployed appendwatch topology, drives dashboard
   queueing through Playwright/Codex to terminal 410, validates replay/CAS/IPC
   ordering and integrity, and verifies the rendered researcher card.
-- Current `HEAD` is `8cd9c11`, including the completed private-header patch.
-  The worktree was clean before recording the current test investigation.
+- Current `HEAD` is `46dae82`, including the completed private-header and
+  protected deployment-path patches. The worktree was clean before recording
+  the current test investigation.
 
 ## Current operator request — historical refactor assessment
 
@@ -470,3 +471,188 @@ operator E2E from this environment.
   the lint/task changes: 215 passed / 47 skipped / 3 deselected; the separately
   selected protected real-API test skipped because `OPENALEX_API_KEY` is
   unavailable. Root and real operator tasks were not run.
+
+## Current operator request — deployment path audit
+
+Audit the AI-augment deployment and provisioning scripts after the
+protected/non-protected split. Check every repository-relative source path,
+script-to-script handoff, generated configuration path, and test/documented
+entry point. Fix only stale path wiring caused by the split; do not execute the
+root deployment or real operator contours.
+
+### Plan
+
+1. [done] Read `deploy.sh` and `provision.sh` completely and resolve all
+   host paths against the current tree.
+2. [done] Trace callers, tests, documentation, and pre-refactor history for
+   path contracts that moved under `protected/`.
+3. [done] Apply the surgical path correction.
+4. [done] Run shell syntax, focused hermetic tests, lint/type checks as
+   relevant, and a final stale-path search.
+
+### Findings and implementation
+
+- Commit `c8941ec` moved both runtime shell programs and `appendwatch.py` into
+  `protected/` byte-for-byte, while the Backend audit protocol implementation
+  `audit_read.py` remained in the non-protected source tree.
+  The unchanged `deploy.sh` default therefore still looked for `audit_read.py`
+  beside protected appendwatch, where no such file exists.
+- Corrected only that stale host-source default: from the protected runtime
+  directory it now walks to the detour root and selects
+  `src/control_centre/appendwatch/audit_read.py`. The adjacent provisioning
+  program and protected appendwatch defaults already resolve to existing files.
+- `provision.sh` contains no repository-relative source paths. It receives the
+  two guest source paths from `deploy.sh`; all remaining paths are explicit
+  guest account, systemd, SSH, Codex, or restricted mount paths and remain
+  coherent. No provisioning edit was necessary.
+### Verification
+
+- Both shell programs pass `bash -n`; all three resolved source files exist.
+- The proposed one-off path-layout test was rejected and removed by the Human
+  Operator; no test encodes this completed repository reorganization.
+- Full `lint` gate passes: Ruff, ordinary mypy (68 files), and strict
+  AI-augment mypy (40 files).
+- `git diff --check` passes. Root deployment and real operator tests were not
+  run.
+
+## Current operator request — production AI-augment test failure
+
+Investigate the Human Operator's complete production-machine log at
+`logs/from_operator/test-detour-ai-augment.log`. The run collected 265 tests,
+selected 262, and ended with 7 failed / 213 passed / 42 skipped / 3 deselected.
+All seven failures are Control Centre browser tests. The dashboard children
+did start and accept HTTP; their `/` page returned HTTP 500 because the
+handwritten `BrowserController` test double lacked `drain_notifications`, added
+to the production controller/page contract by `0394e81c`. `wait_for_server`
+caught that `HTTPError` through `URLError`, retried for 30 seconds, hid the child
+traceback, and finally killed each still-live child. The Human Operator's direct
+child run exposed the actual traceback. This is cross-platform test-double
+drift, not a slow macOS startup or a production-controller defect.
+
+### Agreed replacement boundary
+
+- The Human Operator does not want the fake-controller browser suite repaired
+  as an E2E. A browser E2E must launch the real production dashboard, controller,
+  Backend, IPC, database/replay/CAS projection, SSH transport, appendwatch, and
+  Playwright UI. No production class, HTTP endpoint, or subprocess seam is to
+  be monkeypatched.
+- Only Codex is deterministic. The fixture creates a real SSH key and an
+  isolated SSH-accessible guest tree containing a dummy Codex executable and
+  real rollout/appendwatch files. The dummy creates a UUIDv7 Codex session
+  JSONL after launch and performs real HTTP `/pull` and `/push` requests against
+  the production Backend. The real appendwatch process watches that JSONL, and
+  normal production SSH/audit code reads the resulting files.
+- Do not replace `ssh` with a fake command or emulate audit command output. Test
+  setup may configure real credentials, paths, ports, and isolated source/output
+  resources only. This makes the browser contour hermetic while preserving the
+  production lifecycle beneath the Codex boundary.
+- Startup failure reporting should fail immediately on HTTP 500 and use a
+  three-second readiness ceiling; the Human Operator will not accept a longer
+  wait. The current unstaged interim diff still adds the missing method to the
+  obsolete fake controller, adds a component regression around it, and improves
+  startup diagnostics. Rework/remove that fake-controller repair as part of
+  the native E2E replacement rather than treating it as final.
+
+### Current plan
+
+1. [in progress] Trace exact production SSH, Codex launch, appendwatch, config,
+   and test-resource contracts needed by an isolated real-SSH fixture.
+2. [pending] Add the smallest deterministic Codex dummy and isolated guest
+   runtime that satisfy those contracts with real files and HTTP.
+3. [pending] Replace the handwritten-controller browser harness with production
+   dashboard composition and retain behavior-oriented Playwright assertions.
+4. [pending] Run safe focused tests, Ruff, strict detour mypy, and diff checks;
+   hand off any root/real operator contour to the Human Operator.
+
+### Native startup findings
+
+- The Human Operator has now completed the real production contour: dashboard
+  startup, namekey queueing, Codex run, completed signoff, and result DOCX
+  download all succeeded. Remaining findings are production rough edges, not a
+  failed end-to-end lifecycle.
+- Manual `serve --ipc-only` skipped the task's stable socket export because its
+  branch ran and exited before the normal-mode exports. It consequently used
+  Python's platform temporary directory (`/var/folders/.../T` on macOS), while
+  normal manual mode used `/tmp/detour-manual-${UID}.sock`. Moved the existing
+  socket export above the mode branch so both manual modes use the same path;
+  Backend socket-selection logic is unchanged.
+- The Human Operator's direct `pixi run dashboard` first exposed two independent
+  replay-resource failures: the configured SHA-256 had a trailing ASCII space,
+  and the 908,009-byte replay log lacked a terminating newline. File type,
+  ownership, readability, and writability were correct. The replay-specific
+  wrapper checks writable/non-symlink/newline safety before `RegisteredResource`
+  performs exact hash verification, while wrapping all failures in one generic
+  validation message.
+- After those were addressed, the real dashboard exposed a production config
+  parser defect: `AiAugmentDetourConfig`'s `mode="before"` validator inserted a
+  `Path` object into `model_validate_json()` input, and strict JSON-mode Path
+  validation rejected that validator-produced value. The surgical fix emits
+  the derived detour DB path as a string and lets Pydantic convert it normally.
+  Existing read-only config/source coverage now exercises `from_json()` instead
+  of bypassing the production parser with `model_validate()`; the focused test
+  passes.
+- The first native browser-test draft still times out at its three-second
+  readiness boundary on the Human Operator's machine. Do not increase that
+  deadline. Remove the fresh Python/NiceGUI import from the measured child
+  startup path (Linux fork from the already imported test process) and preserve
+  immediate HTTP-500/child-log diagnostics.
+- Local no-socket validation confirms the synthetic source fixture loads through
+  the production `from_json()` and context paths with exactly 307 researchers,
+  cohorts 196/78/33, and five multidraw researchers. Full browser execution is
+  unavailable in this sandbox because localhost socket creation is denied.
+
+## Proposed dashboard data-ownership simplification
+
+- No code change is authorized yet. The Human proposes removing
+  `SOURCE_DATA_STORAGE_KEY`, its host-filesystem fingerprint, and all direct
+  main-DB/`AiAugmentBackendContext` source-factory use from the Control Centre.
+  The Backend still derives the complete population because unfiltered
+  `GET /query` returns it. The Control Centre context must consequently stop
+  inheriting the Backend context; the current architecture Protocol also models
+  that unwanted inheritance and needs separation.
+- A valid persisted `BACKEND_DATABASE_STORAGE_KEY` `QueryResponse` becomes the
+  sole source for researcher population, ground truth, attempts, committed
+  output, run outcomes, table/history projection, and cards. With no persisted
+  response on a first-ever start, the table is empty. Dashboard-owned queue and
+  run-event journals remain separate control-plane state; live availability and
+  Codex-busy status remain process probes.
+- Ordinary UI rendering must never query IPC. Remove the current periodic
+  owned-Backend query, Backend-readiness history query, and per-namekey card
+  query. A distinct **Refresh statuses** action only probes process/API/IPC
+  availability. A **Query IPC** action is enabled only when neither a full nor
+  IPC Backend is running; it owns a short-lived `--ipc-only` child, waits for
+  the Unix socket, performs one unfiltered GET `/query`, validates/applies/
+  persists the response, and stops the child in `finally`. The existing
+  supervisor supports only full mode, so its process/log/stop machinery can be
+  reused but IPC-only launch and socket readiness are new behavior.
+- Centralize specific browser notifications for missing/invalid cached state,
+  process startup, unavailable IPC, unavailable detour DB, and invalid query
+  response, directing the operator to the appropriate button. Without an IPC
+  query the dashboard cannot know whether a valid cached response matches the
+  current DB; it can only label it cached/unverified. A successful Query IPC
+  replaces it.
+- Exact current run ordering: Backend startup alone does not mutate `Run`; the
+  Codex start callback appends `STARTED`, after which `Run.is_running()` is true
+  and UI projects `RUNNING`. After Codex exit, `_finalize_run` performs an IPC
+  GET (unless a commit ID is already journalled), appends `PUSH_ACCEPTED` when
+  found, and returns the proposed terminal outcome. `_record_run_outcome` then
+  POSTs `/completed|failed|cancelled` and refreshes the Backend snapshot. Only
+  after it returns does `_execute_run` append the terminal event that actually
+  changes `Run.lifecycle`/`run_outcome`; this ordering is tested. The terminal
+  transition is not currently conditional on response code 200: expected IPC
+  failure is reduced to a notification and 500 denotes partial archival capture.
+- Not all run facts are outside query IPC. Queue/start/PID/session/rollout/exit
+  and terminal events are in the dashboard journal, but acceptance, commit ID,
+  persisted attempt/validation/output, and persisted run-outcome evidence come
+  from IPC. Preserve automatic lifecycle IPC while making ordinary display
+  refresh explicit unless the Human directs a lifecycle-contract change.
+- Bootstrapping issue to resolve before implementation: current IPC-only query
+  opens the detour DB read-only and cannot create/replay a missing DB. With no
+  stored response, that failure leaves an empty table and therefore no namekey
+  to queue, so the full Backend can never be launched from the UI. Either the
+  owned query mode must initialize/synchronize the detour DB, or a narrowly
+  defined absent-DB query must still return the source population without
+  masking a missing projection for a non-empty replay log.
+- Added only condensed `Run.lifecycle -> ...` annotations in `_execute_run`
+  and `_process_queued_run` immediately after the relevant event application;
+  no `Run.run_outcome` annotations or behavior changes.

@@ -694,7 +694,7 @@ class _DashboardCounts:
     ready: int
     queued: int
     running: int
-    complete: int
+    completed: int
     failed: int
     cancelled: int
 
@@ -2475,7 +2475,7 @@ class _ControlCentreController:
             ready=lifecycles.count(RunLifecycle.READY),
             queued=lifecycles.count(RunLifecycle.QUEUED),
             running=lifecycles.count(RunLifecycle.RUNNING),
-            complete=lifecycles.count(RunLifecycle.COMPLETED),
+            completed=lifecycles.count(RunLifecycle.COMPLETED),
             failed=lifecycles.count(RunLifecycle.FAILED),
             cancelled=lifecycles.count(RunLifecycle.CANCELLED),
         )
@@ -2546,6 +2546,7 @@ class _ControlCentreController:
                         detail=None if cancelled else str(exc),
                     )
                 )
+                # Run.lifecycle -> run_outcome
         finally:
             cleanup_error: Exception | None = None
             try:
@@ -2565,6 +2566,7 @@ class _ControlCentreController:
                             ),
                         )
                     )
+                    # Run.lifecycle -> RunLifecycle.FAILED
             finally:
                 self._active_codex = None
                 self._active_run = None
@@ -2623,6 +2625,7 @@ class _ControlCentreController:
             run=run,
             on_handle=self._register_active_codex,
         )
+        # Run.lifecycle -> RunLifecycle.STARTED
         self._active_codex = result.handle
         await self._append_run_event(
             RunEvent(
@@ -2633,6 +2636,7 @@ class _ControlCentreController:
                 session_id=result.session_id,
             )
         )
+        # Run.lifecycle -> RunLifecycle.SESSION_DISCOVERED
 
         await self._append_run_event(
             RunEvent(
@@ -2644,6 +2648,7 @@ class _ControlCentreController:
                 rollout_jsonl=result.rollout_jsonl,
             )
         )
+        # Run.lifecycle -> RunLifecycle.ROLLOUT_DISCOVERED
         await self._backend.supply_session_id(result.session_id)
         if run.cancel_requested_at is not None:
             await self._record_run_outcome(
@@ -2661,7 +2666,9 @@ class _ControlCentreController:
                 codex_exit_code=exit_code,
             )
         )
+        # Run.lifecycle -> RunLifecycle.CODEX_EXITED
         run_outcome = await self._finalize_run(run=run)
+        # Run.lifecycle -> RunLifecycle.PUSH_ACCEPTED if accepted
         await self._record_run_outcome(
             run=run,
             run_outcome=run_outcome,
@@ -2675,6 +2682,7 @@ class _ControlCentreController:
                 codex_exit_code=exit_code,
             )
         )
+        # Run.lifecycle -> run_outcome
 
     async def _register_active_codex(
         self,
@@ -3335,7 +3343,7 @@ class _ControlCentrePage:
                     ready=counts.ready,
                     queued=counts.queued,
                     running=counts.running,
-                    complete=counts.complete,
+                    completed=counts.completed,
                     failed=counts.failed,
                     cancelled=counts.cancelled,
                 )
