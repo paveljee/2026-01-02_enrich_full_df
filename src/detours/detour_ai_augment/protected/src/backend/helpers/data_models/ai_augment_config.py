@@ -162,7 +162,7 @@ class AiAugmentDetourConfig(PipelineConfig):
             verify_hash_on_init = bool(
                 info.context.get("verify_hash_on_init", True)
             )
-        data["detour_db_path"] = _detour_db_path(Path(db_file))
+        data["detour_db_path"] = str(_detour_db_path(Path(db_file)))
         data["resources"] = {
             "release_map": _registered_resource(
                 files_config,
