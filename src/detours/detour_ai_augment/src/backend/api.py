@@ -4361,7 +4361,7 @@ def _apply_attempt_record(
     with BACKEND_WORKFLOW_STATE_LOCK:
         BACKEND_ATTEMPT_RECORD = attempt_record
         if validation.result is BackendLifecycle.ACCEPTED:
-            BACKEND_LIFECYCLE = BackendLifecycle.COMPLETE
+            BACKEND_LIFECYCLE = BackendLifecycle.COMPLETED
         elif (
             validation.result is BackendLifecycle.REJECTED
             and validation.stage
@@ -4606,6 +4606,8 @@ def selected_card_outer_dict(
                     isinstance(decoded, str) and decoded in AI_AUGMENT_CARD_EMPTY_VALUE_PLACEHOLDERS
                 ):
                     inner.data[column] = None
+                else:
+                    inner.data[column] = codex_parse.render_ai_standardized_value(value)
     return selected
 
 
@@ -5208,7 +5210,7 @@ def authoritative_pull() -> Response:
         )
     if lifecycle in {
         BackendLifecycle.RETRY,
-        BackendLifecycle.COMPLETE,
+        BackendLifecycle.COMPLETED,
     }:
         if attempt_record is None:
             raise HTTPException(

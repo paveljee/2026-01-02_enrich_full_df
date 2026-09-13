@@ -102,7 +102,7 @@ class BackendLifecycle(StrEnum):
         "configuration_error",
         "rejected",
         "retry",
-        "complete",
+        "completed",
         "failed",
     ]
 
@@ -119,7 +119,7 @@ class BackendLifecycle(StrEnum):
     CONFIGURATION_ERROR = "configuration_error"
     REJECTED = "rejected"
     RETRY = "retry"
-    COMPLETE = "complete"
+    COMPLETED = "completed"
     FAILED = "failed"
 
     def is_post_commit_validation_stage(self) -> bool:

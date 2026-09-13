@@ -84,7 +84,7 @@ class BackendComponent(
             "configuration_error",
             "rejected",
             "retry",
-            "complete",
+            "completed",
             "failed",
         ]: ...
 

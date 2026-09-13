@@ -11,6 +11,7 @@ INLINE_CITATION_SEPARATOR = "\u2020"
 URL_ARGUMENT_ACTIONS = ("open", "click")
 REF_ID_ARGUMENT_KEY = "ref_id"
 URL_ARGUMENT_KEY = "url"
+AI_GENERATED_TEXT_PREFIX = "**AI-generated text**:"
 MARKDOWN_ESCAPE_TRANSLATION = str.maketrans({
     character: f"\\{character}" for character in string.punctuation
 })
@@ -67,11 +68,15 @@ def render_ai_value(value: str, footnote_numbers: tuple[int, ...]) -> str:
     marker = ""
     if footnote_numbers:
         marker = "^" + ",".join(str(number) for number in footnote_numbers) + "^"
-    return f'**AI-generated text**: "{value}"{marker}'
+    return f'{AI_GENERATED_TEXT_PREFIX} "{value}"{marker}'
+
+
+def render_ai_standardized_value(canonical_json: str) -> str:
+    return f"{AI_GENERATED_TEXT_PREFIX} {canonical_json}"
 
 
 def render_comment(value: str, timestamp: str) -> str:
-    return f'- **AI-generated text**: "{value}" ({timestamp})'
+    return f'- {AI_GENERATED_TEXT_PREFIX} "{value}" ({timestamp})'
 
 
 def escape_markdown_text(value: str) -> str:

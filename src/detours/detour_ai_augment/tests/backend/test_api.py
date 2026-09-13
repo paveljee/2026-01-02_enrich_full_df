@@ -56,6 +56,7 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import L
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     AI_AUGMENT_COLUMNS,
     AI_AUGMENT_EVIDENCE_COLUMNS,
+    AI_AUGMENT_STANDARDIZED_COLUMNS,
     DOCX_COLUMNS,
     KTP_AI_AUGMENT_ACADEMIC_POSITIONS_COL,
     KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL,
@@ -4471,6 +4472,78 @@ def ai_augment_outerdict(
     )
 
 
+def test_card_labels_all_nonempty_standardized_fields_without_mutating_source() -> None:
+    standardized_values = tuple(
+        json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        for value in (
+            "Woman",
+            1976,
+            ["University College London"],
+            {"first_name": "Aziz", "last_name": "Sheikh"},
+            ["English", "Urdu"],
+            {"place": "Edinburgh", "location": "Scotland"},
+            ["Professor"],
+            {"collaborators": ["Researcher A"]},
+            ["https://orcid.org/0000-0001-7022-1104"],
+        )
+    )
+    source_values = dict(
+        zip(AI_AUGMENT_STANDARDIZED_COLUMNS, standardized_values, strict=True)
+    )
+    outerdict = ai_augment_outerdict("A.", "Sheikh")
+    source_innerdict = outerdict.xlsx_innerdicts[0]
+    source_innerdict.data.update(source_values)
+    original_source = deepcopy(source_innerdict.data)
+
+    selected = api.selected_card_outer_dict(outerdict)
+    cards = build_cards(
+        selected,
+        total_draws=1,
+        intro="",
+        excluded_cols=api.CARD_EXCLUDED_COLUMNS,
+    )
+
+    assert len(cards) == 1
+    card = next(iter(cards.values()))
+    for column, canonical_json in source_values.items():
+        expected_value = codex_parse.render_ai_standardized_value(canonical_json)
+        selected_innerdict = selected.get_inner_by_key(outerdict.namekey.to_json_key())[0]
+        assert selected_innerdict.data[column] == expected_value
+        assert f"**`{column}`**: {expected_value}" in card
+    assert source_innerdict.data == original_source
+
+
+@pytest.mark.parametrize(
+    "empty_standardized_value",
+    (
+        None,
+        api.NOT_REPORTED_VALUE,
+        api.NOT_AVAILABLE_OR_APPLICABLE_VALUE,
+    ),
+)
+def test_selected_card_outerdict_hides_empty_standardized_fields_without_mutation(
+    empty_standardized_value: str | None,
+) -> None:
+    column = AI_AUGMENT_STANDARDIZED_COLUMNS[0]
+    canonical_json = json.dumps(empty_standardized_value, separators=(",", ":"))
+    outerdict = ai_augment_outerdict("A.", "Sheikh")
+    source_innerdict = outerdict.xlsx_innerdicts[0]
+    source_innerdict.data[column] = canonical_json
+
+    selected = api.selected_card_outer_dict(outerdict)
+    selected_innerdict = selected.get_inner_by_key(outerdict.namekey.to_json_key())[0]
+    cards = build_cards(
+        selected,
+        total_draws=1,
+        intro="",
+        excluded_cols=api.CARD_EXCLUDED_COLUMNS,
+    )
+
+    assert selected_innerdict.data[column] is None
+    assert column not in next(iter(cards.values()))
+    assert source_innerdict.data[column] == canonical_json
+
+
 def test_backend_singleton_lock_is_independent_of_replay_log(
     tmp_path: Path,
 ) -> None:
@@ -4836,9 +4909,11 @@ def test_required_config_and_source_database_are_read_only(
         RESOURCE_SHA256_KEY: hashlib.sha256(b"").hexdigest(),
         RESOURCE_DESCRIPTION_KEY: "isolated authoritative log",
     }
-    configured = AiAugmentDetourConfig.model_validate(
-        config_data,
-        context={"verify_hash_on_init": False},
+    ai_augment_config = tmp_path / "ai-augment-config.json"
+    write_text(ai_augment_config, json.dumps(config_data))
+    configured = AiAugmentDetourConfig.from_json(
+        ai_augment_config,
+        verify_hash_on_init=False,
     )
     assert configured.detour_db_path == backend_test_paths.source_database.with_name(
         "scisci_process__detour_ai-augment.duckdb"
@@ -5343,7 +5418,7 @@ def test_post_commit_result_is_exposed_only_by_follow_up_pull(
         ground_truth_innerdict=None,
     )
     if result is BackendLifecycle.ACCEPTED:
-        api.BACKEND_LIFECYCLE = BackendLifecycle.COMPLETE
+        api.BACKEND_LIFECYCLE = BackendLifecycle.COMPLETED
     elif stage in {
         BackendLifecycle.PYDANTIC_VALIDATION,
         BackendLifecycle.DUCKDB_EVIDENCE_VALIDATION,

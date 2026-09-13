@@ -656,3 +656,259 @@ drift, not a slow macOS startup or a production-controller defect.
 - Added only condensed `Run.lifecycle -> ...` annotations in `_execute_run`
   and `_process_queued_run` immediately after the relevant event application;
   no `Run.run_outcome` annotations or behavior changes.
+
+## Current operator request — core state-authority audit
+
+Perform an excruciatingly meticulous, multifaceted audit for the Multiple
+Sources of Truth anti-pattern in the Codex-session parser and Backend replay
+into the detour database. The target invariant is a hermetic contour from a
+main-DB outerdict missing its DOCX innerdict to an AI-augmented replacement
+innerdict, with the complete Codex interaction captured immutably in the replay
+log and every disposable projection derived directly and transparently from
+that record.
+
+### Audit plan
+
+1. [complete] Inventory the authoritative lifecycle and all Codex-parse,
+   replay, projection, persistence, and query surfaces.
+2. [complete] Trace field-level lineage and state transitions across runtime,
+   replay, rebuild, restart, retry, and failure contours.
+3. [complete] Inspect tests and invariants for duplicate mutable state, hidden
+   derivation, divergent parsers/read paths, stale projections, and provenance
+   gaps at component, record, transaction, database, and operator levels.
+4. [complete] Report prioritized evidence, distinguish defects from deliberate
+   archival duplication, and recommend the smallest core-strengthening steps.
+
+This is an audit only; no production or test implementation change is yet
+authorized by this request.
+
+### Audit result
+
+- Verdict: the contour has a strong fail-closed capture foundation, but is not
+  yet a hermetic, reproducible replay system. The exact HTTP exchanges and
+  appendwatch capture are durably written before responses; commit records bind
+  pull/push IDs, session identity, and rollout CAS metadata. However, the
+  detour DB can silently cease to be a direct projection of the immutable
+  record, and a clean rebuild can depend on mutable current state.
+- Critical: the projection checkpoint authenticates only the last projected
+  replay line, not the full prefix. A same-length mutation to an earlier line
+  is accepted if the last line remains unchanged. A temporary diagnostic
+  proved the resulting replay/DB divergence (`replay_line_1='b'` while the
+  projected row remained `'a'`).
+- Critical: commit interpretation is not sealed. Rebuild invokes the current
+  main-DB/release-map-derived source objects, match implementation/version,
+  timezone, seed policy, and, for standardized retry submissions, live
+  OpenAlex/ROR validation. The captured bytes therefore do not uniquely
+  determine their interpretation.
+- Critical: broad post-commit projection exceptions are converted into a
+  durable failed-attempt projection and the checkpoint advances. Transient CAS,
+  dependency, configuration, source, or parser failures can consequently be
+  frozen as submission failures and are not retried after their cause is fixed.
+- Critical: IPC-only query reads the current detour DB without synchronizing it
+  to, or cryptographically checking it against, the replay log. It can serve a
+  stale but structurally valid competing truth.
+- High: already projected commit CAS blobs are not revalidated, and run-outcome
+  CAS blobs are not replay-validated at all. Deletion/corruption after a
+  checkpoint can leave the projection apparently healthy. The authoritative
+  immutable set is therefore replay log plus CAS, but that set has no complete
+  verified root.
+- High: retry folds consume baseline/evidence rows from the derived detour DB;
+  query separately assembles attempt and output tables; the response models do
+  not enforce conservation between accepted attempts, commit records, and
+  output rows. Validly shaped projection corruption can influence future work
+  or escape detection.
+- High: replay route validation is strict only for `POST /commit`; other
+  records are admitted by a generic HTTP shape check. Unknown routes and
+  malformed run outcomes can be checkpointed before route-specific parsing.
+- High: the documented claim that a persisted terminal `410 Gone` reconstructs
+  final output is not implemented. Output is actually derived on commit; the
+  410 is stored raw and has no explicit commit edge.
+- High: final output construction resolves its source researcher from the
+  current main DB and mutates cached `AiAugmentOuterDict` instances with
+  committed output. The exact selected source outerdict is not sealed into a
+  run, so source and projection state are muddied.
+- High: generated card ZIPs are live-only, unmanifested filesystem projections.
+  Rebuild neither recreates nor verifies them, and stale/orphan artifacts can
+  survive independently of replay.
+- Medium: Codex indexes are keyed chiefly by the mutable rollout filename and
+  cumulative prefix rather than exact CAS SHA plus line ordinal/hash. Computed
+  line hashes are discarded, weakening attempt-specific provenance.
+- Medium: the Codex parser contains duplicated interpretations: session
+  filename time and top-level summary time are not cross-validated; only the
+  first turn context supplies metadata; citation extraction and citation
+  stripping use separate grammars; broadly named indexes intentionally omit
+  uncited call chains without recording a projection/version contract.
+- Medium: some causal links are inferred from ordering, including retry
+  original-pull resolution; terminal records do not explicitly identify the
+  accepted commit. Backend crash/restart resets process globals, so subsequent
+  run-outcome capture can lose links that remain recoverable from replay.
+- Medium: ground truth chooses the first complete DOCX source row without an
+  explicit uniqueness/draw policy. The authorized read-only source aggregate
+  contains four namekeys with multiple complete DOCX rows, so this ambiguity is
+  observable even though their eligible-cohort membership was not inferred.
+
+Strong existing properties include append-plus-fsync before public response,
+cooperating process and replay locks, strict UUIDv7 commit models, explicit
+pull/push references and ordinals, canonical key cross-validation, CAS
+hash/size/line-count checks for newly projected commits, embedded appendwatch
+bytes, transaction rollback around failed commit work, deterministic candidate
+ordering/seed reset, and substantial malformed-rollout/retry coverage.
+
+Nine focused tests passed. They also exposed the central coverage gap: there is
+no test that destroys the detour DB, rebuilds only from replay plus CAS, and
+compares every relation/query/artifact; the restart retry test reopens the same
+DB, and the operator workflow validates the already-built DB. Missing mutation
+tests include earlier-prefix edits, post-checkpoint CAS corruption, stale
+IPC-only projection, current-source/config/network drift, cross-table
+conservation corruption, unknown routes/malformed outcomes, and stale files.
+
+Recommended repair order: define the immutable authority and pure-reducer
+contract; bind checkpoints to the complete replay prefix and all CAS; refuse to
+checkpoint infrastructure/projection failures; seal the exact source input and
+all interpretation versions/dependency results; remove live main-DB/network
+reads from replay; key Codex provenance to exact CAS lines; enforce projection
+conservation; apply one freshness gate to full and IPC-only queries; and add a
+destructive rebuild-equivalence plus corruption-matrix test suite.
+
+## Current operator request — standardized card labelling review
+
+Review only; no implementation change is authorized yet. The Human reports
+that card rendering omits the existing `**AI-generated text**:` marker from AI
+standardized fields and asks whether card construction is centralized.
+
+### Findings
+
+- Mechanical Markdown card construction is centralized in
+  `src/helpers/cards.py::build_cards`, and ZIP/DOCX materialization is likewise
+  centralized there. This renderer is intentionally generic: it prints every
+  non-excluded innerdict value verbatim and has no knowledge of AI-augment
+  columns.
+- Detour-specific card construction is only partially centralized. There are
+  exactly two production `build_cards` calls in the detour: accepted-attempt ZIP
+  construction in Backend `api.py` and Dashboard preview construction in
+  `ui.py`. Both first call the shared `selected_card_outer_dict`, so one common
+  transform currently governs their row selection and standardized-placeholder
+  suppression. However, each caller independently composes that transform with
+  `build_cards`, intro/exclusions, and the one-card assertion; there is no
+  single detour card-builder entry point. The Dashboard DOCX download renders
+  the already-built Dashboard Markdown and is not a third construction path.
+- `render_codex_values` decorates narrative AI values with
+  `codex_parse.render_ai_value`, which supplies `**AI-generated text**:`, but
+  serializes each standardized value directly to compact JSON. This is the
+  correct canonical storage representation. `selected_card_outer_dict` deep
+  copies the rows and parses standardized JSON only to hide null/scalar empty
+  placeholders; for every non-empty value it leaves the bare JSON string
+  unchanged. Generic `build_cards` then renders that bare value verbatim. The
+  missing prefix is therefore deterministic in Backend ZIPs, Dashboard
+  Markdown, and Dashboard-downloaded DOCX files.
+- The main-pipeline Step 10 is the only other production `build_cards` caller.
+  It is not an AI-augment card contour and should not acquire AI-column policy
+  through a global change to the generic renderer.
+- No test asserts the standardized-field card representation or the marker.
+  The captured-contour test checks selected values and provenance fields only;
+  the operator browser test merely requires a non-empty card. A test-side
+  `rendered_cards` capture is populated but not asserted.
+
+### Suggested surgical change
+
+1. Preserve compact JSON unchanged in `codex_output_rows` and all query models;
+   do not add Markdown to `render_codex_values` standardized storage.
+2. Introduce one detour-specific `build_ai_augment_cards` helper, preferably in
+   a small detour card module rather than Backend `api.py`. It should own the
+   deep-copy/selection transform, empty-standardized suppression, standardized
+   display decoration, common exclusions, generic `build_cards` invocation,
+   and exactly-one-card invariant. Both Backend and Dashboard should call only
+   this helper.
+3. For each non-empty canonical standardized JSON string, decorate the card
+   copy as `**AI-generated text**: {canonical_json}`. Do not quote the whole
+   JSON string: JSON string values already carry quotes, while numbers, arrays,
+   and objects require their native representation.
+4. Centralize the exact marker spelling used by narrative, standardized, and
+   comment rendering so it cannot drift.
+5. Add focused tests for string, integer, list, and object standardized values;
+   null/placeholder suppression; exactly one marker; canonical payload
+   preservation; no mutation of the source outerdict; and byte-identical
+   Backend/Dashboard Markdown from the common helper. Add one operator assertion
+   that a known standardized field visibly carries the marker.
+
+### Implemented standardized card labelling
+
+- Added one canonical `AI_GENERATED_TEXT_PREFIX` and
+  `render_ai_standardized_value` beside the existing narrative/comment
+  renderers in protected `codex_parse.py`; existing narrative and comment output
+  is unchanged.
+- `selected_card_outer_dict` now decorates every non-empty value named by
+  `AI_AUGMENT_STANDARDIZED_COLUMNS` on its deep-copied card projection. It
+  continues to suppress JSON null and configured scalar placeholders. The
+  canonical compact JSON in source/query/detour rows is not changed.
+- Because both production detour card paths already pass through
+  `selected_card_outer_dict`, this fixes Backend TXT/DOCX ZIP cards, Dashboard
+  Markdown, and Dashboard-downloaded DOCX without changing generic main-pipeline
+  card rendering.
+- Added regression coverage across all nine standardized columns with JSON
+  string, integer, array, and object forms; exact rendered marker/value text;
+  null and both configured empty placeholders; and source-innerdict
+  immutability.
+- Validation: Backend `test_api.py` passes with 127 tests and 2 skips; focused
+  strict mypy over the three changed Python files succeeds; Ruff checks succeed;
+  and `git diff --check` succeeds. Full strict detour mypy remains blocked by 13
+  pre-existing errors in the Human-modified Control Centre tests
+  (`test_ui_e2e.py` and `test_ui.py`), unrelated to this patch.
+
+## Proposed terminal-410 SourceKey response header
+
+Review only; no implementation is yet authorized. The Human proposes giving a
+terminal `GET /pull` 410 response the same kind of response header produced for
+run-outcome snapshot requests.
+
+- The run-outcome response currently has only a `SourceKey` response header,
+  canonically produced from rollout filename and line count. Its pull/push
+  record IDs are in `RunOutcomeResponseBody`, not in response headers.
+- A 410 can and should identify the exact accepted commit snapshot without
+  rereading the live rollout. Its accepted `AgentRuntimeAttemptRecord` contains
+  the commit, whose mandatory canonical `SourceKey` identifies the rollout
+  filename and commit-time line count. Reparse/re-render that value through the
+  existing SourceKey helpers and return it on the 410 response. It should share
+  the run-outcome header mechanism/type, not necessarily its eventual value:
+  the rollout normally grows while Codex receives the 410 and exits, so the
+  later run-outcome snapshot can correctly have a larger line count.
+- This is meaningful provenance: the 410 SourceKey can equal the accepted
+  commit SourceKey, and the commit directly references the originating pull and
+  push. It is therefore a transitive causal chain. SourceKey alone is not a
+  direct pull/push/commit record-ID edge and can match both rejected and
+  accepted attempts if a retry occurs without rollout growth; replay must
+  resolve it to exactly one prior accepted commit.
+- Merely emitting the header would be low difficulty but mostly documentary.
+  The worthwhile surgical patch also route-validates terminal 410 records:
+  require a canonical SourceKey, resolve exactly one earlier accepted commit
+  with an equal SourceKey, and require the 410 body to equal that accepted
+  attempt's normalized standardized submission plus optional selected ground
+  truth. Infrastructure/linkage failure must abort projection rather than be
+  checkpointed as a failed submission.
+- Public FastAPI/Starlette response headers pass through ASGI in lowercase
+  (`sourcekey`), whereas run-outcome records are constructed directly with the
+  logical `SourceKey` spelling. Header names are HTTP-case-insensitive, but the
+  persisted model uses an ordinary case-sensitive dict. The patch must use one
+  shared case-insensitive accessor or canonicalize this known persisted header;
+  otherwise the two paths only appear to share a contract.
+- Implementation remains small: factor a shared SourceKey-response helper;
+  add the accepted-commit-derived header in `authoritative_pull`; document it in
+  the OpenAPI 410 response; add a strict terminal-410 parser/projector check;
+  and test live response, replay-log capture, accepted-commit equality, missing/
+  malformed/mismatched headers, retry ambiguity, body mismatch, and both
+  ground-truth/no-ground-truth responses. No main-pipeline or cross-detour
+  change is needed.
+
+## Backend lifecycle wording correction
+
+- Renamed the remaining stale Backend lifecycle member/value from
+  `BackendLifecycle.COMPLETE = "complete"` to
+  `BackendLifecycle.COMPLETED = "completed"` in the protected architecture
+  contract, concrete enum, accepted-attempt transition, terminal-pull gate, and
+  Backend test.
+- Confirmed that no standalone `COMPLETE`, `"complete"`, `CANCELED`, or
+  `"canceled"` lifecycle wording remains in the detour Python/Markdown corpus.
+  Existing run terminology remains `COMPLETED` and British `CANCELLED`.
+- Validation: Backend `test_api.py` passes with 127 tests and 2 skips; Ruff and
+  focused strict mypy pass across all four touched lifecycle files; and
+  `git diff --check` passes.
