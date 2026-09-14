@@ -256,6 +256,9 @@ To smoke-test the feasibility of this, on August 6^th^, 2026, UTC-4, a Human Ope
 * Deployed a virtual machine using `src/detours/detour_ai_augment/protected/src/agent_runtime/deploy.sh` under [Lima 2.2.0][lima220] under an arm64 macOS host as [specified above](#directory-contents-and-lockfile).
 * SSH’d into it  as `$AIVM_USER` and opened a session with GNU bash version 5.2.21(1).
 * Installed a standalone instance of codex-cli `VERSION="0.146.0-alpha.3.1"` using this command: `curl -fsSL https://chatgpt.com/codex/install.sh | sh -s -- --release "$VERSION"`
+
+    * **Note** that the version of codex-cli **may and does** differ for codex-cli as used in this detour and as used for AI-assisted coding. The latter is best documented under this repository's `.codex/config.toml`. This is **important** because there **may be and are** multiple differences between codex-cli versions.
+
 * Logged in using Human Operator’s ChatGPT Plus credentials.
 * Note that the `~/.codex/config.toml` file was automatically picked up as provisioned at deploy from `src/detours/detour_ai_augment/protected/src/agent_runtime/provision.sh`.
 * Replaced the `model` definition in `config.toml` with the following:
