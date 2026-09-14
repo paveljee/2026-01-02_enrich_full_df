@@ -32,8 +32,18 @@ from ..control_centre.dashboard.helpers.data_models.run_outcome import (
     RunOutcomeRequest,
 )
 from . import api
+from .helpers.data_models.ai_augment_context import (
+    AiAugmentBackendContext,
+)
 from .helpers.data_models.commit_event import SOURCE_KEY_HEADER
-from .helpers.data_models.run_outcome_response import RunOutcomeResponse
+from .helpers.data_models.run_outcome_response import (
+    RunOutcomeResponse,
+    RunOutcomeResponseBody,
+)
+from .helpers.data_models.query_response import (
+    AgentRuntimeAttemptRecord,
+    QueryResponse,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +68,11 @@ RunOutcomeHandler = Callable[
 ]
 
 
+# =============================================
+# Functions for the POST run outcome endpoints
+# =============================================
+
+
 def _run_outcome_records(
     connection: duckdb.DuckDBPyConnection,
 ) -> tuple[RunOutcomeResponse, ...]:
@@ -80,54 +95,65 @@ def _run_outcome_records(
         raise api._PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT) from exc
 
 
-def dashboard_query_payload(namekey: NameKey | None) -> str:
-    runtime = api.runtime_configuration()
-    with api.synchronized_detour_database(runtime) as connection:
-        response = api.dashboard_query_response(
-            runtime,
-            connection,
-            namekey=namekey,
-            run_outcome_records=_run_outcome_records(connection),
-        )
-    return response.model_dump_json()
+def _run_outcome_snapshot_configuration(session_id: UUID | None) -> api._PushConfiguration:
+    rollout_name = (
+        f"{ROLLOUT_FILENAME_PREFIX}{session_id or 'run-outcome-snapshot'}{ROLLOUT_FILENAME_SUFFIX}"
+    )
+    return api.push_configuration(str(CODEX_SESSIONS_ROOT / rollout_name))
 
 
-def ipc_only_dashboard_query_payload(namekey: NameKey | None) -> str:
-    runtime = api.runtime_configuration()
-    with api.DETOUR_DB_LOCK:
-        connection = api.open_detour_database(runtime, read_only=True)
+def _capture_run_outcome_snapshot(
+    runtime: AiAugmentBackendContext,
+) -> tuple[RunOutcomeResponseBody, str | None, tuple[Exception, ...]]:
+    with BACKEND_WORKFLOW_STATE_LOCK:
+        session_id = BACKEND_SESSION_ID
+        pull_record = BACKEND_PENDING_PULL_RECORD or BACKEND_CURRENT_PULL_RECORD
+        push_record = BACKEND_LATEST_PUSH_RECORD
+
+    rollout_archive: _ArchivedFile | None = None
+    rollout_filename: str | None = None
+    appendwatch_report: bytes | None = None
+    failures: list[Exception] = []
+
+    if session_id is not None:
         try:
-            response = api.dashboard_query_response(
-                runtime,
-                connection,
-                namekey=namekey,
-                run_outcome_records=_run_outcome_records(connection),
-            )
-        finally:
-            connection.close()
-    return response.model_dump_json()
+            rollout_configuration = api.push_configuration_for_session(session_id)
+            rollout_archive = api.copy_rollout_to_cas(rollout_configuration, runtime)
+            rollout_filename = rollout_configuration.rollout_relative_path.name
+        except (OSError, api._PushConfigurationError) as exc:
+            failures.append(exc)
 
+    try:
+        appendwatch_configuration = _run_outcome_snapshot_configuration(session_id)
+        appendwatch_report = api._read_appendwatch_bytes(appendwatch_configuration)
+    except (OSError, api._PushConfigurationError) as exc:
+        failures.append(exc)
 
-def build_ipc_only_dashboard_query_payload_callback(
-    config_path: Path,
-    *,
-    verify_hash_on_init: bool = True,
-) -> Callable[[NameKey | None], str]:
-    configured = False
-
-    def query(namekey: NameKey | None) -> str:
-        nonlocal configured
-
-        if not configured:
-            api.configure_runtime(
-                config_path,
-                require_namekey=False,
-                verify_hash_on_init=verify_hash_on_init,
-            )
-            configured = True
-        return ipc_only_dashboard_query_payload(namekey)
-
-    return query
+    snapshot = RunOutcomeResponseBody(
+        pull_record_id=None if pull_record is None else pull_record.record_id,
+        push_record_id=None if push_record is None else push_record.record_id,
+        codex_session_record=CodexSessionRecord(
+            session_id=session_id,
+            codex_rollout_record=(
+                None
+                if rollout_archive is None
+                else CodexRolloutRecord(
+                    sha256=rollout_archive.sha256,
+                    size=rollout_archive.size,
+                    line_count=rollout_archive.line_count,
+                )
+            ),
+            appendwatch_report_record=(
+                None
+                if appendwatch_report is None
+                else AppendwatchReportRecord(
+                    encoding=AppendwatchReportEncoding.BASE64,
+                    data=base64.b64encode(appendwatch_report).decode(BASE64_TEXT_ENCODING),
+                )
+            ),
+        ),
+    )
+    return snapshot, rollout_filename, tuple(failures)
 
 
 def handle_dashboard_run_outcome_request(
@@ -140,7 +166,7 @@ def handle_dashboard_run_outcome_request(
     ):
         raise api._PushValidationError(Locale.REPLAY_RECORD_CONTOUR_INVALID)
 
-    snapshot, rollout_filename, failures = api.capture_run_outcome_snapshot(runtime)
+    snapshot, rollout_filename, failures = _capture_run_outcome_snapshot(runtime)
     session = snapshot.codex_session_record
     response_code = (
         status.HTTP_200_OK
@@ -186,8 +212,150 @@ def handle_dashboard_run_outcome_request(
     return response
 
 
+# =====================================
+# Functions for the GET query endpoint
+# =====================================
+
+
+def _filter_attempt_records_by_namekey(
+    runtime: AiAugmentBackendContext,
+    conn: duckdb.DuckDBPyConnection,
+    *,
+    namekey: NameKey | None,
+) -> tuple[AgentRuntimeAttemptRecord, ...]:
+    rows = conn.execute(
+        f"SELECT records.{AUTHORITATIVE_RECORD_PAYLOAD_COLUMN}, "
+        f"attempts.{AUTHORITATIVE_ATTEMPT_PAYLOAD_COLUMN} "
+        f"FROM {AUTHORITATIVE_ATTEMPTS_TABLE} AS attempts "
+        f"JOIN {AUTHORITATIVE_RECORDS_TABLE} AS records "
+        f"ON records.{AUTHORITATIVE_RECORD_ID_COLUMN} = "
+        f"attempts.{AUTHORITATIVE_ATTEMPT_COMMIT_ID_COLUMN} "
+        f"ORDER BY records.{AUTHORITATIVE_RECORD_ORDINAL_COLUMN}"
+    ).fetchall()
+    try:
+        attempts: list[AgentRuntimeAttemptRecord] = []
+        for record_json, attempt_json in rows:
+            record = HttpRequestLogRecord.model_validate_json(str(record_json))
+            record_namekey = _parse_name_key_header(
+                record.request_headers.get(NAME_KEY_HEADER)
+            )
+            if namekey is not None and record_namekey != namekey:
+                continue
+            attempts.append(
+                _attempt_record_from_serialized_json(
+                    runtime,
+                    str(attempt_json),
+                    commit_http_record=record,
+                )
+            )
+        return tuple(attempts)
+    except (api._PushValidationError, ValidationError, ValueError) as exc:
+        raise api._PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT) from exc
+
+
+def _filter_backend_context_by_namekey(
+    runtime: AiAugmentBackendContext,
+    conn: duckdb.DuckDBPyConnection,
+    *,
+    namekey: NameKey | None,
+    run_outcome_records: tuple[RunOutcomeResponse, ...],
+) -> QueryResponse:
+    committed_by_namekey: dict[str, list[CommittedInnerDict]] = {}
+    for committed in _committed_innerdicts(conn):
+        committed_namekey_json = name_key_from_header_value(
+            committed.commit_record.request_headers.get(NAME_KEY_HEADER)
+        ).to_json_key()
+        committed_by_namekey.setdefault(committed_namekey_json, []).append(
+            committed
+        )
+    outerdicts = runtime.ai_augment_outerdicts
+    for outerdict in outerdicts:
+        outerdict.committed_innerdicts = tuple(
+            committed_by_namekey.get(outerdict.namekey.to_json_key(), ())
+        )
+    selected_outerdicts = (
+        outerdicts
+        if namekey is None
+        else tuple(
+            outerdict for outerdict in outerdicts if outerdict.namekey == namekey
+        )
+    )
+    return QueryResponse(
+        attempts=_filter_attempt_records_by_namekey(
+            runtime,
+            conn,
+            namekey=namekey,
+        ),
+        ai_augment_outerdicts=selected_outerdicts,
+        run_outcome_records=run_outcome_records,
+    )
+
+
+def _full_dashboard_query_response_json(namekey: NameKey | None) -> str:
+    runtime = api.runtime_configuration()
+    with api.synchronized_detour_database(runtime) as connection:
+        response = _filter_backend_context_by_namekey(
+            runtime,
+            connection,
+            namekey=namekey,
+            run_outcome_records=_run_outcome_records(connection),
+        )
+    return response.model_dump_json()
+
+
+def _full_dashboard_query_response_json_handler(
+) -> Callable[[NameKey | None], str]:
+    """
+    Returns `_full_dashboard_query_response_json`
+    as a `Callable`; added for explicitness because
+    `_ipc_only_dashboard_query_response_json` needs
+    a real handler.
+    """
+    return _full_dashboard_query_response_json
+
+
+def _ipc_only_dashboard_query_response_json(namekey: NameKey | None) -> str:
+    runtime = api.runtime_configuration()
+    with api.DETOUR_DB_LOCK:
+        with runtime.detour_database(read_only=True) as detour_database:
+            connection = detour_database.connection
+            response = _query_response(
+                runtime,
+                connection,
+                namekey=namekey,
+                run_outcome_records=_run_outcome_records(connection),
+            )
+    return response.model_dump_json()
+
+
+def _ipc_only_dashboard_query_response_json_handler(
+    config_path: Path,
+    *,
+    verify_hash_on_init: bool = True,
+) -> Callable[[NameKey | None], str]:
+    configured = False
+
+    def query_response_callable(namekey: NameKey | None) -> str:
+        nonlocal configured
+
+        if not configured:
+            api.configure_runtime(
+                config_path,
+                require_namekey=False,
+                verify_hash_on_init=verify_hash_on_init,
+            )
+            configured = True
+        return _ipc_only_dashboard_query_response_json(namekey)
+
+    return query_response_callable
+
+
+# =============================================================
+# Creation of a `Flask` app object that defines the HTTP routes
+# =============================================================
+
 def create_dashboard_query_app(
-    query: Callable[[NameKey | None], str],
+    query_response_handler: Callable[[NameKey | None], str],
     *,
     namekey_parameter: str,
     query_path: str,
@@ -206,7 +374,7 @@ def create_dashboard_query_app(
                 if namekey_json is None
                 else NameKey.from_json_key(namekey_json)
             )
-            payload = query(namekey)
+            payload = query_response_handler(namekey)
         except BaseException:
             app.logger.exception("dashboard query failed fatally")
             fatal_exit(1)
@@ -215,6 +383,11 @@ def create_dashboard_query_app(
             status=200,
             content_type=JSON_MEDIA_TYPE,
         )
+
+    # ===============================
+    # Dynamic registration for each
+    # @app.post(run_outcome_path)
+    # ===============================
 
     def run_outcome_request(path: RunOutcomePath) -> Response:
         if run_outcome_handler is None:
@@ -256,6 +429,10 @@ def create_dashboard_query_app(
     return app
 
 
+# =====================================================
+# Functions to start/stop IPC server for downstream use
+# =====================================================
+
 @dataclass(frozen=True, slots=True)
 class _DashboardIpcServer:
     socket_path: Path
@@ -275,7 +452,7 @@ def _unlink_stale_socket(path: Path) -> None:
 
 def start_dashboard_query_server(
     socket_path: Path,
-    query: Callable[[NameKey | None], str],
+    query_response_handler: Callable[[NameKey | None], str],
     *,
     namekey_parameter: str,
     query_path: str,
@@ -283,7 +460,7 @@ def start_dashboard_query_server(
     run_outcome_paths: frozenset[RunOutcomePath] = frozenset(),
 ) -> _DashboardIpcServer:
     app = create_dashboard_query_app(
-        query,
+        query_response_handler,
         namekey_parameter=namekey_parameter,
         query_path=query_path,
         run_outcome_handler=run_outcome_handler,
@@ -328,10 +505,23 @@ def stop_dashboard_query_server(handle: _DashboardIpcServer) -> None:
     _unlink_stale_socket(handle.socket_path)
 
 
+# ===================================================
+# Downstream use of start/stop IPC server functions
+# ===================================================
+
+
 def start_full_dashboard_query_server() -> _DashboardIpcServer:
+    """
+    Wrapper for `start_dashboard_query_server` to be used
+    downstream as part of another app's lifespan (e.g.,
+    to inject in FastAPI's `app.router.lifespan_context`).
+
+    Assumes that `stop_dashboard_query_server`
+    is executed in the lifespan's `finally`.
+    """
     return start_dashboard_query_server(
         DASHBOARD_SOCKET_PATH,
-        dashboard_query_payload,
+        _full_dashboard_query_response_json_handler,
         namekey_parameter=KTP_NAMEKEY_COL,
         query_path=DASHBOARD_QUERY_PATH,
         run_outcome_handler=handle_dashboard_run_outcome_request,
@@ -344,9 +534,15 @@ def serve_dashboard_query_only(
     *,
     verify_hash_on_init: bool = True,
 ) -> None:
+    """
+    Wrapper for `start_dashboard_query_server`
+    together with `stop_dashboard_query_server`
+    for downstream use as a standalone app;
+    owns its own start and stop lifecycle.
+    """
     server = start_dashboard_query_server(
         DASHBOARD_SOCKET_PATH,
-        build_ipc_only_dashboard_query_payload_callback(
+        _ipc_only_dashboard_query_response_json_handler(
             config_path,
             verify_hash_on_init=verify_hash_on_init,
         ),
@@ -359,4 +555,3 @@ def serve_dashboard_query_only(
         pass
     finally:
         stop_dashboard_query_server(server)
-        api.close_backend_detour_database()
