@@ -1,4 +1,5 @@
 # alternative config for sync work
+# OpenAI Codex (v0.154.0)
 model = "gpt-6-astra"
 model_reasoning_effort = "xhigh"
 personality = "none"
