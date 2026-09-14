@@ -21,16 +21,18 @@ from typing import Any, TextIO, cast
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 
-import duckdb
 import psutil
 import pytest
 from fastapi import status
 from playwright.sync_api import Locator, Page, ViewportSize, expect, sync_playwright
 
+from src.detours.detour_ai_augment.protected.src.backend import ipc as backend_ipc
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_augment_config import (  # noqa: E501
+    AiAugmentDetourConfig,
+)
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_augment_registered_resource import (  # noqa: E501
     RESOURCE_PATH_KEY,
     RESOURCE_SHA256_KEY,
-    AiAugmentDetourConfig,
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     REPLAY_LOG_KEY,
@@ -43,8 +45,13 @@ from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helper
     Locale,
 )
 from src.detours.detour_ai_augment.src.backend import api as backend_api
-from src.detours.detour_ai_augment.src.backend import ipc as backend_ipc
 from src.detours.detour_ai_augment.src.backend import server as backend_server
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_backend_store import (  # noqa: E501
+    AiAugmentBackendStore,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_cas import (  # noqa: E501
+    ROLLOUT_CAS_FILENAME_TEMPLATE,
+)
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_context import (
     AiAugmentBackendContext,
 )
@@ -111,7 +118,7 @@ pytestmark = pytest.mark.operator
 class OperatorRuntime:
     repository_root: Path
     config_path: Path
-    detour_db_path: Path
+    backend_store: AiAugmentBackendStore
     replay_log_path: Path
     rollout_cas_dir: Path
     dashboard_socket_path: Path
@@ -392,13 +399,14 @@ def _operator_runtime(
         "rollout_cas_dir": str(rollout_cas_dir),
     })
     config_path.write_text(json.dumps(config, indent=2), encoding=TEXT_ENCODING)
+    pipeline_config = AiAugmentDetourConfig.from_json(
+        config_path,
+        verify_hash_on_init=False,
+    )
     return OperatorRuntime(
         repository_root=repository_root,
         config_path=config_path,
-        detour_db_path=AiAugmentDetourConfig.from_json(
-            config_path,
-            verify_hash_on_init=False,
-        ).detour_db_path,
+        backend_store=pipeline_config.backend_store,
         replay_log_path=replay_log_path,
         rollout_cas_dir=rollout_cas_dir,
         dashboard_socket_path=dashboard_socket_path,
@@ -902,9 +910,8 @@ def validate_workflow_artifacts(
             record,
             resolve_http_record=records_by_id.__getitem__,
         )
-        with duckdb.connect(
-            str(operator_runtime.detour_db_path), read_only=True
-        ) as connection:
+        with operator_runtime.backend_store.read_only() as backend_store:
+            connection = backend_store.connection
             row = connection.execute(
                 f"SELECT {backend_api.AUTHORITATIVE_ATTEMPT_PAYLOAD_COLUMN} "
                 f"FROM {backend_api.AUTHORITATIVE_ATTEMPTS_TABLE} "
@@ -944,7 +951,7 @@ def validate_workflow_artifacts(
     assert push_record.response_headers is not None
     assert push_record.response_headers["location"] == backend_api.PULL_PATH
     rollout_blob = operator_runtime.rollout_cas_dir / (
-        backend_api.ROLLOUT_CAS_FILENAME_TEMPLATE.format(
+        ROLLOUT_CAS_FILENAME_TEMPLATE.format(
             sha256=rollout.sha256
         )
     )
@@ -1001,7 +1008,7 @@ def validate_workflow_artifacts(
         )
         assert run_outcome_line_count == run_outcome_rollout.line_count
         run_outcome_rollout_blob = operator_runtime.rollout_cas_dir / (
-            backend_api.ROLLOUT_CAS_FILENAME_TEMPLATE.format(
+            ROLLOUT_CAS_FILENAME_TEMPLATE.format(
                 sha256=run_outcome_rollout.sha256
             )
         )

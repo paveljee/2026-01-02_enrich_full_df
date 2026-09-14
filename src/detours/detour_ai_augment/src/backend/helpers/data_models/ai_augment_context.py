@@ -57,7 +57,7 @@ from src.helpers.vars import (
     KTP_PARTITION_SSN_VALUE,
 )
 
-from .ai_augment_outer_dict import AiAugmentOuterDict
+from .ai_augment_singular_outer_dict import AiAugmentSingularOuterDict
 
 MAP_COLUMNS = (DRAW_LABEL, BATCH_LABEL)
 
@@ -280,12 +280,12 @@ def _namekeys_and_draws(
     }
 
 
-def _derive_ai_augment_outerdicts(
+def _derive_ai_augment_singular_outerdicts(
     conn: duckdb.DuckDBPyConnection,
     release_batches: Mapping[str, str],
     *,
     sample_seed: int,
-) -> tuple[AiAugmentOuterDict, ...]:
+) -> tuple[AiAugmentSingularOuterDict, ...]:
     xlsx_innerdicts = _source_innerdicts_by_namekey(
         conn,
         table_name=XLSX_INNERDICT_TABLE,
@@ -382,7 +382,7 @@ def _derive_ai_augment_outerdicts(
     if set(partition_flags) != set(researchers_by_namekey):
         raise ValueError(Locale.CARD_PARTITION_NAMEKEYS_MISMATCH)
 
-    outerdicts: list[AiAugmentOuterDict] = []
+    singular_outerdicts: list[AiAugmentSingularOuterDict] = []
     for namekey, (name_key, draws) in researchers_by_namekey.items():
         ineligibility_category: AiAugmentIneligibilityCategory | None = None
         if namekey in ground_truth:
@@ -420,8 +420,8 @@ def _derive_ai_augment_outerdicts(
                 )
             else:
                 raise ValueError(Locale.INELIGIBILITY_CATEGORY_UNKNOWN)
-        outerdicts.append(
-            AiAugmentOuterDict(
+        singular_outerdicts.append(
+            AiAugmentSingularOuterDict(
                 namekey=name_key,
                 xlsx_innerdicts=xlsx_innerdicts.get(namekey, ()),
                 ssn_innerdicts=ssn_innerdicts.get(namekey, ()),
@@ -433,19 +433,22 @@ def _derive_ai_augment_outerdicts(
             )
         )
 
-    outerdicts.sort(
-        key=lambda outerdict: (
-            tuple(_draw_sort_key(draw) for draw in outerdict.draw_numbers),
-            outerdict.namekey.first_name.casefold(),
-            outerdict.namekey.last_name.casefold(),
-            outerdict.namekey.to_json_key(),
+    singular_outerdicts.sort(
+        key=lambda singular_outerdict: (
+            tuple(_draw_sort_key(draw) for draw in singular_outerdict.draw_numbers),
+            singular_outerdict.namekey.first_name.casefold(),
+            singular_outerdict.namekey.last_name.casefold(),
+            singular_outerdict.namekey.to_json_key(),
         )
     )
-    cohort_counts = Counter(outerdict.ai_augment_cohort for outerdict in outerdicts)
+    cohort_counts = Counter(
+        singular_outerdict.ai_augment_cohort
+        for singular_outerdict in singular_outerdicts
+    )
     ineligibility_counts = Counter(
-        outerdict.ai_augment_ineligibility_category
-        for outerdict in outerdicts
-        if outerdict.ai_augment_ineligibility_category is not None
+        singular_outerdict.ai_augment_ineligibility_category
+        for singular_outerdict in singular_outerdicts
+        if singular_outerdict.ai_augment_ineligibility_category is not None
     )
     if cohort_counts != {
         AiAugmentCohort.GROUND_TRUTH: EXPECTED_GROUND_TRUTH_RESEARCHERS,
@@ -455,9 +458,9 @@ def _derive_ai_augment_outerdicts(
         raise ValueError(Locale.SOURCE_POPULATION_COHORTS_INVALID)
     if ineligibility_counts != EXPECTED_INELIGIBILITY_COUNTS:
         raise ValueError(Locale.SOURCE_POPULATION_INELIGIBILITY_INVALID)
-    if len(outerdicts) != EXPECTED_SOURCE_RESEARCHERS:
+    if len(singular_outerdicts) != EXPECTED_SOURCE_RESEARCHERS:
         raise ValueError(Locale.SOURCE_POPULATION_CARDINALITY_INVALID)
-    if {outerdict.ai_augment_rnd for outerdict in outerdicts} != set(
+    if {singular_outerdict.ai_augment_rnd for singular_outerdict in singular_outerdicts} != set(
         range(
             AI_AUGMENT_RND_START,
             EXPECTED_SOURCE_RESEARCHERS + AI_AUGMENT_RND_START,
@@ -465,11 +468,11 @@ def _derive_ai_augment_outerdicts(
     ):
         raise ValueError(Locale.SOURCE_POPULATION_RND_INVALID)
     if (
-        sum(len(outerdict.draw_numbers) > 1 for outerdict in outerdicts)
+        sum(len(singular_outerdict.draw_numbers) > 1 for singular_outerdict in singular_outerdicts)
         != EXPECTED_MULTIDRAW_SOURCE_RESEARCHERS
     ):
         raise ValueError(Locale.SOURCE_POPULATION_MULTIDRAW_INVALID)
-    return tuple(outerdicts)
+    return tuple(singular_outerdicts)
 
 
 @implements[BackendComponent.ContextProperty]()
@@ -483,16 +486,16 @@ class AiAugmentBackendContext(BaseModel):
 
     pipeline_config: AiAugmentDetourConfig
     configured_namekey: NameKey | None = None
-    cached_ai_augment_outerdicts: tuple[AiAugmentOuterDict, ...] | None = Field(
+    cached_ai_augment_singular_outerdicts: tuple[AiAugmentSingularOuterDict, ...] | None = Field(
         default=None,
         exclude=True,
         repr=False,
     )
 
-    def ai_augment_outerdicts_factory(self) -> tuple[AiAugmentOuterDict, ...]:
-        if self.cached_ai_augment_outerdicts is not None:
-            return self.cached_ai_augment_outerdicts
-        release_map = self.pipeline_config.resources.release_map
+    def ai_augment_singular_outerdicts_factory(self) -> tuple[AiAugmentSingularOuterDict, ...]:
+        if self.cached_ai_augment_singular_outerdicts is not None:
+            return self.cached_ai_augment_singular_outerdicts
+        release_map = self.pipeline_config.release_map
         release_batches = _load_release_batches(Path(release_map))
         source_conn: duckdb.DuckDBPyConnection | None = None
         try:
@@ -500,7 +503,7 @@ class AiAugmentBackendContext(BaseModel):
                 str(self.pipeline_config.db_file),
                 read_only=True,
             )
-            return _derive_ai_augment_outerdicts(
+            return _derive_ai_augment_singular_outerdicts(
                 source_conn,
                 release_batches,
                 sample_seed=self.pipeline_config.sample_seed,
@@ -513,19 +516,21 @@ class AiAugmentBackendContext(BaseModel):
 
     @computed_field(repr=False)  # type: ignore[prop-decorator]
     @cached_property
-    def ai_augment_outerdicts(self) -> tuple[AiAugmentOuterDict, ...]:
-        return self.ai_augment_outerdicts_factory()
+    def ai_augment_singular_outerdicts(self) -> tuple[AiAugmentSingularOuterDict, ...]:
+        return self.ai_augment_singular_outerdicts_factory()
 
-    def configured_ai_augment_outerdict(
+    def configured_ai_augment_singular_outerdict(
         self,
-    ) -> AiAugmentOuterDict | None:
+    ) -> AiAugmentSingularOuterDict | None:
         if self.configured_namekey is None:
             return None
         matches = tuple(
-            outerdict
-            for outerdict in self.ai_augment_outerdicts
-            if outerdict.namekey == self.configured_namekey
+            singular_outerdict
+            for singular_outerdict in self.ai_augment_singular_outerdicts
+            if singular_outerdict.namekey == self.configured_namekey
         )
         if len(matches) != 1:
-            raise ValueError("configured AI augment outerdict is missing or duplicated")
+            raise ValueError(
+                "configured AI augment singular outerdict is missing or duplicated"
+            )
         return matches[0]

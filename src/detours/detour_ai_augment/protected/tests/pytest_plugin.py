@@ -23,6 +23,8 @@ NEEDS_SUDO_MARKER = "needs_sudo"
 OPERATOR_REDEPLOY_OPTION = "always_redeploy"
 OPERATOR_YES_OPTION = "operator_yes"
 RUN_EXCLUDED_FROM_SUITES_OPTION = "run_excluded_from_suites"
+PLAYWRIGHT_CHROMIUM_OPTION = "playwright_chromium"
+PLAYWRIGHT_CHROMIUM_CLI_OPTION = "--playwright-chromium"
 OPENALEX_API_KEY_ENV_NAME = "OPENALEX_API_KEY"
 REPOSITORY_ROOT_ENV_NAME = "REPO_DIR"
 AIVM_INSTANCE = "aivm"
@@ -226,6 +228,14 @@ def _ensure_codex_is_authenticated(
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
+    browser_group = parser.getgroup("control-centre UI E2E")
+    browser_group.addoption(
+        PLAYWRIGHT_CHROMIUM_CLI_OPTION,
+        action="store_true",
+        dest=PLAYWRIGHT_CHROMIUM_OPTION,
+        default=False,
+        help="use Playwright Chromium instead of the default Google Chrome channel",
+    )
     group = parser.getgroup(OPERATOR_MARKER)
     group.addoption(
         "--always-redeploy",

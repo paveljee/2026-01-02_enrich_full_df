@@ -139,6 +139,17 @@ python = "==3.14.2"
 duckdb = "==1.5.1"
 pandoc = "==3.7.0.2"
 
+[tool.pixi.feature.detour-ai-augment.target.linux.dependencies]
+alsa-lib = "*"
+at-spi2-atk = "*"
+at-spi2-core = "*"
+"atk-1.0" = "*"
+mesalib = "*"
+xorg-libxcomposite = "*"
+xorg-libxdamage = "*"
+xorg-libxfixes = "*"
+xorg-libxrandr = "*"
+
 # ======================
 # Default: Generic tasks
 # ======================
@@ -466,6 +477,27 @@ export PLAYWRIGHT_BROWSERS_PATH="$HOME/.cache/ms-playwright"
 status=$?
 echo "NOTE: root tests need to be run separately with test-detour-ai-augment-root"
 echo "NOTE: operator tests need to be run separately with test-detour-ai-augment-operator"
+exit "$status"
+'
+"""
+elevate = """
+bash -c '
+LOG_PATH="$PIXI_PROJECT_ROOT/logs/from_operator/elevate.log"
+export APPENDWATCH_SCRIPT="$PIXI_PROJECT_ROOT/src/detours/detour_ai_augment/protected/src/control_centre/appendwatch/appendwatch.py"
+export APPENDWATCH_PYTHON="/usr/bin/python3"
+export PLAYWRIGHT_BROWSERS_PATH="$HOME/.cache/ms-playwright"
+export LD_LIBRARY_PATH="$CONDA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+script -q -e -c '"'"'
+"$CONDA_PREFIX/bin/python" -m playwright install --only-shell chromium &&
+"$CONDA_PREFIX/bin/python" -m pytest -vv -srA --playwright-chromium \\
+  src/detours/detour_ai_augment/tests/control_centre/test_ui_e2e.py \\
+  src/detours/detour_ai_augment/tests/backend/test_ipc.py::test_dashboard_client_queries_real_mode_0600_unix_socket \\
+  "src/detours/detour_ai_augment/protected/tests/backend/test_appendwatch.py::test_inspect_flags_nonregular_substitution_without_blocking[socket-path was replaced by a non-regular file]" \\
+  src/detours/detour_ai_augment/protected/tests/backend/test_appendwatch.py::test_cli_detects_delayed_directory_fifo_symlink_and_socket_substitutions \\
+  2>&1
+'"'"' "$LOG_PATH"
+status=$?
+echo "Test output: $LOG_PATH"
 exit "$status"
 '
 """

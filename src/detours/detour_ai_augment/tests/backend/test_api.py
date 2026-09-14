@@ -9,12 +9,13 @@ import subprocess
 import sys
 from collections.abc import AsyncIterator, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from io import StringIO
 from pathlib import Path, PurePosixPath
-from threading import Barrier
+from threading import Barrier, Lock
 from types import SimpleNamespace
 from typing import Any, cast, get_args
 from uuid import UUID
@@ -28,15 +29,22 @@ from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import Response, StreamingResponse
 from pydantic import ValidationError
 
+from src.detours.detour_ai_augment.protected.src.backend import ipc
 from src.detours.detour_ai_augment.protected.src.backend.helpers import codex_parse
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models import (
+    ai_augment_detour_db,
     pydantic_to_paste,
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_augment_config import (  # noqa: E501
+    AiAugmentDetourConfig,
+)
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_augment_detour_db import (  # noqa: E501
+    AiAugmentDetourDB,
+)
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_augment_registered_resource import (  # noqa: E501
     RESOURCE_DESCRIPTION_KEY,
     RESOURCE_PATH_KEY,
     RESOURCE_SHA256_KEY,
-    AiAugmentDetourConfig,
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.pydantic_to_paste import (  # noqa: E501
     EvidenceWithdrawal,
@@ -44,6 +52,9 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.pyd
     StandardizedFieldSubmission,
     StandardizedSubmission,
     WebSearchExcerpt,
+)
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.replay_log import (  # noqa: E501
+    ReplayLogRegisteredResource,
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.submission_fixture import (  # noqa: E501
     L_FEI_FEI_INITIAL_FIXTURE,
@@ -77,13 +88,20 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     AiAugmentCohort,
     AiAugmentIneligibilityCategory,
 )
-from src.detours.detour_ai_augment.src.backend import api, ipc, server
+from src.detours.detour_ai_augment.src.backend import api, server
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_backend_store import (  # noqa: E501
+    AiAugmentBackendStore,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_cas import (  # noqa: E501
+    ROLLOUT_CAS_FILENAME_TEMPLATE,
+    AiAugmentCAS,
+)
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_context import (
     AiAugmentBackendContext,
     _source_innerdicts_by_namekey,
 )
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_outer_dict import (
-    AiAugmentOuterDict,
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_singular_outer_dict import (  # noqa: E501
+    AiAugmentSingularOuterDict,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.commit_event import (
     SOURCE_KEY_HEADER,
@@ -108,11 +126,16 @@ from src.detours.detour_ai_augment.src.backend.helpers.data_models.run_outcome_r
 from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models import (
     run_outcome as run_outcome_models,
 )
+from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.query_request import (  # noqa: E501
+    QueryRequest,
+)
 from src.helpers.cards import build_cards, write_cards_zip
 from src.helpers.config import PipelineConfig
 from src.helpers.data_models import (
+    FragmentType,
     InnerDict,
     NameKey,
+    ResourceGroup,
 )
 from src.helpers.data_models.http_request_log import (
     HttpRequestLogRecord,
@@ -286,8 +309,7 @@ def retry_attempt_records(
         pull_record=pull_record,
         push_record=push_record,
         session_id=session_id,
-        rollout_archive=api._ArchivedFile(
-            path=Path("unused-test-rollout.jsonl"),
+        rollout=CodexRolloutRecord(
             size=3,
             sha256=hashlib.sha256(b"{}\n").hexdigest(),
             line_count=1,
@@ -426,9 +448,7 @@ def isolated_backend_detour_connection(
 ) -> Iterator[None]:
     monkeypatch.setattr(api, "BACKEND_PROCESS_LOCK_PATH", tmp_path / "backend.lock")
     api._release_backend_process_lock()
-    api.close_backend_detour_database()
     yield
-    api.close_backend_detour_database()
     api._release_backend_process_lock()
 
 
@@ -983,7 +1003,7 @@ def connect_v2_index(
     try:
         load_duckdb_extension_from_config_path(
             connection,
-            api.CODEX_TOKEN_EXTENSION,
+            "splink_udfs",
             config_path,
             log=None,
         )
@@ -1107,18 +1127,26 @@ def runtime_for_test(
         "sha256": hashlib.sha256(b"").hexdigest(),
         "desc": "isolated Backend test replay log",
     }
-    configured_pipeline = AiAugmentDetourConfig.model_validate(
-        config_data,
+    configured_pipeline = AiAugmentDetourConfig.model_validate_json(
+        json.dumps(config_data),
         context={"verify_hash_on_init": False},
     )
+    rollout_cas = AiAugmentCAS(path=rollout_cas_dir)
     pipeline = configured_pipeline.model_copy(
         update={
             "db_file": source_database or paths.source_database,
             "output_dir": output_dir,
             "output_format": output_format,
             "pandoc_reference_docx": paths.reference_docx,
-            "detour_db_path": tmp_path / "detour_ai_augment.duckdb",
-            "rollout_cas_dir": rollout_cas_dir,
+            "backend_store": AiAugmentBackendStore(
+                replay_log=configured_pipeline.replay_log,
+                detour_db=AiAugmentDetourDB(
+                    path=tmp_path / "detour_ai_augment.duckdb",
+                    duckdb_extensions=configured_pipeline.duckdb_extensions,
+                ),
+                rollout_cas=rollout_cas,
+            ),
+            "rollout_cas": rollout_cas,
             "match_rule_version": (
                 configured_pipeline.match_rule_version
                 if codex_match_version is None
@@ -1128,7 +1156,7 @@ def runtime_for_test(
             ),
         }
     )
-    ai_augment_outerdicts: tuple[AiAugmentOuterDict, ...] = ()
+    ai_augment_singular_outerdicts: tuple[AiAugmentSingularOuterDict, ...] = ()
     configured_namekey: NameKey | None = None
     if namekey is not None:
         configured_namekey = NameKey.from_json_key(namekey)
@@ -1149,8 +1177,8 @@ def runtime_for_test(
                 table_name=DOCX_INNERDICT_TABLE,
                 procedure=DocxMatchProcedure(),
             )
-            ai_augment_outerdicts = (
-                AiAugmentOuterDict(
+            ai_augment_singular_outerdicts = (
+                AiAugmentSingularOuterDict(
                     namekey=configured_namekey,
                     xlsx_innerdicts=xlsx[namekey],
                     ssn_innerdicts=ssn.get(namekey, ()),
@@ -1164,8 +1192,35 @@ def runtime_for_test(
     return AiAugmentBackendContext(
         pipeline_config=pipeline,
         configured_namekey=configured_namekey,
-        cached_ai_augment_outerdicts=ai_augment_outerdicts,
+        cached_ai_augment_singular_outerdicts=ai_augment_singular_outerdicts,
     )
+
+
+@contextmanager
+def writable_backend_store(
+    runtime: AiAugmentBackendContext,
+) -> Iterator[AiAugmentBackendStore]:
+    def project_record(
+        *,
+        conn: duckdb.DuckDBPyConnection,
+        record: HttpRequestLogRecord,
+        line_number: int,
+        byte_offset: int,
+        line_sha256: str,
+        materialize_files: bool,
+    ) -> AgentRuntimeAttemptRecord | None:
+        return api._project_readme_record(
+            conn,
+            runtime,
+            record,
+            line_number=line_number,
+            byte_offset=byte_offset,
+            line_sha256=line_sha256,
+            materialize_files=materialize_files,
+        )
+
+    with runtime.pipeline_config.backend_store.writable(project_record) as store:
+        yield store
 
 
 def prepare_real_sample_push(
@@ -1198,13 +1253,12 @@ def prepare_real_sample_push(
         ssh_target="aivm-aivm-audit",
         host_key_alias="lima-aivm-aivm-audit",
     )
-    monkeypatch.setattr(api, "runtime_configuration", lambda: runtime)
-    monkeypatch.setattr(api, "load_duckdb_extension", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        ai_augment_detour_db,
+        "load_duckdb_extension",
+        lambda *_args, **_kwargs: None,
+    )
     monkeypatch.setattr(api, "push_configuration", lambda _rollout=None: configuration)
-    monkeypatch.setattr(api, "AUTHORITATIVE_BACKEND_HEALTHY", False)
-    monkeypatch.setattr(api, "AUTHORITATIVE_LOG_DESCRIPTOR", None)
-    monkeypatch.setattr(api, "AUTHORITATIVE_LOG_OFFSET", api.AUTHORITATIVE_EMPTY_OFFSET)
-    monkeypatch.setattr(api, "AUTHORITATIVE_NEXT_LINE_NUMBER", api.AUTHORITATIVE_FIRST_LINE)
 
     def fake_subprocess(
         command: list[str],
@@ -1426,6 +1480,7 @@ def create_operator_capture_source_database(
 
 
 async def authoritative_api_exchange(
+    runtime: AiAugmentBackendContext,
     method: str,
     path: str,
     body: bytes = b"",
@@ -1437,7 +1492,7 @@ async def authoritative_api_exchange(
     ) -> None:
         request = Request(cast(Any, scope), receive=receive)
         response = (
-            api.authoritative_pull()
+            api.authoritative_pull(request)
             if method == api.HTTP_GET_METHOD
             else await api.authoritative_push(request)
         )
@@ -1478,6 +1533,7 @@ async def authoritative_api_exchange(
         "client": ("127.0.0.1", 1234),
         "http_version": "1.1",
         "root_path": "",
+        "app": SimpleNamespace(state=SimpleNamespace(runtime=runtime)),
     }
     await asyncio.wait_for(
         api._AuthoritativeHttpMiddleware(cast(Any, public_endpoint))(
@@ -1605,16 +1661,17 @@ def assert_captured_operator_push_contour(
 
     async def commit_inline_after_authoritative_record(
         record: HttpRequestLogRecord,
+        selected_runtime: AiAugmentBackendContext,
     ) -> None:
+        assert selected_runtime is runtime
         if (record.method, record.path) == (api.HTTP_POST_METHOD, api.PUSH_PATH):
             assert record.response_code == status.HTTP_202_ACCEPTED
-            api._commit_accepted_push(record)
+            api._commit_accepted_push(record, runtime)
             return
-        await original_after_authoritative_record(record)
+        await original_after_authoritative_record(record, runtime)
 
     monkeypatch.setenv(pydantic_to_paste.EXPORT_OPENALEX_API_KEY, "operator-fixture-key")
     monkeypatch.setattr(requests, "get", fake_institution_get)
-    monkeypatch.setattr(api, "runtime_configuration", lambda: runtime)
     monkeypatch.setattr(
         api,
         "StreamingResponse",
@@ -1644,9 +1701,7 @@ def assert_captured_operator_push_contour(
     monkeypatch.setattr(api, "BACKEND_SESSION_ID", UUID(OPERATOR_CAPTURED_SESSION_ID))
     monkeypatch.setattr(api, "BACKEND_ATTEMPT_RECORD", None)
     monkeypatch.setattr(api, "BACKEND_LIFECYCLE", BackendLifecycle.READY)
-    api._acquire_authoritative_process_lock(runtime)
-    try:
-        api.synchronize_authoritative_projection(runtime)
+    with writable_backend_store(runtime) as backend_store:
 
         async def run_captured_contour() -> tuple[
             tuple[int, bytes],
@@ -1656,24 +1711,29 @@ def assert_captured_operator_push_contour(
             tuple[int, bytes],
         ]:
             initial_pull = await authoritative_api_exchange(
+                runtime,
                 api.HTTP_GET_METHOD,
                 api.PULL_PATH,
             )
             baseline_push = await authoritative_api_exchange(
+                runtime,
                 api.HTTP_POST_METHOD,
                 api.PUSH_PATH,
                 json.dumps(operator_retry_baseline(accepted_push)).encode(),
             )
             retry_pull = await authoritative_api_exchange(
+                runtime,
                 api.HTTP_GET_METHOD,
                 api.PULL_PATH,
             )
             accepted = await authoritative_api_exchange(
+                runtime,
                 api.HTTP_POST_METHOD,
                 api.PUSH_PATH,
                 read_bytes(accepted_push_path),
             )
             gone_pull = await authoritative_api_exchange(
+                runtime,
                 api.HTTP_GET_METHOD,
                 api.PULL_PATH,
             )
@@ -1691,7 +1751,7 @@ def assert_captured_operator_push_contour(
         authoritative_records = tuple(
             record
             for record, _byte_offset, _line_sha256 in api._authoritative_log_records(
-                Path(runtime.pipeline_config.resources.replay_log)
+                runtime.pipeline_config.replay_log.read()
             )
         )
         pushes = tuple(
@@ -1721,9 +1781,11 @@ def assert_captured_operator_push_contour(
             and record.response_code == status.HTTP_200_OK
         )
 
-        query = QueryResponse.from_serialized_json(
-            ipc.dashboard_query_payload(TEST_NAMEKEY_MODEL)
-        )
+        with backend_store.threading_lock():
+            query = ipc.handle_query_request(
+                runtime,
+                QueryRequest(namekey=TEST_NAMEKEY_MODEL),
+            )
         assert len(query.attempts) == 2
         assert (
             query.attempts[-1].attempt.post_commit_validation.result
@@ -1738,10 +1800,10 @@ def assert_captured_operator_push_contour(
             .attempt.commit_record.commit_request_body.push_record.record_id
             == pushes[-1].record_id
         )
-        assert len(query.ai_augment_outerdicts) == 1
-        selected_outerdict = query.ai_augment_outerdicts[0]
-        assert len(selected_outerdict.committed_innerdicts) == 1
-        committed = selected_outerdict.committed_innerdicts[0]
+        assert len(query.ai_augment_singular_outerdicts) == 1
+        selected_singular_outerdict = query.ai_augment_singular_outerdicts[0]
+        assert len(selected_singular_outerdict.committed_innerdicts) == 1
+        committed = selected_singular_outerdict.committed_innerdicts[0]
         assert committed.commit_record.record_id == commits[-1].record_id
         assert committed.text(
             KTP_AI_AUGMENT_COMMIT_REQUEST_BODY_COL
@@ -1749,7 +1811,7 @@ def assert_captured_operator_push_contour(
             accepted_commit.model_dump_json()
         )
         cards = build_cards(
-            api.selected_card_outer_dict(selected_outerdict),
+            api.selected_card_outer_dict(selected_singular_outerdict),
             total_draws=runtime.pipeline_config.total_draws,
             intro="",
             excluded_cols=api.CARD_EXCLUDED_COLUMNS,
@@ -1764,9 +1826,6 @@ def assert_captured_operator_push_contour(
         assert commit_record_id_position < commit_request_body_position
         assert str(commits[-1].record_id) in card_markdown
         assert accepted_commit.model_dump_json() in card_markdown
-    finally:
-        api.close_backend_detour_database()
-        api._release_authoritative_process_lock()
 
 
 def test_captured_operator_push_generates_commit_and_exact_410_response(
@@ -1814,11 +1873,24 @@ def test_pure_asgi_middleware_records_every_public_exchange_before_send(
     def append(record: HttpRequestLogRecord) -> None:
         events.append(("append", record.record_id))
 
-    async def after(record: HttpRequestLogRecord) -> None:
+    runtime = cast(
+        AiAugmentBackendContext,
+        SimpleNamespace(
+            pipeline_config=SimpleNamespace(
+                backend_store=SimpleNamespace(
+                    append_authoritative_record=append,
+                )
+            )
+        ),
+    )
+
+    async def after(
+        record: HttpRequestLogRecord,
+        selected_runtime: AiAugmentBackendContext,
+    ) -> None:
+        assert selected_runtime is runtime
         events.append(("after", record.record_id))
 
-    monkeypatch.setattr(api, "AUTHORITATIVE_BACKEND_HEALTHY", True)
-    monkeypatch.setattr(api, "append_authoritative_record", append)
     monkeypatch.setattr(api, "_after_authoritative_public_record", after)
 
     async def exchange(method: str, path: str, body: bytes) -> list[dict[str, object]]:
@@ -1851,6 +1923,7 @@ def test_pure_asgi_middleware_records_every_public_exchange_before_send(
             "client": ("127.0.0.1", 1234),
             "http_version": "1.1",
             "root_path": "",
+            "app": SimpleNamespace(state=SimpleNamespace(runtime=runtime)),
         }
         await api._AuthoritativeHttpMiddleware(cast(Any, finite_app))(
             cast(Any, scope),
@@ -1891,11 +1964,24 @@ def test_authoritative_middleware_preserves_streaming_response_until_complete(
             media_type=api.MEDIA_TYPE,
         )(cast(Any, scope), receive, send)
 
-    async def after(_record: HttpRequestLogRecord) -> None:
+    runtime = cast(
+        AiAugmentBackendContext,
+        SimpleNamespace(
+            pipeline_config=SimpleNamespace(
+                backend_store=SimpleNamespace(
+                    append_authoritative_record=records.append,
+                )
+            )
+        ),
+    )
+
+    async def after(
+        _record: HttpRequestLogRecord,
+        selected_runtime: AiAugmentBackendContext,
+    ) -> None:
+        assert selected_runtime is runtime
         return None
 
-    monkeypatch.setattr(api, "AUTHORITATIVE_BACKEND_HEALTHY", True)
-    monkeypatch.setattr(api, "append_authoritative_record", records.append)
     monkeypatch.setattr(api, "_after_authoritative_public_record", after)
 
     async def exchange() -> list[dict[str, object]]:
@@ -1931,6 +2017,7 @@ def test_authoritative_middleware_preserves_streaming_response_until_complete(
             "client": ("127.0.0.1", 1234),
             "http_version": "1.1",
             "root_path": "",
+            "app": SimpleNamespace(state=SimpleNamespace(runtime=runtime)),
         }
         await asyncio.wait_for(
             api._AuthoritativeHttpMiddleware(cast(Any, streaming_app))(
@@ -2062,7 +2149,11 @@ def test_synthetic_commit_matches_the_readme_contour_exactly(tmp_path: Path) -> 
         pull_record=pull_record,
         push_record=push_record,
         session_id=session_id,
-        rollout_archive=rollout,
+        rollout=CodexRolloutRecord(
+            sha256=rollout.sha256,
+            size=rollout.size,
+            line_count=rollout.line_count,
+        ),
         rollout_filename=TEST_ROLLOUT_FILENAME,
         appendwatch_report=report,
         namekey=TEST_NAMEKEY_MODEL,
@@ -2202,7 +2293,15 @@ def test_run_outcome_snapshot_captures_fresh_rollout_and_appendwatch(
     rollout_filename = f"{api.ROLLOUT_FILENAME_PREFIX}{session_id}.jsonl"
     configuration = cast(
         api._PushConfiguration,
-        SimpleNamespace(rollout_relative_path=PurePosixPath(rollout_filename)),
+        SimpleNamespace(
+            rollout_relative_path=PurePosixPath(rollout_filename),
+            ssh_target="aivm-aivm-audit",
+            lima_ssh_config=tmp_path / "ssh.config",
+            identity_file=tmp_path / "identity",
+            known_hosts_file=tmp_path / "known-hosts",
+            ssh_user="aivm-audit",
+            host_key_alias="lima-aivm-aivm-audit",
+        ),
     )
     archive = api._ArchivedFile(
         path=tmp_path / "cas.jsonl",
@@ -2221,11 +2320,29 @@ def test_run_outcome_snapshot_captures_fresh_rollout_and_appendwatch(
         return configuration
 
     def copy_rollout(
-        selected_configuration: api._PushConfiguration,
-        _runtime: AiAugmentBackendContext,
-    ) -> api._ArchivedFile:
-        calls.append(("copy", selected_configuration))
-        return archive
+        *,
+        rollout_relative_path: PurePosixPath,
+        ssh_target: str,
+        ssh_options: object,
+    ) -> CodexRolloutRecord:
+        assert rollout_relative_path == configuration.rollout_relative_path
+        assert ssh_target == configuration.ssh_target
+        assert ssh_options
+        calls.append(("copy", configuration))
+        return CodexRolloutRecord(
+            sha256=archive.sha256,
+            size=archive.size,
+            line_count=archive.line_count,
+        )
+
+    runtime = cast(
+        AiAugmentBackendContext,
+        SimpleNamespace(
+            pipeline_config=SimpleNamespace(
+                rollout_cas=SimpleNamespace(copy_rollout=copy_rollout)
+            )
+        ),
+    )
 
     monkeypatch.setattr(api, "BACKEND_SESSION_ID", session_id)
     pull_record = persisted_http_record(
@@ -2245,17 +2362,14 @@ def test_run_outcome_snapshot_captures_fresh_rollout_and_appendwatch(
     monkeypatch.setattr(api, "BACKEND_PENDING_PULL_RECORD", None)
     monkeypatch.setattr(api, "BACKEND_LATEST_PUSH_RECORD", push_record)
     monkeypatch.setattr(
-        api,
+        ipc,
         "_run_outcome_snapshot_configuration",
         lambda _session_id: configuration,
     )
     monkeypatch.setattr(api, "_read_appendwatch_bytes", read_appendwatch)
     monkeypatch.setattr(api, "push_configuration_for_session", select_rollout)
-    monkeypatch.setattr(api, "copy_rollout_to_cas", copy_rollout)
 
-    snapshot, filename, failures = api.capture_run_outcome_snapshot(
-        cast(AiAugmentBackendContext, SimpleNamespace())
-    )
+    snapshot, filename, failures = ipc._capture_run_outcome_snapshot(runtime)
 
     assert failures == ()
     assert filename == rollout_filename
@@ -2332,18 +2446,23 @@ def test_run_outcome_http_exchange_is_logged_and_replays_as_raw_history(
     failures: tuple[Exception, ...],
     expected_status: int,
 ) -> None:
+    appended: list[HttpRequestLogRecord] = []
+    backend_store = SimpleNamespace(
+        append_authoritative_record=appended.append,
+    )
     runtime = cast(
         AiAugmentBackendContext,
-        SimpleNamespace(configured_namekey=NameKey.from_json_key(TEST_NAMEKEY)),
+        SimpleNamespace(
+            configured_namekey=NameKey.from_json_key(TEST_NAMEKEY),
+            pipeline_config=SimpleNamespace(backend_store=backend_store),
+            ai_augment_singular_outerdicts=(),
+        ),
     )
-    appended: list[HttpRequestLogRecord] = []
-    monkeypatch.setattr(api, "runtime_configuration", lambda: runtime)
     monkeypatch.setattr(
-        api,
-        "capture_run_outcome_snapshot",
+        ipc,
+        "_capture_run_outcome_snapshot",
         lambda _runtime: (snapshot, rollout_filename, failures),
     )
-    monkeypatch.setattr(api, "append_authoritative_record", appended.append)
     received_at = 1_789_000_000_000_000
     request = HttpRequestLogRecord(
         schema_version="1.1",
@@ -2370,7 +2489,7 @@ def test_run_outcome_http_exchange_is_logged_and_replays_as_raw_history(
     outcome_request = run_outcome_models.RunOutcomeRequest.from_http_request_log_record(
         request
     )
-    response_record = ipc.handle_dashboard_run_outcome_request(outcome_request)
+    response_record = ipc.handle_run_outcome_request(runtime, outcome_request)
 
     assert response_record.response_code == expected_status
     assert response_record.response_body == snapshot.model_dump_json()
@@ -2413,7 +2532,11 @@ def test_run_outcome_http_exchange_is_logged_and_replays_as_raw_history(
             line_sha256="c" * 64,
             materialize_files=False,
         )
-        replayed_responses = ipc._run_outcome_records(connection)
+        backend_store.connection = connection
+        replayed_responses = ipc.handle_query_request(
+            runtime,
+            QueryRequest(namekey=None),
+        ).run_outcome_records
         assert tuple(
             response.http_request_log_record for response in replayed_responses
         ) == (record,)
@@ -2451,7 +2574,11 @@ def test_failed_post_commit_work_projects_atomically_without_domain_changes(
         pull_record=pull_record,
         push_record=push_record,
         session_id=UUID("019d0000-0000-7000-8000-000000000063"),
-        rollout_archive=api._archived_file(rollout_path),
+        rollout=CodexRolloutRecord(
+            sha256=hashlib.sha256(rollout_path.read_bytes()).hexdigest(),
+            size=rollout_path.stat().st_size,
+            line_count=1,
+        ),
         rollout_filename=TEST_ROLLOUT_FILENAME,
         appendwatch_report=b".\n",
         namekey=TEST_NAMEKEY_MODEL,
@@ -3643,19 +3770,20 @@ def test_concurrent_first_rejections_cannot_replace_the_baseline(
     )
     setup_connection.close()
     barrier = Barrier(2)
+    operation_lock = Lock()
 
     def submit(attempt_id: str, excerpt: str) -> None:
         connection = duckdb.connect(str(database_path))
         load_duckdb_extension_from_config_path(
             connection,
-            api.CODEX_TOKEN_EXTENSION,
+            "splink_udfs",
             backend_test_paths.config,
             log=None,
         )
         try:
             plain_body = submission_body_for_evidence(excerpt)
             barrier.wait()
-            with api.DETOUR_DB_LOCK:
+            with operation_lock:
                 original_pull, _commit_record = retry_attempt_records(
                     run_id=TEST_RUN_ID,
                     session_id=TEST_SESSION_ID,
@@ -4273,15 +4401,201 @@ def test_configured_replay_log_hash_is_enforced_on_each_backend_start(
         RESOURCE_DESCRIPTION_KEY: "isolated authoritative log",
     }
 
-    configured = AiAugmentDetourConfig.model_validate(config_data)
+    configured = AiAugmentDetourConfig.model_validate_json(
+        json.dumps(config_data)
+    )
 
     assert all(
         resource.verify_hash_on_init
-        for resource in configured.resources.registered_resources
+        for resource in configured.registered_resources
     )
-    replay_log.write_text('{"changed":true}\n', encoding=TEXT_ENCODING)
+    replay_log.chmod(0o600)
+    try:
+        replay_log.write_text('{"changed":true}\n', encoding=TEXT_ENCODING)
+    finally:
+        replay_log.chmod(0o400)
     with pytest.raises(ValidationError):
-        AiAugmentDetourConfig.model_validate(config_data)
+        AiAugmentDetourConfig.model_validate_json(json.dumps(config_data))
+
+
+def test_replay_log_registered_resource_enforces_hash_during_construction(
+    tmp_path: Path,
+) -> None:
+    replay_log = tmp_path / "replay.jsonl"
+    replay_log.write_text("{}\n", encoding=TEXT_ENCODING)
+
+    with pytest.raises(ValidationError):
+        ReplayLogRegisteredResource(
+            name=replay_log.name,
+            hash=hashlib.sha256(b"different").hexdigest(),
+            group=ResourceGroup.KTP_PIPELINE_ARTIFACT,
+            fragment_type=FragmentType.LINE_NUMBER,
+            description="isolated authoritative log",
+            url=replay_log.resolve().as_uri(),
+            verify_hash_on_init=True,
+        )
+
+    assert replay_log.stat().st_mode & 0o777 == 0o400
+
+
+def test_replay_log_registered_resource_rejects_reentry(
+    tmp_path: Path,
+) -> None:
+    replay_log = tmp_path / "replay.jsonl"
+    replay_log.write_text("{}\n", encoding=TEXT_ENCODING)
+    resource = ReplayLogRegisteredResource.from_config_entry(
+        {
+            RESOURCE_PATH_KEY: str(replay_log),
+            RESOURCE_SHA256_KEY: hashlib.sha256(replay_log.read_bytes()).hexdigest(),
+            RESOURCE_DESCRIPTION_KEY: "isolated authoritative log",
+        },
+        resource_key=REPLAY_LOG_KEY,
+        verify_hash_on_init=True,
+    )
+
+    with resource:
+        with pytest.raises(
+            RuntimeError,
+            match="ReplayLogRegisteredResource is already open",
+        ):
+            resource.__enter__()
+
+    assert replay_log.stat().st_mode & 0o777 == 0o400
+
+
+def test_replay_log_registered_resource_rejects_unexpected_append_offset(
+    tmp_path: Path,
+) -> None:
+    replay_log = tmp_path / "replay.jsonl"
+    replay_log.write_bytes(b"")
+    resource = ReplayLogRegisteredResource.from_config_entry(
+        {
+            RESOURCE_PATH_KEY: str(replay_log),
+            RESOURCE_SHA256_KEY: hashlib.sha256(b"").hexdigest(),
+            RESOURCE_DESCRIPTION_KEY: "isolated authoritative log",
+        },
+        resource_key=REPLAY_LOG_KEY,
+        verify_hash_on_init=True,
+    )
+
+    with resource:
+        with pytest.raises(ValueError, match=Locale.REPLAY_PROJECTION_CONFLICT):
+            resource.append(b"{}\n", expected_offset=1)
+        assert resource.append(b"{}\n", expected_offset=0) == 3
+        assert resource.read() == b"{}\n"
+
+
+def test_authoritative_replay_recreates_byte_identical_detour_database(
+    tmp_path: Path,
+    pytestconfig: pytest.Config,
+    backend_test_paths: BackendTestPaths,
+) -> None:
+    repository_root = pytestconfig.rootpath
+    supplied_replay_log = (
+        repository_root / "tmp" / "detour_ai_augment_backend_api_replay_log.jsonl"
+    )
+    supplied_release_map = repository_root / "tmp" / "map_subset0_to_batch.csv"
+    supplied_rollout_cas = repository_root / "tmp" / ".cas"
+    replay_log = tmp_path / supplied_replay_log.name
+    replay_bytes = read_bytes(supplied_replay_log)
+    write_bytes(replay_log, replay_bytes)
+
+    config_data = read_json(backend_test_paths.ai_augment_config)
+    config_data["db_file"] = str(backend_test_paths.source_database)
+    config_data["rollout_cas_dir"] = str(supplied_rollout_cas)
+    config_data["files_config"][REPLAY_LOG_KEY] = {
+        RESOURCE_PATH_KEY: str(replay_log),
+        RESOURCE_SHA256_KEY: hashlib.sha256(replay_bytes).hexdigest(),
+        RESOURCE_DESCRIPTION_KEY: "isolated copy of supplied authoritative replay log",
+    }
+    config_data["files_config"][MAP_SUBSET_0_TO_BATCH_KEY] = {
+        RESOURCE_PATH_KEY: str(supplied_release_map),
+        RESOURCE_SHA256_KEY: hashlib.sha256(read_bytes(supplied_release_map)).hexdigest(),
+        RESOURCE_DESCRIPTION_KEY: "supplied release map",
+    }
+    detour_database = tmp_path / "detour_ai_augment.duckdb"
+    pipeline = AiAugmentDetourConfig.model_validate_json(json.dumps(config_data))
+    detour_db = AiAugmentDetourDB(
+        path=detour_database,
+        duckdb_extensions=pipeline.duckdb_extensions,
+    )
+    pipeline = pipeline.model_copy(
+        update={
+            "backend_store": AiAugmentBackendStore(
+                replay_log=pipeline.replay_log,
+                detour_db=detour_db,
+                rollout_cas=pipeline.rollout_cas,
+            )
+        }
+    )
+    runtime = AiAugmentBackendContext(pipeline_config=pipeline)
+
+    with writable_backend_store(runtime):
+        pass
+    first_hash = file_signature(detour_database)[2]
+    detour_database.unlink()
+
+    with writable_backend_store(runtime):
+        pass
+    second_hash = file_signature(detour_database)[2]
+
+    assert second_hash == first_hash
+
+
+def test_authoritative_replay_recreates_byte_identical_detour_database(
+    tmp_path: Path,
+    pytestconfig: pytest.Config,
+    backend_test_paths: BackendTestPaths,
+) -> None:
+    repository_root = pytestconfig.rootpath
+    supplied_replay_log = (
+        repository_root / "tmp" / "detour_ai_augment_backend_api_replay_log.jsonl"
+    )
+    supplied_release_map = repository_root / "tmp" / "map_subset0_to_batch.csv"
+    supplied_rollout_cas = repository_root / "tmp" / ".cas"
+    replay_log = tmp_path / supplied_replay_log.name
+    replay_bytes = read_bytes(supplied_replay_log)
+    write_bytes(replay_log, replay_bytes)
+
+    config_data = read_json(backend_test_paths.ai_augment_config)
+    config_data["db_file"] = str(backend_test_paths.source_database)
+    config_data["rollout_cas_dir"] = str(supplied_rollout_cas)
+    config_data["files_config"][REPLAY_LOG_KEY] = {
+        RESOURCE_PATH_KEY: str(replay_log),
+        RESOURCE_SHA256_KEY: hashlib.sha256(replay_bytes).hexdigest(),
+        RESOURCE_DESCRIPTION_KEY: "isolated copy of supplied authoritative replay log",
+    }
+    config_data["files_config"][MAP_SUBSET_0_TO_BATCH_KEY] = {
+        RESOURCE_PATH_KEY: str(supplied_release_map),
+        RESOURCE_SHA256_KEY: hashlib.sha256(read_bytes(supplied_release_map)).hexdigest(),
+        RESOURCE_DESCRIPTION_KEY: "supplied release map",
+    }
+    detour_database = tmp_path / "detour_ai_augment.duckdb"
+    pipeline = AiAugmentDetourConfig.model_validate_json(json.dumps(config_data))
+    pipeline = pipeline.model_copy(
+        update={
+            "backend_store": AiAugmentBackendStore(
+                replay_log=pipeline.replay_log,
+                detour_db=AiAugmentDetourDB(
+                    path=detour_database,
+                    duckdb_extensions=pipeline.duckdb_extensions,
+                ),
+                rollout_cas=pipeline.rollout_cas,
+            )
+        }
+    )
+    runtime = AiAugmentBackendContext(pipeline_config=pipeline)
+
+    with writable_backend_store(runtime):
+        pass
+    first_hash = file_signature(detour_database)[2]
+    detour_database.unlink()
+
+    with writable_backend_store(runtime):
+        pass
+    second_hash = file_signature(detour_database)[2]
+
+    assert second_hash == first_hash
 
 
 @pytest.mark.parametrize(
@@ -4387,7 +4701,17 @@ def test_audit_ssh_uses_pinned_identity_and_counts_physical_lines(
         cast(Any, kwargs["stdout"]).write(b"first\nsecond")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    archived = api.copy_rollout_to_cas(configuration, runtime)
+    archived = runtime.pipeline_config.rollout_cas.copy_rollout(
+        rollout_relative_path=configuration.rollout_relative_path,
+        ssh_target=configuration.ssh_target,
+        ssh_options=api._aivm_connection_options(
+            lima_ssh_config=configuration.lima_ssh_config,
+            identity_file=configuration.identity_file,
+            known_hosts_file=configuration.known_hosts_file,
+            ssh_user=configuration.ssh_user,
+            host_key_alias=configuration.host_key_alias,
+        ),
+    )
 
     command = captured["command"]
     assert command[0] == api.SSH_EXECUTABLE
@@ -4400,9 +4724,9 @@ def test_audit_ssh_uses_pinned_identity_and_counts_physical_lines(
     assert command[-1] == (f"{api.AUDIT_READ_ROLLOUT_COMMAND} {TEST_ROLLOUT_RELATIVE_PATH}")
     assert "shell" not in captured["kwargs"]
     assert archived.line_count == 2
-    assert archived.path == (
-        runtime.pipeline_config.rollout_cas_dir
-        / api.ROLLOUT_CAS_FILENAME_TEMPLATE.format(sha256=archived.sha256)
+    assert runtime.pipeline_config.rollout_cas.validated_rollout(archived) == (
+        runtime.pipeline_config.rollout_cas.path
+        / ROLLOUT_CAS_FILENAME_TEMPLATE.format(sha256=archived.sha256)
     )
 
 
@@ -4444,13 +4768,13 @@ def test_configured_namekey_rejects_malformed_or_incomplete_json(
         api._configured_namekey()
 
 
-def ai_augment_outerdict(
+def ai_augment_singular_outerdict(
     first_name: str,
     last_name: str,
     *,
     cohort: AiAugmentCohort = AiAugmentCohort.GROUND_TRUTH,
     ineligibility_category: AiAugmentIneligibilityCategory | None = None,
-) -> AiAugmentOuterDict:
+) -> AiAugmentSingularOuterDict:
     namekey = NameKey(first_name=first_name, last_name=last_name)
     xlsx_innerdict = InnerDict.from_mapping(
         {
@@ -4461,7 +4785,7 @@ def ai_augment_outerdict(
         },
         XlsxMatchProcedure(),
     )
-    return AiAugmentOuterDict(
+    return AiAugmentSingularOuterDict(
         namekey=namekey,
         xlsx_innerdicts=(xlsx_innerdict,),
         ssn_innerdicts=(),
@@ -4490,12 +4814,12 @@ def test_card_labels_all_nonempty_standardized_fields_without_mutating_source() 
     source_values = dict(
         zip(AI_AUGMENT_STANDARDIZED_COLUMNS, standardized_values, strict=True)
     )
-    outerdict = ai_augment_outerdict("A.", "Sheikh")
-    source_innerdict = outerdict.xlsx_innerdicts[0]
+    singular_outerdict = ai_augment_singular_outerdict("A.", "Sheikh")
+    source_innerdict = singular_outerdict.xlsx_innerdicts[0]
     source_innerdict.data.update(source_values)
     original_source = deepcopy(source_innerdict.data)
 
-    selected = api.selected_card_outer_dict(outerdict)
+    selected = api.selected_card_outer_dict(singular_outerdict)
     cards = build_cards(
         selected,
         total_draws=1,
@@ -4507,7 +4831,7 @@ def test_card_labels_all_nonempty_standardized_fields_without_mutating_source() 
     card = next(iter(cards.values()))
     for column, canonical_json in source_values.items():
         expected_value = codex_parse.render_ai_standardized_value(canonical_json)
-        selected_innerdict = selected.get_inner_by_key(outerdict.namekey.to_json_key())[0]
+        selected_innerdict = selected.get_inner_by_key(singular_outerdict.namekey.to_json_key())[0]
         assert selected_innerdict.data[column] == expected_value
         assert f"**`{column}`**: {expected_value}" in card
     assert source_innerdict.data == original_source
@@ -4521,17 +4845,17 @@ def test_card_labels_all_nonempty_standardized_fields_without_mutating_source() 
         api.NOT_AVAILABLE_OR_APPLICABLE_VALUE,
     ),
 )
-def test_selected_card_outerdict_hides_empty_standardized_fields_without_mutation(
+def test_selected_card_singular_outerdict_hides_empty_standardized_fields_without_mutation(
     empty_standardized_value: str | None,
 ) -> None:
     column = AI_AUGMENT_STANDARDIZED_COLUMNS[0]
     canonical_json = json.dumps(empty_standardized_value, separators=(",", ":"))
-    outerdict = ai_augment_outerdict("A.", "Sheikh")
-    source_innerdict = outerdict.xlsx_innerdicts[0]
+    singular_outerdict = ai_augment_singular_outerdict("A.", "Sheikh")
+    source_innerdict = singular_outerdict.xlsx_innerdicts[0]
     source_innerdict.data[column] = canonical_json
 
-    selected = api.selected_card_outer_dict(outerdict)
-    selected_innerdict = selected.get_inner_by_key(outerdict.namekey.to_json_key())[0]
+    selected = api.selected_card_outer_dict(singular_outerdict)
+    selected_innerdict = selected.get_inner_by_key(singular_outerdict.namekey.to_json_key())[0]
     cards = build_cards(
         selected,
         total_draws=1,
@@ -4590,14 +4914,14 @@ def test_backend_startup_prepares_source_rows_for_initial_pull(
     backend_test_paths: BackendTestPaths,
 ) -> None:
     base_runtime = runtime_for_test(tmp_path, backend_test_paths)
-    outerdict = ai_augment_outerdict("A.", "Sheikh")
+    singular_outerdict = ai_augment_singular_outerdict("A.", "Sheikh")
     factory_calls: list[AiAugmentBackendContext] = []
 
-    def outerdicts_factory(
+    def singular_outerdicts_factory(
         context: AiAugmentBackendContext,
-    ) -> tuple[AiAugmentOuterDict, ...]:
+    ) -> tuple[AiAugmentSingularOuterDict, ...]:
         factory_calls.append(context)
-        return (outerdict,)
+        return (singular_outerdict,)
 
     monkeypatch.setenv(api.NAMEKEY_ENV_NAME, TEST_NAMEKEY)
     monkeypatch.setattr(
@@ -4607,16 +4931,15 @@ def test_backend_startup_prepares_source_rows_for_initial_pull(
     )
     monkeypatch.setattr(
         AiAugmentBackendContext,
-        "ai_augment_outerdicts_factory",
-        outerdicts_factory,
+        "ai_augment_singular_outerdicts_factory",
+        singular_outerdicts_factory,
     )
 
-    runtime = api.configure_runtime(backend_test_paths.ai_augment_config)
+    runtime = server.configure_runtime(backend_test_paths.ai_augment_config)
 
     assert factory_calls == [runtime]
-    assert runtime.configured_ai_augment_outerdict() is outerdict
+    assert runtime.configured_ai_augment_singular_outerdict() is singular_outerdict
 
-    monkeypatch.setattr(api, "runtime_configuration", lambda: runtime)
     monkeypatch.setattr(
         api,
         "StreamingResponse",
@@ -4626,11 +4949,15 @@ def test_backend_startup_prepares_source_rows_for_initial_pull(
         ),
     )
     monkeypatch.setattr(api, "BACKEND_LIFECYCLE", BackendLifecycle.READY)
-    response = api.authoritative_pull()
+    request = Request({
+        "type": "http",
+        "app": SimpleNamespace(state=SimpleNamespace(runtime=runtime)),
+    })
+    response = api.authoritative_pull(request)
 
     assert factory_calls == [runtime]
     assert response.status_code == status.HTTP_200_OK
-    assert response.body == "".join(api.configured_pull_lines(outerdict)).encode()
+    assert response.body == "".join(api.configured_pull_lines(singular_outerdict)).encode()
 
 
 def test_ipc_only_runtime_prepares_projection_without_a_namekey(
@@ -4639,7 +4966,7 @@ def test_ipc_only_runtime_prepares_projection_without_a_namekey(
     backend_test_paths: BackendTestPaths,
 ) -> None:
     base_runtime = runtime_for_test(tmp_path, backend_test_paths)
-    outerdict = ai_augment_outerdict("A.", "Sheikh")
+    singular_outerdict = ai_augment_singular_outerdict("A.", "Sheikh")
     monkeypatch.delenv(api.NAMEKEY_ENV_NAME, raising=False)
     monkeypatch.setattr(
         AiAugmentDetourConfig,
@@ -4648,109 +4975,49 @@ def test_ipc_only_runtime_prepares_projection_without_a_namekey(
     )
     monkeypatch.setattr(
         AiAugmentBackendContext,
-        "ai_augment_outerdicts_factory",
-        lambda *_args, **_kwargs: (outerdict,),
+        "ai_augment_singular_outerdicts_factory",
+        lambda *_args, **_kwargs: (singular_outerdict,),
     )
 
-    runtime = api.configure_runtime(
+    runtime = server.configure_runtime(
         backend_test_paths.ai_augment_config,
         require_namekey=False,
     )
 
     assert runtime.configured_namekey is None
-    assert runtime.configured_ai_augment_outerdict() is None
-    assert runtime.ai_augment_outerdicts == (outerdict,)
+    assert runtime.configured_ai_augment_singular_outerdict() is None
+    assert runtime.ai_augment_singular_outerdicts == (singular_outerdict,)
 
 
-def test_ipc_only_query_defers_configuration_and_uses_read_only_database(
+def test_ipc_only_query_uses_explicit_runtime_and_read_only_store(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     backend_test_paths: BackendTestPaths,
 ) -> None:
-    config_path = tmp_path / "config.json"
-    outerdict = ai_augment_outerdict("A.", "Sheikh")
+    singular_outerdict = ai_augment_singular_outerdict("A.", "Sheikh")
     runtime = runtime_for_test(tmp_path, backend_test_paths).model_copy(
-        update={"cached_ai_augment_outerdicts": (outerdict,)}
+        update={"cached_ai_augment_singular_outerdicts": (singular_outerdict,)}
     )
-    calls: list[object] = []
-
-    class ReadOnlyConnection:
-        def close(self) -> None:
-            calls.append("close")
-
-    connection = cast(duckdb.DuckDBPyConnection, ReadOnlyConnection())
-
-    def configure(
-        selected_path: Path,
-        *,
-        require_namekey: bool,
-        verify_hash_on_init: bool,
-    ) -> None:
-        calls.append(
-            ("configure", selected_path, require_namekey, verify_hash_on_init)
+    monkeypatch.setattr(
+        ai_augment_detour_db,
+        "load_duckdb_extension",
+        lambda *_args, **_kwargs: None,
+    )
+    with writable_backend_store(runtime):
+        pass
+    with runtime.pipeline_config.backend_store.read_only():
+        first = ipc.handle_query_request(runtime, QueryRequest(namekey=None))
+        second = ipc.handle_query_request(
+            runtime,
+            QueryRequest(namekey=TEST_NAMEKEY_MODEL),
         )
 
-    def open_database(
-        selected_runtime: AiAugmentBackendContext,
-        *,
-        read_only: bool = False,
-    ) -> duckdb.DuckDBPyConnection:
-        assert selected_runtime is runtime
-        calls.append(("open", read_only))
-        return connection
-
-    def configured_runtime() -> AiAugmentBackendContext:
-        calls.append("runtime")
-        return runtime
-
-    def attempts(
-        selected_runtime: AiAugmentBackendContext,
-        selected_connection: duckdb.DuckDBPyConnection,
-        *,
-        namekey: NameKey | None,
-    ) -> tuple[AgentRuntimeAttemptRecord, ...]:
-        assert selected_runtime is runtime
-        assert namekey is None or namekey == TEST_NAMEKEY_MODEL
-        calls.append(("attempts", selected_connection))
-        return ()
-
-    def committed_innerdicts(
-        selected_connection: duckdb.DuckDBPyConnection,
-    ) -> tuple[object, ...]:
-        calls.append(("committed", selected_connection))
-        return ()
-
-    monkeypatch.setattr(api, "configure_runtime", configure)
-    monkeypatch.setattr(api, "runtime_configuration", configured_runtime)
-    monkeypatch.setattr(api, "open_detour_database", open_database)
-    monkeypatch.setattr(api, "_attempt_records", attempts)
-    monkeypatch.setattr(api, "_committed_innerdicts", committed_innerdicts)
-    monkeypatch.setattr(ipc, "_run_outcome_records", lambda _connection: ())
-
-    query = ipc.build_ipc_only_dashboard_query_payload_callback(config_path)
-
-    assert calls == []
-    first = QueryResponse.from_serialized_json(query(None))
-    second = QueryResponse.from_serialized_json(query(TEST_NAMEKEY_MODEL))
     assert tuple(
-        value.serialize() for value in first.ai_augment_outerdicts
-    ) == (outerdict.serialize(),)
+        value.serialize() for value in first.ai_augment_singular_outerdicts
+    ) == (singular_outerdict.serialize(),)
     assert tuple(
-        value.serialize() for value in second.ai_augment_outerdicts
-    ) == (outerdict.serialize(),)
-    assert calls == [
-        ("configure", config_path, False, True),
-        "runtime",
-        ("open", True),
-        ("committed", connection),
-        ("attempts", connection),
-        "close",
-        "runtime",
-        ("open", True),
-        ("committed", connection),
-        ("attempts", connection),
-        "close",
-    ]
+        value.serialize() for value in second.ai_augment_singular_outerdicts
+    ) == (singular_outerdict.serialize(),)
 
 
 def test_detour_database_open_modes_are_explicit_and_reported(
@@ -4764,7 +5031,6 @@ def test_detour_database_open_modes_are_explicit_and_reported(
         SimpleNamespace(close=lambda: None),
     )
     calls: list[tuple[str, bool]] = []
-    extension_calls: list[tuple[duckdb.DuckDBPyConnection, str, object, object]] = []
 
     def connect(path: str, *, read_only: bool) -> duckdb.DuckDBPyConnection:
         calls.append((path, read_only))
@@ -4772,58 +5038,196 @@ def test_detour_database_open_modes_are_explicit_and_reported(
             raise duckdb.IOException("permission denied")
         return connection
 
-    def load_extension(
-        selected_connection: duckdb.DuckDBPyConnection,
-        extension: str,
-        config: object,
-        *,
-        log: object,
-    ) -> None:
-        extension_calls.append((selected_connection, extension, config, log))
-
     monkeypatch.setattr(duckdb, "connect", connect)
-    monkeypatch.setattr(api, "load_duckdb_extension", load_extension)
+    monkeypatch.setattr(
+        ai_augment_detour_db,
+        "load_duckdb_extension",
+        lambda *_args, **_kwargs: None,
+    )
 
-    assert api.open_detour_database(runtime, read_only=True) is connection
-    with pytest.raises(api._PushValidationError) as exc_info:
-        api.open_detour_database(runtime)
+    detour_db = runtime.pipeline_config.backend_store.detour_db
+    with detour_db.read_only() as opened_database:
+        assert opened_database is detour_db
+        assert opened_database.connection is connection
+    with pytest.raises(RuntimeError) as write_error:
+        with detour_db.writable():
+            pass
+    assert str(write_error.value) == Locale.DETOUR_DUCKDB_OPEN_FAILED
+    assert isinstance(write_error.value.__cause__, duckdb.IOException)
 
     assert calls == [
-        (str(runtime.pipeline_config.detour_db_path), True),
-        (str(runtime.pipeline_config.detour_db_path), False),
+        (str(tmp_path / "detour_ai_augment.duckdb"), True),
+        (str(tmp_path / "detour_ai_augment.duckdb"), False),
     ]
-    assert extension_calls == [
-        (
-            connection,
-            api.CODEX_TOKEN_EXTENSION,
-            runtime.pipeline_config.duckdb_extensions.get(api.CODEX_TOKEN_EXTENSION),
-            None,
-        )
-    ]
-    assert str(exc_info.value) == Locale.DETOUR_DUCKDB_OPEN_FAILED
-    assert "read/write mode" in str(exc_info.value)
 
     def denied_connect(*_args: object, **_kwargs: object) -> None:
         raise duckdb.IOException("permission denied")
 
     monkeypatch.setattr(duckdb, "connect", denied_connect)
-    with pytest.raises(api._PushValidationError) as read_only_exc_info:
-        api.open_detour_database(runtime, read_only=True)
-    assert str(read_only_exc_info.value) == Locale.DETOUR_DUCKDB_READ_ONLY_OPEN_FAILED
+    with pytest.raises(RuntimeError) as read_error:
+        with detour_db.read_only():
+            pass
+    assert str(read_error.value) == Locale.DETOUR_DUCKDB_READ_ONLY_OPEN_FAILED
+    assert isinstance(read_error.value.__cause__, duckdb.IOException)
+
+
+def test_backend_store_connection_requires_managed_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    backend_test_paths: BackendTestPaths,
+) -> None:
+    runtime = runtime_for_test(tmp_path, backend_test_paths)
+    store = runtime.pipeline_config.backend_store
+    expected = "AiAugmentBackendStore must be used inside a 'with' block"
+    monkeypatch.setattr(
+        ai_augment_detour_db,
+        "load_duckdb_extension",
+        lambda *_args, **_kwargs: None,
+    )
+
+    with pytest.raises(RuntimeError, match=expected):
+        _ = store.connection
+
+    with writable_backend_store(runtime) as opened_store:
+        assert opened_store is store
+        writable_connection = store.connection
+        assert writable_connection is store.detour_db.connection
+
+    with pytest.raises(RuntimeError, match=expected):
+        _ = store.connection
+
+    with store.read_only() as opened_store:
+        assert opened_store is store
+        read_only_connection = store.connection
+        assert read_only_connection is store.detour_db.connection
+
+    with pytest.raises(RuntimeError, match=expected):
+        _ = store.connection
+
+
+def test_query_handler_requires_managed_backend_store_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    backend_test_paths: BackendTestPaths,
+) -> None:
+    runtime = runtime_for_test(tmp_path, backend_test_paths)
+    request = QueryRequest(namekey=None)
+    monkeypatch.setattr(
+        ai_augment_detour_db,
+        "load_duckdb_extension",
+        lambda *_args, **_kwargs: None,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="AiAugmentBackendStore must be used inside a 'with' block",
+    ):
+        ipc.handle_query_request(runtime, request)
+
+    with writable_backend_store(runtime) as store:
+        with store.threading_lock():
+            response = ipc.handle_query_request(runtime, request)
+
+    assert response == QueryResponse(
+        attempts=(),
+        ai_augment_singular_outerdicts=(),
+        run_outcome_records=(),
+    )
+
+
+def test_detour_database_prepares_both_open_modes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    backend_test_paths: BackendTestPaths,
+) -> None:
+    runtime = runtime_for_test(tmp_path, backend_test_paths)
+    calls: list[tuple[duckdb.DuckDBPyConnection, str, object, object]] = []
+
+    def prepare_extension(
+        connection: duckdb.DuckDBPyConnection,
+        extension: str,
+        config: object,
+        *,
+        log: object,
+    ) -> None:
+        calls.append((connection, extension, config, log))
+
+    monkeypatch.setattr(
+        ai_augment_detour_db,
+        "load_duckdb_extension",
+        prepare_extension,
+    )
+
+    detour_db = runtime.pipeline_config.backend_store.detour_db
+    with detour_db.writable() as writable_database:
+        writable_connection = writable_database.connection
+    with detour_db.read_only() as read_only_database:
+        read_only_connection = read_only_database.connection
+
+    extension_config = runtime.pipeline_config.duckdb_extensions.get(
+        "splink_udfs"
+    )
+    assert calls == [
+        (
+            writable_connection,
+            "splink_udfs",
+            extension_config,
+            None,
+        ),
+        (
+            read_only_connection,
+            "splink_udfs",
+            extension_config,
+            None,
+        ),
+    ]
+
+
+def test_detour_database_discards_connection_before_close(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FailingCloseConnection:
+        def close(self) -> None:
+            raise RuntimeError("close failed")
+
+    connection = cast(duckdb.DuckDBPyConnection, FailingCloseConnection())
+    monkeypatch.setattr(duckdb, "connect", lambda *_args, **_kwargs: connection)
+    monkeypatch.setattr(
+        ai_augment_detour_db,
+        "load_duckdb_extension",
+        lambda *_args, **_kwargs: None,
+    )
+
+    writable_path = tmp_path / "writable.duckdb"
+    writable_path.touch()
+    writable_database = AiAugmentDetourDB(path=writable_path)
+
+    with pytest.raises(RuntimeError, match="close failed"):
+        with writable_database.writable():
+            pass
+    assert writable_database._conn is None
+
+    read_only_database = AiAugmentDetourDB(path=tmp_path / "read-only.duckdb")
+
+    with pytest.raises(RuntimeError, match="close failed"):
+        with read_only_database.read_only():
+            pass
+    assert read_only_database._conn is None
 
 
 def test_configured_namekey_population_accepts_exact_eligible_match() -> None:
-    outerdict = ai_augment_outerdict("Gaoquan ", "Shi")
+    singular_outerdict = ai_augment_singular_outerdict("Gaoquan ", "Shi")
 
-    assert api._configured_ai_augment_outerdict(
-        outerdict.namekey,
-        (outerdict,),
-    ) is outerdict
+    assert api._configured_ai_augment_singular_outerdict(
+        singular_outerdict.namekey,
+        (singular_outerdict,),
+    ) is singular_outerdict
 
 
 def test_configured_namekey_population_reports_exact_ineligibility_category() -> None:
     category = AiAugmentIneligibilityCategory.STAGING_PARTITION_2
-    outerdict = ai_augment_outerdict(
+    singular_outerdict = ai_augment_singular_outerdict(
         "Gaoquan ",
         "Shi",
         cohort=AiAugmentCohort.INELIGIBLE,
@@ -4831,9 +5235,9 @@ def test_configured_namekey_population_reports_exact_ineligibility_category() ->
     )
 
     with pytest.raises(api._PushConfigurationError) as exc_info:
-        api._configured_ai_augment_outerdict(
-            outerdict.namekey,
-            (outerdict,),
+        api._configured_ai_augment_singular_outerdict(
+            singular_outerdict.namekey,
+            (singular_outerdict,),
         )
 
     assert str(exc_info.value) == Locale.CONFIGURED_NAMEKEY_INELIGIBLE_TEMPLATE.format(
@@ -4842,29 +5246,32 @@ def test_configured_namekey_population_reports_exact_ineligibility_category() ->
 
 
 def test_configured_namekey_population_suggests_exact_trailing_space_match() -> None:
-    outerdict = ai_augment_outerdict("Gaoquan ", "Shi")
-    configured_namekey = ai_augment_outerdict("Gaoquan", "Shi").namekey
+    singular_outerdict = ai_augment_singular_outerdict("Gaoquan ", "Shi")
+    configured_namekey = ai_augment_singular_outerdict("Gaoquan", "Shi").namekey
 
     with pytest.raises(api._PushConfigurationError) as exc_info:
-        api._configured_ai_augment_outerdict(configured_namekey, (outerdict,))
+        api._configured_ai_augment_singular_outerdict(configured_namekey, (singular_outerdict,))
 
     assert str(exc_info.value) == Locale.CONFIGURED_NAMEKEY_NOT_FOUND_SUGGESTIONS_TEMPLATE.format(
-        suggestions=outerdict.namekey.to_json_key()
+        suggestions=singular_outerdict.namekey.to_json_key()
     )
 
 
 def test_configured_namekey_population_sorts_multiple_whitespace_suggestions() -> None:
-    outerdicts = (
-        ai_augment_outerdict("Gaoquan ", "Shi"),
-        ai_augment_outerdict(" Gaoquan", "Shi"),
+    singular_outerdicts = (
+        ai_augment_singular_outerdict("Gaoquan ", "Shi"),
+        ai_augment_singular_outerdict(" Gaoquan", "Shi"),
     )
-    configured_namekey = ai_augment_outerdict("Gaoquan", "Shi").namekey
+    configured_namekey = ai_augment_singular_outerdict("Gaoquan", "Shi").namekey
     suggestions = " or ".join(
-        sorted(outerdict.namekey.to_json_key() for outerdict in outerdicts)
+        sorted(
+            singular_outerdict.namekey.to_json_key()
+            for singular_outerdict in singular_outerdicts
+        )
     )
 
     with pytest.raises(api._PushConfigurationError) as exc_info:
-        api._configured_ai_augment_outerdict(configured_namekey, outerdicts)
+        api._configured_ai_augment_singular_outerdict(configured_namekey, singular_outerdicts)
 
     assert str(exc_info.value) == Locale.CONFIGURED_NAMEKEY_NOT_FOUND_SUGGESTIONS_TEMPLATE.format(
         suggestions=suggestions
@@ -4872,11 +5279,11 @@ def test_configured_namekey_population_sorts_multiple_whitespace_suggestions() -
 
 
 def test_configured_namekey_population_reports_unrelated_unknown_without_suggestion() -> None:
-    outerdict = ai_augment_outerdict("Gaoquan ", "Shi")
-    configured_namekey = ai_augment_outerdict("Gaoquan", "Shih").namekey
+    singular_outerdict = ai_augment_singular_outerdict("Gaoquan ", "Shi")
+    configured_namekey = ai_augment_singular_outerdict("Gaoquan", "Shih").namekey
 
     with pytest.raises(api._PushConfigurationError) as exc_info:
-        api._configured_ai_augment_outerdict(configured_namekey, (outerdict,))
+        api._configured_ai_augment_singular_outerdict(configured_namekey, (singular_outerdict,))
 
     assert str(exc_info.value) == Locale.CONFIGURED_NAMEKEY_NOT_FOUND
 
@@ -4915,8 +5322,11 @@ def test_required_config_and_source_database_are_read_only(
         ai_augment_config,
         verify_hash_on_init=False,
     )
-    assert configured.detour_db_path == backend_test_paths.source_database.with_name(
-        "scisci_process__detour_ai-augment.duckdb"
+    assert configured.backend_store.detour_db == AiAugmentDetourDB(
+        path=backend_test_paths.source_database.with_name(
+            "scisci_process__detour_ai-augment.duckdb"
+        ),
+        duckdb_extensions=configured.duckdb_extensions,
     )
 
     runtime = runtime_for_test(tmp_path, backend_test_paths)
@@ -4937,20 +5347,47 @@ def test_main_ipc_only_runs_only_the_dashboard_query_server(
     config_path = tmp_path / "config.json"
     calls: list[object] = []
 
+    class BackendStore:
+        @contextmanager
+        def read_only(self) -> Iterator[BackendStore]:
+            calls.append("read-only-start")
+            try:
+                yield self
+            finally:
+                calls.append("read-only-stop")
+
+    runtime = cast(
+        AiAugmentBackendContext,
+        SimpleNamespace(
+            pipeline_config=SimpleNamespace(backend_store=BackendStore())
+        ),
+    )
+
     monkeypatch.setattr(api, "_acquire_backend_process_lock", lambda: calls.append("acquire"))
     monkeypatch.setattr(api, "_release_backend_process_lock", lambda: calls.append("release"))
     monkeypatch.setattr(
         ipc,
         "serve_dashboard_query_only",
-        lambda selected_path, *, verify_hash_on_init: calls.append(
-            ("ipc", selected_path, verify_hash_on_init)
-        ),
+        lambda selected_runtime: calls.append(("ipc", selected_runtime)),
     )
-    monkeypatch.setattr(
-        api,
-        "configure_runtime",
-        lambda *_args, **_kwargs: pytest.fail("full Backend configuration must not start"),
-    )
+
+    def configure_runtime(
+        selected_path: Path,
+        *,
+        require_namekey: bool,
+        verify_hash_on_init: bool,
+    ) -> AiAugmentBackendContext:
+        calls.append(
+            (
+                "configure",
+                selected_path,
+                require_namekey,
+                verify_hash_on_init,
+            )
+        )
+        return runtime
+
+    monkeypatch.setattr(server, "configure_runtime", configure_runtime)
     monkeypatch.setattr(
         uvicorn,
         "run",
@@ -4959,7 +5396,14 @@ def test_main_ipc_only_runs_only_the_dashboard_query_server(
 
     server.main(["--config", str(config_path), server.IPC_ONLY_OPTION])
 
-    assert calls == ["acquire", ("ipc", config_path, True), "release"]
+    assert calls == [
+        "acquire",
+        ("configure", config_path, False, True),
+        "read-only-start",
+        ("ipc", runtime),
+        "read-only-stop",
+        "release",
+    ]
 
 
 def test_main_full_mode_configures_and_runs_composed_backend(
@@ -4968,20 +5412,33 @@ def test_main_full_mode_configures_and_runs_composed_backend(
 ) -> None:
     config_path = tmp_path / "config.json"
     calls: list[object] = []
+    runtime = cast(AiAugmentBackendContext, SimpleNamespace())
 
-    def compose() -> FastAPI:
+    def compose(selected_runtime: AiAugmentBackendContext) -> FastAPI:
+        assert selected_runtime is runtime
         calls.append("compose")
         return api.app
 
     monkeypatch.setattr(api, "_acquire_backend_process_lock", lambda: calls.append("acquire"))
     monkeypatch.setattr(api, "_release_backend_process_lock", lambda: calls.append("release"))
-    monkeypatch.setattr(
-        api,
-        "configure_runtime",
-        lambda selected_path, *, verify_hash_on_init: calls.append(
-            ("configure", selected_path, verify_hash_on_init)
-        ),
-    )
+
+    def configure_runtime(
+        selected_path: Path,
+        *,
+        require_namekey: bool,
+        verify_hash_on_init: bool,
+    ) -> AiAugmentBackendContext:
+        calls.append(
+            (
+                "configure",
+                selected_path,
+                require_namekey,
+                verify_hash_on_init,
+            )
+        )
+        return runtime
+
+    monkeypatch.setattr(server, "configure_runtime", configure_runtime)
     monkeypatch.setattr(
         server,
         "full_backend_application",
@@ -4997,19 +5454,20 @@ def test_main_full_mode_configures_and_runs_composed_backend(
 
     assert calls == [
         "acquire",
-        ("configure", config_path, True),
+        ("configure", config_path, True, True),
         "compose",
         ("serve", api.app, api.SERVER_HOST, api.SERVER_PORT),
         "release",
     ]
 
 
-def test_ipc_only_ctrl_c_stops_server_and_closes_database(
+def test_ipc_only_ctrl_c_stops_server(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    config_path = tmp_path / "config.json"
+    del tmp_path
     calls: list[object] = []
+    runtime = cast(AiAugmentBackendContext, SimpleNamespace())
 
     class InterruptibleThread:
         @staticmethod
@@ -5028,15 +5486,9 @@ def test_ipc_only_ctrl_c_stops_server_and_closes_database(
         "stop_dashboard_query_server",
         lambda handle: calls.append(("stop", handle)),
     )
-    monkeypatch.setattr(
-        api,
-        "close_backend_detour_database",
-        lambda: calls.append("close-database"),
-    )
+    ipc.serve_dashboard_query_only(runtime)
 
-    ipc.serve_dashboard_query_only(config_path)
-
-    assert calls == ["wait", ("stop", ipc_server), "close-database"]
+    assert calls == ["wait", ("stop", ipc_server)]
 
 
 def test_repeated_researcher_rows_materialize_as_distinct_innerdicts() -> None:
@@ -5176,7 +5628,8 @@ def test_retry_push_requires_a_persisted_current_pull_before_acceptance(
         ready_to_respond_at_unix_usec=2,
         duration_usec=1,
     )
-    asyncio.run(api._after_authoritative_public_record(persisted_pull))
+    runtime = cast(AiAugmentBackendContext, SimpleNamespace())
+    asyncio.run(api._after_authoritative_public_record(persisted_pull, runtime))
 
     assert api.BACKEND_CURRENT_PULL_RECORD is persisted_pull
     accepted = asyncio.run(api.authoritative_push(request))
@@ -5253,23 +5706,44 @@ def test_accepted_push_is_committed_only_after_its_public_record(
     rollout_path = tmp_path / f"rollout-2026-08-31T00-00-00-{session_id}.jsonl"
     rollout_path.write_text("{}\n", encoding=TEXT_ENCODING)
     rollout = api._archived_file(rollout_path)
-    configuration = SimpleNamespace(
+    configuration = cast(
+        api._PushConfiguration,
+        SimpleNamespace(
         rollout_relative_path=PurePosixPath(rollout_path.name),
+            ssh_target="aivm-aivm-audit",
+            lima_ssh_config=tmp_path / "ssh.config",
+            identity_file=tmp_path / "identity",
+            known_hosts_file=tmp_path / "known-hosts",
+            ssh_user="aivm-audit",
+            host_key_alias="lima-aivm-aivm-audit",
+        ),
+    )
+    appended: list[BackendCommitRecord] = []
+    backend_store = SimpleNamespace()
+    rollout_record = CodexRolloutRecord(
+        sha256=rollout.sha256,
+        size=rollout.size,
+        line_count=rollout.line_count,
     )
     runtime = cast(
         AiAugmentBackendContext,
-        SimpleNamespace(configured_namekey=NameKey.from_json_key(TEST_NAMEKEY)),
+        SimpleNamespace(
+            configured_namekey=NameKey.from_json_key(TEST_NAMEKEY),
+            pipeline_config=SimpleNamespace(
+                rollout_cas=SimpleNamespace(
+                    copy_rollout=lambda **_kwargs: rollout_record,
+                ),
+                backend_store=backend_store,
+            ),
+        ),
     )
-    appended: list[BackendCommitRecord] = []
     api.BACKEND_PENDING_PULL_RECORD = pull_record
     api.BACKEND_SESSION_ID = session_id
-    monkeypatch.setattr(api, "runtime_configuration", lambda: runtime)
     monkeypatch.setattr(
         api,
         "push_configuration_for_session",
         lambda supplied: configuration if supplied == session_id else pytest.fail(),
     )
-    monkeypatch.setattr(api, "copy_rollout_to_cas", lambda *_args: rollout)
     monkeypatch.setattr(api, "_read_appendwatch_bytes", lambda *_args: b".\n")
 
     def append_commit(record: HttpRequestLogRecord) -> AgentRuntimeAttemptRecord:
@@ -5289,9 +5763,9 @@ def test_accepted_push_is_committed_only_after_its_public_record(
             ground_truth_innerdict=None,
         )
 
-    monkeypatch.setattr(api, "append_authoritative_record", append_commit)
+    backend_store.append_authoritative_record = append_commit
 
-    api._commit_accepted_push(push_record)
+    api._commit_accepted_push(push_record, runtime)
 
     assert len(appended) == 1
     commit_record = appended[0]
@@ -5332,13 +5806,14 @@ async def test_persisted_push_becomes_latest_run_outcome_snapshot_provenance(
     )
     monkeypatch.setattr(api, "BACKEND_LATEST_PUSH_RECORD", None)
     monkeypatch.setattr(api, "AUTHORITATIVE_BACKGROUND_TASKS", set())
-    monkeypatch.setattr(api, "_commit_accepted_push", lambda _record: None)
+    monkeypatch.setattr(api, "_commit_accepted_push", lambda _record, _runtime: None)
+    runtime = cast(AiAugmentBackendContext, SimpleNamespace())
 
     async def run_inline(function: Any, /, *args: object) -> Any:
         return function(*args)
 
     monkeypatch.setattr(asyncio, "to_thread", run_inline)
-    await api._after_authoritative_public_record(push_record)
+    await api._after_authoritative_public_record(push_record, runtime)
     background_tasks = tuple(api.AUTHORITATIVE_BACKGROUND_TASKS)
     await asyncio.gather(*background_tasks)
 
@@ -5387,10 +5862,12 @@ def test_post_commit_result_is_exposed_only_by_follow_up_pull(
     expected_code: int,
     expected_media_type: str,
 ) -> None:
-    monkeypatch.setattr(
-        api,
-        "runtime_configuration",
-        lambda: cast(AiAugmentBackendContext, SimpleNamespace()),
+    runtime = cast(AiAugmentBackendContext, SimpleNamespace())
+    request = Request(
+        {
+            "type": "http",
+            "app": SimpleNamespace(state=SimpleNamespace(runtime=runtime)),
+        }
     )
     pull_record, commit_record = retry_attempt_records(
         run_id=UUID("019d0000-0000-7000-8000-000000000050"),
@@ -5429,11 +5906,11 @@ def test_post_commit_result_is_exposed_only_by_follow_up_pull(
 
     if api.BACKEND_LIFECYCLE is BackendLifecycle.FAILED:
         with pytest.raises(HTTPException) as exc_info:
-            api.authoritative_pull()
+            api.authoritative_pull(request)
         assert exc_info.value.status_code == expected_code
         return
 
-    response = api.authoritative_pull()
+    response = api.authoritative_pull(request)
     assert response.status_code == expected_code
     assert response.headers["content-type"].startswith(expected_media_type)
 
@@ -5556,69 +6033,63 @@ def test_openapi_does_not_disclose_integrity_internals() -> None:
     }
 
 
-def test_dashboard_query_uses_one_backend_owned_connection_and_synchronizes_each_use(
+def test_dashboard_query_uses_the_open_backend_store_connection(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     backend_test_paths: BackendTestPaths,
 ) -> None:
     runtime = runtime_for_test(tmp_path, backend_test_paths)
-    synchronized_connections: list[duckdb.DuckDBPyConnection] = []
-    original_synchronize = api._synchronize_authoritative_projection_locked
-    monkeypatch.setattr(api, "load_duckdb_extension", lambda *_args, **_kwargs: None)
-
-    def tracked_synchronize(
-        selected_runtime: AiAugmentBackendContext,
-        connection: duckdb.DuckDBPyConnection,
-    ) -> None:
-        synchronized_connections.append(connection)
-        original_synchronize(selected_runtime, connection)
-
-    monkeypatch.setattr(api, "runtime_configuration", lambda: runtime)
     monkeypatch.setattr(
-        api,
-        "_synchronize_authoritative_projection_locked",
-        tracked_synchronize,
+        ai_augment_detour_db,
+        "load_duckdb_extension",
+        lambda *_args, **_kwargs: None,
     )
 
-    first = QueryResponse.from_serialized_json(ipc.dashboard_query_payload(None))
-    replayed_pull = HttpRequestLogRecord(
-        schema_version="1.1",
-        method=api.HTTP_GET_METHOD,
-        scheme="http",
-        host="127.0.0.1",
-        port=api.SERVER_PORT,
-        ready_to_respond_at_unix_usec=1,
-        path=api.PULL_PATH,
-        query="",
-        request_headers={},
-        request_body=None,
-        response_code=status.HTTP_200_OK,
-        response_headers={"content-type": api.MEDIA_TYPE},
-        response_body="{}\n",
-        received_at_unix_usec=None,
-        duration_usec=1,
-    )
-    Path(runtime.pipeline_config.resources.replay_log).write_text(
-        replayed_pull.model_dump_json() + "\n",
-        encoding=TEXT_ENCODING,
-    )
-    second = QueryResponse.from_serialized_json(ipc.dashboard_query_payload(None))
+    with writable_backend_store(runtime) as store:
+        detour_database = store.connection
+        with store.threading_lock():
+            first = ipc.handle_query_request(
+                runtime,
+                QueryRequest(namekey=None),
+            )
+        replayed_pull = HttpRequestLogRecord(
+            schema_version="1.1",
+            method=api.HTTP_GET_METHOD,
+            scheme="http",
+            host="127.0.0.1",
+            port=api.SERVER_PORT,
+            ready_to_respond_at_unix_usec=1,
+            path=api.PULL_PATH,
+            query="",
+            request_headers={},
+            request_body=None,
+            response_code=status.HTTP_200_OK,
+            response_headers={"content-type": api.MEDIA_TYPE},
+            response_body="{}\n",
+            received_at_unix_usec=None,
+            duration_usec=1,
+        )
+        store.append_authoritative_record(replayed_pull)
+        with store.threading_lock():
+            second = ipc.handle_query_request(
+                runtime,
+                QueryRequest(namekey=None),
+            )
+        assert store.connection is detour_database
+        projected_count = detour_database.execute(
+            f"SELECT count(*) FROM {api.AUTHORITATIVE_RECORDS_TABLE}"
+        ).fetchone()
 
     assert (
         first
         == second
         == QueryResponse(
             attempts=(),
-            ai_augment_outerdicts=(),
+            ai_augment_singular_outerdicts=(),
             run_outcome_records=(),
         )
     )
-    assert len(synchronized_connections) == 2
-    assert synchronized_connections[0] is synchronized_connections[1]
-    assert synchronized_connections[0] is api.DETOUR_DB_CONNECTION
-    assert synchronized_connections[0].execute(
-        f"SELECT count(*) FROM {api.AUTHORITATIVE_RECORDS_TABLE}"
-    ).fetchone() == (1,)
+    assert projected_count == (1,)
 
 
 def test_dashboard_query_has_no_route_on_the_public_fastapi_application() -> None:

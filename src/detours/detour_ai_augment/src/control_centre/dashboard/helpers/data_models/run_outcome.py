@@ -5,12 +5,12 @@ from collections.abc import Mapping
 from enum import StrEnum
 from typing import Literal, Self
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import model_validator
 
 from src.detours.detour_ai_augment.protected.src.architecture import (
     ControlCentreComponent,
 )
-from src.helpers.architecture import implements
+from src.helpers.architecture import FrozenStrictModel, implements
 from src.helpers.data_models import HttpRequestLogRecord, NameKey
 from src.helpers.vars import (
     KTP_FIRST_NAME_COL,
@@ -176,9 +176,7 @@ def _http_header_value(
 
 
 @implements[ControlCentreComponent.BackendPort.RunOutcomeRequestProperty]()
-class RunOutcomeRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
+class RunOutcomeRequest(FrozenStrictModel):
     run_outcome: RunLifecycle
     namekey: NameKey
     http_request_log_record: HttpRequestLogRecord

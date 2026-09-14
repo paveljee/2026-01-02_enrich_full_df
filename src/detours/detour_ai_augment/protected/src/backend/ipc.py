@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import logging
 import os
 import stat
@@ -11,8 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import NoReturn
 from urllib.parse import urlsplit
+from uuid import UUID
 
-import duckdb
 from fastapi import status
 from flask import Flask, Response, request
 from pydantic import ValidationError
@@ -22,28 +23,43 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import L
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     TEXT_ENCODING,
 )
-from src.helpers.data_models import NameKey
-from src.helpers.data_models.http_request_log import HttpRequestLogRecord
-from src.helpers.vars import KTP_NAMEKEY_COL
-
-from ..control_centre.dashboard.helpers.data_models.run_outcome import (
-    RUN_OUTCOME_PATHS,
-    RunOutcomePath,
-    RunOutcomeRequest,
-)
-from . import api
-from .helpers.data_models.ai_augment_context import (
+from src.detours.detour_ai_augment.src.backend import api
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_context import (  # noqa: E501
     AiAugmentBackendContext,
 )
-from .helpers.data_models.commit_event import SOURCE_KEY_HEADER
-from .helpers.data_models.run_outcome_response import (
-    RunOutcomeResponse,
-    RunOutcomeResponseBody,
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_singular_outer_dict import (  # noqa: E501
+    AiAugmentSingularOuterDict,
+    CommittedInnerDict,
 )
-from .helpers.data_models.query_response import (
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.commit_event import (  # noqa: E501
+    BASE64_TEXT_ENCODING,
+    SOURCE_KEY_HEADER,
+    AppendwatchReportEncoding,
+    AppendwatchReportRecord,
+    CodexRolloutRecord,
+    CodexSessionRecord,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.query_response import (  # noqa: E501
     AgentRuntimeAttemptRecord,
     QueryResponse,
 )
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.run_outcome_response import (  # noqa: E501
+    RunOutcomeResponse,
+    RunOutcomeResponseBody,
+)
+from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.query_request import (  # noqa: E501
+    QueryRequest,
+)
+from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.run_outcome import (  # noqa: E501
+    NAME_KEY_HEADER,
+    RUN_OUTCOME_PATHS,
+    RunOutcomePath,
+    RunOutcomeRequest,
+    name_key_from_header_value,
+)
+from src.helpers.data_models import NameKey
+from src.helpers.data_models.http_request_log import HttpRequestLogRecord
+from src.helpers.vars import KTP_NAMEKEY_COL
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +82,7 @@ RunOutcomeHandler = Callable[
     [RunOutcomeRequest],
     RunOutcomeResponse,
 ]
+QueryResponseHandler = Callable[[QueryRequest], QueryResponse]
 
 
 # =============================================
@@ -73,44 +90,23 @@ RunOutcomeHandler = Callable[
 # =============================================
 
 
-def _run_outcome_records(
-    connection: duckdb.DuckDBPyConnection,
-) -> tuple[RunOutcomeResponse, ...]:
-    placeholders = ", ".join("?" for _path in RUN_OUTCOME_PATHS)
-    rows = connection.execute(
-        f"SELECT {api.AUTHORITATIVE_RECORD_PAYLOAD_COLUMN} "
-        f"FROM {api.AUTHORITATIVE_RECORDS_TABLE} "
-        f"WHERE {api.AUTHORITATIVE_RECORD_METHOD_COLUMN} = ? "
-        f"AND {api.AUTHORITATIVE_RECORD_PATH_COLUMN} IN ({placeholders}) "
-        f"ORDER BY {api.AUTHORITATIVE_RECORD_ORDINAL_COLUMN}",
-        [api.HTTP_POST_METHOD, *(path.value for path in sorted(RUN_OUTCOME_PATHS))],
-    ).fetchall()
-    try:
-        records = tuple(HttpRequestLogRecord.model_validate_json(str(row[0])) for row in rows)
-        return tuple(
-            RunOutcomeResponse.from_http_request_log_record(record)
-            for record in records
-        )
-    except (ValidationError, ValueError) as exc:
-        raise api._PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT) from exc
-
-
 def _run_outcome_snapshot_configuration(session_id: UUID | None) -> api._PushConfiguration:
     rollout_name = (
-        f"{ROLLOUT_FILENAME_PREFIX}{session_id or 'run-outcome-snapshot'}{ROLLOUT_FILENAME_SUFFIX}"
+        f"{api.ROLLOUT_FILENAME_PREFIX}{session_id or 'run-outcome-snapshot'}"
+        f"{api.ROLLOUT_FILENAME_SUFFIX}"
     )
-    return api.push_configuration(str(CODEX_SESSIONS_ROOT / rollout_name))
+    return api.push_configuration(str(api.CODEX_SESSIONS_ROOT / rollout_name))
 
 
 def _capture_run_outcome_snapshot(
     runtime: AiAugmentBackendContext,
 ) -> tuple[RunOutcomeResponseBody, str | None, tuple[Exception, ...]]:
-    with BACKEND_WORKFLOW_STATE_LOCK:
-        session_id = BACKEND_SESSION_ID
-        pull_record = BACKEND_PENDING_PULL_RECORD or BACKEND_CURRENT_PULL_RECORD
-        push_record = BACKEND_LATEST_PUSH_RECORD
+    with api.BACKEND_WORKFLOW_STATE_LOCK:
+        session_id = api.BACKEND_SESSION_ID
+        pull_record = api.BACKEND_PENDING_PULL_RECORD or api.BACKEND_CURRENT_PULL_RECORD
+        push_record = api.BACKEND_LATEST_PUSH_RECORD
 
-    rollout_archive: _ArchivedFile | None = None
+    rollout_record: CodexRolloutRecord | None = None
     rollout_filename: str | None = None
     appendwatch_report: bytes | None = None
     failures: list[Exception] = []
@@ -118,7 +114,20 @@ def _capture_run_outcome_snapshot(
     if session_id is not None:
         try:
             rollout_configuration = api.push_configuration_for_session(session_id)
-            rollout_archive = api.copy_rollout_to_cas(rollout_configuration, runtime)
+            try:
+                rollout_record = runtime.pipeline_config.rollout_cas.copy_rollout(
+                    ssh_target=rollout_configuration.ssh_target,
+                    rollout_relative_path=rollout_configuration.rollout_relative_path,
+                    ssh_options=api._aivm_connection_options(
+                        lima_ssh_config=rollout_configuration.lima_ssh_config,
+                        identity_file=rollout_configuration.identity_file,
+                        known_hosts_file=rollout_configuration.known_hosts_file,
+                        ssh_user=rollout_configuration.ssh_user,
+                        host_key_alias=rollout_configuration.host_key_alias,
+                    ),
+                )
+            except (OSError, ValueError) as exc:
+                raise api._PushConfigurationError(str(exc)) from exc
             rollout_filename = rollout_configuration.rollout_relative_path.name
         except (OSError, api._PushConfigurationError) as exc:
             failures.append(exc)
@@ -136,12 +145,8 @@ def _capture_run_outcome_snapshot(
             session_id=session_id,
             codex_rollout_record=(
                 None
-                if rollout_archive is None
-                else CodexRolloutRecord(
-                    sha256=rollout_archive.sha256,
-                    size=rollout_archive.size,
-                    line_count=rollout_archive.line_count,
-                )
+                if rollout_record is None
+                else rollout_record
             ),
             appendwatch_report_record=(
                 None
@@ -156,10 +161,10 @@ def _capture_run_outcome_snapshot(
     return snapshot, rollout_filename, tuple(failures)
 
 
-def handle_dashboard_run_outcome_request(
+def handle_run_outcome_request(
+    runtime: AiAugmentBackendContext,
     ipc_request: RunOutcomeRequest,
 ) -> RunOutcomeResponse:
-    runtime = api.runtime_configuration()
     if (
         runtime.configured_namekey is None
         or ipc_request.namekey != runtime.configured_namekey
@@ -201,7 +206,9 @@ def handle_dashboard_run_outcome_request(
         ready_to_respond_at_unix_usec=ready_at_unix_usec,
     )
     try:
-        api.append_authoritative_record(response.http_request_log_record)
+        runtime.pipeline_config.backend_store.append_authoritative_record(
+            response.http_request_log_record,
+        )
     except Exception as exc:
         logger.critical(
             Locale.RUN_OUTCOME_SNAPSHOT_APPEND_FATAL_LOG,
@@ -217,137 +224,108 @@ def handle_dashboard_run_outcome_request(
 # =====================================
 
 
-def _filter_attempt_records_by_namekey(
+def handle_query_request(
     runtime: AiAugmentBackendContext,
-    conn: duckdb.DuckDBPyConnection,
-    *,
-    namekey: NameKey | None,
-) -> tuple[AgentRuntimeAttemptRecord, ...]:
-    rows = conn.execute(
-        f"SELECT records.{AUTHORITATIVE_RECORD_PAYLOAD_COLUMN}, "
-        f"attempts.{AUTHORITATIVE_ATTEMPT_PAYLOAD_COLUMN} "
-        f"FROM {AUTHORITATIVE_ATTEMPTS_TABLE} AS attempts "
-        f"JOIN {AUTHORITATIVE_RECORDS_TABLE} AS records "
-        f"ON records.{AUTHORITATIVE_RECORD_ID_COLUMN} = "
-        f"attempts.{AUTHORITATIVE_ATTEMPT_COMMIT_ID_COLUMN} "
-        f"ORDER BY records.{AUTHORITATIVE_RECORD_ORDINAL_COLUMN}"
-    ).fetchall()
-    try:
-        attempts: list[AgentRuntimeAttemptRecord] = []
-        for record_json, attempt_json in rows:
-            record = HttpRequestLogRecord.model_validate_json(str(record_json))
-            record_namekey = _parse_name_key_header(
-                record.request_headers.get(NAME_KEY_HEADER)
-            )
-            if namekey is not None and record_namekey != namekey:
-                continue
-            attempts.append(
-                _attempt_record_from_serialized_json(
-                    runtime,
-                    str(attempt_json),
-                    commit_http_record=record,
-                )
-            )
-        return tuple(attempts)
-    except (api._PushValidationError, ValidationError, ValueError) as exc:
-        raise api._PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT) from exc
-
-
-def _filter_backend_context_by_namekey(
-    runtime: AiAugmentBackendContext,
-    conn: duckdb.DuckDBPyConnection,
-    *,
-    namekey: NameKey | None,
-    run_outcome_records: tuple[RunOutcomeResponse, ...],
+    ipc_request: QueryRequest,
 ) -> QueryResponse:
+    """
+    Builds a `QueryResponse` from configured
+    source singular outerdicts and detour DB records.
+
+    When the request provides a `NameKey`,
+    every returned collection is restricted
+    to that researcher; otherwise the complete
+    configured sample is returned.
+    """
+    conn = runtime.pipeline_config.backend_store.connection
+    namekey = ipc_request.namekey
+
+    def attempt_records() -> tuple[AgentRuntimeAttemptRecord, ...]:
+        rows = conn.execute(
+            f"SELECT records.{api.AUTHORITATIVE_RECORD_PAYLOAD_COLUMN}, "
+            f"attempts.{api.AUTHORITATIVE_ATTEMPT_PAYLOAD_COLUMN} "
+            f"FROM {api.AUTHORITATIVE_ATTEMPTS_TABLE} AS attempts "
+            f"JOIN {api.AUTHORITATIVE_RECORDS_TABLE} AS records "
+            f"ON records.{api.AUTHORITATIVE_RECORD_ID_COLUMN} = "
+            f"attempts.{api.AUTHORITATIVE_ATTEMPT_COMMIT_ID_COLUMN} "
+            f"ORDER BY records.{api.AUTHORITATIVE_RECORD_ORDINAL_COLUMN}"
+        ).fetchall()
+        try:
+            attempts: list[AgentRuntimeAttemptRecord] = []
+            for record_json, attempt_json in rows:
+                record = HttpRequestLogRecord.model_validate_json(str(record_json))
+                record_namekey = api._parse_name_key_header(
+                    record.request_headers.get(NAME_KEY_HEADER)
+                )
+                if namekey is not None and record_namekey != namekey:
+                    continue
+                attempts.append(
+                    api._attempt_record_from_serialized_json(
+                        runtime,
+                        str(attempt_json),
+                        commit_http_record=record,
+                    )
+                )
+            return tuple(attempts)
+        except (api._PushValidationError, ValidationError, ValueError) as exc:
+            raise api._PushConfigurationError(
+                Locale.REPLAY_PROJECTION_CONFLICT
+            ) from exc
+
+    def run_outcome_records() -> tuple[RunOutcomeResponse, ...]:
+        placeholders = ", ".join("?" for _path in RUN_OUTCOME_PATHS)
+        rows = conn.execute(
+            f"SELECT {api.AUTHORITATIVE_RECORD_PAYLOAD_COLUMN} "
+            f"FROM {api.AUTHORITATIVE_RECORDS_TABLE} "
+            f"WHERE {api.AUTHORITATIVE_RECORD_METHOD_COLUMN} = ? "
+            f"AND {api.AUTHORITATIVE_RECORD_PATH_COLUMN} IN ({placeholders}) "
+            f"ORDER BY {api.AUTHORITATIVE_RECORD_ORDINAL_COLUMN}",
+            [
+                api.HTTP_POST_METHOD,
+                *(path.value for path in sorted(RUN_OUTCOME_PATHS)),
+            ],
+        ).fetchall()
+        try:
+            records = tuple(
+                HttpRequestLogRecord.model_validate_json(str(row[0]))
+                for row in rows
+            )
+            return tuple(
+                record
+                for record in (
+                    RunOutcomeResponse.from_http_request_log_record(record)
+                    for record in records
+                )
+                if namekey is None or record.run_outcome_request.namekey == namekey
+            )
+        except (ValidationError, ValueError) as exc:
+            raise api._PushConfigurationError(
+                Locale.REPLAY_PROJECTION_CONFLICT
+            ) from exc
+
+    selected_attempts = attempt_records()
     committed_by_namekey: dict[str, list[CommittedInnerDict]] = {}
-    for committed in _committed_innerdicts(conn):
+    for committed in api._committed_innerdicts(conn):
         committed_namekey_json = name_key_from_header_value(
             committed.commit_record.request_headers.get(NAME_KEY_HEADER)
         ).to_json_key()
         committed_by_namekey.setdefault(committed_namekey_json, []).append(
             committed
         )
-    outerdicts = runtime.ai_augment_outerdicts
-    for outerdict in outerdicts:
-        outerdict.committed_innerdicts = tuple(
-            committed_by_namekey.get(outerdict.namekey.to_json_key(), ())
+    selected_singular_outerdicts: list[AiAugmentSingularOuterDict] = []
+    for singular_outerdict in runtime.ai_augment_singular_outerdicts:
+        if namekey is not None and singular_outerdict.namekey != namekey:
+            continue
+        selected_singular_outerdict = singular_outerdict.model_copy()
+        selected_singular_outerdict.committed_innerdicts = tuple(
+            committed_by_namekey.get(singular_outerdict.namekey.to_json_key(), ())
         )
-    selected_outerdicts = (
-        outerdicts
-        if namekey is None
-        else tuple(
-            outerdict for outerdict in outerdicts if outerdict.namekey == namekey
-        )
-    )
+        selected_singular_outerdicts.append(selected_singular_outerdict)
     return QueryResponse(
-        attempts=_filter_attempt_records_by_namekey(
-            runtime,
-            conn,
-            namekey=namekey,
-        ),
-        ai_augment_outerdicts=selected_outerdicts,
-        run_outcome_records=run_outcome_records,
+        attempts=selected_attempts,
+        ai_augment_singular_outerdicts=tuple(selected_singular_outerdicts),
+        run_outcome_records=run_outcome_records(),
     )
-
-
-def _full_dashboard_query_response_json(namekey: NameKey | None) -> str:
-    runtime = api.runtime_configuration()
-    with api.synchronized_detour_database(runtime) as connection:
-        response = _filter_backend_context_by_namekey(
-            runtime,
-            connection,
-            namekey=namekey,
-            run_outcome_records=_run_outcome_records(connection),
-        )
-    return response.model_dump_json()
-
-
-def _full_dashboard_query_response_json_handler(
-) -> Callable[[NameKey | None], str]:
-    """
-    Returns `_full_dashboard_query_response_json`
-    as a `Callable`; added for explicitness because
-    `_ipc_only_dashboard_query_response_json` needs
-    a real handler.
-    """
-    return _full_dashboard_query_response_json
-
-
-def _ipc_only_dashboard_query_response_json(namekey: NameKey | None) -> str:
-    runtime = api.runtime_configuration()
-    with api.DETOUR_DB_LOCK:
-        with runtime.detour_database(read_only=True) as detour_database:
-            connection = detour_database.connection
-            response = _query_response(
-                runtime,
-                connection,
-                namekey=namekey,
-                run_outcome_records=_run_outcome_records(connection),
-            )
-    return response.model_dump_json()
-
-
-def _ipc_only_dashboard_query_response_json_handler(
-    config_path: Path,
-    *,
-    verify_hash_on_init: bool = True,
-) -> Callable[[NameKey | None], str]:
-    configured = False
-
-    def query_response_callable(namekey: NameKey | None) -> str:
-        nonlocal configured
-
-        if not configured:
-            api.configure_runtime(
-                config_path,
-                require_namekey=False,
-                verify_hash_on_init=verify_hash_on_init,
-            )
-            configured = True
-        return _ipc_only_dashboard_query_response_json(namekey)
-
-    return query_response_callable
 
 
 # =============================================================
@@ -355,7 +333,7 @@ def _ipc_only_dashboard_query_response_json_handler(
 # =============================================================
 
 def create_dashboard_query_app(
-    query_response_handler: Callable[[NameKey | None], str],
+    query_response_handler: QueryResponseHandler,
     *,
     namekey_parameter: str,
     query_path: str,
@@ -374,7 +352,8 @@ def create_dashboard_query_app(
                 if namekey_json is None
                 else NameKey.from_json_key(namekey_json)
             )
-            payload = query_response_handler(namekey)
+            ipc_request = QueryRequest(namekey=namekey)
+            payload = query_response_handler(ipc_request).model_dump_json()
         except BaseException:
             app.logger.exception("dashboard query failed fatally")
             fatal_exit(1)
@@ -452,7 +431,7 @@ def _unlink_stale_socket(path: Path) -> None:
 
 def start_dashboard_query_server(
     socket_path: Path,
-    query_response_handler: Callable[[NameKey | None], str],
+    query_response_handler: QueryResponseHandler,
     *,
     namekey_parameter: str,
     query_path: str,
@@ -510,7 +489,9 @@ def stop_dashboard_query_server(handle: _DashboardIpcServer) -> None:
 # ===================================================
 
 
-def start_full_dashboard_query_server() -> _DashboardIpcServer:
+def start_full_dashboard_query_server(
+    runtime: AiAugmentBackendContext,
+) -> _DashboardIpcServer:
     """
     Wrapper for `start_dashboard_query_server` to be used
     downstream as part of another app's lifespan (e.g.,
@@ -519,20 +500,25 @@ def start_full_dashboard_query_server() -> _DashboardIpcServer:
     Assumes that `stop_dashboard_query_server`
     is executed in the lifespan's `finally`.
     """
+    def run_outcome_handler(request: RunOutcomeRequest) -> RunOutcomeResponse:
+        return handle_run_outcome_request(runtime, request)
+
+    def query_response_handler(request: QueryRequest) -> QueryResponse:
+        with runtime.pipeline_config.backend_store.threading_lock():
+            return handle_query_request(runtime, request)
+
     return start_dashboard_query_server(
         DASHBOARD_SOCKET_PATH,
-        _full_dashboard_query_response_json_handler,
+        query_response_handler,
         namekey_parameter=KTP_NAMEKEY_COL,
         query_path=DASHBOARD_QUERY_PATH,
-        run_outcome_handler=handle_dashboard_run_outcome_request,
+        run_outcome_handler=run_outcome_handler,
         run_outcome_paths=RUN_OUTCOME_PATHS,
     )
 
 
 def serve_dashboard_query_only(
-    config_path: Path,
-    *,
-    verify_hash_on_init: bool = True,
+    runtime: AiAugmentBackendContext,
 ) -> None:
     """
     Wrapper for `start_dashboard_query_server`
@@ -540,12 +526,12 @@ def serve_dashboard_query_only(
     for downstream use as a standalone app;
     owns its own start and stop lifecycle.
     """
+    def query_response_handler(request: QueryRequest) -> QueryResponse:
+        return handle_query_request(runtime, request)
+
     server = start_dashboard_query_server(
         DASHBOARD_SOCKET_PATH,
-        _ipc_only_dashboard_query_response_json_handler(
-            config_path,
-            verify_hash_on_init=verify_hash_on_init,
-        ),
+        query_response_handler,
         namekey_parameter=KTP_NAMEKEY_COL,
         query_path=DASHBOARD_QUERY_PATH,
     )

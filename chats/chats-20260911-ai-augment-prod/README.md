@@ -11,7 +11,7 @@ the interaction with OpenAI Codex
 implemention of this task specification:
 `tasks/tasks-20260911-ai-augment-prod/SPEC.md`.
 This includes the rollout
-`rollout-2026-09-11T15-54-34-01a0912d-8624-7723-82ad-e69aadb05be7.jsonl`.
+`rollout-2026-09-11T15-54-34-01a0912d-8624-7723-82ad-e69aadb05be7.jsonl.tgz`.
 
 While the rollout is a
 (sometimes tar/gzipped)

@@ -20,7 +20,16 @@ from zipfile import ZipFile
 
 import pytest
 from nicegui import ui
-from playwright.sync_api import Locator, Page, ViewportSize, expect, sync_playwright
+from playwright.sync_api import (
+    Browser,
+    Locator,
+    Page,
+    Playwright,
+    ViewportSize,
+    expect,
+    sync_playwright,
+)
+from playwright.sync_api import Error as PlaywrightError
 
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     AiAugmentCohort,
@@ -32,14 +41,15 @@ from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helper
 from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helpers.locale import (
     Locale,
 )
+from src.detours.detour_ai_augment.protected.tests import pytest_plugin
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_context import (
     EXPECTED_GROUND_TRUTH_RESEARCHERS,
     EXPECTED_INELIGIBLE_RESEARCHERS,
     EXPECTED_NO_GROUND_TRUTH_RESEARCHERS,
     EXPECTED_SOURCE_RESEARCHERS,
 )
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_outer_dict import (
-    AiAugmentOuterDict,
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_singular_outer_dict import (  # noqa: E501
+    AiAugmentSingularOuterDict,
 )
 from src.detours.detour_ai_augment.src.control_centre.dashboard import ui as control_ui
 from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.run_outcome import (  # noqa: E501
@@ -60,7 +70,7 @@ E2E_SERVER_MODULE = (
     "src.detours.detour_ai_augment.tests.control_centre.test_ui_e2e"
 )
 E2E_HOST = "127.0.0.1"
-E2E_START_TIMEOUT_SECONDS = 30
+E2E_START_TIMEOUT_SECONDS = 10
 E2E_STOP_TIMEOUT_SECONDS = 10
 E2E_REFRESH_WAIT_MILLISECONDS = 2_500
 E2E_NARROW_VIEWPORT: ViewportSize = {"width": 915, "height": 1_000}
@@ -99,9 +109,9 @@ def browser_researcher(
     draw_number: str,
     cohort: AiAugmentCohort,
     ineligibility_category: AiAugmentIneligibilityCategory | None = None,
-) -> AiAugmentOuterDict:
+) -> AiAugmentSingularOuterDict:
     namekey = NameKey(first_name=first_name, last_name=last_name)
-    return AiAugmentOuterDict(
+    return AiAugmentSingularOuterDict(
         namekey=namekey,
         xlsx_innerdicts=(
             InnerDict.from_mapping(
@@ -122,7 +132,7 @@ def browser_researcher(
     )
 
 
-def browser_researchers() -> tuple[AiAugmentOuterDict, ...]:
+def browser_researchers() -> tuple[AiAugmentSingularOuterDict, ...]:
     researchers = [
         browser_researcher(
             first_name="Pilot Ineligible",
@@ -226,6 +236,9 @@ class BrowserController:
     ) -> control_ui._BackendAvailability:
         return self._backend_availability
 
+    def drain_notifications(self) -> tuple[str, ...]:
+        return ()
+
     async def refresh_from_ipc(self) -> None:
         self._backend_status = control_ui._BackendStatus.STOPPED
         self._backend_availability = control_ui._BackendAvailability(
@@ -271,7 +284,7 @@ class BrowserController:
                 ready=activities.count(RunLifecycle.READY),
                 queued=activities.count(RunLifecycle.QUEUED),
                 running=activities.count(RunLifecycle.RUNNING),
-                complete=activities.count(RunLifecycle.COMPLETED),
+                completed=activities.count(RunLifecycle.COMPLETED),
                 failed=activities.count(RunLifecycle.FAILED),
                 cancelled=activities.count(RunLifecycle.CANCELLED),
             ),
@@ -284,7 +297,7 @@ class BrowserController:
     def _project(
         self,
         *,
-        researcher: AiAugmentOuterDict,
+        researcher: AiAugmentSingularOuterDict,
         variable: control_ui._VariableSpec,
     ) -> control_ui._ResearcherGridRow:
         namekey_json = researcher.namekey.to_json_key()
@@ -339,7 +352,7 @@ class BrowserController:
     def _attempt_projection(
         self,
         *,
-        researcher: AiAugmentOuterDict,
+        researcher: AiAugmentSingularOuterDict,
         variable: control_ui._VariableSpec,
         run_id: UUID,
         attempt_index: int,
@@ -383,7 +396,7 @@ class BrowserController:
     def _matches(
         self,
         *,
-        researcher: AiAugmentOuterDict,
+        researcher: AiAugmentSingularOuterDict,
         selection: control_ui._UiSelection,
     ) -> bool:
         activity = self._activity_by_namekey[researcher.namekey.to_json_key()]
@@ -486,18 +499,38 @@ def serve_e2e_dashboard(*, port: int) -> None:
     )
 
 
+def stop_e2e_server(process: subprocess.Popen[str]) -> str:
+    if process.poll() is None:
+        process.terminate()
+    try:
+        output, _ = process.communicate(timeout=E2E_STOP_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        output, _ = process.communicate(timeout=E2E_STOP_TIMEOUT_SECONDS)
+    return output
+
+
 def wait_for_server(process: subprocess.Popen[str], *, url: str) -> None:
     deadline = time.monotonic() + E2E_START_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
         if process.poll() is not None:
-            output, _ = process.communicate()
+            output = stop_e2e_server(process)
             raise RuntimeError(f"Control Centre E2E server exited during startup:\n{output}")
         try:
             with urllib_request.urlopen(url, timeout=1):
                 return
+        except urllib_error.HTTPError as exc:
+            response_body = exc.read().decode("utf-8", errors="replace")
+            output = stop_e2e_server(process)
+            raise RuntimeError(
+                f"Control Centre E2E server returned HTTP {exc.code} during startup"
+                f"\n\n--- response body ---\n{response_body}"
+                f"\n\n--- child output ---\n{output}"
+            ) from exc
         except OSError, urllib_error.URLError:
             time.sleep(control_vars.BACKEND_READY_POLL_SECONDS)
-    raise TimeoutError("Control Centre E2E server did not start")
+    output = stop_e2e_server(process)
+    raise TimeoutError(f"Control Centre E2E server did not start\n\n--- child output ---\n{output}")
 
 
 def grid_row_for_draw(page: Page, draw: str) -> Locator:
@@ -527,10 +560,25 @@ def assert_shared_width(page: Page) -> None:
     )
 
 
+def launch_e2e_browser(playwright: Playwright, pytestconfig: pytest.Config) -> Browser:
+    if pytestconfig.getoption(pytest_plugin.PLAYWRIGHT_CHROMIUM_OPTION):
+        return playwright.chromium.launch(headless=True)
+    try:
+        return playwright.chromium.launch(channel="chrome", headless=True)
+    except PlaywrightError as exc:
+        pytest.fail(
+            "Google Chrome is unavailable; rerun with "
+            f"{pytest_plugin.PLAYWRIGHT_CHROMIUM_CLI_OPTION} to use Playwright Chromium: "
+            f"{exc}",
+            pytrace=False,
+        )
+
+
 @contextmanager
 def control_centre_browser(
-    repository_root: Path,
+    pytestconfig: pytest.Config,
 ) -> Iterator[tuple[Page, list[str]]]:
+    repository_root = pytestconfig.rootpath
     port = available_e2e_port()
     url = f"http://{E2E_HOST}:{port}"
     server_environment = os.environ.copy()
@@ -552,7 +600,7 @@ def control_centre_browser(
     try:
         wait_for_server(process, url=url)
         with sync_playwright() as playwright:
-            browser = playwright.chromium.launch(headless=True)
+            browser = launch_e2e_browser(playwright, pytestconfig)
             page = browser.new_page(viewport=E2E_WIDE_VIEWPORT)
             errors: list[str] = []
             page.on(
@@ -565,18 +613,14 @@ def control_centre_browser(
             yield page, errors
             browser.close()
     finally:
-        process.terminate()
-        try:
-            process.wait(timeout=E2E_STOP_TIMEOUT_SECONDS)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=E2E_STOP_TIMEOUT_SECONDS)
+        if process.poll() is None:
+            stop_e2e_server(process)
 
 
 def test_underscore_field_labels_render_literally_in_researcher_card(
     pytestconfig: pytest.Config,
 ) -> None:
-    with control_centre_browser(pytestconfig.rootpath) as (page, errors):
+    with control_centre_browser(pytestconfig) as (page, errors):
         eligible_row = grid_row_for_draw(page, BROWSER_PILOT_ELIGIBLE_DRAW)
         eligible_row.click()
         page.get_by_test_id(control_ui.VIEW_CARD_TEST_ID).click()
@@ -595,7 +639,7 @@ def test_underscore_field_labels_render_literally_in_researcher_card(
 def test_main_grid_and_researcher_card_use_compact_line_spacing(
     pytestconfig: pytest.Config,
 ) -> None:
-    with control_centre_browser(pytestconfig.rootpath) as (page, errors):
+    with control_centre_browser(pytestconfig) as (page, errors):
         eligible_row = grid_row_for_draw(page, BROWSER_PILOT_ELIGIBLE_DRAW)
         eligible_row.click()
         page.get_by_test_id(control_ui.EXECUTE_ACTION_TEST_ID).click()
@@ -635,7 +679,7 @@ def test_main_grid_and_researcher_card_use_compact_line_spacing(
 def test_selected_researcher_row_is_highlighted(
     pytestconfig: pytest.Config,
 ) -> None:
-    with control_centre_browser(pytestconfig.rootpath) as (page, errors):
+    with control_centre_browser(pytestconfig) as (page, errors):
         selected_row = grid_row_for_draw(page, BROWSER_PILOT_ELIGIBLE_DRAW)
         unselected_row = grid_row_for_draw(page, BROWSER_PILOT_INELIGIBLE_DRAW)
         selected_row.click()
@@ -655,7 +699,7 @@ def test_selected_researcher_row_is_highlighted(
 def test_researcher_selection_and_attempt_history_are_idempotent(
     pytestconfig: pytest.Config,
 ) -> None:
-    with control_centre_browser(pytestconfig.rootpath) as (page, errors):
+    with control_centre_browser(pytestconfig) as (page, errors):
         first_row = grid_row_for_draw(page, BROWSER_PILOT_ELIGIBLE_DRAW)
         second_row = grid_row_for_draw(page, "1")
         history_panel = page.get_by_test_id(control_ui.ATTEMPT_HISTORY_PANEL_TEST_ID)
@@ -682,7 +726,7 @@ def test_researcher_selection_and_attempt_history_are_idempotent(
 def test_completed_researcher_metadata_is_available_in_visible_attempt_history(
     pytestconfig: pytest.Config,
 ) -> None:
-    with control_centre_browser(pytestconfig.rootpath) as (page, errors):
+    with control_centre_browser(pytestconfig) as (page, errors):
         page.set_viewport_size(E2E_NARROW_VIEWPORT)
         completed_namekey = browser_researchers()[BROWSER_LEADING_RESEARCHER_COUNT].namekey
         page.get_by_label(Locale.SEARCH_FILTER).fill(
@@ -706,7 +750,7 @@ def test_completed_researcher_metadata_is_available_in_visible_attempt_history(
         expect(history_cells.nth(1)).to_have_text(
             RunLifecycle.COMPLETED.value
         )
-        expect(history_cells.nth(2)).to_have_text("attempt-1")
+        assert UUID(history_cells.nth(2).inner_text()).version == 7
         expect(history_cells.nth(3)).to_have_text(
             Locale.RUN_OUTCOME_SNAPSHOT_SAVED
         )
@@ -726,7 +770,7 @@ def test_completed_researcher_metadata_is_available_in_visible_attempt_history(
 def test_displayed_researcher_card_downloads_as_docx(
     pytestconfig: pytest.Config,
 ) -> None:
-    with control_centre_browser(pytestconfig.rootpath) as (page, errors):
+    with control_centre_browser(pytestconfig) as (page, errors):
         download_button = page.get_by_test_id(control_ui.DOWNLOAD_CARD_TEST_ID)
         card_markdown = page.get_by_test_id(control_ui.CARD_MARKDOWN_TEST_ID)
         expect(download_button).to_be_disabled()
@@ -779,7 +823,7 @@ def test_control_centre_browser_contract(pytestconfig: pytest.Config) -> None:
     try:
         wait_for_server(process, url=url)
         with sync_playwright() as playwright:
-            browser = playwright.chromium.launch(headless=True)
+            browser = launch_e2e_browser(playwright, pytestconfig)
             page = browser.new_page(viewport=E2E_NARROW_VIEWPORT)
             errors: list[str] = []
             page.on(
@@ -929,7 +973,7 @@ def test_control_centre_browser_contract(pytestconfig: pytest.Config) -> None:
             history = page.get_by_test_id(control_ui.ATTEMPT_HISTORY_TABLE_TEST_ID)
             history_rows = history.locator("tbody tr")
             expect(history_rows).to_have_count(1)
-            expect(history_rows.nth(0)).to_contain_text("attempt-1")
+            expect(history_rows.nth(0)).to_contain_text("ai-value-1")
             expect(history_rows.nth(0)).to_contain_text(
                 RunLifecycle.QUEUED.value
             )
@@ -943,8 +987,8 @@ def test_control_centre_browser_contract(pytestconfig: pytest.Config) -> None:
             )
             action_button.click()
             expect(history_rows).to_have_count(2)
-            expect(history_rows.nth(0)).to_contain_text("attempt-1")
-            expect(history_rows.nth(1)).to_contain_text("attempt-2")
+            expect(history_rows.nth(0)).to_contain_text("ai-value-1")
+            expect(history_rows.nth(1)).to_contain_text("ai-value-2")
             expect(
                 eligible_row.locator(
                     f'{GRID_CELL_SELECTOR}[col-id="{control_ui.GRID_AI_VALUE_FIELD}"]'
@@ -953,12 +997,8 @@ def test_control_centre_browser_contract(pytestconfig: pytest.Config) -> None:
             assert errors == [], Counter(errors)
             browser.close()
     finally:
-        process.terminate()
-        try:
-            process.wait(timeout=E2E_STOP_TIMEOUT_SECONDS)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=E2E_STOP_TIMEOUT_SECONDS)
+        if process.poll() is None:
+            stop_e2e_server(process)
 
 
 if __name__ == "__main__":

@@ -8,19 +8,12 @@ from pathlib import PurePosixPath
 from typing import Final, Literal, Self
 from uuid import UUID
 
-from pydantic import (
-    BaseModel,
-    ConfigDict,
-    Field,
-    StrictStr,
-    model_serializer,
-    model_validator,
-)
+from pydantic import Field, StrictStr, model_serializer, model_validator
 
 from src.detours.detour_ai_augment.protected.src.architecture import (
     BackendComponent,
 )
-from src.helpers.architecture import implements
+from src.helpers.architecture import FrozenStrictModel, implements
 from src.helpers.data_models import FragmentType, HttpRequestLogRecord
 from src.helpers.vars import (
     KTP_FILENAME_COL,
@@ -146,9 +139,7 @@ POST_COMMIT_VALIDATION_RESULTS: Final = frozenset({
 })
 
 
-class _CodexRolloutRecordSummaryJson(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
+class _CodexRolloutRecordSummaryJson(FrozenStrictModel):
     originator: StrictStr
     source: StrictStr
     cli_version: StrictStr
@@ -166,9 +157,7 @@ class _CodexRolloutRecordSummaryJson(BaseModel):
 
 
 @implements[BackendComponent.AgentRuntimePort.CodexRolloutRecordProperty]()
-class CodexRolloutRecord(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
+class CodexRolloutRecord(FrozenStrictModel):
     sha256: StrictStr
     size: int = Field(ge=0)
     line_count: int = Field(ge=1)
@@ -199,9 +188,7 @@ class CodexRolloutRecord(BaseModel):
 
 
 @implements[BackendComponent.AgentRuntimePort.AppendwatchReportRecordProperty]()
-class AppendwatchReportRecord(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
+class AppendwatchReportRecord(FrozenStrictModel):
     encoding: AppendwatchReportEncoding
     data: StrictStr
 
@@ -223,25 +210,19 @@ class AppendwatchReportRecord(BaseModel):
 
 
 @implements[BackendComponent.CodexSessionRecordProperty]()
-class CodexSessionRecord(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
+class CodexSessionRecord(FrozenStrictModel):
     session_id: UUID | None
     codex_rollout_record: CodexRolloutRecord | None
     appendwatch_report_record: AppendwatchReportRecord | None
 
 
-class _CodexSessionRecordJson(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
+class _CodexSessionRecordJson(FrozenStrictModel):
     codex_session_id: UUID | None
     codex_rollout_record: CodexRolloutRecord | None
     appendwatch_report_record: AppendwatchReportRecord | None
 
 
-class _CommitRequestBodyJson(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
+class _CommitRequestBodyJson(FrozenStrictModel):
     pull_record_id: UUID
     push_record_id: UUID
     codex_session_record: _CodexSessionRecordJson
@@ -259,9 +240,7 @@ class _CommitRequestBodyJson(BaseModel):
 
 
 @implements[BackendComponent.CommitRequestBodyProperty]()
-class CommitRequestBody(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
+class CommitRequestBody(FrozenStrictModel):
     pull_record: HttpRequestLogRecord
     push_record: HttpRequestLogRecord
     codex_session_record: CodexSessionRecord
@@ -389,9 +368,7 @@ class BackendCommitRecord(HttpRequestLogRecord):
 
 
 @implements[BackendComponent.PostCommitValidationProperty]()
-class PostCommitValidation(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
+class PostCommitValidation(FrozenStrictModel):
     stage: BackendLifecycle
     result: BackendLifecycle
     detail: StrictStr | None = None

@@ -6,17 +6,32 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import NoReturn
+from unittest.mock import Mock
 
 import pytest
 from fastapi import status
 
+from src.detours.detour_ai_augment.protected.src.backend import ipc
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_augment_config import (  # noqa: E501
     AiAugmentDetourConfig,
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     TEXT_ENCODING,
 )
-from src.detours.detour_ai_augment.src.backend import api, ipc, server
+from src.detours.detour_ai_augment.protected.src.backend.ipc import (
+    DASHBOARD_IPC_HOST,
+    DASHBOARD_IPC_SCHEME,
+    DASHBOARD_QUERY_PATH,
+    JSON_MEDIA_TYPE,
+    SOCKET_PERMISSIONS,
+    create_dashboard_query_app,
+    start_dashboard_query_server,
+    stop_dashboard_query_server,
+)
+from src.detours.detour_ai_augment.src.backend import api, server
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_context import (  # noqa: E501
+    AiAugmentBackendContext,
+)
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.commit_event import (
     CodexSessionRecord,
 )
@@ -27,18 +42,11 @@ from src.detours.detour_ai_augment.src.backend.helpers.data_models.run_outcome_r
     RunOutcomeResponse,
     RunOutcomeResponseBody,
 )
-from src.detours.detour_ai_augment.src.backend.ipc import (
-    DASHBOARD_IPC_HOST,
-    DASHBOARD_IPC_SCHEME,
-    DASHBOARD_QUERY_PATH,
-    JSON_MEDIA_TYPE,
-    SOCKET_PERMISSIONS,
-    create_dashboard_query_app,
-    start_dashboard_query_server,
-    stop_dashboard_query_server,
-)
 from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models import (
     run_outcome as run_outcome_models,
+)
+from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.query_request import (  # noqa: E501
+    QueryRequest,
 )
 from src.detours.detour_ai_augment.src.control_centre.dashboard.ui import (
     _BackendDatabaseClient,
@@ -65,16 +73,22 @@ def test_full_backend_composition_stops_ipc_before_domain_shutdown(
 ) -> None:
     events: list[object] = []
     ipc_server = object()
+    runtime = Mock(spec=AiAugmentBackendContext)
 
     @asynccontextmanager
-    async def domain_lifespan(_app: object) -> AsyncIterator[None]:
+    async def domain_lifespan(
+        _app: object,
+        received_runtime: AiAugmentBackendContext,
+    ) -> AsyncIterator[None]:
+        assert received_runtime is runtime
         events.append("domain-start")
         try:
             yield
         finally:
             events.append("domain-stop")
 
-    def start_ipc() -> object:
+    def start_ipc(received_runtime: AiAugmentBackendContext) -> object:
+        assert received_runtime is runtime
         events.append("ipc-start")
         return ipc_server
 
@@ -91,7 +105,7 @@ def test_full_backend_composition_stops_ipc_before_domain_shutdown(
     )
 
     async def exercise() -> None:
-        async with server.lifespan(api.app):
+        async with server.lifespan(api.app, runtime):
             events.append("running")
 
     asyncio.run(exercise())
@@ -107,14 +121,15 @@ def test_full_backend_composition_stops_ipc_before_domain_shutdown(
 
 def test_dashboard_query_flask_application_is_separate_and_unauthenticated() -> None:
     observed: list[NameKey | None] = []
-    payload = QueryResponse(
+    query_response = QueryResponse(
         attempts=(),
-        ai_augment_outerdicts=(),
-    ).model_dump_json()
+        ai_augment_singular_outerdicts=(),
+    )
+    payload = query_response.model_dump_json()
 
-    def query(namekey: NameKey | None) -> str:
-        observed.append(namekey)
-        return payload
+    def query(ipc_request: QueryRequest) -> QueryResponse:
+        observed.append(ipc_request.namekey)
+        return query_response
 
     app = create_dashboard_query_app(
         query,
@@ -143,7 +158,7 @@ def test_dashboard_query_failure_exits_loudly() -> None:
     class FatalDashboardQuery(RuntimeError):
         pass
 
-    def failed_query(_namekey: NameKey | None) -> str:
+    def failed_query(_ipc_request: QueryRequest) -> QueryResponse:
         raise RuntimeError("projection failed")
 
     def fatal_exit(code: int) -> NoReturn:
@@ -192,7 +207,10 @@ def test_full_backend_ipc_forwards_run_outcome_http_exchange_exactly() -> None:
         )
 
     app = create_dashboard_query_app(
-        lambda _namekey: "{}",
+        lambda _request: QueryResponse(
+            attempts=(),
+            ai_augment_singular_outerdicts=(),
+        ),
         namekey_parameter=KTP_NAMEKEY_COL,
         query_path=DASHBOARD_QUERY_PATH,
         run_outcome_handler=run_outcome,
@@ -232,7 +250,10 @@ def test_full_backend_ipc_forwards_run_outcome_http_exchange_exactly() -> None:
 
 def test_ipc_only_flask_application_has_no_run_outcome_routes() -> None:
     app = create_dashboard_query_app(
-        lambda _namekey: "{}",
+        lambda _request: QueryResponse(
+            attempts=(),
+            ai_augment_singular_outerdicts=(),
+        ),
         namekey_parameter=KTP_NAMEKEY_COL,
         query_path=DASHBOARD_QUERY_PATH,
     )
@@ -249,14 +270,14 @@ def test_dashboard_client_queries_real_mode_0600_unix_socket(
 ) -> None:
     socket_path = tmp_path / "dashboard.sock"
     observed: list[NameKey | None] = []
-    payload = QueryResponse(
+    query_response = QueryResponse(
         attempts=(),
-        ai_augment_outerdicts=(),
-    ).model_dump_json()
+        ai_augment_singular_outerdicts=(),
+    )
 
-    def query(namekey: NameKey | None) -> str:
-        observed.append(namekey)
-        return payload
+    def query(ipc_request: QueryRequest) -> QueryResponse:
+        observed.append(ipc_request.namekey)
+        return query_response
 
     try:
         server = start_dashboard_query_server(
@@ -273,14 +294,14 @@ def test_dashboard_client_queries_real_mode_0600_unix_socket(
         assert capsys.readouterr().out == (f"Dashboard IPC running on unix://{socket_path}\n")
         client = _BackendDatabaseClient(
             socket_path=socket_path,
-            pipeline_config=AiAugmentDetourConfig.model_construct(),  # type: ignore[call-arg]
+            pipeline_config=Mock(spec=AiAugmentDetourConfig),
         )
         assert client.available() is True
         assert observed == []
         namekey = NameKey.from_json_key(TEST_NAMEKEY)
         assert client.pull(namekey) == QueryResponse(
             attempts=(),
-            ai_augment_outerdicts=(),
+            ai_augment_singular_outerdicts=(),
         )
         assert observed == [namekey]
     finally:
@@ -295,7 +316,10 @@ def test_dashboard_ipc_refuses_to_replace_non_socket_path(tmp_path: Path) -> Non
     with pytest.raises(RuntimeError, match="not a Unix socket"):
         start_dashboard_query_server(
             socket_path,
-            lambda _namekey: "{}",
+            lambda _request: QueryResponse(
+                attempts=(),
+                ai_augment_singular_outerdicts=(),
+            ),
             namekey_parameter=KTP_NAMEKEY_COL,
             query_path=DASHBOARD_QUERY_PATH,
         )

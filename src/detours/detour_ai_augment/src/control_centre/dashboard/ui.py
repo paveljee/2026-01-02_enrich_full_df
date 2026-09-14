@@ -28,9 +28,6 @@ from fastapi import status
 from nicegui import app, ui
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from src.detours.detour_ai_augment.protected.src.architecture import (
-    ControlCentreComponent,
-)
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_augment_config import (  # noqa: E501
     AiAugmentDetourConfig,
 )
@@ -44,6 +41,12 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     KTP_AI_AUGMENT_FOOTNOTE_ARGUMENTS_COL,
     KTP_AI_AUGMENT_FOOTNOTES_COL,
     AiAugmentCohort,
+)
+from src.detours.detour_ai_augment.protected.src.backend.ipc import (
+    DASHBOARD_IPC_HOST,
+    DASHBOARD_QUERY_PATH,
+    DASHBOARD_SOCKET_PATH,
+    DASHBOARD_SOCKET_PATH_ENV_NAME,
 )
 from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helpers.locale import (
     Locale,
@@ -93,7 +96,6 @@ from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helper
     TEXT_DECODE_ERROR_POLICY,
     TEXT_ENCODING,
 )
-from src.helpers.architecture import implements
 from src.helpers.cards import build_cards, card_filename, render_docx_bytes
 from src.helpers.data_models import InnerDict, NameKey
 from src.helpers.vars import (
@@ -126,8 +128,8 @@ from ...backend.helpers.data_models.ai_augment_context import (
     EXPECTED_NO_GROUND_TRUTH_RESEARCHERS,
     EXPECTED_SOURCE_RESEARCHERS,
 )
-from ...backend.helpers.data_models.ai_augment_outer_dict import (
-    AiAugmentOuterDict,
+from ...backend.helpers.data_models.ai_augment_singular_outer_dict import (
+    AiAugmentSingularOuterDict,
     CommittedInnerDict,
 )
 from ...backend.helpers.data_models.commit_event import (
@@ -142,17 +144,12 @@ from ...backend.helpers.data_models.run_outcome_response import (
     RunOutcomeResponse,
     RunOutcomeResponseBody,
 )
-from ...backend.ipc import (
-    DASHBOARD_IPC_HOST,
-    DASHBOARD_QUERY_PATH,
-    DASHBOARD_SOCKET_PATH,
-    DASHBOARD_SOCKET_PATH_ENV_NAME,
-)
 from ...backend.server import CONFIG_OPTION, DANGER_NO_VERIFY_HASH_OPTION
 from .helpers.aggrid import AgGrid
 from .helpers.data_models.ai_augment_context import (
     AiAugmentControlCentreContext,
 )
+from .helpers.data_models.query_request import QueryRequest
 from .helpers.data_models.run_event import (
     Run,
     RunEvent,
@@ -332,7 +329,7 @@ def draw_sort_key(
 
 
 def researcher_sort_key(
-    researcher: AiAugmentOuterDict,
+    researcher: AiAugmentSingularOuterDict,
 ) -> tuple[
     tuple[tuple[int, tuple[tuple[int, int | str], ...], str], ...],
     str,
@@ -457,12 +454,12 @@ class _CachedSourceData(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     fingerprint: _SourceInputFingerprint
-    ai_augment_outerdicts: tuple[dict[str, object], ...]
+    ai_augment_singular_outerdicts: tuple[dict[str, object], ...]
 
-    def outerdicts(self) -> tuple[AiAugmentOuterDict, ...]:
+    def singular_outerdicts(self) -> tuple[AiAugmentSingularOuterDict, ...]:
         return tuple(
-            AiAugmentOuterDict.from_serialized(value)
-            for value in self.ai_augment_outerdicts
+            AiAugmentSingularOuterDict.from_serialized(value)
+            for value in self.ai_augment_singular_outerdicts
         )
 
 
@@ -479,7 +476,7 @@ def source_input_fingerprint(
         source_database_ctime_ns=source_database_stat.st_ctime_ns,
         source_database_device=source_database_stat.st_dev,
         source_database_inode=source_database_stat.st_ino,
-        release_map_sha256=pipeline_config.resources.release_map.hash,
+        release_map_sha256=pipeline_config.release_map.hash,
         sample_seed=pipeline_config.sample_seed,
     )
 
@@ -488,7 +485,7 @@ def load_cached_source_data(
     pipeline_config: AiAugmentDetourConfig,
 ) -> tuple[
     _SourceInputFingerprint,
-    tuple[AiAugmentOuterDict, ...] | None,
+    tuple[AiAugmentSingularOuterDict, ...] | None,
 ]:
     fingerprint = source_input_fingerprint(pipeline_config)
     raw_cache = app.storage.general.get(SOURCE_DATA_STORAGE_KEY)
@@ -499,7 +496,7 @@ def load_cached_source_data(
     if cache.fingerprint != fingerprint:
         return fingerprint, None
     try:
-        return fingerprint, cache.outerdicts()
+        return fingerprint, cache.singular_outerdicts()
     except TypeError, ValueError, ValidationError:
         return fingerprint, None
 
@@ -507,12 +504,12 @@ def load_cached_source_data(
 def store_cached_source_data(
     *,
     fingerprint: _SourceInputFingerprint,
-    ai_augment_outerdicts: tuple[AiAugmentOuterDict, ...],
+    ai_augment_singular_outerdicts: tuple[AiAugmentSingularOuterDict, ...],
 ) -> None:
     cache = _CachedSourceData(
         fingerprint=fingerprint,
-        ai_augment_outerdicts=tuple(
-            outerdict.serialize() for outerdict in ai_augment_outerdicts
+        ai_augment_singular_outerdicts=tuple(
+            singular_outerdict.serialize() for singular_outerdict in ai_augment_singular_outerdicts
         ),
     )
     app.storage.general[SOURCE_DATA_STORAGE_KEY] = cache.model_dump(mode="json")
@@ -629,7 +626,7 @@ class _AttemptView:
 
 @dataclass(frozen=True, slots=True)
 class _ResearcherView:
-    researcher: AiAugmentOuterDict
+    researcher: AiAugmentSingularOuterDict
 
     # Oldest -> newest.
     attempts: tuple[_AttemptView, ...]
@@ -669,7 +666,7 @@ class _AttemptVariableProjection:
 
 @dataclass(frozen=True, slots=True)
 class _ResearcherGridRow:
-    researcher: AiAugmentOuterDict
+    researcher: AiAugmentSingularOuterDict
 
     # Collapsed row: latest attempt projection, or synthetic ready projection.
     latest: _AttemptVariableProjection
@@ -680,7 +677,7 @@ class _ResearcherGridRow:
 
 @dataclass(frozen=True, slots=True)
 class _ResearcherCardView:
-    researcher: AiAugmentOuterDict
+    researcher: AiAugmentSingularOuterDict
     markdown: str
 
 
@@ -737,17 +734,17 @@ class _SourceRepository:
         self._configuration = configuration
 
     @property
-    def ai_augment_outerdicts(self) -> tuple[AiAugmentOuterDict, ...]:
-        return self._configuration.ai_augment_outerdicts
+    def ai_augment_singular_outerdicts(self) -> tuple[AiAugmentSingularOuterDict, ...]:
+        return self._configuration.ai_augment_singular_outerdicts
 
     @property
     def ground_truth_by_namekey(self) -> Mapping[str, InnerDict]:
         return self.load_ground_truth_by_namekey()
 
-    def load_researchers(self) -> tuple[AiAugmentOuterDict, ...]:
+    def load_researchers(self) -> tuple[AiAugmentSingularOuterDict, ...]:
         result = tuple(
             sorted(
-                self._configuration.ai_augment_outerdicts,
+                self._configuration.ai_augment_singular_outerdicts,
                 key=researcher_sort_key,
             )
         )
@@ -759,9 +756,9 @@ class _SourceRepository:
         namekey: NameKey,
     ) -> InnerDict | None:
         matches = tuple(
-            outerdict
-            for outerdict in self._configuration.ai_augment_outerdicts
-            if outerdict.namekey == namekey
+            singular_outerdict
+            for singular_outerdict in self._configuration.ai_augment_singular_outerdicts
+            if singular_outerdict.namekey == namekey
         )
         if len(matches) != 1:
             raise RuntimeError(Locale.GROUND_TRUTH_MISSING)
@@ -771,11 +768,11 @@ class _SourceRepository:
         self,
     ) -> Mapping[str, InnerDict]:
         result: dict[str, InnerDict] = {}
-        for outerdict in self._configuration.ai_augment_outerdicts:
-            if outerdict.ai_augment_cohort is not AiAugmentCohort.GROUND_TRUTH:
+        for singular_outerdict in self._configuration.ai_augment_singular_outerdicts:
+            if singular_outerdict.ai_augment_cohort is not AiAugmentCohort.GROUND_TRUTH:
                 continue
-            namekey = outerdict.namekey
-            innerdict = outerdict.ground_truth_innerdict()
+            namekey = singular_outerdict.namekey
+            innerdict = singular_outerdict.ground_truth_innerdict()
             if innerdict is None:
                 raise RuntimeError(Locale.GROUND_TRUTH_MISSING)
             result[namekey.to_json_key()] = innerdict
@@ -783,7 +780,7 @@ class _SourceRepository:
 
     def assert_population_invariants(
         self,
-        researchers: Sequence[AiAugmentOuterDict],
+        researchers: Sequence[AiAugmentSingularOuterDict],
     ) -> None:
         namekeys = [researcher.namekey.to_json_key() for researcher in researchers]
         ground_truth_count = sum(
@@ -824,12 +821,6 @@ class _SourceRepository:
 # =============================================================================
 # Backend database IPC client
 # =============================================================================
-
-
-@implements[ControlCentreComponent.BackendPort.QueryRequestProperty]()
-@dataclass(frozen=True, slots=True)
-class QueryRequest:
-    namekey: NameKey | None
 
 
 class _UnixSocketHttpConnection(http.client.HTTPConnection):
@@ -943,11 +934,11 @@ class _BackendDatabaseClient:
         cached = self._card_cache.get(namekey_json)
         if cached is not None:
             return cached
-        outerdicts = self.pull(namekey=namekey).ai_augment_outerdicts
-        if len(outerdicts) != 1:
+        singular_outerdicts = self.pull(namekey=namekey).ai_augment_singular_outerdicts
+        if len(singular_outerdicts) != 1:
             raise RuntimeError(Locale.BACKEND_CARD_MISSING)
         cards = build_cards(
-            selected_card_outer_dict(outerdicts[0]),
+            selected_card_outer_dict(singular_outerdicts[0]),
             total_draws=self._pipeline_config.total_draws,
             intro=CARD_INTRODUCTION.format(
                 datetime.now(ZoneInfo(self._pipeline_config.timezone)).strftime(
@@ -1089,7 +1080,7 @@ class _BackendSupervisor:
     async def start(self, *, namekey: NameKey) -> None:
         if not all(
             resource.verify_hash_on_init
-            for resource in self._pipeline_config.resources.registered_resources
+            for resource in self._pipeline_config.registered_resources
         ):
             raise RuntimeError(Locale.BACKEND_RESOURCES_NOT_VERIFIED)
         if self._process is not None:
@@ -1661,7 +1652,7 @@ class _AttemptReconciler:
     def reconcile(
         self,
         *,
-        researcher: AiAugmentOuterDict,
+        researcher: AiAugmentSingularOuterDict,
         runs: Sequence[Run],
         attempt_records: Sequence[AgentRuntimeAttemptRecord],
         committed_innerdicts: Sequence[CommittedInnerDict],
@@ -1800,7 +1791,7 @@ class _AttemptReconciler:
     def reconcile_all(
         self,
         *,
-        researchers: Sequence[AiAugmentOuterDict],
+        researchers: Sequence[AiAugmentSingularOuterDict],
         runs: Mapping[UUID, Run],
         attempt_records: Mapping[str, tuple[AgentRuntimeAttemptRecord, ...]],
         committed_innerdicts: Mapping[
@@ -1857,7 +1848,7 @@ class _VariableProjector:
     def project_attempt(
         self,
         *,
-        researcher: AiAugmentOuterDict,
+        researcher: AiAugmentSingularOuterDict,
         attempt: _AttemptView,
         ground_truth: InnerDict | None,
         variable: _VariableSpec,
@@ -1919,7 +1910,7 @@ class _VariableProjector:
     def project_ready_researcher(
         self,
         *,
-        researcher: AiAugmentOuterDict,
+        researcher: AiAugmentSingularOuterDict,
         ground_truth: InnerDict | None,
         variable: _VariableSpec,
         codex_busy: bool,
@@ -2074,8 +2065,8 @@ class _ControlCentreController:
         self._idle_refresh_lock = asyncio.Lock()
         self._events: list[RunEvent] = []
         self._runs: dict[UUID, Run] = {}
-        self._researchers: tuple[AiAugmentOuterDict, ...] = ()
-        self._researchers_by_namekey: dict[str, AiAugmentOuterDict] = {}
+        self._researchers: tuple[AiAugmentSingularOuterDict, ...] = ()
+        self._researchers_by_namekey: dict[str, AiAugmentSingularOuterDict] = {}
         self._ground_truth: Mapping[str, InnerDict] = {}
         self._attempt_records: Mapping[
             str,
@@ -2368,16 +2359,16 @@ class _ControlCentreController:
             str,
             list[CommittedInnerDict],
         ] = {}
-        for returned_outerdict in snapshot.ai_augment_outerdicts:
-            namekey_json = returned_outerdict.namekey.to_json_key()
-            maintained_outerdict = self._researchers_by_namekey.get(namekey_json)
-            if maintained_outerdict is None:
+        for returned_singular_outerdict in snapshot.ai_augment_singular_outerdicts:
+            namekey_json = returned_singular_outerdict.namekey.to_json_key()
+            maintained_singular_outerdict = self._researchers_by_namekey.get(namekey_json)
+            if maintained_singular_outerdict is None:
                 raise RuntimeError(Locale.ATTEMPT_DATABASE_INCONSISTENT)
-            maintained_outerdict.committed_innerdicts = (
-                returned_outerdict.committed_innerdicts
+            maintained_singular_outerdict.committed_innerdicts = (
+                returned_singular_outerdict.committed_innerdicts
             )
             committed_innerdicts[namekey_json] = list(
-                maintained_outerdict.committed_innerdicts
+                maintained_singular_outerdict.committed_innerdicts
             )
         self._committed_innerdicts = {
             namekey: tuple(innerdicts)
@@ -3727,15 +3718,15 @@ def create_services(
 ) -> tuple[
     _ApplicationServices,
     _SourceInputFingerprint,
-    tuple[AiAugmentOuterDict, ...] | None,
+    tuple[AiAugmentSingularOuterDict, ...] | None,
 ]:
     pipeline_config = AiAugmentDetourConfig.from_json(config_path)
-    fingerprint, cached_outerdicts = load_cached_source_data(pipeline_config)
+    fingerprint, cached_singular_outerdicts = load_cached_source_data(pipeline_config)
     configuration = AiAugmentControlCentreContext(
         pipeline_config=pipeline_config,
-        cached_ai_augment_outerdicts=cached_outerdicts,
+        cached_ai_augment_singular_outerdicts=cached_singular_outerdicts,
     )
-    _ = configuration.ai_augment_outerdicts
+    _ = configuration.ai_augment_singular_outerdicts
     source_repository = _SourceRepository(configuration=configuration)
     backend = _BackendSupervisor(
         repository_root=REPOSITORY_ROOT,
@@ -3776,7 +3767,7 @@ def create_services(
         projector=projector,
         controller=controller,
     )
-    return services, fingerprint, cached_outerdicts
+    return services, fingerprint, cached_singular_outerdicts
 
 
 def require_services() -> _ApplicationServices:
@@ -3822,14 +3813,14 @@ async def application_startup() -> None:
             Locale.CONTROL_CENTRE_LOG_PREFIX,
             Locale.SOURCE_CACHE_CHECK_LOG,
         )
-        services, fingerprint, cached_outerdicts = create_services(
+        services, fingerprint, cached_singular_outerdicts = create_services(
             config_path=APPLICATION_CONFIG_PATH,
         )
         emit_log(
             Locale.CONTROL_CENTRE_LOG_PREFIX,
             (
                 Locale.SOURCE_CACHE_HIT_LOG
-                if cached_outerdicts is not None
+                if cached_singular_outerdicts is not None
                 else Locale.SOURCE_CACHE_MISS_LOG
             ),
         )
@@ -3838,11 +3829,11 @@ async def application_startup() -> None:
         except BaseException:
             await services.controller.shutdown()
             raise
-        if cached_outerdicts is None:
+        if cached_singular_outerdicts is None:
             store_cached_source_data(
                 fingerprint=fingerprint,
-                ai_augment_outerdicts=(
-                    services.source_repository.ai_augment_outerdicts
+                ai_augment_singular_outerdicts=(
+                    services.source_repository.ai_augment_singular_outerdicts
                 ),
             )
             emit_log(

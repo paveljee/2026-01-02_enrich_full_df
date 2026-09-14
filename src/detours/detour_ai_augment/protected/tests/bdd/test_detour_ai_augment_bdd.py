@@ -22,16 +22,18 @@ from fastapi import HTTPException, status
 from fastapi.responses import Response
 from nicegui import app
 from pytest_bdd import given, scenario, then, when
-
-from src.detours.detour_ai_augment.src.backend import api, ipc
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_context import (
-    AiAugmentBackendContext,
-)
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.server_event import (
     QueryResponse,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.locale import Locale as BackendLocale
 from src.detours.detour_ai_augment.src.backend.helpers.vars import AI_AUGMENT_COLUMNS
+from src.detours.detour_ai_augment.tests.operator import test_operator_e2e as operator_support
+
+from src.detours.detour_ai_augment.protected.src.backend import ipc
+from src.detours.detour_ai_augment.src.backend import api
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_context import (
+    AiAugmentBackendContext,
+)
 from src.detours.detour_ai_augment.src.control_centre.dashboard import ui as control_ui
 from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers import (
     vars as control_vars,
@@ -44,7 +46,6 @@ from src.detours.detour_ai_augment.tests.backend import (
     test_appendwatch as appendwatch_support,
 )
 from src.detours.detour_ai_augment.tests.control_centre import test_ui as dashboard_support
-from src.detours.detour_ai_augment.tests.operator import test_operator_e2e as operator_support
 from src.helpers.data_models.http_request_log import HttpRequestLogRecord
 
 FEATURE_PATH = "features/detour_ai_augment_lifecycle.feature"

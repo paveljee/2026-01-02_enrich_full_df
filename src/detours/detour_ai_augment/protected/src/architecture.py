@@ -44,24 +44,24 @@ class BackendComponent(
         @property
         def configured_namekey(self) -> NameKey | None: ...
 
-        def ai_augment_outerdicts_factory(
+        def ai_augment_singular_outerdicts_factory(
             self,
         ) -> tuple[
-            BackendComponent.ControlCentrePort.AiAugmentOuterDictProperty,
+            BackendComponent.ControlCentrePort.AiAugmentSingularOuterDictProperty,
             ...,
         ]: ...
 
         @property
-        def ai_augment_outerdicts(
+        def ai_augment_singular_outerdicts(
             self,
         ) -> tuple[
-            BackendComponent.ControlCentrePort.AiAugmentOuterDictProperty,
+            BackendComponent.ControlCentrePort.AiAugmentSingularOuterDictProperty,
             ...,
         ]: ...
 
-        def configured_ai_augment_outerdict(
+        def configured_ai_augment_singular_outerdict(
             self,
-        ) -> BackendComponent.ControlCentrePort.AiAugmentOuterDictProperty | None: ...
+        ) -> BackendComponent.ControlCentrePort.AiAugmentSingularOuterDictProperty | None: ...
 
     class LifecycleProperty(
         ComponentProtocol.PropertyProtocol,
@@ -287,7 +287,7 @@ class BackendComponent(
 
             def serialize(self) -> dict[str, object]: ...
 
-        class AiAugmentOuterDictProperty(
+        class AiAugmentSingularOuterDictProperty(
             ComponentProtocol.PortProtocol.PropertyProtocol,
             Protocol,
         ):
@@ -322,7 +322,7 @@ class BackendComponent(
                 self,
             ) -> AiAugmentIneligibilityCategory | None: ...
 
-            def validate_ai_augment_outerdict(self) -> Self: ...
+            def validate_ai_augment_singular_outerdict(self) -> Self: ...
 
             def ground_truth_innerdict(self) -> InnerDict | None: ...
 
@@ -400,10 +400,10 @@ class BackendComponent(
             ]: ...
 
             @property
-            def ai_augment_outerdicts(
+            def ai_augment_singular_outerdicts(
                 self,
             ) -> tuple[
-                BackendComponent.ControlCentrePort.AiAugmentOuterDictProperty,
+                BackendComponent.ControlCentrePort.AiAugmentSingularOuterDictProperty,
                 ...,
             ]: ...
 

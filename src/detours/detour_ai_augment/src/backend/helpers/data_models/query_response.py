@@ -20,16 +20,16 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.pyd
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.submission_init import (  # noqa: E501
     Submission,
 )
-from src.helpers.architecture import implements
+from src.helpers.architecture import FrozenStrictModel, implements
 from src.helpers.data_models import HttpRequestLogRecord, InnerDict, MatchingProcedure
 
 from ....control_centre.dashboard.helpers.data_models.run_outcome import (
     NAME_KEY_HEADER,
     name_key_from_header_value,
 )
-from .ai_augment_outer_dict import (
-    AiAugmentOuterDict,
-    _AiAugmentOuterDictJson,
+from .ai_augment_singular_outer_dict import (
+    AiAugmentSingularOuterDict,
+    _AiAugmentSingularOuterDictJson,
     _BackendCommitRecordJson,
 )
 from .commit_event import BackendCommitRecord, PostCommitValidation
@@ -37,17 +37,13 @@ from .run_outcome_response import RunOutcomeResponse
 
 
 @implements[AgentRuntimeComponent.AttemptProperty]()
-class AgentRuntimeAttempt(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
+class AgentRuntimeAttempt(FrozenStrictModel):
     pull_record: HttpRequestLogRecord
     commit_record: BackendCommitRecord
     post_commit_validation: PostCommitValidation
 
 
-class _AgentRuntimeAttemptJson(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
+class _AgentRuntimeAttemptJson(FrozenStrictModel):
     pull_record: HttpRequestLogRecord
     commit_record: _BackendCommitRecordJson
     post_commit_validation: PostCommitValidation
@@ -70,9 +66,7 @@ class _AgentRuntimeAttemptJson(BaseModel):
         )
 
 
-class _AgentRuntimeAttemptRecordJson(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
+class _AgentRuntimeAttemptRecordJson(FrozenStrictModel):
     attempt: _AgentRuntimeAttemptJson
     submission: Submission | StandardizedSubmission | None
     ground_truth_innerdict: dict[str, Any] | None
@@ -151,20 +145,16 @@ class AgentRuntimeAttemptRecord(BaseModel):
         return self.serialize()
 
 
-class _QueryResponseJson(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
+class _QueryResponseJson(FrozenStrictModel):
     attempts: tuple[_AgentRuntimeAttemptRecordJson, ...]
-    ai_augment_outerdicts: tuple[_AiAugmentOuterDictJson, ...]
+    ai_augment_singular_outerdicts: tuple[_AiAugmentSingularOuterDictJson, ...]
     run_outcome_records: tuple[HttpRequestLogRecord, ...]
 
 
 @implements[BackendComponent.ControlCentrePort.QueryResponseProperty]()
-class QueryResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
+class QueryResponse(FrozenStrictModel):
     attempts: tuple[AgentRuntimeAttemptRecord, ...]
-    ai_augment_outerdicts: tuple[AiAugmentOuterDict, ...]
+    ai_augment_singular_outerdicts: tuple[AiAugmentSingularOuterDict, ...]
     run_outcome_records: tuple[RunOutcomeResponse, ...] = ()
 
     @classmethod
@@ -173,13 +163,13 @@ class QueryResponse(BaseModel):
         value: str | bytes,
     ) -> Self:
         serialized = _QueryResponseJson.model_validate_json(value)
-        ai_augment_outerdicts = tuple(
-            AiAugmentOuterDict.from_serialized(outerdict.model_dump(mode="json"))
-            for outerdict in serialized.ai_augment_outerdicts
+        ai_augment_singular_outerdicts = tuple(
+            AiAugmentSingularOuterDict.from_serialized(singular_outerdict.model_dump(mode="json"))
+            for singular_outerdict in serialized.ai_augment_singular_outerdicts
         )
-        outerdict_by_namekey = {
-            outerdict.namekey.to_json_key(): outerdict
-            for outerdict in ai_augment_outerdicts
+        singular_outerdict_by_namekey = {
+            singular_outerdict.namekey.to_json_key(): singular_outerdict
+            for singular_outerdict in ai_augment_singular_outerdicts
         }
         attempts: list[AgentRuntimeAttemptRecord] = []
         for attempt in serialized.attempts:
@@ -190,12 +180,12 @@ class QueryResponse(BaseModel):
                         NAME_KEY_HEADER
                     )
                 )
-                outerdict = outerdict_by_namekey.get(namekey.to_json_key())
-                if outerdict is None or not outerdict.docx_innerdicts:
+                singular_outerdict = singular_outerdict_by_namekey.get(namekey.to_json_key())
+                if singular_outerdict is None or not singular_outerdict.docx_innerdicts:
                     raise ValueError(
                         "ground-truth originating DOCX innerdict is missing"
                     )
-                procedure = outerdict.docx_innerdicts[0].procedure
+                procedure = singular_outerdict.docx_innerdicts[0].procedure
             attempts.append(
                 AgentRuntimeAttemptRecord.from_serialized_json(
                     attempt.model_dump_json(by_alias=True),
@@ -204,7 +194,7 @@ class QueryResponse(BaseModel):
             )
         return cls(
             attempts=tuple(attempts),
-            ai_augment_outerdicts=ai_augment_outerdicts,
+            ai_augment_singular_outerdicts=ai_augment_singular_outerdicts,
             run_outcome_records=tuple(
                 RunOutcomeResponse.from_http_request_log_record(record)
                 for record in serialized.run_outcome_records
@@ -217,9 +207,9 @@ class QueryResponse(BaseModel):
                 _AgentRuntimeAttemptRecordJson.from_attempt_record(attempt)
                 for attempt in self.attempts
             ),
-            ai_augment_outerdicts=tuple(
-                _AiAugmentOuterDictJson.from_ai_augment_outerdict(outerdict)
-                for outerdict in self.ai_augment_outerdicts
+            ai_augment_singular_outerdicts=tuple(
+                _AiAugmentSingularOuterDictJson.from_ai_augment_singular_outerdict(singular_outerdict)
+                for singular_outerdict in self.ai_augment_singular_outerdicts
             ),
             run_outcome_records=tuple(
                 record.http_request_log_record

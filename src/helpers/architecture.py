@@ -1,5 +1,9 @@
 from typing import TypeVar
 
+
+from pydantic import BaseModel, ConfigDict
+
+
 # Reusable generic type variable
 T = TypeVar("T")
 
@@ -46,3 +50,18 @@ class implements[Proto]:
 
     def __call__(self, cls: type[Proto]) -> type[Proto]:
         return cls
+
+class FrozenStrictModel(BaseModel):
+    """
+    Hardened drop-in replacement for Pydantic `BaseModel`:
+    
+    - `extra="forbid"` -> reject unknown fields;
+    - `frozen=True` -> instances are immutable after creation;
+    - `strict=True` -> avoid automatic type coercion.
+    """
+
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+        strict=True,
+    )

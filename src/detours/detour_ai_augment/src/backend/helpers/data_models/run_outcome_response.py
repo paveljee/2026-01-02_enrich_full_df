@@ -4,18 +4,12 @@ from collections.abc import Mapping
 from typing import Self
 from uuid import UUID
 
-from pydantic import (
-    BaseModel,
-    ConfigDict,
-    Field,
-    model_serializer,
-    model_validator,
-)
+from pydantic import Field, model_serializer, model_validator
 
 from src.detours.detour_ai_augment.protected.src.architecture import (
     BackendComponent,
 )
-from src.helpers.architecture import implements
+from src.helpers.architecture import FrozenStrictModel, implements
 from src.helpers.data_models import HttpRequestLogRecord
 
 from ....control_centre.dashboard.helpers.data_models.run_outcome import (
@@ -31,18 +25,14 @@ from .commit_event import (
 )
 
 
-class _RunOutcomeResponseBodyJson(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
+class _RunOutcomeResponseBodyJson(FrozenStrictModel):
     pull_record_id: UUID | None
     push_record_id: UUID | None
     codex_session_record: _CodexSessionRecordJson
 
 
 @implements[BackendComponent.ControlCentrePort.RunOutcomeResponseBodyProperty]()
-class RunOutcomeResponseBody(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
+class RunOutcomeResponseBody(FrozenStrictModel):
     pull_record_id: UUID | None
     push_record_id: UUID | None
     codex_session_record: CodexSessionRecord

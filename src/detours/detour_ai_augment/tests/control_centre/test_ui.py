@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import Mock
 from urllib import request as urllib_request
 from uuid import UUID, uuid7
 from zoneinfo import ZoneInfo
@@ -15,6 +16,7 @@ import pytest
 from fastapi import status
 from nicegui import app, ui
 
+from src.detours.detour_ai_augment.protected.src.backend import ipc
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_augment_config import (  # noqa: E501
     AiAugmentDetourConfig,
 )
@@ -40,12 +42,12 @@ from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helper
 from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helpers.locale import (
     Locale,
 )
-from src.detours.detour_ai_augment.src.backend import api, ipc
+from src.detours.detour_ai_augment.src.backend import api
 from src.detours.detour_ai_augment.src.backend.helpers.data_models import (
     ai_augment_context as backend_context_models,
 )
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_outer_dict import (
-    AiAugmentOuterDict,
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_singular_outer_dict import (  # noqa: E501
+    AiAugmentSingularOuterDict,
     CommittedInnerDict,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.commit_event import (
@@ -101,15 +103,13 @@ ROLLOUT_PATH = PurePosixPath(
 
 
 def configured_pipeline_config() -> AiAugmentDetourConfig:
-    return AiAugmentDetourConfig.model_construct(  # type: ignore[call-arg]
-        total_draws=1,
-        timezone="UTC",
-        resources=SimpleNamespace(  # type: ignore[arg-type]
-            registered_resources=(
-                SimpleNamespace(verify_hash_on_init=True),
-            )
-        ),
+    pipeline_config = Mock(spec=AiAugmentDetourConfig)
+    pipeline_config.total_draws = 1
+    pipeline_config.timezone = "UTC"
+    pipeline_config.registered_resources = (
+        SimpleNamespace(verify_hash_on_init=True),
     )
+    return pipeline_config
 
 
 def http_record(
@@ -297,7 +297,7 @@ def researcher(
     *,
     cohort: AiAugmentCohort = AiAugmentCohort.NO_GROUND_TRUTH,
     ineligibility_category: AiAugmentIneligibilityCategory | None = None,
-) -> AiAugmentOuterDict:
+) -> AiAugmentSingularOuterDict:
     xlsx_innerdict = InnerDict.from_mapping(
         {
             KTP_NAMEKEY_COL: namekey.to_json_key(),
@@ -321,7 +321,7 @@ def researcher(
                 DocxMatchProcedure(),
             ),
         )
-    return AiAugmentOuterDict(
+    return AiAugmentSingularOuterDict(
         namekey=namekey,
         xlsx_innerdicts=(xlsx_innerdict,),
         ssn_innerdicts=(),
@@ -332,7 +332,7 @@ def researcher(
     )
 
 
-def cached_source_population_row() -> AiAugmentOuterDict:
+def cached_source_population_row() -> AiAugmentSingularOuterDict:
     return researcher(cohort=AiAugmentCohort.GROUND_TRUTH)
 
 
@@ -370,7 +370,7 @@ class FakeSourceRepository:
     def __init__(self) -> None:
         self.researchers = (researcher(),)
 
-    def load_researchers(self) -> tuple[AiAugmentOuterDict, ...]:
+    def load_researchers(self) -> tuple[AiAugmentSingularOuterDict, ...]:
         return self.researchers
 
     def load_ground_truth_by_namekey(
@@ -394,7 +394,7 @@ class FakeBackendDatabase:
         self.ipc_available = available
         self.response = QueryResponse(
             attempts=(),
-            ai_augment_outerdicts=(),
+            ai_augment_singular_outerdicts=(),
         )
 
     def pull(self) -> QueryResponse:
@@ -652,14 +652,11 @@ def test_dashboard_context_prepares_source_population_from_read_only_database(
         encoding="utf-8",
     )
     source_db_path = tmp_path / "source.duckdb"
-    pipeline_config = AiAugmentDetourConfig.model_construct(  # type: ignore[call-arg]
-        db_file=source_db_path,
-        sample_seed=42,
-        timezone="UTC",
-        resources=SimpleNamespace(  # type: ignore[arg-type]
-            release_map=Path("/release-map.csv")
-        ),
-    )
+    pipeline_config = Mock(spec=AiAugmentDetourConfig)
+    pipeline_config.db_file = source_db_path
+    pipeline_config.sample_seed = 42
+    pipeline_config.timezone = "UTC"
+    pipeline_config.release_map = Path("/release-map.csv")
     source_population = (researcher(),)
     connection = SimpleNamespace(close=lambda: None)
     calls: list[tuple[str, bool]] = []
@@ -686,14 +683,14 @@ def test_dashboard_context_prepares_source_population_from_read_only_database(
         "_load_release_batches",
         lambda _release_map: "release-batches",
     )
-    monkeypatch.setattr(backend_context_models, "_derive_ai_augment_outerdicts", derive)
+    monkeypatch.setattr(backend_context_models, "_derive_ai_augment_singular_outerdicts", derive)
     monkeypatch.setattr(duckdb, "connect", connect)
 
     context = context_models.AiAugmentControlCentreContext.model_construct(
         pipeline_config=pipeline_config
     )
 
-    assert context.ai_augment_outerdicts is source_population
+    assert context.ai_augment_singular_outerdicts is source_population
     assert calls == [(str(source_db_path), True)]
 
 
@@ -707,10 +704,9 @@ def test_dashboard_context_accepts_cached_population_without_opening_source_data
         '"/home/ai/.aivm-control/appendwatch/appendwatch-tree.txt"},"mounts":[]}',
         encoding="utf-8",
     )
-    pipeline_config = AiAugmentDetourConfig.model_construct(  # type: ignore[call-arg]
-        db_file=tmp_path / "source.duckdb",
-        timezone="UTC",
-    )
+    pipeline_config = Mock(spec=AiAugmentDetourConfig)
+    pipeline_config.db_file = tmp_path / "source.duckdb"
+    pipeline_config.timezone = "UTC"
     source_population = (cached_source_population_row(),)
 
     monkeypatch.setenv(EXPORT_OPENALEX_API_KEY, "host-openalex-key")
@@ -725,10 +721,10 @@ def test_dashboard_context_accepts_cached_population_without_opening_source_data
 
     context = context_models.AiAugmentControlCentreContext.model_construct(
         pipeline_config=pipeline_config,
-        cached_ai_augment_outerdicts=source_population,
+        cached_ai_augment_singular_outerdicts=source_population,
     )
 
-    assert context.ai_augment_outerdicts == source_population
+    assert context.ai_augment_singular_outerdicts == source_population
 
 
 def test_cached_source_data_round_trips_and_rejects_a_stale_fingerprint(
@@ -739,7 +735,7 @@ def test_cached_source_data_round_trips_and_rejects_a_stale_fingerprint(
     source_population = (cached_source_population_row(),)
     control_ui.store_cached_source_data(
         fingerprint=fingerprint,
-        ai_augment_outerdicts=source_population,
+        ai_augment_singular_outerdicts=source_population,
     )
     monkeypatch.setattr(
         control_ui,
@@ -747,7 +743,7 @@ def test_cached_source_data_round_trips_and_rejects_a_stale_fingerprint(
         lambda _config: fingerprint,
     )
 
-    pipeline_config = AiAugmentDetourConfig.model_construct()  # type: ignore[call-arg]
+    pipeline_config = Mock(spec=AiAugmentDetourConfig)
     observed_fingerprint, cached = control_ui.load_cached_source_data(pipeline_config)
 
     assert observed_fingerprint == fingerprint
@@ -775,13 +771,10 @@ def test_source_input_fingerprint_stats_database_without_reading_it(
 ) -> None:
     source_database = tmp_path / "source.duckdb"
     source_database.write_bytes(b"source")
-    pipeline_config = AiAugmentDetourConfig.model_construct(  # type: ignore[call-arg]
-        db_file=source_database,
-        sample_seed=42,
-        resources=SimpleNamespace(  # type: ignore[arg-type]
-            release_map=SimpleNamespace(hash="a" * 64),
-        ),
-    )
+    pipeline_config = Mock(spec=AiAugmentDetourConfig)
+    pipeline_config.db_file = source_database
+    pipeline_config.sample_seed = 42
+    pipeline_config.release_map = SimpleNamespace(hash="a" * 64)
     monkeypatch.setattr(
         Path,
         "open",
@@ -807,8 +800,8 @@ def test_source_repository_uses_cached_ground_truth_without_opening_database(
     ground_truth = source_population[0].ground_truth_innerdict()
     assert ground_truth is not None
     configuration = context_models.AiAugmentControlCentreContext.model_construct(
-        pipeline_config=AiAugmentDetourConfig.model_construct(),  # type: ignore[call-arg]
-        cached_ai_augment_outerdicts=source_population,
+        pipeline_config=Mock(spec=AiAugmentDetourConfig),
+        cached_ai_augment_singular_outerdicts=source_population,
     )
     subject = control_ui._SourceRepository(
         configuration=configuration,
@@ -832,7 +825,7 @@ async def test_dashboard_start_prepares_population_and_ground_truth_before_worke
     order: list[str] = []
 
     class ObservedSourceRepository(FakeSourceRepository):
-        def load_researchers(self) -> tuple[AiAugmentOuterDict, ...]:
+        def load_researchers(self) -> tuple[AiAugmentSingularOuterDict, ...]:
             order.append("source-population")
             return (source,)
 
@@ -906,7 +899,7 @@ async def test_application_startup_publishes_cached_services_only_after_ready(
         SimpleNamespace(
             controller=FakeController(),
             source_repository=SimpleNamespace(
-                ai_augment_outerdicts=source_population,
+                ai_augment_singular_outerdicts=source_population,
             ),
         ),
     )
@@ -919,7 +912,7 @@ async def test_application_startup_publishes_cached_services_only_after_ready(
     ) -> tuple[
         control_ui._ApplicationServices,
         control_ui._SourceInputFingerprint,
-        tuple[AiAugmentOuterDict, ...],
+        tuple[AiAugmentSingularOuterDict, ...],
     ]:
         assert config_path == tmp_path / "config.json"
         order.append("services-created")
@@ -965,7 +958,7 @@ async def test_application_startup_updates_source_cache_before_publishing_servic
         SimpleNamespace(
             controller=FakeController(),
             source_repository=SimpleNamespace(
-                ai_augment_outerdicts=source_population,
+                ai_augment_singular_outerdicts=source_population,
             ),
         ),
     )
@@ -981,7 +974,7 @@ async def test_application_startup_updates_source_cache_before_publishing_servic
         assert control_ui.SERVICES is None
         assert kwargs == {
             "fingerprint": fingerprint,
-            "ai_augment_outerdicts": source_population,
+            "ai_augment_singular_outerdicts": source_population,
         }
         order.append("cache-updated")
 
@@ -1104,7 +1097,7 @@ async def test_page_shows_backend_and_ipc_separately_and_gates_refresh() -> None
                     ready=0,
                     queued=0,
                     running=0,
-                    complete=0,
+                    completed=0,
                     failed=0,
                     cancelled=0,
                 ),
@@ -1163,7 +1156,7 @@ async def test_dashboard_refresh_explicitly_hydrates_attempts_from_ipc(
     attempt = agent_runtime_attempt()
     backend_database.response = QueryResponse(
         attempts=(attempt,),
-        ai_augment_outerdicts=(),
+        ai_augment_singular_outerdicts=(),
     )
     subject = controller(backend_database=backend_database)
 
@@ -1234,7 +1227,7 @@ async def test_dashboard_start_restores_refreshed_backend_data_without_querying(
     attempt = agent_runtime_attempt()
     app.storage.general[control_ui.BACKEND_DATABASE_STORAGE_KEY] = QueryResponse(
         attempts=(attempt,),
-        ai_augment_outerdicts=(),
+        ai_augment_singular_outerdicts=(),
     ).model_dump(mode="json")
     backend_database = FakeBackendDatabase()
     subject = controller(backend_database=backend_database)
@@ -1287,7 +1280,7 @@ def test_backend_database_client_queries_unix_socket_without_authentication(
     response_body = (
         QueryResponse(
             attempts=(),
-            ai_augment_outerdicts=(),
+            ai_augment_singular_outerdicts=(),
         )
         .model_dump_json()
         .encode()
@@ -1328,7 +1321,7 @@ def test_backend_database_client_queries_unix_socket_without_authentication(
 
     assert response == QueryResponse(
         attempts=(),
-        ai_augment_outerdicts=(),
+        ai_augment_singular_outerdicts=(),
     )
     assert calls == [
         (
@@ -2078,7 +2071,7 @@ async def test_backend_acceptance_remains_running_until_codex_exits(
     subject._committed_innerdicts = {NAMEKEY.to_json_key(): (accepted,)}
     backend_database.response = QueryResponse(
         attempts=(accepted_attempt,),
-        ai_augment_outerdicts=(source,),
+        ai_augment_singular_outerdicts=(source,),
     )
 
     async def preserve_backend_snapshot() -> None:
@@ -2115,7 +2108,7 @@ async def test_backend_acceptance_remains_running_until_codex_exits(
     running = await subject.snapshot(selection=control_ui._UiSelection(variable_key=variable.key))
 
     assert running.counts.running == 1
-    assert running.counts.complete == 0
+    assert running.counts.completed == 0
     assert len(running.rows) == 1
     assert running.rows[0].latest.attempt_lifecycle is RunLifecycle.RUNNING
     assert running.rows[0].latest.ai_value is None
@@ -2125,7 +2118,7 @@ async def test_backend_acceptance_remains_running_until_codex_exits(
     completed = await subject.snapshot(selection=control_ui._UiSelection(variable_key=variable.key))
 
     assert completed.counts.running == 0
-    assert completed.counts.complete == 1
+    assert completed.counts.completed == 1
     assert completed.rows[0].latest.attempt_lifecycle is RunLifecycle.COMPLETED
     assert completed.rows[0].latest.ai_value == accepted_value
     assert [event.lifecycle for event in subject._events][-3:] == [

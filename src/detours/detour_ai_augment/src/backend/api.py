@@ -16,13 +16,13 @@ import tempfile
 import threading
 import time
 from collections.abc import AsyncGenerator, Iterator, Mapping, Sequence
-from contextlib import asynccontextmanager, contextmanager, suppress
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from random import Random
 from typing import Any, Callable, Literal, Self, TextIO, get_args
-from uuid import UUID, uuid7
+from uuid import UUID
 from zoneinfo import ZoneInfo
 
 import duckdb
@@ -40,9 +40,6 @@ from starlette.datastructures import Headers
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from src.detours.detour_ai_augment.protected.src.backend.helpers import codex_parse
-from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_augment_config import (  # noqa: E501
-    AiAugmentDetourConfig,
-)
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.pydantic_to_paste import (  # noqa: E501
     MAX_PUSH_BODY_BYTES,
     AcademicPositionsSubmission,
@@ -80,7 +77,6 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     AI_AUGMENT_EVIDENCE_COLUMNS,
     AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS,
     AI_AUGMENT_STANDARDIZED_COLUMNS,
-    CONFIG_FILENAME,
     DOCX_COLUMNS,
     KTP_AI_AUGMENT_ACADEMIC_POSITIONS_COL,
     KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL,
@@ -110,7 +106,6 @@ from src.helpers.data_models import (
 from src.helpers.data_models.http_request_log import (
     HttpRequestLogRecord,
 )
-from src.helpers.duckdb_extensions import load_duckdb_extension
 from src.helpers.duckdb_utils import (
     duckdb_quote_identifier,
     materialize_innerdicts_from_rows_table,
@@ -141,8 +136,8 @@ from ..control_centre.dashboard.helpers.data_models.run_outcome import (
 from .helpers.data_models.ai_augment_context import (
     AiAugmentBackendContext,
 )
-from .helpers.data_models.ai_augment_outer_dict import (
-    AiAugmentOuterDict,
+from .helpers.data_models.ai_augment_singular_outer_dict import (
+    AiAugmentSingularOuterDict,
     CommittedInnerDict,
 )
 from .helpers.data_models.commit_event import (
@@ -162,11 +157,6 @@ from .helpers.data_models.commit_event import (
 from .helpers.data_models.query_response import (
     AgentRuntimeAttempt,
     AgentRuntimeAttemptRecord,
-    QueryResponse,
-)
-from .helpers.data_models.run_outcome_response import (
-    RunOutcomeResponse,
-    RunOutcomeResponseBody,
 )
 
 logger = logging.getLogger(__name__)
@@ -214,7 +204,6 @@ FORBIDDEN_NORMALIZED_PATH_PARTS = frozenset({"", ".", ".."})
 
 COMPACT_JSON_SEPARATORS = (",", ":")
 ARCHIVE_HASH_CHUNK_BYTES = 1024 * 1024
-AUDIT_COPY_TIMEOUT_SECONDS = 60
 SSH_TIMEOUT_SECONDS = 60
 MIN_TCP_PORT = 1
 MAX_TCP_PORT = 65_535
@@ -345,8 +334,6 @@ PYDANTIC_ERROR_LOCATION_KEY = "loc"
 PYDANTIC_ERROR_TYPE_KEY = "type"
 PYDANTIC_ERROR_INPUT_KEY = "input"
 PYDANTIC_MISSING_ERROR_TYPE = "missing"
-ROLLOUT_CAS_TEMP_FILENAME_TEMPLATE = ".{nonce}.tmp"
-ROLLOUT_CAS_FILENAME_TEMPLATE = "{sha256}.jsonl"
 HTTP_ETAG_HEADER = "ETag"
 HTTP_ETAG_SHA256_TEMPLATE = '"sha256:{sha256}"'
 HTTP_ETAG_SHA256_PREFIX = '"sha256:'
@@ -410,15 +397,7 @@ MARKDOWN_MEDIA_TYPE = "text/markdown"
 
 DRAW_VALUE_SEPARATOR = ", "
 
-DETOUR_DB_LOCK = threading.Lock()
-DETOUR_DB_CONNECTION: duckdb.DuckDBPyConnection | None = None
-DETOUR_DB_CONNECTION_PATH: Path | None = None
-AUTHORITATIVE_APPEND_LOCK = threading.Lock()
-AUTHORITATIVE_BACKEND_HEALTHY = True
 BACKEND_PROCESS_LOCK_DESCRIPTOR: int | None = None
-AUTHORITATIVE_LOG_DESCRIPTOR: int | None = None
-AUTHORITATIVE_NEXT_LINE_NUMBER = 1
-AUTHORITATIVE_LOG_OFFSET = 0
 AUTHORITATIVE_BACKGROUND_TASKS: set[asyncio.Task[None]] = set()
 BACKEND_WORKFLOW_STATE_LOCK = threading.Lock()
 BACKEND_LIFECYCLE = BackendLifecycle.READY
@@ -487,7 +466,6 @@ CODEX_EVIDENCE_ASSESSMENT_COL = "assessment"
 CODEX_EVIDENCE_APPLIED_COL = "applied"
 CODEX_EVIDENCE_ACCEPTED_COL = "accepted"
 CODEX_EVIDENCE_AUDIT_ID_COL = "id"
-CODEX_TOKEN_EXTENSION = "splink_udfs"
 CREATE_AUTHORITATIVE_PROJECTION_TABLE_SQL = (
     f"CREATE TABLE IF NOT EXISTS {AUTHORITATIVE_PROJECTION_TABLE} ("
     f"{AUTHORITATIVE_PROJECTION_ID_COLUMN} INTEGER PRIMARY KEY, "
@@ -601,11 +579,32 @@ MEDIA_TYPE_WITH_CHARSET = f"{MEDIA_TYPE}; charset=utf-8"
 
 
 @asynccontextmanager
-async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
+async def lifespan(
+    _app: FastAPI,
+    runtime: AiAugmentBackendContext,
+) -> AsyncGenerator[None, None]:
+    def project_record(
+        *,
+        conn: duckdb.DuckDBPyConnection,
+        record: HttpRequestLogRecord,
+        line_number: int,
+        byte_offset: int,
+        line_sha256: str,
+        materialize_files: bool,
+    ) -> AgentRuntimeAttemptRecord | None:
+        return _project_readme_record(
+            conn,
+            runtime,
+            record,
+            line_number=line_number,
+            byte_offset=byte_offset,
+            line_sha256=line_sha256,
+            materialize_files=materialize_files,
+        )
+
     parent_watch: asyncio.Task[None] | None = None
     acquired_backend_process_lock = False
     try:
-        runtime = runtime_configuration()
         with BACKEND_WORKFLOW_STATE_LOCK:
             global BACKEND_CURRENT_PULL_RECORD
             global BACKEND_LATEST_PUSH_RECORD
@@ -622,36 +621,30 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
         if BACKEND_PROCESS_LOCK_DESCRIPTOR is None:
             _acquire_backend_process_lock()
             acquired_backend_process_lock = True
-        _acquire_authoritative_process_lock(runtime)
-        prove_workflow_inputs_readable()
-        synchronize_authoritative_projection(runtime)
-        start_backend_session_reader()
-        parent_pid = os.environ.get(CONTROL_PARENT_PID_ENV_NAME)
-        if parent_pid is not None:
-            if not parent_pid.isdecimal() or int(parent_pid) <= 0:
-                raise _PushConfigurationError(Locale.CONTROL_PARENT_PID_INVALID)
-            parent_watch = asyncio.create_task(_watch_control_parent(int(parent_pid)))
+        with runtime.pipeline_config.backend_store.writable(project_record):
+            prove_workflow_inputs_readable()
+            start_backend_session_reader()
+            parent_pid = os.environ.get(CONTROL_PARENT_PID_ENV_NAME)
+            if parent_pid is not None:
+                if not parent_pid.isdecimal() or int(parent_pid) <= 0:
+                    raise _PushConfigurationError(Locale.CONTROL_PARENT_PID_INVALID)
+                parent_watch = asyncio.create_task(_watch_control_parent(int(parent_pid)))
+            try:
+                yield
+            finally:
+                if AUTHORITATIVE_BACKGROUND_TASKS:
+                    await asyncio.gather(
+                        *tuple(AUTHORITATIVE_BACKGROUND_TASKS),
+                        return_exceptions=True,
+                    )
+                if parent_watch is not None:
+                    parent_watch.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await parent_watch
     except Exception as exc:
-        logger.error(Locale.API_STARTUP_FAILED_LOG, exc)
-        close_backend_detour_database()
-        _release_authoritative_process_lock()
-        if acquired_backend_process_lock:
-            _release_backend_process_lock()
+        logger.error(Locale.API_LIFESPAN_FAILED_LOG, exc)
         raise
-    try:
-        yield
     finally:
-        if AUTHORITATIVE_BACKGROUND_TASKS:
-            await asyncio.gather(
-                *tuple(AUTHORITATIVE_BACKGROUND_TASKS),
-                return_exceptions=True,
-            )
-        if parent_watch is not None:
-            parent_watch.cancel()
-            with suppress(asyncio.CancelledError):
-                await parent_watch
-        close_backend_detour_database()
-        _release_authoritative_process_lock()
         if acquired_backend_process_lock:
             _release_backend_process_lock()
 
@@ -1009,7 +1002,6 @@ class _CodexMatchProcedure:
 
 
 ValidatedEvidence = dict[str, list[_EvidenceMatch]]
-RUNTIME_CONFIGURATION: AiAugmentBackendContext | None = None
 
 
 def _has_control_character(value: str) -> bool:
@@ -1060,12 +1052,16 @@ def _seed_evidence_random(sample_seed: int) -> None:
     EVIDENCE_RANDOM.seed(sample_seed)
 
 
-def _configured_ai_augment_outerdict(
+def _configured_ai_augment_singular_outerdict(
     configured_namekey: NameKey,
-    outerdicts: Sequence[AiAugmentOuterDict],
-) -> AiAugmentOuterDict:
+    singular_outerdicts: Sequence[AiAugmentSingularOuterDict],
+) -> AiAugmentSingularOuterDict:
     configured = next(
-        (outerdict for outerdict in outerdicts if outerdict.namekey == configured_namekey),
+        (
+            singular_outerdict
+            for singular_outerdict in singular_outerdicts
+            if singular_outerdict.namekey == configured_namekey
+        ),
         None,
     )
     if configured is not None:
@@ -1083,11 +1079,11 @@ def _configured_ai_augment_outerdict(
         configured_namekey.last_name.strip(),
     )
     suggestions = sorted({
-        outerdict.namekey.to_json_key()
-        for outerdict in outerdicts
+        singular_outerdict.namekey.to_json_key()
+        for singular_outerdict in singular_outerdicts
         if (
-            outerdict.namekey.first_name.strip(),
-            outerdict.namekey.last_name.strip(),
+            singular_outerdict.namekey.first_name.strip(),
+            singular_outerdict.namekey.last_name.strip(),
         )
         == stripped_identity
     })
@@ -1111,71 +1107,6 @@ def _configured_namekey() -> NameKey:
         return NameKey.from_json_key(raw_namekey)
     except (ValueError, TypeError, json.JSONDecodeError) as exc:
         raise _PushConfigurationError(Locale.CONFIGURED_NAMEKEY_MALFORMED) from exc
-
-
-def configure_runtime(
-    config_path: Path,
-    *,
-    require_namekey: bool = True,
-    verify_hash_on_init: bool = True,
-) -> AiAugmentBackendContext:
-    global RUNTIME_CONFIGURATION
-
-    try:
-        pipeline = AiAugmentDetourConfig.from_json(
-            config_path,
-            verify_hash_on_init=verify_hash_on_init,
-        )
-    except (OSError, ValueError) as exc:
-        raise _PushConfigurationError(
-            Locale.CONFIG_INVALID_TEMPLATE.format(config_path=config_path)
-        ) from exc
-    if pipeline.output_format not in SUPPORTED_OUTPUT_FORMATS:
-        raise _PushConfigurationError(Locale.OUTPUT_FORMAT_INVALID)
-    if not pipeline.db_file.is_file() or not os.access(pipeline.db_file, os.R_OK):
-        raise _PushConfigurationError(
-            Locale.SOURCE_DUCKDB_UNREADABLE_TEMPLATE.format(db_file=pipeline.db_file)
-        )
-    if pipeline.output_format == DOCX_OUTPUT_FORMAT and (
-        not pipeline.pandoc_reference_docx.is_file()
-        or not os.access(pipeline.pandoc_reference_docx, os.R_OK)
-    ):
-        raise _PushConfigurationError(Locale.DOCX_REFERENCE_UNREADABLE)
-    try:
-        ZoneInfo(pipeline.timezone)
-    except (KeyError, ValueError) as exc:
-        raise _PushConfigurationError(
-            Locale.TIMEZONE_INVALID_TEMPLATE.format(timezone=pipeline.timezone)
-        ) from exc
-
-    configured_namekey = _configured_namekey() if require_namekey else None
-
-    runtime = AiAugmentBackendContext(
-        pipeline_config=pipeline,
-        configured_namekey=configured_namekey,
-    )
-    try:
-        ai_augment_outerdicts = runtime.ai_augment_outerdicts
-        if configured_namekey is not None:
-            _configured_ai_augment_outerdict(
-                configured_namekey,
-                ai_augment_outerdicts,
-            )
-    except ValueError as exc:
-        raise _PushConfigurationError(str(exc)) from exc
-
-    if pipeline.detour_db_path == pipeline.db_file:
-        raise _PushConfigurationError(Locale.DETOUR_DB_EQUALS_SOURCE)
-    RUNTIME_CONFIGURATION = runtime
-    return RUNTIME_CONFIGURATION
-
-
-def runtime_configuration() -> AiAugmentBackendContext:
-    if RUNTIME_CONFIGURATION is None:
-        raise _PushConfigurationError(
-            Locale.API_CONFIG_REQUIRED_TEMPLATE.format(config_filename=CONFIG_FILENAME)
-        )
-    return RUNTIME_CONFIGURATION
 
 
 def push_configuration(rollout_jsonl: str | None = None) -> _PushConfiguration:
@@ -1364,19 +1295,6 @@ def prove_workflow_inputs_readable() -> None:
     logger.info(Locale.CODEX_SESSIONS_READABLE_LOG, CODEX_SESSIONS_ROOT)
 
 
-def _fsync_file(path: Path) -> None:
-    with path.open("rb") as stream:
-        os.fsync(stream.fileno())
-
-
-def _fsync_directory(path: Path) -> None:
-    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-
-
 def _archived_file(path: Path) -> _ArchivedFile:
     digest = hashlib.sha256()
     size = 0
@@ -1396,13 +1314,6 @@ def _archived_file(path: Path) -> _ArchivedFile:
         sha256=digest.hexdigest(),
         line_count=line_count,
     )
-
-
-def _publish_archive(temporary: Path, destination: Path) -> _ArchivedFile:
-    _fsync_file(temporary)
-    os.replace(temporary, destination)
-    _fsync_directory(destination.parent)
-    return _archived_file(destination)
 
 
 def _aivm_connection_options(
@@ -1445,58 +1356,6 @@ def _aivm_connection_options(
         "-o",
         "StrictHostKeyChecking=accept-new",
     ]
-
-
-def copy_rollout_to_cas(
-    configuration: _PushConfiguration,
-    runtime: AiAugmentBackendContext,
-) -> _ArchivedFile:
-    runtime.pipeline_config.rollout_cas_dir.mkdir(parents=True, exist_ok=True)
-    temporary = runtime.pipeline_config.rollout_cas_dir / ROLLOUT_CAS_TEMP_FILENAME_TEMPLATE.format(
-        nonce=uuid7().hex
-    )
-    options = _aivm_connection_options(
-        lima_ssh_config=configuration.lima_ssh_config,
-        identity_file=configuration.identity_file,
-        known_hosts_file=configuration.known_hosts_file,
-        ssh_user=configuration.ssh_user,
-        host_key_alias=configuration.host_key_alias,
-    )
-    command = [
-        SSH_EXECUTABLE,
-        *options,
-        "--",
-        configuration.ssh_target,
-        shlex.join([
-            AUDIT_READ_ROLLOUT_COMMAND,
-            str(configuration.rollout_relative_path),
-        ]),
-    ]
-    try:
-        with temporary.open("wb") as output:
-            subprocess.run(
-                command,
-                check=True,
-                stdout=output,
-                stderr=subprocess.PIPE,
-                timeout=AUDIT_COPY_TIMEOUT_SECONDS,
-            )
-        if not temporary.is_file() or temporary.is_symlink():
-            raise _PushConfigurationError(Locale.AUDIT_ROLLOUT_ARCHIVE_INVALID)
-        archived = _archived_file(temporary)
-        destination = runtime.pipeline_config.rollout_cas_dir / (
-            ROLLOUT_CAS_FILENAME_TEMPLATE.format(sha256=archived.sha256)
-        )
-        if destination.exists():
-            existing = _archived_file(destination)
-            if existing.sha256 != archived.sha256 or existing.size != archived.size:
-                raise _PushConfigurationError(Locale.ROLLOUT_CAS_CONFLICT)
-            return existing
-        return _publish_archive(temporary, destination)
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise _PushConfigurationError(Locale.ROLLOUT_COPY_FAILED) from exc
-    finally:
-        temporary.unlink(missing_ok=True)
 
 
 def parse_appendwatch_report(
@@ -3295,68 +3154,6 @@ def open_source_database(
         raise _PushValidationError(Locale.SOURCE_DUCKDB_OPEN_FAILED) from exc
 
 
-def open_detour_database(
-    runtime: AiAugmentBackendContext,
-    *,
-    read_only: bool = False,
-) -> duckdb.DuckDBPyConnection:
-    conn: duckdb.DuckDBPyConnection | None = None
-    try:
-        if not read_only:
-            runtime.pipeline_config.detour_db_path.parent.mkdir(parents=True, exist_ok=True)
-        conn = duckdb.connect(
-            str(runtime.pipeline_config.detour_db_path),
-            read_only=read_only,
-        )
-        if runtime.pipeline_config.match_rule_version.codex_match == 2:
-            load_duckdb_extension(
-                conn,
-                CODEX_TOKEN_EXTENSION,
-                runtime.pipeline_config.duckdb_extensions.get(CODEX_TOKEN_EXTENSION),
-                log=None,
-            )
-        return conn
-    except (OSError, RuntimeError, duckdb.Error) as exc:
-        if conn is not None:
-            conn.close()
-        detail = (
-            Locale.DETOUR_DUCKDB_READ_ONLY_OPEN_FAILED
-            if read_only
-            else Locale.DETOUR_DUCKDB_OPEN_FAILED
-        )
-        raise _PushValidationError(detail) from exc
-
-
-def _backend_detour_database(
-    runtime: AiAugmentBackendContext,
-) -> duckdb.DuckDBPyConnection:
-    global DETOUR_DB_CONNECTION
-    global DETOUR_DB_CONNECTION_PATH
-
-    if (
-        DETOUR_DB_CONNECTION is not None
-        and DETOUR_DB_CONNECTION_PATH == runtime.pipeline_config.detour_db_path
-    ):
-        return DETOUR_DB_CONNECTION
-    if DETOUR_DB_CONNECTION is not None:
-        DETOUR_DB_CONNECTION.close()
-    DETOUR_DB_CONNECTION = open_detour_database(runtime)
-    DETOUR_DB_CONNECTION_PATH = runtime.pipeline_config.detour_db_path
-    return DETOUR_DB_CONNECTION
-
-
-def close_backend_detour_database() -> None:
-    global DETOUR_DB_CONNECTION
-    global DETOUR_DB_CONNECTION_PATH
-
-    with DETOUR_DB_LOCK:
-        connection = DETOUR_DB_CONNECTION
-        DETOUR_DB_CONNECTION = None
-        DETOUR_DB_CONNECTION_PATH = None
-        if connection is not None:
-            connection.close()
-
-
 def _acquire_backend_process_lock() -> None:
     global BACKEND_PROCESS_LOCK_DESCRIPTOR
 
@@ -3379,36 +3176,6 @@ def _release_backend_process_lock() -> None:
 
     descriptor = BACKEND_PROCESS_LOCK_DESCRIPTOR
     BACKEND_PROCESS_LOCK_DESCRIPTOR = None
-    if descriptor is None:
-        return
-    try:
-        fcntl.flock(descriptor, fcntl.LOCK_UN)
-    finally:
-        os.close(descriptor)
-
-
-def _acquire_authoritative_process_lock(runtime: AiAugmentBackendContext) -> None:
-    global AUTHORITATIVE_LOG_DESCRIPTOR
-
-    if AUTHORITATIVE_LOG_DESCRIPTOR is not None:
-        raise _PushConfigurationError(Locale.REPLAY_LOG_ALREADY_LOCKED)
-    descriptor = os.open(
-        Path(runtime.pipeline_config.resources.replay_log),
-        os.O_RDWR,
-    )
-    try:
-        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError as exc:
-        os.close(descriptor)
-        raise _PushConfigurationError(Locale.REPLAY_LOG_ALREADY_LOCKED) from exc
-    AUTHORITATIVE_LOG_DESCRIPTOR = descriptor
-
-
-def _release_authoritative_process_lock() -> None:
-    global AUTHORITATIVE_LOG_DESCRIPTOR
-
-    descriptor = AUTHORITATIVE_LOG_DESCRIPTOR
-    AUTHORITATIVE_LOG_DESCRIPTOR = None
     if descriptor is None:
         return
     try:
@@ -3556,17 +3323,9 @@ class _AuthoritativeHttpMiddleware:
             response_messages.clear()
             await response(scope, replay_request_body, capture_response)
 
+        runtime: AiAugmentBackendContext = request.app.state.runtime
         try:
-            if not AUTHORITATIVE_BACKEND_HEALTHY:
-                logger.error(Locale.AUTHORITATIVE_BACKEND_UNHEALTHY_LOG, method, path)
-                await replace_response(
-                    JSONResponse(
-                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                        content={"detail": Locale.CONFIGURATION_ERROR_DETAIL},
-                    )
-                )
-            else:
-                await self.app(scope, replay_request_body, capture_response)
+            await self.app(scope, replay_request_body, capture_response)
         except Exception:
             logger.exception(Locale.AUTHORITATIVE_HANDLER_FAILED_LOG, method, path)
             await replace_response(
@@ -3630,8 +3389,10 @@ class _AuthoritativeHttpMiddleware:
                 started_ns=started_ns,
                 ready_to_respond_at_unix_usec=ready_to_respond_at_unix_usec,
             )
-            append_authoritative_record(record)
-            await _after_authoritative_public_record(record)
+            runtime.pipeline_config.backend_store.append_authoritative_record(
+                record,
+            )
+            await _after_authoritative_public_record(record, runtime)
         except Exception as exc:
             logger.exception(Locale.AUTHORITATIVE_LOG_APPEND_FAILED_LOG, method, path, exc)
             raise SystemExit(1) from exc
@@ -3726,29 +3487,28 @@ def _backend_commit_record(
 
 
 def _authoritative_log_records(
-    path: Path,
+    value: bytes,
 ) -> tuple[tuple[HttpRequestLogRecord, int, str], ...]:
     records: list[tuple[HttpRequestLogRecord, int, str]] = []
     byte_offset = AUTHORITATIVE_EMPTY_OFFSET
-    try:
-        with path.open("rb") as stream:
-            for line_number, line in enumerate(stream, start=AUTHORITATIVE_FIRST_LINE):
-                if not line.endswith(b"\n") or not line.strip():
-                    raise _PushValidationError(
-                        Locale.REPLAY_LOG_LINE_INVALID_TEMPLATE.format(line_number=line_number)
-                    )
-                try:
-                    record = _validated_readme_record(
-                        HttpRequestLogRecord.model_validate_json(line)
-                    )
-                except (ValidationError, _PushValidationError) as exc:
-                    raise _PushValidationError(
-                        Locale.REPLAY_LOG_LINE_INVALID_TEMPLATE.format(line_number=line_number)
-                    ) from exc
-                byte_offset += len(line)
-                records.append((record, byte_offset, hashlib.sha256(line).hexdigest()))
-    except (OSError, UnicodeError) as exc:
-        raise _PushConfigurationError(Locale.REPLAY_LOG_UNREADABLE) from exc
+    for line_number, line in enumerate(
+        value.splitlines(keepends=True),
+        start=AUTHORITATIVE_FIRST_LINE,
+    ):
+        if not line.endswith(b"\n") or not line.strip():
+            raise _PushValidationError(
+                Locale.REPLAY_LOG_LINE_INVALID_TEMPLATE.format(line_number=line_number)
+            )
+        try:
+            record = _validated_readme_record(
+                HttpRequestLogRecord.model_validate_json(line)
+            )
+        except (ValidationError, _PushValidationError) as exc:
+            raise _PushValidationError(
+                Locale.REPLAY_LOG_LINE_INVALID_TEMPLATE.format(line_number=line_number)
+            ) from exc
+        byte_offset += len(line)
+        records.append((record, byte_offset, hashlib.sha256(line).hexdigest()))
     return tuple(records)
 
 
@@ -3874,29 +3634,6 @@ def _namekey_from_original_pull(pull: HttpRequestLogRecord) -> NameKey:
         raise _PushValidationError(Locale.REPLAY_COMMIT_PULL_INVALID) from exc
 
 
-def _validated_replay_rollout(
-    runtime: AiAugmentBackendContext,
-    reference: CodexRolloutRecord,
-) -> _ArchivedFile:
-    path = runtime.pipeline_config.rollout_cas_dir / ROLLOUT_CAS_FILENAME_TEMPLATE.format(
-        sha256=reference.sha256
-    )
-    if (
-        path.parent != runtime.pipeline_config.rollout_cas_dir
-        or path.is_symlink()
-        or not path.is_file()
-    ):
-        raise _PushValidationError(Locale.ROLLOUT_CAS_BLOB_INVALID)
-    archived = _archived_file(path)
-    if (
-        archived.sha256 != reference.sha256
-        or archived.size != reference.size
-        or archived.line_count != reference.line_count
-    ):
-        raise _PushValidationError(Locale.ROLLOUT_CAS_BLOB_INVALID)
-    return archived
-
-
 def _failed_attempt_record(
     *,
     commit_record: BackendCommitRecord,
@@ -3967,7 +3704,18 @@ def _validate_projected_commit(
         if source_line_count != rollout.line_count:
             raise _PushValidationError(Locale.REPLAY_COMMIT_SOURCE_KEY_INVALID)
         stage = BackendLifecycle.ROLLOUT_INDEX
-        rollout_archive = _validated_replay_rollout(runtime, rollout)
+        try:
+            rollout_path = runtime.pipeline_config.rollout_cas.validated_rollout(
+                rollout
+            )
+        except (OSError, ValueError) as exc:
+            raise _PushValidationError(str(exc)) from exc
+        rollout_archive = _ArchivedFile(
+            path=rollout_path,
+            size=rollout.size,
+            sha256=rollout.sha256,
+            line_count=rollout.line_count,
+        )
         stage = BackendLifecycle.APPENDWATCH_REPORT_VALIDATION
         return _execute_attempt(
             conn,
@@ -4069,121 +3817,6 @@ def _project_readme_record(
     return projected_attempt
 
 
-def _synchronize_authoritative_projection_locked(
-    runtime: AiAugmentBackendContext,
-    conn: duckdb.DuckDBPyConnection,
-) -> None:
-    global AUTHORITATIVE_BACKEND_HEALTHY
-    global AUTHORITATIVE_LOG_OFFSET
-    global AUTHORITATIVE_NEXT_LINE_NUMBER
-
-    try:
-        records = _authoritative_log_records(
-            Path(runtime.pipeline_config.resources.replay_log)
-        )
-        runtime.pipeline_config.rollout_cas_dir.mkdir(parents=True, exist_ok=True)
-        _initialize_readme_authoritative_schema(conn)
-        checkpoint = _projection_checkpoint(conn)
-        projected_count_row = conn.execute(
-            f"SELECT count(*) FROM {AUTHORITATIVE_RECORDS_TABLE}"
-        ).fetchone()
-        projected_count = 0 if projected_count_row is None else int(projected_count_row[0])
-        if checkpoint is None:
-            if projected_count:
-                raise _PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT)
-            projected_line_count = 0
-        else:
-            projected_line_count, byte_offset, line_sha256 = checkpoint
-            if projected_line_count != projected_count or projected_line_count > len(records):
-                raise _PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT)
-            if projected_line_count:
-                _, expected_offset, expected_hash = records[projected_line_count - 1]
-                if byte_offset != expected_offset or line_sha256 != expected_hash:
-                    raise _PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT)
-        for line_number, (record, byte_offset, line_sha256) in enumerate(
-            records[projected_line_count:],
-            start=projected_line_count + AUTHORITATIVE_FIRST_LINE,
-        ):
-            _project_readme_record(
-                conn,
-                runtime,
-                record,
-                line_number=line_number,
-                byte_offset=byte_offset,
-                line_sha256=line_sha256,
-                materialize_files=False,
-            )
-        AUTHORITATIVE_NEXT_LINE_NUMBER = len(records) + AUTHORITATIVE_FIRST_LINE
-        AUTHORITATIVE_LOG_OFFSET = records[-1][1] if records else AUTHORITATIVE_EMPTY_OFFSET
-        AUTHORITATIVE_BACKEND_HEALTHY = True
-    except Exception as exc:
-        AUTHORITATIVE_BACKEND_HEALTHY = False
-        raise _PushConfigurationError(Locale.REPLAY_PROJECTION_FAILED) from exc
-
-
-def synchronize_authoritative_projection(runtime: AiAugmentBackendContext) -> None:
-    with DETOUR_DB_LOCK:
-        conn = _backend_detour_database(runtime)
-        _synchronize_authoritative_projection_locked(runtime, conn)
-
-
-@contextmanager
-def synchronized_detour_database(
-    runtime: AiAugmentBackendContext,
-) -> Iterator[duckdb.DuckDBPyConnection]:
-    with DETOUR_DB_LOCK:
-        conn = _backend_detour_database(runtime)
-        _synchronize_authoritative_projection_locked(runtime, conn)
-        yield conn
-
-
-def append_authoritative_record(
-    record: HttpRequestLogRecord,
-) -> AgentRuntimeAttemptRecord | None:
-    global AUTHORITATIVE_BACKEND_HEALTHY
-    global AUTHORITATIVE_LOG_OFFSET
-    global AUTHORITATIVE_NEXT_LINE_NUMBER
-
-    validated = _validated_readme_record(record)
-    line = (validated.model_dump_json(ensure_ascii=True) + "\n").encode(TEXT_ENCODING)
-    line_sha256 = hashlib.sha256(line).hexdigest()
-    with AUTHORITATIVE_APPEND_LOCK:
-        try:
-            runtime = runtime_configuration()
-            with DETOUR_DB_LOCK:
-                conn = _backend_detour_database(runtime)
-                _synchronize_authoritative_projection_locked(runtime, conn)
-                descriptor = AUTHORITATIVE_LOG_DESCRIPTOR
-                if descriptor is None:
-                    raise _PushConfigurationError(Locale.AUTHORITATIVE_LOG_NOT_OPEN)
-                end_offset = os.lseek(descriptor, AUTHORITATIVE_EMPTY_OFFSET, os.SEEK_END)
-                if end_offset != AUTHORITATIVE_LOG_OFFSET:
-                    raise _PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT)
-                written = 0
-                while written < len(line):
-                    count = os.write(descriptor, line[written:])
-                    if count <= 0:
-                        raise OSError(Locale.AUTHORITATIVE_LOG_APPEND_FAILED)
-                    written += count
-                os.fsync(descriptor)
-                line_number = AUTHORITATIVE_NEXT_LINE_NUMBER
-                AUTHORITATIVE_LOG_OFFSET += len(line)
-                AUTHORITATIVE_NEXT_LINE_NUMBER += 1
-                projected_attempt = _project_readme_record(
-                    conn,
-                    runtime,
-                    validated,
-                    line_number=line_number,
-                    byte_offset=AUTHORITATIVE_LOG_OFFSET,
-                    line_sha256=line_sha256,
-                    materialize_files=True,
-                )
-            return projected_attempt
-        except Exception:
-            AUTHORITATIVE_BACKEND_HEALTHY = False
-            raise
-
-
 def _attempt_record_from_serialized_json(
     runtime: AiAugmentBackendContext,
     value: str,
@@ -4193,14 +3826,14 @@ def _attempt_record_from_serialized_json(
     namekey = name_key_from_header_value(
         commit_http_record.request_headers.get(NAME_KEY_HEADER)
     )
-    outerdict = _configured_ai_augment_outerdict(
+    singular_outerdict = _configured_ai_augment_singular_outerdict(
         namekey,
-        runtime.ai_augment_outerdicts,
+        runtime.ai_augment_singular_outerdicts,
     )
     procedure = (
         None
-        if not outerdict.docx_innerdicts
-        else outerdict.docx_innerdicts[0].procedure
+        if not singular_outerdict.docx_innerdicts
+        else singular_outerdict.docx_innerdicts[0].procedure
     )
     return AgentRuntimeAttemptRecord.from_serialized_json(
         value,
@@ -4242,18 +3875,14 @@ def _synthetic_commit_record(
     pull_record: HttpRequestLogRecord,
     push_record: HttpRequestLogRecord,
     session_id: UUID,
-    rollout_archive: _ArchivedFile,
+    rollout: CodexRolloutRecord,
     rollout_filename: str,
     appendwatch_report: bytes,
     namekey: NameKey,
 ) -> BackendCommitRecord:
     codex_session_record = CodexSessionRecord(
         session_id=session_id,
-        codex_rollout_record=CodexRolloutRecord(
-            sha256=rollout_archive.sha256,
-            size=rollout_archive.size,
-            line_count=rollout_archive.line_count,
-        ),
+        codex_rollout_record=rollout,
         appendwatch_report_record=AppendwatchReportRecord(
             encoding=AppendwatchReportEncoding.BASE64,
             data=base64.b64encode(appendwatch_report).decode(BASE64_TEXT_ENCODING),
@@ -4276,7 +3905,7 @@ def _synthetic_commit_record(
         request_headers={
             SOURCE_KEY_HEADER: _source_key_header(
                 rollout_filename,
-                rollout_archive.line_count,
+                rollout.line_count,
             ),
             NAME_KEY_HEADER: _name_key_header(namekey),
         },
@@ -4288,67 +3917,6 @@ def _synthetic_commit_record(
         duration_usec=None,
         commit_request_body=commit,
     )
-
-
-def _run_outcome_snapshot_configuration(session_id: UUID | None) -> _PushConfiguration:
-    rollout_name = (
-        f"{ROLLOUT_FILENAME_PREFIX}{session_id or 'run-outcome-snapshot'}{ROLLOUT_FILENAME_SUFFIX}"
-    )
-    return push_configuration(str(CODEX_SESSIONS_ROOT / rollout_name))
-
-
-def capture_run_outcome_snapshot(
-    runtime: AiAugmentBackendContext,
-) -> tuple[RunOutcomeResponseBody, str | None, tuple[Exception, ...]]:
-    with BACKEND_WORKFLOW_STATE_LOCK:
-        session_id = BACKEND_SESSION_ID
-        pull_record = BACKEND_PENDING_PULL_RECORD or BACKEND_CURRENT_PULL_RECORD
-        push_record = BACKEND_LATEST_PUSH_RECORD
-
-    rollout_archive: _ArchivedFile | None = None
-    rollout_filename: str | None = None
-    appendwatch_report: bytes | None = None
-    failures: list[Exception] = []
-
-    if session_id is not None:
-        try:
-            rollout_configuration = push_configuration_for_session(session_id)
-            rollout_archive = copy_rollout_to_cas(rollout_configuration, runtime)
-            rollout_filename = rollout_configuration.rollout_relative_path.name
-        except (OSError, _PushConfigurationError) as exc:
-            failures.append(exc)
-
-    try:
-        appendwatch_configuration = _run_outcome_snapshot_configuration(session_id)
-        appendwatch_report = _read_appendwatch_bytes(appendwatch_configuration)
-    except (OSError, _PushConfigurationError) as exc:
-        failures.append(exc)
-
-    snapshot = RunOutcomeResponseBody(
-        pull_record_id=None if pull_record is None else pull_record.record_id,
-        push_record_id=None if push_record is None else push_record.record_id,
-        codex_session_record=CodexSessionRecord(
-            session_id=session_id,
-            codex_rollout_record=(
-                None
-                if rollout_archive is None
-                else CodexRolloutRecord(
-                    sha256=rollout_archive.sha256,
-                    size=rollout_archive.size,
-                    line_count=rollout_archive.line_count,
-                )
-            ),
-            appendwatch_report_record=(
-                None
-                if appendwatch_report is None
-                else AppendwatchReportRecord(
-                    encoding=AppendwatchReportEncoding.BASE64,
-                    data=base64.b64encode(appendwatch_report).decode(BASE64_TEXT_ENCODING),
-                )
-            ),
-        ),
-    )
-    return snapshot, rollout_filename, tuple(failures)
 
 
 def _apply_attempt_record(
@@ -4385,8 +3953,10 @@ def _mark_backend_lifecycle_failed(error: Exception) -> None:
         BACKEND_LIFECYCLE = BackendLifecycle.FAILED
 
 
-def _commit_accepted_push(record: HttpRequestLogRecord) -> None:
-    runtime = runtime_configuration()
+def _commit_accepted_push(
+    record: HttpRequestLogRecord,
+    runtime: AiAugmentBackendContext,
+) -> None:
     with BACKEND_WORKFLOW_STATE_LOCK:
         pull_record = BACKEND_PENDING_PULL_RECORD
         session_id = BACKEND_SESSION_ID
@@ -4401,7 +3971,20 @@ def _commit_accepted_push(record: HttpRequestLogRecord) -> None:
         return
     try:
         configuration = push_configuration_for_session(session_id)
-        rollout_archive = copy_rollout_to_cas(configuration, runtime)
+        try:
+            rollout = runtime.pipeline_config.rollout_cas.copy_rollout(
+                rollout_relative_path=configuration.rollout_relative_path,
+                ssh_target=configuration.ssh_target,
+                ssh_options=_aivm_connection_options(
+                    lima_ssh_config=configuration.lima_ssh_config,
+                    identity_file=configuration.identity_file,
+                    known_hosts_file=configuration.known_hosts_file,
+                    ssh_user=configuration.ssh_user,
+                    host_key_alias=configuration.host_key_alias,
+                ),
+            )
+        except (OSError, ValueError) as exc:
+            raise _PushConfigurationError(str(exc)) from exc
         report_bytes = _read_appendwatch_bytes(configuration)
     except (OSError, _PushConfigurationError) as exc:
         _mark_backend_lifecycle_failed(exc)
@@ -4410,13 +3993,15 @@ def _commit_accepted_push(record: HttpRequestLogRecord) -> None:
         pull_record=pull_record,
         push_record=record,
         session_id=session_id,
-        rollout_archive=rollout_archive,
+        rollout=rollout,
         rollout_filename=configuration.rollout_relative_path.name,
         appendwatch_report=report_bytes,
         namekey=runtime.configured_namekey,
     )
     try:
-        attempt_record = append_authoritative_record(commit_record)
+        attempt_record = runtime.pipeline_config.backend_store.append_authoritative_record(
+            commit_record,
+        )
         if attempt_record is None:
             raise _PushConfigurationError(Locale.REPLAY_COMMIT_INVALID)
         _apply_attempt_record(attempt_record)
@@ -4436,7 +4021,10 @@ def _authoritative_background_finished(task: asyncio.Task[None]) -> None:
         os._exit(1)
 
 
-async def _after_authoritative_public_record(record: HttpRequestLogRecord) -> None:
+async def _after_authoritative_public_record(
+    record: HttpRequestLogRecord,
+    runtime: AiAugmentBackendContext,
+) -> None:
     global BACKEND_CURRENT_PULL_RECORD
     global BACKEND_LATEST_PUSH_RECORD
 
@@ -4450,17 +4038,19 @@ async def _after_authoritative_public_record(record: HttpRequestLogRecord) -> No
         return
     with BACKEND_WORKFLOW_STATE_LOCK:
         BACKEND_LATEST_PUSH_RECORD = record
-    task = asyncio.create_task(asyncio.to_thread(_commit_accepted_push, record))
+    task = asyncio.create_task(
+        asyncio.to_thread(_commit_accepted_push, record, runtime)
+    )
     AUTHORITATIVE_BACKGROUND_TASKS.add(task)
     task.add_done_callback(_authoritative_background_finished)
 
 
-def configured_pull_lines(outerdict: AiAugmentOuterDict) -> Iterator[str]:
-    for innerdict in (*outerdict.xlsx_innerdicts, *outerdict.ssn_innerdicts):
+def configured_pull_lines(singular_outerdict: AiAugmentSingularOuterDict) -> Iterator[str]:
+    for innerdict in (*singular_outerdict.xlsx_innerdicts, *singular_outerdict.ssn_innerdicts):
         yield json_line(innerdict.data)
     yield json_line({
-        KTP_FIRST_NAME_COL: outerdict.namekey.first_name,
-        KTP_LAST_NAME_COL: outerdict.namekey.last_name,
+        KTP_FIRST_NAME_COL: singular_outerdict.namekey.first_name,
+        KTP_LAST_NAME_COL: singular_outerdict.namekey.last_name,
         **dict.fromkeys(AI_AUGMENT_COLUMNS),
     })
 
@@ -4577,17 +4167,17 @@ def append_codex_output(
 
 
 def selected_card_outer_dict(
-    outerdict: AiAugmentOuterDict,
+    singular_outerdict: AiAugmentSingularOuterDict,
 ) -> OuterDict:
     selected = OuterDict(
         data={
-            outerdict.namekey.to_json_key(): [
+            singular_outerdict.namekey.to_json_key(): [
                 inner.model_copy(deep=True)
                 for inner in (
-                    *outerdict.xlsx_innerdicts,
-                    *(item.innerdict for item in outerdict.committed_innerdicts),
-                    *outerdict.docx_innerdicts,
-                    *outerdict.ssn_innerdicts,
+                    *singular_outerdict.xlsx_innerdicts,
+                    *(item.innerdict for item in singular_outerdict.committed_innerdicts),
+                    *singular_outerdict.docx_innerdicts,
+                    *singular_outerdict.ssn_innerdicts,
                 )
             ]
         }
@@ -4676,7 +4266,7 @@ def write_accepted_submission(
     *,
     submission: StandardizedSubmission,
     evidence: ValidatedEvidence,
-    outerdict: AiAugmentOuterDict,
+    singular_outerdict: AiAugmentSingularOuterDict,
     rollout_index: _RolloutIndex,
     rollout_archive: _ArchivedFile,
     commit_record: BackendCommitRecord,
@@ -4705,13 +4295,13 @@ def write_accepted_submission(
         ),
     )
     output_row: dict[str, object] = {
-        KTP_NAMEKEY_COL: outerdict.namekey.to_json_key(),
+        KTP_NAMEKEY_COL: singular_outerdict.namekey.to_json_key(),
         KTP_FILENAME_COL: rollout_index.session.rollout_filename,
         KTP_FRAGMENT_COL: rollout_archive.line_count,
         KTP_FRAGMENT_TYPE_COL: ROLLOUT_LINE_FRAGMENT_TYPE,
-        DRAW_LABEL: outerdict.draw_number,
-        KTP_FIRST_NAME_COL: outerdict.namekey.first_name,
-        KTP_LAST_NAME_COL: outerdict.namekey.last_name,
+        DRAW_LABEL: singular_outerdict.draw_number,
+        KTP_FIRST_NAME_COL: singular_outerdict.namekey.first_name,
+        KTP_LAST_NAME_COL: singular_outerdict.namekey.last_name,
         KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL: commit_record_id,
         KTP_AI_AUGMENT_COMMIT_REQUEST_BODY_COL: commit_request_body,
         KTP_AI_AUGMENT_SESSION_METADATA_COL: rollout_index.session.summary_json,
@@ -4722,7 +4312,7 @@ def write_accepted_submission(
         detour_conn.execute("BEGIN TRANSACTION")
     try:
         append_codex_output(detour_conn, output_row)
-        ground_truth_innerdict = outerdict.ground_truth_innerdict()
+        ground_truth_innerdict = singular_outerdict.ground_truth_innerdict()
         if materialize_files:
             committed_innerdicts = tuple(
                 committed
@@ -4730,10 +4320,10 @@ def write_accepted_submission(
                 if name_key_from_header_value(
                     committed.commit_record.request_headers.get(NAME_KEY_HEADER)
                 )
-                == outerdict.namekey
+                == singular_outerdict.namekey
             )
             card_outer_dict = selected_card_outer_dict(
-                outerdict.model_copy(
+                singular_outerdict.model_copy(
                     update={"committed_innerdicts": committed_innerdicts}
                 )
             )
@@ -4911,9 +4501,9 @@ def _execute_attempt(
             )
 
             stage = BackendLifecycle.RESEARCHER_RESOLUTION
-            outerdict = _configured_ai_augment_outerdict(
+            singular_outerdict = _configured_ai_augment_singular_outerdict(
                 namekey,
-                runtime.ai_augment_outerdicts,
+                runtime.ai_augment_singular_outerdicts,
             )
 
             stage = BackendLifecycle.INNERDICT_AND_CARD
@@ -4923,7 +4513,7 @@ def _execute_attempt(
                 runtime,
                 submission=accepted_submission,
                 evidence=evidence_assessment.validated,
-                outerdict=outerdict,
+                singular_outerdict=singular_outerdict,
                 rollout_index=rollout_index,
                 rollout_archive=rollout_archive,
                 commit_record=commit_record,
@@ -5040,42 +4630,6 @@ def pydantic_failure(exc: ValidationError) -> tuple[str | None, str, object]:
     return field, reason, failed_input
 
 
-def _attempt_records(
-    runtime: AiAugmentBackendContext,
-    conn: duckdb.DuckDBPyConnection,
-    *,
-    namekey: NameKey | None,
-) -> tuple[AgentRuntimeAttemptRecord, ...]:
-    rows = conn.execute(
-        f"SELECT records.{AUTHORITATIVE_RECORD_PAYLOAD_COLUMN}, "
-        f"attempts.{AUTHORITATIVE_ATTEMPT_PAYLOAD_COLUMN} "
-        f"FROM {AUTHORITATIVE_ATTEMPTS_TABLE} AS attempts "
-        f"JOIN {AUTHORITATIVE_RECORDS_TABLE} AS records "
-        f"ON records.{AUTHORITATIVE_RECORD_ID_COLUMN} = "
-        f"attempts.{AUTHORITATIVE_ATTEMPT_COMMIT_ID_COLUMN} "
-        f"ORDER BY records.{AUTHORITATIVE_RECORD_ORDINAL_COLUMN}"
-    ).fetchall()
-    try:
-        attempts: list[AgentRuntimeAttemptRecord] = []
-        for record_json, attempt_json in rows:
-            record = HttpRequestLogRecord.model_validate_json(str(record_json))
-            record_namekey = _parse_name_key_header(
-                record.request_headers.get(NAME_KEY_HEADER)
-            )
-            if namekey is not None and record_namekey != namekey:
-                continue
-            attempts.append(
-                _attempt_record_from_serialized_json(
-                    runtime,
-                    str(attempt_json),
-                    commit_http_record=record,
-                )
-            )
-        return tuple(attempts)
-    except (_PushValidationError, ValidationError, ValueError) as exc:
-        raise _PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT) from exc
-
-
 def _committed_innerdicts(
     conn: duckdb.DuckDBPyConnection,
 ) -> tuple[CommittedInnerDict, ...]:
@@ -5157,43 +4711,9 @@ def _log_post_commit_validation(
         )
 
 
-def dashboard_query_response(
-    runtime: AiAugmentBackendContext,
-    conn: duckdb.DuckDBPyConnection,
-    *,
-    namekey: NameKey | None,
-    run_outcome_records: tuple[RunOutcomeResponse, ...],
-) -> QueryResponse:
-    committed_by_namekey: dict[str, list[CommittedInnerDict]] = {}
-    for committed in _committed_innerdicts(conn):
-        committed_namekey_json = name_key_from_header_value(
-            committed.commit_record.request_headers.get(NAME_KEY_HEADER)
-        ).to_json_key()
-        committed_by_namekey.setdefault(committed_namekey_json, []).append(
-            committed
-        )
-    outerdicts = runtime.ai_augment_outerdicts
-    for outerdict in outerdicts:
-        outerdict.committed_innerdicts = tuple(
-            committed_by_namekey.get(outerdict.namekey.to_json_key(), ())
-        )
-    selected_outerdicts = (
-        outerdicts
-        if namekey is None
-        else tuple(
-            outerdict for outerdict in outerdicts if outerdict.namekey == namekey
-        )
-    )
-    return QueryResponse(
-        attempts=_attempt_records(runtime, conn, namekey=namekey),
-        ai_augment_outerdicts=selected_outerdicts,
-        run_outcome_records=run_outcome_records,
-    )
-
-
 @app.get(**PULL_ROUTE)
-def authoritative_pull() -> Response:
-    runtime = runtime_configuration()
+def authoritative_pull(request: Request) -> Response:
+    runtime: AiAugmentBackendContext = request.app.state.runtime
     with BACKEND_WORKFLOW_STATE_LOCK:
         lifecycle = BACKEND_LIFECYCLE
         attempt_record = BACKEND_ATTEMPT_RECORD
@@ -5261,10 +4781,10 @@ def authoritative_pull() -> Response:
             media_type=MEDIA_TYPE_WITH_CHARSET,
         )
     try:
-        outerdict = runtime.configured_ai_augment_outerdict()
-        if outerdict is None:
+        singular_outerdict = runtime.configured_ai_augment_singular_outerdict()
+        if singular_outerdict is None:
             raise _PushConfigurationError(Locale.PUSH_LINKAGE_MISSING)
-        lines = tuple(configured_pull_lines(outerdict))
+        lines = tuple(configured_pull_lines(singular_outerdict))
         return StreamingResponse(iter(lines), media_type=MEDIA_TYPE_WITH_CHARSET)
     except (_PushConfigurationError, _PushValidationError, OSError, duckdb.Error) as exc:
         logger.error(Locale.PULL_FAILED_LOG, exc)

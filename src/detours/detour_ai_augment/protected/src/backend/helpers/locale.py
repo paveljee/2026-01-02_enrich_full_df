@@ -131,7 +131,6 @@ class Locale:
     )
     TIMEZONE_INVALID_TEMPLATE: Final = "configured timezone is invalid: {timezone}"
     SOURCE_DUCKDB_VALIDATION_FAILED: Final = "configured source DuckDB could not be validated"
-    DETOUR_DB_EQUALS_SOURCE: Final = "detour DuckDB path must differ from source DuckDB"
     API_CONFIG_REQUIRED_TEMPLATE: Final = (
         "API was not started with required --config {config_filename}"
     )
@@ -499,7 +498,7 @@ class Locale:
     CONFIGURED_SESSION_MISMATCH: Final = "configured session does not match archived rollout"
     CARD_INTRO_DATE_FORMAT: Final = "%B %d, %Y"
 
-    API_STARTUP_FAILED_LOG: Final = "API startup failed: %s"
+    API_LIFESPAN_FAILED_LOG: Final = "API lifespan failed: %s"
     ROUTES_DISABLED_LOG: Final = "pull and push are disabled: %s"
     ATTEMPT_RECORD_FAILED_LOG: Final = "push attempt=%s could not record stage=%s result=%s"
     PULL_FAILED_LOG: Final = "pull failed configuration validation: %s"
