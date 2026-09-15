@@ -9,6 +9,11 @@ sandbox_mode = "workspace-write"
 approval_policy = "untrusted"
 service_tier = "default"
 
+# disable animations in astra
+[tui]
+whimsy = false
+animations = false
+
 [agents]
 enabled = false
 

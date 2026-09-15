@@ -30,6 +30,11 @@ approvals_reviewer = "user"
 # arbitrary name below
 default_permissions = "full-local-no-net"
 
+# disable animations in astra
+[tui]
+whimsy = false
+animations = false
+
 [permissions.full-local-no-net.filesystem]
 ":root" = "write"  # assume Unix DAC non-sudo
 
