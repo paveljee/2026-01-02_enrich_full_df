@@ -87,7 +87,7 @@ class AiAugmentDetourConfig(PipelineConfig, FrozenStrictModel):
         data["release_map"] = release_map
         data["replay_log"] = replay_log
         data["rollout_cas_dir"] = rollout_cas
-        data["backend_store"] = AiAugmentBackendStore(
+        data["backend_store"] = AiAugmentBackendStore.from_resources(
             replay_log=replay_log,
             detour_db=detour_db,
             rollout_cas=rollout_cas,

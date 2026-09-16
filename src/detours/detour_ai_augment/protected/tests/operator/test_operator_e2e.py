@@ -7,7 +7,6 @@ import os
 import shlex
 import signal
 import socket
-import stat
 import subprocess
 import sys
 import tempfile
@@ -513,7 +512,7 @@ def running_dashboard(runtime: OperatorRuntime) -> Generator[DashboardProcess]:
 
 def target_namekey(runtime: OperatorRuntime) -> NameKey:
     _operator_log("selecting the operator workflow target")
-    configuration = AiAugmentControlCentreContext(
+    configuration = AiAugmentBackendContext(
         pipeline_config=AiAugmentDetourConfig.from_json(
             runtime.config_path,
             verify_hash_on_init=False,
@@ -521,9 +520,7 @@ def target_namekey(runtime: OperatorRuntime) -> NameKey:
     )
     namekey = next(
         item.namekey
-        for item in control_ui._SourceRepository(
-            configuration=configuration
-        ).load_researchers()
+        for item in configuration.ai_augment_singular_outerdicts
         if OPERATOR_TARGET_DRAW_NUMBER in item.draw_numbers
         and item.ai_augment_cohort is not AiAugmentCohort.INELIGIBLE
     )
@@ -531,7 +528,20 @@ def target_namekey(runtime: OperatorRuntime) -> NameKey:
     return namekey
 
 
-def queue_in_browser(namekey: NameKey) -> float:
+def query_snapshot_in_browser(page: Page, runtime: OperatorRuntime) -> None:
+    """Exercise production-owned startup/query/shutdown, without a fixture-owned Store."""
+    deadline = time.monotonic() + PROCESS_STOP_TIMEOUT_SECONDS
+    while runtime.dashboard_socket_path.exists():
+        if time.monotonic() >= deadline:
+            raise TimeoutError("owned Backend did not release its IPC socket")
+        page.wait_for_timeout(round(PROCESS_POLL_SECONDS * 1_000))
+    page.get_by_test_id(control_ui.BACKEND_REFRESH_TEST_ID).click()
+    expect(page.get_by_text(Locale.QUERY_SNAPSHOT_REPLACED, exact=True)).to_be_visible(
+        timeout=round(control_vars.BACKEND_REBUILD_TIMEOUT_SECONDS * 1_000),
+    )
+
+
+def queue_in_browser(namekey: NameKey, runtime: OperatorRuntime) -> float:
     _operator_log("opening the Control Centre in Playwright")
     queued_at_monotonic: float | None = None
     with sync_playwright() as playwright:
@@ -541,6 +551,7 @@ def queue_in_browser(namekey: NameKey) -> float:
             page = browser.new_page(viewport=BROWSER_VIEWPORT)
             page.set_default_timeout(BROWSER_ASSERTION_TIMEOUT_MILLISECONDS)
             page.goto(CONTROL_CENTRE_URL, wait_until="networkidle")
+            query_snapshot_in_browser(page, runtime)
             page.get_by_label(Locale.SEARCH_FILTER).fill(namekey.to_json_key())
             rows = page.get_by_test_id(control_ui.RESEARCHER_GRID_TEST_ID).locator(
                 GRID_ROW_SELECTOR
@@ -638,10 +649,8 @@ def run_workflow_to_gone_pull(
     dashboard: DashboardProcess,
     namekey: NameKey,
 ) -> WorkflowCheckpoint:
-    queued_at_monotonic = queue_in_browser(namekey)
+    queued_at_monotonic = queue_in_browser(namekey, runtime)
     wait_for_gone_pull(runtime, dashboard)
-    assert stat.S_ISSOCK(runtime.dashboard_socket_path.stat().st_mode)
-    assert stat.S_IMODE(runtime.dashboard_socket_path.stat().st_mode) == 0o600
     return WorkflowCheckpoint(
         queued_at_monotonic=queued_at_monotonic,
     )
@@ -650,6 +659,7 @@ def run_workflow_to_gone_pull(
 def wait_for_completed_grid_row(
     page: Page,
     dashboard: DashboardProcess,
+    runtime: OperatorRuntime,
     *,
     queued_at_monotonic: float,
 ) -> tuple[Locator, str]:
@@ -667,6 +677,7 @@ def wait_for_completed_grid_row(
     deadline = queued_at_monotonic + FULL_WORKFLOW_TIMEOUT_SECONDS
     next_heartbeat = time.monotonic() + OPERATOR_HEARTBEAT_SECONDS
     previous_status: str | None = None
+    queried_after_completion = False
     while time.monotonic() < deadline:
         raise_for_dashboard_failure(dashboard)
         history_count = history_rows.count()
@@ -686,6 +697,10 @@ def wait_for_completed_grid_row(
             == control_ui.ACTION_LABEL_BY_VALUE[control_ui._RunAction.RERUN.value]
             and view_card.is_enabled()
         ):
+            if not queried_after_completion:
+                query_snapshot_in_browser(page, runtime)
+                queried_after_completion = True
+                continue
             commit_record_id = (
                 history_rows.nth(history_count - 1).locator("td").nth(2).inner_text().strip()
             )
@@ -734,6 +749,7 @@ def wait_for_completed_grid_row(
 
 def capture_completed_researcher_card(
     dashboard: DashboardProcess,
+    runtime: OperatorRuntime,
     *,
     namekey: NameKey,
     queued_at_monotonic: float,
@@ -760,6 +776,7 @@ def capture_completed_researcher_card(
             _row, commit_record_id = wait_for_completed_grid_row(
                 page,
                 dashboard,
+                runtime,
                 queued_at_monotonic=queued_at_monotonic,
             )
             history = page.get_by_test_id(control_ui.ATTEMPT_HISTORY_TABLE_TEST_ID)
@@ -911,8 +928,7 @@ def validate_workflow_artifacts(
             resolve_http_record=records_by_id.__getitem__,
         )
         with operator_runtime.backend_store.read_only() as backend_store:
-            connection = backend_store.connection
-            row = connection.execute(
+            row = backend_store.execute(
                 f"SELECT {backend_api.AUTHORITATIVE_ATTEMPT_PAYLOAD_COLUMN} "
                 f"FROM {backend_api.AUTHORITATIVE_ATTEMPTS_TABLE} "
                 f"WHERE {backend_api.AUTHORITATIVE_ATTEMPT_COMMIT_ID_COLUMN} = ?",
@@ -932,7 +948,7 @@ def validate_workflow_artifacts(
     assert len(accepted_commits) == 1
     commit_record = accepted_commits[0]
     assert (
-        backend_api._validated_readme_record(commit_record).model_dump()
+        backend_api._validated_http_record(commit_record).model_dump()
         == commit_record.model_dump()
     )
     commit_request_body = commit_record.commit_request_body
@@ -1067,6 +1083,7 @@ def assert_completed_dashboard_backend_codex_workflow_renders_researcher_card(
         )
         card_text = capture_completed_researcher_card(
             dashboard,
+            operator_runtime,
             namekey=namekey,
             queued_at_monotonic=checkpoint.queued_at_monotonic,
         )

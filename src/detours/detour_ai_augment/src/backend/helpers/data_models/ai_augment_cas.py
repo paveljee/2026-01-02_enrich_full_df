@@ -8,9 +8,8 @@ from collections.abc import Sequence
 from pathlib import Path, PurePosixPath
 from uuid import uuid7
 
-from pydantic import BaseModel, ConfigDict
-
 from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
+from src.helpers.architecture import FrozenStrictModel
 
 from .commit_event import CodexRolloutRecord
 
@@ -22,10 +21,8 @@ ROLLOUT_CAS_FILENAME_TEMPLATE = "{sha256}.jsonl"
 SSH_EXECUTABLE = "ssh"
 
 
-class AiAugmentCAS(BaseModel):
+class AiAugmentCAS(FrozenStrictModel):
     """Immutable Codex rollout snapshots addressed by their SHA-256 digest."""
-
-    model_config = ConfigDict(frozen=True)
 
     path: Path
 

@@ -4,6 +4,14 @@ from typing import Final
 
 
 class Locale:
+    ACTION_PROBE: Final = "Probe"
+    ACTION_QUERY_IPC: Final = "Query IPC"
+    PROBE_NOT_CHECKED: Final = "not checked"
+    SSH_STATUS_TEMPLATE: Final = "Lima/SSH: {status}"
+    CODEX_AUTH_STATUS_TEMPLATE: Final = "Codex/auth: {status}"
+    PROBE_TIME_TEMPLATE: Final = "Probed: {timestamp}"
+    QUERY_SNAPSHOT_REPLACED: Final = "Dashboard query snapshot replaced"
+
     CONTROL_CENTRE_LOG_PREFIX: Final = "[control-centre]"
     BACKEND_LOG_PREFIX: Final = "[backend]"
 

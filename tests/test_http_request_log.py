@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+import requests
 from pydantic import ValidationError
 
 from src.helpers.data_models.http_request_log import (
@@ -656,3 +657,48 @@ def test_invalid_schema_version_1_1_ignores_v1_coercion_flag(
             "input": "8612",
         }
     ]
+
+
+def test_response_record_roundtrip_preserves_prepared_request_and_redacts_query() -> None:
+    response = requests.Response()
+    response.status_code = 422
+    response.request = requests.Request(
+        "POST", "https://[::1]:8443/check?api_key=secret&item=one",
+        headers={"X-Model": "submission"}, data='{"name":"Málaga"}'.encode(),
+    ).prepare()
+    response.headers["Content-Type"] = "application/json; charset=utf-8"
+    response.encoding = "utf-8"
+    response._content = '{"detail":"invalide — rejeté"}'.encode()
+    record = HttpRequestLogRecord.from_response(
+        response, received_at_unix_usec=100,
+        ready_to_respond_at_unix_usec=130, duration_usec=30,
+    )
+    assert record.record_id.version == 7
+    assert record.host == "::1" and record.port == 8443
+    assert record.query == "api_key=REDACTED&item=one"
+    assert record.request_body == '{"name":"Málaga"}'
+    assert record.request_headers == dict(response.request.headers)
+    restored = HttpRequestLogRecord.model_validate_json(record.model_dump_json()).to_response()
+    assert restored.status_code == 422
+    assert restored.json() == response.json()
+    assert restored.headers == response.headers
+    assert restored.request.method == "POST"
+    assert restored.request.url == "https://[::1]:8443/check?api_key=REDACTED&item=one"
+    assert restored.request.headers["X-Model"] == "submission"
+    with pytest.raises(requests.HTTPError):
+        restored.raise_for_status()
+
+
+def test_from_response_rejects_missing_request() -> None:
+    with pytest.raises(ValueError, match="prepared request"):
+        HttpRequestLogRecord.from_response(requests.Response())
+
+
+def test_to_response_does_not_invent_a_response_for_request_only_record() -> None:
+    record = HttpRequestLogRecord(
+        schema_version="1.1", method="POST", scheme="http", host="invalid",
+        path="/validate", query="", response_code=None, response_headers=None,
+        response_body=None, received_at_unix_usec=None, duration_usec=None,
+    )
+    with pytest.raises(OSError, match="did not receive"):
+        record.to_response()

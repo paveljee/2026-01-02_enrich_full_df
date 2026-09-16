@@ -6,8 +6,9 @@ from pathlib import Path
 from typing import Self
 
 import duckdb
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
+from pydantic import Field, PrivateAttr
 
+from src.helpers.architecture import FrozenStrictModel
 from src.helpers.config import DuckDBExtensionConfig
 from src.helpers.duckdb_extensions import load_duckdb_extension
 
@@ -20,7 +21,7 @@ READ_ONLY_PERMISSIONS = 0o400
 READ_WRITE_PERMISSIONS = 0o600
 
 
-class AiAugmentDetourDB(BaseModel):
+class AiAugmentDetourDB(FrozenStrictModel):
     """
     Context-managed writable projection database.
 
@@ -29,12 +30,9 @@ class AiAugmentDetourDB(BaseModel):
     on context `__enter__` and sets them for
     reading on context `__exit__`.
 
-    When used with `.read_only()`, no file
-    permissions are modified, but `duckdb.connect`
-    is initialized with `read_only=True`.
+    `.read_only()` also enforces read-only file permissions and
+    initializes `duckdb.connect` with `read_only=True`.
     """
-
-    model_config = ConfigDict(frozen=True)
 
     path: Path
     duckdb_extensions: dict[str, DuckDBExtensionConfig] = Field(
@@ -115,6 +113,8 @@ class AiAugmentDetourDB(BaseModel):
         if self._conn is not None:
             raise RuntimeError("AiAugmentDetourDB is already open")
         try:
+            if self.path.exists():
+                self.path.chmod(READ_ONLY_PERMISSIONS)
             self._conn = self._connect(read_only=True)
         except (OSError, RuntimeError, duckdb.Error) as exc:
             self._conn = None

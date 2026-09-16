@@ -6,10 +6,13 @@ from pathlib import PurePosixPath
 from typing import Final
 
 import yaml
-from pydantic import ValidationError, computed_field
+from pydantic import PrivateAttr, ValidationError, computed_field
 
 from src.detours.detour_ai_augment.protected.src.architecture import (
     ControlCentreComponent,
+)
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_augment_config import (  # noqa: E501
+    AiAugmentDetourConfig,
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.pydantic_to_paste import (  # noqa: E501
     EXPORT_OPENALEX_API_KEY,
@@ -24,21 +27,32 @@ from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helper
     LIMA_CONFIG_PATH,
     TEXT_ENCODING,
 )
-from src.helpers.architecture import implements
+from src.helpers.architecture import FrozenStrictModel, implements
 
 from .....backend.api import (
     APPENDWATCH_REPORT_ENV_NAME,
     FORBIDDEN_NORMALIZED_PATH_PARTS,
-)
-from .....backend.helpers.data_models.ai_augment_context import (
-    AiAugmentBackendContext,
 )
 
 LIMA_APPENDWATCH_REPORT_PARAM: Final = APPENDWATCH_REPORT_ENV_NAME
 
 
 @implements[ControlCentreComponent.ContextProperty]()
-class AiAugmentControlCentreContext(AiAugmentBackendContext):
+class AiAugmentControlCentreContext(FrozenStrictModel):
+    pipeline_config: AiAugmentDetourConfig
+    _backend_rebuild_required: bool = PrivateAttr(default=True)
+
+    def begin_backend_start(self) -> tuple[str, ...]:
+        """One policy for every owned child during this Dashboard context's lifetime."""
+        arguments = ("--new", "--yes") if self._backend_rebuild_required else ("--resume", "--yes")
+        self._backend_rebuild_required = True
+        return arguments
+
+    def finish_backend_stop(
+        self, *, startup_succeeded: bool, shutdown_succeeded: bool,
+    ) -> None:
+        self._backend_rebuild_required = not (startup_succeeded and shutdown_succeeded)
+
     @computed_field(repr=False)  # type: ignore[prop-decorator]
     @cached_property
     def openalex_api_key(self) -> str:

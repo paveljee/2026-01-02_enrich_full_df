@@ -13,7 +13,7 @@ implemention of this task specification:
 This includes the rollouts:
 
 - `rollout-2026-09-11T15-54-34-01a0912d-8624-7723-82ad-e69aadb05be7.jsonl.tgz`;
-- `rollout-2026-09-14T20-37-01-01a0a1a3-3069-75f0-8dbc-63015a7ef354.jsonl`.
+- `rollout-2026-09-14T20-37-01-01a0a1a3-3069-75f0-8dbc-63015a7ef354.jsonl.tgz`.
 
 While the rollout is a
 (sometimes tar/gzipped)

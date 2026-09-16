@@ -23,6 +23,7 @@ from pathlib import Path, PurePosixPath
 from random import Random
 from typing import Any, Callable, Literal, Self, TextIO, get_args
 from uuid import UUID
+from zipfile import BadZipFile, ZipFile
 from zoneinfo import ZoneInfo
 
 import duckdb
@@ -71,6 +72,9 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.sub
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.submission_init import (  # noqa: E501
     Submission,
 )
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.submission_mixin import (  # noqa: E501
+    submission_http_context,
+)
 from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     AI_AUGMENT_COLUMNS,
@@ -96,6 +100,16 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     TEXT_ENCODING,
     AiAugmentCohort,
 )
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.model_http_interceptor import (  # noqa: E501
+    ModelHttpInterceptor,
+    ModelHttpRequired,
+    ReplayInputMissing,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.validation_event import (  # noqa: E501
+    VALIDATE_PATH,
+    ValidationRequestBody,
+)
+from src.helpers.architecture import FrozenStrictModel
 from src.helpers.cards import build_cards, write_cards_zip
 from src.helpers.data_models import (
     FragmentType,
@@ -106,10 +120,7 @@ from src.helpers.data_models import (
 from src.helpers.data_models.http_request_log import (
     HttpRequestLogRecord,
 )
-from src.helpers.duckdb_utils import (
-    duckdb_quote_identifier,
-    materialize_innerdicts_from_rows_table,
-)
+from src.helpers.duckdb_utils import duckdb_quote_identifier
 from src.helpers.name_matching import normalized_tokens_sql
 from src.helpers.vars import (
     CARD_INTRODUCTION,
@@ -130,15 +141,16 @@ from src.helpers.vars import (
 
 from ..control_centre.dashboard.helpers.data_models.run_outcome import (
     NAME_KEY_HEADER,
+    RUN_OUTCOME_PATHS,
     name_key_from_header_value,
     name_key_header_value,
 )
+from .helpers.data_models.ai_augment_backend_store import AiAugmentBackendStore
 from .helpers.data_models.ai_augment_context import (
     AiAugmentBackendContext,
 )
 from .helpers.data_models.ai_augment_singular_outer_dict import (
     AiAugmentSingularOuterDict,
-    CommittedInnerDict,
 )
 from .helpers.data_models.commit_event import (
     COMMIT_PATH,
@@ -154,10 +166,12 @@ from .helpers.data_models.commit_event import (
     source_key_from_header_value,
     source_key_header_value,
 )
+from .helpers.data_models.committed_innerdict import CommittedInnerDict
 from .helpers.data_models.query_response import (
     AgentRuntimeAttempt,
     AgentRuntimeAttemptRecord,
 )
+from .helpers.data_models.run_outcome_response import RunOutcomeResponse
 
 logger = logging.getLogger(__name__)
 
@@ -345,7 +359,6 @@ AUTHORITATIVE_FASTAPI_ROUTES = frozenset({
     (HTTP_POST_METHOD, PUSH_PATH),
 })
 AUTHORITATIVE_COMMIT_ROUTE = (HTTP_POST_METHOD, COMMIT_PATH)
-AUTHORITATIVE_CHECKPOINT_ID = 1
 AUTHORITATIVE_FIRST_LINE = 1
 AUTHORITATIVE_EMPTY_OFFSET = 0
 AUTHORITATIVE_LOG_BASE64_ENCODING = "base64"
@@ -417,16 +430,6 @@ CODEX_EVIDENCE_AUDIT_TABLE = "codex_evidence_attempts"
 CODEX_OUTPUT_ROWS_TABLE = "codex_output_rows"
 CODEX_OUTPUT_VIEW = "codex_output"
 CODEX_INNERDICT_TABLE = "codex_innerdicts"
-CODEX_FC_ID_SEQUENCE = "codex_fc_id_sequence"
-CODEX_FCO_ID_SEQUENCE = "codex_fco_id_sequence"
-CODEX_CALLS_ID_SEQUENCE = "codex_calls_id_sequence"
-CODEX_TURN_REF_ID_SEQUENCE = "codex_turn_ref_id_sequence"
-CODEX_EVIDENCE_AUDIT_ID_SEQUENCE = "codex_evidence_audit_id_sequence"
-AUTHORITATIVE_PROJECTION_TABLE = "detour_authoritative_projection"
-AUTHORITATIVE_PROJECTION_ID_COLUMN = "id"
-AUTHORITATIVE_PROJECTION_LINE_COLUMN = "line_number"
-AUTHORITATIVE_PROJECTION_OFFSET_COLUMN = "byte_offset"
-AUTHORITATIVE_PROJECTION_HASH_COLUMN = "line_sha256"
 AUTHORITATIVE_RECORDS_TABLE = "detour_http_records"
 AUTHORITATIVE_RECORD_ORDINAL_COLUMN = "record_ordinal"
 AUTHORITATIVE_RECORD_ID_COLUMN = "record_id"
@@ -466,13 +469,6 @@ CODEX_EVIDENCE_ASSESSMENT_COL = "assessment"
 CODEX_EVIDENCE_APPLIED_COL = "applied"
 CODEX_EVIDENCE_ACCEPTED_COL = "accepted"
 CODEX_EVIDENCE_AUDIT_ID_COL = "id"
-CREATE_AUTHORITATIVE_PROJECTION_TABLE_SQL = (
-    f"CREATE TABLE IF NOT EXISTS {AUTHORITATIVE_PROJECTION_TABLE} ("
-    f"{AUTHORITATIVE_PROJECTION_ID_COLUMN} INTEGER PRIMARY KEY, "
-    f"{AUTHORITATIVE_PROJECTION_LINE_COLUMN} BIGINT NOT NULL, "
-    f"{AUTHORITATIVE_PROJECTION_OFFSET_COLUMN} BIGINT NOT NULL, "
-    f"{AUTHORITATIVE_PROJECTION_HASH_COLUMN} VARCHAR NOT NULL)"
-)
 CREATE_AUTHORITATIVE_RECORDS_TABLE_SQL = (
     f"CREATE TABLE IF NOT EXISTS {AUTHORITATIVE_RECORDS_TABLE} ("
     f"{AUTHORITATIVE_RECORD_ORDINAL_COLUMN} BIGINT PRIMARY KEY, "
@@ -583,27 +579,7 @@ async def lifespan(
     _app: FastAPI,
     runtime: AiAugmentBackendContext,
 ) -> AsyncGenerator[None, None]:
-    def project_record(
-        *,
-        conn: duckdb.DuckDBPyConnection,
-        record: HttpRequestLogRecord,
-        line_number: int,
-        byte_offset: int,
-        line_sha256: str,
-        materialize_files: bool,
-    ) -> AgentRuntimeAttemptRecord | None:
-        return _project_readme_record(
-            conn,
-            runtime,
-            record,
-            line_number=line_number,
-            byte_offset=byte_offset,
-            line_sha256=line_sha256,
-            materialize_files=materialize_files,
-        )
-
     parent_watch: asyncio.Task[None] | None = None
-    acquired_backend_process_lock = False
     try:
         with BACKEND_WORKFLOW_STATE_LOCK:
             global BACKEND_CURRENT_PULL_RECORD
@@ -618,25 +594,26 @@ async def lifespan(
             BACKEND_SESSION_ID = None
             BACKEND_ATTEMPT_RECORD = None
             BACKEND_LIFECYCLE = BackendLifecycle.READY
-        if BACKEND_PROCESS_LOCK_DESCRIPTOR is None:
-            _acquire_backend_process_lock()
-            acquired_backend_process_lock = True
-        with runtime.pipeline_config.backend_store.writable(project_record):
-            prove_workflow_inputs_readable()
-            start_backend_session_reader()
-            parent_pid = os.environ.get(CONTROL_PARENT_PID_ENV_NAME)
-            if parent_pid is not None:
-                if not parent_pid.isdecimal() or int(parent_pid) <= 0:
-                    raise _PushConfigurationError(Locale.CONTROL_PARENT_PID_INVALID)
-                parent_watch = asyncio.create_task(_watch_control_parent(int(parent_pid)))
+        prove_workflow_inputs_readable()
+        start_backend_session_reader()
+        parent_pid = os.environ.get(CONTROL_PARENT_PID_ENV_NAME)
+        if parent_pid is not None:
+            if not parent_pid.isdecimal() or int(parent_pid) <= 0:
+                raise _PushConfigurationError(Locale.CONTROL_PARENT_PID_INVALID)
+            parent_watch = asyncio.create_task(_watch_control_parent(int(parent_pid)))
+        try:
+            yield
+        finally:
             try:
-                yield
-            finally:
                 if AUTHORITATIVE_BACKGROUND_TASKS:
-                    await asyncio.gather(
+                    results = await asyncio.gather(
                         *tuple(AUTHORITATIVE_BACKGROUND_TASKS),
                         return_exceptions=True,
                     )
+                    failures = [result for result in results if isinstance(result, BaseException)]
+                    if failures:
+                        raise BaseExceptionGroup("Backend background work failed", failures)
+            finally:
                 if parent_watch is not None:
                     parent_watch.cancel()
                     with suppress(asyncio.CancelledError):
@@ -644,9 +621,6 @@ async def lifespan(
     except Exception as exc:
         logger.error(Locale.API_LIFESPAN_FAILED_LOG, exc)
         raise
-    finally:
-        if acquired_backend_process_lock:
-            _release_backend_process_lock()
 
 
 async def _watch_control_parent(parent_pid: int) -> None:
@@ -772,32 +746,24 @@ PUSH_ROUTE: dict[str, Any] = {
 app = FastAPI(**APP_CONFIG)
 
 
-class _RetryEvidenceObligation(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
+class _RetryEvidenceObligation(FrozenStrictModel):
     outcome: EvidenceOutcome
     excerpt: StrictStr | None = None
     url: StrictStr | None = None
     normalized_tokens: list[StrictStr] = Field(default_factory=list)
 
 
-class _RetryFieldObligation(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
+class _RetryFieldObligation(FrozenStrictModel):
     value: StrictStr
     evidence: list[_RetryEvidenceObligation]
     accepted: bool
 
 
-class _RetryObligations(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
+class _RetryObligations(FrozenStrictModel):
     fields: dict[StrictStr, _RetryFieldObligation]
 
 
-class _EvidenceCandidateAudit(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
+class _EvidenceCandidateAudit(FrozenStrictModel):
     ref_id: StrictStr
     call_id: StrictStr
     cite_text: StrictStr
@@ -805,9 +771,7 @@ class _EvidenceCandidateAudit(BaseModel):
     url: StrictStr
 
 
-class _EvidenceItemAudit(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
+class _EvidenceItemAudit(FrozenStrictModel):
     field: StrictStr
     index: int
     outcome: EvidenceOutcome
@@ -817,14 +781,14 @@ class _EvidenceItemAudit(BaseModel):
     candidates: list[_EvidenceCandidateAudit]
 
 
-class _EvidenceAttemptAudit(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
+class _EvidenceAttemptAudit(FrozenStrictModel):
     items: list[_EvidenceItemAudit]
 
 
 class _CodexTextResult(BaseModel):
-    model_config = ConfigDict(extra="ignore", strict=True)
+    """Note `extra="ignore"`"""
+
+    model_config = ConfigDict(extra="ignore", frozen=True, strict=True)
 
     type: Literal["text_result"]
     domain: StrictStr | None = None
@@ -1881,24 +1845,15 @@ def build_rollout_index(
 
 
 def _create_codex_schema(
-    conn: duckdb.DuckDBPyConnection,
+    store: AiAugmentBackendStore,
     *,
     codex_match_version: int = 1,
 ) -> None:
-    for sequence in (
-        CODEX_FC_ID_SEQUENCE,
-        CODEX_FCO_ID_SEQUENCE,
-        CODEX_CALLS_ID_SEQUENCE,
-        CODEX_TURN_REF_ID_SEQUENCE,
-        CODEX_EVIDENCE_AUDIT_ID_SEQUENCE,
-    ):
-        conn.execute(f"CREATE SEQUENCE IF NOT EXISTS {sequence}")
-
     id_col = duckdb_quote_identifier(CODEX_ID_COL)
-    conn.execute(
+    store.execute(
         f"""
         CREATE TABLE IF NOT EXISTS {CODEX_FC_TABLE} (
-            {id_col} BIGINT PRIMARY KEY DEFAULT nextval('{CODEX_FC_ID_SEQUENCE}'),
+            {id_col} BIGINT PRIMARY KEY,
             {duckdb_quote_identifier(CODEX_FC_TIMESTAMP_COL)} TIMESTAMPTZ NOT NULL,
             {duckdb_quote_identifier(CODEX_FC_ID_COL)} VARCHAR NOT NULL UNIQUE,
             {duckdb_quote_identifier(CODEX_FC_NAME_COL)} VARCHAR NOT NULL,
@@ -1907,7 +1862,7 @@ def _create_codex_schema(
         )
         """
     )
-    conn.execute(
+    store.execute(
         f"""
         CREATE TABLE IF NOT EXISTS {CODEX_RETRY_BASELINE_TABLE} (
             {duckdb_quote_identifier(CODEX_RETRY_RUN_ID_COL)} VARCHAR PRIMARY KEY,
@@ -1919,12 +1874,10 @@ def _create_codex_schema(
         )
         """
     )
-    conn.execute(
+    store.execute(
         f"""
         CREATE TABLE IF NOT EXISTS {CODEX_EVIDENCE_AUDIT_TABLE} (
-            {duckdb_quote_identifier(CODEX_EVIDENCE_AUDIT_ID_COL)}
-                BIGINT PRIMARY KEY
-                DEFAULT nextval('{CODEX_EVIDENCE_AUDIT_ID_SEQUENCE}'),
+            {duckdb_quote_identifier(CODEX_EVIDENCE_AUDIT_ID_COL)} BIGINT PRIMARY KEY,
             {duckdb_quote_identifier(CODEX_RETRY_ATTEMPT_ID_COL)} VARCHAR NOT NULL UNIQUE,
             {duckdb_quote_identifier(CODEX_RETRY_RUN_ID_COL)} VARCHAR NOT NULL,
             {duckdb_quote_identifier(CODEX_RETRY_NAMEKEY_COL)} VARCHAR NOT NULL,
@@ -1937,19 +1890,19 @@ def _create_codex_schema(
         )
         """
     )
-    conn.execute(
+    store.execute(
         f"""
         CREATE TABLE IF NOT EXISTS {CODEX_FCO_TABLE} (
-            {id_col} BIGINT PRIMARY KEY DEFAULT nextval('{CODEX_FCO_ID_SEQUENCE}'),
+            {id_col} BIGINT PRIMARY KEY,
             {duckdb_quote_identifier(CODEX_FCO_TIMESTAMP_COL)} TIMESTAMPTZ NOT NULL,
             {duckdb_quote_identifier(CODEX_FCO_ID_COL)} VARCHAR NOT NULL UNIQUE
         )
         """
     )
-    conn.execute(
+    store.execute(
         f"""
         CREATE TABLE IF NOT EXISTS {CODEX_CALLS_TABLE} (
-            {id_col} BIGINT PRIMARY KEY DEFAULT nextval('{CODEX_CALLS_ID_SEQUENCE}'),
+            {id_col} BIGINT PRIMARY KEY,
             {duckdb_quote_identifier(CODEX_CALL_ID_COL)} VARCHAR NOT NULL UNIQUE,
             {duckdb_quote_identifier(CODEX_FC_ID_COL)} VARCHAR NOT NULL UNIQUE,
             {duckdb_quote_identifier(CODEX_FCO_ID_COL)} VARCHAR NOT NULL UNIQUE,
@@ -1957,10 +1910,10 @@ def _create_codex_schema(
         )
         """
     )
-    conn.execute(
+    store.execute(
         f"""
         CREATE TABLE IF NOT EXISTS {CODEX_TURN_REF_TABLE} (
-            {id_col} BIGINT PRIMARY KEY DEFAULT nextval('{CODEX_TURN_REF_ID_SEQUENCE}'),
+            {id_col} BIGINT PRIMARY KEY,
             {duckdb_quote_identifier(CODEX_REF_ID_COL)} VARCHAR NOT NULL,
             {duckdb_quote_identifier(CODEX_CALL_ID_COL)} VARCHAR NOT NULL,
             {duckdb_quote_identifier(CODEX_REF_DOMAIN_COL)} VARCHAR,
@@ -1977,7 +1930,7 @@ def _create_codex_schema(
         """
     )
     if codex_match_version == 2:
-        conn.execute(
+        store.execute(
             f"""
             CREATE OR REPLACE VIEW {CODEX_TURN_REF_NORMALIZED_VIEW} AS
             SELECT
@@ -1989,8 +1942,17 @@ def _create_codex_schema(
         )
 
 
+def _next_codex_row_id(store: AiAugmentBackendStore, table_name: str) -> int:
+    """Allocation shares the caller's Store transaction, so rollback consumes no IDs."""
+    row = store.execute(
+        f"SELECT COALESCE(MAX(id), 0) + 1 FROM {duckdb_quote_identifier(table_name)}"
+    ).fetchone()
+    assert row is not None
+    return int(row[0])
+
+
 def _insert_or_validate(
-    conn: duckdb.DuckDBPyConnection,
+    store: AiAugmentBackendStore,
     *,
     table_name: str,
     key_column: str,
@@ -1999,7 +1961,7 @@ def _insert_or_validate(
     values: tuple[object, ...],
 ) -> None:
     projection = ", ".join(duckdb_quote_identifier(column) for column in columns)
-    existing = conn.execute(
+    existing = store.execute(
         f"SELECT {projection} FROM {table_name} WHERE {duckdb_quote_identifier(key_column)} = ?",
         [key_value],
     ).fetchall()
@@ -2012,8 +1974,11 @@ def _insert_or_validate(
                 )
             )
         return
+    columns = (CODEX_ID_COL, *columns)
+    values = (_next_codex_row_id(store, table_name), *values)
+    projection = ", ".join(duckdb_quote_identifier(column) for column in columns)
     placeholders = ", ".join("?" for _column in columns)
-    conn.execute(
+    store.execute(
         f"INSERT INTO {table_name} ({projection}) VALUES ({placeholders})",
         list(values),
     )
@@ -2024,254 +1989,247 @@ def _datetime_value(timestamp: str) -> datetime:
 
 
 def persist_rollout_index(
-    conn: duckdb.DuckDBPyConnection,
+    store: AiAugmentBackendStore,
     rollout_index: _RolloutIndex,
     *,
     codex_match_version: int = 1,
-    manage_transaction: bool = True,
 ) -> None:
-    if manage_transaction:
-        conn.execute("BEGIN TRANSACTION")
-    try:
-        _create_codex_schema(
-            conn,
-            codex_match_version=codex_match_version,
-        )
-        current_call_ids = {row.call_id for row in rollout_index.fc_rows}
-        existing_call_rows: list[tuple[str]] = conn.execute(
-            f"SELECT {duckdb_quote_identifier(CODEX_CALL_ID_COL)} "
-            f"FROM {CODEX_CALLS_TABLE} WHERE "
-            f"{duckdb_quote_identifier(CODEX_ROLLOUT_FILENAME_COL)} = ?",
-            [rollout_index.session.rollout_filename],
-        ).fetchall()
-        existing_call_ids = {
-            row[0]
-            for row in existing_call_rows
-        }
-        if not existing_call_ids.issubset(current_call_ids):
-            raise _PushValidationError(Locale.PROVENANCE_PREFIX_OLDER)
-        current_turn_keys = {(row.call_id, row.ref_id) for row in rollout_index.turn_ref_rows}
-        existing_turn_rows: list[tuple[str, str]] = conn.execute(
-            f"SELECT "
-            f"ts.{duckdb_quote_identifier(CODEX_CALL_ID_COL)}, "
-            f"ts.{duckdb_quote_identifier(CODEX_REF_ID_COL)} "
-            f"FROM {CODEX_TURN_REF_TABLE} ts "
-            f"JOIN {CODEX_CALLS_TABLE} calls ON "
-            f"calls.{duckdb_quote_identifier(CODEX_CALL_ID_COL)} = "
-            f"ts.{duckdb_quote_identifier(CODEX_CALL_ID_COL)} "
-            f"WHERE calls.{duckdb_quote_identifier(CODEX_ROLLOUT_FILENAME_COL)} = ?",
-            [rollout_index.session.rollout_filename],
-        ).fetchall()
-        existing_turn_keys = {
-            (row[0], row[1])
-            for row in existing_turn_rows
-        }
-        if not existing_turn_keys.issubset(current_turn_keys):
-            raise _PushValidationError(Locale.CITATION_PREFIX_OLDER)
+    _create_codex_schema(
+        store,
+        codex_match_version=codex_match_version,
+    )
+    current_call_ids = {row.call_id for row in rollout_index.fc_rows}
+    existing_call_rows: list[tuple[str]] = store.execute(
+        f"SELECT {duckdb_quote_identifier(CODEX_CALL_ID_COL)} "
+        f"FROM {CODEX_CALLS_TABLE} WHERE "
+        f"{duckdb_quote_identifier(CODEX_ROLLOUT_FILENAME_COL)} = ?",
+        [rollout_index.session.rollout_filename],
+    ).fetchall()
+    existing_call_ids = {
+        row[0]
+        for row in existing_call_rows
+    }
+    if not existing_call_ids.issubset(current_call_ids):
+        raise _PushValidationError(Locale.PROVENANCE_PREFIX_OLDER)
+    current_turn_keys = {(row.call_id, row.ref_id) for row in rollout_index.turn_ref_rows}
+    existing_turn_rows: list[tuple[str, str]] = store.execute(
+        f"SELECT "
+        f"ts.{duckdb_quote_identifier(CODEX_CALL_ID_COL)}, "
+        f"ts.{duckdb_quote_identifier(CODEX_REF_ID_COL)} "
+        f"FROM {CODEX_TURN_REF_TABLE} ts "
+        f"JOIN {CODEX_CALLS_TABLE} calls ON "
+        f"calls.{duckdb_quote_identifier(CODEX_CALL_ID_COL)} = "
+        f"ts.{duckdb_quote_identifier(CODEX_CALL_ID_COL)} "
+        f"WHERE calls.{duckdb_quote_identifier(CODEX_ROLLOUT_FILENAME_COL)} = ?",
+        [rollout_index.session.rollout_filename],
+    ).fetchall()
+    existing_turn_keys = {
+        (row[0], row[1])
+        for row in existing_turn_rows
+    }
+    if not existing_turn_keys.issubset(current_turn_keys):
+        raise _PushValidationError(Locale.CITATION_PREFIX_OLDER)
 
-        fc_by_call = {row.call_id: row for row in rollout_index.fc_rows}
-        fco_by_call = {row.call_id: row for row in rollout_index.fco_rows}
-        if set(fc_by_call) != current_call_ids or set(fco_by_call) != current_call_ids:
-            raise _PushValidationError(Locale.ROLLOUT_LINKAGES_INCOMPLETE)
-        for function_call_row in rollout_index.fc_rows:
-            _insert_or_validate(
-                conn,
-                table_name=CODEX_FC_TABLE,
-                key_column=CODEX_FC_ID_COL,
-                key_value=function_call_row.fc_id,
-                columns=(
-                    CODEX_FC_TIMESTAMP_COL,
-                    CODEX_FC_ID_COL,
-                    CODEX_FC_NAME_COL,
-                    CODEX_FC_NAMESPACE_COL,
-                    CODEX_FC_ARGUMENTS_COL,
-                ),
-                values=(
-                    _datetime_value(function_call_row.timestamp),
-                    function_call_row.fc_id,
-                    function_call_row.name,
-                    function_call_row.namespace,
-                    function_call_row.arguments_json,
-                ),
-            )
-        for function_output_row in rollout_index.fco_rows:
-            _insert_or_validate(
-                conn,
-                table_name=CODEX_FCO_TABLE,
-                key_column=CODEX_FCO_ID_COL,
-                key_value=function_output_row.fco_id,
-                columns=(CODEX_FCO_TIMESTAMP_COL, CODEX_FCO_ID_COL),
-                values=(
-                    _datetime_value(function_output_row.timestamp),
-                    function_output_row.fco_id,
-                ),
-            )
-        for call_id in sorted(current_call_ids):
-            fc_row = fc_by_call[call_id]
-            fco_row = fco_by_call[call_id]
-            _insert_or_validate(
-                conn,
-                table_name=CODEX_CALLS_TABLE,
-                key_column=CODEX_CALL_ID_COL,
-                key_value=call_id,
-                columns=(
-                    CODEX_CALL_ID_COL,
-                    CODEX_FC_ID_COL,
-                    CODEX_FCO_ID_COL,
-                    CODEX_ROLLOUT_FILENAME_COL,
-                ),
-                values=(
-                    call_id,
-                    fc_row.fc_id,
-                    fco_row.fco_id,
-                    rollout_index.session.rollout_filename,
-                ),
-            )
-        for turn_ref_row in rollout_index.turn_ref_rows:
-            key_value = f"{turn_ref_row.call_id}{CUMULATIVE_KEY_SEPARATOR}{turn_ref_row.ref_id}"
-            columns = (
-                CODEX_REF_ID_COL,
+    fc_by_call = {row.call_id: row for row in rollout_index.fc_rows}
+    fco_by_call = {row.call_id: row for row in rollout_index.fco_rows}
+    if set(fc_by_call) != current_call_ids or set(fco_by_call) != current_call_ids:
+        raise _PushValidationError(Locale.ROLLOUT_LINKAGES_INCOMPLETE)
+    for function_call_row in rollout_index.fc_rows:
+        _insert_or_validate(
+            store,
+            table_name=CODEX_FC_TABLE,
+            key_column=CODEX_FC_ID_COL,
+            key_value=function_call_row.fc_id,
+            columns=(
+                CODEX_FC_TIMESTAMP_COL,
+                CODEX_FC_ID_COL,
+                CODEX_FC_NAME_COL,
+                CODEX_FC_NAMESPACE_COL,
+                CODEX_FC_ARGUMENTS_COL,
+            ),
+            values=(
+                _datetime_value(function_call_row.timestamp),
+                function_call_row.fc_id,
+                function_call_row.name,
+                function_call_row.namespace,
+                function_call_row.arguments_json,
+            ),
+        )
+    for function_output_row in rollout_index.fco_rows:
+        _insert_or_validate(
+            store,
+            table_name=CODEX_FCO_TABLE,
+            key_column=CODEX_FCO_ID_COL,
+            key_value=function_output_row.fco_id,
+            columns=(CODEX_FCO_TIMESTAMP_COL, CODEX_FCO_ID_COL),
+            values=(
+                _datetime_value(function_output_row.timestamp),
+                function_output_row.fco_id,
+            ),
+        )
+    for call_id in sorted(current_call_ids):
+        fc_row = fc_by_call[call_id]
+        fco_row = fco_by_call[call_id]
+        _insert_or_validate(
+            store,
+            table_name=CODEX_CALLS_TABLE,
+            key_column=CODEX_CALL_ID_COL,
+            key_value=call_id,
+            columns=(
                 CODEX_CALL_ID_COL,
-                CODEX_REF_DOMAIN_COL,
-                CODEX_REF_SNIPPET_COL,
-                CODEX_REF_THUMBNAIL_URL_COL,
-                CODEX_REF_TITLE_COL,
-                CODEX_REF_URL_COL,
-                CODEX_CITE_TEXT_COL,
-            )
-            projection = ", ".join(duckdb_quote_identifier(column) for column in columns)
-            existing = conn.execute(
-                f"SELECT {projection} FROM {CODEX_TURN_REF_TABLE} WHERE "
-                f"{duckdb_quote_identifier(CODEX_CALL_ID_COL)} = ? AND "
-                f"{duckdb_quote_identifier(CODEX_REF_ID_COL)} = ?",
-                [turn_ref_row.call_id, turn_ref_row.ref_id],
-            ).fetchall()
-            values = (
-                turn_ref_row.ref_id,
-                turn_ref_row.call_id,
-                turn_ref_row.domain,
-                turn_ref_row.snippet,
-                turn_ref_row.thumbnail_url,
-                turn_ref_row.title,
-                turn_ref_row.url,
-                turn_ref_row.cite_text,
-            )
-            if existing:
-                if len(existing) != 1 or existing[0] != values:
-                    raise _PushValidationError(
-                        Locale.CUMULATIVE_ROW_CONFLICT_TEMPLATE.format(
-                            table_name=CODEX_TURN_REF_TABLE,
-                            key_value=key_value,
-                        )
-                    )
-            else:
-                placeholders = ", ".join("?" for _column in columns)
-                conn.execute(
-                    f"INSERT INTO {CODEX_TURN_REF_TABLE} ({projection}) VALUES ({placeholders})",
-                    list(values),
-                )
-
-        integrity_checks = (
-            (
-                CODEX_FC_TABLE,
-                duckdb_quote_identifier(CODEX_FC_ID_COL),
+                CODEX_FC_ID_COL,
+                CODEX_FCO_ID_COL,
+                CODEX_ROLLOUT_FILENAME_COL,
             ),
-            (
-                CODEX_FCO_TABLE,
-                duckdb_quote_identifier(CODEX_FCO_ID_COL),
-            ),
-            (
-                CODEX_CALLS_TABLE,
-                duckdb_quote_identifier(CODEX_CALL_ID_COL),
-            ),
-            (
-                CODEX_TURN_REF_TABLE,
-                "("
-                + duckdb_quote_identifier(CODEX_CALL_ID_COL)
-                + ", "
-                + duckdb_quote_identifier(CODEX_REF_ID_COL)
-                + ")",
+            values=(
+                call_id,
+                fc_row.fc_id,
+                fco_row.fco_id,
+                rollout_index.session.rollout_filename,
             ),
         )
-        for table_name, distinct_expression in integrity_checks:
-            integrity_row = conn.execute(
-                f"SELECT COUNT(*), COUNT(DISTINCT {distinct_expression}) FROM {table_name}"
-            ).fetchone()
-            if integrity_row is None:
+    for turn_ref_row in rollout_index.turn_ref_rows:
+        key_value = f"{turn_ref_row.call_id}{CUMULATIVE_KEY_SEPARATOR}{turn_ref_row.ref_id}"
+        columns: tuple[str, ...] = (
+            CODEX_REF_ID_COL,
+            CODEX_CALL_ID_COL,
+            CODEX_REF_DOMAIN_COL,
+            CODEX_REF_SNIPPET_COL,
+            CODEX_REF_THUMBNAIL_URL_COL,
+            CODEX_REF_TITLE_COL,
+            CODEX_REF_URL_COL,
+            CODEX_CITE_TEXT_COL,
+        )
+        projection = ", ".join(duckdb_quote_identifier(column) for column in columns)
+        existing = store.execute(
+            f"SELECT {projection} FROM {CODEX_TURN_REF_TABLE} WHERE "
+            f"{duckdb_quote_identifier(CODEX_CALL_ID_COL)} = ? AND "
+            f"{duckdb_quote_identifier(CODEX_REF_ID_COL)} = ?",
+            [turn_ref_row.call_id, turn_ref_row.ref_id],
+        ).fetchall()
+        values: tuple[object, ...] = (
+            turn_ref_row.ref_id,
+            turn_ref_row.call_id,
+            turn_ref_row.domain,
+            turn_ref_row.snippet,
+            turn_ref_row.thumbnail_url,
+            turn_ref_row.title,
+            turn_ref_row.url,
+            turn_ref_row.cite_text,
+        )
+        if existing:
+            if len(existing) != 1 or existing[0] != values:
                 raise _PushValidationError(
-                    Locale.PROVENANCE_INTEGRITY_QUERY_FAILED_TEMPLATE.format(table_name=table_name)
+                    Locale.CUMULATIVE_ROW_CONFLICT_TEMPLATE.format(
+                        table_name=CODEX_TURN_REF_TABLE,
+                        key_value=key_value,
+                    )
                 )
-            total, distinct = integrity_row
-            if total != distinct:
-                raise _PushValidationError(
-                    Locale.PROVENANCE_UNIQUENESS_FAILED_TEMPLATE.format(table_name=table_name)
-                )
+        else:
+            columns = (CODEX_ID_COL, *columns)
+            values = (_next_codex_row_id(store, CODEX_TURN_REF_TABLE), *values)
+            projection = ", ".join(duckdb_quote_identifier(column) for column in columns)
+            placeholders = ", ".join("?" for _column in columns)
+            store.execute(
+                f"INSERT INTO {CODEX_TURN_REF_TABLE} ({projection}) VALUES ({placeholders})",
+                list(values),
+            )
 
-        linkage_row = conn.execute(
-            f"""
-            SELECT
-                (
-                    SELECT COUNT(*)
-                    FROM {CODEX_CALLS_TABLE} calls
-                    LEFT JOIN {CODEX_FC_TABLE} fc
-                      ON fc.{duckdb_quote_identifier(CODEX_FC_ID_COL)} =
-                         calls.{duckdb_quote_identifier(CODEX_FC_ID_COL)}
-                    WHERE fc.{duckdb_quote_identifier(CODEX_ID_COL)} IS NULL
-                ),
-                (
-                    SELECT COUNT(*)
-                    FROM {CODEX_CALLS_TABLE} calls
-                    LEFT JOIN {CODEX_FCO_TABLE} fco
-                      ON fco.{duckdb_quote_identifier(CODEX_FCO_ID_COL)} =
-                         calls.{duckdb_quote_identifier(CODEX_FCO_ID_COL)}
-                    WHERE fco.{duckdb_quote_identifier(CODEX_ID_COL)} IS NULL
-                ),
-                (
-                    SELECT COUNT(*)
-                    FROM {CODEX_TURN_REF_TABLE} ts
-                    LEFT JOIN {CODEX_CALLS_TABLE} calls
-                      ON calls.{duckdb_quote_identifier(CODEX_CALL_ID_COL)} =
-                         ts.{duckdb_quote_identifier(CODEX_CALL_ID_COL)}
-                    WHERE calls.{duckdb_quote_identifier(CODEX_ID_COL)} IS NULL
-                )
-            """
+    integrity_checks = (
+        (
+            CODEX_FC_TABLE,
+            duckdb_quote_identifier(CODEX_FC_ID_COL),
+        ),
+        (
+            CODEX_FCO_TABLE,
+            duckdb_quote_identifier(CODEX_FCO_ID_COL),
+        ),
+        (
+            CODEX_CALLS_TABLE,
+            duckdb_quote_identifier(CODEX_CALL_ID_COL),
+        ),
+        (
+            CODEX_TURN_REF_TABLE,
+            "("
+            + duckdb_quote_identifier(CODEX_CALL_ID_COL)
+            + ", "
+            + duckdb_quote_identifier(CODEX_REF_ID_COL)
+            + ")",
+        ),
+    )
+    for table_name, distinct_expression in integrity_checks:
+        integrity_row = store.execute(
+            f"SELECT COUNT(*), COUNT(DISTINCT {distinct_expression}) FROM {table_name}"
         ).fetchone()
-        if linkage_row is None:
-            raise _PushValidationError(Locale.PROVENANCE_LINKAGE_QUERY_FAILED)
-        missing_fc_links, missing_fco_links, missing_call_links = linkage_row
-        if missing_fc_links or missing_fco_links or missing_call_links:
-            raise _PushValidationError(Locale.PROVENANCE_RELATIONSHIPS_INCOMPLETE)
+        if integrity_row is None:
+            raise _PushValidationError(
+                Locale.PROVENANCE_INTEGRITY_QUERY_FAILED_TEMPLATE.format(table_name=table_name)
+            )
+        total, distinct = integrity_row
+        if total != distinct:
+            raise _PushValidationError(
+                Locale.PROVENANCE_UNIQUENESS_FAILED_TEMPLATE.format(table_name=table_name)
+            )
 
-        persisted_call_rows: list[tuple[str]] = conn.execute(
-            f"SELECT {duckdb_quote_identifier(CODEX_CALL_ID_COL)} "
-            f"FROM {CODEX_CALLS_TABLE} WHERE "
-            f"{duckdb_quote_identifier(CODEX_ROLLOUT_FILENAME_COL)} = ?",
-            [rollout_index.session.rollout_filename],
-        ).fetchall()
-        persisted_call_ids = {row[0] for row in persisted_call_rows}
-        persisted_turn_rows: list[tuple[str, str]] = conn.execute(
-            f"SELECT "
-            f"ts.{duckdb_quote_identifier(CODEX_CALL_ID_COL)}, "
-            f"ts.{duckdb_quote_identifier(CODEX_REF_ID_COL)} "
-            f"FROM {CODEX_TURN_REF_TABLE} ts "
-            f"JOIN {CODEX_CALLS_TABLE} calls ON "
-            f"calls.{duckdb_quote_identifier(CODEX_CALL_ID_COL)} = "
-            f"ts.{duckdb_quote_identifier(CODEX_CALL_ID_COL)} "
-            f"WHERE calls.{duckdb_quote_identifier(CODEX_ROLLOUT_FILENAME_COL)} = ?",
-            [rollout_index.session.rollout_filename],
-        ).fetchall()
-        persisted_turn_keys = {
-            (row[0], row[1])
-            for row in persisted_turn_rows
-        }
-        if persisted_call_ids != current_call_ids or persisted_turn_keys != current_turn_keys:
-            raise _PushValidationError(Locale.PROVENANCE_PREFIX_MISMATCH)
-        if manage_transaction:
-            conn.execute("COMMIT")
-    except Exception:
-        if manage_transaction:
-            conn.execute("ROLLBACK")
-        raise
+    linkage_row = store.execute(
+        f"""
+        SELECT
+            (
+                SELECT COUNT(*)
+                FROM {CODEX_CALLS_TABLE} calls
+                LEFT JOIN {CODEX_FC_TABLE} fc
+                  ON fc.{duckdb_quote_identifier(CODEX_FC_ID_COL)} =
+                     calls.{duckdb_quote_identifier(CODEX_FC_ID_COL)}
+                WHERE fc.{duckdb_quote_identifier(CODEX_ID_COL)} IS NULL
+            ),
+            (
+                SELECT COUNT(*)
+                FROM {CODEX_CALLS_TABLE} calls
+                LEFT JOIN {CODEX_FCO_TABLE} fco
+                  ON fco.{duckdb_quote_identifier(CODEX_FCO_ID_COL)} =
+                     calls.{duckdb_quote_identifier(CODEX_FCO_ID_COL)}
+                WHERE fco.{duckdb_quote_identifier(CODEX_ID_COL)} IS NULL
+            ),
+            (
+                SELECT COUNT(*)
+                FROM {CODEX_TURN_REF_TABLE} ts
+                LEFT JOIN {CODEX_CALLS_TABLE} calls
+                  ON calls.{duckdb_quote_identifier(CODEX_CALL_ID_COL)} =
+                     ts.{duckdb_quote_identifier(CODEX_CALL_ID_COL)}
+                WHERE calls.{duckdb_quote_identifier(CODEX_ID_COL)} IS NULL
+            )
+        """
+    ).fetchone()
+    if linkage_row is None:
+        raise _PushValidationError(Locale.PROVENANCE_LINKAGE_QUERY_FAILED)
+    missing_fc_links, missing_fco_links, missing_call_links = linkage_row
+    if missing_fc_links or missing_fco_links or missing_call_links:
+        raise _PushValidationError(Locale.PROVENANCE_RELATIONSHIPS_INCOMPLETE)
+
+    persisted_call_rows: list[tuple[str]] = store.execute(
+        f"SELECT {duckdb_quote_identifier(CODEX_CALL_ID_COL)} "
+        f"FROM {CODEX_CALLS_TABLE} WHERE "
+        f"{duckdb_quote_identifier(CODEX_ROLLOUT_FILENAME_COL)} = ?",
+        [rollout_index.session.rollout_filename],
+    ).fetchall()
+    persisted_call_ids = {row[0] for row in persisted_call_rows}
+    persisted_turn_rows: list[tuple[str, str]] = store.execute(
+        f"SELECT "
+        f"ts.{duckdb_quote_identifier(CODEX_CALL_ID_COL)}, "
+        f"ts.{duckdb_quote_identifier(CODEX_REF_ID_COL)} "
+        f"FROM {CODEX_TURN_REF_TABLE} ts "
+        f"JOIN {CODEX_CALLS_TABLE} calls ON "
+        f"calls.{duckdb_quote_identifier(CODEX_CALL_ID_COL)} = "
+        f"ts.{duckdb_quote_identifier(CODEX_CALL_ID_COL)} "
+        f"WHERE calls.{duckdb_quote_identifier(CODEX_ROLLOUT_FILENAME_COL)} = ?",
+        [rollout_index.session.rollout_filename],
+    ).fetchall()
+    persisted_turn_keys = {
+        (row[0], row[1])
+        for row in persisted_turn_rows
+    }
+    if persisted_call_ids != current_call_ids or persisted_turn_keys != current_turn_keys:
+        raise _PushValidationError(Locale.PROVENANCE_PREFIX_MISMATCH)
 
 
 def _render_fco_timestamp(value: datetime) -> str:
@@ -2312,12 +2270,12 @@ def _evidence_candidates(
 
 
 def _exact_evidence_candidates(
-    conn: duckdb.DuckDBPyConnection,
+    store: AiAugmentBackendStore,
     *,
     rollout_filename: str,
     excerpt: str,
 ) -> tuple[_EvidenceCandidate, ...]:
-    rows = conn.execute(
+    rows = store.execute(
         f"""
         SELECT
             ts.{duckdb_quote_identifier(CODEX_REF_ID_COL)},
@@ -2349,10 +2307,10 @@ def _exact_evidence_candidates(
 
 
 def _normalized_evidence_tokens(
-    conn: duckdb.DuckDBPyConnection,
+    store: AiAugmentBackendStore,
     excerpt: str,
 ) -> tuple[str, ...]:
-    row = conn.execute(
+    row = store.execute(
         f"SELECT {normalized_tokens_sql('?')}",
         [excerpt],
     ).fetchone()
@@ -2363,7 +2321,7 @@ def _normalized_evidence_tokens(
 
 
 def _near_evidence_candidates(
-    conn: duckdb.DuckDBPyConnection,
+    store: AiAugmentBackendStore,
     *,
     rollout_filename: str,
     url: str,
@@ -2371,7 +2329,7 @@ def _near_evidence_candidates(
 ) -> tuple[_EvidenceCandidate, ...]:
     if not submitted_tokens:
         return ()
-    rows = conn.execute(
+    rows = store.execute(
         f"""
         WITH submitted(tokens) AS (VALUES (?)),
         candidate_rows AS (
@@ -2458,7 +2416,7 @@ def _candidate_match(
 
 
 def assess_submission_evidence(
-    conn: duckdb.DuckDBPyConnection,
+    store: AiAugmentBackendStore,
     submission_payload: Submission | StandardizedSubmission,
     *,
     rollout_filename: str,
@@ -2482,8 +2440,8 @@ def assess_submission_evidence(
                 )
                 continue
 
-            exact_candidates = _exact_evidence_candidates(
-                conn,
+            exact_candidates = _exact_evidence_candidates(store,
+
                 rollout_filename=rollout_filename,
                 excerpt=evidence.excerpt,
             )
@@ -2519,9 +2477,9 @@ def assess_submission_evidence(
             normalized_tokens: tuple[str, ...] = ()
             near_candidates: tuple[_EvidenceCandidate, ...] = ()
             if codex_match_version == 2:
-                normalized_tokens = _normalized_evidence_tokens(conn, evidence.excerpt)
-                near_candidates = _near_evidence_candidates(
-                    conn,
+                normalized_tokens = _normalized_evidence_tokens(store, evidence.excerpt)
+                near_candidates = _near_evidence_candidates(store,
+
                     rollout_filename=rollout_filename,
                     url=evidence.url,
                     submitted_tokens=normalized_tokens,
@@ -2704,7 +2662,7 @@ def _obligation_item_is_unchanged(
 
 
 def _apply_retry_obligations(
-    conn: duckdb.DuckDBPyConnection,
+    store: AiAugmentBackendStore,
     submission: StandardizedSubmission,
     assessment: _EvidenceAssessment,
     previous: _RetryObligations,
@@ -2763,8 +2721,7 @@ def _apply_retry_obligations(
                     continue
                 current_tokens = assessment_item.normalized_tokens
                 if assessment_item.outcome == EVIDENCE_OUTCOME_V1_EXACT:
-                    current_tokens = _normalized_evidence_tokens(
-                        conn,
+                    current_tokens = _normalized_evidence_tokens(store,
                         current_item.excerpt,
                     )
                 if (
@@ -2839,7 +2796,7 @@ def _assessment_from_audit(
 
 
 def _derive_retry_obligations(
-    conn: duckdb.DuckDBPyConnection,
+    store: AiAugmentBackendStore,
     *,
     baseline_json: str,
     baseline_attempt_id: UUID,
@@ -2847,7 +2804,7 @@ def _derive_retry_obligations(
 ) -> _RetryObligations:
     try:
         obligations = _RetryObligations.model_validate_json(baseline_json)
-        rows: list[tuple[str, str]] = conn.execute(
+        rows: list[tuple[str, str]] = store.execute(
             f"""
             SELECT
                 {duckdb_quote_identifier(CODEX_EVIDENCE_SUBMISSION_COL)},
@@ -2861,13 +2818,13 @@ def _derive_retry_obligations(
             [str(original_pull.record_id), str(baseline_attempt_id)],
         ).fetchall()
         for submission_json, assessment_json in rows:
-            submission = StandardizedSubmission.model_validate_json(submission_json)
+            submission = StandardizedSubmission.model_validate_with_http_records(submission_json)
             assessment = _assessment_from_audit(
                 submission,
                 _EvidenceAttemptAudit.model_validate_json(assessment_json),
             )
             obligations, violations = _apply_retry_obligations(
-                conn,
+                store,
                 submission,
                 assessment,
                 obligations,
@@ -2880,7 +2837,7 @@ def _derive_retry_obligations(
 
 
 def _process_retry_attempt(
-    conn: duckdb.DuckDBPyConnection,
+    store: AiAugmentBackendStore,
     *,
     original_pull: HttpRequestLogRecord,
     commit_record: BackendCommitRecord,
@@ -2888,7 +2845,6 @@ def _process_retry_attempt(
     attempt_timestamp: datetime,
     submission_payload: Submission | StandardizedSubmission,
     assessment: _EvidenceAssessment,
-    manage_transaction: bool = True,
 ) -> tuple[str, ...]:
     session_id = commit_record.commit_request_body.codex_session_record.session_id
     assert session_id is not None
@@ -2902,143 +2858,136 @@ def _process_retry_attempt(
     )
     submission_json = submission_payload.model_dump_json(by_alias=True)
     assessment_json = _assessment_audit(assessment).model_dump_json()
-    if manage_transaction:
-        conn.execute("BEGIN TRANSACTION")
-    try:
-        inserted_baseline = False
-        if not assessment.accepted:
-            inserted_baseline = (
-                conn.execute(
-                    f"""
-                    INSERT INTO {CODEX_RETRY_BASELINE_TABLE} (
-                        {duckdb_quote_identifier(CODEX_RETRY_RUN_ID_COL)},
-                        {duckdb_quote_identifier(CODEX_RETRY_NAMEKEY_COL)},
-                        {duckdb_quote_identifier(CODEX_RETRY_SESSION_ID_COL)},
-                        {duckdb_quote_identifier(CODEX_RETRY_ATTEMPT_ID_COL)},
-                        {duckdb_quote_identifier(CODEX_RETRY_CREATED_AT_COL)},
-                        {duckdb_quote_identifier(CODEX_RETRY_BASELINE_COL)}
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    ON CONFLICT DO NOTHING
-                    RETURNING {duckdb_quote_identifier(CODEX_RETRY_RUN_ID_COL)}
-                    """,
-                    [
-                        run_id_text,
-                        namekey_json,
-                        session_id_text,
-                        attempt_id_text,
-                        attempt_timestamp,
-                        initial_obligations.model_dump_json(),
-                    ],
-                ).fetchone()
-                is not None
-            )
-
-        baseline_row: tuple[str, str, str, str] | None = conn.execute(
-            f"""
-            SELECT
-                {duckdb_quote_identifier(CODEX_RETRY_NAMEKEY_COL)},
-                {duckdb_quote_identifier(CODEX_RETRY_SESSION_ID_COL)},
-                {duckdb_quote_identifier(CODEX_RETRY_ATTEMPT_ID_COL)},
-                {duckdb_quote_identifier(CODEX_RETRY_BASELINE_COL)}
-            FROM {CODEX_RETRY_BASELINE_TABLE}
-            WHERE {duckdb_quote_identifier(CODEX_RETRY_RUN_ID_COL)} = ?
-            """,
-            [run_id_text],
-        ).fetchone()
-
-        violations: tuple[str, ...] = ()
-        if baseline_row is not None:
-            (
-                baseline_namekey,
-                baseline_session_id,
-                baseline_attempt_id_text,
-                baseline_json,
-            ) = baseline_row
-            if (
-                baseline_namekey != namekey_json
-                or baseline_session_id != session_id_text
-            ):
-                raise _PushValidationError(Locale.EVIDENCE_RETRY_IDENTITY_MISMATCH)
-            if inserted_baseline:
-                obligations = initial_obligations
-                violations = tuple(
-                    Locale.EVIDENCE_WITHDRAWAL_WITHOUT_BASELINE
-                    for item in assessment.items
-                    if item.outcome == EVIDENCE_OUTCOME_WITHDRAWN
+    inserted_baseline = False
+    if not assessment.accepted:
+        inserted_baseline = (
+            store.execute(
+                f"""
+                INSERT INTO {CODEX_RETRY_BASELINE_TABLE} (
+                    {duckdb_quote_identifier(CODEX_RETRY_RUN_ID_COL)},
+                    {duckdb_quote_identifier(CODEX_RETRY_NAMEKEY_COL)},
+                    {duckdb_quote_identifier(CODEX_RETRY_SESSION_ID_COL)},
+                    {duckdb_quote_identifier(CODEX_RETRY_ATTEMPT_ID_COL)},
+                    {duckdb_quote_identifier(CODEX_RETRY_CREATED_AT_COL)},
+                    {duckdb_quote_identifier(CODEX_RETRY_BASELINE_COL)}
                 )
-            else:
-                try:
-                    baseline_attempt_id = UUID(baseline_attempt_id_text)
-                except ValueError as exc:
-                    raise _PushValidationError(
-                        Locale.EVIDENCE_RETRY_IDENTITY_MISMATCH
-                    ) from exc
-                if str(baseline_attempt_id) != baseline_attempt_id_text:
-                    raise _PushValidationError(
-                        Locale.EVIDENCE_RETRY_IDENTITY_MISMATCH
-                    )
-                obligations = _derive_retry_obligations(
-                    conn,
-                    baseline_json=baseline_json,
-                    baseline_attempt_id=baseline_attempt_id,
-                    original_pull=original_pull,
-                )
-                if not isinstance(submission_payload, StandardizedSubmission):
-                    raise _PushConfigurationError(Locale.EVIDENCE_AUDIT_REPLAY_FAILED)
-                _next_obligations, violations = _apply_retry_obligations(
-                    conn,
-                    submission_payload,
-                    assessment,
-                    obligations,
-                )
-
-        applied = not violations
-        accepted = assessment.accepted and applied
-        conn.execute(
-            f"""
-            INSERT INTO {CODEX_EVIDENCE_AUDIT_TABLE} (
-                {duckdb_quote_identifier(CODEX_RETRY_ATTEMPT_ID_COL)},
-                {duckdb_quote_identifier(CODEX_RETRY_RUN_ID_COL)},
-                {duckdb_quote_identifier(CODEX_RETRY_NAMEKEY_COL)},
-                {duckdb_quote_identifier(CODEX_RETRY_SESSION_ID_COL)},
-                {duckdb_quote_identifier(CODEX_RETRY_CREATED_AT_COL)},
-                {duckdb_quote_identifier(CODEX_EVIDENCE_SUBMISSION_COL)},
-                {duckdb_quote_identifier(CODEX_EVIDENCE_ASSESSMENT_COL)},
-                {duckdb_quote_identifier(CODEX_EVIDENCE_APPLIED_COL)},
-                {duckdb_quote_identifier(CODEX_EVIDENCE_ACCEPTED_COL)}
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            [
-                attempt_id_text,
-                run_id_text,
-                namekey_json,
-                session_id_text,
-                attempt_timestamp,
-                submission_json,
-                assessment_json,
-                applied,
-                accepted,
-            ],
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT DO NOTHING
+                RETURNING {duckdb_quote_identifier(CODEX_RETRY_RUN_ID_COL)}
+                """,
+                [
+                    run_id_text,
+                    namekey_json,
+                    session_id_text,
+                    attempt_id_text,
+                    attempt_timestamp,
+                    initial_obligations.model_dump_json(),
+                ],
+            ).fetchone()
+            is not None
         )
-        if manage_transaction:
-            conn.execute("COMMIT")
-        return violations
-    except Exception:
-        if manage_transaction:
-            conn.execute("ROLLBACK")
-        raise
+
+    baseline_row: tuple[str, str, str, str] | None = store.execute(
+        f"""
+        SELECT
+            {duckdb_quote_identifier(CODEX_RETRY_NAMEKEY_COL)},
+            {duckdb_quote_identifier(CODEX_RETRY_SESSION_ID_COL)},
+            {duckdb_quote_identifier(CODEX_RETRY_ATTEMPT_ID_COL)},
+            {duckdb_quote_identifier(CODEX_RETRY_BASELINE_COL)}
+        FROM {CODEX_RETRY_BASELINE_TABLE}
+        WHERE {duckdb_quote_identifier(CODEX_RETRY_RUN_ID_COL)} = ?
+        """,
+        [run_id_text],
+    ).fetchone()
+
+    violations: tuple[str, ...] = ()
+    if baseline_row is not None:
+        (
+            baseline_namekey,
+            baseline_session_id,
+            baseline_attempt_id_text,
+            baseline_json,
+        ) = baseline_row
+        if (
+            baseline_namekey != namekey_json
+            or baseline_session_id != session_id_text
+        ):
+            raise _PushValidationError(Locale.EVIDENCE_RETRY_IDENTITY_MISMATCH)
+        if inserted_baseline:
+            obligations = initial_obligations
+            violations = tuple(
+                Locale.EVIDENCE_WITHDRAWAL_WITHOUT_BASELINE
+                for item in assessment.items
+                if item.outcome == EVIDENCE_OUTCOME_WITHDRAWN
+            )
+        else:
+            try:
+                baseline_attempt_id = UUID(baseline_attempt_id_text)
+            except ValueError as exc:
+                raise _PushValidationError(
+                    Locale.EVIDENCE_RETRY_IDENTITY_MISMATCH
+                ) from exc
+            if str(baseline_attempt_id) != baseline_attempt_id_text:
+                raise _PushValidationError(
+                    Locale.EVIDENCE_RETRY_IDENTITY_MISMATCH
+                )
+            obligations = _derive_retry_obligations(
+                store,
+                baseline_json=baseline_json,
+                baseline_attempt_id=baseline_attempt_id,
+                original_pull=original_pull,
+            )
+            if not isinstance(submission_payload, StandardizedSubmission):
+                raise _PushConfigurationError(Locale.EVIDENCE_AUDIT_REPLAY_FAILED)
+            _next_obligations, violations = _apply_retry_obligations(
+                store,
+                submission_payload,
+                assessment,
+                obligations,
+            )
+
+    applied = not violations
+    accepted = assessment.accepted and applied
+    store.execute(
+        f"""
+        INSERT INTO {CODEX_EVIDENCE_AUDIT_TABLE} (
+            {duckdb_quote_identifier(CODEX_EVIDENCE_AUDIT_ID_COL)},
+            {duckdb_quote_identifier(CODEX_RETRY_ATTEMPT_ID_COL)},
+            {duckdb_quote_identifier(CODEX_RETRY_RUN_ID_COL)},
+            {duckdb_quote_identifier(CODEX_RETRY_NAMEKEY_COL)},
+            {duckdb_quote_identifier(CODEX_RETRY_SESSION_ID_COL)},
+            {duckdb_quote_identifier(CODEX_RETRY_CREATED_AT_COL)},
+            {duckdb_quote_identifier(CODEX_EVIDENCE_SUBMISSION_COL)},
+            {duckdb_quote_identifier(CODEX_EVIDENCE_ASSESSMENT_COL)},
+            {duckdb_quote_identifier(CODEX_EVIDENCE_APPLIED_COL)},
+            {duckdb_quote_identifier(CODEX_EVIDENCE_ACCEPTED_COL)}
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            _next_codex_row_id(store, CODEX_EVIDENCE_AUDIT_TABLE),
+            attempt_id_text,
+            run_id_text,
+            namekey_json,
+            session_id_text,
+            attempt_timestamp,
+            submission_json,
+            assessment_json,
+            applied,
+            accepted,
+        ],
+    )
+    return violations
 
 
 def _retry_baseline_exists(
-    conn: duckdb.DuckDBPyConnection,
+    store: AiAugmentBackendStore,
     *,
     original_pull: HttpRequestLogRecord,
     namekey: NameKey,
     session_id: UUID,
 ) -> bool:
-    row = conn.execute(
+    row = store.execute(
         f"""
         SELECT
             {duckdb_quote_identifier(CODEX_RETRY_NAMEKEY_COL)},
@@ -3056,11 +3005,11 @@ def _retry_baseline_exists(
 
 
 def _rollout_ref_urls(
-    conn: duckdb.DuckDBPyConnection,
+    store: AiAugmentBackendStore,
     *,
     rollout_filename: str,
 ) -> dict[str, str]:
-    rows: list[tuple[str, str, str]] = conn.execute(
+    rows: list[tuple[str, str, str]] = store.execute(
         f"""
         SELECT
             ts.{duckdb_quote_identifier(CODEX_REF_ID_COL)},
@@ -3086,14 +3035,14 @@ def _rollout_ref_urls(
 
 
 def validate_submission_evidence(
-    conn: duckdb.DuckDBPyConnection,
+    store: AiAugmentBackendStore,
     submission_payload: Submission | StandardizedSubmission,
     *,
     rollout_filename: str,
     codex_match_version: int = 1,
 ) -> ValidatedEvidence:
     assessment = assess_submission_evidence(
-        conn,
+        store,
         submission_payload,
         rollout_filename=rollout_filename,
         codex_match_version=codex_match_version,
@@ -3182,39 +3131,6 @@ def _release_backend_process_lock() -> None:
         fcntl.flock(descriptor, fcntl.LOCK_UN)
     finally:
         os.close(descriptor)
-
-
-def _projection_checkpoint(
-    conn: duckdb.DuckDBPyConnection,
-) -> tuple[int, int, str] | None:
-    row = conn.execute(
-        f"SELECT {AUTHORITATIVE_PROJECTION_LINE_COLUMN}, "
-        f"{AUTHORITATIVE_PROJECTION_OFFSET_COLUMN}, {AUTHORITATIVE_PROJECTION_HASH_COLUMN} "
-        f"FROM {AUTHORITATIVE_PROJECTION_TABLE} "
-        f"WHERE {AUTHORITATIVE_PROJECTION_ID_COLUMN} = ?",
-        [AUTHORITATIVE_CHECKPOINT_ID],
-    ).fetchone()
-    if row is None:
-        return None
-    return int(row[0]), int(row[1]), str(row[2])
-
-
-def _write_projection_checkpoint(
-    conn: duckdb.DuckDBPyConnection,
-    *,
-    line_number: int,
-    byte_offset: int,
-    line_sha256: str,
-) -> None:
-    conn.execute(
-        f"INSERT OR REPLACE INTO {AUTHORITATIVE_PROJECTION_TABLE} VALUES (?, ?, ?, ?)",
-        [
-            AUTHORITATIVE_CHECKPOINT_ID,
-            line_number,
-            byte_offset,
-            line_sha256,
-        ],
-    )
 
 
 def _http_header_value(
@@ -3389,7 +3305,7 @@ class _AuthoritativeHttpMiddleware:
                 started_ns=started_ns,
                 ready_to_respond_at_unix_usec=ready_to_respond_at_unix_usec,
             )
-            runtime.pipeline_config.backend_store.append_authoritative_record(
+            record = runtime.pipeline_config.backend_store.append_authoritative_record(
                 record,
             )
             await _after_authoritative_public_record(record, runtime)
@@ -3397,22 +3313,19 @@ class _AuthoritativeHttpMiddleware:
             logger.exception(Locale.AUTHORITATIVE_LOG_APPEND_FAILED_LOG, method, path, exc)
             raise SystemExit(1) from exc
 
-        for message in response_messages:
-            await send(message)
+        if record.response_code is None or record.response_body is None:
+            raise RuntimeError("Stored API response is incomplete")
+        await Response(
+            content=record.response_body.encode(TEXT_ENCODING),
+            status_code=record.response_code,
+            headers=record.response_headers,
+        )(scope, receive, send)
 
 
 app.add_middleware(_AuthoritativeHttpMiddleware)
 
 
-def _initialize_readme_authoritative_schema(
-    conn: duckdb.DuckDBPyConnection,
-) -> None:
-    conn.execute(CREATE_AUTHORITATIVE_RECORDS_TABLE_SQL)
-    conn.execute(CREATE_AUTHORITATIVE_ATTEMPTS_TABLE_SQL)
-    conn.execute(CREATE_AUTHORITATIVE_PROJECTION_TABLE_SQL)
-
-
-def _validated_readme_record(record: HttpRequestLogRecord) -> HttpRequestLogRecord:
+def _validated_http_record(record: HttpRequestLogRecord) -> HttpRequestLogRecord:
     validated = HttpRequestLogRecord.model_validate_json(record.model_dump_json())
     if (
         validated.schema_version != KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
@@ -3420,11 +3333,25 @@ def _validated_readme_record(record: HttpRequestLogRecord) -> HttpRequestLogReco
     ):
         raise _PushValidationError(Locale.REPLAY_RECORD_CONTOUR_INVALID)
     route = (validated.method, validated.path)
-    if route != AUTHORITATIVE_COMMIT_ROUTE:
+    if validated.method == HTTP_POST_METHOD and validated.path in RUN_OUTCOME_PATHS:
+        try:
+            RunOutcomeResponse.from_http_request_log_record(validated)
+        except ValueError as exc:
+            raise _PushValidationError(Locale.REPLAY_RECORD_CONTOUR_INVALID) from exc
+        return validated
+
+    if route not in {AUTHORITATIVE_COMMIT_ROUTE, (HTTP_POST_METHOD, VALIDATE_PATH)}:
+        transport_failure = (
+            validated.host != SYNTHETIC_COMMIT_HOST
+            and route not in AUTHORITATIVE_FASTAPI_ROUTES
+            and validated.response_code is None
+            and validated.response_headers is None
+            and validated.response_body is None
+        )
         if (
-            validated.response_code is None
+            not transport_failure and (validated.response_code is None
             or validated.response_headers is None
-            or validated.response_body is None
+            or validated.response_body is None)
             or validated.ready_to_respond_at_unix_usec is None
             or validated.duration_usec is None
         ):
@@ -3446,14 +3373,17 @@ def _validated_readme_record(record: HttpRequestLogRecord) -> HttpRequestLogReco
     ):
         raise _PushValidationError(Locale.REPLAY_COMMIT_INVALID)
     try:
-        CommitRequestBody.validate_serialized_json(validated.request_body)
+        if route == AUTHORITATIVE_COMMIT_ROUTE:
+            CommitRequestBody.validate_serialized_json(validated.request_body)
+        else:
+            ValidationRequestBody.model_validate_json(validated.request_body)
     except (ValidationError, ValueError) as exc:
         raise _PushValidationError(Locale.REPLAY_COMMIT_INVALID) from exc
     return validated
 
 
 def _commit_request_body(
-    conn: duckdb.DuckDBPyConnection,
+    store: AiAugmentBackendStore,
     value: object,
 ) -> CommitRequestBody:
     if not isinstance(value, str):
@@ -3461,8 +3391,7 @@ def _commit_request_body(
     try:
         return CommitRequestBody.from_serialized_json(
             value,
-            resolve_http_record=lambda record_id: _projected_http_record(
-                conn,
+            resolve_http_record=lambda record_id: store.http_record_with_ordinal(
                 record_id,
             )[1],
         )
@@ -3471,14 +3400,13 @@ def _commit_request_body(
 
 
 def _backend_commit_record(
-    conn: duckdb.DuckDBPyConnection,
+    store: AiAugmentBackendStore,
     record: HttpRequestLogRecord,
 ) -> BackendCommitRecord:
     try:
         return BackendCommitRecord.from_http_request_log_record(
             record,
-            resolve_http_record=lambda record_id: _projected_http_record(
-                conn,
+            resolve_http_record=lambda record_id: store.http_record_with_ordinal(
                 record_id,
             )[1],
         )
@@ -3488,8 +3416,8 @@ def _backend_commit_record(
 
 def _authoritative_log_records(
     value: bytes,
-) -> tuple[tuple[HttpRequestLogRecord, int, str], ...]:
-    records: list[tuple[HttpRequestLogRecord, int, str]] = []
+) -> tuple[tuple[HttpRequestLogRecord, int], ...]:
+    records: list[tuple[HttpRequestLogRecord, int]] = []
     byte_offset = AUTHORITATIVE_EMPTY_OFFSET
     for line_number, line in enumerate(
         value.splitlines(keepends=True),
@@ -3500,7 +3428,7 @@ def _authoritative_log_records(
                 Locale.REPLAY_LOG_LINE_INVALID_TEMPLATE.format(line_number=line_number)
             )
         try:
-            record = _validated_readme_record(
+            record = _validated_http_record(
                 HttpRequestLogRecord.model_validate_json(line)
             )
         except (ValidationError, _PushValidationError) as exc:
@@ -3508,27 +3436,8 @@ def _authoritative_log_records(
                 Locale.REPLAY_LOG_LINE_INVALID_TEMPLATE.format(line_number=line_number)
             ) from exc
         byte_offset += len(line)
-        records.append((record, byte_offset, hashlib.sha256(line).hexdigest()))
+        records.append((record, byte_offset))
     return tuple(records)
-
-
-def _projected_http_record(
-    conn: duckdb.DuckDBPyConnection,
-    record_id: UUID,
-) -> tuple[int, HttpRequestLogRecord]:
-    row = conn.execute(
-        f"SELECT {AUTHORITATIVE_RECORD_ORDINAL_COLUMN}, "
-        f"{AUTHORITATIVE_RECORD_PAYLOAD_COLUMN} "
-        f"FROM {AUTHORITATIVE_RECORDS_TABLE} "
-        f"WHERE {AUTHORITATIVE_RECORD_ID_COLUMN} = ?",
-        [str(record_id)],
-    ).fetchone()
-    if row is None:
-        raise _PushValidationError(Locale.REPLAY_COMMIT_LINK_MISSING)
-    try:
-        return int(row[0]), HttpRequestLogRecord.model_validate_json(str(row[1]))
-    except ValidationError as exc:
-        raise _PushValidationError(Locale.REPLAY_COMMIT_LINK_MISSING) from exc
 
 
 def _source_key_header(filename: str, line_count: int) -> str:
@@ -3581,15 +3490,15 @@ def _response_content_type(record: HttpRequestLogRecord) -> str:
 
 
 def _original_pull_record(
-    conn: duckdb.DuckDBPyConnection,
+    store: AiAugmentBackendStore,
     pull_record: HttpRequestLogRecord,
 ) -> HttpRequestLogRecord:
-    pull_ordinal, pull = _projected_http_record(conn, pull_record.record_id)
+    pull_ordinal, pull = store.http_record_with_ordinal(pull_record.record_id)
     if (pull.method, pull.path) != (HTTP_GET_METHOD, PULL_PATH):
         raise _PushValidationError(Locale.REPLAY_COMMIT_PULL_INVALID)
     if _response_content_type(pull) != MARKDOWN_MEDIA_TYPE:
         return pull
-    row = conn.execute(
+    row = store.execute(
         f"SELECT records.{AUTHORITATIVE_RECORD_PAYLOAD_COLUMN} "
         f"FROM {AUTHORITATIVE_RECORDS_TABLE} AS records "
         f"JOIN {AUTHORITATIVE_ATTEMPTS_TABLE} AS attempts "
@@ -3603,11 +3512,11 @@ def _original_pull_record(
         raise _PushValidationError(Locale.REPLAY_COMMIT_PULL_INVALID)
     try:
         prior_record = HttpRequestLogRecord.model_validate_json(str(row[0]))
-        prior_commit_record = _backend_commit_record(conn, prior_record)
+        prior_commit_record = _backend_commit_record(store, prior_record)
     except (ValidationError, _PushValidationError) as exc:
         raise _PushValidationError(Locale.REPLAY_COMMIT_PULL_INVALID) from exc
     return _original_pull_record(
-        conn,
+        store,
         prior_commit_record.commit_request_body.pull_record,
     )
 
@@ -3662,13 +3571,11 @@ def _failed_attempt_record(
 
 
 def _validate_projected_commit(
-    conn: duckdb.DuckDBPyConnection,
+    store: AiAugmentBackendStore,
     runtime: AiAugmentBackendContext,
     record: HttpRequestLogRecord,
-    *,
-    materialize_files: bool,
 ) -> tuple[AgentRuntimeAttemptRecord, bool]:
-    commit_record = _backend_commit_record(conn, record)
+    commit_record = _backend_commit_record(store, record)
     commit = commit_record.commit_request_body
     pull = commit.pull_record
     push = commit.push_record
@@ -3683,9 +3590,9 @@ def _validate_projected_commit(
         namekey = _parse_name_key_header(
             record.request_headers.get(NAME_KEY_HEADER)
         )
-        pull_ordinal, _pull = _projected_http_record(conn, pull.record_id)
-        push_ordinal, _push = _projected_http_record(conn, push.record_id)
-        commit_ordinal, _commit_record = _projected_http_record(conn, record.record_id)
+        pull_ordinal, _pull = store.http_record_with_ordinal(pull.record_id)
+        push_ordinal, _push = store.http_record_with_ordinal(push.record_id)
+        commit_ordinal, _commit_record = store.http_record_with_ordinal(record.record_id)
         if not (
             pull_ordinal < push_ordinal < commit_ordinal
             and (pull.method, pull.path) == (HTTP_GET_METHOD, PULL_PATH)
@@ -3695,7 +3602,7 @@ def _validate_projected_commit(
             and isinstance(push.request_body, str)
         ):
             raise _PushValidationError(Locale.REPLAY_COMMIT_LINK_INVALID)
-        original_pull = _original_pull_record(conn, pull)
+        original_pull = _original_pull_record(store, pull)
         if _namekey_from_original_pull(original_pull) != namekey:
             raise _PushValidationError(Locale.REPLAY_COMMIT_NAME_KEY_INVALID)
         filename, source_line_count = _parse_source_key_header(
@@ -3718,7 +3625,7 @@ def _validate_projected_commit(
         )
         stage = BackendLifecycle.APPENDWATCH_REPORT_VALIDATION
         return _execute_attempt(
-            conn,
+            store,
             runtime,
             commit_record=commit_record,
             rollout_archive=rollout_archive,
@@ -3726,8 +3633,9 @@ def _validate_projected_commit(
             rollout_relative_path=PurePosixPath(filename),
             original_pull=original_pull,
             namekey=namekey,
-            materialize_files=materialize_files,
         )
+    except (ModelHttpRequired, ReplayInputMissing):
+        raise
     except Exception as exc:
         return (
             _failed_attempt_record(
@@ -3739,82 +3647,52 @@ def _validate_projected_commit(
         )
 
 
-def _insert_projected_http_record(
-    conn: duckdb.DuckDBPyConnection,
-    record: HttpRequestLogRecord,
-    *,
-    line_number: int,
-) -> None:
-    conn.execute(
-        f"INSERT INTO {AUTHORITATIVE_RECORDS_TABLE} VALUES (?, ?, ?, ?, ?)",
-        [
-            line_number,
-            str(record.record_id),
-            record.method,
-            record.path,
-            record.model_dump_json(),
-        ],
-    )
-
-
-def _insert_attempt_record(
-    conn: duckdb.DuckDBPyConnection,
-    attempt_record: AgentRuntimeAttemptRecord,
-) -> None:
-    conn.execute(
-        f"INSERT INTO {AUTHORITATIVE_ATTEMPTS_TABLE} VALUES (?, ?)",
-        [
-            str(attempt_record.attempt.commit_record.record_id),
-            attempt_record.model_dump_json(),
-        ],
-    )
-
-
-def _project_readme_record(
-    conn: duckdb.DuckDBPyConnection,
+def _apply_validation_record(
+    store: AiAugmentBackendStore,
     runtime: AiAugmentBackendContext,
     record: HttpRequestLogRecord,
-    *,
-    line_number: int,
-    byte_offset: int,
-    line_sha256: str,
-    materialize_files: bool,
-) -> AgentRuntimeAttemptRecord | None:
-    projected_attempt: AgentRuntimeAttemptRecord | None = None
-    conn.execute("BEGIN TRANSACTION")
-    try:
-        _insert_projected_http_record(
-            conn,
-            record,
-            line_number=line_number,
+) -> tuple[AgentRuntimeAttemptRecord, bool]:
+    if record.request_body is None:
+        raise ReplayInputMissing("Validation body is missing")
+    body = ValidationRequestBody.model_validate_json(record.request_body)
+    ordinal, _ = store.http_record_with_ordinal(record.record_id)
+    commit_ordinal, commit = store.http_record_with_ordinal(body.commit_id)
+    if commit_ordinal >= ordinal or record.request_headers != commit.request_headers:
+        raise ReplayInputMissing("Validation commit linkage is invalid")
+    inputs: list[HttpRequestLogRecord] = []
+    for record_id in body.http_record_ids:
+        input_ordinal, http_record = store.http_record_with_ordinal(record_id)
+        if input_ordinal >= ordinal or http_record.ready_to_respond_at_unix_usec is None:
+            raise ReplayInputMissing("Validation HTTP input must precede validation")
+        inputs.append(http_record)
+    http = ModelHttpInterceptor.from_records(inputs)
+    with submission_http_context(http):
+        evaluated, commit_database = _validate_projected_commit(
+            store, runtime, commit,
         )
-        if (record.method, record.path) == AUTHORITATIVE_COMMIT_ROUTE:
-            projected_attempt, commit_database = _validate_projected_commit(
-                conn,
-                runtime,
-                record,
-                materialize_files=materialize_files,
-            )
-            if not commit_database:
-                conn.execute("ROLLBACK")
-                conn.execute("BEGIN TRANSACTION")
-                _insert_projected_http_record(
-                    conn,
-                    record,
-                    line_number=line_number,
-                )
-            _insert_attempt_record(conn, projected_attempt)
-        _write_projection_checkpoint(
-            conn,
-            line_number=line_number,
-            byte_offset=byte_offset,
-            line_sha256=line_sha256,
-        )
-        conn.execute("COMMIT")
-    except Exception:
-        conn.execute("ROLLBACK")
-        raise
-    return projected_attempt
+    observed = body.post_commit_validation
+    # Preserve historical validations that recorded card I/O failure as a verdict.
+    # New card publication failures occur after DB commit and never change the verdict.
+    if (observed.stage == BackendLifecycle.INNERDICT_AND_CARD
+            and observed.result != BackendLifecycle.ACCEPTED
+            and evaluated.attempt.post_commit_validation.stage == BackendLifecycle.ACCEPTED):
+        evaluated = evaluated.model_copy(update={
+            "attempt": evaluated.attempt.model_copy(update={"post_commit_validation": observed}),
+            "ground_truth_innerdict": None,
+        })
+        commit_database = False
+    submission = evaluated.submission
+    if (
+        evaluated.attempt.post_commit_validation != observed
+        or (None if submission is None else type(submission).__name__) != body.submission_type
+        or (None if submission is None else submission.model_dump(mode="json", by_alias=True))
+        != body.submission
+        or http.record_ids != body.http_record_ids
+    ):
+        raise ReplayInputMissing("Recorded validation does not match its replay inputs")
+    return evaluated.model_copy(update={
+        "http_records": tuple(inputs), "validation_record": record,
+    }), commit_database
 
 
 def _attempt_record_from_serialized_json(
@@ -3999,11 +3877,12 @@ def _commit_accepted_push(
         namekey=runtime.configured_namekey,
     )
     try:
-        attempt_record = runtime.pipeline_config.backend_store.append_authoritative_record(
+        stored_commit = runtime.pipeline_config.backend_store.append_authoritative_record(
             commit_record,
         )
-        if attempt_record is None:
-            raise _PushConfigurationError(Locale.REPLAY_COMMIT_INVALID)
+        attempt_record = runtime.pipeline_config.backend_store.validate_commit(
+            stored_commit.record_id,
+        )
         _apply_attempt_record(attempt_record)
     except Exception as exc:
         _mark_backend_lifecycle_failed(exc)
@@ -4113,12 +3992,12 @@ def render_codex_values(
     return rendered
 
 
-def _create_codex_output_schema(conn: duckdb.DuckDBPyConnection) -> None:
+def _create_codex_output_schema(store: AiAugmentBackendStore) -> None:
     definitions = ", ".join(
         f"{duckdb_quote_identifier(column)} {data_type}"
         for column, data_type in CODEX_OUTPUT_SCHEMA
     )
-    conn.execute(
+    store.execute(
         f"CREATE TABLE IF NOT EXISTS {CODEX_OUTPUT_ROWS_TABLE} ("
         f"{definitions}, UNIQUE ("
         f"{duckdb_quote_identifier(KTP_FILENAME_COL)}, "
@@ -4126,11 +4005,11 @@ def _create_codex_output_schema(conn: duckdb.DuckDBPyConnection) -> None:
     )
 
 
-def _replace_codex_output_view(conn: duckdb.DuckDBPyConnection) -> None:
+def _replace_codex_output_view(store: AiAugmentBackendStore) -> None:
     projection = ", ".join(
         duckdb_quote_identifier(column) for column, _data_type in CODEX_OUTPUT_SCHEMA
     )
-    conn.execute(
+    store.execute(
         f"""
         CREATE OR REPLACE VIEW {CODEX_OUTPUT_VIEW} AS
         SELECT {projection}
@@ -4141,29 +4020,28 @@ def _replace_codex_output_view(conn: duckdb.DuckDBPyConnection) -> None:
             {duckdb_quote_identifier(KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL)}
         """
     )
-    materialize_innerdicts_from_rows_table(
-        conn,
+    store.materialize_innerdicts(
         source_relation=CODEX_OUTPUT_VIEW,
         table_name=CODEX_INNERDICT_TABLE,
     )
 
 
 def append_codex_output(
-    conn: duckdb.DuckDBPyConnection,
+    store: AiAugmentBackendStore,
     row: Mapping[str, object],
 ) -> None:
-    _create_codex_output_schema(conn)
+    _create_codex_output_schema(store)
     columns = tuple(column for column, _data_type in CODEX_OUTPUT_SCHEMA)
     projection = ", ".join(duckdb_quote_identifier(column) for column in columns)
     placeholders = ", ".join("?" for _column in columns)
     try:
-        conn.execute(
+        store.execute(
             f"INSERT INTO {CODEX_OUTPUT_ROWS_TABLE} ({projection}) VALUES ({placeholders})",
             [row[column] for column in columns],
         )
     except duckdb.ConstraintException as exc:
         raise _PushValidationError(Locale.ACCEPTED_IDENTITY_DUPLICATE) from exc
-    _replace_codex_output_view(conn)
+    _replace_codex_output_view(store)
 
 
 def selected_card_outer_dict(
@@ -4261,7 +4139,7 @@ def _standardized_initial_submission(
 
 
 def write_accepted_submission(
-    detour_conn: duckdb.DuckDBPyConnection,
+    store: AiAugmentBackendStore,
     runtime: AiAugmentBackendContext,
     *,
     submission: StandardizedSubmission,
@@ -4271,26 +4149,16 @@ def write_accepted_submission(
     rollout_archive: _ArchivedFile,
     commit_record: BackendCommitRecord,
     attempt_timestamp: datetime,
-    manage_transaction: bool = True,
-    materialize_files: bool = True,
-) -> tuple[InnerDict | None, _ArchivedFile | None]:
+) -> InnerDict | None:
     commit_request_body = commit_record.request_body
     assert commit_request_body is not None
     commit_record_id = str(commit_record.record_id)
-    zip_name = CARD_ZIP_FILENAME_TEMPLATE.format(
-        prefix=CARD_ZIP_PREFIX,
-        attempt_id=commit_record_id,
-    )
-    zip_path = runtime.pipeline_config.output_dir / zip_name
-    if materialize_files and zip_path.exists():
-        raise _PushValidationError(Locale.ATTEMPT_CARD_ZIP_EXISTS)
-
     rendered = render_codex_values(
         submission,
         evidence,
         attempt_timestamp=attempt_timestamp,
-        argument_ref_urls=_rollout_ref_urls(
-            detour_conn,
+        argument_ref_urls=_rollout_ref_urls(store,
+
             rollout_filename=rollout_index.session.rollout_filename,
         ),
     )
@@ -4308,61 +4176,106 @@ def write_accepted_submission(
         **rendered,
     }
 
-    if manage_transaction:
-        detour_conn.execute("BEGIN TRANSACTION")
+    append_codex_output(store, output_row)
+    return singular_outerdict.ground_truth_innerdict()
+
+
+def _same_zip_contents(existing: Path, expected: Path) -> bool:
+    """Compare member names and bytes, ignoring ZIP container timestamps."""
     try:
-        append_codex_output(detour_conn, output_row)
-        ground_truth_innerdict = singular_outerdict.ground_truth_innerdict()
-        if materialize_files:
-            committed_innerdicts = tuple(
-                committed
-                for committed in _committed_innerdicts(detour_conn)
-                if name_key_from_header_value(
-                    committed.commit_record.request_headers.get(NAME_KEY_HEADER)
-                )
-                == singular_outerdict.namekey
-            )
-            card_outer_dict = selected_card_outer_dict(
-                singular_outerdict.model_copy(
-                    update={"committed_innerdicts": committed_innerdicts}
-                )
-            )
-            intro_date = attempt_timestamp.astimezone(
-                ZoneInfo(runtime.pipeline_config.timezone)
-            ).strftime(
-                Locale.CARD_INTRO_DATE_FORMAT
-            )
-            cards = build_cards(
-                card_outer_dict,
-                total_draws=runtime.pipeline_config.total_draws,
-                intro=CARD_INTRODUCTION.format(intro_date),
-                excluded_cols=CARD_EXCLUDED_COLUMNS,
-            )
-            if len(cards) != 1:
-                raise _PushValidationError(Locale.RESEARCHER_CARD_COUNT_INVALID)
-            write_cards_zip(
-                cards,
-                runtime.pipeline_config.output_dir,
-                zip_name,
-                output_format=runtime.pipeline_config.output_format,
-                reference_docx=runtime.pipeline_config.pandoc_reference_docx,
-            )
-        if manage_transaction:
-            detour_conn.execute("COMMIT")
-    except Exception:
-        if manage_transaction:
-            detour_conn.execute("ROLLBACK")
-        if materialize_files:
-            zip_path.unlink(missing_ok=True)
-        raise
-    return (
-        ground_truth_innerdict,
-        _archived_file(zip_path) if materialize_files else None,
+        with ZipFile(existing) as current, ZipFile(expected) as wanted:
+            names = current.namelist()
+            if len(names) != len(set(names)) or sorted(names) != sorted(wanted.namelist()):
+                return False
+            return all(current.read(name) == wanted.read(name) for name in names)
+    except (BadZipFile, EOFError):
+        return False
+
+
+def publish_card_zip(
+    store: AiAugmentBackendStore,
+    runtime: AiAugmentBackendContext,
+    validation_record_id: UUID,
+) -> None:
+    """Publish an accepted validation's historical card from persisted DB state."""
+    ordinal, record = store.http_record_with_ordinal(validation_record_id)
+    if (record.method, record.path) != (HTTP_POST_METHOD, VALIDATE_PATH):
+        raise _PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT)
+    body = ValidationRequestBody.model_validate_json(record.request_body or "")
+    if body.post_commit_validation.result != BackendLifecycle.ACCEPTED:
+        return
+    commit = _backend_commit_record(store, store.http_record(body.commit_id))
+    namekey = name_key_from_header_value(commit.request_headers.get(NAME_KEY_HEADER))
+    singular_outerdict = _configured_ai_augment_singular_outerdict(
+        namekey, runtime.ai_augment_singular_outerdicts,
     )
+    rows = store.execute(
+        f"SELECT {AUTHORITATIVE_RECORD_PAYLOAD_COLUMN} FROM {AUTHORITATIVE_RECORDS_TABLE} "
+        f"WHERE {AUTHORITATIVE_RECORD_METHOD_COLUMN} = ? "
+        f"AND {AUTHORITATIVE_RECORD_PATH_COLUMN} = ? "
+        f"AND {AUTHORITATIVE_RECORD_ORDINAL_COLUMN} <= ?",
+        [HTTP_POST_METHOD, VALIDATE_PATH, ordinal],
+    ).fetchall()
+    accepted_commit_ids: set[UUID] = set()
+    for (payload,) in rows:
+        validation = HttpRequestLogRecord.model_validate_json(str(payload))
+        validation_body = ValidationRequestBody.model_validate_json(validation.request_body or "")
+        if validation_body.post_commit_validation.result == BackendLifecycle.ACCEPTED:
+            accepted_commit_ids.add(validation_body.commit_id)
+    committed_innerdicts = tuple(
+        committed
+        for committed in _committed_innerdicts(store)
+        if committed.commit_record.record_id in accepted_commit_ids
+        and name_key_from_header_value(
+            committed.commit_record.request_headers.get(NAME_KEY_HEADER)
+        ) == namekey
+    )
+    if body.commit_id not in {item.commit_record.record_id for item in committed_innerdicts}:
+        raise _PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT)
+    card_outer_dict = selected_card_outer_dict(
+        singular_outerdict.model_copy(update={"committed_innerdicts": committed_innerdicts})
+    )
+    attempt_timestamp = datetime.fromtimestamp(commit.record_id.time / 1_000, tz=timezone.utc)
+    intro_date = attempt_timestamp.astimezone(
+        ZoneInfo(runtime.pipeline_config.timezone)
+    ).strftime(Locale.CARD_INTRO_DATE_FORMAT)
+    cards = build_cards(
+        card_outer_dict,
+        total_draws=runtime.pipeline_config.total_draws,
+        intro=CARD_INTRODUCTION.format(intro_date),
+        excluded_cols=CARD_EXCLUDED_COLUMNS,
+    )
+    if len(cards) != 1:
+        raise _PushConfigurationError(Locale.RESEARCHER_CARD_COUNT_INVALID)
+    output_dir = runtime.pipeline_config.output_dir
+    output_dir.mkdir(parents=True, exist_ok=True)
+    zip_name = CARD_ZIP_FILENAME_TEMPLATE.format(
+        prefix=CARD_ZIP_PREFIX, attempt_id=commit.record_id,
+    )
+    zip_path = output_dir / zip_name
+    # Same filesystem for atomic publication; partial archives never occupy the final path.
+    with tempfile.TemporaryDirectory(prefix=f".{zip_name}.", dir=output_dir) as temporary:
+        temporary_path = Path(temporary) / zip_name
+        write_cards_zip(
+            cards, Path(temporary), zip_name,
+            output_format=runtime.pipeline_config.output_format,
+            reference_docx=runtime.pipeline_config.pandoc_reference_docx,
+        )
+        with temporary_path.open("rb") as archive:
+            os.fsync(archive.fileno())
+        if zip_path.is_symlink() or not zip_path.is_file() or not _same_zip_contents(
+            zip_path, temporary_path,
+        ):
+            os.replace(temporary_path, zip_path)
+        directory = os.open(output_dir, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
 
 
 def _execute_attempt(
-    detour_conn: duckdb.DuckDBPyConnection,
+    store: AiAugmentBackendStore,
     runtime: AiAugmentBackendContext,
     *,
     commit_record: BackendCommitRecord,
@@ -4371,7 +4284,6 @@ def _execute_attempt(
     rollout_relative_path: PurePosixPath,
     original_pull: HttpRequestLogRecord,
     namekey: NameKey,
-    materialize_files: bool,
 ) -> tuple[AgentRuntimeAttemptRecord, bool]:
     commit_request_body = commit_record.request_body
     body = commit_record.commit_request_body
@@ -4439,32 +4351,30 @@ def _execute_attempt(
             )
             if rollout_index.session.session_id != session_id:
                 raise _PushValidationError(Locale.CONFIGURED_SESSION_MISMATCH)
-            persist_rollout_index(
-                detour_conn,
+            persist_rollout_index(store,
                 rollout_index,
                 codex_match_version=(
                     runtime.pipeline_config.match_rule_version.codex_match
                 ),
-                manage_transaction=False,
             )
 
             stage = BackendLifecycle.PYDANTIC_VALIDATION
-            retry_submission_expected = _retry_baseline_exists(
-                detour_conn,
+            retry_submission_expected = _retry_baseline_exists(store,
+
                 original_pull=original_pull,
                 namekey=namekey,
                 session_id=session_id,
             )
             submission_payload = (
-                StandardizedSubmission.model_validate_json(push_request_body)
+                StandardizedSubmission.model_validate_with_http_records(push_request_body)
                 if retry_submission_expected
-                else Submission.model_validate_json(push_request_body)
+                else Submission.model_validate_with_http_records(push_request_body)
             )
 
             stage = BackendLifecycle.DUCKDB_EVIDENCE_VALIDATION
             _seed_evidence_random(runtime.pipeline_config.sample_seed)
             evidence_assessment = assess_submission_evidence(
-                detour_conn,
+                store,
                 submission_payload,
                 rollout_filename=rollout_index.session.rollout_filename,
                 codex_match_version=(
@@ -4476,14 +4386,13 @@ def _execute_attempt(
                 commit_record=commit_record,
             )
             retry_violations = _process_retry_attempt(
-                detour_conn,
+                store,
                 original_pull=original_pull,
                 commit_record=commit_record,
                 namekey=namekey,
                 attempt_timestamp=attempt_timestamp,
                 submission_payload=submission_payload,
                 assessment=evidence_assessment,
-                manage_transaction=False,
             )
             if not evidence_assessment.accepted or retry_violations:
                 raise _EvidenceAssessmentError(
@@ -4508,8 +4417,8 @@ def _execute_attempt(
 
             stage = BackendLifecycle.INNERDICT_AND_CARD
             submission_payload = accepted_submission
-            ground_truth_innerdict, _card_archive = write_accepted_submission(
-                detour_conn,
+            ground_truth_innerdict = write_accepted_submission(
+                store,
                 runtime,
                 submission=accepted_submission,
                 evidence=evidence_assessment.validated,
@@ -4518,9 +4427,7 @@ def _execute_attempt(
                 rollout_archive=rollout_archive,
                 commit_record=commit_record,
                 attempt_timestamp=attempt_timestamp,
-                manage_transaction=False,
-                materialize_files=materialize_files,
-            )
+                )
             stage = BackendLifecycle.ACCEPTED
             return result(
                 validation_result=BackendLifecycle.ACCEPTED,
@@ -4631,33 +4538,30 @@ def pydantic_failure(exc: ValidationError) -> tuple[str | None, str, object]:
 
 
 def _committed_innerdicts(
-    conn: duckdb.DuckDBPyConnection,
+    store: AiAugmentBackendStore,
 ) -> tuple[CommittedInnerDict, ...]:
-    exists = conn.execute(
+    exists = store.execute(
         "SELECT count(*) FROM information_schema.tables WHERE table_name = ?",
         [CODEX_OUTPUT_ROWS_TABLE],
     ).fetchone()
     if exists is None or int(exists[0]) == 0:
         return ()
-    result = conn.execute(
+    rows = store.query_mappings(
         f"SELECT * FROM {CODEX_OUTPUT_ROWS_TABLE} "
         f"ORDER BY {duckdb_quote_identifier(KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL)}"
     )
-    column_names = tuple(column[0] for column in result.description)
-    rows = result.fetchall()
     committed_innerdicts: list[CommittedInnerDict] = []
-    for row in rows:
-        values = dict(zip(column_names, row, strict=True))
+    for values in rows:
         try:
             commit_record_id = UUID(str(values[KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL]))
-            _ordinal, http_record = _projected_http_record(conn, commit_record_id)
+            _ordinal, http_record = store.http_record_with_ordinal(commit_record_id)
             committed_innerdicts.append(
                 CommittedInnerDict(
                     innerdict=InnerDict.from_mapping(
                         values,
                         _CodexMatchProcedure(),
                     ),
-                    commit_record=_backend_commit_record(conn, http_record),
+                    commit_record=_backend_commit_record(store, http_record),
                 )
             )
         except (

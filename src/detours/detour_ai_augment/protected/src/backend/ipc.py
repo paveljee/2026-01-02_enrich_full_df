@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import logging
 import os
+import signal
 import stat
 import tempfile
 import threading
@@ -10,13 +11,13 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from types import FrameType
 from typing import NoReturn
 from urllib.parse import urlsplit
 from uuid import UUID
 
 from fastapi import status
 from flask import Flask, Response, request
-from pydantic import ValidationError
 from werkzeug.serving import BaseWSGIServer, make_server
 
 from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
@@ -27,10 +28,6 @@ from src.detours.detour_ai_augment.src.backend import api
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_context import (  # noqa: E501
     AiAugmentBackendContext,
 )
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_singular_outer_dict import (  # noqa: E501
-    AiAugmentSingularOuterDict,
-    CommittedInnerDict,
-)
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.commit_event import (  # noqa: E501
     BASE64_TEXT_ENCODING,
     SOURCE_KEY_HEADER,
@@ -40,7 +37,6 @@ from src.detours.detour_ai_augment.src.backend.helpers.data_models.commit_event 
     CodexSessionRecord,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.query_response import (  # noqa: E501
-    AgentRuntimeAttemptRecord,
     QueryResponse,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.run_outcome_response import (  # noqa: E501
@@ -51,15 +47,10 @@ from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_mod
     QueryRequest,
 )
 from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.run_outcome import (  # noqa: E501
-    NAME_KEY_HEADER,
     RUN_OUTCOME_PATHS,
     RunOutcomePath,
     RunOutcomeRequest,
-    name_key_from_header_value,
 )
-from src.helpers.data_models import NameKey
-from src.helpers.data_models.http_request_log import HttpRequestLogRecord
-from src.helpers.vars import KTP_NAMEKEY_COL
 
 logger = logging.getLogger(__name__)
 
@@ -206,7 +197,7 @@ def handle_run_outcome_request(
         ready_to_respond_at_unix_usec=ready_at_unix_usec,
     )
     try:
-        runtime.pipeline_config.backend_store.append_authoritative_record(
+        stored = runtime.pipeline_config.backend_store.append_authoritative_record(
             response.http_request_log_record,
         )
     except Exception as exc:
@@ -216,7 +207,7 @@ def handle_run_outcome_request(
             exc,
         )
         raise SystemExit(1) from exc
-    return response
+    return RunOutcomeResponse.from_http_request_log_record(stored)
 
 
 # =====================================
@@ -228,104 +219,7 @@ def handle_query_request(
     runtime: AiAugmentBackendContext,
     ipc_request: QueryRequest,
 ) -> QueryResponse:
-    """
-    Builds a `QueryResponse` from configured
-    source singular outerdicts and detour DB records.
-
-    When the request provides a `NameKey`,
-    every returned collection is restricted
-    to that researcher; otherwise the complete
-    configured sample is returned.
-    """
-    conn = runtime.pipeline_config.backend_store.connection
-    namekey = ipc_request.namekey
-
-    def attempt_records() -> tuple[AgentRuntimeAttemptRecord, ...]:
-        rows = conn.execute(
-            f"SELECT records.{api.AUTHORITATIVE_RECORD_PAYLOAD_COLUMN}, "
-            f"attempts.{api.AUTHORITATIVE_ATTEMPT_PAYLOAD_COLUMN} "
-            f"FROM {api.AUTHORITATIVE_ATTEMPTS_TABLE} AS attempts "
-            f"JOIN {api.AUTHORITATIVE_RECORDS_TABLE} AS records "
-            f"ON records.{api.AUTHORITATIVE_RECORD_ID_COLUMN} = "
-            f"attempts.{api.AUTHORITATIVE_ATTEMPT_COMMIT_ID_COLUMN} "
-            f"ORDER BY records.{api.AUTHORITATIVE_RECORD_ORDINAL_COLUMN}"
-        ).fetchall()
-        try:
-            attempts: list[AgentRuntimeAttemptRecord] = []
-            for record_json, attempt_json in rows:
-                record = HttpRequestLogRecord.model_validate_json(str(record_json))
-                record_namekey = api._parse_name_key_header(
-                    record.request_headers.get(NAME_KEY_HEADER)
-                )
-                if namekey is not None and record_namekey != namekey:
-                    continue
-                attempts.append(
-                    api._attempt_record_from_serialized_json(
-                        runtime,
-                        str(attempt_json),
-                        commit_http_record=record,
-                    )
-                )
-            return tuple(attempts)
-        except (api._PushValidationError, ValidationError, ValueError) as exc:
-            raise api._PushConfigurationError(
-                Locale.REPLAY_PROJECTION_CONFLICT
-            ) from exc
-
-    def run_outcome_records() -> tuple[RunOutcomeResponse, ...]:
-        placeholders = ", ".join("?" for _path in RUN_OUTCOME_PATHS)
-        rows = conn.execute(
-            f"SELECT {api.AUTHORITATIVE_RECORD_PAYLOAD_COLUMN} "
-            f"FROM {api.AUTHORITATIVE_RECORDS_TABLE} "
-            f"WHERE {api.AUTHORITATIVE_RECORD_METHOD_COLUMN} = ? "
-            f"AND {api.AUTHORITATIVE_RECORD_PATH_COLUMN} IN ({placeholders}) "
-            f"ORDER BY {api.AUTHORITATIVE_RECORD_ORDINAL_COLUMN}",
-            [
-                api.HTTP_POST_METHOD,
-                *(path.value for path in sorted(RUN_OUTCOME_PATHS)),
-            ],
-        ).fetchall()
-        try:
-            records = tuple(
-                HttpRequestLogRecord.model_validate_json(str(row[0]))
-                for row in rows
-            )
-            return tuple(
-                record
-                for record in (
-                    RunOutcomeResponse.from_http_request_log_record(record)
-                    for record in records
-                )
-                if namekey is None or record.run_outcome_request.namekey == namekey
-            )
-        except (ValidationError, ValueError) as exc:
-            raise api._PushConfigurationError(
-                Locale.REPLAY_PROJECTION_CONFLICT
-            ) from exc
-
-    selected_attempts = attempt_records()
-    committed_by_namekey: dict[str, list[CommittedInnerDict]] = {}
-    for committed in api._committed_innerdicts(conn):
-        committed_namekey_json = name_key_from_header_value(
-            committed.commit_record.request_headers.get(NAME_KEY_HEADER)
-        ).to_json_key()
-        committed_by_namekey.setdefault(committed_namekey_json, []).append(
-            committed
-        )
-    selected_singular_outerdicts: list[AiAugmentSingularOuterDict] = []
-    for singular_outerdict in runtime.ai_augment_singular_outerdicts:
-        if namekey is not None and singular_outerdict.namekey != namekey:
-            continue
-        selected_singular_outerdict = singular_outerdict.model_copy()
-        selected_singular_outerdict.committed_innerdicts = tuple(
-            committed_by_namekey.get(singular_outerdict.namekey.to_json_key(), ())
-        )
-        selected_singular_outerdicts.append(selected_singular_outerdict)
-    return QueryResponse(
-        attempts=selected_attempts,
-        ai_augment_singular_outerdicts=tuple(selected_singular_outerdicts),
-        run_outcome_records=run_outcome_records(),
-    )
+    return runtime.pipeline_config.backend_store.query(runtime, ipc_request)
 
 
 # =============================================================
@@ -335,7 +229,6 @@ def handle_query_request(
 def create_dashboard_query_app(
     query_response_handler: QueryResponseHandler,
     *,
-    namekey_parameter: str,
     query_path: str,
     run_outcome_handler: RunOutcomeHandler | None = None,
     run_outcome_paths: frozenset[RunOutcomePath] = frozenset(),
@@ -346,13 +239,13 @@ def create_dashboard_query_app(
     @app.get(query_path)
     def dashboard_query() -> Response:
         try:
-            namekey_json = request.args.get(namekey_parameter)
-            namekey = (
-                None
-                if namekey_json is None
-                else NameKey.from_json_key(namekey_json)
+            ipc_request = QueryRequest.from_http_request(
+                method=request.method, path=request.path,
+                query=request.query_string, body=request.get_data(),
             )
-            ipc_request = QueryRequest(namekey=namekey)
+        except ValueError as exc:
+            return Response(str(exc), status=400, content_type="text/plain")
+        try:
             payload = query_response_handler(ipc_request).model_dump_json()
         except BaseException:
             app.logger.exception("dashboard query failed fatally")
@@ -433,14 +326,12 @@ def start_dashboard_query_server(
     socket_path: Path,
     query_response_handler: QueryResponseHandler,
     *,
-    namekey_parameter: str,
     query_path: str,
     run_outcome_handler: RunOutcomeHandler | None = None,
     run_outcome_paths: frozenset[RunOutcomePath] = frozenset(),
 ) -> _DashboardIpcServer:
     app = create_dashboard_query_app(
         query_response_handler,
-        namekey_parameter=namekey_parameter,
         query_path=query_path,
         run_outcome_handler=run_outcome_handler,
         run_outcome_paths=run_outcome_paths,
@@ -504,13 +395,11 @@ def start_full_dashboard_query_server(
         return handle_run_outcome_request(runtime, request)
 
     def query_response_handler(request: QueryRequest) -> QueryResponse:
-        with runtime.pipeline_config.backend_store.threading_lock():
-            return handle_query_request(runtime, request)
+        return handle_query_request(runtime, request)
 
     return start_dashboard_query_server(
         DASHBOARD_SOCKET_PATH,
         query_response_handler,
-        namekey_parameter=KTP_NAMEKEY_COL,
         query_path=DASHBOARD_QUERY_PATH,
         run_outcome_handler=run_outcome_handler,
         run_outcome_paths=RUN_OUTCOME_PATHS,
@@ -532,12 +421,26 @@ def serve_dashboard_query_only(
     server = start_dashboard_query_server(
         DASHBOARD_SOCKET_PATH,
         query_response_handler,
-        namekey_parameter=KTP_NAMEKEY_COL,
         query_path=DASHBOARD_QUERY_PATH,
     )
+    stopped = threading.Event()
+
+    def request_stop(_signum: int, _frame: FrameType | None) -> None:
+        stopped.set()
+
+    previous = {
+        signum: signal.getsignal(signum)
+        for signum in (signal.SIGTERM, signal.SIGINT)
+    }
     try:
-        server.thread.join()
-    except KeyboardInterrupt:
-        pass
+        for signum in previous:
+            signal.signal(signum, request_stop)
+        while not stopped.wait(0.1):
+            if not server.thread.is_alive():
+                raise RuntimeError("Backend query server stopped unexpectedly")
     finally:
-        stop_dashboard_query_server(server)
+        try:
+            stop_dashboard_query_server(server)
+        finally:
+            for signum, handler in previous.items():
+                signal.signal(signum, handler)

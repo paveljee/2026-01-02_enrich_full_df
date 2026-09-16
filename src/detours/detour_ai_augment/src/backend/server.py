@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import argparse
 import os
-from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
+from collections.abc import AsyncGenerator, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import uvicorn
 from fastapi import FastAPI
+from rich.console import Console
 
 from src.detours.detour_ai_augment.protected.src.backend import ipc
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_augment_config import (  # noqa: E501
@@ -17,6 +18,7 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_
 from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
 
 from . import api
+from .helpers.data_models.ai_augment_backend_store import AiAugmentBackendStore
 from .helpers.data_models.ai_augment_context import AiAugmentBackendContext
 
 CONFIG_OPTION = "--config"
@@ -24,25 +26,51 @@ IPC_ONLY_OPTION = "--ipc-only"
 DANGER_NO_VERIFY_HASH_OPTION = "--danger-no-verify-hash"
 
 
+BACKEND_STORE_CLOSED_CLEANLY = "AI_AUGMENT_BACKEND_STORE_CLOSED_CLEANLY"
+
+
+@contextmanager
+def backend_store_lifecycle(
+    runtime: AiAugmentBackendContext, *, new: bool, confirmed: bool, read_only: bool,
+) -> Iterator[AiAugmentBackendStore]:
+    if not confirmed:
+        raise ValueError("Backend startup confirmation required; use --yes to bypass the prompt.")
+    acquired_lock = api.BACKEND_PROCESS_LOCK_DESCRIPTOR is None
+    if acquired_lock:
+        api._acquire_backend_process_lock()
+    try:
+        store = runtime.pipeline_config.backend_store
+        if new:
+            store.rebuild_from_log(runtime, reset_confirmed=confirmed)
+        context = store.read_only() if read_only else store.writable(runtime)
+        with context:
+            yield store
+    finally:
+        if acquired_lock:
+            api._release_backend_process_lock()
+    # Not reached on failed startup, application, task settlement or resource cleanup.
+    print(BACKEND_STORE_CLOSED_CLEANLY, flush=True)
+
+
 @asynccontextmanager
 async def lifespan(
-    app: FastAPI,
-    runtime: AiAugmentBackendContext,
+    app: FastAPI, runtime: AiAugmentBackendContext, *, new: bool, confirmed: bool,
 ) -> AsyncGenerator[None, None]:
-    async with api.lifespan(app, runtime):
-        dashboard_query_server = ipc.start_full_dashboard_query_server(runtime)
-        try:
-            yield
-        finally:
-            ipc.stop_dashboard_query_server(dashboard_query_server)
+    with backend_store_lifecycle(runtime, new=new, confirmed=confirmed, read_only=False):
+        async with api.lifespan(app, runtime):
+            dashboard_query_server = ipc.start_full_dashboard_query_server(runtime)
+            try:
+                yield
+            finally:
+                ipc.stop_dashboard_query_server(dashboard_query_server)
 
 
-def full_backend_application(runtime: AiAugmentBackendContext) -> FastAPI:
+def full_backend_application(
+    runtime: AiAugmentBackendContext, *, new: bool, confirmed: bool,
+) -> FastAPI:
     @asynccontextmanager
-    async def application_lifespan(
-        app: FastAPI,
-    ) -> AsyncGenerator[None, None]:
-        async with lifespan(app, runtime):
+    async def application_lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+        async with lifespan(app, runtime, new=new, confirmed=confirmed):
             yield
 
     api.app.state.runtime = runtime
@@ -107,11 +135,32 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(CONFIG_OPTION, required=True, type=Path)
     parser.add_argument(IPC_ONLY_OPTION, action="store_true")
     parser.add_argument(DANGER_NO_VERIFY_HASH_OPTION, action="store_true")
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--new", action="store_true")
+    mode.add_argument("--resume", "--continue", action="store_true")
+    parser.add_argument("--yes", action="store_true")
     return parser.parse_args(argv)
+
+
+def confirm_startup(args: argparse.Namespace) -> bool:
+    if args.yes:
+        return True
+    prompt = (
+        "Recreate the AI augment detour database from the replay log? [y/N] "
+        if args.new else "Resume the AI augment detour database without rebuilding? [y/N] "
+    )
+    try:
+        confirmed = Console().input(prompt, markup=False).strip().lower() == "y"
+    except EOFError:
+        confirmed = False
+    if not confirmed:
+        raise ValueError("Backend startup confirmation required; use --yes to bypass the prompt.")
+    return True
 
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
+    confirmed = confirm_startup(args)
     verify_hash_on_init = not args.danger_no_verify_hash
     api._acquire_backend_process_lock()
     try:
@@ -121,11 +170,13 @@ def main(argv: list[str] | None = None) -> None:
             verify_hash_on_init=verify_hash_on_init,
         )
         if args.ipc_only:
-            with runtime.pipeline_config.backend_store.read_only():
+            with backend_store_lifecycle(
+                runtime, new=args.new, confirmed=confirmed, read_only=True,
+            ):
                 ipc.serve_dashboard_query_only(runtime)
         else:
             uvicorn.run(
-                full_backend_application(runtime),
+                full_backend_application(runtime, new=args.new, confirmed=confirmed),
                 host=api.SERVER_HOST,
                 port=api.SERVER_PORT,
             )

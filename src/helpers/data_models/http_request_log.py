@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Final, Literal, cast
-from urllib.parse import parse_qsl, quote, urlencode
+from typing import Any, Final, Literal, Self, cast
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 from uuid import UUID, uuid7
 
+import requests
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -64,6 +65,67 @@ class HttpRequestLogRecord(BaseModel):
     response_body: str | None
     received_at_unix_usec: int | None
     duration_usec: int | None
+
+    @classmethod
+    def from_response(
+        cls,
+        response: requests.Response,
+        *,
+        received_at_unix_usec: int | None = None,
+        ready_to_respond_at_unix_usec: int | None = None,
+        duration_usec: int | None = None,
+    ) -> Self:
+        """
+        Captures one completed exchange, using the response's prepared request.
+
+        Returns a `HttpRequestLogRecord(schema_version="1.1")`.
+        """
+        request = response.request
+        if request is None or request.url is None or request.method is None:
+            raise ValueError("HTTP response is missing its prepared request")
+        target = urlsplit(request.url)
+        body = request.body
+        if isinstance(body, bytes):
+            body = body.decode("utf-8")
+        if body is not None and not isinstance(body, str):
+            raise ValueError("HTTP logging requires a text request body")
+        return cls(
+            schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
+            method=request.method,
+            scheme=target.scheme,
+            host=target.hostname or "",
+            port=target.port,
+            path=target.path,
+            query=redact_http_request_log_query(target.query),
+            request_headers=dict(request.headers),
+            request_body=body,
+            response_code=response.status_code,
+            response_headers=dict(response.headers),
+            response_body=response.text,
+            received_at_unix_usec=received_at_unix_usec,
+            ready_to_respond_at_unix_usec=ready_to_respond_at_unix_usec,
+            duration_usec=duration_usec,
+        )
+
+    def to_response(self) -> requests.Response:
+        """Reconstruct the recorded text response without performing HTTP I/O."""
+        if self.response_code is None:
+            raise OSError("Recorded request did not receive an HTTP response")
+        if self.response_body is None or self.response_headers is None:
+            raise ValueError("Recorded HTTP response is incomplete")
+        response = requests.Response()
+        response.status_code = self.response_code
+        response.headers.update(self.response_headers)
+        response.encoding = "utf-8"
+        response._content = self.response_body.encode("utf-8")
+        _ = response.content  # Finalize the buffered body through requests' public accessor.
+        host = f"[{self.host}]" if ":" in self.host else self.host
+        authority = host if self.port is None else f"{host}:{self.port}"
+        response.url = urlunsplit((self.scheme, authority, self.path, self.query, ""))
+        response.request = requests.Request(
+            self.method, response.url, headers=self.request_headers, data=self.request_body,
+        ).prepare()
+        return response
 
     @model_validator(mode="before")
     @classmethod

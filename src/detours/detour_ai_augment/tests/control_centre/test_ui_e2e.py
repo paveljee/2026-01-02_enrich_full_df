@@ -83,9 +83,9 @@ BROWSER_LEADING_RESEARCHER_COUNT = 2
 BROWSER_PILOT_INELIGIBLE_DRAW = "pilot.1"
 BROWSER_PILOT_ELIGIBLE_DRAW = "pilot.2"
 BROWSER_COMPLETED_DRAW = "1"
-E2E_CARD_FIELD_LABEL = control_ui.VARIABLE_SPECS[0].ai_column
+E2E_CARD_FIELD_LABEL = control_ui.RESEARCHER_VARS[0].ai_column
 E2E_CARD_FIELD_VALUE = "literal field value"
-E2E_CARD_SECOND_FIELD_LABEL = control_ui.VARIABLE_SPECS[1].ai_column
+E2E_CARD_SECOND_FIELD_LABEL = control_ui.RESEARCHER_VARS[1].ai_column
 E2E_CARD_SECOND_FIELD_VALUE = "second literal field value"
 E2E_CARD_FILENAME = "source_file.xlsx"
 E2E_REFERENCE_DOCX = Path("resources/pandoc-custom-reference.docx")
@@ -231,10 +231,8 @@ class BrowserController:
     async def shutdown(self) -> None:
         return None
 
-    async def detect_backend_availability(
-        self,
-    ) -> control_ui._BackendAvailability:
-        return self._backend_availability
+    async def probe_all(self) -> None:
+        return None
 
     def drain_notifications(self) -> tuple[str, ...]:
         return ()
@@ -250,10 +248,10 @@ class BrowserController:
         self,
         *,
         selection: control_ui._UiSelection,
-    ) -> control_ui._UiSnapshot:
-        variable = control_ui.VARIABLE_SPEC_BY_KEY[selection.variable_key]
+    ) -> control_ui._DashboardView:
+        researcher_var = control_ui.RESEARCHER_VARS_BY_VARNAME[selection.researcher_varname]
         rows = tuple(
-            self._project(researcher=researcher, variable=variable)
+            self._researcher_var_view(researcher=researcher, researcher_var=researcher_var)
             for researcher in self._researchers
             if self._matches(researcher=researcher, selection=selection)
         )
@@ -266,7 +264,7 @@ class BrowserController:
             self._activity_by_namekey[researcher.namekey.to_json_key()]
             for researcher in eligible
         ]
-        return control_ui._UiSnapshot(
+        return control_ui._DashboardView(
             counts=control_ui._DashboardCounts(
                 total=len(self._researchers),
                 ground_truth=sum(
@@ -288,25 +286,25 @@ class BrowserController:
                 failed=activities.count(RunLifecycle.FAILED),
                 cancelled=activities.count(RunLifecycle.CANCELLED),
             ),
-            rows=rows,
+            researcher_var_views=rows,
             backend_status=self._backend_status,
             backend_availability=self._backend_availability,
             active_run_id=None,
         )
 
-    def _project(
+    def _researcher_var_view(
         self,
         *,
         researcher: AiAugmentSingularOuterDict,
-        variable: control_ui._VariableSpec,
-    ) -> control_ui._ResearcherGridRow:
+        researcher_var: control_ui._ResearcherVar,
+    ) -> control_ui._ResearcherVarView:
         namekey_json = researcher.namekey.to_json_key()
         activity = self._activity_by_namekey[namekey_json]
         run_id = self._run_id_by_namekey.get(namekey_json)
         attempts = tuple(
-            self._attempt_projection(
+            self._run_commit_var_view(
                 researcher=researcher,
-                variable=variable,
+                researcher_var=researcher_var,
                 run_id=attempt_run_id,
                 attempt_index=attempt_index,
             )
@@ -317,24 +315,25 @@ class BrowserController:
         projection = (
             attempts[-1]
             if attempts
-            else control_ui._AttemptVariableProjection(
+            else control_ui._RunCommitVarView(
                 run_id=run_id,
                 namekey=researcher.namekey,
                 draw_number=researcher.draw_number,
                 first_name=researcher.namekey.first_name,
                 last_name=researcher.namekey.last_name,
-                ai_column=variable.ai_column,
+                ai_column=researcher_var.ai_column,
                 ai_value=None,
-                table_1_column=variable.table_1_column,
+                table_1_column=researcher_var.table_1_column,
                 table_1_value=None,
                 footnotes=None,
                 footnote_arguments=None,
                 commit_record_id=None,
-                attempt_timestamp=None,
-                attempt_lifecycle=activity,
+                timestamp=None,
+                lifecycle=activity,
+                backend_lifecycle=None,
                 run_outcome_snapshot_savedness=None,
                 session_status=None,
-                action=control_ui._VariableProjector.action_for_lifecycle(
+                action=control_ui._RunCommitVarView.action_for_lifecycle(
                     activity,
                     eligible=(
                         researcher.ai_augment_cohort
@@ -343,20 +342,20 @@ class BrowserController:
                 ),
             )
         )
-        return control_ui._ResearcherGridRow(
+        return control_ui._ResearcherVarView(
             researcher=researcher,
-            latest=projection,
-            attempts=attempts,
+            latest_run_commit_var_view=projection,
+            run_commit_var_views=attempts,
         )
 
-    def _attempt_projection(
+    def _run_commit_var_view(
         self,
         *,
         researcher: AiAugmentSingularOuterDict,
-        variable: control_ui._VariableSpec,
+        researcher_var: control_ui._ResearcherVar,
         run_id: UUID,
         attempt_index: int,
-    ) -> control_ui._AttemptVariableProjection:
+    ) -> control_ui._RunCommitVarView:
         activity = self._activity_by_run_id[run_id]
         ordinal = attempt_index + 1
         has_run_outcome = activity in {
@@ -364,21 +363,22 @@ class BrowserController:
             RunLifecycle.FAILED,
             RunLifecycle.CANCELLED,
         }
-        return control_ui._AttemptVariableProjection(
+        return control_ui._RunCommitVarView(
             run_id=run_id,
             namekey=researcher.namekey,
             draw_number=researcher.draw_number,
             first_name=researcher.namekey.first_name,
             last_name=researcher.namekey.last_name,
-            ai_column=variable.ai_column,
+            ai_column=researcher_var.ai_column,
             ai_value=f"ai-value-{ordinal}",
-            table_1_column=variable.table_1_column,
+            table_1_column=researcher_var.table_1_column,
             table_1_value=None,
             footnotes=f"footnote-{ordinal}",
             footnote_arguments=f"arguments-{ordinal}",
             commit_record_id=run_id,
-            attempt_timestamp=(E2E_ATTEMPT_BASE_TIME + timedelta(seconds=attempt_index)),
-            attempt_lifecycle=activity,
+            timestamp=(E2E_ATTEMPT_BASE_TIME + timedelta(seconds=attempt_index)),
+            lifecycle=activity,
+            backend_lifecycle=None,
             run_outcome_snapshot_savedness=(
                 Locale.RUN_OUTCOME_SNAPSHOT_SAVED
                 if has_run_outcome
@@ -387,7 +387,7 @@ class BrowserController:
             session_status=(
                 Locale.SESSION_STATUS_OK if has_run_outcome else None
             ),
-            action=control_ui._VariableProjector.action_for_lifecycle(
+            action=control_ui._RunCommitVarView.action_for_lifecycle(
                 activity,
                 eligible=True,
             ),
@@ -431,7 +431,7 @@ class BrowserController:
         render_count = self._card_render_count[namekey_json]
         return control_ui._ResearcherCardView(
             researcher=researcher,
-            markdown=(
+            card_markdown=(
                 f"#### {KTP_FILENAME_COL}: `{E2E_CARD_FILENAME}`\n\n"
                 f"render-count-{render_count}\n\n"
                 f"**`{E2E_CARD_FIELD_LABEL}`**: {E2E_CARD_FIELD_VALUE}\n\n"
@@ -482,6 +482,7 @@ def serve_e2e_dashboard(*, port: int) -> None:
         control_ui._ApplicationServices,
         SimpleNamespace(
             controller=controller,
+            query_ipc=controller.refresh_from_ipc,
             configuration=SimpleNamespace(
                 pipeline_config=SimpleNamespace(
                     pandoc_reference_docx=E2E_REFERENCE_DOCX,
@@ -839,9 +840,9 @@ def test_control_centre_browser_contract(pytestconfig: pytest.Config) -> None:
             ).get_by_text("Backend API:")
             ipc_status = page.get_by_test_id(control_ui.BACKEND_IPC_STATUS_TEST_ID)
             backend_refresh = page.get_by_test_id(control_ui.BACKEND_REFRESH_TEST_ID)
-            expect(backend_status).to_have_text("Backend API: running")
+            expect(backend_status).to_have_text("Backend API: available")
             expect(ipc_status).to_have_text("IPC: available")
-            expect(backend_refresh).to_have_text(Locale.ACTION_REFRESH)
+            expect(backend_refresh).to_have_text(Locale.ACTION_QUERY_IPC)
             expect(backend_refresh).to_be_enabled()
             status_box = backend_status.bounding_box()
             refresh_box = backend_refresh.bounding_box()
@@ -849,7 +850,7 @@ def test_control_centre_browser_contract(pytestconfig: pytest.Config) -> None:
             assert refresh_box is not None
             assert refresh_box["x"] >= status_box["x"] + status_box["width"]
             backend_refresh.click()
-            expect(backend_status).to_have_text("Backend API: stopped")
+            expect(backend_status).to_have_text("Backend API: unavailable")
             expect(ipc_status).to_have_text("IPC: available")
             expect(backend_refresh).to_be_enabled()
 
@@ -916,7 +917,7 @@ def test_control_centre_browser_contract(pytestconfig: pytest.Config) -> None:
             ineligible_row.click()
             eligible_row.click()
             view_card_button.click()
-            expect(footer).to_contain_text("render-count-1")
+            expect(footer).to_contain_text("render-count-2")
             page.set_viewport_size(E2E_NARROW_VIEWPORT)
             assert footer.evaluate("element => element.scrollWidth <= element.clientWidth")
             assert_shared_width(page)

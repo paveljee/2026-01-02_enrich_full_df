@@ -449,10 +449,12 @@ class ControlCentreComponent(
     Protocol,
 ):
     class ContextProperty(
-        BackendComponent.ContextProperty,
         ComponentProtocol.PropertyProtocol,
         Protocol,
     ):
+        @property
+        def pipeline_config(self) -> PipelineConfig: ...
+
         @property
         def openalex_api_key(self) -> str: ...
 
@@ -601,8 +603,7 @@ class ControlCentreComponent(
             ComponentProtocol.PortProtocol.PropertyProtocol,
             Protocol,
         ):
-            @property
-            def namekey(self) -> NameKey | None: ...
+            def outbound_http(self) -> tuple[Literal["GET"], Literal["/query"]]: ...
 
         class RunOutcomeRequestProperty(
             ComponentProtocol.PortProtocol.PropertyProtocol,

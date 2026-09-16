@@ -367,14 +367,6 @@ class Locale:
         "submission contains evidence that is not yet exactly verified"
     )
 
-    REPLAY_LOG_TAIL_REPAIR_FAILED: Final = "authoritative replay-log tail repair failed"
-    REPLAY_LOG_TAIL_REPAIR_PROMPT_TEMPLATE: Final = (
-        "Authoritative replay log {path} ends with an incomplete record. "
-        "Discard its final {discarded_bytes} byte(s)? [y/N] "
-    )
-    REPLAY_LOG_TAIL_REPAIR_DECLINED: Final = (
-        "operator declined authoritative replay-log tail repair"
-    )
     REPLAY_LOG_UNREADABLE: Final = "authoritative replay log is unreadable"
     REPLAY_LOG_ALREADY_LOCKED: Final = (
         "another backend process already owns the authoritative replay log"
@@ -482,7 +474,6 @@ class Locale:
     ACCEPTED_IDENTITY_DUPLICATE: Final = (
         "commit record ID or rollout filename/line-count fragment is already accepted"
     )
-    ATTEMPT_CARD_ZIP_EXISTS: Final = "attempt card ZIP already exists"
     ATTEMPT_HTTP_LOG_EXISTS: Final = "attempt HTTP request log already exists"
     ARCHIVED_ATTEMPT_PATH_INVALID: Final = "archived attempt path is invalid"
     ARCHIVED_ATTEMPT_MANIFEST_INVALID: Final = "archived attempt manifest is invalid"

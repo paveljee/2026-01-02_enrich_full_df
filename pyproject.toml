@@ -412,15 +412,16 @@ bash -c '
   MODE_OR_NAMEKEY="$1"
   test -n "$MODE_OR_NAMEKEY" || {
     echo "ERROR: namekey argument or --ipc-only is required" >&2
-    echo "Usage: pixi run -e detour-ai-augment serve [--ipc-only|<namekey>]" >&2
+    echo "Usage: pixi run -e detour-ai-augment serve [--ipc-only|<namekey>] [--new|--resume|--continue] [--yes]" >&2
     exit 1
   }
+  shift
   export FASTAPI_DETOUR_DASHBOARD_SOCKET="/tmp/detour-manual-${UID}.sock"
   if test "$MODE_OR_NAMEKEY" = "--ipc-only"; then
     pixi run -e detour-ai-augment \
       python -m src.detours.detour_ai_augment.src.backend.server \
       --config config_ai_augment.json \
-      --ipc-only
+      --ipc-only "$@"
     exit
   fi
   NAMEKEY="$MODE_OR_NAMEKEY"
@@ -442,7 +443,7 @@ bash -c '
   export FASTAPI_DETOUR_AIVM_IDENTITY_FILE="$HOME/.local/share/aivm/.ssh/id_ed25519"
   pixi run -e detour-ai-augment \
     python -m src.detours.detour_ai_augment.src.backend.server \
-    --config config_ai_augment.json
+    --config config_ai_augment.json "$@"
 ' --
 """
 dashboard = """

@@ -98,6 +98,11 @@ pixi run -e detour-ai-augment \
   --config config_ai_augment.json
 ```
 
+Backend requires either `--new` (recreate the detour DB from the replay log) or
+`--resume`/`--continue` (reuse known-clean state). Both ask for confirmation;
+`--yes` bypasses it. Recalculate and repin the replay-log hash in config before a
+verified restart. Dashboard verifies on startup and supplies the child flags itself.
+
 Leave this terminal open. Backend is deliberately waiting for one line on stdin containing the Codex session UUID, while already serving requests.
 
 The appendwatch path above is the current default guest deployment path. If AIVM was deployed with a custom `--mount`, substitute the corresponding path below that guest mount point. Backend reads this path through the forced `aivm-audit` SSH protocol using the same host-held identity file as the `ai` connection.

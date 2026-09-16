@@ -3,27 +3,28 @@ from __future__ import annotations
 import fcntl
 import os
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
-from types import TracebackType
 from typing import Self
 
-from pydantic import PrivateAttr, model_validator
+from pydantic import PrivateAttr
 
 from src.helpers.data_models import FragmentType
 
 from ..locale import Locale
 from .ai_augment_registered_resource import AiAugmentRegisteredResource
 
-OPERATOR_CONFIRMATIONS = frozenset({"y", "yes"})
 READ_CHUNK_BYTES = 1024 * 1024
 READ_ONLY_PERMISSIONS = 0o400
 READ_WRITE_PERMISSIONS = 0o600
 
 
 class ReplayLogRegisteredResource(AiAugmentRegisteredResource):
-    """Registered authoritative replay log with one locked append lifetime."""
+    """Registered metadata; private I/O is used exclusively by Backend Store."""
 
     _fd: int | None = PrivateAttr(default=None)
+    _append_allowed: bool = PrivateAttr(default=False)
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
 
     @classmethod
@@ -44,122 +45,80 @@ class ReplayLogRegisteredResource(AiAugmentRegisteredResource):
             verify_hash_on_init=verify_hash_on_init,
         )
 
-    @model_validator(mode="after")
-    def verify_hash_if_requested(self) -> Self:
-        try:
-            with self:
-                pass
-        except (OSError, RuntimeError) as exc:
-            raise ValueError(str(exc)) from exc
-        return self
-
-    def __enter__(self) -> Self:
+    @contextmanager
+    def _locked(self, *, append_allowed: bool) -> Iterator[None]:
         with self._lock:
             if self._fd is not None:
                 raise RuntimeError("ReplayLogRegisteredResource is already open")
-            path = Path(self)
-            if path.is_symlink() or not path.is_file() or not os.access(path, os.R_OK):
-                raise OSError(Locale.REPLAY_LOG_UNREADABLE)
-            path.chmod(READ_WRITE_PERMISSIONS)
-            fd: int | None = None
+            fd = os.open(
+                Path(self), os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+            )
             try:
-                fd = os.open(
-                    path,
-                    os.O_RDWR
-                    | os.O_APPEND
-                    | getattr(os, "O_CLOEXEC", 0)
-                    | getattr(os, "O_NOFOLLOW", 0),
-                )
-                try:
-                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except OSError as exc:
-                    raise RuntimeError(Locale.REPLAY_LOG_ALREADY_LOCKED) from exc
+                lock = fcntl.LOCK_EX if append_allowed else fcntl.LOCK_SH
+                fcntl.flock(fd, lock | fcntl.LOCK_NB)
+                os.fchmod(fd, READ_ONLY_PERMISSIONS)
                 self._fd = fd
-                self._repair_incomplete_tail()
-                if self.verify_hash_on_init:
-                    self.verify_hash()
-                path.chmod(READ_ONLY_PERMISSIONS)
+                self._append_allowed = append_allowed
             except BaseException:
-                self._fd = None
-                if fd is not None:
-                    os.close(fd)
-                path.chmod(READ_ONLY_PERMISSIONS)
+                os.close(fd)
                 raise
-        return self
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        traceback: TracebackType | None,
-    ) -> None:
-        del exc_type, exc, traceback
-        with self._lock:
-            fd = self._fd
-            self._fd = None
-            if fd is None:
-                return
-            try:
-                os.fsync(fd)
-                fcntl.flock(fd, fcntl.LOCK_UN)
-            finally:
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._fd = None
+                self._append_allowed = False
+                # Closing also releases flock; the retained descriptor was never writable.
                 os.close(fd)
 
-    def append(self, data: bytes, *, expected_offset: int) -> int:
+    def _append(self, data: bytes, *, expected_offset: int) -> int:
         with self._lock:
-            fd = self._require_descriptor()
-            end_offset = os.lseek(fd, 0, os.SEEK_END)
-            if end_offset != expected_offset:
+            if not self._append_allowed:
+                raise RuntimeError("Replay log is read-only")
+            locked_fd = self._require_descriptor()
+            locked = os.fstat(locked_fd)
+            if locked.st_size != expected_offset:
                 raise ValueError(Locale.REPLAY_PROJECTION_CONFLICT)
-            written = 0
-            while written < len(data):
-                count = os.write(fd, data[written:])
-                if count <= 0:
-                    raise OSError(Locale.AUTHORITATIVE_LOG_APPEND_FAILED)
-                written += count
-            os.fsync(fd)
-            return end_offset + written
+            writer: int | None = None
+            try:
+                os.fchmod(locked_fd, READ_WRITE_PERMISSIONS)
+                writer = os.open(
+                    Path(self), os.O_WRONLY | os.O_APPEND | getattr(os, "O_CLOEXEC", 0)
+                    | getattr(os, "O_NOFOLLOW", 0),
+                )
+                opened = os.fstat(writer)
+                if (opened.st_dev, opened.st_ino) != (locked.st_dev, locked.st_ino):
+                    raise ValueError(Locale.REPLAY_PROJECTION_CONFLICT)
+                written = 0
+                while written < len(data):
+                    count = os.write(writer, data[written:])
+                    if count <= 0:
+                        raise OSError(Locale.AUTHORITATIVE_LOG_APPEND_FAILED)
+                    written += count
+                os.fsync(writer)
+            finally:
+                try:
+                    if writer is not None:
+                        os.close(writer)
+                finally:
+                    os.fchmod(locked_fd, READ_ONLY_PERMISSIONS)
+            return expected_offset + len(data)
 
-    def read(self) -> bytes:
+    def _read(self, *, offset: int = 0) -> bytes:
         with self._lock:
             fd = self._require_descriptor()
-            return self._read(fd)
+            chunks: list[bytes] = []
+            while chunk := os.pread(fd, READ_CHUNK_BYTES, offset):
+                chunks.append(chunk)
+                offset += len(chunk)
+            return b"".join(chunks)
+
+    def _size(self) -> int:
+        with self._lock:
+            return os.fstat(self._require_descriptor()).st_size
 
     def _require_descriptor(self) -> int:
         if self._fd is None:
             raise RuntimeError(Locale.AUTHORITATIVE_LOG_NOT_OPEN)
         return self._fd
-
-    @staticmethod
-    def _read(fd: int) -> bytes:
-        os.lseek(fd, 0, os.SEEK_SET)
-        chunks: list[bytes] = []
-        while chunk := os.read(fd, READ_CHUNK_BYTES):
-            chunks.append(chunk)
-        return b"".join(chunks)
-
-    def _repair_incomplete_tail(self) -> None:
-        fd = self._require_descriptor()
-        try:
-            value = self._read(fd)
-            if not value or value.endswith(b"\n"):
-                return
-            truncate_at = value.rfind(b"\n") + 1
-            discarded_bytes = len(value) - truncate_at
-            reply = input(
-                Locale.REPLAY_LOG_TAIL_REPAIR_PROMPT_TEMPLATE.format(
-                    path=Path(self),
-                    discarded_bytes=discarded_bytes,
-                )
-            )
-            if reply.strip().casefold() not in OPERATOR_CONFIRMATIONS:
-                raise ValueError(Locale.REPLAY_LOG_TAIL_REPAIR_DECLINED)
-            os.ftruncate(fd, truncate_at)
-            os.fsync(fd)
-            directory_descriptor = os.open(Path(self).parent, os.O_RDONLY)
-            try:
-                os.fsync(directory_descriptor)
-            finally:
-                os.close(directory_descriptor)
-        except (EOFError, OSError) as exc:
-            raise ValueError(Locale.REPLAY_LOG_TAIL_REPAIR_FAILED) from exc

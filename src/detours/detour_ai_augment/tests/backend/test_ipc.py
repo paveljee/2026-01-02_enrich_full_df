@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import stat
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import NoReturn
 from unittest.mock import Mock
@@ -52,20 +52,12 @@ from src.detours.detour_ai_augment.src.control_centre.dashboard.ui import (
     _BackendDatabaseClient,
 )
 from src.helpers.data_models import NameKey
-from src.helpers.vars import KTP_NAMEKEY_COL
 
 TEST_NAMEKEY = '{"ktp.first_name": "A.", "ktp.last_name": "Sheikh"}'
 
 
 def test_fastapi_module_does_not_own_flask_ipc_routes() -> None:
-    for name in (
-        "DASHBOARD_QUERY_PATH",
-        "COMPLETED_PATH",
-        "FAILED_PATH",
-        "CANCELLED_PATH",
-        "RUN_OUTCOME_PATHS",
-    ):
-        assert not hasattr(api, name)
+    assert set(api.app.openapi()["paths"]) == {api.PULL_PATH, api.PUSH_PATH}
 
 
 def test_full_backend_composition_stops_ipc_before_domain_shutdown(
@@ -92,6 +84,15 @@ def test_full_backend_composition_stops_ipc_before_domain_shutdown(
         events.append("ipc-start")
         return ipc_server
 
+    @contextmanager
+    def store_lifecycle(*_args: object, **_kwargs: object) -> Iterator[None]:
+        events.append("store-start")
+        try:
+            yield
+        finally:
+            events.append("store-stop")
+
+    monkeypatch.setattr(server, "backend_store_lifecycle", store_lifecycle)
     monkeypatch.setattr(api, "lifespan", domain_lifespan)
     monkeypatch.setattr(
         ipc,
@@ -105,22 +106,24 @@ def test_full_backend_composition_stops_ipc_before_domain_shutdown(
     )
 
     async def exercise() -> None:
-        async with server.lifespan(api.app, runtime):
+        async with server.lifespan(api.app, runtime, new=True, confirmed=True):
             events.append("running")
 
     asyncio.run(exercise())
 
     assert events == [
+        "store-start",
         "domain-start",
         "ipc-start",
         "running",
         ("ipc-stop", ipc_server),
         "domain-stop",
+        "store-stop",
     ]
 
 
 def test_dashboard_query_flask_application_is_separate_and_unauthenticated() -> None:
-    observed: list[NameKey | None] = []
+    observed: list[QueryRequest] = []
     query_response = QueryResponse(
         attempts=(),
         ai_augment_singular_outerdicts=(),
@@ -128,28 +131,60 @@ def test_dashboard_query_flask_application_is_separate_and_unauthenticated() -> 
     payload = query_response.model_dump_json()
 
     def query(ipc_request: QueryRequest) -> QueryResponse:
-        observed.append(ipc_request.namekey)
+        observed.append(ipc_request)
         return query_response
 
     app = create_dashboard_query_app(
         query,
-        namekey_parameter=KTP_NAMEKEY_COL,
         query_path=DASHBOARD_QUERY_PATH,
     )
 
     availability_response = app.test_client().options(DASHBOARD_QUERY_PATH)
-    namekey = NameKey.from_json_key(TEST_NAMEKEY)
-    response = app.test_client().get(
-        DASHBOARD_QUERY_PATH,
-        query_string={KTP_NAMEKEY_COL: namekey.to_json_key()},
-    )
+    response = app.test_client().get(DASHBOARD_QUERY_PATH)
 
     assert availability_response.status_code == 200
     assert response.status_code == 200
     assert response.content_type == JSON_MEDIA_TYPE
     assert response.get_data(as_text=True) == payload
-    assert observed == [namekey]
+    assert observed == [QueryRequest()]
     assert id(app) != id(api.app)
+
+
+@pytest.mark.parametrize("parameters, body", [
+    ({"ktp.namekey": TEST_NAMEKEY}, b""),
+    ({"namekey": TEST_NAMEKEY}, b""),
+    ({"unknown": "value"}, b""),
+    ({}, b"{}"),
+])
+def test_query_rejects_filters_and_bodies_without_dispatch_or_fatal_exit(
+    parameters: dict[str, str], body: bytes,
+) -> None:
+    handler = Mock(return_value=QueryResponse(attempts=(), ai_augment_singular_outerdicts=()))
+    fatal_exit = Mock()
+    app = create_dashboard_query_app(
+        handler, query_path=DASHBOARD_QUERY_PATH, fatal_exit=fatal_exit,
+    )
+    client = app.test_client()
+
+    response = client.get(DASHBOARD_QUERY_PATH, query_string=parameters, data=body)
+
+    assert response.status_code == status.HTTP_400_BAD_REQUEST
+    handler.assert_not_called()
+    fatal_exit.assert_not_called()
+    assert client.options(DASHBOARD_QUERY_PATH).status_code == status.HTTP_200_OK
+    handler.assert_not_called()
+    assert client.get(DASHBOARD_QUERY_PATH).status_code == status.HTTP_200_OK
+    handler.assert_called_once_with(QueryRequest())
+
+
+def test_query_request_is_wholesale_only() -> None:
+    request = QueryRequest()
+    assert request.outbound_http() == ("GET", "/query")
+    assert QueryRequest.from_http_request(
+        method="GET", path="/query", query=b"", body=b"",
+    ) == request
+    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
+        QueryRequest.model_validate({"namekey": None})
 
 
 def test_dashboard_query_failure_exits_loudly() -> None:
@@ -167,7 +202,6 @@ def test_dashboard_query_failure_exits_loudly() -> None:
 
     app = create_dashboard_query_app(
         failed_query,
-        namekey_parameter=KTP_NAMEKEY_COL,
         query_path=DASHBOARD_QUERY_PATH,
         fatal_exit=fatal_exit,
     )
@@ -211,7 +245,6 @@ def test_full_backend_ipc_forwards_run_outcome_http_exchange_exactly() -> None:
             attempts=(),
             ai_augment_singular_outerdicts=(),
         ),
-        namekey_parameter=KTP_NAMEKEY_COL,
         query_path=DASHBOARD_QUERY_PATH,
         run_outcome_handler=run_outcome,
         run_outcome_paths=run_outcome_models.RUN_OUTCOME_PATHS,
@@ -254,7 +287,6 @@ def test_ipc_only_flask_application_has_no_run_outcome_routes() -> None:
             attempts=(),
             ai_augment_singular_outerdicts=(),
         ),
-        namekey_parameter=KTP_NAMEKEY_COL,
         query_path=DASHBOARD_QUERY_PATH,
     )
 
@@ -269,21 +301,20 @@ def test_dashboard_client_queries_real_mode_0600_unix_socket(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     socket_path = tmp_path / "dashboard.sock"
-    observed: list[NameKey | None] = []
+    observed: list[QueryRequest] = []
     query_response = QueryResponse(
         attempts=(),
         ai_augment_singular_outerdicts=(),
     )
 
     def query(ipc_request: QueryRequest) -> QueryResponse:
-        observed.append(ipc_request.namekey)
+        observed.append(ipc_request)
         return query_response
 
     try:
         server = start_dashboard_query_server(
             socket_path,
             query,
-            namekey_parameter=KTP_NAMEKEY_COL,
             query_path=DASHBOARD_QUERY_PATH,
         )
     except (OSError, SystemExit) as exc:
@@ -298,12 +329,11 @@ def test_dashboard_client_queries_real_mode_0600_unix_socket(
         )
         assert client.available() is True
         assert observed == []
-        namekey = NameKey.from_json_key(TEST_NAMEKEY)
-        assert client.pull(namekey) == QueryResponse(
+        assert client.send_query_request(QueryRequest()) == QueryResponse(
             attempts=(),
             ai_augment_singular_outerdicts=(),
         )
-        assert observed == [namekey]
+        assert observed == [QueryRequest()]
     finally:
         stop_dashboard_query_server(server)
 
@@ -320,7 +350,6 @@ def test_dashboard_ipc_refuses_to_replace_non_socket_path(tmp_path: Path) -> Non
                 attempts=(),
                 ai_augment_singular_outerdicts=(),
             ),
-            namekey_parameter=KTP_NAMEKEY_COL,
             query_path=DASHBOARD_QUERY_PATH,
         )
 

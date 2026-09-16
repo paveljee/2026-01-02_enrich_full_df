@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import fcntl
 import hashlib
 import json
 import os
+import signal
 import subprocess
 import sys
+import threading
 from collections.abc import AsyncIterator, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -17,7 +20,8 @@ from io import StringIO
 from pathlib import Path, PurePosixPath
 from threading import Barrier, Lock
 from types import SimpleNamespace
-from typing import Any, cast, get_args
+from typing import Any, Self, cast, get_args
+from urllib.parse import urlsplit
 from uuid import UUID
 from zipfile import ZipFile
 
@@ -27,7 +31,8 @@ import requests
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import Response, StreamingResponse
-from pydantic import ValidationError
+from pydantic import AnyUrl, ValidationError
+from rich.console import Console
 
 from src.detours.detour_ai_augment.protected.src.backend import ipc
 from src.detours.detour_ai_augment.protected.src.backend.helpers import codex_parse
@@ -122,6 +127,9 @@ from src.detours.detour_ai_augment.src.backend.helpers.data_models.query_respons
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.run_outcome_response import (
     RunOutcomeResponse,
     RunOutcomeResponseBody,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.validation_event import (  # noqa: E501
+    ValidationRequestBody,
 )
 from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models import (
     run_outcome as run_outcome_models,
@@ -338,7 +346,7 @@ def process_retry_attempt_for_test(
         attempt_id=attempt_id,
     )
     return api._process_retry_attempt(
-        conn,
+        store_for_connection(conn),
         original_pull=original_pull,
         commit_record=commit_record,
         namekey=namekey,
@@ -993,6 +1001,38 @@ def standardized_submission_body(
     return standardized_body
 
 
+def capture_http_record(
+    captured: list[HttpRequestLogRecord], record: HttpRequestLogRecord,
+) -> HttpRequestLogRecord:
+    captured.append(record)
+    return HttpRequestLogRecord.model_validate_json(record.model_dump_json())
+
+
+class _AlgorithmTestDatabase(AiAugmentDetourDB):
+    """Borrow a test-owned connection; production resource ownership is tested separately."""
+
+    @contextmanager
+    def writable(self) -> Iterator[Self]:
+        yield self
+
+    @contextmanager
+    def read_only(self) -> Iterator[Self]:
+        yield self
+
+
+def store_for_connection(
+    connection: duckdb.DuckDBPyConnection, *, transaction_active: bool = True,
+) -> AiAugmentBackendStore:
+    """Exercise domain SQL with an explicitly test-owned in-memory database."""
+    database = _AlgorithmTestDatabase(path=Path(":memory:"))
+    database._conn = connection
+    store = AiAugmentBackendStore(rollout_cas=AiAugmentCAS(path=Path("unused-test-cas")))
+    store._detour_db = database
+    store._mode = "writable"
+    store._transaction_active = transaction_active
+    return store
+
+
 def connect_v2_index(
     index: api._RolloutIndex,
     *,
@@ -1011,7 +1051,7 @@ def connect_v2_index(
         connection.close()
         pytest.skip(f"configured DuckDB token extension is unavailable: {exc}")
     api.persist_rollout_index(
-        connection,
+        store_for_connection(connection),
         index,
         codex_match_version=2,
     )
@@ -1138,7 +1178,7 @@ def runtime_for_test(
             "output_dir": output_dir,
             "output_format": output_format,
             "pandoc_reference_docx": paths.reference_docx,
-            "backend_store": AiAugmentBackendStore(
+            "backend_store": AiAugmentBackendStore.from_resources(
                 replay_log=configured_pipeline.replay_log,
                 detour_db=AiAugmentDetourDB(
                     path=tmp_path / "detour_ai_augment.duckdb",
@@ -1200,26 +1240,10 @@ def runtime_for_test(
 def writable_backend_store(
     runtime: AiAugmentBackendContext,
 ) -> Iterator[AiAugmentBackendStore]:
-    def project_record(
-        *,
-        conn: duckdb.DuckDBPyConnection,
-        record: HttpRequestLogRecord,
-        line_number: int,
-        byte_offset: int,
-        line_sha256: str,
-        materialize_files: bool,
-    ) -> AgentRuntimeAttemptRecord | None:
-        return api._project_readme_record(
-            conn,
-            runtime,
-            record,
-            line_number=line_number,
-            byte_offset=byte_offset,
-            line_sha256=line_sha256,
-            materialize_files=materialize_files,
-        )
-
-    with runtime.pipeline_config.backend_store.writable(project_record) as store:
+    store = runtime.pipeline_config.backend_store
+    if not store.detour_db_path.exists():
+        store.rebuild_from_log(runtime, reset_confirmed=True)
+    with store.writable(runtime):
         yield store
 
 
@@ -1624,18 +1648,21 @@ def assert_captured_operator_push_contour(
         "01nrxwf90": "University of Edinburgh",
     }
 
-    def fake_institution_get(url: str, **_kwargs: object) -> SimpleNamespace:
-        identifier = url.rstrip("/").rsplit("/", 1)[-1]
+    def fake_institution_send(
+        _session: requests.Session, request: requests.PreparedRequest, **_kwargs: object,
+    ) -> requests.Response:
+        url = request.url or ""
+        identifier = urlsplit(url).path.rstrip("/").rsplit("/", 1)[-1]
         if url.startswith("https://api.openalex.org/"):
             organization_name, ror = institution_names[identifier]
             payload: dict[str, object] = {"display_name": organization_name, "ror": ror}
         else:
             payload = {"names": [{"value": ror_names[identifier], "types": ["ror_display"]}]}
-        return SimpleNamespace(
-            status_code=200,
-            json=lambda: payload,
-            raise_for_status=lambda: None,
-        )
+        response = requests.Response()
+        response.status_code = 200
+        response.request = request
+        response._content = json.dumps(payload).encode()
+        return response
 
     def fake_subprocess_run(
         command: list[str],
@@ -1671,7 +1698,7 @@ def assert_captured_operator_push_contour(
         await original_after_authoritative_record(record, runtime)
 
     monkeypatch.setenv(pydantic_to_paste.EXPORT_OPENALEX_API_KEY, "operator-fixture-key")
-    monkeypatch.setattr(requests, "get", fake_institution_get)
+    monkeypatch.setattr(requests.Session, "send", fake_institution_send)
     monkeypatch.setattr(
         api,
         "StreamingResponse",
@@ -1701,7 +1728,7 @@ def assert_captured_operator_push_contour(
     monkeypatch.setattr(api, "BACKEND_SESSION_ID", UUID(OPERATOR_CAPTURED_SESSION_ID))
     monkeypatch.setattr(api, "BACKEND_ATTEMPT_RECORD", None)
     monkeypatch.setattr(api, "BACKEND_LIFECYCLE", BackendLifecycle.READY)
-    with writable_backend_store(runtime) as backend_store:
+    with writable_backend_store(runtime):
 
         async def run_captured_contour() -> tuple[
             tuple[int, bytes],
@@ -1750,8 +1777,8 @@ def assert_captured_operator_push_contour(
 
         authoritative_records = tuple(
             record
-            for record, _byte_offset, _line_sha256 in api._authoritative_log_records(
-                runtime.pipeline_config.replay_log.read()
+            for record, _byte_offset in api._authoritative_log_records(
+                Path(runtime.pipeline_config.replay_log).read_bytes()
             )
         )
         pushes = tuple(
@@ -1781,11 +1808,10 @@ def assert_captured_operator_push_contour(
             and record.response_code == status.HTTP_200_OK
         )
 
-        with backend_store.threading_lock():
-            query = ipc.handle_query_request(
-                runtime,
-                QueryRequest(namekey=TEST_NAMEKEY_MODEL),
-            )
+        query = ipc.handle_query_request(
+            runtime,
+            QueryRequest(),
+        )
         assert len(query.attempts) == 2
         assert (
             query.attempts[-1].attempt.post_commit_validation.result
@@ -1870,8 +1896,9 @@ def test_pure_asgi_middleware_records_every_public_exchange_before_send(
             api.ASGI_BODY_KEY: response_body,
         })
 
-    def append(record: HttpRequestLogRecord) -> None:
+    def append(record: HttpRequestLogRecord) -> HttpRequestLogRecord:
         events.append(("append", record.record_id))
+        return HttpRequestLogRecord.model_validate_json(record.model_dump_json())
 
     runtime = cast(
         AiAugmentBackendContext,
@@ -1969,7 +1996,7 @@ def test_authoritative_middleware_preserves_streaming_response_until_complete(
         SimpleNamespace(
             pipeline_config=SimpleNamespace(
                 backend_store=SimpleNamespace(
-                    append_authoritative_record=records.append,
+                    append_authoritative_record=lambda record: capture_http_record(records, record),
                 )
             )
         ),
@@ -2159,7 +2186,7 @@ def test_synthetic_commit_matches_the_readme_contour_exactly(tmp_path: Path) -> 
         namekey=TEST_NAMEKEY_MODEL,
     )
 
-    assert api._validated_readme_record(record).model_dump() == record.model_dump()
+    assert api._validated_http_record(record).model_dump() == record.model_dump()
     assert record.record_id.version == 7
     serialized_record = record.model_dump(mode="json", exclude={"record_id"})
     assert serialized_record == {
@@ -2448,7 +2475,7 @@ def test_run_outcome_http_exchange_is_logged_and_replays_as_raw_history(
 ) -> None:
     appended: list[HttpRequestLogRecord] = []
     backend_store = SimpleNamespace(
-        append_authoritative_record=appended.append,
+        append_authoritative_record=lambda record: capture_http_record(appended, record),
     )
     runtime = cast(
         AiAugmentBackendContext,
@@ -2522,20 +2549,20 @@ def test_run_outcome_http_exchange_is_logged_and_replays_as_raw_history(
 
     connection = duckdb.connect(":memory:")
     try:
-        api._initialize_readme_authoritative_schema(connection)
-        api._project_readme_record(
-            connection,
+        store_for_connection(connection)._initialize_http_record_schema()
+        store_for_connection(connection, transaction_active=False)._apply_log_record(
             runtime,
             record,
             line_number=1,
-            byte_offset=100,
-            line_sha256="c" * 64,
-            materialize_files=False,
         )
-        backend_store.connection = connection
+        runtime = cast(AiAugmentBackendContext, SimpleNamespace(
+            configured_namekey=runtime.configured_namekey,
+            ai_augment_singular_outerdicts=(),
+            pipeline_config=SimpleNamespace(backend_store=store_for_connection(connection)),
+        ))
         replayed_responses = ipc.handle_query_request(
             runtime,
-            QueryRequest(namekey=None),
+            QueryRequest(),
         ).run_outcome_records
         assert tuple(
             response.http_request_log_record for response in replayed_responses
@@ -2590,41 +2617,51 @@ def test_failed_post_commit_work_projects_atomically_without_domain_changes(
     )
     connection = duckdb.connect(":memory:")
     connection.execute("CREATE TABLE domain_probe (value INTEGER)")
-    api._initialize_readme_authoritative_schema(connection)
+    store_for_connection(connection)._initialize_http_record_schema()
 
     def fail_after_domain_write(
-        conn: duckdb.DuckDBPyConnection,
+        store: AiAugmentBackendStore,
         _runtime: AiAugmentBackendContext,
         _record: HttpRequestLogRecord,
-        *,
-        materialize_files: bool,
     ) -> tuple[AgentRuntimeAttemptRecord, bool]:
-        assert materialize_files is True
-        conn.execute("INSERT INTO domain_probe VALUES (1)")
+        store.execute("INSERT INTO domain_probe VALUES (1)")
         return failed_attempt_record, False
 
-    monkeypatch.setattr(api, "_validate_projected_commit", fail_after_domain_write)
+    monkeypatch.setattr(api, "_apply_validation_record", fail_after_domain_write)
+    validation_record = ValidationRequestBody(
+        commit_id=record.record_id,
+        post_commit_validation=failed_attempt_record.attempt.post_commit_validation,
+        submission_type=None,
+        submission=None,
+    ).http_record(record)
+    published: list[UUID] = []
+    monkeypatch.setattr(
+        api, "publish_card_zip", lambda _store, _runtime, rid: published.append(rid),
+    )
     try:
-        api._project_readme_record(
-            connection,
+        store_for_connection(connection, transaction_active=False)._apply_log_record(
             cast(
                 AiAugmentBackendContext,
                 SimpleNamespace(
                     configured_namekey=NameKey.from_json_key(TEST_NAMEKEY)
                 ),
             ),
-            record,
+            validation_record,
             line_number=1,
-            byte_offset=123,
-            line_sha256="a" * 64,
-            materialize_files=True,
         )
 
+        assert published == [validation_record.record_id]
         assert connection.execute("SELECT * FROM domain_probe").fetchall() == []
+        assert connection.execute(
+            f"SELECT count(*) FROM {api.AUTHORITATIVE_ATTEMPTS_TABLE}"
+        ).fetchone() == (1,)
         assert connection.execute(
             f"SELECT count(*) FROM {api.AUTHORITATIVE_RECORDS_TABLE}"
         ).fetchone() == (1,)
-        assert api._projection_checkpoint(connection) == (1, 123, "a" * 64)
+        assert connection.execute(
+            f"SELECT {api.AUTHORITATIVE_RECORD_ORDINAL_COLUMN} "
+            f"FROM {api.AUTHORITATIVE_RECORDS_TABLE}"
+        ).fetchall() == [(1,)]
     finally:
         connection.close()
 
@@ -2694,7 +2731,7 @@ def test_optional_result_metadata_is_nullable_and_no_url_ref_is_skipped() -> Non
     )
     connection = duckdb.connect(":memory:")
     try:
-        api._create_codex_schema(connection)
+        api._create_codex_schema(store_for_connection(connection))
         not_null = {
             row[1]: bool(row[3])
             for row in connection.execute(
@@ -2703,7 +2740,7 @@ def test_optional_result_metadata_is_nullable_and_no_url_ref_is_skipped() -> Non
         }
         assert all(not not_null[column] for column in OPTIONAL_REF_METADATA_COLUMNS)
 
-        api.persist_rollout_index(connection, index)
+        api.persist_rollout_index(store_for_connection(connection), index)
         stored = connection.execute(
             f'SELECT "{api.CODEX_REF_DOMAIN_COL}", '
             f'"{api.CODEX_REF_SNIPPET_COL}", '
@@ -2880,8 +2917,8 @@ def test_persisted_index_is_idempotent_and_evidence_lookup_is_exact() -> None:
     connection = duckdb.connect(":memory:")
     try:
         index = build_test_index()
-        api.persist_rollout_index(connection, index)
-        api.persist_rollout_index(connection, index)
+        api.persist_rollout_index(store_for_connection(connection), index)
+        api.persist_rollout_index(store_for_connection(connection), index)
         body = {
             column: {
                 "value": column,
@@ -2891,7 +2928,7 @@ def test_persisted_index_is_idempotent_and_evidence_lookup_is_exact() -> None:
         }
         submission = Submission.model_validate(body)
         validated = api.validate_submission_evidence(
-            connection,
+            store_for_connection(connection),
             submission,
             rollout_filename=TEST_ROLLOUT_FILENAME,
         )
@@ -2905,7 +2942,7 @@ def test_persisted_index_is_idempotent_and_evidence_lookup_is_exact() -> None:
         )
         with pytest.raises(api._PushValidationError, match="no indexed match"):
             api.validate_submission_evidence(
-                connection,
+                store_for_connection(connection),
                 Submission.model_validate(changed_excerpt),
                 rollout_filename=TEST_ROLLOUT_FILENAME,
             )
@@ -2916,7 +2953,7 @@ def test_persisted_index_is_idempotent_and_evidence_lookup_is_exact() -> None:
         )
         with pytest.raises(api._PushValidationError, match="URL does not match"):
             api.validate_submission_evidence(
-                connection,
+                store_for_connection(connection),
                 Submission.model_validate(changed_url),
                 rollout_filename=TEST_ROLLOUT_FILENAME,
             )
@@ -2946,7 +2983,7 @@ def test_codex_v2_classifies_normalized_variants_without_accepting_them(
     )
     try:
         assessment = api.assess_submission_evidence(
-            connection,
+            store_for_connection(connection),
             Submission.model_validate(submission_body_for_evidence(excerpt)),
             rollout_filename=TEST_ROLLOUT_FILENAME,
             codex_match_version=2,
@@ -2992,7 +3029,9 @@ def test_codex_v2_normalizer_preserves_non_latin_scripts(
         config_path=backend_test_paths.config,
     )
     try:
-        assert api._normalized_evidence_tokens(connection, value) == expected_tokens
+        assert api._normalized_evidence_tokens(
+            store_for_connection(connection), value
+        ) == expected_tokens
     finally:
         connection.close()
 
@@ -3030,7 +3069,7 @@ def test_codex_v2_matches_non_latin_token_sequences_conservatively(
     )
     try:
         assessment = api.assess_submission_evidence(
-            connection,
+            store_for_connection(connection),
             Submission.model_validate(submission_body_for_evidence(excerpt)),
             rollout_filename=TEST_ROLLOUT_FILENAME,
             codex_match_version=2,
@@ -3062,7 +3101,7 @@ def test_codex_v2_rejects_noncontiguous_or_empty_token_sequences(
     )
     try:
         assessment = api.assess_submission_evidence(
-            connection,
+            store_for_connection(connection),
             Submission.model_validate(submission_body_for_evidence(excerpt)),
             rollout_filename=TEST_ROLLOUT_FILENAME,
             codex_match_version=2,
@@ -3086,7 +3125,7 @@ def test_codex_v2_cannot_join_tokens_across_citation_sections(
     )
     try:
         assessment = api.assess_submission_evidence(
-            connection,
+            store_for_connection(connection),
             Submission.model_validate(submission_body_for_evidence("Alpha Beta Gamma Delta")),
             rollout_filename=TEST_ROLLOUT_FILENAME,
             codex_match_version=2,
@@ -3106,7 +3145,7 @@ def test_codex_v2_requires_the_exact_candidate_url(
     )
     try:
         assessment = api.assess_submission_evidence(
-            connection,
+            store_for_connection(connection),
             Submission.model_validate(
                 submission_body_for_evidence(
                     "Jose Garcia Senior Researcher",
@@ -3141,7 +3180,7 @@ def test_evidence_assessment_is_exhaustive_and_public_guidance_is_nonrevealing(
     )
     try:
         assessment = api.assess_submission_evidence(
-            connection,
+            store_for_connection(connection),
             Submission.model_validate(body),
             rollout_filename=TEST_ROLLOUT_FILENAME,
             codex_match_version=2,
@@ -3214,7 +3253,7 @@ def test_v2_retry_baseline_replays_and_accepts_only_the_exact_correction(
     )
     try:
         near_assessment = api.assess_submission_evidence(
-            connection,
+            store_for_connection(connection),
             near_submission,
             rollout_filename=TEST_ROLLOUT_FILENAME,
             codex_match_version=2,
@@ -3235,7 +3274,7 @@ def test_v2_retry_baseline_replays_and_accepts_only_the_exact_correction(
         )
 
         exact_assessment = api.assess_submission_evidence(
-            connection,
+            store_for_connection(connection),
             exact_submission,
             rollout_filename=TEST_ROLLOUT_FILENAME,
             codex_match_version=2,
@@ -3291,7 +3330,7 @@ def test_v2_retry_rejects_changed_tokens_and_repeats_near_guidance(
     try:
         near_submission = Submission.model_validate(near_body)
         near_assessment = api.assess_submission_evidence(
-            connection,
+            store_for_connection(connection),
             near_submission,
             rollout_filename=TEST_ROLLOUT_FILENAME,
             codex_match_version=2,
@@ -3314,7 +3353,7 @@ def test_v2_retry_rejects_changed_tokens_and_repeats_near_guidance(
             standardized_submission_body(changed_body)
         )
         changed_assessment = api.assess_submission_evidence(
-            connection,
+            store_for_connection(connection),
             changed_submission,
             rollout_filename=TEST_ROLLOUT_FILENAME,
             codex_match_version=2,
@@ -3380,7 +3419,7 @@ def test_retry_preserves_exact_items_inside_a_rejected_field(
     try:
         baseline_submission = Submission.model_validate(baseline_body)
         baseline_assessment = api.assess_submission_evidence(
-            connection,
+            store_for_connection(connection),
             baseline_submission,
             rollout_filename=TEST_ROLLOUT_FILENAME,
             codex_match_version=2,
@@ -3403,7 +3442,7 @@ def test_retry_preserves_exact_items_inside_a_rejected_field(
             standardized_submission_body(changed_body)
         )
         changed_assessment = api.assess_submission_evidence(
-            connection,
+            store_for_connection(connection),
             changed_submission,
             rollout_filename=TEST_ROLLOUT_FILENAME,
             codex_match_version=2,
@@ -3448,7 +3487,7 @@ def test_retry_preserves_fully_verified_fields_and_complete_evidence_counts(
     try:
         baseline_submission = Submission.model_validate(baseline_body)
         baseline_assessment = api.assess_submission_evidence(
-            connection,
+            store_for_connection(connection),
             baseline_submission,
             rollout_filename=TEST_ROLLOUT_FILENAME,
             codex_match_version=2,
@@ -3471,7 +3510,7 @@ def test_retry_preserves_fully_verified_fields_and_complete_evidence_counts(
             standardized_submission_body(changed_body)
         )
         changed_assessment = api.assess_submission_evidence(
-            connection,
+            store_for_connection(connection),
             changed_submission,
             rollout_filename=TEST_ROLLOUT_FILENAME,
             codex_match_version=2,
@@ -3539,7 +3578,7 @@ def test_unmatched_evidence_can_be_replaced_or_explicitly_withdrawn(
     try:
         baseline_submission = Submission.model_validate(baseline_body)
         baseline_assessment = api.assess_submission_evidence(
-            connection,
+            store_for_connection(connection),
             baseline_submission,
             rollout_filename=TEST_ROLLOUT_FILENAME,
             codex_match_version=2,
@@ -3562,7 +3601,7 @@ def test_unmatched_evidence_can_be_replaced_or_explicitly_withdrawn(
             standardized_submission_body(retry_body)
         )
         retry_assessment = api.assess_submission_evidence(
-            connection,
+            store_for_connection(connection),
             retry_submission,
             rollout_filename=TEST_ROLLOUT_FILENAME,
             codex_match_version=2,
@@ -3608,7 +3647,7 @@ def test_v2_near_evidence_cannot_be_withdrawn(
     try:
         baseline_submission = Submission.model_validate(baseline_body)
         baseline_assessment = api.assess_submission_evidence(
-            connection,
+            store_for_connection(connection),
             baseline_submission,
             rollout_filename=TEST_ROLLOUT_FILENAME,
             codex_match_version=2,
@@ -3631,7 +3670,7 @@ def test_v2_near_evidence_cannot_be_withdrawn(
             standardized_submission_body(withdrawal_body)
         )
         withdrawal_assessment = api.assess_submission_evidence(
-            connection,
+            store_for_connection(connection),
             withdrawal_submission,
             rollout_filename=TEST_ROLLOUT_FILENAME,
             codex_match_version=2,
@@ -3683,7 +3722,7 @@ def test_retry_baselines_survive_restart_and_remain_isolated_by_run(
         ):
             submission = Submission.model_validate(body)
             assessment = api.assess_submission_evidence(
-                first_connection,
+                store_for_connection(first_connection),
                 submission,
                 rollout_filename=TEST_ROLLOUT_FILENAME,
                 codex_match_version=2,
@@ -3714,7 +3753,7 @@ def test_retry_baselines_survive_restart_and_remain_isolated_by_run(
             standardized_submission_body(submission_body_for_evidence(V2_EXACT_EXCERPT))
         )
         exact_assessment = api.assess_submission_evidence(
-            second_connection,
+            store_for_connection(second_connection),
             exact_submission,
             rollout_filename=TEST_ROLLOUT_FILENAME,
             codex_match_version=2,
@@ -3790,7 +3829,7 @@ def test_concurrent_first_rejections_cannot_replace_the_baseline(
                     attempt_id=attempt_id,
                 )
                 retry_expected = api._retry_baseline_exists(
-                    connection,
+                    store_for_connection(connection),
                     original_pull=original_pull,
                     namekey=TEST_NAMEKEY_MODEL,
                     session_id=TEST_SESSION_ID,
@@ -3801,7 +3840,7 @@ def test_concurrent_first_rejections_cannot_replace_the_baseline(
                     else Submission.model_validate(plain_body)
                 )
                 assessment = api.assess_submission_evidence(
-                    connection,
+                    store_for_connection(connection),
                     submission,
                     rollout_filename=TEST_ROLLOUT_FILENAME,
                     codex_match_version=2,
@@ -3874,7 +3913,7 @@ def test_corrupt_applied_audit_fails_as_configuration_error(
     submission = Submission.model_validate(body)
     try:
         api.assess_submission_evidence(
-            connection,
+            store_for_connection(connection),
             submission,
             rollout_filename=TEST_ROLLOUT_FILENAME,
             codex_match_version=2,
@@ -3885,7 +3924,7 @@ def test_corrupt_applied_audit_fails_as_configuration_error(
             ("audit-second", retry_submission),
         ):
             attempted_assessment = api.assess_submission_evidence(
-                connection,
+                store_for_connection(connection),
                 attempted_submission,
                 rollout_filename=TEST_ROLLOUT_FILENAME,
                 codex_match_version=2,
@@ -3950,7 +3989,7 @@ def test_historical_haanen_retry_preserves_verified_evidence_roundtrip(
     try:
         original_submission = Submission.model_validate(original_body)
         original_assessment = api.assess_submission_evidence(
-            connection,
+            store_for_connection(connection),
             original_submission,
             rollout_filename=HAANEN_ROLLOUT_FILENAME,
             codex_match_version=2,
@@ -3988,7 +4027,7 @@ def test_historical_haanen_retry_preserves_verified_evidence_roundtrip(
 
         archived_retry = StandardizedSubmission.model_validate(archived_retry_body)
         archived_retry_assessment = api.assess_submission_evidence(
-            connection,
+            store_for_connection(connection),
             archived_retry,
             rollout_filename=HAANEN_ROLLOUT_FILENAME,
             codex_match_version=2,
@@ -4059,7 +4098,7 @@ def test_historical_haanen_retry_preserves_verified_evidence_roundtrip(
             standardized_submission_body(ideal_retry_body)
         )
         ideal_assessment = api.assess_submission_evidence(
-            connection,
+            store_for_connection(connection),
             ideal_retry,
             rollout_filename=HAANEN_ROLLOUT_FILENAME,
             codex_match_version=2,
@@ -4151,7 +4190,7 @@ def test_multiple_sql_matches_report_the_exact_excerpt() -> None:
                 ),
             ),
         )
-        api.persist_rollout_index(connection, duplicate_index)
+        api.persist_rollout_index(store_for_connection(connection), duplicate_index)
         body = {
             column: {
                 "value": column,
@@ -4162,7 +4201,7 @@ def test_multiple_sql_matches_report_the_exact_excerpt() -> None:
 
         with pytest.raises(api._MultipleEvidenceMatches) as raised:
             api.validate_submission_evidence(
-                connection,
+                store_for_connection(connection),
                 Submission.model_validate(body),
                 rollout_filename=TEST_ROLLOUT_FILENAME,
             )
@@ -4180,7 +4219,9 @@ def test_multiple_exact_excerpt_and_url_matches_use_random_candidate(
     assert api.ALLOW_MULTIPLE_EVIDENCE_MATCHES is True
     connection = duckdb.connect(":memory:")
     try:
-        api.persist_rollout_index(connection, build_duplicate_evidence_index())
+        api.persist_rollout_index(
+            store_for_connection(connection), build_duplicate_evidence_index()
+        )
         offered_ref_ids: list[tuple[str, ...]] = []
 
         def choose_search(candidates: tuple[api._EvidenceCandidate, ...]) -> api._EvidenceCandidate:
@@ -4197,7 +4238,7 @@ def test_multiple_exact_excerpt_and_url_matches_use_random_candidate(
         }
 
         validated = api.validate_submission_evidence(
-            connection,
+            store_for_connection(connection),
             Submission.model_validate(body),
             rollout_filename=TEST_ROLLOUT_FILENAME,
         )
@@ -4230,10 +4271,10 @@ def test_seeded_evidence_selection_round_trips_deterministically(
     for _roundtrip in range(2):
         connection = duckdb.connect(str(database_path))
         try:
-            api.persist_rollout_index(connection, index)
+            api.persist_rollout_index(store_for_connection(connection), index)
             api._seed_evidence_random(sample_seed)
             validated = api.validate_submission_evidence(
-                connection,
+                store_for_connection(connection),
                 submission,
                 rollout_filename=TEST_ROLLOUT_FILENAME,
             )
@@ -4414,28 +4455,70 @@ def test_configured_replay_log_hash_is_enforced_on_each_backend_start(
         replay_log.write_text('{"changed":true}\n', encoding=TEXT_ENCODING)
     finally:
         replay_log.chmod(0o400)
+    config_path = tmp_path / "ai-augment.json"
+    config_path.write_text(json.dumps(config_data), encoding=TEXT_ENCODING)
+    # Both Backend and Dashboard startup load configuration through this method.
     with pytest.raises(ValidationError):
-        AiAugmentDetourConfig.model_validate_json(json.dumps(config_data))
+        AiAugmentDetourConfig.from_json(config_path)
+    assert replay_log.read_text(encoding=TEXT_ENCODING) == '{"changed":true}\n'
+    assert replay_log.stat().st_mode & 0o777 == 0o400
 
 
-def test_replay_log_registered_resource_enforces_hash_during_construction(
+def test_replay_log_registered_resource_inherits_construction_hash_check(
     tmp_path: Path,
 ) -> None:
     replay_log = tmp_path / "replay.jsonl"
-    replay_log.write_text("{}\n", encoding=TEXT_ENCODING)
-
-    with pytest.raises(ValidationError):
+    value = b'{}\n{"unfinished":'
+    replay_log.write_bytes(value)
+    original_mode = replay_log.stat().st_mode
+    # The hash matches only the prefix. Nothing may truncate the actual file to fit it.
+    with pytest.raises(ValidationError, match="Hash mismatch"):
         ReplayLogRegisteredResource(
             name=replay_log.name,
-            hash=hashlib.sha256(b"different").hexdigest(),
+            hash=hashlib.sha256(b"{}\n").hexdigest(),
             group=ResourceGroup.KTP_PIPELINE_ARTIFACT,
             fragment_type=FragmentType.LINE_NUMBER,
             description="isolated authoritative log",
-            url=replay_log.resolve().as_uri(),
+            url=AnyUrl(replay_log.resolve().as_uri()),
             verify_hash_on_init=True,
         )
+    assert replay_log.read_bytes() == value
+    assert replay_log.stat().st_mode == original_mode
 
-    assert replay_log.stat().st_mode & 0o777 == 0o400
+
+@pytest.mark.parametrize("read_only", (False, True))
+def test_replay_log_rejects_incomplete_tail_without_repair(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    read_only: bool,
+) -> None:
+    replay_log = tmp_path / "replay.jsonl"
+    complete_record = persisted_http_record(
+        record_id=UUID("019d0000-0000-7000-8000-000000000020"),
+        method=api.HTTP_GET_METHOD,
+        path=api.PULL_PATH,
+        response_code=status.HTTP_200_OK,
+    )
+    value = (complete_record.model_dump_json() + '\n{"unfinished":').encode(TEXT_ENCODING)
+    replay_log.write_bytes(value)
+    resource = ReplayLogRegisteredResource.from_config_entry(
+        {
+            RESOURCE_PATH_KEY: str(replay_log),
+            RESOURCE_SHA256_KEY: hashlib.sha256(value).hexdigest(),
+            RESOURCE_DESCRIPTION_KEY: "isolated authoritative log",
+        },
+        resource_key=REPLAY_LOG_KEY,
+        verify_hash_on_init=True,
+    )
+    monkeypatch.setattr("builtins.input", lambda *_args: pytest.fail("Unexpected repair prompt"))
+    # A matching hash does not make malformed JSONL acceptable for replay.
+    with resource._locked(append_allowed=not read_only):
+        with pytest.raises(
+            api._PushValidationError,
+            match=Locale.REPLAY_LOG_LINE_INVALID_TEMPLATE.format(line_number=2),
+        ):
+            api._authoritative_log_records(resource._read())
+    assert replay_log.read_bytes() == value
 
 
 def test_replay_log_registered_resource_rejects_reentry(
@@ -4453,12 +4536,13 @@ def test_replay_log_registered_resource_rejects_reentry(
         verify_hash_on_init=True,
     )
 
-    with resource:
+    with resource._locked(append_allowed=True):
         with pytest.raises(
             RuntimeError,
             match="ReplayLogRegisteredResource is already open",
         ):
-            resource.__enter__()
+            with resource._locked(append_allowed=True):
+                pass
 
     assert replay_log.stat().st_mode & 0o777 == 0o400
 
@@ -4478,124 +4562,11 @@ def test_replay_log_registered_resource_rejects_unexpected_append_offset(
         verify_hash_on_init=True,
     )
 
-    with resource:
+    with resource._locked(append_allowed=True):
         with pytest.raises(ValueError, match=Locale.REPLAY_PROJECTION_CONFLICT):
-            resource.append(b"{}\n", expected_offset=1)
-        assert resource.append(b"{}\n", expected_offset=0) == 3
-        assert resource.read() == b"{}\n"
-
-
-def test_authoritative_replay_recreates_byte_identical_detour_database(
-    tmp_path: Path,
-    pytestconfig: pytest.Config,
-    backend_test_paths: BackendTestPaths,
-) -> None:
-    repository_root = pytestconfig.rootpath
-    supplied_replay_log = (
-        repository_root / "tmp" / "detour_ai_augment_backend_api_replay_log.jsonl"
-    )
-    supplied_release_map = repository_root / "tmp" / "map_subset0_to_batch.csv"
-    supplied_rollout_cas = repository_root / "tmp" / ".cas"
-    replay_log = tmp_path / supplied_replay_log.name
-    replay_bytes = read_bytes(supplied_replay_log)
-    write_bytes(replay_log, replay_bytes)
-
-    config_data = read_json(backend_test_paths.ai_augment_config)
-    config_data["db_file"] = str(backend_test_paths.source_database)
-    config_data["rollout_cas_dir"] = str(supplied_rollout_cas)
-    config_data["files_config"][REPLAY_LOG_KEY] = {
-        RESOURCE_PATH_KEY: str(replay_log),
-        RESOURCE_SHA256_KEY: hashlib.sha256(replay_bytes).hexdigest(),
-        RESOURCE_DESCRIPTION_KEY: "isolated copy of supplied authoritative replay log",
-    }
-    config_data["files_config"][MAP_SUBSET_0_TO_BATCH_KEY] = {
-        RESOURCE_PATH_KEY: str(supplied_release_map),
-        RESOURCE_SHA256_KEY: hashlib.sha256(read_bytes(supplied_release_map)).hexdigest(),
-        RESOURCE_DESCRIPTION_KEY: "supplied release map",
-    }
-    detour_database = tmp_path / "detour_ai_augment.duckdb"
-    pipeline = AiAugmentDetourConfig.model_validate_json(json.dumps(config_data))
-    detour_db = AiAugmentDetourDB(
-        path=detour_database,
-        duckdb_extensions=pipeline.duckdb_extensions,
-    )
-    pipeline = pipeline.model_copy(
-        update={
-            "backend_store": AiAugmentBackendStore(
-                replay_log=pipeline.replay_log,
-                detour_db=detour_db,
-                rollout_cas=pipeline.rollout_cas,
-            )
-        }
-    )
-    runtime = AiAugmentBackendContext(pipeline_config=pipeline)
-
-    with writable_backend_store(runtime):
-        pass
-    first_hash = file_signature(detour_database)[2]
-    detour_database.unlink()
-
-    with writable_backend_store(runtime):
-        pass
-    second_hash = file_signature(detour_database)[2]
-
-    assert second_hash == first_hash
-
-
-def test_authoritative_replay_recreates_byte_identical_detour_database(
-    tmp_path: Path,
-    pytestconfig: pytest.Config,
-    backend_test_paths: BackendTestPaths,
-) -> None:
-    repository_root = pytestconfig.rootpath
-    supplied_replay_log = (
-        repository_root / "tmp" / "detour_ai_augment_backend_api_replay_log.jsonl"
-    )
-    supplied_release_map = repository_root / "tmp" / "map_subset0_to_batch.csv"
-    supplied_rollout_cas = repository_root / "tmp" / ".cas"
-    replay_log = tmp_path / supplied_replay_log.name
-    replay_bytes = read_bytes(supplied_replay_log)
-    write_bytes(replay_log, replay_bytes)
-
-    config_data = read_json(backend_test_paths.ai_augment_config)
-    config_data["db_file"] = str(backend_test_paths.source_database)
-    config_data["rollout_cas_dir"] = str(supplied_rollout_cas)
-    config_data["files_config"][REPLAY_LOG_KEY] = {
-        RESOURCE_PATH_KEY: str(replay_log),
-        RESOURCE_SHA256_KEY: hashlib.sha256(replay_bytes).hexdigest(),
-        RESOURCE_DESCRIPTION_KEY: "isolated copy of supplied authoritative replay log",
-    }
-    config_data["files_config"][MAP_SUBSET_0_TO_BATCH_KEY] = {
-        RESOURCE_PATH_KEY: str(supplied_release_map),
-        RESOURCE_SHA256_KEY: hashlib.sha256(read_bytes(supplied_release_map)).hexdigest(),
-        RESOURCE_DESCRIPTION_KEY: "supplied release map",
-    }
-    detour_database = tmp_path / "detour_ai_augment.duckdb"
-    pipeline = AiAugmentDetourConfig.model_validate_json(json.dumps(config_data))
-    pipeline = pipeline.model_copy(
-        update={
-            "backend_store": AiAugmentBackendStore(
-                replay_log=pipeline.replay_log,
-                detour_db=AiAugmentDetourDB(
-                    path=detour_database,
-                    duckdb_extensions=pipeline.duckdb_extensions,
-                ),
-                rollout_cas=pipeline.rollout_cas,
-            )
-        }
-    )
-    runtime = AiAugmentBackendContext(pipeline_config=pipeline)
-
-    with writable_backend_store(runtime):
-        pass
-    first_hash = file_signature(detour_database)[2]
-    detour_database.unlink()
-
-    with writable_backend_store(runtime):
-        pass
-    second_hash = file_signature(detour_database)[2]
-
-    assert second_hash == first_hash
+            resource._append(b"{}\n", expected_offset=1)
+        assert resource._append(b"{}\n", expected_offset=0) == 3
+        assert resource._read() == b"{}\n"
 
 
 @pytest.mark.parametrize(
@@ -4994,9 +4965,12 @@ def test_ipc_only_query_uses_explicit_runtime_and_read_only_store(
     monkeypatch: pytest.MonkeyPatch,
     backend_test_paths: BackendTestPaths,
 ) -> None:
-    singular_outerdict = ai_augment_singular_outerdict("A.", "Sheikh")
+    singular_outerdicts = (
+        ai_augment_singular_outerdict("A.", "Sheikh"),
+        ai_augment_singular_outerdict("Jane", "Doe"),
+    )
     runtime = runtime_for_test(tmp_path, backend_test_paths).model_copy(
-        update={"cached_ai_augment_singular_outerdicts": (singular_outerdict,)}
+        update={"cached_ai_augment_singular_outerdicts": singular_outerdicts}
     )
     monkeypatch.setattr(
         ai_augment_detour_db,
@@ -5006,18 +4980,11 @@ def test_ipc_only_query_uses_explicit_runtime_and_read_only_store(
     with writable_backend_store(runtime):
         pass
     with runtime.pipeline_config.backend_store.read_only():
-        first = ipc.handle_query_request(runtime, QueryRequest(namekey=None))
-        second = ipc.handle_query_request(
-            runtime,
-            QueryRequest(namekey=TEST_NAMEKEY_MODEL),
-        )
+        response = ipc.handle_query_request(runtime, QueryRequest())
 
     assert tuple(
-        value.serialize() for value in first.ai_augment_singular_outerdicts
-    ) == (singular_outerdict.serialize(),)
-    assert tuple(
-        value.serialize() for value in second.ai_augment_singular_outerdicts
-    ) == (singular_outerdict.serialize(),)
+        value.serialize() for value in response.ai_augment_singular_outerdicts
+    ) == tuple(value.serialize() for value in singular_outerdicts)
 
 
 def test_detour_database_open_modes_are_explicit_and_reported(
@@ -5045,7 +5012,7 @@ def test_detour_database_open_modes_are_explicit_and_reported(
         lambda *_args, **_kwargs: None,
     )
 
-    detour_db = runtime.pipeline_config.backend_store.detour_db
+    detour_db = runtime.pipeline_config.backend_store._detour_db
     with detour_db.read_only() as opened_database:
         assert opened_database is detour_db
         assert opened_database.connection is connection
@@ -5071,38 +5038,32 @@ def test_detour_database_open_modes_are_explicit_and_reported(
     assert isinstance(read_error.value.__cause__, duckdb.IOException)
 
 
-def test_backend_store_connection_requires_managed_context(
+def test_backend_store_exposes_only_detached_reads_outside_transactions(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     backend_test_paths: BackendTestPaths,
 ) -> None:
     runtime = runtime_for_test(tmp_path, backend_test_paths)
     store = runtime.pipeline_config.backend_store
-    expected = "AiAugmentBackendStore must be used inside a 'with' block"
-    monkeypatch.setattr(
-        ai_augment_detour_db,
-        "load_duckdb_extension",
-        lambda *_args, **_kwargs: None,
-    )
-
-    with pytest.raises(RuntimeError, match=expected):
-        _ = store.connection
-
-    with writable_backend_store(runtime) as opened_store:
-        assert opened_store is store
-        writable_connection = store.connection
-        assert writable_connection is store.detour_db.connection
-
-    with pytest.raises(RuntimeError, match=expected):
-        _ = store.connection
-
-    with store.read_only() as opened_store:
-        assert opened_store is store
-        read_only_connection = store.connection
-        assert read_only_connection is store.detour_db.connection
-
-    with pytest.raises(RuntimeError, match=expected):
-        _ = store.connection
+    assert not hasattr(store, "detour_db")
+    with pytest.raises(RuntimeError, match="must be used inside"):
+        store.execute("SELECT 1")
+    with writable_backend_store(runtime):
+        assert store._detour_db._conn is None
+        result = store.execute("SELECT 1 UNION ALL SELECT 2")
+        assert store._detour_db._conn is None
+        assert result.fetchall() == [(1,), (2,)]
+        assert result.fetchone() is None
+        for sql in ("BEGIN", "CREATE TABLE forbidden (id INT)", "ATTACH ':memory:' AS other"):
+            with pytest.raises(RuntimeError):
+                store.execute(sql)
+        with pytest.raises(RuntimeError, match="transaction"):
+            store.materialize_innerdicts(source_relation="unused", table_name="unused")
+        assert store.detour_db_path.stat().st_mode & 0o777 == 0o400
+    with store.read_only():
+        assert store.execute("SELECT 1").fetchone() == (1,)
+        assert store._detour_db._conn is None
+    with pytest.raises(RuntimeError, match="must be used inside"):
+        store.execute("SELECT 1")
 
 
 def test_query_handler_requires_managed_backend_store_context(
@@ -5111,7 +5072,7 @@ def test_query_handler_requires_managed_backend_store_context(
     backend_test_paths: BackendTestPaths,
 ) -> None:
     runtime = runtime_for_test(tmp_path, backend_test_paths)
-    request = QueryRequest(namekey=None)
+    request = QueryRequest()
     monkeypatch.setattr(
         ai_augment_detour_db,
         "load_duckdb_extension",
@@ -5124,9 +5085,8 @@ def test_query_handler_requires_managed_backend_store_context(
     ):
         ipc.handle_query_request(runtime, request)
 
-    with writable_backend_store(runtime) as store:
-        with store.threading_lock():
-            response = ipc.handle_query_request(runtime, request)
+    with writable_backend_store(runtime):
+        response = ipc.handle_query_request(runtime, request)
 
     assert response == QueryResponse(
         attempts=(),
@@ -5158,7 +5118,7 @@ def test_detour_database_prepares_both_open_modes(
         prepare_extension,
     )
 
-    detour_db = runtime.pipeline_config.backend_store.detour_db
+    detour_db = runtime.pipeline_config.backend_store._detour_db
     with detour_db.writable() as writable_database:
         writable_connection = writable_database.connection
     with detour_db.read_only() as read_only_database:
@@ -5294,14 +5254,14 @@ def test_required_config_and_source_database_are_read_only(
 ) -> None:
     with pytest.raises(SystemExit):
         server.parse_args([])
-    arguments = server.parse_args(["--config", str(backend_test_paths.config)])
+    arguments = server.parse_args(["--config", str(backend_test_paths.config), "--new"])
     assert arguments.config == backend_test_paths.config
     assert arguments.ipc_only is False
     assert (
         server.parse_args([
             "--config",
             str(backend_test_paths.config),
-            server.IPC_ONLY_OPTION,
+            server.IPC_ONLY_OPTION, "--resume",
         ]).ipc_only
         is True
     )
@@ -5322,7 +5282,7 @@ def test_required_config_and_source_database_are_read_only(
         ai_augment_config,
         verify_hash_on_init=False,
     )
-    assert configured.backend_store.detour_db == AiAugmentDetourDB(
+    assert configured.backend_store._detour_db == AiAugmentDetourDB(
         path=backend_test_paths.source_database.with_name(
             "scisci_process__detour_ai-augment.duckdb"
         ),
@@ -5363,6 +5323,7 @@ def test_main_ipc_only_runs_only_the_dashboard_query_server(
         ),
     )
 
+    monkeypatch.setattr(api, "BACKEND_PROCESS_LOCK_DESCRIPTOR", 123)
     monkeypatch.setattr(api, "_acquire_backend_process_lock", lambda: calls.append("acquire"))
     monkeypatch.setattr(api, "_release_backend_process_lock", lambda: calls.append("release"))
     monkeypatch.setattr(
@@ -5394,7 +5355,7 @@ def test_main_ipc_only_runs_only_the_dashboard_query_server(
         lambda *_args, **_kwargs: pytest.fail("Uvicorn must not start in IPC-only mode"),
     )
 
-    server.main(["--config", str(config_path), server.IPC_ONLY_OPTION])
+    server.main(["--config", str(config_path), "--resume", "--yes", server.IPC_ONLY_OPTION])
 
     assert calls == [
         "acquire",
@@ -5414,7 +5375,10 @@ def test_main_full_mode_configures_and_runs_composed_backend(
     calls: list[object] = []
     runtime = cast(AiAugmentBackendContext, SimpleNamespace())
 
-    def compose(selected_runtime: AiAugmentBackendContext) -> FastAPI:
+    def compose(
+        selected_runtime: AiAugmentBackendContext, *, new: bool, confirmed: bool,
+    ) -> FastAPI:
+        assert new and confirmed
         assert selected_runtime is runtime
         calls.append("compose")
         return api.app
@@ -5450,7 +5414,7 @@ def test_main_full_mode_configures_and_runs_composed_backend(
         lambda application, *, host, port: calls.append(("serve", application, host, port)),
     )
 
-    server.main(["--config", str(config_path)])
+    server.main(["--config", str(config_path), "--new", "--yes"])
 
     assert calls == [
         "acquire",
@@ -5461,34 +5425,32 @@ def test_main_full_mode_configures_and_runs_composed_backend(
     ]
 
 
-def test_ipc_only_ctrl_c_stops_server(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("stop_signal", (signal.SIGINT, signal.SIGTERM))
+def test_ipc_only_signals_stop_server(
+    monkeypatch: pytest.MonkeyPatch, stop_signal: signal.Signals,
 ) -> None:
-    del tmp_path
     calls: list[object] = []
+    handlers: dict[int, Any] = {}
     runtime = cast(AiAugmentBackendContext, SimpleNamespace())
+    ipc_server = SimpleNamespace(thread=SimpleNamespace(is_alive=lambda: True))
 
-    class InterruptibleThread:
-        @staticmethod
-        def join() -> None:
-            calls.append("wait")
-            raise KeyboardInterrupt
+    def wait(_event: object, _timeout: float) -> bool:
+        handlers[stop_signal](stop_signal, None)
+        return True
 
-    ipc_server = SimpleNamespace(thread=InterruptibleThread())
+    monkeypatch.setattr(threading.Event, "wait", wait)
+    monkeypatch.setattr(signal, "getsignal", lambda sig: f"old-{sig}")
     monkeypatch.setattr(
-        ipc,
-        "start_dashboard_query_server",
-        lambda *_args, **_kwargs: ipc_server,
+        signal, "signal",
+        lambda sig, handler: (handlers.update({sig: handler}), f"old-{sig}")[1],
     )
-    monkeypatch.setattr(
-        ipc,
-        "stop_dashboard_query_server",
-        lambda handle: calls.append(("stop", handle)),
-    )
+    monkeypatch.setattr(ipc, "start_dashboard_query_server", lambda *_a, **_kw: ipc_server)
+    monkeypatch.setattr(ipc, "stop_dashboard_query_server", lambda handle: calls.append(handle))
     ipc.serve_dashboard_query_only(runtime)
-
-    assert calls == ["wait", ("stop", ipc_server)]
+    assert calls == [ipc_server]
+    assert handlers == {
+        signal.SIGINT: f"old-{signal.SIGINT}", signal.SIGTERM: f"old-{signal.SIGTERM}",
+    }
 
 
 def test_repeated_researcher_rows_materialize_as_distinct_innerdicts() -> None:
@@ -5512,8 +5474,8 @@ def test_repeated_researcher_rows_materialize_as_distinct_innerdicts() -> None:
             })
             return values
 
-        api.append_codex_output(connection, output_row(100, "attempt-1"))
-        api.append_codex_output(connection, output_row(101, "attempt-2"))
+        api.append_codex_output(store_for_connection(connection), output_row(100, "attempt-1"))
+        api.append_codex_output(store_for_connection(connection), output_row(101, "attempt-2"))
         innerdicts_row = connection.execute(
             f"SELECT {duckdb_quote_identifier(KTP_INNERDICT_JSONLINES_COL)} "
             f"FROM {api.CODEX_INNERDICT_TABLE}"
@@ -5528,7 +5490,7 @@ def test_repeated_researcher_rows_materialize_as_distinct_innerdicts() -> None:
         ]
 
         with pytest.raises(api._PushValidationError, match="already accepted"):
-            api.append_codex_output(connection, output_row(101, "attempt-3"))
+            api.append_codex_output(store_for_connection(connection), output_row(101, "attempt-3"))
     finally:
         connection.close()
 
@@ -5746,9 +5708,15 @@ def test_accepted_push_is_committed_only_after_its_public_record(
     )
     monkeypatch.setattr(api, "_read_appendwatch_bytes", lambda *_args: b".\n")
 
-    def append_commit(record: HttpRequestLogRecord) -> AgentRuntimeAttemptRecord:
+    def append_commit(record: HttpRequestLogRecord) -> HttpRequestLogRecord:
         assert isinstance(record, BackendCommitRecord)
         appended.append(record)
+        return HttpRequestLogRecord.model_validate_json(record.model_dump_json())
+
+    def validate_commit(commit_id: UUID) -> AgentRuntimeAttemptRecord:
+        assert len(appended) == 1
+        record = appended[0]
+        assert record.record_id == commit_id
         return AgentRuntimeAttemptRecord(
             attempt=AgentRuntimeAttempt(
                 pull_record=pull_record,
@@ -5764,6 +5732,7 @@ def test_accepted_push_is_committed_only_after_its_public_record(
         )
 
     backend_store.append_authoritative_record = append_commit
+    backend_store.validate_commit = validate_commit
 
     api._commit_accepted_push(push_record, runtime)
 
@@ -6033,7 +6002,7 @@ def test_openapi_does_not_disclose_integrity_internals() -> None:
     }
 
 
-def test_dashboard_query_uses_the_open_backend_store_connection(
+def test_dashboard_query_uses_scoped_store_reads(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     backend_test_paths: BackendTestPaths,
@@ -6046,12 +6015,11 @@ def test_dashboard_query_uses_the_open_backend_store_connection(
     )
 
     with writable_backend_store(runtime) as store:
-        detour_database = store.connection
-        with store.threading_lock():
-            first = ipc.handle_query_request(
-                runtime,
-                QueryRequest(namekey=None),
-            )
+        assert store._detour_db._conn is None
+        first = ipc.handle_query_request(
+            runtime,
+            QueryRequest(),
+        )
         replayed_pull = HttpRequestLogRecord(
             schema_version="1.1",
             method=api.HTTP_GET_METHOD,
@@ -6070,13 +6038,12 @@ def test_dashboard_query_uses_the_open_backend_store_connection(
             duration_usec=1,
         )
         store.append_authoritative_record(replayed_pull)
-        with store.threading_lock():
-            second = ipc.handle_query_request(
-                runtime,
-                QueryRequest(namekey=None),
-            )
-        assert store.connection is detour_database
-        projected_count = detour_database.execute(
+        second = ipc.handle_query_request(
+            runtime,
+            QueryRequest(),
+        )
+        assert store._detour_db._conn is None
+        projected_count = store.execute(
             f"SELECT count(*) FROM {api.AUTHORITATIVE_RECORDS_TABLE}"
         ).fetchone()
 
@@ -6097,3 +6064,140 @@ def test_dashboard_query_has_no_route_on_the_public_fastapi_application() -> Non
 
     assert ipc.DASHBOARD_QUERY_PATH not in route_paths
     assert not any(isinstance(path, str) and path.startswith("/_control/") for path in route_paths)
+
+
+@pytest.mark.parametrize("mode", ("--new", "--resume", "--continue"))
+def test_startup_modes_require_confirmation_or_yes(
+    mode: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    args = server.parse_args(["--config", "unused.json", mode])
+    assert args.new is (mode == "--new")
+    assert args.resume is (mode != "--new")
+    prompts: list[str] = []
+
+    def answer(_console: object, prompt: str, **_kwargs: object) -> str:
+        prompts.append(prompt)
+        return "y"
+
+    monkeypatch.setattr(Console, "input", answer)
+    assert server.confirm_startup(args)
+    assert len(prompts) == 1
+    assert "[y/N]" in prompts[0]
+    assert ("Recreate" in prompts[0]) is args.new
+    monkeypatch.setattr(Console, "input", lambda *_a, **_kw: pytest.fail("prompted"))
+    assert server.confirm_startup(server.parse_args(["--config", "unused.json", mode, "--yes"]))
+
+
+@pytest.mark.parametrize("mode", ("--new", "--resume", "--continue"))
+@pytest.mark.parametrize("eof", (False, True))
+def test_declined_startup_never_opens_resources_or_session_stdin(
+    mode: str, eof: bool, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def decline(*_args: object, **_kwargs: object) -> str:
+        if eof:
+            raise EOFError
+        return "n"
+
+    monkeypatch.setattr(Console, "input", decline)
+    monkeypatch.setattr(api, "_acquire_backend_process_lock", lambda: pytest.fail("lock opened"))
+    monkeypatch.setattr(api, "start_backend_session_reader", lambda: pytest.fail("stdin consumed"))
+    with pytest.raises(ValueError, match="confirmation required"):
+        server.main(["--config", "unused.json", mode])
+
+
+def test_startup_mode_is_required_and_mutually_exclusive() -> None:
+    for modes in ([], ["--new", "--resume"], ["--new", "--continue"]):
+        with pytest.raises(SystemExit):
+            server.parse_args(["--config", "unused.json", *modes])
+
+
+@pytest.mark.parametrize("fails", (False, True))
+def test_clean_close_acknowledges_only_after_resource_cleanup(
+    fails: bool, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    order: list[str] = []
+
+    class Store:
+        @contextmanager
+        def read_only(self) -> Iterator[None]:
+            order.append("opened")
+            try:
+                yield
+            finally:
+                assert server.BACKEND_STORE_CLOSED_CLEANLY not in capsys.readouterr().out
+                order.append("closed")
+                if fails:
+                    raise OSError("cleanup failed")
+
+    runtime = cast(AiAugmentBackendContext, SimpleNamespace(
+        pipeline_config=SimpleNamespace(backend_store=Store()),
+    ))
+    monkeypatch.setattr(api, "BACKEND_PROCESS_LOCK_DESCRIPTOR", None)
+    monkeypatch.setattr(api, "_acquire_backend_process_lock", lambda: order.append("locked"))
+    monkeypatch.setattr(api, "_release_backend_process_lock", lambda: order.append("unlocked"))
+
+    def exercise() -> None:
+        with server.backend_store_lifecycle(runtime, new=False, confirmed=True, read_only=True):
+            assert capsys.readouterr().out == ""
+
+    if fails:
+        with pytest.raises(OSError, match="cleanup failed"):
+            exercise()
+        assert capsys.readouterr().out == ""
+    else:
+        exercise()
+        assert capsys.readouterr().out == server.BACKEND_STORE_CLOSED_CLEANLY + "\n"
+    assert order == ["locked", "opened", "closed", "unlocked"]
+
+
+def test_rebuild_confirmation_and_invalid_log_preserve_existing_database(
+    tmp_path: Path, backend_test_paths: BackendTestPaths,
+) -> None:
+    runtime = runtime_for_test(tmp_path, backend_test_paths)
+    store = runtime.pipeline_config.backend_store
+    store.rebuild_from_log(runtime, reset_confirmed=True)
+    before = store.detour_db_path.read_bytes()
+    with pytest.raises(ValueError, match="confirmation"):
+        store.rebuild_from_log(runtime, reset_confirmed=False)
+    assert store.detour_db_path.read_bytes() == before
+    log = Path(runtime.pipeline_config.replay_log)
+    log.chmod(0o600)
+    log.write_bytes(b'{"unfinished":')
+    with pytest.raises(api._PushValidationError):
+        store.rebuild_from_log(runtime, reset_confirmed=True)
+    assert log.read_bytes() == b'{"unfinished":'
+    assert store.detour_db_path.read_bytes() == before
+
+
+def test_log_descriptor_is_readonly_and_append_failure_closes_writer(
+    tmp_path: Path, backend_test_paths: BackendTestPaths, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = runtime_for_test(tmp_path, backend_test_paths)
+    store = runtime.pipeline_config.backend_store
+    store.rebuild_from_log(runtime, reset_confirmed=True)
+    record = persisted_http_record(
+        record_id=UUID("019d0000-0000-7000-8000-000000000020"),
+        method="GET", path="/pull", response_code=200,
+    )
+    writer_fds: list[int] = []
+
+    def fail_fsync(fd: int) -> None:
+        assert fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_ACCMODE == os.O_WRONLY
+        writer_fds.append(fd)
+        raise OSError("fsync interrupted")
+
+    with pytest.raises(RuntimeError, match="Store failed"):
+        with store.writable(runtime):
+            descriptor = store._replay_log._fd
+            assert descriptor is not None
+            assert fcntl.fcntl(descriptor, fcntl.F_GETFL) & os.O_ACCMODE == os.O_RDONLY
+            monkeypatch.setattr(os, "fsync", fail_fsync)
+            with pytest.raises(OSError, match="fsync interrupted"):
+                store.append_authoritative_record(record)
+            assert Path(runtime.pipeline_config.replay_log).stat().st_mode & 0o777 == 0o400
+            with pytest.raises(OSError):
+                os.fstat(writer_fds[0])
+            with pytest.raises(RuntimeError, match="Store failed"):
+                store.execute("SELECT 1")
+    assert store._replay_log._fd is None
+    assert store._detour_db._conn is None

@@ -5,28 +5,27 @@ import asyncio
 import contextlib
 import http.client
 import json
+import logging
 import os
 import re
 import shlex
+import signal
 import socket
 import subprocess
 import sys
-from collections import Counter
-from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
-from typing import Any, Final, NewType
+from typing import Any, Final, NewType, Protocol, Self
 from urllib import error as urllib_error
 from urllib import request as urllib_request
-from urllib.parse import urlencode
 from uuid import UUID, uuid7
 from zoneinfo import ZoneInfo
 
 from fastapi import status
 from nicegui import app, ui
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_augment_config import (  # noqa: E501
     AiAugmentDetourConfig,
@@ -61,8 +60,10 @@ from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helper
     BACKEND_PULL_URL,
     BACKEND_READY_POLL_SECONDS,
     BACKEND_READY_TIMEOUT_SECONDS,
+    BACKEND_REBUILD_TIMEOUT_SECONDS,
     CHROME_DEVTOOLS_PATH,
     CODEX_CANCEL_TIMEOUT_SECONDS,
+    CODEX_CLI_BIN_PATH,
     CODEX_DISCOVERY_POLL_SECONDS,
     CODEX_DISCOVERY_TIMEOUT_SECONDS,
     CODEX_ENV_PATH,
@@ -96,6 +97,7 @@ from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helper
     TEXT_DECODE_ERROR_POLICY,
     TEXT_ENCODING,
 )
+from src.helpers.architecture import FrozenStrictModel
 from src.helpers.cards import build_cards, card_filename, render_docx_bytes
 from src.helpers.data_models import InnerDict, NameKey
 from src.helpers.vars import (
@@ -117,25 +119,17 @@ from ...backend.api import (
     SERVER_PORT,
     _PushValidationError,
     parse_appendwatch_report_bytes,
-    parse_name_key_header,
     parse_source_key_header,
     selected_card_outer_dict,
 )
-from ...backend.helpers.data_models.ai_augment_context import (
-    EXPECTED_GROUND_TRUTH_RESEARCHERS,
-    EXPECTED_INELIGIBILITY_COUNTS,
-    EXPECTED_INELIGIBLE_RESEARCHERS,
-    EXPECTED_NO_GROUND_TRUTH_RESEARCHERS,
-    EXPECTED_SOURCE_RESEARCHERS,
-)
 from ...backend.helpers.data_models.ai_augment_singular_outer_dict import (
     AiAugmentSingularOuterDict,
-    CommittedInnerDict,
 )
 from ...backend.helpers.data_models.commit_event import (
     SOURCE_KEY_HEADER,
     BackendLifecycle,
 )
+from ...backend.helpers.data_models.committed_innerdict import CommittedInnerDict
 from ...backend.helpers.data_models.query_response import (
     AgentRuntimeAttemptRecord,
     QueryResponse,
@@ -144,21 +138,30 @@ from ...backend.helpers.data_models.run_outcome_response import (
     RunOutcomeResponse,
     RunOutcomeResponseBody,
 )
-from ...backend.server import CONFIG_OPTION, DANGER_NO_VERIFY_HASH_OPTION
+from ...backend.server import (
+    BACKEND_STORE_CLOSED_CLEANLY,
+    CONFIG_OPTION,
+    DANGER_NO_VERIFY_HASH_OPTION,
+)
 from .helpers.aggrid import AgGrid
 from .helpers.data_models.ai_augment_context import (
     AiAugmentControlCentreContext,
 )
+from .helpers.data_models.ai_augment_dashboard_storage import AiAugmentDashboardStorage
+from .helpers.data_models.dashboard_query_snapshot import DashboardQuerySnapshot
 from .helpers.data_models.query_request import QueryRequest
 from .helpers.data_models.run_event import (
     Run,
     RunEvent,
 )
 from .helpers.data_models.run_outcome import (
-    NAME_KEY_HEADER,
     RunLifecycle,
     RunOutcomeRequest,
 )
+
+type _Researcher = AiAugmentSingularOuterDict
+
+logger = logging.getLogger(__name__)
 
 
 class _NiceGui:
@@ -187,16 +190,13 @@ BACKEND_COMMAND_PREFIX: Final = (
 )
 BACKEND_PORT: Final = SERVER_PORT
 
-QUEUE_STORAGE_KEY: Final = "detour_ai_augment_queue"
-RUN_EVENTS_STORAGE_KEY: Final = "detour_ai_augment_run_events"
-BACKEND_DATABASE_STORAGE_KEY: Final = "detour_ai_augment_backend_database"
-SOURCE_DATA_STORAGE_KEY: Final = "detour_ai_augment_source_data"
-SOURCE_DATA_CACHE_SCHEMA_VERSION: Final = 1
 
 LIMA_APPENDWATCH_REPORT_PARAM: Final = APPENDWATCH_REPORT_ENV_NAME
 
 FOOTNOTE_MARKER = re.compile(r"\^(?P<numbers>[0-9]+(?:,[0-9]+)*)\^")
 UI_REFRESH_SECONDS: Final = 1
+PROBE_TIMEOUT_SECONDS: Final = 3
+SSH_PROBE_MARKER: Final = b"ai-augment-probe"
 GRID_ROW_ID_FIELD: Final = "row_id"
 GRID_NAMEKEY_FIELD: Final = KTP_NAMEKEY_COL
 COMPACT_LINE_HEIGHT: Final = 1.25
@@ -329,7 +329,7 @@ def draw_sort_key(
 
 
 def researcher_sort_key(
-    researcher: AiAugmentSingularOuterDict,
+    researcher: _Researcher,
 ) -> tuple[
     tuple[tuple[int, tuple[tuple[int, int | str], ...], str], ...],
     str,
@@ -359,27 +359,34 @@ def nicegui_table_column(
 
 
 # =============================================================================
-# Variable selection
+# Researcher var selection
 # =============================================================================
 
 
-@dataclass(frozen=True, slots=True)
-class _VariableSpec:
-    key: str
+class _ResearcherVar(FrozenStrictModel):
+    """A varname and paired AI/Table1 column names, not cell values.
+
+    The varname is the AI column name without AI_AUGMENT_COLUMN_PREFIX;
+    it identifies the selected researcher var, not a researcher's NameKey.
+    """
+
+    varname: str
     ai_column: str
     table_1_column: str
 
 
-VARIABLE_SPECS: Final[tuple[_VariableSpec, ...]] = tuple(
-    _VariableSpec(
-        key=ai_column.removeprefix(AI_AUGMENT_COLUMN_PREFIX),
+RESEARCHER_VARS: Final[tuple[_ResearcherVar, ...]] = tuple(
+    _ResearcherVar(
+        varname=ai_column.removeprefix(AI_AUGMENT_COLUMN_PREFIX),
         ai_column=ai_column,
         table_1_column=table_1_column,
     )
     for table_1_column, ai_column in DOCX_TO_AI_AUGMENT_COLUMNS
 )
 
-VARIABLE_SPEC_BY_KEY: Final = {variable.key: variable for variable in VARIABLE_SPECS}
+RESEARCHER_VARS_BY_VARNAME: Final = {
+    researcher_var.varname: researcher_var for researcher_var in RESEARCHER_VARS
+}
 
 
 # =============================================================================
@@ -391,6 +398,7 @@ RESEARCHER_LIFECYCLES: Final = (
     RunLifecycle.READY,
     RunLifecycle.QUEUED,
     RunLifecycle.RUNNING,
+    RunLifecycle.CODEX_EXITED,
     RunLifecycle.COMPLETED,
     RunLifecycle.FAILED,
     RunLifecycle.CANCELLED,
@@ -398,6 +406,7 @@ RESEARCHER_LIFECYCLES: Final = (
 LIVE_RESEARCHER_LIFECYCLES: Final = frozenset({
     RunLifecycle.QUEUED,
     RunLifecycle.RUNNING,
+    RunLifecycle.CODEX_EXITED,
 })
 AGENT_RUNTIME_ATTEMPT_LIFECYCLE_BY_RESULT: Final = {
     BackendLifecycle.ACCEPTED: RunLifecycle.COMPLETED,
@@ -426,98 +435,22 @@ class _RunAction(StrEnum):
 
 
 # =============================================================================
-# Source / database domain models
+# Availability observations
 # =============================================================================
 
 
-@dataclass(frozen=True, slots=True)
-class _BackendAvailability:
-    full_api_available: bool
-    ipc_available: bool
+class _BackendAvailability(FrozenStrictModel):
+    full_api_available: bool | None = None
+    ipc_available: bool | None = None
+    ssh_available: bool | None = None
+    codex_authenticated: bool | None = None
+    checked_at: datetime | None = None
 
-
-class _SourceInputFingerprint(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    schema_version: int
-    source_database_path: str
-    source_database_size: int
-    source_database_mtime_ns: int
-    source_database_ctime_ns: int
-    source_database_device: int
-    source_database_inode: int
-    release_map_sha256: str
-    sample_seed: int
-
-
-class _CachedSourceData(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    fingerprint: _SourceInputFingerprint
-    ai_augment_singular_outerdicts: tuple[dict[str, object], ...]
-
-    def singular_outerdicts(self) -> tuple[AiAugmentSingularOuterDict, ...]:
-        return tuple(
-            AiAugmentSingularOuterDict.from_serialized(value)
-            for value in self.ai_augment_singular_outerdicts
-        )
-
-
-def source_input_fingerprint(
-    pipeline_config: AiAugmentDetourConfig,
-) -> _SourceInputFingerprint:
-    source_database_path = pipeline_config.db_file.resolve(strict=True)
-    source_database_stat = source_database_path.stat()
-    return _SourceInputFingerprint(
-        schema_version=SOURCE_DATA_CACHE_SCHEMA_VERSION,
-        source_database_path=str(source_database_path),
-        source_database_size=source_database_stat.st_size,
-        source_database_mtime_ns=source_database_stat.st_mtime_ns,
-        source_database_ctime_ns=source_database_stat.st_ctime_ns,
-        source_database_device=source_database_stat.st_dev,
-        source_database_inode=source_database_stat.st_ino,
-        release_map_sha256=pipeline_config.release_map.hash,
-        sample_seed=pipeline_config.sample_seed,
-    )
-
-
-def load_cached_source_data(
-    pipeline_config: AiAugmentDetourConfig,
-) -> tuple[
-    _SourceInputFingerprint,
-    tuple[AiAugmentSingularOuterDict, ...] | None,
-]:
-    fingerprint = source_input_fingerprint(pipeline_config)
-    raw_cache = app.storage.general.get(SOURCE_DATA_STORAGE_KEY)
-    try:
-        cache = _CachedSourceData.model_validate(raw_cache)
-    except TypeError, ValueError, ValidationError:
-        return fingerprint, None
-    if cache.fingerprint != fingerprint:
-        return fingerprint, None
-    try:
-        return fingerprint, cache.singular_outerdicts()
-    except TypeError, ValueError, ValidationError:
-        return fingerprint, None
-
-
-def store_cached_source_data(
-    *,
-    fingerprint: _SourceInputFingerprint,
-    ai_augment_singular_outerdicts: tuple[AiAugmentSingularOuterDict, ...],
-) -> None:
-    cache = _CachedSourceData(
-        fingerprint=fingerprint,
-        ai_augment_singular_outerdicts=tuple(
-            singular_outerdict.serialize() for singular_outerdict in ai_augment_singular_outerdicts
-        ),
-    )
-    app.storage.general[SOURCE_DATA_STORAGE_KEY] = cache.model_dump(mode="json")
-
-
-# =============================================================================
-# Dashboard-owned run history persisted in NiceGUI general storage.
-# =============================================================================
+    @staticmethod
+    def status_text(value: bool | None) -> str:
+        if value is None:
+            return Locale.PROBE_NOT_CHECKED
+        return Locale.IPC_AVAILABLE if value else Locale.IPC_UNAVAILABLE
 
 
 # =============================================================================
@@ -525,16 +458,17 @@ def store_cached_source_data(
 # =============================================================================
 
 
-@dataclass(frozen=True, slots=True)
-class _AttemptView:
+class _RunCommitView(FrozenStrictModel):
     attempt_record: AgentRuntimeAttemptRecord | None
     run: Run | None
     accepted: CommittedInnerDict | None
     run_outcome_response: RunOutcomeResponse | None
 
-    def __post_init__(self) -> None:
-        if (self.attempt_record is None) == (self.run is None):
-            raise ValueError("attempt view requires exactly one source record")
+    @model_validator(mode="after")
+    def validate_run_or_commit(self) -> Self:
+        if self.attempt_record is None and self.run is None:
+            raise ValueError("Run/commit view requires a Backend commit or Dashboard run")
+        return self
 
     @property
     def row_id(self) -> UUID:
@@ -548,25 +482,29 @@ class _AttemptView:
         return None if self.run is None else self.run.run_id
 
     @property
+    def backend_lifecycle(self) -> RunLifecycle | None:
+        if self.attempt_record is None:
+            return None
+        result = self.attempt_record.attempt.post_commit_validation.result
+        lifecycle = AGENT_RUNTIME_ATTEMPT_LIFECYCLE_BY_RESULT.get(result)
+        if lifecycle is None:
+            raise RuntimeError(Locale.ATTEMPT_DATABASE_INCONSISTENT)
+        return lifecycle
+
+    @property
     def lifecycle(self) -> RunLifecycle:
-        if self.attempt_record is not None:
-            result = self.attempt_record.attempt.post_commit_validation.result
-            lifecycle = AGENT_RUNTIME_ATTEMPT_LIFECYCLE_BY_RESULT.get(result)
-            if lifecycle is None:
-                raise RuntimeError(Locale.ATTEMPT_DATABASE_INCONSISTENT)
+        if self.run is None:
+            lifecycle = self.backend_lifecycle
+            assert lifecycle is not None
             return lifecycle
-        assert self.run is not None
+        if self.run.lifecycle is RunLifecycle.CODEX_EXITED:
+            return RunLifecycle.CODEX_EXITED
         if self.run.is_queued():
             return RunLifecycle.QUEUED
         if self.run.is_running():
             return RunLifecycle.RUNNING
-        if self.run.run_outcome is RunLifecycle.COMPLETED:
-            return RunLifecycle.COMPLETED
-        if self.run.run_outcome is RunLifecycle.FAILED:
-            return RunLifecycle.FAILED
-        if self.run.run_outcome is RunLifecycle.CANCELLED:
-            return RunLifecycle.CANCELLED
-        raise RuntimeError(Locale.ATTEMPT_DATABASE_INCONSISTENT)
+        assert self.run.run_outcome is not None
+        return self.run.run_outcome
 
     @property
     def commit_record_id(self) -> UUID | None:
@@ -623,22 +561,219 @@ class _AttemptView:
             return Locale.SESSION_STATUS_NOT_OK_TEMPLATE.format(detail=exc)
         return Locale.SESSION_STATUS_OK
 
+    def to_var_view(
+        self,
+        *,
+        researcher: _Researcher,
+        ground_truth: InnerDict | None,
+        researcher_var: _ResearcherVar,
+        codex_busy: bool,
+    ) -> _RunCommitVarView:
+        accepted = self.accepted
+        return _RunCommitVarView(
+            run_id=self.run_id,
+            namekey=researcher.namekey,
+            draw_number=researcher.draw_number,
+            first_name=researcher.namekey.first_name,
+            last_name=researcher.namekey.last_name,
+            ai_column=researcher_var.ai_column,
+            ai_value=(
+                None if accepted is None else accepted.text(researcher_var.ai_column)
+            ),
+            table_1_column=researcher_var.table_1_column,
+            table_1_value=(
+                None
+                if ground_truth is None
+                or (value := ground_truth.data[researcher_var.table_1_column]) is None
+                else str(value)
+            ),
+            footnotes=(
+                None
+                if accepted is None
+                else self.footnotes_for_researcher_var(
+                    attempt=accepted, researcher_var=researcher_var,
+                )
+            ),
+            footnote_arguments=(
+                None
+                if accepted is None
+                else self.footnote_arguments_for_researcher_var(
+                    attempt=accepted,
+                    researcher_var=researcher_var,
+                )
+            ),
+            commit_record_id=self.commit_record_id,
+            timestamp=self.timestamp,
+            lifecycle=self.lifecycle,
+            backend_lifecycle=self.backend_lifecycle,
+            run_outcome_snapshot_savedness=(
+                None
+                if self.run_outcome_saved is None
+                else (
+                    Locale.RUN_OUTCOME_SNAPSHOT_SAVED
+                    if self.run_outcome_saved
+                    else Locale.RUN_OUTCOME_SNAPSHOT_FAILED
+                )
+            ),
+            session_status=self.run_outcome_session_status,
+            action=_RunCommitVarView.action_for_lifecycle(
+                self.lifecycle,
+                eligible=(
+                    researcher.ai_augment_cohort is not AiAugmentCohort.INELIGIBLE
+                ),
+                codex_busy=codex_busy,
+            ),
+        )
 
-@dataclass(frozen=True, slots=True)
-class _ResearcherView:
-    researcher: AiAugmentSingularOuterDict
+    def footnotes_for_researcher_var(
+        self,
+        *,
+        attempt: CommittedInnerDict,
+        researcher_var: _ResearcherVar,
+    ) -> str | None:
+        numbers = self._footnote_numbers(attempt, researcher_var)
+        return self._matching_numbered_lines(
+            attempt.text(KTP_AI_AUGMENT_FOOTNOTES_COL),
+            numbers,
+        )
+
+    def footnote_arguments_for_researcher_var(
+        self,
+        *,
+        attempt: CommittedInnerDict,
+        researcher_var: _ResearcherVar,
+    ) -> str | None:
+        numbers = self._footnote_numbers(attempt, researcher_var)
+        return self._matching_numbered_lines(
+            attempt.text(KTP_AI_AUGMENT_FOOTNOTE_ARGUMENTS_COL),
+            numbers,
+        )
+
+    @staticmethod
+    def _footnote_numbers(
+        attempt: CommittedInnerDict,
+        researcher_var: _ResearcherVar,
+    ) -> tuple[int, ...]:
+        value = attempt.text(researcher_var.ai_column)
+        if value is None:
+            return ()
+        match = FOOTNOTE_MARKER.search(value)
+        if match is None:
+            return ()
+        return tuple(int(number) for number in match.group("numbers").split(","))
+
+    @staticmethod
+    def _matching_numbered_lines(
+        value: str | None,
+        numbers: tuple[int, ...],
+    ) -> str | None:
+        if value is None or not numbers:
+            return None
+        prefixes = tuple(f"{number}. " for number in numbers)
+        selected = [line for line in value.splitlines() if line.startswith(prefixes)]
+        return "\n".join(selected) or None
+
+
+class _ResearcherView(FrozenStrictModel):
+    researcher: _Researcher
 
     # Oldest -> newest.
-    attempts: tuple[_AttemptView, ...]
+    run_commit_views: tuple[_RunCommitView, ...]
 
-    # Same object as attempts[-1], or None when never attempted.
-    latest_attempt: _AttemptView | None
+    # Same object as run_commit_views[-1], or None when there are no runs/commits.
+    latest_run_commit_view: _RunCommitView | None
 
     current_lifecycle: RunLifecycle
 
+    @classmethod
+    def from_snapshot(
+        cls,
+        researcher: _Researcher,
+        snapshot: DashboardQuerySnapshot,
+        runs: Sequence[Run],
+    ) -> _ResearcherView:
+        by_session: dict[UUID, Run] = {}
+        for run in runs:
+            if run.session_id is not None:
+                if run.session_id in by_session:
+                    raise RuntimeError(Locale.ATTEMPT_DATABASE_INCONSISTENT)
+                by_session[run.session_id] = run
+        namekey = researcher.namekey.to_json_key()
+        represented: set[UUID] = set()
+        run_commit_views: list[_RunCommitView] = []
+        for record in snapshot.attempts_by_namekey.get(namekey, ()):
+            commit = record.attempt.commit_record
+            session_id = commit.commit_request_body.codex_session_record.session_id
+            matched_run = None if session_id is None else by_session.get(session_id)
+            if matched_run is not None:
+                represented.add(matched_run.run_id)
+            run_commit_views.append(_RunCommitView(
+                attempt_record=record,
+                run=matched_run,
+                accepted=snapshot.committed_by_id.get(commit.record_id),
+                run_outcome_response=(
+                    None if session_id is None
+                    else snapshot.outcomes_by_session.get((namekey, session_id))
+                ),
+            ))
+        for run in runs:
+            if run.run_id not in represented:
+                run_commit_views.append(_RunCommitView(
+                    attempt_record=None,
+                    run=run,
+                    accepted=None,
+                    run_outcome_response=(
+                        None if run.session_id is None
+                        else snapshot.outcomes_by_session.get((namekey, run.session_id))
+                    ),
+                ))
+        ordered = tuple(sorted(run_commit_views, key=lambda run_commit_view: (
+            run_commit_view.run is not None and not run_commit_view.run.is_finished(),
+            run_commit_view.timestamp,
+            str(run_commit_view.row_id),
+        )))
+        latest = ordered[-1] if ordered else None
+        return cls(
+            researcher=researcher,
+            run_commit_views=ordered,
+            latest_run_commit_view=latest,
+            current_lifecycle=RunLifecycle.READY if latest is None else latest.lifecycle,
+        )
 
-@dataclass(frozen=True, slots=True)
-class _AttemptVariableProjection:
+    def to_var_view(
+        self,
+        *,
+        ground_truth: InnerDict | None,
+        researcher_var: _ResearcherVar,
+        codex_busy: bool,
+    ) -> _ResearcherVarView:
+        run_commit_var_views = tuple(
+            run_commit_view.to_var_view(
+                researcher=self.researcher,
+                ground_truth=ground_truth,
+                researcher_var=researcher_var,
+                codex_busy=codex_busy,
+            )
+            for run_commit_view in self.run_commit_views
+        )
+        latest = (
+            run_commit_var_views[-1]
+            if run_commit_var_views
+            else _RunCommitVarView.ready(
+                researcher=self.researcher,
+                ground_truth=ground_truth,
+                researcher_var=researcher_var,
+                codex_busy=codex_busy,
+            )
+        )
+        return _ResearcherVarView(
+            researcher=self.researcher,
+            latest_run_commit_var_view=latest,
+            run_commit_var_views=run_commit_var_views,
+        )
+
+
+class _RunCommitVarView(FrozenStrictModel):
     run_id: UUID | None
 
     namekey: NameKey
@@ -656,33 +791,87 @@ class _AttemptVariableProjection:
     footnote_arguments: str | None
 
     commit_record_id: UUID | None
-    attempt_timestamp: datetime | None
-    attempt_lifecycle: RunLifecycle
+    timestamp: datetime | None
+    lifecycle: RunLifecycle
+    backend_lifecycle: RunLifecycle | None
     run_outcome_snapshot_savedness: str | None
     session_status: str | None
 
     action: _RunAction
 
+    @staticmethod
+    def action_for_lifecycle(
+        lifecycle: RunLifecycle,
+        *,
+        eligible: bool,
+        codex_busy: bool = False,
+    ) -> _RunAction:
+        if not eligible:
+            return _RunAction.DISABLED
+        if lifecycle in LIVE_RESEARCHER_LIFECYCLES:
+            return _RunAction.CANCEL
+        if lifecycle is RunLifecycle.READY or codex_busy:
+            return _RunAction.QUEUE
+        return _RunAction.RERUN
 
-@dataclass(frozen=True, slots=True)
-class _ResearcherGridRow:
-    researcher: AiAugmentSingularOuterDict
+    @classmethod
+    def ready(
+        cls,
+        *,
+        researcher: _Researcher,
+        ground_truth: InnerDict | None,
+        researcher_var: _ResearcherVar,
+        codex_busy: bool,
+    ) -> _RunCommitVarView:
+        return cls(
+            run_id=None,
+            namekey=researcher.namekey,
+            draw_number=researcher.draw_number,
+            first_name=researcher.namekey.first_name,
+            last_name=researcher.namekey.last_name,
+            ai_column=researcher_var.ai_column,
+            ai_value=None,
+            table_1_column=researcher_var.table_1_column,
+            table_1_value=(
+                None
+                if ground_truth is None
+                or (value := ground_truth.data[researcher_var.table_1_column]) is None
+                else str(value)
+            ),
+            footnotes=None,
+            footnote_arguments=None,
+            commit_record_id=None,
+            timestamp=None,
+            lifecycle=RunLifecycle.READY,
+            backend_lifecycle=None,
+            run_outcome_snapshot_savedness=None,
+            session_status=None,
+            action=cls.action_for_lifecycle(
+                RunLifecycle.READY,
+                eligible=(
+                    researcher.ai_augment_cohort is not AiAugmentCohort.INELIGIBLE
+                ),
+                codex_busy=codex_busy,
+            ),
+        )
 
-    # Collapsed row: latest attempt projection, or synthetic ready projection.
-    latest: _AttemptVariableProjection
 
-    # Expanded row content: every attempt, oldest -> newest.
-    attempts: tuple[_AttemptVariableProjection, ...]
+class _ResearcherVarView(FrozenStrictModel):
+    researcher: _Researcher
 
+    # Upper table: latest var view, or a ready placeholder.
+    latest_run_commit_var_view: _RunCommitVarView
 
-@dataclass(frozen=True, slots=True)
-class _ResearcherCardView:
-    researcher: AiAugmentSingularOuterDict
-    markdown: str
+    # Lower table: all var views, oldest -> newest.
+    run_commit_var_views: tuple[_RunCommitVarView, ...]
 
 
-@dataclass(frozen=True, slots=True)
-class _DashboardCounts:
+class _ResearcherCardView(FrozenStrictModel):
+    researcher: _Researcher
+    card_markdown: str
+
+
+class _DashboardCounts(FrozenStrictModel):
     total: int
     ground_truth: int
     no_ground_truth: int
@@ -696,9 +885,10 @@ class _DashboardCounts:
     cancelled: int
 
 
-@dataclass(slots=True)
-class _UiSelection:
-    variable_key: str
+class _UiSelection(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, validate_assignment=True)
+
+    researcher_varname: str
     lifecycle_filter: RunLifecycle | None = None
     cohort_filter: AiAugmentCohort | None = None
     search_text: str = ""
@@ -708,114 +898,12 @@ class _UiSelection:
     selected_action: _RunAction | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class _UiSnapshot:
+class _DashboardView(FrozenStrictModel):
     counts: _DashboardCounts
-    rows: tuple[_ResearcherGridRow, ...]
+    researcher_var_views: tuple[_ResearcherVarView, ...]
     backend_status: _BackendStatus
     backend_availability: _BackendAvailability
     active_run_id: UUID | None
-
-
-# =============================================================================
-# Source DuckDB reads
-#
-# The source DB is read-only from both the backend and Control Centre and may
-# therefore be consulted while an agent run is active.
-# =============================================================================
-
-
-class _SourceRepository:
-    def __init__(
-        self,
-        *,
-        configuration: AiAugmentControlCentreContext,
-    ) -> None:
-        self._configuration = configuration
-
-    @property
-    def ai_augment_singular_outerdicts(self) -> tuple[AiAugmentSingularOuterDict, ...]:
-        return self._configuration.ai_augment_singular_outerdicts
-
-    @property
-    def ground_truth_by_namekey(self) -> Mapping[str, InnerDict]:
-        return self.load_ground_truth_by_namekey()
-
-    def load_researchers(self) -> tuple[AiAugmentSingularOuterDict, ...]:
-        result = tuple(
-            sorted(
-                self._configuration.ai_augment_singular_outerdicts,
-                key=researcher_sort_key,
-            )
-        )
-        self.assert_population_invariants(result)
-        return result
-
-    def load_ground_truth(
-        self,
-        namekey: NameKey,
-    ) -> InnerDict | None:
-        matches = tuple(
-            singular_outerdict
-            for singular_outerdict in self._configuration.ai_augment_singular_outerdicts
-            if singular_outerdict.namekey == namekey
-        )
-        if len(matches) != 1:
-            raise RuntimeError(Locale.GROUND_TRUTH_MISSING)
-        return matches[0].ground_truth_innerdict()
-
-    def load_ground_truth_by_namekey(
-        self,
-    ) -> Mapping[str, InnerDict]:
-        result: dict[str, InnerDict] = {}
-        for singular_outerdict in self._configuration.ai_augment_singular_outerdicts:
-            if singular_outerdict.ai_augment_cohort is not AiAugmentCohort.GROUND_TRUTH:
-                continue
-            namekey = singular_outerdict.namekey
-            innerdict = singular_outerdict.ground_truth_innerdict()
-            if innerdict is None:
-                raise RuntimeError(Locale.GROUND_TRUTH_MISSING)
-            result[namekey.to_json_key()] = innerdict
-        return result
-
-    def assert_population_invariants(
-        self,
-        researchers: Sequence[AiAugmentSingularOuterDict],
-    ) -> None:
-        namekeys = [researcher.namekey.to_json_key() for researcher in researchers]
-        ground_truth_count = sum(
-            researcher.ai_augment_cohort is AiAugmentCohort.GROUND_TRUTH
-            for researcher in researchers
-        )
-        no_ground_truth_count = sum(
-            researcher.ai_augment_cohort is AiAugmentCohort.NO_GROUND_TRUTH
-            for researcher in researchers
-        )
-        if len(set(namekeys)) != len(namekeys):
-            raise RuntimeError(Locale.NAMEKEYS_NOT_UNIQUE)
-        ineligible_count = sum(
-            researcher.ai_augment_cohort is AiAugmentCohort.INELIGIBLE
-            for researcher in researchers
-        )
-        ineligibility_counts = Counter(
-            researcher.ai_augment_ineligibility_category
-            for researcher in researchers
-            if researcher.ai_augment_ineligibility_category is not None
-        )
-        if (
-            ground_truth_count,
-            no_ground_truth_count,
-            ineligible_count,
-            len(researchers),
-        ) != (
-            EXPECTED_GROUND_TRUTH_RESEARCHERS,
-            EXPECTED_NO_GROUND_TRUTH_RESEARCHERS,
-            EXPECTED_INELIGIBLE_RESEARCHERS,
-            EXPECTED_SOURCE_RESEARCHERS,
-        ):
-            raise RuntimeError(Locale.POPULATION_INVARIANTS_FAILED)
-        if ineligibility_counts != EXPECTED_INELIGIBILITY_COUNTS:
-            raise RuntimeError(Locale.INELIGIBILITY_INVARIANTS_FAILED)
 
 
 # =============================================================================
@@ -848,15 +936,14 @@ class _BackendDatabaseClient:
     ) -> None:
         self._socket_path = socket_path
         self._pipeline_config = pipeline_config
-        self._card_cache: dict[str, str] = {}
 
-    def _request(self, *, target: str) -> bytes:
+    def _request(self, *, method: str, target: str) -> bytes:
         connection = _UnixSocketHttpConnection(
             socket_path=self._socket_path,
             timeout=CONTROL_HTTP_TIMEOUT_SECONDS,
         )
         try:
-            connection.request(HTTP_GET_METHOD, target)
+            connection.request(method, target)
             response = connection.getresponse()
             body = response.read()
             if response.status != status.HTTP_200_OK:
@@ -867,13 +954,10 @@ class _BackendDatabaseClient:
         finally:
             connection.close()
 
-    def pull(self, namekey: NameKey | None = None) -> QueryResponse:
-        request = QueryRequest(namekey=namekey)
-        target = DASHBOARD_QUERY_PATH
-        if request.namekey is not None:
-            target = f"{target}?{urlencode({KTP_NAMEKEY_COL: request.namekey.to_json_key()})}"
+    def send_query_request(self, request: QueryRequest) -> QueryResponse:
+        method, target = request.outbound_http()
         try:
-            return QueryResponse.from_serialized_json(self._request(target=target))
+            return QueryResponse.from_serialized_json(self._request(method=method, target=target))
         except ValidationError as exc:
             raise RuntimeError(Locale.BACKEND_DATABASE_RESPONSE_INVALID) from exc
 
@@ -929,16 +1013,9 @@ class _BackendDatabaseClient:
         finally:
             connection.close()
 
-    def card(self, namekey: NameKey) -> str:
-        namekey_json = namekey.to_json_key()
-        cached = self._card_cache.get(namekey_json)
-        if cached is not None:
-            return cached
-        singular_outerdicts = self.pull(namekey=namekey).ai_augment_singular_outerdicts
-        if len(singular_outerdicts) != 1:
-            raise RuntimeError(Locale.BACKEND_CARD_MISSING)
+    def card(self, researcher: _Researcher) -> str:
         cards = build_cards(
-            selected_card_outer_dict(singular_outerdicts[0]),
+            selected_card_outer_dict(researcher),
             total_draws=self._pipeline_config.total_draws,
             intro=CARD_INTRODUCTION.format(
                 datetime.now(ZoneInfo(self._pipeline_config.timezone)).strftime(
@@ -950,7 +1027,6 @@ class _BackendDatabaseClient:
         if len(cards) != 1:
             raise RuntimeError(Locale.BACKEND_CARD_MISSING)
         markdown = next(iter(cards.values()))
-        self._card_cache[namekey_json] = markdown
         return markdown
 
 
@@ -1025,11 +1101,19 @@ def replay_run_events(events: Sequence[RunEvent]) -> Mapping[UUID, Run]:
 # =============================================================================
 
 
-@dataclass(slots=True)
-class _BackendProcessHandle:
+class _BackendProcessHandle(BaseModel):
+    # Process and Task are live handles, not serializable model data.
+    model_config = ConfigDict(
+        extra="forbid", strict=True, frozen=True, arbitrary_types_allowed=True,
+    )
+
     process: asyncio.subprocess.Process
     started_at: datetime
     log_task: asyncio.Task[None]
+    store_closed_cleanly: asyncio.Event
+    ipc_only: bool = False
+    rebuilding: bool = False
+    startup_succeeded: bool = False
 
 
 class _BackendSupervisor:
@@ -1041,14 +1125,16 @@ class _BackendSupervisor:
         openalex_api_key: str,
         appendwatch_report: PurePosixPath,
         dashboard_socket_path: Path,
-        pipeline_config: AiAugmentDetourConfig,
+        configuration: AiAugmentControlCentreContext,
     ) -> None:
         self._repository_root = repository_root
         self._config_path = config_path
         self._openalex_api_key = openalex_api_key
         self._appendwatch_report = appendwatch_report
         self._dashboard_socket_path = dashboard_socket_path
-        self._pipeline_config = pipeline_config
+        self._context = configuration
+        self._pipeline_config = configuration.pipeline_config
+        self._lifecycle_lock = asyncio.Lock()
         self._process: _BackendProcessHandle | None = None
         self._status = _BackendStatus.STOPPED
 
@@ -1078,6 +1164,10 @@ class _BackendSupervisor:
             return False
 
     async def start(self, *, namekey: NameKey) -> None:
+        async with self._lifecycle_lock:
+            await self._start(namekey=namekey, ipc_only=False)
+
+    async def _start(self, *, namekey: NameKey | None, ipc_only: bool) -> None:
         if not all(
             resource.verify_hash_on_init
             for resource in self._pipeline_config.registered_resources
@@ -1085,60 +1175,79 @@ class _BackendSupervisor:
             raise RuntimeError(Locale.BACKEND_RESOURCES_NOT_VERIFIED)
         if self._process is not None:
             raise RuntimeError(Locale.BACKEND_ALREADY_OWNED)
+        arguments = self._context.begin_backend_start()
         self._status = _BackendStatus.STARTING
-        process = await asyncio.create_subprocess_exec(
-            *BACKEND_COMMAND_PREFIX,
-            str(self._config_path),
-            DANGER_NO_VERIFY_HASH_OPTION,
-            cwd=self._repository_root,
-            env=self.environment(namekey=namekey),
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            start_new_session=True,
-        )
-        log_task = asyncio.create_task(self.forward_output(process))
-        self._process = _BackendProcessHandle(
-            process=process,
-            started_at=datetime.now(timezone.utc),
-            log_task=log_task,
-        )
         try:
+            process = await asyncio.create_subprocess_exec(
+                *BACKEND_COMMAND_PREFIX,
+                str(self._config_path),
+                *arguments,
+                DANGER_NO_VERIFY_HASH_OPTION,
+                *(("--ipc-only",) if ipc_only else ()),
+                cwd=self._repository_root,
+                env=self.environment(namekey=namekey),
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                start_new_session=True,
+            )
+            closed_cleanly = asyncio.Event()
+            log_task = asyncio.create_task(self.forward_output(process, closed_cleanly))
+            self._process = _BackendProcessHandle(
+                process=process,
+                started_at=datetime.now(timezone.utc),
+                log_task=log_task,
+                store_closed_cleanly=closed_cleanly,
+                ipc_only=ipc_only,
+                rebuilding="--new" in arguments,
+            )
             await self.wait_until_ready()
-        except Exception, asyncio.CancelledError:
-            self._status = _BackendStatus.FAILED
-            if process.returncode is None:
-                process.terminate()
-                try:
-                    await asyncio.wait_for(
-                        process.wait(),
-                        timeout=PROCESS_STOP_TIMEOUT_SECONDS,
-                    )
-                except TimeoutError:
-                    process.kill()
-                    await process.wait()
-            await log_task
+            self._process = self._process.model_copy(update={"startup_succeeded": True})
+        except BaseException:
+            try:
+                await self._stop()
+            finally:
+                self._status = _BackendStatus.FAILED
             raise
         self._status = _BackendStatus.RUNNING
+
+    @contextlib.asynccontextmanager
+    async def query_connection(self, client: _BackendDatabaseClient) -> AsyncIterator[None]:
+        # Serialize temporary-child lifetime with queued Backend starts/stops.
+        async with self._lifecycle_lock:
+            if self._process is not None or await asyncio.to_thread(client.available):
+                yield  # Borrow an existing Backend; never reset or stop it.
+                return
+            await self._start(namekey=None, ipc_only=True)
+            try:
+                yield
+            finally:
+                await self._stop()
 
     async def forward_output(
         self,
         process: asyncio.subprocess.Process,
+        closed_cleanly: asyncio.Event,
     ) -> None:
         if process.stdout is None:
             raise RuntimeError(Locale.BACKEND_OUTPUT_PIPE_MISSING)
         async for raw_line in process.stdout:
-            emit_log(
-                Locale.BACKEND_LOG_PREFIX,
-                raw_line.decode(
-                    TEXT_ENCODING,
-                    errors=TEXT_DECODE_ERROR_POLICY,
-                ).rstrip(),
-            )
+            line = raw_line.decode(TEXT_ENCODING, errors=TEXT_DECODE_ERROR_POLICY)
+            if line.strip() == BACKEND_STORE_CLOSED_CLEANLY:
+                closed_cleanly.set()
+            emit_log(Locale.BACKEND_LOG_PREFIX, line.rstrip())
 
     async def wait_until_ready(self) -> None:
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + BACKEND_READY_TIMEOUT_SECONDS
+        assert self._process is not None
+        timeout = (
+            BACKEND_REBUILD_TIMEOUT_SECONDS if self._process.rebuilding
+            else BACKEND_READY_TIMEOUT_SECONDS
+        )
+        deadline = loop.time() + timeout
+        query_client = _BackendDatabaseClient(
+            socket_path=self._dashboard_socket_path, pipeline_config=self._pipeline_config,
+        )
 
         def request_openapi() -> None:
             request = urllib_request.Request(BACKEND_OPENAPI_URL, method=HTTP_GET_METHOD)
@@ -1153,7 +1262,11 @@ class _BackendSupervisor:
             if self._process is None or self._process.process.returncode is not None:
                 raise RuntimeError(Locale.BACKEND_EXITED_EARLY)
             try:
-                await asyncio.to_thread(request_openapi)
+                if self._process.ipc_only:
+                    if not await asyncio.to_thread(query_client.available):
+                        raise RuntimeError(Locale.BACKEND_OPENAPI_NOT_READY)
+                else:
+                    await asyncio.to_thread(request_openapi)
                 break
             except (
                 OSError,
@@ -1165,62 +1278,71 @@ class _BackendSupervisor:
         else:
             raise TimeoutError(Locale.BACKEND_READY_TIMEOUT)
 
-        await self.probe_pull()
-        try:
-            await asyncio.to_thread(
-                _BackendDatabaseClient(
-                    socket_path=self._dashboard_socket_path,
-                    pipeline_config=self._pipeline_config,
-                ).pull
-            )
-        except (OSError, RuntimeError, ValidationError) as exc:
-            raise RuntimeError(Locale.BACKEND_DATABASE_REQUEST_FAILED) from exc
+        if not self._process.ipc_only and await self.probe_pull() != status.HTTP_200_OK:
+            raise RuntimeError(Locale.BACKEND_PULL_NOT_READY)
 
-    async def probe_pull(self) -> None:
-        def request_pull() -> None:
+    async def probe_pull(self) -> int:
+        def request_pull() -> int:
             request = urllib_request.Request(BACKEND_PULL_URL, method=HTTP_GET_METHOD)
-            with urllib_request.urlopen(
-                request,
-                timeout=CONTROL_HTTP_TIMEOUT_SECONDS,
-            ) as response:
-                if response.status != status.HTTP_200_OK:
-                    raise RuntimeError(Locale.BACKEND_PULL_NOT_READY)
+            try:
+                response = urllib_request.urlopen(request, timeout=CONTROL_HTTP_TIMEOUT_SECONDS)
+            except urllib_error.HTTPError as exc:
+                with exc:
+                    exc.read()
+                    return int(exc.code)
+            with response:
                 response.read()
+                return int(response.status)
 
         try:
-            await asyncio.to_thread(request_pull)
-        except (OSError, urllib_error.URLError, urllib_error.HTTPError) as exc:
+            return await asyncio.to_thread(request_pull)
+        except (OSError, urllib_error.URLError) as exc:
             raise RuntimeError(Locale.BACKEND_PULL_NOT_READY) from exc
 
     async def stop(self) -> None:
+        async with self._lifecycle_lock:
+            await self._stop()
+
+    async def _stop(self) -> None:
         if self._process is None:
             self._status = _BackendStatus.STOPPED
             return
-        process = self._process.process
+        handle = self._process
+        process = handle.process
+        forced_kill = False
+        shutdown_succeeded = False
         emit_log(
             Locale.CONTROL_CENTRE_LOG_PREFIX,
             Locale.BACKEND_STOPPING_LOG_TEMPLATE.format(pid=process.pid),
         )
-        if process.returncode is None:
-            process.terminate()
-            try:
-                await asyncio.wait_for(
-                    process.wait(),
-                    timeout=PROCESS_STOP_TIMEOUT_SECONDS,
-                )
-            except TimeoutError:
-                process.kill()
-                await process.wait()
-        await self._process.log_task
-        emit_log(
-            Locale.CONTROL_CENTRE_LOG_PREFIX,
-            Locale.BACKEND_STOPPED_LOG_TEMPLATE.format(
-                pid=process.pid,
-                return_code=process.returncode,
-            ),
-        )
-        self._process = None
-        self._status = _BackendStatus.STOPPED
+        try:
+            if process.returncode is None:
+                process.terminate()
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=PROCESS_STOP_TIMEOUT_SECONDS)
+                except TimeoutError:
+                    forced_kill = True
+                    process.kill()
+                    await asyncio.wait_for(process.wait(), timeout=PROCESS_STOP_TIMEOUT_SECONDS)
+            await asyncio.wait_for(handle.log_task, timeout=PROCESS_STOP_TIMEOUT_SECONDS)
+            shutdown_succeeded = (
+                handle.store_closed_cleanly.is_set()
+                and not forced_kill
+                and process.returncode in {0, -signal.SIGTERM, -signal.SIGINT}
+            )
+            emit_log(
+                Locale.CONTROL_CENTRE_LOG_PREFIX,
+                Locale.BACKEND_STOPPED_LOG_TEMPLATE.format(
+                    pid=process.pid, return_code=process.returncode,
+                ),
+            )
+        finally:
+            self._context.finish_backend_stop(
+                startup_succeeded=handle.startup_succeeded,
+                shutdown_succeeded=shutdown_succeeded,
+            )
+            self._process = None
+            self._status = _BackendStatus.STOPPED
 
     async def supply_session_id(self, session_id: UUID) -> None:
         if self._process is None or self._process.process.returncode is not None:
@@ -1238,13 +1360,16 @@ class _BackendSupervisor:
             raise RuntimeError(Locale.BACKEND_NOT_RUNNING)
         return await self._process.process.wait()
 
-    def environment(self, *, namekey: NameKey) -> Mapping[str, str]:
+    def environment(self, *, namekey: NameKey | None) -> Mapping[str, str]:
         environment = os.environ.copy()
         environment[EXPORT_OPENALEX_API_KEY] = self._openalex_api_key
         environment[APPENDWATCH_REPORT_ENV_NAME] = str(self._appendwatch_report)
         environment[CONTROL_PARENT_PID_ENV_NAME] = str(os.getpid())
         environment[DASHBOARD_SOCKET_PATH_ENV_NAME] = str(self._dashboard_socket_path)
-        environment[NAMEKEY_ENV_NAME] = namekey.to_json_key()
+        if namekey is None:
+            environment.pop(NAMEKEY_ENV_NAME, None)
+        else:
+            environment[NAMEKEY_ENV_NAME] = namekey.to_json_key()
         environment[CODEX_SESSIONS_ROOT_ENV_NAME] = str(CODEX_SESSIONS_ROOT)
         return environment
 
@@ -1254,8 +1379,12 @@ class _BackendSupervisor:
 # =============================================================================
 
 
-@dataclass(slots=True)
-class _CodexProcessHandle:
+class _CodexProcessHandle(BaseModel):
+    # Discovery fills metadata while retaining the live subprocess handle.
+    model_config = ConfigDict(
+        extra="forbid", strict=True, validate_assignment=True, arbitrary_types_allowed=True,
+    )
+
     run: Run
     process: asyncio.subprocess.Process
 
@@ -1265,8 +1394,7 @@ class _CodexProcessHandle:
     rollout_jsonl: PurePosixPath | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class _CodexStartResult:
+class _CodexStartResult(FrozenStrictModel):
     handle: _CodexProcessHandle
     session_id: UUID
     session_timestamp: datetime
@@ -1333,6 +1461,28 @@ class _CodexRunner:
                 )
             )
         return stdout
+
+    async def probe_ssh(self) -> bool:
+        try:
+            output = await asyncio.wait_for(
+                self._remote_command("cat", input_bytes=SSH_PROBE_MARKER),
+                timeout=PROBE_TIMEOUT_SECONDS,
+            )
+            return output == SSH_PROBE_MARKER
+        except (OSError, RuntimeError, TimeoutError) as exc:
+            logger.info("SSH probe failed: %s", type(exc).__name__)
+            return False
+
+    async def probe_auth(self) -> bool:
+        try:
+            await asyncio.wait_for(
+                self._remote_command(shlex.join([str(CODEX_CLI_BIN_PATH), "login", "status"])),
+                timeout=PROBE_TIMEOUT_SECONDS,
+            )
+            return True
+        except (OSError, RuntimeError, TimeoutError) as exc:
+            logger.info("Codex authentication probe failed: %s", type(exc).__name__)
+            return False
 
     async def is_busy(self) -> bool:
         output = await self._remote_command(CODEX_REMOTE_BUSY_COMMAND)
@@ -1644,392 +1794,6 @@ class _CodexRunner:
 
 
 # =============================================================================
-# Reconciliation of Backend-projected runs and accepted innerdicts
-# =============================================================================
-
-
-class _AttemptReconciler:
-    def reconcile(
-        self,
-        *,
-        researcher: AiAugmentSingularOuterDict,
-        runs: Sequence[Run],
-        attempt_records: Sequence[AgentRuntimeAttemptRecord],
-        committed_innerdicts: Sequence[CommittedInnerDict],
-        run_outcome_responses: Sequence[RunOutcomeResponse],
-    ) -> _ResearcherView:
-        accepted_by_commit_record_id = {
-            committed.commit_record.record_id: committed
-            for committed in committed_innerdicts
-        }
-        run_outcome_by_session_id = {
-            session_id: response
-            for response in run_outcome_responses
-            if (
-                session_id := response.run_outcome_response_body.codex_session_record.session_id
-            )
-            is not None
-        }
-        run_outcome_without_session_by_outcome = {
-            outcome: [
-                response
-                for response in run_outcome_responses
-                if (
-                    response.run_outcome_response_body.codex_session_record.session_id
-                    is None
-                    and response.run_outcome is outcome
-                )
-            ]
-            for outcome in (
-                RunLifecycle.COMPLETED,
-                RunLifecycle.FAILED,
-                RunLifecycle.CANCELLED,
-            )
-        }
-        live_dashboard_run_ids = {
-            run.run_id
-            for run in runs
-            if run.dashboard_owned and not run.is_finished()
-        }
-        attempts: list[_AttemptView] = []
-        for record in sorted(
-            attempt_records,
-            key=lambda item: item.attempt.commit_record.record_id,
-        ):
-            attempt = record.attempt
-            commit_record = attempt.commit_record
-            commit_record_id = commit_record.record_id
-            accepted = accepted_by_commit_record_id.pop(commit_record_id, None)
-            validation = attempt.post_commit_validation
-            attempt_lifecycle = AGENT_RUNTIME_ATTEMPT_LIFECYCLE_BY_RESULT.get(
-                validation.result
-            )
-            namekey = parse_name_key_header(
-                commit_record.request_headers.get(NAME_KEY_HEADER)
-            )
-            session_id = commit_record.commit_request_body.codex_session_record.session_id
-            researcher_namekey = researcher.namekey
-            if (
-                attempt_lifecycle is None
-                or namekey != researcher_namekey
-                or (attempt_lifecycle is RunLifecycle.COMPLETED)
-                != (accepted is not None)
-                or (
-                    accepted is not None
-                    and (
-                        session_id is None
-                        or session_id
-                        != (
-                            accepted.commit_record.commit_request_body
-                            .codex_session_record.session_id
-                        )
-                    )
-                )
-            ):
-                raise RuntimeError(Locale.ATTEMPT_DATABASE_INCONSISTENT)
-            attempts.append(
-                _AttemptView(
-                    attempt_record=record,
-                    run=None,
-                    accepted=accepted,
-                    run_outcome_response=(
-                        None if session_id is None else run_outcome_by_session_id.get(session_id)
-                    ),
-                )
-            )
-        for run in sorted(runs, key=lambda item: (item.queued_at, str(item.run_id))):
-            if run.accepted_commit_record_id in {
-                attempt.commit_record_id
-                for attempt in attempts
-                if attempt.commit_record_id is not None
-            }:
-                continue
-            run_outcome_response = (
-                None if run.session_id is None else run_outcome_by_session_id.get(run.session_id)
-            )
-            if (
-                run_outcome_response is None
-                and run.session_id is None
-                and run.run_outcome is not None
-            ):
-                run_outcome_without_session = run_outcome_without_session_by_outcome.get(
-                    run.run_outcome,
-                    [],
-                )
-                if run_outcome_without_session:
-                    run_outcome_response = run_outcome_without_session.pop(0)
-            attempts.append(
-                _AttemptView(
-                    attempt_record=None,
-                    run=run,
-                    accepted=None,
-                    run_outcome_response=run_outcome_response,
-                )
-            )
-        if accepted_by_commit_record_id:
-            raise RuntimeError(Locale.ATTEMPT_DATABASE_INCONSISTENT)
-        ordered = tuple(
-            sorted(
-                attempts,
-                key=lambda attempt: (
-                    attempt.run_id in live_dashboard_run_ids,
-                    attempt.timestamp,
-                    str(attempt.row_id),
-                ),
-            )
-        )
-        latest = ordered[-1] if ordered else None
-        return _ResearcherView(
-            researcher=researcher,
-            attempts=ordered,
-            latest_attempt=latest,
-            current_lifecycle=(
-                RunLifecycle.READY if latest is None else latest.lifecycle
-            ),
-        )
-
-    def reconcile_all(
-        self,
-        *,
-        researchers: Sequence[AiAugmentSingularOuterDict],
-        runs: Mapping[UUID, Run],
-        attempt_records: Mapping[str, tuple[AgentRuntimeAttemptRecord, ...]],
-        committed_innerdicts: Mapping[
-            str,
-            tuple[CommittedInnerDict, ...],
-        ],
-        run_outcome_responses: Mapping[str, tuple[RunOutcomeResponse, ...]],
-    ) -> tuple[_ResearcherView, ...]:
-        runs_by_namekey: dict[str, list[Run]] = {}
-        for run in runs.values():
-            runs_by_namekey.setdefault(run.namekey.to_json_key(), []).append(run)
-        return tuple(
-            self.reconcile(
-                researcher=researcher,
-                runs=runs_by_namekey.get(researcher.namekey.to_json_key(), ()),
-                attempt_records=attempt_records.get(
-                    researcher.namekey.to_json_key(),
-                    (),
-                ),
-                committed_innerdicts=committed_innerdicts.get(
-                    researcher.namekey.to_json_key(),
-                    (),
-                ),
-                run_outcome_responses=run_outcome_responses.get(
-                    researcher.namekey.to_json_key(),
-                    (),
-                ),
-            )
-            for researcher in researchers
-        )
-
-
-# =============================================================================
-# Per-variable table projection
-# =============================================================================
-
-
-class _VariableProjector:
-    @staticmethod
-    def action_for_lifecycle(
-        lifecycle: RunLifecycle,
-        *,
-        eligible: bool,
-        codex_busy: bool = False,
-    ) -> _RunAction:
-        if not eligible:
-            return _RunAction.DISABLED
-        if lifecycle in LIVE_RESEARCHER_LIFECYCLES:
-            return _RunAction.CANCEL
-        if lifecycle is RunLifecycle.READY or codex_busy:
-            return _RunAction.QUEUE
-        return _RunAction.RERUN
-
-    def project_attempt(
-        self,
-        *,
-        researcher: AiAugmentSingularOuterDict,
-        attempt: _AttemptView,
-        ground_truth: InnerDict | None,
-        variable: _VariableSpec,
-        codex_busy: bool,
-    ) -> _AttemptVariableProjection:
-        accepted = attempt.accepted
-        return _AttemptVariableProjection(
-            run_id=attempt.run_id,
-            namekey=researcher.namekey,
-            draw_number=researcher.draw_number,
-            first_name=researcher.namekey.first_name,
-            last_name=researcher.namekey.last_name,
-            ai_column=variable.ai_column,
-            ai_value=(
-                None if accepted is None else accepted.text(variable.ai_column)
-            ),
-            table_1_column=variable.table_1_column,
-            table_1_value=(
-                None
-                if ground_truth is None
-                or (value := ground_truth.data[variable.table_1_column]) is None
-                else str(value)
-            ),
-            footnotes=(
-                None
-                if accepted is None
-                else self.footnotes_for_variable(attempt=accepted, variable=variable)
-            ),
-            footnote_arguments=(
-                None
-                if accepted is None
-                else self.footnote_arguments_for_variable(
-                    attempt=accepted,
-                    variable=variable,
-                )
-            ),
-            commit_record_id=attempt.commit_record_id,
-            attempt_timestamp=attempt.timestamp,
-            attempt_lifecycle=attempt.lifecycle,
-            run_outcome_snapshot_savedness=(
-                None
-                if attempt.run_outcome_saved is None
-                else (
-                    Locale.RUN_OUTCOME_SNAPSHOT_SAVED
-                    if attempt.run_outcome_saved
-                    else Locale.RUN_OUTCOME_SNAPSHOT_FAILED
-                )
-            ),
-            session_status=attempt.run_outcome_session_status,
-            action=self.action_for_lifecycle(
-                attempt.lifecycle,
-                eligible=(
-                    researcher.ai_augment_cohort is not AiAugmentCohort.INELIGIBLE
-                ),
-                codex_busy=codex_busy,
-            ),
-        )
-
-    def project_ready_researcher(
-        self,
-        *,
-        researcher: AiAugmentSingularOuterDict,
-        ground_truth: InnerDict | None,
-        variable: _VariableSpec,
-        codex_busy: bool,
-    ) -> _AttemptVariableProjection:
-        return _AttemptVariableProjection(
-            run_id=None,
-            namekey=researcher.namekey,
-            draw_number=researcher.draw_number,
-            first_name=researcher.namekey.first_name,
-            last_name=researcher.namekey.last_name,
-            ai_column=variable.ai_column,
-            ai_value=None,
-            table_1_column=variable.table_1_column,
-            table_1_value=(
-                None
-                if ground_truth is None
-                or (value := ground_truth.data[variable.table_1_column]) is None
-                else str(value)
-            ),
-            footnotes=None,
-            footnote_arguments=None,
-            commit_record_id=None,
-            attempt_timestamp=None,
-            attempt_lifecycle=RunLifecycle.READY,
-            run_outcome_snapshot_savedness=None,
-            session_status=None,
-            action=self.action_for_lifecycle(
-                RunLifecycle.READY,
-                eligible=(
-                    researcher.ai_augment_cohort is not AiAugmentCohort.INELIGIBLE
-                ),
-                codex_busy=codex_busy,
-            ),
-        )
-
-    def project_researcher(
-        self,
-        *,
-        researcher_view: _ResearcherView,
-        ground_truth: InnerDict | None,
-        variable: _VariableSpec,
-        codex_busy: bool,
-    ) -> _ResearcherGridRow:
-        attempts = tuple(
-            self.project_attempt(
-                researcher=researcher_view.researcher,
-                attempt=attempt,
-                ground_truth=ground_truth,
-                variable=variable,
-                codex_busy=codex_busy,
-            )
-            for attempt in researcher_view.attempts
-        )
-        latest = (
-            attempts[-1]
-            if attempts
-            else self.project_ready_researcher(
-                researcher=researcher_view.researcher,
-                ground_truth=ground_truth,
-                variable=variable,
-                codex_busy=codex_busy,
-            )
-        )
-        return _ResearcherGridRow(
-            researcher=researcher_view.researcher,
-            latest=latest,
-            attempts=attempts,
-        )
-
-    def footnotes_for_variable(
-        self,
-        *,
-        attempt: CommittedInnerDict,
-        variable: _VariableSpec,
-    ) -> str | None:
-        numbers = self._footnote_numbers(attempt, variable)
-        return self._matching_numbered_lines(
-            attempt.text(KTP_AI_AUGMENT_FOOTNOTES_COL),
-            numbers,
-        )
-
-    def footnote_arguments_for_variable(
-        self,
-        *,
-        attempt: CommittedInnerDict,
-        variable: _VariableSpec,
-    ) -> str | None:
-        numbers = self._footnote_numbers(attempt, variable)
-        return self._matching_numbered_lines(
-            attempt.text(KTP_AI_AUGMENT_FOOTNOTE_ARGUMENTS_COL),
-            numbers,
-        )
-
-    @staticmethod
-    def _footnote_numbers(
-        attempt: CommittedInnerDict,
-        variable: _VariableSpec,
-    ) -> tuple[int, ...]:
-        value = attempt.text(variable.ai_column)
-        if value is None:
-            return ()
-        match = FOOTNOTE_MARKER.search(value)
-        if match is None:
-            return ()
-        return tuple(int(number) for number in match.group("numbers").split(","))
-
-    @staticmethod
-    def _matching_numbered_lines(
-        value: str | None,
-        numbers: tuple[int, ...],
-    ) -> str | None:
-        if value is None or not numbers:
-            return None
-        prefixes = tuple(f"{number}. " for number in numbers)
-        selected = [line for line in value.splitlines() if line.startswith(prefixes)]
-        return "\n".join(selected) or None
-
-
-# =============================================================================
 # Main orchestration
 #
 # Exactly one Codex attempt may be running at a time.
@@ -2039,23 +1803,27 @@ class _VariableProjector:
 # =============================================================================
 
 
+class _RecordRunOutcome(Protocol):
+    def __call__(self, *, run_outcome: RunLifecycle, namekey: NameKey) -> int: ...
+
+
 class _ControlCentreController:
     def __init__(
         self,
         *,
-        source_repository: _SourceRepository,
+        storage: AiAugmentDashboardStorage,
         backend: _BackendSupervisor,
-        backend_database: _BackendDatabaseClient,
+        probe_ipc: Callable[[], bool],
+        record_run_outcome: _RecordRunOutcome,
+        render_card: Callable[[_Researcher], str],
         codex: _CodexRunner,
-        reconciler: _AttemptReconciler,
-        projector: _VariableProjector,
     ) -> None:
-        self._source_repository = source_repository
+        self._storage = storage
         self._backend = backend
-        self._backend_database = backend_database
+        self._probe_ipc = probe_ipc
+        self._send_run_outcome = record_run_outcome
+        self._render_card = render_card
         self._codex = codex
-        self._reconciler = reconciler
-        self._projector = projector
         self._queue: asyncio.Queue[Run] = asyncio.Queue()
         self._worker_task: asyncio.Task[None] | None = None
         self._active_run: Run | None = None
@@ -2065,28 +1833,22 @@ class _ControlCentreController:
         self._idle_refresh_lock = asyncio.Lock()
         self._events: list[RunEvent] = []
         self._runs: dict[UUID, Run] = {}
-        self._researchers: tuple[AiAugmentSingularOuterDict, ...] = ()
-        self._researchers_by_namekey: dict[str, AiAugmentSingularOuterDict] = {}
-        self._ground_truth: Mapping[str, InnerDict] = {}
-        self._attempt_records: Mapping[
-            str,
-            tuple[AgentRuntimeAttemptRecord, ...],
-        ] = {}
-        self._committed_innerdicts: Mapping[
-            str,
-            tuple[CommittedInnerDict, ...],
-        ] = {}
-        self._run_outcome_responses: Mapping[
-            str,
-            tuple[RunOutcomeResponse, ...],
-        ] = {}
+        self._snapshot = DashboardQuerySnapshot(query_response=QueryResponse(
+            attempts=(), ai_augment_singular_outerdicts=(),
+        ))
         self._run_outcome_recorded_run_ids: set[UUID] = set()
         self._run_outcome_lock = asyncio.Lock()
         self._notifications: list[str] = []
-        self._backend_availability = _BackendAvailability(
-            full_api_available=False,
-            ipc_available=False,
-        )
+        self._backend_availability = _BackendAvailability()
+        self._probe_lock = asyncio.Lock()
+
+    @property
+    def _researchers(self) -> tuple[_Researcher, ...]:
+        return self._snapshot.ai_augment_singular_outerdicts
+
+    @property
+    def _researchers_by_namekey(self) -> Mapping[str, _Researcher]:
+        return self._snapshot.researchers_by_namekey
 
     @property
     def active_run_id(self) -> UUID | None:
@@ -2109,61 +1871,7 @@ class _ControlCentreController:
     def backend_availability(self) -> _BackendAvailability:
         return self._backend_availability
 
-    async def detect_backend_availability(self) -> _BackendAvailability:
-        emit_log(
-            Locale.CONTROL_CENTRE_LOG_PREFIX,
-            Locale.BACKEND_AVAILABILITY_CHECK_LOG,
-        )
-        full_api_available, ipc_available = await asyncio.gather(
-            asyncio.to_thread(self._backend.full_api_available),
-            asyncio.to_thread(self._backend_database.available),
-        )
-        self._backend_availability = _BackendAvailability(
-            full_api_available=full_api_available,
-            ipc_available=ipc_available,
-        )
-        emit_log(
-            Locale.CONTROL_CENTRE_LOG_PREFIX,
-            Locale.BACKEND_AVAILABILITY_READY_LOG_TEMPLATE.format(
-                api_status=(Locale.IPC_AVAILABLE if full_api_available else Locale.IPC_UNAVAILABLE),
-                ipc_status=(Locale.IPC_AVAILABLE if ipc_available else Locale.IPC_UNAVAILABLE),
-            ),
-        )
-        return self._backend_availability
-
     async def start(self) -> None:
-        emit_log(
-            Locale.CONTROL_CENTRE_LOG_PREFIX,
-            Locale.SOURCE_POPULATION_LOADING_LOG,
-        )
-        self._researchers = await asyncio.to_thread(self._source_repository.load_researchers)
-        self._researchers_by_namekey = {
-            researcher.namekey.to_json_key(): researcher
-            for researcher in self._researchers
-        }
-        emit_log(
-            Locale.CONTROL_CENTRE_LOG_PREFIX,
-            Locale.SOURCE_POPULATION_READY_LOG_TEMPLATE.format(
-                count=len(self._researchers),
-            ),
-        )
-        emit_log(
-            Locale.CONTROL_CENTRE_LOG_PREFIX,
-            Locale.GROUND_TRUTH_LOADING_LOG,
-        )
-        self._ground_truth = await asyncio.to_thread(
-            self._source_repository.load_ground_truth_by_namekey
-        )
-        emit_log(
-            Locale.CONTROL_CENTRE_LOG_PREFIX,
-            Locale.GROUND_TRUTH_READY_LOG_TEMPLATE.format(
-                count=len(self._ground_truth),
-            ),
-        )
-        emit_log(
-            Locale.CONTROL_CENTRE_LOG_PREFIX,
-            Locale.DASHBOARD_STORAGE_LOADING_LOG,
-        )
         self._load_dashboard_storage()
         emit_log(
             Locale.CONTROL_CENTRE_LOG_PREFIX,
@@ -2182,12 +1890,10 @@ class _ControlCentreController:
                         detail=Locale.RESTART_INTERRUPTED_RUN,
                     )
                 )
-        for value in app.storage.general.get(QUEUE_STORAGE_KEY, []):
-            run_id = UUID(str(value))
+        for run_id in self._storage.load_queue():
             queued_run = self._runs.get(run_id)
             if queued_run is not None and queued_run.is_queued():
                 await self._queue.put(queued_run)
-        await self.detect_backend_availability()
         self._worker_task = asyncio.create_task(self._worker())
         emit_log(
             Locale.CONTROL_CENTRE_LOG_PREFIX,
@@ -2234,9 +1940,9 @@ class _ControlCentreController:
                 lifecycle=RunLifecycle.QUEUED,
             )
         )
-        queued = list(app.storage.general.get(QUEUE_STORAGE_KEY, []))
-        queued.append(str(run_id))
-        app.storage.general[QUEUE_STORAGE_KEY] = queued
+        queued = self._storage.load_queue()
+        queued.append(run_id)
+        self._storage.save_queue(queued)
         await self._queue.put(run)
         return run_id
 
@@ -2289,10 +1995,10 @@ class _ControlCentreController:
                 raise
             return
         if was_queued:
-            queued = list(app.storage.general.get(QUEUE_STORAGE_KEY, []))
-            if str(run_id) in queued:
-                queued.remove(str(run_id))
-                app.storage.general[QUEUE_STORAGE_KEY] = queued
+            queued = self._storage.load_queue()
+            if run_id in queued:
+                queued.remove(run_id)
+                self._storage.save_queue(queued)
             await self._append_run_event(
                 RunEvent(
                     run_id=run_id,
@@ -2309,14 +2015,11 @@ class _ControlCentreController:
             if self._shutting_down:
                 return
             backend_status = self._backend.status
-            if backend_status is _BackendStatus.RUNNING:
-                await self._refresh_backend_state()
-            else:
-                if backend_status is _BackendStatus.FAILED:
-                    self._backend_availability = _BackendAvailability(
-                        full_api_available=False,
-                        ipc_available=False,
-                    )
+            if backend_status is _BackendStatus.FAILED:
+                self._backend_availability = _BackendAvailability(**{
+                    **self._backend_availability.model_dump(),
+                    'full_api_available': False, 'ipc_available': False,
+                })
             if self._active_run is not None:
                 self._external_codex_busy = False
                 return
@@ -2327,93 +2030,63 @@ class _ControlCentreController:
                     return
                 raise
 
-    async def _refresh_backend_state(self) -> None:
-        snapshot = await asyncio.to_thread(self._backend_database.pull)
-        self._backend_availability = replace(
-            self._backend_availability,
-            ipc_available=True,
-        )
-        self._apply_backend_snapshot(snapshot)
-        app.storage.general[BACKEND_DATABASE_STORAGE_KEY] = snapshot.model_dump(mode="json")
+    async def probe_all(self) -> None:
+        if self._probe_lock.locked():
+            return
+        async with self._probe_lock:
+            self._backend_availability = _BackendAvailability()
+            ipc_available = await asyncio.to_thread(self._probe_ipc)
+            self._backend_availability = _BackendAvailability(**{
+                **self._backend_availability.model_dump(),
+                "ipc_available": ipc_available,
+            })
+            full_api_available = await asyncio.to_thread(self._backend.full_api_available)
+            self._backend_availability = _BackendAvailability(**{
+                **self._backend_availability.model_dump(),
+                "full_api_available": full_api_available,
+            })
+            ssh_available = await self._codex.probe_ssh()
+            self._backend_availability = _BackendAvailability(**{
+                **self._backend_availability.model_dump(),
+                "ssh_available": ssh_available,
+            })
+            codex_authenticated = await self._codex.probe_auth() if ssh_available else None
+            self._backend_availability = _BackendAvailability(**{
+                **self._backend_availability.model_dump(),
+                "codex_authenticated": codex_authenticated,
+                "checked_at": datetime.now(timezone.utc),
+            })
+            logger.info("Dashboard probes: %s", self._backend_availability)
 
-    def _apply_backend_snapshot(self, snapshot: QueryResponse) -> None:
-        attempt_records: dict[str, list[AgentRuntimeAttemptRecord]] = {}
-        for record in snapshot.attempts:
-            try:
-                namekey = parse_name_key_header(
-                    record.attempt.commit_record.request_headers.get(
-                        NAME_KEY_HEADER
-                    )
-                )
-            except (TypeError, ValueError) as exc:
-                raise RuntimeError(Locale.ATTEMPT_DATABASE_INCONSISTENT) from exc
-            namekey_json = namekey.to_json_key()
-            if namekey_json not in self._researchers_by_namekey:
-                raise RuntimeError(Locale.ATTEMPT_DATABASE_INCONSISTENT)
-            attempt_records.setdefault(namekey_json, []).append(record)
-        self._attempt_records = {
-            namekey: tuple(records) for namekey, records in attempt_records.items()
-        }
-
-        committed_innerdicts: dict[
-            str,
-            list[CommittedInnerDict],
-        ] = {}
-        for returned_singular_outerdict in snapshot.ai_augment_singular_outerdicts:
-            namekey_json = returned_singular_outerdict.namekey.to_json_key()
-            maintained_singular_outerdict = self._researchers_by_namekey.get(namekey_json)
-            if maintained_singular_outerdict is None:
-                raise RuntimeError(Locale.ATTEMPT_DATABASE_INCONSISTENT)
-            maintained_singular_outerdict.committed_innerdicts = (
-                returned_singular_outerdict.committed_innerdicts
-            )
-            committed_innerdicts[namekey_json] = list(
-                maintained_singular_outerdict.committed_innerdicts
-            )
-        self._committed_innerdicts = {
-            namekey: tuple(innerdicts)
-            for namekey, innerdicts in committed_innerdicts.items()
-        }
-
-        run_outcome_responses: dict[str, list[RunOutcomeResponse]] = {}
-        for response in snapshot.run_outcome_records:
-            namekey_json = response.run_outcome_request.namekey.to_json_key()
-            run_outcome_responses.setdefault(
-                namekey_json,
-                [],
-            ).append(response)
-        self._run_outcome_responses = {
-            namekey: tuple(responses)
-            for namekey, responses in run_outcome_responses.items()
-        }
-
-    async def refresh_from_ipc(self) -> None:
-        availability = await self.detect_backend_availability()
-        if not availability.ipc_available:
-            raise RuntimeError(Locale.BACKEND_DATABASE_UNAVAILABLE)
-        await self._refresh_backend_state()
+    def accept_query_snapshot(self, snapshot: DashboardQuerySnapshot) -> None:
+        self._snapshot = snapshot
+        self._backend_availability = _BackendAvailability(**{
+            **self._backend_availability.model_dump(),
+            "ipc_available": True,
+        })
 
     async def snapshot(
         self,
         *,
         selection: _UiSelection,
-    ) -> _UiSnapshot:
-        await self.refresh_idle_state()
-        variable = VARIABLE_SPEC_BY_KEY[selection.variable_key]
-        views = self._reconciler.reconcile_all(
-            researchers=self._researchers,
-            runs=self._runs,
-            attempt_records=self._attempt_records,
-            committed_innerdicts=self._committed_innerdicts,
-            run_outcome_responses=self._run_outcome_responses,
+    ) -> _DashboardView:
+        researcher_var = RESEARCHER_VARS_BY_VARNAME[selection.researcher_varname]
+        runs_by_namekey: dict[str, list[Run]] = {}
+        for run in self._runs.values():
+            runs_by_namekey.setdefault(run.namekey.to_json_key(), []).append(run)
+        views = tuple(
+            _ResearcherView.from_snapshot(
+                researcher, self._snapshot,
+                runs_by_namekey.get(researcher.namekey.to_json_key(), ()),
+            )
+            for researcher in self._researchers
         )
         all_rows = tuple(
-            self._projector.project_researcher(
-                researcher_view=view,
-                ground_truth=self._ground_truth.get(
-                    view.researcher.namekey.to_json_key()
+            view.to_var_view(
+                ground_truth=self._snapshot.ground_truth_by_namekey.get(
+                    view.researcher.namekey.to_json_key(),
                 ),
-                variable=variable,
+                researcher_var=researcher_var,
                 codex_busy=self.codex_busy,
             )
             for view in views
@@ -2465,14 +2138,15 @@ class _ControlCentreController:
             ),
             ready=lifecycles.count(RunLifecycle.READY),
             queued=lifecycles.count(RunLifecycle.QUEUED),
-            running=lifecycles.count(RunLifecycle.RUNNING),
+            running=sum(lifecycle in {RunLifecycle.RUNNING, RunLifecycle.CODEX_EXITED}
+                        for lifecycle in lifecycles),
             completed=lifecycles.count(RunLifecycle.COMPLETED),
             failed=lifecycles.count(RunLifecycle.FAILED),
             cancelled=lifecycles.count(RunLifecycle.CANCELLED),
         )
-        return _UiSnapshot(
+        return _DashboardView(
             counts=counts,
-            rows=rows,
+            researcher_var_views=rows,
             backend_status=self.backend_status,
             backend_availability=self.backend_availability,
             active_run_id=self.active_run_id,
@@ -2486,10 +2160,10 @@ class _ControlCentreController:
         researcher = self._researchers_by_namekey.get(namekey.to_json_key())
         if researcher is None:
             raise KeyError(Locale.UNKNOWN_NAMEKEY_TEMPLATE.format(namekey=namekey))
-        markdown = await asyncio.to_thread(self._backend_database.card, namekey)
+        markdown = await asyncio.to_thread(self._render_card, researcher)
         return _ResearcherCardView(
             researcher=researcher,
-            markdown=markdown,
+            card_markdown=markdown,
         )
 
     async def _worker(self) -> None:
@@ -2499,10 +2173,10 @@ class _ControlCentreController:
 
     async def _process_queued_run(self, run: Run) -> None:
         try:
-            queued = list(app.storage.general.get(QUEUE_STORAGE_KEY, []))
-            if str(run.run_id) in queued:
-                queued.remove(str(run.run_id))
-                app.storage.general[QUEUE_STORAGE_KEY] = queued
+            queued = self._storage.load_queue()
+            if run.run_id in queued:
+                queued.remove(run.run_id)
+                self._storage.save_queue(queued)
             if run.run_outcome is RunLifecycle.CANCELLED:
                 return
             if not await self._wait_until_codex_idle(run=run):
@@ -2659,7 +2333,6 @@ class _ControlCentreController:
         )
         # Run.lifecycle -> RunLifecycle.CODEX_EXITED
         run_outcome = await self._finalize_run(run=run)
-        # Run.lifecycle -> RunLifecycle.PUSH_ACCEPTED if accepted
         await self._record_run_outcome(
             run=run,
             run_outcome=run_outcome,
@@ -2699,33 +2372,12 @@ class _ControlCentreController:
             )
         )
 
-    async def _finalize_run(
-        self,
-        *,
-        run: Run,
-    ) -> RunLifecycle:
+    async def _finalize_run(self, *, run: Run) -> RunLifecycle:
         if run.cancel_requested_at is not None:
             return RunLifecycle.CANCELLED
-        if run.accepted_commit_record_id is not None:
-            return RunLifecycle.COMPLETED
-        if run.session_id is not None:
-            accepted = await self._accepted_attempt_for_session(
-                namekey=run_namekey(run),
-                session_id=run.session_id,
-            )
-            if accepted is not None:
-                await self._append_run_event(
-                    RunEvent(
-                        run_id=run.run_id,
-                        namekey=run.namekey,
-                        occurred_at_unix_usec=datetime_to_unix_usec(datetime.now(timezone.utc)),
-                        lifecycle=RunLifecycle.PUSH_ACCEPTED,
-                        session_id=run.session_id,
-                        accepted_commit_record_id=accepted.commit_record.record_id,
-                    )
-                )
-                return RunLifecycle.COMPLETED
-        return RunLifecycle.FAILED
+        response_code = await self._backend.probe_pull()
+        return (RunLifecycle.COMPLETED if response_code == status.HTTP_410_GONE
+                else RunLifecycle.FAILED)
 
     async def _record_run_outcome(
         self,
@@ -2740,7 +2392,7 @@ class _ControlCentreController:
                 return
             try:
                 response_code = await asyncio.to_thread(
-                    self._backend_database.record_run_outcome,
+                    self._send_run_outcome,
                     run_outcome=run_outcome,
                     namekey=run_namekey(run),
                 )
@@ -2753,15 +2405,6 @@ class _ControlCentreController:
                 emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, message)
                 return
             self._run_outcome_recorded_run_ids.add(run.run_id)
-            try:
-                await self._refresh_backend_state()
-            except RuntimeError as exc:
-                message = Locale.RUN_OUTCOME_RESPONSE_REFRESH_FAILED_TEMPLATE.format(
-                    run_id=run.run_id,
-                    error=exc,
-                )
-                self._notifications.append(message)
-                emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, message)
             if response_code == status.HTTP_500_INTERNAL_SERVER_ERROR:
                 message = Locale.RUN_OUTCOME_SNAPSHOT_PARTIAL_TEMPLATE.format(
                     run_id=run.run_id,
@@ -2775,32 +2418,13 @@ class _ControlCentreController:
         self._notifications.clear()
         return notifications
 
-    async def _accepted_attempt_for_session(
-        self,
-        *,
-        namekey: NameKey,
-        session_id: UUID,
-    ) -> CommittedInnerDict | None:
-        await self._refresh_backend_state()
-        attempts = self._committed_innerdicts.get(namekey.to_json_key(), ())
-        matches = [
-            attempt
-            for attempt in attempts
-            if attempt.commit_record.commit_request_body.codex_session_record.session_id
-            == session_id
-        ]
-        if len(matches) > 1:
-            raise RuntimeError(Locale.ACCEPTED_SESSION_DUPLICATE)
-        return matches[0] if matches else None
-
     async def _append_run_event(
         self,
         event: RunEvent,
     ) -> Run:
-        self._events.append(event)
-        app.storage.general[RUN_EVENTS_STORAGE_KEY] = [
-            item.model_dump(mode="json") for item in self._events
-        ]
+        events = [*self._events, event]
+        self._storage.save_run_events(events)
+        self._events = events
         run = apply_run_event(self._runs.get(event.run_id), event)
         self._runs[event.run_id] = run
         if event.lifecycle is RunLifecycle.FAILED:
@@ -2815,40 +2439,30 @@ class _ControlCentreController:
         return run
 
     def _load_dashboard_storage(self) -> None:
-        raw_events = app.storage.general.get(RUN_EVENTS_STORAGE_KEY, [])
-        if not isinstance(raw_events, list):
-            raise RuntimeError(Locale.JOURNAL_STORAGE_INVALID)
-        try:
-            self._events = [RunEvent.model_validate(value) for value in raw_events]
-        except ValidationError as exc:
-            raise RuntimeError(Locale.JOURNAL_STORAGE_INVALID) from exc
+        self._events = self._storage.load_run_events()
         self._runs = dict(replay_run_events(self._events))
-
-        raw_backend_snapshot = app.storage.general.get(BACKEND_DATABASE_STORAGE_KEY)
-        if raw_backend_snapshot is None:
-            return
-        try:
-            snapshot = QueryResponse.from_serialized_json(
-                json.dumps(raw_backend_snapshot)
-            )
-        except (TypeError, ValueError, ValidationError) as exc:
-            raise RuntimeError(Locale.BACKEND_DATABASE_RESPONSE_INVALID) from exc
-        self._apply_backend_snapshot(snapshot)
-
+        snapshot = self._storage.load_query_snapshot()
+        if snapshot is not None:
+            self._snapshot = snapshot
 
 # =============================================================================
 # NiceGUI page
 # =============================================================================
 
 
-@dataclass(slots=True)
-class _UiHandles:
+class _UiHandles(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, validate_assignment=True)
+
     backend_status_label: Any | None = None
     backend_ipc_status_label: Any | None = None
     backend_refresh_button: Any | None = None
+    probe_button: Any | None = None
+    ssh_status_label: Any | None = None
+    codex_status_label: Any | None = None
+    probe_time_label: Any | None = None
     summary_label: Any | None = None
 
-    variable_select: Any | None = None
+    researcher_var_select: Any | None = None
     status_select: Any | None = None
     cohort_select: Any | None = None
     search_input: Any | None = None
@@ -2870,18 +2484,19 @@ class _ControlCentrePage:
         self,
         *,
         controller: _ControlCentreController,
+        query_ipc: Callable[[], Awaitable[None]],
         reference_docx: Path,
     ) -> None:
         self._controller = controller
+        self._query_ipc = query_ipc
         self._reference_docx = reference_docx
-        self._selection = _UiSelection(variable_key=VARIABLE_SPECS[0].key)
+        self._selection = _UiSelection(researcher_varname=RESEARCHER_VARS[0].varname)
         self._handles = _UiHandles()
         self._grid_initialized = False
-        self._grid_variable_key = self._selection.variable_key
+        self._grid_researcher_varname = self._selection.researcher_varname
         self._grid_rows_by_id: dict[str, dict[str, Any]] = {}
-        self._row_views_by_namekey: dict[str, _ResearcherGridRow] = {}
+        self._researcher_var_views_by_namekey: dict[str, _ResearcherVarView] = {}
         self._expanded_history_namekey: NameKey | None = None
-        self._card_cache: dict[str, _ResearcherCardView] = {}
         self._displayed_card: _ResearcherCardView | None = None
 
     @property
@@ -2906,31 +2521,22 @@ class _ControlCentrePage:
         ui.timer(UI_REFRESH_SECONDS, self.refresh)
 
     def build_header(self) -> None:
-        backend_availability = self._controller.backend_availability
         with (
-            ui
-            .row()
-            .style(RESPONSIVE_ROW_STYLE)
+            ui.row().style(RESPONSIVE_ROW_STYLE)
             .props(_NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=PAGE_HEADER_TEST_ID))
         ):
             ui.label(Locale.PAGE_TITLE)
-            self._handles.backend_status_label = ui.label(
-                Locale.BACKEND_STATUS_TEMPLATE.format(status=self._controller.backend_status.value)
+            self._handles.backend_status_label = ui.label()
+            self._handles.backend_ipc_status_label = ui.label().props(
+                _NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=BACKEND_IPC_STATUS_TEST_ID)
             )
-            self._handles.backend_ipc_status_label = ui.label(
-                Locale.IPC_STATUS_TEMPLATE.format(
-                    status=(
-                        Locale.IPC_AVAILABLE
-                        if backend_availability.ipc_available
-                        else Locale.IPC_UNAVAILABLE
-                    )
-                )
-            ).props(_NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=BACKEND_IPC_STATUS_TEST_ID))
+            self._handles.ssh_status_label = ui.label()
+            self._handles.codex_status_label = ui.label()
+            self._handles.probe_time_label = ui.label()
+            self._handles.probe_button = ui.button(Locale.ACTION_PROBE, on_click=self.probe_all)
             self._handles.backend_refresh_button = ui.button(
-                Locale.ACTION_REFRESH, on_click=self.refresh_from_ipc
+                Locale.ACTION_QUERY_IPC, on_click=self.refresh_from_ipc,
             ).props(_NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=BACKEND_REFRESH_TEST_ID))
-            if not backend_availability.ipc_available:
-                self._handles.backend_refresh_button.disable()
 
     def build_summary(self) -> None:
         self._handles.summary_label = (
@@ -2947,11 +2553,14 @@ class _ControlCentrePage:
             .style(RESPONSIVE_ROW_STYLE)
             .props(_NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=PAGE_FILTERS_TEST_ID))
         ):
-            self._handles.variable_select = ui.select(
-                {variable.key: variable.ai_column for variable in VARIABLE_SPECS},
-                value=self._selection.variable_key,
+            self._handles.researcher_var_select = ui.select(
+                {
+                    researcher_var.varname: researcher_var.ai_column
+                    for researcher_var in RESEARCHER_VARS
+                },
+                value=self._selection.researcher_varname,
                 label=Locale.VARIABLE_FILTER,
-                on_change=lambda event: self.on_variable_changed(event.value),
+                on_change=lambda event: self.on_researcher_var_changed(event.value),
             )
             self._handles.status_select = ui.select(
                 {
@@ -2982,12 +2591,12 @@ class _ControlCentrePage:
             ).props(_NiceGui.CLEARABLE_PROP)
 
     def build_grid(self) -> None:
-        variable = VARIABLE_SPEC_BY_KEY[self._selection.variable_key]
+        researcher_var = RESEARCHER_VARS_BY_VARNAME[self._selection.researcher_varname]
         self._handles.grid = (
             ui
             .aggrid(
                 AgGrid.options(
-                    columns=self.grid_column_definitions(variable=variable),
+                    columns=self.grid_column_definitions(researcher_var=researcher_var),
                     rows=[],
                     row_id_field=GRID_ROW_ID_FIELD,
                 ),
@@ -3039,7 +2648,7 @@ class _ControlCentrePage:
             self._handles.view_card_button.disable()
 
     def build_attempt_history_panel(self) -> None:
-        variable = VARIABLE_SPEC_BY_KEY[self._selection.variable_key]
+        researcher_var = RESEARCHER_VARS_BY_VARNAME[self._selection.researcher_varname]
         self._handles.attempt_history_expansion = (
             ui
             .expansion(Locale.ATTEMPT_HISTORY)
@@ -3051,7 +2660,7 @@ class _ControlCentrePage:
                 ui
                 .table(
                     rows=[],
-                    columns=self.attempt_history_column_definitions(variable=variable),
+                    columns=self.attempt_history_column_definitions(researcher_var=researcher_var),
                     row_key=GRID_ROW_ID_FIELD,
                 )
                 .style(ATTEMPT_HISTORY_TABLE_STYLE)
@@ -3090,7 +2699,7 @@ class _ControlCentrePage:
     def grid_column_definitions(
         self,
         *,
-        variable: _VariableSpec,
+        researcher_var: _ResearcherVar,
     ) -> list[dict[str, Any]]:
         return [
             AgGrid.column(
@@ -3126,13 +2735,13 @@ class _ControlCentrePage:
             ),
             AgGrid.column(
                 field=GRID_AI_VALUE_FIELD,
-                header=variable.ai_column,
+                header=researcher_var.ai_column,
                 width=GRID_CONTENT_COLUMN_WIDTH,
                 wrap_text=True,
             ),
             AgGrid.column(
                 field=GRID_TABLE_1_VALUE_FIELD,
-                header=variable.table_1_column,
+                header=researcher_var.table_1_column,
                 width=GRID_CONTENT_COLUMN_WIDTH,
                 wrap_text=True,
             ),
@@ -3179,7 +2788,7 @@ class _ControlCentrePage:
     def attempt_history_column_definitions(
         self,
         *,
-        variable: _VariableSpec,
+        researcher_var: _ResearcherVar,
     ) -> list[dict[str, Any]]:
         return [
             nicegui_table_column(
@@ -3204,11 +2813,11 @@ class _ControlCentrePage:
             ),
             nicegui_table_column(
                 field=GRID_AI_VALUE_FIELD,
-                label=variable.ai_column,
+                label=researcher_var.ai_column,
             ),
             nicegui_table_column(
                 field=GRID_TABLE_1_VALUE_FIELD,
-                label=variable.table_1_column,
+                label=researcher_var.table_1_column,
             ),
             nicegui_table_column(
                 field=GRID_FOOTNOTES_FIELD,
@@ -3223,11 +2832,11 @@ class _ControlCentrePage:
     def grid_options(
         self,
         *,
-        snapshot: _UiSnapshot,
-        variable: _VariableSpec,
+        snapshot: _DashboardView,
+        researcher_var: _ResearcherVar,
     ) -> dict[str, Any]:
         return AgGrid.options(
-            columns=self.grid_column_definitions(variable=variable),
+            columns=self.grid_column_definitions(researcher_var=researcher_var),
             rows=self.grid_rows(snapshot=snapshot),
             row_id_field=GRID_ROW_ID_FIELD,
         )
@@ -3235,12 +2844,12 @@ class _ControlCentrePage:
     def grid_rows(
         self,
         *,
-        snapshot: _UiSnapshot,
+        snapshot: _DashboardView,
     ) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
-        for row in snapshot.rows:
+        for row in snapshot.researcher_var_views:
             researcher = row.researcher
-            latest = row.latest
+            latest = row.latest_run_commit_var_view
             rows.append({
                 GRID_ROW_ID_FIELD: researcher.namekey.to_json_key(),
                 GRID_NAMEKEY_FIELD: researcher.namekey.to_json_key(),
@@ -3262,10 +2871,10 @@ class _ControlCentrePage:
                 GRID_COMMIT_RECORD_ID_FIELD: latest.commit_record_id,
                 GRID_ATTEMPT_TIMESTAMP_FIELD: (
                     None
-                    if latest.attempt_timestamp is None
-                    else latest.attempt_timestamp.isoformat()
+                    if latest.timestamp is None
+                    else latest.timestamp.isoformat()
                 ),
-                GRID_STATUS_FIELD: latest.attempt_lifecycle.value,
+                GRID_STATUS_FIELD: latest.lifecycle.value,
                 GRID_RUN_OUTCOME_SNAPSHOT_FIELD: latest.run_outcome_snapshot_savedness,
                 GRID_SESSION_STATUS_FIELD: latest.session_status,
                 GRID_ACTION_FIELD: latest.action.value,
@@ -3275,21 +2884,22 @@ class _ControlCentrePage:
     def attempt_detail_rows(
         self,
         *,
-        row: _ResearcherGridRow,
+        row: _ResearcherVarView,
     ) -> list[dict[str, Any]]:
         return [
             {
                 GRID_ROW_ID_FIELD: str(
-                    attempt.run_id if attempt.run_id is not None else attempt.commit_record_id
+                    attempt.commit_record_id if attempt.commit_record_id is not None
+                    else attempt.run_id
                 ),
                 GRID_RUN_ID_FIELD: (str(attempt.run_id) if attempt.run_id is not None else None),
                 GRID_COMMIT_RECORD_ID_FIELD: attempt.commit_record_id,
                 GRID_ATTEMPT_TIMESTAMP_FIELD: (
                     None
-                    if attempt.attempt_timestamp is None
-                    else attempt.attempt_timestamp.isoformat()
+                    if attempt.timestamp is None
+                    else attempt.timestamp.isoformat()
                 ),
-                GRID_STATUS_FIELD: attempt.attempt_lifecycle.value,
+                GRID_STATUS_FIELD: (attempt.backend_lifecycle or attempt.lifecycle).value,
                 GRID_RUN_OUTCOME_SNAPSHOT_FIELD: attempt.run_outcome_snapshot_savedness,
                 GRID_SESSION_STATUS_FIELD: attempt.session_status,
                 GRID_AI_VALUE_FIELD: attempt.ai_value,
@@ -3297,32 +2907,31 @@ class _ControlCentrePage:
                 GRID_FOOTNOTES_FIELD: attempt.footnotes,
                 GRID_FOOTNOTE_ARGUMENTS_FIELD: attempt.footnote_arguments,
             }
-            for attempt in row.attempts
+            for attempt in row.run_commit_var_views
         ]
 
     async def refresh(self) -> None:
         snapshot = await self._controller.snapshot(selection=self._selection)
         for message in self._controller.drain_notifications():
             ui.notify(message, type="negative")
-        if self._handles.backend_status_label is not None:
-            self._handles.backend_status_label.set_text(
-                Locale.BACKEND_STATUS_TEMPLATE.format(status=snapshot.backend_status.value)
-            )
-        if self._handles.backend_ipc_status_label is not None:
-            self._handles.backend_ipc_status_label.set_text(
-                Locale.IPC_STATUS_TEMPLATE.format(
-                    status=(
-                        Locale.IPC_AVAILABLE
-                        if snapshot.backend_availability.ipc_available
-                        else Locale.IPC_UNAVAILABLE
-                    )
-                )
-            )
-        if self._handles.backend_refresh_button is not None:
-            if snapshot.backend_availability.ipc_available:
-                self._handles.backend_refresh_button.enable()
-            else:
-                self._handles.backend_refresh_button.disable()
+        availability = snapshot.backend_availability
+        for label, template, value in (
+            (self._handles.backend_status_label, Locale.BACKEND_STATUS_TEMPLATE,
+             availability.full_api_available),
+            (self._handles.backend_ipc_status_label, Locale.IPC_STATUS_TEMPLATE,
+             availability.ipc_available),
+            (self._handles.ssh_status_label, Locale.SSH_STATUS_TEMPLATE,
+             availability.ssh_available),
+            (self._handles.codex_status_label, Locale.CODEX_AUTH_STATUS_TEMPLATE,
+             availability.codex_authenticated),
+        ):
+            if label is not None:
+                label.set_text(template.format(status=availability.status_text(value)))
+        if self._handles.probe_time_label is not None:
+            self._handles.probe_time_label.set_text(Locale.PROBE_TIME_TEMPLATE.format(
+                timestamp=(Locale.PROBE_NOT_CHECKED if availability.checked_at is None
+                           else availability.checked_at.isoformat(timespec="seconds")),
+            ))
         if self._handles.summary_label is not None:
             counts = snapshot.counts
             self._handles.summary_label.set_text(
@@ -3341,50 +2950,67 @@ class _ControlCentrePage:
             )
         await self.refresh_grid(snapshot=snapshot)
 
+    async def probe_all(self) -> None:
+        if self._handles.probe_button is not None:
+            self._handles.probe_button.disable()
+        try:
+            await self._controller.probe_all()
+        finally:
+            if self._handles.probe_button is not None:
+                self._handles.probe_button.enable()
+            await self.refresh()
+
     async def refresh_from_ipc(self) -> None:
         try:
-            await self._controller.refresh_from_ipc()
+            await self._query_ipc()
         except RuntimeError:
             ui.notify(Locale.BACKEND_DATABASE_REQUEST_FAILED, type="negative")
         else:
-            self._card_cache.clear()
             self._clear_displayed_card()
+            ui.notify(Locale.QUERY_SNAPSHOT_REPLACED, type="positive")
         await self.refresh()
 
     async def refresh_grid(
         self,
         *,
-        snapshot: _UiSnapshot | None = None,
+        snapshot: _DashboardView | None = None,
     ) -> None:
         if self._handles.grid is None:
             return
         if snapshot is None:
             snapshot = await self._controller.snapshot(selection=self._selection)
-        variable = VARIABLE_SPEC_BY_KEY[self._selection.variable_key]
-        self._row_views_by_namekey = {
-            row.researcher.namekey.to_json_key(): row for row in snapshot.rows
+        researcher_var = RESEARCHER_VARS_BY_VARNAME[self._selection.researcher_varname]
+        self._researcher_var_views_by_namekey = {
+            row.researcher.namekey.to_json_key(): row for row in snapshot.researcher_var_views
         }
+        card = self._displayed_card
+        if card is not None:
+            current = self._researcher_var_views_by_namekey.get(
+                card.researcher.namekey.to_json_key(),
+            )
+            if current is None or current.researcher is not card.researcher:
+                self._clear_displayed_card()
         self.refresh_attempt_history()
         rows = self.grid_rows(snapshot=snapshot)
         self.sync_selected_action(rows)
         if not self._grid_initialized:
             options = self.grid_options(
                 snapshot=snapshot,
-                variable=variable,
+                researcher_var=researcher_var,
             )
             self._handles.grid.options.update(options)
             self._handles.grid.update()
             self._grid_rows_by_id = {str(row[GRID_ROW_ID_FIELD]): row for row in rows}
-            self._grid_variable_key = self._selection.variable_key
+            self._grid_researcher_varname = self._selection.researcher_varname
             self._grid_initialized = True
             return
-        if self._grid_variable_key != self._selection.variable_key:
+        if self._grid_researcher_varname != self._selection.researcher_varname:
             await self._handles.grid.run_grid_method(
                 AgGrid.SET_GRID_OPTION_METHOD,
                 AgGrid.COLUMN_DEFINITIONS_OPTION,
-                self.grid_column_definitions(variable=variable),
+                self.grid_column_definitions(researcher_var=researcher_var),
             )
-            self._grid_variable_key = self._selection.variable_key
+            self._grid_researcher_varname = self._selection.researcher_varname
         desired_by_id = {str(row[GRID_ROW_ID_FIELD]): row for row in rows}
         if tuple(self._grid_rows_by_id) != tuple(desired_by_id):
             await self._handles.grid.run_grid_method(
@@ -3410,8 +3036,12 @@ class _ControlCentrePage:
         table = self._handles.attempt_history_table
         if namekey is None or table is None:
             return
-        row = self._row_views_by_namekey.get(namekey.to_json_key())
+        row = self._researcher_var_views_by_namekey.get(namekey.to_json_key())
         if row is None:
+            table.update_rows([], clear_selection=True)
+            if self._handles.attempt_history_expansion is not None:
+                self._handles.attempt_history_expansion.set_visibility(False)
+            self._expanded_history_namekey = None
             return
         table.update_rows(
             self.attempt_detail_rows(row=row),
@@ -3422,12 +3052,9 @@ class _ControlCentrePage:
         namekey = self._selection.selected_namekey
         if namekey is None:
             return
-        namekey_json = namekey.to_json_key()
-        card = self._card_cache.get(namekey_json)
-        if card is None:
-            card = await self._controller.researcher_card(namekey=namekey)
-            self._card_cache[namekey_json] = card
-        await self._show_card(card)
+        card = await self._controller.researcher_card(namekey=namekey)
+        if self._selection.selected_namekey == namekey:
+            await self._show_card(card)
 
     async def _show_card(self, card: _ResearcherCardView) -> None:
         if self._handles.selected_researcher_label is not None:
@@ -3439,10 +3066,10 @@ class _ControlCentrePage:
                 )
             )
         if self._handles.card_markdown is not None:
-            self._handles.card_markdown.set_content(card.markdown)
-        self._displayed_card = card if card.markdown else None
+            self._handles.card_markdown.set_content(card.card_markdown)
+        self._displayed_card = card if card.card_markdown else None
         if self._handles.download_card_button is not None:
-            if card.markdown:
+            if card.card_markdown:
                 self._handles.download_card_button.enable()
             else:
                 self._handles.download_card_button.disable()
@@ -3455,7 +3082,6 @@ class _ControlCentrePage:
             self._handles.download_card_button.disable()
 
     def _invalidate_card(self, namekey: NameKey) -> None:
-        self._card_cache.pop(namekey.to_json_key(), None)
         if (
             self._displayed_card is not None
             and self._displayed_card.researcher.namekey == namekey
@@ -3464,7 +3090,7 @@ class _ControlCentrePage:
 
     async def download_displayed_card(self) -> None:
         card = self._displayed_card
-        if card is None or not card.markdown:
+        if card is None or not card.card_markdown:
             return
         button = self._handles.download_card_button
         if button is not None:
@@ -3472,7 +3098,7 @@ class _ControlCentrePage:
         try:
             docx = await asyncio.to_thread(
                 render_docx_bytes,
-                card.markdown,
+                card.card_markdown,
                 self._reference_docx,
             )
             ui.download(
@@ -3499,29 +3125,29 @@ class _ControlCentrePage:
     ) -> None:
         expansion = self._handles.attempt_history_expansion
         table = self._handles.attempt_history_table
-        row = self._row_views_by_namekey.get(namekey.to_json_key())
+        row = self._researcher_var_views_by_namekey.get(namekey.to_json_key())
         if expansion is None or table is None or row is None:
             return
-        variable = VARIABLE_SPEC_BY_KEY[self._selection.variable_key]
-        table.columns = self.attempt_history_column_definitions(variable=variable)
+        researcher_var = RESEARCHER_VARS_BY_VARNAME[self._selection.researcher_varname]
+        table.columns = self.attempt_history_column_definitions(researcher_var=researcher_var)
         table.update_rows(self.attempt_detail_rows(row=row), clear_selection=False)
         expansion.set_text(
             Locale.ATTEMPT_HISTORY_TEMPLATE.format(
-                first_name=row.latest.first_name,
-                last_name=row.latest.last_name,
+                first_name=row.latest_run_commit_var_view.first_name,
+                last_name=row.latest_run_commit_var_view.last_name,
             )
         )
         expansion.set_visibility(True)
         expansion.open()
         self._expanded_history_namekey = namekey
 
-    async def on_variable_changed(
+    async def on_researcher_var_changed(
         self,
-        variable_key: str,
+        researcher_varname: str,
     ) -> None:
-        if variable_key not in VARIABLE_SPEC_BY_KEY:
-            raise KeyError(Locale.UNKNOWN_VARIABLE_TEMPLATE.format(variable_key=variable_key))
-        self._selection.variable_key = variable_key
+        if researcher_varname not in RESEARCHER_VARS_BY_VARNAME:
+            raise KeyError(Locale.UNKNOWN_VARIABLE_TEMPLATE.format(variable_key=researcher_varname))
+        self._selection.researcher_varname = researcher_varname
         await self.refresh_grid()
         expanded_namekey = self._expanded_history_namekey
         if expanded_namekey is not None:
@@ -3691,20 +3317,19 @@ class _ControlCentrePage:
 # =============================================================================
 
 
-@dataclass(frozen=True, slots=True)
-class _ApplicationServices:
+class _ApplicationServices(BaseModel):
+    # These are runtime service instances, not serialized configuration.
+    model_config = ConfigDict(
+        extra="forbid", strict=True, frozen=True, arbitrary_types_allowed=True,
+    )
+
     configuration: AiAugmentControlCentreContext
-
-    source_repository: _SourceRepository
-
+    storage: AiAugmentDashboardStorage
     backend: _BackendSupervisor
     backend_database: _BackendDatabaseClient
     codex: _CodexRunner
-
-    reconciler: _AttemptReconciler
-    projector: _VariableProjector
-
     controller: _ControlCentreController
+    query_ipc: Callable[[], Awaitable[None]]
 
 
 SERVICES: _ApplicationServices | None = None
@@ -3712,62 +3337,53 @@ APPLICATION_LIFECYCLE_CONFIGURED = False
 APPLICATION_CONFIG_PATH = DEFAULT_CONFIG_PATH
 
 
-def create_services(
-    *,
-    config_path: Path,
-) -> tuple[
-    _ApplicationServices,
-    _SourceInputFingerprint,
-    tuple[AiAugmentSingularOuterDict, ...] | None,
-]:
+def create_services(*, config_path: Path) -> _ApplicationServices:
     pipeline_config = AiAugmentDetourConfig.from_json(config_path)
-    fingerprint, cached_singular_outerdicts = load_cached_source_data(pipeline_config)
-    configuration = AiAugmentControlCentreContext(
-        pipeline_config=pipeline_config,
-        cached_ai_augment_singular_outerdicts=cached_singular_outerdicts,
-    )
-    _ = configuration.ai_augment_singular_outerdicts
-    source_repository = _SourceRepository(configuration=configuration)
+    configuration = AiAugmentControlCentreContext(pipeline_config=pipeline_config)
+    storage = AiAugmentDashboardStorage()
     backend = _BackendSupervisor(
         repository_root=REPOSITORY_ROOT,
         config_path=config_path,
         openalex_api_key=configuration.openalex_api_key,
         appendwatch_report=PurePosixPath(
-            configuration.lima_configuration.param[
-                LIMA_APPENDWATCH_REPORT_PARAM
-            ]
+            configuration.lima_configuration.param[LIMA_APPENDWATCH_REPORT_PARAM]
         ),
         dashboard_socket_path=DASHBOARD_SOCKET_PATH,
-        pipeline_config=configuration.pipeline_config,
+        configuration=configuration,
     )
     backend_database = _BackendDatabaseClient(
-        socket_path=DASHBOARD_SOCKET_PATH,
-        pipeline_config=configuration.pipeline_config,
+        socket_path=DASHBOARD_SOCKET_PATH, pipeline_config=pipeline_config,
     )
-    codex = _CodexRunner(
-        timezone=ZoneInfo(configuration.pipeline_config.timezone),
-    )
-    reconciler = _AttemptReconciler()
-    projector = _VariableProjector()
+    codex = _CodexRunner(timezone=ZoneInfo(pipeline_config.timezone))
     controller = _ControlCentreController(
-        source_repository=source_repository,
-        backend=backend,
-        backend_database=backend_database,
-        codex=codex,
-        reconciler=reconciler,
-        projector=projector,
+        storage=storage, backend=backend, codex=codex,
+        probe_ipc=backend_database.available,
+        record_run_outcome=backend_database.record_run_outcome,
+        render_card=backend_database.card,
     )
-    services = _ApplicationServices(
-        configuration=configuration,
-        source_repository=source_repository,
-        backend=backend,
-        backend_database=backend_database,
-        codex=codex,
-        reconciler=reconciler,
-        projector=projector,
-        controller=controller,
+
+    async def query_ipc() -> None:
+        try:
+            async with backend.query_connection(backend_database):
+                response = await asyncio.to_thread(
+                    backend_database.send_query_request, QueryRequest(),
+                )
+            # Storage and the controller reference change together, after child cleanup.
+            snapshot = storage.replace_query_response(response)
+            controller.accept_query_snapshot(snapshot)
+        except Exception as exc:
+            logger.exception("Dashboard query snapshot replacement failed")
+            raise RuntimeError(Locale.BACKEND_DATABASE_RESPONSE_INVALID) from exc
+        emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX,
+                 f"Dashboard snapshot replaced: {len(snapshot.ai_augment_singular_outerdicts)} "
+                 f"researchers, {len(response.attempts)} attempts, "
+                 f"{len(response.run_outcome_records)} run outcomes")
+
+    return _ApplicationServices(
+        configuration=configuration, storage=storage, backend=backend,
+        backend_database=backend_database, codex=codex, controller=controller,
+        query_ipc=query_ipc,
     )
-    return services, fingerprint, cached_singular_outerdicts
 
 
 def require_services() -> _ApplicationServices:
@@ -3789,9 +3405,9 @@ async def chrome_devtools_probe() -> dict[str, object]:
 @ui.page("/")
 async def control_centre_page() -> None:
     services = require_services()
-    await services.controller.detect_backend_availability()
     page = _ControlCentrePage(
         controller=services.controller,
+        query_ipc=services.query_ipc,
         reference_docx=services.configuration.pipeline_config.pandoc_reference_docx,
     )
     page.build()
@@ -3805,41 +3421,15 @@ async def control_centre_page() -> None:
 
 async def application_startup() -> None:
     global SERVICES
-
     if SERVICES is not None:
         await SERVICES.controller.start()
     else:
-        emit_log(
-            Locale.CONTROL_CENTRE_LOG_PREFIX,
-            Locale.SOURCE_CACHE_CHECK_LOG,
-        )
-        services, fingerprint, cached_singular_outerdicts = create_services(
-            config_path=APPLICATION_CONFIG_PATH,
-        )
-        emit_log(
-            Locale.CONTROL_CENTRE_LOG_PREFIX,
-            (
-                Locale.SOURCE_CACHE_HIT_LOG
-                if cached_singular_outerdicts is not None
-                else Locale.SOURCE_CACHE_MISS_LOG
-            ),
-        )
+        services = create_services(config_path=APPLICATION_CONFIG_PATH)
         try:
             await services.controller.start()
         except BaseException:
             await services.controller.shutdown()
             raise
-        if cached_singular_outerdicts is None:
-            store_cached_source_data(
-                fingerprint=fingerprint,
-                ai_augment_singular_outerdicts=(
-                    services.source_repository.ai_augment_singular_outerdicts
-                ),
-            )
-            emit_log(
-                Locale.CONTROL_CENTRE_LOG_PREFIX,
-                Locale.SOURCE_CACHE_UPDATED_LOG,
-            )
         SERVICES = services
     emit_log(
         Locale.CONTROL_CENTRE_LOG_PREFIX,

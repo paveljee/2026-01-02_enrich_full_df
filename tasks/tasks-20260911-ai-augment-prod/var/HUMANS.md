@@ -394,3 +394,158 @@ stored QueryResponse + Run journal
 So, under the proposed refactor, both _AttemptReconciler and _VariableProjector can disappear as
 coordinator/service classes. Their necessary behavior should move onto the objects that actually own and
 represent the data. No product or test code was changed.
+
+
+# well  detour_authoritative_projection should definitely be ditched. i just wonder how to best do this  considering we now have:  - config ai augment json that must contain a current full file hash of replay log and if it doesn't match  on backend start (or on dasbboard start), program exits. correct - does this logic work rigght now?  - backend store that supposedly (but does it in practice?? review) encapsulates and owns completely*  (does it??) _both_ the replay log and detour db. owning means here it sets readonly rights on them and  only makes them writable for the period of transaction . yes or no?  yeah, and we have the replay logic that should (does it??) basically be exactly the same in live and  replay contour - except that in live contour there is also (taken separately! right??) persisting of live  transactions into replay log (with their further projection into detour db) plus live http calls. right??  what am i missing?  so with this in mind, what should be our mechanism for ensuring both-ways equivalence between deotur db  and replay log? we don't want either to ever go stale.
+
+• The intended architecture is reasonable, but the current implementation does not fully enforce it.
+
+### 1. Startup hash verification: not consistently
+
+- Standalone Backend: checks the full replay-log hash when Store opens it, unless --danger-no-verify-hash
+is supplied. However, writable opening currently repairs an incomplete tail before checking the hash.
+
+- Dashboard: currently does not check replay-log contents. Moving verification from model construction to
+Store entry left this path uncovered.
+
+- Dashboard-started Backend: the supervisor (src/detours/detour_ai_augment/src/control_centre/dashboard/
+ui.py:1080) unconditionally supplies --danger-no-verify-hash. Its preceding check merely checks
+configuration booleans—not whether verification happened.
+
+So your mandatory startup rule is currently broken.
+
+### 2. Store ownership and transaction-only writability: no
+
+Production DB/log I/O is now concentrated in Store, but:
+
+- DB stays 0600, with a writable connection, for the entire Backend lifetime.
+- Log becomes 0400, but its writable descriptor remains open throughout that lifetime.
+- Store’s execute() permits SQL outside an explicit transaction.
+- Resource handles remain publicly accessible.
+
+chmod does not revoke an already-open writable descriptor. Literal transaction-only writability requires
+short-lived writable handles, not merely toggling permissions around a persistent writable connection.
+
+### 3. Shared live/replay application: yes, for DB application
+
+Both paths use the same application sequence:
+
+durable log bytes
+→ insert HTTP record into DB
+→ validated DB readback
+→ apply derived changes
+→ commit DB transaction
+
+Live HTTP capture happens separately, outside the DB transaction. Replay validation uses recorded HTTP
+inputs without network.
+
+There are still live-only effects: speculative validation and card-ZIP creation. Replay does not recreate
+those files.
+
+### What is missing
+
+First: hash maintenance. Every legitimate append changes the full-file hash. Nothing currently updates the
+configured hash. Therefore, enforcing your rule means subsequent startup fails until that hash is updated.
+Whether this remains operator-maintained or becomes Store-maintained needs to be explicit.
+
+Second: cross-file atomicity. Log fsync and DuckDB commit cannot be one atomic transaction with the current
+storage arrangement. A crash can leave the log ahead. Updating a separate config file introduces another
+such boundary.
+
+The achievable guarantee is “never serve stale state,” not “these separate files are identical at every
+instant.”
+
+### Recommended mechanism, without the checkpoint table
+
+1. Before serving: Store verifies the configured hash against untouched log bytes.
+2. Verify correspondence: ordered detour_http_records must exactly match a contiguous log prefix—ordinals,
+    UUIDs, payloads, and indexed metadata. Extra or conflicting DB records fail.
+
+3. Catch up: apply the remaining suffix through the common applicator. Each HTTP row and its derived
+    changes commit together.
+
+4. During live operations: serialize append → fsync → apply → readback against queries. On failure, block
+    reads until recovery succeeds; never return the old snapshot as current.
+
+5. Enforce write windows: only Store’s application transaction gets writable DB access; only its append
+    operation gets writable log access.
+
+One qualification to my earlier recommendation: matching HTTP rows does not prove the derived tables are
+correct. For rigorous whole-DB verification, replay into a fresh DB and compare logical contents—not DuckDB
+file hashes. Replay also needs the same hash-validated rollout CAS and source/configuration inputs.
+
+“Both ways” should mean verifying correspondence, never copying unexplained DB changes back into the
+authoritative log.
+
+# could you also pls go over our entire conversation and compare it to WORK - specifically we need all instances where i authorized/approved any change scope, and whether it's reflected in WORK. ideally if after your review you returned in this chat a table of all scope changes (just a short description of the approved scope) that happened in this session and the status: done, rejected, superseded, pending in WORK, pending but NOT in WORK
+
+> closing loopholes one by one
+> but still wanted this another check
+> signed off: Pavel
+
+**One omission found:** “replace all dataclasses” was completed in `ui.py`, but **19 production dataclasses and one test helper remain elsewhere**. WORK hadn’t disclosed that narrower implementation. It now records the discrepancy and remaining locations.
+
+Repeated confirmations are grouped below. **Done** means implemented/reviewed—not production acceptance. Rejected and superseded proposals are not backlog.
+
+| # | Scope change | Status |
+|---|---|---|
+| 1 | Additional `AiAugmentSourceContext` redesign | rejected |
+| 2 | Shared-context protocol and Dashboard inheritance from Backend context | superseded |
+| 3 | Repurpose Backend Store as Dashboard’s in-memory collection | superseded |
+| 4 | Use `FrozenStrictModel` where justified; explicit `BaseModel` configs otherwise; pasted models untouched | done |
+| 5 | Independent Dashboard; wholesale snapshots from NiceGUI storage; no partial/namekey queries | done |
+| 6 | Remove stale `project_record` / `_project_readme_record` machinery | done |
+| 7 | Remove attempt/validation data and restrict records to pull/push/commit/outcome | superseded |
+| 8 | Keep attempts; add `/validate` containing validation, commit ID and full submission | done |
+| 9 | Record provider HTTP exchanges, reference UUIDs, validate through submission mixin | done |
+| 10 | Shared live/replay path: persist log → project DB → typed readback → downstream | done |
+| 11 | Generic model HTTP interceptor, not institution-specific | done |
+| 12 | Keep/restore domain and Codex evidence algorithms in `api.py` | done |
+| 13 | Store owns detour DB/log and write windows; remove raw detour connections from callers | done |
+| 14 | `HttpRequestLogRecord.from_response()` / `to_response()` | done |
+| 15 | Remove `TYPE_CHECKING` import guards | done |
+| 16 | Only writable/read-only Store modes | done |
+| 17 | Detached `execute().fetchone()` / `fetchall()` interface | done |
+| 18 | Remove `detour_authoritative_projection` | done |
+| 19 | Remove tail repair; use registered-resource configured-hash verification | done |
+| 20 | Separate validation from Backend ZIP publication/republication | superseded |
+| 21 | Operator-maintained hash; Dashboard verifies and delegates hash bypass to children | done |
+| 22 | Terminal `CODEX_EXITED`-only lifecycle / alternative completion endpoint | superseded |
+| 23 | One post-exit `/pull`: 410 completed, otherwise failed—including 503—then outcome and shutdown | done |
+| 24 | One cheap four-stage Probe button | done |
+| 25 | Separate probe buttons/services | superseded |
+| 26 | Storage/snapshot ownership; remove `_AttemptReconciler` and `_VariableProjector` | done |
+| 27 | Convert `ui.py` dataclasses to Pydantic | done |
+| 28 | Unqualified “all dataclasses” beyond `ui.py` | **pending but NOT in WORK*** |
+| 29 | Intermediate `RunDisplayRow`, `SingularOuterDictWith*`, `AiTable1ColsPerVariable`, `KeyValueGroundTruth`, `_Var` names | superseded |
+| 30 | Final Researcher/RunCommit view names; `_Researcher` alias; `_ResearcherVar`, docstring, `varname`, lookup naming | done |
+| 31 | Rollback must not consume Codex DB row IDs | done |
+| 32 | Full Backend `--new` versus `--resume`/`--continue`; default-No confirmations; `--yes` | done |
+| 33 | Shared full/IPC first-child initialization policy, rearmed after failure | superseded |
+| 34 | Controller receives no query client; separate Query IPC closure in `create_services` | done |
+| 35 | Typed `QueryRequest` and `send_query_request()` instead of client `pull()` | done |
+| 36 | Startup-failure, WORK/HUMANS/handoff and restoration-behavior reviews | done |
+| 37 | Dashboard startup failure actually shuts down the process with unsuccessful exit | pending in WORK |
+| 38 | Actual append-descriptor startup preflight, only when appends are authorized | pending in WORK |
+| 39 | Trust saved prefix without independently hashing it | superseded |
+| 40 | DuckDB table-comment anchor; raw-line hashes; prefix/suffix verification; safe anchor promotion | pending in WORK |
+| 41 | Require an empty replay log for every `--new` | superseded |
+| 42 | Empty baseline plus optional nonempty-log replay during `--new`; second default-No prompt; `--yes` accepts both | pending in WORK |
+| 43 | No resume recovery, failure-triggered reset or historical validation-verdict substitution | pending in WORK |
+| 44 | Remove all Backend card/ZIP publication and republishing | pending in WORK |
+| 45 | Dashboard `publish completed` command reusing DOCX download logic | pending in WORK |
+| 46 | Start/Stop dequeue button; stopped at startup; active run unaffected; cancellation separate | pending in WORK |
+| 47 | Empty `QueryRequestProperty`; keep `outbound_http` concrete-only | pending in WORK |
+| 48 | Restore literal `DASHBOARD_QUERY_PATH = "/query"` | done |
+| 49 | IPC signal handler: replace Event with approved boolean/polling shape | pending in WORK |
+| 50 | Remove Backend parent watcher and Dashboard PID injection | pending in WORK |
+| 51 | IPC-only ignores initialization flags | pending in WORK |
+| 52 | IPC-only directly opens Store read-only, bypassing initialization | pending in WORK |
+| 53 | Exclude IPC children from Dashboard first-full-start bookkeeping | pending in WORK |
+| 54 | Guardian/ownership registry for orphan cleanup; instead surviving Backend is external | rejected |
+| 55 | Move unchanged clean-close token to protected Backend vars | pending in WORK |
+| 56 | Preserve exact approved snippets, clean stale WORK, explicitly document TABLE COMMENT | done |
+
+\* **Missing before this audit; now recorded.** The wording was “all,” although the surrounding discussion concerned UI models; WORK now preserves that distinction rather than claiming complete conversion.
+
+Only WORK changed. All 16 pinned snippets and four exact numbered headings were preserved. No implementation tests were rerun.

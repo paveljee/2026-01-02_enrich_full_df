@@ -4,7 +4,9 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class LimaMount(BaseModel):
-    model_config = ConfigDict(extra="ignore", frozen=True)
+    """Note `extra="ignore"`"""
+
+    model_config = ConfigDict(extra="ignore", frozen=True, strict=True)
 
     location: str
     mount_point: str = Field(alias="mountPoint")

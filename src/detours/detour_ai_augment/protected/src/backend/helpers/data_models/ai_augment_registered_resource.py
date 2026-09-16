@@ -4,8 +4,9 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Self
 
-from pydantic import ConfigDict
+from pydantic import AnyUrl
 
+from src.helpers.architecture import FrozenStrictModel
 from src.helpers.data_models import FragmentType, RegisteredResource, ResourceGroup
 
 from ..locale import Locale
@@ -15,10 +16,8 @@ RESOURCE_DESCRIPTION_KEY = "desc"
 RESOURCE_SHA256_KEY = "sha256"
 
 
-class AiAugmentRegisteredResource(RegisteredResource):
+class AiAugmentRegisteredResource(RegisteredResource, FrozenStrictModel):
     """Immutable AI-augment registered-resource metadata."""
-
-    model_config = ConfigDict(frozen=True)
 
     @classmethod
     def from_config_entry(
@@ -47,7 +46,7 @@ class AiAugmentRegisteredResource(RegisteredResource):
                 group=ResourceGroup.KTP_PIPELINE_ARTIFACT,
                 fragment_type=fragment_type,
                 description=description_value,
-                url=path.resolve().as_uri(),
+                url=AnyUrl(path.resolve().as_uri()),
                 verify_hash_on_init=verify_hash_on_init,
             )
         except (KeyError, OSError, RuntimeError, TypeError, ValueError) as exc:

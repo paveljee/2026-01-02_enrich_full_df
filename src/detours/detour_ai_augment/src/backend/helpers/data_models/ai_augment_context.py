@@ -10,7 +10,7 @@ from pathlib import Path
 from random import Random
 
 import duckdb
-from pydantic import BaseModel, ConfigDict, Field, computed_field
+from pydantic import Field, computed_field
 
 from src.detours.detour_ai_augment.protected.src.architecture import (
     BackendComponent,
@@ -31,7 +31,7 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     AiAugmentCohort,
     AiAugmentIneligibilityCategory,
 )
-from src.helpers.architecture import implements
+from src.helpers.architecture import FrozenStrictModel, implements
 from src.helpers.data_models import InnerDict, MatchingProcedure, NameKey
 from src.helpers.duckdb_utils import duckdb_quote_identifier
 from src.helpers.procedures import (
@@ -476,14 +476,7 @@ def _derive_ai_augment_singular_outerdicts(
 
 
 @implements[BackendComponent.ContextProperty]()
-class AiAugmentBackendContext(BaseModel):
-    model_config = ConfigDict(
-        arbitrary_types_allowed=True,
-        extra="forbid",
-        frozen=True,
-        strict=True,
-    )
-
+class AiAugmentBackendContext(FrozenStrictModel):
     pipeline_config: AiAugmentDetourConfig
     configured_namekey: NameKey | None = None
     cached_ai_augment_singular_outerdicts: tuple[AiAugmentSingularOuterDict, ...] | None = Field(
