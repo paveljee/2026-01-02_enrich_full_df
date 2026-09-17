@@ -22,6 +22,7 @@ class Locale:
     ACTION_SELECT_RESEARCHER: Final = "Select a researcher"
     ACTION_VIEW_CARD: Final = "View researcher card"
     ACTION_DOWNLOAD_DOCX: Final = "Download DOCX"
+    ACTION_DOWNLOAD_TXT: Final = "Download Markdown"
     ACTION_REFRESH: Final = "Refresh"
 
     PAGE_TITLE: Final = "AI augmentation Control Centre"
@@ -123,6 +124,7 @@ class Locale:
     SESSION_STATUS_UNAVAILABLE: Final = "unavailable"
     SESSION_STATUS_NOT_OK_TEMPLATE: Final = "NOT OK: {detail}"
     DOCX_DOWNLOAD_FAILED: Final = "Researcher card DOCX generation failed"
+    TXT_DOWNLOAD_FAILED: Final = "Researcher card TXT download failed"
     OPENALEX_API_KEY_MISSING: Final = (
         "OPENALEX_API_KEY is required in the Control Centre environment"
     )

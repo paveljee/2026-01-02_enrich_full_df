@@ -4,11 +4,12 @@
 
 2026-09-16: Previously approved implementation scope P1-P12 is implemented.
 Newly approved P13 (extensionless, sharded CAS layout) is PENDING; its exact narrow
-scope and approved snippets are pinned below. The current request is to record it,
-not implement it yet. No CAS code or stored blobs have been changed.
+scope and approved snippets are pinned below. That approval requested recording,
+not implementation. No CAS code or stored blobs have been changed.
 2026-09-17: P14 startup-condition tests and P15 staged-test consolidation review are
 complete: 111 mock-free startup cases and 123 moved/existing tests passed; Ruff/mypy passed.
-P13 remains the only pending approved implementation scope.
+P16 Markdown/TXT download is implemented and verified; approved snippets below.
+P13 remains the only pending approved implementation scope and was not part of P16.
 The full hermetic regression run passed (306 passed,1 skipped,3 excluded); subsequent
 Store/IPC/provisioning checks passed (28, overlapping the broad suite). Final Ruff and strict mypy
 passed after the last edits. No production/operator/guest/network
@@ -51,6 +52,7 @@ Do not edit or run its tests. The conversion inventory below excludes it.
 | P12 | Missing operator-terminal logs for existing UI actions/results/errors, including probes/download/publishing | ui.py |
 | P14 | Current lifecycle review and 111 mock-free parametrized startup-condition cases | tests/control_centre/test_ui.py |
 | P15 | Operator test moves preserved; import, constant and fixture collisions corrected | test_ui.py, test_audit_read.py, test_backend_store.py |
+| P16 | Markdown/TXT button shares DOCX download contour; symmetric format-specific handles/selectors | ui.py, locale.py, existing UI tests |
 
 ## Store integrity and startup — implemented
 
@@ -181,8 +183,8 @@ The command uses normal NiceGUI config/storage/services startup, the stored whol
 Dashboard snapshot and journal, existing unfiltered displayed lifecycle, and normal shutdown.
 It publishes only non-INELIGIBLE, CURRENTLY COMPLETED researchers with download_available.
 No implicit query, Backend launch, source-DB load, queue processing, abandoned remote-run
-cleanup or journal mutation. _ResearcherCardView owns download_available, docx_filename and
-render_docx; the button and batch share them. Button sends browser bytes; batch writes DOCX
+cleanup or journal mutation. _ResearcherCardView owns download_available, filename_stem,
+docx_filename and render_docx; the button and batch share them. Button sends browser bytes; batch writes DOCX
 to configured output_dir, overwriting same names on explicit rerun. No ZIP/browser automation.
 Count/progress/path/final logs include zero-file no-op. First render/write error stops the batch,
 keeps prior files, requests normal shutdown and returns a failing exit status.
@@ -292,6 +294,170 @@ startup-exit/model-deployment checks into these modules),
 plus repository-root tests/test_http_request_log.py. Exclude captured_operator_push,
 historical_haanen_retry and real_mode_0600_unix_socket; exclude real_api/operator/needs_sudo.
 No test_ui_e2e, real socket/HTTP providers, guest deployment or paused BDD execution.
+
+## P16 — Completed: Dashboard Markdown/TXT download
+
+2026-09-17: operator approved the proposed shared download contour and requested
+implementation, with two corrections: button label is "Download Markdown" (no .txt
+parenthetical); formerly unqualified DOCX-only button objects must be explicitly named
+with symmetric _docx / _txt suffixes. TASK/WORK reread before implementation.
+
+Narrow scope: ui.py, existing protected Dashboard locale.py, existing download regression
+in tests/control_centre/test_ui.py, naming-only update to the existing DOCX selector in
+test_ui_e2e.py, and WORK. Main pipeline TXT mode was reviewed: unchanged Markdown, UTF-8,
+shared card_filename basename plus .txt; no separate TXT renderer. Reuse the displayed
+card and existing shared download handler, not a new exporter/helper hierarchy.
+No shared pipeline edits, Backend/IPC/DB/storage changes, ZIPs, CLI/config changes, or
+changes to publish completed (still DOCX-only). P13 remains pending and untouched.
+
+### Approved snippets, incorporating the operator's naming corrections
+
+_ResearcherCardView: extract the existing basename, preserve existing DOCX callers:
+
+```python
+@property
+def filename_stem(self) -> str:
+    return card_filename(
+        draw_label=self.researcher.draw_number,
+        first_name=self.researcher.namekey.first_name,
+        last_name=self.researcher.namekey.last_name,
+    )
+
+@property
+def docx_filename(self) -> str:
+    return f"{self.filename_stem}.docx"
+```
+
+Add Literal to ui.py's typing import. UI constants and handles:
+
+```python
+TXT_MEDIA_TYPE: Final = "text/plain; charset=utf-8"
+DOWNLOAD_CARD_DOCX_TEST_ID: Final = "download-researcher-card-docx"
+DOWNLOAD_CARD_TXT_TEST_ID: Final = "download-researcher-card-txt"
+
+# _UiHandles: replace the old download_card_button, update all consumers.
+download_card_button_docx: Any | None = None
+download_card_button_txt: Any | None = None
+
+# Existing Locale:
+ACTION_DOWNLOAD_TXT: Final = "Download Markdown"
+TXT_DOWNLOAD_FAILED: Final = "Researcher card TXT download failed"
+```
+
+Keep the DOCX button/default handler, rename its handle/selector explicitly; add beside it:
+
+```python
+self._handles.download_card_button_txt = (
+    ui.button(
+        Locale.ACTION_DOWNLOAD_TXT,
+        on_click=lambda: self.download_displayed_card(output_format="txt"),
+    )
+    .style(ACTION_BUTTON_STYLE)
+    .props(_NiceGui.TEST_ID_PROP_TEMPLATE.format(
+        test_id=DOWNLOAD_CARD_TXT_TEST_ID,
+    ))
+)
+self._handles.download_card_button_txt.disable()
+```
+
+Replace the single-button availability/clear sections with:
+
+```python
+# _show_card:
+for button in (
+    self._handles.download_card_button_docx,
+    self._handles.download_card_button_txt,
+):
+    if button is not None:
+        if card.download_available:
+            button.enable()
+        else:
+            button.disable()
+
+# _clear_displayed_card:
+for button in (
+    self._handles.download_card_button_docx,
+    self._handles.download_card_button_txt,
+):
+    if button is not None:
+        button.disable()
+```
+
+Shared handler (no DOCX suffix: it now serves both formats):
+
+```python
+async def download_displayed_card(
+    self,
+    *,
+    output_format: Literal["docx", "txt"] = "docx",
+) -> None:
+    label = output_format.upper()
+    card = self._displayed_card
+    if card is None or not card.download_available:
+        emit_log(
+            Locale.CONTROL_CENTRE_LOG_PREFIX,
+            f"{label} download skipped: no available card",
+        )
+        return
+
+    button = (
+        self._handles.download_card_button_docx
+        if output_format == "docx"
+        else self._handles.download_card_button_txt
+    )
+    filename = f"{card.filename_stem}.{output_format}"
+    if button is not None:
+        button.disable()
+
+    emit_log(
+        Locale.CONTROL_CENTRE_LOG_PREFIX,
+        f"Rendering {label} download: {filename}",
+    )
+    try:
+        if output_format == "docx":
+            content = await asyncio.to_thread(
+                card.render_docx, self._reference_docx,
+            )
+            media_type = DOCX_MEDIA_TYPE
+        else:
+            content = card.card_markdown.encode(TEXT_ENCODING)
+            media_type = TXT_MEDIA_TYPE
+
+        ui.download(content, filename=filename, media_type=media_type)
+        emit_log(
+            Locale.CONTROL_CENTRE_LOG_PREFIX,
+            f"{label} sent to browser: {filename}; {len(content)} bytes",
+        )
+    except (OSError, subprocess.SubprocessError, UnicodeError) as exc:
+        emit_log(
+            Locale.CONTROL_CENTRE_LOG_PREFIX,
+            f"{label} download failed: {filename}; {exc!r}",
+        )
+        ui.notify(
+            Locale.DOCX_DOWNLOAD_FAILED
+            if output_format == "docx"
+            else Locale.TXT_DOWNLOAD_FAILED,
+            type="negative",
+        )
+    finally:
+        if button is not None and self._displayed_card is card:
+            button.enable()
+```
+
+Implemented the pinned shape. The existing card display log now reports DOCX/TXT
+availability. Existing DOCX-only browser-test selector/local names were updated; the browser
+suite was not run. No generic old download-card handle/selector references remain.
+Verification: 7 focused UI cases passed (184 deselected, 11.11s), covering both download
+formats with exact Unicode bytes/filename/MIME, button clearing/skipped download, logs,
+snapshot invalidation, unchanged completed DOCX publishing, publication failure/no-op and
+existing detailed DOCX error logging. Ruff and strict mypy passed the four touched Python
+files; git diff --check passed. No real browser/operator/server/network execution.
+
+Focused command:
+
+```bash
+pixi run -e detour-ai-augment env pytest -q src/detours/detour_ai_augment/tests/control_centre/test_ui.py -k 'displayed_card_download or snapshot_replacement_clears or publish_completed or publish_one_shot or probe_and_docx_failures' -m 'not real_api and not operator and not needs_sudo'
+```
 
 ## P13 — Pending approved scope: extensionless, sharded CAS layout
 
@@ -466,7 +632,8 @@ separately; no additional broad regression rerun is needed for this import/name 
 ## Remaining acceptance, NOT unimplemented approved scope
 
 For completed P1-P12, only human/operator rollout acceptance in the real environment
-remains; P13 is separately pending implementation. P14/P15 test/review scope is complete.
+remains; P13 is separately pending implementation. P14/P15 test/review and P16 download
+scope are complete.
 Rollout acceptance covers actual guest
 provisioning/dependency install, interactive Dashboard/server/browser/provider E2E and the
 operator-maintained production config/log hashes. No such activity was authorized for this

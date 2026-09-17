@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from email.message import Message
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, Literal, cast
 from unittest.mock import AsyncMock, Mock
 from urllib import error as urllib_error
 from urllib import request as urllib_request
@@ -595,9 +595,12 @@ def test_researcher_vars_cover_every_ai_augment_column() -> None:
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("output_format", ("docx", "txt"))
 async def test_displayed_card_download_uses_exact_markdown_and_shared_filename(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    output_format: Literal["docx", "txt"],
 ) -> None:
     class Button:
         enabled = False
@@ -614,7 +617,9 @@ async def test_displayed_card_download_uses_exact_markdown_and_shared_filename(
         def set_content(self, content: str) -> None:
             self.content = content
 
-    button = Button()
+    button_docx = Button()
+    button_txt = Button()
+    button = button_docx if output_format == "docx" else button_txt
     markdown = Markdown()
     reference_docx = tmp_path / "reference.docx"
     card = control_ui._ResearcherCardView(
@@ -638,14 +643,15 @@ async def test_displayed_card_download_uses_exact_markdown_and_shared_filename(
                 )
             }
         ),
-        card_markdown="## Exact displayed card\n\nbody\n",
+        card_markdown="## Exact displayed card\n\n**Café — 研究**\n",
     )
     subject = control_ui._ControlCentrePage(
         controller=cast(control_ui._ControlCentreController, object()),
         query_ipc=AsyncMock(),
         reference_docx=reference_docx,
     )
-    subject._handles.download_card_button = button
+    subject._handles.download_card_button_docx = button_docx
+    subject._handles.download_card_button_txt = button_txt
     subject._handles.card_markdown = markdown
     rendered: list[tuple[str, Path]] = []
     downloads: list[tuple[bytes, str | None, str]] = []
@@ -660,6 +666,7 @@ async def test_displayed_card_download_uses_exact_markdown_and_shared_filename(
         filename: str | None = None,
         media_type: str = "",
     ) -> None:
+        assert not button.enabled
         downloads.append((source, filename, media_type))
 
     async def in_event_loop(
@@ -675,23 +682,34 @@ async def test_displayed_card_download_uses_exact_markdown_and_shared_filename(
 
     await subject._show_card(card)
     assert markdown.content == card.card_markdown
-    assert button.enabled
+    assert button_docx.enabled and button_txt.enabled
 
-    await subject.download_displayed_card()
+    await subject.download_displayed_card(output_format=output_format)
 
-    assert rendered == [(card.card_markdown, reference_docx)]
-    assert downloads == [
-        (
-            b"PK\x03\x04docx",
-            "1_pilot2_Jane_DoeSmith.docx",
-            control_ui.DOCX_MEDIA_TYPE,
-        )
-    ]
-    assert button.enabled
+    if output_format == "docx":
+        assert rendered == [(card.card_markdown, reference_docx)]
+        expected_bytes = b"PK\x03\x04docx"
+        expected_media_type = control_ui.DOCX_MEDIA_TYPE
+    else:
+        assert rendered == []
+        expected_bytes = "## Exact displayed card\n\n**Café — 研究**\n".encode("utf-8")
+        expected_media_type = "text/plain; charset=utf-8"
+    filename = f"1_pilot2_Jane_DoeSmith.{output_format}"
+    assert downloads == [(expected_bytes, filename, expected_media_type)]
+    assert button_docx.enabled and button_txt.enabled
+    output = capsys.readouterr().out
+    assert f"Rendering {output_format.upper()} download: {filename}" in output
+    assert (
+        f"{output_format.upper()} sent to browser: {filename}; {len(expected_bytes)} bytes"
+        in output
+    )
 
     subject._clear_displayed_card()
     assert markdown.content == ""
-    assert not button.enabled
+    assert not button_docx.enabled and not button_txt.enabled
+    await subject.download_displayed_card(output_format=output_format)
+    assert len(downloads) == 1
+    assert f"{output_format.upper()} download skipped:" in capsys.readouterr().out
 
 
 def test_dashboard_paths_resolve_from_repository_root(

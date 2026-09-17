@@ -772,19 +772,19 @@ def test_displayed_researcher_card_downloads_as_docx(
     pytestconfig: pytest.Config,
 ) -> None:
     with control_centre_browser(pytestconfig) as (page, errors):
-        download_button = page.get_by_test_id(control_ui.DOWNLOAD_CARD_TEST_ID)
+        download_button_docx = page.get_by_test_id(control_ui.DOWNLOAD_CARD_DOCX_TEST_ID)
         card_markdown = page.get_by_test_id(control_ui.CARD_MARKDOWN_TEST_ID)
-        expect(download_button).to_be_disabled()
+        expect(download_button_docx).to_be_disabled()
 
         eligible_row = grid_row_for_draw(page, BROWSER_PILOT_ELIGIBLE_DRAW)
         eligible_row.click()
-        expect(download_button).to_be_disabled()
+        expect(download_button_docx).to_be_disabled()
         page.get_by_test_id(control_ui.VIEW_CARD_TEST_ID).click()
         expect(card_markdown).to_contain_text(E2E_CARD_FIELD_VALUE)
-        expect(download_button).to_be_enabled()
+        expect(download_button_docx).to_be_enabled()
 
         with page.expect_download() as download_info:
-            download_button.click()
+            download_button_docx.click()
         download = download_info.value
         assert download.suggested_filename == E2E_DOWNLOADED_DOCX_FILENAME
         downloaded_path = download.path()
@@ -793,11 +793,11 @@ def test_displayed_researcher_card_downloads_as_docx(
             assert "[Content_Types].xml" in archive.namelist()
             document_xml = archive.read("word/document.xml").decode("utf-8")
         assert E2E_CARD_FIELD_VALUE in document_xml
-        expect(download_button).to_be_enabled()
+        expect(download_button_docx).to_be_enabled()
 
         grid_row_for_draw(page, BROWSER_PILOT_INELIGIBLE_DRAW).click()
         expect(card_markdown).to_be_empty()
-        expect(download_button).to_be_disabled()
+        expect(download_button_docx).to_be_disabled()
         assert errors == [], Counter(errors)
 
 

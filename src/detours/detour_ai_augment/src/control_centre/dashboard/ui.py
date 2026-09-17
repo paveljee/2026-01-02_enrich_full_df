@@ -17,7 +17,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequenc
 from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
-from typing import Any, Final, NewType, Protocol, Self
+from typing import Any, Final, Literal, NewType, Protocol, Self
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 from uuid import UUID, uuid7
@@ -217,6 +217,7 @@ ATTEMPT_HISTORY_TABLE_PROPS: Final = "flat bordered wrap-cells"
 ACTION_BUTTON_STYLE: Final = "min-width: 10rem;"
 HTTP_OPTIONS_METHOD: Final = "OPTIONS"
 DOCX_MEDIA_TYPE: Final = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+TXT_MEDIA_TYPE: Final = "text/plain; charset=utf-8"
 GRID_DRAW_COLUMN_WIDTH: Final = 110
 GRID_RND_COLUMN_WIDTH: Final = 90
 GRID_NAME_COLUMN_WIDTH: Final = 150
@@ -261,7 +262,8 @@ RESEARCHER_GRID_TEST_ID: Final = "researcher-grid"
 ACTION_PANEL_TEST_ID: Final = "action-panel"
 EXECUTE_ACTION_TEST_ID: Final = "execute-action"
 VIEW_CARD_TEST_ID: Final = "view-researcher-card"
-DOWNLOAD_CARD_TEST_ID: Final = "download-researcher-card"
+DOWNLOAD_CARD_DOCX_TEST_ID: Final = "download-researcher-card-docx"
+DOWNLOAD_CARD_TXT_TEST_ID: Final = "download-researcher-card-txt"
 CARD_MARKDOWN_TEST_ID: Final = "researcher-card-markdown"
 ATTEMPT_HISTORY_PANEL_TEST_ID: Final = "attempt-history-panel"
 ATTEMPT_HISTORY_TABLE_TEST_ID: Final = "attempt-history-table"
@@ -874,12 +876,16 @@ class _ResearcherCardView(FrozenStrictModel):
         return bool(self.card_markdown)
 
     @property
-    def docx_filename(self) -> str:
+    def filename_stem(self) -> str:
         return card_filename(
             draw_label=self.researcher.draw_number,
             first_name=self.researcher.namekey.first_name,
             last_name=self.researcher.namekey.last_name,
-        ) + ".docx"
+        )
+
+    @property
+    def docx_filename(self) -> str:
+        return f"{self.filename_stem}.docx"
 
     def render_docx(self, reference_docx: Path) -> bytes:
         return render_docx_bytes(self.card_markdown, reference_docx)
@@ -2556,7 +2562,8 @@ class _UiHandles(BaseModel):
     attempt_history_table: Any | None = None
     card_container: Any | None = None
     card_markdown: Any | None = None
-    download_card_button: Any | None = None
+    download_card_button_docx: Any | None = None
+    download_card_button_txt: Any | None = None
 
 
 class _ControlCentrePage:
@@ -2764,16 +2771,26 @@ class _ControlCentrePage:
             .props(_NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=PAGE_FOOTER_TEST_ID))
         )
         with self._handles.card_container:
-            self._handles.download_card_button = (
+            self._handles.download_card_button_docx = (
                 ui
                 .button(
                     Locale.ACTION_DOWNLOAD_DOCX,
                     on_click=self.download_displayed_card,
                 )
                 .style(ACTION_BUTTON_STYLE)
-                .props(_NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=DOWNLOAD_CARD_TEST_ID))
+                .props(_NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=DOWNLOAD_CARD_DOCX_TEST_ID))
             )
-            self._handles.download_card_button.disable()
+            self._handles.download_card_button_docx.disable()
+            self._handles.download_card_button_txt = (
+                ui
+                .button(
+                    Locale.ACTION_DOWNLOAD_TXT,
+                    on_click=lambda: self.download_displayed_card(output_format="txt"),
+                )
+                .style(ACTION_BUTTON_STYLE)
+                .props(_NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=DOWNLOAD_CARD_TXT_TEST_ID))
+            )
+            self._handles.download_card_button_txt.disable()
             self._handles.card_markdown = (
                 ui
                 .markdown("")
@@ -3162,7 +3179,7 @@ class _ControlCentrePage:
             await self._show_card(card)
             emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX,
                      f"Researcher card displayed: {namekey}; "
-                     f"DOCX available={card.download_available}")
+                     f"DOCX/TXT available={card.download_available}")
 
     async def _show_card(self, card: _ResearcherCardView) -> None:
         if self._handles.selected_researcher_label is not None:
@@ -3176,18 +3193,26 @@ class _ControlCentrePage:
         if self._handles.card_markdown is not None:
             self._handles.card_markdown.set_content(card.card_markdown)
         self._displayed_card = card if card.download_available else None
-        if self._handles.download_card_button is not None:
-            if card.download_available:
-                self._handles.download_card_button.enable()
-            else:
-                self._handles.download_card_button.disable()
+        for button in (
+            self._handles.download_card_button_docx,
+            self._handles.download_card_button_txt,
+        ):
+            if button is not None:
+                if card.download_available:
+                    button.enable()
+                else:
+                    button.disable()
 
     def _clear_displayed_card(self) -> None:
         self._displayed_card = None
         if self._handles.card_markdown is not None:
             self._handles.card_markdown.set_content("")
-        if self._handles.download_card_button is not None:
-            self._handles.download_card_button.disable()
+        for button in (
+            self._handles.download_card_button_docx,
+            self._handles.download_card_button_txt,
+        ):
+            if button is not None:
+                button.disable()
 
     def _invalidate_card(self, namekey: NameKey) -> None:
         if (
@@ -3196,24 +3221,54 @@ class _ControlCentrePage:
         ):
             self._clear_displayed_card()
 
-    async def download_displayed_card(self) -> None:
+    async def download_displayed_card(
+        self,
+        *,
+        output_format: Literal["docx", "txt"] = "docx",
+    ) -> None:
+        label = output_format.upper()
         card = self._displayed_card
         if card is None or not card.download_available:
-            emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, "DOCX download skipped: no available card")
+            emit_log(
+                Locale.CONTROL_CENTRE_LOG_PREFIX,
+                f"{label} download skipped: no available card",
+            )
             return
-        button = self._handles.download_card_button
+        button = (
+            self._handles.download_card_button_docx
+            if output_format == "docx"
+            else self._handles.download_card_button_txt
+        )
+        filename = f"{card.filename_stem}.{output_format}"
         if button is not None:
             button.disable()
-        emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, f"Rendering DOCX download: {card.docx_filename}")
+        emit_log(
+            Locale.CONTROL_CENTRE_LOG_PREFIX,
+            f"Rendering {label} download: {filename}",
+        )
         try:
-            docx = await asyncio.to_thread(card.render_docx, self._reference_docx)
-            ui.download(docx, filename=card.docx_filename, media_type=DOCX_MEDIA_TYPE)
-            emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX,
-                     f"DOCX sent to browser: {card.docx_filename}; {len(docx)} bytes")
-        except (OSError, subprocess.SubprocessError) as exc:
-            emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX,
-                     f"DOCX download failed: {card.docx_filename}; {exc!r}")
-            ui.notify(Locale.DOCX_DOWNLOAD_FAILED, type="negative")
+            if output_format == "docx":
+                content = await asyncio.to_thread(card.render_docx, self._reference_docx)
+                media_type = DOCX_MEDIA_TYPE
+            else:
+                content = card.card_markdown.encode(TEXT_ENCODING)
+                media_type = TXT_MEDIA_TYPE
+            ui.download(content, filename=filename, media_type=media_type)
+            emit_log(
+                Locale.CONTROL_CENTRE_LOG_PREFIX,
+                f"{label} sent to browser: {filename}; {len(content)} bytes",
+            )
+        except (OSError, subprocess.SubprocessError, UnicodeError) as exc:
+            emit_log(
+                Locale.CONTROL_CENTRE_LOG_PREFIX,
+                f"{label} download failed: {filename}; {exc!r}",
+            )
+            ui.notify(
+                Locale.DOCX_DOWNLOAD_FAILED
+                if output_format == "docx"
+                else Locale.TXT_DOWNLOAD_FAILED,
+                type="negative",
+            )
         finally:
             if button is not None and self._displayed_card is card:
                 button.enable()
