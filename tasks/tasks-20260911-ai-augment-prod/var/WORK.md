@@ -2,12 +2,19 @@
 
 ## Status and authorization
 
-2026-09-17: P1-P19's pinned code changes are implemented; the applicable local/delegated
+2026-09-17 latest production review: NOT acceptance-ready. New pre-commit-operator logs
+expose a missed F8 IPC-only logging/test regression, eight browser-prerequisite failures,
+the now-identified root interpreter traversal denial, and a silent pre-full-Backend wait
+after queue Start. Review/findings and proposed follow-up (NOT newly authorized code changes)
+are pinned below. Only WORK was edited during this review; the existing IPC-only test was
+run locally and reproduced the failure. Do not recommend a blind full rerun.
+
+P1-P19's pinned code changes are present; the applicable local/delegated
 checks and their limitations are recorded below. The approved Mode-3 deterministic-console
-fix is also implemented and verified, with all assertions unchanged. All currently approved,
-concrete follow-up code changes are now implemented, including F3/F7 diagnostics, the real
-F4 browser/query regression and F8 Backend logs. Remaining blockers below are unresolved
-environment/runtime findings and production acceptance, not omitted pinned implementation.
+fix is also implemented and verified, with all assertions unchanged. Previously approved
+follow-up code is present, including F3/F7 diagnostics, the real F4 browser/query regression
+and F8 Backend logs. The latest run reopens F8 correctness/upstream coverage and exposes
+missing pre-start wait diagnostics; code presence is not verified completion.
 
 Production acceptance is NOT complete. Current retained follow-up status:
 - F1 NiceGUI isolation/preservation and F2 explicit Lima fixture: implemented, locally checked.
@@ -15,16 +22,16 @@ Production acceptance is NOT complete. Current retained follow-up status:
   delegated rerun PASSED the complete real-query contour (47.19s, exit0). Earlier filtering
   and Backend readiness timeouts remain qualified below, not erased by the rerun.
 - F6 IPC diagnostics: implemented, locally checked.
-- F3 preload-before-privilege-drop was rolled back; original launcher restored. The reported
-  nobody/interpreter EACCES remains unresolved. That rejected workaround must not return.
-- F5 temporary DuckDB binary/config fixture was rolled back by the operator. Preserve the
-  existing configured-binary absence failure; do not reapply the synthetic replacement.
+- F3 original privilege-drop launcher preserved. New root diagnostics identify the0750
+  /home/anonymous.linux traversal barrier; correction/actual monitoring remain pending.
+  The rejected preload workaround must not return.
+- F5 latest PROD configured-binary load and config-path fallback tests PASS. Prerequisite
+  is now present there; no synthetic replacement was reapplied and no test was weakened.
 - F7 operator's pixi-run variable failure remains unresolved on their Lima host. Local
   activation tests pass, which does not invalidate their report. No ordinary task fix made.
-- F8 approved detailed Backend request/lifecycle/IPC logging: implemented; local logging and
-  API/cleanup regressions pass; real IPC startup/query/clean-close logs verified by elevate.
-  Direct-terminal full-HTTP serving still requires operator verification; original
-  operator-side disappearance cause not established.
+- F8 detailed Backend logs are present and real IPC emission passes, but latest PROD and
+  local reproduction expose a missed IPC-only test-double attribute access caused by a new
+  log statement. Correction pending; direct-terminal full-HTTP serving remains unverified.
 The rejected browser test that substituted query_snapshot_in_browser was removed, and the
 launcher regression's original15s timeout restored. Neither counts as completed coverage.
 A replacement root-launcher mechanism is not approved. The operator has now approved the
@@ -39,8 +46,8 @@ impact even though the proposed prevention is test isolation. Completed Backend 
 in the original acceptance log does not certify production: card/artifact assertions were
 unreached and privileged watcher monitoring never started. The completion-guard correction
 now has a passing real browser/owned-IPC regression. No absence of additional production
-defects is established. P18's code corrections are implemented; the root-launch, configured
-DuckDB binary and operator-host activation findings remain unresolved.
+defects is established. Latest root-launch and silent pre-start findings remain unresolved;
+the configured DuckDB binary now loads successfully. F8's new regression needs correction.
 Non-elevate Pixi task edits still require explicit per-change approval; rejected pre-commit
 wrapper edits are NOT revived. Only the agent-owned elevate task may be adjusted for
 bounded delegated verification after the relevant corrections are approved and ready.
@@ -66,7 +73,127 @@ reverted the mistakenly included proxy/models/tests/launcher changes; review con
 remaining staged or unstaged changes there and no in-scope dependency on those changes.
 Do not edit or run its tests. The conversion inventory below excludes it.
 
-## Approved follow-up implementation — complete; acceptance boundaries remain
+## Completed immediate correction — prefix/suffix verification logging
+
+Operator authorized ONLY the surgical log wording/placement correction in Store's existing
+_verify_log_projection. Emit one prefix size/line-count summary and a prefix-match message
+after successful verification (including the empty anchor). Emit per-line messages ONLY
+for suffix lines whose individual hashes are compared. Make the final ordinal/byte coverage
+message explicit. No hash reuse/optimization, verification skips, replay/application changes,
+new schema/flags, or edits to the separate operator-review findings. Implemented only log
+calls/wording and logging-only guards in ai_augment_backend_store.py. For a fully anchored
+three-line log the progress messages now read:
+
+```text
+Verifying prefix: 3 lines, 58054 bytes
+Prefix hash matches stored anchor
+DB/log ordinal and byte coverage verified: 3 lines, 58054 bytes
+```
+
+The existing stored/config hash summary remains, now explicitly called "Verifying replay
+log". Only suffix lines emit "Verifying suffix line N". Ruff PASS;12 existing Store
+integrity/anchor/replay-refusal cases passed,14 deselected (33.53s), including corrupt
+prefix/suffix rejection. No test assertions, hash calculations or DB behavior changed.
+The preceding manual /push500 was explained by the operator forgetting to
+supply the session ID; that investigation remains paused, not a newly authorized redesign.
+
+## Latest production review — 2026-09-17 14:55–14:59 (-04:00)
+
+Inputs: logs/from_operator/pre-commit.log and pre-commit-extra.log (updated by operator).
+Reviewed against current HEAD f56fb8a. This is a review, not approval to alter ordinary
+Pixi tasks, browser selection, root permissions, queue semantics or timeouts.
+
+### Actual outcomes
+
+- Normal guest phase14:55:29–14:57:54: Ruff PASS; mypy68/53files PASS. Main tests174 passed,
+  5 skipped,6 xfailed,1 xpassed in4.91s. Both real configured DuckDB binary checks now PASS.
+  Step4 synthetic4passed/1skip; explicit slow case SKIPPED because five real parquet inputs
+  are unavailable. Mode3 all6passed (including the previously regressed notice test).
+  Mode0 all4passed,11 existing Plotly/Kaleido deprecation warnings.
+- AI normal selection:9failed,517passed,1skipped,3deselected,1warning in110.02s.
+  ONE failure is test_main_ipc_only_runs_only_the_dashboard_query_server: server.py's new
+  INFO call accesses runtime.pipeline_config.backend_store.detour_db_path, absent on that
+  test's minimal BackendStore double. Real Store has it and real IPC startup succeeded in
+  the same run. This is an agent-introduced log/test integration regression, not proof the
+  production Store lacks the attribute. Reproduced locally with the unchanged exact node:
+  1failed in2.92s. Earlier22-test verification missed this node after correcting the similar
+  writable-lifecycle logging issue. Narrow proposed correction: retain the IPC opening log
+  without this unnecessary path lookup; preserve the existing lifecycle test/assertions.
+- The other EIGHT failures are all test_ui_e2e browser launches, before browser assertions:
+  installed Google Chrome not found at /opt/google/chrome/chrome. Normal task does not pass
+  --playwright-chromium; elevate does. Setting PLAYWRIGHT_BROWSERS_PATH does not select a
+  channel. The passing elevate is not verification of normal task browser provisioning.
+  Proposed: explicitly select/provision the agreed browser in that guest task, not a silent
+  fallback/skip. Non-elevate task edit requires approval and was NOT made.
+  The normal task's subsequent real_api institution round-trip was not reached (&&).
+- Extra guest14:57:54–14:57:58: main OpenAlex3passed/1expectedxfail (3.25s); privileged
+  appendwatch3FAILED/70deselected (0.26s), still before watcher monitoring assertions.
+  New diagnostics establish /home/anonymous.linux is0750 uid501/gid1000; nobody receives
+  its own uid/gid and empty supplementary groups. This blocks traversal to the configured
+  cached Python; its leaf/resolved executable and later directories have executable modes.
+  The script's /Volumes path components are readable/traversable. Correctly selected AI
+  environment now has dependencies; this is not the earlier missing-Pydantic/FastAPI error.
+  Needed: an actually accessible runtime path or separately approved precise access change,
+  with real drop-before-exec retained. No chmod/ACL/cache move/preload or root execution made.
+  Four safe actual-Pixi unset/stale-parent activation regressions passed on this guest too;
+  the original pixi-shell report is not reproduced, and variables are not this failure.
+- Host operator14:57:58–14:59:39: preflight, private initialization, initial real Query IPC,
+ 307-person wholesale storage replacement, clean IPC stop, Queue and Start all succeeded.
+  Then NO full Backend start, Codex start or HTTP record appeared. Harness printed0records
+  at10s intervals through60s; operator Ctrl+C. Active case INTERRUPTED, not passed;
+  2 intentional skips,88.42s, exit2. Dashboard/descendant shutdown was clean.
+  Guard now covers BOTH production data trees AND .nicegui: all unchanged. Private storage
+  path is visible in the log. This verifies this run's isolation; old contamination was
+  neither inspected nor cleaned.
+
+### Hang: established boundary versus unproven cause
+
+This is NOT the former post-Codex completion-guard hang and is not a long model inference.
+Queue event/processing-start logs are present; full Backend start log is absent. In code,
+_worker dequeues, _process_queued_run removes the persisted queue entry, then waits in
+_wait_until_codex_idle BEFORE _backend.start. That gate repeatedly calls is_busy, whose
+real SSH command is `pgrep -u "$(id -u)" -x codex` and returns literal busy when any same-user
+Codex process exists. The remote command's communicate has no total timeout; successful
+busy checks can also wait indefinitely by design. Neither busy-check entry/result nor
+dequeue/wait progress currently emits a log. Actual external Codex occupancy/blocked SSH
+is NOT captured in these logs, so do not assert either as the proven cause or kill/adopt
+an external process. Worker scheduling/task failure is not directly observed either.
+
+Preflight uses limactl shell for reachability/authentication, whereas the runtime gate uses
+the configured ProxyJump SSH path. Preflight success therefore does not prove that exact
+runtime check completed. The harness closes the browser, then only watches replay records
+and top-level Dashboard process exit; "workflow is still running" is misleading when no
+full Backend has started, and its1800s deadline hides pre-start stalls.
+
+Proposed surgical follow-up: log existing dequeue/busy-check/wait/Backend-handoff boundaries,
+including outcomes/errors; diagnose the actual runtime SSH/occupancy through the same path.
+Only then propose any bounded-check/failure policy needed. Do not silently bypass busy,
+auto-query, start a second Codex, change cancellation/queue semantics or extend timeouts.
+Secure upstream tests for waiting-busy then idle, failed/blocked checks and browser-close
+independence; the existing queue-gate test substitutes _process_queued_run and so does not
+cover the real pre-start gate. The successful F4 synthetic regression deliberately has no
+queued run and consequently could not catch this. No new helper/test changes made yet.
+
+### Other evidence / lessons / next verification
+
+- Audit-read test passes but emits Python3.14's multithreaded-fork deprecation warning;
+  it is a separate risk, not evidence that it caused the operator hang. Mode0's11 warnings
+  are deprecations, not current hard failures. No new cleanup traceback after this Ctrl+C.
+- Normal logs include expected error/warning logs from PASSING negative-path tests; do not
+  count these as extra failures. Initial absent IPC-socket polling precedes successful200.
+- Approval-rejected pre-commit wrapper structure/grep remains unchanged. Read per-stage
+  failures and the active case's interrupted status, not the green "2 skipped" footer.
+- Missed homework: run all existing tests at the changed entrypoint, and verify the actual
+  normal task's browser channel/prerequisites, not only a differently configured elevate.
+  Full UI logging review also missed the silent pre-start gate. These are specific gaps in
+  prior completion claims. Start with the failing IPC test, browser-task prerequisite check,
+  original3root cases after an approved access correction, and a cheap pre-start-gate test;
+  no reason to spend another live-Codex run before these are resolved.
+
+WORK status: prior approved code is present but verified completion/production acceptance
+remain OPEN. Proposed corrective work here is review output, not newly approved scope.
+
+## Approved follow-up implementation — code present; latest regression noted above
 
 Operator authorized strictly the immediately preceding proposal/snippets:
 
@@ -268,7 +395,7 @@ hook/private child environment, and installed-source reads must not import the p
 | P18 | Original operator fixture/query/queue corrections, watcher interpreter, shared lint and graph review | Approved code implemented; F4 real query/browser check passed; F3/F7 diagnostics implemented, runtime findings unresolved; F5 replacement withdrawn; production acceptance pending |
 | P19 | Named subprocess helpers, shared explicit fixture and selectable markers; preserved isolation/timeouts | protected/tests/pytest_plugin.py + existing test callpoints |
 
-## Latest production log review — 2026-09-17; partial follow-up implementation
+## Previous production incident — baseline for F1-F7 corrections
 
 CRITICAL operator finding, confirmed by source tracing and isolated reproduction: tests
 write into PRODUCTION NiceGUI storage. A subsequent normal Dashboard launch displays test
@@ -587,12 +714,12 @@ Backend/Store/replay, queue/final-pull/outcome and wholesale-query contracts are
 |---|---|---|
 | F1 | Early NiceGUI test storage isolation, per-child paths, production-storage preservation guard | Implemented; local real-persistence/wiring and isolated real browser/query checks passed; full production operator rerun pending; contaminated storage untouched |
 | F2 | Explicit Lima fixture for Dashboard consumers only | Implemented; independent watcher import and existing UI checks passed |
-| F3 | Diagnose privileged watcher launch failure | Approved failure-only diagnostics implemented and tested; original privilege-drop launcher/three cases preserved; actual denied path and runtime correction unresolved |
+| F3 | Diagnose privileged watcher launch failure | Diagnostics implemented; latest PROD identifies0750 /home/anonymous.linux traversal barrier; runtime/access correction and real monitoring pending |
 | F4 | Completion text comparison, wait diagnostics and synthetic-record wording | Implemented; real completion/helper/owned-query/wholesale replacement browser regression PASSED; earlier timing failures retained in evidence |
-| F5 | Configured DuckDB fallback binary absence | Synthetic replacement withdrawn; test unchanged, missing prerequisite still causes failure |
+| F5 | Configured DuckDB fallback binary absence | Latest PROD real binary/config fallback checks PASS; no replacement fixture or assertion weakening |
 | F6 | IPC availability diagnostic wording/path | Implemented; focused checks passed |
 | F7 | Investigate/fix operator task-variable availability | Not reproduced locally; safe activation regressions retained with original15s bound; operator-host issue unresolved |
-| F8 | Restore detailed direct-terminal Backend operation logs | Implemented; local API/logging/cleanup and real IPC emission checks passed; full direct-terminal HTTP verification and disappearance cause not established |
+| F8 | Restore detailed direct-terminal Backend operation logs | Logs present/real IPC emission passes; latest PROD/local test exposes new unnecessary detour_db_path access; correction pending |
 
 #### F1 — NiceGUI test storage (implemented; local checks passed)
 
@@ -698,11 +825,12 @@ Coverage: real rendered-uppercase/semantic-Rerun behavior, one query only, succe
 snapshot refresh, existing failure handling, and informative waiting/timeout diagnostics.
 No automatic production query, card gating, Backend finalization or timeout changes.
 
-#### F5 — DuckDB fallback prerequisite: synthetic replacement withdrawn
+#### F5 — DuckDB fallback prerequisite: latest PROD checks pass
 
-Repository-root tests/test_duckdb_extensions.py is unchanged. The existing config-path
-fallback test continues to expose absence of the configured extension binary. The neighboring
-real-binary test already skips an absent binary; it is not replacement prerequisite coverage.
+Repository-root tests/test_duckdb_extensions.py was not changed by this review. The latest
+PROD log shows both real configured-binary and config-path fallback tests passing with the
+actual linux_arm64 extension. The existing config-path test must still expose absence if
+that prerequisite disappears; the neighboring real-binary skip is not replacement coverage.
 Do not reintroduce a temporary config or b"fixture" binary into the existing config-path
 check. No replacement code/config/install change is currently approved for this finding.
 
@@ -1718,17 +1846,17 @@ created by the selected detour tests are synthetic/temporary.
 | Ruff / default | ruff check src tests: PASS; also passed after P19 | None for current code |
 | Mypy / default | mypy src tests: PASS,68 files | P19 touches only detour tests, excluded from this leaf |
 | Mypy / AI augment | strict detour config: PASS,53 files after P19 | None for current code |
-| Main tests / default | Earlier local138 pass/3 fail; latest prod172 pass,1 fail,6 skip,6 xfail,1 xpass | F5 replacement withdrawn; original configured-binary absence failure remains exposed; no new full leaf run |
+| Main tests / default | Latest PROD174 pass,5 skip,6 xfail,1 xpass (4.91s) | Both actual configured-binary tests now pass; no synthetic replacement |
 | Step4 normal / default | explicit module, not slow/real_api: 4 pass,1 deselect | None for synthetic selection |
-| Step4 slow / default | NOT RUN | Real config references forbidden/unavailable source artifacts; not a synthetic substitute |
+| Step4 slow / default | Latest PROD1 skipped/4 deselected | Five referenced real parquet inputs unavailable; not accepted as a pass |
 | Mode3 / default | Approved test-console injection: full module6 pass; actual -s case passes at80/92-column PTYs; Ruff/mypy pass | This narrow fix is complete; assertions/production/tasks unchanged; broader acceptance failures remain separate |
 | Mode0 / mode0 env | Local2 pass/2 socket-restricted failures; delegated complete module4 pass,11 deprecation warnings (18.03s) | Closed for synthetic selection; no mode0 implementation edits |
-| AI augment normal / AI env | Non-subprocess320 pass,1 skip,103 deselect; focused subprocess11 pass; startup90 pass/1 timeout, then the failed case passed alone; all7 browser cases passed across initial/targeted runs | Initial runs were not wholly green; timeout cause unproven; historical captures excluded |
+| AI augment normal / AI env | Latest PROD517 pass,9 fail,1 skip,3 deselect (110.02s) | IPC-only logging/test regression plus8 missing-Chrome launch failures; earlier Chromium elevate not equivalent provisioning |
 | Appendwatch normal / AI env | not needs_sudo, not socket/task-launcher: 38 pass; actual task-interpreter smoke2 pass | P19 sentinel uses named shared helper, rechecked with P19 |
-| Pasted-model provider / AI env | Current fake-response22 pass,1 real_api deselected (21.76s) | Live provider not run locally |
+| Pasted-model provider / AI env | Earlier fake-response22 pass; latest PROD real_api stage not reached | Normal task && stopped after9 failures |
 | Main extra real_api / default | Latest supplied production run3 pass,1 expected xfail (3.09s) | No new Assistant live run |
-| Appendwatch privileged / AI env | Prod3 FAILED before watcher startup (0.81s); later pasted default-env invocation3 setup ERROR | Separate cached-Python EACCES and wrong environment/broad Lima fixture; proposed corrections above; real permission behavior unverified |
-| Operator workflow / host | Latest run reached pull410/completed200/clean stop, then harness stalled; Ctrl+C after500.97s | Active test not passed; card/artifact assertions unreached; critical shared NiceGUI storage defect reported |
+| Appendwatch privileged / AI env | Latest PROD3failed/70deselected (0.26s) | Cached Python unreachable through0750 home after dropping privileges; dependency/fixture issue no longer the blocker |
+| Operator workflow / host | Latest Query IPC/queue/Start succeeded, then0records/no full Backend start; Ctrl+C,88.42s | Active case interrupted; silent pre-start gate needs diagnosis; production data and NiceGUI guard PASS |
 | Pre-commit wrappers | Inspected, UNCHANGED by explicit rejection | Existing failure/reporting quirks remain; no claim fixed |
 | elevate / AI env | Earlier shell/browser/IPC/mode0 evidence below remains recorded | Those checks did not establish storage isolation; fix isolation before further browser/operator execution |
 
@@ -1971,13 +2099,15 @@ Preserve the rest of P18 and its task boundary: two approved interpreter substit
 
 ## Remaining rollout acceptance — separate from pending implementation
 
-The pinned P1-P19, Mode-3 fix and currently approved concrete follow-up code are implemented.
-F4 now has a passing real browser/query regression; F1/F2/F6 checks and F8 local/real-IPC
-emission checks pass. Remaining: F3 actual privileged launch/monitoring (diagnostics ready),
-F5 configured extension prerequisite (replacement withdrawn), F7 operator-host activation
-report (diagnostics pass here), direct-terminal full-HTTP logging verification and final
-production acceptance including card/artifact assertions. Further corrective mechanisms
-need evidence and approval; no concrete approved implementation is silently omitted.
+Prior pinned code is present, but latest PROD reveals a missed F8 regression and pre-start
+diagnostic/verification gaps: it is NOT verified completion. F4's Chromium real-query test
+passed earlier; normal PROD browser task instead fails on missing Chrome. Remaining:
+IPC-only log/test correction, explicitly agreed browser provisioning/selection, root runtime
+access correction and actual monitoring, diagnosis of the silent pre-start wait, full HTTP
+log/workflow/card acceptance. F5 binary prerequisite now PASS; four F7 activation checks
+also pass on PROD (earlier pixi-shell report not reproduced). Proposed corrections at the
+top are NOT newly authorized. Do not revive rejected workarounds or change ordinary tasks
+without approval.
 Do not call removed tests passing coverage or claim production acceptance has passed.
 Earlier transient test failures remain qualified, not relabeled as first-run passes.
 

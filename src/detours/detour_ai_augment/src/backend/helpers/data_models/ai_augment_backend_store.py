@@ -527,7 +527,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
         ).fetchall()
         size = self._replay_log._size()
         logger.info(
-            "Verifying replay: stored hash %s at line %d byte %d; config hash %s; %d bytes",
+            "Verifying replay log: stored hash %s at line %d byte %d; config hash %s; %d bytes",
             anchor.sha256, anchor.ordinal, anchor.byte_offset, self._replay_log.hash, size,
         )
         if anchor.byte_offset > size or anchor.ordinal > len(rows):
@@ -538,8 +538,12 @@ class AiAugmentBackendStore(FrozenStrictModel):
         boundary_seen = anchor.ordinal == 0 and anchor.byte_offset == 0
         if boundary_seen and anchor.sha256 != EMPTY_LOG_SHA256:
             raise ValueError("Empty replay anchor hash mismatch")
+        logger.info("Verifying prefix: %d lines, %d bytes", anchor.ordinal, anchor.byte_offset)
+        if boundary_seen:
+            logger.info("Prefix hash matches stored anchor")
         for ordinal, line in enumerate(self._replay_log._lines(), start=1):
-            logger.info("Verifying replay line %d", ordinal)
+            if ordinal > anchor.ordinal:
+                logger.info("Verifying suffix line %d", ordinal)
             if not line.endswith(b"\n") or not line.strip():
                 raise ValueError(f"Replay line {ordinal}: invalid JSONL boundary")
             if ordinal > len(rows) or rows[ordinal - 1][0] != ordinal:
@@ -554,6 +558,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
                     if offset != anchor.byte_offset or prefix.hexdigest() != anchor.sha256:
                         raise ValueError(f"Replay prefix mismatch at line {ordinal}, byte {offset}")
                     boundary_seen = True
+                    logger.info("Prefix hash matches stored anchor")
             elif hashlib.sha256(line).hexdigest() != digest:
                 raise ValueError(f"Replay line {ordinal}: raw-line hash mismatch")
         if not boundary_seen or ordinal != len(rows) or offset != size:
@@ -568,7 +573,8 @@ class AiAugmentBackendStore(FrozenStrictModel):
             )
         self._next_line_number = ordinal + 1
         self._log_offset = offset
-        logger.info("Replay/DB verification complete: %d lines, %d bytes", ordinal, offset)
+        logger.info("DB/log ordinal and byte coverage verified: %d lines, %d bytes",
+                    ordinal, offset)
         return verified_anchor
 
     def _raise_if_failed(self) -> None:
