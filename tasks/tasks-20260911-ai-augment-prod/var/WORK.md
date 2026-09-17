@@ -9,11 +9,14 @@ not implementation. No CAS code or stored blobs have been changed.
 2026-09-17: P14 startup-condition tests and P15 staged-test consolidation review are
 complete: 111 mock-free startup cases and 123 moved/existing tests passed; Ruff/mypy passed.
 P16 Markdown/TXT download is implemented and verified; approved snippets below.
-P13 remains the only pending approved implementation scope and was not part of P16.
+P13 (CAS layout), P17 (Dashboard layout) and P18 (operator failures/upstream verification)
+are pending approved scopes. Their current authorization is to record them; no implementation
+of these pending items has started. P18 records known integration work, not mere rollout acceptance.
 The full hermetic regression run passed (306 passed,1 skipped,3 excluded); subsequent
 Store/IPC/provisioning checks passed (28, overlapping the broad suite). Final Ruff and strict mypy
-passed after the last edits. No production/operator/guest/network
-rollout was performed. That acceptance remains separate from implementation completion.
+passed after the last edits. The agent performed no production/operator/guest/network
+rollout. The operator subsequently supplied an unsuccessful acceptance run; findings below.
+Acceptance remains separate from implementation completion.
 
 The operator authorized implementation of all pending WORK, strictly narrowly as pinned.
 During implementation they added P12: first probe logs, then a whole-ui.py missing-emit_log
@@ -294,6 +297,116 @@ startup-exit/model-deployment checks into these modules),
 plus repository-root tests/test_http_request_log.py. Exclude captured_operator_push,
 historical_haanen_retry and real_mode_0600_unix_socket; exclude real_api/operator/needs_sudo.
 No test_ui_e2e, real socket/HTTP providers, guest deployment or paused BDD execution.
+
+## P17 — Pending approved scope: Dashboard layout only
+
+2026-09-17: operator requested recording these two surgical formatting changes in WORK.
+Approved and pending; no ui.py implementation in this turn.
+
+Limit production changes to _ControlCentrePage.build_header and build_card_panel in
+src/control_centre/dashboard/ui.py, plus WORK status/evidence. Reuse existing NiceGUI
+containers/styles; only adjust grouping/order/indentation of existing elements.
+
+### Header: two distinct rows, in this exact order
+
+Operator corrected the layout: buttons share the title row, immediately to its right.
+
+1. Left-to-right: "AI augmentation Control Centre" (existing Locale.PAGE_TITLE), then
+   the existing Probe, Query IPC and Start queue processing buttons.
+   Preserve the existing dynamic Stop queue processing label when processing is enabled.
+2. Existing status labels, left-to-right: Backend API; IPC; Lima/SSH; Codex; Probed.
+   Preserve current label text, status values and refresh logic; these names specify order,
+   not a request to relabel statuses.
+
+Use a vertical header container retaining PAGE_HEADER_TEST_ID with these two rows.
+Keep existing child handles, callbacks, test IDs and responsive styling.
+
+### Card download buttons: one horizontal row
+
+Wrap the existing download_card_button_docx and download_card_button_txt construction in
+one ui.row, in that order: Download DOCX on the left, Download Markdown on the right.
+Keep the card Markdown below/outside the button row. Preserve existing button labels,
+styles, handles, test IDs, handlers, enable/disable rules, download content and logging.
+
+### Exact code snippets
+
+These are the complete replacement methods on _ControlCentrePage in ui.py.
+Only existing element grouping/order changes; no new imports, constants, callbacks
+or helpers. Recorded for implementation, not applied to production code yet.
+
+```python
+def build_header(self) -> None:
+    with (
+        ui.column().style(FULL_WIDTH_STYLE)
+        .props(_NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=PAGE_HEADER_TEST_ID))
+    ):
+        with ui.row().style(RESPONSIVE_ROW_STYLE):
+            ui.label(Locale.PAGE_TITLE)
+            self._handles.probe_button = ui.button(Locale.ACTION_PROBE, on_click=self.probe_all)
+            self._handles.backend_refresh_button = ui.button(
+                Locale.ACTION_QUERY_IPC, on_click=self.refresh_from_ipc,
+            ).props(_NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=BACKEND_REFRESH_TEST_ID))
+            self._handles.queue_processing_button = ui.button(
+                "Stop queue processing" if self._controller.queue_processing
+                else "Start queue processing",
+                on_click=self.toggle_queue_processing,
+            )
+        with ui.row().style(RESPONSIVE_ROW_STYLE):
+            self._handles.backend_status_label = ui.label()
+            self._handles.backend_ipc_status_label = ui.label().props(
+                _NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=BACKEND_IPC_STATUS_TEST_ID)
+            )
+            self._handles.ssh_status_label = ui.label()
+            self._handles.codex_status_label = ui.label()
+            self._handles.probe_time_label = ui.label()
+```
+
+```python
+def build_card_panel(self) -> None:
+    self._handles.card_container = (
+        ui
+        .card()
+        .style(CARD_CONTAINER_STYLE)
+        .props(_NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=PAGE_FOOTER_TEST_ID))
+    )
+    with self._handles.card_container:
+        with ui.row().style(RESPONSIVE_ROW_STYLE):
+            self._handles.download_card_button_docx = (
+                ui
+                .button(
+                    Locale.ACTION_DOWNLOAD_DOCX,
+                    on_click=self.download_displayed_card,
+                )
+                .style(ACTION_BUTTON_STYLE)
+                .props(_NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=DOWNLOAD_CARD_DOCX_TEST_ID))
+            )
+            self._handles.download_card_button_docx.disable()
+            self._handles.download_card_button_txt = (
+                ui
+                .button(
+                    Locale.ACTION_DOWNLOAD_TXT,
+                    on_click=lambda: self.download_displayed_card(output_format="txt"),
+                )
+                .style(ACTION_BUTTON_STYLE)
+                .props(_NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=DOWNLOAD_CARD_TXT_TEST_ID))
+            )
+            self._handles.download_card_button_txt.disable()
+        self._handles.card_markdown = (
+            ui
+            .markdown("")
+            .style(CARD_MARKDOWN_STYLE)
+            .props(_NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=CARD_MARKDOWN_TEST_ID))
+        )
+```
+
+### Boundaries
+
+Everything else stays unchanged: no behavioral changes to Probe, Query IPC, queue control,
+statuses, cards/downloads, storage or Backend; no helper/classes/refactoring, renames,
+configuration changes, or changes to other page sections. This does not authorize fixes
+tracked separately in P18 and does not alter pending P13.
+At implementation, run applicable static checks; no new test framework, business-logic
+tests or operator E2E run is needed for this container-only formatting edit.
 
 ## P16 — Completed: Dashboard Markdown/TXT download
 
@@ -629,11 +742,170 @@ cases deselected (144.40s). These checks include the existing UI fixture behavio
 class-scoped correction. Paused BDD and sample_deploy remain unexecuted. P14 is verified
 separately; no additional broad regression rerun is needed for this import/name cleanup.
 
-## Remaining acceptance, NOT unimplemented approved scope
+## P18 — Pending approved scope: operator failures and missed upstream verification
 
-For completed P1-P12, only human/operator rollout acceptance in the real environment
-remains; P13 is separately pending implementation. P14/P15 test/review and P16 download
-scope are complete.
+2026-09-17: operator approved recording the identified integration gaps as a new P item,
+including the broader homework the Assistant missed before handing work to the human.
+TASK was reread IN FULL, especially its testing philosophy. Record scope now; implementation
+has not started. This supersedes the former unapproved operator-log-review follow-up.
+P13/P17 remain separately pending, unchanged.
+
+### Governing lesson from TASK
+
+Human operator-run production E2E remains the acceptance cornerstone, not a substitute for
+Assistant verification. TASK requires catching failures upstream wherever possible and,
+when an operator discovers one, wiring appropriate upstream regression coverage without
+another reminder. Operator time must not be used to discover missing imports, stale test
+setup or inconsistent lifecycle assumptions that cheap checks/code review can expose.
+This is bounded verification of the changed contour and its consumers, not permission for
+an unrelated repo-wide rewrite or a new testing framework.
+
+### Evidence and exact corrective scope
+
+Source: logs/from_operator/pre-commit.log and pre-commit-extra.log, supplied by the operator.
+No production/test code changed during review; only the shared-module Ruff error was
+reproduced locally. Ordinary checks stopped at Ruff. Root appendwatch tests: 3 failed
+before watcher startup. Active operator case failed first Query IPC, then was interrupted;
+2 other cases were intentionally excluded/skipped. None of that is an operator E2E pass.
+Main real_api checks: 3 passed, 1 expected xfail. AIVM/auth/service preflight, Dashboard
+cleanup and production-data pre/post hash preservation succeeded. Post-interruption
+Playwright TargetClosed/pending-task warnings are not the initiating failure.
+
+| Gap | Narrow correction | Required upstream evidence |
+|---|---|---|
+| Shared architecture module omitted from focused lint | Whitespace/import-spacing only in repository-root src/helpers/architecture.py (I001, E302); preserve human-signed comments | Actual lint covers affected shared dependencies as well as the detour; no new test for whitespace |
+| Converted appendwatch imports Pydantic2 but task subprocess uses /usr/bin/python3 | Correct APPENDWATCH_PYTHON selection in the existing regular/elevated/root detour tasks in pyproject.toml; interpreter and packages must remain accessible after dropping privileges to nobody | Real selected-interpreter subprocess imports/starts the watcher; do not substitute pytest's interpreter or mock the import. Retain existing real privilege-drop tests and check executable/dependency accessibility |
+| Fresh operator fixture has empty replay/config, no DB, then immediately queries IPC | In protected/tests/operator/test_operator_e2e.py, initialize the isolated DB through the established full Backend --new/--yes lifecycle and clean shutdown before the first Query IPC | Synthetic fresh setup exercises real config/Store initialization, then succeeds at the query prerequisite; IPC-only against an uninitialized DB must STILL fail. Exercise the harness setup path, not a second manually prepared DB that bypasses it |
+| Harness queues but never enables processing | queue_in_browser explicitly clicks existing Start queue processing as part of its normal browser sequence | Exercise that sequence against the real queue-control behavior: initially stopped, Queue alone does not dequeue, explicit Start permits processing. Existing controller-only tests are insufficient evidence that the harness performs Start |
+| Query helper waits for success up to stale rebuild timeout600s after child failure | Observe query failure/process failure promptly in the existing operator helper, using ordinary IPC readiness bounds, not rebuild bounds | Known startup/query failure exits the helper promptly with useful diagnostics; success still proceeds normally. Do not merely lower the timeout and leave failure unobserved |
+| Pre-commit wrappers can mask earlier failures; inverted grep message and wrong extra-log target | Correct existing pre-commit-operator/pre-commit-extra-operator shell status handling in pyproject.toml; retain intended run-all behavior, propagate aggregate failure, correct log/report handling | Execute the actual wrapper shell logic with controlled external-command outcomes: all-pass, earlier failure followed by success, final failure/interruption. Assert the stages intended to continue do continue and earlier nonzero statuses are not lost; stdout grep must not determine acceptance |
+
+Keep tests in existing relevant modules aligned with production naming: test_appendwatch,
+test_ui (including TestBackendStartupConditions), test_audit_read/deployed-layout coverage
+where appropriate, and existing operator/preflight checks. Update only directly affected
+fixtures/launchers; no gratuitous module moves, new service layers or duplicate test harness.
+Use existing hermetic seams for unavailable external systems, but never replace the very
+boundary being tested (interpreter selection/import, Store initialization, queue permission,
+query-failure observation or shell exit-status propagation). Extend meaningful existing
+coverage instead of testing source-code strings or mirroring the implementation.
+
+### Assistant homework before the next operator handoff
+
+1. Trace each changed contract through its actual consumers and entrypoints. For these
+   changes: dependency -> standalone executable -> regular/root test launchers -> deployed
+   service; full/IPC startup contract -> fresh operator fixture -> first query; default-stopped
+   queue -> browser harness -> dequeue; subprocess failure -> helper -> wrapper exit status.
+   Read the callers and configuration, not only the changed functions.
+2. Audit fixture/mocking assumptions. Identify prerequisite setup supplied by fixtures that
+   the real operator sequence does not perform. P14's 111 real startup cases correctly prove
+   individual modes, including rejection of missing DBs; they do not prove the operator
+   harness initializes a DB before querying. Pydantic importing in the parent proves nothing
+   about /usr/bin/python3 in its child. A passing deployed-service import does not cover the
+   separate test-task interpreter. Record and close these specific integration holes.
+3. Add regressions at the earliest realistic, cheap layer, then fix the issue. Capture the
+   failure first where feasible; exercise normal and failing compositions, not only isolated
+   green components. Preserve real filesystem/Store/process boundaries for the relevant
+   assertions. No live model calls are needed to discover these setup/dependency gaps.
+4. Run applicable available lint/type/import/subprocess/configuration/integration checks
+   before requesting operator time. Use the full pre-commit-operator leaf inventory below,
+   including shared modules and launchers, not merely the changed detour. Review selections,
+   exclusions, interpreter/environment/permission differences and shell propagation; do not
+   blindly invoke the root command in this environment.
+5. Record exactly what passed, what was not exercised, and why. Test counts and mocked
+   successes are not readiness evidence for an unexercised boundary. Distinguish code
+   implemented, upstream integration verified, and real operator acceptance. If an execution
+   prerequisite is unavailable, continue useful static/hermetic review and state the remaining
+   runtime gap explicitly; do not silently substitute a different interpreter/lifecycle.
+
+### Verification entrypoint: the full pre-commit-operator graph
+
+Operator clarification: their acceptance entrypoint is exactly `pixi run pre-commit-operator`.
+Assistant preparation must therefore inspect its FULL execution graph and run every leaf
+that can be run within the available environment/TASK constraints, not just selected AI
+augment checks. Trace both Pixi dependencies/aliases and shell-invoked tasks/commands,
+including feature-specific task definitions, environment selection, pytest default/explicit
+markers, platform/privilege requirements, short-circuit edges and exit-code propagation.
+
+Current graph outline, checked against pyproject.toml (re-read actual definitions before use):
+
+```text
+pre-commit-operator
+  Lima aicode: pre-commit
+    lint
+      ruff: src tests (default environment)
+      mypy: src tests (default environment)
+      mypy-detour-ai-augment (detour-ai-augment environment)
+    test-repl
+      test . (default environment; configured pytest defaults)
+    test-detours
+      step4-breakdown: normal selection + explicit slow selection (default)
+      mode3-pgf-stats: its test module (default)
+      mode0-econ-stats: its test module (detour-mode0-econ-stats)
+      ai-augment (detour-ai-augment)
+        regular detour/backend/operator-preflight selection, not needs_sudo
+        explicit real_api institution round-trip, conditional on preceding success
+  pre-commit-extra-operator
+    Lima aicode
+      test-repl-extra -> test . -m real_api (default)
+      test-detour-ai-augment-root -> needs_sudo backend tests (conditional on preceding success)
+    host
+      test-detour-ai-augment-operator -> real operator workflow selection
+```
+
+This outline is not proof of execution and is not permission to skip nested shell leaves.
+Before the next handoff, record a concise per-leaf inventory: actual command/environment,
+selection, passed/failed/not-run status, evidence/log location, and reason/next action for
+anything unavailable. An early root-task failure does not excuse ignoring later independently
+runnable leaves. Reuse valid existing evidence where applicable; do not rerun equivalent
+checks pointlessly. Broader verification does not authorize unrelated code changes; report
+out-of-scope findings and obtain approval before extending the implementation scope.
+
+### Assistant-owned elevate task: targeted delegated verification
+
+The operator explicitly permits the Assistant to maintain/mutate the existing `elevate`
+task in pyproject.toml as needed for its verification work. It is the Assistant's command;
+there is no need for separate permission just to update that task within this test scope.
+When required leaves cannot run here (e.g. browser/socket/privilege/host prerequisites),
+prepare the concrete targeted checks in `elevate`, then ask the user to execute
+`pixi run elevate` on the Assistant's behalf. State what it exercises and any prerequisites;
+retain useful detailed output in logs/from_operator/elevate.log and meaningful nonzero
+failure status. Read the returned log, fix approved-scope issues and secure upstream
+regressions before recommending the complete operator acceptance run.
+
+Do not silently leave feasible delegated verification outstanding merely because this
+sandbox cannot execute it. Conversely, do not offload checks that the Assistant can run
+itself or use elevate as a disguised repeat of the whole expensive live-Codex acceptance
+workflow. Use the smallest meaningful batch of outstanding checks. User execution is
+explicitly requested when needed; writing the task or asking for a run is not evidence it
+ran/passed and does not grant the agent extra runtime permissions. No elevate/task changes
+or delegated run are being performed by this documentation-only update.
+
+### Completion criteria and boundaries
+
+P18 is NOT complete merely because these notes were written or individual fixes landed.
+Before another operator handoff, record each correction's relevant check/result and its
+coverage boundary, plus the full command-graph leaf inventory and any elevate results, in WORK. Known locally detectable blockers must be resolved; real
+privilege/guest/platform/provider checks that cannot run here stay explicitly outstanding,
+not reported as passed. Avoid unrelated/repeated broad testing after appropriate checks pass.
+The operator remains responsible for final real-environment acceptance, not basic discovery.
+
+Preserve all approved production contracts: no IPC DB creation/replay/append, no automatic
+queue start, no raw detour DB writes outside Store, no recovery/tail repair/hash bypass/new
+flags, no new Backend launcher knowledge, and no change to the final pull/outcome contour.
+The isolated operator fixture may initialize only its own resources through existing Backend
+lifecycle; never production data or direct fixture SQL/schema fabrication. Do not redesign
+provisioning, security permissions or process supervision to conceal a launcher/test problem.
+If the bounded correction requires changing a production contract or adding another mechanism,
+pause and request explicit approval. P18 does not authorize running guest/network/operator
+commands in this restricted environment. Keep sample_deploy, paused BDD and human-owned
+TASK/HUMANS/README untouched; Git remains read-only.
+
+## Remaining rollout acceptance — separate from pending implementation
+
+P1-P12 implementation and P14/P15/P16 checks recorded above remain historical evidence,
+but P18 identifies outstanding launcher/harness integration corrections and verification.
+P13/P17 are also pending implementation. Do not describe the current remaining work as
+"only operator acceptance" until these approved pending items are complete.
 Rollout acceptance covers actual guest
 provisioning/dependency install, interactive Dashboard/server/browser/provider E2E and the
 operator-maintained production config/log hashes. No such activity was authorized for this
