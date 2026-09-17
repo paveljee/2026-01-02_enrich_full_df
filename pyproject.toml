@@ -415,8 +415,18 @@ bash -c '
     echo "Usage: pixi run -e detour-ai-augment serve --ipc-only OR serve <namekey> (--new|--resume|--continue) [--yes]" >&2
     exit 1
   }
+
+  case "$MODE_OR_NAMEKEY" in
+    --new|--resume|--continue)
+      echo "ERROR: namekey must be passed before $MODE_OR_NAMEKEY" >&2
+      echo "Usage: pixi run -e detour-ai-augment serve <namekey> (--new|--resume|--continue) [--yes]" >&2
+      exit 1
+      ;;
+  esac
+
   shift
   export FASTAPI_DETOUR_DASHBOARD_SOCKET="/tmp/detour-manual-${UID}.sock"
+
   if test "$MODE_OR_NAMEKEY" = "--ipc-only"; then
     pixi run -e detour-ai-augment \
       python -m src.detours.detour_ai_augment.src.backend.server \
@@ -424,7 +434,18 @@ bash -c '
       --ipc-only "$@"
     exit
   fi
+
   NAMEKEY="$MODE_OR_NAMEKEY"
+
+  ARGS=()
+  for arg in "$@"; do
+    if test "$arg" = "--continue"; then
+      ARGS+=(--resume)
+    else
+      ARGS+=("$arg")
+    fi
+  done
+
   export OPENALEX_API_KEY="$(
     pixi run -e detour-ai-augment python -c '"'"'
   import os
@@ -433,17 +454,20 @@ bash -c '
   print(dotenv_values(path).get("OPENALEX_API_KEY", ""), end="")
   '"'"'
   )"
+
   test -n "$OPENALEX_API_KEY" || {
     echo "ERROR: OPENALEX_API_KEY is missing from .env" >&2
     exit 1
   }
+
   export FASTAPI_DETOUR_NAMEKEY="$NAMEKEY"
   export FASTAPI_DETOUR_APPENDWATCH_REPORT='"'"'/Volumes/home/aicode/aivm/home/ai/.aivm-control/appendwatch/appendwatch-tree.txt'"'"'
   export FASTAPI_DETOUR_CODEX_SESSIONS_DIR='"'"'/home/ai/.codex/sessions'"'"'
   export FASTAPI_DETOUR_AIVM_IDENTITY_FILE="$HOME/.local/share/aivm/.ssh/id_ed25519"
+
   pixi run -e detour-ai-augment \
     python -m src.detours.detour_ai_augment.src.backend.server \
-    --config config_ai_augment.json "$@"
+    --config config_ai_augment.json "${ARGS[@]}"
 ' --
 """
 dashboard = """
