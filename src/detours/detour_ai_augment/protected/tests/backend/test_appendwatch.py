@@ -27,7 +27,6 @@ import subprocess
 import sys
 import tempfile
 import time
-import tomllib
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Callable, Iterator
@@ -36,6 +35,7 @@ import pytest
 
 from src.detours.detour_ai_augment.protected.tests.pytest_plugin import (
     PythonProcess,
+    watcher_fixture_process,
     watcher_import_process,
 )
 
@@ -132,6 +132,27 @@ def read_text(path: Path) -> str:
         return ""
 
 
+def watcher_runtime_path_details() -> str:
+    details: list[str] = []
+    for configured in (Path(WATCHER_PYTHON).absolute(), SCRIPT):
+        try:
+            resolved = configured.resolve()
+            for leaf in dict.fromkeys((configured, resolved)):
+                details.append(f"Runtime path: {leaf}")
+                for component in (*reversed(leaf.parents), leaf):
+                    try:
+                        info = component.lstat()
+                        details.append(
+                            f"  {stat.filemode(info.st_mode)} uid={info.st_uid} "
+                            f"gid={info.st_gid} {component}"
+                        )
+                    except OSError as diagnostic_error:
+                        details.append(f"  {component}: {diagnostic_error!r}")
+        except (OSError, RuntimeError) as diagnostic_error:
+            details.append(f"Cannot resolve {configured}: {diagnostic_error!r}")
+    return "\n".join(details)
+
+
 class RunningWatcher:
     def __init__(
         self,
@@ -167,14 +188,26 @@ class RunningWatcher:
                 "--debounce-ms",
                 str(debounce_ms),
             ]
-        self.process = subprocess.Popen(
-            command,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            preexec_fn=preexec_fn,
-        )
+        try:
+            self.process = subprocess.Popen(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                preexec_fn=preexec_fn,
+            )
+        except PermissionError as exc:
+            exc.add_note(
+                f"Watcher interpreter: {WATCHER_PYTHON!r}; script: {SCRIPT}; "
+                f"privilege drop requested: {preexec_fn is not None}"
+            )
+            # Resolution errors must not replace the original execution failure.
+            try:
+                exc.add_note(watcher_runtime_path_details())
+            except Exception as diagnostic_error:
+                exc.add_note(f"Runtime path diagnostics failed: {diagnostic_error!r}")
+            raise
         wait_until(lambda: report.exists() or self.process.poll() is not None)
         if self.process.poll() is not None:
             stdout, stderr = self.process.communicate(timeout=1)
@@ -1198,15 +1231,38 @@ def test_cli_shutdown_reconcile_marks_files_from_unwatched_root_interval(
         shutil.rmtree(base, ignore_errors=True)
 
 
+@pytest.mark.parametrize("missing_script", (False, True))
+def test_watcher_exec_permission_error_keeps_failure_and_path_diagnostics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, missing_script: bool,
+) -> None:
+    interpreter = tmp_path / "non-executable-python"
+    interpreter.write_text("not executable")
+    interpreter.chmod(0o600)
+    launcher = tmp_path / "python"
+    launcher.symlink_to(interpreter)
+    monkeypatch.setattr(sys.modules[__name__], "WATCHER_PYTHON", str(launcher))
+    if missing_script:
+        monkeypatch.setattr(sys.modules[__name__], "SCRIPT", tmp_path / "absent-script")
+    with pytest.raises(PermissionError) as failure:
+        RunningWatcher(tmp_path, tmp_path / "report")
+    assert failure.value.errno == errno.EACCES
+    assert failure.value.filename == str(launcher)
+    notes = "\n".join(failure.value.__notes__)
+    assert str(launcher) in notes and str(interpreter) in notes
+    assert "-rw-------" in notes and "uid=" in notes and "gid=" in notes
+    assert "privilege drop requested: False" in notes
+    if missing_script:
+        assert "FileNotFoundError" in notes
+
+
 @pytest.mark.python_subprocess
 @pytest.mark.parametrize("task", ("test-detour-ai-augment", "test-detour-ai-augment-root"))
+@pytest.mark.parametrize("parent_environment", ("unset", "stale"))
 def test_task_selected_interpreter_starts_real_watcher(
     tmp_path: Path, repository_root: Path, task: str, python_process: PythonProcess,
+    parent_environment: str,
 ) -> None:
-    """Run actual task exports; substitute pytest/sudo dispatch, NOT its watcher interpreter."""
-    tasks = tomllib.loads((repository_root / "pyproject.toml").read_text())["tool"]["pixi"][
-        "feature"
-    ]["detour-ai-augment"]["tasks"]
+    """Run actual Pixi activation, without relying on pixi shell or inherited prefixes."""
     # The sentinel avoids the unrelated suite/network stage. Each task invocation still
     # launches its configured interpreter and the unmodified watcher's real --help command.
     sentinel = tmp_path / "pytest"
@@ -1217,16 +1273,40 @@ def test_task_selected_interpreter_starts_real_watcher(
     sudo.write_text('#!/bin/sh\nexec "$@"\n')
     sudo.chmod(0o700)
     environment = dict(
-        os.environ, CONDA_PREFIX=sys.prefix, PIXI_PROJECT_ROOT=str(repository_root),
+        os.environ,
         PYTHONPATH=str(tmp_path), PATH=f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
     )
+    for name in tuple(environment):
+        if name.startswith(("CONDA_", "PIXI_")):
+            environment.pop(name)
+    environment["PATH"] = os.pathsep.join(
+        entry for entry in environment["PATH"].split(os.pathsep)
+        if Path(entry) != Path(sys.prefix) / "bin"
+    )
+    if parent_environment == "stale":
+        environment["CONDA_PREFIX"] = str(tmp_path / "stale-prefix")
+        environment["PIXI_PROJECT_ROOT"] = str(tmp_path / "stale-prefix")
     result = subprocess.run(
-        ["bash", "-c", tasks[task]], cwd=repository_root, env=environment,
+        ["pixi", "run", "--locked", task], cwd=repository_root, env=environment,
         capture_output=True, text=True, timeout=15, check=False,
     )
+    print(f"Task activation: {task}; parent_environment={parent_environment}")
+    print(result.stdout, end="")
     assert result.returncode == 0, result.stdout + result.stderr
     assert result.stdout.count("TASK_WATCHER_IMPORT_OK") == (
         2 if task == "test-detour-ai-augment" else 1
     )
     # Privilege dropping is deliberately NOT claimed here; existing needs_sudo tests
     # must verify interpreter/package path traversal as nobody in the actual operator env.
+
+
+@pytest.mark.python_subprocess
+def test_standalone_watcher_fixtures_do_not_import_dashboard(
+    python_process: PythonProcess,
+) -> None:
+    result = python_process.run(
+        watcher_fixture_process,
+        f"{Path(__file__)}::test_hash_fd_returns_full_and_old_prefix_digests", timeout=20,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "WATCHER_FIXTURES_INDEPENDENT" in result.stdout

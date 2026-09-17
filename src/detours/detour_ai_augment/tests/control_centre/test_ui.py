@@ -63,6 +63,7 @@ from src.detours.detour_ai_augment.protected.tests.pytest_plugin import (
     PythonProcess,
     SocketlessDashboardLifecycle,
     backend_startup_process,
+    nicegui_test_environment,
     operator_fixture_bootstrap_process,
     sleeping_process,
     stdin_waiting_process,
@@ -114,7 +115,6 @@ from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_mod
 from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.query_request import (  # noqa: E501
     QueryRequest,
 )
-from src.detours.detour_ai_augment.tests.control_centre import test_ui_e2e as browser_tests
 from src.helpers.architecture import FrozenStrictModel
 from src.helpers.data_models import HttpRequestLogRecord, InnerDict, NameKey
 from src.helpers.duckdb_utils import duckdb_quote_identifier as quote
@@ -1077,6 +1077,31 @@ async def test_failed_run_events_are_logged(
         f"{Locale.CONTROL_CENTRE_LOG_PREFIX} run failed: "
         f"run_id={event.run_id} namekey={NAMEKEY} "
         f"detail={Locale.BACKEND_EXITED_EARLY}\n"
+    )
+
+
+@pytest.mark.parametrize("failure", (FileNotFoundError("missing"), PermissionError("denied")))
+def test_ipc_availability_logs_socket_path_and_distinct_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: OSError,
+) -> None:
+    connection = Mock()
+    connection.request.side_effect = failure
+    monkeypatch.setattr(control_ui, "_UnixSocketHttpConnection", lambda **_kwargs: connection)
+    messages: list[str] = []
+    monkeypatch.setattr(control_ui, "emit_log", lambda _prefix, message: messages.append(message))
+    path = tmp_path / "dashboard.sock"
+    client = control_ui._BackendDatabaseClient(
+        socket_path=path, pipeline_config=configured_pipeline_config(),
+    )
+    assert client.available() is False
+    assert len(messages) == 1
+    assert str(path) in messages[0]
+    assert repr(failure) in messages[0]
+    assert ("socket not present" in messages[0]) == isinstance(failure, FileNotFoundError)
+    assert ("IPC probe error" in messages[0]) == isinstance(failure, PermissionError)
+    connection.close.assert_called_once_with()
+    connection.request.assert_called_once_with(
+        control_ui.HTTP_OPTIONS_METHOD, ipc.DASHBOARD_QUERY_PATH,
     )
 
 
@@ -2849,6 +2874,8 @@ def test_operator_browser_sequence_explicitly_opens_real_queue_gate(
 @pytest.mark.anyio
 async def test_browser_fixture_supports_current_page_callbacks() -> None:
     """Check the browser stub's production interface before delegating socket/browser tests."""
+    from src.detours.detour_ai_augment.tests.control_centre import test_ui_e2e as browser_tests
+
     controller_stub = browser_tests.BrowserController()
     await controller_stub.start(publishing=False)
     page = control_ui._ControlCentrePage(
@@ -3033,6 +3060,8 @@ def test_startup_failure_exits_through_framework_shutdown(
         assert "CONTROLLER_CLEANED" in result.stdout
 
 
+pytestmark = pytest.mark.usefixtures("isolated_lima_configuration")
+
 ROOT = Path(__file__).resolve().parents[5]
 MODES = ("ipc", "new", "resume", "continue")
 STARTUP_NAMEKEY = NameKey(first_name="Case 000", last_name="Startup")
@@ -3187,7 +3216,7 @@ class TestBackendStartupConditions:
     @pytest.mark.python_subprocess
     @staticmethod
     def test_operator_fixture_initializes_before_query(
-        startup_files: StartupFiles, python_process: PythonProcess,
+        startup_files: StartupFiles, python_process: PythonProcess, nicegui_storage_path: Path,
     ) -> None:
         files = startup_files
         repository = files.config.parent / "operator-repository"
@@ -3196,9 +3225,12 @@ class TestBackendStartupConditions:
         isolated = files.config.parent / "operator-runtime"
         isolated.mkdir()
         source_before = hashlib.sha256(files.source.read_bytes()).hexdigest()
+        environment = nicegui_test_environment(
+            nicegui_storage_path, base=files.environment(),
+        )
         result = python_process.run(
             operator_fixture_bootstrap_process, str(repository), str(isolated),
-            cwd=ROOT, env=files.environment(), timeout=30,
+            cwd=ROOT, env=environment, timeout=30,
         )
         assert result.returncode == 0, result.stdout + result.stderr
         assert "OPERATOR_BOOTSTRAP_QUERY_OK" in result.stdout

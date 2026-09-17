@@ -512,11 +512,7 @@ export LD_LIBRARY_PATH="$CONDA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 script -q -e -c '"'"'task_status=0
 "$CONDA_PREFIX/bin/python" -m playwright install --only-shell chromium || task_status=1
 "$CONDA_PREFIX/bin/python" -m pytest -vv -srA --durations=0 --playwright-chromium \\
-  src/detours/detour_ai_augment/tests/control_centre/test_ui_e2e.py::test_main_grid_and_researcher_card_use_compact_line_spacing \\
-  src/detours/detour_ai_augment/tests/control_centre/test_ui_e2e.py::test_researcher_selection_and_attempt_history_are_idempotent \\
-  src/detours/detour_ai_augment/tests/control_centre/test_ui_e2e.py::test_completed_researcher_metadata_is_available_in_visible_attempt_history \\
-  src/detours/detour_ai_augment/tests/control_centre/test_ui_e2e.py::test_displayed_researcher_card_downloads_as_docx \\
-  src/detours/detour_ai_augment/tests/control_centre/test_ui_e2e.py::test_control_centre_browser_contract \\
+  src/detours/detour_ai_augment/tests/control_centre/test_ui_e2e.py::test_completed_grid_row_uses_real_query_ipc \\
   || task_status=1
 exit "$task_status"
 '"'"' "$LOG_PATH"

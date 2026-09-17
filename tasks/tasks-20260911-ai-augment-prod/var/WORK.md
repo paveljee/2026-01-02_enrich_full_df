@@ -2,28 +2,48 @@
 
 ## Status and authorization
 
-2026-09-16: Previously approved implementation scope P1-P12 is implemented.
-P13 (extensionless, sharded CAS layout) is implemented and verified; exact scope/snippets below.
-Only code/synthetic test fixtures may change; no stored production blobs will be moved.
-2026-09-17: P14 startup-condition tests and P15 staged-test consolidation review are
-complete: 111 mock-free startup cases and 123 moved/existing tests passed; Ruff/mypy passed.
-P16 Markdown/TXT download is implemented and verified; approved snippets below.
-P13 (CAS layout), P17 (Dashboard layout) and P18 (operator failures/upstream verification)
-are authorized for implementation IN ORDER by the latest operator request. P13 is complete;
-P17 is complete; P18's pinned corrections and available upstream checks were completed,
-but the latest production run exposed further integration defects (review below); P19 is implemented and locally verified (test
-subprocess centralization/selection, with one initial startup timeout and a passing isolated
-rerun). The approved P1-P19 code changes are present; production acceptance FAILED and
-further corrective work remains, not merely an unperformed acceptance run. The newly proposed
-corrections below are NOT yet authorized, EXCEPT the subsequently approved surgical
-Mode-3 test-console injection documented below (now implemented and verified).
-Do not treat "implemented" as "accepted/ready". Non-elevate Pixi task edits require explicit
-per-change approval; see P18 authorization correction. P18 records integration work, not mere rollout acceptance.
-The full hermetic regression run passed (306 passed,1 skipped,3 excluded); subsequent
-Store/IPC/provisioning checks passed (28, overlapping the broad suite). Final Ruff and strict mypy
-passed after the last edits. The agent performed no production/operator/guest/network
-rollout. The operator subsequently supplied an unsuccessful acceptance run; findings below.
-Acceptance remains separate from implementation completion.
+2026-09-17: P1-P19's pinned code changes are implemented; the applicable local/delegated
+checks and their limitations are recorded below. The approved Mode-3 deterministic-console
+fix is also implemented and verified, with all assertions unchanged. All currently approved,
+concrete follow-up code changes are now implemented, including F3/F7 diagnostics, the real
+F4 browser/query regression and F8 Backend logs. Remaining blockers below are unresolved
+environment/runtime findings and production acceptance, not omitted pinned implementation.
+
+Production acceptance is NOT complete. Current retained follow-up status:
+- F1 NiceGUI isolation/preservation and F2 explicit Lima fixture: implemented, locally checked.
+- F4 completion helper/diagnostics and real browser/query regression: implemented; latest
+  delegated rerun PASSED the complete real-query contour (47.19s, exit0). Earlier filtering
+  and Backend readiness timeouts remain qualified below, not erased by the rerun.
+- F6 IPC diagnostics: implemented, locally checked.
+- F3 preload-before-privilege-drop was rolled back; original launcher restored. The reported
+  nobody/interpreter EACCES remains unresolved. That rejected workaround must not return.
+- F5 temporary DuckDB binary/config fixture was rolled back by the operator. Preserve the
+  existing configured-binary absence failure; do not reapply the synthetic replacement.
+- F7 operator's pixi-run variable failure remains unresolved on their Lima host. Local
+  activation tests pass, which does not invalidate their report. No ordinary task fix made.
+- F8 approved detailed Backend request/lifecycle/IPC logging: implemented; local logging and
+  API/cleanup regressions pass; real IPC startup/query/clean-close logs verified by elevate.
+  Direct-terminal full-HTTP serving still requires operator verification; original
+  operator-side disappearance cause not established.
+The rejected browser test that substituted query_snapshot_in_browser was removed, and the
+launcher regression's original15s timeout restored. Neither counts as completed coverage.
+A replacement root-launcher mechanism is not approved. The operator has now approved the
+failure-only diagnostics and real-browser verification scope pinned immediately below.
+F4 verification must not substitute the query helper it is meant to exercise. Preserve
+pre-commit wrapper structure and grep. No hidden handoff implementation remains.
+
+Do not conflate code implemented, upstream checks passed, and production acceptance.
+The retained follow-up is MOSTLY test/harness corrections, not "only test infrastructure":
+F6 changes production UI diagnostics. Production storage contamination is a real operator
+impact even though the proposed prevention is test isolation. Completed Backend processing
+in the original acceptance log does not certify production: card/artifact assertions were
+unreached and privileged watcher monitoring never started. The completion-guard correction
+now has a passing real browser/owned-IPC regression. No absence of additional production
+defects is established. P18's code corrections are implemented; the root-launch, configured
+DuckDB binary and operator-host activation findings remain unresolved.
+Non-elevate Pixi task edits still require explicit per-change approval; rejected pre-commit
+wrapper edits are NOT revived. Only the agent-owned elevate task may be adjusted for
+bounded delegated verification after the relevant corrections are approved and ready.
 
 The operator authorized implementation of all pending WORK, strictly narrowly as pinned.
 During implementation they added P12: first probe logs, then a whole-ui.py missing-emit_log
@@ -33,8 +53,10 @@ TASK + this WORK stand alone; HUMANS is a human-owned historical record, not ano
 verbatim backlog. The prior handoff/conversation reconciliation is complete. No hidden
 pending approved implementation items remain from that reconciliation.
 
-Git remains READ ONLY for the agent. The operator has staged some edits concurrently;
-none was staged/unstaged/reverted by the agent. Baseline at implementation start: dc951fe.
+Git remains READ ONLY for the agent. The operator stages/commits concurrently; agent review
+does not alter the index. The original follow-up review used ab8d761; the operator has since committed changes.
+dc951fe is the original
+implementation checkpoint, NOT the pre-change baseline for the Mode-3 investigation.
 Paths below are detour-relative unless explicitly marked repository-root-relative.
 
 Scope correction (2026-09-16): protected/src/llm_inference_api/sample_deploy is
@@ -43,6 +65,184 @@ specified. Its optional illustrative proxy is not production detour code. The op
 reverted the mistakenly included proxy/models/tests/launcher changes; review confirms no
 remaining staged or unstaged changes there and no in-scope dependency on those changes.
 Do not edit or run its tests. The conversion inventory below excludes it.
+
+## Approved follow-up implementation — complete; acceptance boundaries remain
+
+Operator authorized strictly the immediately preceding proposal/snippets:
+
+1. F3: preserve RunningWatcher's original Popen/preexec_fn and all three permission-test
+   bodies. On PermissionError only, add interpreter/resolved path/script/privilege-drop
+   details and owner/group/mode for interpreter/script path components (including symlink
+   targets). A small test-only watcher_runtime_path_details helper may report these.
+   Diagnostic failures must not replace the original exception. No preload, alternate
+   runtime, permission changes, skip or timeout change. This diagnoses EACCES; it does NOT
+   fix the unknown denied path/mount. Any actual runtime correction needs evidence/approval.
+
+   ```python
+   try:
+       self.process = subprocess.Popen(
+           command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+           stderr=subprocess.PIPE, text=True, preexec_fn=preexec_fn,
+       )
+   except PermissionError as exc:
+       exc.add_note(
+           f"Watcher interpreter: {WATCHER_PYTHON!r}; "
+           f"resolved: {Path(WATCHER_PYTHON).resolve()}; script: {SCRIPT}; "
+           f"privilege drop requested: {preexec_fn is not None}"
+       )
+       exc.add_note(watcher_runtime_path_details())
+       raise
+   ```
+
+2. F4: one focused test_ui_e2e regression, with named subprocess support in the EXISTING
+   shared plugin. Reuse synthetic source/config/Store setup; take initial real Store query,
+   append synthetic HTTP records through append_authoritative_record, then seed PRIVATE
+   NiceGUI storage with the earlier snapshot and completed run journal. Launch real
+   Dashboard with stopped queue; use real owned IPC-only startup/query/clean stop/storage
+   replacement. Isolate configuration inputs only; no substitute controller/query/helper,
+   fake success notification, pre-populated saved result, live Codex/SSH workflow, direct
+   derived-table SQL, new production hooks or timeout increase. Assert actual uppercase
+   innerText vs semantic Rerun and invoke existing wait_for_completed_grid_row, which must
+   call unchanged query_snapshot_in_browser. Verify expected commit, saved/OK fields,
+   exactly one request/replacement log and removed owned IPC socket. Snippet core:
+
+   ```python
+   assert execute.inner_text().strip() == "RERUN"
+   assert (execute.text_content() or "").strip() == "Rerun"
+   expect(history).not_to_contain_text(Locale.RUN_OUTCOME_SNAPSHOT_SAVED)
+   output_start = len(dashboard.output)
+   _, commit_id = wait_for_completed_grid_row(
+       page, dashboard, runtime, queued_at_monotonic=time.monotonic(),
+   )
+   assert commit_id == str(expected_commit_id)
+   expect(history).to_contain_text(Locale.RUN_OUTCOME_SNAPSHOT_SAVED)
+   expect(history).to_contain_text(Locale.SESSION_STATUS_OK)
+   output = "".join(dashboard.output[output_start:])
+   assert output.count("Requesting wholesale Backend query snapshot") == 1
+   assert output.count("Dashboard snapshot replaced:") == 1
+   assert not runtime.dashboard_socket_path.exists()
+   ```
+
+   Use existing ACTION_LABEL_BY_VALUE/RERUN mapping (proposal explicitly allowed this;
+   no new ACTION_RERUN locale constant). Parent fixture/assertions remain in test_ui_e2e;
+   child bodies are named helpers in pytest_plugin, following P19.
+
+3. F7: add sys.executable and ONLY PIXI_PROJECT_ROOT/CONDA_PREFIX/APPENDWATCH_PYTHON/
+   APPENDWATCH_SCRIPT prints with flush=True to existing watcher_import_process before its
+   unchanged check=True real watcher --help execution. Keep actual unset/stale-parent Pixi
+   regression and original15s bound. No speculative ordinary task rewrite. Operator-host
+   activation issue remains unresolved until host evidence identifies it.
+
+4. Verify applicable local Ruff/mypy/retained regressions first, then prepare bounded
+   Assistant-owned elevate selection for real browser/query, activation checks and original
+   privileged tests where root is available. Preserve its status aggregation/FAILED grep.
+   Do not claim prepared/delegated tests passed before returned logs. No production storage,
+   DuckDB prerequisite assertions, pre-commit wrapper or Backend/Store contract changes.
+
+5. F8 — added by operator during implementation: investigate missing Backend terminal
+   output and surgically emit missing logs. Operator clarified DIRECT terminal startup,
+   not Dashboard forwarding; then further clarified MISSING RUNTIME /pull and /push detail,
+   not merely startup. Review the existing HTTP middleware, pull/push lifecycle decisions,
+   commit/validation handoff and success/failure logs, plus CLI/IPC emission. Add detailed
+   operation/result/error logs at existing boundaries only. No business/lifecycle/permission changes, new
+   logging framework, production payload dumps, task rewrite or broad refactor. Existing
+   stdout/stderr forwarding, clean-close token and failure propagation must be preserved.
+   Fresh server import + existing basicConfig emits INFO correctly before/after Uvicorn
+   Config construction; no global suppression reproduced. Recent api.py revisions retain
+   evidence/result/error logging, but lack routine request/pull/push decision/progress logs.
+   Do not claim this proves why older detailed output stopped on the operator host.
+   Dashboard forwarding already emits every child line and stays unchanged.
+   Diagnose the actual suppression/gap before claiming a cause. Local logging regressions
+   and the approved real browser/IPC case should cover the changed emission boundaries.
+
+The pinned diagnostics, real-browser fixture/regression, and F8 log additions are now
+implemented. F3/F7 environmental blockers are not claimed fixed by diagnostic additions.
+The operator authorized this contour, not another permission/provisioning mechanism.
+
+Earlier verification failures (not current pending implementation): operator ran elevate while the F4
+fixture was being implemented. logs/from_operator/elevate.log (5008 bytes,18:24:56–18:25:10UTC)
+shows a NEW agent-introduced collection failure: test_ui_e2e imports test_ui.startup_files,
+but test_ui imported test_ui_e2e at module load. Pytest reported1 collection error in5.09s,
+exit1; none of the four activation cases or browser body executed. The local setup-only
+check independently caught the same cycle. Corrected by moving test_ui's sole browser
+module import into its consuming test (no test removal/skip). Local mypy also identified
+new helper import/constant callpoint errors; those were corrected.
+After correction, collection succeeds; the initial real fixture setup child exceeded its
+unchanged30s bound (64.15s total pytest, mypy running concurrently). Cause not established;
+fixture phase diagnostics added, with no timeout increase. The next local setup-only check
+exposed a synthetic-host fixture mismatch; using the existing model constants corrected it.
+The subsequent setup-only check passed (17.68s); it is not browser/IPC serving coverage.
+
+Earlier delegated elevate (18:31:59–18:34:32UTC,2026-09-17):1 FAILED,5 PASSED in139.38s;
+exit1. Existing browser contract passed; four real-Pixi unset/stale-parent launcher cases
+passed and printed correct interpreter/project/script variables. Root dispatch in those
+cases remains a sentinel, NOT real privileged monitoring or proof on the operator's Lima.
+The new real-query fixture setup succeeded (23.54s). Dashboard started/restored private
+storage and received the exact JSON NameKey search. Browser still saw24 rendered grid rows
+instead of1 at the unchanged5s assertion deadline; test failed BEFORE selection/completion
+helper/Query IPC. Dashboard and its child resource tracker stopped cleanly. No Ctrl+C,
+Backend startup, query or storage replacement occurred in this failed case. Browser call
+52.62s, contract47.66s; stage-specific timing was not captured, so no precise cause for
+those durations is established. This is not evidence of a Backend/IPC failure, nor proof
+that production filtering is correct. The fixture now additionally constructs real services,
+loads its private snapshot/journal, and checks real controller snapshots:307 unfiltered,
+exactly1 for the same JSON NameKey, completed/Rerun with no commit yet. No services start
+and no controller/query helper is substituted. The existing named child retains its30s
+limit. Local setup-only verification passed in17.26s; this proves fixture/filter behavior,
+NOT browser rendering or query IPC. Browser warnings/errors and assertion-failure input,
+rendered rows/page errors/server output now appear in diagnostics without replacing the
+original exception. Failure cause remains unestablished; no timeout/assertion relaxation
+or production filtering behavior change. Targeted elevate selected only this case.
+
+Next run (18:44:13–18:45:53UTC) FAILED:1 failure in83.50s. Filtering and completed/Rerun
+checks passed; the REAL completion helper clicked Query IPC. Owned IPC-only Backend missed
+its unchanged30s readiness deadline after config/source loading and entry into Store open.
+Dashboard stopped it with SIGTERM (return_code=-15, no clean-close acknowledgement), and
+the query helper failed promptly rather than waiting1800s. Deleted-slot notification
+exceptions followed browser teardown. No query response/storage replacement occurred;
+no Ctrl+C. Setup17.17s, browser call57.92s. No code/timeout change was made for this failure.
+
+LATEST rerun (18:47:59–18:48:56UTC) PASSED:1 passed in47.19s, exit0; setup11.89s,
+browser call32.26s. Actual rendered RERUN/semantic Rerun checks, real completion helper,
+owned IPC-only Backend, OPTIONS200/GET-query200,5-line replay/DB verification, wholesale
+307-person snapshot with1 accepted commit/1 outcome, saved/OK display, single replacement,
+clean-close acknowledgement/exit0/socket removal and source/replay/DB byte-preservation
+assertions all passed. Dashboard also stopped cleanly. No warning/error/traceback in this
+successful log; repeated absent-socket availability lines precede successful readiness and
+are expected polling, not another failure. Existing browser contract and four activation
+cases already passed in the earlier batch; they were not repeated.
+
+Operator notes this is a weak machine and accepts timing flakiness. Read-only host checks
+after the failed run showed ~961MiB RAM, ~787MiB swap in use and recent memory/CPU pressure;
+these support resource contention as plausible, not proof of its exact causal contribution.
+No timeout increases, retries, assertion weakening, skipped prerequisites or production
+filter/startup changes. No further diagnostic startup helper/test or performance refactor
+was added before the operator stopped investigation and reran. No further repeat requested.
+
+Current local checks:
+- F8 API/middleware/pull decisions, IPC query and Store cleanup selection:22 passed,
+  162 deselected (9.39s). Initial20pass/2fail exposed an unnecessary new log attribute
+  access in minimal cleanup fixtures; removed the attribute read, tests unchanged.
+- F3 failure-only EACCES diagnostics plus F7 actual task activation and standalone import:
+  7 passed,43 deselected (22.29s); original15s bound retained. Original nobody/root cases
+  unchanged and still require actual privileged execution.
+- Operator preflight full non-operator selection:23 passed (71.89s).
+- Final Ruff PASS; strict mypy PASS54files (detour plus shared HttpRequestLogRecord);
+  git diff HEAD --check PASS. TOML parsing and elevate Bash syntax PASS; task-map comparison
+  confirms ONLY elevate differs from HEAD, ordinary tasks unchanged.
+- After narrowing elevate, its real-shell failure/FAILED-reporting cases and existing
+  browser-fixture callback consumer:4 passed,217 deselected (16.31s). This also exercises
+  the corrected local browser-module import; no browser serving claim.
+No production payload dumps, response/schema/state changes, logging reconfiguration or
+ordinary task changes. No local checks remain running. The requested targeted browser
+verification is now complete; root monitoring and final production acceptance remain.
+
+Verification mistake disclosed to operator: a direct Python importlib.find_spec lookup of
+nicegui.persistence.file_persistent_dict imported parent NiceGUI outside the early test
+isolation hook while inspecting installed source. Default storage may have been accessed;
+no assertion of preservation can be made for that command. No default/production storage
+inspection or cleanup followed. Subsequent NiceGUI execution must use the isolated pytest
+hook/private child environment, and installed-source reads must not import the package.
 
 ## Completed scope index
 
@@ -65,18 +265,22 @@ Do not edit or run its tests. The conversion inventory below excludes it.
 | P15 | Operator test moves preserved; import, constant and fixture collisions corrected | test_ui.py, test_audit_read.py, test_backend_store.py |
 | P16 | Markdown/TXT button shares DOCX download contour; symmetric format-specific handles/selectors | ui.py, locale.py, existing UI tests |
 | P17 | Header grouping, horizontal DOCX/Markdown buttons, localized queue-processing labels | ui.py + protected Dashboard locale |
-| P18 | Operator fixture/query/queue corrections, watcher interpreter, shared lint, full check-graph review and targeted elevate verification | Operator helpers/tests, architecture.py, two approved task substitutions + elevate; root/production verification pending |
+| P18 | Original operator fixture/query/queue corrections, watcher interpreter, shared lint and graph review | Approved code implemented; F4 real query/browser check passed; F3/F7 diagnostics implemented, runtime findings unresolved; F5 replacement withdrawn; production acceptance pending |
 | P19 | Named subprocess helpers, shared explicit fixture and selectable markers; preserved isolation/timeouts | protected/tests/pytest_plugin.py + existing test callpoints |
 
-## Latest production log review — 2026-09-17; corrective proposals NOT yet approved
+## Latest production log review — 2026-09-17; partial follow-up implementation
 
 CRITICAL operator finding, confirmed by source tracing and isolated reproduction: tests
 write into PRODUCTION NiceGUI storage. A subsequent normal Dashboard launch displays test
 snapshot/run data although the isolated test replay log no longer exists. This violates
 test isolation; Dashboard's intentional snapshot autonomy does not excuse contamination.
-Investigation/proposal only is authorized by this request; do not read, delete, reset or
-repair production NiceGUI storage or production data. Surgical proposal is pinned below;
-it has NOT been implemented. Do not recommend another operator run before isolating storage.
+F1 prevention is now approved; do not read, delete, reset or
+repair production NiceGUI storage or production data. Surgical approved scope is pinned below;
+F1 prevention is now implemented; local isolation checks pass. Real browser/root verification
+remains below. Existing contaminated production storage has not been touched.
+
+The incident descriptions below refer to the failed-run baseline, not a claim that the now-
+corrected code remains unchanged. Current F1-F7 implementation/check status follows them.
 
 Operator reran pixi run pre-commit-operator and supplied logs/from_operator/pre-commit.log
 (88385 bytes) and pre-commit-extra.log (1277562 bytes). Reviewed stages, timestamps,
@@ -85,7 +289,7 @@ execution were made during this review. This supersedes the previous "next: acce
 recommendation. Do not request another expensive complete run before addressing these
 findings with approved scope and upstream regressions.
 
-### Critical NiceGUI isolation failure — verified cause and narrow proposed fix
+### Critical NiceGUI isolation failure — incident baseline and implemented correction
 
 NiceGUI's Storage.path is fixed DURING IMPORT from NICEGUI_STORAGE_PATH, defaulting to
 cwd/.nicegui. Its global app constructs FilePersistentDict for storage-general.json, and
@@ -100,7 +304,7 @@ file path; tests must unset it before import rather than touching the operator's
 | Operator running_dashboard | Copies environment, cwd=repository_root, no storage override. Temporary config/DB/replay/CAS paths do not affect NiceGUI. Actual test query overwrites the production snapshot and queue/run events use the same production file. |
 | test_ui_e2e browser launches, both context-manager and standalone contract path | Also copy environment and run from repository root with no override. Stub controller avoids domain writes, but real NiceGUI import still accesses production persistence. |
 | test_ui in-process tests | isolated_general_storage replaces app.storage._general with a dict only at fixture setup, AFTER test module import has loaded NiceGUI. It protects test-body writes, not import-time access. |
-| Shared socketless_dashboard_lifecycle child | Fresh NiceGUI import inherits default storage settings. Substituting serving/services does not isolate framework persistence. |
+| Shared socketless_dashboard_lifecycle and operator-fixture bootstrap children | Fresh Dashboard/NiceGUI imports inherit default storage settings. Substituting serving/services or stopping before serving does not isolate framework persistence. |
 | Collection/other detour imports of Dashboard | Can initialize NiceGUI before any per-test fixture. Shared pytest plugin currently provides no early storage isolation. |
 | Blanket isolated_lima_configuration autouse fixture | Imports Dashboard for every non-operator test, including standalone appendwatch tests. This unnecessarily exposes unrelated tests to Dashboard dependencies and, when imports succeed, NiceGUI persistence. Narrow fixture applicability is proposed below. |
 
@@ -124,7 +328,7 @@ storage, production data, server, browser, sockets, network or privilege escalat
   retained test state; a second test directory began empty. Synthetic default sentinel
   stayed byte-for-byte identical across all isolated launches. All five subprocesses exited0.
 
-Proposed test-only scope (await approval): existing protected/tests/pytest_plugin.py,
+Approved test-only scope (F1): existing protected/tests/pytest_plugin.py,
 protected/tests/operator/test_operator_e2e.py, tests/control_centre/test_ui_e2e.py,
 relevant existing test_ui.py/operator-preflight regressions, and WORK. No production
 storage model/UI/config/schema/CLI changes and NO pyproject task changes.
@@ -174,8 +378,9 @@ storage model/UI/config/schema/CLI changes and NO pyproject task changes.
    ```
 
    Both browser launch paths explicitly use the nicegui_storage_path fixture through that
-   helper; socketless_dashboard_lifecycle passes its fixture path/environment to the existing
-   PythonProcess runner. Same operator runtime may restart using the same isolated storage;
+   helper; socketless_dashboard_lifecycle and the named operator-fixture bootstrap pass their
+   fixture path/environment to the existing PythonProcess runner. Same operator runtime may
+   restart using the same isolated storage;
    separate tests get different roots. Do not alter repository cwd/import resolution to
    solve a storage path issue, reset HOME, clear general storage, or copy/restore prod data.
 
@@ -197,176 +402,61 @@ Existing contaminated operator storage is not automatically distinguishable from
 data by presence/absence of a replay file. It has NOT been examined or cleared. Any cleanup
 requires separate explicit instructions; no blanket deletion or silent fallback is proposed.
 
-### Additional pasted failures — investigated, corrections awaiting approval
+### Mode-3 follow-up — completed, NOT pending scope
 
-The operator then supplied a macOS Mode-3 assertion failure and a separate Linux sudo
-appendwatch invocation. These are distinct from the preceding production log's EACCES.
-Initially only investigation/documentation was requested. The operator subsequently approved
-ONLY the Mode-3 deterministic-console injection below; the sudo proposals remain unapproved.
+Operator reported a real failure of test_detour_contract_and_mode3_stats_readonly and
+required causal investigation before any change to unrelated-detour assertions. Baseline
+for that investigation is aicode/staging (ef5ddef898b4dd5fcd1846acd24f6904f8a37c64), NOT
+this task's dc951fe implementation checkpoint. Do not infer a historical test failure
+from old-source execution with current dependencies; the operator reports previous passes.
 
-**Mode-3: approved deterministic test-console injection implemented and verified.**
-Operator explicitly rejected treating this as a test-only correction: investigate recently
-introduced AI-augment/shared code and fix the responsible change, not unrelated-detour
-behavior or assertions. After the causal comparison and independent no--s verification,
-the operator rejected changing the assertion and explicitly approved pinning this test's
-real console to80 columns: "apply this surgical change and check it it works".
-Normalization/80-and92 parametrization and suite-wide configuration are NOT approved.
-Controlled execution now establishes that terminal width alone changes the unchanged
-test's outcome, and default pytest FD capture masks this difference. No introducing
-AI-augment code change was found. Only the approved test setup changes; production Mode-3,
-its assertions, task definitions and dependencies remain untouched.
-Operator specified the authoritative pre-change baseline: aicode/staging, currently
-ef5ddef898b4dd5fcd1846acd24f6904f8a37c64. dc951fe is NOT the pre-change baseline for this
-investigation; the latest-batch-only diff was insufficient and cannot exonerate the branch.
-Staging was compared without switching branches or touching the index.
-At repository-root tests/test_detours/test_detour_mode3_pgf_stats.py:328, the test expects
-"full normalized string first" contiguously in ANSI-stripped output. The actual table
-contains "full" followed by newline/indentation and "normalized string first". The
-canonical methodology text is intact, and the test separately asserts metadata content.
-No statistics-calculation or DB-write failure was established. The full real test, including
-its later metadata/counts/DB-preservation assertions, passes in the 80-column controls below.
+Cause was isolated with real pytest/synthetic DBs and actual temporary PTYs, COLUMNS/LINES
+unset, no renderer mocks. Before the correction:
 
-Local reproduction, using the real synthetic fixture and existing default-environment
-interpreter through outer pixi run -e detour-ai-augment: the exact single test failed at328
-with COLUMNS=92 (3.32s), and also with COLUMNS=160 (2.03s). Widening output is not a fix.
-A separate real run_detour diagnostic against a temporary synthetic DB confirmed:
-success=True; raw phrase absent; whitespace-normalized phrase present; metadata phrase
-present. Captured fragment: 'it then tries the full     \n                                normalized string first'.
-No production data, NiceGUI, sockets or network used. No claim that the failed test reached
-its later DB-preservation assertions; the diagnostic only verifies the stated boundaries.
-
-The normalization diagnostic is evidence only, not the current proposal. The operator's
-latest direction is to preserve the assertion and pin the test renderer configuration;
-the exact test-console injection below is now explicitly approved.
-Preserve production Mode-3, every test assertion and the normal invocation; do not force
-a wider terminal globally, weaken
-assertions or modify other-detour behavior to conceal a recently introduced regression.
-The source/dependency/invocation comparison and controlled results follow.
-
-Staging comparison completed: extracted only staging's Mode-3 module, complete shared
-helpers, matching test/conftest and pyproject into an owned temporary directory with
-git archive (read-only Git; no checkout/index changes). With COLUMNS=92 and the CURRENT
-installed default interpreter/dependencies, staging's exact test fails at its corresponding
-line321 on the SAME phrase (1 failed,3.59s). No AI-augment code/plugin is present in that
-temporary source tree. This narrows causality but is NOT a reproduction of staging's full
-historical runtime and does not justify closing the report or changing Mode-3.
-In particular, do NOT state that Mode-3 failed historically: the reproduction establishes
-only what the old source does in today's dependency environment at the selected width.
-
-Decisive follow-up used REAL temporary pseudo-terminals with COLUMNS and LINES unset,
-real pytest/the unmodified test, and only temporary synthetic DB fixtures. No mocking or
-global environment changes. Within each pair ONLY PTY width changed:
-
-| Source / invocation | 80-column PTY | 92-column PTY |
+| Source / invocation (same current installed dependencies) | 80-column PTY | 92-column PTY |
 |---|---|---|
-| Current HEAD, pytest -q (default FD capture) | PASS,2.28s | PASS,1.82s |
-| Current HEAD, actual task flags -vv -srA | PASS,2.27s | FAIL at phrase,2.04s |
-| aicode/staging source, original task flags -vv -s | PASS,2.26s | FAIL at phrase,1.98s |
+| Current code, default FD capture (-q) | PASS | PASS |
+| Current code, actual task flags (-vv -srA) | PASS | FAIL at the phrase assertion |
+| Isolated staging source, original flags (-vv -s) | PASS | FAIL at the same assertion |
 
-Same installed default Python/dependencies for all six cases. The staging source tree
-contains NO AI-augment code or pytest plugin. The earlier explicit COLUMNS controls also
-passed at80 and failed at92; these real-PTY cases confirm no environment-width override
-is necessary to trigger the operator-style failure.
+Rich's default Console reads terminal geometry; with -s, capsys still leaves the underlying
+terminal FDs available. At92 columns, the methodology phrase wraps between "full" and
+"normalized string first"; the contiguous substring assertion fails. Default pytest FD
+capture hid the geometry and produced the80-column fallback in the local checks. This was
+a verification gap: use the real task invocation, not just a passing captured run.
 
-Mechanism traced in installed Rich console.py: default Console derives width from standard
-terminal FDs (or COLUMNS when set), falling back to80 when unavailable. The task's -s keeps
-the terminal FD available. The test's capsys captures Python stream output but does not
-erase the underlying terminal geometry; the methodology table wraps to that width. At92,
-the phrase becomes 'full' + newline/indentation + 'normalized string first'. _strip_ansi
-does not remove that whitespace; the contiguous substring assertion fails. Default pytest
-FD capture instead redirects the terminal FDs, hiding geometry and yielding the80-column
-fallback in this controlled setup. That is why the Assistant's captured local checks were
-insufficient preparation for the actual task invocation. Do not fix by changing task flags,
-forcing global terminal width, or suppressing the test.
+The renderer, console construction, methodology notices and run_detour are identical to
+staging; the Rich14.3.4 wheel lock record/hash is identical too. No introducing AI-augment
+production-code change was identified. The complete old runtime was not recreated; these
+results explain coexistence of passes/failures, not the exact historical terminal width.
 
-This demonstrates how previous genuine passes and the supplied failure can coexist with
-unchanged code/dependencies: rendering geometry differs. It does NOT establish the exact
-width of the operator's historical session or assert that a historical run failed.
+Operator explicitly approved ONLY injecting a deterministic REAL80-column Rich console
+into this particular test. Whitespace normalization, changed assertions, 80/92 test
+parametrization, global COLUMNS, shared pytest-console configuration, dependency pins,
+production-code changes and task-flag changes were NOT approved and were not applied.
 
-Operator supplied historical acceptance reference cf853359924518b0421882d81dfc493838016e48
-(2026-06-05), an ancestor of both staging and HEAD. Read its full commit body:
-"Confirmed working and / pre-commit-repl all good." This records a successful historical
-pre-commit-repl run. Checked that commit's actual task graph: pre-commit-repl -> lint +
-test-repl -> pytest . (ordinary and real_api selections); its norecursedirs explicitly
-excludes tests/test_detours. Mode-3 was selected by separate test-detours, included in
-pre-commit but NOT pre-commit-repl. Therefore this particular recorded command is not
-specific Mode-3 pass evidence, and equally does NOT establish a historical Mode-3 failure.
-The operator reports prior success; preserve that report and investigate the regression
-without using today's old-source failure to contradict it.
+Approved implementation in repository-root tests/test_detours/test_detour_mode3_pgf_stats.py:
 
-Against staging, Mode-3/schema test differences concern namekey/innerdict table migration.
-Exact-source comparison confirms console construction, all three methodology notices,
-_print_summary and run_detour are unchanged. The generic test command changed from
--vv -s to -vv -srA; both retain -s (the added -rA is summary reporting), not a capture-mode
-change. Current/old lockfiles both pin Rich14.3.4 and markdown-it-py4.2.0. The COMPLETE Rich
-package lock record is identical, including wheel SHA256
-07e7adb4690f68864777b1450859253bed81a99a31ac321ac1817b2313558952. Other default
-runtime differences DO exist: Python3.14.3 ->3.14.2, pytest9.0.3 ->9.1.1,
-Pygments2.20.0 ->2.21.0, Pydantic2.13.4 ->2.13.5, and DuckDB1.5.1 moved from PyPI to Conda.
-No causal link to one of these changes has been demonstrated. Investigation performed no
-package install/downgrade, network access, global environment change, task edit or Mode-3
-edit. The subsequent authorized test-only correction is documented below.
-Do not present current-dependency staging execution as an exact historical acceptance run.
-The failure mechanism is now demonstrated, not an unresolved guess about dependency changes.
-The correction below is now implemented and verified. Overall production
-readiness must not be claimed while the other reported failures remain. No evidence
-supports inventing an AI-augment production-code correction to unrelated Mode-3 rendering.
+```python
+from rich.console import Console
+from src.detours import detour_mode3_pgf_stats as mode3
 
-#### Mode-3 approved correction — completed and verified
+# Existing test gains only the monkeypatch: pytest.MonkeyPatch parameter and this line:
+monkeypatch.setattr(mode3, "console", Console(width=80))
+# Every original assertion is unchanged, including:
+assert "full normalized string first" in plain
+```
 
-Operator independently confirms the current test passes without -s, requests a remedy,
-then prefers pinning the working configuration rather than modifying the assertion.
-Keep -s and ALL task definitions unchanged: removing it hides terminal geometry rather
-than resolving the assertion's incidental dependence on layout. Preserve production
-Mode-3 code, report formatting and all structured metadata/count/DB-preservation checks.
+Exactly four source-line additions, plus WORK. Pytest restores the module binding afterward;
+normal production rendering remains terminal-responsive. Verification after the change:
+- Entire synthetic Mode-3 module/default capture:6 passed in16.67s.
+- Modified test with actual -vv -srA and real PTYs:80 columns1 passed in10.36s;
+  92 columns1 passed in5.73s. These overlap the six above; counts are not additive.
+- Ruff PASS; default-environment mypy PASS (1 source file); git diff HEAD --check PASS.
+The operator committed this as ab8d761; agent Git use remained read-only. This closes the
+narrow Mode-3 fix, not the unrelated acceptance failures below.
 
-Approved file boundary: repository-root
-tests/test_detours/test_detour_mode3_pgf_stats.py and this WORK ONLY. This exact test setup
-change is explicitly authorized; no broader exception to the prior scope is inferred.
-
-1. Keep EVERY assertion, including the failing one, exactly unchanged. No whitespace
-   normalization, _strip_ansi changes, new parameterization or changed expected content.
-2. Pin only this test's real Rich Console to80 columns. Explicit renderer configuration
-   makes the report-format assumption stable regardless of terminal geometry or capture.
-   Pytest monkeypatch restores the prior module console binding afterward. No fake
-   renderer, calculation, config, DuckDB, output or returned result:
-
-   ```python
-   from rich.console import Console
-   from src.detours import detour_mode3_pgf_stats as mode3
-
-   def test_detour_contract_and_mode3_stats_readonly(
-       detour_fixture: tuple[Path, Path, dict[str, int]],
-       capsys: pytest.CaptureFixture[str],
-       monkeypatch: pytest.MonkeyPatch,
-   ) -> None:
-       monkeypatch.setattr(mode3, "console", Console(width=80))
-       # ALL existing body/assertions retained unchanged, including:
-       # assert "full normalized string first" in plain
-   ```
-
-   This establishes a canonical80-column layout for this test; it does NOT claim that
-   production output has the same line breaks at92 columns. Production remains responsive
-   to its actual terminal. Do not set COLUMNS globally or pin dependency versions.
-3. Verify the unchanged assertions with actual task flags -vv -srA in real80/92-column
-   PTYs and default capture, then this synthetic module and applicable Ruff checks.
-   No new subprocess harness, dependencies, deployment/operator run, production data or
-   task/environment workaround.
-
-Implemented exactly: two imports, the existing test's monkeypatch fixture parameter, and
-one real Console(width=80) injection. Every assertion and the remainder of the test body
-are unchanged. No repository-root conftest, COLUMNS override, parameterization, production
-code change or task edit. The operator's concurrent staging is preserved; agent Git use
-remained read-only.
-
-Verification after this change (all through outer pixi run -e detour-ai-augment):
-- Full synthetic Mode-3 module with installed default Python/default pytest capture:
-  6 passed in16.67s; includes real module entrypoint and DB-preservation assertions.
-- Modified test with actual -vv -srA flags, COLUMNS/LINES unset, real temporary PTYs:
-  80 columns:1 passed in10.36s;92 columns:1 passed in5.73s. These overlap the six above;
-  the previously failing92-column invocation now passes without altering the assertion.
-- Ruff on the test module:PASS. Default-environment mypy:PASS,1 source file.
-- git diff HEAD --check:PASS. The code diff is only the four additions described above.
+### Additional privileged invocation — separate setup failure, still unresolved
 
 **New sudo run: default environment plus unnecessarily broad fixture dependencies.** The
 pytest header explicitly identifies .../envs/default/bin/python, not detour-ai-augment.
@@ -389,18 +479,18 @@ The shared plugin's isolated_lima_configuration is autouse for all non-operator 
 imports dashboard.ui at577; ui imports FastAPI at26. Standalone appendwatch tests need no
 Lima/Dashboard setup. Merely replacing the UI import with ai_augment_context is insufficient
 to remove the dependency: that context imports Backend api (FastAPI) and pasted models
-(pydantic-extra-types). Proposed surgical test-only correction is to make this fixture
+(pydantic-extra-types). The now-implemented F2 correction makes this fixture
 explicitly applicable to its actual consumers, preserving their isolation and the existing
 mock-free startup-class override, while standalone watcher tests do not request it. Audit
-consumers before applying; do not special-case test filenames, skip real cases, or substitute
+consumers during implementation; do not special-case test filenames, skip real cases, or substitute
 the fixture's whole production dependency graph. Keep this separate from early NiceGUI
 storage isolation, which is still required for legitimate Dashboard consumers.
 
 Even with the correct AI environment and fixture scoping, the earlier production failure
-remains: nobody cannot exec the cached AI interpreter (EACCES). These reports failed at
+remains: exec of the cached AI interpreter after dropping to nobody failed with EACCES. These reports failed at
 different boundaries; neither exercised permission-monitoring assertions. The proposed
-nobody-accessible isolated test launcher in the corrective follow-up below still requires approval and
-actual post-drop verification. Do not chmod the operator's home/cache or run the watcher
+load-before-drop bootstrap F3 was subsequently rejected and removed; no replacement
+mechanism is approved yet. Do not chmod the operator's home/cache or run the watcher
 as root to make permission tests pass.
 
 Upstream lesson: selected tests include their entire fixture/import graph, not only their
@@ -459,9 +549,8 @@ post-query snapshot status), explaining why operator output offered no useful di
 Main tests/test_duckdb_extensions.py uses _FakeConn to force BOTH repository attempts to
 fail, hardcodes linux_arm64, then reads the real config/default binary path without supplying
 a temporary binary. This is a nonhermetic test setup defect, not evidence that normal
-community loading is broken: other tests log successful community loads. Fix proposal is
-a temporary config+binary fixture through the real config reader, not silently rewriting
-production configuration or installing a missing artifact to satisfy a fake-connection test.
+community loading is broken: other tests log successful community loads. The temporary config/binary proposal was withdrawn by the operator; the existing check
+must continue to expose the configured binary absence. No replacement fix is approved.
 
 ### Other log inconsistencies/noise
 
@@ -486,35 +575,228 @@ production configuration or installing a missing artifact to satisfy a fake-conn
   they are not new hard failures. Unchanged wrapper grep/status limitations remain; no new
   permission to change pre-commit tasks. Read the per-stage results rather than wrapper status.
 
-### Proposed narrow corrective follow-up (await approval; not new approved P scope)
+### Current corrective scope F1-F7 — reconciled with operator rollbacks
 
-1. Operator completion helper: compare semantic button text (text_content/default Playwright
-   text assertion), preserve explicit one-shot wholesale Query IPC and completion ordering;
-   phase-specific heartbeat reports actual unmet guards. Add an upstream browser regression
-   invoking this helper against the real NiceGUI button and stale-then-refreshed synthetic
-   snapshot, without live Codex; include failure/timeout diagnostics. Do not increase1800s
-   or startup timeouts, add automatic production queries, or alter Backend finalization.
-2. Root watcher launcher fixture: choose an isolated, genuinely nobody-accessible interpreter
-   plus its Pydantic/shared-model dependencies and verify actual post-drop execution before
-   permission cases. Concrete setup still needs approval; do NOT chmod the operator's home
-   or cache, weaken watched-tree permissions, run watcher as root instead, or edit the root
-   Pixi task beyond existing authorization. Prior Conda switch was insufficient in this layout.
-3. Make the config-path DuckDB fallback test hermetic using temp config/binary with the
-   existing fake connection. This touches a main-suite test outside prior implementation scope;
-   obtain approval. Keep genuine configured-binary integration coverage separate/explicit.
-4. Consider only the narrowly identified log-wording issues above; any production logging
-   change beyond prior pinned edits needs approval. No pre-commit task changes are proposed.
-5. For the additional pasted failures: Mode-3's exact real80-column test-console injection
-   is now implemented and verified, with every assertion
-   unchanged. No broader Mode-3/global-test change is approved. Scoping the
-   Lima fixture to actual consumers remains a separate proposal awaiting approval, not
-   silently added implementation. Correct environment selection alone fixes neither the
-   blanket fixture coupling nor the separate post-drop EACCES.
+P1-P19 and the Mode-3 console correction remain implemented. F1-F6 were originally approved,
+then the operator withdrew F3's preload solution and F5's synthetic binary/config fixture,
+and requested removal of the substituted-query browser test and timeout increase. These
+latest instructions supersede their prior approval; do not resurrect the removed changes.
+Backend/Store/replay, queue/final-pull/outcome and wholesale-query contracts are unchanged.
 
-The reviewed integration gaps should have upstream coverage BEFORE another expensive
-operator run. Previous helper tests covered first-query setup and queue Start, not this
-post-completion real-DOM text guard; launcher sentinels explicitly did not cover privilege
-drop. Preserve these coverage distinctions instead of claiming prior passing tests proved them.
+| ID | Scope | Current status |
+|---|---|---|
+| F1 | Early NiceGUI test storage isolation, per-child paths, production-storage preservation guard | Implemented; local real-persistence/wiring and isolated real browser/query checks passed; full production operator rerun pending; contaminated storage untouched |
+| F2 | Explicit Lima fixture for Dashboard consumers only | Implemented; independent watcher import and existing UI checks passed |
+| F3 | Diagnose privileged watcher launch failure | Approved failure-only diagnostics implemented and tested; original privilege-drop launcher/three cases preserved; actual denied path and runtime correction unresolved |
+| F4 | Completion text comparison, wait diagnostics and synthetic-record wording | Implemented; real completion/helper/owned-query/wholesale replacement browser regression PASSED; earlier timing failures retained in evidence |
+| F5 | Configured DuckDB fallback binary absence | Synthetic replacement withdrawn; test unchanged, missing prerequisite still causes failure |
+| F6 | IPC availability diagnostic wording/path | Implemented; focused checks passed |
+| F7 | Investigate/fix operator task-variable availability | Not reproduced locally; safe activation regressions retained with original15s bound; operator-host issue unresolved |
+| F8 | Restore detailed direct-terminal Backend operation logs | Implemented; local API/logging/cleanup and real IPC emission checks passed; full direct-terminal HTTP verification and disappearance cause not established |
+
+#### F1 — NiceGUI test storage (implemented; local checks passed)
+
+Use the exact early-isolation/environment-helper shape pinned in the critical-storage
+section above. No new pytest plugin or production setting. Configure an owned private
+session NICEGUI_STORAGE_PATH before collection imports; unset NICEGUI_REDIS_URL. Fail
+if NiceGUI already imported rather than pretending isolation was early enough. Save only
+the original resolved file-storage PATH in typed Config stash for the operator guard.
+
+Every real Dashboard/browser child gets a per-test private path through the ONE shared
+nicegui_test_environment helper. Includes both browser Popen sites, running_dashboard,
+socketless_dashboard_lifecycle, and the named operator-fixture bootstrap child which imports
+operator workflow/Dashboard. Same-test restarts reuse their private path; different tests
+must not inherit each other's state. Keep the existing per-test in-memory UI fixture.
+
+Extend the existing operator production_data_unchanged file-tree guard to the ORIGINAL
+file-based NiceGUI path, detecting absent-before/created-after too; log exact protected
+paths and the test storage path. Local regression uses only a synthetic operator-storage
+sentinel. Do not inspect/clean production NiceGUI here, copy it into tests, clear it, reset
+HOME/cwd, or connect to production Redis. This prevents future contamination; existing
+operator storage cleanup needs separate instructions.
+
+Coverage: real framework import/persistence, early collection, child environment wiring,
+same-test restart, separate-test emptiness, inherited env overrides, preservation sentinel
+and owned-directory cleanup after child shutdown. P19 named helpers/runner, no inline
+Python bodies or mocked persistence. No browser/operator run before this isolation is in place.
+
+#### F2 — Narrow Lima fixture applicability (implemented; local checks passed)
+
+Remove autouse=True from isolated_lima_configuration; request it explicitly for the existing
+Dashboard test consumers, preserving their previous isolated configuration. The test_ui.py
+module can select it with usefixtures; its TestBackendStartupConditions override still
+resolves to the existing no-op. Other actual consumers, if any, must request it explicitly;
+no filename/marker heuristics and no new skip/fallback. Standalone watcher/API/audit tests
+must not import Dashboard merely to initialize an irrelevant fixture.
+
+```python
+@pytest.fixture  # no longer global autouse
+def isolated_lima_configuration(
+    request: pytest.FixtureRequest,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ...  # Existing body, except the import/constant change described below.
+
+# Explicit selection at the Dashboard test consumer; preserve any existing marks:
+pytestmark = pytest.mark.usefixtures("isolated_lima_configuration")
+```
+
+Within that fixture remove its UI import and use the already-imported context module's
+LIMA_APPENDWATCH_REPORT_PARAM. Context itself still imports FastAPI/pasted models, so this
+import simplification alone is NOT the fix; narrowing applicability is essential. Do not
+install Dashboard dependencies into default to conceal the coupling. The existing root
+Pixi task already selects the AI environment; the pasted manual default-env command was a
+separate wrong-environment invocation, not permission to rewrite tasks.
+
+Coverage: isolated appendwatch collection/setup imports no Dashboard/NiceGUI; Dashboard
+consumers retain isolation; the real startup class remains free of the Lima substitution.
+Use isolated child checks without executing privileged or socket operations here.
+
+#### F3 — Privileged watcher startup: unresolved, rejected workaround removed
+
+Original preexec_fn/drop_privileges launcher and all three original permission-test bodies
+are restored exactly. No watcher_permission_process helper or private-interpreter preload
+case remains. The cached interpreter EACCES reported on PROD remains an actual blocker;
+F2 only removes the unrelated Dashboard dependency during fixture setup. Do not claim root
+monitoring was verified or replace real non-root startup with preloaded dependencies.
+A different corrective mechanism needs a narrow proposal and explicit approval first.
+Failure-only path/interpreter diagnostics were subsequently approved and implemented as
+pinned above. Path resolution/stat failures are guarded so they cannot replace EACCES.
+The two added real nonexecutable-interpreter cases verify diagnostics, not nobody execution.
+
+#### F4 — Operator completion wait and harness messages (implemented; real browser check passed)
+
+In wait_for_completed_grid_row, keep the completed-status/action/View-card guard and the
+single explicit post-completion wholesale Query IPC. Replace only presentation-dependent
+button inner_text with semantic text_content:
+
+```python
+action_text = (execute.text_content() or "").strip()
+# Existing guard uses action_text == ACTION_LABEL_BY_VALUE[...RERUN...].
+```
+
+Quasar uppercases rendered innerText; it does not uppercase textContent. The diagnosis is
+source-backed; actual DOM values were not captured in the failed operator log. Secure it
+with an upstream REAL browser regression invoking this existing helper against a real
+NiceGUI button/stale-then-refreshed synthetic snapshot, without live Codex. Do not accept
+arbitrary button text or alter production button styling to satisfy the harness.
+
+Existing heartbeat/timeout logs must identify the actual phase and unmet conditions:
+run status, semantic action text, View-card enabledness, whether the one query was sent,
+commit ID presence, savedness and session status when applicable. Keep the10s heartbeat and
+1800s overall deadline; no timeout increase or new watchdog. Ensure the existing
+savedness-wait branch cannot bypass the common heartbeat via an early continue. Preserve
+failure/cancellation handling and outcome/Backend shutdown ordering.
+
+In wait_for_gone_pull ONLY, describe synthetic POST /commit and /validate records with null
+response fields as "request-only record; response fields intentionally null", not "no
+response". Leave genuinely absent provider responses distinguishable. This wording lives
+in the operator harness, NOT the Backend/Store, so no production HTTP-record changes.
+
+Coverage: real rendered-uppercase/semantic-Rerun behavior, one query only, success after
+snapshot refresh, existing failure handling, and informative waiting/timeout diagnostics.
+No automatic production query, card gating, Backend finalization or timeout changes.
+
+#### F5 — DuckDB fallback prerequisite: synthetic replacement withdrawn
+
+Repository-root tests/test_duckdb_extensions.py is unchanged. The existing config-path
+fallback test continues to expose absence of the configured extension binary. The neighboring
+real-binary test already skips an absent binary; it is not replacement prerequisite coverage.
+Do not reintroduce a temporary config or b"fixture" binary into the existing config-path
+check. No replacement code/config/install change is currently approved for this finding.
+
+#### F6 — Accurate IPC availability logs (implemented and verified)
+
+Only _BackendDatabaseClient.available in ui.py: distinguish FileNotFoundError and include
+the socket path; retain detailed error logging for every other failure. Every explicit
+Probe action/outcome remains emitted. Same requests, timeouts, return values and retries:
+
+```python
+except FileNotFoundError as exc:
+    emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX,
+             f"IPC unavailable; socket not present: {self._socket_path}; {exc!r}")
+    return False
+```
+
+The existing general OSError/HTTPException branch retains error reporting, adding the path.
+No quiet/log flags, new logging interface, per-poll suppression or readiness orchestration.
+Do not label absence as startup-only: this method also serves explicit Probe and borrowing.
+
+#### F7 — Task environment-variable availability (reported issue unresolved on operator host)
+
+Operator reports test-detour-ai-augment-root required pixi shell first. Trace actual Pixi
+activation, command expansion and shell boundaries with a sanitized parent environment and
+safe command sentinels (no sudo/network/live workflow). Correct the proven defect in that
+task and any other task with the same problem, without broad task restructuring, new flags,
+changing task selections or dropping grep. Record precise finding and test actual task
+commands under unset and stale parent CONDA_PREFIX/PIXI_PROJECT_ROOT. Elevate may be adjusted
+for delegated verification as already authorized. No pixi shell prerequisite is acceptable.
+
+Verification checkpoint (2026-09-17): evidence below has distinct retained/reverted boundaries.
+
+| Check | Result / boundary |
+|---|---|
+| Real NiceGUI import/persistence and collection isolation | Initial4 passed; real file writes, restart/separation, inherited storage/Redis override and success/failure cleanup |
+| Actual operator/browser launcher environment wiring | 3 passed; stopped at process-launch seam, separate real persistence coverage above |
+| Original-storage preservation guard | 2 passed against synthetic absent/existing storage; actual fixture detects new/modified files |
+| Independent watcher fixture/import graph + real hash checks | 3 passed; no Dashboard/NiceGUI/FastAPI imported |
+| Completion-helper conditions | 4 passed: success, pending-savedness timeout, failed, cancelled; semantic action, one query, heartbeat diagnostics |
+| Withdrawn F5 fixture | Its prior2 passes are NOT evidence for current code; operator restored the original prerequisite check |
+| UI/lifecycle/bootstrap selection | 8 passed,190 deselected (51.51s); includes both IPC failures, existing client, four socketless lifecycles and real isolated operator Store bootstrap |
+| Existing UI after explicit Lima fixture selection | 82 passed,116 deselected (31.81s); excludes startup matrix/socketless checks already covered separately |
+| Existing nonprivileged watcher CLI | 3 passed,46 deselected (11.41s): default debounce, FIFO shutdown and append/shrink |
+| Elevate status/FAILED reporting | 3 passed,20 deselected (18.47s); actual PTY logger/shell with controlled leaf outcomes |
+| Full preflight selection excluding elevate | 19 passed,1 timed out,3 deselected (72.79s); see qualification below |
+
+Qualification: collection-failure isolation child printed COLLECTION_STORAGE_CLEANED but
+exceeded its30s process-exit limit while other local checks ran. No timeout/runtime change
+was made. After those checks ended, both collection cases plus preservation guard cases
+passed together:4 passed,19 deselected (19.55s). The first selection was NOT wholly green;
+concurrency is not established as the cause. No changed assertions or ignored failures.
+
+F3 has its original three root cases; they have not passed on the corrected operator setup.
+The rejected browser regression substituting the query helper was removed. Its real-query
+replacement passed in the latest elevate after the two qualified timing failures above.
+This verifies the real completion/query contour, not a new live-Codex acceptance run.
+F1's helper retains an optional copied base environment to preserve startup TMPDIR/namekey.
+
+Current elevate selects ONLY test_completed_grid_row_uses_real_query_ipc with its added
+fixture/filter checks and failure diagnostics; it has now passed. The other five cases
+passed in the earlier batch and are not repeated. No live Codex or privileged monitoring; installer/status/FAILED
+grep remain unchanged. The four actual-Pixi activation cases passed locally and delegated
+under their original15s bound. Their sentinels do not prove root monitoring or the separate
+operator-host activation report. Latest static/local results are recorded above.
+Agent did not alter Git index; operator staged files concurrently.
+
+F7: no task-variable defect reproduced. Actual pixi run --locked launches, both explicit
+-e detour-ai-augment and implicit environment selection, supply correct variables with
+parent CONDA_PREFIX/PIXI_PROJECT_ROOT unset or stale. Updated existing task-launch regression
+now tests actual Pixi activation rather than manually supplying those variables:4 passed.
+Only sudo/pytest dispatch are safe sentinels; real configured watcher --help executes.
+No task fix made without a reproduced defect. Operator clarified they entered Lima and only saw variables after pixi shell, then explicitly
+corrected the Assistant: their pixi run invocation DID fail before pixi shell. Do not infer
+an omitted pixi run or dismiss the report. No further clarification requested. Finding remains
+UNRESOLVED on operator host. Local checks now also strip ALL parent CONDA_/PIXI_ variables
+and the active environment bin from PATH before testing unset/stale prefixes. Include these
+safe launcher checks in elevate; no actual sudo/pytest suites are dispatched by their sentinels.
+Ordinary task definitions unchanged until a concrete correction can be justified.
+
+#### Verification and exclusions for retained follow-up scope
+
+TASK's requirement is upstream coverage BEFORE another expensive human live-Codex run.
+Run the changed synthetic/import/process/fixture/helper checks locally where permitted,
+including actual consumer paths, and relevant Ruff/mypy. Root and real browser/Unix-socket
+checks must be prepared as the smallest targeted elevate batch after isolation is fixed;
+operator execution is requested only when ready. Reuse existing graph-leaf evidence; update
+its exact coverage/status rather than claiming a green subset proves pre-commit-operator.
+A successful full production acceptance run is still required afterward, not claimed here.
+
+Only retained scope is authorized; F3/F5 approaches above are withdrawn. F7 permits task-variable
+expansion fixes in affected tasks; preserve pre-commit wrappers and grep. Elevate remains
+authorized for bounded delegated verification. No sample_deploy, paused BDD, TASK/HUMANS/README,
+shared schemas, Backend/Store/replay logic, production cleanup or unapproved data access.
+No general logging cleanup, evidence-log suppression, timeout increases or service redesign.
 
 ## Store integrity and startup — implemented
 
@@ -726,7 +1008,10 @@ Standalone integration (part of the approved conversion, not provisioning redesi
   It is not local orphan-Backend cleanup. Owned stop still SIGTERM, bounded wait then SIGKILL;
   borrowed/external Backend is never stopped or reset.
 - Human-owned README/HUMANS/TASK and signed-off comments preserved. HUMANS' historical proposals
-  do not revive superseded scope. No tests touch historical captures or production artifacts.
+  do not revive superseded scope. Agent test selections exclude historical captures and
+  prohibited production artifacts. The discovered NiceGUI persistence leak violates the
+  intended test-isolation contract; F1 now prevents that leak, with local real-persistence
+  checks passed and real browser/production acceptance still outstanding.
 
 ## Verification evidence
 
@@ -1228,7 +1513,8 @@ TASK was reread IN FULL, especially its testing philosophy. Approved corrections
 implemented after verified P13/P17; earlier upstream checks and delegated results are
 recorded below. The latest production run FAILED root launchers and was interrupted during
 operator completion; the additional storage-contamination finding is critical. Follow-up
-corrections are proposed above, not yet authorized. This supersedes the former unapproved operator-log-review follow-up.
+current corrective status is recorded in F1-F7 above, including the later withdrawals. The separate Mode-3 follow-up is
+already approved, implemented and verified.
 P13/P17 are complete, with their exact scope unchanged.
 
 ### Final task boundary: wrappers rejected; Conda interpreter approved
@@ -1319,11 +1605,12 @@ setup or inconsistent lifecycle assumptions that cheap checks/code review can ex
 This is bounded verification of the changed contour and its consumers, not permission for
 an unrelated repo-wide rewrite or a new testing framework.
 
-### Evidence and exact corrective scope
+### Original P18 evidence and implemented corrective scope (historical, not pending)
 
 Source: logs/from_operator/pre-commit.log and pre-commit-extra.log, supplied by the operator.
-No production/test code changed during review; only the shared-module Ruff error was
-reproduced locally. Ordinary checks stopped at Ruff. Root appendwatch tests: 3 failed
+This subsection records the FIRST failed operator run that motivated the now-implemented
+P18 corrections, not the latest logs currently occupying those paths. During that original
+review only the shared-module Ruff error was reproduced locally. Ordinary checks stopped at Ruff. Root appendwatch tests: 3 failed
 before watcher startup. Active operator case failed first Query IPC, then was interrupted;
 2 other cases were intentionally excluded/skipped. None of that is an operator E2E pass.
 Main real_api checks: 3 passed, 1 expected xfail. AIVM/auth/service preflight, Dashboard
@@ -1431,7 +1718,7 @@ created by the selected detour tests are synthetic/temporary.
 | Ruff / default | ruff check src tests: PASS; also passed after P19 | None for current code |
 | Mypy / default | mypy src tests: PASS,68 files | P19 touches only detour tests, excluded from this leaf |
 | Mypy / AI augment | strict detour config: PASS,53 files after P19 | None for current code |
-| Main tests / default | Earlier local138 pass/3 fail; latest prod172 pass,1 fail,6 skip,6 xfail,1 xpass | Config-path fallback test forces unavailable binary; proposed hermetic correction above, not approved |
+| Main tests / default | Earlier local138 pass/3 fail; latest prod172 pass,1 fail,6 skip,6 xfail,1 xpass | F5 replacement withdrawn; original configured-binary absence failure remains exposed; no new full leaf run |
 | Step4 normal / default | explicit module, not slow/real_api: 4 pass,1 deselect | None for synthetic selection |
 | Step4 slow / default | NOT RUN | Real config references forbidden/unavailable source artifacts; not a synthetic substitute |
 | Mode3 / default | Approved test-console injection: full module6 pass; actual -s case passes at80/92-column PTYs; Ruff/mypy pass | This narrow fix is complete; assertions/production/tasks unchanged; broader acceptance failures remain separate |
@@ -1487,8 +1774,8 @@ verification, but does NOT prove contention caused the earlier timeouts or estab
 robustness. No further repeat run or timeout change is proposed. P19 remains complete.
 
 That production pre-commit-operator run has now occurred and failed as reviewed at the top.
-Do NOT request a blind repeat. First obtain approval for the narrow corrective scope, isolate
-NiceGUI storage, then fix/cover the launcher, completion-helper and main-test fixture issues.
+Do NOT request a blind repeat. Resolve the remaining approved-scope gaps and verify the
+retained corrections before another expensive live-Codex acceptance run.
 The unchanged wrapper status is not a substitute for inspecting individual leaves.
 
 ### Assistant-owned elevate task: targeted delegated verification
@@ -1663,8 +1950,9 @@ needed. No Python script = triple-quote / STARTUP
 body remains in active tests; only the shared runner constructs python -c. Shell -c in
 actual-task smoke tests is intentionally unchanged, not embedded Python.
 
-Final task-map comparison against HEAD confirmed all ordinary pre-commit definitions
-unchanged, with precisely the two approved interpreter substitutions plus elevate different.
+At P19 completion, task-map comparison against its then-HEAD confirmed ordinary pre-commit
+wrappers unchanged, with precisely the two approved interpreter substitutions plus elevate
+different. The operator has since committed those changes; this is historical check evidence.
 No sample_deploy/main CLI changes; git diff --check passed.
 
 
@@ -1683,23 +1971,26 @@ Preserve the rest of P18 and its task boundary: two approved interpreter substit
 
 ## Remaining rollout acceptance — separate from pending implementation
 
-The pinned P1-P19 code changes are present, but production acceptance FAILED and further
-corrective work is needed. The critical storage-isolation defect and other proposed surgical
-corrections at the top are pending explicit approval, not silently added approved scope.
-Do not describe the remaining work as only another operator run. P18's previous upstream
-checks did not exercise these failures.
-The earlier transient startup failures remain recorded, not relabeled as first-run passes.
-Rollout acceptance covers actual guest
-provisioning/dependency install, interactive Dashboard/server/browser/provider E2E and the
-operator-maintained production config/log hashes. No such activity was authorized for this
-restricted execution environment and none is claimed. All code changes remain reviewable
-in the working tree/operator-staged index; no commits were made by the agent.
+The pinned P1-P19, Mode-3 fix and currently approved concrete follow-up code are implemented.
+F4 now has a passing real browser/query regression; F1/F2/F6 checks and F8 local/real-IPC
+emission checks pass. Remaining: F3 actual privileged launch/monitoring (diagnostics ready),
+F5 configured extension prerequisite (replacement withdrawn), F7 operator-host activation
+report (diagnostics pass here), direct-terminal full-HTTP logging verification and final
+production acceptance including card/artifact assertions. Further corrective mechanisms
+need evidence and approval; no concrete approved implementation is silently omitted.
+Do not call removed tests passing coverage or claim production acceptance has passed.
+Earlier transient test failures remain qualified, not relabeled as first-run passes.
+
+Actual guest/browser/provider/privileged execution and production config/log maintenance
+remain operator-side boundaries. Latest delegated and local evidence is at the top; no
+production-data cleanup occurred. The disclosed NiceGUI lookup mistake is also recorded
+there; do not imply untouched storage was proven for that command.
 
 ## Mandatory constraints for continuation
 
 - After compaction reread TASK and WORK IN FULL. Keep WORK current, remove stale pending claims.
 - All commands via pixi run -e detour-ai-augment; Ruff/mypy/pytest via env. Git read-only.
-- No task edits except the two explicitly approved APPENDWATCH_PYTHON substitutions and agent-owned elevate; pre-commit wrapper changes are rejected.
+- Task edits: prior interpreter substitutions, agent-owned elevate, and newly approved F7 fixes for proven environment-variable expansion defects only. Pre-commit structure/grep changes remain rejected.
 - Never run/import src.repl, edit src/cli.py, import another detour or edit TASK/HUMANS.
 - Only allowed production data is data/scisci_process.duckdb READ ONLY. No other data/,
   .aicode/ or historical captures. Isolated temporary test fixtures are permitted.

@@ -5,6 +5,7 @@ import base64
 import fcntl
 import hashlib
 import json
+import logging
 import os
 import signal
 import subprocess
@@ -1862,7 +1863,9 @@ def test_captured_operator_push_generates_commit_and_exact_410_response(
 
 def test_pure_asgi_middleware_records_every_public_exchange_before_send(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    caplog.set_level(logging.INFO, logger=api.__name__)
     events: list[tuple[str, UUID]] = []
     response_body = json.dumps(TEST_AUTHORITATIVE_RESPONSE_BODY).encode()
 
@@ -1961,6 +1964,14 @@ def test_pure_asgi_middleware_records_every_public_exchange_before_send(
     record_ids = [record_id for kind, record_id in events if kind == "append"]
     assert len(set(record_ids)) == 2
     assert all(record_id.version == 7 for record_id in record_ids)
+    for method, path, code, record_id in (
+        ("GET", "/pull", 200, record_ids[0]),
+        ("POST", "/push", 202, record_ids[1]),
+    ):
+        assert f"Backend received {method} {path}:" in caplog.text
+        assert f"Backend persisted {method} {path}: record={record_id}; HTTP {code}" in caplog.text
+        assert f"Backend sent {method} {path}: record={record_id}; HTTP {code}" in caplog.text
+    assert TEST_AUTHORITATIVE_REQUEST_BODY.decode() not in caplog.text
 
 
 def test_authoritative_middleware_preserves_streaming_response_until_complete(
@@ -5819,11 +5830,13 @@ async def test_persisted_push_becomes_latest_run_outcome_snapshot_provenance(
 )
 def test_post_commit_result_is_exposed_only_by_follow_up_pull(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
     result: BackendLifecycle,
     stage: BackendLifecycle,
     expected_code: int,
     expected_media_type: str,
 ) -> None:
+    caplog.set_level(logging.INFO, logger=api.__name__)
     runtime = cast(AiAugmentBackendContext, SimpleNamespace())
     request = Request(
         {
@@ -5870,11 +5883,14 @@ def test_post_commit_result_is_exposed_only_by_follow_up_pull(
         with pytest.raises(HTTPException) as exc_info:
             api.authoritative_pull(request)
         assert exc_info.value.status_code == expected_code
+        assert "Pull: Backend workflow failed; returning HTTP 500" in caplog.text
         return
 
     response = api.authoritative_pull(request)
     assert response.status_code == expected_code
     assert response.headers["content-type"].startswith(expected_media_type)
+    assert f"Pull: returning HTTP {expected_code}" in caplog.text
+    assert str(commit_record.record_id) in caplog.text
 
 
 def test_backend_stdin_accepts_one_canonical_session_id() -> None:

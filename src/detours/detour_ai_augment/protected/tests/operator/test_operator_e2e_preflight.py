@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import inspect
+import json
 import os
 import subprocess
 import tomllib
@@ -11,6 +13,9 @@ from unittest.mock import Mock
 import pytest
 
 from src.detours.detour_ai_augment.protected.src.backend import ipc as backend_ipc
+from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helpers.locale import (
+    Locale,
+)
 from src.detours.detour_ai_augment.protected.tests import (
     pytest_plugin as operator_preflight,
 )
@@ -19,6 +24,177 @@ from src.detours.detour_ai_augment.protected.tests.operator import (
 )
 from src.detours.detour_ai_augment.src.backend import server as backend_server
 from src.detours.detour_ai_augment.src.control_centre.dashboard import ui as control_ui
+
+
+@pytest.mark.python_subprocess
+def test_nicegui_children_have_private_persistent_storage(
+    tmp_path: Path, python_process: operator_preflight.PythonProcess,
+    monkeypatch: pytest.MonkeyPatch, nicegui_storage_path: Path,
+) -> None:
+    original = tmp_path / ".nicegui"
+    original.mkdir()
+    sentinel = original / "storage-general.json"
+    sentinel.write_text('{"operator_sentinel": "untouched"}')
+    before = workflow._tree_digest(original)
+    monkeypatch.setenv("NICEGUI_STORAGE_PATH", str(original))
+    monkeypatch.setenv("NICEGUI_REDIS_URL", "redis://must-not-connect.invalid")
+    for path, previous, value in (
+        (nicegui_storage_path, {}, "first"),
+        (nicegui_storage_path, {"test_value": "first"}, "restart"),
+        (tmp_path / "other-test", {}, "separate"),
+    ):
+        result = python_process.run(
+            operator_preflight.nicegui_persistence_process, json.dumps(previous), value,
+            cwd=tmp_path, env=operator_preflight.nicegui_test_environment(path), timeout=20,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert json.loads((path / "storage-general.json").read_text()) == {"test_value": value}
+        assert workflow._tree_digest(original) == before
+
+
+@pytest.mark.python_subprocess
+@pytest.mark.parametrize("collection_failure", (False, True))
+def test_nicegui_isolated_before_collection_and_cleaned_after_exit(
+    tmp_path: Path, python_process: operator_preflight.PythonProcess,
+    collection_failure: bool,
+) -> None:
+    original = tmp_path / "operator-storage"
+    original.mkdir()
+    (original / "storage-general.json").write_text('{"operator_sentinel": "untouched"}')
+    before = workflow._tree_digest(original)
+    environment = dict(os.environ, NICEGUI_STORAGE_PATH=str(original),
+                       NICEGUI_REDIS_URL="redis://must-not-connect.invalid",
+                       TEST_ORIGINAL_STORAGE=str(original),
+                       TEST_STORAGE_RECEIPT=str(tmp_path / "receipt"),
+                       TEST_COLLECTION_FAILURE=str(int(collection_failure)))
+    result = python_process.run(
+        operator_preflight.nicegui_collection_process, str(tmp_path),
+        "2" if collection_failure else "0", env=environment, timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "COLLECTION_STORAGE_CLEANED" in result.stdout
+    assert workflow._tree_digest(original) == before
+
+
+@pytest.mark.parametrize("initially_present", (False, True))
+def test_operator_preservation_guard_covers_original_storage(
+    tmp_path: Path, initially_present: bool,
+) -> None:
+    storage = tmp_path / "nicegui"
+    if initially_present:
+        storage.mkdir()
+        (storage / "storage-general.json").write_text("{}")
+    config = cast(pytest.Config, SimpleNamespace(stash={
+        operator_preflight.ORIGINAL_NICEGUI_STORAGE_PATH: storage,
+    }))
+    guard = inspect.unwrap(workflow.production_data_unchanged)(
+        operator_aivm=None, repository_root=tmp_path / "repo",
+        detour_root=tmp_path / "detour", pytestconfig=config,
+    )
+    next(guard)
+    storage.mkdir(exist_ok=True)
+    (storage / "storage-general.json").write_text('{"test_data": true}')
+    with pytest.raises(AssertionError):
+        next(guard)
+
+
+@pytest.mark.parametrize("launcher", ("operator", "browser", "browser-contract"))
+def test_dashboard_launchers_pass_private_storage(
+    launcher: str, tmp_path: Path, nicegui_storage_path: Path,
+    pytestconfig: pytest.Config, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.detours.detour_ai_augment.tests.control_centre import test_ui_e2e as browser
+
+    class LaunchCaptured(Exception):
+        pass
+
+    def capture(*_args: object, **kwargs: object) -> None:
+        environment = cast(dict[str, str], kwargs["env"])
+        assert environment["NICEGUI_STORAGE_PATH"] == str(nicegui_storage_path.resolve())
+        assert "NICEGUI_REDIS_URL" not in environment
+        raise LaunchCaptured
+
+    monkeypatch.setenv("NICEGUI_STORAGE_PATH", str(tmp_path / "must-not-use"))
+    monkeypatch.setenv("NICEGUI_REDIS_URL", "redis://must-not-connect.invalid")
+    monkeypatch.setattr(subprocess, "Popen", capture)
+    monkeypatch.setattr(workflow, "_assert_ports_available", lambda: None)
+    monkeypatch.setattr(browser, "available_e2e_port", lambda: 12345)
+    runtime = cast(workflow.OperatorRuntime, SimpleNamespace(
+        config_path=tmp_path / "config.json", repository_root=pytestconfig.rootpath,
+        dashboard_socket_path=tmp_path / "ipc.sock",
+    ))
+    with pytest.raises(LaunchCaptured):
+        if launcher == "operator":
+            with workflow.running_dashboard(runtime):
+                pytest.fail("must stop at launch")
+        elif launcher == "browser":
+            with browser.control_centre_browser(pytestconfig, nicegui_storage_path):
+                pytest.fail("must stop at launch")
+        else:
+            browser.test_control_centre_browser_contract(pytestconfig, nicegui_storage_path)
+
+
+@pytest.mark.parametrize("outcome", ("success", "savedness-pending", "failed", "cancelled"))
+def test_operator_completion_wait_reports_actual_conditions(
+    monkeypatch: pytest.MonkeyPatch, outcome: str,
+) -> None:
+    cells = [Mock() for _ in range(5)]
+    values = ["", "completed", "commit-id", "pending", "OK"]
+    if outcome in {"failed", "cancelled"}:
+        values[1] = outcome
+    for index, cell in enumerate(cells):
+        cell.inner_text.side_effect = lambda index=index: values[index]
+    history_rows = Mock()
+    history_rows.count.return_value = 1
+    history_rows.nth.return_value.locator.return_value.nth.side_effect = lambda index: cells[index]
+    history = Mock()
+    history.locator.return_value = history_rows
+    execute = Mock()
+    execute.inner_text.return_value = "RERUN"
+    execute.text_content.return_value = "Rerun"
+    card = Mock()
+    card.is_enabled.return_value = True
+    page = Mock()
+    page.get_by_test_id.side_effect = {
+        control_ui.RESEARCHER_GRID_TEST_ID: Mock(),
+        control_ui.ATTEMPT_HISTORY_TABLE_TEST_ID: history,
+        control_ui.EXECUTE_ACTION_TEST_ID: execute,
+        control_ui.VIEW_CARD_TEST_ID: card,
+    }.__getitem__
+    clock = iter(range(100))
+    monkeypatch.setattr(workflow, "time", SimpleNamespace(monotonic=lambda: next(clock)))
+    monkeypatch.setattr(workflow, "FULL_WORKFLOW_TIMEOUT_SECONDS", 12)
+    monkeypatch.setattr(workflow, "OPERATOR_HEARTBEAT_SECONDS", 0)
+    monkeypatch.setattr(workflow, "expect", Mock())
+    query = Mock()
+    monkeypatch.setattr(workflow, "query_snapshot_in_browser", query)
+    logs: list[str] = []
+    monkeypatch.setattr(workflow, "_operator_log", logs.append)
+    dashboard = Mock()
+    dashboard.process.poll.return_value = None
+    dashboard.output = []
+    if outcome == "success":
+        page.wait_for_timeout.side_effect = lambda _ms: values.__setitem__(
+            3, Locale.RUN_OUTCOME_SNAPSHOT_SAVED,
+        )
+        values[4] = Locale.SESSION_STATUS_OK
+        _, commit = workflow.wait_for_completed_grid_row(
+            page, dashboard, Mock(), queued_at_monotonic=0,
+        )
+        assert commit == "commit-id"
+    elif outcome == "savedness-pending":
+        with pytest.raises(TimeoutError, match="savedness='pending'"):
+            workflow.wait_for_completed_grid_row(page, dashboard, Mock(), queued_at_monotonic=0)
+    else:
+        with pytest.raises(RuntimeError, match="failed run activity"):
+            workflow.wait_for_completed_grid_row(page, dashboard, Mock(), queued_at_monotonic=0)
+    assert query.call_count == int(outcome not in {"failed", "cancelled"})
+    if outcome in {"success", "savedness-pending"}:
+        diagnostic = "\n".join(logs)
+        assert "queried_after_completion=True" in diagnostic
+        assert "savedness='pending'" in diagnostic
+        assert "action='Rerun'" in diagnostic
+        assert "waiting for Codex to exit" not in diagnostic
 
 
 def test_existing_codex_authentication_does_not_prompt(

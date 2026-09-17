@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-import os
+import hashlib
+import json
 import re
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 from collections import Counter
 from collections.abc import Iterator
@@ -42,6 +44,8 @@ from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helper
     Locale,
 )
 from src.detours.detour_ai_augment.protected.tests import pytest_plugin
+from src.detours.detour_ai_augment.protected.tests.operator import test_operator_e2e as operator
+from src.detours.detour_ai_augment.src.backend import server as backend_server
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_context import (
     EXPECTED_GROUND_TRUTH_RESEARCHERS,
     EXPECTED_INELIGIBLE_RESEARCHERS,
@@ -52,9 +56,14 @@ from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_si
     AiAugmentSingularOuterDict,
 )
 from src.detours.detour_ai_augment.src.control_centre.dashboard import ui as control_ui
+from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.ai_augment_dashboard_storage import (  # noqa: E501
+    BACKEND_DATABASE_STORAGE_KEY,
+    QUEUE_STORAGE_KEY,
+)
 from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.run_outcome import (  # noqa: E501
     RunLifecycle,
 )
+from src.detours.detour_ai_augment.tests.control_centre import test_ui as ui_tests
 from src.helpers.data_models import InnerDict, NameKey
 from src.helpers.procedures import XlsxMatchProcedure
 from src.helpers.vars import (
@@ -99,6 +108,116 @@ GRID_HEADER_SELECTOR = ".ag-header-cell"
 GRID_CELL_SELECTOR = ".ag-cell"
 GRID_ARIA_ROW_COUNT_OFFSET = 1
 EXPECTED_GRID_ARIA_ROW_COUNT = EXPECTED_SOURCE_RESEARCHERS + GRID_ARIA_ROW_COUNT_OFFSET
+startup_files = ui_tests.startup_files
+
+
+@pytest.fixture
+def completed_query_files(
+    startup_files: ui_tests.StartupFiles,
+    python_process: pytest_plugin.PythonProcess,
+) -> ui_tests.StartupFiles:
+    files = startup_files
+    storage_path = files.config.parent / "nicegui"
+    result = python_process.run(
+        pytest_plugin.completed_query_fixture_process, str(files.config),
+        env=pytest_plugin.nicegui_test_environment(storage_path, base=files.environment()),
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "COMPLETED_QUERY_FIXTURE_READY" in result.stdout
+    print(result.stdout, end="", flush=True)
+    stored = json.loads((storage_path / "storage-general.json").read_text())
+    snapshot = stored[BACKEND_DATABASE_STORAGE_KEY]
+    assert snapshot["attempts"] == snapshot["run_outcome_records"] == []
+    assert stored[QUEUE_STORAGE_KEY] == []
+    return files
+
+
+@pytest.mark.python_subprocess
+def test_completed_grid_row_uses_real_query_ipc(
+    completed_query_files: ui_tests.StartupFiles,
+    python_process: pytest_plugin.PythonProcess,
+    pytestconfig: pytest.Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    files = completed_query_files
+    expected = json.loads((files.config.parent / "completed-query.json").read_text())
+    source_before = hashlib.sha256(files.source.read_bytes()).hexdigest()
+    log_before = files.replay.read_bytes()
+    database_before = files.detour.read_bytes()
+    # Only fixture configuration/entrypoint inputs differ; services and both helpers are real.
+    monkeypatch.setenv("OPENALEX_API_KEY", "isolated-unused-query-key")
+    monkeypatch.setenv("TMPDIR", str(files.process_temp))
+    monkeypatch.setattr(operator, "CONTROL_CENTRE_COMMAND_PREFIX", (
+        sys.executable, "-c",
+        python_process.source(pytest_plugin.completed_query_dashboard_process),
+    ))
+    with tempfile.TemporaryDirectory(prefix="query-browser-", dir="/tmp") as directory:
+        runtime = operator.OperatorRuntime(
+            repository_root=pytestconfig.rootpath, config_path=files.config,
+            backend_store=backend_server.configure_runtime(
+                files.config, require_namekey=False,
+            ).pipeline_config.backend_store,
+            replay_log_path=files.replay, rollout_cas_dir=files.config.parent / "cas",
+            dashboard_socket_path=Path(directory) / "dashboard.sock",
+        )
+        with operator.running_dashboard(runtime) as dashboard, sync_playwright() as playwright:
+            browser = launch_e2e_browser(playwright, pytestconfig)
+            try:
+                page = browser.new_page(viewport=E2E_WIDE_VIEWPORT)
+                page.set_default_timeout(operator.BROWSER_ASSERTION_TIMEOUT_MILLISECONDS)
+                errors: list[str] = []
+                page.on("pageerror", lambda error: errors.append(str(error)))
+                page.on("console", lambda message: (
+                    print(f"[query-browser] {message.type}: {message.text}", flush=True)
+                    if message.type in {"warning", "error"} else None
+                ))
+                page.goto(operator.CONTROL_CENTRE_URL, wait_until="networkidle")
+                page.get_by_label(Locale.SEARCH_FILTER).fill(expected["namekey"])
+                rows = page.get_by_test_id(control_ui.RESEARCHER_GRID_TEST_ID).locator(
+                    GRID_ROW_SELECTOR,
+                )
+                try:
+                    expect(rows).to_have_count(1)
+                except AssertionError as exc:
+                    try:
+                        search_value = page.get_by_label(Locale.SEARCH_FILTER).input_value()
+                        exc.add_note(
+                            f"Search input: {search_value!r}; page errors: {errors!r}; "
+                            f"rendered rows: {rows.all_text_contents()!r}\n"
+                            + "".join(dashboard.output)
+                        )
+                    except Exception as diagnostic_error:
+                        exc.add_note(f"Browser failure diagnostics failed: {diagnostic_error!r}")
+                    raise
+                rows.first.click()
+                execute = page.get_by_test_id(control_ui.EXECUTE_ACTION_TEST_ID)
+                expect(execute).to_have_text(
+                    control_ui.ACTION_LABEL_BY_VALUE[control_ui._RunAction.RERUN.value],
+                )
+                assert execute.inner_text().strip() == "RERUN"
+                assert (execute.text_content() or "").strip() == "Rerun"
+                history = page.get_by_test_id(control_ui.ATTEMPT_HISTORY_TABLE_TEST_ID)
+                expect(history).not_to_contain_text(Locale.RUN_OUTCOME_SNAPSHOT_SAVED)
+                expect(history).not_to_contain_text(expected["commit_id"])
+                output_start = len(dashboard.output)
+                _, commit_id = operator.wait_for_completed_grid_row(
+                    page, dashboard, runtime, queued_at_monotonic=time.monotonic(),
+                )
+                assert commit_id == expected["commit_id"]
+                expect(history).to_contain_text(Locale.RUN_OUTCOME_SNAPSHOT_SAVED)
+                expect(history).to_contain_text(Locale.SESSION_STATUS_OK)
+                output = "".join(dashboard.output[output_start:])
+                assert output.count("Requesting wholesale Backend query snapshot") == 1
+                assert output.count("Dashboard snapshot replaced:") == 1
+                assert "Query IPC snapshot ready:" in output
+                assert not runtime.dashboard_socket_path.exists()
+                assert errors == []
+            finally:
+                browser.close()
+    assert hashlib.sha256(files.source.read_bytes()).hexdigest() == source_before
+    assert files.replay.read_bytes() == log_before
+    assert files.detour.read_bytes() == database_before
 
 
 def browser_researcher(
@@ -585,12 +704,12 @@ def launch_e2e_browser(playwright: Playwright, pytestconfig: pytest.Config) -> B
 
 @contextmanager
 def control_centre_browser(
-    pytestconfig: pytest.Config,
+    pytestconfig: pytest.Config, nicegui_storage_path: Path,
 ) -> Iterator[tuple[Page, list[str]]]:
     repository_root = pytestconfig.rootpath
     port = available_e2e_port()
     url = f"http://{E2E_HOST}:{port}"
-    server_environment = os.environ.copy()
+    server_environment = pytest_plugin.nicegui_test_environment(nicegui_storage_path)
     server_environment.pop(PYTEST_CURRENT_TEST_ENV_NAME, None)
     process = subprocess.Popen(
         [
@@ -627,9 +746,9 @@ def control_centre_browser(
 
 
 def test_underscore_field_labels_render_literally_in_researcher_card(
-    pytestconfig: pytest.Config,
+    pytestconfig: pytest.Config, nicegui_storage_path: Path,
 ) -> None:
-    with control_centre_browser(pytestconfig) as (page, errors):
+    with control_centre_browser(pytestconfig, nicegui_storage_path) as (page, errors):
         eligible_row = grid_row_for_draw(page, BROWSER_PILOT_ELIGIBLE_DRAW)
         eligible_row.click()
         page.get_by_test_id(control_ui.VIEW_CARD_TEST_ID).click()
@@ -646,9 +765,9 @@ def test_underscore_field_labels_render_literally_in_researcher_card(
 
 
 def test_main_grid_and_researcher_card_use_compact_line_spacing(
-    pytestconfig: pytest.Config,
+    pytestconfig: pytest.Config, nicegui_storage_path: Path,
 ) -> None:
-    with control_centre_browser(pytestconfig) as (page, errors):
+    with control_centre_browser(pytestconfig, nicegui_storage_path) as (page, errors):
         eligible_row = grid_row_for_draw(page, BROWSER_PILOT_ELIGIBLE_DRAW)
         eligible_row.click()
         page.get_by_test_id(control_ui.EXECUTE_ACTION_TEST_ID).click()
@@ -686,9 +805,9 @@ def test_main_grid_and_researcher_card_use_compact_line_spacing(
 
 
 def test_selected_researcher_row_is_highlighted(
-    pytestconfig: pytest.Config,
+    pytestconfig: pytest.Config, nicegui_storage_path: Path,
 ) -> None:
-    with control_centre_browser(pytestconfig) as (page, errors):
+    with control_centre_browser(pytestconfig, nicegui_storage_path) as (page, errors):
         selected_row = grid_row_for_draw(page, BROWSER_PILOT_ELIGIBLE_DRAW)
         unselected_row = grid_row_for_draw(page, BROWSER_PILOT_INELIGIBLE_DRAW)
         selected_row.click()
@@ -706,9 +825,9 @@ def test_selected_researcher_row_is_highlighted(
 
 
 def test_researcher_selection_and_attempt_history_are_idempotent(
-    pytestconfig: pytest.Config,
+    pytestconfig: pytest.Config, nicegui_storage_path: Path,
 ) -> None:
-    with control_centre_browser(pytestconfig) as (page, errors):
+    with control_centre_browser(pytestconfig, nicegui_storage_path) as (page, errors):
         first_row = grid_row_for_draw(page, BROWSER_PILOT_ELIGIBLE_DRAW)
         second_row = grid_row_for_draw(page, "1")
         history_panel = page.get_by_test_id(control_ui.ATTEMPT_HISTORY_PANEL_TEST_ID)
@@ -733,9 +852,9 @@ def test_researcher_selection_and_attempt_history_are_idempotent(
 
 
 def test_completed_researcher_metadata_is_available_in_visible_attempt_history(
-    pytestconfig: pytest.Config,
+    pytestconfig: pytest.Config, nicegui_storage_path: Path,
 ) -> None:
-    with control_centre_browser(pytestconfig) as (page, errors):
+    with control_centre_browser(pytestconfig, nicegui_storage_path) as (page, errors):
         page.set_viewport_size(E2E_NARROW_VIEWPORT)
         completed_namekey = browser_researchers()[BROWSER_LEADING_RESEARCHER_COUNT].namekey
         page.get_by_label(Locale.SEARCH_FILTER).fill(
@@ -777,9 +896,9 @@ def test_completed_researcher_metadata_is_available_in_visible_attempt_history(
 
 
 def test_displayed_researcher_card_downloads_as_docx(
-    pytestconfig: pytest.Config,
+    pytestconfig: pytest.Config, nicegui_storage_path: Path,
 ) -> None:
-    with control_centre_browser(pytestconfig) as (page, errors):
+    with control_centre_browser(pytestconfig, nicegui_storage_path) as (page, errors):
         download_button_docx = page.get_by_test_id(control_ui.DOWNLOAD_CARD_DOCX_TEST_ID)
         card_markdown = page.get_by_test_id(control_ui.CARD_MARKDOWN_TEST_ID)
         expect(download_button_docx).to_be_disabled()
@@ -809,11 +928,13 @@ def test_displayed_researcher_card_downloads_as_docx(
         assert errors == [], Counter(errors)
 
 
-def test_control_centre_browser_contract(pytestconfig: pytest.Config) -> None:
+def test_control_centre_browser_contract(
+    pytestconfig: pytest.Config, nicegui_storage_path: Path,
+) -> None:
     repository_root = pytestconfig.rootpath
     port = available_e2e_port()
     url = f"http://{E2E_HOST}:{port}"
-    server_environment = os.environ.copy()
+    server_environment = pytest_plugin.nicegui_test_environment(nicegui_storage_path)
     server_environment.pop(PYTEST_CURRENT_TEST_ENV_NAME, None)
     process = subprocess.Popen(
         [

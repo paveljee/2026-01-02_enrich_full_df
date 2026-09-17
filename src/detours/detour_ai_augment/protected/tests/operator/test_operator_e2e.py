@@ -43,6 +43,10 @@ from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helper
 from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helpers.locale import (
     Locale,
 )
+from src.detours.detour_ai_augment.protected.tests.pytest_plugin import (
+    ORIGINAL_NICEGUI_STORAGE_PATH,
+    nicegui_test_environment,
+)
 from src.detours.detour_ai_augment.src.backend import api as backend_api
 from src.detours.detour_ai_augment.src.backend import server as backend_server
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_backend_store import (  # noqa: E501
@@ -52,12 +56,16 @@ from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_co
     AiAugmentBackendContext,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.commit_event import (
+    COMMIT_PATH,
     SOURCE_KEY_HEADER,
     BackendCommitRecord,
     BackendLifecycle,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.run_outcome_response import (
     RunOutcomeResponse,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.validation_event import (
+    VALIDATE_PATH,
 )
 from src.detours.detour_ai_augment.src.control_centre.dashboard import ui as control_ui
 from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models import (
@@ -357,18 +365,20 @@ def production_data_unchanged(
     operator_aivm: None,
     repository_root: Path,
     detour_root: Path,
+    pytestconfig: pytest.Config,
 ) -> Iterator[None]:
     production_data_directories = (
         repository_root / "data",
         detour_root / "data",
+        pytestconfig.stash[ORIGINAL_NICEGUI_STORAGE_PATH],
     )
-    _operator_log("hashing production data before the test")
+    _operator_log(f"hashing protected paths before the test: {production_data_directories}")
     before = {path: _tree_digest(path) for path in production_data_directories}
     _operator_log("production-data pre-test hashes completed")
     yield
     _operator_log("verifying production data remains unchanged", separate=True)
     assert {path: _tree_digest(path) for path in production_data_directories} == before
-    _operator_log("production data is unchanged")
+    _operator_log(f"protected paths unchanged: {production_data_directories}")
 
 
 def _operator_runtime(
@@ -480,7 +490,9 @@ def _wait_for_ports_released() -> None:
 def running_dashboard(runtime: OperatorRuntime) -> Generator[DashboardProcess]:
     _operator_log("checking that Control Centre and Backend ports are free")
     _assert_ports_available()
-    environment = os.environ.copy()
+    storage_path = runtime.config_path.parent / "nicegui"
+    environment = nicegui_test_environment(storage_path)
+    _operator_log(f"isolated NiceGUI storage: {storage_path}")
     environment.pop(PYTEST_CURRENT_TEST_ENV_NAME, None)
     environment["PYTHONUNBUFFERED"] = "1"
     environment[backend_ipc.DASHBOARD_SOCKET_PATH_ENV_NAME] = str(
@@ -652,9 +664,14 @@ def wait_for_gone_pull(
             exchange = (record.method, record.path, record.response_code)
             if exchange != previous_exchange:
                 response = (
-                    "no response"
-                    if record.response_code is None
-                    else str(record.response_code)
+                    "request-only record; response fields intentionally null"
+                    if record.method == backend_api.HTTP_POST_METHOD
+                    and record.path in {COMMIT_PATH, VALIDATE_PATH}
+                    and record.response_code is None
+                    and record.response_headers is None and record.response_body is None
+                    else (
+                        "no response" if record.response_code is None else str(record.response_code)
+                    )
                 )
                 _operator_log(
                     f"observed authoritative {record.method} {record.path} -> {response}"
@@ -720,6 +737,7 @@ def wait_for_completed_grid_row(
     next_heartbeat = time.monotonic() + OPERATOR_HEARTBEAT_SECONDS
     previous_status: str | None = None
     queried_after_completion = False
+    observation = "no completion observations yet"
     while time.monotonic() < deadline:
         raise_for_dashboard_failure(dashboard)
         history_count = history_rows.count()
@@ -733,41 +751,41 @@ def wait_for_completed_grid_row(
                 f"Control Centre attempt history reports workflow status {current_status!r}"
             )
             previous_status = current_status
+        action_text = (execute.text_content() or "").strip()
+        card_enabled = view_card.is_enabled()
+        commit_record_id = run_outcome_savedness = session_status = ""
+        if history_count:
+            cells = history_rows.nth(history_count - 1).locator("td")
+            commit_record_id = cells.nth(2).inner_text().strip()
+            run_outcome_savedness = cells.nth(3).inner_text().strip()
+            session_status = cells.nth(4).inner_text().strip()
+        observation = (
+            f"status={current_status!r}; action={action_text!r}; "
+            f"view_card_enabled={card_enabled}; "
+            f"queried_after_completion={queried_after_completion}; "
+            f"commit_present={bool(commit_record_id)}; savedness={run_outcome_savedness!r}; "
+            f"session_status={session_status!r}"
+        )
         if (
             current_status == RunLifecycle.COMPLETED.value
-            and execute.inner_text().strip()
+            and action_text
             == control_ui.ACTION_LABEL_BY_VALUE[control_ui._RunAction.RERUN.value]
-            and view_card.is_enabled()
+            and card_enabled
         ):
             if not queried_after_completion:
                 query_snapshot_in_browser(page, runtime, dashboard)
                 queried_after_completion = True
                 continue
-            commit_record_id = (
-                history_rows.nth(history_count - 1).locator("td").nth(2).inner_text().strip()
-            )
-            run_outcome_savedness = (
-                history_rows.nth(history_count - 1).locator("td").nth(3).inner_text().strip()
-            )
-            session_status = (
-                history_rows.nth(history_count - 1).locator("td").nth(4).inner_text().strip()
-            )
             if not commit_record_id:
                 raise RuntimeError("completed Control Centre history has no commit record ID")
-            if (
-                run_outcome_savedness
-                != Locale.RUN_OUTCOME_SNAPSHOT_SAVED
-            ):
-                page.wait_for_timeout(round(PROCESS_POLL_SECONDS * 1_000))
-                continue
-            if session_status != Locale.SESSION_STATUS_OK:
-                raise RuntimeError(
-                    "completed Control Centre history has non-OK run-outcome "
-                    "session status: "
-                    f"{session_status!r}"
-                )
-            _operator_log("Control Centre projected the completed post-Codex run")
-            return row, commit_record_id
+            if run_outcome_savedness == Locale.RUN_OUTCOME_SNAPSHOT_SAVED:
+                if session_status != Locale.SESSION_STATUS_OK:
+                    raise RuntimeError(
+                        "completed Control Centre history has non-OK run-outcome "
+                        f"session status: {session_status!r}"
+                    )
+                _operator_log("Control Centre projected the completed post-Codex run")
+                return row, commit_record_id
         if current_status in {
             RunLifecycle.FAILED.value,
             RunLifecycle.CANCELLED.value,
@@ -778,13 +796,13 @@ def wait_for_completed_grid_row(
         now = time.monotonic()
         if now >= next_heartbeat:
             _operator_log(
-                "waiting for Codex to exit and Control Centre to complete the run "
-                f"({now - queued_at_monotonic:.0f}s elapsed)"
+                f"waiting for completion conditions ({now - queued_at_monotonic:.0f}s elapsed): "
+                + observation
             )
             next_heartbeat = now + OPERATOR_HEARTBEAT_SECONDS
         page.wait_for_timeout(round(PROCESS_POLL_SECONDS * 1_000))
     raise TimeoutError(
-        "workflow did not reach the completed Control Centre state:\n"
+        f"workflow did not reach the completed Control Centre state: {observation}\n"
         + "".join(dashboard.output)
     )
 

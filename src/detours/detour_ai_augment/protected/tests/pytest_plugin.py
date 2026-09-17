@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import textwrap
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -145,7 +146,8 @@ OPERATOR_CODEX_AUTH_FAILED = (
 )
 OPERATOR_SANCTUARY_NOTICE = (
     "Operator sanctuary: repository production access is read-only. Every test "
-    "verifies complete pre/post hashes of both production data trees. The Lima "
+    "verifies complete pre/post hashes of both production data trees and the original "
+    "file-based NiceGUI storage path. The Lima "
     "aivm instance is ephemeral and is outside this preservation guarantee."
 )
 OPERATOR_REDEPLOY_NOTICE = (
@@ -160,6 +162,7 @@ OPERATOR_REUSE_NOTICE = (
     "test."
 )
 OPERATOR_REDEPLOY_STASH_KEY = pytest.StashKey[bool]()
+ORIGINAL_NICEGUI_STORAGE_PATH = pytest.StashKey[Path]()
 
 
 def _operator_log(message: str) -> None:
@@ -271,6 +274,18 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 
 
 def pytest_configure(config: pytest.Config) -> None:
+    # NiceGUI initializes general persistence at import, before ordinary fixtures run.
+    if "nicegui" in sys.modules:
+        raise pytest.UsageError("NiceGUI imported before test storage isolation")
+    config.stash[ORIGINAL_NICEGUI_STORAGE_PATH] = Path(
+        os.environ.get("NICEGUI_STORAGE_PATH", ".nicegui"),
+    ).resolve()
+    directory = tempfile.TemporaryDirectory(prefix="ai-augment-pytest-nicegui-")
+    environment = pytest.MonkeyPatch()
+    environment.setenv("NICEGUI_STORAGE_PATH", directory.name)
+    environment.delenv("NICEGUI_REDIS_URL", raising=False)
+    config.add_cleanup(environment.undo)
+    config.add_cleanup(directory.cleanup)
     config.addinivalue_line(
         "markers", "python_subprocess: isolated Python child process via explicit shared fixture",
     )
@@ -390,6 +405,100 @@ class SocketlessDashboardLifecycle(Protocol):
     def __call__(self, *, publish: bool, failure: str) -> subprocess.CompletedProcess[str]: ...
 
 
+def nicegui_test_environment(
+    storage_path: Path, *, base: dict[str, str] | None = None,
+) -> dict[str, str]:
+    environment = os.environ.copy() if base is None else base.copy()
+    environment["NICEGUI_STORAGE_PATH"] = str(storage_path.resolve())
+    environment.pop("NICEGUI_REDIS_URL", None)
+    return environment
+
+
+@pytest.fixture
+def nicegui_storage_path(tmp_path: Path) -> Path:
+    return tmp_path / "nicegui"
+
+
+def nicegui_persistence_process() -> None:
+    import json
+    import os
+    import sys
+    from pathlib import Path
+
+    from nicegui import app
+    from nicegui.storage import Storage
+
+    assert Storage.path == Path(os.environ["NICEGUI_STORAGE_PATH"])
+    assert Storage.redis_url is None
+    assert dict(app.storage.general) == json.loads(sys.argv[1])
+    app.storage.general["test_value"] = sys.argv[2]
+    print("NICEGUI_PERSISTED", Storage.path)
+
+
+def test_nicegui_collection_storage() -> None:
+    """Serialized into an isolated test module; also called during its collection."""
+    import os
+    from pathlib import Path
+
+    from nicegui import app
+    from nicegui.storage import Storage
+
+    assert Storage.path != Path(os.environ["TEST_ORIGINAL_STORAGE"])
+    assert Storage.redis_url is None
+    assert "operator_sentinel" not in app.storage.general
+    app.storage.general["test_value"] = "collection"
+    Path(os.environ["TEST_STORAGE_RECEIPT"]).write_text(str(Storage.path))
+    assert os.environ["TEST_COLLECTION_FAILURE"] == "0"
+
+
+def nicegui_collection_process() -> None:
+    import os
+    import sys
+    from pathlib import Path
+
+    import pytest
+
+    from src.detours.detour_ai_augment.protected.tests import pytest_plugin
+
+    root = Path(sys.argv[1])
+    original = os.environ["NICEGUI_STORAGE_PATH"]
+    redis = os.environ.get("NICEGUI_REDIS_URL")
+    test_path = root / "test_collection.py"
+    test_path.write_text(pytest_plugin.PythonProcess.source(
+        pytest_plugin.test_nicegui_collection_storage,
+    ))
+    ini = root / "pytest.ini"
+    ini.write_text("[pytest]\n")
+    result = pytest.main([
+        "-q", "-p", pytest_plugin.__name__, "-c", str(ini),
+        "--confcutdir", str(root), str(test_path),
+    ])
+    assert int(result) == int(sys.argv[2])
+    storage_path = Path(Path(os.environ["TEST_STORAGE_RECEIPT"]).read_text())
+    assert not storage_path.exists()
+    assert os.environ["NICEGUI_STORAGE_PATH"] == original
+    assert os.environ.get("NICEGUI_REDIS_URL") == redis
+    print("COLLECTION_STORAGE_CLEANED")
+
+
+def watcher_fixture_process() -> None:
+    import sys
+
+    import pytest
+
+    class ImportAudit:
+        def pytest_runtest_call(self, item: pytest.Item) -> None:
+            assert isinstance(item, pytest.Function)
+            assert "isolated_lima_configuration" not in item.fixturenames
+            assert not any(name == "nicegui" or name.startswith("nicegui.")
+                           for name in sys.modules)
+            assert "fastapi" not in sys.modules
+
+    result = pytest.main(["-q", sys.argv[1]], plugins=[ImportAudit()])
+    assert result == 0
+    print("WATCHER_FIXTURES_INDEPENDENT")
+
+
 def backend_startup_process() -> None:
     import sys
 
@@ -445,6 +554,229 @@ def operator_fixture_bootstrap_process() -> None:
     print("OPERATOR_BOOTSTRAP_QUERY_OK")
 
 
+def completed_query_fixture_process() -> None:
+    """Seed real Store history and a deliberately stale, private Dashboard snapshot."""
+    print("Completed-query fixture: importing dependencies", flush=True)
+    import asyncio
+    import hashlib
+    import json
+    import os
+    import sys
+    import time
+    from pathlib import Path, PurePosixPath
+    from uuid import UUID, uuid7
+
+    import duckdb
+    from nicegui import app
+
+    from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
+        DOCX_COLUMNS,
+        REPLAY_LOG_KEY,
+    )
+    from src.detours.detour_ai_augment.src.backend import api, server
+    from src.detours.detour_ai_augment.src.backend.helpers.data_models.commit_event import (
+        SOURCE_KEY_HEADER,
+        BackendLifecycle,
+        CodexRolloutRecord,
+    )
+    from src.detours.detour_ai_augment.src.backend.helpers.data_models.run_outcome_response import (
+        RunOutcomeResponse,
+        RunOutcomeResponseBody,
+    )
+    from src.detours.detour_ai_augment.src.control_centre.dashboard import ui
+    from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models import (
+        ai_augment_context,
+    )
+    from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.ai_augment_dashboard_storage import (  # noqa: E501
+        AiAugmentDashboardStorage,
+    )
+    from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.query_request import (  # noqa: E501
+        QueryRequest,
+    )
+    from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.run_event import (  # noqa: E501
+        RunEvent,
+    )
+    from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.run_outcome import (  # noqa: E501
+        NAME_KEY_HEADER,
+        SYNTHETIC_HOST,
+        SYNTHETIC_SCHEME,
+        RunLifecycle,
+        RunOutcomeRequest,
+    )
+    from src.detours.detour_ai_augment.tests.backend.test_api import (
+        OPERATOR_CAPTURED_SESSION_ID,
+        operator_capture_rollout,
+        persisted_http_record,
+        report_for_rollout,
+        valid_submission_body,
+    )
+    from src.detours.detour_ai_augment.tests.control_centre.test_ui import STARTUP_NAMEKEY
+    from src.helpers.duckdb_utils import duckdb_quote_identifier as quote
+    from src.helpers.schema import DOCX_INNERDICT_TABLE, XLSX_INNERDICT_TABLE
+    from src.helpers.vars import (
+        KTP_FILENAME_COL,
+        KTP_FIRST_NAME_COL,
+        KTP_FRAGMENT_COL,
+        KTP_FRAGMENT_TYPE_COL,
+        KTP_INNERDICT_JSONLINES_COL,
+        KTP_LAST_NAME_COL,
+        KTP_NAMEKEY_COL,
+    )
+
+    config_path = Path(sys.argv[1])
+    print("Completed-query fixture: preparing synthetic source", flush=True)
+    config = json.loads(config_path.read_text())
+    config["match_rule_version"]["codex_match"] = 1
+    config_path.write_text(json.dumps(config))
+    # Startup-only fixtures omit DOCX contents; the real Dashboard requires ground truth.
+    # This is the owned synthetic SOURCE DB, never the detour DB or a production database.
+    source = Path(config["db_file"])
+    assert source.parent == config_path.parent
+    source.chmod(0o600)
+    try:
+        with duckdb.connect(str(source)) as connection:
+            rows = connection.execute(
+                f"SELECT {quote(KTP_NAMEKEY_COL)}, {quote(KTP_INNERDICT_JSONLINES_COL)} "
+                f"FROM {quote(XLSX_INNERDICT_TABLE)}"
+            ).fetchall()
+            documents = []
+            for namekey, lines in rows:
+                row = json.loads(lines.splitlines()[0])
+                row.update(dict.fromkeys(DOCX_COLUMNS, "NR"))
+                row.update({KTP_FILENAME_COL: "fixture.docx", KTP_FRAGMENT_COL: 1,
+                            KTP_FRAGMENT_TYPE_COL: "docx_table"})
+                documents.append((namekey, json.dumps(row)))
+            connection.executemany(
+                f"INSERT INTO {quote(DOCX_INNERDICT_TABLE)} VALUES (?, ?)", documents,
+            )
+    finally:
+        source.chmod(0o400)
+    runtime = server.configure_runtime(config_path, require_namekey=False)
+    print("Completed-query fixture: runtime ready", flush=True)
+    store = runtime.pipeline_config.backend_store
+    payload = valid_submission_body()
+    rollout_bytes = operator_capture_rollout(payload)
+    digest = hashlib.sha256(rollout_bytes).hexdigest()
+    store.rollout_cas.initialize()
+    blob = store.rollout_cas.path / digest[:2] / digest[2:4] / digest
+    blob.parent.mkdir(parents=True, exist_ok=True)
+    blob.write_bytes(rollout_bytes)
+    session_id = UUID(OPERATOR_CAPTURED_SESSION_ID)
+    relative = PurePosixPath(f"2026/09/03/rollout-2026-09-03T15-16-00-{session_id}.jsonl")
+    with store.writable(runtime):
+        stale = store.query(runtime, QueryRequest())
+        pull = store.append_authoritative_record(persisted_http_record(
+            record_id=uuid7(), method="GET", path="/pull", response_code=200,
+        ).model_copy(update={
+            "response_headers": {"content-type": api.MEDIA_TYPE},
+            "response_body": api.json_line({
+                KTP_FIRST_NAME_COL: STARTUP_NAMEKEY.first_name,
+                KTP_LAST_NAME_COL: STARTUP_NAMEKEY.last_name,
+            }),
+        }))
+        push = store.append_authoritative_record(persisted_http_record(
+            record_id=uuid7(), method="POST", path="/push", response_code=202,
+            request_body=json.dumps(payload),
+        ))
+        draft = api._synthetic_commit_record(
+            pull_record=pull, push_record=push, session_id=session_id,
+            rollout=CodexRolloutRecord(
+                sha256=digest, size=len(rollout_bytes), line_count=rollout_bytes.count(b"\n"),
+            ),
+            rollout_filename=relative.name,
+            appendwatch_report=report_for_rollout(relative).encode(),
+            namekey=STARTUP_NAMEKEY,
+        )
+        commit = store.append_authoritative_record(draft)
+        print("Completed-query fixture: validating synthetic commit", flush=True)
+        validated = store.validate_commit(commit.record_id)
+        assert validated.attempt.post_commit_validation.result is BackendLifecycle.ACCEPTED
+        assert validated.http_records == ()  # Plain initial submission needs no provider requests.
+        occurred_at = commit.record_id.time * 1000
+        request = RunOutcomeRequest.from_http_request(
+            received_at_unix_usec=occurred_at + 6, method="POST", scheme=SYNTHETIC_SCHEME,
+            host=SYNTHETIC_HOST,
+            port=None, path=RunLifecycle.COMPLETED.to_run_outcome_path(), query="",
+            request_headers={NAME_KEY_HEADER: api.name_key_header(STARTUP_NAMEKEY)},
+            request_body=b"",
+        )
+        outcome = RunOutcomeResponse.from_run_outcome_request(
+            request, response_code=200,
+            response_headers={SOURCE_KEY_HEADER: draft.request_headers[SOURCE_KEY_HEADER]},
+            response_body=RunOutcomeResponseBody(
+                pull_record_id=pull.record_id, push_record_id=push.record_id,
+                codex_session_record=draft.commit_request_body.codex_session_record,
+            ),
+            ready_to_respond_at_unix_usec=occurred_at + 7,
+        )
+        store.append_authoritative_record(outcome.http_request_log_record)
+        fresh = store.query(runtime, QueryRequest())
+        assert len(fresh.attempts) == len(fresh.run_outcome_records) == 1
+
+    # A fresh Dashboard/IPC startup verifies the new fixture log through normal config mechanics.
+    config["files_config"][REPLAY_LOG_KEY]["sha256"] = hashlib.sha256(
+        Path(config["files_config"][REPLAY_LOG_KEY]["path"]).read_bytes(),
+    ).hexdigest()
+    config_path.write_text(json.dumps(config))
+    run_id = uuid7()
+    events = [
+        RunEvent(run_id=run_id, namekey=STARTUP_NAMEKEY,
+                 occurred_at_unix_usec=occurred_at - 5 + index,
+                 lifecycle=lifecycle, session_id=session_id)
+        for index, lifecycle in enumerate((RunLifecycle.QUEUED, RunLifecycle.STARTED,
+                                          RunLifecycle.SESSION_DISCOVERED,
+                                          RunLifecycle.CODEX_EXITED, RunLifecycle.COMPLETED))
+    ]
+    storage = AiAugmentDashboardStorage()
+    storage.replace_query_response(stale)
+    storage.save_run_events(events)
+    storage.save_queue([])
+    # The real FilePersistentDict writes synchronously outside a running event loop.
+    assert app.storage.general
+    (config_path.parent / "lima.json").write_text(json.dumps({
+        "param": {"FASTAPI_DETOUR_APPENDWATCH_REPORT": "/fixture/appendwatch.txt"},
+        "mounts": [{"location": str(config_path.parent), "mountPoint": "/fixture"}],
+    }))
+    setattr(ai_augment_context, "LIMA_CONFIG_PATH", config_path.parent / "lima.json")
+    os.environ["OPENALEX_API_KEY"] = "isolated-unused-query-key"
+    services = ui.create_services(config_path=config_path)
+    services.controller._load_dashboard_storage()
+    # Exercise real filtering before asking a browser to render it; no services are started.
+    selection = ui._UiSelection(researcher_varname=ui.RESEARCHER_VARS[0].varname)
+    started = time.monotonic()
+    with asyncio.Runner() as runner:
+        unfiltered = runner.run(services.controller.snapshot(selection=selection))
+        assert len(unfiltered.researcher_var_views) == len(stale.ai_augment_singular_outerdicts)
+        selection.search_text = STARTUP_NAMEKEY.to_json_key()
+        filtered = runner.run(services.controller.snapshot(selection=selection))
+    assert len(filtered.researcher_var_views) == 1
+    row = filtered.researcher_var_views[0]
+    assert row.researcher.namekey == STARTUP_NAMEKEY
+    assert row.latest_run_commit_var_view.lifecycle is RunLifecycle.COMPLETED
+    assert row.latest_run_commit_var_view.action is ui._RunAction.RERUN
+    assert row.latest_run_commit_var_view.commit_record_id is None
+    print(f"Completed-query fixture: real 307-to-1 filter passed in "
+          f"{time.monotonic() - started:.3f}s", flush=True)
+    (config_path.parent / "completed-query.json").write_text(json.dumps({
+        "commit_id": str(commit.record_id), "namekey": STARTUP_NAMEKEY.to_json_key(),
+    }))
+    print("COMPLETED_QUERY_FIXTURE_READY", flush=True)
+
+
+def completed_query_dashboard_process() -> None:
+    """Only point real Dashboard configuration at the fixture's local Lima metadata."""
+    import sys
+    from pathlib import Path
+
+    from src.detours.detour_ai_augment.src.control_centre.dashboard import ui
+    from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models import (
+        ai_augment_context,
+    )
+
+    setattr(ai_augment_context, "LIMA_CONFIG_PATH", Path(sys.argv[1]).parent / "lima.json")
+    raise SystemExit(ui.main(["--config", sys.argv[1]]))
+
+
 def deployed_guest_imports_process() -> None:
     import runpy
     from pathlib import Path
@@ -494,6 +826,13 @@ def stdin_waiting_process() -> None:
 def watcher_import_process() -> None:
     import os
     import subprocess
+    import sys
+
+    print(f"pytest interpreter: {sys.executable}", flush=True)
+    for name in (
+        "PIXI_PROJECT_ROOT", "CONDA_PREFIX", "APPENDWATCH_PYTHON", "APPENDWATCH_SCRIPT",
+    ):
+        print(f"{name}={os.environ.get(name)!r}", flush=True)
 
     subprocess.run([
         os.environ["APPENDWATCH_PYTHON"], os.environ["APPENDWATCH_SCRIPT"], "--help",
@@ -548,11 +887,15 @@ def socketless_dashboard_process() -> None:
 @pytest.fixture
 def socketless_dashboard_lifecycle(
     python_process: PythonProcess,
+    nicegui_storage_path: Path,
 ) -> SocketlessDashboardLifecycle:
     def run(*, publish: bool, failure: str) -> subprocess.CompletedProcess[str]:
         args = [failure, *(["publish", "completed"] if publish else []),
                 "--config", "unused.json"]
-        return python_process.run(socketless_dashboard_process, *args, timeout=15)
+        return python_process.run(
+            socketless_dashboard_process, *args, timeout=15,
+            env=nicegui_test_environment(nicegui_storage_path),
+        )
     return run
 
 
@@ -566,7 +909,7 @@ def detour_root(repository_root: Path) -> Path:
     return repository_root / "src" / "detours" / "detour_ai_augment"
 
 
-@pytest.fixture(autouse=True)
+@pytest.fixture
 def isolated_lima_configuration(
     request: pytest.FixtureRequest,
     tmp_path: Path,
@@ -574,9 +917,6 @@ def isolated_lima_configuration(
 ) -> None:
     if request.node.get_closest_marker(OPERATOR_MARKER) is not None:
         return
-    from src.detours.detour_ai_augment.src.control_centre.dashboard import (
-        ui as control_ui,
-    )
     from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models import (
         ai_augment_context,
     )
@@ -590,7 +930,7 @@ def isolated_lima_configuration(
     lima_config_path.write_text(
         json.dumps({
             "param": {
-                control_ui.LIMA_APPENDWATCH_REPORT_PARAM: guest_report,
+                ai_augment_context.LIMA_APPENDWATCH_REPORT_PARAM: guest_report,
             },
             "mounts": [{
                 "location": str(host_mount),
