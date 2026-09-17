@@ -115,7 +115,9 @@ def commit(
     rollout_bytes = operator_capture_rollout(rollout_payload) + rollout_suffix
     digest = hashlib.sha256(rollout_bytes).hexdigest()
     store.rollout_cas.initialize()
-    (store.rollout_cas.path / f"{digest}.jsonl").write_bytes(rollout_bytes)
+    blob = store.rollout_cas.path / digest[:2] / digest[2:4] / digest
+    blob.parent.mkdir(parents=True, exist_ok=True)
+    blob.write_bytes(rollout_bytes)
     relative = PurePosixPath(
         f"2026/09/03/rollout-2026-09-03T15-16-00-{OPERATOR_CAPTURED_SESSION_ID}.jsonl"
     )

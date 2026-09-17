@@ -184,6 +184,7 @@ def browser_researchers() -> tuple[AiAugmentSingularOuterDict, ...]:
 
 class BrowserController:
     def __init__(self) -> None:
+        self._queue_processing = False
         self._researchers = browser_researchers()
         self._activity_by_namekey = {
             researcher.namekey.to_json_key(): RunLifecycle.READY
@@ -225,7 +226,14 @@ class BrowserController:
     def backend_availability(self) -> control_ui._BackendAvailability:
         return self._backend_availability
 
-    async def start(self) -> None:
+    @property
+    def queue_processing(self) -> bool:
+        return self._queue_processing
+
+    def set_queue_processing(self, enabled: bool) -> None:
+        self._queue_processing = enabled
+
+    async def start(self, *, publishing: bool = False) -> None:
         return None
 
     async def shutdown(self) -> None:
@@ -848,7 +856,7 @@ def test_control_centre_browser_contract(pytestconfig: pytest.Config) -> None:
             refresh_box = backend_refresh.bounding_box()
             assert status_box is not None
             assert refresh_box is not None
-            assert refresh_box["x"] >= status_box["x"] + status_box["width"]
+            assert refresh_box["y"] + refresh_box["height"] <= status_box["y"]
             backend_refresh.click()
             expect(backend_status).to_have_text("Backend API: unavailable")
             expect(ipc_status).to_have_text("IPC: available")

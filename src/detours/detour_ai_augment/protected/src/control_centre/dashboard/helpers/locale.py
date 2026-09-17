@@ -16,6 +16,8 @@ class Locale:
     BACKEND_LOG_PREFIX: Final = "[backend]"
 
     ACTION_QUEUE: Final = "Queue run"
+    ACTION_START_QUEUE_PROCESSING: Final = "Start queue processing"
+    ACTION_STOP_QUEUE_PROCESSING: Final = "Stop queue processing"
     ACTION_CANCEL: Final = "Cancel run"
     ACTION_RERUN: Final = "Rerun"
     ACTION_DISABLED: Final = "Ineligible"

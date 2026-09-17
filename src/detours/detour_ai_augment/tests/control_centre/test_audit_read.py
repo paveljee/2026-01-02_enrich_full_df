@@ -7,7 +7,6 @@ import os
 import pwd
 import shutil
 import subprocess
-import sys
 import threading
 from pathlib import Path
 from typing import Any, cast
@@ -16,6 +15,10 @@ from unittest.mock import Mock
 import pytest
 from pydantic import BaseModel, ConfigDict, field_validator
 
+from src.detours.detour_ai_augment.protected.tests.pytest_plugin import (
+    PythonProcess,
+    deployed_guest_imports_process,
+)
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_context import (
     AiAugmentBackendContext,
 )
@@ -170,7 +173,10 @@ ROOT = Path(__file__).resolve().parents[5]
 DETOUR = ROOT / "src/detours/detour_ai_augment"
 
 
-def test_deployed_guest_imports_unchanged_shared_model_outside_repository(tmp_path: Path) -> None:
+@pytest.mark.python_subprocess
+def test_deployed_guest_imports_unchanged_shared_model_outside_repository(
+    tmp_path: Path, python_process: PythonProcess,
+) -> None:
     libexec = tmp_path / "libexec"
     helpers = libexec / "src/helpers"
     helpers.mkdir(parents=True)
@@ -183,27 +189,10 @@ def test_deployed_guest_imports_unchanged_shared_model_outside_repository(tmp_pa
     shutil.copyfile(watcher, deployed_watcher)
     for source in (shared, audit, watcher):
         ast.parse(source.read_text(), feature_version=(3, 12))
-    script = '''
-import runpy
-from pathlib import Path
-from src.helpers.architecture import FrozenStrictModel
-audit = runpy.run_path("libexec/aivm-audit-read", run_name="deployed_audit")
-assert issubclass(audit["AuditReadConfiguration"], FrozenStrictModel)
-model = audit["AuditReadConfiguration"](
-    runtime_user="ai", audit_user="audit", sessions_root=Path("/sessions"),
-    appendwatch_report=Path("/report"),
-)
-assert model.runtime_user == "ai"
-watch = runpy.run_path("appendwatch.py", run_name="deployed_watch")
-record = watch["Record"](dev=1, ino=2, size=0, mtime_ns=0, ctime_ns=0, digest=b"a")
-record.size = 2
-copied = record.model_copy(update={"exists": False})
-assert record.exists and not copied.exists and copied.size == 2
-print("DEPLOYED_MODELS_OK")
-'''
     environment = dict(os.environ, PYTHONPATH=str(libexec), PYTHONDONTWRITEBYTECODE="1")
-    result = subprocess.run([sys.executable, "-c", script], cwd=tmp_path, env=environment,
-                            capture_output=True, text=True, timeout=10, check=False)
+    result = python_process.run(
+        deployed_guest_imports_process, cwd=tmp_path, env=environment, timeout=10,
+    )
     assert result.returncode == 0, result.stderr
     assert "DEPLOYED_MODELS_OK" in result.stdout
     assert (helpers / "architecture.py").read_bytes() == shared.read_bytes()

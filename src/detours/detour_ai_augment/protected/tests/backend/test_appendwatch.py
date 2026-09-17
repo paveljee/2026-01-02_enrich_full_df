@@ -27,11 +27,17 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Callable, Iterator
 
 import pytest
+
+from src.detours.detour_ai_augment.protected.tests.pytest_plugin import (
+    PythonProcess,
+    watcher_import_process,
+)
 
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="appendwatch uses Linux inotify")
 
@@ -1190,3 +1196,37 @@ def test_cli_shutdown_reconcile_marks_files_from_unwatched_root_interval(
         assert text.count("file was inside an unwatched directory; monitoring was incomplete") >= 2
     finally:
         shutil.rmtree(base, ignore_errors=True)
+
+
+@pytest.mark.python_subprocess
+@pytest.mark.parametrize("task", ("test-detour-ai-augment", "test-detour-ai-augment-root"))
+def test_task_selected_interpreter_starts_real_watcher(
+    tmp_path: Path, repository_root: Path, task: str, python_process: PythonProcess,
+) -> None:
+    """Run actual task exports; substitute pytest/sudo dispatch, NOT its watcher interpreter."""
+    tasks = tomllib.loads((repository_root / "pyproject.toml").read_text())["tool"]["pixi"][
+        "feature"
+    ]["detour-ai-augment"]["tasks"]
+    # The sentinel avoids the unrelated suite/network stage. Each task invocation still
+    # launches its configured interpreter and the unmodified watcher's real --help command.
+    sentinel = tmp_path / "pytest"
+    sentinel.mkdir()
+    (sentinel / "__init__.py").write_text("")
+    (sentinel / "__main__.py").write_text(python_process.source(watcher_import_process))
+    sudo = tmp_path / "sudo"
+    sudo.write_text('#!/bin/sh\nexec "$@"\n')
+    sudo.chmod(0o700)
+    environment = dict(
+        os.environ, CONDA_PREFIX=sys.prefix, PIXI_PROJECT_ROOT=str(repository_root),
+        PYTHONPATH=str(tmp_path), PATH=f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
+    )
+    result = subprocess.run(
+        ["bash", "-c", tasks[task]], cwd=repository_root, env=environment,
+        capture_output=True, text=True, timeout=15, check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.count("TASK_WATCHER_IMPORT_OK") == (
+        2 if task == "test-detour-ai-augment" else 1
+    )
+    # Privilege dropping is deliberately NOT claimed here; existing needs_sudo tests
+    # must verify interpreter/package path traversal as nobody in the actual operator env.

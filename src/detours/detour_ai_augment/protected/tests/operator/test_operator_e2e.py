@@ -48,9 +48,6 @@ from src.detours.detour_ai_augment.src.backend import server as backend_server
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_backend_store import (  # noqa: E501
     AiAugmentBackendStore,
 )
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_cas import (  # noqa: E501
-    ROLLOUT_CAS_FILENAME_TEMPLATE,
-)
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_context import (
     AiAugmentBackendContext,
 )
@@ -411,10 +408,15 @@ def _operator_runtime(
         "rollout_cas_dir": str(rollout_cas_dir),
     })
     config_path.write_text(json.dumps(config, indent=2), encoding=TEXT_ENCODING)
-    pipeline_config = AiAugmentDetourConfig.from_json(
-        config_path,
-        verify_hash_on_init=False,
-    )
+    _operator_log("initializing isolated Backend Store through --new --yes lifecycle")
+    args = backend_server.parse_args(["--config", str(config_path), "--new", "--yes"])
+    backend_runtime = backend_server.configure_runtime(args.config, require_namekey=False)
+    with backend_server.backend_store_lifecycle(
+        backend_runtime, new=args.new, confirmed=backend_server.confirm_startup(args), yes=args.yes,
+    ):
+        pass
+    _operator_log("isolated Backend Store initialized and closed cleanly")
+    pipeline_config = backend_runtime.pipeline_config
     return OperatorRuntime(
         repository_root=repository_root,
         config_path=config_path,
@@ -541,20 +543,38 @@ def target_namekey(runtime: OperatorRuntime) -> NameKey:
     return namekey
 
 
-def query_snapshot_in_browser(page: Page, runtime: OperatorRuntime) -> None:
-    """Exercise production-owned startup/query/shutdown, without a fixture-owned Store."""
+def query_snapshot_in_browser(
+    page: Page, runtime: OperatorRuntime, dashboard: DashboardProcess,
+) -> None:
+    """Exercise production-owned query lifetime after explicit fixture initialization."""
     deadline = time.monotonic() + PROCESS_STOP_TIMEOUT_SECONDS
     while runtime.dashboard_socket_path.exists():
+        raise_for_dashboard_failure(dashboard)
         if time.monotonic() >= deadline:
             raise TimeoutError("owned Backend did not release its IPC socket")
         page.wait_for_timeout(round(PROCESS_POLL_SECONDS * 1_000))
+    output_start = len(dashboard.output)
     page.get_by_test_id(control_ui.BACKEND_REFRESH_TEST_ID).click()
-    expect(page.get_by_text(Locale.QUERY_SNAPSHOT_REPLACED, exact=True)).to_be_visible(
-        timeout=round(control_vars.BACKEND_REBUILD_TIMEOUT_SECONDS * 1_000),
+    deadline = time.monotonic() + (
+        control_vars.BACKEND_READY_TIMEOUT_SECONDS + control_vars.PROCESS_STOP_TIMEOUT_SECONDS
     )
+    while time.monotonic() < deadline:
+        raise_for_dashboard_failure(dashboard)
+        output = "".join(dashboard.output[output_start:])
+        if "Backend startup failed:" in output or "Query IPC failed:" in output:
+            raise RuntimeError("operator Query IPC failed:\n" + output)
+        if (
+            "Dashboard snapshot replaced:" in output
+            and page.get_by_text(Locale.QUERY_SNAPSHOT_REPLACED, exact=True).is_visible()
+        ):
+            return
+        page.wait_for_timeout(round(PROCESS_POLL_SECONDS * 1_000))
+    raise TimeoutError("operator Query IPC did not complete:\n" + "".join(dashboard.output))
 
 
-def queue_in_browser(namekey: NameKey, runtime: OperatorRuntime) -> float:
+def queue_in_browser(
+    namekey: NameKey, runtime: OperatorRuntime, dashboard: DashboardProcess,
+) -> float:
     _operator_log("opening the Control Centre in Playwright")
     queued_at_monotonic: float | None = None
     with sync_playwright() as playwright:
@@ -564,7 +584,7 @@ def queue_in_browser(namekey: NameKey, runtime: OperatorRuntime) -> float:
             page = browser.new_page(viewport=BROWSER_VIEWPORT)
             page.set_default_timeout(BROWSER_ASSERTION_TIMEOUT_MILLISECONDS)
             page.goto(CONTROL_CENTRE_URL, wait_until="networkidle")
-            query_snapshot_in_browser(page, runtime)
+            query_snapshot_in_browser(page, runtime, dashboard)
             page.get_by_label(Locale.SEARCH_FILTER).fill(namekey.to_json_key())
             rows = page.get_by_test_id(control_ui.RESEARCHER_GRID_TEST_ID).locator(
                 GRID_ROW_SELECTOR
@@ -576,6 +596,15 @@ def queue_in_browser(namekey: NameKey, runtime: OperatorRuntime) -> float:
             queued_at_monotonic = time.monotonic()
             execute.click()
             _operator_log("queued the workflow through the browser")
+            start_queue = page.get_by_role(
+                "button", name=Locale.ACTION_START_QUEUE_PROCESSING, exact=True,
+            )
+            expect(start_queue).to_be_enabled()
+            start_queue.click()
+            expect(page.get_by_role(
+                "button", name=Locale.ACTION_STOP_QUEUE_PROCESSING, exact=True,
+            )).to_be_visible()
+            _operator_log("started queue processing through the browser")
         finally:
             if browser is not None:
                 browser.close()
@@ -662,7 +691,7 @@ def run_workflow_to_gone_pull(
     dashboard: DashboardProcess,
     namekey: NameKey,
 ) -> WorkflowCheckpoint:
-    queued_at_monotonic = queue_in_browser(namekey, runtime)
+    queued_at_monotonic = queue_in_browser(namekey, runtime, dashboard)
     wait_for_gone_pull(runtime, dashboard)
     return WorkflowCheckpoint(
         queued_at_monotonic=queued_at_monotonic,
@@ -711,7 +740,7 @@ def wait_for_completed_grid_row(
             and view_card.is_enabled()
         ):
             if not queried_after_completion:
-                query_snapshot_in_browser(page, runtime)
+                query_snapshot_in_browser(page, runtime, dashboard)
                 queried_after_completion = True
                 continue
             commit_record_id = (
@@ -979,10 +1008,9 @@ def validate_workflow_artifacts(
     assert push_record.response_code == status.HTTP_202_ACCEPTED
     assert push_record.response_headers is not None
     assert push_record.response_headers["location"] == backend_api.PULL_PATH
-    rollout_blob = operator_runtime.rollout_cas_dir / (
-        ROLLOUT_CAS_FILENAME_TEMPLATE.format(
-            sha256=rollout.sha256
-        )
+    rollout_blob = (
+        operator_runtime.rollout_cas_dir
+        / rollout.sha256[:2] / rollout.sha256[2:4] / rollout.sha256
     )
     assert rollout_blob.is_file()
     assert rollout_blob.stat().st_size == rollout.size
@@ -1036,10 +1064,9 @@ def validate_workflow_artifacts(
             backend_api._parse_source_key_header(run_outcome_source_key)
         )
         assert run_outcome_line_count == run_outcome_rollout.line_count
-        run_outcome_rollout_blob = operator_runtime.rollout_cas_dir / (
-            ROLLOUT_CAS_FILENAME_TEMPLATE.format(
-                sha256=run_outcome_rollout.sha256
-            )
+        run_outcome_rollout_blob = (
+            operator_runtime.rollout_cas_dir / run_outcome_rollout.sha256[:2]
+            / run_outcome_rollout.sha256[2:4] / run_outcome_rollout.sha256
         )
         assert run_outcome_rollout_blob.is_file()
         assert run_outcome_rollout_blob.stat().st_size == run_outcome_rollout.size

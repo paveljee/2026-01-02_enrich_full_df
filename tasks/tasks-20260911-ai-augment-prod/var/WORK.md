@@ -3,15 +3,19 @@
 ## Status and authorization
 
 2026-09-16: Previously approved implementation scope P1-P12 is implemented.
-Newly approved P13 (extensionless, sharded CAS layout) is PENDING; its exact narrow
-scope and approved snippets are pinned below. That approval requested recording,
-not implementation. No CAS code or stored blobs have been changed.
+P13 (extensionless, sharded CAS layout) is implemented and verified; exact scope/snippets below.
+Only code/synthetic test fixtures may change; no stored production blobs will be moved.
 2026-09-17: P14 startup-condition tests and P15 staged-test consolidation review are
 complete: 111 mock-free startup cases and 123 moved/existing tests passed; Ruff/mypy passed.
 P16 Markdown/TXT download is implemented and verified; approved snippets below.
 P13 (CAS layout), P17 (Dashboard layout) and P18 (operator failures/upstream verification)
-are pending approved scopes. Their current authorization is to record them; no implementation
-of these pending items has started. P18 records known integration work, not mere rollout acceptance.
+are authorized for implementation IN ORDER by the latest operator request. P13 is complete;
+P17 is complete; P18 implementation and available upstream verification are complete, with
+root-only/production verification outstanding; P19 is implemented and locally verified (test
+subprocess centralization/selection, with one initial startup timeout and a passing isolated
+rerun). All approved P1-P19 code changes are implemented; no approved implementation item
+remains pending. This is NOT full production acceptance. Non-elevate Pixi task edits require explicit
+per-change approval; see P18 authorization correction. P18 records integration work, not mere rollout acceptance.
 The full hermetic regression run passed (306 passed,1 skipped,3 excluded); subsequent
 Store/IPC/provisioning checks passed (28, overlapping the broad suite). Final Ruff and strict mypy
 passed after the last edits. The agent performed no production/operator/guest/network
@@ -53,9 +57,13 @@ Do not edit or run its tests. The conversion inventory below excludes it.
 | P10 | Dashboard background-startup failure requests normal shutdown and unsuccessful process exit | ui.py application lifecycle |
 | P11 | All25 in-scope remaining detour dataclasses converted, with standalone dependency/constructor integration | Inventory below |
 | P12 | Missing operator-terminal logs for existing UI actions/results/errors, including probes/download/publishing | ui.py |
+| P13 | Extensionless two-level SHA256 CAS shards, symlink guards and directory fsync | ai_augment_cas.py + corresponding test fixtures |
 | P14 | Current lifecycle review and 111 mock-free parametrized startup-condition cases | tests/control_centre/test_ui.py |
 | P15 | Operator test moves preserved; import, constant and fixture collisions corrected | test_ui.py, test_audit_read.py, test_backend_store.py |
 | P16 | Markdown/TXT button shares DOCX download contour; symmetric format-specific handles/selectors | ui.py, locale.py, existing UI tests |
+| P17 | Header grouping, horizontal DOCX/Markdown buttons, localized queue-processing labels | ui.py + protected Dashboard locale |
+| P18 | Operator fixture/query/queue corrections, watcher interpreter, shared lint, full check-graph review and targeted elevate verification | Operator helpers/tests, architecture.py, two approved task substitutions + elevate; root/production verification pending |
+| P19 | Named subprocess helpers, shared explicit fixture and selectable markers; preserved isolation/timeouts | protected/tests/pytest_plugin.py + existing test callpoints |
 
 ## Store integrity and startup — implemented
 
@@ -298,14 +306,22 @@ plus repository-root tests/test_http_request_log.py. Exclude captured_operator_p
 historical_haanen_retry and real_mode_0600_unix_socket; exclude real_api/operator/needs_sudo.
 No test_ui_e2e, real socket/HTTP providers, guest deployment or paused BDD execution.
 
-## P17 — Pending approved scope: Dashboard layout only
+## P17 — Completed: Dashboard layout only
 
 2026-09-17: operator requested recording these two surgical formatting changes in WORK.
-Approved and pending; no ui.py implementation in this turn.
+Approved methods applied after P13. Ruff/strict mypy passed; only grouping/order changed.
+No new layout tests were added. The existing real-browser layout contract subsequently
+passed in P18's targeted elevate rerun, recorded below.
 
 Limit production changes to _ControlCentrePage.build_header and build_card_panel in
 src/control_centre/dashboard/ui.py, plus WORK status/evidence. Reuse existing NiceGUI
 containers/styles; only adjust grouping/order/indentation of existing elements.
+
+Operator steering during implementation: immediately move both Start/Stop queue-processing
+labels into Control Centre Locale.ACTION_START_QUEUE_PROCESSING and
+Locale.ACTION_STOP_QUEUE_PROCESSING. Done in locale.py and both ui.py construction/refresh
+uses; no behavior change. This explicitly extends P17's file boundary to the existing locale
+module; the snippets below reflect the authorized label move.
 
 ### Header: two distinct rows, in this exact order
 
@@ -331,8 +347,8 @@ styles, handles, test IDs, handlers, enable/disable rules, download content and 
 ### Exact code snippets
 
 These are the complete replacement methods on _ControlCentrePage in ui.py.
-Only existing element grouping/order changes; no new imports, constants, callbacks
-or helpers. Recorded for implementation, not applied to production code yet.
+Only existing element grouping/order changes plus the explicitly authorized Locale labels;
+no new imports, callbacks or helpers. Applied to production code as recorded; no additional behavior changes.
 
 ```python
 def build_header(self) -> None:
@@ -347,8 +363,8 @@ def build_header(self) -> None:
                 Locale.ACTION_QUERY_IPC, on_click=self.refresh_from_ipc,
             ).props(_NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=BACKEND_REFRESH_TEST_ID))
             self._handles.queue_processing_button = ui.button(
-                "Stop queue processing" if self._controller.queue_processing
-                else "Start queue processing",
+                Locale.ACTION_STOP_QUEUE_PROCESSING if self._controller.queue_processing
+                else Locale.ACTION_START_QUEUE_PROCESSING,
                 on_click=self.toggle_queue_processing,
             )
         with ui.row().style(RESPONSIVE_ROW_STYLE):
@@ -404,7 +420,7 @@ def build_card_panel(self) -> None:
 Everything else stays unchanged: no behavioral changes to Probe, Query IPC, queue control,
 statuses, cards/downloads, storage or Backend; no helper/classes/refactoring, renames,
 configuration changes, or changes to other page sections. This does not authorize fixes
-tracked separately in P18 and does not alter pending P13.
+tracked separately in P18 and does not alter P13.
 At implementation, run applicable static checks; no new test framework, business-logic
 tests or operator E2E run is needed for this container-only formatting edit.
 
@@ -421,7 +437,7 @@ test_ui_e2e.py, and WORK. Main pipeline TXT mode was reviewed: unchanged Markdow
 shared card_filename basename plus .txt; no separate TXT renderer. Reuse the displayed
 card and existing shared download handler, not a new exporter/helper hierarchy.
 No shared pipeline edits, Backend/IPC/DB/storage changes, ZIPs, CLI/config changes, or
-changes to publish completed (still DOCX-only). P13 remains pending and untouched.
+changes to publish completed (still DOCX-only). P16 did not change CAS; P13 is tracked separately.
 
 ### Approved snippets, incorporating the operator's naming corrections
 
@@ -559,7 +575,9 @@ async def download_displayed_card(
 
 Implemented the pinned shape. The existing card display log now reports DOCX/TXT
 availability. Existing DOCX-only browser-test selector/local names were updated; the browser
-suite was not run. No generic old download-card handle/selector references remain.
+suite was not run at P16 implementation. The real browser DOCX-download test subsequently
+passed in P18's targeted elevate rerun; this is not browser TXT-download coverage.
+No generic old download-card handle/selector references remain.
 Verification: 7 focused UI cases passed (184 deselected, 11.11s), covering both download
 formats with exact Unicode bytes/filename/MIME, button clearing/skipped download, logs,
 snapshot invalidation, unchanged completed DOCX publishing, publication failure/no-op and
@@ -572,16 +590,17 @@ Focused command:
 pixi run -e detour-ai-augment env pytest -q src/detours/detour_ai_augment/tests/control_centre/test_ui.py -k 'displayed_card_download or snapshot_replacement_clears or publish_completed or publish_one_shot or probe_and_docx_failures' -m 'not real_api and not operator and not needs_sudo'
 ```
 
-## P13 — Pending approved scope: extensionless, sharded CAS layout
+## P13 — Completed: extensionless, sharded CAS layout
 
 Approved 2026-09-16: the operator approved the exact narrow proposal and snippets below
-and requested recording them in pending WORK. Implementation has NOT started.
+and initially requested recording them in WORK. The later in-order implementation request
+authorized implementation; it is now complete.
 
 ### Exact scope
 
-Current AiAugmentCAS layout is flat <cas-root>/<full-sha256>.jsonl. The suffix describes
+Former AiAugmentCAS layout was flat <cas-root>/<full-sha256>.jsonl. The suffix describes
 Codex rollout content but is unnecessary for content addressing; the README requires
-content addressing, not that suffix or a flat layout. Replace it with:
+content addressing, not that suffix or a flat layout. Implemented replacement:
 
 ```text
 <cas-root>/ab/cd/abcdef…<full-64-character-digest>
@@ -656,6 +675,14 @@ no additional code snippet was proposed for this explicitly approved requirement
   sample_deploy remains explicitly out of scope.
 - Verify this localized change with focused hermetic CAS/path checks and applicable
   Ruff/mypy checks; do not run the real operator suite in this restricted environment.
+
+P13 verification: the existing audit-copy regression first failed against the old flat
+layout, then passed after implementation. Sharded readback, corruption/size/line-count,
+missing/legacy paths, shard/leaf symlinks, live-copy shard rejection, duplicate copy and
+real fsync of blob/both shards/root were verified. 18 selected CAS/audit/HTTP-interceptor
+cases passed; 6 malformed-digest cases passed after correcting their test fixture's unrelated
+minimum line_count (24 cases total). Ruff and strict mypy passed the four touched modules.
+Operator fixture path expectations updated, but no live operator tests or blob migration ran.
 
 ## P14 — Completed: current Backend table and mock-free startup-condition tests
 
@@ -742,13 +769,91 @@ cases deselected (144.40s). These checks include the existing UI fixture behavio
 class-scoped correction. Paused BDD and sample_deploy remain unexecuted. P14 is verified
 separately; no additional broad regression rerun is needed for this import/name cleanup.
 
-## P18 — Pending approved scope: operator failures and missed upstream verification
+## P18 — Implemented; available upstream checks complete; production verification pending
 
 2026-09-17: operator approved recording the identified integration gaps as a new P item,
 including the broader homework the Assistant missed before handing work to the human.
-TASK was reread IN FULL, especially its testing philosophy. Record scope now; implementation
-has not started. This supersedes the former unapproved operator-log-review follow-up.
-P13/P17 remain separately pending, unchanged.
+TASK was reread IN FULL, especially its testing philosophy. Approved corrections are now
+implemented after verified P13/P17; available upstream checks and delegated results are
+recorded below. Root-only and production acceptance remain outstanding, not additional
+approved code changes. This supersedes the former unapproved operator-log-review follow-up.
+P13/P17 are complete, with their exact scope unchanged.
+
+### Final task boundary: wrappers rejected; Conda interpreter approved
+
+Operator clarified: pre-commit task SHAPE changes are REJECTED, but the previously proposed
+APPENDWATCH_PYTHON="$CONDA_PREFIX/bin/python" substitution is APPROVED in the existing
+test-detour-ai-augment and test-detour-ai-augment-root tasks. Both substitutions are applied;
+no other changes to those tasks are authorized. Verify the selected interpreter and actual
+privilege-drop accessibility; no permission changes are approved.
+
+Keep pre-commit-operator and pre-commit-extra-operator unchanged, including their existing
+grep functionality. The residual agent extra-wrapper patch was removed from the WORKING
+TREE only; Git index/staging was not altered. Wrapper aggregation/grep reformulation is not
+pending approval or implementation. Any special verification status aggregation/reporting
+belongs ONLY in agent-owned elevate. All other task edits still need explicit approval.
+
+The agent briefly over-applied the rejection to the two approved interpreter lines, then
+restored them on this clarification. Effective diff: the two approved launcher interpreter
+substitutions plus elevate; NO pre-commit wrapper changes. Preserve concurrent user edits.
+
+Unchanged pre-commit wrappers retain the reviewed status/reporting limitations. elevate can
+aggregate its own verification results, but success there does not prove those wrappers have
+been corrected. Local leaf-graph review and P19 checks are recorded below. The initial
+delegated batch failed at browser startup; all five failures passed in the targeted rerun
+without startup-code/timeout changes. Production root-test execution remains outstanding.
+
+### Implemented corrections and checks (not rollout acceptance)
+
+- Shared architecture.py Ruff-only whitespace/import correction applied; human comments preserved.
+- Operator fixture now invokes real server parsing/configuration/full Store initialization
+  (--new --yes) and clean closure before first Query IPC. It does not start Uvicorn or perform
+  remote workflow preflights. Synthetic fresh-fixture regression passed (1 test, 15.11s):
+  actual helper creates DB, then real read-only Store/query produces the 307-person snapshot;
+  replay remains empty and source bytes unchanged. No production artifacts or sockets used.
+- Operator browser helpers now request Start explicitly and observe fresh query/failure logs
+  within ordinary readiness/stop bounds. Headless helper/callback/controller checks passed as
+  recorded below; these do not prove real browser serving. Delegated browser results remain
+  initially failed in five cases at startup; those five passed in the targeted rerun,
+  alongside the two browser cases that passed in the initial batch.
+- Pre-commit wrapper edits are rejected; approved regular/root Conda interpreter lines are
+  applied. The initial elevate batch retained its browser/Unix-IPC/socket-substitution checks
+  and invoked the existing privileged appendwatch task and the mode0 synthetic module (its
+  Kaleido child requires socket operations unavailable here). Its own shell runs all these checks,
+  aggregates failures, and prints grep -n FAILED matches (or explicit no-match/read-error)
+  against elevate.log without masking any earlier failure. GNU script -e remains the Linux
+  log/status boundary. TOML parse and bash -n passed, and a before/after task-map comparison
+  confirmed only elevate changed in this step. This initial delegated batch completed with
+  exit1; its results and the narrowly targeted follow-up batch are recorded below.
+- Query-helper regression updated for immediate startup/query/process failure and stale success
+  notifications. Browser fixture now supports publishing startup and the queue-processing
+  property/setter; its old header geometry assertion was aligned with P17. New headless
+  harness/controller-gate and browser-fixture interface regressions passed with the query
+  failure/stale-success cases: 7 passed, 195 deselected (5.34s). Browser transport is substituted;
+  actual operator helper, page callbacks and controller gate/worker execute. An initial threaded
+  test driver stalled; it was stopped and replaced by bounded synchronous asyncio.Runner
+  dispatch with the existing inline-I/O seam, not production changes.
+- Actual regular/root task-shell smoke tests passed: 2 passed,43 deselected (49.78s).
+  Only pytest dispatch and sudo dispatch are sentinels; each actual configured watcher
+  interpreter imports/executes the real appendwatch --help. No real root/privilege-drop claim.
+- Full repository Ruff passed in the default environment; default full mypy passed (68 files).
+  Ruff and detour strict mypy (53 files) also passed after P19's named-helper migration.
+- Existing step4 synthetic leaf: 4 passed,1 slow case deselected (55.35s). Mode3 synthetic leaf:
+  6 passed (28.23s). Mode0: 2 passed,2 failed (69.97s); failures are Kaleido's forbidden
+  socket shutdown operation in this sandbox, not assertions in detour logic. Added that
+  synthetic module to elevate for real execution outside this restriction; no mode0 code edits.
+- Nonprivileged/nonsocket appendwatch leaf: 38 passed,7 deselected (30.51s).
+- elevate's actual shell/PTY logger regression: 5 passed,8 deselected (5.71s). Controlled
+  external-command outcomes cover all-pass, install/browser/root/mode0 failures; every stage
+  still runs, exit status retains failure and matching FAILED lines are shown. An initial
+  sentinel matched --playwright-chromium as the installer; corrected to inspect argv[2].
+- Default main-suite feasible selection: 138 passed,3 skipped,3 deselected,3 failed (48.75s).
+  Failures are environment/fixture prerequisites: config lacks linux_amd64 extension mapping;
+  configured /Volumes/home/aicode extension binary unavailable; reviewed XLSX fixture at the
+  operator path absent. No unrelated fixes/config changes made. Two DOCX-review tests that
+  write data/test_data were excluded; the real_api case was excluded. Initial misspelled
+  exclusion run was stopped before emitting test results, then corrected before this run.
+  Slow step4 real-config and live-provider leaves remain unrun under TASK resource restrictions.
 
 ### Governing lesson from TASK
 
@@ -774,11 +879,11 @@ Playwright TargetClosed/pending-task warnings are not the initiating failure.
 | Gap | Narrow correction | Required upstream evidence |
 |---|---|---|
 | Shared architecture module omitted from focused lint | Whitespace/import-spacing only in repository-root src/helpers/architecture.py (I001, E302); preserve human-signed comments | Actual lint covers affected shared dependencies as well as the detour; no new test for whitespace |
-| Converted appendwatch imports Pydantic2 but task subprocess uses /usr/bin/python3 | Correct APPENDWATCH_PYTHON selection in the existing regular/elevated/root detour tasks in pyproject.toml; interpreter and packages must remain accessible after dropping privileges to nobody | Real selected-interpreter subprocess imports/starts the watcher; do not substitute pytest's interpreter or mock the import. Retain existing real privilege-drop tests and check executable/dependency accessibility |
+| Converted appendwatch imports Pydantic2 but task subprocess uses /usr/bin/python3 | APPROVED: set APPENDWATCH_PYTHON to the existing Pixi interpreter in regular/root tasks (and elevate). Interpreter/packages must remain accessible after dropping privileges to nobody | Real selected-interpreter subprocess imports/starts the watcher; do not substitute pytest's interpreter or mock the import. Retain existing real privilege-drop tests and check executable/dependency accessibility |
 | Fresh operator fixture has empty replay/config, no DB, then immediately queries IPC | In protected/tests/operator/test_operator_e2e.py, initialize the isolated DB through the established full Backend --new/--yes lifecycle and clean shutdown before the first Query IPC | Synthetic fresh setup exercises real config/Store initialization, then succeeds at the query prerequisite; IPC-only against an uninitialized DB must STILL fail. Exercise the harness setup path, not a second manually prepared DB that bypasses it |
 | Harness queues but never enables processing | queue_in_browser explicitly clicks existing Start queue processing as part of its normal browser sequence | Exercise that sequence against the real queue-control behavior: initially stopped, Queue alone does not dequeue, explicit Start permits processing. Existing controller-only tests are insufficient evidence that the harness performs Start |
 | Query helper waits for success up to stale rebuild timeout600s after child failure | Observe query failure/process failure promptly in the existing operator helper, using ordinary IPC readiness bounds, not rebuild bounds | Known startup/query failure exits the helper promptly with useful diagnostics; success still proceeds normally. Do not merely lower the timeout and leave failure unobserved |
-| Pre-commit wrappers can mask earlier failures; inverted grep message and wrong extra-log target | Correct existing pre-commit-operator/pre-commit-extra-operator shell status handling in pyproject.toml; retain intended run-all behavior, propagate aggregate failure, correct log/report handling | Execute the actual wrapper shell logic with controlled external-command outcomes: all-pass, earlier failure followed by success, final failure/interruption. Assert the stages intended to continue do continue and earlier nonzero statuses are not lost; stdout grep must not determine acceptance |
+| Pre-commit wrappers can mask earlier failures; inverted grep message and wrong extra-log target | Pre-commit edits REJECTED. Keep those wrappers unchanged; put aggregate verification status and visible FAILED grep diagnostics only in elevate | Verify elevate shell syntax and status/FAILED reporting with controlled outcomes; inspect unchanged pre-commit limitations, but do not add tests claiming those rejected fixes exist |
 
 Keep tests in existing relevant modules aligned with production naming: test_appendwatch,
 test_ui (including TestBackendStartupConditions), test_audit_read/deployed-layout coverage
@@ -860,6 +965,80 @@ runnable leaves. Reuse valid existing evidence where applicable; do not rerun eq
 checks pointlessly. Broader verification does not authorize unrelated code changes; report
 out-of-scope findings and obtain approval before extending the implementation scope.
 
+### Current P18 leaf evidence (local/delegated, not production acceptance)
+
+Commands below use the existing installed environment executables, always through the
+required outer pixi run -e detour-ai-augment. Ruff/mypy/pytest use env dispatch or the
+explicit installed executable of the graph leaf's required environment. All test data
+created by the selected detour tests are synthetic/temporary.
+
+| Leaf / environment | Selection and evidence | Remaining boundary |
+|---|---|---|
+| Ruff / default | ruff check src tests: PASS; also passed after P19 | None for current code |
+| Mypy / default | mypy src tests: PASS,68 files | P19 touches only detour tests, excluded from this leaf |
+| Mypy / AI augment | strict detour config: PASS,53 files after P19 | None for current code |
+| Main tests / default | tests, not slow/real_api, excluding both DOCX-review data-writing cases: 138 pass,3 skip,3 deselect,3 fail | Platform mapping/operator extension path/reviewed XLSX unavailable; do not mutate unrelated config/data |
+| Step4 normal / default | explicit module, not slow/real_api: 4 pass,1 deselect | None for synthetic selection |
+| Step4 slow / default | NOT RUN | Real config references forbidden/unavailable source artifacts; not a synthetic substitute |
+| Mode3 / default | explicit module: 6 pass | None |
+| Mode0 / mode0 env | Local2 pass/2 socket-restricted failures; delegated complete module4 pass,11 deprecation warnings (18.03s) | Closed for synthetic selection; no mode0 implementation edits |
+| AI augment normal / AI env | Non-subprocess320 pass,1 skip,103 deselect; focused subprocess11 pass; startup90 pass/1 timeout, then the failed case passed alone; all7 browser cases passed across initial/targeted runs | Initial runs were not wholly green; timeout cause unproven; historical captures excluded |
+| Appendwatch normal / AI env | not needs_sudo, not socket/task-launcher: 38 pass; actual task-interpreter smoke2 pass | P19 sentinel uses named shared helper, rechecked with P19 |
+| Pasted-model provider / AI env | Current fake-response22 pass,1 real_api deselected (21.76s) | Live provider not run locally |
+| Main extra real_api / default | NOT RUN locally; supplied operator log3 pass,1 expected xfail retained | Existing evidence, not a new live run |
+| Appendwatch privileged / AI env | NOT RUN: delegated sudo stopped before pytest because a password was unavailable | Operator confirms root unavailable here; run existing root task on prod to verify nobody interpreter/dependency accessibility |
+| Operator workflow / host | NOT RUN | Expensive real acceptance, after upstream preparation; never hidden inside elevate |
+| Pre-commit wrappers | Inspected, UNCHANGED by explicit rejection | Existing failure/reporting quirks remain; no claim fixed |
+| elevate / AI env | Initial shell orchestration5 pass; first real batch exit1: IPC/socket substitutions3 pass, browser2 pass/5 startup timeouts, mode0 all4 pass; narrowed shell regression3 pass; targeted real browser rerun5 pass, exit0 | No further elevate run needed for these checks; root execution deferred to prod |
+
+### Completed delegated run and targeted follow-up
+
+Initial P18 delegated verification completed on2026-09-17 at15:38:32UTC, with exit1, reviewed
+from logs/from_operator/elevate.log (then37791 bytes; the rerun replaced that file). Real Unix IPC and both socket-substitution cases
+passed; browser2 passed/5 failed at the existing10s startup deadline (combined group5 passed,
+5 failed in156.30s). These failures occurred before their UI assertions, including DOCX export
+and the header contract. Some failed children emitted no output; others logged ready then
+normal shutdown after the harness timed out. Sudo requested a password and exited before
+the root tests ran. Operator confirms root is unavailable in this environment: all three
+needs_sudo appendwatch tests remain explicitly pending on PROD through the existing
+pixi run test-detour-ai-augment-root task (also part of pre-commit-operator). No privilege or
+permission workaround is authorized/needed. Mode0 then completed:4 passed,11 deprecation
+warnings in18.03s. This batch contained no live Codex workflow.
+
+After local heavy checks finished, a socket-free fresh browser-module import/fixture profile
+took4.01s +0.04s construction (5.00s process total). This does not establish why real HTTP
+startup missed10s. Review confirms the failed cases stop in wait_for_server before browser
+launch; no child traceback or HTTP error is reported. Earlier local heavy tests overlapped
+the batch, so load is a possible contributor, not a proven cause. No timeouts changed.
+
+The targeted P18 follow-up batch was prepared within existing Assistant-owned elevate authorization:
+elevate selects ONLY the FIVE initially failed test_ui_e2e cases, retaining its cached Chromium setup,
+PTY log, nonzero status preservation and FAILED grep. Pytest --durations=0 records timings.
+Already-passed IPC/socket/mode0 leaves and the unavailable sudo invocation are removed from
+this temporary batch; their regular tasks/tests are untouched. The existing elevate shell
+regression now matches its two remaining stages (install/browser):3 passed,8 deselected
+(6.35s), covering success and each stage failing without losing diagnostics/status. Ruff,
+strict mypy and TOML/bash syntax passed. Task-map comparison confirms no additional task
+edits beyond elevate and the two previously approved interpreter substitutions.
+
+The operator completed this targeted rerun at15:46:13UTC on2026-09-17:
+5 passed in97.60s, COMMAND_EXIT_CODE=0. Current logs/from_operator/elevate.log is5548 bytes.
+Passing cases cover compact line spacing, idempotent researcher/history selection, completed
+metadata/history, actual DOCX browser download, and the overall browser/layout contract.
+No production/test-startup code or timeout was changed between the failed run and this
+rerun, and no heavy local suites overlapped it. The rerun closes the outstanding browser
+verification, but does NOT prove contention caused the earlier timeouts or establish load
+robustness. No further repeat run or timeout change is proposed. P19 remains complete.
+
+Next operator step: run the established pixi run pre-commit-operator in the usual
+production/operator setup, with sudo available for the three root-only appendwatch cases.
+That is the acceptance entrypoint, not another implementation task. Inspect its leaf results
+and logs rather than trusting the unchanged wrapper's status alone. If an earlier command
+prevents the root leaf running, it remains unverified; the existing
+pixi run test-detour-ai-augment-root is its standalone entrypoint. Real provider/workflow,
+guest provisioning and production-resource checks remain acceptance boundaries. Local
+main-suite platform/extension/XLSX prerequisite failures above are not claimed fixed.
+
 ### Assistant-owned elevate task: targeted delegated verification
 
 The operator explicitly permits the Assistant to maintain/mutate the existing `elevate`
@@ -877,14 +1056,14 @@ sandbox cannot execute it. Conversely, do not offload checks that the Assistant 
 itself or use elevate as a disguised repeat of the whole expensive live-Codex acceptance
 workflow. Use the smallest meaningful batch of outstanding checks. User execution is
 explicitly requested when needed; writing the task or asking for a run is not evidence it
-ran/passed and does not grant the agent extra runtime permissions. No elevate/task changes
-or delegated run are being performed by this documentation-only update.
+ran/passed and does not grant the agent extra runtime permissions. Update elevate as needed during P18 and request delegated execution only when its checks
+are concrete and ready.
 
 ### Completion criteria and boundaries
 
 P18 is NOT complete merely because these notes were written or individual fixes landed.
 Before another operator handoff, record each correction's relevant check/result and its
-coverage boundary, plus the full command-graph leaf inventory and any elevate results, in WORK. Known locally detectable blockers must be resolved; real
+coverage boundary, plus the full command-graph leaf inventory and any elevate results, in WORK. Known locally detectable blockers within approved scope must be resolved; rejected task repairs remain explicitly documented, not claimed fixed; real
 privilege/guest/platform/provider checks that cannot run here stay explicitly outstanding,
 not reported as passed. Avoid unrelated/repeated broad testing after appropriate checks pass.
 The operator remains responsible for final real-environment acceptance, not basic discovery.
@@ -900,12 +1079,162 @@ pause and request explicit approval. P18 does not authorize running guest/networ
 commands in this restricted environment. Keep sample_deploy, paused BDD and human-owned
 TASK/HUMANS/README untouched; Git remains read-only.
 
+## P19 — Implemented and locally verified: explicit, centralized Python-subprocess tests
+
+2026-09-17: operator requested review of inline Python snippets launched from detour tests,
+and authorized centralizing their shared mechanics through appropriate pytest fixtures/
+markers, explicitly requested/applied by the affected tests. Implementation and local checks
+are complete after P18 local corrections; its available delegated checks have passed, while
+root/production verification remains outstanding. This does NOT authorize the rejected pre-commit wrapper edits in P18.
+
+Implemented: PythonProcess run/popen fixture and explicit marker registrations
+now live in the EXISTING protected/tests/pytest_plugin.py; the socketless NiceGUI harness is
+centralized there behind its explicit fixture. Operator clarified that embedded Python bodies must go too, not just launch boilerplate.
+All five existing bodies, the fixture cleanup children, and P18's watcher-import sentinel
+have now become named ordinary Python functions in the same plugin. PythonProcess accepts
+only a zero-argument callable, serializes that function's source centrally, and launches it
+without importing the plugin/parent globals in the child (essential for deployed import
+isolation). The task sentinel uses the same source serializer. No script-string bodies remain
+in affected tests; setup/parent assertions remain module-aligned. Static checks and affected
+regression evidence are recorded below; final marker collection selects102 subprocess cases, with the
+4 socketless lifecycle cases separately selectable. The first regression run was stopped for this clarification, not passed. Operator briefly requested moving the plugin,
+then explicitly withdrew that instruction: KEEP it in protected; no move was made.
+
+### Findings: these are not subprocess escapes from socket restrictions
+
+Pre-change review of active tests/shared plugin found these five inline-Python launch sites
+(now migrated to named helpers and explicit fixtures):
+
+| Test family / location | Actual reason for subprocess / coverage boundary |
+|---|---|
+| test_ui.test_startup_failure_exits_through_framework_shutdown | Fresh NiceGUI globals and actual process exit status. Centralized harness substitutes ONLY ui.run's socket-serving loop; real framework callback dispatch, shutdown signalling/hooks and application exit code execute. This is the socketless lifecycle substitute, not real serving coverage. |
+| test_ui.start / TestBackendStartupConditions | Real CLI stdin/default-No confirmations, process lock, configuration and Store initialization in a fresh process. Stops before serving; no server/socket substitution. Only startup conditions/confirmation methods use this launcher; parser-only methods run in-process. |
+| test_ui.TestBackendStartupConditions.test_operator_fixture_initializes_before_query | Actual isolated operator fixture initialization plus read-only query, in a fresh process/environment; no socket server or mocked Store. |
+| test_audit_read.test_deployed_guest_imports_unchanged_shared_model_outside_repository | Fresh sys.modules/import path and cwd outside the repository prove deployed-layout dependencies resolve; unrelated to socket restrictions. |
+| test_api.test_backend_singleton_lock_is_independent_of_replay_log | Concurrent real process holds flock while the parent checks contention/release; unrelated to sockets. Uses Popen rather than run. |
+
+Real browser servers use python -m and actually bind sockets. Appendwatch launches the
+real script; operator tests launch actual applications/external commands. Those are not the
+inline-snippet pattern and must not be converted into socketless substitutes. A child process
+has no greater socket permission than the parent; none of these subprocesses bypasses a
+sandbox. The NiceGUI case avoids serving by explicitly substituting that boundary.
+
+### Narrow implementation scope / chosen pytest mechanics
+
+Use the EXISTING protected/tests/pytest_plugin.py as the one shared support location:
+both tests/conftest.py and protected/tests/conftest.py already load it. Do not introduce a
+second plugin or duplicate fixtures across these trees.
+
+1. Add one explicit python_process fixture for the inline-Python execution mechanics.
+   Its small test-only runner exposes run (CompletedProcess[str]) and popen (Popen[str])
+   for the existing blocking and lock-holder cases. Centralize interpreter selection,
+   callable-source serialization, python -c construction, text/captured I/O and bounded child
+   cleanup here. Helpers are normal typed Python functions, checked by Ruff/mypy, not strings.
+   Preserve each caller's explicit argv, stdin, cwd, environment and timeout. Do not inject
+   repository PYTHONPATH into the deployed-layout test or hide errors/turn failures into skips.
+   Preserve live lock-holder stdin/stdout coordination and always reap it, including on failed
+   assertions. No shell=True, transport fallback or permission changes.
+2. Register python_subprocess in the plugin's existing pytest_configure, and explicitly
+   decorate each affected test (or only a wholly subprocess-based class). Marker registration
+   belongs here, NOT in pyproject.toml. Tests request python_process directly or through an
+   explicitly named scenario fixture; helpers receive it explicitly. No autouse subprocess
+   substitution or source scanning to infer which tests to mark. Do not mark the startup class wholesale:
+   its parser-only methods are not subprocess tests.
+3. Move the reusable socketless NiceGUI driver out of the test's embedded harness into
+   shared support, exposed by an explicit socketless_dashboard_lifecycle fixture using the
+   common runner. Register/apply socketless_lifecycle ONLY to the framework-substitution
+   tests, in addition to python_subprocess. Preserve its existing substitution boundary;
+   never imply that this exercises Uvicorn/socket serving. Real startup initialization tests
+   retain their real production boundaries and must not acquire this fixture/marker.
+4. Replace the five inline-launch sites' duplicated process construction with the shared
+   runner/fixtures. Move ALL embedded child bodies into named helpers in this shared plugin;
+   keep parent-process assertions and fixture data next to their tests;
+   preserve test names and module-aligned placement. The startup helper may still assemble
+   its domain-specific arguments; it delegates process execution. Do not collect unrelated
+   assertions into a giant scenario switch or create a new test framework.
+
+Implemented usage (annotations abbreviated in these call-shape examples):
+
+```python
+@pytest.mark.python_subprocess
+def test_deployed_guest_imports_unchanged_shared_model_outside_repository(
+    tmp_path, python_process,
+):
+    # Existing isolated files, parent assertions and environment setup remain;
+    # child assertions live in the named statically checked helper.
+    result = python_process.run(
+        deployed_guest_imports_process, cwd=tmp_path, env=environment, timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "DEPLOYED_MODELS_OK" in result.stdout
+
+
+@pytest.mark.python_subprocess
+@pytest.mark.socketless_lifecycle
+@pytest.mark.parametrize("publish", (False, True))
+@pytest.mark.parametrize("failure", ("config", "storage"))
+def test_startup_failure_exits_through_framework_shutdown(
+    publish, failure, socketless_dashboard_lifecycle,
+):
+    result = socketless_dashboard_lifecycle(publish=publish, failure=failure)
+    # Existing exit/shutdown/cleanup assertions remain here.
+```
+
+Selection becomes explicit without a new CLI flag or task edit:
+
+```bash
+pixi run -e detour-ai-augment env pytest <existing-test-paths> -m python_subprocess
+pixi run -e detour-ai-augment env pytest <existing-test-paths> -m 'not python_subprocess'
+pixi run -e detour-ai-augment env pytest <existing-test-paths> -m socketless_lifecycle
+```
+
+These are marker-selection examples, not permission to execute unrelated socket/operator/
+provider tests. Retain other required marker exclusions and TASK restrictions. No change to
+which tests run by default; markers make intentional inclusion/exclusion and collection
+listing possible. No new blanket socket probing/skipping or real-server test redesign.
+
+### Verification / boundaries
+
+P19 evidence: Ruff src/tests passed; strict detour mypy passed all53 files after
+named-helper migration. 11 focused subprocess cases passed (63.56s): framework shutdown4,
+operator fixture bootstrap1, deployed import1, real process lock1, cleanup/timeout2 and
+actual task-launcher sentinels2. The remaining feasible AI-augment suite passed: 320 passed,1 skipped,103 deselected
+(193.38s), excluding subprocess/browser/real-provider/privileged/historical-capture cases.
+The full91 startup/confirmation run finished: 90 passed,1 failed,105 deselected (717.18s).
+Failure was missing_source-resume hitting its unchanged20s child-process timeout with
+empty stdout/stderr, not a contract assertion. The identical case passed alone in7.65s without
+changing code/timeouts. The initial full matrix was not wholly green; the cause of its one
+timeout is not established. Socketless marker collection selects exactly4 cases;
+parser-only startup checks remain unmarked. Full active-tree python_subprocess collection:
+102 selected,410 deselected (512 total); no marker registration or test-task changes were
+needed. No Python script = triple-quote / STARTUP
+body remains in active tests; only the shared runner constructs python -c. Shell -c in
+actual-task smoke tests is intentionally unchanged, not embedded Python.
+
+Final task-map comparison against HEAD confirmed all ordinary pre-commit definitions
+unchanged, with precisely the two approved interpreter substitutions plus elevate different.
+No sample_deploy/main CLI changes; git diff --check passed.
+
+
+Use collection-only marker selections to demonstrate the exact marked set and ensure
+in-process parser tests are not mislabeled. Run the affected existing subprocess regressions
+through the common fixture, retaining real stdin, exit statuses, isolated imports, Store and
+lock contention. Check timeout/failing-assertion cleanup where applicable, and Ruff/strict
+mypy for touched modules. No new broad suite, live guest/operator/browser run or new fixture
+that mocks the behavior under assertion. P18 verification may reuse these results.
+
+Files: shared pytest_plugin.py, tests/control_centre/test_ui.py, test_audit_read.py,
+tests/backend/test_api.py, protected/tests/backend/test_appendwatch.py (the new P18
+watcher-import sentinel body), and WORK. Existing conftest imports need no change unless needed
+for this wiring. Exclude sample_deploy, paused BDD, production code and all Pixi task edits.
+Preserve the rest of P18 and its task boundary: two approved interpreter substitutions, no pre-commit wrapper changes; special verification in elevate only.
+
 ## Remaining rollout acceptance — separate from pending implementation
 
-P1-P12 implementation and P14/P15/P16 checks recorded above remain historical evidence,
-but P18 identifies outstanding launcher/harness integration corrections and verification.
-P13/P17 are also pending implementation. Do not describe the current remaining work as
-"only operator acceptance" until these approved pending items are complete.
+All approved P1-P19 implementation is complete within the pinned scope; no approved code
+change remains pending. P18's available local/delegated verification is complete, including
+the five-case browser rerun, but root-only and production verification are NOT complete.
+The earlier transient startup failures remain recorded, not relabeled as first-run passes.
 Rollout acceptance covers actual guest
 provisioning/dependency install, interactive Dashboard/server/browser/provider E2E and the
 operator-maintained production config/log hashes. No such activity was authorized for this
@@ -916,6 +1245,7 @@ in the working tree/operator-staged index; no commits were made by the agent.
 
 - After compaction reread TASK and WORK IN FULL. Keep WORK current, remove stale pending claims.
 - All commands via pixi run -e detour-ai-augment; Ruff/mypy/pytest via env. Git read-only.
+- No task edits except the two explicitly approved APPENDWATCH_PYTHON substitutions and agent-owned elevate; pre-commit wrapper changes are rejected.
 - Never run/import src.repl, edit src/cli.py, import another detour or edit TASK/HUMANS.
 - Only allowed production data is data/scisci_process.duckdb READ ONLY. No other data/,
   .aicode/ or historical captures. Isolated temporary test fixtures are permitted.

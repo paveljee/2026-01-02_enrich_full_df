@@ -467,7 +467,7 @@ print(dotenv_values(env_path).get("OPENALEX_API_KEY", ""), end="")
 test-detour-ai-augment = """
 bash -c '
 export APPENDWATCH_SCRIPT="$PIXI_PROJECT_ROOT/src/detours/detour_ai_augment/protected/src/control_centre/appendwatch/appendwatch.py"
-export APPENDWATCH_PYTHON="/usr/bin/python3"
+export APPENDWATCH_PYTHON="$CONDA_PREFIX/bin/python"
 export PLAYWRIGHT_BROWSERS_PATH="$HOME/.cache/ms-playwright"
 "$CONDA_PREFIX/bin/python" -m pytest -vv -srA -m "not needs_sudo" \
   src/detours/detour_ai_augment/tests \
@@ -482,30 +482,36 @@ exit "$status"
 '
 """
 elevate = """
-bash -c '
-LOG_PATH="$PIXI_PROJECT_ROOT/logs/from_operator/elevate.log"
-export APPENDWATCH_SCRIPT="$PIXI_PROJECT_ROOT/src/detours/detour_ai_augment/protected/src/control_centre/appendwatch/appendwatch.py"
-export APPENDWATCH_PYTHON="/usr/bin/python3"
+bash -c 'LOG_PATH="$PIXI_PROJECT_ROOT/logs/from_operator/elevate.log"
 export PLAYWRIGHT_BROWSERS_PATH="$HOME/.cache/ms-playwright"
 export LD_LIBRARY_PATH="$CONDA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-script -q -e -c '"'"'
-"$CONDA_PREFIX/bin/python" -m playwright install --only-shell chromium &&
-"$CONDA_PREFIX/bin/python" -m pytest -vv -srA --playwright-chromium \\
-  src/detours/detour_ai_augment/tests/control_centre/test_ui_e2e.py \\
-  src/detours/detour_ai_augment/tests/backend/test_ipc.py::test_dashboard_client_queries_real_mode_0600_unix_socket \\
-  "src/detours/detour_ai_augment/protected/tests/backend/test_appendwatch.py::test_inspect_flags_nonregular_substitution_without_blocking[socket-path was replaced by a non-regular file]" \\
-  src/detours/detour_ai_augment/protected/tests/backend/test_appendwatch.py::test_cli_detects_delayed_directory_fifo_symlink_and_socket_substitutions \\
-  2>&1
+script -q -e -c '"'"'task_status=0
+"$CONDA_PREFIX/bin/python" -m playwright install --only-shell chromium || task_status=1
+"$CONDA_PREFIX/bin/python" -m pytest -vv -srA --durations=0 --playwright-chromium \\
+  src/detours/detour_ai_augment/tests/control_centre/test_ui_e2e.py::test_main_grid_and_researcher_card_use_compact_line_spacing \\
+  src/detours/detour_ai_augment/tests/control_centre/test_ui_e2e.py::test_researcher_selection_and_attempt_history_are_idempotent \\
+  src/detours/detour_ai_augment/tests/control_centre/test_ui_e2e.py::test_completed_researcher_metadata_is_available_in_visible_attempt_history \\
+  src/detours/detour_ai_augment/tests/control_centre/test_ui_e2e.py::test_displayed_researcher_card_downloads_as_docx \\
+  src/detours/detour_ai_augment/tests/control_centre/test_ui_e2e.py::test_control_centre_browser_contract \\
+  || task_status=1
+exit "$task_status"
 '"'"' "$LOG_PATH"
-status=$?
+task_status=$?
+grep -n -- "FAILED" "$LOG_PATH"
+grep_status=$?
+case "$grep_status" in
+  0) echo "grep: FAILED matches shown above ($LOG_PATH)" ;;
+  1) echo "grep: no FAILED ($LOG_PATH)" ;;
+  *) echo "grep: could not inspect $LOG_PATH" >&2; task_status=1 ;;
+esac
 echo "Test output: $LOG_PATH"
-exit "$status"
+exit "$task_status"
 '
 """
 test-detour-ai-augment-root = """
 sudo env \
   APPENDWATCH_SCRIPT="$PIXI_PROJECT_ROOT/src/detours/detour_ai_augment/protected/src/control_centre/appendwatch/appendwatch.py" \
-  APPENDWATCH_PYTHON="/usr/bin/python3" \
+  APPENDWATCH_PYTHON="$CONDA_PREFIX/bin/python" \
   PATH="$CONDA_PREFIX/bin:$PATH" \
   PLAYWRIGHT_BROWSERS_PATH="$HOME/.cache/ms-playwright" \
   "$CONDA_PREFIX/bin/python" -m pytest -vv -srA -m needs_sudo \

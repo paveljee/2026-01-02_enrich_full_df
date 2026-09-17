@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import shlex
 import subprocess
 from collections.abc import Sequence
@@ -17,7 +18,6 @@ ARCHIVE_HASH_CHUNK_BYTES = 1024 * 1024
 AUDIT_COPY_TIMEOUT_SECONDS = 60
 AUDIT_READ_ROLLOUT_COMMAND = "read-rollout"
 ROLLOUT_CAS_TEMP_FILENAME_TEMPLATE = ".{nonce}.tmp"
-ROLLOUT_CAS_FILENAME_TEMPLATE = "{sha256}.jsonl"
 SSH_EXECUTABLE = "ssh"
 
 
@@ -63,6 +63,10 @@ class AiAugmentCAS(FrozenStrictModel):
                 raise ValueError(Locale.AUDIT_ROLLOUT_ARCHIVE_INVALID)
             archived = self._record(temporary)
             destination = self._blob_path(archived.sha256)
+            for directory in (destination.parent.parent, destination.parent):
+                directory.mkdir(exist_ok=True)
+                if directory.is_symlink() or not directory.is_dir():
+                    raise ValueError(Locale.ROLLOUT_CAS_BLOB_INVALID)
             if destination.exists():
                 existing = self._record(destination)
                 if (
@@ -82,7 +86,10 @@ class AiAugmentCAS(FrozenStrictModel):
         reference: CodexRolloutRecord,
     ) -> Path:
         path = self._blob_path(reference.sha256)
-        if path.parent != self.path or path.is_symlink() or not path.is_file():
+        if (
+            any(p.is_symlink() for p in (path.parent.parent, path.parent, path))
+            or not path.is_file()
+        ):
             raise ValueError(Locale.ROLLOUT_CAS_BLOB_INVALID)
         archived = self._record(path)
         if (
@@ -94,7 +101,9 @@ class AiAugmentCAS(FrozenStrictModel):
         return path
 
     def _blob_path(self, sha256: str) -> Path:
-        return self.path / ROLLOUT_CAS_FILENAME_TEMPLATE.format(sha256=sha256)
+        if re.fullmatch(r"[0-9a-f]{64}", sha256) is None:
+            raise ValueError(Locale.ROLLOUT_CAS_BLOB_INVALID)
+        return self.path / sha256[:2] / sha256[2:4] / sha256
 
     @staticmethod
     def _record(path: Path) -> CodexRolloutRecord:
@@ -125,12 +134,13 @@ class AiAugmentCAS(FrozenStrictModel):
         with temporary.open("rb") as stream:
             os.fsync(stream.fileno())
         os.replace(temporary, destination)
-        descriptor = os.open(
-            destination.parent,
-            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
-        )
-        try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
+        for directory in (destination.parent, destination.parent.parent, destination.parents[2]):
+            descriptor = os.open(
+                directory,
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+            )
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
         return cls._record(destination)

@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import subprocess
+import sys
+import textwrap
+from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import Protocol
 
 import pytest
+from pydantic import PrivateAttr
+
+from src.helpers.architecture import FrozenStrictModel
 
 DEPLOY_SCRIPT_RELATIVE_PATH = (
     Path("src")
@@ -264,6 +272,12 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 
 def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
+        "markers", "python_subprocess: isolated Python child process via explicit shared fixture",
+    )
+    config.addinivalue_line(
+        "markers", "socketless_lifecycle: framework lifecycle with socket serving substituted",
+    )
+    config.addinivalue_line(
         "markers",
         f"{OPERATOR_MARKER}: {OPERATOR_MARK_DESCRIPTION}",
     )
@@ -308,6 +322,238 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     for item in items:
         if item.get_closest_marker(OPERATOR_MARKER) is not None:
             item.add_marker(skip_operator)
+
+
+class PythonProcess(FrozenStrictModel):
+    """Own bounded Python children; do not alter their environment or mock their code."""
+
+    _children: list[subprocess.Popen[str]] = PrivateAttr(default_factory=list)
+
+    @staticmethod
+    def source(target: Callable[[], None]) -> str:
+        # Serialize only the helper function, not plugin imports or parent globals. The
+        # deployed-layout check must resolve its imports from the isolated child cwd/env.
+        return f"{textwrap.dedent(inspect.getsource(target))}\n{target.__name__}()\n"
+
+    def popen(
+        self, target: Callable[[], None], *args: str, cwd: Path | None = None,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.Popen[str]:
+        child = subprocess.Popen(
+            [sys.executable, "-c", self.source(target), *args], cwd=cwd, env=env,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        self._children.append(child)
+        return child
+
+    def run(
+        self, target: Callable[[], None], *args: str, timeout: float, stdin: str = "",
+        cwd: Path | None = None, env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        child = self.popen(target, *args, cwd=cwd, env=env)
+        try:
+            stdout, stderr = child.communicate(input=stdin, timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            child.kill()
+            stdout, stderr = child.communicate(timeout=5)
+            exc.output, exc.stderr = stdout.encode(), stderr.encode()
+            raise
+        assert child.returncode is not None
+        return subprocess.CompletedProcess(child.args, child.returncode, stdout, stderr)
+
+    def close(self) -> None:
+        for child in reversed(self._children):
+            try:
+                if child.poll() is None:
+                    child.terminate()
+                    try:
+                        child.communicate(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        child.kill()
+                        child.communicate(timeout=5)
+            finally:
+                for stream in (child.stdin, child.stdout, child.stderr):
+                    if stream is not None:
+                        stream.close()
+
+
+@pytest.fixture
+def python_process() -> Iterator[PythonProcess]:
+    process = PythonProcess()
+    try:
+        yield process
+    finally:
+        process.close()
+
+
+class SocketlessDashboardLifecycle(Protocol):
+    def __call__(self, *, publish: bool, failure: str) -> subprocess.CompletedProcess[str]: ...
+
+
+def backend_startup_process() -> None:
+    import sys
+
+    from src.detours.detour_ai_augment.src.backend import api, server
+
+    args = server.parse_args(sys.argv[1:])
+    confirmed = False if args.ipc_only else server.confirm_startup(args)
+    api._acquire_backend_process_lock()
+    try:
+        runtime = server.configure_runtime(
+            args.config, require_namekey=not args.ipc_only,
+            verify_hash_on_init=not args.danger_no_verify_hash,
+        )
+        store = runtime.pipeline_config.backend_store
+        boundary = (
+            store.read_only() if args.ipc_only else server.backend_store_lifecycle(
+                runtime, new=args.new, confirmed=confirmed, yes=args.yes,
+            )
+        )
+        with boundary:
+            rows = store.execute("SELECT count(*) FROM detour_http_records").fetchone()
+            assert rows is not None
+            print("STARTUP_READY", rows[0], len(runtime.ai_augment_singular_outerdicts))
+    finally:
+        api._release_backend_process_lock()
+
+
+def operator_fixture_bootstrap_process() -> None:
+    import sys
+    from pathlib import Path
+
+    from src.detours.detour_ai_augment.protected.src.backend import ipc
+    from src.detours.detour_ai_augment.protected.tests.operator import test_operator_e2e as workflow
+    from src.detours.detour_ai_augment.src.backend import server
+    from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models import (
+        query_request,
+    )
+    QueryRequest = query_request.QueryRequest
+    root, isolated = map(Path, sys.argv[1:])
+    assert not list(isolated.iterdir())
+    runtime = workflow._operator_runtime(
+        isolated, repository_root=root, dashboard_socket_path=isolated / "ipc.sock",
+    )
+    assert runtime.backend_store.detour_db_path.is_file()
+    context = server.configure_runtime(runtime.config_path, require_namekey=False)
+    store = context.pipeline_config.backend_store
+    with store.read_only():
+        response = ipc.handle_query_request(context, QueryRequest())
+        assert len(response.ai_augment_singular_outerdicts) == 307
+        assert response.attempts == () and response.run_outcome_records == ()
+    assert runtime.replay_log_path.read_bytes() == b""
+    assert not runtime.dashboard_socket_path.exists()
+    print("OPERATOR_BOOTSTRAP_QUERY_OK")
+
+
+def deployed_guest_imports_process() -> None:
+    import runpy
+    from pathlib import Path
+
+    from src.helpers.architecture import FrozenStrictModel
+    audit = runpy.run_path("libexec/aivm-audit-read", run_name="deployed_audit")
+    assert issubclass(audit["AuditReadConfiguration"], FrozenStrictModel)
+    model = audit["AuditReadConfiguration"](
+        runtime_user="ai", audit_user="audit", sessions_root=Path("/sessions"),
+        appendwatch_report=Path("/report"),
+    )
+    assert model.runtime_user == "ai"
+    watch = runpy.run_path("appendwatch.py", run_name="deployed_watch")
+    record = watch["Record"](dev=1, ino=2, size=0, mtime_ns=0, ctime_ns=0, digest=b"a")
+    record.size = 2
+    copied = record.model_copy(update={"exists": False})
+    assert record.exists and not copied.exists and copied.size == 2
+    print("DEPLOYED_MODELS_OK")
+
+
+def backend_lock_holder_process() -> None:
+    import fcntl
+    import os
+    import sys
+
+    descriptor = os.open(sys.argv[1], os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    print("locked", flush=True)
+    sys.stdin.read(1)
+
+
+def sleeping_process() -> None:
+    import os
+    import time
+
+    print(os.getpid(), flush=True)
+    time.sleep(60)
+
+
+def stdin_waiting_process() -> None:
+    import sys
+
+    print("ready", flush=True)
+    sys.stdin.read()
+
+
+def watcher_import_process() -> None:
+    import os
+    import subprocess
+
+    subprocess.run([
+        os.environ["APPENDWATCH_PYTHON"], os.environ["APPENDWATCH_SCRIPT"], "--help",
+    ], check=True)
+    print("TASK_WATCHER_IMPORT_OK")
+
+
+def socketless_dashboard_process() -> None:
+    import asyncio
+    import sys
+    from types import SimpleNamespace
+    from typing import Any, cast
+    from unittest.mock import patch
+
+    from nicegui import app, core, server, ui
+
+    from src.detours.detour_ai_augment.src.control_centre.dashboard import ui as dashboard
+
+    async def start(**kwargs: object) -> None:
+        raise ValueError("invalid persisted storage")
+
+    async def stop() -> None:
+        print("CONTROLLER_CLEANED", flush=True)
+
+    def create(**kwargs: object) -> Any:
+        if sys.argv[1] == "config":
+            raise ValueError("invalid configuration hash")
+        return SimpleNamespace(controller=SimpleNamespace(start=start, shutdown=stop))
+
+    def run(**kwargs: object) -> None:
+        # Substitute only the socket-serving loop. Framework callback dispatch, shutdown
+        # signalling, shutdown hooks and the application's exit code are real.
+        async def lifecycle() -> None:
+            core.loop = asyncio.get_running_loop()
+            server.Server.instance = cast(server.Server, SimpleNamespace(
+                should_exit=False, config=SimpleNamespace(should_reload=False),
+            ))
+            app.config.reload = False
+            app.safe_invoke(dashboard.application_startup)
+            async with asyncio.timeout(2):
+                while not server.Server.instance.should_exit:
+                    await asyncio.sleep(0)
+            print("FRAMEWORK_SHUTDOWN_REQUESTED", flush=True)
+            await app.stop()
+            print("FRAMEWORK_STOPPED", flush=True)
+        asyncio.run(lifecycle())
+
+    with patch.object(ui, "run", run), patch.object(dashboard, "create_services", create):
+        raise SystemExit(dashboard.main(sys.argv[2:]))
+
+
+@pytest.fixture
+def socketless_dashboard_lifecycle(
+    python_process: PythonProcess,
+) -> SocketlessDashboardLifecycle:
+    def run(*, publish: bool, failure: str) -> subprocess.CompletedProcess[str]:
+        args = [failure, *(["publish", "completed"] if publish else []),
+                "--config", "unused.json"]
+        return python_process.run(socketless_dashboard_process, *args, timeout=15)
+    return run
 
 
 @pytest.fixture(scope="session")

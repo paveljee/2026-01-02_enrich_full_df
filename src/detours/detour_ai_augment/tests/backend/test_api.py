@@ -8,7 +8,6 @@ import json
 import os
 import signal
 import subprocess
-import sys
 import time
 from collections.abc import AsyncIterator, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
@@ -93,12 +92,15 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     AiAugmentCohort,
     AiAugmentIneligibilityCategory,
 )
+from src.detours.detour_ai_augment.protected.tests.pytest_plugin import (
+    PythonProcess,
+    backend_lock_holder_process,
+)
 from src.detours.detour_ai_augment.src.backend import api, server
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_backend_store import (  # noqa: E501
     AiAugmentBackendStore,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_cas import (  # noqa: E501
-    ROLLOUT_CAS_FILENAME_TEMPLATE,
     AiAugmentCAS,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_context import (
@@ -4683,7 +4685,7 @@ def test_audit_ssh_uses_pinned_identity_and_counts_physical_lines(
     assert archived.line_count == 2
     assert runtime.pipeline_config.rollout_cas.validated_rollout(archived) == (
         runtime.pipeline_config.rollout_cas.path
-        / ROLLOUT_CAS_FILENAME_TEMPLATE.format(sha256=archived.sha256)
+        / archived.sha256[:2] / archived.sha256[2:4] / archived.sha256
     )
 
 
@@ -4825,26 +4827,12 @@ def test_selected_card_singular_outerdict_hides_empty_standardized_fields_withou
     assert source_innerdict.data[column] == canonical_json
 
 
+@pytest.mark.python_subprocess
 def test_backend_singleton_lock_is_independent_of_replay_log(
-    tmp_path: Path,
+    tmp_path: Path, python_process: PythonProcess,
 ) -> None:
     lock_path = api.BACKEND_PROCESS_LOCK_PATH
-    holder = subprocess.Popen(
-        (
-            sys.executable,
-            "-c",
-            (
-                "import fcntl, os, sys; "
-                "descriptor = os.open(sys.argv[1], os.O_CREAT | os.O_RDWR, 0o600); "
-                "fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB); "
-                "print('locked', flush=True); sys.stdin.read(1)"
-            ),
-            str(lock_path),
-        ),
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        text=True,
-    )
+    holder = python_process.popen(backend_lock_holder_process, str(lock_path))
     assert holder.stdout is not None
     assert holder.stdout.readline().strip() == "locked"
     try:
@@ -6206,3 +6194,99 @@ def test_log_descriptor_is_readonly_and_append_failure_closes_writer(
                 store.execute("SELECT 1")
     assert store._replay_log._fd is None
     assert store._detour_db._conn is None
+
+
+@pytest.mark.parametrize(
+    "digest", ("", "a" * 63, "A" * 64, "g" * 64, "../" + "a" * 61, "a" * 64 + "\n"),
+)
+def test_cas_rejects_noncanonical_digest(tmp_path: Path, digest: str) -> None:
+    cas = AiAugmentCAS(path=tmp_path / "cas")
+    reference = CodexRolloutRecord(sha256=digest, size=0, line_count=1)
+    with pytest.raises(ValueError, match=Locale.ROLLOUT_CAS_BLOB_INVALID):
+        cas.validated_rollout(reference)
+    assert not cas.path.exists()
+
+
+@pytest.mark.parametrize("changed", ("contents", "size", "lines", "missing", "legacy"))
+def test_cas_sharded_blob_verification(tmp_path: Path, changed: str) -> None:
+    content = b"one\ntwo\n"
+    digest = hashlib.sha256(content).hexdigest()
+    cas = AiAugmentCAS(path=tmp_path / "cas")
+    path = cas.path / digest[:2] / digest[2:4] / digest
+    path.parent.mkdir(parents=True)
+    path.write_bytes(content)
+    reference = CodexRolloutRecord(sha256=digest, size=len(content), line_count=2)
+    assert cas.validated_rollout(reference) == path
+    if changed == "contents":
+        path.write_bytes(b"two\none\n")
+    elif changed == "size":
+        reference = reference.model_copy(update={"size": len(content) + 1})
+    elif changed == "lines":
+        reference = reference.model_copy(update={"line_count": 3})
+    elif changed == "legacy":
+        path.rename(cas.path / f"{digest}.jsonl")
+    else:
+        path.unlink()
+    with pytest.raises(ValueError, match=Locale.ROLLOUT_CAS_BLOB_INVALID):
+        cas.validated_rollout(reference)
+
+
+@pytest.mark.parametrize("level", (0, 1, 2))
+def test_cas_rejects_symlink_in_sharded_blob_path(tmp_path: Path, level: int) -> None:
+    content = b"one\n"
+    digest = hashlib.sha256(content).hexdigest()
+    cas = AiAugmentCAS(path=tmp_path / "cas")
+    path = cas.path / digest[:2] / digest[2:4] / digest
+    path.parent.mkdir(parents=True)
+    path.write_bytes(content)
+    component = (path.parent.parent, path.parent, path)[level]
+    outside = tmp_path / "outside"
+    component.rename(outside)
+    component.symlink_to(outside, target_is_directory=level < 2)
+    with pytest.raises(ValueError, match=Locale.ROLLOUT_CAS_BLOB_INVALID):
+        cas.validated_rollout(CodexRolloutRecord(sha256=digest, size=len(content), line_count=1))
+
+
+@pytest.mark.parametrize("symlink_level", (None, 0, 1))
+def test_cas_copy_shards_are_checked_and_durably_published(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, symlink_level: int | None,
+) -> None:
+    content = b"one\ntwo"
+    digest = hashlib.sha256(content).hexdigest()
+    cas = AiAugmentCAS(path=tmp_path / "cas")
+    path = cas.path / digest[:2] / digest[2:4] / digest
+    cas.initialize()
+    if symlink_level is not None:
+        component = (path.parent.parent, path.parent)[symlink_level]
+        component.parent.mkdir(parents=True, exist_ok=True)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        component.symlink_to(outside, target_is_directory=True)
+    synced: list[tuple[int, int]] = []
+    real_fsync = os.fsync
+
+    def fsync(fd: int) -> None:
+        info = os.fstat(fd)
+        synced.append((info.st_dev, info.st_ino))
+        real_fsync(fd)
+
+    def copy(_command: list[str], **kwargs: Any) -> None:
+        kwargs["stdout"].write(content)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    monkeypatch.setattr(subprocess, "run", copy)
+    if symlink_level is not None:
+        with pytest.raises(ValueError, match=Locale.ROLLOUT_CAS_BLOB_INVALID):
+            cas.copy_rollout(rollout_relative_path=PurePosixPath("rollout.jsonl"),
+                             ssh_target="unused", ssh_options=())
+        assert list(outside.iterdir()) == []
+    else:
+        reference = cas.copy_rollout(rollout_relative_path=PurePosixPath("rollout.jsonl"),
+                                     ssh_target="unused", ssh_options=())
+        assert cas.validated_rollout(reference) == path
+        assert path.read_bytes() == content and reference.line_count == 2
+        assert synced == [(p.stat().st_dev, p.stat().st_ino)
+                          for p in (path, path.parent, path.parent.parent, cas.path)]
+        assert cas.copy_rollout(rollout_relative_path=PurePosixPath("rollout.jsonl"),
+                                ssh_target="unused", ssh_options=()) == reference
+    assert not list(cas.path.glob(".*.tmp"))

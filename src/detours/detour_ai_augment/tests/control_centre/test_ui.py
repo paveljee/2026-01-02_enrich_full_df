@@ -9,9 +9,8 @@ import io
 import json
 import os
 import subprocess
-import sys
 from collections.abc import AsyncIterator
-from contextlib import ExitStack, asynccontextmanager
+from contextlib import ExitStack, asynccontextmanager, nullcontext
 from copy import deepcopy
 from datetime import datetime, timezone
 from email.message import Message
@@ -56,6 +55,17 @@ from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helper
 )
 from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helpers.locale import (
     Locale,
+)
+from src.detours.detour_ai_augment.protected.tests.operator import (
+    test_operator_e2e as operator_workflow,
+)
+from src.detours.detour_ai_augment.protected.tests.pytest_plugin import (
+    PythonProcess,
+    SocketlessDashboardLifecycle,
+    backend_startup_process,
+    operator_fixture_bootstrap_process,
+    sleeping_process,
+    stdin_waiting_process,
 )
 from src.detours.detour_ai_augment.src.backend import api
 from src.detours.detour_ai_augment.src.backend import server as backend_server
@@ -104,6 +114,7 @@ from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_mod
 from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.query_request import (  # noqa: E501
     QueryRequest,
 )
+from src.detours.detour_ai_augment.tests.control_centre import test_ui_e2e as browser_tests
 from src.helpers.architecture import FrozenStrictModel
 from src.helpers.data_models import HttpRequestLogRecord, InnerDict, NameKey
 from src.helpers.duckdb_utils import duckdb_quote_identifier as quote
@@ -2761,6 +2772,105 @@ async def test_queue_gate_holds_next_run_without_interrupting_active_run(
         await subject.shutdown()
 
 
+def test_operator_browser_sequence_explicitly_opens_real_queue_gate(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, inline_controller_io: None,
+) -> None:
+    """Fake browser transport only; execute the actual harness and page/controller callbacks."""
+    subject = controller()
+    view = control_ui._ControlCentrePage(
+        controller=subject, query_ipc=AsyncMock(), reference_docx=Path("unused.docx"),
+    )
+    view.selection.selected_namekey = NAMEKEY
+    view.selection.selected_action = control_ui._RunAction.QUEUE
+    processed: list[UUID] = []
+    queued: list[UUID] = []
+    started = asyncio.Event()
+
+    async def process(run: run_event_models.Run) -> None:
+        processed.append(run.run_id)
+        subject._queue.task_done()
+        started.set()
+
+    monkeypatch.setattr(subject, "_process_queued_run", process)
+    browser = Mock()
+    page = browser.new_page.return_value
+    execute, start_button, stop_button, query = Mock(), Mock(), Mock(), Mock()
+    output: list[str] = []
+    process_handle = Mock()
+    process_handle.poll.return_value = None
+    dashboard = cast(operator_workflow.DashboardProcess, SimpleNamespace(
+        process=process_handle, output=output,
+    ))
+    runtime = cast(operator_workflow.OperatorRuntime, SimpleNamespace(
+        dashboard_socket_path=tmp_path / "ipc.sock",
+    ))
+    query.click.side_effect = lambda: output.append("Dashboard snapshot replaced: fixture\n")
+    page.get_by_text.return_value.is_visible.return_value = True
+    page.get_by_test_id.side_effect = lambda test_id: {
+        control_ui.BACKEND_REFRESH_TEST_ID: query,
+        control_ui.EXECUTE_ACTION_TEST_ID: execute,
+    }.get(test_id, Mock())
+    page.get_by_role.side_effect = lambda _role, *, name, exact: {
+        Locale.ACTION_START_QUEUE_PROCESSING: start_button,
+        Locale.ACTION_STOP_QUEUE_PROCESSING: stop_button,
+    }[name]
+
+    async def enqueue() -> None:
+        await view.on_execute_selected()
+        assert view.selection.selected_run_id is not None
+        queued.append(view.selection.selected_run_id)
+        await asyncio.sleep(0)
+        assert not subject.queue_processing and processed == []
+
+    async def enable() -> None:
+        assert queued and not subject.queue_processing
+        await view.toggle_queue_processing()
+        await asyncio.wait_for(started.wait(), 1)
+
+    playwright = Mock()
+    playwright.chromium.launch.return_value = browser
+    monkeypatch.setattr(operator_workflow, "sync_playwright", lambda: nullcontext(playwright))
+    monkeypatch.setattr(operator_workflow, "expect", lambda _locator: Mock())
+    with asyncio.Runner() as runner:
+        runner.run(subject.start())
+        execute.click.side_effect = lambda: runner.run(enqueue())
+        start_button.click.side_effect = lambda: runner.run(enable())
+        try:
+            operator_workflow.queue_in_browser(NAMEKEY, runtime, dashboard)
+            execute.click.assert_called_once_with()
+            start_button.click.assert_called_once_with()
+            assert processed == queued and len(processed) == 1
+            assert subject.queue_processing
+            browser.close.assert_called_once_with()
+        finally:
+            runner.run(subject.shutdown())
+
+
+@pytest.mark.anyio
+async def test_browser_fixture_supports_current_page_callbacks() -> None:
+    """Check the browser stub's production interface before delegating socket/browser tests."""
+    controller_stub = browser_tests.BrowserController()
+    await controller_stub.start(publishing=False)
+    page = control_ui._ControlCentrePage(
+        controller=cast(control_ui._ControlCentreController, controller_stub),
+        query_ipc=controller_stub.refresh_from_ipc,
+        reference_docx=browser_tests.E2E_REFERENCE_DOCX,
+    )
+    with ui.column() as container:
+        try:
+            page.build_header()
+            page.build_card_panel()
+            await page.refresh()
+            assert not controller_stub.queue_processing
+            await page.toggle_queue_processing()
+            assert controller_stub.queue_processing
+            await page.toggle_queue_processing()
+            assert not controller_stub.queue_processing
+        finally:
+            container.delete()
+            await controller_stub.shutdown()
+
+
 @pytest.mark.anyio
 async def test_restored_queue_stays_stopped_and_publish_skips_remote_and_journal_mutation(
     monkeypatch: pytest.MonkeyPatch,
@@ -2907,55 +3017,15 @@ async def test_publish_one_shot_shutdown_noop_or_first_error_keeps_written_files
         assert "Publishing finished: 0 DOCX files" in capsys.readouterr().out
 
 
+@pytest.mark.python_subprocess
+@pytest.mark.socketless_lifecycle
 @pytest.mark.parametrize("publish", (False, True))
 @pytest.mark.parametrize("failure", ("config", "storage"))
-def test_startup_failure_exits_through_framework_shutdown(publish: bool, failure: str) -> None:
-    """Exercise NiceGUI's real background dispatch/shutdown flag without binding sockets."""
-    script = '''
-import asyncio
-import sys
-from types import SimpleNamespace
-from unittest.mock import patch
-from nicegui import app, core, server, ui
-from src.detours.detour_ai_augment.src.control_centre.dashboard import ui as dashboard
-
-async def start(**kwargs):
-    raise ValueError("invalid persisted storage")
-
-async def stop():
-    print("CONTROLLER_CLEANED", flush=True)
-
-def create(**kwargs):
-    if sys.argv[1] == "config":
-        raise ValueError("invalid configuration hash")
-    return SimpleNamespace(controller=SimpleNamespace(start=start, shutdown=stop))
-
-def run(**kwargs):
-    # Substitute only the socket-serving loop. Framework callback dispatch, shutdown
-    # signalling, shutdown hooks and the application's exit code are real.
-    async def lifecycle():
-        core.loop = asyncio.get_running_loop()
-        server.Server.instance = SimpleNamespace(
-            should_exit=False, config=SimpleNamespace(should_reload=False),
-        )
-        app.config.reload = False
-        app.safe_invoke(dashboard.application_startup)
-        async with asyncio.timeout(2):
-            while not server.Server.instance.should_exit:
-                await asyncio.sleep(0)
-        print("FRAMEWORK_SHUTDOWN_REQUESTED", flush=True)
-        await app.stop()
-        print("FRAMEWORK_STOPPED", flush=True)
-    asyncio.run(lifecycle())
-
-with patch.object(ui, "run", run), patch.object(dashboard, "create_services", create):
-    raise SystemExit(dashboard.main(sys.argv[2:]))
-'''
-    command = [sys.executable, "-c", script, failure]
-    if publish:
-        command += ["publish", "completed"]
-    command += ["--config", "unused.json"]
-    result = subprocess.run(command, capture_output=True, text=True, timeout=15, check=False)
+def test_startup_failure_exits_through_framework_shutdown(
+    publish: bool, failure: str, socketless_dashboard_lifecycle: SocketlessDashboardLifecycle,
+) -> None:
+    """Real framework shutdown/exit, with serving explicitly substituted by the fixture."""
+    result = socketless_dashboard_lifecycle(publish=publish, failure=failure)
     assert result.returncode == 1, result.stderr
     assert "FRAMEWORK_SHUTDOWN_REQUESTED" in result.stdout
     assert "FRAMEWORK_STOPPED" in result.stdout
@@ -2969,30 +3039,6 @@ STARTUP_NAMEKEY = NameKey(first_name="Case 000", last_name="Startup")
 
 # Exercise production initialization boundaries, deliberately not the serving lifespan.
 # No functions, transports, configuration objects or global constants are substituted.
-STARTUP = """
-import sys
-from src.detours.detour_ai_augment.src.backend import api, server
-
-args = server.parse_args(sys.argv[1:])
-confirmed = False if args.ipc_only else server.confirm_startup(args)
-api._acquire_backend_process_lock()
-try:
-    runtime = server.configure_runtime(
-        args.config, require_namekey=not args.ipc_only,
-        verify_hash_on_init=not args.danger_no_verify_hash,
-    )
-    store = runtime.pipeline_config.backend_store
-    boundary = (
-        store.read_only() if args.ipc_only else server.backend_store_lifecycle(
-            runtime, new=args.new, confirmed=confirmed, yes=args.yes,
-        )
-    )
-    with boundary:
-        rows = store.execute("SELECT count(*) FROM detour_http_records").fetchone()
-        print("STARTUP_READY", rows[0], len(runtime.ai_augment_singular_outerdicts))
-finally:
-    api._release_backend_process_lock()
-"""
 
 
 class StartupFiles(FrozenStrictModel):
@@ -3104,12 +3150,13 @@ def argv(mode: str, config: Path, *, yes: bool = True) -> list[str]:
             *(["--yes"] if yes else [])]
 
 
-def start(files: StartupFiles, mode: str, *, stdin: str = "", yes: bool = True,
-          namekey: str | None = STARTUP_NAMEKEY.to_json_key()) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [sys.executable, "-c", STARTUP, *argv(mode, files.config, yes=yes)],
-        cwd=ROOT, env=files.environment(namekey), input=stdin,
-        capture_output=True, text=True, timeout=20, check=False,
+def start(
+    python_process: PythonProcess, files: StartupFiles, mode: str, *, stdin: str = "",
+    yes: bool = True, namekey: str | None = STARTUP_NAMEKEY.to_json_key(),
+) -> subprocess.CompletedProcess[str]:
+    return python_process.run(
+        backend_startup_process, *argv(mode, files.config, yes=yes),
+        cwd=ROOT, env=files.environment(namekey), stdin=stdin, timeout=20,
     )
 
 
@@ -3137,6 +3184,28 @@ class TestBackendStartupConditions:
     def inline_controller_io(self) -> None:
         """Keep production dispatch untouched; these checks exercise no controller."""
 
+    @pytest.mark.python_subprocess
+    @staticmethod
+    def test_operator_fixture_initializes_before_query(
+        startup_files: StartupFiles, python_process: PythonProcess,
+    ) -> None:
+        files = startup_files
+        repository = files.config.parent / "operator-repository"
+        repository.mkdir()
+        (repository / "config_ai_augment.json").write_bytes(files.config.read_bytes())
+        isolated = files.config.parent / "operator-runtime"
+        isolated.mkdir()
+        source_before = hashlib.sha256(files.source.read_bytes()).hexdigest()
+        result = python_process.run(
+            operator_fixture_bootstrap_process, str(repository), str(isolated),
+            cwd=ROOT, env=files.environment(), timeout=30,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "OPERATOR_BOOTSTRAP_QUERY_OK" in result.stdout
+        assert BACKEND_STORE_CLOSED_CLEANLY in result.stdout
+        assert hashlib.sha256(files.source.read_bytes()).hexdigest() == source_before
+
+    @pytest.mark.python_subprocess
     @pytest.mark.parametrize("mode", MODES)
     @pytest.mark.parametrize("condition", (
         "ready", "missing_config", "malformed_config", "invalid_config", "missing_source",
@@ -3145,7 +3214,9 @@ class TestBackendStartupConditions:
         "missing_namekey", "unknown_namekey", "ineligible_namekey", "lock_held",
     ))
     @staticmethod
-    def test_startup_conditions(startup_files: StartupFiles, mode: str, condition: str) -> None:
+    def test_startup_conditions(
+        startup_files: StartupFiles, mode: str, condition: str, python_process: PythonProcess,
+    ) -> None:
         files = startup_files
         namekey: str | None = STARTUP_NAMEKEY.to_json_key()
         success = condition == "ready"
@@ -3198,7 +3269,7 @@ class TestBackendStartupConditions:
                     (files.process_temp / "ktp-hcr-detour-ai-augment-backend.lock").open("wb")
                 )
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            result = start(files, mode, namekey=namekey)
+            result = start(python_process, files, mode, namekey=namekey)
         details = result.stdout + result.stderr
         assert (result.returncode == 0) is success, details
         assert ("STARTUP_READY" in result.stdout) is success, details
@@ -3212,6 +3283,7 @@ class TestBackendStartupConditions:
             after_db = files.detour.read_bytes() if files.detour.exists() else None
             assert after_db == before[files.detour]
 
+    @pytest.mark.python_subprocess
     @pytest.mark.parametrize("mode", ("new", "resume", "continue"))
     @pytest.mark.parametrize("stdin,yes,success", (
         ("", False, False), ("\n", False, False), ("n\n", False, False),
@@ -3220,12 +3292,14 @@ class TestBackendStartupConditions:
     @staticmethod
     def test_real_startup_confirmation(
         startup_files: StartupFiles, mode: str, stdin: str, yes: bool, success: bool,
+        python_process: PythonProcess,
     ) -> None:
-        result = start(startup_files, mode, stdin=stdin, yes=yes)
+        result = start(python_process, startup_files, mode, stdin=stdin, yes=yes)
         assert (result.returncode == 0) is success, result.stdout + result.stderr
         assert ("[y/N]" not in result.stdout) is yes
         assert ("STARTUP_READY" in result.stdout) is success
 
+    @pytest.mark.python_subprocess
     @pytest.mark.parametrize("stdin,yes,success", (
         ("y\n", False, False), ("y\nn\n", False, False),
         ("y\ny\n", False, True), ("", True, True),
@@ -3233,6 +3307,7 @@ class TestBackendStartupConditions:
     @staticmethod
     def test_real_second_replay_confirmation_preserves_old_db_on_refusal(
         startup_files: StartupFiles, stdin: str, yes: bool, success: bool,
+        python_process: PythonProcess,
     ) -> None:
         files = startup_files
         files.replay.chmod(0o600)
@@ -3240,7 +3315,7 @@ class TestBackendStartupConditions:
         files.repin()
         old_db = files.detour.read_bytes()
         log = files.replay.read_bytes()
-        result = start(files, "new", stdin=stdin, yes=yes)
+        result = start(python_process, files, "new", stdin=stdin, yes=yes)
         assert (result.returncode == 0) is success, result.stdout + result.stderr
         assert ("Registered a nonempty replay log" in result.stdout) is not yes
         assert files.replay.read_bytes() == log
@@ -3275,3 +3350,29 @@ class TestBackendStartupConditions:
         with pytest.raises(SystemExit) as error:
             backend_server.parse_args(["--ipc-only" if mode == "ipc" else f"--{mode}"])
         assert error.value.code == 2
+
+
+@pytest.mark.python_subprocess
+def test_python_process_timeout_reaps_child(python_process: PythonProcess) -> None:
+    with pytest.raises(subprocess.TimeoutExpired) as error:
+        python_process.run(
+            sleeping_process, timeout=1,
+        )
+    assert error.value.stdout is not None
+    pid = int(error.value.stdout.strip())
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+
+
+@pytest.mark.python_subprocess
+def test_python_process_cleanup_reaps_unfinished_child(python_process: PythonProcess) -> None:
+    child = python_process.popen(stdin_waiting_process)
+    assert child.stdout is not None and child.stdout.readline().strip() == "ready"
+    with pytest.raises(AssertionError, match="interrupted test"):
+        try:
+            raise AssertionError("interrupted test")
+        finally:
+            python_process.close()
+    assert child.poll() is not None
+    with pytest.raises(ProcessLookupError):
+        os.kill(child.pid, 0)

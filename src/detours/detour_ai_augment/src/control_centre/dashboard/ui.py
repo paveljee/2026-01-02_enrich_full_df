@@ -2609,26 +2609,28 @@ class _ControlCentrePage:
 
     def build_header(self) -> None:
         with (
-            ui.row().style(RESPONSIVE_ROW_STYLE)
+            ui.column().style(FULL_WIDTH_STYLE)
             .props(_NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=PAGE_HEADER_TEST_ID))
         ):
-            ui.label(Locale.PAGE_TITLE)
-            self._handles.backend_status_label = ui.label()
-            self._handles.backend_ipc_status_label = ui.label().props(
-                _NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=BACKEND_IPC_STATUS_TEST_ID)
-            )
-            self._handles.ssh_status_label = ui.label()
-            self._handles.codex_status_label = ui.label()
-            self._handles.probe_time_label = ui.label()
-            self._handles.probe_button = ui.button(Locale.ACTION_PROBE, on_click=self.probe_all)
-            self._handles.queue_processing_button = ui.button(
-                "Stop queue processing" if self._controller.queue_processing
-                else "Start queue processing",
-                on_click=self.toggle_queue_processing,
-            )
-            self._handles.backend_refresh_button = ui.button(
-                Locale.ACTION_QUERY_IPC, on_click=self.refresh_from_ipc,
-            ).props(_NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=BACKEND_REFRESH_TEST_ID))
+            with ui.row().style(RESPONSIVE_ROW_STYLE):
+                ui.label(Locale.PAGE_TITLE)
+                self._handles.probe_button = ui.button(Locale.ACTION_PROBE, on_click=self.probe_all)
+                self._handles.backend_refresh_button = ui.button(
+                    Locale.ACTION_QUERY_IPC, on_click=self.refresh_from_ipc,
+                ).props(_NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=BACKEND_REFRESH_TEST_ID))
+                self._handles.queue_processing_button = ui.button(
+                    Locale.ACTION_STOP_QUEUE_PROCESSING if self._controller.queue_processing
+                    else Locale.ACTION_START_QUEUE_PROCESSING,
+                    on_click=self.toggle_queue_processing,
+                )
+            with ui.row().style(RESPONSIVE_ROW_STYLE):
+                self._handles.backend_status_label = ui.label()
+                self._handles.backend_ipc_status_label = ui.label().props(
+                    _NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=BACKEND_IPC_STATUS_TEST_ID)
+                )
+                self._handles.ssh_status_label = ui.label()
+                self._handles.codex_status_label = ui.label()
+                self._handles.probe_time_label = ui.label()
 
     def build_summary(self) -> None:
         self._handles.summary_label = (
@@ -2771,26 +2773,27 @@ class _ControlCentrePage:
             .props(_NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=PAGE_FOOTER_TEST_ID))
         )
         with self._handles.card_container:
-            self._handles.download_card_button_docx = (
-                ui
-                .button(
-                    Locale.ACTION_DOWNLOAD_DOCX,
-                    on_click=self.download_displayed_card,
+            with ui.row().style(RESPONSIVE_ROW_STYLE):
+                self._handles.download_card_button_docx = (
+                    ui
+                    .button(
+                        Locale.ACTION_DOWNLOAD_DOCX,
+                        on_click=self.download_displayed_card,
+                    )
+                    .style(ACTION_BUTTON_STYLE)
+                    .props(_NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=DOWNLOAD_CARD_DOCX_TEST_ID))
                 )
-                .style(ACTION_BUTTON_STYLE)
-                .props(_NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=DOWNLOAD_CARD_DOCX_TEST_ID))
-            )
-            self._handles.download_card_button_docx.disable()
-            self._handles.download_card_button_txt = (
-                ui
-                .button(
-                    Locale.ACTION_DOWNLOAD_TXT,
-                    on_click=lambda: self.download_displayed_card(output_format="txt"),
+                self._handles.download_card_button_docx.disable()
+                self._handles.download_card_button_txt = (
+                    ui
+                    .button(
+                        Locale.ACTION_DOWNLOAD_TXT,
+                        on_click=lambda: self.download_displayed_card(output_format="txt"),
+                    )
+                    .style(ACTION_BUTTON_STYLE)
+                    .props(_NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=DOWNLOAD_CARD_TXT_TEST_ID))
                 )
-                .style(ACTION_BUTTON_STYLE)
-                .props(_NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=DOWNLOAD_CARD_TXT_TEST_ID))
-            )
-            self._handles.download_card_button_txt.disable()
+                self._handles.download_card_button_txt.disable()
             self._handles.card_markdown = (
                 ui
                 .markdown("")
@@ -3015,8 +3018,8 @@ class _ControlCentrePage:
     async def refresh(self) -> None:
         if self._handles.queue_processing_button is not None:
             self._handles.queue_processing_button.set_text(
-                "Stop queue processing" if self._controller.queue_processing
-                else "Start queue processing",
+                Locale.ACTION_STOP_QUEUE_PROCESSING if self._controller.queue_processing
+                else Locale.ACTION_START_QUEUE_PROCESSING,
             )
         snapshot = await self._controller.snapshot(selection=self._selection)
         for message in self._controller.drain_notifications():
