@@ -3175,6 +3175,7 @@ class _AuthoritativeHttpMiddleware:
         started_ns = time.monotonic_ns()
         request = Request(scope, receive=receive)
         request_body = await request.body()
+        logger.info("Backend received %s %s: %d request bytes", method, path, len(request_body))
         request_body_pending = True
         response_messages: list[Message] = []
 
@@ -3265,6 +3266,11 @@ class _AuthoritativeHttpMiddleware:
             record = runtime.pipeline_config.backend_store.append_authoritative_record(
                 record,
             )
+            logger.info(
+                "Backend persisted %s %s: record=%s; HTTP %s; %d response bytes; %s us",
+                method, path, record.record_id, record.response_code,
+                len(response_body), record.duration_usec,
+            )
             await _after_authoritative_public_record(record, runtime)
         except Exception as exc:
             logger.exception(Locale.AUTHORITATIVE_LOG_APPEND_FAILED_LOG, method, path, exc)
@@ -3277,6 +3283,8 @@ class _AuthoritativeHttpMiddleware:
             status_code=record.response_code,
             headers=record.response_headers,
         )(scope, receive, send)
+        logger.info("Backend sent %s %s: record=%s; HTTP %s",
+                    method, path, record.record_id, record.response_code)
 
 
 app.add_middleware(_AuthoritativeHttpMiddleware)
@@ -3796,6 +3804,8 @@ def _commit_accepted_push(
         return
     try:
         configuration = push_configuration_for_session(session_id)
+        logger.info("Push %s: capturing rollout and appendwatch evidence for session %s",
+                    record.record_id, session_id)
         try:
             rollout = runtime.pipeline_config.rollout_cas.copy_rollout(
                 rollout_relative_path=configuration.rollout_relative_path,
@@ -3811,6 +3821,9 @@ def _commit_accepted_push(
         except (OSError, ValueError) as exc:
             raise _PushConfigurationError(str(exc)) from exc
         report_bytes = _read_appendwatch_bytes(configuration)
+        logger.info("Push %s: captured rollout sha256=%s, bytes=%d, lines=%d; report bytes=%d",
+                    record.record_id, rollout.sha256, rollout.size, rollout.line_count,
+                    len(report_bytes))
     except (OSError, _PushConfigurationError) as exc:
         _mark_backend_lifecycle_failed(exc)
         return
@@ -3827,10 +3840,16 @@ def _commit_accepted_push(
         stored_commit = runtime.pipeline_config.backend_store.append_authoritative_record(
             commit_record,
         )
+        logger.info("Push %s: commit %s persisted; starting validation",
+                    record.record_id, stored_commit.record_id)
         attempt_record = runtime.pipeline_config.backend_store.validate_commit(
             stored_commit.record_id,
         )
         _apply_attempt_record(attempt_record)
+        validation = attempt_record.attempt.post_commit_validation
+        logger.info("Push %s: commit=%s; validation stage=%s result=%s; Backend lifecycle=%s",
+                    record.record_id, stored_commit.record_id, validation.stage,
+                    validation.result, BACKEND_LIFECYCLE)
     except Exception as exc:
         _mark_backend_lifecycle_failed(exc)
         logger.critical(Locale.COMMIT_APPEND_FATAL_LOG, exc)
@@ -3864,6 +3883,7 @@ async def _after_authoritative_public_record(
         return
     with BACKEND_WORKFLOW_STATE_LOCK:
         BACKEND_LATEST_PUSH_RECORD = record
+    logger.info("Push %s durably accepted; scheduling commit/validation", record.record_id)
     task = asyncio.create_task(
         asyncio.to_thread(_commit_accepted_push, record, runtime)
     )
@@ -4474,13 +4494,17 @@ def authoritative_pull(request: Request) -> Response:
     with BACKEND_WORKFLOW_STATE_LOCK:
         lifecycle = BACKEND_LIFECYCLE
         attempt_record = BACKEND_ATTEMPT_RECORD
+    logger.info("Pull: lifecycle=%s; commit=%s", lifecycle,
+                None if attempt_record is None else attempt_record.attempt.commit_record.record_id)
     if lifecycle is BackendLifecycle.BUSY:
+        logger.info("Pull: validation still running; returning HTTP 503 with Retry-After")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=Locale.CONFIGURATION_ERROR_DETAIL,
             headers={RETRY_AFTER_HEADER: RETRY_AFTER_SECONDS},
         )
     if lifecycle is BackendLifecycle.FAILED:
+        logger.error("Pull: Backend workflow failed; returning HTTP 500")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=Locale.CONFIGURATION_ERROR_DETAIL,
@@ -4490,6 +4514,8 @@ def authoritative_pull(request: Request) -> Response:
         BackendLifecycle.COMPLETED,
     }:
         if attempt_record is None:
+            logger.error("Pull: lifecycle=%s has no validation record; returning HTTP 500",
+                         lifecycle)
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=Locale.CONFIGURATION_ERROR_DETAIL,
@@ -4504,10 +4530,12 @@ def authoritative_pull(request: Request) -> Response:
                     BackendLifecycle.DUCKDB_EVIDENCE_VALIDATION,
                 }
             ):
+                logger.error("Pull: inconsistent retry validation; returning HTTP 500")
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     detail=Locale.CONFIGURATION_ERROR_DETAIL,
                 )
+            logger.info("Pull: returning HTTP 200 retry instructions; stage=%s", validation.stage)
             return Response(
                 content=(
                     validation.detail or Locale.VALIDATION_ERROR_DETAIL
@@ -4521,6 +4549,8 @@ def authoritative_pull(request: Request) -> Response:
             validation.result is not BackendLifecycle.ACCEPTED
             or not isinstance(submission, StandardizedSubmission)
         ):
+            logger.error("Pull: completed workflow has invalid submission/result; "
+                         "returning HTTP 500")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=Locale.CONFIGURATION_ERROR_DETAIL,
@@ -4532,6 +4562,8 @@ def authoritative_pull(request: Request) -> Response:
                     select_columns(attempt_record.ground_truth_innerdict.data)
                 )
             )
+        logger.info("Pull: returning HTTP 410 completed submission; ground_truth=%s",
+                    attempt_record.ground_truth_innerdict is not None)
         return Response(
             content="".join(response_lines),
             status_code=status.HTTP_410_GONE,
@@ -4542,6 +4574,8 @@ def authoritative_pull(request: Request) -> Response:
         if singular_outerdict is None:
             raise _PushConfigurationError(Locale.PUSH_LINKAGE_MISSING)
         lines = tuple(configured_pull_lines(singular_outerdict))
+        logger.info("Pull: returning HTTP 200 initial task; namekey=%s; %d JSONL lines",
+                    singular_outerdict.namekey, len(lines))
         return StreamingResponse(iter(lines), media_type=MEDIA_TYPE_WITH_CHARSET)
     except (_PushConfigurationError, _PushValidationError, OSError, duckdb.Error) as exc:
         logger.error(Locale.PULL_FAILED_LOG, exc)
@@ -4561,7 +4595,12 @@ async def authoritative_push(request: Request) -> Response:
 
     with BACKEND_WORKFLOW_STATE_LOCK:
         lifecycle = BACKEND_LIFECYCLE
+        logger.info("Push: lifecycle=%s; session=%s; current_pull=%s", lifecycle,
+                    BACKEND_SESSION_ID,
+                    None if BACKEND_CURRENT_PULL_RECORD is None
+                    else BACKEND_CURRENT_PULL_RECORD.record_id)
         if lifecycle is BackendLifecycle.BUSY:
+            logger.info("Push: previous submission still processing; returning HTTP 409")
             return JSONResponse(
                 status_code=status.HTTP_409_CONFLICT,
                 content={"detail": Locale.CONFIGURATION_ERROR_DETAIL},
@@ -4571,6 +4610,7 @@ async def authoritative_push(request: Request) -> Response:
             BackendLifecycle.READY,
             BackendLifecycle.RETRY,
         } or BACKEND_SESSION_ID is None:
+            logger.error("Push: workflow/session is not ready; returning HTTP 500")
             return JSONResponse(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 content={"detail": Locale.CONFIGURATION_ERROR_DETAIL},
@@ -4586,6 +4626,8 @@ async def authoritative_push(request: Request) -> Response:
         BACKEND_CURRENT_PULL_RECORD = None
         BACKEND_ATTEMPT_RECORD = None
         BACKEND_LIFECYCLE = BackendLifecycle.BUSY
+        logger.info("Push: reserved current pull; lifecycle=busy; "
+                    "returning HTTP 202 for persistence")
     return Response(
         status_code=status.HTTP_202_ACCEPTED,
         headers={LOCATION_HEADER: PULL_PATH},

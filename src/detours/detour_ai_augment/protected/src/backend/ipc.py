@@ -219,7 +219,12 @@ def handle_query_request(
     runtime: AiAugmentBackendContext,
     ipc_request: QueryRequest,
 ) -> QueryResponse:
-    return runtime.pipeline_config.backend_store.query(runtime, ipc_request)
+    logger.info("Query IPC: reading wholesale Backend snapshot")
+    response = runtime.pipeline_config.backend_store.query(runtime, ipc_request)
+    logger.info("Query IPC snapshot ready: %d researchers, %d attempts, %d run outcomes",
+                len(response.ai_augment_singular_outerdicts), len(response.attempts),
+                len(response.run_outcome_records))
+    return response
 
 
 # =============================================================

@@ -1029,8 +1029,17 @@ class _BackendDatabaseClient:
             response.read()
             emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, f"IPC probe HTTP status: {response.status}")
             return response.status == status.HTTP_200_OK
+        except FileNotFoundError as exc:
+            emit_log(
+                Locale.CONTROL_CENTRE_LOG_PREFIX,
+                f"IPC unavailable; socket not present: {self._socket_path}; {exc!r}",
+            )
+            return False
         except (OSError, http.client.HTTPException) as exc:
-            emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, f"IPC probe error: {exc!r}")
+            emit_log(
+                Locale.CONTROL_CENTRE_LOG_PREFIX,
+                f"IPC probe error: {self._socket_path}; {exc!r}",
+            )
             return False
         finally:
             connection.close()

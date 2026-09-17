@@ -28,6 +28,7 @@ from .helpers.data_models.ai_augment_context import AiAugmentBackendContext
 CONFIG_OPTION = "--config"
 IPC_ONLY_OPTION = "--ipc-only"
 DANGER_NO_VERIFY_HASH_OPTION = "--danger-no-verify-hash"
+logger = logging.getLogger(__name__)
 
 
 @contextmanager
@@ -41,17 +42,20 @@ def backend_store_lifecycle(
         api._acquire_backend_process_lock()
     try:
         store = runtime.pipeline_config.backend_store
+        logger.info("Opening writable Backend Store: new=%s", new)
         if new:
             store.rebuild_from_log(
                 runtime, reset_confirmed=confirmed,
                 confirm_replay=lambda: confirm_nonempty_replay(yes=yes),
             )
         with store.writable(runtime):
+            logger.info("Writable Backend Store ready")
             yield store
     finally:
         if acquired_lock:
             api._release_backend_process_lock()
     # Not reached on failed startup, application, task settlement or resource cleanup.
+    logger.info("Writable Backend Store closed cleanly")
     print(BACKEND_STORE_CLOSED_CLEANLY, flush=True)
 
 
@@ -88,6 +92,8 @@ def configure_runtime(
     require_namekey: bool = True,
     verify_hash_on_init: bool = True,
 ) -> AiAugmentBackendContext:
+    logger.info("Loading Backend configuration/resources: %s; verify_hashes=%s",
+                config_path, verify_hash_on_init)
     try:
         pipeline = AiAugmentDetourConfig.from_json(
             config_path,
@@ -115,6 +121,7 @@ def configure_runtime(
         pipeline_config=pipeline,
         configured_namekey=configured_namekey,
     )
+    logger.info("Loading researchers from read-only source DB: %s", pipeline.db_file)
     try:
         singular_outerdicts = runtime.ai_augment_singular_outerdicts
         if configured_namekey is not None:
@@ -124,6 +131,8 @@ def configure_runtime(
             )
     except ValueError as exc:
         raise api._PushConfigurationError(str(exc)) from exc
+    logger.info("Backend runtime ready: %d researchers; selected=%s",
+                len(singular_outerdicts), configured_namekey)
     return runtime
 
 
@@ -176,6 +185,8 @@ def confirm_nonempty_replay(*, yes: bool) -> bool:
 def main(argv: list[str] | None = None) -> None:
     logging.basicConfig(level=logging.INFO)
     args = parse_args(argv)
+    logger.info("Starting Backend: config=%s; ipc_only=%s; new=%s; resume=%s",
+                args.config, args.ipc_only, args.new, args.resume)
     confirmed = False if args.ipc_only else confirm_startup(args)
     verify_hash_on_init = not args.danger_no_verify_hash
     api._acquire_backend_process_lock()
@@ -186,10 +197,15 @@ def main(argv: list[str] | None = None) -> None:
             verify_hash_on_init=verify_hash_on_init,
         )
         if args.ipc_only:
+            logger.info("Opening read-only Backend Store: %s",
+                        runtime.pipeline_config.backend_store.detour_db_path)
             with runtime.pipeline_config.backend_store.read_only():
+                logger.info("Read-only Backend Store ready; starting query-only IPC")
                 ipc.serve_dashboard_query_only(runtime)
+            logger.info("Query-only IPC stopped; read-only Backend Store closed cleanly")
             print(BACKEND_STORE_CLOSED_CLEANLY, flush=True)
         else:
+            logger.info("Starting Backend HTTP API at %s:%s", api.SERVER_HOST, api.SERVER_PORT)
             uvicorn.run(
                 full_backend_application(
                     runtime, new=args.new, confirmed=confirmed, yes=args.yes,
@@ -197,8 +213,12 @@ def main(argv: list[str] | None = None) -> None:
                 host=api.SERVER_HOST,
                 port=api.SERVER_PORT,
             )
+    except BaseException:
+        logger.exception("Backend failed; exiting without recovery")
+        raise
     finally:
         api._release_backend_process_lock()
+        logger.info("Backend process lock released")
 
 
 if __name__ == "__main__":
