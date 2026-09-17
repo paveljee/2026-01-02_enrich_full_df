@@ -5,6 +5,7 @@ SCRIPT_NAME="aivm"
 PROVISION_LIB_NAME="provision.sh"
 APPENDWATCH_LIB_NAME="appendwatch.py"
 AUDIT_READ_LIB_NAME="audit_read.py"
+SHARED_MODEL_LIB_NAME="architecture.py"
 SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 PROJECT_DIR="/Volumes/home/aicode/aivm/home/ai"
 LIMA_INSTANCE="aivm"
@@ -52,6 +53,8 @@ ASSUME_YES=false
 PROVISION_SCRIPT="${AIVM_PROVISION_SCRIPT:-$SOURCE_DIR/$PROVISION_LIB_NAME}"
 APPENDWATCH_SCRIPT="${AIVM_APPENDWATCH_SCRIPT:-$SOURCE_DIR/../control_centre/appendwatch/$APPENDWATCH_LIB_NAME}"
 AUDIT_READ_SCRIPT="${AIVM_AUDIT_READ_SCRIPT:-$SOURCE_DIR/../../../src/control_centre/appendwatch/$AUDIT_READ_LIB_NAME}"
+
+SHARED_MODEL_SCRIPT="$SOURCE_DIR/../../../../../helpers/$SHARED_MODEL_LIB_NAME"
 
 prepare_mount_paths() {
     AIVM_CONTROL_DIR="$MOUNT_DIR/.aivm-control/appendwatch"
@@ -213,6 +216,10 @@ cp "$APPENDWATCH_SCRIPT" "$AIVM_CONTROL_DIR/$APPENDWATCH_LIB_NAME"
 chmod 600 "$AIVM_CONTROL_DIR/$APPENDWATCH_LIB_NAME"
 cp "$AUDIT_READ_SCRIPT" "$AIVM_CONTROL_DIR/$AUDIT_READ_LIB_NAME"
 chmod 600 "$AIVM_CONTROL_DIR/$AUDIT_READ_LIB_NAME"
+# Ship the shared module that defines `FrozenStrictModel`,
+# which `audit_read.py::AuditReadConfiguration` depends on
+cp "$SHARED_MODEL_SCRIPT" "$AIVM_CONTROL_DIR/$SHARED_MODEL_LIB_NAME"
+chmod 600 "$AIVM_CONTROL_DIR/$SHARED_MODEL_LIB_NAME"
 
 echo "🔑 Generating one dedicated operator SSH key for '$AIVM_USER' and '$AIVM_AUDIT_USER' into '$AIVM_KEY_DIR'..."
 generate_aivm_key

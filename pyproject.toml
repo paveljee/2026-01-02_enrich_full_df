@@ -412,7 +412,7 @@ bash -c '
   MODE_OR_NAMEKEY="$1"
   test -n "$MODE_OR_NAMEKEY" || {
     echo "ERROR: namekey argument or --ipc-only is required" >&2
-    echo "Usage: pixi run -e detour-ai-augment serve [--ipc-only|<namekey>] [--new|--resume|--continue] [--yes]" >&2
+    echo "Usage: pixi run -e detour-ai-augment serve --ipc-only OR serve <namekey> (--new|--resume|--continue) [--yes]" >&2
     exit 1
   }
   shift

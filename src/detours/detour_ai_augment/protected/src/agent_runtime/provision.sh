@@ -31,6 +31,8 @@ AIVM_APPENDWATCH_REPORT="${AIVM_APPENDWATCH_REPORT:-}"
 AIVM_AUDIT_READ_SCRIPT="${AIVM_AUDIT_READ_SCRIPT:-}"
 APPENDWATCH_DIR="$(dirname "$AIVM_APPENDWATCH_SCRIPT")"
 AIVM_AUDIT_READ_BIN="/usr/local/libexec/aivm-audit-read"
+# Provision `audit_read.py`'s Python prerequisites
+AIVM_AUDIT_ENV="/usr/local/libexec/aivm-audit-env"
 AIVM_AUDIT_DISPATCH="/usr/local/libexec/aivm-audit-dispatch"
 AIVM_AUDIT_ENTRYPOINT="/usr/local/libexec/aivm-audit-entrypoint"
 AIVM_AUDIT_CONFIG="$APPENDWATCH_DIR/audit-read.json"
@@ -191,6 +193,9 @@ case "$AIVM_HOME/" in
 esac
 
 packages=()
+/usr/bin/python3 -c 'import sys; assert sys.version_info >= (3, 12)' \
+    || { echo "Python 3.12+ is required for shared Pydantic models"; exit 1; }
+/usr/bin/python3 -c 'import ensurepip' >/dev/null 2>&1 || packages+=(python3-venv)
 command -v setfacl >/dev/null 2>&1 || packages+=(acl)
 command -v sshd >/dev/null 2>&1 || packages+=(openssh-server)
 command -v curl >/dev/null 2>&1 || packages+=(curl)
@@ -203,6 +208,12 @@ if [ "${#packages[@]}" -gt 0 ]; then
     apt-get update
     apt-get install -y --no-install-recommends "${packages[@]}"
 fi
+
+# Keep the model dependency isolated from the guest's distro Python packages.
+[ -x "$AIVM_AUDIT_ENV/bin/python" ] || /usr/bin/python3 -m venv "$AIVM_AUDIT_ENV"
+"$AIVM_AUDIT_ENV/bin/python" -c \
+    'import pydantic; assert pydantic.__version__.split(".")[0] == "2"' \
+    >/dev/null 2>&1 || "$AIVM_AUDIT_ENV/bin/pip" install 'pydantic>=2,<3'
 
 if ! getent group "$AIVM_USER" >/dev/null; then
     groupadd "$AIVM_USER"
@@ -319,12 +330,20 @@ install -d \
     "$AIVM_CODEX_PATH" \
     "$AIVM_CODEX_SESSIONS_PATH"
 
+# Root-owned import location serves both the audit executable and appendwatch service.
+install -d -m 0755 -o root -g root /usr/local/libexec/src/helpers
+install -m 0644 -o root -g root \
+    "$APPENDWATCH_DIR/architecture.py" /usr/local/libexec/src/helpers/architecture.py
+PYTHONPATH=/usr/local/libexec "$AIVM_AUDIT_ENV/bin/python" -c \
+    'from src.helpers.architecture import FrozenStrictModel'
+
 install -D \
     -m 0755 \
     -o root \
     -g root \
     "$AIVM_AUDIT_READ_SCRIPT" \
     "$AIVM_AUDIT_READ_BIN"
+sed -i "1c#!$AIVM_AUDIT_ENV/bin/python" "$AIVM_AUDIT_READ_BIN"
 
 /usr/bin/python3 - \
     "$AIVM_AUDIT_CONFIG" \
@@ -399,7 +418,8 @@ RequiresMountsFor="$AIVM_APPENDWATCH_SCRIPT" "$AIVM_CODEX_SESSIONS_PATH"
 Type=simple
 UMask=0077
 Environment=PYTHONDONTWRITEBYTECODE=1
-ExecStart=/usr/bin/python3 -B "$AIVM_APPENDWATCH_SCRIPT" "$AIVM_CODEX_SESSIONS_PATH" --report "$AIVM_APPENDWATCH_REPORT" --report-mode 0640
+Environment=PYTHONPATH=/usr/local/libexec
+ExecStart="$AIVM_AUDIT_ENV/bin/python" -B "$AIVM_APPENDWATCH_SCRIPT" "$AIVM_CODEX_SESSIONS_PATH" --report "$AIVM_APPENDWATCH_REPORT" --report-mode 0640
 Restart=on-failure
 RestartSec=$AIVM_SERVICE_RESTART_SECONDS
 

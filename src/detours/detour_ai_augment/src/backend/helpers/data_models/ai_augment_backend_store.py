@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import hashlib
+import logging
 import os
 import threading
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Literal, Self, cast
@@ -12,7 +14,7 @@ from uuid import UUID
 
 import duckdb
 import requests
-from pydantic import PrivateAttr, ValidationError
+from pydantic import Field, PrivateAttr, ValidationError
 
 from src.detours.detour_ai_augment.protected.src.architecture import BackendComponent
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_augment_detour_db import (  # noqa: E501
@@ -51,6 +53,17 @@ from .query_response import AgentRuntimeAttemptRecord, QueryResponse
 from .validation_event import ValidationRequestBody
 
 StoreMode = Literal["writable", "read_only"]
+logger = logging.getLogger(__name__)
+# Literally empty file, like `printf "" | sha256sum`
+EMPTY_LOG_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+
+class _ReplayAnchor(FrozenStrictModel):
+    """Accepted configured hash at an exact durable prefix boundary."""
+
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    ordinal: int = Field(ge=0)
+    byte_offset: int = Field(ge=0)
 
 
 class ExecuteResult:
@@ -107,9 +120,15 @@ class AiAugmentBackendStore(FrozenStrictModel):
             self._runtime = runtime
             try:
                 with self._lock:
-                    self._restore_append_position()
-                    if runtime is not None:
-                        self._publish_stored_cards(runtime)
+                    verified_anchor = self._verify_log_projection()
+                    if mode == "writable":
+                        self._replay_log._preflight_append()
+                        if verified_anchor is not None:
+                            with self._transaction():
+                                self._write_anchor(verified_anchor)
+                            logger.info("Accepted new replay hash %s at line %d byte %d",
+                                        verified_anchor.sha256, verified_anchor.ordinal,
+                                        verified_anchor.byte_offset)
                 yield self
                 self._raise_if_failed()
             finally:
@@ -129,6 +148,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
 
     def rebuild_from_log(
         self, runtime: BackendComponent.ContextProperty, *, reset_confirmed: bool,
+        confirm_replay: Callable[[], bool] = lambda: False,
     ) -> None:
         from src.detours.detour_ai_augment.src.backend import api
 
@@ -137,8 +157,13 @@ class AiAugmentBackendStore(FrozenStrictModel):
         with self._lock:
             self._require_closed()
             with self._replay_log._locked(append_allowed=False):
-                # Reject invalid JSONL before touching the old derived DB. Never repair it.
-                records = api._authoritative_log_records(self._replay_log._read())
+                # Only explicit --new can reconstruct; refusal precedes any DB deletion.
+                self._replay_log.verify_hash()
+                size = self._replay_log._size()
+                if size and not confirm_replay():
+                    raise ValueError("Nonempty replay log requires replay confirmation")
+                if not size and self._replay_log.hash != EMPTY_LOG_SHA256:
+                    raise ValueError("An empty replay log requires SHA256(empty)")
                 path = self._detour_db.path
                 protected_paths = (runtime.pipeline_config.db_file, Path(self._replay_log))
                 if path.is_symlink() or any(
@@ -156,11 +181,32 @@ class AiAugmentBackendStore(FrozenStrictModel):
                     path.with_name(path.name + ".wal").unlink(missing_ok=True)
                     with self._transaction():
                         self._initialize_http_record_schema()
-                    for ordinal, (record, _) in enumerate(records, start=1):
-                        self._apply_log_record(runtime, record, line_number=ordinal)
-                    self._next_line_number = len(records) + 1
-                    self._log_offset = self._replay_log._size()
-                    self._publish_stored_cards(runtime)
+                        self._write_anchor(_ReplayAnchor(
+                            sha256=EMPTY_LOG_SHA256, ordinal=0, byte_offset=0,
+                        ))
+                    total = sum(1 for _ in self._replay_log._lines())
+                    logger.info("Replaying %d lines (%d bytes) into new detour DB", total, size)
+                    self._next_line_number = 1
+                    self._log_offset = 0
+                    for ordinal, line in enumerate(self._replay_log._lines(), start=1):
+                        logger.info("Replaying line %d/%d", ordinal, total)
+                        try:
+                            record = api._authoritative_log_records(line)[0][0]
+                            self._apply_log_record(
+                                runtime, record, line_number=ordinal, raw_line=line,
+                            )
+                        except Exception:
+                            logger.exception("Replay failed at line %d", ordinal)
+                            raise
+                        self._next_line_number = ordinal + 1
+                        self._log_offset += len(line)
+                    with self._transaction():
+                        self._write_anchor(_ReplayAnchor(
+                            sha256=self._replay_log.hash, ordinal=total,
+                            byte_offset=self._log_offset,
+                        ))
+                    logger.info("Replay complete; accepted hash %s at line %d, byte %d",
+                                self._replay_log.hash, total, self._log_offset)
                 except BaseException as exc:
                     self._failure = exc
                     raise
@@ -175,23 +221,6 @@ class AiAugmentBackendStore(FrozenStrictModel):
         with self._lock:
             self._raise_if_failed()
             yield self
-
-    def _publish_stored_cards(self, runtime: BackendComponent.ContextProperty) -> None:
-        """Opening for live work or replay always completes stored card publication."""
-        from src.detours.detour_ai_augment.src.backend import api
-
-        from .ai_augment_context import AiAugmentBackendContext
-
-        rows = self.execute(
-            f"SELECT {api.AUTHORITATIVE_RECORD_ID_COLUMN} "
-            f"FROM {api.AUTHORITATIVE_RECORDS_TABLE} "
-            f"WHERE {api.AUTHORITATIVE_RECORD_METHOD_COLUMN} = ? "
-            f"AND {api.AUTHORITATIVE_RECORD_PATH_COLUMN} = ? "
-            f"ORDER BY {api.AUTHORITATIVE_RECORD_ORDINAL_COLUMN}",
-            [api.HTTP_POST_METHOD, VALIDATE_PATH],
-        ).fetchall()
-        for (record_id,) in rows:
-            api.publish_card_zip(self, cast(AiAugmentBackendContext, runtime), UUID(str(record_id)))
 
     def append_authoritative_record(
         self,
@@ -406,17 +435,8 @@ class AiAugmentBackendStore(FrozenStrictModel):
                         existing[0],
                         commit_http_record=commit,
                     )
-                    if applied.validation_record is not None:
-                        try:
-                            api.publish_card_zip(
-                                self, cast(AiAugmentBackendContext, self._runtime),
-                                applied.validation_record.record_id,
-                            )
-                        except BaseException as exc:
-                            self._failure = exc
-                            raise
                     return applied
-                http = ModelHttpInterceptor(self._recorded_model_http)
+                http = ModelHttpInterceptor(record_get=self._recorded_model_http)
                 try:
                     with self._transaction(rollback=True), submission_http_context(http):
                         evaluated, _ = api._validate_projected_commit(
@@ -473,28 +493,83 @@ class AiAugmentBackendStore(FrozenStrictModel):
         from src.detours.detour_ai_augment.src.backend import api
 
         assert self._runtime is not None
-        records = api._authoritative_log_records(
-            self._replay_log._read(offset=self._log_offset)
-        )
-        for record, _ in records:
-            self._apply_log_record(self._runtime, record, line_number=self._next_line_number)
+        for line in self._replay_log._lines(offset=self._log_offset):
+            record = api._authoritative_log_records(line)[0][0]
+            self._apply_log_record(
+                self._runtime, record, line_number=self._next_line_number, raw_line=line,
+            )
             self._next_line_number += 1
-        if records:
-            self._log_offset += records[-1][1]
+            self._log_offset += len(line)
 
-    def _restore_append_position(self) -> None:
-        """Resume is explicitly restricted to a previously clean Store lifecycle."""
-        from src.detours.detour_ai_augment.src.backend import api
+    def _write_anchor(self, anchor: _ReplayAnchor) -> None:
+        # Table comments are transactional metadata, not a separate checkpoint table.
+        if not self._transaction_active:
+            raise RuntimeError("Anchor changes require a Store transaction")
+        payload = anchor.model_dump_json().replace("'", "''")
+        self._detour_db.connection.execute(
+            f"COMMENT ON TABLE detour_http_records IS '{payload}'"
+        )
 
+    def _verify_log_projection(self) -> _ReplayAnchor | None:
+        """Verify only; missing history is never applied on resume or query startup."""
         row = self.execute(
-            f"SELECT COALESCE(MAX({api.AUTHORITATIVE_RECORD_ORDINAL_COLUMN}), 0) "
-            f"FROM {api.AUTHORITATIVE_RECORDS_TABLE}"
+            "SELECT comment FROM duckdb_tables() "
+            "WHERE database_name = current_database() AND schema_name = 'main' "
+            "AND table_name = 'detour_http_records'"
         ).fetchone()
-        assert row is not None
-        self._next_line_number = int(row[0]) + 1
-        self._log_offset = self._replay_log._size()
-        if self._log_offset and self._replay_log._read(offset=self._log_offset - 1) != b"\n":
-            raise ValueError("Replay log has an incomplete tail; --resume is unavailable")
+        if row is None or row[0] is None:
+            raise ValueError("Replay anchor missing; explicit --new is required")
+        anchor = _ReplayAnchor.model_validate_json(row[0])
+        # Missing legacy columns fail here without migration or mutation.
+        rows = self.execute(
+            "SELECT record_ordinal, raw_line_sha256 FROM detour_http_records "
+            "ORDER BY record_ordinal"
+        ).fetchall()
+        size = self._replay_log._size()
+        logger.info(
+            "Verifying replay: stored hash %s at line %d byte %d; config hash %s; %d bytes",
+            anchor.sha256, anchor.ordinal, anchor.byte_offset, self._replay_log.hash, size,
+        )
+        if anchor.byte_offset > size or anchor.ordinal > len(rows):
+            raise ValueError("Replay prefix is truncated or missing from DB")
+        prefix = hashlib.sha256()
+        offset = 0
+        ordinal = 0
+        boundary_seen = anchor.ordinal == 0 and anchor.byte_offset == 0
+        if boundary_seen and anchor.sha256 != EMPTY_LOG_SHA256:
+            raise ValueError("Empty replay anchor hash mismatch")
+        for ordinal, line in enumerate(self._replay_log._lines(), start=1):
+            logger.info("Verifying replay line %d", ordinal)
+            if not line.endswith(b"\n") or not line.strip():
+                raise ValueError(f"Replay line {ordinal}: invalid JSONL boundary")
+            if ordinal > len(rows) or rows[ordinal - 1][0] != ordinal:
+                raise ValueError(f"Replay line {ordinal}: missing or unordered DB record")
+            digest = rows[ordinal - 1][1]
+            if not isinstance(digest, str) or len(digest) != 64:
+                raise ValueError(f"Replay line {ordinal}: missing raw-line hash")
+            offset += len(line)
+            if ordinal <= anchor.ordinal:
+                prefix.update(line)
+                if ordinal == anchor.ordinal:
+                    if offset != anchor.byte_offset or prefix.hexdigest() != anchor.sha256:
+                        raise ValueError(f"Replay prefix mismatch at line {ordinal}, byte {offset}")
+                    boundary_seen = True
+            elif hashlib.sha256(line).hexdigest() != digest:
+                raise ValueError(f"Replay line {ordinal}: raw-line hash mismatch")
+        if not boundary_seen or ordinal != len(rows) or offset != size:
+            raise ValueError("Replay/DB coverage mismatch (extra rows or invalid anchor boundary)")
+        # A Dashboard child's unchanged config may describe only the accepted old prefix.
+        # A different hash must be verified by RegisteredResource, never trusted from a flag.
+        verified_anchor = None
+        if self._replay_log.hash != anchor.sha256:
+            self._replay_log.verify_hash()
+            verified_anchor = _ReplayAnchor(
+                sha256=self._replay_log.hash, ordinal=ordinal, byte_offset=offset,
+            )
+        self._next_line_number = ordinal + 1
+        self._log_offset = offset
+        logger.info("Replay/DB verification complete: %d lines, %d bytes", ordinal, offset)
+        return verified_anchor
 
     def _raise_if_failed(self) -> None:
         if self._failure is not None:
@@ -547,18 +622,20 @@ class AiAugmentBackendStore(FrozenStrictModel):
         record: HttpRequestLogRecord,
         *,
         line_number: int,
+        raw_line: bytes,
     ) -> None:
         from src.detours.detour_ai_augment.src.backend import api
 
         conn = self._detour_db.connection
         conn.execute(
-            f"INSERT INTO {api.AUTHORITATIVE_RECORDS_TABLE} VALUES (?, ?, ?, ?, ?)",
+            f"INSERT INTO {api.AUTHORITATIVE_RECORDS_TABLE} VALUES (?, ?, ?, ?, ?, ?)",
             [
                 line_number,
                 str(record.record_id),
                 record.method,
                 record.path,
                 record.model_dump_json(),
+                hashlib.sha256(raw_line).hexdigest(),
             ],
         )
 
@@ -579,7 +656,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
 
     def _apply_log_record(
         self, runtime: BackendComponent.ContextProperty, record: HttpRequestLogRecord,
-        *, line_number: int,
+        *, line_number: int, raw_line: bytes,
     ) -> AgentRuntimeAttemptRecord | None:
         from src.detours.detour_ai_augment.src.backend import api
 
@@ -587,7 +664,9 @@ class AiAugmentBackendStore(FrozenStrictModel):
 
         applied: AgentRuntimeAttemptRecord | None = None
         with self._transaction() as conn:
-            self._insert_projected_http_record(record, line_number=line_number)
+            self._insert_projected_http_record(
+                record, line_number=line_number, raw_line=raw_line,
+            )
             record = self.http_record_with_ordinal(record.record_id)[1]
             if (record.method, record.path) == (api.HTTP_POST_METHOD, VALIDATE_PATH):
                 applied, commit_database = api._apply_validation_record(
@@ -596,12 +675,10 @@ class AiAugmentBackendStore(FrozenStrictModel):
                 if not commit_database:
                     conn.execute("ROLLBACK")
                     conn.execute("BEGIN TRANSACTION")
-                    self._insert_projected_http_record(record, line_number=line_number)
+                    self._insert_projected_http_record(
+                        record, line_number=line_number, raw_line=raw_line,
+                    )
                 self._insert_attempt_record(applied)
-        # Publication is outside the committed DB transaction in both live and replay.
-        # Failure leaves the durable validation intact for recovery, never a new verdict.
-        if (record.method, record.path) == (api.HTTP_POST_METHOD, VALIDATE_PATH):
-            api.publish_card_zip(self, cast(AiAugmentBackendContext, runtime), record.record_id)
         return applied
 
     @contextmanager

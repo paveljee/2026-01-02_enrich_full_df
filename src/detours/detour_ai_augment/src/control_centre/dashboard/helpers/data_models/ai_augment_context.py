@@ -41,17 +41,22 @@ LIMA_APPENDWATCH_REPORT_PARAM: Final = APPENDWATCH_REPORT_ENV_NAME
 class AiAugmentControlCentreContext(FrozenStrictModel):
     pipeline_config: AiAugmentDetourConfig
     _backend_rebuild_required: bool = PrivateAttr(default=True)
+    _backend_cycle_failed: bool = PrivateAttr(default=False)
 
     def begin_backend_start(self) -> tuple[str, ...]:
         """One policy for every owned child during this Dashboard context's lifetime."""
+        if self._backend_cycle_failed:
+            raise RuntimeError("Previous full Backend cycle failed; operator intervention required")
         arguments = ("--new", "--yes") if self._backend_rebuild_required else ("--resume", "--yes")
-        self._backend_rebuild_required = True
+        self._backend_cycle_failed = True
         return arguments
 
     def finish_backend_stop(
         self, *, startup_succeeded: bool, shutdown_succeeded: bool,
     ) -> None:
-        self._backend_rebuild_required = not (startup_succeeded and shutdown_succeeded)
+        self._backend_cycle_failed = not (startup_succeeded and shutdown_succeeded)
+        if not self._backend_cycle_failed:
+            self._backend_rebuild_required = False
 
     @computed_field(repr=False)  # type: ignore[prop-decorator]
     @cached_property

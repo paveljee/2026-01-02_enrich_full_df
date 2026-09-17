@@ -9,21 +9,18 @@ import logging
 import os
 import re
 import shlex
-import signal
 import subprocess
 import sys
 import tempfile
 import threading
 import time
 from collections.abc import AsyncGenerator, Iterator, Mapping, Sequence
-from contextlib import asynccontextmanager, suppress
-from dataclasses import dataclass
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from random import Random
 from typing import Any, Callable, Literal, Self, TextIO, get_args
 from uuid import UUID
-from zipfile import BadZipFile, ZipFile
 from zoneinfo import ZoneInfo
 
 import duckdb
@@ -110,7 +107,6 @@ from src.detours.detour_ai_augment.src.backend.helpers.data_models.validation_ev
     ValidationRequestBody,
 )
 from src.helpers.architecture import FrozenStrictModel
-from src.helpers.cards import build_cards, write_cards_zip
 from src.helpers.data_models import (
     FragmentType,
     InnerDict,
@@ -123,7 +119,6 @@ from src.helpers.data_models.http_request_log import (
 from src.helpers.duckdb_utils import duckdb_quote_identifier
 from src.helpers.name_matching import normalized_tokens_sql
 from src.helpers.vars import (
-    CARD_INTRODUCTION,
     CSV_ROW_INDEX_COL,
     DOCX_FRAGMENT_COL,
     DOCX_ROW_INDEX_COL,
@@ -183,7 +178,6 @@ ROLLOUT_JSONL = os.environ.get(ROLLOUT_ENV_NAME, "")
 APPENDWATCH_REPORT_ENV_NAME = "FASTAPI_DETOUR_APPENDWATCH_REPORT"
 NAMEKEY_ENV_NAME = "FASTAPI_DETOUR_NAMEKEY"
 CODEX_SESSIONS_ROOT_ENV_NAME = "FASTAPI_DETOUR_CODEX_SESSIONS_DIR"
-CONTROL_PARENT_PID_ENV_NAME = "FASTAPI_DETOUR_CONTROL_PARENT_PID"
 AIVM_INSTANCE_ENV_NAME = "FASTAPI_DETOUR_AIVM_INSTANCE"
 AIVM_AUDIT_USER_ENV_NAME = "FASTAPI_DETOUR_AIVM_AUDIT_USER"
 AIVM_SSH_PORT_ENV_NAME = "FASTAPI_DETOUR_AIVM_SSH_PORT"
@@ -331,12 +325,8 @@ ASGI_HTTP_REQUEST_MESSAGE_TYPE = "http.request"
 ASGI_HTTP_DISCONNECT_MESSAGE_TYPE = "http.disconnect"
 ASGI_HTTP_RESPONSE_START_MESSAGE_TYPE = "http.response.start"
 ASGI_HTTP_RESPONSE_BODY_MESSAGE_TYPE = "http.response.body"
-TEXT_OUTPUT_FORMAT = "txt"
-DOCX_OUTPUT_FORMAT = "docx"
-SUPPORTED_OUTPUT_FORMATS = frozenset({TEXT_OUTPUT_FORMAT, DOCX_OUTPUT_FORMAT})
 ROLLOUT_FILENAME_PREFIX = "rollout-"
 ROLLOUT_FILENAME_SUFFIX = ".jsonl"
-CARD_ZIP_FILENAME_TEMPLATE = "{prefix}_{attempt_id}.zip"
 ROLLOUT_TIMESTAMP_FORMAT = "%Y-%m-%dT%H-%M-%S"
 CUMULATIVE_KEY_SEPARATOR = "\0"
 FCO_TIMESTAMP_TIMESPEC = "milliseconds"
@@ -475,7 +465,8 @@ CREATE_AUTHORITATIVE_RECORDS_TABLE_SQL = (
     f"{AUTHORITATIVE_RECORD_ID_COLUMN} VARCHAR NOT NULL UNIQUE, "
     f"{AUTHORITATIVE_RECORD_METHOD_COLUMN} VARCHAR NOT NULL, "
     f"{AUTHORITATIVE_RECORD_PATH_COLUMN} VARCHAR NOT NULL, "
-    f"{AUTHORITATIVE_RECORD_PAYLOAD_COLUMN} JSON NOT NULL)"
+    f"{AUTHORITATIVE_RECORD_PAYLOAD_COLUMN} JSON NOT NULL, "
+    "raw_line_sha256 VARCHAR NOT NULL)"
 )
 CREATE_AUTHORITATIVE_ATTEMPTS_TABLE_SQL = (
     f"CREATE TABLE IF NOT EXISTS {AUTHORITATIVE_ATTEMPTS_TABLE} ("
@@ -485,7 +476,6 @@ CREATE_AUTHORITATIVE_ATTEMPTS_TABLE_SQL = (
 HTTP_REQUEST_LOG_RESPONSE_CONTENT_TYPE_HEADER = "content-type"
 HTTP_REQUEST_LOG_RESPONSE_CONTENT_TYPE_JSON = "application/json"
 NANOSECONDS_PER_MICROSECOND = 1_000
-CONTROL_PARENT_WATCH_SECONDS = 0.1
 
 NOT_REPORTED_VALUE: NotReported = get_args(NotReported)[0]
 NOT_AVAILABLE_OR_APPLICABLE_VALUE: NotAvailableOrApplicable = get_args(
@@ -568,7 +558,6 @@ CARD_EXCLUDED_COLUMNS = {
     DOCX_ROW_INDEX_COL,
     DOCX_FRAGMENT_COL,
 }
-CARD_ZIP_PREFIX = "ai_augment_cards"
 
 MEDIA_TYPE = "application/x-ndjson"
 MEDIA_TYPE_WITH_CHARSET = f"{MEDIA_TYPE}; charset=utf-8"
@@ -579,7 +568,6 @@ async def lifespan(
     _app: FastAPI,
     runtime: AiAugmentBackendContext,
 ) -> AsyncGenerator[None, None]:
-    parent_watch: asyncio.Task[None] | None = None
     try:
         with BACKEND_WORKFLOW_STATE_LOCK:
             global BACKEND_CURRENT_PULL_RECORD
@@ -596,39 +584,20 @@ async def lifespan(
             BACKEND_LIFECYCLE = BackendLifecycle.READY
         prove_workflow_inputs_readable()
         start_backend_session_reader()
-        parent_pid = os.environ.get(CONTROL_PARENT_PID_ENV_NAME)
-        if parent_pid is not None:
-            if not parent_pid.isdecimal() or int(parent_pid) <= 0:
-                raise _PushConfigurationError(Locale.CONTROL_PARENT_PID_INVALID)
-            parent_watch = asyncio.create_task(_watch_control_parent(int(parent_pid)))
         try:
             yield
         finally:
-            try:
-                if AUTHORITATIVE_BACKGROUND_TASKS:
-                    results = await asyncio.gather(
-                        *tuple(AUTHORITATIVE_BACKGROUND_TASKS),
-                        return_exceptions=True,
-                    )
-                    failures = [result for result in results if isinstance(result, BaseException)]
-                    if failures:
-                        raise BaseExceptionGroup("Backend background work failed", failures)
-            finally:
-                if parent_watch is not None:
-                    parent_watch.cancel()
-                    with suppress(asyncio.CancelledError):
-                        await parent_watch
+            if AUTHORITATIVE_BACKGROUND_TASKS:
+                results = await asyncio.gather(
+                    *tuple(AUTHORITATIVE_BACKGROUND_TASKS),
+                    return_exceptions=True,
+                )
+                failures = [result for result in results if isinstance(result, BaseException)]
+                if failures:
+                    raise BaseExceptionGroup("Backend background work failed", failures)
     except Exception as exc:
         logger.error(Locale.API_LIFESPAN_FAILED_LOG, exc)
         raise
-
-
-async def _watch_control_parent(parent_pid: int) -> None:
-    while True:
-        if os.getppid() != parent_pid:
-            os.kill(os.getpid(), signal.SIGTERM)
-            return
-        await asyncio.sleep(CONTROL_PARENT_WATCH_SECONDS)
 
 
 EVIDENCE_SUBMISSION_EXAMPLE = L_FEI_FEI_INITIAL_FIXTURE.submission.model_dump(
@@ -825,8 +794,7 @@ class _MultipleEvidenceMatches(_PushValidationError):
         super().__init__(Locale.MULTIPLE_EVIDENCE_MATCHES_TEMPLATE.format(excerpt=excerpt))
 
 
-@dataclass(frozen=True)
-class _PushConfiguration:
+class _PushConfiguration(FrozenStrictModel):
     rollout_guest_path: str
     rollout_relative_path: PurePosixPath
     appendwatch_report: PurePosixPath
@@ -838,31 +806,27 @@ class _PushConfiguration:
     host_key_alias: str
 
 
-@dataclass(frozen=True)
-class _ArchivedFile:
+class _ArchivedFile(FrozenStrictModel):
     path: Path
     size: int
     sha256: str
     line_count: int
 
 
-@dataclass(frozen=True)
-class _RolloutRecord:
+class _RolloutRecord(FrozenStrictModel):
     line_number: int
     line_sha256: str
     value: dict[str, object]
 
 
-@dataclass(frozen=True)
-class _SessionMetadata:
+class _SessionMetadata(FrozenStrictModel):
     session_id: UUID
     timestamp: str
     rollout_filename: str
     summary_json: str
 
 
-@dataclass(frozen=True)
-class _CodexFcRow:
+class _CodexFcRow(FrozenStrictModel):
     timestamp: str
     fc_id: str
     call_id: str
@@ -871,15 +835,13 @@ class _CodexFcRow:
     arguments_json: str
 
 
-@dataclass(frozen=True)
-class _CodexFcoRow:
+class _CodexFcoRow(FrozenStrictModel):
     timestamp: str
     fco_id: str
     call_id: str
 
 
-@dataclass(frozen=True)
-class _CodexTurnRefRow:
+class _CodexTurnRefRow(FrozenStrictModel):
     ref_id: str
     call_id: str
     domain: str | None
@@ -890,16 +852,14 @@ class _CodexTurnRefRow:
     cite_text: str
 
 
-@dataclass(frozen=True)
-class _RolloutIndex:
+class _RolloutIndex(FrozenStrictModel):
     session: _SessionMetadata
     fc_rows: tuple[_CodexFcRow, ...]
     fco_rows: tuple[_CodexFcoRow, ...]
     turn_ref_rows: tuple[_CodexTurnRefRow, ...]
 
 
-@dataclass(frozen=True)
-class _EvidenceMatch:
+class _EvidenceMatch(FrozenStrictModel):
     field: str
     evidence_number: int
     excerpt: str
@@ -912,8 +872,7 @@ class _EvidenceMatch:
     arguments_json: str
 
 
-@dataclass(frozen=True)
-class _EvidenceCandidate:
+class _EvidenceCandidate(FrozenStrictModel):
     ref_id: str
     call_id: str
     cite_text: str
@@ -923,8 +882,7 @@ class _EvidenceCandidate:
     arguments_json: object
 
 
-@dataclass(frozen=True)
-class _EvidenceItemAssessment:
+class _EvidenceItemAssessment(FrozenStrictModel):
     field: str
     index: int
     evidence_number: int
@@ -935,8 +893,7 @@ class _EvidenceItemAssessment:
     candidates: tuple[_EvidenceCandidate, ...] = ()
 
 
-@dataclass(frozen=True)
-class _EvidenceAssessment:
+class _EvidenceAssessment(FrozenStrictModel):
     items: tuple[_EvidenceItemAssessment, ...]
 
     @property
@@ -3671,16 +3628,6 @@ def _apply_validation_record(
             store, runtime, commit,
         )
     observed = body.post_commit_validation
-    # Preserve historical validations that recorded card I/O failure as a verdict.
-    # New card publication failures occur after DB commit and never change the verdict.
-    if (observed.stage == BackendLifecycle.INNERDICT_AND_CARD
-            and observed.result != BackendLifecycle.ACCEPTED
-            and evaluated.attempt.post_commit_validation.stage == BackendLifecycle.ACCEPTED):
-        evaluated = evaluated.model_copy(update={
-            "attempt": evaluated.attempt.model_copy(update={"post_commit_validation": observed}),
-            "ground_truth_innerdict": None,
-        })
-        commit_database = False
     submission = evaluated.submission
     if (
         evaluated.attempt.post_commit_validation != observed
@@ -4178,100 +4125,6 @@ def write_accepted_submission(
 
     append_codex_output(store, output_row)
     return singular_outerdict.ground_truth_innerdict()
-
-
-def _same_zip_contents(existing: Path, expected: Path) -> bool:
-    """Compare member names and bytes, ignoring ZIP container timestamps."""
-    try:
-        with ZipFile(existing) as current, ZipFile(expected) as wanted:
-            names = current.namelist()
-            if len(names) != len(set(names)) or sorted(names) != sorted(wanted.namelist()):
-                return False
-            return all(current.read(name) == wanted.read(name) for name in names)
-    except (BadZipFile, EOFError):
-        return False
-
-
-def publish_card_zip(
-    store: AiAugmentBackendStore,
-    runtime: AiAugmentBackendContext,
-    validation_record_id: UUID,
-) -> None:
-    """Publish an accepted validation's historical card from persisted DB state."""
-    ordinal, record = store.http_record_with_ordinal(validation_record_id)
-    if (record.method, record.path) != (HTTP_POST_METHOD, VALIDATE_PATH):
-        raise _PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT)
-    body = ValidationRequestBody.model_validate_json(record.request_body or "")
-    if body.post_commit_validation.result != BackendLifecycle.ACCEPTED:
-        return
-    commit = _backend_commit_record(store, store.http_record(body.commit_id))
-    namekey = name_key_from_header_value(commit.request_headers.get(NAME_KEY_HEADER))
-    singular_outerdict = _configured_ai_augment_singular_outerdict(
-        namekey, runtime.ai_augment_singular_outerdicts,
-    )
-    rows = store.execute(
-        f"SELECT {AUTHORITATIVE_RECORD_PAYLOAD_COLUMN} FROM {AUTHORITATIVE_RECORDS_TABLE} "
-        f"WHERE {AUTHORITATIVE_RECORD_METHOD_COLUMN} = ? "
-        f"AND {AUTHORITATIVE_RECORD_PATH_COLUMN} = ? "
-        f"AND {AUTHORITATIVE_RECORD_ORDINAL_COLUMN} <= ?",
-        [HTTP_POST_METHOD, VALIDATE_PATH, ordinal],
-    ).fetchall()
-    accepted_commit_ids: set[UUID] = set()
-    for (payload,) in rows:
-        validation = HttpRequestLogRecord.model_validate_json(str(payload))
-        validation_body = ValidationRequestBody.model_validate_json(validation.request_body or "")
-        if validation_body.post_commit_validation.result == BackendLifecycle.ACCEPTED:
-            accepted_commit_ids.add(validation_body.commit_id)
-    committed_innerdicts = tuple(
-        committed
-        for committed in _committed_innerdicts(store)
-        if committed.commit_record.record_id in accepted_commit_ids
-        and name_key_from_header_value(
-            committed.commit_record.request_headers.get(NAME_KEY_HEADER)
-        ) == namekey
-    )
-    if body.commit_id not in {item.commit_record.record_id for item in committed_innerdicts}:
-        raise _PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT)
-    card_outer_dict = selected_card_outer_dict(
-        singular_outerdict.model_copy(update={"committed_innerdicts": committed_innerdicts})
-    )
-    attempt_timestamp = datetime.fromtimestamp(commit.record_id.time / 1_000, tz=timezone.utc)
-    intro_date = attempt_timestamp.astimezone(
-        ZoneInfo(runtime.pipeline_config.timezone)
-    ).strftime(Locale.CARD_INTRO_DATE_FORMAT)
-    cards = build_cards(
-        card_outer_dict,
-        total_draws=runtime.pipeline_config.total_draws,
-        intro=CARD_INTRODUCTION.format(intro_date),
-        excluded_cols=CARD_EXCLUDED_COLUMNS,
-    )
-    if len(cards) != 1:
-        raise _PushConfigurationError(Locale.RESEARCHER_CARD_COUNT_INVALID)
-    output_dir = runtime.pipeline_config.output_dir
-    output_dir.mkdir(parents=True, exist_ok=True)
-    zip_name = CARD_ZIP_FILENAME_TEMPLATE.format(
-        prefix=CARD_ZIP_PREFIX, attempt_id=commit.record_id,
-    )
-    zip_path = output_dir / zip_name
-    # Same filesystem for atomic publication; partial archives never occupy the final path.
-    with tempfile.TemporaryDirectory(prefix=f".{zip_name}.", dir=output_dir) as temporary:
-        temporary_path = Path(temporary) / zip_name
-        write_cards_zip(
-            cards, Path(temporary), zip_name,
-            output_format=runtime.pipeline_config.output_format,
-            reference_docx=runtime.pipeline_config.pandoc_reference_docx,
-        )
-        with temporary_path.open("rb") as archive:
-            os.fsync(archive.fileno())
-        if zip_path.is_symlink() or not zip_path.is_file() or not _same_zip_contents(
-            zip_path, temporary_path,
-        ):
-            os.replace(temporary_path, zip_path)
-        directory = os.open(output_dir, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
 
 
 def _execute_attempt(

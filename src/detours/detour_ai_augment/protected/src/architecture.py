@@ -603,7 +603,7 @@ class ControlCentreComponent(
             ComponentProtocol.PortProtocol.PropertyProtocol,
             Protocol,
         ):
-            def outbound_http(self) -> tuple[Literal["GET"], Literal["/query"]]: ...
+            """Request the complete Backend snapshot; no parameters."""
 
         class RunOutcomeRequestProperty(
             ComponentProtocol.PortProtocol.PropertyProtocol,

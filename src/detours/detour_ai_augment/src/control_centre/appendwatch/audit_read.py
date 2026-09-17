@@ -9,10 +9,11 @@ import pwd
 import shlex
 import stat
 import sys
-from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO, Final
 from uuid import UUID
+
+from src.helpers.architecture import FrozenStrictModel
 
 CONFIGURATION_OPTION: Final = "--configuration"
 READ_BUFFER_BYTES: Final = 1024 * 1024
@@ -33,8 +34,7 @@ class AuditReadError(RuntimeError):
     """The requested audit operation is invalid or unavailable."""
 
 
-@dataclass(frozen=True, slots=True)
-class AuditReadConfiguration:
+class AuditReadConfiguration(FrozenStrictModel):
     runtime_user: str
     audit_user: str
     sessions_root: Path

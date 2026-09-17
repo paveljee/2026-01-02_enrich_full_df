@@ -9,7 +9,6 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
 from pathlib import Path
 from types import FrameType
 from typing import NoReturn
@@ -18,6 +17,7 @@ from uuid import UUID
 
 from fastapi import status
 from flask import Flask, Response, request
+from pydantic import BaseModel, ConfigDict
 from werkzeug.serving import BaseWSGIServer, make_server
 
 from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
@@ -305,8 +305,11 @@ def create_dashboard_query_app(
 # Functions to start/stop IPC server for downstream use
 # =====================================================
 
-@dataclass(frozen=True, slots=True)
-class _DashboardIpcServer:
+class _DashboardIpcServer(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid", strict=True, frozen=True, arbitrary_types_allowed=True,
+    )
+
     socket_path: Path
     server: BaseWSGIServer
     thread: threading.Thread
@@ -423,10 +426,11 @@ def serve_dashboard_query_only(
         query_response_handler,
         query_path=DASHBOARD_QUERY_PATH,
     )
-    stopped = threading.Event()
+    stopped = False
 
     def request_stop(_signum: int, _frame: FrameType | None) -> None:
-        stopped.set()
+        nonlocal stopped
+        stopped = True
 
     previous = {
         signum: signal.getsignal(signum)
@@ -435,9 +439,10 @@ def serve_dashboard_query_only(
     try:
         for signum in previous:
             signal.signal(signum, request_stop)
-        while not stopped.wait(0.1):
+        while not stopped:
             if not server.thread.is_alive():
                 raise RuntimeError("Backend query server stopped unexpectedly")
+            time.sleep(0.1)
     finally:
         try:
             stop_dashboard_query_server(server)

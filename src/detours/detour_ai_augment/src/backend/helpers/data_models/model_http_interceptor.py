@@ -3,13 +3,14 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlsplit
 from uuid import UUID
 
 import requests
+from pydantic import PrivateAttr
 
+from src.helpers.architecture import FrozenStrictModel
 from src.helpers.data_models.http_request_log import (
     HttpRequestLogRecord,
     redact_http_request_log_query,
@@ -58,13 +59,12 @@ def record_key(record: HttpRequestLogRecord) -> RequestKey:
             record.request_body)
 
 
-@dataclass
-class ModelHttpInterceptor:
+class ModelHttpInterceptor(FrozenStrictModel):
     """Generic HTTP adapter: the supplied resolver owns persistence, not this class."""
 
     record_get: RecordGet
-    _used: dict[UUID, HttpRequestLogRecord] = field(default_factory=dict)
-    _requests: dict[RequestKey, HttpRequestLogRecord] = field(default_factory=dict)
+    _used: dict[UUID, HttpRequestLogRecord] = PrivateAttr(default_factory=dict)
+    _requests: dict[RequestKey, HttpRequestLogRecord] = PrivateAttr(default_factory=dict)
 
     @property
     def records(self) -> tuple[HttpRequestLogRecord, ...]:

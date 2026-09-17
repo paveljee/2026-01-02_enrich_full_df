@@ -129,3 +129,6 @@ class AiAugmentIneligibilityCategory(StrEnum):
     STAGING_PARTITION_2 = "staging_partition_2"
     STAGING_PARTITION_4_XLSX_NON_EXACT = "staging_partition_4_xlsx_non_exact"
     STAGING_PARTITION_4_MULTIPLE_SSN = "staging_partition_4_multiple_ssn"
+
+
+BACKEND_STORE_CLOSED_CLEANLY = "AI_AUGMENT_BACKEND_STORE_CLOSED_CLEANLY"

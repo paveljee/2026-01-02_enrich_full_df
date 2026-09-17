@@ -14,7 +14,6 @@ import threading
 import time
 from collections.abc import Generator, Iterator, Sequence
 from contextlib import contextmanager, suppress
-from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, TextIO, cast
 from urllib import error as urllib_error
@@ -24,6 +23,7 @@ import psutil
 import pytest
 from fastapi import status
 from playwright.sync_api import Locator, Page, ViewportSize, expect, sync_playwright
+from pydantic import BaseModel, ConfigDict, field_validator
 
 from src.detours.detour_ai_augment.protected.src.backend import ipc as backend_ipc
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_augment_config import (  # noqa: E501
@@ -74,6 +74,7 @@ from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_mod
     RunLifecycle,
     RunOutcomePath,
 )
+from src.helpers.architecture import FrozenStrictModel
 from src.helpers.data_models import HttpRequestLogRecord, NameKey
 
 CONTROL_CENTRE_MODULE = "src.detours.detour_ai_augment.src.control_centre.dashboard.ui"
@@ -113,8 +114,7 @@ RESEARCHER_CARD_END = "Playwright researcher card end"
 pytestmark = pytest.mark.operator
 
 
-@dataclass(frozen=True, slots=True)
-class OperatorRuntime:
+class OperatorRuntime(FrozenStrictModel):
     repository_root: Path
     config_path: Path
     backend_store: AiAugmentBackendStore
@@ -123,16 +123,26 @@ class OperatorRuntime:
     dashboard_socket_path: Path
 
 
-@dataclass(frozen=True, slots=True)
-class WorkflowCheckpoint:
+class WorkflowCheckpoint(FrozenStrictModel):
     queued_at_monotonic: float
 
 
-@dataclass(slots=True)
-class DashboardProcess:
+class DashboardProcess(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid", strict=True, frozen=True, arbitrary_types_allowed=True,
+    )
+
     process: subprocess.Popen[str]
     output: list[str]
     output_thread: threading.Thread
+
+    @field_validator("output", mode="plain")
+    @classmethod
+    def shared_output(cls, value: object) -> list[str]:
+        # The collector thread owns this very buffer; validation must not copy it.
+        if not isinstance(value, list) or any(not isinstance(line, str) for line in value):
+            raise ValueError("output must be a shared list of strings")
+        return value
 
     def wait_until_ready(self) -> None:
         _operator_log("waiting for Control Centre readiness")
@@ -252,8 +262,11 @@ class DashboardProcess:
             raise RuntimeError(f"operator child processes did not stop: {processes}")
 
 
-@dataclass(frozen=True, slots=True)
-class OperatorProcessSnapshot:
+class OperatorProcessSnapshot(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid", strict=True, frozen=True, arbitrary_types_allowed=True,
+    )
+
     process: psutil.Process
     pid: int
     parent_pid: int | None
@@ -494,7 +507,7 @@ def running_dashboard(runtime: OperatorRuntime) -> Generator[DashboardProcess]:
             daemon=True,
         )
         output_thread.start()
-        dashboard = DashboardProcess(process, output, output_thread)
+        dashboard = DashboardProcess(process=process, output=output, output_thread=output_thread)
         dashboard.wait_until_ready()
         yield dashboard
     finally:

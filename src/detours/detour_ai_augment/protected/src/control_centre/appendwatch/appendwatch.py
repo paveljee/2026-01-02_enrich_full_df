@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Watch a Linux directory tree and flag non-append-only file changes.
 
-No third-party packages are required.  Uses Linux inotify via ctypes.
+Requires Pydantic 2, provided by guest provisioning. Uses Linux inotify via ctypes.
 """
 
 from __future__ import annotations
@@ -9,7 +9,6 @@ from __future__ import annotations
 import argparse
 import ctypes
 import ctypes.util
-import dataclasses
 import errno
 import hashlib
 import os
@@ -21,6 +20,8 @@ import sys
 import tempfile
 import time
 from typing import Dict, Iterable, Optional, Tuple
+
+from pydantic import BaseModel, ConfigDict
 
 # linux/inotify.h
 IN_MODIFY = 0x00000002
@@ -58,8 +59,9 @@ EMPTY_DIGEST = hashlib.sha256(b"").digest()
 RECONCILE_INTERVAL = 60.0
 
 
-@dataclasses.dataclass
-class Record:
+class Record(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, validate_assignment=True)
+
     dev: int
     ino: int
     size: int
@@ -525,13 +527,13 @@ class AppendWatch:
             source = candidates.pop() if candidates else None
             if source:
                 source_path, source_rec = source
-                moved = dataclasses.replace(source_rec, exists=True)
+                moved = source_rec.model_copy(update={"exists": True})
                 prior = self.records.get(rel)
                 if prior is not None and prior is not source_rec:
                     moved.status = "COMPROMISED"
                     moved.reason = prior.reason or "path was replaced or reused"
                 self.records[rel] = moved
-                self.records[source_path] = dataclasses.replace(source_rec, exists=False)
+                self.records[source_path] = source_rec.model_copy(update={"exists": False})
                 visible_changed = True
             elif record is not None:
                 record.exists = True

@@ -2,12 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlsplit
 from uuid import UUID, uuid7
-from zipfile import ZipFile
 
 import duckdb
 import pytest
@@ -249,8 +247,7 @@ def test_live_validation_replays_with_only_referenced_http(
         )
         log_bytes = Path(runtime.pipeline_config.replay_log).read_bytes()
         assert b"isolated-test-key" not in log_bytes
-        published_card = card_path(runtime, commit_id)
-        published_contents = card_contents(published_card)
+        assert not list(runtime.pipeline_config.output_dir.iterdir())
 
     def no_network(*_args: Any, **_kwargs: Any) -> Any:
         pytest.fail("Replay/QueryResponse restoration attempted live HTTP")
@@ -268,10 +265,8 @@ def test_live_validation_replays_with_only_referenced_http(
     )
     live_database = fixtures.logical_database_snapshot(store.detour_db_path)
     mode = Path(runtime.pipeline_config.replay_log).stat().st_mode
-    published_card.unlink()
-    replay_store.rebuild_from_log(runtime, reset_confirmed=True)
+    rebuild_for_test(replay_store, runtime)
     with replay_store.read_only():
-        assert card_contents(published_card) == published_contents
         assert replay_store.query(runtime, QueryRequest()).model_dump_json() == snapshot
         assert Path(runtime.pipeline_config.replay_log).read_bytes() == log_bytes
         with pytest.raises(RuntimeError):
@@ -280,7 +275,7 @@ def test_live_validation_replays_with_only_referenced_http(
     assert fixtures.logical_database_snapshot(replay_store.detour_db_path) == live_database
 
 
-def test_readback_failure_leaves_durable_tail_for_recovery(
+def test_readback_failure_requires_explicit_new(
     runtime: AiAugmentBackendContext,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -303,7 +298,13 @@ def test_readback_failure_leaves_durable_tail_for_recovery(
         assert connection.execute(
             f"SELECT count(*) FROM {api.AUTHORITATIVE_RECORDS_TABLE}"
         ).fetchone() == (0,)
-    store.rebuild_from_log(runtime, reset_confirmed=True)
+    fresh = AiAugmentBackendStore.from_resources(
+        replay_log=store._replay_log, detour_db=store._detour_db, rollout_cas=store.rollout_cas,
+    )
+    with pytest.raises(ValueError, match="missing"):
+        with fresh.read_only():
+            pytest.fail("Resume must not apply the durable tail")
+    rebuild_for_test(store, runtime)
     with store.read_only():
         stored = store.http_record(draft.record_id)
         assert stored == draft and stored is not draft
@@ -335,7 +336,7 @@ def test_generic_interception_matches_method_headers_and_body() -> None:
         observed.append(record)
         return record
 
-    http = ModelHttpInterceptor(resolve)
+    http = ModelHttpInterceptor(record_get=resolve)
     binding = RequestsBinding()
     with model_http_context(http):
         assert binding.get("https://model.invalid/value").text == "GET"
@@ -370,15 +371,12 @@ def test_execute_results_are_detached_and_consumed(
             store.execute("CREATE TABLE forbidden_write (i INTEGER)")
 
 
-def card_path(runtime: AiAugmentBackendContext, commit_id: UUID) -> Path:
-    return runtime.pipeline_config.output_dir / api.CARD_ZIP_FILENAME_TEMPLATE.format(
-        prefix=api.CARD_ZIP_PREFIX, attempt_id=commit_id,
-    )
-
-
-def card_contents(path: Path) -> dict[str, bytes]:
-    with ZipFile(path) as archive:
-        return {name: archive.read(name) for name in archive.namelist()}
+def rebuild_for_test(store: AiAugmentBackendStore, runtime: AiAugmentBackendContext) -> None:
+    # Emulate the operator repinning the hash before explicitly accepting --new replay.
+    store._replay_log = store._replay_log.model_copy(update={
+        "hash": hashlib.sha256(Path(store._replay_log).read_bytes()).hexdigest(),
+    })
+    store.rebuild_from_log(runtime, reset_confirmed=True, confirm_replay=lambda: True)
 
 
 def no_network(*_args: Any, **_kwargs: Any) -> Any:
@@ -408,100 +406,35 @@ def test_validation_preview_does_not_publish_zip(
             with pytest.raises(OSError, match="before validation append"):
                 store.validate_commit(commit_id)
         assert fixtures.logical_database_snapshot(store.detour_db_path) == before_preview
-        assert not card_path(runtime, commit_id).exists()
+        assert not list(runtime.pipeline_config.output_dir.iterdir())
         assert store.query(runtime, QueryRequest()).attempts == ()
         result = store.validate_commit(commit_id)
         assert result.attempt.post_commit_validation.result == BackendLifecycle.ACCEPTED
-        assert card_path(runtime, commit_id).is_file()
+        assert not list(runtime.pipeline_config.output_dir.iterdir())
 
 
-@pytest.mark.parametrize("interruption", ("before_render", "partial_archive", "after_rename"))
-def test_zip_publication_failure_recovers_after_committed_validation(
-    runtime: AiAugmentBackendContext, monkeypatch: pytest.MonkeyPatch, interruption: str,
-) -> None:
-    store = runtime.pipeline_config.backend_store
-    payload = valid_submission_body()
-    monkeypatch.setattr(requests.Session, "send", no_network)
-    with pytest.raises(RuntimeError, match="Backend Store failed"), store.writable(runtime):
-        commit_id = commit(store, payload, payload)
-        destination = card_path(runtime, commit_id)
-        with monkeypatch.context() as patch:
-            if interruption == "after_rename":
-                original_replace = os.replace
-
-                def interrupted_replace(source: Any, target: Any) -> None:
-                    original_replace(source, target)
-                    if Path(target) == destination:
-                        raise OSError("injected publication interruption")
-                patch.setattr(os, "replace", interrupted_replace)
-            else:
-                def interrupted_write(
-                    _cards: Any, output: Path, name: str, **_kwargs: Any,
-                ) -> None:
-                    # Publication starts only after the durable /validate transaction committed.
-                    with store._reading():
-                        assert not store._transaction_active
-                        row = store.execute(
-                            f"SELECT {api.AUTHORITATIVE_ATTEMPT_PAYLOAD_COLUMN} "
-                            f"FROM {api.AUTHORITATIVE_ATTEMPTS_TABLE} "
-                            f"WHERE {api.AUTHORITATIVE_ATTEMPT_COMMIT_ID_COLUMN} = ?",
-                            [str(commit_id)],
-                        ).fetchone()
-                        assert row is not None and '"accepted"' in row[0]
-                    assert output != runtime.pipeline_config.output_dir
-                    if interruption == "partial_archive":
-                        (output / name).write_bytes(b"partial ZIP")
-                    raise OSError("injected publication interruption")
-                patch.setattr(api, "write_cards_zip", interrupted_write)
-            with pytest.raises(OSError, match="injected publication interruption"):
-                store.validate_commit(commit_id)
-        assert destination.exists() == (interruption == "after_rename")
-        with pytest.raises(RuntimeError, match="Backend Store failed"):
-            store.query(runtime, QueryRequest())
-        log_bytes = Path(runtime.pipeline_config.replay_log).read_bytes()
-    # No new log suffix: recovery must also inspect validations already applied to DB.
-    store.rebuild_from_log(runtime, reset_confirmed=True)
-    with store.read_only():
-        assert destination.is_file()
-        assert str(commit_id).encode() in b"".join(card_contents(destination).values())
-        assert Path(runtime.pipeline_config.replay_log).read_bytes() == log_bytes
-        snapshot = store.query(runtime, QueryRequest())
-        assert snapshot.attempts[-1].attempt.post_commit_validation.result == (
-            BackendLifecycle.ACCEPTED
-        )
-
-
-def test_card_recovery_is_historical_and_repeatable(
+def test_live_repeat_resume_and_explicit_replay_never_publish(
     runtime: AiAugmentBackendContext, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = runtime.pipeline_config.backend_store
     payload = valid_submission_body()
     monkeypatch.setattr(requests.Session, "send", no_network)
+    output = runtime.pipeline_config.output_dir
+    output.mkdir(parents=True, exist_ok=True)
+    old_archive = output / "existing.zip"
+    old_archive.write_bytes(b"leave existing archives alone")
+    before = old_archive.stat().st_mtime_ns
     with store.writable(runtime):
-        first_id = commit(store, payload, payload)
-        store.validate_commit(first_id)
-        first_path = card_path(runtime, first_id)
-        first_contents = card_contents(first_path)
-        second_id = commit(
-            store, payload, payload,
-            rollout_suffix=b'{"type":"event_msg","timestamp":"2026-09-03T19:20:00Z",'
-            b'"payload":{"type":"agent_message","message":"next submission"}}\n',
-        )
-        second = store.validate_commit(second_id)
-        assert second.attempt.post_commit_validation.result == BackendLifecycle.ACCEPTED
-        second_path = card_path(runtime, second_id)
-        second_contents = card_contents(second_path)
-        assert str(second_id).encode() not in b"".join(first_contents.values())
-        assert str(first_id).encode() in b"".join(second_contents.values())
-        first_path.unlink()
-        second_path.write_bytes(b"invalid existing ZIP")
-        log_bytes = Path(runtime.pipeline_config.replay_log).read_bytes()
-    store.rebuild_from_log(runtime, reset_confirmed=True)
+        commit_id = commit(store, payload, payload)
+        result = store.validate_commit(commit_id)
+        assert result.attempt.post_commit_validation.result == BackendLifecycle.ACCEPTED
+        assert store.validate_commit(commit_id) == result
+        snapshot = store.query(runtime, QueryRequest()).model_dump_json()
+    with store.writable(runtime):
+        assert store.query(runtime, QueryRequest()).model_dump_json() == snapshot
+    rebuild_for_test(store, runtime)
     with store.read_only():
-        assert card_contents(first_path) == first_contents
-        assert card_contents(second_path) == second_contents
-    recovered = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in (first_path, second_path)}
-    store.rebuild_from_log(runtime, reset_confirmed=True)
-    with store.read_only():
-        assert Path(runtime.pipeline_config.replay_log).read_bytes() == log_bytes
-    assert {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in recovered} == recovered
+        assert store.query(runtime, QueryRequest()).model_dump_json() == snapshot
+    assert list(output.iterdir()) == [old_archive]
+    assert old_archive.read_bytes() == b"leave existing archives alone"
+    assert old_archive.stat().st_mtime_ns == before

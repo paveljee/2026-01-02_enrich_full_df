@@ -72,14 +72,14 @@ class ReplayLogRegisteredResource(AiAugmentRegisteredResource):
                 # Closing also releases flock; the retained descriptor was never writable.
                 os.close(fd)
 
-    def _append(self, data: bytes, *, expected_offset: int) -> int:
+    @contextmanager
+    def _append_descriptor(self) -> Iterator[int]:
+        """The same zero-creation append window for preflight and actual writes."""
         with self._lock:
             if not self._append_allowed:
                 raise RuntimeError("Replay log is read-only")
             locked_fd = self._require_descriptor()
             locked = os.fstat(locked_fd)
-            if locked.st_size != expected_offset:
-                raise ValueError(Locale.REPLAY_PROJECTION_CONFLICT)
             writer: int | None = None
             try:
                 os.fchmod(locked_fd, READ_WRITE_PERMISSIONS)
@@ -90,20 +90,46 @@ class ReplayLogRegisteredResource(AiAugmentRegisteredResource):
                 opened = os.fstat(writer)
                 if (opened.st_dev, opened.st_ino) != (locked.st_dev, locked.st_ino):
                     raise ValueError(Locale.REPLAY_PROJECTION_CONFLICT)
-                written = 0
-                while written < len(data):
-                    count = os.write(writer, data[written:])
-                    if count <= 0:
-                        raise OSError(Locale.AUTHORITATIVE_LOG_APPEND_FAILED)
-                    written += count
-                os.fsync(writer)
+                yield writer
             finally:
                 try:
                     if writer is not None:
                         os.close(writer)
                 finally:
                     os.fchmod(locked_fd, READ_ONLY_PERMISSIONS)
-            return expected_offset + len(data)
+
+    def _preflight_append(self) -> None:
+        with self._append_descriptor():
+            pass
+
+    def _append(self, data: bytes, *, expected_offset: int) -> int:
+        with self._append_descriptor() as writer:
+            if os.fstat(writer).st_size != expected_offset:
+                raise ValueError(Locale.REPLAY_PROJECTION_CONFLICT)
+            written = 0
+            while written < len(data):
+                count = os.write(writer, data[written:])
+                if count <= 0:
+                    raise OSError(Locale.AUTHORITATIVE_LOG_APPEND_FAILED)
+                written += count
+            os.fsync(writer)
+        return expected_offset + len(data)
+
+    def _lines(self, *, offset: int = 0) -> Iterator[bytes]:
+        """Stream exact durable LF-delimited bytes, retaining any invalid final tail."""
+        pending = b""
+        while True:
+            with self._lock:
+                chunk = os.pread(self._require_descriptor(), READ_CHUNK_BYTES, offset)
+            if not chunk:
+                if pending:
+                    yield pending
+                return
+            offset += len(chunk)
+            parts = (pending + chunk).split(b"\n")
+            pending = parts.pop()
+            for part in parts:
+                yield part + b"\n"
 
     def _read(self, *, offset: int = 0) -> bytes:
         with self._lock:

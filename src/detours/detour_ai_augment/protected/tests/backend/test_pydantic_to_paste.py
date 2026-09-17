@@ -3,7 +3,6 @@ from __future__ import annotations
 import importlib
 import json
 import os
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +10,8 @@ import pytest
 import requests
 from dotenv import dotenv_values
 from pydantic import BaseModel, ValidationError
+
+from src.helpers.architecture import FrozenStrictModel
 
 pytest.importorskip("pydantic_extra_types")
 
@@ -130,15 +131,15 @@ FIELD_MODEL_UNAVAILABLE_CASES = (
 )
 
 
-@dataclass(frozen=True)
-class FakeResponse:
+class FakeResponse(FrozenStrictModel):
     status_code: int
     payload: dict[str, Any]
 
     def raise_for_status(self) -> None:
         return None
 
-    def json(self) -> dict[str, Any]:
+    def json(self) -> dict[str, Any]:  # type: ignore[override]
+        # requests.Response stub, not Pydantic's deprecated JSON-string API.
         return self.payload
 
 

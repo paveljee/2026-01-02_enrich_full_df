@@ -2,9 +2,16 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import csv
+import fcntl
+import hashlib
 import io
+import json
+import os
+import subprocess
+import sys
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import ExitStack, asynccontextmanager
 from copy import deepcopy
 from datetime import datetime, timezone
 from email.message import Message
@@ -32,11 +39,15 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.sub
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     AI_AUGMENT_COLUMNS,
+    BACKEND_STORE_CLOSED_CLEANLY,
     DOCX_COLUMNS,
+    EXCLUDED_NAMEKEY,
     KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL,
     KTP_AI_AUGMENT_FOOTNOTE_ARGUMENTS_COL,
     KTP_AI_AUGMENT_FOOTNOTES_COL,
     KTP_AI_AUGMENT_SESSION_METADATA_COL,
+    MAP_SUBSET_0_TO_BATCH_KEY,
+    REPLAY_LOG_KEY,
     AiAugmentCohort,
     AiAugmentIneligibilityCategory,
 )
@@ -93,13 +104,29 @@ from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_mod
 from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.query_request import (  # noqa: E501
     QueryRequest,
 )
+from src.helpers.architecture import FrozenStrictModel
 from src.helpers.data_models import HttpRequestLogRecord, InnerDict, NameKey
+from src.helpers.duckdb_utils import duckdb_quote_identifier as quote
 from src.helpers.procedures import DocxMatchProcedure, XlsxMatchProcedure
+from src.helpers.schema import (
+    CARD_PARTITION_TABLE,
+    DOCX_INNERDICT_TABLE,
+    PARQUET_INNERDICT_TABLE,
+    XLSX_INNERDICT_TABLE,
+)
 from src.helpers.vars import (
+    BATCH_LABEL,
     DRAW_LABEL,
+    KTP_FILENAME_COL,
     KTP_FIRST_NAME_COL,
+    KTP_FRAGMENT_COL,
+    KTP_FRAGMENT_TYPE_COL,
+    KTP_INNERDICT_JSONLINES_COL,
     KTP_LAST_NAME_COL,
     KTP_NAMEKEY_COL,
+    KTP_PARTITION_COL,
+    KTP_PARTITION_FLAG_SSN_COUNT_COL,
+    KTP_PARTITION_FLAG_XLSX_NON_EXACT_ANY_COL,
 )
 
 RunEvent = run_event_models.RunEvent
@@ -715,7 +742,8 @@ async def test_application_startup_publishes_services_only_after_ready(
     subject = controller()
     services = cast(control_ui._ApplicationServices, SimpleNamespace(controller=subject))
 
-    async def start() -> None:
+    async def start(*, publishing: bool = False) -> None:
+        assert not publishing
         assert control_ui.SERVICES is None
     monkeypatch.setattr(subject, "start", start)
     monkeypatch.setattr(control_ui, "SERVICES", None)
@@ -730,16 +758,20 @@ async def test_application_startup_does_not_publish_failed_services(
 ) -> None:
     subject = controller()
 
-    async def start() -> None:
+    async def start(*, publishing: bool = False) -> None:
         raise RuntimeError("failed storage")
     monkeypatch.setattr(subject, "start", start)
     monkeypatch.setattr(control_ui, "SERVICES", None)
     monkeypatch.setattr(
         control_ui, "create_services", lambda **kwargs: SimpleNamespace(controller=subject),
     )
-    with pytest.raises(RuntimeError, match="failed storage"):
-        await control_ui.application_startup()
+    shutdown = Mock()
+    monkeypatch.setattr(app, "shutdown", shutdown)
+    monkeypatch.setattr(control_ui, "APPLICATION_EXIT_CODE", 0)
+    await control_ui.application_startup()
     assert control_ui.SERVICES is None
+    assert control_ui.APPLICATION_EXIT_CODE == 1
+    shutdown.assert_called_once_with()
 
 
 @pytest.mark.anyio
@@ -1743,6 +1775,7 @@ async def test_dashboard_shutdown_stops_inflight_codex_and_backend(
     source = researcher()
     set_researchers(subject, (source,))
     run_id = await subject.queue(namekey=source.namekey)
+    subject.set_queue_processing(True)
     subject._worker_task = asyncio.create_task(subject._worker())
 
     await asyncio.wait_for(codex_waiting.wait(), timeout=1)
@@ -1957,6 +1990,8 @@ async def test_backend_supervisor_refuses_replacement_and_uses_stdin(
 
     assert len(calls) == 1
     assert first_process.returncode is None
+    assert subject.process is not None
+    subject.process.store_closed_cleanly.set()
     await subject.stop()
     await subject.start(namekey=SECOND_NAMEKEY)
 
@@ -2010,7 +2045,7 @@ async def test_backend_readiness_fails_immediately_after_pull_error(
         url = cast(Any, request).full_url
         requested_urls.append(url)
         return FakeResponse(
-            status.HTTP_200_OK
+            response_status=status.HTTP_200_OK
             if url == control_vars.BACKEND_OPENAPI_URL
             else status.HTTP_500_INTERNAL_SERVER_ERROR
         )
@@ -2544,7 +2579,7 @@ async def test_owned_query_and_codex_launch_share_rebuild_policy(
         async def output() -> AsyncIterator[bytes]:
             await stopped.wait()
             if clean:
-                yield (backend_server.BACKEND_STORE_CLOSED_CLEANLY + "\n").encode()
+                yield (BACKEND_STORE_CLOSED_CLEANLY + "\n").encode()
 
         terminate = process.terminate
 
@@ -2581,14 +2616,21 @@ async def test_owned_query_and_codex_launch_share_rebuild_policy(
     if not query_first:
         await subject.start(namekey=NAMEKEY)
         await subject.stop()
-    await query()
-    assert "--new" in calls[0]
-    for args in calls:
+    if not query_first and not clean:
+        with pytest.raises(RuntimeError, match="operator intervention"):
+            await query()
+    else:
+        await query()
+    full_calls = [args for args in calls if "--ipc-only" not in args]
+    assert "--new" in full_calls[0]
+    for args in full_calls:
         assert "--yes" in args
         assert backend_server.DANGER_NO_VERIFY_HASH_OPTION in args
-    for args in calls[1:]:
-        assert ("--resume" if clean else "--new") in args
-    assert sum("--ipc-only" in args for args in calls) == 1
+    for args in full_calls[1:]:
+        assert "--resume" in args
+    query_calls = [args for args in calls if "--ipc-only" in args]
+    assert len(query_calls) == 1
+    assert not set(query_calls[0]) & {"--new", "--resume", "--yes"}
     fresh = context_models.AiAugmentControlCentreContext.model_construct(
         pipeline_config=configured_pipeline_config(),
     )
@@ -2618,7 +2660,7 @@ async def test_external_query_does_not_initialize_dashboard_context(
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("failure", ("startup", "forced-stop", "crash"))
-async def test_failed_owned_cycle_rearms_new_despite_close_ack(
+async def test_failed_owned_cycle_blocks_retry_despite_close_ack(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str,
 ) -> None:
     context = context_models.AiAugmentControlCentreContext.model_construct(
@@ -2633,7 +2675,7 @@ async def test_failed_owned_cycle_rearms_new_despite_close_ack(
     process = FakeProcess()
 
     async def output() -> AsyncIterator[bytes]:
-        yield (backend_server.BACKEND_STORE_CLOSED_CLEANLY + "\n").encode()
+        yield (BACKEND_STORE_CLOSED_CLEANLY + "\n").encode()
 
     process.stdout = output()
     spawn = AsyncMock(return_value=process)
@@ -2651,5 +2693,567 @@ async def test_failed_owned_cycle_rearms_new_despite_close_ack(
             monkeypatch.setattr(process, "wait", AsyncMock(side_effect=[TimeoutError(), -9]))
         await subject.stop()
     assert "--resume" in spawn.call_args.args
-    assert context.begin_backend_start() == ("--new", "--yes")
+    with pytest.raises(RuntimeError, match="operator intervention"):
+        context.begin_backend_start()
     assert subject.process is None
+
+
+@pytest.mark.anyio
+async def test_queue_gate_holds_next_run_without_interrupting_active_run(
+    monkeypatch: pytest.MonkeyPatch, inline_controller_io: None,
+) -> None:
+    subject = controller()
+    started = asyncio.Event()
+    release = asyncio.Event()
+    processed: list[UUID] = []
+
+    async def process(run: run_event_models.Run) -> None:
+        processed.append(run.run_id)
+        started.set()
+        await release.wait()
+        subject._queue.task_done()
+
+    monkeypatch.setattr(subject, "_process_queued_run", process)
+    await subject.start()
+    try:
+        worker = subject._worker_task
+        first = await subject.queue(namekey=NAMEKEY)
+        await asyncio.sleep(0)
+        assert not subject.queue_processing and processed == []
+        subject.set_queue_processing(True)
+        subject.set_queue_processing(True)
+        assert subject._worker_task is worker
+        await asyncio.wait_for(started.wait(), 1)
+        subject.set_queue_processing(False)
+        second = await subject.queue(namekey=NAMEKEY)
+        release.set()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert processed == [first]
+        subject.set_queue_processing(True)
+        await asyncio.wait_for(subject._queue.join(), 1)
+        assert processed == [first, second]
+        # Stop while empty must gate even a later enqueue.
+        subject.set_queue_processing(False)
+        third = await subject.queue(namekey=NAMEKEY)
+        await asyncio.sleep(0)
+        assert processed == [first, second]
+        assert third in subject._storage.load_queue()
+    finally:
+        await subject.shutdown()
+
+
+@pytest.mark.anyio
+async def test_restored_queue_stays_stopped_and_publish_skips_remote_and_journal_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = controller()
+    queued_id = await original.queue(namekey=NAMEKEY)
+    active_id = await original.queue(namekey=NAMEKEY)
+    await original._append_run_event(RunEvent(
+        run_id=active_id, namekey=NAMEKEY, lifecycle=RunLifecycle.CODEX_EXITED,
+        occurred_at_unix_usec=control_ui.datetime_to_unix_usec(SESSION_TIMESTAMP),
+        codex_exit_code=0,
+    ))
+    original.set_queue_processing(True)
+    before = deepcopy(app.storage.general)
+    published = controller()
+    abandon = AsyncMock(side_effect=AssertionError("publish cannot cancel remote runs"))
+    monkeypatch.setattr(published._codex, "terminate_abandoned_run", abandon)
+    await published.start(publishing=True)
+    await published.shutdown()
+    assert not published.queue_processing and published._worker_task is None
+    assert app.storage.general == before
+    assert queued_id in published._storage.load_queue()
+    assert published._runs[active_id].run_outcome is None
+    abandon.assert_not_called()
+    restarted = controller()
+    await restarted.start()
+    try:
+        await asyncio.sleep(0)
+        assert not restarted.queue_processing
+        assert restarted._queue.qsize() == 1
+    finally:
+        await restarted.shutdown()
+
+
+@pytest.mark.anyio
+async def test_publish_completed_filters_current_display_and_uses_shared_renderer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    inline_controller_io: None,
+) -> None:
+    application = services()
+    subject = application.controller
+    configuration = application.configuration.pipeline_config
+    configuration.output_dir = tmp_path / "output"  # type: ignore[misc]
+    configuration.pandoc_reference_docx = tmp_path / "reference.docx"  # type: ignore[misc]
+    sources = tuple(researcher(NameKey(first_name=f"Person{i}", last_name="Test"))
+                    for i in range(3)) + (
+        researcher(NameKey(first_name="Person3", last_name="Test"),
+                   cohort=AiAugmentCohort.INELIGIBLE,
+                   ineligibility_category=next(iter(AiAugmentIneligibilityCategory))),
+    )
+    set_researchers(subject, sources)
+    for source in sources:
+        run = queued_run(namekey=source.namekey)
+        run.lifecycle = RunLifecycle.COMPLETED
+        run.run_outcome = RunLifecycle.COMPLETED
+        subject._runs[run.run_id] = run
+    # A queued current run excludes a researcher even with a completed predecessor.
+    pending = queued_run(namekey=sources[1].namekey)
+    subject._runs[pending.run_id] = pending
+    monkeypatch.setattr(subject, "_render_card",
+                        lambda source: "" if source is sources[2] else "shared card")
+    calls: list[tuple[str, Path]] = []
+
+    def render(markdown: str, reference: Path) -> bytes:
+        calls.append((markdown, reference))
+        return b"rendered docx"
+
+    monkeypatch.setattr(control_ui, "render_docx_bytes", render)
+    before = deepcopy(app.storage.general)
+    await control_ui.publish_completed(application)
+    card = await subject.researcher_card(namekey=sources[0].namekey)
+    assert list(configuration.output_dir.iterdir()) == [
+        configuration.output_dir / card.docx_filename,
+    ]
+    assert (configuration.output_dir / card.docx_filename).read_bytes() == b"rendered docx"
+    assert calls == [("shared card", configuration.pandoc_reference_docx)]
+    assert app.storage.general == before
+    assert not subject.queue_processing
+    assert "4 researchers; 2 eligible and completed; 1 DOCX" in capsys.readouterr().out
+
+
+@pytest.mark.anyio
+async def test_probe_and_docx_failures_emit_operator_details(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    inline_controller_io: None,
+) -> None:
+    subject = controller()
+    await subject.probe_all()
+    output = capsys.readouterr().out
+    for action in ("IPC OPTIONS /query", "Backend API GET /openapi.json", "Lima/SSH connect",
+                   "Codex login status"):
+        assert f"Probing {action}" in output and f"Probe {action}:" in output
+    page = control_ui._ControlCentrePage(
+        controller=subject, query_ipc=AsyncMock(), reference_docx=tmp_path / "reference.docx",
+    )
+    page._displayed_card = control_ui._ResearcherCardView(
+        researcher=researcher(), card_markdown="card",
+    )
+    monkeypatch.setattr(control_ui, "render_docx_bytes", Mock(side_effect=OSError("pandoc detail")))
+    monkeypatch.setattr(ui, "notify", Mock())
+    await page.download_displayed_card()
+    output = capsys.readouterr().out
+    assert "Rendering DOCX download:" in output
+    assert "DOCX download failed:" in output and "pandoc detail" in output
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("fail_second", (False, True))
+async def test_publish_one_shot_shutdown_noop_or_first_error_keeps_written_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fail_second: bool,
+    capsys: pytest.CaptureFixture[str], inline_controller_io: None,
+) -> None:
+    application = services()
+    subject = application.controller
+    config = application.configuration.pipeline_config
+    config.output_dir = tmp_path / "published"  # type: ignore[misc]
+    config.pandoc_reference_docx = tmp_path / "reference.docx"  # type: ignore[misc]
+    if fail_second:
+        sources = (researcher(), researcher(SECOND_NAMEKEY))
+        set_researchers(subject, sources)
+        for source in sources:
+            run = queued_run(namekey=source.namekey)
+            run.lifecycle = RunLifecycle.COMPLETED
+            run.run_outcome = RunLifecycle.COMPLETED
+            subject._runs[run.run_id] = run
+    render = Mock(side_effect=[b"first document", OSError("second render failed")])
+    monkeypatch.setattr(control_ui, "render_docx_bytes", render)
+    shutdown = Mock()
+    monkeypatch.setattr(app, "shutdown", shutdown)
+    monkeypatch.setattr(control_ui, "SERVICES", application)
+    monkeypatch.setattr(control_ui, "APPLICATION_EXIT_CODE", 0)
+    before = deepcopy(app.storage.general)
+    await control_ui.publish_completed_and_shutdown()
+    shutdown.assert_called_once_with()
+    assert control_ui.APPLICATION_EXIT_CODE == int(fail_second)
+    assert app.storage.general == before
+    if fail_second:
+        paths = list(config.output_dir.iterdir())
+        assert len(paths) == 1 and paths[0].read_bytes() == b"first document"
+        assert "second render failed" in capsys.readouterr().out
+    else:
+        assert not config.output_dir.exists()
+        render.assert_not_called()
+        assert "Publishing finished: 0 DOCX files" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("publish", (False, True))
+@pytest.mark.parametrize("failure", ("config", "storage"))
+def test_startup_failure_exits_through_framework_shutdown(publish: bool, failure: str) -> None:
+    """Exercise NiceGUI's real background dispatch/shutdown flag without binding sockets."""
+    script = '''
+import asyncio
+import sys
+from types import SimpleNamespace
+from unittest.mock import patch
+from nicegui import app, core, server, ui
+from src.detours.detour_ai_augment.src.control_centre.dashboard import ui as dashboard
+
+async def start(**kwargs):
+    raise ValueError("invalid persisted storage")
+
+async def stop():
+    print("CONTROLLER_CLEANED", flush=True)
+
+def create(**kwargs):
+    if sys.argv[1] == "config":
+        raise ValueError("invalid configuration hash")
+    return SimpleNamespace(controller=SimpleNamespace(start=start, shutdown=stop))
+
+def run(**kwargs):
+    # Substitute only the socket-serving loop. Framework callback dispatch, shutdown
+    # signalling, shutdown hooks and the application's exit code are real.
+    async def lifecycle():
+        core.loop = asyncio.get_running_loop()
+        server.Server.instance = SimpleNamespace(
+            should_exit=False, config=SimpleNamespace(should_reload=False),
+        )
+        app.config.reload = False
+        app.safe_invoke(dashboard.application_startup)
+        async with asyncio.timeout(2):
+            while not server.Server.instance.should_exit:
+                await asyncio.sleep(0)
+        print("FRAMEWORK_SHUTDOWN_REQUESTED", flush=True)
+        await app.stop()
+        print("FRAMEWORK_STOPPED", flush=True)
+    asyncio.run(lifecycle())
+
+with patch.object(ui, "run", run), patch.object(dashboard, "create_services", create):
+    raise SystemExit(dashboard.main(sys.argv[2:]))
+'''
+    command = [sys.executable, "-c", script, failure]
+    if publish:
+        command += ["publish", "completed"]
+    command += ["--config", "unused.json"]
+    result = subprocess.run(command, capture_output=True, text=True, timeout=15, check=False)
+    assert result.returncode == 1, result.stderr
+    assert "FRAMEWORK_SHUTDOWN_REQUESTED" in result.stdout
+    assert "FRAMEWORK_STOPPED" in result.stdout
+    if failure == "storage":
+        assert "CONTROLLER_CLEANED" in result.stdout
+
+
+ROOT = Path(__file__).resolve().parents[5]
+MODES = ("ipc", "new", "resume", "continue")
+STARTUP_NAMEKEY = NameKey(first_name="Case 000", last_name="Startup")
+
+# Exercise production initialization boundaries, deliberately not the serving lifespan.
+# No functions, transports, configuration objects or global constants are substituted.
+STARTUP = """
+import sys
+from src.detours.detour_ai_augment.src.backend import api, server
+
+args = server.parse_args(sys.argv[1:])
+confirmed = False if args.ipc_only else server.confirm_startup(args)
+api._acquire_backend_process_lock()
+try:
+    runtime = server.configure_runtime(
+        args.config, require_namekey=not args.ipc_only,
+        verify_hash_on_init=not args.danger_no_verify_hash,
+    )
+    store = runtime.pipeline_config.backend_store
+    boundary = (
+        store.read_only() if args.ipc_only else server.backend_store_lifecycle(
+            runtime, new=args.new, confirmed=confirmed, yes=args.yes,
+        )
+    )
+    with boundary:
+        rows = store.execute("SELECT count(*) FROM detour_http_records").fetchone()
+        print("STARTUP_READY", rows[0], len(runtime.ai_augment_singular_outerdicts))
+finally:
+    api._release_backend_process_lock()
+"""
+
+
+class StartupFiles(FrozenStrictModel):
+    config: Path
+    source: Path
+    replay: Path
+    detour: Path
+    process_temp: Path
+
+    def environment(self, namekey: str | None = STARTUP_NAMEKEY.to_json_key()) -> dict[str, str]:
+        environment = dict(os.environ, TMPDIR=str(self.process_temp))
+        environment.pop("FASTAPI_DETOUR_NAMEKEY", None)
+        if namekey is not None:
+            environment["FASTAPI_DETOUR_NAMEKEY"] = namekey
+        return environment
+
+    def repin(self) -> None:
+        config = json.loads(self.config.read_text())
+        config["files_config"][REPLAY_LOG_KEY]["sha256"] = hashlib.sha256(
+            self.replay.read_bytes()
+        ).hexdigest()
+        self.config.write_text(json.dumps(config))
+
+
+def source_population(path: Path, release_map: Path) -> None:
+    """Synthetic source tables satisfy the real 307-person population invariants."""
+    groups = (
+        (196, "subset 1", 1, False, 0),
+        (78, "unreleased", 4, False, 1),
+        (1, "subset 1", 1, False, 0),  # the explicitly excluded duplicate identity
+        (3, "subset 8", 1, False, 0),
+        (7, "unreleased", 2, False, 0),
+        (6, "unreleased", 4, True, 1),
+        (16, "unreleased", 4, False, 2),
+    )
+    with duckdb.connect(str(path)) as connection, release_map.open("w") as mapping:
+        writer = csv.writer(mapping)
+        writer.writerow((DRAW_LABEL, BATCH_LABEL))
+        for table in (XLSX_INNERDICT_TABLE, PARQUET_INNERDICT_TABLE, DOCX_INNERDICT_TABLE):
+            connection.execute(
+                f"CREATE TABLE {quote(table)} ("
+                f"{quote(KTP_NAMEKEY_COL)} VARCHAR, {quote(KTP_INNERDICT_JSONLINES_COL)} VARCHAR)"
+            )
+        connection.execute(
+            f"CREATE TABLE {quote(CARD_PARTITION_TABLE)} ("
+            f"{quote(KTP_NAMEKEY_COL)} VARCHAR, {quote(KTP_PARTITION_COL)} INTEGER, "
+            f"{quote(KTP_PARTITION_FLAG_XLSX_NON_EXACT_ANY_COL)} BOOLEAN, "
+            f"{quote(KTP_PARTITION_FLAG_SSN_COUNT_COL)} INTEGER)"
+        )
+        source_rows: list[tuple[str, str]] = []
+        classifications: list[tuple[str, int, bool, int]] = []
+        for count, batch, partition, nonexact, ssn_count in groups:
+            for _ in range(count):
+                index = len(source_rows)
+                namekey = (
+                    NameKey.from_json_key(EXCLUDED_NAMEKEY) if index == 274
+                    else NameKey(first_name=f"Case {index:03}", last_name="Startup")
+                )
+                draws = (str(index), f"extra-{index}") if index < 5 else (str(index),)
+                rows = []
+                for draw in draws:
+                    writer.writerow((draw, batch))
+                    rows.append(json.dumps({
+                        KTP_NAMEKEY_COL: namekey.to_json_key(),
+                        KTP_FIRST_NAME_COL: namekey.first_name,
+                        KTP_LAST_NAME_COL: namekey.last_name,
+                        KTP_FILENAME_COL: "startup.xlsx",
+                        KTP_FRAGMENT_COL: index + 1,
+                        KTP_FRAGMENT_TYPE_COL: "csv_row",
+                        DRAW_LABEL: draw,
+                    }))
+                source_rows.append((namekey.to_json_key(), "\n".join(rows)))
+                classifications.append((namekey.to_json_key(), partition, nonexact, ssn_count))
+        connection.executemany(f"INSERT INTO {quote(XLSX_INNERDICT_TABLE)} VALUES (?, ?)",
+                               source_rows)
+        connection.executemany(f"INSERT INTO {quote(CARD_PARTITION_TABLE)} VALUES (?, ?, ?, ?)",
+                               classifications)
+
+
+@pytest.fixture
+def startup_files(tmp_path: Path) -> StartupFiles:
+    source = tmp_path / "source.duckdb"
+    release_map = tmp_path / "release-map.csv"
+    source_population(source, release_map)
+    replay = tmp_path / "replay.jsonl"
+    replay.write_bytes(b"")
+    config: dict[str, Any] = json.loads((ROOT / "config_ai_augment.json").read_text())
+    config.update(db_file=str(source), output_dir=str(tmp_path / "output"),
+                  state_file=str(tmp_path / "state.json"), rollout_cas_dir=str(tmp_path / "cas"))
+    for key, path in ((MAP_SUBSET_0_TO_BATCH_KEY, release_map), (REPLAY_LOG_KEY, replay)):
+        config["files_config"][key] = {
+            "path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "desc": "isolated startup fixture",
+        }
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(config))
+    runtime = backend_server.configure_runtime(config_path, require_namekey=False)
+    store = runtime.pipeline_config.backend_store
+    store.rebuild_from_log(runtime, reset_confirmed=True)
+    source.chmod(0o400)
+    process_temp = tmp_path / "process-temp"
+    process_temp.mkdir()
+    return StartupFiles(config=config_path, source=source, replay=replay,
+                        detour=store.detour_db_path, process_temp=process_temp)
+
+
+def argv(mode: str, config: Path, *, yes: bool = True) -> list[str]:
+    return ["--config", str(config), "--ipc-only" if mode == "ipc" else f"--{mode}",
+            *(["--yes"] if yes else [])]
+
+
+def start(files: StartupFiles, mode: str, *, stdin: str = "", yes: bool = True,
+          namekey: str | None = STARTUP_NAMEKEY.to_json_key()) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, "-c", STARTUP, *argv(mode, files.config, yes=yes)],
+        cwd=ROOT, env=files.environment(namekey), input=stdin,
+        capture_output=True, text=True, timeout=20, check=False,
+    )
+
+
+def record_line() -> bytes:
+    return (HttpRequestLogRecord(
+        schema_version="1.1", record_id=uuid7(), method="GET", scheme="https",
+        host="startup.invalid", port=None, path="/fixture", query="", request_headers={},
+        request_body=None, response_code=200, response_headers={}, response_body="{}",
+        received_at_unix_usec=1, ready_to_respond_at_unix_usec=2, duration_usec=1,
+    ).model_dump_json() + "\n").encode()
+
+
+class TestBackendStartupConditions:
+    """Real initialization only; do not inherit the surrounding UI tests' mocks."""
+
+    @pytest.fixture(autouse=True)
+    def isolated_lima_configuration(self) -> None:
+        """No Lima configuration replacement for these local startup checks."""
+
+    @pytest.fixture(autouse=True)
+    def isolated_general_storage(self) -> None:
+        """These checks do not access NiceGUI storage."""
+
+    @pytest.fixture(autouse=True)
+    def inline_controller_io(self) -> None:
+        """Keep production dispatch untouched; these checks exercise no controller."""
+
+    @pytest.mark.parametrize("mode", MODES)
+    @pytest.mark.parametrize("condition", (
+        "ready", "missing_config", "malformed_config", "invalid_config", "missing_source",
+        "corrupt_source", "missing_replay", "hash_mismatch", "missing_db", "corrupt_db",
+        "missing_anchor", "unprojected_record", "empty_object_lf", "empty_object_no_lf",
+        "missing_namekey", "unknown_namekey", "ineligible_namekey", "lock_held",
+    ))
+    @staticmethod
+    def test_startup_conditions(startup_files: StartupFiles, mode: str, condition: str) -> None:
+        files = startup_files
+        namekey: str | None = STARTUP_NAMEKEY.to_json_key()
+        success = condition == "ready"
+        if condition == "missing_config":
+            files.config.unlink()
+        elif condition in {"malformed_config", "invalid_config"}:
+            files.config.write_text("{" if condition == "malformed_config" else "{}")
+        elif condition == "missing_source":
+            files.source.unlink()
+        elif condition == "corrupt_source":
+            files.source.chmod(0o600)
+            files.source.write_bytes(b"not DuckDB")
+        elif condition == "missing_replay":
+            files.replay.unlink()
+        elif condition == "missing_db":
+            files.detour.unlink()
+            success = mode == "new"
+        elif condition == "corrupt_db":
+            files.detour.chmod(0o600)
+            files.detour.write_bytes(b"not DuckDB")
+            success = mode == "new"
+        elif condition == "missing_anchor":
+            files.detour.chmod(0o600)
+            with duckdb.connect(str(files.detour)) as connection:
+                connection.execute("COMMENT ON TABLE detour_http_records IS NULL")
+            success = mode == "new"
+        elif condition in {"hash_mismatch", "unprojected_record", "empty_object_lf",
+                           "empty_object_no_lf"}:
+            files.replay.chmod(0o600)
+            payload = {"empty_object_lf": b"{}\n", "empty_object_no_lf": b"{}"}.get(
+                condition, record_line(),
+            )
+            files.replay.write_bytes(payload)
+            if condition != "hash_mismatch":
+                files.repin()
+            success = condition == "unprojected_record" and mode == "new"
+        elif condition in {"missing_namekey", "unknown_namekey", "ineligible_namekey"}:
+            namekey = {
+                "missing_namekey": None,
+                "unknown_namekey": NameKey(first_name="Absent", last_name="Startup").to_json_key(),
+                "ineligible_namekey": EXCLUDED_NAMEKEY,
+            }[condition]
+            success = mode == "ipc"
+
+        before = {path: path.read_bytes() if path.exists() else None
+                  for path in (files.source, files.replay, files.detour)}
+        with ExitStack() as stack:
+            if condition == "lock_held":
+                lock = stack.enter_context(
+                    (files.process_temp / "ktp-hcr-detour-ai-augment-backend.lock").open("wb")
+                )
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            result = start(files, mode, namekey=namekey)
+        details = result.stdout + result.stderr
+        assert (result.returncode == 0) is success, details
+        assert ("STARTUP_READY" in result.stdout) is success, details
+        if success:
+            expected_rows = 1 if condition == "unprojected_record" else 0
+            assert f"STARTUP_READY {expected_rows} 307" in result.stdout
+        for path in (files.source, files.replay):
+            assert (path.read_bytes() if path.exists() else None) == before[path]
+        # Only explicit new can change/reconstruct DB contents, even when startup fails.
+        if mode != "new":
+            after_db = files.detour.read_bytes() if files.detour.exists() else None
+            assert after_db == before[files.detour]
+
+    @pytest.mark.parametrize("mode", ("new", "resume", "continue"))
+    @pytest.mark.parametrize("stdin,yes,success", (
+        ("", False, False), ("\n", False, False), ("n\n", False, False),
+        ("y\n", False, True), ("", True, True),
+    ))
+    @staticmethod
+    def test_real_startup_confirmation(
+        startup_files: StartupFiles, mode: str, stdin: str, yes: bool, success: bool,
+    ) -> None:
+        result = start(startup_files, mode, stdin=stdin, yes=yes)
+        assert (result.returncode == 0) is success, result.stdout + result.stderr
+        assert ("[y/N]" not in result.stdout) is yes
+        assert ("STARTUP_READY" in result.stdout) is success
+
+    @pytest.mark.parametrize("stdin,yes,success", (
+        ("y\n", False, False), ("y\nn\n", False, False),
+        ("y\ny\n", False, True), ("", True, True),
+    ))
+    @staticmethod
+    def test_real_second_replay_confirmation_preserves_old_db_on_refusal(
+        startup_files: StartupFiles, stdin: str, yes: bool, success: bool,
+    ) -> None:
+        files = startup_files
+        files.replay.chmod(0o600)
+        files.replay.write_bytes(record_line())
+        files.repin()
+        old_db = files.detour.read_bytes()
+        log = files.replay.read_bytes()
+        result = start(files, "new", stdin=stdin, yes=yes)
+        assert (result.returncode == 0) is success, result.stdout + result.stderr
+        assert ("Registered a nonempty replay log" in result.stdout) is not yes
+        assert files.replay.read_bytes() == log
+        if not success:
+            assert files.detour.read_bytes() == old_db
+
+    @pytest.mark.parametrize("ipc_only", (False, True))
+    @pytest.mark.parametrize("flags,valid", (
+        ((), False), (("--new",), True), (("--resume",), True), (("--continue",), True),
+        (("--new", "--resume"), False), (("--new", "--continue"), False),
+        (("--resume", "--continue"), True), (("--new", "--resume", "--continue"), False),
+    ))
+    @staticmethod
+    def test_real_mode_parser(ipc_only: bool, flags: tuple[str, ...], valid: bool) -> None:
+        arguments = ["--config", "unused.json", *(["--ipc-only"] if ipc_only else []), *flags]
+        if not ipc_only and not valid:
+            with pytest.raises(SystemExit) as error:
+                backend_server.parse_args(arguments)
+            assert error.value.code == 2
+            return
+        parsed = backend_server.parse_args(arguments)
+        assert parsed.ipc_only is ipc_only
+        if ipc_only:
+            assert not parsed.new and not parsed.resume
+        else:
+            assert parsed.new is ("--new" in flags)
+            assert parsed.resume is ("--new" not in flags)
+
+    @pytest.mark.parametrize("mode", MODES)
+    @staticmethod
+    def test_config_argument_is_required(mode: str) -> None:
+        with pytest.raises(SystemExit) as error:
+            backend_server.parse_args(["--ipc-only" if mode == "ipc" else f"--{mode}"])
+        assert error.value.code == 2

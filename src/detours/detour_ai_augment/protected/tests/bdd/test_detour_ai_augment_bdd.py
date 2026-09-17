@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pydantic import BaseModel, ConfigDict
+
 import asyncio
 import inspect
 import json
@@ -9,7 +11,6 @@ import sys
 import tempfile
 import time
 from collections.abc import Iterator
-from dataclasses import dataclass
 from io import StringIO
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
@@ -81,8 +82,9 @@ PREAMBLE_PHRASES = (
 )
 
 
-@dataclass(slots=True)
-class LifecycleState:
+class LifecycleState(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, validate_assignment=True)
+
     lifecycle_text: str = ""
     lifecycle_items: tuple[str, ...] = ()
     provisioning_files: dict[str, str] | None = None

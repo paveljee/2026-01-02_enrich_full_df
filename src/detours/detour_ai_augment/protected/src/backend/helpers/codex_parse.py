@@ -4,7 +4,8 @@ import json
 import re
 import string
 from collections.abc import Mapping
-from dataclasses import dataclass
+
+from src.helpers.architecture import FrozenStrictModel
 
 LINE_BREAK = re.compile(r"\r\n|[\n\r\v\f\x1c-\x1e\x85\u2028\u2029]")
 INLINE_CITATION_SEPARATOR = "\u2020"
@@ -17,8 +18,7 @@ MARKDOWN_ESCAPE_TRANSLATION = str.maketrans({
 })
 
 
-@dataclass(frozen=True)
-class CiteSection:
+class CiteSection(FrozenStrictModel):
     ref_id: str
     text: str
 

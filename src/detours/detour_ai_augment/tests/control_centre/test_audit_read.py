@@ -1,14 +1,24 @@
 from __future__ import annotations
 
+import ast
 import io
 import json
 import os
 import pwd
+import shutil
 import subprocess
+import sys
+import threading
 from pathlib import Path
+from typing import Any, cast
+from unittest.mock import Mock
 
 import pytest
+from pydantic import BaseModel, ConfigDict, field_validator
 
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_context import (
+    AiAugmentBackendContext,
+)
 from src.detours.detour_ai_augment.src.control_centre.appendwatch import audit_read
 
 SESSION_ID = "019fa457-aac5-7652-8669-9d571206e7cb"
@@ -154,3 +164,75 @@ def test_runtime_provisioning_preserves_reverse_sshfs_ownership(
 
     for script in (provision_path, deploy_path):
         subprocess.run(["bash", "-n", str(script)], check=True)
+
+
+ROOT = Path(__file__).resolve().parents[5]
+DETOUR = ROOT / "src/detours/detour_ai_augment"
+
+
+def test_deployed_guest_imports_unchanged_shared_model_outside_repository(tmp_path: Path) -> None:
+    libexec = tmp_path / "libexec"
+    helpers = libexec / "src/helpers"
+    helpers.mkdir(parents=True)
+    shared = ROOT / "src/helpers/architecture.py"
+    shutil.copyfile(shared, helpers / "architecture.py")
+    audit = DETOUR / "src/control_centre/appendwatch/audit_read.py"
+    watcher = DETOUR / "protected/src/control_centre/appendwatch/appendwatch.py"
+    shutil.copyfile(audit, libexec / "aivm-audit-read")
+    deployed_watcher = tmp_path / "appendwatch.py"
+    shutil.copyfile(watcher, deployed_watcher)
+    for source in (shared, audit, watcher):
+        ast.parse(source.read_text(), feature_version=(3, 12))
+    script = '''
+import runpy
+from pathlib import Path
+from src.helpers.architecture import FrozenStrictModel
+audit = runpy.run_path("libexec/aivm-audit-read", run_name="deployed_audit")
+assert issubclass(audit["AuditReadConfiguration"], FrozenStrictModel)
+model = audit["AuditReadConfiguration"](
+    runtime_user="ai", audit_user="audit", sessions_root=Path("/sessions"),
+    appendwatch_report=Path("/report"),
+)
+assert model.runtime_user == "ai"
+watch = runpy.run_path("appendwatch.py", run_name="deployed_watch")
+record = watch["Record"](dev=1, ino=2, size=0, mtime_ns=0, ctime_ns=0, digest=b"a")
+record.size = 2
+copied = record.model_copy(update={"exists": False})
+assert record.exists and not copied.exists and copied.size == 2
+print("DEPLOYED_MODELS_OK")
+'''
+    environment = dict(os.environ, PYTHONPATH=str(libexec), PYTHONDONTWRITEBYTECODE="1")
+    result = subprocess.run([sys.executable, "-c", script], cwd=tmp_path, env=environment,
+                            capture_output=True, text=True, timeout=10, check=False)
+    assert result.returncode == 0, result.stderr
+    assert "DEPLOYED_MODELS_OK" in result.stdout
+    assert (helpers / "architecture.py").read_bytes() == shared.read_bytes()
+
+
+def isolated_class(path: Path, name: str, namespace: dict[str, Any]) -> type[Any]:
+    """Do not import/collect the operator or paused BDD suite to test a DTO."""
+    node = next(node for node in ast.parse(path.read_text()).body
+                if isinstance(node, ast.ClassDef) and node.name == name)
+    exec(compile(ast.Module(body=[node], type_ignores=[]), str(path), "exec"), namespace)
+    return cast(type[Any], namespace[name])
+
+
+def test_operator_output_buffer_identity_and_paused_bdd_mutability() -> None:
+    namespace: dict[str, Any] = {
+        "__name__": __name__, "BaseModel": BaseModel, "ConfigDict": ConfigDict,
+        "field_validator": field_validator, "threading": threading, "subprocess": subprocess,
+        "Any": Any, "AiAugmentBackendContext": AiAugmentBackendContext,
+    }
+    dashboard = isolated_class(DETOUR / "protected/tests/operator/test_operator_e2e.py",
+                               "DashboardProcess", namespace)
+    output: list[str] = []
+    thread = threading.Thread()
+    process = Mock(spec=subprocess.Popen)
+    handle = dashboard(process=process, output=output, output_thread=thread)
+    output.append("ready")
+    assert handle.output is output and handle.output == ["ready"]
+    assert handle.process is process and handle.output_thread is thread
+    state = isolated_class(DETOUR / "protected/tests/bdd/test_detour_ai_augment_bdd.py",
+                           "LifecycleState", namespace)()
+    state.captured_contour_passed = True
+    assert state.captured_contour_passed

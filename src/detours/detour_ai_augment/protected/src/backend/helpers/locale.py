@@ -63,7 +63,6 @@ class Locale:
     APPENDWATCH_READABLE_LOG: Final = "proved APPENDWATCH_REPORT readable: %s"
     CODEX_SESSIONS_READABLE_LOG: Final = "proved Codex sessions directory readable: %s"
     CODEX_SESSIONS_UNREADABLE: Final = "Codex sessions directory is not readable"
-    CONTROL_PARENT_PID_INVALID: Final = "Control Centre parent PID is invalid"
     WEB_RESULT_REF_ID_NONBLANK: Final = "web result ref_id must be non-blank"
 
     SETTING_REQUIRED_TEMPLATE: Final = "{setting} is required"
@@ -124,11 +123,8 @@ class Locale:
         "source population contracted-draw count is invalid"
     )
     CONFIG_INVALID_TEMPLATE: Final = "--config is invalid or unreadable: {config_path}"
-    OUTPUT_FORMAT_INVALID: Final = "config output_format must be txt or docx"
     SOURCE_DUCKDB_UNREADABLE_TEMPLATE: Final = "configured source DuckDB is not readable: {db_file}"
-    DOCX_REFERENCE_UNREADABLE: Final = (
-        "configured DOCX output requires a readable pandoc_reference_docx"
-    )
+
     TIMEZONE_INVALID_TEMPLATE: Final = "configured timezone is invalid: {timezone}"
     SOURCE_DUCKDB_VALIDATION_FAILED: Final = "configured source DuckDB could not be validated"
     API_CONFIG_REQUIRED_TEMPLATE: Final = (

@@ -373,7 +373,7 @@ def test_atomic_replacement_is_compromised(
 
 
 def test_first_compromise_reason_is_preserved(aw: ModuleType) -> None:
-    rec = aw.Record(1, 2, 3, 4, 5, b"digest")
+    rec = aw.Record(dev=1, ino=2, size=3, mtime_ns=4, ctime_ns=5, digest=b"digest")
     watcher = object.__new__(aw.AppendWatch)
     assert watcher.compromise(rec, "first") is True
     assert watcher.compromise(rec, "second") is False

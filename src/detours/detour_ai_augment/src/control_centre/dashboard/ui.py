@@ -35,6 +35,7 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.pyd
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     AI_AUGMENT_COLUMN_PREFIX,
+    BACKEND_STORE_CLOSED_CLEANLY,
     DOCX_TO_AI_AUGMENT_COLUMNS,
     KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL,
     KTP_AI_AUGMENT_FOOTNOTE_ARGUMENTS_COL,
@@ -112,7 +113,6 @@ from ...backend.api import (
     APPENDWATCH_REPORT_ENV_NAME,
     CARD_EXCLUDED_COLUMNS,
     CODEX_SESSIONS_ROOT_ENV_NAME,
-    CONTROL_PARENT_PID_ENV_NAME,
     HTTP_GET_METHOD,
     HTTP_POST_METHOD,
     NAMEKEY_ENV_NAME,
@@ -139,7 +139,6 @@ from ...backend.helpers.data_models.run_outcome_response import (
     RunOutcomeResponseBody,
 )
 from ...backend.server import (
-    BACKEND_STORE_CLOSED_CLEANLY,
     CONFIG_OPTION,
     DANGER_NO_VERIFY_HASH_OPTION,
 )
@@ -870,6 +869,21 @@ class _ResearcherCardView(FrozenStrictModel):
     researcher: _Researcher
     card_markdown: str
 
+    @property
+    def download_available(self) -> bool:
+        return bool(self.card_markdown)
+
+    @property
+    def docx_filename(self) -> str:
+        return card_filename(
+            draw_label=self.researcher.draw_number,
+            first_name=self.researcher.namekey.first_name,
+            last_name=self.researcher.namekey.last_name,
+        ) + ".docx"
+
+    def render_docx(self, reference_docx: Path) -> bytes:
+        return render_docx_bytes(self.card_markdown, reference_docx)
+
 
 class _DashboardCounts(FrozenStrictModel):
     total: int
@@ -1007,8 +1021,10 @@ class _BackendDatabaseClient:
             connection.request(HTTP_OPTIONS_METHOD, DASHBOARD_QUERY_PATH)
             response = connection.getresponse()
             response.read()
+            emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, f"IPC probe HTTP status: {response.status}")
             return response.status == status.HTTP_200_OK
-        except OSError, http.client.HTTPException:
+        except (OSError, http.client.HTTPException) as exc:
+            emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, f"IPC probe error: {exc!r}")
             return False
         finally:
             connection.close()
@@ -1159,8 +1175,11 @@ class _BackendSupervisor:
                 request,
                 timeout=BACKEND_AVAILABILITY_TIMEOUT_SECONDS,
             ) as response:
+                emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX,
+                         f"Backend API probe HTTP status: {response.status}")
                 return int(response.status) == status.HTTP_200_OK
-        except OSError, urllib_error.URLError, urllib_error.HTTPError:
+        except (OSError, urllib_error.URLError, urllib_error.HTTPError) as exc:
+            emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, f"Backend API probe error: {exc!r}")
             return False
 
     async def start(self, *, namekey: NameKey) -> None:
@@ -1175,8 +1194,11 @@ class _BackendSupervisor:
             raise RuntimeError(Locale.BACKEND_RESOURCES_NOT_VERIFIED)
         if self._process is not None:
             raise RuntimeError(Locale.BACKEND_ALREADY_OWNED)
-        arguments = self._context.begin_backend_start()
+        arguments = (() if ipc_only else self._context.begin_backend_start())
         self._status = _BackendStatus.STARTING
+        emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX,
+                 f"Starting owned Backend: ipc_only={ipc_only}, mode={arguments}, "
+                 f"namekey={namekey}")
         try:
             process = await asyncio.create_subprocess_exec(
                 *BACKEND_COMMAND_PREFIX,
@@ -1203,19 +1225,23 @@ class _BackendSupervisor:
             )
             await self.wait_until_ready()
             self._process = self._process.model_copy(update={"startup_succeeded": True})
-        except BaseException:
+        except BaseException as exc:
+            emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, f"Backend startup failed: {exc!r}")
             try:
                 await self._stop()
             finally:
                 self._status = _BackendStatus.FAILED
             raise
         self._status = _BackendStatus.RUNNING
+        emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, f"Owned Backend ready: pid={process.pid}")
 
     @contextlib.asynccontextmanager
     async def query_connection(self, client: _BackendDatabaseClient) -> AsyncIterator[None]:
         # Serialize temporary-child lifetime with queued Backend starts/stops.
         async with self._lifecycle_lock:
             if self._process is not None or await asyncio.to_thread(client.available):
+                emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX,
+                         "Query IPC borrowing available Backend; ownership unchanged")
                 yield  # Borrow an existing Backend; never reset or stop it.
                 return
             await self._start(namekey=None, ipc_only=True)
@@ -1337,10 +1363,11 @@ class _BackendSupervisor:
                 ),
             )
         finally:
-            self._context.finish_backend_stop(
-                startup_succeeded=handle.startup_succeeded,
-                shutdown_succeeded=shutdown_succeeded,
-            )
+            if not handle.ipc_only:
+                self._context.finish_backend_stop(
+                    startup_succeeded=handle.startup_succeeded,
+                    shutdown_succeeded=shutdown_succeeded,
+                )
             self._process = None
             self._status = _BackendStatus.STOPPED
 
@@ -1364,7 +1391,6 @@ class _BackendSupervisor:
         environment = os.environ.copy()
         environment[EXPORT_OPENALEX_API_KEY] = self._openalex_api_key
         environment[APPENDWATCH_REPORT_ENV_NAME] = str(self._appendwatch_report)
-        environment[CONTROL_PARENT_PID_ENV_NAME] = str(os.getpid())
         environment[DASHBOARD_SOCKET_PATH_ENV_NAME] = str(self._dashboard_socket_path)
         if namekey is None:
             environment.pop(NAMEKEY_ENV_NAME, None)
@@ -1468,9 +1494,12 @@ class _CodexRunner:
                 self._remote_command("cat", input_bytes=SSH_PROBE_MARKER),
                 timeout=PROBE_TIMEOUT_SECONDS,
             )
+            if output != SSH_PROBE_MARKER:
+                emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX,
+                         f"SSH probe unexpected response: {output!r}")
             return output == SSH_PROBE_MARKER
         except (OSError, RuntimeError, TimeoutError) as exc:
-            logger.info("SSH probe failed: %s", type(exc).__name__)
+            emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, f"SSH probe error: {exc!r}")
             return False
 
     async def probe_auth(self) -> bool:
@@ -1481,7 +1510,7 @@ class _CodexRunner:
             )
             return True
         except (OSError, RuntimeError, TimeoutError) as exc:
-            logger.info("Codex authentication probe failed: %s", type(exc).__name__)
+            emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, f"Codex authentication probe error: {exc!r}")
             return False
 
     async def is_busy(self) -> bool:
@@ -1825,6 +1854,9 @@ class _ControlCentreController:
         self._render_card = render_card
         self._codex = codex
         self._queue: asyncio.Queue[Run] = asyncio.Queue()
+        self._queue_processing = False
+        self._queue_wakeup = asyncio.Event()
+        self._publishing = False
         self._worker_task: asyncio.Task[None] | None = None
         self._active_run: Run | None = None
         self._active_codex: _CodexProcessHandle | None = None
@@ -1871,12 +1903,26 @@ class _ControlCentreController:
     def backend_availability(self) -> _BackendAvailability:
         return self._backend_availability
 
-    async def start(self) -> None:
+    @property
+    def queue_processing(self) -> bool:
+        return self._queue_processing
+
+    def set_queue_processing(self, enabled: bool) -> None:
+        self._queue_processing = enabled
+        if enabled:
+            self._queue_wakeup.set()
+        emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX,
+                 "Queue processing started" if enabled else "Queue processing stopped")
+
+    async def start(self, *, publishing: bool = False) -> None:
+        self._publishing = publishing
         self._load_dashboard_storage()
         emit_log(
             Locale.CONTROL_CENTRE_LOG_PREFIX,
             Locale.DASHBOARD_STORAGE_READY_LOG,
         )
+        if publishing:
+            return
         restart_time = datetime.now(timezone.utc)
         for run in tuple(self._runs.values()):
             if run.dashboard_owned and run.is_running():
@@ -1907,6 +1953,8 @@ class _ControlCentreController:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._worker_task
             self._worker_task = None
+        if self._publishing:
+            return
         await self._wind_down_owned_run_processes()
         shutdown_time = datetime.now(timezone.utc)
         for run in tuple(self._runs.values()):
@@ -1943,7 +1991,8 @@ class _ControlCentreController:
         queued = self._storage.load_queue()
         queued.append(run_id)
         self._storage.save_queue(queued)
-        await self._queue.put(run)
+        self._queue.put_nowait(run)
+        self._queue_wakeup.set()
         return run_id
 
     async def rerun(
@@ -1962,6 +2011,8 @@ class _ControlCentreController:
         if run is None:
             raise KeyError(Locale.UNKNOWN_RUN_ID_TEMPLATE.format(run_id=run_id))
         if run.is_finished():
+            emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX,
+                     f"Cancel skipped: run {run_id} already finished")
             return
         was_queued = run.is_queued()
         await self._append_run_event(
@@ -2032,25 +2083,38 @@ class _ControlCentreController:
 
     async def probe_all(self) -> None:
         if self._probe_lock.locked():
+            emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, "Probe skipped: already in progress")
             return
         async with self._probe_lock:
             self._backend_availability = _BackendAvailability()
+            emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, "Probing IPC OPTIONS /query")
             ipc_available = await asyncio.to_thread(self._probe_ipc)
+            emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX,
+                     f"Probe IPC OPTIONS /query: {ipc_available}")
             self._backend_availability = _BackendAvailability(**{
                 **self._backend_availability.model_dump(),
                 "ipc_available": ipc_available,
             })
+            emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, "Probing Backend API GET /openapi.json")
             full_api_available = await asyncio.to_thread(self._backend.full_api_available)
+            emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX,
+                     f"Probe Backend API GET /openapi.json: {full_api_available}")
             self._backend_availability = _BackendAvailability(**{
                 **self._backend_availability.model_dump(),
                 "full_api_available": full_api_available,
             })
+            emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, "Probing Lima/SSH connect")
             ssh_available = await self._codex.probe_ssh()
+            emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX,
+                     f"Probe Lima/SSH connect: {ssh_available}")
             self._backend_availability = _BackendAvailability(**{
                 **self._backend_availability.model_dump(),
                 "ssh_available": ssh_available,
             })
+            emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, "Probing Codex login status")
             codex_authenticated = await self._codex.probe_auth() if ssh_available else None
+            emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX,
+                     f"Probe Codex login status: {codex_authenticated} (None = SSH unavailable)")
             self._backend_availability = _BackendAvailability(**{
                 **self._backend_availability.model_dump(),
                 "codex_authenticated": codex_authenticated,
@@ -2168,7 +2232,12 @@ class _ControlCentreController:
 
     async def _worker(self) -> None:
         while True:
-            run = await self._queue.get()
+            if not self._queue_processing or self._queue.empty():
+                self._queue_wakeup.clear()
+                await self._queue_wakeup.wait()
+                continue
+            # No await between permission check and dequeue; Stop gates the next run.
+            run = self._queue.get_nowait()
             await self._process_queued_run(run)
 
     async def _process_queued_run(self, run: Run) -> None:
@@ -2376,6 +2445,8 @@ class _ControlCentreController:
         if run.cancel_requested_at is not None:
             return RunLifecycle.CANCELLED
         response_code = await self._backend.probe_pull()
+        emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX,
+                 f"Run {run.run_id} final /pull: HTTP {response_code}")
         return (RunLifecycle.COMPLETED if response_code == status.HTTP_410_GONE
                 else RunLifecycle.FAILED)
 
@@ -2390,6 +2461,8 @@ class _ControlCentreController:
                 return
             if self._backend.status is not _BackendStatus.RUNNING:
                 return
+            emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX,
+                     f"Sending run outcome: run={run.run_id}, outcome={run_outcome.value}")
             try:
                 response_code = await asyncio.to_thread(
                     self._send_run_outcome,
@@ -2404,6 +2477,8 @@ class _ControlCentreController:
                 self._notifications.append(message)
                 emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, message)
                 return
+            emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX,
+                     f"Run outcome response: run={run.run_id}, HTTP {response_code}")
             self._run_outcome_recorded_run_ids.add(run.run_id)
             if response_code == status.HTTP_500_INTERNAL_SERVER_ERROR:
                 message = Locale.RUN_OUTCOME_SNAPSHOT_PARTIAL_TEMPLATE.format(
@@ -2427,6 +2502,10 @@ class _ControlCentreController:
         self._events = events
         run = apply_run_event(self._runs.get(event.run_id), event)
         self._runs[event.run_id] = run
+        if event.lifecycle is not RunLifecycle.FAILED:
+            emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX,
+                     f"Run {event.run_id}: {event.lifecycle.value}; namekey={event.namekey}; "
+                     f"detail={event.detail or ''}")
         if event.lifecycle is RunLifecycle.FAILED:
             emit_log(
                 Locale.CONTROL_CENTRE_LOG_PREFIX,
@@ -2457,6 +2536,7 @@ class _UiHandles(BaseModel):
     backend_ipc_status_label: Any | None = None
     backend_refresh_button: Any | None = None
     probe_button: Any | None = None
+    queue_processing_button: Any | None = None
     ssh_status_label: Any | None = None
     codex_status_label: Any | None = None
     probe_time_label: Any | None = None
@@ -2534,6 +2614,11 @@ class _ControlCentrePage:
             self._handles.codex_status_label = ui.label()
             self._handles.probe_time_label = ui.label()
             self._handles.probe_button = ui.button(Locale.ACTION_PROBE, on_click=self.probe_all)
+            self._handles.queue_processing_button = ui.button(
+                "Stop queue processing" if self._controller.queue_processing
+                else "Start queue processing",
+                on_click=self.toggle_queue_processing,
+            )
             self._handles.backend_refresh_button = ui.button(
                 Locale.ACTION_QUERY_IPC, on_click=self.refresh_from_ipc,
             ).props(_NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=BACKEND_REFRESH_TEST_ID))
@@ -2911,6 +2996,11 @@ class _ControlCentrePage:
         ]
 
     async def refresh(self) -> None:
+        if self._handles.queue_processing_button is not None:
+            self._handles.queue_processing_button.set_text(
+                "Stop queue processing" if self._controller.queue_processing
+                else "Start queue processing",
+            )
         snapshot = await self._controller.snapshot(selection=self._selection)
         for message in self._controller.drain_notifications():
             ui.notify(message, type="negative")
@@ -2950,20 +3040,29 @@ class _ControlCentrePage:
             )
         await self.refresh_grid(snapshot=snapshot)
 
+    async def toggle_queue_processing(self) -> None:
+        self._controller.set_queue_processing(not self._controller.queue_processing)
+        await self.refresh()
+
     async def probe_all(self) -> None:
         if self._handles.probe_button is not None:
             self._handles.probe_button.disable()
         try:
             await self._controller.probe_all()
+        except Exception as exc:
+            emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, f"Dashboard probes failed: {exc!r}")
+            raise
         finally:
             if self._handles.probe_button is not None:
                 self._handles.probe_button.enable()
             await self.refresh()
 
     async def refresh_from_ipc(self) -> None:
+        emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, "Query IPC requested")
         try:
             await self._query_ipc()
-        except RuntimeError:
+        except RuntimeError as exc:
+            emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, f"Query IPC failed: {exc!r}")
             ui.notify(Locale.BACKEND_DATABASE_REQUEST_FAILED, type="negative")
         else:
             self._clear_displayed_card()
@@ -3052,9 +3151,18 @@ class _ControlCentrePage:
         namekey = self._selection.selected_namekey
         if namekey is None:
             return
-        card = await self._controller.researcher_card(namekey=namekey)
+        emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, f"Rendering researcher card: {namekey}")
+        try:
+            card = await self._controller.researcher_card(namekey=namekey)
+        except Exception as exc:
+            emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX,
+                     f"Researcher card failed: {namekey}; {exc!r}")
+            raise
         if self._selection.selected_namekey == namekey:
             await self._show_card(card)
+            emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX,
+                     f"Researcher card displayed: {namekey}; "
+                     f"DOCX available={card.download_available}")
 
     async def _show_card(self, card: _ResearcherCardView) -> None:
         if self._handles.selected_researcher_label is not None:
@@ -3067,9 +3175,9 @@ class _ControlCentrePage:
             )
         if self._handles.card_markdown is not None:
             self._handles.card_markdown.set_content(card.card_markdown)
-        self._displayed_card = card if card.card_markdown else None
+        self._displayed_card = card if card.download_available else None
         if self._handles.download_card_button is not None:
-            if card.card_markdown:
+            if card.download_available:
                 self._handles.download_card_button.enable()
             else:
                 self._handles.download_card_button.disable()
@@ -3090,30 +3198,21 @@ class _ControlCentrePage:
 
     async def download_displayed_card(self) -> None:
         card = self._displayed_card
-        if card is None or not card.card_markdown:
+        if card is None or not card.download_available:
+            emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, "DOCX download skipped: no available card")
             return
         button = self._handles.download_card_button
         if button is not None:
             button.disable()
+        emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, f"Rendering DOCX download: {card.docx_filename}")
         try:
-            docx = await asyncio.to_thread(
-                render_docx_bytes,
-                card.card_markdown,
-                self._reference_docx,
-            )
-            ui.download(
-                docx,
-                filename=(
-                    card_filename(
-                        draw_label=card.researcher.draw_number,
-                        first_name=card.researcher.namekey.first_name,
-                        last_name=card.researcher.namekey.last_name,
-                    )
-                    + ".docx"
-                ),
-                media_type=DOCX_MEDIA_TYPE,
-            )
-        except OSError, subprocess.SubprocessError:
+            docx = await asyncio.to_thread(card.render_docx, self._reference_docx)
+            ui.download(docx, filename=card.docx_filename, media_type=DOCX_MEDIA_TYPE)
+            emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX,
+                     f"DOCX sent to browser: {card.docx_filename}; {len(docx)} bytes")
+        except (OSError, subprocess.SubprocessError) as exc:
+            emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX,
+                     f"DOCX download failed: {card.docx_filename}; {exc!r}")
             ui.notify(Locale.DOCX_DOWNLOAD_FAILED, type="negative")
         finally:
             if button is not None and self._displayed_card is card:
@@ -3148,6 +3247,7 @@ class _ControlCentrePage:
         if researcher_varname not in RESEARCHER_VARS_BY_VARNAME:
             raise KeyError(Locale.UNKNOWN_VARIABLE_TEMPLATE.format(variable_key=researcher_varname))
         self._selection.researcher_varname = researcher_varname
+        emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, f"Researcher var selected: {researcher_varname}")
         await self.refresh_grid()
         expanded_namekey = self._expanded_history_namekey
         if expanded_namekey is not None:
@@ -3158,6 +3258,7 @@ class _ControlCentrePage:
         lifecycle: RunLifecycle | None,
     ) -> None:
         self._selection.lifecycle_filter = lifecycle
+        emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, f"Lifecycle filter: {lifecycle}")
         await self.refresh_grid()
 
     async def on_cohort_filter_changed(
@@ -3165,6 +3266,7 @@ class _ControlCentrePage:
         cohort: str | None,
     ) -> None:
         self._selection.cohort_filter = None if cohort is None else AiAugmentCohort(cohort)
+        emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, f"Cohort filter: {cohort}")
         await self.refresh_grid()
 
     async def on_search_changed(
@@ -3172,6 +3274,7 @@ class _ControlCentrePage:
         search_text: str | None,
     ) -> None:
         self._selection.search_text = "" if search_text is None else search_text
+        emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, f"Search filter: {search_text!r}")
         await self.refresh_grid()
 
     async def on_researcher_selected(
@@ -3335,6 +3438,8 @@ class _ApplicationServices(BaseModel):
 SERVICES: _ApplicationServices | None = None
 APPLICATION_LIFECYCLE_CONFIGURED = False
 APPLICATION_CONFIG_PATH = DEFAULT_CONFIG_PATH
+APPLICATION_PUBLISH_COMPLETED = False
+APPLICATION_EXIT_CODE = 0
 
 
 def create_services(*, config_path: Path) -> _ApplicationServices:
@@ -3363,6 +3468,7 @@ def create_services(*, config_path: Path) -> _ApplicationServices:
     )
 
     async def query_ipc() -> None:
+        emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, "Requesting wholesale Backend query snapshot")
         try:
             async with backend.query_connection(backend_database):
                 response = await asyncio.to_thread(
@@ -3419,28 +3525,96 @@ async def control_centre_page() -> None:
 # =============================================================================
 
 
-async def application_startup() -> None:
-    global SERVICES
-    if SERVICES is not None:
-        await SERVICES.controller.start()
-    else:
-        services = create_services(config_path=APPLICATION_CONFIG_PATH)
-        try:
-            await services.controller.start()
-        except BaseException:
-            await services.controller.shutdown()
-            raise
-        SERVICES = services
-    emit_log(
-        Locale.CONTROL_CENTRE_LOG_PREFIX,
-        Locale.READY_LOG_TEMPLATE.format(url=CONTROL_CENTRE_BASE_URL),
+async def publish_completed(services: _ApplicationServices) -> None:
+    controller = services.controller
+    config = services.configuration.pipeline_config
+    dashboard = await controller.snapshot(
+        selection=_UiSelection(researcher_varname=RESEARCHER_VARS[0].varname),
     )
+    candidates = [
+        row for row in dashboard.researcher_var_views
+        if row.researcher.ai_augment_cohort is not AiAugmentCohort.INELIGIBLE
+        and row.latest_run_commit_var_view.lifecycle is RunLifecycle.COMPLETED
+    ]
+    cards = []
+    for row in candidates:
+        card = await controller.researcher_card(namekey=row.researcher.namekey)
+        if card.download_available:
+            cards.append(card)
+    emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX,
+             f"Publish completed: {dashboard.counts.total} researchers; {len(candidates)} eligible "
+             f"and completed; {len(cards)} DOCX downloads available")
+    logger.info(
+        "Publish completed: %d researchers; %d eligible and completed; "
+        "%d DOCX downloads available",
+        dashboard.counts.total, len(candidates), len(cards),
+    )
+    if cards:
+        config.output_dir.mkdir(parents=True, exist_ok=True)
+    for index, card in enumerate(cards, start=1):
+        destination = config.output_dir / card.docx_filename
+        emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX,
+                 f"[{index}/{len(cards)}] Rendering {destination}")
+        logger.info("[%d/%d] Rendering %s", index, len(cards), destination)
+        docx = await asyncio.to_thread(card.render_docx, config.pandoc_reference_docx)
+        await asyncio.to_thread(destination.write_bytes, docx)
+        emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX,
+                 f"[{index}/{len(cards)}] Written {destination}: {len(docx)} bytes")
+        logger.info("[%d/%d] Written %s", index, len(cards), destination)
+    emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, f"Publishing finished: {len(cards)} DOCX files")
+    logger.info("Publishing finished: %d DOCX files", len(cards))
+
+
+async def publish_completed_and_shutdown() -> None:
+    global APPLICATION_EXIT_CODE
+    try:
+        await publish_completed(require_services())
+    except Exception as exc:
+        APPLICATION_EXIT_CODE = 1
+        emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, f"Publishing failed: {exc!r}")
+        logger.exception("Publishing completed researchers failed")
+    finally:
+        app.shutdown()
+
+
+async def application_startup() -> None:
+    global SERVICES, APPLICATION_EXIT_CODE
+    try:
+        emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX,
+                 f"Starting Dashboard with config {APPLICATION_CONFIG_PATH}")
+        if SERVICES is None:
+            services = create_services(config_path=APPLICATION_CONFIG_PATH)
+            try:
+                await services.controller.start(publishing=APPLICATION_PUBLISH_COMPLETED)
+            except BaseException:
+                await services.controller.shutdown()
+                raise
+            SERVICES = services
+        else:
+            await SERVICES.controller.start(publishing=APPLICATION_PUBLISH_COMPLETED)
+        emit_log(
+            Locale.CONTROL_CENTRE_LOG_PREFIX,
+            Locale.READY_LOG_TEMPLATE.format(url=CONTROL_CENTRE_BASE_URL),
+        )
+        if APPLICATION_PUBLISH_COMPLETED:
+            await publish_completed_and_shutdown()
+    except Exception as exc:
+        APPLICATION_EXIT_CODE = 1
+        emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, f"Dashboard startup failed: {exc!r}")
+        logger.exception("Dashboard startup failed")
+        app.shutdown()
 
 
 async def application_shutdown() -> None:
+    global APPLICATION_EXIT_CODE
     if SERVICES is not None:
         emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, Locale.STOPPING_LOG)
-        await SERVICES.controller.shutdown()
+        try:
+            await SERVICES.controller.shutdown()
+        except Exception as exc:
+            APPLICATION_EXIT_CODE = 1
+            emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, f"Dashboard shutdown failed: {exc!r}")
+            raise
         emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, Locale.STOPPED_LOG)
 
 
@@ -3454,12 +3628,18 @@ def configure_application_lifecycle() -> None:
     APPLICATION_LIFECYCLE_CONFIGURED = True
 
 
-def main() -> None:
-    global APPLICATION_CONFIG_PATH
+def main(argv: list[str] | None = None) -> int:
+    global APPLICATION_CONFIG_PATH, APPLICATION_PUBLISH_COMPLETED, APPLICATION_EXIT_CODE
 
     parser = argparse.ArgumentParser()
     parser.add_argument(CONFIG_OPTION, required=True, type=Path)
-    arguments = parser.parse_args()
+    parser.add_argument("operation", nargs="?", choices=["publish"])
+    parser.add_argument("selection", nargs="?", choices=["completed"])
+    arguments = parser.parse_args(argv)
+    if (arguments.operation is None) != (arguments.selection is None):
+        parser.error("Publishing requires: publish completed")
+    APPLICATION_PUBLISH_COMPLETED = arguments.operation == "publish"
+    APPLICATION_EXIT_CODE = 0
     APPLICATION_CONFIG_PATH = arguments.config
     configure_application_lifecycle()
     with contextlib.suppress(KeyboardInterrupt):
@@ -3470,7 +3650,8 @@ def main() -> None:
             show=False,
             show_welcome_message=False,
         )
+    return APPLICATION_EXIT_CODE
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

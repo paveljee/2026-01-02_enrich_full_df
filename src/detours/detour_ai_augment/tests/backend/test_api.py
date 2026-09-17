@@ -9,12 +9,11 @@ import os
 import signal
 import subprocess
 import sys
-import threading
+import time
 from collections.abc import AsyncIterator, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from copy import deepcopy
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from io import StringIO
 from pathlib import Path, PurePosixPath
@@ -73,6 +72,7 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     AI_AUGMENT_COLUMNS,
     AI_AUGMENT_EVIDENCE_COLUMNS,
     AI_AUGMENT_STANDARDIZED_COLUMNS,
+    BACKEND_STORE_CLOSED_CLEANLY,
     DOCX_COLUMNS,
     KTP_AI_AUGMENT_ACADEMIC_POSITIONS_COL,
     KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL,
@@ -137,7 +137,8 @@ from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_mod
 from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.query_request import (  # noqa: E501
     QueryRequest,
 )
-from src.helpers.cards import build_cards, write_cards_zip
+from src.helpers.architecture import FrozenStrictModel
+from src.helpers.cards import build_cards
 from src.helpers.config import PipelineConfig
 from src.helpers.data_models import (
     FragmentType,
@@ -172,8 +173,7 @@ from src.helpers.vars import (
 )
 
 
-@dataclass(frozen=True, slots=True)
-class BackendTestPaths:
+class BackendTestPaths(FrozenStrictModel):
     config: Path
     ai_augment_config: Path
     source_database: Path
@@ -503,8 +503,7 @@ CALL_ARGUMENTS_TURN_8 = (
 )
 
 
-@dataclass(frozen=True)
-class ExpectedEvidence:
+class ExpectedEvidence(FrozenStrictModel):
     column: str
     value: str
     excerpt: str
@@ -520,128 +519,128 @@ class ExpectedEvidence:
 
 EXPECTED_EVIDENCE = (
     ExpectedEvidence(
-        KTP_AI_AUGMENT_RESEARCHER_AUTHOR_COL,
-        "Aziz Sheikh",
-        "SHEIKH, Aziz Ul Haque",
-        OFFICERS_URL,
-        "turn7view0",
-        "call_SzOsv4AVuruWWBbM0oy5i4M0",
-        "fc_03938c1e0667a7cc016a6783752e2481959e7e365e71c60b20",
-        "fco_019fa459-883b-7480-b82c-b775520d1401",
-        "2026-07-27T16:12:38.843Z",
-        CALL_ARGUMENTS_TURN_7,
-        DISPLAY_ARGUMENTS_TURN_7,
+        column=KTP_AI_AUGMENT_RESEARCHER_AUTHOR_COL,
+        value="Aziz Sheikh",
+        excerpt="SHEIKH, Aziz Ul Haque",
+        url=OFFICERS_URL,
+        ref_id="turn7view0",
+        call_id="call_SzOsv4AVuruWWBbM0oy5i4M0",
+        fc_id="fc_03938c1e0667a7cc016a6783752e2481959e7e365e71c60b20",
+        fco_id="fco_019fa459-883b-7480-b82c-b775520d1401",
+        fco_timestamp="2026-07-27T16:12:38.843Z",
+        arguments_json=CALL_ARGUMENTS_TURN_7,
+        display_arguments_json=DISPLAY_ARGUMENTS_TURN_7,
     ),
     ExpectedEvidence(
-        KTP_AI_AUGMENT_PLACE_OF_RESIDENCE_COL,
-        "Scotland",
-        "Country of residence\nL75:      Scotland",
-        OFFICERS_URL,
-        "turn7view0",
-        "call_SzOsv4AVuruWWBbM0oy5i4M0",
-        "fc_03938c1e0667a7cc016a6783752e2481959e7e365e71c60b20",
-        "fco_019fa459-883b-7480-b82c-b775520d1401",
-        "2026-07-27T16:12:38.843Z",
-        CALL_ARGUMENTS_TURN_7,
-        DISPLAY_ARGUMENTS_TURN_7,
+        column=KTP_AI_AUGMENT_PLACE_OF_RESIDENCE_COL,
+        value="Scotland",
+        excerpt="Country of residence\nL75:      Scotland",
+        url=OFFICERS_URL,
+        ref_id="turn7view0",
+        call_id="call_SzOsv4AVuruWWBbM0oy5i4M0",
+        fc_id="fc_03938c1e0667a7cc016a6783752e2481959e7e365e71c60b20",
+        fco_id="fco_019fa459-883b-7480-b82c-b775520d1401",
+        fco_timestamp="2026-07-27T16:12:38.843Z",
+        arguments_json=CALL_ARGUMENTS_TURN_7,
+        display_arguments_json=DISPLAY_ARGUMENTS_TURN_7,
     ),
     ExpectedEvidence(
-        KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL,
-        "British nationality; race, ethnicity, language, and culture not reported",
-        "Nationality\nL72:      British",
-        OFFICERS_URL,
-        "turn7view0",
-        "call_SzOsv4AVuruWWBbM0oy5i4M0",
-        "fc_03938c1e0667a7cc016a6783752e2481959e7e365e71c60b20",
-        "fco_019fa459-883b-7480-b82c-b775520d1401",
-        "2026-07-27T16:12:38.843Z",
-        CALL_ARGUMENTS_TURN_7,
-        DISPLAY_ARGUMENTS_TURN_7,
+        column=KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL,
+        value="British nationality; race, ethnicity, language, and culture not reported",
+        excerpt="Nationality\nL72:      British",
+        url=OFFICERS_URL,
+        ref_id="turn7view0",
+        call_id="call_SzOsv4AVuruWWBbM0oy5i4M0",
+        fc_id="fc_03938c1e0667a7cc016a6783752e2481959e7e365e71c60b20",
+        fco_id="fco_019fa459-883b-7480-b82c-b775520d1401",
+        fco_timestamp="2026-07-27T16:12:38.843Z",
+        arguments_json=CALL_ARGUMENTS_TURN_7,
+        display_arguments_json=DISPLAY_ARGUMENTS_TURN_7,
     ),
     ExpectedEvidence(
-        KTP_AI_AUGMENT_GENDER_COL,
-        "Male",
-        "Nationality\nL72:      British",
-        OFFICERS_URL,
-        "turn7view0",
-        "call_SzOsv4AVuruWWBbM0oy5i4M0",
-        "fc_03938c1e0667a7cc016a6783752e2481959e7e365e71c60b20",
-        "fco_019fa459-883b-7480-b82c-b775520d1401",
-        "2026-07-27T16:12:38.843Z",
-        CALL_ARGUMENTS_TURN_7,
-        DISPLAY_ARGUMENTS_TURN_7,
+        column=KTP_AI_AUGMENT_GENDER_COL,
+        value="Male",
+        excerpt="Nationality\nL72:      British",
+        url=OFFICERS_URL,
+        ref_id="turn7view0",
+        call_id="call_SzOsv4AVuruWWBbM0oy5i4M0",
+        fc_id="fc_03938c1e0667a7cc016a6783752e2481959e7e365e71c60b20",
+        fco_id="fco_019fa459-883b-7480-b82c-b775520d1401",
+        fco_timestamp="2026-07-27T16:12:38.843Z",
+        arguments_json=CALL_ARGUMENTS_TURN_7,
+        display_arguments_json=DISPLAY_ARGUMENTS_TURN_7,
     ),
     ExpectedEvidence(
-        KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL,
-        "Age derived from a December 1968 birth date",
-        "Date of birth\nL66:      December 1968",
-        OFFICERS_URL,
-        "turn7view0",
-        "call_SzOsv4AVuruWWBbM0oy5i4M0",
-        "fc_03938c1e0667a7cc016a6783752e2481959e7e365e71c60b20",
-        "fco_019fa459-883b-7480-b82c-b775520d1401",
-        "2026-07-27T16:12:38.843Z",
-        CALL_ARGUMENTS_TURN_7,
-        DISPLAY_ARGUMENTS_TURN_7,
+        column=KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL,
+        value="Age derived from a December 1968 birth date",
+        excerpt="Date of birth\nL66:      December 1968",
+        url=OFFICERS_URL,
+        ref_id="turn7view0",
+        call_id="call_SzOsv4AVuruWWBbM0oy5i4M0",
+        fc_id="fc_03938c1e0667a7cc016a6783752e2481959e7e365e71c60b20",
+        fco_id="fco_019fa459-883b-7480-b82c-b775520d1401",
+        fco_timestamp="2026-07-27T16:12:38.843Z",
+        arguments_json=CALL_ARGUMENTS_TURN_7,
+        display_arguments_json=DISPLAY_ARGUMENTS_TURN_7,
     ),
     ExpectedEvidence(
-        KTP_AI_AUGMENT_EDUCATION_COL,
-        "MSc epidemiology and MD",
-        (
+        column=KTP_AI_AUGMENT_EDUCATION_COL,
+        value="MSc epidemiology and MD",
+        excerpt=(
             "Sheikh holds a master's of science in epidemiology from the London "
             "School of Hygiene & Tropical Medicine, and a M.D. from the University "
             "of London."
         ),
-        COMMONWEALTH_URL,
-        "turn4search0",
-        "call_S7SrLlbSPHIujjScm4LXYt2X",
-        "fc_03938c1e0667a7cc016a67836064b081958a409fea02229e26",
-        "fco_019fa459-3dda-7ea0-8d5c-2351036f67f5",
-        "2026-07-27T16:12:19.802Z",
-        CALL_ARGUMENTS_TURN_4,
-        CALL_ARGUMENTS_TURN_4,
+        url=COMMONWEALTH_URL,
+        ref_id="turn4search0",
+        call_id="call_S7SrLlbSPHIujjScm4LXYt2X",
+        fc_id="fc_03938c1e0667a7cc016a67836064b081958a409fea02229e26",
+        fco_id="fco_019fa459-3dda-7ea0-8d5c-2351036f67f5",
+        fco_timestamp="2026-07-27T16:12:19.802Z",
+        arguments_json=CALL_ARGUMENTS_TURN_4,
+        display_arguments_json=CALL_ARGUMENTS_TURN_4,
     ),
     ExpectedEvidence(
-        KTP_AI_AUGMENT_ACADEMIC_POSITIONS_COL,
-        "Oxford Big Data Institute",
-        "Aziz Sheikh — Oxford Big Data Institute (https://www.bdi.ox.ac.uk/Team/aziz-sheikh)",
-        OXFORD_BDI_URL,
-        "turn2search0",
-        "call_Tv7D3tbhKCOUBdz2xfruMIIY",
-        "fc_03938c1e0667a7cc016a678326af18819587231df3dd08c37d",
-        "fco_019fa458-5973-77a1-93a4-0c27355f8eb8",
-        "2026-07-27T16:11:21.331Z",
-        CALL_ARGUMENTS_TURN_2,
-        CALL_ARGUMENTS_TURN_2,
+        column=KTP_AI_AUGMENT_ACADEMIC_POSITIONS_COL,
+        value="Oxford Big Data Institute",
+        excerpt="Aziz Sheikh — Oxford Big Data Institute (https://www.bdi.ox.ac.uk/Team/aziz-sheikh)",
+        url=OXFORD_BDI_URL,
+        ref_id="turn2search0",
+        call_id="call_Tv7D3tbhKCOUBdz2xfruMIIY",
+        fc_id="fc_03938c1e0667a7cc016a678326af18819587231df3dd08c37d",
+        fco_id="fco_019fa458-5973-77a1-93a4-0c27355f8eb8",
+        fco_timestamp="2026-07-27T16:11:21.331Z",
+        arguments_json=CALL_ARGUMENTS_TURN_2,
+        display_arguments_json=CALL_ARGUMENTS_TURN_2,
     ),
     ExpectedEvidence(
-        KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL,
-        "NIHR Senior Investigator",
-        (
+        column=KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL,
+        value="NIHR Senior Investigator",
+        excerpt=(
             "The NIHR has announced its 2026 cohort of Senior Investigators, "
             "recognising outstanding leaders in health and care research."
         ),
-        NIHR_URL,
-        "turn8search0",
-        "call_KLTzFeZeazG7AjjhDp42wUtj",
-        "fc_03938c1e0667a7cc016a67837ae26881958bb5e280a116e970",
-        "fco_019fa459-b0f8-79e1-88f4-535744154d8e",
-        "2026-07-27T16:12:49.272Z",
-        CALL_ARGUMENTS_TURN_8,
-        CALL_ARGUMENTS_TURN_8,
+        url=NIHR_URL,
+        ref_id="turn8search0",
+        call_id="call_KLTzFeZeazG7AjjhDp42wUtj",
+        fc_id="fc_03938c1e0667a7cc016a67837ae26881958bb5e280a116e970",
+        fco_id="fco_019fa459-b0f8-79e1-88f4-535744154d8e",
+        fco_timestamp="2026-07-27T16:12:49.272Z",
+        arguments_json=CALL_ARGUMENTS_TURN_8,
+        display_arguments_json=CALL_ARGUMENTS_TURN_8,
     ),
     ExpectedEvidence(
-        KTP_AI_AUGMENT_LINKS_COL,
-        COMPANY_URL,
-        'Source: open({"ref_id":"turn5search0","lineno":null}); Total lines: 92',
-        COMPANY_URL,
-        "turn6view0",
-        "call_dWCc1wam5TvIfxwvI1o6RPEL",
-        "fc_03938c1e0667a7cc016a678370815881958bcee4380dc8ed61",
-        "fco_019fa459-750e-7920-b0cf-ef211333113f",
-        "2026-07-27T16:12:33.934Z",
-        CALL_ARGUMENTS_TURN_6,
-        DISPLAY_ARGUMENTS_TURN_6,
+        column=KTP_AI_AUGMENT_LINKS_COL,
+        value=COMPANY_URL,
+        excerpt='Source: open({"ref_id":"turn5search0","lineno":null}); Total lines: 92',
+        url=COMPANY_URL,
+        ref_id="turn6view0",
+        call_id="call_dWCc1wam5TvIfxwvI1o6RPEL",
+        fc_id="fc_03938c1e0667a7cc016a678370815881958bcee4380dc8ed61",
+        fco_id="fco_019fa459-750e-7920-b0cf-ef211333113f",
+        fco_timestamp="2026-07-27T16:12:33.934Z",
+        arguments_json=CALL_ARGUMENTS_TURN_6,
+        display_arguments_json=DISPLAY_ARGUMENTS_TURN_6,
     ),
 )
 EXPECTED_COMMENT = "OpenAlex records may contain identity conflation."
@@ -1307,16 +1306,6 @@ def prepare_real_sample_push(
         return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
 
     monkeypatch.setattr(subprocess, "run", fake_subprocess)
-
-    original_write_cards_zip = write_cards_zip
-
-    def tracked_write_cards_zip(*args: object, **kwargs: object) -> None:
-        cards = args[0]
-        assert isinstance(cards, dict)
-        rendered_cards.extend(cards.values())
-        original_write_cards_zip(*args, **kwargs)  # type: ignore[arg-type]
-
-    monkeypatch.setattr(api, "write_cards_zip", tracked_write_cards_zip)
 
     return SimpleNamespace(
         payload=valid_submission_body(),
@@ -2554,6 +2543,7 @@ def test_run_outcome_http_exchange_is_logged_and_replays_as_raw_history(
             runtime,
             record,
             line_number=1,
+            raw_line=(record.model_dump_json() + "\n").encode(),
         )
         runtime = cast(AiAugmentBackendContext, SimpleNamespace(
             configured_namekey=runtime.configured_namekey,
@@ -2634,10 +2624,6 @@ def test_failed_post_commit_work_projects_atomically_without_domain_changes(
         submission_type=None,
         submission=None,
     ).http_record(record)
-    published: list[UUID] = []
-    monkeypatch.setattr(
-        api, "publish_card_zip", lambda _store, _runtime, rid: published.append(rid),
-    )
     try:
         store_for_connection(connection, transaction_active=False)._apply_log_record(
             cast(
@@ -2648,9 +2634,9 @@ def test_failed_post_commit_work_projects_atomically_without_domain_changes(
             ),
             validation_record,
             line_number=1,
+            raw_line=(validation_record.model_dump_json() + "\n").encode(),
         )
 
-        assert published == [validation_record.record_id]
         assert connection.execute("SELECT * FROM domain_probe").fetchall() == []
         assert connection.execute(
             f"SELECT count(*) FROM {api.AUTHORITATIVE_ATTEMPTS_TABLE}"
@@ -5376,7 +5362,7 @@ def test_main_full_mode_configures_and_runs_composed_backend(
     runtime = cast(AiAugmentBackendContext, SimpleNamespace())
 
     def compose(
-        selected_runtime: AiAugmentBackendContext, *, new: bool, confirmed: bool,
+        selected_runtime: AiAugmentBackendContext, *, new: bool, confirmed: bool, yes: bool,
     ) -> FastAPI:
         assert new and confirmed
         assert selected_runtime is runtime
@@ -5434,11 +5420,10 @@ def test_ipc_only_signals_stop_server(
     runtime = cast(AiAugmentBackendContext, SimpleNamespace())
     ipc_server = SimpleNamespace(thread=SimpleNamespace(is_alive=lambda: True))
 
-    def wait(_event: object, _timeout: float) -> bool:
+    def sleep(_timeout: float) -> None:
         handlers[stop_signal](stop_signal, None)
-        return True
 
-    monkeypatch.setattr(threading.Event, "wait", wait)
+    monkeypatch.setattr(time, "sleep", sleep)
     monkeypatch.setattr(signal, "getsignal", lambda sig: f"old-{sig}")
     monkeypatch.setattr(
         signal, "signal",
@@ -5448,6 +5433,26 @@ def test_ipc_only_signals_stop_server(
     monkeypatch.setattr(ipc, "stop_dashboard_query_server", lambda handle: calls.append(handle))
     ipc.serve_dashboard_query_only(runtime)
     assert calls == [ipc_server]
+    assert handlers == {
+        signal.SIGINT: f"old-{signal.SIGINT}", signal.SIGTERM: f"old-{signal.SIGTERM}",
+    }
+
+
+def test_ipc_worker_death_cleans_up_and_restores_signal_handlers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    handlers: dict[int, Any] = {}
+    closed: list[object] = []
+    handle = SimpleNamespace(thread=SimpleNamespace(is_alive=lambda: False))
+    monkeypatch.setattr(signal, "getsignal", lambda sig: f"old-{sig}")
+    monkeypatch.setattr(signal, "signal", lambda sig, handler: handlers.update({sig: handler}))
+    monkeypatch.setattr(ipc, "start_dashboard_query_server", lambda *_a, **_k: handle)
+    monkeypatch.setattr(
+        ipc, "stop_dashboard_query_server", lambda selected: closed.append(selected),
+    )
+    with pytest.raises(RuntimeError, match="stopped unexpectedly"):
+        ipc.serve_dashboard_query_only(cast(AiAugmentBackendContext, SimpleNamespace()))
+    assert closed == [handle]
     assert handlers == {
         signal.SIGINT: f"old-{signal.SIGINT}", signal.SIGTERM: f"old-{signal.SIGTERM}",
     }
@@ -6119,12 +6124,12 @@ def test_clean_close_acknowledges_only_after_resource_cleanup(
 
     class Store:
         @contextmanager
-        def read_only(self) -> Iterator[None]:
+        def writable(self, _runtime: object) -> Iterator[None]:
             order.append("opened")
             try:
                 yield
             finally:
-                assert server.BACKEND_STORE_CLOSED_CLEANLY not in capsys.readouterr().out
+                assert BACKEND_STORE_CLOSED_CLEANLY not in capsys.readouterr().out
                 order.append("closed")
                 if fails:
                     raise OSError("cleanup failed")
@@ -6137,7 +6142,7 @@ def test_clean_close_acknowledges_only_after_resource_cleanup(
     monkeypatch.setattr(api, "_release_backend_process_lock", lambda: order.append("unlocked"))
 
     def exercise() -> None:
-        with server.backend_store_lifecycle(runtime, new=False, confirmed=True, read_only=True):
+        with server.backend_store_lifecycle(runtime, new=False, confirmed=True):
             assert capsys.readouterr().out == ""
 
     if fails:
@@ -6146,7 +6151,7 @@ def test_clean_close_acknowledges_only_after_resource_cleanup(
         assert capsys.readouterr().out == ""
     else:
         exercise()
-        assert capsys.readouterr().out == server.BACKEND_STORE_CLOSED_CLEANLY + "\n"
+        assert capsys.readouterr().out == BACKEND_STORE_CLOSED_CLEANLY + "\n"
     assert order == ["locked", "opened", "closed", "unlocked"]
 
 
@@ -6163,7 +6168,7 @@ def test_rebuild_confirmation_and_invalid_log_preserve_existing_database(
     log = Path(runtime.pipeline_config.replay_log)
     log.chmod(0o600)
     log.write_bytes(b'{"unfinished":')
-    with pytest.raises(api._PushValidationError):
+    with pytest.raises(ValueError, match="Hash verification failed"):
         store.rebuild_from_log(runtime, reset_confirmed=True)
     assert log.read_bytes() == b'{"unfinished":'
     assert store.detour_db_path.read_bytes() == before

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 from collections.abc import AsyncGenerator, Iterator
 from contextlib import asynccontextmanager, contextmanager
@@ -16,6 +17,9 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_
     AiAugmentDetourConfig,
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
+from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
+    BACKEND_STORE_CLOSED_CLEANLY,
+)
 
 from . import api
 from .helpers.data_models.ai_augment_backend_store import AiAugmentBackendStore
@@ -26,12 +30,9 @@ IPC_ONLY_OPTION = "--ipc-only"
 DANGER_NO_VERIFY_HASH_OPTION = "--danger-no-verify-hash"
 
 
-BACKEND_STORE_CLOSED_CLEANLY = "AI_AUGMENT_BACKEND_STORE_CLOSED_CLEANLY"
-
-
 @contextmanager
 def backend_store_lifecycle(
-    runtime: AiAugmentBackendContext, *, new: bool, confirmed: bool, read_only: bool,
+    runtime: AiAugmentBackendContext, *, new: bool, confirmed: bool, yes: bool = False,
 ) -> Iterator[AiAugmentBackendStore]:
     if not confirmed:
         raise ValueError("Backend startup confirmation required; use --yes to bypass the prompt.")
@@ -41,9 +42,11 @@ def backend_store_lifecycle(
     try:
         store = runtime.pipeline_config.backend_store
         if new:
-            store.rebuild_from_log(runtime, reset_confirmed=confirmed)
-        context = store.read_only() if read_only else store.writable(runtime)
-        with context:
+            store.rebuild_from_log(
+                runtime, reset_confirmed=confirmed,
+                confirm_replay=lambda: confirm_nonempty_replay(yes=yes),
+            )
+        with store.writable(runtime):
             yield store
     finally:
         if acquired_lock:
@@ -54,9 +57,10 @@ def backend_store_lifecycle(
 
 @asynccontextmanager
 async def lifespan(
-    app: FastAPI, runtime: AiAugmentBackendContext, *, new: bool, confirmed: bool,
+    app: FastAPI, runtime: AiAugmentBackendContext, *,
+    new: bool, confirmed: bool, yes: bool = False,
 ) -> AsyncGenerator[None, None]:
-    with backend_store_lifecycle(runtime, new=new, confirmed=confirmed, read_only=False):
+    with backend_store_lifecycle(runtime, new=new, confirmed=confirmed, yes=yes):
         async with api.lifespan(app, runtime):
             dashboard_query_server = ipc.start_full_dashboard_query_server(runtime)
             try:
@@ -66,11 +70,11 @@ async def lifespan(
 
 
 def full_backend_application(
-    runtime: AiAugmentBackendContext, *, new: bool, confirmed: bool,
+    runtime: AiAugmentBackendContext, *, new: bool, confirmed: bool, yes: bool = False,
 ) -> FastAPI:
     @asynccontextmanager
     async def application_lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-        async with lifespan(app, runtime, new=new, confirmed=confirmed):
+        async with lifespan(app, runtime, new=new, confirmed=confirmed, yes=yes):
             yield
 
     api.app.state.runtime = runtime
@@ -93,19 +97,12 @@ def configure_runtime(
         raise api._PushConfigurationError(
             Locale.CONFIG_INVALID_TEMPLATE.format(config_path=config_path)
         ) from exc
-    if pipeline.output_format not in api.SUPPORTED_OUTPUT_FORMATS:
-        raise api._PushConfigurationError(Locale.OUTPUT_FORMAT_INVALID)
     if not pipeline.db_file.is_file() or not os.access(pipeline.db_file, os.R_OK):
         raise api._PushConfigurationError(
             Locale.SOURCE_DUCKDB_UNREADABLE_TEMPLATE.format(
                 db_file=pipeline.db_file
             )
         )
-    if pipeline.output_format == api.DOCX_OUTPUT_FORMAT and (
-        not pipeline.pandoc_reference_docx.is_file()
-        or not os.access(pipeline.pandoc_reference_docx, os.R_OK)
-    ):
-        raise api._PushConfigurationError(Locale.DOCX_REFERENCE_UNREADABLE)
     try:
         ZoneInfo(pipeline.timezone)
     except (KeyError, ValueError) as exc:
@@ -135,11 +132,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(CONFIG_OPTION, required=True, type=Path)
     parser.add_argument(IPC_ONLY_OPTION, action="store_true")
     parser.add_argument(DANGER_NO_VERIFY_HASH_OPTION, action="store_true")
-    mode = parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--new", action="store_true")
-    mode.add_argument("--resume", "--continue", action="store_true")
+    parser.add_argument("--new", action="store_true")
+    parser.add_argument("--resume", "--continue", action="store_true")
     parser.add_argument("--yes", action="store_true")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.ipc_only:
+        # Initialization flags have no effect in query-only mode.
+        args.new = False
+        args.resume = False
+    elif args.new == args.resume:
+        parser.error("Full Backend requires exactly one of --new or --resume/--continue")
+    return args
 
 
 def confirm_startup(args: argparse.Namespace) -> bool:
@@ -158,9 +161,22 @@ def confirm_startup(args: argparse.Namespace) -> bool:
     return True
 
 
+def confirm_nonempty_replay(*, yes: bool) -> bool:
+    if yes:
+        return True
+    try:
+        return Console().input(
+            "Registered a nonempty replay log. Replay it into the new database? [y/N] ",
+            markup=False,
+        ).strip().lower() == "y"
+    except EOFError:
+        return False
+
+
 def main(argv: list[str] | None = None) -> None:
+    logging.basicConfig(level=logging.INFO)
     args = parse_args(argv)
-    confirmed = confirm_startup(args)
+    confirmed = False if args.ipc_only else confirm_startup(args)
     verify_hash_on_init = not args.danger_no_verify_hash
     api._acquire_backend_process_lock()
     try:
@@ -170,13 +186,14 @@ def main(argv: list[str] | None = None) -> None:
             verify_hash_on_init=verify_hash_on_init,
         )
         if args.ipc_only:
-            with backend_store_lifecycle(
-                runtime, new=args.new, confirmed=confirmed, read_only=True,
-            ):
+            with runtime.pipeline_config.backend_store.read_only():
                 ipc.serve_dashboard_query_only(runtime)
+            print(BACKEND_STORE_CLOSED_CLEANLY, flush=True)
         else:
             uvicorn.run(
-                full_backend_application(runtime, new=args.new, confirmed=confirmed),
+                full_backend_application(
+                    runtime, new=args.new, confirmed=confirmed, yes=args.yes,
+                ),
                 host=api.SERVER_HOST,
                 port=api.SERVER_PORT,
             )
