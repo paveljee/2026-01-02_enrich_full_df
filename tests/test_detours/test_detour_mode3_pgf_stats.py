@@ -10,7 +10,9 @@ from pathlib import Path
 
 import duckdb
 import pytest
+from rich.console import Console
 
+from src.detours import detour_mode3_pgf_stats as mode3
 from src.detours.detour_mode3_pgf_stats import (
     DETOUR_STEPS,
     _exact_binomial_inference,
@@ -291,7 +293,9 @@ def detour_fixture(tmp_path: Path) -> tuple[Path, Path, dict[str, int]]:
 def test_detour_contract_and_mode3_stats_readonly(
     detour_fixture: tuple[Path, Path, dict[str, int]],
     capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(mode3, "console", Console(width=80))
     config_path, db_path, baseline_counts = detour_fixture
     config = PipelineConfig.from_json(config_path)
 
