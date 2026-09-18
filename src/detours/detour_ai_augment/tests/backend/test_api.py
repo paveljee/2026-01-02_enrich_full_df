@@ -845,6 +845,7 @@ def minimal_rollout_records(action: str = "search_query") -> tuple[api._RolloutR
         "search_query": [{"q": "example"}],
         "open": [{"ref_id": TEST_REF_ID}],
         "click": [{"ref_id": TEST_REF_ID, "id": 1}],
+        "find": [{"ref_id": TEST_REF_ID, "pattern": "example"}],
     }[action]
     cite_text = (
         f"Result\n{api.CODEX_CITE_MARKER_PREFIX}{TEST_REF_ID}"
@@ -924,6 +925,29 @@ def build_test_index(action: str = "search_query") -> api._RolloutIndex:
         timezone_name=TEST_TIMEZONE,
         configured_rollout_basename=TEST_ROLLOUT_FILENAME,
     )
+
+
+def web_arguments_rollout(
+    *argument_sets: dict[str, object],
+) -> tuple[api._RolloutRecord, ...]:
+    records = list(minimal_rollout_records()[:2])
+    for index, arguments in enumerate(argument_sets):
+        for record in minimal_rollout_records()[2:]:
+            value = json.loads(json.dumps(record.value))
+            payload = value["payload"]
+            payload["call_id"] = f"call_arguments_{index}"
+            if payload["type"] == "function_call":
+                payload["id"] = f"fc_arguments_{index}"
+                payload["arguments"] = json.dumps(arguments)
+            elif payload["type"] == "function_call_output":
+                payload["id"] = f"fco_arguments_{index}"
+                payload["output"][0]["text"] = payload["output"][0]["text"].replace(
+                    TEST_REF_ID, f"turn{index}search0",
+                )
+            else:
+                payload["results"][0]["ref_id"] = f"turn{index}search0"
+            records.append(rollout_record(value, len(records) + 1))
+    return tuple(records)
 
 
 def build_duplicate_evidence_index() -> api._RolloutIndex:
@@ -2515,8 +2539,8 @@ def test_failed_post_commit_work_projects_atomically_without_domain_changes(
         assert len(api._authoritative_log_records(Path(api_store._replay_log).read_bytes())) == 4
 
 
-@pytest.mark.parametrize("action", sorted(api.ELIGIBLE_WEB_ACTIONS))
-def test_direct_search_open_and_click_build_complete_ref_rows(action: str) -> None:
+@pytest.mark.parametrize("action", ("search_query", "open", "click", "find"))
+def test_direct_search_open_click_and_find_build_complete_ref_rows(action: str) -> None:
     index = build_test_index(action)
 
     assert len(index.fc_rows) == len(index.fco_rows) == len(index.turn_ref_rows) == 1
@@ -2534,6 +2558,150 @@ def test_direct_search_open_and_click_build_complete_ref_rows(action: str) -> No
         cite_text=index.turn_ref_rows[0].cite_text,
     )
     assert TEST_EXCERPT in index.turn_ref_rows[0].cite_text
+
+
+def test_supported_web_actions_can_share_one_call() -> None:
+    arguments: dict[str, object] = {
+        "search_query": [{"q": "example", "recency": 3, "domains": ["example.test"]}],
+        "open": [{"ref_id": TEST_REF_ID, "lineno": 1}],
+        "click": [{"ref_id": TEST_REF_ID, "id": 1}],
+        "find": [{"ref_id": TEST_REF_ID, "pattern": "example"}],
+        "response_length": "long",
+    }
+    index = api.build_rollout_index(
+        web_arguments_rollout(arguments),
+        timezone_name=TEST_TIMEZONE,
+        configured_rollout_basename=TEST_ROLLOUT_FILENAME,
+    )
+    assert len(index.turn_ref_rows) == 1
+    assert json.loads(index.fc_rows[0].arguments_json) == arguments
+
+
+def test_find_batch_indexes_only_url_backed_results() -> None:
+    records = list(web_arguments_rollout({
+        "find": [{"ref_id": f"turn{index}search0", "pattern": "example"} for index in range(4)],
+        "response_length": "long",
+    }))
+    event = json.loads(json.dumps(records[3].value))
+    event["payload"]["action"] = {"type": "find_in_page", "pattern": "example"}
+    event["payload"]["results"] = [
+        {"type": "text_result", "ref_id": f"turn7view{index}", **(
+            {"url": TEST_URL, "title": "Result"} if index % 2 == 0
+            else {"title": "Internal Error"}
+        )}
+        for index in range(4)
+    ]
+    records[3] = rollout_record(event, records[3].line_number)
+    output = json.loads(json.dumps(records[4].value))
+    output["payload"]["output"][0]["text"] = (
+        f"\n{api.CODEX_RESULT_SEPARATOR}\n".join(
+            f"Result\n{api.CODEX_CITE_MARKER_PREFIX}turn7view{index}"
+            f"{api.CODEX_CITE_MARKER_SUFFIX}\n{TEST_EXCERPT}"
+            for index in range(4)
+        )
+    )
+    records[4] = rollout_record(output, records[4].line_number)
+    index = api.build_rollout_index(
+        tuple(records), timezone_name=TEST_TIMEZONE,
+        configured_rollout_basename=TEST_ROLLOUT_FILENAME,
+    )
+    assert len(index.fc_rows) == len(index.fco_rows) == 1
+    assert tuple(row.ref_id for row in index.turn_ref_rows) == ("turn7view0", "turn7view2")
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    (
+        {"image_query": [{"q": "example"}]},
+        {"screenshot": [{"ref_id": TEST_REF_ID, "pageno": 0}]},
+        {"finance": [{"ticker": "TEST", "type": "equity"}]},
+        {"weather": [{"location": "London"}]},
+        {"sports": [{"fn": "schedule", "league": "nba"}]},
+        {"time": [{"utc_offset": "+00:00"}]},
+        {"unknown_action": [{}]},
+        {"find": [{"ref_id": TEST_REF_ID, "pattern": "example"}], "unknown_option": True},
+        {"open": [{"ref_id": TEST_REF_ID}], "image_query": [{"q": "example"}]},
+        {"response_length": "long"},
+        {"find": []},
+    ),
+)
+@pytest.mark.parametrize("multiple_output_blocks", (False, True))
+def test_unsupported_web_arguments_are_excluded_before_output_validation(
+    arguments: dict[str, object], multiple_output_blocks: bool,
+) -> None:
+    records = list(web_arguments_rollout(arguments))
+    if multiple_output_blocks:
+        value = json.loads(json.dumps(records[-1].value))
+        value["payload"]["output"].append({"type": "input_image", "image_url": TEST_URL})
+        records[-1] = rollout_record(value, records[-1].line_number)
+    index = api.build_rollout_index(
+        tuple(records),
+        timezone_name=TEST_TIMEZONE,
+        configured_rollout_basename=TEST_ROLLOUT_FILENAME,
+    )
+    assert index.fc_rows == ()
+    assert index.fco_rows == ()
+    assert index.turn_ref_rows == ()
+
+
+@pytest.mark.parametrize("codex_match_version", (1, 2))
+@pytest.mark.parametrize("include_supported", (False, True))
+def test_evidence_candidates_exclude_unsupported_calls(
+    backend_test_paths: BackendTestPaths,
+    codex_match_version: int,
+    include_supported: bool,
+) -> None:
+    arguments: list[dict[str, object]] = [{"image_query": [{"q": "example"}]}]
+    if include_supported:
+        arguments.extend((
+            {"find": [{"ref_id": TEST_REF_ID, "pattern": "example"}]},
+            {"open": [{"ref_id": TEST_REF_ID}]},
+        ))
+    index = api.build_rollout_index(
+        web_arguments_rollout(*arguments),
+        timezone_name=TEST_TIMEZONE,
+        configured_rollout_basename=TEST_ROLLOUT_FILENAME,
+    )
+    connection = duckdb.connect(":memory:")
+    try:
+        if codex_match_version == 2:
+            load_duckdb_extension_from_config_path(
+                connection, "splink_udfs", backend_test_paths.config, log=None,
+            )
+        store = store_for_connection(connection)
+        api.persist_rollout_index(store, index, codex_match_version=codex_match_version)
+        submission = Submission.model_validate(submission_body_for_evidence(TEST_EXCERPT))
+        api._seed_evidence_random(17)
+        assessment = api.assess_submission_evidence(
+            store, submission, rollout_filename=TEST_ROLLOUT_FILENAME,
+            codex_match_version=codex_match_version,
+        )
+        assert assessment.accepted is include_supported
+        for item in assessment.items:
+            assert {candidate.call_id for candidate in item.candidates} == (
+                {"call_arguments_1", "call_arguments_2"} if include_supported else set()
+            )
+            if include_supported:
+                assert item.match is not None
+                assert item.match.call_id in {"call_arguments_1", "call_arguments_2"}
+            else:
+                assert item.outcome == api.EVIDENCE_OUTCOME_UNMATCHED
+                assert item.match is None
+        if codex_match_version == 2:
+            near = api.assess_submission_evidence(
+                store,
+                Submission.model_validate(submission_body_for_evidence(TEST_EXCERPT.upper())),
+                rollout_filename=TEST_ROLLOUT_FILENAME,
+                codex_match_version=2,
+            )
+            for item in near.items:
+                assert item.outcome == (
+                    api.EVIDENCE_OUTCOME_V2_NEAR if include_supported
+                    else api.EVIDENCE_OUTCOME_UNMATCHED
+                )
+                assert all(candidate.call_id != "call_arguments_0" for candidate in item.candidates)
+    finally:
+        connection.close()
 
 
 def test_optional_result_metadata_is_nullable_and_no_url_ref_is_skipped() -> None:
@@ -2622,6 +2790,40 @@ def test_rollout_index_fails_closed_on_broken_direct_chain() -> None:
         api.build_rollout_index(
             tuple(malformed_output),
             timezone_name=TEST_TIMEZONE,
+            configured_rollout_basename=TEST_ROLLOUT_FILENAME,
+        )
+
+
+@pytest.mark.parametrize(
+    ("damage", "message"),
+    (
+        ("malformed_arguments", "malformed arguments"),
+        ("nonobject_arguments", "not a JSON object"),
+        ("duplicate_call", "one function call and one"),
+        ("duplicate_event", "one function call and one"),
+        ("out_of_order", "out of order"),
+        ("duplicate_ref", "does not resolve to one event result"),
+    ),
+)
+def test_find_eligibility_preserves_corrupt_chain_failures(damage: str, message: str) -> None:
+    records = list(minimal_rollout_records("find"))
+    if damage in {"malformed_arguments", "nonobject_arguments"}:
+        value = json.loads(json.dumps(records[2].value))
+        value["payload"]["arguments"] = "{" if damage == "malformed_arguments" else "[]"
+        records[2] = rollout_record(value, records[2].line_number)
+    elif damage == "duplicate_call":
+        records.insert(3, records[2])
+    elif damage == "duplicate_event":
+        records.insert(4, records[3])
+    elif damage == "out_of_order":
+        records[3] = rollout_record(records[3].value, 6)
+    else:
+        value = json.loads(json.dumps(records[3].value))
+        value["payload"]["results"].append(value["payload"]["results"][0])
+        records[3] = rollout_record(value, records[3].line_number)
+    with pytest.raises(api._PushValidationError, match=message):
+        api.build_rollout_index(
+            tuple(records), timezone_name=TEST_TIMEZONE,
             configured_rollout_basename=TEST_ROLLOUT_FILENAME,
         )
 

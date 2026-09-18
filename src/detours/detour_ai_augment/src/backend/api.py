@@ -279,10 +279,13 @@ ALLOW_MULTIPLE_EVIDENCE_MATCHES = True
 WEB_SEARCH_QUERY_ACTION = "search_query"
 WEB_OPEN_ACTION = "open"
 WEB_CLICK_ACTION = "click"
+WEB_FIND_ACTION = "find"
+WEB_RESPONSE_LENGTH_ARGUMENT = "response_length"
 ELIGIBLE_WEB_ACTIONS = frozenset({
     WEB_SEARCH_QUERY_ACTION,
     WEB_OPEN_ACTION,
     WEB_CLICK_ACTION,
+    WEB_FIND_ACTION,
 })
 CODEX_TYPE_KEY = "type"
 CODEX_PAYLOAD_KEY = "payload"
@@ -1461,7 +1464,14 @@ def _timestamp(value: object, *, label: str) -> str:
     return raw
 
 
-def _web_arguments(payload: Mapping[str, object], line_number: int) -> dict[str, object]:
+def _web_arguments(
+    payload: Mapping[str, object], line_number: int,
+) -> dict[str, object] | None:
+    """Decode arguments; unsupported commands are ineligible, not corrupt evidence.
+
+    Upstream SearchCommands permits multiple action keys. Our evidence subset
+    allows any combination of supported actions, plus the response_length option.
+    """
     call_id = _require_nonblank_text(
         payload.get(CODEX_CALL_ID_KEY),
         _PushValidationError(
@@ -1484,9 +1494,12 @@ def _web_arguments(payload: Mapping[str, object], line_number: int) -> dict[str,
             Locale.WEB_CALL_ARGUMENTS_NON_OBJECT_TEMPLATE.format(call_id=call_id)
         )
     decoded: dict[str, object] = decoded_value
-    eligible_actions = [action for action in ELIGIBLE_WEB_ACTIONS if decoded.get(action)]
-    if len(eligible_actions) != 1:
-        raise _PushValidationError(Locale.WEB_CALL_ACTION_COUNT_TEMPLATE.format(call_id=call_id))
+    if (
+        decoded.keys() - ELIGIBLE_WEB_ACTIONS - {WEB_RESPONSE_LENGTH_ARGUMENT}
+        or not any(decoded.get(action) for action in ELIGIBLE_WEB_ACTIONS)
+    ):
+        logger.info(Locale.WEB_CALL_EVIDENCE_INELIGIBLE_LOG, call_id, sorted(decoded))
+        return None
     return decoded
 
 
@@ -1567,22 +1580,23 @@ def _session_metadata(
     )
 
 
-def _eligible_fco_text(record: _RolloutRecord, payload: Mapping[str, object]) -> str | None:
+def _has_cite_marker(payload: Mapping[str, object]) -> bool:
     output = payload.get(CODEX_OUTPUT_KEY)
     marker_start = f"{CODEX_CITE_MARKER_PREFIX}turn"
-    contains_marker = False
     if isinstance(output, list):
         for block in output:
             if not isinstance(block, dict):
                 continue
             block_text = block.get(CODEX_TEXT_KEY)
             if isinstance(block_text, str) and marker_start in block_text:
-                contains_marker = True
-                break
+                return True
     elif isinstance(output, str):
-        contains_marker = marker_start in output
-    if not contains_marker:
-        return None
+        return marker_start in output
+    return False
+
+
+def _cited_fco_text(record: _RolloutRecord, payload: Mapping[str, object]) -> str:
+    output = payload.get(CODEX_OUTPUT_KEY)
     if not isinstance(output, list) or len(output) != 1:
         raise _PushValidationError(
             Locale.CITED_OUTPUT_BLOCK_INVALID_TEMPLATE.format(line_number=record.line_number)
@@ -1616,7 +1630,7 @@ def build_rollout_index(
     )
     calls: dict[str, list[_RolloutRecord]] = {}
     events: dict[str, list[_RolloutRecord]] = {}
-    cited_outputs: list[tuple[_RolloutRecord, dict[str, object], str]] = []
+    cited_outputs: list[tuple[_RolloutRecord, dict[str, object]]] = []
 
     for record in records:
         value = record.value
@@ -1652,9 +1666,8 @@ def build_rollout_index(
             value.get(CODEX_TYPE_KEY) == CODEX_RESPONSE_ITEM_TYPE
             and payload_type == CODEX_FUNCTION_CALL_OUTPUT_TYPE
         ):
-            text = _eligible_fco_text(record, payload)
-            if text is not None:
-                cited_outputs.append((record, payload, text))
+            if _has_cite_marker(payload):
+                cited_outputs.append((record, payload))
 
     fc_rows: list[_CodexFcRow] = []
     fco_rows: list[_CodexFcoRow] = []
@@ -1662,7 +1675,7 @@ def build_rollout_index(
     seen_fc_ids: set[str] = set()
     seen_fco_ids: set[str] = set()
     seen_call_ids: set[str] = set()
-    for output_record, output_payload, output_text in cited_outputs:
+    for output_record, output_payload in cited_outputs:
         call_id = _require_nonblank_text(
             output_payload.get(CODEX_CALL_ID_KEY),
             _PushValidationError(
@@ -1718,6 +1731,9 @@ def build_rollout_index(
             )
         seen_fc_ids.add(fc_id)
         arguments = _web_arguments(call_payload, call_record.line_number)
+        if arguments is None:
+            continue
+        output_text = _cited_fco_text(output_record, output_payload)
         arguments_json = json.dumps(
             arguments,
             ensure_ascii=False,

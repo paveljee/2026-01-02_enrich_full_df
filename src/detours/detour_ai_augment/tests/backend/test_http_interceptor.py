@@ -16,6 +16,7 @@ import requests
 from fastapi import FastAPI
 from starlette.types import Message, Scope
 
+from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     DOCX_COLUMNS,
     KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL,
@@ -188,6 +189,7 @@ def commit(
     pull: HttpRequestLogRecord | None = None,
     *,
     rollout_suffix: bytes = b"",
+    web_arguments: dict[str, object] | None = None,
 ) -> UUID:
     if pull is None:
         pull = persisted_http_record(
@@ -214,7 +216,16 @@ def commit(
             request_body=json.dumps(payload),
         )
     )
-    rollout_bytes = operator_capture_rollout(rollout_payload) + rollout_suffix
+    rollout_bytes = operator_capture_rollout(rollout_payload)
+    if web_arguments is not None:
+        records = [json.loads(line) for line in rollout_bytes.splitlines()]
+        for record in records:
+            if record["payload"].get("type") == "function_call":
+                record["payload"]["arguments"] = json.dumps(web_arguments)
+        rollout_bytes = b"".join(
+            json.dumps(record, separators=(",", ":")).encode() + b"\n" for record in records
+        )
+    rollout_bytes += rollout_suffix
     digest = hashlib.sha256(rollout_bytes).hexdigest()
     store.rollout_cas.initialize()
     blob = store.rollout_cas.path / digest[:2] / digest[2:4] / digest
@@ -421,6 +432,69 @@ def test_live_validation_replays_with_only_referenced_http(
             replay_store._append_authoritative_record(result.http_records[0])
     assert Path(runtime.pipeline_config.replay_log).stat().st_mode == mode
     assert fixtures.logical_database_snapshot(replay_store._detour_db_path) == live_database
+
+
+@pytest.mark.parametrize(
+    ("arguments", "accepted"),
+    (
+        ({"find": [{"ref_id": "turn0search0", "pattern": "evidence"}]}, True),
+        ({"search_query": [{"q": "evidence"}], "open": [{"ref_id": "turn0search0"}]}, True),
+        ({"image_query": [{"q": "evidence"}]}, False),
+        ({"search_query": [{"q": "evidence"}], "image_query": [{"q": "evidence"}]}, False),
+    ),
+)
+def test_web_argument_eligibility_drives_retry_and_replays_identically(
+    backend_store: AiAugmentBackendStore,
+    runtime: AiAugmentBackendContext,
+    monkeypatch: pytest.MonkeyPatch,
+    threaded_loop: asyncio.Runner,
+    arguments: dict[str, object],
+    accepted: bool,
+) -> None:
+    store = backend_store
+    monkeypatch.setattr(requests.Session, "send", no_network)
+    monkeypatch.setattr(api, "BACKEND_LIFECYCLE", BackendLifecycle.READY)
+    monkeypatch.setattr(api, "BACKEND_PUSH_RESPONSE_RECORD", None)
+    payload = valid_submission_body()
+    with store._writable(runtime):
+        commit_id = commit(store, payload, payload, web_arguments=arguments)
+        result = store._validate_commit(commit_id)
+        assert result.validation_record is not None
+        validation = result.attempt.post_commit_validation
+        assert validation.result is (
+            BackendLifecycle.ACCEPTED if accepted else BackendLifecycle.REJECTED
+        )
+        assert validation.stage is (
+            BackendLifecycle.ACCEPTED if accepted else BackendLifecycle.DUCKDB_EVIDENCE_VALIDATION
+        )
+        api.update_pull_state(PushResponseRecord(
+            **result.attempt.commit_record.commit_request_body.push_record.model_dump(),
+            commit_record=result.attempt.commit_record,
+            validation_record=result.validation_record,
+        ))
+        response = threaded_loop.run(api.authoritative_pull(
+            requests.Request("GET", "http://invalid/pull").prepare(), runtime, store,
+        ))
+        assert response.status_code == (HTTPStatus.GONE if accepted else HTTPStatus.OK)
+        if not accepted:
+            assert response.headers["content-type"].startswith(api.MARKDOWN_MEDIA_TYPE)
+            assert validation.detail is not None
+            assert response.text.strip() == validation.detail.strip()
+            assert Locale.EVIDENCE_RETRY_INSTRUCTION in response.text
+            assert store._execute(
+                f"SELECT count(*) FROM {api.CODEX_RETRY_BASELINE_TABLE}"
+            ).fetchone() == (1,)
+            assert store._execute(
+                f"SELECT {api.CODEX_EVIDENCE_ACCEPTED_COL} FROM {api.CODEX_EVIDENCE_AUDIT_TABLE}"
+            ).fetchall() == [(False,)]
+        snapshot = store._query_snapshot().model_dump_json()
+    log_bytes = Path(store._replay_log).read_bytes()
+    live_database = fixtures.logical_database_snapshot(store._detour_db_path)
+    rebuild_for_test(store, runtime)
+    with store._read_only(runtime):
+        assert store._query_snapshot().model_dump_json() == snapshot
+    assert fixtures.logical_database_snapshot(store._detour_db_path) == live_database
+    assert Path(store._replay_log).read_bytes() == log_bytes
 
 
 def test_readback_failure_requires_explicit_new(

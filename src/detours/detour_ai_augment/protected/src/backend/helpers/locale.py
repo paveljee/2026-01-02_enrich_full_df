@@ -315,8 +315,9 @@ class Locale:
     WEB_CALL_ARGUMENTS_NON_OBJECT_TEMPLATE: Final = (
         "web call {call_id} arguments are not a JSON object"
     )
-    WEB_CALL_ACTION_COUNT_TEMPLATE: Final = (
-        "web call {call_id} must contain exactly one eligible web action"
+    WEB_CALL_EVIDENCE_INELIGIBLE_LOG: Final = (
+        "Excluding web call %s from evidence: unsupported arguments or no nonempty "
+        "supported action; argument keys=%s"
     )
     SESSION_META_COUNT_INVALID: Final = "rollout must contain exactly one session_meta record"
     SESSION_META_PAYLOAD_MALFORMED: Final = "session_meta payload is malformed"
