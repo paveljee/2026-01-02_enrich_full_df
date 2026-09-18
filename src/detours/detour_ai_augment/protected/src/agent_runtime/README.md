@@ -49,3 +49,8 @@ in ChatGPT Plus chat interface,
 which may also signal that
 this is sufficient
 for most workflows.
+
+## openai/codex/commits/rust-v0.146.0-alpha.3.1/codex-rs/codex-api/src/search.rs
+Downloaded from
+<https://raw.githubusercontent.com/openai/codex/2ca20d522451adf0340403fc15cd54d4926f14b0/codex-rs/codex-api/src/search.rs>
+on 2026-09-18 UTC-4.
