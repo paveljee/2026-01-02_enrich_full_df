@@ -5,16 +5,18 @@ import stat
 import threading
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
+from http import HTTPStatus
 from pathlib import Path
 from typing import Any, NoReturn
 from unittest.mock import Mock
+from uuid import uuid7
 
 import pytest
+import requests
 from fastapi import FastAPI, status
 from starlette.responses import Response
 from starlette.types import Message, Scope
 
-from src.detours.detour_ai_augment.protected.src.backend import ipc
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_augment_config import (  # noqa: E501
     AiAugmentDetourConfig,
 )
@@ -27,9 +29,6 @@ from src.detours.detour_ai_augment.protected.src.backend.ipc import (
     DASHBOARD_QUERY_PATH,
     JSON_MEDIA_TYPE,
     SOCKET_PERMISSIONS,
-    create_dashboard_query_app,
-    start_dashboard_query_server,
-    stop_dashboard_query_server,
 )
 from src.detours.detour_ai_augment.src.backend import api, server
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_context import (  # noqa: E501
@@ -42,8 +41,12 @@ from src.detours.detour_ai_augment.src.backend.helpers.data_models.query_respons
     QueryResponse,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.run_outcome_record import (
-    RunOutcomeRecord,
     RunOutcomeResponseBody,
+)
+from src.detours.detour_ai_augment.src.backend.server import (
+    create_dashboard_query_app,
+    start_dashboard_query_server,
+    stop_dashboard_query_server,
 )
 from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models import (
     run_outcome as run_outcome_models,
@@ -59,8 +62,16 @@ from src.helpers.data_models import NameKey
 TEST_NAMEKEY = '{"ktp.first_name": "A.", "ktp.last_name": "Sheikh"}'
 
 
+def empty_query_response(request: requests.PreparedRequest) -> requests.Response:
+    return api._response(
+        request, HTTPStatus.OK,
+        QueryResponse(attempts=(), ai_augment_singular_outerdicts=()).model_dump_json(),
+        content_type=JSON_MEDIA_TYPE,
+    )
+
+
 def test_fastapi_module_does_not_own_flask_ipc_routes() -> None:
-    assert set(api.app.openapi()["paths"]) == {api.PULL_PATH, api.PUSH_PATH}
+    assert set(server.app.openapi()["paths"]) == {api.PULL_PATH, api.PUSH_PATH}
 
 
 def test_full_backend_composition_stops_ipc_before_domain_shutdown(
@@ -72,7 +83,6 @@ def test_full_backend_composition_stops_ipc_before_domain_shutdown(
 
     @asynccontextmanager
     async def domain_lifespan(
-        _app: object,
         received_runtime: AiAugmentBackendContext,
     ) -> AsyncIterator[None]:
         assert received_runtime is runtime
@@ -83,7 +93,8 @@ def test_full_backend_composition_stops_ipc_before_domain_shutdown(
             events.append("domain-stop")
 
     def start_ipc(
-        received_runtime: AiAugmentBackendContext, *, request_scope: ipc.IpcRequestScope,
+        received_runtime: AiAugmentBackendContext, _store: object,
+        *, request_scope: server.IpcRequestScope,
     ) -> object:
         assert received_runtime is runtime
         events.append("ipc-start")
@@ -100,18 +111,18 @@ def test_full_backend_composition_stops_ipc_before_domain_shutdown(
     monkeypatch.setattr(server, "backend_store_lifecycle", store_lifecycle)
     monkeypatch.setattr(api, "lifespan", domain_lifespan)
     monkeypatch.setattr(
-        ipc,
+        server,
         "start_full_dashboard_query_server",
         start_ipc,
     )
     monkeypatch.setattr(
-        ipc,
+        server,
         "stop_dashboard_query_server",
         lambda handle: events.append(("ipc-stop", handle)),
     )
 
     async def exercise() -> None:
-        async with server.lifespan(api.app, runtime, new=True, confirmed=True):
+        async with server.lifespan(server.app, runtime, new=True, confirmed=True):
             events.append("running")
 
     threaded_loop.run(asyncio.wait_for(exercise(), timeout=10))
@@ -128,16 +139,19 @@ def test_full_backend_composition_stops_ipc_before_domain_shutdown(
 
 
 def test_dashboard_query_flask_application_is_separate_and_unauthenticated() -> None:
-    observed: list[QueryRequest] = []
+    observed: list[requests.PreparedRequest] = []
     query_response = QueryResponse(
         attempts=(),
         ai_augment_singular_outerdicts=(),
     )
     payload = query_response.model_dump_json()
 
-    def query(ipc_request: QueryRequest) -> QueryResponse:
+    def query(ipc_request: requests.PreparedRequest) -> requests.Response:
         observed.append(ipc_request)
-        return query_response
+        return api._response(
+            ipc_request, HTTPStatus.OK, query_response.model_dump_json(),
+            content_type=JSON_MEDIA_TYPE,
+        )
 
     app = create_dashboard_query_app(
         query,
@@ -151,8 +165,8 @@ def test_dashboard_query_flask_application_is_separate_and_unauthenticated() -> 
     assert response.status_code == 200
     assert response.content_type == JSON_MEDIA_TYPE
     assert response.get_data(as_text=True) == payload
-    assert observed == [QueryRequest()]
-    assert id(app) != id(api.app)
+    assert [(item.method, item.path_url) for item in observed] == [("GET", "/query")]
+    assert id(app) != id(server.app)
 
 
 @pytest.mark.parametrize("parameters, body", [
@@ -164,7 +178,7 @@ def test_dashboard_query_flask_application_is_separate_and_unauthenticated() -> 
 def test_query_rejects_filters_and_bodies_without_dispatch_or_fatal_exit(
     parameters: dict[str, str], body: bytes,
 ) -> None:
-    handler = Mock(return_value=QueryResponse(attempts=(), ai_augment_singular_outerdicts=()))
+    handler = Mock(side_effect=empty_query_response)
     fatal_exit = Mock()
     app = create_dashboard_query_app(
         handler, query_path=DASHBOARD_QUERY_PATH, fatal_exit=fatal_exit,
@@ -179,7 +193,8 @@ def test_query_rejects_filters_and_bodies_without_dispatch_or_fatal_exit(
     assert client.options(DASHBOARD_QUERY_PATH).status_code == status.HTTP_200_OK
     handler.assert_not_called()
     assert client.get(DASHBOARD_QUERY_PATH).status_code == status.HTTP_200_OK
-    handler.assert_called_once_with(QueryRequest())
+    handler.assert_called_once()
+    assert handler.call_args.args[0].path_url == "/query"
 
 
 def test_query_request_is_wholesale_only() -> None:
@@ -198,7 +213,7 @@ def test_dashboard_query_failure_exits_loudly() -> None:
     class FatalDashboardQuery(RuntimeError):
         pass
 
-    def failed_query(_ipc_request: QueryRequest) -> QueryResponse:
+    def failed_query(_ipc_request: requests.PreparedRequest) -> requests.Response:
         raise RuntimeError("projection failed")
 
     def fatal_exit(code: int) -> NoReturn:
@@ -219,79 +234,47 @@ def test_dashboard_query_failure_exits_loudly() -> None:
 
 
 def test_full_backend_ipc_forwards_run_outcome_http_exchange_exactly() -> None:
-    observed: list[run_outcome_models.RunOutcomeRequest] = []
+    observed: list[requests.PreparedRequest] = []
     snapshot = RunOutcomeResponseBody(
-        pull_record_id=None,
-        push_record_id=None,
+        pull_record_id=None, push_record_id=None,
+        commit_record_id=None, validation_record_id=None, run_outcome_record_id=uuid7(),
         codex_session_record=CodexSessionRecord(
-            session_id=None,
-            codex_rollout_record=None,
-            appendwatch_report_record=None,
+            session_id=None, codex_rollout_record=None, appendwatch_report_record=None,
         ),
     )
     response_body = snapshot.model_dump_json().encode(TEXT_ENCODING)
 
-    def run_outcome(
-        request: run_outcome_models.RunOutcomeRequest,
-    ) -> RunOutcomeRecord:
+    def run_outcome(request: requests.PreparedRequest) -> requests.Response:
         observed.append(request)
-        received_at_unix_usec = request.http_request_log_record.received_at_unix_usec
-        assert received_at_unix_usec is not None
-        return RunOutcomeRecord.from_run_outcome_request(
-            request,
-            response_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            response_headers=None,
-            response_body=snapshot,
-            ready_to_respond_at_unix_usec=received_at_unix_usec + 1,
+        return api._response(
+            request, HTTPStatus.INTERNAL_SERVER_ERROR, snapshot.model_dump_json(),
+            content_type=JSON_MEDIA_TYPE,
         )
 
     app = create_dashboard_query_app(
-        lambda _request: QueryResponse(
-            attempts=(),
-            ai_augment_singular_outerdicts=(),
-        ),
-        query_path=DASHBOARD_QUERY_PATH,
-        run_outcome_handler=run_outcome,
-        run_outcome_paths=run_outcome_models.RUN_OUTCOME_PATHS,
+        empty_query_response, query_path=DASHBOARD_QUERY_PATH,
+        run_outcome_handler=run_outcome, run_outcome_paths=run_outcome_models.RUN_OUTCOME_PATHS,
     )
+    namekey = NameKey.from_json_key(TEST_NAMEKEY)
     response = app.test_client().post(
         run_outcome_models.FAILED_PATH,
         base_url=f"{DASHBOARD_IPC_SCHEME}://{DASHBOARD_IPC_HOST}",
-        headers={
-            run_outcome_models.NAME_KEY_HEADER: api.name_key_header(
-                NameKey.from_json_key(TEST_NAMEKEY)
-            )
-        },
+        headers={run_outcome_models.NAME_KEY_HEADER: api.name_key_header(namekey)},
     )
-
     assert response.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
     assert response.content_type == JSON_MEDIA_TYPE
     assert response.data == response_body
     assert len(observed) == 1
     request = observed[0]
-    assert request.run_outcome is run_outcome_models.RunLifecycle.FAILED
-    assert request.namekey == NameKey.from_json_key(TEST_NAMEKEY)
-    request_record = request.http_request_log_record
-    assert request_record.received_at_unix_usec is not None
-    assert request_record.received_at_unix_usec > 0
-    assert request_record.method == api.HTTP_POST_METHOD
-    assert request_record.scheme == DASHBOARD_IPC_SCHEME
-    assert request_record.host == DASHBOARD_IPC_HOST
-    assert request_record.port is None
-    assert request_record.path == run_outcome_models.FAILED_PATH
-    assert request_record.query == ""
-    assert request_record.request_headers[
-        run_outcome_models.NAME_KEY_HEADER
-    ] == api.name_key_header(NameKey.from_json_key(TEST_NAMEKEY))
-    assert request_record.request_body is None
+    assert request.method == "POST"
+    assert request.url == "http://invalid/failed"
+    assert request.headers[run_outcome_models.NAME_KEY_HEADER] == api.name_key_header(namekey)
+    assert api._prepared_request_body(request) == b""
 
 
 def test_ipc_only_flask_application_has_no_run_outcome_routes() -> None:
     app = create_dashboard_query_app(
-        lambda _request: QueryResponse(
-            attempts=(),
-            ai_augment_singular_outerdicts=(),
-        ),
+        empty_query_response,
         query_path=DASHBOARD_QUERY_PATH,
     )
 
@@ -306,15 +289,18 @@ def test_dashboard_client_queries_real_mode_0600_unix_socket(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     socket_path = tmp_path / "dashboard.sock"
-    observed: list[QueryRequest] = []
+    observed: list[requests.PreparedRequest] = []
     query_response = QueryResponse(
         attempts=(),
         ai_augment_singular_outerdicts=(),
     )
 
-    def query(ipc_request: QueryRequest) -> QueryResponse:
+    def query(ipc_request: requests.PreparedRequest) -> requests.Response:
         observed.append(ipc_request)
-        return query_response
+        return api._response(
+            ipc_request, HTTPStatus.OK, query_response.model_dump_json(),
+            content_type=JSON_MEDIA_TYPE,
+        )
 
     try:
         server = start_dashboard_query_server(
@@ -338,7 +324,7 @@ def test_dashboard_client_queries_real_mode_0600_unix_socket(
             attempts=(),
             ai_augment_singular_outerdicts=(),
         )
-        assert observed == [QueryRequest()]
+        assert [(item.method, item.path_url) for item in observed] == [("GET", "/query")]
     finally:
         stop_dashboard_query_server(server)
 
@@ -351,28 +337,11 @@ def test_dashboard_ipc_refuses_to_replace_non_socket_path(tmp_path: Path) -> Non
     with pytest.raises(RuntimeError, match="not a Unix socket"):
         start_dashboard_query_server(
             socket_path,
-            lambda _request: QueryResponse(
-                attempts=(),
-                ai_augment_singular_outerdicts=(),
-            ),
+            empty_query_response,
             query_path=DASHBOARD_QUERY_PATH,
         )
 
     assert socket_path.read_text(encoding="utf-8") == "owned by someone else"
-
-
-@pytest.fixture
-def threaded_loop() -> Iterator[asyncio.Runner]:
-    # Drive cross-thread callbacks even on hosts without self-pipe wakeups, including
-    # Runner's executor cleanup. This does not substitute the gate/bridge/thread offload.
-    with asyncio.Runner() as runner:
-        loop = runner.get_loop()
-
-        def tick() -> None:
-            loop.call_later(0.01, tick)
-
-        loop.call_soon(tick)
-        yield runner
 
 
 def test_http_response_and_background_completion_precede_ipc_admission(
@@ -488,11 +457,11 @@ def test_ipc_scope_covers_complete_wsgi_exchange(method: str, path: str, code: i
         finally:
             events.append("exit")
 
-    def query(_request: QueryRequest) -> QueryResponse:
+    def query(request: requests.PreparedRequest) -> requests.Response:
         assert events == ["enter"]
-        return QueryResponse(attempts=(), ai_augment_singular_outerdicts=())
+        return empty_query_response(request)
 
-    app = ipc.create_dashboard_query_app(
+    app = server.create_dashboard_query_app(
         query, query_path="/query", request_scope=request_scope,
     )
     response = app.test_client().open(path, method=method, buffered=True)
@@ -505,7 +474,7 @@ def test_server_shutdown_keeps_loop_available_for_inflight_ipc(
 ) -> None:
     runtime = Mock(spec=AiAugmentBackendContext)
     thread_errors: list[BaseException] = []
-    received_scopes: list[ipc.IpcRequestScope] = []
+    received_scopes: list[server.IpcRequestScope] = []
     worker: threading.Thread | None = None
     worker_started = threading.Event()
     response_codes: list[int] = []
@@ -519,7 +488,7 @@ def test_server_shutdown_keeps_loop_available_for_inflight_ipc(
         yield
 
     def start_ipc(
-        _runtime: AiAugmentBackendContext, *, request_scope: ipc.IpcRequestScope,
+        _runtime: AiAugmentBackendContext, _store: object, *, request_scope: server.IpcRequestScope,
     ) -> object:
         received_scopes.append(request_scope)
         return object()
@@ -531,16 +500,16 @@ def test_server_shutdown_keeps_loop_available_for_inflight_ipc(
 
     monkeypatch.setattr(server, "backend_store_lifecycle", store_lifecycle)
     monkeypatch.setattr(api, "lifespan", domain_lifespan)
-    monkeypatch.setattr(ipc, "start_full_dashboard_query_server", start_ipc)
-    monkeypatch.setattr(ipc, "stop_dashboard_query_server", stop_ipc)
+    monkeypatch.setattr(server, "start_full_dashboard_query_server", start_ipc)
+    monkeypatch.setattr(server, "stop_dashboard_query_server", stop_ipc)
     monkeypatch.setattr(api, "AUTHORITATIVE_BACKGROUND_TASKS", set())
 
     async def exercise() -> None:
         nonlocal worker
         app = FastAPI()
         async with server.lifespan(app, runtime, new=False, confirmed=True):
-            flask_app = ipc.create_dashboard_query_app(
-                lambda _: QueryResponse(attempts=(), ai_augment_singular_outerdicts=()),
+            flask_app = server.create_dashboard_query_app(
+                empty_query_response,
                 query_path="/query", request_scope=received_scopes[0],
             )
 
@@ -568,14 +537,13 @@ def test_server_shutdown_keeps_loop_available_for_inflight_ipc(
 
 def test_full_backend_factory_registers_admission_once(monkeypatch: pytest.MonkeyPatch) -> None:
     app = FastAPI()
-    app.add_middleware(api._AuthoritativeHttpMiddleware)
-    monkeypatch.setattr(api, "app", app)
+    monkeypatch.setattr(server, "app", app)
     runtime = Mock(spec=AiAugmentBackendContext)
     for _ in range(2):
         assert server.full_backend_application(runtime, new=False, confirmed=True) is app
-    assert len(app.user_middleware) == 2
+    assert len(app.user_middleware) == 1
     for entry, expected in zip(app.user_middleware, (
-        server._BackendRequestMiddleware, api._AuthoritativeHttpMiddleware,
+        server._BackendRequestMiddleware,
     ), strict=True):
         assert isinstance(entry.cls, type)
         assert issubclass(entry.cls, expected)

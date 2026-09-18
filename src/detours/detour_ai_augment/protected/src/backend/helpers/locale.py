@@ -8,6 +8,94 @@ from .vars import (
 
 
 class Locale:
+
+    # Store request/response contract and its API/IPC adapters.
+    RUN_OUTCOME_PERSISTED_LOG: Final = 'Run outcome persisted: record=%s; HTTP %s'
+    QUERY_SNAPSHOT_READING_LOG: Final = 'Query IPC: reading wholesale Backend snapshot'
+    QUERY_SNAPSHOT_READY_LOG: Final = (
+        'Query IPC snapshot ready: %d researchers, %d attempts, %d run outcomes'
+    )
+    IPC_REQUEST_UNEXPECTEDLY_PERSISTED: Final = 'IPC unexpectedly persisted a request record'
+    IPC_RESPONSE_MISSING: Final = 'Missing IPC response record'
+    BUFFERED_REQUEST_REQUIRED: Final = 'Backend requires a buffered request body'
+    PUSH_RESULT_STATE_LOG: Final = (
+        'Push %s: commit=%s; validation=%s; stage=%s result=%s; lifecycle=%s'
+    )
+    PULL_STATE_LOG: Final = 'Pull: lifecycle=%s; commit=%s'
+    PULL_PERSISTED_LOG: Final = 'Pull persisted: record=%s; HTTP %s'
+    PUSH_PERSISTED_LOG: Final = "Push persisted: record=%s; HTTP %s"
+    STORE_RUNTIME_UNAVAILABLE: Final = 'Backend Store runtime is unavailable'
+    RUN_OUTCOME_REPLAY_MISMATCH: Final = 'Recorded run outcome does not match its replay inputs'
+    PUSH_VALIDATION_RECORD_MISSING: Final = 'Processed push has no validation record'
+    PULL_PROCESSING_LOG: Final = 'Pull: validation still running; HTTP 503 with Retry-After'
+    PULL_WORKFLOW_FAILED_LOG: Final = 'Pull: Backend workflow failed'
+    PULL_COMPLETED_GROUND_TRUTH_LOG: Final = 'Pull: completed submission; ground_truth=%s'
+    PULL_INITIAL_TASK_LOG: Final = 'Pull: initial task; namekey=%s; %d JSONL lines'
+    PULL_DURABLE_RESPONSE_MISSING: Final = 'Pull has no durably acknowledged response'
+    PUSH_REQUEST_STATE_LOG: Final = 'Push: lifecycle=%s; session=%s; current_pull=%s'
+    PUSH_NAK_ERROR_MISSING: Final = 'Push NAK without persistence error'
+    PUSH_DURABLY_ACCEPTED_LOG: Final = 'Push %s durably accepted; commit/validation processing'
+    PUSH_RESPONSE_RECORD_MISSING: Final = 'Missing push response record'
+    RUN_OUTCOME_PROJECTION_INCONSISTENT: Final = (
+        'Run-outcome validation/attempt projection is inconsistent'
+    )
+    RUN_OUTCOME_REPLAY_INPUTS_DIFFER: Final = 'Run-outcome replay inputs differ from the projection'
+    RUN_OUTCOME_ROLLOUT_FILENAME_MISSING: Final = 'Outcome rollout has no filename'
+    PULL_VALIDATION_RECORD_MISSING: Final = 'Finished workflow has no validation record'
+    PULL_RETRY_STAGE_LOG: Final = 'Pull: retry instructions; stage=%s'
+    PULL_COMPLETED_RESULT_INVALID: Final = 'Completed workflow has invalid submission/result'
+    PULL_COMPLETED_RESEARCHER_MISSING: Final = 'Completed workflow has no configured researcher'
+    PUSH_SESSION_NOT_READY_LOG: Final = 'Push: workflow/session is not ready'
+    RUN_OUTCOME_VALIDATION_LINKAGE_CORRUPT: Final = 'Run-outcome validation linkage is corrupt'
+    RUN_OUTCOME_DURABLE_VALIDATION_MISSING: Final = 'Projected attempt has no durable validation'
+    RUN_OUTCOME_PROVIDER_INPUT_CORRUPT: Final = 'Run-outcome provider replay input is corrupt'
+    PULL_RETRY_VALIDATION_INCONSISTENT: Final = 'Inconsistent retry validation'
+    PULL_SUBMISSION_VALUE_INVALID: Final = 'Validated submission value is invalid'
+    HTTP_REQUEST_RECEIVED_LOG: Final = 'Backend received %s %s: %d request bytes'
+    HTTP_RESPONSE_SENT_LOG: Final = 'Backend sent %s %s: HTTP %d; %d response bytes'
+    STORE_STARTUP_CONFIRMATION_REQUIRED: Final = (
+        'Backend startup confirmation required; use --yes to bypass the prompt.'
+    )
+    IPC_PATH_NOT_SOCKET_TEMPLATE: Final = 'dashboard IPC path is not a Unix socket: {path}'
+    IPC_PATH_NOT_ABSOLUTE_TEMPLATE: Final = 'dashboard IPC path is not absolute: {path}'
+    IPC_RUNNING_TEMPLATE: Final = 'Dashboard IPC running on unix://{path}'
+    PULL_PROCESSING_FATAL_LOG: Final = 'Backend pull processing failed fatally'
+    PUSH_PROCESSING_FATAL_LOG: Final = 'Backend push processing failed fatally'
+    IPC_OUTCOME_HANDLER_UNAVAILABLE: Final = 'run-outcome IPC handler is unavailable'
+    IPC_QUERY_FATAL_LOG: Final = 'dashboard query failed fatally'
+    IPC_OUTCOME_FATAL_LOG: Final = 'dashboard run-outcome request failed fatally'
+    IPC_QUERY_STOPPED_UNEXPECTEDLY: Final = 'Backend query server stopped unexpectedly'
+    STORE_DURABLE_APPEND_MISMATCH: Final = 'Durable append differs from its HTTP record'
+    PUSH_COMMIT_PERSISTED_LOG: Final = 'Push %s: commit %s persisted; starting validation'
+    VALIDATION_PUSH_TRANSACTION_REQUIRED: Final = 'Validation requires an active push transaction'
+    STORE_PUSH_GROUP_MISSING: Final = 'No push group to finish'
+    REPLAY_PUSH_GROUP_MISSING: Final = 'Commit/validation has no preceding accepted push group'
+    REPLAY_PUSH_GROUP_OVERLAP: Final = 'A second accepted push precedes validation of the first'
+    STORE_PUSH_GROUP_INCOMPLETE: Final = 'Backend closed with an incomplete accepted-push group'
+    PUSH_SERVER_LOOP_REQUIRED: Final = 'Accepted push requires the Backend server event loop'
+    RUN_OUTCOME_PUSH_GROUP_OVERLAP: Final = 'Run outcome cannot overlap a push group'
+    REPLAY_PUSH_GROUP_COMMIT_MISMATCH: Final = 'Commit does not match the active push group'
+    REPLAY_PUSH_GROUP_INCOMPLETE_TEMPLATE: Final = (
+        'Incomplete push group at replay line {line_number}'
+    )
+    REPLAY_PUSH_GROUP_VALIDATION_MISMATCH: Final = 'Validation does not match the active commit'
+    REPLAY_PUSH_GROUP_OUTCOME_EARLY: Final = 'Run outcome precedes push group completion'
+    REPLAY_GROUP_FAILED_LOG: Final = 'Replay failed at line %d (group starts at %d)'
+    PUBLIC_HTTP_EXCHANGE_INVALID: Final = 'Public HTTP exchange has an invalid contour'
+    PULL_RESPONSE_BODY_MISSING: Final = 'Pull response body is missing'
+    PUSH_CAPTURED_LINKAGE_REQUIRED: Final = 'Accepted push requires captured pull/session linkage'
+    QUERY_REQUEST_INVALID: Final = 'Query requires GET /query without parameters or a body'
+    QUERY_RESPONSE_BODY_MISMATCH: Final = 'Query response body does not match its record'
+    PUSH_RESULT_LINKAGE_INVALID: Final = (
+        'Processed push has missing or inconsistent commit/validation'
+    )
+    PUSH_REJECTED_LINKAGE_INVALID: Final = 'Unaccepted push cannot have commit/validation'
+    STORE_PROMISE_COMPLETION_MISSING: Final = 'Response promise has no completion'
+    STORE_RESPONSE_PROCESSING_FAILED_LOG: Final = 'Backend Store response processing failed'
+    RUN_OUTCOME_SELF_ID_INCONSISTENT: Final = 'Run-outcome response self ID is inconsistent'
+    RUN_OUTCOME_VALIDATION_COMMIT_REQUIRED: Final = 'Run-outcome validation requires its commit ID'
+    RUN_OUTCOME_REFERENCE_UUID_INVALID: Final = 'Run-outcome reference IDs must be UUIDv7'
+
     API_TITLE: Final = "Highly-Cited Researcher Annotation API"
     API_DESCRIPTION: Final = (
         "Pull a JSONL annotation task, submit completed values, and compare the "

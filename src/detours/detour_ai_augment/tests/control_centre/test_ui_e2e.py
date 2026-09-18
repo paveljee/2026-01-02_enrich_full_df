@@ -46,6 +46,9 @@ from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helper
 from src.detours.detour_ai_augment.protected.tests import pytest_plugin
 from src.detours.detour_ai_augment.protected.tests.operator import test_operator_e2e as operator
 from src.detours.detour_ai_augment.src.backend import server as backend_server
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_backend_store import (
+    initialize_backend_store,
+)
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_context import (
     EXPECTED_GROUND_TRUTH_RESEARCHERS,
     EXPECTED_INELIGIBLE_RESEARCHERS,
@@ -134,6 +137,29 @@ def completed_query_files(
 
 
 @pytest.mark.python_subprocess
+def test_completed_query_fixture_has_current_queryable_history(
+    completed_query_files: ui_tests.StartupFiles,
+) -> None:
+    """Verify the real browser fixture's Store setup before any browser is needed."""
+    files = completed_query_files
+    runtime = backend_server.configure_runtime(files.config, require_namekey=False)
+    with initialize_backend_store(runtime, ipc_only=True) as capability:
+        snapshot = capability._engine._query_snapshot()
+    assert len(snapshot.attempts) == len(snapshot.run_outcome_records) == 1
+    attempt = snapshot.attempts[0]
+    validation = attempt.validation_record
+    assert validation is not None
+    outcome = snapshot.run_outcome_records[0]
+    body = outcome.run_outcome_response_body
+    assert body.commit_record_id == attempt.attempt.commit_record.record_id
+    assert body.validation_record_id == validation.record_id
+    assert body.run_outcome_record_id == outcome.record_id
+    assert sum(
+        len(item.committed_innerdicts) for item in snapshot.ai_augment_singular_outerdicts
+    ) == 1
+
+
+@pytest.mark.python_subprocess
 def test_completed_grid_row_uses_real_query_ipc(
     completed_query_files: ui_tests.StartupFiles,
     python_process: pytest_plugin.PythonProcess,
@@ -153,12 +179,17 @@ def test_completed_grid_row_uses_real_query_ipc(
         python_process.source(pytest_plugin.completed_query_dashboard_process),
     ))
     with tempfile.TemporaryDirectory(prefix="query-browser-", dir="/tmp") as directory:
+        with initialize_backend_store(
+            backend_server.configure_runtime(files.config, require_namekey=False),
+            ipc_only=True,
+        ) as query_store:
+            fixture_store = query_store._engine
         runtime = operator.OperatorRuntime(
-            repository_root=pytestconfig.rootpath, config_path=files.config,
-            backend_store=backend_server.configure_runtime(
-                files.config, require_namekey=False,
-            ).pipeline_config.backend_store,
-            replay_log_path=files.replay, rollout_cas_dir=files.config.parent / "cas",
+            repository_root=pytestconfig.rootpath,
+            config_path=files.config,
+            backend_store=fixture_store,
+            replay_log_path=files.replay,
+            rollout_cas_dir=files.config.parent / "cas",
             dashboard_socket_path=Path(directory) / "dashboard.sock",
         )
         with operator.running_dashboard(runtime) as dashboard, sync_playwright() as playwright:

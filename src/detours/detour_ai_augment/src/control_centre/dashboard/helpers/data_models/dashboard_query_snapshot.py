@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Mapping
 from functools import cached_property
+from http import HTTPStatus
 from types import MappingProxyType
 from typing import Self
 from uuid import UUID
@@ -67,12 +68,18 @@ class DashboardQuerySnapshot(FrozenStrictModel):
     @cached_property
     def outcomes_by_session(self) -> Mapping[tuple[str, UUID], RunOutcomeRecord]:
         return MappingProxyType({
-            (run_outcome_record.run_outcome_request.namekey.to_json_key(), session_id):
-            run_outcome_record
+            (
+                run_outcome_record.run_outcome_request.namekey.to_json_key(),
+                session_id,
+            ): run_outcome_record
             for run_outcome_record in self.query_response.run_outcome_records
-            if (session_id := (
-                run_outcome_record.run_outcome_response_body.codex_session_record.session_id
-            )) is not None
+            if run_outcome_record.response_code != HTTPStatus.CONFLICT
+            if (
+                session_id := (
+                    run_outcome_record.run_outcome_response_body.codex_session_record.session_id
+                )
+            )
+            is not None
         })
 
     @cached_property
@@ -139,16 +146,19 @@ class DashboardQuerySnapshot(FrozenStrictModel):
                         record.validation_record is None
                         or validation_id != record.validation_record.record_id
                         or outcome is None
+                        or outcome.response_code == HTTPStatus.CONFLICT
                         or outcome.run_outcome_request.namekey.to_json_key() != namekey
                         or outcome.run_outcome_response_body.codex_session_record.session_id
                         != session_id
                         or session_id is None
                         or session_id
-                        != (accepted.commit_record.commit_request_body
-                            .codex_session_record.session_id)
+                        != (
+                            accepted.commit_record.commit_request_body.codex_session_record.session_id
+                        )
                         or name_key_from_header_value(
                             accepted.commit_record.request_headers.get(NAME_KEY_HEADER)
-                        ).to_json_key() != namekey
+                        ).to_json_key()
+                        != namekey
                     ):
                         raise ValueError(Locale.ATTEMPT_DATABASE_INCONSISTENT)
                     accepted_ids.add(commit_id)

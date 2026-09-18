@@ -16,6 +16,7 @@ import sys
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from datetime import datetime, timezone
 from enum import StrEnum
+from http import HTTPStatus
 from pathlib import Path, PurePosixPath
 from typing import Any, Final, Literal, NewType, Protocol, Self
 from urllib import error as urllib_error
@@ -986,7 +987,7 @@ class _BackendDatabaseClient:
         *,
         run_outcome: RunLifecycle,
         namekey: NameKey,
-    ) -> int:
+    ) -> HTTPStatus:
         request_path, request_headers = RunOutcomeRequest.outbound_http(
             run_outcome=run_outcome,
             namekey=namekey,
@@ -1004,15 +1005,16 @@ class _BackendDatabaseClient:
             response = connection.getresponse()
             body = response.read()
             if response.status not in {
-                status.HTTP_200_OK,
-                status.HTTP_500_INTERNAL_SERVER_ERROR,
+                HTTPStatus.OK,
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                HTTPStatus.CONFLICT,
             }:
                 raise RuntimeError(Locale.RUN_OUTCOME_SNAPSHOT_REQUEST_FAILED)
             try:
                 RunOutcomeResponseBody.from_serialized_json(body)
             except ValidationError as exc:
                 raise RuntimeError(Locale.BACKEND_DATABASE_RESPONSE_INVALID) from exc
-            return response.status
+            return HTTPStatus(response.status)
         except (OSError, http.client.HTTPException) as exc:
             raise RuntimeError(Locale.RUN_OUTCOME_SNAPSHOT_REQUEST_FAILED) from exc
         finally:

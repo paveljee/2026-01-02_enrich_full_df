@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from http import HTTPStatus
 from typing import Self
 from uuid import UUID
 
+import requests
 from pydantic import Field, model_serializer, model_validator
 
 from src.detours.detour_ai_augment.protected.src.architecture import (
     BackendComponent,
 )
+from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
 from src.helpers.architecture import FrozenStrictModel, implements
 from src.helpers.data_models import HttpRequestLogRecord
 
@@ -28,6 +31,9 @@ from .commit_event import (
 class _RunOutcomeResponseBodyJson(FrozenStrictModel):
     pull_record_id: UUID | None
     push_record_id: UUID | None
+    commit_record_id: UUID | None
+    validation_record_id: UUID | None
+    run_outcome_record_id: UUID
     codex_session_record: _CodexSessionRecordJson
 
 
@@ -35,6 +41,9 @@ class _RunOutcomeResponseBodyJson(FrozenStrictModel):
 class RunOutcomeResponseBody(FrozenStrictModel):
     pull_record_id: UUID | None
     push_record_id: UUID | None
+    commit_record_id: UUID | None
+    validation_record_id: UUID | None
+    run_outcome_record_id: UUID
     codex_session_record: CodexSessionRecord
 
     @classmethod
@@ -44,6 +53,9 @@ class RunOutcomeResponseBody(FrozenStrictModel):
         return cls(
             pull_record_id=serialized.pull_record_id,
             push_record_id=serialized.push_record_id,
+            commit_record_id=serialized.commit_record_id,
+            validation_record_id=serialized.validation_record_id,
+            run_outcome_record_id=serialized.run_outcome_record_id,
             codex_session_record=CodexSessionRecord(
                 session_id=session.codex_session_id,
                 codex_rollout_record=session.codex_rollout_record,
@@ -56,6 +68,9 @@ class RunOutcomeResponseBody(FrozenStrictModel):
         return {
             "pull_record_id": self.pull_record_id,
             "push_record_id": self.push_record_id,
+            "commit_record_id": self.commit_record_id,
+            "validation_record_id": self.validation_record_id,
+            "run_outcome_record_id": self.run_outcome_record_id,
             "codex_session_record": _CodexSessionRecordJson(
                 codex_session_id=session.session_id,
                 codex_rollout_record=session.codex_rollout_record,
@@ -86,7 +101,7 @@ class RunOutcomeRecord(HttpRequestLogRecord):
         cls,
         request: RunOutcomeRequest,
         *,
-        response_code: int,
+        response_code: HTTPStatus,
         response_headers: Mapping[str, str] | None,
         response_body: RunOutcomeResponseBody,
         ready_to_respond_at_unix_usec: int,
@@ -147,24 +162,47 @@ class RunOutcomeRecord(HttpRequestLogRecord):
         received_at_unix_usec = self.received_at_unix_usec
         ready_to_respond_at_unix_usec = self.ready_to_respond_at_unix_usec
         if (
-            projected_request_record
-            != self.run_outcome_request.http_request_log_record
-            or self.response_code not in {200, 500}
+            projected_request_record != self.run_outcome_request.http_request_log_record
+            or self.response_code not in {
+                HTTPStatus.OK, HTTPStatus.CONFLICT, HTTPStatus.INTERNAL_SERVER_ERROR,
+            }
             or self.response_body is None
             or ready_to_respond_at_unix_usec is None
             or received_at_unix_usec is None
             or self.duration_usec is None
             or self.duration_usec < 0
-            or self.duration_usec
-            != ready_to_respond_at_unix_usec - received_at_unix_usec
+            or self.duration_usec != ready_to_respond_at_unix_usec - received_at_unix_usec
             or self.response_headers != expected_response_headers
-            or (self.response_code == 200) is not complete_capture
+            or (self.response_code in {HTTPStatus.OK, HTTPStatus.CONFLICT}) is not complete_capture
         ):
             raise ValueError("run-outcome HTTP record has an invalid contour")
         parsed = RunOutcomeResponseBody.from_serialized_json(self.response_body)
+        if parsed.run_outcome_record_id != self.record_id:
+            raise ValueError(Locale.RUN_OUTCOME_SELF_ID_INCONSISTENT)
+        if parsed.validation_record_id is not None and parsed.commit_record_id is None:
+            raise ValueError(Locale.RUN_OUTCOME_VALIDATION_COMMIT_REQUIRED)
+        if any(
+            value is not None and value.version != 7
+            for value in (
+                parsed.commit_record_id,
+                parsed.validation_record_id,
+                parsed.run_outcome_record_id,
+            )
+        ):
+            raise ValueError(Locale.RUN_OUTCOME_REFERENCE_UUID_INVALID)
         if parsed != self.run_outcome_response_body:
             raise ValueError("run-outcome response body does not match its record")
         return self
+
+    def to_response(self) -> requests.Response:
+        # Absence of SourceKey is intentional for an incomplete outcome capture.
+        # Adapt only at this transport boundary; do not alter the durable record.
+        record = HttpRequestLogRecord.model_validate(
+            self.model_dump() | {"response_headers": self.response_headers or {}},
+        )
+        response = record.to_response()
+        response.headers["Content-Type"] = "application/json"
+        return response
 
     @model_validator(mode="after")
     def _validate_run_outcome_record(self) -> Self:

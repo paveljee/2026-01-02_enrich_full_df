@@ -14,6 +14,7 @@ from contextlib import ExitStack, asynccontextmanager, nullcontext
 from copy import deepcopy
 from datetime import datetime, timezone
 from email.message import Message
+from http import HTTPStatus
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 from typing import Any, Literal, cast
@@ -227,6 +228,9 @@ def run_outcome_record(
             SOURCE_KEY_HEADER: api._source_key_header(rollout_filename, 1)
         }
         body = RunOutcomeResponseBody(
+            commit_record_id=None,
+            validation_record_id=None,
+            run_outcome_record_id=request.http_request_log_record.record_id,
             pull_record_id=None,
             push_record_id=None,
             codex_session_record=CodexSessionRecord(
@@ -245,6 +249,9 @@ def run_outcome_record(
     else:
         response_headers = None
         body = RunOutcomeResponseBody(
+            commit_record_id=None,
+            validation_record_id=None,
+            run_outcome_record_id=request.http_request_log_record.record_id,
             pull_record_id=None,
             push_record_id=None,
             codex_session_record=CodexSessionRecord(
@@ -255,7 +262,7 @@ def run_outcome_record(
         )
     return RunOutcomeRecord.from_run_outcome_request(
         request,
-        response_code=response_code,
+        response_code=HTTPStatus(response_code),
         response_headers=response_headers,
         response_body=body,
         ready_to_respond_at_unix_usec=2,
@@ -1190,6 +1197,7 @@ def test_backend_database_client_queries_unix_socket_without_authentication(
     (
         (status.HTTP_200_OK, True),
         (status.HTTP_500_INTERNAL_SERVER_ERROR, False),
+        (status.HTTP_409_CONFLICT, False),
     ),
 )
 def test_backend_database_client_posts_exact_run_outcome_request(
@@ -1204,6 +1212,9 @@ def test_backend_database_client_posts_exact_run_outcome_request(
     rollout_filename = f"{api.ROLLOUT_FILENAME_PREFIX}{session_id}.jsonl"
     report = f".\n└── {api.APPENDWATCH_OK_PREFIX}{rollout_filename}\n".encode()
     snapshot = RunOutcomeResponseBody(
+        commit_record_id=None,
+        validation_record_id=None,
+        run_outcome_record_id=uuid7(),
         pull_record_id=None,
         push_record_id=None,
         codex_session_record=CodexSessionRecord(
@@ -3351,13 +3362,20 @@ def startup_files(tmp_path: Path) -> StartupFiles:
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps(config))
     runtime = backend_server.configure_runtime(config_path, require_namekey=False)
-    store = runtime.pipeline_config.backend_store
-    store.rebuild_from_log(runtime, reset_confirmed=True)
+    with backend_server.backend_store_lifecycle(
+        runtime, new=True, confirmed=True, yes=True
+    ) as store:
+        detour_path = store._detour_db_path
     source.chmod(0o400)
     process_temp = tmp_path / "process-temp"
     process_temp.mkdir()
-    return StartupFiles(config=config_path, source=source, replay=replay,
-                        detour=store.detour_db_path, process_temp=process_temp)
+    return StartupFiles(
+        config=config_path,
+        source=source,
+        replay=replay,
+        detour=detour_path,
+        process_temp=process_temp,
+    )
 
 
 def argv(mode: str, config: Path, *, yes: bool = True) -> list[str]:

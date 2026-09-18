@@ -14,18 +14,20 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import AsyncGenerator, Iterator, Mapping, Sequence
+from collections.abc import AsyncGenerator, Coroutine, Iterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from http import HTTPStatus
 from pathlib import Path, PurePosixPath
 from random import Random
 from typing import Any, Callable, Literal, Self, TextIO, get_args
+from urllib.parse import urlsplit
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
 import duckdb
-from fastapi import FastAPI, HTTPException, Request, status
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+import requests
+from fastapi import status
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -34,9 +36,8 @@ from pydantic import (
     ValidationError,
     model_validator,
 )
-from starlette.datastructures import Headers
-from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from src.detours.detour_ai_augment.protected.src.architecture import BackendComponent
 from src.detours.detour_ai_augment.protected.src.backend.helpers import codex_parse
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.pydantic_to_paste import (  # noqa: E501
     MAX_PUSH_BODY_BYTES,
@@ -141,6 +142,8 @@ from src.helpers.vars import (
 from ..control_centre.dashboard.helpers.data_models.run_outcome import (
     NAME_KEY_HEADER,
     RUN_OUTCOME_PATHS,
+    RunOutcomePath,
+    RunOutcomeRequest,
     name_key_from_header_value,
     name_key_header_value,
 )
@@ -170,7 +173,17 @@ from .helpers.data_models.query_response import (
     AgentRuntimeAttempt,
     AgentRuntimeAttemptRecord,
 )
-from .helpers.data_models.run_outcome_record import RunOutcomeRecord
+from .helpers.data_models.request_response_records import (
+    PullRequestRecord,
+    PushRequestRecord,
+    PushResponseRecord,
+    RunOutcomeRequestRecord,
+)
+from .helpers.data_models.response_record_promise import (
+    BackendStoreAcknowledgment,
+    BackendStoreException,
+)
+from .helpers.data_models.run_outcome_record import RunOutcomeRecord, RunOutcomeResponseBody
 
 logger = logging.getLogger(__name__)
 
@@ -408,7 +421,7 @@ BACKEND_PROCESS_LOCK_DESCRIPTOR: int | None = None
 AUTHORITATIVE_BACKGROUND_TASKS: set[asyncio.Task[None]] = set()
 BACKEND_WORKFLOW_STATE_LOCK = threading.Lock()
 BACKEND_LIFECYCLE = BackendLifecycle.READY
-BACKEND_ATTEMPT_RECORD: AgentRuntimeAttemptRecord | None = None
+BACKEND_PUSH_RESPONSE_RECORD: PushResponseRecord | None = None
 BACKEND_CURRENT_PULL_RECORD: HttpRequestLogRecord | None = None
 BACKEND_PENDING_PULL_RECORD: HttpRequestLogRecord | None = None
 BACKEND_LATEST_PUSH_RECORD: HttpRequestLogRecord | None = None
@@ -571,7 +584,6 @@ MEDIA_TYPE_WITH_CHARSET = f"{MEDIA_TYPE}; charset=utf-8"
 
 @asynccontextmanager
 async def lifespan(
-    _app: FastAPI,
     runtime: AiAugmentBackendContext,
 ) -> AsyncGenerator[None, None]:
     try:
@@ -580,13 +592,13 @@ async def lifespan(
             global BACKEND_LATEST_PUSH_RECORD
             global BACKEND_PENDING_PULL_RECORD
             global BACKEND_SESSION_ID
-            global BACKEND_ATTEMPT_RECORD
+            global BACKEND_PUSH_RESPONSE_RECORD
             global BACKEND_LIFECYCLE
             BACKEND_CURRENT_PULL_RECORD = None
             BACKEND_PENDING_PULL_RECORD = None
             BACKEND_LATEST_PUSH_RECORD = None
             BACKEND_SESSION_ID = None
-            BACKEND_ATTEMPT_RECORD = None
+            BACKEND_PUSH_RESPONSE_RECORD = None
             BACKEND_LIFECYCLE = BackendLifecycle.READY
         prove_workflow_inputs_readable()
         start_backend_session_reader()
@@ -638,12 +650,10 @@ APP_CONFIG: dict[str, Any] = {
     "title": Locale.API_TITLE,
     "description": Locale.API_DESCRIPTION,
     "version": API_VERSION,
-    "lifespan": lifespan,
 }
 
 PULL_ROUTE: dict[str, Any] = {
     "path": PULL_PATH,
-    "response_class": Response,
     "summary": Locale.PULL_SUMMARY,
     "description": Locale.PULL_DESCRIPTION,
     "responses": {
@@ -682,7 +692,6 @@ PULL_ROUTE: dict[str, Any] = {
 
 PUSH_ROUTE: dict[str, Any] = {
     "path": PUSH_PATH,
-    "response_class": Response,
     "status_code": status.HTTP_202_ACCEPTED,
     "summary": Locale.PUSH_SUMMARY,
     "description": Locale.PUSH_DESCRIPTION,
@@ -717,8 +726,6 @@ PUSH_ROUTE: dict[str, Any] = {
         }
     },
 }
-
-app = FastAPI(**APP_CONFIG)
 
 
 class _RetryEvidenceObligation(FrozenStrictModel):
@@ -1813,7 +1820,7 @@ def _create_codex_schema(
     codex_match_version: int = 1,
 ) -> None:
     id_col = duckdb_quote_identifier(CODEX_ID_COL)
-    store.execute(
+    store._execute(
         f"""
         CREATE TABLE IF NOT EXISTS {CODEX_FC_TABLE} (
             {id_col} BIGINT PRIMARY KEY,
@@ -1825,7 +1832,7 @@ def _create_codex_schema(
         )
         """
     )
-    store.execute(
+    store._execute(
         f"""
         CREATE TABLE IF NOT EXISTS {CODEX_RETRY_BASELINE_TABLE} (
             {duckdb_quote_identifier(CODEX_RETRY_RUN_ID_COL)} VARCHAR PRIMARY KEY,
@@ -1837,7 +1844,7 @@ def _create_codex_schema(
         )
         """
     )
-    store.execute(
+    store._execute(
         f"""
         CREATE TABLE IF NOT EXISTS {CODEX_EVIDENCE_AUDIT_TABLE} (
             {duckdb_quote_identifier(CODEX_EVIDENCE_AUDIT_ID_COL)} BIGINT PRIMARY KEY,
@@ -1853,7 +1860,7 @@ def _create_codex_schema(
         )
         """
     )
-    store.execute(
+    store._execute(
         f"""
         CREATE TABLE IF NOT EXISTS {CODEX_FCO_TABLE} (
             {id_col} BIGINT PRIMARY KEY,
@@ -1862,7 +1869,7 @@ def _create_codex_schema(
         )
         """
     )
-    store.execute(
+    store._execute(
         f"""
         CREATE TABLE IF NOT EXISTS {CODEX_CALLS_TABLE} (
             {id_col} BIGINT PRIMARY KEY,
@@ -1873,7 +1880,7 @@ def _create_codex_schema(
         )
         """
     )
-    store.execute(
+    store._execute(
         f"""
         CREATE TABLE IF NOT EXISTS {CODEX_TURN_REF_TABLE} (
             {id_col} BIGINT PRIMARY KEY,
@@ -1893,7 +1900,7 @@ def _create_codex_schema(
         """
     )
     if codex_match_version == 2:
-        store.execute(
+        store._execute(
             f"""
             CREATE OR REPLACE VIEW {CODEX_TURN_REF_NORMALIZED_VIEW} AS
             SELECT
@@ -1907,7 +1914,7 @@ def _create_codex_schema(
 
 def _next_codex_row_id(store: AiAugmentBackendStore, table_name: str) -> int:
     """Allocation shares the caller's Store transaction, so rollback consumes no IDs."""
-    row = store.execute(
+    row = store._execute(
         f"SELECT COALESCE(MAX(id), 0) + 1 FROM {duckdb_quote_identifier(table_name)}"
     ).fetchone()
     assert row is not None
@@ -1924,7 +1931,7 @@ def _insert_or_validate(
     values: tuple[object, ...],
 ) -> None:
     projection = ", ".join(duckdb_quote_identifier(column) for column in columns)
-    existing = store.execute(
+    existing = store._execute(
         f"SELECT {projection} FROM {table_name} WHERE {duckdb_quote_identifier(key_column)} = ?",
         [key_value],
     ).fetchall()
@@ -1941,7 +1948,7 @@ def _insert_or_validate(
     values = (_next_codex_row_id(store, table_name), *values)
     projection = ", ".join(duckdb_quote_identifier(column) for column in columns)
     placeholders = ", ".join("?" for _column in columns)
-    store.execute(
+    store._execute(
         f"INSERT INTO {table_name} ({projection}) VALUES ({placeholders})",
         list(values),
     )
@@ -1962,7 +1969,7 @@ def persist_rollout_index(
         codex_match_version=codex_match_version,
     )
     current_call_ids = {row.call_id for row in rollout_index.fc_rows}
-    existing_call_rows: list[tuple[str]] = store.execute(
+    existing_call_rows: list[tuple[str]] = store._execute(
         f"SELECT {duckdb_quote_identifier(CODEX_CALL_ID_COL)} "
         f"FROM {CODEX_CALLS_TABLE} WHERE "
         f"{duckdb_quote_identifier(CODEX_ROLLOUT_FILENAME_COL)} = ?",
@@ -1975,7 +1982,7 @@ def persist_rollout_index(
     if not existing_call_ids.issubset(current_call_ids):
         raise _PushValidationError(Locale.PROVENANCE_PREFIX_OLDER)
     current_turn_keys = {(row.call_id, row.ref_id) for row in rollout_index.turn_ref_rows}
-    existing_turn_rows: list[tuple[str, str]] = store.execute(
+    existing_turn_rows: list[tuple[str, str]] = store._execute(
         f"SELECT "
         f"ts.{duckdb_quote_identifier(CODEX_CALL_ID_COL)}, "
         f"ts.{duckdb_quote_identifier(CODEX_REF_ID_COL)} "
@@ -2064,7 +2071,7 @@ def persist_rollout_index(
             CODEX_CITE_TEXT_COL,
         )
         projection = ", ".join(duckdb_quote_identifier(column) for column in columns)
-        existing = store.execute(
+        existing = store._execute(
             f"SELECT {projection} FROM {CODEX_TURN_REF_TABLE} WHERE "
             f"{duckdb_quote_identifier(CODEX_CALL_ID_COL)} = ? AND "
             f"{duckdb_quote_identifier(CODEX_REF_ID_COL)} = ?",
@@ -2093,7 +2100,7 @@ def persist_rollout_index(
             values = (_next_codex_row_id(store, CODEX_TURN_REF_TABLE), *values)
             projection = ", ".join(duckdb_quote_identifier(column) for column in columns)
             placeholders = ", ".join("?" for _column in columns)
-            store.execute(
+            store._execute(
                 f"INSERT INTO {CODEX_TURN_REF_TABLE} ({projection}) VALUES ({placeholders})",
                 list(values),
             )
@@ -2121,7 +2128,7 @@ def persist_rollout_index(
         ),
     )
     for table_name, distinct_expression in integrity_checks:
-        integrity_row = store.execute(
+        integrity_row = store._execute(
             f"SELECT COUNT(*), COUNT(DISTINCT {distinct_expression}) FROM {table_name}"
         ).fetchone()
         if integrity_row is None:
@@ -2134,7 +2141,7 @@ def persist_rollout_index(
                 Locale.PROVENANCE_UNIQUENESS_FAILED_TEMPLATE.format(table_name=table_name)
             )
 
-    linkage_row = store.execute(
+    linkage_row = store._execute(
         f"""
         SELECT
             (
@@ -2169,14 +2176,14 @@ def persist_rollout_index(
     if missing_fc_links or missing_fco_links or missing_call_links:
         raise _PushValidationError(Locale.PROVENANCE_RELATIONSHIPS_INCOMPLETE)
 
-    persisted_call_rows: list[tuple[str]] = store.execute(
+    persisted_call_rows: list[tuple[str]] = store._execute(
         f"SELECT {duckdb_quote_identifier(CODEX_CALL_ID_COL)} "
         f"FROM {CODEX_CALLS_TABLE} WHERE "
         f"{duckdb_quote_identifier(CODEX_ROLLOUT_FILENAME_COL)} = ?",
         [rollout_index.session.rollout_filename],
     ).fetchall()
     persisted_call_ids = {row[0] for row in persisted_call_rows}
-    persisted_turn_rows: list[tuple[str, str]] = store.execute(
+    persisted_turn_rows: list[tuple[str, str]] = store._execute(
         f"SELECT "
         f"ts.{duckdb_quote_identifier(CODEX_CALL_ID_COL)}, "
         f"ts.{duckdb_quote_identifier(CODEX_REF_ID_COL)} "
@@ -2238,7 +2245,7 @@ def _exact_evidence_candidates(
     rollout_filename: str,
     excerpt: str,
 ) -> tuple[_EvidenceCandidate, ...]:
-    rows = store.execute(
+    rows = store._execute(
         f"""
         SELECT
             ts.{duckdb_quote_identifier(CODEX_REF_ID_COL)},
@@ -2273,7 +2280,7 @@ def _normalized_evidence_tokens(
     store: AiAugmentBackendStore,
     excerpt: str,
 ) -> tuple[str, ...]:
-    row = store.execute(
+    row = store._execute(
         f"SELECT {normalized_tokens_sql('?')}",
         [excerpt],
     ).fetchone()
@@ -2292,7 +2299,7 @@ def _near_evidence_candidates(
 ) -> tuple[_EvidenceCandidate, ...]:
     if not submitted_tokens:
         return ()
-    rows = store.execute(
+    rows = store._execute(
         f"""
         WITH submitted(tokens) AS (VALUES (?)),
         candidate_rows AS (
@@ -2767,7 +2774,7 @@ def _derive_retry_obligations(
 ) -> _RetryObligations:
     try:
         obligations = _RetryObligations.model_validate_json(baseline_json)
-        rows: list[tuple[str, str]] = store.execute(
+        rows: list[tuple[str, str]] = store._execute(
             f"""
             SELECT
                 {duckdb_quote_identifier(CODEX_EVIDENCE_SUBMISSION_COL)},
@@ -2824,7 +2831,7 @@ def _process_retry_attempt(
     inserted_baseline = False
     if not assessment.accepted:
         inserted_baseline = (
-            store.execute(
+            store._execute(
                 f"""
                 INSERT INTO {CODEX_RETRY_BASELINE_TABLE} (
                     {duckdb_quote_identifier(CODEX_RETRY_RUN_ID_COL)},
@@ -2850,7 +2857,7 @@ def _process_retry_attempt(
             is not None
         )
 
-    baseline_row: tuple[str, str, str, str] | None = store.execute(
+    baseline_row: tuple[str, str, str, str] | None = store._execute(
         f"""
         SELECT
             {duckdb_quote_identifier(CODEX_RETRY_NAMEKEY_COL)},
@@ -2911,7 +2918,7 @@ def _process_retry_attempt(
 
     applied = not violations
     accepted = assessment.accepted and applied
-    store.execute(
+    store._execute(
         f"""
         INSERT INTO {CODEX_EVIDENCE_AUDIT_TABLE} (
             {duckdb_quote_identifier(CODEX_EVIDENCE_AUDIT_ID_COL)},
@@ -2950,7 +2957,7 @@ def _retry_baseline_exists(
     namekey: NameKey,
     session_id: UUID,
 ) -> bool:
-    row = store.execute(
+    row = store._execute(
         f"""
         SELECT
             {duckdb_quote_identifier(CODEX_RETRY_NAMEKEY_COL)},
@@ -2972,7 +2979,7 @@ def _rollout_ref_urls(
     *,
     rollout_filename: str,
 ) -> dict[str, str]:
-    rows: list[tuple[str, str, str]] = store.execute(
+    rows: list[tuple[str, str, str]] = store._execute(
         f"""
         SELECT
             ts.{duckdb_quote_identifier(CODEX_REF_ID_COL)},
@@ -3124,176 +3131,39 @@ def _request_body_for_authoritative_log(body: bytes) -> str:
 
 
 def _authoritative_http_record(
-    request: Request,
+    request: requests.PreparedRequest,
+    response: requests.Response,
     *,
-    request_body: bytes,
-    response_code: int,
-    response_headers: Mapping[str, str],
-    response_body: bytes,
     started_ns: int,
-    ready_to_respond_at_unix_usec: int,
 ) -> HttpRequestLogRecord:
-    try:
-        response_text = response_body.decode(TEXT_ENCODING)
-    except UnicodeDecodeError as exc:
-        raise _PushConfigurationError(Locale.AUTHORITATIVE_RESPONSE_NOT_UTF8) from exc
+    parsed = urlsplit(request.url or "")
     return HttpRequestLogRecord(
         schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
-        method=request.method,
-        scheme=request.url.scheme,
-        host=request.url.hostname or "",
-        port=request.url.port,
-        ready_to_respond_at_unix_usec=ready_to_respond_at_unix_usec,
-        path=request.url.path,
-        query=request.url.query,
+        method=request.method or "",
+        scheme=parsed.scheme,
+        host=parsed.hostname or "",
+        port=parsed.port,
+        path=parsed.path,
+        query=parsed.query,
         request_headers=dict(request.headers),
-        request_body=_request_body_for_authoritative_log(request_body),
-        response_code=response_code,
-        response_headers=dict(response_headers),
-        response_body=response_text,
+        request_body=_request_body_for_authoritative_log(_prepared_request_body(request)),
+        response_code=response.status_code,
+        response_headers=dict(response.headers),
+        response_body=response.content.decode(TEXT_ENCODING),
         received_at_unix_usec=None,
+        ready_to_respond_at_unix_usec=time.time_ns() // NANOSECONDS_PER_MICROSECOND,
         duration_usec=(time.monotonic_ns() - started_ns) // NANOSECONDS_PER_MICROSECOND,
     )
 
 
-class _AuthoritativeHttpMiddleware:
-    """Durably record finite public exchanges before forwarding ASGI responses."""
-
-    def __init__(self, app: ASGIApp) -> None:
-        self.app = app
-
-    async def __call__(
-        self,
-        scope: Scope,
-        receive: Receive,
-        send: Send,
-    ) -> None:
-        if scope[ASGI_TYPE_KEY] != ASGI_HTTP_SCOPE_TYPE:
-            await self.app(scope, receive, send)
-            return
-        method: str = scope[ASGI_METHOD_KEY]
-        path: str = scope[ASGI_PATH_KEY]
-        route = (method, path)
-        if route not in AUTHORITATIVE_FASTAPI_ROUTES:
-            await self.app(scope, receive, send)
-            return
-
-        started_ns = time.monotonic_ns()
-        request = Request(scope, receive=receive)
-        request_body = await request.body()
-        logger.info("Backend received %s %s: %d request bytes", method, path, len(request_body))
-        request_body_pending = True
-        response_messages: list[Message] = []
-
-        async def replay_request_body() -> Message:
-            nonlocal request_body_pending
-            if request_body_pending:
-                request_body_pending = False
-                return {
-                    ASGI_TYPE_KEY: ASGI_HTTP_REQUEST_MESSAGE_TYPE,
-                    ASGI_BODY_KEY: request_body,
-                    ASGI_MORE_BODY_KEY: False,
-                }
-            return await receive()
-
-        async def capture_response(message: Message) -> None:
-            response_messages.append(message)
-
-        async def replace_response(response: Response) -> None:
-            response_messages.clear()
-            await response(scope, replay_request_body, capture_response)
-
-        runtime: AiAugmentBackendContext = request.app.state.runtime
-        try:
-            await self.app(scope, replay_request_body, capture_response)
-        except Exception:
-            logger.exception(Locale.AUTHORITATIVE_HANDLER_FAILED_LOG, method, path)
-            await replace_response(
-                JSONResponse(
-                    status_code=HTTP_INTERNAL_ERROR_RESPONSE,
-                    content={"detail": Locale.CONFIGURATION_ERROR_DETAIL},
-                )
-            )
-
-        response_start = tuple(
-            message
-            for message in response_messages
-            if message[ASGI_TYPE_KEY] == ASGI_HTTP_RESPONSE_START_MESSAGE_TYPE
-        )
-        response_chunks = tuple(
-            message
-            for message in response_messages
-            if message[ASGI_TYPE_KEY] == ASGI_HTTP_RESPONSE_BODY_MESSAGE_TYPE
-        )
-        if (
-            len(response_start) != 1
-            or not response_chunks
-            or response_chunks[-1].get(ASGI_MORE_BODY_KEY, False)
-        ):
-            logger.error(Locale.AUTHORITATIVE_RESPONSE_INCOMPLETE_LOG, method, path)
-            await replace_response(
-                JSONResponse(
-                    status_code=HTTP_INTERNAL_ERROR_RESPONSE,
-                    content={"detail": Locale.CONFIGURATION_ERROR_DETAIL},
-                )
-            )
-            response_start = tuple(
-                message
-                for message in response_messages
-                if message[ASGI_TYPE_KEY] == ASGI_HTTP_RESPONSE_START_MESSAGE_TYPE
-            )
-            response_chunks = tuple(
-                message
-                for message in response_messages
-                if message[ASGI_TYPE_KEY] == ASGI_HTTP_RESPONSE_BODY_MESSAGE_TYPE
-            )
-
-        start_message = response_start[0]
-        response_body_parts: list[bytes] = [
-            message.get(ASGI_BODY_KEY, b"") for message in response_chunks
-        ]
-        response_body = b"".join(response_body_parts)
-        response_header_pairs: list[tuple[bytes, bytes]] = start_message[
-            ASGI_HEADERS_KEY
-        ]
-        response_headers = Headers(raw=response_header_pairs)
-        response_code: int = start_message[ASGI_STATUS_KEY]
-        ready_to_respond_at_unix_usec = time.time_ns() // NANOSECONDS_PER_MICROSECOND
-        try:
-            record = _authoritative_http_record(
-                request,
-                request_body=request_body,
-                response_code=response_code,
-                response_headers=dict(response_headers.items()),
-                response_body=response_body,
-                started_ns=started_ns,
-                ready_to_respond_at_unix_usec=ready_to_respond_at_unix_usec,
-            )
-            record = runtime.pipeline_config.backend_store.append_authoritative_record(
-                record,
-            )
-            logger.info(
-                "Backend persisted %s %s: record=%s; HTTP %s; %d response bytes; %s us",
-                method, path, record.record_id, record.response_code,
-                len(response_body), record.duration_usec,
-            )
-            await _after_authoritative_public_record(record, runtime)
-        except Exception as exc:
-            logger.exception(Locale.AUTHORITATIVE_LOG_APPEND_FAILED_LOG, method, path, exc)
-            raise SystemExit(1) from exc
-
-        if record.response_code is None or record.response_body is None:
-            raise RuntimeError("Stored API response is incomplete")
-        await Response(
-            content=record.response_body.encode(TEXT_ENCODING),
-            status_code=record.response_code,
-            headers=record.response_headers,
-        )(scope, receive, send)
-        logger.info("Backend sent %s %s: record=%s; HTTP %s",
-                    method, path, record.record_id, record.response_code)
-
-
-app.add_middleware(_AuthoritativeHttpMiddleware)
+def _prepared_request_body(request: requests.PreparedRequest) -> bytes:
+    if request.body is None:
+        return b""
+    if isinstance(request.body, bytes):
+        return request.body
+    if isinstance(request.body, str):
+        return request.body.encode(TEXT_ENCODING)
+    raise ValueError(Locale.BUFFERED_REQUEST_REQUIRED)
 
 
 def _validated_http_record(record: HttpRequestLogRecord) -> HttpRequestLogRecord:
@@ -3366,7 +3236,7 @@ def _commit_request_body(
     try:
         return CommitRequestBody.from_serialized_json(
             value,
-            resolve_http_record=lambda record_id: store.http_record_with_ordinal(
+            resolve_http_record=lambda record_id: store._http_record_with_ordinal(
                 record_id,
             )[1],
         )
@@ -3381,7 +3251,7 @@ def _backend_commit_record(
     try:
         return BackendCommitRecord.from_http_request_log_record(
             record,
-            resolve_http_record=lambda record_id: store.http_record_with_ordinal(
+            resolve_http_record=lambda record_id: store._http_record_with_ordinal(
                 record_id,
             )[1],
         )
@@ -3468,12 +3338,12 @@ def _original_pull_record(
     store: AiAugmentBackendStore,
     pull_record: HttpRequestLogRecord,
 ) -> HttpRequestLogRecord:
-    pull_ordinal, pull = store.http_record_with_ordinal(pull_record.record_id)
+    pull_ordinal, pull = store._http_record_with_ordinal(pull_record.record_id)
     if (pull.method, pull.path) != (HTTP_GET_METHOD, PULL_PATH):
         raise _PushValidationError(Locale.REPLAY_COMMIT_PULL_INVALID)
     if _response_content_type(pull) != MARKDOWN_MEDIA_TYPE:
         return pull
-    row = store.execute(
+    row = store._execute(
         f"SELECT records.{AUTHORITATIVE_RECORD_PAYLOAD_COLUMN} "
         f"FROM {AUTHORITATIVE_RECORDS_TABLE} AS records "
         f"JOIN {AUTHORITATIVE_ATTEMPTS_TABLE} AS attempts "
@@ -3565,9 +3435,9 @@ def _validate_projected_commit(
         namekey = _parse_name_key_header(
             record.request_headers.get(NAME_KEY_HEADER)
         )
-        pull_ordinal, _pull = store.http_record_with_ordinal(pull.record_id)
-        push_ordinal, _push = store.http_record_with_ordinal(push.record_id)
-        commit_ordinal, _commit_record = store.http_record_with_ordinal(record.record_id)
+        pull_ordinal, _pull = store._http_record_with_ordinal(pull.record_id)
+        push_ordinal, _push = store._http_record_with_ordinal(push.record_id)
+        commit_ordinal, _commit_record = store._http_record_with_ordinal(record.record_id)
         if not (
             pull_ordinal < push_ordinal < commit_ordinal
             and (pull.method, pull.path) == (HTTP_GET_METHOD, PULL_PATH)
@@ -3629,15 +3499,15 @@ def _apply_validation_record(
 ) -> tuple[AgentRuntimeAttemptRecord, bool]:
     validation_record = BackendValidationRecord.from_http_request_log_record(record)
     body = validation_record.validation_request_body
-    ordinal, _ = store.http_record_with_ordinal(record.record_id)
-    commit_ordinal, commit = store.http_record_with_ordinal(body.commit_id)
+    ordinal, _ = store._http_record_with_ordinal(record.record_id)
+    commit_ordinal, commit = store._http_record_with_ordinal(body.commit_id)
     if commit_ordinal >= ordinal or record.request_headers != commit.request_headers:
         raise ReplayInputMissing("Validation commit linkage is invalid")
     typed_commit = _backend_commit_record(store, commit)
     session_id = typed_commit.commit_request_body.codex_session_record.session_id
     namekey = name_key_from_header_value(commit.request_headers.get(NAME_KEY_HEADER))
     placeholders = ", ".join("?" for _path in RUN_OUTCOME_PATHS)
-    outcomes = store.execute(
+    outcomes = store._execute(
         f"SELECT {AUTHORITATIVE_RECORD_PAYLOAD_COLUMN} FROM {AUTHORITATIVE_RECORDS_TABLE} "
         f"WHERE {AUTHORITATIVE_RECORD_METHOD_COLUMN} = ? "
         f"AND {AUTHORITATIVE_RECORD_PATH_COLUMN} IN ({placeholders})",
@@ -3648,14 +3518,15 @@ def _apply_validation_record(
             HttpRequestLogRecord.model_validate_json(payload),
         )
         if (
-            session_id is not None
+            outcome.response_code != HTTPStatus.CONFLICT
+            and session_id is not None
             and outcome.run_outcome_request.namekey == namekey
             and outcome.run_outcome_response_body.codex_session_record.session_id == session_id
         ):
             raise ReplayInputMissing("Validation must precede its session's run outcome")
     inputs: list[HttpRequestLogRecord] = []
     for record_id in body.http_record_ids:
-        input_ordinal, http_record = store.http_record_with_ordinal(record_id)
+        input_ordinal, http_record = store._http_record_with_ordinal(record_id)
         if input_ordinal >= ordinal or http_record.ready_to_respond_at_unix_usec is None:
             raise ReplayInputMissing("Validation HTTP input must precede validation")
         inputs.append(http_record)
@@ -3679,38 +3550,200 @@ def _apply_validation_record(
     }), commit_database
 
 
+def _run_outcome_references(
+    store: AiAugmentBackendStore,
+    runtime: AiAugmentBackendContext,
+    namekey: NameKey,
+    session_id: UUID | None,
+    *,
+    before_ordinal: int | None = None,
+) -> tuple[BackendCommitRecord | None, BackendValidationRecord | None]:
+    if session_id is None:
+        return None, None
+    records = store._execute(
+        f"SELECT {AUTHORITATIVE_RECORD_ORDINAL_COLUMN}, {AUTHORITATIVE_RECORD_PAYLOAD_COLUMN} "
+        f"FROM {AUTHORITATIVE_RECORDS_TABLE} WHERE {AUTHORITATIVE_RECORD_PATH_COLUMN} = ? "
+        f"ORDER BY {AUTHORITATIVE_RECORD_ORDINAL_COLUMN} DESC",
+        [COMMIT_PATH],
+    ).fetchall()
+    for ordinal, payload in records:
+        if before_ordinal is not None and ordinal >= before_ordinal:
+            continue
+        commit = _backend_commit_record(store, HttpRequestLogRecord.model_validate_json(payload))
+        if (
+            commit.commit_request_body.codex_session_record.session_id != session_id
+            or name_key_from_header_value(commit.request_headers.get(NAME_KEY_HEADER)) != namekey
+        ):
+            continue
+        row = store._execute(
+            f"SELECT {AUTHORITATIVE_ATTEMPT_PAYLOAD_COLUMN} FROM {AUTHORITATIVE_ATTEMPTS_TABLE} "
+            f"WHERE {AUTHORITATIVE_ATTEMPT_COMMIT_ID_COLUMN} = ?",
+            [str(commit.record_id)],
+        ).fetchone()
+        validations = store._execute(
+            f"SELECT {AUTHORITATIVE_RECORD_ORDINAL_COLUMN}, {AUTHORITATIVE_RECORD_PAYLOAD_COLUMN} "
+            f"FROM {AUTHORITATIVE_RECORDS_TABLE} WHERE {AUTHORITATIVE_RECORD_PATH_COLUMN} = ? "
+            f"AND json_extract_string({AUTHORITATIVE_RECORD_PAYLOAD_COLUMN}, "
+            "'$.request_body') IS NOT NULL",
+            [VALIDATE_PATH],
+        ).fetchall()
+        linked: list[BackendValidationRecord] = []
+        for validation_ordinal, validation_payload in validations:
+            if before_ordinal is not None and validation_ordinal >= before_ordinal:
+                continue
+            validation = BackendValidationRecord.from_http_request_log_record(
+                HttpRequestLogRecord.model_validate_json(validation_payload),
+            )
+            if validation.validation_request_body.commit_id != commit.record_id:
+                continue
+            if (
+                validation_ordinal <= ordinal
+                or validation.request_headers != commit.request_headers
+            ):
+                raise ReplayInputMissing(Locale.RUN_OUTCOME_VALIDATION_LINKAGE_CORRUPT)
+            linked.append(validation)
+        if not linked:
+            if row is not None:
+                raise ReplayInputMissing(Locale.RUN_OUTCOME_DURABLE_VALIDATION_MISSING)
+            return commit, None
+        if len(linked) != 1 or row is None:
+            raise ReplayInputMissing(Locale.RUN_OUTCOME_PROJECTION_INCONSISTENT)
+        # Rehydrate against recorded provider inputs; never reapply evidence/output writes.
+        attempt = _attempt_record_from_serialized_json(runtime, row[0], commit_http_record=commit)
+        validation = linked[0]
+        if (
+            attempt.attempt.commit_record.model_dump() != commit.model_dump()
+            or attempt.validation_record is None
+            or attempt.validation_record.model_dump() != validation.model_dump()
+        ):
+            raise ReplayInputMissing(Locale.RUN_OUTCOME_REPLAY_INPUTS_DIFFER)
+        for provider in attempt.http_records:
+            provider_ordinal, persisted = store._http_record_with_ordinal(provider.record_id)
+            validation_ordinal, _ = store._http_record_with_ordinal(validation.record_id)
+            if persisted != provider or provider_ordinal >= validation_ordinal:
+                raise ReplayInputMissing(Locale.RUN_OUTCOME_PROVIDER_INPUT_CORRUPT)
+        return commit, validation
+    return None, None
+
+
+def _run_outcome_code(
+    path: str,
+    session: CodexSessionRecord,
+    validation: BackendValidationRecord | None,
+) -> HTTPStatus:
+    if (
+        session.session_id is None
+        or session.codex_rollout_record is None
+        or session.appendwatch_report_record is None
+    ):
+        return HTTPStatus.INTERNAL_SERVER_ERROR
+    accepted = validation is not None and (
+        validation.validation_request_body.post_commit_validation.result
+        is BackendLifecycle.ACCEPTED
+    )
+    if (path == RunOutcomePath.COMPLETED and not accepted) or (
+        path == RunOutcomePath.FAILED and accepted
+    ):
+        return HTTPStatus.CONFLICT
+    return HTTPStatus.OK
+
+
+def _run_outcome_record(
+    store: AiAugmentBackendStore,
+    runtime: AiAugmentBackendContext | None,
+    request: RunOutcomeRequestRecord,
+) -> RunOutcomeRecord:
+    if runtime is None:
+        raise BackendStoreException(Locale.STORE_RUNTIME_UNAVAILABLE)
+    ipc_request = RunOutcomeRequest.from_http_request_log_record(
+        HttpRequestLogRecord.model_validate(request.model_dump()),
+    )
+    commit, validation = _run_outcome_references(
+        store,
+        runtime,
+        ipc_request.namekey,
+        request.codex_session_record.session_id,
+    )
+    body = RunOutcomeResponseBody(
+        pull_record_id=request.pull_record_id,
+        push_record_id=request.push_record_id,
+        commit_record_id=None if commit is None else commit.record_id,
+        validation_record_id=None if validation is None else validation.record_id,
+        run_outcome_record_id=request.record_id,
+        codex_session_record=request.codex_session_record,
+    )
+    rollout = request.codex_session_record.codex_rollout_record
+    headers = None
+    if rollout is not None:
+        if request.rollout_filename is None:
+            raise BackendStoreException(Locale.RUN_OUTCOME_ROLLOUT_FILENAME_MISSING)
+        headers = {
+            SOURCE_KEY_HEADER: _source_key_header(request.rollout_filename, rollout.line_count)
+        }
+    return RunOutcomeRecord.from_run_outcome_request(
+        ipc_request,
+        response_code=_run_outcome_code(request.path, request.codex_session_record, validation),
+        response_headers=headers,
+        response_body=body,
+        ready_to_respond_at_unix_usec=time.time_ns() // NANOSECONDS_PER_MICROSECOND,
+    )
+
+
+def _verify_run_outcome_record(
+    store: AiAugmentBackendStore,
+    runtime: AiAugmentBackendContext,
+    outcome: RunOutcomeRecord,
+) -> None:
+    body = outcome.run_outcome_response_body
+    ordinal, _ = store._http_record_with_ordinal(outcome.record_id)
+    commit, validation = _run_outcome_references(
+        store,
+        runtime,
+        outcome.run_outcome_request.namekey,
+        body.codex_session_record.session_id,
+        before_ordinal=ordinal,
+    )
+    if (
+        body.commit_record_id != (None if commit is None else commit.record_id)
+        or body.validation_record_id != (None if validation is None else validation.record_id)
+        or outcome.response_code
+        != _run_outcome_code(outcome.path, body.codex_session_record, validation)
+    ):
+        raise ReplayInputMissing(Locale.RUN_OUTCOME_REPLAY_MISMATCH)
+
+
 def _apply_run_outcome_record(
     store: AiAugmentBackendStore,
     outcome: RunOutcomeRecord,
 ) -> None:
     session_id = outcome.run_outcome_response_body.codex_session_record.session_id
-    if session_id is None:
+    if outcome.response_code == HTTPStatus.CONFLICT or session_id is None:
         return
-    exists = store.execute(
+    exists = store._execute(
         "SELECT count(*) FROM information_schema.tables WHERE table_name = ?",
         [CODEX_OUTPUT_ROWS_TABLE],
     ).fetchone()
     if exists is None or int(exists[0]) == 0:
         return
     namekey = outcome.run_outcome_request.namekey
-    rows = store.execute(
+    rows = store._execute(
         f"SELECT {duckdb_quote_identifier(KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL)} "
         f"FROM {CODEX_OUTPUT_ROWS_TABLE} "
         f"WHERE {duckdb_quote_identifier(KTP_NAMEKEY_COL)} = ? "
         f"AND {duckdb_quote_identifier(KTP_AI_AUGMENT_RUN_OUTCOME_RECORD_ID_COL)} IS NULL",
         [namekey.to_json_key()],
     ).fetchall()
-    outcome_ordinal, _ = store.http_record_with_ordinal(outcome.record_id)
+    outcome_ordinal, _ = store._http_record_with_ordinal(outcome.record_id)
     updated = 0
     for (value,) in rows:
         commit_id = UUID(str(value))
-        commit_ordinal, http_commit = store.http_record_with_ordinal(commit_id)
+        commit_ordinal, http_commit = store._http_record_with_ordinal(commit_id)
         commit = _backend_commit_record(store, http_commit)
         if commit.commit_request_body.codex_session_record.session_id != session_id:
             continue
         if name_key_from_header_value(commit.request_headers.get(NAME_KEY_HEADER)) != namekey:
             raise ReplayInputMissing("Run outcome commit NameKey does not match")
-        linked = store.execute(
+        linked = store._execute(
             f"SELECT json_extract_string({AUTHORITATIVE_ATTEMPT_PAYLOAD_COLUMN}, "
             "'$.validation_record.record_id') "
             f"FROM {AUTHORITATIVE_ATTEMPTS_TABLE} "
@@ -3719,7 +3752,7 @@ def _apply_run_outcome_record(
         ).fetchone()
         if linked is None or linked[0] is None:
             raise ReplayInputMissing("Run outcome accepted row has no validation record")
-        validation_ordinal, http_validation = store.http_record_with_ordinal(UUID(linked[0]))
+        validation_ordinal, http_validation = store._http_record_with_ordinal(UUID(linked[0]))
         validation = BackendValidationRecord.from_http_request_log_record(http_validation)
         body = validation.validation_request_body
         if (
@@ -3729,7 +3762,7 @@ def _apply_run_outcome_record(
             or not commit_ordinal < validation_ordinal < outcome_ordinal
         ):
             raise ReplayInputMissing("Run outcome validation linkage is invalid")
-        store.execute(
+        store._execute(
             f"UPDATE {CODEX_OUTPUT_ROWS_TABLE} SET "
             f"{duckdb_quote_identifier(KTP_AI_AUGMENT_VALIDATION_RECORD_ID_COL)} = ?, "
             f"{duckdb_quote_identifier(KTP_AI_AUGMENT_RUN_OUTCOME_RECORD_ID_COL)} = ? "
@@ -3844,56 +3877,53 @@ def _synthetic_commit_record(
     )
 
 
-def _apply_attempt_record(
-    attempt_record: AgentRuntimeAttemptRecord,
-) -> None:
-    global BACKEND_ATTEMPT_RECORD
+def update_pull_state(response: PushResponseRecord) -> None:
+    global BACKEND_PUSH_RESPONSE_RECORD
     global BACKEND_LIFECYCLE
 
-    validation = attempt_record.attempt.post_commit_validation
+    if response.validation_record is None:
+        raise BackendStoreException(Locale.PUSH_VALIDATION_RECORD_MISSING)
+    validation = response.validation_record.validation_request_body.post_commit_validation
     with BACKEND_WORKFLOW_STATE_LOCK:
-        BACKEND_ATTEMPT_RECORD = attempt_record
+        BACKEND_PUSH_RESPONSE_RECORD = response
         if validation.result is BackendLifecycle.ACCEPTED:
             BACKEND_LIFECYCLE = BackendLifecycle.COMPLETED
-        elif (
-            validation.result is BackendLifecycle.REJECTED
-            and validation.stage
-            in {
-                BackendLifecycle.PYDANTIC_VALIDATION,
-                BackendLifecycle.DUCKDB_EVIDENCE_VALIDATION,
-            }
-        ):
+        elif validation.result is BackendLifecycle.REJECTED and validation.stage in {
+            BackendLifecycle.PYDANTIC_VALIDATION,
+            BackendLifecycle.DUCKDB_EVIDENCE_VALIDATION,
+        }:
             BACKEND_LIFECYCLE = BackendLifecycle.RETRY
         else:
             BACKEND_LIFECYCLE = BackendLifecycle.FAILED
+    logger.info(
+        Locale.PUSH_RESULT_STATE_LOG,
+        response.record_id,
+        None if response.commit_record is None else response.commit_record.record_id,
+        response.validation_record.record_id,
+        validation.stage,
+        validation.result,
+        BACKEND_LIFECYCLE,
+    )
 
 
 def _mark_backend_lifecycle_failed(error: Exception) -> None:
-    global BACKEND_ATTEMPT_RECORD
+    global BACKEND_PUSH_RESPONSE_RECORD
     global BACKEND_LIFECYCLE
-
     logger.error(Locale.POST_ACCEPT_PROCESSING_FAILED_LOG, error)
     with BACKEND_WORKFLOW_STATE_LOCK:
-        BACKEND_ATTEMPT_RECORD = None
+        BACKEND_PUSH_RESPONSE_RECORD = None
         BACKEND_LIFECYCLE = BackendLifecycle.FAILED
 
 
-def _commit_accepted_push(
-    record: HttpRequestLogRecord,
+def _capture_push_commit(
+    store: AiAugmentBackendStore,
     runtime: AiAugmentBackendContext,
-) -> None:
-    with BACKEND_WORKFLOW_STATE_LOCK:
-        pull_record = BACKEND_PENDING_PULL_RECORD
-        session_id = BACKEND_SESSION_ID
-    if (
-        pull_record is None
-        or session_id is None
-        or runtime.configured_namekey is None
-    ):
-        _mark_backend_lifecycle_failed(
-            _PushConfigurationError(Locale.PUSH_LINKAGE_MISSING)
-        )
-        return
+    record: PushRequestRecord,
+) -> BackendCommitRecord:
+    session_id = record.session_id
+    if record.pull_record_id is None or session_id is None or runtime.configured_namekey is None:
+        raise _PushConfigurationError(Locale.PUSH_LINKAGE_MISSING)
+    pull_record = store._http_record(record.pull_record_id)
     try:
         configuration = push_configuration_for_session(session_id)
         logger.info("Push %s: capturing rollout and appendwatch evidence for session %s",
@@ -3916,10 +3946,9 @@ def _commit_accepted_push(
         logger.info("Push %s: captured rollout sha256=%s, bytes=%d, lines=%d; report bytes=%d",
                     record.record_id, rollout.sha256, rollout.size, rollout.line_count,
                     len(report_bytes))
-    except (OSError, _PushConfigurationError) as exc:
-        _mark_backend_lifecycle_failed(exc)
-        return
-    commit_record = _synthetic_commit_record(
+    except (OSError, _PushConfigurationError):
+        raise
+    return _synthetic_commit_record(
         pull_record=pull_record,
         push_record=record,
         session_id=session_id,
@@ -3928,24 +3957,6 @@ def _commit_accepted_push(
         appendwatch_report=report_bytes,
         namekey=runtime.configured_namekey,
     )
-    try:
-        stored_commit = runtime.pipeline_config.backend_store.append_authoritative_record(
-            commit_record,
-        )
-        logger.info("Push %s: commit %s persisted; starting validation",
-                    record.record_id, stored_commit.record_id)
-        attempt_record = runtime.pipeline_config.backend_store.validate_commit(
-            stored_commit.record_id,
-        )
-        _apply_attempt_record(attempt_record)
-        validation = attempt_record.attempt.post_commit_validation
-        logger.info("Push %s: commit=%s; validation stage=%s result=%s; Backend lifecycle=%s",
-                    record.record_id, stored_commit.record_id, validation.stage,
-                    validation.result, BACKEND_LIFECYCLE)
-    except Exception as exc:
-        _mark_backend_lifecycle_failed(exc)
-        logger.critical(Locale.COMMIT_APPEND_FATAL_LOG, exc)
-        raise SystemExit(1) from exc
 
 
 def _authoritative_background_finished(task: asyncio.Task[None]) -> None:
@@ -3958,27 +3969,25 @@ def _authoritative_background_finished(task: asyncio.Task[None]) -> None:
         os._exit(1)
 
 
-async def _after_authoritative_public_record(
-    record: HttpRequestLogRecord,
-    runtime: AiAugmentBackendContext,
+async def finish_push(
+    promise: BackendComponent.ResponseRecordPromiseProperty[
+        BackendComponent.PushResponseRecordProperty
+    ],
 ) -> None:
-    global BACKEND_CURRENT_PULL_RECORD
-    global BACKEND_LATEST_PUSH_RECORD
+    try:
+        response, error = await promise.response_record()
+        if error is not None:
+            error.raise_exception()
+        if response is None:
+            raise BackendStoreException(Locale.PUSH_RESPONSE_RECORD_MISSING)
+        update_pull_state(PushResponseRecord.model_validate(response, from_attributes=True))
+    except Exception as exc:
+        _mark_backend_lifecycle_failed(exc)
+        raise
 
-    route = (record.method, record.path)
-    if route == (HTTP_GET_METHOD, PULL_PATH):
-        if record.response_code == status.HTTP_200_OK:
-            with BACKEND_WORKFLOW_STATE_LOCK:
-                BACKEND_CURRENT_PULL_RECORD = record
-        return
-    if route != (HTTP_POST_METHOD, PUSH_PATH) or (record.response_code != status.HTTP_202_ACCEPTED):
-        return
-    with BACKEND_WORKFLOW_STATE_LOCK:
-        BACKEND_LATEST_PUSH_RECORD = record
-    logger.info("Push %s durably accepted; scheduling commit/validation", record.record_id)
-    task = asyncio.create_task(
-        asyncio.to_thread(_commit_accepted_push, record, runtime)
-    )
+
+def register_processing(work: Coroutine[object, object, None]) -> None:
+    task = asyncio.create_task(work)
     AUTHORITATIVE_BACKGROUND_TASKS.add(task)
     task.add_done_callback(_authoritative_background_finished)
 
@@ -4056,7 +4065,7 @@ def _create_codex_output_schema(store: AiAugmentBackendStore) -> None:
         f"{duckdb_quote_identifier(column)} {data_type}"
         for column, data_type in CODEX_OUTPUT_SCHEMA
     )
-    store.execute(
+    store._execute(
         f"CREATE TABLE IF NOT EXISTS {CODEX_OUTPUT_ROWS_TABLE} ("
         f"{definitions}, UNIQUE ("
         f"{duckdb_quote_identifier(KTP_FILENAME_COL)}, "
@@ -4068,7 +4077,7 @@ def _replace_codex_output_view(store: AiAugmentBackendStore) -> None:
     projection = ", ".join(
         duckdb_quote_identifier(column) for column, _data_type in CODEX_OUTPUT_SCHEMA
     )
-    store.execute(
+    store._execute(
         f"""
         CREATE OR REPLACE VIEW {CODEX_OUTPUT_VIEW} AS
         SELECT {projection}
@@ -4081,7 +4090,7 @@ def _replace_codex_output_view(store: AiAugmentBackendStore) -> None:
             {duckdb_quote_identifier(KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL)}
         """
     )
-    store.materialize_innerdicts(
+    store._materialize_innerdicts(
         source_relation=CODEX_OUTPUT_VIEW,
         table_name=CODEX_INNERDICT_TABLE,
     )
@@ -4096,7 +4105,7 @@ def append_codex_output(
     projection = ", ".join(duckdb_quote_identifier(column) for column in columns)
     placeholders = ", ".join("?" for _column in columns)
     try:
-        store.execute(
+        store._execute(
             f"INSERT INTO {CODEX_OUTPUT_ROWS_TABLE} ({projection}) VALUES ({placeholders})",
             [row[column] for column in columns],
         )
@@ -4451,7 +4460,7 @@ def _execute_attempt(
             )
 
 
-def validate_transport(request: Request) -> None:
+def validate_transport(request: requests.PreparedRequest) -> None:
     content_type = (
         request.headers.get(HTTP_REQUEST_CONTENT_TYPE_HEADER, "").partition(";")[0].strip().lower()
     )
@@ -4467,13 +4476,11 @@ def validate_transport(request: Request) -> None:
             raise _PushValidationError(Locale.REQUEST_BODY_TOO_LARGE)
 
 
-async def bounded_request_body(request: Request) -> bytes:
-    body = bytearray()
-    async for chunk in request.stream():
-        body.extend(chunk)
-        if len(body) > MAX_PUSH_BODY_BYTES:
-            raise _PushValidationError(Locale.REQUEST_BODY_TOO_LARGE)
-    return bytes(body)
+def bounded_request_body(request: requests.PreparedRequest) -> bytes:
+    body = _prepared_request_body(request)
+    if len(body) > MAX_PUSH_BODY_BYTES:
+        raise _PushValidationError(Locale.REQUEST_BODY_TOO_LARGE)
+    return body
 
 
 def pydantic_failure(exc: ValidationError) -> tuple[str | None, str, object]:
@@ -4508,13 +4515,13 @@ def pydantic_failure(exc: ValidationError) -> tuple[str | None, str, object]:
 def _committed_innerdicts(
     store: AiAugmentBackendStore,
 ) -> tuple[CommittedInnerDict, ...]:
-    exists = store.execute(
+    exists = store._execute(
         "SELECT count(*) FROM information_schema.tables WHERE table_name = ?",
         [CODEX_INNERDICT_TABLE],
     ).fetchone()
     if exists is None or int(exists[0]) == 0:
         return ()
-    rows = store.execute(
+    rows = store._execute(
         f"SELECT {duckdb_quote_identifier(KTP_NAMEKEY_COL)}, "
         f"{duckdb_quote_identifier(KTP_INNERDICT_JSONLINES_COL)} "
         f"FROM {CODEX_INNERDICT_TABLE} "
@@ -4525,7 +4532,7 @@ def _committed_innerdicts(
         try:
             for values in loads_jsonlines(payload):
                 commit_record_id = UUID(str(values[KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL]))
-                _ordinal, http_record = store.http_record_with_ordinal(commit_record_id)
+                _ordinal, http_record = store._http_record_with_ordinal(commit_record_id)
                 committed_innerdicts.append(
                     CommittedInnerDict(
                         innerdict=InnerDict.from_mapping(
@@ -4585,147 +4592,228 @@ def _log_post_commit_validation(
         )
 
 
-@app.get(**PULL_ROUTE)
-def authoritative_pull(request: Request) -> Response:
-    runtime: AiAugmentBackendContext = request.app.state.runtime
+def _response(
+    request: requests.PreparedRequest,
+    code: HTTPStatus,
+    body: str = "",
+    *,
+    content_type: str | None = None,
+    headers: Mapping[str, str] | None = None,
+) -> requests.Response:
+    response = requests.Response()
+    response.status_code = code
+    response.request = request
+    response.url = request.url or ""
+    response.encoding = TEXT_ENCODING
+    response._content = body.encode(TEXT_ENCODING)
+    _ = response.content
+    if headers is not None:
+        response.headers.update(headers)
+    if content_type is not None:
+        response.headers["Content-Type"] = content_type
+    response.headers["Content-Length"] = str(len(response.content))
+    return response
+
+
+def _error_response(
+    request: requests.PreparedRequest,
+    code: HTTPStatus,
+    *,
+    headers: Mapping[str, str] | None = None,
+) -> requests.Response:
+    return _response(
+        request,
+        code,
+        json.dumps(
+            {"detail": Locale.CONFIGURATION_ERROR_DETAIL},
+            ensure_ascii=False,
+            separators=COMPACT_JSON_SEPARATORS,
+        ),
+        content_type=JSON_MEDIA_TYPE,
+        headers=headers,
+    )
+
+
+def _pull_response(
+    request: requests.PreparedRequest,
+    runtime: AiAugmentBackendContext,
+) -> requests.Response:
     with BACKEND_WORKFLOW_STATE_LOCK:
         lifecycle = BACKEND_LIFECYCLE
-        attempt_record = BACKEND_ATTEMPT_RECORD
-    logger.info("Pull: lifecycle=%s; commit=%s", lifecycle,
-                None if attempt_record is None else attempt_record.attempt.commit_record.record_id)
+        push_response = BACKEND_PUSH_RESPONSE_RECORD
+    logger.info(
+        Locale.PULL_STATE_LOG,
+        lifecycle,
+        None
+        if push_response is None or push_response.commit_record is None
+        else push_response.commit_record.record_id,
+    )
     if lifecycle is BackendLifecycle.BUSY:
-        logger.info("Pull: validation still running; returning HTTP 503 with Retry-After")
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=Locale.CONFIGURATION_ERROR_DETAIL,
+        logger.info(Locale.PULL_PROCESSING_LOG)
+        return _error_response(
+            request, HTTPStatus.SERVICE_UNAVAILABLE,
             headers={RETRY_AFTER_HEADER: RETRY_AFTER_SECONDS},
         )
     if lifecycle is BackendLifecycle.FAILED:
-        logger.error("Pull: Backend workflow failed; returning HTTP 500")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=Locale.CONFIGURATION_ERROR_DETAIL,
-        )
-    if lifecycle in {
-        BackendLifecycle.RETRY,
-        BackendLifecycle.COMPLETED,
-    }:
-        if attempt_record is None:
-            logger.error("Pull: lifecycle=%s has no validation record; returning HTTP 500",
-                         lifecycle)
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=Locale.CONFIGURATION_ERROR_DETAIL,
-            )
-        validation = attempt_record.attempt.post_commit_validation
+        logger.error(Locale.PULL_WORKFLOW_FAILED_LOG)
+        return _error_response(request, HTTPStatus.INTERNAL_SERVER_ERROR)
+    if lifecycle in {BackendLifecycle.RETRY, BackendLifecycle.COMPLETED}:
+        if push_response is None or push_response.validation_record is None:
+            raise BackendStoreException(Locale.PULL_VALIDATION_RECORD_MISSING)
+        body = push_response.validation_record.validation_request_body
+        validation = body.post_commit_validation
         if lifecycle is BackendLifecycle.RETRY:
-            if (
-                validation.result is not BackendLifecycle.REJECTED
-                or validation.stage
-                not in {
-                    BackendLifecycle.PYDANTIC_VALIDATION,
-                    BackendLifecycle.DUCKDB_EVIDENCE_VALIDATION,
-                }
-            ):
-                logger.error("Pull: inconsistent retry validation; returning HTTP 500")
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=Locale.CONFIGURATION_ERROR_DETAIL,
-                )
-            logger.info("Pull: returning HTTP 200 retry instructions; stage=%s", validation.stage)
-            return Response(
-                content=(
-                    validation.detail or Locale.VALIDATION_ERROR_DETAIL
-                ).rstrip()
-                + "\n",
-                status_code=status.HTTP_200_OK,
-                media_type=MARKDOWN_MEDIA_TYPE,
+            if validation.result is not BackendLifecycle.REJECTED or validation.stage not in {
+                BackendLifecycle.PYDANTIC_VALIDATION,
+                BackendLifecycle.DUCKDB_EVIDENCE_VALIDATION,
+            }:
+                raise BackendStoreException(Locale.PULL_RETRY_VALIDATION_INCONSISTENT)
+            logger.info(Locale.PULL_RETRY_STAGE_LOG, validation.stage)
+            return _response(
+                request,
+                HTTPStatus.OK,
+                (validation.detail or Locale.VALIDATION_ERROR_DETAIL).rstrip() + "\n",
+                content_type=MARKDOWN_MEDIA_TYPE + "; charset=utf-8",
             )
-        submission = attempt_record.submission
         if (
             validation.result is not BackendLifecycle.ACCEPTED
-            or not isinstance(submission, StandardizedSubmission)
+            or body.submission_type != "StandardizedSubmission"
+            or body.submission is None
         ):
-            logger.error("Pull: completed workflow has invalid submission/result; "
-                         "returning HTTP 500")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=Locale.CONFIGURATION_ERROR_DETAIL,
-            )
-        response_lines = [json_line(submission.normalized_values())]
-        if attempt_record.ground_truth_innerdict is not None:
-            response_lines.append(
-                json_line(
-                    select_columns(attempt_record.ground_truth_innerdict.data)
-                )
-            )
-        logger.info("Pull: returning HTTP 410 completed submission; ground_truth=%s",
-                    attempt_record.ground_truth_innerdict is not None)
-        return Response(
-            content="".join(response_lines),
-            status_code=status.HTTP_410_GONE,
-            media_type=MEDIA_TYPE_WITH_CHARSET,
+            raise BackendStoreException(Locale.PULL_COMPLETED_RESULT_INVALID)
+        # Render the Store-validated serialized values; never revalidate providers in API.
+        values: dict[str, str] = {}
+        for column in (*AI_AUGMENT_EVIDENCE_COLUMNS, KTP_AI_AUGMENT_COMMENTS_COL):
+            field = body.submission[column]
+            if column == KTP_AI_AUGMENT_COMMENTS_COL and field is None:
+                continue
+            if not isinstance(field, dict) or not isinstance(field.get("value"), str):
+                raise BackendStoreException(Locale.PULL_SUBMISSION_VALUE_INVALID)
+            value = field["value"]
+            assert isinstance(value, str)
+            values[column] = value
+        singular = runtime.configured_ai_augment_singular_outerdict()
+        if singular is None:
+            raise BackendStoreException(Locale.PULL_COMPLETED_RESEARCHER_MISSING)
+        ground_truth = singular.ground_truth_innerdict()
+        lines = [json_line(values)]
+        if ground_truth is not None:
+            lines.append(json_line(select_columns(ground_truth.data)))
+        logger.info(Locale.PULL_COMPLETED_GROUND_TRUTH_LOG, ground_truth is not None)
+        return _response(
+            request, HTTPStatus.GONE, "".join(lines), content_type=MEDIA_TYPE_WITH_CHARSET,
         )
     try:
-        singular_outerdict = runtime.configured_ai_augment_singular_outerdict()
-        if singular_outerdict is None:
+        singular = runtime.configured_ai_augment_singular_outerdict()
+        if singular is None:
             raise _PushConfigurationError(Locale.PUSH_LINKAGE_MISSING)
-        lines = tuple(configured_pull_lines(singular_outerdict))
-        logger.info("Pull: returning HTTP 200 initial task; namekey=%s; %d JSONL lines",
-                    singular_outerdict.namekey, len(lines))
-        return StreamingResponse(iter(lines), media_type=MEDIA_TYPE_WITH_CHARSET)
+        initial_lines = tuple(configured_pull_lines(singular))
+        logger.info(
+            Locale.PULL_INITIAL_TASK_LOG, singular.namekey, len(initial_lines)
+        )
+        return _response(
+            request, HTTPStatus.OK, "".join(initial_lines), content_type=MEDIA_TYPE_WITH_CHARSET,
+        )
     except (_PushConfigurationError, _PushValidationError, OSError, duckdb.Error) as exc:
         logger.error(Locale.PULL_FAILED_LOG, exc)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=Locale.CONFIGURATION_ERROR_DETAIL,
-        ) from None
+        return _error_response(request, HTTPStatus.INTERNAL_SERVER_ERROR)
 
 
-@app.post(**PUSH_ROUTE)
-async def authoritative_push(request: Request) -> Response:
-    del request
-    global BACKEND_ATTEMPT_RECORD
+async def authoritative_pull(
+    request: requests.PreparedRequest,
+    runtime: AiAugmentBackendContext,
+    store: BackendComponent.FullStoreProperty,
+) -> requests.Response:
     global BACKEND_CURRENT_PULL_RECORD
-    global BACKEND_PENDING_PULL_RECORD
-    global BACKEND_LIFECYCLE
+    started_ns = time.monotonic_ns()
+    response = _pull_response(request, runtime)
+    record = PullRequestRecord.model_validate(
+        _authoritative_http_record(request, response, started_ns=started_ns).model_dump(),
+    )
+    promise = await asyncio.to_thread(store.pull, record)
+    response_record, error = await promise.response_record()
+    if error is not None:
+        error.raise_exception()
+    if promise.acknowledgment is not BackendStoreAcknowledgment.ACK or response_record is None:
+        raise BackendStoreException(Locale.PULL_DURABLE_RESPONSE_MISSING)
+    if response_record.response_code == HTTPStatus.OK:
+        with BACKEND_WORKFLOW_STATE_LOCK:
+            BACKEND_CURRENT_PULL_RECORD = HttpRequestLogRecord.model_validate(
+                response_record,
+                from_attributes=True,
+            )
+    logger.info(
+        Locale.PULL_PERSISTED_LOG,
+        response_record.record_id,
+        response_record.response_code,
+    )
+    return response_record.to_response()
 
+
+def _push_response(request: requests.PreparedRequest) -> requests.Response:
+    global BACKEND_PUSH_RESPONSE_RECORD, BACKEND_CURRENT_PULL_RECORD
+    global BACKEND_PENDING_PULL_RECORD, BACKEND_LIFECYCLE
     with BACKEND_WORKFLOW_STATE_LOCK:
         lifecycle = BACKEND_LIFECYCLE
-        logger.info("Push: lifecycle=%s; session=%s; current_pull=%s", lifecycle,
-                    BACKEND_SESSION_ID,
-                    None if BACKEND_CURRENT_PULL_RECORD is None
-                    else BACKEND_CURRENT_PULL_RECORD.record_id)
+        logger.info(
+            Locale.PUSH_REQUEST_STATE_LOG,
+            lifecycle,
+            BACKEND_SESSION_ID,
+            None if BACKEND_CURRENT_PULL_RECORD is None else BACKEND_CURRENT_PULL_RECORD.record_id,
+        )
         if lifecycle is BackendLifecycle.BUSY:
-            logger.info("Push: previous submission still processing; returning HTTP 409")
-            return JSONResponse(
-                status_code=status.HTTP_409_CONFLICT,
-                content={"detail": Locale.CONFIGURATION_ERROR_DETAIL},
-                headers={LOCATION_HEADER: PULL_PATH},
+            return _error_response(
+                request, HTTPStatus.CONFLICT, headers={LOCATION_HEADER: PULL_PATH},
             )
-        if lifecycle not in {
-            BackendLifecycle.READY,
-            BackendLifecycle.RETRY,
-        } or BACKEND_SESSION_ID is None:
-            logger.error("Push: workflow/session is not ready; returning HTTP 500")
-            return JSONResponse(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                content={"detail": Locale.CONFIGURATION_ERROR_DETAIL},
-            )
+        if (
+            lifecycle not in {BackendLifecycle.READY, BackendLifecycle.RETRY}
+            or BACKEND_SESSION_ID is None
+        ):
+            logger.error(Locale.PUSH_SESSION_NOT_READY_LOG)
+            return _error_response(request, HTTPStatus.INTERNAL_SERVER_ERROR)
         if BACKEND_CURRENT_PULL_RECORD is None:
             logger.warning(Locale.PUSH_CURRENT_PULL_REQUIRED_LOG)
-            return JSONResponse(
-                status_code=status.HTTP_409_CONFLICT,
-                content={"detail": Locale.CONFIGURATION_ERROR_DETAIL},
-                headers={LOCATION_HEADER: PULL_PATH},
+            return _error_response(
+                request, HTTPStatus.CONFLICT, headers={LOCATION_HEADER: PULL_PATH},
             )
         BACKEND_PENDING_PULL_RECORD = BACKEND_CURRENT_PULL_RECORD
         BACKEND_CURRENT_PULL_RECORD = None
-        BACKEND_ATTEMPT_RECORD = None
+        BACKEND_PUSH_RESPONSE_RECORD = None
         BACKEND_LIFECYCLE = BackendLifecycle.BUSY
-        logger.info("Push: reserved current pull; lifecycle=busy; "
-                    "returning HTTP 202 for persistence")
-    return Response(
-        status_code=status.HTTP_202_ACCEPTED,
-        headers={LOCATION_HEADER: PULL_PATH},
+    return _response(request, HTTPStatus.ACCEPTED, headers={LOCATION_HEADER: PULL_PATH})
+
+
+async def authoritative_push(
+    request: requests.PreparedRequest,
+    store: BackendComponent.FullStoreProperty,
+) -> requests.Response:
+    global BACKEND_LATEST_PUSH_RECORD
+    started_ns = time.monotonic_ns()
+    response = _push_response(request)
+    with BACKEND_WORKFLOW_STATE_LOCK:
+        pull = BACKEND_PENDING_PULL_RECORD
+        session = BACKEND_SESSION_ID
+    record = PushRequestRecord(
+        **_authoritative_http_record(request, response, started_ns=started_ns).model_dump(),
+        pull_record_id=None if pull is None else pull.record_id,
+        session_id=session,
     )
+    promise = await asyncio.to_thread(store.push, record)
+    if promise.acknowledgment is not BackendStoreAcknowledgment.ACK:
+        _record, error = await promise.response_record()
+        if error is not None:
+            error.raise_exception()
+        raise BackendStoreException(Locale.PUSH_NAK_ERROR_MISSING)
+    if response.status_code == HTTPStatus.ACCEPTED:
+        with BACKEND_WORKFLOW_STATE_LOCK:
+            BACKEND_LATEST_PUSH_RECORD = record
+        register_processing(finish_push(promise))
+        logger.info(Locale.PUSH_DURABLY_ACCEPTED_LOG, record.record_id)
+        return response
+    response_record, error = await promise.response_record()
+    if error is not None:
+        error.raise_exception()
+    if response_record is None:
+        raise BackendStoreException(Locale.PUSH_RESPONSE_RECORD_MISSING)
+    logger.info(Locale.PUSH_PERSISTED_LOG, response_record.record_id, response_record.response_code)
+    return response_record.to_response()

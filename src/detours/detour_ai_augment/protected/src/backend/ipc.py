@@ -1,56 +1,43 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 import os
-import signal
-import stat
 import tempfile
-import threading
 import time
-from collections.abc import Callable, Iterator
-from contextlib import AbstractContextManager, closing, nullcontext
 from pathlib import Path
-from types import FrameType
-from typing import Any, NoReturn
 from urllib.parse import urlsplit
 from uuid import UUID
 
-from fastapi import status
-from flask import Flask, Response, request
-from pydantic import BaseModel, ConfigDict
-from werkzeug.serving import BaseWSGIServer, make_server
-from werkzeug.wsgi import ClosingIterator
+import requests
 
+from src.detours.detour_ai_augment.protected.src.architecture import BackendComponent
 from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
-from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
-    TEXT_ENCODING,
-)
 from src.detours.detour_ai_augment.src.backend import api
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_context import (  # noqa: E501
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_context import (
     AiAugmentBackendContext,
 )
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.commit_event import (  # noqa: E501
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.commit_event import (
     BASE64_TEXT_ENCODING,
-    SOURCE_KEY_HEADER,
     AppendwatchReportEncoding,
     AppendwatchReportRecord,
     CodexRolloutRecord,
     CodexSessionRecord,
 )
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.query_response import (  # noqa: E501
-    QueryResponse,
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.request_response_records import (
+    QueryRequestRecord,
+    RunOutcomeRequestRecord,
 )
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.run_outcome_record import (  # noqa: E501
-    RunOutcomeRecord,
-    RunOutcomeResponseBody,
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.response_record_promise import (
+    BackendStoreAcknowledgment,
+    BackendStoreException,
 )
-from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.query_request import (  # noqa: E501
+
+from ....src.control_centre.dashboard.helpers.data_models.query_request import (
     QueryRequest,
 )
-from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.run_outcome import (  # noqa: E501
-    RUN_OUTCOME_PATHS,
-    RunOutcomePath,
+from ....src.control_centre.dashboard.helpers.data_models.run_outcome import (
     RunOutcomeRequest,
 )
 
@@ -71,34 +58,6 @@ DASHBOARD_SOCKET_PATH = Path(
 ).expanduser()
 
 
-RunOutcomeHandler = Callable[
-    [RunOutcomeRequest],
-    RunOutcomeRecord,
-]
-QueryResponseHandler = Callable[[QueryRequest], QueryResponse]
-IpcRequestScope = Callable[[], AbstractContextManager[None]]
-
-
-class _DashboardQueryApp(Flask):
-    def __init__(self, request_scope: IpcRequestScope) -> None:
-        super().__init__("detour-ai-augment-dashboard-query")
-        self._request_scope = request_scope
-
-    def wsgi_app(
-        self, environ: dict[str, Any], start_response: Callable[..., Any],
-    ) -> Iterator[bytes]:
-        with (
-            self._request_scope(),
-            closing(ClosingIterator(super().wsgi_app(environ, start_response))) as response,
-        ):
-            yield from response
-
-
-# =============================================
-# Functions for the POST run outcome endpoints
-# =============================================
-
-
 def _run_outcome_snapshot_configuration(session_id: UUID | None) -> api._PushConfiguration:
     rollout_name = (
         f"{api.ROLLOUT_FILENAME_PREFIX}{session_id or 'run-outcome-snapshot'}"
@@ -109,7 +68,8 @@ def _run_outcome_snapshot_configuration(session_id: UUID | None) -> api._PushCon
 
 def _capture_run_outcome_snapshot(
     runtime: AiAugmentBackendContext,
-) -> tuple[RunOutcomeResponseBody, str | None, tuple[Exception, ...]]:
+    request: RunOutcomeRequest,
+) -> tuple[RunOutcomeRequestRecord, tuple[Exception, ...]]:
     with api.BACKEND_WORKFLOW_STATE_LOCK:
         session_id = api.BACKEND_SESSION_ID
         pull_record = api.BACKEND_PENDING_PULL_RECORD or api.BACKEND_CURRENT_PULL_RECORD
@@ -147,16 +107,14 @@ def _capture_run_outcome_snapshot(
     except (OSError, api._PushConfigurationError) as exc:
         failures.append(exc)
 
-    snapshot = RunOutcomeResponseBody(
+    snapshot = RunOutcomeRequestRecord(
+        **request.http_request_log_record.model_dump(),
+        rollout_filename=rollout_filename,
         pull_record_id=None if pull_record is None else pull_record.record_id,
         push_record_id=None if push_record is None else push_record.record_id,
         codex_session_record=CodexSessionRecord(
             session_id=session_id,
-            codex_rollout_record=(
-                None
-                if rollout_record is None
-                else rollout_record
-            ),
+            codex_rollout_record=(None if rollout_record is None else rollout_record),
             appendwatch_report_record=(
                 None
                 if appendwatch_report is None
@@ -167,312 +125,100 @@ def _capture_run_outcome_snapshot(
             ),
         ),
     )
-    return snapshot, rollout_filename, tuple(failures)
+    return snapshot, tuple(failures)
 
 
-def handle_run_outcome_request(
+async def handle_run_outcome_request(
     runtime: AiAugmentBackendContext,
-    ipc_request: RunOutcomeRequest,
-) -> RunOutcomeRecord:
-    if (
-        runtime.configured_namekey is None
-        or ipc_request.namekey != runtime.configured_namekey
-    ):
-        raise api._PushValidationError(Locale.REPLAY_RECORD_CONTOUR_INVALID)
-
-    snapshot, rollout_filename, failures = _capture_run_outcome_snapshot(runtime)
-    session = snapshot.codex_session_record
-    response_code = (
-        status.HTTP_200_OK
-        if (
-            session.session_id is not None
-            and session.codex_rollout_record is not None
-            and session.appendwatch_report_record is not None
-        )
-        else status.HTTP_500_INTERNAL_SERVER_ERROR
+    store: BackendComponent.FullStoreProperty,
+    request: requests.PreparedRequest,
+) -> requests.Response:
+    parsed = urlsplit(request.url or "")
+    ipc_request = RunOutcomeRequest.from_http_request(
+        received_at_unix_usec=time.time_ns() // NANOSECONDS_PER_MICROSECOND,
+        method=request.method or "",
+        scheme=parsed.scheme,
+        host=parsed.hostname or "",
+        port=parsed.port,
+        path=parsed.path,
+        query=parsed.query,
+        request_headers=dict(request.headers),
+        request_body=api._prepared_request_body(request),
     )
-    response_headers: dict[str, str] | None = None
-    if session.codex_rollout_record is not None and rollout_filename is not None:
-        response_headers = {
-            SOURCE_KEY_HEADER: api._source_key_header(
-                rollout_filename,
-                session.codex_rollout_record.line_count,
-            )
-        }
+    if runtime.configured_namekey is None or ipc_request.namekey != runtime.configured_namekey:
+        raise api._PushValidationError(Locale.REPLAY_RECORD_CONTOUR_INVALID)
+    request_record, failures = await asyncio.to_thread(
+        _capture_run_outcome_snapshot, runtime, ipc_request
+    )
     if failures:
         logger.error(
             Locale.RUN_OUTCOME_SNAPSHOT_FAILED_LOG,
             ipc_request.path,
             "; ".join(str(failure) for failure in failures),
         )
-
-    ready_at_unix_usec = time.time_ns() // NANOSECONDS_PER_MICROSECOND
-    record = RunOutcomeRecord.from_run_outcome_request(
-        ipc_request,
-        response_code=response_code,
-        response_headers=response_headers,
-        response_body=snapshot,
-        ready_to_respond_at_unix_usec=ready_at_unix_usec,
+    promise = await asyncio.to_thread(store.run_outcome, request_record)
+    if promise.acknowledgment is not BackendStoreAcknowledgment.NAK:
+        raise BackendStoreException(Locale.IPC_REQUEST_UNEXPECTEDLY_PERSISTED)
+    response_record, error = await promise.response_record()
+    if error is not None:
+        error.raise_exception()
+    if response_record is None:
+        raise BackendStoreException(Locale.IPC_RESPONSE_MISSING)
+    logger.info(
+        Locale.RUN_OUTCOME_PERSISTED_LOG,
+        response_record.record_id,
+        response_record.response_code,
     )
-    try:
-        stored = runtime.pipeline_config.backend_store.append_authoritative_record(
-            record.http_request_log_record,
-        )
-    except Exception as exc:
-        logger.critical(
-            Locale.RUN_OUTCOME_SNAPSHOT_APPEND_FATAL_LOG,
-            ipc_request.path,
-            exc,
-        )
-        raise SystemExit(1) from exc
-    return RunOutcomeRecord.from_http_request_log_record(stored)
+    return response_record.to_response()
 
 
-# =====================================
-# Functions for the GET query endpoint
-# =====================================
-
-
-def handle_query_request(
-    runtime: AiAugmentBackendContext,
-    ipc_request: QueryRequest,
-) -> QueryResponse:
-    logger.info("Query IPC: reading wholesale Backend snapshot")
-    response = runtime.pipeline_config.backend_store.query(runtime, ipc_request)
-    logger.info("Query IPC snapshot ready: %d researchers, %d attempts, %d run outcomes",
-                len(response.ai_augment_singular_outerdicts), len(response.attempts),
-                len(response.run_outcome_records))
-    return response
-
-
-# =============================================================
-# Creation of a `Flask` app object that defines the HTTP routes
-# =============================================================
-
-def create_dashboard_query_app(
-    query_response_handler: QueryResponseHandler,
-    *,
-    query_path: str,
-    run_outcome_handler: RunOutcomeHandler | None = None,
-    run_outcome_paths: frozenset[RunOutcomePath] = frozenset(),
-    fatal_exit: Callable[[int], NoReturn] = os._exit,
-    request_scope: IpcRequestScope = nullcontext,
-) -> Flask:
-    app = _DashboardQueryApp(request_scope)
-
-    @app.get(query_path)
-    def dashboard_query() -> Response:
-        try:
-            ipc_request = QueryRequest.from_http_request(
-                method=request.method, path=request.path,
-                query=request.query_string, body=request.get_data(),
-            )
-        except ValueError as exc:
-            return Response(str(exc), status=400, content_type="text/plain")
-        try:
-            payload = query_response_handler(ipc_request).model_dump_json()
-        except BaseException:
-            app.logger.exception("dashboard query failed fatally")
-            fatal_exit(1)
-        return Response(
-            payload.encode(TEXT_ENCODING),
-            status=200,
-            content_type=JSON_MEDIA_TYPE,
-        )
-
-    # ===============================
-    # Dynamic registration for each
-    # @app.post(run_outcome_path)
-    # ===============================
-
-    def run_outcome_request(path: RunOutcomePath) -> Response:
-        if run_outcome_handler is None:
-            raise RuntimeError("run-outcome IPC handler is unavailable")
-        received_at_unix_usec = time.time_ns() // NANOSECONDS_PER_MICROSECOND
-        parsed = urlsplit(request.url)
-        try:
-            request_body = request.get_data()
-            ipc_request = RunOutcomeRequest.from_http_request(
-                received_at_unix_usec=received_at_unix_usec,
-                method=request.method,
-                scheme=parsed.scheme,
-                host=parsed.hostname or "",
-                port=parsed.port,
-                path=path,
-                query=parsed.query,
-                request_headers=dict(request.headers),
-                request_body=request_body,
-            )
-            response_record = run_outcome_handler(ipc_request)
-        except BaseException:
-            app.logger.exception("dashboard run-outcome request failed fatally")
-            fatal_exit(1)
-        return Response(
-            response_record.response_body,
-            status=response_record.response_code,
-            headers=dict(response_record.response_headers or {}),
-            content_type=JSON_MEDIA_TYPE,
-        )
-
-    for run_outcome_path in sorted(run_outcome_paths):
-        app.add_url_rule(
-            run_outcome_path.value,
-            endpoint=f"run-outcome-{run_outcome_path.removeprefix('/')}",
-            view_func=lambda path=run_outcome_path: run_outcome_request(path),
-            methods=["POST"],
-        )
-
-    return app
-
-
-# =====================================================
-# Functions to start/stop IPC server for downstream use
-# =====================================================
-
-class _DashboardIpcServer(BaseModel):
-    model_config = ConfigDict(
-        extra="forbid", strict=True, frozen=True, arbitrary_types_allowed=True,
-    )
-
-    socket_path: Path
-    server: BaseWSGIServer
-    thread: threading.Thread
-
-
-def _unlink_stale_socket(path: Path) -> None:
-    try:
-        mode = path.lstat().st_mode
-    except FileNotFoundError:
-        return
-    if not stat.S_ISSOCK(mode):
-        raise RuntimeError(f"dashboard IPC path is not a Unix socket: {path}")
-    path.unlink()
-
-
-def start_dashboard_query_server(
-    socket_path: Path,
-    query_response_handler: QueryResponseHandler,
-    *,
-    query_path: str,
-    run_outcome_handler: RunOutcomeHandler | None = None,
-    run_outcome_paths: frozenset[RunOutcomePath] = frozenset(),
-    request_scope: IpcRequestScope = nullcontext,
-) -> _DashboardIpcServer:
-    app = create_dashboard_query_app(
-        query_response_handler,
-        query_path=query_path,
-        run_outcome_handler=run_outcome_handler,
-        run_outcome_paths=run_outcome_paths,
-        request_scope=request_scope,
-    )
-    if not socket_path.is_absolute():
-        raise RuntimeError(f"dashboard IPC path is not absolute: {socket_path}")
-    socket_path.parent.mkdir(parents=True, exist_ok=True)
-    _unlink_stale_socket(socket_path)
-    server: BaseWSGIServer | None = None
-    try:
-        server = make_server(
-            f"unix://{socket_path}",
-            0,
-            app,
-            threaded=False,
-        )
-        socket_path.chmod(SOCKET_PERMISSIONS)
-        thread = threading.Thread(
-            target=server.serve_forever,
-            name="detour-ai-augment-dashboard-ipc",
-            daemon=True,
-        )
-        thread.start()
-        print(f"Dashboard IPC running on unix://{socket_path}", flush=True)
-        return _DashboardIpcServer(
-            socket_path=socket_path,
-            server=server,
-            thread=thread,
-        )
-    except BaseException:
-        if server is not None:
-            server.server_close()
-        _unlink_stale_socket(socket_path)
-        raise
-
-
-def stop_dashboard_query_server(handle: _DashboardIpcServer) -> None:
-    handle.server.shutdown()
-    handle.thread.join()
-    handle.server.server_close()
-    _unlink_stale_socket(handle.socket_path)
-
-
-# ===================================================
-# Downstream use of start/stop IPC server functions
-# ===================================================
-
-
-def start_full_dashboard_query_server(
-    runtime: AiAugmentBackendContext, *, request_scope: IpcRequestScope = nullcontext,
-) -> _DashboardIpcServer:
-    """
-    Wrapper for `start_dashboard_query_server` to be used
-    downstream as part of another app's lifespan (e.g.,
-    to inject in FastAPI's `app.router.lifespan_context`).
-
-    Assumes that `stop_dashboard_query_server`
-    is executed in the lifespan's `finally`.
-    """
-    def run_outcome_handler(request: RunOutcomeRequest) -> RunOutcomeRecord:
-        return handle_run_outcome_request(runtime, request)
-
-    def query_response_handler(request: QueryRequest) -> QueryResponse:
-        return handle_query_request(runtime, request)
-
-    return start_dashboard_query_server(
-        DASHBOARD_SOCKET_PATH,
-        query_response_handler,
-        query_path=DASHBOARD_QUERY_PATH,
-        run_outcome_handler=run_outcome_handler,
-        run_outcome_paths=RUN_OUTCOME_PATHS,
-        request_scope=request_scope,
+def validate_query_request(request: requests.PreparedRequest) -> None:
+    parsed = urlsplit(request.url or "")
+    QueryRequest.from_http_request(
+        method=request.method or "",
+        path=parsed.path,
+        query=parsed.query.encode(),
+        body=api._prepared_request_body(request),
     )
 
 
-def serve_dashboard_query_only(
-    runtime: AiAugmentBackendContext,
-) -> None:
-    """
-    Wrapper for `start_dashboard_query_server`
-    together with `stop_dashboard_query_server`
-    for downstream use as a standalone app;
-    owns its own start and stop lifecycle.
-    """
-    def query_response_handler(request: QueryRequest) -> QueryResponse:
-        return handle_query_request(runtime, request)
-
-    server = start_dashboard_query_server(
-        DASHBOARD_SOCKET_PATH,
-        query_response_handler,
-        query_path=DASHBOARD_QUERY_PATH,
+async def handle_query_request(
+    store: BackendComponent.QueryOnlyStoreProperty,
+    request: requests.PreparedRequest,
+) -> requests.Response:
+    validate_query_request(request)
+    parsed = urlsplit(request.url or "")
+    request_record = QueryRequestRecord(
+        schema_version="1.1",
+        method=request.method or "",
+        scheme=parsed.scheme,
+        host=parsed.hostname or "",
+        port=parsed.port,
+        path=parsed.path,
+        query=parsed.query,
+        request_headers=dict(request.headers),
+        request_body=None,
+        response_code=None,
+        response_headers=None,
+        response_body=None,
+        received_at_unix_usec=time.time_ns() // NANOSECONDS_PER_MICROSECOND,
+        ready_to_respond_at_unix_usec=None,
+        duration_usec=None,
     )
-    stopped = False
-
-    def request_stop(_signum: int, _frame: FrameType | None) -> None:
-        nonlocal stopped
-        stopped = True
-
-    previous = {
-        signum: signal.getsignal(signum)
-        for signum in (signal.SIGTERM, signal.SIGINT)
-    }
-    try:
-        for signum in previous:
-            signal.signal(signum, request_stop)
-        while not stopped:
-            if not server.thread.is_alive():
-                raise RuntimeError("Backend query server stopped unexpectedly")
-            time.sleep(0.1)
-    finally:
-        try:
-            stop_dashboard_query_server(server)
-        finally:
-            for signum, handler in previous.items():
-                signal.signal(signum, handler)
+    logger.info(Locale.QUERY_SNAPSHOT_READING_LOG)
+    promise = await asyncio.to_thread(store.query, request_record)
+    if promise.acknowledgment is not BackendStoreAcknowledgment.NAK:
+        raise BackendStoreException(Locale.IPC_REQUEST_UNEXPECTEDLY_PERSISTED)
+    response_record, error = await promise.response_record()
+    if error is not None:
+        error.raise_exception()
+    if response_record is None:
+        raise BackendStoreException(Locale.IPC_RESPONSE_MISSING)
+    body = response_record.query_response_body
+    logger.info(
+        Locale.QUERY_SNAPSHOT_READY_LOG,
+        len(body.ai_augment_singular_outerdicts),
+        len(body.attempts),
+        len(body.run_outcome_records),
+    )
+    return response_record.to_response()

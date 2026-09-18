@@ -10,14 +10,15 @@ import os
 import signal
 import subprocess
 import time
-from collections.abc import AsyncIterator, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime, timezone
+from http import HTTPStatus
 from io import StringIO
 from pathlib import Path, PurePosixPath
-from threading import Barrier, Lock
+from threading import Barrier, Event, Lock
 from types import SimpleNamespace
 from typing import Any, Self, cast, get_args
 from urllib.parse import urlsplit
@@ -25,14 +26,16 @@ from uuid import UUID
 from zipfile import ZipFile
 
 import duckdb
+import httpx
 import pytest
 import requests
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request, status
-from fastapi.responses import Response, StreamingResponse
+from fastapi import FastAPI, status
 from pydantic import AnyUrl, ValidationError
 from rich.console import Console
+from starlette.types import Message, Scope
 
+from src.detours.detour_ai_augment.protected.src.architecture import BackendComponent
 from src.detours.detour_ai_augment.protected.src.backend import ipc
 from src.detours.detour_ai_augment.protected.src.backend.helpers import codex_parse
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models import (
@@ -100,6 +103,7 @@ from src.detours.detour_ai_augment.protected.tests.pytest_plugin import (
 from src.detours.detour_ai_augment.src.backend import api, server
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_backend_store import (  # noqa: E501
     AiAugmentBackendStore,
+    AiAugmentQueryBackendStore,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_cas import (  # noqa: E501
     AiAugmentCAS,
@@ -123,22 +127,25 @@ from src.detours.detour_ai_augment.src.backend.helpers.data_models.commit_event 
     PostCommitValidation,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.query_response import (
-    AgentRuntimeAttempt,
     AgentRuntimeAttemptRecord,
     QueryResponse,
 )
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.request_response_records import (
+    PushResponseRecord,
+    RunOutcomeRequestRecord,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.response_record_promise import (
+    BackendStoreException,
+)
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.run_outcome_record import (
     RunOutcomeRecord,
-    RunOutcomeResponseBody,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.validation_event import (  # noqa: E501
+    BackendValidationRecord,
     ValidationRequestBody,
 )
 from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models import (
     run_outcome as run_outcome_models,
-)
-from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.query_request import (  # noqa: E501
-    QueryRequest,
 )
 from src.helpers.architecture import FrozenStrictModel
 from src.helpers.cards import build_cards
@@ -781,41 +788,47 @@ def open_readonly_database(path: Path) -> duckdb.DuckDBPyConnection:
     return duckdb.connect(str(path), read_only=True)
 
 
-def logical_database_snapshot(
-    path: Path,
-) -> dict[str, tuple[str, tuple[tuple[object, ...], ...], tuple[tuple[object, ...], ...]]]:
+type DatabaseSnapshot = dict[
+    str, tuple[str, tuple[tuple[object, ...], ...], tuple[tuple[object, ...], ...]]
+]
+
+
+def logical_database_snapshot(path: Path) -> DatabaseSnapshot:
     connection = open_readonly_database(path)
     try:
-        relations = tuple(
-            connection.execute(
-                "SELECT table_name, table_type FROM information_schema.tables "
-                "WHERE table_schema = 'main' ORDER BY table_name"
-            ).fetchall()
+        return _database_snapshot(
+            lambda sql, parameters: connection.execute(sql, parameters).fetchall()
         )
-        return {
-            str(name): (
-                str(relation_type),
-                tuple(
-                    tuple(row)
-                    for row in connection.execute(
-                        "SELECT column_name, data_type, is_nullable "
-                        "FROM information_schema.columns "
-                        "WHERE table_schema = 'main' AND table_name = ? "
-                        "ORDER BY ordinal_position",
-                        [name],
-                    ).fetchall()
-                ),
-                tuple(
-                    tuple(row)
-                    for row in connection.execute(
-                        f"SELECT * FROM {duckdb_quote_identifier(str(name))} ORDER BY ALL"
-                    ).fetchall()
-                ),
-            )
-            for name, relation_type in relations
-        }
     finally:
         connection.close()
+
+
+def store_database_snapshot(store: AiAugmentBackendStore) -> DatabaseSnapshot:
+    return _database_snapshot(
+        lambda sql, parameters: store._execute(sql, parameters).fetchall()
+    )
+
+
+def _database_snapshot(
+    rows: Callable[[str, list[object] | None], list[tuple[object, ...]]],
+) -> DatabaseSnapshot:
+    relations = rows(
+        "SELECT table_name, table_type FROM information_schema.tables "
+        "WHERE table_schema = 'main' ORDER BY table_name",
+        None,
+    )
+    return {
+        str(name): (
+            str(relation_type),
+            tuple(rows(
+                "SELECT column_name, data_type, is_nullable FROM information_schema.columns "
+                "WHERE table_schema = 'main' AND table_name = ? ORDER BY ordinal_position",
+                [name],
+            )),
+            tuple(rows(f"SELECT * FROM {duckdb_quote_identifier(str(name))} ORDER BY ALL", None)),
+        )
+        for name, relation_type in relations
+    }
 
 
 def rollout_record(value: dict[str, object], line_number: int) -> api._RolloutRecord:
@@ -1180,14 +1193,6 @@ def runtime_for_test(
             "output_dir": output_dir,
             "output_format": output_format,
             "pandoc_reference_docx": paths.reference_docx,
-            "backend_store": AiAugmentBackendStore.from_resources(
-                replay_log=configured_pipeline.replay_log,
-                detour_db=AiAugmentDetourDB(
-                    path=tmp_path / "detour_ai_augment.duckdb",
-                    duckdb_extensions=configured_pipeline.duckdb_extensions,
-                ),
-                rollout_cas=rollout_cas,
-            ),
             "rollout_cas": rollout_cas,
             "match_rule_version": (
                 configured_pipeline.match_rule_version
@@ -1238,15 +1243,100 @@ def runtime_for_test(
     )
 
 
+def backend_store_for_test(runtime: AiAugmentBackendContext) -> AiAugmentBackendStore:
+    config = runtime.pipeline_config
+    return AiAugmentBackendStore._from_resources(
+        replay_log=config.replay_log,
+        detour_db=AiAugmentDetourDB(
+            path=config.output_dir.parent / "detour_ai_augment.duckdb",
+            duckdb_extensions=config.duckdb_extensions,
+        ),
+        rollout_cas=config.rollout_cas,
+    )
+
+
 @contextmanager
 def writable_backend_store(
     runtime: AiAugmentBackendContext,
 ) -> Iterator[AiAugmentBackendStore]:
-    store = runtime.pipeline_config.backend_store
-    if not store.detour_db_path.exists():
-        store.rebuild_from_log(runtime, reset_confirmed=True)
-    with store.writable(runtime):
+    store = backend_store_for_test(runtime)
+    if not store._detour_db_path.exists():
+        store._rebuild_from_log(runtime, reset_confirmed=True)
+    with store._writable(runtime):
         yield store
+
+
+@pytest.fixture
+def api_runtime(tmp_path: Path, backend_test_paths: BackendTestPaths) -> AiAugmentBackendContext:
+    source = tmp_path / "source.duckdb"
+    create_operator_capture_source_database(source, {column: "NR" for column in DOCX_COLUMNS})
+    return runtime_for_test(
+        tmp_path, backend_test_paths, source_database=source,
+        namekey=TEST_NAMEKEY, codex_match_version=1,
+    )
+
+
+@pytest.fixture
+def api_store(api_runtime: AiAugmentBackendContext) -> AiAugmentBackendStore:
+    store = backend_store_for_test(api_runtime)
+    store._rebuild_from_log(api_runtime, reset_confirmed=True)
+    return store
+
+
+@pytest.fixture
+def api_push_capture(
+    api_runtime: AiAugmentBackendContext,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> tuple[CodexRolloutRecord, api._PushConfiguration]:
+    payload = operator_capture_rollout(valid_submission_body())
+    digest = hashlib.sha256(payload).hexdigest()
+    cas = api_runtime.pipeline_config.rollout_cas
+    cas.initialize()
+    blob = cas.path / digest[:2] / digest[2:4] / digest
+    blob.parent.mkdir(parents=True, exist_ok=True)
+    blob.write_bytes(payload)
+    rollout = CodexRolloutRecord(sha256=digest, size=len(payload), line_count=payload.count(b"\n"))
+    relative = PurePosixPath(
+        f"2026/09/03/rollout-2026-09-03T15-16-00-{OPERATOR_CAPTURED_SESSION_ID}.jsonl"
+    )
+    configuration = api._PushConfiguration(
+        rollout_guest_path=f"/home/ai/.codex/sessions/{relative}",
+        rollout_relative_path=relative,
+        appendwatch_report=PurePosixPath("/report.txt"),
+        lima_ssh_config=tmp_path / "ssh.config", identity_file=tmp_path / "id",
+        known_hosts_file=tmp_path / "known-hosts", ssh_user="aivm-audit",
+        ssh_target="aivm-aivm-audit", host_key_alias="lima-aivm-aivm-audit",
+    )
+
+    def select(session_id: UUID) -> api._PushConfiguration:
+        assert session_id == UUID(OPERATOR_CAPTURED_SESSION_ID)
+        return configuration
+
+    def copy_rollout(
+        selected: AiAugmentCAS, *, rollout_relative_path: PurePosixPath,
+        ssh_target: str, ssh_options: object,
+    ) -> CodexRolloutRecord:
+        assert selected is cas
+        assert rollout_relative_path == relative
+        assert ssh_target == configuration.ssh_target
+        assert ssh_options
+        return rollout
+
+    # Only guest I/O is substituted; validation consumes this real synthetic CAS blob.
+    monkeypatch.setattr(api, "push_configuration_for_session", select)
+    monkeypatch.setattr(AiAugmentCAS, "copy_rollout", copy_rollout)
+    monkeypatch.setattr(
+        api, "_read_appendwatch_bytes", lambda _config: report_for_rollout(relative).encode(),
+    )
+    monkeypatch.setattr(api, "BACKEND_SESSION_ID", UUID(OPERATOR_CAPTURED_SESSION_ID))
+    monkeypatch.setattr(api, "BACKEND_LIFECYCLE", BackendLifecycle.READY)
+    monkeypatch.setattr(api, "BACKEND_CURRENT_PULL_RECORD", None)
+    monkeypatch.setattr(api, "BACKEND_PENDING_PULL_RECORD", None)
+    monkeypatch.setattr(api, "BACKEND_LATEST_PUSH_RECORD", None)
+    monkeypatch.setattr(api, "BACKEND_PUSH_RESPONSE_RECORD", None)
+    monkeypatch.setattr(api, "AUTHORITATIVE_BACKGROUND_TASKS", set())
+    return rollout, configuration
 
 
 def prepare_real_sample_push(
@@ -1495,81 +1585,47 @@ def create_operator_capture_source_database(
         connection.close()
 
 
+def query_snapshot_for_test(
+    store: BackendComponent.QueryOnlyStoreProperty, threaded_loop: asyncio.Runner,
+) -> QueryResponse:
+    response = threaded_loop.run(ipc.handle_query_request(
+        store, requests.Request("GET", "http://invalid/query").prepare(),
+    ))
+    assert response.status_code == HTTPStatus.OK
+    return QueryResponse.from_serialized_json(response.content)
+
+
+def api_application_for_test(
+    runtime: AiAugmentBackendContext, store: AiAugmentBackendStore,
+) -> FastAPI:
+    app = FastAPI()
+    app.state.runtime = runtime
+    app.state.store = store
+    app.state.request_gate = server._BackendRequestGate()
+    app.get(api.PULL_PATH)(server.pull)
+    app.post(api.PUSH_PATH)(server.push)
+    app.add_middleware(server._BackendRequestMiddleware)
+    return app
+
+
 async def authoritative_api_exchange(
     runtime: AiAugmentBackendContext,
+    store: AiAugmentBackendStore,
     method: str,
     path: str,
     body: bytes = b"",
-) -> tuple[int, bytes]:
-    async def public_endpoint(
-        scope: dict[str, object],
-        receive: Any,
-        send: Any,
-    ) -> None:
-        request = Request(cast(Any, scope), receive=receive)
-        response = (
-            api.authoritative_pull(request)
-            if method == api.HTTP_GET_METHOD
-            else await api.authoritative_push(request)
+) -> tuple[HTTPStatus, bytes]:
+    store._loop = asyncio.get_running_loop()
+    app = api_application_for_test(runtime, store)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver",
+    ) as client:
+        response = await client.request(
+            method, path, content=body, headers={"content-type": "application/json"},
         )
-        await response(cast(Any, scope), receive, send)
-
-    request_pending = True
-    never_disconnect = asyncio.Event()
-    sent: list[dict[str, object]] = []
-
-    async def receive() -> dict[str, object]:
-        nonlocal request_pending
-        if request_pending:
-            request_pending = False
-            return {
-                api.ASGI_TYPE_KEY: api.ASGI_HTTP_REQUEST_MESSAGE_TYPE,
-                api.ASGI_BODY_KEY: body,
-                api.ASGI_MORE_BODY_KEY: False,
-            }
-        await never_disconnect.wait()
-        return {api.ASGI_TYPE_KEY: api.ASGI_HTTP_DISCONNECT_MESSAGE_TYPE}
-
-    async def send(message: dict[str, object]) -> None:
-        sent.append(message)
-
-    headers = [(b"content-type", b"application/json")]
-    if body:
-        headers.append((b"content-length", str(len(body)).encode()))
-    scope = {
-        api.ASGI_TYPE_KEY: api.ASGI_HTTP_SCOPE_TYPE,
-        api.ASGI_METHOD_KEY: method,
-        api.ASGI_PATH_KEY: path,
-        "asgi": {"version": "3.0", "spec_version": "2.4"},
-        "raw_path": path.encode(),
-        "query_string": b"",
-        "headers": headers,
-        "scheme": "http",
-        "server": ("testserver", 80),
-        "client": ("127.0.0.1", 1234),
-        "http_version": "1.1",
-        "root_path": "",
-        "app": SimpleNamespace(state=SimpleNamespace(runtime=runtime)),
-    }
-    await asyncio.wait_for(
-        api._AuthoritativeHttpMiddleware(cast(Any, public_endpoint))(
-            cast(Any, scope),
-            receive,
-            cast(Any, send),
-        ),
-        timeout=5,
-    )
-    response_start = next(
-        message
-        for message in sent
-        if message[api.ASGI_TYPE_KEY] == api.ASGI_HTTP_RESPONSE_START_MESSAGE_TYPE
-    )
-    response_body = b"".join(
-        cast(bytes, message.get(api.ASGI_BODY_KEY, b""))
-        for message in sent
-        if message[api.ASGI_TYPE_KEY] == api.ASGI_HTTP_RESPONSE_BODY_MESSAGE_TYPE
-    )
-    return cast(int, response_start[api.ASGI_STATUS_KEY]), response_body
+    # This helper checks final workflow results. Early-202 timing is tested separately.
+    await asyncio.gather(*tuple(api.AUTHORITATIVE_BACKGROUND_TASKS))
+    return HTTPStatus(response.status_code), response.content
 
 
 def assert_captured_operator_push_contour(
@@ -1577,6 +1633,7 @@ def assert_captured_operator_push_contour(
     monkeypatch: pytest.MonkeyPatch,
     backend_test_paths: BackendTestPaths,
     detour_root: Path,
+    threaded_loop: asyncio.Runner,
 ) -> None:
     accepted_push_path = operator_capture_fixture(
         detour_root,
@@ -1676,29 +1733,8 @@ def assert_captured_operator_push_contour(
             stderr=b"",
         )
 
-    original_after_authoritative_record = api._after_authoritative_public_record
-
-    async def commit_inline_after_authoritative_record(
-        record: HttpRequestLogRecord,
-        selected_runtime: AiAugmentBackendContext,
-    ) -> None:
-        assert selected_runtime is runtime
-        if (record.method, record.path) == (api.HTTP_POST_METHOD, api.PUSH_PATH):
-            assert record.response_code == status.HTTP_202_ACCEPTED
-            api._commit_accepted_push(record, runtime)
-            return
-        await original_after_authoritative_record(record, runtime)
-
     monkeypatch.setenv(pydantic_to_paste.EXPORT_OPENALEX_API_KEY, "operator-fixture-key")
     monkeypatch.setattr(requests.Session, "send", fake_institution_send)
-    monkeypatch.setattr(
-        api,
-        "StreamingResponse",
-        lambda content, *, media_type: Response(
-            content="".join(content),
-            media_type=media_type,
-        ),
-    )
     monkeypatch.setattr(
         api,
         "push_configuration_for_session",
@@ -1709,18 +1745,13 @@ def assert_captured_operator_push_contour(
         ),
     )
     monkeypatch.setattr(subprocess, "run", fake_subprocess_run)
-    monkeypatch.setattr(
-        api,
-        "_after_authoritative_public_record",
-        commit_inline_after_authoritative_record,
-    )
     monkeypatch.setattr(api, "BACKEND_CURRENT_PULL_RECORD", None)
     monkeypatch.setattr(api, "BACKEND_PENDING_PULL_RECORD", None)
     monkeypatch.setattr(api, "BACKEND_LATEST_PUSH_RECORD", None)
     monkeypatch.setattr(api, "BACKEND_SESSION_ID", UUID(OPERATOR_CAPTURED_SESSION_ID))
-    monkeypatch.setattr(api, "BACKEND_ATTEMPT_RECORD", None)
+    monkeypatch.setattr(api, "BACKEND_PUSH_RESPONSE_RECORD", None)
     monkeypatch.setattr(api, "BACKEND_LIFECYCLE", BackendLifecycle.READY)
-    with writable_backend_store(runtime):
+    with writable_backend_store(runtime) as store:
 
         async def run_captured_contour() -> tuple[
             tuple[int, bytes],
@@ -1731,34 +1762,39 @@ def assert_captured_operator_push_contour(
         ]:
             initial_pull = await authoritative_api_exchange(
                 runtime,
+                store,
                 api.HTTP_GET_METHOD,
                 api.PULL_PATH,
             )
             baseline_push = await authoritative_api_exchange(
                 runtime,
+                store,
                 api.HTTP_POST_METHOD,
                 api.PUSH_PATH,
                 json.dumps(operator_retry_baseline(accepted_push)).encode(),
             )
             retry_pull = await authoritative_api_exchange(
                 runtime,
+                store,
                 api.HTTP_GET_METHOD,
                 api.PULL_PATH,
             )
             accepted = await authoritative_api_exchange(
                 runtime,
+                store,
                 api.HTTP_POST_METHOD,
                 api.PUSH_PATH,
                 read_bytes(accepted_push_path),
             )
             gone_pull = await authoritative_api_exchange(
                 runtime,
+                store,
                 api.HTTP_GET_METHOD,
                 api.PULL_PATH,
             )
             return initial_pull, baseline_push, retry_pull, accepted, gone_pull
 
-        initial_pull, baseline_push, retry_pull, accepted, gone_pull = asyncio.run(
+        initial_pull, baseline_push, retry_pull, accepted, gone_pull = threaded_loop.run(
             run_captured_contour()
         )
         assert initial_pull[0] == status.HTTP_200_OK
@@ -1800,23 +1836,19 @@ def assert_captured_operator_push_contour(
             and record.response_code == status.HTTP_200_OK
         )
 
-        assert not ipc.handle_query_request(
-            runtime, QueryRequest(),
-        ).ai_augment_singular_outerdicts[0].committed_innerdicts
+        interim = query_snapshot_for_test(store, threaded_loop)
+        assert not interim.ai_augment_singular_outerdicts[0].committed_innerdicts
         from src.detours.detour_ai_augment.tests.backend.test_http_interceptor import (
             outcome_for_commit,
         )
 
-        runtime.pipeline_config.backend_store.append_authoritative_record(
-            outcome_for_commit(api._backend_commit_record(
-                runtime.pipeline_config.backend_store, commits[-1],
+        store._append_authoritative_record(
+            outcome_for_commit(store, api._backend_commit_record(
+                store, commits[-1],
             )),
         )
 
-        query = ipc.handle_query_request(
-            runtime,
-            QueryRequest(),
-        )
+        query = query_snapshot_for_test(store, threaded_loop)
         assert len(query.attempts) == 2
         assert (
             query.attempts[-1].attempt.post_commit_validation.result
@@ -1864,6 +1896,7 @@ def test_captured_operator_push_generates_commit_and_exact_410_response(
     monkeypatch: pytest.MonkeyPatch,
     backend_test_paths: BackendTestPaths,
     pytestconfig: pytest.Config,
+    threaded_loop: asyncio.Runner,
 ) -> None:
     detour_root = pytestconfig.rootpath / "src" / "detours" / "detour_ai_augment"
     assert_captured_operator_push_contour(
@@ -1871,222 +1904,78 @@ def test_captured_operator_push_generates_commit_and_exact_410_response(
         monkeypatch,
         backend_test_paths,
         detour_root,
+        threaded_loop,
     )
 
 
-def test_pure_asgi_middleware_records_every_public_exchange_before_send(
+@pytest.mark.parametrize(("method", "path", "state", "expected_status", "chunks"), (
+    ("GET", "/pull", BackendLifecycle.READY, HTTPStatus.OK, (b"",)),
+    ("POST", "/push", BackendLifecycle.BUSY, HTTPStatus.CONFLICT,
+     (b'{"submission":', b'"private test input"}')),
+))
+def test_http_adapter_persists_complete_exchange_before_sending(
+    api_runtime: AiAugmentBackendContext,
+    api_store: AiAugmentBackendStore,
+    threaded_loop: asyncio.Runner,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    method: str,
+    path: str,
+    state: BackendLifecycle,
+    expected_status: HTTPStatus,
+    chunks: tuple[bytes, ...],
 ) -> None:
-    caplog.set_level(logging.INFO, logger=api.__name__)
-    events: list[tuple[str, UUID]] = []
-    response_body = json.dumps(TEST_AUTHORITATIVE_RESPONSE_BODY).encode()
+    caplog.set_level(logging.INFO)
+    monkeypatch.setattr(api, "BACKEND_LIFECYCLE", state)
+    monkeypatch.setattr(api, "BACKEND_SESSION_ID", TEST_SESSION_ID)
+    monkeypatch.setattr(api, "BACKEND_PENDING_PULL_RECORD", None)
+    monkeypatch.setattr(api, "BACKEND_CURRENT_PULL_RECORD", None)
+    monkeypatch.setattr(api, "AUTHORITATIVE_BACKGROUND_TASKS", set())
+    messages: list[Message] = []
+    persisted: list[HttpRequestLogRecord] = []
 
-    async def finite_app(
-        scope: dict[str, object],
-        receive: Any,
-        send: Any,
-    ) -> None:
-        del receive
-        response_code = (
-            status.HTTP_200_OK
-            if scope[api.ASGI_METHOD_KEY] == api.HTTP_GET_METHOD
-            else status.HTTP_202_ACCEPTED
-        )
-        await send({
-            api.ASGI_TYPE_KEY: api.ASGI_HTTP_RESPONSE_START_MESSAGE_TYPE,
-            api.ASGI_STATUS_KEY: response_code,
-            api.ASGI_HEADERS_KEY: [(b"content-type", b"application/json")],
-        })
-        await send({
-            api.ASGI_TYPE_KEY: api.ASGI_HTTP_RESPONSE_BODY_MESSAGE_TYPE,
-            api.ASGI_BODY_KEY: response_body,
-        })
+    async def exchange() -> None:
+        app = api_application_for_test(api_runtime, api_store)
+        pieces = iter(enumerate(chunks))
 
-    def append(record: HttpRequestLogRecord) -> HttpRequestLogRecord:
-        events.append(("append", record.record_id))
-        return HttpRequestLogRecord.model_validate_json(record.model_dump_json())
+        async def receive() -> Message:
+            index, chunk = next(pieces)
+            return {"type": "http.request", "body": chunk, "more_body": index < len(chunks) - 1}
 
-    runtime = cast(
-        AiAugmentBackendContext,
-        SimpleNamespace(
-            pipeline_config=SimpleNamespace(
-                backend_store=SimpleNamespace(
-                    append_authoritative_record=append,
-                )
-            )
-        ),
-    )
+        async def send(message: Message) -> None:
+            # Assert real durable log and DB readback BEFORE any response is emitted.
+            records = api._authoritative_log_records(Path(api_store._replay_log).read_bytes())
+            assert len(records) == 1
+            record = records[0][0]
+            assert api_store._http_record(record.record_id) == record
+            persisted.append(record)
+            messages.append(message)
 
-    async def after(
-        record: HttpRequestLogRecord,
-        selected_runtime: AiAugmentBackendContext,
-    ) -> None:
-        assert selected_runtime is runtime
-        events.append(("after", record.record_id))
-
-    monkeypatch.setattr(api, "_after_authoritative_public_record", after)
-
-    async def exchange(method: str, path: str, body: bytes) -> list[dict[str, object]]:
-        request_pending = True
-        sent: list[dict[str, object]] = []
-
-        async def receive() -> dict[str, object]:
-            nonlocal request_pending
-            if request_pending:
-                request_pending = False
-                return {
-                    api.ASGI_TYPE_KEY: api.ASGI_HTTP_REQUEST_MESSAGE_TYPE,
-                    api.ASGI_BODY_KEY: body,
-                    api.ASGI_MORE_BODY_KEY: False,
-                }
-            return {api.ASGI_TYPE_KEY: api.ASGI_HTTP_DISCONNECT_MESSAGE_TYPE}
-
-        async def send(message: dict[str, object]) -> None:
-            sent.append(message)
-
-        scope = {
-            api.ASGI_TYPE_KEY: api.ASGI_HTTP_SCOPE_TYPE,
-            api.ASGI_METHOD_KEY: method,
-            api.ASGI_PATH_KEY: path,
-            "raw_path": path.encode(),
-            "query_string": b"",
-            "headers": [(b"content-type", b"application/json")],
-            "scheme": "http",
-            "server": ("testserver", 80),
-            "client": ("127.0.0.1", 1234),
-            "http_version": "1.1",
-            "root_path": "",
-            "app": SimpleNamespace(state=SimpleNamespace(runtime=runtime)),
+        scope: Scope = {
+            "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
+            "method": method, "scheme": "http", "path": path, "raw_path": path.encode(),
+            "query_string": b"", "headers": [(b"host", b"invalid")],
+            "client": ("127.0.0.1", 1), "server": ("invalid", 80),
         }
-        await api._AuthoritativeHttpMiddleware(cast(Any, finite_app))(
-            cast(Any, scope),
-            receive,
-            cast(Any, send),
-        )
-        return sent
+        await app(scope, receive, send)
 
-    pull_messages = asyncio.run(exchange(api.HTTP_GET_METHOD, api.PULL_PATH, b""))
-    push_messages = asyncio.run(
-        exchange(api.HTTP_POST_METHOD, api.PUSH_PATH, TEST_AUTHORITATIVE_REQUEST_BODY)
+    with api_store._writable(api_runtime):
+        threaded_loop.run(asyncio.wait_for(exchange(), timeout=10))
+    assert messages[0]["status"] == expected_status
+    assert messages[-1].get("more_body", False) is False
+    record = persisted[0]
+    assert record.record_id.version == 7
+    assert all(item == record for item in persisted)
+    assert record.request_body == b"".join(chunks).decode()
+    assert record.response_code == expected_status
+    assert record.response_body is not None
+    assert b"".join(message.get("body", b"") for message in messages) == (
+        record.response_body.encode()
     )
-
-    assert pull_messages[0][api.ASGI_STATUS_KEY] == status.HTTP_200_OK
-    assert push_messages[0][api.ASGI_STATUS_KEY] == status.HTTP_202_ACCEPTED
-    assert [kind for kind, _record_id in events] == ["append", "after"] * 2
-    record_ids = [record_id for kind, record_id in events if kind == "append"]
-    assert len(set(record_ids)) == 2
-    assert all(record_id.version == 7 for record_id in record_ids)
-    for method, path, code, record_id in (
-        ("GET", "/pull", 200, record_ids[0]),
-        ("POST", "/push", 202, record_ids[1]),
-    ):
-        assert f"Backend received {method} {path}:" in caplog.text
-        assert f"Backend persisted {method} {path}: record={record_id}; HTTP {code}" in caplog.text
-        assert f"Backend sent {method} {path}: record={record_id}; HTTP {code}" in caplog.text
-    assert TEST_AUTHORITATIVE_REQUEST_BODY.decode() not in caplog.text
-
-
-def test_authoritative_middleware_preserves_streaming_response_until_complete(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    response_body = b'{"task":"streamed"}\n'
-    records: list[HttpRequestLogRecord] = []
-
-    async def body() -> AsyncIterator[bytes]:
-        yield response_body
-
-    async def streaming_app(
-        scope: dict[str, object],
-        receive: Any,
-        send: Any,
-    ) -> None:
-        await StreamingResponse(
-            body(),
-            media_type=api.MEDIA_TYPE,
-        )(cast(Any, scope), receive, send)
-
-    runtime = cast(
-        AiAugmentBackendContext,
-        SimpleNamespace(
-            pipeline_config=SimpleNamespace(
-                backend_store=SimpleNamespace(
-                    append_authoritative_record=lambda record: capture_http_record(records, record),
-                )
-            )
-        ),
-    )
-
-    async def after(
-        _record: HttpRequestLogRecord,
-        selected_runtime: AiAugmentBackendContext,
-    ) -> None:
-        assert selected_runtime is runtime
-        return None
-
-    monkeypatch.setattr(api, "_after_authoritative_public_record", after)
-
-    async def exchange() -> list[dict[str, object]]:
-        request_pending = True
-        disconnected = asyncio.Event()
-        sent: list[dict[str, object]] = []
-
-        async def receive() -> dict[str, object]:
-            nonlocal request_pending
-            if request_pending:
-                request_pending = False
-                return {
-                    api.ASGI_TYPE_KEY: api.ASGI_HTTP_REQUEST_MESSAGE_TYPE,
-                    api.ASGI_BODY_KEY: b"",
-                    api.ASGI_MORE_BODY_KEY: False,
-                }
-            await disconnected.wait()
-            return {api.ASGI_TYPE_KEY: api.ASGI_HTTP_DISCONNECT_MESSAGE_TYPE}
-
-        async def send(message: dict[str, object]) -> None:
-            sent.append(message)
-
-        scope = {
-            api.ASGI_TYPE_KEY: api.ASGI_HTTP_SCOPE_TYPE,
-            api.ASGI_METHOD_KEY: api.HTTP_GET_METHOD,
-            api.ASGI_PATH_KEY: api.PULL_PATH,
-            "asgi": {"version": "3.0", "spec_version": "2.3"},
-            "raw_path": api.PULL_PATH.encode(),
-            "query_string": b"",
-            "headers": [],
-            "scheme": "http",
-            "server": ("testserver", 80),
-            "client": ("127.0.0.1", 1234),
-            "http_version": "1.1",
-            "root_path": "",
-            "app": SimpleNamespace(state=SimpleNamespace(runtime=runtime)),
-        }
-        await asyncio.wait_for(
-            api._AuthoritativeHttpMiddleware(cast(Any, streaming_app))(
-                cast(Any, scope),
-                receive,
-                cast(Any, send),
-            ),
-            timeout=1,
-        )
-        return sent
-
-    messages = asyncio.run(exchange())
-    response_chunks = [
-        message
-        for message in messages
-        if message[api.ASGI_TYPE_KEY] == api.ASGI_HTTP_RESPONSE_BODY_MESSAGE_TYPE
-    ]
-
-    assert messages[0][api.ASGI_STATUS_KEY] == status.HTTP_200_OK
-    assert response_chunks[-1].get(api.ASGI_MORE_BODY_KEY, False) is False
-    assert (
-        b"".join(cast(bytes, message.get(api.ASGI_BODY_KEY, b"")) for message in response_chunks)
-        == response_body
-    )
-    assert len(records) == 1
-    assert records[0].response_code == status.HTTP_200_OK
-    assert records[0].response_body == response_body.decode()
+    assert f"Backend received {method} {path}:" in caplog.text
+    assert str(record.record_id) in caplog.text
+    assert f"Backend sent {method} {path}:" in caplog.text
+    assert "private test input" not in caplog.text
 
 
 def test_private_metadata_headers_are_canonical_structured_fields() -> None:
@@ -2328,22 +2217,22 @@ def test_commit_request_body_contract_is_strict_canonical_and_losslessly_resolve
 def test_run_outcome_snapshot_captures_fresh_rollout_and_appendwatch(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    api_runtime: AiAugmentBackendContext,
 ) -> None:
     session_id = UUID("019d0000-0000-7000-8000-000000000011")
     pull_record_id = UUID("019d0000-0000-7000-8000-000000000012")
     push_record_id = UUID("019d0000-0000-7000-8000-000000000013")
     rollout_filename = f"{api.ROLLOUT_FILENAME_PREFIX}{session_id}.jsonl"
-    configuration = cast(
-        api._PushConfiguration,
-        SimpleNamespace(
-            rollout_relative_path=PurePosixPath(rollout_filename),
-            ssh_target="aivm-aivm-audit",
-            lima_ssh_config=tmp_path / "ssh.config",
-            identity_file=tmp_path / "identity",
-            known_hosts_file=tmp_path / "known-hosts",
-            ssh_user="aivm-audit",
-            host_key_alias="lima-aivm-aivm-audit",
-        ),
+    configuration = api._PushConfiguration(
+        rollout_guest_path=f"/home/ai/.codex/sessions/{rollout_filename}",
+        rollout_relative_path=PurePosixPath(rollout_filename),
+        appendwatch_report=PurePosixPath("/report.txt"),
+        ssh_target="aivm-aivm-audit",
+        lima_ssh_config=tmp_path / "ssh.config",
+        identity_file=tmp_path / "identity",
+        known_hosts_file=tmp_path / "known-hosts",
+        ssh_user="aivm-audit",
+        host_key_alias="lima-aivm-aivm-audit",
     )
     archive = api._ArchivedFile(
         path=tmp_path / "cas.jsonl",
@@ -2362,6 +2251,7 @@ def test_run_outcome_snapshot_captures_fresh_rollout_and_appendwatch(
         return configuration
 
     def copy_rollout(
+        _cas: AiAugmentCAS,
         *,
         rollout_relative_path: PurePosixPath,
         ssh_target: str,
@@ -2377,14 +2267,7 @@ def test_run_outcome_snapshot_captures_fresh_rollout_and_appendwatch(
             line_count=archive.line_count,
         )
 
-    runtime = cast(
-        AiAugmentBackendContext,
-        SimpleNamespace(
-            pipeline_config=SimpleNamespace(
-                rollout_cas=SimpleNamespace(copy_rollout=copy_rollout)
-            )
-        ),
-    )
+    monkeypatch.setattr(AiAugmentCAS, "copy_rollout", copy_rollout)
 
     monkeypatch.setattr(api, "BACKEND_SESSION_ID", session_id)
     pull_record = persisted_http_record(
@@ -2411,11 +2294,20 @@ def test_run_outcome_snapshot_captures_fresh_rollout_and_appendwatch(
     monkeypatch.setattr(api, "_read_appendwatch_bytes", read_appendwatch)
     monkeypatch.setattr(api, "push_configuration_for_session", select_rollout)
 
-    snapshot, filename, failures = ipc._capture_run_outcome_snapshot(runtime)
+    request = run_outcome_models.RunOutcomeRequest.from_http_request(
+        received_at_unix_usec=1, method="POST", scheme="http", host="invalid",
+        port=None, path="/completed", query="",
+        request_headers={
+            run_outcome_models.NAME_KEY_HEADER: api.name_key_header(TEST_NAMEKEY_MODEL),
+        },
+        request_body=b"",
+    )
+    snapshot, failures = ipc._capture_run_outcome_snapshot(api_runtime, request)
 
     assert failures == ()
-    assert filename == rollout_filename
-    assert snapshot == RunOutcomeResponseBody(
+    assert snapshot == RunOutcomeRequestRecord(
+        **request.http_request_log_record.model_dump(),
+        rollout_filename=rollout_filename,
         pull_record_id=pull_record_id,
         push_record_id=push_record_id,
         codex_session_record=CodexSessionRecord(
@@ -2438,163 +2330,120 @@ def test_run_outcome_snapshot_captures_fresh_rollout_and_appendwatch(
     ]
 
 
-@pytest.mark.parametrize(
-    ("path", "snapshot", "rollout_filename", "failures", "expected_status"),
-    (
-        (
-            run_outcome_models.COMPLETED_PATH,
-            RunOutcomeResponseBody(
-                pull_record_id=UUID("019d0000-0000-7000-8000-000000000022"),
-                push_record_id=UUID("019d0000-0000-7000-8000-000000000023"),
-                codex_session_record=CodexSessionRecord(
-                    session_id=UUID("019d0000-0000-7000-8000-000000000021"),
-                    codex_rollout_record=CodexRolloutRecord(
-                        sha256="b" * 64,
-                        size=10,
-                        line_count=2,
-                    ),
-                    appendwatch_report_record=AppendwatchReportRecord(
-                        encoding=AppendwatchReportEncoding.BASE64,
-                        data=base64.b64encode(b".\n").decode("ascii"),
-                    ),
-                ),
-            ),
-            ("rollout-2026-09-07T00-00-00-019d0000-0000-7000-8000-000000000021.jsonl"),
-            (),
-            status.HTTP_200_OK,
-        ),
-        (
-            run_outcome_models.FAILED_PATH,
-            RunOutcomeResponseBody(
-                pull_record_id=None,
-                push_record_id=None,
-                codex_session_record=CodexSessionRecord(
-                    session_id=None,
-                    codex_rollout_record=None,
-                    appendwatch_report_record=None,
-                ),
-            ),
-            None,
-            (OSError("rollout unavailable"),),
-            status.HTTP_500_INTERNAL_SERVER_ERROR,
-        ),
-    ),
-)
+@pytest.mark.parametrize("path", tuple(run_outcome_models.RunOutcomePath))
+@pytest.mark.parametrize("complete_capture", (False, True))
 def test_run_outcome_http_exchange_is_logged_and_replays_as_raw_history(
     monkeypatch: pytest.MonkeyPatch,
-    path: str,
-    snapshot: RunOutcomeResponseBody,
-    rollout_filename: str | None,
-    failures: tuple[Exception, ...],
-    expected_status: int,
+    api_runtime: AiAugmentBackendContext,
+    api_store: AiAugmentBackendStore,
+    threaded_loop: asyncio.Runner,
+    path: run_outcome_models.RunOutcomePath,
+    complete_capture: bool,
 ) -> None:
-    appended: list[HttpRequestLogRecord] = []
-    backend_store = SimpleNamespace(
-        append_authoritative_record=lambda record: capture_http_record(appended, record),
-    )
-    runtime = cast(
-        AiAugmentBackendContext,
-        SimpleNamespace(
-            configured_namekey=NameKey.from_json_key(TEST_NAMEKEY),
-            pipeline_config=SimpleNamespace(backend_store=backend_store),
-            ai_augment_singular_outerdicts=(),
+    session = CodexSessionRecord(
+        session_id=TEST_SESSION_ID if complete_capture else None,
+        codex_rollout_record=(
+            CodexRolloutRecord(sha256="b" * 64, size=10, line_count=2)
+            if complete_capture else None
+        ),
+        appendwatch_report_record=(
+            AppendwatchReportRecord(
+                encoding=AppendwatchReportEncoding.BASE64,
+                data=base64.b64encode(b".\n").decode("ascii"),
+            ) if complete_capture else None
         ),
     )
-    monkeypatch.setattr(
-        ipc,
-        "_capture_run_outcome_snapshot",
-        lambda _runtime: (snapshot, rollout_filename, failures),
-    )
-    received_at = 1_789_000_000_000_000
-    request = HttpRequestLogRecord(
-        schema_version="1.1",
-        received_at_unix_usec=received_at,
-        method=api.HTTP_POST_METHOD,
-        scheme=ipc.DASHBOARD_IPC_SCHEME,
-        host=ipc.DASHBOARD_IPC_HOST,
-        port=None,
-        path=path,
-        query="",
-        ready_to_respond_at_unix_usec=None,
-        request_headers={
-            run_outcome_models.NAME_KEY_HEADER: api.name_key_header(
-                TEST_NAMEKEY_MODEL
-            )
-        },
-        request_body=None,
-        response_code=None,
-        response_headers=None,
-        response_body=None,
-        duration_usec=None,
-    )
+    captured: list[RunOutcomeRequestRecord] = []
 
-    outcome_request = run_outcome_models.RunOutcomeRequest.from_http_request_log_record(
-        request
-    )
-    response_record = ipc.handle_run_outcome_request(runtime, outcome_request)
-
-    assert response_record.response_code == expected_status
-    assert response_record.response_body == snapshot.model_dump_json()
-    if rollout_filename is None:
-        expected_response_headers = None
-    else:
-        rollout = snapshot.codex_session_record.codex_rollout_record
-        assert rollout is not None
-        expected_response_headers = {
-            SOURCE_KEY_HEADER: api._source_key_header(
-                rollout_filename,
-                rollout.line_count,
-            )
-        }
-    assert response_record.response_headers == expected_response_headers
-    assert len(appended) == 1
-    record = appended[0]
-    assert record == response_record.http_request_log_record
-    validated = RunOutcomeRecord.from_http_request_log_record(record)
-    assert validated.run_outcome_response_body == snapshot
-    assert record.record_id.version == 7
-    assert record.path == path
-    assert record.request_headers == outcome_request.request_headers
-    assert record.request_body is None
-    assert record.response_code == expected_status
-    assert record.response_body == snapshot.model_dump_json()
-    assert record.received_at_unix_usec == received_at
-    assert record.duration_usec is not None
-    assert (record.response_headers is not None) == (rollout_filename is not None)
-
-    connection = duckdb.connect(":memory:")
-    try:
-        store_for_connection(connection)._initialize_http_record_schema()
-        store_for_connection(connection, transaction_active=False)._apply_log_record(
-            runtime,
-            record,
-            line_number=1,
-            raw_line=(record.model_dump_json() + "\n").encode(),
+    def capture(
+        runtime: AiAugmentBackendContext, request: run_outcome_models.RunOutcomeRequest,
+    ) -> tuple[RunOutcomeRequestRecord, tuple[Exception, ...]]:
+        assert runtime is api_runtime
+        record = RunOutcomeRequestRecord(
+            **request.http_request_log_record.model_dump(),
+            pull_record_id=None, push_record_id=None, codex_session_record=session,
+            rollout_filename=TEST_ROLLOUT_FILENAME if complete_capture else None,
         )
-        runtime = cast(AiAugmentBackendContext, SimpleNamespace(
-            configured_namekey=runtime.configured_namekey,
-            ai_augment_singular_outerdicts=(),
-            pipeline_config=SimpleNamespace(backend_store=store_for_connection(connection)),
+        captured.append(record)
+        return record, () if complete_capture else (OSError("rollout unavailable"),)
+
+    # Isolate external evidence capture only; real IPC, Store, log, DB and replay execute.
+    monkeypatch.setattr(ipc, "_capture_run_outcome_snapshot", capture)
+    request = requests.Request(
+        "POST", f"http://invalid{path}",
+        headers={run_outcome_models.NAME_KEY_HEADER: api.name_key_header(TEST_NAMEKEY_MODEL)},
+    ).prepare()
+    expected_status = (
+        HTTPStatus.INTERNAL_SERVER_ERROR if not complete_capture else
+        HTTPStatus.CONFLICT if path is run_outcome_models.RunOutcomePath.COMPLETED else
+        HTTPStatus.OK
+    )
+    with api_store._writable(api_runtime):
+        response = threaded_loop.run(
+            ipc.handle_run_outcome_request(api_runtime, api_store, request),
+        )
+        assert response.status_code == expected_status
+        log_bytes = Path(api_store._replay_log).read_bytes()
+        records = api._authoritative_log_records(log_bytes)
+        assert len(records) == 1
+        record = records[0][0]
+        assert api_store._http_record(record.record_id) == record
+        validated = RunOutcomeRecord.from_http_request_log_record(record)
+        body = validated.run_outcome_response_body
+        assert body.run_outcome_record_id == record.record_id == captured[0].record_id
+        assert body.commit_record_id is None and body.validation_record_id is None
+        assert body.pull_record_id is None and body.push_record_id is None
+        assert body.codex_session_record == session
+        assert record.record_id.version == 7
+        assert record.path == path
+        assert record.request_headers == {
+            run_outcome_models.NAME_KEY_HEADER: api.name_key_header(TEST_NAMEKEY_MODEL),
+        }
+        assert record.request_headers == captured[0].request_headers
+        assert record.request_body is None
+        assert record.response_code == expected_status
+        assert record.response_body == response.text == body.model_dump_json()
+        assert record.received_at_unix_usec == captured[0].received_at_unix_usec
+        assert record.duration_usec is not None
+        if complete_capture:
+            assert record.response_headers == {
+                SOURCE_KEY_HEADER: api._source_key_header(TEST_ROLLOUT_FILENAME, 2),
+            }
+        else:
+            assert record.response_headers is None
+        live_snapshot = api_store._query_snapshot().model_dump_json()
+
+    live_database = logical_database_snapshot(api_store._detour_db_path)
+    replay = AiAugmentBackendStore._from_resources(
+        replay_log=api_store._replay_log.model_copy(update={
+            "hash": hashlib.sha256(log_bytes).hexdigest(),
+        }),
+        detour_db=api_store._detour_db.model_copy(update={
+            "path": api_store._detour_db_path.with_name("outcome-replay.duckdb"),
+        }),
+        rollout_cas=api_store.rollout_cas,
+    )
+    replay._rebuild_from_log(api_runtime, reset_confirmed=True, confirm_replay=lambda: True)
+    with replay._read_only(api_runtime):
+        response = threaded_loop.run(ipc.handle_query_request(
+            replay, requests.Request("GET", "http://invalid/query").prepare(),
         ))
-        replayed_responses = ipc.handle_query_request(
-            runtime,
-            QueryRequest(),
-        ).run_outcome_records
-        assert tuple(
-            response.http_request_log_record for response in replayed_responses
-        ) == (record,)
-        assert replayed_responses[0].run_outcome_request == outcome_request
-        assert replayed_responses[0].run_outcome_response_body == snapshot
-        assert connection.execute(
-            f"SELECT count(*) FROM {api.AUTHORITATIVE_RECORDS_TABLE}"
-        ).fetchone() == (1,)
-    finally:
-        connection.close()
+        assert response.status_code == HTTPStatus.OK
+        assert response.text == live_snapshot
+        snapshot = QueryResponse.from_serialized_json(response.content)
+        assert tuple(item.model_dump_json() for item in snapshot.run_outcome_records) == (
+            record.model_dump_json(),
+        )
+        assert snapshot.run_outcome_records[0].run_outcome_response_body == body
+    assert logical_database_snapshot(replay._detour_db_path) == live_database
+    assert Path(replay._replay_log).read_bytes() == log_bytes
 
 
 def test_failed_post_commit_work_projects_atomically_without_domain_changes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    api_runtime: AiAugmentBackendContext,
+    api_store: AiAugmentBackendStore,
 ) -> None:
     rollout_path = tmp_path / TEST_ROLLOUT_FILENAME
     rollout_path.write_text("{}\n", encoding=TEXT_ENCODING)
@@ -2631,16 +2480,13 @@ def test_failed_post_commit_work_projects_atomically_without_domain_changes(
         stage=BackendLifecycle.APPENDWATCH_REPORT_VALIDATION,
         error=RuntimeError("post-commit validation failed"),
     )
-    connection = duckdb.connect(":memory:")
-    connection.execute("CREATE TABLE domain_probe (value INTEGER)")
-    store_for_connection(connection)._initialize_http_record_schema()
 
     def fail_after_domain_write(
         store: AiAugmentBackendStore,
         _runtime: AiAugmentBackendContext,
         _record: HttpRequestLogRecord,
     ) -> tuple[AgentRuntimeAttemptRecord, bool]:
-        store.execute("INSERT INTO domain_probe VALUES (1)")
+        store._execute("INSERT INTO domain_probe VALUES (1)")
         return failed_attempt_record, False
 
     monkeypatch.setattr(api, "_apply_validation_record", fail_after_domain_write)
@@ -2650,32 +2496,23 @@ def test_failed_post_commit_work_projects_atomically_without_domain_changes(
         submission_type=None,
         submission=None,
     ).http_record(record)
-    try:
-        store_for_connection(connection, transaction_active=False)._apply_log_record(
-            cast(
-                AiAugmentBackendContext,
-                SimpleNamespace(
-                    configured_namekey=NameKey.from_json_key(TEST_NAMEKEY)
-                ),
-            ),
-            validation_record,
-            line_number=1,
-            raw_line=(validation_record.model_dump_json() + "\n").encode(),
-        )
+    with api_store._writable(api_runtime):
+        with api_store._transaction():
+            api_store._execute("CREATE TABLE domain_probe (value INTEGER)")
+        api_store._append_authoritative_record(pull_record)
+        api_store._append_authoritative_record(push_record)
+        api_store._append_authoritative_record(record)
+        api_store._append_authoritative_record(validation_record)
 
-        assert connection.execute("SELECT * FROM domain_probe").fetchall() == []
-        assert connection.execute(
+        assert api_store._execute("SELECT * FROM domain_probe").fetchall() == []
+        assert api_store._execute(
             f"SELECT count(*) FROM {api.AUTHORITATIVE_ATTEMPTS_TABLE}"
         ).fetchone() == (1,)
-        assert connection.execute(
-            f"SELECT count(*) FROM {api.AUTHORITATIVE_RECORDS_TABLE}"
-        ).fetchone() == (1,)
-        assert connection.execute(
+        assert api_store._execute(
             f"SELECT {api.AUTHORITATIVE_RECORD_ORDINAL_COLUMN} "
-            f"FROM {api.AUTHORITATIVE_RECORDS_TABLE}"
-        ).fetchall() == [(1,)]
-    finally:
-        connection.close()
+            f"FROM {api.AUTHORITATIVE_RECORDS_TABLE} ORDER BY 1"
+        ).fetchall() == [(1,), (2,), (3,), (4,)]
+        assert len(api._authoritative_log_records(Path(api_store._replay_log).read_bytes())) == 4
 
 
 @pytest.mark.parametrize("action", sorted(api.ELIGIBLE_WEB_ACTIONS))
@@ -4909,24 +4746,14 @@ def test_backend_startup_prepares_source_rows_for_initial_pull(
     assert factory_calls == [runtime]
     assert runtime.configured_ai_augment_singular_outerdict() is singular_outerdict
 
-    monkeypatch.setattr(
-        api,
-        "StreamingResponse",
-        lambda content, *, media_type: Response(
-            content="".join(content),
-            media_type=media_type,
-        ),
-    )
     monkeypatch.setattr(api, "BACKEND_LIFECYCLE", BackendLifecycle.READY)
-    request = Request({
-        "type": "http",
-        "app": SimpleNamespace(state=SimpleNamespace(runtime=runtime)),
-    })
-    response = api.authoritative_pull(request)
+    response = api._pull_response(
+        requests.Request("GET", "http://testserver/pull").prepare(), runtime,
+    )
 
     assert factory_calls == [runtime]
-    assert response.status_code == status.HTTP_200_OK
-    assert response.body == "".join(api.configured_pull_lines(singular_outerdict)).encode()
+    assert response.status_code == HTTPStatus.OK
+    assert response.content == "".join(api.configured_pull_lines(singular_outerdict)).encode()
 
 
 def test_ipc_only_runtime_prepares_projection_without_a_namekey(
@@ -4962,6 +4789,7 @@ def test_ipc_only_query_uses_explicit_runtime_and_read_only_store(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     backend_test_paths: BackendTestPaths,
+    threaded_loop: asyncio.Runner,
 ) -> None:
     singular_outerdicts = (
         ai_augment_singular_outerdict("A.", "Sheikh"),
@@ -4975,10 +4803,10 @@ def test_ipc_only_query_uses_explicit_runtime_and_read_only_store(
         "load_duckdb_extension",
         lambda *_args, **_kwargs: None,
     )
-    with writable_backend_store(runtime):
+    with writable_backend_store(runtime) as store:
         pass
-    with runtime.pipeline_config.backend_store.read_only():
-        response = ipc.handle_query_request(runtime, QueryRequest())
+    with store._read_only(runtime):
+        response = query_snapshot_for_test(store, threaded_loop)
 
     assert tuple(
         value.serialize() for value in response.ai_augment_singular_outerdicts
@@ -5010,7 +4838,7 @@ def test_detour_database_open_modes_are_explicit_and_reported(
         lambda *_args, **_kwargs: None,
     )
 
-    detour_db = runtime.pipeline_config.backend_store._detour_db
+    detour_db = backend_store_for_test(runtime)._detour_db
     with detour_db.read_only() as opened_database:
         assert opened_database is detour_db
         assert opened_database.connection is connection
@@ -5041,36 +4869,37 @@ def test_backend_store_exposes_only_detached_reads_outside_transactions(
     backend_test_paths: BackendTestPaths,
 ) -> None:
     runtime = runtime_for_test(tmp_path, backend_test_paths)
-    store = runtime.pipeline_config.backend_store
+    store = backend_store_for_test(runtime)
     assert not hasattr(store, "detour_db")
     with pytest.raises(RuntimeError, match="must be used inside"):
-        store.execute("SELECT 1")
-    with writable_backend_store(runtime):
+        store._execute("SELECT 1")
+    with writable_backend_store(runtime) as store:
         assert store._detour_db._conn is None
-        result = store.execute("SELECT 1 UNION ALL SELECT 2")
+        result = store._execute("SELECT 1 UNION ALL SELECT 2")
         assert store._detour_db._conn is None
         assert result.fetchall() == [(1,), (2,)]
         assert result.fetchone() is None
         for sql in ("BEGIN", "CREATE TABLE forbidden (id INT)", "ATTACH ':memory:' AS other"):
             with pytest.raises(RuntimeError):
-                store.execute(sql)
+                store._execute(sql)
         with pytest.raises(RuntimeError, match="transaction"):
-            store.materialize_innerdicts(source_relation="unused", table_name="unused")
-        assert store.detour_db_path.stat().st_mode & 0o777 == 0o400
-    with store.read_only():
-        assert store.execute("SELECT 1").fetchone() == (1,)
+            store._materialize_innerdicts(source_relation="unused", table_name="unused")
+        assert store._detour_db_path.stat().st_mode & 0o777 == 0o400
+    with store._read_only(runtime):
+        assert store._execute("SELECT 1").fetchone() == (1,)
         assert store._detour_db._conn is None
     with pytest.raises(RuntimeError, match="must be used inside"):
-        store.execute("SELECT 1")
+        store._execute("SELECT 1")
 
 
 def test_query_handler_requires_managed_backend_store_context(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     backend_test_paths: BackendTestPaths,
+    threaded_loop: asyncio.Runner,
 ) -> None:
     runtime = runtime_for_test(tmp_path, backend_test_paths)
-    request = QueryRequest()
+    store = backend_store_for_test(runtime)
     monkeypatch.setattr(
         ai_augment_detour_db,
         "load_duckdb_extension",
@@ -5078,13 +4907,13 @@ def test_query_handler_requires_managed_backend_store_context(
     )
 
     with pytest.raises(
-        RuntimeError,
-        match="AiAugmentBackendStore must be used inside a 'with' block",
+        BackendStoreException,
+        match=Locale.STORE_RUNTIME_UNAVAILABLE,
     ):
-        ipc.handle_query_request(runtime, request)
+        query_snapshot_for_test(store, threaded_loop)
 
-    with writable_backend_store(runtime):
-        response = ipc.handle_query_request(runtime, request)
+    with writable_backend_store(runtime) as store:
+        response = query_snapshot_for_test(store, threaded_loop)
 
     assert response == QueryResponse(
         attempts=(),
@@ -5116,7 +4945,7 @@ def test_detour_database_prepares_both_open_modes(
         prepare_extension,
     )
 
-    detour_db = runtime.pipeline_config.backend_store._detour_db
+    detour_db = backend_store_for_test(runtime)._detour_db
     with detour_db.writable() as writable_database:
         writable_connection = writable_database.connection
     with detour_db.read_only() as read_only_database:
@@ -5280,11 +5109,11 @@ def test_required_config_and_source_database_are_read_only(
         ai_augment_config,
         verify_hash_on_init=False,
     )
-    assert configured.backend_store._detour_db == AiAugmentDetourDB(
-        path=backend_test_paths.source_database.with_name(
-            "scisci_process__detour_ai-augment.duckdb"
-        ),
-        duckdb_extensions=configured.duckdb_extensions,
+    assert not hasattr(configured, "backend_store")
+    assert AiAugmentDetourDB.from_pipeline_db(
+        configured.db_file, duckdb_extensions=configured.duckdb_extensions,
+    ).path == backend_test_paths.source_database.with_name(
+        "scisci_process__detour_ai-augment.duckdb"
     )
 
     runtime = runtime_for_test(tmp_path, backend_test_paths)
@@ -5301,31 +5130,31 @@ def test_required_config_and_source_database_are_read_only(
 def test_main_ipc_only_runs_only_the_dashboard_query_server(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    api_runtime: AiAugmentBackendContext,
 ) -> None:
     config_path = tmp_path / "config.json"
     calls: list[object] = []
 
-    class BackendStore:
-        @contextmanager
-        def read_only(self) -> Iterator[BackendStore]:
-            calls.append("read-only-start")
-            try:
-                yield self
-            finally:
-                calls.append("read-only-stop")
+    store = AiAugmentQueryBackendStore()
+    runtime = api_runtime
 
-    runtime = cast(
-        AiAugmentBackendContext,
-        SimpleNamespace(
-            pipeline_config=SimpleNamespace(backend_store=BackendStore())
-        ),
-    )
+    @contextmanager
+    def initialize(
+        selected_runtime: AiAugmentBackendContext, *, ipc_only: bool,
+    ) -> Iterator[AiAugmentQueryBackendStore]:
+        assert selected_runtime is runtime and ipc_only
+        calls.append("read-only-start")
+        try:
+            yield store
+        finally:
+            calls.append("read-only-stop")
 
+    monkeypatch.setattr(server, "initialize_backend_store", initialize)
     monkeypatch.setattr(api, "BACKEND_PROCESS_LOCK_DESCRIPTOR", 123)
     monkeypatch.setattr(api, "_acquire_backend_process_lock", lambda: calls.append("acquire"))
     monkeypatch.setattr(api, "_release_backend_process_lock", lambda: calls.append("release"))
     monkeypatch.setattr(
-        ipc,
+        server,
         "serve_dashboard_query_only",
         lambda selected_runtime: calls.append(("ipc", selected_runtime)),
     )
@@ -5359,7 +5188,7 @@ def test_main_ipc_only_runs_only_the_dashboard_query_server(
         "acquire",
         ("configure", config_path, False, True),
         "read-only-start",
-        ("ipc", runtime),
+        ("ipc", store),
         "read-only-stop",
         "release",
     ]
@@ -5379,7 +5208,7 @@ def test_main_full_mode_configures_and_runs_composed_backend(
         assert new and confirmed
         assert selected_runtime is runtime
         calls.append("compose")
-        return api.app
+        return server.app
 
     monkeypatch.setattr(api, "_acquire_backend_process_lock", lambda: calls.append("acquire"))
     monkeypatch.setattr(api, "_release_backend_process_lock", lambda: calls.append("release"))
@@ -5418,7 +5247,7 @@ def test_main_full_mode_configures_and_runs_composed_backend(
         "acquire",
         ("configure", config_path, True, True),
         "compose",
-        ("serve", api.app, api.SERVER_HOST, api.SERVER_PORT),
+        ("serve", server.app, api.SERVER_HOST, api.SERVER_PORT),
         "release",
     ]
 
@@ -5429,7 +5258,7 @@ def test_ipc_only_signals_stop_server(
 ) -> None:
     calls: list[object] = []
     handlers: dict[int, Any] = {}
-    runtime = cast(AiAugmentBackendContext, SimpleNamespace())
+    store = AiAugmentQueryBackendStore()
     ipc_server = SimpleNamespace(thread=SimpleNamespace(is_alive=lambda: True))
 
     def sleep(_timeout: float) -> None:
@@ -5441,9 +5270,9 @@ def test_ipc_only_signals_stop_server(
         signal, "signal",
         lambda sig, handler: (handlers.update({sig: handler}), f"old-{sig}")[1],
     )
-    monkeypatch.setattr(ipc, "start_dashboard_query_server", lambda *_a, **_kw: ipc_server)
-    monkeypatch.setattr(ipc, "stop_dashboard_query_server", lambda handle: calls.append(handle))
-    ipc.serve_dashboard_query_only(runtime)
+    monkeypatch.setattr(server, "start_dashboard_query_server", lambda *_a, **_kw: ipc_server)
+    monkeypatch.setattr(server, "stop_dashboard_query_server", lambda handle: calls.append(handle))
+    server.serve_dashboard_query_only(store)
     assert calls == [ipc_server]
     assert handlers == {
         signal.SIGINT: f"old-{signal.SIGINT}", signal.SIGTERM: f"old-{signal.SIGTERM}",
@@ -5458,12 +5287,12 @@ def test_ipc_worker_death_cleans_up_and_restores_signal_handlers(
     handle = SimpleNamespace(thread=SimpleNamespace(is_alive=lambda: False))
     monkeypatch.setattr(signal, "getsignal", lambda sig: f"old-{sig}")
     monkeypatch.setattr(signal, "signal", lambda sig, handler: handlers.update({sig: handler}))
-    monkeypatch.setattr(ipc, "start_dashboard_query_server", lambda *_a, **_k: handle)
+    monkeypatch.setattr(server, "start_dashboard_query_server", lambda *_a, **_k: handle)
     monkeypatch.setattr(
-        ipc, "stop_dashboard_query_server", lambda selected: closed.append(selected),
+        server, "stop_dashboard_query_server", lambda selected: closed.append(selected),
     )
     with pytest.raises(RuntimeError, match="stopped unexpectedly"):
-        ipc.serve_dashboard_query_only(cast(AiAugmentBackendContext, SimpleNamespace()))
+        server.serve_dashboard_query_only(AiAugmentQueryBackendStore())
     assert closed == [handle]
     assert handlers == {
         signal.SIGINT: f"old-{signal.SIGINT}", signal.SIGTERM: f"old-{signal.SIGTERM}",
@@ -5527,10 +5356,12 @@ def test_push_acceptance_changes_state_before_post_commit_work(
     monkeypatch.setattr(api, "BACKEND_LIFECYCLE", BackendLifecycle.READY)
     monkeypatch.setattr(api, "BACKEND_CURRENT_PULL_RECORD", pull_record)
     monkeypatch.setattr(api, "BACKEND_PENDING_PULL_RECORD", None)
-    monkeypatch.setattr(api, "BACKEND_ATTEMPT_RECORD", None)
+    monkeypatch.setattr(api, "BACKEND_PUSH_RESPONSE_RECORD", None)
     monkeypatch.setattr(api, "BACKEND_SESSION_ID", session_id)
 
-    response = asyncio.run(api.authoritative_push(cast(Any, None)))
+    response = api._push_response(
+        requests.Request("POST", "http://invalid/push", data=b"{}").prepare(),
+    )
 
     assert response.status_code == status.HTTP_202_ACCEPTED
     assert response.headers[api.LOCATION_HEADER] == api.PULL_PATH
@@ -5538,7 +5369,9 @@ def test_push_acceptance_changes_state_before_post_commit_work(
     assert api.BACKEND_PENDING_PULL_RECORD is pull_record
     assert api.BACKEND_CURRENT_PULL_RECORD is None
 
-    duplicate = asyncio.run(api.authoritative_push(cast(Any, None)))
+    duplicate = api._push_response(
+        requests.Request("POST", "http://invalid/push", data=b"{}").prepare(),
+    )
 
     assert duplicate.status_code == status.HTTP_409_CONFLICT
     assert duplicate.headers[api.LOCATION_HEADER] == api.PULL_PATH
@@ -5547,27 +5380,29 @@ def test_push_acceptance_changes_state_before_post_commit_work(
 def test_retry_push_requires_a_persisted_current_pull_before_acceptance(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    api_runtime: AiAugmentBackendContext,
+    api_store: AiAugmentBackendStore,
+    threaded_loop: asyncio.Runner,
 ) -> None:
     prior_pending_pull_record_id = UUID("019d0000-0000-7000-8000-000000000030")
-    current_pull_record_id = UUID("019d0000-0000-7000-8000-000000000031")
     session_id = UUID("019d0000-0000-7000-8000-000000000032")
     prior_pending_pull, prior_commit = retry_attempt_records(
         run_id=prior_pending_pull_record_id,
         session_id=session_id,
         attempt_id="prior-retry",
     )
-    prior_attempt_record = AgentRuntimeAttemptRecord(
-        attempt=AgentRuntimeAttempt(
-            pull_record=prior_pending_pull,
-            commit_record=prior_commit,
-            post_commit_validation=PostCommitValidation(
-                stage=BackendLifecycle.PYDANTIC_VALIDATION,
-                result=BackendLifecycle.REJECTED,
-                detail="retry",
-            ),
+    validation = ValidationRequestBody(
+        commit_id=prior_commit.record_id,
+        post_commit_validation=PostCommitValidation(
+            stage=BackendLifecycle.PYDANTIC_VALIDATION,
+            result=BackendLifecycle.REJECTED, detail="retry",
         ),
-        submission=None,
-        ground_truth_innerdict=None,
+        submission_type=None, submission=None,
+    ).http_record(prior_commit)
+    prior_attempt_record = PushResponseRecord(
+        **prior_commit.commit_request_body.push_record.model_dump(),
+        commit_record=prior_commit,
+        validation_record=BackendValidationRecord.from_http_request_log_record(validation),
     )
     monkeypatch.setattr(api, "BACKEND_LIFECYCLE", BackendLifecycle.RETRY)
     monkeypatch.setattr(api, "BACKEND_CURRENT_PULL_RECORD", None)
@@ -5576,49 +5411,39 @@ def test_retry_push_requires_a_persisted_current_pull_before_acceptance(
         "BACKEND_PENDING_PULL_RECORD",
         prior_pending_pull,
     )
-    monkeypatch.setattr(api, "BACKEND_ATTEMPT_RECORD", prior_attempt_record)
+    monkeypatch.setattr(api, "BACKEND_PUSH_RESPONSE_RECORD", prior_attempt_record)
     monkeypatch.setattr(api, "BACKEND_SESSION_ID", session_id)
-    request = cast(Any, object())
+    request = requests.Request("POST", "http://invalid/push", data=b"{}").prepare()
 
-    premature = asyncio.run(api.authoritative_push(request))
+    premature = api._push_response(request)
 
     assert premature.status_code == status.HTTP_409_CONFLICT
     assert premature.headers[api.LOCATION_HEADER] == api.PULL_PATH
-    assert json.loads(bytes(premature.body)) == {"detail": Locale.CONFIGURATION_ERROR_DETAIL}
+    assert premature.json() == {"detail": Locale.CONFIGURATION_ERROR_DETAIL}
     assert api.BACKEND_LIFECYCLE is BackendLifecycle.RETRY
     assert api.BACKEND_CURRENT_PULL_RECORD is None
     assert api.BACKEND_PENDING_PULL_RECORD is prior_pending_pull
-    assert api.BACKEND_ATTEMPT_RECORD is prior_attempt_record
+    assert api.BACKEND_PUSH_RESPONSE_RECORD is prior_attempt_record
     assert Locale.PUSH_CURRENT_PULL_REQUIRED_LOG in caplog.messages
 
-    persisted_pull = HttpRequestLogRecord(
-        schema_version="1.1",
-        record_id=current_pull_record_id,
-        method=api.HTTP_GET_METHOD,
-        scheme="http",
-        host="testserver",
-        path=api.PULL_PATH,
-        query="",
-        request_headers={},
-        request_body="",
-        response_code=status.HTTP_200_OK,
-        response_headers={"content-type": api.MARKDOWN_MEDIA_TYPE},
-        response_body="retry\n",
-        received_at_unix_usec=1,
-        ready_to_respond_at_unix_usec=2,
-        duration_usec=1,
-    )
-    runtime = cast(AiAugmentBackendContext, SimpleNamespace())
-    asyncio.run(api._after_authoritative_public_record(persisted_pull, runtime))
+    with api_store._writable(api_runtime):
+        pulled = threaded_loop.run(api.authoritative_pull(
+            requests.Request("GET", "http://invalid/pull").prepare(), api_runtime, api_store,
+        ))
+        assert pulled.status_code == HTTPStatus.OK
+        persisted_pull = api.BACKEND_CURRENT_PULL_RECORD
+        assert persisted_pull is not None
+        assert api_store._http_record(persisted_pull.record_id).model_dump_json() == (
+            persisted_pull.model_dump_json()
+        )
 
-    assert api.BACKEND_CURRENT_PULL_RECORD is persisted_pull
-    accepted = asyncio.run(api.authoritative_push(request))
+    accepted = api._push_response(request)
     assert accepted.status_code == status.HTTP_202_ACCEPTED
     assert accepted.headers[api.LOCATION_HEADER] == api.PULL_PATH
     assert api.BACKEND_LIFECYCLE is BackendLifecycle.BUSY
     assert api.BACKEND_CURRENT_PULL_RECORD is None
     assert api.BACKEND_PENDING_PULL_RECORD is persisted_pull
-    assert api.BACKEND_ATTEMPT_RECORD is None
+    assert api.BACKEND_PUSH_RESPONSE_RECORD is None
 
 
 @pytest.mark.parametrize(
@@ -5643,10 +5468,12 @@ def test_push_configuration_failures_remain_internal_errors(
     monkeypatch.setattr(api, "BACKEND_LIFECYCLE", workflow_status)
     monkeypatch.setattr(api, "BACKEND_CURRENT_PULL_RECORD", pull_record)
     monkeypatch.setattr(api, "BACKEND_PENDING_PULL_RECORD", None)
-    monkeypatch.setattr(api, "BACKEND_ATTEMPT_RECORD", None)
+    monkeypatch.setattr(api, "BACKEND_PUSH_RESPONSE_RECORD", None)
     monkeypatch.setattr(api, "BACKEND_SESSION_ID", session_id)
 
-    response = asyncio.run(api.authoritative_push(cast(Any, None)))
+    response = api._push_response(
+        requests.Request("POST", "http://invalid/push", data=b"{}").prepare(),
+    )
 
     assert response.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
     assert api.LOCATION_HEADER not in response.headers
@@ -5656,155 +5483,198 @@ def test_push_configuration_failures_remain_internal_errors(
 
 
 def test_accepted_push_is_committed_only_after_its_public_record(
-    tmp_path: Path,
+    api_runtime: AiAugmentBackendContext,
+    api_store: AiAugmentBackendStore,
+    api_push_capture: tuple[CodexRolloutRecord, api._PushConfiguration],
+    threaded_loop: asyncio.Runner,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    session_id = UUID("019d0000-0000-7000-8000-000000000021")
-    pull_record_id = UUID("019d0000-0000-7000-8000-000000000020")
-    pull_record = persisted_http_record(
-        record_id=pull_record_id,
-        method=api.HTTP_GET_METHOD,
-        path=api.PULL_PATH,
-        response_code=status.HTTP_200_OK,
-    )
-    push_record = HttpRequestLogRecord(
-        schema_version="1.1",
-        method="POST",
-        scheme="http",
-        host="testserver",
-        path="/push",
-        query="",
-        request_headers={},
-        request_body="{}",
-        response_code=202,
-        response_headers={"location": "/pull"},
-        response_body="",
-        received_at_unix_usec=None,
-        ready_to_respond_at_unix_usec=1,
-        duration_usec=1,
-    )
-    rollout_path = tmp_path / f"rollout-2026-08-31T00-00-00-{session_id}.jsonl"
-    rollout_path.write_text("{}\n", encoding=TEXT_ENCODING)
-    rollout = api._archived_file(rollout_path)
-    configuration = cast(
-        api._PushConfiguration,
-        SimpleNamespace(
-        rollout_relative_path=PurePosixPath(rollout_path.name),
-            ssh_target="aivm-aivm-audit",
-            lima_ssh_config=tmp_path / "ssh.config",
-            identity_file=tmp_path / "identity",
-            known_hosts_file=tmp_path / "known-hosts",
-            ssh_user="aivm-audit",
-            host_key_alias="lima-aivm-aivm-audit",
-        ),
-    )
-    appended: list[BackendCommitRecord] = []
-    backend_store = SimpleNamespace()
-    rollout_record = CodexRolloutRecord(
-        sha256=rollout.sha256,
-        size=rollout.size,
-        line_count=rollout.line_count,
-    )
-    runtime = cast(
-        AiAugmentBackendContext,
-        SimpleNamespace(
-            configured_namekey=NameKey.from_json_key(TEST_NAMEKEY),
-            pipeline_config=SimpleNamespace(
-                rollout_cas=SimpleNamespace(
-                    copy_rollout=lambda **_kwargs: rollout_record,
-                ),
-                backend_store=backend_store,
-            ),
-        ),
-    )
-    api.BACKEND_PENDING_PULL_RECORD = pull_record
-    api.BACKEND_SESSION_ID = session_id
-    monkeypatch.setattr(
-        api,
-        "push_configuration_for_session",
-        lambda supplied: configuration if supplied == session_id else pytest.fail(),
-    )
-    monkeypatch.setattr(api, "_read_appendwatch_bytes", lambda *_args: b".\n")
+    rollout, configuration = api_push_capture
+    entered = Event()
+    release = Event()
 
-    def append_commit(record: HttpRequestLogRecord) -> HttpRequestLogRecord:
-        assert isinstance(record, BackendCommitRecord)
-        appended.append(record)
-        return HttpRequestLogRecord.model_validate_json(record.model_dump_json())
+    def read_report(selected: api._PushConfiguration) -> bytes:
+        assert selected == configuration
+        entered.set()
+        assert release.wait(timeout=10), "test did not release guest capture"
+        return report_for_rollout(configuration.rollout_relative_path).encode()
 
-    def validate_commit(commit_id: UUID) -> AgentRuntimeAttemptRecord:
-        assert len(appended) == 1
-        record = appended[0]
-        assert record.record_id == commit_id
-        return AgentRuntimeAttemptRecord(
-            attempt=AgentRuntimeAttempt(
-                pull_record=pull_record,
-                commit_record=record,
-                post_commit_validation=PostCommitValidation(
-                    stage=BackendLifecycle.PYDANTIC_VALIDATION,
-                    result=BackendLifecycle.REJECTED,
-                    detail="retry",
-                ),
-            ),
-            submission=None,
-            ground_truth_innerdict=None,
+    monkeypatch.setattr(api, "_read_appendwatch_bytes", read_report)
+
+    async def exercise() -> None:
+        api_store._loop = asyncio.get_running_loop()
+        await api.authoritative_pull(
+            requests.Request("GET", "http://invalid/pull").prepare(), api_runtime, api_store,
         )
+        initial_pull = api.BACKEND_CURRENT_PULL_RECORD
+        assert initial_pull is not None
+        try:
+            response = await api.authoritative_push(
+                requests.Request(
+                    "POST", "http://invalid/push", json=valid_submission_body(),
+                ).prepare(),
+                api_store,
+            )
+            assert response.status_code == HTTPStatus.ACCEPTED
+            assert response.headers[api.LOCATION_HEADER] == api.PULL_PATH
+            assert await asyncio.to_thread(entered.wait, 5)
+            busy_lifecycle = api.BACKEND_LIFECYCLE
+            assert busy_lifecycle is BackendLifecycle.BUSY
+            accepted_push = api.BACKEND_LATEST_PUSH_RECORD
+            assert accepted_push is not None
+            records = api._authoritative_log_records(Path(api_store._replay_log).read_bytes())
+            assert [item.path for item, _ in records] == ["/pull", "/push"]
+            assert records[-1][0].record_id == accepted_push.record_id
+            assert api_store._http_record(accepted_push.record_id).model_dump_json() == (
+                accepted_push.model_dump_json()
+            )
+            assert all(not task.done() for task in api.AUTHORITATIVE_BACKGROUND_TASKS)
+            busy = await api.authoritative_pull(
+                requests.Request("GET", "http://invalid/pull").prepare(), api_runtime, api_store,
+            )
+            assert busy.status_code == HTTPStatus.SERVICE_UNAVAILABLE
+            assert busy.headers[api.RETRY_AFTER_HEADER] == api.RETRY_AFTER_SECONDS
+        finally:
+            release.set()
+            await asyncio.gather(*tuple(api.AUTHORITATIVE_BACKGROUND_TASKS))
 
-    backend_store.append_authoritative_record = append_commit
-    backend_store.validate_commit = validate_commit
+        completed_records = [item for item, _ in api._authoritative_log_records(
+            Path(api_store._replay_log).read_bytes()
+        )]
+        assert [item.path for item in completed_records] == [
+            "/pull", "/push", "/pull", "/commit", "/validate",
+        ]
+        committed = api._backend_commit_record(api_store, completed_records[-2])
+        assert committed.commit_request_body.pull_record.record_id == initial_pull.record_id
+        assert committed.commit_request_body.push_record.record_id == completed_records[1].record_id
+        assert committed.commit_request_body.codex_session_record.codex_rollout_record == rollout
+        assert api.BACKEND_PUSH_RESPONSE_RECORD is not None
+        assert api.BACKEND_PUSH_RESPONSE_RECORD.commit_record == committed
+        assert api.BACKEND_LIFECYCLE is BackendLifecycle.COMPLETED
 
-    api._commit_accepted_push(push_record, runtime)
-
-    assert len(appended) == 1
-    commit_record = appended[0]
-    assert commit_record.request_body is not None
-    commit = CommitRequestBody.from_serialized_json(
-        commit_record.request_body,
-        resolve_http_record={
-            pull_record_id: pull_record,
-            push_record.record_id: push_record,
-        }.__getitem__,
-    )
-    assert commit.pull_record is pull_record
-    assert commit.push_record is push_record
-    assert commit.codex_session_record.codex_rollout_record is not None
-    assert commit.codex_session_record.codex_rollout_record.sha256 == rollout.sha256
-    assert api.BACKEND_LIFECYCLE is BackendLifecycle.RETRY
+    with api_store._writable(api_runtime):
+        threaded_loop.run(asyncio.wait_for(exercise(), timeout=20))
 
 
-@pytest.mark.anyio
-async def test_persisted_push_becomes_latest_run_outcome_snapshot_provenance(
+def test_persisted_push_becomes_latest_run_outcome_snapshot_provenance(
+    api_runtime: AiAugmentBackendContext,
+    api_store: AiAugmentBackendStore,
+    api_push_capture: tuple[CodexRolloutRecord, api._PushConfiguration],
+    threaded_loop: asyncio.Runner,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    push_record = HttpRequestLogRecord(
-        schema_version="1.1",
-        method=api.HTTP_POST_METHOD,
-        scheme="http",
-        host="testserver",
-        path=api.PUSH_PATH,
-        query="",
-        request_headers={},
-        request_body="{}",
-        response_code=status.HTTP_202_ACCEPTED,
-        response_headers={api.LOCATION_HEADER: api.PULL_PATH},
-        response_body="",
-        received_at_unix_usec=1,
-        ready_to_respond_at_unix_usec=2,
-        duration_usec=1,
-    )
-    monkeypatch.setattr(api, "BACKEND_LATEST_PUSH_RECORD", None)
-    monkeypatch.setattr(api, "AUTHORITATIVE_BACKGROUND_TASKS", set())
-    monkeypatch.setattr(api, "_commit_accepted_push", lambda _record, _runtime: None)
-    runtime = cast(AiAugmentBackendContext, SimpleNamespace())
+    _rollout, configuration = api_push_capture
+    monkeypatch.setattr(ipc, "_run_outcome_snapshot_configuration", lambda _session: configuration)
 
-    async def run_inline(function: Any, /, *args: object) -> Any:
-        return function(*args)
+    async def exercise() -> None:
+        api_store._loop = asyncio.get_running_loop()
+        await api.authoritative_pull(
+            requests.Request("GET", "http://invalid/pull").prepare(), api_runtime, api_store,
+        )
+        pull = api.BACKEND_CURRENT_PULL_RECORD
+        assert pull is not None
+        response = await api.authoritative_push(
+            requests.Request("POST", "http://invalid/push", json=valid_submission_body()).prepare(),
+            api_store,
+        )
+        assert response.status_code == HTTPStatus.ACCEPTED
+        await asyncio.gather(*tuple(api.AUTHORITATIVE_BACKGROUND_TASKS))
+        push = api.BACKEND_LATEST_PUSH_RECORD
+        assert push is not None
+        assert api_store._http_record(push.record_id).model_dump_json() == push.model_dump_json()
+        request = run_outcome_models.RunOutcomeRequest.from_http_request(
+            received_at_unix_usec=1, method="POST", scheme="http", host="invalid",
+            port=None, path="/completed", query="", request_body=b"",
+            request_headers={
+                run_outcome_models.NAME_KEY_HEADER: api.name_key_header(TEST_NAMEKEY_MODEL),
+            },
+        )
+        snapshot, failures = ipc._capture_run_outcome_snapshot(api_runtime, request)
+        assert failures == ()
+        assert snapshot.push_record_id == push.record_id
+        assert snapshot.pull_record_id == pull.record_id
+        assert snapshot.codex_session_record.session_id == UUID(OPERATOR_CAPTURED_SESSION_ID)
+        promise = api_store.run_outcome(snapshot)
+        response_record, error = await promise.response_record()
+        assert error is None and response_record is not None
+        assert response_record.response_code == HTTPStatus.OK
+        assert api.BACKEND_PUSH_RESPONSE_RECORD is not None
+        commit = api.BACKEND_PUSH_RESPONSE_RECORD.commit_record
+        validation = api.BACKEND_PUSH_RESPONSE_RECORD.validation_record
+        assert commit is not None and validation is not None
+        body = response_record.run_outcome_response_body
+        assert body.commit_record_id == commit.record_id
+        assert body.validation_record_id == validation.record_id
+        assert body.run_outcome_record_id == response_record.record_id
+        assert api_store._http_record(response_record.record_id).model_dump_json() == (
+            response_record.model_dump_json()
+        )
+        (researcher,) = api_store._query_snapshot().ai_augment_singular_outerdicts
+        assert len(researcher.committed_innerdicts) == 1
 
-    monkeypatch.setattr(asyncio, "to_thread", run_inline)
-    await api._after_authoritative_public_record(push_record, runtime)
-    background_tasks = tuple(api.AUTHORITATIVE_BACKGROUND_TASKS)
-    await asyncio.gather(*background_tasks)
+    with api_store._writable(api_runtime):
+        threaded_loop.run(asyncio.wait_for(exercise(), timeout=20))
 
-    assert api.BACKEND_LATEST_PUSH_RECORD is push_record
+
+@pytest.mark.parametrize("failure", ("disconnect", "send"))
+def test_accepted_push_finishes_after_client_or_response_send_failure(
+    api_runtime: AiAugmentBackendContext,
+    api_store: AiAugmentBackendStore,
+    api_push_capture: tuple[CodexRolloutRecord, api._PushConfiguration],
+    threaded_loop: asyncio.Runner,
+    failure: str,
+) -> None:
+    async def exercise() -> None:
+        api_store._loop = asyncio.get_running_loop()
+        await api.authoritative_pull(
+            requests.Request("GET", "http://invalid/pull").prepare(), api_runtime, api_store,
+        )
+        app = api_application_for_test(api_runtime, api_store)
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def receive() -> Message:
+            return {
+                "type": "http.request", "body": json.dumps(valid_submission_body()).encode(),
+                "more_body": False,
+            }
+
+        async def send(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                assert message["status"] == HTTPStatus.ACCEPTED
+                assert api.AUTHORITATIVE_BACKGROUND_TASKS
+                started.set()
+                await release.wait()
+                if failure == "send":
+                    raise OSError("response send failed")
+
+        scope: Scope = {
+            "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
+            "method": "POST", "scheme": "http", "path": api.PUSH_PATH,
+            "raw_path": api.PUSH_PATH.encode(), "query_string": b"",
+            "headers": [(b"content-type", b"application/json")],
+            "server": ("invalid", 80), "client": ("client", 1234), "root_path": "",
+        }
+        client = asyncio.create_task(app(scope, receive, send))
+        try:
+            await started.wait()
+            if failure == "disconnect":
+                client.cancel()
+            release.set()
+            with pytest.raises(asyncio.CancelledError if failure == "disconnect" else OSError):
+                await client
+        finally:
+            release.set()
+            await asyncio.gather(*tuple(api.AUTHORITATIVE_BACKGROUND_TASKS))
+        assert api.BACKEND_LIFECYCLE is BackendLifecycle.COMPLETED
+        records = api._authoritative_log_records(Path(api_store._replay_log).read_bytes())
+        assert [record.path for record, _ in records] == ["/pull", "/push", "/commit", "/validate"]
+        assert api_store._http_record(records[-1][0].record_id) == records[-1][0]
+        async with app.state.request_gate.ipc():
+            assert not api.AUTHORITATIVE_BACKGROUND_TASKS
+
+    with api_store._writable(api_runtime):
+        threaded_loop.run(asyncio.wait_for(exercise(), timeout=20))
 
 
 @pytest.mark.parametrize(
@@ -5813,31 +5683,31 @@ async def test_persisted_push_becomes_latest_run_outcome_snapshot_provenance(
         (
             BackendLifecycle.ACCEPTED,
             BackendLifecycle.ACCEPTED,
-            410,
+            HTTPStatus.GONE,
             api.MEDIA_TYPE_WITH_CHARSET,
         ),
         (
             BackendLifecycle.REJECTED,
             BackendLifecycle.PYDANTIC_VALIDATION,
-            200,
+            HTTPStatus.OK,
             api.MARKDOWN_MEDIA_TYPE,
         ),
         (
             BackendLifecycle.REJECTED,
             BackendLifecycle.DUCKDB_EVIDENCE_VALIDATION,
-            200,
+            HTTPStatus.OK,
             api.MARKDOWN_MEDIA_TYPE,
         ),
         (
             BackendLifecycle.REJECTED,
             BackendLifecycle.ROLLOUT_INDEX,
-            500,
+            HTTPStatus.INTERNAL_SERVER_ERROR,
             api.JSON_MEDIA_TYPE,
         ),
         (
             BackendLifecycle.REJECTED,
             BackendLifecycle.APPENDWATCH_REPORT_VALIDATION,
-            500,
+            HTTPStatus.INTERNAL_SERVER_ERROR,
             api.JSON_MEDIA_TYPE,
         ),
     ),
@@ -5847,18 +5717,14 @@ def test_post_commit_result_is_exposed_only_by_follow_up_pull(
     caplog: pytest.LogCaptureFixture,
     result: BackendLifecycle,
     stage: BackendLifecycle,
-    expected_code: int,
+    expected_code: HTTPStatus,
     expected_media_type: str,
+    api_runtime: AiAugmentBackendContext,
+    api_store: AiAugmentBackendStore,
+    threaded_loop: asyncio.Runner,
 ) -> None:
     caplog.set_level(logging.INFO, logger=api.__name__)
-    runtime = cast(AiAugmentBackendContext, SimpleNamespace())
-    request = Request(
-        {
-            "type": "http",
-            "app": SimpleNamespace(state=SimpleNamespace(runtime=runtime)),
-        }
-    )
-    pull_record, commit_record = retry_attempt_records(
+    _pull_record, commit_record = retry_attempt_records(
         run_id=UUID("019d0000-0000-7000-8000-000000000050"),
         session_id=UUID("019d0000-0000-7000-8000-000000000051"),
         attempt_id=f"{result.value}-{stage.value}",
@@ -5870,41 +5736,41 @@ def test_post_commit_result_is_exposed_only_by_follow_up_pull(
         if result is BackendLifecycle.ACCEPTED
         else None
     )
-    api.BACKEND_ATTEMPT_RECORD = AgentRuntimeAttemptRecord(
-        attempt=AgentRuntimeAttempt(
-            pull_record=pull_record,
-            commit_record=commit_record,
-            post_commit_validation=PostCommitValidation(
-                stage=stage,
-                result=result,
-                detail="retry details",
-            ),
+    validation = ValidationRequestBody(
+        commit_id=commit_record.record_id,
+        post_commit_validation=PostCommitValidation(
+            stage=stage, result=result, detail="retry details",
         ),
-        submission=submission,
-        ground_truth_innerdict=None,
-    )
-    if result is BackendLifecycle.ACCEPTED:
-        api.BACKEND_LIFECYCLE = BackendLifecycle.COMPLETED
-    elif stage in {
-        BackendLifecycle.PYDANTIC_VALIDATION,
-        BackendLifecycle.DUCKDB_EVIDENCE_VALIDATION,
-    }:
-        api.BACKEND_LIFECYCLE = BackendLifecycle.RETRY
-    else:
-        api.BACKEND_LIFECYCLE = BackendLifecycle.FAILED
-
-    if api.BACKEND_LIFECYCLE is BackendLifecycle.FAILED:
-        with pytest.raises(HTTPException) as exc_info:
-            api.authoritative_pull(request)
-        assert exc_info.value.status_code == expected_code
-        assert "Pull: Backend workflow failed; returning HTTP 500" in caplog.text
-        return
-
-    response = api.authoritative_pull(request)
+        submission_type="StandardizedSubmission" if submission is not None else None,
+        submission=(
+            None if submission is None else submission.model_dump(mode="json", by_alias=True)
+        ),
+    ).http_record(commit_record)
+    monkeypatch.setattr(api, "BACKEND_PUSH_RESPONSE_RECORD", None)
+    monkeypatch.setattr(api, "BACKEND_LIFECYCLE", BackendLifecycle.BUSY)
+    api.update_pull_state(PushResponseRecord(
+        **commit_record.commit_request_body.push_record.model_dump(),
+        commit_record=commit_record,
+        validation_record=BackendValidationRecord.from_http_request_log_record(validation),
+    ))
+    with api_store._writable(api_runtime):
+        response = threaded_loop.run(api.authoritative_pull(
+            requests.Request("GET", "http://invalid/pull").prepare(), api_runtime, api_store,
+        ))
     assert response.status_code == expected_code
     assert response.headers["content-type"].startswith(expected_media_type)
-    assert f"Pull: returning HTTP {expected_code}" in caplog.text
     assert str(commit_record.record_id) in caplog.text
+    if expected_code == HTTPStatus.INTERNAL_SERVER_ERROR:
+        assert response.json() == {"detail": Locale.CONFIGURATION_ERROR_DETAIL}
+        assert Locale.PULL_WORKFLOW_FAILED_LOG in caplog.messages
+    elif result is BackendLifecycle.REJECTED:
+        assert response.text == "retry details\n"
+    else:
+        assert submission is not None
+        rows = [json.loads(line) for line in response.text.splitlines()]
+        assert rows[0][KTP_AI_AUGMENT_EDUCATION_COL] == (
+            submission.model_dump(by_alias=True)[KTP_AI_AUGMENT_EDUCATION_COL]["value"]
+        )
 
 
 def test_backend_stdin_accepts_one_canonical_session_id() -> None:
@@ -6004,7 +5870,7 @@ def test_appendwatch_commit_lookup_requires_one_exact_filename(
 
 
 def test_openapi_does_not_disclose_integrity_internals() -> None:
-    schema = api.app.openapi()
+    schema = server.app.openapi()
     assert set(schema["paths"]) == {api.PULL_PATH, api.PUSH_PATH}
     push_schema = schema["paths"]["/push"]["post"]
     serialized = json.dumps(push_schema).lower()
@@ -6029,6 +5895,7 @@ def test_dashboard_query_uses_scoped_store_reads(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     backend_test_paths: BackendTestPaths,
+    threaded_loop: asyncio.Runner,
 ) -> None:
     runtime = runtime_for_test(tmp_path, backend_test_paths)
     monkeypatch.setattr(
@@ -6039,10 +5906,7 @@ def test_dashboard_query_uses_scoped_store_reads(
 
     with writable_backend_store(runtime) as store:
         assert store._detour_db._conn is None
-        first = ipc.handle_query_request(
-            runtime,
-            QueryRequest(),
-        )
+        first = query_snapshot_for_test(store, threaded_loop)
         replayed_pull = HttpRequestLogRecord(
             schema_version="1.1",
             method=api.HTTP_GET_METHOD,
@@ -6060,13 +5924,10 @@ def test_dashboard_query_uses_scoped_store_reads(
             received_at_unix_usec=None,
             duration_usec=1,
         )
-        store.append_authoritative_record(replayed_pull)
-        second = ipc.handle_query_request(
-            runtime,
-            QueryRequest(),
-        )
+        store._append_authoritative_record(replayed_pull)
+        second = query_snapshot_for_test(store, threaded_loop)
         assert store._detour_db._conn is None
-        projected_count = store.execute(
+        projected_count = store._execute(
             f"SELECT count(*) FROM {api.AUTHORITATIVE_RECORDS_TABLE}"
         ).fetchone()
 
@@ -6083,7 +5944,7 @@ def test_dashboard_query_uses_scoped_store_reads(
 
 
 def test_dashboard_query_has_no_route_on_the_public_fastapi_application() -> None:
-    route_paths = {getattr(route, "path", None) for route in api.app.routes}
+    route_paths = {getattr(route, "path", None) for route in server.app.routes}
 
     assert ipc.DASHBOARD_QUERY_PATH not in route_paths
     assert not any(isinstance(path, str) and path.startswith("/_control/") for path in route_paths)
@@ -6137,24 +5998,24 @@ def test_startup_mode_is_required_and_mutually_exclusive() -> None:
 @pytest.mark.parametrize("fails", (False, True))
 def test_clean_close_acknowledges_only_after_resource_cleanup(
     fails: bool, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch,
+    api_runtime: AiAugmentBackendContext,
 ) -> None:
     order: list[str] = []
 
-    class Store:
-        @contextmanager
-        def writable(self, _runtime: object) -> Iterator[None]:
-            order.append("opened")
-            try:
-                yield
-            finally:
-                assert BACKEND_STORE_CLOSED_CLEANLY not in capsys.readouterr().out
-                order.append("closed")
-                if fails:
-                    raise OSError("cleanup failed")
+    runtime = api_runtime
 
-    runtime = cast(AiAugmentBackendContext, SimpleNamespace(
-        pipeline_config=SimpleNamespace(backend_store=Store()),
-    ))
+    @contextmanager
+    def initialize(_runtime: object, **_kwargs: object) -> Iterator[None]:
+        order.append("opened")
+        try:
+            yield
+        finally:
+            assert BACKEND_STORE_CLOSED_CLEANLY not in capsys.readouterr().out
+            order.append("closed")
+            if fails:
+                raise OSError("cleanup failed")
+
+    monkeypatch.setattr(server, "initialize_backend_store", initialize)
     monkeypatch.setattr(api, "BACKEND_PROCESS_LOCK_DESCRIPTOR", None)
     monkeypatch.setattr(api, "_acquire_backend_process_lock", lambda: order.append("locked"))
     monkeypatch.setattr(api, "_release_backend_process_lock", lambda: order.append("unlocked"))
@@ -6177,27 +6038,27 @@ def test_rebuild_confirmation_and_invalid_log_preserve_existing_database(
     tmp_path: Path, backend_test_paths: BackendTestPaths,
 ) -> None:
     runtime = runtime_for_test(tmp_path, backend_test_paths)
-    store = runtime.pipeline_config.backend_store
-    store.rebuild_from_log(runtime, reset_confirmed=True)
-    before = store.detour_db_path.read_bytes()
+    store = backend_store_for_test(runtime)
+    store._rebuild_from_log(runtime, reset_confirmed=True)
+    before = store._detour_db_path.read_bytes()
     with pytest.raises(ValueError, match="confirmation"):
-        store.rebuild_from_log(runtime, reset_confirmed=False)
-    assert store.detour_db_path.read_bytes() == before
+        store._rebuild_from_log(runtime, reset_confirmed=False)
+    assert store._detour_db_path.read_bytes() == before
     log = Path(runtime.pipeline_config.replay_log)
     log.chmod(0o600)
     log.write_bytes(b'{"unfinished":')
     with pytest.raises(ValueError, match="Hash verification failed"):
-        store.rebuild_from_log(runtime, reset_confirmed=True)
+        store._rebuild_from_log(runtime, reset_confirmed=True)
     assert log.read_bytes() == b'{"unfinished":'
-    assert store.detour_db_path.read_bytes() == before
+    assert store._detour_db_path.read_bytes() == before
 
 
 def test_log_descriptor_is_readonly_and_append_failure_closes_writer(
     tmp_path: Path, backend_test_paths: BackendTestPaths, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runtime = runtime_for_test(tmp_path, backend_test_paths)
-    store = runtime.pipeline_config.backend_store
-    store.rebuild_from_log(runtime, reset_confirmed=True)
+    store = backend_store_for_test(runtime)
+    store._rebuild_from_log(runtime, reset_confirmed=True)
     record = persisted_http_record(
         record_id=UUID("019d0000-0000-7000-8000-000000000020"),
         method="GET", path="/pull", response_code=200,
@@ -6210,18 +6071,18 @@ def test_log_descriptor_is_readonly_and_append_failure_closes_writer(
         raise OSError("fsync interrupted")
 
     with pytest.raises(RuntimeError, match="Store failed"):
-        with store.writable(runtime):
+        with store._writable(runtime):
             descriptor = store._replay_log._fd
             assert descriptor is not None
             assert fcntl.fcntl(descriptor, fcntl.F_GETFL) & os.O_ACCMODE == os.O_RDONLY
             monkeypatch.setattr(os, "fsync", fail_fsync)
             with pytest.raises(OSError, match="fsync interrupted"):
-                store.append_authoritative_record(record)
+                store._append_authoritative_record(record)
             assert Path(runtime.pipeline_config.replay_log).stat().st_mode & 0o777 == 0o400
             with pytest.raises(OSError):
                 os.fstat(writer_fds[0])
             with pytest.raises(RuntimeError, match="Store failed"):
-                store.execute("SELECT 1")
+                store._execute("SELECT 1")
     assert store._replay_log._fd is None
     assert store._detour_db._conn is None
 

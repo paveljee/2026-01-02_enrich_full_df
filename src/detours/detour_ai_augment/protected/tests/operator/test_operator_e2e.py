@@ -422,15 +422,17 @@ def _operator_runtime(
     args = backend_server.parse_args(["--config", str(config_path), "--new", "--yes"])
     backend_runtime = backend_server.configure_runtime(args.config, require_namekey=False)
     with backend_server.backend_store_lifecycle(
-        backend_runtime, new=args.new, confirmed=backend_server.confirm_startup(args), yes=args.yes,
-    ):
+        backend_runtime,
+        new=args.new,
+        confirmed=backend_server.confirm_startup(args),
+        yes=args.yes,
+    ) as backend_store:
         pass
     _operator_log("isolated Backend Store initialized and closed cleanly")
-    pipeline_config = backend_runtime.pipeline_config
     return OperatorRuntime(
         repository_root=repository_root,
         config_path=config_path,
-        backend_store=pipeline_config.backend_store,
+        backend_store=backend_store,
         replay_log_path=replay_log_path,
         rollout_cas_dir=rollout_cas_dir,
         dashboard_socket_path=dashboard_socket_path,
@@ -987,8 +989,8 @@ def validate_workflow_artifacts(
             record,
             resolve_http_record=records_by_id.__getitem__,
         )
-        with operator_runtime.backend_store.read_only() as backend_store:
-            row = backend_store.execute(
+        with operator_runtime.backend_store._read_only(runtime) as backend_store:
+            row = backend_store._execute(
                 f"SELECT {backend_api.AUTHORITATIVE_ATTEMPT_PAYLOAD_COLUMN} "
                 f"FROM {backend_api.AUTHORITATIVE_ATTEMPTS_TABLE} "
                 f"WHERE {backend_api.AUTHORITATIVE_ATTEMPT_COMMIT_ID_COLUMN} = ?",

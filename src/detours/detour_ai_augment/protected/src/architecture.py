@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import PurePosixPath
 from typing import (
     Literal,
+    NoReturn,
     Protocol,
     Self,
 )
@@ -37,6 +38,123 @@ class BackendComponent(
     ComponentProtocol,
     Protocol,
 ):
+    class RequestRecordProperty(
+        HttpRequestLogRecordProtocol, ComponentProtocol.PropertyProtocol, Protocol
+    ):
+        pass
+
+    class ResponseRecordProperty(
+        HttpRequestLogRecordProtocol, ComponentProtocol.PropertyProtocol, Protocol
+    ):
+        pass
+
+    class StoreExceptionProperty(ComponentProtocol.PropertyProtocol, Protocol):
+        def raise_exception(self) -> NoReturn: ...
+
+    class StoreAcknowledgmentProperty(ComponentProtocol.PropertyProtocol, Protocol):
+        @property
+        def value(self) -> Literal["ack", "nak"]: ...
+
+    type ResponseRecordPromiseResultProperty[R] = (
+        tuple[R, None] | tuple[None, BackendComponent.StoreExceptionProperty]
+    )
+
+    class ResponseRecordPromiseProperty[
+        R: BackendComponent.ResponseRecordProperty,
+    ](ComponentProtocol.PropertyProtocol, Protocol):
+        """A request-persistence acknowledgment and an eventual application result.
+
+        ACK means the request record was appended and fsynced in the replay log.
+        NAK means it was not. IPC deliberately does not persist request records.
+        Neither value describes response persistence or application success.
+
+        Backend Store performs response persistence where required before returning
+        the successful completed result. Response-persistence failure returns
+        (None, exc); success returns (response_record, None).
+
+        Returning the initial promise handle does not imply processing completion.
+        """
+
+        @property
+        def acknowledgment(self) -> BackendComponent.StoreAcknowledgmentProperty: ...
+
+        async def response_record(
+            self,
+        ) -> BackendComponent.ResponseRecordPromiseResultProperty[R]: ...
+
+    class PullRequestRecordProperty(RequestRecordProperty, Protocol):
+        pass
+
+    class PullResponseRecordProperty(ResponseRecordProperty, Protocol):
+        @property
+        def pull_response_body(self) -> str: ...
+
+    class PushRequestRecordProperty(RequestRecordProperty, Protocol):
+        @property
+        def pull_record_id(self) -> UUID | None: ...
+
+        @property
+        def session_id(self) -> UUID | None: ...
+
+    class PushResponseRecordProperty(ResponseRecordProperty, Protocol):
+        @property
+        def commit_record(self) -> BackendComponent.CommitRecordProperty | None: ...
+
+        @property
+        def validation_record(self) -> BackendComponent.ValidationRecordProperty | None: ...
+
+    class QueryRequestRecordProperty(RequestRecordProperty, Protocol):
+        pass
+
+    class QueryResponseRecordProperty(ResponseRecordProperty, Protocol):
+        @property
+        def query_response_body(
+            self,
+        ) -> BackendComponent.ControlCentrePort.QueryResponseProperty: ...
+
+    class RunOutcomeRequestRecordProperty(RequestRecordProperty, Protocol):
+        @property
+        def pull_record_id(self) -> UUID | None: ...
+
+        @property
+        def push_record_id(self) -> UUID | None: ...
+
+        @property
+        def codex_session_record(self) -> BackendComponent.CodexSessionRecordProperty: ...
+
+        @property
+        def rollout_filename(self) -> str | None: ...
+
+    class QueryOnlyStoreProperty(ComponentProtocol.PropertyProtocol, Protocol):
+        def query(
+            self,
+            request: BackendComponent.QueryRequestRecordProperty,
+        ) -> BackendComponent.ResponseRecordPromiseProperty[
+            BackendComponent.QueryResponseRecordProperty
+        ]: ...
+
+    class FullStoreProperty(QueryOnlyStoreProperty, Protocol):
+        def pull(
+            self,
+            request: BackendComponent.PullRequestRecordProperty,
+        ) -> BackendComponent.ResponseRecordPromiseProperty[
+            BackendComponent.PullResponseRecordProperty
+        ]: ...
+
+        def push(
+            self,
+            request: BackendComponent.PushRequestRecordProperty,
+        ) -> BackendComponent.ResponseRecordPromiseProperty[
+            BackendComponent.PushResponseRecordProperty
+        ]: ...
+
+        def run_outcome(
+            self,
+            request: BackendComponent.RunOutcomeRequestRecordProperty,
+        ) -> BackendComponent.ResponseRecordPromiseProperty[
+            BackendComponent.ControlCentrePort.RunOutcomeRecordProperty
+        ]: ...
+
     class ContextProperty(
         ComponentProtocol.PropertyProtocol,
         Protocol,
@@ -393,6 +511,15 @@ class BackendComponent(
             ComponentProtocol.PortProtocol.PropertyProtocol,
             Protocol,
         ):
+            @property
+            def commit_record_id(self) -> UUID | None: ...
+
+            @property
+            def validation_record_id(self) -> UUID | None: ...
+
+            @property
+            def run_outcome_record_id(self) -> UUID: ...
+
             @property
             def pull_record_id(self) -> UUID | None: ...
 

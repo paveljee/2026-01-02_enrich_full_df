@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import threading
+from http import HTTPStatus
 from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlsplit
@@ -11,8 +13,7 @@ from uuid import UUID, uuid7
 import duckdb
 import pytest
 import requests
-from fastapi import FastAPI, Request
-from starlette.responses import Response
+from fastapi import FastAPI
 from starlette.types import Message, Scope
 
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
@@ -47,9 +48,17 @@ from src.detours.detour_ai_augment.src.backend.helpers.data_models.model_http_in
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.query_response import (
     QueryResponse,
 )
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.request_response_records import (
+    PullRequestRecord,
+    PushRequestRecord,
+    PushResponseRecord,
+    RunOutcomeRequestRecord,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.response_record_promise import (
+    BackendStoreAcknowledgment,
+)
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.run_outcome_record import (
     RunOutcomeRecord,
-    RunOutcomeResponseBody,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.validation_event import (  # noqa: E501
     VALIDATE_PATH,
@@ -58,9 +67,6 @@ from src.detours.detour_ai_augment.src.backend.helpers.data_models.validation_ev
 )
 from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.dashboard_query_snapshot import (  # noqa: E501
     DashboardQuerySnapshot,
-)
-from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.query_request import (  # noqa: E501
-    QueryRequest,
 )
 from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.run_outcome import (  # noqa: E501
     NAME_KEY_HEADER,
@@ -74,6 +80,7 @@ from src.detours.detour_ai_augment.tests.backend.test_api import (
     TEST_NAMEKEY,
     TEST_NAMEKEY_MODEL,
     BackendTestPaths,
+    backend_store_for_test,
     create_operator_capture_source_database,
     operator_capture_rollout,
     persisted_http_record,
@@ -164,8 +171,14 @@ def runtime(tmp_path: Path, backend_test_paths: BackendTestPaths) -> AiAugmentBa
         codex_match_version=1,
     )
 
-    runtime.pipeline_config.backend_store.rebuild_from_log(runtime, reset_confirmed=True)
     return runtime
+
+
+@pytest.fixture
+def backend_store(runtime: AiAugmentBackendContext) -> AiAugmentBackendStore:
+    store = backend_store_for_test(runtime)
+    store._rebuild_from_log(runtime, reset_confirmed=True)
+    return store
 
 
 def commit(
@@ -191,8 +204,8 @@ def commit(
                 }),
             }
         )
-        pull = store.append_authoritative_record(pull)
-    push = store.append_authoritative_record(
+        pull = store._append_authoritative_record(pull)
+    push = store._append_authoritative_record(
         persisted_http_record(
             record_id=uuid7(),
             method="POST",
@@ -223,7 +236,7 @@ def commit(
         appendwatch_report=report_for_rollout(relative).encode(),
         namekey=TEST_NAMEKEY_MODEL,
     )
-    return store.append_authoritative_record(draft).record_id
+    return store._append_authoritative_record(draft).record_id
 
 
 def standardized_payload() -> dict[str, Any]:
@@ -246,10 +259,11 @@ def standardized_payload() -> dict[str, Any]:
 
 
 def test_live_validation_replays_with_only_referenced_http(
+    backend_store: AiAugmentBackendStore,
     runtime: AiAugmentBackendContext,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    store = runtime.pipeline_config.backend_store
+    store = backend_store
     captured: list[str] = []
     monkeypatch.setenv("OPENALEX_API_KEY", "isolated-test-key")
 
@@ -257,11 +271,41 @@ def test_live_validation_replays_with_only_referenced_http(
         _session: requests.Session, request: requests.PreparedRequest, **kwargs: Any
     ) -> requests.Response:
         assert kwargs["allow_redirects"] is False
-        # Capture is outside both the Store lock and its speculative transaction.
-        assert store._lock.acquire(blocking=False)
-        store._lock.release()
-        assert not store._transaction_active
-        assert store._detour_db._conn is None
+        # Provider I/O leaves the mutex free, but the outer push DB transaction
+        # remains open. A concurrent ordinary busy pull must join that group.
+        assert store._transaction_active
+        assert store._detour_db._conn is not None
+        observed: list[BackendStoreAcknowledgment] = []
+
+        def busy_pull() -> None:
+            record = PullRequestRecord.model_validate(
+                persisted_http_record(
+                    record_id=uuid7(),
+                    method="GET",
+                    path="/pull",
+                    response_code=503,
+                ).model_dump()
+            )
+            observed.append(store.pull(record).acknowledgment)
+            rejected = PushRequestRecord(
+                **persisted_http_record(
+                    record_id=uuid7(), method="POST", path="/push",
+                    response_code=HTTPStatus.CONFLICT, request_body="{}",
+                ).model_dump(),
+                pull_record_id=None, session_id=None,
+            )
+            result = store.push(rejected)
+            observed.append(result.acknowledgment)
+            response, error = asyncio.run(result.response_record())
+            assert error is None and response is not None
+            assert response.response_code == HTTPStatus.CONFLICT
+            assert response.commit_record is None and response.validation_record is None
+
+        thread = threading.Thread(target=busy_pull)
+        thread.start()
+        thread.join(timeout=2)
+        assert not thread.is_alive(), "provider I/O held the Store mutex"
+        assert observed == [BackendStoreAcknowledgment.ACK, BackendStoreAcknowledgment.ACK]
         captured.append(request.url or "")
         response = requests.Response()
         response.status_code = 200
@@ -284,12 +328,12 @@ def test_live_validation_replays_with_only_referenced_http(
     education = baseline[KTP_AI_AUGMENT_EDUCATION_COL]
     assert isinstance(education, dict)
     education["web_search_excerpts"][0]["excerpt"] = "not verified"
-    with store.writable(runtime):
+    with store._writable(runtime):
         baseline_id = commit(store, baseline, accepted)
-        assert store.query(runtime, QueryRequest()).attempts == ()
-        rejected = store.validate_commit(baseline_id)
+        assert store._query_snapshot().attempts == ()
+        rejected = store._validate_commit(baseline_id)
         assert rejected.attempt.post_commit_validation.result == BackendLifecycle.REJECTED
-        retry_pull = store.append_authoritative_record(
+        retry_pull = store._append_authoritative_record(
             persisted_http_record(
                 record_id=uuid7(),
                 method="GET",
@@ -303,7 +347,7 @@ def test_live_validation_replays_with_only_referenced_http(
             )
         )
         commit_id = commit(store, accepted, accepted, retry_pull)
-        result = store.validate_commit(commit_id)
+        result = store._validate_commit(commit_id)
         assert result.attempt.post_commit_validation.result == BackendLifecycle.ACCEPTED
         assert len(captured) == 2
         assert len(result.http_records) == 2
@@ -313,7 +357,7 @@ def test_live_validation_replays_with_only_referenced_http(
         envelope = ValidationRequestBody.model_validate_json(validation.request_body or "")
         assert envelope == validation.validation_request_body
         assert validation.model_dump_json() == (
-            store.http_record(validation.record_id).model_dump_json()
+            store._http_record(validation.record_id).model_dump_json()
         )
         assert envelope.http_record_ids == tuple(r.record_id for r in result.http_records)
         assert validation.path == VALIDATE_PATH
@@ -330,10 +374,10 @@ def test_live_validation_replays_with_only_referenced_http(
             )
         )
         for record in result.http_records:
-            assert record == store.http_record(record.record_id)
-        snapshot = store.query(runtime, QueryRequest()).model_dump_json()
+            assert record == store._http_record(record.record_id)
+        snapshot = store._query_snapshot().model_dump_json()
         # A later observation of the same URL must not replace the linked validation input.
-        store.append_authoritative_record(
+        store._append_authoritative_record(
             result.http_records[0].model_copy(
                 update={
                     "record_id": uuid7(),
@@ -360,57 +404,60 @@ def test_live_validation_replays_with_only_referenced_http(
         invalid_snapshot["attempts"][-1]["validation_record"][field] = value
         with pytest.raises(ValueError, match="validation HTTP record has an invalid contour"):
             QueryResponse.from_serialized_json(json.dumps(invalid_snapshot))
-    replay_store = AiAugmentBackendStore.from_resources(
+    replay_store = AiAugmentBackendStore._from_resources(
         replay_log=runtime.pipeline_config.replay_log,
         detour_db=store._detour_db.model_copy(
-            update={"path": store.detour_db_path.with_name("rebuilt.duckdb")}
+            update={"path": store._detour_db_path.with_name("rebuilt.duckdb")}
         ),
         rollout_cas=store.rollout_cas,
     )
-    live_database = fixtures.logical_database_snapshot(store.detour_db_path)
+    live_database = fixtures.logical_database_snapshot(store._detour_db_path)
     mode = Path(runtime.pipeline_config.replay_log).stat().st_mode
     rebuild_for_test(replay_store, runtime)
-    with replay_store.read_only():
-        assert replay_store.query(runtime, QueryRequest()).model_dump_json() == snapshot
+    with replay_store._read_only(runtime):
+        assert replay_store._query_snapshot().model_dump_json() == snapshot
         assert Path(runtime.pipeline_config.replay_log).read_bytes() == log_bytes
         with pytest.raises(RuntimeError):
-            replay_store.append_authoritative_record(result.http_records[0])
+            replay_store._append_authoritative_record(result.http_records[0])
     assert Path(runtime.pipeline_config.replay_log).stat().st_mode == mode
-    assert fixtures.logical_database_snapshot(replay_store.detour_db_path) == live_database
+    assert fixtures.logical_database_snapshot(replay_store._detour_db_path) == live_database
 
 
 def test_readback_failure_requires_explicit_new(
+    backend_store: AiAugmentBackendStore,
     runtime: AiAugmentBackendContext,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    store = runtime.pipeline_config.backend_store
+    store = backend_store
     draft = persisted_http_record(record_id=uuid7(), method="GET", path="/pull", response_code=200)
-    original = AiAugmentBackendStore.http_record_with_ordinal
-    with pytest.raises(RuntimeError, match="Backend Store failed"), store.writable(runtime):
+    original = AiAugmentBackendStore._http_record_with_ordinal
+    with pytest.raises(RuntimeError, match="Backend Store failed"), store._writable(runtime):
         with monkeypatch.context() as patch:
             def fail_readback(*_args: Any, **_kwargs: Any) -> Any:
                 log_bytes = Path(runtime.pipeline_config.replay_log).read_bytes()
                 assert str(draft.record_id).encode() in log_bytes
                 raise RuntimeError("injected DB readback failure")
 
-            patch.setattr(AiAugmentBackendStore, "http_record_with_ordinal", fail_readback)
+            patch.setattr(AiAugmentBackendStore, "_http_record_with_ordinal", fail_readback)
             with pytest.raises(RuntimeError, match="injected DB readback failure"):
-                store.append_authoritative_record(draft)
+                store._append_authoritative_record(draft)
         with pytest.raises(RuntimeError, match="Backend Store failed"):
-            store.query(runtime, QueryRequest())
-    with duckdb.connect(str(store.detour_db_path), read_only=True) as connection:
+            store._query_snapshot()
+    with duckdb.connect(str(store._detour_db_path), read_only=True) as connection:
         assert connection.execute(
             f"SELECT count(*) FROM {api.AUTHORITATIVE_RECORDS_TABLE}"
         ).fetchone() == (0,)
-    fresh = AiAugmentBackendStore.from_resources(
-        replay_log=store._replay_log, detour_db=store._detour_db, rollout_cas=store.rollout_cas,
+    fresh = AiAugmentBackendStore._from_resources(
+        replay_log=store._replay_log,
+        detour_db=store._detour_db,
+        rollout_cas=store.rollout_cas,
     )
     with pytest.raises(ValueError, match="missing"):
-        with fresh.read_only():
+        with fresh._read_only(runtime):
             pytest.fail("Resume must not apply the durable tail")
     rebuild_for_test(store, runtime)
-    with store.read_only():
-        stored = store.http_record(draft.record_id)
+    with store._read_only(runtime):
+        stored = store._http_record(draft.record_id)
         assert stored == draft and stored is not draft
         assert original(store, draft.record_id)[1] == stored
 
@@ -457,22 +504,23 @@ def test_generic_interception_matches_method_headers_and_body() -> None:
 
 
 def test_execute_results_are_detached_and_consumed(
+    backend_store: AiAugmentBackendStore,
     runtime: AiAugmentBackendContext,
 ) -> None:
-    store = runtime.pipeline_config.backend_store
-    with store.writable(runtime):
-        result = store.execute("SELECT i FROM range(?) AS t(i) ORDER BY i", [3])
+    store = backend_store
+    with store._writable(runtime):
+        result = store._execute("SELECT i FROM range(?) AS t(i) ORDER BY i", [3])
         # Another query on the shared connection cannot overwrite this result.
-        assert store.execute("SELECT 99").fetchone() == (99,)
+        assert store._execute("SELECT 99").fetchone() == (99,)
         assert result.fetchone() == (0,)
     # Fetching never depends on an open Store or borrowed DuckDB cursor.
     assert result.fetchall() == [(1,), (2,)]
     assert result.fetchone() is None
     assert result.fetchall() == []
-    with store.read_only():
-        assert store.execute("SELECT 1 WHERE false").fetchone() is None
+    with store._read_only(runtime):
+        assert store._execute("SELECT 1 WHERE false").fetchone() is None
         with pytest.raises(RuntimeError, match="transaction scope"):
-            store.execute("CREATE TABLE forbidden_write (i INTEGER)")
+            store._execute("CREATE TABLE forbidden_write (i INTEGER)")
 
 
 def rebuild_for_test(store: AiAugmentBackendStore, runtime: AiAugmentBackendContext) -> None:
@@ -480,7 +528,7 @@ def rebuild_for_test(store: AiAugmentBackendStore, runtime: AiAugmentBackendCont
     store._replay_log = store._replay_log.model_copy(update={
         "hash": hashlib.sha256(Path(store._replay_log).read_bytes()).hexdigest(),
     })
-    store.rebuild_from_log(runtime, reset_confirmed=True, confirm_replay=lambda: True)
+    store._rebuild_from_log(runtime, reset_confirmed=True, confirm_replay=lambda: True)
 
 
 def no_network(*_args: Any, **_kwargs: Any) -> Any:
@@ -488,15 +536,17 @@ def no_network(*_args: Any, **_kwargs: Any) -> Any:
 
 
 def test_validation_preview_does_not_publish_zip(
-    runtime: AiAugmentBackendContext, monkeypatch: pytest.MonkeyPatch,
+    backend_store: AiAugmentBackendStore,
+    runtime: AiAugmentBackendContext,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    store = runtime.pipeline_config.backend_store
+    store = backend_store
     payload = valid_submission_body()
     monkeypatch.setattr(requests.Session, "send", no_network)
-    with store.writable(runtime):
+    with store._writable(runtime):
         commit_id = commit(store, payload, payload)
-        original = AiAugmentBackendStore.append_authoritative_record
-        before_preview = fixtures.logical_database_snapshot(store.detour_db_path)
+        original = AiAugmentBackendStore._append_authoritative_record
+        before_preview = fixtures.store_database_snapshot(store)
         with monkeypatch.context() as patch:
             def interrupt(
                 selected: AiAugmentBackendStore, record: HttpRequestLogRecord,
@@ -506,21 +556,24 @@ def test_validation_preview_does_not_publish_zip(
                     assert body.post_commit_validation.result == BackendLifecycle.ACCEPTED
                     raise OSError("interrupted before validation append")
                 return original(selected, record)
-            patch.setattr(AiAugmentBackendStore, "append_authoritative_record", interrupt)
+
+            patch.setattr(AiAugmentBackendStore, "_append_authoritative_record", interrupt)
             with pytest.raises(OSError, match="before validation append"):
-                store.validate_commit(commit_id)
-        assert fixtures.logical_database_snapshot(store.detour_db_path) == before_preview
+                store._validate_commit(commit_id)
+        assert fixtures.store_database_snapshot(store) == before_preview
         assert not list(runtime.pipeline_config.output_dir.iterdir())
-        assert store.query(runtime, QueryRequest()).attempts == ()
-        result = store.validate_commit(commit_id)
+        assert store._query_snapshot().attempts == ()
+        result = store._validate_commit(commit_id)
         assert result.attempt.post_commit_validation.result == BackendLifecycle.ACCEPTED
         assert not list(runtime.pipeline_config.output_dir.iterdir())
 
 
 def test_live_repeat_resume_and_explicit_replay_never_publish(
-    runtime: AiAugmentBackendContext, monkeypatch: pytest.MonkeyPatch,
+    backend_store: AiAugmentBackendStore,
+    runtime: AiAugmentBackendContext,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    store = runtime.pipeline_config.backend_store
+    store = backend_store
     payload = valid_submission_body()
     monkeypatch.setattr(requests.Session, "send", no_network)
     output = runtime.pipeline_config.output_dir
@@ -528,26 +581,29 @@ def test_live_repeat_resume_and_explicit_replay_never_publish(
     old_archive = output / "existing.zip"
     old_archive.write_bytes(b"leave existing archives alone")
     before = old_archive.stat().st_mtime_ns
-    with store.writable(runtime):
+    with store._writable(runtime):
         commit_id = commit(store, payload, payload)
-        result = store.validate_commit(commit_id)
+        result = store._validate_commit(commit_id)
         assert result.attempt.post_commit_validation.result == BackendLifecycle.ACCEPTED
-        assert store.validate_commit(commit_id) == result
-        snapshot = store.query(runtime, QueryRequest()).model_dump_json()
-    with store.writable(runtime):
-        assert store.query(runtime, QueryRequest()).model_dump_json() == snapshot
+        assert store._validate_commit(commit_id) == result
+        snapshot = store._query_snapshot().model_dump_json()
+    with store._writable(runtime):
+        assert store._query_snapshot().model_dump_json() == snapshot
     rebuild_for_test(store, runtime)
-    with store.read_only():
-        assert store.query(runtime, QueryRequest()).model_dump_json() == snapshot
+    with store._read_only(runtime):
+        assert store._query_snapshot().model_dump_json() == snapshot
     assert list(output.iterdir()) == [old_archive]
     assert old_archive.read_bytes() == b"leave existing archives alone"
     assert old_archive.stat().st_mtime_ns == before
 
 
 def outcome_for_commit(
-    commit_record: BackendCommitRecord, *,
+    store: AiAugmentBackendStore,
+    commit_record: BackendCommitRecord,
+    *,
     path: RunOutcomePath = RunOutcomePath.COMPLETED,
-    partial: bool = False, no_session: bool = False,
+    partial: bool = False,
+    no_session: bool = False,
 ) -> RunOutcomeRecord:
     body = commit_record.commit_request_body
     session = body.codex_session_record
@@ -562,131 +618,173 @@ def outcome_for_commit(
         request_headers={NAME_KEY_HEADER: commit_record.request_headers[NAME_KEY_HEADER]},
         request_body=b"",
     )
-    return RunOutcomeRecord.from_run_outcome_request(
-        request,
-        response_code=500 if partial or no_session else 200,
-        response_headers=None if partial or no_session else {
-            SOURCE_KEY_HEADER: commit_record.request_headers[SOURCE_KEY_HEADER],
-        },
-        response_body=RunOutcomeResponseBody(
+    return api._run_outcome_record(
+        store,
+        store._runtime,
+        RunOutcomeRequestRecord(
+            **request.http_request_log_record.model_dump(),
             pull_record_id=body.pull_record.record_id,
             push_record_id=body.push_record.record_id,
             codex_session_record=session,
+            rollout_filename=None
+            if partial or no_session
+            else api._parse_source_key_header(
+                commit_record.request_headers[SOURCE_KEY_HEADER],
+            )[0],
         ),
-        ready_to_respond_at_unix_usec=2,
     )
 
 
 @pytest.mark.parametrize("path", tuple(RunOutcomePath))
 @pytest.mark.parametrize("partial", (False, True))
 def test_outcome_materializes_persisted_ids_identically_live_and_replay(
-    runtime: AiAugmentBackendContext, monkeypatch: pytest.MonkeyPatch,
-    path: RunOutcomePath, partial: bool,
+    backend_store: AiAugmentBackendStore,
+    runtime: AiAugmentBackendContext,
+    monkeypatch: pytest.MonkeyPatch,
+    path: RunOutcomePath,
+    partial: bool,
 ) -> None:
     monkeypatch.setattr(requests.Session, "send", no_network)
-    store = runtime.pipeline_config.backend_store
+    store = backend_store
     payload = valid_submission_body()
-    with store.writable(runtime):
+    with store._writable(runtime):
         commit_id = commit(store, payload, payload)
-        result = store.validate_commit(commit_id)
+        result = store._validate_commit(commit_id)
         assert result.attempt.post_commit_validation.result is BackendLifecycle.ACCEPTED
         assert result.validation_record is not None
-        interim = store.query(runtime, QueryRequest())
+        interim = store._query_snapshot()
         DashboardQuerySnapshot(query_response=interim)
         assert not interim.ai_augment_singular_outerdicts[0].committed_innerdicts
-        assert store.execute(
+        assert store._execute(
             f'SELECT "{KTP_AI_AUGMENT_VALIDATION_RECORD_ID_COL}", '
             f'"{KTP_AI_AUGMENT_RUN_OUTCOME_RECORD_ID_COL}" FROM {api.CODEX_OUTPUT_ROWS_TABLE}'
         ).fetchone() == (None, None)
-        outcome = outcome_for_commit(result.attempt.commit_record, path=path, partial=partial)
-        stored = store.append_authoritative_record(outcome)
+        outcome = outcome_for_commit(
+            store, result.attempt.commit_record, path=path, partial=partial
+        )
+        stored = store._append_authoritative_record(outcome)
         assert RunOutcomeRecord.from_http_request_log_record(stored) == outcome
         assert stored.model_dump_json() == outcome.model_dump_json()
-        query = store.query(runtime, QueryRequest())
+        query = store._query_snapshot()
         DashboardQuerySnapshot(query_response=query)
-        innerdict, = query.ai_augment_singular_outerdicts[0].committed_innerdicts
-        data = innerdict.innerdict.data
-        column_index = list(data).index(KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL)
-        assert list(data)[column_index:column_index + 3] == [
-            KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL,
-            KTP_AI_AUGMENT_VALIDATION_RECORD_ID_COL,
-            KTP_AI_AUGMENT_RUN_OUTCOME_RECORD_ID_COL,
-        ]
-        assert data[KTP_AI_AUGMENT_VALIDATION_RECORD_ID_COL] == str(
-            result.validation_record.record_id
+        assert outcome.response_code == (
+            500 if partial else 409 if path is RunOutcomePath.FAILED else 200
         )
-        assert data[KTP_AI_AUGMENT_RUN_OUTCOME_RECORD_ID_COL] == str(outcome.record_id)
+        if outcome.response_code == 409:
+            assert not query.ai_augment_singular_outerdicts[0].committed_innerdicts
+        else:
+            (innerdict,) = query.ai_augment_singular_outerdicts[0].committed_innerdicts
+            data = innerdict.innerdict.data
+            column_index = list(data).index(KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL)
+            assert list(data)[column_index : column_index + 3] == [
+                KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL,
+                KTP_AI_AUGMENT_VALIDATION_RECORD_ID_COL,
+                KTP_AI_AUGMENT_RUN_OUTCOME_RECORD_ID_COL,
+            ]
+            assert data[KTP_AI_AUGMENT_VALIDATION_RECORD_ID_COL] == str(
+                result.validation_record.record_id
+            )
+            assert data[KTP_AI_AUGMENT_RUN_OUTCOME_RECORD_ID_COL] == str(outcome.record_id)
         snapshot = query.model_dump_json()
         assert QueryResponse.from_serialized_json(snapshot).model_dump_json() == snapshot
     log_bytes = Path(store._replay_log).read_bytes()
-    live_database = fixtures.logical_database_snapshot(store.detour_db_path)
-    replay = AiAugmentBackendStore.from_resources(
+    live_database = fixtures.logical_database_snapshot(store._detour_db_path)
+    replay = AiAugmentBackendStore._from_resources(
         replay_log=store._replay_log,
-        detour_db=store._detour_db.model_copy(update={
-            "path": store.detour_db_path.with_name("outcome-replay.duckdb"),
-        }),
+        detour_db=store._detour_db.model_copy(
+            update={
+                "path": store._detour_db_path.with_name("outcome-replay.duckdb"),
+            }
+        ),
         rollout_cas=store.rollout_cas,
     )
     rebuild_for_test(replay, runtime)
-    with replay.read_only():
-        assert replay.query(runtime, QueryRequest()).model_dump_json() == snapshot
-    assert fixtures.logical_database_snapshot(replay.detour_db_path) == live_database
+    with replay._read_only(runtime):
+        assert replay._query_snapshot().model_dump_json() == snapshot
+    assert fixtures.logical_database_snapshot(replay._detour_db_path) == live_database
     assert Path(store._replay_log).read_bytes() == log_bytes
 
 
 @pytest.mark.parametrize("case", ("unvalidated", "rejected", "no_session", "other_session"))
 def test_outcome_without_matching_accepted_data_keeps_history_only(
-    runtime: AiAugmentBackendContext, case: str,
+    backend_store: AiAugmentBackendStore,
+    runtime: AiAugmentBackendContext,
+    case: str,
 ) -> None:
-    store = runtime.pipeline_config.backend_store
+    store = backend_store
     payload = valid_submission_body()
-    with store.writable(runtime):
+    if case == "unvalidated":
+        with pytest.raises(RuntimeError, match="Backend Store failed"), store._writable(runtime):
+            commit_id = commit(store, payload, payload)
+            typed_commit = api._backend_commit_record(store, store._http_record(commit_id))
+            with pytest.raises(ValueError, match="precedes push group completion"):
+                store._append_authoritative_record(
+                    outcome_for_commit(store, typed_commit, partial=True)
+                )
+        with duckdb.connect(str(store._detour_db_path), read_only=True) as connection:
+            assert connection.execute("SELECT count(*) FROM detour_http_records").fetchone() == (1,)
+        return
+    with store._writable(runtime):
         commit_id = commit(store, {} if case == "rejected" else payload, payload)
-        typed_commit = api._backend_commit_record(store, store.http_record(commit_id))
+        typed_commit = api._backend_commit_record(store, store._http_record(commit_id))
         if case != "unvalidated":
-            result = store.validate_commit(commit_id)
+            result = store._validate_commit(commit_id)
             assert result.attempt.post_commit_validation.result is (
                 BackendLifecycle.REJECTED if case == "rejected" else BackendLifecycle.ACCEPTED
             )
-        outcome = outcome_for_commit(typed_commit, partial=True, no_session=case == "no_session")
+        outcome = outcome_for_commit(
+            store, typed_commit, partial=True, no_session=case == "no_session"
+        )
         if case == "other_session":
-            body = outcome.run_outcome_response_body.model_copy(update={
-                "codex_session_record": CodexSessionRecord(
-                    session_id=uuid7(), codex_rollout_record=None, appendwatch_report_record=None,
-                ),
-            })
+            body = outcome.run_outcome_response_body.model_copy(
+                update={
+                    "commit_record_id": None,
+                    "validation_record_id": None,
+                    "codex_session_record": CodexSessionRecord(
+                        session_id=uuid7(),
+                        codex_rollout_record=None,
+                        appendwatch_report_record=None,
+                    ),
+                }
+            )
             outcome = RunOutcomeRecord.from_run_outcome_request(
-                outcome.run_outcome_request, response_code=500, response_headers=None,
+                outcome.run_outcome_request, response_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+                response_headers=None,
                 response_body=body, ready_to_respond_at_unix_usec=2,
             )
-        store.append_authoritative_record(outcome)
-        query = store.query(runtime, QueryRequest())
+        store._append_authoritative_record(outcome)
+        query = store._query_snapshot()
         DashboardQuerySnapshot(query_response=query)
         assert not query.ai_augment_singular_outerdicts[0].committed_innerdicts
         assert query.run_outcome_records == (outcome,)
 
 
 def test_outcome_finalizes_all_session_commits_once(
+    backend_store: AiAugmentBackendStore,
     runtime: AiAugmentBackendContext,
 ) -> None:
-    store = runtime.pipeline_config.backend_store
+    store = backend_store
     payload = valid_submission_body()
-    with store.writable(runtime):
+    with store._writable(runtime):
         for index in range(2):
             commit_id = commit(store, payload, payload, rollout_suffix=(
                 b'{"type":"event_msg","timestamp":"2026-09-03T15:17:00Z",'
                 b'"payload":{"type":"task_complete"}}\n'
             ) * index)
-            result = store.validate_commit(commit_id)
+            result = store._validate_commit(commit_id)
             assert result.attempt.post_commit_validation.result is BackendLifecycle.ACCEPTED
-        outcome = outcome_for_commit(result.attempt.commit_record)
-        store.append_authoritative_record(outcome)
-        before = store.query(runtime, QueryRequest())
+        outcome = outcome_for_commit(store, result.attempt.commit_record)
+        store._append_authoritative_record(outcome)
+        before = store._query_snapshot()
         assert len(before.ai_augment_singular_outerdicts[0].committed_innerdicts) == 2
-        store.append_authoritative_record(outcome_for_commit(
-            result.attempt.commit_record, path=RunOutcomePath.FAILED,
-        ))
-        after = store.query(runtime, QueryRequest())
+        store._append_authoritative_record(
+            outcome_for_commit(
+                store,
+                result.attempt.commit_record,
+                path=RunOutcomePath.FAILED,
+            )
+        )
+        after = store._query_snapshot()
         DashboardQuerySnapshot(query_response=after)
         assert [
             item.serialize()
@@ -698,43 +796,51 @@ def test_outcome_finalizes_all_session_commits_once(
 
 
 def test_validation_after_session_outcome_fails_without_materialization(
+    backend_store: AiAugmentBackendStore,
     runtime: AiAugmentBackendContext,
 ) -> None:
-    store = runtime.pipeline_config.backend_store
+    store = backend_store
     payload = valid_submission_body()
-    with pytest.raises(RuntimeError, match="Backend Store failed"), store.writable(runtime):
+    with pytest.raises(RuntimeError, match="Backend Store failed"), store._writable(runtime):
         commit_id = commit(store, payload, payload)
-        typed_commit = api._backend_commit_record(store, store.http_record(commit_id))
-        store.append_authoritative_record(outcome_for_commit(typed_commit))
+        result = store._validate_commit(commit_id)
+        store._append_authoritative_record(outcome_for_commit(store, result.attempt.commit_record))
+        later_id = commit(store, payload, payload)
         with pytest.raises(ReplayInputMissing, match="Validation must precede"):
-            store.validate_commit(commit_id)
-    with duckdb.connect(str(store.detour_db_path), read_only=True) as connection:
+            store._validate_commit(later_id)
+    with duckdb.connect(str(store._detour_db_path), read_only=True) as connection:
         assert connection.execute(
-            "SELECT count(*) FROM information_schema.tables WHERE table_name = ?",
-            [api.CODEX_INNERDICT_TABLE],
-        ).fetchone() == (0,)
+            f"SELECT count(*) FROM {api.CODEX_INNERDICT_TABLE}"
+        ).fetchone() == (1,)
 
 
 def test_durable_validation_allows_410_before_outcome_and_ipc_waits_for_http_send(
-    runtime: AiAugmentBackendContext, monkeypatch: pytest.MonkeyPatch,
+    backend_store: AiAugmentBackendStore,
+    runtime: AiAugmentBackendContext,
+    monkeypatch: pytest.MonkeyPatch,
+    threaded_loop: asyncio.Runner,
 ) -> None:
-    store = runtime.pipeline_config.backend_store
+    store = backend_store
     monkeypatch.setattr(api, "BACKEND_LIFECYCLE", BackendLifecycle.READY)
-    monkeypatch.setattr(api, "BACKEND_ATTEMPT_RECORD", None)
+    monkeypatch.setattr(api, "BACKEND_PUSH_RESPONSE_RECORD", None)
     monkeypatch.setattr(api, "AUTHORITATIVE_BACKGROUND_TASKS", set())
     payload = valid_submission_body()
-    with store.writable(runtime):
+    with store._writable(runtime):
         commit_id = commit(store, payload, payload)
-        result = store.validate_commit(commit_id)
+        result = store._validate_commit(commit_id)
         assert result.validation_record is not None
         assert str(result.validation_record.record_id).encode() in (
             Path(store._replay_log).read_bytes()
         )
-        api._apply_attempt_record(result)
+        api.update_pull_state(PushResponseRecord(
+            **result.attempt.commit_record.commit_request_body.push_record.model_dump(),
+            commit_record=result.attempt.commit_record,
+            validation_record=result.validation_record,
+        ))
         assert api.BACKEND_LIFECYCLE is BackendLifecycle.COMPLETED
-        interim = store.query(runtime, QueryRequest())
+        interim = store._query_snapshot()
         assert not interim.ai_augment_singular_outerdicts[0].committed_innerdicts
-        outcome = outcome_for_commit(result.attempt.commit_record)
+        outcome = outcome_for_commit(store, result.attempt.commit_record)
 
         async def exercise() -> None:
             app = FastAPI()
@@ -742,12 +848,9 @@ def test_durable_validation_allows_410_before_outcome_and_ipc_waits_for_http_sen
             app.state.runtime = runtime
             app.state.request_gate = gate
 
-            # Invoke the real handler without an unrelated worker-thread/self-pipe boundary.
-            @app.get("/pull")
-            async def pull(request: Request) -> Response:
-                return api.authoritative_pull(request)
+            app.state.store = store
+            app.get("/pull")(server.pull)
 
-            app.add_middleware(api._AuthoritativeHttpMiddleware)
             app.add_middleware(server._BackendRequestMiddleware)
             sending = asyncio.Event()
             finish_send = asyncio.Event()
@@ -775,7 +878,7 @@ def test_durable_validation_allows_410_before_outcome_and_ipc_waits_for_http_sen
 
             async def ipc_outcome() -> None:
                 async with gate.ipc():
-                    outcomes.append(store.append_authoritative_record(outcome))
+                    outcomes.append(store._append_authoritative_record(outcome))
 
             ipc_task = asyncio.create_task(ipc_outcome())
             await asyncio.sleep(0)
@@ -784,7 +887,7 @@ def test_durable_validation_allows_410_before_outcome_and_ipc_waits_for_http_sen
             await asyncio.gather(http, ipc_task)
             assert len(outcomes) == 1
 
-        asyncio.run(asyncio.wait_for(exercise(), timeout=10))
+        threaded_loop.run(asyncio.wait_for(exercise(), timeout=10))
         records = [
             record for record, _ in api._authoritative_log_records(
                 Path(store._replay_log).read_bytes()
@@ -798,6 +901,6 @@ def test_durable_validation_allows_410_before_outcome_and_ipc_waits_for_http_sen
             ids.index(result.validation_record.record_id)
             < ids.index(gone.record_id) < ids.index(outcome.record_id)
         )
-        query = store.query(runtime, QueryRequest())
+        query = store._query_snapshot()
         assert len(query.ai_augment_singular_outerdicts[0].committed_innerdicts) == 1
         DashboardQuerySnapshot(query_response=query)

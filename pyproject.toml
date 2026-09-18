@@ -506,16 +506,82 @@ exit "$status"
 '
 """
 elevate = """
-bash -c 'LOG_PATH="$PIXI_PROJECT_ROOT/logs/from_operator/elevate.log"
-export PLAYWRIGHT_BROWSERS_PATH="$HOME/.cache/ms-playwright"
-export LD_LIBRARY_PATH="$CONDA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-script -q -e -c '"'"'task_status=0
-"$CONDA_PREFIX/bin/python" -m playwright install --only-shell chromium || task_status=1
-"$CONDA_PREFIX/bin/python" -m pytest -vv -srA --durations=0 --playwright-chromium \\
-  src/detours/detour_ai_augment/tests/control_centre/test_ui_e2e.py::test_completed_grid_row_uses_real_query_ipc \\
+bash -c '
+set -o pipefail
+if [ "$(uname -s)" != Darwin ]; then
+  echo "elevate requires the macOS production host; aicode checks are dispatched automatically." >&2
+  exit 2
+fi
+LOG_PATH="$PIXI_PROJECT_ROOT/logs/from_operator/elevate.log"
+(
+task_status=0
+echo "[elevate] macOS host: real Google Chrome Dashboard tests; no live Codex"
+"$CONDA_PREFIX/bin/python" -m pytest -vv -srA --durations=10 \\
+  src/detours/detour_ai_augment/tests/control_centre/test_ui_e2e.py \\
   || task_status=1
+
+echo "[elevate] macOS host: exact Dashboard SSH busy probe; 15-second diagnostic bound"
+"$CONDA_PREFIX/bin/python" - <<"PY" || task_status=1
+import os
+import signal
+import subprocess
+import sys
+import time
+
+from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helpers.vars import (
+    AIVM_SSH_CONNECTION_COMMAND,
+    AIVM_SSH_TARGET,
+    CODEX_REMOTE_BUSY_COMMAND,
+)
+
+command = [
+    AIVM_SSH_CONNECTION_COMMAND[0], "-v",
+    *AIVM_SSH_CONNECTION_COMMAND[1:],
+    AIVM_SSH_TARGET, CODEX_REMOTE_BUSY_COMMAND,
+]
+started = time.monotonic()
+with subprocess.Popen(
+    command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    text=True, start_new_session=True,
+) as process:
+    timed_out = False
+    try:
+        stdout, stderr = process.communicate(timeout=15)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        stdout, stderr = process.communicate()
+    print(f"[elevate] SSH timeout={timed_out}; exit={process.returncode}; "
+          f"elapsed={time.monotonic() - started:.2f}s; stdout={stdout!r}", flush=True)
+    print(stderr, flush=True)
+    sys.exit(124 if timed_out else process.returncode)
+PY
+
+echo "[elevate] aicode guest: interpreter traversal and real nobody watcher --help; sudo may prompt"
+guest_check=$(cat <<"GUEST"
+case "$(uname -s)/$(uname -m)" in
+  Linux/aarch64|Linux/arm64) ;;
+  *) echo "elevate guest check requires Linux ARM64 in aicode" >&2; exit 2 ;;
+esac
+export PATH="$HOME/.pixi/bin:$PATH"
+sudo -v || exit 1
+pixi run -e detour-ai-augment env bash <<"CHECK"
+namei -l "$CONDA_PREFIX/bin/python" || exit 1
+sudo -n setpriv --reuid=nobody --regid="$(id -g nobody)" --clear-groups \\
+  "$CONDA_PREFIX/bin/python" -B \\
+  "$PIXI_PROJECT_ROOT/src/detours/detour_ai_augment/protected/src/control_centre/appendwatch/appendwatch.py" \\
+  --help
+CHECK
+GUEST
+)
+limactl shell --workdir="$PIXI_PROJECT_ROOT" aicode \\
+  script -q -e -c "$guest_check" /dev/null || task_status=1
+echo "[elevate] combined diagnostic status: $task_status"
 exit "$task_status"
-'"'"' "$LOG_PATH"
+) 2>&1 | tee "$LOG_PATH"
 task_status=$?
 grep -n -- "FAILED" "$LOG_PATH"
 grep_status=$?

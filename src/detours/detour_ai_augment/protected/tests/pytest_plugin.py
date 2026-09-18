@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import os
@@ -8,6 +9,7 @@ import sys
 import tempfile
 import textwrap
 from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Protocol
 
@@ -512,14 +514,27 @@ def backend_startup_process() -> None:
             args.config, require_namekey=not args.ipc_only,
             verify_hash_on_init=not args.danger_no_verify_hash,
         )
-        store = runtime.pipeline_config.backend_store
+        from src.detours.detour_ai_augment.src.backend.helpers.data_models import (
+            ai_augment_backend_store as store_models,
+        )
+
         boundary = (
-            store.read_only() if args.ipc_only else server.backend_store_lifecycle(
-                runtime, new=args.new, confirmed=confirmed, yes=args.yes,
+            store_models.initialize_backend_store(runtime, ipc_only=True)
+            if args.ipc_only
+            else server.backend_store_lifecycle(
+                runtime,
+                new=args.new,
+                confirmed=confirmed,
+                yes=args.yes,
             )
         )
-        with boundary:
-            rows = store.execute("SELECT count(*) FROM detour_http_records").fetchone()
+        with boundary as capability:
+            store = (
+                capability._engine
+                if isinstance(capability, store_models.AiAugmentQueryBackendStore)
+                else capability
+            )
+            rows = store._execute("SELECT count(*) FROM detour_http_records").fetchone()
             assert rows is not None
             print("STARTUP_READY", rows[0], len(runtime.ai_augment_singular_outerdicts))
     finally:
@@ -530,23 +545,38 @@ def operator_fixture_bootstrap_process() -> None:
     import sys
     from pathlib import Path
 
+    import requests
+
     from src.detours.detour_ai_augment.protected.src.backend import ipc
     from src.detours.detour_ai_augment.protected.tests.operator import test_operator_e2e as workflow
+    from src.detours.detour_ai_augment.protected.tests.pytest_plugin import threaded_loop_runner
     from src.detours.detour_ai_augment.src.backend import server
-    from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models import (
-        query_request,
+    from src.detours.detour_ai_augment.src.backend.helpers.data_models import (
+        ai_augment_backend_store as store_models,
     )
-    QueryRequest = query_request.QueryRequest
+    from src.detours.detour_ai_augment.src.backend.helpers.data_models.query_response import (
+        QueryResponse,
+    )
+
     root, isolated = map(Path, sys.argv[1:])
     assert not list(isolated.iterdir())
     runtime = workflow._operator_runtime(
         isolated, repository_root=root, dashboard_socket_path=isolated / "ipc.sock",
     )
-    assert runtime.backend_store.detour_db_path.is_file()
+    assert runtime.backend_store._detour_db_path.is_file()
     context = server.configure_runtime(runtime.config_path, require_namekey=False)
-    store = context.pipeline_config.backend_store
-    with store.read_only():
-        response = ipc.handle_query_request(context, QueryRequest())
+    with (
+        store_models.initialize_backend_store(context, ipc_only=True) as store,
+        threaded_loop_runner() as runner,
+    ):
+        response = QueryResponse.from_serialized_json(
+            runner.run(
+                ipc.handle_query_request(
+                    store,
+                    requests.Request("GET", "http://invalid/query").prepare(),
+                )
+            ).content
+        )
         assert len(response.ai_augment_singular_outerdicts) == 307
         assert response.attempts == () and response.run_outcome_records == ()
     assert runtime.replay_log_path.read_bytes() == b""
@@ -557,12 +587,12 @@ def operator_fixture_bootstrap_process() -> None:
 def completed_query_fixture_process() -> None:
     """Seed real Store history and a deliberately stale, private Dashboard snapshot."""
     print("Completed-query fixture: importing dependencies", flush=True)
-    import asyncio
     import hashlib
     import json
     import os
     import sys
     import time
+    from http import HTTPStatus
     from pathlib import Path, PurePosixPath
     from uuid import UUID, uuid7
 
@@ -573,6 +603,7 @@ def completed_query_fixture_process() -> None:
         DOCX_COLUMNS,
         REPLAY_LOG_KEY,
     )
+    from src.detours.detour_ai_augment.protected.tests.pytest_plugin import threaded_loop_runner
     from src.detours.detour_ai_augment.src.backend import api, server
     from src.detours.detour_ai_augment.src.backend.helpers.data_models.commit_event import (
         SOURCE_KEY_HEADER,
@@ -589,9 +620,6 @@ def completed_query_fixture_process() -> None:
     )
     from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.ai_augment_dashboard_storage import (  # noqa: E501
         AiAugmentDashboardStorage,
-    )
-    from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.query_request import (  # noqa: E501
-        QueryRequest,
     )
     from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.run_event import (  # noqa: E501
         RunEvent,
@@ -653,31 +681,42 @@ def completed_query_fixture_process() -> None:
         source.chmod(0o400)
     runtime = server.configure_runtime(config_path, require_namekey=False)
     print("Completed-query fixture: runtime ready", flush=True)
-    store = runtime.pipeline_config.backend_store
     payload = valid_submission_body()
     rollout_bytes = operator_capture_rollout(payload)
     digest = hashlib.sha256(rollout_bytes).hexdigest()
-    store.rollout_cas.initialize()
-    blob = store.rollout_cas.path / digest[:2] / digest[2:4] / digest
+    runtime.pipeline_config.rollout_cas.initialize()
+    blob = runtime.pipeline_config.rollout_cas.path / digest[:2] / digest[2:4] / digest
     blob.parent.mkdir(parents=True, exist_ok=True)
     blob.write_bytes(rollout_bytes)
     session_id = UUID(OPERATOR_CAPTURED_SESSION_ID)
     relative = PurePosixPath(f"2026/09/03/rollout-2026-09-03T15-16-00-{session_id}.jsonl")
-    with store.writable(runtime):
-        stale = store.query(runtime, QueryRequest())
-        pull = store.append_authoritative_record(persisted_http_record(
-            record_id=uuid7(), method="GET", path="/pull", response_code=200,
-        ).model_copy(update={
-            "response_headers": {"content-type": api.MEDIA_TYPE},
-            "response_body": api.json_line({
-                KTP_FIRST_NAME_COL: STARTUP_NAMEKEY.first_name,
-                KTP_LAST_NAME_COL: STARTUP_NAMEKEY.last_name,
-            }),
-        }))
-        push = store.append_authoritative_record(persisted_http_record(
-            record_id=uuid7(), method="POST", path="/push", response_code=202,
-            request_body=json.dumps(payload),
-        ))
+    with server.backend_store_lifecycle(runtime, new=False, confirmed=True, yes=True) as store:
+        stale = store._query_snapshot()
+        pull = store._append_authoritative_record(
+            persisted_http_record(
+                record_id=uuid7(),
+                method="GET",
+                path="/pull",
+                response_code=200,
+            ).model_copy(
+                update={
+                    "response_headers": {"content-type": api.MEDIA_TYPE},
+                    "response_body": api.json_line({
+                        KTP_FIRST_NAME_COL: STARTUP_NAMEKEY.first_name,
+                        KTP_LAST_NAME_COL: STARTUP_NAMEKEY.last_name,
+                    }),
+                }
+            )
+        )
+        push = store._append_authoritative_record(
+            persisted_http_record(
+                record_id=uuid7(),
+                method="POST",
+                path="/push",
+                response_code=202,
+                request_body=json.dumps(payload),
+            )
+        )
         draft = api._synthetic_commit_record(
             pull_record=pull, push_record=push, session_id=session_id,
             rollout=CodexRolloutRecord(
@@ -687,10 +726,11 @@ def completed_query_fixture_process() -> None:
             appendwatch_report=report_for_rollout(relative).encode(),
             namekey=STARTUP_NAMEKEY,
         )
-        commit = store.append_authoritative_record(draft)
+        commit = store._append_authoritative_record(draft)
         print("Completed-query fixture: validating synthetic commit", flush=True)
-        validated = store.validate_commit(commit.record_id)
+        validated = store._validate_commit(commit.record_id)
         assert validated.attempt.post_commit_validation.result is BackendLifecycle.ACCEPTED
+        assert validated.validation_record is not None
         assert validated.http_records == ()  # Plain initial submission needs no provider requests.
         occurred_at = commit.record_id.time * 1000
         request = RunOutcomeRequest.from_http_request(
@@ -701,16 +741,21 @@ def completed_query_fixture_process() -> None:
             request_body=b"",
         )
         outcome = RunOutcomeRecord.from_run_outcome_request(
-            request, response_code=200,
+            request,
+            response_code=HTTPStatus.OK,
             response_headers={SOURCE_KEY_HEADER: draft.request_headers[SOURCE_KEY_HEADER]},
             response_body=RunOutcomeResponseBody(
-                pull_record_id=pull.record_id, push_record_id=push.record_id,
+                pull_record_id=pull.record_id,
+                push_record_id=push.record_id,
+                commit_record_id=commit.record_id,
+                validation_record_id=validated.validation_record.record_id,
+                run_outcome_record_id=request.http_request_log_record.record_id,
                 codex_session_record=draft.commit_request_body.codex_session_record,
             ),
             ready_to_respond_at_unix_usec=occurred_at + 7,
         )
-        store.append_authoritative_record(outcome.http_request_log_record)
-        fresh = store.query(runtime, QueryRequest())
+        store._append_authoritative_record(outcome.http_request_log_record)
+        fresh = store._query_snapshot()
         assert len(fresh.attempts) == len(fresh.run_outcome_records) == 1
 
     # A fresh Dashboard/IPC startup verifies the new fixture log through normal config mechanics.
@@ -744,7 +789,7 @@ def completed_query_fixture_process() -> None:
     # Exercise real filtering before asking a browser to render it; no services are started.
     selection = ui._UiSelection(researcher_varname=ui.RESEARCHER_VARS[0].varname)
     started = time.monotonic()
-    with asyncio.Runner() as runner:
+    with threaded_loop_runner() as runner:
         unfiltered = runner.run(services.controller.snapshot(selection=selection))
         assert len(unfiltered.researcher_var_views) == len(stale.ai_augment_singular_outerdicts)
         selection.search_text = STARTUP_NAMEKEY.to_json_key()
@@ -1069,3 +1114,23 @@ def operator_aivm(
             repository_root=repository_root,
         )
     _operator_log("operator AIVM preflight completed")
+
+
+@contextmanager
+def threaded_loop_runner() -> Iterator[asyncio.Runner]:
+    # Drive cross-thread callbacks even on hosts without self-pipe wakeups, including
+    # Runner's executor cleanup. This does not substitute the gate/bridge/thread offload.
+    with asyncio.Runner() as runner:
+        loop = runner.get_loop()
+
+        def tick() -> None:
+            loop.call_later(0.01, tick)
+
+        loop.call_soon(tick)
+        yield runner
+
+
+@pytest.fixture
+def threaded_loop() -> Iterator[asyncio.Runner]:
+    with threaded_loop_runner() as runner:
+        yield runner
