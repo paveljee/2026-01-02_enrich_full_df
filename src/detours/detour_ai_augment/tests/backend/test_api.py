@@ -127,8 +127,8 @@ from src.detours.detour_ai_augment.src.backend.helpers.data_models.query_respons
     AgentRuntimeAttemptRecord,
     QueryResponse,
 )
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.run_outcome_response import (
-    RunOutcomeResponse,
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.run_outcome_record import (
+    RunOutcomeRecord,
     RunOutcomeResponseBody,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.validation_event import (  # noqa: E501
@@ -1800,6 +1800,19 @@ def assert_captured_operator_push_contour(
             and record.response_code == status.HTTP_200_OK
         )
 
+        assert not ipc.handle_query_request(
+            runtime, QueryRequest(),
+        ).ai_augment_singular_outerdicts[0].committed_innerdicts
+        from src.detours.detour_ai_augment.tests.backend.test_http_interceptor import (
+            outcome_for_commit,
+        )
+
+        runtime.pipeline_config.backend_store.append_authoritative_record(
+            outcome_for_commit(api._backend_commit_record(
+                runtime.pipeline_config.backend_store, commits[-1],
+            )),
+        )
+
         query = ipc.handle_query_request(
             runtime,
             QueryRequest(),
@@ -2537,7 +2550,7 @@ def test_run_outcome_http_exchange_is_logged_and_replays_as_raw_history(
     assert len(appended) == 1
     record = appended[0]
     assert record == response_record.http_request_log_record
-    validated = RunOutcomeResponse.from_http_request_log_record(record)
+    validated = RunOutcomeRecord.from_http_request_log_record(record)
     assert validated.run_outcome_response_body == snapshot
     assert record.record_id.version == 7
     assert record.path == path
@@ -5480,6 +5493,7 @@ def test_repeated_researcher_rows_materialize_as_distinct_innerdicts() -> None:
 
         api.append_codex_output(store_for_connection(connection), output_row(100, "attempt-1"))
         api.append_codex_output(store_for_connection(connection), output_row(101, "attempt-2"))
+        api._replace_codex_output_view(store_for_connection(connection))
         innerdicts_row = connection.execute(
             f"SELECT {duckdb_quote_identifier(KTP_INNERDICT_JSONLINES_COL)} "
             f"FROM {api.CODEX_INNERDICT_TABLE}"

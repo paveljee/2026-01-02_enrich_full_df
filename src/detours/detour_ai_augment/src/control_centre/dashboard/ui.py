@@ -134,8 +134,8 @@ from ...backend.helpers.data_models.query_response import (
     AgentRuntimeAttemptRecord,
     QueryResponse,
 )
-from ...backend.helpers.data_models.run_outcome_response import (
-    RunOutcomeResponse,
+from ...backend.helpers.data_models.run_outcome_record import (
+    RunOutcomeRecord,
     RunOutcomeResponseBody,
 )
 from ...backend.server import (
@@ -463,7 +463,7 @@ class _RunCommitView(FrozenStrictModel):
     attempt_record: AgentRuntimeAttemptRecord | None
     run: Run | None
     accepted: CommittedInnerDict | None
-    run_outcome_response: RunOutcomeResponse | None
+    run_outcome_record: RunOutcomeRecord | None
 
     @model_validator(mode="after")
     def validate_run_or_commit(self) -> Self:
@@ -533,13 +533,13 @@ class _RunCommitView(FrozenStrictModel):
 
     @property
     def run_outcome_saved(self) -> bool | None:
-        if self.run_outcome_response is None:
+        if self.run_outcome_record is None:
             return None
-        return self.run_outcome_response.response_code == status.HTTP_200_OK
+        return self.run_outcome_record.response_code == status.HTTP_200_OK
 
     @property
     def run_outcome_session_status(self) -> str | None:
-        response = self.run_outcome_response
+        response = self.run_outcome_record
         if response is None:
             return None
         session = response.run_outcome_response_body.codex_session_record
@@ -712,7 +712,7 @@ class _ResearcherView(FrozenStrictModel):
                 attempt_record=record,
                 run=matched_run,
                 accepted=snapshot.committed_by_id.get(commit.record_id),
-                run_outcome_response=(
+                run_outcome_record=(
                     None if session_id is None
                     else snapshot.outcomes_by_session.get((namekey, session_id))
                 ),
@@ -723,7 +723,7 @@ class _ResearcherView(FrozenStrictModel):
                     attempt_record=None,
                     run=run,
                     accepted=None,
-                    run_outcome_response=(
+                    run_outcome_record=(
                         None if run.session_id is None
                         else snapshot.outcomes_by_session.get((namekey, run.session_id))
                     ),
@@ -1045,8 +1045,9 @@ class _BackendDatabaseClient:
             connection.close()
 
     def card(self, researcher: _Researcher) -> str:
+        selected = selected_card_outer_dict(researcher)
         cards = build_cards(
-            selected_card_outer_dict(researcher),
+            selected,
             total_draws=self._pipeline_config.total_draws,
             intro=CARD_INTRODUCTION.format(
                 datetime.now(ZoneInfo(self._pipeline_config.timezone)).strftime(
@@ -2236,7 +2237,8 @@ class _ControlCentreController:
         *,
         namekey: NameKey,
     ) -> _ResearcherCardView:
-        researcher = self._researchers_by_namekey.get(namekey.to_json_key())
+        snapshot = self._snapshot
+        researcher = snapshot.researchers_by_namekey.get(namekey.to_json_key())
         if researcher is None:
             raise KeyError(Locale.UNKNOWN_NAMEKEY_TEMPLATE.format(namekey=namekey))
         markdown = await asyncio.to_thread(self._render_card, researcher)

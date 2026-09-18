@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Final, Literal, Self, cast
+from typing import Any, Final, Literal, Protocol, Self, cast
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 from uuid import UUID, uuid7
 
@@ -18,6 +18,7 @@ from pydantic import (
 )
 from pydantic_core import InitErrorDetails
 
+from src.helpers.architecture import implements
 from src.helpers.vars import (
     KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION,
     KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
@@ -37,14 +38,96 @@ HttpRequestLogSchemaVersionV1 = Literal[1, "1"]
 HttpRequestLogSchemaVersion = Literal[1, "1", "1.1"]
 
 
+class HttpRequestLogRecordProtocol(Protocol):
+    """The v1.1 record fields and existing response-conversion interface.
+
+    The shared model also accepts legacy v1, reflected by its schema-version type.
+    Excluded coercion input and Pydantic implementation hooks are not record fields.
+    """
+
+    @property
+    def schema_version(self) -> HttpRequestLogSchemaVersion: ...
+
+    @property
+    def record_id(self) -> UUID: ...
+
+    @property
+    def method(self) -> str: ...
+
+    @property
+    def scheme(self) -> str: ...
+
+    @property
+    def host(self) -> str: ...
+
+    @property
+    def port(self) -> int | None: ...
+
+    @property
+    def ready_to_respond_at_unix_usec(self) -> int | None: ...
+
+    @property
+    def path(self) -> str: ...
+
+    @property
+    def query(self) -> str: ...
+
+    @property
+    def request_headers(self) -> dict[str, str]: ...
+
+    @property
+    def request_body(self) -> str | None: ...
+
+    @property
+    def response_code(self) -> int | None: ...
+
+    @property
+    def response_headers(self) -> dict[str, str] | None: ...
+
+    @property
+    def response_body(self) -> str | None: ...
+
+    @property
+    def received_at_unix_usec(self) -> int | None: ...
+
+    @property
+    def duration_usec(self) -> int | None: ...
+
+    @classmethod
+    def from_response(
+        cls,
+        response: requests.Response,
+        *,
+        received_at_unix_usec: int | None = None,
+        ready_to_respond_at_unix_usec: int | None = None,
+        duration_usec: int | None = None,
+    ) -> Self: ...
+
+    def to_response(self) -> requests.Response: ...
+
+
 def _is_http_request_log_schema_version_1(value: object) -> bool:
     return value == KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION or (
         isinstance(value, int) and not isinstance(value, bool) and value == 1
     )
 
 
+@implements[HttpRequestLogRecordProtocol]()
 class HttpRequestLogRecord(BaseModel):
-    """JSONL record for cached HTTP requests made by pipeline helpers."""
+    """JSONL record for cached HTTP requests made by pipeline helpers.
+
+    Current provider uses expect JSON: OpenAlex /authors, /works,
+    /institutions/{id}, and ROR /v2/organizations/{id}. Local recorded routes
+    are /pull, /push, synthetic /commit and /validate, and /completed, /failed,
+    /cancelled. These use JSON or empty bodies, except /pull also returns UTF-8
+    NDJSON or Markdown; /push specifies application/json for its request body.
+
+    These text-based uses retain v1.1: capture uses Response.text and replay
+    reconstructs UTF-8, not original bytes. Review every new endpoint's body
+    format and encoding case by case before using this class. A future v2 should
+    explicitly serialize raw body bytes (including Response.content) without
+    character decoding; v1/v1.1 text-body contracts remain unchanged.
+    """
 
     model_config = ConfigDict(extra="forbid", strict=True)
 

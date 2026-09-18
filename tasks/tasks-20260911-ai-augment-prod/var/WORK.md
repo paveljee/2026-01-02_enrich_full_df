@@ -2,6 +2,511 @@
 
 ## Status and authorization
 
+Latest implemented P24 authorization (2026-09-18): operator ran `git restore .` and authorized ONLY
+reimplementation of P24's exact surgical shape. Staged P20/P21/P22/P23 remain; discarded
+P24 implementation/checks are NOT evidence for this retry. P24 is now IMPLEMENTED
+and locally verified with fresh evidence below.
+No compatibility audit, removal of current defaults, stricter DTO/card parsing, schema
+special cases or unrelated corrections are part of this retry. Preserve staged changes.
+P22 is historical, superseded by P24's persisted-ID/pure-renderer contour.
+P20/P21/P23 remain implemented; production acceptance remains separate.
+
+### Current discussion — Store/transport boundary and grouped processing (not implemented)
+
+Operator is refining a proposal; no exact new implementation/snippets are approved.
+Current P24 remains implemented below: per-record DB transactions, outcome-triggered
+materialization, and one undifferentiated IPC gate. Only WORK changed during this review.
+
+Latest clarified responsibilities:
+- server.py owns actual transports, configuration/resource/process lifecycle, and HTTP/IPC
+  exclusion. API/IPC transport adapters exchange Requests-library request/response objects
+  with server.py, used as in-process objects, not internal network calls.
+- api.py/ipc.py construct app-specific RequestRecords from raw requests and necessary
+  external inputs; talk to Store ONLY in RequestRecord/ResponseRecord objects. These are
+  application operations/results, NOT aliases for HTTP request/response messages. Domain
+  persistence/validation/projection/response-result formulation remains opaque to adapters.
+- Full Store exposes exactly four public request operations: pull, push, run_outcome, query.
+  No public execute/append/validate/materialize/readback/locking escape hatches. Construction
+  and open/close remain lifecycle machinery rather than extra request operations.
+- IPC-only initialization exposes ONLY query. Operator proposes separate full/query-only
+  initialization behind an overloaded common initializer. Concrete design must enforce the
+  capability boundary: overloading __init__ alone cannot hide methods on the same class.
+- BackendComponent gains RequestRecordProperty/ResponseRecordProperty bases using the
+  shared HTTP-record protocol, plus corresponding route-specific protocols/concrete records.
+  Pull request adds no properties; pull response adds pull_response_body. Push response
+  exposes commit_record/validation_record (absent when not produced). Outcome/query have
+  corresponding typed records/bodies. No implicit duplicated serialization/wire changes.
+
+Push TIMING remains current client-facing behavior: api.py dispatches PushRequestRecord
+into Store and returns HTTP202 once accepted, without waiting for final validation. Store's
+later PushResponseRecord carries the processing result; api.py uses it to update pull
+contents. The earlier interpretation that HTTP202 must wait for final validation is
+SUPERSEDED. API owns this asynchronous adaptation, not persistence/domain reimplementation.
+Preserve durable push acceptance before202. Operator now proposes Store returning an
+acknowledgement once the push exchange is durably appended/fsynced, together with an
+awaitable final PushResponseRecord. API can immediately return202 from that acknowledgement
+and separately await completion before publishing the new pull contents. Proposed acceptance
+receipt identifies the persisted push exchange; it does not claim commit/validation or the
+grouped DB transaction has finished. Append/fsync failure means no successful acknowledgement.
+Store owns completion work; HTTP-client disconnect/API-waiter cancellation must not cancel
+it. Server must register pending processing before202 and release it only after completion
+and pull-state publication (or the existing explicit failure path); shutdown awaits it.
+Latest operator clarification resolves the read-only query conflict and supersedes the
+previous NAY-always-failure / completion-raises proposal:
+- Name: ResponseRecordPromise. Synchronous gate is BackendStoreAcknowledgment, an enum
+  containing ONLY ACK and NAY (no admission decision wrapper/third state).
+- ACK: supplied request record was persisted in HttpRequestLogRecord form and fsynced in
+  replay log. Does not assert final DB commit, validation success or HTTP status.
+- NAY: request record was NOT successfully persisted. This is either a persistence failure
+  for pull/push, or EXPECTED endpoint policy for both IPC operations. It is not intrinsically
+  an error, nor a guarantee that failed append/fsync left zero bytes in the file.
+- Pull/push expect ACK. Their NAY yields an already-resolved (None, BackendStoreException),
+  which API retrieves and raises; no successful response/early202 on that failure.
+- Query/run_outcome EXPECT NAY: neither appends a separate request record. Query never
+  persists anything. Run outcome constructs and durably persists/replays/projects its
+  RESPONSE record (the HTTP exchange includes its request fields), not an initial request
+  append. Unexpected ACK in IPC is a contract error.
+- ResponseRecordPromiseResult is the named awaited result, EXACTLY one of (ResponseRecord, None) or
+  (None, BackendStoreException). Never both values or both None. Normal Store processing
+  failures are represented by this tuple, rather than raised from the completion awaitable.
+  API/IPC raise the returned exception. BackendStoreException is a real exception conforming
+  to new BackendComponent.StoreExceptionProperty; exact protocol members remain to specify.
+- ACK followed by a completion error remains ACK plus (None, exc): no retroactive gate
+  change. Successful IPC is NAY plus (response_record, None). Thus a run-outcome409 has
+  NAY (no request-only append) and a successful response tuple AFTER its response exchange
+  is durably persisted/projected. HTTP409 does not imply a Store exception or failed fsync.
+
+ResponseRecordPromise's task state stays private and unserialized. Store owns processing;
+client cancellation must not cancel it. Full mode retains four methods; IPC-only exposes
+query only. API registers pending work before202 and releases it only after the awaited
+result is handled and pull state published (or existing failure handling). For push, a later
+error is raised in the tracked completion task; it cannot replace an already-sent202.
+ACK is a durability fact, not a replacement for existing HTTP acceptance/status decisions.
+Synchronous gate follows required I/O without blocking ASGI's event loop. No public
+Store finish/poll operation, third acknowledgment value, query writes or recovery contour.
+The clarification question is answered by this explicit policy; no query decision pending.
+No new implementation/snippets have yet been approved for execution.
+
+Latest naming/docstring requirement, to include in the full proposed scope/snippets:
+ResponseRecordPromiseResult (not ResponseRecordResult); BackendStoreAcknowledgment
+(not RequestRecordAcknowledgment). The promise protocol docstring must explicitly state
+that acknowledgment concerns ONLY REQUEST persistence. Store performs RESPONSE persistence
+where the endpoint requires it before returning its completed response result; a response
+persistence failure must resolve the promise to (None, BackendStoreException), never a
+successful response. For asynchronous push, returning the promise handle is distinct from
+resolving its result; final response persistence cannot precede initial handle return if
+that response depends on ongoing work. The presentation must make that timing explicit.
+
+Operator requested recording the complete discussion before preparing a full contract,
+bounded surgical change scope and code snippets. This is proposal preparation, NOT approval
+to implement the structural changes. Preserve current staged P24/F8 and operator edits.
+
+IPC stays SINGLE-THREADED; no new concurrent IPC acceptance, priority queue or overtaking
+between outcome/query. They naturally serialize and clients may wait/time out. Operator
+explicitly superseded the earlier strict queued-outcome-over-query interpretation. Server
+withholds IPC while FastAPI work is processing. Concrete scope must cover post202 Store
+work and the subsequent pull-state publication, not just the HTTP coroutine lifetime.
+Operator explicitly agreed that IPC waits before Store processing, not only socket response
+emission; admission must prevent new HTTP work slipping through that gap. They also agreed
+that the processing interval includes the post202 Store work and pull-state publication,
+and that query-only construction must expose an actual narrowed capability, not rely on
+__init__ overload annotations alone.
+Client timeout does not cancel durable processing; no new timeout/retry/recovery policy.
+
+Store processing proposal retained:
+- Pull persists/replays/projects its exchange. Rejected push persists its exchange without
+  manufacturing commit/validation. Accepted push progressively records push, commit,
+  provider exchanges and validation, then completes their grouped DB projection transaction.
+  Provider append -> DB-readback -> model validation must remain valid within that grouping.
+- Outcome evaluates existing commit/validation through replay logic without inserting them
+  or duplicating effects, decides the requested outcome response, persists it (including409),
+  replays/projects it and materializes eligible innerdicts atomically before returning.
+  Response body includes commit ID, validation ID and its own outcome record ID.409 records
+  rejection, not successful finalization. Explicit replay rejects incomplete groups instead
+  of fabricating missing records. Requested completed/failed eligibility versus replayable
+  REJECTED validation, the existing final-pull503=>failed rule, and multiple commits per run
+  still need exact definition in the concrete scope.
+- Query remains read-only wholesale DB snapshot, including IPC-only: common record types
+  do NOT imply appending query exchanges. Preserve startup confirmations/hash verification,
+  Store DB/log ownership, no recovery, launcher independence and clean-close acknowledgement.
+
+No production/test/task changes made for this discussion, no tests needed/run. Do not
+silently implement a new transport/type/lifecycle design or revive unrelated scope.
+
+## Proposed next scope — four-operation Store contract (approval pending)
+
+Prepared only AFTER the preceding discussion/names were recorded. No production/test edits.
+This is a bounded structural change, not merely a server gate cleanup. Preserve P24's persisted
+IDs, pure card renderer, no recovery and common live/replay rules. Do not label this approved
+or implemented until the operator approves the concrete scope. It does not include the
+unrelated browser/root/pre-start operator findings.
+
+### Responsibility and persistence contract
+
+Server owns ASGI/WSGI transport conversion, lifecycle and admission. API/IPC helpers exchange
+Requests PreparedRequest/Response objects with server, app RequestRecord/ResponseRecordPromise
+objects with Store. Requests is used as an in-process representation, never internal HTTP.
+API retains existing transport/workflow response timing, including busy503, push409 and early202,
+and publishes final push results into pull state. It does not append/project/validate itself.
+Existing evidence/SQL algorithms may remain private helpers invoked by Store; no wholesale
+move of API algorithms into the Store module. Only Store owns DB/log operations/transactions.
+
+BackendStoreAcknowledgment has exactly ACK/NAY and refers ONLY to request persistence.
+ResponseRecordPromiseResult[R] is exactly (R, None) or (None, StoreExceptionProperty), with
+concrete BackendStoreException implementing that protocol. Result errors are raised by the
+adapter; they do not silently become HTTP409. Request persistence failure for API returns NAY
+plus an already-resolved error result. IPC always expects NAY. ACK followed by a later error
+remains ACK plus an error result. Invalid result tuples are contract failures, never fallbacks.
+
+| Operation | Gate | Operation/result boundary |
+|---|---|---|
+| pull | ACK after append/fsync; NAY on failure | project/read back exchange before result; preserve all existing HTTP statuses/bodies |
+| push | ACK after append/fsync; NAY on failure | accepted202 may be sent before processing finishes; final result follows grouped commit/validation projection |
+| run_outcome | NAY by policy | persist complete response exchange, including409, project/materialize eligible rows, then return successful result |
+| query | NAY by policy | read-only wholesale snapshot, no log or DB content writes |
+
+Record-format proposal: retain existing v1.1 COMPLETE pull/push HTTP exchange envelopes in
+log. The app RequestRecord can contain the already-selected public response (202/409/etc.)
+because it is an application input, not an alias for raw HTTP request. Do not introduce a
+second request-only pull/push log entry, repeated record UUIDs, mutation of old JSONL lines,
+or request/response pairing schema. Commit/validate retain their current synthetic shapes;
+outcome logs its full response exchange only; query logs nothing. This is explicitly part
+of the proposal, not a new compatibility contour. Early202 establishes log durability,
+NOT completion of grouped DB projection. Final result objects still come through Store
+projection/readback. Extra application model fields are excluded from HTTP-log serialization.
+
+Timing wording to make explicit in the promise protocol: Store performs required response
+persistence before returning a SUCCESSFUL completed promise result. The initial handle and
+its request gate are distinct from that final result. A response persistence failure yields
+(None, exc), never a usable response. For push its public202 exchange is already persisted
+at ACK; its added commit/validation properties become available only at completion. A literal
+requirement to finish all final application-response work before returning the initial handle
+would contradict early push acceptance; do not silently change that timing.
+
+### Proposed protocol and exception snippets
+
+Definitions below live in protected/src/architecture.py (existing component bases retained).
+The structural exception includes raise_exception so protocol-typed consumers can raise the
+real exception without casts or pretending a Protocol inherits Exception.
+
+```python
+class BackendStoreAcknowledgment(StrEnum):
+    ACK = "ack"
+    NAY = "nay"
+
+
+type ResponseRecordPromiseResult[R] = (
+    tuple[R, None]
+    | tuple[None, BackendComponent.StoreExceptionProperty]
+)
+
+# Nested under BackendComponent:
+class RequestRecordProperty(HttpRequestLogRecordProtocol, Protocol):
+    pass
+
+class ResponseRecordProperty(HttpRequestLogRecordProtocol, Protocol):
+    pass
+
+class StoreExceptionProperty(Protocol):
+    def raise_exception(self) -> NoReturn: ...
+
+class ResponseRecordPromiseProperty[
+    R: BackendComponent.ResponseRecordProperty,
+](Protocol):
+    """An initial request-persistence gate and an eventual application result.
+
+    ACK means the request record was appended and fsynced in the replay log.
+    NAY means it was not; IPC intentionally does not persist request records.
+    Neither value describes response persistence or application success.
+
+    Store performs response persistence where required before returning the
+    successful completed result. Response-persistence failure returns
+    (None, exc). Other results are exactly (response_record, None).
+    The promise handle can precede completion, notably for accepted pushes.
+    """
+    @property
+    def acknowledgment(self) -> BackendStoreAcknowledgment: ...
+
+    async def response_record(self) -> ResponseRecordPromiseResult[R]: ...
+```
+
+Concrete exception in the new response_record_promise.py helper:
+
+```python
+@implements[BackendComponent.StoreExceptionProperty]()
+class BackendStoreException(RuntimeError):
+    def raise_exception(self) -> NoReturn:
+        raise self
+```
+
+Preserve the original cause when converting internal exceptions; log detailed errors, retain
+existing fail-closed Store state, and never stringify away the cause or retry. The concrete
+ResponseRecordPromise is a FrozenStrictModel: acknowledgment is its public field, task/result
+state is PrivateAttr. Awaiters shield the Store-owned completion. No arbitrary_types_allowed,
+new executor service, cast, type suppression or serialized Task/Future. Reuse existing thread
+offload and tracked background work; no threaded IPC. Keep completion tracked through pull
+publication and shutdown, including client disconnect and failed response sends.
+
+### Route-specific records and Store surface
+
+Add route-specific RequestRecordProperty/ResponseRecordProperty protocols under BackendComponent.
+Their common base is the corresponding HTTP-record protocol. Concrete pull/push/query records
+inherit HttpRequestLogRecord; reuse existing RunOutcomeRecord as the outcome response model,
+adding conformance rather than undoing P21's naming. Keep outbound Dashboard QueryRequest and
+RunOutcomeRequest as existing client-facing types; add server-side record adapters, not duplicate
+client protocols. Existing QueryResponse remains the wholesale response BODY, not the envelope.
+
+Representative concrete shapes (constructors/validators preserve current wire fields):
+
+```python
+class PullRequestRecord(HttpRequestLogRecord):
+    pass
+
+class PullResponseRecord(HttpRequestLogRecord):
+    @property
+    def pull_response_body(self) -> str:
+        if self.response_body is None:
+            raise ValueError("Pull response body is missing")
+        return self.response_body
+
+class PushResponseRecord(HttpRequestLogRecord):
+    commit_record: BackendCommitRecord | None = Field(exclude=True)
+    validation_record: BackendValidationRecord | None = Field(exclude=True)
+```
+
+Use existing @implements decorators and record validators; both extra push fields are explicit
+at construction, not old-data fallbacks. Nonaccepted pushes have neither; accepted pushes return
+matching typed records after completion. Preserve external session/pull linkage on PushRequestRecord
+and captured outcome inputs on its server-side request model as excluded typed fields. API/IPC
+helpers assemble/capture those external inputs at their existing lifecycle points; do not delay202
+for rollout capture or duplicate that I/O. Store orchestrates the existing capture helpers when
+processing needs them. QueryResponseRecord exposes typed query_response_body. No raw DB handle
+or transport object in serialized records. Preserve intentional nullable outcome headers when
+converting to Requests responses; do not change the shared v1/v1.1 converter or add old-schema code.
+
+Public surface, abbreviated concrete names:
+
+```python
+class QueryOnlyStoreProperty(Protocol):
+    def query(self, request: QueryRequestRecord) -> ResponseRecordPromise[QueryResponseRecord]: ...
+
+class FullStoreProperty(QueryOnlyStoreProperty, Protocol):
+    def pull(self, request: PullRequestRecord) -> ResponseRecordPromise[PullResponseRecord]: ...
+    def push(self, request: PushRequestRecord) -> ResponseRecordPromise[PushResponseRecord]: ...
+    def run_outcome(self, request: RunOutcomeRequestRecord) -> ResponseRecordPromise[RunOutcomeRecord]: ...
+```
+
+The real architecture protocols use the corresponding component record/promise protocols.
+Private constructors/lifecycle/SQL/append/readback/validation/materialization helpers remain
+private; public Store operations are exactly these four. Query-only object actually has only
+query, not a cast or full object hidden solely behind a narrower annotation.
+
+Initialization overloads in the EXISTING Store module, preserving confirmation/hash/lock rules:
+
+```python
+@overload
+def initialize_backend_store(
+    runtime: AiAugmentBackendContext, *, ipc_only: Literal[True],
+) -> AbstractContextManager[AiAugmentQueryBackendStore]: ...
+
+@overload
+def initialize_backend_store(
+    runtime: AiAugmentBackendContext, *, ipc_only: Literal[False],
+    new: bool, confirmed: bool, confirm_replay: Callable[[], bool],
+) -> AbstractContextManager[AiAugmentBackendStore]: ...
+```
+
+One actual query-only wrapper, with its engine reference private, suffices; no hierarchy of
+services. Config still registers/verifies resources but no longer exposes a full Store instance
+before mode selection. Construct the owned Store at server lifecycle entry from those resources;
+pass only selected capability to adapters. This requires the local ai_augment_config.py field/
+construction removal and necessary runtime callpoint wiring. No JSON config/CLI change.
+IPC-only still ignores new/resume flags, does not initialize DB, append-preflight or promote hashes.
+Full new/resume/continue prompts, optional nonempty replay confirmation, permissions, process
+lock and clean-close acknowledgment stay unchanged. No public Store open/execute/etc. loophole.
+
+### Adapter/server snippets and boundary
+
+API preserves current response selection/timing. It creates app RequestRecords from Requests
+objects. Schematic accepted-push branch (new helper names are reviewable wiring, not extra Store
+methods):
+
+```python
+promise = await asyncio.to_thread(store.push, request_record)
+if promise.acknowledgment is BackendStoreAcknowledgment.NAY:
+    response_record, error = await promise.response_record()
+    if error is not None:
+        error.raise_exception()
+    raise BackendStoreException("Push NAY without persistence error")
+
+# Register before serving202; task publishes pull state before leaving the gate.
+register_processing(finish_push(promise))
+return accepted_response
+```
+
+The candidate202 exchange in request_record is what was durably logged; ACK does not select
+202 for a request whose existing API response decision was409/500. Later Store errors are
+raised by the tracked completion task and retain existing fatal handling, never dropped.
+
+```python
+async def finish_push(promise: ResponseRecordPromise[PushResponseRecord]) -> None:
+    response_record, error = await promise.response_record()
+    if error is not None:
+        error.raise_exception()
+    if response_record is None:
+        raise BackendStoreException("Missing push response record")
+    publish_pull_result(response_record)
+```
+
+IPC requires NAY and resolves the same tuple before transport conversion:
+
+```python
+if promise.acknowledgment is not BackendStoreAcknowledgment.NAY:
+    raise BackendStoreException("IPC unexpectedly persisted a request record")
+response_record, error = await promise.response_record()
+if error is not None:
+    error.raise_exception()
+if response_record is None:
+    raise BackendStoreException("Missing IPC response record")
+return response_record.to_response()
+```
+
+Move ONLY actual transport glue to server.py: FastAPI app/route registration and raw
+ASGI request/response conversion; Flask app/route registration, _DashboardQueryApp and
+Unix-socket start/stop/serve wrappers currently in protected IPC. Preserve route metadata,
+OpenAPI output, socket permissions, signals and clean shutdown. Update direct test/import
+callpoints rather than leaving compatibility aliases. API workflow input/session startup
+remains its helper, called by server; evidence/validation algorithms are not part of this
+transport move. Eliminate _AuthoritativeHttpMiddleware's independent persistence path once
+Store operations own it, not a second append on top of the new flow.
+
+Server receives Requests Response and serves status/headers/body unchanged. Retain separate
+FastAPI and single-threaded Flask; gate ALL IPC including OPTIONS before Store work, through
+response. Existing server-owned gate/bridge/shutdown offload can remain narrowly adapted:
+wait for active HTTP exchanges plus registered API completion/publication tasks, prevent a
+new HTTP request slipping through IPC admission, release on failures. No priority queue or
+threaded Flask. Client timeout is explicitly allowed and never cancels durable work. No
+need to reimplement the gate merely to make it shorter.
+
+### Grouped replay and outcome changes — not hidden in a protocol-only patch
+
+Current append_authoritative_record projects/commits EACH record. Split its private append/
+fsync and common apply stages; separate durable append position from committed projection
+position so an ACK can precede group completion. Keep exact raw bytes, SHA256, ordinals and
+anchor coverage. Group an accepted202 push through its matching commit/provider/validate
+records, preserving interleaved /pull503 and rejected /push409 records in append order.
+Domain invalidity is a completed recorded validation, not a missing validation record.
+Incomplete group on explicit replay fails at the originating push; no recovery/network.
+
+Common group application uses ONE outer DB transaction; per-record applicators no longer
+independently commit it. Provider rows may be provisionally inserted/read inside this
+transaction before model validation, then all group rows become committed together. Do not
+hold the append/DB mutex across external provider wait in a way that prevents current busy503
+responses. An interleaved public exchange can enlist in the active group; it must not open
+a competing/nested transaction or independently commit it. Query/outcome remain gated out.
+This concurrency/cursor wiring is a required part of the proposal, not presumed implemented.
+
+Current validation rollback branch discards derived effects but retains its HTTP record.
+For a grouped transaction it must retain/reinsert ALL group raw HTTP rows/hashes/ordinals,
+not only /validate, plus the recorded attempt, without retaining rejected derived output.
+Preserve existing evidence/retry algorithms and which domain effects are retained. Final
+accepted innerdicts still wait for outcome, as P24 specifies.
+
+Run outcome uses existing durable references, checks their replay consistency without
+reapplying their side effects, constructs response with commit_record_id, validation_record_id
+and run_outcome_record_id, appends/fsyncs, then projects outcome/materializes in the same
+transaction before exposing success. Exact self ID is the exchange UUID, not a second UUID.
+Rejected409 is logged/history only: no finalization and no late-validation fence. Update P24
+applicator/snapshot invariants accordingly, retaining all accepted rows/multiple commit links
+and not choosing a different researcher's/session's latest commit. No synthetic missing data.
+
+Explicit choices needing review before execution (not silently approved):
+1. Preserve complete pull/push exchange envelopes as above, rather than add request-only logs.
+2. Propose /completed200 only when the latest matching commit has a replay-consistent
+   ACCEPTED validation; /failed200 when that latest matching result is absent/not accepted
+   (including replay-consistent rejected validation),
+   otherwise409. Missing evidence is distinct from corrupt persisted evidence/DB, which
+   remains a Store error. /cancelled requires no commit/validation. Existing capture failures
+   remain separate from domain409; do not silently drop their500/history behavior.
+3. For singular IDs in outcome body, propose identifying the latest matching commit and its
+   exact validation within the current NameKey/session; existing per-innerdict links retain
+   every eligible accepted commit. Never overwrite earlier finalized IDs. All body/DTO/
+   protocol validators and query consumers must agree; no fallback for missing new fields.
+4. Dashboard's one-pull503=>failed policy is unchanged: if Store finishes successfully while
+   outcome waits, /failed may then409. No automatic reclassification/retry/extraquery proposed.
+
+### File boundary and upstream verification
+
+Existing production files: protected architecture.py, backend API/server/Store and config,
+protected IPC, run_outcome_record.py, query_response.py; necessary concrete context typing/
+initialization callpoints; Dashboard snapshot/run-outcome DTO consumers ONLY as needed to
+understand outcome IDs/409 without treating rejection as finalization. No UI layout/queue/
+render/export redesign or extra query. Preserve P21 naming and P24 stored ID/card contour.
+New small modules only: response_record_promise.py and request_response_records.py under
+existing Backend helpers/data_models. Keep private Store lifecycle/query-only implementation
+in its current module. Necessary imports/calls/tests only; no broad module reorganization.
+
+Existing relevant tests: test_api, test_ipc, test_backend_store, test_http_interceptor,
+startup cases in test_ui and isolated browser/operator fixture callpoints affected by Store
+construction. Test real synthetic Store/log/DB and transport adapters, not source-string tests.
+Cover all ACK/NAY/result combinations; fsync/request/response/projection failures; early202
+and later pull update; callback failure/shutdown/client disconnect; read-only no-write query;
+actual query-only capability; grouped exact-byte live/replay equivalence including interleaved
+503/409 and rejected validation; truncated groups; outcome200/409/cancellation; finalization
+IDs and pure cards. Test existing IPC gate with real in-process ASGI/WSGI and background tasks.
+Run applicable Ruff/strict mypy without casts/suppressions and existing meaningful regressions.
+Real socket/browser/operator verification is a separate boundary; no live Codex needed to
+catch these contract errors. Do not alter ordinary tasks or touch production artifacts.
+
+Excluded: shared HttpRequestLogRecord v1/v1.1 implementation, pasted models/StrictModel,
+main pipeline/other detours, sample_deploy, TASK/HUMANS/README, CAS layout, hash/config auto-
+updates, compatibility/migration/fallbacks, recovery, wrapper tasks, unrelated operator fixes.
+No claim that grouped persistence or the new request/response API is already implemented.
+
+### F8 IPC-only opening-log correction — implemented and verified
+
+Operator explicitly authorized the previously proposed narrow correction: replace ONLY
+server.py's IPC-only opening log with `logger.info("Opening read-only Backend Store")`.
+Remove its detour_db_path argument; preserve INFO emission, lifecycle behavior, and all
+existing tests/assertions. No other F8 diagnostics, browser/task/access/pre-start changes
+are authorized here. Applied exactly that log-only change. The unchanged
+`test_main_ipc_only_runs_only_the_dashboard_query_server` now PASSES (1 test,1.94s),
+after its recorded pre-fix failure. Server Ruff and diff whitespace checks PASS.
+No test edits, new assertions, schema/Store/IPC behavior or task changes. This closes
+only the IPC-only log/test regression; other handoff blockers below remain open.
+
+### Post-P24 handoff readiness review — 2026-09-18
+
+Operator asked what remains before pre-commit-operator. Read-only source/task review and
+bounded local checks confirm: P24 is implemented; the FULL acceptance handoff is NOT ready.
+This review does not authorize additional production/task/access changes.
+
+- Re-ran the exact existing IPC-only lifecycle test:1 FAILED in2.79s, unchanged
+  AttributeError at server.py's INFO argument backend_store.detour_db_path. This is the
+  known F8 log/test-double mismatch, not a newly discovered P24 failure. Subsequently
+  authorized and corrected by the log-only change above; unchanged test now passes.
+- Existing completed-query browser test --setup-only succeeds (13.41s, exit0; no test body
+  ran). Its real isolated Store/history/private-storage fixture accepts current P24.
+  This is fresh fixture integration evidence, NOT browser/Unix-socket serving evidence.
+- Actual normal AI task still selects default Chrome; elevate explicitly selects Chromium.
+  Last PROD Chrome prerequisite failure is not cleared by earlier Chromium passes. Verify
+  normal-task Chrome provisioning or obtain explicit approval for a browser-selection edit.
+- Last PROD root tests still have no subsequent passing evidence after the identified0750
+  home traversal denial. Preserve real drop-before-exec; no permission/preload workaround
+  or launcher change was made. An approved accessible-runtime/access correction is needed.
+- The pre-Backend dequeue/Codex-busy check still lacks the proposed progress/result logs;
+  source remains unchanged. Last operator Ctrl+C cause is not established. Diagnose this
+  actual SSH/occupancy boundary before another expensive live-Codex run; do not bypass it.
+
+Recommended sequence: the IPC log/test correction is now closed; separately approve/resolve
+browser/root/pre-start blockers, then targeted
+real browser/IPC checks and the original three root cases, then pre-commit-operator. P24's
+new gate has real in-process ASGI/WSGI/threaded tests, but actual full Backend/Uvicorn/SSH
+lifecycle still awaits production acceptance. Do not treat another passing IPC-only smoke
+as coverage of the full-Backend gate. Preserve the rejected pre-commit wrapper shape/grep;
+inspect each graph leaf's result, not just the aggregate shell status. No code/task/index
+or production-resource changes were made in this handoff review; only WORK was updated.
+
 2026-09-17 latest production review: NOT acceptance-ready. New pre-commit-operator logs
 expose a missed F8 IPC-only logging/test regression, eight browser-prerequisite failures,
 the now-identified root interpreter traversal denial, and a silent pre-full-Backend wait
@@ -13,8 +518,8 @@ P1-P19's pinned code changes are present; the applicable local/delegated
 checks and their limitations are recorded below. The approved Mode-3 deterministic-console
 fix is also implemented and verified, with all assertions unchanged. Previously approved
 follow-up code is present, including F3/F7 diagnostics, the real F4 browser/query regression
-and F8 Backend logs. The latest run reopens F8 correctness/upstream coverage and exposes
-missing pre-start wait diagnostics; code presence is not verified completion.
+and F8 Backend logs. The latest run exposed an IPC-only logging/test regression (now fixed
+and locally verified above) and missing pre-start wait diagnostics (still unresolved).
 
 Production acceptance is NOT complete. Current retained follow-up status:
 - F1 NiceGUI isolation/preservation and F2 explicit Lima fixture: implemented, locally checked.
@@ -29,9 +534,9 @@ Production acceptance is NOT complete. Current retained follow-up status:
   is now present there; no synthetic replacement was reapplied and no test was weakened.
 - F7 operator's pixi-run variable failure remains unresolved on their Lima host. Local
   activation tests pass, which does not invalidate their report. No ordinary task fix made.
-- F8 detailed Backend logs are present and real IPC emission passes, but latest PROD and
-  local reproduction expose a missed IPC-only test-double attribute access caused by a new
-  log statement. Correction pending; direct-terminal full-HTTP serving remains unverified.
+- F8 detailed Backend logs are present. The subsequently authorized IPC-only opening-log
+  correction is implemented; its unchanged lifecycle test passes. Direct-terminal full-HTTP
+  serving/production acceptance remains unverified by this local log-only check.
 The rejected browser test that substituted query_snapshot_in_browser was removed, and the
 launcher regression's original15s timeout restored. Neither counts as completed coverage.
 A replacement root-launcher mechanism is not approved. The operator has now approved the
@@ -47,7 +552,8 @@ in the original acceptance log does not certify production: card/artifact assert
 unreached and privileged watcher monitoring never started. The completion-guard correction
 now has a passing real browser/owned-IPC regression. No absence of additional production
 defects is established. Latest root-launch and silent pre-start findings remain unresolved;
-the configured DuckDB binary now loads successfully. F8's new regression needs correction.
+the configured DuckDB binary now loads successfully. F8's IPC-only regression is now fixed
+and locally verified; the other production acceptance findings remain open.
 Non-elevate Pixi task edits still require explicit per-change approval; rejected pre-commit
 wrapper edits are NOT revived. Only the agent-owned elevate task may be adjusted for
 bounded delegated verification after the relevant corrections are approved and ready.
@@ -72,6 +578,998 @@ specified. Its optional illustrative proxy is not production detour code. The op
 reverted the mistakenly included proxy/models/tests/launcher changes; review confirms no
 remaining staged or unstaged changes there and no in-scope dependency on those changes.
 Do not edit or run its tests. The conversion inventory below excludes it.
+
+## Body-capture decision — keep v1.1; v2 docstring note only
+
+Operator rejected changing the v1.1 body format as breaking. Keep ALL v1/v1.1 body fields,
+serialization, decoding, conversion and consumers unchanged. The proposed tagged-base64
+v1.1 representation is NOT pending work and must not be implemented. Only a short docstring
+note on shared HttpRequestLogRecord is authorized and now added: current v1.1 capture uses
+Response.text and replay reconstructs UTF8, not original bytes; a future v2 should explicitly
+serialize body bytes, including Response.content. No v2 model/protocol/version/flag/migration
+is authorized or implemented. Materialization/IPC ordering is implemented under P24 below.
+
+Installed Requests2.34.2 source reviewed to answer the operator's reliability question:
+HTTPAdapter initializes Response.encoding from Content-Type charset; without charset it
+uses ISO8859-1 for text content and UTF8 for application/json. Otherwise encoding is None.
+Response.text uses that encoding (or any explicit override); only when None does it call
+apparent_encoding, here backed by charset_normalizer. Decoding uses errors="replace";
+unknown codecs fall back to UTF8 with replacement. Binary content is not rejected by MIME
+or guaranteed to raise an error: it can produce gibberish/control characters/U+FFFD while
+original Response.content stays untouched. The log retains only the decoded result.
+Correct UTF8 JSON is suitable for current text consumers; this is not byte-level fidelity.
+Docstring-only Ruff and diff whitespace checks PASS; no new tests or runtime changes.
+
+Endpoint-specific source review: main pipeline uses OpenAlex /authors (select=id) and
+/works (select=id,title); detour institution validation uses OpenAlex /institutions/{id}
+and ROR /v2/organizations/{id}. All expect JSON, not binary payloads. Valid UTF8 with
+application/json decodes deterministically, preserving Unicode titles/institution names.
+Residual risk is malformed/mislabelled encoding: damaged strings can remain valid JSON,
+so titles could be corrupted or exact institution-name checks could falsely fail. Author
+IDs are ASCII. Detour live/replay both consume the same persisted decoded text through
+to_response; that ensures consistent interpretation, not original-byte preservation.
+Assessment is source-based, without fresh provider calls/header verification. No concrete
+encoding failure identified; no further v1/v1.1 implementation change is proposed.
+
+Operator authorized extending only the class docstring with the current provider/local
+route inventory, retained-v1.1 rationale, mandatory case-by-case review of new endpoints,
+and desirable raw-body-byte capture in v2. Applied. Local-format wording is deliberately
+precise: /push specifies application/json in OpenAPI; /pull also returns UTF8 NDJSON or
+Markdown, so not every local body is JSON. Synthetic /commit and /validate are identified
+as such, with the recorded outcome routes enumerated. No runtime/schema changes.
+
+## P24 — Implemented and locally verified after operator restore: outcome-triggered innerdict materialization
+
+Operator requested a NEW scope item and concrete snippets, not a reopening of P22.
+Keep existing Backend processing,
+but defer innerdict materialization until the matching run outcome is applied.
+The final persisted innerdict must contain the same data/ID order currently shown by the
+Dashboard card; DOCX/TXT renderers merely render it, as the main pipeline does. Validation
+and outcome IDs must not exist only in a transient UI copy. This section records the
+exact revised scope, now explicitly approved by the operator: "approved within the narrow exact shape".
+No casts, runtime argument to the outcome applicator, or unrelated changes are authorized.
+
+Intended ordering, replacing the Assistant's previous "whichever prerequisite comes last"
+proposal (DO NOT implement that alternative):
+- Validation must be durably persisted/fsynced before a410 can be returned. Preserve the
+  accepted validation/standardized-submission basis for410, independent of final innerdicts.
+- server.py orchestrates IPC exclusion while FastAPI work is in progress. IPC must wait,
+  including for durable completion of pending commit/validation work following accepted
+  pushes; otherwise a202 response would leave the same ordering gap. A client may time out;
+  no special timeout recovery, retry or fabricated result is requested.
+- The admission boundary must ensure in-flight HTTP records have persisted before outcome
+  logging and must prevent a new HTTP operation slipping through that boundary. Store locks
+  alone protect transactions, not the entire request/background-work lifetime.
+- Once outcome is durably logged/projected, Store has the prerequisites and materializes
+  the final innerdict through the common live/replay applicator, without UI joins or live-only
+  work. Do not infer a broad replacement of existing validation/evidence/output-row processing.
+  Because current query builds committed innerdicts directly from codex_output_rows, simply
+  moving the materialize_innerdicts call would still expose unfinished data there; the narrow
+  query/invariant wiring must expose finalized persisted innerdicts instead.
+- Cancellation records its cancellation outcome and does not invent/finish missing data,
+  undo earlier durable data, or introduce recovery. Previously persisted data remains;
+  work that was not persisted is not manufactured. Exact final row eligibility follows the
+  existing accepted-data contour, not a new "completed-only" policy inferred by the agent.
+- Current DashboardQuerySnapshot enforces accepted validation iff committed innerdict exists;
+  the deferred-materialization interval requires a corresponding narrow invariant adjustment.
+
+Approved implementation defers codex_innerdicts until outcome, queries that persisted grouped
+table, validates both stored IDs, and removes P22's transient UI augmentation. /pull410
+continues using accepted validation/submission, not output innerdicts. Store I/O ownership
+and common replay application remain intact. No separate reconciliation/recovery mechanism.
+
+### Approved file and behavior boundary
+
+Production files: backend server.py/api.py/Store, protected backend ipc.py/vars.py,
+committed_innerdict.py, Dashboard dashboard_query_snapshot.py/ui.py and its Locale.
+Only necessary direct imports/callpoints and existing associated tests. No main-pipeline
+or shared HttpRequestLogRecord changes, new HTTP model, route/body change, new service,
+task/CLI/config change, automatic query, timeout/retry policy or DB recovery/migration.
+All DB/log I/O remains owned by Store; domain SQL/algorithms stay in api.py.
+
+1. Keep validation/evidence/accepted-output-row processing as now. Add two nullable
+   output-row columns, in the desired card order immediately after commit ID. These are
+   genuine Backend column constants, replacing the P22 display-only labels. Before outcome
+   they remain internal NULLs, never placeholder-bearing committed innerdicts.
+
+   ```python
+   # protected Backend vars.py
+   KTP_AI_AUGMENT_VALIDATION_RECORD_ID_COL = f"{AI_AUGMENT_COLUMN_PREFIX}validation_record_id"
+   KTP_AI_AUGMENT_RUN_OUTCOME_RECORD_ID_COL = f"{AI_AUGMENT_COLUMN_PREFIX}run_outcome_record_id"
+
+   # In CODEX_OUTPUT_SCHEMA, immediately after the existing commit-ID column:
+   (KTP_AI_AUGMENT_VALIDATION_RECORD_ID_COL, "VARCHAR"),
+   (KTP_AI_AUGMENT_RUN_OUTCOME_RECORD_ID_COL, "VARCHAR"),
+
+   # In write_accepted_submission's output_row, in the same position:
+   KTP_AI_AUGMENT_VALIDATION_RECORD_ID_COL: None,
+   KTP_AI_AUGMENT_RUN_OUTCOME_RECORD_ID_COL: None,
+   ```
+
+   Remove ONLY append_codex_output's _replace_codex_output_view(store) call. Validation
+   continues storing output rows/attempts and returning its DB-readback result. Preserve
+   append/fsync -> projection/readback -> _apply_attempt_record -> /pull410 ordering.
+   No need to make /pull wait for outcome; that would deadlock normal finalization.
+
+2. In Store._apply_log_record, after the existing HTTP-row insertion/readback, add outcome
+   dispatch alongside /validate, within the SAME existing transaction:
+
+   ```python
+   elif record.method == api.HTTP_POST_METHOD and record.path in RUN_OUTCOME_PATHS:
+       api._apply_run_outcome_record(
+           self,
+           RunOutcomeRecord.from_http_request_log_record(record),
+       )
+   ```
+
+   New narrow api._apply_run_outcome_record(store, outcome) selects only
+   unfinalized accepted output rows for outcome.run_outcome_request.namekey. For each,
+   resolve its typed commit from Store, require that commit's Codex session to equal
+   outcome.run_outcome_response_body.codex_session_record.session_id, and load its existing
+   typed validation record directly from persisted HTTP history. No runtime argument or
+   runtime-dependent submission revalidation is needed for this linkage step. Require
+   accepted validation, exact commit linkage and
+   commit ordinal < validation ordinal < outcome ordinal. No session/matching accepted
+   row means outcome history only. Do not choose a researcher's latest unrelated commit.
+   Use these existing durable typed records to update the two columns:
+
+   ```python
+   def _apply_run_outcome_record(
+       store: AiAugmentBackendStore,
+       outcome: RunOutcomeRecord,
+   ) -> None:
+       # Matching, validation and update steps specified here.
+       ...
+   ```
+
+   ```python
+   # Inside that applicator, after the matching/ordinal checks above:
+   store.execute(
+       f"UPDATE {CODEX_OUTPUT_ROWS_TABLE} SET "
+       f"{duckdb_quote_identifier(KTP_AI_AUGMENT_VALIDATION_RECORD_ID_COL)} = ?, "
+       f"{duckdb_quote_identifier(KTP_AI_AUGMENT_RUN_OUTCOME_RECORD_ID_COL)} = ? "
+       f"WHERE {duckdb_quote_identifier(KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL)} = ?",
+       [str(validation.record_id), str(outcome.record_id), str(commit.record_id)],
+   )
+   # Once, after all matching rows were updated (only if at least one changed):
+   _replace_codex_output_view(store)
+   ```
+
+   _replace_codex_output_view retains the existing shared materializer and ordered column
+   projection, adding this filter to its SELECT:
+
+   ```python
+   WHERE {duckdb_quote_identifier(KTP_AI_AUGMENT_VALIDATION_RECORD_ID_COL)} IS NOT NULL
+     AND {duckdb_quote_identifier(KTP_AI_AUGMENT_RUN_OUTCOME_RECORD_ID_COL)} IS NOT NULL
+   ```
+
+   Thus codex_innerdicts never contains an unfinished accepted section. The existing
+   materializer still replaces its grouped table; no new append-only table algorithm.
+   Later outcome records do not rewrite IDs on already finalized sections. A /validate
+   arriving after a matching session outcome must fail rather than create a late dangling
+   accepted row or trigger retrospective materialization. This is an ordering check, not
+   automatic recovery. All three outcome paths use this contour, including logged500
+   partial snapshots when the session is known. Do not infer completed-only eligibility.
+   Cancellation adds no validation/capture beyond the existing outcome handler: it waits
+   for already-running authoritative work, records its outcome, and preserves durable data.
+   Missing/rejected validation never becomes an accepted row or invented placeholder.
+
+3. Query must read codex_innerdicts, not reconstruct output from codex_output_rows.
+   Preserve its absent-table empty result and typed commit linkage/error handling:
+
+   ```python
+   rows = store.execute(
+       f"SELECT {duckdb_quote_identifier(KTP_NAMEKEY_COL)}, "
+       f"{duckdb_quote_identifier(KTP_INNERDICT_JSONLINES_COL)} "
+       f"FROM {CODEX_INNERDICT_TABLE} "
+       f"ORDER BY {duckdb_quote_identifier(KTP_NAMEKEY_COL)}"
+   ).fetchall()
+   for namekey_json, payload in rows:
+       for values in loads_jsonlines(payload):
+           # The shared materializer puts NameKey in the grouping column, not JSONL.
+           innerdict = InnerDict.from_mapping(
+               {KTP_NAMEKEY_COL: namekey_json, **values}, _CodexMatchProcedure(),
+           )
+           # Existing typed commit lookup and CommittedInnerDict construction follow.
+   ```
+
+   CommittedInnerDict requires both new UUID fields. DashboardQuerySnapshot changes its
+   accepted-iff-committed check to accepted-with-matching-outcome iff committed, permitting
+   accepted-but-not-finalized records before outcome. Check the persisted validation UUID
+   against that commit's typed validation, and resolve the persisted outcome UUID in query
+   history to verify NameKey/session (not merely the latest outcome). Keep all existing
+   uniqueness, researcher, commit and session checks; no permissive fallback.
+
+4. server.py owns one instance-local admission gate for full Backend. Use a small
+   _BackendRequestGate(FrozenStrictModel) with private asyncio.Condition/counter/boolean;
+   no public config fields or arbitrary_types_allowed. Gate methods run only on the
+   Uvicorn loop. Normal HTTP exchanges may remain concurrent; an IPC waiter blocks NEW
+   admission, waits for current exchanges to finish, then awaits already-scheduled
+   authoritative background work. Existing background tasks do not acquire this gate.
+   Private state on the new server-local model:
+
+   ```python
+   class _BackendRequestGate(FrozenStrictModel):
+       _condition: asyncio.Condition = PrivateAttr(default_factory=asyncio.Condition)
+       _http_requests: int = PrivateAttr(default=0)
+       _ipc_pending: bool = PrivateAttr(default=False)
+   ```
+
+   Core methods on that model:
+
+   ```python
+   @asynccontextmanager
+   async def http(self) -> AsyncIterator[None]:
+       async with self._condition:
+           await self._condition.wait_for(lambda: not self._ipc_pending)
+           self._http_requests += 1
+       try:
+           yield
+       finally:
+           async with self._condition:
+               self._http_requests -= 1
+               self._condition.notify_all()
+
+   @asynccontextmanager
+   async def ipc(self) -> AsyncIterator[None]:
+       try:
+           async with self._condition:
+               self._ipc_pending = True
+               await self._condition.wait_for(lambda: self._http_requests == 0)
+           pending = tuple(api.AUTHORITATIVE_BACKGROUND_TASKS)
+           if pending:
+               await asyncio.gather(*(asyncio.shield(task) for task in pending))
+           yield
+       finally:
+           async with self._condition:
+               self._ipc_pending = False
+               self._condition.notify_all()
+   ```
+
+   Existing IPC is single-threaded (threaded=False), hence one IPC scope at a time. A thin
+   server-owned ASGI middleware surrounds the COMPLETE HTTP call, including authoritative
+   record persistence and response send; non-HTTP/lifespan passes through untouched.
+   Wire the gate via full_backend_application/app state, once per application lifecycle;
+   register the middleware only once, so repeated factory calls cannot nest two gates.
+   no gate inside Store or parent-process knowledge. An HTTP call does not retain its
+   slot after202 while background validation runs, so ordinary /pull503 remains possible.
+
+   Inside server.lifespan, bridge existing IPC thread to the loop with this context:
+
+   ```python
+   loop = asyncio.get_running_loop()
+
+   @contextmanager
+   def ipc_request_scope() -> Iterator[None]:
+       scope = gate.ipc()
+       asyncio.run_coroutine_threadsafe(scope.__aenter__(), loop).result()
+       try:
+           yield
+       finally:
+           asyncio.run_coroutine_threadsafe(
+               scope.__aexit__(None, None, None), loop,
+           ).result()
+   ```
+
+   Thread this optional scope factory through the existing ipc start/app functions; its
+   default is nullcontext for IPC-only. Wrap the complete WSGI request/response iterable
+   and its close in that scope, so OPTIONS and error responses cannot bypass the gate.
+   Do not gate only domain handlers. The server-owned ASGI call has this exact boundary:
+
+   ```python
+   if scope["type"] != "http":
+       await self.app(scope, receive, send)
+       return
+   async with scope["app"].state.request_gate.http():
+       await self.app(scope, receive, send)
+   ```
+
+   Hold IPC admission through snapshot capture, outcome append/fsync/application, typed
+   readback and response. No server-side deadline/retry/503 substitution for IPC; a client
+   may time out without cancelling durable server work. Preserve existing fatal failures.
+   Operator additionally requires an appropriate docstring explicitly stating that IPC
+   intentionally permits client timeouts while waiting for FastAPI work to finish; such
+   timeouts do not cancel Backend processing/persistence. Add this on the IPC gate method.
+   Full lifespan MUST change synchronous IPC stop to the following, otherwise its join
+   could block the loop which the waiting IPC request needs:
+
+   ```python
+   await asyncio.to_thread(ipc.stop_dashboard_query_server, dashboard_query_server)
+   ```
+
+   IPC-only serving/initialization/permissions are unchanged. Add concise existing-style
+   waiting/admitted/materialized logs at the new boundaries, not a logging framework.
+
+5. Remove P22's transient metadata-lookup/insertion block and unused display-only labels.
+   Restore the pure card callback and direct caller (other card/export behavior unchanged):
+
+   ```python
+   def card(self, researcher: _Researcher) -> str:
+       selected = selected_card_outer_dict(researcher)
+       # Existing build_cards call, arguments and result checks unchanged.
+
+   # Controller callback annotation and invocation:
+   render_card: Callable[[_Researcher], str]
+   markdown = await asyncio.to_thread(self._render_card, researcher)
+   ```
+
+   Existing value-formatting selection remains; no metadata augmentation or independent
+   DOCX/TXT/export logic. Display, both downloads and publish completed use identical
+   persisted metadata through existing rendering primitives.
+
+### Current schema and verification for P24
+
+Only the current schema exists. The operator explicitly removed the special output-schema
+guard and its dedicated test; do not restore them. Required current columns and fields are
+accessed/validated normally. No compatibility branches, migration, backfill, reconciliation,
+snapshot enrichment or automatic query. Explicit confirmed --new remains ordinary current
+initialization/replay, not a special handling path for another schema. Do not operate on
+operator resources.
+
+Extend existing test_api/test_backend_store/test_http_interceptor/test_ipc/test_ui coverage:
+- Real Store append/fsync/readback: accepted validation and /pull410 before outcome, but
+  no committed innerdict; outcome yields exact adjacent IDs and unchanged remaining data.
+- Same replay inputs reproduce the exact materialized JSONL/query result, no network;
+  cancelled/failed/no-session/rejected/no-validation cases preserve only eligible data.
+- Correct NameKey/session binding, multiple commits, already-finalized IDs unchanged,
+  malformed/mismatching IDs and late validation fail closed.
+- Real gate/ASGI/WSGI in process with synchronization events: HTTP persistence/response
+  blocks all IPC including OPTIONS; outstanding post202 work blocks IPC; new HTTP cannot
+  slip through; /pull503 stays available before IPC admission; exceptions release gate;
+  shutdown can finish an in-flight IPC request without event-loop deadlock.
+- Actual card renderer/wholesale query roundtrip and existing DOCX/TXT/publish consumers:
+  no metadata synthesis, original snapshot remains unchanged, interim accepted state valid.
+Use synthetic fixtures and real DB/record paths, not assertions on source strings or mocked
+materialization. Ruff/strict detour mypy plus relevant shared-consumer checks. No live Codex,
+ordinary task edits or unrelated F3/F7/F8/browser corrections bundled in P24. Production
+acceptance remains separate. Reimplementation and applicable local verification are complete.
+
+### P24 retry implementation/evidence — 2026-09-18
+
+Operator clarified the subsequent rollback message referred to the PRIOR restore, not
+this execution. The brief mistaken pause did not alter work or authorization. The agent
+made no Git mutation; preserve the operator's concurrent staging.
+
+Implemented in exactly the nine pinned production files, with four existing test modules
+and WORK. Domain SQL remains in API, all DB/log I/O in Store. No schema-specific guard,
+compatibility audit, DTO-default removal, stricter card-format parser, extra casting or
+suppression, task/config/CLI change, production data access or unrelated F3/F7/F8 fix.
+Outcome linkage reads the exact accepted attempt's validation UUID and resolves it through
+Store's typed HTTP readback. Card callbacks again consume only the researcher. IPC-only
+uses nullcontext unchanged; full Backend owns the private-state FrozenStrictModel gate.
+The small Flask adapter scopes the complete WSGI iterable and close, including OPTIONS
+and errors, without reassigning methods or suppressing types. The IPC timeout docstring
+is present. Full shutdown offloads IPC stop/join while retaining the server event loop.
+
+Fresh checks (overlapping selections; do not add these into a claimed single suite run):
+
+| Check | Result and boundary |
+|---|---|
+| Live/replay outcome matrix and negative ordering/history | 12 passed (70.86s): complete/partial snapshots across completed/failed/cancelled; exact query JSON/logical DB equality, unchanged log; no-validation/rejected/no-session/other-session; two accepted commits, finalized IDs not rewritten, late validation rejected |
+| Existing Store/interceptor selection | 47 passed,13 deselected (103.71s); excludes the above outcome cases and410 integration |
+| Real Store/ASGI410 integration plus four card cases | 5 passed (32.00s): validation durable before410, no early innerdict, IPC waits through actual response send, validate < pull410 < outcome in durable history; card/interim-state checks |
+| Gate/WSGI/lifespan composition | 21 passed,1 real-socket case deselected (9.81s): response/background wait, new-HTTP exclusion, ordinary503 availability, exception cleanup, OPTIONS/errors and real threaded bridge/shutdown |
+| Factory registration plus final card-ID checks | 5 passed (7.61s); subsequent type-safe factory assertion alone1 passed (6.20s). Covers one-time outer gate registration and missing/malformed/unlinked/cross-NameKey/cross-session ID rejection |
+| Existing API feasible selection | 166 passed,1 existing skip,4 deselected (80.28s). Preserved skip for currently allowed multiple evidence matches. No historical capture execution |
+| Existing UI feasible selection | 84 passed,1 new negative-fixture failure (11.10s), then all four card cases passed in the focused checks above. Existing download/publishing/queue/autonomy checks passed |
+| Final static checks | Ruff PASS; strict detour/shared-record mypy PASS54files; diff whitespace PASS |
+
+Development failures were corrected in the new tests, not concealed by production changes:
+base-versus-specialized HTTP model and procedure-object identity comparisons became exact
+serialized readback/data comparisons; the invalid-version test accidentally supplied a
+valid UUIDv7 and now supplies UUID(int=0). The factory test now uses isinstance/issubclass
+with the actual Starlette middleware factory types instead of a mypy-incompatible identity
+comparison. No casts/suppressions or weakened existing production checks.
+
+The existing synthetic flat-row materializer unit now explicitly materializes its finalized
+rows; append no longer does so. The historical capture test's source callpoint explicitly
+records its outcome before unchanged final card assertions. That capture was NOT accessed
+or executed; it was statically checked. Its synthetic outcome helper lives in the existing
+interceptor module and is imported only inside that consuming test helper.
+
+Threaded bridge/shutdown tests use a test-only loop timer through Runner cleanup, retaining
+the restriction-aware test boundary from the earlier discarded run. Actual gate, WSGI,
+thread bridge and thread offload execute; this does NOT certify host self-pipe wakeup,
+real Unix/TCP serving or the full Uvicorn/SSH/Codex lifecycle. No production timer/deadline/
+retry was added. The410 test calls the real sync pull handler through an async test route,
+avoiding an unrelated framework threadpool boundary; persistence middleware and Store are real.
+
+No P24 implementation or feasible local check remains pending. Live socket/browser/root/
+Codex production acceptance remains separate and unperformed here. Existing unrelated
+production-review corrections remain awaiting approval; this item does not close them.
+
+## P23 — Completed: shared HTTP-record protocol and record-protocol inheritance
+
+Explicitly requested now, surgically. Only repository-root
+src/helpers/data_models/http_request_log.py and detour protected/src/architecture.py plus
+WORK need production edits. Add HttpRequestLogRecordProtocol alongside the existing model;
+HttpRequestLogRecord gets @implements[HttpRequestLogRecordProtocol](). Add the shared protocol
+as a base of CommitRecordProperty, ValidationRecordProperty and RunOutcomeRecordProperty.
+Keep their existing specific properties/methods and concrete http_request_log_record getters.
+RunOutcomeRequest is a wrapper, not an HTTP-record subclass; do NOT add inheritance there.
+
+Core wiring (the shared protocol's fields/methods are specified below and in its source):
+
+```python
+@implements[HttpRequestLogRecordProtocol]()
+class HttpRequestLogRecord(BaseModel):
+    # Entire existing model body unchanged.
+    ...
+
+class CommitRecordProperty(
+    HttpRequestLogRecordProtocol, ComponentProtocol.PropertyProtocol, Protocol,
+):
+    # Existing commit-specific members unchanged.
+    ...
+```
+
+ValidationRecordProperty and RunOutcomeRecordProperty gain the same protocol base, keeping
+their current ComponentProtocol bases/nesting. Their earlier pinned snippets below include
+this P23 addition; no P20/P21 wire behavior is changed.
+
+Protocol mirrors all16 serialized v1.1 fields, with the exact existing nullable/types and
+from_response/to_response signatures. Read-only properties express structural access; no
+runtime_checkable/extra framework. The shared model still supports schema_version1 as well
+as1.1: retain its existing HttpRequestLogSchemaVersion union honestly, without silently
+removing main-pipeline v1 compatibility. coerce_schema_v1 is excluded implementation input,
+not a v1.1 record field; omit it and Pydantic validator/serializer internals from the protocol.
+No Pydantic config, field, serialization, conversion, validation behavior, constructor or
+runtime inheritance change. No broad consumer annotations, new shared re-exports or tasks.
+Verify @implements conformance with strict mypy, shared/main mypy and existing HTTP-record
+v1/v1.1/conversion and focused derived-record tests; no mock-only protocol test needed.
+
+Implementation is present in exactly those two production files. Ruff PASS; strict detour
+mypy PASS54files. Existing shared HTTP-record plus commit/validation/run-outcome selection:
+53 passed,185 deselected (6.78s); no new test assertions or skips. AST comparison confirms
+all16 serialized field types and both response-conversion signatures exactly match the
+concrete model, whose entire body is unchanged from HEAD. Main mypy selection (src/tests)
+invoked with AI-environment stubs reported20 errors in7 untouched pandas/docx consumers,
+none in the modified HTTP model (68files checked). Rerun with the designated main-pipeline
+executable (.pixi/envs/default/bin/mypy src tests, under the required outer Pixi invocation):
+PASS68files, without source edits between runs. The initial AI-environment check was not
+green and is not counted as a pass; no unrelated correction, dependency or task changes.
+Final git diff HEAD --check PASS; agent Git use stayed read-only. P23 has no pending work.
+Read-only main-pipeline review confirms step_10_build_cards passes the selected OuterDict
+into shared build_cards, which renders innerdict.data in order; TXT/DOCX consume that same
+Markdown. No main-pipeline runtime/data or card/IPC/lifecycle implementation was changed.
+
+## P20 — Completed: /validate model/protocol consolidation
+
+Operator approved the immediately preceding proposal/snippets and requested pinning them
+in WORK. Implementation and focused verification are complete, not approval of other
+operator-review corrections. Preserve the exact narrow shape below.
+
+Four production files only:
+- protected/src/architecture.py
+- src/backend/helpers/data_models/validation_event.py
+- src/backend/api.py
+- src/backend/helpers/data_models/query_response.py
+
+Necessary direct imports and focused existing-test additions are included. No new module,
+Store orchestration changes, endpoint renaming, request/response format change, new config,
+new ConfigDict, shared HttpRequestLogRecord change, pasted-model change or task edits.
+Commit/run-outcome/pull/push behavior stays unchanged. /validate remains a synthetic,
+request-only durable record, NOT a served endpoint; no ValidationResponse model is added.
+
+### 1. Corresponding architectural protocols
+
+Under BackendComponent in protected/src/architecture.py (JsonValue is a normal Pydantic
+import; retain existing Mapping/UUID/Literal/Self imports):
+
+```python
+class ValidationRequestBodyProperty(
+    ComponentProtocol.PropertyProtocol,
+    Protocol,
+):
+    @property
+    def commit_id(self) -> UUID: ...
+
+    @property
+    def post_commit_validation(
+        self,
+    ) -> BackendComponent.PostCommitValidationProperty: ...
+
+    @property
+    def submission_type(
+        self,
+    ) -> Literal["Submission", "StandardizedSubmission"] | None: ...
+
+    @property
+    def submission(self) -> Mapping[str, JsonValue] | None: ...
+
+    @property
+    def http_record_ids(self) -> tuple[UUID, ...]: ...
+
+    def validate_body(self) -> Self: ...
+
+
+class ValidationRecordProperty(
+    HttpRequestLogRecordProtocol,
+    ComponentProtocol.PropertyProtocol,
+    Protocol,
+):
+    @property
+    def http_request_log_record(self) -> HttpRequestLogRecord: ...
+
+    @property
+    def validation_request_body(
+        self,
+    ) -> BackendComponent.ValidationRequestBodyProperty: ...
+
+    def validate_record(self) -> Self: ...
+
+    @classmethod
+    def from_http_request_log_record(
+        cls,
+        record: HttpRequestLogRecord,
+    ) -> Self: ...
+```
+
+The existing body gains only its conformance decorator; fields/body validation stay:
+
+```python
+@implements[BackendComponent.ValidationRequestBodyProperty]()
+class ValidationRequestBody(FrozenStrictModel):
+    # Existing fields and body validation unchanged.
+```
+
+### 2. Typed record in the existing validation_event.py
+
+Reuse existing schema/method/synthetic-host/header constants through direct imports.
+Follow BackendCommitRecord's excluded parsed-body pattern; no second serialized body:
+
+```python
+@implements[BackendComponent.ValidationRecordProperty]()
+class BackendValidationRecord(HttpRequestLogRecord):
+    validation_request_body: ValidationRequestBody = Field(exclude=True)
+
+    @property
+    def http_request_log_record(self) -> HttpRequestLogRecord:
+        return self
+
+    def validate_record(self) -> Self:
+        if (
+            self.schema_version != KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
+            or self.record_id.version != 7
+            or self.method != HTTP_POST_METHOD
+            or self.scheme != SYNTHETIC_SCHEME
+            or self.host != SYNTHETIC_HOST
+            or self.port is not None
+            or self.path != VALIDATE_PATH
+            or self.query
+            or set(self.request_headers) != {SOURCE_KEY_HEADER, NAME_KEY_HEADER}
+            or self.request_body is None
+            or self.response_code is not None
+            or self.response_headers is not None
+            or self.response_body is not None
+            or self.received_at_unix_usec is not None
+            or self.ready_to_respond_at_unix_usec is not None
+            or self.duration_usec is not None
+        ):
+            raise ValueError("validation HTTP record has an invalid contour")
+
+        parsed = ValidationRequestBody.model_validate_json(self.request_body)
+        if parsed != self.validation_request_body:
+            raise ValueError("validation request body does not match its record")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_record(self) -> Self:
+        return self.validate_record()
+
+    @classmethod
+    def from_http_request_log_record(
+        cls,
+        record: HttpRequestLogRecord,
+    ) -> Self:
+        if record.request_body is None:
+            raise ValueError("validation request body is missing")
+        return cls(
+            **record.model_dump(),
+            validation_request_body=ValidationRequestBody.model_validate_json(
+                record.request_body,
+            ),
+        )
+```
+
+Existing ValidationRequestBody.http_record changes only return type/constructor and adds
+the excluded typed body; its commit-ID guard and all envelope arguments remain unchanged:
+
+```diff
+- def http_record(self, commit: BackendCommitRecord) -> HttpRequestLogRecord:
++ def http_record(self, commit: BackendCommitRecord) -> BackendValidationRecord:
+```
+
+```diff
+- return HttpRequestLogRecord(
++ return BackendValidationRecord(
++     validation_request_body=self,
+      schema_version="1.1",
+```
+
+### 3. Existing consumer wiring
+
+api._validated_http_record delegates /validate before its commit-only branch, preserving
+the current generic return and error translation:
+
+```python
+if route == (HTTP_POST_METHOD, VALIDATE_PATH):
+    try:
+        BackendValidationRecord.from_http_request_log_record(validated)
+    except ValueError as exc:
+        raise _PushValidationError(Locale.REPLAY_COMMIT_INVALID) from exc
+    return validated
+```
+
+Remove /validate from the subsequent commit-specific branch; retain commit checks.
+api._apply_validation_record obtains the typed body at its existing entry:
+
+```python
+validation_record = BackendValidationRecord.from_http_request_log_record(record)
+body = validation_record.validation_request_body
+```
+
+KEEP all Store-dependent checks in that applicator: preceding commit/provider records,
+matching commit headers, exact re-evaluated verdict/submission/consumed-provider-ID
+agreement. Models must not acquire Store/DB access. Its existing result update becomes:
+
+```python
+return evaluated.model_copy(update={
+    "http_records": tuple(inputs),
+    "validation_record": validation_record,
+}), commit_database
+```
+
+In query_response.py, change only the domain AgentRuntimeAttemptRecord field:
+
+```python
+validation_record: BackendValidationRecord | None = None
+```
+
+KEEP _AgentRuntimeAttemptRecordJson.validation_record as HttpRequestLogRecord | None
+for the unchanged serialized shape. Its rehydration now constructs:
+
+```python
+validation_record = (
+    None
+    if serialized.validation_record is None
+    else BackendValidationRecord.from_http_request_log_record(
+        serialized.validation_record,
+    )
+)
+
+if validation_record is not None:
+    body = validation_record.validation_request_body
+    # Existing body/result/reference consistency checks remain.
+```
+
+Pass validation_record to the returned domain object. Add the corresponding getter to
+BackendComponent.AgentRuntimePort.AttemptRecordProperty:
+
+```python
+@property
+def validation_record(
+    self,
+) -> BackendComponent.ValidationRecordProperty | None: ...
+```
+
+Store's append/apply/readback orchestration is untouched, including:
+
+```python
+self.append_authoritative_record(body.http_record(commit))
+```
+
+### Verification and explicit tightening
+
+One intentional tightening IS approved: QueryResponse rehydration now validates the entire
+/validate envelope, not only its body/linked values. Preserve optional None for existing
+DTOs; no new compatibility fallback or migration. No valid-record wire/schema/UUID change.
+Extend focused existing test_api/test_http_interceptor coverage as appropriate for exact
+serialized JSON/UUID preservation, typed live/replay/query readback, malformed-envelope
+rejection and typed-body mismatch rejection. Preserve existing linkage/replay-agreement
+checks. Run applicable Ruff/strict mypy and these meaningful regressions; this model-only
+scope does not require a live Codex/operator run.
+
+P20 implementation is present in the four pinned production files and existing
+test_http_interceptor.py. Initial focused checks:21 passed,171 deselected (27.77s),
+Ruff and diff whitespace checks passed. Strict mypy identified Pydantic's decorated
+validator descriptor as incompatible with protocol callable methods. Kept both public
+validation methods and their rules unchanged, using the existing commit-record pattern:
+private @model_validator wrappers call validate_body()/validate_record(). No protocol
+weakening or type suppression. The snippet above reflects this typing-only wiring;
+ValidationRequestBody similarly has _validate_body calling validate_body. Final check:
+21 passed,171 deselected (29.25s); strict mypy passed54files. The two test-only header
+imports were corrected to their defining modules, without re-export assumptions.
+
+## P21 — Completed: RunOutcomeRecord naming consolidation
+
+Operator approved the exact immediately preceding proposal and requested recording it with
+exact snippets. Implementation and focused verification are complete. Unlike /validate, run outcomes
+already have a specialized full-exchange model: rename that existing model; do NOT introduce
+another wrapper. This scope does not authorize the separate operator-review corrections.
+
+### Exact rename scope
+
+| Current | Approved replacement |
+|---|---|
+| RunOutcomeResponse | RunOutcomeRecord |
+| RunOutcomeResponseProperty | RunOutcomeRecordProperty |
+| validate_run_outcome_response() | validate_record() |
+| _validate_run_outcome_response() | _validate_run_outcome_record() |
+| src/backend/helpers/data_models/run_outcome_response.py | src/backend/helpers/data_models/run_outcome_record.py |
+| _RunCommitView.run_outcome_response | _RunCommitView.run_outcome_record |
+
+Keep RunOutcomeRequest, RunOutcomeResponseBody, their protocols, and the field
+run_outcome_response_body unchanged: those names correctly describe their contents.
+The module move is a straight rename, with necessary import updates; no duplicate module,
+compatibility alias, new ConfigDict or unrelated renaming/test-file moves.
+
+### 1. Rename the existing record protocol
+
+Keep it under BackendComponent.ControlCentrePort in protected/src/architecture.py:
+
+```python
+class RunOutcomeRecordProperty(
+    HttpRequestLogRecordProtocol,
+    ComponentProtocol.PortProtocol.PropertyProtocol,
+    Protocol,
+):
+    @property
+    def run_outcome_request(
+        self,
+    ) -> ControlCentreComponent.BackendPort.RunOutcomeRequestProperty: ...
+
+    @property
+    def http_request_log_record(self) -> HttpRequestLogRecord: ...
+
+    @property
+    def run_outcome_response_body(
+        self,
+    ) -> BackendComponent.ControlCentrePort.RunOutcomeResponseBodyProperty: ...
+
+    @property
+    def run_outcome(
+        self,
+    ) -> ControlCentreComponent.LifecycleProperty: ...
+
+    def validate_record(self) -> Self: ...
+
+    @classmethod
+    def from_http_request_log_record(
+        cls,
+        record: HttpRequestLogRecord,
+    ) -> Self: ...
+```
+
+Update existing references in QueryResponseProperty.run_outcome_records and
+RunProperty.run_outcome_record. Do not move the protocol to another architectural port.
+
+### 2. Rename the existing model and validator methods
+
+In the renamed module:
+
+```diff
+- @implements[BackendComponent.ControlCentrePort.RunOutcomeResponseProperty]()
+- class RunOutcomeResponse(HttpRequestLogRecord):
++ @implements[BackendComponent.ControlCentrePort.RunOutcomeRecordProperty]()
++ class RunOutcomeRecord(HttpRequestLogRecord):
+      run_outcome_request: RunOutcomeRequest = Field(exclude=True)
+      run_outcome_response_body: RunOutcomeResponseBody = Field(exclude=True)
+```
+
+```diff
+- def validate_run_outcome_response(self) -> Self:
++ def validate_record(self) -> Self:
+```
+
+The entire validation body remains unchanged. Its existing wrapper becomes:
+
+```python
+@model_validator(mode="after")
+def _validate_run_outcome_record(self) -> Self:
+    return self.validate_record()
+```
+
+Keep both existing constructor implementations unchanged, using the renamed class:
+
+```python
+RunOutcomeRecord.from_run_outcome_request(...)
+RunOutcomeRecord.from_http_request_log_record(...)
+```
+
+### 3. Preserve the persistence contour
+
+The existing IPC handler changes by naming substitution only:
+
+```python
+record = RunOutcomeRecord.from_run_outcome_request(
+    ipc_request,
+    response_code=response_code,
+    response_headers=response_headers,
+    response_body=snapshot,
+    ready_to_respond_at_unix_usec=ready_at_unix_usec,
+)
+
+# Existing try/except and fatal persistence-error handling remain.
+stored = runtime.pipeline_config.backend_store.append_authoritative_record(
+    record.http_request_log_record,
+)
+return RunOutcomeRecord.from_http_request_log_record(stored)
+```
+
+Keep the actual existing try/except around append; the excerpt above does not remove it.
+Flask continues sending the returned DB-readback record's response fields. Do not send
+the response before persistence/readback or change Store ownership/transaction ordering.
+
+### 4. Update typed consumers, preserving serialized keys
+
+```python
+# QueryResponse
+run_outcome_records: tuple[RunOutcomeRecord, ...] = ()
+
+# Run — field name already correct
+run_outcome_record: RunOutcomeRecord | None = None
+
+# _RunCommitView — rename the misleading field and its consumers
+run_outcome_record: RunOutcomeRecord | None
+```
+
+Query's serialized DTO remains:
+
+```python
+run_outcome_records: tuple[HttpRequestLogRecord, ...]
+```
+
+Rehydration uses the renamed class:
+
+```python
+run_outcome_records=tuple(
+    RunOutcomeRecord.from_http_request_log_record(record)
+    for record in serialized.run_outcome_records
+)
+```
+
+Update imports, annotations and direct call sites in api.py, protected/src/backend/ipc.py,
+Store query, query_response.py, Dashboard dashboard_query_snapshot.py/run_event.py/ui.py,
+and corresponding existing tests/helpers. Include the _RunCommitView constructor keyword,
+property consumers and associated test-helper naming. Do not rename genuine response-body
+or HTTP-response concepts. No unrelated renames or test-file moves.
+
+### Unchanged boundaries and verification
+
+- /completed, /failed, /cancelled; request headers and empty request body.
+- Response body, HTTP codes, UUIDs, timestamps and ALL existing validation rules.
+- Replay-log/DB/NiceGUI serialized shapes and storage keys.
+- Store ownership, append/apply/readback ordering, queue and finalization behavior.
+
+Verify with existing run-outcome IPC, replay, query-roundtrip and Dashboard tests plus
+Ruff/strict mypy. No new testing framework, live Codex run, production-data access, task
+edit or permission change. P21 applied exactly as a naming-only change. No old full-record names/imports remain;
+response-body names are unchanged. Renamed record module compared against HEAD: exact
+text match after only the four approved identifier substitutions. IPC still persists,
+reads back and only then responds; its fatal error path remains unchanged.
+Verification:21 focused IPC/replay/query/UI cases passed,361 deselected (14.00s).
+Ruff PASS; strict mypy PASS54files; diff whitespace PASS. No task edits or live services.
+
+## P22 — Completed historical scope: display-only IDs on researcher cards
+
+Operator requested this surgical addition: in the researcher card, immediately after the
+existing commit record ID, show the validation record ID and then the run outcome record
+ID. Feasible using the existing NiceGUI wholesale query snapshot; no new Backend query,
+record, persisted field or DB column was needed for that former display-only scope.
+Its implementation/checks are historical. P24 is the separately approved replacement for
+this display-only approach; P22 is not reopened or relabeled pending.
+
+### Narrow contour
+
+- Add the two metadata lines to EACH committed section already rendered in the researcher
+  card, in this exact order: commit record ID, validation record ID, run outcome record ID.
+  No new rows/columns in either Dashboard table and no change to which cards are available.
+- Resolve validation by the displayed section's commit ID in the snapshot's existing
+  attempt records. Resolve the run outcome through the existing outcomes_by_session lookup
+  with BOTH that researcher's NameKey and that commit's Codex session ID. Do not use the
+  researcher's latest unrelated run/commit, fabricate IDs, or consult the run journal/DB.
+- Missing optional validation/outcome records display an em dash; do not infer that an
+  unqueried record does not exist in Backend. No committed section means no added ID block.
+- Build the extra fields ONLY in the transient deep-copied InnerDict data returned by the
+  existing selected_card_outer_dict. Insert them into dictionary order immediately after
+  KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL, then call the unchanged shared build_cards renderer.
+  Never mutate the stored query snapshot, source researcher, committed innerdicts or DB.
+- Keep a single Markdown source: displayed card, Download Markdown/TXT, Download DOCX and
+  publish completed naturally include the same metadata through their existing contour.
+  No independent export metadata path, Markdown string-replacement hack or new exporter.
+
+Limit production edits to src/control_centre/dashboard/ui.py and its existing protected
+helpers/locale.py, plus necessary existing test_ui helper/callpoint updates. No shared
+cards.py, Backend/API/Store, schema, query protocol, task, storage-slot or new-model changes.
+Uses P20/P21's typed records; no duplicated model work.
+
+### Historical implemented shape (superseded by P24)
+
+Display-only labels in Control Centre Locale, matching the existing commit label style;
+these are NOT new database-column constants:
+
+```python
+CARD_VALIDATION_RECORD_ID_LABEL: Final = "ktp.ai_augment_validation_record_id"
+CARD_RUN_OUTCOME_RECORD_ID_LABEL: Final = "ktp.ai_augment_run_outcome_record_id"
+CARD_RECORD_ID_UNAVAILABLE: Final = "—"
+```
+
+Pass the same captured in-memory snapshot through the existing render callback, without
+adding a service or granting a query capability:
+
+```python
+# _ControlCentreController.__init__ callback annotation
+render_card: Callable[[_Researcher, DashboardQuerySnapshot], str]
+
+# researcher_card: capture once and use this snapshot for researcher and metadata.
+snapshot = self._snapshot
+researcher = snapshot.researchers_by_namekey.get(namekey.to_json_key())
+# Preserve the existing unknown-namekey check.
+markdown = await asyncio.to_thread(self._render_card, researcher, snapshot)
+
+# Existing pure _BackendDatabaseClient.card callback
+def card(self, researcher: _Researcher, snapshot: DashboardQuerySnapshot) -> str:
+    selected = selected_card_outer_dict(researcher)
+    # Add ordered display-only metadata to selected's copied rows, as below.
+    # Existing build_cards call uses selected; remaining arguments/result checks stay.
+```
+
+The metadata lookup/insertion stays local to that existing card method. For each selected
+copied innerdict with a commit-ID field:
+
+```python
+attempts_by_commit = {
+    record.attempt.commit_record.record_id: record
+    for record in snapshot.attempts_by_namekey.get(researcher.namekey.to_json_key(), ())
+}
+
+# Inside the local iteration over selected's copied rows, after finding a commit-ID field:
+attempt_record = attempts_by_commit[UUID(str(inner.data[KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL]))]
+validation_record = attempt_record.validation_record
+session_id = attempt_record.attempt.commit_record.commit_request_body.codex_session_record.session_id
+run_outcome_record = (
+    None if session_id is None
+    else snapshot.outcomes_by_session.get((researcher.namekey.to_json_key(), session_id))
+)
+metadata = {
+    Locale.CARD_VALIDATION_RECORD_ID_LABEL: (
+        Locale.CARD_RECORD_ID_UNAVAILABLE
+        if validation_record is None else str(validation_record.record_id)
+    ),
+    Locale.CARD_RUN_OUTCOME_RECORD_ID_LABEL: (
+        Locale.CARD_RECORD_ID_UNAVAILABLE
+        if run_outcome_record is None else str(run_outcome_record.record_id)
+    ),
+}
+data: dict[str, Any] = {}
+for column, value in inner.data.items():
+    data[column] = value
+    if column == KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL:
+        data.update(metadata)
+inner.data = data
+```
+
+No fallback for inconsistent commit linkage: the existing snapshot already requires each
+committed innerdict to have its matching accepted attempt. Preserve that invariant.
+The missing-record placeholder is only for genuinely optional validation/outcome fields.
+
+Verification: focused existing card/UI tests for exact adjacent ordering, correct IDs with
+multiple commits/sessions, absent optional records, unchanged cards without commits, and
+unchanged snapshot/source dictionaries. Reuse existing export tests for the shared Markdown
+contour; no live Backend/Codex/browser run required just to verify these metadata lines.
+Implemented exactly in ui.py/Locale and existing test_ui helpers/tests. The real renderer
+regression first failed at the missing metadata assertion before implementation. Afterward:
+11 focused card/offline/download/publish cases passed,191 deselected (3.67s), plus the
+new no-commit exact shared-renderer comparison:1 passed,202 deselected (8.98s).
+Coverage includes three commits over two sessions (two commits sharing one outcome), all
+four present/absent validation/outcome combinations, a different researcher's same-session
+outcome and a newer unrelated session. Metadata order and UUIDs are exact. Original query,
+rehydrated snapshot and NiceGUI storage remain unchanged; no query is sent while rendering.
+Existing TXT/DOCX and completed-publishing tests confirm the shared Markdown callback path.
+No shared renderer/exporter edits or actual browser/Codex execution. Final Ruff PASS;
+strict mypy PASS54files; all callback/import callpoints reviewed. Only the approved card
+callback gains the captured snapshot argument; no new query capability or service.
 
 ## Completed immediate correction — prefix/suffix verification logging
 
@@ -394,6 +1892,14 @@ hook/private child environment, and installed-source reads must not import the p
 | P17 | Header grouping, horizontal DOCX/Markdown buttons, localized queue-processing labels | ui.py + protected Dashboard locale |
 | P18 | Original operator fixture/query/queue corrections, watcher interpreter, shared lint and graph review | Approved code implemented; F4 real query/browser check passed; F3/F7 diagnostics implemented, runtime findings unresolved; F5 replacement withdrawn; production acceptance pending |
 | P19 | Named subprocess helpers, shared explicit fixture and selectable markers; preserved isolation/timeouts | protected/tests/pytest_plugin.py + existing test callpoints |
+| P20 | Typed /validate record/body protocols and readback, unchanged wire format | validation_event.py, architecture.py, api.py, query_response.py |
+| P21 | Existing full run-outcome exchange renamed RunOutcomeRecord throughout | renamed run_outcome_record.py + direct protocol/consumer/test callpoints |
+| P22 | Completed historical display-only card-ID scope; superseded by P24 | ui.py + Control Centre Locale + test_ui.py |
+| P23 | Shared v1.1 HTTP-record structural protocol, model conformance and three record-protocol bases | shared http_request_log.py + protected architecture.py |
+| P24 | Persisted validation/outcome IDs, outcome-triggered materialization, pure card renderer, server-owned HTTP/IPC admission | Backend API/Store/server/IPC/models; Dashboard snapshot/card callpoints |
+
+P24 is implemented and locally verified. Its exact scope and verification boundary
+are pinned above; unrelated production-review corrections remain unapproved.
 
 ## Previous production incident — baseline for F1-F7 corrections
 
@@ -719,7 +2225,7 @@ Backend/Store/replay, queue/final-pull/outcome and wholesale-query contracts are
 | F5 | Configured DuckDB fallback binary absence | Latest PROD real binary/config fallback checks PASS; no replacement fixture or assertion weakening |
 | F6 | IPC availability diagnostic wording/path | Implemented; focused checks passed |
 | F7 | Investigate/fix operator task-variable availability | Not reproduced locally; safe activation regressions retained with original15s bound; operator-host issue unresolved |
-| F8 | Restore detailed direct-terminal Backend operation logs | Logs present/real IPC emission passes; latest PROD/local test exposes new unnecessary detour_db_path access; correction pending |
+| F8 | Restore detailed direct-terminal Backend operation logs | Logs present; IPC-only opening-log correction implemented and unchanged regression passes; full production serving acceptance remains open |
 
 #### F1 — NiceGUI test storage (implemented; local checks passed)
 
@@ -945,7 +2451,7 @@ not this table comment.
 Every resume/continue/read-only opening verifies the saved prefix independently, checks
 ordered DB coverage through exact EOF and each suffix line's raw SHA256, and validates
 anchor/line boundaries. Missing/extra/gapped rows, truncated prefix, invalid tail, absent
-anchor or legacy hash-column schema FAIL. Same config/anchor hash does not skip coverage
+anchor or missing required hash column FAIL. Same config/anchor hash does not skip coverage
 checks. Resume/IPC never insert missing history, repair tails, migrate old DBs, or silently
 rebuild. The failure latch and explicit --new remain the reconstruction boundary.
 
@@ -1002,7 +2508,7 @@ The literal DASHBOARD_QUERY_PATH = "/query" is preserved.
 
 Implemented: main uses confirmed=False for IPC-only, preserves common process lock/config/
 runtime setup, directly enters backend_store.read_only(), serves query-only IPC, and emits
-the clean-close acknowledgement only after successful context exit. Missing/invalid/legacy
+the clean-close acknowledgement only after successful context exit. Missing/invalid
 DB fails without initialization. backend_store_lifecycle is full-only, with Store.writable;
 explicit --new invokes the Store replay-confirmation callback. No read_only selector remains.
 
@@ -1542,7 +3048,7 @@ no additional code snippet was proposed for this explicitly approved requirement
 
 P13 verification: the existing audit-copy regression first failed against the old flat
 layout, then passed after implementation. Sharded readback, corruption/size/line-count,
-missing/legacy paths, shard/leaf symlinks, live-copy shard rejection, duplicate copy and
+missing/unsharded paths, shard/leaf symlinks, live-copy shard rejection, duplicate copy and
 real fsync of blob/both shards/root were verified. 18 selected CAS/audit/HTTP-interceptor
 cases passed; 6 malformed-digest cases passed after correcting their test fixture's unrelated
 minimum line_count (24 cases total). Ruff and strict mypy passed the four touched modules.
@@ -1851,7 +3357,7 @@ created by the selected detour tests are synthetic/temporary.
 | Step4 slow / default | Latest PROD1 skipped/4 deselected | Five referenced real parquet inputs unavailable; not accepted as a pass |
 | Mode3 / default | Approved test-console injection: full module6 pass; actual -s case passes at80/92-column PTYs; Ruff/mypy pass | This narrow fix is complete; assertions/production/tasks unchanged; broader acceptance failures remain separate |
 | Mode0 / mode0 env | Local2 pass/2 socket-restricted failures; delegated complete module4 pass,11 deprecation warnings (18.03s) | Closed for synthetic selection; no mode0 implementation edits |
-| AI augment normal / AI env | Latest PROD517 pass,9 fail,1 skip,3 deselect (110.02s) | IPC-only logging/test regression plus8 missing-Chrome launch failures; earlier Chromium elevate not equivalent provisioning |
+| AI augment normal / AI env | Latest PROD517 pass,9 fail,1 skip,3 deselect (110.02s) | IPC-only logging/test regression subsequently fixed and locally verified;8 missing-Chrome launch failures unresolved; earlier Chromium elevate not equivalent provisioning |
 | Appendwatch normal / AI env | not needs_sudo, not socket/task-launcher: 38 pass; actual task-interpreter smoke2 pass | P19 sentinel uses named shared helper, rechecked with P19 |
 | Pasted-model provider / AI env | Earlier fake-response22 pass; latest PROD real_api stage not reached | Normal task && stopped after9 failures |
 | Main extra real_api / default | Latest supplied production run3 pass,1 expected xfail (3.09s) | No new Assistant live run |
@@ -2097,12 +3603,19 @@ watcher-import sentinel body), and WORK. Existing conftest imports need no chang
 for this wiring. Exclude sample_deploy, paused BDD, production code and all Pixi task edits.
 Preserve the rest of P18 and its task boundary: two approved interpreter substitutions, no pre-commit wrapper changes; special verification in elevate only.
 
-## Remaining rollout acceptance — separate from pending implementation
+## Remaining rollout acceptance — separate from latest protocol/innerdict review
 
-Prior pinned code is present, but latest PROD reveals a missed F8 regression and pre-start
-diagnostic/verification gaps: it is NOT verified completion. F4's Chromium real-query test
-passed earlier; normal PROD browser task instead fails on missing Chrome. Remaining:
-IPC-only log/test correction, explicitly agreed browser provisioning/selection, root runtime
+P20/P21/P22 are complete within their historical approved scopes. P24's revised scope
+for outcome-triggered materialization/persisted IDs/HTTP-IPC ordering is implemented
+and locally verified after operator restore; its explicit IPC-timeout docstring is included.
+P23 shared HTTP-record protocol addition is COMPLETE and verified. These items do not fix
+or authorizes the separate production-review corrections below. P1-P19's implementation/
+evidence and production-acceptance limitations remain distinct.
+
+P1-P19 and earlier follow-up code are present. The F8 IPC-only log/test regression is now
+fixed and locally verified; pre-start diagnostic/verification gaps remain. F4's Chromium
+real-query test passed earlier; normal PROD browser task instead fails on missing Chrome.
+Remaining: explicitly agreed browser provisioning/selection, root runtime
 access correction and actual monitoring, diagnosis of the silent pre-start wait, full HTTP
 log/workflow/card acceptance. F5 binary prerequisite now PASS; four F7 activation checks
 also pass on PROD (earlier pixi-shell report not reproduced). Proposed corrections at the
@@ -2119,6 +3632,12 @@ there; do not imply untouched storage was proven for that command.
 ## Mandatory constraints for continuation
 
 - After compaction reread TASK and WORK IN FULL. Keep WORK current, remove stale pending claims.
+- Only the current detour contract exists: no historical-schema special cases, shape-based
+  migration or alternate parser. No special output-schema guard. This retry changes
+  ONLY P24; no audit, DTO-default removal or card-format tightening is authorized.
+- Operator forbids cast: proposed/implemented changes must use genuinely compatible types,
+  not cast or substitute type suppressions. P24's needless runtime argument/cast is removed.
+  This constraint does not authorize an unrelated codebase-wide refactor; P24 is narrowly approved.
 - All commands via pixi run -e detour-ai-augment; Ruff/mypy/pytest via env. Git read-only.
 - Task edits: prior interpreter substitutions, agent-owned elevate, and newly approved F7 fixes for proven environment-variable expansion defects only. Pre-commit structure/grep changes remain rejected.
 - Never run/import src.repl, edit src/cli.py, import another detour or edit TASK/HUMANS.

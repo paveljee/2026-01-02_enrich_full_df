@@ -8,10 +8,11 @@ import stat
 import tempfile
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager, closing, nullcontext
 from pathlib import Path
 from types import FrameType
-from typing import NoReturn
+from typing import Any, NoReturn
 from urllib.parse import urlsplit
 from uuid import UUID
 
@@ -19,6 +20,7 @@ from fastapi import status
 from flask import Flask, Response, request
 from pydantic import BaseModel, ConfigDict
 from werkzeug.serving import BaseWSGIServer, make_server
+from werkzeug.wsgi import ClosingIterator
 
 from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
@@ -39,8 +41,8 @@ from src.detours.detour_ai_augment.src.backend.helpers.data_models.commit_event 
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.query_response import (  # noqa: E501
     QueryResponse,
 )
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.run_outcome_response import (  # noqa: E501
-    RunOutcomeResponse,
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.run_outcome_record import (  # noqa: E501
+    RunOutcomeRecord,
     RunOutcomeResponseBody,
 )
 from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.query_request import (  # noqa: E501
@@ -71,9 +73,25 @@ DASHBOARD_SOCKET_PATH = Path(
 
 RunOutcomeHandler = Callable[
     [RunOutcomeRequest],
-    RunOutcomeResponse,
+    RunOutcomeRecord,
 ]
 QueryResponseHandler = Callable[[QueryRequest], QueryResponse]
+IpcRequestScope = Callable[[], AbstractContextManager[None]]
+
+
+class _DashboardQueryApp(Flask):
+    def __init__(self, request_scope: IpcRequestScope) -> None:
+        super().__init__("detour-ai-augment-dashboard-query")
+        self._request_scope = request_scope
+
+    def wsgi_app(
+        self, environ: dict[str, Any], start_response: Callable[..., Any],
+    ) -> Iterator[bytes]:
+        with (
+            self._request_scope(),
+            closing(ClosingIterator(super().wsgi_app(environ, start_response))) as response,
+        ):
+            yield from response
 
 
 # =============================================
@@ -155,7 +173,7 @@ def _capture_run_outcome_snapshot(
 def handle_run_outcome_request(
     runtime: AiAugmentBackendContext,
     ipc_request: RunOutcomeRequest,
-) -> RunOutcomeResponse:
+) -> RunOutcomeRecord:
     if (
         runtime.configured_namekey is None
         or ipc_request.namekey != runtime.configured_namekey
@@ -189,7 +207,7 @@ def handle_run_outcome_request(
         )
 
     ready_at_unix_usec = time.time_ns() // NANOSECONDS_PER_MICROSECOND
-    response = RunOutcomeResponse.from_run_outcome_request(
+    record = RunOutcomeRecord.from_run_outcome_request(
         ipc_request,
         response_code=response_code,
         response_headers=response_headers,
@@ -198,7 +216,7 @@ def handle_run_outcome_request(
     )
     try:
         stored = runtime.pipeline_config.backend_store.append_authoritative_record(
-            response.http_request_log_record,
+            record.http_request_log_record,
         )
     except Exception as exc:
         logger.critical(
@@ -207,7 +225,7 @@ def handle_run_outcome_request(
             exc,
         )
         raise SystemExit(1) from exc
-    return RunOutcomeResponse.from_http_request_log_record(stored)
+    return RunOutcomeRecord.from_http_request_log_record(stored)
 
 
 # =====================================
@@ -238,8 +256,9 @@ def create_dashboard_query_app(
     run_outcome_handler: RunOutcomeHandler | None = None,
     run_outcome_paths: frozenset[RunOutcomePath] = frozenset(),
     fatal_exit: Callable[[int], NoReturn] = os._exit,
+    request_scope: IpcRequestScope = nullcontext,
 ) -> Flask:
-    app = Flask("detour-ai-augment-dashboard-query")
+    app = _DashboardQueryApp(request_scope)
 
     @app.get(query_path)
     def dashboard_query() -> Response:
@@ -337,12 +356,14 @@ def start_dashboard_query_server(
     query_path: str,
     run_outcome_handler: RunOutcomeHandler | None = None,
     run_outcome_paths: frozenset[RunOutcomePath] = frozenset(),
+    request_scope: IpcRequestScope = nullcontext,
 ) -> _DashboardIpcServer:
     app = create_dashboard_query_app(
         query_response_handler,
         query_path=query_path,
         run_outcome_handler=run_outcome_handler,
         run_outcome_paths=run_outcome_paths,
+        request_scope=request_scope,
     )
     if not socket_path.is_absolute():
         raise RuntimeError(f"dashboard IPC path is not absolute: {socket_path}")
@@ -389,7 +410,7 @@ def stop_dashboard_query_server(handle: _DashboardIpcServer) -> None:
 
 
 def start_full_dashboard_query_server(
-    runtime: AiAugmentBackendContext,
+    runtime: AiAugmentBackendContext, *, request_scope: IpcRequestScope = nullcontext,
 ) -> _DashboardIpcServer:
     """
     Wrapper for `start_dashboard_query_server` to be used
@@ -399,7 +420,7 @@ def start_full_dashboard_query_server(
     Assumes that `stop_dashboard_query_server`
     is executed in the lifespan's `finally`.
     """
-    def run_outcome_handler(request: RunOutcomeRequest) -> RunOutcomeResponse:
+    def run_outcome_handler(request: RunOutcomeRequest) -> RunOutcomeRecord:
         return handle_run_outcome_request(runtime, request)
 
     def query_response_handler(request: QueryRequest) -> QueryResponse:
@@ -411,6 +432,7 @@ def start_full_dashboard_query_server(
         query_path=DASHBOARD_QUERY_PATH,
         run_outcome_handler=run_outcome_handler,
         run_outcome_paths=RUN_OUTCOME_PATHS,
+        request_scope=request_scope,
     )
 
 

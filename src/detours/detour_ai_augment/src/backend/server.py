@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import logging
 import os
-from collections.abc import AsyncGenerator, Iterator
+from collections.abc import AsyncGenerator, AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import uvicorn
 from fastapi import FastAPI
+from pydantic import PrivateAttr
 from rich.console import Console
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from src.detours.detour_ai_augment.protected.src.backend import ipc
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_augment_config import (  # noqa: E501
@@ -20,6 +23,7 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import L
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     BACKEND_STORE_CLOSED_CLEANLY,
 )
+from src.helpers.architecture import FrozenStrictModel
 
 from . import api
 from .helpers.data_models.ai_augment_backend_store import AiAugmentBackendStore
@@ -29,6 +33,62 @@ CONFIG_OPTION = "--config"
 IPC_ONLY_OPTION = "--ipc-only"
 DANGER_NO_VERIFY_HASH_OPTION = "--danger-no-verify-hash"
 logger = logging.getLogger(__name__)
+
+
+class _BackendRequestGate(FrozenStrictModel):
+    """Full-Backend HTTP/IPC admission, owned by its server event loop."""
+
+    _condition: asyncio.Condition = PrivateAttr(default_factory=asyncio.Condition)
+    _http_requests: int = PrivateAttr(default=0)
+    _ipc_pending: bool = PrivateAttr(default=False)
+
+    @asynccontextmanager
+    async def http(self) -> AsyncIterator[None]:
+        async with self._condition:
+            await self._condition.wait_for(lambda: not self._ipc_pending)
+            self._http_requests += 1
+        try:
+            yield
+        finally:
+            async with self._condition:
+                self._http_requests -= 1
+                self._condition.notify_all()
+
+    @asynccontextmanager
+    async def ipc(self) -> AsyncIterator[None]:
+        """Admit IPC after all in-flight HTTP and authoritative work finishes.
+
+        IPC intentionally permits clients to time out while FastAPI work finishes.
+        Client timeouts do not cancel Backend processing or durable persistence;
+        there is no IPC admission timeout or automatic retry.
+        """
+        try:
+            async with self._condition:
+                self._ipc_pending = True
+                logger.info("IPC waiting for %d active HTTP exchanges", self._http_requests)
+                await self._condition.wait_for(lambda: self._http_requests == 0)
+            pending = tuple(api.AUTHORITATIVE_BACKGROUND_TASKS)
+            if pending:
+                logger.info("IPC waiting for %d authoritative background tasks", len(pending))
+                await asyncio.gather(*(asyncio.shield(task) for task in pending))
+            logger.info("IPC admitted after HTTP persistence and authoritative work")
+            yield
+        finally:
+            async with self._condition:
+                self._ipc_pending = False
+                self._condition.notify_all()
+
+
+class _BackendRequestMiddleware:
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        async with scope["app"].state.request_gate.http():
+            await self.app(scope, receive, send)
 
 
 @contextmanager
@@ -64,13 +124,30 @@ async def lifespan(
     app: FastAPI, runtime: AiAugmentBackendContext, *,
     new: bool, confirmed: bool, yes: bool = False,
 ) -> AsyncGenerator[None, None]:
+    gate = _BackendRequestGate()
+    app.state.request_gate = gate
+    loop = asyncio.get_running_loop()
+
+    @contextmanager
+    def ipc_request_scope() -> Iterator[None]:
+        scope = gate.ipc()
+        asyncio.run_coroutine_threadsafe(scope.__aenter__(), loop).result()
+        try:
+            yield
+        finally:
+            asyncio.run_coroutine_threadsafe(
+                scope.__aexit__(None, None, None), loop,
+            ).result()
+
     with backend_store_lifecycle(runtime, new=new, confirmed=confirmed, yes=yes):
         async with api.lifespan(app, runtime):
-            dashboard_query_server = ipc.start_full_dashboard_query_server(runtime)
+            dashboard_query_server = ipc.start_full_dashboard_query_server(
+                runtime, request_scope=ipc_request_scope,
+            )
             try:
                 yield
             finally:
-                ipc.stop_dashboard_query_server(dashboard_query_server)
+                await asyncio.to_thread(ipc.stop_dashboard_query_server, dashboard_query_server)
 
 
 def full_backend_application(
@@ -81,6 +158,12 @@ def full_backend_application(
         async with lifespan(app, runtime, new=new, confirmed=confirmed, yes=yes):
             yield
 
+    if not any(
+        isinstance(middleware.cls, type)
+        and issubclass(middleware.cls, _BackendRequestMiddleware)
+        for middleware in api.app.user_middleware
+    ):
+        api.app.add_middleware(_BackendRequestMiddleware)
     api.app.state.runtime = runtime
     api.app.router.lifespan_context = application_lifespan
     return api.app
@@ -197,8 +280,7 @@ def main(argv: list[str] | None = None) -> None:
             verify_hash_on_init=verify_hash_on_init,
         )
         if args.ipc_only:
-            logger.info("Opening read-only Backend Store: %s",
-                        runtime.pipeline_config.backend_store.detour_db_path)
+            logger.info("Opening read-only Backend Store")
             with runtime.pipeline_config.backend_store.read_only():
                 logger.info("Read-only Backend Store ready; starting query-only IPC")
                 ipc.serve_dashboard_query_only(runtime)

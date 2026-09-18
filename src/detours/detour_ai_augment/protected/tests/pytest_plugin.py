@@ -579,8 +579,8 @@ def completed_query_fixture_process() -> None:
         BackendLifecycle,
         CodexRolloutRecord,
     )
-    from src.detours.detour_ai_augment.src.backend.helpers.data_models.run_outcome_response import (
-        RunOutcomeResponse,
+    from src.detours.detour_ai_augment.src.backend.helpers.data_models.run_outcome_record import (
+        RunOutcomeRecord,
         RunOutcomeResponseBody,
     )
     from src.detours.detour_ai_augment.src.control_centre.dashboard import ui
@@ -700,7 +700,7 @@ def completed_query_fixture_process() -> None:
             request_headers={NAME_KEY_HEADER: api.name_key_header(STARTUP_NAMEKEY)},
             request_body=b"",
         )
-        outcome = RunOutcomeResponse.from_run_outcome_request(
+        outcome = RunOutcomeRecord.from_run_outcome_request(
             request, response_code=200,
             response_headers={SOURCE_KEY_HEADER: draft.request_headers[SOURCE_KEY_HEADER]},
             response_body=RunOutcomeResponseBody(

@@ -92,8 +92,10 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     KTP_AI_AUGMENT_PLACE_OF_RESIDENCE_COL,
     KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL,
     KTP_AI_AUGMENT_RESEARCHER_AUTHOR_COL,
+    KTP_AI_AUGMENT_RUN_OUTCOME_RECORD_ID_COL,
     KTP_AI_AUGMENT_SESSION_METADATA_COL,
     KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL,
+    KTP_AI_AUGMENT_VALIDATION_RECORD_ID_COL,
     TEXT_ENCODING,
     AiAugmentCohort,
 )
@@ -104,7 +106,7 @@ from src.detours.detour_ai_augment.src.backend.helpers.data_models.model_http_in
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.validation_event import (  # noqa: E501
     VALIDATE_PATH,
-    ValidationRequestBody,
+    BackendValidationRecord,
 )
 from src.helpers.architecture import FrozenStrictModel
 from src.helpers.data_models import (
@@ -117,6 +119,7 @@ from src.helpers.data_models.http_request_log import (
     HttpRequestLogRecord,
 )
 from src.helpers.duckdb_utils import duckdb_quote_identifier
+from src.helpers.jsonlines import loads_jsonlines
 from src.helpers.name_matching import normalized_tokens_sql
 from src.helpers.vars import (
     CSV_ROW_INDEX_COL,
@@ -129,6 +132,7 @@ from src.helpers.vars import (
     KTP_FRAGMENT_COL,
     KTP_FRAGMENT_TYPE_COL,
     KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
+    KTP_INNERDICT_JSONLINES_COL,
     KTP_LAST_NAME_COL,
     KTP_NAMEKEY_COL,
     KTP_TABLE_1_EMPTY_VALUE_PLACEHOLDERS,
@@ -166,7 +170,7 @@ from .helpers.data_models.query_response import (
     AgentRuntimeAttempt,
     AgentRuntimeAttemptRecord,
 )
-from .helpers.data_models.run_outcome_response import RunOutcomeResponse
+from .helpers.data_models.run_outcome_record import RunOutcomeRecord
 
 logger = logging.getLogger(__name__)
 
@@ -535,6 +539,8 @@ CODEX_OUTPUT_SCHEMA = (
     (KTP_FIRST_NAME_COL, "VARCHAR NOT NULL"),
     (KTP_LAST_NAME_COL, "VARCHAR NOT NULL"),
     (KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL, "VARCHAR NOT NULL UNIQUE"),
+    (KTP_AI_AUGMENT_VALIDATION_RECORD_ID_COL, "VARCHAR"),
+    (KTP_AI_AUGMENT_RUN_OUTCOME_RECORD_ID_COL, "VARCHAR"),
     (KTP_AI_AUGMENT_COMMIT_REQUEST_BODY_COL, "VARCHAR NOT NULL"),
     (KTP_AI_AUGMENT_SESSION_METADATA_COL, "VARCHAR NOT NULL"),
     *(
@@ -3300,12 +3306,19 @@ def _validated_http_record(record: HttpRequestLogRecord) -> HttpRequestLogRecord
     route = (validated.method, validated.path)
     if validated.method == HTTP_POST_METHOD and validated.path in RUN_OUTCOME_PATHS:
         try:
-            RunOutcomeResponse.from_http_request_log_record(validated)
+            RunOutcomeRecord.from_http_request_log_record(validated)
         except ValueError as exc:
             raise _PushValidationError(Locale.REPLAY_RECORD_CONTOUR_INVALID) from exc
         return validated
 
-    if route not in {AUTHORITATIVE_COMMIT_ROUTE, (HTTP_POST_METHOD, VALIDATE_PATH)}:
+    if route == (HTTP_POST_METHOD, VALIDATE_PATH):
+        try:
+            BackendValidationRecord.from_http_request_log_record(validated)
+        except ValueError as exc:
+            raise _PushValidationError(Locale.REPLAY_COMMIT_INVALID) from exc
+        return validated
+
+    if route != AUTHORITATIVE_COMMIT_ROUTE:
         transport_failure = (
             validated.host != SYNTHETIC_COMMIT_HOST
             and route not in AUTHORITATIVE_FASTAPI_ROUTES
@@ -3338,10 +3351,7 @@ def _validated_http_record(record: HttpRequestLogRecord) -> HttpRequestLogRecord
     ):
         raise _PushValidationError(Locale.REPLAY_COMMIT_INVALID)
     try:
-        if route == AUTHORITATIVE_COMMIT_ROUTE:
-            CommitRequestBody.validate_serialized_json(validated.request_body)
-        else:
-            ValidationRequestBody.model_validate_json(validated.request_body)
+        CommitRequestBody.validate_serialized_json(validated.request_body)
     except (ValidationError, ValueError) as exc:
         raise _PushValidationError(Locale.REPLAY_COMMIT_INVALID) from exc
     return validated
@@ -3617,13 +3627,32 @@ def _apply_validation_record(
     runtime: AiAugmentBackendContext,
     record: HttpRequestLogRecord,
 ) -> tuple[AgentRuntimeAttemptRecord, bool]:
-    if record.request_body is None:
-        raise ReplayInputMissing("Validation body is missing")
-    body = ValidationRequestBody.model_validate_json(record.request_body)
+    validation_record = BackendValidationRecord.from_http_request_log_record(record)
+    body = validation_record.validation_request_body
     ordinal, _ = store.http_record_with_ordinal(record.record_id)
     commit_ordinal, commit = store.http_record_with_ordinal(body.commit_id)
     if commit_ordinal >= ordinal or record.request_headers != commit.request_headers:
         raise ReplayInputMissing("Validation commit linkage is invalid")
+    typed_commit = _backend_commit_record(store, commit)
+    session_id = typed_commit.commit_request_body.codex_session_record.session_id
+    namekey = name_key_from_header_value(commit.request_headers.get(NAME_KEY_HEADER))
+    placeholders = ", ".join("?" for _path in RUN_OUTCOME_PATHS)
+    outcomes = store.execute(
+        f"SELECT {AUTHORITATIVE_RECORD_PAYLOAD_COLUMN} FROM {AUTHORITATIVE_RECORDS_TABLE} "
+        f"WHERE {AUTHORITATIVE_RECORD_METHOD_COLUMN} = ? "
+        f"AND {AUTHORITATIVE_RECORD_PATH_COLUMN} IN ({placeholders})",
+        [HTTP_POST_METHOD, *(path.value for path in sorted(RUN_OUTCOME_PATHS))],
+    ).fetchall()
+    for (payload,) in outcomes:
+        outcome = RunOutcomeRecord.from_http_request_log_record(
+            HttpRequestLogRecord.model_validate_json(payload),
+        )
+        if (
+            session_id is not None
+            and outcome.run_outcome_request.namekey == namekey
+            and outcome.run_outcome_response_body.codex_session_record.session_id == session_id
+        ):
+            raise ReplayInputMissing("Validation must precede its session's run outcome")
     inputs: list[HttpRequestLogRecord] = []
     for record_id in body.http_record_ids:
         input_ordinal, http_record = store.http_record_with_ordinal(record_id)
@@ -3646,8 +3675,71 @@ def _apply_validation_record(
     ):
         raise ReplayInputMissing("Recorded validation does not match its replay inputs")
     return evaluated.model_copy(update={
-        "http_records": tuple(inputs), "validation_record": record,
+        "http_records": tuple(inputs), "validation_record": validation_record,
     }), commit_database
+
+
+def _apply_run_outcome_record(
+    store: AiAugmentBackendStore,
+    outcome: RunOutcomeRecord,
+) -> None:
+    session_id = outcome.run_outcome_response_body.codex_session_record.session_id
+    if session_id is None:
+        return
+    exists = store.execute(
+        "SELECT count(*) FROM information_schema.tables WHERE table_name = ?",
+        [CODEX_OUTPUT_ROWS_TABLE],
+    ).fetchone()
+    if exists is None or int(exists[0]) == 0:
+        return
+    namekey = outcome.run_outcome_request.namekey
+    rows = store.execute(
+        f"SELECT {duckdb_quote_identifier(KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL)} "
+        f"FROM {CODEX_OUTPUT_ROWS_TABLE} "
+        f"WHERE {duckdb_quote_identifier(KTP_NAMEKEY_COL)} = ? "
+        f"AND {duckdb_quote_identifier(KTP_AI_AUGMENT_RUN_OUTCOME_RECORD_ID_COL)} IS NULL",
+        [namekey.to_json_key()],
+    ).fetchall()
+    outcome_ordinal, _ = store.http_record_with_ordinal(outcome.record_id)
+    updated = 0
+    for (value,) in rows:
+        commit_id = UUID(str(value))
+        commit_ordinal, http_commit = store.http_record_with_ordinal(commit_id)
+        commit = _backend_commit_record(store, http_commit)
+        if commit.commit_request_body.codex_session_record.session_id != session_id:
+            continue
+        if name_key_from_header_value(commit.request_headers.get(NAME_KEY_HEADER)) != namekey:
+            raise ReplayInputMissing("Run outcome commit NameKey does not match")
+        linked = store.execute(
+            f"SELECT json_extract_string({AUTHORITATIVE_ATTEMPT_PAYLOAD_COLUMN}, "
+            "'$.validation_record.record_id') "
+            f"FROM {AUTHORITATIVE_ATTEMPTS_TABLE} "
+            f"WHERE {AUTHORITATIVE_ATTEMPT_COMMIT_ID_COLUMN} = ?",
+            [str(commit_id)],
+        ).fetchone()
+        if linked is None or linked[0] is None:
+            raise ReplayInputMissing("Run outcome accepted row has no validation record")
+        validation_ordinal, http_validation = store.http_record_with_ordinal(UUID(linked[0]))
+        validation = BackendValidationRecord.from_http_request_log_record(http_validation)
+        body = validation.validation_request_body
+        if (
+            body.commit_id != commit_id
+            or validation.request_headers != commit.request_headers
+            or body.post_commit_validation.result is not BackendLifecycle.ACCEPTED
+            or not commit_ordinal < validation_ordinal < outcome_ordinal
+        ):
+            raise ReplayInputMissing("Run outcome validation linkage is invalid")
+        store.execute(
+            f"UPDATE {CODEX_OUTPUT_ROWS_TABLE} SET "
+            f"{duckdb_quote_identifier(KTP_AI_AUGMENT_VALIDATION_RECORD_ID_COL)} = ?, "
+            f"{duckdb_quote_identifier(KTP_AI_AUGMENT_RUN_OUTCOME_RECORD_ID_COL)} = ? "
+            f"WHERE {duckdb_quote_identifier(KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL)} = ?",
+            [str(validation.record_id), str(outcome.record_id), str(commit.record_id)],
+        )
+        updated += 1
+    if updated:
+        _replace_codex_output_view(store)
+        logger.info("Run outcome %s: materialized %d accepted sections", outcome.record_id, updated)
 
 
 def _attempt_record_from_serialized_json(
@@ -3981,6 +4073,8 @@ def _replace_codex_output_view(store: AiAugmentBackendStore) -> None:
         CREATE OR REPLACE VIEW {CODEX_OUTPUT_VIEW} AS
         SELECT {projection}
         FROM {CODEX_OUTPUT_ROWS_TABLE}
+        WHERE {duckdb_quote_identifier(KTP_AI_AUGMENT_VALIDATION_RECORD_ID_COL)} IS NOT NULL
+          AND {duckdb_quote_identifier(KTP_AI_AUGMENT_RUN_OUTCOME_RECORD_ID_COL)} IS NOT NULL
         ORDER BY
             {duckdb_quote_identifier(KTP_FILENAME_COL)},
             {duckdb_quote_identifier(KTP_FRAGMENT_COL)},
@@ -4008,7 +4102,6 @@ def append_codex_output(
         )
     except duckdb.ConstraintException as exc:
         raise _PushValidationError(Locale.ACCEPTED_IDENTITY_DUPLICATE) from exc
-    _replace_codex_output_view(store)
 
 
 def selected_card_outer_dict(
@@ -4138,6 +4231,8 @@ def write_accepted_submission(
         KTP_FIRST_NAME_COL: singular_outerdict.namekey.first_name,
         KTP_LAST_NAME_COL: singular_outerdict.namekey.last_name,
         KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL: commit_record_id,
+        KTP_AI_AUGMENT_VALIDATION_RECORD_ID_COL: None,
+        KTP_AI_AUGMENT_RUN_OUTCOME_RECORD_ID_COL: None,
         KTP_AI_AUGMENT_COMMIT_REQUEST_BODY_COL: commit_request_body,
         KTP_AI_AUGMENT_SESSION_METADATA_COL: rollout_index.session.summary_json,
         **rendered,
@@ -4415,28 +4510,30 @@ def _committed_innerdicts(
 ) -> tuple[CommittedInnerDict, ...]:
     exists = store.execute(
         "SELECT count(*) FROM information_schema.tables WHERE table_name = ?",
-        [CODEX_OUTPUT_ROWS_TABLE],
+        [CODEX_INNERDICT_TABLE],
     ).fetchone()
     if exists is None or int(exists[0]) == 0:
         return ()
-    rows = store.query_mappings(
-        f"SELECT * FROM {CODEX_OUTPUT_ROWS_TABLE} "
-        f"ORDER BY {duckdb_quote_identifier(KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL)}"
-    )
+    rows = store.execute(
+        f"SELECT {duckdb_quote_identifier(KTP_NAMEKEY_COL)}, "
+        f"{duckdb_quote_identifier(KTP_INNERDICT_JSONLINES_COL)} "
+        f"FROM {CODEX_INNERDICT_TABLE} "
+        f"ORDER BY {duckdb_quote_identifier(KTP_NAMEKEY_COL)}"
+    ).fetchall()
     committed_innerdicts: list[CommittedInnerDict] = []
-    for values in rows:
+    for namekey_json, payload in rows:
         try:
-            commit_record_id = UUID(str(values[KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL]))
-            _ordinal, http_record = store.http_record_with_ordinal(commit_record_id)
-            committed_innerdicts.append(
-                CommittedInnerDict(
-                    innerdict=InnerDict.from_mapping(
-                        values,
-                        _CodexMatchProcedure(),
-                    ),
-                    commit_record=_backend_commit_record(store, http_record),
+            for values in loads_jsonlines(payload):
+                commit_record_id = UUID(str(values[KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL]))
+                _ordinal, http_record = store.http_record_with_ordinal(commit_record_id)
+                committed_innerdicts.append(
+                    CommittedInnerDict(
+                        innerdict=InnerDict.from_mapping(
+                            {KTP_NAMEKEY_COL: namekey_json, **values}, _CodexMatchProcedure(),
+                        ),
+                        commit_record=_backend_commit_record(store, http_record),
+                    )
                 )
-            )
         except (
             KeyError,
             TypeError,

@@ -68,8 +68,8 @@ class RunOutcomeResponseBody(FrozenStrictModel):
         return self.serialize()
 
 
-@implements[BackendComponent.ControlCentrePort.RunOutcomeResponseProperty]()
-class RunOutcomeResponse(HttpRequestLogRecord):
+@implements[BackendComponent.ControlCentrePort.RunOutcomeRecordProperty]()
+class RunOutcomeRecord(HttpRequestLogRecord):
     run_outcome_request: RunOutcomeRequest = Field(exclude=True)
     run_outcome_response_body: RunOutcomeResponseBody = Field(exclude=True)
 
@@ -112,7 +112,7 @@ class RunOutcomeResponse(HttpRequestLogRecord):
             }
         )
 
-    def validate_run_outcome_response(self) -> Self:
+    def validate_record(self) -> Self:
         projected_request_record = HttpRequestLogRecord.model_validate(
             self.model_dump()
             | {
@@ -167,8 +167,8 @@ class RunOutcomeResponse(HttpRequestLogRecord):
         return self
 
     @model_validator(mode="after")
-    def _validate_run_outcome_response(self) -> Self:
-        return self.validate_run_outcome_response()
+    def _validate_run_outcome_record(self) -> Self:
+        return self.validate_record()
 
     @classmethod
     def from_http_request_log_record(

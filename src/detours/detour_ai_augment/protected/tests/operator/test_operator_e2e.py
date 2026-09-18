@@ -61,8 +61,8 @@ from src.detours.detour_ai_augment.src.backend.helpers.data_models.commit_event 
     BackendCommitRecord,
     BackendLifecycle,
 )
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.run_outcome_response import (
-    RunOutcomeResponse,
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.run_outcome_record import (
+    RunOutcomeRecord,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.validation_event import (
     VALIDATE_PATH,
@@ -1063,7 +1063,7 @@ def validate_workflow_artifacts(
         run_outcome_record.request_headers,
         SOURCE_KEY_HEADER,
     ) is None
-    validated_run_outcome = RunOutcomeResponse.from_http_request_log_record(
+    validated_run_outcome = RunOutcomeRecord.from_http_request_log_record(
         run_outcome_record
     )
     run_outcome_snapshot = validated_run_outcome.run_outcome_response_body

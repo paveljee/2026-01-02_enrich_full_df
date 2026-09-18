@@ -260,7 +260,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
         from .ai_augment_context import AiAugmentBackendContext
         from .ai_augment_singular_outer_dict import AiAugmentSingularOuterDict
         from .query_response import QueryResponse
-        from .run_outcome_response import RunOutcomeResponse
+        from .run_outcome_record import RunOutcomeRecord
 
         runtime = cast(AiAugmentBackendContext, runtime)
         with self._reading():
@@ -294,7 +294,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
                 except (api._PushValidationError, ValidationError, ValueError) as exc:
                     raise api._PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT) from exc
 
-            def run_outcome_records() -> tuple[RunOutcomeResponse, ...]:
+            def run_outcome_records() -> tuple[RunOutcomeRecord, ...]:
                 placeholders = ", ".join("?" for _path in RUN_OUTCOME_PATHS)
                 rows = conn.execute(
                     f"SELECT {api.AUTHORITATIVE_RECORD_PAYLOAD_COLUMN} "
@@ -312,7 +312,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
                         HttpRequestLogRecord.model_validate_json(str(row[0])) for row in rows
                     )
                     return tuple(
-                        RunOutcomeResponse.from_http_request_log_record(record)
+                        RunOutcomeRecord.from_http_request_log_record(record)
                         for record in records
                     )
                 except (ValidationError, ValueError) as exc:
@@ -665,8 +665,12 @@ class AiAugmentBackendStore(FrozenStrictModel):
         *, line_number: int, raw_line: bytes,
     ) -> AgentRuntimeAttemptRecord | None:
         from src.detours.detour_ai_augment.src.backend import api
+        from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.run_outcome import (  # noqa: E501
+            RUN_OUTCOME_PATHS,
+        )
 
         from .ai_augment_context import AiAugmentBackendContext
+        from .run_outcome_record import RunOutcomeRecord
 
         applied: AgentRuntimeAttemptRecord | None = None
         with self._transaction() as conn:
@@ -685,6 +689,11 @@ class AiAugmentBackendStore(FrozenStrictModel):
                         record, line_number=line_number, raw_line=raw_line,
                     )
                 self._insert_attempt_record(applied)
+            elif record.method == api.HTTP_POST_METHOD and record.path in RUN_OUTCOME_PATHS:
+                api._apply_run_outcome_record(
+                    self,
+                    RunOutcomeRecord.from_http_request_log_record(record),
+                )
         return applied
 
     @contextmanager

@@ -12,6 +12,8 @@ from typing import (
 )
 from uuid import UUID
 
+from pydantic import JsonValue
+
 from src.helpers.config import PipelineConfig
 from src.helpers.data_models import (
     HttpRequestLogRecord,
@@ -19,6 +21,7 @@ from src.helpers.data_models import (
     MatchingProcedure,
     NameKey,
 )
+from src.helpers.data_models.http_request_log import HttpRequestLogRecordProtocol
 
 from .acme_protocol import ComponentProtocol
 from .backend.helpers.data_models.pydantic_to_paste import StandardizedSubmission
@@ -141,6 +144,7 @@ class BackendComponent(
         def serialize(self) -> dict[str, object]: ...
 
     class CommitRecordProperty(
+        HttpRequestLogRecordProtocol,
         ComponentProtocol.PropertyProtocol,
         Protocol,
     ):
@@ -180,6 +184,52 @@ class BackendComponent(
 
         def validate_lifecycle(self) -> Self: ...
 
+    class ValidationRequestBodyProperty(
+        ComponentProtocol.PropertyProtocol,
+        Protocol,
+    ):
+        @property
+        def commit_id(self) -> UUID: ...
+
+        @property
+        def post_commit_validation(
+            self,
+        ) -> BackendComponent.PostCommitValidationProperty: ...
+
+        @property
+        def submission_type(
+            self,
+        ) -> Literal["Submission", "StandardizedSubmission"] | None: ...
+
+        @property
+        def submission(self) -> Mapping[str, JsonValue] | None: ...
+
+        @property
+        def http_record_ids(self) -> tuple[UUID, ...]: ...
+
+        def validate_body(self) -> Self: ...
+
+    class ValidationRecordProperty(
+        HttpRequestLogRecordProtocol,
+        ComponentProtocol.PropertyProtocol,
+        Protocol,
+    ):
+        @property
+        def http_request_log_record(self) -> HttpRequestLogRecord: ...
+
+        @property
+        def validation_request_body(
+            self,
+        ) -> BackendComponent.ValidationRequestBodyProperty: ...
+
+        def validate_record(self) -> Self: ...
+
+        @classmethod
+        def from_http_request_log_record(
+            cls,
+            record: HttpRequestLogRecord,
+        ) -> Self: ...
+
     class AgentRuntimePort(
         ComponentProtocol.PortProtocol,
         Protocol,
@@ -200,6 +250,11 @@ class BackendComponent(
 
             @property
             def ground_truth_innerdict(self) -> InnerDict | None: ...
+
+            @property
+            def validation_record(
+                self,
+            ) -> BackendComponent.ValidationRecordProperty | None: ...
 
             @classmethod
             def from_serialized_json(
@@ -357,7 +412,8 @@ class BackendComponent(
 
             def serialize(self) -> dict[str, object]: ...
 
-        class RunOutcomeResponseProperty(
+        class RunOutcomeRecordProperty(
+            HttpRequestLogRecordProtocol,
             ComponentProtocol.PortProtocol.PropertyProtocol,
             Protocol,
         ):
@@ -379,7 +435,7 @@ class BackendComponent(
                 self,
             ) -> ControlCentreComponent.LifecycleProperty: ...
 
-            def validate_run_outcome_response(self) -> Self: ...
+            def validate_record(self) -> Self: ...
 
             @classmethod
             def from_http_request_log_record(
@@ -411,7 +467,7 @@ class BackendComponent(
             def run_outcome_records(
                 self,
             ) -> tuple[
-                BackendComponent.ControlCentrePort.RunOutcomeResponseProperty,
+                BackendComponent.ControlCentrePort.RunOutcomeRecordProperty,
                 ...,
             ]: ...
 
@@ -578,7 +634,7 @@ class ControlCentreComponent(
         @property
         def run_outcome_record(
             self,
-        ) -> BackendComponent.ControlCentrePort.RunOutcomeResponseProperty | None: ...
+        ) -> BackendComponent.ControlCentrePort.RunOutcomeRecordProperty | None: ...
 
     class BackendPort(
         ComponentProtocol.PortProtocol,

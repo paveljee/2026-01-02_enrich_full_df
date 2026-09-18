@@ -15,7 +15,9 @@ from src.detours.detour_ai_augment.protected.src.architecture import (
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL,
+    KTP_AI_AUGMENT_RUN_OUTCOME_RECORD_ID_COL,
     KTP_AI_AUGMENT_SESSION_METADATA_COL,
+    KTP_AI_AUGMENT_VALIDATION_RECORD_ID_COL,
 )
 from src.helpers.architecture import FrozenStrictModel, implements
 from src.helpers.data_models import (
@@ -113,6 +115,12 @@ class CommittedInnerDict(FrozenStrictModel):
             self.commit_record.record_id
         ):
             raise ValueError("committed innerdict ID does not match its commit")
+        for column in (
+            KTP_AI_AUGMENT_VALIDATION_RECORD_ID_COL,
+            KTP_AI_AUGMENT_RUN_OUTCOME_RECORD_ID_COL,
+        ):
+            if UUID(self._required_text(column)).version != 7:
+                raise ValueError("committed innerdict record ID must be UUIDv7")
         session_id = body.codex_session_record.session_id
         if session_id is None:
             raise ValueError("committed innerdict Codex session ID is missing")

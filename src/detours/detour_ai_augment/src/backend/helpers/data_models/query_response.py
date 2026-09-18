@@ -33,8 +33,8 @@ from .ai_augment_singular_outer_dict import (
 from .commit_event import BackendCommitRecord, PostCommitValidation
 from .committed_innerdict import _BackendCommitRecordJson
 from .model_http_interceptor import ModelHttpInterceptor
-from .run_outcome_response import RunOutcomeResponse
-from .validation_event import ValidationRequestBody
+from .run_outcome_record import RunOutcomeRecord
+from .validation_event import BackendValidationRecord
 
 
 @implements[AgentRuntimeComponent.AttemptProperty]()
@@ -107,7 +107,7 @@ class AgentRuntimeAttemptRecord(FrozenStrictModel):
     ground_truth_innerdict: InnerDict | None
 
     http_records: tuple[HttpRequestLogRecord, ...] = ()
-    validation_record: HttpRequestLogRecord | None = None
+    validation_record: BackendValidationRecord | None = None
 
     @model_validator(mode="after")
     def validate_attempt_record(self) -> Self:
@@ -139,10 +139,15 @@ class AgentRuntimeAttemptRecord(FrozenStrictModel):
         else:
             loaded_ground_truth = None
         submission = None
-        if serialized.validation_record is not None:
-            body = ValidationRequestBody.model_validate_json(
-                serialized.validation_record.request_body or ""
+        validation_record = (
+            None
+            if serialized.validation_record is None
+            else BackendValidationRecord.from_http_request_log_record(
+                serialized.validation_record,
             )
+        )
+        if validation_record is not None:
+            body = validation_record.validation_request_body
             if (
                 body.commit_id != serialized.attempt.commit_record.http_record.record_id
                 or body.post_commit_validation != serialized.attempt.post_commit_validation
@@ -150,7 +155,7 @@ class AgentRuntimeAttemptRecord(FrozenStrictModel):
                 or body.submission_type != serialized.submission_type
                 or body.http_record_ids
                 != tuple(record.record_id for record in serialized.http_records)
-                or serialized.validation_record.request_headers
+                or validation_record.request_headers
                 != serialized.attempt.commit_record.http_record.request_headers
             ):
                 raise ValueError("Serialized validation inputs do not match the result")
@@ -181,7 +186,7 @@ class AgentRuntimeAttemptRecord(FrozenStrictModel):
             submission=submission,
             ground_truth_innerdict=loaded_ground_truth,
             http_records=serialized.http_records,
-            validation_record=serialized.validation_record,
+            validation_record=validation_record,
         )
 
     def serialize(self) -> dict[str, object]:
@@ -205,7 +210,7 @@ class _QueryResponseJson(FrozenStrictModel):
 class QueryResponse(FrozenStrictModel):
     attempts: tuple[AgentRuntimeAttemptRecord, ...]
     ai_augment_singular_outerdicts: tuple[AiAugmentSingularOuterDict, ...]
-    run_outcome_records: tuple[RunOutcomeResponse, ...] = ()
+    run_outcome_records: tuple[RunOutcomeRecord, ...] = ()
 
     @classmethod
     def from_serialized_json(
@@ -242,7 +247,7 @@ class QueryResponse(FrozenStrictModel):
             attempts=tuple(attempts),
             ai_augment_singular_outerdicts=ai_augment_singular_outerdicts,
             run_outcome_records=tuple(
-                RunOutcomeResponse.from_http_request_log_record(record)
+                RunOutcomeRecord.from_http_request_log_record(record)
                 for record in serialized.run_outcome_records
             ),
         )

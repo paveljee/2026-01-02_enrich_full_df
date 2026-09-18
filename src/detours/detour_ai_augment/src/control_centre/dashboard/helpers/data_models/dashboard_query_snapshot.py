@@ -9,7 +9,11 @@ from uuid import UUID
 
 from pydantic import model_validator
 
-from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import AiAugmentCohort
+from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
+    KTP_AI_AUGMENT_RUN_OUTCOME_RECORD_ID_COL,
+    KTP_AI_AUGMENT_VALIDATION_RECORD_ID_COL,
+    AiAugmentCohort,
+)
 from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helpers.locale import (
     Locale,
 )
@@ -22,7 +26,7 @@ from .....backend.helpers.data_models.ai_augment_singular_outer_dict import (
 from .....backend.helpers.data_models.commit_event import BackendLifecycle
 from .....backend.helpers.data_models.committed_innerdict import CommittedInnerDict
 from .....backend.helpers.data_models.query_response import AgentRuntimeAttemptRecord, QueryResponse
-from .....backend.helpers.data_models.run_outcome_response import RunOutcomeResponse
+from .....backend.helpers.data_models.run_outcome_record import RunOutcomeRecord
 from .run_outcome import NAME_KEY_HEADER, name_key_from_header_value
 
 
@@ -61,7 +65,7 @@ class DashboardQuerySnapshot(FrozenStrictModel):
         return MappingProxyType({key: tuple(records) for key, records in grouped.items()})
 
     @cached_property
-    def outcomes_by_session(self) -> Mapping[tuple[str, UUID], RunOutcomeResponse]:
+    def outcomes_by_session(self) -> Mapping[tuple[str, UUID], RunOutcomeRecord]:
         return MappingProxyType({
             (run_outcome_record.run_outcome_request.namekey.to_json_key(), session_id):
             run_outcome_record
@@ -93,6 +97,9 @@ class DashboardQuerySnapshot(FrozenStrictModel):
         if len(self.committed_by_id) != committed_count:
             raise ValueError(Locale.ATTEMPT_DATABASE_INCONSISTENT)
 
+        outcomes_by_id = {
+            record.record_id: record for record in self.query_response.run_outcome_records
+        }
         seen: set[UUID] = set()
         accepted_ids: set[UUID] = set()
         for namekey, records in self.attempts_by_namekey.items():
@@ -103,6 +110,12 @@ class DashboardQuerySnapshot(FrozenStrictModel):
                 commit_id = commit.record_id
                 result = record.attempt.post_commit_validation.result
                 accepted = self.committed_by_id.get(commit_id)
+                session_id = commit.commit_request_body.codex_session_record.session_id
+                finalized = (
+                    result is BackendLifecycle.ACCEPTED
+                    and session_id is not None
+                    and (namekey, session_id) in self.outcomes_by_session
+                )
                 if (
                     commit_id in seen
                     or result not in {
@@ -110,14 +123,26 @@ class DashboardQuerySnapshot(FrozenStrictModel):
                         BackendLifecycle.REJECTED,
                         BackendLifecycle.CONFIGURATION_ERROR,
                     }
-                    or (result is BackendLifecycle.ACCEPTED) != (accepted is not None)
+                    or finalized != (accepted is not None)
                 ):
                     raise ValueError(Locale.ATTEMPT_DATABASE_INCONSISTENT)
                 seen.add(commit_id)
                 if accepted is not None:
-                    session_id = commit.commit_request_body.codex_session_record.session_id
+                    validation_id = UUID(
+                        accepted.innerdict.data[KTP_AI_AUGMENT_VALIDATION_RECORD_ID_COL]
+                    )
+                    outcome_id = UUID(
+                        accepted.innerdict.data[KTP_AI_AUGMENT_RUN_OUTCOME_RECORD_ID_COL]
+                    )
+                    outcome = outcomes_by_id.get(outcome_id)
                     if (
-                        session_id is None
+                        record.validation_record is None
+                        or validation_id != record.validation_record.record_id
+                        or outcome is None
+                        or outcome.run_outcome_request.namekey.to_json_key() != namekey
+                        or outcome.run_outcome_response_body.codex_session_record.session_id
+                        != session_id
+                        or session_id is None
                         or session_id
                         != (accepted.commit_record.commit_request_body
                             .codex_session_record.session_id)
