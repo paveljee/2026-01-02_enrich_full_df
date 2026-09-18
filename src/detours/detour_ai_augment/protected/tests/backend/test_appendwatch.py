@@ -7,8 +7,9 @@ Override the script location when needed:
     APPENDWATCH_SCRIPT=/path/to/appendwatch.py pytest -q test_appendwatch.py
 
 The suite intentionally combines direct unit tests with real Linux/inotify
-subprocess tests. Tests requiring a privilege drop to ``nobody`` are skipped
-unless pytest itself is running as root and that account exists.
+subprocess tests. Permission tests are skipped unless pytest itself runs as root;
+the watcher drops to the non-root sudo invoker identified by SUDO_UID/SUDO_GID.
+Missing or invalid invoker credentials fail the root test run.
 """
 
 from __future__ import annotations
@@ -18,7 +19,6 @@ import errno
 import hashlib
 import importlib.util
 import os
-import pwd
 import shutil
 import signal
 import socket
@@ -264,14 +264,26 @@ def start_running(
     return watcher
 
 
-def nobody_credentials() -> tuple[int, int] | None:
+def sudo_invoker_credentials() -> tuple[int, int] | None:
     if os.geteuid() != 0:
         return None
+
     try:
-        account = pwd.getpwnam("nobody")
-    except KeyError:
-        return None
-    return account.pw_uid, account.pw_gid
+        uid = int(os.environ["SUDO_UID"])
+        gid = int(os.environ["SUDO_GID"])
+    except (KeyError, ValueError) as exc:
+        pytest.fail(
+            f"Permission tests require valid SUDO_UID/SUDO_GID: {exc}",
+            pytrace=False,
+        )
+
+    if uid <= 0 or gid < 0:
+        pytest.fail(
+            "Permission tests require a non-root sudo invoker",
+            pytrace=False,
+        )
+
+    return uid, gid
 
 
 def drop_privileges(uid: int, gid: int) -> Callable[[], None]:
@@ -1091,9 +1103,9 @@ def test_cli_rename_history_remains_ok(
 
 
 def _permission_test_tree() -> tuple[Path, Path, Path, int, int]:
-    credentials = nobody_credentials()
+    credentials = sudo_invoker_credentials()
     if credentials is None:
-        pytest.skip("requires root and a nobody account for real EACCES integration")
+        pytest.skip("requires root for real EACCES integration")
     uid, gid = credentials
     base = Path(tempfile.mkdtemp(prefix="appendwatch-permission-", dir="/tmp"))
     os.chmod(base, 0o755)

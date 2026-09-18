@@ -1266,11 +1266,11 @@ pre-commit.log and pre-commit-extra.log, reviewed against then-f56fb8a. Full acc
 
 | Finding | Current state / boundary |
 |---|---|
-| Normal AI suite | 517passed,9failed,1skip,3deselected in110.02s. One IPC log/test failure subsequently fixed above; eight Chrome launch prerequisites still unresolved. Provider stage not reached because && stopped it. |
-| Browser placement | Operator confirms Chrome is installed on the macOS host and production Dashboard runs there. Normal guest task incorrectly includes eight Chrome browser tests in aicode/Linux ARM64. Those must be tested on the host, not solved by installing/substituting Chrome in the guest. Passing the separate Chromium elevate batch does not prove host Chrome. Exact task/selection edits still require approval. |
-| Root watcher | 3failed before monitoring. Correct AI interpreter cannot be reached through0750 /home/anonymous.linux after drop to nobody with empty groups. Diagnostics implemented, accessible-runtime/access correction unapproved; no preload/chmod/ACL/cache move. |
+| Normal AI suite | Historical run:517passed,9failed,1skip,3deselected in110.02s. One IPC log/test failure subsequently fixed above; eight browser tests were incorrectly run in the guest. Provider stage not reached because && stopped it. Targeted host browser module passes9tests; approved pre-commit-operator routing correction now implemented, full command not rerun. |
+| Browser placement | Chrome is installed on the production macOS Dashboard host; latest host module9passed29.72s. Approved correction changes only pre-commit-operator: exclude test_ui_e2e in its guest invocation, then run the full module on macOS via existing BSD script logging. Inline comment included. Syntax/routing checked locally; no marker/task/test changes or browser substitution. |
+| Root watcher | Confirmed test-runtime/credential mismatch; approved helper correction implemented with non-root SUDO_UID/SUDO_GID. Local42tests/Ruff/strict mypy pass. Latest actual aicode root run:3passed,70deselected1.54s, status0, unchanged EACCES assertions. No ACL/permission/runtime changes. This pre-handoff blocker is resolved. |
 | Latest operator hang | Private initialization, Query IPC307rows, clean IPC stop, Queue and Start succeeded; then0records/no full Backend start, Ctrl+C at88.42s. Actual SSH occupancy/blockage not captured, cause unproven. |
-| Pre-start boundary | _wait_until_codex_idle precedes Backend start; configured ProxyJump SSH pgrep may report busy or block. Preflight limactl shell does not prove this exact path. Proposed progress logs/diagnosis not implemented/approved by P25. No bypass, timeout increase, external-process killing or automatic query. |
+| Pre-start boundary | _wait_until_codex_idle precedes Backend start; configured ProxyJump SSH pgrep may report busy or block. Latest targeted macOS -> aivm probe exits0 in0.33s with empty stdout (idle), no timeout. This does not explain the earlier hang or exercise the whole dequeue path. Production progress-log changes remain unapproved. No bypass, timeout increase, external-process killing or automatic query. |
 | F7 variables | Operator explicitly reports pixi run failed before pixi shell. Not reproduced by local/PROD sanitized activation cases. Do not dismiss report or patch tasks without a proven defect. |
 | Configured DuckDB binary | Latest PROD both actual configured-binary/config-path checks PASS; preserve absence detection, no synthetic replacement. |
 | Preservation | Latest guard covers both data trees AND original NiceGUI directory and passed; old contaminated production storage untouched. |
@@ -1285,27 +1285,173 @@ error logs/initial missing-socket polls are not additional hard failures.
 
 Latest operator-assisted diagnostics (2026-09-18): operator authorized putting the proposed
 checks in elevate with embedded machine checks, rather than separate commands or instructions
-about where to run them. Prepared batch requires macOS before any diagnostics/log replacement,
-runs test_ui_e2e with default Chrome and the exact Dashboard ProxyJump busy command (verbose
-SSH,15s diagnostic timeout), and automatically dispatches interpreter/appendwatch --help to
-the named aicode guest via limactl. Guest verifies Linux ARM64; sudo authenticates in a guest
-PTY, then setpriv runs the actual selected interpreter/watcher as nobody with no supplementary
-groups. namei prints interpreter traversal permissions. No browser install, permission change,
+about where to run them. The completed batch required macOS before diagnostics/log replacement,
+ran test_ui_e2e with default Chrome and the exact Dashboard ProxyJump busy command
+(15s diagnostic timeout), and automatically dispatched interpreter/appendwatch --help to
+the named aicode guest via limactl. Guest verifies Linux ARM64; non-interactive sudo -n and
+setpriv run the actual selected interpreter/watcher as nobody with no supplementary groups.
+No interactive sudo authentication or script/PTY wrapper; guest dispatch has stdin closed.
+Unavailable privileges fail explicitly without requesting a password. namei prints interpreter
+traversal permissions. No browser install, permission change,
 live Codex run or remote process killing. A timed-out diagnostic kills only its own local
 SSH process group. Combined stdout/stderr goes to elevate.log; all three checks run despite
 earlier failure, aggregate status and FAILED grep retained. Only elevate and WORK changed;
 no ordinary task edits. TOML/outer+batch+guest shell syntax, embedded SSH Python compilation,
 wrong-machine guard and comparison proving other TOML settings unchanged all PASS locally.
-Actual delegated results pending. All future operator execution requests must be prepared
-in elevate with embedded machine checks, not pasted as separate manual commands.
+First reviewed delegated log: host module9passed29.53s (eight real Chrome browser tests plus one
+browser-free fixture check); slowest call7.08s, real owned query4.43s, clean child/host shutdown,
+no timeout/Ctrl+C. SSH probe to aivm:exit0,0.33s,empty stdout (idle). The root diagnostic DID
+NOT RUN: limactl reports the explicitly targeted aicode instance is stopped. Combined status1
+is therefore correct, not a browser/SSH failure or a new watcher result.
+Machine roles: macOS is the production Dashboard/browser-test host; aicode is the Linux
+ARM64 development/test guest; aivm is the remote agent runtime and only the SSH busy-check
+target. Log platform/path confirms macOS execution; no test batch was dispatched to aivm.
+Operator redacted SSH key details from the log. The added -v unnecessarily printed public-key
+fingerprints/identity paths; removed it and clarified the SSH phase label. Preserve ordinary
+SSH errors/status/timing, do not request unredacted key material. Existing optional known-host
+file/security-key-provider debug messages were not connection failures (actual exchange exits0).
+Operator also flagged the sudo password prompt in recorded execution. Removed sudo -v and
+the guest script/PTY wrapper entirely, rather than try to transfer sudo authentication between
+different TTYs. Only sudo -n remains and guest stdin is /dev/null. No password input is requested
+or collected by this diagnostic. Do not read/request an unredacted credential-bearing log;
+previous log files were not modified.
+Latest rerun (log modified2026-09-18 19:00UTC): host9passed29.72s; slowest call7.11s,
+real query4.26s; SSH to aivm exits0 in0.32s, idle. aicode now runs the noninteractive check:
+Python starts but cannot locate its platform-independent/dependent libraries, then fatally
+fails importing encodings. Watcher code never starts; no monitoring pass. Combined status1.
+The follow-up below establishes the actual path/access failure rather than treating this as
+a missing Pydantic package or changing Python environment variables.
 
-Permanent correction proposal remains NOT approved: explicit browser routing:
-explicit dashboard_browser marker on the eight browser tests, exclude that marker from
-the guest task and invoke it in a host task wired into pre-commit-operator's existing host
-portion; keep the browser-free fixture regression in guest coverage. No automatic browser
-fallback or pre-commit status/grep restructuring. No such source/task edits made yet.
-Any root-access correction needs separate approval after current permission evidence;
-an exact named-user traversal ACL is an option to review, not an authorized change.
+Focused elevate batch completed: only the aicode runtime-access diagnosis; no repeated Chrome/
+SSH checks. Retains macOS guard, named aicode dispatch, Linux ARM64 check, closed stdin and sudo -n.
+Normal-user interpreter identifies its actual prefix/stdlib/encodings paths, then the batch
+prints nobody identity, namei chains and actual read/traverse checks under that identity before
+executing the unchanged watcher --help with the same interpreter. Every subprocess is bounded.
+This launches a fresh nobody Python; no privileged import preload, PYTHONHOME/PYTHONPATH override,
+package install, permission change or test weakening. TOML/outer+guest shell syntax, embedded
+Python compilation, wrong-machine guard and unchanged-other-TOML comparison PASS locally.
+Reviewed result: uid65534(nobody),gid65534(nogroup), no supplementary groups. Every tested runtime
+path is unreadable to nobody; prefix/stdlib/encodings directories also fail traversal. Normal
+user resolves those paths successfully. namei identifies /home/anonymous.linux as0750, while
+the listed descendant directories are0775 and encodings/__init__.py is0664. The watcher source
+outside that home is readable (access exit0). Fresh nobody Python fails encodings import,
+watcher startup exit1 and combined status1. No monitoring tests ran. Enough evidence for a
+test-runtime/credential mismatch; no further diagnostic rerun requested. Operator correctly
+challenged granting nobody home access when the caller already owns the runtime. ACL proposal
+withdrawn; the narrower proposed harness correction is recorded below.
+All future operator execution requests must be prepared in elevate with embedded machine
+checks, not pasted as separate manual commands.
+Operator requested reverting idle elevate to the original "Nothing to elevate" shape:
+restored that exact placeholder with script/log/FAILED-grep/exit-status scaffolding. No
+further diagnostic run is pending; do not execute a permission change before approval.
+
+Latest browser-routing correction is APPROVED and IMPLEMENTED, including the operator's
+additional one-line comment directly above PYTEST_ADDOPTS. It supersedes the earlier
+marker/new-task proposal: change ONLY pre-commit-operator, not test modules/plugin or other
+tasks. Scoped PYTEST_ADDOPTS in the existing aicode shell excludes the entire test_ui_e2e
+module from that guest invocation only. Existing macOS BSD script logging runs the entire
+nine-test module on the host before pre-commit-extra-operator. Keep existing PYTEST_ADDOPTS,
+Chrome selection, test bodies and all grep/status/run-all behavior. No new marker/task or
+browser fallback. TOML and outer/guest/host shell syntax plus actual parsed routing checked;
+comparison confirms other task/settings unchanged (elevate separately restored to its idle
+placeholder as requested). No operator commands executed locally or full acceptance claimed.
+
+```diff
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -341,12 +341,14 @@
+ [tool.pixi.tasks.pre-commit-operator]
+ cwd = "."
+-# run all in lima except operator tests.
++# run non-browser tests in lima; browser and operator tests on macOS.
+ # using bash -c so that pixi does not
+ # exit on first failed command.
+ cmd = """
+ bash -c '
+   limactl shell aicode -- bash -c '"'"'
+     export PATH="$HOME/.pixi/bin:$PATH"
++    # Exclude browser tests in this guest invocation; run them with host Chrome below.
++    export PYTEST_ADDOPTS="${PYTEST_ADDOPTS:+$PYTEST_ADDOPTS }--ignore=src/detours/detour_ai_augment/tests/control_centre/test_ui_e2e.py"
+     script -e -c "
+       {
+         pixi run pre-commit
+@@ -355,6 +357,10 @@
+     grep -q "FAILED" logs/pre-commit.log &&
+     echo "grep: no FAILED"
+   '"'"'
++  script -a \
++    logs/pre-commit.log \
++    bash -c '"'"'pixi run -e detour-ai-augment python -m pytest -vv -srA \
++      src/detours/detour_ai_augment/tests/control_centre/test_ui_e2e.py 2>&1'"'"'
+   pixi run pre-commit-extra-operator
+ '
+ """
+```
+
+Root test harness is a SEPARATE APPROVED and IMPLEMENTED correction, not part of the browser-routing patch.
+The ACL proposal is withdrawn. Tests intentionally run pytest as root and launch the watcher
+unprivileged via nobody_credentials/drop_privileges; moving its interpreter into the invoking
+user's private Pixi environment made that identity incompatible with runtime access.
+Approved exact fix: select the original non-root sudo invoker via SUDO_UID/SUDO_GID,
+not nobody, for the existing privilege-drop helper and temporary-tree ownership. Fail clearly
+if invoker credentials are missing/invalid or root; no invented account/fallback/new skip.
+Keep supplementary-group clearing, root-owned0700 denial fixtures, real watcher subprocesses,
+permission transitions and every EACCES assertion unchanged. Update only helper naming and
+direct explanatory text/callpoints. No home ACL/chmod, package/runtime relocation or preload.
+The three existing privileged tests were verified through elevate using sudo -n; ordinary root
+task unchanged. That verification used the macOS guard, explicit aicode dispatch and Linux ARM64
+guard, same root-test environment/selection, closed stdin and sudo -n. No authentication prompt,
+SSH verbosity, ACL edit or repeated Chrome/busy-probe checks. After the passing run, restored
+elevate to the requested "Nothing to elevate" placeholder with script/log/status/grep scaffolding.
+
+Exact approved helper replacement, in protected/tests/backend/
+test_appendwatch.py; remove now-unused pwd import and update the introductory explanation:
+
+```python
+def sudo_invoker_credentials() -> tuple[int, int] | None:
+    if os.geteuid() != 0:
+        return None
+    try:
+        uid = int(os.environ["SUDO_UID"])
+        gid = int(os.environ["SUDO_GID"])
+    except (KeyError, ValueError) as exc:
+        pytest.fail(
+            f"Permission tests require valid SUDO_UID/SUDO_GID: {exc}",
+            pytrace=False,
+        )
+    if uid <= 0 or gid < 0:
+        pytest.fail("Permission tests require a non-root sudo invoker", pytrace=False)
+    return uid, gid
+
+
+def _permission_test_tree() -> tuple[Path, Path, Path, int, int]:
+    credentials = sudo_invoker_credentials()
+    if credentials is None:
+        pytest.skip("requires root for real EACCES integration")
+    uid, gid = credentials
+    # Existing temporary-tree creation/chown/chmod and return remain unchanged.
+```
+
+Existing drop_privileges continues clearing supplementary groups, setting gid then uid.
+Only non-root pytest retains its existing skip; missing/bad invoker under root fails rather
+than skips. No existing permission-denial assertion or root-owned0700 fixture changes.
+Implementation audit confirms only the approved helper/callpoint, unused pwd import and
+introductory docstring changed. Local evidence:42passed,8deselected18.43s for test_appendwatch
+with -m "not needs_sudo" -k "not socket and not nonregular_substitution"; exclusions respect
+the no-root/no-socket execution boundary, not a pass for those cases. Ruff PASS; configured
+strict mypy PASS1file. Exact delegated selection collects3/73tests (70deselected) in0.36s.
+elevate TOML/shell syntax and wrong-machine guard PASS; no privileged commands executed here.
+First delegated root rerun failed3before startup using the pre-fix test file: all three
+traceback callsites match the old revision,12lines before the corrected version. Operator
+confirmed forgetting to pull, then updated and reran. Latest reviewed elevate.log confirms
+3passed,70deselected1.54s, root test status0. No additional implementation change or proposed
+source-hash guard was applied between runs. Root verification is complete.
+Recommend running full pre-commit-operator now: no further elevate checks needed first.
+Host Chrome/browser routing is verified/implemented. The old pre-start hang remains unexplained;
+the full operator run is the next evidence boundary, not another speculative diagnostic loop.
+P26-P30 remain separate pending work; operator-run readiness is not their completion or a
+claim of production acceptance. TASK's upstream-before-human verification requirement is met
+for these corrections; review the next full logs for failures, waits, hangs and cleanup.
 
 Rejected changes MUST NOT return: root preload-before-drop, synthetic DuckDB config/binary
 that conceals prerequisites, substituted-query browser test, raised launcher timeout,
