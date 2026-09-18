@@ -33,3 +33,22 @@ link using any web browser
 (e.g., Chrome) and
 drag and drop the rollout file
 onto the viewer panel.
+
+The directory also contains `ChatGPT-Discover_Web_Run_Schema.md`,
+which is an export of a separate ChatGPT chat
+produced via chatgpt.com on 2026-09-18 UTC-4
+on a ChatGPT Pro subscription,
+with GPT-6-Astra (reasoning: pro),
+with custom instructions
+`each word of response costs $1000 so uses them wisely`
+and the "memory" feature disabled.
+The file `./raw_chat_api_json/ChatGPT-Discover_Web_Run_Schema.json`
+is the raw JSON file
+obtained from OpenAI API
+using [ChatGPT Exporter 2.32.3 by pionxzh](https://greasyfork.org/scripts/456055),
+from which ultimately `ChatGPT-Discover_Web_Run_Schema.md` was produced
+using this [custom app](https://github.com/paveljee/chat-viewer).
+That project uses Tampermonkey exporter outputs and scripts as reference material.
+Thanks to their authors:
+[Claude API Exporter 5.4.1 by MRL](https://update.greasyfork.org/scripts/542117/Claude%20API%20Exporter.user.js) and
+[ChatGPT Exporter 2.32.0 by pionxzh](https://update.greasyfork.org/scripts/456055/ChatGPT%20Exporter.user.js).
