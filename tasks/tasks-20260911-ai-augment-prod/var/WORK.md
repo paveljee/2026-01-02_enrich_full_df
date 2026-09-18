@@ -2,144 +2,30 @@
 
 ## Status and authorization
 
-Latest implemented P24 authorization (2026-09-18): operator ran `git restore .` and authorized ONLY
-reimplementation of P24's exact surgical shape. Staged P20/P21/P22/P23 remain; discarded
-P24 implementation/checks are NOT evidence for this retry. P24 is now IMPLEMENTED
-and locally verified with fresh evidence below.
-No compatibility audit, removal of current defaults, stricter DTO/card parsing, schema
-special cases or unrelated corrections are part of this retry. Preserve staged changes.
-P22 is historical, superseded by P24's persisted-ID/pure-renderer contour.
-P20/P21/P23 remain implemented; production acceptance remains separate.
+Latest authorization (2026-09-18): P25's exact proposed four-operation Store contract,
+implementation boundary and code snippets are APPROVED, with two operator corrections:
+use BackendStoreAcknowledgment.ACK/NAK (values "ack"/"nak") everywhere; reserve publishing
+terminology for DOCX/TXT and use update_pull_state for the runtime pull-state update.
+P25 is PENDING IMPLEMENTATION. This update documents the approval only; no production,
+test or task changes were made. The full approved contour/snippets below stand alone.
+Any deviation or extension requires explicit approval before implementation.
 
-### Current discussion — Store/transport boundary and grouped processing (not implemented)
+P24 is implemented and locally verified after the operator's restore/reimplementation
+instruction; its fresh evidence is below. P20/P21/P23 remain implemented. P22 is historical,
+superseded by P24's persisted-ID/pure-renderer contour. P25 retains that contour while
+changing Store/adapter boundaries and grouped processing only as explicitly pinned below.
+Current code still uses per-record DB transactions and the existing server-owned IPC gate;
+P25's promises, operation records, query-only capability and grouped transaction are NOT
+implemented yet. Preserve operator edits/staging. Production acceptance and the unrelated
+browser/root/pre-start findings remain separate; P25 does not authorize their corrections.
 
-Operator is refining a proposal; no exact new implementation/snippets are approved.
-Current P24 remains implemented below: per-record DB transactions, outcome-triggered
-materialization, and one undifferentiated IPC gate. Only WORK changed during this review.
+## P25 — Approved, pending implementation: four-operation Store contract
 
-Latest clarified responsibilities:
-- server.py owns actual transports, configuration/resource/process lifecycle, and HTTP/IPC
-  exclusion. API/IPC transport adapters exchange Requests-library request/response objects
-  with server.py, used as in-process objects, not internal network calls.
-- api.py/ipc.py construct app-specific RequestRecords from raw requests and necessary
-  external inputs; talk to Store ONLY in RequestRecord/ResponseRecord objects. These are
-  application operations/results, NOT aliases for HTTP request/response messages. Domain
-  persistence/validation/projection/response-result formulation remains opaque to adapters.
-- Full Store exposes exactly four public request operations: pull, push, run_outcome, query.
-  No public execute/append/validate/materialize/readback/locking escape hatches. Construction
-  and open/close remain lifecycle machinery rather than extra request operations.
-- IPC-only initialization exposes ONLY query. Operator proposes separate full/query-only
-  initialization behind an overloaded common initializer. Concrete design must enforce the
-  capability boundary: overloading __init__ alone cannot hide methods on the same class.
-- BackendComponent gains RequestRecordProperty/ResponseRecordProperty bases using the
-  shared HTTP-record protocol, plus corresponding route-specific protocols/concrete records.
-  Pull request adds no properties; pull response adds pull_response_body. Push response
-  exposes commit_record/validation_record (absent when not produced). Outcome/query have
-  corresponding typed records/bodies. No implicit duplicated serialization/wire changes.
-
-Push TIMING remains current client-facing behavior: api.py dispatches PushRequestRecord
-into Store and returns HTTP202 once accepted, without waiting for final validation. Store's
-later PushResponseRecord carries the processing result; api.py uses it to update pull
-contents. The earlier interpretation that HTTP202 must wait for final validation is
-SUPERSEDED. API owns this asynchronous adaptation, not persistence/domain reimplementation.
-Preserve durable push acceptance before202. Operator now proposes Store returning an
-acknowledgement once the push exchange is durably appended/fsynced, together with an
-awaitable final PushResponseRecord. API can immediately return202 from that acknowledgement
-and separately await completion before publishing the new pull contents. Proposed acceptance
-receipt identifies the persisted push exchange; it does not claim commit/validation or the
-grouped DB transaction has finished. Append/fsync failure means no successful acknowledgement.
-Store owns completion work; HTTP-client disconnect/API-waiter cancellation must not cancel
-it. Server must register pending processing before202 and release it only after completion
-and pull-state publication (or the existing explicit failure path); shutdown awaits it.
-Latest operator clarification resolves the read-only query conflict and supersedes the
-previous NAY-always-failure / completion-raises proposal:
-- Name: ResponseRecordPromise. Synchronous gate is BackendStoreAcknowledgment, an enum
-  containing ONLY ACK and NAY (no admission decision wrapper/third state).
-- ACK: supplied request record was persisted in HttpRequestLogRecord form and fsynced in
-  replay log. Does not assert final DB commit, validation success or HTTP status.
-- NAY: request record was NOT successfully persisted. This is either a persistence failure
-  for pull/push, or EXPECTED endpoint policy for both IPC operations. It is not intrinsically
-  an error, nor a guarantee that failed append/fsync left zero bytes in the file.
-- Pull/push expect ACK. Their NAY yields an already-resolved (None, BackendStoreException),
-  which API retrieves and raises; no successful response/early202 on that failure.
-- Query/run_outcome EXPECT NAY: neither appends a separate request record. Query never
-  persists anything. Run outcome constructs and durably persists/replays/projects its
-  RESPONSE record (the HTTP exchange includes its request fields), not an initial request
-  append. Unexpected ACK in IPC is a contract error.
-- ResponseRecordPromiseResult is the named awaited result, EXACTLY one of (ResponseRecord, None) or
-  (None, BackendStoreException). Never both values or both None. Normal Store processing
-  failures are represented by this tuple, rather than raised from the completion awaitable.
-  API/IPC raise the returned exception. BackendStoreException is a real exception conforming
-  to new BackendComponent.StoreExceptionProperty; exact protocol members remain to specify.
-- ACK followed by a completion error remains ACK plus (None, exc): no retroactive gate
-  change. Successful IPC is NAY plus (response_record, None). Thus a run-outcome409 has
-  NAY (no request-only append) and a successful response tuple AFTER its response exchange
-  is durably persisted/projected. HTTP409 does not imply a Store exception or failed fsync.
-
-ResponseRecordPromise's task state stays private and unserialized. Store owns processing;
-client cancellation must not cancel it. Full mode retains four methods; IPC-only exposes
-query only. API registers pending work before202 and releases it only after the awaited
-result is handled and pull state published (or existing failure handling). For push, a later
-error is raised in the tracked completion task; it cannot replace an already-sent202.
-ACK is a durability fact, not a replacement for existing HTTP acceptance/status decisions.
-Synchronous gate follows required I/O without blocking ASGI's event loop. No public
-Store finish/poll operation, third acknowledgment value, query writes or recovery contour.
-The clarification question is answered by this explicit policy; no query decision pending.
-No new implementation/snippets have yet been approved for execution.
-
-Latest naming/docstring requirement, to include in the full proposed scope/snippets:
-ResponseRecordPromiseResult (not ResponseRecordResult); BackendStoreAcknowledgment
-(not RequestRecordAcknowledgment). The promise protocol docstring must explicitly state
-that acknowledgment concerns ONLY REQUEST persistence. Store performs RESPONSE persistence
-where the endpoint requires it before returning its completed response result; a response
-persistence failure must resolve the promise to (None, BackendStoreException), never a
-successful response. For asynchronous push, returning the promise handle is distinct from
-resolving its result; final response persistence cannot precede initial handle return if
-that response depends on ongoing work. The presentation must make that timing explicit.
-
-Operator requested recording the complete discussion before preparing a full contract,
-bounded surgical change scope and code snippets. This is proposal preparation, NOT approval
-to implement the structural changes. Preserve current staged P24/F8 and operator edits.
-
-IPC stays SINGLE-THREADED; no new concurrent IPC acceptance, priority queue or overtaking
-between outcome/query. They naturally serialize and clients may wait/time out. Operator
-explicitly superseded the earlier strict queued-outcome-over-query interpretation. Server
-withholds IPC while FastAPI work is processing. Concrete scope must cover post202 Store
-work and the subsequent pull-state publication, not just the HTTP coroutine lifetime.
-Operator explicitly agreed that IPC waits before Store processing, not only socket response
-emission; admission must prevent new HTTP work slipping through that gap. They also agreed
-that the processing interval includes the post202 Store work and pull-state publication,
-and that query-only construction must expose an actual narrowed capability, not rely on
-__init__ overload annotations alone.
-Client timeout does not cancel durable processing; no new timeout/retry/recovery policy.
-
-Store processing proposal retained:
-- Pull persists/replays/projects its exchange. Rejected push persists its exchange without
-  manufacturing commit/validation. Accepted push progressively records push, commit,
-  provider exchanges and validation, then completes their grouped DB projection transaction.
-  Provider append -> DB-readback -> model validation must remain valid within that grouping.
-- Outcome evaluates existing commit/validation through replay logic without inserting them
-  or duplicating effects, decides the requested outcome response, persists it (including409),
-  replays/projects it and materializes eligible innerdicts atomically before returning.
-  Response body includes commit ID, validation ID and its own outcome record ID.409 records
-  rejection, not successful finalization. Explicit replay rejects incomplete groups instead
-  of fabricating missing records. Requested completed/failed eligibility versus replayable
-  REJECTED validation, the existing final-pull503=>failed rule, and multiple commits per run
-  still need exact definition in the concrete scope.
-- Query remains read-only wholesale DB snapshot, including IPC-only: common record types
-  do NOT imply appending query exchanges. Preserve startup confirmations/hash verification,
-  Store DB/log ownership, no recovery, launcher independence and clean-close acknowledgement.
-
-No production/test/task changes made for this discussion, no tests needed/run. Do not
-silently implement a new transport/type/lifecycle design or revive unrelated scope.
-
-## Proposed next scope — four-operation Store contract (approval pending)
-
-Prepared only AFTER the preceding discussion/names were recorded. No production/test edits.
-This is a bounded structural change, not merely a server gate cleanup. Preserve P24's persisted
-IDs, pure card renderer, no recovery and common live/replay rules. Do not label this approved
-or implemented until the operator approves the concrete scope. It does not include the
-unrelated browser/root/pre-start operator findings.
+Operator approved the exact preceding proposal and snippets, subject only to the naming
+corrections incorporated below. This section consolidates the discussion into that approved
+contour; it is not a further proposal or an implementation claim. This is a bounded structural
+change, not merely a server gate cleanup. Preserve P24's persisted IDs, pure card renderer,
+no recovery and common live/replay rules. Unrelated browser/root/pre-start findings are excluded.
 
 ### Responsibility and persistence contract
 
@@ -147,31 +33,36 @@ Server owns ASGI/WSGI transport conversion, lifecycle and admission. API/IPC hel
 Requests PreparedRequest/Response objects with server, app RequestRecord/ResponseRecordPromise
 objects with Store. Requests is used as an in-process representation, never internal HTTP.
 API retains existing transport/workflow response timing, including busy503, push409 and early202,
-and publishes final push results into pull state. It does not append/project/validate itself.
+and updates pull state from final push results. It does not append/project/validate itself.
 Existing evidence/SQL algorithms may remain private helpers invoked by Store; no wholesale
 move of API algorithms into the Store module. Only Store owns DB/log operations/transactions.
 
-BackendStoreAcknowledgment has exactly ACK/NAY and refers ONLY to request persistence.
+BackendStoreAcknowledgment has exactly ACK/NAK and refers ONLY to request persistence.
 ResponseRecordPromiseResult[R] is exactly (R, None) or (None, StoreExceptionProperty), with
 concrete BackendStoreException implementing that protocol. Result errors are raised by the
-adapter; they do not silently become HTTP409. Request persistence failure for API returns NAY
-plus an already-resolved error result. IPC always expects NAY. ACK followed by a later error
+adapter; they do not silently become HTTP409. Request persistence failure for API returns NAK
+plus an already-resolved error result. IPC always expects NAK. ACK followed by a later error
 remains ACK plus an error result. Invalid result tuples are contract failures, never fallbacks.
+Normal Store failures resolve the tuple; they are not thrown directly from the completion
+awaitable. API/IPC raise its returned real exception. Never return both tuple values or both
+None. A failed append/fsync can leave bytes despite NAK: fail closed, no repair/retry or claim
+of zero bytes written. Successful run-outcome409 is NAK plus (response_record, None) after
+its response exchange is durably persisted/projected; HTTP status is independent of the gate.
 
 | Operation | Gate | Operation/result boundary |
 |---|---|---|
-| pull | ACK after append/fsync; NAY on failure | project/read back exchange before result; preserve all existing HTTP statuses/bodies |
-| push | ACK after append/fsync; NAY on failure | accepted202 may be sent before processing finishes; final result follows grouped commit/validation projection |
-| run_outcome | NAY by policy | persist complete response exchange, including409, project/materialize eligible rows, then return successful result |
-| query | NAY by policy | read-only wholesale snapshot, no log or DB content writes |
+| pull | ACK after append/fsync; NAK on failure | project/read back exchange before result; preserve all existing HTTP statuses/bodies |
+| push | ACK after append/fsync; NAK on failure | accepted202 may be sent before processing finishes; final result follows grouped commit/validation projection |
+| run_outcome | NAK by policy | persist complete response exchange, including409, project/materialize eligible rows, then return successful result |
+| query | NAK by policy | read-only wholesale snapshot, no log or DB content writes |
 
-Record-format proposal: retain existing v1.1 COMPLETE pull/push HTTP exchange envelopes in
+Approved record format: retain existing v1.1 COMPLETE pull/push HTTP exchange envelopes in
 log. The app RequestRecord can contain the already-selected public response (202/409/etc.)
 because it is an application input, not an alias for raw HTTP request. Do not introduce a
 second request-only pull/push log entry, repeated record UUIDs, mutation of old JSONL lines,
 or request/response pairing schema. Commit/validate retain their current synthetic shapes;
 outcome logs its full response exchange only; query logs nothing. This is explicitly part
-of the proposal, not a new compatibility contour. Early202 establishes log durability,
+of the approved scope, not a new compatibility contour. Early202 establishes log durability,
 NOT completion of grouped DB projection. Final result objects still come through Store
 projection/readback. Extra application model fields are excluded from HTTP-log serialization.
 
@@ -183,7 +74,7 @@ at ACK; its added commit/validation properties become available only at completi
 requirement to finish all final application-response work before returning the initial handle
 would contradict early push acceptance; do not silently change that timing.
 
-### Proposed protocol and exception snippets
+### Exact approved protocol and exception snippets
 
 Definitions below live in protected/src/architecture.py (existing component bases retained).
 The structural exception includes raise_exception so protocol-typed consumers can raise the
@@ -192,7 +83,7 @@ real exception without casts or pretending a Protocol inherits Exception.
 ```python
 class BackendStoreAcknowledgment(StrEnum):
     ACK = "ack"
-    NAY = "nay"
+    NAK = "nak"
 
 
 type ResponseRecordPromiseResult[R] = (
@@ -213,16 +104,17 @@ class StoreExceptionProperty(Protocol):
 class ResponseRecordPromiseProperty[
     R: BackendComponent.ResponseRecordProperty,
 ](Protocol):
-    """An initial request-persistence gate and an eventual application result.
+    """A request-persistence acknowledgment and an eventual application result.
 
     ACK means the request record was appended and fsynced in the replay log.
-    NAY means it was not; IPC intentionally does not persist request records.
+    NAK means it was not. IPC deliberately does not persist request records.
     Neither value describes response persistence or application success.
 
-    Store performs response persistence where required before returning the
-    successful completed result. Response-persistence failure returns
-    (None, exc). Other results are exactly (response_record, None).
-    The promise handle can precede completion, notably for accepted pushes.
+    Backend Store performs response persistence where required before returning
+    the successful completed result. Response-persistence failure returns
+    (None, exc); success returns (response_record, None).
+
+    Returning the initial promise handle does not imply processing completion.
     """
     @property
     def acknowledgment(self) -> BackendStoreAcknowledgment: ...
@@ -244,8 +136,8 @@ existing fail-closed Store state, and never stringify away the cause or retry. T
 ResponseRecordPromise is a FrozenStrictModel: acknowledgment is its public field, task/result
 state is PrivateAttr. Awaiters shield the Store-owned completion. No arbitrary_types_allowed,
 new executor service, cast, type suppression or serialized Task/Future. Reuse existing thread
-offload and tracked background work; no threaded IPC. Keep completion tracked through pull
-publication and shutdown, including client disconnect and failed response sends.
+offload and tracked background work; no threaded IPC. Keep completion tracked through the
+pull-state update and shutdown, including client disconnect and failed response sends.
 
 ### Route-specific records and Store surface
 
@@ -324,6 +216,8 @@ construction removal and necessary runtime callpoint wiring. No JSON config/CLI 
 IPC-only still ignores new/resume flags, does not initialize DB, append-preflight or promote hashes.
 Full new/resume/continue prompts, optional nonempty replay confirmation, permissions, process
 lock and clean-close acknowledgment stay unchanged. No public Store open/execute/etc. loophole.
+Construct config/source runtime once per server lifetime; mode-selected Store lives inside
+the corresponding server context. No duplicate context/resource construction.
 
 ### Adapter/server snippets and boundary
 
@@ -333,13 +227,13 @@ methods):
 
 ```python
 promise = await asyncio.to_thread(store.push, request_record)
-if promise.acknowledgment is BackendStoreAcknowledgment.NAY:
+if promise.acknowledgment is BackendStoreAcknowledgment.NAK:
     response_record, error = await promise.response_record()
     if error is not None:
         error.raise_exception()
-    raise BackendStoreException("Push NAY without persistence error")
+    raise BackendStoreException("Push NAK without persistence error")
 
-# Register before serving202; task publishes pull state before leaving the gate.
+# Register before serving 202; task updates pull state before leaving the gate.
 register_processing(finish_push(promise))
 return accepted_response
 ```
@@ -355,13 +249,13 @@ async def finish_push(promise: ResponseRecordPromise[PushResponseRecord]) -> Non
         error.raise_exception()
     if response_record is None:
         raise BackendStoreException("Missing push response record")
-    publish_pull_result(response_record)
+    update_pull_state(response_record)
 ```
 
-IPC requires NAY and resolves the same tuple before transport conversion:
+IPC requires NAK and resolves the same tuple before transport conversion:
 
 ```python
-if promise.acknowledgment is not BackendStoreAcknowledgment.NAY:
+if promise.acknowledgment is not BackendStoreAcknowledgment.NAK:
     raise BackendStoreException("IPC unexpectedly persisted a request record")
 response_record, error = await promise.response_record()
 if error is not None:
@@ -383,10 +277,16 @@ Store operations own it, not a second append on top of the new flow.
 Server receives Requests Response and serves status/headers/body unchanged. Retain separate
 FastAPI and single-threaded Flask; gate ALL IPC including OPTIONS before Store work, through
 response. Existing server-owned gate/bridge/shutdown offload can remain narrowly adapted:
-wait for active HTTP exchanges plus registered API completion/publication tasks, prevent a
+wait for active HTTP exchanges plus registered API completion/pull-state-update tasks, prevent a
 new HTTP request slipping through IPC admission, release on failures. No priority queue or
 threaded Flask. Client timeout is explicitly allowed and never cancels durable work. No
 need to reimplement the gate merely to make it shorter.
+Keep the explicit IPC docstring: clients may time out while IPC waits for FastAPI and its
+tracked processing to finish; their timeout does not cancel durable Backend work. Single-threaded
+IPC naturally serializes outcome/query; no outcome-over-query overtaking policy. Shutdown drains
+tracked processing through the pull-state update and responses, stops/joins transports without
+blocking the server event loop, closes Store, then emits the existing clean-close acknowledgment
+and releases the process lock. No public Store finish/poll operation or client-owned task lifetime.
 
 ### Grouped replay and outcome changes — not hidden in a protocol-only patch
 
@@ -404,7 +304,7 @@ transaction before model validation, then all group rows become committed togeth
 hold the append/DB mutex across external provider wait in a way that prevents current busy503
 responses. An interleaved public exchange can enlist in the active group; it must not open
 a competing/nested transaction or independently commit it. Query/outcome remain gated out.
-This concurrency/cursor wiring is a required part of the proposal, not presumed implemented.
+This concurrency/cursor wiring is approved and required, not presumed implemented.
 
 Current validation rollback branch discards derived effects but retains its HTTP record.
 For a grouped transaction it must retain/reinsert ALL group raw HTTP rows/hashes/ordinals,
@@ -416,24 +316,35 @@ Run outcome uses existing durable references, checks their replay consistency wi
 reapplying their side effects, constructs response with commit_record_id, validation_record_id
 and run_outcome_record_id, appends/fsyncs, then projects outcome/materializes in the same
 transaction before exposing success. Exact self ID is the exchange UUID, not a second UUID.
+The exact additions to the existing RunOutcomeResponseBody are:
+
+```python
+commit_record_id: UUID | None
+validation_record_id: UUID | None
+run_outcome_record_id: UUID
+```
+
+These are required current fields (nullable references where genuinely absent), not defaults
+or old-schema fallbacks. Update the corresponding protocol/DTO/readback consumers together.
 Rejected409 is logged/history only: no finalization and no late-validation fence. Update P24
 applicator/snapshot invariants accordingly, retaining all accepted rows/multiple commit links
 and not choosing a different researcher's/session's latest commit. No synthetic missing data.
 
-Explicit choices needing review before execution (not silently approved):
+Approved outcome/record decisions (included in the accepted exact scope):
+
 1. Preserve complete pull/push exchange envelopes as above, rather than add request-only logs.
-2. Propose /completed200 only when the latest matching commit has a replay-consistent
+2. /completed200 only when the latest matching commit has a replay-consistent
    ACCEPTED validation; /failed200 when that latest matching result is absent/not accepted
    (including replay-consistent rejected validation),
    otherwise409. Missing evidence is distinct from corrupt persisted evidence/DB, which
    remains a Store error. /cancelled requires no commit/validation. Existing capture failures
    remain separate from domain409; do not silently drop their500/history behavior.
-3. For singular IDs in outcome body, propose identifying the latest matching commit and its
+3. For singular IDs in outcome body, identify the latest matching commit and its
    exact validation within the current NameKey/session; existing per-innerdict links retain
    every eligible accepted commit. Never overwrite earlier finalized IDs. All body/DTO/
    protocol validators and query consumers must agree; no fallback for missing new fields.
 4. Dashboard's one-pull503=>failed policy is unchanged: if Store finishes successfully while
-   outcome waits, /failed may then409. No automatic reclassification/retry/extraquery proposed.
+   outcome waits, /failed may then409. No automatic reclassification/retry/extra query is authorized.
 
 ### File boundary and upstream verification
 
@@ -449,7 +360,7 @@ in its current module. Necessary imports/calls/tests only; no broad module reorg
 Existing relevant tests: test_api, test_ipc, test_backend_store, test_http_interceptor,
 startup cases in test_ui and isolated browser/operator fixture callpoints affected by Store
 construction. Test real synthetic Store/log/DB and transport adapters, not source-string tests.
-Cover all ACK/NAY/result combinations; fsync/request/response/projection failures; early202
+Cover all ACK/NAK/result combinations; fsync/request/response/projection failures; early202
 and later pull update; callback failure/shutdown/client disconnect; read-only no-write query;
 actual query-only capability; grouped exact-byte live/replay equivalence including interleaved
 503/409 and rejected validation; truncated groups; outcome200/409/cancellation; finalization
@@ -463,7 +374,7 @@ main pipeline/other detours, sample_deploy, TASK/HUMANS/README, CAS layout, hash
 updates, compatibility/migration/fallbacks, recovery, wrapper tasks, unrelated operator fixes.
 No claim that grouped persistence or the new request/response API is already implemented.
 
-### F8 IPC-only opening-log correction — implemented and verified
+## F8 IPC-only opening-log correction — implemented and verified
 
 Operator explicitly authorized the previously proposed narrow correction: replace ONLY
 server.py's IPC-only opening log with `logger.info("Opening read-only Backend Store")`.
@@ -1899,7 +1810,8 @@ hook/private child environment, and installed-source reads must not import the p
 | P24 | Persisted validation/outcome IDs, outcome-triggered materialization, pure card renderer, server-owned HTTP/IPC admission | Backend API/Store/server/IPC/models; Dashboard snapshot/card callpoints |
 
 P24 is implemented and locally verified. Its exact scope and verification boundary
-are pinned above; unrelated production-review corrections remain unapproved.
+are pinned above. P25 is the separately approved PENDING implementation item at the top,
+not part of this completed index. Unrelated production-review corrections remain unapproved.
 
 ## Previous production incident — baseline for F1-F7 corrections
 
@@ -3603,13 +3515,14 @@ watcher-import sentinel body), and WORK. Existing conftest imports need no chang
 for this wiring. Exclude sample_deploy, paused BDD, production code and all Pixi task edits.
 Preserve the rest of P18 and its task boundary: two approved interpreter substitutions, no pre-commit wrapper changes; special verification in elevate only.
 
-## Remaining rollout acceptance — separate from latest protocol/innerdict review
+## Remaining rollout acceptance — separate from pending P25 implementation
 
 P20/P21/P22 are complete within their historical approved scopes. P24's revised scope
 for outcome-triggered materialization/persisted IDs/HTTP-IPC ordering is implemented
 and locally verified after operator restore; its explicit IPC-timeout docstring is included.
-P23 shared HTTP-record protocol addition is COMPLETE and verified. These items do not fix
-or authorizes the separate production-review corrections below. P1-P19's implementation/
+P23 shared HTTP-record protocol addition is COMPLETE and verified. P25 is now approved
+but not implemented; its full contour/snippets are at the top. These items do not fix
+or authorize the separate production-review corrections below. P1-P19's implementation/
 evidence and production-acceptance limitations remain distinct.
 
 P1-P19 and earlier follow-up code are present. The F8 IPC-only log/test regression is now
@@ -3618,8 +3531,8 @@ real-query test passed earlier; normal PROD browser task instead fails on missin
 Remaining: explicitly agreed browser provisioning/selection, root runtime
 access correction and actual monitoring, diagnosis of the silent pre-start wait, full HTTP
 log/workflow/card acceptance. F5 binary prerequisite now PASS; four F7 activation checks
-also pass on PROD (earlier pixi-shell report not reproduced). Proposed corrections at the
-top are NOT newly authorized. Do not revive rejected workarounds or change ordinary tasks
+also pass on PROD (earlier pixi-shell report not reproduced). The unrelated browser/root/pre-start corrections in the production-review
+section are NOT newly authorized by P25. Do not revive rejected workarounds or change ordinary tasks
 without approval.
 Do not call removed tests passing coverage or claim production acceptance has passed.
 Earlier transient test failures remain qualified, not relabeled as first-run passes.
@@ -3633,11 +3546,12 @@ there; do not imply untouched storage was proven for that command.
 
 - After compaction reread TASK and WORK IN FULL. Keep WORK current, remove stale pending claims.
 - Only the current detour contract exists: no historical-schema special cases, shape-based
-  migration or alternate parser. No special output-schema guard. This retry changes
-  ONLY P24; no audit, DTO-default removal or card-format tightening is authorized.
-- Operator forbids cast: proposed/implemented changes must use genuinely compatible types,
-  not cast or substitute type suppressions. P24's needless runtime argument/cast is removed.
-  This constraint does not authorize an unrelated codebase-wide refactor; P24 is narrowly approved.
+  migration or alternate parser. No special output-schema guard. P24 is complete; pending
+  implementation is ONLY P25's exact approved contour/snippets above, with ACK/NAK and
+  update_pull_state. No unrelated audit, DTO-default removal or card-format tightening.
+- Operator forbids cast: changes must use genuinely compatible types, not cast or substitute
+  type suppressions. No unrelated codebase-wide refactor. Store persistence and pull-state
+  updates must not be named publishing; that term is reserved for DOCX/TXT in the new scope.
 - All commands via pixi run -e detour-ai-augment; Ruff/mypy/pytest via env. Git read-only.
 - Task edits: prior interpreter substitutions, agent-owned elevate, and newly approved F7 fixes for proven environment-variable expansion defects only. Pre-commit structure/grep changes remain rejected.
 - Never run/import src.repl, edit src/cli.py, import another detour or edit TASK/HUMANS.
