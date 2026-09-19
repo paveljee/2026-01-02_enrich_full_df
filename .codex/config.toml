@@ -16,7 +16,7 @@
 # options below.
 # ======================================
 
-# OpenAI Codex (v0.154.0)
+# OpenAI Codex (v0.155.1)
 model = "gpt-6-astra"
 model_reasoning_effort = "xhigh"
 model_reasoning_summary = "detailed"

@@ -1,3 +1,16 @@
+# NOTE: This sync config is considered
+# retired and no longer updated
+# as of 2026-09-19. The reason is
+# because the current async config
+# is more flexible while still allowing
+# for a semi-sync workflow, that is,
+# concurrent review and interaction.
+# This config may still be helpful
+# for local development on a sensitive
+# machine.
+#
+# Signed off: Pavel
+
 # alternative config for sync work
 # OpenAI Codex (v0.154.0)
 model = "gpt-6-astra"
