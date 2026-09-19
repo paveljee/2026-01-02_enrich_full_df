@@ -515,52 +515,12 @@ exit "$status"
 '
 """
 elevate = """
-bash -c 'if [ "$(uname -s)" != Darwin ]; then
-  echo "ERROR: run elevate on the macOS Dashboard host; it dispatches guest checks to aicode" >&2
-  exit 1
-fi
-LOG_PATH="$PIXI_PROJECT_ROOT/logs/from_operator/elevate.log"
-ELEVATE_CHECKS_DIR="$(mktemp -d "$PIXI_PROJECT_ROOT/tmp/elevate.XXXXXX")" || exit 1
-export ELEVATE_CHECKS_DIR
-cat > "$ELEVATE_CHECKS_DIR/guest.sh" <<'"'"'GUEST_ENTRY'"'"'
-case "$(uname -sm)" in
-  "Linux aarch64"|"Linux arm64") ;;
-  *) echo "ERROR: guest checks require the aicode Linux ARM64 development guest" >&2; exit 1 ;;
-esac
-export PATH="$HOME/.pixi/bin:$PATH"
-exec pixi run -e detour-ai-augment env bash "$1"
-GUEST_ENTRY
-cat > "$ELEVATE_CHECKS_DIR/guest-checks.sh" <<'"'"'GUEST_CHECKS'"'"'
-export APPENDWATCH_SCRIPT="$PIXI_PROJECT_ROOT/src/detours/detour_ai_augment/protected/src/control_centre/appendwatch/appendwatch.py"
-export APPENDWATCH_PYTHON="$CONDA_PREFIX/bin/python"
-task_status=0
-echo "aicode: real OpenAlex/ROR institution validation (no credential values logged)"
-python -m pytest -vv -srA --durations=10 -m real_api src/detours/detour_ai_augment/protected/tests/backend/test_pydantic_to_paste.py::test_academic_institution_round_trips_against_real_apis || task_status=1
-echo "aicode: real Unix IPC and the isolated audit probe"
-python -m pytest -vv -srA --durations=10 src/detours/detour_ai_augment/tests/backend/test_ipc.py::test_dashboard_client_queries_real_mode_0600_unix_socket src/detours/detour_ai_augment/tests/control_centre/test_audit_read.py::test_audit_protocol_finds_and_reads_only_configured_artifacts || task_status=1
-echo "aicode: nonprivileged watcher socket-substitution cases"
-python -m pytest -vv -srA --durations=10 -m "not needs_sudo" -k socket src/detours/detour_ai_augment/protected/tests/backend/test_appendwatch.py || task_status=1
-echo "aicode: unchanged main-pipeline configured extension and reviewed-workbook prerequisites"
-pixi run -e default env python -m pytest -vv -srA --durations=10 tests/test_duckdb_extensions.py tests/test_sciscinet_name_matching.py::test_manual_best_reviewed_fixture_expectation_coverage || task_status=1
+bash -c 'LOG_PATH="$PIXI_PROJECT_ROOT/logs/from_operator/elevate.log"
+script -q -e -c '"'"'task_status=0
+echo "Nothing to elevate" || task_status=1
 exit "$task_status"
-GUEST_CHECKS
-cat > "$ELEVATE_CHECKS_DIR/host.sh" <<'"'"'HOST_CHECKS'"'"'
-task_status=0
-echo "macOS: production Chrome Dashboard tests, including card readiness and owned Backend cleanup"
-pixi run -e detour-ai-augment env python -m pytest -vv -srA --durations=10 src/detours/detour_ai_augment/tests/control_centre/test_ui_e2e.py || task_status=1
-echo "Dispatching remaining checks only to the aicode development guest (not aivm); no sudo or live Codex"
-limactl shell --workdir="$PIXI_PROJECT_ROOT" aicode -- bash "$ELEVATE_CHECKS_DIR/guest.sh" "$ELEVATE_CHECKS_DIR/guest-checks.sh" </dev/null || task_status=1
-printf '"'"'%s\\n'"'"' "$task_status" > "$ELEVATE_CHECKS_DIR/status"
-exit "$task_status"
-HOST_CHECKS
-script -q "$LOG_PATH" bash "$ELEVATE_CHECKS_DIR/host.sh"
+'"'"' "$LOG_PATH"
 task_status=$?
-if read -r batch_status < "$ELEVATE_CHECKS_DIR/status"; then
-  if [ "$batch_status" != 0 ]; then task_status=1; fi
-else
-  echo "ERROR: verification batch did not finish" >&2
-  task_status=1
-fi
 grep -n -- "FAILED" "$LOG_PATH"
 grep_status=$?
 case "$grep_status" in

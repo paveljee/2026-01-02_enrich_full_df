@@ -4,8 +4,9 @@
 
 Active execution (2026-09-19): operator requested implementing exactly HUMANS corrections2
 and4–7, whose approved snippets/boundaries are pinned below. All five code corrections are
-now implemented and locally verified within the available boundaries; delegated verification
-and full operator acceptance remain pending. Items1/3 were already complete. No P26–P30,
+now implemented and locally verified. The targeted delegated elevate batch also PASSED
+(20tests, details below). Full pre-commit-operator acceptance remains pending; ready for
+that operator run now. P26 must wait for its result. Items1/3 were already complete. No P26–P30,
 Backend/Store, CSS or ordinary-task changes. Human-maintained HUMANS remains unchanged;
 its captured "proposed" labels do not supersede the later explicit approvals recorded here.
 
@@ -13,7 +14,7 @@ Current verification:
 - Item2: reproduced all five stale IPC-target failures (4.04s); corrected only target/import;
   unchanged preflight module then20passed25.15s.
 - Item4: exact ready-card checks and finite measurement diagnostics; every existing spacing/
-  bounding-box assertion and timeout retained. Host Chrome execution remains pending.
+  bounding-box assertion and timeout retained. Host Chrome spacing verification now passes (3.28s); see delegated results below.
 - Item5: real-child cancellation regressions reproduce early ownership release (2failed7.40s).
   Exact wrapper/log implementation plus per-owned-PID operator teardown check now in place;
   focused supervisor/shutdown/teardown selection8passed7.79s. Named child helper lives in the
@@ -42,8 +43,8 @@ Current verification:
   initial maxfail run20passed1skipped1deselected1failed12.43s (configuration lists only ARM
   extension binaries, not linux_amd64). Remaining main selection140passed3skipped2deselected
   2failed16.42s: configured ARM binary absent, reviewed workbook absent at production path.
-  No fixture/config substitution, new skip, data search or test weakening. Verify these
-  existing prerequisites on aicode through elevate; no out-of-scope implementation.
+  No fixture/config substitution, new skip, data search or test weakening. Those
+  existing prerequisite checks now pass on aicode through elevate; no out-of-scope implementation.
   Step4/Mode3:10passed1slow deselected17.80s (default environment). Mode0 import/isolation
   and normalization helpers:2passed2plot cases deselected2.60s (Mode0 environment). Plotting
   requires Kaleido sockets unavailable here; existing operator Mode0/root passes remain the
@@ -53,40 +54,161 @@ Priority remains a failure-free FULL pre-commit-operator run before P26. P26–P
 approved/pending. Correction1 (find/supported-subset eligibility) remains implemented and
 locally verified246passed1existing skip3deselected; seeded choice/retry behavior unchanged.
 Correction3 deleted all elevate-triggering tests and preserved the then-idle task. The
-Assistant-owned elevate is now prepared for the delegated checks described below, not
-invoked by any test. Any further deviation/new defect requires explicit approval.
+Assistant-owned elevate completed the delegated checks described below and is restored to
+its historical idle script/log/status/FAILED-grep scaffolding; no tests invoke it. Any further deviation/new defect requires explicit approval.
 
-### Next operator verification — prepared, NOT executed
+### Delegated verification completed — full operator run is next
 
-Run pixi run elevate; its embedded machine guard requires the macOS Dashboard host before
-any log replacement or temporary files. It runs the entire9-test Chrome UI module on host,
-including ready-card spacing and actual owned IPC cleanup. It then dispatches ONLY to the
-named aicode guest (Linux ARM64 guard), never aivm:
-- Real OpenAlex/ROR institution test (previously unreached leaf).
-- Real0600 Unix IPC and the now-isolated audit probe.
-- Two nonprivileged watcher socket-substitution cases unavailable here.
-- Unchanged main-pipeline extension tests and reviewed-workbook prerequisite case (6tests)
-  which cannot be certified on this x86 host without production resources.
+Reviewed current logs/from_operator/elevate.log (mtime2026-09-19T12:19:57UTC,23837bytes,
+231lines). All20 targeted cases PASS, none skipped, no warnings/errors, timeout, Ctrl+C or
+forced process kill. Log ends at the final pytest summary; outer wrapper exit status is not
+included, so do not invent one. Each of the five intended leaf commands visibly completed:
 
-Total targeted collection20cases:12host/IPC/audit/provider7.35s,2watcher0.50s,
-6default-prerequisite6.27s. Collection is not execution/acceptance. All relevant skips,
-failures, warnings, durations and cleanup evidence must be reviewed from elevate.log.
-No sudo, password input, SSH debug/key output, live Codex, browser installation, fixture
-substitution or ordinary-task edit. Preserve main test failures until the real prerequisites
-pass; never add a fake extension/config, new skip or edited assertion to mask them.
+| Machine/leaf | Result |
+|---|---|
+| macOS, actual Chrome UI module |9passed31.09s; compact spacing3.28s, DOCX export3.38s, real owned query4.45s; longest case7.25s |
+| aicode, real OpenAlex/ROR model validation |1passed1.11s (previously unreached provider leaf) |
+| aicode, real0600 Unix IPC and isolated audit probe |2passed0.82s; audit0.31s, no multithreaded-fork warning |
+| aicode, nonprivileged watcher socket substitutions |2passed48deselected4.72s; real CLI case4.65s |
+| aicode, default-env extension/reviewed-workbook prerequisites |6passed0.61s; real configured ARM binary loads and workbook exists |
 
-Only elevate in pyproject.toml changed. Its temporary shell scripts are created in one
-mktemp directory under the shared repository tmp (removed on EXIT), avoiding nested quote
-explosion and allowing the guest to read the exact script. BSD script captures host/guest
-output; an explicit batch-status file preserves failure independently of script's status.
-All leaves run despite earlier failures; FAILED grep/log path remain. Guest stdin is closed.
-TOML, four shell bodies, wrong-machine guard and equality of all other task/settings PASS.
-An intermediate in-memory shell-decoding script used a wrong argv index and failed before
-writing; corrected before the final syntax/guard checks. No delegated commands ran locally.
-Restore idle Nothing-to-elevate script/log/status/grep scaffolding after this batch is reviewed
-and no further delegated verification is needed. Full pre-commit-operator is NOT authorized
-as acceptance-ready yet: review this targeted batch first, then run the full gate before P26.
+Owned IPC Backend pid23475 logs clean-close acknowledgment, exit0, clean_close_ack=True,
+forced_kill=False, shutdown_succeeded=True before the snapshot replacement. Dashboard
+pid23457 then stops normally, exits0; resource-tracker descendant exits without fallback
+termination. Private NiceGUI storage path is explicit. The full-Backend/live-Codex contour
+was not part of this batch; its final proof remains the full pre-commit-operator run.
 
+Eight identical missing-socket messages precede normal IPC readiness, accounting for the
+operator's noise complaint, not an actual failed start. The suffix verification from an
+empty anchor is expected for this fixture. "after earlier load attempts failed" in the
+main extension tests is their intentional exercised fallback, not a new failure or masking.
+No abnormal wait or inconsistent machine/environment routing was found.
+
+Operator removed the elevate EXIT trap to retain its temporary files. Preserve that choice:
+no preserved script/status/log file was deleted, and no trap was restored. There are no
+copied tmp/elevate.*/status files locally; do not search unrelated artifacts for one.
+With this batch complete, restored only elevate's historical "Nothing to elevate"
+script/log/status/FAILED-grep scaffolding. TOML, shell syntax and equality of all other
+settings/tasks checked; no task executed during restoration. No new delegated batch is
+needed. Ready for full pre-commit-operator; P26–P30 stay pending until its acceptance gate.
+
+### Additional IPC log-noise request — prior patch verified, no longer present
+
+Operator asks to remove routine "IPC unavailable; socket not present" startup noise.
+Confirmed source: _BackendDatabaseClient.available() emits it on FileNotFoundError;
+query_connection calls it before deciding to launch an owned child and wait_until_ready
+repeats it while IPC starts. Operator explicitly authorized the exact logging-only shape
+on2026-09-19, in ui.py only plus its directly affected existing test:
+
+```python
+except FileNotFoundError:
+    return False
+```
+
+Remove only that branch's emit_log and unused exception binding. Keep OPTIONS behavior,
+return value, finally-close, success logs and other OSError/HTTPException path/error details
+unchanged. Explicit Probe already logs its act and True/False outcome; startup failure and
+readiness timeout still log. Update the existing parametrized availability test so missing
+socket expects no emitted message, while PermissionError still requires path/repr and the
+error message; retain request/close assertions. No quiet flag, state cache, polling/timeout
+change, broad log suppression or Backend change. This correction does not block the full
+operator run. The exact branch/test change was implemented and verified, but current
+working tree again contains the original logging handler and no ui.py/test_ui.py diff.
+Do not reapply it during this discussion. Preserve operator edits/staging; P26–P30 remain pending.
+
+Verification: updated missing-socket assertion reproduced the old noise (1failed/1passed,
+3.64s); after the production change, the two availability cases, successful availability/query,
+explicit Probe cases and Probe/download logging check pass8tests6.25s. OPTIONS/close and
+permission path/error assertions retained; no real sockets/network. Ruff PASS; configured
+strict mypy PASS2files; diff whitespace PASS. No task/Backend/Store changes in this
+addition; prior elevate idle restoration remains untouched.
+
+### Follow-up IPC diagnostics — proposed, not authorized or implemented
+
+Causal review2026-09-19: elevate.log42–45 shows explicit Query IPC AFTER Dashboard readiness,
+not automatic Dashboard-startup probing. First missing-socket message is external discovery
+before any owned Backend starts. Seven further messages occur during IPC-only child readiness
+polling (retry interval0.1s). Backend imports/config/source loading and Store verification
+precede server.make_server's Unix-socket bind; logs67–70 then show Store ready, socket running
+at the SAME path and OPTIONS200. Query200 and clean shutdown follow. Actual socket absence is
+normal in this observed startup, not a broken/mismatched socket or failed Backend. Diagnostic
+fact is accurate but emitted without lifecycle context on every ordinary readiness miss.
+Test/control-flow confirmation: test_completed_grid_row_uses_real_query_ipc calls the
+operator helper, which waits for the prior owned socket to disappear and clicks the REAL
+BACKEND_REFRESH button. Production query_ipc enters query_connection, waits for owned child
+OPTIONS readiness, then and only then sends the wholesale GET. The pre-start "Requesting
+wholesale Backend query snapshot" log announces the action, not a transmitted GET. Existing
+readiness deadline is30s (600s for full --new/rebuild), polling sleep0.1s. Seven failed child
+polls imply about0.7s scheduled sleeps; the whole successful test call4.45s also includes
+Dashboard/browser/query/shutdown, so is NOT a startup measurement. Earlier30.24s whole-case
+and historical30s readiness-timeout evidence cannot justify a fixed startup delay. No new
+elevate or runtime changes: bounded readiness polling already prevents premature GET.
+Operator challenges the flag naming: permitted temporary absence is not advance knowledge
+that the socket is missing. The proposal below is not authorized; no source changes made in
+this causal review.
+
+Operator asks to retain missing-socket diagnostics outside contexts where absence is
+acceptable. The prior patch above suppressed FileNotFoundError unconditionally;
+that affected explicit Probe too, not merely startup. Proposed replacement: log by default,
+explicitly suppress only external-Backend discovery before owned startup and owned IPC-only
+readiness polling. Absence is an acceptable lifecycle condition there, not proof that an
+incorrect path is harmless. At readiness timeout include the configured socket path in the
+existing startup failure, without another probe, changed deadline or filesystem precheck.
+
+Exact proposed snippets (unchanged surrounding behavior retained):
+
+```python
+# _BackendDatabaseClient: signature and affected handler only.
+def available(self, *, missing_socket_expected: bool = False) -> bool:
+    # Existing connection construction remains.
+    try:
+        ...  # Existing OPTIONS/response handling remains.
+    except FileNotFoundError as exc:
+        if not missing_socket_expected:
+            emit_log(
+                Locale.CONTROL_CENTRE_LOG_PREFIX,
+                Locale.IPC_SOCKET_MISSING_LOG_TEMPLATE.format(
+                    socket_path=self._socket_path, error=repr(exc),
+                ),
+            )
+        return False
+    # Existing other exception handler and finally-close remain.
+```
+
+```python
+# query_connection's existing pre-launch availability check
+await asyncio.to_thread(client.available, missing_socket_expected=True)
+
+# wait_until_ready's existing IPC-only readiness check
+await asyncio.to_thread(query_client.available, missing_socket_expected=True)
+
+# Existing readiness loop's timeout branch
+else:
+    if self._process.ipc_only:
+        raise TimeoutError(Locale.IPC_READY_TIMEOUT_TEMPLATE.format(
+            socket_path=self._dashboard_socket_path,
+        ))
+    raise TimeoutError(Locale.BACKEND_READY_TIMEOUT)
+```
+
+```python
+# Existing Control Centre Locale
+IPC_SOCKET_MISSING_LOG_TEMPLATE: Final = (
+    "IPC unavailable; socket not present: {socket_path}; {error}"
+)
+IPC_READY_TIMEOUT_TEMPLATE: Final = (
+    "backend IPC did not become ready; socket path: {socket_path}"
+)
+```
+
+Explicit Probe uses available() with its default and retains act/outcome/path/exception
+logs. Other errors and success logs remain unchanged even in expected-absence calls.
+No log cache, stored error, retry/timeout change, extra request, exists() race or Backend/
+Store change. Files only ui.py, existing Control Centre Locale and directly affected existing
+UI tests: missing/default logs, missing/expected quiet, permissions logged in both modes,
+unchanged OPTIONS/close assertions, two caller flags, explicit Probe and IPC timeout detail.
+Necessary test doubles accept the new keyword. Full-Backend timeout remains unchanged.
+This is a proposal awaiting approval, not an extension already applied or a P26 gate change.
 
 Latest addition (2026-09-18): P30 is APPROVED/PENDING: Store-owned current pull/push/commit/
 validation record instances; explicit session/current-record outcome linkage and completed
@@ -632,9 +754,9 @@ existing snapshot/replay checks passed2 in25.84s.
   test storage, existing timeouts/assertions and detailed elevate.log/FAILED grep/status.
   No live Codex, provider or sudo tests; ordinary tasks unchanged.
   P25's targeted real-transport check now passes, but does not resolve browser-test placement,
-  root watcher access or the live-operator pre-start hang. Full acceptance
-  readiness remains unestablished; recommend resolving those known independent blockers
-  before another expensive pre-commit-operator run. P26-P30 still pending. Local preparation:
+  root watcher access or the live-operator pre-start hang. That checkpoint did not establish full acceptance readiness. The subsequent routing/root
+  corrections and targeted checks below now permit a full operator run; acceptance itself
+  is still pending. P26-P30 still pending. Local preparation:
   TOML/shell syntax PASS, both exact nodes collected (2tests3.42s), diff whitespace PASS;
   collection is not an execution pass.
 
@@ -1201,7 +1323,7 @@ unresolved operator acceptance boundaries remain pending as recorded elsewhere.
 
 All P1-P24 code changes are implemented (P22 superseded by P24); this is not production
 acceptance or fresh P25 verification. No additional pending historical implementation is
-revived. Current approved implementation is P25 plus its narrow P26-P30 additions. F7 remains an unresolved report,
+revived. P25 is implemented; current pending implementation is its narrow P26-P30 additions. F7 remains an unresolved report,
 not a proven task defect to patch speculatively.
 
 ## Retained contracts — baseline and P25 boundaries
@@ -1353,7 +1475,7 @@ Latest reviewed pre-commit-operator run:2026-09-18 15:37:17–15:46:13(-04),
 logs/from_operator/pre-commit.log and pre-commit-extra.log. Full acceptance FAILED.
 Operator explicitly requested findings independent of pending P26-P30; those approved items
 remain unchanged/unimplemented. The initial review changed WORK only; correction1 was
-subsequently approved and implemented below. Corrections2 and4–7 are implemented and locally verified; delegated/full verification remains pending;
+subsequently approved and implemented below. Corrections2 and4–7 are implemented and locally verified; targeted delegated verification passed; full operator acceptance remains pending;
 correction3's approved test deletion is complete, not its original redesign. Line references below count LF lines
 in the raw logs (terminal CR/ANSI sequences may affect rendered editor numbering).
 
@@ -1362,7 +1484,7 @@ in the raw logs (terminal CR/ANSI sequences may affect rendered editor numbering
 | Live workflow blocker | Extra log4623–4629: rollout capture succeeds (856518bytes/178lines), commit and validation are persisted, but rollout_index rejects call_YiI9YVKmuEiZtIrZu1FI3vl2: “must contain exactly one eligible web action”. Pull then returns500, never410. Dashboard's ordinary final pull500 -> /failed200 follows its current contract. Recovered evidence identifies a find-only call excluded by that run's pre-fix whitelist (details below). Correction1 below implements the fix; full production acceptance has not been rerun. |
 | Five stale preflight callpoints | test_operator_e2e_preflight.py:303 patches backend_ipc.start_dashboard_query_server, moved to backend_server by P25. All five then failed before exercising their behavior. Item2 now corrects the direct target/import, preserving cases/assertions; the20-case preflight run passed. No compatibility alias or production rollback. |
 | Three stale elevate expectations | Same test module:344 assumes elevate always runs install+browser stages. Operator-requested idle “Nothing to elevate” correctly runs neither. The three tests failed on missing stages or expected nonzero status. Item3 deleted that parametrized test entirely; no obsolete batch or redesigned wrapper tests remain. |
-| Host browser layout | pre-commit.log3267: card line-height ratio is NaN, so the compact-spacing assertion fails. Host module8passed/1failed34.11s; real query and DOCX download pass. The pre-correction test evaluated computed lineHeight/fontSize immediately after card click without content/visibility readiness; item4 now adds the exact approved readiness checks and diagnostics, pending host verification. Current CSS explicitly sets1.25; logs do not capture computed strings or element attachment, so a render/detachment race is plausible, NOT proven and not justification to relax the assertion or change production CSS blindly. |
+| Host browser layout | pre-commit.log3267: card line-height ratio is NaN, so the compact-spacing assertion fails. Host module8passed/1failed34.11s; real query and DOCX download pass. The pre-correction test evaluated computed lineHeight/fontSize immediately after card click without content/visibility readiness; item4 adds the exact approved readiness checks and diagnostics; fresh host Chrome verification passes (3.28s). Current CSS explicitly sets1.25; logs do not capture computed strings or element attachment, so a render/detachment race is plausible, NOT proven and not justification to relax the assertion or change production CSS blindly. |
 | Full Backend shutdown evidence incomplete | Extra log5405–5415: test teardown signals Dashboard while its worker is already stopping Backend. All processes disappear, Dashboard exits0, no forced-kill report; however the full Backend clean-close token, final Uvicorn shutdown lines and Dashboard Backend-stopped log are absent. Query-only shutdown earlier has them. The prior code had a cancellation window: cancellation inside Backend._stop cleared self._process before a second stop could await it. Item5 now shields/awaits that cleanup and tests both cancellation points. The prior missing log was not proof of Store failure; full operator re-verification remains pending. |
 | Normal AI suite | 578passed/8failed/1skip/3deselected/1warning116.24s. The eight failures above prevent the subsequent real OpenAlex/ROR institution test via task's &&. Do not report that provider leaf as tested. |
 | Browser placement / root watcher | Routing now correctly runs Chrome tests on macOS; aicode privileged appendwatch3passed70deselected2.55s, unchanged real EACCES assertions. Earlier machine-placement/credential blockers are resolved, not reasons for this run's failures. |
@@ -1450,7 +1572,7 @@ acceptance is NOT reached; host synthetic DOCX export passing is a distinct boun
 Wrapper status/grep quirks are unchanged and previously rejected for modification; actual
 leaf summaries/exit statuses, not “grep: no FAILED”, determine the result.
 
-### Operator-log corrections — implemented; local evidence above, delegated gate pending
+### Operator-log corrections — implemented and targeted checks passed; full gate pending
 
 Scope is separate from P26-P30. All seven corrections are implemented; verification status is below. On2026-09-19 the operator approved
 exactly HUMANS sections2 and4–7; their complete bodies and fenced code snippets are copied
@@ -1560,7 +1682,7 @@ ELIGIBLE_WEB_ACTIONS = frozenset({
      Initial mypy caught heterogeneous empty-tuple chained comparisons and indirect Locale
      import in new tests; corrected to separate assertions/direct import, no casts/ignores.
    - No network/browser/root/live-Codex acceptance run. Current correction is complete, not
-     a full pre-commit-operator acceptance claim. Corrections2 and4–7 are implemented and locally verified; delegated/full verification remains pending;
+     a full pre-commit-operator acceptance claim. Corrections2 and4–7 are implemented and locally verified; targeted delegated verification passed; full operator acceptance remains pending;
      correction3's authorized deletion is complete. P26–P30 remain separately approved/pending.
 
 2. **IMPLEMENTED — Correct the five stale IPC test callpoints**
@@ -1609,7 +1731,7 @@ Remove the unused `backend_ipc` import. Preserve all five cases and assertions. 
    (6.11s), none targeting elevate. This is collection evidence, not a claim those20 tests
    pass; item2 was subsequently corrected and its full20-case preflight run passed above.
 
-4. **IMPLEMENTED; HOST VERIFICATION PENDING — Make the spacing test measure a ready card**
+4. **IMPLEMENTED; HOST CHROME PASSED — Make the spacing test measure a ready card**
 
 Test-only changes in `test_ui_e2e.py`:
 
@@ -1744,12 +1866,14 @@ assert result.stdout == result.stderr == ""
 
 Production audit behavior remains unchanged. No warning suppression or new privilege requirement.
 
-**No correction proposed for normal/unchanged observations:** initial missing-socket polls,
+**No correction in these seven items for normal/unchanged observations:**
 unchanged NiceGUI snapshot, duplicate live/replay warning, old unreproduced pre-start hang,
 F7 report, documented main-pipeline XPASS. Mode0 dependency deprecations are outside this
 isolated detour scope: no main-pipeline/other-detour/environment/lockfile changes. Existing
 ordinary-wrapper status/grep restructuring remains rejected; no pyproject task edit proposed.
-The skipped provider leaf is a verification gap to execute, not a reason to change && or tasks.
+The previously skipped provider leaf now passes in elevate, without changing && or tasks.
+The later missing-socket patch was approved and verified but is no longer present;
+the follow-up proposal/discussion is recorded at the top.
 
 **Pre-handoff verification for approved corrections:** reproduce regressions before each fix; run all
 feasible normal-suite leaves including operator preflight, changed API/index/replay and UI/
@@ -1763,7 +1887,7 @@ failure-free full pre-commit-operator run BEFORE starting P26: no failed test/ch
 operator interruption or silently unreached leaf may be reported as acceptance. Review each
 leaf rather than unchanged wrapper status/grep quirks; retain existing intentional skips/
 xfails and inspect warnings, waits, cleanup and preservation evidence. Correction1's local
-passes do not satisfy this gate. Corrections2 and4–7 are implemented and locally verified; delegated/full verification remains pending; correction3's
+passes do not satisfy this gate. Corrections2 and4–7 are implemented and locally verified; targeted delegated verification passed; full operator acceptance remains pending; correction3's
 authorized deletion is complete. New defects or scope deviations still need a narrow
 proposal/approval rather than broadening implementation silently.
 
@@ -1931,9 +2055,10 @@ confirmed forgetting to pull, then updated and reran. Latest reviewed elevate.lo
 3passed,70deselected1.54s, root test status0. No additional implementation change or proposed
 source-hash guard was applied between runs. Root verification is complete.
 That targeted result supported the subsequent full operator run, now reviewed above.
-Chrome placement/root credentials are resolved; full acceptance remains blocked by the
-independent current findings, including cheap preflight cases missed before handoff.
-That earlier review required no further batch. The current post-correction elevate batch
+Chrome placement/root credentials are resolved; the subsequent full run exposed
+independent findings, including cheap preflight cases missed before handoff. Those corrections
+are now implemented and targeted checks pass; fresh full acceptance remains pending.
+That earlier review required no further batch. The completed post-correction elevate batch
 is recorded at the top; P26-P30 remain separate pending work.
 
 Rejected changes MUST NOT return: root preload-before-drop, synthetic DuckDB config/binary
