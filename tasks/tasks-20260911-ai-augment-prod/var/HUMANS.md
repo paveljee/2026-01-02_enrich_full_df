@@ -6,16 +6,37 @@
 > because I maintain it vs. agents.
 > signed off: Pavel
 
-# give me proposed shape for all issues you identified in logs
+# Pre-commit-operator acceptance gate before P26
 
-**Proposed only; separate from P26–P30.** Two production corrections—`find` support and cancellation-safe Dashboard shutdown. The remainder is test infrastructure and diagnostics.
+**Current priority: obtain a failure-free `pixi run pre-commit-operator` run before starting P26.**
+The completed `find`/evidence-eligibility fix is not full operator acceptance. P26–P30 remain
+approved but pending; they must not be used to obscure failures in the current implementation.
 
-## 1. Support the observed `find` action
+Updated on 2026-09-18 with the operator's permission. Status and implementation evidence are
+also recorded in [WORK.md](WORK.md). Remaining snippets below retain their proposed scope;
+this document update does not authorize their implementation.
+
+| Item | Status | Remaining acceptance concern |
+|---|---|---|
+| 1. Web-action eligibility | Implemented; locally verified | Confirm in the eventual full operator workflow |
+| 2. IPC test callpoints | Proposed; awaiting approval | Five ordinary-suite failures |
+| 3. Elevate wrapper tests | Proposed; awaiting approval | Three ordinary-suite failures |
+| 4. Card spacing test | Proposed; awaiting approval | Host Chrome failure; render readiness versus CSS cause not yet established |
+| 5. Cancellation-safe Backend stop | Proposed; awaiting approval | Missing full-Backend clean-close evidence and a confirmed cancellation window |
+| 6. Operator failure diagnostics | Proposed; awaiting approval | Preserve the actual Backend reason in the final test failure |
+| 7. Audit probe subprocess | Proposed; awaiting approval | Avoid the test's multithreaded-fork warning without suppressing it |
+
+Item 5 is the remaining proposed production correction. Items 2–4 and 6–7 concern tests and
+diagnostics. The provider test was not reached after the ordinary-suite failures; it is still
+a verification gap, not a pass or a demonstrated provider defect.
+
+## 1. Completed: `find` and supported-subset evidence eligibility
 
 In `api.py`, alongside the existing action constants:
 
 ```python
 WEB_FIND_ACTION = "find"
+WEB_RESPONSE_LENGTH_ARGUMENT = "response_length"
 
 ELIGIBLE_WEB_ACTIONS = frozenset({
     WEB_SEARCH_QUERY_ACTION,
@@ -25,14 +46,44 @@ ELIGIBLE_WEB_ACTIONS = frozenset({
 })
 ```
 
-Preserve all existing chain, citation, URL and evidence checks.
+The final approved implementation also excludes unsupported arguments instead of failing
+the entire rollout. In `_web_arguments`, after the existing JSON-object decoding:
 
-Tests:
+```python
+if (
+    decoded.keys() - ELIGIBLE_WEB_ACTIONS - {WEB_RESPONSE_LENGTH_ARGUMENT}
+    or not any(decoded.get(action) for action in ELIGIBLE_WEB_ACTIONS)
+):
+    logger.info(Locale.WEB_CALL_EVIDENCE_INELIGIBLE_LOG, call_id, sorted(decoded))
+    return None
+return decoded
+```
+
+Multiple supported action keys can coexist, as confirmed by `SearchCommands` in the
+operator-supplied `protected/src/agent_runtime/docs/search.rs` and message 25 of the schema
+chat. `response_length` remains allowed. A call containing any unsupported argument is
+excluded, even if it also contains a supported action.
+
+Exclusion happens before strict citation-output parsing and before indexing, so both exact
+and near-match candidate pools exclude that call. The existing seeded `choice()` remains
+unchanged. If no eligible evidence matches, the existing assessment/retry mechanism produces
+`/pull` 200 Markdown correction instructions, not 500. Malformed JSON and broken supported
+chains still fail closed; no generic exception swallowing or evidence-check relaxation.
+
+Verified coverage:
 
 - Explicitly cover all four actions, rather than derive coverage from the whitelist.
-- Add a sanitized version of the recovered four-target `find` chain.
-- Assert that its two URL-backed results are indexed and its two URL-less errors remain excluded.
-- Preserve rejection of malformed/ambiguous chains.
+- Combined supported actions and `response_length`.
+- Sanitized four-target `find`: two URL-backed results indexed, two URL-less errors excluded.
+- Unsupported and mixed calls, alternative eligible provenance, exact/near-match filtering.
+- Rejection of malformed/ambiguous chains.
+- Real persisted validation, retry obligations and `/pull` status; identical DB/query state
+  after replay, with unchanged replay-log bytes.
+
+**Local result: 246 passed, 1 existing skip, 3 deliberate exclusions; Ruff and strict mypy
+passed.** The exclusions were the process-lock subprocess and two historical-capture cases;
+the existing skip concerns multiple-match rejection when multiple matches are intentionally
+allowed. No full production/operator rerun is claimed.
 
 No recovered files are modified. Changing this validation rule can cause the recovered rejected `/validate` record to fail replay consistency; no historical-verdict substitution or fallback.
 
@@ -217,12 +268,28 @@ Production audit behavior remains unchanged. No warning suppression or new privi
 
 ## Verification and exclusions
 
-Before another expensive operator run:
+After approval and implementation of the remaining corrections, before another expensive
+operator run:
 
-- Run the corrected preflight cases and all feasible affected API/replay/UI/audit tests locally, plus Ruff/mypy.
-- Put necessary host-Chrome checks and the previously unreached real-provider test into `elevate`, with machine checks.
+- Examine the entire `pre-commit-operator` task graph and run every feasible leaf locally,
+  including the corrected preflight cases, affected API/replay/UI/audit tests and Ruff/mypy.
+  Selected passing tests are not proof that the ordinary suite passes.
+- Put necessary host-Chrome checks and the previously unreached real-provider test into
+  `elevate`, with embedded machine checks and the correct existing environment. Chrome tests
+  belong on the macOS production Dashboard host; Linux tests belong on `aicode`, not `aivm`.
+- Retain isolated NiceGUI storage and production-data preservation checks. No password/key
+  logging, prerequisite masking, substituted tested boundaries or new skips.
 - Preserve existing timeouts, assertions and storage isolation.
+- Only after cheap/local and necessary delegated checks pass, request the full operator run.
+  Review every leaf's result and actual execution, not wrapper exit/grep summaries alone.
+
+**P26 is blocked until that full run completes without test/check failures, hangs or operator
+interruptions.** Previously unreached leaves must actually run; an interrupted or partially
+executed workflow is not acceptance. Review warnings, long waits, cleanup and preservation
+evidence as well. Existing intentional skips/xfails are not new failures or permission to
+hide a failed prerequisite. Unexpected new defects need their own narrow proposal/approval.
 
 No changes proposed for normal readiness polling, cached NiceGUI data, duplicate live/replay warnings, the unreproduced old hang, documented XPASS, or out-of-scope Mode0 dependency deprecations. Previously rejected pre-commit wrapper restructuring remains excluded.
 
-Recorded in WORK as **proposed, not approved**. No implementation changes made.
+Item 1 is implemented. Items 2–7 remain **proposed, not approved**. The operator acceptance
+gate remains unmet; no P26 implementation should begin yet.

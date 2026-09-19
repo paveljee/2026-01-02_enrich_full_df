@@ -2,13 +2,23 @@
 
 ## Status and authorization
 
+Latest approvals (2026-09-19): operator APPROVES exactly HUMANS items2 and4–7, including
+all their snippets and boundaries. Their full bodies/snippets are copied verbatim below as
+APPROVED/PENDING. Items1 and3 are implemented: the operator approved deleting all
+elevate-triggering tests (item3), not the previously proposed wrapper-test replacement.
+That deletion is verified below and is the only code change in this turn. Other approved corrections
+remain pending. Latest chat approvals supersede the captured status labels in HUMANS;
+its current operator edits are preserved unchanged. No ordinary task change is authorized.
+Complete the corrections toward the full pre-commit-operator acceptance gate before P26;
+P26–P30 remain pending. Obtain explicit approval before any deviation from the pinned scope.
+
 Current operator priority (2026-09-18): a failure-free full pre-commit-operator run is the
 blocker BEFORE starting P26. P26–P30 remain approved/pending, not the next execution step.
 Operator explicitly authorized updating var/HUMANS.md's captured proposal after the find
 fix; that documentation-only exception supersedes the usual no-HUMANS-edit restriction
 for this update only. Preserve its human-signed introduction. HUMANS now distinguishes
-implemented correction1 from proposed/unapproved corrections2–7 and records the acceptance
-gate and full task-graph verification. No source/test/task change in this documentation turn.
+implemented correction1 from the then-proposed corrections2–7 and records the acceptance
+gate and full task-graph verification. The 2026-09-19 approvals above are now authoritative.
 
 Latest execution (2026-09-18): operator APPROVED implementing only correction1 below:
 add find; exclude unsupported web arguments from evidence candidates rather than fail the
@@ -17,7 +27,8 @@ and locally verified:246passed,1existing skip,3deselected; Ruff/strict mypy pass
 Supported action combinations are checked against the complete four-action subset, not
 an upstream exactly-one restriction; response_length is an allowed option. Preserve strict
 supported-chain/integrity checks, current near-match/retry semantics and common replay.
-Corrections2–7 remain proposals only; P26–P30 remain pending and untouched by this execution.
+Corrections2 and4–7 are now approved/pending; correction3's authorized deletion is complete.
+P26–P30 remain pending and untouched by the completed correction1 execution.
 
 Latest addition (2026-09-18): P30 is APPROVED/PENDING: Store-owned current pull/push/commit/
 validation record instances; explicit session/current-record outcome linkage and completed
@@ -65,7 +76,8 @@ changing Store/adapter boundaries and grouped processing only as explicitly pinn
 P25 production wiring is implemented and its selected integration/startup checks pass.
 The fresh full operator run exposed five missed preflight test callpoints and three stale
 elevate test expectations; P25 is not fully integrated/acceptance-green. See the current
-operator findings below; those eight test failures still await correction approval. The
+operator findings below; the five IPC-callpoint fixes are approved/pending and the three
+elevate-test cases have been removed as explicitly authorized. The
 separate web-action correction1 is implemented. P26-P30 remain pending additions. P30 supersedes only the state ownership,
 outcome reference selection and innerdict metadata decisions identified below. Preserve
 operator edits/staging. Production acceptance and unrelated browser/root/pre-start findings
@@ -1285,15 +1297,15 @@ Latest reviewed pre-commit-operator run:2026-09-18 15:37:17–15:46:13(-04),
 logs/from_operator/pre-commit.log and pre-commit-extra.log. Full acceptance FAILED.
 Operator explicitly requested findings independent of pending P26-P30; those approved items
 remain unchanged/unimplemented. The initial review changed WORK only; correction1 was
-subsequently approved and implemented below. Other findings have no new implementation
-authorization. Line references below count LF lines
+subsequently approved and implemented below. Corrections2 and4–7 are now approved/pending;
+correction3's approved test deletion is complete, not its original redesign. Line references below count LF lines
 in the raw logs (terminal CR/ANSI sequences may affect rendered editor numbering).
 
 | Finding | Current evidence / boundary |
 |---|---|
 | Live workflow blocker | Extra log4623–4629: rollout capture succeeds (856518bytes/178lines), commit and validation are persisted, but rollout_index rejects call_YiI9YVKmuEiZtIrZu1FI3vl2: “must contain exactly one eligible web action”. Pull then returns500, never410. Dashboard's ordinary final pull500 -> /failed200 follows its current contract. Recovered evidence identifies a find-only call excluded by that run's pre-fix whitelist (details below). Correction1 below implements the fix; full production acceptance has not been rerun. |
 | Five stale preflight callpoints | test_operator_e2e_preflight.py:303 patches backend_ipc.start_dashboard_query_server, moved to backend_server by P25. All five lifecycle cases fail before exercising their behavior. Correct the direct test target/import; no compatibility alias or production rollback. This was missed by the earlier P25 callpoint audit. |
-| Three stale elevate expectations | Same test module:344 assumes elevate always runs install+browser stages. Operator-requested idle “Nothing to elevate” correctly runs neither. Tests fail on missing stages or expected nonzero status. Do not resurrect an obsolete batch or remove failure/log assertions to appease them; decouple reusable shell/log/status verification from mutable task payload. Correction3 below is proposed, not approved. |
+| Three stale elevate expectations | Same test module:344 assumes elevate always runs install+browser stages. Operator-requested idle “Nothing to elevate” correctly runs neither. Tests fail on missing stages or expected nonzero status. The operator now explicitly authorizes deleting this parametrized test entirely (item3 below), not reinstating the obsolete batch or redesigning wrapper tests. |
 | Host browser layout | pre-commit.log3267: card line-height ratio is NaN, so the compact-spacing assertion fails. Host module8passed/1failed34.11s; real query and DOCX download pass. Test evaluates computed lineHeight/fontSize immediately after card click, with no card-content/visibility readiness assertion. Current CSS explicitly sets1.25; logs do not capture computed strings or element attachment, so a render/detachment race is plausible, NOT proven and not justification to relax the assertion or change production CSS blindly. |
 | Full Backend shutdown evidence incomplete | Extra log5405–5415: test teardown signals Dashboard while its worker is already stopping Backend. All processes disappear, Dashboard exits0, no forced-kill report; however the full Backend clean-close token, final Uvicorn shutdown lines and Dashboard Backend-stopped log are absent. Query-only shutdown earlier has them. Code has a cancellation window: controller.shutdown cancels the worker; cancellation inside Backend._stop still clears self._process in finally before a second stop can await it. This supports a cleanup concern, not proof that Store failed to close in this run. |
 | Normal AI suite | 578passed/8failed/1skip/3deselected/1warning116.24s. The eight failures above prevent the subsequent real OpenAlex/ROR institution test via task's &&. Do not report that provider leaf as tested. |
@@ -1329,7 +1341,8 @@ candidate correction, NOT full submission acceptance or replay under changed val
 The initial find-only whitelist proposal is superseded by the operator's subsequent
 discussion below: unsupported actions should make evidence ineligible, not fail the whole
 rollout. The diagnostic above establishes find support only, not that revised behavior.
-Operator subsequently authorized correction1 below; the other corrections remain proposals.
+Operator subsequently authorized correction1 below, then corrections2 and4–7 on2026-09-19,
+and finally deletion of the elevate-triggering tests instead of the proposed correction3.
 The existing rejected /validate record remains unchanged; changing the indexing rule can
 change recomputed validation on explicit replay, so no compatibility/success claim is made.
 
@@ -1381,12 +1394,14 @@ acceptance is NOT reached; host synthetic DOCX export passing is a distinct boun
 Wrapper status/grep quirks are unchanged and previously rejected for modification; actual
 leaf summaries/exit statuses, not “grep: no FAILED”, determine the result.
 
-### Operator-log corrections — correction1 implemented; corrections2–7 unapproved
+### Operator-log corrections — items1/3 implemented; items2/4–7 approved pending
 
-The initial request was a proposal for all identified log issues. The following is reviewable
-scope, separate from P26-P30. Operator now explicitly approves correction1 only, with the
-choice()/prefilter refinement below. Corrections2–7 are NOT approved. Any further fix beyond
-the approved boundary requires a fresh proposal. All existing semantic assertions/timeouts stay.
+Scope is separate from P26-P30. Items1 and3 are implemented. On2026-09-19 the operator approved
+exactly HUMANS sections2 and4–7; their complete bodies and fenced code snippets are copied
+verbatim below, with only headings marked APPROVED/PENDING. This is the implementation
+boundary, not permission for broader refactoring. Item3 is explicitly superseded by deletion
+of elevate-triggering tests. Preserve existing assertions/timeouts in retained tests and all
+isolation/ownership constraints; any deviation needs explicit approval before implementation.
 
 1. **Web-action evidence eligibility — IMPLEMENTED, locally verified:** add find alongside
    search_query/open/click. Operator proposes unsupported arguments make the affected
@@ -1489,75 +1504,74 @@ ELIGIBLE_WEB_ACTIONS = frozenset({
      Initial mypy caught heterogeneous empty-tuple chained comparisons and indirect Locale
      import in new tests; corrected to separate assertions/direct import, no casts/ignores.
    - No network/browser/root/live-Codex acceptance run. Current correction is complete, not
-     a full pre-commit-operator acceptance claim. Corrections2–7 still await approval and
-     P26–P30 remain separately approved/pending.
+     a full pre-commit-operator acceptance claim. Corrections2 and4–7 are now approved/pending;
+     correction3's authorized deletion is complete. P26–P30 remain separately approved/pending.
 
-2. **Five obsolete IPC patch targets:** change only the target module and remove its unused
-   backend_ipc import; preserve the five cases and every assertion.
+2. **APPROVED/PENDING — Correct the five stale IPC test callpoints**
+
+In `test_operator_e2e_preflight.py`:
 
 ```python
 monkeypatch.setattr(
-    backend_server, "start_dashboard_query_server", Mock(side_effect=AssertionError),
+    backend_server,
+    "start_dashboard_query_server",
+    Mock(side_effect=AssertionError),
 )
 ```
 
-3. **Three elevate tests coupled to a retired batch:** keep elevate's requested idle shape
-   and all ordinary tasks unchanged. Replace obsolete install/browser stage expectations
-   with tests of the actual outer logger/exit/grep scaffolding against controlled batch
-   outcomes. Read the real TOML command; an executable test-only script shim replaces ONLY
-   its -c batch argument, then execs the real GNU script executable. No fake logger, grep,
-   exit status, Python installer/browser invocation or task-file text substitution.
-   Resolve REAL_SCRIPT before prepending the test bin directory to PATH; fail clearly if
-   absent. The shim fails on an unexpected argument shape instead of running a real batch.
-   Existing temp log directory, bounded subprocess.run and captured output remain.
+Remove the unused `backend_ipc` import. Preserve all five cases and assertions. No compatibility alias.
 
-   Exact test shim content:
+3. **IMPLEMENTED — Remove elevate-triggering tests entirely**
 
-```sh
-#!/bin/sh
-if [ "$#" -ne 5 ] || [ "$1" != -q ] || [ "$2" != -e ] || [ "$3" != -c ]; then
-    echo "Unexpected elevate script invocation" >&2
-    exit 98
-fi
-exec "$REAL_SCRIPT" "$1" "$2" "$3" "$ELEVATE_TEST_BATCH" "$5"
-```
+   Operator explicitly rejected the replacement-wrapper-test direction: "purge elevate
+   triggering tests altogether". Remove test_elevate_retains_failures_and_reports_failed_lines
+   and its none/install/browser parametrization from protected/tests/operator/
+   test_operator_e2e_preflight.py, plus the now-unused tomllib import. Search the active detour
+   tests for any other elevate-triggering tests and remove only those if present. Do not
+   replace them with a shim, source-string assertion, skip or a different elevate invocation.
+   Actual elevate command, log/status/FAILED-grep scaffolding and ordinary tasks stay untouched.
+   Preserve the unrelated preflight tests. This supersedes the former unapproved item3 code
+   snippets; they are deliberately removed from WORK, not retained as pending implementation.
 
-   Replace the parameter matrix with:
+   Provenance: git blame/show identifies introduction in commit
+   2eeb7c4c0f754d483e975cb75376ec238fa91af7 (2026-09-17, "ai augment task: address test failures").
+   Its historical WORK records P18 tests of the real GNU script/PTY logger, run-all behavior,
+   retained failure status and FAILED reporting. The temporary verification batch was narrowed
+   from five controlled cases to the committed three install/browser cases. The permanent
+   preflight test reads current pyproject.toml's elevate command and runs the actual shell
+   in tmp_path while replacing Python leaves with sentinel outcomes. It enters the ordinary
+   suite because test-detour-ai-augment explicitly includes this preflight module; there is
+   no recursive pixi run elevate. Binding those tests to the mutable install/browser payload
+   was the mistake: correct restoration to "Nothing to elevate" broke all three. The operator
+   now authorizes deleting that dependency entirely, not redesigning its coverage.
 
-```python
-@pytest.mark.parametrize(
-    ("batch", "expected_status", "has_failed_line"),
-    (
-        ("printf 'passed controlled\\n'; exit 0", 0, False),
-        ("printf 'FAILED controlled\\n'; exit 7", 7, True),
-        ("printf 'FAILED controlled\\n'; exit 0", 0, True),
-    ),
-)
-```
+   Completion2026-09-19: removed the one parametrized test (all three cases) and unused
+   tomllib import. No elevate references remain in the detour's tests. AST comparison to
+   HEAD confirms every retained function/class is unchanged; only that test definition was
+   removed. The actual elevate task and all other pyproject tasks are unchanged. Ruff PASS;
+   configured strict mypy PASS1file; pytest collection succeeds with20 remaining cases
+   (6.11s), none targeting elevate. This is collection evidence, not a claim those20 tests
+   pass: item2's five known failures are still pending their now-approved correction.
 
-   Pass batch through ELEVATE_TEST_BATCH, absolute real script through REAL_SCRIPT, and
-   retain PIXI_PROJECT_ROOT pointing only at tmp_path. Assert exact returned status, actual
-   log contents, matching FAILED/no-FAILED report and reported log path. The last case tests
-   grep reporting independently of command failure; it does NOT change current exit policy.
-   This is the existing Linux/GNU-scaffold test boundary, not a new platform skip, install
-   stage, script abstraction or ordinary pre-commit wrapper redesign.
+4. **APPROVED/PENDING — Make the spacing test measure a ready card**
 
-4. **Card spacing NaN:** test-only readiness and diagnostics in test_ui_e2e.py. After View
-   Card, wait for the actual fixture card and enabled download button, then visible elements.
-   Scope paragraph selection to the card Markdown element. Replace the bare ratio expression
-   with one measurement that records connection and raw computed styles. Fail meaningfully
-   on NaN; retain EVERY numeric spacing and bounding-box assertion. No CSS change, sleeps,
-   longer timeout, NaN substitution or wait-until-the-ratio-passes loop.
+Test-only changes in `test_ui_e2e.py`:
 
 ```python
 card = page.get_by_test_id(control_ui.CARD_MARKDOWN_TEST_ID)
-expect(card.locator("code", has_text=E2E_CARD_FILENAME)).to_have_text(E2E_CARD_FILENAME)
-expect(page.get_by_test_id(control_ui.DOWNLOAD_CARD_DOCX_TEST_ID)).to_be_enabled()
+
+expect(
+    card.locator("code", has_text=E2E_CARD_FILENAME)
+).to_have_text(E2E_CARD_FILENAME)
+
+expect(
+    page.get_by_test_id(control_ui.DOWNLOAD_CARD_DOCX_TEST_ID)
+).to_be_enabled()
+
 card_paragraphs = card.locator("p")
-card_paragraph = card_paragraphs.first
 ```
 
-   One small test-local helper, used for the existing three measured locators:
+Replace the uninformative bare ratio calculation with:
 
 ```python
 def _line_height_ratio(locator: Locator) -> float:
@@ -1577,14 +1591,11 @@ def _line_height_ratio(locator: Locator) -> float:
     return ratio
 ```
 
-   Necessary math/Locator imports only. If this exposes a genuine computed CSS defect,
-   stop and propose that specific production correction rather than assume approval here.
+Keep **every spacing/bounding-box assertion and timeout unchanged**. No CSS change, arbitrary sleep, NaN replacement or retry-until-spacing-passes. If a genuine CSS defect remains, return with that evidence before changing production styling.
 
-5. **Cancellation during Backend stop:** within _BackendSupervisor, wrap its current
-   private _stop body in a separately awaited task. Rename that existing body to
-   _stop_owned_process; all callpoints still call _stop while holding the existing lifecycle
-   lock. Do not release that lock or clear the handle merely because the caller was cancelled.
-   This targets ordinary Dashboard worker cancellation; it makes no SIGKILL guarantee.
+5. **APPROVED/PENDING — Finish Backend shutdown before propagating cancellation**
+
+In `_BackendSupervisor`, move the existing `_stop` body unchanged into `_stop_owned_process`, then wrap it:
 
 ```python
 async def _stop(self) -> None:
@@ -1596,15 +1607,15 @@ async def _stop(self) -> None:
         raise
 
 async def _stop_owned_process(self) -> None:
-    # Existing _stop body, including process wait, log drain, clean-close check,
-    # finish_backend_stop and finally cleanup, remains here.
+    # Existing _stop body:
+    # terminate/wait, drain logs, check acknowledgement,
+    # finish_backend_stop, then clear ownership.
     ...
 ```
 
-   Keep existing SIGTERM/10s/SIGKILL behavior, acceptable statuses, startup flags and missing-
-   token fail-closed bookkeeping. Borrowed Backends remain untouched; no Backend/server,
-   Store, parent-watcher, recovery or queue redesign. At the existing stop-complete log only,
-   extend the authoritative Locale template and pass its already-computed booleans:
+Existing callers retain the lifecycle lock until this finishes. Preserve the existing SIGTERM/10-second/SIGKILL policy and clean-close requirements.
+
+Extend the **existing** Locale-backed stop log:
 
 ```python
 BACKEND_STOPPED_LOG_TEMPLATE: Final = (
@@ -1614,25 +1625,15 @@ BACKEND_STOPPED_LOG_TEMPLATE: Final = (
 )
 ```
 
-   Test actual supervisor/worker cancellation during process wait and during log drain,
-   using a real bounded child and a named shared PythonProcess helper where needed, not
-   replacing stop with a mock. Verify output/token is drained, exit is reaped, cancellation
-   propagates only afterward, bookkeeping occurs once and missing token/nonzero exit stay
-   unsuccessful. Preserve existing first-new/subsequent-resume and borrowed-child tests.
-   After existing operator teardown finishes process cleanup and output draining, assert
-   that every owned Backend reported ready has a stop log with clean_close_ack=True,
-   forced_kill=False and shutdown_succeeded=True. Extract ready PIDs from existing Dashboard
-   readiness logs; match stop lines by PID, so an earlier IPC-only acknowledgement cannot
-   satisfy a later full Backend shutdown. Keep process-disappearance checks and perform this
-   assertion only AFTER all cleanup, never before killing/reaping outstanding descendants.
-   Test this assertion locally with two PIDs, including the previous IPC-only-only false
-   positive. No log-based production workflow decisions or borrowed-process ownership change.
+Pass the already-computed booleans.
 
-6. **Unhelpful operator failure exception:** keep Dashboard's one-pull classification and
-   autonomous storage unchanged; do not fetch/guess Backend internals or add another query.
-   In raise_for_dashboard_failure only, include already captured Backend warning/error/
-   critical lines alongside the failed-run lines, so pytest's final failure contains the
-   known root cause. No new production logging service or log parsing for workflow decisions.
+Tests exercise actual supervisor cancellation during child exit and log draining. Operator teardown additionally verifies a successful stop **for each owned Backend PID**, after completing cleanup—an earlier IPC-only acknowledgement must not satisfy full-Backend shutdown.
+
+No Backend/server/Store changes or borrowed-process handling changes.
+
+6. **APPROVED/PENDING — Include the actual Backend error in operator-test failures**
+
+Change only `raise_for_dashboard_failure`:
 
 ```python
 if failed_run_lines:
@@ -1645,19 +1646,20 @@ if failed_run_lines:
         if line.startswith(backend_error_prefixes)
     ]
     raise RuntimeError(
-        "workflow failed:\n" + "".join((*failed_run_lines, *diagnostics))
+        "workflow failed:\n"
+        + "".join((*failed_run_lines, *diagnostics))
     )
 ```
 
-   Add a cheap preflight regression: summary-only failure plus captured rollout-index warning
-   must produce one exception containing both; unrelated raw Codex output is not included.
-   This deliberately does not fabricate a detailed Dashboard run-event reason from HTTP500.
+Add a cheap regression proving the exception includes both the failed-run summary and captured rollout-index error.
 
-7. **Multithreaded pytest fork warning:** the ordinary audit protocol test calls real _probe
-   inside pytest after other threads have started. Move only that probe call to a fresh child
-   through existing PythonProcess fixture and python_subprocess marker; keep find/read and
-   negative assertions. Production audit_read.py and its privilege/fork design stay unchanged.
-   Add the named child helper in the existing protected pytest plugin (P19 mechanism):
+Dashboard remains dumb: no additional query, Backend-state inspection or inferred validation reason.
+
+7. **APPROVED/PENDING — Run the audit probe outside multithreaded pytest**
+
+Move only the test’s in-process probe invocation into the existing shared subprocess mechanism.
+
+Named helper in the protected pytest plugin:
 
 ```python
 def audit_probe_process() -> None:
@@ -1665,21 +1667,26 @@ def audit_probe_process() -> None:
     from src.detours.detour_ai_augment.src.control_centre.appendwatch import audit_read
 
     configured = audit_read.AuditReadConfiguration.model_validate_json(sys.argv[1])
-    audit_read.execute(configured, audit_read.PROBE_COMMAND, output=sys.stdout.buffer)
+    audit_read.execute(
+        configured,
+        audit_read.PROBE_COMMAND,
+        output=sys.stdout.buffer,
+    )
 ```
 
-   In the existing marked test, replace its final in-process probe with:
+Existing test, explicitly marked `python_subprocess`:
 
 ```python
 result = python_process.run(
-    audit_probe_process, configured.model_dump_json(), timeout=10,
+    audit_probe_process,
+    configured.model_dump_json(),
+    timeout=10,
 )
 assert result.returncode == 0, result.stdout + result.stderr
 assert result.stdout == result.stderr == ""
 ```
 
-   No warning suppression, privileged import preload, permissions changes or new root need.
-   The test config already uses the current account for both identities; root is not required.
+Production audit behavior remains unchanged. No warning suppression or new privilege requirement.
 
 **No correction proposed for normal/unchanged observations:** initial missing-socket polls,
 unchanged NiceGUI snapshot, duplicate live/replay warning, old unreproduced pre-start hang,
@@ -1688,7 +1695,7 @@ isolated detour scope: no main-pipeline/other-detour/environment/lockfile change
 ordinary-wrapper status/grep restructuring remains rejected; no pyproject task edit proposed.
 The skipped provider leaf is a verification gap to execute, not a reason to change && or tasks.
 
-**Pre-handoff verification if approved:** reproduce regressions before each fix; run all
+**Pre-handoff verification for approved corrections:** reproduce regressions before each fix; run all
 feasible normal-suite leaves including operator preflight, changed API/index/replay and UI/
 audit tests, Ruff and strict mypy. List environment-blocked leaves explicitly. Then prepare
 only necessary delegated host-Chrome/layout/cleanup and previously blocked real-provider
@@ -1700,8 +1707,9 @@ failure-free full pre-commit-operator run BEFORE starting P26: no failed test/ch
 operator interruption or silently unreached leaf may be reported as acceptance. Review each
 leaf rather than unchanged wrapper status/grep quirks; retain existing intentional skips/
 xfails and inspect warnings, waits, cleanup and preservation evidence. Correction1's local
-passes do not satisfy this gate. Corrections2–7 remain unapproved; a new defect still needs
-a narrow proposal/approval rather than broadening the implementation silently.
+passes do not satisfy this gate. Corrections2 and4–7 are approved/pending; correction3's
+authorized deletion is complete. New defects or scope deviations still need a narrow
+proposal/approval rather than broadening implementation silently.
 
 Latest operator-assisted diagnostics (2026-09-18): operator authorized putting the proposed
 checks in elevate with embedded machine checks, rather than separate commands or instructions
@@ -1946,7 +1954,10 @@ pixi run -e detour-ai-augment env mypy --config-file src/detours/detour_ai_augme
   update_pull_state, plus the approved P26 typed-construction/content-type, P27 literal-audit,
   P28 protocol-ownership/inheritance, P29 original-pull-ID rename and P30 Store-owned
   current-record/session/outcome-metadata/linkage additions.
-  No unrelated audit, DTO-default removal or card-format tightening.
+  Current priority is the approved operator-log corrections2–7 above, with item3 explicitly
+  limited to deleting elevate-triggering tests. Do not start P26 until the full
+  pre-commit-operator acceptance gate is met. No unrelated audit, DTO-default removal or
+  card-format tightening.
 - Operator forbids cast: changes must use genuinely compatible types, not cast or substitute
   type suppressions. No unrelated codebase-wide refactor. Store persistence and pull-state
   updates must not be named publishing; that term is reserved for DOCX/TXT in the new scope.

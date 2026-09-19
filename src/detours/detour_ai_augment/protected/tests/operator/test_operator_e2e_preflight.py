@@ -4,7 +4,6 @@ import inspect
 import json
 import os
 import subprocess
-import tomllib
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -338,42 +337,3 @@ def test_operator_query_button_uses_production_lifecycle(
         page.wait_for_timeout.assert_not_called()
     page.get_by_test_id.assert_called_once_with(control_ui.BACKEND_REFRESH_TEST_ID)
     page.get_by_test_id.return_value.click.assert_called_once_with()
-
-
-@pytest.mark.parametrize("failure", ("none", "install", "browser"))
-def test_elevate_retains_failures_and_reports_failed_lines(
-    tmp_path: Path, repository_root: Path, failure: str,
-) -> None:
-    """Execute the real elevate shell/PTY logger with controlled leaf-command outcomes."""
-    command = tomllib.loads((repository_root / "pyproject.toml").read_text())["tool"]["pixi"][
-        "feature"
-    ]["detour-ai-augment"]["tasks"]["elevate"]
-    binary = tmp_path / "bin"
-    binary.mkdir()
-    (tmp_path / "logs/from_operator").mkdir(parents=True)
-    stages = tmp_path / "stages"
-    executable = binary / "python"
-    executable.write_text(
-        '#!/bin/sh\n'
-        'case "$2" in playwright) stage=install ;; *) stage=browser ;; esac\n'
-        'printf "%s\\n" "$stage" >> "$STAGES_FILE"\n'
-        'if [ "$FAIL_STAGE" = "$stage" ]; then\n'
-        '  echo "FAILED controlled-$stage"; exit 7\n'
-        'fi\necho "passed controlled-$stage"\n',
-    )
-    executable.chmod(0o700)
-    result = subprocess.run(
-        ["bash", "-c", command], cwd=tmp_path,
-        env=dict(os.environ, CONDA_PREFIX=str(tmp_path), PIXI_PROJECT_ROOT=str(tmp_path),
-                 PATH=f"{binary}{os.pathsep}{os.environ['PATH']}",
-                 STAGES_FILE=str(stages), FAIL_STAGE=failure),
-        capture_output=True, text=True, timeout=15, check=False,
-    )
-    assert result.returncode == int(failure != "none"), result.stdout + result.stderr
-    assert stages.read_text().splitlines() == ["install", "browser"]
-    if failure == "none":
-        assert "grep: no FAILED" in result.stdout
-    else:
-        assert f"FAILED controlled-{failure}" in result.stdout
-        assert "grep: FAILED matches shown above" in result.stdout
-    assert "Test output:" in result.stdout
