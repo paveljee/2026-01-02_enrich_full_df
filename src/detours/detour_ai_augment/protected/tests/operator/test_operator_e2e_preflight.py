@@ -4,6 +4,7 @@ import inspect
 import json
 import os
 import subprocess
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -11,7 +12,6 @@ from unittest.mock import Mock
 
 import pytest
 
-from src.detours.detour_ai_augment.protected.src.backend import ipc as backend_ipc
 from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helpers.locale import (
     Locale,
 )
@@ -300,7 +300,9 @@ def test_operator_query_button_uses_production_lifecycle(
     # Query itself must not initialize a DB or bypass the Dashboard-owned IPC lifetime.
     monkeypatch.setattr(backend_server, "configure_runtime", Mock(side_effect=AssertionError))
     monkeypatch.setattr(
-        backend_ipc, "start_dashboard_query_server", Mock(side_effect=AssertionError),
+        backend_server,
+        "start_dashboard_query_server",
+        Mock(side_effect=AssertionError),
     )
     process = Mock()
     process.poll.return_value = None
@@ -337,3 +339,45 @@ def test_operator_query_button_uses_production_lifecycle(
         page.wait_for_timeout.assert_not_called()
     page.get_by_test_id.assert_called_once_with(control_ui.BACKEND_REFRESH_TEST_ID)
     page.get_by_test_id.return_value.click.assert_called_once_with()
+
+
+@pytest.mark.parametrize("full_stop", ("clean", "missing", "no-ack", "forced-kill"))
+def test_operator_requires_clean_stop_for_each_owned_backend(full_stop: str) -> None:
+    prefix = Locale.CONTROL_CENTRE_LOG_PREFIX
+    output = [f"{prefix} Owned Backend ready: pid={pid}\n" for pid in (101, 102)]
+    output.append(
+        f"{prefix} " + Locale.BACKEND_STOPPED_LOG_TEMPLATE.format(
+            pid=101, return_code=0, clean_close_ack=True,
+            forced_kill=False, shutdown_succeeded=True,
+        ) + "\n",
+    )
+    if full_stop != "missing":
+        output.append(
+            f"{prefix} " + Locale.BACKEND_STOPPED_LOG_TEMPLATE.format(
+                pid=102, return_code=0, clean_close_ack=full_stop != "no-ack",
+                forced_kill=full_stop == "forced-kill", shutdown_succeeded=full_stop == "clean",
+            ) + "\n",
+        )
+    if full_stop == "clean":
+        workflow.assert_owned_backends_stopped(output, [])
+    else:
+        with pytest.raises(AssertionError, match=r"PIDs.*\[102\]"):
+            workflow.assert_owned_backends_stopped(output, [])
+
+
+def test_operator_failure_includes_captured_backend_reason() -> None:
+    summary = f"{workflow.FAILED_RUN_LOG_PREFIX} detail=unspecified\n"
+    reason = (
+        f"{Locale.BACKEND_LOG_PREFIX} WARNING:backend.api:"
+        "validation rejected at rollout_index: broken supported citation chain\n"
+    )
+    informational = f"{Locale.BACKEND_LOG_PREFIX} INFO:backend.api:Pull: HTTP 500\n"
+    process = Mock(spec=subprocess.Popen)
+    process.poll.return_value = None
+    dashboard = workflow.DashboardProcess(
+        process=process, output=[reason, informational, summary],
+        output_thread=threading.Thread(),
+    )
+    with pytest.raises(RuntimeError) as caught:
+        workflow.raise_for_dashboard_failure(dashboard)
+    assert str(caught.value) == "workflow failed:\n" + summary + reason

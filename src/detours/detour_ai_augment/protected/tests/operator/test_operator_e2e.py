@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import shlex
 import signal
 import socket
@@ -224,6 +225,7 @@ class DashboardProcess(BaseModel):
             self.process.stdout.close()
         _wait_for_ports_released()
         _operator_log("Control Centre and child processes stopped")
+        assert_owned_backends_stopped(self.output, descendants)
 
     def _descendants(self) -> list[OperatorProcessSnapshot]:
         try:
@@ -265,6 +267,36 @@ class DashboardProcess(BaseModel):
                 f"{snapshots[process.pid].role} pid={process.pid}" for process in alive
             )
             raise RuntimeError(f"operator child processes did not stop: {processes}")
+
+
+def assert_owned_backends_stopped(
+    output: Sequence[str], descendants: Sequence[OperatorProcessSnapshot],
+) -> None:
+    prefix = re.escape(Locale.CONTROL_CENTRE_LOG_PREFIX)
+    owned_pid = re.compile(
+        rf"^{prefix} (?:Owned Backend ready|stopping Backend process): pid=(\d+)$",
+    )
+    owned = {snapshot.pid for snapshot in descendants if snapshot.role == "Backend"}
+    for line in output:
+        match = owned_pid.fullmatch(line.strip())
+        if match is not None:
+            owned.add(int(match[1]))
+    lines = {line.strip() for line in output}
+    missing = sorted(
+        pid for pid in owned
+        if not any(
+            f"{Locale.CONTROL_CENTRE_LOG_PREFIX} "
+            + Locale.BACKEND_STOPPED_LOG_TEMPLATE.format(
+                pid=pid, return_code=code, clean_close_ack=True,
+                forced_kill=False, shutdown_succeeded=True,
+            ) in lines
+            for code in (0, -signal.SIGTERM, -signal.SIGINT)
+        )
+    )
+    assert not missing, (
+        f"Owned Backend PIDs lack successful clean-stop evidence: {missing}\n"
+        + "".join(output)
+    )
 
 
 class OperatorProcessSnapshot(BaseModel):
@@ -645,7 +677,18 @@ def raise_for_dashboard_failure(dashboard: DashboardProcess) -> None:
         line for line in dashboard.output if line.startswith(FAILED_RUN_LOG_PREFIX)
     ]
     if failed_run_lines:
-        raise RuntimeError("workflow failed:\n" + "".join(failed_run_lines))
+        backend_error_prefixes = tuple(
+            f"{Locale.BACKEND_LOG_PREFIX} {level}:"
+            for level in ("WARNING", "ERROR", "CRITICAL")
+        )
+        diagnostics = [
+            line for line in dashboard.output
+            if line.startswith(backend_error_prefixes)
+        ]
+        raise RuntimeError(
+            "workflow failed:\n"
+            + "".join((*failed_run_lines, *diagnostics))
+        )
 
 
 def wait_for_gone_pull(

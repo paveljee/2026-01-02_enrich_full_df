@@ -2,33 +2,91 @@
 
 ## Status and authorization
 
-Latest approvals (2026-09-19): operator APPROVES exactly HUMANS items2 and4–7, including
-all their snippets and boundaries. Their full bodies/snippets are copied verbatim below as
-APPROVED/PENDING. Items1 and3 are implemented: the operator approved deleting all
-elevate-triggering tests (item3), not the previously proposed wrapper-test replacement.
-That deletion is verified below and is the only code change in this turn. Other approved corrections
-remain pending. Latest chat approvals supersede the captured status labels in HUMANS;
-its current operator edits are preserved unchanged. No ordinary task change is authorized.
-Complete the corrections toward the full pre-commit-operator acceptance gate before P26;
-P26–P30 remain pending. Obtain explicit approval before any deviation from the pinned scope.
+Active execution (2026-09-19): operator requested implementing exactly HUMANS corrections2
+and4–7, whose approved snippets/boundaries are pinned below. All five code corrections are
+now implemented and locally verified within the available boundaries; delegated verification
+and full operator acceptance remain pending. Items1/3 were already complete. No P26–P30,
+Backend/Store, CSS or ordinary-task changes. Human-maintained HUMANS remains unchanged;
+its captured "proposed" labels do not supersede the later explicit approvals recorded here.
 
-Current operator priority (2026-09-18): a failure-free full pre-commit-operator run is the
-blocker BEFORE starting P26. P26–P30 remain approved/pending, not the next execution step.
-Operator explicitly authorized updating var/HUMANS.md's captured proposal after the find
-fix; that documentation-only exception supersedes the usual no-HUMANS-edit restriction
-for this update only. Preserve its human-signed introduction. HUMANS now distinguishes
-implemented correction1 from the then-proposed corrections2–7 and records the acceptance
-gate and full task-graph verification. The 2026-09-19 approvals above are now authoritative.
+Current verification:
+- Item2: reproduced all five stale IPC-target failures (4.04s); corrected only target/import;
+  unchanged preflight module then20passed25.15s.
+- Item4: exact ready-card checks and finite measurement diagnostics; every existing spacing/
+  bounding-box assertion and timeout retained. Host Chrome execution remains pending.
+- Item5: real-child cancellation regressions reproduce early ownership release (2failed7.40s).
+  Exact wrapper/log implementation plus per-owned-PID operator teardown check now in place;
+  focused supervisor/shutdown/teardown selection8passed7.79s. Named child helper lives in the
+  existing plugin; test explicitly marked python_subprocess. Initial test harness loop wakeup
+  issue interrupted48.56s; reused existing threaded_loop fixture. An initial child-exit wait also timed out; replaced signal-handler
+  printing with explicit sigwait to eliminate that race opportunity (initial cause unproven); synchronized log-drain phase with actual child exit. No production
+  timing/timeout change or skipped assertion. These harness-development failures are not passes.
+- Item6: new diagnostic regression reproduced missing Backend reason (1failed3.16s), then
+  exact approved error-prefix filtering applied.
+- Item7: exact named audit subprocess helper/explicit marker, unchanged production audit.
+  First combined preflight/audit run36passed1failed80.96s: new child exceeded approved10s
+  bound during concurrent verification. No timeout increase/suppression. The unchanged test
+  passed within the full feasible suite below; unchanged isolated recheck plus three nonsocket
+  substitution cases passed4tests2.67s. Cause of the initial timeout remains unproven.
+- Full ordinary AI feasible suite:620passed1existing skip12deselected818.49s. Includes all
+  startup cases, API/replay/index/Store, UI/supervisor, audit and full operator preflight.
+  Excluded real-provider/root, two historical captures, Unix IPC/socket-substitution and
+  four nonregular substitution params; the three nonsocket params passed separately above.
+  Host browser module explicitly ignored, not reported passed. Existing skip is the
+  deliberately disabled multiple-evidence-match rejection test. No warnings in this run.
+  Strict detour mypy PASS55files; full src/tests
+  Ruff PASS after correcting only the approved helper snippet's import-spacing blank line.
+  AST audit confirms old _stop body unchanged except approved extra log fields; every original
+  compact-spacing/bounding-box assertion is unchanged.
+  Main/default mypy PASS68files. Main suite on this x86 host is NOT wholly green:
+  initial maxfail run20passed1skipped1deselected1failed12.43s (configuration lists only ARM
+  extension binaries, not linux_amd64). Remaining main selection140passed3skipped2deselected
+  2failed16.42s: configured ARM binary absent, reviewed workbook absent at production path.
+  No fixture/config substitution, new skip, data search or test weakening. Verify these
+  existing prerequisites on aicode through elevate; no out-of-scope implementation.
+  Step4/Mode3:10passed1slow deselected17.80s (default environment). Mode0 import/isolation
+  and normalization helpers:2passed2plot cases deselected2.60s (Mode0 environment). Plotting
+  requires Kaleido sockets unavailable here; existing operator Mode0/root passes remain the
+  retained evidence for unchanged boundaries, not newly executed checks. No full acceptance claim.
 
-Latest execution (2026-09-18): operator APPROVED implementing only correction1 below:
-add find; exclude unsupported web arguments from evidence candidates rather than fail the
-rollout; keep seeded choice(); exhaust into existing evidence-retry handling. IMPLEMENTED
-and locally verified:246passed,1existing skip,3deselected; Ruff/strict mypy pass (details below).
-Supported action combinations are checked against the complete four-action subset, not
-an upstream exactly-one restriction; response_length is an allowed option. Preserve strict
-supported-chain/integrity checks, current near-match/retry semantics and common replay.
-Corrections2 and4–7 are now approved/pending; correction3's authorized deletion is complete.
-P26–P30 remain pending and untouched by the completed correction1 execution.
+Priority remains a failure-free FULL pre-commit-operator run before P26. P26–P30 stay
+approved/pending. Correction1 (find/supported-subset eligibility) remains implemented and
+locally verified246passed1existing skip3deselected; seeded choice/retry behavior unchanged.
+Correction3 deleted all elevate-triggering tests and preserved the then-idle task. The
+Assistant-owned elevate is now prepared for the delegated checks described below, not
+invoked by any test. Any further deviation/new defect requires explicit approval.
+
+### Next operator verification — prepared, NOT executed
+
+Run pixi run elevate; its embedded machine guard requires the macOS Dashboard host before
+any log replacement or temporary files. It runs the entire9-test Chrome UI module on host,
+including ready-card spacing and actual owned IPC cleanup. It then dispatches ONLY to the
+named aicode guest (Linux ARM64 guard), never aivm:
+- Real OpenAlex/ROR institution test (previously unreached leaf).
+- Real0600 Unix IPC and the now-isolated audit probe.
+- Two nonprivileged watcher socket-substitution cases unavailable here.
+- Unchanged main-pipeline extension tests and reviewed-workbook prerequisite case (6tests)
+  which cannot be certified on this x86 host without production resources.
+
+Total targeted collection20cases:12host/IPC/audit/provider7.35s,2watcher0.50s,
+6default-prerequisite6.27s. Collection is not execution/acceptance. All relevant skips,
+failures, warnings, durations and cleanup evidence must be reviewed from elevate.log.
+No sudo, password input, SSH debug/key output, live Codex, browser installation, fixture
+substitution or ordinary-task edit. Preserve main test failures until the real prerequisites
+pass; never add a fake extension/config, new skip or edited assertion to mask them.
+
+Only elevate in pyproject.toml changed. Its temporary shell scripts are created in one
+mktemp directory under the shared repository tmp (removed on EXIT), avoiding nested quote
+explosion and allowing the guest to read the exact script. BSD script captures host/guest
+output; an explicit batch-status file preserves failure independently of script's status.
+All leaves run despite earlier failures; FAILED grep/log path remain. Guest stdin is closed.
+TOML, four shell bodies, wrong-machine guard and equality of all other task/settings PASS.
+An intermediate in-memory shell-decoding script used a wrong argv index and failed before
+writing; corrected before the final syntax/guard checks. No delegated commands ran locally.
+Restore idle Nothing-to-elevate script/log/status/grep scaffolding after this batch is reviewed
+and no further delegated verification is needed. Full pre-commit-operator is NOT authorized
+as acceptance-ready yet: review this targeted batch first, then run the full gate before P26.
+
 
 Latest addition (2026-09-18): P30 is APPROVED/PENDING: Store-owned current pull/push/commit/
 validation record instances; explicit session/current-record outcome linkage and completed
@@ -74,10 +132,8 @@ instruction; its fresh evidence is below. P20/P21/P23 remain implemented. P22 is
 superseded by P24's persisted-ID/pure-renderer contour. P25 retains that contour while
 changing Store/adapter boundaries and grouped processing only as explicitly pinned below.
 P25 production wiring is implemented and its selected integration/startup checks pass.
-The fresh full operator run exposed five missed preflight test callpoints and three stale
-elevate test expectations; P25 is not fully integrated/acceptance-green. See the current
-operator findings below; the five IPC-callpoint fixes are approved/pending and the three
-elevate-test cases have been removed as explicitly authorized. The
+The last full operator run exposed five missed preflight callpoints and three stale elevate
+test expectations; both are corrected now, but fresh full acceptance remains pending. The
 separate web-action correction1 is implemented. P26-P30 remain pending additions. P30 supersedes only the state ownership,
 outcome reference selection and innerdict metadata decisions identified below. Preserve
 operator edits/staging. Production acceptance and unrelated browser/root/pre-start findings
@@ -1291,23 +1347,23 @@ Additional baseline evidence:
   Baseline aicode/staging (ef5ddef), not dc951fe. Staging source with current dependencies
   reproduces92-column wrap but does not establish historical failure; operator reports passes.
 
-## Operator findings still open — not newly authorized by P25
+## Last full operator findings — corrections separate from P25; acceptance pending
 
 Latest reviewed pre-commit-operator run:2026-09-18 15:37:17–15:46:13(-04),
 logs/from_operator/pre-commit.log and pre-commit-extra.log. Full acceptance FAILED.
 Operator explicitly requested findings independent of pending P26-P30; those approved items
 remain unchanged/unimplemented. The initial review changed WORK only; correction1 was
-subsequently approved and implemented below. Corrections2 and4–7 are now approved/pending;
+subsequently approved and implemented below. Corrections2 and4–7 are implemented and locally verified; delegated/full verification remains pending;
 correction3's approved test deletion is complete, not its original redesign. Line references below count LF lines
 in the raw logs (terminal CR/ANSI sequences may affect rendered editor numbering).
 
-| Finding | Current evidence / boundary |
+| Finding in the last operator run | Evidence and present correction boundary |
 |---|---|
 | Live workflow blocker | Extra log4623–4629: rollout capture succeeds (856518bytes/178lines), commit and validation are persisted, but rollout_index rejects call_YiI9YVKmuEiZtIrZu1FI3vl2: “must contain exactly one eligible web action”. Pull then returns500, never410. Dashboard's ordinary final pull500 -> /failed200 follows its current contract. Recovered evidence identifies a find-only call excluded by that run's pre-fix whitelist (details below). Correction1 below implements the fix; full production acceptance has not been rerun. |
-| Five stale preflight callpoints | test_operator_e2e_preflight.py:303 patches backend_ipc.start_dashboard_query_server, moved to backend_server by P25. All five lifecycle cases fail before exercising their behavior. Correct the direct test target/import; no compatibility alias or production rollback. This was missed by the earlier P25 callpoint audit. |
-| Three stale elevate expectations | Same test module:344 assumes elevate always runs install+browser stages. Operator-requested idle “Nothing to elevate” correctly runs neither. Tests fail on missing stages or expected nonzero status. The operator now explicitly authorizes deleting this parametrized test entirely (item3 below), not reinstating the obsolete batch or redesigning wrapper tests. |
-| Host browser layout | pre-commit.log3267: card line-height ratio is NaN, so the compact-spacing assertion fails. Host module8passed/1failed34.11s; real query and DOCX download pass. Test evaluates computed lineHeight/fontSize immediately after card click, with no card-content/visibility readiness assertion. Current CSS explicitly sets1.25; logs do not capture computed strings or element attachment, so a render/detachment race is plausible, NOT proven and not justification to relax the assertion or change production CSS blindly. |
-| Full Backend shutdown evidence incomplete | Extra log5405–5415: test teardown signals Dashboard while its worker is already stopping Backend. All processes disappear, Dashboard exits0, no forced-kill report; however the full Backend clean-close token, final Uvicorn shutdown lines and Dashboard Backend-stopped log are absent. Query-only shutdown earlier has them. Code has a cancellation window: controller.shutdown cancels the worker; cancellation inside Backend._stop still clears self._process in finally before a second stop can await it. This supports a cleanup concern, not proof that Store failed to close in this run. |
+| Five stale preflight callpoints | test_operator_e2e_preflight.py:303 patches backend_ipc.start_dashboard_query_server, moved to backend_server by P25. All five then failed before exercising their behavior. Item2 now corrects the direct target/import, preserving cases/assertions; the20-case preflight run passed. No compatibility alias or production rollback. |
+| Three stale elevate expectations | Same test module:344 assumes elevate always runs install+browser stages. Operator-requested idle “Nothing to elevate” correctly runs neither. The three tests failed on missing stages or expected nonzero status. Item3 deleted that parametrized test entirely; no obsolete batch or redesigned wrapper tests remain. |
+| Host browser layout | pre-commit.log3267: card line-height ratio is NaN, so the compact-spacing assertion fails. Host module8passed/1failed34.11s; real query and DOCX download pass. The pre-correction test evaluated computed lineHeight/fontSize immediately after card click without content/visibility readiness; item4 now adds the exact approved readiness checks and diagnostics, pending host verification. Current CSS explicitly sets1.25; logs do not capture computed strings or element attachment, so a render/detachment race is plausible, NOT proven and not justification to relax the assertion or change production CSS blindly. |
+| Full Backend shutdown evidence incomplete | Extra log5405–5415: test teardown signals Dashboard while its worker is already stopping Backend. All processes disappear, Dashboard exits0, no forced-kill report; however the full Backend clean-close token, final Uvicorn shutdown lines and Dashboard Backend-stopped log are absent. Query-only shutdown earlier has them. The prior code had a cancellation window: cancellation inside Backend._stop cleared self._process before a second stop could await it. Item5 now shields/awaits that cleanup and tests both cancellation points. The prior missing log was not proof of Store failure; full operator re-verification remains pending. |
 | Normal AI suite | 578passed/8failed/1skip/3deselected/1warning116.24s. The eight failures above prevent the subsequent real OpenAlex/ROR institution test via task's &&. Do not report that provider leaf as tested. |
 | Browser placement / root watcher | Routing now correctly runs Chrome tests on macOS; aicode privileged appendwatch3passed70deselected2.55s, unchanged real EACCES assertions. Earlier machine-placement/credential blockers are resolved, not reasons for this run's failures. |
 | Timing / previous hang | Live case finishes1failed/2intentional skips332.21s, no Ctrl+C/KeyboardInterrupt/timeout. Full Backend starts, session supplied, Codex works for about280s before push; then failure/outcome within roughly30s. Repeated 2-record heartbeats during research are expected, not proof of a stuck Backend. The old pre-start hang did not recur; its historical cause remains unknown. |
@@ -1394,11 +1450,11 @@ acceptance is NOT reached; host synthetic DOCX export passing is a distinct boun
 Wrapper status/grep quirks are unchanged and previously rejected for modification; actual
 leaf summaries/exit statuses, not “grep: no FAILED”, determine the result.
 
-### Operator-log corrections — items1/3 implemented; items2/4–7 approved pending
+### Operator-log corrections — implemented; local evidence above, delegated gate pending
 
-Scope is separate from P26-P30. Items1 and3 are implemented. On2026-09-19 the operator approved
+Scope is separate from P26-P30. All seven corrections are implemented; verification status is below. On2026-09-19 the operator approved
 exactly HUMANS sections2 and4–7; their complete bodies and fenced code snippets are copied
-verbatim below, with only headings marked APPROVED/PENDING. This is the implementation
+verbatim below, with headings reflecting current implementation/verification status. This is the implementation
 boundary, not permission for broader refactoring. Item3 is explicitly superseded by deletion
 of elevate-triggering tests. Preserve existing assertions/timeouts in retained tests and all
 isolation/ownership constraints; any deviation needs explicit approval before implementation.
@@ -1504,10 +1560,10 @@ ELIGIBLE_WEB_ACTIONS = frozenset({
      Initial mypy caught heterogeneous empty-tuple chained comparisons and indirect Locale
      import in new tests; corrected to separate assertions/direct import, no casts/ignores.
    - No network/browser/root/live-Codex acceptance run. Current correction is complete, not
-     a full pre-commit-operator acceptance claim. Corrections2 and4–7 are now approved/pending;
+     a full pre-commit-operator acceptance claim. Corrections2 and4–7 are implemented and locally verified; delegated/full verification remains pending;
      correction3's authorized deletion is complete. P26–P30 remain separately approved/pending.
 
-2. **APPROVED/PENDING — Correct the five stale IPC test callpoints**
+2. **IMPLEMENTED — Correct the five stale IPC test callpoints**
 
 In `test_operator_e2e_preflight.py`:
 
@@ -1548,12 +1604,12 @@ Remove the unused `backend_ipc` import. Preserve all five cases and assertions. 
    Completion2026-09-19: removed the one parametrized test (all three cases) and unused
    tomllib import. No elevate references remain in the detour's tests. AST comparison to
    HEAD confirms every retained function/class is unchanged; only that test definition was
-   removed. The actual elevate task and all other pyproject tasks are unchanged. Ruff PASS;
-   configured strict mypy PASS1file; pytest collection succeeds with20 remaining cases
+   removed. At item3 completion, the actual elevate task and all other pyproject tasks were unchanged. Ruff PASS;
+   configured strict mypy PASS1file; pytest collection succeeded with20 remaining cases
    (6.11s), none targeting elevate. This is collection evidence, not a claim those20 tests
-   pass: item2's five known failures are still pending their now-approved correction.
+   pass; item2 was subsequently corrected and its full20-case preflight run passed above.
 
-4. **APPROVED/PENDING — Make the spacing test measure a ready card**
+4. **IMPLEMENTED; HOST VERIFICATION PENDING — Make the spacing test measure a ready card**
 
 Test-only changes in `test_ui_e2e.py`:
 
@@ -1593,7 +1649,7 @@ def _line_height_ratio(locator: Locator) -> float:
 
 Keep **every spacing/bounding-box assertion and timeout unchanged**. No CSS change, arbitrary sleep, NaN replacement or retry-until-spacing-passes. If a genuine CSS defect remains, return with that evidence before changing production styling.
 
-5. **APPROVED/PENDING — Finish Backend shutdown before propagating cancellation**
+5. **IMPLEMENTED; LOCAL VERIFICATION PASSED — Finish Backend shutdown before propagating cancellation**
 
 In `_BackendSupervisor`, move the existing `_stop` body unchanged into `_stop_owned_process`, then wrap it:
 
@@ -1631,7 +1687,7 @@ Tests exercise actual supervisor cancellation during child exit and log draining
 
 No Backend/server/Store changes or borrowed-process handling changes.
 
-6. **APPROVED/PENDING — Include the actual Backend error in operator-test failures**
+6. **IMPLEMENTED; LOCAL VERIFICATION PASSED — Include the actual Backend error in operator-test failures**
 
 Change only `raise_for_dashboard_failure`:
 
@@ -1655,7 +1711,7 @@ Add a cheap regression proving the exception includes both the failed-run summar
 
 Dashboard remains dumb: no additional query, Backend-state inspection or inferred validation reason.
 
-7. **APPROVED/PENDING — Run the audit probe outside multithreaded pytest**
+7. **IMPLEMENTED; LOCAL VERIFICATION PASSED — Run the audit probe outside multithreaded pytest**
 
 Move only the test’s in-process probe invocation into the existing shared subprocess mechanism.
 
@@ -1707,7 +1763,7 @@ failure-free full pre-commit-operator run BEFORE starting P26: no failed test/ch
 operator interruption or silently unreached leaf may be reported as acceptance. Review each
 leaf rather than unchanged wrapper status/grep quirks; retain existing intentional skips/
 xfails and inspect warnings, waits, cleanup and preservation evidence. Correction1's local
-passes do not satisfy this gate. Corrections2 and4–7 are approved/pending; correction3's
+passes do not satisfy this gate. Corrections2 and4–7 are implemented and locally verified; delegated/full verification remains pending; correction3's
 authorized deletion is complete. New defects or scope deviations still need a narrow
 proposal/approval rather than broadening implementation silently.
 
@@ -1877,7 +1933,8 @@ source-hash guard was applied between runs. Root verification is complete.
 That targeted result supported the subsequent full operator run, now reviewed above.
 Chrome placement/root credentials are resolved; full acceptance remains blocked by the
 independent current findings, including cheap preflight cases missed before handoff.
-No further elevate batch is prepared in this review. P26-P30 remain separate pending work.
+That earlier review required no further batch. The current post-correction elevate batch
+is recorded at the top; P26-P30 remain separate pending work.
 
 Rejected changes MUST NOT return: root preload-before-drop, synthetic DuckDB config/binary
 that conceals prerequisites, substituted-query browser test, raised launcher timeout,
@@ -1954,8 +2011,8 @@ pixi run -e detour-ai-augment env mypy --config-file src/detours/detour_ai_augme
   update_pull_state, plus the approved P26 typed-construction/content-type, P27 literal-audit,
   P28 protocol-ownership/inheritance, P29 original-pull-ID rename and P30 Store-owned
   current-record/session/outcome-metadata/linkage additions.
-  Current priority is the approved operator-log corrections2–7 above, with item3 explicitly
-  limited to deleting elevate-triggering tests. Do not start P26 until the full
+  Current priority is verification of the now-implemented operator-log corrections2–7
+  above; item3 was limited to deleting elevate-triggering tests. Do not start P26 until the full
   pre-commit-operator acceptance gate is met. No unrelated audit, DTO-default removal or
   card-format tightening.
 - Operator forbids cast: changes must use genuinely compatible types, not cast or substitute

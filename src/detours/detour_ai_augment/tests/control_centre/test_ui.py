@@ -9,6 +9,7 @@ import io
 import json
 import os
 import subprocess
+import sys
 from collections.abc import AsyncIterator
 from contextlib import ExitStack, asynccontextmanager, nullcontext
 from copy import deepcopy
@@ -66,6 +67,7 @@ from src.detours.detour_ai_augment.protected.tests.pytest_plugin import (
     PythonProcess,
     SocketlessDashboardLifecycle,
     backend_startup_process,
+    backend_stop_child_process,
     nicegui_test_environment,
     operator_fixture_bootstrap_process,
     sleeping_process,
@@ -2046,6 +2048,109 @@ class FakeProcess(Mock):
         if self.returncode is None:
             self.returncode = 0
         return self.returncode
+
+
+@pytest.mark.python_subprocess
+@pytest.mark.parametrize("phase", ("child-exit", "log-drain"))
+def test_backend_supervisor_finishes_stop_before_propagating_cancellation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, python_process: PythonProcess,
+    phase: str, threaded_loop: asyncio.Runner,
+) -> None:
+    async def check() -> None:
+        reached = asyncio.Event()
+        release = asyncio.Event()
+        logs: list[str] = []
+
+        def capture_log(prefix: str, message: str) -> None:
+            logs.append(f"{prefix} {message}")
+            if phase == "child-exit" and message == "STOPPING":
+                reached.set()
+
+        class Supervisor(control_ui._BackendSupervisor):
+            async def forward_output(
+                self, process: asyncio.subprocess.Process, closed_cleanly: asyncio.Event,
+            ) -> None:
+                await super().forward_output(process, closed_cleanly)
+                if phase == "log-drain":
+                    await process.wait()
+                    reached.set()
+                    await release.wait()
+
+        monkeypatch.setattr(control_ui, "emit_log", capture_log)
+        configuration = context_models.AiAugmentControlCentreContext.model_construct(
+            pipeline_config=configured_pipeline_config(),
+        )
+        assert configuration.begin_backend_start() == ("--new", "--yes")
+        subject = Supervisor(
+            repository_root=tmp_path, config_path=tmp_path / "config.json",
+            openalex_api_key="unused", appendwatch_report=PurePosixPath("/unused"),
+            dashboard_socket_path=tmp_path / "unused.sock", configuration=configuration,
+        )
+        process = await asyncio.create_subprocess_exec(
+            sys.executable, "-c", python_process.source(backend_stop_child_process), phase,
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        stopping: asyncio.Task[None] | None = None
+        try:
+            assert process.stdout is not None
+            assert await asyncio.wait_for(process.stdout.readline(), timeout=10) == b"READY\n"
+            closed_cleanly = asyncio.Event()
+            handle = control_ui._BackendProcessHandle(
+                process=process, started_at=datetime.now(timezone.utc),
+                log_task=asyncio.create_task(subject.forward_output(process, closed_cleanly)),
+                store_closed_cleanly=closed_cleanly, ipc_only=False, rebuilding=True,
+                startup_succeeded=True,
+            )
+            subject._process = handle
+            stopping = asyncio.create_task(subject.stop())
+            await asyncio.wait_for(reached.wait(), timeout=10)
+            stopping.cancel()
+            # Let cancellation reach the exact in-flight stop await.
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            assert not stopping.done()
+            assert subject.process is handle
+            assert subject._lifecycle_lock.locked()
+            assert configuration._backend_cycle_failed
+            if phase == "child-exit":
+                assert process.returncode is None
+                assert process.stdin is not None
+                process.stdin.write(b"finish\n")
+                await process.stdin.drain()
+            else:
+                assert process.returncode == 0
+                assert not handle.log_task.done()
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(stopping, timeout=10)
+            assert process.returncode == 0
+            assert handle.log_task.done() and not handle.log_task.cancelled()
+            assert closed_cleanly.is_set()
+            assert subject.process is None
+            assert not subject._lifecycle_lock.locked()
+            assert subject.status is control_ui._BackendStatus.STOPPED
+            assert configuration.begin_backend_start() == ("--resume", "--yes")
+            assert (
+                f"{Locale.CONTROL_CENTRE_LOG_PREFIX} "
+                + Locale.BACKEND_STOPPED_LOG_TEMPLATE.format(
+                    pid=process.pid, return_code=0, clean_close_ack=True,
+                    forced_kill=False, shutdown_succeeded=True,
+                )
+            ) in logs
+        finally:
+            release.set()
+            if process.stdin is not None:
+                process.stdin.close()
+            if process.returncode is None:
+                process.kill()
+            await process.wait()
+            if stopping is not None:
+                await asyncio.gather(stopping, return_exceptions=True)
+            if subject.process is not None:
+                await subject.stop()
+
+    threaded_loop.run(check())
 
 
 @pytest.mark.anyio

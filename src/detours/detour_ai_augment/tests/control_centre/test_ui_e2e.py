@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import socket
 import subprocess
@@ -795,6 +796,23 @@ def test_underscore_field_labels_render_literally_in_researcher_card(
         assert errors == [], Counter(errors)
 
 
+def _line_height_ratio(locator: Locator) -> float:
+    expect(locator).to_be_visible()
+    measurement = locator.evaluate("""element => {
+        const style = getComputedStyle(element);
+        return {
+            connected: element.isConnected,
+            lineHeight: style.lineHeight,
+            fontSize: style.fontSize,
+            ratio: parseFloat(style.lineHeight) / parseFloat(style.fontSize),
+        };
+    }""")
+    assert measurement["connected"], measurement
+    ratio = float(measurement["ratio"])
+    assert math.isfinite(ratio), measurement
+    return ratio
+
+
 def test_main_grid_and_researcher_card_use_compact_line_spacing(
     pytestconfig: pytest.Config, nicegui_storage_path: Path,
 ) -> None:
@@ -809,15 +827,20 @@ def test_main_grid_and_researcher_card_use_compact_line_spacing(
         page.get_by_test_id(control_ui.VIEW_CARD_TEST_ID).click()
 
         grid_cell = eligible_row.locator(".ag-cell-value").first
-        card_paragraphs = page.get_by_test_id(control_ui.PAGE_FOOTER_TEST_ID).locator("p")
+        card = page.get_by_test_id(control_ui.CARD_MARKDOWN_TEST_ID)
+
+        expect(
+            card.locator("code", has_text=E2E_CARD_FILENAME)
+        ).to_have_text(E2E_CARD_FILENAME)
+
+        expect(
+            page.get_by_test_id(control_ui.DOWNLOAD_CARD_DOCX_TEST_ID)
+        ).to_be_enabled()
+
+        card_paragraphs = card.locator("p")
         card_paragraph = card_paragraphs.first
         ratios = [
-            locator.evaluate(
-                "element => {"
-                " const style = getComputedStyle(element);"
-                " return parseFloat(style.lineHeight) / parseFloat(style.fontSize);"
-                "}"
-            )
+            _line_height_ratio(locator)
             for locator in (grid_cell, card_paragraph, history_cell)
         ]
         grid_ratio, card_ratio, history_ratio = ratios

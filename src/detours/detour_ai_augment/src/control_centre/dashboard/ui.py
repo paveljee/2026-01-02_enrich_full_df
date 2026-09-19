@@ -1348,6 +1348,14 @@ class _BackendSupervisor:
             await self._stop()
 
     async def _stop(self) -> None:
+        stop_task = asyncio.create_task(self._stop_owned_process())
+        try:
+            await asyncio.shield(stop_task)
+        except asyncio.CancelledError:
+            await stop_task
+            raise
+
+    async def _stop_owned_process(self) -> None:
         if self._process is None:
             self._status = _BackendStatus.STOPPED
             return
@@ -1378,6 +1386,8 @@ class _BackendSupervisor:
                 Locale.CONTROL_CENTRE_LOG_PREFIX,
                 Locale.BACKEND_STOPPED_LOG_TEMPLATE.format(
                     pid=process.pid, return_code=process.returncode,
+                    clean_close_ack=handle.store_closed_cleanly.is_set(),
+                    forced_kill=forced_kill, shutdown_succeeded=shutdown_succeeded,
                 ),
             )
         finally:

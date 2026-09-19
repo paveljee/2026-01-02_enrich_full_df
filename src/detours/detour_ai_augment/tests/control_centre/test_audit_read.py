@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, field_validator
 
 from src.detours.detour_ai_augment.protected.tests.pytest_plugin import (
     PythonProcess,
+    audit_probe_process,
     deployed_guest_imports_process,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_context import (
@@ -45,8 +46,9 @@ def configuration(tmp_path: Path) -> audit_read.AuditReadConfiguration:
     )
 
 
+@pytest.mark.python_subprocess
 def test_audit_protocol_finds_and_reads_only_configured_artifacts(
-    tmp_path: Path,
+    tmp_path: Path, python_process: PythonProcess,
 ) -> None:
     configured = configuration(tmp_path)
     rollout = configured.sessions_root / ROLLOUT_RELATIVE_PATH
@@ -78,7 +80,13 @@ def test_audit_protocol_finds_and_reads_only_configured_artifacts(
     )
     assert report_output.getvalue() == b".\n"
 
-    audit_read.execute(configured, audit_read.PROBE_COMMAND, output=io.BytesIO())
+    result = python_process.run(
+        audit_probe_process,
+        configured.model_dump_json(),
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout == result.stderr == ""
 
 
 @pytest.mark.parametrize(

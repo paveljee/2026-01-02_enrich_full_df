@@ -210,7 +210,9 @@ class Locale:
     )
     BACKEND_STOPPING_LOG_TEMPLATE: Final = "stopping Backend process: pid={pid}"
     BACKEND_STOPPED_LOG_TEMPLATE: Final = (
-        "Backend process stopped: pid={pid} return_code={return_code}"
+        "Backend process stopped: pid={pid} return_code={return_code}; "
+        "clean_close_ack={clean_close_ack}; forced_kill={forced_kill}; "
+        "shutdown_succeeded={shutdown_succeeded}"
     )
     CODEX_REMOTE_STOPPING_LOG_TEMPLATE: Final = (
         "stopping recorded remote Codex process: run_id={run_id} "

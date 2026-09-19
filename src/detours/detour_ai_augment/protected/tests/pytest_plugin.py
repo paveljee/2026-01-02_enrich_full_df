@@ -822,6 +822,19 @@ def completed_query_dashboard_process() -> None:
     raise SystemExit(ui.main(["--config", sys.argv[1]]))
 
 
+def audit_probe_process() -> None:
+    import sys
+
+    from src.detours.detour_ai_augment.src.control_centre.appendwatch import audit_read
+
+    configured = audit_read.AuditReadConfiguration.model_validate_json(sys.argv[1])
+    audit_read.execute(
+        configured,
+        audit_read.PROBE_COMMAND,
+        output=sys.stdout.buffer,
+    )
+
+
 def deployed_guest_imports_process() -> None:
     import runpy
     from pathlib import Path
@@ -859,6 +872,23 @@ def sleeping_process() -> None:
 
     print(os.getpid(), flush=True)
     time.sleep(60)
+
+
+def backend_stop_child_process() -> None:
+    import signal
+    import sys
+
+    from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
+        BACKEND_STORE_CLOSED_CLEANLY,
+    )
+
+    signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
+    print("READY", flush=True)
+    signal.sigwait({signal.SIGTERM})
+    print("STOPPING", flush=True)
+    if sys.argv[1] == "child-exit":
+        sys.stdin.readline()
+    print(BACKEND_STORE_CLOSED_CLEANLY, flush=True)
 
 
 def stdin_waiting_process() -> None:
