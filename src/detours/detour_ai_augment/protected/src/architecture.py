@@ -110,7 +110,7 @@ class BackendComponent(
         @property
         def query_response_body(
             self,
-        ) -> BackendComponent.ControlCentrePort.QueryResponseProperty: ...
+        ) -> BackendComponent.QueryResponseProperty: ...
 
     class RunOutcomeRequestRecordProperty(RequestRecordProperty, Protocol):
         @property
@@ -134,6 +134,21 @@ class BackendComponent(
         ]: ...
 
     class FullStoreProperty(QueryOnlyStoreProperty, Protocol):
+        @property
+        def current_pull_record(self) -> HttpRequestLogRecord | None: ...
+
+        @property
+        def current_push_record(self) -> HttpRequestLogRecord | None: ...
+
+        @property
+        def current_commit_record(self) -> BackendComponent.CommitRecordProperty | None: ...
+
+        @property
+        def current_validation_record(self) -> BackendComponent.ValidationRecordProperty | None: ...
+
+        @property
+        def initial_validation_record(self) -> BackendComponent.ValidationRecordProperty | None: ...
+
         def pull(
             self,
             request: BackendComponent.PullRequestRecordProperty,
@@ -152,7 +167,7 @@ class BackendComponent(
             self,
             request: BackendComponent.RunOutcomeRequestRecordProperty,
         ) -> BackendComponent.ResponseRecordPromiseProperty[
-            BackendComponent.ControlCentrePort.RunOutcomeRecordProperty
+            BackendComponent.RunOutcomeResponseRecordProperty
         ]: ...
 
     class ContextProperty(
@@ -262,8 +277,7 @@ class BackendComponent(
         def serialize(self) -> dict[str, object]: ...
 
     class CommitRecordProperty(
-        HttpRequestLogRecordProtocol,
-        ComponentProtocol.PropertyProtocol,
+        RequestRecordProperty,
         Protocol,
     ):
         @property
@@ -300,20 +314,6 @@ class BackendComponent(
         @property
         def detail(self) -> str | None: ...
 
-        def validate_lifecycle(self) -> Self: ...
-
-    class ValidationRequestBodyProperty(
-        ComponentProtocol.PropertyProtocol,
-        Protocol,
-    ):
-        @property
-        def commit_id(self) -> UUID: ...
-
-        @property
-        def post_commit_validation(
-            self,
-        ) -> BackendComponent.PostCommitValidationProperty: ...
-
         @property
         def submission_type(
             self,
@@ -322,14 +322,32 @@ class BackendComponent(
         @property
         def submission(self) -> Mapping[str, JsonValue] | None: ...
 
+        def validate_lifecycle(self) -> Self: ...
+
+    class ValidationRequestBodyProperty(
+        ComponentProtocol.PropertyProtocol,
+        Protocol,
+    ):
         @property
-        def http_record_ids(self) -> tuple[UUID, ...]: ...
+        def commit_record(self) -> BackendComponent.CommitRecordProperty: ...
+
+        @property
+        def post_commit_validation(
+            self,
+        ) -> BackendComponent.PostCommitValidationProperty: ...
+
+        @property
+        def initial_validation_record(
+            self,
+        ) -> BackendComponent.ValidationRecordProperty | None: ...
+
+        @property
+        def openalex_ror_records(self) -> tuple[HttpRequestLogRecord, ...]: ...
 
         def validate_body(self) -> Self: ...
 
     class ValidationRecordProperty(
-        HttpRequestLogRecordProtocol,
-        ComponentProtocol.PropertyProtocol,
+        RequestRecordProperty,
         Protocol,
     ):
         @property
@@ -347,6 +365,160 @@ class BackendComponent(
             cls,
             record: HttpRequestLogRecord,
         ) -> Self: ...
+
+    class RunOutcomeResponseBodyProperty(
+        ComponentProtocol.PropertyProtocol,
+        Protocol,
+    ):
+        @property
+        def commit_record_id(self) -> UUID | None: ...
+
+        @property
+        def validation_record_id(self) -> UUID | None: ...
+
+        @property
+        def run_outcome_record_id(self) -> UUID: ...
+
+        @property
+        def pull_record_id(self) -> UUID | None: ...
+
+        @property
+        def push_record_id(self) -> UUID | None: ...
+
+        @property
+        def codex_session_record(
+            self,
+        ) -> BackendComponent.CodexSessionRecordProperty: ...
+
+        @classmethod
+        def from_serialized_json(
+            cls,
+            value: str | bytes,
+        ) -> Self: ...
+
+        def serialize(self) -> dict[str, object]: ...
+
+    class RunOutcomeResponseRecordProperty(
+        ResponseRecordProperty,
+        Protocol,
+    ):
+        @property
+        def run_outcome_request(
+            self,
+        ) -> BackendComponent.RunOutcomeRequestProperty: ...
+
+        @property
+        def http_request_log_record(self) -> HttpRequestLogRecord: ...
+
+        @property
+        def run_outcome_response_body(
+            self,
+        ) -> BackendComponent.RunOutcomeResponseBodyProperty: ...
+
+        @property
+        def run_outcome(
+            self,
+        ) -> ControlCentreComponent.LifecycleProperty: ...
+
+        def validate_record(self) -> Self: ...
+
+        @classmethod
+        def from_http_request_log_record(
+            cls,
+            record: HttpRequestLogRecord,
+        ) -> Self: ...
+
+    class QueryResponseProperty(
+        ComponentProtocol.PropertyProtocol,
+        Protocol,
+    ):
+        @property
+        def attempts(
+            self,
+        ) -> tuple[
+            BackendComponent.AgentRuntimePort.AttemptRecordProperty,
+            ...,
+        ]: ...
+
+        @property
+        def ai_augment_singular_outerdicts(
+            self,
+        ) -> tuple[
+            BackendComponent.ControlCentrePort.AiAugmentSingularOuterDictProperty,
+            ...,
+        ]: ...
+
+        @property
+        def run_outcome_records(
+            self,
+        ) -> tuple[
+            BackendComponent.RunOutcomeResponseRecordProperty,
+            ...,
+        ]: ...
+
+        @classmethod
+        def from_serialized_json(
+            cls,
+            value: str | bytes,
+        ) -> Self: ...
+
+        def serialize(self) -> dict[str, object]: ...
+
+    class QueryRequestProperty(
+        ComponentProtocol.PropertyProtocol,
+        Protocol,
+    ):
+        """Request the complete Backend snapshot; no parameters."""
+
+    class RunOutcomeRequestProperty(
+        ComponentProtocol.PropertyProtocol,
+        Protocol,
+    ):
+        @property
+        def run_outcome(self) -> ControlCentreComponent.LifecycleProperty: ...
+
+        @property
+        def namekey(self) -> NameKey | None: ...
+
+        @property
+        def session_id(self) -> UUID | None: ...
+
+        @property
+        def validation_record_id(self) -> UUID | None: ...
+
+        @property
+        def http_request_log_record(self) -> HttpRequestLogRecord: ...
+
+        @property
+        def path(
+            self,
+        ) -> ControlCentreComponent.BackendPort.RunOutcomePathProperty: ...
+
+        @property
+        def request_headers(self) -> Mapping[str, str]: ...
+
+        @classmethod
+        def from_http_request(
+            cls,
+            *,
+            received_at_unix_usec: int,
+            method: str,
+            scheme: str,
+            host: str,
+            port: int | None,
+            path: str,
+            query: str,
+            request_headers: Mapping[str, str],
+            request_body: str | None,
+        ) -> Self: ...
+
+        @classmethod
+        def from_http_request_log_record(
+            cls,
+            record: HttpRequestLogRecord,
+        ) -> Self: ...
+
+        def validate_http_request_log_record(self) -> Self: ...
 
     class AgentRuntimePort(
         ComponentProtocol.PortProtocol,
@@ -448,6 +620,11 @@ class BackendComponent(
             @property
             def commit_record(self) -> BackendComponent.CommitRecordProperty: ...
 
+            @property
+            def run_outcome_response_record(
+                self,
+            ) -> BackendComponent.RunOutcomeResponseRecordProperty: ...
+
             def text(self, column: str) -> str | None: ...
 
             def validate_committed_innerdict(self) -> Self: ...
@@ -503,105 +680,6 @@ class BackendComponent(
             def from_serialized(
                 cls,
                 value: Mapping[str, object],
-            ) -> Self: ...
-
-            def serialize(self) -> dict[str, object]: ...
-
-        class RunOutcomeResponseBodyProperty(
-            ComponentProtocol.PortProtocol.PropertyProtocol,
-            Protocol,
-        ):
-            @property
-            def commit_record_id(self) -> UUID | None: ...
-
-            @property
-            def validation_record_id(self) -> UUID | None: ...
-
-            @property
-            def run_outcome_record_id(self) -> UUID: ...
-
-            @property
-            def pull_record_id(self) -> UUID | None: ...
-
-            @property
-            def push_record_id(self) -> UUID | None: ...
-
-            @property
-            def codex_session_record(
-                self,
-            ) -> BackendComponent.CodexSessionRecordProperty: ...
-
-            @classmethod
-            def from_serialized_json(
-                cls,
-                value: str | bytes,
-            ) -> Self: ...
-
-            def serialize(self) -> dict[str, object]: ...
-
-        class RunOutcomeRecordProperty(
-            HttpRequestLogRecordProtocol,
-            ComponentProtocol.PortProtocol.PropertyProtocol,
-            Protocol,
-        ):
-            @property
-            def run_outcome_request(
-                self,
-            ) -> ControlCentreComponent.BackendPort.RunOutcomeRequestProperty: ...
-
-            @property
-            def http_request_log_record(self) -> HttpRequestLogRecord: ...
-
-            @property
-            def run_outcome_response_body(
-                self,
-            ) -> BackendComponent.ControlCentrePort.RunOutcomeResponseBodyProperty: ...
-
-            @property
-            def run_outcome(
-                self,
-            ) -> ControlCentreComponent.LifecycleProperty: ...
-
-            def validate_record(self) -> Self: ...
-
-            @classmethod
-            def from_http_request_log_record(
-                cls,
-                record: HttpRequestLogRecord,
-            ) -> Self: ...
-
-        class QueryResponseProperty(
-            ComponentProtocol.PortProtocol.PropertyProtocol,
-            Protocol,
-        ):
-            @property
-            def attempts(
-                self,
-            ) -> tuple[
-                BackendComponent.AgentRuntimePort.AttemptRecordProperty,
-                ...,
-            ]: ...
-
-            @property
-            def ai_augment_singular_outerdicts(
-                self,
-            ) -> tuple[
-                BackendComponent.ControlCentrePort.AiAugmentSingularOuterDictProperty,
-                ...,
-            ]: ...
-
-            @property
-            def run_outcome_records(
-                self,
-            ) -> tuple[
-                BackendComponent.ControlCentrePort.RunOutcomeRecordProperty,
-                ...,
-            ]: ...
-
-            @classmethod
-            def from_serialized_json(
-                cls,
-                value: str | bytes,
             ) -> Self: ...
 
             def serialize(self) -> dict[str, object]: ...
@@ -761,7 +839,7 @@ class ControlCentreComponent(
         @property
         def run_outcome_record(
             self,
-        ) -> BackendComponent.ControlCentrePort.RunOutcomeRecordProperty | None: ...
+        ) -> BackendComponent.RunOutcomeResponseRecordProperty | None: ...
 
     class BackendPort(
         ComponentProtocol.PortProtocol,
@@ -781,53 +859,3 @@ class ControlCentreComponent(
                 "/failed",
                 "/cancelled",
             ]: ...
-
-        class QueryRequestProperty(
-            ComponentProtocol.PortProtocol.PropertyProtocol,
-            Protocol,
-        ):
-            """Request the complete Backend snapshot; no parameters."""
-
-        class RunOutcomeRequestProperty(
-            ComponentProtocol.PortProtocol.PropertyProtocol,
-            Protocol,
-        ):
-            @property
-            def run_outcome(self) -> ControlCentreComponent.LifecycleProperty: ...
-
-            @property
-            def namekey(self) -> NameKey: ...
-
-            @property
-            def http_request_log_record(self) -> HttpRequestLogRecord: ...
-
-            @property
-            def path(
-                self,
-            ) -> ControlCentreComponent.BackendPort.RunOutcomePathProperty: ...
-
-            @property
-            def request_headers(self) -> Mapping[str, str]: ...
-
-            @classmethod
-            def from_http_request(
-                cls,
-                *,
-                received_at_unix_usec: int,
-                method: str,
-                scheme: str,
-                host: str,
-                port: int | None,
-                path: str,
-                query: str,
-                request_headers: Mapping[str, str],
-                request_body: bytes,
-            ) -> Self: ...
-
-            @classmethod
-            def from_http_request_log_record(
-                cls,
-                record: HttpRequestLogRecord,
-            ) -> Self: ...
-
-            def validate_http_request_log_record(self) -> Self: ...

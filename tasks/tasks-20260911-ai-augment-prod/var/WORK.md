@@ -2,13 +2,145 @@
 
 ## Status and authorization
 
-Active execution (2026-09-19): operator requested implementing exactly HUMANS corrections2
-and4–7, whose approved snippets/boundaries are pinned below. All five code corrections are
-now implemented and locally verified. The targeted delegated elevate batch also PASSED
-(20tests, details below). Full pre-commit-operator acceptance remains pending; ready for
-that operator run now. P26 must wait for its result. Items1/3 were already complete. No P26–P30,
-Backend/Store, CSS or ordinary-task changes. Human-maintained HUMANS remains unchanged;
-its captured "proposed" labels do not supersede the later explicit approvals recorded here.
+Completed implementation (2026-09-20): operator explicitly directed implementing P26–P30 IN
+ORDER, within their exact approved scope/snippets; verify and document each P complete
+before starting the next. This LIFTS the earlier pre-commit-operator gate for this work.
+P26–P30 COMPLETE, including P30's approved initial-validation addition and persistence-first
+clarification. No approved implementation remains pending. The prior
+session-less outcome persistence blocker is withdrawn. P25 remains implemented. Unexpected ambiguity
+requiring scope extension must be raised before dependent implementation, not improvised.
+The latest operator harness failures and requested artifact-directory proposal are deferred
+as P31, UNAPPROVED for discussion, with exact proposed snippets below. Do not fix them now.
+Keep original IPC missing-socket diagnostics/polling as operator elected. No ordinary tasks,
+HUMANS, pasted/shared HTTP schema, sample_deploy or other-detour changes are authorized.
+
+### Latest full operator run — failed acceptance; live workflow completed
+
+Files: logs/from_operator/pre-commit.log (392568bytes,mtime2026-09-19T13:49:24UTC) and
+pre-commit-extra.log (1141265bytes,mtime13:54:57UTC). Execution09:46:16–09:54:57(-04).
+Log references below use raw LF line numbers; CR/ANSI-normalized views differ.
+
+| Leaf | Result |
+|---|---|
+| Ruff/default mypy/AI mypy | PASS;68/55 source files |
+| Main |174passed5skipped6xfailed1documented XPASS5.38s |
+| Step4 |4passed1skipped2.31s; separate slow selection1skipped4deselected0.24s (configured external resources unavailable) |
+| Mode3 |6passed1.11s |
+| Mode0 |4passed11existing Plotly/Kaleido deprecation warnings3.46s |
+| AI ordinary (aicode) |629passed1existing skip3deselected118.00s; no audit fork warning |
+| Real OpenAlex/ROR model |1passed0.97s; reached after ordinary suite |
+| macOS Chrome |9passed31.77s, including spacing, real query and synthetic DOCX export |
+| Main real API |3passed182deselected1expected xfail3.86s |
+| Privileged watcher |3passed70deselected3.56s |
+| Live operator |1failed2intentional excluded-case skips320.80s; command exit1 |
+
+No Ctrl+C, timeout or hanging wait in this run. Research/retries explain the duration:
+first push about190s after queueing, second about261s, third about284s. Two evidence
+validations reject into normal retry, then third is accepted. First was30/31 exact; final
+31/31. No rollout-index failure or /pull500 observed. Repeated warnings correspond to
+live/replay verification of the rejected attempts, not duplicate /validate records. Some
+long evidence output interleaves warning prefixes; diagnostic formatting is noisy, not proof
+of additional validation failure. Normal-suite ERROR/traceback output belongs to passing
+negative-path tests; do not confuse pytest -srA capture with fresh failures.
+
+Fresh verified progress: /completed200 materializes1section. Full Backend pid25607 closes
+Store cleanly, Uvicorn completes shutdown; Dashboard records exit-15, clean_close_ack=True,
+forced_kill=False, shutdown_succeeded=True. IPC-only pids25587 and26160 likewise close cleanly
+and exit0. Post-run query returns307researchers/3attempts/1outcome; storage replacement is
+after clean stop. Dashboard25569 exits0; resource-tracker descendant exits gracefully; no
+forced fallback kill or Playwright teardown warning. Explicit private NiceGUI path and
+production-data/original-NiceGUI preservation checks pass. IPC missing-socket polling stays
+unchanged as operator elected below. IPC 'waiting for0' is immediately followed by admission,
+not evidence of a stall. Full artifact validation/card-content verification did NOT pass.
+
+Confirmed harness issues, independent of pending P26–P30:
+
+1. validate_workflow_artifacts, protected/tests/operator/test_operator_e2e.py:1001, permits
+   only /pull,/push,/commit and outcome paths. It rejects legitimate synthetic POST /validate.
+   The traceback explicitly lists this sole extra route. Do not remove validation records,
+   loosen production validation, or drop the allowlist assertion. Proposed test correction
+   must use current /validate definition and also account strictly for linked provider HTTP
+   inputs when present (none in this recovered run), not blanket-allow arbitrary external rows.
+2. capture_completed_researcher_card selects PAGE_FOOTER_TEST_ID and waits only for nonempty
+   text. Footer buttons already meet that condition. Actual captured card_text in extra.log
+   LF7266 is exactly 'DOWNLOAD DOCX\nDOWNLOAD MARKDOWN'; no Markdown was captured. Its success
+   log is therefore false evidence. Production 'Researcher card displayed' follows capture.
+   Proposed narrow correction: select existing CARD_MARKDOWN_TEST_ID, wait for the linked
+   commit UUID/actual content and enabled DOCX button, then capture Markdown element text;
+   retain downstream commit-body/content assertions and existing timeouts. No UI/CSS change.
+
+The first assertion prevented all later artifact checks; after it is corrected, the recorded
+button-only capture would also fail card assertions. No claim that all remaining checks have
+already passed. Ordinary/synthetic Chrome cases did not exercise these actual end-of-workflow
+helpers. Before requesting another live run, proposed upstream coverage must invoke the actual
+artifact validator against a real synthetic completed Store/log/CAS fixture and exercise the
+actual card-capture helper in the existing host browser contour (not merely parallel helpers).
+No new implementation authorized by this review; return a concrete narrow correction scope.
+No new elevate batch prepared or run; idle task unchanged.
+
+### Recovered current run — read-only audit and requested artifact-directory change
+
+Operator explicitly supplied tmp/run_h5f6hp6j_2 and reports conflation during recovery with a
+previous run. Inspected ONLY this supplied bundle; no original production paths/config
+construction, live/replay execution, provider/SSH calls or artifact edits. Current config
+paths identify pytest-77/test_completed_dashboard_backe0. Findings:
+
+-16LF-terminated JSON records; all16 DB HTTP rows exactly match IDs, ordinal sequence,
+ method/path, JSON envelopes and LF-inclusive SHA256. DuckDB opened read_only=True;
+ whole-file hash unchanged after reads. Initial empty table-comment anchor is expected.
+-3push/commit/validate groups:2rejected evidence retries,1accepted; final /completed200.
+ DB has3attempts and1materialized innerdict. Final outcome's commit/validation/self IDs match
+ the innerdict. Accepted StandardizedSubmission has11institution objects, all provider IDs
+ NR/NR: empty provider-record lists are consistent, not unexplained missing captures.
+-All4CAS blobs match hash/size/line-count and are referenced by this run's3commits/final
+ outcome; no unreferenced old blob. One Codex session01a0b9ee-3d90-7dc0-b437-55741ea22a18.
+-NiceGUI has one Dashboard run01a0b9ee-2ff7-7213-8e62-3e58865dbcac,7events ending completed,
+ empty queue and refreshed307/3/1 snapshot. Its sole committed innerdict matches the DB
+ payload plus the separate namekey column; nested commit DTO's http_record/pull/push and
+ outcome envelope match the exact replay records. Initial diagnostic comparisons mistakenly
+ compared DTO wrappers/omitted separate namekey; corrected to the actual serialized shapes,
+ not evidence of a data mismatch. No implementation/test assertion was changed.
+-Queued→started interval1.572342s includes launch/readiness bookkeeping (not an isolated
+ startup stopwatch); queued→completed297.656583s. No old Dashboard run in supplied storage.
+ These files show no cross-run contamination; that does not refute operator's reported
+ ambiguity/conflation while recovering files from the shared system-temp hierarchy.
+
+Current fixture uses pytest's per-test tmp_path for config/DB/replay/CAS/storage and a
+separate /tmp/detour-operator-* TemporaryDirectory for socket path length. It does NOT
+intentionally reuse one data directory across invocations. Nonetheless generated artifacts
+should be easier to locate and preserve together, as operator requests. Proposed exact narrow
+fixture change (not yet implemented): unique retained repository tmp/operator-test.XXXXXXXX/
+per operator test, logged before initialization, containing config/source-readonly-symlink,
+DB/replay/CAS/NiceGUI/output and socket. No ordinary task or global pytest basetemp change,
+no production storage cleanup, no change to production Dashboard/Store and no deletion on
+success/failure. Existing process/socket cleanup and production preservation guards remain.
+Collection-time NiceGUI isolation in the shared plugin is distinct from child run storage;
+no unrelated all-suite tempdir redesign is proposed.
+
+```python
+@pytest.fixture
+def operator_runtime(repository_root: Path) -> Iterator[OperatorRuntime]:
+    artifacts_root = repository_root / "tmp"
+    artifacts_root.mkdir(exist_ok=True)
+    run_dir = Path(tempfile.mkdtemp(prefix="operator-test.", dir=artifacts_root))
+    _operator_log(f"Operator run directory (preserved): {run_dir}")
+    dashboard_socket_path = run_dir / "dashboard.sock"
+    if len(os.fsencode(dashboard_socket_path)) >= DARWIN_AF_UNIX_PATH_CAPACITY_BYTES:
+        raise RuntimeError("operator dashboard socket path exceeds Darwin AF_UNIX capacity")
+    yield _operator_runtime(
+        run_dir,
+        repository_root=repository_root,
+        dashboard_socket_path=dashboard_socket_path,
+    )
+```
+
+Configured production checkout yields88bytes for the proposed socket path, below the
+existing104-byte Darwin limit; retain the explicit guard for other checkout locations, no
+system-directory fallback. Necessary fixture/isolation tests should establish uniqueness,
+retention and child storage/config/socket paths inside the run directory. This requested
+direction and proposed snippet are recorded for scope approval, not silently applied.
+
+### Local/delegated verification preceding this full run
 
 Current verification:
 - Item2: reproduced all five stale IPC-target failures (4.04s); corrected only target/import;
@@ -50,16 +182,15 @@ Current verification:
   requires Kaleido sockets unavailable here; existing operator Mode0/root passes remain the
   retained evidence for unchanged boundaries, not newly executed checks. No full acceptance claim.
 
-Priority remains a failure-free FULL pre-commit-operator run before P26. P26–P30 stay
-approved/pending. Correction1 (find/supported-subset eligibility) remains implemented and
+The prior failure-free FULL pre-commit-operator prerequisite is lifted by the latest explicit instruction. P26–P30 are now authorized for sequential implementation despite the deferred harness failures. Correction1 (find/supported-subset eligibility) remains implemented and
 locally verified246passed1existing skip3deselected; seeded choice/retry behavior unchanged.
 Correction3 deleted all elevate-triggering tests and preserved the then-idle task. The
 Assistant-owned elevate completed the delegated checks described below and is restored to
 its historical idle script/log/status/FAILED-grep scaffolding; no tests invoke it. Any further deviation/new defect requires explicit approval.
 
-### Delegated verification completed — full operator run is next
+### Delegated verification preceding the latest full operator run
 
-Reviewed current logs/from_operator/elevate.log (mtime2026-09-19T12:19:57UTC,23837bytes,
+Previously reviewed logs/from_operator/elevate.log (mtime2026-09-19T12:19:57UTC,23837bytes,
 231lines). All20 targeted cases PASS, none skipped, no warnings/errors, timeout, Ctrl+C or
 forced process kill. Log ends at the final pytest summary; outer wrapper exit status is not
 included, so do not invent one. Each of the five intended leaf commands visibly completed:
@@ -90,154 +221,38 @@ copied tmp/elevate.*/status files locally; do not search unrelated artifacts for
 With this batch complete, restored only elevate's historical "Nothing to elevate"
 script/log/status/FAILED-grep scaffolding. TOML, shell syntax and equality of all other
 settings/tasks checked; no task executed during restoration. No new delegated batch is
-needed. Ready for full pre-commit-operator; P26–P30 stay pending until its acceptance gate.
+needed for that handoff. The subsequently executed full run is reviewed above; its new
+harness failures keep P31 pending/unapproved; the operator subsequently lifted the gate for P26–P30 implementation.
 
-### Additional IPC log-noise request — prior patch verified, no longer present
+### IPC readiness logging — keep current behavior; discussion closed
 
-Operator asks to remove routine "IPC unavailable; socket not present" startup noise.
-Confirmed source: _BackendDatabaseClient.available() emits it on FileNotFoundError;
-query_connection calls it before deciding to launch an owned child and wait_until_ready
-repeats it while IPC starts. Operator explicitly authorized the exact logging-only shape
-on2026-09-19, in ui.py only plus its directly affected existing test:
+Operator explicitly rolled back the ui.py/test_ui.py suppression patch, then said
+"ok. let's keep it" after the causal review. Preserve original FileNotFoundError diagnostic,
+0.1s readiness polling and30s deadline (600s full rebuild). No suppression flag, initial
+sleep, timeout change or SSE implementation is pending/authorized. The prior patch's8test/
+Ruff/mypy pass is historical evidence only, not a current implementation.
+The real Query button checks for an external Backend, starts its own if absent, waits for
+OPTIONS readiness, THEN sends GET/query. Initial discovery plus startup polls explain the
+messages; Backend creates socket only after config/source loading and Store verification.
+The earlier elevate case had7child readiness misses, whole test call4.45s; neither that nor
+slower prior test durations is an isolated startup benchmark. Query is not sent prematurely.
 
-```python
-except FileNotFoundError:
-    return False
-```
+P30 is COMPLETE. Implemented operator clarification: persistence must not depend on
+application validity. Missing/mismatching session/identity/linkage/ETag cannot suppress the
+HTTP history. This supersedes the prior session-less outcome exception question; no special
+permission to persist it is needed. Current implementation and verification are recorded below.
 
-Remove only that branch's emit_log and unused exception binding. Keep OPTIONS behavior,
-return value, finally-close, success logs and other OSError/HTTPException path/error details
-unchanged. Explicit Probe already logs its act and True/False outcome; startup failure and
-readiness timeout still log. Update the existing parametrized availability test so missing
-socket expects no emitted message, while PermissionError still requires path/repr and the
-error message; retain request/close assertions. No quiet flag, state cache, polling/timeout
-change, broad log suppression or Backend change. This correction does not block the full
-operator run. The exact branch/test change was implemented and verified, but current
-working tree again contains the original logging handler and no ui.py/test_ui.py diff.
-Do not reapply it during this discussion. Preserve operator edits/staging; P26–P30 remain pending.
+P29 is COMPLETE: Backend retry bookkeeping uses original_pull_record_id throughout, including
+DDL/SQL and direct tests. Dashboard run IDs are unchanged; P30 linkage work is now complete.
 
-Verification: updated missing-socket assertion reproduced the old noise (1failed/1passed,
-3.64s); after the production change, the two availability cases, successful availability/query,
-explicit Probe cases and Probe/download logging check pass8tests6.25s. OPTIONS/close and
-permission path/error assertions retained; no real sockets/network. Ruff PASS; configured
-strict mypy PASS2files; diff whitespace PASS. No task/Backend/Store changes in this
-addition; prior elevate idle restoration remains untouched.
+P28 is COMPLETE: direct BackendComponent ownership, common record inheritance and downstream
+RunOutcomeResponseRecord rename. Wire fields/module locations remain unchanged.
 
-### Follow-up IPC diagnostics — proposed, not authorized or implemented
+P27 is COMPLETE: full P25 literal audit, authoritative definitions and retained-literal
+justification recorded below, with fresh passing checks.
 
-Causal review2026-09-19: elevate.log42–45 shows explicit Query IPC AFTER Dashboard readiness,
-not automatic Dashboard-startup probing. First missing-socket message is external discovery
-before any owned Backend starts. Seven further messages occur during IPC-only child readiness
-polling (retry interval0.1s). Backend imports/config/source loading and Store verification
-precede server.make_server's Unix-socket bind; logs67–70 then show Store ready, socket running
-at the SAME path and OPTIONS200. Query200 and clean shutdown follow. Actual socket absence is
-normal in this observed startup, not a broken/mismatched socket or failed Backend. Diagnostic
-fact is accurate but emitted without lifecycle context on every ordinary readiness miss.
-Test/control-flow confirmation: test_completed_grid_row_uses_real_query_ipc calls the
-operator helper, which waits for the prior owned socket to disappear and clicks the REAL
-BACKEND_REFRESH button. Production query_ipc enters query_connection, waits for owned child
-OPTIONS readiness, then and only then sends the wholesale GET. The pre-start "Requesting
-wholesale Backend query snapshot" log announces the action, not a transmitted GET. Existing
-readiness deadline is30s (600s for full --new/rebuild), polling sleep0.1s. Seven failed child
-polls imply about0.7s scheduled sleeps; the whole successful test call4.45s also includes
-Dashboard/browser/query/shutdown, so is NOT a startup measurement. Earlier30.24s whole-case
-and historical30s readiness-timeout evidence cannot justify a fixed startup delay. No new
-elevate or runtime changes: bounded readiness polling already prevents premature GET.
-Operator challenges the flag naming: permitted temporary absence is not advance knowledge
-that the socket is missing. The proposal below is not authorized; no source changes made in
-this causal review.
-
-Operator asks to retain missing-socket diagnostics outside contexts where absence is
-acceptable. The prior patch above suppressed FileNotFoundError unconditionally;
-that affected explicit Probe too, not merely startup. Proposed replacement: log by default,
-explicitly suppress only external-Backend discovery before owned startup and owned IPC-only
-readiness polling. Absence is an acceptable lifecycle condition there, not proof that an
-incorrect path is harmless. At readiness timeout include the configured socket path in the
-existing startup failure, without another probe, changed deadline or filesystem precheck.
-
-Exact proposed snippets (unchanged surrounding behavior retained):
-
-```python
-# _BackendDatabaseClient: signature and affected handler only.
-def available(self, *, missing_socket_expected: bool = False) -> bool:
-    # Existing connection construction remains.
-    try:
-        ...  # Existing OPTIONS/response handling remains.
-    except FileNotFoundError as exc:
-        if not missing_socket_expected:
-            emit_log(
-                Locale.CONTROL_CENTRE_LOG_PREFIX,
-                Locale.IPC_SOCKET_MISSING_LOG_TEMPLATE.format(
-                    socket_path=self._socket_path, error=repr(exc),
-                ),
-            )
-        return False
-    # Existing other exception handler and finally-close remain.
-```
-
-```python
-# query_connection's existing pre-launch availability check
-await asyncio.to_thread(client.available, missing_socket_expected=True)
-
-# wait_until_ready's existing IPC-only readiness check
-await asyncio.to_thread(query_client.available, missing_socket_expected=True)
-
-# Existing readiness loop's timeout branch
-else:
-    if self._process.ipc_only:
-        raise TimeoutError(Locale.IPC_READY_TIMEOUT_TEMPLATE.format(
-            socket_path=self._dashboard_socket_path,
-        ))
-    raise TimeoutError(Locale.BACKEND_READY_TIMEOUT)
-```
-
-```python
-# Existing Control Centre Locale
-IPC_SOCKET_MISSING_LOG_TEMPLATE: Final = (
-    "IPC unavailable; socket not present: {socket_path}; {error}"
-)
-IPC_READY_TIMEOUT_TEMPLATE: Final = (
-    "backend IPC did not become ready; socket path: {socket_path}"
-)
-```
-
-Explicit Probe uses available() with its default and retains act/outcome/path/exception
-logs. Other errors and success logs remain unchanged even in expected-absence calls.
-No log cache, stored error, retry/timeout change, extra request, exists() race or Backend/
-Store change. Files only ui.py, existing Control Centre Locale and directly affected existing
-UI tests: missing/default logs, missing/expected quiet, permissions logged in both modes,
-unchanged OPTIONS/close assertions, two caller flags, explicit Probe and IPC timeout detail.
-Necessary test doubles accept the new keyword. Full-Backend timeout remains unchanged.
-This is a proposal awaiting approval, not an extension already applied or a P26 gate change.
-
-Latest addition (2026-09-18): P30 is APPROVED/PENDING: Store-owned current pull/push/commit/
-validation record instances; explicit session/current-record outcome linkage and completed
-ETag handshake; full outcome-response-record innerdict metadata; re-hook original-pull/retry
-bookkeeping to that model. It supersedes the conflicting historical lookup/metadata rules
-in P25/P29, not their other approved work. Only WORK changed; no P30 source implementation.
-
-P29 is APPROVED/PENDING: rename Backend retry bookkeeping's
-misleading run_id to original_pull_record_id, including its column constant, SQL and direct
-test callpoints. Dashboard run IDs remain unchanged. P30 additionally authorizes re-hooking
-this bookkeeping; P29 by itself is still only the rename.
-Only WORK changed for this addition; the rename is not implemented yet.
-
-P28 is APPROVED/PENDING: specific request/response record
-protocols inherit their common record protocol plus Protocol; downstream implementations
-declare only the specific protocol. Centralize all corresponding request/response/body
-properties directly in BackendComponent. Latest operator correction also renames the outcome
-response protocol/model to RunOutcomeResponseRecordProperty/RunOutcomeResponseRecord.
-Only WORK changed for this addition; no protocol/source implementation yet.
-
-P27 is APPROVED/PENDING: audit all single-/double-quoted literals
-introduced by P25, reuse authoritative definitions, centralize genuinely global/reusable
-values and all text messages appropriately, and justify every retained inline literal.
-Only WORK is changed for this new approval; the literal audit/corrections are not yet complete.
-
-P26 is APPROVED/PENDING, narrowly extending P25 with explicit
-typed request/response construction and one Backend ContentType StrEnum. Its exact query
-constructor shape and enum wiring are pinned below. Only WORK is changed for this addition
-so far; it is not an implementation/completion claim.
+P26 is COMPLETE: explicit typed record constructors, authoritative Backend ContentType/header
+wiring and query receipt-time validation. Fresh verification is below.
 
 P25's exact proposed four-operation Store contract,
 implementation boundary and code snippets are APPROVED, with two operator corrections:
@@ -256,7 +271,7 @@ changing Store/adapter boundaries and grouped processing only as explicitly pinn
 P25 production wiring is implemented and its selected integration/startup checks pass.
 The last full operator run exposed five missed preflight callpoints and three stale elevate
 test expectations; both are corrected now, but fresh full acceptance remains pending. The
-separate web-action correction1 is implemented. P26-P30 remain pending additions. P30 supersedes only the state ownership,
+separate web-action correction1 is implemented. The additions' current statuses are above; P26–P30 are complete, including the persistence-first and initial-validation clarifications. P30 supersedes only the state ownership,
 outcome reference selection and innerdict metadata decisions identified below. Preserve
 operator edits/staging. Production acceptance and unrelated browser/root/pre-start findings
 remain separate; these additions do not authorize their corrections.
@@ -436,7 +451,8 @@ or transport object in serialized records. Preserve intentional nullable outcome
 converting to Requests responses; do not change the shared v1/v1.1 converter or add old-schema code.
 
 Public operations, abbreviated concrete names (P30 additionally exposes four read-only
-current-record properties on the full Store only; query-only capability stays unchanged):
+current-record properties and the initial-validation reference on the full Store only;
+query-only capability stays unchanged):
 
 ```python
 class QueryOnlyStoreProperty(Protocol):
@@ -450,7 +466,7 @@ class FullStoreProperty(QueryOnlyStoreProperty, Protocol):
 
 The real architecture protocols use the corresponding component record/promise protocols.
 Private constructors/lifecycle/SQL/append/readback/validation/materialization helpers remain
-private; public Store operations are exactly these four, plus P30's read-only properties.
+private; public Store operations are exactly these four, plus P30's read-only current/initial properties.
 Query-only object actually has only
 query, not a cast or full object hidden solely behind a narrower annotation.
 
@@ -528,7 +544,7 @@ return response_record.to_response()
 
 Move ONLY actual transport glue to server.py: FastAPI app/route registration and raw
 ASGI request/response conversion; Flask app/route registration, _DashboardQueryApp and
-Unix-socket start/stop/serve wrappers currently in protected IPC. Preserve route metadata,
+Unix-socket start/stop/serve wrappers formerly in protected IPC. Preserve route metadata,
 OpenAPI output, socket permissions, signals and clean shutdown. Update direct test/import
 callpoints rather than leaving compatibility aliases. API workflow input/session startup
 remains its helper, called by server; evidence/validation algorithms are not part of this
@@ -646,7 +662,8 @@ catch these contract errors. Do not alter ordinary tasks or touch production art
 Excluded: shared HttpRequestLogRecord v1/v1.1 implementation, pasted models/StrictModel,
 main pipeline/other detours, sample_deploy, TASK/HUMANS/README, CAS layout, hash/config auto-
 updates, compatibility/migration/fallbacks, recovery, wrapper tasks, unrelated operator fixes.
-Grouped persistence and the request/response API are implemented; P26-P30 are separate pending additions.
+Grouped persistence and the request/response API are implemented; P26–P30 additions are complete.
+P30 is also complete; only unapproved/deferred P31 and production acceptance remain.
 
 ### Latest approved P25 test-helper correction
 
@@ -670,7 +687,8 @@ existing snapshot/replay checks passed2 in25.84s.
 ## P25 execution checkpoint
 
 - Completed instruction: P25 only, including the approved snapshot helper split.
-  P26-P30 remain separately pending. Do not implement their changes silently or reintroduce
+  P26–P30 were separately pending at that historical checkpoint. Their current statuses
+  are above. Do not reintroduce
   their superseded historical selection/card rules as the final design. Operator has staged
   in-progress files; preserve the index and signed human comments.
 - Production wiring is implemented: four Store operations/private lifecycle/SQL; actual
@@ -685,7 +703,7 @@ existing snapshot/replay checks passed2 in25.84s.
   @implements; P28 separately removes the redundant Pull common-base decorators.
 - Enum comparisons use BackendStoreAcknowledgment.ACK/NAK, not raw .value strings. P25
   status decisions/constructor annotations use HTTPStatus; shared numeric wire fields stay.
-  P26/P27 typed construction/content types and full literal audit remain pending.
+  P26/P27 subsequently completed typed construction/content types and the full literal audit.
 - Actual fsync -> readback failure now preserves ACK plus error (never NAK). Grouped raw
   records/hashes/ordinals survive rejected-derived-effects rollback. Busy503 and rejected409
   can enlist during provider capture; IPC waits through HTTP and tracked pull-state update.
@@ -756,11 +774,11 @@ existing snapshot/replay checks passed2 in25.84s.
   P25's targeted real-transport check now passes, but does not resolve browser-test placement,
   root watcher access or the live-operator pre-start hang. That checkpoint did not establish full acceptance readiness. The subsequent routing/root
   corrections and targeted checks below now permit a full operator run; acceptance itself
-  is still pending. P26-P30 still pending. Local preparation:
+  is still pending. P26–P30 were pending at that checkpoint; see current statuses above. Local preparation:
   TOML/shell syntax PASS, both exact nodes collected (2tests3.42s), diff whitespace PASS;
   collection is not an execution pass.
 
-## P26 — Approved, pending: typed record construction and Backend content types
+## P26 — COMPLETE: typed record construction and Backend content types
 
 Operator approved the explicit QueryResponseRecord constructor/factory shown in chat,
 including rejection of a missing receipt timestamp instead of inventing zero duration.
@@ -777,7 +795,7 @@ Scope:
   Store orchestrates operations and passes typed inputs. No generic builder/service layer,
   model_construct validation bypass, cast, compatibility alias or schema fallback.
 - Explicit operator-flagged instance, covered by P26/P27 rather than a new scope item:
-  RunOutcomeRecord.to_response (RunOutcomeResponseRecord after P28) currently reconstructs
+  RunOutcomeRecord.to_response (RunOutcomeResponseRecord after P28) previously reconstructed
   an HTTP record via self.model_dump() | {"response_headers": ...}, then sets literal
   "Content-Type"/"application/json" on the converted response. Replace this shape with
   explicit typed construction and the authoritative header constant/ContentType.JSON;
@@ -893,7 +911,23 @@ headers, bodies and persistence behavior; cover query receipt time0 (valid) vers
 (error), exact response duration and continued read-only query behavior. Ruff/strict mypy
 for affected paths. No source-string tests or relaxed assertions/prerequisites.
 
-## P27 — Approved, pending: P25 literal audit and authoritative definitions
+### P26 completion — 2026-09-19
+
+Explicit named-field construction replaces P25 record dictionary merging in API/IPC/Store
+and commit/validation/outcome readback. Query factory exactly follows the approved snippet;
+receipt0 is valid, None returns the error promise. One ContentType enum/header constant
+owns app headers; captured provider headers and synthetic/null durable headers unchanged.
+Removed unused duplicate JSON media constant; only necessary direct test/helper imports
+changed. No protocol rename, Store-state or retry-algorithm change.
+
+Verification: feasible Backend API/Store/IPC/interceptor batch314passed,1existing skip,
+4deselected183.80s; includes real persistence/replay/wire checks and query0/None duration
+cases. Exclusions: subprocess lock, real Unix socket, two historical captures. Full configured
+strict mypy PASS56files; changed-file Ruff PASS. An earlier identical test invocation's
+terminal output was lost across compaction; its result is not claimed, so this batch was
+rerun after that process exited. No browser/root/provider/live-Codex acceptance claim.
+
+## P27 — COMPLETE: P25 literal audit and authoritative definitions
 
 Exact narrow operator instruction:
 
@@ -942,7 +976,72 @@ Recheck the changed literals after corrections and run affected Ruff/strict mypy
 existing relevant behavior tests. This is an enforced completion review, not a claim that
 the earlier partial Locale migration already satisfied it.
 
-## P28 — Approved, pending: centralized request/response/body protocols
+### P27 audit checkpoint — scope and retained-literal rationale
+
+Audited the entire P25 commit c4ef193 against its parent608f561 (the parent changes only
+WORK/rollout capture), then both index and working-tree diffs. Index was empty. rg scanned
+both quote forms (including f-string/multiline lines); AST string-span inspection additionally
+mapped every P25-introduced occurrence to current code so moved/removed strings were not
+missed. Broad current-diff inspection also identified later find/operator changes; those are
+not a new P27 cleanup scope. No audit framework or source-string test was added.
+
+P26 already removed dictionary-key construction/media duplicates. P27 reuses shared
+KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1; common Backend vars now own GET/POST, pull/push
+paths and Content-Length alongside P26's Content-Type. Direct consumers import those
+constants from vars, including operator fixture callpoints (imports only; P31 unchanged).
+Query record validation delegates to the existing QueryRequest.outbound_http route pair,
+not a duplicate /query definition or circular IPC import. StandardizedSubmission discriminator
+comparison has an authoritative Backend constant; its existing Literal schema stays literal.
+Existing literal error/log messages introduced by P25 are already centralized in Backend
+Locale (73 AST string occurrences); no translated/runtime wording changes were needed.
+
+Retained production occurrences, exhaustively grouped by identical purpose:
+
+| Location | Retained inline literals and justification |
+|---|---|
+| architecture.py | ACK/NAK Literal type members: Python typing requires literal values, not runtime constants. Promise docstring documents its contract. |
+| IPC handlers | Eight empty-string operands are Requests/urlsplit absent-value normalization into existing validators, not fallback schema or operator text. |
+| api.py new response/pull/reference helpers | Empty body/join identities and newline delimiters preserve transport framing; `detail` is the public error JSON key; `value` is the existing submission field key. SQL fragments SELECT/FROM/WHERE/ORDER/DESC/operators/separators and `$.request_body` are local query syntax with existing table/column constants, not new global identifiers. |
+| Store | BEGIN TRANSACTION/COMMIT/ROLLBACK are the three literal DuckDB commands at the owning boundary; extracting SQL verbs does not add an application authority. `read_only` is the existing StoreMode value at its entry point (typed Literal remains authoritative). Query-only docstring documents capability. |
+| request_response_records.py | Six `mode="after"` Pydantic decorator settings are third-party Literal API options. Empty request-body sentinel is protocol emptiness, not a message. |
+| response_record_promise.py | ACK/NAK enum definitions are the authority; docstring and human-signed Annotated compatibility text stay attached to the contract. No `.value`/raw-string consumer comparison. |
+| run_outcome_record.py | Three added serializer keys commit_record_id/validation_record_id/run_outcome_record_id are exact model/wire field names, intentionally inline in the authoritative serializer. |
+| server.py | `app` is the ASGI scope key; `forbid` a Pydantic Literal config option; Flask app/thread identifiers are single-owner registration names; endpoint `run-outcome-` and slash-removal compose local route identifiers; `unix://` is Werkzeug's transport-address syntax; lifecycle docstring stays local. |
+
+Test occurrences are independent synthetic inputs, boundary expectations, fixture/monkeypatch
+symbol names and pytest parameter names—not operator-facing application messages. They remain
+inline to avoid expected values being derived from the implementation under test. Specifically:
+plugin10 occurrences (standalone /query request, pull/push fixture headers/routes, row-count SQL);
+test_api P25's229 occurrences (ASGI schema/HTTP-version1.1—not HTTP-log schema—message fields,
+controlled request/response payloads and URLs, fixture file paths, explicit monkeypatch names,
+error/log expectations, domain-probe/snapshot SQL and disconnect/send-failure case labels);
+test_backend_store66 (schema/header/status/route expectations, damaged-log and fsync/projection
+injections, promise cancellation, read-only SQL/capability assertions); interceptor29 (provider
+capture exclusion timing, exact route/validation/replay checks, SQL probes and error expectations);
+IPC11 (Flask/OpenAPI route and request expectations, named lifecycle substitutions); browser2
+(fixture docstring and CAS config key). The counts refer to the original P25 diff, not later
+find/spacing/cleanup changes. Test strings that are schema keys/hooks are required library/
+model names; injected errors and exact expected diagnostics deliberately do not become Locale
+entries used by production. Necessary moved-constant imports were updated without changing
+any assertion. P25 config/context/Dashboard snapshot/UI changes introduced no string literals.
+
+Development corrections: the first targeted run83passed/2failed exposed an accidental import
+list insertion in _http_header_value arguments; restored its exact two-argument call. Strict
+mypy identified implicit reexports and an overbroad removal of the Dashboard request method;
+fixed direct imports and restored the unchanged HTTP request call, without aliases/ignores.
+These initial runs are failures, not completion evidence; fresh checks follow.
+
+### P27 completion — 2026-09-19
+
+Fresh Store/IPC/interceptor106passed,1real-socket deselected175.75s. Dashboard exact outcome
+sender/query replacement4passed202deselected11.20s. Full Ruff PASS, strict mypy PASS56files,
+diff whitespace PASS. No index edits. Test bytes (ASGI wire bodies/headers) were included in
+the quote scan and remain independently pinned boundary payloads, like the test strings
+above. No ACK/NAK raw-string comparison, shared HTTP schema change or compatibility alias.
+Only direct constant imports changed in operator helpers; P31 corrections remain unimplemented.
+P27 is complete; move to P28 ownership/inheritance/rename only.
+
+## P28 — COMPLETE: centralized request/response/body protocols
 
 Exact narrow operator direction: specific request record properties inherit
 BackendComponent.RequestRecordProperty and Protocol; apply the corresponding rule to
@@ -953,10 +1052,9 @@ RunOutcomeRecordProperty becomes RunOutcomeResponseRecordProperty and its concre
 RunOutcomeRecord becomes RunOutcomeResponseRecord. This supersedes the earlier instruction
 to retain P21's name; the existing model/contract is renamed, not duplicated.
 
-Current finding: Pull/Push/Query/RunOutcomeRequest record protocols already inherit the
-appropriate common base plus Protocol. The additional downstream Pull base decorators
-therefore add no required check. Commit/Validation record protocols currently inherit
-the shared HTTP protocol directly; RunOutcomeRecordProperty is still nested in a port.
+Pre-P28 finding (corrected): Pull/Push/Query/RunOutcomeRequest protocols already inherited
+the common base. P28 removed redundant Pull decorators, changed Commit/Validation bases
+and moved the outcome protocol out of the port, as authorized below.
 
 Approved implementation boundary:
 
@@ -1066,7 +1164,21 @@ and update Store promise/query-body annotations to the direct BackendComponent p
 Verify with strict mypy/Ruff and existing affected record/adapter tests; no casts, type
 suppressions, source-string tests or weakening of member signatures.
 
-## P29 — Approved, pending: original pull record ID naming
+### P28 completion — 2026-09-19
+
+Moved exactly the five approved protocols directly into BackendComponent, preserving their
+members; commit/validation inherit RequestRecordProperty and outcome inherits
+ResponseRecordProperty. Removed only redundant common Pull decorators; concrete bodies/client
+requests/records retain specific @implements. All direct active producers/consumers/tests now
+use RunOutcomeResponseRecord, no alias or module move; serialized run_outcome_records unchanged.
+No old protocol path/name remains in active scoped Python. Human-signed promise comment preserved.
+
+Strict mypy PASS56files; Ruff PASS; selected outcome/query/card contract tests18passed,
+423deselected37.84s. Static review confirms every moved protocol has its downstream decorator
+and correct inherited members. No runtime/lifecycle/persistence/default changes. P28 complete;
+P29 follows as the rename-only step before P30 linkage changes.
+
+## P29 — COMPLETE: original pull record ID naming
 
 Operator authorized the narrow rename of Backend retry bookkeeping's run_id to
 original_pull_record_id. This is the existing original_pull.record_id, NOT Dashboard's
@@ -1112,9 +1224,19 @@ no SQL algorithm rewrite under P29 alone (P30's explicit linkage rewiring is add
 Verify existing synthetic retry-baseline/evidence tests and affected
 Ruff/strict mypy checks. Historical capture fixtures remain unexecuted/inaccessible. Check
 that Backend retry references no longer use the misleading name, without renaming legitimate
-Dashboard run_id fields. Status: approved, pending; documentation only in this turn.
+Dashboard run_id fields. Status: implemented and verified; evidence below.
 
-## P30 — Approved, pending: Store-owned current records and session outcome linkage
+### P29 completion — 2026-09-19
+
+Renamed the column constant/value in both retry tables, every SQL callpoint and local
+original_pull_record_id_text. Backend test helper parameters/fixture constants (including
+historical fixture names, not execution) and the baseline-isolation test name now describe
+the actual original pull UUID. Values, constraints, grouping and evidence rules unchanged.
+No Backend retry run_id/CODEX_RETRY_RUN_ID_COL reference remains; Dashboard run_id untouched.
+No alias/migration/recovery. Nine synthetic retry/baseline checks passed,203deselected11.32s;
+configured mypy PASS2changedfiles; Ruff PASS. P29 complete before P30 boundary review.
+
+## P30 — COMPLETE: Store-owned records, initial validation, session outcome linkage and persistence independent of validity
 
 Approval sequence: operator specified explicit pull -> commit -> validation linkage, a
 session-scoped outcome with Session-ID confirmation and a completed-only ETag handshake,
@@ -1123,7 +1245,7 @@ records belong to Backend Store, not API globals; expose actual model instances,
 UUIDs, by reference without deepcopy. Assistant restated persist/fsync -> DB projection ->
 typed DB readback before exposure; operator approved recording this shape. Latest explicit
 addition: original_pull_record_id and its related machinery must be re-hooked to this model
-in this same P. Status: approved, pending; this turn edits documentation only.
+in this same P. Status: implemented and locally verified, including the approved addition below.
 
 ### Current record ownership and access
 
@@ -1139,7 +1261,8 @@ in this same P. Status: approved, pending; this turn edits documentation only.
 - API/IPC consume references; they do not own/update these four slots. Existing four Store
   operations remain; these four read-only properties are the explicit narrow extension to
   P25's full-Store surface. Query-only wrapper still exposes only query.
-- Initial absence is None, not a fabricated record. Preserve current initialized session
+- Initial absence is None, not a fabricated record. The approved addition below also maintains
+  the distinct first-validation reference. Preserve current initialized session
   identity: old-session records must not silently become a new session's commit/validation.
   No duplicate context/service, mutable public setter or new record-ID generation scheme.
 - Preserve the accepted push's captured pull reference and the actual accepted push while
@@ -1199,22 +1322,28 @@ these getters or the adapters; no catch-up projection from a getter.
   /completed. Backend compares it with current_validation_record.record_id and requires the
   matching accepted validation/commit. Preserve actual HTTP header encoding consistently;
   compare parsed UUIDs, not loose string/enum coercions.
-- Session/identity/linkage/ETag inconsistency fails through the existing promise result
-  (None, BackendStoreException), not silent fallback, guessed references or an invented
-  successful response. Use the existing ResponseRecordPromiseResult naming/architecture
-  alias; do not invent a parallel RunOutcomeResponsePromiseResult class.
+- Latest required-header/persistence clarification supersedes the earlier pre-persistence
+  exception direction: invalid/missing client identity or completed ETag selects an actual
+  BAD_REQUEST exchange, which is persisted and returned without materialization. NAK remains
+  the IPC request-persistence policy, not its HTTP outcome. The response is not an accepted
+  domain result. Genuine storage/projection/reference-verification failures still resolve
+  (None, BackendStoreException). No fabricated IDs, guessed references or silent fallback;
+  retain existing ResponseRecordPromiseResult, not a parallel result class.
 - /failed and /cancelled still support legitimately absent commit/validation records;
   present-but-inconsistent references are errors. Cancellation does not require accepted
   validation or the completed ETag. Preserve the separately approved domain200/409 and
   evidence-capture500 behavior except where these explicit identity/linkage checks apply.
-  If a genuinely missing session at early cancellation requires a new policy, obtain approval
-  rather than fabricating an ID or silently rejecting previously supported cancellation.
+  Missing session data must remain honestly missing in the persisted record. The latest
+  operator clarification below removes the proposed permission gate on persistence; no
+  fabricated ID or omission of an invalid/partial outcome from the log.
 - Retain NAK for outcome request persistence; required outcome response persistence precedes
   successful completion. Server gate/client-timeout tolerance and Dashboard one-pull503=>failed
   behavior stay unchanged. No extra pull/query, retry or automatic outcome reclassification.
 
-The exact link check uses the existing models and Locale definition; surrounding Store
-promise/error handling converts the raised exception to (None, exc):
+The earlier approved link check below pins the inconsistency condition, not a surviving
+pre-persistence raise. Under the latest clarification, response selection records an error
+exchange first; full DB-reference verification follows append/fsync. Storage/projection
+errors use (None, exc), while recorded client rejection is an actual error response:
 
 ```python
 commit = store.current_commit_record
@@ -1288,8 +1417,450 @@ Update affected direct callpoints and run Ruff/strict mypy. No source-string ass
 mocked replacement of the tested persistence boundary, skipped prerequisites or network calls.
 
 P30 supersedes only the earlier API-global current-record ownership, historical outcome/root
-selection and commit-centric innerdict metadata instructions. Remaining P25-P29 work and
-unresolved operator acceptance boundaries remain pending as recorded elsewhere.
+selection and commit-centric innerdict metadata instructions. P25–P29 are complete. Unresolved operator acceptance boundaries remain separate, with
+P31 unapproved/deferred as recorded below.
+
+### P30 clarification — persistence is independent of application validity
+
+Latest operator instruction (supersedes the prior missing-session question/proposal):
+
+> persistence of run outcome should in no way depend on its validity. it should persist
+> in log at all times. this also goes for pull an push and validate and commit. they must
+> be persist whenever at all possible. so we must never gate the persistence.
+
+Further explicit clarification: clients MUST submit both NameKey and Session-ID. Missing,
+malformed or mismatched identity headers affect the actual Backend response, not durable
+capture. There is NO both-None identity acceptance exception. Resume P30 implementation
+under this rule; retain the actual error exchange and no fabricated identity. A completed
+outcome still additionally requires the validation ETag. The former persistence question
+is resolved, not a remaining approval prerequisite.
+
+The Assistant wrongly conflated domain acceptance/identity confirmation with eligibility
+for durable capture. Withdraw the proposed missing-session persistence exception and its
+approval request. No permission is needed to preserve an invalid/partial exchange; missing
+or mismatching session information is data/error to record, not justification to omit it.
+This does not mean accepting invalid input for derived output/materialization, inventing
+missing IDs or returning a successful domain result. No special both-None authentication
+exception was approved by this clarification; none is silently introduced.
+
+Pre-P30 gaps now corrected: IPC rejected wrong NameKey before Store; outcome DB reference
+verification preceded append; API Store inputs performed application validation before durable
+capture. Current code captures nullable parsed identity while retaining raw invalid headers/
+bodies, selects the actual error exchange, appends/fsyncs before reference verification, and
+validates available base HTTP envelopes before route-specific application. Commit/validate
+invalid-envelope regressions prove fsync precedes domain rejection. Structural impossibility
+or real append failure remains an error, never invented data or a false persistence ACK.
+
+Required interpretation for continuing the narrowly approved work:
+- Capture and append/fsync each available HTTP-log envelope independently of domain validity,
+  retaining the actual request, available data and failure/partial response where applicable.
+- Domain rejection may prevent accepted projection/materialization and may return the existing
+  error result, but must not prevent preserving the exchange whenever serialization/storage
+  permit it. An append/fsync failure remains a real failure, never a fabricated persistence ACK.
+- Preserve existing record contour: complete pull/push exchanges, synthetic commit/validate
+  records and complete outcome response exchange; no duplicate request-only outcome record.
+  Outcome request acknowledgment remains NAK; query remains read-only/unlogged.
+- Keep shared HTTP-log v1.1 schema unchanged; application validators must not be confused
+  with whether the actual available HTTP envelope can be durably serialized. No old schema,
+  fallback/recovery, fabricated commit/validation/session or unrelated redesign.
+- P30's existing identity/linkage/ETag checks still determine domain acceptance. Necessary
+  ordering/capture changes must preserve failure history before reporting those errors.
+  Add upstream checks for missing/mismatched identities and failed application validation:
+  assert actual durable log bytes/fsync/history, separately from error/materialization.
+
+P26–P30 are completed; the former persistence blocker is withdrawn,
+not implemented via a nullable-session acceptance exception. P31 remains unapproved/deferred.
+
+### P30 approved addition — initial-validation ancestry and typed validation inputs
+
+The proposed original_pull_record_id addition to CommitRequestBody/PushRequestRecord was
+NOT approved or implemented and is superseded by the operator's2026-09-20 direction below.
+Do not add that field. Existing retry baselines/audits use the initial pull UUID, but the
+operator instead supplies explicit ancestry through the first validation's commit/push/pull.
+
+Exact operator-provided model shape, including the subsequently approved nullable initial
+validation reference:
+
+```python
+@implements[BackendComponent.ValidationRequestBodyProperty]()
+class ValidationRequestBody(FrozenStrictModel):
+    commit_record: BackendCommitRecord
+    post_commit_validation: PostCommitValidation
+    initial_validation_record: BackendValidationRecord | None
+    openalex_ror_records: tuple[HttpRequestLogRecord, ...] = ()
+```
+
+Operator also directs moving submission_type into PostCommitValidation and post-commit
+validation-related definitions into validation_event.py. Store retains the FIRST validation
+record successfully persisted, projected and reconstructed from DB, never replacing it
+during that Backend lifecycle. This is distinct from current_validation_record, which advances.
+The shared live/replay application mechanism establishes it regardless of accepted/rejected
+domain result, not from a speculative validation. Later validations explicitly reference it;
+retry machinery can follow initial validation -> commit -> original push/pull without the
+Markdown/nearest-commit heuristic or an extra original-pull field on commits.
+
+Operator explicitly approved documenting this exact flow/scope/snippets and continuing
+implementation to completion, stopping only for an unexpected scope blocker.
+Operator explicitly confirmed the nullable type: BackendValidationRecord | None, with None
+ONLY on the first validation record. Keep this a required field with an explicitly supplied
+None, not a missing-field default, fabricated record or recursive self-reference. This settles
+the initial-record construction detail. Do not invent further unspecified changes to the
+shape. The full serialized submission remains captured alongside submission_type in
+PostCommitValidation, as included in the approved flow:
+
+```python
+@implements[BackendComponent.PostCommitValidationProperty]()
+class PostCommitValidation(FrozenStrictModel):
+    stage: BackendLifecycle
+    result: BackendLifecycle
+    detail: StrictStr | None = None
+    submission_type: Literal["Submission", "StandardizedSubmission"] | None
+    submission: dict[str, JsonValue] | None
+```
+
+Move the existing validation model/validators and their necessary imports from commit_event.py
+to validation_event.py. Update the existing component protocols and direct constructors/
+consumers/tests together; no old import aliases, old-body parser or discriminator inference.
+Typed commit/provider/initial-validation inputs must roundtrip through the current serialized
+validation body and be checked against Store-owned persisted records. Reuse the existing
+commit DTO serialization primitive for its HTTP envelope/pull/push/session; the initial
+validation's HTTP envelope carries its complete body. No extra original-pull field on commits,
+new record UUID or duplicate top-level replay entry. This is a self-contained typed validation
+body, not an invented request transport or a change to shared HTTP-log v1.1.
+
+Approved state rule, expressed with the existing Store model/readback convention:
+
+```python
+_initial_validation_record: BackendValidationRecord | None = PrivateAttr(default=None)
+
+@property
+def initial_validation_record(self) -> BackendValidationRecord | None:
+    return self._initial_validation_record
+
+# After successful common projection and typed DB readback:
+if self._initial_validation_record is None:
+    self._initial_validation_record = validation
+self._current_validation_record = validation
+```
+
+The first stored validation has initial_validation_record=None; later validation construction
+uses the retained initial instance. Failed projection must not leave an authoritative initial
+slot populated. Full Store protocol mirrors the accessor; query-only capability is unchanged.
+Explicit replay uses the serialized initial link/None boundary to reproduce each lifecycle;
+the first validation of the entire multi-lifecycle log is not every lifecycle's root. No
+nearest-record/session guessing. New live Backend lifetime starts with absent current/initial
+state; mere resume verification does not restore a previous lifetime's active state.
+
+Retry baseline/audit rules and stored pull UUIDs stay; replace heuristic root selection with
+the directly linked pull of initial_validation_record.commit_record (or the current commit's
+pull for the first validation). A rejected/configuration-error first validation still anchors
+the lifecycle; do not silently choose the first accepted/evidence-rejected validation instead.
+Necessary Store/API/DTO/protocol/query/fixture changes are part of this P30 addition, no P31
+harness behavior or ordinary task edits. Verify initial None, immutable initial vs advancing
+current state, failed projection, repeated pulls, live/replay multi-validation and lifecycle
+boundaries, exact serialized inputs and unchanged retry obligations/materialization.
+
+### P30 execution evidence and completion — 2026-09-20
+
+Store current-record getters/common projection/rollback restoration, API-global removal,
+IPC capture from Store, required-identity/ETag error responses, full outcome innerdict
+metadata and Dashboard single-pull ETag forwarding are wired. Invalid identities produce
+persisted BAD_REQUEST history and no materialization; query retains those raw histories
+without treating them as accepted session outcomes. Error-response handling is not a nullable
+identity acceptance exception. Explicit outcome links replace historical outcome scans.
+Retry ancestry now uses the approved initial-validation link; the former Markdown/nearest-commit
+heuristic is removed, with no new original-pull field on commits.
+
+Affected synthetic fixtures/assertions have been migrated to actual Store state/new metadata;
+no compatibility aliases. First focused batch stopped with8passed490deselected179.38s because
+an accidentally nested workflow lock deadlocked accepted push; corrected by capturing state
+under the existing lock and calling the separately locking response decision outside it,
+without an intervening await. This is failed development evidence, not a pass. First strict
+mypy check29errors then4errors were stale test callpoints/signatures plus one accidental
+probe return replacement; corrected. Fresh focused rerun77passed490deselected128.76s: all three outcomes x complete/partial
+capture x eight identity cases (matching, absent/malformed/wrong NameKey or Session-ID,
+absent Backend session); exact durable log/DB/readback, query and independent replay equality,
+no materialization for invalid identities. Includes API state/push/capture, Dashboard
+single-pull/cancellation and pure-card cases. Strict mypy PASS56files and Ruff PASS. A broader pre-addition batch stopped at386passed/1existing skip/104deselected/5failed303.23s:
+missed fixture/callpoint adaptations, not passes. Reused the initialized runtime fixture;
+updated typed current-slot response-policy unit fixtures and tuple-returning Dashboard
+finalizer doubles. Corrected/new capture selection42passed493deselected66.56s. The response-
+policy unit test injects current slots; it is not claimed as real persistence coverage.
+
+2026-09-20 initial-validation addition: moved PostCommitValidation to validation_event.py,
+including submission discriminator/payload; body holds the approved typed records, serializes
+through existing commit DTO and complete initial/provider HTTP envelopes, and checks these
+against persisted DB counterparts. Store exposes an immutable initial reference separately
+from latest; common projection/readback advances it only after a successful group. Explicit
+None roots preserve recorded lifecycle boundaries during replay. Removed the original-pull
+Markdown/nearest-commit heuristic; retry tables retain their actual pull UUID via the initial
+validation's exact commit link. No new commit wire field or compatibility alias. Updated
+necessary query/body/protocol/test callpoints; removed touched DTO's old discriminator guess.
+
+Initial migration mypy77errors (including a missed StrictStr import and prior request-body
+protocol annotation) corrected; intermediate mypy56files passed. Focused current validation/
+response-policy/provenance selection46passed273deselected18.49s. Broader five-module feasible
+regression completed491passed/1existing skip/104deselected/1failed397.37s. Includes all outcome
+identity/ETag/raw-history, live/replay, grouped push, retry/provider, initial-validation and
+pure-card checks. Sole failure: existing readiness-test response double lacked headers now
+read for ETag. Added its empty typed header map; unchanged assertion/timeout passed in the
+follow-up below. Do not represent the initial batch as wholly green.
+
+Follow-up7case selection:5passed/2failed25.88s. Passed readiness correction, two actual Store
+projection-failure cases and repeated multi-lifecycle replay; the two failures were incorrect
+new test exception expectations (ReplayInputMissing, not ValueError). Corrected only those
+expected exception classes; all3altered-initial/commit/provider-input cases then passed10.83s,
+proving the actual envelope remains logged while bad inputs neither advance initial/current
+state nor leave rejected projection rows. No weakened body/state/log assertions.
+Standalone real completed-query/browser-fixture preparation passed1test22.63s, without
+launching Chrome or sockets. The initial mypy snapshot-inference issue was fixed with an
+explicit snapshots list; final strict mypy PASS56files, full detour/shared-record Ruff PASS
+and diff whitespace PASS. Test batches overlap and are not an additive total.
+
+P30 is COMPLETE. Current active API/IPC globals/root-guessing paths are removed; specific
+protocols retain downstream @implements; enum/constants/Locale and explicit model construction
+remain wired; no casts, new suppressions, schema aliases/fallbacks or ordinary task/index edits.
+Historical fixture callpoints were updated for current outcome metadata but not executed or
+accessed. Main/shared HTTP schema, pasted models, server admission, renderer and P31 harness
+behavior are unchanged. P26–P30 are implemented in the approved order. Real provider/network,
+Chrome, privileged watcher and production pre-commit-operator acceptance were not rerun here;
+P31 remains explicitly unapproved/deferred, not an outstanding authorized implementation.
+
+## P31 — UNAPPROVED: exact test-harness correction proposal
+
+2026-09-20: operator requests concrete snippets because the previous description was too
+broad. P26–P30 are complete; this is the proposed replacement P31, NOT implementation
+authorization. Only WORK changed while preparing this proposal. Preserve the actual
+failure/recovered-artifact evidence above. No production, task, timeout, CSS, cleanup-policy,
+schema or ordinary-wrapper changes; no new harness service/module or compatibility path.
+
+Files: protected/tests/operator/test_operator_e2e.py and its existing preflight module;
+protected/tests/pytest_plugin.py only the completed-query fixture; existing
+tests/control_centre/test_ui_e2e.py. Necessary imports only. No new casts/suppressions.
+
+### 1. Strict current HTTP history and explicit links
+
+Add one private assertion helper in test_operator_e2e.py, called by the EXISTING artifact
+validator in place of its stale route-only assertion. Import BackendValidationRecord and
+VALIDATE_PATH from validation_event; import the unchanged pasted model module as
+submission_models for its authoritative endpoint constants; UUID from uuid.
+
+```python
+def _validate_workflow_http_records(
+    records: Sequence[HttpRequestLogRecord],
+) -> dict[UUID, BackendValidationRecord]:
+    by_id = {record.record_id: record for record in records}
+    assert len(by_id) == len(records), "Duplicate HTTP record UUID"
+    ordinal = {record.record_id: index for index, record in enumerate(records)}
+    validations: dict[UUID, BackendValidationRecord] = {}
+    provider_ids: set[UUID] = set()
+    provider_endpoints = {
+        (HTTP_GET_METHOD, submission_models.OPENALEX_SCHEME,
+         submission_models.OPENALEX_HOST, submission_models.OPENALEX_INSTITUTIONS_PATH),
+        (HTTP_GET_METHOD, submission_models.ROR_SCHEME,
+         submission_models.ROR_HOST, submission_models.ROR_ORGANIZATIONS_PATH),
+    }
+    for record in records:
+        if (record.method, record.path) != (HTTP_POST_METHOD, VALIDATE_PATH):
+            continue
+        validation = BackendValidationRecord.from_http_request_log_record(record)
+        validations[record.record_id] = validation
+        body = validation.validation_request_body
+        commit = body.commit_record
+        references: tuple[HttpRequestLogRecord, ...] = (
+            commit,
+            commit.commit_request_body.pull_record,
+            commit.commit_request_body.push_record,
+            *body.openalex_ror_records,
+        )
+        if body.initial_validation_record is not None:
+            references += (body.initial_validation_record,)
+        for linked in references:
+            assert linked.record_id in by_id, linked.record_id
+            assert linked.model_dump() == by_id[linked.record_id].model_dump(), linked.record_id
+            assert ordinal[linked.record_id] < ordinal[record.record_id], linked.record_id
+        for provider in body.openalex_ror_records:
+            parent, _, identifier = provider.path.rpartition("/")
+            assert identifier and (
+                provider.method, provider.scheme, provider.host, parent
+            ) in provider_endpoints, provider.record_id
+            provider_ids.add(provider.record_id)
+
+    local_routes = backend_api.AUTHORITATIVE_FASTAPI_ROUTES | {
+        backend_api.AUTHORITATIVE_COMMIT_ROUTE,
+        (HTTP_POST_METHOD, VALIDATE_PATH),
+        *((HTTP_POST_METHOD, path) for path in run_outcome_models.RUN_OUTCOME_PATHS),
+    }
+    unexpected = [
+        (record.record_id, record.method, record.host, record.path)
+        for record in records
+        if (record.method, record.path) not in local_routes
+        and record.record_id not in provider_ids
+    ]
+    assert not unexpected, unexpected
+    return validations
+```
+
+In validate_workflow_artifacts, replace only the route assertion with
+`validations = _validate_workflow_http_records(records)`. Existing schema/UUID, DB attempt,
+single accepted commit, CAS/hash/appendwatch and response checks remain. After constructing
+validated_run_outcome/run_outcome_snapshot, add the current-link assertions:
+
+```python
+assert run_outcome_snapshot.pull_record_id == commit_request_body.pull_record.record_id
+assert run_outcome_snapshot.push_record_id == commit_request_body.push_record.record_id
+assert run_outcome_snapshot.commit_record_id == commit_record.record_id
+assert run_outcome_snapshot.run_outcome_record_id == run_outcome_record.record_id
+assert run_outcome_snapshot.validation_record_id is not None
+assert run_outcome_snapshot.validation_record_id in validations
+validation = validations[run_outcome_snapshot.validation_record_id]
+assert validation.validation_request_body.commit_record == commit_record
+assert validation.validation_request_body.post_commit_validation.result is BackendLifecycle.ACCEPTED
+assert commit_ordinal < _record_ordinal(records, validation.record_id) < gone_pull_ordinal
+assert backend_api._http_header_value(
+    gone_pull.response_headers, ETAG_HEADER,
+) == f'"{validation.record_id}"'
+outcome_request = validated_run_outcome.run_outcome_request
+assert outcome_request.session_id == session.session_id
+if outcome_request.run_outcome is RunLifecycle.COMPLETED:
+    assert outcome_request.validation_record_id == validation.record_id
+```
+
+All these checks apply to this existing completed-workflow validator, not to general failed/
+cancelled histories. No accepted/rejected policy is changed. Provider responses need not be
+HTTP200: preserve failure responses too; eligibility here is endpoint plus exact persisted link.
+
+### 2. Capture actual ready card and inspect current outcome metadata
+
+Replace the footer selector/nonempty wait inside capture_completed_researcher_card only:
+
+```python
+card = page.get_by_test_id(control_ui.CARD_MARKDOWN_TEST_ID)
+expect(card).to_contain_text(commit_record_id)
+expect(page.get_by_test_id(control_ui.DOWNLOAD_CARD_DOCX_TEST_ID)).to_be_enabled()
+card_text = card.inner_text().strip()
+```
+
+Preserve its empty-card check, browser-error assertion, browser close/finally and timeouts.
+In validate_workflow_artifacts replace only its old commit-request-body card block:
+
+```python
+# Imports: lxml.html.fromstring and nicegui.elements.markdown.prepare_content.
+# Both dependencies are already installed/declared; existing pytest isolation precedes imports.
+if card_text is not None:
+    expected_html = prepare_content(
+        validated_run_outcome.model_dump_json(), extras="fenced-code-blocks tables",
+    )
+    expected_text = fromstring(expected_html).text_content().strip()
+    metadata_position = card_text.index(KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_RECORD_COL)
+    outcome_position = card_text.index(expected_text)
+    assert metadata_position < outcome_position
+```
+
+This requires the rendered counterpart of the FULL current serialized envelope, not merely
+three matching UUID strings. Browser inner_text is not raw Markdown: a read-only markdown2
+probe confirmed underscores in nested JSON keys can become emphasis, so direct raw-JSON
+substring comparison would be invalid. Use NiceGUI's existing converter/default extras and
+already-declared lxml only for HTML text extraction. This does not certify raw JSON survives
+HTML rendering byte-for-byte or alter/repair production rendering. Source Markdown/TXT remains
+unchanged. Use the existing Backend vars constant; no invented old fields or new dependency.
+
+### 3. Retained unique operator run directory
+
+Replace only the operator_runtime fixture (remove tmp_path argument and separate /tmp
+TemporaryDirectory). Existing _operator_runtime, child launch/cleanup and preservation guard stay:
+
+```python
+@pytest.fixture
+def operator_runtime(repository_root: Path) -> Iterator[OperatorRuntime]:
+    artifacts_root = repository_root / "tmp"
+    artifacts_root.mkdir(exist_ok=True)
+    run_dir = Path(tempfile.mkdtemp(prefix="operator-test.", dir=artifacts_root))
+    _operator_log(f"Operator run directory (preserved): {run_dir}")
+    dashboard_socket_path = run_dir / "dashboard.sock"
+    if len(os.fsencode(dashboard_socket_path)) >= DARWIN_AF_UNIX_PATH_CAPACITY_BYTES:
+        raise RuntimeError("operator dashboard socket path exceeds Darwin AF_UNIX capacity")
+    yield _operator_runtime(
+        run_dir,
+        repository_root=repository_root,
+        dashboard_socket_path=dashboard_socket_path,
+    )
+```
+
+Existing constructors already derive config/DB/replay/CAS/output and NiceGUI child storage
+from this run directory; source remains a symlink to the readonly source DB. Artifacts stay on
+success/failure. Expected host socket path88bytes fits existing104byte guard. No alternate
+system-temp location, global basetemp change, new cleanup or production storage access.
+
+### 4. Exact upstream coverage boundary and fixture additions
+
+Reuse completed_query_files and the shared named completed_query_fixture_process. The fixture
+already persists a real synthetic accepted commit/validation/outcome and CAS through Store,
+but omits the push Location header and final410. Add only the following before outcome:
+
+```python
+# Existing persisted_http_record(...) construction of the accepted push:
+response_headers={LOCATION_HEADER.lower(): PULL_PATH},
+
+# Immediately after the fixture's existing successful _validate_commit assertions:
+assert validated.submission is not None
+lines = [api.json_line(validated.submission.normalized_values())]
+if validated.ground_truth_innerdict is not None:
+    lines.append(api.json_line(api.select_columns(validated.ground_truth_innerdict.data)))
+store._append_authoritative_record(persisted_http_record(
+    record_id=uuid7(),
+    method=HTTP_GET_METHOD,
+    path=PULL_PATH,
+    response_code=HTTPStatus.GONE,
+    response_headers={
+        HTTP_CONTENT_TYPE_HEADER: ContentType.NDJSON_UTF8,
+        ETAG_HEADER: f'"{validated.validation_record.record_id}"',
+    },
+    response_body="".join(lines),
+))
+```
+
+Use existing fixture helpers/constants (necessary local imports); no provider network call,
+live Codex, inline subprocess script or mocked persistence. Existing repin/storage setup stays.
+
+- Preflight: reuse existing completed_query_files/startup_files fixtures by import; construct
+  OperatorRuntime exactly as the existing browser test does from its closed query-only
+  Store engine/config/replay/CAS. Call real validate_workflow_artifacts with STARTUP_NAMEKEY
+  and completed path. This is a nonbrowser python_subprocess-marked test. No Store mock.
+- Parameterized cheap tests call the NEW assertion helper with real typed synthetic records:
+  no providers, linked OpenAlex/ROR, later validation linked to initial; reject unknown route,
+  unreferenced provider, missing/changed provider, wrong provider endpoint, missing/changed
+  embedded commit/pull/push/initial, reversed reference order and duplicate UUID. These test
+  the actual helper used by the full validator, not source strings or a replacement parser.
+- Card: in existing test_completed_grid_row_uses_real_query_ipc, after its current Playwright
+  context closes but before running_dashboard exits, call the ACTUAL existing capture helper:
+
+```python
+card_text = operator.capture_completed_researcher_card(
+    dashboard, runtime, namekey=ui_tests.STARTUP_NAMEKEY,
+    queued_at_monotonic=time.monotonic(),
+)
+operator.validate_workflow_artifacts(
+    runtime, namekey=ui_tests.STARTUP_NAMEKEY,
+    expected_run_outcome_path=RunLifecycle.COMPLETED.to_run_outcome_path(),
+    card_text=card_text,
+)
+```
+
+  Split that test's combined Dashboard/Playwright `with` into nesting solely to place these
+  calls after Playwright closes. Keep all current assertions (including one-query assertion
+  before this separate capture's own explicit Query), startup inputs, Chrome and timeouts.
+  Existing post-test source/log/DB-byte preservation checks remain. No nested sync_playwright.
+- Directory: exercise the real fixture using an isolated synthetic repository/config and
+  existing startup fixture; two invocations must allocate distinct repo/tmp children, retain
+  them after generator close, and contain config/DB/replay/CAS/output/storage/socket paths.
+  Existing source remains readonly; path-length failure remains explicit. No new production
+  data dependency and no source-string test.
+
+Feasible preflight/record/fixture tests and Ruff/mypy first. Host Chrome is the only new
+delegated boundary for this proposal; prepare it in elevate only AFTER approval/local checks.
+No fresh privileged/provider/live-Codex run is needed for these test-only edits. P31 remains
+UNAPPROVED; no implementation or acceptance pass is claimed.
 
 ## Completed scope index
 
@@ -1323,7 +1894,7 @@ unresolved operator acceptance boundaries remain pending as recorded elsewhere.
 
 All P1-P24 code changes are implemented (P22 superseded by P24); this is not production
 acceptance or fresh P25 verification. No additional pending historical implementation is
-revived. P25 is implemented; current pending implementation is its narrow P26-P30 additions. F7 remains an unresolved report,
+revived. P25 is implemented; no approved implementation remains pending; P26–P30 are complete, P31 unapproved/deferred. F7 remains an unresolved report,
 not a proven task defect to patch speculatively.
 
 ## Retained contracts — baseline and P25 boundaries
@@ -1379,8 +1950,9 @@ not a proven task defect to patch speculatively.
 - /commit and /validate remain synthetic request-only HTTP records with null response
   fields. Typed BackendValidationRecord/body stay; P28 explicitly renames the outcome model
   to RunOutcomeResponseRecord without changing its wire shape. Validation
-  contains commit ID, serialized PostCommitValidation and submission/discriminator, provider
-  UUIDs. Unchanged pasted model performs intercepted validation using persisted DB-readback
+  now contains typed commit/initial-validation/provider records and PostCommitValidation
+  with submission/discriminator, following the approved P30 addition rather than the prior
+  commit-ID/provider-ID-only body. Unchanged pasted model performs intercepted validation using persisted DB-readback
   responses; no replay provider calls or swallowed replay inconsistency.
 - P24 baseline: accepted output rows initially have null validation/outcome IDs; /pull410
   uses durably persisted accepted validation/submission, not final innerdicts. Only matching
@@ -1469,9 +2041,9 @@ Additional baseline evidence:
   Baseline aicode/staging (ef5ddef), not dc951fe. Staging source with current dependencies
   reproduces92-column wrap but does not establish historical failure; operator reports passes.
 
-## Last full operator findings — corrections separate from P25; acceptance pending
+## Previous full operator findings (2026-09-18) — corrections implemented
 
-Latest reviewed pre-commit-operator run:2026-09-18 15:37:17–15:46:13(-04),
+Historical reviewed pre-commit-operator run:2026-09-18 15:37:17–15:46:13(-04),
 logs/from_operator/pre-commit.log and pre-commit-extra.log. Full acceptance FAILED.
 Operator explicitly requested findings independent of pending P26-P30; those approved items
 remain unchanged/unimplemented. The initial review changed WORK only; correction1 was
@@ -1683,7 +2255,7 @@ ELIGIBLE_WEB_ACTIONS = frozenset({
      import in new tests; corrected to separate assertions/direct import, no casts/ignores.
    - No network/browser/root/live-Codex acceptance run. Current correction is complete, not
      a full pre-commit-operator acceptance claim. Corrections2 and4–7 are implemented and locally verified; targeted delegated verification passed; full operator acceptance remains pending;
-     correction3's authorized deletion is complete. P26–P30 remain separately approved/pending.
+     correction3's authorized deletion is complete. P26–P30 are now complete; P31 remains unapproved/deferred.
 
 2. **IMPLEMENTED — Correct the five stale IPC test callpoints**
 
@@ -1872,8 +2444,8 @@ F7 report, documented main-pipeline XPASS. Mode0 dependency deprecations are out
 isolated detour scope: no main-pipeline/other-detour/environment/lockfile changes. Existing
 ordinary-wrapper status/grep restructuring remains rejected; no pyproject task edit proposed.
 The previously skipped provider leaf now passes in elevate, without changing && or tasks.
-The later missing-socket patch was approved and verified but is no longer present;
-the follow-up proposal/discussion is recorded at the top.
+The later missing-socket patch was rolled back; operator elected to keep existing
+readiness polling/diagnostics. No follow-up logging implementation is pending.
 
 **Pre-handoff verification for approved corrections:** reproduce regressions before each fix; run all
 feasible normal-suite leaves including operator preflight, changed API/index/replay and UI/
@@ -1882,12 +2454,10 @@ only necessary delegated host-Chrome/layout/cleanup and previously blocked real-
 checks in elevate, with machine checks, safe logging and preserved failure status/FAILED grep.
 No password capture or SSH verbosity, no altered browser, no repeated root tests unless the
 new diff touches their boundary. Full pre-commit-operator/live Codex only after those checks.
-P26-P30 remain pending and outside these corrections. Operator now explicitly requires a
-failure-free full pre-commit-operator run BEFORE starting P26: no failed test/check, hang,
-operator interruption or silently unreached leaf may be reported as acceptance. Review each
-leaf rather than unchanged wrapper status/grep quirks; retain existing intentional skips/
-xfails and inspect warnings, waits, cleanup and preservation evidence. Correction1's local
-passes do not satisfy this gate. Corrections2 and4–7 are implemented and locally verified; targeted delegated verification passed; full operator acceptance remains pending; correction3's
+These corrections are separate from P26–P30. The operator subsequently lifted the full
+pre-commit-operator prerequisite for implementing P26–P30 and deferred new harness issues
+to unapproved P31. Full acceptance still requires reviewing every actual leaf, intentional
+skip/xfail, warning, wait, cleanup and preservation result; it is not claimed here. Corrections2 and4–7 are implemented and locally verified; targeted delegated verification passed; full operator acceptance remains pending; correction3's
 authorized deletion is complete. New defects or scope deviations still need a narrow
 proposal/approval rather than broadening implementation silently.
 
@@ -2059,7 +2629,7 @@ Chrome placement/root credentials are resolved; the subsequent full run exposed
 independent findings, including cheap preflight cases missed before handoff. Those corrections
 are now implemented and targeted checks pass; fresh full acceptance remains pending.
 That earlier review required no further batch. The completed post-correction elevate batch
-is recorded at the top; P26-P30 remain separate pending work.
+is recorded at the top; current P26–P30 statuses are recorded separately above.
 
 Rejected changes MUST NOT return: root preload-before-drop, synthetic DuckDB config/binary
 that conceals prerequisites, substituted-query browser test, raised launcher timeout,
@@ -2136,9 +2706,11 @@ pixi run -e detour-ai-augment env mypy --config-file src/detours/detour_ai_augme
   update_pull_state, plus the approved P26 typed-construction/content-type, P27 literal-audit,
   P28 protocol-ownership/inheritance, P29 original-pull-ID rename and P30 Store-owned
   current-record/session/outcome-metadata/linkage additions.
-  Current priority is verification of the now-implemented operator-log corrections2–7
-  above; item3 was limited to deleting elevate-triggering tests. Do not start P26 until the full
-  pre-commit-operator acceptance gate is met. No unrelated audit, DTO-default removal or
+  Current state: P26–P30 complete in order, including P30's explicit
+  persistence-first clarification and initial-validation addition. The prior missing-session persistence question is withdrawn.
+  Operator explicitly lifted the earlier full-acceptance gate. Harness/artifact-directory
+  corrections are P31, UNAPPROVED and deferred. Earlier corrections2–7 are implemented;
+  item3 deleted elevate-triggering tests. No unrelated audit, DTO-default removal or
   card-format tightening.
 - Operator forbids cast: changes must use genuinely compatible types, not cast or substitute
   type suppressions. No unrelated codebase-wide refactor. Store persistence and pull-state
