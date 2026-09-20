@@ -19,14 +19,20 @@ from pathlib import Path, PurePosixPath
 from typing import Any, TextIO, cast
 from urllib import error as urllib_error
 from urllib import request as urllib_request
+from uuid import UUID
 
 import psutil
 import pytest
 from fastapi import status
+from lxml.html import fromstring
+from nicegui.elements.markdown import prepare_content
 from playwright.sync_api import Locator, Page, ViewportSize, expect, sync_playwright
 from pydantic import BaseModel, ConfigDict, field_validator
 
 from src.detours.detour_ai_augment.protected.src.backend import ipc as backend_ipc
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models import (
+    pydantic_to_paste as submission_models,
+)
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_augment_config import (  # noqa: E501
     AiAugmentDetourConfig,
 )
@@ -35,9 +41,12 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_
     RESOURCE_SHA256_KEY,
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
+    ETAG_HEADER,
     HTTP_GET_METHOD,
     HTTP_POST_METHOD,
+    KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_RECORD_COL,
     PULL_PATH,
+    PUSH_PATH,
     REPLAY_LOG_KEY,
     AiAugmentCohort,
 )
@@ -70,6 +79,7 @@ from src.detours.detour_ai_augment.src.backend.helpers.data_models.run_outcome_r
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.validation_event import (
     VALIDATE_PATH,
+    BackendValidationRecord,
 )
 from src.detours.detour_ai_augment.src.control_centre.dashboard import ui as control_ui
 from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models import (
@@ -475,19 +485,19 @@ def _operator_runtime(
 
 
 @pytest.fixture
-def operator_runtime(
-    tmp_path: Path,
-    repository_root: Path,
-) -> Iterator[OperatorRuntime]:
-    with tempfile.TemporaryDirectory(prefix="detour-operator-", dir="/tmp") as directory:
-        dashboard_socket_path = Path(directory) / "dashboard.sock"
-        if len(os.fsencode(dashboard_socket_path)) >= DARWIN_AF_UNIX_PATH_CAPACITY_BYTES:
-            raise RuntimeError("operator dashboard socket path exceeds Darwin AF_UNIX capacity")
-        yield _operator_runtime(
-            tmp_path,
-            repository_root=repository_root,
-            dashboard_socket_path=dashboard_socket_path,
-        )
+def operator_runtime(repository_root: Path) -> Iterator[OperatorRuntime]:
+    artifacts_root = repository_root / "tmp"
+    artifacts_root.mkdir(exist_ok=True)
+    run_dir = Path(tempfile.mkdtemp(prefix="operator-test.", dir=artifacts_root))
+    _operator_log(f"Operator run directory (preserved): {run_dir}")
+    dashboard_socket_path = run_dir / "dashboard.sock"
+    if len(os.fsencode(dashboard_socket_path)) >= DARWIN_AF_UNIX_PATH_CAPACITY_BYTES:
+        raise RuntimeError("operator dashboard socket path exceeds Darwin AF_UNIX capacity")
+    yield _operator_runtime(
+        run_dir,
+        repository_root=repository_root,
+        dashboard_socket_path=dashboard_socket_path,
+    )
 
 
 def _collect_output(stream: TextIO, output: list[str]) -> None:
@@ -902,8 +912,9 @@ def capture_completed_researcher_card(
             view_card = page.get_by_test_id(control_ui.VIEW_CARD_TEST_ID)
             expect(view_card).to_be_enabled()
             view_card.click()
-            card = page.get_by_test_id(control_ui.PAGE_FOOTER_TEST_ID)
-            expect(card).not_to_have_text("")
+            card = page.get_by_test_id(control_ui.CARD_MARKDOWN_TEST_ID)
+            expect(card).to_contain_text(commit_record_id)
+            expect(page.get_by_test_id(control_ui.DOWNLOAD_CARD_DOCX_TEST_ID)).to_be_enabled()
             card_text = card.inner_text().strip()
             if not card_text:
                 raise RuntimeError("Playwright captured an empty researcher card")
@@ -988,6 +999,61 @@ def test_existing_aivm_exposes_the_persisted_appendwatch_topology(
     _assert_deployed_appendwatch_topology(operator_runtime)
 
 
+def _validate_workflow_http_records(
+    records: Sequence[HttpRequestLogRecord],
+) -> dict[UUID, BackendValidationRecord]:
+    by_id = {record.record_id: record for record in records}
+    assert len(by_id) == len(records), "Duplicate HTTP record UUID"
+    ordinal = {record.record_id: index for index, record in enumerate(records)}
+    validations: dict[UUID, BackendValidationRecord] = {}
+    provider_ids: set[UUID] = set()
+    provider_endpoints = {
+        (HTTP_GET_METHOD, submission_models.OPENALEX_SCHEME,
+         submission_models.OPENALEX_HOST, submission_models.OPENALEX_INSTITUTIONS_PATH),
+        (HTTP_GET_METHOD, submission_models.ROR_SCHEME,
+         submission_models.ROR_HOST, submission_models.ROR_ORGANIZATIONS_PATH),
+    }
+    for record in records:
+        if (record.method, record.path) != (HTTP_POST_METHOD, VALIDATE_PATH):
+            continue
+        validation = BackendValidationRecord.from_http_request_log_record(record)
+        validations[record.record_id] = validation
+        body = validation.validation_request_body
+        commit = body.commit_record
+        references: tuple[HttpRequestLogRecord, ...] = (
+            commit,
+            commit.commit_request_body.pull_record,
+            commit.commit_request_body.push_record,
+            *body.openalex_ror_records,
+        )
+        if body.initial_validation_record is not None:
+            references += (body.initial_validation_record,)
+        for linked in references:
+            assert linked.record_id in by_id, linked.record_id
+            assert linked.model_dump() == by_id[linked.record_id].model_dump(), linked.record_id
+            assert ordinal[linked.record_id] < ordinal[record.record_id], linked.record_id
+        for provider in body.openalex_ror_records:
+            parent, _, identifier = provider.path.rpartition("/")
+            assert identifier and (
+                provider.method, provider.scheme, provider.host, parent
+            ) in provider_endpoints, provider.record_id
+            provider_ids.add(provider.record_id)
+
+    local_routes = backend_api.AUTHORITATIVE_FASTAPI_ROUTES | {
+        backend_api.AUTHORITATIVE_COMMIT_ROUTE,
+        (HTTP_POST_METHOD, VALIDATE_PATH),
+        *((HTTP_POST_METHOD, path) for path in run_outcome_models.RUN_OUTCOME_PATHS),
+    }
+    unexpected = [
+        (record.record_id, record.method, record.host, record.path)
+        for record in records
+        if (record.method, record.path) not in local_routes
+        and record.record_id not in provider_ids
+    ]
+    assert not unexpected, unexpected
+    return validations
+
+
 def validate_workflow_artifacts(
     operator_runtime: OperatorRuntime,
     *,
@@ -1001,14 +1067,7 @@ def validate_workflow_artifacts(
 
     assert all(record.schema_version == "1.1" for record in records)
     assert all(record.record_id.version == 7 for record in records)
-    assert {
-        (record.method, record.path) for record in records
-    } <= backend_api.AUTHORITATIVE_FASTAPI_ROUTES | {
-        (HTTP_POST_METHOD, path)
-        for path in run_outcome_models.RUN_OUTCOME_PATHS
-    } | {
-        backend_api.AUTHORITATIVE_COMMIT_ROUTE
-    }
+    validations = _validate_workflow_http_records(records)
 
     gone_pull = next(
         record
@@ -1115,6 +1174,36 @@ def validate_workflow_artifacts(
         run_outcome_record
     )
     run_outcome_snapshot = validated_run_outcome.run_outcome_response_body
+    outcome_ordinal = _record_ordinal(records, run_outcome_record.record_id)
+    preceding_records = records[:outcome_ordinal]
+    latest_pull = next(
+        record for record in reversed(preceding_records)
+        if (record.method, record.path) == (HTTP_GET_METHOD, PULL_PATH)
+    )
+    latest_push = next(
+        record for record in reversed(preceding_records)
+        if (record.method, record.path) == (HTTP_POST_METHOD, PUSH_PATH)
+    )
+    assert run_outcome_snapshot.pull_record_id == latest_pull.record_id
+    assert run_outcome_snapshot.push_record_id == latest_push.record_id
+    assert run_outcome_snapshot.commit_record_id == commit_record.record_id
+    assert run_outcome_snapshot.run_outcome_record_id == run_outcome_record.record_id
+    assert run_outcome_snapshot.validation_record_id is not None
+    assert run_outcome_snapshot.validation_record_id in validations
+    validation = validations[run_outcome_snapshot.validation_record_id]
+    assert validation.validation_request_body.commit_record == commit_record
+    assert (
+        validation.validation_request_body.post_commit_validation.result
+        is BackendLifecycle.ACCEPTED
+    )
+    assert commit_ordinal < _record_ordinal(records, validation.record_id) < gone_pull_ordinal
+    assert backend_api._http_header_value(
+        gone_pull.response_headers, ETAG_HEADER,
+    ) == f'"{validation.record_id}"'
+    outcome_request = validated_run_outcome.run_outcome_request
+    assert outcome_request.session_id == session.session_id
+    if outcome_request.run_outcome is RunLifecycle.COMPLETED:
+        assert outcome_request.validation_record_id == validation.record_id
     run_outcome_session = run_outcome_snapshot.codex_session_record
     if run_outcome_record.response_code == status.HTTP_200_OK:
         assert run_outcome_session.session_id is not None
@@ -1148,10 +1237,13 @@ def validate_workflow_artifacts(
             PurePosixPath(run_outcome_filename),
         )
     if card_text is not None:
-        commit_record_id_position = card_text.index(str(commit_record.record_id))
-        assert commit_record.request_body is not None
-        commit_request_body_position = card_text.index(commit_record.request_body)
-        assert commit_record_id_position < commit_request_body_position
+        expected_html = prepare_content(
+            validated_run_outcome.model_dump_json(), extras="fenced-code-blocks tables",
+        )
+        expected_text = fromstring(expected_html).text_content().strip()
+        metadata_position = card_text.index(KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_RECORD_COL)
+        outcome_position = card_text.index(expected_text)
+        assert metadata_position < outcome_position
     _operator_log("full operator workflow contract validated")
 
 

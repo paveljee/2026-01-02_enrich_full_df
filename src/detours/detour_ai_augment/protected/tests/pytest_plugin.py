@@ -601,11 +601,16 @@ def completed_query_fixture_process() -> None:
 
     from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
         DOCX_COLUMNS,
+        ETAG_HEADER,
+        HTTP_CONTENT_TYPE_HEADER,
+        HTTP_GET_METHOD,
+        PULL_PATH,
         REPLAY_LOG_KEY,
         ContentType,
     )
     from src.detours.detour_ai_augment.protected.tests.pytest_plugin import threaded_loop_runner
     from src.detours.detour_ai_augment.src.backend import api, server
+    from src.detours.detour_ai_augment.src.backend.api import LOCATION_HEADER
     from src.detours.detour_ai_augment.src.backend.helpers.data_models.commit_event import (
         SOURCE_KEY_HEADER,
         BackendLifecycle,
@@ -716,6 +721,7 @@ def completed_query_fixture_process() -> None:
                 path="/push",
                 response_code=202,
                 request_body=json.dumps(payload),
+                response_headers={LOCATION_HEADER.lower(): PULL_PATH},
             )
         )
         draft = api._synthetic_commit_record(
@@ -733,6 +739,21 @@ def completed_query_fixture_process() -> None:
         assert validated.attempt.post_commit_validation.result is BackendLifecycle.ACCEPTED
         assert validated.validation_record is not None
         assert validated.http_records == ()  # Plain initial submission needs no provider requests.
+        assert validated.submission is not None
+        lines = [api.json_line(validated.submission.normalized_values())]
+        if validated.ground_truth_innerdict is not None:
+            lines.append(api.json_line(api.select_columns(validated.ground_truth_innerdict.data)))
+        gone_pull = store._append_authoritative_record(persisted_http_record(
+            record_id=uuid7(),
+            method=HTTP_GET_METHOD,
+            path=PULL_PATH,
+            response_code=HTTPStatus.GONE,
+            response_headers={
+                HTTP_CONTENT_TYPE_HEADER: ContentType.NDJSON_UTF8,
+                ETAG_HEADER: f'"{validated.validation_record.record_id}"',
+            },
+            response_body="".join(lines),
+        ))
         occurred_at = commit.record_id.time * 1000
         request = RunOutcomeRequest.from_http_request(
             received_at_unix_usec=occurred_at + 6, method="POST", scheme=SYNTHETIC_SCHEME,
@@ -750,7 +771,7 @@ def completed_query_fixture_process() -> None:
             response_code=HTTPStatus.OK,
             response_headers={SOURCE_KEY_HEADER: draft.request_headers[SOURCE_KEY_HEADER]},
             response_body=RunOutcomeResponseBody(
-                pull_record_id=pull.record_id,
+                pull_record_id=gone_pull.record_id,
                 push_record_id=push.record_id,
                 commit_record_id=commit.record_id,
                 validation_record_id=validated.validation_record.record_id,

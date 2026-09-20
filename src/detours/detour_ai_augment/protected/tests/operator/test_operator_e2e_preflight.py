@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import hashlib
 import inspect
 import json
 import os
 import subprocess
+import tempfile
 import threading
+from http import HTTPStatus
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import Mock
+from uuid import uuid7
 
 import pytest
 
@@ -22,7 +26,250 @@ from src.detours.detour_ai_augment.protected.tests.operator import (
     test_operator_e2e as workflow,
 )
 from src.detours.detour_ai_augment.src.backend import server as backend_server
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_backend_store import (
+    initialize_backend_store,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.commit_event import (
+    BackendLifecycle,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.validation_event import (
+    BackendValidationRecord,
+    PostCommitValidation,
+    ValidationRequestBody,
+)
 from src.detours.detour_ai_augment.src.control_centre.dashboard import ui as control_ui
+from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models import (
+    run_outcome,
+)
+from src.detours.detour_ai_augment.tests.backend import test_api as api_fixtures
+from src.detours.detour_ai_augment.tests.control_centre import test_ui as ui_tests
+from src.detours.detour_ai_augment.tests.control_centre import test_ui_e2e as browser_tests
+from src.helpers.data_models import HttpRequestLogRecord
+
+startup_files = browser_tests.startup_files
+completed_query_files = browser_tests.completed_query_files
+
+
+@pytest.mark.python_subprocess
+def test_operator_artifact_validator_accepts_completed_store_history(
+    completed_query_files: ui_tests.StartupFiles,
+    pytestconfig: pytest.Config,
+) -> None:
+    files = completed_query_files
+    with initialize_backend_store(
+        backend_server.configure_runtime(files.config, require_namekey=False),
+        ipc_only=True,
+    ) as query_store:
+        fixture_store = query_store._engine
+    runtime = workflow.OperatorRuntime(
+        repository_root=pytestconfig.rootpath,
+        config_path=files.config,
+        backend_store=fixture_store,
+        replay_log_path=files.replay,
+        rollout_cas_dir=files.config.parent / "cas",
+        dashboard_socket_path=files.config.parent / "dashboard.sock",
+    )
+    workflow.validate_workflow_artifacts(
+        runtime,
+        namekey=ui_tests.STARTUP_NAMEKEY,
+        expected_run_outcome_path=run_outcome.RunLifecycle.COMPLETED.to_run_outcome_path(),
+    )
+
+
+def _workflow_http_records(
+    *,
+    provider_targets: tuple[tuple[str, str], ...],
+    provider_status: HTTPStatus = HTTPStatus.OK,
+    with_initial: bool = True,
+) -> tuple[HttpRequestLogRecord, ...]:
+    session_id = uuid7()
+    records: list[HttpRequestLogRecord] = []
+    initial: BackendValidationRecord | None = None
+    for index in range(2 if with_initial else 1):
+        pull, commit = api_fixtures.retry_attempt_records(
+            original_pull_record_id=uuid7(), session_id=session_id,
+            attempt_id=f"operator-history-{index}",
+        )
+        providers = tuple(
+            HttpRequestLogRecord(
+                schema_version="1.1", record_id=uuid7(), method="GET", scheme="https",
+                host=host, port=None, path=path, query="", request_headers={},
+                request_body=None, response_code=provider_status, response_headers={},
+                response_body='{"provider": "fixture"}', received_at_unix_usec=1,
+                ready_to_respond_at_unix_usec=2, duration_usec=1,
+            )
+            for host, path in provider_targets
+            if not with_initial or index == 1
+        )
+        validation = ValidationRequestBody(
+            commit_record=commit,
+            post_commit_validation=PostCommitValidation(
+                stage=BackendLifecycle.PYDANTIC_VALIDATION,
+                result=BackendLifecycle.REJECTED,
+                detail="synthetic model rejection",
+                submission_type=None,
+                submission=None,
+            ),
+            initial_validation_record=initial,
+            openalex_ror_records=providers,
+        ).http_record()
+        records.extend((pull, commit.commit_request_body.push_record, commit,
+                        *providers, validation))
+        if initial is None:
+            initial = validation
+    return tuple(records)
+
+
+@pytest.mark.parametrize("provider_targets", (
+    (),
+    (("api.openalex.org", "/institutions/I97018004"),),
+    (("api.ror.org", "/v2/organizations/00f54p054"),),
+    (("api.openalex.org", "/institutions/I97018004"),
+     ("api.ror.org", "/v2/organizations/00f54p054")),
+))
+@pytest.mark.parametrize("provider_status", (HTTPStatus.OK, HTTPStatus.NOT_FOUND))
+@pytest.mark.parametrize("with_initial", (False, True))
+def test_operator_http_history_accepts_only_linked_current_records(
+    provider_targets: tuple[tuple[str, str], ...], provider_status: HTTPStatus,
+    with_initial: bool,
+) -> None:
+    records = _workflow_http_records(
+        provider_targets=provider_targets, provider_status=provider_status,
+        with_initial=with_initial,
+    )
+    validations = workflow._validate_workflow_http_records(records)
+    assert len(validations) == (2 if with_initial else 1)
+    assert validations[records[-1].record_id].model_dump() == records[-1].model_dump()
+
+
+@pytest.mark.parametrize("mutation, target", (
+    ("unknown-route", ""),
+    ("unreferenced-provider", ""),
+    ("wrong-endpoint", ""),
+    ("duplicate", ""),
+    *((mutation, target)
+      for mutation in ("missing", "changed", "after-validation")
+      for target in ("provider", "commit", "pull", "push", "initial")),
+))
+def test_operator_http_history_rejects_corrupt_or_unreferenced_records(
+    mutation: str, target: str,
+) -> None:
+    records = list(_workflow_http_records(
+        provider_targets=(("api.openalex.org", "/institutions/I97018004"),),
+    ))
+    validation = BackendValidationRecord.from_http_request_log_record(records[-1])
+    body = validation.validation_request_body
+    assert body.initial_validation_record is not None
+    provider = body.openalex_ror_records[0]
+    if mutation == "unknown-route":
+        records.append(api_fixtures.persisted_http_record(
+            record_id=uuid7(), method="GET", path="/unexpected",
+            response_code=HTTPStatus.OK,
+        ))
+    elif mutation == "unreferenced-provider":
+        records.append(provider.model_copy(update={"record_id": uuid7()}))
+    elif mutation == "wrong-endpoint":
+        changed = provider.model_copy(update={"host": "unapproved.invalid"})
+        records[records.index(provider)] = changed
+        changed_body = body.model_copy(update={"openalex_ror_records": (changed,)})
+        records[-1] = validation.model_copy(update={
+            "request_body": changed_body.model_dump_json(),
+            "validation_request_body": changed_body,
+        })
+    elif mutation == "duplicate":
+        records.append(records[0])
+    else:
+        linked = {
+            "provider": provider,
+            "commit": body.commit_record,
+            "pull": body.commit_record.commit_request_body.pull_record,
+            "push": body.commit_record.commit_request_body.push_record,
+            "initial": body.initial_validation_record,
+        }[target]
+        position = next(
+            index for index, record in enumerate(records) if record.record_id == linked.record_id
+        )
+        if mutation == "missing":
+            records.pop(position)
+        elif mutation == "after-validation":
+            records.append(records.pop(position))
+        else:
+            assert mutation == "changed"
+            if target == "initial":
+                initial = body.initial_validation_record
+                initial_body = initial.validation_request_body
+                changed_body = initial_body.model_copy(update={
+                    "post_commit_validation": initial_body.post_commit_validation.model_copy(
+                        update={"detail": "changed persisted validation"},
+                    ),
+                })
+                records[position] = initial.model_copy(update={
+                    "request_body": changed_body.model_dump_json(),
+                    "validation_request_body": changed_body,
+                })
+            else:
+                records[position] = linked.model_copy(update={"query": "changed=1"})
+    with pytest.raises(AssertionError):
+        workflow._validate_workflow_http_records(records)
+
+
+def test_operator_run_directories_are_unique_retained_and_contained(
+    startup_files: ui_tests.StartupFiles, pytestconfig: pytest.Config,
+) -> None:
+    files = startup_files
+    source_before = hashlib.sha256(files.source.read_bytes()).hexdigest()
+    assert files.source.stat().st_mode & 0o222 == 0
+    artifacts_root = pytestconfig.rootpath / "tmp"
+    artifacts_root.mkdir(exist_ok=True)
+    # Short test-repository prefix preserves the real Darwin socket-path limit.
+    with tempfile.TemporaryDirectory(prefix="p.", dir=artifacts_root) as directory:
+        repository = Path(directory)
+        (repository / "config_ai_augment.json").write_bytes(files.config.read_bytes())
+        run_dirs: list[Path] = []
+        for _ in range(2):
+            fixture = inspect.unwrap(workflow.operator_runtime)(repository_root=repository)
+            runtime = next(fixture)
+            run_dir = runtime.config_path.parent
+            run_dirs.append(run_dir)
+            assert run_dir.parent == repository / "tmp"
+            assert run_dir.name.startswith("operator-test.")
+            assert (
+                len(os.fsencode(runtime.dashboard_socket_path))
+                < workflow.DARWIN_AF_UNIX_PATH_CAPACITY_BYTES
+            )
+            config = json.loads(runtime.config_path.read_text())
+            for path in (
+                runtime.config_path, runtime.replay_log_path, runtime.rollout_cas_dir,
+                runtime.dashboard_socket_path, runtime.backend_store._detour_db_path,
+                Path(config["db_file"]), Path(config["state_file"]),
+                Path(config["output_dir"]), run_dir / "nicegui",
+            ):
+                assert path.is_relative_to(run_dir), path
+            source_link = Path(config["db_file"])
+            assert source_link.is_symlink()
+            assert source_link.resolve() == files.source.resolve()
+            retained = (runtime.config_path, runtime.replay_log_path,
+                        runtime.backend_store._detour_db_path)
+            before_close = {path: path.read_bytes() for path in retained}
+            with pytest.raises(StopIteration):
+                next(fixture)
+            assert run_dir.is_dir()
+            assert {path: path.read_bytes() for path in retained} == before_close
+        assert run_dirs[0] != run_dirs[1]
+        assert all(path.is_dir() for path in run_dirs)
+    assert hashlib.sha256(files.source.read_bytes()).hexdigest() == source_before
+    assert files.source.stat().st_mode & 0o222 == 0
+
+
+def test_operator_run_directory_rejects_overlong_socket_path(tmp_path: Path) -> None:
+    repository = tmp_path / ("long-checkout-" * 9)
+    repository.mkdir()
+    fixture = inspect.unwrap(workflow.operator_runtime)(repository_root=repository)
+    with pytest.raises(RuntimeError, match="exceeds Darwin AF_UNIX capacity"):
+        next(fixture)
+    run_dirs = tuple((repository / "tmp").iterdir())
+    assert len(run_dirs) == 1 and run_dirs[0].is_dir()
+    assert not (run_dirs[0] / "config.operator.json").exists()
 
 
 @pytest.mark.python_subprocess

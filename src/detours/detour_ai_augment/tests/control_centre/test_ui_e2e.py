@@ -193,60 +193,72 @@ def test_completed_grid_row_uses_real_query_ipc(
             rollout_cas_dir=files.config.parent / "cas",
             dashboard_socket_path=Path(directory) / "dashboard.sock",
         )
-        with operator.running_dashboard(runtime) as dashboard, sync_playwright() as playwright:
-            browser = launch_e2e_browser(playwright, pytestconfig)
-            try:
-                page = browser.new_page(viewport=E2E_WIDE_VIEWPORT)
-                page.set_default_timeout(operator.BROWSER_ASSERTION_TIMEOUT_MILLISECONDS)
-                errors: list[str] = []
-                page.on("pageerror", lambda error: errors.append(str(error)))
-                page.on("console", lambda message: (
-                    print(f"[query-browser] {message.type}: {message.text}", flush=True)
-                    if message.type in {"warning", "error"} else None
-                ))
-                page.goto(operator.CONTROL_CENTRE_URL, wait_until="networkidle")
-                page.get_by_label(Locale.SEARCH_FILTER).fill(expected["namekey"])
-                rows = page.get_by_test_id(control_ui.RESEARCHER_GRID_TEST_ID).locator(
-                    GRID_ROW_SELECTOR,
-                )
+        with operator.running_dashboard(runtime) as dashboard:
+            with sync_playwright() as playwright:
+                browser = launch_e2e_browser(playwright, pytestconfig)
                 try:
-                    expect(rows).to_have_count(1)
-                except AssertionError as exc:
+                    page = browser.new_page(viewport=E2E_WIDE_VIEWPORT)
+                    page.set_default_timeout(operator.BROWSER_ASSERTION_TIMEOUT_MILLISECONDS)
+                    errors: list[str] = []
+                    page.on("pageerror", lambda error: errors.append(str(error)))
+                    page.on("console", lambda message: (
+                        print(f"[query-browser] {message.type}: {message.text}", flush=True)
+                        if message.type in {"warning", "error"} else None
+                    ))
+                    page.goto(operator.CONTROL_CENTRE_URL, wait_until="networkidle")
+                    page.get_by_label(Locale.SEARCH_FILTER).fill(expected["namekey"])
+                    rows = page.get_by_test_id(control_ui.RESEARCHER_GRID_TEST_ID).locator(
+                        GRID_ROW_SELECTOR,
+                    )
                     try:
-                        search_value = page.get_by_label(Locale.SEARCH_FILTER).input_value()
-                        exc.add_note(
-                            f"Search input: {search_value!r}; page errors: {errors!r}; "
-                            f"rendered rows: {rows.all_text_contents()!r}\n"
-                            + "".join(dashboard.output)
-                        )
-                    except Exception as diagnostic_error:
-                        exc.add_note(f"Browser failure diagnostics failed: {diagnostic_error!r}")
-                    raise
-                rows.first.click()
-                execute = page.get_by_test_id(control_ui.EXECUTE_ACTION_TEST_ID)
-                expect(execute).to_have_text(
-                    control_ui.ACTION_LABEL_BY_VALUE[control_ui._RunAction.RERUN.value],
-                )
-                assert execute.inner_text().strip() == "RERUN"
-                assert (execute.text_content() or "").strip() == "Rerun"
-                history = page.get_by_test_id(control_ui.ATTEMPT_HISTORY_TABLE_TEST_ID)
-                expect(history).not_to_contain_text(Locale.RUN_OUTCOME_SNAPSHOT_SAVED)
-                expect(history).not_to_contain_text(expected["commit_id"])
-                output_start = len(dashboard.output)
-                _, commit_id = operator.wait_for_completed_grid_row(
-                    page, dashboard, runtime, queued_at_monotonic=time.monotonic(),
-                )
-                assert commit_id == expected["commit_id"]
-                expect(history).to_contain_text(Locale.RUN_OUTCOME_SNAPSHOT_SAVED)
-                expect(history).to_contain_text(Locale.SESSION_STATUS_OK)
-                output = "".join(dashboard.output[output_start:])
-                assert output.count("Requesting wholesale Backend query snapshot") == 1
-                assert output.count("Dashboard snapshot replaced:") == 1
-                assert "Query IPC snapshot ready:" in output
-                assert not runtime.dashboard_socket_path.exists()
-                assert errors == []
-            finally:
-                browser.close()
+                        expect(rows).to_have_count(1)
+                    except AssertionError as exc:
+                        try:
+                            search_value = page.get_by_label(Locale.SEARCH_FILTER).input_value()
+                            exc.add_note(
+                                f"Search input: {search_value!r}; page errors: {errors!r}; "
+                                f"rendered rows: {rows.all_text_contents()!r}\n"
+                                + "".join(dashboard.output)
+                            )
+                        except Exception as diagnostic_error:
+                            exc.add_note(
+                                f"Browser failure diagnostics failed: {diagnostic_error!r}",
+                            )
+                        raise
+                    rows.first.click()
+                    execute = page.get_by_test_id(control_ui.EXECUTE_ACTION_TEST_ID)
+                    expect(execute).to_have_text(
+                        control_ui.ACTION_LABEL_BY_VALUE[control_ui._RunAction.RERUN.value],
+                    )
+                    assert execute.inner_text().strip() == "RERUN"
+                    assert (execute.text_content() or "").strip() == "Rerun"
+                    history = page.get_by_test_id(control_ui.ATTEMPT_HISTORY_TABLE_TEST_ID)
+                    expect(history).not_to_contain_text(Locale.RUN_OUTCOME_SNAPSHOT_SAVED)
+                    expect(history).not_to_contain_text(expected["commit_id"])
+                    output_start = len(dashboard.output)
+                    _, commit_id = operator.wait_for_completed_grid_row(
+                        page, dashboard, runtime, queued_at_monotonic=time.monotonic(),
+                    )
+                    assert commit_id == expected["commit_id"]
+                    expect(history).to_contain_text(Locale.RUN_OUTCOME_SNAPSHOT_SAVED)
+                    expect(history).to_contain_text(Locale.SESSION_STATUS_OK)
+                    output = "".join(dashboard.output[output_start:])
+                    assert output.count("Requesting wholesale Backend query snapshot") == 1
+                    assert output.count("Dashboard snapshot replaced:") == 1
+                    assert "Query IPC snapshot ready:" in output
+                    assert not runtime.dashboard_socket_path.exists()
+                    assert errors == []
+                finally:
+                    browser.close()
+            card_text = operator.capture_completed_researcher_card(
+                dashboard, runtime, namekey=ui_tests.STARTUP_NAMEKEY,
+                queued_at_monotonic=time.monotonic(),
+            )
+            operator.validate_workflow_artifacts(
+                runtime, namekey=ui_tests.STARTUP_NAMEKEY,
+                expected_run_outcome_path=RunLifecycle.COMPLETED.to_run_outcome_path(),
+                card_text=card_text,
+            )
     assert hashlib.sha256(files.source.read_bytes()).hexdigest() == source_before
     assert files.replay.read_bytes() == log_before
     assert files.detour.read_bytes() == database_before

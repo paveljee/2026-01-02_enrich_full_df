@@ -6,11 +6,17 @@ Completed implementation (2026-09-20): operator explicitly directed implementing
 ORDER, within their exact approved scope/snippets; verify and document each P complete
 before starting the next. This LIFTS the earlier pre-commit-operator gate for this work.
 P26–P30 COMPLETE, including P30's approved initial-validation addition and persistence-first
-clarification. No approved implementation remains pending. The prior
+clarification. P31 is COMPLETE within its approved implementation scope, including the separately
+approved test-only UUID amendment. Fresh affected preflight63passed98.40s, full Ruff and strict
+detour mypy56files PASS. Outcome pull/push checks match the current Store snapshot, independently
+of commit ancestry. No production/task changes. Recommend the proposed focused macOS elevate
+verification before pre-commit-operator; its exact task edit remains UNAPPLIED for review. The prior
 session-less outcome persistence blocker is withdrawn. P25 remains implemented. Unexpected ambiguity
 requiring scope extension must be raised before dependent implementation, not improvised.
-The latest operator harness failures and requested artifact-directory proposal are deferred
-as P31, UNAPPROVED for discussion, with exact proposed snippets below. Do not fix them now.
+The latest operator harness failures and requested artifact-directory change were addressed
+as P31 within the approved snippets below, including their upstream coverage. No remaining
+approved implementation; delegated verification is proposed separately, with no production
+or ordinary task changes.
 Keep original IPC missing-socket diagnostics/polling as operator elected. No ordinary tasks,
 HUMANS, pasted/shared HTTP schema, sample_deploy or other-detour changes are authorized.
 
@@ -53,7 +59,7 @@ production-data/original-NiceGUI preservation checks pass. IPC missing-socket po
 unchanged as operator elected below. IPC 'waiting for0' is immediately followed by admission,
 not evidence of a stall. Full artifact validation/card-content verification did NOT pass.
 
-Confirmed harness issues, independent of pending P26–P30:
+Confirmed harness issues in that run (now corrected by P31 below):
 
 1. validate_workflow_artifacts, protected/tests/operator/test_operator_e2e.py:1001, permits
    only /pull,/push,/commit and outcome paths. It rejects legitimate synthetic POST /validate.
@@ -65,9 +71,9 @@ Confirmed harness issues, independent of pending P26–P30:
    text. Footer buttons already meet that condition. Actual captured card_text in extra.log
    LF7266 is exactly 'DOWNLOAD DOCX\nDOWNLOAD MARKDOWN'; no Markdown was captured. Its success
    log is therefore false evidence. Production 'Researcher card displayed' follows capture.
-   Proposed narrow correction: select existing CARD_MARKDOWN_TEST_ID, wait for the linked
+   Approved P31 correction: select existing CARD_MARKDOWN_TEST_ID, wait for the linked
    commit UUID/actual content and enabled DOCX button, then capture Markdown element text;
-   retain downstream commit-body/content assertions and existing timeouts. No UI/CSS change.
+   replace stale commit-body assertions with current outcome-record content checks; retain timeouts. No UI/CSS change.
 
 The first assertion prevented all later artifact checks; after it is corrected, the recorded
 button-only capture would also fail card assertions. No claim that all remaining checks have
@@ -75,7 +81,7 @@ already passed. Ordinary/synthetic Chrome cases did not exercise these actual en
 helpers. Before requesting another live run, proposed upstream coverage must invoke the actual
 artifact validator against a real synthetic completed Store/log/CAS fixture and exercise the
 actual card-capture helper in the existing host browser contour (not merely parallel helpers).
-No new implementation authorized by this review; return a concrete narrow correction scope.
+That review alone authorized no implementation; the exact P31 proposal below was subsequently approved.
 No new elevate batch prepared or run; idle task unchanged.
 
 ### Recovered current run — read-only audit and requested artifact-directory change
@@ -105,11 +111,11 @@ paths identify pytest-77/test_completed_dashboard_backe0. Findings:
  These files show no cross-run contamination; that does not refute operator's reported
  ambiguity/conflation while recovering files from the shared system-temp hierarchy.
 
-Current fixture uses pytest's per-test tmp_path for config/DB/replay/CAS/storage and a
+Before P31, the fixture used pytest's per-test tmp_path for config/DB/replay/CAS/storage and a
 separate /tmp/detour-operator-* TemporaryDirectory for socket path length. It does NOT
 intentionally reuse one data directory across invocations. Nonetheless generated artifacts
 should be easier to locate and preserve together, as operator requests. Proposed exact narrow
-fixture change (not yet implemented): unique retained repository tmp/operator-test.XXXXXXXX/
+P31 fixture change (now implemented): unique retained repository tmp/operator-test.XXXXXXXX/
 per operator test, logged before initialization, containing config/source-readonly-symlink,
 DB/replay/CAS/NiceGUI/output and socket. No ordinary task or global pytest basetemp change,
 no production storage cleanup, no change to production Dashboard/Store and no deletion on
@@ -138,7 +144,7 @@ Configured production checkout yields88bytes for the proposed socket path, below
 existing104-byte Darwin limit; retain the explicit guard for other checkout locations, no
 system-directory fallback. Necessary fixture/isolation tests should establish uniqueness,
 retention and child storage/config/socket paths inside the run directory. This requested
-direction and proposed snippet are recorded for scope approval, not silently applied.
+direction and exact snippet were subsequently approved and implemented as P31.
 
 ### Local/delegated verification preceding this full run
 
@@ -222,7 +228,7 @@ With this batch complete, restored only elevate's historical "Nothing to elevate
 script/log/status/FAILED-grep scaffolding. TOML, shell syntax and equality of all other
 settings/tasks checked; no task executed during restoration. No new delegated batch is
 needed for that handoff. The subsequently executed full run is reviewed above; its new
-harness failures keep P31 pending/unapproved; the operator subsequently lifted the gate for P26–P30 implementation.
+harness failures were addressed by P31; its approved UUID amendment is implemented and locally verified. The operator had separately lifted the gate for P26–P30 implementation.
 
 ### IPC readiness logging — keep current behavior; discussion closed
 
@@ -663,7 +669,7 @@ Excluded: shared HttpRequestLogRecord v1/v1.1 implementation, pasted models/Stri
 main pipeline/other detours, sample_deploy, TASK/HUMANS/README, CAS layout, hash/config auto-
 updates, compatibility/migration/fallbacks, recovery, wrapper tasks, unrelated operator fixes.
 Grouped persistence and the request/response API are implemented; P26–P30 additions are complete.
-P30 is also complete; only unapproved/deferred P31 and production acceptance remain.
+P30 and P31 are also complete and locally verified. Proposed delegated host verification and full production acceptance remain.
 
 ### Latest approved P25 test-helper correction
 
@@ -1038,7 +1044,8 @@ sender/query replacement4passed202deselected11.20s. Full Ruff PASS, strict mypy 
 diff whitespace PASS. No index edits. Test bytes (ASGI wire bodies/headers) were included in
 the quote scan and remain independently pinned boundary payloads, like the test strings
 above. No ACK/NAK raw-string comparison, shared HTTP schema change or compatibility alias.
-Only direct constant imports changed in operator helpers; P31 corrections remain unimplemented.
+At the P27 checkpoint only direct constant imports changed in operator helpers; P31 was
+separate. Its subsequent implementation/verification is recorded below.
 P27 is complete; move to P28 ownership/inheritance/rename only.
 
 ## P28 — COMPLETE: centralized request/response/body protocols
@@ -1418,7 +1425,7 @@ mocked replacement of the tested persistence boundary, skipped prerequisites or 
 
 P30 supersedes only the earlier API-global current-record ownership, historical outcome/root
 selection and commit-centric innerdict metadata instructions. P25–P29 are complete. Unresolved operator acceptance boundaries remain separate, with
-P31 unapproved/deferred as recorded below.
+P31 including its approved UUID amendment is complete and locally verified below.
 
 ### P30 clarification — persistence is independent of application validity
 
@@ -1469,7 +1476,7 @@ Required interpretation for continuing the narrowly approved work:
   assert actual durable log bytes/fsync/history, separately from error/materialization.
 
 P26–P30 are completed; the former persistence blocker is withdrawn,
-not implemented via a nullable-session acceptance exception. P31 remains unapproved/deferred.
+not implemented via a nullable-session acceptance exception. P31 including its approved UUID amendment is complete and locally verified below.
 
 ### P30 approved addition — initial-validation ancestry and typed validation inputs
 
@@ -1624,13 +1631,13 @@ Historical fixture callpoints were updated for current outcome metadata but not 
 accessed. Main/shared HTTP schema, pasted models, server admission, renderer and P31 harness
 behavior are unchanged. P26–P30 are implemented in the approved order. Real provider/network,
 Chrome, privileged watcher and production pre-commit-operator acceptance were not rerun here;
-P31 remains explicitly unapproved/deferred, not an outstanding authorized implementation.
+P31 including its approved UUID amendment is implemented; fresh verification is recorded separately below.
 
-## P31 — UNAPPROVED: exact test-harness correction proposal
+## P31 — COMPLETE: approved implementation and UUID amendment locally verified
 
-2026-09-20: operator requests concrete snippets because the previous description was too
-broad. P26–P30 are complete; this is the proposed replacement P31, NOT implementation
-authorization. Only WORK changed while preparing this proposal. Preserve the actual
+2026-09-20: operator explicitly approved P31 within the EXACT documented shape below.
+P26–P30 are complete. P31 code and the separately approved test-only UUID correction are applied.
+The approved proposal replaced the earlier broad description; its snippets are preserved. Preserve the actual
 failure/recovered-artifact evidence above. No production, task, timeout, CSS, cleanup-policy,
 schema or ordinary-wrapper changes; no new harness service/module or compatibility path.
 
@@ -1707,8 +1714,18 @@ single accepted commit, CAS/hash/appendwatch and response checks remain. After c
 validated_run_outcome/run_outcome_snapshot, add the current-link assertions:
 
 ```python
-assert run_outcome_snapshot.pull_record_id == commit_request_body.pull_record.record_id
-assert run_outcome_snapshot.push_record_id == commit_request_body.push_record.record_id
+outcome_ordinal = _record_ordinal(records, run_outcome_record.record_id)
+preceding_records = records[:outcome_ordinal]
+latest_pull = next(
+    record for record in reversed(preceding_records)
+    if (record.method, record.path) == (HTTP_GET_METHOD, PULL_PATH)
+)
+latest_push = next(
+    record for record in reversed(preceding_records)
+    if (record.method, record.path) == (HTTP_POST_METHOD, PUSH_PATH)
+)
+assert run_outcome_snapshot.pull_record_id == latest_pull.record_id
+assert run_outcome_snapshot.push_record_id == latest_push.record_id
 assert run_outcome_snapshot.commit_record_id == commit_record.record_id
 assert run_outcome_snapshot.run_outcome_record_id == run_outcome_record.record_id
 assert run_outcome_snapshot.validation_record_id is not None
@@ -1807,7 +1824,7 @@ assert validated.submission is not None
 lines = [api.json_line(validated.submission.normalized_values())]
 if validated.ground_truth_innerdict is not None:
     lines.append(api.json_line(api.select_columns(validated.ground_truth_innerdict.data)))
-store._append_authoritative_record(persisted_http_record(
+gone_pull = store._append_authoritative_record(persisted_http_record(
     record_id=uuid7(),
     method=HTTP_GET_METHOD,
     path=PULL_PATH,
@@ -1818,6 +1835,9 @@ store._append_authoritative_record(persisted_http_record(
     },
     response_body="".join(lines),
 ))
+
+# Existing RunOutcomeResponseBody construction uses the final persisted pull:
+pull_record_id=gone_pull.record_id,
 ```
 
 Use existing fixture helpers/constants (necessary local imports); no provider network call,
@@ -1859,8 +1879,161 @@ operator.validate_workflow_artifacts(
 
 Feasible preflight/record/fixture tests and Ruff/mypy first. Host Chrome is the only new
 delegated boundary for this proposal; prepare it in elevate only AFTER approval/local checks.
-No fresh privileged/provider/live-Codex run is needed for these test-only edits. P31 remains
-UNAPPROVED; no implementation or acceptance pass is claimed.
+No fresh privileged/provider/live-Codex run is needed for these test-only edits. P31 is
+COMPLETE within the approved code scope, including the UUID correction below; fresh affected checks pass.
+
+### P31 execution checkpoint — 2026-09-20
+
+All four approved code changes are implemented in the four named test files only. The
+private history helper and fixture replacement match the approved snippets; existing card
+assertions/timeouts/cleanup and source/log/DB preservation assertions remain. Browser context
+nesting changes only enable the approved actual capture/artifact calls after the initial
+Playwright context exits. No production, ordinary-task, index or dependency edit.
+
+New upstream full-artifact test first reproduced the actual /validate allowlist failure
+(1failed17.92s). During fixture wiring, a wrong LOCATION_HEADER import failed setup
+(1error8.27s); corrected to its existing authority in backend.api, not a new constant or
+production move. The full preflight module then passed63tests50.85s, including real completed
+Store/log/CAS validation, current typed reference checks and real unique/retained directory
+fixtures. Positive provider tests cover absent/OpenAlex/ROR/both, initial ancestry and200/404;
+negative tests reject missing/changed/reordered references, duplicate IDs, unknown routes,
+unreferenced providers and unsupported endpoints. Directory test uses an owned synthetic
+repository under repo/tmp (short p. prefix to keep the existing Darwin limit), not production
+data or a system-temp fallback; fixture close retains artifacts before the test's own outer
+temporary-repository cleanup. Overlong-path test fails before runtime construction.
+
+Ruff initially found only import ordering/line wrapping; fixed without suppressions or
+behavior changes. Fresh full-repository src/tests Ruff, detour strict mypy56files and default
+mypy68files PASS. Read-only AST audit confirms exact approved helper/directory-fixture bodies,
+no changed/deleted existing preflight tests, only the named plugin/browser function changes,
+and every original browser assertion unchanged. Only four test files plus WORK differ; index
+is unchanged/empty. Full feasible ordinary AI suite finished737passed,1existing skip,
+12deselected1011.94s. This includes the full operator preflight module, real synthetic
+Store/log/CAS, API/IPC/in-process transport, startup subprocess matrix, UI/controller and
+nonprivileged watcher coverage. Exclusions: host browser module, operator/live-provider/root,
+two historical captures, real Unix socket and socket-substitution selections. Existing skip
+is the deliberately disabled multiple-evidence-match rejection test. No warnings reported.
+This pre-amendment green batch did NOT establish correct outcome-reference checking. The
+separately approved correction below fixes that fixture/assertion pair and fresh affected
+checks pass. Host Chrome has not been executed locally.
+
+Latest operator instruction: once P31 is implemented, explicitly report pre-commit-operator
+readiness; if proposing elevate, give its EXACT edit shape and justification for review.
+Leave elevate unchanged until that review; no delegated run or full acceptance is claimed.
+
+### P31 UUID amendment — APPROVED, implemented and locally verified
+
+Read-only producer review during handoff verification found an Assistant proposal error:
+protected/src/backend/ipc.py:_capture_run_outcome_snapshot captures store.current_pull_record
+and current_push_record. Store updates the pull slot after EVERY projected pull, including410;
+api._run_outcome_record copies these captured IDs unchanged into the response body. Thus in
+normal Dashboard completion, the outcome pull is the final410, not the earlier200 linked by
+the commit. A later rejected push can likewise make the outcome push differ from the commit's
+accepted push. The explicit commit/validation links separately preserve submission ancestry.
+
+The original approved P31 assertions equated both pairs, while the synthetic fixture manually
+constructed its outcome with the older pull. That passing upstream artifact test therefore
+did NOT establish correct live outcome-input checking. Operator subsequently approved exactly
+the test-only correction below, including the fixture UUID change. It is now applied; fresh
+affected checks passed, as recorded below. No production/task changes are included in this approval.
+
+Exact approved amendment, same two existing P31 files only:
+
+```python
+# validate_workflow_artifacts: replace ONLY the first two new equality assertions.
+# Add PUSH_PATH to its existing Backend vars imports.
+outcome_ordinal = _record_ordinal(records, run_outcome_record.record_id)
+preceding_records = records[:outcome_ordinal]
+latest_pull = next(
+    record for record in reversed(preceding_records)
+    if (record.method, record.path) == (HTTP_GET_METHOD, PULL_PATH)
+)
+latest_push = next(
+    record for record in reversed(preceding_records)
+    if (record.method, record.path) == (HTTP_POST_METHOD, PUSH_PATH)
+)
+assert run_outcome_snapshot.pull_record_id == latest_pull.record_id
+assert run_outcome_snapshot.push_record_id == latest_push.record_id
+
+# completed_query_fixture_process: retain the new410 record rather than discard its handle:
+gone_pull = store._append_authoritative_record(persisted_http_record(
+    # EXACT existing approved410 construction, unchanged.
+))
+# In the existing RunOutcomeResponseBody construction only:
+pull_record_id=gone_pull.record_id,
+```
+
+Keep every other approved assertion, including commit/validation equality, ETag, ordering,
+CAS, provider/initial links and full rendered outcome; no production change or weakened
+reference requirement. Re-run the existing real completed-Store preflight case with the
+corrected final-pull fixture. This check now passes; proposed host Chrome verification follows.
+
+Completion evidence: full affected preflight module63passed98.40s with the corrected final410
+fixture; full src/tests Ruff PASS and strict detour mypy PASS56files; diff whitespace PASS.
+Read-only AST audit confirms the new assertion block exactly matches the approved snippet.
+Only the two approved test files changed in this amendment, plus WORK; prior P31 changes
+remain confined to the original four test files. Production, pyproject, dependencies and
+index unchanged. The earlier737passed ordinary batch is retained evidence, not falsely
+reported as rerun after this small correction. No remaining approved P31 implementation;
+host Chrome/actual-macOS-path verification and full production acceptance remain unexecuted.
+
+### Proposed delegated verification — NOT APPLIED; operator review required
+
+P31 including its approved UUID amendment is now locally verified. Recommend these two
+existing tests on the macOS Dashboard host before the full operator run:
+the changed real-Chrome/query/card/artifact test, and the new real retained-directory fixture
+test under the actual host checkout path. No live Codex, SSH, provider HTTP, sudo, browser
+installation or repeated root test. The first reproduces the actual operator helper's timing
+boundary without an expensive research run; the second verifies real host path lengths and
+retention. Do not recommend the full run as already verified before this boundary passes.
+
+Exact proposed replacement of ONLY the existing elevate value below. Preserve the log path,
+FAILED grep/status reporting and retained repo/tmp files. Use BSD script on the guarded macOS
+host; save the pytest status separately so script's status cannot conceal a failed test.
+Machine guard is before log replacement. There is no EXIT trap or artifact cleanup. Current
+pyproject.toml remains untouched with its idle "Nothing to elevate" task.
+Read-only validation of this proposal: TOML parsing, outer/inner bash syntax and the actual
+wrong-machine guard PASS; the Linux guard exits2 before touching logs or temporary files.
+This is not a host/browser test result.
+
+```toml
+elevate = """
+bash -c '
+if [ "$(uname -s)" != Darwin ]; then
+  echo "Run elevate on the macOS Dashboard host." >&2
+  exit 2
+fi
+LOG_PATH="$PIXI_PROJECT_ROOT/logs/from_operator/elevate.log"
+mkdir -p "$PIXI_PROJECT_ROOT/tmp" || exit 1
+ELEVATE_RUN_DIR="$(mktemp -d "$PIXI_PROJECT_ROOT/tmp/elevate.XXXXXX")" || exit 1
+export ELEVATE_STATUS_PATH="$ELEVATE_RUN_DIR/status"
+echo "Retained verification directory: $ELEVATE_RUN_DIR"
+script -q "$LOG_PATH" bash -c '"'"'
+  "$CONDA_PREFIX/bin/python" -m pytest -vv -srA \
+    src/detours/detour_ai_augment/tests/control_centre/test_ui_e2e.py::test_completed_grid_row_uses_real_query_ipc \
+    src/detours/detour_ai_augment/protected/tests/operator/test_operator_e2e_preflight.py::test_operator_run_directories_are_unique_retained_and_contained
+  task_status=$?
+  printf "%s\\n" "$task_status" > "$ELEVATE_STATUS_PATH"
+  exit "$task_status"
+'"'"'
+script_status=$?
+task_status=1
+if [ -r "$ELEVATE_STATUS_PATH" ]; then
+  read -r task_status < "$ELEVATE_STATUS_PATH" || task_status=1
+fi
+if [ "$script_status" -ne 0 ]; then task_status=1; fi
+grep -n -- "FAILED" "$LOG_PATH"
+grep_status=$?
+case "$grep_status" in
+  0) echo "grep: FAILED matches shown above ($LOG_PATH)" ;;
+  1) echo "grep: no FAILED ($LOG_PATH)" ;;
+  *) echo "grep: could not inspect $LOG_PATH" >&2; task_status=1 ;;
+esac
+echo "Test output: $LOG_PATH"
+exit "$task_status"
+'
+"""
+```
 
 ## Completed scope index
 
@@ -1894,7 +2067,7 @@ UNAPPROVED; no implementation or acceptance pass is claimed.
 
 All P1-P24 code changes are implemented (P22 superseded by P24); this is not production
 acceptance or fresh P25 verification. No additional pending historical implementation is
-revived. P25 is implemented; no approved implementation remains pending; P26–P30 are complete, P31 unapproved/deferred. F7 remains an unresolved report,
+revived. P25 is implemented; P26–P30 are complete; P31's approved shape and UUID amendment are complete and locally verified. F7 remains an unresolved report,
 not a proven task defect to patch speculatively.
 
 ## Retained contracts — baseline and P25 boundaries
@@ -2255,7 +2428,7 @@ ELIGIBLE_WEB_ACTIONS = frozenset({
      import in new tests; corrected to separate assertions/direct import, no casts/ignores.
    - No network/browser/root/live-Codex acceptance run. Current correction is complete, not
      a full pre-commit-operator acceptance claim. Corrections2 and4–7 are implemented and locally verified; targeted delegated verification passed; full operator acceptance remains pending;
-     correction3's authorized deletion is complete. P26–P30 are now complete; P31 remains unapproved/deferred.
+     correction3's authorized deletion is complete. P26–P30 are now complete; P31 including its approved UUID amendment is complete and locally verified below.
 
 2. **IMPLEMENTED — Correct the five stale IPC test callpoints**
 
@@ -2456,7 +2629,7 @@ No password capture or SSH verbosity, no altered browser, no repeated root tests
 new diff touches their boundary. Full pre-commit-operator/live Codex only after those checks.
 These corrections are separate from P26–P30. The operator subsequently lifted the full
 pre-commit-operator prerequisite for implementing P26–P30 and deferred new harness issues
-to unapproved P31. Full acceptance still requires reviewing every actual leaf, intentional
+to P31 (subsequently implemented, including its separately approved UUID amendment). Full acceptance still requires reviewing every actual leaf, intentional
 skip/xfail, warning, wait, cleanup and preservation result; it is not claimed here. Corrections2 and4–7 are implemented and locally verified; targeted delegated verification passed; full operator acceptance remains pending; correction3's
 authorized deletion is complete. New defects or scope deviations still need a narrow
 proposal/approval rather than broadening implementation silently.
@@ -2709,7 +2882,7 @@ pixi run -e detour-ai-augment env mypy --config-file src/detours/detour_ai_augme
   Current state: P26–P30 complete in order, including P30's explicit
   persistence-first clarification and initial-validation addition. The prior missing-session persistence question is withdrawn.
   Operator explicitly lifted the earlier full-acceptance gate. Harness/artifact-directory
-  corrections are P31, UNAPPROVED and deferred. Earlier corrections2–7 are implemented;
+  corrections are P31, complete and locally verified including its approved reference-check amendment. Earlier corrections2–7 are implemented;
   item3 deleted elevate-triggering tests. No unrelated audit, DTO-default removal or
   card-format tightening.
 - Operator forbids cast: changes must use genuinely compatible types, not cast or substitute
