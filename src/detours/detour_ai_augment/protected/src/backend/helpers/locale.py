@@ -8,6 +8,27 @@ from .vars import (
 
 
 class Locale:
+    VALIDATION_STAGE_INVALID: Final = "invalid post-commit validation stage"
+    VALIDATION_RESULT_INVALID: Final = "invalid post-commit validation result"
+    VALIDATION_ACCEPTANCE_MISMATCH: Final = "accepted validation stage and result must agree"
+    VALIDATION_SUBMISSION_TYPE_MISMATCH: Final = "Submission type and payload must agree"
+    VALIDATION_SUBMISSION_MISSING: Final = "Accepted validation requires the full submission"
+    VALIDATION_INITIAL_LINK_INVALID: Final = "Initial validation linkage is invalid"
+    VALIDATION_HTTP_REFERENCES_INVALID: Final = (
+        "Model HTTP references must be unique UUIDv7 records"
+    )
+    VALIDATION_RECORD_INVALID: Final = "validation HTTP record has an invalid contour"
+    VALIDATION_BODY_MISMATCH: Final = "validation request body does not match its record"
+    VALIDATION_SUBMISSION_DISCRIMINATOR_MISSING: Final = (
+        "Serialized submission discriminator is missing"
+    )
+    VALIDATION_BODY_MISSING: Final = "validation request body is missing"
+    VALIDATION_COMMIT_LINK_INVALID: Final = "Validation commit linkage is invalid"
+    VALIDATION_HTTP_INPUT_INVALID: Final = (
+        "Validation HTTP input must precede validation and match DB"
+    )
+    VALIDATION_REPLAY_MISMATCH: Final = "Recorded validation does not match its replay inputs"
+    VALIDATION_AFTER_OUTCOME: Final = "Validation must precede its session's run outcome"
 
     # Store request/response contract and its API/IPC adapters.
     RUN_OUTCOME_PERSISTED_LOG: Final = 'Run outcome persisted: record=%s; HTTP %s'
@@ -46,6 +67,22 @@ class Locale:
     PULL_COMPLETED_RESULT_INVALID: Final = 'Completed workflow has invalid submission/result'
     PULL_COMPLETED_RESEARCHER_MISSING: Final = 'Completed workflow has no configured researcher'
     PUSH_SESSION_NOT_READY_LOG: Final = 'Push: workflow/session is not ready'
+    RUN_OUTCOME_NAMEKEY_MISMATCH: Final = (
+        "Run outcome requires NameKey matching the Backend researcher"
+    )
+    RUN_OUTCOME_SESSION_MISMATCH: Final = (
+        "Run outcome requires Session-ID matching the Backend session"
+    )
+    RUN_OUTCOME_ETAG_MISMATCH: Final = (
+        "Completed outcome requires ETag matching the current validation"
+    )
+    INNERDICT_OUTCOME_MISMATCH: Final = "Committed innerdict outcome does not match its commit"
+    RUN_OUTCOME_QUERY_UNEXPECTED: Final = "Run outcome request must have no query parameters"
+    RUN_OUTCOME_HEADERS_INVALID: Final = (
+        "SourceKey is a response header, not a run outcome request header"
+    )
+    RUN_OUTCOME_BODY_UNEXPECTED: Final = "Run outcome request must have no body"
+    RUN_OUTCOME_REJECTED_LOG: Final = "Run outcome %s rejected: %s"
     RUN_OUTCOME_VALIDATION_LINKAGE_CORRUPT: Final = 'Run-outcome validation linkage is corrupt'
     RUN_OUTCOME_DURABLE_VALIDATION_MISSING: Final = 'Projected attempt has no durable validation'
     RUN_OUTCOME_PROVIDER_INPUT_CORRUPT: Final = 'Run-outcome provider replay input is corrupt'
@@ -84,6 +121,7 @@ class Locale:
     PUBLIC_HTTP_EXCHANGE_INVALID: Final = 'Public HTTP exchange has an invalid contour'
     PULL_RESPONSE_BODY_MISSING: Final = 'Pull response body is missing'
     PUSH_CAPTURED_LINKAGE_REQUIRED: Final = 'Accepted push requires captured pull/session linkage'
+    QUERY_REQUEST_RECEIPT_TIME_MISSING: Final = "Query request receipt time is missing"
     QUERY_REQUEST_INVALID: Final = 'Query requires GET /query without parameters or a body'
     QUERY_RESPONSE_BODY_MISMATCH: Final = 'Query response body does not match its record'
     PUSH_RESULT_LINKAGE_INVALID: Final = (

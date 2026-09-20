@@ -3,12 +3,12 @@ from __future__ import annotations
 from typing import Literal, Self
 
 from src.detours.detour_ai_augment.protected.src.architecture import (
-    ControlCentreComponent,
+    BackendComponent,
 )
 from src.helpers.architecture import FrozenStrictModel, implements
 
 
-@implements[ControlCentreComponent.BackendPort.QueryRequestProperty]()
+@implements[BackendComponent.QueryRequestProperty]()
 class QueryRequest(FrozenStrictModel):
     """Request the complete Backend snapshot, without filters or a request body."""
 

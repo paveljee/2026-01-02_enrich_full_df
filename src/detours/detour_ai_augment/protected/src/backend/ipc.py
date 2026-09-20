@@ -14,6 +14,9 @@ import requests
 
 from src.detours.detour_ai_augment.protected.src.architecture import BackendComponent
 from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
+from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
+    NANOSECONDS_PER_MICROSECOND,
+)
 from src.detours.detour_ai_augment.src.backend import api
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_context import (
     AiAugmentBackendContext,
@@ -33,6 +36,7 @@ from src.detours.detour_ai_augment.src.backend.helpers.data_models.response_reco
     BackendStoreAcknowledgment,
     BackendStoreException,
 )
+from src.helpers.vars import KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
 
 from ....src.control_centre.dashboard.helpers.data_models.query_request import (
     QueryRequest,
@@ -43,9 +47,7 @@ from ....src.control_centre.dashboard.helpers.data_models.run_outcome import (
 
 logger = logging.getLogger(__name__)
 
-JSON_MEDIA_TYPE = "application/json"
 SOCKET_PERMISSIONS = 0o600
-NANOSECONDS_PER_MICROSECOND = 1_000
 DASHBOARD_IPC_SCHEME = api.SYNTHETIC_COMMIT_SCHEME
 DASHBOARD_IPC_HOST = api.SYNTHETIC_COMMIT_HOST
 DASHBOARD_SOCKET_PATH_ENV_NAME = "FASTAPI_DETOUR_DASHBOARD_SOCKET"
@@ -69,11 +71,12 @@ def _run_outcome_snapshot_configuration(session_id: UUID | None) -> api._PushCon
 def _capture_run_outcome_snapshot(
     runtime: AiAugmentBackendContext,
     request: RunOutcomeRequest,
+    store: BackendComponent.FullStoreProperty,
 ) -> tuple[RunOutcomeRequestRecord, tuple[Exception, ...]]:
     with api.BACKEND_WORKFLOW_STATE_LOCK:
         session_id = api.BACKEND_SESSION_ID
-        pull_record = api.BACKEND_PENDING_PULL_RECORD or api.BACKEND_CURRENT_PULL_RECORD
-        push_record = api.BACKEND_LATEST_PUSH_RECORD
+        pull_record = store.current_pull_record
+        push_record = store.current_push_record
 
     rollout_record: CodexRolloutRecord | None = None
     rollout_filename: str | None = None
@@ -107,8 +110,24 @@ def _capture_run_outcome_snapshot(
     except (OSError, api._PushConfigurationError) as exc:
         failures.append(exc)
 
+    http_record = request.http_request_log_record
     snapshot = RunOutcomeRequestRecord(
-        **request.http_request_log_record.model_dump(),
+        schema_version=http_record.schema_version,
+        record_id=http_record.record_id,
+        method=http_record.method,
+        scheme=http_record.scheme,
+        host=http_record.host,
+        port=http_record.port,
+        path=http_record.path,
+        query=http_record.query,
+        request_headers=http_record.request_headers,
+        request_body=http_record.request_body,
+        response_code=http_record.response_code,
+        response_headers=http_record.response_headers,
+        response_body=http_record.response_body,
+        received_at_unix_usec=http_record.received_at_unix_usec,
+        ready_to_respond_at_unix_usec=http_record.ready_to_respond_at_unix_usec,
+        duration_usec=http_record.duration_usec,
         rollout_filename=rollout_filename,
         pull_record_id=None if pull_record is None else pull_record.record_id,
         push_record_id=None if push_record is None else push_record.record_id,
@@ -134,6 +153,7 @@ async def handle_run_outcome_request(
     request: requests.PreparedRequest,
 ) -> requests.Response:
     parsed = urlsplit(request.url or "")
+    raw_body = api._prepared_request_body(request)
     ipc_request = RunOutcomeRequest.from_http_request(
         received_at_unix_usec=time.time_ns() // NANOSECONDS_PER_MICROSECOND,
         method=request.method or "",
@@ -143,12 +163,10 @@ async def handle_run_outcome_request(
         path=parsed.path,
         query=parsed.query,
         request_headers=dict(request.headers),
-        request_body=api._prepared_request_body(request),
+        request_body=(api._request_body_for_authoritative_log(raw_body) if raw_body else None),
     )
-    if runtime.configured_namekey is None or ipc_request.namekey != runtime.configured_namekey:
-        raise api._PushValidationError(Locale.REPLAY_RECORD_CONTOUR_INVALID)
     request_record, failures = await asyncio.to_thread(
-        _capture_run_outcome_snapshot, runtime, ipc_request
+        _capture_run_outcome_snapshot, runtime, ipc_request, store
     )
     if failures:
         logger.error(
@@ -189,7 +207,7 @@ async def handle_query_request(
     validate_query_request(request)
     parsed = urlsplit(request.url or "")
     request_record = QueryRequestRecord(
-        schema_version="1.1",
+        schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
         method=request.method or "",
         scheme=parsed.scheme,
         host=parsed.hostname or "",

@@ -13,6 +13,7 @@ from uuid import uuid7
 import duckdb
 import pytest
 
+from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
 from src.detours.detour_ai_augment.src.backend import api, server
 from src.detours.detour_ai_augment.src.backend.helpers.data_models import (
     ai_augment_backend_store as store_models,
@@ -360,8 +361,10 @@ def test_pull_ack_means_only_request_fsync_and_result_reports_processing_error(
                 asyncio.run(exercise())
 
 
+@pytest.mark.parametrize("received_at_unix_usec", (1, 0, None))
 def test_query_only_capability_returns_nak_snapshot_and_never_changes_log_or_db(
     runtime: AiAugmentBackendContext,
+    received_at_unix_usec: int | None,
 ) -> None:
     with store_models.initialize_backend_store(
         runtime,
@@ -386,7 +389,7 @@ def test_query_only_capability_returns_nak_snapshot_and_never_changes_log_or_db(
         response_code=None,
         response_headers=None,
         response_body=None,
-        received_at_unix_usec=1,
+        received_at_unix_usec=received_at_unix_usec,
         ready_to_respond_at_unix_usec=None,
         duration_usec=None,
     )
@@ -395,16 +398,25 @@ def test_query_only_capability_returns_nak_snapshot_and_never_changes_log_or_db(
         promise = store.query(request)
         assert promise.acknowledgment is BackendStoreAcknowledgment.NAK
         response, error = asyncio.run(promise.response_record())
-        assert error is None and response is not None
-        assert response.record_id == request.record_id
-        assert len(response.query_response_body.ai_augment_singular_outerdicts) == 1
+        if received_at_unix_usec is None:
+            assert response is None and error is not None
+            assert str(error) == Locale.QUERY_REQUEST_RECEIPT_TIME_MISSING
+        else:
+            assert error is None and response is not None
+            assert response.record_id == request.record_id
+            assert response.ready_to_respond_at_unix_usec is not None
+            assert response.duration_usec == (
+                response.ready_to_respond_at_unix_usec - received_at_unix_usec
+            )
+            assert response.response_headers == {"Content-Type": "application/json"}
+            assert len(response.query_response_body.ai_augment_singular_outerdicts) == 1
     assert db_path.read_bytes() == before_db
     assert Path(runtime.pipeline_config.replay_log).read_bytes() == before_log
 
 
 @pytest.mark.parametrize("failure", (None, "fsync", "projection"))
 @pytest.mark.parametrize("path", ("/completed", "/failed", "/cancelled"))
-def test_incomplete_capture_outcome_is_nak_with_durable_500_and_self_id(
+def test_missing_identity_outcome_is_nak_with_durable_400_and_self_id(
     runtime: AiAugmentBackendContext,
     backend_store: store_models.AiAugmentBackendStore,
     path: str,
@@ -454,11 +466,11 @@ def test_incomplete_capture_outcome_is_nak_with_durable_500_and_self_id(
             assert isinstance(caught.value.__cause__, OSError)
             return
         assert error is None and response is not None
-        assert response.response_code == HTTPStatus.INTERNAL_SERVER_ERROR
+        assert response.response_code == HTTPStatus.BAD_REQUEST
         assert response.run_outcome_response_body.run_outcome_record_id == record.record_id
         assert response.run_outcome_response_body.commit_record_id is None
         assert response.run_outcome_response_body.validation_record_id is None
-        assert response.to_response().status_code == HTTPStatus.INTERNAL_SERVER_ERROR
+        assert response.to_response().status_code == HTTPStatus.BAD_REQUEST
         assert store._http_record(record.record_id).model_dump() == response.model_dump()
 
     if failure is None:
@@ -550,3 +562,40 @@ def test_explicit_replay_rejects_incomplete_push_group_without_projecting_it(
             f"SELECT count(*) FROM {api.AUTHORITATIVE_ATTEMPTS_TABLE}"
         ).fetchone() == (0,)
     assert log.read_bytes() == b"".join(lines)
+
+
+@pytest.mark.parametrize("path", ("/commit", "/validate"))
+def test_invalid_synthetic_envelope_is_fsynced_before_domain_rejection(
+    runtime: AiAugmentBackendContext,
+    backend_store: store_models.AiAugmentBackendStore,
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+) -> None:
+    record = HttpRequestLogRecord(
+        schema_version="1.1", method="POST", scheme="http", host="invalid", port=None,
+        path=path, query="", request_headers={}, request_body="{}",
+        response_code=None, response_headers=None, response_body=None,
+        received_at_unix_usec=None, ready_to_respond_at_unix_usec=None, duration_usec=None,
+    )
+    fsynced: list[bytes] = []
+    real_fsync = os.fsync
+    log_path = Path(backend_store._replay_log)
+
+    def fsync(descriptor: int) -> None:
+        real_fsync(descriptor)
+        if os.fstat(descriptor).st_ino == log_path.stat().st_ino:
+            fsynced.append(log_path.read_bytes())
+
+    with pytest.raises(RuntimeError, match="Store failed"), backend_store._writable(runtime):
+        monkeypatch.setattr(os, "fsync", fsync)
+        with pytest.raises(api._PushValidationError):
+            backend_store._append_authoritative_record(record)
+        payload = log_path.read_bytes()
+        assert fsynced == [payload]
+        assert payload.endswith(b"\n")
+        assert HttpRequestLogRecord.model_validate_json(payload) == record
+        assert backend_store.current_commit_record is None
+        assert backend_store.current_validation_record is None
+        assert backend_store.initial_validation_record is None
+    with duckdb.connect(str(backend_store._detour_db_path), read_only=True) as connection:
+        assert connection.execute("SELECT count(*) FROM detour_http_records").fetchone() == (0,)

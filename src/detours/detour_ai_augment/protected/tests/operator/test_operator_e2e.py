@@ -35,6 +35,9 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_
     RESOURCE_SHA256_KEY,
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
+    HTTP_GET_METHOD,
+    HTTP_POST_METHOD,
+    PULL_PATH,
     REPLAY_LOG_KEY,
     AiAugmentCohort,
 )
@@ -63,7 +66,7 @@ from src.detours.detour_ai_augment.src.backend.helpers.data_models.commit_event 
     BackendLifecycle,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.run_outcome_record import (
-    RunOutcomeRecord,
+    RunOutcomeResponseRecord,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.validation_event import (
     VALIDATE_PATH,
@@ -710,7 +713,7 @@ def wait_for_gone_pull(
             if exchange != previous_exchange:
                 response = (
                     "request-only record; response fields intentionally null"
-                    if record.method == backend_api.HTTP_POST_METHOD
+                    if record.method == HTTP_POST_METHOD
                     and record.path in {COMMIT_PATH, VALIDATE_PATH}
                     and record.response_code is None
                     and record.response_headers is None and record.response_body is None
@@ -726,8 +729,8 @@ def wait_for_gone_pull(
         if any(
             (record.method, record.path, record.response_code)
             == (
-                backend_api.HTTP_GET_METHOD,
-                backend_api.PULL_PATH,
+                HTTP_GET_METHOD,
+                PULL_PATH,
                 status.HTTP_410_GONE,
             )
             for record in records
@@ -1001,7 +1004,7 @@ def validate_workflow_artifacts(
     assert {
         (record.method, record.path) for record in records
     } <= backend_api.AUTHORITATIVE_FASTAPI_ROUTES | {
-        (backend_api.HTTP_POST_METHOD, path)
+        (HTTP_POST_METHOD, path)
         for path in run_outcome_models.RUN_OUTCOME_PATHS
     } | {
         backend_api.AUTHORITATIVE_COMMIT_ROUTE
@@ -1012,8 +1015,8 @@ def validate_workflow_artifacts(
         for record in reversed(records)
         if (record.method, record.path, record.response_code)
         == (
-            backend_api.HTTP_GET_METHOD,
-            backend_api.PULL_PATH,
+            HTTP_GET_METHOD,
+            PULL_PATH,
             status.HTTP_410_GONE,
         )
     )
@@ -1070,7 +1073,7 @@ def validate_workflow_artifacts(
     push_record = records[push_ordinal]
     assert push_record.response_code == status.HTTP_202_ACCEPTED
     assert push_record.response_headers is not None
-    assert push_record.response_headers["location"] == backend_api.PULL_PATH
+    assert push_record.response_headers["location"] == PULL_PATH
     rollout_blob = (
         operator_runtime.rollout_cas_dir
         / rollout.sha256[:2] / rollout.sha256[2:4] / rollout.sha256
@@ -1087,7 +1090,7 @@ def validate_workflow_artifacts(
         for record in records
         if (record.method, record.path)
         in {
-            (backend_api.HTTP_POST_METHOD, path)
+            (HTTP_POST_METHOD, path)
             for path in run_outcome_models.RUN_OUTCOME_PATHS
         }
     )
@@ -1108,7 +1111,7 @@ def validate_workflow_artifacts(
         run_outcome_record.request_headers,
         SOURCE_KEY_HEADER,
     ) is None
-    validated_run_outcome = RunOutcomeRecord.from_http_request_log_record(
+    validated_run_outcome = RunOutcomeResponseRecord.from_http_request_log_record(
         run_outcome_record
     )
     run_outcome_snapshot = validated_run_outcome.run_outcome_response_body

@@ -42,6 +42,8 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_
 from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     BACKEND_STORE_CLOSED_CLEANLY,
+    HTTP_POST_METHOD,
+    ContentType,
 )
 from src.helpers.architecture import FrozenStrictModel
 
@@ -318,7 +320,9 @@ def create_dashboard_query_app(
         try:
             ipc.validate_query_request(prepared)
         except ValueError as exc:
-            return FlaskResponse(str(exc), status=HTTPStatus.BAD_REQUEST, content_type="text/plain")
+            return FlaskResponse(
+                str(exc), status=HTTPStatus.BAD_REQUEST, content_type=ContentType.PLAIN_TEXT,
+            )
         try:
             return response_from_adapter(query_response_handler(prepared))
         except BaseException:
@@ -339,7 +343,7 @@ def create_dashboard_query_app(
             run_outcome_path.value,
             endpoint=f"run-outcome-{run_outcome_path.removeprefix('/')}",
             view_func=lambda path=run_outcome_path: run_outcome_request(path),
-            methods=["POST"],
+            methods=[HTTP_POST_METHOD],
         )
 
     return app

@@ -38,6 +38,9 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     AI_AUGMENT_COLUMN_PREFIX,
     BACKEND_STORE_CLOSED_CLEANLY,
     DOCX_TO_AI_AUGMENT_COLUMNS,
+    ETAG_HEADER,
+    HTTP_GET_METHOD,
+    HTTP_POST_METHOD,
     KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL,
     KTP_AI_AUGMENT_FOOTNOTE_ARGUMENTS_COL,
     KTP_AI_AUGMENT_FOOTNOTES_COL,
@@ -114,8 +117,6 @@ from ...backend.api import (
     APPENDWATCH_REPORT_ENV_NAME,
     CARD_EXCLUDED_COLUMNS,
     CODEX_SESSIONS_ROOT_ENV_NAME,
-    HTTP_GET_METHOD,
-    HTTP_POST_METHOD,
     NAMEKEY_ENV_NAME,
     SERVER_PORT,
     _PushValidationError,
@@ -136,8 +137,8 @@ from ...backend.helpers.data_models.query_response import (
     QueryResponse,
 )
 from ...backend.helpers.data_models.run_outcome_record import (
-    RunOutcomeRecord,
     RunOutcomeResponseBody,
+    RunOutcomeResponseRecord,
 )
 from ...backend.server import (
     CONFIG_OPTION,
@@ -157,6 +158,7 @@ from .helpers.data_models.run_event import (
 from .helpers.data_models.run_outcome import (
     RunLifecycle,
     RunOutcomeRequest,
+    _request_uuid,
 )
 
 type _Researcher = AiAugmentSingularOuterDict
@@ -464,7 +466,7 @@ class _RunCommitView(FrozenStrictModel):
     attempt_record: AgentRuntimeAttemptRecord | None
     run: Run | None
     accepted: CommittedInnerDict | None
-    run_outcome_record: RunOutcomeRecord | None
+    run_outcome_record: RunOutcomeResponseRecord | None
 
     @model_validator(mode="after")
     def validate_run_or_commit(self) -> Self:
@@ -987,10 +989,14 @@ class _BackendDatabaseClient:
         *,
         run_outcome: RunLifecycle,
         namekey: NameKey,
+        session_id: UUID | None,
+        validation_record_id: UUID | None,
     ) -> HTTPStatus:
         request_path, request_headers = RunOutcomeRequest.outbound_http(
             run_outcome=run_outcome,
             namekey=namekey,
+            session_id=session_id,
+            validation_record_id=validation_record_id,
         )
         connection = _UnixSocketHttpConnection(
             socket_path=self._socket_path,
@@ -1006,6 +1012,7 @@ class _BackendDatabaseClient:
             body = response.read()
             if response.status not in {
                 HTTPStatus.OK,
+                HTTPStatus.BAD_REQUEST,
                 HTTPStatus.INTERNAL_SERVER_ERROR,
                 HTTPStatus.CONFLICT,
             }:
@@ -1322,21 +1329,27 @@ class _BackendSupervisor:
         else:
             raise TimeoutError(Locale.BACKEND_READY_TIMEOUT)
 
-        if not self._process.ipc_only and await self.probe_pull() != status.HTTP_200_OK:
+        if not self._process.ipc_only and (await self.probe_pull())[0] != HTTPStatus.OK:
             raise RuntimeError(Locale.BACKEND_PULL_NOT_READY)
 
-    async def probe_pull(self) -> int:
-        def request_pull() -> int:
+    async def probe_pull(self) -> tuple[HTTPStatus, UUID | None]:
+        def request_pull() -> tuple[HTTPStatus, UUID | None]:
             request = urllib_request.Request(BACKEND_PULL_URL, method=HTTP_GET_METHOD)
             try:
                 response = urllib_request.urlopen(request, timeout=CONTROL_HTTP_TIMEOUT_SECONDS)
             except urllib_error.HTTPError as exc:
                 with exc:
                     exc.read()
-                    return int(exc.code)
+                    return (
+                        HTTPStatus(exc.code),
+                        _request_uuid(exc.headers.get(ETAG_HEADER), quoted=True),
+                    )
             with response:
                 response.read()
-                return int(response.status)
+                return (
+                    HTTPStatus(response.status),
+                    _request_uuid(response.headers.get(ETAG_HEADER), quoted=True),
+                )
 
         try:
             return await asyncio.to_thread(request_pull)
@@ -1861,7 +1874,10 @@ class _CodexRunner:
 
 
 class _RecordRunOutcome(Protocol):
-    def __call__(self, *, run_outcome: RunLifecycle, namekey: NameKey) -> int: ...
+    def __call__(
+        self, *, run_outcome: RunLifecycle, namekey: NameKey,
+        session_id: UUID | None, validation_record_id: UUID | None,
+    ) -> HTTPStatus: ...
 
 
 class _ControlCentreController:
@@ -2430,10 +2446,11 @@ class _ControlCentreController:
             )
         )
         # Run.lifecycle -> RunLifecycle.CODEX_EXITED
-        run_outcome = await self._finalize_run(run=run)
+        run_outcome, validation_record_id = await self._finalize_run(run=run)
         await self._record_run_outcome(
             run=run,
             run_outcome=run_outcome,
+            validation_record_id=validation_record_id,
         )
         await self._append_run_event(
             RunEvent(
@@ -2470,20 +2487,23 @@ class _ControlCentreController:
             )
         )
 
-    async def _finalize_run(self, *, run: Run) -> RunLifecycle:
+    async def _finalize_run(self, *, run: Run) -> tuple[RunLifecycle, UUID | None]:
         if run.cancel_requested_at is not None:
-            return RunLifecycle.CANCELLED
-        response_code = await self._backend.probe_pull()
+            return RunLifecycle.CANCELLED, None
+        response_code, validation_record_id = await self._backend.probe_pull()
         emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX,
                  f"Run {run.run_id} final /pull: HTTP {response_code}")
-        return (RunLifecycle.COMPLETED if response_code == status.HTTP_410_GONE
-                else RunLifecycle.FAILED)
+        return (
+            (RunLifecycle.COMPLETED, validation_record_id)
+            if response_code == HTTPStatus.GONE else (RunLifecycle.FAILED, None)
+        )
 
     async def _record_run_outcome(
         self,
         *,
         run: Run,
         run_outcome: RunLifecycle,
+        validation_record_id: UUID | None = None,
     ) -> None:
         async with self._run_outcome_lock:
             if run.run_id in self._run_outcome_recorded_run_ids:
@@ -2497,6 +2517,8 @@ class _ControlCentreController:
                     self._send_run_outcome,
                     run_outcome=run_outcome,
                     namekey=run_namekey(run),
+                    session_id=run.session_id,
+                    validation_record_id=validation_record_id,
                 )
             except RuntimeError as exc:
                 message = Locale.RUN_OUTCOME_SNAPSHOT_REQUEST_FAILED_TEMPLATE.format(

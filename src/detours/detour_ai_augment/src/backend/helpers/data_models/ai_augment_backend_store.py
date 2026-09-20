@@ -29,6 +29,11 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.rep
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
+    HTTP_GET_METHOD,
+    HTTP_POST_METHOD,
+    NANOSECONDS_PER_MICROSECOND,
+    PULL_PATH,
+    PUSH_PATH,
     TEXT_ENCODING,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.validation_event import (
@@ -40,10 +45,11 @@ from src.helpers.data_models.http_request_log import (
     redact_http_request_log_query,
 )
 from src.helpers.duckdb_utils import materialize_innerdicts_from_rows_table
+from src.helpers.vars import KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
 
 from .ai_augment_cas import AiAugmentCAS
 from .ai_augment_context import AiAugmentBackendContext
-from .commit_event import COMMIT_PATH
+from .commit_event import COMMIT_PATH, BackendCommitRecord
 from .committed_innerdict import CommittedInnerDict
 from .model_http_interceptor import (
     ModelHttpInterceptor,
@@ -54,7 +60,6 @@ from .model_http_interceptor import (
 )
 from .query_response import AgentRuntimeAttemptRecord, QueryResponse
 from .request_response_records import (
-    PullRequestRecord,
     PullResponseRecord,
     PushRequestRecord,
     PushResponseRecord,
@@ -67,8 +72,8 @@ from .response_record_promise import (
     BackendStoreException,
     ResponseRecordPromise,
 )
-from .run_outcome_record import RunOutcomeRecord
-from .validation_event import ValidationRequestBody
+from .run_outcome_record import RunOutcomeResponseRecord
+from .validation_event import BackendValidationRecord, ValidationRequestBody
 
 StoreMode = Literal["writable", "read_only"]
 logger = logging.getLogger(__name__)
@@ -120,6 +125,49 @@ class AiAugmentBackendStore(FrozenStrictModel):
     _group_scope: AbstractContextManager[AiAugmentDetourDB] | None = PrivateAttr(default=None)
     _group_push_id: UUID | None = PrivateAttr(default=None)
     _group_commit_id: UUID | None = PrivateAttr(default=None)
+
+    _current_pull_record: HttpRequestLogRecord | None = PrivateAttr(default=None)
+    _current_push_record: HttpRequestLogRecord | None = PrivateAttr(default=None)
+    _current_commit_record: BackendCommitRecord | None = PrivateAttr(default=None)
+    _current_validation_record: BackendValidationRecord | None = PrivateAttr(default=None)
+    _initial_validation_record: BackendValidationRecord | None = PrivateAttr(default=None)
+    _group_previous_records: tuple[
+        HttpRequestLogRecord | None, HttpRequestLogRecord | None,
+        BackendCommitRecord | None, BackendValidationRecord | None,
+    ] | None = PrivateAttr(default=None)
+
+    @property
+    def current_pull_record(self) -> HttpRequestLogRecord | None:
+        return self._current_pull_record
+
+    @property
+    def current_push_record(self) -> HttpRequestLogRecord | None:
+        return self._current_push_record
+
+    @property
+    def current_commit_record(self) -> BackendCommitRecord | None:
+        return self._current_commit_record
+
+    @property
+    def current_validation_record(self) -> BackendValidationRecord | None:
+        return self._current_validation_record
+
+    @property
+    def initial_validation_record(self) -> BackendValidationRecord | None:
+        return self._initial_validation_record
+
+    def _reset_current_records(self) -> None:
+        self._current_pull_record = None
+        self._current_push_record = None
+        self._current_commit_record = None
+        self._current_validation_record = None
+        self._initial_validation_record = None
+
+    def _remember_http_record(self, record: HttpRequestLogRecord) -> None:
+        if (record.method, record.path) == (HTTP_GET_METHOD, PULL_PATH):
+            self._current_pull_record = record
+        elif (record.method, record.path) == (HTTP_POST_METHOD, PUSH_PATH):
+            self._current_push_record = record
 
     @classmethod
     def _from_resources(
@@ -273,11 +321,10 @@ class AiAugmentBackendStore(FrozenStrictModel):
     def _append_request(
         self, record: HttpRequestLogRecord
     ) -> tuple[HttpRequestLogRecord, int, bytes]:
-        from src.detours.detour_ai_augment.src.backend import api
-
         self._require_writable()
         self._raise_if_failed()
-        validated = api._validated_http_record(record)
+        # Only the HTTP envelope constrains serialization. Domain validity must not gate fsync.
+        validated = HttpRequestLogRecord.model_validate_json(record.model_dump_json())
         line = (validated.model_dump_json(ensure_ascii=True) + "\n").encode(TEXT_ENCODING)
         self._replay_log._append(line, expected_offset=self._append_offset)
         self._append_offset += len(line)
@@ -312,7 +359,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
         with self._lock:
             try:
                 record, ordinal, line = self._append_request(
-                    PullRequestRecord.model_validate(request, from_attributes=True),
+                    HttpRequestLogRecord.model_validate(request, from_attributes=True),
                 )
             except Exception as exc:
                 self._failure = exc
@@ -324,8 +371,24 @@ class AiAugmentBackendStore(FrozenStrictModel):
                 self._apply_durable_record(
                     self._read_appended_record(line), ordinal=ordinal, raw_line=line
                 )
-                response = PullResponseRecord.model_validate(
-                    self._http_record(record.record_id).model_dump()
+                http_record = self._http_record(record.record_id)
+                response = PullResponseRecord(
+                    schema_version=http_record.schema_version,
+                    record_id=http_record.record_id,
+                    method=http_record.method,
+                    scheme=http_record.scheme,
+                    host=http_record.host,
+                    port=http_record.port,
+                    path=http_record.path,
+                    query=http_record.query,
+                    request_headers=http_record.request_headers,
+                    request_body=http_record.request_body,
+                    response_code=http_record.response_code,
+                    response_headers=http_record.response_headers,
+                    response_body=http_record.response_body,
+                    received_at_unix_usec=http_record.received_at_unix_usec,
+                    ready_to_respond_at_unix_usec=http_record.ready_to_respond_at_unix_usec,
+                    duration_usec=http_record.duration_usec,
                 )
                 return ResponseRecordPromise[PullResponseRecord]._resolved(
                     BackendStoreAcknowledgment.ACK,
@@ -344,8 +407,8 @@ class AiAugmentBackendStore(FrozenStrictModel):
     ) -> ResponseRecordPromise[PushResponseRecord]:
         with self._lock:
             try:
-                selected = PushRequestRecord.model_validate(request, from_attributes=True)
-                record, ordinal, line = self._append_request(selected)
+                captured = HttpRequestLogRecord.model_validate(request, from_attributes=True)
+                record, ordinal, line = self._append_request(captured)
             except Exception as exc:
                 self._failure = exc
                 return ResponseRecordPromise[PushResponseRecord]._resolved(
@@ -353,12 +416,29 @@ class AiAugmentBackendStore(FrozenStrictModel):
                     (None, BackendStoreException._from_exception(exc)),
                 )
             try:
+                selected = PushRequestRecord.model_validate(request, from_attributes=True)
                 self._apply_durable_record(
                     self._read_appended_record(line), ordinal=ordinal, raw_line=line
                 )
                 if record.response_code != HTTPStatus.ACCEPTED:
+                    http_record = self._http_record(record.record_id)
                     response = PushResponseRecord(
-                        **self._http_record(record.record_id).model_dump(),
+                        schema_version=http_record.schema_version,
+                        record_id=http_record.record_id,
+                        method=http_record.method,
+                        scheme=http_record.scheme,
+                        host=http_record.host,
+                        port=http_record.port,
+                        path=http_record.path,
+                        query=http_record.query,
+                        request_headers=http_record.request_headers,
+                        request_body=http_record.request_body,
+                        response_code=http_record.response_code,
+                        response_headers=http_record.response_headers,
+                        response_body=http_record.response_body,
+                        received_at_unix_usec=http_record.received_at_unix_usec,
+                        ready_to_respond_at_unix_usec=http_record.ready_to_respond_at_unix_usec,
+                        duration_usec=http_record.duration_usec,
                         commit_record=None,
                         validation_record=None,
                     )
@@ -395,8 +475,24 @@ class AiAugmentBackendStore(FrozenStrictModel):
                 stored_commit.record_id,
             )
             attempt = self._validate_commit(stored_commit.record_id)
+            http_record = self._http_record(request.record_id)
             return PushResponseRecord(
-                **self._http_record(request.record_id).model_dump(),
+                schema_version=http_record.schema_version,
+                record_id=http_record.record_id,
+                method=http_record.method,
+                scheme=http_record.scheme,
+                host=http_record.host,
+                port=http_record.port,
+                path=http_record.path,
+                query=http_record.query,
+                request_headers=http_record.request_headers,
+                request_body=http_record.request_body,
+                response_code=http_record.response_code,
+                response_headers=http_record.response_headers,
+                response_body=http_record.response_body,
+                received_at_unix_usec=http_record.received_at_unix_usec,
+                ready_to_respond_at_unix_usec=http_record.ready_to_respond_at_unix_usec,
+                duration_usec=http_record.duration_usec,
                 commit_record=attempt.attempt.commit_record,
                 validation_record=attempt.validation_record,
             )
@@ -414,19 +510,10 @@ class AiAugmentBackendStore(FrozenStrictModel):
         try:
             selected = QueryRequestRecord.model_validate(request, from_attributes=True)
             snapshot = self._query_snapshot()
-            ready = time.time_ns() // 1000
-            response = QueryResponseRecord(
-                **(
-                    selected.model_dump()
-                    | {
-                        "response_code": HTTPStatus.OK,
-                        "response_headers": {"Content-Type": "application/json"},
-                        "response_body": snapshot.model_dump_json(),
-                        "ready_to_respond_at_unix_usec": ready,
-                        "duration_usec": ready - (selected.received_at_unix_usec or ready),
-                    }
-                ),
-                query_response_body=snapshot,
+            response = QueryResponseRecord.from_query_request(
+                selected,
+                body=snapshot,
+                ready_to_respond_at_unix_usec=time.time_ns() // NANOSECONDS_PER_MICROSECOND,
             )
             return ResponseRecordPromise[QueryResponseRecord]._resolved(
                 BackendStoreAcknowledgment.NAK,
@@ -441,7 +528,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
     def run_outcome(
         self,
         request: BackendComponent.RunOutcomeRequestRecordProperty,
-    ) -> ResponseRecordPromise[RunOutcomeRecord]:
+    ) -> ResponseRecordPromise[RunOutcomeResponseRecord]:
         from src.detours.detour_ai_augment.src.backend import api
 
         try:
@@ -451,14 +538,14 @@ class AiAugmentBackendStore(FrozenStrictModel):
                     raise RuntimeError(Locale.RUN_OUTCOME_PUSH_GROUP_OVERLAP)
                 record = api._run_outcome_record(self, self._runtime, selected)
                 stored = self._append_authoritative_record(record)
-                response = RunOutcomeRecord.from_http_request_log_record(stored)
-            return ResponseRecordPromise[RunOutcomeRecord]._resolved(
+                response = RunOutcomeResponseRecord.from_http_request_log_record(stored)
+            return ResponseRecordPromise[RunOutcomeResponseRecord]._resolved(
                 BackendStoreAcknowledgment.NAK,
                 (response, None),
             )
         except Exception as exc:
             self._failure = exc
-            return ResponseRecordPromise[RunOutcomeRecord]._resolved(
+            return ResponseRecordPromise[RunOutcomeResponseRecord]._resolved(
                 BackendStoreAcknowledgment.NAK,
                 (None, BackendStoreException._from_exception(exc)),
             )
@@ -480,7 +567,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
 
         from .ai_augment_singular_outer_dict import AiAugmentSingularOuterDict
         from .query_response import QueryResponse
-        from .run_outcome_record import RunOutcomeRecord
+        from .run_outcome_record import RunOutcomeResponseRecord
 
         runtime = self._runtime
         if runtime is None:
@@ -516,7 +603,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
                 except (api._PushValidationError, ValidationError, ValueError) as exc:
                     raise api._PushConfigurationError(Locale.REPLAY_PROJECTION_CONFLICT) from exc
 
-            def run_outcome_records() -> tuple[RunOutcomeRecord, ...]:
+            def run_outcome_records() -> tuple[RunOutcomeResponseRecord, ...]:
                 placeholders = ", ".join("?" for _path in RUN_OUTCOME_PATHS)
                 rows = conn.execute(
                     f"SELECT {api.AUTHORITATIVE_RECORD_PAYLOAD_COLUMN} "
@@ -525,7 +612,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
                     f"AND {api.AUTHORITATIVE_RECORD_PATH_COLUMN} IN ({placeholders}) "
                     f"ORDER BY {api.AUTHORITATIVE_RECORD_ORDINAL_COLUMN}",
                     [
-                        api.HTTP_POST_METHOD,
+                        HTTP_POST_METHOD,
                         *(path.value for path in sorted(RUN_OUTCOME_PATHS)),
                     ],
                 ).fetchall()
@@ -534,7 +621,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
                         HttpRequestLogRecord.model_validate_json(str(row[0])) for row in rows
                     )
                     return tuple(
-                        RunOutcomeRecord.from_http_request_log_record(record)
+                        RunOutcomeResponseRecord.from_http_request_log_record(record)
                         for record in records
                     )
                 except (ValidationError, ValueError) as exc:
@@ -610,7 +697,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
             return self._append_authoritative_record(record)
         target = urlsplit(request.url or "")
         record = HttpRequestLogRecord(
-            schema_version="1.1",
+            schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
             method=request.method or "",
             scheme=target.scheme,
             host=target.hostname or "",
@@ -663,6 +750,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
                             self,
                             self._runtime,
                             commit,
+                            initial_validation_record=self._initial_validation_record,
                         )
                 except ModelHttpRequired as exc:
                     missing = exc
@@ -673,28 +761,15 @@ class AiAugmentBackendStore(FrozenStrictModel):
             if missing is not None:
                 self._capture_model_http(missing)
                 continue
-            submission = evaluated.submission
             body = ValidationRequestBody(
-                commit_id=commit_id,
+                commit_record=commit,
                 post_commit_validation=evaluated.attempt.post_commit_validation,
-                submission_type=None
-                if submission is None
-                else (
-                    "StandardizedSubmission"
-                    if type(submission).__name__ == "StandardizedSubmission"
-                    else "Submission"
+                initial_validation_record=self._initial_validation_record,
+                openalex_ror_records=tuple(
+                    self._http_record(record_id) for record_id in http.record_ids
                 ),
-                submission=(
-                    None
-                    if submission is None
-                    else submission.model_dump(
-                        mode="json",
-                        by_alias=True,
-                    )
-                ),
-                http_record_ids=http.record_ids,
             )
-            self._append_authoritative_record(body.http_record(commit))
+            self._append_authoritative_record(body.http_record())
             # Return the applied, serialized result, not the speculative evaluation.
             with self._lock:
                 row = self._execute(
@@ -873,6 +948,10 @@ class AiAugmentBackendStore(FrozenStrictModel):
         )
 
     def _begin_group(self, push_id: UUID) -> None:
+        self._group_previous_records = (
+            self._current_pull_record, self._current_push_record,
+            self._current_commit_record, self._current_validation_record,
+        )
         self._group_push_id = push_id
         self._group_commit_id = None
         scope = self._detour_db.writable()
@@ -891,6 +970,12 @@ class AiAugmentBackendStore(FrozenStrictModel):
             self._transaction_active = False
             self._group_scope = None
             self._group_records.clear()
+            if self._group_previous_records is not None:
+                (
+                    self._current_pull_record, self._current_push_record,
+                    self._current_commit_record, self._current_validation_record,
+                ) = self._group_previous_records
+            self._group_previous_records = None
             self._group_push_id = None
             self._group_commit_id = None
             scope.__exit__(None, None, None)
@@ -917,6 +1002,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
         scope.__exit__(None, None, None)
         self._log_offset += sum(len(line) for _, line in self._group_records)
         self._next_line_number = self._group_records[-1][0] + 1
+        self._group_previous_records = None
         self._group_records.clear()
         self._group_push_id = None
         self._group_commit_id = None
@@ -939,7 +1025,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
         if runtime is None:
             raise RuntimeError(Locale.STORE_RUNTIME_UNAVAILABLE)
         accepted_push = (record.method, record.path, record.response_code) == (
-            "POST", "/push", HTTPStatus.ACCEPTED,
+            HTTP_POST_METHOD, PUSH_PATH, HTTPStatus.ACCEPTED,
         )
         if accepted_push:
             if self._group_scope is not None:
@@ -949,7 +1035,8 @@ class AiAugmentBackendStore(FrozenStrictModel):
             self._group_records.append((ordinal, raw_line))
             self._insert_projected_http_record(record, line_number=ordinal, raw_line=raw_line)
             record = self._http_record(record.record_id)
-            if (record.method, record.path) == ("POST", COMMIT_PATH):
+            self._remember_http_record(record)
+            if (record.method, record.path) == (HTTP_POST_METHOD, COMMIT_PATH):
                 commit = api._backend_commit_record(self, record)
                 if (
                     self._group_commit_id is not None
@@ -957,27 +1044,42 @@ class AiAugmentBackendStore(FrozenStrictModel):
                 ):
                     raise ValueError(Locale.REPLAY_PUSH_GROUP_COMMIT_MISMATCH)
                 self._group_commit_id = record.record_id
-            elif (record.method, record.path) == ("POST", VALIDATE_PATH):
+                self._current_commit_record = commit
+            elif (record.method, record.path) == (HTTP_POST_METHOD, VALIDATE_PATH):
                 validation = BackendValidationRecord.from_http_request_log_record(record)
-                if validation.validation_request_body.commit_id != self._group_commit_id:
+                body = validation.validation_request_body
+                if body.commit_record.record_id != self._group_commit_id:
                     raise ValueError(Locale.REPLAY_PUSH_GROUP_VALIDATION_MISMATCH)
+                initial = body.initial_validation_record
+                if initial is None:
+                    # An explicit root in replay marks a recorded Backend lifecycle boundary.
+                    if self._initial_validation_record is not None and not self._rebuilding:
+                        raise ValueError(Locale.VALIDATION_INITIAL_LINK_INVALID)
+                elif initial != self._initial_validation_record:
+                    raise ValueError(Locale.VALIDATION_INITIAL_LINK_INVALID)
                 applied, commit_database = api._apply_validation_record(self, runtime, record)
                 if not commit_database:
                     self._reset_group_projection()
                 self._insert_attempt_record(applied)
                 self._finish_group()
-            elif record.method == "POST" and record.path in RUN_OUTCOME_PATHS:
+                if initial is None:
+                    self._initial_validation_record = validation
+                self._current_validation_record = validation
+            elif record.method == HTTP_POST_METHOD and record.path in RUN_OUTCOME_PATHS:
                 raise ValueError(Locale.REPLAY_PUSH_GROUP_OUTCOME_EARLY)
             return
-        if (record.method, record.path) in {("POST", COMMIT_PATH), ("POST", VALIDATE_PATH)}:
+        if (record.method, record.path) in {
+            (HTTP_POST_METHOD, COMMIT_PATH), (HTTP_POST_METHOD, VALIDATE_PATH),
+        }:
             raise ValueError(Locale.REPLAY_PUSH_GROUP_MISSING)
         with self._transaction():
             self._insert_projected_http_record(record, line_number=ordinal, raw_line=raw_line)
             record = self._http_record(record.record_id)
-            if record.method == "POST" and record.path in RUN_OUTCOME_PATHS:
-                outcome = RunOutcomeRecord.from_http_request_log_record(record)
+            if record.method == HTTP_POST_METHOD and record.path in RUN_OUTCOME_PATHS:
+                outcome = RunOutcomeResponseRecord.from_http_request_log_record(record)
                 api._verify_run_outcome_record(self, runtime, outcome)
                 api._apply_run_outcome_record(self, outcome)
+        self._remember_http_record(record)
         self._next_line_number = ordinal + 1
         self._log_offset += len(raw_line)
 
@@ -1151,6 +1253,7 @@ def _initialize_backend_store(
         raise ValueError(Locale.STORE_STARTUP_CONFIRMATION_REQUIRED)
     if new:
         store._rebuild_from_log(runtime, reset_confirmed=confirmed, confirm_replay=confirm_replay)
+    store._reset_current_records()
     try:
         store._loop = asyncio.get_running_loop()
     except RuntimeError:

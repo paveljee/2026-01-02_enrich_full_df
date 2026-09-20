@@ -22,7 +22,7 @@ from threading import Barrier, Event, Lock
 from types import SimpleNamespace
 from typing import Any, Self, cast, get_args
 from urllib.parse import urlsplit
-from uuid import UUID
+from uuid import UUID, uuid7
 from zipfile import ZipFile
 
 import duckdb
@@ -77,24 +77,29 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     AI_AUGMENT_STANDARDIZED_COLUMNS,
     BACKEND_STORE_CLOSED_CLEANLY,
     DOCX_COLUMNS,
+    HTTP_GET_METHOD,
+    HTTP_POST_METHOD,
     KTP_AI_AUGMENT_ACADEMIC_POSITIONS_COL,
     KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL,
     KTP_AI_AUGMENT_COMMENTS_COL,
     KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL,
-    KTP_AI_AUGMENT_COMMIT_REQUEST_BODY_COL,
     KTP_AI_AUGMENT_EDUCATION_COL,
     KTP_AI_AUGMENT_GENDER_COL,
     KTP_AI_AUGMENT_LINKS_COL,
     KTP_AI_AUGMENT_PLACE_OF_RESIDENCE_COL,
     KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL,
     KTP_AI_AUGMENT_RESEARCHER_AUTHOR_COL,
+    KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_RECORD_COL,
     KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL,
     MAP_SUBSET_0_TO_BATCH_KEY,
+    PULL_PATH,
+    PUSH_PATH,
     PYDANTIC_TO_PASTE_SOURCE,
     REPLAY_LOG_KEY,
     TEXT_ENCODING,
     AiAugmentCohort,
     AiAugmentIneligibilityCategory,
+    ContentType,
 )
 from src.detours.detour_ai_augment.protected.tests.pytest_plugin import (
     PythonProcess,
@@ -124,7 +129,6 @@ from src.detours.detour_ai_augment.src.backend.helpers.data_models.commit_event 
     CodexRolloutRecord,
     CodexSessionRecord,
     CommitRequestBody,
-    PostCommitValidation,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.query_response import (
     AgentRuntimeAttemptRecord,
@@ -138,14 +142,18 @@ from src.detours.detour_ai_augment.src.backend.helpers.data_models.response_reco
     BackendStoreException,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.run_outcome_record import (
-    RunOutcomeRecord,
+    RunOutcomeResponseRecord,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.validation_event import (  # noqa: E501
     BackendValidationRecord,
+    PostCommitValidation,
     ValidationRequestBody,
 )
 from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models import (
     run_outcome as run_outcome_models,
+)
+from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.dashboard_query_snapshot import (  # noqa: E501
+    DashboardQuerySnapshot,
 )
 from src.helpers.architecture import FrozenStrictModel
 from src.helpers.cards import build_cards
@@ -252,8 +260,8 @@ V2_CITE_TEXT = "Profile: José García — Senior\nResearcher"
 V2_EXACT_EXCERPT = "José García — Senior\nResearcher"
 TEST_NAMEKEY = '{"ktp.first_name": "A.", "ktp.last_name": "Sheikh"}'
 TEST_NAMEKEY_MODEL = NameKey.from_json_key(TEST_NAMEKEY)
-TEST_RUN_ID = UUID("019fa457-aac5-7652-8669-9d571206e7cb")
-TEST_SECOND_RUN_ID = UUID("019fa457-aac5-7652-8669-9d571206e7cc")
+TEST_ORIGINAL_PULL_RECORD_ID = UUID("019fa457-aac5-7652-8669-9d571206e7cb")
+TEST_SECOND_ORIGINAL_PULL_RECORD_ID = UUID("019fa457-aac5-7652-8669-9d571206e7cc")
 TEST_ATTEMPT_TIMESTAMP = datetime(2026, 8, 14, tzinfo=timezone.utc)
 TEST_AUTHORITATIVE_REQUEST_BODY = b'{"probe":true}'
 TEST_AUTHORITATIVE_RESPONSE_BODY = {"accepted": True}
@@ -306,20 +314,20 @@ def deterministic_uuid7(value: str) -> UUID:
 
 def retry_attempt_records(
     *,
-    run_id: UUID,
+    original_pull_record_id: UUID,
     session_id: UUID,
     attempt_id: str,
 ) -> tuple[HttpRequestLogRecord, BackendCommitRecord]:
     pull_record = persisted_http_record(
-        record_id=run_id,
-        method=api.HTTP_GET_METHOD,
-        path=api.PULL_PATH,
+        record_id=original_pull_record_id,
+        method=HTTP_GET_METHOD,
+        path=PULL_PATH,
         response_code=status.HTTP_200_OK,
     )
     push_record = persisted_http_record(
         record_id=deterministic_uuid7(attempt_id + "-push"),
-        method=api.HTTP_POST_METHOD,
-        path=api.PUSH_PATH,
+        method=HTTP_POST_METHOD,
+        path=PUSH_PATH,
         response_code=status.HTTP_202_ACCEPTED,
         request_body="{}",
     )
@@ -342,7 +350,7 @@ def retry_attempt_records(
 def process_retry_attempt_for_test(
     conn: duckdb.DuckDBPyConnection,
     *,
-    run_id: UUID,
+    original_pull_record_id: UUID,
     namekey: NameKey,
     session_id: UUID,
     attempt_id: str,
@@ -351,7 +359,7 @@ def process_retry_attempt_for_test(
     assessment: api._EvidenceAssessment,
 ) -> tuple[str, ...]:
     original_pull, commit_record = retry_attempt_records(
-        run_id=run_id,
+        original_pull_record_id=original_pull_record_id,
         session_id=session_id,
         attempt_id=attempt_id,
     )
@@ -370,7 +378,7 @@ HAANEN_REJECTED_ATTEMPT_ID = "20260813T141344_678596Z_8ef1f6372b4a48d9a3b1279736
 HAANEN_ACCEPTED_ATTEMPT_ID = "20260813T141450_027429Z_044215aac8c44200882531b10a2acfa6"
 HAANEN_ROLLOUT_FILENAME = "rollout-2026-08-13T10-08-12-019ffb73-b72c-7812-9fc4-d56fdf3ea1a2.jsonl"
 HAANEN_SESSION_ID = UUID("019ffb73-b72c-7812-9fc4-d56fdf3ea1a2")
-HAANEN_RUN_ID = UUID("019ffb73-b72c-7812-9fc4-d56fdf3ea1a3")
+HAANEN_ORIGINAL_PULL_RECORD_ID = UUID("019ffb73-b72c-7812-9fc4-d56fdf3ea1a3")
 HAANEN_NAMEKEY = '{"ktp.first_name": "J. B.", "ktp.last_name": "Haanen"}'
 HAANEN_NAMEKEY_MODEL = NameKey.from_json_key(HAANEN_NAMEKEY)
 HAANEN_TOOL_CALL_TYPE = "custom_tool_call"
@@ -1355,10 +1363,6 @@ def api_push_capture(
     )
     monkeypatch.setattr(api, "BACKEND_SESSION_ID", UUID(OPERATOR_CAPTURED_SESSION_ID))
     monkeypatch.setattr(api, "BACKEND_LIFECYCLE", BackendLifecycle.READY)
-    monkeypatch.setattr(api, "BACKEND_CURRENT_PULL_RECORD", None)
-    monkeypatch.setattr(api, "BACKEND_PENDING_PULL_RECORD", None)
-    monkeypatch.setattr(api, "BACKEND_LATEST_PUSH_RECORD", None)
-    monkeypatch.setattr(api, "BACKEND_PUSH_RESPONSE_RECORD", None)
     monkeypatch.setattr(api, "AUTHORITATIVE_BACKGROUND_TASKS", set())
     return rollout, configuration
 
@@ -1626,8 +1630,8 @@ def api_application_for_test(
     app.state.runtime = runtime
     app.state.store = store
     app.state.request_gate = server._BackendRequestGate()
-    app.get(api.PULL_PATH)(server.pull)
-    app.post(api.PUSH_PATH)(server.push)
+    app.get(PULL_PATH)(server.pull)
+    app.post(PUSH_PATH)(server.push)
     app.add_middleware(server._BackendRequestMiddleware)
     return app
 
@@ -1769,11 +1773,7 @@ def assert_captured_operator_push_contour(
         ),
     )
     monkeypatch.setattr(subprocess, "run", fake_subprocess_run)
-    monkeypatch.setattr(api, "BACKEND_CURRENT_PULL_RECORD", None)
-    monkeypatch.setattr(api, "BACKEND_PENDING_PULL_RECORD", None)
-    monkeypatch.setattr(api, "BACKEND_LATEST_PUSH_RECORD", None)
     monkeypatch.setattr(api, "BACKEND_SESSION_ID", UUID(OPERATOR_CAPTURED_SESSION_ID))
-    monkeypatch.setattr(api, "BACKEND_PUSH_RESPONSE_RECORD", None)
     monkeypatch.setattr(api, "BACKEND_LIFECYCLE", BackendLifecycle.READY)
     with writable_backend_store(runtime) as store:
 
@@ -1787,34 +1787,34 @@ def assert_captured_operator_push_contour(
             initial_pull = await authoritative_api_exchange(
                 runtime,
                 store,
-                api.HTTP_GET_METHOD,
-                api.PULL_PATH,
+                HTTP_GET_METHOD,
+                PULL_PATH,
             )
             baseline_push = await authoritative_api_exchange(
                 runtime,
                 store,
-                api.HTTP_POST_METHOD,
-                api.PUSH_PATH,
+                HTTP_POST_METHOD,
+                PUSH_PATH,
                 json.dumps(operator_retry_baseline(accepted_push)).encode(),
             )
             retry_pull = await authoritative_api_exchange(
                 runtime,
                 store,
-                api.HTTP_GET_METHOD,
-                api.PULL_PATH,
+                HTTP_GET_METHOD,
+                PULL_PATH,
             )
             accepted = await authoritative_api_exchange(
                 runtime,
                 store,
-                api.HTTP_POST_METHOD,
-                api.PUSH_PATH,
+                HTTP_POST_METHOD,
+                PUSH_PATH,
                 read_bytes(accepted_push_path),
             )
             gone_pull = await authoritative_api_exchange(
                 runtime,
                 store,
-                api.HTTP_GET_METHOD,
-                api.PULL_PATH,
+                HTTP_GET_METHOD,
+                PULL_PATH,
             )
             return initial_pull, baseline_push, retry_pull, accepted, gone_pull
 
@@ -1836,7 +1836,7 @@ def assert_captured_operator_push_contour(
         pushes = tuple(
             record
             for record in authoritative_records
-            if (record.method, record.path) == (api.HTTP_POST_METHOD, api.PUSH_PATH)
+            if (record.method, record.path) == (HTTP_POST_METHOD, PUSH_PATH)
         )
         commits = tuple(
             record
@@ -1856,7 +1856,7 @@ def assert_captured_operator_push_contour(
         assert accepted_commit.pull_record.record_id == next(
             record.record_id
             for record in reversed(authoritative_records)
-            if (record.method, record.path) == (api.HTTP_GET_METHOD, api.PULL_PATH)
+            if (record.method, record.path) == (HTTP_GET_METHOD, PULL_PATH)
             and record.response_code == status.HTTP_200_OK
         )
 
@@ -1892,11 +1892,11 @@ def assert_captured_operator_push_contour(
         assert len(selected_singular_outerdict.committed_innerdicts) == 1
         committed = selected_singular_outerdict.committed_innerdicts[0]
         assert committed.commit_record.record_id == commits[-1].record_id
-        assert committed.text(
-            KTP_AI_AUGMENT_COMMIT_REQUEST_BODY_COL
-        ) == (
-            accepted_commit.model_dump_json()
+        stored_outcome = committed.run_outcome_response_record
+        assert committed.text(KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_RECORD_COL) == (
+            stored_outcome.model_dump_json()
         )
+        assert stored_outcome.run_outcome_response_body.commit_record_id == commits[-1].record_id
         cards = build_cards(
             api.selected_card_outer_dict(selected_singular_outerdict),
             total_draws=runtime.pipeline_config.total_draws,
@@ -1906,13 +1906,9 @@ def assert_captured_operator_push_contour(
         assert len(cards) == 1
         card_markdown = next(iter(cards.values()))
         assert "Professor Sir Aziz Sheikh OBE" in card_markdown
-        commit_record_id_position = card_markdown.index(KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL)
-        commit_request_body_position = card_markdown.index(
-            KTP_AI_AUGMENT_COMMIT_REQUEST_BODY_COL
-        )
-        assert commit_record_id_position < commit_request_body_position
+        assert KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_RECORD_COL in card_markdown
         assert str(commits[-1].record_id) in card_markdown
-        assert accepted_commit.model_dump_json() in card_markdown
+        assert stored_outcome.model_dump_json() in card_markdown
 
 
 def test_captured_operator_push_generates_commit_and_exact_410_response(
@@ -1952,8 +1948,6 @@ def test_http_adapter_persists_complete_exchange_before_sending(
     caplog.set_level(logging.INFO)
     monkeypatch.setattr(api, "BACKEND_LIFECYCLE", state)
     monkeypatch.setattr(api, "BACKEND_SESSION_ID", TEST_SESSION_ID)
-    monkeypatch.setattr(api, "BACKEND_PENDING_PULL_RECORD", None)
-    monkeypatch.setattr(api, "BACKEND_CURRENT_PULL_RECORD", None)
     monkeypatch.setattr(api, "AUTHORITATIVE_BACKGROUND_TASKS", set())
     messages: list[Message] = []
     persisted: list[HttpRequestLogRecord] = []
@@ -2083,14 +2077,14 @@ def test_synthetic_commit_matches_the_readme_contour_exactly(tmp_path: Path) -> 
     session_id = UUID("019d0000-0000-7000-8000-000000000003")
     pull_record = persisted_http_record(
         record_id=pull_record_id,
-        method=api.HTTP_GET_METHOD,
-        path=api.PULL_PATH,
+        method=HTTP_GET_METHOD,
+        path=PULL_PATH,
         response_code=status.HTTP_200_OK,
     )
     push_record = persisted_http_record(
         record_id=push_record_id,
-        method=api.HTTP_POST_METHOD,
-        path=api.PUSH_PATH,
+        method=HTTP_POST_METHOD,
+        path=PUSH_PATH,
         response_code=status.HTTP_202_ACCEPTED,
         request_body="{}",
     )
@@ -2168,14 +2162,14 @@ def test_commit_request_body_contract_is_strict_canonical_and_losslessly_resolve
     session_id = UUID("019d0000-0000-7000-8000-000000000003")
     pull_record = persisted_http_record(
         record_id=pull_record_id,
-        method=api.HTTP_GET_METHOD,
-        path=api.PULL_PATH,
+        method=HTTP_GET_METHOD,
+        path=PULL_PATH,
         response_code=status.HTTP_200_OK,
     )
     push_record = persisted_http_record(
         record_id=push_record_id,
-        method=api.HTTP_POST_METHOD,
-        path=api.PUSH_PATH,
+        method=HTTP_POST_METHOD,
+        path=PUSH_PATH,
         response_code=status.HTTP_202_ACCEPTED,
         request_body="{}",
     )
@@ -2242,6 +2236,7 @@ def test_run_outcome_snapshot_captures_fresh_rollout_and_appendwatch(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     api_runtime: AiAugmentBackendContext,
+    api_store: AiAugmentBackendStore,
 ) -> None:
     session_id = UUID("019d0000-0000-7000-8000-000000000011")
     pull_record_id = UUID("019d0000-0000-7000-8000-000000000012")
@@ -2296,20 +2291,17 @@ def test_run_outcome_snapshot_captures_fresh_rollout_and_appendwatch(
     monkeypatch.setattr(api, "BACKEND_SESSION_ID", session_id)
     pull_record = persisted_http_record(
         record_id=pull_record_id,
-        method=api.HTTP_GET_METHOD,
-        path=api.PULL_PATH,
+        method=HTTP_GET_METHOD,
+        path=PULL_PATH,
         response_code=status.HTTP_200_OK,
     )
     push_record = persisted_http_record(
         record_id=push_record_id,
-        method=api.HTTP_POST_METHOD,
-        path=api.PUSH_PATH,
-        response_code=status.HTTP_202_ACCEPTED,
+        method=HTTP_POST_METHOD,
+        path=PUSH_PATH,
+        response_code=HTTPStatus.CONFLICT,
         request_body="{}",
     )
-    monkeypatch.setattr(api, "BACKEND_CURRENT_PULL_RECORD", pull_record)
-    monkeypatch.setattr(api, "BACKEND_PENDING_PULL_RECORD", None)
-    monkeypatch.setattr(api, "BACKEND_LATEST_PUSH_RECORD", push_record)
     monkeypatch.setattr(
         ipc,
         "_run_outcome_snapshot_configuration",
@@ -2324,9 +2316,12 @@ def test_run_outcome_snapshot_captures_fresh_rollout_and_appendwatch(
         request_headers={
             run_outcome_models.NAME_KEY_HEADER: api.name_key_header(TEST_NAMEKEY_MODEL),
         },
-        request_body=b"",
+        request_body=None,
     )
-    snapshot, failures = ipc._capture_run_outcome_snapshot(api_runtime, request)
+    with api_store._writable(api_runtime):
+        api_store._append_authoritative_record(pull_record)
+        api_store._append_authoritative_record(push_record)
+        snapshot, failures = ipc._capture_run_outcome_snapshot(api_runtime, request, api_store)
 
     assert failures == ()
     assert snapshot == RunOutcomeRequestRecord(
@@ -2356,6 +2351,11 @@ def test_run_outcome_snapshot_captures_fresh_rollout_and_appendwatch(
 
 @pytest.mark.parametrize("path", tuple(run_outcome_models.RunOutcomePath))
 @pytest.mark.parametrize("complete_capture", (False, True))
+@pytest.mark.parametrize("identity", (
+    "matching", "missing_namekey", "malformed_namekey", "wrong_namekey",
+    "missing_session", "malformed_session", "wrong_session", "no_backend_session",
+    "unexpected_body", "binary_body", "unexpected_query", "unexpected_sourcekey",
+))
 def test_run_outcome_http_exchange_is_logged_and_replays_as_raw_history(
     monkeypatch: pytest.MonkeyPatch,
     api_runtime: AiAugmentBackendContext,
@@ -2363,9 +2363,10 @@ def test_run_outcome_http_exchange_is_logged_and_replays_as_raw_history(
     threaded_loop: asyncio.Runner,
     path: run_outcome_models.RunOutcomePath,
     complete_capture: bool,
+    identity: str,
 ) -> None:
     session = CodexSessionRecord(
-        session_id=TEST_SESSION_ID if complete_capture else None,
+        session_id=None if identity == "no_backend_session" else TEST_SESSION_ID,
         codex_rollout_record=(
             CodexRolloutRecord(sha256="b" * 64, size=10, line_count=2)
             if complete_capture else None
@@ -2381,6 +2382,7 @@ def test_run_outcome_http_exchange_is_logged_and_replays_as_raw_history(
 
     def capture(
         runtime: AiAugmentBackendContext, request: run_outcome_models.RunOutcomeRequest,
+        store: AiAugmentBackendStore,
     ) -> tuple[RunOutcomeRequestRecord, tuple[Exception, ...]]:
         assert runtime is api_runtime
         record = RunOutcomeRequestRecord(
@@ -2393,13 +2395,38 @@ def test_run_outcome_http_exchange_is_logged_and_replays_as_raw_history(
 
     # Isolate external evidence capture only; real IPC, Store, log, DB and replay execute.
     monkeypatch.setattr(ipc, "_capture_run_outcome_snapshot", capture)
+    headers = {
+        run_outcome_models.NAME_KEY_HEADER: api.name_key_header(TEST_NAMEKEY_MODEL),
+        "Session-ID": str(TEST_SESSION_ID),
+    }
+    if identity == "missing_namekey":
+        del headers[run_outcome_models.NAME_KEY_HEADER]
+    elif identity == "malformed_namekey":
+        headers[run_outcome_models.NAME_KEY_HEADER] = "not a NameKey"
+    elif identity == "wrong_namekey":
+        headers[run_outcome_models.NAME_KEY_HEADER] = api.name_key_header(
+            NameKey(**{KTP_FIRST_NAME_COL: "Another", KTP_LAST_NAME_COL: "Researcher"})
+        )
+    elif identity == "missing_session":
+        del headers["Session-ID"]
+    elif identity == "malformed_session":
+        headers["Session-ID"] = "not a UUID"
+    elif identity == "wrong_session":
+        headers["Session-ID"] = str(uuid7())
+    elif identity == "unexpected_sourcekey":
+        headers["SourceKey"] = "unexpected"
+    request_body = (
+        b"unexpected" if identity == "unexpected_body" else
+        b"\xff" if identity == "binary_body" else b""
+    )
+    query = "?unexpected=1" if identity == "unexpected_query" else ""
     request = requests.Request(
-        "POST", f"http://invalid{path}",
-        headers={run_outcome_models.NAME_KEY_HEADER: api.name_key_header(TEST_NAMEKEY_MODEL)},
+        "POST", f"http://invalid{path}{query}", headers=headers, data=request_body,
     ).prepare()
     expected_status = (
+        HTTPStatus.BAD_REQUEST
+        if identity != "matching" or path is run_outcome_models.RunOutcomePath.COMPLETED else
         HTTPStatus.INTERNAL_SERVER_ERROR if not complete_capture else
-        HTTPStatus.CONFLICT if path is run_outcome_models.RunOutcomePath.COMPLETED else
         HTTPStatus.OK
     )
     with api_store._writable(api_runtime):
@@ -2412,7 +2439,7 @@ def test_run_outcome_http_exchange_is_logged_and_replays_as_raw_history(
         assert len(records) == 1
         record = records[0][0]
         assert api_store._http_record(record.record_id) == record
-        validated = RunOutcomeRecord.from_http_request_log_record(record)
+        validated = RunOutcomeResponseRecord.from_http_request_log_record(record)
         body = validated.run_outcome_response_body
         assert body.run_outcome_record_id == record.record_id == captured[0].record_id
         assert body.commit_record_id is None and body.validation_record_id is None
@@ -2420,11 +2447,13 @@ def test_run_outcome_http_exchange_is_logged_and_replays_as_raw_history(
         assert body.codex_session_record == session
         assert record.record_id.version == 7
         assert record.path == path
-        assert record.request_headers == {
-            run_outcome_models.NAME_KEY_HEADER: api.name_key_header(TEST_NAMEKEY_MODEL),
-        }
+        assert record.request_headers == headers
         assert record.request_headers == captured[0].request_headers
-        assert record.request_body is None
+        assert record.request_body == (
+            "unexpected" if identity == "unexpected_body" else
+            '{"encoding":"base64","data":"/w=="}' if identity == "binary_body" else None
+        )
+        assert record.query == ("unexpected=1" if identity == "unexpected_query" else "")
         assert record.response_code == expected_status
         assert record.response_body == response.text == body.model_dump_json()
         assert record.received_at_unix_usec == captured[0].received_at_unix_usec
@@ -2435,7 +2464,12 @@ def test_run_outcome_http_exchange_is_logged_and_replays_as_raw_history(
             }
         else:
             assert record.response_headers is None
-        live_snapshot = api_store._query_snapshot().model_dump_json()
+        live_query = api_store._query_snapshot()
+        DashboardQuerySnapshot(query_response=live_query)
+        assert all(
+            not person.committed_innerdicts for person in live_query.ai_augment_singular_outerdicts
+        )
+        live_snapshot = live_query.model_dump_json()
 
     live_database = logical_database_snapshot(api_store._detour_db_path)
     replay = AiAugmentBackendStore._from_resources(
@@ -2475,14 +2509,14 @@ def test_failed_post_commit_work_projects_atomically_without_domain_changes(
     push_record_id = UUID("019d0000-0000-7000-8000-000000000062")
     pull_record = persisted_http_record(
         record_id=pull_record_id,
-        method=api.HTTP_GET_METHOD,
-        path=api.PULL_PATH,
+        method=HTTP_GET_METHOD,
+        path=PULL_PATH,
         response_code=status.HTTP_200_OK,
     )
     push_record = persisted_http_record(
         record_id=push_record_id,
-        method=api.HTTP_POST_METHOD,
-        path=api.PUSH_PATH,
+        method=HTTP_POST_METHOD,
+        path=PUSH_PATH,
         response_code=status.HTTP_202_ACCEPTED,
         request_body="{}",
     )
@@ -2515,11 +2549,10 @@ def test_failed_post_commit_work_projects_atomically_without_domain_changes(
 
     monkeypatch.setattr(api, "_apply_validation_record", fail_after_domain_write)
     validation_record = ValidationRequestBody(
-        commit_id=record.record_id,
+        commit_record=record,
         post_commit_validation=failed_attempt_record.attempt.post_commit_validation,
-        submission_type=None,
-        submission=None,
-    ).http_record(record)
+        initial_validation_record=None,
+    ).http_record()
     with api_store._writable(api_runtime):
         with api_store._transaction():
             api_store._execute("CREATE TABLE domain_probe (value INTEGER)")
@@ -3313,7 +3346,7 @@ def test_v2_retry_baseline_replays_and_accepts_only_the_exact_correction(
         assert (
             process_retry_attempt_for_test(
                 connection,
-                run_id=TEST_RUN_ID,
+                original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
                 namekey=TEST_NAMEKEY_MODEL,
                 session_id=TEST_SESSION_ID,
                 attempt_id="attempt-near",
@@ -3334,7 +3367,7 @@ def test_v2_retry_baseline_replays_and_accepts_only_the_exact_correction(
         assert (
             process_retry_attempt_for_test(
                 connection,
-                run_id=TEST_RUN_ID,
+                original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
                 namekey=TEST_NAMEKEY_MODEL,
                 session_id=TEST_SESSION_ID,
                 attempt_id="attempt-exact",
@@ -3389,7 +3422,7 @@ def test_v2_retry_rejects_changed_tokens_and_repeats_near_guidance(
         assert (
             process_retry_attempt_for_test(
                 connection,
-                run_id=TEST_RUN_ID,
+                original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
                 namekey=TEST_NAMEKEY_MODEL,
                 session_id=TEST_SESSION_ID,
                 attempt_id="attempt-near",
@@ -3411,7 +3444,7 @@ def test_v2_retry_rejects_changed_tokens_and_repeats_near_guidance(
         )
         changed_violations = process_retry_attempt_for_test(
             connection,
-            run_id=TEST_RUN_ID,
+            original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
             namekey=TEST_NAMEKEY_MODEL,
             session_id=TEST_SESSION_ID,
             attempt_id="attempt-changed",
@@ -3424,7 +3457,7 @@ def test_v2_retry_rejects_changed_tokens_and_repeats_near_guidance(
         )
         repeated_violations = process_retry_attempt_for_test(
             connection,
-            run_id=TEST_RUN_ID,
+            original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
             namekey=TEST_NAMEKEY_MODEL,
             session_id=TEST_SESSION_ID,
             attempt_id="attempt-near-again",
@@ -3478,7 +3511,7 @@ def test_retry_preserves_exact_items_inside_a_rejected_field(
         assert (
             process_retry_attempt_for_test(
                 connection,
-                run_id=TEST_RUN_ID,
+                original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
                 namekey=TEST_NAMEKEY_MODEL,
                 session_id=TEST_SESSION_ID,
                 attempt_id="attempt-baseline",
@@ -3500,7 +3533,7 @@ def test_retry_preserves_exact_items_inside_a_rejected_field(
         )
         violations = process_retry_attempt_for_test(
             connection,
-            run_id=TEST_RUN_ID,
+            original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
             namekey=TEST_NAMEKEY_MODEL,
             session_id=TEST_SESSION_ID,
             attempt_id="attempt-changed",
@@ -3546,7 +3579,7 @@ def test_retry_preserves_fully_verified_fields_and_complete_evidence_counts(
         assert (
             process_retry_attempt_for_test(
                 connection,
-                run_id=TEST_RUN_ID,
+                original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
                 namekey=TEST_NAMEKEY_MODEL,
                 session_id=TEST_SESSION_ID,
                 attempt_id="attempt-baseline",
@@ -3568,7 +3601,7 @@ def test_retry_preserves_fully_verified_fields_and_complete_evidence_counts(
         )
         violations = process_retry_attempt_for_test(
             connection,
-            run_id=TEST_RUN_ID,
+            original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
             namekey=TEST_NAMEKEY_MODEL,
             session_id=TEST_SESSION_ID,
             attempt_id="attempt-changed",
@@ -3637,7 +3670,7 @@ def test_unmatched_evidence_can_be_replaced_or_explicitly_withdrawn(
         assert (
             process_retry_attempt_for_test(
                 connection,
-                run_id=TEST_RUN_ID,
+                original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
                 namekey=TEST_NAMEKEY_MODEL,
                 session_id=TEST_SESSION_ID,
                 attempt_id="attempt-baseline",
@@ -3659,7 +3692,7 @@ def test_unmatched_evidence_can_be_replaced_or_explicitly_withdrawn(
         )
         violations = process_retry_attempt_for_test(
             connection,
-            run_id=TEST_RUN_ID,
+            original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
             namekey=TEST_NAMEKEY_MODEL,
             session_id=TEST_SESSION_ID,
             attempt_id="attempt-retry",
@@ -3706,7 +3739,7 @@ def test_v2_near_evidence_cannot_be_withdrawn(
         assert (
             process_retry_attempt_for_test(
                 connection,
-                run_id=TEST_RUN_ID,
+                original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
                 namekey=TEST_NAMEKEY_MODEL,
                 session_id=TEST_SESSION_ID,
                 attempt_id="attempt-baseline",
@@ -3728,7 +3761,7 @@ def test_v2_near_evidence_cannot_be_withdrawn(
         )
         violations = process_retry_attempt_for_test(
             connection,
-            run_id=TEST_RUN_ID,
+            original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
             namekey=TEST_NAMEKEY_MODEL,
             session_id=TEST_SESSION_ID,
             attempt_id="attempt-withdrawal",
@@ -3746,7 +3779,7 @@ def test_v2_near_evidence_cannot_be_withdrawn(
     )
 
 
-def test_retry_baselines_survive_restart_and_remain_isolated_by_run(
+def test_retry_baselines_survive_restart_and_remain_isolated_by_original_pull(
     tmp_path: Path,
     backend_test_paths: BackendTestPaths,
 ) -> None:
@@ -3767,9 +3800,9 @@ def test_retry_baselines_survive_restart_and_remain_isolated_by_run(
         database_path=database_path,
     )
     try:
-        for run_id, attempt_id, body in (
-            (TEST_RUN_ID, "run-one-baseline", near_body),
-            (TEST_SECOND_RUN_ID, "run-two-baseline", unmatched_body),
+        for original_pull_record_id, attempt_id, body in (
+            (TEST_ORIGINAL_PULL_RECORD_ID, "run-one-baseline", near_body),
+            (TEST_SECOND_ORIGINAL_PULL_RECORD_ID, "run-two-baseline", unmatched_body),
         ):
             submission = Submission.model_validate(body)
             assessment = api.assess_submission_evidence(
@@ -3781,7 +3814,7 @@ def test_retry_baselines_survive_restart_and_remain_isolated_by_run(
             assert (
                 process_retry_attempt_for_test(
                     first_connection,
-                    run_id=run_id,
+                    original_pull_record_id=original_pull_record_id,
                     namekey=TEST_NAMEKEY_MODEL,
                     session_id=TEST_SESSION_ID,
                     attempt_id=attempt_id,
@@ -3809,14 +3842,14 @@ def test_retry_baselines_survive_restart_and_remain_isolated_by_run(
             rollout_filename=TEST_ROLLOUT_FILENAME,
             codex_match_version=2,
         )
-        for run_id, attempt_id in (
-            (TEST_RUN_ID, "run-one-exact"),
-            (TEST_SECOND_RUN_ID, "run-two-exact"),
+        for original_pull_record_id, attempt_id in (
+            (TEST_ORIGINAL_PULL_RECORD_ID, "run-one-exact"),
+            (TEST_SECOND_ORIGINAL_PULL_RECORD_ID, "run-two-exact"),
         ):
             assert (
                 process_retry_attempt_for_test(
                     second_connection,
-                    run_id=run_id,
+                    original_pull_record_id=original_pull_record_id,
                     namekey=TEST_NAMEKEY_MODEL,
                     session_id=TEST_SESSION_ID,
                     attempt_id=attempt_id,
@@ -3828,9 +3861,9 @@ def test_retry_baselines_survive_restart_and_remain_isolated_by_run(
             )
         baseline_rows = second_connection.execute(
             f"""
-            SELECT {api.CODEX_RETRY_RUN_ID_COL}
+            SELECT {api.CODEX_RETRY_ORIGINAL_PULL_RECORD_ID_COL}
             FROM {api.CODEX_RETRY_BASELINE_TABLE}
-            ORDER BY {api.CODEX_RETRY_RUN_ID_COL}
+            ORDER BY {api.CODEX_RETRY_ORIGINAL_PULL_RECORD_ID_COL}
             """
         ).fetchall()
         accepted_rows = second_connection.execute(
@@ -3843,7 +3876,10 @@ def test_retry_baselines_survive_restart_and_remain_isolated_by_run(
     finally:
         second_connection.close()
 
-    assert baseline_rows == sorted([(str(TEST_RUN_ID),), (str(TEST_SECOND_RUN_ID),)])
+    assert baseline_rows == sorted([
+        (str(TEST_ORIGINAL_PULL_RECORD_ID),),
+        (str(TEST_SECOND_ORIGINAL_PULL_RECORD_ID),),
+    ])
     assert accepted_rows == (2,)
 
 
@@ -3875,7 +3911,7 @@ def test_concurrent_first_rejections_cannot_replace_the_baseline(
             barrier.wait()
             with operation_lock:
                 original_pull, _commit_record = retry_attempt_records(
-                    run_id=TEST_RUN_ID,
+                    original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
                     session_id=TEST_SESSION_ID,
                     attempt_id=attempt_id,
                 )
@@ -3899,7 +3935,7 @@ def test_concurrent_first_rejections_cannot_replace_the_baseline(
                 assert (
                     process_retry_attempt_for_test(
                         connection,
-                        run_id=TEST_RUN_ID,
+                        original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
                         namekey=TEST_NAMEKEY_MODEL,
                         session_id=TEST_SESSION_ID,
                         attempt_id=attempt_id,
@@ -3983,7 +4019,7 @@ def test_corrupt_applied_audit_fails_as_configuration_error(
             assert (
                 process_retry_attempt_for_test(
                     connection,
-                    run_id=TEST_RUN_ID,
+                    original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
                     namekey=TEST_NAMEKEY_MODEL,
                     session_id=TEST_SESSION_ID,
                     attempt_id=attempt_id,
@@ -4008,7 +4044,7 @@ def test_corrupt_applied_audit_fails_as_configuration_error(
         ):
             process_retry_attempt_for_test(
                 connection,
-                run_id=TEST_RUN_ID,
+                original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
                 namekey=TEST_NAMEKEY_MODEL,
                 session_id=TEST_SESSION_ID,
                 attempt_id="audit-third",
@@ -4065,7 +4101,7 @@ def test_historical_haanen_retry_preserves_verified_evidence_roundtrip(
         assert (
             process_retry_attempt_for_test(
                 connection,
-                run_id=HAANEN_RUN_ID,
+                original_pull_record_id=HAANEN_ORIGINAL_PULL_RECORD_ID,
                 namekey=HAANEN_NAMEKEY_MODEL,
                 session_id=HAANEN_SESSION_ID,
                 attempt_id=HAANEN_REJECTED_ATTEMPT_ID,
@@ -4095,7 +4131,7 @@ def test_historical_haanen_retry_preserves_verified_evidence_roundtrip(
         )
         archived_retry_violations = process_retry_attempt_for_test(
             connection,
-            run_id=HAANEN_RUN_ID,
+            original_pull_record_id=HAANEN_ORIGINAL_PULL_RECORD_ID,
             namekey=HAANEN_NAMEKEY_MODEL,
             session_id=HAANEN_SESSION_ID,
             attempt_id=HAANEN_ACCEPTED_ATTEMPT_ID,
@@ -4165,7 +4201,7 @@ def test_historical_haanen_retry_preserves_verified_evidence_roundtrip(
         assert (
             process_retry_attempt_for_test(
                 connection,
-                run_id=HAANEN_RUN_ID,
+                original_pull_record_id=HAANEN_ORIGINAL_PULL_RECORD_ID,
                 namekey=HAANEN_NAMEKEY_MODEL,
                 session_id=HAANEN_SESSION_ID,
                 attempt_id=f"{HAANEN_ACCEPTED_ATTEMPT_ID}-ideal",
@@ -4546,8 +4582,8 @@ def test_replay_log_rejects_incomplete_tail_without_repair(
     replay_log = tmp_path / "replay.jsonl"
     complete_record = persisted_http_record(
         record_id=UUID("019d0000-0000-7000-8000-000000000020"),
-        method=api.HTTP_GET_METHOD,
-        path=api.PULL_PATH,
+        method=HTTP_GET_METHOD,
+        path=PULL_PATH,
         response_code=status.HTTP_200_OK,
     )
     value = (complete_record.model_dump_json() + '\n{"unfinished":').encode(TEXT_ENCODING)
@@ -4919,9 +4955,11 @@ def test_backend_singleton_lock_is_independent_of_replay_log(
 def test_backend_startup_prepares_source_rows_for_initial_pull(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    api_store: AiAugmentBackendStore,
+    api_runtime: AiAugmentBackendContext,
     backend_test_paths: BackendTestPaths,
 ) -> None:
-    base_runtime = runtime_for_test(tmp_path, backend_test_paths)
+    base_runtime = api_runtime
     singular_outerdict = ai_augment_singular_outerdict("A.", "Sheikh")
     factory_calls: list[AiAugmentBackendContext] = []
 
@@ -4950,7 +4988,7 @@ def test_backend_startup_prepares_source_rows_for_initial_pull(
 
     monkeypatch.setattr(api, "BACKEND_LIFECYCLE", BackendLifecycle.READY)
     response = api._pull_response(
-        requests.Request("GET", "http://testserver/pull").prepare(), runtime,
+        requests.Request("GET", "http://testserver/pull").prepare(), runtime, api_store,
     )
 
     assert factory_calls == [runtime]
@@ -5518,6 +5556,7 @@ def test_repeated_researcher_rows_materialize_as_distinct_innerdicts() -> None:
                 KTP_FIRST_NAME_COL: "A.",
                 KTP_LAST_NAME_COL: "Sheikh",
                 KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL: attempt_id,
+                KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_RECORD_COL: f"outcome for {attempt_id}",
                 KTP_AI_AUGMENT_COMMENTS_COL: None,
             })
             return values
@@ -5533,10 +5572,14 @@ def test_repeated_researcher_rows_materialize_as_distinct_innerdicts() -> None:
         innerdicts_text = innerdicts_row[0]
         innerdicts = tuple(json.loads(line) for line in innerdicts_text.splitlines())
         assert [row[KTP_FRAGMENT_COL] for row in innerdicts] == [100, 101]
-        assert [row[KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL] for row in innerdicts] == [
-            "attempt-1",
-            "attempt-2",
+        assert all(KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL not in row for row in innerdicts)
+        assert [row[KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_RECORD_COL] for row in innerdicts] == [
+            "outcome for attempt-1", "outcome for attempt-2",
         ]
+        assert connection.execute(
+            f'SELECT "{KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL}" FROM {api.CODEX_OUTPUT_ROWS_TABLE} '
+            f'ORDER BY "{KTP_FRAGMENT_COL}"'
+        ).fetchall() == [("attempt-1",), ("attempt-2",)]
 
         with pytest.raises(api._PushValidationError, match="already accepted"):
             api.append_codex_output(store_for_connection(connection), output_row(101, "attempt-3"))
@@ -5545,107 +5588,75 @@ def test_repeated_researcher_rows_materialize_as_distinct_innerdicts() -> None:
 
 
 def test_push_acceptance_changes_state_before_post_commit_work(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, api_runtime: AiAugmentBackendContext,
+    api_store: AiAugmentBackendStore,
 ) -> None:
-    pull_record_id = UUID("019d0000-0000-7000-8000-000000000010")
     pull_record = persisted_http_record(
-        record_id=pull_record_id,
-        method=api.HTTP_GET_METHOD,
-        path=api.PULL_PATH,
-        response_code=status.HTTP_200_OK,
+        record_id=uuid7(), method=HTTP_GET_METHOD, path=PULL_PATH,
+        response_code=HTTPStatus.OK,
     )
-    session_id = UUID("019d0000-0000-7000-8000-000000000011")
     monkeypatch.setattr(api, "BACKEND_LIFECYCLE", BackendLifecycle.READY)
-    monkeypatch.setattr(api, "BACKEND_CURRENT_PULL_RECORD", pull_record)
-    monkeypatch.setattr(api, "BACKEND_PENDING_PULL_RECORD", None)
-    monkeypatch.setattr(api, "BACKEND_PUSH_RESPONSE_RECORD", None)
-    monkeypatch.setattr(api, "BACKEND_SESSION_ID", session_id)
-
-    response = api._push_response(
-        requests.Request("POST", "http://invalid/push", data=b"{}").prepare(),
-    )
-
-    assert response.status_code == status.HTTP_202_ACCEPTED
-    assert response.headers[api.LOCATION_HEADER] == api.PULL_PATH
-    assert api.BACKEND_LIFECYCLE is BackendLifecycle.BUSY
-    assert api.BACKEND_PENDING_PULL_RECORD is pull_record
-    assert api.BACKEND_CURRENT_PULL_RECORD is None
-
-    duplicate = api._push_response(
-        requests.Request("POST", "http://invalid/push", data=b"{}").prepare(),
-    )
-
-    assert duplicate.status_code == status.HTTP_409_CONFLICT
-    assert duplicate.headers[api.LOCATION_HEADER] == api.PULL_PATH
+    monkeypatch.setattr(api, "BACKEND_SESSION_ID", TEST_SESSION_ID)
+    with api_store._writable(api_runtime):
+        api_store._append_authoritative_record(pull_record)
+        captured_pull = api_store.current_pull_record
+        assert captured_pull is not None
+        request = requests.Request("POST", "http://invalid/push", data=b"{}").prepare()
+        response = api._push_response(request, api_store, captured_pull)
+        assert response.status_code == HTTPStatus.ACCEPTED
+        assert response.headers[api.LOCATION_HEADER] == PULL_PATH
+        assert api.BACKEND_LIFECYCLE is BackendLifecycle.BUSY
+        assert api_store.current_pull_record is captured_pull
+        assert api_store.current_push_record is None
+        duplicate = api._push_response(request, api_store, api_store.current_pull_record)
+        assert duplicate.status_code == HTTPStatus.CONFLICT
+        assert duplicate.headers[api.LOCATION_HEADER] == PULL_PATH
 
 
 def test_retry_push_requires_a_persisted_current_pull_before_acceptance(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-    api_runtime: AiAugmentBackendContext,
+    caplog: pytest.LogCaptureFixture, api_runtime: AiAugmentBackendContext,
     api_store: AiAugmentBackendStore,
+    api_push_capture: tuple[CodexRolloutRecord, api._PushConfiguration],
     threaded_loop: asyncio.Runner,
 ) -> None:
-    prior_pending_pull_record_id = UUID("019d0000-0000-7000-8000-000000000030")
-    session_id = UUID("019d0000-0000-7000-8000-000000000032")
-    prior_pending_pull, prior_commit = retry_attempt_records(
-        run_id=prior_pending_pull_record_id,
-        session_id=session_id,
-        attempt_id="prior-retry",
-    )
-    validation = ValidationRequestBody(
-        commit_id=prior_commit.record_id,
-        post_commit_validation=PostCommitValidation(
-            stage=BackendLifecycle.PYDANTIC_VALIDATION,
-            result=BackendLifecycle.REJECTED, detail="retry",
-        ),
-        submission_type=None, submission=None,
-    ).http_record(prior_commit)
-    prior_attempt_record = PushResponseRecord(
-        **prior_commit.commit_request_body.push_record.model_dump(),
-        commit_record=prior_commit,
-        validation_record=BackendValidationRecord.from_http_request_log_record(validation),
-    )
-    monkeypatch.setattr(api, "BACKEND_LIFECYCLE", BackendLifecycle.RETRY)
-    monkeypatch.setattr(api, "BACKEND_CURRENT_PULL_RECORD", None)
-    monkeypatch.setattr(
-        api,
-        "BACKEND_PENDING_PULL_RECORD",
-        prior_pending_pull,
-    )
-    monkeypatch.setattr(api, "BACKEND_PUSH_RESPONSE_RECORD", prior_attempt_record)
-    monkeypatch.setattr(api, "BACKEND_SESSION_ID", session_id)
-    request = requests.Request("POST", "http://invalid/push", data=b"{}").prepare()
-
-    premature = api._push_response(request)
-
-    assert premature.status_code == status.HTTP_409_CONFLICT
-    assert premature.headers[api.LOCATION_HEADER] == api.PULL_PATH
-    assert premature.json() == {"detail": Locale.CONFIGURATION_ERROR_DETAIL}
-    assert api.BACKEND_LIFECYCLE is BackendLifecycle.RETRY
-    assert api.BACKEND_CURRENT_PULL_RECORD is None
-    assert api.BACKEND_PENDING_PULL_RECORD is prior_pending_pull
-    assert api.BACKEND_PUSH_RESPONSE_RECORD is prior_attempt_record
-    assert Locale.PUSH_CURRENT_PULL_REQUIRED_LOG in caplog.messages
-
-    with api_store._writable(api_runtime):
-        pulled = threaded_loop.run(api.authoritative_pull(
+    async def exercise() -> None:
+        api_store._loop = asyncio.get_running_loop()
+        await api.authoritative_pull(
             requests.Request("GET", "http://invalid/pull").prepare(), api_runtime, api_store,
-        ))
-        assert pulled.status_code == HTTPStatus.OK
-        persisted_pull = api.BACKEND_CURRENT_PULL_RECORD
-        assert persisted_pull is not None
-        assert api_store._http_record(persisted_pull.record_id).model_dump_json() == (
-            persisted_pull.model_dump_json()
         )
-
-    accepted = api._push_response(request)
-    assert accepted.status_code == status.HTTP_202_ACCEPTED
-    assert accepted.headers[api.LOCATION_HEADER] == api.PULL_PATH
-    assert api.BACKEND_LIFECYCLE is BackendLifecycle.BUSY
-    assert api.BACKEND_CURRENT_PULL_RECORD is None
-    assert api.BACKEND_PENDING_PULL_RECORD is persisted_pull
-    assert api.BACKEND_PUSH_RESPONSE_RECORD is None
+        initial = api_store.current_pull_record
+        request = requests.Request("POST", "http://invalid/push", data=b"{}").prepare()
+        pushed = await api.authoritative_push(request, api_store)
+        assert pushed.status_code == HTTPStatus.ACCEPTED
+        await asyncio.gather(*tuple(api.AUTHORITATIVE_BACKGROUND_TASKS))
+        commit, validation = api_store.current_commit_record, api_store.current_validation_record
+        assert commit is not None and validation is not None
+        assert api.BACKEND_LIFECYCLE is BackendLifecycle.RETRY
+        premature = api._push_response(request, api_store, api_store.current_pull_record)
+        assert premature.status_code == HTTPStatus.CONFLICT
+        assert premature.headers[api.LOCATION_HEADER] == PULL_PATH
+        assert premature.json() == {"detail": Locale.CONFIGURATION_ERROR_DETAIL}
+        assert api.BACKEND_LIFECYCLE is BackendLifecycle.RETRY
+        assert api_store.current_pull_record is initial
+        assert api_store.current_commit_record is commit
+        assert api_store.current_validation_record is validation
+        assert Locale.PUSH_CURRENT_PULL_REQUIRED_LOG in caplog.messages
+        pulled = await api.authoritative_pull(
+            requests.Request("GET", "http://invalid/pull").prepare(), api_runtime, api_store,
+        )
+        assert pulled.status_code == HTTPStatus.OK
+        persisted_pull = api_store.current_pull_record
+        assert persisted_pull is not None and persisted_pull is not initial
+        assert api_store._http_record(persisted_pull.record_id) == persisted_pull
+        accepted = api._push_response(request, api_store, persisted_pull)
+        assert accepted.status_code == HTTPStatus.ACCEPTED
+        assert accepted.headers[api.LOCATION_HEADER] == PULL_PATH
+        assert BackendLifecycle(api.BACKEND_LIFECYCLE) is BackendLifecycle.BUSY
+        assert api_store.current_pull_record is persisted_pull
+        assert api_store.current_commit_record is commit
+        assert api_store.current_validation_record is validation
+    with api_store._writable(api_runtime):
+        threaded_loop.run(exercise())
 
 
 @pytest.mark.parametrize(
@@ -5656,32 +5667,28 @@ def test_retry_push_requires_a_persisted_current_pull_before_acceptance(
     ),
 )
 def test_push_configuration_failures_remain_internal_errors(
-    monkeypatch: pytest.MonkeyPatch,
-    workflow_status: BackendLifecycle,
-    session_id: UUID | None,
+    monkeypatch: pytest.MonkeyPatch, workflow_status: BackendLifecycle,
+    session_id: UUID | None, api_runtime: AiAugmentBackendContext,
+    api_store: AiAugmentBackendStore,
 ) -> None:
-    pull_record_id = UUID("019d0000-0000-7000-8000-000000000040")
     pull_record = persisted_http_record(
-        record_id=pull_record_id,
-        method=api.HTTP_GET_METHOD,
-        path=api.PULL_PATH,
-        response_code=status.HTTP_200_OK,
+        record_id=uuid7(), method=HTTP_GET_METHOD, path=PULL_PATH,
+        response_code=HTTPStatus.OK,
     )
     monkeypatch.setattr(api, "BACKEND_LIFECYCLE", workflow_status)
-    monkeypatch.setattr(api, "BACKEND_CURRENT_PULL_RECORD", pull_record)
-    monkeypatch.setattr(api, "BACKEND_PENDING_PULL_RECORD", None)
-    monkeypatch.setattr(api, "BACKEND_PUSH_RESPONSE_RECORD", None)
     monkeypatch.setattr(api, "BACKEND_SESSION_ID", session_id)
-
-    response = api._push_response(
-        requests.Request("POST", "http://invalid/push", data=b"{}").prepare(),
-    )
-
-    assert response.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
-    assert api.LOCATION_HEADER not in response.headers
-    assert api.BACKEND_LIFECYCLE is workflow_status
-    assert api.BACKEND_CURRENT_PULL_RECORD is pull_record
-    assert api.BACKEND_PENDING_PULL_RECORD is None
+    with api_store._writable(api_runtime):
+        api_store._append_authoritative_record(pull_record)
+        captured_pull = api_store.current_pull_record
+        response = api._push_response(
+            requests.Request("POST", "http://invalid/push", data=b"{}").prepare(),
+            api_store, captured_pull,
+        )
+        assert response.status_code == HTTPStatus.INTERNAL_SERVER_ERROR
+        assert api.LOCATION_HEADER not in response.headers
+        assert api.BACKEND_LIFECYCLE is workflow_status
+        assert api_store.current_pull_record is captured_pull
+        assert api_store.current_push_record is None
 
 
 def test_accepted_push_is_committed_only_after_its_public_record(
@@ -5708,7 +5715,7 @@ def test_accepted_push_is_committed_only_after_its_public_record(
         await api.authoritative_pull(
             requests.Request("GET", "http://invalid/pull").prepare(), api_runtime, api_store,
         )
-        initial_pull = api.BACKEND_CURRENT_PULL_RECORD
+        initial_pull = api_store.current_pull_record
         assert initial_pull is not None
         try:
             response = await api.authoritative_push(
@@ -5718,11 +5725,11 @@ def test_accepted_push_is_committed_only_after_its_public_record(
                 api_store,
             )
             assert response.status_code == HTTPStatus.ACCEPTED
-            assert response.headers[api.LOCATION_HEADER] == api.PULL_PATH
+            assert response.headers[api.LOCATION_HEADER] == PULL_PATH
             assert await asyncio.to_thread(entered.wait, 5)
             busy_lifecycle = api.BACKEND_LIFECYCLE
             assert busy_lifecycle is BackendLifecycle.BUSY
-            accepted_push = api.BACKEND_LATEST_PUSH_RECORD
+            accepted_push = api_store.current_push_record
             assert accepted_push is not None
             records = api._authoritative_log_records(Path(api_store._replay_log).read_bytes())
             assert [item.path for item, _ in records] == ["/pull", "/push"]
@@ -5736,6 +5743,7 @@ def test_accepted_push_is_committed_only_after_its_public_record(
             )
             assert busy.status_code == HTTPStatus.SERVICE_UNAVAILABLE
             assert busy.headers[api.RETRY_AFTER_HEADER] == api.RETRY_AFTER_SECONDS
+            assert "ETag" not in busy.headers
         finally:
             release.set()
             await asyncio.gather(*tuple(api.AUTHORITATIVE_BACKGROUND_TASKS))
@@ -5750,20 +5758,22 @@ def test_accepted_push_is_committed_only_after_its_public_record(
         assert committed.commit_request_body.pull_record.record_id == initial_pull.record_id
         assert committed.commit_request_body.push_record.record_id == completed_records[1].record_id
         assert committed.commit_request_body.codex_session_record.codex_rollout_record == rollout
-        assert api.BACKEND_PUSH_RESPONSE_RECORD is not None
-        assert api.BACKEND_PUSH_RESPONSE_RECORD.commit_record == committed
+        assert api_store.current_commit_record is not None
+        assert api_store.current_commit_record == committed
         assert api.BACKEND_LIFECYCLE is BackendLifecycle.COMPLETED
 
     with api_store._writable(api_runtime):
         threaded_loop.run(asyncio.wait_for(exercise(), timeout=20))
 
 
+@pytest.mark.parametrize("etag", ("matching", "missing", "wrong", "malformed"))
 def test_persisted_push_becomes_latest_run_outcome_snapshot_provenance(
     api_runtime: AiAugmentBackendContext,
     api_store: AiAugmentBackendStore,
     api_push_capture: tuple[CodexRolloutRecord, api._PushConfiguration],
     threaded_loop: asyncio.Runner,
     monkeypatch: pytest.MonkeyPatch,
+    etag: str,
 ) -> None:
     _rollout, configuration = api_push_capture
     monkeypatch.setattr(ipc, "_run_outcome_snapshot_configuration", lambda _session: configuration)
@@ -5773,7 +5783,7 @@ def test_persisted_push_becomes_latest_run_outcome_snapshot_provenance(
         await api.authoritative_pull(
             requests.Request("GET", "http://invalid/pull").prepare(), api_runtime, api_store,
         )
-        pull = api.BACKEND_CURRENT_PULL_RECORD
+        pull = api_store.current_pull_record
         assert pull is not None
         response = await api.authoritative_push(
             requests.Request("POST", "http://invalid/push", json=valid_submission_body()).prepare(),
@@ -5781,17 +5791,25 @@ def test_persisted_push_becomes_latest_run_outcome_snapshot_provenance(
         )
         assert response.status_code == HTTPStatus.ACCEPTED
         await asyncio.gather(*tuple(api.AUTHORITATIVE_BACKGROUND_TASKS))
-        push = api.BACKEND_LATEST_PUSH_RECORD
+        push = api_store.current_push_record
         assert push is not None
         assert api_store._http_record(push.record_id).model_dump_json() == push.model_dump_json()
+        assert api_store.current_validation_record is not None
+        headers = {
+            run_outcome_models.NAME_KEY_HEADER: api.name_key_header(TEST_NAMEKEY_MODEL),
+            "Session-ID": str(OPERATOR_CAPTURED_SESSION_ID),
+        }
+        if etag != "missing":
+            headers["ETag"] = (
+                f'"{api_store.current_validation_record.record_id}"' if etag == "matching" else
+                f'"{uuid7()}"' if etag == "wrong" else "invalid"
+            )
         request = run_outcome_models.RunOutcomeRequest.from_http_request(
             received_at_unix_usec=1, method="POST", scheme="http", host="invalid",
-            port=None, path="/completed", query="", request_body=b"",
-            request_headers={
-                run_outcome_models.NAME_KEY_HEADER: api.name_key_header(TEST_NAMEKEY_MODEL),
-            },
+            port=None, path="/completed", query="", request_body=None,
+            request_headers=headers,
         )
-        snapshot, failures = ipc._capture_run_outcome_snapshot(api_runtime, request)
+        snapshot, failures = ipc._capture_run_outcome_snapshot(api_runtime, request, api_store)
         assert failures == ()
         assert snapshot.push_record_id == push.record_id
         assert snapshot.pull_record_id == pull.record_id
@@ -5799,10 +5817,12 @@ def test_persisted_push_becomes_latest_run_outcome_snapshot_provenance(
         promise = api_store.run_outcome(snapshot)
         response_record, error = await promise.response_record()
         assert error is None and response_record is not None
-        assert response_record.response_code == HTTPStatus.OK
-        assert api.BACKEND_PUSH_RESPONSE_RECORD is not None
-        commit = api.BACKEND_PUSH_RESPONSE_RECORD.commit_record
-        validation = api.BACKEND_PUSH_RESPONSE_RECORD.validation_record
+        assert response_record.response_code == (
+            HTTPStatus.OK if etag == "matching" else HTTPStatus.BAD_REQUEST
+        )
+        assert api_store.current_commit_record is not None
+        commit = api_store.current_commit_record
+        validation = api_store.current_validation_record
         assert commit is not None and validation is not None
         body = response_record.run_outcome_response_body
         assert body.commit_record_id == commit.record_id
@@ -5812,7 +5832,7 @@ def test_persisted_push_becomes_latest_run_outcome_snapshot_provenance(
             response_record.model_dump_json()
         )
         (researcher,) = api_store._query_snapshot().ai_augment_singular_outerdicts
-        assert len(researcher.committed_innerdicts) == 1
+        assert len(researcher.committed_innerdicts) == int(etag == "matching")
 
     with api_store._writable(api_runtime):
         threaded_loop.run(asyncio.wait_for(exercise(), timeout=20))
@@ -5852,8 +5872,8 @@ def test_accepted_push_finishes_after_client_or_response_send_failure(
 
         scope: Scope = {
             "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
-            "method": "POST", "scheme": "http", "path": api.PUSH_PATH,
-            "raw_path": api.PUSH_PATH.encode(), "query_string": b"",
+            "method": "POST", "scheme": "http", "path": PUSH_PATH,
+            "raw_path": PUSH_PATH.encode(), "query_string": b"",
             "headers": [(b"content-type", b"application/json")],
             "server": ("invalid", 80), "client": ("client", 1234), "root_path": "",
         }
@@ -5886,31 +5906,31 @@ def test_accepted_push_finishes_after_client_or_response_send_failure(
             BackendLifecycle.ACCEPTED,
             BackendLifecycle.ACCEPTED,
             HTTPStatus.GONE,
-            api.MEDIA_TYPE_WITH_CHARSET,
+            ContentType.NDJSON_UTF8,
         ),
         (
             BackendLifecycle.REJECTED,
             BackendLifecycle.PYDANTIC_VALIDATION,
             HTTPStatus.OK,
-            api.MARKDOWN_MEDIA_TYPE,
+            ContentType.MARKDOWN,
         ),
         (
             BackendLifecycle.REJECTED,
             BackendLifecycle.DUCKDB_EVIDENCE_VALIDATION,
             HTTPStatus.OK,
-            api.MARKDOWN_MEDIA_TYPE,
+            ContentType.MARKDOWN,
         ),
         (
             BackendLifecycle.REJECTED,
             BackendLifecycle.ROLLOUT_INDEX,
             HTTPStatus.INTERNAL_SERVER_ERROR,
-            api.JSON_MEDIA_TYPE,
+            ContentType.JSON,
         ),
         (
             BackendLifecycle.REJECTED,
             BackendLifecycle.APPENDWATCH_REPORT_VALIDATION,
             HTTPStatus.INTERNAL_SERVER_ERROR,
-            api.JSON_MEDIA_TYPE,
+            ContentType.JSON,
         ),
     ),
 )
@@ -5927,7 +5947,7 @@ def test_post_commit_result_is_exposed_only_by_follow_up_pull(
 ) -> None:
     caplog.set_level(logging.INFO, logger=api.__name__)
     _pull_record, commit_record = retry_attempt_records(
-        run_id=UUID("019d0000-0000-7000-8000-000000000050"),
+        original_pull_record_id=UUID("019d0000-0000-7000-8000-000000000050"),
         session_id=UUID("019d0000-0000-7000-8000-000000000051"),
         attempt_id=f"{result.value}-{stage.value}",
     )
@@ -5939,16 +5959,23 @@ def test_post_commit_result_is_exposed_only_by_follow_up_pull(
         else None
     )
     validation = ValidationRequestBody(
-        commit_id=commit_record.record_id,
+        commit_record=commit_record,
         post_commit_validation=PostCommitValidation(
             stage=stage, result=result, detail="retry details",
+            submission_type="StandardizedSubmission" if submission is not None else None,
+            submission=(
+                None if submission is None else submission.model_dump(mode="json", by_alias=True)
+            ),
         ),
-        submission_type="StandardizedSubmission" if submission is not None else None,
-        submission=(
-            None if submission is None else submission.model_dump(mode="json", by_alias=True)
-        ),
-    ).http_record(commit_record)
-    monkeypatch.setattr(api, "BACKEND_PUSH_RESPONSE_RECORD", None)
+        initial_validation_record=None,
+    ).http_record()
+    # This existing five-case response-policy unit test supplies typed current slots.
+    # Real Store persistence/readback/410 ordering is exercised by the integration cases.
+    monkeypatch.setattr(api_store, "_current_commit_record", commit_record)
+    monkeypatch.setattr(
+        api_store, "_current_validation_record",
+        BackendValidationRecord.from_http_request_log_record(validation),
+    )
     monkeypatch.setattr(api, "BACKEND_LIFECYCLE", BackendLifecycle.BUSY)
     api.update_pull_state(PushResponseRecord(
         **commit_record.commit_request_body.push_record.model_dump(),
@@ -5960,6 +5987,10 @@ def test_post_commit_result_is_exposed_only_by_follow_up_pull(
             requests.Request("GET", "http://invalid/pull").prepare(), api_runtime, api_store,
         ))
     assert response.status_code == expected_code
+    if expected_code is HTTPStatus.GONE:
+        assert response.headers["ETag"] == f'"{validation.record_id}"'
+    else:
+        assert "ETag" not in response.headers
     assert response.headers["content-type"].startswith(expected_media_type)
     assert str(commit_record.record_id) in caplog.text
     if expected_code == HTTPStatus.INTERNAL_SERVER_ERROR:
@@ -6073,7 +6104,7 @@ def test_appendwatch_commit_lookup_requires_one_exact_filename(
 
 def test_openapi_does_not_disclose_integrity_internals() -> None:
     schema = server.app.openapi()
-    assert set(schema["paths"]) == {api.PULL_PATH, api.PUSH_PATH}
+    assert set(schema["paths"]) == {PULL_PATH, PUSH_PATH}
     push_schema = schema["paths"]["/push"]["post"]
     serialized = json.dumps(push_schema).lower()
 
@@ -6111,17 +6142,17 @@ def test_dashboard_query_uses_scoped_store_reads(
         first = query_snapshot_for_test(store, threaded_loop)
         replayed_pull = HttpRequestLogRecord(
             schema_version="1.1",
-            method=api.HTTP_GET_METHOD,
+            method=HTTP_GET_METHOD,
             scheme="http",
             host="127.0.0.1",
             port=api.SERVER_PORT,
             ready_to_respond_at_unix_usec=1,
-            path=api.PULL_PATH,
+            path=PULL_PATH,
             query="",
             request_headers={},
             request_body=None,
             response_code=status.HTTP_200_OK,
-            response_headers={"content-type": api.MEDIA_TYPE},
+            response_headers={"content-type": ContentType.NDJSON},
             response_body="{}\n",
             received_at_unix_usec=None,
             duration_usec=1,

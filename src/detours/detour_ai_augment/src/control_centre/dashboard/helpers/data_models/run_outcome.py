@@ -4,11 +4,17 @@ import re
 from collections.abc import Mapping
 from enum import StrEnum
 from typing import Literal, Self
+from uuid import UUID
 
 from pydantic import model_validator
 
 from src.detours.detour_ai_augment.protected.src.architecture import (
+    BackendComponent,
     ControlCentreComponent,
+)
+from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
+    ETAG_HEADER,
+    SESSION_ID_HEADER,
 )
 from src.helpers.architecture import FrozenStrictModel, implements
 from src.helpers.data_models import HttpRequestLogRecord, NameKey
@@ -175,10 +181,26 @@ def _http_header_value(
     return None
 
 
-@implements[ControlCentreComponent.BackendPort.RunOutcomeRequestProperty]()
+def _request_uuid(value: str | None, *, quoted: bool = False) -> UUID | None:
+    if value is None:
+        return None
+    if quoted:
+        if len(value) < 2 or value[0] != '"' or value[-1] != '"':
+            return None
+        value = value[1:-1]
+    try:
+        parsed = UUID(value)
+    except ValueError:
+        return None
+    return parsed if parsed.version == 7 and str(parsed) == value else None
+
+
+@implements[BackendComponent.RunOutcomeRequestProperty]()
 class RunOutcomeRequest(FrozenStrictModel):
     run_outcome: RunLifecycle
-    namekey: NameKey
+    namekey: NameKey | None
+    session_id: UUID | None
+    validation_record_id: UUID | None
     http_request_log_record: HttpRequestLogRecord
 
     @property
@@ -187,7 +209,7 @@ class RunOutcomeRequest(FrozenStrictModel):
 
     @property
     def request_headers(self) -> Mapping[str, str]:
-        return {NAME_KEY_HEADER: name_key_header_value(self.namekey)}
+        return self.http_request_log_record.request_headers
 
     @classmethod
     def outbound_http(
@@ -195,14 +217,18 @@ class RunOutcomeRequest(FrozenStrictModel):
         *,
         run_outcome: RunLifecycle,
         namekey: NameKey,
+        session_id: UUID | None,
+        validation_record_id: UUID | None,
     ) -> tuple[
         RunOutcomePath,
         Mapping[str, str],
     ]:
-        return (
-            run_outcome.to_run_outcome_path(),
-            {NAME_KEY_HEADER: name_key_header_value(namekey)},
-        )
+        headers = {NAME_KEY_HEADER: name_key_header_value(namekey)}
+        if session_id is not None:
+            headers[SESSION_ID_HEADER] = str(session_id)
+        if run_outcome is RunLifecycle.COMPLETED and validation_record_id is not None:
+            headers[ETAG_HEADER] = f'"{validation_record_id}"'
+        return run_outcome.to_run_outcome_path(), headers
 
     @classmethod
     def from_http_request(
@@ -216,11 +242,11 @@ class RunOutcomeRequest(FrozenStrictModel):
         path: str,
         query: str,
         request_headers: Mapping[str, str],
-        request_body: bytes,
+        request_body: str | None,
     ) -> Self:
         selected_headers = {
             name: value
-            for name in (NAME_KEY_HEADER, SOURCE_KEY_HEADER)
+            for name in (NAME_KEY_HEADER, SOURCE_KEY_HEADER, SESSION_ID_HEADER, ETAG_HEADER)
             if (value := _http_header_value(request_headers, name)) is not None
         }
         record = HttpRequestLogRecord(
@@ -233,7 +259,7 @@ class RunOutcomeRequest(FrozenStrictModel):
             path=path,
             query=query,
             request_headers=selected_headers,
-            request_body=(None if not request_body else request_body.decode()),
+            request_body=request_body,
             response_code=None,
             response_headers=None,
             response_body=None,
@@ -248,11 +274,18 @@ class RunOutcomeRequest(FrozenStrictModel):
         record: HttpRequestLogRecord,
     ) -> Self:
         run_outcome = RunLifecycle.from_run_outcome_path(record.path)
+        # Invalid client identity remains in the envelope; Store records its error response.
+        try:
+            namekey = name_key_from_header_value(record.request_headers.get(NAME_KEY_HEADER))
+        except ValueError:
+            namekey = None
+        session_id = _request_uuid(record.request_headers.get(SESSION_ID_HEADER))
+        validation_record_id = _request_uuid(record.request_headers.get(ETAG_HEADER), quoted=True)
         return cls(
             run_outcome=run_outcome,
-            namekey=name_key_from_header_value(
-                record.request_headers.get(NAME_KEY_HEADER)
-            ),
+            namekey=namekey,
+            session_id=session_id,
+            validation_record_id=validation_record_id,
             http_request_log_record=record,
         )
 
@@ -267,9 +300,6 @@ class RunOutcomeRequest(FrozenStrictModel):
             or record.port is not None
             or record.ready_to_respond_at_unix_usec is not None
             or record.path not in RUN_OUTCOME_PATHS
-            or record.query
-            or set(record.request_headers) != {NAME_KEY_HEADER}
-            or record.request_body is not None
             or record.response_code is not None
             or record.response_headers is not None
             or record.response_body is not None
@@ -279,9 +309,6 @@ class RunOutcomeRequest(FrozenStrictModel):
             or record.request_headers != self.request_headers
         ):
             raise ValueError("run-outcome HTTP request has an invalid contour")
-        namekey = name_key_from_header_value(record.request_headers[NAME_KEY_HEADER])
-        if namekey != self.namekey:
-            raise ValueError("run-outcome NameKey does not match its request")
         return self
 
     @model_validator(mode="after")

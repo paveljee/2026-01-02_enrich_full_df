@@ -19,6 +19,7 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.pyd
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.submission_init import (  # noqa: E501
     Submission,
 )
+from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
 from src.helpers.architecture import FrozenStrictModel, implements
 from src.helpers.data_models import HttpRequestLogRecord, InnerDict, MatchingProcedure
 
@@ -30,11 +31,13 @@ from .ai_augment_singular_outer_dict import (
     AiAugmentSingularOuterDict,
     _AiAugmentSingularOuterDictJson,
 )
-from .commit_event import BackendCommitRecord, PostCommitValidation
+from .commit_event import (
+    BackendCommitRecord,
+)
 from .committed_innerdict import _BackendCommitRecordJson
 from .model_http_interceptor import ModelHttpInterceptor
-from .run_outcome_record import RunOutcomeRecord
-from .validation_event import BackendValidationRecord
+from .run_outcome_record import RunOutcomeResponseRecord
+from .validation_event import BackendValidationRecord, PostCommitValidation
 
 
 @implements[AgentRuntimeComponent.AttemptProperty]()
@@ -149,12 +152,13 @@ class AgentRuntimeAttemptRecord(FrozenStrictModel):
         if validation_record is not None:
             body = validation_record.validation_request_body
             if (
-                body.commit_id != serialized.attempt.commit_record.http_record.record_id
+                body.commit_record.record_id
+                != serialized.attempt.commit_record.http_record.record_id
                 or body.post_commit_validation != serialized.attempt.post_commit_validation
-                or body.submission != serialized.submission
-                or body.submission_type != serialized.submission_type
-                or body.http_record_ids
-                != tuple(record.record_id for record in serialized.http_records)
+                or body.post_commit_validation.submission != serialized.submission
+                or body.post_commit_validation.submission_type
+                != serialized.submission_type
+                or body.openalex_ror_records != serialized.http_records
                 or validation_record.request_headers
                 != serialized.attempt.commit_record.http_record.request_headers
             ):
@@ -162,16 +166,7 @@ class AgentRuntimeAttemptRecord(FrozenStrictModel):
         if serialized.submission is not None:
             submission_type = serialized.submission_type
             if submission_type is None:
-                # Older DTOs did not carry a discriminator. No network fallback:
-                # a legacy model needing HTTP still requires recorded inputs.
-                submission_type = (
-                    "StandardizedSubmission"
-                    if any(
-                        isinstance(value, dict) and "standardized_value" in value
-                        for value in serialized.submission.values()
-                    )
-                    else "Submission"
-                )
+                raise ValueError(Locale.VALIDATION_SUBMISSION_DISCRIMINATOR_MISSING)
             model = (
                 StandardizedSubmission
                 if submission_type == "StandardizedSubmission"
@@ -206,11 +201,11 @@ class _QueryResponseJson(FrozenStrictModel):
     run_outcome_records: tuple[HttpRequestLogRecord, ...]
 
 
-@implements[BackendComponent.ControlCentrePort.QueryResponseProperty]()
+@implements[BackendComponent.QueryResponseProperty]()
 class QueryResponse(FrozenStrictModel):
     attempts: tuple[AgentRuntimeAttemptRecord, ...]
     ai_augment_singular_outerdicts: tuple[AiAugmentSingularOuterDict, ...]
-    run_outcome_records: tuple[RunOutcomeRecord, ...] = ()
+    run_outcome_records: tuple[RunOutcomeResponseRecord, ...] = ()
 
     @classmethod
     def from_serialized_json(
@@ -247,7 +242,7 @@ class QueryResponse(FrozenStrictModel):
             attempts=tuple(attempts),
             ai_augment_singular_outerdicts=ai_augment_singular_outerdicts,
             run_outcome_records=tuple(
-                RunOutcomeRecord.from_http_request_log_record(record)
+                RunOutcomeResponseRecord.from_http_request_log_record(record)
                 for record in serialized.run_outcome_records
             ),
         )

@@ -11,8 +11,6 @@ from uuid import UUID
 from pydantic import model_validator
 
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
-    KTP_AI_AUGMENT_RUN_OUTCOME_RECORD_ID_COL,
-    KTP_AI_AUGMENT_VALIDATION_RECORD_ID_COL,
     AiAugmentCohort,
 )
 from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helpers.locale import (
@@ -27,7 +25,7 @@ from .....backend.helpers.data_models.ai_augment_singular_outer_dict import (
 from .....backend.helpers.data_models.commit_event import BackendLifecycle
 from .....backend.helpers.data_models.committed_innerdict import CommittedInnerDict
 from .....backend.helpers.data_models.query_response import AgentRuntimeAttemptRecord, QueryResponse
-from .....backend.helpers.data_models.run_outcome_record import RunOutcomeRecord
+from .....backend.helpers.data_models.run_outcome_record import RunOutcomeResponseRecord
 from .run_outcome import NAME_KEY_HEADER, name_key_from_header_value
 
 
@@ -66,14 +64,15 @@ class DashboardQuerySnapshot(FrozenStrictModel):
         return MappingProxyType({key: tuple(records) for key, records in grouped.items()})
 
     @cached_property
-    def outcomes_by_session(self) -> Mapping[tuple[str, UUID], RunOutcomeRecord]:
+    def outcomes_by_session(self) -> Mapping[tuple[str, UUID], RunOutcomeResponseRecord]:
         return MappingProxyType({
             (
-                run_outcome_record.run_outcome_request.namekey.to_json_key(),
+                namekey.to_json_key(),
                 session_id,
             ): run_outcome_record
             for run_outcome_record in self.query_response.run_outcome_records
-            if run_outcome_record.response_code != HTTPStatus.CONFLICT
+            if run_outcome_record.response_code not in {HTTPStatus.BAD_REQUEST, HTTPStatus.CONFLICT}
+            if (namekey := run_outcome_record.run_outcome_request.namekey) is not None
             if (
                 session_id := (
                     run_outcome_record.run_outcome_response_body.codex_session_record.session_id
@@ -135,18 +134,14 @@ class DashboardQuerySnapshot(FrozenStrictModel):
                     raise ValueError(Locale.ATTEMPT_DATABASE_INCONSISTENT)
                 seen.add(commit_id)
                 if accepted is not None:
-                    validation_id = UUID(
-                        accepted.innerdict.data[KTP_AI_AUGMENT_VALIDATION_RECORD_ID_COL]
-                    )
-                    outcome_id = UUID(
-                        accepted.innerdict.data[KTP_AI_AUGMENT_RUN_OUTCOME_RECORD_ID_COL]
-                    )
-                    outcome = outcomes_by_id.get(outcome_id)
+                    embedded_outcome = accepted.run_outcome_response_record
+                    outcome = outcomes_by_id.get(embedded_outcome.record_id)
                     if (
                         record.validation_record is None
-                        or validation_id != record.validation_record.record_id
                         or outcome is None
-                        or outcome.response_code == HTTPStatus.CONFLICT
+                        or outcome.model_dump() != embedded_outcome.model_dump()
+                        or outcome.response_code in {HTTPStatus.BAD_REQUEST, HTTPStatus.CONFLICT}
+                        or outcome.run_outcome_request.namekey is None
                         or outcome.run_outcome_request.namekey.to_json_key() != namekey
                         or outcome.run_outcome_response_body.codex_session_record.session_id
                         != session_id
@@ -165,8 +160,13 @@ class DashboardQuerySnapshot(FrozenStrictModel):
         if accepted_ids != set(self.committed_by_id):
             raise ValueError(Locale.ATTEMPT_DATABASE_INCONSISTENT)
         for run_outcome_record in self.query_response.run_outcome_records:
-            namekey = run_outcome_record.run_outcome_request.namekey.to_json_key()
-            if namekey not in self.researchers_by_namekey:
+            if run_outcome_record.response_code == HTTPStatus.BAD_REQUEST:
+                continue
+            outcome_namekey = run_outcome_record.run_outcome_request.namekey
+            if (
+                outcome_namekey is None
+                or outcome_namekey.to_json_key() not in self.researchers_by_namekey
+            ):
                 raise ValueError(Locale.ATTEMPT_DATABASE_INCONSISTENT)
         # Build every derived lookup before a snapshot can replace persisted/UI state.
         _ = self.ground_truth_by_namekey, self.outcomes_by_session

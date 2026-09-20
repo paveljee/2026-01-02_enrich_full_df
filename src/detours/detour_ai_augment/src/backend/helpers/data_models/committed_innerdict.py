@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from http import HTTPStatus
 from typing import Any, Self
 from uuid import UUID
 
@@ -13,11 +14,10 @@ from pydantic import (
 from src.detours.detour_ai_augment.protected.src.architecture import (
     BackendComponent,
 )
+from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
-    KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL,
-    KTP_AI_AUGMENT_RUN_OUTCOME_RECORD_ID_COL,
+    KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_RECORD_COL,
     KTP_AI_AUGMENT_SESSION_METADATA_COL,
-    KTP_AI_AUGMENT_VALIDATION_RECORD_ID_COL,
 )
 from src.helpers.architecture import FrozenStrictModel, implements
 from src.helpers.data_models import (
@@ -39,6 +39,7 @@ from .commit_event import (
     CodexSessionRecord,
     CommitRequestBody,
 )
+from .run_outcome_record import RunOutcomeResponseRecord
 
 
 class _CodexInnerDictProcedure:
@@ -103,6 +104,14 @@ class CommittedInnerDict(FrozenStrictModel):
             raise ValueError("committed innerdict required text value is missing")
         return value
 
+    @property
+    def run_outcome_response_record(self) -> RunOutcomeResponseRecord:
+        return RunOutcomeResponseRecord.from_http_request_log_record(
+            HttpRequestLogRecord.model_validate_json(
+                self._required_text(KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_RECORD_COL)
+            )
+        )
+
     def validate_committed_innerdict(self) -> Self:
         body = self.commit_record.commit_request_body
         stored_namekey = NameKey.from_json_key(self._required_text(KTP_NAMEKEY_COL))
@@ -111,16 +120,14 @@ class CommittedInnerDict(FrozenStrictModel):
         )
         if stored_namekey != committed_namekey:
             raise ValueError("committed innerdict namekey does not match its commit")
-        if UUID(self._required_text(KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL)) != (
-            self.commit_record.record_id
+        outcome = self.run_outcome_response_record
+        if (
+            outcome.response_code in {HTTPStatus.BAD_REQUEST, HTTPStatus.CONFLICT}
+            or outcome.run_outcome_request.namekey != committed_namekey
+            or outcome.run_outcome_response_body.codex_session_record.session_id
+            != body.codex_session_record.session_id
         ):
-            raise ValueError("committed innerdict ID does not match its commit")
-        for column in (
-            KTP_AI_AUGMENT_VALIDATION_RECORD_ID_COL,
-            KTP_AI_AUGMENT_RUN_OUTCOME_RECORD_ID_COL,
-        ):
-            if UUID(self._required_text(column)).version != 7:
-                raise ValueError("committed innerdict record ID must be UUIDv7")
+            raise ValueError(Locale.INNERDICT_OUTCOME_MISMATCH)
         session_id = body.codex_session_record.session_id
         if session_id is None:
             raise ValueError("committed innerdict Codex session ID is missing")

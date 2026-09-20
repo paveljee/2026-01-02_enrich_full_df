@@ -21,13 +21,15 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_
     AiAugmentDetourConfig,
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
+    PULL_PATH,
+    PUSH_PATH,
     TEXT_ENCODING,
+    ContentType,
 )
 from src.detours.detour_ai_augment.protected.src.backend.ipc import (
     DASHBOARD_IPC_HOST,
     DASHBOARD_IPC_SCHEME,
     DASHBOARD_QUERY_PATH,
-    JSON_MEDIA_TYPE,
     SOCKET_PERMISSIONS,
 )
 from src.detours.detour_ai_augment.src.backend import api, server
@@ -66,12 +68,12 @@ def empty_query_response(request: requests.PreparedRequest) -> requests.Response
     return api._response(
         request, HTTPStatus.OK,
         QueryResponse(attempts=(), ai_augment_singular_outerdicts=()).model_dump_json(),
-        content_type=JSON_MEDIA_TYPE,
+        content_type=ContentType.JSON,
     )
 
 
 def test_fastapi_module_does_not_own_flask_ipc_routes() -> None:
-    assert set(server.app.openapi()["paths"]) == {api.PULL_PATH, api.PUSH_PATH}
+    assert set(server.app.openapi()["paths"]) == {PULL_PATH, PUSH_PATH}
 
 
 def test_full_backend_composition_stops_ipc_before_domain_shutdown(
@@ -150,7 +152,7 @@ def test_dashboard_query_flask_application_is_separate_and_unauthenticated() -> 
         observed.append(ipc_request)
         return api._response(
             ipc_request, HTTPStatus.OK, query_response.model_dump_json(),
-            content_type=JSON_MEDIA_TYPE,
+            content_type=ContentType.JSON,
         )
 
     app = create_dashboard_query_app(
@@ -163,7 +165,7 @@ def test_dashboard_query_flask_application_is_separate_and_unauthenticated() -> 
 
     assert availability_response.status_code == 200
     assert response.status_code == 200
-    assert response.content_type == JSON_MEDIA_TYPE
+    assert response.content_type == ContentType.JSON
     assert response.get_data(as_text=True) == payload
     assert [(item.method, item.path_url) for item in observed] == [("GET", "/query")]
     assert id(app) != id(server.app)
@@ -248,7 +250,7 @@ def test_full_backend_ipc_forwards_run_outcome_http_exchange_exactly() -> None:
         observed.append(request)
         return api._response(
             request, HTTPStatus.INTERNAL_SERVER_ERROR, snapshot.model_dump_json(),
-            content_type=JSON_MEDIA_TYPE,
+            content_type=ContentType.JSON,
         )
 
     app = create_dashboard_query_app(
@@ -262,7 +264,7 @@ def test_full_backend_ipc_forwards_run_outcome_http_exchange_exactly() -> None:
         headers={run_outcome_models.NAME_KEY_HEADER: api.name_key_header(namekey)},
     )
     assert response.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
-    assert response.content_type == JSON_MEDIA_TYPE
+    assert response.content_type == ContentType.JSON
     assert response.data == response_body
     assert len(observed) == 1
     request = observed[0]
@@ -299,7 +301,7 @@ def test_dashboard_client_queries_real_mode_0600_unix_socket(
         observed.append(ipc_request)
         return api._response(
             ipc_request, HTTPStatus.OK, query_response.model_dump_json(),
-            content_type=JSON_MEDIA_TYPE,
+            content_type=ContentType.JSON,
         )
 
     try:

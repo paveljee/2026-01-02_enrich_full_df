@@ -602,6 +602,7 @@ def completed_query_fixture_process() -> None:
     from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
         DOCX_COLUMNS,
         REPLAY_LOG_KEY,
+        ContentType,
     )
     from src.detours.detour_ai_augment.protected.tests.pytest_plugin import threaded_loop_runner
     from src.detours.detour_ai_augment.src.backend import api, server
@@ -611,8 +612,8 @@ def completed_query_fixture_process() -> None:
         CodexRolloutRecord,
     )
     from src.detours.detour_ai_augment.src.backend.helpers.data_models.run_outcome_record import (
-        RunOutcomeRecord,
         RunOutcomeResponseBody,
+        RunOutcomeResponseRecord,
     )
     from src.detours.detour_ai_augment.src.control_centre.dashboard import ui
     from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models import (
@@ -700,7 +701,7 @@ def completed_query_fixture_process() -> None:
                 response_code=200,
             ).model_copy(
                 update={
-                    "response_headers": {"content-type": api.MEDIA_TYPE},
+                    "response_headers": {"content-type": ContentType.NDJSON},
                     "response_body": api.json_line({
                         KTP_FIRST_NAME_COL: STARTUP_NAMEKEY.first_name,
                         KTP_LAST_NAME_COL: STARTUP_NAMEKEY.last_name,
@@ -737,10 +738,14 @@ def completed_query_fixture_process() -> None:
             received_at_unix_usec=occurred_at + 6, method="POST", scheme=SYNTHETIC_SCHEME,
             host=SYNTHETIC_HOST,
             port=None, path=RunLifecycle.COMPLETED.to_run_outcome_path(), query="",
-            request_headers={NAME_KEY_HEADER: api.name_key_header(STARTUP_NAMEKEY)},
-            request_body=b"",
+            request_headers={
+                NAME_KEY_HEADER: api.name_key_header(STARTUP_NAMEKEY),
+                "Session-ID": str(session_id),
+                "ETag": f'"{validated.validation_record.record_id}"',
+            },
+            request_body=None,
         )
-        outcome = RunOutcomeRecord.from_run_outcome_request(
+        outcome = RunOutcomeResponseRecord.from_run_outcome_request(
             request,
             response_code=HTTPStatus.OK,
             response_headers={SOURCE_KEY_HEADER: draft.request_headers[SOURCE_KEY_HEADER]},

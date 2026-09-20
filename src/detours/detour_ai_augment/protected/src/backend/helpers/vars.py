@@ -2,6 +2,7 @@ import json
 from collections.abc import Callable, Mapping
 from enum import StrEnum
 from pathlib import Path
+from typing import Final
 
 from src.helpers.vars import KTP_FIRST_NAME_COL, KTP_LAST_NAME_COL
 
@@ -9,6 +10,29 @@ PYDANTIC_TO_PASTE_SOURCE = Path(
     "src/detours/detour_ai_augment/protected/src/backend/helpers/data_models/"
     "pydantic_to_paste.py"
 ).read_text(encoding="utf-8").rstrip()
+
+SESSION_ID_HEADER: Final = "Session-ID"
+ETAG_HEADER: Final = "ETag"
+
+HTTP_CONTENT_TYPE_HEADER: Final = "Content-Type"
+HTTP_CONTENT_LENGTH_HEADER: Final = "Content-Length"
+HTTP_GET_METHOD: Final = "GET"
+HTTP_POST_METHOD: Final = "POST"
+PULL_PATH: Final = "/pull"
+PUSH_PATH: Final = "/push"
+SUBMISSION_TYPE: Final = "Submission"
+STANDARDIZED_SUBMISSION_TYPE: Final = "StandardizedSubmission"
+NANOSECONDS_PER_MICROSECOND: Final = 1_000
+
+
+class ContentType(StrEnum):
+    JSON = "application/json"
+    NDJSON = "application/x-ndjson"
+    MARKDOWN = "text/markdown"
+    PLAIN_TEXT = "text/plain"
+    NDJSON_UTF8 = "application/x-ndjson; charset=utf-8"
+    MARKDOWN_UTF8 = "text/markdown; charset=utf-8"
+
 
 AI_AUGMENT_COLUMN_PREFIX = "ktp.ai_augment_"
 
@@ -53,6 +77,9 @@ AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS = tuple(
 
 KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL = f"{AI_AUGMENT_COLUMN_PREFIX}commit_record_id"
 KTP_AI_AUGMENT_VALIDATION_RECORD_ID_COL = f"{AI_AUGMENT_COLUMN_PREFIX}validation_record_id"
+KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_RECORD_COL = (
+    f"{AI_AUGMENT_COLUMN_PREFIX}run_outcome_response_record"
+)
 KTP_AI_AUGMENT_RUN_OUTCOME_RECORD_ID_COL = f"{AI_AUGMENT_COLUMN_PREFIX}run_outcome_record_id"
 KTP_AI_AUGMENT_COMMIT_REQUEST_BODY_COL = (
     f"{AI_AUGMENT_COLUMN_PREFIX}commit_request_body"

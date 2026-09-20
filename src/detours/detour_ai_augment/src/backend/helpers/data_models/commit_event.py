@@ -13,6 +13,7 @@ from pydantic import Field, StrictStr, model_serializer, model_validator
 from src.detours.detour_ai_augment.protected.src.architecture import (
     BackendComponent,
 )
+from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import HTTP_POST_METHOD
 from src.helpers.architecture import FrozenStrictModel, implements
 from src.helpers.data_models import FragmentType, HttpRequestLogRecord
 from src.helpers.vars import (
@@ -29,7 +30,6 @@ from ....control_centre.dashboard.helpers.data_models.run_outcome import (
 )
 
 COMMIT_PATH = "/commit"
-HTTP_POST_METHOD = "POST"
 SYNTHETIC_SCHEME = "http"
 SYNTHETIC_HOST = "invalid"
 SOURCE_KEY_HEADER = "SourceKey"
@@ -362,28 +362,21 @@ class BackendCommitRecord(HttpRequestLogRecord):
             resolve_http_record=resolve_http_record,
         )
         return cls(
-            **record.model_dump(),
+            schema_version=record.schema_version,
+            record_id=record.record_id,
+            method=record.method,
+            scheme=record.scheme,
+            host=record.host,
+            port=record.port,
+            path=record.path,
+            query=record.query,
+            request_headers=record.request_headers,
+            request_body=record.request_body,
+            response_code=record.response_code,
+            response_headers=record.response_headers,
+            response_body=record.response_body,
+            received_at_unix_usec=record.received_at_unix_usec,
+            ready_to_respond_at_unix_usec=record.ready_to_respond_at_unix_usec,
+            duration_usec=record.duration_usec,
             commit_request_body=body,
         )
-
-
-@implements[BackendComponent.PostCommitValidationProperty]()
-class PostCommitValidation(FrozenStrictModel):
-    stage: BackendLifecycle
-    result: BackendLifecycle
-    detail: StrictStr | None = None
-
-    def validate_lifecycle(self) -> Self:
-        if not self.stage.is_post_commit_validation_stage():
-            raise ValueError("invalid post-commit validation stage")
-        if not self.result.is_post_commit_validation_result():
-            raise ValueError("invalid post-commit validation result")
-        if (self.stage is BackendLifecycle.ACCEPTED) != (
-            self.result is BackendLifecycle.ACCEPTED
-        ):
-            raise ValueError("accepted validation stage and result must agree")
-        return self
-
-    @model_validator(mode="after")
-    def _validate_lifecycle(self) -> Self:
-        return self.validate_lifecycle()

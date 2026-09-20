@@ -13,7 +13,7 @@ from src.helpers.architecture import implements
 from src.helpers.data_models import NameKey
 
 from .....backend.helpers.data_models.query_response import AgentRuntimeAttempt
-from .....backend.helpers.data_models.run_outcome_record import RunOutcomeRecord
+from .....backend.helpers.data_models.run_outcome_record import RunOutcomeResponseRecord
 from .run_outcome import RunLifecycle
 
 MICROSECONDS_PER_SECOND = 1_000_000
@@ -33,7 +33,7 @@ class Run(BaseModel):
     run_outcome: RunLifecycle | None = None
     events: tuple[RunEvent, ...] = ()
     attempts: tuple[AgentRuntimeAttempt, ...] = ()
-    run_outcome_record: RunOutcomeRecord | None = None
+    run_outcome_record: RunOutcomeResponseRecord | None = None
 
     queued_at: datetime
     started_at: datetime | None = None
