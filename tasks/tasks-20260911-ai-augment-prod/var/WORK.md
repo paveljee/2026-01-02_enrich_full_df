@@ -2,30 +2,69 @@
 
 ## Status and authorization
 
-Completed implementation (2026-09-20): operator explicitly directed implementing P26–P30 IN
-ORDER, within their exact approved scope/snippets; verify and document each P complete
-before starting the next. This LIFTS the earlier pre-commit-operator gate for this work.
-P26–P30 COMPLETE, including P30's approved initial-validation addition and persistence-first
-clarification. P31 is COMPLETE within its approved implementation scope, including the separately
-approved test-only UUID amendment. Fresh affected preflight63passed98.40s, full Ruff and strict
-detour mypy56files PASS. Outcome pull/push checks match the current Store snapshot, independently
-of commit ancestry. No production/task changes. New delegated log reviewed below:227tests pass,
-including the real Chrome card/query/artifact test, but two shell node-name commands fail and
-the retained-directory test did not run. Diagnostic artifacts were not retained under elevate.
-P32 is COMPLETE within its approved scope, including the separately approved one-line
-test-baseline amendment. Full affected preflight70passed70.59s; Ruff and strict mypy56files
-PASS. Elevate is ready for the exact two macOS checks below. Full pre-commit-operator handoff
-still awaits that delegated result; no fresh browser/transport acceptance is claimed. The prior
-session-less outcome persistence blocker is withdrawn. P25 remains implemented. Unexpected ambiguity
-requiring scope extension must be raised before dependent implementation, not improvised.
-The latest operator harness failures and requested artifact-directory change were addressed
-as P31 within the approved snippets below, including their upstream coverage. P32 completes
-retained test artifacts and the exact elevate wrapper. No approved implementation remains;
-delegated verification is pending, with no production or ordinary task changes.
+2026-09-21: P25–P33 are COMPLETE within their approved scopes. P26–P30 were completed in
+the authorized order, including P30's persistence-first and initial-validation additions.
+P31 includes its separately approved UUID amendment; P32 includes its approved one-line
+test-cache-baseline correction. Their exact scopes and verification remain below.
+
+P32 local preflight70passed70.59s; its delegated macOS batch now also PASSES:2passed9.83s,
+status0, with actual retained log/data/card and clean Dashboard/IPC shutdown. P33's exact
+busy GET /pull503 message-only patch is implemented:11focused checks PASS, full detour Ruff
+and strict mypy56files PASS. No approved implementation or targeted elevate check remains.
+
+Recommendation: READY for the human's next pixi run pre-commit-operator with these changes.
+This is readiness for the full acceptance run, not a claim it has already passed. Existing
+wrapper status/grep quirks remain unchanged; review every actual leaf summary. No new batch
+or ordinary task change requested. Unexpected scope extension still requires explicit approval.
 Keep original IPC missing-socket diagnostics/polling as operator elected. No ordinary tasks,
 HUMANS, pasted/shared HTTP schema, sample_deploy or other-detour changes are authorized.
 
-### Latest elevate review — 2026-09-20; passing tests, failed invocation/retention
+### Latest elevate review — 2026-09-21; P32 PASS, retained artifacts verified
+
+Operator supplied the complete logs/from_operator/elevate.lBbiaK bundle. Read its195-line,
+22178-byte elevate.log in full plus status0 and relevant retained synthetic files. No original
+host paths followed or production resources constructed; supplied detour DB opened READ ONLY,
+whole-file bytes checked unchanged afterward. No artifact or symlink edits.
+
+- Exact two intended nodes and --test-artifacts-root are visible in captured argv (lines1–5).
+  macOS Python3.14.2/pytest9.1.1 runs the real Chrome completed-query/card/artifact case and
+  real retained-operator-directory case:2passed9.83s (lines167–170), Pytest exit0; saved status
+  also0. No test failure, warning summary, traceback, command-not-found, timeout or Ctrl+C.
+  Captured log does not contain the OUTER wrapper exit code/grep output; do not invent it.
+- Both explicit Query phases succeed: IPC-only Backend PIDs34804/34821 return307researchers,
+  1attempt/1outcome; each closes Store cleanly, exits0, clean_close_ack=True, forced_kill=False,
+  shutdown_succeeded=True before the Dashboard snapshot replacement. Dashboard34773 exits0;
+  resource-tracker descendant34774 exits gracefully. No abnormal wait or forced fallback kill.
+  Two queries are intentional: original grid assertion, then the separate approved real card
+  capture helper. There is no hidden automatic query introduced by these tests.
+- Fifteen missing-socket diagnostics (8 then7) resolve into OPTIONS200 readiness. These are
+  the existing discovery/startup polling messages the operator elected to retain, not a new
+  missing-file failure. Repeated six-line suffix verification is expected: IPC-only verifies
+  against the empty anchor without promoting it. No incorrect prefix-line logging/recovery.
+- Retention is now proven, not merely claimed: all24 files in the captured final inventory
+  exist in the supplied bundle, plus its log/status (26regular files). Reserved nicegui/t/pytest
+  and q.14e7kje1 directories remain. Two distinct operator-test.chugb10j/q2l53o8y directories
+  retain config/initialized DB/empty replay; synthetic repository/source remain under pytest.
+  Socket files are absent after normal unlink, as intended. Copied absolute source/current
+  symlinks still name the original macOS run root; inspected link text only, no following or
+  relocation/migration. They are not evidence of missing original fixture data.
+- Browser fixture retains config/source/detour DB/replay/CAS/private NiceGUI and7293-byte
+  card-rendered.txt, not just footer buttons. Actual browser helper's full card/workflow
+  validator passed before shutdown. Independent read-only review: six LF records
+  pull200 -> push202 -> commit -> validate -> pull410 -> completed200 exactly match DB
+  UUIDs/envelopes/ordinals and LF-inclusive line hashes; one finalized innerdict carries the
+  outcome envelope. Replay SHA256 matches the hash shown by startup verification. The sole
+  extensionless CAS blob's SHA256/shards match. Private NiceGUI retains307researchers,
+  1attempt/1outcome and an empty queue; card contains linked commit/validation/outcome IDs.
+
+Rechecked current pre-commit-operator graph: aicode nonbrowser/default/provider/root leaves,
+host Chrome then live operator; routing/commands untouched. P33 independently passes its
+changed HTTP-message boundary locally. Combined with retained earlier per-leaf evidence,
+no identified blocker remains to attempting full pre-commit-operator. No further elevate
+requested. Full live-Codex/provider/root acceptance was NOT rerun in this two-test batch.
+The elevate task remains its approved P32 batch; this review changes WORK only, not tasks.
+
+### Prior elevate review — 2026-09-20; invocation/retention defects corrected by P32
 
 Operator supplied logs/from_operator/elevate.log (127108bytes,mtime13:42UTC). Read this log
 and current code only; operator reports no recovered test data. Do not search unrelated
@@ -43,7 +82,7 @@ banner. Therefore do not claim the exact proposed two-node wrapper was what actu
   were executed as standalone commands and are not found. The browser node passed within the
   broader suite; the retained-directory preflight node was NOT collected/executed. The log
   shows argument/command separation, but cannot identify the exact shell edit that caused it.
-  No aggregate success claim; full pre-commit-operator is not yet recommended.
+  At that checkpoint there was no aggregate success claim or full-run recommendation.
 - Browser DB/log/CAS/config/NiceGUI fixtures live under the logged system pytest-78/
   test_completed_grid_row_uses_r0 directory, not an elevate directory. This is separate from
   production NiceGUI storage; no production-contamination finding is established by this log.
@@ -67,7 +106,7 @@ socket directory and operator fixtures, plus exact logging/command wiring. Opera
 directories sit DIRECTLY beneath that root rather than under a nested repository/tmp, making
 the existing socket path103bytes on the macOS checkout (guard remains104). The retention
 self-test's outer synthetic repository is retained too. P32 and its separately approved
-test-baseline amendment are now implemented and locally verified; elevate is ready.
+test-baseline amendment are now implemented, locally verified and passed on the host above.
 No production or ordinary task change, alternate socket path or cleanup fallback.
 
 ### Latest full operator run — failed acceptance; live workflow completed
@@ -2026,10 +2065,10 @@ Only the two approved test files changed in this amendment, plus WORK; prior P31
 remain confined to the original four test files. Production, pyproject, dependencies and
 index unchanged. The earlier737passed ordinary batch is retained evidence, not falsely
 reported as rerun after this small correction. No remaining approved P31 implementation;
-The later host Chrome helper passes (see latest elevate review); the separate actual-macOS
-directory test and full production acceptance remain unexecuted.
+The subsequent P32 host batch now passes BOTH the Chrome helper and actual-macOS directory
+test (see latest elevate review). Full production acceptance remains the next operator run.
 
-## P32 — COMPLETE within approved scope; elevate ready, delegated verification pending
+## P32 — COMPLETE within approved scope; local and delegated verification PASS
 
 Supersedes the incomplete elevate-only proposal. Operator asked for the COMPLETE proposed
 shape after correctly rejecting existing fixture paths/cleanup as immutable constraints.
@@ -2388,11 +2427,127 @@ has its macOS guard, captured root/argv/status/inventory and retained log copy. 
 execution occurred. Both exact delegated nodes collect successfully (2tests2.68s) with a
 fresh explicit root and matching --basetemp, proving that positive configuration boundary;
 collection is not browser execution. The actual option/retention checks now pass as above.
-Elevate is ready: exactly the real Chrome completed-query/card/artifact case and retained
+The prepared elevate ran exactly the real Chrome completed-query/card/artifact case and retained
 operator-directory case, macOS guard before log replacement, detailed captured argv/status/
-file inventory, data plus log copy under repo/tmp/elevate.XXXXXX. Review that result before
-recommending the full pre-commit-operator run. No permanent tests invoking elevate; no
+file inventory, data plus log copy under repo/tmp/elevate.XXXXXX. The2026-09-21 review above
+confirms2passed9.83s/status0 and retained artifacts; full operator run is now recommended.
+No permanent tests invoking elevate; no
 index/production/ordinary-task edits. Earlier broad737-case evidence is not claimed as rerun.
+
+## P33 — COMPLETE within exact approved scope: busy pull503 message
+
+2026-09-21 operator asks for the minimal surgical shape to customize the message when
+GET /pull returns503 during processing, with exact snippets recorded as a new P.
+Operator subsequently approved implementation strictly within these exact snippets.
+The three scoped code files are changed exactly as specified; verification passed below.
+
+Pre-change: api._pull_response's BackendLifecycle.BUSY branch used _error_response,
+whose JSON detail was unconditionally Locale.CONFIGURATION_ERROR_DETAIL:
+"API is not properly configured. Contact the human operator." That is misleading for
+normal processing. Existing response is application/json, HTTP503, Retry-After:1, no ETag.
+Busy includes accepted-push capture/commit/validation work, so the proposed text says
+"being processed", not an unsupported claim about the current validation stage.
+authoritative_pull already sends the selected complete exchange through Store.pull's
+append/fsync -> projection -> typed DB readback before returning the response. No Store or
+server changes are necessary to persist/serve the new detail through the existing path.
+
+### Exact approved scope and snippets
+
+Only two production files: protected/src/backend/helpers/locale.py and src/backend/api.py.
+Add one Locale message, one keyword-only helper argument retaining the existing default,
+pass that message ONLY from the busy pull branch, and reuse it for that503's OpenAPI
+description. No new model/helper/module or response-envelope/schema change. All other
+_error_response callers keep their exact current message, including push409 and pull/push500.
+
+```python
+# Existing Backend Locale, alongside its pull messages:
+PULL_PROCESSING_DETAIL: Final = (
+    "Submission is still being processed; retry GET /pull after one second."
+)
+```
+
+```python
+# api.py: existing helper, only the keyword argument and JSON detail value change.
+def _error_response(
+    request: requests.PreparedRequest,
+    code: HTTPStatus,
+    *,
+    detail: str = Locale.CONFIGURATION_ERROR_DETAIL,
+    headers: Mapping[str, str] | None = None,
+) -> requests.Response:
+    return _response(
+        request,
+        code,
+        json.dumps(
+            {"detail": detail},
+            ensure_ascii=False,
+            separators=COMPACT_JSON_SEPARATORS,
+        ),
+        content_type=ContentType.JSON,
+        headers=headers,
+    )
+
+# Existing _pull_response branch only:
+if lifecycle is BackendLifecycle.BUSY:
+    logger.info(Locale.PULL_PROCESSING_LOG)
+    return _error_response(
+        request, HTTPStatus.SERVICE_UNAVAILABLE,
+        detail=Locale.PULL_PROCESSING_DETAIL,
+        headers={RETRY_AFTER_HEADER: RETRY_AFTER_SECONDS},
+    )
+```
+
+Exact OpenAPI entry replacement inside existing PULL_ROUTE responses; no other route edit:
+
+```python
+status.HTTP_503_SERVICE_UNAVAILABLE: {
+    "description": Locale.PULL_PROCESSING_DETAIL,
+    "headers": {
+        RETRY_AFTER_HEADER: {
+            "schema": {"type": "string", "example": RETRY_AFTER_SECONDS},
+        },
+    },
+},
+```
+
+### Verification within this approved scope
+
+Only extend existing test_api.py:test_accepted_push_is_committed_only_after_its_public_record;
+it already exercises a real accepted push, concurrent busy pull, durable log and Store readback.
+No new fixture, mocked persistence, timeout change or separate test module. Immediately after
+the existing busy status/header/no-ETag assertions add:
+
+```python
+assert busy.json() == {"detail": Locale.PULL_PROCESSING_DETAIL}
+```
+
+After the existing completed_records path-order assertion (the busy pull is index2), add:
+
+```python
+assert completed_records[2].response_body == busy.text
+assert api_store._http_record(completed_records[2].record_id).response_body == busy.text
+```
+
+Keep all existing assertions; run this integration case, existing error-response cases
+(including configuration500 and push409 body checks), affected Ruff/strict mypy. No new
+operator/elevate batch is needed for message-only behavior; P32's host check now passes.
+Explicit approval received; focused verification passed. No additional scope.
+
+### P33 completion — 2026-09-21
+
+Exact Locale constant/helper argument/busy call/OpenAPI description and three existing-test
+assertions applied, with no other code changes. Selected busy accepted-push/log/DB-readback,
+unchanged configuration500, push409 and actual transport-before-send cases:6passed,
+275deselected25.28s. Existing five post-commit pull response cases:5passed8.92s, including
+unchanged failed500 messages, retry Markdown and completed410. Full detour Ruff PASS;
+strict mypy PASS56files; diff whitespace PASS. No new fixture/test/module, timeout change,
+Store/server/Dashboard/task edit or operator batch. Staged operator work preserved.
+
+Unchanged: JSON detail shape, ContentType.JSON, HTTP503, Retry-After:1, no ETag, response
+timing/gating, Store persistence/replay, other statuses/messages, server logs, Dashboard
+one-pull503=>failed rule, polling cadence, configuration and all tasks. Content-Length is
+already derived from encoded response bytes by _response. Previously persisted records
+are not rewritten; newly served responses carry and persist the new text.
 
 ## Completed scope index
 
