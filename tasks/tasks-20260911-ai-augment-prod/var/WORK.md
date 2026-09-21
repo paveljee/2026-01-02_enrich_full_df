@@ -2,6 +2,13 @@
 
 ## Status and authorization
 
+P36 is COMPLETE: exact use_rootpath_tmp marker/fixture proposal, locally verified with
+72preflight +677ordinary tests, Ruff/mypy and root collection. It replaces P35's operator-
+specific allocation, not its normal scratch/NiceGUI isolation or sudo correction. Only marked
+tests retain tmp_path-derived files in rootpath/tmp; unmarked tests retain pytest defaults.
+Operator tests receive both independent markers. No remaining approved P36 implementation;
+production operator acceptance has not been rerun here.
+
 2026-09-21: WITHDRAW the prior pre-commit-operator readiness recommendation. The operator's
 next full run exposed a P32 regression: retained generated test_collection.py files beneath
 repo/tmp are recursively imported by the default-environment pytest . / pytest -m real_api .
@@ -11,18 +18,28 @@ and locally verified, including root discovery AFTER the full feasible AI suite 
 retained artifacts. No ordinary task, dependency or production changes. Full operator
 acceptance is still pending; the former overbroad readiness claim is not a test result.
 
-P25–P32 remain implemented in their approved scopes. P34 corrects P32's repository-wide
-collection defect; its fresh72-case preflight and677-case feasible AI passes are recorded
+New operator report: five appendwatch FIFO/socket failures. P35 is IMPLEMENTED and locally
+verified: interactive sudo with fresh authentication; ordinary native scratch; only operator
+runtime artifacts retained under repo/tmp. The native_fs_path proposal is superseded.
+P34 remains implemented; it fixes discovery, not native-filesystem/path requirements.
+Fresh P35 checks:68preflight +677ordinary tests passed; Ruff/mypy and actual root discovery
+passed. No remaining approved P35 implementation. Actual sudo prompting/root monitoring,
+Unix sockets and host Chrome are not locally verified; full operator acceptance is pending.
+
+P25–P31 remain implemented. P32's global retention is superseded by P35's operator-only
+boundary. P34 corrects P32's repository-wide collection defect; its72-case preflight and
+677-case feasible AI passes precede P35 and are recorded
 below. P32's delegated2-case pass remains valid for its boundary, not full production acceptance.
 P33 was explicitly rolled back by the operator: generic message/HTTP503/Retry-After remain.
 Confirmed PULL_PROCESSING_DETAIL and its callpoint/assertions are absent; no rollback by the
 Assistant is needed. Do not reimplement P33 or infer permission to replace503 with200.
 
 The operator supplied the failure traceback in chat; no new full operator log was supplied
-or read for this finding. No new dependencies, ordinary task changes, artifact deletion,
-test skips or production fix. Unexpected scope extensions still require explicit approval.
-Keep original IPC missing-socket diagnostics/polling as operator elected. No ordinary tasks,
-HUMANS, pasted/shared HTTP schema, sample_deploy or other-detour changes are authorized.
+or read for this finding. No new dependencies, artifact deletion, test skips or production
+fix. Unexpected scope extensions still require explicit approval.
+Keep original IPC missing-socket diagnostics/polling as operator elected. Only P35's exact
+sudo flag edit is now authorized in ordinary tasks. No changes to HUMANS, pasted/shared HTTP
+schema, sample_deploy or other detours are authorized.
 
 ### Latest elevate review — 2026-09-21; P32 PASS, retained artifacts verified
 
@@ -105,15 +122,11 @@ banner. Therefore do not claim the exact proposed two-node wrapper was what actu
   The completed browser fixture's durable config/DB/log/CAS/child-NiceGUI data DO derive from
   tmp_path and can be retained with --basetemp alone, without changing tests or production.
 
-P31 approved implementation remains COMPLETE. The operator correctly challenged the
-incomplete elevate-only proposal: fixture paths and cleanup are ours to correct too. P32
-below implements ONE shared retained root for collection storage, pytest data, browser
-socket directory and operator fixtures, plus exact logging/command wiring. Operator fixture
-directories sit DIRECTLY beneath that root rather than under a nested repository/tmp, making
-the existing socket path103bytes on the macOS checkout (guard remains104). The retention
-self-test's outer synthetic repository is retained too. P32 and its separately approved
-test-baseline amendment are now implemented, locally verified and passed on the host above.
-No production or ordinary task change, alternate socket path or cleanup fallback.
+P31 approved implementation remains COMPLETE. This historical review led to P32's shared
+retained root and delegated two-case pass. P35 now explicitly supersedes that global policy:
+only actual operator runtime artifacts are retained in repo/tmp; ordinary pytest scratch and
+collection storage use normal native temporary storage/cleanup. Do not restore P32's global
+overrides from this historical review. No production or cleanup fallback is authorized.
 
 ### Latest full operator run — failed acceptance; live workflow completed
 
@@ -1879,6 +1892,9 @@ unchanged. Use the existing Backend vars constant; no invented old fields or new
 
 ### 3. Retained unique operator run directory
 
+This records the historical P31 approval. P36 now replaces this fixture's allocation with
+the marker-selected tmp_path; do not restore the historical direct mkdtemp below.
+
 Replace only the operator_runtime fixture (remove tmp_path argument and separate /tmp
 TemporaryDirectory). Existing _operator_runtime, child launch/cleanup and preservation guard stay:
 
@@ -2074,372 +2090,21 @@ reported as rerun after this small correction. No remaining approved P31 impleme
 The subsequent P32 host batch now passes BOTH the Chrome helper and actual-macOS directory
 test (see latest elevate review). Full production acceptance remains the next operator run.
 
-## P32 — COMPLETE within approved scope; local and delegated verification PASS
+## P32 — Historical implementation; global retention SUPERSEDED by P35
 
-Supersedes the incomplete elevate-only proposal. Operator asked for the COMPLETE proposed
-shape after correctly rejecting existing fixture paths/cleanup as immutable constraints.
-Operator subsequently approved this COMPLETE exact shape and all snippets, directing surgical
-implementation and a handoff when elevate is ready. P31 remains implemented; this is its
-newly identified verification/retention correction. Preserve all other tasks and production code.
+P32 introduced a shared retained test root, --test-artifacts-root, global basetemp/TMPDIR/
+tempfile.tempdir redirection, retained collection NiceGUI scratch and browser/unit fixture
+storage. This was implemented and locally passed70preflight cases; delegated macOS batch
+passed2cases9.83s with preserved files (review above). Those boundaries did NOT exercise
+subsequent root discovery or Linux shared-mount FIFO/socket constraints.
 
-### Boundary
-
-Five existing files plus WORK: shared protected/tests/pytest_plugin.py, existing operator
-fixture and preflight modules, tests/control_centre/test_ui_e2e.py, and ONLY the elevate
-value in pyproject.toml. No new module/model/service, production changes, ordinary task changes,
-timeout/assertion relaxation, root/provider/live-Codex action, or test that invokes elevate.
-No global pytest/main-pipeline/other-detour configuration change: the existing plugin is
-loaded by the AI detour's two conftest.py files only (and explicitly by its isolated child tests).
-
-A pytest-only --test-artifacts-root selects the shared run root before NiceGUI import. With
-no option, ordinary AI tests allocate a fresh repo/tmp/tests.XXXXXXXX root through the SAME
-mechanism, not system-temp storage or a cleanup fallback. Elevate supplies its own fresh
-repo/tmp/elevate.XXXXXX root. Original production NiceGUI-path capture and environment
-restoration remain. Preserve artifacts on success, failure and collection failure; keep
-process shutdown, server close/unlink and environment restoration. Do not delete or reuse
-old artifact trees. Browser/library-owned ephemeral resources still close normally; this
-is retention of fixture data/logs, not disabling browser cleanup.
-
-Expected layout:
-
-```text
-tmp/elevate.XXXXXX/
-  elevate.log, status
-  nicegui/                         # retained collection-time isolation
-  t/                               # short default temporary-file root
-  pytest/<test-name>/              # source/config/DB/replay/CAS/child NiceGUI
-    repository/                   # directory self-test's synthetic repository
-    card-rendered.txt             # real browser inner_text; NOT Markdown export
-  q.XXXXXXXX/                     # real browser test socket directory
-    dashboard.sock                # unlinked by normal Backend shutdown
-  operator-test.XXXXXXXX/          # each actual operator fixture's own data + socket
-```
-
-### 1. Shared pytest root and retained early isolation
-
-In the existing plugin, add exactly one option/stash/session fixture. The following replaces
-ONLY the current TemporaryDirectory-based early isolation block; existing marker/operator
-setup and the before-import NiceGUI guard remain. Necessary pathlib/tempfile imports already
-exist. No opaque new model or cast. Standard --basetemp is accepted only if it matches the
-selected root's pytest child, so there cannot be two conflicting artifact roots.
-Decorate the EXISTING pytest_configure with @pytest.hookimpl(tryfirst=True): pytest's own
-normal-priority configure hook captures basetemp when it constructs TempPathFactory, so
-our root must be selected before that point, not merely before the first fixture. Reject
-a conflicting non-all retention policy rather than silently allowing pytest to delete data.
-
-```python
-TEST_ARTIFACTS_ROOT = pytest.StashKey[Path]()
-
-# In pytest_addoption:
-parser.getgroup("AI augment test artifacts").addoption(
-    "--test-artifacts-root", type=Path, default=None,
-    help="Retain AI augment test data beneath this fresh directory",
-)
-
-# In pytest_configure, AFTER the existing imported-NiceGUI guard and capture of
-# ORIGINAL_NICEGUI_STORAGE_PATH, BEFORE any NiceGUI import:
-selected_root: Path | None = config.getoption("test_artifacts_root")
-if selected_root is None:
-    parent = config.rootpath / "tmp"
-    parent.mkdir(exist_ok=True)
-    root = Path(tempfile.mkdtemp(prefix="tests.", dir=parent))
-else:
-    root = selected_root.resolve()
-    root.mkdir(parents=True, exist_ok=True)
-
-basetemp = root / "pytest"
-configured_basetemp: str | None = config.getoption("basetemp")
-if configured_basetemp is not None and Path(configured_basetemp).resolve() != basetemp:
-    raise pytest.UsageError("--basetemp must equal <test-artifacts-root>/pytest")
-if config.getini("tmp_path_retention_policy") != "all":
-    raise pytest.UsageError("AI augment test artifacts require tmp_path_retention_policy=all")
-for path in (basetemp, root / "nicegui", root / "t"):
-    if path.exists() or path.is_symlink():
-        raise pytest.UsageError(f"Test artifact path already exists; use a fresh root: {path}")
-(root / "nicegui").mkdir()
-(root / "t").mkdir()
-config.option.basetemp = str(basetemp)
-config.stash[TEST_ARTIFACTS_ROOT] = root
-
-environment = pytest.MonkeyPatch()
-environment.setenv("NICEGUI_STORAGE_PATH", str(root / "nicegui"))
-environment.delenv("NICEGUI_REDIS_URL", raising=False)
-environment.setenv("TMPDIR", str(root / "t"))
-environment.setattr(tempfile, "tempdir", str(root / "t"))
-config.add_cleanup(environment.undo)  # Restore environment; do NOT remove artifacts.
-print(f"[test-artifacts] retained root: {root}", flush=True)
-print(f"[test-artifacts] pytest data: {basetemp}", flush=True)
-print(f"[test-artifacts] collection NiceGUI: {root / 'nicegui'}", flush=True)
-
-
-@pytest.fixture(scope="session")
-def test_artifacts_root(pytestconfig: pytest.Config) -> Path:
-    return pytestconfig.stash[TEST_ARTIFACTS_ROOT]
-```
-
-Pytest creates its fresh basetemp later; collection storage is a sibling, never deleted by
-that creation. Updating cached tempfile.tempdir alongside TMPDIR covers in-process standard
-library allocations and fresh children; existing child-specific paths remain under tmp_path.
-No data-file cleanup callback replaces the removed directory.cleanup callback.
-
-### 2. Operator fixture and its retention self-test
-
-Replace only operator_runtime's root selection/signature; keep _operator_runtime unchanged.
-There is NO extra repository/tmp nesting below the selected artifact root:
-
-```python
-@pytest.fixture
-def operator_runtime(
-    repository_root: Path, test_artifacts_root: Path,
-) -> Iterator[OperatorRuntime]:
-    run_dir = Path(tempfile.mkdtemp(prefix="operator-test.", dir=test_artifacts_root))
-    _operator_log(f"Operator run directory (preserved): {run_dir}")
-    dashboard_socket_path = run_dir / "dashboard.sock"
-    if len(os.fsencode(dashboard_socket_path)) >= DARWIN_AF_UNIX_PATH_CAPACITY_BYTES:
-        raise RuntimeError("operator dashboard socket path exceeds Darwin AF_UNIX capacity")
-    yield _operator_runtime(
-        run_dir,
-        repository_root=repository_root,
-        dashboard_socket_path=dashboard_socket_path,
-    )
-```
-
-In test_operator_run_directories_are_unique_retained_and_contained, replace the outer
-TemporaryDirectory with a retained repository under its existing startup fixture directory;
-add test_artifacts_root fixture argument, remove no-longer-used pytestconfig argument/imports.
-Preserve all current source/DB-byte/retention/uniqueness/symlink/permission assertions, changing
-only the expected parent from repository/tmp to the actual shared artifact root:
-
-```python
-assert files.config.parent.is_relative_to(test_artifacts_root)
-repository = files.config.parent / "repository"
-repository.mkdir()
-print(f"[test-artifacts] retained synthetic repository: {repository}", flush=True)
-(repository / "config_ai_augment.json").write_bytes(files.config.read_bytes())
-# Existing two-iteration loop:
-fixture = inspect.unwrap(workflow.operator_runtime)(
-    repository_root=repository, test_artifacts_root=test_artifacts_root,
-)
-# Existing assertion's new authoritative parent:
-assert run_dir.parent == test_artifacts_root
-```
-
-Existing run_dir contents (including each socket) still must be relative to that run_dir.
-Each source link resolves to the retained synthetic source inside this shared root. No outer
-context/finally deletes either repository or runtime data. Unwrap calls close the actual
-fixture generator exactly as before; retention assertions remain after each closure.
-
-Update the existing overlong-socket negative test ONLY for the new root argument; it must
-still fail before runtime/config creation and retain the allocated directory:
-
-```python
-artifacts_root = tmp_path / ("long-artifacts-" * 9)
-artifacts_root.mkdir()
-fixture = inspect.unwrap(workflow.operator_runtime)(
-    repository_root=tmp_path, test_artifacts_root=artifacts_root,
-)
-with pytest.raises(RuntimeError, match="exceeds Darwin AF_UNIX capacity"):
-    next(fixture)
-run_dirs = tuple(artifacts_root.iterdir())
-assert len(run_dirs) == 1 and run_dirs[0].is_dir()
-assert not (run_dirs[0] / "config.operator.json").exists()
-```
-
-### 3. Browser fixture socket/data/output
-
-In test_completed_grid_row_uses_real_query_ipc add test_artifacts_root: Path and replace
-ONLY the /tmp/query-browser-* TemporaryDirectory with a retained, short local child. Remove
-its with/dedent unchanged body; retain all original browser assertions, context/finally,
-process shutdown and byte-preservation checks. Necessary os import for the same guard:
-
-```python
-assert files.config.parent.is_relative_to(test_artifacts_root)
-directory = Path(tempfile.mkdtemp(prefix="q.", dir=test_artifacts_root))
-dashboard_socket_path = directory / "dashboard.sock"
-if len(os.fsencode(dashboard_socket_path)) >= operator.DARWIN_AF_UNIX_PATH_CAPACITY_BYTES:
-    raise RuntimeError("query browser socket path exceeds Darwin AF_UNIX capacity")
-print(f"[test-artifacts] retained query data: {files.config.parent}", flush=True)
-print(f"[test-artifacts] query socket: {dashboard_socket_path}", flush=True)
-# Existing OperatorRuntime construction:
-# dashboard_socket_path=dashboard_socket_path,
-```
-
-Source/config/log/CAS/storage and process-temp already follow startup_files/tmp_path; the
-shared root automatically moves them into its pytest child, no second startup fixture.
-After the actual card capture returns and BEFORE its existing artifact assertion, retain
-that exact browser text as a diagnostic (not a new renderer or a Markdown export):
-
-```python
-(files.config.parent / "card-rendered.txt").write_text(card_text, encoding="utf-8")
-```
-
-On the configured macOS checkout: operator-test.XXXXXXXX/dashboard.sock directly under
-an elevate.XXXXXX root is103bytes; q.XXXXXXXX/dashboard.sock is91bytes. Both are below104.
-Keep the real guard for longer checkouts, no symlink or system-temp/socket fallback.
-
-### 4. Preserve isolation coverage, change only its cleanup expectation
-
-Existing nicegui_collection_process (named child helper) passes the new option to its actual
-pytest.main and checks retained storage rather than deletion. Retain original environment/
-Redis restoration and the parent test's original-storage hash assertions in both existing
-collection success/failure cases. Also verify TMPDIR and cached tempfile.tempdir restoration,
-because this proposal explicitly starts managing those two values.
-
-```python
-# Existing named child helper, before pytest.main; add local tempfile import:
-original_tmpdir = os.environ.get("TMPDIR")
-tempfile.gettempdir()  # Initialize the cache before pytest's FD capture does.
-original_tempdir = tempfile.tempdir
-# Add to the existing pytest.main argument list:
-# "--test-artifacts-root", str(root / "artifacts"),
-
-# Replace only the old `assert not storage_path.exists()`/CLEANED receipt:
-assert storage_path == root / "artifacts" / "nicegui"
-assert json.loads((storage_path / "storage-general.json").read_text())["test_value"] == "collection"
-assert os.environ.get("TMPDIR") == original_tmpdir
-assert tempfile.tempdir == original_tempdir
-# Existing NICEGUI_STORAGE_PATH/Redis restoration assertions remain.
-print("COLLECTION_STORAGE_RETAINED")
-```
-
-Rename the existing parametrized test to
-test_nicegui_isolated_before_collection_and_retained_after_exit and update its expected
-receipt to COLLECTION_STORAGE_RETAINED; retain False/True parametrization, timeout, real
-child pytest execution and original storage digest check. No sentinel bypass/skip or import
-of NiceGUI outside isolation. The helper already has json as a module import but requires a
-LOCAL json import in its standalone body, alongside tempfile, because python_process extracts
-its source; include both explicitly. No inline child code in individual tests.
-
-Upstream verification before delegated execution: actual collection success/failure with
-retention and environment restoration, real operator fixture uniqueness/containment/guard,
-actual completed-Store artifact validator, full affected preflight, Ruff/strict mypy. Add
-cheap real-plugin rejection checks for an already-used reserved artifact child, conflicting
-basetemp and non-all retention policy; no destructive reuse, fallback or pytest-data loss. These test the actual plugin,
-not source strings or an elevate invocation. Host verifies Chrome/socket transport and path
-lengths only after these checks pass. No production data access or live Codex needed locally.
-
-### 5. Exact approved elevate replacement
-
-The pytest-only root option establishes all paths before import. Log the root/actual argv,
-pytest result and final file inventory INSIDE BSD script capture. Keep a status file because
-BSD script can conceal the child exit code. Retain a log copy beside the data. No trap or
-artifact deletion. Machine guard precedes log replacement. No ordinary task edits.
-
-```toml
-elevate = """
-bash -c '
-if [ "$(uname -s)" != Darwin ]; then
-  echo "Run elevate on the macOS Dashboard host." >&2
-  exit 2
-fi
-LOG_PATH="$PIXI_PROJECT_ROOT/logs/from_operator/elevate.log"
-mkdir -p "$PIXI_PROJECT_ROOT/tmp" "$(dirname "$LOG_PATH")" || exit 1
-ELEVATE_RUN_DIR="$(mktemp -d "$PIXI_PROJECT_ROOT/tmp/elevate.XXXXXX")" || exit 1
-export ELEVATE_RUN_DIR
-export ELEVATE_STATUS_PATH="$ELEVATE_RUN_DIR/status"
-script -q "$LOG_PATH" bash -c '"'"'
-  echo "Retained verification directory: $ELEVATE_RUN_DIR"
-  pytest_args=(
-    -vv -srA --capture=tee-sys
-    --test-artifacts-root "$ELEVATE_RUN_DIR"
-    src/detours/detour_ai_augment/tests/control_centre/test_ui_e2e.py::test_completed_grid_row_uses_real_query_ipc
-    src/detours/detour_ai_augment/protected/tests/operator/test_operator_e2e_preflight.py::test_operator_run_directories_are_unique_retained_and_contained
-  )
-  printf "Pytest arguments:"
-  printf " %q" "${pytest_args[@]}"
-  printf "\\n"
-  "$CONDA_PREFIX/bin/python" -m pytest "${pytest_args[@]}"
-  task_status=$?
-  echo "Pytest exit status: $task_status"
-  echo "Retained fixture files under $ELEVATE_RUN_DIR:"
-  find "$ELEVATE_RUN_DIR" -type f -print || task_status=1
-  printf "%s\\n" "$task_status" > "$ELEVATE_STATUS_PATH"
-  exit "$task_status"
-'"'"'
-script_status=$?
-task_status=1
-if [ -r "$ELEVATE_STATUS_PATH" ]; then
-  read -r task_status < "$ELEVATE_STATUS_PATH" || task_status=1
-fi
-if [ "$script_status" -ne 0 ]; then task_status=1; fi
-cp "$LOG_PATH" "$ELEVATE_RUN_DIR/elevate.log" || task_status=1
-grep -n -- "FAILED" "$LOG_PATH"
-grep_status=$?
-case "$grep_status" in
-  0) echo "grep: FAILED matches shown above ($LOG_PATH)" ;;
-  1) echo "grep: no FAILED ($LOG_PATH)" ;;
-  *) echo "grep: could not inspect $LOG_PATH" >&2; task_status=1 ;;
-esac
-echo "Test output: $LOG_PATH"
-exit "$task_status"
-'
-"""
-```
-
-### P32 execution checkpoint — 2026-09-20
-
-Implementation is COMPLETE and locally verified. Shared option/root/retained early isolation,
-operator fixture/self-test and browser path/card-text edits are applied within the snippets.
-Real directory uniqueness/retention/containment and overlong-path checks PASS (2 tests).
-Initially both collection success/failure cases reached retained storage and restored TMPDIR
-but FAILED the new cached tempfile.tempdir equality assertion.
-Initial pre-implementation run failed both cases because the new option did not yet exist;
-post-implementation selection:2passed2failed59deselected19.44s.
-
-Installed pytest source establishes an earlier initialization boundary: FD capture starts
-TemporaryFile in pytest_load_initial_conftests, before pytest_configure. Our MonkeyPatch
-restores the cache value it received at configure entry, whereas the approved test snippet
-captures the earlier pre-pytest cache (None). The operator separately approved the one-line
-test-only setup correction to initialize the cache before taking that baseline. It is now
-applied, retaining the equality assertion. No plugin restore workaround or assertion weakening.
-Independent approved rejection coverage and the exact elevate replacement are now applied.
-
-Before the amendment, the other affected preflight tests passed:68passed2deselected63.32s;
-the two known cache failures were deliberately excluded from that historical batch, not
-marked skipped. The subsequent full70-case pass below includes both corrected cases.
-Includes all seven real-plugin rejection cases (reserved children/dangling link, conflicting
-basetemp, non-all retention), unchanged preservation guards and real completed Store/log/CAS
-artifact validation. No production or browser execution. Full detour Ruff PASS; strict mypy
-PASS56files; diff whitespace PASS. Read-only diff review confirms only the five approved
-files plus WORK changed, no index edits; original browser assertions/cleanup are retained.
-
-Independent diagnostic with installed pytest and NO AI plugin: tempfile.tempdir is None
-before pytest.main and the configured scratch directory afterward (1passed0.03s). This
-confirms pytest's cache initialization, not a plugin restoration defect. Synthetic diagnostic
-files remain under tmp/p32-cache.knvc6s_0. The approved amendment inserts exactly ONE line
-in nicegui_collection_process before capturing the cache baseline:
-
-```python
-original_tmpdir = os.environ.get("TMPDIR")
-tempfile.gettempdir()  # Initialize the cache before pytest's FD capture does.
-original_tempdir = tempfile.tempdir
-```
-
-Retain `assert tempfile.tempdir == original_tempdir` and all storage/environment checks.
-No changed plugin semantics, dropped assertion, timeout increase or exception suppression.
-Operator confirmed this is test-only and approved the exact insertion. It is applied.
-Fresh FULL affected preflight:70passed70.59s, no deselections/skips/warnings. Includes both
-actual collection success/failure isolation cases, retained storage and restored environment/
-cache, all seven conflict-rejection cases, operator directory retention/containment and real
-completed Store/log/CAS validation. Full detour Ruff PASS, strict mypy PASS56files, diff
-whitespace PASS. No browser/socket/root/provider/live-Codex execution or production change.
-This completes P32's approved code/local verification; no remaining approval blocker.
-
-Read-only review verified installed hook ordering and103/91-byte host socket paths;
-proposal Python/TOML/outer+inner Bash syntax and exact root-option/node argv passed static
-validation. The actual edited TOML and outer/inner Bash syntax, exact two-node argument array
-and comparison proving ALL other TOML settings/tasks unchanged also PASS. The prepared task
-has its macOS guard, captured root/argv/status/inventory and retained log copy. No elevate
-execution occurred. Both exact delegated nodes collect successfully (2tests2.68s) with a
-fresh explicit root and matching --basetemp, proving that positive configuration boundary;
-collection is not browser execution. The actual option/retention checks now pass as above.
-The prepared elevate ran exactly the real Chrome completed-query/card/artifact case and retained
-operator-directory case, macOS guard before log replacement, detailed captured argv/status/
-file inventory, data plus log copy under repo/tmp/elevate.XXXXXX. The2026-09-21 review above
-confirms2passed9.83s/status0 and retained artifacts; the ensuing full run exposed P34,
-so the earlier full-run recommendation is withdrawn pending that correction.
-No permanent tests invoking elevate; no
-index/production/ordinary-task edits. Earlier broad737-case evidence is not claimed as rerun.
+P34 corrected root discovery. The latest operator instruction now explicitly withdraws
+all-suite repository retention: retain ONLY actual operator Dashboard/Backend/Codex data
+under repo/tmp. P35 restores normal pytest/system scratch and pre-P32 isolated collection
+cleanup. Obsolete P32 implementation snippets are removed so they cannot be reapplied as
+pending/authoritative scope. Operator per-run retention, real card/artifact validation,
+production NiceGUI protection and existing cleanup/timeout/assertion contracts remain.
+Elevate is already idle; no task payload from historical P32 is pending or restored.
 
 ## P33 — WITHDRAWN / rolled back by operator: preserve generic busy-pull message
 
@@ -2610,6 +2275,242 @@ for this discovery correction: its actual default-environment boundary is testab
 now tested. Current elevate remains the existing idle scaffolding, unchanged. A full new
 pre-commit-operator run is still production acceptance, not something these local results
 can certify in advance. P33 remains withdrawn; no other pending approved code is revived.
+
+## P35 — COMPLETE: restore interactive sudo and ordinary temporary storage
+
+Historical P35 implementation/evidence below: P36 supersedes its direct operator-directory
+allocation and prefix. All other P35 corrections remain. Do not reinstate the old allocation
+snippet once the marker-based P36 wiring is applied.
+
+Latest explicit operator instruction supersedes the unapproved native_fs_path proposal:
+- Root task must ask for its sudo password; restore interactive authentication.
+- Repository ./tmp retention is ONLY for operator-test Dashboard/Backend/Codex files.
+- No sweeping changes; modify only necessary wiring and corresponding tests.
+
+Implementation boundary:
+1. Existing root task uses ordinary sudo already, not sudo -n. Add only -k to invalidate
+   cached authentication for this invocation; preserve env/interpreter/selection and every
+   other task. No password capture, sudo -S, root preload or credential-policy changes.
+   Update its existing launcher sentinel to require/consume -k; that test proves argv and
+   real interpreter activation, NOT actual sudo authentication/privilege dropping.
+2. Remove P32's global test-artifacts-root option/stash, basetemp/TMPDIR/tempfile.tempdir
+   overrides and all-suite retained directories. Restore the pre-P32 TemporaryDirectory
+   NiceGUI collection isolation/cleanup; original-storage/Redis guards stay intact.
+3. operator_runtime alone retains unique repo/tmp/operator-test.XXXXXXXX directories for
+   its config/source link/DB/replay/CAS/NiceGUI/output/socket. No scratch redirected there.
+4. Ordinary browser fixture uses its original short native temporary socket directory,
+   with normal cleanup; data stays in ordinary tmp_path. Update only direct removed-fixture
+   callpoints and retention tests. Keep browser/card assertions, helpers and timeouts.
+5. Replace obsolete P32 global-retention rejection expectations with real checks that
+   normal pytest scratch/configuration is not redirected. Keep P34 discovery exclusions/
+   regression (old retained artifacts still exist). Never delete old artifacts or add skips.
+
+Exact root command change: sudo env -> sudo -k env.
+Exact collection isolation to restore (historical58e727e):
+```python
+directory = tempfile.TemporaryDirectory(prefix="ai-augment-pytest-nicegui-")
+environment = pytest.MonkeyPatch()
+environment.setenv("NICEGUI_STORAGE_PATH", directory.name)
+environment.delenv("NICEGUI_REDIS_URL", raising=False)
+config.add_cleanup(environment.undo)
+config.add_cleanup(directory.cleanup)
+```
+Exact operator retention boundary:
+```python
+@pytest.fixture
+def operator_runtime(repository_root: Path) -> Iterator[OperatorRuntime]:
+    artifacts_root = repository_root / "tmp"
+    artifacts_root.mkdir(exist_ok=True)
+    run_dir = Path(tempfile.mkdtemp(prefix="operator-test.", dir=artifacts_root))
+    # Existing log, socket-length guard, runtime initialization/yield remain unchanged.
+```
+
+The five reported FIFO/socket failures are ordinary, NOT needs_sudo tests. Their path
+correction is independent of root authentication. Shared-checkout FIFO semantics remain
+unconfirmed without the full traceback/mount evidence, but returning ordinary scratch to
+native temp also restores the previous filesystem boundary. No new native_fs_path fixture,
+locator mechanism, broad skip removal or production patch from the superseded proposal.
+
+Verify changed real preflight/collection/ordinary FIFO tests, launcher activation, static
+checks and root discovery. Socket/browser/sudo execution remains an explicitly delegated
+boundary; do not claim actual password-prompt verification from a sentinel. No new elevate
+batch or pre-commit wrapper change is included in this correction.
+
+### P35 execution checkpoint — 2026-09-21
+
+Implementation is confined to six existing config/test files plus WORK:
+- pyproject.toml: only sudo env -> sudo -k env in test-detour-ai-augment-root. Parsed TOML
+  equality outside that exact change and bash -n PASS; every other task remains unchanged.
+- test_appendwatch.py: its existing sudo sentinel requires/consumes -k, preserving real
+  Pixi activation/watcher --help checks. Actual sudo authentication is not simulated evidence.
+- pytest_plugin.py: remove global retention option/stash/fixture and path overrides; restore
+  pre-P32 isolated NiceGUI cleanup. AST of pytest_configure matches58e727e exactly. Preserve
+  original-storage/Redis guards and add one tiny named child source for normal tmp_path proof.
+- operator fixture: restore repo/tmp/operator-test.* allocation, unchanged logging/length
+  guard/runtime/yield and retained artifacts. Only this real runtime retains repo/tmp data.
+- preflight: update removed-fixture callpoints and superseded retention expectations; replace
+  obsolete seven global-retention conflicts with three real standard pytest policy cases.
+  Preserve remaining assertions; synthetic-repository cleanup is ordinary test cleanup.
+- browser test: restore short native socket TemporaryDirectory with finalizer, remove the
+  obsolete global-root argument/assertion, correct misleading retained-data log. No browser
+  assertion/helper/timeout/process-cleanup change; ordinary data still derives from tmp_path.
+
+First preflight run:64passed/3failed/1error117.97s. New subprocess regression ran outside the
+repository without an import path; fixed only its cwd to pytestconfig.rootpath, keeping its
+explicit temporary pytest.ini/basetemp. Existing completed-history fixture exceeded unchanged
+30s child timeout while other checks ran; no proven cause or timeout change. Fresh module run
+alone:68passed52.74s, including that unchanged fixture and all three new policy cases.
+Ruff initially caught import ordering for tempfile; corrected, full src/tests Ruff PASS.
+Strict detour/shared-record mypy PASS56files. A prior ordinary watcher receipt was lost across
+compaction; not claimed as a pass. Fresh full feasible ordinary AI results follow.
+No production code, dependency, test skip/timeout or Git-index mutation. Elevate stays idle.
+
+### P35 completion evidence — 2026-09-21
+
+- Full feasible ordinary AI suite:677passed/1existing skip/9deselected893.08s, exit0. Includes
+  unchanged three FIFO-only regressions, remaining nonsocket watcher cases, all four actual
+  Pixi/interpreter launcher cases, Store/API/replay and startup matrix. Existing skip is the
+  deliberately disabled multiple-evidence-match rejection test. Nine deselections:3root,
+  1provider,2historical captures,1real Unix IPC,1socket substitution parameter,1mixed socket
+  CLI case. Host browser module explicitly excluded. Separate changed preflight68passed52.74s.
+- AFTER this suite: actual default-environment root collection147nodes; real_api collection
+  1node; both exit0, all nodes under tests/, no retained tmp/logs test imports. Collection
+  is not execution evidence for provider/main tests. P34 exclusions remain unchanged.
+- Final Ruff PASS; strict mypy56files PASS plus the final preflight cwd correction checked
+  separately1file PASS. Diff whitespace PASS. Parsed TOML proves root sudo -k is its sole
+  change; bash -n PASS. AST checks prove every other watcher/browser/operator function
+  unchanged; all original browser assertions remain except superseded global-root containment.
+  pytest_configure exactly matches pre-P32, preserving early NiceGUI isolation/cleanup.
+- Representative normal aicode socket paths are89/91bytes, below Linux107byte pathname
+  maximum. This is arithmetic, not a real socket pass or proof of the guest mount's FIFO
+  semantics. No root/sudo/socket/Chrome/provider/live-Codex execution here. Sudo uses normal
+  terminal authentication with -k; no password input capture or modified sudoers policy.
+
+Approved P35 implementation is complete. Only the six named config/test files and WORK
+changed; no native_fs_path fixture, added skip, timeout, production edit or pre-commit/elevate
+rewrite. Actual operator runtime data alone is retained under repo/tmp/operator-test.*;
+ordinary scratch follows pytest/system policy. Old retained artifacts were not deleted.
+No unqualified full pre-commit-operator success/readiness claim; production acceptance remains.
+
+## P36 — COMPLETE: use_rootpath_tmp
+
+Operator accepted the exact proposed snippets, renamed use_cwd_tmp -> use_workdir_tmp ->
+use_rootpath_tmp with constant USE_ROOTPATH_TMP_MARKER. Root means request.config.rootpath,
+not invocation cwd or later chdir. This supersedes only P35's operator-specific allocation:
+marked tests may retain ALL tmp_path-derived files, not exclusively runtime files. Initially
+mark only the existing operator module; do not opt other suites/browser tests in implicitly.
+
+Exact additions in existing protected/tests/pytest_plugin.py:
+```python
+USE_ROOTPATH_TMP_MARKER = "use_rootpath_tmp"
+
+# Inside existing pytest_configure:
+config.addinivalue_line(
+    "markers",
+    f"{USE_ROOTPATH_TMP_MARKER}: retain tmp_path data under project-root/tmp",
+)
+
+@pytest.fixture
+def tmp_path(
+    request: pytest.FixtureRequest,
+    tmp_path: Path,
+) -> Path:
+    if request.node.get_closest_marker(USE_ROOTPATH_TMP_MARKER) is None:
+        return tmp_path
+
+    root = request.config.rootpath / "tmp"
+    root.mkdir(exist_ok=True)
+    directory = Path(tempfile.mkdtemp(prefix="test.", dir=root))
+    print(
+        f"[test-data] {request.node.nodeid}: retained {directory}",
+        flush=True,
+    )
+    return directory
+```
+
+The same-name argument resolves pytest's original fixture by standard override semantics;
+unmarked callers receive that unchanged Path. Marked directories are unique and retained
+after success/failure. No override of basetemp, TMPDIR, tempfile or tmp_path_factory; no
+collection-time NiceGUI storage change, new cleanup or change to ordinary fixture policies.
+
+Exact operator module wiring:
+```python
+pytestmark = [
+    pytest.mark.operator,
+    pytest.mark.use_rootpath_tmp,
+]
+
+@pytest.fixture
+def operator_runtime(
+    repository_root: Path,
+    tmp_path: Path,
+) -> Iterator[OperatorRuntime]:
+    run_dir = tmp_path
+    # Existing logging, socket-length guard and runtime/yield unchanged.
+```
+
+Remove only the now-redundant directory allocation from operator_runtime. Keep existing
+operator selection/authentication behavior; the new marker does NOT authorize AIVM work.
+Necessary existing preflight callpoints/tests must consume the supplied directory and
+preserve runtime containment, file/source preservation and socket-length assertions. Add
+real isolated pytest coverage for marked/unmarked behavior, marker inheritance, unique
+directories/retention on success and failure, dependent fixtures and project-root anchoring
+when invoked from a subdirectory. Reuse existing named subprocess helpers, no inline child
+programs in test functions. No test weakening, new skip or timeout change.
+
+Boundary: three existing test files (plugin, operator module, operator preflight), plus WORK.
+No task/production/dependency/browser modification, sudo rework or index mutation. P35's
+fake-sudo adaptation was expressly accepted and stays unchanged. Keep P34 discovery guards.
+Prototype before approval: actual pytest4cases passed0.80s with rootpath anchoring from a
+subdirectory; this is mechanism proof, distinct from the repository verification below.
+
+### P36 execution checkpoint
+
+Exact approved marker constant/registration/fixture body and operator module markers/runtime
+signature are implemented. Removed only operator_runtime's redundant allocation and its now
+unused tempfile import; existing log, guard and yield unchanged. Necessary preflight changes:
+runtime test supplies two distinct short owned directories and retains its complete byte/
+source/path checks; overlong-path test supplies the actual overlong directory directly.
+Allocation uniqueness is now exercised at its owner: four real child-pytest cases (function/
+module marker x success/failure), each running two parameterized tests. They prove dependent
+NiceGUI paths, project-root anchoring from a subdirectory, diagnostic paths and retained data
+even with ordinary pytest retention disabled. Existing three unmarked policy cases remain.
+One named test-source helper added to the existing plugin; no separate harness/module.
+
+Focused actual checks:11passed61deselected53.81s, including those four cases, unmarked policies,
+collection NiceGUI cleanup and runtime path checks. Ruff PASS; strict mypy PASS56files. Added
+an explicit expected-failure-message assertion afterward; full affected module follows.
+Full affected preflight:72passed60.24s, including that assertion and all existing artifact/
+isolation/root-discovery checks. AST audit matches the approved fixture body, marker list,
+operator signature and assignment exactly. No obsolete marker names/prefix consumers remain
+in active tests. Operator staging changed during implementation; preserve it. No Git mutation
+was performed. No tasks/production/browser files changed for P36. Full feasible ordinary AI
+suite ran separately with the same explicit browser/socket/root/provider/history boundaries
+as P35; final evidence follows.
+
+### P36 completion evidence — 2026-09-21
+
+- Full feasible ordinary AI suite:677passed/1existing skip/9deselected879.13s, exit0. Includes
+  unchanged FIFO/watcher, interpreter launchers, real synthetic Store/log/DB/replay, UI and
+  startup subprocess matrix. The existing multiple-evidence-match skip and nine explicit
+  exclusions are exactly those listed for P35; browser module excluded, no new skip/timeout.
+  Separate full preflight72passed60.24s; the focused11case run is a subset, not additive.
+- Actual default-environment root discovery after those checks:147ordinary nodes and1real_api
+  node, exit0, all under tests/. No tmp/logs import. This is collection, not provider execution.
+- Ruff PASS; strict detour/shared-record mypy PASS56files; whitespace check PASS. AST verifies
+  the exact approved fixture body, operator marker list/signature/assignment; operator
+  log/guard/yield remain unchanged. pytest_configure matches the pre-P32 behavior exactly
+  after removing ONLY the new marker-registration statement from the comparison.
+- Operator asked whether old relocation code remained: inspected HEAD/index/working tree.
+  All-suite option/stash/fixture, basetemp/TMPDIR/tempfile.tempdir overrides, policy guards and
+  operator-specific allocation are removed (already staged). Native NiceGUI collection
+  isolation, short socket directories and the existing browser-local child TMPDIR remain
+  intentionally; none is the retired suite-wide repository relocation mechanism.
+
+P36 is complete within the exact approved shape. Three existing test files plus WORK only;
+no new module, production/task/dependency change or Git mutation. All operator staging is
+preserved. Actual sudo/socket/Chrome/provider/live-Codex acceptance was not rerun; elevate
+remains idle. Prior operator-prefix allocation snippets are historical, superseded by P36.
 
 ## Completed scope index
 
@@ -3465,7 +3366,7 @@ pixi run -e detour-ai-augment env mypy --config-file src/detours/detour_ai_augme
   type suppressions. No unrelated codebase-wide refactor. Store persistence and pull-state
   updates must not be named publishing; that term is reserved for DOCX/TXT in the new scope.
 - All commands via pixi run -e detour-ai-augment; Ruff/mypy/pytest via env. Git read-only.
-- Task edits: prior interpreter substitutions, agent-owned elevate, approved pre-commit-operator host-browser routing, and F7 fixes for proven environment-variable expansion defects only. Other pre-commit structure/status/grep changes remain rejected.
+- Task edits: prior interpreter substitutions, agent-owned elevate, approved pre-commit-operator host-browser routing, F7 fixes for proven environment-variable expansion defects, and P35's exact sudo -k addition only. Other pre-commit structure/status/grep changes remain rejected.
 - Never run/import src.repl, edit src/cli.py, import another detour or edit TASK. HUMANS is
   human-maintained; the operator explicitly authorized only this 2026-09-18 post-find
   proposal/status update. No broader HUMANS editing permission is inferred.

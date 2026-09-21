@@ -167,7 +167,7 @@ def test_completed_grid_row_uses_real_query_ipc(
     python_process: pytest_plugin.PythonProcess,
     pytestconfig: pytest.Config,
     monkeypatch: pytest.MonkeyPatch,
-    test_artifacts_root: Path,
+    request: pytest.FixtureRequest,
 ) -> None:
     files = completed_query_files
     expected = json.loads((files.config.parent / "completed-query.json").read_text())
@@ -181,12 +181,12 @@ def test_completed_grid_row_uses_real_query_ipc(
         sys.executable, "-c",
         python_process.source(pytest_plugin.completed_query_dashboard_process),
     ))
-    assert files.config.parent.is_relative_to(test_artifacts_root)
-    directory = Path(tempfile.mkdtemp(prefix="q.", dir=test_artifacts_root))
-    dashboard_socket_path = directory / "dashboard.sock"
+    directory = tempfile.TemporaryDirectory(prefix="q.", dir="/tmp")
+    request.addfinalizer(directory.cleanup)
+    dashboard_socket_path = Path(directory.name) / "dashboard.sock"
     if len(os.fsencode(dashboard_socket_path)) >= operator.DARWIN_AF_UNIX_PATH_CAPACITY_BYTES:
         raise RuntimeError("query browser socket path exceeds Darwin AF_UNIX capacity")
-    print(f"[test-artifacts] retained query data: {files.config.parent}", flush=True)
+    print(f"[test-artifacts] query data: {files.config.parent}", flush=True)
     print(f"[test-artifacts] query socket: {dashboard_socket_path}", flush=True)
     with initialize_backend_store(
         backend_server.configure_runtime(files.config, require_namekey=False),

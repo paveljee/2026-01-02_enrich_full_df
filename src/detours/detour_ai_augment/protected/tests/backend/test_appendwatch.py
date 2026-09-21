@@ -1282,7 +1282,7 @@ def test_task_selected_interpreter_starts_real_watcher(
     (sentinel / "__init__.py").write_text("")
     (sentinel / "__main__.py").write_text(python_process.source(watcher_import_process))
     sudo = tmp_path / "sudo"
-    sudo.write_text('#!/bin/sh\nexec "$@"\n')
+    sudo.write_text('#!/bin/sh\n[ "$1" = "-k" ] || exit 64\nshift\nexec "$@"\n')
     sudo.chmod(0o700)
     environment = dict(
         os.environ,

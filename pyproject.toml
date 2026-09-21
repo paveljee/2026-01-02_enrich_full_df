@@ -535,7 +535,7 @@ exit "$task_status"
 '
 """
 test-detour-ai-augment-root = """
-sudo env \
+sudo -k env \
   APPENDWATCH_SCRIPT="$PIXI_PROJECT_ROOT/src/detours/detour_ai_augment/protected/src/control_centre/appendwatch/appendwatch.py" \
   APPENDWATCH_PYTHON="$CONDA_PREFIX/bin/python" \
   PATH="$CONDA_PREFIX/bin:$PATH" \

@@ -5,6 +5,7 @@ import inspect
 import json
 import os
 import subprocess
+import tempfile
 import threading
 from http import HTTPStatus
 from pathlib import Path
@@ -212,27 +213,27 @@ def test_operator_http_history_rejects_corrupt_or_unreferenced_records(
         workflow._validate_workflow_http_records(records)
 
 
-def test_operator_run_directories_are_unique_retained_and_contained(
-    startup_files: ui_tests.StartupFiles, test_artifacts_root: Path,
+def test_operator_runtime_uses_supplied_directories_and_preserves_files(
+    startup_files: ui_tests.StartupFiles, request: pytest.FixtureRequest,
 ) -> None:
     files = startup_files
     source_before = hashlib.sha256(files.source.read_bytes()).hexdigest()
     assert files.source.stat().st_mode & 0o222 == 0
-    assert files.config.parent.is_relative_to(test_artifacts_root)
-    repository = files.config.parent / "repository"
-    repository.mkdir()
-    print(f"[test-artifacts] retained synthetic repository: {repository}", flush=True)
+    directory = tempfile.TemporaryDirectory(prefix="p.", dir="/tmp")
+    request.addfinalizer(directory.cleanup)
+    repository = Path(directory.name)
     (repository / "config_ai_augment.json").write_bytes(files.config.read_bytes())
     run_dirs: list[Path] = []
-    for _ in range(2):
+    for index in range(2):
+        supplied = repository / f"run-{index}"
+        supplied.mkdir()
         fixture = inspect.unwrap(workflow.operator_runtime)(
-            repository_root=repository, test_artifacts_root=test_artifacts_root,
+            repository_root=repository, tmp_path=supplied,
         )
         runtime = next(fixture)
         run_dir = runtime.config_path.parent
         run_dirs.append(run_dir)
-        assert run_dir.parent == test_artifacts_root
-        assert run_dir.name.startswith("operator-test.")
+        assert run_dir == supplied
         assert (
             len(os.fsencode(runtime.dashboard_socket_path))
             < workflow.DARWIN_AF_UNIX_PATH_CAPACITY_BYTES
@@ -262,16 +263,15 @@ def test_operator_run_directories_are_unique_retained_and_contained(
 
 
 def test_operator_run_directory_rejects_overlong_socket_path(tmp_path: Path) -> None:
-    artifacts_root = tmp_path / ("long-artifacts-" * 9)
-    artifacts_root.mkdir()
+    run_dir = tmp_path / ("long-directory-" * 9)
+    run_dir.mkdir()
     fixture = inspect.unwrap(workflow.operator_runtime)(
-        repository_root=tmp_path, test_artifacts_root=artifacts_root,
+        repository_root=tmp_path, tmp_path=run_dir,
     )
     with pytest.raises(RuntimeError, match="exceeds Darwin AF_UNIX capacity"):
         next(fixture)
-    run_dirs = tuple(artifacts_root.iterdir())
-    assert len(run_dirs) == 1 and run_dirs[0].is_dir()
-    assert not (run_dirs[0] / "config.operator.json").exists()
+    assert run_dir.is_dir()
+    assert not (run_dir / "config.operator.json").exists()
 
 
 @pytest.mark.python_subprocess
@@ -302,7 +302,7 @@ def test_nicegui_children_have_private_persistent_storage(
 
 @pytest.mark.python_subprocess
 @pytest.mark.parametrize("collection_failure", (False, True))
-def test_nicegui_isolated_before_collection_and_retained_after_exit(
+def test_nicegui_isolated_before_collection_and_cleaned_after_exit(
     tmp_path: Path, python_process: operator_preflight.PythonProcess,
     collection_failure: bool,
 ) -> None:
@@ -320,52 +320,86 @@ def test_nicegui_isolated_before_collection_and_retained_after_exit(
         "2" if collection_failure else "0", env=environment, timeout=30,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "COLLECTION_STORAGE_RETAINED" in result.stdout
+    assert "COLLECTION_STORAGE_CLEANED" in result.stdout
     assert workflow._tree_digest(original) == before
 
 
 @pytest.mark.python_subprocess
-@pytest.mark.parametrize(
-    "conflict",
-    ("pytest", "nicegui", "t", "dangling-nicegui", "basetemp", "failed", "none"),
-)
-def test_pytest_artifact_configuration_rejects_conflicts_without_deleting_data(
-    tmp_path: Path, python_process: operator_preflight.PythonProcess, conflict: str,
+@pytest.mark.parametrize("retention_policy", ("all", "failed", "none"))
+def test_pytest_temporary_storage_is_not_redirected(
+    tmp_path: Path, pytestconfig: pytest.Config,
+    python_process: operator_preflight.PythonProcess, retention_policy: str,
 ) -> None:
-    artifacts = tmp_path / "artifacts"
-    artifacts.mkdir()
+    assert not tmp_path.is_relative_to(pytestconfig.rootpath / "tmp")
+    assert not Path(tempfile.gettempdir()).is_relative_to(pytestconfig.rootpath / "tmp")
     ini = tmp_path / "pytest.ini"
     ini.write_text("[pytest]\n")
-    extra_args: tuple[str, ...] = ()
-    preserved = [artifacts]
-    if conflict in {"pytest", "nicegui", "t"}:
-        occupied = artifacts / conflict
-        occupied.mkdir()
-        (occupied / "sentinel").write_text("must not be removed")
-        expected_error = "Test artifact path already exists"
-    elif conflict == "dangling-nicegui":
-        (artifacts / "nicegui").symlink_to(artifacts / "absent")
-        expected_error = "Test artifact path already exists"
-    elif conflict == "basetemp":
-        conflicting = tmp_path / "other-pytest-data"
-        conflicting.mkdir()
-        (conflicting / "sentinel").write_text("must not be removed")
-        preserved.append(conflicting)
-        extra_args = ("--basetemp", str(conflicting))
-        expected_error = "--basetemp must equal <test-artifacts-root>/pytest"
-    else:
-        extra_args = ("-o", f"tmp_path_retention_policy={conflict}")
-        expected_error = "AI augment test artifacts require tmp_path_retention_policy=all"
-    before = {path: workflow._tree_digest(path) for path in preserved}
+    test_path = tmp_path / "test_scratch.py"
+    test_path.write_text(
+        "from pathlib import Path\n\n"
+        + inspect.getsource(operator_preflight.test_pytest_requested_temporary_path),
+    )
+    basetemp = tmp_path / "requested-pytest-data"
     result = python_process.run(
         operator_preflight.artifact_configuration_process,
-        "-q", "--collect-only", "--noconftest", "-p", operator_preflight.__name__,
-        "-c", str(ini), "--test-artifacts-root", str(artifacts),
-        *extra_args, str(tmp_path), timeout=30,
+        "-q", "--noconftest", "-p", operator_preflight.__name__,
+        "-c", str(ini), "--basetemp", str(basetemp),
+        "-o", f"tmp_path_retention_policy={retention_policy}", str(test_path),
+        cwd=pytestconfig.rootpath,
+        env=dict(os.environ, TEST_EXPECTED_BASETEMP=str(basetemp)), timeout=30,
     )
-    assert result.returncode == pytest.ExitCode.USAGE_ERROR, result.stdout + result.stderr
-    assert expected_error in result.stderr
-    assert {path: workflow._tree_digest(path) for path in preserved} == before
+    assert result.returncode == pytest.ExitCode.OK, result.stdout + result.stderr
+    assert "1 passed" in result.stdout
+    assert not (tmp_path / "tmp").exists()
+
+
+@pytest.mark.python_subprocess
+@pytest.mark.parametrize("marker_scope", ("function", "module"))
+@pytest.mark.parametrize("fails", (False, True))
+def test_rootpath_tmp_marker_retains_unique_directories(
+    tmp_path: Path, pytestconfig: pytest.Config,
+    python_process: operator_preflight.PythonProcess, marker_scope: str, fails: bool,
+) -> None:
+    ini = tmp_path / "pytest.ini"
+    ini.write_text("[pytest]\n")
+    suite = tmp_path / "suite"
+    suite.mkdir()
+    marked = (
+        "pytestmark = pytest.mark.use_rootpath_tmp\n\n"
+        if marker_scope == "module" else "@pytest.mark.use_rootpath_tmp\n"
+    )
+    test_path = suite / "test_paths.py"
+    test_path.write_text(
+        "from pathlib import Path\n\nimport pytest\n\n"
+        + marked
+        + '@pytest.mark.parametrize("case", (0, 1))\n'
+        + inspect.getsource(operator_preflight.test_rootpath_tmp_directory),
+    )
+    environment = dict(
+        os.environ,
+        PYTHONPATH=os.pathsep.join(filter(None, (
+            str(pytestconfig.rootpath), os.environ.get("PYTHONPATH"),
+        ))),
+        TEST_FAIL_AFTER_WRITE=str(int(fails)),
+    )
+    result = python_process.run(
+        operator_preflight.artifact_configuration_process,
+        "-q", "-s", "--noconftest", "-p", operator_preflight.__name__,
+        "-c", str(ini), "-o", "tmp_path_retention_policy=none", str(test_path),
+        cwd=suite, env=environment, timeout=30,
+    )
+    expected = pytest.ExitCode.TESTS_FAILED if fails else pytest.ExitCode.OK
+    assert result.returncode == expected, result.stdout + result.stderr
+    assert ("2 failed" if fails else "2 passed") in result.stdout
+    if fails:
+        assert "intentional failure after writing retained data" in result.stdout
+    directories = tuple((tmp_path / "tmp").iterdir())
+    assert len(directories) == 2
+    assert {path.joinpath("retained.txt").read_text() for path in directories} == {"0", "1"}
+    for path in directories:
+        assert path.name.startswith("test.")
+        assert f": retained {path}" in result.stdout
+    assert not (suite / "tmp").exists()
 
 
 @pytest.mark.python_subprocess

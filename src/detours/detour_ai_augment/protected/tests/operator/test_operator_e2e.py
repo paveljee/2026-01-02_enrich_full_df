@@ -10,7 +10,6 @@ import signal
 import socket
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from collections.abc import Generator, Iterator, Sequence
@@ -130,7 +129,10 @@ FAILED_RUN_LOG_PREFIX = f"{Locale.CONTROL_CENTRE_LOG_PREFIX} run failed:"
 RESEARCHER_CARD_BEGIN = "Playwright researcher card begin"
 RESEARCHER_CARD_END = "Playwright researcher card end"
 
-pytestmark = pytest.mark.operator
+pytestmark = [
+    pytest.mark.operator,
+    pytest.mark.use_rootpath_tmp,
+]
 
 
 class OperatorRuntime(FrozenStrictModel):
@@ -486,9 +488,10 @@ def _operator_runtime(
 
 @pytest.fixture
 def operator_runtime(
-    repository_root: Path, test_artifacts_root: Path,
+    repository_root: Path,
+    tmp_path: Path,
 ) -> Iterator[OperatorRuntime]:
-    run_dir = Path(tempfile.mkdtemp(prefix="operator-test.", dir=test_artifacts_root))
+    run_dir = tmp_path
     _operator_log(f"Operator run directory (preserved): {run_dir}")
     dashboard_socket_path = run_dir / "dashboard.sock"
     if len(os.fsencode(dashboard_socket_path)) >= DARWIN_AF_UNIX_PATH_CAPACITY_BYTES:
