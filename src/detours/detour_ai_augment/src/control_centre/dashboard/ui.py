@@ -302,10 +302,6 @@ CARD_RESPONSIVE_CSS: Final = f"""
 RemotePid = NewType("RemotePid", int)
 
 
-def datetime_to_unix_usec(value: datetime) -> int:
-    if value.tzinfo is None:
-        raise ValueError("run-event time must be timezone-aware")
-    return int(value.timestamp() * 1_000_000)
 
 
 def emit_log(prefix: str, message: str) -> None:
@@ -1893,6 +1889,13 @@ class _ControlCentreController:
     ) -> None:
         self._storage = storage
         self._backend = backend
+        self._unix_usec: Callable[[datetime], int] = lambda dt: (
+            Run.datetime_to_unix_usec(
+                dt.astimezone(
+                    ZoneInfo(self._backend._pipeline_config.timezone)
+                )
+            )
+        )
         self._probe_ipc = probe_ipc
         self._send_run_outcome = record_run_outcome
         self._render_card = render_card
@@ -1967,7 +1970,7 @@ class _ControlCentreController:
         )
         if publishing:
             return
-        restart_time = datetime.now(timezone.utc)
+        restart_time_usec = self._unix_usec(datetime.now())
         for run in tuple(self._runs.values()):
             if run.dashboard_owned and run.is_running():
                 await self._codex.terminate_abandoned_run(run)
@@ -1975,7 +1978,7 @@ class _ControlCentreController:
                     RunEvent(
                         run_id=run.run_id,
                         namekey=run.namekey,
-                        occurred_at_unix_usec=datetime_to_unix_usec(restart_time),
+                        occurred_at_unix_usec=restart_time_usec,
                         lifecycle=RunLifecycle.FAILED,
                         detail=Locale.RESTART_INTERRUPTED_RUN,
                     )
@@ -2000,14 +2003,14 @@ class _ControlCentreController:
         if self._publishing:
             return
         await self._wind_down_owned_run_processes()
-        shutdown_time = datetime.now(timezone.utc)
+        shutdown_time_usec = self._unix_usec(datetime.now())
         for run in tuple(self._runs.values()):
             if run.dashboard_owned and run.is_running():
                 await self._append_run_event(
                     RunEvent(
                         run_id=run.run_id,
                         namekey=run.namekey,
-                        occurred_at_unix_usec=datetime_to_unix_usec(shutdown_time),
+                        occurred_at_unix_usec=shutdown_time_usec,
                         lifecycle=RunLifecycle.FAILED,
                         detail=Locale.SHUTDOWN_INTERRUPTED_RUN,
                     )
@@ -2028,7 +2031,7 @@ class _ControlCentreController:
             RunEvent(
                 run_id=run_id,
                 namekey=namekey,
-                occurred_at_unix_usec=datetime_to_unix_usec(datetime.now(timezone.utc)),
+                occurred_at_unix_usec=self._unix_usec(datetime.now()),
                 lifecycle=RunLifecycle.QUEUED,
             )
         )
@@ -2063,7 +2066,7 @@ class _ControlCentreController:
             RunEvent(
                 run_id=run_id,
                 namekey=run.namekey,
-                occurred_at_unix_usec=datetime_to_unix_usec(datetime.now(timezone.utc)),
+                occurred_at_unix_usec=self._unix_usec(datetime.now()),
                 lifecycle=RunLifecycle.CANCEL_REQUESTED,
             )
         )
@@ -2082,7 +2085,7 @@ class _ControlCentreController:
                     RunEvent(
                         run_id=run_id,
                         namekey=run.namekey,
-                        occurred_at_unix_usec=datetime_to_unix_usec(datetime.now(timezone.utc)),
+                        occurred_at_unix_usec=self._unix_usec(datetime.now()),
                         lifecycle=RunLifecycle.FAILED,
                         detail=Locale.CODEX_CANCEL_FAILED_TEMPLATE.format(error=exc),
                     )
@@ -2098,7 +2101,7 @@ class _ControlCentreController:
                 RunEvent(
                     run_id=run_id,
                     namekey=run.namekey,
-                    occurred_at_unix_usec=datetime_to_unix_usec(datetime.now(timezone.utc)),
+                    occurred_at_unix_usec=self._unix_usec(datetime.now()),
                     lifecycle=RunLifecycle.CANCELLED,
                 )
             )
@@ -2320,7 +2323,7 @@ class _ControlCentreController:
                     RunEvent(
                         run_id=run.run_id,
                         namekey=run.namekey,
-                        occurred_at_unix_usec=datetime_to_unix_usec(datetime.now(timezone.utc)),
+                        occurred_at_unix_usec=self._unix_usec(datetime.now()),
                         lifecycle=run_outcome,
                         detail=None if cancelled else str(exc),
                     )
@@ -2338,7 +2341,7 @@ class _ControlCentreController:
                         RunEvent(
                             run_id=run.run_id,
                             namekey=run.namekey,
-                            occurred_at_unix_usec=datetime_to_unix_usec(datetime.now(timezone.utc)),
+                            occurred_at_unix_usec=self._unix_usec(datetime.now()),
                             lifecycle=RunLifecycle.FAILED,
                             detail=Locale.RUN_PROCESS_CLEANUP_FAILED_TEMPLATE.format(
                                 error=cleanup_error
@@ -2410,7 +2413,9 @@ class _ControlCentreController:
             RunEvent(
                 run_id=run.run_id,
                 namekey=run.namekey,
-                occurred_at_unix_usec=datetime_to_unix_usec(result.session_timestamp),
+                occurred_at_unix_usec=self._unix_usec(
+                    result.session_timestamp,
+                ),
                 lifecycle=RunLifecycle.SESSION_DISCOVERED,
                 session_id=result.session_id,
             )
@@ -2421,7 +2426,7 @@ class _ControlCentreController:
             RunEvent(
                 run_id=run.run_id,
                 namekey=run.namekey,
-                occurred_at_unix_usec=datetime_to_unix_usec(datetime.now(timezone.utc)),
+                occurred_at_unix_usec=self._unix_usec(datetime.now()),
                 lifecycle=RunLifecycle.ROLLOUT_DISCOVERED,
                 session_id=result.session_id,
                 rollout_jsonl=result.rollout_jsonl,
@@ -2440,7 +2445,7 @@ class _ControlCentreController:
             RunEvent(
                 run_id=run.run_id,
                 namekey=run.namekey,
-                occurred_at_unix_usec=datetime_to_unix_usec(datetime.now(timezone.utc)),
+                occurred_at_unix_usec=self._unix_usec(datetime.now()),
                 lifecycle=RunLifecycle.CODEX_EXITED,
                 codex_exit_code=exit_code,
             )
@@ -2456,7 +2461,7 @@ class _ControlCentreController:
             RunEvent(
                 run_id=run.run_id,
                 namekey=run.namekey,
-                occurred_at_unix_usec=datetime_to_unix_usec(datetime.now(timezone.utc)),
+                occurred_at_unix_usec=self._unix_usec(datetime.now()),
                 lifecycle=run_outcome,
                 codex_exit_code=exit_code,
             )
@@ -2481,7 +2486,7 @@ class _ControlCentreController:
             RunEvent(
                 run_id=run.run_id,
                 namekey=run.namekey,
-                occurred_at_unix_usec=datetime_to_unix_usec(datetime.now(timezone.utc)),
+                occurred_at_unix_usec=self._unix_usec(datetime.now()),
                 lifecycle=lifecycle,
                 remote_pid=(None if handle.remote_pid is None else int(handle.remote_pid)),
             )

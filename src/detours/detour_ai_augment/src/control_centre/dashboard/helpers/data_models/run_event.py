@@ -58,25 +58,19 @@ class Run(BaseModel):
     def is_finished(self) -> bool:
         return self.run_outcome is not None
 
-
-@implements[ControlCentreComponent.RunEventProperty]()
-class RunEvent(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    run_id: UUID
-    namekey: NameKey
-    occurred_at_unix_usec: int
-    lifecycle: RunLifecycle
-    session_id: UUID | None = None
-    rollout_jsonl: PurePosixPath | None = None
-    remote_pid: int | None = Field(default=None, gt=0)
-    accepted_commit_record_id: UUID | None = None
-    codex_exit_code: int | None = None
-    detail: str | None = None
-
     @property
     def occurred_at(self) -> datetime:
         return datetime.fromtimestamp(
             self.occurred_at_unix_usec / MICROSECONDS_PER_SECOND,
             tz=timezone.utc,
         )
+
+    @staticmethod
+    def datetime_to_unix_usec(value: datetime) -> int:
+        """Run-wide helper to construct a Unix timestamp in usec.
+        Preserves `tz_info` of the argument, so ensure it is correct.
+        
+        signed off: human"""
+        if value.tzinfo is None:
+            raise ValueError("run-event time must be timezone-aware")
+        return int(value.timestamp() * 1_000_000)
