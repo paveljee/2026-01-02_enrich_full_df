@@ -6,6 +6,7 @@ untracked/
 embargoed/
 .tmp
 .nicegui
+logs/
 
 # pixi environments
 .pixi/*
