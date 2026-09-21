@@ -515,12 +515,42 @@ exit "$status"
 '
 """
 elevate = """
-bash -c 'LOG_PATH="$PIXI_PROJECT_ROOT/logs/from_operator/elevate.log"
-script -q -e -c '"'"'task_status=0
-echo "Nothing to elevate" || task_status=1
-exit "$task_status"
-'"'"' "$LOG_PATH"
-task_status=$?
+bash -c '
+if [ "$(uname -s)" != Darwin ]; then
+  echo "Run elevate on the macOS Dashboard host." >&2
+  exit 2
+fi
+LOG_PATH="$PIXI_PROJECT_ROOT/logs/from_operator/elevate.log"
+mkdir -p "$PIXI_PROJECT_ROOT/tmp" "$(dirname "$LOG_PATH")" || exit 1
+ELEVATE_RUN_DIR="$(mktemp -d "$PIXI_PROJECT_ROOT/tmp/elevate.XXXXXX")" || exit 1
+export ELEVATE_RUN_DIR
+export ELEVATE_STATUS_PATH="$ELEVATE_RUN_DIR/status"
+script -q "$LOG_PATH" bash -c '"'"'
+  echo "Retained verification directory: $ELEVATE_RUN_DIR"
+  pytest_args=(
+    -vv -srA --capture=tee-sys
+    --test-artifacts-root "$ELEVATE_RUN_DIR"
+    src/detours/detour_ai_augment/tests/control_centre/test_ui_e2e.py::test_completed_grid_row_uses_real_query_ipc
+    src/detours/detour_ai_augment/protected/tests/operator/test_operator_e2e_preflight.py::test_operator_run_directories_are_unique_retained_and_contained
+  )
+  printf "Pytest arguments:"
+  printf " %q" "${pytest_args[@]}"
+  printf "\\n"
+  "$CONDA_PREFIX/bin/python" -m pytest "${pytest_args[@]}"
+  task_status=$?
+  echo "Pytest exit status: $task_status"
+  echo "Retained fixture files under $ELEVATE_RUN_DIR:"
+  find "$ELEVATE_RUN_DIR" -type f -print || task_status=1
+  printf "%s\\n" "$task_status" > "$ELEVATE_STATUS_PATH"
+  exit "$task_status"
+'"'"'
+script_status=$?
+task_status=1
+if [ -r "$ELEVATE_STATUS_PATH" ]; then
+  read -r task_status < "$ELEVATE_STATUS_PATH" || task_status=1
+fi
+if [ "$script_status" -ne 0 ]; then task_status=1; fi
+cp "$LOG_PATH" "$ELEVATE_RUN_DIR/elevate.log" || task_status=1
 grep -n -- "FAILED" "$LOG_PATH"
 grep_status=$?
 case "$grep_status" in

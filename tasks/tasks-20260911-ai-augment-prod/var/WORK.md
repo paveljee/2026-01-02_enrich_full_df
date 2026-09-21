@@ -9,16 +9,66 @@ P26–P30 COMPLETE, including P30's approved initial-validation addition and per
 clarification. P31 is COMPLETE within its approved implementation scope, including the separately
 approved test-only UUID amendment. Fresh affected preflight63passed98.40s, full Ruff and strict
 detour mypy56files PASS. Outcome pull/push checks match the current Store snapshot, independently
-of commit ancestry. No production/task changes. Recommend the proposed focused macOS elevate
-verification before pre-commit-operator; its exact task edit remains UNAPPLIED for review. The prior
+of commit ancestry. No production/task changes. New delegated log reviewed below:227tests pass,
+including the real Chrome card/query/artifact test, but two shell node-name commands fail and
+the retained-directory test did not run. Diagnostic artifacts were not retained under elevate.
+P32 is COMPLETE within its approved scope, including the separately approved one-line
+test-baseline amendment. Full affected preflight70passed70.59s; Ruff and strict mypy56files
+PASS. Elevate is ready for the exact two macOS checks below. Full pre-commit-operator handoff
+still awaits that delegated result; no fresh browser/transport acceptance is claimed. The prior
 session-less outcome persistence blocker is withdrawn. P25 remains implemented. Unexpected ambiguity
 requiring scope extension must be raised before dependent implementation, not improvised.
 The latest operator harness failures and requested artifact-directory change were addressed
-as P31 within the approved snippets below, including their upstream coverage. No remaining
-approved implementation; delegated verification is proposed separately, with no production
-or ordinary task changes.
+as P31 within the approved snippets below, including their upstream coverage. P32 completes
+retained test artifacts and the exact elevate wrapper. No approved implementation remains;
+delegated verification is pending, with no production or ordinary task changes.
 Keep original IPC missing-socket diagnostics/polling as operator elected. No ordinary tasks,
 HUMANS, pasted/shared HTTP schema, sample_deploy or other-detour changes are authorized.
+
+### Latest elevate review — 2026-09-20; passing tests, failed invocation/retention
+
+Operator supplied logs/from_operator/elevate.log (127108bytes,mtime13:42UTC). Read this log
+and current code only; operator reports no recovered test data. Do not search unrelated
+system/production directories for it. At this log review the checked-in elevate was the idle task,
+and the supplied log does not contain the executed command, wrapper status or retained-root
+banner. Therefore do not claim the exact proposed two-node wrapper was what actually ran.
+
+- macOS Python3.14:227passed110.32s, consisting of audit_read12, UI206 and UI-E2E9.
+  The real completed-query/card helper and full artifact validator pass, including both
+  IPC-only children32187/32204 clean Store closure/exit0, no forced kill; Dashboard32167
+  exits0 and its resource-tracker descendant exits gracefully. No timeout/interruption or
+  warning summary. Other logged ERROR tracebacks are passing negative-path tests, not failures.
+- Final two log lines are shell errors: test_ui_e2e.py::test_completed_grid_row_uses_real_query_ipc
+  and test_operator_e2e_preflight.py::test_operator_run_directories_are_unique_retained_and_contained
+  were executed as standalone commands and are not found. The browser node passed within the
+  broader suite; the retained-directory preflight node was NOT collected/executed. The log
+  shows argument/command separation, but cannot identify the exact shell edit that caused it.
+  No aggregate success claim; full pre-commit-operator is not yet recommended.
+- Browser DB/log/CAS/config/NiceGUI fixtures live under the logged system pytest-78/
+  test_completed_grid_row_uses_r0 directory, not an elevate directory. This is separate from
+  production NiceGUI storage; no production-contamination finding is established by this log.
+  Source/config paths and isolated NiceGUI path are logged, but no retained artifact root.
+- Assistant proposal defect: ELEVATE_RUN_DIR owned only the status file. Pytest received no
+  --basetemp, so its actual durable test files remained in system temp; the root banner was
+  printed BEFORE script started recording. Retention and discoverability were not wired in.
+  The earlier claim about retained temporary files applied only to wrapper status, not data.
+- Separate deliberate cleanup: the browser socket uses /tmp/query-browser-* TemporaryDirectory
+  (socket removed normally), and the directory self-test uses repo/tmp/p.* TemporaryDirectory
+  around its synthetic repository. It asserts retention across operator-fixture closure but
+  then deletes its own outer fixture. --basetemp does not preserve either of these explicit
+  TemporaryDirectory trees, nor collection-only NiceGUI scratch. Do NOT promise otherwise.
+  The completed browser fixture's durable config/DB/log/CAS/child-NiceGUI data DO derive from
+  tmp_path and can be retained with --basetemp alone, without changing tests or production.
+
+P31 approved implementation remains COMPLETE. The operator correctly challenged the
+incomplete elevate-only proposal: fixture paths and cleanup are ours to correct too. P32
+below implements ONE shared retained root for collection storage, pytest data, browser
+socket directory and operator fixtures, plus exact logging/command wiring. Operator fixture
+directories sit DIRECTLY beneath that root rather than under a nested repository/tmp, making
+the existing socket path103bytes on the macOS checkout (guard remains104). The retention
+self-test's outer synthetic repository is retained too. P32 and its separately approved
+test-baseline amendment are now implemented and locally verified; elevate is ready.
+No production or ordinary task change, alternate socket path or cleanup fallback.
 
 ### Latest full operator run — failed acceptance; live workflow completed
 
@@ -1919,7 +1969,8 @@ checks pass. Host Chrome has not been executed locally.
 
 Latest operator instruction: once P31 is implemented, explicitly report pre-commit-operator
 readiness; if proposing elevate, give its EXACT edit shape and justification for review.
-Leave elevate unchanged until that review; no delegated run or full acceptance is claimed.
+Leave elevate unchanged until that review. The new delegated result is recorded at the top;
+it proves the Chrome helper but not the separate directory test or successful wrapper execution.
 
 ### P31 UUID amendment — APPROVED, implemented and locally verified
 
@@ -1975,26 +2026,259 @@ Only the two approved test files changed in this amendment, plus WORK; prior P31
 remain confined to the original four test files. Production, pyproject, dependencies and
 index unchanged. The earlier737passed ordinary batch is retained evidence, not falsely
 reported as rerun after this small correction. No remaining approved P31 implementation;
-host Chrome/actual-macOS-path verification and full production acceptance remain unexecuted.
+The later host Chrome helper passes (see latest elevate review); the separate actual-macOS
+directory test and full production acceptance remain unexecuted.
 
-### Proposed delegated verification — NOT APPLIED; operator review required
+## P32 — COMPLETE within approved scope; elevate ready, delegated verification pending
 
-P31 including its approved UUID amendment is now locally verified. Recommend these two
-existing tests on the macOS Dashboard host before the full operator run:
-the changed real-Chrome/query/card/artifact test, and the new real retained-directory fixture
-test under the actual host checkout path. No live Codex, SSH, provider HTTP, sudo, browser
-installation or repeated root test. The first reproduces the actual operator helper's timing
-boundary without an expensive research run; the second verifies real host path lengths and
-retention. Do not recommend the full run as already verified before this boundary passes.
+Supersedes the incomplete elevate-only proposal. Operator asked for the COMPLETE proposed
+shape after correctly rejecting existing fixture paths/cleanup as immutable constraints.
+Operator subsequently approved this COMPLETE exact shape and all snippets, directing surgical
+implementation and a handoff when elevate is ready. P31 remains implemented; this is its
+newly identified verification/retention correction. Preserve all other tasks and production code.
 
-Exact proposed replacement of ONLY the existing elevate value below. Preserve the log path,
-FAILED grep/status reporting and retained repo/tmp files. Use BSD script on the guarded macOS
-host; save the pytest status separately so script's status cannot conceal a failed test.
-Machine guard is before log replacement. There is no EXIT trap or artifact cleanup. Current
-pyproject.toml remains untouched with its idle "Nothing to elevate" task.
-Read-only validation of this proposal: TOML parsing, outer/inner bash syntax and the actual
-wrong-machine guard PASS; the Linux guard exits2 before touching logs or temporary files.
-This is not a host/browser test result.
+### Boundary
+
+Five existing files plus WORK: shared protected/tests/pytest_plugin.py, existing operator
+fixture and preflight modules, tests/control_centre/test_ui_e2e.py, and ONLY the elevate
+value in pyproject.toml. No new module/model/service, production changes, ordinary task changes,
+timeout/assertion relaxation, root/provider/live-Codex action, or test that invokes elevate.
+No global pytest/main-pipeline/other-detour configuration change: the existing plugin is
+loaded by the AI detour's two conftest.py files only (and explicitly by its isolated child tests).
+
+A pytest-only --test-artifacts-root selects the shared run root before NiceGUI import. With
+no option, ordinary AI tests allocate a fresh repo/tmp/tests.XXXXXXXX root through the SAME
+mechanism, not system-temp storage or a cleanup fallback. Elevate supplies its own fresh
+repo/tmp/elevate.XXXXXX root. Original production NiceGUI-path capture and environment
+restoration remain. Preserve artifacts on success, failure and collection failure; keep
+process shutdown, server close/unlink and environment restoration. Do not delete or reuse
+old artifact trees. Browser/library-owned ephemeral resources still close normally; this
+is retention of fixture data/logs, not disabling browser cleanup.
+
+Expected layout:
+
+```text
+tmp/elevate.XXXXXX/
+  elevate.log, status
+  nicegui/                         # retained collection-time isolation
+  t/                               # short default temporary-file root
+  pytest/<test-name>/              # source/config/DB/replay/CAS/child NiceGUI
+    repository/                   # directory self-test's synthetic repository
+    card-rendered.txt             # real browser inner_text; NOT Markdown export
+  q.XXXXXXXX/                     # real browser test socket directory
+    dashboard.sock                # unlinked by normal Backend shutdown
+  operator-test.XXXXXXXX/          # each actual operator fixture's own data + socket
+```
+
+### 1. Shared pytest root and retained early isolation
+
+In the existing plugin, add exactly one option/stash/session fixture. The following replaces
+ONLY the current TemporaryDirectory-based early isolation block; existing marker/operator
+setup and the before-import NiceGUI guard remain. Necessary pathlib/tempfile imports already
+exist. No opaque new model or cast. Standard --basetemp is accepted only if it matches the
+selected root's pytest child, so there cannot be two conflicting artifact roots.
+Decorate the EXISTING pytest_configure with @pytest.hookimpl(tryfirst=True): pytest's own
+normal-priority configure hook captures basetemp when it constructs TempPathFactory, so
+our root must be selected before that point, not merely before the first fixture. Reject
+a conflicting non-all retention policy rather than silently allowing pytest to delete data.
+
+```python
+TEST_ARTIFACTS_ROOT = pytest.StashKey[Path]()
+
+# In pytest_addoption:
+parser.getgroup("AI augment test artifacts").addoption(
+    "--test-artifacts-root", type=Path, default=None,
+    help="Retain AI augment test data beneath this fresh directory",
+)
+
+# In pytest_configure, AFTER the existing imported-NiceGUI guard and capture of
+# ORIGINAL_NICEGUI_STORAGE_PATH, BEFORE any NiceGUI import:
+selected_root: Path | None = config.getoption("test_artifacts_root")
+if selected_root is None:
+    parent = config.rootpath / "tmp"
+    parent.mkdir(exist_ok=True)
+    root = Path(tempfile.mkdtemp(prefix="tests.", dir=parent))
+else:
+    root = selected_root.resolve()
+    root.mkdir(parents=True, exist_ok=True)
+
+basetemp = root / "pytest"
+configured_basetemp: str | None = config.getoption("basetemp")
+if configured_basetemp is not None and Path(configured_basetemp).resolve() != basetemp:
+    raise pytest.UsageError("--basetemp must equal <test-artifacts-root>/pytest")
+if config.getini("tmp_path_retention_policy") != "all":
+    raise pytest.UsageError("AI augment test artifacts require tmp_path_retention_policy=all")
+for path in (basetemp, root / "nicegui", root / "t"):
+    if path.exists() or path.is_symlink():
+        raise pytest.UsageError(f"Test artifact path already exists; use a fresh root: {path}")
+(root / "nicegui").mkdir()
+(root / "t").mkdir()
+config.option.basetemp = str(basetemp)
+config.stash[TEST_ARTIFACTS_ROOT] = root
+
+environment = pytest.MonkeyPatch()
+environment.setenv("NICEGUI_STORAGE_PATH", str(root / "nicegui"))
+environment.delenv("NICEGUI_REDIS_URL", raising=False)
+environment.setenv("TMPDIR", str(root / "t"))
+environment.setattr(tempfile, "tempdir", str(root / "t"))
+config.add_cleanup(environment.undo)  # Restore environment; do NOT remove artifacts.
+print(f"[test-artifacts] retained root: {root}", flush=True)
+print(f"[test-artifacts] pytest data: {basetemp}", flush=True)
+print(f"[test-artifacts] collection NiceGUI: {root / 'nicegui'}", flush=True)
+
+
+@pytest.fixture(scope="session")
+def test_artifacts_root(pytestconfig: pytest.Config) -> Path:
+    return pytestconfig.stash[TEST_ARTIFACTS_ROOT]
+```
+
+Pytest creates its fresh basetemp later; collection storage is a sibling, never deleted by
+that creation. Updating cached tempfile.tempdir alongside TMPDIR covers in-process standard
+library allocations and fresh children; existing child-specific paths remain under tmp_path.
+No data-file cleanup callback replaces the removed directory.cleanup callback.
+
+### 2. Operator fixture and its retention self-test
+
+Replace only operator_runtime's root selection/signature; keep _operator_runtime unchanged.
+There is NO extra repository/tmp nesting below the selected artifact root:
+
+```python
+@pytest.fixture
+def operator_runtime(
+    repository_root: Path, test_artifacts_root: Path,
+) -> Iterator[OperatorRuntime]:
+    run_dir = Path(tempfile.mkdtemp(prefix="operator-test.", dir=test_artifacts_root))
+    _operator_log(f"Operator run directory (preserved): {run_dir}")
+    dashboard_socket_path = run_dir / "dashboard.sock"
+    if len(os.fsencode(dashboard_socket_path)) >= DARWIN_AF_UNIX_PATH_CAPACITY_BYTES:
+        raise RuntimeError("operator dashboard socket path exceeds Darwin AF_UNIX capacity")
+    yield _operator_runtime(
+        run_dir,
+        repository_root=repository_root,
+        dashboard_socket_path=dashboard_socket_path,
+    )
+```
+
+In test_operator_run_directories_are_unique_retained_and_contained, replace the outer
+TemporaryDirectory with a retained repository under its existing startup fixture directory;
+add test_artifacts_root fixture argument, remove no-longer-used pytestconfig argument/imports.
+Preserve all current source/DB-byte/retention/uniqueness/symlink/permission assertions, changing
+only the expected parent from repository/tmp to the actual shared artifact root:
+
+```python
+assert files.config.parent.is_relative_to(test_artifacts_root)
+repository = files.config.parent / "repository"
+repository.mkdir()
+print(f"[test-artifacts] retained synthetic repository: {repository}", flush=True)
+(repository / "config_ai_augment.json").write_bytes(files.config.read_bytes())
+# Existing two-iteration loop:
+fixture = inspect.unwrap(workflow.operator_runtime)(
+    repository_root=repository, test_artifacts_root=test_artifacts_root,
+)
+# Existing assertion's new authoritative parent:
+assert run_dir.parent == test_artifacts_root
+```
+
+Existing run_dir contents (including each socket) still must be relative to that run_dir.
+Each source link resolves to the retained synthetic source inside this shared root. No outer
+context/finally deletes either repository or runtime data. Unwrap calls close the actual
+fixture generator exactly as before; retention assertions remain after each closure.
+
+Update the existing overlong-socket negative test ONLY for the new root argument; it must
+still fail before runtime/config creation and retain the allocated directory:
+
+```python
+artifacts_root = tmp_path / ("long-artifacts-" * 9)
+artifacts_root.mkdir()
+fixture = inspect.unwrap(workflow.operator_runtime)(
+    repository_root=tmp_path, test_artifacts_root=artifacts_root,
+)
+with pytest.raises(RuntimeError, match="exceeds Darwin AF_UNIX capacity"):
+    next(fixture)
+run_dirs = tuple(artifacts_root.iterdir())
+assert len(run_dirs) == 1 and run_dirs[0].is_dir()
+assert not (run_dirs[0] / "config.operator.json").exists()
+```
+
+### 3. Browser fixture socket/data/output
+
+In test_completed_grid_row_uses_real_query_ipc add test_artifacts_root: Path and replace
+ONLY the /tmp/query-browser-* TemporaryDirectory with a retained, short local child. Remove
+its with/dedent unchanged body; retain all original browser assertions, context/finally,
+process shutdown and byte-preservation checks. Necessary os import for the same guard:
+
+```python
+assert files.config.parent.is_relative_to(test_artifacts_root)
+directory = Path(tempfile.mkdtemp(prefix="q.", dir=test_artifacts_root))
+dashboard_socket_path = directory / "dashboard.sock"
+if len(os.fsencode(dashboard_socket_path)) >= operator.DARWIN_AF_UNIX_PATH_CAPACITY_BYTES:
+    raise RuntimeError("query browser socket path exceeds Darwin AF_UNIX capacity")
+print(f"[test-artifacts] retained query data: {files.config.parent}", flush=True)
+print(f"[test-artifacts] query socket: {dashboard_socket_path}", flush=True)
+# Existing OperatorRuntime construction:
+# dashboard_socket_path=dashboard_socket_path,
+```
+
+Source/config/log/CAS/storage and process-temp already follow startup_files/tmp_path; the
+shared root automatically moves them into its pytest child, no second startup fixture.
+After the actual card capture returns and BEFORE its existing artifact assertion, retain
+that exact browser text as a diagnostic (not a new renderer or a Markdown export):
+
+```python
+(files.config.parent / "card-rendered.txt").write_text(card_text, encoding="utf-8")
+```
+
+On the configured macOS checkout: operator-test.XXXXXXXX/dashboard.sock directly under
+an elevate.XXXXXX root is103bytes; q.XXXXXXXX/dashboard.sock is91bytes. Both are below104.
+Keep the real guard for longer checkouts, no symlink or system-temp/socket fallback.
+
+### 4. Preserve isolation coverage, change only its cleanup expectation
+
+Existing nicegui_collection_process (named child helper) passes the new option to its actual
+pytest.main and checks retained storage rather than deletion. Retain original environment/
+Redis restoration and the parent test's original-storage hash assertions in both existing
+collection success/failure cases. Also verify TMPDIR and cached tempfile.tempdir restoration,
+because this proposal explicitly starts managing those two values.
+
+```python
+# Existing named child helper, before pytest.main; add local tempfile import:
+original_tmpdir = os.environ.get("TMPDIR")
+tempfile.gettempdir()  # Initialize the cache before pytest's FD capture does.
+original_tempdir = tempfile.tempdir
+# Add to the existing pytest.main argument list:
+# "--test-artifacts-root", str(root / "artifacts"),
+
+# Replace only the old `assert not storage_path.exists()`/CLEANED receipt:
+assert storage_path == root / "artifacts" / "nicegui"
+assert json.loads((storage_path / "storage-general.json").read_text())["test_value"] == "collection"
+assert os.environ.get("TMPDIR") == original_tmpdir
+assert tempfile.tempdir == original_tempdir
+# Existing NICEGUI_STORAGE_PATH/Redis restoration assertions remain.
+print("COLLECTION_STORAGE_RETAINED")
+```
+
+Rename the existing parametrized test to
+test_nicegui_isolated_before_collection_and_retained_after_exit and update its expected
+receipt to COLLECTION_STORAGE_RETAINED; retain False/True parametrization, timeout, real
+child pytest execution and original storage digest check. No sentinel bypass/skip or import
+of NiceGUI outside isolation. The helper already has json as a module import but requires a
+LOCAL json import in its standalone body, alongside tempfile, because python_process extracts
+its source; include both explicitly. No inline child code in individual tests.
+
+Upstream verification before delegated execution: actual collection success/failure with
+retention and environment restoration, real operator fixture uniqueness/containment/guard,
+actual completed-Store artifact validator, full affected preflight, Ruff/strict mypy. Add
+cheap real-plugin rejection checks for an already-used reserved artifact child, conflicting
+basetemp and non-all retention policy; no destructive reuse, fallback or pytest-data loss. These test the actual plugin,
+not source strings or an elevate invocation. Host verifies Chrome/socket transport and path
+lengths only after these checks pass. No production data access or live Codex needed locally.
+
+### 5. Exact approved elevate replacement
+
+The pytest-only root option establishes all paths before import. Log the root/actual argv,
+pytest result and final file inventory INSIDE BSD script capture. Keep a status file because
+BSD script can conceal the child exit code. Retain a log copy beside the data. No trap or
+artifact deletion. Machine guard precedes log replacement. No ordinary task edits.
 
 ```toml
 elevate = """
@@ -2004,15 +2288,26 @@ if [ "$(uname -s)" != Darwin ]; then
   exit 2
 fi
 LOG_PATH="$PIXI_PROJECT_ROOT/logs/from_operator/elevate.log"
-mkdir -p "$PIXI_PROJECT_ROOT/tmp" || exit 1
+mkdir -p "$PIXI_PROJECT_ROOT/tmp" "$(dirname "$LOG_PATH")" || exit 1
 ELEVATE_RUN_DIR="$(mktemp -d "$PIXI_PROJECT_ROOT/tmp/elevate.XXXXXX")" || exit 1
+export ELEVATE_RUN_DIR
 export ELEVATE_STATUS_PATH="$ELEVATE_RUN_DIR/status"
-echo "Retained verification directory: $ELEVATE_RUN_DIR"
 script -q "$LOG_PATH" bash -c '"'"'
-  "$CONDA_PREFIX/bin/python" -m pytest -vv -srA \
-    src/detours/detour_ai_augment/tests/control_centre/test_ui_e2e.py::test_completed_grid_row_uses_real_query_ipc \
+  echo "Retained verification directory: $ELEVATE_RUN_DIR"
+  pytest_args=(
+    -vv -srA --capture=tee-sys
+    --test-artifacts-root "$ELEVATE_RUN_DIR"
+    src/detours/detour_ai_augment/tests/control_centre/test_ui_e2e.py::test_completed_grid_row_uses_real_query_ipc
     src/detours/detour_ai_augment/protected/tests/operator/test_operator_e2e_preflight.py::test_operator_run_directories_are_unique_retained_and_contained
+  )
+  printf "Pytest arguments:"
+  printf " %q" "${pytest_args[@]}"
+  printf "\\n"
+  "$CONDA_PREFIX/bin/python" -m pytest "${pytest_args[@]}"
   task_status=$?
+  echo "Pytest exit status: $task_status"
+  echo "Retained fixture files under $ELEVATE_RUN_DIR:"
+  find "$ELEVATE_RUN_DIR" -type f -print || task_status=1
   printf "%s\\n" "$task_status" > "$ELEVATE_STATUS_PATH"
   exit "$task_status"
 '"'"'
@@ -2022,6 +2317,7 @@ if [ -r "$ELEVATE_STATUS_PATH" ]; then
   read -r task_status < "$ELEVATE_STATUS_PATH" || task_status=1
 fi
 if [ "$script_status" -ne 0 ]; then task_status=1; fi
+cp "$LOG_PATH" "$ELEVATE_RUN_DIR/elevate.log" || task_status=1
 grep -n -- "FAILED" "$LOG_PATH"
 grep_status=$?
 case "$grep_status" in
@@ -2034,6 +2330,69 @@ exit "$task_status"
 '
 """
 ```
+
+### P32 execution checkpoint — 2026-09-20
+
+Implementation is COMPLETE and locally verified. Shared option/root/retained early isolation,
+operator fixture/self-test and browser path/card-text edits are applied within the snippets.
+Real directory uniqueness/retention/containment and overlong-path checks PASS (2 tests).
+Initially both collection success/failure cases reached retained storage and restored TMPDIR
+but FAILED the new cached tempfile.tempdir equality assertion.
+Initial pre-implementation run failed both cases because the new option did not yet exist;
+post-implementation selection:2passed2failed59deselected19.44s.
+
+Installed pytest source establishes an earlier initialization boundary: FD capture starts
+TemporaryFile in pytest_load_initial_conftests, before pytest_configure. Our MonkeyPatch
+restores the cache value it received at configure entry, whereas the approved test snippet
+captures the earlier pre-pytest cache (None). The operator separately approved the one-line
+test-only setup correction to initialize the cache before taking that baseline. It is now
+applied, retaining the equality assertion. No plugin restore workaround or assertion weakening.
+Independent approved rejection coverage and the exact elevate replacement are now applied.
+
+Before the amendment, the other affected preflight tests passed:68passed2deselected63.32s;
+the two known cache failures were deliberately excluded from that historical batch, not
+marked skipped. The subsequent full70-case pass below includes both corrected cases.
+Includes all seven real-plugin rejection cases (reserved children/dangling link, conflicting
+basetemp, non-all retention), unchanged preservation guards and real completed Store/log/CAS
+artifact validation. No production or browser execution. Full detour Ruff PASS; strict mypy
+PASS56files; diff whitespace PASS. Read-only diff review confirms only the five approved
+files plus WORK changed, no index edits; original browser assertions/cleanup are retained.
+
+Independent diagnostic with installed pytest and NO AI plugin: tempfile.tempdir is None
+before pytest.main and the configured scratch directory afterward (1passed0.03s). This
+confirms pytest's cache initialization, not a plugin restoration defect. Synthetic diagnostic
+files remain under tmp/p32-cache.knvc6s_0. The approved amendment inserts exactly ONE line
+in nicegui_collection_process before capturing the cache baseline:
+
+```python
+original_tmpdir = os.environ.get("TMPDIR")
+tempfile.gettempdir()  # Initialize the cache before pytest's FD capture does.
+original_tempdir = tempfile.tempdir
+```
+
+Retain `assert tempfile.tempdir == original_tempdir` and all storage/environment checks.
+No changed plugin semantics, dropped assertion, timeout increase or exception suppression.
+Operator confirmed this is test-only and approved the exact insertion. It is applied.
+Fresh FULL affected preflight:70passed70.59s, no deselections/skips/warnings. Includes both
+actual collection success/failure isolation cases, retained storage and restored environment/
+cache, all seven conflict-rejection cases, operator directory retention/containment and real
+completed Store/log/CAS validation. Full detour Ruff PASS, strict mypy PASS56files, diff
+whitespace PASS. No browser/socket/root/provider/live-Codex execution or production change.
+This completes P32's approved code/local verification; no remaining approval blocker.
+
+Read-only review verified installed hook ordering and103/91-byte host socket paths;
+proposal Python/TOML/outer+inner Bash syntax and exact root-option/node argv passed static
+validation. The actual edited TOML and outer/inner Bash syntax, exact two-node argument array
+and comparison proving ALL other TOML settings/tasks unchanged also PASS. The prepared task
+has its macOS guard, captured root/argv/status/inventory and retained log copy. No elevate
+execution occurred. Both exact delegated nodes collect successfully (2tests2.68s) with a
+fresh explicit root and matching --basetemp, proving that positive configuration boundary;
+collection is not browser execution. The actual option/retention checks now pass as above.
+Elevate is ready: exactly the real Chrome completed-query/card/artifact case and retained
+operator-directory case, macOS guard before log replacement, detailed captured argv/status/
+file inventory, data plus log copy under repo/tmp/elevate.XXXXXX. Review that result before
+recommending the full pre-commit-operator run. No permanent tests invoking elevate; no
+index/production/ordinary-task edits. Earlier broad737-case evidence is not claimed as rerun.
 
 ## Completed scope index
 

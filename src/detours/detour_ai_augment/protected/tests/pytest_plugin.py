@@ -165,6 +165,7 @@ OPERATOR_REUSE_NOTICE = (
 )
 OPERATOR_REDEPLOY_STASH_KEY = pytest.StashKey[bool]()
 ORIGINAL_NICEGUI_STORAGE_PATH = pytest.StashKey[Path]()
+TEST_ARTIFACTS_ROOT = pytest.StashKey[Path]()
 
 
 def _operator_log(message: str) -> None:
@@ -241,6 +242,10 @@ def _ensure_codex_is_authenticated(
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.getgroup("AI augment test artifacts").addoption(
+        "--test-artifacts-root", type=Path, default=None,
+        help="Retain AI augment test data beneath this fresh directory",
+    )
     browser_group = parser.getgroup("control-centre UI E2E")
     browser_group.addoption(
         PLAYWRIGHT_CHROMIUM_CLI_OPTION,
@@ -275,6 +280,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     )
 
 
+@pytest.hookimpl(tryfirst=True)
 def pytest_configure(config: pytest.Config) -> None:
     # NiceGUI initializes general persistence at import, before ordinary fixtures run.
     if "nicegui" in sys.modules:
@@ -282,12 +288,38 @@ def pytest_configure(config: pytest.Config) -> None:
     config.stash[ORIGINAL_NICEGUI_STORAGE_PATH] = Path(
         os.environ.get("NICEGUI_STORAGE_PATH", ".nicegui"),
     ).resolve()
-    directory = tempfile.TemporaryDirectory(prefix="ai-augment-pytest-nicegui-")
+    selected_root: Path | None = config.getoption("test_artifacts_root")
+    if selected_root is None:
+        parent = config.rootpath / "tmp"
+        parent.mkdir(exist_ok=True)
+        root = Path(tempfile.mkdtemp(prefix="tests.", dir=parent))
+    else:
+        root = selected_root.resolve()
+        root.mkdir(parents=True, exist_ok=True)
+
+    basetemp = root / "pytest"
+    configured_basetemp: str | None = config.getoption("basetemp")
+    if configured_basetemp is not None and Path(configured_basetemp).resolve() != basetemp:
+        raise pytest.UsageError("--basetemp must equal <test-artifacts-root>/pytest")
+    if config.getini("tmp_path_retention_policy") != "all":
+        raise pytest.UsageError("AI augment test artifacts require tmp_path_retention_policy=all")
+    for path in (basetemp, root / "nicegui", root / "t"):
+        if path.exists() or path.is_symlink():
+            raise pytest.UsageError(f"Test artifact path already exists; use a fresh root: {path}")
+    (root / "nicegui").mkdir()
+    (root / "t").mkdir()
+    config.option.basetemp = str(basetemp)
+    config.stash[TEST_ARTIFACTS_ROOT] = root
+
     environment = pytest.MonkeyPatch()
-    environment.setenv("NICEGUI_STORAGE_PATH", directory.name)
+    environment.setenv("NICEGUI_STORAGE_PATH", str(root / "nicegui"))
     environment.delenv("NICEGUI_REDIS_URL", raising=False)
-    config.add_cleanup(environment.undo)
-    config.add_cleanup(directory.cleanup)
+    environment.setenv("TMPDIR", str(root / "t"))
+    environment.setattr(tempfile, "tempdir", str(root / "t"))
+    config.add_cleanup(environment.undo)  # Restore environment; do NOT remove artifacts.
+    print(f"[test-artifacts] retained root: {root}", flush=True)
+    print(f"[test-artifacts] pytest data: {basetemp}", flush=True)
+    print(f"[test-artifacts] collection NiceGUI: {root / 'nicegui'}", flush=True)
     config.addinivalue_line(
         "markers", "python_subprocess: isolated Python child process via explicit shared fixture",
     )
@@ -325,6 +357,11 @@ def pytest_configure(config: pytest.Config) -> None:
     if operator_requested:
         print(OPERATOR_REDEPLOY_NOTICE if redeploy else OPERATOR_REUSE_NOTICE)
     config.stash[OPERATOR_REDEPLOY_STASH_KEY] = redeploy
+
+
+@pytest.fixture(scope="session")
+def test_artifacts_root(pytestconfig: pytest.Config) -> Path:
+    return pytestconfig.stash[TEST_ARTIFACTS_ROOT]
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
@@ -454,8 +491,10 @@ def test_nicegui_collection_storage() -> None:
 
 
 def nicegui_collection_process() -> None:
+    import json
     import os
     import sys
+    import tempfile
     from pathlib import Path
 
     import pytest
@@ -465,6 +504,9 @@ def nicegui_collection_process() -> None:
     root = Path(sys.argv[1])
     original = os.environ["NICEGUI_STORAGE_PATH"]
     redis = os.environ.get("NICEGUI_REDIS_URL")
+    original_tmpdir = os.environ.get("TMPDIR")
+    tempfile.gettempdir()  # Initialize the cache before pytest's FD capture does.
+    original_tempdir = tempfile.tempdir
     test_path = root / "test_collection.py"
     test_path.write_text(pytest_plugin.PythonProcess.source(
         pytest_plugin.test_nicegui_collection_storage,
@@ -473,14 +515,30 @@ def nicegui_collection_process() -> None:
     ini.write_text("[pytest]\n")
     result = pytest.main([
         "-q", "-p", pytest_plugin.__name__, "-c", str(ini),
+        "--test-artifacts-root", str(root / "artifacts"),
         "--confcutdir", str(root), str(test_path),
     ])
     assert int(result) == int(sys.argv[2])
     storage_path = Path(Path(os.environ["TEST_STORAGE_RECEIPT"]).read_text())
-    assert not storage_path.exists()
+    assert storage_path == root / "artifacts" / "nicegui"
+    assert json.loads(
+        (storage_path / "storage-general.json").read_text()
+    )["test_value"] == "collection"
+    assert os.environ.get("TMPDIR") == original_tmpdir
+    assert tempfile.tempdir == original_tempdir
     assert os.environ["NICEGUI_STORAGE_PATH"] == original
     assert os.environ.get("NICEGUI_REDIS_URL") == redis
-    print("COLLECTION_STORAGE_CLEANED")
+    print("COLLECTION_STORAGE_RETAINED")
+
+
+def artifact_configuration_process() -> None:
+    import sys
+
+    import pytest
+
+    result = pytest.main(sys.argv[1:])
+    assert "nicegui" not in sys.modules
+    raise SystemExit(result)
 
 
 def watcher_fixture_process() -> None:

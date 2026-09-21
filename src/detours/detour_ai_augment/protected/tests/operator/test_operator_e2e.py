@@ -485,10 +485,10 @@ def _operator_runtime(
 
 
 @pytest.fixture
-def operator_runtime(repository_root: Path) -> Iterator[OperatorRuntime]:
-    artifacts_root = repository_root / "tmp"
-    artifacts_root.mkdir(exist_ok=True)
-    run_dir = Path(tempfile.mkdtemp(prefix="operator-test.", dir=artifacts_root))
+def operator_runtime(
+    repository_root: Path, test_artifacts_root: Path,
+) -> Iterator[OperatorRuntime]:
+    run_dir = Path(tempfile.mkdtemp(prefix="operator-test.", dir=test_artifacts_root))
     _operator_log(f"Operator run directory (preserved): {run_dir}")
     dashboard_socket_path = run_dir / "dashboard.sock"
     if len(os.fsencode(dashboard_socket_path)) >= DARWIN_AF_UNIX_PATH_CAPACITY_BYTES:

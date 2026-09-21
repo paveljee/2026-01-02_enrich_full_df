@@ -5,7 +5,6 @@ import inspect
 import json
 import os
 import subprocess
-import tempfile
 import threading
 from http import HTTPStatus
 from pathlib import Path
@@ -214,60 +213,63 @@ def test_operator_http_history_rejects_corrupt_or_unreferenced_records(
 
 
 def test_operator_run_directories_are_unique_retained_and_contained(
-    startup_files: ui_tests.StartupFiles, pytestconfig: pytest.Config,
+    startup_files: ui_tests.StartupFiles, test_artifacts_root: Path,
 ) -> None:
     files = startup_files
     source_before = hashlib.sha256(files.source.read_bytes()).hexdigest()
     assert files.source.stat().st_mode & 0o222 == 0
-    artifacts_root = pytestconfig.rootpath / "tmp"
-    artifacts_root.mkdir(exist_ok=True)
-    # Short test-repository prefix preserves the real Darwin socket-path limit.
-    with tempfile.TemporaryDirectory(prefix="p.", dir=artifacts_root) as directory:
-        repository = Path(directory)
-        (repository / "config_ai_augment.json").write_bytes(files.config.read_bytes())
-        run_dirs: list[Path] = []
-        for _ in range(2):
-            fixture = inspect.unwrap(workflow.operator_runtime)(repository_root=repository)
-            runtime = next(fixture)
-            run_dir = runtime.config_path.parent
-            run_dirs.append(run_dir)
-            assert run_dir.parent == repository / "tmp"
-            assert run_dir.name.startswith("operator-test.")
-            assert (
-                len(os.fsencode(runtime.dashboard_socket_path))
-                < workflow.DARWIN_AF_UNIX_PATH_CAPACITY_BYTES
-            )
-            config = json.loads(runtime.config_path.read_text())
-            for path in (
-                runtime.config_path, runtime.replay_log_path, runtime.rollout_cas_dir,
-                runtime.dashboard_socket_path, runtime.backend_store._detour_db_path,
-                Path(config["db_file"]), Path(config["state_file"]),
-                Path(config["output_dir"]), run_dir / "nicegui",
-            ):
-                assert path.is_relative_to(run_dir), path
-            source_link = Path(config["db_file"])
-            assert source_link.is_symlink()
-            assert source_link.resolve() == files.source.resolve()
-            retained = (runtime.config_path, runtime.replay_log_path,
-                        runtime.backend_store._detour_db_path)
-            before_close = {path: path.read_bytes() for path in retained}
-            with pytest.raises(StopIteration):
-                next(fixture)
-            assert run_dir.is_dir()
-            assert {path: path.read_bytes() for path in retained} == before_close
-        assert run_dirs[0] != run_dirs[1]
-        assert all(path.is_dir() for path in run_dirs)
+    assert files.config.parent.is_relative_to(test_artifacts_root)
+    repository = files.config.parent / "repository"
+    repository.mkdir()
+    print(f"[test-artifacts] retained synthetic repository: {repository}", flush=True)
+    (repository / "config_ai_augment.json").write_bytes(files.config.read_bytes())
+    run_dirs: list[Path] = []
+    for _ in range(2):
+        fixture = inspect.unwrap(workflow.operator_runtime)(
+            repository_root=repository, test_artifacts_root=test_artifacts_root,
+        )
+        runtime = next(fixture)
+        run_dir = runtime.config_path.parent
+        run_dirs.append(run_dir)
+        assert run_dir.parent == test_artifacts_root
+        assert run_dir.name.startswith("operator-test.")
+        assert (
+            len(os.fsencode(runtime.dashboard_socket_path))
+            < workflow.DARWIN_AF_UNIX_PATH_CAPACITY_BYTES
+        )
+        config = json.loads(runtime.config_path.read_text())
+        for path in (
+            runtime.config_path, runtime.replay_log_path, runtime.rollout_cas_dir,
+            runtime.dashboard_socket_path, runtime.backend_store._detour_db_path,
+            Path(config["db_file"]), Path(config["state_file"]),
+            Path(config["output_dir"]), run_dir / "nicegui",
+        ):
+            assert path.is_relative_to(run_dir), path
+        source_link = Path(config["db_file"])
+        assert source_link.is_symlink()
+        assert source_link.resolve() == files.source.resolve()
+        retained = (runtime.config_path, runtime.replay_log_path,
+                    runtime.backend_store._detour_db_path)
+        before_close = {path: path.read_bytes() for path in retained}
+        with pytest.raises(StopIteration):
+            next(fixture)
+        assert run_dir.is_dir()
+        assert {path: path.read_bytes() for path in retained} == before_close
+    assert run_dirs[0] != run_dirs[1]
+    assert all(path.is_dir() for path in run_dirs)
     assert hashlib.sha256(files.source.read_bytes()).hexdigest() == source_before
     assert files.source.stat().st_mode & 0o222 == 0
 
 
 def test_operator_run_directory_rejects_overlong_socket_path(tmp_path: Path) -> None:
-    repository = tmp_path / ("long-checkout-" * 9)
-    repository.mkdir()
-    fixture = inspect.unwrap(workflow.operator_runtime)(repository_root=repository)
+    artifacts_root = tmp_path / ("long-artifacts-" * 9)
+    artifacts_root.mkdir()
+    fixture = inspect.unwrap(workflow.operator_runtime)(
+        repository_root=tmp_path, test_artifacts_root=artifacts_root,
+    )
     with pytest.raises(RuntimeError, match="exceeds Darwin AF_UNIX capacity"):
         next(fixture)
-    run_dirs = tuple((repository / "tmp").iterdir())
+    run_dirs = tuple(artifacts_root.iterdir())
     assert len(run_dirs) == 1 and run_dirs[0].is_dir()
     assert not (run_dirs[0] / "config.operator.json").exists()
 
@@ -300,7 +302,7 @@ def test_nicegui_children_have_private_persistent_storage(
 
 @pytest.mark.python_subprocess
 @pytest.mark.parametrize("collection_failure", (False, True))
-def test_nicegui_isolated_before_collection_and_cleaned_after_exit(
+def test_nicegui_isolated_before_collection_and_retained_after_exit(
     tmp_path: Path, python_process: operator_preflight.PythonProcess,
     collection_failure: bool,
 ) -> None:
@@ -318,8 +320,52 @@ def test_nicegui_isolated_before_collection_and_cleaned_after_exit(
         "2" if collection_failure else "0", env=environment, timeout=30,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "COLLECTION_STORAGE_CLEANED" in result.stdout
+    assert "COLLECTION_STORAGE_RETAINED" in result.stdout
     assert workflow._tree_digest(original) == before
+
+
+@pytest.mark.python_subprocess
+@pytest.mark.parametrize(
+    "conflict",
+    ("pytest", "nicegui", "t", "dangling-nicegui", "basetemp", "failed", "none"),
+)
+def test_pytest_artifact_configuration_rejects_conflicts_without_deleting_data(
+    tmp_path: Path, python_process: operator_preflight.PythonProcess, conflict: str,
+) -> None:
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    ini = tmp_path / "pytest.ini"
+    ini.write_text("[pytest]\n")
+    extra_args: tuple[str, ...] = ()
+    preserved = [artifacts]
+    if conflict in {"pytest", "nicegui", "t"}:
+        occupied = artifacts / conflict
+        occupied.mkdir()
+        (occupied / "sentinel").write_text("must not be removed")
+        expected_error = "Test artifact path already exists"
+    elif conflict == "dangling-nicegui":
+        (artifacts / "nicegui").symlink_to(artifacts / "absent")
+        expected_error = "Test artifact path already exists"
+    elif conflict == "basetemp":
+        conflicting = tmp_path / "other-pytest-data"
+        conflicting.mkdir()
+        (conflicting / "sentinel").write_text("must not be removed")
+        preserved.append(conflicting)
+        extra_args = ("--basetemp", str(conflicting))
+        expected_error = "--basetemp must equal <test-artifacts-root>/pytest"
+    else:
+        extra_args = ("-o", f"tmp_path_retention_policy={conflict}")
+        expected_error = "AI augment test artifacts require tmp_path_retention_policy=all"
+    before = {path: workflow._tree_digest(path) for path in preserved}
+    result = python_process.run(
+        operator_preflight.artifact_configuration_process,
+        "-q", "--collect-only", "--noconftest", "-p", operator_preflight.__name__,
+        "-c", str(ini), "--test-artifacts-root", str(artifacts),
+        *extra_args, str(tmp_path), timeout=30,
+    )
+    assert result.returncode == pytest.ExitCode.USAGE_ERROR, result.stdout + result.stderr
+    assert expected_error in result.stderr
+    assert {path: workflow._tree_digest(path) for path in preserved} == before
 
 
 @pytest.mark.parametrize("initially_present", (False, True))
