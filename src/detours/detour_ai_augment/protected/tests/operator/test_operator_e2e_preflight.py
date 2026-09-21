@@ -368,6 +368,51 @@ def test_pytest_artifact_configuration_rejects_conflicts_without_deleting_data(
     assert {path: workflow._tree_digest(path) for path in preserved} == before
 
 
+@pytest.mark.python_subprocess
+@pytest.mark.parametrize("marker", ("", "real_api"), ids=("ordinary", "real-api"))
+def test_root_pytest_discovery_ignores_retained_artifacts(
+    tmp_path: Path, pytestconfig: pytest.Config,
+    python_process: operator_preflight.PythonProcess, marker: str,
+) -> None:
+    (tmp_path / "pyproject.toml").write_bytes(
+        (pytestconfig.rootpath / "pyproject.toml").read_bytes(),
+    )
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "test_controls.py").write_text(
+        "import pytest\n\n"
+        + inspect.getsource(operator_preflight.test_artifact_discovery_ordinary_control)
+        + "\n"
+        + inspect.getsource(operator_preflight.test_artifact_discovery_real_api_control),
+    )
+    artifacts = (tmp_path / "tmp", tmp_path / "logs")
+    source = python_process.source(operator_preflight.artifact_discovery_import_failure)
+    for directory in (
+        artifacts[0] / "tests.previous/pytest/case0",
+        artifacts[1] / "from_operator/copied-run/pytest/case0",
+    ):
+        directory.mkdir(parents=True)
+        (directory / "test_collection.py").write_text(source)
+    (artifacts[0] / "tests.previous/pytest/casecurrent").symlink_to(
+        "case0", target_is_directory=True,
+    )
+    before = {path: workflow._tree_digest(path) for path in artifacts}
+    marker_args = ("-m", marker) if marker else ()
+    result = python_process.run(
+        operator_preflight.artifact_configuration_process,
+        "-q", ".", *marker_args, cwd=tmp_path, timeout=30,
+    )
+    assert result.returncode == pytest.ExitCode.OK, result.stdout + result.stderr
+    assert (tmp_path / "real-api-executed").read_text() == "ran"
+    if marker:
+        assert not (tmp_path / "ordinary-executed").exists()
+        assert "1 passed, 1 deselected" in result.stdout
+    else:
+        assert (tmp_path / "ordinary-executed").read_text() == "ran"
+        assert "2 passed" in result.stdout
+    assert {path: workflow._tree_digest(path) for path in artifacts} == before
+
+
 @pytest.mark.parametrize("initially_present", (False, True))
 def test_operator_preservation_guard_covers_original_storage(
     tmp_path: Path, initially_present: bool,

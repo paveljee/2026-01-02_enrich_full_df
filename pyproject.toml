@@ -58,6 +58,8 @@ detour-ai-augment = [
 pythonpath = ["."]
 testpaths = ["tests"]
 norecursedirs = [
+    "tmp",  # retained runtime/test artifacts, not test sources
+    "logs",  # includes copied diagnostic/test artifact bundles
     "tests/test_detours",  # can run via `pixi run test tests/test_detours`
     "src/detours/detour_ai_augment/tests",
     "src/detours/detour_ai_augment/protected/tests",

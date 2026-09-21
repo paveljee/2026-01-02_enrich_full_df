@@ -541,6 +541,23 @@ def artifact_configuration_process() -> None:
     raise SystemExit(result)
 
 
+def test_artifact_discovery_ordinary_control() -> None:
+    from pathlib import Path
+
+    Path("ordinary-executed").write_text("ran")
+
+
+@pytest.mark.real_api
+def test_artifact_discovery_real_api_control() -> None:
+    from pathlib import Path
+
+    Path("real-api-executed").write_text("ran")
+
+
+def artifact_discovery_import_failure() -> None:
+    raise RuntimeError("Retained test artifact was imported")
+
+
 def watcher_fixture_process() -> None:
     import sys
 

@@ -2,20 +2,25 @@
 
 ## Status and authorization
 
-2026-09-21: P25–P33 are COMPLETE within their approved scopes. P26–P30 were completed in
-the authorized order, including P30's persistence-first and initial-validation additions.
-P31 includes its separately approved UUID amendment; P32 includes its approved one-line
-test-cache-baseline correction. Their exact scopes and verification remain below.
+2026-09-21: WITHDRAW the prior pre-commit-operator readiness recommendation. The operator's
+next full run exposed a P32 regression: retained generated test_collection.py files beneath
+repo/tmp are recursively imported by the default-environment pytest . / pytest -m real_api .
+leaves, outside detour isolation. Missing NiceGUI is the symptom, NOT a dependency to install.
+P34's two exact pytest exclusions and upstream discovery regression are now IMPLEMENTED
+and locally verified, including root discovery AFTER the full feasible AI suite generated
+retained artifacts. No ordinary task, dependency or production changes. Full operator
+acceptance is still pending; the former overbroad readiness claim is not a test result.
 
-P32 local preflight70passed70.59s; its delegated macOS batch now also PASSES:2passed9.83s,
-status0, with actual retained log/data/card and clean Dashboard/IPC shutdown. P33's exact
-busy GET /pull503 message-only patch is implemented:11focused checks PASS, full detour Ruff
-and strict mypy56files PASS. No approved implementation or targeted elevate check remains.
+P25–P32 remain implemented in their approved scopes. P34 corrects P32's repository-wide
+collection defect; its fresh72-case preflight and677-case feasible AI passes are recorded
+below. P32's delegated2-case pass remains valid for its boundary, not full production acceptance.
+P33 was explicitly rolled back by the operator: generic message/HTTP503/Retry-After remain.
+Confirmed PULL_PROCESSING_DETAIL and its callpoint/assertions are absent; no rollback by the
+Assistant is needed. Do not reimplement P33 or infer permission to replace503 with200.
 
-Recommendation: READY for the human's next pixi run pre-commit-operator with these changes.
-This is readiness for the full acceptance run, not a claim it has already passed. Existing
-wrapper status/grep quirks remain unchanged; review every actual leaf summary. No new batch
-or ordinary task change requested. Unexpected scope extension still requires explicit approval.
+The operator supplied the failure traceback in chat; no new full operator log was supplied
+or read for this finding. No new dependencies, ordinary task changes, artifact deletion,
+test skips or production fix. Unexpected scope extensions still require explicit approval.
 Keep original IPC missing-socket diagnostics/polling as operator elected. No ordinary tasks,
 HUMANS, pasted/shared HTTP schema, sample_deploy or other-detour changes are authorized.
 
@@ -58,11 +63,12 @@ whole-file bytes checked unchanged afterward. No artifact or symlink edits.
   1attempt/1outcome and an empty queue; card contains linked commit/validation/outcome IDs.
 
 Rechecked current pre-commit-operator graph: aicode nonbrowser/default/provider/root leaves,
-host Chrome then live operator; routing/commands untouched. P33 independently passes its
-changed HTTP-message boundary locally. Combined with retained earlier per-leaf evidence,
-no identified blocker remains to attempting full pre-commit-operator. No further elevate
-requested. Full live-Codex/provider/root acceptance was NOT rerun in this two-test batch.
-The elevate task remains its approved P32 batch; this review changes WORK only, not tasks.
+host Chrome then live operator; routing/commands untouched. P33 independently passed its
+changed HTTP-message boundary locally before the operator withdrew that change. That review supported the then-issued full-run recommendation, which is NOW WITHDRAWN
+after the operator exposed P34 below. The two passing targeted tests did not cover retained
+fixture rediscovery by a subsequent repository-wide run. No further elevate requested yet. Full live-Codex/provider/root acceptance was NOT rerun in this two-test batch.
+At that review elevate held the approved P32 batch. Current read-only inspection finds it
+restored to the idle "Nothing to elevate" scaffolding; P34 leaves every task unchanged.
 
 ### Prior elevate review — 2026-09-20; invocation/retention defects corrected by P32
 
@@ -2430,124 +2436,180 @@ collection is not browser execution. The actual option/retention checks now pass
 The prepared elevate ran exactly the real Chrome completed-query/card/artifact case and retained
 operator-directory case, macOS guard before log replacement, detailed captured argv/status/
 file inventory, data plus log copy under repo/tmp/elevate.XXXXXX. The2026-09-21 review above
-confirms2passed9.83s/status0 and retained artifacts; full operator run is now recommended.
+confirms2passed9.83s/status0 and retained artifacts; the ensuing full run exposed P34,
+so the earlier full-run recommendation is withdrawn pending that correction.
 No permanent tests invoking elevate; no
 index/production/ordinary-task edits. Earlier broad737-case evidence is not claimed as rerun.
 
-## P33 — COMPLETE within exact approved scope: busy pull503 message
+## P33 — WITHDRAWN / rolled back by operator: preserve generic busy-pull message
 
-2026-09-21 operator asks for the minimal surgical shape to customize the message when
-GET /pull returns503 during processing, with exact snippets recorded as a new P.
-Operator subsequently approved implementation strictly within these exact snippets.
-The three scoped code files are changed exactly as specified; verification passed below.
+Operator decided the existing generic detail, HTTP503 and Retry-After:1 are sufficient and
+explicitly rolled back P33. Current API again uses Locale.CONFIGURATION_ERROR_DETAIL for
+this response; no PULL_PROCESSING_DETAIL, optional detail parameter or new busy-body assertions
+remain. Verified read-only on2026-09-21, clean working tree before this WORK update. Preserve
+that decision; no reapplication and no status200 change is authorized.
 
-Pre-change: api._pull_response's BackendLifecycle.BUSY branch used _error_response,
-whose JSON detail was unconditionally Locale.CONFIGURATION_ERROR_DETAIL:
-"API is not properly configured. Contact the human operator." That is misleading for
-normal processing. Existing response is application/json, HTTP503, Retry-After:1, no ETag.
-Busy includes accepted-push capture/commit/validation work, so the proposed text says
-"being processed", not an unsupported claim about the current validation stage.
-authoritative_pull already sends the selected complete exchange through Store.pull's
-append/fsync -> projection -> typed DB readback before returning the response. No Store or
-server changes are necessary to persist/serve the new detail through the existing path.
+Historical evidence only: the reverted exact message/helper/OpenAPI patch and three assertion
+additions passed11focused checks, Ruff and mypy56files. Those passes do not represent surviving
+P33 code or a pending requirement. Obsolete implementation snippets are removed from WORK.
 
-### Exact approved scope and snippets
+## P34 — COMPLETE: exclude retained artifacts from root discovery
 
-Only two production files: protected/src/backend/helpers/locale.py and src/backend/api.py.
-Add one Locale message, one keyword-only helper argument retaining the existing default,
-pass that message ONLY from the busy pull branch, and reuse it for that503's OpenAPI
-description. No new model/helper/module or response-envelope/schema change. All other
-_error_response callers keep their exact current message, including push409 and pull/push500.
+### Confirmed failure and missed upstream boundary
 
-```python
-# Existing Backend Locale, alongside its pull messages:
-PULL_PROCESSING_DETAIL: Final = (
-    "Submission is still being processed; retry GET /pull after one second."
-)
+Operator traceback reports three collection errors under
+`tmp/tests.uxqd116_/pytest/test_nicegui_isolated_before_c{0,1,current}/test_collection.py`.
+The generated modules import NiceGUI at collection time; default environment lacks it, so
+collection aborts before real tests run. The current symlink names the second retained case,
+not a third independent fixture. The182deselected summary does not make this a runtime test
+failure; marker selection cannot protect against imports already performed in collection.
+
+P32 moved/retained generated fixture modules under repository tmp. Existing main tasks
+explicitly invoke pytest on `.`: test-repl -> test '.', test-repl-extra -> test '.' real_api.
+Explicit `.` bypasses testpaths=['tests']. Existing norecursedirs excludes detour source/test
+paths but not tmp or logs. Pytest does not use gitignore for discovery. The generated files
+have no enclosing detour conftest, so its early NiceGUI isolation is not installed. Installing
+NiceGUI would not correct the boundary; it could instead permit unintended fixture imports
+outside their controlled child environment. No production storage access is asserted from
+this particular ModuleNotFoundError report.
+
+Assistant missed the next-run cross-suite effect of retaining generated Python modules.
+The70-case local preflight and2-case macOS elevate used explicit detour node paths and could
+not expose this. Prior graph review noted `test .` but failed to test it AFTER artifact
+creation. This is an Assistant-introduced P32 regression, not operator/environment fault.
+The full-run readiness recommendation is withdrawn.
+
+### Exact approved correction
+
+Add ONLY these two entries to the EXISTING global pytest norecursedirs list in pyproject.toml;
+keep all current entries/markers/testpaths and every Pixi task byte-for-byte unchanged:
+
+```diff
+ [tool.pytest.ini_options]
+ pythonpath = ["."]
+ testpaths = ["tests"]
+ norecursedirs = [
++    "tmp",  # retained runtime/test artifacts, not test sources
++    "logs",  # includes copied diagnostic/test artifact bundles
+     "tests/test_detours",  # can run via `pixi run test tests/test_detours`
 ```
 
-```python
-# api.py: existing helper, only the keyword argument and JSON detail value change.
-def _error_response(
-    request: requests.PreparedRequest,
-    code: HTTPStatus,
-    *,
-    detail: str = Locale.CONFIGURATION_ERROR_DETAIL,
-    headers: Mapping[str, str] | None = None,
-) -> requests.Response:
-    return _response(
-        request,
-        code,
-        json.dumps(
-            {"detail": detail},
-            ensure_ascii=False,
-            separators=COMPACT_JSON_SEPARATORS,
-        ),
-        content_type=ContentType.JSON,
-        headers=headers,
-    )
+Both directories are artifact roots, not authoritative test suites; git ls-files reports
+no tracked Python files beneath tmp/logs. Logs exclusion addresses the same generated files
+when copied into from_operator for diagnosis, as the operator has repeatedly supplied bundles.
+No deleting retained data, shortening its lifetime, renaming generated tests, dependency
+addition, pytest skip/importorskip, collection-error suppression, command/marker rewrite,
+new plugin or production behavior change. The excluded artifacts must remain deliberately
+runnable as explicit child file targets with their existing isolated configuration.
 
-# Existing _pull_response branch only:
-if lifecycle is BackendLifecycle.BUSY:
-    logger.info(Locale.PULL_PROCESSING_LOG)
-    return _error_response(
-        request, HTTPStatus.SERVICE_UNAVAILABLE,
-        detail=Locale.PULL_PROCESSING_DETAIL,
-        headers={RETRY_AFTER_HEADER: RETRY_AFTER_SECONDS},
-    )
-```
+Global pytest config was outside P32's boundary. The operator has now explicitly approved
+this narrow P34 extension and its discovery regression. It changes CONFIGURATION, not any
+ordinary task shape. Approval does not authorize dependency, fixture-lifetime or other edits.
 
-Exact OpenAPI entry replacement inside existing PULL_ROUTE responses; no other route edit:
+### Reproduction and approved regression coverage
 
-```python
-status.HTTP_503_SERVICE_UNAVAILABLE: {
-    "description": Locale.PULL_PROCESSING_DETAIL,
-    "headers": {
-        RETRY_AFTER_HEADER: {
-            "schema": {"type": "string", "example": RETRY_AFTER_SECONDS},
-        },
-    },
-},
-```
+Read-only review plus a safe synthetic project at tmp/p34-discovery.sefdm6_m. Copied current
+pyproject.toml; used the actual default-environment Python/pytest through the mandated Pixi
+wrapper. No real main tests/CLI import, NiceGUI import, socket, provider or production artifact.
+Synthetic archived modules deliberately raise on import, avoiding unintended storage access;
+tree includes tmp retained case, its current symlink and a copied logs/from_operator bundle.
+Legitimate control tests are under tests, one marked real_api and one ordinary.
 
-### Verification within this approved scope
+- Unchanged config: `pytest -q .` -> exit2/3collection errors0.39s;
+  `pytest -q -m real_api .` -> exit2/3errors/1deselected0.30s.
+- Candidate applied ONLY to the copied config: ordinary ->2passed0.02s;
+  marked ->1passed1deselected0.01s; both exit0. TOML comparison proves only norecursedirs differs.
+- Real repository config was unchanged at that diagnostic stage. Diagnostic log/tree retained; no old artifacts
+  were imported/removed, no main pipeline code executed and no production data inspected.
 
-Only extend existing test_api.py:test_accepted_push_is_committed_only_after_its_public_record;
-it already exercises a real accepted push, concurrent busy pull, durable log and Store readback.
-No new fixture, mocked persistence, timeout change or separate test module. Immediately after
-the existing busy status/header/no-ETag assertions add:
+Approved permanent coverage belongs in the existing operator preflight/shared subprocess
+mechanism, testing ACTUAL pytest discovery with a copied current repository configuration,
+not source-string matching. Parameterize the ordinary and real_api root invocations. Place
+controlled generated fixture modules under tmp and a copied logs tree, including a current
+symlink; require legitimate tests to run and archived modules NEVER to be imported, with files
+unchanged afterward. Reuse existing PythonProcess/named-helper mechanism and explicit
+python_subprocess marker; no inline multi-line child scripts in individual tests. Preserve
+existing direct child collection/retention tests to prove exclusion does not skip intended
+isolated fixture execution. No elevate-triggering test or new dependency/module.
 
-```python
-assert busy.json() == {"detail": Locale.PULL_PROCESSING_DETAIL}
-```
+Implement only the config entries and corresponding discovery regression in
+existing preflight/plugin files, run the new regression plus existing isolation/retention
+cases and affected static checks; check root collection safely without executing retained
+fixture code or importing src.repl. No further operator run requested before this passes.
 
-After the existing completed_records path-order assertion (the busy pull is index2), add:
+Latest operator instruction reinforces the missing homework: exercise ALL locally feasible
+test leaves before handoff, use elevate/necessary production checks for unavailable boundaries,
+and explicitly flag uncertainty instead of giving an unqualified readiness claim. Test real
+root discovery after retained files exist (including copied logs/current symlinks), not merely
+the generating tests' explicit paths. Record actual passes/failures and environment/resource
+constraints separately. No assertion weakening or speculative prerequisite substitution.
 
-```python
-assert completed_records[2].response_body == busy.text
-assert api_store._http_record(completed_records[2].record_id).response_body == busy.text
-```
+Latest operator constraint: no sweeping changes; justify every changed line. P34 remains
+exactly two configuration entries, one two-case regression and three tiny named source
+helpers in the existing plugin, plus WORK. No existing test body/fixture changed.
 
-Keep all existing assertions; run this integration case, existing error-response cases
-(including configuration500 and push409 body checks), affected Ruff/strict mypy. No new
-operator/elevate batch is needed for message-only behavior; P32's host check now passes.
-Explicit approval received; focused verification passed. No additional scope.
+Execution checkpoint: permanent regression reproduced BOTH failures before the config fix
+(2failed70deselected6.62s). Each actual child root invocation imported tmp, its current
+symlink and logs archive, producing3collection errors. The two approved entries are now
+applied. Full changed preflight PASS72tests158.95s, including both new root-discovery cases
+and existing explicit child isolation/retention/conflict tests, no skips/deselections.
+Actual default-environment repository-root collection AFTER retained artifacts exist passes:
+ordinary147nodes25.55s; real_api1node/146deselected25.59s (production-only reviewed fixture
+parameterization is unavailable here). Both exit0; every node belongs to tests/, no tmp/logs
+imports. This is COLLECTION evidence, not live-API execution. Logs are retained under
+tmp/p34-verify.h4s5vslu. Full Ruff PASS; strict detour mypy PASS56files. Parsed TOML comparison
+proves only those two exclusion entries differ; every task and dependency is unchanged.
+Remaining feasible graph verification is complete; results and exclusions follow.
+The previous attempt's terminal receipt was lost at compaction; it is not claimed as a pass.
 
-### P33 completion — 2026-09-21
+Fresh additional leaves: default mypy PASS68files; Step4/Mode3 PASS10tests71.63s (only
+production-resource slow case excluded); Mode0 nonplot helpers PASS2tests9.67s (two Kaleido
+socket-dependent cases excluded). Default root execution:138passed/3existing skips/4deselected/
+2failed48.33s. The two unchanged extension prerequisite tests require a configured platform
+binary; this x86 host has no config entry and the configured ARM path is absent. No binary/
+config substitution, new skip or relaxed assertion. The four deselections are the two
+reviewed-workbook cases and two DOCX cases that write data/test_data; TASK prohibits those
+artifact operations here. No production data was read/written by these tests. Real Chrome/
+provider/socket/root/live-Codex execution remains unavailable, not a pass or an inferred failure.
 
-Exact Locale constant/helper argument/busy call/OpenAPI description and three existing-test
-assertions applied, with no other code changes. Selected busy accepted-push/log/DB-readback,
-unchanged configuration500, push409 and actual transport-before-send cases:6passed,
-275deselected25.28s. Existing five post-commit pull response cases:5passed8.92s, including
-unchanged failed500 messages, retry Markdown and completed410. Full detour Ruff PASS;
-strict mypy PASS56files; diff whitespace PASS. No new fixture/test/module, timeout change,
-Store/server/Dashboard/task edit or operator batch. Staged operator work preserved.
+Line-level scope justification: the tmp entry blocks generated fixtures; the logs entry
+blocks copied fixture bundles. The new test's decorators select both actual root command
+shapes; setup copies authoritative config and constructs two legitimate controls plus three
+archive paths (including current symlink); subprocess/receipt assertions prove discovery
+and marker behavior; before/after hashes prove exclusion does not delete data. Three tiny
+named plugin helpers provide those standalone source bodies through the existing mechanism,
+avoiding inline child programs. AST comparison proves ALL previous test/plugin code unchanged.
 
-Unchanged: JSON detail shape, ContentType.JSON, HTTP503, Retry-After:1, no ETag, response
-timing/gating, Store persistence/replay, other statuses/messages, server logs, Dashboard
-one-pull503=>failed rule, polling cadence, configuration and all tasks. Content-Length is
-already derived from encoded response bytes by _response. Previously persisted records
-are not rewritten; newly served responses carry and persist the new text.
+### P34 completion evidence — 2026-09-21
+
+- Full feasible ordinary AI batch:677passed/1existing skip/9deselected1006.83s, exit0,
+  no warnings. Includes real synthetic Store/log/DB/replay, in-process transport, UI/controller,
+  startup subprocess matrix, audit and nonprivileged watcher tests. The separately completed
+  full72-case preflight is not included in this batch. Host browser module was explicitly
+  excluded; its browser-free completed-query fixture separately passed1test42.76s. The
+  existing skip is the deliberately disabled multiple-evidence-match rejection check.
+  Nine deselections:3needs_sudo,1real provider,2historical captures,1real Unix IPC,
+  1socket substitution parameter and1socket-substitution CLI case. Three nonsocket
+  substitution parameters WERE executed, not discarded with the socket case.
+- AFTER that artifact-generating batch, repeated both actual default-env root collections:
+  ordinary147nodes; real_api1node/146deselected; both exit0 in6.92s. Node lists exactly
+  match the earlier successful collection, all under tests/, no tmp/logs imports. This
+  covers the previously missed subsequent-invocation boundary, not just a copied config.
+- Every locally feasible operator-graph leaf was addressed: Ruff, both mypy environments,
+  default root execution/collection, Step4/Mode3, Mode0 nonplot, AI ordinary/preflight and
+  browser-free fixture. Resource/safety/network/browser/root exclusions and two genuine
+  local extension-prerequisite failures remain explicit above; no hidden green claim.
+- Diff: ONLY2pyproject configuration lines,45new preflight lines (one two-case test),17new
+  plugin lines (three named source helpers), plus WORK. No existing test/assertion/timeout,
+  fixture lifecycle, task, production source, dependency or index changes. TOML equality
+  outside the two entries, unchanged existing test/plugin AST and diff whitespace all PASS.
+  Verification logs remain in tmp/p34-verify.h4s5vslu; generated artifact roots are retained.
+
+All approved P34 implementation is complete. No additional fix or elevate batch is proposed
+for this discovery correction: its actual default-environment boundary is testable here and
+now tested. Current elevate remains the existing idle scaffolding, unchanged. A full new
+pre-commit-operator run is still production acceptance, not something these local results
+can certify in advance. P33 remains withdrawn; no other pending approved code is revived.
 
 ## Completed scope index
 
