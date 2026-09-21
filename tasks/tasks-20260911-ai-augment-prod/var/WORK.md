@@ -2,44 +2,244 @@
 
 ## Status and authorization
 
-P36 is COMPLETE: exact use_rootpath_tmp marker/fixture proposal, locally verified with
-72preflight +677ordinary tests, Ruff/mypy and root collection. It replaces P35's operator-
-specific allocation, not its normal scratch/NiceGUI isolation or sudo correction. Only marked
-tests retain tmp_path-derived files in rootpath/tmp; unmarked tests retain pytest defaults.
-Operator tests receive both independent markers. No remaining approved P36 implementation;
-production operator acceptance has not been rerun here.
+2026-09-21 latest instruction: item1's EXACT two header-test/fixture edits are IMPLEMENTED
+and verified:72preflight cases, Ruff and strict mypy PASS. Item2's outcome-ancestry proposal is REJECTED;
+change neither production outcome selection/replay nor its existing fixture/UUID assertions.
+Item3 is explicitly NO CHANGE to authentication. Earlier approved implementation through
+P36 is complete except P32 global retention superseded by P35/P36 and withdrawn P33.
+Latest full operator acceptance FAILED at KeyError('location'); the correction now passes
+the actual upstream artifact validator. No full operator rerun or new elevate payload; no
+full-run success claim. No approved implementation remains from these three items. Generic503 and
+original missing-socket diagnostics remain as elected. No production/task/index changes.
+TASK reread; preserve all scope constraints and operator staging.
 
-2026-09-21: WITHDRAW the prior pre-commit-operator readiness recommendation. The operator's
-next full run exposed a P32 regression: retained generated test_collection.py files beneath
-repo/tmp are recursively imported by the default-environment pytest . / pytest -m real_api .
-leaves, outside detour isolation. Missing NiceGUI is the symptom, NOT a dependency to install.
-P34's two exact pytest exclusions and upstream discovery regression are now IMPLEMENTED
-and locally verified, including root discovery AFTER the full feasible AI suite generated
-retained artifacts. No ordinary task, dependency or production changes. Full operator
-acceptance is still pending; the former overbroad readiness claim is not a test result.
+P36's exact marker/fixture is implemented: only use_rootpath_tmp-marked tests retain their
+tmp_path-derived files under rootpath/tmp; unmarked tests use pytest/system scratch. The
+operator module has independent operator and use_rootpath_tmp markers. Local evidence:
+72preflight +677ordinary tests, Ruff/mypy/root discovery. The latest production run now
+confirms ordinary FIFO/socket/root/browser checks pass and the actual operator runtime uses
+a unique retained tmp/test.v4dkxxmy directory. Original NiceGUI preservation checks pass.
+P34 artifact-discovery exclusions and P35 sudo -k remain implemented. The root log shows
+sudo -k and3passes but does not print a password prompt; do not claim prompt visibility.
 
-New operator report: five appendwatch FIFO/socket failures. P35 is IMPLEMENTED and locally
-verified: interactive sudo with fresh authentication; ordinary native scratch; only operator
-runtime artifacts retained under repo/tmp. The native_fs_path proposal is superseded.
-P34 remains implemented; it fixes discovery, not native-filesystem/path requirements.
-Fresh P35 checks:68preflight +677ordinary tests passed; Ruff/mypy and actual root discovery
-passed. No remaining approved P35 implementation. Actual sudo prompting/root monitoring,
-Unix sockets and host Chrome are not locally verified; full operator acceptance is pending.
+### Latest full operator review — 2026-09-21; workflow complete, harness FAILED
 
-P25–P31 remain implemented. P32's global retention is superseded by P35's operator-only
-boundary. P34 corrects P32's repository-wide collection defect; its72-case preflight and
-677-case feasible AI passes precede P35 and are recorded
-below. P32's delegated2-case pass remains valid for its boundary, not full production acceptance.
-P33 was explicitly rolled back by the operator: generic message/HTTP503/Retry-After remain.
-Confirmed PULL_PROCESSING_DETAIL and its callpoint/assertions are absent; no rollback by the
-Assistant is needed. Do not reimplement P33 or infer permission to replace503 with200.
+User initially requested only pre-commit.log, then explicitly added pre-commit-extra.log
+and tmp/test.v4dkxxmy. Reviewed only those current logs/bundle plus source; no unrelated
+captures or original host resources. Raw LF line references below (not universal-newline
+conversion, which adds lines for terminal CRs). Files: pre-commit.log485213bytes/3689LF;
+pre-commit-extra.log836120bytes/4970LF. No Ctrl+C/KeyboardInterrupt/test timeout in either.
 
-The operator supplied the failure traceback in chat; no new full operator log was supplied
-or read for this finding. No new dependencies, artifact deletion, test skips or production
-fix. Unexpected scope extensions still require explicit approval.
-Keep original IPC missing-socket diagnostics/polling as operator elected. Only P35's exact
-sudo flag edit is now authorized in ordinary tasks. No changes to HUMANS, pasted/shared HTTP
-schema, sample_deploy or other detours are authorized.
+| Leaf | Actual result |
+|---|---|
+| Ruff/default mypy/AI strict mypy | PASS;68/55source files |
+| Main |174passed5skipped6xfailed1documented XPASS4.35s |
+| Step4 |4passed1skip2.33s; slow leaf1skip4deselected0.24s (configured parquet resources unavailable) |
+| Mode3 |6passed1.14s |
+| Mode0 |4passed11existing Plotly/Kaleido deprecation warnings2.46s |
+| AI ordinary + preflight, aicode |755passed1existing skip3root deselected147.27s; previously failing FIFO/socket cases and root-discovery regressions pass |
+| Real OpenAlex/ROR institution model |1passed0.80s; ordinary task's && reached this leaf |
+| Host Chrome module |9passed34.70s, including real query/card/synthetic DOCX; guest and host script status0 |
+| Main real API |3passed182deselected1expected xfail2.75s |
+| Privileged appendwatch |3passed70deselected3.64s; guest script status0 |
+| Live operator |1failed2intentional excluded-case skips273.26s; host status1 |
+
+Severity-message investigation:
+- pre-commit.log has133ERROR,28WARNING,1CRITICAL log entries, ALL under passing tests'
+  captured-log sections. Existing -srA includes -rA, which displays these even for passes;
+  stdout capture and pytest logging capture are separate. No severity suppression proposed.
+-104errors are the explicit outcome matrix (LF2198–2441): deliberately missing/wrong
+  NameKey/Session-ID/ETag, body/query/SourceKey rejection and injected unavailable rollout.
+  Tests verify durable error history and live/replay equality, not success for invalid input.
+-Remaining errors exercise injected validation/projection/fsync/completion failures, invalid
+  replay lines, invalid workflow states/ETags, failed IPC/startup/cleanup/snapshot replacement
+  and DOCX rendering failure. Traces point into deliberate test raises/fixtures. Sole CRITICAL
+  LF2497 is test_background_commit_failure_exits_backend: its FailedTask returns
+  RuntimeError('commit failed'), and the test verifies fatal exit1 without killing pytest.
+-28warnings exercise rejected evidence/retry baseline, missing initial pull, malformed
+  submission and duplicate already-accepted fragments. Repeated live evaluation, authoritative
+  validation application and explicit replay re-log those rejections. Tests of first/current
+  validation state intentionally reuse the same fragment. No new persistence failure inferred.
+-Mode0's11DeprecationWarnings are separate: legacy Kaleido defaults/old Kaleido API/setDaemon.
+  Existing dependency warnings, all Mode0 tests pass; outside this detour's correction scope.
+-Extra log has6REAL Codex-client ERRORs at LF169–192: expired authentication token causes
+  two model-list401s, two MCP transport401s and two Responses-WebSocket401s. Not test injections
+  or Backend HTTP errors. Preflight only checks codex login status exit0 (plugin185–203),
+  which cannot establish live endpoint authorization. Codex subsequently performs research,
+  submits twice and exits0. Log does NOT establish whether refresh/retry/transport selection
+  resolved the authorization; do not invent that mechanism or claim all MCP tools recovered.
+-Extra log's2Backend WARNINGs (LF1523,1543, interleaved into long evidence lines) are the SAME
+  first rejected push, logged at evaluation and persisted-input application. Actual mismatch:
+  social_capital.web_search_excerpts[0] says 'he is a highly cited author, ...'; captured HMC
+  sentence instead has '... in excess of £200M, is a highly cited author, ...'. Exact contiguous
+  match fails:26/27. Retry fixes it and all27match. One rejected validation, not two failures.
+  Long full-candidate log output interleaves prefixes; a genuine readability issue, not a new
+  validation/persistence failure. No logging refactor approved by this review.
+
+Actual failure, current producer and missed upstream boundary:
+-At the failed run, extra LF4947 / test_operator_e2e.py:1138 indexed a plain stored dict with ['location'].
+  BOTH real accepted push records have {'Location': '/pull', 'Content-Length': '0'}.
+  Backend api._response uses LOCATION_HEADER='Location'; _authoritative_http_record captures
+  dict(response.headers) BEFORE ASGI transport. Curl's lowercased wire header at LF1096/3565
+  does not imply the persisted Requests-side envelope has lowercase keys. HTTP header names
+  are case-insensitive; the test's dictionary assumption is wrong, not a missing Location.
+-At the failed run, P31's synthetic completed-query fixture used LOCATION_HEADER.lower() (plugin803).
+  Therefore both upstream artifact-validator and Chrome helper tests passed with the same
+  lowercase assumption. This is a missed Assistant test-fidelity defect, not a required
+  production header/serialization change or an unavailable-browser explanation.
+-Header diagnostic executed actual api._response/_authoritative_http_record plus typed copies
+  of both supplied live pushes, through isolated pytest/pre-import NiceGUI protection; no
+  network/serving/Store writes. Reproduces KeyError and proves existing _http_header_value
+  handles Location/location/LOCATION:4passed0.88s. Initial diagnostic had1pass/3fail because
+  Python-mode strict UUID validation was mistakenly used for JSON dict input; corrected to
+  model_validate_json, no model relaxation or production edit. Temporary module removed.
+  This is NOT a full artifact-validator pass or acceptance run.
+
+Lifecycle, timing and retained files:
+-Guest normal run11:18:40–11:21:42; Chrome finishes11:22:18; extra guest completes11:22:25.
+  Host operator wrapper11:22:25–12:06:56, but pytest reports273.26s (~4m33), and actual
+  Dashboard run queued12:02:35.746 -> completed12:06:45.924 (~250s). Approximately40minutes
+  occur outside the timed pytest session. The redeploy prompt is before session start;
+  untimestamped prompt/preflight output cannot prove where that interval was spent. Do NOT
+  label it a40minute Backend/Codex hang or assume the operator caused it.
+-Research accounts for heartbeats with2records through171s, first push around180s, second
+  around239s; no500pull. Final pull410 and completed200 materialize1section (LF4755–4771).
+  Full Backend42631: clean token, exit-15, clean_close_ack=True, forced_kill=False,
+  shutdown_succeeded=True. IPC-only42609/43503 both clean exit0. Post-run query307researchers/
+  2attempts/1outcome; actual card displayed/captured; Dashboard42583 and resource tracker42588
+  exit normally. Artifact assertion fails AFTER cleanup. No Playwright teardown warnings.
+-Expected absent-socket polls and one transient ConnectionRefused at LF116 resolve to readiness.
+  They are not failed Query requests; unchanged operator-approved startup behavior.
+-Run directory retained/logged as tmp/test.v4dkxxmy, including replay/DB/CAS/config/private
+  NiceGUI. No global basetemp retention. Host ordinary browser data instead uses native
+  pytest scratch with short /tmp/q.* sockets. Original data/NiceGUI preservation guard passes.
+
+Read-only audit of supplied tmp/test.v4dkxxmy:
+-12LF-terminated valid typed HTTP records,342140bytes, replay SHA256
+  c4d5d009b355bf8438bdb215932784760150e9135ef75e549c6567071525bf7b.
+  Every DB ordinal/UUID/method/path/full JSON envelope/LF-inclusive hash matches exactly.
+  Readonly DuckDB; whole-file hash unchanged after each read. No source symlink followed,
+  no saved-config resource construction, replay/network/provider call or artifact mutation.
+-Sequence:pull200,pull200,push202,commit,validate(rejected),pull200,push202,commit,
+  validate(accepted),pull410,pull410,completed200.2attempts,1materialized innerdict. Embedded
+  commit/pull/push/initial-validation inputs match prior records in order; final outcome
+  references final410/current push/accepted commit+validation/self, with matching Session-ID/
+  ETag. That final410 reference matches the current implementation but is INCORRECT under the
+  ancestry expectation raised in review. The proposed correction was subsequently REJECTED;
+  this observation is not an implementation instruction. Initial-validation ancestry
+  correctly points to the rejected first validation.
+-All3extensionless CAS blobs match SHA256/shards/size; each is referenced. No missing or
+  orphan blob. Both validations have no provider captures; accepted submission has7institution
+  objects, all OpenAlex/ROR IDs NR/NR, consistent with no provider HTTP inputs. Table-comment
+  anchor remains empty prefix0/0, consistent with
+  a fresh --new lifetime; subsequent readonly verification does not promote it.
+-NiceGUI has307researchers,2attempts,1outcome,7events ending Codex exit0/completed, empty queue.
+  Stored committed innerdict matches DB plus its separate namekey, its complete outcome
+  matches the replay envelope, and its commit DTO matches the actual persisted records.
+  This supplies substantial independent consistency evidence, not proof of checks never
+  reached by the failed validator. Its later CAS/outcome/full rendered-card assertions did
+  NOT execute; no raw captured card-text file is included in this bundle.
+
+### Follow-up assertion audit — 2026-09-21
+
+Operator asks whether replacing location with Location passes and whether similar assertions
+were missed. Yes for BOTH saved real push records, but merely changing that literal would
+break the lowercase synthetic fixture. Existing case-insensitive lookup plus producer-cased
+fixture are now explicitly approved below. Reviewed all direct header accesses/assertions in the operator module
+and its preflight helper: this is the ONLY direct header-dictionary subscript. NameKey,
+SourceKey and ETag already use _http_header_value; no second equivalent casing defect found.
+Reviewed the remaining ordering/identity/CAS/outcome/card and browser/cleanup/preservation
+checks against producers and current captured evidence.
+
+Executed the EXACT original statement block following the bad assertion up to (excluding)
+the browser card_text block against the supplied saved records/CAS, with real parsed typed
+records and accepted-commit selection from readonly DB:1passed3.91s. Temporary isolated
+pytest loaded that unchanged AST block; it did NOT invoke Store/config initialization,
+mock persistence, alter an assertion or change artifacts. DB hash unchanged, temporary module
+removed. All remaining nonbrowser artifact assertions pass for this run, including CAS
+size/hash/line count, outcome UUID/session/ETag/SourceKey, ordering and appendwatch parsing.
+Those unchanged assertions explicitly expect the latest pull; their pass does NOT establish
+correct commit ancestry. The user's concern remains recorded, but the proposed ancestry
+correction is rejected and the existing UUID assertions are outside the approved change.
+This is deliberately a tail-block forensic check, not a full operator invocation or live
+replay. Exact captured browser inner_text was not retained, so its final complete rendered-
+card comparison remains unverified against this run. Earlier browser capture assertions and
+cleanup/preservation passed in the actual run; no new production/test/task changes.
+
+### Approved narrow header-test correction — COMPLETE, locally verified
+
+Only existing operator artifact test, its completed-query fixture and corresponding preflight
+coverage; no production, HttpRequestLogRecord, task, timeout, casing normalization or fallback.
+Reuse the case-insensitive helper already used by the rest of the artifact validator:
+
+```python
+# test_operator_e2e.py; replace ONLY the faulty header assertion:
+assert backend_api._http_header_value(
+    push_record.response_headers, backend_api.LOCATION_HEADER,
+) == PULL_PATH
+
+# pytest_plugin.py completed-query fixture; match actual producer casing:
+response_headers={LOCATION_HEADER: PULL_PATH},
+```
+
+Latest operator approval is ONLY the exact two edits above. No additional permanent test
+body/helper/refactor is authorized. The existing full synthetic artifact-validator test now
+provides upstream coverage with producer-cased headers. Verification sequence: change fixture
+first to reproduce KeyError through that actual validator, then apply the exact assertion
+and run the affected preflight module plus Ruff/strict mypy. The prior four-case diagnostic
+already covers actual response capture and header case variants; no fresh live Codex/browser
+run is needed to reproduce this dictionary lookup. Preserve every other assertion/timeout.
+
+Reproduction: after changing ONLY fixture header spelling, the unchanged actual artifact
+validator fails exactly at ['location']:1failed18.94s. Real synthetic Store/replay/DB/CAS,
+isolated NiceGUI and normal fixture startup; no socket/provider/live-Codex call. Applied the
+exact approved helper assertion next. The full affected preflight module then passed:
+72passed85.83s, no skips or warnings. This includes the actual synthetic Store/log/DB/CAS
+artifact validator and retained header/UUID/order/CAS assertions, not a replacement validator.
+Ruff PASS and configured strict mypy PASS2changed files; diff whitespace PASS. The prior
+four-case header diagnostic is separate evidence, not a rerun in this implementation.
+
+Final code diff is exactly the approved assertion replacement (one line -> three) and removal
+of .lower() in the fixture (one line). No other existing test, permanent test addition,
+production source, HTTP schema, outcome reference/assertion, auth, task, dependency or index
+change. WORK records completion and rejection/no-change decisions. Browser/live-Codex/root/
+provider checks were not rerun; this test-only correction is locally complete, not a new full
+operator acceptance result. Existing real browser fixture consumes the same corrected data.
+
+### Outcome ancestry proposal — REJECTED; no implementation
+
+The user rejected item2 in full. Removed its proposed implementation/test snippets so they
+cannot be mistaken for pending approved work. Do NOT derive outcome pull/push from commit,
+add the proposed replay equality check, alter the fixture's final410 reference, or replace
+P31's latest-record assertions. No API/IPC/Store/protocol/saved-artifact change is authorized.
+
+Retain the read-only finding for discussion, not as a pending correction: outcome
+01a0c4b8-42a3-75f4-abd2-49639cca13c3 references pull01a0c4b8-426a-73bd-b0e9-c1202a5b5c8b
+(line11, Dashboard410), whereas its commit01a0c4b8-1cec-77cb-8449-0b03b1d0ec7f references
+pull01a0c4b7-42dc-73f6-b3d8-298111a6a2d7 (line6, retry200). Store advances the current pull
+on each projected exchange; IPC captures it and the outcome copies it. The existing verifier
+and operator assertions accept that latest-record relationship. Rejection of the proposed
+patch does not itself resolve the operator's semantic concern or authorize an alternative.
+
+### Authentication follow-up — operator confirmed NO CHANGE
+
+Confirmed operator contour: active completed test has requires_codex_auth; its autouse
+production_data_unchanged depends on operator_aivm, which calls _ensure_codex_is_authenticated
+before the test body/Dashboard/Codex session. Actual command is limactl shell --workdir=/ aivm
+sudo --user ai --set-home /home/ai/.local/bin/codex login status. Plugin185–203 checks exit0,
+discards stdout/stderr and enforces the existing probe timeout. Extra log LF70–72 records
+successful auth preflight before actual session startup and LF169+ expired-token401 errors.
+The run subsequently completes; the exact recovery/refresh mechanism is NOT established.
+An exit0 login-status probe is not proof every later remote endpoint will authorize a call.
+No credential reset, forced login, added network probe, retry policy or log suppression proposed
+for this recovered incident.
+
+Important production distinction: Dashboard._CodexRunner.probe_auth runs login status only
+from explicit probe_all (ui2159). _wait_until_codex_idle checks busy state; _execute_run starts
+Backend then _CodexRunner.start directly. That start prepares remote paths and executes Codex;
+its shell template contains no login-status check. Thus operator preflight DOES precede this
+session, but ordinary Dashboard does NOT automatically recheck authentication before every
+queued session. No auth-gate implementation authorization inferred from this question.
 
 ### Latest elevate review — 2026-09-21; P32 PASS, retained artifacts verified
 
@@ -128,7 +328,7 @@ only actual operator runtime artifacts are retained in repo/tmp; ordinary pytest
 collection storage use normal native temporary storage/cleanup. Do not restore P32's global
 overrides from this historical review. No production or cleanup fallback is authorized.
 
-### Latest full operator run — failed acceptance; live workflow completed
+### Prior full operator run — 2026-09-19; failed acceptance; live workflow completed
 
 Files: logs/from_operator/pre-commit.log (392568bytes,mtime2026-09-19T13:49:24UTC) and
 pre-commit-extra.log (1141265bytes,mtime13:54:57UTC). Execution09:46:16–09:54:57(-04).
@@ -1922,13 +2122,17 @@ system-temp location, global basetemp change, new cleanup or production storage 
 
 ### 4. Exact upstream coverage boundary and fixture additions
 
+The fixture snippet below includes the latest approved header-case correction; its originally
+approved LOCATION_HEADER.lower() was the test-fidelity defect documented above. All other
+P31 fixture behavior and outcome UUID assertions remain unchanged.
+
 Reuse completed_query_files and the shared named completed_query_fixture_process. The fixture
 already persists a real synthetic accepted commit/validation/outcome and CAS through Store,
 but omits the push Location header and final410. Add only the following before outcome:
 
 ```python
 # Existing persisted_http_record(...) construction of the accepted push:
-response_headers={LOCATION_HEADER.lower(): PULL_PATH},
+response_headers={LOCATION_HEADER: PULL_PATH},
 
 # Immediately after the fixture's existing successful _validate_commit assertions:
 assert validated.submission is not None
@@ -2034,6 +2238,11 @@ Leave elevate unchanged until that review. The new delegated result is recorded 
 it proves the Chrome helper but not the separate directory test or successful wrapper execution.
 
 ### P31 UUID amendment — APPROVED, implemented and locally verified
+
+Historical approval/implementation evidence. The2026-09-21 review raised an outcome-ancestry
+concern, but the operator explicitly REJECTED the proposed production/test correction.
+This amendment remains implemented and untouched by the separately approved header fix.
+No ancestry correction is pending implementation; preserve the review finding above.
 
 Read-only producer review during handoff verification found an Assistant proposal error:
 protected/src/backend/ipc.py:_capture_run_outcome_snapshot captures store.current_pull_record
@@ -2695,8 +2904,8 @@ Additional baseline evidence:
 
 Historical reviewed pre-commit-operator run:2026-09-18 15:37:17–15:46:13(-04),
 logs/from_operator/pre-commit.log and pre-commit-extra.log. Full acceptance FAILED.
-Operator explicitly requested findings independent of pending P26-P30; those approved items
-remain unchanged/unimplemented. The initial review changed WORK only; correction1 was
+Operator then requested findings independent of pending P26-P30; those items were still
+unimplemented at that checkpoint (now complete). The initial review changed WORK only; correction1 was
 subsequently approved and implemented below. Corrections2 and4–7 are implemented and locally verified; targeted delegated verification passed; full operator acceptance remains pending;
 correction3's approved test deletion is complete, not its original redesign. Line references below count LF lines
 in the raw logs (terminal CR/ANSI sequences may affect rendered editor numbering).

@@ -800,7 +800,7 @@ def completed_query_fixture_process() -> None:
                 path="/push",
                 response_code=202,
                 request_body=json.dumps(payload),
-                response_headers={LOCATION_HEADER.lower(): PULL_PATH},
+                response_headers={LOCATION_HEADER: PULL_PATH},
             )
         )
         draft = api._synthetic_commit_record(

@@ -1135,7 +1135,9 @@ def validate_workflow_artifacts(
     push_record = records[push_ordinal]
     assert push_record.response_code == status.HTTP_202_ACCEPTED
     assert push_record.response_headers is not None
-    assert push_record.response_headers["location"] == PULL_PATH
+    assert backend_api._http_header_value(
+        push_record.response_headers, backend_api.LOCATION_HEADER,
+    ) == PULL_PATH
     rollout_blob = (
         operator_runtime.rollout_cas_dir
         / rollout.sha256[:2] / rollout.sha256[2:4] / rollout.sha256
