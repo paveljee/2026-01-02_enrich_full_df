@@ -322,6 +322,10 @@ cwd = "."
 # exit on first failed command.
 cmd = """
 bash -c '
+  if [ "$(uname -s)" != Darwin ]; then
+    echo "ERROR: run on a macOS host; it dispatches guest checks to Lima" >&2
+    exit 1
+  fi
   limactl shell aicode -- bash -c '"'"'
     export PATH="$HOME/.pixi/bin:$PATH"
     script -e -c "
@@ -349,6 +353,10 @@ cwd = "."
 # exit on first failed command.
 cmd = """
 bash -c '
+  if [ "$(uname -s)" != Darwin ]; then
+    echo "ERROR: run on a macOS host; it dispatches guest checks to Lima" >&2
+    exit 1
+  fi
   limactl shell aicode -- bash -c '"'"'
     export PATH="$HOME/.pixi/bin:$PATH"
     # exclude test_ui_e2e.py from lima
