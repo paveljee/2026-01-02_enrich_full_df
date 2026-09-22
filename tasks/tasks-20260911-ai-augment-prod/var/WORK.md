@@ -2,575 +2,266 @@
 
 ## Status and authorization
 
-2026-09-22 CURRENT: operator requests REVIEW of architecture commit1824770 against current
-implementations and a surgical alignment sketch, NOT implementation. Latest clarification:
-review the ENTIRE diff as a connected architecture, not only the outcome record or individual
-renames. Essential protocols prescribe data transitions; extra implementation members must
-not bypass or duplicate them. The Assistant's earlier alignment proposal missed this and is
-WITHDRAWN where it preserves independent representations or offers to relax the architecture.
-No new implementation scope is approved. Only WORK changed; preserve operator staging and
-signed comments. Earlier Run/detail simplification discussion is closed by 'nvm'.
+2026-09-22: REVIEW ONLY. Operator rejects the foundation-only G1 proposal because it
+leaves compensatory representations intact. Latest request: select ONE data-model purge
+contour and argue the concrete changes from current architecture.py. No implementation
+approved. G1 is withdrawn; its patch/snippets are removed from active WORK. The combined
+two-commit inventory remains reference, not an approved implementation plan. Preserve
+operator staging/edits and signed comments. Do not restore earlier rejected broad proposals.
 
-### Architecture1824770 review — corrected whole-model interpretation; no implementation approval
+TASK reread. Comparison is 1824770^ (fe9cd31) -> a17256a, architecture.py only, treating
+1824770 and a17256a as ONE change. Operator establishes pre-change implementation as the
+working/test-passing baseline. Do not introduce unrelated repairs or reinterpret omitted
+nonessential protocol members as orders to delete concrete methods/fields. Entire combined
+diff read (356 insertions/500 deletions), current architecture already read end to end.
+No source implementation or fresh test result; only source/history reads and WORK maintenance.
 
-Read TASK/WORK in full after compaction, architecture.py end to end and the ENTIRE last-commit
-diff in bounded, untruncated sections. Also reviewed Acme protocol definitions and README;
-latest explicit operator contracts supersede historical README mechanics where they differ.
-Commit18247703127dd63e0d16c5af5b88f48f8d142035 changes only architecture
-(359insertions/484deletions). Its parent fe9cd31 independently changed RunEvent/timestamps.
-Earlier source review covered concrete records/DTOs, Store initialization/readback/operations,
-API/IPC/server and Dashboard client/storage/views. No production artifact or runtime import.
+## P37 — architecture review; commit reconstruction purge proposed, NOT APPROVED
 
-The cross-cutting constraint is a single record-based chain of authority across component
-and port representations. App Request/Response records and their connector specializations
-share the HTTP-record conversion contract. Richer representations expose/contain the actual
-preceding records; they must not independently reconstruct the same facts from latest-state
-slots, parallel DTOs, duplicated identifier bags or side-input-dependent deserialization.
-This is not simply an extra factory, decorator migration, or an outcome-ID correction.
+Abbreviations below: B=BackendComponent, A=AgentRuntimeComponent, C=ControlCentreComponent.
+The inventory describes the combined architectural diff, not proposed extra behavior.
 
-This does NOT make every class an HTTP record: secondary InnerDict/OuterDict aggregates,
-Backend runtime resources and Dashboard-local Run/events have their separately declared roles.
-It also does not require deleting every omitted method or validator. Extra accessors, cached
-views and processing helpers are legitimate only when they preserve the documented authority
-and conversions rather than create a competing path.
+### Complete combined change inventory
 
-| Whole-diff area | Required reading and present implementation gap |
-|---|---|
-| Common app-record base | All Backend request/response specializations inherit AiAugmentHttpRequestLogRecordProperty, including its keyword-only record/JSON factories and serialize. Their essential state must reconstruct through those inputs. Existing plain route records lack the shared methods; commit requires an external resolver and several route records require excluded side inputs. These are data-boundary gaps, not just mypy errors. |
-| Transport versus app records | Raw Requests capture precedes app-record construction. API/IPC process app-specific views of captured records, not independent transport DTOs passed as equivalent records. The middleware comment is an example, not an instruction to reinstall the old persistence middleware. |
-| Component and connector ownership | Backend owns internal records, lower-level session/rollout/appendwatch inputs and secondary researcher handoff. AgentRuntime.BackendPort and ControlCentre.BackendPort define connector roles extending Backend record contracts. The empty opposite ports do not authorize duplicate models; their docstrings explain the nested-Python ownership choice. Retarget moved decorators and all actual consumers, not only annotations. |
-| Attempt / AttemptRecord | Attempt IS the validation request record, inheriting its complete record contract. AttemptRecord inherits Attempt and supplies submission/ground-truth access to that same record. Existing AgentRuntimeAttempt and its separate partial DTO are not an independent source to preserve. Pre-persistence evaluation is processing data, not yet an authoritative persisted Attempt; it cannot fabricate a validation UUID. |
-| Commit / validation inputs | Commit exposes its actual pull, push and session capture; validation contains commit, verdict/submission, first-validation ancestry and provider records. Required reconstruction must follow captured inputs, not consult a later Store snapshot. Existing commit-body UUID resolver and duplicate rich commit DTO need alignment with the common record boundary. |
-| Outcome request / response | The request's identity and nullable backend_validation_record replace the bag of unrelated captured pull/push IDs. The response body carries the actual nullable Attempt. Submission ancestry therefore follows outcome -> validation -> commit -> committed pull/push. Extra convenience IDs derive from that chain; no independently assigned latest-pull field. |
-| CodexInnerDict / SingularOuterDict | CodexInnerDict is explicitly a completed outcome with its InnerDict. The ultimate researcher aggregate contains codex_innerdicts. Current CommittedInnerDict centers a separately supplied commit and the collection is still committed_innerdicts. Outcome/card data must come from the declared contained records, not another independently assembled provenance object. Renderer stays dumb. |
-| Query connector | The port request and response are now record specializations, not parameterless/payload-only DTOs masquerading as records. Its researcher collection carries the nested Backend data. Existing attempts/outerdicts/outcomes lists are assembled and joined independently; do not promise to preserve them unchanged merely as allowed extras. Any additional history/index must have a demonstrated noncompeting role, not bypass the aggregate/record contour. |
-| Dashboard Run/events/lifecycle | Run owns local orchestration identity/lifecycle/session/PID, exposes events() and refers to the Backend outcome record. Local journal facts are not Backend submission evidence. Outcome is a narrow completed/failed/cancelled value, distinct from broad lifecycle and URL syntax, with explicit conversions. Existing Run.attempts and independent outcome state must be evaluated against these roles, not automatically retained as alternate authority. |
-| Context / Store / promises | Backend Context explicitly supplies the mode-appropriate Store. Store remains the sole DB/log owner; four operations, current/initial references, request ACK/NAK and completed-result/error contracts persist. Context should expose the actual lifecycle-owned capability, not create a second Store or route around it. Full and query-only lifetimes remain distinct. |
+1. B.AiAugmentHttpRequestLogRecordProperty added with http_request_log_record, keyword-only
+   from_http_request_log_record(*, http_request_log_record), from_serialized_json(*, value:str),
+   serialize()->dict[str,object]. B.RequestRecordProperty/ResponseRecordProperty inherit it.
+2. PullResponseRecordProperty no longer specifies pull_response_body; PullRequest remains
+   empty-specific. Both still inherit their common record contracts.
+3. PushRequestRecordProperty no longer specifies pull_record_id/session_id.
+4. PushResponseRecordProperty no longer specifies commit_record/validation_record.
+5. CommitRecordProperty becomes CommitRequestRecordProperty; commit_request_body remains,
+   common interface inherited; specialized validate_commit_record/resolver-taking factory
+   no longer declared.
+6. CommitRequestBodyProperty keeps pull/push/session objects but omits validate_complete_commit,
+   validate_serialized_json, resolver-taking from_serialized_json and serialize.
+7. ValidationRecordProperty becomes ValidationRequestRecordProperty, inheriting common record
+   interface. Specialized validation_request_body/validate_record/factory declarations omitted;
+   docstring specifies lossless whole-attempt meaning and no Agent wire exposure.
+8. PostCommitValidationProperty omits validate_lifecycle; its five data properties unchanged.
+9. ValidationRequestBodyProperty omits validate_body, retargets commit/initial validation to
+   request-record names, adds body docstring; captured-input members otherwise unchanged.
+10. Backend Lifecycle omits is_post_commit_validation_stage/result; value literals unchanged.
+11. CodexRolloutRecordProperty, AppendwatchReportEncodingProperty, AppendwatchReportRecordProperty
+    move from B.AgentRuntimePort directly to B. Session/encoding references follow. Report
+    contract omits validate_canonical_base64/decoded_bytes; other members/bases unchanged.
+12. B.ControlCentrePort.CommittedInnerDictProperty becomes B.CodexInnerDictProperty; documents
+    completed outcome+InnerDict; omits independent commit_record; outcome type is C.BackendPort;
+    validator is validate_codex_innerdict. Marker base is component-property rather than
+    port-property. Text/innerdict/serialization remain.
+13. AiAugmentSingularOuterDictProperty moves from B.ControlCentrePort to B;
+    committed_innerdicts becomes codex_innerdicts typed with CodexInnerDictProperty; adds
+    ultimate augmented-card docstring; marker base becomes component-property. Other
+    data/methods unchanged.
+14. A.AttemptProperty becomes A.BackendPort.AttemptProperty, inheriting B.ValidationRequestRecordProperty
+    instead of declaring separate pull/commit/post-commit-result members.
+15. B.AgentRuntimePort.AttemptRecordProperty becomes A.BackendPort.AttemptRecordProperty and
+    inherits AttemptProperty. Keeps attempt/submission/ground_truth_innerdict. Separate nullable
+    validation_record and procedure-taking deserializer declarations disappear; common
+    conversion/serialization inherited. Added docstring explains richer view of validation.
+16. Backend QueryRequestProperty (empty client request) and QueryRequestRecordProperty give
+    way to one C.BackendPort.QueryRequestRecordProperty inheriting B.RequestRecordProperty.
+17. Backend QueryResponseProperty (attempts/researchers/outcomes body) and QueryResponseRecordProperty
+    (query_response_body accessor) give way to one C.BackendPort.QueryResponseRecordProperty:
+    inherited response-record contract plus direct researcher collection only. Custom body
+    deserializer/serializer no longer declared separately.
+18. Backend RunOutcomeRequestProperty/client and RunOutcomeRequestRecordProperty/captured-input
+    contracts give way to C.BackendPort.RunOutcomeRequestRecordProperty. Essential members:
+    namekey,session_id,backend_validation_record(nullable FULL validation),run_outcome(narrow
+    port outcome). Inherits request-record contract. No separate pull/push IDs/final session
+    capture/rollout filename; validation UUID property is replaced by full-record property.
+    Custom transport factories/validator/path narrowing no longer declared separately.
+19. RunOutcomeResponseRecordProperty belongs to C.BackendPort, inherits common response record;
+    run_outcome_request_record replaces run_outcome_request, direct attempt is added; requested
+    run_outcome stays C.LifecycleProperty. Body accessor and specialized validator/factory
+    declarations absent; common conversion applies.
+20. RunOutcomeResponseBodyProperty is absent: its independent pull/push/commit/validation/self
+    IDs, session snapshot and body serialization are not the essential outcome contract.
+21. Store query and outcome signatures use C.BackendPort request/response protocols directly;
+    current commit/current validation/initial validation use new request-record names. Pull,
+    push, current raw pull/push, four-operation shape, ACK/NAK and result tuple unchanged.
+22. Backend Context adds backend_store:FullStore|QueryOnlyStore. Its source-researcher factory,
+    collection and configured-researcher method are omitted; config/configured_namekey remain.
+23. C.BackendPort.RunOutcomePathProperty becomes RunOutcomeProperty with values
+    completed/failed/cancelled, from_url_path(Literal paths), to_url_path PROPERTY returning
+    those paths. Semantic value separated from URL representation.
+24. C.Lifecycle to_run_outcome_path/from_run_outcome_path(str) become to_run_outcome and
+    from_run_outcome(port outcome). is_run_outcome and lifecycle literals unchanged.
+25. RunEvent essential members are run_id,time,lifecycle,detail; namekey,session_id,
+    rollout_jsonl,remote_pid,accepted_commit_record_id,codex_exit_code,occurred_at omitted.
+26. Run adds essential session_id/remote_pid; events changes property->method; run_outcome/
+    attempts omitted; run_outcome_record references C.BackendPort response. Other essentials stay.
+27. B.AgentRuntimePort and B.ControlCentrePort are descriptive empty counterparts; A.BackendPort
+    is introduced. Ownership/connector docstrings explain nested-Python placement and trusted
+    Control Centre versus non-authoritative Agent Runtime.
+28. Sections/comments/formatting reorganized; unused Callable/datetime/PurePosixPath/
+    MatchingProcedure imports absent. Exception/acknowledgment protocols gain docstrings only;
+    promise behavior/signatures/result alias not changed independently of inherited record base.
 
-Consequences for the earlier proposal:
-- Withdraw preserving independent outcome ancestry alongside attempt. Correct alignment fixes
-  the reported pull mismatch structurally: the pull belongs to the contained commit, not the
-  most recent410. No attempt means no invented commit-linked ancestry. The user's earlier
-  rejection of a different local fix is not grounds to retain the bypass in this proposal.
-- Withdraw the suggestion to relax the common factory signature to preserve today's resolver.
-  Self-contained required record inputs/conversions are an implementation obligation under
-  this architecture. A helper may not secretly consult Store or accept authoritative side
-  data to evade that boundary. The exact wire/constructor changes still need a concrete
-  reviewed scope; no such implementation is authorized by this review.
-- Withdraw unconditional preservation of separate query attempt/outcome collections and
-  independent CommittedInnerDict commit state. Additional members are judged by whether they
-  derive from/preserve the declared graph, not simply whether current code uses them.
-- Do not interpret structural compatibility as sufficient: every actual producer, serializer,
-  readback, Store adapter and Dashboard consumer must follow the same transitions. No casts,
-  aliases, fabricated defaults, old-schema support or competing reconstruction path.
+### Logical groups, in implementation-review order
 
-Concrete alignment work to specify before implementation (not new approvals):
-1. Shared app-record conversion and route models, including the currently external required
-   inputs. Preserve shared HTTPv1.1 and durable-before-response/invalid-exchange capture.
-2. Actual validation-based Attempt/AttemptRecord and contained outcome model; migrate common
-   live/replay construction and consumers together. Independent speculative validation remains
-   private processing, never a persisted-record substitute.
-3. Completed-outcome CodexInnerDict and researcher/query aggregates, adapting Dashboard views
-   to consume these authoritative objects without hidden queries or card enrichment.
-4. Mode-selected Store on existing Backend Context, semantic outcome/lifecycle conversion,
-   and Run.events()/outcome-reference wiring; preserve journal and queue autonomy.
-5. Direct imports/fixtures/tests, with real lossless roundtrips and end-to-end ancestry checks,
-   not merely decorator conformance. No automatic source-wide cleanup or deletion of useful
-   implementation methods omitted from the essential protocol.
+G1 Common record-conversion foundation:1; downstream promise-bound implication from21/28.
+G2 Backend concrete records and lower-level inputs:2-11.
+G3 Validation-based Agent port views:14-15.
+G4 Single IPC record family and semantic outcomes:16-20,23-24, related21/27 ownership.
+G5 Researcher/innerdict handoff:12-13.
+G6 Runtime capability and local Run/events:22,25-26, remaining21 consumers.
+G7 Documentation/import-only bookkeeping:28 and explanatory parts of27.
 
-Specific details still requiring an exact implementation proposal, not alternative authority:
-- Commit's present serialized body only carries pull/push UUIDs; its typed body requires the
-  actual records. The common factory must work from the record itself. Rich push completion
-  and enriched attempt inputs similarly cannot remain unexplained excluded required fields.
-- Header-only outcome callers know NameKey/session/ETag, not necessarily a complete validation
-  record; the nullable port property and Backend's captured record must be wired without
-  pretending a UUID is a record or making a hidden Query. Preserve raw header checks/capture.
-- Current outcome HTTP body is not the exact persisted envelope. The Dashboard sender throws
-  it away after checking status, and Run.run_outcome_record stays None. Receipt/record identity
-  and the explicit Query contour need concrete wiring; never fabricate Backend timestamps/UUIDs.
-- CodexInnerDict's completed-only definition differs from current finalization on some
-  cancelled/partial500 outcomes. Align real materialization and validation deliberately;
-  still preserve all raw HTTP outcomes, and explicitly account for multiple commit sections.
-- validation_event currently imports the rich commit serializer from committed_innerdict,
-  which imports run_outcome_record. Adding a typed validation to outcome reveals that cycle;
-  moving only the existing commit serializer beside commit_event is the bounded candidate,
-  not permission for a package/service reorganization.
-- Return-type distinction: port request.run_outcome is narrow RunOutcome; Backend response's
-  run_outcome is ControlCentre Lifecycle. Follow the explicit conversion rather than replace
-  both blindly with one enum. Run.events is a method, not a public tuple field.
+Groups express dependencies, not permission to implement them. Omitted essentials may remain
+as useful concrete members; they must not bypass/duplicate declared authoritative transitions.
 
-Independent current defect from fe9cd31: RunEvent class/decorator/fields were removed but
-imports/construction/annotations remain; occurred_at landed on Run, which lacks its timestamp
-field. A separate surgical repair would restore RunEvent/occurred_at while preserving the
-human-signed Run.datetime_to_unix_usec and the user's new timezone callpoints. Architecture
-still declares RunEvent, so do not treat that missing class as permission to remove the journal.
-No source correction has been made or approved in this review.
+### Selected purge contour — self-contained commit reconstruction; REVIEW ONLY
 
-Verification retained from this review: architecture-only Ruff/strict mypy PASS. Whole configured
-detour mypy reports92errors in23files (56checked), including prior timestamp defects and
-cascades from stale protocol paths. Not92independent architecture defects. No runtime tests,
-production model imports, network/browser/storage operations, or fresh operator readiness claim.
-Earlier green implementation evidence predates these user commits. Current diff is WORK only;
-Git/index remains untouched. The withdrawn partial proposal/snippets are not pending scope.
+Operator asks for one concrete model-file purge argued from the current architecture.
+Selected commit_event.py plus its DIRECT representation consumers, not a common-superclass
+rollout or a full outcome/Attempt/Dashboard redesign. No implementation authorization inferred.
+Test code can be omitted from review snippets but remains required during any implementation.
 
-## P37 — PROPOSED, NOT APPROVED: complete architecture1824770 alignment
+Architectural reason: CommitRequestRecordProperty inherits the common factory accepting ONLY
+http_request_log_record; its commit_request_body exposes actual pull_record/push_record/session.
+Current commit HTTP body serializes only pull/push UUIDs; its factory needs resolve_http_record.
+Therefore those bytes cannot independently reconstruct the declared object. A signature rename
+cannot fix the missing information. Proposed concrete current-format change: commit request_body
+contains the full existing CommitRequestBody's typed pull/push/session data, not UUID substitutes.
+This changes the commit-body format, not shared HTTP-log v1.1 or synthetic null response fields.
+README162 still specifies UUID-only commit body; it must be explicitly aligned if this scope
+is approved. No old parser, fallback or migration. Exact serialized session spelling must be
+pinned in the eventual patch; do not silently change the distinct outcome snapshot codec.
 
-Latest operator asks for ONE complete, implementable proposal, including internal architecture
-and README tensions; approval must not leave follow-up design decisions. No implementation
-is authorized yet. This proposal supersedes the earlier withdrawn partial alignment sketch.
-Approval would include the precise protocol/payload/behavior changes below, not merely renames.
+Purge:
+- _CommitRequestBodyJson's separate ID-only representation; its validation-only pass and
+  resolver-taking deserializer/serializer round trip. Keep CommitRequestBody and its actual
+  completeness validation; standard model serialization can carry the already typed inputs.
+- BackendCommitRecord.commit_request_body Field(exclude=True) as an independently supplied
+  second copy. Make it a derived typed property parsed from request_body. Existing envelope
+  validator additionally validates that body; remove only the equality check whose purpose
+  was comparing two independently supplied copies and its temporary UUID->record resolver.
+- Remove required resolve_http_record from record reconstruction; implement exact keyword-only
+  factory/common conversion signatures under BackendComponent.CommitRequestRecordProperty.
+- Delete _BackendCommitRecordJson in committed_innerdict.py (http_record plus independent
+  pull/push/session copies). In committed_innerdict/query_response/validation_event codecs,
+  carry the self-contained commit record directly and remove from_commit_record/to_commit_record
+  wrapping. Do NOT redesign the remaining outer codecs or AgentRuntimeAttempt in this contour.
+- _commit_request_body in api.py has NO caller anywhere in active detour Python; delete it.
+  _backend_commit_record currently supplies a Store resolver; replace its callers with the
+  single authoritative model factory, retaining necessary ReplayInputMissing/_PushValidationError
+  translation at actual replay boundaries. No compatibility alias or duplicate reconstruction path.
+- _synthetic_commit_record no longer passes commit_request_body separately: the serialized
+  request_body is sufficient. Update direct constructors/factories/annotations and test fixtures.
 
-### Decisions resolving the tensions
+Preserve:
+- CodexSessionRecord, rollout summary, appendwatch canonical-base64 validation/decoded_bytes,
+  lifecycle stage/result helpers: these still have semantic consumers despite omission from
+  essential protocols. _CodexSessionRecordJson is also used by outcome serialization; do not
+  delete/change it globally merely because commit no longer needs a parallel ID-only codec.
+- Synthetic commit method/path/headers/null-response contract, actual UUIDs, full pull/push
+  exchanges, snapshot/CAS capture, append/fsync/project/readback, ACK202 timing and retry rules.
+- Store-owned persisted-input verification. _validate_projected_commit already loads _pull/_push
+  and checks ordinal/routes/status. With embedded inputs, ALSO compare the embedded envelopes
+  to those DB-readback records. Previously equality was implicit because the resolver supplied
+  the DB objects. Removing resolution must not remove that guarantee. DB reads verify already
+  reconstructed objects; they no longer provide otherwise missing construction data.
+- Full tests remain implementation work: offline reconstruction/JSON equality, rejection of
+  malformed body, real log/DB equality/order checks for tampered embedded pull/push, unchanged
+  grouped durability/replay and dependent validation/query/innerdict round trips.
 
-1. Common record reconstruction must need only its captured envelope. Commit body will embed
-   full pull/push records. Accepted push will record its captured pull/session in its actual202
-   response headers. Derived model properties replace excluded independently supplied fields.
-2. Header-only outcome callers cannot supply a full validation record. In BOTH Backend and
-   ControlCentre-port outcome request contracts replace backend_validation_record with
-   validation_record_id: UUID | None, parsed from ETag. Backend resolves it against its actual
-   Store record; the response contains that full record. No request-body change, extra pull,
-   hidden Query or fabricated validation. This is an explicit architecture correction.
-3. AttemptRecord cannot recover DOCX ground truth from the initial pull (which omits it).
-   Capture ground_truth_innerdict as required nullable JSON data in ValidationRequestBody;
-   reconstruct with the existing DocxMatchProcedure. No source-DB/procedure argument in factories.
-4. Query's port record is a view of the SAME query envelope, not a record nested in its own
-   response body. Keep existing protocol return type; document that interpretation. Backend
-   QueryResponseRecord.query_response_body returns ControlCentreQueryResponseRecord from the
-   identical envelope. Only the researcher collection is in the wire payload.
-5. Preserve rejected/unsealed/manual Backend history without independent Attempt DTOs: each
-   researcher aggregate additionally contains validation_records and run_outcome_records,
-   comprised of the actual typed HTTP records. Add those essential properties to architecture.
-   They are histories of real events, not independent summaries. CodexInnerDict's contained
-   outcome and its attempt must exactly equal the same UUID's historical records.
-6. CodexInnerDict explicitly means successful completed output: materialize ONLY completed200
-   and ONLY the commit in outcome.body.attempt. No session-wide finalization of other accepted
-   commits, cancelled/failed/400/409/500 materialization, or rewriting previously finalized rows.
-   Preserve all raw records and pending derived rows. Multiple completed runs still produce
-   multiple cards; one outcome does not claim unrelated commits from the same session.
-7. Retain the fresh end-of-session rollout/appendwatch capture as codex_session_record in the
-   outcome body. It describes a DIFFERENT observation from the commit-time session snapshot,
-   not redundant submission ancestry. Keep capture failure500 and all existing durable error
-   exchanges. Outcome path is requested classification, not evidence HTTP200 was returned.
+Current compensating layout verified in source:
+  commit_event.py225: _CommitRequestBodyJson(pull_record_id,push_record_id,session codec)
+  commit_event.py243: CommitRequestBody(actual pull,push,session)
+  commit_event.py308: BackendCommitRecord(raw request_body + required excluded typed body)
+  committed_innerdict.py49: _BackendCommitRecordJson(raw commit + pull,push,session copies)
+  validation_event.py56/query_response.py52/committed_innerdict.py78 use that extra wrapper.
 
-Changes1/2/3/5/6 are deliberate wire/protocol/domain changes, not claimed to be mechanical
-renames. Shared HTTPv1.1 is unchanged, but application bodies/query storage change. No old
-payload parser, alias, migration, automatic reset or data edit. Existing incompatible replay/
-NiceGUI payloads must fail clearly; never silently reinterpret or delete operator data.
+Initial outcome trace was useful but not selected for implementation: RunOutcomeResponseBody's
+independent ancestry IDs are candidates for the subsequent record-chain purge, but its final
+codex_session_record is FRESH rollout/report evidence and is not the commit snapshot. It must
+not be deleted as supposedly duplicate data merely because the new essential protocol omits it.
+Outcome request full-validation vs current empty-body/ETag transport also needs a concrete later
+proposal; no implicit permission for wire changes from this commit-focused discussion.
 
-### 1. Common record implementation and contained commit/validation
+Review only: complete commit/outcome modules and direct API/Store/IPC/codec consumers read;
+no production/test/task/index edits or runtime tests. G1 proposal artifact is removed because
+it is withdrawn; historical syntax/style/applicability checks do not establish implementation.
+Await review of this contour, then an exact patch if requested; no claim this section is an
+approved executable snippet set or that all architecture differences are resolved.
 
-New small backend/helpers/data_models/ai_augment_http_request_log_record.py:
+### Commit serialization ownership — proposal refinement, NOT APPROVED
 
-```python
-@implements[BackendComponent.AiAugmentHttpRequestLogRecordProperty]()
-class AiAugmentHttpRequestLogRecord(HttpRequestLogRecord):
-    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
-    record_id: UUID = Field()
+Latest operator asks how ALL serialization/deserialization is owned by model methods in the
+selected commit contour. Proposed ownership:
+1. CommitRequestBody keeps its three existing typed fields and completeness validator. Remove
+   _CommitRequestBodyJson, ID-only serialize mapping, resolver-taking decoder and _serialize
+   @model_serializer. from_serialized_json(*, value) calls cls.model_validate_json(value);
+   serialize() calls model_dump(mode="json"). Inherited model_dump_json emits the JSON string
+   needed by the HTTP request_body. Do not decorate the model_dump-backed serialize method:
+   that would recurse. Nested HTTP/session/rollout/report models own their own serialization.
+2. BackendCommitRecord implements the new CommitRequestRecordProperty. Raw request_body is
+   authoritative; commit_request_body becomes a property calling the body model's decoder.
+   from_http_request_log_record(*, http_request_log_record) delegates to from_serialized_json
+   with the shared record's model_dump_json; from_serialized_json(*, value) runs its own
+   model_validate_json. Existing after-validator retains envelope checks and validates the
+   derived body, without the removed independently supplied body's equality/resolver check.
+   serialize() is existing HTTP envelope model_dump(mode="json"); http_request_log_record
+   returns self. No derived-body @computed_field, excluded input, external resolver or DB I/O.
+3. Live producer serializes CommitRequestBody with its model_dump_json; supplies that string
+   to the existing synthetic envelope constructor and NO commit_request_body argument.
+   This does not require a new creator service or extra factory. Raw external capture and
+   header selection remain in their existing producer; data encoding belongs to models.
+4. Direct consumers of _BackendCommitRecordJson instead use BackendCommitRecord typed fields;
+   their enclosing models serialize/validate those nested records using the record's actual
+   Pydantic schema/validators. No separate DTO reconstructs missing record contents. All named
+   factory callpoints use the exact keyword-only signature; malformed data is not defaulted.
 
-    @property
-    def http_request_log_record(self) -> HttpRequestLogRecord:
-        return self
-
-    @classmethod
-    def from_http_request_log_record(
-        cls, *, http_request_log_record: HttpRequestLogRecord,
-    ) -> Self:
-        return cls.model_validate_json(http_request_log_record.model_dump_json())
-
-    @classmethod
-    def from_serialized_json(cls, *, value: str) -> Self:
-        return cls.model_validate_json(value)
-
-    def serialize(self) -> dict[str, object]:
-        return self.model_dump(mode="json")
-```
-
-Preserve shared conversion methods; detour validators continue requiring v1.1/UUIDv7.
-Require record_id when rehydrating; existing creation sites explicitly supply uuid7 exactly
-once. No model_construct, cast, model_dump dictionary override or unknown-field relaxation.
-All app records inherit this base and their specific @implements. Rename protocol references
-CommitRecordProperty -> CommitRequestRecordProperty, ValidationRecordProperty ->
-ValidationRequestRecordProperty. Concrete BackendCommitRecord/BackendValidationRecord names stay.
-Retarget moved rollout/report decorators; preserve their actual validation methods.
-
-CommitRequestBody retains these three typed fields, but SERIALIZES full pull/push envelopes:
-
-```python
-class CommitRequestBody(FrozenStrictModel):
-    pull_record: HttpRequestLogRecord
-    push_record: HttpRequestLogRecord
-    codex_session_record: CodexSessionRecord
-```
-
-Retain existing codex_session_id wire spelling through _CodexSessionRecordJson. Change
-_CommitRequestBodyJson accordingly; remove resolve_http_record from both factories and all
-callers. BackendCommitRecord.commit_request_body becomes a cached parsed property of
-request_body, not an excluded constructor field. Route/body validators remain. Store checks
-embedded records against earlier DB envelopes and ordinal order; self-containment does not
-replace persistence verification. Delete _BackendCommitRecordJson sidecar and its imports;
-validation/innerdict no longer need that duplicate rich commit serialization helper/cycle.
-
-```python
-@implements[BackendComponent.ValidationRequestBodyProperty]()
-class ValidationRequestBody(FrozenStrictModel):
-    commit_record: BackendCommitRecord
-    post_commit_validation: PostCommitValidation
-    initial_validation_record: BackendValidationRecord | None
-    openalex_ror_records: tuple[HttpRequestLogRecord, ...] = ()
-    ground_truth_innerdict: dict[str, JsonValue] | None
-```
-
-Update its protocol with the last property's Mapping[str, JsonValue] | None type. Stored value
-is complete InnerDict.data, not an external procedure or a new ground-truth source. Keep initial
-None root, same-session initial link, provider order and exact recorded inputs. Validation body
-serializes commit/initial/provider records as their full envelopes. BackendValidationRecord's
-body is likewise derived from request_body, not separately supplied. Add validation conformance
-and the AgentRuntime.BackendPort.AttemptProperty role to that actual model.
-
-Move only AgentRuntimeAttemptRecord from query_response.py to validation_event.py, with the
-existing submission/model-interceptor imports it needs. Delete AgentRuntimeAttempt and the
-independent _AgentRuntimeAttemptJson/_AgentRuntimeAttemptRecordJson shapes.
+Core proposed method shapes (existing class fields/validators otherwise as described):
 
 ```python
-@implements[AgentRuntimeComponent.BackendPort.AttemptRecordProperty]()
-class AgentRuntimeAttemptRecord(BackendValidationRecord):
-    @property
-    def attempt(self) -> BackendValidationRecord:
-        return self
+# CommitRequestBody; remove its custom @model_serializer and ID-only codec.
+@classmethod
+def from_serialized_json(cls, *, value: str) -> Self:
+    return cls.model_validate_json(value)
 
-    @cached_property
-    def submission(self) -> Submission | StandardizedSubmission | None:
-        body = self.validation_request_body
-        result = body.post_commit_validation
-        if result.submission is None:
-            return None
-        model = (
-            StandardizedSubmission
-            if result.submission_type == STANDARDIZED_SUBMISSION_TYPE
-            else Submission
-        )
-        return model.model_validate_with_http_records(
-            json.dumps(result.submission),
-            http=ModelHttpInterceptor.from_records(body.openalex_ror_records),
-        )
+def serialize(self) -> dict[str, object]:
+    return self.model_dump(mode="json")
 
-    @cached_property
-    def ground_truth_innerdict(self) -> InnerDict | None:
-        data = self.validation_request_body.ground_truth_innerdict
-        return None if data is None else InnerDict.from_mapping(data, DocxMatchProcedure())
-```
-
-PostCommitValidation already validates discriminator/payload presence; preserve it. This
-record serializes only its inherited HTTP envelope. Convenience commit/verdict/provider access
-must derive from its validation body. No query/DB/CAS/network lookup during reconstruction.
-Provider validation remains through the existing offline interceptor, pasted models untouched.
-
-Private pre-record processing gets ONE _ValidationEvaluation(FrozenStrictModel) with fields
-post_commit_validation: PostCommitValidation, ground_truth_innerdict: InnerDict | None,
-commit_database: bool. It is not an Attempt or HTTP record. Existing validation algorithms
-return it; Store builds/fsyncs/applies /validate, compares recorded verdict/submission/providers/
-ground-truth data during replay, then reconstructs AgentRuntimeAttemptRecord from DB.
-Retain the existing attempts table as an index keyed by commit ID, but its payload is now the
-actual validation HTTP envelope, not a parallel DTO. Raw/evidence/retry tables stay. Update
-its direct SQL JSON paths/readback and equality checks. No fake persisted object in speculation.
-
-### 2. Pull/push and promise wiring
-
-PullRequestRecord/PullResponseRecord/PushRequestRecord/PushResponseRecord inherit the base.
-Remove required excluded push linkage/result fields. Accepted push's exact captured linkage
-becomes part of its existing public202 exchange, selected in the existing _push_response branch:
-
-```python
-# Existing protected Backend vars; reuse SESSION_ID_HEADER and LOCATION_HEADER.
-PULL_RECORD_ID_HEADER: Final = "Pull-Record-ID"
-
-# Existing accepted branch; pull/session already checked under workflow lock:
-headers={
-    LOCATION_HEADER: PULL_PATH,
-    PULL_RECORD_ID_HEADER: str(pull.record_id),
-    SESSION_ID_HEADER: str(BACKEND_SESSION_ID),
-}
-```
-
-No body/status/Location/ETag change: ETag remains410-only. Nonaccepted responses unchanged.
-PushRequestRecord's pull_record_id/session_id become parsed nullable properties of these
-response headers, not input fields; Store requires them for accepted processing AFTER durable
-capture. This preserves the acceptance-time values across later503/rejected-push interleaving.
-Commit still embeds exactly that DB-readback pull/push and captured session, never latest state.
-
-PushResponseRecord is only the persisted push exchange. API finish_push receives the existing
-full Store reference as well as the promise; after successful completion it reads/converts
-Store.current_validation_record and requires its embedded push UUID to equal response.record_id.
-Then update_pull_state consumes that validation. No duplicate completion DTO, added Store op,
-extra request or waiting for validation before202. Nonaccepted push returns its normal response.
-Promise generic bound/decorator changes to AiAugmentHttpRequestLogRecord (structurally satisfies
-ResponseRecordProperty); preserve the human-signed Annotated result alias and all ACK/NAK,
-shielding, error tuple, group rollback, response gating and fatal completion behavior.
-
-### 3. Outcome request, body, application and innerdict
-
-Architecture amendment (existing component bases retained):
-
-```python
-# BackendComponent.RunOutcomeRequestRecordProperty:
+# BackendCommitRecord; replace the excluded commit_request_body field.
 @property
-def validation_record_id(self) -> UUID | None: ...
-# Replaces backend_validation_record; namekey/session_id remain.
-
-# ControlCentreComponent.BackendPort:
-class RunOutcomeRequestRecordProperty(
-    BackendComponent.RunOutcomeRequestRecordProperty,
-    ComponentProtocol.PortProtocol.PropertyProtocol,
-    Protocol,
-):
-    @property
-    def run_outcome(self) -> ControlCentreComponent.BackendPort.RunOutcomeProperty: ...
-```
-
-Rename concrete Dashboard RunOutcomeRequest -> RunOutcomeRequestRecord in its existing module;
-make it inherit the common record base and implement the port specialization. Remove duplicate
-captured RunOutcomeRequestRecord from request_response_records.py. Identity/outcome/ETag
-properties derive from headers/path. Missing/malformed identity stays nullable for persistence
-and400 selection; header-only empty-body transport stays unchanged. No old class alias.
-
-```python
-@implements[BackendComponent.RunOutcomeResponseBodyProperty]()
-class RunOutcomeResponseBody(FrozenStrictModel):
-    attempt: BackendValidationRecord | None
-    codex_session_record: CodexSessionRecord
-```
-
-Serialize the actual validation envelope plus the distinct final capture, retaining existing
-Codex-session wire spelling. Remove all independently stored pull/push/commit/validation/self
-IDs from this body. Any convenience ID derives through attempt or the enclosing outcome record.
-RunOutcomeResponseRecord's request/body are derived from the envelope; its run_outcome remains
-RunLifecycle.from_run_outcome(request.run_outcome), as architecture specifies. It denotes the
-requested terminal classification even for400/409/500, never success by itself.
-
-Move ONLY existing IPC snapshot capture/configuration helpers into API's existing capture
-helpers, returning private _RunOutcomeSnapshot(codex_session_record, rollout_filename) plus
-existing failures. Store.run_outcome orchestrates capture before response construction; IPC
-passes only the real request record. Persist fresh snapshot in the response body/SourceKey,
-not excluded request state. Preserve detailed logs, partial500, required identity, ETag checks,
-completed/failed409 rules and cancellation. Responses400/409/500 still fsync/project/history;
-response-persistence errors still yield (None, exc). No duplicate request persistence.
-
-Only this materialization gate and exact linked-row selection replace session-wide finalization:
-
-```python
-if (
-    outcome.run_outcome_request.run_outcome is not RunOutcome.COMPLETED
-    or outcome.response_code != HTTPStatus.OK
-):
-    return
-validation = outcome.run_outcome_response_body.attempt
-if validation is None:
-    raise ReplayInputMissing(Locale.RUN_OUTCOME_VALIDATION_COMMIT_REQUIRED)
-commit = validation.validation_request_body.commit_record
-```
-
-Require accepted verdict, exact persisted embedded records, NameKey/session/ETag and ordinal
-consistency. Update only this commit's pending output row in the SAME outcome transaction;
-preserve finalized rows. No commit search by session/latest pull. Both live and replay use it.
-Typed invalid-record construction must not move domain gating ahead of raw append/fsync.
-
-Rename committed_innerdict.py -> codex_innerdict.py and CommittedInnerDict -> CodexInnerDict;
-rename validator/collection/direct DTO/import/test callers. The wrapper stores ONLY innerdict;
-run_outcome_response_record parses its existing ktp.ai_augment_run_outcome_response_record.
-Derived commit_record may remain a convenience getter via outcome.attempt, never constructor
-state. Serialized wrapper contains only innerdict data. Validate completed200, accepted attempt,
-NameKey/session/source-key correspondence (innerdict SourceKey is COMMIT-time, not the fresh
-outcome snapshot), and session summary. Card/DOCX/TXT stays pure rendering, unchanged layout.
-
-### 4. Researcher aggregate, query and Dashboard data
-
-Add the following required histories alongside renamed codex_innerdicts in concrete/DTO and
-Backend.AiAugmentSingularOuterDictProperty (corresponding protocol types):
-
-```python
-codex_innerdicts: tuple[CodexInnerDict, ...]
-validation_records: tuple[BackendValidationRecord, ...]
-run_outcome_records: tuple[RunOutcomeResponseRecord, ...]
-```
-
-Initial source researchers explicitly have empty tuples. Store query populates all three
-from DB-readback actual records, ordered by append ordinal, without mutating source researcher
-objects. No parallel top-level attempts/outcomes query collections. Rejected/unsealed validation
-history and named manual failed/cancelled outcomes remain available. Outcome records whose
-NameKey is malformed/unknown remain in raw DB/log history, not assigned to an invented researcher;
-query is the whole researcher collection, not a raw-log export. Invalid400/409 records never
-constitute completion. This attribution boundary is explicit, not swallowed corruption.
-Validate unique IDs, matching researcher identity, exact equality of nested/historical same-UUID
-records and every card's completed outcome/attempt. Store validates DB references/order; no
-Dashboard replay/projection. Local derived indexes are permitted and reference these objects.
-
-Private _QueryResponseJson retains ONLY ai_augment_singular_outerdicts with existing source
-InnerDict DTO conversion. It is a wire-body codec, not another authoritative record model.
-Replace old QueryResponse with ControlCentreQueryResponseRecord in query_response.py:
-
-```python
-@implements[ControlCentreComponent.BackendPort.QueryResponseRecordProperty]()
-class ControlCentreQueryResponseRecord(AiAugmentHttpRequestLogRecord):
-    @cached_property
-    def ai_augment_singular_outerdicts(self) -> tuple[AiAugmentSingularOuterDict, ...]:
-        if self.response_body is None:
-            raise ValueError(Locale.QUERY_RESPONSE_BODY_MISSING)
-        payload = _QueryResponseJson.model_validate_json(self.response_body)
-        return tuple(
-            AiAugmentSingularOuterDict.from_serialized(item.model_dump(mode="json"))
-            for item in payload.ai_augment_singular_outerdicts
-        )
-
-# Existing Backend QueryResponseRecord inherits the common base:
-@cached_property
-def query_response_body(self) -> ControlCentreQueryResponseRecord:
-    return ControlCentreQueryResponseRecord.from_http_request_log_record(
-        http_request_log_record=self.http_request_log_record,
-    )
-```
-
-Both views preserve identical envelope identity/fields; validators eagerly validate payload.
-No recursive HTTP envelope in JSON body. Existing factory constructs response from request and
-serialized researcher payload, preserving timestamp validation and read-only/unlogged query.
-QueryRequestRecord implements Backend and port query roles; replace parameterless QueryRequest
-wrapper/callers with QueryRequestRecord.create(), constructing one valid parameterless request
-envelope with explicit UUID/timestamp. Keep /query path authority in existing protected IPC.
-
-Backend client still sends exactly GET/query. It captures its actual response as an unlogged
-local HTTP envelope and converts to ControlCentreQueryResponseRecord; that local query capture
-is NOT claimed to be a persisted Backend record. Contained validation/outcome UUIDs/envelopes
-are the unchanged authoritative Backend records. Store this complete query view wholesale in
-the existing NiceGUI slot after the existing owned-child clean-stop check. No startup/automatic/
-filtered query and no new receipt headers/endpoints.
-
-DashboardQuerySnapshot derives histories/maps from each researcher's records. _RunCommitView
-gets its validation and corresponding card/outcome through explicit UUID containment, never a
-session-wide outcome presented as that commit's provenance. Session IDs still join the separate
-local Run to Backend history. Preserve table columns/actions/ordering, journal and export flow.
-On explicit query replacement, and on loading that saved snapshot, bind each Run's nullable
-run_outcome_record to the latest actual exchange for its exact NameKey/session. Keep400/409
-recognizable as rejected responses; do not use it to reclassify the Dashboard run. Before a
-matching query it remains None. This deliberately preserves query-owned Backend display data:
-the existing outcome sender still consumes status/body without inventing Backend envelope UUIDs
-or timestamps or enriching researcher data during Backend start/stop.
-
-### 5. Context, lifecycle and local Run
-
-Bind the actual opened mode-selected capability to the existing Context during its existing
-initialization context, clear on EVERY exit; no extra owner/resource or arbitrary_types_allowed:
-
-```python
-_backend_store: (
-    BackendComponent.FullStoreProperty | BackendComponent.QueryOnlyStoreProperty | None
-) = PrivateAttr(default=None)
+def commit_request_body(self) -> CommitRequestBody:
+    if self.request_body is None:
+        raise ValueError(Locale.COMMIT_REQUEST_BODY_MISSING)
+    return CommitRequestBody.from_serialized_json(value=self.request_body)
 
 @property
-def backend_store(self) -> (
-    BackendComponent.FullStoreProperty | BackendComponent.QueryOnlyStoreProperty
-):
-    if self._backend_store is None:
-        raise BackendStoreException(Locale.STORE_RUNTIME_UNAVAILABLE)
-    return self._backend_store
+def http_request_log_record(self) -> HttpRequestLogRecord:
+    return self
+
+@classmethod
+def from_http_request_log_record(
+    cls, *, http_request_log_record: HttpRequestLogRecord,
+) -> Self:
+    return cls.from_serialized_json(value=http_request_log_record.model_dump_json())
+
+@classmethod
+def from_serialized_json(cls, *, value: str) -> Self:
+    return cls.model_validate_json(value)
+
+def serialize(self) -> dict[str, object]:
+    return self.model_dump(mode="json")
 ```
 
-Use a private context binding contextmanager with an already-bound guard and finally-clear.
-Bind after actual Store opening, encompassing service work/drain/close; do not expose an engine
-through the query-only wrapper. Server obtains the same capability from runtime rather than
-maintaining app.state.store as another source. At full-mode composition use a real concrete
-isinstance check to narrow capability, no cast or duck-typed method probing. Existing typed
-initialize_backend_store overloads remain. Source researcher factory is a legitimate source
-input, not an alternate augmented snapshot; retain it. Startup flags/prompts/hash/permissions,
-process lock, transport admission, signals/drain and clean-close token remain unchanged.
+Locale.COMMIT_REQUEST_BODY_MISSING is a proposed existing-Backend-Locale constant with the
+current exact message "commit request body is missing" (not an existing constant claimed
+available). Keep existing commit-envelope/completeness errors, centralized there if touched.
+The existing envelope after-validator MUST parse/validate the derived body on construction;
+lazy getter validation alone would be insufficient. Only the two-copy comparison disappears.
 
-Implement RunOutcome semantic enum exactly completed/failed/cancelled, from_url_path and
-property to_url_path with existing route strings. Remove RunOutcomePath and its old conversion
-methods; use existing constants sourced from the new enum's paths. RunLifecycle explicitly
-converts to/from RunOutcome, raising for nonterminal values. Update all direct SQL routes,
-client/server and tests; response.run_outcome remains the broad lifecycle type as specified.
-
-Restore the actual RunEvent class/occurred_at from before the timestamp commit, retaining all
-used event fields and its existing frozen explicit ConfigDict. Keep the human-signed
-Run.datetime_to_unix_usec and current configured-timezone callpoints; fix their direct stale tests.
-Do not fold a journal redesign or other unused-field pruning into this repair.
-
-Run.events becomes a method over private retained event references; remove the unused attempts
-field and independently assigned run_outcome field. Derive terminal outcome from the journal,
-preserving the existing behavior across a later nonterminal event:
-
-```python
-_events: tuple[RunEvent, ...] = PrivateAttr(default=())
-
-def events(self) -> tuple[RunEvent, ...]:
-    return self._events
-
-@property
-def run_outcome(self) -> RunOutcome | None:
-    for event in reversed(self._events):
-        if event.lifecycle.is_run_outcome():
-            return event.lifecycle.to_run_outcome()
-    return None
-```
-
-Reducer appends through a small private Run method and no longer assigns run_outcome; its
-other field updates stay. Adapt terminal comparisons to RunOutcome enum. Run.run_outcome_record
-is the actual nullable queried record reference, not a separately constructed result. Local
-journal remains the only persistence of orchestration events, query slot independent.
-
-### 6. Complete boundaries, documentation and verification
-
-Files: protected architecture/Backend vars/Locale and IPC; Backend api/server/Store/context,
-commit/validation/query/request-response/outcome/promise/researcher/innerdict models; Dashboard
-run_outcome/query_request/run_event/storage/snapshot and ui.py DIRECT record/view callpoints.
-New module only common app-record base; move existing attempt model beside validation; rename
-existing innerdict module. Delete obsolete QueryRequest module if empty. No package/service
-reorganization, controller query capability, queue/probe/export/layout redesign or task change.
-
-All added/changed user-facing diagnostics belong in existing Locale; use existing constants,
-ContentType, HTTPStatus and enum comparisons. Downstream @implements covers every new/moved
-protocol, promise specialization included. No casts/type suppressions/new arbitrary-type config,
-old aliases, parser fallbacks, model_construct or model_dump merges. Pasted/shared models,
-main pipeline/other detours, sample_deploy, appendwatch/CAS implementations, dependencies and
-ordinary Pixi tasks stay untouched. Preserve signed comments/operator index and changes.
-
-Explicit README edit scope: update only conflicting lifecycle/record paragraphs to this
-contract and already-approved surrounding behavior: Store ownership and strict startup/explicit
-replay instead of catch-up; Dashboard NiceGUI/query source and stopped queue; post-exit single
-pull/outcome and external orphan treatment; full embedded commit/validation bodies; accepted202
-linkage headers; required outcome identity/ETag, contained attempt plus distinct final snapshot,
-400/409/500 persistence and completed-only linked materialization; wholesale query histories;
-410 as response history, not a materialization trigger. Remove the superseded literal wire
-examples in favor of exact current shapes. Preserve human-signed/retired comments and unrelated
-provisioning/security/agent-autonomy text. Architecture docstrings clarify record-view versus
-wire body, validation not sent to Agent, requested outcome versus HTTP success, and scope of
-self-containment (CAS bytes still referenced by hash, not embedded).
-
-Completion checks, all included rather than deferred design/test work:
-- Architecture/import smoke, all downstream @implements and strict configured mypy/Ruff.
-- Every concrete record: full envelope -> typed -> JSON -> typed equality, including inherited
-  factories; exact captured identities/bodies, missing record IDs rejected. No resource/network
-  access needed for reconstruction; submission validation uses recorded provider inputs.
-- Real Store/log/DB live/replay equality: initial/retry validation, provider and ground-truth
-  capture, response403/400/409/500 history where applicable, fsync/projection failures, grouped
-  rollback/interleaved503 and rejected pushes, early202/client cancellation, orphan groups.
-- Accepted202 actual headers and later state changes preserve commit's selected pull/session;
-  outcome's pull is exactly its nested commit's pull even after repeated410/rejected pushes.
-- Completed200 materializes only its linked accepted attempt; other paths/statuses materialize
-  nothing, multiple successful outcomes preserved, finalized IDs never rewritten. Tampered
-  nested record, provider, initial, ground truth and wrong NameKey/session/ETag fail correctly.
-- Real wholesale query/storage roundtrip preserves source population and rejected/unsealed/
-  named manual histories, pure card/DOCX/TXT content, query-only capability, read-only resources,
-  local Run/events/terminal behavior and record binding only on explicit query/storage load.
-- Adapt existing real synthetic fixture and actual operator artifact/card validators, not just
-  model tests. Existing P31 latest-pull assertions become exact contained-attempt ancestry
-  assertions; multi-commit materialization matrix explicitly tests the newly approved rule.
-- Full locally feasible ordinary/preflight/startup/operator-command-graph leaves; retain explicit
-  browser/socket/provider/root/resource constraints and existing intentional skips, not new
-  masking. If needed prepare only affected real macOS Chrome/Unix IPC checks in Assistant-owned
-  elevate after local checks. No full acceptance claim until actual operator results; no new
-  task routing/timeouts/prerequisite substitution or tests triggering elevate.
-
-This is a single proposed end-to-end implementation scope. No follow-up design phase is reserved.
-No source implementation or new testing pass is claimed; this review used source/history reads.
+Proposed new commit body uses actual field names pull_record/push_record/codex_session_record;
+nested CodexSessionRecord therefore uses session_id under normal model serialization. This
+explicitly resolves the earlier unpinned session spelling for the NEW commit body. Existing
+outcome body's codex_session_id codec remains untouched pending its own proposal. No alias,
+legacy decoder, shared HTTP-log schema change, new transport or renamed lower-level fields.
+The operator has not approved this commit-body schema or implementation yet. WORK records a
+reviewable method-ownership proposal, not a completed or authorized patch. No source changes.
 
 ### Historical completion status before operator architecture/timestamp edits
 
