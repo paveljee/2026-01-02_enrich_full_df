@@ -124,9 +124,16 @@ class BackendComponent(
             self,
         ) -> BackendComponent.ResponseRecordPromiseResultProperty[R]: ...
 
-    # =======================================
-    # Request and Response Record properties
-    # =======================================
+    # =================================================================
+    # FastAPI and internal Request and Response Record properties.
+    # IPC Request and Response Record properties are owned by the
+    # Control Centre component for clearer separation of concerns.
+    # FastAPI properties are not owned by the Agent Runtime component,
+    # however, to highlight the lack of authority imposed on the
+    # Agent Runtime component – unlike the Control Centre that can
+    # comfortably host load-bearing properties because it basically
+    # functions as a mere extension of the Human Operator's authority.
+    # =================================================================
 
     class PullRequestRecordProperty(RequestRecordProperty, Protocol): ...
 
@@ -149,46 +156,6 @@ class BackendComponent(
         content to `POST /push`. Not a part of the Agent
         Runtime - Backend connector because it is never
         exposed to the Agent Runtime."""
-
-    class RunOutcomeRequestRecordProperty(RequestRecordProperty, Protocol):
-        @property
-        def namekey(self) -> NameKey | None: ...
-
-        @property
-        def session_id(self) -> UUID | None: ...
-
-        @property
-        def backend_validation_record(self) -> (
-            BackendComponent.ValidationRequestRecordProperty | None
-        ): ...
-
-    class RunOutcomeResponseRecordProperty(
-        ResponseRecordProperty,
-        Protocol,
-    ):
-        @property
-        def run_outcome_request(
-            self,
-        ) -> ControlCentreComponent.BackendPort.RunOutcomeRequestRecordProperty: ...
-
-        @property
-        def run_outcome_response_body(
-            self,
-        ) -> BackendComponent.RunOutcomeResponseBodyProperty: ...
-
-        @property
-        def run_outcome(
-            self,
-        ) -> ControlCentreComponent.LifecycleProperty: ...
-
-    class QueryRequestRecordProperty(RequestRecordProperty, Protocol):
-        pass
-
-    class QueryResponseRecordProperty(ResponseRecordProperty, Protocol):
-        @property
-        def query_response_body(
-            self,
-        ) -> ControlCentreComponent.BackendPort.QueryResponseRecordProperty: ...
     
     # =============================================
     # Secondary representations for detour handoff
@@ -205,7 +172,7 @@ class BackendComponent(
 
         @property
         def run_outcome_response_record(self) -> (
-            BackendComponent.RunOutcomeResponseRecordProperty
+            ControlCentreComponent.BackendPort.RunOutcomeResponseRecordProperty
         ): ...
 
         def text(self, column: str) -> str | None: ...
@@ -390,13 +357,6 @@ class BackendComponent(
         @property
         def openalex_ror_records(self) -> tuple[HttpRequestLogRecord, ...]: ...
 
-    class RunOutcomeResponseBodyProperty(
-        ComponentProtocol.PropertyProtocol,
-        Protocol,
-    ):
-        @property
-        def attempt(self) -> AgentRuntimeComponent.BackendPort.AttemptProperty | None: ...
-
     # ================================
     # Backend's lifecycle and runtime
     # ================================
@@ -447,9 +407,9 @@ class BackendComponent(
     class QueryOnlyStoreProperty(ComponentProtocol.PropertyProtocol, Protocol):
         def query(
             self,
-            request: BackendComponent.QueryRequestRecordProperty,
+            request: ControlCentreComponent.BackendPort.QueryRequestRecordProperty,
         ) -> BackendComponent.ResponseRecordPromiseProperty[
-            BackendComponent.QueryResponseRecordProperty
+            ControlCentreComponent.BackendPort.QueryResponseRecordProperty
         ]: ...
             
     class FullStoreProperty(QueryOnlyStoreProperty, Protocol):
@@ -460,7 +420,9 @@ class BackendComponent(
         def current_push_record(self) -> HttpRequestLogRecord | None: ...
 
         @property
-        def current_commit_record(self) -> BackendComponent.CommitRequestRecordProperty | None: ...
+        def current_commit_record(self) -> (
+            BackendComponent.CommitRequestRecordProperty | None
+        ): ...
 
         @property
         def current_validation_record(self) -> (
@@ -488,9 +450,9 @@ class BackendComponent(
 
         def run_outcome(
             self,
-            request: BackendComponent.RunOutcomeRequestRecordProperty,
+            request: ControlCentreComponent.BackendPort.RunOutcomeRequestRecordProperty,
         ) -> BackendComponent.ResponseRecordPromiseProperty[
-            BackendComponent.RunOutcomeResponseRecordProperty
+            ControlCentreComponent.BackendPort.RunOutcomeResponseRecordProperty
         ]: ...
 
     class AgentRuntimePort(
@@ -655,7 +617,9 @@ class ControlCentreComponent(
         @property
         def run_outcome_record(
             self,
-        ) -> BackendComponent.RunOutcomeResponseRecordProperty | None: ...
+        ) -> (
+            ControlCentreComponent.BackendPort.RunOutcomeResponseRecordProperty | None
+        ): ...
 
     class BackendPort(
         ComponentProtocol.PortProtocol,
@@ -713,6 +677,23 @@ class ControlCentreComponent(
 
             @property
             def run_outcome(self) -> ControlCentreComponent.BackendPort.RunOutcomeProperty: ...
+    
+        class RunOutcomeResponseRecordProperty(
+            BackendComponent.ResponseRecordProperty,
+            Protocol,
+        ):
+            @property
+            def run_outcome_request_record(
+                self,
+            ) -> ControlCentreComponent.BackendPort.RunOutcomeRequestRecordProperty: ...
+    
+            @property
+            def attempt(self) -> AgentRuntimeComponent.BackendPort.AttemptProperty | None: ...
+    
+            @property
+            def run_outcome(
+                self,
+            ) -> ControlCentreComponent.LifecycleProperty: ...
         
         class QueryRequestRecordProperty(
             BackendComponent.RequestRecordProperty,
