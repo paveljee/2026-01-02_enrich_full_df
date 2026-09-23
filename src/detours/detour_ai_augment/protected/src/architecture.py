@@ -607,6 +607,7 @@ class ControlCentreComponent(
         @property
         def remote_pid(self) -> int | None: ...
 
+        @property
         def events(
             self,
         ) -> tuple[
