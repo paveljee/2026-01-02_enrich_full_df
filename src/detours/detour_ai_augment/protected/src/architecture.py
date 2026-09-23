@@ -156,6 +156,9 @@ class BackendComponent(
         content to `POST /push`. Not a part of the Agent
         Runtime - Backend connector because it is never
         exposed to the Agent Runtime."""
+        
+        @property
+        def validation_request_body(self) -> BackendComponent.ValidationRequestBodyProperty: ...
     
     # =============================================
     # Secondary representations for detour handoff
@@ -174,10 +177,6 @@ class BackendComponent(
         def run_outcome_response_record(self) -> (
             ControlCentreComponent.BackendPort.RunOutcomeResponseRecordProperty
         ): ...
-
-        def text(self, column: str) -> str | None: ...
-
-        def validate_codex_innerdict(self) -> Self: ...
 
         @classmethod
         def from_serialized(
@@ -672,9 +671,7 @@ class ControlCentreComponent(
             def session_id(self) -> UUID | None: ...
 
             @property
-            def backend_validation_record(self) -> (
-                BackendComponent.ValidationRequestRecordProperty | None
-            ): ...
+            def validation_record_id(self) -> UUID | None: ...
 
             @property
             def run_outcome(self) -> ControlCentreComponent.BackendPort.RunOutcomeProperty: ...
@@ -691,10 +688,6 @@ class ControlCentreComponent(
             @property
             def attempt(self) -> AgentRuntimeComponent.BackendPort.AttemptProperty | None: ...
     
-            @property
-            def run_outcome(
-                self,
-            ) -> ControlCentreComponent.LifecycleProperty: ...
         
         class QueryRequestRecordProperty(
             BackendComponent.RequestRecordProperty,
