@@ -6,7 +6,10 @@ from pydantic import BaseModel, ConfigDict
 T = TypeVar("T")
 
 
-class implements[Proto]:
+from typing import Any, get_args
+
+
+class implements[Proto, Base = object]:
     """
     Generic decorator for statically asserting that a concrete class
     structurally implements a `Protocol`.
@@ -28,6 +31,10 @@ class implements[Proto]:
 
     At runtime, no conformance check is performed.
 
+    When `Base` and keyword arguments are provided, the concrete
+    class is additionally required at runtime to inherit from `Base`
+    and to have matching class attributes for those arguments.
+
     Returns the original class unchanged.
 
     Note 1: The static type checker neither asserts nor enforces
@@ -46,7 +53,27 @@ class implements[Proto]:
     signed off: human (credit to gpt-6-astra-pro for conceiving)
     """
 
+    def __init__(self, **requirements: Any) -> None:
+        self.requirements = requirements
+
     def __call__(self, cls: type[Proto]) -> type[Proto]:
+        base: type[Base]  # for static typing
+        _, base = get_args(self.__orig_class__)
+
+        if not issubclass(cls, base):
+            raise TypeError(
+                f"{cls.__qualname__} must inherit from {base.__qualname__}."
+            )
+
+        for name, expected in self.requirements.items():
+            actual = getattr(cls, name)
+
+            if actual != expected:
+                raise TypeError(
+                    f"{cls.__qualname__}.{name} must equal "
+                    f"{expected!r}; got {actual!r}."
+                )
+
         return cls
 
 
