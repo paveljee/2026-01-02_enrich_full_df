@@ -1,12 +1,9 @@
-from typing import TypeVar
+from typing import Any, TypeVar, get_args
 
 from pydantic import BaseModel, ConfigDict
 
 # Reusable generic type variable
 T = TypeVar("T")
-
-
-from typing import Any, get_args
 
 
 class implements[Proto, Base = object]:
@@ -53,6 +50,8 @@ class implements[Proto, Base = object]:
     signed off: human (credit to gpt-6-astra-pro for conceiving)
     """
 
+    __orig_class__: Any  # for static typing
+
     def __init__(self, **requirements: Any) -> None:
         self.requirements = requirements
 
@@ -60,7 +59,9 @@ class implements[Proto, Base = object]:
         base: type[Base]  # for static typing
         _, base = get_args(self.__orig_class__)
 
-        if not issubclass(cls, base):
+        candidate: type[Any] = cls   # for static typing
+
+        if not issubclass(candidate, base):
             raise TypeError(
                 f"{cls.__qualname__} must inherit from {base.__qualname__}."
             )
@@ -77,6 +78,15 @@ class implements[Proto, Base = object]:
         return cls
 
 
+# For demo purposes;
+# mypy this then import this
+@implements[object, BaseModel](
+    model_config=ConfigDict(
+        extra="forbid",
+        frozen=True,
+        strict=True,
+    ),
+)
 class FrozenStrictModel(BaseModel):
     """
     Hardened drop-in replacement for Pydantic `BaseModel`:
