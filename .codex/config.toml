@@ -1,13 +1,47 @@
-model = "gpt-5.6-sol"
+# ================================
+# Untrusted policy for local dev
+# for OpenAI Codex CLI (v0.157.0)
+# ================================
+
+model = "gpt-6-sol"
+service_tier = "default"
 model_reasoning_effort = "xhigh"
 personality = "none"
 web_search = "disabled"
 sandbox_mode = "workspace-write"
-approval_policy = "untrusted"
-service_tier = "default"
+approvals_reviewer = "user"
+#approval_policy = "on-request"
+# > To preserve the stricter command-approval rule,
+# > omit an explicit approval_policy and
+# > add a project entry to your
+# > user-level `~/.codex/config.toml`
+# > ```
+# > [projects."/path/to/project"]
+# > trust_level = "untrusted"
+# > ```
+# https://learn.chatgpt.com/docs/agent-approvals-security
+
+[sandbox_workspace_write]
+network_access = false
 
 [agents]
 enabled = false
 
-[sandbox_workspace_write]
-network_access = false
+[features]
+plugins = false
+remote_plugin = false
+plugin_sharing = false
+recommended_plugins = false
+apps = false
+skill_mcp_dependency_install = false
+multi_agent = false
+
+[apps._default]
+enabled = false
+destructive_enabled = false
+open_world_enabled = false
+
+[tui]
+# disable animations in astra
+whimsy = false
+animations = false
