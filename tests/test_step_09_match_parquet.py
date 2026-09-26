@@ -187,7 +187,7 @@ def test_step_09_non_ok_title_batch_preserves_successful_log_and_parquet(
         with patch.object(requests, "get", side_effect=responses) as request_get:
             with pytest.raises(_OpenAlexNonOKResponse) as raised:
                 run(context)
-        assert raised.value.status_code == HTTPStatus.TOO_MANY_REQUESTS
+        assert raised.value.record.response_code == HTTPStatus.TOO_MANY_REQUESTS
         assert request_get.call_count == fail_on_batch
         records = [json.loads(line) for line in title_log.read_text(encoding="utf-8").splitlines()]
         if fail_on_batch == 1:

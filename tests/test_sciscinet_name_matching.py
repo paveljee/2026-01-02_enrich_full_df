@@ -688,6 +688,7 @@ def test_openalex_author_non_ok_raises_without_logging(
 
     response = requests.Response()
     response.status_code = status
+    response._content = b'{"error":"author unavailable"}'
 
     with patch.object(requests, "get", return_value=response) as request_get:
         with pytest.raises(_OpenAlexNonOKResponse) as raised:
@@ -700,7 +701,12 @@ def test_openalex_author_non_ok_raises_without_logging(
                 api_key="test-key",
             )
 
-    assert raised.value.status_code == status
+    assert raised.value.record.response_code == status
+    assert raised.value.record.path == "/authors"
+    assert raised.value.record.response_body == response.text
+    assert json.loads(str(raised.value).removeprefix("Non-OK response: ")) == (
+        raised.value.record.model_dump(mode="json")
+    )
     request_get.assert_called_once()
     assert "test-key" not in str(raised.value)
     assert log_path.read_text(encoding="utf-8") == original_log
@@ -790,6 +796,7 @@ def test_openalex_work_titles_non_ok_raises_without_logging(
 
     response = requests.Response()
     response.status_code = status
+    response._content = b'{"error":"works unavailable"}'
 
     with patch.object(requests, "get", return_value=response) as request_get:
         with pytest.raises(_OpenAlexNonOKResponse) as raised:
@@ -799,7 +806,12 @@ def test_openalex_work_titles_non_ok_raises_without_logging(
                 api_key="test-key",
             )
 
-    assert raised.value.status_code == status
+    assert raised.value.record.response_code == status
+    assert raised.value.record.path == "/works"
+    assert raised.value.record.response_body == response.text
+    assert json.loads(str(raised.value).removeprefix("Non-OK response: ")) == (
+        raised.value.record.model_dump(mode="json")
+    )
     request_get.assert_called_once()
     assert "test-key" not in str(raised.value)
     assert log_path.read_text(encoding="utf-8") == original_log
