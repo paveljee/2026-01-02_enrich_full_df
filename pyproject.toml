@@ -155,6 +155,8 @@ detour-mode0-econ-stats = ["detour-mode0-econ-stats"]
 pythonpath = ["."]
 testpaths = ["tests"]
 norecursedirs = [
+    "tmp",  # retained runtime/test artifacts, not test sources
+    "logs",  # includes copied diagnostic/test artifact bundles
     "tests/test_detours",  # can run via `pixi run test tests/test_detours`
 ]
 markers = [
