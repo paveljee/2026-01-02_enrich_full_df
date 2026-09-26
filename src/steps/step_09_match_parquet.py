@@ -495,66 +495,73 @@ def run(context: PipelineContext) -> StepResult:
         response_status_counts: dict[str, int] = {}
         if missing_paperids:
             total_batches = sum(1 for _ in chunk_openalex_work_title_paperids(missing_paperids))
-            
-            for batch_index, batch in enumerate(
-                chunk_openalex_work_title_paperids(missing_paperids),
-                start=1,
-            ):
+            try:
+                for batch_index, batch in enumerate(
+                    chunk_openalex_work_title_paperids(missing_paperids),
+                    start=1,
+                ):
+                    log_tag(
+                        STEP_MATCH_PARQUET_LOG_TAG_TABLE_EFF,
+                        "OpenAlex work-title request starting: "
+                        f"batch={batch_index:,}/{total_batches:,}, "
+                        f"paper IDs in request={len(batch):,}, "
+                        f"first paperid={batch[0] if batch else '<none>'}, "
+                        f"last paperid={batch[-1] if batch else '<none>'}.",
+                    )
+
+                    result = fetch_openalex_work_titles_batch(
+                        paperids=batch,
+                        log_path=openalex_paper_title_log_path,
+                    )
+                    appended_log_record_count += 1
+                    status_key = (
+                        str(result.response_code) if result.response_code is not None else "null"
+                    )
+                    response_status_counts[status_key] = (
+                        response_status_counts.get(status_key, 0) + 1
+                    )
+                    fetched_titled_count += sum(
+                        1 for title in result.titles_by_paperid.values() if title is not None
+                    )
+                status_summary = ", ".join(
+                    f"{status}={count:,}"
+                    for status, count in sorted(response_status_counts.items())
+                )
                 log_tag(
                     STEP_MATCH_PARQUET_LOG_TAG_TABLE_EFF,
-                    "OpenAlex work-title request starting: "
-                    f"batch={batch_index:,}/{total_batches:,}, "
-                    f"paper IDs in request={len(batch):,}, "
-                    f"first paperid={batch[0] if batch else '<none>'}, "
-                    f"last paperid={batch[-1] if batch else '<none>'}.",
+                    "OpenAlex work-title command side: "
+                    f"fetched de novo={len(missing_paperids):,} paper IDs, "
+                    f"JSONL batch records appended={appended_log_record_count:,}, "
+                    f"batch HTTP statuses={status_summary or 'none'}, "
+                    f"new titles returned={fetched_titled_count:,}, "
+                    "missing/null titles returned="
+                    f"{len(missing_paperids) - fetched_titled_count:,}.",
                 )
-                
-                result = fetch_openalex_work_titles_batch(
-                    paperids=batch,
-                    log_path=openalex_paper_title_log_path,
-                )
-                appended_log_record_count += 1
-                status_key = (
-                    str(result.response_code) if result.response_code is not None else "null"
-                )
-                response_status_counts[status_key] = response_status_counts.get(status_key, 0) + 1
-                fetched_titled_count += sum(
-                    1 for title in result.titles_by_paperid.values() if title is not None
-                )
-            status_summary = ", ".join(
-                f"{status}={count:,}" for status, count in sorted(response_status_counts.items())
-            )
-            log_tag(
-                STEP_MATCH_PARQUET_LOG_TAG_TABLE_EFF,
-                "OpenAlex work-title command side: "
-                f"fetched de novo={len(missing_paperids):,} paper IDs, "
-                f"JSONL batch records appended={appended_log_record_count:,}, "
-                f"batch HTTP statuses={status_summary or 'none'}, "
-                f"new titles returned={fetched_titled_count:,}, "
-                f"missing/null titles returned={len(missing_paperids) - fetched_titled_count:,}.",
-            )
-            new_log_resource = deepcopy(resources.openalex_paper_title_log_resource)
-            updated_log_hash = write_openalex_paper_title_read_model(
-                conn,
-                openalex_paper_title_log_resource=new_log_resource,
-                output_path=openalex_paper_title_parquet_path,
-            )
-            updated_parquet_hash = file_sha256(openalex_paper_title_parquet_path)
-            parquet_metadata_log_hash = openalex_paper_title_read_model_log_sha256(
-                conn,
-                openalex_paper_title_parquet_path,
-            )
-            log_tag(
-                STEP_MATCH_PARQUET_LOG_TAG_TABLE_EFF,
-                "OpenAlex work-title query side rebuilt after command append: "
-                f"parquet={openalex_paper_title_parquet_path}; "
-                f"sha256 in parquet footer={parquet_metadata_log_hash or '<missing>'}; "
-                f"current title-log hash (calculated from JSONL) "
-                f"sha256={updated_log_hash}; "
-                f"hash match={'yes' if parquet_metadata_log_hash == updated_log_hash else 'no'}. "
-                "The parquet's own hash (calculated after rebuild) "
-                f"sha256={updated_parquet_hash}.",
-            )
+            finally:
+                if appended_log_record_count:
+                    new_log_resource = deepcopy(resources.openalex_paper_title_log_resource)
+                    updated_log_hash = write_openalex_paper_title_read_model(
+                        conn,
+                        openalex_paper_title_log_resource=new_log_resource,
+                        output_path=openalex_paper_title_parquet_path,
+                    )
+                    updated_parquet_hash = file_sha256(openalex_paper_title_parquet_path)
+                    parquet_metadata_log_hash = openalex_paper_title_read_model_log_sha256(
+                        conn,
+                        openalex_paper_title_parquet_path,
+                    )
+                    log_tag(
+                        STEP_MATCH_PARQUET_LOG_TAG_TABLE_EFF,
+                        "OpenAlex work-title query side rebuilt after command append: "
+                        f"parquet={openalex_paper_title_parquet_path}; "
+                        f"sha256 in parquet footer={parquet_metadata_log_hash or '<missing>'}; "
+                        f"current title-log hash (calculated from JSONL) "
+                        f"sha256={updated_log_hash}; "
+                        "hash match="
+                        f"{'yes' if parquet_metadata_log_hash == updated_log_hash else 'no'}. "
+                        "The parquet's own hash (calculated after rebuild) "
+                        f"sha256={updated_parquet_hash}.",
+                    )
         else:
             log_tag(
                 STEP_MATCH_PARQUET_LOG_TAG_TABLE_EFF,

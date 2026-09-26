@@ -5,6 +5,7 @@ import os
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from http import HTTPStatus
 from pathlib import Path
 from typing import Protocol, cast
 from urllib.parse import parse_qsl, quote, urlencode
@@ -52,6 +53,12 @@ class _ResponseLike(Protocol):
 
 
 _RequestGet = Callable[..., _ResponseLike]
+
+
+class _OpenAlexNonOKResponse(RuntimeError):
+    def __init__(self, *, status_code: int, path: str) -> None:
+        self.status_code = status_code
+        super().__init__(f"OpenAlex GET {path} returned HTTP {status_code}.")
 
 
 @dataclass(frozen=True)
@@ -490,6 +497,11 @@ def check_openalex_author(
     resolved_request_get = request_get or cast(_RequestGet, requests.get)
     start_ns = time.monotonic_ns()
     response = resolved_request_get(url, timeout=OPENALEX_AUTHOR_SEARCH_TIMEOUT_SECONDS)
+    if response.status_code != HTTPStatus.OK:
+        raise _OpenAlexNonOKResponse(
+            status_code=response.status_code,
+            path=OPENALEX_AUTHOR_SEARCH_PATH,
+        )
     duration_usec = (time.monotonic_ns() - start_ns) // 1_000
     received_at_unix_usec = time.time_ns() // 1_000
     top_author_id = parse_openalex_top_author_id(response.text)
@@ -540,6 +552,11 @@ def fetch_openalex_work_titles_batch(
     resolved_request_get = request_get or cast(_RequestGet, requests.get)
     start_ns = time.monotonic_ns()
     response = resolved_request_get(url, timeout=OPENALEX_AUTHOR_SEARCH_TIMEOUT_SECONDS)
+    if response.status_code != HTTPStatus.OK:
+        raise _OpenAlexNonOKResponse(
+            status_code=response.status_code,
+            path=OPENALEX_WORKS_PATH,
+        )
     duration_usec = (time.monotonic_ns() - start_ns) // 1_000
     received_at_unix_usec = time.time_ns() // 1_000
     titles_by_paperid = parse_openalex_work_titles_response(

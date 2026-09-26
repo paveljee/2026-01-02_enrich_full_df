@@ -4,11 +4,14 @@ import json
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
+from http import HTTPStatus
 from pathlib import Path
+from unittest.mock import patch
 
 import duckdb
 import pandas as pd
 import pytest
+import requests
 
 from src.helpers.duckdb_extensions import load_duckdb_extension_from_config_path
 from src.helpers.name_matching import (
@@ -17,6 +20,7 @@ from src.helpers.name_matching import (
     sciscinet_ktp_name_norm_sql,
 )
 from src.helpers.openalex import (
+    _OpenAlexNonOKResponse,
     check_openalex_author,
     fetch_openalex_work_titles_batch,
     openalex_author_search_query,
@@ -670,6 +674,38 @@ def test_openalex_author_check_appends_response_and_parses_mismatch(tmp_path: Pa
     assert "openalex_match" not in record
 
 
+@pytest.mark.parametrize(
+    "status",
+    [HTTPStatus.NO_CONTENT, HTTPStatus.TOO_MANY_REQUESTS, HTTPStatus.SERVICE_UNAVAILABLE],
+)
+def test_openalex_author_non_ok_raises_without_logging(
+    tmp_path: Path,
+    status: HTTPStatus,
+) -> None:
+    log_path = tmp_path / "openalex.jsonl"
+    original_log = "existing record\n"
+    log_path.write_text(original_log, encoding="utf-8")
+
+    response = requests.Response()
+    response.status_code = status
+
+    with patch.object(requests, "get", return_value=response) as request_get:
+        with pytest.raises(_OpenAlexNonOKResponse) as raised:
+            check_openalex_author(
+                source_key="Ada Lovelace",
+                first_name="Ada",
+                last_name="Lovelace",
+                selected_author_id="A123",
+                log_path=log_path,
+                api_key="test-key",
+            )
+
+    assert raised.value.status_code == status
+    request_get.assert_called_once()
+    assert "test-key" not in str(raised.value)
+    assert log_path.read_text(encoding="utf-8") == original_log
+
+
 def test_openalex_work_titles_batch_query_preserves_work_id_filter() -> None:
     query = openalex_work_titles_batch_query(
         paperids=["W123", "W456"],
@@ -738,6 +774,35 @@ def test_openalex_work_titles_batch_appends_response_and_parses_titles(
     assert record["query"].startswith("filter=openalex_id:W123|W999")
     assert record["query"].endswith("api_key=REDACTED")
     assert "test-key" not in record["query"]
+
+
+@pytest.mark.parametrize(
+    "status",
+    [HTTPStatus.NO_CONTENT, HTTPStatus.TOO_MANY_REQUESTS, HTTPStatus.SERVICE_UNAVAILABLE],
+)
+def test_openalex_work_titles_non_ok_raises_without_logging(
+    tmp_path: Path,
+    status: HTTPStatus,
+) -> None:
+    log_path = tmp_path / "openalex_paper_title_log.jsonl"
+    original_log = "existing record\n"
+    log_path.write_text(original_log, encoding="utf-8")
+
+    response = requests.Response()
+    response.status_code = status
+
+    with patch.object(requests, "get", return_value=response) as request_get:
+        with pytest.raises(_OpenAlexNonOKResponse) as raised:
+            fetch_openalex_work_titles_batch(
+                paperids=["W123"],
+                log_path=log_path,
+                api_key="test-key",
+            )
+
+    assert raised.value.status_code == status
+    request_get.assert_called_once()
+    assert "test-key" not in str(raised.value)
+    assert log_path.read_text(encoding="utf-8") == original_log
 
 
 def test_parse_openalex_top_author_id_handles_empty_or_malformed_results() -> None:
