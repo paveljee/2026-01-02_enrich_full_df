@@ -47,9 +47,10 @@ depends-on = [
 ]
 
 [tool.pixi.tasks.test-detours]
+# econ env is default plus more while default is sufficient for non-econ tests 
 depends-on = [
-  { task = "test", args = ["tests/test_detours"] },
-  { task = "test", args = ["tests/test_detours", "slow"] },
+  { task = "test", args = ["tests/test_detours"], environment = "detour-mode0-econ-stats" },
+  { task = "test", args = ["tests/test_detours", "slow"], environment = "detour-mode0-econ-stats" },
 ]
 
 [tool.pixi.tasks.cov]
