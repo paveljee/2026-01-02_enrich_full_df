@@ -120,7 +120,7 @@ class BackendComponent(
         @property
         def acknowledgment(self) -> BackendComponent.StoreAcknowledgmentProperty: ...
 
-        async def response_record(
+        async def response_record_promise(
             self,
         ) -> BackendComponent.ResponseRecordPromiseResultProperty[R]: ...
 
@@ -137,11 +137,33 @@ class BackendComponent(
 
     class PullRequestRecordProperty(RequestRecordProperty, Protocol): ...
 
-    class PullResponseRecordProperty(ResponseRecordProperty, Protocol): ...
+    class PullResponseRecordProperty(ResponseRecordProperty, Protocol):
+        @property
+        def validation_request_record(
+            self,
+        ) -> BackendComponent.ValidationRequestRecordProperty | None:
+            """
+            Consumed by Backend Store's retry cycle. `None` otherwise.
+
+            An illustrative chaining of Backend Store's
+            `current_response_record` value transitions:
+
+                initial pull, push, commit
+                → initial validation (V0)
+                → retry pull P1 (validation_request_record is V0)
+                → push S1 (pull_response_record is P1)
+                → commit C1 (pull_response_record is P1, push_response_record is S1)
+                → validation V1 (initial_validation_request_record is V0)
+            
+            """
 
     class PushRequestRecordProperty(RequestRecordProperty, Protocol): ...
 
-    class PushResponseRecordProperty(ResponseRecordProperty, Protocol): ...
+    class PushResponseRecordProperty(ResponseRecordProperty, Protocol):
+        @property
+        def pull_response_record(
+            self,
+        ) -> BackendComponent.PullResponseRecordProperty | None: ...
 
     class CommitRequestRecordProperty(RequestRecordProperty, Protocol):
         @property
@@ -190,7 +212,22 @@ class BackendComponent(
         ComponentProtocol.PropertyProtocol,
         Protocol,
     ):
-        """Ultimate representation of a NameKey's augmented card."""
+        """Ultimate representation of a NameKey's augmented card.
+        
+        Implementing class must be decorated as follows:
+
+        ```
+        @implements[
+            BackendComponent.AiAugmentSingularOuterDictProperty,
+            BaseModel,
+        ](
+            model_config=ConfigDict(
+                extra="forbid",
+                frozen=True,
+                strict=True,
+            ),
+        )
+        ```"""
 
         @property
         def namekey(self) -> NameKey: ...
@@ -305,10 +342,10 @@ class BackendComponent(
         Protocol,
     ):
         @property
-        def pull_record(self) -> HttpRequestLogRecord: ...
+        def pull_response_record(self) -> HttpRequestLogRecord: ...
 
         @property
-        def push_record(self) -> HttpRequestLogRecord: ...
+        def push_response_record(self) -> HttpRequestLogRecord: ...
 
         @property
         def codex_session_record(self) -> BackendComponent.CodexSessionRecordProperty: ...
@@ -341,7 +378,7 @@ class BackendComponent(
         """Post-commit validation request body."""
 
         @property
-        def commit_record(self) -> BackendComponent.CommitRequestRecordProperty: ...
+        def commit_request_record(self) -> BackendComponent.CommitRequestRecordProperty: ...
 
         @property
         def post_commit_validation(
@@ -349,7 +386,7 @@ class BackendComponent(
         ) -> BackendComponent.PostCommitValidationProperty: ...
 
         @property
-        def initial_validation_record(
+        def initial_validation_request_record(
             self,
         ) -> BackendComponent.ValidationRequestRecordProperty | None: ...
 
@@ -364,6 +401,21 @@ class BackendComponent(
         ComponentProtocol.PropertyProtocol,
         Protocol,
     ):
+        """Implementing class must be decorated as follows:
+
+        ```
+        @implements[
+            BackendComponent.ContextProperty,
+            BaseModel,
+        ](
+            model_config=ConfigDict(
+                extra="forbid",
+                frozen=True,
+                strict=True,
+            ),
+        )
+        ```"""
+
         @property
         def pipeline_config(self) -> PipelineConfig: ...
 
@@ -371,12 +423,15 @@ class BackendComponent(
         def configured_namekey(self) -> NameKey | None: ...
 
         @property
-        def backend_store(
-            self,
-        ) -> (
-            BackendComponent.FullStoreProperty
-            | BackendComponent.QueryOnlyStoreProperty
-        ): ...
+        def ai_augment_singular_outerdict_blueprints(self) -> (
+            tuple[
+                BackendComponent.AiAugmentSingularOuterDictProperty,
+                ...,
+            ]
+        ):
+            """To be used privately to be passed to Backend Store.
+            Must be constructed exactly once and then held frozen
+            by `FrozenStrictModel` that `@implements` this."""
 
     class LifecycleProperty(
         ComponentProtocol.PropertyProtocol,
@@ -404,7 +459,7 @@ class BackendComponent(
         ]: ...
 
     class QueryOnlyStoreProperty(ComponentProtocol.PropertyProtocol, Protocol):
-        def query(
+        def query_response_record(
             self,
             request: ControlCentreComponent.BackendPort.QueryRequestRecordProperty,
         ) -> BackendComponent.ResponseRecordPromiseProperty[
@@ -413,46 +468,14 @@ class BackendComponent(
             
     class FullStoreProperty(QueryOnlyStoreProperty, Protocol):
         @property
-        def current_pull_record(self) -> HttpRequestLogRecord | None: ...
-
-        @property
-        def current_push_record(self) -> HttpRequestLogRecord | None: ...
-
-        @property
-        def current_commit_record(self) -> (
-            BackendComponent.CommitRequestRecordProperty | None
-        ): ...
-
-        @property
-        def current_validation_record(self) -> (
-            BackendComponent.ValidationRequestRecordProperty | None
-        ): ...
-
-        @property
-        def initial_validation_record(self) -> (
-            BackendComponent.ValidationRequestRecordProperty | None
-        ): ...
-
-        def pull(
-            self,
-            request: BackendComponent.PullRequestRecordProperty,
-        ) -> BackendComponent.ResponseRecordPromiseProperty[
+        def current_replayed_response_record(self) -> (
             BackendComponent.PullResponseRecordProperty
-        ]: ...
-
-        def push(
-            self,
-            request: BackendComponent.PushRequestRecordProperty,
-        ) -> BackendComponent.ResponseRecordPromiseProperty[
-            BackendComponent.PushResponseRecordProperty
-        ]: ...
-
-        def run_outcome(
-            self,
-            request: ControlCentreComponent.BackendPort.RunOutcomeRequestRecordProperty,
-        ) -> BackendComponent.ResponseRecordPromiseProperty[
-            ControlCentreComponent.BackendPort.RunOutcomeResponseRecordProperty
-        ]: ...
+            | BackendComponent.PushResponseRecordProperty
+            | BackendComponent.CommitRequestRecordProperty
+            | BackendComponent.ValidationRequestRecordProperty
+            | ControlCentreComponent.BackendPort.RunOutcomeResponseRecordProperty
+            | None
+        ): ...
 
     class AgentRuntimePort(
         ComponentProtocol.PortProtocol,
@@ -615,7 +638,7 @@ class ControlCentreComponent(
         ]: ...
 
         @property
-        def run_outcome_record(
+        def run_outcome_response_record(
             self,
         ) -> (
             ControlCentreComponent.BackendPort.RunOutcomeResponseRecordProperty | None
@@ -671,7 +694,7 @@ class ControlCentreComponent(
             def session_id(self) -> UUID | None: ...
 
             @property
-            def validation_record_id(self) -> UUID | None: ...
+            def validation_request_record_id(self) -> UUID | None: ...
 
             @property
             def run_outcome(self) -> ControlCentreComponent.BackendPort.RunOutcomeProperty: ...
@@ -688,7 +711,6 @@ class ControlCentreComponent(
             @property
             def attempt(self) -> AgentRuntimeComponent.BackendPort.AttemptProperty | None: ...
     
-        
         class QueryRequestRecordProperty(
             BackendComponent.RequestRecordProperty,
             ComponentProtocol.PropertyProtocol,
