@@ -3,7 +3,6 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Mapping
 from functools import cached_property
-from http import HTTPStatus
 from types import MappingProxyType
 from typing import Self
 from uuid import UUID
@@ -22,21 +21,24 @@ from src.helpers.data_models import InnerDict, NameKey
 from .....backend.helpers.data_models.ai_augment_singular_outer_dict import (
     AiAugmentSingularOuterDict,
 )
-from .....backend.helpers.data_models.commit_event import BackendLifecycle
-from .....backend.helpers.data_models.committed_innerdict import CommittedInnerDict
-from .....backend.helpers.data_models.query_response import AgentRuntimeAttemptRecord, QueryResponse
-from .....backend.helpers.data_models.run_outcome_record import RunOutcomeResponseRecord
-from .run_outcome import NAME_KEY_HEADER, name_key_from_header_value
+from .....backend.helpers.data_models.codex_innerdict import CodexInnerDict
+from .....backend.helpers.data_models.validation_request import BackendValidationRecord
+from .query_event import QueryResponseRecord
+from .run_outcome_event import RunOutcomeResponseRecord
 
 
 class DashboardQuerySnapshot(FrozenStrictModel):
     """One complete query response; the Dashboard never mutates its nested models."""
 
-    query_response: QueryResponse
+    ai_augment_singular_outerdicts: tuple[AiAugmentSingularOuterDict, ...]
 
-    @property
-    def ai_augment_singular_outerdicts(self) -> tuple[AiAugmentSingularOuterDict, ...]:
-        return self.query_response.ai_augment_singular_outerdicts
+    @classmethod
+    def from_serialized_json(cls, value: str | bytes) -> Self:
+        return cls(
+            ai_augment_singular_outerdicts=(
+                QueryResponseRecord.outerdicts_from_response_body(value)
+            ),
+        )
 
     @cached_property
     def researchers_by_namekey(self) -> Mapping[str, AiAugmentSingularOuterDict]:
@@ -46,21 +48,23 @@ class DashboardQuerySnapshot(FrozenStrictModel):
         })
 
     @cached_property
-    def committed_by_id(self) -> Mapping[UUID, CommittedInnerDict]:
+    def committed_by_id(self) -> Mapping[UUID, CodexInnerDict]:
         return MappingProxyType({
-            committed.commit_record.record_id: committed
+            committed.run_outcome_response_record.attempt.validation_request_body
+            .commit_request_record.record_id: committed
             for researcher in self.ai_augment_singular_outerdicts
-            for committed in researcher.committed_innerdicts
+            for committed in researcher.codex_innerdicts
+            if committed.run_outcome_response_record.attempt is not None
         })
 
     @cached_property
-    def attempts_by_namekey(self) -> Mapping[str, tuple[AgentRuntimeAttemptRecord, ...]]:
-        grouped: dict[str, list[AgentRuntimeAttemptRecord]] = defaultdict(list)
-        for record in self.query_response.attempts:
-            namekey = name_key_from_header_value(
-                record.attempt.commit_record.request_headers.get(NAME_KEY_HEADER)
-            )
-            grouped[namekey.to_json_key()].append(record)
+    def attempts_by_namekey(self) -> Mapping[str, tuple[BackendValidationRecord, ...]]:
+        grouped: dict[str, list[BackendValidationRecord]] = defaultdict(list)
+        for researcher in self.ai_augment_singular_outerdicts:
+            for committed in researcher.codex_innerdicts:
+                attempt = committed.run_outcome_response_record.attempt
+                if attempt is not None:
+                    grouped[researcher.namekey.to_json_key()].append(attempt)
         return MappingProxyType({key: tuple(records) for key, records in grouped.items()})
 
     @cached_property
@@ -70,12 +74,13 @@ class DashboardQuerySnapshot(FrozenStrictModel):
                 namekey.to_json_key(),
                 session_id,
             ): run_outcome_record
-            for run_outcome_record in self.query_response.run_outcome_records
-            if run_outcome_record.response_code not in {HTTPStatus.BAD_REQUEST, HTTPStatus.CONFLICT}
-            if (namekey := run_outcome_record.run_outcome_request.namekey) is not None
+            for researcher in self.ai_augment_singular_outerdicts
+            for committed in researcher.codex_innerdicts
+            if (run_outcome_record := committed.run_outcome_response_record)
+            if (namekey := run_outcome_record.run_outcome_request_record.namekey) is not None
             if (
                 session_id := (
-                    run_outcome_record.run_outcome_response_body.codex_session_record.session_id
+                    run_outcome_record._codex_session_record().session_id
                 )
             )
             is not None
@@ -99,86 +104,36 @@ class DashboardQuerySnapshot(FrozenStrictModel):
         committed_count = 0
         for researcher in self.ai_augment_singular_outerdicts:
             researcher.validate_ai_augment_singular_outerdict()
-            committed_count += len(researcher.committed_innerdicts)
+            committed_count += len(researcher.codex_innerdicts)
         if len(self.committed_by_id) != committed_count:
             raise ValueError(Locale.ATTEMPT_DATABASE_INCONSISTENT)
 
-        outcomes_by_id = {
-            record.record_id: record for record in self.query_response.run_outcome_records
-        }
-        seen: set[UUID] = set()
-        accepted_ids: set[UUID] = set()
-        for namekey, records in self.attempts_by_namekey.items():
-            if namekey not in self.researchers_by_namekey:
-                raise ValueError(Locale.ATTEMPT_DATABASE_INCONSISTENT)
-            for record in records:
-                commit = record.attempt.commit_record
-                commit_id = commit.record_id
-                result = record.attempt.post_commit_validation.result
-                accepted = self.committed_by_id.get(commit_id)
-                session_id = commit.commit_request_body.codex_session_record.session_id
-                finalized = (
-                    result is BackendLifecycle.ACCEPTED
-                    and session_id is not None
-                    and (namekey, session_id) in self.outcomes_by_session
-                )
+        for researcher in self.ai_augment_singular_outerdicts:
+            for committed in researcher.codex_innerdicts:
+                outcome = committed.run_outcome_response_record
+                attempt = outcome.attempt
                 if (
-                    commit_id in seen
-                    or result not in {
-                        BackendLifecycle.ACCEPTED,
-                        BackendLifecycle.REJECTED,
-                        BackendLifecycle.CONFIGURATION_ERROR,
-                    }
-                    or finalized != (accepted is not None)
+                    attempt is None
+                    or outcome.run_outcome_request_record.namekey != researcher.namekey
+                    or outcome._codex_session_record().session_id is None
+                    or attempt.validation_request_body.commit_request_record.record_id
+                    not in self.committed_by_id
                 ):
                     raise ValueError(Locale.ATTEMPT_DATABASE_INCONSISTENT)
-                seen.add(commit_id)
-                if accepted is not None:
-                    embedded_outcome = accepted.run_outcome_response_record
-                    outcome = outcomes_by_id.get(embedded_outcome.record_id)
-                    if (
-                        record.validation_record is None
-                        or outcome is None
-                        or outcome.model_dump() != embedded_outcome.model_dump()
-                        or outcome.response_code in {HTTPStatus.BAD_REQUEST, HTTPStatus.CONFLICT}
-                        or outcome.run_outcome_request.namekey is None
-                        or outcome.run_outcome_request.namekey.to_json_key() != namekey
-                        or outcome.run_outcome_response_body.codex_session_record.session_id
-                        != session_id
-                        or session_id is None
-                        or session_id
-                        != (
-                            accepted.commit_record.commit_request_body.codex_session_record.session_id
-                        )
-                        or name_key_from_header_value(
-                            accepted.commit_record.request_headers.get(NAME_KEY_HEADER)
-                        ).to_json_key()
-                        != namekey
-                    ):
-                        raise ValueError(Locale.ATTEMPT_DATABASE_INCONSISTENT)
-                    accepted_ids.add(commit_id)
-        if accepted_ids != set(self.committed_by_id):
-            raise ValueError(Locale.ATTEMPT_DATABASE_INCONSISTENT)
-        for run_outcome_record in self.query_response.run_outcome_records:
-            if run_outcome_record.response_code == HTTPStatus.BAD_REQUEST:
-                continue
-            outcome_namekey = run_outcome_record.run_outcome_request.namekey
-            if (
-                outcome_namekey is None
-                or outcome_namekey.to_json_key() not in self.researchers_by_namekey
-            ):
-                raise ValueError(Locale.ATTEMPT_DATABASE_INCONSISTENT)
         # Build every derived lookup before a snapshot can replace persisted/UI state.
         _ = self.ground_truth_by_namekey, self.outcomes_by_session
         return self
 
     def attempts_for_session(
         self, namekey: NameKey, session_id: UUID | None,
-    ) -> tuple[AgentRuntimeAttemptRecord, ...]:
+    ) -> tuple[BackendValidationRecord, ...]:
         if session_id is None:
             return ()
         return tuple(
             record for record in self.attempts_by_namekey.get(namekey.to_json_key(), ())
-            if record.attempt.commit_record.commit_request_body.codex_session_record.session_id
+            if (
+                record.validation_request_body.commit_request_record
+                .commit_request_body.codex_session_record.session_id
+            )
             == session_id
         )

@@ -3,7 +3,7 @@ from __future__ import annotations
 import fcntl
 import os
 import threading
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Self
@@ -18,6 +18,11 @@ from .ai_augment_registered_resource import AiAugmentRegisteredResource
 READ_CHUNK_BYTES = 1024 * 1024
 READ_ONLY_PERMISSIONS = 0o400
 READ_WRITE_PERMISSIONS = 0o600
+
+
+class _ReplayProjectionConflictError(RuntimeError):
+    def __init__(self) -> None:
+        super().__init__(Locale.REPLAY_PROJECTION_CONFLICT)
 
 
 class ReplayLogRegisteredResource(AiAugmentRegisteredResource):
@@ -37,7 +42,7 @@ class ReplayLogRegisteredResource(AiAugmentRegisteredResource):
         verify_hash_on_init: bool,
     ) -> Self:
         if fragment_type is not FragmentType.LINE_NUMBER:
-            raise ValueError("replay-log fragment type must be line_number")
+            raise ValueError(Locale.REPLAY_LOG_FRAGMENT_INVALID)
         return super().from_config_entry(
             metadata,
             resource_key=resource_key,
@@ -46,10 +51,10 @@ class ReplayLogRegisteredResource(AiAugmentRegisteredResource):
         )
 
     @contextmanager
-    def _locked(self, *, append_allowed: bool) -> Iterator[None]:
+    def _locked(self, *, append_allowed: bool) -> Generator[None, None, None]:
         with self._lock:
             if self._fd is not None:
-                raise RuntimeError("ReplayLogRegisteredResource is already open")
+                raise RuntimeError(Locale.REPLAY_LOG_ALREADY_OPEN)
             fd = os.open(
                 Path(self), os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
                 | getattr(os, "O_NOFOLLOW", 0),
@@ -73,11 +78,11 @@ class ReplayLogRegisteredResource(AiAugmentRegisteredResource):
                 os.close(fd)
 
     @contextmanager
-    def _append_descriptor(self) -> Iterator[int]:
+    def _append_descriptor(self) -> Generator[int, None, None]:
         """The same zero-creation append window for preflight and actual writes."""
         with self._lock:
             if not self._append_allowed:
-                raise RuntimeError("Replay log is read-only")
+                raise RuntimeError(Locale.REPLAY_LOG_READ_ONLY)
             locked_fd = self._require_descriptor()
             locked = os.fstat(locked_fd)
             writer: int | None = None
@@ -89,7 +94,7 @@ class ReplayLogRegisteredResource(AiAugmentRegisteredResource):
                 )
                 opened = os.fstat(writer)
                 if (opened.st_dev, opened.st_ino) != (locked.st_dev, locked.st_ino):
-                    raise ValueError(Locale.REPLAY_PROJECTION_CONFLICT)
+                    raise _ReplayProjectionConflictError
                 yield writer
             finally:
                 try:
@@ -105,7 +110,7 @@ class ReplayLogRegisteredResource(AiAugmentRegisteredResource):
     def _append(self, data: bytes, *, expected_offset: int) -> int:
         with self._append_descriptor() as writer:
             if os.fstat(writer).st_size != expected_offset:
-                raise ValueError(Locale.REPLAY_PROJECTION_CONFLICT)
+                raise _ReplayProjectionConflictError
             written = 0
             while written < len(data):
                 count = os.write(writer, data[written:])

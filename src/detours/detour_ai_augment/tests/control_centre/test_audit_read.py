@@ -7,6 +7,7 @@ import os
 import pwd
 import shutil
 import subprocess
+import sys
 import threading
 from pathlib import Path
 from typing import Any, cast
@@ -196,7 +197,7 @@ def test_deployed_guest_imports_unchanged_shared_model_outside_repository(
     deployed_watcher = tmp_path / "appendwatch.py"
     shutil.copyfile(watcher, deployed_watcher)
     for source in (shared, audit, watcher):
-        ast.parse(source.read_text(), feature_version=(3, 12))
+        ast.parse(source.read_text(), feature_version=sys.version_info[:2])
     environment = dict(os.environ, PYTHONPATH=str(libexec), PYTHONDONTWRITEBYTECODE="1")
     result = python_process.run(
         deployed_guest_imports_process, cwd=tmp_path, env=environment, timeout=10,

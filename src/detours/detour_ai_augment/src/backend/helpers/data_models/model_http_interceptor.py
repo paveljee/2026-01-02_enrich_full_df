@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any
@@ -10,6 +10,7 @@ from uuid import UUID
 import requests
 from pydantic import PrivateAttr
 
+from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
 from src.helpers.architecture import FrozenStrictModel
 from src.helpers.data_models.http_request_log import (
     HttpRequestLogRecord,
@@ -30,7 +31,7 @@ class ModelHttpRequired(RuntimeError):
     def __init__(self, request: requests.PreparedRequest, **kwargs: Any) -> None:
         self.request = request
         self.send_kwargs = kwargs
-        super().__init__("Model HTTP input must be recorded")
+        super().__init__(Locale.MODEL_HTTP_INPUT_REQUIRED)
 
 
 def request_body(request: requests.PreparedRequest) -> str | None:
@@ -38,13 +39,13 @@ def request_body(request: requests.PreparedRequest) -> str | None:
     if isinstance(body, bytes):
         return body.decode("utf-8")
     if body is not None and not isinstance(body, str):
-        raise ValueError("Model HTTP logging requires a text request body")
+        raise ValueError(Locale.MODEL_HTTP_REQUEST_TEXT_REQUIRED)
     return body
 
 
 def request_key(request: requests.PreparedRequest) -> RequestKey:
     if request.url is None or request.method is None:
-        raise ValueError("Prepared HTTP request is incomplete")
+        raise ValueError(Locale.MODEL_HTTP_REQUEST_INCOMPLETE)
     target = urlsplit(request.url)
     return (request.method, target.scheme, target.hostname or "", target.port,
             target.path, redact_http_request_log_query(target.query),
@@ -80,7 +81,7 @@ class ModelHttpInterceptor(FrozenStrictModel):
         if record is None:
             record = self.record_get(request, **kwargs)
             if record_key(record) != key:
-                raise ReplayInputMissing("Recorded response does not match its request")
+                raise ReplayInputMissing(Locale.MODEL_HTTP_RESPONSE_MISMATCH)
             self._requests[key] = record
         self._used[record.record_id] = record
         return record.to_response()
@@ -98,14 +99,14 @@ class ModelHttpInterceptor(FrozenStrictModel):
             key = record_key(record)
             previous = by_request.get(key)
             if previous is not None and previous.record_id != record.record_id:
-                raise ReplayInputMissing("Ambiguous model HTTP response references")
+                raise ReplayInputMissing(Locale.MODEL_HTTP_RESPONSE_AMBIGUOUS)
             by_request[key] = record
 
         def get(request: requests.PreparedRequest, **_kwargs: Any) -> HttpRequestLogRecord:
             try:
                 return by_request[request_key(request)]
             except KeyError as exc:
-                raise ReplayInputMissing("Missing referenced model HTTP response") from exc
+                raise ReplayInputMissing(Locale.MODEL_HTTP_RESPONSE_REFERENCE_MISSING) from exc
 
         return cls(record_get=get)
 
@@ -150,7 +151,7 @@ class RequestsBinding:
 
 
 @contextmanager
-def model_http_context(http: ModelHttpInterceptor) -> Iterator[None]:
+def model_http_context(http: ModelHttpInterceptor) -> Generator[None, None, None]:
     token = _current.set(http)
     try:
         yield

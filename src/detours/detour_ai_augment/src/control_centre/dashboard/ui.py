@@ -28,6 +28,13 @@ from fastapi import status
 from nicegui import app, ui
 from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 
+from src.detours.detour_ai_augment.protected.src.backend.api import (
+    APPENDWATCH_REPORT_ENV_NAME,
+    CARD_EXCLUDED_COLUMNS,
+    CODEX_SESSIONS_ROOT_ENV_NAME,
+    NAMEKEY_ENV_NAME,
+    SERVER_PORT,
+)
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_augment_config import (  # noqa: E501
     AiAugmentDetourConfig,
 )
@@ -38,12 +45,15 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     AI_AUGMENT_COLUMN_PREFIX,
     BACKEND_STORE_CLOSED_CLEANLY,
     DOCX_TO_AI_AUGMENT_COLUMNS,
+    DRAW_PILOT_PREFIX,
+    DRAW_SORT_PART,
     ETAG_HEADER,
     HTTP_GET_METHOD,
     HTTP_POST_METHOD,
-    KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL,
+    KTP_AI_AUGMENT_COMMIT_REQUEST_RECORD_ID_COL,
     KTP_AI_AUGMENT_FOOTNOTE_ARGUMENTS_COL,
     KTP_AI_AUGMENT_FOOTNOTES_COL,
+    SOURCE_KEY_HEADER,
     AiAugmentCohort,
 )
 from src.detours.detour_ai_augment.protected.src.backend.ipc import (
@@ -102,6 +112,11 @@ from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helper
     TEXT_DECODE_ERROR_POLICY,
     TEXT_ENCODING,
 )
+from src.detours.detour_ai_augment.src.shared import (
+    AppendwatchReportError,
+    parse_appendwatch_report_bytes,
+    source_key_from_header_value,
+)
 from src.helpers.architecture import FrozenStrictModel
 from src.helpers.cards import build_cards, card_filename, render_docx_bytes
 from src.helpers.data_models import InnerDict, NameKey
@@ -113,33 +128,13 @@ from src.helpers.vars import (
     KTP_NAMEKEY_COL,
 )
 
-from ...backend.api import (
-    APPENDWATCH_REPORT_ENV_NAME,
-    CARD_EXCLUDED_COLUMNS,
-    CODEX_SESSIONS_ROOT_ENV_NAME,
-    NAMEKEY_ENV_NAME,
-    SERVER_PORT,
-    _PushValidationError,
-    parse_appendwatch_report_bytes,
-    parse_source_key_header,
-    selected_card_outer_dict,
-)
 from ...backend.helpers.data_models.ai_augment_singular_outer_dict import (
     AiAugmentSingularOuterDict,
+    selected_card_outer_dict,
 )
-from ...backend.helpers.data_models.commit_event import (
-    SOURCE_KEY_HEADER,
-    BackendLifecycle,
-)
-from ...backend.helpers.data_models.committed_innerdict import CommittedInnerDict
-from ...backend.helpers.data_models.query_response import (
-    AgentRuntimeAttemptRecord,
-    QueryResponse,
-)
-from ...backend.helpers.data_models.run_outcome_record import (
-    RunOutcomeResponseBody,
-    RunOutcomeResponseRecord,
-)
+from ...backend.helpers.data_models.codex_innerdict import CodexInnerDict
+from ...backend.helpers.data_models.lifecycle import BackendLifecycle
+from ...backend.helpers.data_models.validation_request import BackendValidationRecord
 from ...backend.server import (
     CONFIG_OPTION,
     DANGER_NO_VERIFY_HASH_OPTION,
@@ -150,14 +145,14 @@ from .helpers.data_models.ai_augment_context import (
 )
 from .helpers.data_models.ai_augment_dashboard_storage import AiAugmentDashboardStorage
 from .helpers.data_models.dashboard_query_snapshot import DashboardQuerySnapshot
-from .helpers.data_models.query_request import QueryRequest
+from .helpers.data_models.lifecycle import RunLifecycle
 from .helpers.data_models.run_event import (
     Run,
     RunEvent,
 )
-from .helpers.data_models.run_outcome import (
-    RunLifecycle,
-    RunOutcomeRequest,
+from .helpers.data_models.run_outcome_event import (
+    RunOutcomeRequestRecord,
+    RunOutcomeResponseRecord,
     _request_uuid,
 )
 
@@ -230,8 +225,6 @@ GRID_CONTENT_COLUMN_WIDTH: Final = 320
 GRID_ATTEMPT_COLUMN_WIDTH: Final = 190
 GRID_TIME_COLUMN_WIDTH: Final = 180
 GRID_STATUS_COLUMN_WIDTH: Final = 110
-DRAW_PILOT_PREFIX: Final = "pilot."
-NATURAL_SORT_PART = re.compile(r"\d+|\D+")
 ACTION_LABEL_BY_VALUE: Final = {
     "queue": Locale.ACTION_QUEUE,
     "cancel": Locale.ACTION_CANCEL,
@@ -249,7 +242,7 @@ GRID_AI_VALUE_FIELD: Final = "ai_value"
 GRID_TABLE_1_VALUE_FIELD: Final = "table_1_value"
 GRID_FOOTNOTES_FIELD: Final = "footnotes"
 GRID_FOOTNOTE_ARGUMENTS_FIELD: Final = "footnote_arguments"
-GRID_COMMIT_RECORD_ID_FIELD: Final = "commit_record_id"
+GRID_COMMIT_REQUEST_RECORD_ID_FIELD: Final = "commit_request_record_id"
 GRID_ATTEMPT_TIMESTAMP_FIELD: Final = "attempt_timestamp"
 GRID_STATUS_FIELD: Final = "status"
 GRID_RUN_OUTCOME_SNAPSHOT_FIELD: Final = "run_outcome_snapshot"
@@ -302,8 +295,6 @@ CARD_RESPONSIVE_CSS: Final = f"""
 RemotePid = NewType("RemotePid", int)
 
 
-
-
 def emit_log(prefix: str, message: str) -> None:
     print(f"{prefix} {message}", flush=True)
 
@@ -311,7 +302,7 @@ def emit_log(prefix: str, message: str) -> None:
 def natural_sort_tokens(value: str) -> tuple[tuple[int, int | str], ...]:
     return tuple(
         (0, int(part)) if part.isdigit() else (1, part.casefold())
-        for part in NATURAL_SORT_PART.findall(value)
+        for part in DRAW_SORT_PART.findall(value)
     )
 
 
@@ -459,21 +450,21 @@ class _BackendAvailability(FrozenStrictModel):
 
 
 class _RunCommitView(FrozenStrictModel):
-    attempt_record: AgentRuntimeAttemptRecord | None
+    attempt_record: BackendValidationRecord | None
     run: Run | None
-    accepted: CommittedInnerDict | None
+    accepted: CodexInnerDict | None
     run_outcome_record: RunOutcomeResponseRecord | None
 
     @model_validator(mode="after")
     def validate_run_or_commit(self) -> Self:
         if self.attempt_record is None and self.run is None:
-            raise ValueError("Run/commit view requires a Backend commit or Dashboard run")
+            raise ValueError(Locale.RUN_COMMIT_VIEW_EMPTY)
         return self
 
     @property
     def row_id(self) -> UUID:
         if self.attempt_record is not None:
-            return self.attempt_record.attempt.commit_record.record_id
+            return self.attempt_record.validation_request_body.commit_request_record.record_id
         assert self.run is not None
         return self.run.run_id
 
@@ -485,7 +476,7 @@ class _RunCommitView(FrozenStrictModel):
     def backend_lifecycle(self) -> RunLifecycle | None:
         if self.attempt_record is None:
             return None
-        result = self.attempt_record.attempt.post_commit_validation.result
+        result = self.attempt_record.validation_request_body.post_commit_validation.result
         lifecycle = AGENT_RUNTIME_ATTEMPT_LIFECYCLE_BY_RESULT.get(result)
         if lifecycle is None:
             raise RuntimeError(Locale.ATTEMPT_DATABASE_INCONSISTENT)
@@ -503,32 +494,41 @@ class _RunCommitView(FrozenStrictModel):
             return RunLifecycle.QUEUED
         if self.run.is_running():
             return RunLifecycle.RUNNING
-        assert self.run.run_outcome is not None
-        return self.run.run_outcome
+        return self.run.lifecycle
 
     @property
-    def commit_record_id(self) -> UUID | None:
+    def commit_request_record_id(self) -> UUID | None:
         if self.attempt_record is not None:
-            return self.attempt_record.attempt.commit_record.record_id
+            return self.attempt_record.validation_request_body.commit_request_record.record_id
         assert self.run is not None
-        return self.run.accepted_commit_record_id
+        outcome = self.run.run_outcome_response_record
+        attempt = None if outcome is None else outcome.attempt
+        return (
+            None if attempt is None
+            else attempt.validation_request_body.commit_request_record.record_id
+        )
 
     @property
     def timestamp(self) -> datetime:
         if self.attempt_record is not None:
             return datetime.fromtimestamp(
-                self.attempt_record.attempt.commit_record.record_id.time / 1_000,
+                self.attempt_record.validation_request_body
+                .commit_request_record.record_id.time / 1_000,
                 tz=timezone.utc,
             )
         assert self.run is not None
-        return self.run.started_at or self.run.queued_at
+        started = latest_run_event(self.run, RunLifecycle.STARTED)
+        queued = latest_run_event(self.run, RunLifecycle.QUEUED)
+        assert queued is not None
+        return (started or queued).occurred_at
 
     @property
     def failure_detail(self) -> str | None:
         if self.attempt_record is not None:
-            return self.attempt_record.attempt.post_commit_validation.detail
+            return self.attempt_record.validation_request_body.post_commit_validation.detail
         assert self.run is not None
-        return self.run.failure_detail
+        failed = latest_run_event(self.run, RunLifecycle.FAILED)
+        return None if failed is None else failed.detail
 
     @property
     def run_outcome_saved(self) -> bool | None:
@@ -541,7 +541,7 @@ class _RunCommitView(FrozenStrictModel):
         response = self.run_outcome_record
         if response is None:
             return None
-        session = response.run_outcome_response_body.codex_session_record
+        session = response._codex_session_record()
         report = session.appendwatch_report_record
         rollout = session.codex_rollout_record
         if report is None:
@@ -550,14 +550,14 @@ class _RunCommitView(FrozenStrictModel):
         if rollout is None or source_key is None:
             return Locale.SESSION_STATUS_UNAVAILABLE
         try:
-            filename, line_count = parse_source_key_header(source_key)
+            filename, line_count = source_key_from_header_value(source_key)
             if line_count != rollout.line_count:
-                raise _PushValidationError(Locale.RUN_OUTCOME_SNAPSHOT_INVALID)
+                raise AppendwatchReportError(Locale.RUN_OUTCOME_SNAPSHOT_INVALID)
             parse_appendwatch_report_bytes(
                 report.decoded_bytes(),
                 PurePosixPath(filename),
             )
-        except (_PushValidationError, ValueError) as exc:
+        except (AppendwatchReportError, ValueError) as exc:
             return Locale.SESSION_STATUS_NOT_OK_TEMPLATE.format(detail=exc)
         return Locale.SESSION_STATUS_OK
 
@@ -602,7 +602,7 @@ class _RunCommitView(FrozenStrictModel):
                     researcher_var=researcher_var,
                 )
             ),
-            commit_record_id=self.commit_record_id,
+            commit_request_record_id=self.commit_request_record_id,
             timestamp=self.timestamp,
             lifecycle=self.lifecycle,
             backend_lifecycle=self.backend_lifecycle,
@@ -628,7 +628,7 @@ class _RunCommitView(FrozenStrictModel):
     def footnotes_for_researcher_var(
         self,
         *,
-        attempt: CommittedInnerDict,
+        attempt: CodexInnerDict,
         researcher_var: _ResearcherVar,
     ) -> str | None:
         numbers = self._footnote_numbers(attempt, researcher_var)
@@ -640,7 +640,7 @@ class _RunCommitView(FrozenStrictModel):
     def footnote_arguments_for_researcher_var(
         self,
         *,
-        attempt: CommittedInnerDict,
+        attempt: CodexInnerDict,
         researcher_var: _ResearcherVar,
     ) -> str | None:
         numbers = self._footnote_numbers(attempt, researcher_var)
@@ -651,7 +651,7 @@ class _RunCommitView(FrozenStrictModel):
 
     @staticmethod
     def _footnote_numbers(
-        attempt: CommittedInnerDict,
+        attempt: CodexInnerDict,
         researcher_var: _ResearcherVar,
     ) -> tuple[int, ...]:
         value = attempt.text(researcher_var.ai_column)
@@ -702,7 +702,7 @@ class _ResearcherView(FrozenStrictModel):
         represented: set[UUID] = set()
         run_commit_views: list[_RunCommitView] = []
         for record in snapshot.attempts_by_namekey.get(namekey, ()):
-            commit = record.attempt.commit_record
+            commit = record.validation_request_body.commit_request_record
             session_id = commit.commit_request_body.codex_session_record.session_id
             matched_run = None if session_id is None else by_session.get(session_id)
             if matched_run is not None:
@@ -790,7 +790,7 @@ class _RunCommitVarView(FrozenStrictModel):
     footnotes: str | None
     footnote_arguments: str | None
 
-    commit_record_id: UUID | None
+    commit_request_record_id: UUID | None
     timestamp: datetime | None
     lifecycle: RunLifecycle
     backend_lifecycle: RunLifecycle | None
@@ -840,7 +840,7 @@ class _RunCommitVarView(FrozenStrictModel):
             ),
             footnotes=None,
             footnote_arguments=None,
-            commit_record_id=None,
+            commit_request_record_id=None,
             timestamp=None,
             lifecycle=RunLifecycle.READY,
             backend_lifecycle=None,
@@ -973,10 +973,11 @@ class _BackendDatabaseClient:
         finally:
             connection.close()
 
-    def send_query_request(self, request: QueryRequest) -> QueryResponse:
-        method, target = request.outbound_http()
+    def send_query_request(self) -> DashboardQuerySnapshot:
         try:
-            return QueryResponse.from_serialized_json(self._request(method=method, target=target))
+            return DashboardQuerySnapshot.from_serialized_json(
+                self._request(method=HTTP_GET_METHOD, target=DASHBOARD_QUERY_PATH)
+            )
         except ValidationError as exc:
             raise RuntimeError(Locale.BACKEND_DATABASE_RESPONSE_INVALID) from exc
 
@@ -988,7 +989,7 @@ class _BackendDatabaseClient:
         session_id: UUID | None,
         validation_record_id: UUID | None,
     ) -> HTTPStatus:
-        request_path, request_headers = RunOutcomeRequest.outbound_http(
+        request_path, request_headers = RunOutcomeRequestRecord.outbound_http(
             run_outcome=run_outcome,
             namekey=namekey,
             session_id=session_id,
@@ -1014,7 +1015,7 @@ class _BackendDatabaseClient:
             }:
                 raise RuntimeError(Locale.RUN_OUTCOME_SNAPSHOT_REQUEST_FAILED)
             try:
-                RunOutcomeResponseBody.from_serialized_json(body)
+                RunOutcomeResponseRecord._parse_response_body(body)
             except ValidationError as exc:
                 raise RuntimeError(Locale.BACKEND_DATABASE_RESPONSE_INVALID) from exc
             return HTTPStatus(response.status)
@@ -1032,18 +1033,23 @@ class _BackendDatabaseClient:
             connection.request(HTTP_OPTIONS_METHOD, DASHBOARD_QUERY_PATH)
             response = connection.getresponse()
             response.read()
-            emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, f"IPC probe HTTP status: {response.status}")
+            emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX,
+                     Locale.IPC_PROBE_STATUS_LOG_TEMPLATE.format(status=response.status))
             return response.status == status.HTTP_200_OK
         except FileNotFoundError as exc:
             emit_log(
                 Locale.CONTROL_CENTRE_LOG_PREFIX,
-                f"IPC unavailable; socket not present: {self._socket_path}; {exc!r}",
+                Locale.IPC_SOCKET_MISSING_LOG_TEMPLATE.format(
+                    socket=self._socket_path, error=exc,
+                ),
             )
             return False
         except (OSError, http.client.HTTPException) as exc:
             emit_log(
                 Locale.CONTROL_CENTRE_LOG_PREFIX,
-                f"IPC probe error: {self._socket_path}; {exc!r}",
+                Locale.IPC_PROBE_ERROR_LOG_TEMPLATE.format(
+                    socket=self._socket_path, error=exc,
+                ),
             )
             return False
         finally:
@@ -1072,65 +1078,46 @@ class _BackendDatabaseClient:
 # =============================================================================
 
 
-def apply_run_event(run: Run | None, event: RunEvent) -> Run:
+def apply_run_event(
+    run: Run | None,
+    event: RunEvent,
+    *,
+    namekey: NameKey | None = None,
+    session_id: UUID | None = None,
+    remote_pid: int | None = None,
+) -> Run:
     if run is None:
-        if event.lifecycle is not RunLifecycle.QUEUED:
+        if event.lifecycle is not RunLifecycle.QUEUED or namekey is None:
             raise RuntimeError(Locale.JOURNAL_EVENT_WITHOUT_RUN)
         run = Run(
             run_id=event.run_id,
-            namekey=event.namekey,
+            namekey=namekey,
             lifecycle=RunLifecycle.QUEUED,
-            queued_at=event.occurred_at,
-            dashboard_owned=True,
         )
-    elif run.namekey != event.namekey:
+    elif run.run_id != event.run_id:
         raise RuntimeError(Locale.JOURNAL_EVENT_WITHOUT_RUN)
     elif event.lifecycle is RunLifecycle.QUEUED:
         raise RuntimeError(Locale.JOURNAL_DUPLICATE_RUN_ID)
 
-    if event.lifecycle is RunLifecycle.STARTED:
-        run.started_at = event.occurred_at
-        run.remote_pid = event.remote_pid
-    elif event.lifecycle is RunLifecycle.REMOTE_PID_DISCOVERED:
-        if event.remote_pid is None:
+    if event.lifecycle in {RunLifecycle.STARTED, RunLifecycle.REMOTE_PID_DISCOVERED}:
+        if remote_pid is None and event.lifecycle is RunLifecycle.REMOTE_PID_DISCOVERED:
             raise RuntimeError(Locale.JOURNAL_REMOTE_PID_MISSING)
-        run.remote_pid = event.remote_pid
+        if remote_pid is not None:
+            run.remote_pid = remote_pid
     elif event.lifecycle is RunLifecycle.SESSION_DISCOVERED:
-        if event.session_id is None:
+        if session_id is None:
             raise RuntimeError(Locale.JOURNAL_SESSION_ID_MISSING)
-        run.session_id = event.session_id
-        run.session_timestamp = event.occurred_at
-    elif event.lifecycle is RunLifecycle.ROLLOUT_DISCOVERED:
-        if event.rollout_jsonl is None:
-            raise RuntimeError(Locale.JOURNAL_ROLLOUT_PATH_MISSING)
-        run.rollout_jsonl = event.rollout_jsonl
-    elif event.lifecycle is RunLifecycle.PUSH_ACCEPTED:
-        if event.accepted_commit_record_id is None:
-            raise RuntimeError(Locale.JOURNAL_COMMIT_RECORD_ID_MISSING)
-        run.accepted_commit_record_id = event.accepted_commit_record_id
-        run.accepted_at = event.occurred_at
-    elif event.lifecycle is RunLifecycle.CANCEL_REQUESTED:
-        run.cancel_requested_at = event.occurred_at
-    elif event.lifecycle is RunLifecycle.CODEX_EXITED:
-        run.codex_exit_code = event.codex_exit_code
-        run.exited_at = event.occurred_at
-    elif event.lifecycle is RunLifecycle.COMPLETED:
-        run.run_outcome = RunLifecycle.COMPLETED
-    elif event.lifecycle is RunLifecycle.FAILED:
-        run.run_outcome = RunLifecycle.FAILED
-        run.failure_detail = event.detail
-    elif event.lifecycle is RunLifecycle.CANCELLED:
-        run.run_outcome = RunLifecycle.CANCELLED
+        run.session_id = session_id
     run.lifecycle = event.lifecycle
     run.events += (event,)
     return run
 
 
-def replay_run_events(events: Sequence[RunEvent]) -> Mapping[UUID, Run]:
-    runs: dict[UUID, Run] = {}
-    for event in events:
-        runs[event.run_id] = apply_run_event(runs.get(event.run_id), event)
-    return runs
+def latest_run_event(run: Run, lifecycle: RunLifecycle) -> RunEvent | None:
+    return next(
+        (event for event in reversed(run.events) if event.lifecycle is lifecycle),
+        None,
+    )
 
 
 # =============================================================================
@@ -1197,10 +1184,13 @@ class _BackendSupervisor:
                 timeout=BACKEND_AVAILABILITY_TIMEOUT_SECONDS,
             ) as response:
                 emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX,
-                         f"Backend API probe HTTP status: {response.status}")
+                         Locale.BACKEND_API_PROBE_STATUS_LOG_TEMPLATE.format(
+                             status=response.status,
+                         ))
                 return int(response.status) == status.HTTP_200_OK
         except (OSError, urllib_error.URLError, urllib_error.HTTPError) as exc:
-            emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, f"Backend API probe error: {exc!r}")
+            emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX,
+                     Locale.BACKEND_API_PROBE_ERROR_LOG_TEMPLATE.format(error=exc))
             return False
 
     async def start(self, *, namekey: NameKey) -> None:
@@ -1218,8 +1208,9 @@ class _BackendSupervisor:
         arguments = (() if ipc_only else self._context.begin_backend_start())
         self._status = _BackendStatus.STARTING
         emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX,
-                 f"Starting owned Backend: ipc_only={ipc_only}, mode={arguments}, "
-                 f"namekey={namekey}")
+                 Locale.BACKEND_START_LOG_TEMPLATE.format(
+                     ipc_only=ipc_only, mode=arguments, namekey=namekey,
+                 ))
         try:
             process = await asyncio.create_subprocess_exec(
                 *BACKEND_COMMAND_PREFIX,
@@ -1247,22 +1238,23 @@ class _BackendSupervisor:
             await self.wait_until_ready()
             self._process = self._process.model_copy(update={"startup_succeeded": True})
         except BaseException as exc:
-            emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, f"Backend startup failed: {exc!r}")
+            emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX,
+                     Locale.BACKEND_START_FAILED_LOG_TEMPLATE.format(error=exc))
             try:
                 await self._stop()
             finally:
                 self._status = _BackendStatus.FAILED
             raise
         self._status = _BackendStatus.RUNNING
-        emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, f"Owned Backend ready: pid={process.pid}")
+        emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX,
+                 Locale.BACKEND_READY_LOG_TEMPLATE.format(pid=process.pid))
 
     @contextlib.asynccontextmanager
     async def query_connection(self, client: _BackendDatabaseClient) -> AsyncIterator[None]:
         # Serialize temporary-child lifetime with queued Backend starts/stops.
         async with self._lifecycle_lock:
             if self._process is not None or await asyncio.to_thread(client.available):
-                emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX,
-                         "Query IPC borrowing available Backend; ownership unchanged")
+                emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, Locale.QUERY_IPC_BORROWED_LOG)
                 yield  # Borrow an existing Backend; never reset or stop it.
                 return
             await self._start(namekey=None, ipc_only=True)
@@ -1296,37 +1288,17 @@ class _BackendSupervisor:
             socket_path=self._dashboard_socket_path, pipeline_config=self._pipeline_config,
         )
 
-        def request_openapi() -> None:
-            request = urllib_request.Request(BACKEND_OPENAPI_URL, method=HTTP_GET_METHOD)
-            with urllib_request.urlopen(
-                request,
-                timeout=CONTROL_HTTP_TIMEOUT_SECONDS,
-            ) as response:
-                if response.status != status.HTTP_200_OK:
-                    raise RuntimeError(Locale.BACKEND_OPENAPI_NOT_READY)
-
         while loop.time() < deadline:
             if self._process is None or self._process.process.returncode is not None:
                 raise RuntimeError(Locale.BACKEND_EXITED_EARLY)
-            try:
-                if self._process.ipc_only:
-                    if not await asyncio.to_thread(query_client.available):
-                        raise RuntimeError(Locale.BACKEND_OPENAPI_NOT_READY)
-                else:
-                    await asyncio.to_thread(request_openapi)
-                break
-            except (
-                OSError,
-                RuntimeError,
-                urllib_error.URLError,
-                urllib_error.HTTPError,
-            ):
-                await asyncio.sleep(BACKEND_READY_POLL_SECONDS)
-        else:
-            raise TimeoutError(Locale.BACKEND_READY_TIMEOUT)
-
-        if not self._process.ipc_only and (await self.probe_pull())[0] != HTTPStatus.OK:
-            raise RuntimeError(Locale.BACKEND_PULL_NOT_READY)
+            ipc_ready = await asyncio.to_thread(query_client.available)
+            api_ready = self._process.ipc_only or await asyncio.to_thread(
+                self.full_api_available
+            )
+            if ipc_ready and api_ready:
+                return
+            await asyncio.sleep(BACKEND_READY_POLL_SECONDS)
+        raise TimeoutError(Locale.BACKEND_READY_TIMEOUT)
 
     async def probe_pull(self) -> tuple[HTTPStatus, UUID | None]:
         def request_pull() -> tuple[HTTPStatus, UUID | None]:
@@ -1890,7 +1862,7 @@ class _ControlCentreController:
         self._storage = storage
         self._backend = backend
         self._unix_usec: Callable[[datetime], int] = lambda dt: (
-            Run.datetime_to_unix_usec(
+            RunEvent.datetime_to_unix_usec(
                 dt.astimezone(
                     ZoneInfo(self._backend._pipeline_config.timezone)
                 )
@@ -1912,9 +1884,9 @@ class _ControlCentreController:
         self._idle_refresh_lock = asyncio.Lock()
         self._events: list[RunEvent] = []
         self._runs: dict[UUID, Run] = {}
-        self._snapshot = DashboardQuerySnapshot(query_response=QueryResponse(
-            attempts=(), ai_augment_singular_outerdicts=(),
-        ))
+        self._snapshot = DashboardQuerySnapshot(
+            ai_augment_singular_outerdicts=(),
+        )
         self._run_outcome_recorded_run_ids: set[UUID] = set()
         self._run_outcome_lock = asyncio.Lock()
         self._notifications: list[str] = []
@@ -1972,12 +1944,11 @@ class _ControlCentreController:
             return
         restart_time_usec = self._unix_usec(datetime.now())
         for run in tuple(self._runs.values()):
-            if run.dashboard_owned and run.is_running():
+            if run.is_running():
                 await self._codex.terminate_abandoned_run(run)
                 await self._append_run_event(
                     RunEvent(
                         run_id=run.run_id,
-                        namekey=run.namekey,
                         occurred_at_unix_usec=restart_time_usec,
                         lifecycle=RunLifecycle.FAILED,
                         detail=Locale.RESTART_INTERRUPTED_RUN,
@@ -2005,11 +1976,10 @@ class _ControlCentreController:
         await self._wind_down_owned_run_processes()
         shutdown_time_usec = self._unix_usec(datetime.now())
         for run in tuple(self._runs.values()):
-            if run.dashboard_owned and run.is_running():
+            if run.is_running():
                 await self._append_run_event(
                     RunEvent(
                         run_id=run.run_id,
-                        namekey=run.namekey,
                         occurred_at_unix_usec=shutdown_time_usec,
                         lifecycle=RunLifecycle.FAILED,
                         detail=Locale.SHUTDOWN_INTERRUPTED_RUN,
@@ -2030,10 +2000,10 @@ class _ControlCentreController:
         run = await self._append_run_event(
             RunEvent(
                 run_id=run_id,
-                namekey=namekey,
                 occurred_at_unix_usec=self._unix_usec(datetime.now()),
                 lifecycle=RunLifecycle.QUEUED,
-            )
+            ),
+            namekey=namekey,
         )
         queued = self._storage.load_queue()
         queued.append(run_id)
@@ -2065,7 +2035,6 @@ class _ControlCentreController:
         await self._append_run_event(
             RunEvent(
                 run_id=run_id,
-                namekey=run.namekey,
                 occurred_at_unix_usec=self._unix_usec(datetime.now()),
                 lifecycle=RunLifecycle.CANCEL_REQUESTED,
             )
@@ -2084,7 +2053,6 @@ class _ControlCentreController:
                 await self._append_run_event(
                     RunEvent(
                         run_id=run_id,
-                        namekey=run.namekey,
                         occurred_at_unix_usec=self._unix_usec(datetime.now()),
                         lifecycle=RunLifecycle.FAILED,
                         detail=Locale.CODEX_CANCEL_FAILED_TEMPLATE.format(error=exc),
@@ -2100,7 +2068,6 @@ class _ControlCentreController:
             await self._append_run_event(
                 RunEvent(
                     run_id=run_id,
-                    namekey=run.namekey,
                     occurred_at_unix_usec=self._unix_usec(datetime.now()),
                     lifecycle=RunLifecycle.CANCELLED,
                 )
@@ -2130,44 +2097,48 @@ class _ControlCentreController:
 
     async def probe_all(self) -> None:
         if self._probe_lock.locked():
-            emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, "Probe skipped: already in progress")
+            emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, Locale.PROBE_ALREADY_IN_PROGRESS_LOG)
             return
         async with self._probe_lock:
             self._backend_availability = _BackendAvailability()
-            emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, "Probing IPC OPTIONS /query")
+            emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, Locale.PROBE_IPC_START_LOG)
             ipc_available = await asyncio.to_thread(self._probe_ipc)
             emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX,
-                     f"Probe IPC OPTIONS /query: {ipc_available}")
+                     Locale.PROBE_IPC_RESULT_LOG_TEMPLATE.format(available=ipc_available))
             self._backend_availability = _BackendAvailability(**{
                 **self._backend_availability.model_dump(),
                 "ipc_available": ipc_available,
             })
-            emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, "Probing Backend API GET /openapi.json")
+            emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, Locale.PROBE_BACKEND_START_LOG)
             full_api_available = await asyncio.to_thread(self._backend.full_api_available)
             emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX,
-                     f"Probe Backend API GET /openapi.json: {full_api_available}")
+                     Locale.PROBE_BACKEND_RESULT_LOG_TEMPLATE.format(
+                         available=full_api_available,
+                     ))
             self._backend_availability = _BackendAvailability(**{
                 **self._backend_availability.model_dump(),
                 "full_api_available": full_api_available,
             })
-            emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, "Probing Lima/SSH connect")
+            emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, Locale.PROBE_SSH_START_LOG)
             ssh_available = await self._codex.probe_ssh()
             emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX,
-                     f"Probe Lima/SSH connect: {ssh_available}")
+                     Locale.PROBE_SSH_RESULT_LOG_TEMPLATE.format(available=ssh_available))
             self._backend_availability = _BackendAvailability(**{
                 **self._backend_availability.model_dump(),
                 "ssh_available": ssh_available,
             })
-            emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, "Probing Codex login status")
+            emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, Locale.PROBE_CODEX_AUTH_START_LOG)
             codex_authenticated = await self._codex.probe_auth() if ssh_available else None
             emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX,
-                     f"Probe Codex login status: {codex_authenticated} (None = SSH unavailable)")
+                     Locale.PROBE_CODEX_AUTH_RESULT_LOG_TEMPLATE.format(
+                         authenticated=codex_authenticated,
+                     ))
             self._backend_availability = _BackendAvailability(**{
                 **self._backend_availability.model_dump(),
                 "codex_authenticated": codex_authenticated,
                 "checked_at": datetime.now(timezone.utc),
             })
-            logger.info("Dashboard probes: %s", self._backend_availability)
+            logger.info(Locale.DASHBOARD_PROBES_LOG, self._backend_availability)
 
     def accept_query_snapshot(self, snapshot: DashboardQuerySnapshot) -> None:
         self._snapshot = snapshot
@@ -2294,7 +2265,7 @@ class _ControlCentreController:
             if run.run_id in queued:
                 queued.remove(run.run_id)
                 self._storage.save_queue(queued)
-            if run.run_outcome is RunLifecycle.CANCELLED:
+            if run.lifecycle is RunLifecycle.CANCELLED:
                 return
             if not await self._wait_until_codex_idle(run=run):
                 return
@@ -2310,7 +2281,10 @@ class _ControlCentreController:
                 )
             raise
         except Exception as exc:
-            cancelled = run.cancel_requested_at is not None and run.failure_detail is None
+            cancelled = (
+                latest_run_event(run, RunLifecycle.CANCEL_REQUESTED) is not None
+                and latest_run_event(run, RunLifecycle.FAILED) is None
+            )
             if not run.is_finished():
                 run_outcome = (
                     RunLifecycle.CANCELLED if cancelled else RunLifecycle.FAILED
@@ -2322,7 +2296,6 @@ class _ControlCentreController:
                 await self._append_run_event(
                     RunEvent(
                         run_id=run.run_id,
-                        namekey=run.namekey,
                         occurred_at_unix_usec=self._unix_usec(datetime.now()),
                         lifecycle=run_outcome,
                         detail=None if cancelled else str(exc),
@@ -2340,7 +2313,6 @@ class _ControlCentreController:
                     await self._append_run_event(
                         RunEvent(
                             run_id=run.run_id,
-                            namekey=run.namekey,
                             occurred_at_unix_usec=self._unix_usec(datetime.now()),
                             lifecycle=RunLifecycle.FAILED,
                             detail=Locale.RUN_PROCESS_CLEANUP_FAILED_TEMPLATE.format(
@@ -2383,7 +2355,7 @@ class _ControlCentreController:
     async def _wait_until_codex_idle(self, *, run: Run) -> bool:
         while True:
             await self.refresh_idle_state()
-            if run.run_outcome is RunLifecycle.CANCELLED:
+            if run.lifecycle is RunLifecycle.CANCELLED:
                 return False
             if not self._external_codex_busy:
                 return True
@@ -2412,29 +2384,25 @@ class _ControlCentreController:
         await self._append_run_event(
             RunEvent(
                 run_id=run.run_id,
-                namekey=run.namekey,
                 occurred_at_unix_usec=self._unix_usec(
                     result.session_timestamp,
                 ),
                 lifecycle=RunLifecycle.SESSION_DISCOVERED,
-                session_id=result.session_id,
-            )
+            ),
+            session_id=result.session_id,
         )
         # Run.lifecycle -> RunLifecycle.SESSION_DISCOVERED
 
         await self._append_run_event(
             RunEvent(
                 run_id=run.run_id,
-                namekey=run.namekey,
                 occurred_at_unix_usec=self._unix_usec(datetime.now()),
                 lifecycle=RunLifecycle.ROLLOUT_DISCOVERED,
-                session_id=result.session_id,
-                rollout_jsonl=result.rollout_jsonl,
             )
         )
         # Run.lifecycle -> RunLifecycle.ROLLOUT_DISCOVERED
         await self._backend.supply_session_id(result.session_id)
-        if run.cancel_requested_at is not None:
+        if latest_run_event(run, RunLifecycle.CANCEL_REQUESTED) is not None:
             await self._record_run_outcome(
                 run=run,
                 run_outcome=RunLifecycle.CANCELLED,
@@ -2444,10 +2412,9 @@ class _ControlCentreController:
         await self._append_run_event(
             RunEvent(
                 run_id=run.run_id,
-                namekey=run.namekey,
                 occurred_at_unix_usec=self._unix_usec(datetime.now()),
                 lifecycle=RunLifecycle.CODEX_EXITED,
-                codex_exit_code=exit_code,
+                detail=Locale.CODEX_EXIT_DETAIL_TEMPLATE.format(exit_code=exit_code),
             )
         )
         # Run.lifecycle -> RunLifecycle.CODEX_EXITED
@@ -2460,10 +2427,8 @@ class _ControlCentreController:
         await self._append_run_event(
             RunEvent(
                 run_id=run.run_id,
-                namekey=run.namekey,
                 occurred_at_unix_usec=self._unix_usec(datetime.now()),
                 lifecycle=run_outcome,
-                codex_exit_code=exit_code,
             )
         )
         # Run.lifecycle -> run_outcome
@@ -2476,7 +2441,7 @@ class _ControlCentreController:
             raise RuntimeError(Locale.CODEX_HANDLE_MISMATCH)
         self._active_codex = handle
         run = handle.run
-        if run.started_at is None:
+        if latest_run_event(run, RunLifecycle.STARTED) is None:
             lifecycle = RunLifecycle.STARTED
         elif handle.remote_pid is not None and run.remote_pid != handle.remote_pid:
             lifecycle = RunLifecycle.REMOTE_PID_DISCOVERED
@@ -2485,15 +2450,14 @@ class _ControlCentreController:
         await self._append_run_event(
             RunEvent(
                 run_id=run.run_id,
-                namekey=run.namekey,
                 occurred_at_unix_usec=self._unix_usec(datetime.now()),
                 lifecycle=lifecycle,
-                remote_pid=(None if handle.remote_pid is None else int(handle.remote_pid)),
-            )
+            ),
+            remote_pid=(None if handle.remote_pid is None else int(handle.remote_pid)),
         )
 
     async def _finalize_run(self, *, run: Run) -> tuple[RunLifecycle, UUID | None]:
-        if run.cancel_requested_at is not None:
+        if latest_run_event(run, RunLifecycle.CANCEL_REQUESTED) is not None:
             return RunLifecycle.CANCELLED, None
         response_code, validation_record_id = await self._backend.probe_pull()
         emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX,
@@ -2552,22 +2516,33 @@ class _ControlCentreController:
     async def _append_run_event(
         self,
         event: RunEvent,
+        *,
+        namekey: NameKey | None = None,
+        session_id: UUID | None = None,
+        remote_pid: int | None = None,
     ) -> Run:
+        run = apply_run_event(
+            self._runs.get(event.run_id),
+            event,
+            namekey=namekey,
+            session_id=session_id,
+            remote_pid=remote_pid,
+        )
+        self._runs[event.run_id] = run
         events = [*self._events, event]
+        self._storage.save_runs(tuple(self._runs.values()))
         self._storage.save_run_events(events)
         self._events = events
-        run = apply_run_event(self._runs.get(event.run_id), event)
-        self._runs[event.run_id] = run
         if event.lifecycle is not RunLifecycle.FAILED:
             emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX,
-                     f"Run {event.run_id}: {event.lifecycle.value}; namekey={event.namekey}; "
+                     f"Run {event.run_id}: {event.lifecycle.value}; namekey={run.namekey}; "
                      f"detail={event.detail or ''}")
         if event.lifecycle is RunLifecycle.FAILED:
             emit_log(
                 Locale.CONTROL_CENTRE_LOG_PREFIX,
                 Locale.RUN_FAILED_LOG_TEMPLATE.format(
                     run_id=event.run_id,
-                    namekey=event.namekey,
+                    namekey=run.namekey,
                     detail=event.detail or "unspecified",
                 ),
             )
@@ -2575,7 +2550,17 @@ class _ControlCentreController:
 
     def _load_dashboard_storage(self) -> None:
         self._events = self._storage.load_run_events()
-        self._runs = dict(replay_run_events(self._events))
+        self._runs = self._storage.load_runs()
+        if (
+            sum(len(run.events) for run in self._runs.values()) != len(self._events)
+            or any(
+                run.events != tuple(
+                    event for event in self._events if event.run_id == run.run_id
+                )
+                for run in self._runs.values()
+            )
+        ):
+            raise RuntimeError(Locale.JOURNAL_STORAGE_INVALID)
         snapshot = self._storage.load_query_snapshot()
         if snapshot is not None:
             self._snapshot = snapshot
@@ -2913,8 +2898,8 @@ class _ControlCentrePage:
                 wrap_text=True,
             ),
             AgGrid.column(
-                field=GRID_COMMIT_RECORD_ID_FIELD,
-                header=KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL,
+                field=GRID_COMMIT_REQUEST_RECORD_ID_FIELD,
+                header=KTP_AI_AUGMENT_COMMIT_REQUEST_RECORD_ID_COL,
                 width=GRID_ATTEMPT_COLUMN_WIDTH,
             ),
             AgGrid.column(
@@ -2955,8 +2940,8 @@ class _ControlCentrePage:
                 label=GRID_STATUS_FIELD,
             ),
             nicegui_table_column(
-                field=GRID_COMMIT_RECORD_ID_FIELD,
-                label=KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL,
+                field=GRID_COMMIT_REQUEST_RECORD_ID_FIELD,
+                label=KTP_AI_AUGMENT_COMMIT_REQUEST_RECORD_ID_COL,
             ),
             nicegui_table_column(
                 field=GRID_RUN_OUTCOME_SNAPSHOT_FIELD,
@@ -3023,7 +3008,7 @@ class _ControlCentrePage:
                 GRID_TABLE_1_VALUE_FIELD: latest.table_1_value,
                 GRID_FOOTNOTES_FIELD: latest.footnotes,
                 GRID_FOOTNOTE_ARGUMENTS_FIELD: latest.footnote_arguments,
-                GRID_COMMIT_RECORD_ID_FIELD: latest.commit_record_id,
+                GRID_COMMIT_REQUEST_RECORD_ID_FIELD: latest.commit_request_record_id,
                 GRID_ATTEMPT_TIMESTAMP_FIELD: (
                     None
                     if latest.timestamp is None
@@ -3044,11 +3029,11 @@ class _ControlCentrePage:
         return [
             {
                 GRID_ROW_ID_FIELD: str(
-                    attempt.commit_record_id if attempt.commit_record_id is not None
+                    attempt.commit_request_record_id if attempt.commit_request_record_id is not None
                     else attempt.run_id
                 ),
                 GRID_RUN_ID_FIELD: (str(attempt.run_id) if attempt.run_id is not None else None),
-                GRID_COMMIT_RECORD_ID_FIELD: attempt.commit_record_id,
+                GRID_COMMIT_REQUEST_RECORD_ID_FIELD: attempt.commit_request_record_id,
                 GRID_ATTEMPT_TIMESTAMP_FIELD: (
                     None
                     if attempt.timestamp is None
@@ -3120,7 +3105,8 @@ class _ControlCentrePage:
         try:
             await self._controller.probe_all()
         except Exception as exc:
-            emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, f"Dashboard probes failed: {exc!r}")
+            emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX,
+                     Locale.DASHBOARD_PROBES_FAILED_LOG_TEMPLATE.format(error=exc))
             raise
         finally:
             if self._handles.probe_button is not None:
@@ -3128,11 +3114,12 @@ class _ControlCentrePage:
             await self.refresh()
 
     async def refresh_from_ipc(self) -> None:
-        emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, "Query IPC requested")
+        emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, Locale.QUERY_IPC_REQUESTED_LOG)
         try:
             await self._query_ipc()
         except RuntimeError as exc:
-            emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, f"Query IPC failed: {exc!r}")
+            emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX,
+                     Locale.QUERY_IPC_FAILED_LOG_TEMPLATE.format(error=exc))
             ui.notify(Locale.BACKEND_DATABASE_REQUEST_FAILED, type="negative")
         else:
             self._clear_displayed_card()
@@ -3580,18 +3567,17 @@ def create_services(*, config_path: Path) -> _ApplicationServices:
         try:
             async with backend.query_connection(backend_database):
                 response = await asyncio.to_thread(
-                    backend_database.send_query_request, QueryRequest(),
+                    backend_database.send_query_request,
                 )
             # Storage and the controller reference change together, after child cleanup.
-            snapshot = storage.replace_query_response(response)
+            snapshot = storage.replace_query_snapshot(response)
             controller.accept_query_snapshot(snapshot)
         except Exception as exc:
-            logger.exception("Dashboard query snapshot replacement failed")
+            logger.exception(Locale.DASHBOARD_QUERY_REPLACE_FAILED_LOG)
             raise RuntimeError(Locale.BACKEND_DATABASE_RESPONSE_INVALID) from exc
         emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX,
                  f"Dashboard snapshot replaced: {len(snapshot.ai_augment_singular_outerdicts)} "
-                 f"researchers, {len(response.attempts)} attempts, "
-                 f"{len(response.run_outcome_records)} run outcomes")
+                 f"researchers, {len(snapshot.committed_by_id)} completed augmentations")
 
     return _ApplicationServices(
         configuration=configuration, storage=storage, backend=backend,
@@ -3663,14 +3649,14 @@ async def publish_completed(services: _ApplicationServices) -> None:
         destination = config.output_dir / card.docx_filename
         emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX,
                  f"[{index}/{len(cards)}] Rendering {destination}")
-        logger.info("[%d/%d] Rendering %s", index, len(cards), destination)
+        logger.info(Locale.PUBLISH_RENDER_LOG, index, len(cards), destination)
         docx = await asyncio.to_thread(card.render_docx, config.pandoc_reference_docx)
         await asyncio.to_thread(destination.write_bytes, docx)
         emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX,
                  f"[{index}/{len(cards)}] Written {destination}: {len(docx)} bytes")
-        logger.info("[%d/%d] Written %s", index, len(cards), destination)
+        logger.info(Locale.PUBLISH_WRITTEN_LOG, index, len(cards), destination)
     emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, f"Publishing finished: {len(cards)} DOCX files")
-    logger.info("Publishing finished: %d DOCX files", len(cards))
+    logger.info(Locale.PUBLISH_FINISHED_LOG, len(cards))
 
 
 async def publish_completed_and_shutdown() -> None:
@@ -3680,7 +3666,7 @@ async def publish_completed_and_shutdown() -> None:
     except Exception as exc:
         APPLICATION_EXIT_CODE = 1
         emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, f"Publishing failed: {exc!r}")
-        logger.exception("Publishing completed researchers failed")
+        logger.exception(Locale.PUBLISH_FAILED_LOG)
     finally:
         app.shutdown()
 
@@ -3709,7 +3695,7 @@ async def application_startup() -> None:
     except Exception as exc:
         APPLICATION_EXIT_CODE = 1
         emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, f"Dashboard startup failed: {exc!r}")
-        logger.exception("Dashboard startup failed")
+        logger.exception(Locale.DASHBOARD_STARTUP_FAILED_LOG)
         app.shutdown()
 
 

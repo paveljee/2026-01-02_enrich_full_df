@@ -564,8 +564,9 @@ def test_inspect_open_flags_include_nonblock(
         captured["flags"] = flags
         raise FileNotFoundError
 
-    monkeypatch.setattr(aw.os, "open", fake_open)
-    watcher.inspect(str(root / "missing"))
+    with monkeypatch.context() as patch:
+        patch.setattr(aw.os, "open", fake_open)
+        watcher.inspect(str(root / "missing"))
     assert captured["flags"] & os.O_NONBLOCK
 
 

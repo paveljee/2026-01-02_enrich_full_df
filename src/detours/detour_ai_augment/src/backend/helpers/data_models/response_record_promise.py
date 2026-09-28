@@ -14,7 +14,6 @@ from src.detours.detour_ai_augment.protected.src.architecture import (
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
 from src.helpers.architecture import FrozenStrictModel, implements
-from src.helpers.data_models.http_request_log import HttpRequestLogRecord
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +37,7 @@ class BackendStoreException(RuntimeError):
 
 
 # Exposed to structural type-checking through `@implements`
-# under `ResponseRecordPromise.response_record`'s return type;
+# under `ResponseRecordPromise.response_record_promise`'s return type;
 # signed off: human
 type ResponseRecordPromiseResult[R] = Annotated[
     tuple[R, None] | tuple[None, BackendStoreException],
@@ -46,8 +45,10 @@ type ResponseRecordPromiseResult[R] = Annotated[
 ]
 
 
-@implements[BackendComponent.ResponseRecordPromiseProperty[HttpRequestLogRecord]]()
-class ResponseRecordPromise[R: HttpRequestLogRecord](FrozenStrictModel):
+@implements[
+    BackendComponent.ResponseRecordPromiseProperty[BackendComponent.ResponseRecordProperty]
+]()
+class ResponseRecordPromise[R: BackendComponent.ResponseRecordProperty](FrozenStrictModel):
     """Request durability and a shielded, Store-owned application result.
 
     The initial handle is not completion. Required response persistence precedes
@@ -88,7 +89,7 @@ class ResponseRecordPromise[R: HttpRequestLogRecord](FrozenStrictModel):
         promise._future = asyncio.run_coroutine_threadsafe(complete(), loop)
         return promise
 
-    async def response_record(self) -> ResponseRecordPromiseResult[R]:
+    async def response_record_promise(self) -> ResponseRecordPromiseResult[R]:
         if self._result is not None:
             return self._result
         if self._future is None:

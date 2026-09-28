@@ -31,7 +31,7 @@ from src.detours.detour_ai_augment.src.backend.helpers.vars import AI_AUGMENT_CO
 from src.detours.detour_ai_augment.tests.operator import test_operator_e2e as operator_support
 
 from src.detours.detour_ai_augment.protected.src.backend import ipc
-from src.detours.detour_ai_augment.src.backend import api
+from src.detours.detour_ai_augment.protected.src.backend import api
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_context import (
     AiAugmentBackendContext,
 )

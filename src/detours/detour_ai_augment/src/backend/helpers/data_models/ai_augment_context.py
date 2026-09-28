@@ -2,15 +2,15 @@ from __future__ import annotations
 
 import csv
 import json
-import re
+import logging
 from collections import Counter
 from collections.abc import Mapping
-from functools import cached_property
 from pathlib import Path
 from random import Random
+from typing import Any
 
 import duckdb
-from pydantic import Field, computed_field
+from pydantic import BaseModel, ConfigDict, Field
 
 from src.detours.detour_ai_augment.protected.src.architecture import (
     BackendComponent,
@@ -21,13 +21,24 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_
 from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     AI_AUGMENT_RND_START,
+    DRAW_PILOT_PREFIX,
+    DRAW_SORT_PART,
     EXCLUDED_NAMEKEY,
+    EXPECTED_ELIGIBLE_RESEARCHERS,
+    EXPECTED_GROUND_TRUTH_RESEARCHERS,
+    EXPECTED_INELIGIBILITY_COUNTS,
+    EXPECTED_INELIGIBLE_RESEARCHERS,
+    EXPECTED_MULTIDRAW_SOURCE_RESEARCHERS,
+    EXPECTED_NO_GROUND_TRUTH_RESEARCHERS,
+    EXPECTED_SOURCE_RESEARCHERS,
     GROUND_TRUTH_DEF,
     INELIGIBLE_RELEASE_BATCH,
+    MAP_COLUMNS,
     MAP_SUBSET_0_TO_BATCH_KEY,
     NO_GROUND_TRUTH_DEF,
     NO_GROUND_TRUTH_SSN_COUNT,
     TEXT_ENCODING,
+    VALID_NONBLANK,
     AiAugmentCohort,
     AiAugmentIneligibilityCategory,
 )
@@ -59,35 +70,7 @@ from src.helpers.vars import (
 
 from .ai_augment_singular_outer_dict import AiAugmentSingularOuterDict
 
-MAP_COLUMNS = (DRAW_LABEL, BATCH_LABEL)
-
-EXPECTED_GROUND_TRUTH_RESEARCHERS = 196
-EXPECTED_NO_GROUND_TRUTH_RESEARCHERS = 78
-EXPECTED_ELIGIBLE_RESEARCHERS = 274
-EXPECTED_INELIGIBLE_RESEARCHERS = 33
-EXPECTED_SOURCE_RESEARCHERS = (
-    EXPECTED_ELIGIBLE_RESEARCHERS + EXPECTED_INELIGIBLE_RESEARCHERS
-)
-EXPECTED_MULTIDRAW_SOURCE_RESEARCHERS = 5
-
-EXPECTED_INELIGIBILITY_COUNTS = {
-    AiAugmentIneligibilityCategory.EXCLUDED_DUPLICATE_NAMEKEY: 1,
-    AiAugmentIneligibilityCategory.RELEASE_BATCH_SUBSET_8: 3,
-    AiAugmentIneligibilityCategory.STAGING_PARTITION_2: 7,
-    AiAugmentIneligibilityCategory.STAGING_PARTITION_4_XLSX_NON_EXACT: 6,
-    AiAugmentIneligibilityCategory.STAGING_PARTITION_4_MULTIPLE_SSN: 16,
-}
-DRAW_PILOT_PREFIX = "pilot."
-DRAW_SORT_PART = re.compile(r"\d+|\D+")
-
-
-def _valid_nonblank(value: object) -> bool:
-    return (
-        isinstance(value, str)
-        and bool(value.strip())
-        and value == value.strip()
-        and not any(ord(character) < 32 or ord(character) == 127 for character in value)
-    )
+logger = logging.getLogger(__name__)
 
 
 def _load_release_batches(path: Path) -> dict[str, str]:
@@ -105,7 +88,7 @@ def _load_release_batches(path: Path) -> dict[str, str]:
             for row_number, row in enumerate(reader, start=2):
                 draw_number = row.get(DRAW_LABEL)
                 release_batch = row.get(BATCH_LABEL)
-                if not _valid_nonblank(draw_number) or not _valid_nonblank(
+                if not VALID_NONBLANK(draw_number) or not VALID_NONBLANK(
                     release_batch
                 ):
                     raise ValueError(
@@ -426,7 +409,7 @@ def _derive_ai_augment_singular_outerdicts(
                 xlsx_innerdicts=xlsx_innerdicts.get(namekey, ()),
                 ssn_innerdicts=ssn_innerdicts.get(namekey, ()),
                 docx_innerdicts=docx_innerdicts.get(namekey, ()),
-                committed_innerdicts=(),
+                codex_innerdicts=(),
                 ai_augment_rnd=rnd_by_namekey[namekey],
                 ai_augment_cohort=cohort,
                 ai_augment_ineligibility_category=ineligibility_category,
@@ -475,55 +458,80 @@ def _derive_ai_augment_singular_outerdicts(
     return tuple(singular_outerdicts)
 
 
-@implements[BackendComponent.ContextProperty]()
+def _load_ai_augment_singular_outerdict_blueprints(
+    validated_data: dict[str, Any],
+) -> tuple[AiAugmentSingularOuterDict, ...]:
+    pipeline_config: AiAugmentDetourConfig = validated_data["pipeline_config"]
+    logger.info(
+        Locale.SOURCE_RESEARCHERS_LOADING_LOG,
+        pipeline_config.db_file,
+    )
+    release_batches = _load_release_batches(Path(pipeline_config.release_map))
+    source_conn: duckdb.DuckDBPyConnection | None = None
+    try:
+        source_conn = duckdb.connect(str(pipeline_config.db_file), read_only=True)
+        return _derive_ai_augment_singular_outerdicts(
+            source_conn,
+            release_batches,
+            sample_seed=pipeline_config.sample_seed,
+        )
+    except duckdb.Error as exc:
+        raise ValueError(Locale.SOURCE_DUCKDB_VALIDATION_FAILED) from exc
+    finally:
+        if source_conn is not None:
+            source_conn.close()
+
+
+@implements[BackendComponent.ContextProperty, BaseModel](
+    model_config=ConfigDict(extra="forbid", frozen=True, strict=True),
+)
 class AiAugmentBackendContext(FrozenStrictModel):
     pipeline_config: AiAugmentDetourConfig
     configured_namekey: NameKey | None = None
-    cached_ai_augment_singular_outerdicts: tuple[AiAugmentSingularOuterDict, ...] | None = Field(
-        default=None,
+    ai_augment_singular_outerdict_blueprints: tuple[AiAugmentSingularOuterDict, ...] = Field(
+        default_factory=_load_ai_augment_singular_outerdict_blueprints,
         exclude=True,
         repr=False,
     )
-
-    def ai_augment_singular_outerdicts_factory(self) -> tuple[AiAugmentSingularOuterDict, ...]:
-        if self.cached_ai_augment_singular_outerdicts is not None:
-            return self.cached_ai_augment_singular_outerdicts
-        release_map = self.pipeline_config.release_map
-        release_batches = _load_release_batches(Path(release_map))
-        source_conn: duckdb.DuckDBPyConnection | None = None
-        try:
-            source_conn = duckdb.connect(
-                str(self.pipeline_config.db_file),
-                read_only=True,
-            )
-            return _derive_ai_augment_singular_outerdicts(
-                source_conn,
-                release_batches,
-                sample_seed=self.pipeline_config.sample_seed,
-            )
-        except duckdb.Error as exc:
-            raise ValueError(Locale.SOURCE_DUCKDB_VALIDATION_FAILED) from exc
-        finally:
-            if source_conn is not None:
-                source_conn.close()
-
-    @computed_field(repr=False)  # type: ignore[prop-decorator]
-    @cached_property
-    def ai_augment_singular_outerdicts(self) -> tuple[AiAugmentSingularOuterDict, ...]:
-        return self.ai_augment_singular_outerdicts_factory()
 
     def configured_ai_augment_singular_outerdict(
         self,
     ) -> AiAugmentSingularOuterDict | None:
         if self.configured_namekey is None:
             return None
-        matches = tuple(
-            singular_outerdict
-            for singular_outerdict in self.ai_augment_singular_outerdicts
-            if singular_outerdict.namekey == self.configured_namekey
+        configured = next(
+            (
+                blueprint
+                for blueprint in self.ai_augment_singular_outerdict_blueprints
+                if blueprint.namekey == self.configured_namekey
+            ),
+            None,
         )
-        if len(matches) != 1:
+        if configured is not None:
+            if configured.ai_augment_cohort is not AiAugmentCohort.INELIGIBLE:
+                return configured
+            category = configured.ai_augment_ineligibility_category
+            if category is None:
+                raise ValueError(Locale.INELIGIBILITY_CATEGORY_UNKNOWN)
             raise ValueError(
-                "configured AI augment singular outerdict is missing or duplicated"
+                Locale.CONFIGURED_NAMEKEY_INELIGIBLE_TEMPLATE.format(category=category.value)
             )
-        return matches[0]
+        stripped_identity = (
+            self.configured_namekey.first_name.strip(),
+            self.configured_namekey.last_name.strip(),
+        )
+        suggestions = sorted({
+            blueprint.namekey.to_json_key()
+            for blueprint in self.ai_augment_singular_outerdict_blueprints
+            if (
+                blueprint.namekey.first_name.strip(),
+                blueprint.namekey.last_name.strip(),
+            ) == stripped_identity
+        })
+        if suggestions:
+            raise ValueError(
+                Locale.CONFIGURED_NAMEKEY_NOT_FOUND_SUGGESTIONS_TEMPLATE.format(
+                    suggestions=" or ".join(suggestions)
+                )
+            )
+        raise ValueError(Locale.CONFIGURED_NAMEKEY_NOT_FOUND)

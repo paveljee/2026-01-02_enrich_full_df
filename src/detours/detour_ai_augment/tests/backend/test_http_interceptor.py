@@ -16,29 +16,37 @@ import requests
 from fastapi import FastAPI
 from starlette.types import Message, Scope
 
+from src.detours.detour_ai_augment.protected.src.backend import api
+from src.detours.detour_ai_augment.protected.src.backend.helpers import vars as backend_vars
 from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
+from src.detours.detour_ai_augment.protected.src.backend.helpers.post_commit_validation import (  # noqa: E501
+    PostCommitValidation,
+)
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     DOCX_COLUMNS,
-    KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL,
+    KTP_AI_AUGMENT_COMMIT_REQUEST_RECORD_ID_COL,
     KTP_AI_AUGMENT_EDUCATION_COL,
     KTP_AI_AUGMENT_RUN_OUTCOME_RECORD_ID_COL,
     KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_RECORD_COL,
     KTP_AI_AUGMENT_VALIDATION_RECORD_ID_COL,
+    SOURCE_KEY_HEADER,
     ContentType,
 )
-from src.detours.detour_ai_augment.src.backend import api, server
+from src.detours.detour_ai_augment.src.backend import server
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_backend_store import (  # noqa: E501
     AiAugmentBackendStore,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_context import (  # noqa: E501
     AiAugmentBackendContext,
 )
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.commit_event import (
-    SOURCE_KEY_HEADER,
-    BackendCommitRecord,
-    BackendLifecycle,
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.commit_request import (
+    BackendCommitRequestRecord,
     CodexRolloutRecord,
     CodexSessionRecord,
+    _synthetic_commit_request_record,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.lifecycle import (
+    BackendLifecycle,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.model_http_interceptor import (  # noqa: E501
     ModelHttpInterceptor,
@@ -47,35 +55,29 @@ from src.detours.detour_ai_augment.src.backend.helpers.data_models.model_http_in
     model_http_context,
     request_body,
 )
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.query_response import (
-    AgentRuntimeAttemptRecord,
-    QueryResponse,
-)
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.request_response_records import (
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.pull_event import (
     PullRequestRecord,
+    PullResponseRecord,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.push_event import (
     PushRequestRecord,
-    PushResponseRecord,
-    RunOutcomeRequestRecord,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.response_record_promise import (
     BackendStoreAcknowledgment,
 )
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.run_outcome_record import (
-    RunOutcomeResponseRecord,
-)
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.validation_event import (  # noqa: E501
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.validation_request import (  # noqa: E501
     VALIDATE_PATH,
     BackendValidationRecord,
-    PostCommitValidation,
     ValidationRequestBody,
 )
 from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.dashboard_query_snapshot import (  # noqa: E501
     DashboardQuerySnapshot,
 )
-from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.run_outcome import (  # noqa: E501
+from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.run_outcome_event import (  # noqa: E501
     NAME_KEY_HEADER,
     RunOutcomePath,
-    RunOutcomeRequest,
+    RunOutcomeRequestRecord,
+    RunOutcomeResponseRecord,
 )
 from src.detours.detour_ai_augment.tests.backend import test_api as fixtures
 from src.detours.detour_ai_augment.tests.backend.test_api import (
@@ -104,7 +106,7 @@ def validation_http_record() -> HttpRequestLogRecord:
         original_pull_record_id=uuid7(), session_id=uuid7(), attempt_id="validation-model",
     )
     body = ValidationRequestBody(
-        commit_record=commit,
+        commit_request_record=commit,
         post_commit_validation=PostCommitValidation(
             stage=BackendLifecycle.PYDANTIC_VALIDATION,
             result=BackendLifecycle.REJECTED,
@@ -112,7 +114,7 @@ def validation_http_record() -> HttpRequestLogRecord:
             submission_type=None,
             submission=None,
         ),
-        initial_validation_record=None,
+        initial_validation_request_record=None,
     )
     return HttpRequestLogRecord(
         schema_version="1.1", method="POST", scheme="http", host="invalid",
@@ -134,7 +136,7 @@ def test_validation_record_preserves_wire_json_and_uuid(
     assert record.validation_request_body == ValidationRequestBody.from_serialized_json(
         validation_http_record.request_body or "",
     )
-    assert api._validated_http_record(record) == validation_http_record
+    assert AiAugmentBackendStore._validated_http_record(record) == validation_http_record
 
 
 @pytest.mark.parametrize(("field", "value"), (
@@ -189,12 +191,19 @@ def backend_store(runtime: AiAugmentBackendContext) -> AiAugmentBackendStore:
     return store
 
 
+def query_snapshot(store: AiAugmentBackendStore) -> DashboardQuerySnapshot:
+    return DashboardQuerySnapshot(
+        ai_augment_singular_outerdicts=store.ai_augment_singular_outerdicts(),
+    )
+
+
 def commit(
     store: AiAugmentBackendStore,
     payload: dict[str, Any],
     rollout_payload: dict[str, Any],
     pull: HttpRequestLogRecord | None = None,
     *,
+    session_id: UUID = UUID(OPERATOR_CAPTURED_SESSION_ID),
     rollout_suffix: bytes = b"",
     web_arguments: dict[str, object] | None = None,
 ) -> UUID:
@@ -223,7 +232,7 @@ def commit(
             request_body=json.dumps(payload),
         )
     )
-    rollout_bytes = operator_capture_rollout(rollout_payload)
+    rollout_bytes = operator_capture_rollout(rollout_payload, session_id=session_id)
     if web_arguments is not None:
         records = [json.loads(line) for line in rollout_bytes.splitlines()]
         for record in records:
@@ -239,12 +248,12 @@ def commit(
     blob.parent.mkdir(parents=True, exist_ok=True)
     blob.write_bytes(rollout_bytes)
     relative = PurePosixPath(
-        f"2026/09/03/rollout-2026-09-03T15-16-00-{OPERATOR_CAPTURED_SESSION_ID}.jsonl"
+        f"2026/09/03/rollout-2026-09-03T15-16-00-{session_id}.jsonl"
     )
-    draft = api._synthetic_commit_record(
+    draft = _synthetic_commit_request_record(
         pull_record=pull,
         push_record=push,
-        session_id=UUID(OPERATOR_CAPTURED_SESSION_ID),
+        session_id=session_id,
         rollout=CodexRolloutRecord(
             sha256=digest,
             size=len(rollout_bytes),
@@ -304,20 +313,22 @@ def test_live_validation_replays_with_only_referenced_http(
                     response_code=503,
                 ).model_dump()
             )
-            observed.append(store.pull(record).acknowledgment)
+            pulled = store.pull_response_record(record)
+            observed.append(pulled.acknowledgment)
+            pull_response, pull_error = asyncio.run(pulled.response_record_promise())
+            assert pull_error is None and pull_response is not None
             rejected = PushRequestRecord(
                 **persisted_http_record(
                     record_id=uuid7(), method="POST", path="/push",
                     response_code=HTTPStatus.CONFLICT, request_body="{}",
                 ).model_dump(),
-                pull_record_id=None, session_id=None,
             )
-            result = store.push(rejected)
+            result = store.push_response_record(rejected, session_id=None)
             observed.append(result.acknowledgment)
-            response, error = asyncio.run(result.response_record())
+            response, error = asyncio.run(result.response_record_promise())
             assert error is None and response is not None
             assert response.response_code == HTTPStatus.CONFLICT
-            assert response.commit_record is None and response.validation_record is None
+            assert response.pull_response_record is None
 
         thread = threading.Thread(target=busy_pull)
         thread.start()
@@ -347,16 +358,23 @@ def test_live_validation_replays_with_only_referenced_http(
     assert isinstance(education, dict)
     education["web_search_excerpts"][0]["excerpt"] = "not verified"
     with store._writable(runtime):
-        assert store.initial_validation_record is None
+        assert store.current_replayed_response_record is None
         baseline_id = commit(store, baseline, accepted)
-        assert store._query_snapshot().attempts == ()
+        assert all(
+            not researcher.codex_innerdicts
+            for researcher in query_snapshot(store).ai_augment_singular_outerdicts
+        )
         rejected = store._validate_commit(baseline_id)
-        assert rejected.attempt.post_commit_validation.result == BackendLifecycle.REJECTED
-        initial = store.initial_validation_record
-        assert initial is not None
-        assert initial is store.current_validation_record
-        assert initial.validation_request_body.initial_validation_record is None
-        assert initial.validation_request_body.commit_record == rejected.attempt.commit_record
+        assert (
+            rejected.validation_request_body.post_commit_validation.result
+            == BackendLifecycle.REJECTED
+        )
+        initial = store.current_replayed_response_record
+        assert isinstance(initial, BackendValidationRecord)
+        assert initial.validation_request_body.initial_validation_request_record is None
+        assert initial.validation_request_body.commit_request_record.model_dump(
+            mode="json"
+        ) == rejected.validation_request_body.commit_request_record.model_dump(mode="json")
         retry_pull = store._append_authoritative_record(
             persisted_http_record(
                 record_id=uuid7(),
@@ -366,32 +384,43 @@ def test_live_validation_replays_with_only_referenced_http(
             ).model_copy(
                 update={
                     "response_headers": {"content-type": ContentType.MARKDOWN},
-                    "response_body": rejected.attempt.post_commit_validation.detail,
+                    "response_body": rejected.validation_request_body.post_commit_validation.detail,
                 }
             )
         )
         # Repeated polling must not replace the retry baseline or infer a different root.
-        store._append_authoritative_record(retry_pull.model_copy(update={"record_id": uuid7()}))
+        retry_pull = store._append_authoritative_record(
+            retry_pull.model_copy(update={"record_id": uuid7()})
+        )
         commit_id = commit(store, accepted, accepted, retry_pull)
         result = store._validate_commit(commit_id)
-        assert result.attempt.post_commit_validation.result == BackendLifecycle.ACCEPTED
+        assert (
+            result.validation_request_body.post_commit_validation.result
+            == BackendLifecycle.ACCEPTED
+        )
         assert len(captured) == 2
-        assert len(result.http_records) == 2
-        assert result.validation_record is not None
-        validation = result.validation_record
+        assert len(result.validation_request_body.openalex_ror_records) == 2
+        assert result is not None
+        validation = store.current_replayed_response_record
         assert isinstance(validation, BackendValidationRecord)
-        assert store.initial_validation_record is initial
-        assert store.current_validation_record == validation
-        assert validation.validation_request_body.initial_validation_record == initial
-        assert validation.validation_request_body.commit_record == result.attempt.commit_record
+        assert validation.model_dump_json() == result.model_dump_json()
+        assert validation.validation_request_body.initial_validation_request_record == initial
+        assert validation.validation_request_body.commit_request_record.model_dump(
+            mode="json"
+        ) == result.validation_request_body.commit_request_record.model_dump(mode="json")
         envelope = ValidationRequestBody.from_serialized_json(validation.request_body or "")
-        assert envelope == validation.validation_request_body
+        assert envelope.model_dump(mode="json") == validation.validation_request_body.model_dump(
+            mode="json"
+        )
         assert validation.model_dump_json() == (
             store._http_record(validation.record_id).model_dump_json()
         )
-        assert envelope.openalex_ror_records == result.http_records
+        assert envelope.openalex_ror_records == result.validation_request_body.openalex_ror_records
         assert validation.path == VALIDATE_PATH
-        assert validation.request_headers == result.attempt.commit_record.request_headers
+        assert (
+            validation.request_headers
+            == result.validation_request_body.commit_request_record.request_headers
+        )
         assert all(
             getattr(validation, name) is None
             for name in (
@@ -403,12 +432,12 @@ def test_live_validation_replays_with_only_referenced_http(
                 "duration_usec",
             )
         )
-        for record in result.http_records:
+        for record in result.validation_request_body.openalex_ror_records:
             assert record == store._http_record(record.record_id)
-        snapshot = store._query_snapshot().model_dump_json()
+        snapshot = query_snapshot(store).model_dump_json()
         # A later observation of the same URL must not replace the linked validation input.
         store._append_authoritative_record(
-            result.http_records[0].model_copy(
+            result.validation_request_body.openalex_ror_records[0].model_copy(
                 update={
                     "record_id": uuid7(),
                     "response_body": "{}",
@@ -424,16 +453,10 @@ def test_live_validation_replays_with_only_referenced_http(
 
     monkeypatch.setattr(requests.Session, "send", no_network)
     monkeypatch.delenv("OPENALEX_API_KEY")
-    restored = QueryResponse.from_serialized_json(snapshot)
+    restored = DashboardQuerySnapshot.from_serialized_json(snapshot)
     assert restored.model_dump_json() == snapshot
-    assert all(
-        isinstance(item.validation_record, BackendValidationRecord) for item in restored.attempts
-    )
-    for field, value in (("method", "GET"), ("path", "/commit"), ("response_code", 200)):
-        invalid_snapshot = json.loads(snapshot)
-        invalid_snapshot["attempts"][-1]["validation_record"][field] = value
-        with pytest.raises(ValueError, match="validation HTTP record has an invalid contour"):
-            QueryResponse.from_serialized_json(json.dumps(invalid_snapshot))
+    assert "attempts" not in json.loads(snapshot)
+    assert all(not item.codex_innerdicts for item in restored.ai_augment_singular_outerdicts)
     replay_store = AiAugmentBackendStore._from_resources(
         replay_log=runtime.pipeline_config.replay_log,
         detour_db=store._detour_db.model_copy(
@@ -445,10 +468,10 @@ def test_live_validation_replays_with_only_referenced_http(
     mode = Path(runtime.pipeline_config.replay_log).stat().st_mode
     rebuild_for_test(replay_store, runtime)
     with replay_store._read_only(runtime):
-        assert replay_store._query_snapshot().model_dump_json() == snapshot
+        assert query_snapshot(replay_store).model_dump_json() == snapshot
         assert Path(runtime.pipeline_config.replay_log).read_bytes() == log_bytes
         with pytest.raises(RuntimeError):
-            replay_store._append_authoritative_record(result.http_records[0])
+            replay_store._append_authoritative_record(result.validation_request_body.openalex_ror_records[0])
     assert Path(runtime.pipeline_config.replay_log).stat().st_mode == mode
     assert fixtures.logical_database_snapshot(replay_store._detour_db_path) == live_database
 
@@ -477,21 +500,17 @@ def test_web_argument_eligibility_drives_retry_and_replays_identically(
     with store._writable(runtime):
         commit_id = commit(store, payload, payload, web_arguments=arguments)
         result = store._validate_commit(commit_id)
-        assert result.validation_record is not None
-        validation = result.attempt.post_commit_validation
+        assert result is not None
+        validation = result.validation_request_body.post_commit_validation
         assert validation.result is (
             BackendLifecycle.ACCEPTED if accepted else BackendLifecycle.REJECTED
         )
         assert validation.stage is (
             BackendLifecycle.ACCEPTED if accepted else BackendLifecycle.DUCKDB_EVIDENCE_VALIDATION
         )
-        api.update_pull_state(PushResponseRecord(
-            **result.attempt.commit_record.commit_request_body.push_record.model_dump(),
-            commit_record=result.attempt.commit_record,
-            validation_record=result.validation_record,
-        ))
+        api.update_pull_state(result)
         response = threaded_loop.run(api.authoritative_pull(
-            requests.Request("GET", "http://invalid/pull").prepare(), runtime, store,
+            requests.Request("GET", "http://invalid/pull").prepare(), store,
         ))
         assert response.status_code == (HTTPStatus.GONE if accepted else HTTPStatus.OK)
         if not accepted:
@@ -500,17 +519,18 @@ def test_web_argument_eligibility_drives_retry_and_replays_identically(
             assert response.text.strip() == validation.detail.strip()
             assert Locale.EVIDENCE_RETRY_INSTRUCTION in response.text
             assert store._execute(
-                f"SELECT count(*) FROM {api.CODEX_RETRY_BASELINE_TABLE}"
+                f"SELECT count(*) FROM {backend_vars.CODEX_RETRY_BASELINE_TABLE}"
             ).fetchone() == (1,)
             assert store._execute(
-                f"SELECT {api.CODEX_EVIDENCE_ACCEPTED_COL} FROM {api.CODEX_EVIDENCE_AUDIT_TABLE}"
+                f"SELECT {backend_vars.CODEX_EVIDENCE_ACCEPTED_COL} "
+                f"FROM {backend_vars.CODEX_EVIDENCE_AUDIT_TABLE}"
             ).fetchall() == [(False,)]
-        snapshot = store._query_snapshot().model_dump_json()
+        snapshot = query_snapshot(store).model_dump_json()
     log_bytes = Path(store._replay_log).read_bytes()
     live_database = fixtures.logical_database_snapshot(store._detour_db_path)
     rebuild_for_test(store, runtime)
     with store._read_only(runtime):
-        assert store._query_snapshot().model_dump_json() == snapshot
+        assert query_snapshot(store).model_dump_json() == snapshot
     assert fixtures.logical_database_snapshot(store._detour_db_path) == live_database
     assert Path(store._replay_log).read_bytes() == log_bytes
 
@@ -534,7 +554,7 @@ def test_readback_failure_requires_explicit_new(
             with pytest.raises(RuntimeError, match="injected DB readback failure"):
                 store._append_authoritative_record(draft)
         with pytest.raises(RuntimeError, match="Backend Store failed"):
-            store._query_snapshot()
+            query_snapshot(store)
     with duckdb.connect(str(store._detour_db_path), read_only=True) as connection:
         assert connection.execute(
             f"SELECT count(*) FROM {api.AUTHORITATIVE_RECORDS_TABLE}"
@@ -654,9 +674,15 @@ def test_validation_preview_does_not_publish_zip(
                 store._validate_commit(commit_id)
         assert fixtures.store_database_snapshot(store) == before_preview
         assert not list(runtime.pipeline_config.output_dir.iterdir())
-        assert store._query_snapshot().attempts == ()
+        assert all(
+            not researcher.codex_innerdicts
+            for researcher in query_snapshot(store).ai_augment_singular_outerdicts
+        )
         result = store._validate_commit(commit_id)
-        assert result.attempt.post_commit_validation.result == BackendLifecycle.ACCEPTED
+        assert (
+            result.validation_request_body.post_commit_validation.result
+            == BackendLifecycle.ACCEPTED
+        )
         assert not list(runtime.pipeline_config.output_dir.iterdir())
 
 
@@ -676,14 +702,17 @@ def test_live_repeat_resume_and_explicit_replay_never_publish(
     with store._writable(runtime):
         commit_id = commit(store, payload, payload)
         result = store._validate_commit(commit_id)
-        assert result.attempt.post_commit_validation.result == BackendLifecycle.ACCEPTED
+        assert (
+            result.validation_request_body.post_commit_validation.result
+            == BackendLifecycle.ACCEPTED
+        )
         assert store._validate_commit(commit_id) == result
-        snapshot = store._query_snapshot().model_dump_json()
+        snapshot = query_snapshot(store).model_dump_json()
     with store._writable(runtime):
-        assert store._query_snapshot().model_dump_json() == snapshot
+        assert query_snapshot(store).model_dump_json() == snapshot
     rebuild_for_test(store, runtime)
     with store._read_only(runtime):
-        assert store._query_snapshot().model_dump_json() == snapshot
+        assert query_snapshot(store).model_dump_json() == snapshot
     assert list(output.iterdir()) == [old_archive]
     assert old_archive.read_bytes() == b"leave existing archives alone"
     assert old_archive.stat().st_mtime_ns == before
@@ -691,43 +720,43 @@ def test_live_repeat_resume_and_explicit_replay_never_publish(
 
 def outcome_for_commit(
     store: AiAugmentBackendStore,
-    commit_record: BackendCommitRecord,
+    commit_request_record: BackendCommitRequestRecord,
     *,
     path: RunOutcomePath = RunOutcomePath.COMPLETED,
     partial: bool = False,
     no_session: bool = False,
+    other_session: bool = False,
 ) -> RunOutcomeResponseRecord:
-    body = commit_record.commit_request_body
+    body = commit_request_record.commit_request_body
     session = body.codex_session_record
     if partial or no_session:
         session = CodexSessionRecord(
             session_id=None if no_session else session.session_id,
             codex_rollout_record=None, appendwatch_report_record=None,
         )
-    request = RunOutcomeRequest.from_http_request(
+    request = RunOutcomeRequestRecord.from_http_request(
         received_at_unix_usec=1, method="POST", scheme="http", host="invalid",
         port=None, path=path, query="",
         request_headers={
-            NAME_KEY_HEADER: commit_record.request_headers[NAME_KEY_HEADER],
-            **({"Session-ID": str(session.session_id)} if session.session_id is not None else {}),
-            **({"ETag": f'"{store.current_validation_record.record_id}"'}
-               if store.current_validation_record is not None else {}),
+            NAME_KEY_HEADER: commit_request_record.request_headers[NAME_KEY_HEADER],
+            **({"Session-ID": str(uuid7() if other_session else session.session_id)}
+               if session.session_id is not None else {}),
+            **(
+                {"ETag": f'"{store.current_replayed_response_record.record_id}"'}
+                if isinstance(store.current_replayed_response_record, BackendValidationRecord)
+                else {}
+            ),
         },
         request_body=None,
     )
-    return api._run_outcome_record(
-        store,
-        store._runtime,
-        RunOutcomeRequestRecord(
-            **request.http_request_log_record.model_dump(),
-            pull_record_id=body.pull_record.record_id,
-            push_record_id=body.push_record.record_id,
-            codex_session_record=session,
-            rollout_filename=None
-            if partial or no_session
-            else api._parse_source_key_header(
-                commit_record.request_headers[SOURCE_KEY_HEADER],
-            )[0],
+    return store._construct_run_outcome_response_record(
+        request,
+        codex_session_record=session,
+        rollout_filename=(
+            None if partial or no_session
+            else AiAugmentBackendStore._parse_source_key_header(
+                commit_request_record.request_headers[SOURCE_KEY_HEADER],
+            )[0]
         ),
     )
 
@@ -747,39 +776,54 @@ def test_outcome_materializes_persisted_ids_identically_live_and_replay(
     with store._writable(runtime):
         commit_id = commit(store, payload, payload)
         result = store._validate_commit(commit_id)
-        assert result.attempt.post_commit_validation.result is BackendLifecycle.ACCEPTED
-        assert result.validation_record is not None
-        interim = store._query_snapshot()
-        DashboardQuerySnapshot(query_response=interim)
-        assert not interim.ai_augment_singular_outerdicts[0].committed_innerdicts
+        assert (
+            result.validation_request_body.post_commit_validation.result
+            is BackendLifecycle.ACCEPTED
+        )
+        assert result is not None
+        interim = query_snapshot(store)
+        assert (
+            type(interim).from_serialized_json(interim.model_dump_json()).model_dump_json()
+            == interim.model_dump_json()
+        )
+        assert not interim.ai_augment_singular_outerdicts[0].codex_innerdicts
         assert store._execute(
             f'SELECT "{KTP_AI_AUGMENT_VALIDATION_RECORD_ID_COL}", '
             f'"{KTP_AI_AUGMENT_RUN_OUTCOME_RECORD_ID_COL}" FROM {api.CODEX_OUTPUT_ROWS_TABLE}'
         ).fetchone() == (None, None)
         outcome = outcome_for_commit(
-            store, result.attempt.commit_record, path=path, partial=partial
+            store, result.validation_request_body.commit_request_record, path=path, partial=partial
         )
         stored = store._append_authoritative_record(outcome)
-        assert RunOutcomeResponseRecord.from_http_request_log_record(stored) == outcome
+        assert RunOutcomeResponseRecord.from_http_request_log_record(
+            stored
+        ).model_dump_json() == stored.model_dump_json()
         assert stored.model_dump_json() == outcome.model_dump_json()
-        query = store._query_snapshot()
-        DashboardQuerySnapshot(query_response=query)
+        query = query_snapshot(store)
+        assert (
+            type(query).from_serialized_json(query.model_dump_json()).model_dump_json()
+            == query.model_dump_json()
+        )
         assert outcome.response_code == (
             500 if partial else 409 if path is RunOutcomePath.FAILED else 200
         )
-        if outcome.response_code == 409:
-            assert not query.ai_augment_singular_outerdicts[0].committed_innerdicts
+        if outcome.response_code != 200 or path is not RunOutcomePath.COMPLETED:
+            assert not query.ai_augment_singular_outerdicts[0].codex_innerdicts
         else:
-            (innerdict,) = query.ai_augment_singular_outerdicts[0].committed_innerdicts
+            (innerdict,) = query.ai_augment_singular_outerdicts[0].codex_innerdicts
             data = innerdict.innerdict.data
             assert data[KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_RECORD_COL] == outcome.model_dump_json()
-            assert innerdict.run_outcome_response_record == outcome
+            assert (
+                innerdict.run_outcome_response_record.model_dump_json()
+                == outcome.model_dump_json()
+            )
             assert all(column not in data for column in (
-                KTP_AI_AUGMENT_COMMIT_RECORD_ID_COL, KTP_AI_AUGMENT_VALIDATION_RECORD_ID_COL,
+                KTP_AI_AUGMENT_COMMIT_REQUEST_RECORD_ID_COL,
+                KTP_AI_AUGMENT_VALIDATION_RECORD_ID_COL,
                 KTP_AI_AUGMENT_RUN_OUTCOME_RECORD_ID_COL,
             ))
         snapshot = query.model_dump_json()
-        assert QueryResponse.from_serialized_json(snapshot).model_dump_json() == snapshot
+        assert DashboardQuerySnapshot.from_serialized_json(snapshot).model_dump_json() == snapshot
     log_bytes = Path(store._replay_log).read_bytes()
     live_database = fixtures.logical_database_snapshot(store._detour_db_path)
     replay = AiAugmentBackendStore._from_resources(
@@ -793,7 +837,7 @@ def test_outcome_materializes_persisted_ids_identically_live_and_replay(
     )
     rebuild_for_test(replay, runtime)
     with replay._read_only(runtime):
-        assert replay._query_snapshot().model_dump_json() == snapshot
+        assert query_snapshot(replay).model_dump_json() == snapshot
     assert fixtures.logical_database_snapshot(replay._detour_db_path) == live_database
     assert Path(store._replay_log).read_bytes() == log_bytes
 
@@ -809,7 +853,7 @@ def test_outcome_without_matching_accepted_data_keeps_history_only(
     if case == "unvalidated":
         with pytest.raises(RuntimeError, match="Backend Store failed"), store._writable(runtime):
             commit_id = commit(store, payload, payload)
-            typed_commit = api._backend_commit_record(store, store._http_record(commit_id))
+            typed_commit = store._backend_commit_request_record(store._http_record(commit_id))
             with pytest.raises(ValueError, match="precedes push group completion"):
                 store._append_authoritative_record(
                     outcome_for_commit(store, typed_commit, partial=True)
@@ -819,40 +863,29 @@ def test_outcome_without_matching_accepted_data_keeps_history_only(
         return
     with store._writable(runtime):
         commit_id = commit(store, {} if case == "rejected" else payload, payload)
-        typed_commit = api._backend_commit_record(store, store._http_record(commit_id))
+        typed_commit = store._backend_commit_request_record(store._http_record(commit_id))
         if case != "unvalidated":
             result = store._validate_commit(commit_id)
-            assert result.attempt.post_commit_validation.result is (
+            assert result.validation_request_body.post_commit_validation.result is (
                 BackendLifecycle.REJECTED if case == "rejected" else BackendLifecycle.ACCEPTED
             )
         outcome = outcome_for_commit(
-            store, typed_commit, partial=True, no_session=case == "no_session"
+            store, typed_commit, partial=True, no_session=case == "no_session",
+            other_session=case == "other_session",
         )
-        if case == "other_session":
-            body = outcome.run_outcome_response_body.model_copy(
-                update={
-                    "commit_record_id": None,
-                    "validation_record_id": None,
-                    "codex_session_record": CodexSessionRecord(
-                        session_id=uuid7(),
-                        codex_rollout_record=None,
-                        appendwatch_report_record=None,
-                    ),
-                }
-            )
-            outcome = RunOutcomeResponseRecord.from_run_outcome_request(
-                outcome.run_outcome_request, response_code=HTTPStatus.BAD_REQUEST,
-                response_headers=None,
-                response_body=body, ready_to_respond_at_unix_usec=2,
-            )
         store._append_authoritative_record(outcome)
-        query = store._query_snapshot()
-        DashboardQuerySnapshot(query_response=query)
-        assert not query.ai_augment_singular_outerdicts[0].committed_innerdicts
-        assert query.run_outcome_records == (outcome,)
+        query = query_snapshot(store)
+        assert (
+            type(query).from_serialized_json(query.model_dump_json()).model_dump_json()
+            == query.model_dump_json()
+        )
+        assert not query.ai_augment_singular_outerdicts[0].codex_innerdicts
+        assert store._http_record(outcome.record_id).model_dump() == (
+            outcome.http_request_log_record.model_dump()
+        )
 
 
-def test_outcome_finalizes_all_session_commits_once(
+def test_outcome_finalizes_only_linked_commit_once(
     backend_store: AiAugmentBackendStore,
     runtime: AiAugmentBackendContext,
 ) -> None:
@@ -865,26 +898,32 @@ def test_outcome_finalizes_all_session_commits_once(
                 b'"payload":{"type":"task_complete"}}\n'
             ) * index)
             result = store._validate_commit(commit_id)
-            assert result.attempt.post_commit_validation.result is BackendLifecycle.ACCEPTED
-        outcome = outcome_for_commit(store, result.attempt.commit_record)
+            assert (
+                result.validation_request_body.post_commit_validation.result
+                is BackendLifecycle.ACCEPTED
+            )
+        outcome = outcome_for_commit(store, result.validation_request_body.commit_request_record)
         store._append_authoritative_record(outcome)
-        before = store._query_snapshot()
-        assert len(before.ai_augment_singular_outerdicts[0].committed_innerdicts) == 2
+        before = query_snapshot(store)
+        assert len(before.ai_augment_singular_outerdicts[0].codex_innerdicts) == 1
         store._append_authoritative_record(
             outcome_for_commit(
                 store,
-                result.attempt.commit_record,
+                result.validation_request_body.commit_request_record,
                 path=RunOutcomePath.FAILED,
             )
         )
-        after = store._query_snapshot()
-        DashboardQuerySnapshot(query_response=after)
+        after = query_snapshot(store)
+        assert (
+            type(after).from_serialized_json(after.model_dump_json()).model_dump_json()
+            == after.model_dump_json()
+        )
         assert [
             item.serialize()
-            for item in after.ai_augment_singular_outerdicts[0].committed_innerdicts
+            for item in after.ai_augment_singular_outerdicts[0].codex_innerdicts
         ] == [
             item.serialize()
-            for item in before.ai_augment_singular_outerdicts[0].committed_innerdicts
+            for item in before.ai_augment_singular_outerdicts[0].codex_innerdicts
         ]
 
 
@@ -897,7 +936,9 @@ def test_validation_after_session_outcome_fails_without_materialization(
     with pytest.raises(RuntimeError, match="Backend Store failed"), store._writable(runtime):
         commit_id = commit(store, payload, payload)
         result = store._validate_commit(commit_id)
-        store._append_authoritative_record(outcome_for_commit(store, result.attempt.commit_record))
+        store._append_authoritative_record(outcome_for_commit(
+            store, result.validation_request_body.commit_request_record,
+        ))
         later_id = commit(store, payload, payload)
         with pytest.raises(ReplayInputMissing, match="Validation must precede"):
             store._validate_commit(later_id)
@@ -920,24 +961,19 @@ def test_durable_validation_allows_410_before_outcome_and_ipc_waits_for_http_sen
     with store._writable(runtime):
         commit_id = commit(store, payload, payload)
         result = store._validate_commit(commit_id)
-        assert result.validation_record is not None
-        assert str(result.validation_record.record_id).encode() in (
+        assert result is not None
+        assert str(result.record_id).encode() in (
             Path(store._replay_log).read_bytes()
         )
-        api.update_pull_state(PushResponseRecord(
-            **result.attempt.commit_record.commit_request_body.push_record.model_dump(),
-            commit_record=result.attempt.commit_record,
-            validation_record=result.validation_record,
-        ))
+        api.update_pull_state(result)
         assert api.BACKEND_LIFECYCLE is BackendLifecycle.COMPLETED
-        interim = store._query_snapshot()
-        assert not interim.ai_augment_singular_outerdicts[0].committed_innerdicts
-        outcome = outcome_for_commit(store, result.attempt.commit_record)
+        interim = query_snapshot(store)
+        assert not interim.ai_augment_singular_outerdicts[0].codex_innerdicts
+        outcome = outcome_for_commit(store, result.validation_request_body.commit_request_record)
 
         async def exercise() -> None:
             app = FastAPI()
             gate = server._BackendRequestGate()
-            app.state.runtime = runtime
             app.state.request_gate = gate
 
             app.state.store = store
@@ -981,7 +1017,7 @@ def test_durable_validation_allows_410_before_outcome_and_ipc_waits_for_http_sen
 
         threaded_loop.run(asyncio.wait_for(exercise(), timeout=10))
         records = [
-            record for record, _ in api._authoritative_log_records(
+            record for record, _ in AiAugmentBackendStore._authoritative_log_records(
                 Path(store._replay_log).read_bytes()
             )
         ]
@@ -990,12 +1026,15 @@ def test_durable_validation_allows_410_before_outcome_and_ipc_waits_for_http_sen
         )
         ids = [record.record_id for record in records]
         assert (
-            ids.index(result.validation_record.record_id)
+            ids.index(result.record_id)
             < ids.index(gone.record_id) < ids.index(outcome.record_id)
         )
-        query = store._query_snapshot()
-        assert len(query.ai_augment_singular_outerdicts[0].committed_innerdicts) == 1
-        DashboardQuerySnapshot(query_response=query)
+        query = query_snapshot(store)
+        assert len(query.ai_augment_singular_outerdicts[0].codex_innerdicts) == 1
+        assert (
+            type(query).from_serialized_json(query.model_dump_json()).model_dump_json()
+            == query.model_dump_json()
+        )
 
 
 def test_initial_validation_is_lifecycle_scoped_and_replays_explicit_links(
@@ -1006,31 +1045,60 @@ def test_initial_validation_is_lifecycle_scoped_and_replays_explicit_links(
     roots: list[UUID] = []
     snapshots: list[str] = []
     last_validation: BackendValidationRecord | None = None
-    for store in (backend_store, backend_store_for_test(runtime)):
-        assert store.initial_validation_record is None
-        assert store.current_validation_record is None
+    for index, store in enumerate((backend_store, backend_store_for_test(runtime))):
+        session_id = UUID(OPERATOR_CAPTURED_SESSION_ID) if index == 0 else uuid7()
+        assert store.current_replayed_response_record is None
         with store._writable(runtime):
-            first = store._validate_commit(commit(store, payload, payload))
-            initial = store.initial_validation_record
-            assert initial is not None and initial == first.validation_record
-            assert initial.validation_request_body.initial_validation_record is None
+            first = store._validate_commit(commit(store, payload, payload, session_id=session_id))
+            initial = store.current_replayed_response_record
+            assert isinstance(initial, BackendValidationRecord)
+            assert first is not None
+            assert initial.model_dump_json() == first.model_dump_json()
+            assert initial.validation_request_body.initial_validation_request_record is None
             roots.append(initial.record_id)
-            second = store._validate_commit(commit(store, payload, payload))
-            assert store.initial_validation_record is initial
-            last_validation = store.current_validation_record
-            assert last_validation is not None and last_validation == second.validation_record
+            retry_pull = store._append_authoritative_record(persisted_http_record(
+                record_id=uuid7(), method="GET", path="/pull", response_code=200,
+            ))
+            assert isinstance(retry_pull, PullResponseRecord)
+            assert retry_pull.validation_request_record is initial
+            second = store._validate_commit(commit(
+                store, payload, payload, retry_pull, session_id=session_id,
+            ))
+            last_validation = store.current_replayed_response_record
+            assert isinstance(last_validation, BackendValidationRecord)
+            assert second is not None
+            assert last_validation.model_dump_json() == second.model_dump_json()
             assert last_validation.record_id != initial.record_id
-            assert last_validation.validation_request_body.initial_validation_record == initial
-            snapshots.append(store._query_snapshot().model_dump_json())
+            assert (
+                last_validation.validation_request_body.initial_validation_request_record
+                is initial
+            )
+            snapshots.append(query_snapshot(store).model_dump_json())
+            if index == 0:
+                terminal_path = (
+                    RunOutcomePath.COMPLETED
+                    if (
+                        second.validation_request_body.post_commit_validation.result
+                        is BackendLifecycle.ACCEPTED
+                    )
+                    else RunOutcomePath.FAILED
+                )
+                terminal = outcome_for_commit(
+                    store, second.validation_request_body.commit_request_record, path=terminal_path,
+                )
+                assert terminal.response_code == HTTPStatus.OK
+                store._append_authoritative_record(terminal)
     assert roots[0] != roots[1]
     before = Path(runtime.pipeline_config.replay_log).read_bytes()
     replay = backend_store_for_test(runtime)
     rebuild_for_test(replay, runtime)
-    assert replay.initial_validation_record is not None
-    assert replay.initial_validation_record.record_id == roots[-1]
-    assert replay.current_validation_record == last_validation
+    replayed = replay.current_replayed_response_record
+    assert isinstance(replayed, BackendValidationRecord)
+    assert replayed.validation_request_body.initial_validation_request_record is not None
+    assert replayed.validation_request_body.initial_validation_request_record.record_id == roots[-1]
+    assert replayed == last_validation
     with replay._read_only(runtime):
-        assert replay._query_snapshot().model_dump_json() == snapshots[-1]
+        assert query_snapshot(replay).model_dump_json() == snapshots[-1]
     assert Path(runtime.pipeline_config.replay_log).read_bytes() == before
 
 
@@ -1046,17 +1114,26 @@ def test_failed_validation_projection_does_not_advance_store_validation_state(
     real_insert = AiAugmentBackendStore._insert_attempt_record
 
     def fail_after_insert(
-        subject: AiAugmentBackendStore, record: AgentRuntimeAttemptRecord,
+        subject: AiAugmentBackendStore, record: BackendValidationRecord,
     ) -> None:
         real_insert(subject, record)
         raise RuntimeError("injected projection failure")
 
     with pytest.raises(RuntimeError, match="Store failed"), store._writable(runtime):
+        retry_pull = None
         if has_initial:
             store._validate_commit(commit(store, payload, payload))
-        initial = store.initial_validation_record
-        current = store.current_validation_record
-        commit_id = commit(store, payload, payload)
+            initial = store.current_replayed_response_record
+            assert isinstance(initial, BackendValidationRecord)
+            retry_pull = store._append_authoritative_record(persisted_http_record(
+                record_id=uuid7(), method="GET", path="/pull", response_code=200,
+            ))
+            assert isinstance(retry_pull, PullResponseRecord)
+            assert retry_pull.validation_request_record is initial
+        commit_id = commit(store, payload, payload, retry_pull)
+        current_commit = store.current_replayed_response_record
+        assert isinstance(current_commit, BackendCommitRequestRecord)
+        current = current_commit.commit_request_body.pull_response_record
         with monkeypatch.context() as patch:
             patch.setattr(AiAugmentBackendStore, "_insert_attempt_record", fail_after_insert)
             with pytest.raises(RuntimeError, match="injected projection failure"):
@@ -1065,11 +1142,9 @@ def test_failed_validation_projection_does_not_advance_store_validation_state(
         durable = BackendValidationRecord.from_http_request_log_record(
             HttpRequestLogRecord.model_validate_json(last_line),
         )
-        assert durable.validation_request_body.commit_record.record_id == commit_id
-        assert store.initial_validation_record is initial
-        assert store.current_validation_record is current
-    assert store.initial_validation_record is initial
-    assert store.current_validation_record is current
+        assert durable.validation_request_body.commit_request_record.record_id == commit_id
+        assert store.current_replayed_response_record is current_commit
+    assert store.current_replayed_response_record is current
     with duckdb.connect(str(store._detour_db_path), read_only=True) as connection:
         assert connection.execute(
             "SELECT count(*) FROM detour_http_records WHERE path = '/validate'",
@@ -1089,18 +1164,24 @@ def test_validation_rejects_altered_embedded_inputs_after_durable_capture(
     payload = valid_submission_body()
     with pytest.raises(RuntimeError, match="Store failed"), store._writable(runtime):
         store._validate_commit(commit(store, payload, payload))
-        initial = store.initial_validation_record
-        assert initial is not None
+        initial = store.current_replayed_response_record
+        assert isinstance(initial, BackendValidationRecord)
         provider = store._append_authoritative_record(persisted_http_record(
             record_id=uuid7(), method="GET", path="/institutions/I1", response_code=200,
         ).model_copy(update={"host": "api.openalex.org", "response_body": "{}"}))
-        commit_id = commit(store, payload, payload)
-        current_commit = store.current_commit_record
-        assert current_commit is not None and current_commit.record_id == commit_id
+        retry_pull = store._append_authoritative_record(persisted_http_record(
+            record_id=uuid7(), method="GET", path="/pull", response_code=200,
+        ))
+        assert isinstance(retry_pull, PullResponseRecord)
+        assert retry_pull.validation_request_record is initial
+        commit_id = commit(store, payload, payload, retry_pull)
+        current_commit = store.current_replayed_response_record
+        assert isinstance(current_commit, BackendCommitRequestRecord)
+        assert current_commit.record_id == commit_id
         candidate = ValidationRequestBody(
-            commit_record=current_commit,
+            commit_request_record=current_commit,
             post_commit_validation=initial.validation_request_body.post_commit_validation,
-            initial_validation_record=initial,
+            initial_validation_request_record=initial,
             openalex_ror_records=(provider,) if changed_input == "provider" else (),
         ).http_record()
         body = json.loads(candidate.request_body or "")
@@ -1110,7 +1191,9 @@ def test_validation_rejects_altered_embedded_inputs_after_durable_capture(
             initial_body["post_commit_validation"]["detail"] = "altered initial input"
             embedded["request_body"] = json.dumps(initial_body)
         elif changed_input == "commit":
-            body["commit_record"]["pull_record"]["response_body"] = "altered pull input"
+            body["commit_request_record"]["pull_response_record"]["response_body"] = (
+                "altered pull input"
+            )
         else:
             body["openalex_ror_records"][0]["response_body"] = '{"altered":true}'
         captured = candidate.model_copy(update={"request_body": json.dumps(body)})
@@ -1123,8 +1206,8 @@ def test_validation_rejects_altered_embedded_inputs_after_durable_capture(
             HttpRequestLogRecord.model_validate_json(last_line).request_body
             == captured.request_body
         )
-        assert store.initial_validation_record is initial
-        assert store.current_validation_record is initial
+        assert store.current_replayed_response_record is current_commit
+    assert store.current_replayed_response_record is retry_pull
     with duckdb.connect(str(store._detour_db_path), read_only=True) as connection:
         assert connection.execute(
             "SELECT count(*) FROM detour_http_records WHERE path = '/validate'",

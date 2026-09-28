@@ -11,7 +11,7 @@ import sys
 import tempfile
 import time
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -36,6 +36,10 @@ from playwright.sync_api import (
 from playwright.sync_api import Error as PlaywrightError
 
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
+    EXPECTED_GROUND_TRUTH_RESEARCHERS,
+    EXPECTED_INELIGIBLE_RESEARCHERS,
+    EXPECTED_NO_GROUND_TRUTH_RESEARCHERS,
+    EXPECTED_SOURCE_RESEARCHERS,
     AiAugmentCohort,
     AiAugmentIneligibilityCategory,
 )
@@ -51,12 +55,6 @@ from src.detours.detour_ai_augment.src.backend import server as backend_server
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_backend_store import (
     initialize_backend_store,
 )
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_context import (
-    EXPECTED_GROUND_TRUTH_RESEARCHERS,
-    EXPECTED_INELIGIBLE_RESEARCHERS,
-    EXPECTED_NO_GROUND_TRUTH_RESEARCHERS,
-    EXPECTED_SOURCE_RESEARCHERS,
-)
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_singular_outer_dict import (  # noqa: E501
     AiAugmentSingularOuterDict,
 )
@@ -65,7 +63,7 @@ from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_mod
     BACKEND_DATABASE_STORAGE_KEY,
     QUEUE_STORAGE_KEY,
 )
-from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.run_outcome import (  # noqa: E501
+from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.lifecycle import (  # noqa: E501
     RunLifecycle,
 )
 from src.detours.detour_ai_augment.tests.control_centre import test_ui as ui_tests
@@ -133,7 +131,7 @@ def completed_query_files(
     print(result.stdout, end="", flush=True)
     stored = json.loads((storage_path / "storage-general.json").read_text())
     snapshot = stored[BACKEND_DATABASE_STORAGE_KEY]
-    assert snapshot["attempts"] == snapshot["run_outcome_records"] == []
+    assert all(not item["codex_innerdicts"] for item in snapshot["ai_augment_singular_outerdicts"])
     assert stored[QUEUE_STORAGE_KEY] == []
     return files
 
@@ -146,18 +144,22 @@ def test_completed_query_fixture_has_current_queryable_history(
     files = completed_query_files
     runtime = backend_server.configure_runtime(files.config, require_namekey=False)
     with initialize_backend_store(runtime, ipc_only=True) as capability:
-        snapshot = capability._engine._query_snapshot()
-    assert len(snapshot.attempts) == len(snapshot.run_outcome_records) == 1
-    attempt = snapshot.attempts[0]
-    validation = attempt.validation_record
-    assert validation is not None
-    outcome = snapshot.run_outcome_records[0]
-    body = outcome.run_outcome_response_body
-    assert body.commit_record_id == attempt.attempt.commit_record.record_id
-    assert body.validation_record_id == validation.record_id
+        outerdicts = capability._engine.ai_augment_singular_outerdicts()
+    (committed,) = (
+        item for researcher in outerdicts for item in researcher.codex_innerdicts
+    )
+    outcome = committed.run_outcome_response_record
+    attempt = outcome.attempt
+    assert attempt is not None
+    body = outcome._body()
+    assert (
+        body.commit_request_record_id
+        == attempt.validation_request_body.commit_request_record.record_id
+    )
+    assert body.validation_record_id == attempt.record_id
     assert body.run_outcome_record_id == outcome.record_id
     assert sum(
-        len(item.committed_innerdicts) for item in snapshot.ai_augment_singular_outerdicts
+        len(item.codex_innerdicts) for item in outerdicts
     ) == 1
 
 
@@ -507,7 +509,7 @@ class BrowserController:
                 table_1_value=None,
                 footnotes=None,
                 footnote_arguments=None,
-                commit_record_id=None,
+                commit_request_record_id=None,
                 timestamp=None,
                 lifecycle=activity,
                 backend_lifecycle=None,
@@ -555,7 +557,7 @@ class BrowserController:
             table_1_value=None,
             footnotes=f"footnote-{ordinal}",
             footnote_arguments=f"arguments-{ordinal}",
-            commit_record_id=run_id,
+            commit_request_record_id=run_id,
             timestamp=(E2E_ATTEMPT_BASE_TIME + timedelta(seconds=attempt_index)),
             lifecycle=activity,
             backend_lifecycle=None,
@@ -758,7 +760,7 @@ def launch_e2e_browser(playwright: Playwright, pytestconfig: pytest.Config) -> B
 @contextmanager
 def control_centre_browser(
     pytestconfig: pytest.Config, nicegui_storage_path: Path,
-) -> Iterator[tuple[Page, list[str]]]:
+) -> Generator[tuple[Page, list[str]], None, None]:
     repository_root = pytestconfig.rootpath
     port = available_e2e_port()
     url = f"http://{E2E_HOST}:{port}"

@@ -5,6 +5,7 @@ import re
 import string
 from collections.abc import Mapping
 
+from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
 from src.helpers.architecture import FrozenStrictModel
 
 LINE_BREAK = re.compile(r"\r\n|[\n\r\v\f\x1c-\x1e\x85\u2028\u2029]")
@@ -38,17 +39,19 @@ def extract_cite_sections(
     relevant_marker_count = text.count(f"{marker_prefix}turn")
     if not matches:
         if relevant_marker_count:
-            raise ValueError("web output contains malformed citation markers")
+            raise ValueError(Locale.WEB_CITATION_MARKERS_MALFORMED)
         return ()
     if relevant_marker_count != len(matches):
-        raise ValueError("web output contains malformed citation markers")
+        raise ValueError(Locale.WEB_CITATION_MARKERS_MALFORMED)
 
     sections: list[CiteSection] = []
     seen_ref_ids: set[str] = set()
     for match in matches:
         ref_id = match.group("ref_id")
         if ref_id in seen_ref_ids:
-            raise ValueError(f"web output repeats citation ref_id {ref_id}")
+            raise ValueError(
+                Locale.WEB_CITATION_REF_REPEATED_TEMPLATE.format(ref_id=ref_id)
+            )
         seen_ref_ids.add(ref_id)
 
         preceding_separator = text.rfind(result_separator, 0, match.start())
@@ -59,7 +62,9 @@ def extract_cite_sections(
         section_end = len(text) if following_separator < 0 else following_separator
         section_text = text[section_start:section_end].strip()
         if not section_text or len(tuple(marker.finditer(section_text))) != 1:
-            raise ValueError(f"could not isolate citation section for {ref_id}")
+            raise ValueError(
+                Locale.WEB_CITATION_SECTION_MISSING_TEMPLATE.format(ref_id=ref_id)
+            )
         sections.append(CiteSection(ref_id=ref_id, text=section_text))
     return tuple(sections)
 
@@ -124,13 +129,13 @@ def render_footnote(
     marker_start = cite_text.find(citation_marker)
     marker_end = marker_start + len(citation_marker)
     if marker_start < 0 or cite_text.find(citation_marker, marker_end) >= 0:
-        raise ValueError("cite text does not contain one current-ref marker")
+        raise ValueError(Locale.CITE_CURRENT_REF_MARKER_MISSING)
     if excerpt_end <= marker_start:
         context_end = min(context_end, marker_start)
     elif excerpt_position >= marker_end:
         context_start = max(context_start, marker_end)
     else:
-        raise ValueError("excerpt overlaps its current-ref marker")
+        raise ValueError(Locale.CITE_EXCERPT_OVERLAPS_REF)
     prefix = "..." if context_start > 0 else ""
     suffix = "..." if context_end < len(cite_text) else ""
     before = escape_markdown_text(
@@ -170,7 +175,7 @@ def render_footnote_argument(
 ) -> str:
     arguments = json.loads(arguments_json)
     if not isinstance(arguments, dict):
-        raise ValueError("web arguments must be a JSON object")
+        raise ValueError(Locale.WEB_ARGUMENTS_NOT_OBJECT)
     for action in URL_ARGUMENT_ACTIONS:
         action_items = arguments.get(action)
         if not action_items:

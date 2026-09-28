@@ -16,6 +16,9 @@ from uuid import uuid7
 
 import pytest
 
+from src.detours.detour_ai_augment.protected.src.backend.helpers.post_commit_validation import (  # noqa: E501
+    PostCommitValidation,
+)
 from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helpers.locale import (
     Locale,
 )
@@ -29,17 +32,16 @@ from src.detours.detour_ai_augment.src.backend import server as backend_server
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_backend_store import (
     initialize_backend_store,
 )
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.commit_event import (
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.lifecycle import (
     BackendLifecycle,
 )
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.validation_event import (
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.validation_request import (
     BackendValidationRecord,
-    PostCommitValidation,
     ValidationRequestBody,
 )
 from src.detours.detour_ai_augment.src.control_centre.dashboard import ui as control_ui
-from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models import (
-    run_outcome,
+from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.lifecycle import (  # noqa: E501
+    RunLifecycle,
 )
 from src.detours.detour_ai_augment.tests.backend import test_api as api_fixtures
 from src.detours.detour_ai_augment.tests.control_centre import test_ui as ui_tests
@@ -72,7 +74,7 @@ def test_operator_artifact_validator_accepts_completed_store_history(
     workflow.validate_workflow_artifacts(
         runtime,
         namekey=ui_tests.STARTUP_NAMEKEY,
-        expected_run_outcome_path=run_outcome.RunLifecycle.COMPLETED.to_run_outcome_path(),
+        expected_run_outcome_path=RunLifecycle.COMPLETED.to_run_outcome_path(),
     )
 
 
@@ -102,7 +104,7 @@ def _workflow_http_records(
             if not with_initial or index == 1
         )
         validation = ValidationRequestBody(
-            commit_record=commit,
+            commit_request_record=commit,
             post_commit_validation=PostCommitValidation(
                 stage=BackendLifecycle.PYDANTIC_VALIDATION,
                 result=BackendLifecycle.REJECTED,
@@ -110,10 +112,10 @@ def _workflow_http_records(
                 submission_type=None,
                 submission=None,
             ),
-            initial_validation_record=initial,
+            initial_validation_request_record=initial,
             openalex_ror_records=providers,
         ).http_record()
-        records.extend((pull, commit.commit_request_body.push_record, commit,
+        records.extend((pull, commit.commit_request_body.push_response_record, commit,
                         *providers, validation))
         if initial is None:
             initial = validation
@@ -159,7 +161,7 @@ def test_operator_http_history_rejects_corrupt_or_unreferenced_records(
     ))
     validation = BackendValidationRecord.from_http_request_log_record(records[-1])
     body = validation.validation_request_body
-    assert body.initial_validation_record is not None
+    assert body.initial_validation_request_record is not None
     provider = body.openalex_ror_records[0]
     if mutation == "unknown-route":
         records.append(api_fixtures.persisted_http_record(
@@ -181,10 +183,10 @@ def test_operator_http_history_rejects_corrupt_or_unreferenced_records(
     else:
         linked = {
             "provider": provider,
-            "commit": body.commit_record,
-            "pull": body.commit_record.commit_request_body.pull_record,
-            "push": body.commit_record.commit_request_body.push_record,
-            "initial": body.initial_validation_record,
+            "commit": body.commit_request_record,
+            "pull": body.commit_request_record.commit_request_body.pull_response_record,
+            "push": body.commit_request_record.commit_request_body.push_response_record,
+            "initial": body.initial_validation_request_record,
         }[target]
         position = next(
             index for index, record in enumerate(records) if record.record_id == linked.record_id
@@ -196,7 +198,7 @@ def test_operator_http_history_rejects_corrupt_or_unreferenced_records(
         else:
             assert mutation == "changed"
             if target == "initial":
-                initial = body.initial_validation_record
+                initial = body.initial_validation_request_record
                 initial_body = initial.validation_request_body
                 changed_body = initial_body.model_copy(update={
                     "post_commit_validation": initial_body.post_commit_validation.model_copy(

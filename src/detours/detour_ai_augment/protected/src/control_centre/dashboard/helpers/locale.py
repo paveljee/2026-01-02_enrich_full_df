@@ -82,7 +82,7 @@ class Locale:
     JOURNAL_ROLLOUT_PATH_MISSING: Final = (
         "rollout-discovered event has no path"
     )
-    JOURNAL_COMMIT_RECORD_ID_MISSING: Final = (
+    JOURNAL_COMMIT_REQUEST_RECORD_ID_MISSING: Final = (
         "push-accepted event has no commit record ID"
     )
     UNKNOWN_NAMEKEY_TEMPLATE: Final = "unknown namekey: {namekey}"
@@ -230,3 +230,52 @@ class Locale:
     )
     STOPPING_LOG: Final = "stopping"
     STOPPED_LOG: Final = "stopped"
+    CODEX_EXIT_DETAIL_TEMPLATE: Final = "Codex exited with code {exit_code}"
+    RUN_EVENT_TIMEZONE_REQUIRED: Final = "run-event time must be timezone-aware"
+    BACKEND_CYCLE_PREVIOUSLY_FAILED: Final = (
+        "Previous full Backend cycle failed; operator intervention required"
+    )
+    RUN_LIFECYCLE_NOT_OUTCOME: Final = "run lifecycle has no run outcome"
+    RUN_LIFECYCLE_NO_OUTCOME_PATH: Final = (
+        "run lifecycle has no run-outcome HTTP request path"
+    )
+    RUN_OUTCOME_PATH_INVALID: Final = "run-outcome HTTP request path is invalid"
+    RUN_COMMIT_VIEW_EMPTY: Final = (
+        "Run/commit view requires a Backend commit or Dashboard run"
+    )
+    DASHBOARD_PROBES_LOG: Final = "Dashboard probes: %s"
+    IPC_PROBE_STATUS_LOG_TEMPLATE: Final = "IPC probe HTTP status: {status}"
+    IPC_SOCKET_MISSING_LOG_TEMPLATE: Final = (
+        "IPC unavailable; socket not present: {socket}; {error!r}"
+    )
+    IPC_PROBE_ERROR_LOG_TEMPLATE: Final = "IPC probe error: {socket}; {error!r}"
+    BACKEND_API_PROBE_STATUS_LOG_TEMPLATE: Final = "Backend API probe HTTP status: {status}"
+    BACKEND_API_PROBE_ERROR_LOG_TEMPLATE: Final = "Backend API probe error: {error!r}"
+    BACKEND_START_LOG_TEMPLATE: Final = (
+        "Starting owned Backend: ipc_only={ipc_only}, mode={mode}, namekey={namekey}"
+    )
+    BACKEND_START_FAILED_LOG_TEMPLATE: Final = "Backend startup failed: {error!r}"
+    BACKEND_READY_LOG_TEMPLATE: Final = "Owned Backend ready: pid={pid}"
+    QUERY_IPC_BORROWED_LOG: Final = "Query IPC borrowing available Backend; ownership unchanged"
+    PROBE_ALREADY_IN_PROGRESS_LOG: Final = "Probe skipped: already in progress"
+    PROBE_IPC_START_LOG: Final = "Probing IPC OPTIONS /query"
+    PROBE_IPC_RESULT_LOG_TEMPLATE: Final = "Probe IPC OPTIONS /query: {available}"
+    PROBE_BACKEND_START_LOG: Final = "Probing Backend API GET /openapi.json"
+    PROBE_BACKEND_RESULT_LOG_TEMPLATE: Final = "Probe Backend API GET /openapi.json: {available}"
+    PROBE_SSH_START_LOG: Final = "Probing Lima/SSH connect"
+    PROBE_SSH_RESULT_LOG_TEMPLATE: Final = "Probe Lima/SSH connect: {available}"
+    PROBE_CODEX_AUTH_START_LOG: Final = "Probing Codex login status"
+    PROBE_CODEX_AUTH_RESULT_LOG_TEMPLATE: Final = (
+        "Probe Codex login status: {authenticated} (None = SSH unavailable)"
+    )
+    DASHBOARD_PROBES_FAILED_LOG_TEMPLATE: Final = "Dashboard probes failed: {error!r}"
+    QUERY_IPC_REQUESTED_LOG: Final = "Query IPC requested"
+    QUERY_IPC_FAILED_LOG_TEMPLATE: Final = "Query IPC failed: {error!r}"
+    DASHBOARD_QUERY_REPLACE_FAILED_LOG: Final = (
+        "Dashboard query snapshot replacement failed"
+    )
+    PUBLISH_RENDER_LOG: Final = "[%d/%d] Rendering %s"
+    PUBLISH_WRITTEN_LOG: Final = "[%d/%d] Written %s"
+    PUBLISH_FINISHED_LOG: Final = "Publishing finished: %d DOCX files"
+    PUBLISH_FAILED_LOG: Final = "Publishing completed researchers failed"
+    DASHBOARD_STARTUP_FAILED_LOG: Final = "Dashboard startup failed"

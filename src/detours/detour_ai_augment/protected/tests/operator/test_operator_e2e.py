@@ -28,7 +28,11 @@ from nicegui.elements.markdown import prepare_content
 from playwright.sync_api import Locator, Page, ViewportSize, expect, sync_playwright
 from pydantic import BaseModel, ConfigDict, field_validator
 
+from src.detours.detour_ai_augment.protected.src.backend import api as backend_api
 from src.detours.detour_ai_augment.protected.src.backend import ipc as backend_ipc
+from src.detours.detour_ai_augment.protected.src.backend.helpers.aivm_audit import (
+    aivm_connection_options,
+)
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models import (
     pydantic_to_paste as submission_models,
 )
@@ -40,6 +44,7 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_
     RESOURCE_SHA256_KEY,
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
+    AUTHORITATIVE_ATTEMPT_COMMIT_REQUEST_RECORD_ID_COLUMN,
     ETAG_HEADER,
     HTTP_GET_METHOD,
     HTTP_POST_METHOD,
@@ -47,6 +52,7 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     PULL_PATH,
     PUSH_PATH,
     REPLAY_LOG_KEY,
+    SOURCE_KEY_HEADER,
     AiAugmentCohort,
 )
 from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helpers import (
@@ -59,7 +65,6 @@ from src.detours.detour_ai_augment.protected.tests.pytest_plugin import (
     ORIGINAL_NICEGUI_STORAGE_PATH,
     nicegui_test_environment,
 )
-from src.detours.detour_ai_augment.src.backend import api as backend_api
 from src.detours.detour_ai_augment.src.backend import server as backend_server
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_backend_store import (  # noqa: E501
     AiAugmentBackendStore,
@@ -67,31 +72,33 @@ from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_ba
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_context import (
     AiAugmentBackendContext,
 )
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.commit_event import (
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.commit_request import (
     COMMIT_PATH,
-    SOURCE_KEY_HEADER,
-    BackendCommitRecord,
+    BackendCommitRequestRecord,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.lifecycle import (
     BackendLifecycle,
 )
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.run_outcome_record import (
-    RunOutcomeResponseRecord,
-)
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.validation_event import (
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.validation_request import (
     VALIDATE_PATH,
     BackendValidationRecord,
 )
 from src.detours.detour_ai_augment.src.control_centre.dashboard import ui as control_ui
 from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models import (
-    run_outcome as run_outcome_models,
+    run_outcome_event as run_outcome_models,
 )
 from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.ai_augment_context import (  # noqa: E501
     LIMA_APPENDWATCH_REPORT_PARAM,
     AiAugmentControlCentreContext,
 )
-from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.run_outcome import (  # noqa: E501
+from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.lifecycle import (  # noqa: E501
     RunLifecycle,
-    RunOutcomePath,
 )
+from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.run_outcome_event import (  # noqa: E501
+    RunOutcomePath,
+    RunOutcomeResponseRecord,
+)
+from src.detours.detour_ai_augment.src.shared import parse_appendwatch_report_bytes
 from src.helpers.architecture import FrozenStrictModel
 from src.helpers.data_models import HttpRequestLogRecord, NameKey
 
@@ -597,7 +604,7 @@ def target_namekey(runtime: OperatorRuntime) -> NameKey:
     )
     namekey = next(
         item.namekey
-        for item in configuration.ai_augment_singular_outerdicts
+        for item in configuration.ai_augment_singular_outerdict_blueprints
         if OPERATOR_TARGET_DRAW_NUMBER in item.draw_numbers
         and item.ai_augment_cohort is not AiAugmentCohort.INELIGIBLE
     )
@@ -814,17 +821,18 @@ def wait_for_completed_grid_row(
             previous_status = current_status
         action_text = (execute.text_content() or "").strip()
         card_enabled = view_card.is_enabled()
-        commit_record_id = run_outcome_savedness = session_status = ""
+        commit_request_record_id = run_outcome_savedness = session_status = ""
         if history_count:
             cells = history_rows.nth(history_count - 1).locator("td")
-            commit_record_id = cells.nth(2).inner_text().strip()
+            commit_request_record_id = cells.nth(2).inner_text().strip()
             run_outcome_savedness = cells.nth(3).inner_text().strip()
             session_status = cells.nth(4).inner_text().strip()
         observation = (
             f"status={current_status!r}; action={action_text!r}; "
             f"view_card_enabled={card_enabled}; "
             f"queried_after_completion={queried_after_completion}; "
-            f"commit_present={bool(commit_record_id)}; savedness={run_outcome_savedness!r}; "
+            f"commit_present={bool(commit_request_record_id)}; "
+            f"savedness={run_outcome_savedness!r}; "
             f"session_status={session_status!r}"
         )
         if (
@@ -837,7 +845,7 @@ def wait_for_completed_grid_row(
                 query_snapshot_in_browser(page, runtime, dashboard)
                 queried_after_completion = True
                 continue
-            if not commit_record_id:
+            if not commit_request_record_id:
                 raise RuntimeError("completed Control Centre history has no commit record ID")
             if run_outcome_savedness == Locale.RUN_OUTCOME_SNAPSHOT_SAVED:
                 if session_status != Locale.SESSION_STATUS_OK:
@@ -846,7 +854,7 @@ def wait_for_completed_grid_row(
                         f"session status: {session_status!r}"
                     )
                 _operator_log("Control Centre projected the completed post-Codex run")
-                return row, commit_record_id
+                return row, commit_request_record_id
         if current_status in {
             RunLifecycle.FAILED.value,
             RunLifecycle.CANCELLED.value,
@@ -894,7 +902,7 @@ def capture_completed_researcher_card(
             page.on("pageerror", lambda error: browser_errors.append(str(error)))
             page.goto(CONTROL_CENTRE_URL, wait_until="networkidle")
             page.get_by_label(Locale.SEARCH_FILTER).fill(namekey.to_json_key())
-            _row, commit_record_id = wait_for_completed_grid_row(
+            _row, commit_request_record_id = wait_for_completed_grid_row(
                 page,
                 dashboard,
                 runtime,
@@ -903,7 +911,7 @@ def capture_completed_researcher_card(
             history = page.get_by_test_id(control_ui.ATTEMPT_HISTORY_TABLE_TEST_ID)
             expect(history).to_be_visible()
             expect(history.locator(ATTEMPT_HISTORY_ROW_SELECTOR)).not_to_have_count(0)
-            expect(history).to_contain_text(commit_record_id)
+            expect(history).to_contain_text(commit_request_record_id)
             expect(history).to_contain_text(
                 Locale.RUN_OUTCOME_SNAPSHOT_SAVED
             )
@@ -916,7 +924,7 @@ def capture_completed_researcher_card(
             expect(view_card).to_be_enabled()
             view_card.click()
             card = page.get_by_test_id(control_ui.CARD_MARKDOWN_TEST_ID)
-            expect(card).to_contain_text(commit_record_id)
+            expect(card).to_contain_text(commit_request_record_id)
             expect(page.get_by_test_id(control_ui.DOWNLOAD_CARD_DOCX_TEST_ID)).to_be_enabled()
             card_text = card.inner_text().strip()
             if not card_text:
@@ -966,7 +974,7 @@ def _assert_deployed_appendwatch_topology(
         configuration.lima_configuration.param[LIMA_APPENDWATCH_REPORT_PARAM]
     )
     assert appendwatch_report.is_absolute()
-    options = backend_api._aivm_connection_options(
+    options = aivm_connection_options(
         lima_ssh_config=backend_api.LIMA_SSH_CONFIG_PATH,
         identity_file=identity_file,
         known_hosts_file=backend_api.AIVM_KNOWN_HOSTS_FILE,
@@ -1022,15 +1030,15 @@ def _validate_workflow_http_records(
         validation = BackendValidationRecord.from_http_request_log_record(record)
         validations[record.record_id] = validation
         body = validation.validation_request_body
-        commit = body.commit_record
+        commit = body.commit_request_record
         references: tuple[HttpRequestLogRecord, ...] = (
             commit,
-            commit.commit_request_body.pull_record,
-            commit.commit_request_body.push_record,
+            commit.commit_request_body.pull_response_record,
+            commit.commit_request_body.push_response_record,
             *body.openalex_ror_records,
         )
-        if body.initial_validation_record is not None:
-            references += (body.initial_validation_record,)
+        if body.initial_validation_request_record is not None:
+            references += (body.initial_validation_request_record,)
         for linked in references:
             assert linked.record_id in by_id, linked.record_id
             assert linked.model_dump() == by_id[linked.record_id].model_dump(), linked.record_id
@@ -1042,8 +1050,10 @@ def _validate_workflow_http_records(
             ) in provider_endpoints, provider.record_id
             provider_ids.add(provider.record_id)
 
-    local_routes = backend_api.AUTHORITATIVE_FASTAPI_ROUTES | {
-        backend_api.AUTHORITATIVE_COMMIT_ROUTE,
+    local_routes = {
+        (HTTP_GET_METHOD, PULL_PATH),
+        (HTTP_POST_METHOD, PUSH_PATH),
+        (HTTP_POST_METHOD, COMMIT_PATH),
         (HTTP_POST_METHOD, VALIDATE_PATH),
         *((HTTP_POST_METHOD, path) for path in run_outcome_models.RUN_OUTCOME_PATHS),
     }
@@ -1089,11 +1099,11 @@ def validate_workflow_artifacts(
             verify_hash_on_init=False,
         )
     )
-    accepted_commits: list[BackendCommitRecord] = []
+    accepted_commits: list[BackendCommitRequestRecord] = []
     for record in records:
-        if (record.method, record.path) != backend_api.AUTHORITATIVE_COMMIT_ROUTE:
+        if (record.method, record.path) != (HTTP_POST_METHOD, COMMIT_PATH):
             continue
-        commit_record = BackendCommitRecord.from_http_request_log_record(
+        commit_request_record = BackendCommitRequestRecord.from_http_request_log_record(
             record,
             resolve_http_record=records_by_id.__getitem__,
         )
@@ -1101,35 +1111,35 @@ def validate_workflow_artifacts(
             row = backend_store._execute(
                 f"SELECT {backend_api.AUTHORITATIVE_ATTEMPT_PAYLOAD_COLUMN} "
                 f"FROM {backend_api.AUTHORITATIVE_ATTEMPTS_TABLE} "
-                f"WHERE {backend_api.AUTHORITATIVE_ATTEMPT_COMMIT_ID_COLUMN} = ?",
+                f"WHERE {AUTHORITATIVE_ATTEMPT_COMMIT_REQUEST_RECORD_ID_COLUMN} = ?",
                 [str(record.record_id)],
             ).fetchone()
+            if row is not None:
+                attempt_record = backend_store._validation_from_attempt_json(
+                    str(row[0]),
+                    commit_http_record=record,
+                )
         if row is not None:
-            attempt_record = backend_api._attempt_record_from_serialized_json(
-                runtime,
-                str(row[0]),
-                commit_http_record=record,
-            )
             if (
-                attempt_record.attempt.post_commit_validation.result
+                attempt_record.validation_request_body.post_commit_validation.result
                 is BackendLifecycle.ACCEPTED
             ):
-                accepted_commits.append(commit_record)
+                accepted_commits.append(commit_request_record)
     assert len(accepted_commits) == 1
-    commit_record = accepted_commits[0]
+    commit_request_record = accepted_commits[0]
     assert (
-        backend_api._validated_http_record(commit_record).model_dump()
-        == commit_record.model_dump()
+        AiAugmentBackendStore._validated_http_record(commit_request_record).model_dump()
+        == commit_request_record.model_dump()
     )
-    commit_request_body = commit_record.commit_request_body
+    commit_request_body = commit_request_record.commit_request_body
     session = commit_request_body.codex_session_record
     assert session.session_id is not None
     assert session.codex_rollout_record is not None
     assert session.appendwatch_report_record is not None
     rollout = session.codex_rollout_record
-    pull_ordinal = _record_ordinal(records, commit_request_body.pull_record.record_id)
-    push_ordinal = _record_ordinal(records, commit_request_body.push_record.record_id)
-    commit_ordinal = _record_ordinal(records, commit_record.record_id)
+    pull_ordinal = _record_ordinal(records, commit_request_body.pull_response_record.record_id)
+    push_ordinal = _record_ordinal(records, commit_request_body.push_response_record.record_id)
+    commit_ordinal = _record_ordinal(records, commit_request_record.record_id)
     gone_pull_ordinal = _record_ordinal(records, gone_pull.record_id)
     assert pull_ordinal < push_ordinal < commit_ordinal < gone_pull_ordinal
     push_record = records[push_ordinal]
@@ -1165,7 +1175,7 @@ def validate_workflow_artifacts(
         assert run_outcome_record.response_code == status.HTTP_200_OK
     assert gone_pull_ordinal < _record_ordinal(records, run_outcome_record.record_id)
     assert run_outcome_record.request_body is None
-    assert backend_api._parse_name_key_header(
+    assert AiAugmentBackendStore._parse_name_key_header(
         backend_api._http_header_value(
             run_outcome_record.request_headers,
             run_outcome_models.NAME_KEY_HEADER,
@@ -1178,7 +1188,7 @@ def validate_workflow_artifacts(
     validated_run_outcome = RunOutcomeResponseRecord.from_http_request_log_record(
         run_outcome_record
     )
-    run_outcome_snapshot = validated_run_outcome.run_outcome_response_body
+    run_outcome_snapshot = validated_run_outcome._body()
     outcome_ordinal = _record_ordinal(records, run_outcome_record.record_id)
     preceding_records = records[:outcome_ordinal]
     latest_pull = next(
@@ -1191,12 +1201,12 @@ def validate_workflow_artifacts(
     )
     assert run_outcome_snapshot.pull_record_id == latest_pull.record_id
     assert run_outcome_snapshot.push_record_id == latest_push.record_id
-    assert run_outcome_snapshot.commit_record_id == commit_record.record_id
+    assert run_outcome_snapshot.commit_request_record_id == commit_request_record.record_id
     assert run_outcome_snapshot.run_outcome_record_id == run_outcome_record.record_id
     assert run_outcome_snapshot.validation_record_id is not None
     assert run_outcome_snapshot.validation_record_id in validations
     validation = validations[run_outcome_snapshot.validation_record_id]
-    assert validation.validation_request_body.commit_record == commit_record
+    assert validation.validation_request_body.commit_request_record == commit_request_record
     assert (
         validation.validation_request_body.post_commit_validation.result
         is BackendLifecycle.ACCEPTED
@@ -1205,11 +1215,11 @@ def validate_workflow_artifacts(
     assert backend_api._http_header_value(
         gone_pull.response_headers, ETAG_HEADER,
     ) == f'"{validation.record_id}"'
-    outcome_request = validated_run_outcome.run_outcome_request
+    outcome_request = validated_run_outcome.run_outcome_request_record
     assert outcome_request.session_id == session.session_id
-    if outcome_request.run_outcome is RunLifecycle.COMPLETED:
-        assert outcome_request.validation_record_id == validation.record_id
-    run_outcome_session = run_outcome_snapshot.codex_session_record
+    if outcome_request.run_outcome is run_outcome_models.RunOutcome.COMPLETED:
+        assert outcome_request.validation_request_record_id == validation.record_id
+    run_outcome_session = validated_run_outcome._codex_session_record()
     if run_outcome_record.response_code == status.HTTP_200_OK:
         assert run_outcome_session.session_id is not None
         assert run_outcome_session.codex_rollout_record is not None
@@ -1221,7 +1231,7 @@ def validate_workflow_artifacts(
             SOURCE_KEY_HEADER,
         )
         run_outcome_filename, run_outcome_line_count = (
-            backend_api._parse_source_key_header(run_outcome_source_key)
+            AiAugmentBackendStore._parse_source_key_header(run_outcome_source_key)
         )
         assert run_outcome_line_count == run_outcome_rollout.line_count
         run_outcome_rollout_blob = (
@@ -1234,7 +1244,7 @@ def validate_workflow_artifacts(
             _file_digest(run_outcome_rollout_blob).hex()
             == run_outcome_rollout.sha256
         )
-        backend_api.parse_appendwatch_report_bytes(
+        parse_appendwatch_report_bytes(
             base64.b64decode(
                 run_outcome_report.data,
                 validate=True,

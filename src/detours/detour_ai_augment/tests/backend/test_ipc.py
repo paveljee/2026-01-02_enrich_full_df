@@ -3,13 +3,12 @@ from __future__ import annotations
 import asyncio
 import stat
 import threading
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Generator
 from contextlib import asynccontextmanager, contextmanager
 from http import HTTPStatus
 from pathlib import Path
 from typing import Any, NoReturn
 from unittest.mock import Mock
-from uuid import uuid7
 
 import pytest
 import requests
@@ -17,6 +16,7 @@ from fastapi import FastAPI, status
 from starlette.responses import Response
 from starlette.types import Message, Scope
 
+from src.detours.detour_ai_augment.protected.src.backend import api
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_augment_config import (  # noqa: E501
     AiAugmentDetourConfig,
 )
@@ -32,18 +32,12 @@ from src.detours.detour_ai_augment.protected.src.backend.ipc import (
     DASHBOARD_QUERY_PATH,
     SOCKET_PERMISSIONS,
 )
-from src.detours.detour_ai_augment.src.backend import api, server
+from src.detours.detour_ai_augment.src.backend import server
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_context import (  # noqa: E501
     AiAugmentBackendContext,
 )
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.commit_event import (
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.commit_request import (
     CodexSessionRecord,
-)
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.query_response import (
-    QueryResponse,
-)
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.run_outcome_record import (
-    RunOutcomeResponseBody,
 )
 from src.detours.detour_ai_augment.src.backend.server import (
     create_dashboard_query_app,
@@ -51,14 +45,22 @@ from src.detours.detour_ai_augment.src.backend.server import (
     stop_dashboard_query_server,
 )
 from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models import (
-    run_outcome as run_outcome_models,
+    run_outcome_event as run_outcome_models,
 )
-from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.query_request import (  # noqa: E501
-    QueryRequest,
+from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.dashboard_query_snapshot import (  # noqa: E501
+    DashboardQuerySnapshot,
+)
+from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.query_event import (  # noqa: E501
+    QueryRequestRecord,
+)
+from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.run_outcome_event import (  # noqa: E501
+    RunOutcomeRequestRecord,
+    RunOutcomeResponseRecord,
 )
 from src.detours.detour_ai_augment.src.control_centre.dashboard.ui import (
     _BackendDatabaseClient,
 )
+from src.detours.detour_ai_augment.src.shared import name_key_header_value
 from src.helpers.data_models import NameKey
 
 TEST_NAMEKEY = '{"ktp.first_name": "A.", "ktp.last_name": "Sheikh"}'
@@ -67,7 +69,7 @@ TEST_NAMEKEY = '{"ktp.first_name": "A.", "ktp.last_name": "Sheikh"}'
 def empty_query_response(request: requests.PreparedRequest) -> requests.Response:
     return api._response(
         request, HTTPStatus.OK,
-        QueryResponse(attempts=(), ai_augment_singular_outerdicts=()).model_dump_json(),
+        DashboardQuerySnapshot(ai_augment_singular_outerdicts=()).model_dump_json(),
         content_type=ContentType.JSON,
     )
 
@@ -84,10 +86,7 @@ def test_full_backend_composition_stops_ipc_before_domain_shutdown(
     runtime = Mock(spec=AiAugmentBackendContext)
 
     @asynccontextmanager
-    async def domain_lifespan(
-        received_runtime: AiAugmentBackendContext,
-    ) -> AsyncIterator[None]:
-        assert received_runtime is runtime
+    async def domain_lifespan() -> AsyncIterator[None]:
         events.append("domain-start")
         try:
             yield
@@ -95,15 +94,14 @@ def test_full_backend_composition_stops_ipc_before_domain_shutdown(
             events.append("domain-stop")
 
     def start_ipc(
-        received_runtime: AiAugmentBackendContext, _store: object,
+        _store: object,
         *, request_scope: server.IpcRequestScope,
     ) -> object:
-        assert received_runtime is runtime
         events.append("ipc-start")
         return ipc_server
 
     @contextmanager
-    def store_lifecycle(*_args: object, **_kwargs: object) -> Iterator[None]:
+    def store_lifecycle(*_args: object, **_kwargs: object) -> Generator[None, None, None]:
         events.append("store-start")
         try:
             yield
@@ -142,10 +140,7 @@ def test_full_backend_composition_stops_ipc_before_domain_shutdown(
 
 def test_dashboard_query_flask_application_is_separate_and_unauthenticated() -> None:
     observed: list[requests.PreparedRequest] = []
-    query_response = QueryResponse(
-        attempts=(),
-        ai_augment_singular_outerdicts=(),
-    )
+    query_response = DashboardQuerySnapshot(ai_augment_singular_outerdicts=())
     payload = query_response.model_dump_json()
 
     def query(ipc_request: requests.PreparedRequest) -> requests.Response:
@@ -200,13 +195,16 @@ def test_query_rejects_filters_and_bodies_without_dispatch_or_fatal_exit(
 
 
 def test_query_request_is_wholesale_only() -> None:
-    request = QueryRequest()
-    assert request.outbound_http() == ("GET", "/query")
-    assert QueryRequest.from_http_request(
-        method="GET", path="/query", query=b"", body=b"",
-    ) == request
+    request = QueryRequestRecord(
+        schema_version="1.1", method="GET", scheme="http", host="invalid",
+        port=None, path="/query", query="", request_headers={}, request_body=None,
+        response_code=None, response_headers=None, response_body=None,
+        received_at_unix_usec=1, ready_to_respond_at_unix_usec=None,
+        duration_usec=None,
+    )
+    assert (request.method, request.path, request.query) == ("GET", "/query", "")
     with pytest.raises(ValueError, match="Extra inputs are not permitted"):
-        QueryRequest.model_validate({"namekey": None})
+        QueryRequestRecord.model_validate({**request.model_dump(), "namekey": None})
 
 
 def test_dashboard_query_failure_exits_loudly() -> None:
@@ -237,19 +235,28 @@ def test_dashboard_query_failure_exits_loudly() -> None:
 
 def test_full_backend_ipc_forwards_run_outcome_http_exchange_exactly() -> None:
     observed: list[requests.PreparedRequest] = []
-    snapshot = RunOutcomeResponseBody(
-        pull_record_id=None, push_record_id=None,
-        commit_record_id=None, validation_record_id=None, run_outcome_record_id=uuid7(),
+    request_record = RunOutcomeRequestRecord.from_http_request(
+        received_at_unix_usec=1, method="POST", scheme="http", host="invalid",
+        port=None, path=run_outcome_models.FAILED_PATH, query="",
+        request_headers={}, request_body=None,
+    )
+    snapshot = RunOutcomeResponseRecord.from_run_outcome_request_record(
+        request_record, response_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+        response_headers=None, pull_record_id=None, push_record_id=None,
+        commit_request_record_id=None, validation_record_id=None,
         codex_session_record=CodexSessionRecord(
             session_id=None, codex_rollout_record=None, appendwatch_report_record=None,
         ),
+        ready_to_respond_at_unix_usec=2,
     )
-    response_body = snapshot.model_dump_json().encode(TEXT_ENCODING)
+    body_text = snapshot.response_body
+    assert body_text is not None
+    response_body = body_text.encode(TEXT_ENCODING)
 
     def run_outcome(request: requests.PreparedRequest) -> requests.Response:
         observed.append(request)
         return api._response(
-            request, HTTPStatus.INTERNAL_SERVER_ERROR, snapshot.model_dump_json(),
+            request, HTTPStatus.INTERNAL_SERVER_ERROR, body_text,
             content_type=ContentType.JSON,
         )
 
@@ -261,7 +268,7 @@ def test_full_backend_ipc_forwards_run_outcome_http_exchange_exactly() -> None:
     response = app.test_client().post(
         run_outcome_models.FAILED_PATH,
         base_url=f"{DASHBOARD_IPC_SCHEME}://{DASHBOARD_IPC_HOST}",
-        headers={run_outcome_models.NAME_KEY_HEADER: api.name_key_header(namekey)},
+        headers={run_outcome_models.NAME_KEY_HEADER: name_key_header_value(namekey)},
     )
     assert response.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
     assert response.content_type == ContentType.JSON
@@ -270,7 +277,7 @@ def test_full_backend_ipc_forwards_run_outcome_http_exchange_exactly() -> None:
     request = observed[0]
     assert request.method == "POST"
     assert request.url == "http://invalid/failed"
-    assert request.headers[run_outcome_models.NAME_KEY_HEADER] == api.name_key_header(namekey)
+    assert request.headers[run_outcome_models.NAME_KEY_HEADER] == name_key_header_value(namekey)
     assert api._prepared_request_body(request) == b""
 
 
@@ -292,10 +299,7 @@ def test_dashboard_client_queries_real_mode_0600_unix_socket(
 ) -> None:
     socket_path = tmp_path / "dashboard.sock"
     observed: list[requests.PreparedRequest] = []
-    query_response = QueryResponse(
-        attempts=(),
-        ai_augment_singular_outerdicts=(),
-    )
+    query_response = DashboardQuerySnapshot(ai_augment_singular_outerdicts=())
 
     def query(ipc_request: requests.PreparedRequest) -> requests.Response:
         observed.append(ipc_request)
@@ -322,10 +326,7 @@ def test_dashboard_client_queries_real_mode_0600_unix_socket(
         )
         assert client.available() is True
         assert observed == []
-        assert client.send_query_request(QueryRequest()) == QueryResponse(
-            attempts=(),
-            ai_augment_singular_outerdicts=(),
-        )
+        assert client.send_query_request() == query_response
         assert [(item.method, item.path_url) for item in observed] == [("GET", "/query")]
     finally:
         stop_dashboard_query_server(server)
@@ -452,7 +453,7 @@ def test_ipc_scope_covers_complete_wsgi_exchange(method: str, path: str, code: i
     events: list[str] = []
 
     @contextmanager
-    def request_scope() -> Iterator[None]:
+    def request_scope() -> Generator[None, None, None]:
         events.append("enter")
         try:
             yield
@@ -482,15 +483,15 @@ def test_server_shutdown_keeps_loop_available_for_inflight_ipc(
     response_codes: list[int] = []
 
     @contextmanager
-    def store_lifecycle(*_args: Any, **_kwargs: Any) -> Iterator[None]:
+    def store_lifecycle(*_args: Any, **_kwargs: Any) -> Generator[None, None, None]:
         yield
 
     @asynccontextmanager
-    async def domain_lifespan(*_args: Any) -> AsyncIterator[None]:
+    async def domain_lifespan() -> AsyncIterator[None]:
         yield
 
     def start_ipc(
-        _runtime: AiAugmentBackendContext, _store: object, *, request_scope: server.IpcRequestScope,
+        _store: object, *, request_scope: server.IpcRequestScope,
     ) -> object:
         received_scopes.append(request_scope)
         return object()
@@ -549,4 +550,4 @@ def test_full_backend_factory_registers_admission_once(monkeypatch: pytest.Monke
     ), strict=True):
         assert isinstance(entry.cls, type)
         assert issubclass(entry.cls, expected)
-    assert app.state.runtime is runtime
+    assert not hasattr(app.state, "context")

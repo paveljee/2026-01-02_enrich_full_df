@@ -8,7 +8,7 @@ import signal
 import stat
 import threading
 import time
-from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterator
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Generator, Iterator
 from contextlib import (
     AbstractContextManager,
     asynccontextmanager,
@@ -35,7 +35,7 @@ from werkzeug.serving import BaseWSGIServer, make_server
 from werkzeug.wsgi import ClosingIterator
 
 from src.detours.detour_ai_augment.protected.src.architecture import BackendComponent
-from src.detours.detour_ai_augment.protected.src.backend import ipc
+from src.detours.detour_ai_augment.protected.src.backend import api, ipc
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_augment_config import (  # noqa: E501
     AiAugmentDetourConfig,
 )
@@ -43,15 +43,17 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import L
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     BACKEND_STORE_CLOSED_CLEANLY,
     HTTP_POST_METHOD,
+    NAMEKEY_ENV_NAME,
+    VALID_NONBLANK,
     ContentType,
 )
 from src.helpers.architecture import FrozenStrictModel
+from src.helpers.data_models import NameKey
 
-from ..control_centre.dashboard.helpers.data_models.run_outcome import (
+from ..control_centre.dashboard.helpers.data_models.run_outcome_event import (
     RUN_OUTCOME_PATHS,
     RunOutcomePath,
 )
-from . import api
 from .helpers.data_models.ai_augment_backend_store import (
     AiAugmentBackendStore,
     initialize_backend_store,
@@ -94,13 +96,13 @@ class _BackendRequestGate(FrozenStrictModel):
         try:
             async with self._condition:
                 self._ipc_pending = True
-                logger.info("IPC waiting for %d active HTTP exchanges", self._http_requests)
+                logger.info(Locale.BACKEND_IPC_WAIT_HTTP_LOG, self._http_requests)
                 await self._condition.wait_for(lambda: self._http_requests == 0)
             pending = tuple(api.AUTHORITATIVE_BACKGROUND_TASKS)
             if pending:
-                logger.info("IPC waiting for %d authoritative background tasks", len(pending))
+                logger.info(Locale.BACKEND_IPC_WAIT_WORK_LOG, len(pending))
                 await asyncio.gather(*(asyncio.shield(task) for task in pending))
-            logger.info("IPC admitted after HTTP persistence and authoritative work")
+            logger.info(Locale.BACKEND_IPC_ADMITTED_LOG)
             yield
         finally:
             async with self._condition:
@@ -132,35 +134,35 @@ class _BackendRequestMiddleware:
 
 @contextmanager
 def backend_store_lifecycle(
-    runtime: AiAugmentBackendContext, *, new: bool, confirmed: bool, yes: bool = False,
-) -> Iterator[AiAugmentBackendStore]:
+    context: AiAugmentBackendContext, *, new: bool, confirmed: bool, yes: bool = False,
+) -> Generator[AiAugmentBackendStore, None, None]:
     if not confirmed:
         raise ValueError(Locale.STORE_STARTUP_CONFIRMATION_REQUIRED)
     acquired_lock = api.BACKEND_PROCESS_LOCK_DESCRIPTOR is None
     if acquired_lock:
         api._acquire_backend_process_lock()
     try:
-        logger.info("Opening writable Backend Store: new=%s", new)
+        logger.info(Locale.BACKEND_STORE_OPEN_WRITABLE_LOG, new)
         with initialize_backend_store(
-            runtime,
+            context,
             ipc_only=False,
             new=new,
             confirmed=confirmed,
             confirm_replay=lambda: confirm_nonempty_replay(yes=yes),
         ) as store:
-            logger.info("Writable Backend Store ready")
+            logger.info(Locale.BACKEND_STORE_READY_LOG)
             yield store
     finally:
         if acquired_lock:
             api._release_backend_process_lock()
     # Not reached on failed startup, application, task settlement or resource cleanup.
-    logger.info("Writable Backend Store closed cleanly")
+    logger.info(Locale.BACKEND_STORE_CLOSED_LOG)
     print(BACKEND_STORE_CLOSED_CLEANLY, flush=True)
 
 
 @asynccontextmanager
 async def lifespan(
-    app: FastAPI, runtime: AiAugmentBackendContext, *,
+    app: FastAPI, context: AiAugmentBackendContext, *,
     new: bool, confirmed: bool, yes: bool = False,
 ) -> AsyncGenerator[None, None]:
     gate = _BackendRequestGate()
@@ -168,7 +170,7 @@ async def lifespan(
     loop = asyncio.get_running_loop()
 
     @contextmanager
-    def ipc_request_scope() -> Iterator[None]:
+    def ipc_request_scope() -> Generator[None, None, None]:
         scope = gate.ipc()
         asyncio.run_coroutine_threadsafe(scope.__aenter__(), loop).result()
         try:
@@ -178,11 +180,10 @@ async def lifespan(
                 scope.__aexit__(None, None, None), loop,
             ).result()
 
-    with backend_store_lifecycle(runtime, new=new, confirmed=confirmed, yes=yes) as store:
+    with backend_store_lifecycle(context, new=new, confirmed=confirmed, yes=yes) as store:
         app.state.store = store
-        async with api.lifespan(runtime):
+        async with api.lifespan():
             dashboard_query_server = start_full_dashboard_query_server(
-                runtime,
                 store,
                 request_scope=ipc_request_scope,
             )
@@ -227,7 +228,6 @@ async def pull(request: Request) -> Response:
         return _http_response(
             await api.authoritative_pull(
                 await _prepared_http_request(request),
-                request.app.state.runtime,
                 request.app.state.store,
             )
         )
@@ -251,11 +251,11 @@ async def push(request: Request) -> Response:
 
 
 def full_backend_application(
-    runtime: AiAugmentBackendContext, *, new: bool, confirmed: bool, yes: bool = False,
+    context: AiAugmentBackendContext, *, new: bool, confirmed: bool, yes: bool = False,
 ) -> FastAPI:
     @asynccontextmanager
     async def application_lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-        async with lifespan(app, runtime, new=new, confirmed=confirmed, yes=yes):
+        async with lifespan(app, context, new=new, confirmed=confirmed, yes=yes):
             yield
 
     if not any(
@@ -263,7 +263,6 @@ def full_backend_application(
         for middleware in app.user_middleware
     ):
         app.add_middleware(_BackendRequestMiddleware)
-    app.state.runtime = runtime
     app.router.lifespan_context = application_lifespan
     return app
 
@@ -438,13 +437,12 @@ def stop_dashboard_query_server(handle: _DashboardIpcServer) -> None:
 
 
 def start_full_dashboard_query_server(
-    runtime: AiAugmentBackendContext,
-    store: BackendComponent.FullStoreProperty,
+    store: AiAugmentBackendStore,
     *,
     request_scope: IpcRequestScope = nullcontext,
 ) -> _DashboardIpcServer:
     def outcome(request: requests.PreparedRequest) -> requests.Response:
-        return asyncio.run(ipc.handle_run_outcome_request(runtime, store, request))
+        return asyncio.run(ipc.handle_run_outcome_request(store, request))
 
     def query(request: requests.PreparedRequest) -> requests.Response:
         return asyncio.run(ipc.handle_query_request(store, request))
@@ -505,7 +503,7 @@ def configure_runtime(
     require_namekey: bool = True,
     verify_hash_on_init: bool = True,
 ) -> AiAugmentBackendContext:
-    logger.info("Loading Backend configuration/resources: %s; verify_hashes=%s",
+    logger.info(Locale.BACKEND_CONFIG_LOADING_LOG,
                 config_path, verify_hash_on_init)
     try:
         pipeline = AiAugmentDetourConfig.from_json(
@@ -513,11 +511,11 @@ def configure_runtime(
             verify_hash_on_init=verify_hash_on_init,
         )
     except (OSError, ValueError) as exc:
-        raise api._PushConfigurationError(
+        raise RuntimeError(
             Locale.CONFIG_INVALID_TEMPLATE.format(config_path=config_path)
         ) from exc
     if not pipeline.db_file.is_file() or not os.access(pipeline.db_file, os.R_OK):
-        raise api._PushConfigurationError(
+        raise RuntimeError(
             Locale.SOURCE_DUCKDB_UNREADABLE_TEMPLATE.format(
                 db_file=pipeline.db_file
             )
@@ -525,28 +523,37 @@ def configure_runtime(
     try:
         ZoneInfo(pipeline.timezone)
     except (KeyError, ValueError) as exc:
-        raise api._PushConfigurationError(
+        raise RuntimeError(
             Locale.TIMEZONE_INVALID_TEMPLATE.format(timezone=pipeline.timezone)
         ) from exc
 
-    configured_namekey = api._configured_namekey() if require_namekey else None
-    runtime = AiAugmentBackendContext(
-        pipeline_config=pipeline,
-        configured_namekey=configured_namekey,
-    )
-    logger.info("Loading researchers from read-only source DB: %s", pipeline.db_file)
-    try:
-        singular_outerdicts = runtime.ai_augment_singular_outerdicts
-        if configured_namekey is not None:
-            api._configured_ai_augment_singular_outerdict(
-                configured_namekey,
-                singular_outerdicts,
+    configured_namekey = None
+    if require_namekey:
+        raw_namekey = os.environ.get(NAMEKEY_ENV_NAME)
+        if not VALID_NONBLANK(raw_namekey):
+            raise ValueError(
+                Locale.NAMEKEY_NOT_SET_TEMPLATE.format(environment_name=NAMEKEY_ENV_NAME)
             )
+        assert isinstance(raw_namekey, str)
+        try:
+            configured_namekey = NameKey.from_json_key(raw_namekey)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(Locale.CONFIGURED_NAMEKEY_MALFORMED) from exc
+    try:
+        context = AiAugmentBackendContext(
+            pipeline_config=pipeline,
+            configured_namekey=configured_namekey,
+        )
+        if configured_namekey is not None:
+            context.configured_ai_augment_singular_outerdict()
     except ValueError as exc:
-        raise api._PushConfigurationError(str(exc)) from exc
-    logger.info("Backend runtime ready: %d researchers; selected=%s",
-                len(singular_outerdicts), configured_namekey)
-    return runtime
+        raise RuntimeError(str(exc)) from exc
+    logger.info(
+        Locale.BACKEND_CONFIG_VALIDATED_LOG,
+        len(context.ai_augment_singular_outerdict_blueprints),
+        configured_namekey,
+    )
+    return context
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -563,7 +570,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         args.new = False
         args.resume = False
     elif args.new == args.resume:
-        parser.error("Full Backend requires exactly one of --new or --resume/--continue")
+        parser.error(Locale.BACKEND_START_FLAGS_REQUIRED)
     return args
 
 
@@ -571,8 +578,8 @@ def confirm_startup(args: argparse.Namespace) -> bool:
     if args.yes:
         return True
     prompt = (
-        "Recreate the AI augment detour database from the replay log? [y/N] "
-        if args.new else "Resume the AI augment detour database without rebuilding? [y/N] "
+        Locale.BACKEND_RECREATE_PROMPT
+        if args.new else Locale.BACKEND_RESUME_PROMPT
     )
     try:
         confirmed = Console().input(prompt, markup=False).strip().lower() == "y"
@@ -588,7 +595,7 @@ def confirm_nonempty_replay(*, yes: bool) -> bool:
         return True
     try:
         return Console().input(
-            "Registered a nonempty replay log. Replay it into the new database? [y/N] ",
+            Locale.BACKEND_NONEMPTY_REPLAY_PROMPT,
             markup=False,
         ).strip().lower() == "y"
     except EOFError:
@@ -598,39 +605,39 @@ def confirm_nonempty_replay(*, yes: bool) -> bool:
 def main(argv: list[str] | None = None) -> None:
     logging.basicConfig(level=logging.INFO)
     args = parse_args(argv)
-    logger.info("Starting Backend: config=%s; ipc_only=%s; new=%s; resume=%s",
+    logger.info(Locale.BACKEND_STARTING_LOG,
                 args.config, args.ipc_only, args.new, args.resume)
     confirmed = False if args.ipc_only else confirm_startup(args)
     verify_hash_on_init = not args.danger_no_verify_hash
     api._acquire_backend_process_lock()
     try:
-        runtime = configure_runtime(
+        context = configure_runtime(
             args.config,
             require_namekey=not args.ipc_only,
             verify_hash_on_init=verify_hash_on_init,
         )
         if args.ipc_only:
-            logger.info("Opening read-only Backend Store")
-            with initialize_backend_store(runtime, ipc_only=True) as store:
-                logger.info("Read-only Backend Store ready; starting query-only IPC")
+            logger.info(Locale.BACKEND_STORE_OPEN_READ_ONLY_LOG)
+            with initialize_backend_store(context, ipc_only=True) as store:
+                logger.info(Locale.BACKEND_STORE_READ_ONLY_READY_LOG)
                 serve_dashboard_query_only(store)
-            logger.info("Query-only IPC stopped; read-only Backend Store closed cleanly")
+            logger.info(Locale.BACKEND_STORE_READ_ONLY_CLOSED_LOG)
             print(BACKEND_STORE_CLOSED_CLEANLY, flush=True)
         else:
-            logger.info("Starting Backend HTTP API at %s:%s", api.SERVER_HOST, api.SERVER_PORT)
+            logger.info(Locale.BACKEND_HTTP_STARTING_LOG, api.SERVER_HOST, api.SERVER_PORT)
             uvicorn.run(
                 full_backend_application(
-                    runtime, new=args.new, confirmed=confirmed, yes=args.yes,
+                    context, new=args.new, confirmed=confirmed, yes=args.yes,
                 ),
                 host=api.SERVER_HOST,
                 port=api.SERVER_PORT,
             )
     except BaseException:
-        logger.exception("Backend failed; exiting without recovery")
+        logger.exception(Locale.BACKEND_FAILED_LOG)
         raise
     finally:
         api._release_backend_process_lock()
-        logger.info("Backend process lock released")
+        logger.info(Locale.BACKEND_LOCK_RELEASED_LOG)
 
 
 if __name__ == "__main__":

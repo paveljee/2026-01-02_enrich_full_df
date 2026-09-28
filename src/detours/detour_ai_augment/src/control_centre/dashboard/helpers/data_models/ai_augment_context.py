@@ -11,6 +11,10 @@ from pydantic import PrivateAttr, ValidationError, computed_field
 from src.detours.detour_ai_augment.protected.src.architecture import (
     ControlCentreComponent,
 )
+from src.detours.detour_ai_augment.protected.src.backend.api import (
+    APPENDWATCH_REPORT_ENV_NAME,
+    FORBIDDEN_NORMALIZED_PATH_PARTS,
+)
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_augment_config import (  # noqa: E501
     AiAugmentDetourConfig,
 )
@@ -29,11 +33,6 @@ from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helper
 )
 from src.helpers.architecture import FrozenStrictModel, implements
 
-from .....backend.api import (
-    APPENDWATCH_REPORT_ENV_NAME,
-    FORBIDDEN_NORMALIZED_PATH_PARTS,
-)
-
 LIMA_APPENDWATCH_REPORT_PARAM: Final = APPENDWATCH_REPORT_ENV_NAME
 
 
@@ -46,7 +45,7 @@ class AiAugmentControlCentreContext(FrozenStrictModel):
     def begin_backend_start(self) -> tuple[str, ...]:
         """One policy for every owned child during this Dashboard context's lifetime."""
         if self._backend_cycle_failed:
-            raise RuntimeError("Previous full Backend cycle failed; operator intervention required")
+            raise RuntimeError(Locale.BACKEND_CYCLE_PREVIOUSLY_FAILED)
         arguments = ("--new", "--yes") if self._backend_rebuild_required else ("--resume", "--yes")
         self._backend_cycle_failed = True
         return arguments

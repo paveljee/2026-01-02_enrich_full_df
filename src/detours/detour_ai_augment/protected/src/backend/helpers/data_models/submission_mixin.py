@@ -1,6 +1,6 @@
 import os
 import threading
-from collections.abc import Iterator, MutableMapping
+from collections.abc import Generator, Iterator, MutableMapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Generic, Protocol, Self, TypeVar, cast
@@ -124,7 +124,7 @@ class _ParamsBinding(MutableMapping[str, str | None]):
 
 
 @contextmanager
-def submission_http_context(http: ModelHttpInterceptor) -> Iterator[None]:
+def submission_http_context(http: ModelHttpInterceptor) -> Generator[None, None, None]:
     global _installed
     with _install_lock:
         if not _installed:

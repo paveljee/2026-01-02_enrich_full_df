@@ -12,13 +12,14 @@ from pydantic import (
     model_validator,
 )
 
-from src.detours.detour_ai_augment.protected.src.architecture import (
-    BackendComponent,
-)
+from src.detours.detour_ai_augment.protected.src.architecture import BackendComponent
+from src.detours.detour_ai_augment.protected.src.backend.helpers import codex_parse
 from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import (
     Locale,
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
+    AI_AUGMENT_CARD_EMPTY_VALUE_PLACEHOLDERS,
+    AI_AUGMENT_STANDARDIZED_COLUMNS,
     DOCX_COLUMNS,
     AiAugmentCohort,
     AiAugmentIneligibilityCategory,
@@ -27,6 +28,7 @@ from src.helpers.architecture import FrozenStrictModel, implements
 from src.helpers.data_models import (
     InnerDict,
     NameKey,
+    OuterDict,
 )
 from src.helpers.procedures import (
     DocxMatchProcedure,
@@ -36,13 +38,11 @@ from src.helpers.procedures import (
 from src.helpers.vars import (
     DRAW_LABEL,
     KTP_DOCX_OPTIONAL_EMPTY_COLS,
+    KTP_FILENAME_COL,
+    KTP_FRAGMENT_COL,
 )
 
-from ....control_centre.dashboard.helpers.data_models.run_outcome import (
-    NAME_KEY_HEADER,
-    name_key_from_header_value,
-)
-from .committed_innerdict import CommittedInnerDict, _CommittedInnerDictJson
+from .codex_innerdict import CodexInnerDict, _CodexInnerDictJson
 
 
 class _AiAugmentSingularOuterDictJson(FrozenStrictModel):
@@ -50,7 +50,7 @@ class _AiAugmentSingularOuterDictJson(FrozenStrictModel):
     xlsx_innerdicts: tuple[dict[str, Any], ...]
     ssn_innerdicts: tuple[dict[str, Any], ...]
     docx_innerdicts: tuple[dict[str, Any], ...]
-    committed_innerdicts: tuple[_CommittedInnerDictJson, ...]
+    codex_innerdicts: tuple[_CodexInnerDictJson, ...]
     ai_augment_rnd: int = Field(ge=1)
     ai_augment_cohort: AiAugmentCohort
     ai_augment_ineligibility_category: AiAugmentIneligibilityCategory | None
@@ -68,9 +68,9 @@ class _AiAugmentSingularOuterDictJson(FrozenStrictModel):
             docx_innerdicts=tuple(
                 innerdict.data for innerdict in value.docx_innerdicts
             ),
-            committed_innerdicts=tuple(
-                _CommittedInnerDictJson.from_committed_innerdict(innerdict)
-                for innerdict in value.committed_innerdicts
+            codex_innerdicts=tuple(
+                _CodexInnerDictJson.from_codex_innerdict(innerdict)
+                for innerdict in value.codex_innerdicts
             ),
             ai_augment_rnd=value.ai_augment_rnd,
             ai_augment_cohort=value.ai_augment_cohort,
@@ -80,16 +80,10 @@ class _AiAugmentSingularOuterDictJson(FrozenStrictModel):
         )
 
 
-@implements[BackendComponent.ControlCentrePort.AiAugmentSingularOuterDictProperty]()
-class AiAugmentSingularOuterDict(BaseModel):
-    """Note `validate_assignment=True` and `frozen=False`"""
-
-    model_config = ConfigDict(
-        extra="forbid",
-        frozen=False,
-        strict=True,
-        validate_assignment=True,
-    )
+@implements[BackendComponent.AiAugmentSingularOuterDictProperty, BaseModel](
+    model_config=ConfigDict(extra="forbid", frozen=True, strict=True),
+)
+class AiAugmentSingularOuterDict(FrozenStrictModel):
 
     namekey: NameKey
     ai_augment_rnd: int = Field(ge=1)
@@ -98,7 +92,7 @@ class AiAugmentSingularOuterDict(BaseModel):
     xlsx_innerdicts: tuple[InnerDict, ...]
     ssn_innerdicts: tuple[InnerDict, ...]
     docx_innerdicts: tuple[InnerDict, ...]
-    committed_innerdicts: tuple[CommittedInnerDict, ...] = ()
+    codex_innerdicts: tuple[CodexInnerDict, ...] = ()
 
     @property
     def draw_numbers(self) -> tuple[str, ...]:
@@ -123,26 +117,22 @@ class AiAugmentSingularOuterDict(BaseModel):
         if (
             self.ai_augment_cohort is AiAugmentCohort.INELIGIBLE
         ) is not (self.ai_augment_ineligibility_category is not None):
-            raise ValueError("AI augment eligibility classification is inconsistent")
+            raise ValueError(Locale.AI_AUGMENT_ELIGIBILITY_INCONSISTENT)
         if not self.xlsx_innerdicts:
-            raise ValueError("AI augment XLSX source rows are missing")
-        commit_ids = tuple(
-            committed.commit_record.record_id
-            for committed in self.committed_innerdicts
+            raise ValueError(Locale.AI_AUGMENT_XLSX_ROWS_MISSING)
+        section_keys = tuple(
+            (committed.innerdict.data.get(KTP_FILENAME_COL),
+             committed.innerdict.data.get(KTP_FRAGMENT_COL))
+            for committed in self.codex_innerdicts
         )
-        if len(set(commit_ids)) != len(commit_ids):
-            raise ValueError("AI augment committed innerdict IDs are duplicated")
-        if commit_ids != tuple(sorted(commit_ids, key=lambda value: value.int)):
-            raise ValueError("AI augment committed innerdicts are not ordered")
-        for committed in self.committed_innerdicts:
-            committed_namekey = name_key_from_header_value(
-                committed.commit_record.request_headers.get(NAME_KEY_HEADER)
+        if len(set(section_keys)) != len(section_keys):
+            raise ValueError(Locale.AI_AUGMENT_INNERDICT_SECTIONS_DUPLICATED)
+        for committed in self.codex_innerdicts:
+            committed_namekey = (
+                committed.run_outcome_response_record.run_outcome_request_record.namekey
             )
             if committed_namekey != self.namekey:
-                raise ValueError(
-                    "AI augment committed innerdict has "
-                    "a different namekey in request headers"
-                )
+                raise ValueError(Locale.AI_AUGMENT_INNERDICT_NAMEKEY_MISMATCH)
         return self
 
     def ground_truth_innerdict(self) -> InnerDict | None:
@@ -187,9 +177,9 @@ class AiAugmentSingularOuterDict(BaseModel):
                 InnerDict.from_mapping(innerdict, DocxMatchProcedure())
                 for innerdict in serialized.docx_innerdicts
             ),
-            committed_innerdicts=tuple(
-                CommittedInnerDict.from_serialized(innerdict.model_dump(mode="json"))
-                for innerdict in serialized.committed_innerdicts
+            codex_innerdicts=tuple(
+                CodexInnerDict.from_serialized(innerdict.model_dump(mode="json"))
+                for innerdict in serialized.codex_innerdicts
             ),
             ai_augment_rnd=serialized.ai_augment_rnd,
             ai_augment_cohort=serialized.ai_augment_cohort,
@@ -206,3 +196,38 @@ class AiAugmentSingularOuterDict(BaseModel):
     @model_serializer
     def _serialize(self) -> dict[str, object]:
         return self.serialize()
+
+
+def selected_card_outer_dict(
+    singular_outerdict: AiAugmentSingularOuterDict,
+) -> OuterDict:
+    selected = OuterDict(
+        data={
+            singular_outerdict.namekey.to_json_key(): [
+                inner.model_copy(deep=True)
+                for inner in (
+                    *singular_outerdict.xlsx_innerdicts,
+                    *(item.innerdict for item in singular_outerdict.codex_innerdicts),
+                    *singular_outerdict.docx_innerdicts,
+                    *singular_outerdict.ssn_innerdicts,
+                )
+            ]
+        }
+    )
+    for inner_dicts in selected.values():
+        for inner in inner_dicts:
+            for column in AI_AUGMENT_STANDARDIZED_COLUMNS:
+                value = inner.data.get(column)
+                if not isinstance(value, str):
+                    continue
+                try:
+                    decoded = json.loads(value)
+                except json.JSONDecodeError:
+                    continue
+                if decoded is None or (
+                    isinstance(decoded, str) and decoded in AI_AUGMENT_CARD_EMPTY_VALUE_PLACEHOLDERS
+                ):
+                    inner.data[column] = None
+                else:
+                    inner.data[column] = codex_parse.render_ai_standardized_value(value)
+    return selected

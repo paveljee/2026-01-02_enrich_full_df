@@ -29,13 +29,21 @@ class Locale:
     )
     VALIDATION_REPLAY_MISMATCH: Final = "Recorded validation does not match its replay inputs"
     VALIDATION_AFTER_OUTCOME: Final = "Validation must precede its session's run outcome"
+    VALIDATION_RESULT_NOT_APPLIED: Final = "Validation result was not applied"
+    APPLIED_ATTEMPT_CURRENT_VALIDATION_MISSING: Final = (
+        "Applied attempt has no current validation"
+    )
+    PERSISTED_ATTEMPT_CURRENT_VALIDATION_MISSING: Final = (
+        "Persisted attempt has no current validation"
+    )
+    VALIDATION_CURRENT_RECONSTRUCTED_COMMIT_REQUIRED: Final = (
+        "Validation requires the current reconstructed commit"
+    )
 
     # Store request/response contract and its API/IPC adapters.
     RUN_OUTCOME_PERSISTED_LOG: Final = 'Run outcome persisted: record=%s; HTTP %s'
     QUERY_SNAPSHOT_READING_LOG: Final = 'Query IPC: reading wholesale Backend snapshot'
-    QUERY_SNAPSHOT_READY_LOG: Final = (
-        'Query IPC snapshot ready: %d researchers, %d attempts, %d run outcomes'
-    )
+    QUERY_SNAPSHOT_READY_LOG: Final = 'Query IPC snapshot ready: %d researchers'
     IPC_REQUEST_UNEXPECTEDLY_PERSISTED: Final = 'IPC unexpectedly persisted a request record'
     IPC_RESPONSE_MISSING: Final = 'Missing IPC response record'
     BUFFERED_REQUEST_REQUIRED: Final = 'Backend requires a buffered request body'
@@ -45,7 +53,72 @@ class Locale:
     PULL_STATE_LOG: Final = 'Pull: lifecycle=%s; commit=%s'
     PULL_PERSISTED_LOG: Final = 'Pull persisted: record=%s; HTTP %s'
     PUSH_PERSISTED_LOG: Final = "Push persisted: record=%s; HTTP %s"
-    STORE_RUNTIME_UNAVAILABLE: Final = 'Backend Store runtime is unavailable'
+    STORE_CONTEXT_UNAVAILABLE: Final = 'Backend Store context is unavailable'
+    STORE_RESET_CONFIRMATION_REQUIRED: Final = "Database reset confirmation required for --new."
+    REPLAY_CONFIRMATION_REQUIRED: Final = "Nonempty replay log requires replay confirmation"
+    REPLAY_EMPTY_HASH_INVALID: Final = "An empty replay log requires SHA256(empty)"
+    STORE_DB_ISOLATION_REQUIRED: Final = (
+        "Detour database must be separate from source and replay log"
+    )
+    STORE_RECONSTRUCTION_AUTHORITATIVE_MISMATCH: Final = (
+        "Store reconstruction differs from authoritative record"
+    )
+    STORE_RECONSTRUCTION_ORIGINAL_MISMATCH: Final = (
+        "Store reconstruction differs from original object"
+    )
+    STORE_RUN_OUTCOME_RECONSTRUCTION_MISSING: Final = "Store run outcome was not reconstructed"
+    STORE_ANCHOR_TRANSACTION_REQUIRED: Final = "Anchor changes require a Store transaction"
+    REPLAY_ANCHOR_MISSING: Final = "Replay anchor missing; explicit --new is required"
+    REPLAY_PREFIX_TRUNCATED: Final = "Replay prefix is truncated or missing from DB"
+    REPLAY_EMPTY_ANCHOR_HASH_MISMATCH: Final = "Empty replay anchor hash mismatch"
+    REPLAY_COVERAGE_MISMATCH: Final = (
+        "Replay/DB coverage mismatch (extra rows or invalid anchor boundary)"
+    )
+    STORE_FAILED_REBUILD_REQUIRED: Final = "Backend Store failed; rebuild with --new before reuse"
+    STORE_ALREADY_OPEN: Final = "AiAugmentBackendStore is already open"
+    STORE_WRITABLE_CONTEXT_REQUIRED: Final = (
+        "AiAugmentBackendStore must be used inside a writable 'with' block"
+    )
+    STORE_CONTEXT_REQUIRED: Final = "AiAugmentBackendStore must be used inside a 'with' block"
+    STORE_PROJECTION_REPLAY_MISMATCH: Final = "Store projection differs from replay log"
+    STORE_SQL_SCOPE_INVALID: Final = "SQL is not allowed in the current Store transaction scope"
+    STORE_READ_ONLY: Final = "Backend Store is read-only"
+    STORE_NESTED_WRITE_TRANSACTION: Final = "Cannot nest a Store write transaction"
+    STORE_MATERIALIZATION_TRANSACTION_REQUIRED: Final = (
+        "Materialization requires a Store write transaction"
+    )
+    RUN_OUTCOME_COMMIT_NAMEKEY_MISMATCH: Final = "Run outcome commit NameKey does not match"
+    RUN_OUTCOME_ACCEPTED_ROW_VALIDATION_MISSING: Final = (
+        "Run outcome accepted row has no validation record"
+    )
+    RUN_OUTCOME_VALIDATION_LINKAGE_INVALID: Final = "Run outcome validation linkage is invalid"
+    REPLAY_ACCEPTED_HASH_LOG: Final = "Accepted new replay hash %s at line %d byte %d"
+    REPLAY_NEW_DB_LOG: Final = "Replaying %d lines (%d bytes) into new detour DB"
+    REPLAY_LINE_LOG: Final = "Replaying line %d/%d"
+    REPLAY_COMPLETE_LOG: Final = "Replay complete; accepted hash %s at line %d, byte %d"
+    REPLAY_VERIFY_LOG: Final = (
+        "Verifying replay log: stored hash %s at line %d byte %d; config hash %s; %d bytes"
+    )
+    REPLAY_VERIFY_PREFIX_LOG: Final = "Verifying prefix: %d lines, %d bytes"
+    REPLAY_PREFIX_HASH_MATCH_LOG: Final = "Prefix hash matches stored anchor"
+    REPLAY_VERIFY_SUFFIX_LINE_LOG: Final = "Verifying suffix line %d"
+    REPLAY_COVERAGE_VERIFIED_LOG: Final = (
+        "DB/log ordinal and byte coverage verified: %d lines, %d bytes"
+    )
+    REPLAY_LINE_INVALID_JSONL_TEMPLATE: Final = "Replay line {ordinal}: invalid JSONL boundary"
+    REPLAY_LINE_DB_RECORD_MISSING_TEMPLATE: Final = (
+        "Replay line {ordinal}: missing or unordered DB record"
+    )
+    REPLAY_LINE_RAW_HASH_MISSING_TEMPLATE: Final = "Replay line {ordinal}: missing raw-line hash"
+    REPLAY_PREFIX_MISMATCH_TEMPLATE: Final = (
+        "Replay prefix mismatch at line {ordinal}, byte {offset}"
+    )
+    REPLAY_LINE_RAW_HASH_MISMATCH_TEMPLATE: Final = (
+        "Replay line {ordinal}: raw-line hash mismatch"
+    )
+    RUN_OUTCOME_MATERIALIZED_SECTIONS_LOG: Final = (
+        "Run outcome %s: materialized %d accepted sections"
+    )
     RUN_OUTCOME_REPLAY_MISMATCH: Final = 'Recorded run outcome does not match its replay inputs'
     PUSH_VALIDATION_RECORD_MISSING: Final = 'Processed push has no validation record'
     PULL_PROCESSING_LOG: Final = 'Pull: validation still running; HTTP 503 with Retry-After'
@@ -77,6 +150,20 @@ class Locale:
         "Completed outcome requires ETag matching the current validation"
     )
     INNERDICT_OUTCOME_MISMATCH: Final = "Committed innerdict outcome does not match its commit"
+    AI_AUGMENT_ELIGIBILITY_INCONSISTENT: Final = (
+        "AI augment eligibility classification is inconsistent"
+    )
+    AI_AUGMENT_XLSX_ROWS_MISSING: Final = "AI augment XLSX source rows are missing"
+    AI_AUGMENT_INNERDICT_SECTIONS_DUPLICATED: Final = (
+        "AI augment committed innerdict sections are duplicated"
+    )
+    AI_AUGMENT_INNERDICT_NAMEKEY_MISMATCH: Final = (
+        "AI augment committed innerdict has a different run-outcome NameKey"
+    )
+    CODEX_INNERDICT_TEXT_INVALID: Final = "committed innerdict text value is invalid"
+    CODEX_INNERDICT_REQUIRED_TEXT_MISSING: Final = (
+        "committed innerdict required text value is missing"
+    )
     RUN_OUTCOME_QUERY_UNEXPECTED: Final = "Run outcome request must have no query parameters"
     RUN_OUTCOME_HEADERS_INVALID: Final = (
         "SourceKey is a response header, not a run outcome request header"
@@ -631,3 +718,115 @@ class Locale:
     )
     PUSH_PYDANTIC_FAILED_LOG: Final = "push attempt=%s failed stage=%s field=%s value=%r: %s"
     PUSH_UNEXPECTED_FAILED_LOG: Final = "push attempt=%s failed stage=%s: %s"
+    CODEX_ROLLOUT_SUMMARY_BLANK: Final = "Codex rollout summary values must be nonblank"
+    APPENDWATCH_BASE64_INVALID: Final = "appendwatch report is not valid base64"
+    APPENDWATCH_BASE64_NONCANONICAL: Final = "appendwatch report is not canonical base64"
+    COMMIT_SESSION_INCOMPLETE: Final = "commit requires a complete Codex session record"
+    COMMIT_HTTP_CONTOUR_INVALID: Final = "commit HTTP record has an invalid contour"
+    COMMIT_BODY_RECORDS_MISMATCH: Final = "commit request body does not match its records"
+    COMMIT_REFERENCES_REQUIRED: Final = (
+        "commit HTTP record requires referenced pull/push records"
+    )
+    COMMIT_BODY_MISSING: Final = "commit request body is missing"
+    MODEL_HTTP_INPUT_REQUIRED: Final = "Model HTTP input must be recorded"
+    MODEL_HTTP_REQUEST_TEXT_REQUIRED: Final = "Model HTTP logging requires a text request body"
+    MODEL_HTTP_REQUEST_INCOMPLETE: Final = "Prepared HTTP request is incomplete"
+    MODEL_HTTP_RESPONSE_MISMATCH: Final = "Recorded response does not match its request"
+    MODEL_HTTP_RESPONSE_AMBIGUOUS: Final = "Ambiguous model HTTP response references"
+    MODEL_HTTP_RESPONSE_REFERENCE_MISSING: Final = "Missing referenced model HTTP response"
+    DETOUR_DB_ALREADY_OPEN: Final = "AiAugmentDetourDB is already open"
+    DETOUR_DB_CONTEXT_REQUIRED: Final = "AiAugmentDetourDB must be used inside a 'with' block"
+    REPLAY_LOG_FRAGMENT_INVALID: Final = "replay-log fragment type must be line_number"
+    REPLAY_LOG_ALREADY_OPEN: Final = "ReplayLogRegisteredResource is already open"
+    REPLAY_LOG_READ_ONLY: Final = "Replay log is read-only"
+    WEB_CITATION_MARKERS_MALFORMED: Final = "web output contains malformed citation markers"
+    WEB_CITATION_REF_REPEATED_TEMPLATE: Final = "web output repeats citation ref_id {ref_id}"
+    WEB_CITATION_SECTION_MISSING_TEMPLATE: Final = (
+        "could not isolate citation section for {ref_id}"
+    )
+    CITE_CURRENT_REF_MARKER_MISSING: Final = "cite text does not contain one current-ref marker"
+    CITE_EXCERPT_OVERLAPS_REF: Final = "excerpt overlaps its current-ref marker"
+    WEB_ARGUMENTS_NOT_OBJECT: Final = "web arguments must be a JSON object"
+    BACKEND_BACKGROUND_WORK_FAILED: Final = "Backend background work failed"
+    PUSH_ALREADY_PROCESSING_DESCRIPTION: Final = (
+        "A submission is already being processed, or the current pull must be "
+        "retrieved before submitting."
+    )
+    BACKEND_IPC_WAIT_HTTP_LOG: Final = "IPC waiting for %d active HTTP exchanges"
+    BACKEND_IPC_WAIT_WORK_LOG: Final = "IPC waiting for %d authoritative background tasks"
+    BACKEND_IPC_ADMITTED_LOG: Final = (
+        "IPC admitted after HTTP persistence and authoritative work"
+    )
+    BACKEND_STORE_OPEN_WRITABLE_LOG: Final = "Opening writable Backend Store: new=%s"
+    BACKEND_STORE_READY_LOG: Final = "Writable Backend Store ready"
+    BACKEND_STORE_CLOSED_LOG: Final = "Writable Backend Store closed cleanly"
+    BACKEND_CONFIG_LOADING_LOG: Final = (
+        "Loading Backend configuration/resources: %s; verify_hashes=%s"
+    )
+    BACKEND_CONFIG_VALIDATED_LOG: Final = (
+        "Backend configuration and source validated: %d researchers; selected=%s"
+    )
+    BACKEND_STARTING_LOG: Final = (
+        "Starting Backend: config=%s; ipc_only=%s; new=%s; resume=%s"
+    )
+    BACKEND_STORE_OPEN_READ_ONLY_LOG: Final = "Opening read-only Backend Store"
+    BACKEND_STORE_READ_ONLY_READY_LOG: Final = (
+        "Read-only Backend Store ready; starting query-only IPC"
+    )
+    BACKEND_STORE_READ_ONLY_CLOSED_LOG: Final = (
+        "Query-only IPC stopped; read-only Backend Store closed cleanly"
+    )
+    BACKEND_HTTP_STARTING_LOG: Final = "Starting Backend HTTP API at %s:%s"
+    BACKEND_FAILED_LOG: Final = "Backend failed; exiting without recovery"
+    BACKEND_LOCK_RELEASED_LOG: Final = "Backend process lock released"
+    PUSH_CAPTURE_START_LOG: Final = (
+        "Push %s: capturing rollout and appendwatch evidence for session %s"
+    )
+    PUSH_CAPTURE_COMPLETE_LOG: Final = (
+        "Push %s: captured rollout sha256=%s, bytes=%d, lines=%d; report bytes=%d"
+    )
+    RUN_OUTCOME_REQUEST_PATH_INVALID: Final = "run-outcome HTTP request path is invalid"
+    RUN_OUTCOME_REQUEST_CONTOUR_INVALID: Final = (
+        "run-outcome HTTP request has an invalid contour"
+    )
+    RUN_OUTCOME_RECORD_INCOMPLETE: Final = "run-outcome HTTP record is incomplete"
+    RUN_OUTCOME_ATTEMPT_BODY_MISMATCH: Final = (
+        "run-outcome attempt does not match response body"
+    )
+    RUN_OUTCOME_REQUEST_RECEIPT_MISSING: Final = (
+        "run-outcome HTTP request receipt time is missing"
+    )
+    RUN_OUTCOME_SOURCE_KEY_MISSING: Final = (
+        "run-outcome SourceKey response header is missing"
+    )
+    RUN_OUTCOME_SOURCE_KEY_LINE_COUNT_INVALID: Final = (
+        "run-outcome SourceKey line count is inconsistent"
+    )
+    RUN_OUTCOME_RECORD_CONTOUR_INVALID: Final = (
+        "run-outcome HTTP record has an invalid contour"
+    )
+    RUN_OUTCOME_ATTEMPT_PRESENCE_INVALID: Final = (
+        "run-outcome attempt presence is inconsistent"
+    )
+    RUN_OUTCOME_ATTEMPT_LINK_INVALID: Final = "run-outcome attempt linkage is invalid"
+    BACKEND_START_FLAGS_REQUIRED: Final = (
+        "Full Backend requires exactly one of --new or --resume/--continue"
+    )
+    BACKEND_RECREATE_PROMPT: Final = (
+        "Recreate the AI augment detour database from the replay log? [y/N] "
+    )
+    BACKEND_RESUME_PROMPT: Final = (
+        "Resume the AI augment detour database without rebuilding? [y/N] "
+    )
+    BACKEND_NONEMPTY_REPLAY_PROMPT: Final = (
+        "Registered a nonempty replay log. Replay it into the new database? [y/N] "
+    )
+    SOURCE_RESEARCHERS_LOADING_LOG: Final = (
+        "Loading researchers from read-only source DB: %s"
+    )
+    PULL_ACCEPTED_DESCRIPTION: Final = (
+        "Accepted submission, followed by ground truth if available."
+    )
+    PULL_PROCESSING_DESCRIPTION: Final = (
+        "Accepted submission is still being processed; retry after one second."
+    )

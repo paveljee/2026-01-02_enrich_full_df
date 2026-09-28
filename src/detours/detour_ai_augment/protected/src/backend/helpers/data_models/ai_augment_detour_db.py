@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Generator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Self
@@ -75,9 +75,9 @@ class AiAugmentDetourDB(FrozenStrictModel):
         return connection
 
     @contextmanager
-    def writable(self) -> Iterator[Self]:
+    def writable(self) -> Generator[Self, None, None]:
         if self._conn is not None:
-            raise RuntimeError("AiAugmentDetourDB is already open")
+            raise RuntimeError(Locale.DETOUR_DB_ALREADY_OPEN)
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             if self.path.exists():
@@ -109,9 +109,9 @@ class AiAugmentDetourDB(FrozenStrictModel):
                     self.path.chmod(READ_ONLY_PERMISSIONS)
 
     @contextmanager
-    def read_only(self) -> Iterator[Self]:
+    def read_only(self) -> Generator[Self, None, None]:
         if self._conn is not None:
-            raise RuntimeError("AiAugmentDetourDB is already open")
+            raise RuntimeError(Locale.DETOUR_DB_ALREADY_OPEN)
         try:
             if self.path.exists():
                 self.path.chmod(READ_ONLY_PERMISSIONS)
@@ -130,5 +130,5 @@ class AiAugmentDetourDB(FrozenStrictModel):
     @property
     def connection(self) -> duckdb.DuckDBPyConnection:
         if self._conn is None:
-            raise RuntimeError("AiAugmentDetourDB must be used inside a 'with' block")
+            raise RuntimeError(Locale.DETOUR_DB_CONTEXT_REQUIRED)
         return self._conn

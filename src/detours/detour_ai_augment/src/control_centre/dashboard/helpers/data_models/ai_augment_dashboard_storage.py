@@ -11,12 +11,12 @@ from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helper
     Locale,
 )
 
-from .....backend.helpers.data_models.query_response import QueryResponse
 from .dashboard_query_snapshot import DashboardQuerySnapshot
-from .run_event import RunEvent
+from .run_event import Run, RunEvent
 
 QUEUE_STORAGE_KEY = "detour_ai_augment_queue"
 RUN_EVENTS_STORAGE_KEY = "detour_ai_augment_run_events"
+RUNS_STORAGE_KEY = "detour_ai_augment_runs"
 BACKEND_DATABASE_STORAGE_KEY = "detour_ai_augment_backend_database"
 
 
@@ -28,16 +28,12 @@ class AiAugmentDashboardStorage:
         if raw is None:
             return None
         try:
-            return DashboardQuerySnapshot(
-                query_response=QueryResponse.from_serialized_json(json.dumps(raw)),
-            )
+            return DashboardQuerySnapshot.from_serialized_json(json.dumps(raw))
         except (TypeError, ValueError) as exc:
             raise RuntimeError(Locale.BACKEND_DATABASE_RESPONSE_INVALID) from exc
 
-    def replace_query_response(self, query_response: QueryResponse) -> DashboardQuerySnapshot:
-        snapshot = DashboardQuerySnapshot(query_response=query_response)
-        serialized = snapshot.query_response.serialize()
-        app.storage.general[BACKEND_DATABASE_STORAGE_KEY] = serialized
+    def replace_query_snapshot(self, snapshot: DashboardQuerySnapshot) -> DashboardQuerySnapshot:
+        app.storage.general[BACKEND_DATABASE_STORAGE_KEY] = snapshot.model_dump(mode="json")
         return snapshot
 
     def load_run_events(self) -> list[RunEvent]:
@@ -52,6 +48,21 @@ class AiAugmentDashboardStorage:
     def save_run_events(self, events: Sequence[RunEvent]) -> None:
         serialized = [event.model_dump(mode="json") for event in events]
         app.storage.general[RUN_EVENTS_STORAGE_KEY] = serialized
+
+    def load_runs(self) -> dict[UUID, Run]:
+        raw = app.storage.general.get(RUNS_STORAGE_KEY, [])
+        if not isinstance(raw, list):
+            raise RuntimeError(Locale.JOURNAL_STORAGE_INVALID)
+        try:
+            runs = tuple(Run.model_validate_json(json.dumps(value)) for value in raw)
+        except ValidationError as exc:
+            raise RuntimeError(Locale.JOURNAL_STORAGE_INVALID) from exc
+        if len({run.run_id for run in runs}) != len(runs):
+            raise RuntimeError(Locale.JOURNAL_DUPLICATE_RUN_ID)
+        return {run.run_id: run for run in runs}
+
+    def save_runs(self, runs: Sequence[Run]) -> None:
+        app.storage.general[RUNS_STORAGE_KEY] = [run.model_dump(mode="json") for run in runs]
 
     def load_queue(self) -> list[UUID]:
         raw = app.storage.general.get(QUEUE_STORAGE_KEY, [])

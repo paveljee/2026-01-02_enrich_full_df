@@ -12,7 +12,7 @@ from uuid import uuid7
 from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
 from src.helpers.architecture import FrozenStrictModel
 
-from .commit_event import CodexRolloutRecord
+from .commit_request import CodexRolloutRecord
 
 ARCHIVE_HASH_CHUNK_BYTES = 1024 * 1024
 AUDIT_COPY_TIMEOUT_SECONDS = 60

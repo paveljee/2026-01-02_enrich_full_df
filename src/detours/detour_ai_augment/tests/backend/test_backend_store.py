@@ -13,21 +13,21 @@ from uuid import uuid7
 import duckdb
 import pytest
 
+from src.detours.detour_ai_augment.protected.src.backend import api
 from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
-from src.detours.detour_ai_augment.src.backend import api, server
+from src.detours.detour_ai_augment.src.backend import server
 from src.detours.detour_ai_augment.src.backend.helpers.data_models import (
     ai_augment_backend_store as store_models,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_context import (
     AiAugmentBackendContext,
 )
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.commit_event import (
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.commit_request import (
     CodexSessionRecord,
 )
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.request_response_records import (
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.pull_event import (
     PullRequestRecord,
-    QueryRequestRecord,
-    RunOutcomeRequestRecord,
+    PullResponseRecord,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.response_record_promise import (
     BackendStoreAcknowledgment,
@@ -35,7 +35,13 @@ from src.detours.detour_ai_augment.src.backend.helpers.data_models.response_reco
     ResponseRecordPromise,
 )
 from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models import (
-    run_outcome,
+    run_outcome_event as run_outcome,
+)
+from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.query_event import (  # noqa: E501
+    QueryRequestRecord,
+)
+from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.run_outcome_event import (  # noqa: E501
+    RunOutcomeRequestRecord,
 )
 from src.detours.detour_ai_augment.tests.backend import test_http_interceptor as fixtures
 from src.detours.detour_ai_augment.tests.backend.test_api import (
@@ -252,7 +258,7 @@ def test_new_replay_stops_at_first_invalid_line_and_keeps_empty_anchor(
     log.chmod(0o600)
     log.write_bytes(tail)
     repin(runtime, backend_store)
-    with pytest.raises((api._PushValidationError, IndexError)):
+    with pytest.raises((store_models._ReplayLogLineInvalidError, IndexError)):
         store._rebuild_from_log(runtime, reset_confirmed=True, confirm_replay=lambda: True)
     assert "Replay failed at line 1" in caplog.text
     assert anchor(runtime, backend_store)["ordinal"] == 0
@@ -330,12 +336,12 @@ def test_pull_ack_means_only_request_fsync_and_result_reports_processing_error(
         raise OSError(f"{failure} interrupted")
 
     async def exercise() -> None:
-        promise = store.pull(record)
+        promise = store.pull_response_record(record)
         expected = (
             BackendStoreAcknowledgment.NAK if failure == "fsync" else BackendStoreAcknowledgment.ACK
         )
         assert promise.acknowledgment is expected
-        response, error = await promise.response_record()
+        response, error = await promise.response_record_promise()
         if failure is None:
             assert error is None and response is not None
             assert response.model_dump() == record.model_dump()
@@ -395,9 +401,9 @@ def test_query_only_capability_returns_nak_snapshot_and_never_changes_log_or_db(
     )
     with store_models.initialize_backend_store(runtime, ipc_only=True) as store:
         assert not any(hasattr(store, name) for name in ("pull", "push", "run_outcome", "execute"))
-        promise = store.query(request)
+        promise = store.query_response_record(request)
         assert promise.acknowledgment is BackendStoreAcknowledgment.NAK
-        response, error = asyncio.run(promise.response_record())
+        response, error = asyncio.run(promise.response_record_promise())
         if received_at_unix_usec is None:
             assert response is None and error is not None
             assert str(error) == Locale.QUERY_REQUEST_RECEIPT_TIME_MISSING
@@ -409,7 +415,7 @@ def test_query_only_capability_returns_nak_snapshot_and_never_changes_log_or_db(
                 response.ready_to_respond_at_unix_usec - received_at_unix_usec
             )
             assert response.response_headers == {"Content-Type": "application/json"}
-            assert len(response.query_response_body.ai_augment_singular_outerdicts) == 1
+            assert len(response.ai_augment_singular_outerdicts) == 1
     assert db_path.read_bytes() == before_db
     assert Path(runtime.pipeline_config.replay_log).read_bytes() == before_log
 
@@ -445,20 +451,20 @@ def test_missing_identity_outcome_is_nak_with_durable_400_and_self_id(
         received_at_unix_usec=1,
         ready_to_respond_at_unix_usec=None,
         duration_usec=None,
-        pull_record_id=None,
-        push_record_id=None,
-        rollout_filename=None,
-        codex_session_record=CodexSessionRecord(
-            session_id=None,
-            codex_rollout_record=None,
-            appendwatch_report_record=None,
-        ),
     )
 
     def exercise() -> None:
-        promise = store.run_outcome(record)
+        promise = store.run_outcome_response_record(
+            record,
+            codex_session_record=CodexSessionRecord(
+                session_id=None,
+                codex_rollout_record=None,
+                appendwatch_report_record=None,
+            ),
+            rollout_filename=None,
+        )
         assert promise.acknowledgment is BackendStoreAcknowledgment.NAK
-        response, error = asyncio.run(promise.response_record())
+        response, error = asyncio.run(promise.response_record_promise())
         if failure is not None:
             assert response is None and error is not None
             with pytest.raises(BackendStoreException, match="interrupted") as caught:
@@ -467,9 +473,9 @@ def test_missing_identity_outcome_is_nak_with_durable_400_and_self_id(
             return
         assert error is None and response is not None
         assert response.response_code == HTTPStatus.BAD_REQUEST
-        assert response.run_outcome_response_body.run_outcome_record_id == record.record_id
-        assert response.run_outcome_response_body.commit_record_id is None
-        assert response.run_outcome_response_body.validation_record_id is None
+        assert response._body().run_outcome_record_id == record.record_id
+        assert response._body().commit_request_record_id is None
+        assert response._body().validation_record_id is None
         assert response.to_response().status_code == HTTPStatus.BAD_REQUEST
         assert store._http_record(record.record_id).model_dump() == response.model_dump()
 
@@ -499,12 +505,12 @@ def test_response_record_promise_waiter_cancellation_preserves_completion(
 ) -> None:
     entered = Event()
     release = Event()
-    record = persisted_http_record(
+    record = PullResponseRecord.model_validate(persisted_http_record(
         record_id=uuid7(), method="GET", path="/pull", response_code=HTTPStatus.OK,
-    )
+    ).model_dump())
     failure = OSError("response processing failed")
 
-    def work() -> HttpRequestLogRecord:
+    def work() -> PullResponseRecord:
         entered.set()
         assert release.wait(timeout=5), "test did not release completion work"
         if fails:
@@ -512,10 +518,10 @@ def test_response_record_promise_waiter_cancellation_preserves_completion(
         return record
 
     async def exercise() -> None:
-        promise = ResponseRecordPromise[HttpRequestLogRecord]._start(
+        promise = ResponseRecordPromise[PullResponseRecord]._start(
             BackendStoreAcknowledgment.ACK, work, asyncio.get_running_loop(),
         )
-        waiting = asyncio.create_task(promise.response_record())
+        waiting = asyncio.create_task(promise.response_record_promise())
         try:
             assert await asyncio.to_thread(entered.wait, 2)
             waiting.cancel()
@@ -523,14 +529,14 @@ def test_response_record_promise_waiter_cancellation_preserves_completion(
                 await waiting
         finally:
             release.set()
-        response, error = await promise.response_record()
+        response, error = await promise.response_record_promise()
         assert promise.acknowledgment is BackendStoreAcknowledgment.ACK
         if fails:
             assert response is None and error is not None
             assert error.__cause__ is failure
         else:
             assert response is record and error is None
-        assert await promise.response_record() == (response, error)
+        assert await promise.response_record_promise() == (response, error)
 
     threaded_loop.run(asyncio.wait_for(exercise(), timeout=10))
 
@@ -588,14 +594,12 @@ def test_invalid_synthetic_envelope_is_fsynced_before_domain_rejection(
 
     with pytest.raises(RuntimeError, match="Store failed"), backend_store._writable(runtime):
         monkeypatch.setattr(os, "fsync", fsync)
-        with pytest.raises(api._PushValidationError):
+        with pytest.raises(store_models._ReplayLogLineInvalidError):
             backend_store._append_authoritative_record(record)
         payload = log_path.read_bytes()
         assert fsynced == [payload]
         assert payload.endswith(b"\n")
         assert HttpRequestLogRecord.model_validate_json(payload) == record
-        assert backend_store.current_commit_record is None
-        assert backend_store.current_validation_record is None
-        assert backend_store.initial_validation_record is None
+        assert backend_store.current_replayed_response_record is None
     with duckdb.connect(str(backend_store._detour_db_path), read_only=True) as connection:
         assert connection.execute("SELECT count(*) FROM detour_http_records").fetchone() == (0,)

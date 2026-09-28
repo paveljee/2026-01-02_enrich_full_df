@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import base64
-import re
 from collections.abc import Callable, Mapping
 from enum import StrEnum
-from pathlib import PurePosixPath
-from typing import Final, Literal, Self
+from typing import Literal, Self
 from uuid import UUID
 
 from pydantic import Field, StrictStr, model_serializer, model_validator
@@ -13,130 +11,33 @@ from pydantic import Field, StrictStr, model_serializer, model_validator
 from src.detours.detour_ai_augment.protected.src.architecture import (
     BackendComponent,
 )
-from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import HTTP_POST_METHOD
-from src.helpers.architecture import FrozenStrictModel, implements
-from src.helpers.data_models import FragmentType, HttpRequestLogRecord
-from src.helpers.vars import (
-    KTP_FILENAME_COL,
-    KTP_FRAGMENT_COL,
-    KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
-)
-
-from ....control_centre.dashboard.helpers.data_models.run_outcome import (
+from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
+from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
+    BASE64_TEXT_ENCODING,
+    HTTP_POST_METHOD,
     NAME_KEY_HEADER,
-    STRUCTURED_FIELD_STRING,
-    structured_field_string,
-    structured_field_string_value,
+    SOURCE_KEY_HEADER,
+    SYNTHETIC_COMMIT_HOST,
+    SYNTHETIC_COMMIT_SCHEME,
 )
+from src.detours.detour_ai_augment.src.shared import (
+    name_key_header_value,
+    source_key_header_value,
+)
+from src.helpers.architecture import FrozenStrictModel, implements
+from src.helpers.data_models import HttpRequestLogRecord, NameKey
+from src.helpers.vars import KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
+
+from .ai_augment_http_request_log_record import RequestRecord
 
 COMMIT_PATH = "/commit"
-SYNTHETIC_SCHEME = "http"
-SYNTHETIC_HOST = "invalid"
-SOURCE_KEY_HEADER = "SourceKey"
-BASE64_TEXT_ENCODING = "ascii"
-ROLLOUT_LINE_FRAGMENT_TYPE = FragmentType.LINE_NUMBER.value
-SOURCE_KEY_PATTERN = re.compile(
-    rf"^{re.escape(KTP_FILENAME_COL)}=(?P<filename>{STRUCTURED_FIELD_STRING}), "
-    rf'{re.escape(KTP_FRAGMENT_COL)};type="{ROLLOUT_LINE_FRAGMENT_TYPE}";'
-    rf"{ROLLOUT_LINE_FRAGMENT_TYPE}=(?P<fragment>{STRUCTURED_FIELD_STRING})$"
-)
 
 
-def source_key_header_value(filename: str, line_count: int) -> str:
-    return (
-        f"{KTP_FILENAME_COL}={structured_field_string(filename)}, "
-        f'{KTP_FRAGMENT_COL};type="{ROLLOUT_LINE_FRAGMENT_TYPE}";'
-        f"{ROLLOUT_LINE_FRAGMENT_TYPE}={structured_field_string(str(line_count))}"
-    )
-
-
-def source_key_from_header_value(value: object) -> tuple[str, int]:
-    if not isinstance(value, str):
-        raise ValueError("SourceKey header is missing")
-    matched = SOURCE_KEY_PATTERN.fullmatch(value)
-    if matched is None:
-        raise ValueError("SourceKey header is malformed")
-    try:
-        filename = structured_field_string_value(matched.group("filename"))
-        fragment = structured_field_string_value(matched.group("fragment"))
-        line_count = int(fragment)
-    except ValueError as exc:
-        raise ValueError("SourceKey header is malformed") from exc
-    if (
-        not filename
-        or PurePosixPath(filename).name != filename
-        or line_count < 1
-        or value != source_key_header_value(filename, line_count)
-    ):
-        raise ValueError("SourceKey header is not canonical")
-    return filename, line_count
-
-
-@implements[BackendComponent.AgentRuntimePort.AppendwatchReportEncodingProperty]()
+@implements[BackendComponent.AppendwatchReportEncodingProperty]()
 class AppendwatchReportEncoding(StrEnum):
     value: Literal["base64"]
 
     BASE64 = "base64"
-
-
-@implements[BackendComponent.LifecycleProperty]()
-class BackendLifecycle(StrEnum):
-    value: Literal[
-        "ready",
-        "busy",
-        "configuration",
-        "appendwatch_report_validation",
-        "rollout_index",
-        "pydantic_validation",
-        "duckdb_evidence_validation",
-        "researcher_resolution",
-        "innerdict_and_card",
-        "accepted",
-        "configuration_error",
-        "rejected",
-        "retry",
-        "completed",
-        "failed",
-    ]
-
-    READY = "ready"
-    BUSY = "busy"
-    CONFIGURATION = "configuration"
-    APPENDWATCH_REPORT_VALIDATION = "appendwatch_report_validation"
-    ROLLOUT_INDEX = "rollout_index"
-    PYDANTIC_VALIDATION = "pydantic_validation"
-    DUCKDB_EVIDENCE_VALIDATION = "duckdb_evidence_validation"
-    RESEARCHER_RESOLUTION = "researcher_resolution"
-    INNERDICT_AND_CARD = "innerdict_and_card"
-    ACCEPTED = "accepted"
-    CONFIGURATION_ERROR = "configuration_error"
-    REJECTED = "rejected"
-    RETRY = "retry"
-    COMPLETED = "completed"
-    FAILED = "failed"
-
-    def is_post_commit_validation_stage(self) -> bool:
-        return self in POST_COMMIT_VALIDATION_STAGES
-
-    def is_post_commit_validation_result(self) -> bool:
-        return self in POST_COMMIT_VALIDATION_RESULTS
-
-
-POST_COMMIT_VALIDATION_STAGES: Final = frozenset({
-    BackendLifecycle.CONFIGURATION,
-    BackendLifecycle.APPENDWATCH_REPORT_VALIDATION,
-    BackendLifecycle.ROLLOUT_INDEX,
-    BackendLifecycle.PYDANTIC_VALIDATION,
-    BackendLifecycle.DUCKDB_EVIDENCE_VALIDATION,
-    BackendLifecycle.RESEARCHER_RESOLUTION,
-    BackendLifecycle.INNERDICT_AND_CARD,
-    BackendLifecycle.ACCEPTED,
-})
-POST_COMMIT_VALIDATION_RESULTS: Final = frozenset({
-    BackendLifecycle.ACCEPTED,
-    BackendLifecycle.CONFIGURATION_ERROR,
-    BackendLifecycle.REJECTED,
-})
 
 
 class _CodexRolloutRecordSummaryJson(FrozenStrictModel):
@@ -152,11 +53,11 @@ class _CodexRolloutRecordSummaryJson(FrozenStrictModel):
     @model_validator(mode="after")
     def validate_summary(self) -> Self:
         if any(not value.strip() for value in self.model_dump().values()):
-            raise ValueError("Codex rollout summary values must be nonblank")
+            raise ValueError(Locale.CODEX_ROLLOUT_SUMMARY_BLANK)
         return self
 
 
-@implements[BackendComponent.AgentRuntimePort.CodexRolloutRecordProperty]()
+@implements[BackendComponent.CodexRolloutRecordProperty]()
 class CodexRolloutRecord(FrozenStrictModel):
     sha256: StrictStr
     size: int = Field(ge=0)
@@ -187,7 +88,7 @@ class CodexRolloutRecord(FrozenStrictModel):
         }
 
 
-@implements[BackendComponent.AgentRuntimePort.AppendwatchReportRecordProperty]()
+@implements[BackendComponent.AppendwatchReportRecordProperty]()
 class AppendwatchReportRecord(FrozenStrictModel):
     encoding: AppendwatchReportEncoding
     data: StrictStr
@@ -196,9 +97,9 @@ class AppendwatchReportRecord(FrozenStrictModel):
         try:
             decoded = base64.b64decode(self.data, validate=True)
         except ValueError as exc:
-            raise ValueError("appendwatch report is not valid base64") from exc
+            raise ValueError(Locale.APPENDWATCH_BASE64_INVALID) from exc
         if base64.b64encode(decoded).decode(BASE64_TEXT_ENCODING) != self.data:
-            raise ValueError("appendwatch report is not canonical base64")
+            raise ValueError(Locale.APPENDWATCH_BASE64_NONCANONICAL)
         return self
 
     @model_validator(mode="after")
@@ -235,14 +136,14 @@ class _CommitRequestBodyJson(FrozenStrictModel):
             or session.codex_rollout_record is None
             or session.appendwatch_report_record is None
         ):
-            raise ValueError("commit requires a complete Codex session record")
+            raise ValueError(Locale.COMMIT_SESSION_INCOMPLETE)
         return self
 
 
 @implements[BackendComponent.CommitRequestBodyProperty]()
 class CommitRequestBody(FrozenStrictModel):
-    pull_record: HttpRequestLogRecord
-    push_record: HttpRequestLogRecord
+    pull_response_record: HttpRequestLogRecord
+    push_response_record: HttpRequestLogRecord
     codex_session_record: CodexSessionRecord
 
     def validate_complete_commit(self) -> Self:
@@ -252,7 +153,7 @@ class CommitRequestBody(FrozenStrictModel):
             or session.codex_rollout_record is None
             or session.appendwatch_report_record is None
         ):
-            raise ValueError("commit requires a complete Codex session record")
+            raise ValueError(Locale.COMMIT_SESSION_INCOMPLETE)
         return self
 
     @model_validator(mode="after")
@@ -273,8 +174,8 @@ class CommitRequestBody(FrozenStrictModel):
         serialized = _CommitRequestBodyJson.model_validate_json(value)
         session = serialized.codex_session_record
         return cls(
-            pull_record=resolve_http_record(serialized.pull_record_id),
-            push_record=resolve_http_record(serialized.push_record_id),
+            pull_response_record=resolve_http_record(serialized.pull_record_id),
+            push_response_record=resolve_http_record(serialized.push_record_id),
             codex_session_record=CodexSessionRecord(
                 session_id=session.codex_session_id,
                 codex_rollout_record=session.codex_rollout_record,
@@ -290,8 +191,8 @@ class CommitRequestBody(FrozenStrictModel):
         assert rollout is not None
         assert report is not None
         return {
-            "pull_record_id": self.pull_record.record_id,
-            "push_record_id": self.push_record.record_id,
+            "pull_record_id": self.pull_response_record.record_id,
+            "push_record_id": self.push_response_record.record_id,
             "codex_session_record": _CodexSessionRecordJson(
                 codex_session_id=session_id,
                 codex_rollout_record=rollout,
@@ -304,21 +205,32 @@ class CommitRequestBody(FrozenStrictModel):
         return self.serialize()
 
 
-@implements[BackendComponent.CommitRecordProperty]()
-class BackendCommitRecord(HttpRequestLogRecord):
+@implements[BackendComponent.CommitRequestRecordProperty]()
+class BackendCommitRequestRecord(RequestRecord):
     commit_request_body: CommitRequestBody = Field(exclude=True)
 
-    @property
-    def http_request_log_record(self) -> HttpRequestLogRecord:
-        return self
+    @classmethod
+    def from_serialized_json(cls, *, value: str) -> Self:
+        record = _BackendCommitRequestRecordJson.model_validate_json(
+            value,
+        ).to_commit_request_record()
+        return cls(
+            **record.http_request_log_record.model_dump(mode="python"),
+            commit_request_body=record.commit_request_body,
+        )
 
-    def validate_commit_record(self) -> Self:
+    def serialize(self) -> dict[str, object]:
+        return _BackendCommitRequestRecordJson.from_commit_request_record(self).model_dump(
+            mode="json",
+        )
+
+    def validate_commit_request_record(self) -> Self:
         if (
             self.schema_version != KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
             or self.record_id.version != 7
             or self.method != HTTP_POST_METHOD
-            or self.scheme != SYNTHETIC_SCHEME
-            or self.host != SYNTHETIC_HOST
+            or self.scheme != SYNTHETIC_COMMIT_SCHEME
+            or self.host != SYNTHETIC_COMMIT_HOST
             or self.port is not None
             or self.ready_to_respond_at_unix_usec is not None
             or self.path != COMMIT_PATH
@@ -331,32 +243,35 @@ class BackendCommitRecord(HttpRequestLogRecord):
             or self.received_at_unix_usec is not None
             or self.duration_usec is not None
         ):
-            raise ValueError("commit HTTP record has an invalid contour")
+            raise ValueError(Locale.COMMIT_HTTP_CONTOUR_INVALID)
         expected = self.commit_request_body
         parsed = CommitRequestBody.from_serialized_json(
             self.request_body,
             resolve_http_record=lambda record_id: {
-                expected.pull_record.record_id: expected.pull_record,
-                expected.push_record.record_id: expected.push_record,
+                expected.pull_response_record.record_id: expected.pull_response_record,
+                expected.push_response_record.record_id: expected.push_response_record,
             }[record_id],
         )
         if parsed != expected:
-            raise ValueError("commit request body does not match its records")
+            raise ValueError(Locale.COMMIT_BODY_RECORDS_MISMATCH)
         return self
 
     @model_validator(mode="after")
-    def _validate_commit_record(self) -> Self:
-        return self.validate_commit_record()
+    def _validate_commit_request_record(self) -> Self:
+        return self.validate_commit_request_record()
 
     @classmethod
     def from_http_request_log_record(
         cls,
-        record: HttpRequestLogRecord,
+        http_request_log_record: HttpRequestLogRecord,
         *,
-        resolve_http_record: Callable[[UUID], HttpRequestLogRecord],
+        resolve_http_record: Callable[[UUID], HttpRequestLogRecord] | None = None,
     ) -> Self:
+        if resolve_http_record is None:
+            raise ValueError(Locale.COMMIT_REFERENCES_REQUIRED)
+        record = http_request_log_record
         if record.request_body is None:
-            raise ValueError("commit request body is missing")
+            raise ValueError(Locale.COMMIT_BODY_MISSING)
         body = CommitRequestBody.from_serialized_json(
             record.request_body,
             resolve_http_record=resolve_http_record,
@@ -380,3 +295,76 @@ class BackendCommitRecord(HttpRequestLogRecord):
             duration_usec=record.duration_usec,
             commit_request_body=body,
         )
+
+
+class _BackendCommitRequestRecordJson(FrozenStrictModel):
+    self_http_record: HttpRequestLogRecord
+    pull_response_record: HttpRequestLogRecord
+    push_response_record: HttpRequestLogRecord
+
+    @classmethod
+    def from_commit_request_record(cls, value: BackendCommitRequestRecord) -> Self:
+        body = value.commit_request_body
+        return cls(
+            self_http_record=value.http_request_log_record,
+            pull_response_record=body.pull_response_record,
+            push_response_record=body.push_response_record,
+        )
+
+    def to_commit_request_record(self) -> BackendCommitRequestRecord:
+        refs = {
+            self.pull_response_record.record_id: self.pull_response_record,
+            self.push_response_record.record_id: self.push_response_record,
+        }
+        return BackendCommitRequestRecord.from_http_request_log_record(
+            self.self_http_record,
+            resolve_http_record=lambda record_id: refs[record_id],
+        )
+
+
+def _synthetic_commit_request_record(
+    *,
+    pull_record: HttpRequestLogRecord,
+    push_record: HttpRequestLogRecord,
+    session_id: UUID,
+    rollout: CodexRolloutRecord,
+    rollout_filename: str,
+    appendwatch_report: bytes,
+    namekey: NameKey,
+) -> BackendCommitRequestRecord:
+    session = CodexSessionRecord(
+        session_id=session_id,
+        codex_rollout_record=rollout,
+        appendwatch_report_record=AppendwatchReportRecord(
+            encoding=AppendwatchReportEncoding.BASE64,
+            data=base64.b64encode(appendwatch_report).decode(BASE64_TEXT_ENCODING),
+        ),
+    )
+    body = CommitRequestBody(
+        pull_response_record=pull_record,
+        push_response_record=push_record,
+        codex_session_record=session,
+    )
+    assert body.pull_response_record is pull_record
+    assert body.push_response_record is push_record
+    return BackendCommitRequestRecord(
+        schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
+        method=HTTP_POST_METHOD,
+        scheme=SYNTHETIC_COMMIT_SCHEME,
+        host=SYNTHETIC_COMMIT_HOST,
+        port=None,
+        ready_to_respond_at_unix_usec=None,
+        path=COMMIT_PATH,
+        query="",
+        request_headers={
+            SOURCE_KEY_HEADER: source_key_header_value(rollout_filename, rollout.line_count),
+            NAME_KEY_HEADER: name_key_header_value(namekey),
+        },
+        request_body=body.model_dump_json(),
+        response_code=None,
+        response_headers=None,
+        response_body=None,
+        received_at_unix_usec=None,
+        duration_usec=None,
+        commit_request_body=body,
+    )
