@@ -1,4 +1,4 @@
-# AI augment production — live workbook (2026-09-27)
+# AI augment production — live workbook (2026-09-28)
 
 ## Governing scope
 Follow `tasks/tasks-20260911-ai-augment-prod/src/TASK.md`; refresh both files after compaction. No former WORK/HUMANS, `src.repl`, stage/unstage, excluded BDD edit, signed-off comment removal, old-record fallback, architecture-competing wrapper, or architecture.py edit without targeted approval. Use `pixi run -e detour-ai-augment`. Surgical source/test edits; no new or redundant tests. User's architecture.py is authoritative; README lifecycle is stale. Scope is backend start through dashboard download/publish. Replay log is principal; detour DB must reconstruct from log/CAS; DOCX is a dumb DB-derived innerdict rendering. Store owns replayed lifecycle records and one current reconstructed cursor; byref nesting uses `is`. Context owns frozen startup config/namekey/blueprints and alone reads main DB at startup; Store does not read main DB.
@@ -41,11 +41,35 @@ Unapproved edge under trace, **no code edit yet**: `protected/src/backend/helper
 ## Work completed in this contour
 User moved `appendwatch.py`, `capture.py`, and several Codex parsing models wholesale into `protected/src/backend/helpers/post_commit_validation.py`; they deleted the two old modules. Mechanical import/name/declaration repairs in validator, API, IPC, Store, dashboard UI and affected tests make consolidated module importable; no new abstraction. `commit_request.py` stale `_BackendCommitRequestRecordJson` field names fixed (`self_http_record`, `pull_response_record`, `push_response_record`) when real validation exposed them. `test_api.py` disallowed mocks replaced: selector contexts via real Context construction, real seeded randomness, real `PostCommitValidation.evaluate_commit`, real read-only DuckDB connection, real context/config loaders, real push/outcome capture behind SSH transport seam, real pull→push→commit→validation→retry-pull instead of direct cursor injection, real synthetic 307-person source/config and Store in `server.main` tests, real lock/store in cleanup tests with only failure injection, real DB open on normal path. No architecture edit or excluded BDD edit. `test_api.py` currently reuses `source_population` from `tests/control_centre/test_ui.py`; reuse avoids duplicating the synthetic source. `test_http_interceptor.py` input key changed from stale `pull_record` to `pull_response_record`. `protected/tests/pytest_plugin.py` bootstrap subprocess now imports `EXPECTED_SOURCE_RESEARCHERS` locally because it serializes only the function body.
 
-## Verification now
+## Prior broad verification (before current model tightening)
 - Contiguous Linux-feasible detour suite (`pytest tests protected/tests/backend protected/tests/operator/test_operator_e2e_preflight.py -q -x -m 'not operator and not needs_sudo and not real_api' --ignore=tests/control_centre/test_ui_e2e.py --tb=short` via pixi): **750 passed, 5 skipped, 4 deselected**, exit 0 in 1250.21s. Focused post-final-edit tests: **3 passed, 278 deselected** (synthetic commit, appendwatch parser, outcome snapshot); earlier focused affected selection: **21 passed, 260 deselected**.
 - Detour-wide Ruff, strict mypy (61 source files), `git diff --check`: **passed** after final edits. Commands use `pixi run -e detour-ai-augment python -m ruff ...` / `python -m mypy ...` because `ruff`/`mypy` names also identify fixed-argument pixi tasks.
 - Browser E2E: fixture sanity passed; `test_completed_grid_row_uses_real_query_ipc` stopped **before app startup** because Linux sandbox denies AF_INET `socket.socket` (`PermissionError: Operation not permitted`). Separate selection excluding that case: **1 passed, 7 skipped, 1 deselected**; seven cases explicitly skip for local-socket unavailability. Browser real-query path awaits the human's macOS run; no test or production weakening to hide the environment error.
 - `pre-commit-operator` explicitly requires Darwin and dispatches Lima/Chrome checks, so it cannot run in this Linux sandbox. The tested detour code is ready for that human gate; root/live API/operator/real-browser scenarios remain its expected coverage.
 
 ## Other standing architecture notes
+**Approved internal model tightening — implemented surgically:** Operator approved the exact following classes in `protected/src/backend/helpers/post_commit_validation.py` (pre-edit :371-382); no added fields/properties, no mutation of `line_value`, no new wrapper:
+```python
+class _ArchivedFile(FrozenStrictModel):
+    codex_rollout_record: CodexRolloutRecord
+    codex_rollout_path: Path
+
+
+class _RolloutRecordLine(FrozenStrictModel):
+    line_number: int = Field(ge=1)
+    line_sha256: StrictStr
+    line_value: dict[str, JsonValue]
+```
+At pre-edit :1996, construct only from the same commit-nested rollout object and validated CAS path:
+```python
+rollout_archive = _ArchivedFile(
+    codex_rollout_record=rollout,
+    codex_rollout_path=rollout_path,
+)
+assert rollout_archive.codex_rollout_record is rollout
+```
+At pre-edit :1776 read `rollout_archive.codex_rollout_path`; at :1678 read `rollout_archive.codex_rollout_record.line_count`. Removed unused `_archived_file` at :440-458 and only its now-unused import, not the CAS owner/helper. At :461-491 parser now constructs `_RolloutRecordLine(line_number=..., line_sha256=..., line_value=...)` using the same decoded JSON and byte hash; all rollout-line annotations/`.value` reads in this module were renamed. Direct fixture/helper references in `tests/backend/test_api.py:888-995,2645-2883` were surgically updated; tests still clone line dictionaries before editing their own copies. Read-only local annotations changed to `Mapping[str, object]` only where strict mypy required due the new `JsonValue` field. No architecture, replay-log, DB schema, excluded-BDD, or unrelated edits. **Current verification:** Ruff passed for both edited source/test files; strict detour mypy passed (61 source files); full existing `test_api.py` selection **279 passed, 2 skipped**; existing `test_backend_store.py` + `test_http_interceptor.py` selection **92 passed**; `git diff --check` passed and stale old-model references absent. No new/replaced tests, no staging/unstaging.
+
+**Input-boundary review (2026-09-28; no implementation):** A reconstructed `BackendCommitRequestRecord` carries byref pull/push and session/report/rollout reference, but does not alone provide startup context/blueprint, CAS bytes, recorded OpenAlex/ROR responses, or Store-owned DB facts (record ordinals, retry baseline/audit rows, accepted-output identity). `PostCommitValidation.evaluate_commit` currently reaches Store at :1977 for provenance; `_execute_attempt` reads retry existence at :1783 after report/rollout, baseline/audit at :1412/:1371 after evidence assessment, output identity at :1847 after accepted-row construction. A one-shot eagerly populated `EvaluationInputs` would move these reads earlier, potentially changing failure stage/classification and causing persisted `/validate` replay mismatch; do not treat it as an approved refactor. An explicit HTTP adapter and per-evaluation `Random(sample_seed)` are conceptually useful, but HTTP is still effectful via `submission_http_context`/pasted Pydantic validators, and a passed mutable RNG is not itself pure. Preserve one shared live/post-append/startup replay evaluation path and byref commit identity; keep Store as DB owner and validator in memory, with stage-ordered inputs. No new architecture-competing wrapper or source edit authorized by this review.
+
 `PostCommitValidation.evaluate_commit` is sole Store entry to validator, which should build PostCommitValidation in memory; Store owns all detour SQL and replay projection. One private frozen `_ValidationProjection` carries transient facts byref to the authoritative commit, not another lifecycle record or log line. No validation-directed rollback. Retry nested pull/push/commit/validation references must retain same-instance identity; replay comparison is value equality before replacing Store cursor. Do not assume old helper names/placements correct: inspect each object's semantics, inputs, outputs, and callers before proposing moves. Follow up only on concrete failures; do not expand this approved test-mock contour into unsolicited architecture restructuring.

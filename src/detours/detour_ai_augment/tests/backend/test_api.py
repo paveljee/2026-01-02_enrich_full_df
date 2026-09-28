@@ -31,7 +31,7 @@ import pytest
 import requests
 import uvicorn
 from fastapi import FastAPI, status
-from pydantic import AnyUrl, ValidationError
+from pydantic import AnyUrl, JsonValue, ValidationError
 from rich.console import Console
 from starlette.types import Message, Scope
 
@@ -886,19 +886,19 @@ def _database_snapshot(
 
 
 def rollout_record(
-    value: dict[str, object], line_number: int
-) -> post_commit_validation._RolloutRecord:
+    value: dict[str, JsonValue], line_number: int
+) -> post_commit_validation._RolloutRecordLine:
     raw_line = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode() + b"\n"
-    return post_commit_validation._RolloutRecord(
+    return post_commit_validation._RolloutRecordLine(
         line_number=line_number,
         line_sha256=hashlib.sha256(raw_line).hexdigest(),
-        value=value,
+        line_value=value,
     )
 
 
 def minimal_rollout_records(
     action: str = "search_query",
-) -> tuple[post_commit_validation._RolloutRecord, ...]:
+) -> tuple[post_commit_validation._RolloutRecordLine, ...]:
     arguments = {
         "search_query": [{"q": "example"}],
         "open": [{"ref_id": TEST_REF_ID}],
@@ -909,7 +909,7 @@ def minimal_rollout_records(
         f"Result\n{CODEX_CITE_MARKER_PREFIX}{TEST_REF_ID}"
         f"{CODEX_CITE_MARKER_SUFFIX}\n{TEST_EXCERPT}"
     )
-    values: tuple[dict[str, object], ...] = (
+    values: tuple[dict[str, JsonValue], ...] = (
         {
             "timestamp": TEST_SESSION_TIMESTAMP,
             "type": "session_meta",
@@ -987,11 +987,11 @@ def build_test_index(action: str = "search_query") -> post_commit_validation._Ro
 
 def web_arguments_rollout(
     *argument_sets: dict[str, object],
-) -> tuple[post_commit_validation._RolloutRecord, ...]:
+) -> tuple[post_commit_validation._RolloutRecordLine, ...]:
     records = list(minimal_rollout_records()[:2])
     for index, arguments in enumerate(argument_sets):
         for record in minimal_rollout_records()[2:]:
-            value = json.loads(json.dumps(record.value))
+            value = json.loads(json.dumps(record.line_value))
             payload = value["payload"]
             payload["call_id"] = f"call_arguments_{index}"
             if payload["type"] == "function_call":
@@ -2642,7 +2642,7 @@ def test_find_batch_indexes_only_url_backed_results() -> None:
         "find": [{"ref_id": f"turn{index}search0", "pattern": "example"} for index in range(4)],
         "response_length": "long",
     }))
-    event = json.loads(json.dumps(records[3].value))
+    event = json.loads(json.dumps(records[3].line_value))
     event["payload"]["action"] = {"type": "find_in_page", "pattern": "example"}
     event["payload"]["results"] = [
         {"type": "text_result", "ref_id": f"turn7view{index}", **(
@@ -2652,7 +2652,7 @@ def test_find_batch_indexes_only_url_backed_results() -> None:
         for index in range(4)
     ]
     records[3] = rollout_record(event, records[3].line_number)
-    output = json.loads(json.dumps(records[4].value))
+    output = json.loads(json.dumps(records[4].line_value))
     output["payload"]["output"][0]["text"] = (
         f"\n{post_commit_validation.CODEX_RESULT_SEPARATOR}\n".join(
             f"Result\n{CODEX_CITE_MARKER_PREFIX}turn7view{index}"
@@ -2691,7 +2691,7 @@ def test_unsupported_web_arguments_are_excluded_before_output_validation(
 ) -> None:
     records = list(web_arguments_rollout(arguments))
     if multiple_output_blocks:
-        value = json.loads(json.dumps(records[-1].value))
+        value = json.loads(json.dumps(records[-1].line_value))
         value["payload"]["output"].append({"type": "input_image", "image_url": TEST_URL})
         records[-1] = rollout_record(value, records[-1].line_number)
     index = post_commit_validation.build_rollout_index(
@@ -2766,7 +2766,7 @@ def test_evidence_candidates_exclude_unsupported_calls(
 
 def test_optional_result_metadata_is_nullable_and_no_url_ref_is_skipped() -> None:
     records = list(minimal_rollout_records())
-    event_value = json.loads(json.dumps(records[3].value))
+    event_value = json.loads(json.dumps(records[3].line_value))
     event_results = event_value["payload"]["results"]
     valid_result = event_results[0]
     for optional_field in ("domain", "snippet", "thumbnail_url", "title"):
@@ -2779,7 +2779,7 @@ def test_optional_result_metadata_is_nullable_and_no_url_ref_is_skipped() -> Non
     })
     records[3] = rollout_record(event_value, records[3].line_number)
 
-    output_value = json.loads(json.dumps(records[4].value))
+    output_value = json.loads(json.dumps(records[4].line_value))
     output_text = output_value["payload"]["output"][0]["text"]
     output_value["payload"]["output"][0]["text"] = (
         f"{output_text}\n{post_commit_validation.CODEX_RESULT_SEPARATOR}\nInternal Error ()\n"
@@ -2845,7 +2845,7 @@ def test_rollout_index_fails_closed_on_broken_direct_chain() -> None:
         )
 
     malformed_output = list(records)
-    output_value = json.loads(json.dumps(malformed_output[-1].value))
+    output_value = json.loads(json.dumps(malformed_output[-1].line_value))
     output_value["payload"]["output"].append({"type": "input_text", "text": TEST_EXCERPT})
     malformed_output[-1] = rollout_record(output_value, malformed_output[-1].line_number)
     with pytest.raises(post_commit_validation._PushValidationError, match="exactly one input_text"):
@@ -2870,7 +2870,7 @@ def test_rollout_index_fails_closed_on_broken_direct_chain() -> None:
 def test_find_eligibility_preserves_corrupt_chain_failures(damage: str, message: str) -> None:
     records = list(minimal_rollout_records("find"))
     if damage in {"malformed_arguments", "nonobject_arguments"}:
-        value = json.loads(json.dumps(records[2].value))
+        value = json.loads(json.dumps(records[2].line_value))
         value["payload"]["arguments"] = "{" if damage == "malformed_arguments" else "[]"
         records[2] = rollout_record(value, records[2].line_number)
     elif damage == "duplicate_call":
@@ -2878,9 +2878,9 @@ def test_find_eligibility_preserves_corrupt_chain_failures(damage: str, message:
     elif damage == "duplicate_event":
         records.insert(4, records[3])
     elif damage == "out_of_order":
-        records[3] = rollout_record(records[3].value, 6)
+        records[3] = rollout_record(records[3].line_value, 6)
     else:
-        value = json.loads(json.dumps(records[3].value))
+        value = json.loads(json.dumps(records[3].line_value))
         value["payload"]["results"].append(value["payload"]["results"][0])
         records[3] = rollout_record(value, records[3].line_number)
     with pytest.raises(post_commit_validation._PushValidationError, match=message):

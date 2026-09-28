@@ -62,7 +62,6 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     AI_AUGMENT_COLUMNS,
     AI_AUGMENT_EVIDENCE_COLUMNS,
     AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS,
-    ARCHIVE_HASH_CHUNK_BYTES,
     CODEX_CITE_MARKER_PREFIX,
     CODEX_CITE_MARKER_SUFFIX,
     CODEX_PAYLOAD_KEY,
@@ -369,16 +368,14 @@ class _MultipleEvidenceMatches(_PushValidationError):
 
 
 class _ArchivedFile(FrozenStrictModel):
-    path: Path
-    size: int
-    sha256: str
-    line_count: int
+    codex_rollout_record: CodexRolloutRecord
+    codex_rollout_path: Path
 
 
-class _RolloutRecord(FrozenStrictModel):
-    line_number: int
-    line_sha256: str
-    value: dict[str, object]
+class _RolloutRecordLine(FrozenStrictModel):
+    line_number: int = Field(ge=1)
+    line_sha256: StrictStr
+    line_value: dict[str, JsonValue]
 
 
 class _EvidenceMatch(FrozenStrictModel):
@@ -437,34 +434,13 @@ def _seed_evidence_random(sample_seed: int) -> None:
     EVIDENCE_RANDOM.seed(sample_seed)
 
 
-def _archived_file(path: Path) -> _ArchivedFile:
-    digest = hashlib.sha256()
-    size = 0
-    line_count = 0
-    final_byte = b""
-    with path.open("rb") as stream:
-        while chunk := stream.read(ARCHIVE_HASH_CHUNK_BYTES):
-            size += len(chunk)
-            digest.update(chunk)
-            line_count += chunk.count(b"\n")
-            final_byte = chunk[-1:]
-    if size and final_byte != b"\n":
-        line_count += 1
-    return _ArchivedFile(
-        path=path,
-        size=size,
-        sha256=digest.hexdigest(),
-        line_count=line_count,
-    )
-
-
-def parse_rollout(rollout_path: Path) -> tuple[_RolloutRecord, ...]:
+def parse_rollout(rollout_path: Path) -> tuple[_RolloutRecordLine, ...]:
     try:
         raw_lines = rollout_path.read_bytes().splitlines(keepends=True)
     except OSError as exc:
         raise _PushValidationError(Locale.ROLLOUT_UNREADABLE) from exc
 
-    records: list[_RolloutRecord] = []
+    records: list[_RolloutRecordLine] = []
     for line_number, raw_line in enumerate(raw_lines, start=1):
         completed = raw_line.endswith(b"\n")
         encoded = raw_line[:-1] if completed else raw_line
@@ -482,12 +458,12 @@ def parse_rollout(rollout_path: Path) -> tuple[_RolloutRecord, ...]:
             raise _PushValidationError(
                 Locale.ROLLOUT_LINE_NON_OBJECT_TEMPLATE.format(line_number=line_number)
             )
-        rollout_value: dict[str, object] = value
+        rollout_value: dict[str, JsonValue] = value
         records.append(
-            _RolloutRecord(
+            _RolloutRecordLine(
                 line_number=line_number,
                 line_sha256=hashlib.sha256(raw_line).hexdigest(),
-                value=rollout_value,
+                line_value=rollout_value,
             )
         )
     return tuple(records)
@@ -547,18 +523,19 @@ def _web_arguments(
 
 
 def _session_metadata(
-    records: tuple[_RolloutRecord, ...],
+    records: tuple[_RolloutRecordLine, ...],
     *,
     timezone_name: str,
     configured_rollout_basename: str | None,
 ) -> _SessionMetadata:
     session_records = [
-        record for record in records if record.value.get(CODEX_TYPE_KEY) == CODEX_SESSION_META_TYPE
+        record for record in records
+        if record.line_value.get(CODEX_TYPE_KEY) == CODEX_SESSION_META_TYPE
     ]
     if len(session_records) != 1:
         raise _PushValidationError(Locale.SESSION_META_COUNT_INVALID)
     session_record = session_records[0]
-    payload = session_record.value.get(CODEX_PAYLOAD_KEY)
+    payload = session_record.line_value.get(CODEX_PAYLOAD_KEY)
     if not isinstance(payload, dict):
         raise _PushValidationError(Locale.SESSION_META_PAYLOAD_MALFORMED)
     session_id_text = require_nonblank_text(
@@ -576,7 +553,7 @@ def _session_metadata(
         label=Locale.SESSION_META_PAYLOAD_LABEL,
     )
     response_timestamp = _timestamp(
-        session_record.value.get(CODEX_TIMESTAMP_KEY),
+        session_record.line_value.get(CODEX_TIMESTAMP_KEY),
         label=Locale.SESSION_META_RESPONSE_LABEL,
     )
     local_timestamp = datetime.fromisoformat(
@@ -591,11 +568,11 @@ def _session_metadata(
     if configured_rollout_basename is not None and rollout_filename != configured_rollout_basename:
         raise _PushValidationError(Locale.SESSION_META_ROLLOUT_MISMATCH)
 
-    turn_context_payload: dict[str, object] | None = None
+    turn_context_payload: Mapping[str, object] | None = None
     for record in records:
-        candidate = record.value.get(CODEX_PAYLOAD_KEY)
+        candidate = record.line_value.get(CODEX_PAYLOAD_KEY)
         if (
-            record.value.get(CODEX_TYPE_KEY) == CODEX_TURN_CONTEXT_TYPE
+            record.line_value.get(CODEX_TYPE_KEY) == CODEX_TURN_CONTEXT_TYPE
             and isinstance(candidate, dict)
         ):
             turn_context_payload = candidate
@@ -640,7 +617,7 @@ def _has_cite_marker(payload: Mapping[str, object]) -> bool:
     return False
 
 
-def _cited_fco_text(record: _RolloutRecord, payload: Mapping[str, object]) -> str:
+def _cited_fco_text(record: _RolloutRecordLine, payload: Mapping[str, object]) -> str:
     output = payload.get(CODEX_OUTPUT_KEY)
     if not isinstance(output, list) or len(output) != 1:
         raise _PushValidationError(
@@ -663,7 +640,7 @@ def _cited_fco_text(record: _RolloutRecord, payload: Mapping[str, object]) -> st
 
 
 def build_rollout_index(
-    records: tuple[_RolloutRecord, ...],
+    records: tuple[_RolloutRecordLine, ...],
     *,
     timezone_name: str,
     configured_rollout_basename: str | None,
@@ -673,12 +650,12 @@ def build_rollout_index(
         timezone_name=timezone_name,
         configured_rollout_basename=configured_rollout_basename,
     )
-    calls: dict[str, list[_RolloutRecord]] = {}
-    events: dict[str, list[_RolloutRecord]] = {}
-    cited_outputs: list[tuple[_RolloutRecord, dict[str, object]]] = []
+    calls: dict[str, list[_RolloutRecordLine]] = {}
+    events: dict[str, list[_RolloutRecordLine]] = {}
+    cited_outputs: list[tuple[_RolloutRecordLine, Mapping[str, object]]] = []
 
     for record in records:
-        value = record.value
+        value = record.line_value
         payload = value.get(CODEX_PAYLOAD_KEY)
         if not isinstance(payload, dict):
             continue
@@ -742,7 +719,7 @@ def build_rollout_index(
         seen_call_ids.add(call_id)
         seen_fco_ids.add(fco_id)
         fco_timestamp = _timestamp(
-            output_record.value.get(CODEX_TIMESTAMP_KEY),
+            output_record.line_value.get(CODEX_TIMESTAMP_KEY),
             label=Locale.FUNCTION_OUTPUT_LABEL_TEMPLATE.format(fco_id=fco_id),
         )
 
@@ -758,12 +735,12 @@ def build_rollout_index(
             raise _PushValidationError(
                 Locale.CITED_WEB_CHAIN_ORDER_TEMPLATE.format(call_id=call_id)
             )
-        call_payload_value = call_record.value.get(CODEX_PAYLOAD_KEY)
+        call_payload_value = call_record.line_value.get(CODEX_PAYLOAD_KEY)
         if not isinstance(call_payload_value, dict):
             raise _PushValidationError(
                 Locale.CITED_WEB_CHAIN_COUNT_TEMPLATE.format(call_id=call_id)
             )
-        call_payload: dict[str, object] = call_payload_value
+        call_payload: Mapping[str, object] = call_payload_value
         fc_id = require_nonblank_text(
             call_payload.get(CODEX_ID_KEY),
             _PushValidationError(
@@ -787,7 +764,7 @@ def build_rollout_index(
         fc_rows.append(
             _CodexFcRow(
                 timestamp=_timestamp(
-                    call_record.value.get(CODEX_TIMESTAMP_KEY),
+                    call_record.line_value.get(CODEX_TIMESTAMP_KEY),
                     label=Locale.FUNCTION_CALL_LABEL_TEMPLATE.format(fc_id=fc_id),
                 ),
                 fc_id=fc_id,
@@ -815,12 +792,12 @@ def build_rollout_index(
             )
         except ValueError as exc:
             raise _PushValidationError(str(exc)) from exc
-        event_payload_value = event_record.value.get(CODEX_PAYLOAD_KEY)
+        event_payload_value = event_record.line_value.get(CODEX_PAYLOAD_KEY)
         if not isinstance(event_payload_value, dict):
             raise _PushValidationError(
                 Locale.CITED_WEB_CHAIN_COUNT_TEMPLATE.format(call_id=call_id)
             )
-        event_payload: dict[str, object] = event_payload_value
+        event_payload: Mapping[str, object] = event_payload_value
         results = event_payload.get(CODEX_RESULTS_KEY)
         if not isinstance(results, list):
             raise _PushValidationError(
@@ -1675,7 +1652,7 @@ def _accepted_output_row(
     output_row: dict[str, str | int | None] = {
         KTP_NAMEKEY_COL: singular_outerdict.namekey.to_json_key(),
         KTP_FILENAME_COL: rollout_index.session.rollout_filename,
-        KTP_FRAGMENT_COL: rollout_archive.line_count,
+        KTP_FRAGMENT_COL: rollout_archive.codex_rollout_record.line_count,
         KTP_FRAGMENT_TYPE_COL: ROLLOUT_LINE_FRAGMENT_TYPE,
         DRAW_LABEL: singular_outerdict.draw_number,
         KTP_FIRST_NAME_COL: singular_outerdict.namekey.first_name,
@@ -1773,7 +1750,7 @@ def _execute_attempt(
                 raise _PushValidationError(str(exc)) from exc
             stage = BackendLifecycle.ROLLOUT_INDEX
             rollout_index = build_rollout_index(
-                parse_rollout(rollout_archive.path),
+                parse_rollout(rollout_archive.codex_rollout_path),
                 timezone_name=context.pipeline_config.timezone,
                 configured_rollout_basename=rollout_relative_path.name,
             )
@@ -1994,11 +1971,10 @@ class PostCommitValidation(FrozenStrictModel):
             except (OSError, ValueError) as exc:
                 raise _PushValidationError(str(exc)) from exc
             rollout_archive = _ArchivedFile(
-                path=rollout_path,
-                size=rollout.size,
-                sha256=rollout.sha256,
-                line_count=rollout.line_count,
+                codex_rollout_record=rollout,
+                codex_rollout_path=rollout_path,
             )
+            assert rollout_archive.codex_rollout_record is rollout
             stage = BackendLifecycle.APPENDWATCH_REPORT_VALIDATION
             result = _execute_attempt(
                 store,
