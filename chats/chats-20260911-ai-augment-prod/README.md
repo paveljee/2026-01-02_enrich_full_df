@@ -5,7 +5,7 @@ September 11, 2026, UTC-4
 This dir
 `chats-20260911-ai-augment-prod`
 contains
-the complete log of
+an incomplete log of
 the interaction with OpenAI Codex
 (i.e., a Codex rollout) in relation to the
 implemention of this task specification:
@@ -13,7 +13,18 @@ implemention of this task specification:
 This includes the rollouts:
 
 - `rollout-2026-09-11T15-54-34-01a0912d-8624-7723-82ad-e69aadb05be7.jsonl.tgz`;
-- `rollout-2026-09-14T20-37-01-01a0a1a3-3069-75f0-8dbc-63015a7ef354.jsonl.tgz`.
+- `rollout-2026-09-14T20-37-01-01a0a1a3-3069-75f0-8dbc-63015a7ef354.jsonl.tgz`;
+- rollout-2026-09-22T23-46-18-01a0cb83-59dc-78d3-aaf6-e1fbacdcf6f1.jsonl (intentionally missing).
+
+The missing rollout session was largely limited to the work
+recorded in the commit `dea2bf1010d29e8b0aff14f6cb57f655b0940dae`.
+It was intentionally omitted because it was too noisy to share.
+For example, the usual conversation flow broke due to the human operator's
+inability to elicit appropriate edits, and thus the human edited the code themself
+while sending concurrent instructions to the agent to follow up/complete the edits,
+which ultimately made the rollout irrepresentative of the process,
+that is, to get the full picture, it would also be necessary to have a record of
+concurrent human edits, which was never captured.
 
 While the rollout is a
 (sometimes tar/gzipped)
