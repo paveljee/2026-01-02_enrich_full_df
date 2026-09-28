@@ -44,6 +44,9 @@ CODEX_CLI_INSTALL_URL="https://chatgpt.com/codex/install.sh"
 CODEX_CLI_BIN_PATH="$AIVM_HOME/.local/bin/codex"
 CODEX_PATH="$AIVM_HOME/.codex"
 CODEX_CONFIG_PATH="$CODEX_PATH/config.toml"
+UV_VERSION="0.10.0"
+UV_URL="https://github.com/astral-sh/uv/releases/download/$UV_VERSION/uv-aarch64-unknown-linux-gnu.tar.gz"
+UV_BIN_PATH="/usr/local/libexec/aivm-uv/uv"
 CODEX_WORKDIR="$AIVM_HOME/workdir"
 CODEX_ENV_PATH="$CODEX_WORKDIR/.openalex.env"
 OPENALEX_API_KEY_NAME="OPENALEX_API_KEY"
@@ -55,6 +58,32 @@ APPENDWATCH_SCRIPT="${AIVM_APPENDWATCH_SCRIPT:-$SOURCE_DIR/../control_centre/app
 AUDIT_READ_SCRIPT="${AIVM_AUDIT_READ_SCRIPT:-$SOURCE_DIR/../../../src/control_centre/appendwatch/$AUDIT_READ_LIB_NAME}"
 
 SHARED_MODEL_SCRIPT="$SOURCE_DIR/../../../../../helpers/$SHARED_MODEL_LIB_NAME"
+PROJECT_ROOT="$(cd "$SOURCE_DIR/../../../../../.." && pwd -P)"
+PROJECT_PYPROJECT="$PROJECT_ROOT/pyproject.toml"
+PROJECT_VERSIONS="$(
+    cd "$PROJECT_ROOT"
+    pixi run -e detour-ai-augment python - "$PROJECT_PYPROJECT" <<'PY'
+import sys
+import tomllib
+from pathlib import Path
+
+project = tomllib.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+python_pin = project["tool"]["pixi"]["dependencies"]["python"]
+if not python_pin.startswith("==") or project["project"]["requires-python"] != python_pin:
+    raise ValueError("Project and Pixi Python pins must match exactly")
+pydantic_pins = [
+    dependency for dependency in project["dependency-groups"]["detour-ai-augment"]
+    if dependency.startswith("pydantic==")
+]
+if len(pydantic_pins) != 1:
+    raise ValueError("Expected one exact detour Pydantic pin")
+print(python_pin[2:], pydantic_pins[0].removeprefix("pydantic=="))
+PY
+)"
+read -r PYTHON_VERSION PYDANTIC_VERSION <<< "$PROJECT_VERSIONS"
+[[ "$PYTHON_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+    && [[ "$PYDANTIC_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+    || { echo "❌ Expected exact Python and Pydantic pins in $PROJECT_PYPROJECT"; exit 1; }
 
 prepare_mount_paths() {
     AIVM_CONTROL_DIR="$MOUNT_DIR/.aivm-control/appendwatch"
@@ -227,6 +256,8 @@ generate_aivm_key
 echo "🚀 Creating new Lima instance '$LIMA_INSTANCE'..."
 
 PROVISION_SCRIPT_B64="$(base64_file "$PROVISION_SCRIPT")"
+PYTHON_VERSION_B64="$(base64_string "$PYTHON_VERSION")"
+PYDANTIC_VERSION_B64="$(base64_string "$PYDANTIC_VERSION")"
 AIVM_USER_B64="$(base64_string "$AIVM_USER")"
 AIVM_HOME_B64="$(base64_string "$AIVM_HOME")"
 AIVM_AUDIT_USER_B64="$(base64_string "$AIVM_AUDIT_USER")"
@@ -247,6 +278,9 @@ CODEX_CLI_INSTALL_URL_B64="$(base64_string "$CODEX_CLI_INSTALL_URL")"
 CODEX_CLI_BIN_PATH_B64="$(base64_string "$CODEX_CLI_BIN_PATH")"
 CODEX_PATH_B64="$(base64_string "$CODEX_PATH")"
 CODEX_CONFIG_PATH_B64="$(base64_string "$CODEX_CONFIG_PATH")"
+UV_VERSION_B64="$(base64_string "$UV_VERSION")"
+UV_URL_B64="$(base64_string "$UV_URL")"
+UV_BIN_PATH_B64="$(base64_string "$UV_BIN_PATH")"
 APPENDWATCH_SCRIPT_B64="$(base64_string "$GUEST_APPENDWATCH_SCRIPT")"
 AUDIT_READ_SCRIPT_B64="$(base64_string "$GUEST_AUDIT_READ_SCRIPT")"
 
@@ -302,6 +336,8 @@ provision:
       decode "$PROVISION_SCRIPT_B64" > "\$PROVISION_SCRIPT_PATH"
       chmod 700 "\$PROVISION_SCRIPT_PATH"
 
+      export AIVM_PYTHON_VERSION="\$(decode "$PYTHON_VERSION_B64")"
+      export AIVM_PYDANTIC_VERSION="\$(decode "$PYDANTIC_VERSION_B64")"
       export AIVM_USER="\$(decode "$AIVM_USER_B64")"
       export AIVM_HOME="\$(decode "$AIVM_HOME_B64")"
       export AIVM_AUDIT_USER="\$(decode "$AIVM_AUDIT_USER_B64")"
@@ -322,6 +358,9 @@ provision:
       export AIVM_CODEX_CLI_BIN_PATH="\$(decode "$CODEX_CLI_BIN_PATH_B64")"
       export AIVM_CODEX_PATH="\$(decode "$CODEX_PATH_B64")"
       export AIVM_CODEX_CONFIG_PATH="\$(decode "$CODEX_CONFIG_PATH_B64")"
+      export AIVM_UV_VERSION="\$(decode "$UV_VERSION_B64")"
+      export AIVM_UV_URL="\$(decode "$UV_URL_B64")"
+      export AIVM_UV_BIN_PATH="\$(decode "$UV_BIN_PATH_B64")"
       export AIVM_APPENDWATCH_SCRIPT="\$(decode "$APPENDWATCH_SCRIPT_B64")"
       export AIVM_AUDIT_READ_SCRIPT="\$(decode "$AUDIT_READ_SCRIPT_B64")"
       export AIVM_APPENDWATCH_REPORT="\$PARAM_$LIMA_APPENDWATCH_REPORT_PARAM"

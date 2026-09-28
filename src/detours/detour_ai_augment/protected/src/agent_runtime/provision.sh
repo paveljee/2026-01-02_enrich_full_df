@@ -2,6 +2,8 @@
 set -euo pipefail
 
 AIVM_USER="${AIVM_USER:-ai}"
+AIVM_PYTHON_VERSION="${AIVM_PYTHON_VERSION:-}"
+AIVM_PYDANTIC_VERSION="${AIVM_PYDANTIC_VERSION:-}"
 AIVM_HOME="${AIVM_HOME:-/home/$AIVM_USER}"
 AIVM_AUDIT_USER="${AIVM_AUDIT_USER:-aivm-audit}"
 AIVM_AUDIT_HOME="${AIVM_AUDIT_HOME:-/var/lib/$AIVM_AUDIT_USER}"
@@ -26,6 +28,9 @@ AIVM_CODEX_CLI_BIN_PATH="${AIVM_CODEX_CLI_BIN_PATH:-$AIVM_HOME/.local/bin/codex}
 AIVM_CODEX_PATH="${AIVM_CODEX_PATH:-$AIVM_HOME/.codex}"
 AIVM_CODEX_SESSIONS_PATH="$AIVM_CODEX_PATH/sessions"
 AIVM_CODEX_CONFIG_PATH="${AIVM_CODEX_CONFIG_PATH:-$AIVM_CODEX_PATH/config.toml}"
+AIVM_UV_VERSION="${AIVM_UV_VERSION:-0.10.0}"
+AIVM_UV_URL="${AIVM_UV_URL:-https://github.com/astral-sh/uv/releases/download/$AIVM_UV_VERSION/uv-aarch64-unknown-linux-gnu.tar.gz}"
+AIVM_UV_BIN_PATH="${AIVM_UV_BIN_PATH:-/usr/local/libexec/aivm-uv/uv}"
 AIVM_APPENDWATCH_SCRIPT="${AIVM_APPENDWATCH_SCRIPT:-}"
 AIVM_APPENDWATCH_REPORT="${AIVM_APPENDWATCH_REPORT:-}"
 AIVM_AUDIT_READ_SCRIPT="${AIVM_AUDIT_READ_SCRIPT:-}"
@@ -33,6 +38,7 @@ APPENDWATCH_DIR="$(dirname "$AIVM_APPENDWATCH_SCRIPT")"
 AIVM_AUDIT_READ_BIN="/usr/local/libexec/aivm-audit-read"
 # Provision `audit_read.py`'s Python prerequisites
 AIVM_AUDIT_ENV="/usr/local/libexec/aivm-audit-env"
+AIVM_PYTHON_INSTALL_DIR="/usr/local/libexec/aivm-python"
 AIVM_AUDIT_DISPATCH="/usr/local/libexec/aivm-audit-dispatch"
 AIVM_AUDIT_ENTRYPOINT="/usr/local/libexec/aivm-audit-entrypoint"
 AIVM_AUDIT_CONFIG="$APPENDWATCH_DIR/audit-read.json"
@@ -124,6 +130,11 @@ done
 [ "$(id -u)" -eq 0 ] \
     || { echo "❌ This provisioning script must run as root"; exit 1; }
 
+[[ "$AIVM_PYTHON_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+    || { echo "❌ Exact project Python version is required"; exit 1; }
+[[ "$AIVM_PYDANTIC_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+    || { echo "❌ Exact detour Pydantic version is required"; exit 1; }
+
 [[ "$AIVM_USER" =~ ^[a-z_][a-z0-9_-]*\$?$ ]] \
     || { echo "❌ Invalid user name: $AIVM_USER"; exit 1; }
 [[ "$AIVM_AUDIT_USER" =~ ^[a-z_][a-z0-9_-]*\$?$ ]] \
@@ -193,9 +204,6 @@ case "$AIVM_HOME/" in
 esac
 
 packages=()
-/usr/bin/python3 -c 'import sys; assert sys.version_info >= (3, 12)' \
-    || { echo "Python 3.12+ is required for shared Pydantic models"; exit 1; }
-/usr/bin/python3 -c 'import ensurepip' >/dev/null 2>&1 || packages+=(python3-venv)
 command -v setfacl >/dev/null 2>&1 || packages+=(acl)
 command -v sshd >/dev/null 2>&1 || packages+=(openssh-server)
 command -v curl >/dev/null 2>&1 || packages+=(curl)
@@ -209,11 +217,32 @@ if [ "${#packages[@]}" -gt 0 ]; then
     apt-get install -y --no-install-recommends "${packages[@]}"
 fi
 
-# Keep the model dependency isolated from the guest's distro Python packages.
-[ -x "$AIVM_AUDIT_ENV/bin/python" ] || /usr/bin/python3 -m venv "$AIVM_AUDIT_ENV"
-"$AIVM_AUDIT_ENV/bin/python" -c \
-    'import pydantic; assert pydantic.__version__.split(".")[0] == "2"' \
-    >/dev/null 2>&1 || "$AIVM_AUDIT_ENV/bin/pip" install 'pydantic>=2,<3'
+# Keep the audit interpreter and models isolated from the guest's distro Python.
+if [ ! -x "$AIVM_UV_BIN_PATH" ]; then
+    install -d -m 0755 "$(dirname "$AIVM_UV_BIN_PATH")"
+    curl -fsSL "$AIVM_UV_URL" |
+        tar -xz --strip-components=1 -C "$(dirname "$AIVM_UV_BIN_PATH")"
+fi
+[ "$("$AIVM_UV_BIN_PATH" --version)" = "uv $AIVM_UV_VERSION" ] \
+    || { echo "❌ uv does not match the configured version"; exit 1; }
+UV_PYTHON_INSTALL_DIR="$AIVM_PYTHON_INSTALL_DIR" \
+    "$AIVM_UV_BIN_PATH" python install "$AIVM_PYTHON_VERSION"
+AIVM_PYTHON_BIN="$(
+    UV_PYTHON_INSTALL_DIR="$AIVM_PYTHON_INSTALL_DIR" \
+        "$AIVM_UV_BIN_PATH" python find \
+        --managed-python "$AIVM_PYTHON_VERSION"
+)"
+if [ ! -x "$AIVM_AUDIT_ENV/bin/python" ]; then
+    "$AIVM_UV_BIN_PATH" venv --python "$AIVM_PYTHON_BIN" "$AIVM_AUDIT_ENV"
+fi
+[ "$("$AIVM_AUDIT_ENV/bin/python" -c 'import platform; print(platform.python_version())')" \
+    = "$AIVM_PYTHON_VERSION" ] \
+    || { echo "❌ Audit Python does not match project pin"; exit 1; }
+"$AIVM_UV_BIN_PATH" pip install \
+    --python "$AIVM_AUDIT_ENV/bin/python" "pydantic==$AIVM_PYDANTIC_VERSION"
+[ "$("$AIVM_AUDIT_ENV/bin/python" -c 'import pydantic; print(pydantic.__version__)')" \
+    = "$AIVM_PYDANTIC_VERSION" ] \
+    || { echo "❌ Audit Pydantic does not match detour pin"; exit 1; }
 
 if ! getent group "$AIVM_USER" >/dev/null; then
     groupadd "$AIVM_USER"
@@ -345,7 +374,7 @@ install -D \
     "$AIVM_AUDIT_READ_BIN"
 sed -i "1c#!$AIVM_AUDIT_ENV/bin/python" "$AIVM_AUDIT_READ_BIN"
 
-/usr/bin/python3 - \
+"$AIVM_AUDIT_ENV/bin/python" - \
     "$AIVM_AUDIT_CONFIG" \
     "$AIVM_USER" \
     "$AIVM_AUDIT_USER" \
