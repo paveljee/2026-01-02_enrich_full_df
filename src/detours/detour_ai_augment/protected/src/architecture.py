@@ -516,7 +516,16 @@ class AgentRuntimeComponent(
             ComponentProtocol.PortProtocol.PropertyProtocol,
             Protocol,
         ):
-            """Wraps BackendValidationRecord, a.k.a (on the Agent
+            """Appears not implemented downstream as of now.
+
+            This is potentially deprecated because `Record`
+            naming potentially conflicts with Backend use
+            of `Record` and the fact that Control Centre's
+            `Attempt` is in fact a Backend Record.
+
+            Do not delete.
+            
+            Wraps BackendValidationRecord, a.k.a (on the Agent
             Runtime's port) Attempt, in order to expose additional
             properties that are helpful on the Backend end's of
             the Agent Runtime - Backend connector for the purpose
