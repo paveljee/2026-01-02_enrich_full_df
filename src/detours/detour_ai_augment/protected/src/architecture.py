@@ -468,7 +468,7 @@ class BackendComponent(
             
     class FullStoreProperty(QueryOnlyStoreProperty, Protocol):
         @property
-        def current_replayed_response_record(self) -> (
+        def current_replayed_record(self) -> (
             BackendComponent.PullResponseRecordProperty
             | BackendComponent.PushResponseRecordProperty
             | BackendComponent.CommitRequestRecordProperty
