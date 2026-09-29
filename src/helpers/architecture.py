@@ -1,4 +1,4 @@
-from typing import Any, TypeVar, get_args
+from typing import Any, Callable, TypeVar, get_args
 
 from pydantic import BaseModel, ConfigDict
 
@@ -101,3 +101,11 @@ class FrozenStrictModel(BaseModel):
         frozen=True,
         strict=True,
     )
+
+# Helpful for passing sync lazy stuff.
+# Not separating Result out to keep
+# the definition boringly explicit.
+type LazyResultFactory[**P, T, E] = Callable[
+    P,
+    tuple[T | None, E | None],
+]
