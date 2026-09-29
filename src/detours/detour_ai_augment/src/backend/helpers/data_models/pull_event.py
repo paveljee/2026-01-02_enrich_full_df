@@ -18,7 +18,6 @@ from .ai_augment_http_request_log_record import (
     ResponseRecord,
     _validate_public_exchange,
 )
-from .validation_request import BackendValidationRecord
 
 
 @implements[BackendComponent.PullRequestRecordProperty]()
@@ -31,14 +30,16 @@ class PullRequestRecord(RequestRecord):
 
 @implements[BackendComponent.PullResponseRecordProperty]()
 class PullResponseRecord(ResponseRecord):
-    validation_request_record: BackendValidationRecord | None = Field(default=None, exclude=True)
+    validation_request_record: BackendValidationRequestRecord | None = Field(
+        default=None, exclude=True
+    )
 
     @classmethod
     def from_http_request_log_record(
         cls,
         *,
         http_request_log_record: HttpRequestLogRecord,
-        validation_request_record: BackendValidationRecord | None = None,
+        validation_request_record: BackendValidationRequestRecord | None = None,
     ) -> Self:
         return cls(
             **http_request_log_record.model_dump(mode="python"),
@@ -55,3 +56,10 @@ class PullResponseRecord(ResponseRecord):
     def _validate_exchange(self) -> Self:
         _validate_public_exchange(self, HTTP_GET_METHOD, PULL_PATH)
         return self
+
+
+# Deliberate post-definition import: pull and validation records refer to one
+# another through earlier lifecycle objects. Define the Pydantic model first,
+# then bind its concrete annotation name; moving this import to the header
+# recreates a module-initialization cycle, not an object-instance cycle.
+from .validation_request import BackendValidationRequestRecord  # noqa: E402

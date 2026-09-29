@@ -237,7 +237,7 @@ from src.detours.detour_ai_augment.src.backend.helpers.data_models.response_reco
     BackendStoreException,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.validation_request import (  # noqa: E501
-    BackendValidationRecord,
+    BackendValidationRequestRecord,
 )
 from src.helpers.data_models.http_request_log import (
     HttpRequestLogRecord,
@@ -428,7 +428,7 @@ def _pull_response(
 ) -> requests.Response:
     with BACKEND_WORKFLOW_STATE_LOCK:
         lifecycle = BACKEND_LIFECYCLE
-        commit_request_record, validation_record = store._cursor_commit_validation()
+        commit_request_record, validation_request_record = store._cursor_commit_validation()
     logger.info(
         Locale.PULL_STATE_LOG,
         lifecycle,
@@ -446,9 +446,9 @@ def _pull_response(
         logger.error(Locale.PULL_WORKFLOW_FAILED_LOG)
         return _error_response(request, HTTPStatus.INTERNAL_SERVER_ERROR)
     if lifecycle in {BackendLifecycle.RETRY, BackendLifecycle.COMPLETED}:
-        if validation_record is None:
+        if validation_request_record is None:
             raise BackendStoreException(Locale.PULL_VALIDATION_RECORD_MISSING)
-        body = validation_record.validation_request_body
+        body = validation_request_record.validation_request_body
         assert body.commit_request_record is commit_request_record
         validation = body.post_commit_validation
         if lifecycle is BackendLifecycle.RETRY:
@@ -491,7 +491,7 @@ def _pull_response(
         logger.info(Locale.PULL_COMPLETED_GROUND_TRUTH_LOG, ground_truth is not None)
         return _response(
             request, HTTPStatus.GONE, "".join(lines), content_type=ContentType.NDJSON_UTF8,
-            headers={ETAG_HEADER: f'"{validation_record.record_id}"'},
+            headers={ETAG_HEADER: f'"{validation_request_record.record_id}"'},
         )
     try:
         singular = store.configured_ai_augment_singular_outerdict()
@@ -555,14 +555,14 @@ async def authoritative_pull(
 def _push_response(
     request: requests.PreparedRequest,
     store: AiAugmentBackendStore,
-    pull: HttpRequestLogRecord | None,
+    pull_response_record: PullResponseRecord | None,
 ) -> requests.Response:
     global BACKEND_LIFECYCLE
     with BACKEND_WORKFLOW_STATE_LOCK:
         lifecycle = BACKEND_LIFECYCLE
         logger.info(
             Locale.PUSH_REQUEST_STATE_LOG, lifecycle, BACKEND_SESSION_ID,
-            None if pull is None else pull.record_id,
+            None if pull_response_record is None else pull_response_record.record_id,
         )
         if lifecycle is BackendLifecycle.BUSY:
             return _error_response(
@@ -576,10 +576,11 @@ def _push_response(
             return _error_response(request, HTTPStatus.INTERNAL_SERVER_ERROR)
         commit, _validation = store._cursor_commit_validation()
         if (
-            pull is None or pull.response_code != HTTPStatus.OK
+            pull_response_record is None or pull_response_record.response_code != HTTPStatus.OK
             or (
                 commit is not None
-                and commit.commit_request_body.pull_response_record.record_id == pull.record_id
+                and commit.commit_request_body.pull_response_record.record_id
+                == pull_response_record.record_id
             )
         ):
             logger.warning(Locale.PUSH_CURRENT_PULL_REQUIRED_LOG)
@@ -596,10 +597,10 @@ async def authoritative_push(
 ) -> requests.Response:
     started_ns = time.monotonic_ns()
     with BACKEND_WORKFLOW_STATE_LOCK:
-        current = store.current_replayed_response_record
-        pull = current if isinstance(current, PullResponseRecord) else None
+        current = store.current_replayed_record
+        pull_response_record = current if isinstance(current, PullResponseRecord) else None
         session = BACKEND_SESSION_ID
-    response = _push_response(request, store, pull)
+    response = _push_response(request, store, pull_response_record)
     http_record = _authoritative_http_record(request, response, started_ns=started_ns)
     record = PushRequestRecord(
         schema_version=http_record.schema_version,
@@ -710,13 +711,13 @@ def _release_backend_process_lock() -> None:
         os.close(descriptor)
 
 
-def update_pull_state(validation_record: BackendValidationRecord) -> None:
+def update_pull_state(validation_request_record: BackendValidationRequestRecord) -> None:
     global BACKEND_LIFECYCLE
 
-    body = validation_record.validation_request_body
+    body = validation_request_record.validation_request_body
     validation = body.post_commit_validation
     commit_request_record = body.commit_request_record
-    push_record = commit_request_record.commit_request_body.push_response_record
+    push_response_record = commit_request_record.commit_request_body.push_response_record
     with BACKEND_WORKFLOW_STATE_LOCK:
         if validation.result is BackendLifecycle.ACCEPTED:
             BACKEND_LIFECYCLE = BackendLifecycle.COMPLETED
@@ -729,9 +730,9 @@ def update_pull_state(validation_record: BackendValidationRecord) -> None:
             BACKEND_LIFECYCLE = BackendLifecycle.FAILED
     logger.info(
         Locale.PUSH_RESULT_STATE_LOG,
-        push_record.record_id,
+        push_response_record.record_id,
         commit_request_record.record_id,
-        validation_record.record_id,
+        validation_request_record.record_id,
         validation.stage,
         validation.result,
         BACKEND_LIFECYCLE,
@@ -768,8 +769,8 @@ async def finish_push(
         if response is None:
             raise BackendStoreException(Locale.PUSH_RESPONSE_RECORD_MISSING)
         assert isinstance(response, PushResponseRecord)
-        validation = store.current_replayed_response_record
-        if not isinstance(validation, BackendValidationRecord):
+        validation = store.current_replayed_record
+        if not isinstance(validation, BackendValidationRequestRecord):
             raise BackendStoreException(Locale.PUSH_VALIDATION_RECORD_MISSING)
         assert (
             validation.validation_request_body.commit_request_record

@@ -81,7 +81,7 @@ from src.detours.detour_ai_augment.src.backend.helpers.data_models.lifecycle imp
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.validation_request import (
     VALIDATE_PATH,
-    BackendValidationRecord,
+    BackendValidationRequestRecord,
 )
 from src.detours.detour_ai_augment.src.control_centre.dashboard import ui as control_ui
 from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models import (
@@ -1012,11 +1012,11 @@ def test_existing_aivm_exposes_the_persisted_appendwatch_topology(
 
 def _validate_workflow_http_records(
     records: Sequence[HttpRequestLogRecord],
-) -> dict[UUID, BackendValidationRecord]:
+) -> dict[UUID, BackendValidationRequestRecord]:
     by_id = {record.record_id: record for record in records}
     assert len(by_id) == len(records), "Duplicate HTTP record UUID"
     ordinal = {record.record_id: index for index, record in enumerate(records)}
-    validations: dict[UUID, BackendValidationRecord] = {}
+    validations: dict[UUID, BackendValidationRequestRecord] = {}
     provider_ids: set[UUID] = set()
     provider_endpoints = {
         (HTTP_GET_METHOD, submission_models.OPENALEX_SCHEME,
@@ -1027,7 +1027,7 @@ def _validate_workflow_http_records(
     for record in records:
         if (record.method, record.path) != (HTTP_POST_METHOD, VALIDATE_PATH):
             continue
-        validation = BackendValidationRecord.from_http_request_log_record(record)
+        validation = BackendValidationRequestRecord.from_http_request_log_record(record)
         validations[record.record_id] = validation
         body = validation.validation_request_body
         commit = body.commit_request_record

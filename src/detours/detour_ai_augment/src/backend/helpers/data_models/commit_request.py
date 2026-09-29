@@ -142,8 +142,8 @@ class _CommitRequestBodyJson(FrozenStrictModel):
 
 @implements[BackendComponent.CommitRequestBodyProperty]()
 class CommitRequestBody(FrozenStrictModel):
-    pull_response_record: HttpRequestLogRecord
-    push_response_record: HttpRequestLogRecord
+    pull_response_record: PullResponseRecord
+    push_response_record: PushResponseRecord
     codex_session_record: CodexSessionRecord
 
     def validate_complete_commit(self) -> Self:
@@ -169,13 +169,21 @@ class CommitRequestBody(FrozenStrictModel):
         cls,
         value: str,
         *,
-        resolve_http_record: Callable[[UUID], HttpRequestLogRecord],
+        resolve_http_record: Callable[
+            [UUID], PullResponseRecord | PushResponseRecord
+        ],
     ) -> Self:
         serialized = _CommitRequestBodyJson.model_validate_json(value)
         session = serialized.codex_session_record
+        pull_response_record = resolve_http_record(serialized.pull_record_id)
+        push_response_record = resolve_http_record(serialized.push_record_id)
+        if not isinstance(pull_response_record, PullResponseRecord) or not isinstance(
+            push_response_record, PushResponseRecord
+        ):
+            raise ValueError(Locale.COMMIT_BODY_RECORDS_MISMATCH)
         return cls(
-            pull_response_record=resolve_http_record(serialized.pull_record_id),
-            push_response_record=resolve_http_record(serialized.push_record_id),
+            pull_response_record=pull_response_record,
+            push_response_record=push_response_record,
             codex_session_record=CodexSessionRecord(
                 session_id=session.codex_session_id,
                 codex_rollout_record=session.codex_rollout_record,
@@ -265,7 +273,9 @@ class BackendCommitRequestRecord(RequestRecord):
         cls,
         http_request_log_record: HttpRequestLogRecord,
         *,
-        resolve_http_record: Callable[[UUID], HttpRequestLogRecord] | None = None,
+        resolve_http_record: Callable[
+            [UUID], PullResponseRecord | PushResponseRecord
+        ] | None = None,
     ) -> Self:
         if resolve_http_record is None:
             raise ValueError(Locale.COMMIT_REFERENCES_REQUIRED)
@@ -298,6 +308,8 @@ class BackendCommitRequestRecord(RequestRecord):
 
 
 class _BackendCommitRequestRecordJson(FrozenStrictModel):
+    # Embedded JSON contains HTTP envelopes, not the by-reference lifecycle
+    # objects reconstructed from Store's cursor during replay.
     self_http_record: HttpRequestLogRecord
     pull_response_record: HttpRequestLogRecord
     push_response_record: HttpRequestLogRecord
@@ -312,9 +324,17 @@ class _BackendCommitRequestRecordJson(FrozenStrictModel):
         )
 
     def to_commit_request_record(self) -> BackendCommitRequestRecord:
+        pull_response_record = PullResponseRecord.from_http_request_log_record(
+            http_request_log_record=self.pull_response_record,
+        )
+        push_response_record = PushResponseRecord.from_http_request_log_record(
+            http_request_log_record=self.push_response_record,
+            pull_response_record=pull_response_record,
+        )
+        assert push_response_record.pull_response_record is pull_response_record
         refs = {
-            self.pull_response_record.record_id: self.pull_response_record,
-            self.push_response_record.record_id: self.push_response_record,
+            pull_response_record.record_id: pull_response_record,
+            push_response_record.record_id: push_response_record,
         }
         return BackendCommitRequestRecord.from_http_request_log_record(
             self.self_http_record,
@@ -324,8 +344,8 @@ class _BackendCommitRequestRecordJson(FrozenStrictModel):
 
 def _synthetic_commit_request_record(
     *,
-    pull_record: HttpRequestLogRecord,
-    push_record: HttpRequestLogRecord,
+    pull_response_record: PullResponseRecord,
+    push_response_record: PushResponseRecord,
     session_id: UUID,
     rollout: CodexRolloutRecord,
     rollout_filename: str,
@@ -341,12 +361,12 @@ def _synthetic_commit_request_record(
         ),
     )
     body = CommitRequestBody(
-        pull_response_record=pull_record,
-        push_response_record=push_record,
+        pull_response_record=pull_response_record,
+        push_response_record=push_response_record,
         codex_session_record=session,
     )
-    assert body.pull_response_record is pull_record
-    assert body.push_response_record is push_record
+    assert body.pull_response_record is pull_response_record
+    assert body.push_response_record is push_response_record
     return BackendCommitRequestRecord(
         schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
         method=HTTP_POST_METHOD,
@@ -368,3 +388,12 @@ def _synthetic_commit_request_record(
         duration_usec=None,
         commit_request_body=body,
     )
+
+
+# Deliberate post-definition imports: the concrete pull/push response types
+# form a Pydantic annotation ring with commit and validation. All commit
+# models, including the JSON reader used by validation, must exist before
+# importing those modules. These names then resolve to the actual classes;
+# no generic HTTP field or manual model_rebuild is used for the links.
+from .pull_event import PullResponseRecord  # noqa: E402
+from .push_event import PushResponseRecord  # noqa: E402

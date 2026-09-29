@@ -709,6 +709,12 @@ def completed_query_fixture_process() -> None:
     from src.detours.detour_ai_augment.src.backend.helpers.data_models.lifecycle import (  # noqa: E501
         BackendLifecycle,
     )
+    from src.detours.detour_ai_augment.src.backend.helpers.data_models.pull_event import (  # noqa: E501
+        PullResponseRecord,
+    )
+    from src.detours.detour_ai_augment.src.backend.helpers.data_models.push_event import (  # noqa: E501
+        PushResponseRecord,
+    )
     from src.detours.detour_ai_augment.src.control_centre.dashboard import ui
     from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models import (
         ai_augment_context,
@@ -812,6 +818,7 @@ def completed_query_fixture_process() -> None:
                 }
             )
         )
+        assert isinstance(pull, PullResponseRecord)
         push = store._append_authoritative_record(
             persisted_http_record(
                 record_id=uuid7(),
@@ -822,8 +829,9 @@ def completed_query_fixture_process() -> None:
                 response_headers={LOCATION_HEADER: PULL_PATH},
             )
         )
+        assert isinstance(push, PushResponseRecord)
         draft = _synthetic_commit_request_record(
-            pull_record=pull, push_record=push, session_id=session_id,
+            pull_response_record=pull, push_response_record=push, session_id=session_id,
             rollout=CodexRolloutRecord(
                 sha256=digest, size=len(rollout_bytes), line_count=rollout_bytes.count(b"\n"),
             ),

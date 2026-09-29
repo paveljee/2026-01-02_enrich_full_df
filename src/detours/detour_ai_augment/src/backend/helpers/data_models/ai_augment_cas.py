@@ -21,6 +21,14 @@ ROLLOUT_CAS_TEMP_FILENAME_TEMPLATE = ".{nonce}.tmp"
 SSH_EXECUTABLE = "ssh"
 
 
+class CASCodexRolloutRecord(CodexRolloutRecord):
+    """Backend Store will use CAS to fill this in
+    so this can be returned for downstream use.
+    Note that this is still a `FrozenStrictModel`."""
+
+    cas_path: Path
+
+
 class AiAugmentCAS(FrozenStrictModel):
     """Immutable Codex rollout snapshots addressed by their SHA-256 digest."""
 
@@ -84,7 +92,7 @@ class AiAugmentCAS(FrozenStrictModel):
     def validated_rollout(
         self,
         reference: CodexRolloutRecord,
-    ) -> Path:
+    ) -> CASCodexRolloutRecord:
         path = self._blob_path(reference.sha256)
         if (
             any(p.is_symlink() for p in (path.parent.parent, path.parent, path))
@@ -98,7 +106,12 @@ class AiAugmentCAS(FrozenStrictModel):
             or archived.line_count != reference.line_count
         ):
             raise ValueError(Locale.ROLLOUT_CAS_BLOB_INVALID)
-        return path
+        return CASCodexRolloutRecord(
+            sha256=reference.sha256,
+            size=reference.size,
+            line_count=reference.line_count,
+            cas_path=path,
+        )
 
     def _blob_path(self, sha256: str) -> Path:
         if re.fullmatch(r"[0-9a-f]{64}", sha256) is None:

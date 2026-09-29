@@ -19,7 +19,6 @@ from .ai_augment_http_request_log_record import (
     ResponseRecord,
     _validate_public_exchange,
 )
-from .pull_event import PullResponseRecord
 
 
 @implements[BackendComponent.PushRequestRecordProperty]()
@@ -56,3 +55,9 @@ class PushResponseRecord(ResponseRecord):
             ):
                 raise ValueError(Locale.PUSH_RESULT_LINKAGE_INVALID)
         return self
+
+
+# Deliberate post-definition import: define PushResponseRecord before binding
+# the concrete pull type so commit/pull/validation modules can import this
+# module in either order without observing a half-defined response class.
+from .pull_event import PullResponseRecord  # noqa: E402

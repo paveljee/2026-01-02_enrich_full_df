@@ -18,11 +18,11 @@ from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helper
 from src.helpers.architecture import FrozenStrictModel
 from src.helpers.data_models import InnerDict, NameKey
 
+from .....agent_runtime.helpers.data_models.attempt import AgentRuntimeAttempt
 from .....backend.helpers.data_models.ai_augment_singular_outer_dict import (
     AiAugmentSingularOuterDict,
 )
 from .....backend.helpers.data_models.codex_innerdict import CodexInnerDict
-from .....backend.helpers.data_models.validation_request import BackendValidationRecord
 from .query_event import QueryResponseRecord
 from .run_outcome_event import RunOutcomeResponseRecord
 
@@ -58,8 +58,8 @@ class DashboardQuerySnapshot(FrozenStrictModel):
         })
 
     @cached_property
-    def attempts_by_namekey(self) -> Mapping[str, tuple[BackendValidationRecord, ...]]:
-        grouped: dict[str, list[BackendValidationRecord]] = defaultdict(list)
+    def attempts_by_namekey(self) -> Mapping[str, tuple[AgentRuntimeAttempt, ...]]:
+        grouped: dict[str, list[AgentRuntimeAttempt]] = defaultdict(list)
         for researcher in self.ai_augment_singular_outerdicts:
             for committed in researcher.codex_innerdicts:
                 attempt = committed.run_outcome_response_record.attempt
@@ -73,14 +73,16 @@ class DashboardQuerySnapshot(FrozenStrictModel):
             (
                 namekey.to_json_key(),
                 session_id,
-            ): run_outcome_record
+            ): run_outcome_response_record
             for researcher in self.ai_augment_singular_outerdicts
             for committed in researcher.codex_innerdicts
-            if (run_outcome_record := committed.run_outcome_response_record)
-            if (namekey := run_outcome_record.run_outcome_request_record.namekey) is not None
+            if (run_outcome_response_record := committed.run_outcome_response_record)
+            if (
+                namekey := run_outcome_response_record.run_outcome_request_record.namekey
+            ) is not None
             if (
                 session_id := (
-                    run_outcome_record._codex_session_record().session_id
+                    run_outcome_response_record._codex_session_record().session_id
                 )
             )
             is not None
@@ -126,7 +128,7 @@ class DashboardQuerySnapshot(FrozenStrictModel):
 
     def attempts_for_session(
         self, namekey: NameKey, session_id: UUID | None,
-    ) -> tuple[BackendValidationRecord, ...]:
+    ) -> tuple[AgentRuntimeAttempt, ...]:
         if session_id is None:
             return ()
         return tuple(

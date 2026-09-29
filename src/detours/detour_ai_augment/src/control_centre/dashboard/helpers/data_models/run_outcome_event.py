@@ -390,9 +390,7 @@ class RunOutcomeResponseRecord(ResponseRecord):
         if (parsed.validation_record_id is None) != (attempt_record is None):
             raise ValueError(Locale.RUN_OUTCOME_ATTEMPT_PRESENCE_INVALID)
         if attempt_record is not None:
-            from .....backend.helpers.data_models.validation_request import BackendValidationRecord
-
-            attempt = BackendValidationRecord.from_http_request_log_record(
+            attempt = AgentRuntimeAttempt.from_http_request_log_record(
                 http_request_log_record=attempt_record,
             )
             if (

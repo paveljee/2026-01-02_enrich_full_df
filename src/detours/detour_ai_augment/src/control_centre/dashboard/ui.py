@@ -128,13 +128,13 @@ from src.helpers.vars import (
     KTP_NAMEKEY_COL,
 )
 
+from ...agent_runtime.helpers.data_models.attempt import AgentRuntimeAttempt
 from ...backend.helpers.data_models.ai_augment_singular_outer_dict import (
     AiAugmentSingularOuterDict,
     selected_card_outer_dict,
 )
 from ...backend.helpers.data_models.codex_innerdict import CodexInnerDict
 from ...backend.helpers.data_models.lifecycle import BackendLifecycle
-from ...backend.helpers.data_models.validation_request import BackendValidationRecord
 from ...backend.server import (
     CONFIG_OPTION,
     DANGER_NO_VERIFY_HASH_OPTION,
@@ -450,21 +450,21 @@ class _BackendAvailability(FrozenStrictModel):
 
 
 class _RunCommitView(FrozenStrictModel):
-    attempt_record: BackendValidationRecord | None
+    attempt: AgentRuntimeAttempt | None
     run: Run | None
     accepted: CodexInnerDict | None
-    run_outcome_record: RunOutcomeResponseRecord | None
+    run_outcome_response_record: RunOutcomeResponseRecord | None
 
     @model_validator(mode="after")
     def validate_run_or_commit(self) -> Self:
-        if self.attempt_record is None and self.run is None:
+        if self.attempt is None and self.run is None:
             raise ValueError(Locale.RUN_COMMIT_VIEW_EMPTY)
         return self
 
     @property
     def row_id(self) -> UUID:
-        if self.attempt_record is not None:
-            return self.attempt_record.validation_request_body.commit_request_record.record_id
+        if self.attempt is not None:
+            return self.attempt.validation_request_body.commit_request_record.record_id
         assert self.run is not None
         return self.run.run_id
 
@@ -474,9 +474,9 @@ class _RunCommitView(FrozenStrictModel):
 
     @property
     def backend_lifecycle(self) -> RunLifecycle | None:
-        if self.attempt_record is None:
+        if self.attempt is None:
             return None
-        result = self.attempt_record.validation_request_body.post_commit_validation.result
+        result = self.attempt.validation_request_body.post_commit_validation.result
         lifecycle = AGENT_RUNTIME_ATTEMPT_LIFECYCLE_BY_RESULT.get(result)
         if lifecycle is None:
             raise RuntimeError(Locale.ATTEMPT_DATABASE_INCONSISTENT)
@@ -498,8 +498,8 @@ class _RunCommitView(FrozenStrictModel):
 
     @property
     def commit_request_record_id(self) -> UUID | None:
-        if self.attempt_record is not None:
-            return self.attempt_record.validation_request_body.commit_request_record.record_id
+        if self.attempt is not None:
+            return self.attempt.validation_request_body.commit_request_record.record_id
         assert self.run is not None
         outcome = self.run.run_outcome_response_record
         attempt = None if outcome is None else outcome.attempt
@@ -510,9 +510,9 @@ class _RunCommitView(FrozenStrictModel):
 
     @property
     def timestamp(self) -> datetime:
-        if self.attempt_record is not None:
+        if self.attempt is not None:
             return datetime.fromtimestamp(
-                self.attempt_record.validation_request_body
+                self.attempt.validation_request_body
                 .commit_request_record.record_id.time / 1_000,
                 tz=timezone.utc,
             )
@@ -524,21 +524,21 @@ class _RunCommitView(FrozenStrictModel):
 
     @property
     def failure_detail(self) -> str | None:
-        if self.attempt_record is not None:
-            return self.attempt_record.validation_request_body.post_commit_validation.detail
+        if self.attempt is not None:
+            return self.attempt.validation_request_body.post_commit_validation.detail
         assert self.run is not None
         failed = latest_run_event(self.run, RunLifecycle.FAILED)
         return None if failed is None else failed.detail
 
     @property
     def run_outcome_saved(self) -> bool | None:
-        if self.run_outcome_record is None:
+        if self.run_outcome_response_record is None:
             return None
-        return self.run_outcome_record.response_code == status.HTTP_200_OK
+        return self.run_outcome_response_record.response_code == status.HTTP_200_OK
 
     @property
     def run_outcome_session_status(self) -> str | None:
-        response = self.run_outcome_record
+        response = self.run_outcome_response_record
         if response is None:
             return None
         session = response._codex_session_record()
@@ -708,10 +708,10 @@ class _ResearcherView(FrozenStrictModel):
             if matched_run is not None:
                 represented.add(matched_run.run_id)
             run_commit_views.append(_RunCommitView(
-                attempt_record=record,
+                attempt=record,
                 run=matched_run,
                 accepted=snapshot.committed_by_id.get(commit.record_id),
-                run_outcome_record=(
+                run_outcome_response_record=(
                     None if session_id is None
                     else snapshot.outcomes_by_session.get((namekey, session_id))
                 ),
@@ -719,10 +719,10 @@ class _ResearcherView(FrozenStrictModel):
         for run in runs:
             if run.run_id not in represented:
                 run_commit_views.append(_RunCommitView(
-                    attempt_record=None,
+                    attempt=None,
                     run=run,
                     accepted=None,
-                    run_outcome_record=(
+                    run_outcome_response_record=(
                         None if run.session_id is None
                         else snapshot.outcomes_by_session.get((namekey, run.session_id))
                     ),

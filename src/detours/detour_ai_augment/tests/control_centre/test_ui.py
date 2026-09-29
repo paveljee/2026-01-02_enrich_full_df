@@ -35,11 +35,11 @@ from src.detours.detour_ai_augment.protected.src.backend import api, ipc
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_augment_config import (  # noqa: E501
     AiAugmentDetourConfig,
 )
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.post_commit_validation import (  # noqa: E501
+    PostCommitValidation,
+)
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.submission_init import (  # noqa: E501
     Submission,
-)
-from src.detours.detour_ai_augment.protected.src.backend.helpers.post_commit_validation import (  # noqa: E501
-    PostCommitValidation,
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     AI_AUGMENT_COLUMNS,
@@ -80,6 +80,9 @@ from src.detours.detour_ai_augment.protected.tests.pytest_plugin import (
     sleeping_process,
     stdin_waiting_process,
 )
+from src.detours.detour_ai_augment.src.agent_runtime.helpers.data_models.attempt import (
+    AgentRuntimeAttempt,
+)
 from src.detours.detour_ai_augment.src.backend import server as backend_server
 from src.detours.detour_ai_augment.src.backend.helpers.data_models import (
     ai_augment_context as backend_context_models,
@@ -102,8 +105,13 @@ from src.detours.detour_ai_augment.src.backend.helpers.data_models.commit_reques
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.lifecycle import (
     BackendLifecycle,
 )
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.pull_event import (
+    PullResponseRecord,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.push_event import (
+    PushResponseRecord,
+)
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.validation_request import (
-    BackendValidationRecord,
     ValidationRequestBody,
 )
 from src.detours.detour_ai_augment.src.control_centre.dashboard import ui as control_ui
@@ -209,13 +217,13 @@ def http_record(
     )
 
 
-def run_outcome_record(
+def run_outcome_response_record(
     *,
     namekey: NameKey = NAMEKEY,
     run_outcome: RunLifecycle = RunLifecycle.COMPLETED,
     response_code: int = status.HTTP_200_OK,
     session_id: UUID = SESSION_ID,
-    attempt: BackendValidationRecord | None = None,
+    attempt: AgentRuntimeAttempt | None = None,
 ) -> RunOutcomeResponseRecord:
     headers: Mapping[str, str] = {
         run_outcome_models.NAME_KEY_HEADER: name_key_header_value(namekey),
@@ -287,18 +295,24 @@ def agent_runtime_attempt(
     result: BackendLifecycle = BackendLifecycle.ACCEPTED,
     commit_request_record_id: UUID | None = None,
     session_id: UUID = SESSION_ID,
-) -> BackendValidationRecord:
-    pull_record = http_record(
-        method=HTTP_GET_METHOD,
-        path=PULL_PATH,
-        response_code=status.HTTP_200_OK,
+) -> AgentRuntimeAttempt:
+    pull_response_record = PullResponseRecord.from_http_request_log_record(
+        http_request_log_record=http_record(
+            method=HTTP_GET_METHOD,
+            path=PULL_PATH,
+            response_code=status.HTTP_200_OK,
+        ),
     )
-    push_record = http_record(
-        method=HTTP_POST_METHOD,
-        path=PUSH_PATH,
-        response_code=status.HTTP_202_ACCEPTED,
-        request_body="{}",
+    push_response_record = PushResponseRecord.from_http_request_log_record(
+        http_request_log_record=http_record(
+            method=HTTP_POST_METHOD,
+            path=PUSH_PATH,
+            response_code=status.HTTP_202_ACCEPTED,
+            request_body="{}",
+        ),
+        pull_response_record=pull_response_record,
     )
+    assert push_response_record.pull_response_record is pull_response_record
     codex_session_record = CodexSessionRecord(
         session_id=session_id,
         codex_rollout_record=CodexRolloutRecord(
@@ -312,8 +326,8 @@ def agent_runtime_attempt(
         ),
     )
     commit_body = CommitRequestBody(
-        pull_response_record=pull_record,
-        push_response_record=push_record,
+        pull_response_record=pull_response_record,
+        push_response_record=push_response_record,
         codex_session_record=codex_session_record,
     )
     commit_request_record = BackendCommitRequestRecord(
@@ -341,7 +355,7 @@ def agent_runtime_attempt(
         duration_usec=None,
         commit_request_body=commit_body,
     )
-    return BackendValidationRecord.from_http_request_log_record(
+    return AgentRuntimeAttempt.from_http_request_log_record(
         ValidationRequestBody(
             commit_request_record=commit_request_record,
             post_commit_validation=PostCommitValidation(
@@ -478,7 +492,7 @@ class FakeBackendDatabase:
             f"run-outcome:{run_outcome.to_run_outcome_path()}"
         )
         self.run_outcome_calls.append((run_outcome, namekey))
-        response = run_outcome_record(namekey=namekey, run_outcome=run_outcome)
+        response = run_outcome_response_record(namekey=namekey, run_outcome=run_outcome)
         assert response.response_code is not None
         return HTTPStatus(response.response_code)
 
@@ -1215,7 +1229,7 @@ def test_backend_database_client_posts_exact_run_outcome_request(
     namekey = NameKey(first_name="Jane", last_name="Doe")
     session_id = UUID(str(SESSION_ID))
     rollout_filename = f"{api.ROLLOUT_FILENAME_PREFIX}{session_id}.jsonl"
-    snapshot = run_outcome_record(
+    snapshot = run_outcome_response_record(
         namekey=namekey, response_code=response_code, session_id=session_id,
     )
     body = snapshot.response_body
@@ -1288,12 +1302,12 @@ def test_backend_database_client_posts_exact_run_outcome_request(
 
 
 def test_run_outcome_snapshot_decodes_appendwatch_for_display_only() -> None:
-    response = run_outcome_record(
+    response = run_outcome_response_record(
         namekey=NAMEKEY,
         run_outcome=RunLifecycle.COMPLETED,
     )
     attempt = control_ui._RunCommitView(
-        attempt_record=None,
+        attempt=None,
         run=run_event_models.Run(
             run_id=uuid7(),
             namekey=NAMEKEY,
@@ -1302,10 +1316,10 @@ def test_run_outcome_snapshot_decodes_appendwatch_for_display_only() -> None:
             run_outcome_response_record=response,
         ),
         accepted=None,
-        run_outcome_record=response,
+        run_outcome_response_record=response,
     )
 
-    assert attempt.run_outcome_record is response
+    assert attempt.run_outcome_response_record is response
     assert attempt.run_outcome_saved is True
     assert (
         response._codex_session_record().session_id
@@ -1330,7 +1344,7 @@ async def test_run_outcome_snapshot_500_is_kept_separate_from_run_outcome(
             validation_record_id: UUID | None,
         ) -> HTTPStatus:
             self.run_outcome_calls.append((run_outcome, namekey))
-            response = run_outcome_record(
+            response = run_outcome_response_record(
                 namekey=namekey,
                 run_outcome=run_outcome,
                 response_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1383,7 +1397,7 @@ async def test_run_outcome_snapshot_500_is_kept_separate_from_run_outcome(
     assert reconciled.latest_run_commit_view.lifecycle is RunLifecycle.FAILED
     # A partial capture without a session UUID cannot be assigned to this local run.
     assert response._codex_session_record().session_id is None
-    assert reconciled.latest_run_commit_view.run_outcome_record is None
+    assert reconciled.latest_run_commit_view.run_outcome_response_record is None
     assert reconciled.latest_run_commit_view.run_outcome_saved is None
     assert subject.drain_notifications() == (
         Locale.RUN_OUTCOME_SNAPSHOT_PARTIAL_TEMPLATE.format(
@@ -1953,7 +1967,7 @@ async def test_backend_acceptance_remains_running_until_codex_exits(
     )
     assert completed.researcher_var_views[0].latest_run_commit_var_view.ai_value is None
     if expected_outcome is RunLifecycle.COMPLETED:
-        outcome = run_outcome_record(
+        outcome = run_outcome_response_record(
             namekey=NAMEKEY, run_outcome=RunLifecycle.COMPLETED,
             attempt=accepted_attempt,
         )
@@ -2686,7 +2700,7 @@ def test_multiple_commits_for_same_session_remain_distinct_display_rows(tmp_path
                 KTP_FILENAME_COL: f"commit-{index}.docx",
                 KTP_AI_AUGMENT_SESSION_METADATA_COL: metadata,
             }, _CodexInnerDictProcedure()),
-            run_outcome_response_record=run_outcome_record(attempt=record),
+            run_outcome_response_record=run_outcome_response_record(attempt=record),
         ) for index, record in enumerate(records)),
     })
     storage = storage_models.AiAugmentDashboardStorage()
@@ -2719,12 +2733,12 @@ async def test_card_record_ids_match_each_commit_and_researcher_session(
 ) -> None:
     source = researcher()
     sessions = (SESSION_ID, SESSION_ID, uuid7())
-    records: list[BackendValidationRecord] = []
+    records: list[AgentRuntimeAttempt] = []
     committed: list[CodexInnerDict] = []
     matched_outcomes: list[RunOutcomeResponseRecord] = []
     for index, session_id in enumerate(sessions):
         record = agent_runtime_attempt(session_id=session_id)
-        outcome = run_outcome_record(session_id=session_id, attempt=record)
+        outcome = run_outcome_response_record(session_id=session_id, attempt=record)
         matched_outcomes.append(outcome)
         assert record.validation_request_body.post_commit_validation.submission is not None
         records.append(record)
@@ -2743,8 +2757,8 @@ async def test_card_record_ids_match_each_commit_and_researcher_session(
             ))
     source = source.model_copy(update={"codex_innerdicts": tuple(committed)})
     unrelated_outcomes = (
-        run_outcome_record(session_id=uuid7()),
-        run_outcome_record(namekey=SECOND_NAMEKEY, session_id=SESSION_ID),
+        run_outcome_response_record(session_id=uuid7()),
+        run_outcome_response_record(namekey=SECOND_NAMEKEY, session_id=SESSION_ID),
     )
     response = DashboardQuerySnapshot(
         ai_augment_singular_outerdicts=(source, researcher(SECOND_NAMEKEY)),
@@ -2758,7 +2772,7 @@ async def test_card_record_ids_match_each_commit_and_researcher_session(
                     innerdict=first.innerdict,
                     run_outcome_response_record=unrelated,
                 )
-        unrecorded = run_outcome_record(session_id=SESSION_ID)
+        unrecorded = run_outcome_response_record(session_id=SESSION_ID)
         wrong_link = CodexInnerDict(
             innerdict=first.innerdict,
             run_outcome_response_record=unrecorded,
@@ -2787,7 +2801,7 @@ async def test_card_record_ids_match_each_commit_and_researcher_session(
 
     for record, outcome in zip(records, matched_outcomes, strict=True):
         if include_materialization and include_outcome:
-            assert isinstance(record, BackendValidationRecord)
+            assert isinstance(record, AgentRuntimeAttempt)
             assert str(outcome._codex_session_record().session_id) in card.card_markdown
     count = 3 if include_materialization and include_outcome else 0
     metadata_heading = f"**`{KTP_AI_AUGMENT_SESSION_METADATA_COL}`**"

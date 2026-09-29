@@ -542,7 +542,7 @@ def test_response_record_promise_waiter_cancellation_preserves_completion(
 
 
 @pytest.mark.parametrize("line_count", (2, 3))
-def test_explicit_replay_rejects_incomplete_push_group_without_projecting_it(
+def test_explicit_replay_projects_durable_prefix_ending_at_push_or_commit(
     backend_store: store_models.AiAugmentBackendStore,
     runtime: AiAugmentBackendContext,
     line_count: int,
@@ -558,12 +558,14 @@ def test_explicit_replay_rejects_incomplete_push_group_without_projecting_it(
     log.chmod(0o600)
     log.write_bytes(b"".join(lines))
     repin(runtime, store)
-    with pytest.raises(ValueError, match="Incomplete push group at replay line 2"):
-        store._rebuild_from_log(runtime, reset_confirmed=True, confirm_replay=lambda: True)
+    store._rebuild_from_log(runtime, reset_confirmed=True, confirm_replay=lambda: True)
     with duckdb.connect(str(store._detour_db_path), read_only=True) as connection:
         assert connection.execute(
             "SELECT record_ordinal, method, path FROM detour_http_records ORDER BY record_ordinal"
-        ).fetchall() == [(1, "GET", "/pull")]
+        ).fetchall() == [
+            (1, "GET", "/pull"), (2, "POST", "/push"),
+            *([(3, "POST", "/commit")] if line_count == 3 else []),
+        ]
         assert connection.execute(
             f"SELECT count(*) FROM {api.AUTHORITATIVE_ATTEMPTS_TABLE}"
         ).fetchone() == (0,)
@@ -600,6 +602,6 @@ def test_invalid_synthetic_envelope_is_fsynced_before_domain_rejection(
         assert fsynced == [payload]
         assert payload.endswith(b"\n")
         assert HttpRequestLogRecord.model_validate_json(payload) == record
-        assert backend_store.current_replayed_response_record is None
+        assert backend_store.current_replayed_record is None
     with duckdb.connect(str(backend_store._detour_db_path), read_only=True) as connection:
         assert connection.execute("SELECT count(*) FROM detour_http_records").fetchone() == (0,)

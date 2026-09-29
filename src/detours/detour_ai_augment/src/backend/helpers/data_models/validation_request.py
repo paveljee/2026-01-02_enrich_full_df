@@ -8,9 +8,6 @@ from src.detours.detour_ai_augment.protected.src.architecture import (
     BackendComponent,
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
-from src.detours.detour_ai_augment.protected.src.backend.helpers.post_commit_validation import (  # noqa: E501
-    PostCommitValidation,
-)
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     HTTP_POST_METHOD,
     NAME_KEY_HEADER,
@@ -23,10 +20,6 @@ from src.helpers.data_models.http_request_log import HttpRequestLogRecord
 from src.helpers.vars import KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
 
 from .ai_augment_http_request_log_record import RequestRecord
-from .commit_request import (
-    BackendCommitRequestRecord,
-    _BackendCommitRequestRecordJson,
-)
 
 VALIDATE_PATH = "/validate"
 
@@ -34,7 +27,7 @@ VALIDATE_PATH = "/validate"
 class _ValidationRequestBodyJson(FrozenStrictModel):
     commit_request_record: _BackendCommitRequestRecordJson
     post_commit_validation: PostCommitValidation
-    initial_validation_record: HttpRequestLogRecord | None
+    initial_validation_request_record: HttpRequestLogRecord | None
     openalex_ror_records: tuple[HttpRequestLogRecord, ...] = ()
 
 
@@ -42,7 +35,7 @@ class _ValidationRequestBodyJson(FrozenStrictModel):
 class ValidationRequestBody(FrozenStrictModel):
     commit_request_record: BackendCommitRequestRecord
     post_commit_validation: PostCommitValidation
-    initial_validation_request_record: BackendValidationRecord | None
+    initial_validation_request_record: BackendValidationRequestRecord | None
     openalex_ror_records: tuple[HttpRequestLogRecord, ...] = ()
 
     def validate_body(self) -> Self:
@@ -72,13 +65,13 @@ class ValidationRequestBody(FrozenStrictModel):
     @classmethod
     def from_serialized_json(cls, value: str | bytes) -> Self:
         serialized = _ValidationRequestBodyJson.model_validate_json(value)
-        initial = serialized.initial_validation_record
+        initial = serialized.initial_validation_request_record
         return cls(
             commit_request_record=serialized.commit_request_record.to_commit_request_record(),
             post_commit_validation=serialized.post_commit_validation,
             initial_validation_request_record=(
                 None if initial is None
-                else BackendValidationRecord.from_http_request_log_record(initial)
+                else BackendValidationRequestRecord.from_http_request_log_record(initial)
             ),
             openalex_ror_records=serialized.openalex_ror_records,
         )
@@ -88,12 +81,12 @@ class ValidationRequestBody(FrozenStrictModel):
         return _ValidationRequestBodyJson(
             commit_request_record=_BackendCommitRequestRecordJson.from_commit_request_record(self.commit_request_record),
             post_commit_validation=self.post_commit_validation,
-            initial_validation_record=self.initial_validation_request_record,
+            initial_validation_request_record=self.initial_validation_request_record,
             openalex_ror_records=self.openalex_ror_records,
         ).model_dump(mode="json")
 
-    def http_record(self) -> BackendValidationRecord:
-        return BackendValidationRecord(
+    def http_record(self) -> BackendValidationRequestRecord:
+        return BackendValidationRequestRecord(
             validation_request_body=self,
             schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
             method=HTTP_POST_METHOD,
@@ -114,7 +107,7 @@ class ValidationRequestBody(FrozenStrictModel):
 
 
 @implements[BackendComponent.ValidationRequestRecordProperty]()
-class BackendValidationRecord(RequestRecord):
+class BackendValidationRequestRecord(RequestRecord):
     validation_request_body: ValidationRequestBody = Field(exclude=True)
 
     @classmethod
@@ -164,7 +157,7 @@ class BackendValidationRecord(RequestRecord):
         http_request_log_record: HttpRequestLogRecord,
         *,
         commit_request_record: BackendCommitRequestRecord | None = None,
-        initial_validation_record: BackendValidationRecord | None = None,
+        initial_validation_request_record: BackendValidationRequestRecord | None = None,
     ) -> Self:
         record = http_request_log_record
         if record.request_body is None:
@@ -179,7 +172,8 @@ class BackendValidationRecord(RequestRecord):
             initial_validation_request_record=(
                 None if parsed.initial_validation_request_record is None else
                 (parsed.initial_validation_request_record
-                 if initial_validation_record is None else initial_validation_record)
+                 if initial_validation_request_record is None
+                 else initial_validation_request_record)
             ),
             openalex_ror_records=parsed.openalex_ror_records,
         )
@@ -202,3 +196,17 @@ class BackendValidationRecord(RequestRecord):
             duration_usec=record.duration_usec,
             validation_request_body=body,
         )
+
+
+# Deliberate post-definition imports: validation refers to a prior commit,
+# while retry pulls refer back to a prior validation. The response models
+# must be defined before these concrete names are imported; postponed
+# annotations let Pydantic resolve them without weakening the field types.
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.post_commit_validation import (  # noqa: E402, E501
+    PostCommitValidation,
+)
+
+from .commit_request import (  # noqa: E402
+    BackendCommitRequestRecord,
+    _BackendCommitRequestRecordJson,
+)

@@ -35,15 +35,21 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.aivm_audit impo
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_augment_detour_db import (  # noqa: E501
     AiAugmentDetourDB,
 )
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.post_commit_validation import (  # noqa: E501
+    _AppliedRetryAuditRow,
+    _CommitConfigFacts,
+    _CommitEvaluationInputs,
+    _DetourDbValidationReads,
+    _RetryBaselineRow,
+    _RolloutIndex,
+    _ValidationProjection,
+    evaluate_commit,
+)
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.replay_log import (  # noqa: E501
     ReplayLogRegisteredResource,
     _ReplayProjectionConflictError,
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
-from src.detours.detour_ai_augment.protected.src.backend.helpers.post_commit_validation import (
-    _RolloutIndex,
-    _ValidationProjection,
-)
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     AUTHORITATIVE_ATTEMPT_COMMIT_REQUEST_RECORD_ID_COLUMN,
     AUTHORITATIVE_ATTEMPT_PAYLOAD_COLUMN,
@@ -162,7 +168,7 @@ from ....control_centre.dashboard.helpers.data_models.query_event import (
 from ....control_centre.dashboard.helpers.data_models.run_outcome_event import (
     RunOutcomeResponseRecord,
 )
-from .ai_augment_cas import AiAugmentCAS
+from .ai_augment_cas import AiAugmentCAS, CASCodexRolloutRecord
 from .ai_augment_context import AiAugmentBackendContext
 from .ai_augment_singular_outer_dict import AiAugmentSingularOuterDict
 from .codex_innerdict import CodexInnerDict, _CodexInnerDictProcedure
@@ -192,12 +198,12 @@ from .response_record_promise import (
     BackendStoreException,
     ResponseRecordPromise,
 )
-from .validation_request import BackendValidationRecord, ValidationRequestBody
+from .validation_request import BackendValidationRequestRecord, ValidationRequestBody
 
 StoreMode = Literal["writable", "read_only"]
-type LifecycleResponseRecord = (
+type ReplayedLifecycleRecord = (
     PullResponseRecord | PushResponseRecord | BackendCommitRequestRecord
-    | BackendValidationRecord | RunOutcomeResponseRecord
+    | BackendValidationRequestRecord | RunOutcomeResponseRecord
 )
 logger = logging.getLogger(__name__)
 # Literally empty file, like `printf "" | sha256sum`
@@ -266,12 +272,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
     _loop: asyncio.AbstractEventLoop | None = PrivateAttr(default=None)
     _append_offset: int = PrivateAttr(default=0)
     _append_ordinal: int = PrivateAttr(default=0)
-    _group_records: list[tuple[int, bytes]] = PrivateAttr(default_factory=list)
-    _group_scope: AbstractContextManager[AiAugmentDetourDB] | None = PrivateAttr(default=None)
-    _group_push_id: UUID | None = PrivateAttr(default=None)
-    _group_commit_id: UUID | None = PrivateAttr(default=None)
-    _current_response_record: LifecycleResponseRecord | None = PrivateAttr(default=None)
-    _group_previous_response_record: LifecycleResponseRecord | None = PrivateAttr(default=None)
+    _current_replayed_record: ReplayedLifecycleRecord | None = PrivateAttr(default=None)
 
     @property
     def context(self) -> AiAugmentBackendContext:
@@ -280,11 +281,11 @@ class AiAugmentBackendStore(FrozenStrictModel):
         return self._context
 
     @property
-    def current_replayed_response_record(self) -> LifecycleResponseRecord | None:
-        return self._current_response_record
+    def current_replayed_record(self) -> ReplayedLifecycleRecord | None:
+        return self._current_replayed_record
 
-    def _reset_current_response_record(self) -> None:
-        self._current_response_record = None
+    def _reset_current_replayed_record(self) -> None:
+        self._current_replayed_record = None
 
     def ai_augment_singular_outerdicts(self) -> tuple[AiAugmentSingularOuterDict, ...]:
         context = self._context
@@ -331,13 +332,13 @@ class AiAugmentBackendStore(FrozenStrictModel):
         record: HttpRequestLogRecord,
     ) -> None:
         if isinstance(record, PullResponseRecord) and record.response_code == HTTPStatus.OK:
-            self._current_response_record = record
+            self._current_replayed_record = record
         elif isinstance(record, PushResponseRecord) and record.response_code == HTTPStatus.ACCEPTED:
-            self._current_response_record = record
-        elif isinstance(record, (BackendCommitRequestRecord, BackendValidationRecord)):
-            self._current_response_record = record
+            self._current_replayed_record = record
+        elif isinstance(record, (BackendCommitRequestRecord, BackendValidationRequestRecord)):
+            self._current_replayed_record = record
         elif isinstance(record, RunOutcomeResponseRecord) and record.response_code == HTTPStatus.OK:
-            self._current_response_record = record
+            self._current_replayed_record = record
 
     @classmethod
     def _from_resources(
@@ -383,12 +384,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
                     self.configured_ai_augment_singular_outerdict()
                 yield self
                 self._raise_if_failed()
-                if self._group_scope is not None:
-                    raise RuntimeError(Locale.STORE_PUSH_GROUP_INCOMPLETE)
             finally:
-                with self._lock:
-                    if self._group_scope is not None:
-                        self._abort_group()
                 self._context = None
                 self._mode = None
 
@@ -449,7 +445,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
                     self._log_offset = 0
                     self._append_offset = 0
                     self._append_ordinal = 0
-                    self._reset_current_response_record()
+                    self._reset_current_replayed_record()
                     for ordinal, line in enumerate(self._replay_log._lines(), start=1):
                         logger.info(Locale.REPLAY_LINE_LOG, ordinal, total)
                         try:
@@ -461,15 +457,8 @@ class AiAugmentBackendStore(FrozenStrictModel):
                             )
                             self._remember_reconstructed_record(reconstructed)
                         except Exception:
-                            origin = self._group_records[0][0] if self._group_records else ordinal
-                            logger.exception(
-                                Locale.REPLAY_GROUP_FAILED_LOG, ordinal, origin
-                            )
+                            logger.exception(Locale.REPLAY_RECORD_FAILED_LOG, ordinal)
                             raise
-                    if self._group_records:
-                        raise ValueError(
-                            Locale.REPLAY_PUSH_GROUP_INCOMPLETE_TEMPLATE.format(line_number=self._group_records[0][0])
-                        )
                     with self._transaction():
                         self._write_anchor(_ReplayAnchor(
                             sha256=self._replay_log.hash, ordinal=total,
@@ -481,8 +470,6 @@ class AiAugmentBackendStore(FrozenStrictModel):
                     self._failure = exc
                     raise
                 finally:
-                    if self._group_scope is not None:
-                        self._abort_group()
                     self._rebuilding = False
                     self._context = None
                     self._mode = None
@@ -497,11 +484,11 @@ class AiAugmentBackendStore(FrozenStrictModel):
     def _response_record_for_http(
         self, record: HttpRequestLogRecord,
     ) -> HttpRequestLogRecord:
-        current = self._current_response_record
+        current = self._current_replayed_record
         if (record.method, record.path) == (HTTP_GET_METHOD, PULL_PATH):
             prior = None
             if record.response_code == HTTPStatus.OK:
-                if isinstance(current, BackendValidationRecord):
+                if isinstance(current, BackendValidationRequestRecord):
                     prior = current
                 elif isinstance(current, PullResponseRecord):
                     prior = current.validation_request_record
@@ -520,7 +507,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
     @staticmethod
     def _initial_validation_for_commit(
         commit: BackendCommitRequestRecord,
-    ) -> BackendValidationRecord | None:
+    ) -> BackendValidationRequestRecord | None:
         pull = commit.commit_request_body.pull_response_record
         assert isinstance(pull, PullResponseRecord)
         prior = pull.validation_request_record
@@ -528,9 +515,9 @@ class AiAugmentBackendStore(FrozenStrictModel):
             return None
         return prior.validation_request_body.initial_validation_request_record or prior
 
-    def _validation_from_cursor(self) -> BackendValidationRecord | None:
-        current = self._current_response_record
-        if isinstance(current, BackendValidationRecord):
+    def _validation_from_cursor(self) -> BackendValidationRequestRecord | None:
+        current = self._current_replayed_record
+        if isinstance(current, BackendValidationRequestRecord):
             return current
         if isinstance(current, PullResponseRecord):
             return current.validation_request_record
@@ -543,7 +530,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
             return commit_pull.validation_request_record
         if isinstance(current, RunOutcomeResponseRecord):
             attempt = current.attempt
-            assert attempt is None or isinstance(attempt, BackendValidationRecord)
+            assert attempt is None or isinstance(attempt, BackendValidationRequestRecord)
             return attempt
         return None
 
@@ -570,12 +557,12 @@ class AiAugmentBackendStore(FrozenStrictModel):
     def _assert_lifecycle_links(
         self,
         record: HttpRequestLogRecord,
-        previous: LifecycleResponseRecord | None,
+        previous: ReplayedLifecycleRecord | None,
     ) -> None:
         if isinstance(record, PullResponseRecord):
             expected = None
             if record.response_code == HTTPStatus.OK:
-                if isinstance(previous, BackendValidationRecord):
+                if isinstance(previous, BackendValidationRequestRecord):
                     expected = previous
                 elif isinstance(previous, PullResponseRecord):
                     expected = previous.validation_request_record
@@ -588,7 +575,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
             assert isinstance(previous, PushResponseRecord)
             assert record.commit_request_body.pull_response_record is previous.pull_response_record
             assert record.commit_request_body.push_response_record is previous
-        elif isinstance(record, BackendValidationRecord):
+        elif isinstance(record, BackendValidationRequestRecord):
             assert isinstance(previous, BackendCommitRequestRecord)
             body = record.validation_request_body
             assert body.commit_request_record is previous
@@ -606,7 +593,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
         with self._threading_lock():
             try:
                 record = self._response_record_for_http(record)
-                previous = self._current_response_record
+                previous = self._current_replayed_record
                 stored, ordinal, line = self._append_request(record)
                 reconstructed = self._replay_durable_record(
                     self._read_appended_record(line), ordinal=ordinal, raw_line=line
@@ -630,15 +617,15 @@ class AiAugmentBackendStore(FrozenStrictModel):
                     isinstance(reconstructed, PushResponseRecord)
                     and reconstructed.response_code == HTTPStatus.ACCEPTED
                 ) or isinstance(
-                    reconstructed, (BackendCommitRequestRecord, BackendValidationRecord)
+                    reconstructed, (BackendCommitRequestRecord, BackendValidationRequestRecord)
                 ) or (
                     isinstance(reconstructed, RunOutcomeResponseRecord)
                     and reconstructed.response_code == HTTPStatus.OK
                 )
                 if advances:
-                    assert self._current_response_record is reconstructed
+                    assert self._current_replayed_record is reconstructed
                 else:
-                    assert self._current_response_record is previous
+                    assert self._current_replayed_record is previous
                 return reconstructed
             except BaseException as exc:
                 self._failure = exc
@@ -713,7 +700,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
         self, request: PushRequestRecord, *, session_id: UUID | None,
     ) -> BackendCommitRequestRecord:
         context = self.context
-        push = self._current_response_record
+        push = self._current_replayed_record
         if (
             session_id is None
             or context.configured_namekey is None
@@ -750,8 +737,8 @@ class AiAugmentBackendStore(FrozenStrictModel):
             len(report_bytes),
         )
         commit = _synthetic_commit_request_record(
-            pull_record=pull,
-            push_record=push,
+            pull_response_record=pull,
+            push_response_record=push,
             session_id=session_id,
             rollout=rollout,
             rollout_filename=configuration.rollout_relative_path.name,
@@ -815,12 +802,12 @@ class AiAugmentBackendStore(FrozenStrictModel):
             context = self._context
             if context is None:
                 raise RuntimeError(Locale.STORE_CONTEXT_UNAVAILABLE)
-            accepted_push = self._current_response_record
+            accepted_push = self._current_replayed_record
             if (
                 not isinstance(accepted_push, PushResponseRecord)
                 or accepted_push.record_id != request.record_id
             ):
-                raise RuntimeError(Locale.REPLAY_PUSH_GROUP_COMMIT_MISMATCH)
+                raise RuntimeError(Locale.REPLAY_COMMIT_PUSH_MISMATCH)
             assert isinstance(accepted_push, PushResponseRecord)
             commit = self._capture_push_commit(request, session_id=session_id)
             stored_commit = self._append_authoritative_record(commit)
@@ -830,8 +817,8 @@ class AiAugmentBackendStore(FrozenStrictModel):
                 stored_commit.record_id,
             )
             attempt = self._validate_commit(stored_commit.record_id)
-            validation_ref = self._current_response_record
-            if not isinstance(validation_ref, BackendValidationRecord):
+            validation_ref = self._current_replayed_record
+            if not isinstance(validation_ref, BackendValidationRequestRecord):
                 raise RuntimeError(Locale.PUSH_RESULT_LINKAGE_INVALID)
             commit_ref = validation_ref.validation_request_body.commit_request_record
             if (
@@ -848,8 +835,6 @@ class AiAugmentBackendStore(FrozenStrictModel):
         except Exception as exc:
             with self._lock:
                 self._failure = exc
-                if self._group_scope is not None:
-                    self._abort_group()
             raise
 
     def query_response_record(
@@ -883,8 +868,11 @@ class AiAugmentBackendStore(FrozenStrictModel):
         try:
             selected = RunOutcomeRequestRecord.model_validate(request, from_attributes=True)
             with self._threading_lock():
-                if self._group_records:
-                    raise RuntimeError(Locale.RUN_OUTCOME_PUSH_GROUP_OVERLAP)
+                if isinstance(
+                    self._current_replayed_record,
+                    (PushResponseRecord, BackendCommitRequestRecord),
+                ):
+                    raise RuntimeError(Locale.RUN_OUTCOME_BEFORE_VALIDATION)
                 record = self._construct_run_outcome_response_record(
                     selected, codex_session_record=codex_session_record,
                     rollout_filename=rollout_filename,
@@ -1005,14 +993,10 @@ class AiAugmentBackendStore(FrozenStrictModel):
         )
         return self._append_authoritative_record(record)
 
-    def _validate_commit(self, commit_id: UUID) -> BackendValidationRecord:
+    def _validate_commit(self, commit_id: UUID) -> BackendValidationRequestRecord:
         from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.submission_mixin import (  # noqa: E501
             submission_http_context,
         )
-        from src.detours.detour_ai_augment.protected.src.backend.helpers.post_commit_validation import (  # noqa: E501
-            PostCommitValidation,
-        )
-
         self._require_writable()
         assert self._context is not None
         while True:
@@ -1024,7 +1008,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
                     f"WHERE {AUTHORITATIVE_ATTEMPT_COMMIT_REQUEST_RECORD_ID_COLUMN} = ?",
                     [str(commit_id)],
                 ).fetchone()
-                current = self._current_response_record
+                current = self._current_replayed_record
                 validation = self._validation_from_cursor()
                 commit = (
                     current if isinstance(current, BackendCommitRequestRecord)
@@ -1042,7 +1026,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
                     )
                     if applied.model_dump() != validation.model_dump():
                         raise _ReplayProjectionConflictError
-                    assert self._current_response_record is validation
+                    assert self._current_replayed_record is validation
                     return validation
                 if not isinstance(current, BackendCommitRequestRecord):
                     raise RuntimeError(Locale.VALIDATION_CURRENT_RECONSTRUCTED_COMMIT_REQUIRED)
@@ -1050,10 +1034,15 @@ class AiAugmentBackendStore(FrozenStrictModel):
                 http = ModelHttpInterceptor(record_get=self._recorded_model_http)
                 try:
                     with submission_http_context(http):
-                        evaluated, projection = PostCommitValidation.evaluate_commit(
-                            self,
+                        inputs, db_reads = self._validated_commit_inputs(
                             commit,
-                            initial_validation_record=initial_ref,
+                            initial_validation_request_record=initial_ref,
+                        )
+                        evaluated, projection = evaluate_commit(
+                            commit,
+                            initial_validation_request_record=initial_ref,
+                            inputs=inputs,
+                            db_reads=db_reads,
                         )
                         assert projection.commit_request_record is commit
                 except ModelHttpRequired as exc:
@@ -1093,7 +1082,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
                 )
                 if applied.model_dump() != validation.model_dump():
                     raise _ReplayProjectionConflictError
-                assert self._current_response_record is validation
+                assert self._current_replayed_record is validation
                 return validation
 
     def _write_anchor(self, anchor: _ReplayAnchor) -> None:
@@ -1251,65 +1240,22 @@ class AiAugmentBackendStore(FrozenStrictModel):
 
     def _insert_attempt_record(
         self,
-        validation_record: BackendValidationRecord,
+        validation_request_record: BackendValidationRequestRecord,
     ) -> None:
 
         conn = self._detour_db.connection
         conn.execute(
             f"INSERT INTO {AUTHORITATIVE_ATTEMPTS_TABLE} VALUES (?, ?)",
             [
-                str(validation_record.validation_request_body.commit_request_record.record_id),
+                str(validation_request_record.validation_request_body.commit_request_record.record_id),
                 json.dumps(
-                    {AUTHORITATIVE_ATTEMPT_VALIDATION_ID_KEY: str(validation_record.record_id)}
+                    {
+                        AUTHORITATIVE_ATTEMPT_VALIDATION_ID_KEY:
+                        str(validation_request_record.record_id)
+                    }
                 ),
             ],
         )
-
-    def _begin_group(self, push_id: UUID) -> None:
-        self._group_previous_response_record = self._current_response_record
-        self._group_push_id = push_id
-        self._group_commit_id = None
-        scope = self._detour_db.writable()
-        scope.__enter__()
-        self._group_scope = scope
-        self._detour_db.connection.execute("BEGIN TRANSACTION")
-        self._transaction_active = True
-        assert self._context is not None
-        self._create_codex_schema(
-            codex_match_version=self._context.pipeline_config.match_rule_version.codex_match
-        )
-        self._create_codex_output_schema()
-
-    def _abort_group(self) -> None:
-        scope = self._group_scope
-        if scope is None:
-            return
-        try:
-            self._detour_db.connection.execute("ROLLBACK")
-        finally:
-            self._transaction_active = False
-            self._group_scope = None
-            self._group_records.clear()
-            self._current_response_record = self._group_previous_response_record
-            self._group_previous_response_record = None
-            self._group_push_id = None
-            self._group_commit_id = None
-            scope.__exit__(None, None, None)
-
-    def _finish_group(self) -> None:
-        scope = self._group_scope
-        if scope is None:
-            raise RuntimeError(Locale.STORE_PUSH_GROUP_MISSING)
-        self._detour_db.connection.execute("COMMIT")
-        self._transaction_active = False
-        self._group_scope = None
-        scope.__exit__(None, None, None)
-        self._log_offset += sum(len(line) for _, line in self._group_records)
-        self._next_line_number = self._group_records[-1][0] + 1
-        self._group_previous_response_record = None
-        self._group_records.clear()
-        self._group_push_id = None
-        self._group_commit_id = None
 
     def _replay_durable_record(
         self,
@@ -1318,7 +1264,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
         ordinal: int,
         raw_line: bytes,
     ) -> HttpRequestLogRecord:
-        previous = self._current_response_record
+        previous = self._current_replayed_record
         reconstructed = self._apply_durable_record(
             record, ordinal=ordinal, raw_line=raw_line,
         )
@@ -1339,79 +1285,59 @@ class AiAugmentBackendStore(FrozenStrictModel):
             RUN_OUTCOME_PATHS,
         )
 
-        from .validation_request import BackendValidationRecord
+        from .validation_request import BackendValidationRequestRecord
 
         context = self._context
         if context is None:
             raise RuntimeError(Locale.STORE_CONTEXT_UNAVAILABLE)
-        accepted_push = (record.method, record.path, record.response_code) == (
-            HTTP_POST_METHOD, PUSH_PATH, HTTPStatus.ACCEPTED,
-        )
-        if accepted_push:
-            if self._group_scope is not None:
-                raise ValueError(Locale.REPLAY_PUSH_GROUP_OVERLAP)
-            self._begin_group(record.record_id)
-        if self._group_scope is not None:
-            self._group_records.append((ordinal, raw_line))
+        with self._transaction():
             self._insert_projected_http_record(record, line_number=ordinal, raw_line=raw_line)
             record = self._http_record(record.record_id)
             if (record.method, record.path) == (HTTP_POST_METHOD, COMMIT_PATH):
-                push_ref = self._current_response_record
-                if not isinstance(push_ref, PushResponseRecord):
-                    raise ValueError(Locale.REPLAY_PUSH_GROUP_COMMIT_MISMATCH)
-                pull_ref = None if push_ref is None else push_ref.pull_response_record
+                push_ref = self._current_replayed_record
                 if (
-                    pull_ref is None or push_ref is None
-                    or push_ref.record_id != self._group_push_id
+                    not isinstance(push_ref, PushResponseRecord)
+                    or push_ref.response_code != HTTPStatus.ACCEPTED
                 ):
-                    raise ValueError(Locale.REPLAY_PUSH_GROUP_COMMIT_MISMATCH)
+                    raise ValueError(Locale.REPLAY_COMMIT_PUSH_MISMATCH)
+                pull_ref = push_ref.pull_response_record
+                if pull_ref is None:
+                    raise ValueError(Locale.REPLAY_COMMIT_PUSH_MISMATCH)
                 refs = {pull_ref.record_id: pull_ref, push_ref.record_id: push_ref}
                 commit = BackendCommitRequestRecord.from_http_request_log_record(
                     record,
                     resolve_http_record=lambda record_id: refs[record_id],
                 )
                 if (
-                    self._group_commit_id is not None
-                    or commit.commit_request_body.pull_response_record is not pull_ref
+                    commit.commit_request_body.pull_response_record is not pull_ref
                     or commit.commit_request_body.push_response_record is not push_ref
-                    or push_ref.record_id != self._group_push_id
                 ):
-                    raise ValueError(Locale.REPLAY_PUSH_GROUP_COMMIT_MISMATCH)
-                self._group_commit_id = record.record_id
-                return commit
+                    raise ValueError(Locale.REPLAY_COMMIT_PUSH_MISMATCH)
+                reconstructed: HttpRequestLogRecord = commit
             elif (record.method, record.path) == (HTTP_POST_METHOD, VALIDATE_PATH):
-                commit_ref = self._current_response_record
-                if (
-                    not isinstance(commit_ref, BackendCommitRequestRecord)
-                    or commit_ref.record_id != self._group_commit_id
-                ):
-                    raise ValueError(Locale.REPLAY_PUSH_GROUP_VALIDATION_MISMATCH)
+                commit_ref = self._current_replayed_record
+                if not isinstance(commit_ref, BackendCommitRequestRecord):
+                    raise ValueError(Locale.REPLAY_VALIDATION_COMMIT_MISMATCH)
                 self._apply_validation_record(record)
                 initial_ref = self._initial_validation_for_commit(commit_ref)
-                validation = BackendValidationRecord.from_http_request_log_record(
+                validation = BackendValidationRequestRecord.from_http_request_log_record(
                     record,
                     commit_request_record=commit_ref,
-                    initial_validation_record=initial_ref,
+                    initial_validation_request_record=initial_ref,
                 )
                 body = validation.validation_request_body
-                if body.commit_request_record.record_id != self._group_commit_id:
-                    raise ValueError(Locale.REPLAY_PUSH_GROUP_VALIDATION_MISMATCH)
+                if body.commit_request_record is not commit_ref:
+                    raise ValueError(Locale.REPLAY_VALIDATION_COMMIT_MISMATCH)
                 if body.initial_validation_request_record is not initial_ref:
                     raise ValueError(Locale.VALIDATION_INITIAL_LINK_INVALID)
                 self._insert_attempt_record(validation)
-                self._finish_group()
-                return validation
+                reconstructed = validation
             elif record.method == HTTP_POST_METHOD and record.path in RUN_OUTCOME_PATHS:
-                raise ValueError(Locale.REPLAY_PUSH_GROUP_OUTCOME_EARLY)
-            return self._response_record_for_http(record)
-        if (record.method, record.path) in {
-            (HTTP_POST_METHOD, COMMIT_PATH), (HTTP_POST_METHOD, VALIDATE_PATH),
-        }:
-            raise ValueError(Locale.REPLAY_PUSH_GROUP_MISSING)
-        with self._transaction():
-            self._insert_projected_http_record(record, line_number=ordinal, raw_line=raw_line)
-            record = self._http_record(record.record_id)
-            if record.method == HTTP_POST_METHOD and record.path in RUN_OUTCOME_PATHS:
+                if isinstance(
+                    self._current_replayed_record,
+                    (PushResponseRecord, BackendCommitRequestRecord),
+                ):
+                    raise ValueError(Locale.RUN_OUTCOME_BEFORE_VALIDATION)
                 if record.response_body is None:
                     raise ValueError(Locale.RUN_OUTCOME_REPLAY_MISMATCH)
                 outcome_body = RunOutcomeResponseRecord._parse_response_body(record.response_body)
@@ -1428,8 +1354,20 @@ class AiAugmentBackendStore(FrozenStrictModel):
                     raise ValueError(Locale.RUN_OUTCOME_REPLAY_MISMATCH)
                 self._verify_run_outcome_record(outcome)
                 self._apply_run_outcome_record(outcome)
-                reconstructed: HttpRequestLogRecord = outcome
+                reconstructed = outcome
             else:
+                if (record.method, record.path, record.response_code) == (
+                    HTTP_POST_METHOD, PUSH_PATH, HTTPStatus.ACCEPTED,
+                ):
+                    if isinstance(
+                        self._current_replayed_record,
+                        (PushResponseRecord, BackendCommitRequestRecord),
+                    ):
+                        raise ValueError(Locale.REPLAY_ACCEPTED_PUSH_OVERLAP)
+                    self._create_codex_schema(
+                        codex_match_version=context.pipeline_config.match_rule_version.codex_match
+                    )
+                    self._create_codex_output_schema()
                 reconstructed = self._response_record_for_http(record)
         self._next_line_number = ordinal + 1
         self._log_offset += len(raw_line)
@@ -1545,7 +1483,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
 
         if route == (HTTP_POST_METHOD, VALIDATE_PATH):
             try:
-                BackendValidationRecord.from_http_request_log_record(validated)
+                BackendValidationRequestRecord.from_http_request_log_record(validated)
             except ValueError as exc:
                 raise _ReplayCommitInvalidError(Locale.REPLAY_COMMIT_INVALID) from exc
             return validated
@@ -1619,15 +1557,15 @@ class AiAugmentBackendStore(FrozenStrictModel):
         self,
         record: HttpRequestLogRecord,
     ) -> BackendCommitRequestRecord:
-        try:
-            return BackendCommitRequestRecord.from_http_request_log_record(
-                record,
-                resolve_http_record=lambda record_id: self._http_record_with_ordinal(
-                    record_id,
-                )[1],
-            )
-        except (KeyError, ValidationError, ValueError) as exc:
-            raise _ReplayCommitInvalidError(Locale.REPLAY_COMMIT_INVALID) from exc
+        commit, _validation = self._cursor_commit_validation()
+        if (
+            commit is None
+            or commit.record_id != record.record_id
+            or commit.http_request_log_record.model_dump(mode="json")
+            != record.model_dump(mode="json")
+        ):
+            raise _ReplayCommitInvalidError(Locale.REPLAY_COMMIT_INVALID)
+        return commit
 
     @staticmethod
     def _parse_source_key_header(value: object) -> tuple[str, int]:
@@ -1644,23 +1582,28 @@ class AiAugmentBackendStore(FrozenStrictModel):
             raise _ReplayCommitInvalidError(Locale.REPLAY_COMMIT_NAME_KEY_INVALID) from exc
 
     @staticmethod
-    def _namekey_from_original_pull(pull: HttpRequestLogRecord) -> NameKey:
+    def _namekey_from_original_pull_response_record(
+        original_pull_response_record: PullResponseRecord,
+    ) -> NameKey:
         content_type = next(
             (
                 value.partition(";")[0].strip().casefold()
-                for key, value in (pull.response_headers or {}).items()
+                for key, value in (original_pull_response_record.response_headers or {}).items()
                 if key.casefold() == HTTP_CONTENT_TYPE_HEADER.casefold()
             ),
             None,
         )
         if (
-            pull.response_code != HTTPStatus.OK
+            original_pull_response_record.response_code != HTTPStatus.OK
             or content_type != ContentType.NDJSON
-            or not pull.response_body
+            or not original_pull_response_record.response_body
         ):
             raise _ReplayCommitInvalidError(Locale.REPLAY_COMMIT_PULL_INVALID)
         try:
-            lines = tuple(json.loads(line) for line in pull.response_body.splitlines())
+            lines = tuple(
+                json.loads(line)
+                for line in original_pull_response_record.response_body.splitlines()
+            )
             identity = next(
                 line for line in reversed(lines)
                 if isinstance(line, dict)
@@ -1675,15 +1618,13 @@ class AiAugmentBackendStore(FrozenStrictModel):
 
     def _validated_commit_inputs(
         self,
-        record: HttpRequestLogRecord,
+        commit_request_record: BackendCommitRequestRecord,
         *,
-        initial_validation_record: BackendValidationRecord | None,
-    ) -> tuple[BackendCommitRequestRecord, HttpRequestLogRecord, NameKey, str]:
-        commit_request_record = self._current_response_record
-        if not isinstance(commit_request_record, BackendCommitRequestRecord) or (
-            commit_request_record is not record
-        ):
+        initial_validation_request_record: BackendValidationRequestRecord | None,
+    ) -> tuple[_CommitEvaluationInputs, _DetourDbValidationReads]:
+        if self._current_replayed_record is not commit_request_record:
             raise _ReplayCommitInvalidError(Locale.REPLAY_COMMIT_LINK_INVALID)
+        record = commit_request_record
         body = commit_request_record.commit_request_body
         pull = body.pull_response_record
         push = body.push_response_record
@@ -1701,11 +1642,15 @@ class AiAugmentBackendStore(FrozenStrictModel):
             raise _ReplayCommitInvalidError(Locale.REPLAY_COMMIT_LINK_INVALID)
         namekey = self._parse_name_key_header(record.request_headers.get(NAME_KEY_HEADER))
         initial_commit = (
-            commit_request_record if initial_validation_record is None
-            else initial_validation_record.validation_request_body.commit_request_record
+            commit_request_record if initial_validation_request_record is None
+            else initial_validation_request_record.validation_request_body.commit_request_record
         )
-        original_pull = initial_commit.commit_request_body.pull_response_record
-        if self._namekey_from_original_pull(original_pull) != namekey:
+        original_pull_response_record = initial_commit.commit_request_body.pull_response_record
+        assert isinstance(original_pull_response_record, PullResponseRecord)
+        if (
+            self._namekey_from_original_pull_response_record(original_pull_response_record)
+            != namekey
+        ):
             raise _ReplayCommitInvalidError(Locale.REPLAY_COMMIT_NAME_KEY_INVALID)
         filename, source_line_count = self._parse_source_key_header(
             record.request_headers.get(SOURCE_KEY_HEADER)
@@ -1713,12 +1658,109 @@ class AiAugmentBackendStore(FrozenStrictModel):
         rollout = body.codex_session_record.codex_rollout_record
         if rollout is None or source_line_count != rollout.line_count:
             raise _ReplayCommitInvalidError(Locale.REPLAY_COMMIT_SOURCE_KEY_INVALID)
-        return commit_request_record, original_pull, namekey, filename
+        assert isinstance(push, PushResponseRecord)
+        assert push.pull_response_record is pull
+        context = self.context
+        config = context.pipeline_config
+        session_id = body.codex_session_record.session_id
+        assert session_id is not None
+
+        def draw_number() -> tuple[str | None, Exception | None]:
+            try:
+                blueprint = context.configured_ai_augment_singular_outerdict()
+                if blueprint is None or blueprint.namekey != namekey:
+                    return None, None
+                assert any(
+                    blueprint is item
+                    for item in context.ai_augment_singular_outerdict_blueprints
+                )
+                return blueprint.draw_number, None
+            except Exception as exc:
+                return None, exc
+
+        def cas_rollout() -> tuple[CASCodexRolloutRecord | None, Exception | None]:
+            try:
+                result = self.rollout_cas.validated_rollout(rollout)
+                assert (
+                    result.sha256 == rollout.sha256
+                    and result.size == rollout.size
+                    and result.line_count == rollout.line_count
+                )
+                return result, None
+            except Exception as exc:
+                return None, exc
+
+        def retry_baseline_exists() -> tuple[bool | None, Exception | None]:
+            try:
+                return self._retry_baseline_exists(
+                    original_pull=original_pull_response_record,
+                    namekey=namekey,
+                    session_id=session_id,
+                ), None
+            except Exception as exc:
+                return None, exc
+
+        def retry_baseline_row() -> tuple[_RetryBaselineRow | None, Exception | None]:
+            try:
+                row = self._retry_baseline_row(original_pull_response_record.record_id)
+                return (None if row is None else _RetryBaselineRow(
+                    namekey_json=row[0],
+                    session_id_text=row[1],
+                    attempt_id_text=row[2],
+                    obligations_json=row[3],
+                )), None
+            except Exception as exc:
+                return None, exc
+
+        def applied_retry_audit_rows(
+            baseline_attempt_id: UUID,
+        ) -> tuple[tuple[_AppliedRetryAuditRow, ...] | None, Exception | None]:
+            try:
+                return tuple(
+                    _AppliedRetryAuditRow(
+                        submission_json=submission_json,
+                        assessment_json=assessment_json,
+                    )
+                    for submission_json, assessment_json in self._applied_retry_audit_rows(
+                        original_pull_record_id=original_pull_response_record.record_id,
+                        baseline_attempt_id=baseline_attempt_id,
+                    )
+                ), None
+            except Exception as exc:
+                return None, exc
+
+        def output_identity_exists() -> tuple[bool | None, Exception | None]:
+            try:
+                return self._codex_output_identity_exists({
+                    KTP_FILENAME_COL: filename,
+                    KTP_FRAGMENT_COL: rollout.line_count,
+                }), None
+            except Exception as exc:
+                return None, exc
+
+        inputs = _CommitEvaluationInputs(
+            original_pull_response_record=original_pull_response_record,
+            namekey=namekey,
+            config_facts=_CommitConfigFacts(
+                timezone_name=config.timezone,
+                sample_seed=config.sample_seed,
+                codex_match_version=config.match_rule_version.codex_match,
+            ),
+            draw_number=draw_number,
+            cas_codex_rollout_record=cas_rollout,
+        )
+        assert inputs.original_pull_response_record is original_pull_response_record
+        return inputs, _DetourDbValidationReads(
+            retry_baseline_exists=retry_baseline_exists,
+            retry_baseline_row=retry_baseline_row,
+            applied_retry_audit_rows=applied_retry_audit_rows,
+            output_identity_exists=output_identity_exists,
+        )
 
     def _cursor_commit_validation(
         self,
-    ) -> tuple[BackendCommitRequestRecord | None, BackendValidationRecord | None]:
-        current = self.current_replayed_response_record
+    ) -> tuple[BackendCommitRequestRecord | None, BackendValidationRequestRecord | None]:
+        current = self.current_replayed_record
         validation = self._validation_from_cursor()
         commit = (
             current if isinstance(current, BackendCommitRequestRecord) else
@@ -1731,14 +1773,14 @@ class AiAugmentBackendStore(FrozenStrictModel):
         value: str,
         *,
         commit_http_record: HttpRequestLogRecord,
-    ) -> BackendValidationRecord:
+    ) -> BackendValidationRequestRecord:
         payload = json.loads(value)
         if not isinstance(payload, dict) or set(payload) != {
             AUTHORITATIVE_ATTEMPT_VALIDATION_ID_KEY
         }:
             raise _ReplayProjectionConflictError
         validation_id = UUID(payload[AUTHORITATIVE_ATTEMPT_VALIDATION_ID_KEY])
-        validation = BackendValidationRecord.from_http_request_log_record(
+        validation = BackendValidationRequestRecord.from_http_request_log_record(
             self._http_record(validation_id)
         )
         if (
@@ -1756,21 +1798,31 @@ class AiAugmentBackendStore(FrozenStrictModel):
         from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.submission_mixin import (  # noqa: E501
             submission_http_context,
         )
-        from src.detours.detour_ai_augment.protected.src.backend.helpers.post_commit_validation import (  # noqa: E501
-            PostCommitValidation,
+        validation_request_record = BackendValidationRequestRecord.from_http_request_log_record(
+            record
         )
-
-        validation_record = BackendValidationRecord.from_http_request_log_record(record)
-        body = validation_record.validation_request_body
+        body = validation_request_record.validation_request_body
         ordinal, _ = self._http_record_with_ordinal(record.record_id)
         commit_ordinal, commit = self._http_record_with_ordinal(
             body.commit_request_record.record_id
         )
+        typed_commit = self._current_replayed_record
         if (
-            commit_ordinal >= ordinal
+            not isinstance(typed_commit, BackendCommitRequestRecord)
+            or typed_commit.record_id != commit.record_id
+            or commit_ordinal >= ordinal
             or record.request_headers != commit.request_headers
             or commit.model_dump() != body.commit_request_record.model_dump()
-            or self._backend_commit_request_record(commit) != body.commit_request_record
+            or typed_commit.http_request_log_record.model_dump(mode="json")
+            != commit.model_dump(mode="json")
+            or body.commit_request_record.commit_request_body.serialize()
+            != typed_commit.commit_request_body.serialize()
+            or body.commit_request_record.commit_request_body.pull_response_record.model_dump(
+                mode="json"
+            ) != typed_commit.commit_request_body.pull_response_record.model_dump(mode="json")
+            or body.commit_request_record.commit_request_body.push_response_record.model_dump(
+                mode="json"
+            ) != typed_commit.commit_request_body.push_response_record.model_dump(mode="json")
         ):
             raise ReplayInputMissing(Locale.VALIDATION_COMMIT_LINK_INVALID)
         initial = body.initial_validation_request_record
@@ -1778,12 +1830,6 @@ class AiAugmentBackendStore(FrozenStrictModel):
             initial_ordinal, persisted = self._http_record_with_ordinal(initial.record_id)
             if initial_ordinal >= commit_ordinal or persisted.model_dump() != initial.model_dump():
                 raise ValueError(Locale.VALIDATION_INITIAL_LINK_INVALID)
-        typed_commit = self._current_response_record
-        if (
-            not isinstance(typed_commit, BackendCommitRequestRecord)
-            or typed_commit.record_id != commit.record_id
-        ):
-            raise ReplayInputMissing(Locale.VALIDATION_COMMIT_LINK_INVALID)
         initial_ref = self._initial_validation_for_commit(typed_commit)
         if (initial is None) != (initial_ref is None) or (
             initial is not None
@@ -1823,8 +1869,15 @@ class AiAugmentBackendStore(FrozenStrictModel):
             inputs.append(http_record)
         http = ModelHttpInterceptor.from_records(inputs)
         with submission_http_context(http):
-            evaluated, projection = PostCommitValidation.evaluate_commit(
-                self, typed_commit, initial_validation_record=initial_ref,
+            evaluation_inputs, db_reads = self._validated_commit_inputs(
+                typed_commit,
+                initial_validation_request_record=initial_ref,
+            )
+            evaluated, projection = evaluate_commit(
+                typed_commit,
+                initial_validation_request_record=initial_ref,
+                inputs=evaluation_inputs,
+                db_reads=db_reads,
             )
         assert projection.commit_request_record is typed_commit
         observed = body.post_commit_validation
@@ -1844,7 +1897,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
         *,
         accepted: bool,
     ) -> None:
-        assert commit is self._current_response_record
+        assert commit is self._current_replayed_record
         assert projection.commit_request_record is commit
         index = projection.rollout_index
         if index is not None:
@@ -1974,7 +2027,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
     def _retry_baseline_exists(
         self,
         *,
-        original_pull: HttpRequestLogRecord,
+        original_pull: PullResponseRecord,
         namekey: NameKey,
         session_id: UUID,
     ) -> bool:
@@ -2505,7 +2558,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
     def _check_run_outcome_references(
         self,
         commit: BackendCommitRequestRecord | None,
-        validation: BackendValidationRecord | None,
+        validation: BackendValidationRequestRecord | None,
         *,
         namekey: NameKey,
         session_id: UUID,
@@ -2562,7 +2615,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
         *,
         namekey: NameKey | None,
         session_id: UUID | None,
-        validation: BackendValidationRecord | None,
+        validation: BackendValidationRequestRecord | None,
     ) -> str | None:
         if namekey is None or request.namekey is None or request.namekey != namekey:
             return Locale.RUN_OUTCOME_NAMEKEY_MISMATCH
@@ -2584,7 +2637,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
     def _run_outcome_code(
         path: str,
         session: CodexSessionRecord,
-        validation: BackendValidationRecord | None,
+        validation: BackendValidationRequestRecord | None,
     ) -> HTTPStatus:
         if (
             session.session_id is None
@@ -2603,7 +2656,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
         return HTTPStatus.OK
 
     def _cursor_http_ids(self) -> tuple[UUID | None, UUID | None]:
-        current = self.current_replayed_response_record
+        current = self.current_replayed_record
         if isinstance(current, PullResponseRecord):
             return current.record_id, None
         if isinstance(current, PushResponseRecord):
@@ -2612,7 +2665,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
         if isinstance(current, BackendCommitRequestRecord):
             body = current.commit_request_body
             return body.pull_response_record.record_id, body.push_response_record.record_id
-        if isinstance(current, BackendValidationRecord):
+        if isinstance(current, BackendValidationRequestRecord):
             body = current.validation_request_body.commit_request_record.commit_request_body
             return body.pull_response_record.record_id, body.push_response_record.record_id
         if isinstance(current, RunOutcomeResponseRecord):
@@ -2629,7 +2682,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
     ) -> tuple[
         HTTPStatus, Mapping[str, str] | None,
         UUID | None, UUID | None, UUID | None, UUID | None,
-        BackendValidationRecord | None,
+        BackendValidationRequestRecord | None,
     ]:
         context = self.context
         commit, validation = self._cursor_commit_validation()
@@ -2689,7 +2742,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
                 or body.attempt_record != record
             ):
                 raise ReplayInputMissing(Locale.RUN_OUTCOME_REPLAY_MISMATCH)
-            validation = BackendValidationRecord.from_http_request_log_record(record)
+            validation = BackendValidationRequestRecord.from_http_request_log_record(record)
         elif body.attempt_record is not None:
             raise ReplayInputMissing(Locale.RUN_OUTCOME_REPLAY_MISMATCH)
         # A rejected client exchange is authoritative history, never derived acceptance.
@@ -2768,7 +2821,9 @@ class AiAugmentBackendStore(FrozenStrictModel):
             if linked is None or linked[0] is None:
                 raise ReplayInputMissing(Locale.RUN_OUTCOME_ACCEPTED_ROW_VALIDATION_MISSING)
             validation_ordinal, http_validation = self._http_record_with_ordinal(UUID(linked[0]))
-            validation = BackendValidationRecord.from_http_request_log_record(http_validation)
+            validation = BackendValidationRequestRecord.from_http_request_log_record(
+                http_validation
+            )
             body = validation.validation_request_body
             if (
                 body.commit_request_record.record_id != commit_id
@@ -2920,7 +2975,7 @@ def _initialize_backend_store(
         store._rebuild_from_log(
             context, reset_confirmed=confirmed, confirm_replay=confirm_replay,
         )
-    store._reset_current_response_record()
+    store._reset_current_replayed_record()
     try:
         store._loop = asyncio.get_running_loop()
     except RuntimeError:

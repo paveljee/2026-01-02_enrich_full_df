@@ -40,11 +40,11 @@ from src.detours.detour_ai_augment.protected.src.backend import api, ipc
 from src.detours.detour_ai_augment.protected.src.backend.helpers import (
     aivm_audit,
     codex_parse,
-    post_commit_validation,
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers import vars as backend_vars
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models import (
     ai_augment_detour_db,
+    post_commit_validation,
     pydantic_to_paste,
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_augment_config import (  # noqa: E501
@@ -77,9 +77,6 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.sub
     Submission,
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
-from src.detours.detour_ai_augment.protected.src.backend.helpers.post_commit_validation import (  # noqa: E501
-    PostCommitValidation,
-)
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     AI_AUGMENT_COLUMNS,
     AI_AUGMENT_EVIDENCE_COLUMNS,
@@ -166,7 +163,7 @@ from src.detours.detour_ai_augment.src.backend.helpers.data_models.response_reco
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.validation_request import (  # noqa: E501
     VALIDATE_PATH,
-    BackendValidationRecord,
+    BackendValidationRequestRecord,
     ValidationRequestBody,
 )
 from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models import (
@@ -370,8 +367,8 @@ def retry_attempt_records(
         pull_response_record=pull_record,
     )
     commit_request_record = _synthetic_commit_request_record(
-        pull_record=pull_record,
-        push_record=push_record,
+        pull_response_record=pull_record,
+        push_response_record=push_record,
         session_id=session_id,
         rollout=CodexRolloutRecord(
             size=3,
@@ -402,13 +399,58 @@ def process_retry_attempt_for_test(
         attempt_id=attempt_id,
     )
     store = store_for_connection(conn)
+    filename, _ = source_key_from_header_value(
+        commit_request_record.request_headers[SOURCE_KEY_HEADER]
+    )
+    rollout = commit_request_record.commit_request_body.codex_session_record.codex_rollout_record
+    assert rollout is not None
+
+    def baseline_row() -> tuple[post_commit_validation._RetryBaselineRow | None, None]:
+        row = store._retry_baseline_row(original_pull.record_id)
+        return (None if row is None else post_commit_validation._RetryBaselineRow(
+            namekey_json=row[0],
+            session_id_text=row[1],
+            attempt_id_text=row[2],
+            obligations_json=row[3],
+        )), None
+
+    def audit_rows(
+        baseline_attempt_id: UUID,
+    ) -> tuple[tuple[post_commit_validation._AppliedRetryAuditRow, ...], None]:
+        return tuple(
+            post_commit_validation._AppliedRetryAuditRow(
+                submission_json=submission_json,
+                assessment_json=assessment_json,
+            )
+            for submission_json, assessment_json in store._applied_retry_audit_rows(
+                original_pull_record_id=original_pull.record_id,
+                baseline_attempt_id=baseline_attempt_id,
+            )
+        ), None
+
+    db_reads = post_commit_validation._DetourDbValidationReads(
+        retry_baseline_exists=lambda: (
+            store._retry_baseline_exists(
+                original_pull=original_pull,
+                namekey=namekey,
+                session_id=session_id,
+            ), None
+        ),
+        retry_baseline_row=baseline_row,
+        applied_retry_audit_rows=audit_rows,
+        output_identity_exists=lambda: (
+            store._codex_output_identity_exists({
+                KTP_FILENAME_COL: filename,
+                KTP_FRAGMENT_COL: rollout.line_count,
+            }), None
+        ),
+    )
     violations, projection = post_commit_validation._process_retry_attempt(
-        store,
-        original_pull=original_pull,
         commit_request_record=commit_request_record,
         namekey=namekey,
         submission_payload=submission_payload,
         assessment=assessment,
+        db_reads=db_reads,
     )
     assert projection.commit_request_record is commit_request_record
     store._project_retry_attempt(
@@ -1885,12 +1927,11 @@ def assert_captured_operator_push_contour(
         assert len(pushes) == len(commits) == 2
         assert isinstance(pushes[-1].request_body, str)
         assert pushes[-1].request_body == read_text(accepted_push_path)
-        records_by_id = {record.record_id: record for record in authoritative_records}
         assert commits[-1].request_body is not None
-        accepted_commit = CommitRequestBody.from_serialized_json(
-            commits[-1].request_body,
-            resolve_http_record=records_by_id.__getitem__,
-        )
+        accepted_commit_record, _ = store._cursor_commit_validation()
+        assert accepted_commit_record is not None
+        assert accepted_commit_record.record_id == commits[-1].record_id
+        accepted_commit = accepted_commit_record.commit_request_body
         assert accepted_commit.push_response_record.record_id == pushes[-1].record_id
         assert accepted_commit.pull_response_record.record_id == next(
             record.record_id
@@ -1915,7 +1956,7 @@ def assert_captured_operator_push_contour(
             record for record in authoritative_records if record.path == VALIDATE_PATH
         )
         assert len(validation_records) == 2
-        accepted_attempt = BackendValidationRecord.from_http_request_log_record(
+        accepted_attempt = BackendValidationRequestRecord.from_http_request_log_record(
             validation_records[-1]
         )
         assert (
@@ -2125,18 +2166,23 @@ def test_synthetic_commit_matches_the_readme_contour_exactly(tmp_path: Path) -> 
     pull_record_id = UUID("019d0000-0000-7000-8000-000000000001")
     push_record_id = UUID("019d0000-0000-7000-8000-000000000002")
     session_id = UUID("019d0000-0000-7000-8000-000000000003")
-    pull_record = persisted_http_record(
-        record_id=pull_record_id,
-        method=HTTP_GET_METHOD,
-        path=PULL_PATH,
-        response_code=status.HTTP_200_OK,
+    pull_record = PullResponseRecord.from_http_request_log_record(
+        http_request_log_record=persisted_http_record(
+            record_id=pull_record_id,
+            method=HTTP_GET_METHOD,
+            path=PULL_PATH,
+            response_code=status.HTTP_200_OK,
+        ),
     )
-    push_record = persisted_http_record(
-        record_id=push_record_id,
-        method=HTTP_POST_METHOD,
-        path=PUSH_PATH,
-        response_code=status.HTTP_202_ACCEPTED,
-        request_body="{}",
+    push_record = PushResponseRecord.from_http_request_log_record(
+        http_request_log_record=persisted_http_record(
+            record_id=push_record_id,
+            method=HTTP_POST_METHOD,
+            path=PUSH_PATH,
+            response_code=status.HTTP_202_ACCEPTED,
+            request_body="{}",
+        ),
+        pull_response_record=pull_record,
     )
     report = (
         b".\n\xe2\x94\x94\xe2\x94\x80\xe2\x94\x80 OK          "
@@ -2145,8 +2191,8 @@ def test_synthetic_commit_matches_the_readme_contour_exactly(tmp_path: Path) -> 
     )
 
     record = _synthetic_commit_request_record(
-        pull_record=pull_record,
-        push_record=push_record,
+        pull_response_record=pull_record,
+        push_response_record=push_record,
         session_id=session_id,
         rollout=rollout,
         rollout_filename=TEST_ROLLOUT_FILENAME,
@@ -2206,18 +2252,23 @@ def test_commit_request_body_contract_is_strict_canonical_and_losslessly_resolve
     pull_record_id = UUID("019d0000-0000-7000-8000-000000000001")
     push_record_id = UUID("019d0000-0000-7000-8000-000000000002")
     session_id = UUID("019d0000-0000-7000-8000-000000000003")
-    pull_record = persisted_http_record(
-        record_id=pull_record_id,
-        method=HTTP_GET_METHOD,
-        path=PULL_PATH,
-        response_code=status.HTTP_200_OK,
+    pull_record = PullResponseRecord.from_http_request_log_record(
+        http_request_log_record=persisted_http_record(
+            record_id=pull_record_id,
+            method=HTTP_GET_METHOD,
+            path=PULL_PATH,
+            response_code=status.HTTP_200_OK,
+        ),
     )
-    push_record = persisted_http_record(
-        record_id=push_record_id,
-        method=HTTP_POST_METHOD,
-        path=PUSH_PATH,
-        response_code=status.HTTP_202_ACCEPTED,
-        request_body="{}",
+    push_record = PushResponseRecord.from_http_request_log_record(
+        http_request_log_record=persisted_http_record(
+            record_id=push_record_id,
+            method=HTTP_POST_METHOD,
+            path=PUSH_PATH,
+            response_code=status.HTTP_202_ACCEPTED,
+            request_body="{}",
+        ),
+        pull_response_record=pull_record,
     )
     body: dict[str, Any] = {
         "pull_record_id": str(pull_record_id),
@@ -2551,14 +2602,14 @@ def test_failed_post_commit_work_projects_without_conditional_rollback(
 
     with api_store._writable(api_runtime):
         api_store._append_authoritative_record(pull_record)
-        replayed_pull = api_store.current_replayed_response_record
+        replayed_pull = api_store.current_replayed_record
         assert isinstance(replayed_pull, PullResponseRecord)
         api_store._append_authoritative_record(push_record)
-        replayed_push = api_store.current_replayed_response_record
+        replayed_push = api_store.current_replayed_record
         assert isinstance(replayed_push, PushResponseRecord)
         record = _synthetic_commit_request_record(
-            pull_record=replayed_pull,
-            push_record=replayed_push,
+            pull_response_record=replayed_pull,
+            push_response_record=replayed_push,
             session_id=UUID("019d0000-0000-7000-8000-000000000063"),
             rollout=CodexRolloutRecord(
                 sha256=hashlib.sha256(rollout_path.read_bytes()).hexdigest(),
@@ -2570,10 +2621,16 @@ def test_failed_post_commit_work_projects_without_conditional_rollback(
             namekey=TEST_NAMEKEY_MODEL,
         )
         api_store._append_authoritative_record(record)
-        replayed_commit = api_store.current_replayed_response_record
+        replayed_commit = api_store.current_replayed_record
         assert isinstance(replayed_commit, BackendCommitRequestRecord)
-        failed_validation, _ = PostCommitValidation.evaluate_commit(
-            api_store, replayed_commit, initial_validation_record=None,
+        inputs, db_reads = api_store._validated_commit_inputs(
+            replayed_commit, initial_validation_request_record=None,
+        )
+        failed_validation, _ = post_commit_validation.evaluate_commit(
+            replayed_commit,
+            initial_validation_request_record=None,
+            inputs=inputs,
+            db_reads=db_reads,
         )
         assert failed_validation.result is BackendLifecycle.CONFIGURATION_ERROR
         validation_record = ValidationRequestBody(
@@ -4776,7 +4833,9 @@ def test_audit_ssh_uses_pinned_identity_and_counts_physical_lines(
     assert command[-1] == (f"{api.AUDIT_READ_ROLLOUT_COMMAND} {TEST_ROLLOUT_RELATIVE_PATH}")
     assert "shell" not in captured["kwargs"]
     assert archived.line_count == 2
-    assert runtime.pipeline_config.rollout_cas.validated_rollout(archived) == (
+    validated = runtime.pipeline_config.rollout_cas.validated_rollout(archived)
+    assert validated.model_dump(exclude={"cas_path"}) == archived.model_dump()
+    assert validated.cas_path == (
         runtime.pipeline_config.rollout_cas.path
         / archived.sha256[:2] / archived.sha256[2:4] / archived.sha256
     )
@@ -5575,14 +5634,14 @@ def test_push_acceptance_changes_state_before_post_commit_work(
     monkeypatch.setattr(api, "BACKEND_SESSION_ID", TEST_SESSION_ID)
     with api_store._writable(api_runtime):
         api_store._append_authoritative_record(pull_record)
-        captured_pull = api_store.current_replayed_response_record
+        captured_pull = api_store.current_replayed_record
         assert isinstance(captured_pull, PullResponseRecord)
         request = requests.Request("POST", "http://invalid/push", data=b"{}").prepare()
         response = api._push_response(request, api_store, captured_pull)
         assert response.status_code == HTTPStatus.ACCEPTED
         assert response.headers[api.LOCATION_HEADER] == PULL_PATH
         assert api.BACKEND_LIFECYCLE is BackendLifecycle.BUSY
-        assert api_store.current_replayed_response_record is captured_pull
+        assert api_store.current_replayed_record is captured_pull
         duplicate = api._push_response(request, api_store, captured_pull)
         assert duplicate.status_code == HTTPStatus.CONFLICT
         assert duplicate.headers[api.LOCATION_HEADER] == PULL_PATH
@@ -5599,14 +5658,14 @@ def test_retry_push_requires_a_persisted_current_pull_before_acceptance(
         await api.authoritative_pull(
             requests.Request("GET", "http://invalid/pull").prepare(), api_store,
         )
-        initial = api_store.current_replayed_response_record
+        initial = api_store.current_replayed_record
         assert isinstance(initial, PullResponseRecord)
         request = requests.Request("POST", "http://invalid/push", data=b"{}").prepare()
         pushed = await api.authoritative_push(request, api_store)
         assert pushed.status_code == HTTPStatus.ACCEPTED
         await asyncio.gather(*tuple(api.AUTHORITATIVE_BACKGROUND_TASKS))
-        validation = api_store.current_replayed_response_record
-        assert isinstance(validation, BackendValidationRecord)
+        validation = api_store.current_replayed_record
+        assert isinstance(validation, BackendValidationRequestRecord)
         commit = validation.validation_request_body.commit_request_record
         assert api.BACKEND_LIFECYCLE is BackendLifecycle.RETRY
         premature = api._push_response(request, api_store, None)
@@ -5614,14 +5673,14 @@ def test_retry_push_requires_a_persisted_current_pull_before_acceptance(
         assert premature.headers[api.LOCATION_HEADER] == PULL_PATH
         assert premature.json() == {"detail": Locale.CONFIGURATION_ERROR_DETAIL}
         assert api.BACKEND_LIFECYCLE is BackendLifecycle.RETRY
-        assert api_store.current_replayed_response_record is validation
+        assert api_store.current_replayed_record is validation
         assert commit.commit_request_body.pull_response_record is initial
         assert Locale.PUSH_CURRENT_PULL_REQUIRED_LOG in caplog.messages
         pulled = await api.authoritative_pull(
             requests.Request("GET", "http://invalid/pull").prepare(), api_store,
         )
         assert pulled.status_code == HTTPStatus.OK
-        persisted_pull = api_store.current_replayed_response_record
+        persisted_pull = api_store.current_replayed_record
         assert isinstance(persisted_pull, PullResponseRecord)
         assert persisted_pull is not initial
         assert persisted_pull.validation_request_record is validation
@@ -5632,7 +5691,7 @@ def test_retry_push_requires_a_persisted_current_pull_before_acceptance(
         assert accepted.status_code == HTTPStatus.ACCEPTED
         assert accepted.headers[api.LOCATION_HEADER] == PULL_PATH
         assert BackendLifecycle(api.BACKEND_LIFECYCLE) is BackendLifecycle.BUSY
-        assert api_store.current_replayed_response_record is persisted_pull
+        assert api_store.current_replayed_record is persisted_pull
     with api_store._writable(api_runtime):
         threaded_loop.run(exercise())
 
@@ -5657,7 +5716,7 @@ def test_push_configuration_failures_remain_internal_errors(
     monkeypatch.setattr(api, "BACKEND_SESSION_ID", session_id)
     with api_store._writable(api_runtime):
         api_store._append_authoritative_record(pull_record)
-        captured_pull = api_store.current_replayed_response_record
+        captured_pull = api_store.current_replayed_record
         assert isinstance(captured_pull, PullResponseRecord)
         response = api._push_response(
             requests.Request("POST", "http://invalid/push", data=b"{}").prepare(),
@@ -5666,7 +5725,7 @@ def test_push_configuration_failures_remain_internal_errors(
         assert response.status_code == HTTPStatus.INTERNAL_SERVER_ERROR
         assert api.LOCATION_HEADER not in response.headers
         assert api.BACKEND_LIFECYCLE is workflow_status
-        assert api_store.current_replayed_response_record is captured_pull
+        assert api_store.current_replayed_record is captured_pull
 
 
 def test_accepted_push_is_committed_only_after_its_public_record(
@@ -5696,7 +5755,7 @@ def test_accepted_push_is_committed_only_after_its_public_record(
         await api.authoritative_pull(
             requests.Request("GET", "http://invalid/pull").prepare(), api_store,
         )
-        initial_pull = api_store.current_replayed_response_record
+        initial_pull = api_store.current_replayed_record
         assert isinstance(initial_pull, PullResponseRecord)
         try:
             response = await api.authoritative_push(
@@ -5710,7 +5769,7 @@ def test_accepted_push_is_committed_only_after_its_public_record(
             assert await asyncio.to_thread(entered.wait, 5)
             busy_lifecycle = api.BACKEND_LIFECYCLE
             assert busy_lifecycle is BackendLifecycle.BUSY
-            accepted_push = api_store.current_replayed_response_record
+            accepted_push = api_store.current_replayed_record
             assert isinstance(accepted_push, PushResponseRecord)
             assert accepted_push.pull_response_record is initial_pull
             records = AiAugmentBackendStore._authoritative_log_records(
@@ -5747,8 +5806,8 @@ def test_accepted_push_is_committed_only_after_its_public_record(
             == completed_records[1].record_id
         )
         assert committed.commit_request_body.codex_session_record.codex_rollout_record == rollout
-        validation = api_store.current_replayed_response_record
-        assert isinstance(validation, BackendValidationRecord)
+        validation = api_store.current_replayed_record
+        assert isinstance(validation, BackendValidationRequestRecord)
         assert (
             validation.validation_request_body.commit_request_record.model_dump_json()
             == committed.model_dump_json()
@@ -5776,7 +5835,7 @@ def test_persisted_push_becomes_latest_run_outcome_snapshot_provenance(
         await api.authoritative_pull(
             requests.Request("GET", "http://invalid/pull").prepare(), api_store,
         )
-        pull = api_store.current_replayed_response_record
+        pull = api_store.current_replayed_record
         assert isinstance(pull, PullResponseRecord)
         response = await api.authoritative_push(
             requests.Request("POST", "http://invalid/push", json=valid_submission_body()).prepare(),
@@ -5784,8 +5843,8 @@ def test_persisted_push_becomes_latest_run_outcome_snapshot_provenance(
         )
         assert response.status_code == HTTPStatus.ACCEPTED
         await asyncio.gather(*tuple(api.AUTHORITATIVE_BACKGROUND_TASKS))
-        validation = api_store.current_replayed_response_record
-        assert isinstance(validation, BackendValidationRecord)
+        validation = api_store.current_replayed_record
+        assert isinstance(validation, BackendValidationRequestRecord)
         commit = validation.validation_request_body.commit_request_record
         push = commit.commit_request_body.push_response_record
         assert isinstance(push, PushResponseRecord)
@@ -5820,9 +5879,9 @@ def test_persisted_push_becomes_latest_run_outcome_snapshot_provenance(
             HTTPStatus.OK if etag == "matching" else HTTPStatus.BAD_REQUEST
         )
         if etag == "matching":
-            assert api_store.current_replayed_response_record is response_record
+            assert api_store.current_replayed_record is response_record
         else:
-            assert api_store.current_replayed_response_record is validation
+            assert api_store.current_replayed_record is validation
         body = response_record._body()
         assert body.push_record_id == push.record_id
         assert body.pull_record_id == pull.record_id
@@ -5975,7 +6034,7 @@ def test_post_commit_result_is_exposed_only_by_follow_up_pull(
         evidence[0]["excerpt"] = "fabricated excerpt"
 
     with api_store._writable(api_runtime):
-        async def exercise() -> tuple[requests.Response, BackendValidationRecord]:
+        async def exercise() -> tuple[requests.Response, BackendValidationRequestRecord]:
             api_store._loop = asyncio.get_running_loop()
             await api.authoritative_pull(
                 requests.Request("GET", "http://invalid/pull").prepare(), api_store,
@@ -5986,8 +6045,8 @@ def test_post_commit_result_is_exposed_only_by_follow_up_pull(
             )
             assert push_response.status_code == HTTPStatus.ACCEPTED
             await asyncio.gather(*tuple(api.AUTHORITATIVE_BACKGROUND_TASKS))
-            validation_record = api_store.current_replayed_response_record
-            assert isinstance(validation_record, BackendValidationRecord)
+            validation_record = api_store.current_replayed_record
+            assert isinstance(validation_record, BackendValidationRequestRecord)
             pull_response = await api.authoritative_pull(
                 requests.Request("GET", "http://invalid/pull").prepare(), api_store,
             )
@@ -6362,7 +6421,9 @@ def test_cas_sharded_blob_verification(tmp_path: Path, changed: str) -> None:
     path.parent.mkdir(parents=True)
     path.write_bytes(content)
     reference = CodexRolloutRecord(sha256=digest, size=len(content), line_count=2)
-    assert cas.validated_rollout(reference) == path
+    validated = cas.validated_rollout(reference)
+    assert validated.model_dump(exclude={"cas_path"}) == reference.model_dump()
+    assert validated.cas_path == path
     if changed == "contents":
         path.write_bytes(b"two\none\n")
     elif changed == "size":
@@ -6429,7 +6490,9 @@ def test_cas_copy_shards_are_checked_and_durably_published(
     else:
         reference = cas.copy_rollout(rollout_relative_path=PurePosixPath("rollout.jsonl"),
                                      ssh_target="unused", ssh_options=())
-        assert cas.validated_rollout(reference) == path
+        validated = cas.validated_rollout(reference)
+        assert validated.model_dump(exclude={"cas_path"}) == reference.model_dump()
+        assert validated.cas_path == path
         assert path.read_bytes() == content and reference.line_count == 2
         assert synced == [(p.stat().st_dev, p.stat().st_ino)
                           for p in (path, path.parent, path.parent.parent, cas.path)]

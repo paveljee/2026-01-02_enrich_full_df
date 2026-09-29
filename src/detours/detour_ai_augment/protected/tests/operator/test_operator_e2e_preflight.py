@@ -16,7 +16,7 @@ from uuid import uuid7
 
 import pytest
 
-from src.detours.detour_ai_augment.protected.src.backend.helpers.post_commit_validation import (  # noqa: E501
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.post_commit_validation import (  # noqa: E501
     PostCommitValidation,
 )
 from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helpers.locale import (
@@ -36,7 +36,7 @@ from src.detours.detour_ai_augment.src.backend.helpers.data_models.lifecycle imp
     BackendLifecycle,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.validation_request import (
-    BackendValidationRecord,
+    BackendValidationRequestRecord,
     ValidationRequestBody,
 )
 from src.detours.detour_ai_augment.src.control_centre.dashboard import ui as control_ui
@@ -86,7 +86,7 @@ def _workflow_http_records(
 ) -> tuple[HttpRequestLogRecord, ...]:
     session_id = uuid7()
     records: list[HttpRequestLogRecord] = []
-    initial: BackendValidationRecord | None = None
+    initial: BackendValidationRequestRecord | None = None
     for index in range(2 if with_initial else 1):
         pull, commit = api_fixtures.retry_attempt_records(
             original_pull_record_id=uuid7(), session_id=session_id,
@@ -159,7 +159,7 @@ def test_operator_http_history_rejects_corrupt_or_unreferenced_records(
     records = list(_workflow_http_records(
         provider_targets=(("api.openalex.org", "/institutions/I97018004"),),
     ))
-    validation = BackendValidationRecord.from_http_request_log_record(records[-1])
+    validation = BackendValidationRequestRecord.from_http_request_log_record(records[-1])
     body = validation.validation_request_body
     assert body.initial_validation_request_record is not None
     provider = body.openalex_ror_records[0]

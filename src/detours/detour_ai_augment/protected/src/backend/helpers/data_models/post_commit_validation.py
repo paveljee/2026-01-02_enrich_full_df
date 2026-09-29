@@ -99,14 +99,10 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     NOT_REPORTED_VALUE,
     ROLLOUT_FILENAME_PREFIX,
     ROLLOUT_FILENAME_SUFFIX,
+    SOURCE_KEY_HEADER,
     STANDARDIZED_SUBMISSION_TYPE,
     SUBMISSION_TYPE,
     TEXT_ENCODING,
-)
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.commit_request import (
-    AppendwatchReportRecord,
-    BackendCommitRequestRecord,
-    CodexRolloutRecord,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.lifecycle import (
     BackendLifecycle,
@@ -119,14 +115,12 @@ from src.detours.detour_ai_augment.src.shared import (
     AppendwatchReportError,
     parse_appendwatch_report,
     require_nonblank_text,
+    source_key_from_header_value,
 )
-from src.helpers.architecture import FrozenStrictModel, implements
+from src.helpers.architecture import FrozenStrictModel, LazyResultFactory, implements
 from src.helpers.data_models import (
     FragmentType,
     NameKey,
-)
-from src.helpers.data_models.http_request_log import (
-    HttpRequestLogRecord,
 )
 from src.helpers.vars import (
     DRAW_LABEL,
@@ -139,14 +133,8 @@ from src.helpers.vars import (
 )
 
 if TYPE_CHECKING:
-    from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_backend_store import (  # noqa: E501
-        AiAugmentBackendStore,
-    )
-    from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_singular_outer_dict import (  # noqa: E501
-        AiAugmentSingularOuterDict,
-    )
     from src.detours.detour_ai_augment.src.backend.helpers.data_models.validation_request import (  # noqa: E501
-        BackendValidationRecord,
+        BackendValidationRequestRecord,
     )
 
 logger = logging.getLogger(__name__)
@@ -158,6 +146,41 @@ class _PushValidationError(RuntimeError):
 
 class _ValidationPreparationError(RuntimeError):
     pass
+
+
+class _CommitConfigFacts(FrozenStrictModel):
+    timezone_name: StrictStr
+    sample_seed: int
+    codex_match_version: int
+
+
+class _CommitEvaluationInputs(FrozenStrictModel):
+    original_pull_response_record: PullResponseRecord
+    namekey: NameKey
+    config_facts: _CommitConfigFacts
+    draw_number: LazyResultFactory[[], str, Exception]
+    cas_codex_rollout_record: LazyResultFactory[[], CASCodexRolloutRecord, Exception]
+
+
+class _RetryBaselineRow(FrozenStrictModel):
+    namekey_json: StrictStr
+    session_id_text: StrictStr
+    attempt_id_text: StrictStr
+    obligations_json: StrictStr
+
+
+class _AppliedRetryAuditRow(FrozenStrictModel):
+    submission_json: StrictStr
+    assessment_json: StrictStr
+
+
+class _DetourDbValidationReads(FrozenStrictModel):
+    retry_baseline_exists: LazyResultFactory[[], bool, Exception]
+    retry_baseline_row: LazyResultFactory[[], _RetryBaselineRow, Exception]
+    applied_retry_audit_rows: LazyResultFactory[
+        [UUID], tuple[_AppliedRetryAuditRow, ...], Exception
+    ]
+    output_identity_exists: LazyResultFactory[[], bool, Exception]
 
 
 RETRY_EVIDENCE_SUBMISSION_EXAMPLE = L_FEI_FEI_RETRY_FIXTURE.submission.model_dump(
@@ -365,11 +388,6 @@ class _MultipleEvidenceMatches(_PushValidationError):
     def __init__(self, excerpt: str) -> None:
         self.excerpt = excerpt
         super().__init__(Locale.MULTIPLE_EVIDENCE_MATCHES_TEMPLATE.format(excerpt=excerpt))
-
-
-class _ArchivedFile(FrozenStrictModel):
-    codex_rollout_record: CodexRolloutRecord
-    codex_rollout_path: Path
 
 
 class _RolloutRecordLine(FrozenStrictModel):
@@ -1337,23 +1355,25 @@ def _assessment_from_audit(
 
 
 def _derive_retry_obligations(
-    store: AiAugmentBackendStore,
     *,
     baseline_json: str,
     baseline_attempt_id: UUID,
-    original_pull: HttpRequestLogRecord,
+    db_reads: _DetourDbValidationReads,
 ) -> _RetryObligations:
     try:
         obligations = _RetryObligations.model_validate_json(baseline_json)
-        rows = store._applied_retry_audit_rows(
-            original_pull_record_id=original_pull.record_id,
-            baseline_attempt_id=baseline_attempt_id,
-        )
-        for submission_json, assessment_json in rows:
-            submission = StandardizedSubmission.model_validate_with_http_records(submission_json)
+        rows, error = db_reads.applied_retry_audit_rows(baseline_attempt_id)
+        if error is not None:
+            assert rows is None
+            raise error
+        assert rows is not None
+        for row in rows:
+            submission = StandardizedSubmission.model_validate_with_http_records(
+                row.submission_json
+            )
             assessment = _assessment_from_audit(
                 submission,
-                _EvidenceAttemptAudit.model_validate_json(assessment_json),
+                _EvidenceAttemptAudit.model_validate_json(row.assessment_json),
             )
             obligations, violations = _apply_retry_obligations(
                 submission,
@@ -1368,13 +1388,12 @@ def _derive_retry_obligations(
 
 
 def _process_retry_attempt(
-    store: AiAugmentBackendStore,
     *,
-    original_pull: HttpRequestLogRecord,
     commit_request_record: BackendCommitRequestRecord,
     namekey: NameKey,
     submission_payload: Submission | StandardizedSubmission,
     assessment: _EvidenceAssessment,
+    db_reads: _DetourDbValidationReads,
 ) -> tuple[tuple[str, ...], _ValidationProjection]:
     session_id = commit_request_record.commit_request_body.codex_session_record.session_id
     assert session_id is not None
@@ -1386,7 +1405,10 @@ def _process_retry_attempt(
     )
     submission_json = submission_payload.model_dump_json(by_alias=True)
     assessment_json = _assessment_audit(assessment).model_dump_json()
-    baseline_row = store._retry_baseline_row(original_pull.record_id)
+    baseline_row, error = db_reads.retry_baseline_row()
+    if error is not None:
+        assert baseline_row is None
+        raise error
 
     violations: tuple[str, ...] = ()
     baseline_obligations_json = None
@@ -1399,32 +1421,25 @@ def _process_retry_attempt(
                 if item.outcome == EVIDENCE_OUTCOME_WITHDRAWN
             )
     else:
-        (
-            baseline_namekey,
-            baseline_session_id,
-            baseline_attempt_id_text,
-            baseline_json,
-        ) = baseline_row
         if (
-            baseline_namekey != namekey_json
-            or baseline_session_id != session_id_text
+            baseline_row.namekey_json != namekey_json
+            or baseline_row.session_id_text != session_id_text
         ):
             raise _PushValidationError(Locale.EVIDENCE_RETRY_IDENTITY_MISMATCH)
         try:
-            baseline_attempt_id = UUID(baseline_attempt_id_text)
+            baseline_attempt_id = UUID(baseline_row.attempt_id_text)
         except ValueError as exc:
             raise _PushValidationError(
                 Locale.EVIDENCE_RETRY_IDENTITY_MISMATCH
             ) from exc
-        if str(baseline_attempt_id) != baseline_attempt_id_text:
+        if str(baseline_attempt_id) != baseline_row.attempt_id_text:
             raise _PushValidationError(
                 Locale.EVIDENCE_RETRY_IDENTITY_MISMATCH
             )
         obligations = _derive_retry_obligations(
-            store,
-            baseline_json=baseline_json,
+            baseline_json=baseline_row.obligations_json,
             baseline_attempt_id=baseline_attempt_id,
-            original_pull=original_pull,
+            db_reads=db_reads,
         )
         if not isinstance(submission_payload, StandardizedSubmission):
             raise _ValidationPreparationError(Locale.EVIDENCE_AUDIT_REPLAY_FAILED)
@@ -1634,9 +1649,10 @@ def _accepted_output_row(
     *,
     submission: StandardizedSubmission,
     evidence: ValidatedEvidence,
-    singular_outerdict: AiAugmentSingularOuterDict,
+    namekey: NameKey,
+    draw_number: str,
     rollout_index: _RolloutIndex,
-    rollout_archive: _ArchivedFile,
+    cas_codex_rollout_record: CASCodexRolloutRecord,
     commit_request_record: BackendCommitRequestRecord,
     attempt_timestamp: datetime,
 ) -> tuple[tuple[str, str | int | None], ...]:
@@ -1650,13 +1666,13 @@ def _accepted_output_row(
         argument_ref_urls=_rollout_ref_urls(rollout_index),
     )
     output_row: dict[str, str | int | None] = {
-        KTP_NAMEKEY_COL: singular_outerdict.namekey.to_json_key(),
+        KTP_NAMEKEY_COL: namekey.to_json_key(),
         KTP_FILENAME_COL: rollout_index.session.rollout_filename,
-        KTP_FRAGMENT_COL: rollout_archive.codex_rollout_record.line_count,
+        KTP_FRAGMENT_COL: cas_codex_rollout_record.line_count,
         KTP_FRAGMENT_TYPE_COL: ROLLOUT_LINE_FRAGMENT_TYPE,
-        DRAW_LABEL: singular_outerdict.draw_number,
-        KTP_FIRST_NAME_COL: singular_outerdict.namekey.first_name,
-        KTP_LAST_NAME_COL: singular_outerdict.namekey.last_name,
+        DRAW_LABEL: draw_number,
+        KTP_FIRST_NAME_COL: namekey.first_name,
+        KTP_LAST_NAME_COL: namekey.last_name,
         KTP_AI_AUGMENT_COMMIT_REQUEST_RECORD_ID_COL: commit_request_record_id,
         KTP_AI_AUGMENT_VALIDATION_RECORD_ID_COL: None,
         KTP_AI_AUGMENT_RUN_OUTCOME_RECORD_ID_COL: None,
@@ -1670,23 +1686,24 @@ def _accepted_output_row(
 
 
 def _execute_attempt(
-    store: AiAugmentBackendStore,
     *,
     commit_request_record: BackendCommitRequestRecord,
-    rollout_archive: _ArchivedFile,
-    appendwatch_report: AppendwatchReportRecord,
-    rollout_relative_path: PurePosixPath,
-    original_pull: HttpRequestLogRecord,
-    namekey: NameKey,
+    cas_codex_rollout_record: CASCodexRolloutRecord,
+    inputs: _CommitEvaluationInputs,
+    db_reads: _DetourDbValidationReads,
 ) -> tuple[PostCommitValidation, _ValidationProjection]:
-    context = store.context
     commit_request_body = commit_request_record.request_body
     body = commit_request_record.commit_request_body
     push_request_body = body.push_response_record.request_body
     session_id = body.codex_session_record.session_id
+    appendwatch_report = body.codex_session_record.appendwatch_report_record
+    rollout_basename = PurePosixPath(source_key_from_header_value(
+        commit_request_record.request_headers.get(SOURCE_KEY_HEADER)
+    )[0])
     assert commit_request_body is not None
     assert push_request_body is not None
     assert session_id is not None
+    assert appendwatch_report is not None
 
     attempt_timestamp = datetime.fromtimestamp(
         commit_request_record.record_id.time / MILLISECONDS_PER_SECOND,
@@ -1745,23 +1762,24 @@ def _execute_attempt(
             )
             report_path.write_bytes(appendwatch_report.decoded_bytes())
             try:
-                parse_appendwatch_report(report_path, rollout_relative_path)
+                parse_appendwatch_report(report_path, rollout_basename)
             except AppendwatchReportError as exc:
                 raise _PushValidationError(str(exc)) from exc
             stage = BackendLifecycle.ROLLOUT_INDEX
             rollout_index = build_rollout_index(
-                parse_rollout(rollout_archive.codex_rollout_path),
-                timezone_name=context.pipeline_config.timezone,
-                configured_rollout_basename=rollout_relative_path.name,
+                parse_rollout(cas_codex_rollout_record.cas_path),
+                timezone_name=inputs.config_facts.timezone_name,
+                configured_rollout_basename=rollout_basename.name,
             )
             if rollout_index.session.session_id != session_id:
                 raise _PushValidationError(Locale.CONFIGURED_SESSION_MISMATCH)
             stage = BackendLifecycle.PYDANTIC_VALIDATION
-            retry_submission_expected = store._retry_baseline_exists(
-                original_pull=original_pull,
-                namekey=namekey,
-                session_id=session_id,
-            )
+            retry_baseline_exists, error = db_reads.retry_baseline_exists()
+            if error is not None:
+                assert retry_baseline_exists is None
+                raise error
+            assert retry_baseline_exists is not None
+            retry_submission_expected = retry_baseline_exists
             submission_payload = (
                 StandardizedSubmission.model_validate_with_http_records(push_request_body)
                 if retry_submission_expected
@@ -1769,25 +1787,22 @@ def _execute_attempt(
             )
 
             stage = BackendLifecycle.DUCKDB_EVIDENCE_VALIDATION
-            _seed_evidence_random(context.pipeline_config.sample_seed)
+            _seed_evidence_random(inputs.config_facts.sample_seed)
             evidence_assessment = assess_submission_evidence(
                 rollout_index,
                 submission_payload,
-                codex_match_version=(
-                    context.pipeline_config.match_rule_version.codex_match
-                ),
+                codex_match_version=inputs.config_facts.codex_match_version,
             )
             _log_evidence_assessment(
                 evidence_assessment,
                 commit_request_record=commit_request_record,
             )
             retry_violations, retry_projection = _process_retry_attempt(
-                store,
-                original_pull=original_pull,
                 commit_request_record=commit_request_record,
-                namekey=namekey,
+                namekey=inputs.namekey,
                 submission_payload=submission_payload,
                 assessment=evidence_assessment,
+                db_reads=db_reads,
             )
             assert retry_projection.commit_request_record is commit_request_record
             if not evidence_assessment.accepted or retry_violations:
@@ -1806,8 +1821,11 @@ def _execute_attempt(
             )
 
             stage = BackendLifecycle.RESEARCHER_RESOLUTION
-            singular_outerdict = context.configured_ai_augment_singular_outerdict()
-            if singular_outerdict is None or singular_outerdict.namekey != namekey:
+            draw_number, error = inputs.draw_number()
+            if error is not None:
+                assert draw_number is None
+                raise error
+            if draw_number is None:
                 raise _ValidationPreparationError(Locale.CONFIGURED_NAMEKEY_NOT_FOUND)
 
             stage = BackendLifecycle.INNERDICT_AND_CARD
@@ -1815,13 +1833,24 @@ def _execute_attempt(
             output_row = _accepted_output_row(
                 submission=accepted_submission,
                 evidence=evidence_assessment.validated,
-                singular_outerdict=singular_outerdict,
+                namekey=inputs.namekey,
+                draw_number=draw_number,
                 rollout_index=rollout_index,
-                rollout_archive=rollout_archive,
+                cas_codex_rollout_record=cas_codex_rollout_record,
                 commit_request_record=commit_request_record,
                 attempt_timestamp=attempt_timestamp,
             )
-            if store._codex_output_identity_exists(dict(output_row)):
+            output_identity = dict(output_row)
+            assert output_identity[KTP_FILENAME_COL] == rollout_basename.name
+            assert output_identity[KTP_FRAGMENT_COL] == (
+                cas_codex_rollout_record.line_count
+            )
+            identity_exists, error = db_reads.output_identity_exists()
+            if error is not None:
+                assert identity_exists is None
+                raise error
+            assert identity_exists is not None
+            if identity_exists:
                 raise _PushValidationError(Locale.ACCEPTED_IDENTITY_DUPLICATE)
             stage = BackendLifecycle.ACCEPTED
             return result(
@@ -1896,17 +1925,17 @@ def pydantic_failure(exc: ValidationError) -> tuple[str | None, str, object]:
 
 
 def _log_post_commit_validation(
-    push_record: HttpRequestLogRecord,
+    push_response_record: PushResponseRecord,
     post_commit_validation: PostCommitValidation,
     error: Exception | None,
 ) -> None:
     if error is None:
-        logger.info(Locale.PUSH_ACCEPTED_LOG, push_record.record_id)
+        logger.info(Locale.PUSH_ACCEPTED_LOG, push_response_record.record_id)
     elif isinstance(error, ValidationError):
         field, reason, failed_input = pydantic_failure(error)
         logger.warning(
             Locale.PUSH_PYDANTIC_FAILED_LOG,
-            push_record.record_id,
+            push_response_record.record_id,
             post_commit_validation.stage,
             field or Locale.UNKNOWN_FIELD,
             failed_input,
@@ -1915,24 +1944,81 @@ def _log_post_commit_validation(
     elif isinstance(error, _ValidationPreparationError):
         logger.error(
             Locale.PUSH_CONFIGURATION_FAILED_LOG,
-            push_record.record_id,
+            push_response_record.record_id,
             post_commit_validation.stage,
             error,
         )
     elif isinstance(error, _PushValidationError):
         logger.warning(
             Locale.PUSH_VALIDATION_FAILED_LOG,
-            push_record.record_id,
+            push_response_record.record_id,
             post_commit_validation.stage,
             error,
         )
     else:
         logger.warning(
             Locale.PUSH_UNEXPECTED_FAILED_LOG,
-            push_record.record_id,
+            push_response_record.record_id,
             post_commit_validation.stage,
             error,
         )
+
+
+def evaluate_commit(
+    commit_request_record: BackendCommitRequestRecord,
+    *,
+    initial_validation_request_record: BackendValidationRequestRecord | None,
+    inputs: _CommitEvaluationInputs,
+    db_reads: _DetourDbValidationReads,
+) -> tuple[PostCommitValidation, _ValidationProjection]:
+    initial_commit = (
+        commit_request_record if initial_validation_request_record is None
+        else initial_validation_request_record.validation_request_body.commit_request_record
+    )
+    assert (
+        inputs.original_pull_response_record
+        is initial_commit.commit_request_body.pull_response_record
+    )
+    commit = commit_request_record.commit_request_body
+    session_id = commit.codex_session_record.session_id
+    rollout = commit.codex_session_record.codex_rollout_record
+    appendwatch_report = commit.codex_session_record.appendwatch_report_record
+    assert session_id is not None
+    assert rollout is not None
+    assert appendwatch_report is not None
+    stage = BackendLifecycle.CONFIGURATION
+    try:
+        stage = BackendLifecycle.ROLLOUT_INDEX
+        try:
+            cas_codex_rollout_record, error = inputs.cas_codex_rollout_record()
+            if error is not None:
+                assert cas_codex_rollout_record is None
+                raise error
+        except (OSError, ValueError) as exc:
+            raise _PushValidationError(str(exc)) from exc
+        assert cas_codex_rollout_record is not None
+        assert (
+            cas_codex_rollout_record.sha256 == rollout.sha256
+            and cas_codex_rollout_record.size == rollout.size
+            and cas_codex_rollout_record.line_count == rollout.line_count
+        )
+        stage = BackendLifecycle.APPENDWATCH_REPORT_VALIDATION
+        result = _execute_attempt(
+            commit_request_record=commit_request_record,
+            cas_codex_rollout_record=cas_codex_rollout_record,
+            inputs=inputs,
+            db_reads=db_reads,
+        )
+    except (ModelHttpRequired, ReplayInputMissing):
+        raise
+    except Exception as exc:
+        result = _failed_post_commit_validation(
+            commit_request_record=commit_request_record,
+            stage=stage,
+            error=exc,
+        )
+    assert result[1].commit_request_record is commit_request_record
+    return result
 
 
 @implements[BackendComponent.PostCommitValidationProperty]()
@@ -1942,59 +2028,6 @@ class PostCommitValidation(FrozenStrictModel):
     detail: StrictStr | None = None
     submission_type: Literal["Submission", "StandardizedSubmission"] | None
     submission: dict[str, JsonValue] | None
-
-    @staticmethod
-    def evaluate_commit(
-        store: AiAugmentBackendStore,
-        record: HttpRequestLogRecord,
-        *,
-        initial_validation_record: BackendValidationRecord | None,
-    ) -> tuple[PostCommitValidation, _ValidationProjection]:
-        context = store.context
-        commit_request_record, original_pull, namekey, filename = store._validated_commit_inputs(
-            record, initial_validation_record=initial_validation_record,
-        )
-        commit = commit_request_record.commit_request_body
-        session_id = commit.codex_session_record.session_id
-        rollout = commit.codex_session_record.codex_rollout_record
-        appendwatch_report = commit.codex_session_record.appendwatch_report_record
-        assert session_id is not None
-        assert rollout is not None
-        assert appendwatch_report is not None
-        stage = BackendLifecycle.CONFIGURATION
-        try:
-            stage = BackendLifecycle.ROLLOUT_INDEX
-            try:
-                rollout_path = context.pipeline_config.rollout_cas.validated_rollout(
-                    rollout
-                )
-            except (OSError, ValueError) as exc:
-                raise _PushValidationError(str(exc)) from exc
-            rollout_archive = _ArchivedFile(
-                codex_rollout_record=rollout,
-                codex_rollout_path=rollout_path,
-            )
-            assert rollout_archive.codex_rollout_record is rollout
-            stage = BackendLifecycle.APPENDWATCH_REPORT_VALIDATION
-            result = _execute_attempt(
-                store,
-                commit_request_record=commit_request_record,
-                rollout_archive=rollout_archive,
-                appendwatch_report=appendwatch_report,
-                rollout_relative_path=PurePosixPath(filename),
-                original_pull=original_pull,
-                namekey=namekey,
-            )
-        except (ModelHttpRequired, ReplayInputMissing):
-            raise
-        except Exception as exc:
-            result = _failed_post_commit_validation(
-                commit_request_record=commit_request_record,
-                stage=stage,
-                error=exc,
-            )
-        assert result[1].commit_request_record is commit_request_record
-        return result
 
     def validate_lifecycle(self) -> Self:
         if not self.stage.is_post_commit_validation_stage():
@@ -2014,6 +2047,27 @@ class PostCommitValidation(FrozenStrictModel):
     @model_validator(mode="after")
     def _validate_lifecycle(self) -> Self:
         return self.validate_lifecycle()
+
+
+# Deliberate mid-file imports: validation_request imports the concrete
+# PostCommitValidation model, while these dependencies reach commit_request,
+# then pull/push/validation_request. Keep this class defined before entering
+# that import path. These are real runtime types used by the evaluator;
+# postponing their imports avoids a half-initialized module and needs no
+# model_rebuild, placeholder type, or change to the by-reference records.
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_cas import (  # noqa: E402, E501
+    CASCodexRolloutRecord,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.commit_request import (  # noqa: E402, E501
+    BackendCommitRequestRecord,
+    CodexRolloutRecord,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.pull_event import (  # noqa: E402, E501
+    PullResponseRecord,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.push_event import (  # noqa: E402, E501
+    PushResponseRecord,
+)
 
 
 class _SessionMetadata(FrozenStrictModel):
