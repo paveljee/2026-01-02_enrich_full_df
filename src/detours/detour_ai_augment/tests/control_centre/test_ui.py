@@ -355,28 +355,25 @@ def agent_runtime_attempt(
         duration_usec=None,
         commit_request_body=commit_body,
     )
-    return AgentRuntimeAttempt.from_http_request_log_record(
-        ValidationRequestBody(
-            commit_request_record=commit_request_record,
-            post_commit_validation=PostCommitValidation(
-                stage=(
-                    BackendLifecycle.ACCEPTED
-                    if result is BackendLifecycle.ACCEPTED
-                    else BackendLifecycle.PYDANTIC_VALIDATION
-                ),
-                result=result,
-                detail=None if result is BackendLifecycle.ACCEPTED else "failed",
-                submission_type="Submission" if result is BackendLifecycle.ACCEPTED else None,
-                submission=(
-                    Submission.model_validate(api.EVIDENCE_SUBMISSION_EXAMPLE).model_dump(
-                        mode="json", by_alias=True,
-                    ) if result is BackendLifecycle.ACCEPTED else None
-                ),
-            ),
-            initial_validation_request_record=None,
-        ).http_record(),
+    return ValidationRequestBody(
         commit_request_record=commit_request_record,
-    )
+        post_commit_validation=PostCommitValidation(
+            stage=(
+                BackendLifecycle.ACCEPTED
+                if result is BackendLifecycle.ACCEPTED
+                else BackendLifecycle.PYDANTIC_VALIDATION
+            ),
+            result=result,
+            detail=None if result is BackendLifecycle.ACCEPTED else "failed",
+            submission_type="Submission" if result is BackendLifecycle.ACCEPTED else None,
+            submission=(
+                Submission.model_validate(api.EVIDENCE_SUBMISSION_EXAMPLE).model_dump(
+                    mode="json", by_alias=True,
+                ) if result is BackendLifecycle.ACCEPTED else None
+            ),
+        ),
+        initial_validation_request_record=None,
+    ).http_record()
 
 
 @pytest.fixture(autouse=True)

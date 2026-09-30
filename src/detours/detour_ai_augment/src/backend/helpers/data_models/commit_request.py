@@ -253,12 +253,13 @@ class BackendCommitRequestRecord(RequestRecord):
         ):
             raise ValueError(Locale.COMMIT_HTTP_CONTOUR_INVALID)
         expected = self.commit_request_body
+        refs: dict[UUID, PullResponseRecord | PushResponseRecord] = {
+            expected.pull_response_record.record_id: expected.pull_response_record,
+            expected.push_response_record.record_id: expected.push_response_record,
+        }
         parsed = CommitRequestBody.from_serialized_json(
             self.request_body,
-            resolve_http_record=lambda record_id: {
-                expected.pull_response_record.record_id: expected.pull_response_record,
-                expected.push_response_record.record_id: expected.push_response_record,
-            }[record_id],
+            resolve_http_record=lambda record_id: refs[record_id],
         )
         if parsed != expected:
             raise ValueError(Locale.COMMIT_BODY_RECORDS_MISMATCH)
@@ -332,7 +333,7 @@ class _BackendCommitRequestRecordJson(FrozenStrictModel):
             pull_response_record=pull_response_record,
         )
         assert push_response_record.pull_response_record is pull_response_record
-        refs = {
+        refs: dict[UUID, PullResponseRecord | PushResponseRecord] = {
             pull_response_record.record_id: pull_response_record,
             push_response_record.record_id: push_response_record,
         }

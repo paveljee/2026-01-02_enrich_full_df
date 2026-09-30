@@ -742,9 +742,8 @@ class Locale:
     CITE_EXCERPT_OVERLAPS_REF: Final = "excerpt overlaps its current-ref marker"
     WEB_ARGUMENTS_NOT_OBJECT: Final = "web arguments must be a JSON object"
     BACKEND_BACKGROUND_WORK_FAILED: Final = "Backend background work failed"
-    PUSH_ALREADY_PROCESSING_DESCRIPTION: Final = (
-        "A submission is already being processed, or the current pull must be "
-        "retrieved before submitting."
+    PUSH_CURRENT_PULL_REQUIRED_DESCRIPTION: Final = (
+        "The current pull must be retrieved before submitting."
     )
     BACKEND_IPC_WAIT_HTTP_LOG: Final = "IPC waiting for %d active HTTP exchanges"
     BACKEND_IPC_WAIT_WORK_LOG: Final = "IPC waiting for %d authoritative background tasks"
@@ -784,9 +783,6 @@ class Locale:
         "run-outcome HTTP request has an invalid contour"
     )
     RUN_OUTCOME_RECORD_INCOMPLETE: Final = "run-outcome HTTP record is incomplete"
-    RUN_OUTCOME_ATTEMPT_BODY_MISMATCH: Final = (
-        "run-outcome attempt does not match response body"
-    )
     RUN_OUTCOME_REQUEST_RECEIPT_MISSING: Final = (
         "run-outcome HTTP request receipt time is missing"
     )
@@ -798,9 +794,6 @@ class Locale:
     )
     RUN_OUTCOME_RECORD_CONTOUR_INVALID: Final = (
         "run-outcome HTTP record has an invalid contour"
-    )
-    RUN_OUTCOME_ATTEMPT_PRESENCE_INVALID: Final = (
-        "run-outcome attempt presence is inconsistent"
     )
     RUN_OUTCOME_ATTEMPT_LINK_INVALID: Final = "run-outcome attempt linkage is invalid"
     BACKEND_START_FLAGS_REQUIRED: Final = (
@@ -821,6 +814,6 @@ class Locale:
     PULL_ACCEPTED_DESCRIPTION: Final = (
         "Accepted submission, followed by ground truth if available."
     )
-    PULL_PROCESSING_DESCRIPTION: Final = (
+    PUSH_PROCESSING_DESCRIPTION: Final = (
         "Accepted submission is still being processed; retry after one second."
     )

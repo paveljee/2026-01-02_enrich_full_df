@@ -10,7 +10,7 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import AsyncGenerator, Coroutine, Iterator, Mapping
+from collections.abc import AsyncGenerator, Iterator, Mapping
 from contextlib import asynccontextmanager
 from http import HTTPStatus
 from pathlib import Path
@@ -305,6 +305,16 @@ APP_CONFIG: dict[str, Any] = {
     "version": API_VERSION,
 }
 
+SHARED_ROUTE_RESPONSES = {
+    status.HTTP_503_SERVICE_UNAVAILABLE: {
+        "description": Locale.PUSH_PROCESSING_DESCRIPTION,
+        "headers": {
+            RETRY_AFTER_HEADER: {
+                "schema": {"type": "string", "example": RETRY_AFTER_SECONDS},
+            },
+        },
+    }
+}
 PULL_ROUTE: dict[str, Any] = {
     "path": PULL_PATH,
     "summary": Locale.PULL_SUMMARY,
@@ -332,14 +342,7 @@ PULL_ROUTE: dict[str, Any] = {
         status.HTTP_500_INTERNAL_SERVER_ERROR: {
             "description": Locale.CONFIGURATION_ERROR_DETAIL,
         },
-        status.HTTP_503_SERVICE_UNAVAILABLE: {
-            "description": Locale.PULL_PROCESSING_DESCRIPTION,
-            "headers": {
-                RETRY_AFTER_HEADER: {
-                    "schema": {"type": "string", "example": RETRY_AFTER_SECONDS},
-                },
-            },
-        },
+        status.HTTP_503_SERVICE_UNAVAILABLE: SHARED_ROUTE_RESPONSES[status.HTTP_503_SERVICE_UNAVAILABLE],
     },
 }
 
@@ -359,7 +362,7 @@ PUSH_ROUTE: dict[str, Any] = {
         },
         status.HTTP_409_CONFLICT: {
             "description": (
-                Locale.PUSH_ALREADY_PROCESSING_DESCRIPTION
+                Locale.PUSH_CURRENT_PULL_REQUIRED_DESCRIPTION
             ),
             "headers": {
                 LOCATION_HEADER: {
@@ -367,6 +370,7 @@ PUSH_ROUTE: dict[str, Any] = {
                 },
             },
         },
+        status.HTTP_503_SERVICE_UNAVAILABLE: SHARED_ROUTE_RESPONSES[status.HTTP_503_SERVICE_UNAVAILABLE],
         status.HTTP_500_INTERNAL_SERVER_ERROR: {
             "description": Locale.CONFIGURATION_ERROR_DETAIL,
         },
@@ -552,99 +556,115 @@ async def authoritative_pull(
     return response_record.to_response()
 
 
-def _push_response(
-    request: requests.PreparedRequest,
-    store: AiAugmentBackendStore,
-    pull_response_record: PullResponseRecord | None,
-) -> requests.Response:
-    global BACKEND_LIFECYCLE
-    with BACKEND_WORKFLOW_STATE_LOCK:
-        lifecycle = BACKEND_LIFECYCLE
-        logger.info(
-            Locale.PUSH_REQUEST_STATE_LOG, lifecycle, BACKEND_SESSION_ID,
-            None if pull_response_record is None else pull_response_record.record_id,
-        )
-        if lifecycle is BackendLifecycle.BUSY:
-            return _error_response(
-                request, HTTPStatus.CONFLICT, headers={LOCATION_HEADER: PULL_PATH},
-            )
-        if (
-            lifecycle not in {BackendLifecycle.READY, BackendLifecycle.RETRY}
-            or BACKEND_SESSION_ID is None
-        ):
-            logger.error(Locale.PUSH_SESSION_NOT_READY_LOG)
-            return _error_response(request, HTTPStatus.INTERNAL_SERVER_ERROR)
-        commit, _validation = store._cursor_commit_validation()
-        if (
-            pull_response_record is None or pull_response_record.response_code != HTTPStatus.OK
-            or (
-                commit is not None
-                and commit.commit_request_body.pull_response_record.record_id
-                == pull_response_record.record_id
-            )
-        ):
-            logger.warning(Locale.PUSH_CURRENT_PULL_REQUIRED_LOG)
-            return _error_response(
-                request, HTTPStatus.CONFLICT, headers={LOCATION_HEADER: PULL_PATH},
-            )
-        BACKEND_LIFECYCLE = BackendLifecycle.BUSY
-    return _response(request, HTTPStatus.ACCEPTED, headers={LOCATION_HEADER: PULL_PATH})
-
-
 async def authoritative_push(
     request: requests.PreparedRequest,
     store: AiAugmentBackendStore,
 ) -> requests.Response:
+    global BACKEND_LIFECYCLE
+
     started_ns = time.monotonic_ns()
     with BACKEND_WORKFLOW_STATE_LOCK:
-        current = store.current_replayed_record
-        pull_response_record = current if isinstance(current, PullResponseRecord) else None
+        lifecycle = BACKEND_LIFECYCLE
         session_id = BACKEND_SESSION_ID
-    response = _push_response(request, store, pull_response_record)
-    http_record = _authoritative_http_record(request, response, started_ns=started_ns)
-    push_request_record = PushRequestRecord(
-        schema_version=http_record.schema_version,
-        record_id=http_record.record_id,
-        method=http_record.method,
-        scheme=http_record.scheme,
-        host=http_record.host,
-        port=http_record.port,
-        path=http_record.path,
-        query=http_record.query,
-        request_headers=http_record.request_headers,
-        request_body=http_record.request_body,
-        response_code=http_record.response_code,
-        response_headers=http_record.response_headers,
-        response_body=http_record.response_body,
-        received_at_unix_usec=http_record.received_at_unix_usec,
-        ready_to_respond_at_unix_usec=http_record.ready_to_respond_at_unix_usec,
-        duration_usec=http_record.duration_usec,
+        current_replayed_record = store.current_replayed_record
+        pull_response_record = (
+            current_replayed_record
+            if isinstance(current_replayed_record, PullResponseRecord)
+            else None
+        )
+        logger.info(
+            Locale.PUSH_REQUEST_STATE_LOG, lifecycle, session_id,
+            None if pull_response_record is None else pull_response_record.record_id,
+        )
+
+        if lifecycle is BackendLifecycle.BUSY:
+            provisional_http_response = _error_response(
+                request,
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                headers={RETRY_AFTER_HEADER: RETRY_AFTER_SECONDS},
+            )
+        elif (
+            lifecycle not in {BackendLifecycle.READY, BackendLifecycle.RETRY}
+            or session_id is None
+        ):
+            logger.error(Locale.PUSH_SESSION_NOT_READY_LOG)
+            provisional_http_response = _error_response(request, HTTPStatus.INTERNAL_SERVER_ERROR)
+        else:
+            commit_request_record, _ = store._cursor_commit_validation()
+            if (
+                pull_response_record is None
+                or pull_response_record.response_code != HTTPStatus.OK
+                or (
+                    commit_request_record is not None
+                    and commit_request_record.commit_request_body.pull_response_record.record_id
+                    == pull_response_record.record_id
+                )
+            ):
+                logger.warning(Locale.PUSH_CURRENT_PULL_REQUIRED_LOG)
+                provisional_http_response = _error_response(
+                    request,
+                    HTTPStatus.CONFLICT,
+                    headers={LOCATION_HEADER: PULL_PATH},
+                )
+            else:
+                BACKEND_LIFECYCLE = BackendLifecycle.BUSY
+                provisional_http_response = _response(
+                    request,
+                    HTTPStatus.ACCEPTED,
+                    headers={LOCATION_HEADER: PULL_PATH},
+                )
+
+    push_request_record = PushRequestRecord.from_http_request_log_record(
+        http_request_log_record=_authoritative_http_record(
+            request, provisional_http_response, started_ns=started_ns
+        )
     )
-    # stands for "store's" push promise specifically
-    stores_push_promise = await asyncio.to_thread(
-        func=store.promise_push_response_record,
-        request=push_request_record,
+    immediate_replayed_push_response_record, stores_push_promise = await asyncio.to_thread(
+        store.promise_push_response_record,
+        push_request_record,
         session_id=session_id,
     )
+    # The immediate record is the replayed push for this HTTP reply. The promise yields
+    # that same instance later, after commit/validation, for `finish_push` to check.
+
     if stores_push_promise.acknowledgment is not BackendStoreAcknowledgment.ACK:
-        _record, error = await stores_push_promise.response_record_promise()
+        _, error = await stores_push_promise.response_record_promise()
         if error is not None:
             error.raise_exception()
         raise BackendStoreException(Locale.PUSH_NAK_ERROR_MISSING)
-    if response.status_code == HTTPStatus.ACCEPTED:
+
+    if immediate_replayed_push_response_record is None:
+        _, error = await stores_push_promise.response_record_promise()
+        if error is not None:
+            error.raise_exception()
+        raise BackendStoreException(Locale.PUSH_RESPONSE_RECORD_MISSING)
+
+    assert (
+        immediate_replayed_push_response_record.response_code
+        == provisional_http_response.status_code
+    )
+    assert immediate_replayed_push_response_record.pull_response_record is pull_response_record
+
+    if immediate_replayed_push_response_record.response_code == HTTPStatus.ACCEPTED:
         # this below hands off the awaiting to a new asyncio task,
         # allowing server to release a response to the HTTP client
         # who had sent the push request:
         _continue_awaiting_on_stores_push_promise(stores_push_promise, store)
-        logger.info(Locale.PUSH_DURABLY_ACCEPTED_LOG, push_request_record.record_id)
-        return response
-    response_record, error = await stores_push_promise.response_record_promise()
+        logger.info(
+            Locale.PUSH_DURABLY_ACCEPTED_LOG, immediate_replayed_push_response_record.record_id
+        )
+        return immediate_replayed_push_response_record.to_response()
+
+    resolved_push_response_record, error = await stores_push_promise.response_record_promise()
     if error is not None:
         error.raise_exception()
-    if response_record is None:
-        raise BackendStoreException(Locale.PUSH_RESPONSE_RECORD_MISSING)
-    logger.info(Locale.PUSH_PERSISTED_LOG, response_record.record_id, response_record.response_code)
-    return response_record.to_response()
+    assert resolved_push_response_record is immediate_replayed_push_response_record
+    logger.info(
+        Locale.PUSH_PERSISTED_LOG,
+        resolved_push_response_record.record_id,
+        resolved_push_response_record.response_code,
+    )
+    return resolved_push_response_record.to_response()
 
 
 def set_backend_session_id(value: str) -> None:
@@ -776,20 +796,22 @@ async def finish_push(
         # `promise_push_response_record` because that's
         # what this promise is supposed to be upstream,
         # that is, as defined in `authoritative_push`:
-        response, error = await stores_push_promise.response_record_promise()
+        promised_push_response_record, error = await stores_push_promise.response_record_promise()
         if error is not None:
             error.raise_exception()
-        if response is None:
+        if promised_push_response_record is None:
             raise BackendStoreException(Locale.PUSH_RESPONSE_RECORD_MISSING)
-        assert isinstance(response, PushResponseRecord)
-        validation = store.current_replayed_record
-        if not isinstance(validation, BackendValidationRequestRecord):
+        assert isinstance(promised_push_response_record, PushResponseRecord)
+        # This is the already-sent push record, not a second HTTP response.
+        # Its identity must be preserved through the validation's commit link.
+        validation_request_record = store.current_replayed_record
+        if not isinstance(validation_request_record, BackendValidationRequestRecord):
             raise BackendStoreException(Locale.PUSH_VALIDATION_RECORD_MISSING)
         assert (
-            validation.validation_request_body.commit_request_record
-            .commit_request_body.push_response_record is response
+            validation_request_record.validation_request_body.commit_request_record
+            .commit_request_body.push_response_record is promised_push_response_record
         )
-        update_pull_state(validation)
+        update_pull_state(validation_request_record)
     except Exception as exc:
         _mark_backend_lifecycle_failed(exc)
         raise
@@ -802,7 +824,7 @@ def _continue_awaiting_on_stores_push_promise(
     store: AiAugmentBackendStore,
 ) -> None:
     """Creates an asyncio task to await on an `authoritative_push`'s
-    `ResponseRecordPromise`. The couroutine awaits on Backend Store
+    `ResponseRecordPromise`. The coroutine awaits on Backend Store
     finishing its `promise_push_response_record`, whose return
     object is this exact promise that this gets as an argument."""
 

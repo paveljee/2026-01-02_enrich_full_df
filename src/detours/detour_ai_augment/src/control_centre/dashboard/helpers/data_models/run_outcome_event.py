@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from enum import StrEnum
 from http import HTTPStatus
@@ -12,15 +13,25 @@ from pydantic import Field, model_validator
 from src.detours.detour_ai_augment.protected.src.architecture import (
     ControlCentreComponent,
 )
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.post_commit_validation import (  # noqa: E501
+    PostCommitValidation,
+)
 from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     ETAG_HEADER,
     HTTP_CONTENT_TYPE_HEADER,
     HTTP_POST_METHOD,
+    SERIALIZED_ATTEMPT_LINEAGE_KEY,
     SESSION_ID_HEADER,
     SOURCE_KEY_HEADER,
     SYNTHETIC_COMMIT_HOST,
     SYNTHETIC_COMMIT_SCHEME,
+    VALIDATION_BODY_COMMIT_REQUEST_RECORD_KEY,
+    VALIDATION_BODY_OPENALEX_ROR_RECORDS_KEY,
+    VALIDATION_BODY_POST_COMMIT_VALIDATION_KEY,
+    VALIDATION_COMMIT_PULL_RESPONSE_RECORD_KEY,
+    VALIDATION_COMMIT_PUSH_RESPONSE_RECORD_KEY,
+    VALIDATION_COMMIT_SELF_HTTP_RECORD_KEY,
     ContentType,
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
@@ -44,9 +55,13 @@ from .....backend.helpers.data_models.ai_augment_http_request_log_record import 
     ResponseRecord,
 )
 from .....backend.helpers.data_models.commit_request import (
+    BackendCommitRequestRecord,
     CodexSessionRecord,
     _CodexSessionRecordJson,
 )
+from .....backend.helpers.data_models.pull_event import PullResponseRecord
+from .....backend.helpers.data_models.push_event import PushResponseRecord
+from .....backend.helpers.data_models.validation_request import ValidationRequestBody
 from .lifecycle import RunLifecycle
 
 
@@ -223,7 +238,6 @@ class _RunOutcomeResponseBodyJson(FrozenStrictModel):
     validation_record_id: UUID | None
     run_outcome_record_id: UUID
     codex_session_record: _CodexSessionRecordJson
-    attempt_record: HttpRequestLogRecord | None
 
 
 @implements[ControlCentreComponent.BackendPort.RunOutcomeResponseRecordProperty]()
@@ -248,25 +262,98 @@ class RunOutcomeResponseRecord(ResponseRecord):
             appendwatch_report_record=session.appendwatch_report_record,
         )
 
-    def _validate_attempt(self) -> None:
-        record = self._body().attempt_record
-        attempt = self.attempt
-        if (record is None) != (attempt is None) or (
-            record is not None and attempt is not None
-            and record.model_dump(mode="json")
-            != attempt.http_request_log_record.model_dump(mode="json")
-        ):
-            raise ValueError(Locale.RUN_OUTCOME_ATTEMPT_BODY_MISMATCH)
-
     @property
     def run_outcome(self) -> RunLifecycle:
         return RunLifecycle.from_run_outcome(self.run_outcome_request_record.run_outcome)
 
     @classmethod
     def from_serialized_json(cls, *, value: str) -> Self:
-        return cls.from_http_request_log_record(
-            http_request_log_record=HttpRequestLogRecord.model_validate_json(value),
+        payload = json.loads(value)
+        if not isinstance(payload, dict):
+            raise ValueError(Locale.RUN_OUTCOME_RECORD_INCOMPLETE)
+        lineage = payload.pop(SERIALIZED_ATTEMPT_LINEAGE_KEY)
+        if not isinstance(lineage, list):
+            raise ValueError(Locale.RUN_OUTCOME_ATTEMPT_LINK_INVALID)
+        attempt: AgentRuntimeAttempt | None = None
+        for item in reversed(lineage):
+            prior = attempt
+            validation = HttpRequestLogRecord.model_validate(item, strict=False)
+            if validation.request_body is None:
+                raise ValueError(Locale.RUN_OUTCOME_ATTEMPT_LINK_INVALID)
+            parsed = json.loads(validation.request_body)
+            embedded = parsed[VALIDATION_BODY_COMMIT_REQUEST_RECORD_KEY]
+            pull = PullResponseRecord.from_http_request_log_record(
+                http_request_log_record=HttpRequestLogRecord.model_validate(
+                    embedded[VALIDATION_COMMIT_PULL_RESPONSE_RECORD_KEY], strict=False,
+                ),
+                validation_request_record=prior,
+            )
+            push = PushResponseRecord.from_http_request_log_record(
+                http_request_log_record=HttpRequestLogRecord.model_validate(
+                    embedded[VALIDATION_COMMIT_PUSH_RESPONSE_RECORD_KEY], strict=False,
+                ),
+                pull_response_record=pull,
+            )
+            refs: dict[UUID, PullResponseRecord | PushResponseRecord] = {
+                pull.record_id: pull,
+                push.record_id: push,
+            }
+            commit = BackendCommitRequestRecord.from_http_request_log_record(
+                HttpRequestLogRecord.model_validate(
+                    embedded[VALIDATION_COMMIT_SELF_HTTP_RECORD_KEY], strict=False,
+                ),
+                resolve_http_record=lambda record_id: refs[record_id],
+            )
+            initial = None if prior is None else (
+                prior.validation_request_body.initial_validation_request_record or prior
+            )
+            body = ValidationRequestBody(
+                commit_request_record=commit,
+                post_commit_validation=PostCommitValidation.model_validate(
+                    parsed[VALIDATION_BODY_POST_COMMIT_VALIDATION_KEY], strict=False,
+                ),
+                initial_validation_request_record=initial,
+                openalex_ror_records=tuple(
+                    HttpRequestLogRecord.model_validate(record, strict=False)
+                    for record in parsed[VALIDATION_BODY_OPENALEX_ROR_RECORDS_KEY]
+                ),
+            )
+            attempt = AgentRuntimeAttempt.from_http_request_log_record(
+                validation,
+                validation_request_body=body,
+            )
+            assert attempt.validation_request_body is body
+            assert body.commit_request_record is commit
+            assert commit.commit_request_body.pull_response_record is pull
+            assert commit.commit_request_body.push_response_record is push
+            assert pull.validation_request_record is prior
+            assert body.initial_validation_request_record is initial
+        outcome = cls.from_http_request_log_record(
+            HttpRequestLogRecord.model_validate(payload, strict=False),
+            attempt=attempt,
         )
+        if (outcome._body().validation_record_id is None) != (attempt is None):
+            raise ValueError(Locale.RUN_OUTCOME_ATTEMPT_LINK_INVALID)
+        assert outcome.attempt is attempt
+        return outcome
+
+    def serialize(self) -> dict[str, object]:
+        lineage: list[dict[str, object]] = []
+        attempt = self.attempt
+        seen: set[UUID] = set()
+        while attempt is not None:
+            if attempt.record_id in seen:
+                raise ValueError(Locale.RUN_OUTCOME_ATTEMPT_LINK_INVALID)
+            seen.add(attempt.record_id)
+            lineage.append(attempt.http_request_log_record.model_dump(mode="json"))
+            attempt = (
+                attempt.validation_request_body.commit_request_record.commit_request_body
+                .pull_response_record.validation_request_record
+            )
+        return {
+            **self.http_request_log_record.model_dump(mode="json"),
+            SERIALIZED_ATTEMPT_LINEAGE_KEY: lineage,
+        }
 
     @classmethod
     def from_run_outcome_request_record(
@@ -297,7 +384,6 @@ class RunOutcomeResponseRecord(ResponseRecord):
                 codex_rollout_record=codex_session_record.codex_rollout_record,
                 appendwatch_report_record=codex_session_record.appendwatch_report_record,
             ),
-            attempt_record=None if attempt is None else attempt.http_request_log_record,
         )
         response = cls(
             schema_version=request_record.schema_version,
@@ -322,7 +408,6 @@ class RunOutcomeResponseRecord(ResponseRecord):
         return response
 
     def validate_record(self) -> Self:
-        self._validate_attempt()
         projected_request_record = HttpRequestLogRecord(
             schema_version=self.schema_version,
             record_id=self.record_id,
@@ -386,19 +471,12 @@ class RunOutcomeResponseRecord(ResponseRecord):
         ):
             raise ValueError(Locale.RUN_OUTCOME_RECORD_CONTOUR_INVALID)
         parsed = self._body()
-        attempt_record = parsed.attempt_record
-        if (parsed.validation_record_id is None) != (attempt_record is None):
-            raise ValueError(Locale.RUN_OUTCOME_ATTEMPT_PRESENCE_INVALID)
-        if attempt_record is not None:
-            attempt = AgentRuntimeAttempt.from_http_request_log_record(
-                http_request_log_record=attempt_record,
-            )
-            if (
-                parsed.validation_record_id != attempt.record_id
-                or parsed.commit_request_record_id
-                != attempt.validation_request_body.commit_request_record.record_id
-            ):
-                raise ValueError(Locale.RUN_OUTCOME_ATTEMPT_LINK_INVALID)
+        if self.attempt is not None and (
+            parsed.validation_record_id != self.attempt.record_id
+            or parsed.commit_request_record_id
+            != self.attempt.validation_request_body.commit_request_record.record_id
+        ):
+            raise ValueError(Locale.RUN_OUTCOME_ATTEMPT_LINK_INVALID)
         if parsed.run_outcome_record_id != self.record_id:
             raise ValueError(Locale.RUN_OUTCOME_SELF_ID_INCONSISTENT)
         if (
@@ -474,13 +552,6 @@ class RunOutcomeResponseRecord(ResponseRecord):
             ready_to_respond_at_unix_usec=None,
             duration_usec=None,
         )
-        attempt_record = _RunOutcomeResponseBodyJson.model_validate_json(
-            record.response_body,
-        ).attempt_record
-        if attempt is None and attempt_record is not None:
-            attempt = AgentRuntimeAttempt.from_http_request_log_record(
-                http_request_log_record=attempt_record,
-            )
         return cls(
             schema_version=record.schema_version,
             record_id=record.record_id,

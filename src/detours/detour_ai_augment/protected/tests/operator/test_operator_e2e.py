@@ -43,8 +43,12 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_
     RESOURCE_PATH_KEY,
     RESOURCE_SHA256_KEY,
 )
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.post_commit_validation import (  # noqa: E501
+    PostCommitValidation,
+)
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     AUTHORITATIVE_ATTEMPT_COMMIT_REQUEST_RECORD_ID_COLUMN,
+    AUTHORITATIVE_ATTEMPT_VALIDATION_ID_KEY,
     ETAG_HEADER,
     HTTP_GET_METHOD,
     HTTP_POST_METHOD,
@@ -53,6 +57,13 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     PUSH_PATH,
     REPLAY_LOG_KEY,
     SOURCE_KEY_HEADER,
+    VALIDATION_BODY_COMMIT_REQUEST_RECORD_KEY,
+    VALIDATION_BODY_INITIAL_VALIDATION_REQUEST_RECORD_KEY,
+    VALIDATION_BODY_OPENALEX_ROR_RECORDS_KEY,
+    VALIDATION_BODY_POST_COMMIT_VALIDATION_KEY,
+    VALIDATION_COMMIT_PULL_RESPONSE_RECORD_KEY,
+    VALIDATION_COMMIT_PUSH_RESPONSE_RECORD_KEY,
+    VALIDATION_COMMIT_SELF_HTTP_RECORD_KEY,
     AiAugmentCohort,
 )
 from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helpers import (
@@ -81,7 +92,6 @@ from src.detours.detour_ai_augment.src.backend.helpers.data_models.lifecycle imp
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.validation_request import (
     VALIDATE_PATH,
-    BackendValidationRequestRecord,
 )
 from src.detours.detour_ai_augment.src.control_centre.dashboard import ui as control_ui
 from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models import (
@@ -1012,11 +1022,11 @@ def test_existing_aivm_exposes_the_persisted_appendwatch_topology(
 
 def _validate_workflow_http_records(
     records: Sequence[HttpRequestLogRecord],
-) -> dict[UUID, BackendValidationRequestRecord]:
+) -> dict[UUID, HttpRequestLogRecord]:
     by_id = {record.record_id: record for record in records}
     assert len(by_id) == len(records), "Duplicate HTTP record UUID"
     ordinal = {record.record_id: index for index, record in enumerate(records)}
-    validations: dict[UUID, BackendValidationRequestRecord] = {}
+    validations: dict[UUID, HttpRequestLogRecord] = {}
     provider_ids: set[UUID] = set()
     provider_endpoints = {
         (HTTP_GET_METHOD, submission_models.OPENALEX_SCHEME,
@@ -1027,23 +1037,36 @@ def _validate_workflow_http_records(
     for record in records:
         if (record.method, record.path) != (HTTP_POST_METHOD, VALIDATE_PATH):
             continue
-        validation = BackendValidationRequestRecord.from_http_request_log_record(record)
-        validations[record.record_id] = validation
-        body = validation.validation_request_body
-        commit = body.commit_request_record
+        assert record.request_body is not None
+        validations[record.record_id] = record
+        body = json.loads(record.request_body)
+        embedded = body[VALIDATION_BODY_COMMIT_REQUEST_RECORD_KEY]
+        commit = HttpRequestLogRecord.model_validate(
+            embedded[VALIDATION_COMMIT_SELF_HTTP_RECORD_KEY], strict=False,
+        )
+        providers = tuple(
+            HttpRequestLogRecord.model_validate(value, strict=False)
+            for value in body[VALIDATION_BODY_OPENALEX_ROR_RECORDS_KEY]
+        )
         references: tuple[HttpRequestLogRecord, ...] = (
             commit,
-            commit.commit_request_body.pull_response_record,
-            commit.commit_request_body.push_response_record,
-            *body.openalex_ror_records,
+            HttpRequestLogRecord.model_validate(
+                embedded[VALIDATION_COMMIT_PULL_RESPONSE_RECORD_KEY], strict=False,
+            ),
+            HttpRequestLogRecord.model_validate(
+                embedded[VALIDATION_COMMIT_PUSH_RESPONSE_RECORD_KEY], strict=False,
+            ),
+            *providers,
         )
-        if body.initial_validation_request_record is not None:
-            references += (body.initial_validation_request_record,)
+        if body[VALIDATION_BODY_INITIAL_VALIDATION_REQUEST_RECORD_KEY] is not None:
+            references += (HttpRequestLogRecord.model_validate(
+                body[VALIDATION_BODY_INITIAL_VALIDATION_REQUEST_RECORD_KEY], strict=False,
+            ),)
         for linked in references:
             assert linked.record_id in by_id, linked.record_id
             assert linked.model_dump() == by_id[linked.record_id].model_dump(), linked.record_id
             assert ordinal[linked.record_id] < ordinal[record.record_id], linked.record_id
-        for provider in body.openalex_ror_records:
+        for provider in providers:
             parent, _, identifier = provider.path.rpartition("/")
             assert identifier and (
                 provider.method, provider.scheme, provider.host, parent
@@ -1115,13 +1138,24 @@ def validate_workflow_artifacts(
                 [str(record.record_id)],
             ).fetchone()
             if row is not None:
-                attempt_record = backend_store._validation_from_attempt_json(
-                    str(row[0]),
-                    commit_http_record=record,
-                )
+                attempt_payload = json.loads(str(row[0]))
+                assert set(attempt_payload) == {AUTHORITATIVE_ATTEMPT_VALIDATION_ID_KEY}
+                attempt_record = validations[
+                    UUID(attempt_payload[AUTHORITATIVE_ATTEMPT_VALIDATION_ID_KEY])
+                ]
+                assert attempt_record.request_headers == record.request_headers
+                assert attempt_record.request_body is not None
+                attempt_body = json.loads(attempt_record.request_body)
+                assert HttpRequestLogRecord.model_validate(
+                    attempt_body[VALIDATION_BODY_COMMIT_REQUEST_RECORD_KEY][
+                        VALIDATION_COMMIT_SELF_HTTP_RECORD_KEY
+                    ], strict=False,
+                ) == record
         if row is not None:
             if (
-                attempt_record.validation_request_body.post_commit_validation.result
+                PostCommitValidation.model_validate(
+                    attempt_body[VALIDATION_BODY_POST_COMMIT_VALIDATION_KEY], strict=False,
+                ).result
                 is BackendLifecycle.ACCEPTED
             ):
                 accepted_commits.append(commit_request_record)
@@ -1206,9 +1240,21 @@ def validate_workflow_artifacts(
     assert run_outcome_snapshot.validation_record_id is not None
     assert run_outcome_snapshot.validation_record_id in validations
     validation = validations[run_outcome_snapshot.validation_record_id]
-    assert validation.validation_request_body.commit_request_record == commit_request_record
+    assert validation.request_body is not None
+    validation_body = json.loads(validation.request_body)
+    embedded_commit = HttpRequestLogRecord.model_validate(
+        validation_body[VALIDATION_BODY_COMMIT_REQUEST_RECORD_KEY][
+            VALIDATION_COMMIT_SELF_HTTP_RECORD_KEY
+        ], strict=False,
+    )
+    assert all(
+        getattr(embedded_commit, field) == getattr(commit_request_record, field)
+        for field in HttpRequestLogRecord.model_fields
+    )
     assert (
-        validation.validation_request_body.post_commit_validation.result
+        PostCommitValidation.model_validate(
+            validation_body[VALIDATION_BODY_POST_COMMIT_VALIDATION_KEY], strict=False,
+        ).result
         is BackendLifecycle.ACCEPTED
     )
     assert commit_ordinal < _record_ordinal(records, validation.record_id) < gone_pull_ordinal

@@ -36,6 +36,7 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_
     AiAugmentDetourDB,
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.post_commit_validation import (  # noqa: E501
+    PostCommitValidation,
     _AppliedRetryAuditRow,
     _CommitConfigFacts,
     _CommitEvaluationInputs,
@@ -125,6 +126,13 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     SYNTHETIC_COMMIT_HOST,
     SYNTHETIC_COMMIT_SCHEME,
     TEXT_ENCODING,
+    VALIDATION_BODY_COMMIT_REQUEST_RECORD_KEY,
+    VALIDATION_BODY_INITIAL_VALIDATION_REQUEST_RECORD_KEY,
+    VALIDATION_BODY_OPENALEX_ROR_RECORDS_KEY,
+    VALIDATION_BODY_POST_COMMIT_VALIDATION_KEY,
+    VALIDATION_COMMIT_PULL_RESPONSE_RECORD_KEY,
+    VALIDATION_COMMIT_PUSH_RESPONSE_RECORD_KEY,
+    VALIDATION_COMMIT_SELF_HTTP_RECORD_KEY,
     ContentType,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.validation_request import (
@@ -332,6 +340,10 @@ class AiAugmentBackendStore(FrozenStrictModel):
         record: HttpRequestLogRecord,
     ) -> None:
         if isinstance(record, PullResponseRecord) and record.response_code == HTTPStatus.OK:
+            assert not isinstance(
+                self._current_replayed_record,
+                (PushResponseRecord, BackendCommitRequestRecord),
+            )
             self._current_replayed_record = record
         elif isinstance(record, PushResponseRecord) and record.response_code == HTTPStatus.ACCEPTED:
             self._current_replayed_record = record
@@ -659,39 +671,49 @@ class AiAugmentBackendStore(FrozenStrictModel):
         request: BackendComponent.PushRequestRecordProperty,
         *,
         session_id: UUID | None,
-    ) -> ResponseRecordPromise[PushResponseRecord]:
+    ) -> tuple[
+        PushResponseRecord | None,
+        ResponseRecordPromise[PushResponseRecord],
+    ]:
         with self._lock:
             before_append = self._append_ordinal
             try:
-                captured = HttpRequestLogRecord(
+                captured_push_request_http_record = HttpRequestLogRecord(
                     **request.http_request_log_record.model_dump(mode="python")
                 )
-                http_record = self._append_authoritative_record(captured)
+                push_response_record = self._append_authoritative_record(
+                    captured_push_request_http_record
+                )
+                assert isinstance(push_response_record, PushResponseRecord)
             except Exception as exc:
                 self._failure = exc
-                return ResponseRecordPromise[PushResponseRecord]._resolved(
+                return None, ResponseRecordPromise[PushResponseRecord]._resolved(
                     (BackendStoreAcknowledgment.ACK if self._append_ordinal > before_append
                      else BackendStoreAcknowledgment.NAK),
                     (None, BackendStoreException._from_exception(exc)),
                 )
             try:
-                selected = PushRequestRecord.model_validate(request, from_attributes=True)
-                if http_record.response_code != HTTPStatus.ACCEPTED:
-                    assert isinstance(http_record, PushResponseRecord)
-                    return ResponseRecordPromise[PushResponseRecord]._resolved(
-                        BackendStoreAcknowledgment.ACK,
-                        (http_record, None),
+                push_request_record = PushRequestRecord.model_validate(
+                    request, from_attributes=True
+                )
+                if push_response_record.response_code != HTTPStatus.ACCEPTED:
+                    return (
+                        push_response_record,
+                        ResponseRecordPromise[PushResponseRecord]._resolved(
+                            BackendStoreAcknowledgment.ACK,
+                            (push_response_record, None),
+                        ),
                     )
                 if self._loop is None:
                     raise RuntimeError(Locale.PUSH_SERVER_LOOP_REQUIRED)
-                return ResponseRecordPromise[PushResponseRecord]._start(
+                return push_response_record, ResponseRecordPromise[PushResponseRecord]._start(
                     BackendStoreAcknowledgment.ACK,
-                    lambda: self._process_push(selected, session_id=session_id),
+                    lambda: self._process_push(push_request_record, session_id=session_id),
                     self._loop,
                 )
             except Exception as exc:
                 self._failure = exc
-                return ResponseRecordPromise[PushResponseRecord]._resolved(
+                return push_response_record, ResponseRecordPromise[PushResponseRecord]._resolved(
                     BackendStoreAcknowledgment.ACK,
                     (None, BackendStoreException._from_exception(exc)),
                 )
@@ -1021,12 +1043,11 @@ class AiAugmentBackendStore(FrozenStrictModel):
                 if existing is not None:
                     if validation is None:
                         raise RuntimeError(Locale.PERSISTED_ATTEMPT_CURRENT_VALIDATION_MISSING)
-                    applied = self._validation_from_attempt_json(
+                    self._assert_attempt_projection(
                         existing[0],
-                        commit_http_record=commit,
+                        commit_request_record=commit,
+                        validation_request_record=validation,
                     )
-                    if applied.model_dump() != validation.model_dump():
-                        raise _ReplayProjectionConflictError
                     assert self._current_replayed_record is validation
                     return validation
                 if not isinstance(current, BackendCommitRequestRecord):
@@ -1077,12 +1098,11 @@ class AiAugmentBackendStore(FrozenStrictModel):
                 validation = self._validation_from_cursor()
                 if validation is None:
                     raise RuntimeError(Locale.APPLIED_ATTEMPT_CURRENT_VALIDATION_MISSING)
-                applied = self._validation_from_attempt_json(
+                self._assert_attempt_projection(
                     row[0],
-                    commit_http_record=commit,
+                    commit_request_record=commit,
+                    validation_request_record=validation,
                 )
-                if applied.model_dump() != validation.model_dump():
-                    raise _ReplayProjectionConflictError
                 assert self._current_replayed_record is validation
                 return validation
 
@@ -1286,8 +1306,6 @@ class AiAugmentBackendStore(FrozenStrictModel):
             RUN_OUTCOME_PATHS,
         )
 
-        from .validation_request import BackendValidationRequestRecord
-
         context = self._context
         if context is None:
             raise RuntimeError(Locale.STORE_CONTEXT_UNAVAILABLE)
@@ -1304,7 +1322,10 @@ class AiAugmentBackendStore(FrozenStrictModel):
                 pull_ref = push_ref.pull_response_record
                 if pull_ref is None:
                     raise ValueError(Locale.REPLAY_COMMIT_PUSH_MISMATCH)
-                refs = {pull_ref.record_id: pull_ref, push_ref.record_id: push_ref}
+                refs: dict[UUID, PullResponseRecord | PushResponseRecord] = {
+                    pull_ref.record_id: pull_ref,
+                    push_ref.record_id: push_ref,
+                }
                 commit = BackendCommitRequestRecord.from_http_request_log_record(
                     record,
                     resolve_http_record=lambda record_id: refs[record_id],
@@ -1319,14 +1340,33 @@ class AiAugmentBackendStore(FrozenStrictModel):
                 commit_ref = self._current_replayed_record
                 if not isinstance(commit_ref, BackendCommitRequestRecord):
                     raise ValueError(Locale.REPLAY_VALIDATION_COMMIT_MISMATCH)
-                self._apply_validation_record(record)
+                if record.request_body is None:
+                    raise ValueError(Locale.VALIDATION_BODY_MISSING)
+                parsed = json.loads(record.request_body)
                 initial_ref = self._initial_validation_for_commit(commit_ref)
+                body = ValidationRequestBody(
+                    commit_request_record=commit_ref,
+                    post_commit_validation=PostCommitValidation.model_validate(
+                        parsed[VALIDATION_BODY_POST_COMMIT_VALIDATION_KEY], strict=False,
+                    ),
+                    initial_validation_request_record=initial_ref,
+                    openalex_ror_records=tuple(
+                        HttpRequestLogRecord.model_validate(value, strict=False)
+                        for value in parsed[VALIDATION_BODY_OPENALEX_ROR_RECORDS_KEY]
+                    ),
+                )
+                self._apply_validation_record(
+                    record,
+                    body=body,
+                    parsed=parsed,
+                    commit_ref=commit_ref,
+                    initial_ref=initial_ref,
+                )
                 validation = BackendValidationRequestRecord.from_http_request_log_record(
                     record,
-                    commit_request_record=commit_ref,
-                    initial_validation_request_record=initial_ref,
+                    validation_request_body=body,
                 )
-                body = validation.validation_request_body
+                assert validation.validation_request_body is body
                 if body.commit_request_record is not commit_ref:
                     raise ValueError(Locale.REPLAY_VALIDATION_COMMIT_MISMATCH)
                 if body.initial_validation_request_record is not initial_ref:
@@ -1482,14 +1522,10 @@ class AiAugmentBackendStore(FrozenStrictModel):
                 raise _ReplayRecordContourInvalidError from exc
             return validated
 
-        if route == (HTTP_POST_METHOD, VALIDATE_PATH):
-            try:
-                BackendValidationRequestRecord.from_http_request_log_record(validated)
-            except ValueError as exc:
-                raise _ReplayCommitInvalidError(Locale.REPLAY_COMMIT_INVALID) from exc
-            return validated
-
-        if route != (HTTP_POST_METHOD, COMMIT_PATH):
+        if route not in {
+            (HTTP_POST_METHOD, COMMIT_PATH),
+            (HTTP_POST_METHOD, VALIDATE_PATH),
+        }:
             transport_failure = (
                 validated.host != SYNTHETIC_COMMIT_HOST
                 and route not in {
@@ -1523,6 +1559,8 @@ class AiAugmentBackendStore(FrozenStrictModel):
             or validated.duration_usec is not None
         ):
             raise _ReplayCommitInvalidError(Locale.REPLAY_COMMIT_INVALID)
+        if route == (HTTP_POST_METHOD, VALIDATE_PATH):
+            return validated
         try:
             CommitRequestBody.validate_serialized_json(validated.request_body)
         except (ValidationError, ValueError) as exc:
@@ -1769,77 +1807,94 @@ class AiAugmentBackendStore(FrozenStrictModel):
         )
         return commit, validation
 
-    def _validation_from_attempt_json(
+    def _assert_attempt_projection(
         self,
         value: str,
         *,
-        commit_http_record: HttpRequestLogRecord,
-    ) -> BackendValidationRequestRecord:
+        commit_request_record: BackendCommitRequestRecord,
+        validation_request_record: BackendValidationRequestRecord,
+    ) -> None:
         payload = json.loads(value)
         if not isinstance(payload, dict) or set(payload) != {
             AUTHORITATIVE_ATTEMPT_VALIDATION_ID_KEY
         }:
             raise _ReplayProjectionConflictError
         validation_id = UUID(payload[AUTHORITATIVE_ATTEMPT_VALIDATION_ID_KEY])
-        validation = BackendValidationRequestRecord.from_http_request_log_record(
-            self._http_record(validation_id)
-        )
         if (
-            validation.validation_request_body.commit_request_record.record_id
-            != commit_http_record.record_id
-            or validation.request_headers != commit_http_record.request_headers
+            validation_request_record.record_id != validation_id
+            or self._http_record(validation_id).model_dump(mode="json")
+            != validation_request_record.http_request_log_record.model_dump(mode="json")
+            or validation_request_record.validation_request_body.commit_request_record
+            is not commit_request_record
+            or validation_request_record.request_headers
+            != commit_request_record.request_headers
         ):
             raise _ReplayProjectionConflictError
-        return validation
 
     def _apply_validation_record(
         self,
         record: HttpRequestLogRecord,
+        *,
+        body: ValidationRequestBody,
+        parsed: Mapping[str, Any],
+        commit_ref: BackendCommitRequestRecord,
+        initial_ref: BackendValidationRequestRecord | None,
     ) -> None:
         from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.submission_mixin import (  # noqa: E501
             submission_http_context,
         )
-        validation_request_record = BackendValidationRequestRecord.from_http_request_log_record(
-            record
-        )
-        body = validation_request_record.validation_request_body
+        assert body.commit_request_record is commit_ref
+        assert body.initial_validation_request_record is initial_ref
         ordinal, _ = self._http_record_with_ordinal(record.record_id)
-        commit_ordinal, commit = self._http_record_with_ordinal(
-            body.commit_request_record.record_id
+        embedded = parsed[VALIDATION_BODY_COMMIT_REQUEST_RECORD_KEY]
+        embedded_commit = HttpRequestLogRecord.model_validate(
+            embedded[VALIDATION_COMMIT_SELF_HTTP_RECORD_KEY], strict=False,
         )
-        typed_commit = self._current_replayed_record
+        embedded_pull = HttpRequestLogRecord.model_validate(
+            embedded[VALIDATION_COMMIT_PULL_RESPONSE_RECORD_KEY], strict=False,
+        )
+        embedded_push = HttpRequestLogRecord.model_validate(
+            embedded[VALIDATION_COMMIT_PUSH_RESPONSE_RECORD_KEY], strict=False,
+        )
+        commit_ordinal, commit = self._http_record_with_ordinal(
+            embedded_commit.record_id
+        )
         if (
-            not isinstance(typed_commit, BackendCommitRequestRecord)
-            or typed_commit.record_id != commit.record_id
+            self._current_replayed_record is not commit_ref
+            or commit_ref.record_id != embedded_commit.record_id
             or commit_ordinal >= ordinal
             or record.request_headers != commit.request_headers
-            or commit.model_dump() != body.commit_request_record.model_dump()
-            or typed_commit.http_request_log_record.model_dump(mode="json")
-            != commit.model_dump(mode="json")
-            or body.commit_request_record.commit_request_body.serialize()
-            != typed_commit.commit_request_body.serialize()
-            or body.commit_request_record.commit_request_body.pull_response_record.model_dump(
-                mode="json"
-            ) != typed_commit.commit_request_body.pull_response_record.model_dump(mode="json")
-            or body.commit_request_record.commit_request_body.push_response_record.model_dump(
-                mode="json"
-            ) != typed_commit.commit_request_body.push_response_record.model_dump(mode="json")
+            or embedded_commit != commit
+            or any(
+                getattr(commit_ref, field) != getattr(embedded_commit, field)
+                for field in HttpRequestLogRecord.model_fields
+            )
+            or any(
+                getattr(commit_ref.commit_request_body.pull_response_record, field)
+                != getattr(embedded_pull, field)
+                or getattr(commit_ref.commit_request_body.push_response_record, field)
+                != getattr(embedded_push, field)
+                for field in HttpRequestLogRecord.model_fields
+            )
         ):
             raise ReplayInputMissing(Locale.VALIDATION_COMMIT_LINK_INVALID)
-        initial = body.initial_validation_request_record
+        initial_value = parsed[VALIDATION_BODY_INITIAL_VALIDATION_REQUEST_RECORD_KEY]
+        initial = (
+            None if initial_value is None else
+            HttpRequestLogRecord.model_validate(initial_value, strict=False)
+        )
         if initial is not None:
             initial_ordinal, persisted = self._http_record_with_ordinal(initial.record_id)
-            if initial_ordinal >= commit_ordinal or persisted.model_dump() != initial.model_dump():
+            if initial_ordinal >= commit_ordinal or persisted != initial:
                 raise ValueError(Locale.VALIDATION_INITIAL_LINK_INVALID)
-        initial_ref = self._initial_validation_for_commit(typed_commit)
         if (initial is None) != (initial_ref is None) or (
-            initial is not None
-            and initial_ref is not None
-            and initial.http_request_log_record.model_dump(mode="json")
-            != initial_ref.http_request_log_record.model_dump(mode="json")
+            initial is not None and initial_ref is not None and any(
+                getattr(initial, field) != getattr(initial_ref, field)
+                for field in HttpRequestLogRecord.model_fields
+            )
         ):
             raise ReplayInputMissing(Locale.VALIDATION_INITIAL_LINK_INVALID)
-        session_id = typed_commit.commit_request_body.codex_session_record.session_id
+        session_id = commit_ref.commit_request_body.codex_session_record.session_id
         namekey = name_key_from_header_value(commit.request_headers.get(NAME_KEY_HEADER))
         placeholders = ", ".join("?" for _path in RUN_OUTCOME_PATHS)
         outcomes = self._execute(
@@ -1871,23 +1926,23 @@ class AiAugmentBackendStore(FrozenStrictModel):
         http = ModelHttpInterceptor.from_records(inputs)
         with submission_http_context(http):
             evaluation_inputs, db_reads = self._validated_commit_inputs(
-                typed_commit,
+                commit_ref,
                 initial_validation_request_record=initial_ref,
             )
             evaluated, projection = evaluate_commit(
-                typed_commit,
+                commit_ref,
                 initial_validation_request_record=initial_ref,
                 inputs=evaluation_inputs,
                 db_reads=db_reads,
             )
-        assert projection.commit_request_record is typed_commit
+        assert projection.commit_request_record is commit_ref
         observed = body.post_commit_validation
         if (
             evaluated != observed
             or http.record_ids != tuple(item.record_id for item in body.openalex_ror_records)
         ):
             raise ReplayInputMissing(Locale.VALIDATION_REPLAY_MISMATCH)
-        self._project_validation(typed_commit, projection, accepted=(
+        self._project_validation(commit_ref, projection, accepted=(
             observed.result is BackendLifecycle.ACCEPTED
         ))
 
@@ -2598,14 +2653,15 @@ class AiAugmentBackendStore(FrozenStrictModel):
         if row is None:
             raise BackendStoreException(Locale.RUN_OUTCOME_PROJECTION_INCONSISTENT)
         # Verify the explicit persisted inputs without reapplying derived effects.
-        attempt = self._validation_from_attempt_json(row[0], commit_http_record=commit)
-        if (
-            attempt.validation_request_body.commit_request_record.model_dump()
-            != commit.model_dump()
-            or attempt.model_dump() != validation.model_dump()
-        ):
-            raise BackendStoreException(Locale.RUN_OUTCOME_REPLAY_INPUTS_DIFFER)
-        for provider in attempt.validation_request_body.openalex_ror_records:
+        try:
+            self._assert_attempt_projection(
+                row[0],
+                commit_request_record=commit,
+                validation_request_record=validation,
+            )
+        except _ReplayProjectionConflictError as exc:
+            raise BackendStoreException(Locale.RUN_OUTCOME_REPLAY_INPUTS_DIFFER) from exc
+        for provider in validation.validation_request_body.openalex_ror_records:
             provider_ordinal, persisted = self._http_record_with_ordinal(provider.record_id)
             if persisted != provider or provider_ordinal >= validation_ordinal:
                 raise BackendStoreException(Locale.RUN_OUTCOME_PROVIDER_INPUT_CORRUPT)
@@ -2738,13 +2794,17 @@ class AiAugmentBackendStore(FrozenStrictModel):
         validation = None
         if body.validation_record_id is not None:
             validation_ordinal, record = self._http_record_with_ordinal(body.validation_record_id)
+            validation = outcome.attempt
             if (
                 validation_ordinal >= ordinal
-                or body.attempt_record != record
+                or validation is None
+                or validation is not self._validation_from_cursor()
+                or validation.record_id != body.validation_record_id
+                or validation.http_request_log_record.model_dump(mode="json")
+                != record.model_dump(mode="json")
             ):
                 raise ReplayInputMissing(Locale.RUN_OUTCOME_REPLAY_MISMATCH)
-            validation = BackendValidationRequestRecord.from_http_request_log_record(record)
-        elif body.attempt_record is not None:
+        elif outcome.attempt is not None:
             raise ReplayInputMissing(Locale.RUN_OUTCOME_REPLAY_MISMATCH)
         # A rejected client exchange is authoritative history, never derived acceptance.
         if outcome.response_code == HTTPStatus.BAD_REQUEST:
@@ -2821,15 +2881,20 @@ class AiAugmentBackendStore(FrozenStrictModel):
             ).fetchone()
             if linked is None or linked[0] is None:
                 raise ReplayInputMissing(Locale.RUN_OUTCOME_ACCEPTED_ROW_VALIDATION_MISSING)
-            validation_ordinal, http_validation = self._http_record_with_ordinal(UUID(linked[0]))
-            validation = BackendValidationRequestRecord.from_http_request_log_record(
-                http_validation
+            validation_id = UUID(linked[0])
+            validation_ordinal, http_validation = self._http_record_with_ordinal(
+                validation_id
             )
-            body = validation.validation_request_body
+            validation = self._validation_from_cursor()
             if (
-                body.commit_request_record.record_id != commit_id
+                validation is None
+                or validation.record_id != validation_id
+                or validation.http_request_log_record.model_dump(mode="json")
+                != http_validation.model_dump(mode="json")
+                or validation.validation_request_body.commit_request_record is not commit
                 or validation.request_headers != commit.request_headers
-                or body.post_commit_validation.result is not BackendLifecycle.ACCEPTED
+                or validation.validation_request_body.post_commit_validation.result
+                is not BackendLifecycle.ACCEPTED
                 or not commit_ordinal < validation_ordinal < outcome_ordinal
             ):
                 raise ReplayInputMissing(Locale.RUN_OUTCOME_VALIDATION_LINKAGE_INVALID)
@@ -2841,7 +2906,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
                 f"WHERE {duckdb_quote_identifier(KTP_AI_AUGMENT_COMMIT_REQUEST_RECORD_ID_COL)} = ?",
                 [
                     str(validation.record_id), str(outcome.record_id),
-                    outcome.model_dump_json(), str(commit.record_id),
+                    json.dumps(outcome.serialize()), str(commit.record_id),
                 ],
             )
             updated += 1
@@ -2879,8 +2944,8 @@ class AiAugmentBackendStore(FrozenStrictModel):
                                 _CodexInnerDictProcedure(),
                             ),
                             run_outcome_response_record=(
-                                RunOutcomeResponseRecord.from_http_request_log_record(
-                                    HttpRequestLogRecord.model_validate_json(outcome_json),
+                                RunOutcomeResponseRecord.from_serialized_json(
+                                    value=outcome_json,
                                 )
                             ),
                         )

@@ -102,7 +102,7 @@ backend_test_paths = fixtures.backend_test_paths
 
 
 @pytest.fixture
-def validation_http_record() -> HttpRequestLogRecord:
+def validation_http_record() -> BackendValidationRequestRecord:
     _pull, commit = fixtures.retry_attempt_records(
         original_pull_record_id=uuid7(), session_id=uuid7(), attempt_id="validation-model",
     )
@@ -117,7 +117,7 @@ def validation_http_record() -> HttpRequestLogRecord:
         ),
         initial_validation_request_record=None,
     )
-    return HttpRequestLogRecord(
+    record = HttpRequestLogRecord(
         schema_version="1.1", method="POST", scheme="http", host="invalid",
         path=VALIDATE_PATH, query="",
         request_headers=dict(commit.request_headers),
@@ -125,19 +125,27 @@ def validation_http_record() -> HttpRequestLogRecord:
         response_code=None, response_headers=None, response_body=None,
         received_at_unix_usec=None, ready_to_respond_at_unix_usec=None, duration_usec=None,
     )
+    return BackendValidationRequestRecord(
+        **record.model_dump(mode="python"), validation_request_body=body,
+    )
 
 
 def test_validation_record_preserves_wire_json_and_uuid(
-    validation_http_record: HttpRequestLogRecord,
+    validation_http_record: BackendValidationRequestRecord,
 ) -> None:
-    record = BackendValidationRequestRecord.from_http_request_log_record(validation_http_record)
+    body = validation_http_record.validation_request_body
+    record = BackendValidationRequestRecord.from_http_request_log_record(
+        validation_http_record.http_request_log_record,
+        validation_request_body=body,
+    )
     assert record.model_dump_json() == validation_http_record.model_dump_json()
     assert record.record_id == validation_http_record.record_id
     assert record.http_request_log_record is record
-    assert record.validation_request_body == ValidationRequestBody.from_serialized_json(
-        validation_http_record.request_body or "",
+    assert record.validation_request_body == body
+    assert record.validation_request_body.commit_request_record is body.commit_request_record
+    assert AiAugmentBackendStore._validated_http_record(record).model_dump() == (
+        validation_http_record.model_dump()
     )
-    assert AiAugmentBackendStore._validated_http_record(record) == validation_http_record
 
 
 @pytest.mark.parametrize(("field", "value"), (
@@ -148,17 +156,20 @@ def test_validation_record_preserves_wire_json_and_uuid(
     ("duration_usec", 1), ("request_body", None),
 ))
 def test_validation_record_rejects_invalid_envelope(
-    validation_http_record: HttpRequestLogRecord, field: str, value: Any,
+    validation_http_record: BackendValidationRequestRecord, field: str, value: Any,
 ) -> None:
     invalid = validation_http_record.model_copy(update={field: value})
     with pytest.raises(ValueError, match="validation .* (invalid contour|missing)"):
-        BackendValidationRequestRecord.from_http_request_log_record(invalid)
+        BackendValidationRequestRecord.from_http_request_log_record(
+            invalid,
+            validation_request_body=validation_http_record.validation_request_body,
+        )
 
 
 def test_validation_record_rejects_mismatched_parsed_body(
-    validation_http_record: HttpRequestLogRecord,
+    validation_http_record: BackendValidationRequestRecord,
 ) -> None:
-    body = ValidationRequestBody.from_serialized_json(validation_http_record.request_body or "")
+    body = validation_http_record.validation_request_body
     with pytest.raises(ValueError, match="body does not match its record"):
         BackendValidationRequestRecord(
             **validation_http_record.model_dump(),
@@ -315,7 +326,7 @@ def test_live_validation_replays_with_only_referenced_http(
                     response_code=503,
                 ).model_dump()
             )
-            pulled = store.pull_response_record(record)
+            pulled = store.promise_pull_response_record(record)
             observed.append(pulled.acknowledgment)
             pull_response, pull_error = asyncio.run(pulled.response_record_promise())
             assert pull_error is None and pull_response is not None
@@ -325,10 +336,11 @@ def test_live_validation_replays_with_only_referenced_http(
                     response_code=HTTPStatus.CONFLICT, request_body="{}",
                 ).model_dump(),
             )
-            result = store.push_response_record(rejected, session_id=None)
+            immediate, result = store.promise_push_response_record(rejected, session_id=None)
             observed.append(result.acknowledgment)
             response, error = asyncio.run(result.response_record_promise())
             assert error is None and response is not None
+            assert immediate is response
             assert response.response_code == HTTPStatus.CONFLICT
             assert response.pull_response_record is None
 
@@ -410,14 +422,17 @@ def test_live_validation_replays_with_only_referenced_http(
         assert validation.validation_request_body.commit_request_record.model_dump(
             mode="json"
         ) == result.validation_request_body.commit_request_record.model_dump(mode="json")
-        envelope = ValidationRequestBody.from_serialized_json(validation.request_body or "")
-        assert envelope.model_dump(mode="json") == validation.validation_request_body.model_dump(
-            mode="json"
-        )
+        envelope = json.loads(validation.request_body or "")
+        assert PostCommitValidation.model_validate(
+            envelope[backend_vars.VALIDATION_BODY_POST_COMMIT_VALIDATION_KEY], strict=False,
+        ) == validation.validation_request_body.post_commit_validation
         assert validation.model_dump_json() == (
             store._http_record(validation.record_id).model_dump_json()
         )
-        assert envelope.openalex_ror_records == result.validation_request_body.openalex_ror_records
+        assert tuple(
+            HttpRequestLogRecord.model_validate(value, strict=False)
+            for value in envelope[backend_vars.VALIDATION_BODY_OPENALEX_ROR_RECORDS_KEY]
+        ) == result.validation_request_body.openalex_ror_records
         assert validation.path == VALIDATE_PATH
         assert (
             validation.request_headers
@@ -666,8 +681,11 @@ def test_validation_preview_does_not_publish_zip(
                 selected: AiAugmentBackendStore, record: HttpRequestLogRecord,
             ) -> HttpRequestLogRecord:
                 if record.path == VALIDATE_PATH:
-                    body = ValidationRequestBody.from_serialized_json(record.request_body or "")
-                    assert body.post_commit_validation.result == BackendLifecycle.ACCEPTED
+                    body = json.loads(record.request_body or "")
+                    assert PostCommitValidation.model_validate(
+                        body[backend_vars.VALIDATION_BODY_POST_COMMIT_VALIDATION_KEY],
+                        strict=False,
+                    ).result == BackendLifecycle.ACCEPTED
                     raise OSError("interrupted before validation append")
                 return original(selected, record)
 
@@ -814,7 +832,9 @@ def test_outcome_materializes_persisted_ids_identically_live_and_replay(
         else:
             (innerdict,) = query.ai_augment_singular_outerdicts[0].codex_innerdicts
             data = innerdict.innerdict.data
-            assert data[KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_RECORD_COL] == outcome.model_dump_json()
+            assert RunOutcomeResponseRecord.from_serialized_json(
+                value=data[KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_RECORD_COL],
+            ) == innerdict.run_outcome_response_record
             assert (
                 innerdict.run_outcome_response_record.model_dump_json()
                 == outcome.model_dump_json()
@@ -1140,10 +1160,14 @@ def test_failed_validation_projection_does_not_advance_store_validation_state(
             with pytest.raises(RuntimeError, match="injected projection failure"):
                 store._validate_commit(commit_id)
         last_line = Path(runtime.pipeline_config.replay_log).read_bytes().splitlines()[-1]
-        durable = BackendValidationRequestRecord.from_http_request_log_record(
-            HttpRequestLogRecord.model_validate_json(last_line),
-        )
-        assert durable.validation_request_body.commit_request_record.record_id == commit_id
+        durable = HttpRequestLogRecord.model_validate_json(last_line)
+        assert durable.request_body is not None
+        serialized = json.loads(durable.request_body)
+        assert HttpRequestLogRecord.model_validate(
+            serialized[backend_vars.VALIDATION_BODY_COMMIT_REQUEST_RECORD_KEY][
+                backend_vars.VALIDATION_COMMIT_SELF_HTTP_RECORD_KEY
+            ], strict=False,
+        ).record_id == commit_id
         assert store.current_replayed_record is current_commit
     assert store.current_replayed_record is current_commit
     with duckdb.connect(str(store._detour_db_path), read_only=True) as connection:

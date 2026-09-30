@@ -29,7 +29,6 @@ from ....control_centre.dashboard.helpers.data_models.run_outcome_event import (
     RunOutcome,
     RunOutcomeResponseRecord,
 )
-from .ai_augment_http_request_log_record import ResponseRecord
 from .commit_request import (
     CodexRolloutRecord,
 )
@@ -41,13 +40,13 @@ class _CodexInnerDictProcedure:
 
 class _CodexInnerDictJson(FrozenStrictModel):
     innerdict: dict[str, Any]
-    run_outcome_response_record: ResponseRecord
+    run_outcome_response_record: dict[str, object]
 
     @classmethod
     def from_codex_innerdict(cls, value: CodexInnerDict) -> Self:
         return cls(
             innerdict=value.innerdict.data,
-            run_outcome_response_record=value.run_outcome_response_record,
+            run_outcome_response_record=value.run_outcome_response_record.serialize(),
         )
 
 
@@ -99,8 +98,8 @@ class CodexInnerDict(FrozenStrictModel):
                 serialized.innerdict,
                 _CodexInnerDictProcedure(),
             ),
-            run_outcome_response_record=RunOutcomeResponseRecord.from_http_request_log_record(
-                serialized.run_outcome_response_record,
+            run_outcome_response_record=RunOutcomeResponseRecord.from_serialized_json(
+                value=json.dumps(serialized.run_outcome_response_record),
             ),
         )
 

@@ -336,7 +336,7 @@ def test_pull_ack_means_only_request_fsync_and_result_reports_processing_error(
         raise OSError(f"{failure} interrupted")
 
     async def exercise() -> None:
-        promise = store.pull_response_record(record)
+        promise = store.promise_pull_response_record(record)
         expected = (
             BackendStoreAcknowledgment.NAK if failure == "fsync" else BackendStoreAcknowledgment.ACK
         )

@@ -58,6 +58,9 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_
     RESOURCE_PATH_KEY,
     RESOURCE_SHA256_KEY,
 )
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.post_commit_validation import (  # noqa: E501
+    PostCommitValidation,
+)
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.pydantic_to_paste import (  # noqa: E501
     EvidenceWithdrawal,
     FieldSubmission,
@@ -159,7 +162,9 @@ from src.detours.detour_ai_augment.src.backend.helpers.data_models.push_event im
     PushResponseRecord,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.response_record_promise import (
+    BackendStoreAcknowledgment,
     BackendStoreException,
+    ResponseRecordPromise,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.validation_request import (  # noqa: E501
     VALIDATE_PATH,
@@ -1956,20 +1961,30 @@ def assert_captured_operator_push_contour(
             record for record in authoritative_records if record.path == VALIDATE_PATH
         )
         assert len(validation_records) == 2
-        accepted_attempt = BackendValidationRequestRecord.from_http_request_log_record(
-            validation_records[-1]
-        )
+        accepted_attempt_record = validation_records[-1]
+        assert accepted_attempt_record.request_body is not None
+        accepted_attempt = json.loads(accepted_attempt_record.request_body)
         assert (
-            accepted_attempt.validation_request_body.post_commit_validation.result
+            PostCommitValidation.model_validate(
+                accepted_attempt[backend_vars.VALIDATION_BODY_POST_COMMIT_VALIDATION_KEY],
+                strict=False,
+            ).result
             is BackendLifecycle.ACCEPTED
         )
         assert (
-            accepted_attempt.validation_request_body.commit_request_record.record_id
+            HttpRequestLogRecord.model_validate(
+                accepted_attempt[backend_vars.VALIDATION_BODY_COMMIT_REQUEST_RECORD_KEY][
+                    backend_vars.VALIDATION_COMMIT_SELF_HTTP_RECORD_KEY
+                ], strict=False,
+            ).record_id
             == commits[-1].record_id
         )
         assert (
-            accepted_attempt
-            .validation_request_body.commit_request_record.commit_request_body.push_response_record.record_id
+            HttpRequestLogRecord.model_validate(
+                accepted_attempt[backend_vars.VALIDATION_BODY_COMMIT_REQUEST_RECORD_KEY][
+                    backend_vars.VALIDATION_COMMIT_PUSH_RESPONSE_RECORD_KEY
+                ], strict=False,
+            ).record_id
             == pushes[-1].record_id
         )
         assert len(query.ai_augment_singular_outerdicts) == 1
@@ -1978,10 +1993,12 @@ def assert_captured_operator_push_contour(
         committed = selected_singular_outerdict.codex_innerdicts[0]
         stored_outcome = committed.run_outcome_response_record
         assert stored_outcome.attempt is not None
-        assert stored_outcome.attempt.record_id == accepted_attempt.record_id
-        assert committed.text(KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_RECORD_COL) == (
-            stored_outcome.model_dump_json()
-        )
+        assert stored_outcome.attempt.record_id == accepted_attempt_record.record_id
+        outcome_text = committed.text(KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_RECORD_COL)
+        assert outcome_text is not None
+        assert RunOutcomeResponseRecord.from_serialized_json(
+            value=outcome_text,
+        ) == stored_outcome
         assert (
             stored_outcome._body().commit_request_record_id
             == commits[-1].record_id
@@ -1997,7 +2014,7 @@ def assert_captured_operator_push_contour(
         assert "Professor Sir Aziz Sheikh OBE" in card_markdown
         assert KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_RECORD_COL in card_markdown
         assert str(commits[-1].record_id) in card_markdown
-        assert stored_outcome.model_dump_json() in card_markdown
+        assert outcome_text in card_markdown
 
 
 def test_captured_operator_push_generates_commit_and_exact_410_response(
@@ -2019,7 +2036,7 @@ def test_captured_operator_push_generates_commit_and_exact_410_response(
 
 @pytest.mark.parametrize(("method", "path", "state", "expected_status", "chunks"), (
     ("GET", "/pull", BackendLifecycle.READY, HTTPStatus.OK, (b"",)),
-    ("POST", "/push", BackendLifecycle.BUSY, HTTPStatus.CONFLICT,
+    ("POST", "/push", BackendLifecycle.BUSY, HTTPStatus.SERVICE_UNAVAILABLE,
      (b'{"submission":', b'"private test input"}')),
 ))
 def test_http_adapter_persists_complete_exchange_before_sending(
@@ -5622,29 +5639,35 @@ def test_repeated_researcher_rows_materialize_as_distinct_innerdicts() -> None:
         connection.close()
 
 
-def test_push_acceptance_changes_state_before_post_commit_work(
+def test_push_acceptance_changes_state_before_validation_is_exposed(
     monkeypatch: pytest.MonkeyPatch, api_runtime: AiAugmentBackendContext,
     api_store: AiAugmentBackendStore,
+    api_push_capture: tuple[CodexRolloutRecord, aivm_audit._AivmAuditConfiguration],
+    threaded_loop: asyncio.Runner,
 ) -> None:
-    pull_record = persisted_http_record(
-        record_id=uuid7(), method=HTTP_GET_METHOD, path=PULL_PATH,
-        response_code=HTTPStatus.OK,
-    )
     monkeypatch.setattr(api, "BACKEND_LIFECYCLE", BackendLifecycle.READY)
-    monkeypatch.setattr(api, "BACKEND_SESSION_ID", TEST_SESSION_ID)
-    with api_store._writable(api_runtime):
-        api_store._append_authoritative_record(pull_record)
+
+    async def exercise() -> None:
+        api_store._loop = asyncio.get_running_loop()
+        await api.authoritative_pull(
+            requests.Request("GET", "http://invalid/pull").prepare(), api_store,
+        )
         captured_pull = api_store.current_replayed_record
         assert isinstance(captured_pull, PullResponseRecord)
         request = requests.Request("POST", "http://invalid/push", data=b"{}").prepare()
-        response = api._push_response(request, api_store, captured_pull)
+        response = await api.authoritative_push(request, api_store)
         assert response.status_code == HTTPStatus.ACCEPTED
         assert response.headers[api.LOCATION_HEADER] == PULL_PATH
         assert api.BACKEND_LIFECYCLE is BackendLifecycle.BUSY
-        assert api_store.current_replayed_record is captured_pull
-        duplicate = api._push_response(request, api_store, captured_pull)
-        assert duplicate.status_code == HTTPStatus.CONFLICT
-        assert duplicate.headers[api.LOCATION_HEADER] == PULL_PATH
+        await asyncio.gather(*tuple(api.AUTHORITATIVE_BACKGROUND_TASKS))
+        validation = api_store.current_replayed_record
+        assert isinstance(validation, BackendValidationRequestRecord)
+        assert (
+            validation.validation_request_body.commit_request_record
+            .commit_request_body.pull_response_record is captured_pull
+        )
+    with api_store._writable(api_runtime):
+        threaded_loop.run(exercise())
 
 
 def test_retry_push_requires_a_persisted_current_pull_before_acceptance(
@@ -5668,7 +5691,7 @@ def test_retry_push_requires_a_persisted_current_pull_before_acceptance(
         assert isinstance(validation, BackendValidationRequestRecord)
         commit = validation.validation_request_body.commit_request_record
         assert api.BACKEND_LIFECYCLE is BackendLifecycle.RETRY
-        premature = api._push_response(request, api_store, None)
+        premature = await api.authoritative_push(request, api_store)
         assert premature.status_code == HTTPStatus.CONFLICT
         assert premature.headers[api.LOCATION_HEADER] == PULL_PATH
         assert premature.json() == {"detail": Locale.CONFIGURATION_ERROR_DETAIL}
@@ -5687,11 +5710,17 @@ def test_retry_push_requires_a_persisted_current_pull_before_acceptance(
         assert api_store._http_record(persisted_pull.record_id).model_dump_json() == (
             persisted_pull.model_dump_json()
         )
-        accepted = api._push_response(request, api_store, persisted_pull)
+        accepted = await api.authoritative_push(request, api_store)
         assert accepted.status_code == HTTPStatus.ACCEPTED
         assert accepted.headers[api.LOCATION_HEADER] == PULL_PATH
         assert BackendLifecycle(api.BACKEND_LIFECYCLE) is BackendLifecycle.BUSY
-        assert api_store.current_replayed_record is persisted_pull
+        await asyncio.gather(*tuple(api.AUTHORITATIVE_BACKGROUND_TASKS))
+        retried_validation = api_store.current_replayed_record
+        assert isinstance(retried_validation, BackendValidationRequestRecord)
+        assert (
+            retried_validation.validation_request_body.commit_request_record
+            .commit_request_body.pull_response_record is persisted_pull
+        )
     with api_store._writable(api_runtime):
         threaded_loop.run(exercise())
 
@@ -5707,6 +5736,7 @@ def test_push_configuration_failures_remain_internal_errors(
     monkeypatch: pytest.MonkeyPatch, workflow_status: BackendLifecycle,
     session_id: UUID | None, api_runtime: AiAugmentBackendContext,
     api_store: AiAugmentBackendStore,
+    threaded_loop: asyncio.Runner,
 ) -> None:
     pull_record = persisted_http_record(
         record_id=uuid7(), method=HTTP_GET_METHOD, path=PULL_PATH,
@@ -5718,9 +5748,11 @@ def test_push_configuration_failures_remain_internal_errors(
         api_store._append_authoritative_record(pull_record)
         captured_pull = api_store.current_replayed_record
         assert isinstance(captured_pull, PullResponseRecord)
-        response = api._push_response(
-            requests.Request("POST", "http://invalid/push", data=b"{}").prepare(),
-            api_store, captured_pull,
+        response = threaded_loop.run(
+            api.authoritative_push(
+                requests.Request("POST", "http://invalid/push", data=b"{}").prepare(),
+                api_store,
+            )
         )
         assert response.status_code == HTTPStatus.INTERNAL_SERVER_ERROR
         assert api.LOCATION_HEADER not in response.headers
@@ -6137,22 +6169,22 @@ def test_explicit_probe_proves_report_and_remote_sessions_readable(
 
 def test_background_commit_failure_exits_backend(
     monkeypatch: pytest.MonkeyPatch,
+    api_store: AiAugmentBackendStore,
 ) -> None:
     exits: list[int] = []
-
-    class FailedTask:
-        @staticmethod
-        def cancelled() -> bool:
-            return False
-
-        @staticmethod
-        def exception() -> RuntimeError:
-            return RuntimeError("commit failed")
-
-    task = cast(asyncio.Task[None], FailedTask())
     monkeypatch.setattr(os, "_exit", exits.append)
 
-    api._authoritative_background_finished(task)
+    async def exercise() -> None:
+        stores_push_promise = ResponseRecordPromise[PushResponseRecord]._resolved(
+            BackendStoreAcknowledgment.ACK,
+            (None, BackendStoreException("commit failed")),
+        )
+        api._continue_awaiting_on_stores_push_promise(stores_push_promise, api_store)
+        (task,) = tuple(api.AUTHORITATIVE_BACKGROUND_TASKS)
+        await asyncio.gather(task, return_exceptions=True)
+        await asyncio.sleep(0)
+
+    asyncio.run(exercise())
 
     assert exits == [1]
 
@@ -6189,7 +6221,7 @@ def test_openapi_does_not_disclose_integrity_internals() -> None:
     assert "appendwatch" not in serialized
     assert "rollout" not in serialized
     assert api.ROLLOUT_ENV_NAME.lower() not in serialized
-    assert set(push_schema["responses"]) == {"202", "409", "500"}
+    assert set(push_schema["responses"]) == {"202", "409", "500", "503"}
     conflict_schema = push_schema["responses"]["409"]
     assert "current pull must be retrieved" in conflict_schema["description"]
     assert set(conflict_schema["headers"]) == {api.LOCATION_HEADER}

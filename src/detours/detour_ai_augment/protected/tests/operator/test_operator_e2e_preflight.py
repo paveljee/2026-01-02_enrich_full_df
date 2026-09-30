@@ -16,6 +16,7 @@ from uuid import uuid7
 
 import pytest
 
+from src.detours.detour_ai_augment.protected.src.backend.helpers import vars as backend_vars
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.post_commit_validation import (  # noqa: E501
     PostCommitValidation,
 )
@@ -159,10 +160,13 @@ def test_operator_http_history_rejects_corrupt_or_unreferenced_records(
     records = list(_workflow_http_records(
         provider_targets=(("api.openalex.org", "/institutions/I97018004"),),
     ))
-    validation = BackendValidationRequestRecord.from_http_request_log_record(records[-1])
-    body = validation.validation_request_body
-    assert body.initial_validation_request_record is not None
-    provider = body.openalex_ror_records[0]
+    validation = records[-1]
+    assert validation.request_body is not None
+    body = json.loads(validation.request_body)
+    assert body[backend_vars.VALIDATION_BODY_INITIAL_VALIDATION_REQUEST_RECORD_KEY] is not None
+    provider = HttpRequestLogRecord.model_validate(
+        body[backend_vars.VALIDATION_BODY_OPENALEX_ROR_RECORDS_KEY][0], strict=False,
+    )
     if mutation == "unknown-route":
         records.append(api_fixtures.persisted_http_record(
             record_id=uuid7(), method="GET", path="/unexpected",
@@ -173,20 +177,36 @@ def test_operator_http_history_rejects_corrupt_or_unreferenced_records(
     elif mutation == "wrong-endpoint":
         changed = provider.model_copy(update={"host": "unapproved.invalid"})
         records[records.index(provider)] = changed
-        changed_body = body.model_copy(update={"openalex_ror_records": (changed,)})
+        body[backend_vars.VALIDATION_BODY_OPENALEX_ROR_RECORDS_KEY] = [
+            changed.model_dump(mode="json"),
+        ]
         records[-1] = validation.model_copy(update={
-            "request_body": changed_body.model_dump_json(),
-            "validation_request_body": changed_body,
+            "request_body": json.dumps(body),
         })
     elif mutation == "duplicate":
         records.append(records[0])
     else:
         linked = {
             "provider": provider,
-            "commit": body.commit_request_record,
-            "pull": body.commit_request_record.commit_request_body.pull_response_record,
-            "push": body.commit_request_record.commit_request_body.push_response_record,
-            "initial": body.initial_validation_request_record,
+            "commit": HttpRequestLogRecord.model_validate(
+                body[backend_vars.VALIDATION_BODY_COMMIT_REQUEST_RECORD_KEY][
+                    backend_vars.VALIDATION_COMMIT_SELF_HTTP_RECORD_KEY
+                ], strict=False,
+            ),
+            "pull": HttpRequestLogRecord.model_validate(
+                body[backend_vars.VALIDATION_BODY_COMMIT_REQUEST_RECORD_KEY][
+                    backend_vars.VALIDATION_COMMIT_PULL_RESPONSE_RECORD_KEY
+                ], strict=False,
+            ),
+            "push": HttpRequestLogRecord.model_validate(
+                body[backend_vars.VALIDATION_BODY_COMMIT_REQUEST_RECORD_KEY][
+                    backend_vars.VALIDATION_COMMIT_PUSH_RESPONSE_RECORD_KEY
+                ], strict=False,
+            ),
+            "initial": HttpRequestLogRecord.model_validate(
+                body[backend_vars.VALIDATION_BODY_INITIAL_VALIDATION_REQUEST_RECORD_KEY],
+                strict=False,
+            ),
         }[target]
         position = next(
             index for index, record in enumerate(records) if record.record_id == linked.record_id
@@ -198,16 +218,14 @@ def test_operator_http_history_rejects_corrupt_or_unreferenced_records(
         else:
             assert mutation == "changed"
             if target == "initial":
-                initial = body.initial_validation_request_record
-                initial_body = initial.validation_request_body
-                changed_body = initial_body.model_copy(update={
-                    "post_commit_validation": initial_body.post_commit_validation.model_copy(
-                        update={"detail": "changed persisted validation"},
-                    ),
-                })
+                initial = linked
+                assert initial.request_body is not None
+                initial_body = json.loads(initial.request_body)
+                initial_body[backend_vars.VALIDATION_BODY_POST_COMMIT_VALIDATION_KEY][
+                    "detail"
+                ] = "changed persisted validation"
                 records[position] = initial.model_copy(update={
-                    "request_body": changed_body.model_dump_json(),
-                    "validation_request_body": changed_body,
+                    "request_body": json.dumps(initial_body),
                 })
             else:
                 records[position] = linked.model_copy(update={"query": "changed=1"})

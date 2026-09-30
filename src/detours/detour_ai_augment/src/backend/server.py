@@ -76,7 +76,9 @@ class _BackendRequestGate(FrozenStrictModel):
     @asynccontextmanager
     async def http(self) -> AsyncIterator[None]:
         async with self._condition:
-            await self._condition.wait_for(lambda: not self._ipc_pending)
+            await self._condition.wait_for(
+                lambda: not self._ipc_pending and self._http_requests == 0
+            )
             self._http_requests += 1
         try:
             yield
