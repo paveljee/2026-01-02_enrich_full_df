@@ -538,7 +538,7 @@ async def authoritative_pull(
         ready_to_respond_at_unix_usec=http_record.ready_to_respond_at_unix_usec,
         duration_usec=http_record.duration_usec,
     )
-    promise = await asyncio.to_thread(store.pull_response_record, record)
+    promise = await asyncio.to_thread(store.promise_pull_response_record, record)
     response_record, error = await promise.response_record_promise()
     if error is not None:
         error.raise_exception()
@@ -599,10 +599,10 @@ async def authoritative_push(
     with BACKEND_WORKFLOW_STATE_LOCK:
         current = store.current_replayed_record
         pull_response_record = current if isinstance(current, PullResponseRecord) else None
-        session = BACKEND_SESSION_ID
+        session_id = BACKEND_SESSION_ID
     response = _push_response(request, store, pull_response_record)
     http_record = _authoritative_http_record(request, response, started_ns=started_ns)
-    record = PushRequestRecord(
+    push_request_record = PushRequestRecord(
         schema_version=http_record.schema_version,
         record_id=http_record.record_id,
         method=http_record.method,
@@ -620,17 +620,25 @@ async def authoritative_push(
         ready_to_respond_at_unix_usec=http_record.ready_to_respond_at_unix_usec,
         duration_usec=http_record.duration_usec,
     )
-    promise = await asyncio.to_thread(store.push_response_record, record, session_id=session)
-    if promise.acknowledgment is not BackendStoreAcknowledgment.ACK:
-        _record, error = await promise.response_record_promise()
+    # stands for "store's" push promise specifically
+    stores_push_promise = await asyncio.to_thread(
+        func=store.promise_push_response_record,
+        request=push_request_record,
+        session_id=session_id,
+    )
+    if stores_push_promise.acknowledgment is not BackendStoreAcknowledgment.ACK:
+        _record, error = await stores_push_promise.response_record_promise()
         if error is not None:
             error.raise_exception()
         raise BackendStoreException(Locale.PUSH_NAK_ERROR_MISSING)
     if response.status_code == HTTPStatus.ACCEPTED:
-        register_processing(finish_push(promise, store))
-        logger.info(Locale.PUSH_DURABLY_ACCEPTED_LOG, record.record_id)
+        # this below hands off the awaiting to a new asyncio task,
+        # allowing server to release a response to the HTTP client
+        # who had sent the push request:
+        _continue_awaiting_on_stores_push_promise(stores_push_promise, store)
+        logger.info(Locale.PUSH_DURABLY_ACCEPTED_LOG, push_request_record.record_id)
         return response
-    response_record, error = await promise.response_record_promise()
+    response_record, error = await stores_push_promise.response_record_promise()
     if error is not None:
         error.raise_exception()
     if response_record is None:
@@ -746,24 +754,29 @@ def _mark_backend_lifecycle_failed(error: Exception) -> None:
         BACKEND_LIFECYCLE = BackendLifecycle.FAILED
 
 
-def _authoritative_background_finished(task: asyncio.Task[None]) -> None:
-    AUTHORITATIVE_BACKGROUND_TASKS.discard(task)
-    if task.cancelled():
-        return
-    failure = task.exception()
-    if failure is not None:
-        logger.critical(Locale.COMMIT_APPEND_FATAL_LOG, failure)
-        os._exit(1)
-
-
 async def finish_push(
-    promise: BackendComponent.ResponseRecordPromiseProperty[
+    stores_push_promise: BackendComponent.ResponseRecordPromiseProperty[
         BackendComponent.PushResponseRecordProperty
     ],
     store: AiAugmentBackendStore,
 ) -> None:
+    """This basically awaits on Backend Store
+    finishing its `promise_push_response_record`.
+
+    Specifically - because this launches only
+    under a `HTTPStatus.ACCEPTED` branch anyway -
+    Store is running its `_process_push` method
+    that performs the commit/validation cycle.
+
+    Raises if the promise resulted in an exception,
+    or else updates the pull state on success."""
+
     try:
-        response, error = await promise.response_record_promise()
+        # this basically awaits on Backend Store's
+        # `promise_push_response_record` because that's
+        # what this promise is supposed to be upstream,
+        # that is, as defined in `authoritative_push`:
+        response, error = await stores_push_promise.response_record_promise()
         if error is not None:
             error.raise_exception()
         if response is None:
@@ -782,9 +795,30 @@ async def finish_push(
         raise
 
 
-def register_processing(work: Coroutine[object, object, None]) -> None:
-    task = asyncio.create_task(work)
+def _continue_awaiting_on_stores_push_promise(
+    stores_push_promise: BackendComponent.ResponseRecordPromiseProperty[
+        BackendComponent.PushResponseRecordProperty
+    ],
+    store: AiAugmentBackendStore,
+) -> None:
+    """Creates an asyncio task to await on an `authoritative_push`'s
+    `ResponseRecordPromise`. The couroutine awaits on Backend Store
+    finishing its `promise_push_response_record`, whose return
+    object is this exact promise that this gets as an argument."""
+
+    the_coroutine = finish_push(stores_push_promise, store)
+    task = asyncio.create_task(the_coroutine)
     AUTHORITATIVE_BACKGROUND_TASKS.add(task)
+
+    def _authoritative_background_finished(task: asyncio.Task[None]) -> None:
+        AUTHORITATIVE_BACKGROUND_TASKS.discard(task)
+        if task.cancelled():
+            return
+        failure = task.exception()
+        if failure is not None:
+            logger.critical(Locale.COMMIT_APPEND_FATAL_LOG, failure)
+            os._exit(1)
+
     task.add_done_callback(_authoritative_background_finished)
 
 

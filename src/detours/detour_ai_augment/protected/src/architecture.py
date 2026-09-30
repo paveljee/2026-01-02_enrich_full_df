@@ -163,7 +163,10 @@ class BackendComponent(
         @property
         def pull_response_record(
             self,
-        ) -> BackendComponent.PullResponseRecordProperty | None: ...
+        ) -> BackendComponent.PullResponseRecordProperty | None:
+            """Must refer to the pull record held by Backend Store
+            as its `_current_replayed_record` at the time the push
+            request was received from the HTTP client."""
 
     class CommitRequestRecordProperty(RequestRecordProperty, Protocol):
         @property

@@ -631,7 +631,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
                 self._failure = exc
                 raise
 
-    def pull_response_record(
+    def promise_pull_response_record(
         self,
         request: BackendComponent.PullRequestRecordProperty,
     ) -> ResponseRecordPromise[PullResponseRecord]:
@@ -654,7 +654,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
                     (None, BackendStoreException._from_exception(exc)),
                 )
 
-    def push_response_record(
+    def promise_push_response_record(
         self,
         request: BackendComponent.PushRequestRecordProperty,
         *,
@@ -797,6 +797,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
     def _process_push(
         self, request: PushRequestRecord, *, session_id: UUID | None,
     ) -> PushResponseRecord:
+        """Actual push/commit/validation cycle entrypoint."""
 
         try:
             context = self._context
