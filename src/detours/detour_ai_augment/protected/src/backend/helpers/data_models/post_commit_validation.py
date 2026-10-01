@@ -79,7 +79,6 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     KTP_AI_AUGMENT_ACADEMIC_POSITIONS_COL,
     KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL,
     KTP_AI_AUGMENT_COMMENTS_COL,
-    KTP_AI_AUGMENT_COMMIT_REQUEST_BODY_COL,
     KTP_AI_AUGMENT_COMMIT_REQUEST_RECORD_ID_COL,
     KTP_AI_AUGMENT_EDUCATION_COL,
     KTP_AI_AUGMENT_FOOTNOTE_ARGUMENTS_COL,
@@ -90,7 +89,7 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL,
     KTP_AI_AUGMENT_RESEARCHER_AUTHOR_COL,
     KTP_AI_AUGMENT_RUN_OUTCOME_RECORD_ID_COL,
-    KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_RECORD_COL,
+    KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL,
     KTP_AI_AUGMENT_SESSION_METADATA_COL,
     KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL,
     KTP_AI_AUGMENT_VALIDATION_RECORD_ID_COL,
@@ -165,7 +164,7 @@ class _CommitEvaluationInputs(FrozenStrictModel):
 class _RetryBaselineRow(FrozenStrictModel):
     namekey_json: StrictStr
     session_id_text: StrictStr
-    attempt_id_text: StrictStr
+    commit_record_id_text: StrictStr
     obligations_json: StrictStr
 
 
@@ -200,7 +199,7 @@ RETRY_SUBMISSION_PUBLIC_GUIDANCE = (
 
 AIVM_WORKDIR = PurePosixPath("/home/ai/workdir")
 
-APPENDWATCH_ARCHIVE_FILENAME_TEMPLATE = "appendwatch-tree.{attempt_id}.txt"
+APPENDWATCH_ARCHIVE_FILENAME_TEMPLATE = "appendwatch-tree.{commit_record_id}.txt"
 ALLOW_MULTIPLE_EVIDENCE_MATCHES = True
 WEB_SEARCH_QUERY_ACTION = "search_query"
 WEB_OPEN_ACTION = "open"
@@ -354,7 +353,7 @@ class _EvidenceItemAudit(FrozenStrictModel):
     candidates: list[_EvidenceCandidateAudit]
 
 
-class _EvidenceAttemptAudit(FrozenStrictModel):
+class _EvidenceAssessmentAudit(FrozenStrictModel):
     items: list[_EvidenceItemAudit]
 
 
@@ -1097,7 +1096,7 @@ def _retry_obligations_from_assessment(
     return _RetryObligations(fields=fields)
 
 
-def _assessment_audit(assessment: _EvidenceAssessment) -> _EvidenceAttemptAudit:
+def _assessment_audit(assessment: _EvidenceAssessment) -> _EvidenceAssessmentAudit:
     items: list[_EvidenceItemAudit] = []
     for item in assessment.items:
         if isinstance(item.submission, WebSearchExcerpt):
@@ -1126,7 +1125,7 @@ def _assessment_audit(assessment: _EvidenceAssessment) -> _EvidenceAttemptAudit:
                 ],
             )
         )
-    return _EvidenceAttemptAudit(items=items)
+    return _EvidenceAssessmentAudit(items=items)
 
 
 def _log_evidence_assessment(
@@ -1334,7 +1333,7 @@ def _apply_retry_obligations(
 
 def _assessment_from_audit(
     submission: StandardizedSubmission,
-    audit: _EvidenceAttemptAudit,
+    audit: _EvidenceAssessmentAudit,
 ) -> _EvidenceAssessment:
     submission_fields = dict(submission.evidence_items())
     items: list[_EvidenceItemAssessment] = []
@@ -1357,12 +1356,12 @@ def _assessment_from_audit(
 def _derive_retry_obligations(
     *,
     baseline_json: str,
-    baseline_attempt_id: UUID,
+    baseline_commit_record_id: UUID,
     db_reads: _DetourDbValidationReads,
 ) -> _RetryObligations:
     try:
         obligations = _RetryObligations.model_validate_json(baseline_json)
-        rows, error = db_reads.applied_retry_audit_rows(baseline_attempt_id)
+        rows, error = db_reads.applied_retry_audit_rows(baseline_commit_record_id)
         if error is not None:
             assert rows is None
             raise error
@@ -1373,7 +1372,7 @@ def _derive_retry_obligations(
             )
             assessment = _assessment_from_audit(
                 submission,
-                _EvidenceAttemptAudit.model_validate_json(row.assessment_json),
+                _EvidenceAssessmentAudit.model_validate_json(row.assessment_json),
             )
             obligations, violations = _apply_retry_obligations(
                 submission,
@@ -1387,7 +1386,7 @@ def _derive_retry_obligations(
         raise _ValidationPreparationError(Locale.EVIDENCE_AUDIT_REPLAY_FAILED) from exc
 
 
-def _process_retry_attempt(
+def _evaluate_retry_submission(
     *,
     commit_request_record: BackendCommitRequestRecord,
     namekey: NameKey,
@@ -1427,18 +1426,18 @@ def _process_retry_attempt(
         ):
             raise _PushValidationError(Locale.EVIDENCE_RETRY_IDENTITY_MISMATCH)
         try:
-            baseline_attempt_id = UUID(baseline_row.attempt_id_text)
+            baseline_commit_record_id = UUID(baseline_row.commit_record_id_text)
         except ValueError as exc:
             raise _PushValidationError(
                 Locale.EVIDENCE_RETRY_IDENTITY_MISMATCH
             ) from exc
-        if str(baseline_attempt_id) != baseline_row.attempt_id_text:
+        if str(baseline_commit_record_id) != baseline_row.commit_record_id_text:
             raise _PushValidationError(
                 Locale.EVIDENCE_RETRY_IDENTITY_MISMATCH
             )
         obligations = _derive_retry_obligations(
             baseline_json=baseline_row.obligations_json,
-            baseline_attempt_id=baseline_attempt_id,
+            baseline_commit_record_id=baseline_commit_record_id,
             db_reads=db_reads,
         )
         if not isinstance(submission_payload, StandardizedSubmission):
@@ -1532,7 +1531,7 @@ def render_codex_values(
     submission: StandardizedSubmission,
     evidence: ValidatedEvidence,
     *,
-    attempt_timestamp: datetime,
+    commit_request_timestamp: datetime,
     argument_ref_urls: Mapping[str, str],
 ) -> dict[str, str | None]:
     rendered: dict[str, str | None] = {}
@@ -1580,7 +1579,7 @@ def render_codex_values(
         if submission.comments is None
         else codex_parse.render_comment(
             submission.comments.value,
-            _render_fco_timestamp(attempt_timestamp),
+            _render_fco_timestamp(commit_request_timestamp),
         )
     )
     return rendered
@@ -1654,15 +1653,13 @@ def _accepted_output_row(
     rollout_index: _RolloutIndex,
     cas_codex_rollout_record: CASCodexRolloutRecord,
     commit_request_record: BackendCommitRequestRecord,
-    attempt_timestamp: datetime,
+    commit_request_timestamp: datetime,
 ) -> tuple[tuple[str, str | int | None], ...]:
-    commit_request_body = commit_request_record.request_body
-    assert commit_request_body is not None
     commit_request_record_id = str(commit_request_record.record_id)
     rendered = render_codex_values(
         submission,
         evidence,
-        attempt_timestamp=attempt_timestamp,
+        commit_request_timestamp=commit_request_timestamp,
         argument_ref_urls=_rollout_ref_urls(rollout_index),
     )
     output_row: dict[str, str | int | None] = {
@@ -1673,11 +1670,10 @@ def _accepted_output_row(
         DRAW_LABEL: draw_number,
         KTP_FIRST_NAME_COL: namekey.first_name,
         KTP_LAST_NAME_COL: namekey.last_name,
+        KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL: None,
         KTP_AI_AUGMENT_COMMIT_REQUEST_RECORD_ID_COL: commit_request_record_id,
         KTP_AI_AUGMENT_VALIDATION_RECORD_ID_COL: None,
         KTP_AI_AUGMENT_RUN_OUTCOME_RECORD_ID_COL: None,
-        KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_RECORD_COL: None,
-        KTP_AI_AUGMENT_COMMIT_REQUEST_BODY_COL: commit_request_body,
         KTP_AI_AUGMENT_SESSION_METADATA_COL: rollout_index.session.summary_json,
         **rendered,
     }
@@ -1685,7 +1681,7 @@ def _accepted_output_row(
     return tuple(output_row.items())
 
 
-def _execute_attempt(
+def _evaluate_submission_for_commit(
     *,
     commit_request_record: BackendCommitRequestRecord,
     cas_codex_rollout_record: CASCodexRolloutRecord,
@@ -1705,7 +1701,7 @@ def _execute_attempt(
     assert session_id is not None
     assert appendwatch_report is not None
 
-    attempt_timestamp = datetime.fromtimestamp(
+    commit_request_timestamp = datetime.fromtimestamp(
         commit_request_record.record_id.time / MILLISECONDS_PER_SECOND,
         tz=timezone.utc,
     )
@@ -1755,10 +1751,10 @@ def _execute_attempt(
         )
 
     with tempfile.TemporaryDirectory() as temporary_directory:
-        attempt_dir = Path(temporary_directory)
+        evaluation_dir = Path(temporary_directory)
         try:
-            report_path = attempt_dir / APPENDWATCH_ARCHIVE_FILENAME_TEMPLATE.format(
-                attempt_id=commit_request_record.record_id
+            report_path = evaluation_dir / APPENDWATCH_ARCHIVE_FILENAME_TEMPLATE.format(
+                commit_record_id=commit_request_record.record_id
             )
             report_path.write_bytes(appendwatch_report.decoded_bytes())
             try:
@@ -1797,7 +1793,7 @@ def _execute_attempt(
                 evidence_assessment,
                 commit_request_record=commit_request_record,
             )
-            retry_violations, retry_projection = _process_retry_attempt(
+            retry_violations, retry_projection = _evaluate_retry_submission(
                 commit_request_record=commit_request_record,
                 namekey=inputs.namekey,
                 submission_payload=submission_payload,
@@ -1838,7 +1834,7 @@ def _execute_attempt(
                 rollout_index=rollout_index,
                 cas_codex_rollout_record=cas_codex_rollout_record,
                 commit_request_record=commit_request_record,
-                attempt_timestamp=attempt_timestamp,
+                commit_request_timestamp=commit_request_timestamp,
             )
             output_identity = dict(output_row)
             assert output_identity[KTP_FILENAME_COL] == rollout_basename.name
@@ -2003,7 +1999,7 @@ def evaluate_commit(
             and cas_codex_rollout_record.line_count == rollout.line_count
         )
         stage = BackendLifecycle.APPENDWATCH_REPORT_VALIDATION
-        result = _execute_attempt(
+        result = _evaluate_submission_for_commit(
             commit_request_record=commit_request_record,
             cas_codex_rollout_record=cas_codex_rollout_record,
             inputs=inputs,

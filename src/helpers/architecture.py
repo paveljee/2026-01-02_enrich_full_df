@@ -102,6 +102,7 @@ class FrozenStrictModel(BaseModel):
         strict=True,
     )
 
+
 # Helpful for passing sync lazy stuff.
 # Not separating Result out to keep
 # the definition boringly explicit.

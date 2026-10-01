@@ -2,15 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import csv
 import fcntl
 import hashlib
 import io
-import json
 import os
 import subprocess
 import sys
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator
 from contextlib import ExitStack, asynccontextmanager, nullcontext
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -44,6 +42,7 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.sub
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     AI_AUGMENT_COLUMNS,
     APPENDWATCH_OK_PREFIX,
+    AUTHORITATIVE_RECORDS_TABLE,
     BACKEND_STORE_CLOSED_CLEANLY,
     DOCX_COLUMNS,
     EXCLUDED_NAMEKEY,
@@ -51,12 +50,10 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     HTTP_POST_METHOD,
     KTP_AI_AUGMENT_FOOTNOTE_ARGUMENTS_COL,
     KTP_AI_AUGMENT_FOOTNOTES_COL,
-    KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_RECORD_COL,
+    KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL,
     KTP_AI_AUGMENT_SESSION_METADATA_COL,
-    MAP_SUBSET_0_TO_BATCH_KEY,
     PULL_PATH,
     PUSH_PATH,
-    REPLAY_LOG_KEY,
     SOURCE_KEY_HEADER,
     AiAugmentCohort,
     AiAugmentIneligibilityCategory,
@@ -66,6 +63,11 @@ from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helper
 )
 from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helpers.locale import (
     Locale,
+)
+from src.detours.detour_ai_augment.protected.tests.fixtures.pytest_fixtures import (  # noqa: E501
+    ROOT,
+    STARTUP_NAMEKEY,
+    StartupFiles,
 )
 from src.detours.detour_ai_augment.protected.tests.operator import (
     test_operator_e2e as operator_workflow,
@@ -141,31 +143,16 @@ from src.detours.detour_ai_augment.src.shared import (
     name_key_header_value,
     source_key_header_value,
 )
-from src.helpers.architecture import FrozenStrictModel
 from src.helpers.cards import build_cards
 from src.helpers.data_models import HttpRequestLogRecord, InnerDict, NameKey
-from src.helpers.duckdb_utils import duckdb_quote_identifier as quote
 from src.helpers.procedures import DocxMatchProcedure, XlsxMatchProcedure
-from src.helpers.schema import (
-    CARD_PARTITION_TABLE,
-    DOCX_INNERDICT_TABLE,
-    PARQUET_INNERDICT_TABLE,
-    XLSX_INNERDICT_TABLE,
-)
 from src.helpers.vars import (
-    BATCH_LABEL,
     CARD_INTRODUCTION,
     DRAW_LABEL,
     KTP_FILENAME_COL,
     KTP_FIRST_NAME_COL,
-    KTP_FRAGMENT_COL,
-    KTP_FRAGMENT_TYPE_COL,
-    KTP_INNERDICT_JSONLINES_COL,
     KTP_LAST_NAME_COL,
     KTP_NAMEKEY_COL,
-    KTP_PARTITION_COL,
-    KTP_PARTITION_FLAG_SSN_COUNT_COL,
-    KTP_PARTITION_FLAG_XLSX_NON_EXACT_ANY_COL,
 )
 
 RunEvent = run_event_models.RunEvent
@@ -225,14 +212,10 @@ def run_outcome_response_record(
     session_id: UUID = SESSION_ID,
     attempt: AgentRuntimeAttempt | None = None,
 ) -> RunOutcomeResponseRecord:
-    headers: Mapping[str, str] = {
-        run_outcome_models.NAME_KEY_HEADER: name_key_header_value(namekey),
-    }
-    if attempt is not None:
-        _path, headers = RunOutcomeRequestRecord.outbound_http(
-            run_outcome=run_outcome, namekey=namekey, session_id=session_id,
-            validation_record_id=attempt.record_id,
-        )
+    _path, headers = RunOutcomeRequestRecord.outbound_http(
+        run_outcome=run_outcome, namekey=namekey, session_id=session_id,
+        validation_record_id=None if attempt is None else attempt.record_id,
+    )
     request = RunOutcomeRequestRecord.from_http_request(
         received_at_unix_usec=1,
         method=HTTP_POST_METHOD,
@@ -1303,7 +1286,7 @@ def test_run_outcome_snapshot_decodes_appendwatch_for_display_only() -> None:
         namekey=NAMEKEY,
         run_outcome=RunLifecycle.COMPLETED,
     )
-    attempt = control_ui._RunCommitView(
+    run_attempt_view = control_ui._RunAttemptView(
         attempt=None,
         run=run_event_models.Run(
             run_id=uuid7(),
@@ -1312,17 +1295,17 @@ def test_run_outcome_snapshot_decodes_appendwatch_for_display_only() -> None:
             session_id=SESSION_ID,
             run_outcome_response_record=response,
         ),
-        accepted=None,
+        codex_innerdict=None,
         run_outcome_response_record=response,
     )
 
-    assert attempt.run_outcome_response_record is response
-    assert attempt.run_outcome_saved is True
+    assert run_attempt_view.run_outcome_response_record is response
+    assert run_attempt_view.run_outcome_saved is True
     assert (
         response._codex_session_record().session_id
         == SESSION_ID
     )
-    assert attempt.run_outcome_session_status == Locale.SESSION_STATUS_OK
+    assert run_attempt_view.run_outcome_session_status == Locale.SESSION_STATUS_OK
 
 
 @pytest.mark.anyio
@@ -1390,12 +1373,12 @@ async def test_run_outcome_snapshot_500_is_kept_separate_from_run_outcome(
     reconciled = control_ui._ResearcherView.from_snapshot(
         researcher(), subject._snapshot, tuple(subject._runs.values()),
     )
-    assert reconciled.latest_run_commit_view is not None
-    assert reconciled.latest_run_commit_view.lifecycle is RunLifecycle.FAILED
+    assert reconciled.latest_run_attempt_view is not None
+    assert reconciled.latest_run_attempt_view.lifecycle is RunLifecycle.FAILED
     # A partial capture without a session UUID cannot be assigned to this local run.
     assert response._codex_session_record().session_id is None
-    assert reconciled.latest_run_commit_view.run_outcome_response_record is None
-    assert reconciled.latest_run_commit_view.run_outcome_saved is None
+    assert reconciled.latest_run_attempt_view.run_outcome_response_record is None
+    assert reconciled.latest_run_attempt_view.run_outcome_saved is None
     assert subject.drain_notifications() == (
         Locale.RUN_OUTCOME_SNAPSHOT_PARTIAL_TEMPLATE.format(
             run_id=run_id,
@@ -1909,16 +1892,6 @@ async def test_backend_acceptance_remains_running_until_codex_exits(
     subject = application.controller
     source = researcher()
     set_researchers(subject, (source,))
-    session_metadata = CodexRolloutRecord.build_summary_json({
-        "originator": "codex_cli_rs",
-        "source": "exec",
-        "cli_version": "test",
-        "model_provider": "openai",
-        "model": "test-model",
-        "reasoning_effort": "high",
-        "session_id": str(SESSION_ID),
-        "timestamp": SESSION_TIMESTAMP.isoformat(),
-    })
     accepted_attempt = agent_runtime_attempt(
         commit_request_record_id=accepted_commit_request_record_id,
         session_id=SESSION_ID,
@@ -1948,10 +1921,10 @@ async def test_backend_acceptance_remains_running_until_codex_exits(
     assert running.counts.running == 1
     assert running.counts.completed == 0
     assert len(running.researcher_var_views) == 1
-    assert running.researcher_var_views[0].latest_run_commit_var_view.lifecycle is (
+    assert running.researcher_var_views[0].current_researcher_var_row_view.lifecycle is (
         RunLifecycle.RUNNING
     )
-    assert running.researcher_var_views[0].latest_run_commit_var_view.ai_value is None
+    assert running.researcher_var_views[0].current_researcher_var_row_view.ai_value is None
 
     allow_codex_exit.set()
     await execution
@@ -1959,24 +1932,29 @@ async def test_backend_acceptance_remains_running_until_codex_exits(
 
     assert completed.counts.running == 0
     assert completed.counts.completed == int(expected_outcome is RunLifecycle.COMPLETED)
-    assert completed.researcher_var_views[0].latest_run_commit_var_view.lifecycle is (
+    assert completed.researcher_var_views[0].current_researcher_var_row_view.lifecycle is (
         expected_outcome
     )
-    assert completed.researcher_var_views[0].latest_run_commit_var_view.ai_value is None
+    assert completed.researcher_var_views[0].current_researcher_var_row_view.ai_value is None
     if expected_outcome is RunLifecycle.COMPLETED:
         outcome = run_outcome_response_record(
             namekey=NAMEKEY, run_outcome=RunLifecycle.COMPLETED,
             attempt=accepted_attempt,
         )
+        session_metadata = CodexRolloutRecord.build_summary_json({
+            "originator": "codex_cli_rs", "source": "exec", "cli_version": "test",
+            "model_provider": "openai", "model": "test-model", "reasoning_effort": "high",
+            "session_id": str(SESSION_ID), "timestamp": SESSION_TIMESTAMP.isoformat(),
+        })
         accepted = CodexInnerDict(
             innerdict=InnerDict.from_mapping(
                 {
                     KTP_NAMEKEY_COL: NAMEKEY.to_json_key(),
-                    KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_RECORD_COL: outcome.model_dump_json(),
-                    KTP_AI_AUGMENT_SESSION_METADATA_COL: session_metadata,
                     researcher_var.ai_column: accepted_value,
                     KTP_AI_AUGMENT_FOOTNOTES_COL: None,
                     KTP_AI_AUGMENT_FOOTNOTE_ARGUMENTS_COL: None,
+                    KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL: outcome.response_body,
+                    KTP_AI_AUGMENT_SESSION_METADATA_COL: session_metadata,
                 },
                 _CodexInnerDictProcedure(),
             ),
@@ -1990,7 +1968,7 @@ async def test_backend_acceptance_remains_running_until_codex_exits(
     journal_before_query = list(subject._events)
     await application.query_ipc()
     completed = await subject.snapshot(selection=selection)
-    assert completed.researcher_var_views[0].latest_run_commit_var_view.ai_value == (
+    assert completed.researcher_var_views[0].current_researcher_var_row_view.ai_value == (
         accepted_value if expected_outcome is RunLifecycle.COMPLETED else None
     )
     assert subject._events == journal_before_query
@@ -1998,7 +1976,7 @@ async def test_backend_acceptance_remains_running_until_codex_exits(
         RunLifecycle.CODEX_EXITED,
         expected_outcome,
     ]
-    display = completed.researcher_var_views[0].latest_run_commit_var_view
+    display = completed.researcher_var_views[0].current_researcher_var_row_view
     assert display.lifecycle is expected_outcome
     assert display.backend_lifecycle is (
         RunLifecycle.COMPLETED if expected_outcome is RunLifecycle.COMPLETED else None
@@ -2425,7 +2403,7 @@ async def test_final_pull_is_single_and_after_persisted_codex_exit(
             snapshot = await subject.snapshot(selection=control_ui._UiSelection(
                 researcher_varname=control_ui.RESEARCHER_VARS[0].varname,
             ))
-            assert snapshot.researcher_var_views[0].latest_run_commit_var_view.lifecycle is (
+            assert snapshot.researcher_var_views[0].current_researcher_var_row_view.lifecycle is (
                 RunLifecycle.CODEX_EXITED
             )
             assert snapshot.counts.running == 1
@@ -2685,7 +2663,8 @@ async def test_page_query_uses_composed_operation_and_publishes_only_after_clean
 
 def test_multiple_commits_for_same_session_remain_distinct_display_rows(tmp_path: Path) -> None:
     records = tuple(agent_runtime_attempt() for _ in range(2))
-    metadata = CodexRolloutRecord.build_summary_json({
+    outcomes = tuple(run_outcome_response_record(attempt=record) for record in records)
+    session_metadata = CodexRolloutRecord.build_summary_json({
         "originator": "codex_cli_rs", "source": "exec", "cli_version": "test",
         "model_provider": "openai", "model": "test", "reasoning_effort": "high",
         "session_id": str(SESSION_ID), "timestamp": SESSION_TIMESTAMP.isoformat(),
@@ -2695,10 +2674,11 @@ def test_multiple_commits_for_same_session_remain_distinct_display_rows(tmp_path
             innerdict=InnerDict.from_mapping({
                 KTP_NAMEKEY_COL: NAMEKEY.to_json_key(),
                 KTP_FILENAME_COL: f"commit-{index}.docx",
-                KTP_AI_AUGMENT_SESSION_METADATA_COL: metadata,
+                KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL: outcome.response_body,
+                KTP_AI_AUGMENT_SESSION_METADATA_COL: session_metadata,
             }, _CodexInnerDictProcedure()),
-            run_outcome_response_record=run_outcome_response_record(attempt=record),
-        ) for index, record in enumerate(records)),
+            run_outcome_response_record=outcome,
+        ) for index, outcome in enumerate(outcomes)),
     })
     storage = storage_models.AiAugmentDashboardStorage()
     snapshot = storage.replace_query_snapshot(DashboardQuerySnapshot(
@@ -2710,15 +2690,15 @@ def test_multiple_commits_for_same_session_remain_distinct_display_rows(tmp_path
     row = view.to_var_view(
         ground_truth=None, researcher_var=control_ui.RESEARCHER_VARS[0], codex_busy=False,
     )
-    assert len(row.run_commit_var_views) == 2
-    assert all(item.run_id == run.run_id for item in row.run_commit_var_views)
+    assert len(row.researcher_var_row_views) == 2
+    assert all(item.run_id == run.run_id for item in row.researcher_var_row_views)
     page = control_ui._ControlCentrePage(
         controller=controller(), query_ipc=AsyncMock(), reference_docx=tmp_path / "ref",
     )
-    ids = [item[control_ui.GRID_ROW_ID_FIELD] for item in page.attempt_detail_rows(row=row)]
+    ids = [item[control_ui.GRID_ROW_ID_FIELD] for item in page.run_outcome_history_rows(row=row)]
     assert len(set(ids)) == 2
     with pytest.raises(ValidationError, match="frozen"):
-        row.latest_run_commit_var_view.ai_value = "changed"  # type: ignore[misc]
+        row.current_researcher_var_row_view.ai_value = "changed"  # type: ignore[misc]
 
 
 @pytest.mark.anyio
@@ -2744,10 +2724,13 @@ async def test_card_record_ids_match_each_commit_and_researcher_session(
                 innerdict=InnerDict.from_mapping({
                     KTP_NAMEKEY_COL: NAMEKEY.to_json_key(),
                     KTP_FILENAME_COL: f"commit-{index}.docx",
+                    KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL: outcome.response_body,
                     KTP_AI_AUGMENT_SESSION_METADATA_COL: CodexRolloutRecord.build_summary_json({
-                        "originator": "codex_cli_rs", "source": "exec", "cli_version": "test",
-                        "model_provider": "openai", "model": "test", "reasoning_effort": "high",
-                        "session_id": str(session_id), "timestamp": SESSION_TIMESTAMP.isoformat(),
+                        "originator": "codex_cli_rs", "source": "exec",
+                        "cli_version": "test", "model_provider": "openai",
+                        "model": "test", "reasoning_effort": "high",
+                        "session_id": str(session_id),
+                        "timestamp": SESSION_TIMESTAMP.isoformat(),
                     }),
                 }, _CodexInnerDictProcedure()),
                 run_outcome_response_record=outcome,
@@ -2800,9 +2783,11 @@ async def test_card_record_ids_match_each_commit_and_researcher_session(
         if include_materialization and include_outcome:
             assert isinstance(record, AgentRuntimeAttempt)
             assert str(outcome._codex_session_record().session_id) in card.card_markdown
-    count = 3 if include_materialization and include_outcome else 0
+    count = len(committed)
     metadata_heading = f"**`{KTP_AI_AUGMENT_SESSION_METADATA_COL}`**"
     assert card.card_markdown.count(metadata_heading) == count
+    outcome_heading = f"**`{KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL}`**"
+    assert card.card_markdown.count(outcome_heading) == count
     assert "**`ktp.ai_augment_commit_request_record_id`**" not in card.card_markdown
     assert "**`ktp.ai_augment_validation_record_id`**" not in card.card_markdown
     assert "**`ktp.ai_augment_run_outcome_record_id`**" not in card.card_markdown
@@ -2891,8 +2876,8 @@ async def test_snapshot_replacement_clears_other_page_card_and_removed_history(
     page._expanded_history_namekey = NAMEKEY
     history = Mock()
     expansion = Mock()
-    page._handles.attempt_history_table = history
-    page._handles.attempt_history_expansion = expansion
+    page._handles.run_outcome_history_table = history
+    page._handles.run_outcome_history_expansion = expansion
     database.response = DashboardQuerySnapshot(ai_augment_singular_outerdicts=())
     await application.query_ipc()
     await page.refresh_grid()
@@ -3353,123 +3338,10 @@ def test_startup_failure_exits_through_framework_shutdown(
 
 pytestmark = pytest.mark.usefixtures("isolated_lima_configuration")
 
-ROOT = Path(__file__).resolve().parents[5]
 MODES = ("ipc", "new", "resume", "continue")
-STARTUP_NAMEKEY = NameKey(first_name="Case 000", last_name="Startup")
 
 # Exercise production initialization boundaries, deliberately not the serving lifespan.
 # No functions, transports, configuration objects or global constants are substituted.
-
-
-class StartupFiles(FrozenStrictModel):
-    config: Path
-    source: Path
-    replay: Path
-    detour: Path
-    process_temp: Path
-
-    def environment(self, namekey: str | None = STARTUP_NAMEKEY.to_json_key()) -> dict[str, str]:
-        environment = dict(os.environ, TMPDIR=str(self.process_temp))
-        environment.pop("FASTAPI_DETOUR_NAMEKEY", None)
-        if namekey is not None:
-            environment["FASTAPI_DETOUR_NAMEKEY"] = namekey
-        return environment
-
-    def repin(self) -> None:
-        config = json.loads(self.config.read_text())
-        config["files_config"][REPLAY_LOG_KEY]["sha256"] = hashlib.sha256(
-            self.replay.read_bytes()
-        ).hexdigest()
-        self.config.write_text(json.dumps(config))
-
-
-def source_population(path: Path, release_map: Path) -> None:
-    """Synthetic source tables satisfy the real 307-person population invariants."""
-    groups = (
-        (196, "subset 1", 1, False, 0),
-        (78, "unreleased", 4, False, 1),
-        (1, "subset 1", 1, False, 0),  # the explicitly excluded duplicate identity
-        (3, "subset 8", 1, False, 0),
-        (7, "unreleased", 2, False, 0),
-        (6, "unreleased", 4, True, 1),
-        (16, "unreleased", 4, False, 2),
-    )
-    with duckdb.connect(str(path)) as connection, release_map.open("w") as mapping:
-        writer = csv.writer(mapping)
-        writer.writerow((DRAW_LABEL, BATCH_LABEL))
-        for table in (XLSX_INNERDICT_TABLE, PARQUET_INNERDICT_TABLE, DOCX_INNERDICT_TABLE):
-            connection.execute(
-                f"CREATE TABLE {quote(table)} ("
-                f"{quote(KTP_NAMEKEY_COL)} VARCHAR, {quote(KTP_INNERDICT_JSONLINES_COL)} VARCHAR)"
-            )
-        connection.execute(
-            f"CREATE TABLE {quote(CARD_PARTITION_TABLE)} ("
-            f"{quote(KTP_NAMEKEY_COL)} VARCHAR, {quote(KTP_PARTITION_COL)} INTEGER, "
-            f"{quote(KTP_PARTITION_FLAG_XLSX_NON_EXACT_ANY_COL)} BOOLEAN, "
-            f"{quote(KTP_PARTITION_FLAG_SSN_COUNT_COL)} INTEGER)"
-        )
-        source_rows: list[tuple[str, str]] = []
-        classifications: list[tuple[str, int, bool, int]] = []
-        for count, batch, partition, nonexact, ssn_count in groups:
-            for _ in range(count):
-                index = len(source_rows)
-                namekey = (
-                    NameKey.from_json_key(EXCLUDED_NAMEKEY) if index == 274
-                    else NameKey(first_name=f"Case {index:03}", last_name="Startup")
-                )
-                draws = (str(index), f"extra-{index}") if index < 5 else (str(index),)
-                rows = []
-                for draw in draws:
-                    writer.writerow((draw, batch))
-                    rows.append(json.dumps({
-                        KTP_NAMEKEY_COL: namekey.to_json_key(),
-                        KTP_FIRST_NAME_COL: namekey.first_name,
-                        KTP_LAST_NAME_COL: namekey.last_name,
-                        KTP_FILENAME_COL: "startup.xlsx",
-                        KTP_FRAGMENT_COL: index + 1,
-                        KTP_FRAGMENT_TYPE_COL: "csv_row",
-                        DRAW_LABEL: draw,
-                    }))
-                source_rows.append((namekey.to_json_key(), "\n".join(rows)))
-                classifications.append((namekey.to_json_key(), partition, nonexact, ssn_count))
-        connection.executemany(f"INSERT INTO {quote(XLSX_INNERDICT_TABLE)} VALUES (?, ?)",
-                               source_rows)
-        connection.executemany(f"INSERT INTO {quote(CARD_PARTITION_TABLE)} VALUES (?, ?, ?, ?)",
-                               classifications)
-
-
-@pytest.fixture
-def startup_files(tmp_path: Path) -> StartupFiles:
-    source = tmp_path / "source.duckdb"
-    release_map = tmp_path / "release-map.csv"
-    source_population(source, release_map)
-    replay = tmp_path / "replay.jsonl"
-    replay.write_bytes(b"")
-    config: dict[str, Any] = json.loads((ROOT / "config_ai_augment.json").read_text())
-    config.update(db_file=str(source), output_dir=str(tmp_path / "output"),
-                  state_file=str(tmp_path / "state.json"), rollout_cas_dir=str(tmp_path / "cas"))
-    for key, path in ((MAP_SUBSET_0_TO_BATCH_KEY, release_map), (REPLAY_LOG_KEY, replay)):
-        config["files_config"][key] = {
-            "path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-            "desc": "isolated startup fixture",
-        }
-    config_path = tmp_path / "config.json"
-    config_path.write_text(json.dumps(config))
-    runtime = backend_server.configure_runtime(config_path, require_namekey=False)
-    with backend_server.backend_store_lifecycle(
-        runtime, new=True, confirmed=True, yes=True
-    ) as store:
-        detour_path = store._detour_db_path
-    source.chmod(0o400)
-    process_temp = tmp_path / "process-temp"
-    process_temp.mkdir()
-    return StartupFiles(
-        config=config_path,
-        source=source,
-        replay=replay,
-        detour=detour_path,
-        process_temp=process_temp,
-    )
 
 
 def argv(mode: str, config: Path, *, yes: bool = True) -> list[str]:
@@ -3571,7 +3443,7 @@ class TestBackendStartupConditions:
         elif condition == "missing_anchor":
             files.detour.chmod(0o600)
             with duckdb.connect(str(files.detour)) as connection:
-                connection.execute("COMMENT ON TABLE detour_http_records IS NULL")
+                connection.execute(f"COMMENT ON TABLE {AUTHORITATIVE_RECORDS_TABLE} IS NULL")
             success = mode == "new"
         elif condition in {"hash_mismatch", "unprojected_record", "empty_object_lf",
                            "empty_object_no_lf"}:

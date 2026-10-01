@@ -80,7 +80,62 @@ where the descriptions are given as
 [Gherkin][gherkin-docs]-ish **scenarios**.
 A lower-level **representation** of these
 as Python `Protocol`s is available from
-`src/detours/detour_ai_augment/protected/src/architecture.py`.
+`src/detours/detour_ai_augment/protected/src/architecture.py`
+(hereafter referred to simply as the detour’s `architecture.py`).
+
+Some underlying terminology that
+emerged in the development process,
+helpful to distinguish in the code base:
+
+* A `Run`
+  (exemplified by the
+  `ControlCentreComponent.RunProperty`
+  Python `Protocol` in
+  the detour’s `architecture.py`)
+  is what the Human Operator launches
+  (either manually
+  or through the Control Centre)
+  as an act of HCR researcher card augmentation.
+  A `Run Outcome` (Request), in particular,
+  is an event that the Human Operator
+  (or the Control Centre)
+  triggers on the Backend 
+  to signify the completion of a `Run`.
+  In that sense,
+  a `Run` remains a Control Centre-side concept
+  while a `Run Outcome` (Request) is
+  something that the Backend learns about
+  (from the Control Centre),
+  `Record`s (see below), and
+  responds to.
+* An `Attempt`
+  (exemplified by the
+  `AgentRuntimeComponent.BackendPort.AttemptProperty`
+  Python `Protocol` in
+  the detour’s `architecture.py`)
+  represents what the AI Agent Runtime
+  attempts to accomplish
+  through its interaction with the Backend API
+  (there may be
+  and often are
+  multiple `Attempt`s in a single
+  AI Agent Runtime session).
+  On the Backend side,
+  this is merely an alias of the
+  `Validate` (Request) event 
+  that concludes the
+  AI Agent Runtime’s submission process.
+* A `Record`
+  (exemplified by the
+  `BackendComponent.AiAugmentHttpRequestLogRecordProperty`
+  Python `Protocol` in
+  the detour’s `architecture.py`)
+  is something the Backend documents.
+  This includes
+  both `Run`- and `Attempt`-related interactions
+  (both Requests and Responses) with the
+  Control Centre and the
+  AI Agent Runtime, respectively.
 
 ## Lifecycle
 

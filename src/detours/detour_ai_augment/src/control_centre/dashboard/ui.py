@@ -207,11 +207,11 @@ CARD_MARKDOWN_STYLE: Final = (
     f"{FULL_WIDTH_STYLE} overflow-wrap: anywhere; word-break: break-word; "
     f"line-height: {COMPACT_LINE_HEIGHT};"
 )
-ATTEMPT_HISTORY_STYLE: Final = f"{FULL_WIDTH_STYLE} overflow: hidden;"
-ATTEMPT_HISTORY_TABLE_STYLE: Final = (
+RUN_OUTCOME_HISTORY_STYLE: Final = f"{FULL_WIDTH_STYLE} overflow: hidden;"
+RUN_OUTCOME_HISTORY_TABLE_STYLE: Final = (
     f"{FULL_WIDTH_STYLE} overflow-wrap: anywhere; word-break: break-word;"
 )
-ATTEMPT_HISTORY_TABLE_PROPS: Final = "flat bordered wrap-cells"
+RUN_OUTCOME_HISTORY_TABLE_PROPS: Final = "flat bordered wrap-cells"
 ACTION_BUTTON_STYLE: Final = "min-width: 10rem;"
 HTTP_OPTIONS_METHOD: Final = "OPTIONS"
 DOCX_MEDIA_TYPE: Final = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -222,7 +222,7 @@ GRID_NAME_COLUMN_WIDTH: Final = 150
 GRID_COHORT_COLUMN_WIDTH: Final = 150
 GRID_INELIGIBILITY_COLUMN_WIDTH: Final = 260
 GRID_CONTENT_COLUMN_WIDTH: Final = 320
-GRID_ATTEMPT_COLUMN_WIDTH: Final = 190
+GRID_COMMIT_RECORD_ID_COLUMN_WIDTH: Final = 190
 GRID_TIME_COLUMN_WIDTH: Final = 180
 GRID_STATUS_COLUMN_WIDTH: Final = 110
 ACTION_LABEL_BY_VALUE: Final = {
@@ -243,7 +243,7 @@ GRID_TABLE_1_VALUE_FIELD: Final = "table_1_value"
 GRID_FOOTNOTES_FIELD: Final = "footnotes"
 GRID_FOOTNOTE_ARGUMENTS_FIELD: Final = "footnote_arguments"
 GRID_COMMIT_REQUEST_RECORD_ID_FIELD: Final = "commit_request_record_id"
-GRID_ATTEMPT_TIMESTAMP_FIELD: Final = "attempt_timestamp"
+GRID_TIMESTAMP_FIELD: Final = "timestamp"
 GRID_STATUS_FIELD: Final = "status"
 GRID_RUN_OUTCOME_SNAPSHOT_FIELD: Final = "run_outcome_snapshot"
 GRID_SESSION_STATUS_FIELD: Final = "session_status"
@@ -261,8 +261,8 @@ VIEW_CARD_TEST_ID: Final = "view-researcher-card"
 DOWNLOAD_CARD_DOCX_TEST_ID: Final = "download-researcher-card-docx"
 DOWNLOAD_CARD_TXT_TEST_ID: Final = "download-researcher-card-txt"
 CARD_MARKDOWN_TEST_ID: Final = "researcher-card-markdown"
-ATTEMPT_HISTORY_PANEL_TEST_ID: Final = "attempt-history-panel"
-ATTEMPT_HISTORY_TABLE_TEST_ID: Final = "attempt-history-table"
+RUN_OUTCOME_HISTORY_PANEL_TEST_ID: Final = "run-outcome-history-panel"
+RUN_OUTCOME_HISTORY_TABLE_TEST_ID: Final = "run-outcome-history-table"
 PAGE_FOOTER_TEST_ID: Final = "page-footer"
 CARD_RESPONSIVE_CSS: Final = f"""
 [data-testid=\"{RESEARCHER_GRID_TEST_ID}\"] .ag-cell-value {{
@@ -449,16 +449,16 @@ class _BackendAvailability(FrozenStrictModel):
 # =============================================================================
 
 
-class _RunCommitView(FrozenStrictModel):
+class _RunAttemptView(FrozenStrictModel):
     attempt: AgentRuntimeAttempt | None
     run: Run | None
-    accepted: CodexInnerDict | None
+    codex_innerdict: CodexInnerDict | None
     run_outcome_response_record: RunOutcomeResponseRecord | None
 
     @model_validator(mode="after")
-    def validate_run_or_commit(self) -> Self:
+    def validate_run_or_attempt(self) -> Self:
         if self.attempt is None and self.run is None:
-            raise ValueError(Locale.RUN_COMMIT_VIEW_EMPTY)
+            raise ValueError(Locale.RUN_ATTEMPT_VIEW_EMPTY)
         return self
 
     @property
@@ -561,16 +561,16 @@ class _RunCommitView(FrozenStrictModel):
             return Locale.SESSION_STATUS_NOT_OK_TEMPLATE.format(detail=exc)
         return Locale.SESSION_STATUS_OK
 
-    def to_var_view(
+    def to_researcher_var_row_view(
         self,
         *,
         researcher: _Researcher,
         ground_truth: InnerDict | None,
         researcher_var: _ResearcherVar,
         codex_busy: bool,
-    ) -> _RunCommitVarView:
-        accepted = self.accepted
-        return _RunCommitVarView(
+    ) -> _ResearcherVarRowView:
+        codex_innerdict = self.codex_innerdict
+        return _ResearcherVarRowView(
             run_id=self.run_id,
             namekey=researcher.namekey,
             draw_number=researcher.draw_number,
@@ -578,7 +578,8 @@ class _RunCommitView(FrozenStrictModel):
             last_name=researcher.namekey.last_name,
             ai_column=researcher_var.ai_column,
             ai_value=(
-                None if accepted is None else accepted.text(researcher_var.ai_column)
+                None if codex_innerdict is None
+                else codex_innerdict.text(researcher_var.ai_column)
             ),
             table_1_column=researcher_var.table_1_column,
             table_1_value=(
@@ -589,16 +590,16 @@ class _RunCommitView(FrozenStrictModel):
             ),
             footnotes=(
                 None
-                if accepted is None
+                if codex_innerdict is None
                 else self.footnotes_for_researcher_var(
-                    attempt=accepted, researcher_var=researcher_var,
+                    codex_innerdict=codex_innerdict, researcher_var=researcher_var,
                 )
             ),
             footnote_arguments=(
                 None
-                if accepted is None
+                if codex_innerdict is None
                 else self.footnote_arguments_for_researcher_var(
-                    attempt=accepted,
+                    codex_innerdict=codex_innerdict,
                     researcher_var=researcher_var,
                 )
             ),
@@ -616,7 +617,7 @@ class _RunCommitView(FrozenStrictModel):
                 )
             ),
             session_status=self.run_outcome_session_status,
-            action=_RunCommitVarView.action_for_lifecycle(
+            action=_ResearcherVarRowView.action_for_lifecycle(
                 self.lifecycle,
                 eligible=(
                     researcher.ai_augment_cohort is not AiAugmentCohort.INELIGIBLE
@@ -628,33 +629,33 @@ class _RunCommitView(FrozenStrictModel):
     def footnotes_for_researcher_var(
         self,
         *,
-        attempt: CodexInnerDict,
+        codex_innerdict: CodexInnerDict,
         researcher_var: _ResearcherVar,
     ) -> str | None:
-        numbers = self._footnote_numbers(attempt, researcher_var)
+        numbers = self._footnote_numbers(codex_innerdict, researcher_var)
         return self._matching_numbered_lines(
-            attempt.text(KTP_AI_AUGMENT_FOOTNOTES_COL),
+            codex_innerdict.text(KTP_AI_AUGMENT_FOOTNOTES_COL),
             numbers,
         )
 
     def footnote_arguments_for_researcher_var(
         self,
         *,
-        attempt: CodexInnerDict,
+        codex_innerdict: CodexInnerDict,
         researcher_var: _ResearcherVar,
     ) -> str | None:
-        numbers = self._footnote_numbers(attempt, researcher_var)
+        numbers = self._footnote_numbers(codex_innerdict, researcher_var)
         return self._matching_numbered_lines(
-            attempt.text(KTP_AI_AUGMENT_FOOTNOTE_ARGUMENTS_COL),
+            codex_innerdict.text(KTP_AI_AUGMENT_FOOTNOTE_ARGUMENTS_COL),
             numbers,
         )
 
     @staticmethod
     def _footnote_numbers(
-        attempt: CodexInnerDict,
+        codex_innerdict: CodexInnerDict,
         researcher_var: _ResearcherVar,
     ) -> tuple[int, ...]:
-        value = attempt.text(researcher_var.ai_column)
+        value = codex_innerdict.text(researcher_var.ai_column)
         if value is None:
             return ()
         match = FOOTNOTE_MARKER.search(value)
@@ -678,10 +679,10 @@ class _ResearcherView(FrozenStrictModel):
     researcher: _Researcher
 
     # Oldest -> newest.
-    run_commit_views: tuple[_RunCommitView, ...]
+    run_attempt_views: tuple[_RunAttemptView, ...]
 
-    # Same object as run_commit_views[-1], or None when there are no runs/commits.
-    latest_run_commit_view: _RunCommitView | None
+    # Same object as run_attempt_views[-1], or None when there are no Runs/Attempts.
+    latest_run_attempt_view: _RunAttemptView | None
 
     current_lifecycle: RunLifecycle
 
@@ -700,17 +701,17 @@ class _ResearcherView(FrozenStrictModel):
                 by_session[run.session_id] = run
         namekey = researcher.namekey.to_json_key()
         represented: set[UUID] = set()
-        run_commit_views: list[_RunCommitView] = []
+        run_attempt_views: list[_RunAttemptView] = []
         for record in snapshot.attempts_by_namekey.get(namekey, ()):
             commit = record.validation_request_body.commit_request_record
             session_id = commit.commit_request_body.codex_session_record.session_id
             matched_run = None if session_id is None else by_session.get(session_id)
             if matched_run is not None:
                 represented.add(matched_run.run_id)
-            run_commit_views.append(_RunCommitView(
+            run_attempt_views.append(_RunAttemptView(
                 attempt=record,
                 run=matched_run,
-                accepted=snapshot.committed_by_id.get(commit.record_id),
+                codex_innerdict=snapshot.committed_by_id.get(commit.record_id),
                 run_outcome_response_record=(
                     None if session_id is None
                     else snapshot.outcomes_by_session.get((namekey, session_id))
@@ -718,25 +719,25 @@ class _ResearcherView(FrozenStrictModel):
             ))
         for run in runs:
             if run.run_id not in represented:
-                run_commit_views.append(_RunCommitView(
+                run_attempt_views.append(_RunAttemptView(
                     attempt=None,
                     run=run,
-                    accepted=None,
+                    codex_innerdict=None,
                     run_outcome_response_record=(
                         None if run.session_id is None
                         else snapshot.outcomes_by_session.get((namekey, run.session_id))
                     ),
                 ))
-        ordered = tuple(sorted(run_commit_views, key=lambda run_commit_view: (
-            run_commit_view.run is not None and not run_commit_view.run.is_finished(),
-            run_commit_view.timestamp,
-            str(run_commit_view.row_id),
+        ordered = tuple(sorted(run_attempt_views, key=lambda run_attempt_view: (
+            run_attempt_view.run is not None and not run_attempt_view.run.is_finished(),
+            run_attempt_view.timestamp,
+            str(run_attempt_view.row_id),
         )))
         latest = ordered[-1] if ordered else None
         return cls(
             researcher=researcher,
-            run_commit_views=ordered,
-            latest_run_commit_view=latest,
+            run_attempt_views=ordered,
+            latest_run_attempt_view=latest,
             current_lifecycle=RunLifecycle.READY if latest is None else latest.lifecycle,
         )
 
@@ -747,19 +748,19 @@ class _ResearcherView(FrozenStrictModel):
         researcher_var: _ResearcherVar,
         codex_busy: bool,
     ) -> _ResearcherVarView:
-        run_commit_var_views = tuple(
-            run_commit_view.to_var_view(
+        researcher_var_row_views = tuple(
+            run_attempt_view.to_researcher_var_row_view(
                 researcher=self.researcher,
                 ground_truth=ground_truth,
                 researcher_var=researcher_var,
                 codex_busy=codex_busy,
             )
-            for run_commit_view in self.run_commit_views
+            for run_attempt_view in self.run_attempt_views
         )
         latest = (
-            run_commit_var_views[-1]
-            if run_commit_var_views
-            else _RunCommitVarView.ready(
+            researcher_var_row_views[-1]
+            if researcher_var_row_views
+            else _ResearcherVarRowView.ready(
                 researcher=self.researcher,
                 ground_truth=ground_truth,
                 researcher_var=researcher_var,
@@ -768,12 +769,12 @@ class _ResearcherView(FrozenStrictModel):
         )
         return _ResearcherVarView(
             researcher=self.researcher,
-            latest_run_commit_var_view=latest,
-            run_commit_var_views=run_commit_var_views,
+            current_researcher_var_row_view=latest,
+            researcher_var_row_views=researcher_var_row_views,
         )
 
 
-class _RunCommitVarView(FrozenStrictModel):
+class _ResearcherVarRowView(FrozenStrictModel):
     run_id: UUID | None
 
     namekey: NameKey
@@ -822,7 +823,7 @@ class _RunCommitVarView(FrozenStrictModel):
         ground_truth: InnerDict | None,
         researcher_var: _ResearcherVar,
         codex_busy: bool,
-    ) -> _RunCommitVarView:
+    ) -> _ResearcherVarRowView:
         return cls(
             run_id=None,
             namekey=researcher.namekey,
@@ -860,10 +861,10 @@ class _ResearcherVarView(FrozenStrictModel):
     researcher: _Researcher
 
     # Upper table: latest var view, or a ready placeholder.
-    latest_run_commit_var_view: _RunCommitVarView
+    current_researcher_var_row_view: _ResearcherVarRowView
 
     # Lower table: all var views, oldest -> newest.
-    run_commit_var_views: tuple[_RunCommitVarView, ...]
+    researcher_var_row_views: tuple[_ResearcherVarRowView, ...]
 
 
 class _ResearcherCardView(FrozenStrictModel):
@@ -1834,7 +1835,7 @@ class _CodexRunner:
 # =============================================================================
 # Main orchestration
 #
-# Exactly one Codex attempt may be running at a time.
+# Exactly one Codex run may be running at a time.
 #
 # The dashboard owns queue/run history in NiceGUI storage. Backend owns
 # attempts, accepted output, cards, the authoritative log, and the detour DB.
@@ -2593,8 +2594,8 @@ class _UiHandles(BaseModel):
     view_card_button: Any | None = None
 
     selected_researcher_label: Any | None = None
-    attempt_history_expansion: Any | None = None
-    attempt_history_table: Any | None = None
+    run_outcome_history_expansion: Any | None = None
+    run_outcome_history_table: Any | None = None
     card_container: Any | None = None
     card_markdown: Any | None = None
     download_card_button_docx: Any | None = None
@@ -2637,7 +2638,7 @@ class _ControlCentrePage:
             self.build_summary()
             self.build_filters()
             self.build_grid()
-            self.build_attempt_history_panel()
+            self.build_run_outcome_history_panel()
             self.build_action_panel()
             self.build_card_panel()
         ui.timer(UI_REFRESH_SECONDS, self.refresh)
@@ -2776,29 +2777,29 @@ class _ControlCentrePage:
             )
             self._handles.view_card_button.disable()
 
-    def build_attempt_history_panel(self) -> None:
+    def build_run_outcome_history_panel(self) -> None:
         researcher_var = RESEARCHER_VARS_BY_VARNAME[self._selection.researcher_varname]
-        self._handles.attempt_history_expansion = (
+        self._handles.run_outcome_history_expansion = (
             ui
-            .expansion(Locale.ATTEMPT_HISTORY)
-            .style(ATTEMPT_HISTORY_STYLE)
-            .props(_NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=ATTEMPT_HISTORY_PANEL_TEST_ID))
+            .expansion(Locale.RUN_OUTCOME_HISTORY)
+            .style(RUN_OUTCOME_HISTORY_STYLE)
+            .props(_NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=RUN_OUTCOME_HISTORY_PANEL_TEST_ID))
         )
-        with self._handles.attempt_history_expansion:
-            self._handles.attempt_history_table = (
+        with self._handles.run_outcome_history_expansion:
+            self._handles.run_outcome_history_table = (
                 ui
                 .table(
                     rows=[],
-                    columns=self.attempt_history_column_definitions(researcher_var=researcher_var),
+                    columns=self.run_outcome_history_column_definitions(researcher_var=researcher_var),
                     row_key=GRID_ROW_ID_FIELD,
                 )
-                .style(ATTEMPT_HISTORY_TABLE_STYLE)
+                .style(RUN_OUTCOME_HISTORY_TABLE_STYLE)
                 .props(
-                    f"{ATTEMPT_HISTORY_TABLE_PROPS} "
-                    f"{_NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=ATTEMPT_HISTORY_TABLE_TEST_ID)}"
+                    f"{RUN_OUTCOME_HISTORY_TABLE_PROPS} "
+                    f"{_NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=RUN_OUTCOME_HISTORY_TABLE_TEST_ID)}"
                 )
             )
-        self._handles.attempt_history_expansion.set_visibility(False)
+        self._handles.run_outcome_history_expansion.set_visibility(False)
 
     def build_card_panel(self) -> None:
         self._handles.card_container = (
@@ -2900,11 +2901,11 @@ class _ControlCentrePage:
             AgGrid.column(
                 field=GRID_COMMIT_REQUEST_RECORD_ID_FIELD,
                 header=KTP_AI_AUGMENT_COMMIT_REQUEST_RECORD_ID_COL,
-                width=GRID_ATTEMPT_COLUMN_WIDTH,
+                width=GRID_COMMIT_RECORD_ID_COLUMN_WIDTH,
             ),
             AgGrid.column(
-                field=GRID_ATTEMPT_TIMESTAMP_FIELD,
-                header=GRID_ATTEMPT_TIMESTAMP_FIELD,
+                field=GRID_TIMESTAMP_FIELD,
+                header=GRID_TIMESTAMP_FIELD,
                 width=GRID_TIME_COLUMN_WIDTH,
             ),
             AgGrid.column(
@@ -2925,15 +2926,15 @@ class _ControlCentrePage:
             ),
         ]
 
-    def attempt_history_column_definitions(
+    def run_outcome_history_column_definitions(
         self,
         *,
         researcher_var: _ResearcherVar,
     ) -> list[dict[str, Any]]:
         return [
             nicegui_table_column(
-                field=GRID_ATTEMPT_TIMESTAMP_FIELD,
-                label=GRID_ATTEMPT_TIMESTAMP_FIELD,
+                field=GRID_TIMESTAMP_FIELD,
+                label=GRID_TIMESTAMP_FIELD,
             ),
             nicegui_table_column(
                 field=GRID_STATUS_FIELD,
@@ -2989,7 +2990,7 @@ class _ControlCentrePage:
         rows: list[dict[str, Any]] = []
         for row in snapshot.researcher_var_views:
             researcher = row.researcher
-            latest = row.latest_run_commit_var_view
+            latest = row.current_researcher_var_row_view
             rows.append({
                 GRID_ROW_ID_FIELD: researcher.namekey.to_json_key(),
                 GRID_NAMEKEY_FIELD: researcher.namekey.to_json_key(),
@@ -3009,7 +3010,7 @@ class _ControlCentrePage:
                 GRID_FOOTNOTES_FIELD: latest.footnotes,
                 GRID_FOOTNOTE_ARGUMENTS_FIELD: latest.footnote_arguments,
                 GRID_COMMIT_REQUEST_RECORD_ID_FIELD: latest.commit_request_record_id,
-                GRID_ATTEMPT_TIMESTAMP_FIELD: (
+                GRID_TIMESTAMP_FIELD: (
                     None
                     if latest.timestamp is None
                     else latest.timestamp.isoformat()
@@ -3021,7 +3022,7 @@ class _ControlCentrePage:
             })
         return rows
 
-    def attempt_detail_rows(
+    def run_outcome_history_rows(
         self,
         *,
         row: _ResearcherVarView,
@@ -3029,25 +3030,35 @@ class _ControlCentrePage:
         return [
             {
                 GRID_ROW_ID_FIELD: str(
-                    attempt.commit_request_record_id if attempt.commit_request_record_id is not None
-                    else attempt.run_id
+                    researcher_var_row_view.commit_request_record_id
+                    if researcher_var_row_view.commit_request_record_id is not None
+                    else researcher_var_row_view.run_id
                 ),
-                GRID_RUN_ID_FIELD: (str(attempt.run_id) if attempt.run_id is not None else None),
-                GRID_COMMIT_REQUEST_RECORD_ID_FIELD: attempt.commit_request_record_id,
-                GRID_ATTEMPT_TIMESTAMP_FIELD: (
+                GRID_RUN_ID_FIELD: (
+                    str(researcher_var_row_view.run_id)
+                    if researcher_var_row_view.run_id is not None else None
+                ),
+                GRID_COMMIT_REQUEST_RECORD_ID_FIELD: (
+                    researcher_var_row_view.commit_request_record_id
+                ),
+                GRID_TIMESTAMP_FIELD: (
                     None
-                    if attempt.timestamp is None
-                    else attempt.timestamp.isoformat()
+                    if researcher_var_row_view.timestamp is None
+                    else researcher_var_row_view.timestamp.isoformat()
                 ),
-                GRID_STATUS_FIELD: (attempt.backend_lifecycle or attempt.lifecycle).value,
-                GRID_RUN_OUTCOME_SNAPSHOT_FIELD: attempt.run_outcome_snapshot_savedness,
-                GRID_SESSION_STATUS_FIELD: attempt.session_status,
-                GRID_AI_VALUE_FIELD: attempt.ai_value,
-                GRID_TABLE_1_VALUE_FIELD: attempt.table_1_value,
-                GRID_FOOTNOTES_FIELD: attempt.footnotes,
-                GRID_FOOTNOTE_ARGUMENTS_FIELD: attempt.footnote_arguments,
+                GRID_STATUS_FIELD: (
+                    researcher_var_row_view.backend_lifecycle or researcher_var_row_view.lifecycle
+                ).value,
+                GRID_RUN_OUTCOME_SNAPSHOT_FIELD: (
+                    researcher_var_row_view.run_outcome_snapshot_savedness
+                ),
+                GRID_SESSION_STATUS_FIELD: researcher_var_row_view.session_status,
+                GRID_AI_VALUE_FIELD: researcher_var_row_view.ai_value,
+                GRID_TABLE_1_VALUE_FIELD: researcher_var_row_view.table_1_value,
+                GRID_FOOTNOTES_FIELD: researcher_var_row_view.footnotes,
+                GRID_FOOTNOTE_ARGUMENTS_FIELD: researcher_var_row_view.footnote_arguments,
             }
-            for attempt in row.run_commit_var_views
+            for researcher_var_row_view in row.researcher_var_row_views
         ]
 
     async def refresh(self) -> None:
@@ -3146,7 +3157,7 @@ class _ControlCentrePage:
             )
             if current is None or current.researcher is not card.researcher:
                 self._clear_displayed_card()
-        self.refresh_attempt_history()
+        self.refresh_run_outcome_history()
         rows = self.grid_rows(snapshot=snapshot)
         self.sync_selected_action(rows)
         if not self._grid_initialized:
@@ -3187,20 +3198,20 @@ class _ControlCentrePage:
                 )
         self._grid_rows_by_id = desired_by_id
 
-    def refresh_attempt_history(self) -> None:
+    def refresh_run_outcome_history(self) -> None:
         namekey = self._expanded_history_namekey
-        table = self._handles.attempt_history_table
+        table = self._handles.run_outcome_history_table
         if namekey is None or table is None:
             return
         row = self._researcher_var_views_by_namekey.get(namekey.to_json_key())
         if row is None:
             table.update_rows([], clear_selection=True)
-            if self._handles.attempt_history_expansion is not None:
-                self._handles.attempt_history_expansion.set_visibility(False)
+            if self._handles.run_outcome_history_expansion is not None:
+                self._handles.run_outcome_history_expansion.set_visibility(False)
             self._expanded_history_namekey = None
             return
         table.update_rows(
-            self.attempt_detail_rows(row=row),
+            self.run_outcome_history_rows(row=row),
             clear_selection=False,
         )
 
@@ -3313,22 +3324,22 @@ class _ControlCentrePage:
             if button is not None and self._displayed_card is card:
                 button.enable()
 
-    def show_attempt_history(
+    def show_run_outcome_history(
         self,
         namekey: NameKey,
     ) -> None:
-        expansion = self._handles.attempt_history_expansion
-        table = self._handles.attempt_history_table
+        expansion = self._handles.run_outcome_history_expansion
+        table = self._handles.run_outcome_history_table
         row = self._researcher_var_views_by_namekey.get(namekey.to_json_key())
         if expansion is None or table is None or row is None:
             return
         researcher_var = RESEARCHER_VARS_BY_VARNAME[self._selection.researcher_varname]
-        table.columns = self.attempt_history_column_definitions(researcher_var=researcher_var)
-        table.update_rows(self.attempt_detail_rows(row=row), clear_selection=False)
+        table.columns = self.run_outcome_history_column_definitions(researcher_var=researcher_var)
+        table.update_rows(self.run_outcome_history_rows(row=row), clear_selection=False)
         expansion.set_text(
-            Locale.ATTEMPT_HISTORY_TEMPLATE.format(
-                first_name=row.latest_run_commit_var_view.first_name,
-                last_name=row.latest_run_commit_var_view.last_name,
+            Locale.RUN_OUTCOME_HISTORY_TEMPLATE.format(
+                first_name=row.current_researcher_var_row_view.first_name,
+                last_name=row.current_researcher_var_row_view.last_name,
             )
         )
         expansion.set_visibility(True)
@@ -3346,7 +3357,7 @@ class _ControlCentrePage:
         await self.refresh_grid()
         expanded_namekey = self._expanded_history_namekey
         if expanded_namekey is not None:
-            self.show_attempt_history(expanded_namekey)
+            self.show_run_outcome_history(expanded_namekey)
 
     async def on_lifecycle_filter_changed(
         self,
@@ -3507,7 +3518,7 @@ class _ControlCentrePage:
         namekey = NameKey.from_json_key(namekey_json)
         self._selection.selected_namekey = namekey
         self.sync_selected_action((data,))
-        self.show_attempt_history(namekey)
+        self.show_run_outcome_history(namekey)
 
 
 # =============================================================================
@@ -3628,7 +3639,7 @@ async def publish_completed(services: _ApplicationServices) -> None:
     candidates = [
         row for row in dashboard.researcher_var_views
         if row.researcher.ai_augment_cohort is not AiAugmentCohort.INELIGIBLE
-        and row.latest_run_commit_var_view.lifecycle is RunLifecycle.COMPLETED
+        and row.current_researcher_var_row_view.lifecycle is RunLifecycle.COMPLETED
     ]
     cards = []
     for row in candidates:

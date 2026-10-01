@@ -36,7 +36,6 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_
     AiAugmentDetourDB,
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.post_commit_validation import (  # noqa: E501
-    PostCommitValidation,
     _AppliedRetryAuditRow,
     _CommitConfigFacts,
     _CommitEvaluationInputs,
@@ -52,10 +51,6 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.rep
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
-    AUTHORITATIVE_ATTEMPT_COMMIT_REQUEST_RECORD_ID_COLUMN,
-    AUTHORITATIVE_ATTEMPT_PAYLOAD_COLUMN,
-    AUTHORITATIVE_ATTEMPT_VALIDATION_ID_KEY,
-    AUTHORITATIVE_ATTEMPTS_TABLE,
     AUTHORITATIVE_EMPTY_OFFSET,
     AUTHORITATIVE_FIRST_LINE,
     AUTHORITATIVE_RECORD_ID_COLUMN,
@@ -95,28 +90,34 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     CODEX_REF_THUMBNAIL_URL_COL,
     CODEX_REF_TITLE_COL,
     CODEX_REF_URL_COL,
-    CODEX_RETRY_ATTEMPT_ID_COL,
     CODEX_RETRY_BASELINE_COL,
     CODEX_RETRY_BASELINE_TABLE,
+    CODEX_RETRY_COMMIT_RECORD_ID_COL,
     CODEX_RETRY_CREATED_AT_COL,
     CODEX_RETRY_NAMEKEY_COL,
     CODEX_RETRY_ORIGINAL_PULL_RECORD_ID_COL,
     CODEX_RETRY_SESSION_ID_COL,
     CODEX_ROLLOUT_FILENAME_COL,
+    CODEX_RUN_OUTCOME_RECORD_ID_COL,
+    CODEX_RUN_OUTCOME_RECORDS_TABLE,
+    CODEX_RUN_OUTCOME_SERIALIZED_JSON_COL,
+    CODEX_SESSION_ID_JSON_KEY,
     CODEX_TURN_REF_NORMALIZED_VIEW,
     CODEX_TURN_REF_TABLE,
-    CREATE_AUTHORITATIVE_ATTEMPTS_TABLE_SQL,
+    COMMIT_REQUEST_RECORD_ID_COLUMN,
+    COMMIT_VALIDATION_REQUEST_RECORD_INDEX_TABLE,
     CREATE_AUTHORITATIVE_RECORDS_TABLE_SQL,
+    CREATE_COMMIT_VALIDATION_REQUEST_RECORD_INDEX_TABLE_SQL,
     CUMULATIVE_KEY_SEPARATOR,
     HTTP_CONTENT_TYPE_HEADER,
     HTTP_GET_METHOD,
     HTTP_POST_METHOD,
     ISO_8601_UTC_OFFSET,
     ISO_8601_UTC_SUFFIX,
-    KTP_AI_AUGMENT_COMMIT_REQUEST_BODY_COL,
     KTP_AI_AUGMENT_COMMIT_REQUEST_RECORD_ID_COL,
     KTP_AI_AUGMENT_RUN_OUTCOME_RECORD_ID_COL,
-    KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_RECORD_COL,
+    KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL,
+    KTP_AI_AUGMENT_SESSION_METADATA_COL,
     KTP_AI_AUGMENT_VALIDATION_RECORD_ID_COL,
     MILLISECONDS_PER_SECOND,
     NANOSECONDS_PER_MICROSECOND,
@@ -126,13 +127,7 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     SYNTHETIC_COMMIT_HOST,
     SYNTHETIC_COMMIT_SCHEME,
     TEXT_ENCODING,
-    VALIDATION_BODY_COMMIT_REQUEST_RECORD_KEY,
-    VALIDATION_BODY_INITIAL_VALIDATION_REQUEST_RECORD_KEY,
-    VALIDATION_BODY_OPENALEX_ROR_RECORDS_KEY,
-    VALIDATION_BODY_POST_COMMIT_VALIDATION_KEY,
-    VALIDATION_COMMIT_PULL_RESPONSE_RECORD_KEY,
-    VALIDATION_COMMIT_PUSH_RESPONSE_RECORD_KEY,
-    VALIDATION_COMMIT_SELF_HTTP_RECORD_KEY,
+    VALIDATION_REQUEST_RECORD_ID_COLUMN,
     ContentType,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.validation_request import (
@@ -179,7 +174,11 @@ from ....control_centre.dashboard.helpers.data_models.run_outcome_event import (
 from .ai_augment_cas import AiAugmentCAS, CASCodexRolloutRecord
 from .ai_augment_context import AiAugmentBackendContext
 from .ai_augment_singular_outer_dict import AiAugmentSingularOuterDict
-from .codex_innerdict import CodexInnerDict, _CodexInnerDictProcedure
+from .codex_innerdict import (
+    CodexInnerDict,
+    _CodexInnerDictProcedure,
+    _RunOutcomeResponseRecordJson,
+)
 from .commit_request import (
     COMMIT_PATH,
     AppendwatchReportEncoding,
@@ -839,17 +838,17 @@ class AiAugmentBackendStore(FrozenStrictModel):
                 request.record_id,
                 stored_commit.record_id,
             )
-            attempt = self._validate_commit(stored_commit.record_id)
+            validation_request_record = self._validate_commit(stored_commit.record_id)
             validation_ref = self._current_replayed_record
             if not isinstance(validation_ref, BackendValidationRequestRecord):
                 raise RuntimeError(Locale.PUSH_RESULT_LINKAGE_INVALID)
             commit_ref = validation_ref.validation_request_body.commit_request_record
             if (
-                attempt is not validation_ref
+                validation_request_record is not validation_ref
                 or commit_ref.record_id != stored_commit.record_id
             ):
                 raise RuntimeError(Locale.PUSH_RESULT_LINKAGE_INVALID)
-            assert attempt is validation_ref
+            assert validation_request_record is validation_ref
             assert commit_ref.commit_request_body.push_response_record is accepted_push
             assert commit_ref.commit_request_body.pull_response_record is (
                 accepted_push.pull_response_record
@@ -1026,9 +1025,9 @@ class AiAugmentBackendStore(FrozenStrictModel):
             missing: ModelHttpRequired | None = None
             with self._lock:
                 existing = self._execute(
-                    f"SELECT {AUTHORITATIVE_ATTEMPT_PAYLOAD_COLUMN} "
-                    f"FROM {AUTHORITATIVE_ATTEMPTS_TABLE} "
-                    f"WHERE {AUTHORITATIVE_ATTEMPT_COMMIT_REQUEST_RECORD_ID_COLUMN} = ?",
+                    f"SELECT {VALIDATION_REQUEST_RECORD_ID_COLUMN} "
+                    f"FROM {COMMIT_VALIDATION_REQUEST_RECORD_INDEX_TABLE} "
+                    f"WHERE {COMMIT_REQUEST_RECORD_ID_COLUMN} = ?",
                     [str(commit_id)],
                 ).fetchone()
                 current = self._current_replayed_record
@@ -1042,8 +1041,8 @@ class AiAugmentBackendStore(FrozenStrictModel):
                     raise RuntimeError(Locale.VALIDATION_CURRENT_RECONSTRUCTED_COMMIT_REQUIRED)
                 if existing is not None:
                     if validation is None:
-                        raise RuntimeError(Locale.PERSISTED_ATTEMPT_CURRENT_VALIDATION_MISSING)
-                    self._assert_attempt_projection(
+                        raise RuntimeError(Locale.INDEXED_VALIDATION_CURSOR_MISSING)
+                    self._assert_commit_validation_request_record_index(
                         existing[0],
                         commit_request_record=commit,
                         validation_request_record=validation,
@@ -1082,23 +1081,21 @@ class AiAugmentBackendStore(FrozenStrictModel):
                     self._http_record(record_id) for record_id in http.record_ids
                 ),
             )
-            assert body.commit_request_record is commit
-            assert body.initial_validation_request_record is initial_ref
             self._append_authoritative_record(body.http_record())
             # Return the applied, serialized result, not the speculative evaluation.
             with self._lock:
                 row = self._execute(
-                    f"SELECT {AUTHORITATIVE_ATTEMPT_PAYLOAD_COLUMN} "
-                    f"FROM {AUTHORITATIVE_ATTEMPTS_TABLE} "
-                    f"WHERE {AUTHORITATIVE_ATTEMPT_COMMIT_REQUEST_RECORD_ID_COLUMN} = ?",
+                    f"SELECT {VALIDATION_REQUEST_RECORD_ID_COLUMN} "
+                    f"FROM {COMMIT_VALIDATION_REQUEST_RECORD_INDEX_TABLE} "
+                    f"WHERE {COMMIT_REQUEST_RECORD_ID_COLUMN} = ?",
                     [str(commit_id)],
                 ).fetchone()
                 if row is None:
                     raise RuntimeError(Locale.VALIDATION_RESULT_NOT_APPLIED)
                 validation = self._validation_from_cursor()
                 if validation is None:
-                    raise RuntimeError(Locale.APPLIED_ATTEMPT_CURRENT_VALIDATION_MISSING)
-                self._assert_attempt_projection(
+                    raise RuntimeError(Locale.APPLIED_VALIDATION_CURSOR_MISSING)
+                self._assert_commit_validation_request_record_index(
                     row[0],
                     commit_request_record=commit,
                     validation_request_record=validation,
@@ -1112,7 +1109,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
             raise RuntimeError(Locale.STORE_ANCHOR_TRANSACTION_REQUIRED)
         payload = anchor.model_dump_json().replace("'", "''")
         self._detour_db.connection.execute(
-            f"COMMENT ON TABLE detour_http_records IS '{payload}'"
+            f"COMMENT ON TABLE {AUTHORITATIVE_RECORDS_TABLE} IS '{payload}'"
         )
 
     def _verify_log_projection(self) -> _ReplayAnchor | None:
@@ -1120,14 +1117,15 @@ class AiAugmentBackendStore(FrozenStrictModel):
         row = self._execute(
             "SELECT comment FROM duckdb_tables() "
             "WHERE database_name = current_database() AND schema_name = 'main' "
-            "AND table_name = 'detour_http_records'"
+            "AND table_name = ?",
+            [AUTHORITATIVE_RECORDS_TABLE],
         ).fetchone()
         if row is None or row[0] is None:
             raise ValueError(Locale.REPLAY_ANCHOR_MISSING)
         anchor = _ReplayAnchor.model_validate_json(row[0])
         # Missing legacy columns fail here without migration or mutation.
         rows = self._execute(
-            "SELECT record_ordinal, raw_line_sha256 FROM detour_http_records "
+            f"SELECT record_ordinal, raw_line_sha256 FROM {AUTHORITATIVE_RECORDS_TABLE} "
             "ORDER BY record_ordinal"
         ).fetchall()
         size = self._replay_log._size()
@@ -1215,7 +1213,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
     def _initialize_http_record_schema(self) -> None:
 
         self._execute(CREATE_AUTHORITATIVE_RECORDS_TABLE_SQL)
-        self._execute(CREATE_AUTHORITATIVE_ATTEMPTS_TABLE_SQL)
+        self._execute(CREATE_COMMIT_VALIDATION_REQUEST_RECORD_INDEX_TABLE_SQL)
 
     def _http_record_with_ordinal(
         self,
@@ -1259,22 +1257,17 @@ class AiAugmentBackendStore(FrozenStrictModel):
             ],
         )
 
-    def _insert_attempt_record(
+    def _insert_validation_request_record_id(
         self,
         validation_request_record: BackendValidationRequestRecord,
     ) -> None:
 
         conn = self._detour_db.connection
         conn.execute(
-            f"INSERT INTO {AUTHORITATIVE_ATTEMPTS_TABLE} VALUES (?, ?)",
+            f"INSERT INTO {COMMIT_VALIDATION_REQUEST_RECORD_INDEX_TABLE} VALUES (?, ?)",
             [
                 str(validation_request_record.validation_request_body.commit_request_record.record_id),
-                json.dumps(
-                    {
-                        AUTHORITATIVE_ATTEMPT_VALIDATION_ID_KEY:
-                        str(validation_request_record.record_id)
-                    }
-                ),
+                str(validation_request_record.record_id),
             ],
         )
 
@@ -1342,23 +1335,16 @@ class AiAugmentBackendStore(FrozenStrictModel):
                     raise ValueError(Locale.REPLAY_VALIDATION_COMMIT_MISMATCH)
                 if record.request_body is None:
                     raise ValueError(Locale.VALIDATION_BODY_MISSING)
-                parsed = json.loads(record.request_body)
                 initial_ref = self._initial_validation_for_commit(commit_ref)
-                body = ValidationRequestBody(
+                body = ValidationRequestBody.from_serialized_json(
+                    record.request_body,
                     commit_request_record=commit_ref,
-                    post_commit_validation=PostCommitValidation.model_validate(
-                        parsed[VALIDATION_BODY_POST_COMMIT_VALIDATION_KEY], strict=False,
-                    ),
                     initial_validation_request_record=initial_ref,
-                    openalex_ror_records=tuple(
-                        HttpRequestLogRecord.model_validate(value, strict=False)
-                        for value in parsed[VALIDATION_BODY_OPENALEX_ROR_RECORDS_KEY]
-                    ),
+                    resolve_http_record=self._http_record,
                 )
                 self._apply_validation_record(
                     record,
                     body=body,
-                    parsed=parsed,
                     commit_ref=commit_ref,
                     initial_ref=initial_ref,
                 )
@@ -1367,11 +1353,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
                     validation_request_body=body,
                 )
                 assert validation.validation_request_body is body
-                if body.commit_request_record is not commit_ref:
-                    raise ValueError(Locale.REPLAY_VALIDATION_COMMIT_MISMATCH)
-                if body.initial_validation_request_record is not initial_ref:
-                    raise ValueError(Locale.VALIDATION_INITIAL_LINK_INVALID)
-                self._insert_attempt_record(validation)
+                self._insert_validation_request_record_id(validation)
                 reconstructed = validation
             elif record.method == HTTP_POST_METHOD and record.path in RUN_OUTCOME_PATHS:
                 if isinstance(
@@ -1745,14 +1727,14 @@ class AiAugmentBackendStore(FrozenStrictModel):
                 return (None if row is None else _RetryBaselineRow(
                     namekey_json=row[0],
                     session_id_text=row[1],
-                    attempt_id_text=row[2],
+                    commit_record_id_text=row[2],
                     obligations_json=row[3],
                 )), None
             except Exception as exc:
                 return None, exc
 
         def applied_retry_audit_rows(
-            baseline_attempt_id: UUID,
+            baseline_commit_record_id: UUID,
         ) -> tuple[tuple[_AppliedRetryAuditRow, ...] | None, Exception | None]:
             try:
                 return tuple(
@@ -1762,7 +1744,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
                     )
                     for submission_json, assessment_json in self._applied_retry_audit_rows(
                         original_pull_record_id=original_pull_response_record.record_id,
-                        baseline_attempt_id=baseline_attempt_id,
+                        baseline_commit_record_id=baseline_commit_record_id,
                     )
                 ), None
             except Exception as exc:
@@ -1807,19 +1789,14 @@ class AiAugmentBackendStore(FrozenStrictModel):
         )
         return commit, validation
 
-    def _assert_attempt_projection(
+    def _assert_commit_validation_request_record_index(
         self,
         value: str,
         *,
         commit_request_record: BackendCommitRequestRecord,
         validation_request_record: BackendValidationRequestRecord,
     ) -> None:
-        payload = json.loads(value)
-        if not isinstance(payload, dict) or set(payload) != {
-            AUTHORITATIVE_ATTEMPT_VALIDATION_ID_KEY
-        }:
-            raise _ReplayProjectionConflictError
-        validation_id = UUID(payload[AUTHORITATIVE_ATTEMPT_VALIDATION_ID_KEY])
+        validation_id = UUID(value)
         if (
             validation_request_record.record_id != validation_id
             or self._http_record(validation_id).model_dump(mode="json")
@@ -1836,7 +1813,6 @@ class AiAugmentBackendStore(FrozenStrictModel):
         record: HttpRequestLogRecord,
         *,
         body: ValidationRequestBody,
-        parsed: Mapping[str, Any],
         commit_ref: BackendCommitRequestRecord,
         initial_ref: BackendValidationRequestRecord | None,
     ) -> None:
@@ -1846,54 +1822,26 @@ class AiAugmentBackendStore(FrozenStrictModel):
         assert body.commit_request_record is commit_ref
         assert body.initial_validation_request_record is initial_ref
         ordinal, _ = self._http_record_with_ordinal(record.record_id)
-        embedded = parsed[VALIDATION_BODY_COMMIT_REQUEST_RECORD_KEY]
-        embedded_commit = HttpRequestLogRecord.model_validate(
-            embedded[VALIDATION_COMMIT_SELF_HTTP_RECORD_KEY], strict=False,
-        )
-        embedded_pull = HttpRequestLogRecord.model_validate(
-            embedded[VALIDATION_COMMIT_PULL_RESPONSE_RECORD_KEY], strict=False,
-        )
-        embedded_push = HttpRequestLogRecord.model_validate(
-            embedded[VALIDATION_COMMIT_PUSH_RESPONSE_RECORD_KEY], strict=False,
-        )
         commit_ordinal, commit = self._http_record_with_ordinal(
-            embedded_commit.record_id
+            commit_ref.record_id
         )
         if (
             self._current_replayed_record is not commit_ref
-            or commit_ref.record_id != embedded_commit.record_id
             or commit_ordinal >= ordinal
             or record.request_headers != commit.request_headers
-            or embedded_commit != commit
             or any(
-                getattr(commit_ref, field) != getattr(embedded_commit, field)
-                for field in HttpRequestLogRecord.model_fields
-            )
-            or any(
-                getattr(commit_ref.commit_request_body.pull_response_record, field)
-                != getattr(embedded_pull, field)
-                or getattr(commit_ref.commit_request_body.push_response_record, field)
-                != getattr(embedded_push, field)
+                getattr(commit_ref, field) != getattr(commit, field)
                 for field in HttpRequestLogRecord.model_fields
             )
         ):
             raise ReplayInputMissing(Locale.VALIDATION_COMMIT_LINK_INVALID)
-        initial_value = parsed[VALIDATION_BODY_INITIAL_VALIDATION_REQUEST_RECORD_KEY]
-        initial = (
-            None if initial_value is None else
-            HttpRequestLogRecord.model_validate(initial_value, strict=False)
-        )
-        if initial is not None:
-            initial_ordinal, persisted = self._http_record_with_ordinal(initial.record_id)
-            if initial_ordinal >= commit_ordinal or persisted != initial:
-                raise ValueError(Locale.VALIDATION_INITIAL_LINK_INVALID)
-        if (initial is None) != (initial_ref is None) or (
-            initial is not None and initial_ref is not None and any(
-                getattr(initial, field) != getattr(initial_ref, field)
+        if initial_ref is not None:
+            initial_ordinal, persisted = self._http_record_with_ordinal(initial_ref.record_id)
+            if initial_ordinal >= commit_ordinal or any(
+                getattr(persisted, field) != getattr(initial_ref, field)
                 for field in HttpRequestLogRecord.model_fields
-            )
-        ):
-            raise ReplayInputMissing(Locale.VALIDATION_INITIAL_LINK_INVALID)
+            ):
+                raise ValueError(Locale.VALIDATION_INITIAL_LINK_INVALID)
         session_id = commit_ref.commit_request_body.codex_session_record.session_id
         namekey = name_key_from_header_value(commit.request_headers.get(NAME_KEY_HEADER))
         placeholders = ", ".join("?" for _path in RUN_OUTCOME_PATHS)
@@ -1966,15 +1914,15 @@ class AiAugmentBackendStore(FrozenStrictModel):
             if index is None:
                 raise ReplayInputMissing(Locale.VALIDATION_REPLAY_MISMATCH)
             namekey = name_key_from_header_value(commit.request_headers.get(NAME_KEY_HEADER))
-            attempt_timestamp = datetime.fromtimestamp(
+            commit_request_timestamp = datetime.fromtimestamp(
                 commit.record_id.time / MILLISECONDS_PER_SECOND,
                 tz=timezone.utc,
             )
-            self._project_retry_attempt(
+            self._project_retry_evidence(
                 commit,
                 projection,
                 namekey=namekey,
-                attempt_timestamp=attempt_timestamp,
+                commit_request_timestamp=commit_request_timestamp,
             )
         elif (
             projection.assessment_json is not None or projection.applied is not None
@@ -1988,13 +1936,13 @@ class AiAugmentBackendStore(FrozenStrictModel):
         elif accepted:
             raise ReplayInputMissing(Locale.VALIDATION_REPLAY_MISMATCH)
 
-    def _project_retry_attempt(
+    def _project_retry_evidence(
         self,
         commit: BackendCommitRequestRecord,
         projection: _ValidationProjection,
         *,
         namekey: NameKey,
-        attempt_timestamp: datetime,
+        commit_request_timestamp: datetime,
     ) -> None:
         assert projection.commit_request_record is commit
         submission_json = projection.submission_json
@@ -2018,17 +1966,17 @@ class AiAugmentBackendStore(FrozenStrictModel):
             original_pull_record_id=pull.record_id,
             namekey=namekey,
             session_id=session_id,
-            attempt_id=commit.record_id,
-            attempt_timestamp=attempt_timestamp,
+            commit_record_id=commit.record_id,
+            commit_request_timestamp=commit_request_timestamp,
             obligations_json=projection.baseline_obligations_json,
         ):
             raise _ReplayProjectionConflictError
         self._append_evidence_audit(
-            attempt_id=commit.record_id,
+            commit_record_id=commit.record_id,
             original_pull_record_id=pull.record_id,
             namekey=namekey,
             session_id=session_id,
-            attempt_timestamp=attempt_timestamp,
+            commit_request_timestamp=commit_request_timestamp,
             submission_json=submission_json,
             assessment_json=assessment_json,
             applied=applied,
@@ -2107,7 +2055,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
         self,
         *,
         original_pull_record_id: UUID,
-        baseline_attempt_id: UUID,
+        baseline_commit_record_id: UUID,
     ) -> tuple[tuple[str, str], ...]:
         rows: list[tuple[str, str]] = self._execute(
             f"""
@@ -2117,10 +2065,10 @@ class AiAugmentBackendStore(FrozenStrictModel):
             FROM {CODEX_EVIDENCE_AUDIT_TABLE}
             WHERE {duckdb_quote_identifier(CODEX_RETRY_ORIGINAL_PULL_RECORD_ID_COL)} = ?
               AND {duckdb_quote_identifier(CODEX_EVIDENCE_APPLIED_COL)}
-              AND {duckdb_quote_identifier(CODEX_RETRY_ATTEMPT_ID_COL)} <> ?
+              AND {duckdb_quote_identifier(CODEX_RETRY_COMMIT_RECORD_ID_COL)} <> ?
             ORDER BY {duckdb_quote_identifier(CODEX_EVIDENCE_AUDIT_ID_COL)}
             """,
-            [str(original_pull_record_id), str(baseline_attempt_id)],
+            [str(original_pull_record_id), str(baseline_commit_record_id)],
         ).fetchall()
         return tuple(rows)
 
@@ -2130,8 +2078,8 @@ class AiAugmentBackendStore(FrozenStrictModel):
         original_pull_record_id: UUID,
         namekey: NameKey,
         session_id: UUID,
-        attempt_id: UUID,
-        attempt_timestamp: datetime,
+        commit_record_id: UUID,
+        commit_request_timestamp: datetime,
         obligations_json: str,
     ) -> bool:
         return self._execute(
@@ -2140,7 +2088,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
                 {duckdb_quote_identifier(CODEX_RETRY_ORIGINAL_PULL_RECORD_ID_COL)},
                 {duckdb_quote_identifier(CODEX_RETRY_NAMEKEY_COL)},
                 {duckdb_quote_identifier(CODEX_RETRY_SESSION_ID_COL)},
-                {duckdb_quote_identifier(CODEX_RETRY_ATTEMPT_ID_COL)},
+                {duckdb_quote_identifier(CODEX_RETRY_COMMIT_RECORD_ID_COL)},
                 {duckdb_quote_identifier(CODEX_RETRY_CREATED_AT_COL)},
                 {duckdb_quote_identifier(CODEX_RETRY_BASELINE_COL)}
             )
@@ -2152,8 +2100,8 @@ class AiAugmentBackendStore(FrozenStrictModel):
                 str(original_pull_record_id),
                 namekey.to_json_key(),
                 str(session_id),
-                str(attempt_id),
-                attempt_timestamp,
+                str(commit_record_id),
+                commit_request_timestamp,
                 obligations_json,
             ],
         ).fetchone() is not None
@@ -2166,7 +2114,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
             SELECT
                 {duckdb_quote_identifier(CODEX_RETRY_NAMEKEY_COL)},
                 {duckdb_quote_identifier(CODEX_RETRY_SESSION_ID_COL)},
-                {duckdb_quote_identifier(CODEX_RETRY_ATTEMPT_ID_COL)},
+                {duckdb_quote_identifier(CODEX_RETRY_COMMIT_RECORD_ID_COL)},
                 {duckdb_quote_identifier(CODEX_RETRY_BASELINE_COL)}
             FROM {CODEX_RETRY_BASELINE_TABLE}
             WHERE {duckdb_quote_identifier(CODEX_RETRY_ORIGINAL_PULL_RECORD_ID_COL)} = ?
@@ -2178,11 +2126,11 @@ class AiAugmentBackendStore(FrozenStrictModel):
     def _append_evidence_audit(
         self,
         *,
-        attempt_id: UUID,
+        commit_record_id: UUID,
         original_pull_record_id: UUID,
         namekey: NameKey,
         session_id: UUID,
-        attempt_timestamp: datetime,
+        commit_request_timestamp: datetime,
         submission_json: str,
         assessment_json: str,
         applied: bool,
@@ -2192,7 +2140,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
             f"""
             INSERT INTO {CODEX_EVIDENCE_AUDIT_TABLE} (
                 {duckdb_quote_identifier(CODEX_EVIDENCE_AUDIT_ID_COL)},
-                {duckdb_quote_identifier(CODEX_RETRY_ATTEMPT_ID_COL)},
+                {duckdb_quote_identifier(CODEX_RETRY_COMMIT_RECORD_ID_COL)},
                 {duckdb_quote_identifier(CODEX_RETRY_ORIGINAL_PULL_RECORD_ID_COL)},
                 {duckdb_quote_identifier(CODEX_RETRY_NAMEKEY_COL)},
                 {duckdb_quote_identifier(CODEX_RETRY_SESSION_ID_COL)},
@@ -2206,11 +2154,11 @@ class AiAugmentBackendStore(FrozenStrictModel):
             """,
             [
                 self._next_codex_row_id(CODEX_EVIDENCE_AUDIT_TABLE),
-                str(attempt_id),
+                str(commit_record_id),
                 str(original_pull_record_id),
                 namekey.to_json_key(),
                 str(session_id),
-                attempt_timestamp,
+                commit_request_timestamp,
                 submission_json,
                 assessment_json,
                 applied,
@@ -2476,7 +2424,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
                     VARCHAR PRIMARY KEY,
                 {duckdb_quote_identifier(CODEX_RETRY_NAMEKEY_COL)} VARCHAR NOT NULL,
                 {duckdb_quote_identifier(CODEX_RETRY_SESSION_ID_COL)} VARCHAR NOT NULL,
-                {duckdb_quote_identifier(CODEX_RETRY_ATTEMPT_ID_COL)} VARCHAR NOT NULL,
+                {duckdb_quote_identifier(CODEX_RETRY_COMMIT_RECORD_ID_COL)} VARCHAR NOT NULL,
                 {duckdb_quote_identifier(CODEX_RETRY_CREATED_AT_COL)} TIMESTAMPTZ NOT NULL,
                 {duckdb_quote_identifier(CODEX_RETRY_BASELINE_COL)} JSON NOT NULL
             )
@@ -2486,7 +2434,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
             f"""
             CREATE TABLE IF NOT EXISTS {CODEX_EVIDENCE_AUDIT_TABLE} (
                 {duckdb_quote_identifier(CODEX_EVIDENCE_AUDIT_ID_COL)} BIGINT PRIMARY KEY,
-                {duckdb_quote_identifier(CODEX_RETRY_ATTEMPT_ID_COL)} VARCHAR NOT NULL UNIQUE,
+                {duckdb_quote_identifier(CODEX_RETRY_COMMIT_RECORD_ID_COL)} VARCHAR NOT NULL UNIQUE,
                 {duckdb_quote_identifier(CODEX_RETRY_ORIGINAL_PULL_RECORD_ID_COL)} VARCHAR NOT NULL,
                 {duckdb_quote_identifier(CODEX_RETRY_NAMEKEY_COL)} VARCHAR NOT NULL,
                 {duckdb_quote_identifier(CODEX_RETRY_SESSION_ID_COL)} VARCHAR NOT NULL,
@@ -2584,12 +2532,17 @@ class AiAugmentBackendStore(FrozenStrictModel):
             f"{duckdb_quote_identifier(KTP_FILENAME_COL)}, "
             f"{duckdb_quote_identifier(KTP_FRAGMENT_COL)}))"
         )
+        self._execute(
+            f"CREATE TABLE IF NOT EXISTS {CODEX_RUN_OUTCOME_RECORDS_TABLE} ("
+            f"{duckdb_quote_identifier(CODEX_RUN_OUTCOME_RECORD_ID_COL)} VARCHAR PRIMARY KEY, "
+            f"{duckdb_quote_identifier(CODEX_RUN_OUTCOME_SERIALIZED_JSON_COL)} VARCHAR NOT NULL)"
+        )
 
     def _replace_codex_output_view(self) -> None:
         projection = ", ".join(
             duckdb_quote_identifier(column) for column, _data_type in CODEX_OUTPUT_SCHEMA
             if column not in {
-                KTP_AI_AUGMENT_COMMIT_REQUEST_RECORD_ID_COL, KTP_AI_AUGMENT_COMMIT_REQUEST_BODY_COL,
+                KTP_AI_AUGMENT_COMMIT_REQUEST_RECORD_ID_COL,
                 KTP_AI_AUGMENT_VALIDATION_RECORD_ID_COL, KTP_AI_AUGMENT_RUN_OUTCOME_RECORD_ID_COL,
             }
         )
@@ -2646,15 +2599,16 @@ class AiAugmentBackendStore(FrozenStrictModel):
         ):
             raise BackendStoreException(Locale.RUN_OUTCOME_VALIDATION_LINKAGE_CORRUPT)
         row = self._execute(
-            f"SELECT {AUTHORITATIVE_ATTEMPT_PAYLOAD_COLUMN} FROM {AUTHORITATIVE_ATTEMPTS_TABLE} "
-            f"WHERE {AUTHORITATIVE_ATTEMPT_COMMIT_REQUEST_RECORD_ID_COLUMN} = ?",
+            f"SELECT {VALIDATION_REQUEST_RECORD_ID_COLUMN} "
+            f"FROM {COMMIT_VALIDATION_REQUEST_RECORD_INDEX_TABLE} "
+            f"WHERE {COMMIT_REQUEST_RECORD_ID_COLUMN} = ?",
             [str(commit.record_id)],
         ).fetchone()
         if row is None:
             raise BackendStoreException(Locale.RUN_OUTCOME_PROJECTION_INCONSISTENT)
         # Verify the explicit persisted inputs without reapplying derived effects.
         try:
-            self._assert_attempt_projection(
+            self._assert_commit_validation_request_record_index(
                 row[0],
                 commit_request_record=commit,
                 validation_request_record=validation,
@@ -2873,10 +2827,9 @@ class AiAugmentBackendStore(FrozenStrictModel):
             if name_key_from_header_value(commit.request_headers.get(NAME_KEY_HEADER)) != namekey:
                 raise ReplayInputMissing(Locale.RUN_OUTCOME_COMMIT_NAMEKEY_MISMATCH)
             linked = self._execute(
-                f"SELECT json_extract_string({AUTHORITATIVE_ATTEMPT_PAYLOAD_COLUMN}, "
-                "'$.validation_record_id') "
-                f"FROM {AUTHORITATIVE_ATTEMPTS_TABLE} "
-                f"WHERE {AUTHORITATIVE_ATTEMPT_COMMIT_REQUEST_RECORD_ID_COLUMN} = ?",
+                f"SELECT {VALIDATION_REQUEST_RECORD_ID_COLUMN} "
+                f"FROM {COMMIT_VALIDATION_REQUEST_RECORD_INDEX_TABLE} "
+                f"WHERE {COMMIT_REQUEST_RECORD_ID_COLUMN} = ?",
                 [str(commit_id)],
             ).fetchone()
             if linked is None or linked[0] is None:
@@ -2902,11 +2855,24 @@ class AiAugmentBackendStore(FrozenStrictModel):
                 f"UPDATE {CODEX_OUTPUT_ROWS_TABLE} SET "
                 f"{duckdb_quote_identifier(KTP_AI_AUGMENT_VALIDATION_RECORD_ID_COL)} = ?, "
                 f"{duckdb_quote_identifier(KTP_AI_AUGMENT_RUN_OUTCOME_RECORD_ID_COL)} = ?, "
-                f"{duckdb_quote_identifier(KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_RECORD_COL)} = ? "
+                f"{duckdb_quote_identifier(KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL)} = ? "
                 f"WHERE {duckdb_quote_identifier(KTP_AI_AUGMENT_COMMIT_REQUEST_RECORD_ID_COL)} = ?",
                 [
                     str(validation.record_id), str(outcome.record_id),
-                    json.dumps(outcome.serialize()), str(commit.record_id),
+                    outcome.response_body,
+                    str(commit.record_id),
+                ],
+            )
+            self._execute(
+                f"INSERT INTO {CODEX_RUN_OUTCOME_RECORDS_TABLE} ("
+                f"{duckdb_quote_identifier(CODEX_RUN_OUTCOME_RECORD_ID_COL)}, "
+                f"{duckdb_quote_identifier(CODEX_RUN_OUTCOME_SERIALIZED_JSON_COL)}) "
+                "VALUES (?, ?)",
+                [
+                    str(outcome.record_id),
+                    _RunOutcomeResponseRecordJson.from_run_outcome_response_record(
+                        outcome
+                    ).model_dump_json(),
                 ],
             )
             updated += 1
@@ -2934,8 +2900,34 @@ class AiAugmentBackendStore(FrozenStrictModel):
         for namekey_json, payload in rows:
             try:
                 for values in loads_jsonlines(payload):
-                    outcome_json = values[KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_RECORD_COL]
-                    if not isinstance(outcome_json, str):
+                    row = self._execute(
+                        "SELECT "
+                        f"{duckdb_quote_identifier(KTP_AI_AUGMENT_RUN_OUTCOME_RECORD_ID_COL)}, "
+                        f"{duckdb_quote_identifier(KTP_AI_AUGMENT_SESSION_METADATA_COL)} "
+                        f"FROM {CODEX_OUTPUT_ROWS_TABLE} "
+                        f"WHERE {duckdb_quote_identifier(KTP_NAMEKEY_COL)} = ? "
+                        f"AND {duckdb_quote_identifier(KTP_FILENAME_COL)} = ? "
+                        f"AND {duckdb_quote_identifier(KTP_FRAGMENT_COL)} = ?",
+                        [namekey_json, values[KTP_FILENAME_COL], values[KTP_FRAGMENT_COL]],
+                    ).fetchone()
+                    if row is None or row[0] is None:
+                        raise ReplayInputMissing(Locale.RUN_OUTCOME_PROJECTION_INCONSISTENT)
+                    outcome_row = self._execute(
+                        f"SELECT {duckdb_quote_identifier(CODEX_RUN_OUTCOME_SERIALIZED_JSON_COL)} "
+                        f"FROM {CODEX_RUN_OUTCOME_RECORDS_TABLE} "
+                        f"WHERE {duckdb_quote_identifier(CODEX_RUN_OUTCOME_RECORD_ID_COL)} = ?",
+                        [row[0]],
+                    ).fetchone()
+                    if outcome_row is None:
+                        raise ReplayInputMissing(Locale.RUN_OUTCOME_PROJECTION_INCONSISTENT)
+                    run_outcome_json = outcome_row[0]
+                    outcome = _RunOutcomeResponseRecordJson.model_validate_json(
+                        run_outcome_json
+                    ).to_run_outcome_response_record()
+                    summary = CodexRolloutRecord.parse_summary_json(row[1])
+                    if UUID(summary[CODEX_SESSION_ID_JSON_KEY]) != (
+                        outcome.run_outcome_request_record.session_id
+                    ):
                         raise ReplayInputMissing(Locale.RUN_OUTCOME_PROJECTION_INCONSISTENT)
                     codex_innerdicts.append(
                         CodexInnerDict(
@@ -2943,11 +2935,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
                                 {KTP_NAMEKEY_COL: namekey_json, **values},
                                 _CodexInnerDictProcedure(),
                             ),
-                            run_outcome_response_record=(
-                                RunOutcomeResponseRecord.from_serialized_json(
-                                    value=outcome_json,
-                                )
-                            ),
+                            run_outcome_response_record=outcome,
                         )
                     )
             except (

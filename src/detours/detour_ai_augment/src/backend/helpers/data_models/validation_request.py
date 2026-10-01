@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import json
+from collections.abc import Callable
 from typing import Self
+from uuid import UUID
 
 from pydantic import Field, model_serializer, model_validator
 
@@ -15,13 +16,6 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     SOURCE_KEY_HEADER,
     SYNTHETIC_COMMIT_HOST,
     SYNTHETIC_COMMIT_SCHEME,
-    VALIDATION_BODY_COMMIT_REQUEST_RECORD_KEY,
-    VALIDATION_BODY_INITIAL_VALIDATION_REQUEST_RECORD_KEY,
-    VALIDATION_BODY_OPENALEX_ROR_RECORDS_KEY,
-    VALIDATION_BODY_POST_COMMIT_VALIDATION_KEY,
-    VALIDATION_COMMIT_PULL_RESPONSE_RECORD_KEY,
-    VALIDATION_COMMIT_PUSH_RESPONSE_RECORD_KEY,
-    VALIDATION_COMMIT_SELF_HTTP_RECORD_KEY,
 )
 from src.helpers.architecture import FrozenStrictModel, implements
 from src.helpers.data_models.http_request_log import HttpRequestLogRecord
@@ -33,10 +27,10 @@ VALIDATE_PATH = "/validate"
 
 
 class _ValidationRequestBodyJson(FrozenStrictModel):
-    commit_request_record: _BackendCommitRequestRecordJson
+    commit_request_record_id: UUID
     post_commit_validation: PostCommitValidation
-    initial_validation_request_record: HttpRequestLogRecord | None
-    openalex_ror_records: tuple[HttpRequestLogRecord, ...] = ()
+    initial_validation_request_record_id: UUID | None
+    openalex_ror_records_ids: tuple[UUID, ...]
 
 
 @implements[BackendComponent.ValidationRequestBodyProperty]()
@@ -73,11 +67,43 @@ class ValidationRequestBody(FrozenStrictModel):
     @model_serializer
     def serialize(self) -> dict[str, object]:
         return _ValidationRequestBodyJson(
-            commit_request_record=_BackendCommitRequestRecordJson.from_commit_request_record(self.commit_request_record),
+            commit_request_record_id=self.commit_request_record.record_id,
             post_commit_validation=self.post_commit_validation,
-            initial_validation_request_record=self.initial_validation_request_record,
-            openalex_ror_records=self.openalex_ror_records,
+            initial_validation_request_record_id=(
+                None if self.initial_validation_request_record is None
+                else self.initial_validation_request_record.record_id
+            ),
+            openalex_ror_records_ids=tuple(
+                record.record_id for record in self.openalex_ror_records
+            ),
         ).model_dump(mode="json")
+
+    @classmethod
+    def from_serialized_json(
+        cls,
+        value: str,
+        *,
+        commit_request_record: BackendCommitRequestRecord,
+        initial_validation_request_record: BackendValidationRequestRecord | None,
+        resolve_http_record: Callable[[UUID], HttpRequestLogRecord],
+    ) -> Self:
+        parsed = _ValidationRequestBodyJson.model_validate_json(value)
+        if parsed.commit_request_record_id != commit_request_record.record_id:
+            raise ValueError(Locale.VALIDATION_COMMIT_LINK_INVALID)
+        if parsed.initial_validation_request_record_id != (
+            None if initial_validation_request_record is None
+            else initial_validation_request_record.record_id
+        ):
+            raise ValueError(Locale.VALIDATION_INITIAL_LINK_INVALID)
+        return cls(
+            commit_request_record=commit_request_record,
+            post_commit_validation=parsed.post_commit_validation,
+            initial_validation_request_record=initial_validation_request_record,
+            openalex_ror_records=tuple(
+                resolve_http_record(record_id)
+                for record_id in parsed.openalex_ror_records_ids
+            ),
+        )
 
     def http_record(self) -> BackendValidationRequestRecord:
         return BackendValidationRequestRecord(
@@ -104,6 +130,10 @@ class ValidationRequestBody(FrozenStrictModel):
 class BackendValidationRequestRecord(RequestRecord):
     validation_request_body: ValidationRequestBody = Field(exclude=True)
 
+    @property
+    def http_request_log_record(self) -> HttpRequestLogRecord:
+        return super().http_request_log_record
+
     def validate_record(self) -> Self:
         if (
             self.schema_version != KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
@@ -124,56 +154,12 @@ class BackendValidationRequestRecord(RequestRecord):
             or self.duration_usec is not None
         ):
             raise ValueError(Locale.VALIDATION_RECORD_INVALID)
-        parsed = json.loads(self.request_body)
-        if not isinstance(parsed, dict) or set(parsed) != {
-            VALIDATION_BODY_COMMIT_REQUEST_RECORD_KEY,
-            VALIDATION_BODY_POST_COMMIT_VALIDATION_KEY,
-            VALIDATION_BODY_INITIAL_VALIDATION_REQUEST_RECORD_KEY,
-            VALIDATION_BODY_OPENALEX_ROR_RECORDS_KEY,
-        }:
-            raise ValueError(Locale.VALIDATION_BODY_MISMATCH)
-        embedded = parsed[VALIDATION_BODY_COMMIT_REQUEST_RECORD_KEY]
-        if not isinstance(embedded, dict) or set(embedded) != {
-            VALIDATION_COMMIT_SELF_HTTP_RECORD_KEY,
-            VALIDATION_COMMIT_PULL_RESPONSE_RECORD_KEY,
-            VALIDATION_COMMIT_PUSH_RESPONSE_RECORD_KEY,
-        }:
-            raise ValueError(Locale.VALIDATION_BODY_MISMATCH)
-        body = self.validation_request_body
-        commit = body.commit_request_record
-        commit_body = commit.commit_request_body
-        initial = body.initial_validation_request_record
-        embedded_initial = parsed[VALIDATION_BODY_INITIAL_VALIDATION_REQUEST_RECORD_KEY]
-        if (embedded_initial is None) != (initial is None):
-            raise ValueError(Locale.VALIDATION_BODY_MISMATCH)
-        links = (
-            (embedded[VALIDATION_COMMIT_SELF_HTTP_RECORD_KEY], commit),
-            (embedded[VALIDATION_COMMIT_PULL_RESPONSE_RECORD_KEY],
-             commit_body.pull_response_record),
-            (embedded[VALIDATION_COMMIT_PUSH_RESPONSE_RECORD_KEY],
-             commit_body.push_response_record),
-        )
-        for value, expected in links:
-            observed = HttpRequestLogRecord.model_validate(value, strict=False)
-            if any(
-                getattr(observed, field) != getattr(expected, field)
-                for field in HttpRequestLogRecord.model_fields
-            ):
-                raise ValueError(Locale.VALIDATION_BODY_MISMATCH)
-        if initial is not None:
-            observed = HttpRequestLogRecord.model_validate(embedded_initial, strict=False)
-            if any(
-                getattr(observed, field) != getattr(initial, field)
-                for field in HttpRequestLogRecord.model_fields
-            ):
-                raise ValueError(Locale.VALIDATION_BODY_MISMATCH)
+        parsed = _ValidationRequestBodyJson.model_validate_json(self.request_body)
+        initial = self.validation_request_body.initial_validation_request_record
         if (
-            PostCommitValidation.model_validate(
-                parsed[VALIDATION_BODY_POST_COMMIT_VALIDATION_KEY], strict=False,
-            ) != body.post_commit_validation
-            or tuple(HttpRequestLogRecord.model_validate(value, strict=False) for value in
-                     parsed[VALIDATION_BODY_OPENALEX_ROR_RECORDS_KEY]) != body.openalex_ror_records
-            or self.request_headers != commit.request_headers
+            parsed.model_dump(mode="json") != self.validation_request_body.serialize()
+            or self.request_headers
+            != self.validation_request_body.commit_request_record.request_headers
             or (initial is not None and initial.record_id == self.record_id)
         ):
             raise ValueError(Locale.VALIDATION_BODY_MISMATCH)
@@ -215,6 +201,35 @@ class BackendValidationRequestRecord(RequestRecord):
             validation_request_body=validation_request_body,
         )
 
+    @classmethod
+    def from_serialized_json(
+        cls,
+        *,
+        value: str,
+        commit_request_record: BackendCommitRequestRecord | None = None,
+        initial_validation_request_record: BackendValidationRequestRecord | None = None,
+        resolve_http_record: Callable[[UUID], HttpRequestLogRecord] | None = None,
+    ) -> Self:
+        if commit_request_record is None:
+            raise ValueError(Locale.VALIDATION_COMMIT_LINK_INVALID)
+        if resolve_http_record is None:
+            raise ValueError(Locale.VALIDATION_HTTP_REFERENCES_INVALID)
+        record = HttpRequestLogRecord.model_validate_json(value)
+        if record.request_body is None:
+            raise ValueError(Locale.VALIDATION_BODY_MISSING)
+        body = ValidationRequestBody.from_serialized_json(
+            record.request_body,
+            commit_request_record=commit_request_record,
+            initial_validation_request_record=initial_validation_request_record,
+            resolve_http_record=resolve_http_record,
+        )
+        return cls.from_http_request_log_record(
+            record, validation_request_body=body,
+        )
+
+    def serialize(self) -> dict[str, object]:
+        return self.http_request_log_record.model_dump(mode="json")
+
 
 # Deliberate post-definition imports: validation refers to a prior commit,
 # while retry pulls refer back to a prior validation. The response models
@@ -224,7 +239,4 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.pos
     PostCommitValidation,
 )
 
-from .commit_request import (  # noqa: E402
-    BackendCommitRequestRecord,
-    _BackendCommitRequestRecordJson,
-)
+from .commit_request import BackendCommitRequestRecord  # noqa: E402

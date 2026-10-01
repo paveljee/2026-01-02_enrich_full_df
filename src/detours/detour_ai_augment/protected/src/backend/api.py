@@ -34,7 +34,6 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     AI_AUGMENT_COLUMNS,
     AI_AUGMENT_EVIDENCE_COLUMNS,
     API_VERSION,
-    AUTHORITATIVE_ATTEMPT_COMMIT_REQUEST_RECORD_ID_COLUMN,  # noqa: F401
     AUTHORITATIVE_LOG_BASE64_ENCODING,
     AUTHORITATIVE_LOG_DATA_KEY,
     AUTHORITATIVE_LOG_ENCODING_KEY,
@@ -120,12 +119,6 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     AUDIT_READ_ROLLOUT_COMMAND as AUDIT_READ_ROLLOUT_COMMAND,
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
-    AUTHORITATIVE_ATTEMPT_PAYLOAD_COLUMN as AUTHORITATIVE_ATTEMPT_PAYLOAD_COLUMN,
-)
-from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
-    AUTHORITATIVE_ATTEMPTS_TABLE as AUTHORITATIVE_ATTEMPTS_TABLE,
-)
-from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     AUTHORITATIVE_RECORD_ORDINAL_COLUMN as AUTHORITATIVE_RECORD_ORDINAL_COLUMN,
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
@@ -148,6 +141,9 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     CODEX_SESSIONS_ROOT_ENV_NAME as CODEX_SESSIONS_ROOT_ENV_NAME,
+)
+from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
+    COMMIT_VALIDATION_REQUEST_RECORD_INDEX_TABLE as COMMIT_VALIDATION_REQUEST_RECORD_INDEX_TABLE,
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     FORBIDDEN_NORMALIZED_PATH_PARTS as FORBIDDEN_NORMALIZED_PATH_PARTS,
@@ -211,6 +207,9 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     SYNTHETIC_COMMIT_SCHEME as SYNTHETIC_COMMIT_SCHEME,
+)
+from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
+    VALIDATION_REQUEST_RECORD_ID_COLUMN as VALIDATION_REQUEST_RECORD_ID_COLUMN,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_backend_store import (
     AiAugmentBackendStore,
@@ -342,7 +341,9 @@ PULL_ROUTE: dict[str, Any] = {
         status.HTTP_500_INTERNAL_SERVER_ERROR: {
             "description": Locale.CONFIGURATION_ERROR_DETAIL,
         },
-        status.HTTP_503_SERVICE_UNAVAILABLE: SHARED_ROUTE_RESPONSES[status.HTTP_503_SERVICE_UNAVAILABLE],
+        status.HTTP_503_SERVICE_UNAVAILABLE: SHARED_ROUTE_RESPONSES[
+            status.HTTP_503_SERVICE_UNAVAILABLE
+        ],
     },
 }
 
@@ -370,7 +371,9 @@ PUSH_ROUTE: dict[str, Any] = {
                 },
             },
         },
-        status.HTTP_503_SERVICE_UNAVAILABLE: SHARED_ROUTE_RESPONSES[status.HTTP_503_SERVICE_UNAVAILABLE],
+        status.HTTP_503_SERVICE_UNAVAILABLE: SHARED_ROUTE_RESPONSES[
+            status.HTTP_503_SERVICE_UNAVAILABLE
+        ],
         status.HTTP_500_INTERNAL_SERVER_ERROR: {
             "description": Locale.CONFIGURATION_ERROR_DETAIL,
         },

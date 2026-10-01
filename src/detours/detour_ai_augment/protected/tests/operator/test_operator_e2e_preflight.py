@@ -12,13 +12,16 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import Mock
-from uuid import uuid7
+from uuid import UUID, uuid7
 
 import pytest
 
-from src.detours.detour_ai_augment.protected.src.backend.helpers import vars as backend_vars
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.post_commit_validation import (  # noqa: E501
     PostCommitValidation,
+)
+from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
+    PULL_PATH,
+    PUSH_PATH,
 )
 from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helpers.locale import (
     Locale,
@@ -26,12 +29,20 @@ from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helper
 from src.detours.detour_ai_augment.protected.tests import (
     pytest_plugin as operator_preflight,
 )
+from src.detours.detour_ai_augment.protected.tests.fixtures.pytest_fixtures import (
+    STARTUP_NAMEKEY,
+    StartupFiles,
+)
 from src.detours.detour_ai_augment.protected.tests.operator import (
     test_operator_e2e as workflow,
 )
 from src.detours.detour_ai_augment.src.backend import server as backend_server
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_backend_store import (
     initialize_backend_store,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.commit_request import (
+    COMMIT_PATH,
+    _CommitRequestBodyJson,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.lifecycle import (
     BackendLifecycle,
@@ -45,17 +56,15 @@ from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_mod
     RunLifecycle,
 )
 from src.detours.detour_ai_augment.tests.backend import test_api as api_fixtures
-from src.detours.detour_ai_augment.tests.control_centre import test_ui as ui_tests
 from src.detours.detour_ai_augment.tests.control_centre import test_ui_e2e as browser_tests
 from src.helpers.data_models import HttpRequestLogRecord
 
-startup_files = browser_tests.startup_files
 completed_query_files = browser_tests.completed_query_files
 
 
 @pytest.mark.python_subprocess
 def test_operator_artifact_validator_accepts_completed_store_history(
-    completed_query_files: ui_tests.StartupFiles,
+    completed_query_files: StartupFiles,
     pytestconfig: pytest.Config,
 ) -> None:
     files = completed_query_files
@@ -74,7 +83,7 @@ def test_operator_artifact_validator_accepts_completed_store_history(
     )
     workflow.validate_workflow_artifacts(
         runtime,
-        namekey=ui_tests.STARTUP_NAMEKEY,
+        namekey=STARTUP_NAMEKEY,
         expected_run_outcome_path=RunLifecycle.COMPLETED.to_run_outcome_path(),
     )
 
@@ -89,9 +98,9 @@ def _workflow_http_records(
     records: list[HttpRequestLogRecord] = []
     initial: BackendValidationRequestRecord | None = None
     for index in range(2 if with_initial else 1):
-        pull, commit = api_fixtures.retry_attempt_records(
+        pull, commit = api_fixtures.retry_commit_records(
             original_pull_record_id=uuid7(), session_id=session_id,
-            attempt_id=f"operator-history-{index}",
+            synthetic_record_id_seed=f"operator-history-{index}",
         )
         providers = tuple(
             HttpRequestLogRecord(
@@ -163,10 +172,12 @@ def test_operator_http_history_rejects_corrupt_or_unreferenced_records(
     validation = records[-1]
     assert validation.request_body is not None
     body = json.loads(validation.request_body)
-    assert body[backend_vars.VALIDATION_BODY_INITIAL_VALIDATION_REQUEST_RECORD_KEY] is not None
-    provider = HttpRequestLogRecord.model_validate(
-        body[backend_vars.VALIDATION_BODY_OPENALEX_ROR_RECORDS_KEY][0], strict=False,
-    )
+    assert body["initial_validation_request_record_id"] is not None
+    by_id = {record.record_id: record for record in records}
+    provider = by_id[UUID(body["openalex_ror_records_ids"][0])]
+    commit = by_id[UUID(body["commit_request_record_id"])]
+    assert commit.request_body is not None
+    commit_body = _CommitRequestBodyJson.model_validate_json(commit.request_body)
     if mutation == "unknown-route":
         records.append(api_fixtures.persisted_http_record(
             record_id=uuid7(), method="GET", path="/unexpected",
@@ -177,36 +188,15 @@ def test_operator_http_history_rejects_corrupt_or_unreferenced_records(
     elif mutation == "wrong-endpoint":
         changed = provider.model_copy(update={"host": "unapproved.invalid"})
         records[records.index(provider)] = changed
-        body[backend_vars.VALIDATION_BODY_OPENALEX_ROR_RECORDS_KEY] = [
-            changed.model_dump(mode="json"),
-        ]
-        records[-1] = validation.model_copy(update={
-            "request_body": json.dumps(body),
-        })
     elif mutation == "duplicate":
         records.append(records[0])
     else:
         linked = {
             "provider": provider,
-            "commit": HttpRequestLogRecord.model_validate(
-                body[backend_vars.VALIDATION_BODY_COMMIT_REQUEST_RECORD_KEY][
-                    backend_vars.VALIDATION_COMMIT_SELF_HTTP_RECORD_KEY
-                ], strict=False,
-            ),
-            "pull": HttpRequestLogRecord.model_validate(
-                body[backend_vars.VALIDATION_BODY_COMMIT_REQUEST_RECORD_KEY][
-                    backend_vars.VALIDATION_COMMIT_PULL_RESPONSE_RECORD_KEY
-                ], strict=False,
-            ),
-            "push": HttpRequestLogRecord.model_validate(
-                body[backend_vars.VALIDATION_BODY_COMMIT_REQUEST_RECORD_KEY][
-                    backend_vars.VALIDATION_COMMIT_PUSH_RESPONSE_RECORD_KEY
-                ], strict=False,
-            ),
-            "initial": HttpRequestLogRecord.model_validate(
-                body[backend_vars.VALIDATION_BODY_INITIAL_VALIDATION_REQUEST_RECORD_KEY],
-                strict=False,
-            ),
+            "commit": commit,
+            "pull": by_id[commit_body.pull_record_id],
+            "push": by_id[commit_body.push_record_id],
+            "initial": by_id[UUID(body["initial_validation_request_record_id"])],
         }[target]
         position = next(
             index for index, record in enumerate(records) if record.record_id == linked.record_id
@@ -217,24 +207,22 @@ def test_operator_http_history_rejects_corrupt_or_unreferenced_records(
             records.append(records.pop(position))
         else:
             assert mutation == "changed"
-            if target == "initial":
-                initial = linked
-                assert initial.request_body is not None
-                initial_body = json.loads(initial.request_body)
-                initial_body[backend_vars.VALIDATION_BODY_POST_COMMIT_VALIDATION_KEY][
-                    "detail"
-                ] = "changed persisted validation"
-                records[position] = initial.model_copy(update={
-                    "request_body": json.dumps(initial_body),
-                })
+            if target == "provider":
+                records[position] = linked.model_copy(update={"scheme": "ftp"})
             else:
-                records[position] = linked.model_copy(update={"query": "changed=1"})
+                wrong_path = {
+                    "commit": PULL_PATH,
+                    "pull": PUSH_PATH,
+                    "push": PULL_PATH,
+                    "initial": COMMIT_PATH,
+                }[target]
+                records[position] = linked.model_copy(update={"path": wrong_path})
     with pytest.raises(AssertionError):
         workflow._validate_workflow_http_records(records)
 
 
 def test_operator_runtime_uses_supplied_directories_and_preserves_files(
-    startup_files: ui_tests.StartupFiles, request: pytest.FixtureRequest,
+    startup_files: StartupFiles, request: pytest.FixtureRequest,
 ) -> None:
     files = startup_files
     source_before = hashlib.sha256(files.source.read_bytes()).hexdigest()
@@ -548,7 +536,7 @@ def test_operator_completion_wait_reports_actual_conditions(
     page = Mock()
     page.get_by_test_id.side_effect = {
         control_ui.RESEARCHER_GRID_TEST_ID: Mock(),
-        control_ui.ATTEMPT_HISTORY_TABLE_TEST_ID: history,
+        control_ui.RUN_OUTCOME_HISTORY_TABLE_TEST_ID: history,
         control_ui.EXECUTE_ACTION_TEST_ID: execute,
         control_ui.VIEW_CARD_TEST_ID: card,
     }.__getitem__

@@ -50,6 +50,10 @@ from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helper
     Locale,
 )
 from src.detours.detour_ai_augment.protected.tests import pytest_plugin
+from src.detours.detour_ai_augment.protected.tests.fixtures.pytest_fixtures import (
+    STARTUP_NAMEKEY,
+    StartupFiles,
+)
 from src.detours.detour_ai_augment.protected.tests.operator import test_operator_e2e as operator
 from src.detours.detour_ai_augment.src.backend import server as backend_server
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_backend_store import (
@@ -66,7 +70,6 @@ from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_mod
 from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.lifecycle import (  # noqa: E501
     RunLifecycle,
 )
-from src.detours.detour_ai_augment.tests.control_centre import test_ui as ui_tests
 from src.helpers.data_models import InnerDict, NameKey
 from src.helpers.procedures import XlsxMatchProcedure
 from src.helpers.vars import (
@@ -88,7 +91,7 @@ E2E_REFRESH_WAIT_MILLISECONDS = 2_500
 E2E_NARROW_VIEWPORT: ViewportSize = {"width": 915, "height": 1_000}
 E2E_WIDE_VIEWPORT: ViewportSize = {"width": 1_600, "height": 1_000}
 E2E_GRID_MARKER = "preserved"
-E2E_ATTEMPT_BASE_TIME = datetime(2026, 8, 10, tzinfo=timezone.utc)
+E2E_RUN_BASE_TIME = datetime(2026, 8, 10, tzinfo=timezone.utc)
 E2E_LONG_CARD_TOKEN = "responsive-card-content-" * 40
 PYTEST_CURRENT_TEST_ENV_NAME = "PYTEST_CURRENT_TEST"
 BROWSER_LEADING_RESEARCHER_COUNT = 2
@@ -111,14 +114,13 @@ GRID_HEADER_SELECTOR = ".ag-header-cell"
 GRID_CELL_SELECTOR = ".ag-cell"
 GRID_ARIA_ROW_COUNT_OFFSET = 1
 EXPECTED_GRID_ARIA_ROW_COUNT = EXPECTED_SOURCE_RESEARCHERS + GRID_ARIA_ROW_COUNT_OFFSET
-startup_files = ui_tests.startup_files
 
 
 @pytest.fixture
 def completed_query_files(
-    startup_files: ui_tests.StartupFiles,
+    startup_files: StartupFiles,
     python_process: pytest_plugin.PythonProcess,
-) -> ui_tests.StartupFiles:
+) -> StartupFiles:
     files = startup_files
     storage_path = files.config.parent / "nicegui"
     result = python_process.run(
@@ -138,7 +140,7 @@ def completed_query_files(
 
 @pytest.mark.python_subprocess
 def test_completed_query_fixture_has_current_queryable_history(
-    completed_query_files: ui_tests.StartupFiles,
+    completed_query_files: StartupFiles,
 ) -> None:
     """Verify the real browser fixture's Store setup before any browser is needed."""
     files = completed_query_files
@@ -165,7 +167,7 @@ def test_completed_query_fixture_has_current_queryable_history(
 
 @pytest.mark.python_subprocess
 def test_completed_grid_row_uses_real_query_ipc(
-    completed_query_files: ui_tests.StartupFiles,
+    completed_query_files: StartupFiles,
     python_process: pytest_plugin.PythonProcess,
     pytestconfig: pytest.Config,
     monkeypatch: pytest.MonkeyPatch,
@@ -242,7 +244,7 @@ def test_completed_grid_row_uses_real_query_ipc(
                 )
                 assert execute.inner_text().strip() == "RERUN"
                 assert (execute.text_content() or "").strip() == "Rerun"
-                history = page.get_by_test_id(control_ui.ATTEMPT_HISTORY_TABLE_TEST_ID)
+                history = page.get_by_test_id(control_ui.RUN_OUTCOME_HISTORY_TABLE_TEST_ID)
                 expect(history).not_to_contain_text(Locale.RUN_OUTCOME_SNAPSHOT_SAVED)
                 expect(history).not_to_contain_text(expected["commit_id"])
                 output_start = len(dashboard.output)
@@ -261,12 +263,12 @@ def test_completed_grid_row_uses_real_query_ipc(
             finally:
                 browser.close()
         card_text = operator.capture_completed_researcher_card(
-            dashboard, runtime, namekey=ui_tests.STARTUP_NAMEKEY,
+            dashboard, runtime, namekey=STARTUP_NAMEKEY,
             queued_at_monotonic=time.monotonic(),
         )
         (files.config.parent / "card-rendered.txt").write_text(card_text, encoding="utf-8")
         operator.validate_workflow_artifacts(
-            runtime, namekey=ui_tests.STARTUP_NAMEKEY,
+            runtime, namekey=STARTUP_NAMEKEY,
             expected_run_outcome_path=RunLifecycle.COMPLETED.to_run_outcome_path(),
             card_text=card_text,
         )
@@ -365,7 +367,7 @@ class BrowserController:
             for researcher in self._researchers
         }
         self._run_id_by_namekey: dict[str, UUID] = {}
-        self._attempt_run_ids_by_namekey: dict[
+        self._run_history_ids_by_namekey: dict[
             str,
             list[UUID],
         ] = {researcher.namekey.to_json_key(): [] for researcher in self._researchers}
@@ -381,7 +383,7 @@ class BrowserController:
         completed_namekey = completed.namekey.to_json_key()
         self._activity_by_namekey[completed_namekey] = RunLifecycle.COMPLETED
         self._run_id_by_namekey[completed_namekey] = completed_run_id
-        self._attempt_run_ids_by_namekey[completed_namekey].append(completed_run_id)
+        self._run_history_ids_by_namekey[completed_namekey].append(completed_run_id)
         self._activity_by_run_id[completed_run_id] = RunLifecycle.COMPLETED
 
     @property
@@ -483,21 +485,21 @@ class BrowserController:
         namekey_json = researcher.namekey.to_json_key()
         activity = self._activity_by_namekey[namekey_json]
         run_id = self._run_id_by_namekey.get(namekey_json)
-        attempts = tuple(
-            self._run_commit_var_view(
+        researcher_var_row_views = tuple(
+            self._researcher_var_row_view(
                 researcher=researcher,
                 researcher_var=researcher_var,
-                run_id=attempt_run_id,
-                attempt_index=attempt_index,
+                run_id=history_run_id,
+                run_index=run_index,
             )
-            for attempt_index, attempt_run_id in enumerate(
-                self._attempt_run_ids_by_namekey[namekey_json]
+            for run_index, history_run_id in enumerate(
+                self._run_history_ids_by_namekey[namekey_json]
             )
         )
         projection = (
-            attempts[-1]
-            if attempts
-            else control_ui._RunCommitVarView(
+            researcher_var_row_views[-1]
+            if researcher_var_row_views
+            else control_ui._ResearcherVarRowView(
                 run_id=run_id,
                 namekey=researcher.namekey,
                 draw_number=researcher.draw_number,
@@ -515,7 +517,7 @@ class BrowserController:
                 backend_lifecycle=None,
                 run_outcome_snapshot_savedness=None,
                 session_status=None,
-                action=control_ui._RunCommitVarView.action_for_lifecycle(
+                action=control_ui._ResearcherVarRowView.action_for_lifecycle(
                     activity,
                     eligible=(
                         researcher.ai_augment_cohort
@@ -526,26 +528,26 @@ class BrowserController:
         )
         return control_ui._ResearcherVarView(
             researcher=researcher,
-            latest_run_commit_var_view=projection,
-            run_commit_var_views=attempts,
+            current_researcher_var_row_view=projection,
+            researcher_var_row_views=researcher_var_row_views,
         )
 
-    def _run_commit_var_view(
+    def _researcher_var_row_view(
         self,
         *,
         researcher: AiAugmentSingularOuterDict,
         researcher_var: control_ui._ResearcherVar,
         run_id: UUID,
-        attempt_index: int,
-    ) -> control_ui._RunCommitVarView:
+        run_index: int,
+    ) -> control_ui._ResearcherVarRowView:
         activity = self._activity_by_run_id[run_id]
-        ordinal = attempt_index + 1
+        ordinal = run_index + 1
         has_run_outcome = activity in {
             RunLifecycle.COMPLETED,
             RunLifecycle.FAILED,
             RunLifecycle.CANCELLED,
         }
-        return control_ui._RunCommitVarView(
+        return control_ui._ResearcherVarRowView(
             run_id=run_id,
             namekey=researcher.namekey,
             draw_number=researcher.draw_number,
@@ -558,7 +560,7 @@ class BrowserController:
             footnotes=f"footnote-{ordinal}",
             footnote_arguments=f"arguments-{ordinal}",
             commit_request_record_id=run_id,
-            timestamp=(E2E_ATTEMPT_BASE_TIME + timedelta(seconds=attempt_index)),
+            timestamp=(E2E_RUN_BASE_TIME + timedelta(seconds=run_index)),
             lifecycle=activity,
             backend_lifecycle=None,
             run_outcome_snapshot_savedness=(
@@ -569,7 +571,7 @@ class BrowserController:
             session_status=(
                 Locale.SESSION_STATUS_OK if has_run_outcome else None
             ),
-            action=control_ui._RunCommitVarView.action_for_lifecycle(
+            action=control_ui._ResearcherVarRowView.action_for_lifecycle(
                 activity,
                 eligible=True,
             ),
@@ -630,7 +632,7 @@ class BrowserController:
         run_id = uuid7()
         namekey_json = namekey.to_json_key()
         self._run_id_by_namekey[namekey_json] = run_id
-        self._attempt_run_ids_by_namekey[namekey_json].append(run_id)
+        self._run_history_ids_by_namekey[namekey_json].append(run_id)
         self._activity_by_run_id[run_id] = RunLifecycle.QUEUED
         self._activity_by_namekey[namekey_json] = RunLifecycle.QUEUED
         return run_id
@@ -844,7 +846,7 @@ def test_main_grid_and_researcher_card_use_compact_line_spacing(
         eligible_row.click()
         page.get_by_test_id(control_ui.EXECUTE_ACTION_TEST_ID).click()
 
-        history = page.get_by_test_id(control_ui.ATTEMPT_HISTORY_TABLE_TEST_ID)
+        history = page.get_by_test_id(control_ui.RUN_OUTCOME_HISTORY_TABLE_TEST_ID)
         history_cell = history.locator("tbody td").first
         expect(history_cell).to_be_visible()
         page.get_by_test_id(control_ui.VIEW_CARD_TEST_ID).click()
@@ -901,14 +903,14 @@ def test_selected_researcher_row_is_highlighted(
         assert errors == [], Counter(errors)
 
 
-def test_researcher_selection_and_attempt_history_are_idempotent(
+def test_researcher_selection_and_run_outcome_history_are_idempotent(
     pytestconfig: pytest.Config, nicegui_storage_path: Path,
 ) -> None:
     with control_centre_browser(pytestconfig, nicegui_storage_path) as (page, errors):
         first_row = grid_row_for_draw(page, BROWSER_PILOT_ELIGIBLE_DRAW)
         second_row = grid_row_for_draw(page, "1")
-        history_panel = page.get_by_test_id(control_ui.ATTEMPT_HISTORY_PANEL_TEST_ID)
-        history_table = page.get_by_test_id(control_ui.ATTEMPT_HISTORY_TABLE_TEST_ID)
+        history_panel = page.get_by_test_id(control_ui.RUN_OUTCOME_HISTORY_PANEL_TEST_ID)
+        history_table = page.get_by_test_id(control_ui.RUN_OUTCOME_HISTORY_TABLE_TEST_ID)
 
         first_row.click()
         expect(first_row).to_have_class(re.compile(r"\bag-row-selected\b"))
@@ -928,7 +930,7 @@ def test_researcher_selection_and_attempt_history_are_idempotent(
         assert errors == [], Counter(errors)
 
 
-def test_completed_researcher_metadata_is_available_in_visible_attempt_history(
+def test_completed_researcher_metadata_is_available_in_visible_run_outcome_history(
     pytestconfig: pytest.Config, nicegui_storage_path: Path,
 ) -> None:
     with control_centre_browser(pytestconfig, nicegui_storage_path) as (page, errors):
@@ -948,7 +950,7 @@ def test_completed_researcher_metadata_is_available_in_visible_attempt_history(
         ).to_have_count(0)
         completed_row.click()
 
-        history = page.get_by_test_id(control_ui.ATTEMPT_HISTORY_TABLE_TEST_ID)
+        history = page.get_by_test_id(control_ui.RUN_OUTCOME_HISTORY_TABLE_TEST_ID)
         history_rows = history.locator("tbody tr")
         expect(history_rows).to_have_count(1)
         history_cells = history_rows.first.locator("td")
@@ -1177,7 +1179,7 @@ def test_control_centre_browser_contract(
             )
 
             eligible_row.click()
-            history = page.get_by_test_id(control_ui.ATTEMPT_HISTORY_TABLE_TEST_ID)
+            history = page.get_by_test_id(control_ui.RUN_OUTCOME_HISTORY_TABLE_TEST_ID)
             history_rows = history.locator("tbody tr")
             expect(history_rows).to_have_count(1)
             expect(history_rows.nth(0)).to_contain_text("ai-value-1")

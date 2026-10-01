@@ -23,6 +23,25 @@ from .ai_augment_http_request_log_record import (
 
 @implements[BackendComponent.PushRequestRecordProperty]()
 class PushRequestRecord(RequestRecord):
+    @property
+    def http_request_log_record(self) -> HttpRequestLogRecord:
+        return super().http_request_log_record
+
+    @classmethod
+    def from_http_request_log_record(
+        cls, *, http_request_log_record: HttpRequestLogRecord,
+    ) -> Self:
+        return super().from_http_request_log_record(
+            http_request_log_record=http_request_log_record,
+        )
+
+    @classmethod
+    def from_serialized_json(cls, *, value: str) -> Self:
+        return super().from_serialized_json(value=value)
+
+    def serialize(self) -> dict[str, object]:
+        return super().serialize()
+
     @model_validator(mode="after")
     def _validate_exchange(self) -> Self:
         _validate_public_exchange(self, HTTP_POST_METHOD, PUSH_PATH)
@@ -32,6 +51,10 @@ class PushRequestRecord(RequestRecord):
 @implements[BackendComponent.PushResponseRecordProperty]()
 class PushResponseRecord(ResponseRecord):
     pull_response_record: PullResponseRecord | None = Field(default=None, exclude=True)
+
+    @property
+    def http_request_log_record(self) -> HttpRequestLogRecord:
+        return super().http_request_log_record
 
     @classmethod
     def from_http_request_log_record(
@@ -44,6 +67,18 @@ class PushResponseRecord(ResponseRecord):
             **http_request_log_record.model_dump(mode="python"),
             pull_response_record=pull_response_record,
         )
+
+    @classmethod
+    def from_serialized_json(
+        cls, *, value: str, pull_response_record: PullResponseRecord | None = None,
+    ) -> Self:
+        return cls.from_http_request_log_record(
+            http_request_log_record=HttpRequestLogRecord.model_validate_json(value),
+            pull_response_record=pull_response_record,
+        )
+
+    def serialize(self) -> dict[str, object]:
+        return self.http_request_log_record.model_dump(mode="json")
 
     @model_validator(mode="after")
     def _validate_exchange(self) -> Self:

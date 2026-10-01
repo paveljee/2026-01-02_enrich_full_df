@@ -30,6 +30,25 @@ from .....backend.helpers.data_models.ai_augment_singular_outer_dict import (
 
 @implements[ControlCentreComponent.BackendPort.QueryRequestRecordProperty]()
 class QueryRequestRecord(RequestRecord):
+    @property
+    def http_request_log_record(self) -> HttpRequestLogRecord:
+        return super().http_request_log_record
+
+    @classmethod
+    def from_http_request_log_record(
+        cls, *, http_request_log_record: HttpRequestLogRecord,
+    ) -> Self:
+        return super().from_http_request_log_record(
+            http_request_log_record=http_request_log_record,
+        )
+
+    @classmethod
+    def from_serialized_json(cls, *, value: str) -> Self:
+        return super().from_serialized_json(value=value)
+
+    def serialize(self) -> dict[str, object]:
+        return super().serialize()
+
     @model_validator(mode="after")
     def _validate_query(self) -> Self:
         if (
@@ -58,6 +77,10 @@ class QueryResponseRecord(ResponseRecord):
         exclude=True,
     )
 
+    @property
+    def http_request_log_record(self) -> HttpRequestLogRecord:
+        return super().http_request_log_record
+
     @classmethod
     def outerdicts_from_response_body(
         cls, value: str | bytes,
@@ -85,6 +108,9 @@ class QueryResponseRecord(ResponseRecord):
         return cls.from_http_request_log_record(
             http_request_log_record=HttpRequestLogRecord.model_validate_json(value),
         )
+
+    def serialize(self) -> dict[str, object]:
+        return self.http_request_log_record.model_dump(mode="json")
 
     @classmethod
     def from_query_request(

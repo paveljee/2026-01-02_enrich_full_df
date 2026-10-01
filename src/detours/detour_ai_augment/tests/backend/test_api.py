@@ -58,9 +58,6 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_
     RESOURCE_PATH_KEY,
     RESOURCE_SHA256_KEY,
 )
-from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.post_commit_validation import (  # noqa: E501
-    PostCommitValidation,
-)
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.pydantic_to_paste import (  # noqa: E501
     EvidenceWithdrawal,
     FieldSubmission,
@@ -104,7 +101,8 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     KTP_AI_AUGMENT_PLACE_OF_RESIDENCE_COL,
     KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL,
     KTP_AI_AUGMENT_RESEARCHER_AUTHOR_COL,
-    KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_RECORD_COL,
+    KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL,
+    KTP_AI_AUGMENT_SESSION_METADATA_COL,
     KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL,
     MAP_SUBSET_0_TO_BATCH_KEY,
     PULL_PATH,
@@ -116,6 +114,9 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     AiAugmentCohort,
     AiAugmentIneligibilityCategory,
     ContentType,
+)
+from src.detours.detour_ai_augment.protected.tests.fixtures.pytest_fixtures import (  # noqa: E501
+    source_population,
 )
 from src.detours.detour_ai_augment.protected.tests.pytest_plugin import (
     PythonProcess,
@@ -170,6 +171,7 @@ from src.detours.detour_ai_augment.src.backend.helpers.data_models.validation_re
     VALIDATE_PATH,
     BackendValidationRequestRecord,
     ValidationRequestBody,
+    _ValidationRequestBodyJson,
 )
 from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models import (
     run_outcome_event as run_outcome_models,
@@ -188,7 +190,6 @@ from src.detours.detour_ai_augment.src.shared import (
     source_key_from_header_value,
     source_key_header_value,
 )
-from src.detours.detour_ai_augment.tests.control_centre.test_ui import source_population
 from src.helpers.architecture import FrozenStrictModel
 from src.helpers.cards import build_cards
 from src.helpers.config import PipelineConfig
@@ -297,7 +298,7 @@ TEST_NAMEKEY = '{"ktp.first_name": "A.", "ktp.last_name": "Sheikh"}'
 TEST_NAMEKEY_MODEL = NameKey.from_json_key(TEST_NAMEKEY)
 TEST_ORIGINAL_PULL_RECORD_ID = UUID("019fa457-aac5-7652-8669-9d571206e7cb")
 TEST_SECOND_ORIGINAL_PULL_RECORD_ID = UUID("019fa457-aac5-7652-8669-9d571206e7cc")
-TEST_ATTEMPT_TIMESTAMP = datetime(2026, 8, 14, tzinfo=timezone.utc)
+TEST_COMMIT_REQUEST_TIMESTAMP = datetime(2026, 8, 14, tzinfo=timezone.utc)
 TEST_AUTHORITATIVE_REQUEST_BODY = b'{"probe":true}'
 TEST_AUTHORITATIVE_RESPONSE_BODY = {"accepted": True}
 TEST_AUTHORITATIVE_RESPONSE_HEADER = "X-Authoritative-Probe"
@@ -347,11 +348,11 @@ def deterministic_uuid7(value: str) -> UUID:
     )
 
 
-def retry_attempt_records(
+def retry_commit_records(
     *,
     original_pull_record_id: UUID,
     session_id: UUID,
-    attempt_id: str,
+    synthetic_record_id_seed: str,
 ) -> tuple[PullResponseRecord, BackendCommitRequestRecord]:
     pull_record = PullResponseRecord.from_http_request_log_record(
         http_request_log_record=persisted_http_record(
@@ -363,7 +364,7 @@ def retry_attempt_records(
     )
     push_record = PushResponseRecord.from_http_request_log_record(
         http_request_log_record=persisted_http_record(
-            record_id=deterministic_uuid7(attempt_id + "-push"),
+            record_id=deterministic_uuid7(synthetic_record_id_seed + "-push"),
             method=HTTP_POST_METHOD,
             path=PUSH_PATH,
             response_code=status.HTTP_202_ACCEPTED,
@@ -383,25 +384,25 @@ def retry_attempt_records(
         rollout_filename=f"rollout-{session_id}.jsonl",
         appendwatch_report=b".\n",
         namekey=TEST_NAMEKEY_MODEL,
-    ).model_copy(update={"record_id": deterministic_uuid7(attempt_id)})
+    ).model_copy(update={"record_id": deterministic_uuid7(synthetic_record_id_seed)})
     return pull_record, commit_request_record
 
 
-def process_retry_attempt_for_test(
+def evaluate_retry_submission_for_test(
     conn: duckdb.DuckDBPyConnection,
     *,
     original_pull_record_id: UUID,
     namekey: NameKey,
     session_id: UUID,
-    attempt_id: str,
-    attempt_timestamp: datetime,
+    synthetic_record_id_seed: str,
+    commit_request_timestamp: datetime,
     submission_payload: Submission | StandardizedSubmission,
     assessment: post_commit_validation._EvidenceAssessment,
 ) -> tuple[str, ...]:
-    original_pull, commit_request_record = retry_attempt_records(
+    original_pull, commit_request_record = retry_commit_records(
         original_pull_record_id=original_pull_record_id,
         session_id=session_id,
-        attempt_id=attempt_id,
+        synthetic_record_id_seed=synthetic_record_id_seed,
     )
     store = store_for_connection(conn)
     filename, _ = source_key_from_header_value(
@@ -415,12 +416,12 @@ def process_retry_attempt_for_test(
         return (None if row is None else post_commit_validation._RetryBaselineRow(
             namekey_json=row[0],
             session_id_text=row[1],
-            attempt_id_text=row[2],
+            commit_record_id_text=row[2],
             obligations_json=row[3],
         )), None
 
     def audit_rows(
-        baseline_attempt_id: UUID,
+        baseline_commit_record_id: UUID,
     ) -> tuple[tuple[post_commit_validation._AppliedRetryAuditRow, ...], None]:
         return tuple(
             post_commit_validation._AppliedRetryAuditRow(
@@ -429,7 +430,7 @@ def process_retry_attempt_for_test(
             )
             for submission_json, assessment_json in store._applied_retry_audit_rows(
                 original_pull_record_id=original_pull.record_id,
-                baseline_attempt_id=baseline_attempt_id,
+                baseline_commit_record_id=baseline_commit_record_id,
             )
         ), None
 
@@ -450,7 +451,7 @@ def process_retry_attempt_for_test(
             }), None
         ),
     )
-    violations, projection = post_commit_validation._process_retry_attempt(
+    violations, projection = post_commit_validation._evaluate_retry_submission(
         commit_request_record=commit_request_record,
         namekey=namekey,
         submission_payload=submission_payload,
@@ -458,17 +459,17 @@ def process_retry_attempt_for_test(
         db_reads=db_reads,
     )
     assert projection.commit_request_record is commit_request_record
-    store._project_retry_attempt(
+    store._project_retry_evidence(
         commit_request_record,
         projection,
         namekey=namekey,
-        attempt_timestamp=attempt_timestamp,
+        commit_request_timestamp=commit_request_timestamp,
     )
     return violations
 
 
-HAANEN_REJECTED_ATTEMPT_ID = "20260813T141344_678596Z_8ef1f6372b4a48d9a3b1279736356363"
-HAANEN_ACCEPTED_ATTEMPT_ID = "20260813T141450_027429Z_044215aac8c44200882531b10a2acfa6"
+HAANEN_REJECTED_CAPTURE_ID = "20260813T141344_678596Z_8ef1f6372b4a48d9a3b1279736356363"
+HAANEN_ACCEPTED_CAPTURE_ID = "20260813T141450_027429Z_044215aac8c44200882531b10a2acfa6"
 HAANEN_ROLLOUT_FILENAME = "rollout-2026-08-13T10-08-12-019ffb73-b72c-7812-9fc4-d56fdf3ea1a2.jsonl"
 HAANEN_SESSION_ID = UUID("019ffb73-b72c-7812-9fc4-d56fdf3ea1a2")
 HAANEN_ORIGINAL_PULL_RECORD_ID = UUID("019ffb73-b72c-7812-9fc4-d56fdf3ea1a3")
@@ -527,8 +528,8 @@ def backend_test_paths(
 ) -> BackendTestPaths:
     repository_root = pytestconfig.rootpath
     detour_root = repository_root / "src" / "detours" / "detour_ai_augment"
-    haanen_rejected_attempt = repository_root / "tmp" / HAANEN_REJECTED_ATTEMPT_ID
-    haanen_accepted_attempt = repository_root / "tmp" / HAANEN_ACCEPTED_ATTEMPT_ID
+    haanen_rejected_capture_dir = repository_root / "tmp" / HAANEN_REJECTED_CAPTURE_ID
+    haanen_accepted_capture_dir = repository_root / "tmp" / HAANEN_ACCEPTED_CAPTURE_ID
     return BackendTestPaths(
         config=repository_root / "config.repl.json",
         ai_augment_config=repository_root / "config_ai_augment.json",
@@ -552,10 +553,10 @@ def backend_test_paths(
             / Path(*JULY_ROLLOUT_RELATIVE_PATH.parts)
         ),
         haanen_rejected_rollout=(
-            haanen_rejected_attempt / f"rollout.{HAANEN_REJECTED_ATTEMPT_ID}.jsonl"
+            haanen_rejected_capture_dir / f"rollout.{HAANEN_REJECTED_CAPTURE_ID}.jsonl"
         ),
         haanen_accepted_rollout=(
-            haanen_accepted_attempt / f"rollout.{HAANEN_ACCEPTED_ATTEMPT_ID}.jsonl"
+            haanen_accepted_capture_dir / f"rollout.{HAANEN_ACCEPTED_CAPTURE_ID}.jsonl"
         ),
     )
 
@@ -1961,44 +1962,29 @@ def assert_captured_operator_push_contour(
             record for record in authoritative_records if record.path == VALIDATE_PATH
         )
         assert len(validation_records) == 2
-        accepted_attempt_record = validation_records[-1]
-        assert accepted_attempt_record.request_body is not None
-        accepted_attempt = json.loads(accepted_attempt_record.request_body)
+        accepted_validation_http_record = validation_records[-1]
+        assert accepted_validation_http_record.request_body is not None
+        accepted_validation_body_json = _ValidationRequestBodyJson.model_validate_json(
+            accepted_validation_http_record.request_body
+        )
         assert (
-            PostCommitValidation.model_validate(
-                accepted_attempt[backend_vars.VALIDATION_BODY_POST_COMMIT_VALIDATION_KEY],
-                strict=False,
-            ).result
+            accepted_validation_body_json.post_commit_validation.result
             is BackendLifecycle.ACCEPTED
         )
-        assert (
-            HttpRequestLogRecord.model_validate(
-                accepted_attempt[backend_vars.VALIDATION_BODY_COMMIT_REQUEST_RECORD_KEY][
-                    backend_vars.VALIDATION_COMMIT_SELF_HTTP_RECORD_KEY
-                ], strict=False,
-            ).record_id
-            == commits[-1].record_id
-        )
-        assert (
-            HttpRequestLogRecord.model_validate(
-                accepted_attempt[backend_vars.VALIDATION_BODY_COMMIT_REQUEST_RECORD_KEY][
-                    backend_vars.VALIDATION_COMMIT_PUSH_RESPONSE_RECORD_KEY
-                ], strict=False,
-            ).record_id
-            == pushes[-1].record_id
-        )
+        assert accepted_validation_body_json.commit_request_record_id == commits[-1].record_id
         assert len(query.ai_augment_singular_outerdicts) == 1
         selected_singular_outerdict = query.ai_augment_singular_outerdicts[0]
         assert len(selected_singular_outerdict.codex_innerdicts) == 1
         committed = selected_singular_outerdict.codex_innerdicts[0]
         stored_outcome = committed.run_outcome_response_record
         assert stored_outcome.attempt is not None
-        assert stored_outcome.attempt.record_id == accepted_attempt_record.record_id
-        outcome_text = committed.text(KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_RECORD_COL)
-        assert outcome_text is not None
-        assert RunOutcomeResponseRecord.from_serialized_json(
-            value=outcome_text,
-        ) == stored_outcome
+        assert stored_outcome.attempt.record_id == accepted_validation_http_record.record_id
+        assert stored_outcome.attempt is not None
+        assert (
+            stored_outcome.attempt.validation_request_body.commit_request_record
+            .commit_request_body.push_response_record.record_id
+            == pushes[-1].record_id
+        )
         assert (
             stored_outcome._body().commit_request_record_id
             == commits[-1].record_id
@@ -2012,9 +1998,14 @@ def assert_captured_operator_push_contour(
         assert len(cards) == 1
         card_markdown = next(iter(cards.values()))
         assert "Professor Sir Aziz Sheikh OBE" in card_markdown
-        assert KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_RECORD_COL in card_markdown
-        assert str(commits[-1].record_id) in card_markdown
-        assert outcome_text in card_markdown
+        assert KTP_AI_AUGMENT_SESSION_METADATA_COL in card_markdown
+        assert (
+            committed.innerdict.data[KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL]
+            == stored_outcome.response_body
+        )
+        assert card_markdown.index(KTP_LAST_NAME_COL) < card_markdown.index(
+            KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL
+        ) < card_markdown.index(KTP_AI_AUGMENT_SESSION_METADATA_COL)
 
 
 def test_captured_operator_push_generates_commit_and_exact_410_response(
@@ -2304,12 +2295,13 @@ def test_commit_request_body_contract_is_strict_canonical_and_losslessly_resolve
         },
     }
     serialized = json.dumps(body, separators=(",", ":"))
+    refs: dict[UUID, PullResponseRecord | PushResponseRecord] = {
+        pull_record_id: pull_record,
+        push_record_id: push_record,
+    }
     resolved = CommitRequestBody.from_serialized_json(
         serialized,
-        resolve_http_record={
-            pull_record_id: pull_record,
-            push_record_id: push_record,
-        }.__getitem__,
+        resolve_http_record=refs.__getitem__,
     )
 
     assert json.loads(resolved.model_dump_json()) == body
@@ -2658,7 +2650,7 @@ def test_failed_post_commit_work_projects_without_conditional_rollback(
         api_store._append_authoritative_record(validation_record)
 
         assert api_store._execute(
-            f"SELECT count(*) FROM {api.AUTHORITATIVE_ATTEMPTS_TABLE}"
+            f"SELECT count(*) FROM {api.COMMIT_VALIDATION_REQUEST_RECORD_INDEX_TABLE}"
         ).fetchone() == (1,)
         assert api_store._execute(
             f"SELECT {api.AUTHORITATIVE_RECORD_ORDINAL_COLUMN} "
@@ -3428,13 +3420,13 @@ def test_v2_retry_baseline_replays_and_accepts_only_the_exact_correction(
         )
         assert near_assessment.accepted is False
         assert (
-            process_retry_attempt_for_test(
+            evaluate_retry_submission_for_test(
                 connection,
                 original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
                 namekey=TEST_NAMEKEY_MODEL,
                 session_id=TEST_SESSION_ID,
-                attempt_id="attempt-near",
-                attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
+                synthetic_record_id_seed="commit-near",
+                commit_request_timestamp=TEST_COMMIT_REQUEST_TIMESTAMP,
                 submission_payload=near_submission,
                 assessment=near_assessment,
             )
@@ -3448,13 +3440,13 @@ def test_v2_retry_baseline_replays_and_accepts_only_the_exact_correction(
         )
         assert exact_assessment.accepted is True
         assert (
-            process_retry_attempt_for_test(
+            evaluate_retry_submission_for_test(
                 connection,
                 original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
                 namekey=TEST_NAMEKEY_MODEL,
                 session_id=TEST_SESSION_ID,
-                attempt_id="attempt-exact",
-                attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
+                synthetic_record_id_seed="commit-exact",
+                commit_request_timestamp=TEST_COMMIT_REQUEST_TIMESTAMP,
                 submission_payload=exact_submission,
                 assessment=exact_assessment,
             )
@@ -3502,13 +3494,13 @@ def test_v2_retry_rejects_changed_tokens_and_repeats_near_guidance(
             codex_match_version=2,
         )
         assert (
-            process_retry_attempt_for_test(
+            evaluate_retry_submission_for_test(
                 connection,
                 original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
                 namekey=TEST_NAMEKEY_MODEL,
                 session_id=TEST_SESSION_ID,
-                attempt_id="attempt-near",
-                attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
+                synthetic_record_id_seed="commit-near",
+                commit_request_timestamp=TEST_COMMIT_REQUEST_TIMESTAMP,
                 submission_payload=near_submission,
                 assessment=near_assessment,
             )
@@ -3523,26 +3515,26 @@ def test_v2_retry_rejects_changed_tokens_and_repeats_near_guidance(
             changed_submission,
             codex_match_version=2,
         )
-        changed_violations = process_retry_attempt_for_test(
+        changed_violations = evaluate_retry_submission_for_test(
             connection,
             original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
             namekey=TEST_NAMEKEY_MODEL,
             session_id=TEST_SESSION_ID,
-            attempt_id="attempt-changed",
-            attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
+            synthetic_record_id_seed="commit-changed",
+            commit_request_timestamp=TEST_COMMIT_REQUEST_TIMESTAMP,
             submission_payload=changed_submission,
             assessment=changed_assessment,
         )
         near_retry_submission = StandardizedSubmission.model_validate(
             standardized_submission_body(near_body)
         )
-        repeated_violations = process_retry_attempt_for_test(
+        repeated_violations = evaluate_retry_submission_for_test(
             connection,
             original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
             namekey=TEST_NAMEKEY_MODEL,
             session_id=TEST_SESSION_ID,
-            attempt_id="attempt-near-again",
-            attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
+            synthetic_record_id_seed="commit-near-again",
+            commit_request_timestamp=TEST_COMMIT_REQUEST_TIMESTAMP,
             submission_payload=near_retry_submission,
             assessment=near_assessment,
         )
@@ -3589,13 +3581,13 @@ def test_retry_preserves_exact_items_inside_a_rejected_field(
             codex_match_version=2,
         )
         assert (
-            process_retry_attempt_for_test(
+            evaluate_retry_submission_for_test(
                 connection,
                 original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
                 namekey=TEST_NAMEKEY_MODEL,
                 session_id=TEST_SESSION_ID,
-                attempt_id="attempt-baseline",
-                attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
+                synthetic_record_id_seed="commit-baseline",
+                commit_request_timestamp=TEST_COMMIT_REQUEST_TIMESTAMP,
                 submission_payload=baseline_submission,
                 assessment=baseline_assessment,
             )
@@ -3610,13 +3602,13 @@ def test_retry_preserves_exact_items_inside_a_rejected_field(
             changed_submission,
             codex_match_version=2,
         )
-        violations = process_retry_attempt_for_test(
+        violations = evaluate_retry_submission_for_test(
             connection,
             original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
             namekey=TEST_NAMEKEY_MODEL,
             session_id=TEST_SESSION_ID,
-            attempt_id="attempt-changed",
-            attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
+            synthetic_record_id_seed="commit-changed",
+            commit_request_timestamp=TEST_COMMIT_REQUEST_TIMESTAMP,
             submission_payload=changed_submission,
             assessment=changed_assessment,
         )
@@ -3655,13 +3647,13 @@ def test_retry_preserves_fully_verified_fields_and_complete_evidence_counts(
             codex_match_version=2,
         )
         assert (
-            process_retry_attempt_for_test(
+            evaluate_retry_submission_for_test(
                 connection,
                 original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
                 namekey=TEST_NAMEKEY_MODEL,
                 session_id=TEST_SESSION_ID,
-                attempt_id="attempt-baseline",
-                attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
+                synthetic_record_id_seed="commit-baseline",
+                commit_request_timestamp=TEST_COMMIT_REQUEST_TIMESTAMP,
                 submission_payload=baseline_submission,
                 assessment=baseline_assessment,
             )
@@ -3676,13 +3668,13 @@ def test_retry_preserves_fully_verified_fields_and_complete_evidence_counts(
             changed_submission,
             codex_match_version=2,
         )
-        violations = process_retry_attempt_for_test(
+        violations = evaluate_retry_submission_for_test(
             connection,
             original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
             namekey=TEST_NAMEKEY_MODEL,
             session_id=TEST_SESSION_ID,
-            attempt_id="attempt-changed",
-            attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
+            synthetic_record_id_seed="commit-changed",
+            commit_request_timestamp=TEST_COMMIT_REQUEST_TIMESTAMP,
             submission_payload=changed_submission,
             assessment=changed_assessment,
         )
@@ -3744,13 +3736,13 @@ def test_unmatched_evidence_can_be_replaced_or_explicitly_withdrawn(
             codex_match_version=2,
         )
         assert (
-            process_retry_attempt_for_test(
+            evaluate_retry_submission_for_test(
                 connection,
                 original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
                 namekey=TEST_NAMEKEY_MODEL,
                 session_id=TEST_SESSION_ID,
-                attempt_id="attempt-baseline",
-                attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
+                synthetic_record_id_seed="commit-baseline",
+                commit_request_timestamp=TEST_COMMIT_REQUEST_TIMESTAMP,
                 submission_payload=baseline_submission,
                 assessment=baseline_assessment,
             )
@@ -3765,13 +3757,13 @@ def test_unmatched_evidence_can_be_replaced_or_explicitly_withdrawn(
             retry_submission,
             codex_match_version=2,
         )
-        violations = process_retry_attempt_for_test(
+        violations = evaluate_retry_submission_for_test(
             connection,
             original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
             namekey=TEST_NAMEKEY_MODEL,
             session_id=TEST_SESSION_ID,
-            attempt_id="attempt-retry",
-            attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
+            synthetic_record_id_seed="commit-retry",
+            commit_request_timestamp=TEST_COMMIT_REQUEST_TIMESTAMP,
             submission_payload=retry_submission,
             assessment=retry_assessment,
         )
@@ -3811,13 +3803,13 @@ def test_v2_near_evidence_cannot_be_withdrawn(
             codex_match_version=2,
         )
         assert (
-            process_retry_attempt_for_test(
+            evaluate_retry_submission_for_test(
                 connection,
                 original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
                 namekey=TEST_NAMEKEY_MODEL,
                 session_id=TEST_SESSION_ID,
-                attempt_id="attempt-baseline",
-                attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
+                synthetic_record_id_seed="commit-baseline",
+                commit_request_timestamp=TEST_COMMIT_REQUEST_TIMESTAMP,
                 submission_payload=baseline_submission,
                 assessment=baseline_assessment,
             )
@@ -3832,13 +3824,13 @@ def test_v2_near_evidence_cannot_be_withdrawn(
             withdrawal_submission,
             codex_match_version=2,
         )
-        violations = process_retry_attempt_for_test(
+        violations = evaluate_retry_submission_for_test(
             connection,
             original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
             namekey=TEST_NAMEKEY_MODEL,
             session_id=TEST_SESSION_ID,
-            attempt_id="attempt-withdrawal",
-            attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
+            synthetic_record_id_seed="commit-withdrawal",
+            commit_request_timestamp=TEST_COMMIT_REQUEST_TIMESTAMP,
             submission_payload=withdrawal_submission,
             assessment=withdrawal_assessment,
         )
@@ -3873,7 +3865,7 @@ def test_retry_baselines_survive_restart_and_remain_isolated_by_original_pull(
         database_path=database_path,
     )
     try:
-        for original_pull_record_id, attempt_id, body in (
+        for original_pull_record_id, synthetic_record_id_seed, body in (
             (TEST_ORIGINAL_PULL_RECORD_ID, "run-one-baseline", near_body),
             (TEST_SECOND_ORIGINAL_PULL_RECORD_ID, "run-two-baseline", unmatched_body),
         ):
@@ -3884,13 +3876,13 @@ def test_retry_baselines_survive_restart_and_remain_isolated_by_original_pull(
                 codex_match_version=2,
             )
             assert (
-                process_retry_attempt_for_test(
+                evaluate_retry_submission_for_test(
                     first_connection,
                     original_pull_record_id=original_pull_record_id,
                     namekey=TEST_NAMEKEY_MODEL,
                     session_id=TEST_SESSION_ID,
-                    attempt_id=attempt_id,
-                    attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
+                    synthetic_record_id_seed=synthetic_record_id_seed,
+                    commit_request_timestamp=TEST_COMMIT_REQUEST_TIMESTAMP,
                     submission_payload=submission,
                     assessment=assessment,
                 )
@@ -3913,18 +3905,18 @@ def test_retry_baselines_survive_restart_and_remain_isolated_by_original_pull(
             exact_submission,
             codex_match_version=2,
         )
-        for original_pull_record_id, attempt_id in (
+        for original_pull_record_id, synthetic_record_id_seed in (
             (TEST_ORIGINAL_PULL_RECORD_ID, "run-one-exact"),
             (TEST_SECOND_ORIGINAL_PULL_RECORD_ID, "run-two-exact"),
         ):
             assert (
-                process_retry_attempt_for_test(
+                evaluate_retry_submission_for_test(
                     second_connection,
                     original_pull_record_id=original_pull_record_id,
                     namekey=TEST_NAMEKEY_MODEL,
                     session_id=TEST_SESSION_ID,
-                    attempt_id=attempt_id,
-                    attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
+                    synthetic_record_id_seed=synthetic_record_id_seed,
+                    commit_request_timestamp=TEST_COMMIT_REQUEST_TIMESTAMP,
                     submission_payload=exact_submission,
                     assessment=exact_assessment,
                 )
@@ -3969,7 +3961,7 @@ def test_concurrent_first_rejections_cannot_replace_the_baseline(
     barrier = Barrier(2)
     operation_lock = Lock()
 
-    def submit(attempt_id: str, excerpt: str) -> None:
+    def submit(synthetic_record_id_seed: str, excerpt: str) -> None:
         connection = duckdb.connect(str(database_path))
         load_duckdb_extension_from_config_path(
             connection,
@@ -3981,10 +3973,10 @@ def test_concurrent_first_rejections_cannot_replace_the_baseline(
             plain_body = submission_body_for_evidence(excerpt)
             barrier.wait()
             with operation_lock:
-                original_pull, _commit_request_record = retry_attempt_records(
+                original_pull, _commit_request_record = retry_commit_records(
                     original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
                     session_id=TEST_SESSION_ID,
-                    attempt_id=attempt_id,
+                    synthetic_record_id_seed=synthetic_record_id_seed,
                 )
                 retry_expected = store_for_connection(connection)._retry_baseline_exists(
                     original_pull=original_pull,
@@ -4002,13 +3994,13 @@ def test_concurrent_first_rejections_cannot_replace_the_baseline(
                     codex_match_version=2,
                 )
                 assert (
-                    process_retry_attempt_for_test(
+                    evaluate_retry_submission_for_test(
                         connection,
                         original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
                         namekey=TEST_NAMEKEY_MODEL,
                         session_id=TEST_SESSION_ID,
-                        attempt_id=attempt_id,
-                        attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
+                        synthetic_record_id_seed=synthetic_record_id_seed,
+                        commit_request_timestamp=TEST_COMMIT_REQUEST_TIMESTAMP,
                         submission_payload=submission,
                         assessment=assessment,
                     )
@@ -4035,15 +4027,15 @@ def test_concurrent_first_rejections_cannot_replace_the_baseline(
 
     verification_connection = duckdb.connect(str(database_path))
     try:
-        baseline_attempt = verification_connection.execute(
+        baseline_commit_record = verification_connection.execute(
             f"""
-            SELECT {backend_vars.CODEX_RETRY_ATTEMPT_ID_COL}
+            SELECT {backend_vars.CODEX_RETRY_COMMIT_RECORD_ID_COL}
             FROM {backend_vars.CODEX_RETRY_BASELINE_TABLE}
             """
         ).fetchone()
-        audit_attempts = verification_connection.execute(
+        audit_commit_records = verification_connection.execute(
             f"""
-            SELECT {backend_vars.CODEX_RETRY_ATTEMPT_ID_COL}
+            SELECT {backend_vars.CODEX_RETRY_COMMIT_RECORD_ID_COL}
             FROM {backend_vars.CODEX_EVIDENCE_AUDIT_TABLE}
             ORDER BY {backend_vars.CODEX_EVIDENCE_AUDIT_ID_COL}
             """
@@ -4051,8 +4043,8 @@ def test_concurrent_first_rejections_cannot_replace_the_baseline(
     finally:
         verification_connection.close()
 
-    assert len(audit_attempts) == 2
-    assert baseline_attempt == audit_attempts[0]
+    assert len(audit_commit_records) == 2
+    assert baseline_commit_record == audit_commit_records[0]
 
 
 def test_corrupt_applied_audit_fails_as_configuration_error(
@@ -4074,25 +4066,25 @@ def test_corrupt_applied_audit_fails_as_configuration_error(
             codex_match_version=2,
         )
         retry_submission = StandardizedSubmission.model_validate(standardized_submission_body(body))
-        for attempt_id, attempted_submission in (
+        for synthetic_record_id_seed, candidate_submission in (
             ("audit-baseline", submission),
             ("audit-second", retry_submission),
         ):
-            attempted_assessment = post_commit_validation.assess_submission_evidence(
+            candidate_assessment = post_commit_validation.assess_submission_evidence(
                 index,
-                attempted_submission,
+                candidate_submission,
                 codex_match_version=2,
             )
             assert (
-                process_retry_attempt_for_test(
+                evaluate_retry_submission_for_test(
                     connection,
                     original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
                     namekey=TEST_NAMEKEY_MODEL,
                     session_id=TEST_SESSION_ID,
-                    attempt_id=attempt_id,
-                    attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
-                    submission_payload=attempted_submission,
-                    assessment=attempted_assessment,
+                    synthetic_record_id_seed=synthetic_record_id_seed,
+                    commit_request_timestamp=TEST_COMMIT_REQUEST_TIMESTAMP,
+                    submission_payload=candidate_submission,
+                    assessment=candidate_assessment,
                 )
                 == ()
             )
@@ -4100,7 +4092,7 @@ def test_corrupt_applied_audit_fails_as_configuration_error(
             f"""
             UPDATE {backend_vars.CODEX_EVIDENCE_AUDIT_TABLE}
             SET {backend_vars.CODEX_EVIDENCE_ASSESSMENT_COL} = ?
-            WHERE {backend_vars.CODEX_RETRY_ATTEMPT_ID_COL} = ?
+            WHERE {backend_vars.CODEX_RETRY_COMMIT_RECORD_ID_COL} = ?
             """,
             ["{}", str(deterministic_uuid7("audit-second"))],
         )
@@ -4109,15 +4101,15 @@ def test_corrupt_applied_audit_fails_as_configuration_error(
             post_commit_validation._ValidationPreparationError,
             match=Locale.EVIDENCE_AUDIT_REPLAY_FAILED,
         ):
-            process_retry_attempt_for_test(
+            evaluate_retry_submission_for_test(
                 connection,
                 original_pull_record_id=TEST_ORIGINAL_PULL_RECORD_ID,
                 namekey=TEST_NAMEKEY_MODEL,
                 session_id=TEST_SESSION_ID,
-                attempt_id="audit-third",
-                attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
+                synthetic_record_id_seed="audit-third",
+                commit_request_timestamp=TEST_COMMIT_REQUEST_TIMESTAMP,
                 submission_payload=retry_submission,
-                assessment=attempted_assessment,
+                assessment=candidate_assessment,
             )
     finally:
         connection.close()
@@ -4166,13 +4158,13 @@ def test_historical_haanen_retry_preserves_verified_evidence_roundtrip(
             (KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL, 1),
         )
         assert (
-            process_retry_attempt_for_test(
+            evaluate_retry_submission_for_test(
                 connection,
                 original_pull_record_id=HAANEN_ORIGINAL_PULL_RECORD_ID,
                 namekey=HAANEN_NAMEKEY_MODEL,
                 session_id=HAANEN_SESSION_ID,
-                attempt_id=HAANEN_REJECTED_ATTEMPT_ID,
-                attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
+                synthetic_record_id_seed=HAANEN_REJECTED_CAPTURE_ID,
+                commit_request_timestamp=TEST_COMMIT_REQUEST_TIMESTAMP,
                 submission_payload=original_submission,
                 assessment=original_assessment,
             )
@@ -4195,13 +4187,13 @@ def test_historical_haanen_retry_preserves_verified_evidence_roundtrip(
             )
             == HAANEN_RETRY_EVIDENCE_COUNT
         )
-        archived_retry_violations = process_retry_attempt_for_test(
+        archived_retry_violations = evaluate_retry_submission_for_test(
             connection,
             original_pull_record_id=HAANEN_ORIGINAL_PULL_RECORD_ID,
             namekey=HAANEN_NAMEKEY_MODEL,
             session_id=HAANEN_SESSION_ID,
-            attempt_id=HAANEN_ACCEPTED_ATTEMPT_ID,
-            attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
+            synthetic_record_id_seed=HAANEN_ACCEPTED_CAPTURE_ID,
+            commit_request_timestamp=TEST_COMMIT_REQUEST_TIMESTAMP,
             submission_payload=archived_retry,
             assessment=archived_retry_assessment,
         )
@@ -4267,13 +4259,13 @@ def test_historical_haanen_retry_preserves_verified_evidence_roundtrip(
         )
         assert ideal_assessment.accepted is True
         assert (
-            process_retry_attempt_for_test(
+            evaluate_retry_submission_for_test(
                 connection,
                 original_pull_record_id=HAANEN_ORIGINAL_PULL_RECORD_ID,
                 namekey=HAANEN_NAMEKEY_MODEL,
                 session_id=HAANEN_SESSION_ID,
-                attempt_id=f"{HAANEN_ACCEPTED_ATTEMPT_ID}-ideal",
-                attempt_timestamp=TEST_ATTEMPT_TIMESTAMP,
+                synthetic_record_id_seed=f"{HAANEN_ACCEPTED_CAPTURE_ID}-ideal",
+                commit_request_timestamp=TEST_COMMIT_REQUEST_TIMESTAMP,
                 submission_payload=ideal_retry,
                 assessment=ideal_assessment,
             )
@@ -4283,7 +4275,7 @@ def test_historical_haanen_retry_preserves_verified_evidence_roundtrip(
         audit_rows = connection.execute(
             f"""
             SELECT
-                {backend_vars.CODEX_RETRY_ATTEMPT_ID_COL},
+                {backend_vars.CODEX_RETRY_COMMIT_RECORD_ID_COL},
                 {backend_vars.CODEX_EVIDENCE_APPLIED_COL},
                 {backend_vars.CODEX_EVIDENCE_ACCEPTED_COL}
             FROM {backend_vars.CODEX_EVIDENCE_AUDIT_TABLE}
@@ -4294,10 +4286,10 @@ def test_historical_haanen_retry_preserves_verified_evidence_roundtrip(
         connection.close()
 
     assert audit_rows == [
-        (str(deterministic_uuid7(HAANEN_REJECTED_ATTEMPT_ID)), True, False),
-        (str(deterministic_uuid7(HAANEN_ACCEPTED_ATTEMPT_ID)), False, False),
+        (str(deterministic_uuid7(HAANEN_REJECTED_CAPTURE_ID)), True, False),
+        (str(deterministic_uuid7(HAANEN_ACCEPTED_CAPTURE_ID)), False, False),
         (
-            str(deterministic_uuid7(f"{HAANEN_ACCEPTED_ATTEMPT_ID}-ideal")),
+            str(deterministic_uuid7(f"{HAANEN_ACCEPTED_CAPTURE_ID}-ideal")),
             True,
             True,
         ),
@@ -5591,7 +5583,7 @@ def test_repeated_researcher_rows_materialize_as_distinct_innerdicts() -> None:
     connection = duckdb.connect(":memory:")
     try:
 
-        def output_row(fragment: int, attempt_id: str) -> dict[str, object]:
+        def output_row(fragment: int, commit_record_id: str) -> dict[str, object]:
             values: dict[str, object] = {
                 column: f"value for {column}" for column, _data_type in api.CODEX_OUTPUT_SCHEMA
             }
@@ -5603,15 +5595,14 @@ def test_repeated_researcher_rows_materialize_as_distinct_innerdicts() -> None:
                 DRAW_LABEL: TEST_DRAW_NUMBER,
                 KTP_FIRST_NAME_COL: "A.",
                 KTP_LAST_NAME_COL: "Sheikh",
-                KTP_AI_AUGMENT_COMMIT_REQUEST_RECORD_ID_COL: attempt_id,
-                KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_RECORD_COL: f"outcome for {attempt_id}",
+                KTP_AI_AUGMENT_COMMIT_REQUEST_RECORD_ID_COL: commit_record_id,
                 KTP_AI_AUGMENT_COMMENTS_COL: None,
             })
             return values
 
-        store_for_connection(connection)._append_codex_output(output_row(100, "attempt-1"),
+        store_for_connection(connection)._append_codex_output(output_row(100, "commit-1"),
         )
-        store_for_connection(connection)._append_codex_output(output_row(101, "attempt-2"),
+        store_for_connection(connection)._append_codex_output(output_row(101, "commit-2"),
         )
         store_for_connection(connection)._replace_codex_output_view()
         innerdicts_row = connection.execute(
@@ -5623,17 +5614,16 @@ def test_repeated_researcher_rows_materialize_as_distinct_innerdicts() -> None:
         innerdicts = tuple(json.loads(line) for line in innerdicts_text.splitlines())
         assert [row[KTP_FRAGMENT_COL] for row in innerdicts] == [100, 101]
         assert all(KTP_AI_AUGMENT_COMMIT_REQUEST_RECORD_ID_COL not in row for row in innerdicts)
-        assert [row[KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_RECORD_COL] for row in innerdicts] == [
-            "outcome for attempt-1", "outcome for attempt-2",
-        ]
+        assert all(KTP_AI_AUGMENT_SESSION_METADATA_COL in row for row in innerdicts)
+        assert all(KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL in row for row in innerdicts)
         assert connection.execute(
             f'SELECT "{KTP_AI_AUGMENT_COMMIT_REQUEST_RECORD_ID_COL}" '
             f'FROM {api.CODEX_OUTPUT_ROWS_TABLE} '
             f'ORDER BY "{KTP_FRAGMENT_COL}"'
-        ).fetchall() == [("attempt-1",), ("attempt-2",)]
+        ).fetchall() == [("commit-1",), ("commit-2",)]
 
         with pytest.raises(ReplayInputMissing, match="already accepted"):
-            store_for_connection(connection)._append_codex_output(output_row(101, "attempt-3"),
+            store_for_connection(connection)._append_codex_output(output_row(101, "commit-3"),
             )
     finally:
         connection.close()

@@ -30,11 +30,11 @@ class Locale:
     VALIDATION_REPLAY_MISMATCH: Final = "Recorded validation does not match its replay inputs"
     VALIDATION_AFTER_OUTCOME: Final = "Validation must precede its session's run outcome"
     VALIDATION_RESULT_NOT_APPLIED: Final = "Validation result was not applied"
-    APPLIED_ATTEMPT_CURRENT_VALIDATION_MISSING: Final = (
-        "Applied attempt has no current validation"
+    APPLIED_VALIDATION_CURSOR_MISSING: Final = (
+        "Applied validation request record is missing from the current replay cursor"
     )
-    PERSISTED_ATTEMPT_CURRENT_VALIDATION_MISSING: Final = (
-        "Persisted attempt has no current validation"
+    INDEXED_VALIDATION_CURSOR_MISSING: Final = (
+        "Indexed validation request record is missing from the current replay cursor"
     )
     VALIDATION_CURRENT_RECONSTRUCTED_COMMIT_REQUIRED: Final = (
         "Validation requires the current reconstructed commit"
@@ -131,7 +131,7 @@ class Locale:
     PUSH_DURABLY_ACCEPTED_LOG: Final = 'Push %s durably accepted; commit/validation processing'
     PUSH_RESPONSE_RECORD_MISSING: Final = 'Missing push response record'
     RUN_OUTCOME_PROJECTION_INCONSISTENT: Final = (
-        'Run-outcome validation/attempt projection is inconsistent'
+        'Run-outcome projection is inconsistent'
     )
     RUN_OUTCOME_REPLAY_INPUTS_DIFFER: Final = 'Run-outcome replay inputs differ from the projection'
     RUN_OUTCOME_ROLLOUT_FILENAME_MISSING: Final = 'Outcome rollout has no filename'
@@ -171,7 +171,9 @@ class Locale:
     RUN_OUTCOME_BODY_UNEXPECTED: Final = "Run outcome request must have no body"
     RUN_OUTCOME_REJECTED_LOG: Final = "Run outcome %s rejected: %s"
     RUN_OUTCOME_VALIDATION_LINKAGE_CORRUPT: Final = 'Run-outcome validation linkage is corrupt'
-    RUN_OUTCOME_DURABLE_VALIDATION_MISSING: Final = 'Projected attempt has no durable validation'
+    RUN_OUTCOME_DURABLE_VALIDATION_MISSING: Final = (
+        'Run-outcome projection has no durable validation request record'
+    )
     RUN_OUTCOME_PROVIDER_INPUT_CORRUPT: Final = 'Run-outcome provider replay input is corrupt'
     PULL_RETRY_VALIDATION_INCONSISTENT: Final = 'Inconsistent retry validation'
     PULL_SUBMISSION_VALUE_INVALID: Final = 'Validated submission value is invalid'
@@ -565,7 +567,7 @@ class Locale:
         "stored retry state does not match the configured namekey/session identity"
     )
     EVIDENCE_AUDIT_REPLAY_FAILED: Final = (
-        "stored evidence attempt audit cannot be replayed from its immutable baseline"
+        "stored evidence assessment audit cannot be replayed from its immutable baseline"
     )
     EVIDENCE_SUBMISSION_REJECTED: Final = (
         "submission contains evidence that is not yet exactly verified"
@@ -678,14 +680,14 @@ class Locale:
     ACCEPTED_IDENTITY_DUPLICATE: Final = (
         "commit record ID or rollout filename/line-count fragment is already accepted"
     )
-    ATTEMPT_HTTP_LOG_EXISTS: Final = "attempt HTTP request log already exists"
-    ARCHIVED_ATTEMPT_PATH_INVALID: Final = "archived attempt path is invalid"
-    ARCHIVED_ATTEMPT_MANIFEST_INVALID: Final = "archived attempt manifest is invalid"
-    ARCHIVED_ATTEMPT_ARTIFACT_INVALID_TEMPLATE: Final = (
-        "archived attempt artifact is invalid: {artifact}"
+    CAPTURE_HTTP_LOG_EXISTS: Final = "capture HTTP request log already exists"
+    ARCHIVED_CAPTURE_PATH_INVALID: Final = "archived capture path is invalid"
+    ARCHIVED_CAPTURE_MANIFEST_INVALID: Final = "archived capture manifest is invalid"
+    ARCHIVED_CAPTURE_ARTIFACT_INVALID_TEMPLATE: Final = (
+        "archived capture artifact is invalid: {artifact}"
     )
-    ARCHIVED_ATTEMPT_HTTP_INVALID: Final = "archived attempt HTTP request log is invalid"
-    ARCHIVED_ATTEMPT_OUTCOME_MISMATCH: Final = "archived attempt result does not match replay"
+    ARCHIVED_CAPTURE_HTTP_INVALID: Final = "archived capture HTTP request log is invalid"
+    ARCHIVED_CAPTURE_OUTCOME_MISMATCH: Final = "archived capture result does not match replay"
     RESEARCHER_CARD_COUNT_INVALID: Final = "selected researcher did not produce exactly one card"
     REQUEST_CONTENT_TYPE_INVALID: Final = "request Content-Type must be application/json"
     REQUEST_CONTENT_LENGTH_INVALID: Final = "request Content-Length is invalid"
@@ -695,23 +697,23 @@ class Locale:
 
     API_LIFESPAN_FAILED_LOG: Final = "API lifespan failed: %s"
     ROUTES_DISABLED_LOG: Final = "pull and push are disabled: %s"
-    ATTEMPT_RECORD_FAILED_LOG: Final = "push attempt=%s could not record stage=%s result=%s"
+    PUSH_RECORD_FAILED_LOG: Final = "push_record_id=%s could not record stage=%s result=%s"
     PULL_FAILED_LOG: Final = "pull failed configuration validation: %s"
-    PUSH_ACCEPTED_LOG: Final = "push attempt=%s accepted"
+    PUSH_ACCEPTED_LOG: Final = "push_record_id=%s accepted"
     PUSH_CURRENT_PULL_REQUIRED_LOG: Final = (
         "push rejected before acceptance: no current persisted pull record; "
         "client must GET /pull before submitting"
     )
-    PUSH_CONFIGURATION_FAILED_LOG: Final = "push attempt=%s failed stage=%s: %s"
+    PUSH_CONFIGURATION_FAILED_LOG: Final = "push_record_id=%s failed stage=%s: %s"
     PUSH_MULTIPLE_MATCHES_LOG: Final = (
-        "push attempt=%s failed stage=%s: excerpt matched multiple rows excerpt=%r"
+        "push_record_id=%s failed stage=%s: excerpt matched multiple rows excerpt=%r"
     )
-    PUSH_VALIDATION_FAILED_LOG: Final = "push attempt=%s failed stage=%s: %s"
+    PUSH_VALIDATION_FAILED_LOG: Final = "push_record_id=%s failed stage=%s: %s"
     EVIDENCE_ITEM_ASSESSMENT_LOG: Final = (
-        "push attempt=%s evidence field=%s index=%s outcome=%s excerpt=%r url=%r candidates=%r"
+        "commit_record_id=%s evidence field=%s index=%s outcome=%s excerpt=%r url=%r candidates=%r"
     )
-    PUSH_PYDANTIC_FAILED_LOG: Final = "push attempt=%s failed stage=%s field=%s value=%r: %s"
-    PUSH_UNEXPECTED_FAILED_LOG: Final = "push attempt=%s failed stage=%s: %s"
+    PUSH_PYDANTIC_FAILED_LOG: Final = "push_record_id=%s failed stage=%s field=%s value=%r: %s"
+    PUSH_UNEXPECTED_FAILED_LOG: Final = "push_record_id=%s failed stage=%s: %s"
     CODEX_ROLLOUT_SUMMARY_BLANK: Final = "Codex rollout summary values must be nonblank"
     APPENDWATCH_BASE64_INVALID: Final = "appendwatch report is not valid base64"
     APPENDWATCH_BASE64_NONCANONICAL: Final = "appendwatch report is not canonical base64"

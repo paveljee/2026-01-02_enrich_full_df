@@ -22,8 +22,6 @@ from src.helpers.data_models import (
 from src.helpers.data_models.http_request_log import HttpRequestLogRecordProtocol
 
 from .acme_protocol import ComponentProtocol
-from .backend.helpers.data_models.pydantic_to_paste import StandardizedSubmission
-from .backend.helpers.data_models.submission_init import Submission
 from .backend.helpers.vars import (
     AiAugmentCohort,
     AiAugmentIneligibilityCategory,
@@ -514,36 +512,42 @@ class AgentRuntimeComponent(
             Protocol,
         ): ...
 
-        class AttemptRecordProperty(
-            AttemptProperty,
-            ComponentProtocol.PortProtocol.PropertyProtocol,
-            Protocol,
-        ):
-            """Appears not implemented downstream as of now.
+        # ================================================================
+        #                      UNUSED - DO NOT USE
+        # ================================================================
+        # from .backend.helpers.data_models.pydantic_to_paste import StandardizedSubmission
+        # from .backend.helpers.data_models.submission_init import Submission
+        # class AttemptRecordProperty(
+        #     AttemptProperty,
+        #     ComponentProtocol.PortProtocol.PropertyProtocol,
+        #     Protocol,
+        # ):
+        #     """Appears not implemented downstream as of now.
 
-            This is potentially deprecated because `Record`
-            naming potentially conflicts with Backend use
-            of `Record` and the fact that Control Centre's
-            `Attempt` is in fact a Backend Record.
+        #     This is potentially deprecated because `Record`
+        #     naming potentially conflicts with Backend use
+        #     of `Record` and the fact that Control Centre's
+        #     `Attempt` is in fact a Backend Record.
 
-            Do not delete.
+        #     Do not delete.
             
-            Wraps BackendValidationRecord, a.k.a (on the Agent
-            Runtime's port) Attempt, in order to expose additional
-            properties that are helpful on the Backend end's of
-            the Agent Runtime - Backend connector for the purpose
-            of processing an Agent Runtime's submission."""
+        #     Wraps BackendValidationRecord, a.k.a (on the Agent
+        #     Runtime's port) Attempt, in order to expose additional
+        #     properties that are helpful on the Backend end's of
+        #     the Agent Runtime - Backend connector for the purpose
+        #     of processing an Agent Runtime's submission."""
 
-            @property
-            def attempt(self) -> AgentRuntimeComponent.BackendPort.AttemptProperty: ...
+        #     @property
+        #     def attempt(self) -> AgentRuntimeComponent.BackendPort.AttemptProperty: ...
 
-            @property
-            def submission(
-                self,
-            ) -> Submission | StandardizedSubmission | None: ...
+        #     @property
+        #     def submission(
+        #         self,
+        #     ) -> Submission | StandardizedSubmission | None: ...
 
-            @property
-            def ground_truth_innerdict(self) -> InnerDict | None: ...
+        #     @property
+        #     def ground_truth_innerdict(self) -> InnerDict | None: ...
+        # ================================================================
 
 
 class ControlCentreComponent(

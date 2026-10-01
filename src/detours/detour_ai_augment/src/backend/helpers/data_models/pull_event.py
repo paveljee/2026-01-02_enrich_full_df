@@ -22,6 +22,25 @@ from .ai_augment_http_request_log_record import (
 
 @implements[BackendComponent.PullRequestRecordProperty]()
 class PullRequestRecord(RequestRecord):
+    @property
+    def http_request_log_record(self) -> HttpRequestLogRecord:
+        return super().http_request_log_record
+
+    @classmethod
+    def from_http_request_log_record(
+        cls, *, http_request_log_record: HttpRequestLogRecord,
+    ) -> Self:
+        return super().from_http_request_log_record(
+            http_request_log_record=http_request_log_record,
+        )
+
+    @classmethod
+    def from_serialized_json(cls, *, value: str) -> Self:
+        return super().from_serialized_json(value=value)
+
+    def serialize(self) -> dict[str, object]:
+        return super().serialize()
+
     @model_validator(mode="after")
     def _validate_exchange(self) -> Self:
         _validate_public_exchange(self, HTTP_GET_METHOD, PULL_PATH)
@@ -34,6 +53,10 @@ class PullResponseRecord(ResponseRecord):
         default=None, exclude=True
     )
 
+    @property
+    def http_request_log_record(self) -> HttpRequestLogRecord:
+        return super().http_request_log_record
+
     @classmethod
     def from_http_request_log_record(
         cls,
@@ -45,6 +68,19 @@ class PullResponseRecord(ResponseRecord):
             **http_request_log_record.model_dump(mode="python"),
             validation_request_record=validation_request_record,
         )
+
+    @classmethod
+    def from_serialized_json(
+        cls, *, value: str,
+        validation_request_record: BackendValidationRequestRecord | None = None,
+    ) -> Self:
+        return cls.from_http_request_log_record(
+            http_request_log_record=HttpRequestLogRecord.model_validate_json(value),
+            validation_request_record=validation_request_record,
+        )
+
+    def serialize(self) -> dict[str, object]:
+        return self.http_request_log_record.model_dump(mode="json")
 
     @property
     def pull_response_body(self) -> str:

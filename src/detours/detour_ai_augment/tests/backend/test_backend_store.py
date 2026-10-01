@@ -15,6 +15,9 @@ import pytest
 
 from src.detours.detour_ai_augment.protected.src.backend import api
 from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
+from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
+    AUTHORITATIVE_RECORDS_TABLE,
+)
 from src.detours.detour_ai_augment.src.backend import server
 from src.detours.detour_ai_augment.src.backend.helpers.data_models import (
     ai_augment_backend_store as store_models,
@@ -76,7 +79,8 @@ def anchor(
 ) -> dict[str, Any]:
     with duckdb.connect(str(backend_store._detour_db_path), read_only=True) as connection:
         row = connection.execute(
-            "SELECT comment FROM duckdb_tables() WHERE table_name = 'detour_http_records'"
+            "SELECT comment FROM duckdb_tables() "
+            f"WHERE table_name = '{AUTHORITATIVE_RECORDS_TABLE}'"
         ).fetchone()
     assert row is not None
     return dict(json.loads(row[0]))
@@ -100,7 +104,9 @@ def test_stale_dashboard_hash_retains_boundary_and_verified_hash_promotes_only_w
     initial = anchor(runtime, backend_store)
     line = append(runtime, backend_store)
     with store._read_only(runtime):
-        assert store._execute("SELECT raw_line_sha256 FROM detour_http_records").fetchone() == (
+        assert store._execute(
+            f"SELECT raw_line_sha256 FROM {AUTHORITATIVE_RECORDS_TABLE}"
+        ).fetchone() == (
             hashlib.sha256(line).hexdigest(),
         )
     with store._writable(runtime):
@@ -159,15 +165,20 @@ def test_mismatch_fails_without_any_healing(
         store._detour_db_path.chmod(0o600)
         with duckdb.connect(str(store._detour_db_path)) as connection:
             sql = {
-                "missing_row": "DELETE FROM detour_http_records WHERE record_ordinal = 2",
-                "extra_row": "INSERT INTO detour_http_records VALUES "
+                "missing_row": (
+                    f"DELETE FROM {AUTHORITATIVE_RECORDS_TABLE} WHERE record_ordinal = 2"
+                ),
+                "extra_row": f"INSERT INTO {AUTHORITATIVE_RECORDS_TABLE} VALUES "
                     "(3, 'extra', 'GET', '/pull', '{}', repeat('0', 64))",
-                "gap": "UPDATE detour_http_records SET record_ordinal = 3 WHERE record_ordinal = 2",
-                "anchor_boundary": "COMMENT ON TABLE detour_http_records IS '"
+                "gap": (
+                    f"UPDATE {AUTHORITATIVE_RECORDS_TABLE} SET record_ordinal = 3 "
+                    "WHERE record_ordinal = 2"
+                ),
+                "anchor_boundary": f"COMMENT ON TABLE {AUTHORITATIVE_RECORDS_TABLE} IS '"
                     + json.dumps({"sha256": hashlib.sha256(b"").hexdigest(),
                                   "ordinal": 0, "byte_offset": 1}) + "'",
-                "missing_anchor": "COMMENT ON TABLE detour_http_records IS NULL",
-                "legacy_schema": "ALTER TABLE detour_http_records DROP raw_line_sha256",
+                "missing_anchor": f"COMMENT ON TABLE {AUTHORITATIVE_RECORDS_TABLE} IS NULL",
+                "legacy_schema": f"ALTER TABLE {AUTHORITATIVE_RECORDS_TABLE} DROP raw_line_sha256",
             }[damage]
             connection.execute(sql)
     saved_db = store._detour_db_path.read_bytes()
@@ -239,7 +250,9 @@ def test_nonempty_replay_refusal_preserves_db_then_exact_raw_line_is_bootstrappe
     store._rebuild_from_log(runtime, reset_confirmed=True, confirm_replay=lambda: True)
     with store._read_only(runtime):
         assert store._http_record(record.record_id) == record
-        assert store._execute("SELECT raw_line_sha256 FROM detour_http_records").fetchone() == (
+        assert store._execute(
+            f"SELECT raw_line_sha256 FROM {AUTHORITATIVE_RECORDS_TABLE}"
+        ).fetchone() == (
             hashlib.sha256(raw).hexdigest(),
         )
     assert log.read_bytes() == raw
@@ -494,7 +507,9 @@ def test_missing_identity_outcome_is_nak_with_durable_400_and_self_id(
                     patch.setattr(type(store), "_apply_durable_record", broken)
                 exercise()
         with duckdb.connect(str(store._detour_db_path), read_only=True) as connection:
-            assert connection.execute("SELECT count(*) FROM detour_http_records").fetchone() == (0,)
+            assert connection.execute(
+                f"SELECT count(*) FROM {AUTHORITATIVE_RECORDS_TABLE}"
+            ).fetchone() == (0,)
     # fsync failure need not mean zero bytes: no automatic retry or repair is permitted.
     assert len(Path(store._replay_log).read_bytes().splitlines()) == 1
 
@@ -561,13 +576,14 @@ def test_explicit_replay_projects_durable_prefix_ending_at_push_or_commit(
     store._rebuild_from_log(runtime, reset_confirmed=True, confirm_replay=lambda: True)
     with duckdb.connect(str(store._detour_db_path), read_only=True) as connection:
         assert connection.execute(
-            "SELECT record_ordinal, method, path FROM detour_http_records ORDER BY record_ordinal"
+            f"SELECT record_ordinal, method, path FROM {AUTHORITATIVE_RECORDS_TABLE} "
+            "ORDER BY record_ordinal"
         ).fetchall() == [
             (1, "GET", "/pull"), (2, "POST", "/push"),
             *([(3, "POST", "/commit")] if line_count == 3 else []),
         ]
         assert connection.execute(
-            f"SELECT count(*) FROM {api.AUTHORITATIVE_ATTEMPTS_TABLE}"
+            f"SELECT count(*) FROM {api.COMMIT_VALIDATION_REQUEST_RECORD_INDEX_TABLE}"
         ).fetchone() == (0,)
     assert log.read_bytes() == b"".join(lines)
 
@@ -604,4 +620,6 @@ def test_invalid_synthetic_envelope_is_fsynced_before_domain_rejection(
         assert HttpRequestLogRecord.model_validate_json(payload) == record
         assert backend_store.current_replayed_record is None
     with duckdb.connect(str(backend_store._detour_db_path), read_only=True) as connection:
-        assert connection.execute("SELECT count(*) FROM detour_http_records").fetchone() == (0,)
+        assert connection.execute(
+            f"SELECT count(*) FROM {AUTHORITATIVE_RECORDS_TABLE}"
+        ).fetchone() == (0,)

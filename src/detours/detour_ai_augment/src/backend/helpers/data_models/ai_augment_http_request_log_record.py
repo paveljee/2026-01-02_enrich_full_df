@@ -50,9 +50,43 @@ class AiAugmentHttpRequestLogRecord(
 
 @implements[BackendComponent.RequestRecordProperty]()
 class RequestRecord(AiAugmentHttpRequestLogRecord):
-    pass
+    @property
+    def http_request_log_record(self) -> HttpRequestLogRecord:
+        return super().http_request_log_record
+
+    @classmethod
+    def from_http_request_log_record(
+        cls, *, http_request_log_record: HttpRequestLogRecord,
+    ) -> Self:
+        return super().from_http_request_log_record(
+            http_request_log_record=http_request_log_record,
+        )
+
+    @classmethod
+    def from_serialized_json(cls, *, value: str) -> Self:
+        return super().from_serialized_json(value=value)
+
+    def serialize(self) -> dict[str, object]:
+        return super().serialize()
 
 
 @implements[BackendComponent.ResponseRecordProperty]()
 class ResponseRecord(AiAugmentHttpRequestLogRecord):
-    pass
+    @property
+    def http_request_log_record(self) -> HttpRequestLogRecord:
+        return super().http_request_log_record
+
+    @classmethod
+    def from_http_request_log_record(
+        cls, *, http_request_log_record: HttpRequestLogRecord,
+    ) -> Self:
+        return super().from_http_request_log_record(
+            http_request_log_record=http_request_log_record,
+        )
+
+    @classmethod
+    def from_serialized_json(cls, *, value: str) -> Self:
+        return super().from_serialized_json(value=value)
+
+    def serialize(self) -> dict[str, object]:
+        return super().serialize()

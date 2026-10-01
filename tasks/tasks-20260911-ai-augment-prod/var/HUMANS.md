@@ -6,244 +6,49 @@
 > because I maintain it vs. agents.
 > signed off: Pavel
 
-# propose the exact shape for review with code snippets; as it's documented in P31 is currently too broad. i would like to see the exact shape you propose to change
+# correct me if i'm wrong but my understanding is this. detour http records table is truly a duckdb representation of replay log  -every replayed jsonl line goes into there, and the code enforces that the table is same length as replay log and same record uuids etc. then codex output rows is the actual workhorse - it stores the actual kind of workbook of what we need ; it's indexed by _accepted_ push , that is, by _attempt_ (in architecture.py definition - that is, same as validation request); so there are as many rows as there were ever validation request records produced simply put. now, codex innerdicts is simply a flat representation of it and it doesn't include failed validations. and then codex run outcome json table is just again a representation of codex output rows that contains basically all same info but represented as full serialization of run outcome response record for convenienet replay. and then there is completely secondary codex_fco and whatnot tables that i cannot even bother to enumerate (pls do this for me) that contain data solely for validation's internal needs like evidence retries etc. now, looking through the lens i impose here - look in actual code and say if my lens actually holds water. provide response by following my narrative exactly and providing your comment based on actual code, to each atomic bit of what i said (and i mean atomic - better take my text verbatim and break it down into smallest meaningful atoms, and constrcut a table where left col is my atom and right col is your actual verification against code base). and be sure in your code review to stress the TOTAL number of ALL tables in detour db, that is, we need a full audit of all any any tables in this db to check if they actually are meaningful/used appropriately
 
-I propose **four test-only changes**. No production code, task definitions, timeouts, or cleanup-policy changes. I’ve replaced the broad P31 description in [WORK](/home/moshi/2026-01-02_enrich_full_df/tasks/tasks-20260911-ai-augment-prod/var/WORK.md) with this proposal, still **unapproved**.
+> may be outdated after today's edit.
+> also, my prompt above has been edited
+> very lightly for standing alone.
+> signed off: Pavel
 
-## 1. Correct the artifact validator without blanket-allowing external records
+**The detour DB defines 11 persistent user tables in a completed lifecycle.** This is a source-code inventory, not an inspection of a particular DB file. Schema creation is lazy: an empty rebuild has 2 tables, the first accepted `/push` brings the total to 10, and the first completed accepted output brings it to 11. There are also up to 2 views and one briefly created-and-dropped materialization table. The creation paths are in [Store](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/src/backend/helpers/data_models/ai_augment_backend_store.py:1212) and the [innerdict materializer](/home/moshi/2026-01-02_enrich_full_df/src/helpers/duckdb_utils.py:37).
 
-In `protected/tests/operator/test_operator_e2e.py`, add this private helper. `submission_models` imports the existing pasted model module’s endpoint constants; that module is not modified.
+### Your narrative, checked atom by atom
 
-```python
-def _validate_workflow_http_records(
-    records: Sequence[HttpRequestLogRecord],
-) -> dict[UUID, BackendValidationRecord]:
-    by_id = {record.record_id: record for record in records}
-    assert len(by_id) == len(records), "Duplicate HTTP record UUID"
-    ordinal = {record.record_id: index for index, record in enumerate(records)}
-    validations: dict[UUID, BackendValidationRecord] = {}
-    provider_ids: set[UUID] = set()
+| Your words | What the code does |
+|---|---|
+| “detour http records table is truly a duckdb representation of replay log” | Yes. It holds each projected HTTP envelope, its log ordinal and UUID, and a raw-line SHA-256. |
+| “every replayed jsonl line goes into there” | Yes, for every **successfully** replayed line. Both live append and rebuild use the record-application path. [Store:1261](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/src/backend/helpers/data_models/ai_augment_backend_store.py:1261) |
+| “the code enforces that the table is same length as replay log” | Yes at startup: it checks ordinal coverage and row count against log lines, along with hash coverage. [Store:1115](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/src/backend/helpers/data_models/ai_augment_backend_store.py:1115) |
+| “and same record uuids etc.” | **Not fully at startup.** That verification reads `record_ordinal` and `raw_line_sha256`, not each projected UUID or JSON envelope. Live append does compare its newly reconstructed record. [Store:1126](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/src/backend/helpers/data_models/ai_augment_backend_store.py:1126), [Store:603](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/src/backend/helpers/data_models/ai_augment_backend_store.py:603) |
+| “codex output rows is the actual workhorse” / “stores the actual kind of workbook of what we need” | Broadly yes: it holds the accepted flat researcher-card values before completion and is updated with outcome links afterward. [Store:2511](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/src/backend/helpers/data_models/ai_augment_backend_store.py:2511), [Store:2854](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/src/backend/helpers/data_models/ai_augment_backend_store.py:2854) |
+| “it's indexed by _accepted_ push” | No. Its unique record link is **commit-request ID**, with a separate unique `(filename, fragment)` constraint; it stores no push-ID key. [Vars:335](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/protected/src/backend/helpers/vars.py:335), [Store:2523](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/src/backend/helpers/data_models/ai_augment_backend_store.py:2523) |
+| “by _attempt_ (in architecture.py definition - that is, same as validation request)” | The **object** identification is right: `AgentRuntimeAttempt` aliases `BackendValidationRequestRecord`. But that does not make the output table keyed by attempt/validation ID. [attempt.py:6](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/src/agent_runtime/helpers/data_models/attempt.py:6) |
+| “as many rows as there were ever validation request records produced” | No. A validation can be rejected. `_project_validation` inserts an output row only when it has an accepted output; the separate commit→validation index records validation IDs. [Store:1896](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/src/backend/helpers/data_models/ai_augment_backend_store.py:1896), [Store:1258](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/src/backend/helpers/data_models/ai_augment_backend_store.py:1258) |
+| “codex innerdicts is simply a flat representation of it” | Yes. It is grouped by namekey into the common two-column innerdict/JSONL shape; its JSONL records are flat card data. [Store:2540](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/src/backend/helpers/data_models/ai_augment_backend_store.py:2540), [materializer:37](/home/moshi/2026-01-02_enrich_full_df/src/helpers/duckdb_utils.py:37) |
+| “it doesn't include failed validations” | Correct—and it also excludes **accepted validations not yet completed**. The `codex_output` view requires both validation and outcome IDs before materialization. [Store:2550](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/src/backend/helpers/data_models/ai_augment_backend_store.py:2550) |
+| “codex run outcome json table is just again a representation of codex output rows” / “contains basically all same info” | No. `codex_run_outcome_records` holds the serialized outcome HTTP record **and its validation/pull/push/commit/provider graph**. It does not hold the flat researcher-card values. The two tables are complementary. [Store:2866](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/src/backend/helpers/data_models/ai_augment_backend_store.py:2866), [codex_innerdict.py](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/src/backend/helpers/data_models/codex_innerdict.py) |
+| “represented as full serialization of run outcome response record” | Substantially yes: it is the *query-ready graph snapshot*, not the lean replay-log serialization of that record. |
+| “for convenienet replay” | No. Replay **creates** this table from the logged outcome and reconstructed references. Historical **query readback** consumes it. [Store:2916](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/src/backend/helpers/data_models/ai_augment_backend_store.py:2916) |
+| “completely secondary codex_fco and whatnot tables” | Secondary in **authority**, yes: their contents are projected from replay/CAS inputs. Several remain operationally necessary to the current validation and provenance checks. [Store:2170](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/src/backend/helpers/data_models/ai_augment_backend_store.py:2170) |
+| “solely for validation's internal needs like evidence retries” | Too broad. Retry tables serve that purpose; the provenance tables also enforce cumulative call/citation consistency, while output, outcome, and innerdict tables serve completion and query. |
 
-    provider_endpoints = {
-        (
-            HTTP_GET_METHOD,
-            submission_models.OPENALEX_SCHEME,
-            submission_models.OPENALEX_HOST,
-            submission_models.OPENALEX_INSTITUTIONS_PATH,
-        ),
-        (
-            HTTP_GET_METHOD,
-            submission_models.ROR_SCHEME,
-            submission_models.ROR_HOST,
-            submission_models.ROR_ORGANIZATIONS_PATH,
-        ),
-    }
+### Every persistent detour table
 
-    for record in records:
-        if (record.method, record.path) != (HTTP_POST_METHOD, VALIDATE_PATH):
-            continue
+| Table | Writer → actual reader/use | Assessment |
+|---|---|---|
+| [detour_http_records](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/protected/src/backend/helpers/vars.py:132) | Every applied log line → HTTP-record resolution, provider lookup, replay checks, startup coverage check. | Essential log projection; startup UUID/payload verification is narrower than your description. |
+| [commit_validation_request_record_index](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/protected/src/backend/helpers/vars.py:141) | Every validation → validation idempotency and run-outcome link checks. | Meaningful two-ID index, **not** a stored Attempt object. |
+| [codex_fc](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/src/backend/helpers/data_models/ai_augment_backend_store.py:2409) | CAS rollout function-call projection → repeat-value and linkage/integrity checks. | Used for persisted provenance consistency; not card data. |
+| [codex_fco](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/src/backend/helpers/data_models/ai_augment_backend_store.py:2450) | CAS rollout function-output projection → repeat-value and linkage/integrity checks. | Same limited but real provenance role. |
+| [codex_calls](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/src/backend/helpers/data_models/ai_augment_backend_store.py:2459) | Links call, function-call/output IDs and rollout filename → cumulative-prefix and linkage checks. | Operationally used. |
+| [codex_turn_ref](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/src/backend/helpers/data_models/ai_augment_backend_store.py:2470) | Citation/reference projection → cumulative-prefix, duplicate-value and call-link checks. | Operationally used. |
+| [codex_retry_baselines](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/src/backend/helpers/data_models/ai_augment_backend_store.py:2421) | Initial retry obligations → later retry-baseline reads. | Needed by current retry validation. Its `attempt_id` means **commit ID** here. |
+| [codex_evidence_attempts](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/src/backend/helpers/data_models/ai_augment_backend_store.py:2434) | Parsed submission/assessment and applied flags → later applied-retry audit reads. | Needed by current retry validation; not one row for every validation failure. |
+| [codex_output_rows](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/src/backend/helpers/data_models/ai_augment_backend_store.py:2523) | Accepted validation inserts flat values; completed outcome fills links/body → identity checks, materialization, historical outcome-ID lookup. | The accepted-card working table. Completed values duplicate the final innerdict, but the table still supplies the outcome link. |
+| [codex_run_outcome_records](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/src/backend/helpers/data_models/ai_augment_backend_store.py:2535) | Matching completed accepted outcome inserts graph JSON → historical query reconstruction. | Purposeful secondary snapshot; **not** the flat-card table or an input to replay. |
+| [codex_innerdicts](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/src/backend/helpers/data_models/ai_augment_backend_store.py:2562) | Completed-output view is materialized as grouped flat JSONL → Store query builds `CodexInnerDict` and outerdicts. | Required final card representation. |
 
-        validation = BackendValidationRecord.from_http_request_log_record(record)
-        validations[record.record_id] = validation
-        body = validation.validation_request_body
-        commit = body.commit_record
-
-        references: tuple[HttpRequestLogRecord, ...] = (
-            commit,
-            commit.commit_request_body.pull_record,
-            commit.commit_request_body.push_record,
-            *body.openalex_ror_records,
-        )
-        if body.initial_validation_record is not None:
-            references += (body.initial_validation_record,)
-
-        for linked in references:
-            assert linked.record_id in by_id, linked.record_id
-            assert (
-                linked.model_dump() == by_id[linked.record_id].model_dump()
-            ), linked.record_id
-            assert (
-                ordinal[linked.record_id] < ordinal[record.record_id]
-            ), linked.record_id
-
-        for provider in body.openalex_ror_records:
-            parent, _, identifier = provider.path.rpartition("/")
-            assert identifier and (
-                provider.method, provider.scheme, provider.host, parent
-            ) in provider_endpoints, provider.record_id
-            provider_ids.add(provider.record_id)
-
-    local_routes = backend_api.AUTHORITATIVE_FASTAPI_ROUTES | {
-        backend_api.AUTHORITATIVE_COMMIT_ROUTE,
-        (HTTP_POST_METHOD, VALIDATE_PATH),
-        *((HTTP_POST_METHOD, path) for path in run_outcome_models.RUN_OUTCOME_PATHS),
-    }
-    unexpected = [
-        (record.record_id, record.method, record.host, record.path)
-        for record in records
-        if (record.method, record.path) not in local_routes
-        and record.record_id not in provider_ids
-    ]
-    assert not unexpected, unexpected
-    return validations
-```
-
-Replace the existing route-only assertion in `validate_workflow_artifacts` with:
-
-```python
-validations = _validate_workflow_http_records(records)
-```
-
-After its existing outcome parsing, add explicit current-link checks:
-
-```python
-assert run_outcome_snapshot.pull_record_id == commit_request_body.pull_record.record_id
-assert run_outcome_snapshot.push_record_id == commit_request_body.push_record.record_id
-assert run_outcome_snapshot.commit_record_id == commit_record.record_id
-assert run_outcome_snapshot.run_outcome_record_id == run_outcome_record.record_id
-
-assert run_outcome_snapshot.validation_record_id is not None
-assert run_outcome_snapshot.validation_record_id in validations
-validation = validations[run_outcome_snapshot.validation_record_id]
-
-assert validation.validation_request_body.commit_record == commit_record
-assert (
-    validation.validation_request_body.post_commit_validation.result
-    is BackendLifecycle.ACCEPTED
-)
-assert (
-    commit_ordinal
-    < _record_ordinal(records, validation.record_id)
-    < gone_pull_ordinal
-)
-assert backend_api._http_header_value(
-    gone_pull.response_headers, ETAG_HEADER,
-) == f'"{validation.record_id}"'
-
-outcome_request = validated_run_outcome.run_outcome_request
-assert outcome_request.session_id == session.session_id
-if outcome_request.run_outcome is RunLifecycle.COMPLETED:
-    assert outcome_request.validation_record_id == validation.record_id
-```
-
-Existing DB, CAS, hash, appendwatch, accepted-commit and response assertions remain.
-
-## 2. Capture the actual card and check current metadata
-
-In `capture_completed_researcher_card`, replace only the footer selector and nonempty wait:
-
-```python
-card = page.get_by_test_id(control_ui.CARD_MARKDOWN_TEST_ID)
-expect(card).to_contain_text(commit_record_id)
-expect(page.get_by_test_id(control_ui.DOWNLOAD_CARD_DOCX_TEST_ID)).to_be_enabled()
-card_text = card.inner_text().strip()
-```
-
-Preserve its empty-card check, browser-error assertion, timeout and cleanup.
-
-Replace the obsolete commit-request-body card assertion with:
-
-```python
-from lxml.html import fromstring
-from nicegui.elements.markdown import prepare_content
-
-# Inside validate_workflow_artifacts:
-if card_text is not None:
-    expected_html = prepare_content(
-        validated_run_outcome.model_dump_json(),
-        extras="fenced-code-blocks tables",
-    )
-    expected_text = fromstring(expected_html).text_content().strip()
-
-    metadata_position = card_text.index(
-        KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_RECORD_COL,
-    )
-    outcome_position = card_text.index(expected_text)
-    assert metadata_position < outcome_position
-```
-
-This compares the **full record’s rendered text**, not merely its UUIDs. Rendering matters: browser `inner_text()` is not raw Markdown, and Markdown can interpret underscores in JSON keys. Both dependencies already exist; no renderer change is proposed.
-
-## 3. Keep each operator run together in a unique retained directory
-
-Replace only the `operator_runtime` fixture:
-
-```python
-@pytest.fixture
-def operator_runtime(repository_root: Path) -> Iterator[OperatorRuntime]:
-    artifacts_root = repository_root / "tmp"
-    artifacts_root.mkdir(exist_ok=True)
-    run_dir = Path(tempfile.mkdtemp(prefix="operator-test.", dir=artifacts_root))
-    _operator_log(f"Operator run directory (preserved): {run_dir}")
-
-    dashboard_socket_path = run_dir / "dashboard.sock"
-    if len(os.fsencode(dashboard_socket_path)) >= DARWIN_AF_UNIX_PATH_CAPACITY_BYTES:
-        raise RuntimeError("operator dashboard socket path exceeds Darwin AF_UNIX capacity")
-
-    yield _operator_runtime(
-        run_dir,
-        repository_root=repository_root,
-        dashboard_socket_path=dashboard_socket_path,
-    )
-```
-
-Existing constructors already derive the generated config, DB, replay, CAS, output and child NiceGUI storage from this directory. Source remains a read-only-source symlink. Process/socket cleanup stays; artifacts are retained.
-
-## 4. Exercise these exact helpers upstream
-
-Reuse the existing completed-query fixture. It currently omits two exchanges/details required by the artifact checker.
-
-In `completed_query_fixture_process`, add to the existing accepted-push construction:
-
-```python
-response_headers={LOCATION_HEADER.lower(): PULL_PATH},
-```
-
-After successful validation, before outcome persistence:
-
-```python
-assert validated.submission is not None
-lines = [api.json_line(validated.submission.normalized_values())]
-if validated.ground_truth_innerdict is not None:
-    lines.append(
-        api.json_line(api.select_columns(validated.ground_truth_innerdict.data)),
-    )
-
-store._append_authoritative_record(persisted_http_record(
-    record_id=uuid7(),
-    method=HTTP_GET_METHOD,
-    path=PULL_PATH,
-    response_code=HTTPStatus.GONE,
-    response_headers={
-        HTTP_CONTENT_TYPE_HEADER: ContentType.NDJSON_UTF8,
-        ETAG_HEADER: f'"{validated.validation_record.record_id}"',
-    },
-    response_body="".join(lines),
-))
-```
-
-Then:
-
-- **Existing preflight module:** invoke the full `validate_workflow_artifacts` against that real synthetic Store/log/CAS fixture, without a browser.
-- **Parameterized helper tests:** valid linked providers/initial validation; unknown routes, unreferenced/missing/changed providers, incorrect endpoints, missing/changed embedded references, reversed ordering and duplicate UUIDs.
-- **Directory fixture checks:** distinct retained directories and contained generated paths.
-- **Existing host Chrome test:** after its current Playwright context closes, but while its Dashboard still runs, invoke the actual capture and artifact helpers:
-
-```python
-card_text = operator.capture_completed_researcher_card(
-    dashboard,
-    runtime,
-    namekey=ui_tests.STARTUP_NAMEKEY,
-    queued_at_monotonic=time.monotonic(),
-)
-operator.validate_workflow_artifacts(
-    runtime,
-    namekey=ui_tests.STARTUP_NAMEKEY,
-    expected_run_outcome_path=RunLifecycle.COMPLETED.to_run_outcome_path(),
-    card_text=card_text,
-)
-```
-
-The existing assertions and file-preservation checks remain. No live Codex is needed for these upstream checks.
-
-**Status:** P26–P30 complete. P31 proposal documented; no P31 implementation performed.
+**Other relations:** `codex_output` is a used view that filters completed rows for `codex_innerdicts`. `codex_turn_ref_normalized` is a match-version-2 view that is created but has **no production reader I could find**; it is the one relation whose current utility I cannot justify. [Store:2487](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/src/backend/helpers/data_models/ai_augment_backend_store.py:2487) The shared materializer briefly creates and drops `codex_innerdicts_frame`, so it is **not a twelfth persistent table**. The sample proxy’s `pricing_daily` and `requests` belong to a separate SQLite DB, not this DuckDB.

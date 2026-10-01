@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping
 from enum import StrEnum
 from http import HTTPStatus
@@ -13,25 +12,15 @@ from pydantic import Field, model_validator
 from src.detours.detour_ai_augment.protected.src.architecture import (
     ControlCentreComponent,
 )
-from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.post_commit_validation import (  # noqa: E501
-    PostCommitValidation,
-)
 from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     ETAG_HEADER,
     HTTP_CONTENT_TYPE_HEADER,
     HTTP_POST_METHOD,
-    SERIALIZED_ATTEMPT_LINEAGE_KEY,
     SESSION_ID_HEADER,
     SOURCE_KEY_HEADER,
     SYNTHETIC_COMMIT_HOST,
     SYNTHETIC_COMMIT_SCHEME,
-    VALIDATION_BODY_COMMIT_REQUEST_RECORD_KEY,
-    VALIDATION_BODY_OPENALEX_ROR_RECORDS_KEY,
-    VALIDATION_BODY_POST_COMMIT_VALIDATION_KEY,
-    VALIDATION_COMMIT_PULL_RESPONSE_RECORD_KEY,
-    VALIDATION_COMMIT_PUSH_RESPONSE_RECORD_KEY,
-    VALIDATION_COMMIT_SELF_HTTP_RECORD_KEY,
     ContentType,
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
@@ -55,13 +44,9 @@ from .....backend.helpers.data_models.ai_augment_http_request_log_record import 
     ResponseRecord,
 )
 from .....backend.helpers.data_models.commit_request import (
-    BackendCommitRequestRecord,
     CodexSessionRecord,
     _CodexSessionRecordJson,
 )
-from .....backend.helpers.data_models.pull_event import PullResponseRecord
-from .....backend.helpers.data_models.push_event import PushResponseRecord
-from .....backend.helpers.data_models.validation_request import ValidationRequestBody
 from .lifecycle import RunLifecycle
 
 
@@ -130,6 +115,25 @@ def _request_uuid(value: str | None, *, quoted: bool = False) -> UUID | None:
 
 @implements[ControlCentreComponent.BackendPort.RunOutcomeRequestRecordProperty]()
 class RunOutcomeRequestRecord(RequestRecord):
+    @property
+    def http_request_log_record(self) -> HttpRequestLogRecord:
+        return super().http_request_log_record
+
+    @classmethod
+    def from_http_request_log_record(
+        cls, *, http_request_log_record: HttpRequestLogRecord,
+    ) -> Self:
+        return super().from_http_request_log_record(
+            http_request_log_record=http_request_log_record,
+        )
+
+    @classmethod
+    def from_serialized_json(cls, *, value: str) -> Self:
+        return super().from_serialized_json(value=value)
+
+    def serialize(self) -> dict[str, object]:
+        return super().serialize()
+
     @property
     def namekey(self) -> NameKey | None:
         try:
@@ -245,6 +249,10 @@ class RunOutcomeResponseRecord(ResponseRecord):
     run_outcome_request_record: RunOutcomeRequestRecord = Field(exclude=True)
     attempt: AgentRuntimeAttempt | None = Field(default=None, exclude=True)
 
+    @property
+    def http_request_log_record(self) -> HttpRequestLogRecord:
+        return super().http_request_log_record
+
     @classmethod
     def _parse_response_body(cls, value: str | bytes) -> _RunOutcomeResponseBodyJson:
         return _RunOutcomeResponseBodyJson.model_validate_json(value)
@@ -267,93 +275,21 @@ class RunOutcomeResponseRecord(ResponseRecord):
         return RunLifecycle.from_run_outcome(self.run_outcome_request_record.run_outcome)
 
     @classmethod
-    def from_serialized_json(cls, *, value: str) -> Self:
-        payload = json.loads(value)
-        if not isinstance(payload, dict):
-            raise ValueError(Locale.RUN_OUTCOME_RECORD_INCOMPLETE)
-        lineage = payload.pop(SERIALIZED_ATTEMPT_LINEAGE_KEY)
-        if not isinstance(lineage, list):
-            raise ValueError(Locale.RUN_OUTCOME_ATTEMPT_LINK_INVALID)
-        attempt: AgentRuntimeAttempt | None = None
-        for item in reversed(lineage):
-            prior = attempt
-            validation = HttpRequestLogRecord.model_validate(item, strict=False)
-            if validation.request_body is None:
-                raise ValueError(Locale.RUN_OUTCOME_ATTEMPT_LINK_INVALID)
-            parsed = json.loads(validation.request_body)
-            embedded = parsed[VALIDATION_BODY_COMMIT_REQUEST_RECORD_KEY]
-            pull = PullResponseRecord.from_http_request_log_record(
-                http_request_log_record=HttpRequestLogRecord.model_validate(
-                    embedded[VALIDATION_COMMIT_PULL_RESPONSE_RECORD_KEY], strict=False,
-                ),
-                validation_request_record=prior,
-            )
-            push = PushResponseRecord.from_http_request_log_record(
-                http_request_log_record=HttpRequestLogRecord.model_validate(
-                    embedded[VALIDATION_COMMIT_PUSH_RESPONSE_RECORD_KEY], strict=False,
-                ),
-                pull_response_record=pull,
-            )
-            refs: dict[UUID, PullResponseRecord | PushResponseRecord] = {
-                pull.record_id: pull,
-                push.record_id: push,
-            }
-            commit = BackendCommitRequestRecord.from_http_request_log_record(
-                HttpRequestLogRecord.model_validate(
-                    embedded[VALIDATION_COMMIT_SELF_HTTP_RECORD_KEY], strict=False,
-                ),
-                resolve_http_record=lambda record_id: refs[record_id],
-            )
-            initial = None if prior is None else (
-                prior.validation_request_body.initial_validation_request_record or prior
-            )
-            body = ValidationRequestBody(
-                commit_request_record=commit,
-                post_commit_validation=PostCommitValidation.model_validate(
-                    parsed[VALIDATION_BODY_POST_COMMIT_VALIDATION_KEY], strict=False,
-                ),
-                initial_validation_request_record=initial,
-                openalex_ror_records=tuple(
-                    HttpRequestLogRecord.model_validate(record, strict=False)
-                    for record in parsed[VALIDATION_BODY_OPENALEX_ROR_RECORDS_KEY]
-                ),
-            )
-            attempt = AgentRuntimeAttempt.from_http_request_log_record(
-                validation,
-                validation_request_body=body,
-            )
-            assert attempt.validation_request_body is body
-            assert body.commit_request_record is commit
-            assert commit.commit_request_body.pull_response_record is pull
-            assert commit.commit_request_body.push_response_record is push
-            assert pull.validation_request_record is prior
-            assert body.initial_validation_request_record is initial
+    def from_serialized_json(
+        cls, *, value: str, attempt: AgentRuntimeAttempt | None = None,
+    ) -> Self:
         outcome = cls.from_http_request_log_record(
-            HttpRequestLogRecord.model_validate(payload, strict=False),
+            HttpRequestLogRecord.model_validate_json(value),
             attempt=attempt,
         )
-        if (outcome._body().validation_record_id is None) != (attempt is None):
+        if outcome._body().validation_record_id != (
+            None if attempt is None else attempt.record_id
+        ):
             raise ValueError(Locale.RUN_OUTCOME_ATTEMPT_LINK_INVALID)
-        assert outcome.attempt is attempt
         return outcome
 
     def serialize(self) -> dict[str, object]:
-        lineage: list[dict[str, object]] = []
-        attempt = self.attempt
-        seen: set[UUID] = set()
-        while attempt is not None:
-            if attempt.record_id in seen:
-                raise ValueError(Locale.RUN_OUTCOME_ATTEMPT_LINK_INVALID)
-            seen.add(attempt.record_id)
-            lineage.append(attempt.http_request_log_record.model_dump(mode="json"))
-            attempt = (
-                attempt.validation_request_body.commit_request_record.commit_request_body
-                .pull_response_record.validation_request_record
-            )
-        return {
-            **self.http_request_log_record.model_dump(mode="json"),
-            SERIALIZED_ATTEMPT_LINEAGE_KEY: lineage,
-        }
+        return self.http_request_log_record.model_dump(mode="json")
 
     @classmethod
     def from_run_outcome_request_record(

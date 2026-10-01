@@ -217,20 +217,28 @@ class CommitRequestBody(FrozenStrictModel):
 class BackendCommitRequestRecord(RequestRecord):
     commit_request_body: CommitRequestBody = Field(exclude=True)
 
+    @property
+    def http_request_log_record(self) -> HttpRequestLogRecord:
+        return super().http_request_log_record
+
     @classmethod
-    def from_serialized_json(cls, *, value: str) -> Self:
-        record = _BackendCommitRequestRecordJson.model_validate_json(
-            value,
-        ).to_commit_request_record()
-        return cls(
-            **record.http_request_log_record.model_dump(mode="python"),
-            commit_request_body=record.commit_request_body,
+    def from_serialized_json(
+        cls,
+        *,
+        value: str,
+        resolve_http_record: Callable[
+            [UUID], PullResponseRecord | PushResponseRecord
+        ] | None = None,
+    ) -> Self:
+        if resolve_http_record is None:
+            raise ValueError(Locale.COMMIT_REFERENCES_REQUIRED)
+        return cls.from_http_request_log_record(
+            HttpRequestLogRecord.model_validate_json(value),
+            resolve_http_record=resolve_http_record,
         )
 
     def serialize(self) -> dict[str, object]:
-        return _BackendCommitRequestRecordJson.from_commit_request_record(self).model_dump(
-            mode="json",
-        )
+        return self.http_request_log_record.model_dump(mode="json")
 
     def validate_commit_request_record(self) -> Self:
         if (
@@ -308,41 +316,6 @@ class BackendCommitRequestRecord(RequestRecord):
         )
 
 
-class _BackendCommitRequestRecordJson(FrozenStrictModel):
-    # Embedded JSON contains HTTP envelopes, not the by-reference lifecycle
-    # objects reconstructed from Store's cursor during replay.
-    self_http_record: HttpRequestLogRecord
-    pull_response_record: HttpRequestLogRecord
-    push_response_record: HttpRequestLogRecord
-
-    @classmethod
-    def from_commit_request_record(cls, value: BackendCommitRequestRecord) -> Self:
-        body = value.commit_request_body
-        return cls(
-            self_http_record=value.http_request_log_record,
-            pull_response_record=body.pull_response_record,
-            push_response_record=body.push_response_record,
-        )
-
-    def to_commit_request_record(self) -> BackendCommitRequestRecord:
-        pull_response_record = PullResponseRecord.from_http_request_log_record(
-            http_request_log_record=self.pull_response_record,
-        )
-        push_response_record = PushResponseRecord.from_http_request_log_record(
-            http_request_log_record=self.push_response_record,
-            pull_response_record=pull_response_record,
-        )
-        assert push_response_record.pull_response_record is pull_response_record
-        refs: dict[UUID, PullResponseRecord | PushResponseRecord] = {
-            pull_response_record.record_id: pull_response_record,
-            push_response_record.record_id: push_response_record,
-        }
-        return BackendCommitRequestRecord.from_http_request_log_record(
-            self.self_http_record,
-            resolve_http_record=lambda record_id: refs[record_id],
-        )
-
-
 def _synthetic_commit_request_record(
     *,
     pull_response_record: PullResponseRecord,
@@ -393,7 +366,7 @@ def _synthetic_commit_request_record(
 
 # Deliberate post-definition imports: the concrete pull/push response types
 # form a Pydantic annotation ring with commit and validation. All commit
-# models, including the JSON reader used by validation, must exist before
+# models must exist before
 # importing those modules. These names then resolve to the actual classes;
 # no generic HTTP field or manual model_rebuild is used for the links.
 from .pull_event import PullResponseRecord  # noqa: E402

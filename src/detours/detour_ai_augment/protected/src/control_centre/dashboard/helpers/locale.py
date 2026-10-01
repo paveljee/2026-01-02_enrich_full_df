@@ -36,7 +36,7 @@ class Locale:
     ALL_STATUSES: Final = "All statuses"
     ALL_COHORTS: Final = "All cohorts"
     NO_RESEARCHER_SELECTED: Final = "No researcher selected"
-    ATTEMPT_HISTORY: Final = "Attempt history"
+    RUN_OUTCOME_HISTORY: Final = "Runs and outcomes"
     BACKEND_STATUS_TEMPLATE: Final = "Backend API: {status}"
     IPC_STATUS_TEMPLATE: Final = "IPC: {status}"
     IPC_AVAILABLE: Final = "available"
@@ -50,8 +50,8 @@ class Locale:
     RESEARCHER_SELECTION_TEMPLATE: Final = (
         "{first_name} {last_name} · draw(s) {draw_number}"
     )
-    ATTEMPT_HISTORY_TEMPLATE: Final = (
-        "Attempt history: {first_name} {last_name}"
+    RUN_OUTCOME_HISTORY_TEMPLATE: Final = (
+        "Runs and outcomes: {first_name} {last_name}"
     )
     CARD_INTRO_DATE_FORMAT: Final = "%B %d, %Y"
 
@@ -177,9 +177,6 @@ class Locale:
     )
     CODEX_HANDLE_MISMATCH: Final = "Codex handle does not match the active run"
     RUN_PROCESS_CLEANUP_FAILED_TEMPLATE: Final = "run process cleanup failed: {error}"
-    ACCEPTED_SESSION_DUPLICATE: Final = (
-        "accepted output contains duplicate session attempts"
-    )
     UNKNOWN_VARIABLE_TEMPLATE: Final = "unknown variable: {variable_key}"
     SERVICES_NOT_STARTED: Final = "Control Centre services have not started"
 
@@ -240,8 +237,8 @@ class Locale:
         "run lifecycle has no run-outcome HTTP request path"
     )
     RUN_OUTCOME_PATH_INVALID: Final = "run-outcome HTTP request path is invalid"
-    RUN_COMMIT_VIEW_EMPTY: Final = (
-        "Run/commit view requires a Backend commit or Dashboard run"
+    RUN_ATTEMPT_VIEW_EMPTY: Final = (
+        "A Run or AgentRuntimeAttempt is required for this view"
     )
     DASHBOARD_PROBES_LOG: Final = "Dashboard probes: %s"
     IPC_PROBE_STATUS_LOG_TEMPLATE: Final = "IPC probe HTTP status: {status}"

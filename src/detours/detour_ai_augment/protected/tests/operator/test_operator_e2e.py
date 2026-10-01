@@ -47,23 +47,16 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.pos
     PostCommitValidation,
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
-    AUTHORITATIVE_ATTEMPT_COMMIT_REQUEST_RECORD_ID_COLUMN,
-    AUTHORITATIVE_ATTEMPT_VALIDATION_ID_KEY,
+    COMMIT_REQUEST_RECORD_ID_COLUMN,
     ETAG_HEADER,
     HTTP_GET_METHOD,
     HTTP_POST_METHOD,
-    KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_RECORD_COL,
+    KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL,
+    KTP_AI_AUGMENT_SESSION_METADATA_COL,
     PULL_PATH,
     PUSH_PATH,
     REPLAY_LOG_KEY,
     SOURCE_KEY_HEADER,
-    VALIDATION_BODY_COMMIT_REQUEST_RECORD_KEY,
-    VALIDATION_BODY_INITIAL_VALIDATION_REQUEST_RECORD_KEY,
-    VALIDATION_BODY_OPENALEX_ROR_RECORDS_KEY,
-    VALIDATION_BODY_POST_COMMIT_VALIDATION_KEY,
-    VALIDATION_COMMIT_PULL_RESPONSE_RECORD_KEY,
-    VALIDATION_COMMIT_PUSH_RESPONSE_RECORD_KEY,
-    VALIDATION_COMMIT_SELF_HTTP_RECORD_KEY,
     AiAugmentCohort,
 )
 from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helpers import (
@@ -86,9 +79,16 @@ from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_co
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.commit_request import (
     COMMIT_PATH,
     BackendCommitRequestRecord,
+    _CommitRequestBodyJson,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.lifecycle import (
     BackendLifecycle,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.pull_event import (
+    PullResponseRecord,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.push_event import (
+    PushResponseRecord,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.validation_request import (
     VALIDATE_PATH,
@@ -111,6 +111,7 @@ from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_mod
 from src.detours.detour_ai_augment.src.shared import parse_appendwatch_report_bytes
 from src.helpers.architecture import FrozenStrictModel
 from src.helpers.data_models import HttpRequestLogRecord, NameKey
+from src.helpers.vars import KTP_LAST_NAME_COL
 
 CONTROL_CENTRE_MODULE = "src.detours.detour_ai_augment.src.control_centre.dashboard.ui"
 CONTROL_CENTRE_COMMAND_PREFIX = (
@@ -137,7 +138,7 @@ BROWSER_ASSERTION_TIMEOUT_MILLISECONDS = 30_000
 BROWSER_VIEWPORT: ViewportSize = {"width": 1_600, "height": 1_000}
 BROWSER_CHANNEL = "chrome"
 GRID_ROW_SELECTOR = ".ag-center-cols-container .ag-row"
-ATTEMPT_HISTORY_ROW_SELECTOR = "tbody tr"
+RUN_OUTCOME_HISTORY_ROW_SELECTOR = "tbody tr"
 OPERATOR_TARGET_DRAW_NUMBER = "146"
 DARWIN_AF_UNIX_PATH_CAPACITY_BYTES = 104
 PYTEST_CURRENT_TEST_ENV_NAME = "PYTEST_CURRENT_TEST"
@@ -806,9 +807,9 @@ def wait_for_completed_grid_row(
     expect(rows).to_have_count(1)
     row = rows.first
     row.click()
-    history = page.get_by_test_id(control_ui.ATTEMPT_HISTORY_TABLE_TEST_ID)
+    history = page.get_by_test_id(control_ui.RUN_OUTCOME_HISTORY_TABLE_TEST_ID)
     expect(history).to_be_visible()
-    history_rows = history.locator(ATTEMPT_HISTORY_ROW_SELECTOR)
+    history_rows = history.locator(RUN_OUTCOME_HISTORY_ROW_SELECTOR)
     execute = page.get_by_test_id(control_ui.EXECUTE_ACTION_TEST_ID)
     view_card = page.get_by_test_id(control_ui.VIEW_CARD_TEST_ID)
     deadline = queued_at_monotonic + FULL_WORKFLOW_TIMEOUT_SECONDS
@@ -826,7 +827,7 @@ def wait_for_completed_grid_row(
         )
         if current_status != previous_status:
             _operator_log(
-                f"Control Centre attempt history reports workflow status {current_status!r}"
+                f"Control Centre run/commit history reports workflow status {current_status!r}"
             )
             previous_status = current_status
         action_text = (execute.text_content() or "").strip()
@@ -918,9 +919,9 @@ def capture_completed_researcher_card(
                 runtime,
                 queued_at_monotonic=queued_at_monotonic,
             )
-            history = page.get_by_test_id(control_ui.ATTEMPT_HISTORY_TABLE_TEST_ID)
+            history = page.get_by_test_id(control_ui.RUN_OUTCOME_HISTORY_TABLE_TEST_ID)
             expect(history).to_be_visible()
-            expect(history.locator(ATTEMPT_HISTORY_ROW_SELECTOR)).not_to_have_count(0)
+            expect(history.locator(RUN_OUTCOME_HISTORY_ROW_SELECTOR)).not_to_have_count(0)
             expect(history).to_contain_text(commit_request_record_id)
             expect(history).to_contain_text(
                 Locale.RUN_OUTCOME_SNAPSHOT_SAVED
@@ -941,7 +942,7 @@ def capture_completed_researcher_card(
                 raise RuntimeError("Playwright captured an empty researcher card")
             assert browser_errors == []
             _operator_log(
-                "Playwright confirmed the completed attempt and captured its researcher card"
+                "Playwright confirmed the completed run and captured its researcher card"
             )
             return card_text
         finally:
@@ -1040,31 +1041,31 @@ def _validate_workflow_http_records(
         assert record.request_body is not None
         validations[record.record_id] = record
         body = json.loads(record.request_body)
-        embedded = body[VALIDATION_BODY_COMMIT_REQUEST_RECORD_KEY]
-        commit = HttpRequestLogRecord.model_validate(
-            embedded[VALIDATION_COMMIT_SELF_HTTP_RECORD_KEY], strict=False,
-        )
-        providers = tuple(
-            HttpRequestLogRecord.model_validate(value, strict=False)
-            for value in body[VALIDATION_BODY_OPENALEX_ROR_RECORDS_KEY]
-        )
-        references: tuple[HttpRequestLogRecord, ...] = (
-            commit,
-            HttpRequestLogRecord.model_validate(
-                embedded[VALIDATION_COMMIT_PULL_RESPONSE_RECORD_KEY], strict=False,
-            ),
-            HttpRequestLogRecord.model_validate(
-                embedded[VALIDATION_COMMIT_PUSH_RESPONSE_RECORD_KEY], strict=False,
-            ),
-            *providers,
-        )
-        if body[VALIDATION_BODY_INITIAL_VALIDATION_REQUEST_RECORD_KEY] is not None:
-            references += (HttpRequestLogRecord.model_validate(
-                body[VALIDATION_BODY_INITIAL_VALIDATION_REQUEST_RECORD_KEY], strict=False,
-            ),)
+        commit_id = UUID(body["commit_request_record_id"])
+        assert commit_id in by_id, commit_id
+        commit = by_id[commit_id]
+        assert (commit.method, commit.path) == (HTTP_POST_METHOD, COMMIT_PATH)
+        assert commit.request_body is not None
+        commit_body = _CommitRequestBodyJson.model_validate_json(commit.request_body)
+        push_id = commit_body.push_record_id
+        assert push_id in by_id, push_id
+        push = by_id[push_id]
+        assert (push.method, push.path) == (HTTP_POST_METHOD, PUSH_PATH)
+        pull_id = commit_body.pull_record_id
+        assert pull_id in by_id, pull_id
+        pull = by_id[pull_id]
+        assert (pull.method, pull.path) == (HTTP_GET_METHOD, PULL_PATH)
+        provider_ids_in_body = tuple(UUID(value) for value in body["openalex_ror_records_ids"])
+        assert all(record_id in by_id for record_id in provider_ids_in_body)
+        providers = tuple(by_id[record_id] for record_id in provider_ids_in_body)
+        references = (commit, pull, push, *providers)
+        initial_id = body["initial_validation_request_record_id"]
+        if initial_id is not None:
+            assert UUID(initial_id) in by_id
+            initial_record = by_id[UUID(initial_id)]
+            assert (initial_record.method, initial_record.path) == (HTTP_POST_METHOD, VALIDATE_PATH)
+            references += (by_id[UUID(initial_id)],)
         for linked in references:
-            assert linked.record_id in by_id, linked.record_id
-            assert linked.model_dump() == by_id[linked.record_id].model_dump(), linked.record_id
             assert ordinal[linked.record_id] < ordinal[record.record_id], linked.record_id
         for provider in providers:
             parent, _, identifier = provider.path.rpartition("/")
@@ -1126,35 +1127,39 @@ def validate_workflow_artifacts(
     for record in records:
         if (record.method, record.path) != (HTTP_POST_METHOD, COMMIT_PATH):
             continue
+        assert record.request_body is not None
+        body = _CommitRequestBodyJson.model_validate_json(record.request_body)
+        pull = PullResponseRecord.from_http_request_log_record(
+            http_request_log_record=records_by_id[body.pull_record_id],
+        )
+        push = PushResponseRecord.from_http_request_log_record(
+            http_request_log_record=records_by_id[body.push_record_id],
+            pull_response_record=pull,
+        )
+        refs: dict[UUID, PullResponseRecord | PushResponseRecord] = {
+            pull.record_id: pull, push.record_id: push,
+        }
         commit_request_record = BackendCommitRequestRecord.from_http_request_log_record(
             record,
-            resolve_http_record=records_by_id.__getitem__,
+            resolve_http_record=refs.__getitem__,
         )
         with operator_runtime.backend_store._read_only(runtime) as backend_store:
             row = backend_store._execute(
-                f"SELECT {backend_api.AUTHORITATIVE_ATTEMPT_PAYLOAD_COLUMN} "
-                f"FROM {backend_api.AUTHORITATIVE_ATTEMPTS_TABLE} "
-                f"WHERE {AUTHORITATIVE_ATTEMPT_COMMIT_REQUEST_RECORD_ID_COLUMN} = ?",
+                f"SELECT {backend_api.VALIDATION_REQUEST_RECORD_ID_COLUMN} "
+                f"FROM {backend_api.COMMIT_VALIDATION_REQUEST_RECORD_INDEX_TABLE} "
+                f"WHERE {COMMIT_REQUEST_RECORD_ID_COLUMN} = ?",
                 [str(record.record_id)],
             ).fetchone()
             if row is not None:
-                attempt_payload = json.loads(str(row[0]))
-                assert set(attempt_payload) == {AUTHORITATIVE_ATTEMPT_VALIDATION_ID_KEY}
-                attempt_record = validations[
-                    UUID(attempt_payload[AUTHORITATIVE_ATTEMPT_VALIDATION_ID_KEY])
-                ]
-                assert attempt_record.request_headers == record.request_headers
-                assert attempt_record.request_body is not None
-                attempt_body = json.loads(attempt_record.request_body)
-                assert HttpRequestLogRecord.model_validate(
-                    attempt_body[VALIDATION_BODY_COMMIT_REQUEST_RECORD_KEY][
-                        VALIDATION_COMMIT_SELF_HTTP_RECORD_KEY
-                    ], strict=False,
-                ) == record
+                validation_request_record = validations[UUID(str(row[0]))]
+                assert validation_request_record.request_headers == record.request_headers
+                assert validation_request_record.request_body is not None
+                validation_request_body = json.loads(validation_request_record.request_body)
+                assert UUID(validation_request_body["commit_request_record_id"]) == record.record_id
         if row is not None:
             if (
                 PostCommitValidation.model_validate(
-                    attempt_body[VALIDATION_BODY_POST_COMMIT_VALIDATION_KEY], strict=False,
+                    validation_request_body["post_commit_validation"], strict=False,
                 ).result
                 is BackendLifecycle.ACCEPTED
             ):
@@ -1242,18 +1247,10 @@ def validate_workflow_artifacts(
     validation = validations[run_outcome_snapshot.validation_record_id]
     assert validation.request_body is not None
     validation_body = json.loads(validation.request_body)
-    embedded_commit = HttpRequestLogRecord.model_validate(
-        validation_body[VALIDATION_BODY_COMMIT_REQUEST_RECORD_KEY][
-            VALIDATION_COMMIT_SELF_HTTP_RECORD_KEY
-        ], strict=False,
-    )
-    assert all(
-        getattr(embedded_commit, field) == getattr(commit_request_record, field)
-        for field in HttpRequestLogRecord.model_fields
-    )
+    assert UUID(validation_body["commit_request_record_id"]) == commit_request_record.record_id
     assert (
         PostCommitValidation.model_validate(
-            validation_body[VALIDATION_BODY_POST_COMMIT_VALIDATION_KEY], strict=False,
+            validation_body["post_commit_validation"], strict=False,
         ).result
         is BackendLifecycle.ACCEPTED
     )
@@ -1299,12 +1296,14 @@ def validate_workflow_artifacts(
         )
     if card_text is not None:
         expected_html = prepare_content(
-            validated_run_outcome.model_dump_json(), extras="fenced-code-blocks tables",
+            validated_run_outcome.response_body, extras="fenced-code-blocks tables",
         )
         expected_text = fromstring(expected_html).text_content().strip()
-        metadata_position = card_text.index(KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_RECORD_COL)
-        outcome_position = card_text.index(expected_text)
-        assert metadata_position < outcome_position
+        last_name_position = card_text.index(KTP_LAST_NAME_COL)
+        outcome_position = card_text.index(KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL)
+        metadata_position = card_text.index(KTP_AI_AUGMENT_SESSION_METADATA_COL)
+        assert last_name_position < outcome_position < metadata_position
+        assert expected_text in card_text
     _operator_log("full operator workflow contract validated")
 
 

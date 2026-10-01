@@ -584,6 +584,9 @@ def backend_startup_process() -> None:
     import sys
 
     from src.detours.detour_ai_augment.protected.src.backend import api
+    from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
+        AUTHORITATIVE_RECORDS_TABLE,
+    )
     from src.detours.detour_ai_augment.src.backend import server
 
     args = server.parse_args(sys.argv[1:])
@@ -614,7 +617,9 @@ def backend_startup_process() -> None:
                 if isinstance(capability, store_models.AiAugmentQueryBackendStore)
                 else capability
             )
-            rows = store._execute("SELECT count(*) FROM detour_http_records").fetchone()
+            rows = store._execute(
+                f"SELECT count(*) FROM {AUTHORITATIVE_RECORDS_TABLE}"
+            ).fetchone()
             assert rows is not None
             print("STARTUP_READY", rows[0], len(store.ai_augment_singular_outerdicts()))
     finally:
@@ -700,6 +705,9 @@ def completed_query_fixture_process() -> None:
         SYNTHETIC_COMMIT_SCHEME,
         ContentType,
     )
+    from src.detours.detour_ai_augment.protected.tests.fixtures.pytest_fixtures import (
+        STARTUP_NAMEKEY,
+    )
     from src.detours.detour_ai_augment.protected.tests.pytest_plugin import threaded_loop_runner
     from src.detours.detour_ai_augment.src.backend import server
     from src.detours.detour_ai_augment.src.backend.helpers.data_models.commit_request import (
@@ -745,7 +753,6 @@ def completed_query_fixture_process() -> None:
         report_for_rollout,
         valid_submission_body,
     )
-    from src.detours.detour_ai_augment.tests.control_centre.test_ui import STARTUP_NAMEKEY
     from src.helpers.duckdb_utils import duckdb_quote_identifier as quote
     from src.helpers.schema import DOCX_INNERDICT_TABLE, XLSX_INNERDICT_TABLE
     from src.helpers.vars import (
@@ -942,9 +949,9 @@ def completed_query_fixture_process() -> None:
     assert len(filtered.researcher_var_views) == 1
     row = filtered.researcher_var_views[0]
     assert row.researcher.namekey == STARTUP_NAMEKEY
-    assert row.latest_run_commit_var_view.lifecycle is RunLifecycle.COMPLETED
-    assert row.latest_run_commit_var_view.action is ui._RunAction.RERUN
-    assert row.latest_run_commit_var_view.commit_request_record_id is None
+    assert row.current_researcher_var_row_view.lifecycle is RunLifecycle.COMPLETED
+    assert row.current_researcher_var_row_view.action is ui._RunAction.RERUN
+    assert row.current_researcher_var_row_view.commit_request_record_id is None
     print(f"Completed-query fixture: real 307-to-1 filter passed in "
           f"{time.monotonic() - started:.3f}s", flush=True)
     (config_path.parent / "completed-query.json").write_text(json.dumps({
