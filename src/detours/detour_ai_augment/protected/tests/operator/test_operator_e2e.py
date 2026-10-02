@@ -23,8 +23,6 @@ from uuid import UUID
 import psutil
 import pytest
 from fastapi import status
-from lxml.html import fromstring
-from nicegui.elements.markdown import prepare_content
 from playwright.sync_api import Locator, Page, ViewportSize, expect, sync_playwright
 from pydantic import BaseModel, ConfigDict, field_validator
 
@@ -893,7 +891,7 @@ def capture_completed_researcher_card(
     *,
     namekey: NameKey,
     queued_at_monotonic: float,
-) -> str:
+) -> tuple[str, str]:
     _operator_log("opening the completed workflow in Playwright")
     with sync_playwright() as playwright:
         browser = None
@@ -940,11 +938,19 @@ def capture_completed_researcher_card(
             card_text = card.inner_text().strip()
             if not card_text:
                 raise RuntimeError("Playwright captured an empty researcher card")
+            outcome_label = card.locator("strong > code").filter(
+                has_text=KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL
+            )
+            expect(outcome_label).to_have_count(1)
+            expect(outcome_label).to_have_text(KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL)
+            outcome_value = outcome_label.locator("xpath=../following-sibling::code")
+            expect(outcome_value).to_have_count(1)
+            browser_run_outcome_response_body = outcome_value.inner_text()
             assert browser_errors == []
             _operator_log(
                 "Playwright confirmed the completed run and captured its researcher card"
             )
-            return card_text
+            return card_text, browser_run_outcome_response_body
         finally:
             if browser is not None:
                 browser.close()
@@ -1097,6 +1103,7 @@ def validate_workflow_artifacts(
     namekey: NameKey,
     expected_run_outcome_path: RunOutcomePath | None = None,
     card_text: str | None = None,
+    browser_run_outcome_response_body: str | None = None,
 ) -> None:
     _operator_log("validating authoritative workflow artifacts")
     assert not operator_runtime.dashboard_socket_path.exists()
@@ -1289,15 +1296,12 @@ def validate_workflow_artifacts(
             PurePosixPath(run_outcome_filename),
         )
     if card_text is not None:
-        expected_html = prepare_content(
-            validated_run_outcome.response_body, extras="fenced-code-blocks tables",
-        )
-        expected_text = fromstring(expected_html).text_content().strip()
         last_name_position = card_text.index(KTP_LAST_NAME_COL)
         outcome_position = card_text.index(KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL)
         metadata_position = card_text.index(KTP_AI_AUGMENT_SESSION_METADATA_COL)
         assert last_name_position < outcome_position < metadata_position
-        assert expected_text in card_text
+        assert browser_run_outcome_response_body is not None
+        assert browser_run_outcome_response_body == validated_run_outcome.response_body
     _operator_log("full operator workflow contract validated")
 
 
@@ -1333,7 +1337,7 @@ def assert_completed_dashboard_backend_codex_workflow_renders_researcher_card(
             dashboard,
             namekey,
         )
-        card_text = capture_completed_researcher_card(
+        card_text, browser_run_outcome_response_body = capture_completed_researcher_card(
             dashboard,
             operator_runtime,
             namekey=namekey,
@@ -1346,6 +1350,7 @@ def assert_completed_dashboard_backend_codex_workflow_renders_researcher_card(
         namekey=namekey,
         expected_run_outcome_path=run_outcome_models.COMPLETED_PATH,
         card_text=card_text,
+        browser_run_outcome_response_body=browser_run_outcome_response_body,
     )
     emit_researcher_card(card_text)
     _operator_log(

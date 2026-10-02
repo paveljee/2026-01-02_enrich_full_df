@@ -262,15 +262,18 @@ def test_completed_grid_row_uses_real_query_ipc(
                 assert errors == []
             finally:
                 browser.close()
-        card_text = operator.capture_completed_researcher_card(
-            dashboard, runtime, namekey=STARTUP_NAMEKEY,
-            queued_at_monotonic=time.monotonic(),
+        card_text, browser_run_outcome_response_body = (
+            operator.capture_completed_researcher_card(
+                dashboard, runtime, namekey=STARTUP_NAMEKEY,
+                queued_at_monotonic=time.monotonic(),
+            )
         )
         (files.config.parent / "card-rendered.txt").write_text(card_text, encoding="utf-8")
         operator.validate_workflow_artifacts(
             runtime, namekey=STARTUP_NAMEKEY,
             expected_run_outcome_path=RunLifecycle.COMPLETED.to_run_outcome_path(),
             card_text=card_text,
+            browser_run_outcome_response_body=browser_run_outcome_response_body,
         )
     assert hashlib.sha256(files.source.read_bytes()).hexdigest() == source_before
     assert files.replay.read_bytes() == log_before
