@@ -23,16 +23,64 @@ from src.detours.detour_ai_augment.protected.tests.fixtures.pytest_fixtures impo
 )
 from src.detours.detour_ai_augment.src.backend import server
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_backend_store import (  # noqa: E501
+    AiAugmentBackendStore,
     initialize_backend_store,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_context import (  # noqa: E501
+    AiAugmentBackendContext,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_http_request_log_record import (  # noqa: E501
     ResponseRecord,
 )
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.lifecycle import (
+    BackendLifecycle,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.model_http_interceptor import (  # noqa: E501
+    ReplayInputMissing,
+)
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.pull_event import (
     PullResponseRecord,
 )
-from src.detours.detour_ai_augment.tests.backend.test_api import persisted_http_record
+from src.detours.detour_ai_augment.tests.backend import test_http_interceptor as store_tests
+from src.detours.detour_ai_augment.tests.backend.test_api import (
+    persisted_http_record,
+    valid_submission_body,
+)
 from src.helpers.data_models.http_request_log import HttpRequestLogRecord
+
+backend_test_paths = store_tests.backend_test_paths
+runtime = store_tests.runtime
+backend_store = store_tests.backend_store
+commit = store_tests.commit
+
+
+def test_second_same_session_acceptance_fails_loudly(
+    backend_store: AiAugmentBackendStore,
+    runtime: AiAugmentBackendContext,
+) -> None:
+    """Synthetic second same-session acceptance bypasses the API lifecycle and collides with unique session metadata before outcome-link assertions"""  # noqa: E501
+    payload = valid_submission_body()
+    with pytest.raises(RuntimeError, match="Backend Store failed"), (
+        backend_store._writable(runtime)
+    ):
+        first = backend_store._validate_commit(
+            commit(backend_store, payload, payload)
+        )
+        assert (
+            first.validation_request_body.post_commit_validation.result
+            is BackendLifecycle.ACCEPTED
+        )
+        second_commit_id = commit(
+            backend_store, payload, payload,
+            rollout_suffix=(
+                b'{"type":"event_msg","timestamp":"2026-09-03T15:17:00Z",'
+                b'"payload":{"type":"task_complete"}}\n'
+            ),
+        )
+        with pytest.raises(
+            ReplayInputMissing, match=Locale.ACCEPTED_IDENTITY_DUPLICATE
+        ):
+            backend_store._validate_commit(second_commit_id)
 
 
 def test_resume_after_committed_row_and_postcommit_failure(

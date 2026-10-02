@@ -144,7 +144,7 @@ class BackendComponent(
             Consumed by Backend Store's retry cycle. `None` otherwise.
 
             An illustrative chaining of Backend Store's
-            `current_response_record` value transitions:
+            `current_replayed_record` value transitions:
 
                 initial pull, push, commit
                 → initial validation (V0)
@@ -531,7 +531,7 @@ class AgentRuntimeComponent(
 
         #     Do not delete.
             
-        #     Wraps BackendValidationRecord, a.k.a (on the Agent
+        #     Wraps BackendValidationRequestRecord, a.k.a (on the Agent
         #     Runtime's port) Attempt, in order to expose additional
         #     properties that are helpful on the Backend end's of
         #     the Agent Runtime - Backend connector for the purpose
@@ -641,6 +641,11 @@ class ControlCentreComponent(
 
         @property
         def session_id(self) -> UUID | None: ...
+
+        @property
+        def completed_attempt_id(self) -> UUID | None:
+            """Final /pull ETag, present only for a completed Run."""
+            ...
 
         @property
         def remote_pid(self) -> int | None: ...

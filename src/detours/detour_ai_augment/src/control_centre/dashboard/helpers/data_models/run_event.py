@@ -57,6 +57,7 @@ class Run(BaseModel):
     namekey: NameKey
     lifecycle: RunLifecycle
     session_id: UUID | None = None
+    completed_attempt_id: UUID | None = None
     remote_pid: int | None = Field(default=None, gt=0)
     events: tuple[RunEvent, ...] = ()
     run_outcome_response_record: RunOutcomeResponseRecord | None = None

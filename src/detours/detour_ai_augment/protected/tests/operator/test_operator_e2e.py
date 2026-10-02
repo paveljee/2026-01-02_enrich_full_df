@@ -827,22 +827,22 @@ def wait_for_completed_grid_row(
         )
         if current_status != previous_status:
             _operator_log(
-                f"Control Centre run/commit history reports workflow status {current_status!r}"
+                f"Control Centre Runs and outcomes panel reports workflow status {current_status!r}"
             )
             previous_status = current_status
         action_text = (execute.text_content() or "").strip()
         card_enabled = view_card.is_enabled()
-        commit_request_record_id = run_outcome_savedness = session_status = ""
+        completed_attempt_id = run_outcome_savedness = session_status = ""
         if history_count:
             cells = history_rows.nth(history_count - 1).locator("td")
-            commit_request_record_id = cells.nth(2).inner_text().strip()
+            completed_attempt_id = cells.nth(2).inner_text().strip()
             run_outcome_savedness = cells.nth(3).inner_text().strip()
             session_status = cells.nth(4).inner_text().strip()
         observation = (
             f"status={current_status!r}; action={action_text!r}; "
             f"view_card_enabled={card_enabled}; "
             f"queried_after_completion={queried_after_completion}; "
-            f"commit_present={bool(commit_request_record_id)}; "
+            f"completed_attempt_present={bool(completed_attempt_id)}; "
             f"savedness={run_outcome_savedness!r}; "
             f"session_status={session_status!r}"
         )
@@ -856,8 +856,8 @@ def wait_for_completed_grid_row(
                 query_snapshot_in_browser(page, runtime, dashboard)
                 queried_after_completion = True
                 continue
-            if not commit_request_record_id:
-                raise RuntimeError("completed Control Centre history has no commit record ID")
+            if not completed_attempt_id:
+                raise RuntimeError(Locale.RUN_OUTCOME_COMPLETED_ATTEMPT_ID_MISSING)
             if run_outcome_savedness == Locale.RUN_OUTCOME_SNAPSHOT_SAVED:
                 if session_status != Locale.SESSION_STATUS_OK:
                     raise RuntimeError(
@@ -865,7 +865,7 @@ def wait_for_completed_grid_row(
                         f"session status: {session_status!r}"
                     )
                 _operator_log("Control Centre projected the completed post-Codex run")
-                return row, commit_request_record_id
+                return row, completed_attempt_id
         if current_status in {
             RunLifecycle.FAILED.value,
             RunLifecycle.CANCELLED.value,
@@ -913,7 +913,7 @@ def capture_completed_researcher_card(
             page.on("pageerror", lambda error: browser_errors.append(str(error)))
             page.goto(CONTROL_CENTRE_URL, wait_until="networkidle")
             page.get_by_label(Locale.SEARCH_FILTER).fill(namekey.to_json_key())
-            _row, commit_request_record_id = wait_for_completed_grid_row(
+            _row, completed_attempt_id = wait_for_completed_grid_row(
                 page,
                 dashboard,
                 runtime,
@@ -922,7 +922,7 @@ def capture_completed_researcher_card(
             history = page.get_by_test_id(control_ui.RUN_OUTCOME_HISTORY_TABLE_TEST_ID)
             expect(history).to_be_visible()
             expect(history.locator(RUN_OUTCOME_HISTORY_ROW_SELECTOR)).not_to_have_count(0)
-            expect(history).to_contain_text(commit_request_record_id)
+            expect(history).to_contain_text(completed_attempt_id)
             expect(history).to_contain_text(
                 Locale.RUN_OUTCOME_SNAPSHOT_SAVED
             )
@@ -935,7 +935,7 @@ def capture_completed_researcher_card(
             expect(view_card).to_be_enabled()
             view_card.click()
             card = page.get_by_test_id(control_ui.CARD_MARKDOWN_TEST_ID)
-            expect(card).to_contain_text(commit_request_record_id)
+            expect(card).to_contain_text(completed_attempt_id)
             expect(page.get_by_test_id(control_ui.DOWNLOAD_CARD_DOCX_TEST_ID)).to_be_enabled()
             card_text = card.inner_text().strip()
             if not card_text:
@@ -1228,18 +1228,12 @@ def validate_workflow_artifacts(
         run_outcome_record
     )
     run_outcome_snapshot = validated_run_outcome._body()
-    outcome_ordinal = _record_ordinal(records, run_outcome_record.record_id)
-    preceding_records = records[:outcome_ordinal]
-    latest_pull = next(
-        record for record in reversed(preceding_records)
-        if (record.method, record.path) == (HTTP_GET_METHOD, PULL_PATH)
+    assert run_outcome_snapshot.pull_record_id == (
+        commit_request_body.pull_response_record.record_id
     )
-    latest_push = next(
-        record for record in reversed(preceding_records)
-        if (record.method, record.path) == (HTTP_POST_METHOD, PUSH_PATH)
+    assert run_outcome_snapshot.push_record_id == (
+        commit_request_body.push_response_record.record_id
     )
-    assert run_outcome_snapshot.pull_record_id == latest_pull.record_id
-    assert run_outcome_snapshot.push_record_id == latest_push.record_id
     assert run_outcome_snapshot.commit_request_record_id == commit_request_record.record_id
     assert run_outcome_snapshot.run_outcome_record_id == run_outcome_record.record_id
     assert run_outcome_snapshot.validation_record_id is not None

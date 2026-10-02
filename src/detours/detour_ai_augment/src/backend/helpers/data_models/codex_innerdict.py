@@ -16,7 +16,9 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import L
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     CODEX_SESSION_ID_JSON_KEY,
     KTP_AI_AUGMENT_SESSION_METADATA_COL,
+    SOURCE_KEY_HEADER,
 )
+from src.detours.detour_ai_augment.src.shared import source_key_from_header_value
 from src.helpers.architecture import FrozenStrictModel, implements
 from src.helpers.data_models import (
     HttpRequestLogRecord,
@@ -24,6 +26,8 @@ from src.helpers.data_models import (
     NameKey,
 )
 from src.helpers.vars import (
+    KTP_FILENAME_COL,
+    KTP_FRAGMENT_COL,
     KTP_NAMEKEY_COL,
 )
 
@@ -209,6 +213,16 @@ class CodexInnerDict(FrozenStrictModel):
             self._required_text(KTP_AI_AUGMENT_SESSION_METADATA_COL)
         )
         if UUID(summary[CODEX_SESSION_ID_JSON_KEY]) != session_id:
+            raise ValueError(Locale.INNERDICT_OUTCOME_MISMATCH)
+        if outcome.response_headers is None:
+            raise ValueError(Locale.INNERDICT_OUTCOME_MISMATCH)
+        filename, fragment = source_key_from_header_value(
+            outcome.response_headers.get(SOURCE_KEY_HEADER)
+        )
+        if (
+            self.innerdict.data.get(KTP_FILENAME_COL) != filename
+            or self.innerdict.data.get(KTP_FRAGMENT_COL) != fragment
+        ):
             raise ValueError(Locale.INNERDICT_OUTCOME_MISMATCH)
         return self
 

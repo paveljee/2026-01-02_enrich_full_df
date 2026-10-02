@@ -1,11 +1,410 @@
-# AI augment production — current workbook (2026-10-01)
+# AI augment production — current workbook (2026-10-02)
+
+## Approved follow-up, implemented and locally verified (2026-10-02)
+
+1. **Integration-test docstring.** The test arose from the stale fixture that fabricated two accepted commits for one session. It now proves a real rejected→accepted retry can have two validation-request IDs and one queryable outcome. Its final assertion is narrower than its name suggests: it rejects **two dashboard Runs claiming the same session** after a second, 409 run-outcome record is logged; that second record is not in the query snapshot. I propose:
+
+   ```python
+   """Cover the same-session case lost with the stale two-accepted-commits fixture.
+
+   A real Store retry creates two validation requests but one queryable
+   completed outcome, linked to its Run by the final attempt ID. A second
+   Run claiming that session, after a rejected outcome is logged, must
+   fail the dashboard's duplicate-session check.
+   """
+   ```
+
+2. **Retry-pull literals.** In [test_http_interceptor.py](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/tests/backend/test_http_interceptor.py:965), `HTTP_GET_METHOD`, `PULL_PATH`, and `HTTP_CONTENT_TYPE_HEADER` already exist in backend vars. The focused edit would be:
+
+   ```python
+   method=HTTP_GET_METHOD,
+   path=PULL_PATH,
+   response_code=HTTPStatus.OK,
+   response_headers={HTTP_CONTENT_TYPE_HEADER: ContentType.MARKDOWN_UTF8},
+   ```
+
+   The protected integration test already uses the first two globals but still has a literal header key. `HTTP_CONTENT_TYPE_HEADER` is title-cased; Store’s content-type check is case-insensitive. I found no established newline global, so I would leave `"\n"` alone.
+
+6. **Test names.** I agree both are misleading. For [test_ui.py](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/tests/control_centre/test_ui.py:2705), I propose `test_control_centre_run_history_keeps_failed_cancelled_and_completed_runs_distinct`. For the test at [line 2799](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/tests/control_centre/test_ui.py:2799), I propose `test_researcher_card_uses_linked_run_outcome_response_bodies_for_distinct_sessions`.
+
+For **5**, keep `row_id=None` and `completed_attempt_id=None` on the no-history placeholder. Fix only the fake’s actual completed history row by giving it a stable, distinct synthetic attempt ID:
+
+```python
+# BrowserController.__init__
+self._completed_attempt_id_by_run_id: dict[UUID, UUID] = {}
+
+# Beside the pre-seeded completed Run setup
+self._completed_attempt_id_by_run_id[completed_run_id] = uuid7()
+
+# BrowserController._researcher_var_row_view
+completed_attempt_id=self._completed_attempt_id_by_run_id.get(run_id),
+```
+
+Queued and cancelled fake Runs still show no completed attempt. The pre-seeded completed Run shows the same UUID across snapshots. This also addresses an existing browser assertion that currently expects a UUID in that history cell while the fake supplies `None` ([test_ui_e2e.py](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/tests/control_centre/test_ui_e2e.py:962)). The synthetic ID is only for this browser-layout fake; it does not claim to test the real ETag handoff.
+
+Items 1, 2, 5, and 6 are operator-approved exactly as written and now applied to test source. The operator accepted explanations 3 and 4; no code change was requested for them. Focused affected selection passed **7/7** (`tmp/ai-augment-completed-attempt-20261002/approved-followup-focused.xml`); Ruff on the four affected test files, detour mypy (64 source files), and unstaged `git diff --check` passed. An in-process check of `BrowserController` confirmed the pre-seeded completed history row has the same UUIDv7 across snapshots and the no-history placeholder retains both `None` fields. The browser/Playwright case itself was not run on this Linux host; the completed-attempt-ID cell that was blank in the fake now receives the approved synthetic ID. The earlier 935-node whole-suite totals below predate these test-only edits and are not claimed as a post-edit full rerun.
+
+## Approved replacement for stale dashboard history test — implemented and verified
+
+Replace `tests/control_centre/test_ui.py::test_multiple_commits_for_same_session_remain_distinct_display_rows` surgically with one test of **three terminal dashboard Runs for the same NameKey, with three distinct session IDs**: one failed, one cancelled, one completed. Only the completed Run has one valid CodexInnerDict and one linked completed RunOutcomeResponseRecord from the query snapshot; its card `ktp.filename` and `ktp.fragment` come from that outcome's SourceKey, and its session metadata matches its session ID. Construct Runs through existing `queued_run`/`apply_run_event` and existing typed models, without a new helper or fabricated second completed output. Assert exactly one upper-grid row for this researcher/variable, selecting the latest completed Run; assert exactly three lower-history rows with distinct Run IDs and their respective failed/cancelled/completed statuses, with no duplicate row IDs. Preserve the test's frozen-view assertion if still applicable. The operator accepted this replacement shape.
+
+**Approved operator correction:** The earlier proposal also said to assert/display a completed commit-request ID. That aspect is **withdrawn**: dashboard identity and linkage must use the validation-request UUID (`AgentRuntimeAttempt.record_id`) carried by the final `/pull` ETag and `/completed` request/response, not any commit ID. The exact ETag-to-Run/query contour below is approved for implementation. Do not implement this test replacement using the superseded commit-ID assertion.
+
+### Separate protected dashboard integration test — implemented; focused test passed
+
+The new `src/detours/detour_ai_augment/protected/tests/control_centre/test_ui_integration.py` test establishes both sides of the session cardinality rule using a real Store/replay/query contour and typed Run/attempt/outcome/query objects: **multiple RunOutcomeResponseRecords for the same session ID fail**, while **multiple distinct validation-request-record IDs (`AgentRuntimeAttempt.record_id`) within that same session do not themselves cause failure**. The allowed case has a rejected retry attempt and one final accepted attempt for one Run and one completed RunOutcomeResponseRecord; the view accepts it and matches by final validation UUID. A second rejected run-outcome response for the same session, attached to a second Run, triggers the explicit cardinality failure. No second accepted CodexInnerDict with duplicate session metadata, commit-ID substitution, or retry history row was fabricated. This test is distinct from the approved three-Run replacement above. Both focused tests passed on 2026-10-02.
+
+**ETag-link audit:** Dashboard `_finalize_run` takes the 410 `/pull` ETag UUID, `RunOutcomeRequestRecord.outbound_http` sends it on `/completed`, and Store `_run_outcome_identity_error` requires it match the current validation UUID. Store's outcome body and typed `attempt` are checked against that UUID during replay/readback. But `_BackendDatabaseClient.record_run_outcome` returns only HTTP status after parsing the body; `_record_run_outcome` does not retain/verify its linked UUID and treats 400/409 as recorded before the Run terminal event. Later `_ResearcherView.from_snapshot` associates the query-derived outcome/final attempt to a Run by session ID, not by the sent ETag UUID. `Run.run_outcome_response_record` is never populated by dashboard source. The operator approved the surgical link below, not a broader failure-policy rewrite.
+
+**Approved hard-grep correction:** `dashboard_query_snapshot.py` keys completed query objects by commit ID; `ui.py` uses that key and the commit-derived session to join Runs, sets row IDs/timestamps from commits, and displays commit IDs in both tables. Replace those dashboard uses with a persisted per-Run final attempt UUID from the 410 ETag, query outcome's typed `attempt.record_id`, and Run/outcome row identity. `run_outcome_event.py` also mentions commit IDs because its response body is the backend's shared authoritative codec; those provenance checks are not dashboard selection/display logic and must not be silently deleted. The unused `JOURNAL_COMMIT_REQUEST_RECORD_ID_MISSING` locale and dashboard-only commit column global can go after UI references are removed. Preserve the existing 400/409/500 outcome-status policy; verify a successful response's validation UUID against the Run's saved attempt ID.
+
+### Exact approved production contour — implemented and verified locally
+
+The operator approves the targeted architecture edit, naming the Run property **`completed_attempt_id`** with corresponding `UUID | None` type (superseding `attempt_id` and the earlier `validation_request_record_id`). This property is filled only for a completed Run from its final `/pull` ETag; add that short docstring in `RunProperty`. In `protected/src/architecture.py::ControlCentreComponent.RunProperty` and concrete `src/control_centre/dashboard/helpers/data_models/run_event.py::Run`:
+
+```python
+# RunProperty
+@property
+def completed_attempt_id(self) -> UUID | None:
+    """Final /pull ETag, present only for a completed Run."""
+    ...
+
+# Run
+completed_attempt_id: UUID | None = None
+```
+
+Persist the 410 ETag on the same Run before `/completed`; do not use `RunEvent.detail`, fabricate a RunOutcomeResponseRecord from a partial HTTP response, or add a fallback. The previously shown code shape, with the approved name, is:
+
+```python
+run.completed_attempt_id = validation_record_id
+self._storage.save_runs(tuple(self._runs.values()))
+
+# Query reconciliation
+matched_run = runs_by_completed_attempt_id.get(outcome.attempt.record_id)
+```
+
+In `dashboard_query_snapshot.py`, remove commit-keyed `committed_by_id` and commit-derived query joins/checks. Validate/index only the final outcome-linked `attempt.record_id`; allow multiple retry-attempt IDs inside one outcome's typed graph, but reject multiple run outcomes for one session. In `ui.py`, replace the commit-keyed lookup and session-based Run join with `Run.completed_attempt_id == outcome.attempt.record_id`; session/namekey remain cross-checks. The lower table stays one row per Run or query-only outcome, not per retry attempt. Use `run.run_id` for matched Run row identity, `outcome.record_id` for query-only outcome identity, Run event/outcome time instead of commit UUID time, and a completed-attempt-ID column in place of the commit-ID column in both tables. Do not add/change card data for display. Keep shared backend response-codec commit provenance fields/checks unchanged. `_BackendDatabaseClient.record_run_outcome` must retain the parsed response validation UUID; on successful `/completed`, verify it equals the Run's saved `completed_attempt_id`. Do not silently alter current 400/409/500 handling.
+
+Surgically adapted affected UI/operator assertions and implemented the approved three-Run replacement and separate protected integration test above; backend replay/commit provenance tests are preserved. The new integration and replacement tests passed **2/2**; the related outcome-client, lifecycle, card, and completed-query fixture selection passed **10/10**. Fresh full local verification completed on 2026-10-02: feasible detour **752 passed, 5 runtime-skipped, 4 deselected** (`tmp/ai-augment-completed-attempt-20261002/full-detour.xml`); repository-main **140 passed, 3 runtime-skipped, 4 deselected** (`full-main.xml`); optional other detours **12 passed, 3 deselected** (`full-optional.xml`); separately feasible browser-module subprocess fixture **1 passed** (`full-browser-fixture.xml`). Thus **935 collected**, **913 executed = 905 passed + 8 runtime-skipped**, and **22 not run** for the already-approved platform, data, sudo, real-API, operator, browser, and TASK exclusions. Per-test collection and JUnit evidence are in that same tmp directory; `not-run-nodes.txt` names all 22, with individual reasons in the final table below. Whole-source Ruff, detour mypy (**64 source files**), and unstaged `git diff --check` pass. No unexpected test failed. The Darwin/Lima/Chrome `pre-commit-operator` task remains for the human operator; do not claim it passed here.
+
+**Current dashboard contract:** The lower table has one view per dashboard Run or query-only completed outcome, not one per validation attempt. `_ResearcherView.from_snapshot` matches a query-derived final attempt to a Run by `completed_attempt_id` and adds unmatched Runs (including failed/cancelled). The upper grid selects the latest view per researcher/variable. The query payload transports every linked validation inside a completed `CodexInnerDict`, but exposing retries as separate history rows is **not** in the approved scope. The stale same-session test has been replaced as approved above.
+
+## Historical reference — earlier investigation and completed contours
+
+Material below preserves prior approved code shapes and failure analyses. Its dated test counts and any old “pending” or “current” status refer to earlier checkpoints; **the 2026-10-02 status above is authoritative for this implementation**. Do not treat an older proposal-only paragraph as active authorization or an earlier exclusion/failure as a current test result.
+
+### Earlier approved test correction and continuation
+Operator-approved three **test-only** edits are applied: a new Store-invariant test in `src/detours/detour_ai_augment/protected/tests/backend/test_backend_store_integration.py`; removed xfail and repaired `test_outcome_finalizes_only_linked_commit_once`; repaired `test_initial_validation_is_lifecycle_scoped_and_replays_explicit_links` in `src/detours/detour_ai_augment/tests/backend/test_http_interceptor.py`. The new test's docstring contains the former xfail reason verbatim. All three focused tests passed; the subsequent approved narrow correction for `test_failed_validation_projection_does_not_advance_store_validation_state[True]` also passed focused `[False]`/`[True]`. The approved dashboard fixture correction below is applied; focused `[410-completed]` and `[503-failed]` cases both passed. Affected-file Ruff and `git diff --check` pass. The subsequent continuation stopped at **another dashboard test failure**: `test_multiple_commits_for_same_session_remain_distinct_display_rows`, after **24 passed, 1 failed** in 7.44s (`tmp/ai-augment-card-verification-20261001/detour-after-ui-fixture-repair.xml/log`). Its two completed innerdicts for the same namekey/session use fabricated `commit-{index}.docx` filenames and omit `ktp.fragment`, while both outcome SourceKeys derive from the same session ID. `CodexInnerDict.validate_codex_innerdict()` rejects the first. More importantly, Store's unique `(namekey, session_metadata)` accepted-output constraint prohibits two completed innerdicts for that same namekey/session in real production. Dashboard `_ResearcherView.from_snapshot` builds rows from `snapshot.attempts_by_namekey`, but that property currently lists only the final `outcome.attempt` from each completed CodexInnerDict, not preceding retry validations. Thus the same-session two-row expectation is not merely a stale fixture field: it is not currently realizable from a production query snapshot without changing dashboard derivation or the intended display contract. No such production change is authorized here. The nearby `test_card_record_ids_match_each_commit_and_researcher_session` also constructs two same-session completed innerdicts and may share the stale premise; not run yet. **No code change after this new failure.** Exact JUnit node ID matching confirms **283 remaining feasible nodes** at `tmp/ai-augment-card-verification-20261001/remaining-after-same-session-stop.txt`; 22 operator-approved exclusions remain uninvoked. Current distinct tally: **934 collected; 629 invoked = 622 passed, 6 skipped, 1 failed; 305 not invoked**. Stop for operator review of intended dashboard coverage before modifying or rerunning this test. No production, architecture, legacy, restart, or unrelated test changes. The new protected test reuses existing test fixtures/helper by import; no fixture behavior was modified.
+
+### Approved dashboard fixture correction
+
+In `src/detours/detour_ai_augment/tests/control_centre/test_ui.py::test_backend_acceptance_remains_running_until_codex_exits[410-completed]`, derive the card SourceKey fields from the already-created outcome's `SOURCE_KEY_HEADER`, using the existing `source_key_from_header_value` from `src.detours.detour_ai_augment.src.shared`. Add only that and `KTP_FRAGMENT_COL` to the existing imports; place the following after `outcome = run_outcome_response_record(...)`, then add only the two shown fields to its `InnerDict.from_mapping` literal. Leave the other branch, controller assertions, production code, and all other tests unchanged.
+
+```python
+assert outcome.response_headers is not None
+filename, fragment = source_key_from_header_value(
+    outcome.response_headers[SOURCE_KEY_HEADER]
+)
+# Existing session_metadata construction remains here.
+innerdict=InnerDict.from_mapping(
+    {
+        KTP_NAMEKEY_COL: NAMEKEY.to_json_key(),
+        KTP_FILENAME_COL: filename,
+        KTP_FRAGMENT_COL: fragment,
+        # Existing remaining mapping entries unchanged.
+    },
+    _CodexInnerDictProcedure(),
+)
+```
+
+### Approved correction for the continuation failure
+
+In `src/detours/detour_ai_augment/tests/backend/test_http_interceptor.py::test_failed_validation_projection_does_not_advance_store_validation_state`, change only the `has_initial` setup. This is the operator-approved code shape, with `retry_pull = ...` denoting **existing code unchanged**:
+
+```python
+if has_initial:
+    store._validate_commit(commit(store, {}, payload))
+    initial = store.current_replayed_record
+    assert isinstance(initial, BackendValidationRequestRecord)
+    assert (
+        initial.validation_request_body.post_commit_validation.result
+        is BackendLifecycle.REJECTED
+    )
+    assert (
+        initial.validation_request_body.post_commit_validation.stage
+        is BackendLifecycle.PYDANTIC_VALIDATION
+    )
+    retry_pull = store._append_authoritative_record(...)  # existing code unchanged
+```
+
+The `[False]` branch, injection, cursor/DB assertions, and other tests remain unchanged. **Applied exactly**; focused `[False]` and `[True]` cases both passed in 11.35s. Historical continuation checkpoint: 386 previously unreached feasible nodes stopped after 76 passed, 1 skipped, 1 failed in 23.73s (`tmp/ai-augment-card-verification-20261001/detour-after-projection-test-repair.xml/log`). The failed `test_backend_acceptance_remains_running_until_codex_exits[410-completed]` fixture omitted the two outcome SourceKey columns; the operator approved and agent applied only the targeted fixture correction above. The two parameter cases passed focused verification before the next continuation.
+
+### Exact approved code contour
+
+1. New test in the protected backend Store integration module. Deliberately bypass API admission and assert the second accepted validation for the same session fails loudly; retain the preexisting extra rollout line so the commits have distinct fragments. Preserve this function body, adding only module-local imports/fixture exposure required by its new location and the verbatim docstring.
+
+```python
+def test_second_same_session_acceptance_fails_loudly(
+    backend_store: AiAugmentBackendStore,
+    runtime: AiAugmentBackendContext,
+) -> None:
+    """Synthetic second same-session acceptance bypasses the API lifecycle and collides with unique session metadata before outcome-link assertions"""  # noqa: E501
+    payload = valid_submission_body()
+    with pytest.raises(RuntimeError, match="Backend Store failed"), (
+        backend_store._writable(runtime)
+    ):
+        first = backend_store._validate_commit(
+            commit(backend_store, payload, payload)
+        )
+        assert (
+            first.validation_request_body.post_commit_validation.result
+            is BackendLifecycle.ACCEPTED
+        )
+        second_commit_id = commit(
+            backend_store, payload, payload,
+            rollout_suffix=(
+                b'{"type":"event_msg","timestamp":"2026-09-03T15:17:00Z",'
+                b'"payload":{"type":"task_complete"}}\n'
+            ),
+        )
+        with pytest.raises(
+            ReplayInputMissing, match=Locale.ACCEPTED_IDENTITY_DUPLICATE
+        ):
+            backend_store._validate_commit(second_commit_id)
+```
+
+2. Remove the xfail. In `test_outcome_finalizes_only_linked_commit_once`, replace only the two-accepted loop with a Pydantic-rejected first commit, a linked 200 retry pull, and one accepted second commit. Preserve the completed outcome, later failed outcome, query round-trip, and unchanged-card assertions; add explicit completion link/200 and failed-outcome/409 assertions. No new helper.
+
+```python
+first = store._validate_commit(commit(store, {}, payload))
+assert first.validation_request_body.post_commit_validation.result is BackendLifecycle.REJECTED
+assert first.validation_request_body.post_commit_validation.stage is BackendLifecycle.PYDANTIC_VALIDATION
+
+retry_pull = store._append_authoritative_record(persisted_http_record(
+    record_id=uuid7(), method="GET", path="/pull", response_code=HTTPStatus.OK,
+    response_headers={"content-type": ContentType.MARKDOWN_UTF8},
+    response_body=(
+        first.validation_request_body.post_commit_validation.detail
+        or Locale.VALIDATION_ERROR_DETAIL
+    ).rstrip() + "\n",
+))
+assert isinstance(retry_pull, PullResponseRecord)
+assert retry_pull.validation_request_record is first
+
+result = store._validate_commit(commit(store, payload, payload, retry_pull))
+assert result.validation_request_body.post_commit_validation.result is BackendLifecycle.ACCEPTED
+```
+
+3. In `test_initial_validation_is_lifecycle_scoped_and_replays_explicit_links`, change only the first commit to invalid input and assert retryable Pydantic rejection; keep its existing retry-pull, byref, distinct-root, snapshot, outcome, and rebuild assertions; assert second validation is accepted.
+
+```python
+first = store._validate_commit(
+    commit(store, {}, payload, session_id=session_id)
+)
+assert first.validation_request_body.post_commit_validation.result is BackendLifecycle.REJECTED
+assert first.validation_request_body.post_commit_validation.stage is BackendLifecycle.PYDANTIC_VALIDATION
+# Existing initial-reference assertions and 200 retry pull remain.
+second = store._validate_commit(commit(
+    store, payload, payload, retry_pull, session_id=session_id,
+))
+assert second.validation_request_body.post_commit_validation.result is BackendLifecycle.ACCEPTED
+```
+
+Previous checkpoint before this approval: 933 collected; 523 invoked = 516 passed, 5 skipped, 1 strict xfailed, 1 failed; 410 not invoked (388 not reached, 22 approved exclusions). The former strict xfail and second test failure are superseded by the 3/3 focused pass. Prior evidence: `tmp/ai-augment-card-verification-20261001/detour-continuation.log/xml`; individual not-run inventory: `tmp/ai-augment-card-verification-20261001/not-run-after-continuation.md`. Read-only `--resume` finding: API lifespan resets READY, ordinary Store opening verifies projected log/DB without restoring cursor; same-session restart behavior remains unreviewed and out of this test correction.
+
+The four approved test/fixture edits are applied; no production edit was made in that step. Focused backend/card/live-replay tests passed **10/10 in 64.97s**; the subprocess-only completed-query fixture passed **1/1 in 20.49s**. Ruff on the configured `src tests` scope and detour mypy (63 source files) passed. The operator requested a fresh repetition of HEAD's approximately 934-node test inventory with a per-node accounting. The new run stopped at the first unexpected detour failure, as the operator instructed; no fix, test skip, or source change was made after that failure. Earlier 904/8/22 figures below are historical, not a current-tree result.
+
+Fresh collection: **918** configured main/detour nodes plus **15** optional-other-detour nodes = **933** total. HEAD's 934 fell by one because three old placeholder-selector parameter cases became two explicit NR/NA card cases (plus name-only test renames). Main: **140 passed, 3 skipped, 4 deselected** (`tmp/ai-augment-card-verification-20261001/main.xml/log`). Optional other detours: **12 passed, 3 deselected** (`optional.xml/log`). The detour run (`detour.xml/log`) stopped at `tests/backend/test_http_interceptor.py::test_outcome_finalizes_only_linked_commit_once` after **361 passed, 2 skipped, 4 deselected, 1 failed** (511.29s). The separate completed-query fixture passed and counts as one more distinct passed node. Therefore across 933 collected nodes: **514 passed, 5 runtime-skipped, 1 failed, 413 not invoked**. `tmp/ai-augment-card-verification-20261001/not-run.md` lists every one of the 413 with an individual reason; 391 were not reached because of the stop, while 22 had the prior approved environment/operator/TASK exclusions. These are partial results, **not** whole-suite readiness.
+
+Historical failure boundary, now covered by the new protected integration test: the old outcome test made two accepted commits for the same namekey and Codex session before either outcome, by calling `commit(..., rollout_suffix=...)` twice with the helper's default `session_id=UUID(OPERATOR_CAPTURED_SESSION_ID)`. The appended suffix changes rollout bytes but not `CodexRolloutRecord.session.summary_json`. The approved `codex_output_rows` `UNIQUE (ktp.namekey, ktp.ai_augment_session_metadata)` constraint rejects the second accepted validation at Store `_append_codex_output` (`ai_augment_backend_store.py:2498`); `ReplayInputMissing(Locale.ACCEPTED_IDENTITY_DUPLICATE)` occurs before outcome-link assertions. The new test asserts that Store invariant directly; the repaired outcome test uses a live-reachable rejected-then-accepted retry.
+
+Read-only follow-up on whether the test's two acceptances are live-reachable: within one running backend, public `authoritative_push` sets `BACKEND_LIFECYCLE=BUSY` before accepted push processing; a second push gets 503 while BUSY. After Store persists/projects the accepted validation, `finish_push` calls `update_pull_state`, setting COMPLETED; subsequent `/pull` returns and durably logs 410, while `/push` is outside READY/RETRY and returns 500. The 410 is produced on a **later GET**, not inside the validation DB transaction. The failing test bypasses API admission and calls Store's private `_append_authoritative_record` to synthesize a fresh 200 pull, 202 push, and commit twice, then `_validate_commit` twice; it keeps the same helper-default session ID. Store's low-level append path does not enforce API lifecycle. Across a new `--resume` backend process, API lifespan resets lifecycle to READY and ordinary Store `_opened` verifies DB/log but does not reconstruct the cursor; a same-session new pull/push could therefore be attempted again. Whether that restart behavior is intended remains unreviewed; do not infer a proven public HTTP reproduction or change it within the current narrow scope.
 
 ## Governing boundaries
-Read tasks/tasks-20260911-ai-augment-prod/src/TASK.md and this entire file after compaction. Do not consult former WORK or HUMANS. Use pixi run -e detour-ai-augment for Python/checks; never run src.repl or modify the main DB. Git is read-only for this agent: do not stage/unstage. Do not edit architecture.py without targeted approval, excluded BDD, or human-signed-off comments. Source and existing-test edits must be surgical; no old-record fallbacks, unauthorized wrappers, new/redundant tests, wholesale replacements, or unrelated cleanup. The operator has now authorized implementation of the exact settled WORK contour. SQL/method wiring is implementation work, not a new operator decision. Preserve exact model shapes and docstrings, particularly CASCodexRolloutRecord. Stop and ask if a deviation from the reviewed boundary is needed.
+Read tasks/tasks-20260911-ai-augment-prod/src/TASK.md and this entire file after compaction. Do not consult former WORK or HUMANS. Use pixi run -e detour-ai-augment for Python/checks; never run src.repl or modify the main DB. Git is read-only for this agent: do not stage/unstage. Do not edit architecture.py without targeted approval, excluded BDD, or human-signed-off comments. Source and existing-test edits must be surgical; no old-record fallbacks, unauthorized wrappers, wholesale replacements, or unrelated cleanup. The one new Store-invariant test is specifically authorized in this turn. Earlier settled WORK contours were authorized and applied; the **current SourceKey/card-table/prefix contour is approved and under resumed verification after the 3/3 focused pass**. Preserve exact model shapes and docstrings, particularly CASCodexRolloutRecord. Stop and ask if a deviation from a reviewed boundary is needed.
 
 Architecture.py governs models; README lifecycle is somewhat stale. Replay log is principal and detour DB is fully reconstructible from log/CAS; DOCX renders DB innerdicts. Store alone owns detour SQL and authoritative lifecycle records. Current replay contour: append/fsync, log readback, project in one DB transaction, reconstruct typed object from DB, compare value and byref links, then advance the one current_replayed_record cursor if applicable. BUSY 503 exchanges are logged but do not advance that cursor. On validation replay the cursor must be a BackendCommitRequestRecord; intervening provider HTTP or BUSY 503 log lines are permitted. Assert identity with is only for the same byref object, not across a fresh reconstruction. Post-commit validation gets a byref commit and Store-supplied inputs/reads; it does no SQL. Existing LazyResultFactory callbacks for validation are truly deferred and use (value, error) results; immediate HTTP-record lookup is instead Callable[[UUID], HttpRequestLogRecord].
 
 ## Current source and verification status
+**Current SourceKey/card state; earlier internal-column shape superseded.** The retained artifact's accepted commit SourceKey ends at line 220 while `/completed` reports line 230; the old card displays 220. The operator approved the integrated contour below, including removing the earlier partial internal-column implementation. Source edits now implement the flat `codex_output_rows` schema, outcome-only card SourceKey, and storage-side standardized prefix; the focused tests passed after the approved fixture correction, but the full suite stopped at the new accepted-validation conflict above. The operator's rule is that `codex_output_rows` has **no internal-only columns**: its columns correspond to `codex_innerdicts` card data, with `ktp.namekey` as the outer grouping key. Card-facing `ktp.filename`, `ktp.fragment`, and `ktp.fragment_type` start NULL in the accepted-validation row and are filled **only** from the completed run-outcome response SourceKey. Commit SourceKey remains for appendwatch/rollout binding. No COALESCE, fallback, legacy schema path, architecture.py edit, or dashboard/DOCX card-value rewrite. README lifecycle wording is known-stale.
+
+### Integrated SourceKey / flat output / prefix contour — approved; verification pending
+
+Operator approved this exact contour for surgical implementation on 2026-10-01. Source and affected-test edits are partially implemented; verification stopped at the full-suite accepted-validation failure described above, pending operator review. No new table, class, public model, fallback, record format, or `architecture.py` change. Live projection and full replay use the same existing Store transaction; an existing secondary DB needs an explicit log/CAS rebuild. `codex_output_rows` retains **only** card columns plus `ktp.namekey` (outer grouping key). It may hold accepted-but-not-completed rows with NULL final SourceKey/body fields; only completed rows are materialized into `codex_innerdicts`. Do not confuse equal columns with equal row sets.
+
+**Resolved historical focused-test stop, 2026-10-01:** The first node, `tests/backend/test_api.py::test_card_labels_stored_standardized_fields_without_mutating_source`, failed before reaching the prefix assertions. Its new test setup calls `StandardizedSubmission.model_validate(L_FEI_FEI_RETRY_FIXTURE.submission.model_dump(...))`; the pre-existing retry fixture is deliberately assembled with `model_construct`, and JSON revalidation hits strict enum inputs plus `OPENALEX_API_KEY`-dependent institution validation (62 errors). No test/source edit was made after observing the failure. The subsequently approved correction was: use the already typed fixture's `submission.model_copy(deep=True)` in the two adapted card tests, changing only the gender standardized value on that copy for the `NR`/`NA` cases, then resume the focused tests. This does not change production validation or mock it. Ruff on the six edited production/test files passes. Detour mypy initially had one unrelated error in previously approved `protected/tests/pytest_plugin.py:897`: `commit` was annotated as a base `HttpRequestLogRecord` and thus had no typed `commit_request_body`; the operator later approved and the agent applied the narrow fixture type assertion. Full tests/operator readiness are not claimed.
+
+**Revised exact correction, approved and applied; focused verification passed:** In `tests/backend/test_api.py::test_card_labels_stored_standardized_fields_without_mutating_source`, replace only the two-line `StandardizedSubmission.model_validate(...model_dump(...))` setup with `submission = L_FEI_FEI_RETRY_FIXTURE.submission.model_copy(deep=True)`. The original passing test never revalidated a full submission; the new attempted revalidation failed before assertions, so this does not remove pre-existing input-validation coverage. In `test_card_preserves_standardized_placeholders`, copy the fixture likewise, but construct `GenderSubmission(value=submission.gender.value, web_search_excerpts=submission.gender.web_search_excerpts, standardized_value=placeholder)` and assign it to `submission.gender`. That **does** runtime-validate the newly supplied NR/NA value without validating unrelated fixture institutions or calling OpenAlex. Annotate `placeholder: NotReported | NotAvailableOrApplicable` using established aliases. Also adapt the **existing** `test_outcome_materializes_persisted_ids_identically_live_and_replay` to assert every standardized field in the completed query innerdict starts with `codex_parse.AI_GENERATED_TEXT_PREFIX` plus a space, and that `api.selected_card_outer_dict(singular_outerdict).get_inner_by_key(...)[...] is innerdict.innerdict`; its already present live/rebuild equality then covers the real Store→DB→query path and Codex byref selection. No new test, mock, or production change. Separately, for the pre-existing out-of-contour mypy/Ruff gate in `protected/tests/pytest_plugin.py`, add `BackendCommitRequestRecord` to the function-local commit_request import, add `assert isinstance(commit, BackendCommitRequestRecord)` immediately after Store's commit append/readback, and remove only `gone_pull = ` from the 410 append. Store's annotated append return type is generic `HttpRequestLogRecord`; its actual reconstructed commit should be the concrete class, as already asserted for pull and push in that same fixture. The operator authorized all these exact test/fixture edits in the current turn. Stop and report any new unexpected failure rather than silently fixing it.
+
+1. In `protected/src/backend/helpers/vars.py`, remove the two `CODEX_OUTPUT_RUN_OUTCOME_*` constants and their physical columns, and remove the three lifecycle-ID columns from `CODEX_OUTPUT_SCHEMA`. Keep the `KTP_AI_AUGMENT_COMMIT_REQUEST_RECORD_ID_COL` *constant* only where dashboard's independent grid label still uses it; remove validation/outcome-ID constants if no consumer remains after test adaptation. Keep the final response-body and session-metadata card fields. Change only final SourceKey column nullability:
+
+   ~~~python
+   (KTP_NAMEKEY_COL, "VARCHAR NOT NULL"),
+   (KTP_FILENAME_COL, "VARCHAR"),
+   (KTP_FRAGMENT_COL, "BIGINT"),
+   (KTP_FRAGMENT_TYPE_COL, "VARCHAR"),
+   # Existing ordinary card fields, response body, session metadata,
+   # nine narrative/standardized pairs, comments, footnotes: unchanged.
+   ~~~
+
+   Store `_create_codex_output_schema` uses those definitions with `UNIQUE (ktp.filename, ktp.fragment)` for the **final** SourceKey and `UNIQUE (ktp.namekey, ktp.ai_augment_session_metadata)` for one accepted row per exact session summary; both constraints use card columns, no hidden key. `CODEX_OUTPUT_VIEW` remains only a completed-row filter, **SELECT * with no column aliases/exclusions**:
+
+   ~~~sql
+   CREATE OR REPLACE VIEW codex_output AS
+   SELECT * FROM codex_output_rows
+   WHERE "ktp.ai_augment_run_outcome_response_body" IS NOT NULL
+   ORDER BY "ktp.filename", "ktp.fragment";
+   ~~~
+
+   Production SQL interpolates established table/column constants via `duckdb_quote_identifier`, not these illustrative literal identifiers. `_materialize_innerdicts(source_relation=CODEX_OUTPUT_VIEW, table_name=CODEX_INNERDICT_TABLE)` remains. Each completed output-row column except `ktp.namekey` becomes exactly one flat innerdict key; the common materializer puts `ktp.namekey` in the outer table column. Do not create an extra projection with hidden fields.
+
+2. In `post_commit_validation.py`, `_accepted_output_row` sets `KTP_FILENAME_COL`, `KTP_FRAGMENT_COL`, `KTP_FRAGMENT_TYPE_COL`, and `KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL` to `None`; it does not use commit SourceKey for card identity and no longer accepts `commit_request_record`/`cas_codex_rollout_record` arguments used only to populate now-removed ID/SourceKey fields. Remove the three lifecycle-ID entries, the stale output-identity assertions, and `_DetourDbValidationReads.output_identity_exists` plus its invocation. In Store remove the corresponding lazy closure and `_codex_output_identity_exists`; keep Store's commit SourceKey **line-count check against the durable rollout** in `_validated_commit_inputs` and post-commit validation's commit SourceKey **basename binding** for appendwatch and rollout index. The premature accepted-commit filename/fragment duplicate check goes; the final completed SourceKey constraint now catches duplicates.
+
+3. In the existing `render_codex_values`, the nine narrative fields already use `render_ai_value` and present comments already use `render_comment`; do not double-prefix them. Wrap only the nine standardized canonical JSON strings with existing `codex_parse.render_ai_standardized_value`, as in the exact snippet immediately below. Top-level `NR` and `NA` stay literal JSON string tokens inside `**AI-generated text**: "NR"` / `**AI-generated text**: "NA"`, never `None`, never hidden. Structured `NR`/`NA` members remain unchanged. Metadata, response-body JSON, footnotes and footnote arguments are not submitted AI prose and receive no prefix. `CODEX_OUTPUT_SCHEMA` standardized columns stay `VARCHAR NOT NULL`. Replace `selected_card_outer_dict`'s deep-copy/JSON-parse/mutation loop with the pure by-reference selector in the exact snippet below; delete the now-unused selector imports and `AI_AUGMENT_CARD_EMPTY_VALUE_PLACEHOLDERS` constant/import. Browser card, TXT, DOCX, and publish continue through the same `build_cards` path, without additional value rewrite. Do not change the shared formatter without separate review of its generic headings/null omission/newline formatting.
+
+4. In Store `_apply_run_outcome_record`, after the existing record/reference checks, parse the **completed outcome response** SourceKey once for final filename and fragment; take fragment type from the parser-enforced `ROLLOUT_LINE_FRAGMENT_TYPE`. Remove its commit-vs-outcome filename comparison: the accepted commit basename remains an appendwatch/rollout binding, not a card identity rule. The already-reconstructed `outcome.attempt` is the accepted validation by reference; its commit ID and the existing `commit_validation_request_record_index` remain available for linkage verification. Locate the pending flat row using only *existing card columns*: fetch `ktp.ai_augment_session_metadata` for this namekey where response body is NULL, parse each with `CodexRolloutRecord.parse_summary_json`, and retain those whose `session_id` equals `outcome._codex_session_record().session_id`. Require **exactly one** match (zero or multiple is a loud `Locale.RUN_OUTCOME_PROJECTION_INCONSISTENT` error); the `(namekey, session_metadata)` uniqueness constraint makes the subsequent update singular. The concrete read/update contour is:
+
+   ~~~python
+   pending = self._execute(
+       f"SELECT {duckdb_quote_identifier(KTP_AI_AUGMENT_SESSION_METADATA_COL)} "
+       f"FROM {CODEX_OUTPUT_ROWS_TABLE} "
+       f"WHERE {duckdb_quote_identifier(KTP_NAMEKEY_COL)} = ? "
+       f"AND {duckdb_quote_identifier(KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL)} IS NULL",
+       [namekey.to_json_key()],
+   ).fetchall()
+   matches = tuple(
+       metadata_json for (metadata_json,) in pending
+       if UUID(CodexRolloutRecord.parse_summary_json(metadata_json)[CODEX_SESSION_ID_JSON_KEY])
+       == session_id
+   )
+   if len(matches) != 1:
+       raise ReplayInputMissing(Locale.RUN_OUTCOME_PROJECTION_INCONSISTENT)
+   metadata_json = matches[0]
+   updated_rows = self._execute(
+       f"UPDATE {CODEX_OUTPUT_ROWS_TABLE} SET "
+       f"{duckdb_quote_identifier(KTP_FILENAME_COL)} = ?, "
+       f"{duckdb_quote_identifier(KTP_FRAGMENT_COL)} = ?, "
+       f"{duckdb_quote_identifier(KTP_FRAGMENT_TYPE_COL)} = ?, "
+       f"{duckdb_quote_identifier(KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL)} = ? "
+       f"WHERE {duckdb_quote_identifier(KTP_NAMEKEY_COL)} = ? "
+       f"AND {duckdb_quote_identifier(KTP_AI_AUGMENT_SESSION_METADATA_COL)} = ? "
+       f"AND {duckdb_quote_identifier(KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL)} IS NULL "
+       f"RETURNING {duckdb_quote_identifier(KTP_NAMEKEY_COL)}",
+       [outcome_filename, outcome_fragment, ROLLOUT_LINE_FRAGMENT_TYPE,
+        outcome.response_body, namekey.to_json_key(), metadata_json],
+   ).fetchall()
+   if len(updated_rows) != 1:
+       raise ReplayInputMissing(Locale.RUN_OUTCOME_PROJECTION_INCONSISTENT)
+   ~~~
+
+   Continue inserting the **one** full `_RunOutcomeResponseRecordJson` snapshot into the unchanged two-column `codex_run_outcome_records(run_outcome_record_id PRIMARY KEY, serialized_json)` table, then refresh the completed-row view/materialized `codex_innerdicts`, all in the same replay projection transaction. An absent accepted-output table/row on a successful completed outcome and a duplicate final SourceKey are fatal, not ignored or repaired. Remove the old multi-row loop/ID updates and unprefixed internal-column writes. There is no commit-derived card SourceKey field to read or fall back to.
+
+5. In Store `_codex_innerdicts`, stop joining the flat card back to `codex_output_rows` for an outcome ID or session metadata. The **existing** card field `ktp.ai_augment_run_outcome_response_body` is the exact serialized HTTP response body and already contains `run_outcome_record_id`; obtain it using `RunOutcomeResponseRecord._parse_response_body` and fetch the full snapshot by that ID from `codex_run_outcome_records`. Check the reconstructed outcome's `response_body` equals the card field, then construct the same `CodexInnerDict(InnerDict.from_mapping(...), outcome)` as today. Its **existing** validator checks the card's `ktp.ai_augment_session_metadata` session ID against the outcome and compares card filename/fragment to the outcome response SourceKey; do not duplicate those checks in Store. The replacement of the existing staging-row lookup is:
+
+   ~~~python
+   response_body = values[KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL]
+   if not isinstance(response_body, str):
+       raise ReplayInputMissing(Locale.RUN_OUTCOME_PROJECTION_INCONSISTENT)
+   outcome_record_id = RunOutcomeResponseRecord._parse_response_body(
+       response_body
+   ).run_outcome_record_id
+   outcome_row = self._execute(
+       f"SELECT {duckdb_quote_identifier(CODEX_RUN_OUTCOME_SERIALIZED_JSON_COL)} "
+       f"FROM {CODEX_RUN_OUTCOME_RECORDS_TABLE} "
+       f"WHERE {duckdb_quote_identifier(CODEX_RUN_OUTCOME_RECORD_ID_COL)} = ?",
+       [str(outcome_record_id)],
+   ).fetchone()
+   if outcome_row is None:
+       raise ReplayInputMissing(Locale.RUN_OUTCOME_PROJECTION_INCONSISTENT)
+   outcome = _RunOutcomeResponseRecordJson.model_validate_json(
+       outcome_row[0]
+   ).to_run_outcome_response_record()
+   if outcome.response_body != response_body:
+       raise ReplayInputMissing(Locale.RUN_OUTCOME_PROJECTION_INCONSISTENT)
+   codex_innerdicts.append(CodexInnerDict(
+       innerdict=InnerDict.from_mapping(
+           {KTP_NAMEKEY_COL: namekey_json, **values},
+           _CodexInnerDictProcedure(),
+       ),
+       run_outcome_response_record=outcome,
+   ))
+   ~~~
+
+   Keep the existing containing `try`/`except` handling and `CodexInnerDict` model validation. No DB read outside Store, dashboard reconstruction from replay fragments, new table, or new wire field.
+
+6. **SourceKey checks retained vs removed:** The two authorities are commit request SourceKey for appendwatch/rollout binding and completed outcome response SourceKey for final card identity. Remove Store's early accepted-output duplicate lookup, post-validation card-identity assertions, and Store's commit-vs-outcome filename equality check. Preserve `RunOutcomeResponseRecord.validate_record`'s canonical outcome-header/rollout-line-count check, `CodexInnerDict.validate_codex_innerdict`'s DB-card-vs-outcome integrity check, and dashboard `_RunAttemptView.run_outcome_session_status`'s later appendwatch status check; these validate the two authorities and do **not** provide alternate card-field values. Validation request still copies/checks the commit headers. This explicit retention list is part of the proposal for operator approval; literal removal of every parser call would weaken these checks and is **not** silently assumed.
+
+7. Surgically adapt only impacted existing tests: `tests/backend/test_api.py`'s direct output-row/materialization and standardized-card tests, `tests/backend/test_http_interceptor.py`'s live/replay outcome materialization assertions, affected `tests/control_centre/test_ui.py` card assertions, and the operator rendered-card SourceKey/prefix assertion if its expected content changes. Preserve test coverage and test bodies outside changed expectations; no new tests or wholesale replacement. Verify same logical flat columns in completed `codex_output_rows` and `codex_innerdicts`, literal `NR`/`NA` preservation, exact prefix once, outcome (not commit) line count, live/rebuild equivalence, and query/DOCX consumption from DB. Run focused affected tests, all feasible detour tests, Ruff/mypy, and ask operator to rerun `pixi run pre-commit-operator` on the production machine. No claim of operator readiness before those checks.
+
+**Read-only standardized-card prefix finding, 2026-10-01:** The retained artifact's `codex_output_rows`, `codex_innerdicts`, and NiceGUI query snapshot hold nine standardized values as canonical JSON, without the Markdown label. This is the existing storage contract: `post_commit_validation.render_codex_values` writes `json.dumps(standardized_value)`. `selected_card_outer_dict` copies each innerdict and adds `codex_parse.render_ai_standardized_value(value)` to nonempty standardized strings only for display; dashboard `_BackendDatabaseClient.card` calls that function before `build_cards`, and DOCX uses the resulting Markdown. The retained query payload reproduced a generated Markdown card with all nine standardized fields prefixed and 19 total AI-generated markers, using `model_construct` solely to bypass the *new, untested SourceKey equality check* against this old artifact. Existing focused standardized-card unit test passed 1/1. The prefix was introduced 2026-09-13 by 3734a7f and moved intact with card-selection logic in 2026-09-28 dea2bf1; no evidence of its subsequent removal from the rendering path. The artifact contains no rendered-card screenshot/text, so actual browser display cannot be independently confirmed from these files. No code change for this investigation.
+
+**Operator correction; proposal only, no code edit approved:** The display-time rewrite just described is unacceptable even if it generates the expected visible text. At Codex innerdict materialization, standardized values must acquire the same `**AI-generated text**:` prefix already applied to narrative values, so the accepted output row and `codex_innerdicts` contain final researcher-card text. No card/Markdown/browser/TXT/DOCX/publish layer may add, remove, substitute, or otherwise alter *Codex innerdict values* for display. Purge the display-only standardized-field JSON decoding, placeholder suppression, and prefix injection in `selected_card_outer_dict`; propose a pure selection of the existing innerdict references instead. Do not introduce a display-specific projection or fallback. The main DB's XLSX (2018), DOCX (317), and SSN (2044) innerdicts contain no `_standardized` fields, so the affected real fields are Codex's. **Operator decision:** `NR` and `NA` must always be preserved as values, never substituted with null/None or suppressed. The preceding agent proposal to store null for top-level `NR`/`NA` is rejected and superseded below. Existing tests would be adapted surgically only after the complete contour is approved. The broader grep/audit below is a required part of this edit, not optional follow-up. This proposal is **not approved or implemented**; SourceKey implementation remains paused.
+
+**Concrete prefix proposal for operator review (not approved, no code edit):** In `post_commit_validation.render_codex_values`, replace only the standardized assignment; keep narrative rendering and canonical JSON spelling. The accepted `StandardizedValue` permits top-level `NR`/`NA` but not top-level JSON null. Serialize and prefix **every** accepted standardized value, including top-level `NR` and `NA`: their literal tokens remain intact as `"NR"`/`"NA"` inside canonical JSON, and the complete stored/card values become `**AI-generated text**: "NR"`/`**AI-generated text**: "NA"`. Nested `NR`/`NA` tokens likewise remain unchanged inside prefixed structured JSON. Do not make the standardized DB columns nullable or introduce a special missing-value path. Unlike today's display-only suppression, the card will visibly contain these two top-level values, as required by the operator's preservation rule.
+
+**Exact AI-content scope for this proposal:** `AI_AUGMENT_COLUMNS` names nine narrative evidence fields plus optional comments. `render_codex_values` already applies `codex_parse.render_ai_value` to each narrative field and `codex_parse.render_comment` (which includes the prefix after its list marker) to a present comment. The nine `AI_AUGMENT_STANDARDIZED_COLUMNS` are the only submitted AI-content fields currently stored without the prefix; change their existing assignment below, without prefixing any already-prefixed field a second time. Do **not** indiscriminately prefix every `ktp.ai_augment_*`-named field: run-outcome response body and session metadata are structured JSON, while footnotes/footnote arguments are evidence/citation apparatus, not submitted AI prose. The operator's "all AI columns" instruction is thus interpreted as all AI-authored narrative/comment/standardized content, not machine-readable metadata or provenance fields; this exact boundary is for operator review before any source edit. A production-source `rg` for `NOT_REPORTED_VALUE|NOT_AVAILABLE_OR_APPLICABLE_VALUE|AI_AUGMENT_CARD_EMPTY_VALUE_PLACEHOLDERS|KTP_TABLE_1_EMPTY_VALUE_PLACEHOLDERS` and placeholder-to-`None` assignments found **one** explicit `NR`/`NA` suppression path: `selected_card_outer_dict` at `ai_augment_singular_outer_dict.py:219-232`. The other `None` cases found in these files represent absent optional data (e.g. comments), not an `NR`/`NA` conversion. Remove that loop/constant rather than replacing it with another suppression point. Shared `build_cards`' `pd.isna` omits actual nulls but does not omit the literal strings `NR` or `NA`.
+
+~~~python
+standardized_value = field_submission.model_dump(mode="json")[STANDARDIZED_VALUE_FIELD]
+rendered[standardized_columns[column]] = codex_parse.render_ai_standardized_value(
+    json.dumps(
+        standardized_value,
+        ensure_ascii=False,
+        separators=COMPACT_JSON_SEPARATORS,
+    )
+)
+~~~
+
+`_accepted_output_row` already takes `render_codex_values`; `codex_output_rows` → `codex_output` → `codex_innerdicts` then carries these exact values. Do not add Store/query/dashboard/DOCX transformations. Replace `selected_card_outer_dict` with a selection that keeps the existing source order and each existing `InnerDict` instance by reference:
+
+~~~python
+def selected_card_outer_dict(
+    singular_outerdict: AiAugmentSingularOuterDict,
+) -> OuterDict:
+    return OuterDict(data={
+        singular_outerdict.namekey.to_json_key(): [
+            *singular_outerdict.xlsx_innerdicts,
+            *(item.innerdict for item in singular_outerdict.codex_innerdicts),
+            *singular_outerdict.docx_innerdicts,
+            *singular_outerdict.ssn_innerdicts,
+        ],
+    })
+~~~
+
+Remove only selector imports that become unused and the `AI_AUGMENT_CARD_EMPTY_VALUE_PLACEHOLDERS` constant (and its now-unused `KTP_TABLE_1_EMPTY_VALUE_PLACEHOLDERS` import), retaining the globally used standardized-column constants. Surgically adapt the existing standardized card tests: assert the selected `InnerDict` is the same instance, all standardized strings—including top-level `NR`/`NA`—are already prefixed in Codex innerdicts before selection and appear in the card, and no source data is changed while rendering. The existing synthetic tests inject raw standardized JSON (including an artificial top-level null) into XLSX; that test setup should instead exercise Codex's validated storage-side output, since XLSX has no such fields in real source data and the accepted standardized model does not admit top-level null. Shared `build_cards` still adds headings/introduction and omits genuinely null fields; that generic formatting was identified in the audit below and is **not** being silently characterized as zero display processing. No old-record fallback or architecture.py edit.
+
+**Required comprehensive presentation audit, 2026-10-01 (read-only grep completed; no source edits):** Search the entire detour production source and the shared card formatter for all codex-innerdict/card presentation paths, including Markdown, browser, TXT, DOCX download, and `publish completed`. For every value-changing or display-only operation, report whether it changes a stored field, filters it, adds content, or merely supplies formatting; do not silently preserve any display-time *value* addition/removal. The searches used `rg` over detour `{src,protected/src}` for `selected_card_outer_dict|build_cards|render_docx_bytes|card_markdown|render_codex_values|render_ai_standardized_value|download_displayed_card|prepare_content|fromstring`, all `innerdict`/`card`/`markdown`/`docx`/`txt` references in dashboard modules, and `model_copy|deepcopy|json.loads|replace|strip|isna|excluded_cols` in the relevant source and shared `src/helpers/cards.py`. Findings:
+
+- `protected/src/backend/helpers/data_models/post_commit_validation.py:1530-1553`: `render_codex_values` prefixes narrative text via `codex_parse.render_ai_value` but stores standardized values as raw canonical JSON. This is the proposed storage-side correction point; the operator has now rejected null substitution/suppression of `NR`/`NA`.
+- `src/backend/helpers/data_models/ai_augment_singular_outer_dict.py:201-233`: `selected_card_outer_dict` deep-copies innerdicts, parses standardized JSON, turns JSON null/recognized placeholders into `None`, and prefixes other standardized values. This is the definite display-time value rewrite to remove within the proposed change.
+- `src/control_centre/dashboard/ui.py:1059-1074` calls that selector then shared `build_cards`. `src/helpers/cards.py:51-122` adds card introduction/date, researcher/draw header, optional fun fact, filename heading, field labels, and Markdown spacing; it omits `excluded_cols` and `pd.isna` values, turns values into `str`, and doubles embedded newlines. Detour's `CARD_EXCLUDED_COLUMNS` (`protected/src/backend/helpers/vars.py:375`) suppresses filename/namekey/source-position fields as ordinary value lines (filename is separately a heading). Those are existing Markdown layout/structural-selection operations, **not changes to `InnerDict.data`**, but they affect visible layout and which structural fields appear as ordinary lines. The integrated proposal explicitly **retains** these existing generic formatting rules and changes only the Codex standardized-value rewrite; approval of the proposal includes this precise boundary. Do not edit shared `cards.py` or `CARD_EXCLUDED_COLUMNS` in this change.
+- Browser card display at `ui.py:3244-3245` passes the generated Markdown directly to NiceGUI. TXT download at `ui.py:3305` encodes the same Markdown; DOCX download at `ui.py:890-891,3301-3302` and publish at `ui.py:3660-3665` pass it to `src/helpers/cards.py:143-148`, which writes the Markdown and invokes Pandoc with the reference DOCX. No additional field-value rewrite was found in these branches. No independent `prepare_content`/`lxml.fromstring` card path remains.
+- The separate dashboard variable grid reads `CodexInnerDict.text` directly (`ui.py:580-583`) but `footnotes_for_researcher_var` and `footnote_arguments_for_researcher_var` (`ui.py:629-674`) select only matching numbered lines for a variable. This is a derived grid view, not the researcher card or its TXT/DOCX; keep it visible in the comprehensive audit rather than conflating it with card-value mutation.
+
+**SourceKey revision requested, proposal only:** The operator requires card-facing `ktp.filename`/`ktp.fragment`/`ktp.fragment_type` to be NULL in the accepted validation-stage row and populated only from the completed run-outcome response SourceKey, alongside the already-NULL `ktp.ai_augment_run_outcome_response_body`. The in-progress separate internal outcome columns must be removed, not completed; **no staging-only columns may remain in `codex_output_rows`**. A prior suggestion to scan accepted commit headers to preserve `_codex_output_identity_exists` is withdrawn. That check currently compares accepted *commit* filename/line count and rejects a second accepted validation before run outcome, backed by an early UNIQUE constraint; it is not required for final card identity. The proposed final-card duplicate guard is the existing unique filename/fragment pair at completed-outcome update plus `AiAugmentSingularOuterDict` section validation. The existing three lifecycle-ID-only columns in `CODEX_OUTPUT_SCHEMA` are also nonconforming and need a separate, specific index/readback contour; their removal must not break completed-outcome linkage or query. This changes a duplicate-commit scenario from validation rejection to possible outcome-time conflict, so the complete surgical SQL/readback contour needs operator review before code edits. No code changes in response to this proposal request.
+
+**Read-only SourceKey parsing audit:** Validation request headers are copied from the commit and checked for exact equality; no independent validation-header value parse exists. The commit header is parsed (1) by Store `_validated_commit_inputs` to compare line count with its durable `CodexRolloutRecord` and, currently, supply the premature accepted-output duplicate check; (2) by `post_commit_validation._evaluate_submission_for_commit` to obtain the expected rollout basename for appendwatch report validation and CAS rollout session metadata comparison, plus stale output-row assertions; (3) by Store `_apply_run_outcome_record` to compare commit filename with completed-outcome filename. The completed run-outcome response header is parsed (4) by `RunOutcomeResponseRecord.validate_record` to check canonical header and rollout line count; (5) by Store `_apply_run_outcome_record` to project final SourceKey; (6) by `CodexInnerDict.validate_codex_innerdict` to compare flat card fields with outcome; (7) by dashboard `_RunAttemptView.run_outcome_session_status` for line count and appendwatch path validation. Constructors/forwarders are separate: synthetic commit puts configured rollout basename and line count into SourceKey; validation copies commit request headers; Store constructs the outcome response SourceKey; outcome request rejects a client SourceKey. Thus the operator's thesis aligns with validation-header handling and intended card provenance but not with current commit-header validation: `CodexRolloutRecord` has hash/size/line_count only, not a filename, and post-commit validation presently obtains its expected basename from the commit header. No code changes; any move away from that use needs a concrete alternative durable filename source and replay/failure-order review.
+
+**Operator SourceKey purpose refinement; review only, no source edit:** The operator agrees that commit-request SourceKey is needed for appendwatch/rollout binding and completed run-outcome response SourceKey is the sole source of final card `ktp.filename`/`ktp.fragment`/`ktp.fragment_type`; commit/validation headers must not populate card identity. The operator proposes purging every other SourceKey use surgically, without fallback/legacy support. The two *provenance purposes* are clear, but a literal two-parse-only rule is not yet safe: Store `_validated_commit_inputs` checks commit header line count against the durable rollout; `RunOutcomeResponseRecord.validate_record` checks outcome header canonicality/rollout line count even without card projection; Store `_apply_run_outcome_record` compares outcome and commit basenames; `CodexInnerDict.validate_codex_innerdict` checks DB card identity against the linked outcome; and dashboard `_RunAttemptView.run_outcome_session_status` checks the later appendwatch report against the outcome basename. These are integrity/status checks, not alternate card-data sources. The current accepted-output duplicate check and `_accepted_output_row`/post-validation card-identity assertions are the stale commit-derived uses to remove in the proposed card correction. Before editing other parse sites, resolve whether these independent checks are deliberately dropped or retained as checks without being alternate data sources. No source change was authorized by this clarification.
+
+**Binding Codex output/innerdict schema rule and read-only audit:** Every `codex_output_rows` column must correspond to a final card field in `codex_innerdicts`, except `ktp.namekey`, which corresponds to the outer grouping key. No internal-only lifecycle IDs, intermediate SourceKey columns, or other staging columns in that table; it should be the direct flat source of Codex innerdict values, not a card-data relation with hidden columns filtered out by `codex_output`. Current code does **not** satisfy this: `CODEX_OUTPUT_SCHEMA` contains commit, validation, and outcome record-ID columns excluded by `_replace_codex_output_view`; the partially applied SourceKey edit adds two more internal columns and aliases them into the view. The common `materialize_innerdicts_from_rows_table` drops only `ktp.namekey` into the outer table key. Retained pre-edit artifact verifies 33 staging columns, 30 view columns, and 29 flat JSON keys; the three staging-only columns were those lifecycle IDs. XLSX/DOCX use their match views directly; SSN uses its legacy rows relation directly. In main DB, SSN's 50 source columns become 49 JSON keys plus namekey; XLSX/DOCX match views could not be `DESCRIBE`d here because the configured `unaccent` extension was not loaded, but their code calls the same materializer directly on those views. The exact relocation/removal of existing ID links and resulting direct materialization/readback is pending a surgical proposal; **do not implement by keeping a hidden view, adding a new internal column, or dropping a needed link without replacement**. No source change for this review.
+
+**Read-only replay-link audit, 2026-10-01:** The operator asks whether absent pull `validation_request_record_id` and push `pull_response_record_id` are available when logging. They are: Store `_response_record_for_http` constructs the typed links from `_current_replayed_record` immediately before `_append_request`. However both model fields have `Field(exclude=True)`, and `_append_request` converts to the plain HTTP envelope via `HttpRequestLogRecord.model_validate_json(record.model_dump_json())`; the replay line omits these IDs. On replay, `_apply_durable_record` projects/reads the HTTP record from DB and calls the same `_response_record_for_http` against the sequential cursor, then `_remember_reconstructed_record` advances it. Live append compares the original and reconstructed typed objects and uses identity checks against the predecessor. Retry 200 pulls link to the preceding validation; initial 200 pulls link to None. 410 pulls do not attach a validation object (although their ETag carries validation UUID) or advance the cursor. Accepted pushes require the current 200 pull by model validation; rejected/BUSY pushes may have None and do not advance. The artifact's retry 200 pulls and 202 pushes have no explicit link IDs in their own log lines; the later commit request body carries pull/push IDs. No source change requested or made for this audit.
+
+**Post-fixture Ruff follow-up needs authorization:** After the exact one-line approved fixture change, all 72 operator preflight tests pass, but Ruff now reports F841 at `protected/tests/pytest_plugin.py:869`: `gone_pull` is assigned and no longer read. The minimal mechanical correction is to remove only `gone_pull = `, leaving the Store append call and its effects unchanged. Do not apply this second edit without operator approval because the approval specified exactly one line. Both staged and unstaged `git diff --check` pass.
+
+**Focused verification after targeted fixture approval:** The operator approved replacing only `pull_record_id=gone_pull.record_id` with `pull_record_id=commit.commit_request_body.pull_response_record.record_id` in `protected/tests/pytest_plugin.py:897`. The single line was changed and all **72/72** operator preflight tests now pass (74.42s). Whole-source Ruff, detour mypy (63 source files), TOML parsing, operator E2E collection (3 nodes), and unstaged `git diff --check` passed before that one-line fixture edit; the production operator E2E has not yet been rerun after the assertion edit.
+
+**Current authorized follow-up (2026-10-01):** The operator authorized the exact surgical changes identified in the operator-log/stale-wording review. The operator E2E now compares outcome pull/push IDs to the accepted `commit_request_body` links, not the latest chronological 410 `/pull` and `/push`; only that obsolete search and two test messages changed. Two Locale strings now say `commit request record ID`. Two targeted architecture.py comment/docstring names now match the implemented classes/cursor; no protocol code changed. The operator separately directed the extra Pixi task's existing `grep -q "FAILED"` to search `logs/pre-commit-extra.log` instead of `logs/pre-commit.log`; only that filename changed. The grep's `-q`, `&&`, and echo semantics remain as authored. README lifecycle remains known-stale and unedited; no exact replacement prose was approved. The broader Pixi status-propagation concern remains diagnosed but unedited; the operator expressly asked only for the grep filename correction. Current verification and the focused preflight failure are recorded immediately above; the production operator E2E must be rerun before claiming it passes.
+
+**Production-machine temp-space incident resolved by operator:** the initial `pre-commit` detour pytest invocation reported 475 passed, 1 skipped, 3 deselected, then 281 setup errors from pytest failing to create directories under `/tmp/pytest-of-anonymous/pytest-5`. The operator confirmed insufficient device space, freed space, and reports those tests then passed. No code or test-task change was made for this incident; no concern remains. Pytest's `_pytest.pathlib.make_numbered_dir` had masked the underlying `mkdir` errno in the initial traceback. A completed local feasible run retained ~918 MB in one pytest temp session, consistent with this diagnosis. This report does not independently establish that the full `pre-commit-operator` task passed; do not claim that without its final result.
+
+**Operator log/artifact audit before approved corrections:** copied full `pixi run pre-commit-operator` logs are `logs/from_operator/pre-commit.log` and `pre-commit-extra.log`; retained E2E artifact is `tmp/test.h_zcehhk/`. The primary pre-commit child exited 0: default tests 174 passed/5 skipped/6 xfailed/1 xpassed, other detours passed, detour suite 756 passed/1 skipped/3 deselected, real-API smoke 1 passed, and all nine macOS-browser tests passed. Extra stage: 3 real-API passed/1 xfailed, 3 sudo passed; the authenticated operator test `test_completed_dashboard_backend_codex_workflow_renders_researcher_card` alone failed (two excluded operator cases skipped); its child log ends `Command exit status: 1`. The overall Pixi wrapper exit status cannot be inferred from these child logs; `pyproject.toml:318-378` has a separate status-propagation defect noted below. The E2E failure is `protected/tests/operator/test_operator_e2e.py:1241`: `run_outcome_snapshot.pull_record_id` is compared to the latest chronological `/pull` before `/completed`, which was a **410 probe**, not the accepted initiating **200 pull**. Retained replay log has 23 records, including five validation requests (four rejected, then one accepted); #17 `/pull` 200 → #18 `/push` 202 → #19 `/commit` → #20 `/validate` accepted → #21 and #22 `/pull` 410 → #23 `/completed` 200. Commit body and outcome response both link to #17/#18; #21/#22 share validation #20's ETag. Thus the observed ID mismatch is an E2E assertion error, not evidence of a bad outcome link. Surgical proposed correction for operator review: assert the outcome's pull/push IDs against `commit_request_body.pull_response_record.record_id` and `.push_response_record.record_id`, removing the latest-by-time `/pull`/`/push` search. The operator subsequently approved and the narrow assertion correction is applied. Assertions later in that function (CAS/report/card-text) were not executed by the failed run; Playwright did capture/display the card and enabled DOCX beforehand. Independent read-only artifact checks: all 23 replay IDs match 23 projected HTTP rows; all six CAS blobs hash to their names and all six commit/outcome rollout refs resolve with correct size; `codex_innerdicts` has one flat 29-field card whose outcome-body field exactly equals `/completed` response body and follows `ktp.last_name` before session metadata; `codex_run_outcome_records` has one full snapshot with five validations; NiceGUI storage has 307 query researchers, one Run, seven RunEvents ending `completed`, no queued Runs. This does not claim that the whole E2E will pass after the assertion is corrected.
+
+**Independent operator-gate status-propagation concern, read-only:** `pyproject.toml:337,369` uses `grep -q "FAILED" ... && echo "grep: no FAILED"`, which is logically reversed: the success-looking message is reached only if a literal `FAILED` *is present*. The copied passing `pre-commit.log` has zero literal `FAILED`, so that grep would return 1. Both outer `bash -c` task bodies lack `set -e`/explicit status accumulation and run later commands after guest-stage failure; the final macOS `script -a` child status propagation is not established by these logs. Therefore the child logs are the evidence of success/failure, not a trustworthy implied overall Pixi status. Only the wrong grep file in the extra task was corrected on operator direction; other shell behavior is unchanged.
+
+**Detour-wide stale-term grep audit (read-only):** definite live wording drift at `protected/tests/operator/test_operator_e2e.py:830` (`run/commit history`, while UI title is `Runs and outcomes`) and :860 (`commit record ID`, should name `commit request record ID` and preferably the specific history row); `protected/src/control_centre/dashboard/helpers/locale.py:86` and `protected/src/backend/helpers/locale.py:681` also abbreviate that architectural name to `commit record ID`. Authoritative-but-stale docstring at `protected/src/architecture.py:147` says `current_response_record` instead of the implemented `current_replayed_record`; its deliberately commented-out unused protocol at :534 says old `BackendValidationRecord`. The two exact wording corrections were subsequently approved and applied. `README.md:217,222` still describes a “current pull” and run-outcome projection as raw-HTTP-only, contrary to commit-bound pull provenance and current secondary outcome/card projections; README was already acknowledged as stale. `src/control_centre/dashboard/ui.py:1840` queue/run history and the browser fake's `_run_history_ids_by_namekey` are valid because they refer to actual dashboard Runs, not the “Runs and outcomes” panel. DB `commit_record_id` columns/globals are approved schema names, not stray model classes; paused BDD still contains an obsolete current-pull fixture reference but remains explicitly excluded. This original audit was read-only; the authorized follow-up edits are recorded above.
+
 The working tree contains the approved push-admission implementation (exclusive HTTP gate, inlined API push decision, immediately reconstructed PushResponseRecord plus eventual promise, BUSY 503, narrow cursor invariant), the ID-based run-outcome response-body cleanup, and the secondary run-outcome/query readback codec. Preserve the operator's names current_replayed_record, session_id, captured_push_request_http_record, the_coroutine, stores_push_promise, and PUSH_PROCESSING_DESCRIPTION. The card's exact response-body JSON follows `ktp.last_name`; the unused commit-body staging field is removed. Serialization changes and surgical updates to existing tests are verified by the checks below.
 
 The **final full Linux-feasible detour run after all approved rename/import edits** passed **751 tests, 5 skipped, 4 deselected in 1278.50s** (`tmp/ai-augment-rename-verification-20261001/final-feasible-detour.log/xml`). Full dashboard `test_ui.py` passed **206/206**, operator preflight **72/72**, and the separately feasible subprocess-only query fixture plus Store recovery integration passed **2/2** after the exact name/import edits; these are overlapping focused checks, not additional distinct detour tests except the subprocess-only fixture. After the operator's targeted direction, the two unused `StandardizedSubmission` and `Submission` imports in `protected/src/architecture.py` were moved verbatim into comments inside the unused `AttemptRecordProperty` block; no protocol code or existing comment was changed. Whole-source Ruff, detour mypy (**63 source files**), and unstaged `git diff --check` now pass. **Staged** `git diff --cached --check` separately reports two trailing-space lines in the human-staged detour README (lines 102, 125); this agent did not alter that unrelated file. The Pixi `pre-commit-operator` task does not itself call `git diff --check`, but the staged diff is not whitespace-clean. An additional repository-wide `mypy src tests` run in the detour environment reports 20 errors in seven unchanged main-pipeline files; this is not the operator task's default-environment mypy invocation and is outside the approved edit contour. The operator explicitly approved the targeted one-blank-line Ruff E305 fix in `src/helpers/architecture.py:108`; that exact formatting edit is applied. The corrected operator E2E assertion requires surname → exact run-outcome response body → session metadata and restores a rendered-body content check. Full pre-commit-operator requires Darwin/Lima/Chrome and cannot run here; do not call it passed.

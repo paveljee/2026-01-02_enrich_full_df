@@ -50,7 +50,6 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     ETAG_HEADER,
     HTTP_GET_METHOD,
     HTTP_POST_METHOD,
-    KTP_AI_AUGMENT_COMMIT_REQUEST_RECORD_ID_COL,
     KTP_AI_AUGMENT_FOOTNOTE_ARGUMENTS_COL,
     KTP_AI_AUGMENT_FOOTNOTES_COL,
     SOURCE_KEY_HEADER,
@@ -222,7 +221,7 @@ GRID_NAME_COLUMN_WIDTH: Final = 150
 GRID_COHORT_COLUMN_WIDTH: Final = 150
 GRID_INELIGIBILITY_COLUMN_WIDTH: Final = 260
 GRID_CONTENT_COLUMN_WIDTH: Final = 320
-GRID_COMMIT_RECORD_ID_COLUMN_WIDTH: Final = 190
+GRID_COMPLETED_ATTEMPT_ID_COLUMN_WIDTH: Final = 190
 GRID_TIME_COLUMN_WIDTH: Final = 180
 GRID_STATUS_COLUMN_WIDTH: Final = 110
 ACTION_LABEL_BY_VALUE: Final = {
@@ -242,7 +241,7 @@ GRID_AI_VALUE_FIELD: Final = "ai_value"
 GRID_TABLE_1_VALUE_FIELD: Final = "table_1_value"
 GRID_FOOTNOTES_FIELD: Final = "footnotes"
 GRID_FOOTNOTE_ARGUMENTS_FIELD: Final = "footnote_arguments"
-GRID_COMMIT_REQUEST_RECORD_ID_FIELD: Final = "commit_request_record_id"
+GRID_COMPLETED_ATTEMPT_ID_FIELD: Final = "completed_attempt_id"
 GRID_TIMESTAMP_FIELD: Final = "timestamp"
 GRID_STATUS_FIELD: Final = "status"
 GRID_RUN_OUTCOME_SNAPSHOT_FIELD: Final = "run_outcome_snapshot"
@@ -463,10 +462,10 @@ class _RunAttemptView(FrozenStrictModel):
 
     @property
     def row_id(self) -> UUID:
-        if self.attempt is not None:
-            return self.attempt.validation_request_body.commit_request_record.record_id
-        assert self.run is not None
-        return self.run.run_id
+        if self.run is not None:
+            return self.run.run_id
+        assert self.run_outcome_response_record is not None
+        return self.run_outcome_response_record.record_id
 
     @property
     def run_id(self) -> UUID | None:
@@ -497,30 +496,22 @@ class _RunAttemptView(FrozenStrictModel):
         return self.run.lifecycle
 
     @property
-    def commit_request_record_id(self) -> UUID | None:
-        if self.attempt is not None:
-            return self.attempt.validation_request_body.commit_request_record.record_id
-        assert self.run is not None
-        outcome = self.run.run_outcome_response_record
-        attempt = None if outcome is None else outcome.attempt
-        return (
-            None if attempt is None
-            else attempt.validation_request_body.commit_request_record.record_id
-        )
+    def completed_attempt_id(self) -> UUID | None:
+        if self.run is not None:
+            return self.run.completed_attempt_id
+        return None if self.attempt is None else self.attempt.record_id
 
     @property
     def timestamp(self) -> datetime:
-        if self.attempt is not None:
-            return datetime.fromtimestamp(
-                self.attempt.validation_request_body
-                .commit_request_record.record_id.time / 1_000,
-                tz=timezone.utc,
-            )
-        assert self.run is not None
-        started = latest_run_event(self.run, RunLifecycle.STARTED)
-        queued = latest_run_event(self.run, RunLifecycle.QUEUED)
-        assert queued is not None
-        return (started or queued).occurred_at
+        if self.run is not None:
+            started = latest_run_event(self.run, RunLifecycle.STARTED)
+            queued = latest_run_event(self.run, RunLifecycle.QUEUED)
+            assert queued is not None
+            return (started or queued).occurred_at
+        assert self.run_outcome_response_record is not None
+        ready_at = self.run_outcome_response_record.ready_to_respond_at_unix_usec
+        assert ready_at is not None
+        return datetime.fromtimestamp(ready_at / 1_000_000, tz=timezone.utc)
 
     @property
     def failure_detail(self) -> str | None:
@@ -571,6 +562,7 @@ class _RunAttemptView(FrozenStrictModel):
     ) -> _ResearcherVarRowView:
         codex_innerdict = self.codex_innerdict
         return _ResearcherVarRowView(
+            row_id=self.row_id,
             run_id=self.run_id,
             namekey=researcher.namekey,
             draw_number=researcher.draw_number,
@@ -603,7 +595,7 @@ class _RunAttemptView(FrozenStrictModel):
                     researcher_var=researcher_var,
                 )
             ),
-            commit_request_record_id=self.commit_request_record_id,
+            completed_attempt_id=self.completed_attempt_id,
             timestamp=self.timestamp,
             lifecycle=self.lifecycle,
             backend_lifecycle=self.backend_lifecycle,
@@ -693,29 +685,41 @@ class _ResearcherView(FrozenStrictModel):
         snapshot: DashboardQuerySnapshot,
         runs: Sequence[Run],
     ) -> _ResearcherView:
-        by_session: dict[UUID, Run] = {}
+        session_ids: set[UUID] = set()
+        runs_by_completed_attempt_id: dict[UUID, Run] = {}
         for run in runs:
             if run.session_id is not None:
-                if run.session_id in by_session:
+                if run.session_id in session_ids:
+                    raise RuntimeError(Locale.RUN_OUTCOME_SESSION_DUPLICATE)
+                session_ids.add(run.session_id)
+            if run.completed_attempt_id is not None:
+                if run.completed_attempt_id in runs_by_completed_attempt_id:
                     raise RuntimeError(Locale.ATTEMPT_DATABASE_INCONSISTENT)
-                by_session[run.session_id] = run
+                runs_by_completed_attempt_id[run.completed_attempt_id] = run
         namekey = researcher.namekey.to_json_key()
         represented: set[UUID] = set()
         run_attempt_views: list[_RunAttemptView] = []
-        for record in snapshot.attempts_by_namekey.get(namekey, ()):
-            commit = record.validation_request_body.commit_request_record
-            session_id = commit.commit_request_body.codex_session_record.session_id
-            matched_run = None if session_id is None else by_session.get(session_id)
+        queried_researcher = snapshot.researchers_by_namekey.get(namekey)
+        for codex_innerdict in (
+            () if queried_researcher is None else queried_researcher.codex_innerdicts
+        ):
+            outcome = codex_innerdict.run_outcome_response_record
+            record = outcome.attempt
+            assert record is not None
+            session_id = outcome.run_outcome_request_record.session_id
+            matched_run = runs_by_completed_attempt_id.get(record.record_id)
             if matched_run is not None:
+                if (
+                    matched_run.session_id != session_id
+                    or matched_run.namekey != researcher.namekey
+                ):
+                    raise RuntimeError(Locale.ATTEMPT_DATABASE_INCONSISTENT)
                 represented.add(matched_run.run_id)
             run_attempt_views.append(_RunAttemptView(
                 attempt=record,
                 run=matched_run,
-                codex_innerdict=snapshot.committed_by_id.get(commit.record_id),
-                run_outcome_response_record=(
-                    None if session_id is None
-                    else snapshot.outcomes_by_session.get((namekey, session_id))
-                ),
+                codex_innerdict=codex_innerdict,
+                run_outcome_response_record=outcome,
             ))
         for run in runs:
             if run.run_id not in represented:
@@ -723,10 +727,7 @@ class _ResearcherView(FrozenStrictModel):
                     attempt=None,
                     run=run,
                     codex_innerdict=None,
-                    run_outcome_response_record=(
-                        None if run.session_id is None
-                        else snapshot.outcomes_by_session.get((namekey, run.session_id))
-                    ),
+                    run_outcome_response_record=run.run_outcome_response_record,
                 ))
         ordered = tuple(sorted(run_attempt_views, key=lambda run_attempt_view: (
             run_attempt_view.run is not None and not run_attempt_view.run.is_finished(),
@@ -775,6 +776,7 @@ class _ResearcherView(FrozenStrictModel):
 
 
 class _ResearcherVarRowView(FrozenStrictModel):
+    row_id: UUID | None
     run_id: UUID | None
 
     namekey: NameKey
@@ -791,7 +793,7 @@ class _ResearcherVarRowView(FrozenStrictModel):
     footnotes: str | None
     footnote_arguments: str | None
 
-    commit_request_record_id: UUID | None
+    completed_attempt_id: UUID | None
     timestamp: datetime | None
     lifecycle: RunLifecycle
     backend_lifecycle: RunLifecycle | None
@@ -825,6 +827,7 @@ class _ResearcherVarRowView(FrozenStrictModel):
         codex_busy: bool,
     ) -> _ResearcherVarRowView:
         return cls(
+            row_id=None,
             run_id=None,
             namekey=researcher.namekey,
             draw_number=researcher.draw_number,
@@ -841,7 +844,7 @@ class _ResearcherVarRowView(FrozenStrictModel):
             ),
             footnotes=None,
             footnote_arguments=None,
-            commit_request_record_id=None,
+            completed_attempt_id=None,
             timestamp=None,
             lifecycle=RunLifecycle.READY,
             backend_lifecycle=None,
@@ -1016,9 +1019,15 @@ class _BackendDatabaseClient:
             }:
                 raise RuntimeError(Locale.RUN_OUTCOME_SNAPSHOT_REQUEST_FAILED)
             try:
-                RunOutcomeResponseRecord._parse_response_body(body)
+                outcome_body = RunOutcomeResponseRecord._parse_response_body(body)
             except ValidationError as exc:
                 raise RuntimeError(Locale.BACKEND_DATABASE_RESPONSE_INVALID) from exc
+            if (
+                response.status == HTTPStatus.OK
+                and run_outcome is RunLifecycle.COMPLETED
+                and outcome_body.validation_record_id != validation_record_id
+            ):
+                raise RuntimeError(Locale.RUN_OUTCOME_COMPLETED_ATTEMPT_ID_MISMATCH)
             return HTTPStatus(response.status)
         except (OSError, http.client.HTTPException) as exc:
             raise RuntimeError(Locale.RUN_OUTCOME_SNAPSHOT_REQUEST_FAILED) from exc
@@ -2420,10 +2429,14 @@ class _ControlCentreController:
         )
         # Run.lifecycle -> RunLifecycle.CODEX_EXITED
         run_outcome, validation_record_id = await self._finalize_run(run=run)
+        if run_outcome is RunLifecycle.COMPLETED:
+            if validation_record_id is None:
+                raise RuntimeError(Locale.RUN_OUTCOME_COMPLETED_ATTEMPT_ID_MISSING)
+            run.completed_attempt_id = validation_record_id
+            self._storage.save_runs(tuple(self._runs.values()))
         await self._record_run_outcome(
             run=run,
             run_outcome=run_outcome,
-            validation_record_id=validation_record_id,
         )
         await self._append_run_event(
             RunEvent(
@@ -2473,7 +2486,6 @@ class _ControlCentreController:
         *,
         run: Run,
         run_outcome: RunLifecycle,
-        validation_record_id: UUID | None = None,
     ) -> None:
         async with self._run_outcome_lock:
             if run.run_id in self._run_outcome_recorded_run_ids:
@@ -2488,7 +2500,10 @@ class _ControlCentreController:
                     run_outcome=run_outcome,
                     namekey=run_namekey(run),
                     session_id=run.session_id,
-                    validation_record_id=validation_record_id,
+                    validation_record_id=(
+                        run.completed_attempt_id if run_outcome is RunLifecycle.COMPLETED
+                        else None
+                    ),
                 )
             except RuntimeError as exc:
                 message = Locale.RUN_OUTCOME_SNAPSHOT_REQUEST_FAILED_TEMPLATE.format(
@@ -2899,9 +2914,9 @@ class _ControlCentrePage:
                 wrap_text=True,
             ),
             AgGrid.column(
-                field=GRID_COMMIT_REQUEST_RECORD_ID_FIELD,
-                header=KTP_AI_AUGMENT_COMMIT_REQUEST_RECORD_ID_COL,
-                width=GRID_COMMIT_RECORD_ID_COLUMN_WIDTH,
+                field=GRID_COMPLETED_ATTEMPT_ID_FIELD,
+                header=GRID_COMPLETED_ATTEMPT_ID_FIELD,
+                width=GRID_COMPLETED_ATTEMPT_ID_COLUMN_WIDTH,
             ),
             AgGrid.column(
                 field=GRID_TIMESTAMP_FIELD,
@@ -2941,8 +2956,8 @@ class _ControlCentrePage:
                 label=GRID_STATUS_FIELD,
             ),
             nicegui_table_column(
-                field=GRID_COMMIT_REQUEST_RECORD_ID_FIELD,
-                label=KTP_AI_AUGMENT_COMMIT_REQUEST_RECORD_ID_COL,
+                field=GRID_COMPLETED_ATTEMPT_ID_FIELD,
+                label=GRID_COMPLETED_ATTEMPT_ID_FIELD,
             ),
             nicegui_table_column(
                 field=GRID_RUN_OUTCOME_SNAPSHOT_FIELD,
@@ -3009,7 +3024,7 @@ class _ControlCentrePage:
                 GRID_TABLE_1_VALUE_FIELD: latest.table_1_value,
                 GRID_FOOTNOTES_FIELD: latest.footnotes,
                 GRID_FOOTNOTE_ARGUMENTS_FIELD: latest.footnote_arguments,
-                GRID_COMMIT_REQUEST_RECORD_ID_FIELD: latest.commit_request_record_id,
+                GRID_COMPLETED_ATTEMPT_ID_FIELD: latest.completed_attempt_id,
                 GRID_TIMESTAMP_FIELD: (
                     None
                     if latest.timestamp is None
@@ -3029,17 +3044,13 @@ class _ControlCentrePage:
     ) -> list[dict[str, Any]]:
         return [
             {
-                GRID_ROW_ID_FIELD: str(
-                    researcher_var_row_view.commit_request_record_id
-                    if researcher_var_row_view.commit_request_record_id is not None
-                    else researcher_var_row_view.run_id
-                ),
+                GRID_ROW_ID_FIELD: str(researcher_var_row_view.row_id),
                 GRID_RUN_ID_FIELD: (
                     str(researcher_var_row_view.run_id)
                     if researcher_var_row_view.run_id is not None else None
                 ),
-                GRID_COMMIT_REQUEST_RECORD_ID_FIELD: (
-                    researcher_var_row_view.commit_request_record_id
+                GRID_COMPLETED_ATTEMPT_ID_FIELD: (
+                    researcher_var_row_view.completed_attempt_id
                 ),
                 GRID_TIMESTAMP_FIELD: (
                     None
@@ -3586,9 +3597,13 @@ def create_services(*, config_path: Path) -> _ApplicationServices:
         except Exception as exc:
             logger.exception(Locale.DASHBOARD_QUERY_REPLACE_FAILED_LOG)
             raise RuntimeError(Locale.BACKEND_DATABASE_RESPONSE_INVALID) from exc
+        completed_count = sum(
+            len(researcher.codex_innerdicts)
+            for researcher in snapshot.ai_augment_singular_outerdicts
+        )
         emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX,
                  f"Dashboard snapshot replaced: {len(snapshot.ai_augment_singular_outerdicts)} "
-                 f"researchers, {len(snapshot.committed_by_id)} completed augmentations")
+                 f"researchers, {completed_count} completed augmentations")
 
     return _ApplicationServices(
         configuration=configuration, storage=storage, backend=backend,

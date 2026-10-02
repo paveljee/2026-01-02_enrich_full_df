@@ -246,12 +246,12 @@ def test_completed_grid_row_uses_real_query_ipc(
                 assert (execute.text_content() or "").strip() == "Rerun"
                 history = page.get_by_test_id(control_ui.RUN_OUTCOME_HISTORY_TABLE_TEST_ID)
                 expect(history).not_to_contain_text(Locale.RUN_OUTCOME_SNAPSHOT_SAVED)
-                expect(history).not_to_contain_text(expected["commit_id"])
+                expect(history).to_contain_text(expected["completed_attempt_id"])
                 output_start = len(dashboard.output)
-                _, commit_id = operator.wait_for_completed_grid_row(
+                _, completed_attempt_id = operator.wait_for_completed_grid_row(
                     page, dashboard, runtime, queued_at_monotonic=time.monotonic(),
                 )
-                assert commit_id == expected["commit_id"]
+                assert completed_attempt_id == expected["completed_attempt_id"]
                 expect(history).to_contain_text(Locale.RUN_OUTCOME_SNAPSHOT_SAVED)
                 expect(history).to_contain_text(Locale.SESSION_STATUS_OK)
                 output = "".join(dashboard.output[output_start:])
@@ -372,6 +372,7 @@ class BrowserController:
             list[UUID],
         ] = {researcher.namekey.to_json_key(): [] for researcher in self._researchers}
         self._activity_by_run_id: dict[UUID, RunLifecycle] = {}
+        self._completed_attempt_id_by_run_id: dict[UUID, UUID] = {}
         self._card_render_count: Counter[str] = Counter()
         self._backend_status = control_ui._BackendStatus.RUNNING
         self._backend_availability = control_ui._BackendAvailability(
@@ -385,6 +386,7 @@ class BrowserController:
         self._run_id_by_namekey[completed_namekey] = completed_run_id
         self._run_history_ids_by_namekey[completed_namekey].append(completed_run_id)
         self._activity_by_run_id[completed_run_id] = RunLifecycle.COMPLETED
+        self._completed_attempt_id_by_run_id[completed_run_id] = uuid7()
 
     @property
     def active_run_id(self) -> None:
@@ -500,6 +502,7 @@ class BrowserController:
             researcher_var_row_views[-1]
             if researcher_var_row_views
             else control_ui._ResearcherVarRowView(
+                row_id=None,
                 run_id=run_id,
                 namekey=researcher.namekey,
                 draw_number=researcher.draw_number,
@@ -511,7 +514,7 @@ class BrowserController:
                 table_1_value=None,
                 footnotes=None,
                 footnote_arguments=None,
-                commit_request_record_id=None,
+                completed_attempt_id=None,
                 timestamp=None,
                 lifecycle=activity,
                 backend_lifecycle=None,
@@ -548,6 +551,7 @@ class BrowserController:
             RunLifecycle.CANCELLED,
         }
         return control_ui._ResearcherVarRowView(
+            row_id=run_id,
             run_id=run_id,
             namekey=researcher.namekey,
             draw_number=researcher.draw_number,
@@ -559,7 +563,7 @@ class BrowserController:
             table_1_value=None,
             footnotes=f"footnote-{ordinal}",
             footnote_arguments=f"arguments-{ordinal}",
-            commit_request_record_id=run_id,
+            completed_attempt_id=self._completed_attempt_id_by_run_id.get(run_id),
             timestamp=(E2E_RUN_BASE_TIME + timedelta(seconds=run_index)),
             lifecycle=activity,
             backend_lifecycle=None,

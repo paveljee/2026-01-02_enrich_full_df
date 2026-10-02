@@ -79,7 +79,6 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     KTP_AI_AUGMENT_ACADEMIC_POSITIONS_COL,
     KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL,
     KTP_AI_AUGMENT_COMMENTS_COL,
-    KTP_AI_AUGMENT_COMMIT_REQUEST_RECORD_ID_COL,
     KTP_AI_AUGMENT_EDUCATION_COL,
     KTP_AI_AUGMENT_FOOTNOTE_ARGUMENTS_COL,
     KTP_AI_AUGMENT_FOOTNOTES_COL,
@@ -88,11 +87,9 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     KTP_AI_AUGMENT_PLACE_OF_RESIDENCE_COL,
     KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL,
     KTP_AI_AUGMENT_RESEARCHER_AUTHOR_COL,
-    KTP_AI_AUGMENT_RUN_OUTCOME_RECORD_ID_COL,
     KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL,
     KTP_AI_AUGMENT_SESSION_METADATA_COL,
     KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL,
-    KTP_AI_AUGMENT_VALIDATION_RECORD_ID_COL,
     MILLISECONDS_PER_SECOND,
     NOT_AVAILABLE_OR_APPLICABLE_VALUE,
     NOT_REPORTED_VALUE,
@@ -179,7 +176,6 @@ class _DetourDbValidationReads(FrozenStrictModel):
     applied_retry_audit_rows: LazyResultFactory[
         [UUID], tuple[_AppliedRetryAuditRow, ...], Exception
     ]
-    output_identity_exists: LazyResultFactory[[], bool, Exception]
 
 
 RETRY_EVIDENCE_SUBMISSION_EXAMPLE = L_FEI_FEI_RETRY_FIXTURE.submission.model_dump(
@@ -315,7 +311,6 @@ INITIAL_STANDARDIZED_VALUES: Mapping[str, StandardizedValue] = {
 DRAW_NUMBER_COLUMN = DRAW_LABEL
 FRAGMENT_TYPE_COLUMN = KTP_FRAGMENT_TYPE_COL
 DOCX_ROW_FRAGMENT_TYPE = FragmentType.DOCX_ROW.value
-ROLLOUT_LINE_FRAGMENT_TYPE = FragmentType.LINE_NUMBER.value
 
 
 class _RetryEvidenceObligation(FrozenStrictModel):
@@ -1545,10 +1540,12 @@ def render_codex_values(
             tuple(match.evidence_number for match in matches),
         )
         standardized_value = field_submission.model_dump(mode="json")[STANDARDIZED_VALUE_FIELD]
-        rendered[standardized_columns[column]] = json.dumps(
-            standardized_value,
-            ensure_ascii=False,
-            separators=COMPACT_JSON_SEPARATORS,
+        rendered[standardized_columns[column]] = codex_parse.render_ai_standardized_value(
+            json.dumps(
+                standardized_value,
+                ensure_ascii=False,
+                separators=COMPACT_JSON_SEPARATORS,
+            )
         )
     rendered[KTP_AI_AUGMENT_FOOTNOTES_COL] = "\n".join(
         codex_parse.render_footnote(
@@ -1651,11 +1648,8 @@ def _accepted_output_row(
     namekey: NameKey,
     draw_number: str,
     rollout_index: _RolloutIndex,
-    cas_codex_rollout_record: CASCodexRolloutRecord,
-    commit_request_record: BackendCommitRequestRecord,
     commit_request_timestamp: datetime,
 ) -> tuple[tuple[str, str | int | None], ...]:
-    commit_request_record_id = str(commit_request_record.record_id)
     rendered = render_codex_values(
         submission,
         evidence,
@@ -1664,16 +1658,13 @@ def _accepted_output_row(
     )
     output_row: dict[str, str | int | None] = {
         KTP_NAMEKEY_COL: namekey.to_json_key(),
-        KTP_FILENAME_COL: rollout_index.session.rollout_filename,
-        KTP_FRAGMENT_COL: cas_codex_rollout_record.line_count,
-        KTP_FRAGMENT_TYPE_COL: ROLLOUT_LINE_FRAGMENT_TYPE,
+        KTP_FILENAME_COL: None,
+        KTP_FRAGMENT_COL: None,
+        KTP_FRAGMENT_TYPE_COL: None,
         DRAW_LABEL: draw_number,
         KTP_FIRST_NAME_COL: namekey.first_name,
         KTP_LAST_NAME_COL: namekey.last_name,
         KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL: None,
-        KTP_AI_AUGMENT_COMMIT_REQUEST_RECORD_ID_COL: commit_request_record_id,
-        KTP_AI_AUGMENT_VALIDATION_RECORD_ID_COL: None,
-        KTP_AI_AUGMENT_RUN_OUTCOME_RECORD_ID_COL: None,
         KTP_AI_AUGMENT_SESSION_METADATA_COL: rollout_index.session.summary_json,
         **rendered,
     }
@@ -1832,22 +1823,8 @@ def _evaluate_submission_for_commit(
                 namekey=inputs.namekey,
                 draw_number=draw_number,
                 rollout_index=rollout_index,
-                cas_codex_rollout_record=cas_codex_rollout_record,
-                commit_request_record=commit_request_record,
                 commit_request_timestamp=commit_request_timestamp,
             )
-            output_identity = dict(output_row)
-            assert output_identity[KTP_FILENAME_COL] == rollout_basename.name
-            assert output_identity[KTP_FRAGMENT_COL] == (
-                cas_codex_rollout_record.line_count
-            )
-            identity_exists, error = db_reads.output_identity_exists()
-            if error is not None:
-                assert identity_exists is None
-                raise error
-            assert identity_exists is not None
-            if identity_exists:
-                raise _PushValidationError(Locale.ACCEPTED_IDENTITY_DUPLICATE)
             stage = BackendLifecycle.ACCEPTED
             return result(
                 validation_result=BackendLifecycle.ACCEPTED,

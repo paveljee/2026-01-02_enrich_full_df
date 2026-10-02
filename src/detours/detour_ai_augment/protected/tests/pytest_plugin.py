@@ -711,6 +711,7 @@ def completed_query_fixture_process() -> None:
     from src.detours.detour_ai_augment.protected.tests.pytest_plugin import threaded_loop_runner
     from src.detours.detour_ai_augment.src.backend import server
     from src.detours.detour_ai_augment.src.backend.helpers.data_models.commit_request import (
+        BackendCommitRequestRecord,
         CodexRolloutRecord,
         _synthetic_commit_request_record,
     )
@@ -847,6 +848,7 @@ def completed_query_fixture_process() -> None:
             namekey=STARTUP_NAMEKEY,
         )
         commit = store._append_authoritative_record(draft)
+        assert isinstance(commit, BackendCommitRequestRecord)
         print("Completed-query fixture: validating synthetic commit", flush=True)
         validated = store._validate_commit(commit.record_id)
         assert (
@@ -866,7 +868,7 @@ def completed_query_fixture_process() -> None:
         ground_truth_innerdict = store.ai_augment_singular_outerdicts()[0].ground_truth_innerdict()
         if ground_truth_innerdict is not None:
             lines.append(api.json_line(api.select_columns(ground_truth_innerdict.data)))
-        gone_pull = store._append_authoritative_record(persisted_http_record(
+        store._append_authoritative_record(persisted_http_record(
             record_id=uuid7(),
             method=HTTP_GET_METHOD,
             path=PULL_PATH,
@@ -894,7 +896,7 @@ def completed_query_fixture_process() -> None:
             attempt=validated,
             response_code=HTTPStatus.OK,
             response_headers={SOURCE_KEY_HEADER: draft.request_headers[SOURCE_KEY_HEADER]},
-            pull_record_id=gone_pull.record_id,
+            pull_record_id=commit.commit_request_body.pull_response_record.record_id,
             push_record_id=push.record_id,
             commit_request_record_id=commit.record_id,
             validation_record_id=validated.record_id,
@@ -925,7 +927,8 @@ def completed_query_fixture_process() -> None:
     storage.replace_query_snapshot(stale)
     storage.save_run_events(events)
     run = Run(run_id=run_id, namekey=STARTUP_NAMEKEY, lifecycle=RunLifecycle.COMPLETED,
-                 session_id=session_id, events=tuple(events))
+                 session_id=session_id, completed_attempt_id=validated.record_id,
+                 events=tuple(events))
     storage.save_runs((run,))
     storage.save_queue([])
     # The real FilePersistentDict writes synchronously outside a running event loop.
@@ -951,11 +954,15 @@ def completed_query_fixture_process() -> None:
     assert row.researcher.namekey == STARTUP_NAMEKEY
     assert row.current_researcher_var_row_view.lifecycle is RunLifecycle.COMPLETED
     assert row.current_researcher_var_row_view.action is ui._RunAction.RERUN
-    assert row.current_researcher_var_row_view.commit_request_record_id is None
+    assert (
+        row.current_researcher_var_row_view.completed_attempt_id
+        == validated.record_id
+    )
     print(f"Completed-query fixture: real 307-to-1 filter passed in "
           f"{time.monotonic() - started:.3f}s", flush=True)
     (config_path.parent / "completed-query.json").write_text(json.dumps({
-        "commit_id": str(commit.record_id), "namekey": STARTUP_NAMEKEY.to_json_key(),
+        "completed_attempt_id": str(validated.record_id),
+        "namekey": STARTUP_NAMEKEY.to_json_key(),
     }))
     print("COMPLETED_QUERY_FIXTURE_READY", flush=True)
 

@@ -334,7 +334,7 @@ bash -c '
         pixi run test-detour-ai-augment-root
       } 2>&1
     " logs/pre-commit-extra.log &&
-    grep -q "FAILED" logs/pre-commit.log &&
+    grep -q "FAILED" logs/pre-commit-extra.log &&
     echo "grep: no FAILED"
   '"'"'
   # note the use of BSD-style script on macOS

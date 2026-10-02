@@ -61,6 +61,9 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.pydantic_to_paste import (  # noqa: E501
     EvidenceWithdrawal,
     FieldSubmission,
+    GenderSubmission,
+    NotAvailableOrApplicable,
+    NotReported,
     StandardizedFieldSubmission,
     StandardizedSubmission,
     WebSearchExcerpt,
@@ -94,7 +97,6 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     KTP_AI_AUGMENT_ACADEMIC_POSITIONS_COL,
     KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL,
     KTP_AI_AUGMENT_COMMENTS_COL,
-    KTP_AI_AUGMENT_COMMIT_REQUEST_RECORD_ID_COL,
     KTP_AI_AUGMENT_EDUCATION_COL,
     KTP_AI_AUGMENT_GENDER_COL,
     KTP_AI_AUGMENT_LINKS_COL,
@@ -139,6 +141,9 @@ from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_co
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_singular_outer_dict import (  # noqa: E501
     AiAugmentSingularOuterDict,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.codex_innerdict import (
+    _CodexInnerDictProcedure,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.commit_request import (
     COMMIT_PATH,
@@ -197,6 +202,7 @@ from src.helpers.data_models import (
     FragmentType,
     InnerDict,
     NameKey,
+    OuterDict,
     ResourceGroup,
 )
 from src.helpers.data_models.http_request_log import (
@@ -405,11 +411,6 @@ def evaluate_retry_submission_for_test(
         synthetic_record_id_seed=synthetic_record_id_seed,
     )
     store = store_for_connection(conn)
-    filename, _ = source_key_from_header_value(
-        commit_request_record.request_headers[SOURCE_KEY_HEADER]
-    )
-    rollout = commit_request_record.commit_request_body.codex_session_record.codex_rollout_record
-    assert rollout is not None
 
     def baseline_row() -> tuple[post_commit_validation._RetryBaselineRow | None, None]:
         row = store._retry_baseline_row(original_pull.record_id)
@@ -444,12 +445,6 @@ def evaluate_retry_submission_for_test(
         ),
         retry_baseline_row=baseline_row,
         applied_retry_audit_rows=audit_rows,
-        output_identity_exists=lambda: (
-            store._codex_output_identity_exists({
-                KTP_FILENAME_COL: filename,
-                KTP_FRAGMENT_COL: rollout.line_count,
-            }), None
-        ),
     )
     violations, projection = post_commit_validation._evaluate_retry_submission(
         commit_request_record=commit_request_record,
@@ -2577,7 +2572,10 @@ def test_run_outcome_http_exchange_is_logged_and_replays_as_raw_history(
         assert response.status_code == HTTPStatus.OK
         snapshot = DashboardQuerySnapshot.from_serialized_json(response.content)
         assert snapshot.model_dump_json() == live_snapshot
-        assert not snapshot.outcomes_by_session
+        assert all(
+            not researcher.codex_innerdicts
+            for researcher in snapshot.ai_augment_singular_outerdicts
+        )
     assert logical_database_snapshot(replay._detour_db_path) == live_database
     assert Path(replay._replay_log).read_bytes() == log_bytes
 
@@ -4932,32 +4930,32 @@ def ai_augment_singular_outerdict(
     )
 
 
-def test_card_labels_all_nonempty_standardized_fields_without_mutating_source() -> None:
-    standardized_values = tuple(
-        json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-        for value in (
-            "Woman",
-            1976,
-            ["University College London"],
-            {"first_name": "Aziz", "last_name": "Sheikh"},
-            ["English", "Urdu"],
-            {"place": "Edinburgh", "location": "Scotland"},
-            ["Professor"],
-            {"collaborators": ["Researcher A"]},
-            ["https://orcid.org/0000-0001-7022-1104"],
-        )
-    )
-    source_values = dict(
-        zip(AI_AUGMENT_STANDARDIZED_COLUMNS, standardized_values, strict=True)
+def test_card_labels_stored_standardized_fields_without_mutating_source() -> None:
+    submission = L_FEI_FEI_RETRY_FIXTURE.submission.model_copy(deep=True)
+    rendered = post_commit_validation.render_codex_values(
+        submission,
+        {column: [] for column in AI_AUGMENT_EVIDENCE_COLUMNS},
+        commit_request_timestamp=TEST_COMMIT_REQUEST_TIMESTAMP,
+        argument_ref_urls={},
     )
     singular_outerdict = ai_augment_singular_outerdict("A.", "Sheikh")
     source_innerdict = singular_outerdict.xlsx_innerdicts[0]
-    source_innerdict.data.update(source_values)
     original_source = deepcopy(source_innerdict.data)
-
     selected = api.selected_card_outer_dict(singular_outerdict)
+    assert (
+        selected.get_inner_by_key(singular_outerdict.namekey.to_json_key())[0]
+        is source_innerdict
+    )
+    codex_innerdict = InnerDict.from_mapping(
+        {
+            KTP_NAMEKEY_COL: singular_outerdict.namekey.to_json_key(),
+            KTP_FILENAME_COL: TEST_ROLLOUT_FILENAME,
+            **rendered,
+        },
+        _CodexInnerDictProcedure(),
+    )
     cards = build_cards(
-        selected,
+        OuterDict(data={singular_outerdict.namekey.to_json_key(): [codex_innerdict]}),
         total_draws=1,
         intro="",
         excluded_cols=api.CARD_EXCLUDED_COLUMNS,
@@ -4965,43 +4963,60 @@ def test_card_labels_all_nonempty_standardized_fields_without_mutating_source() 
 
     assert len(cards) == 1
     card = next(iter(cards.values()))
-    for column, canonical_json in source_values.items():
+    for (_, field_submission), column in zip(
+        submission.evidence_items(), AI_AUGMENT_STANDARDIZED_COLUMNS, strict=True,
+    ):
+        canonical_json = json.dumps(
+            field_submission.model_dump(mode="json")[FIELD_STANDARDIZED_VALUE_FIELD],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
         expected_value = codex_parse.render_ai_standardized_value(canonical_json)
-        selected_innerdict = selected.get_inner_by_key(singular_outerdict.namekey.to_json_key())[0]
-        assert selected_innerdict.data[column] == expected_value
+        assert codex_innerdict.data[column] == expected_value
         assert f"**`{column}`**: {expected_value}" in card
     assert source_innerdict.data == original_source
 
 
 @pytest.mark.parametrize(
-    "empty_standardized_value",
+    "placeholder",
     (
-        None,
         api.NOT_REPORTED_VALUE,
         api.NOT_AVAILABLE_OR_APPLICABLE_VALUE,
     ),
 )
-def test_selected_card_singular_outerdict_hides_empty_standardized_fields_without_mutation(
-    empty_standardized_value: str | None,
+def test_card_preserves_standardized_placeholders(
+    placeholder: NotReported | NotAvailableOrApplicable,
 ) -> None:
-    column = AI_AUGMENT_STANDARDIZED_COLUMNS[0]
-    canonical_json = json.dumps(empty_standardized_value, separators=(",", ":"))
-    singular_outerdict = ai_augment_singular_outerdict("A.", "Sheikh")
-    source_innerdict = singular_outerdict.xlsx_innerdicts[0]
-    source_innerdict.data[column] = canonical_json
-
-    selected = api.selected_card_outer_dict(singular_outerdict)
-    selected_innerdict = selected.get_inner_by_key(singular_outerdict.namekey.to_json_key())[0]
+    submission = L_FEI_FEI_RETRY_FIXTURE.submission.model_copy(deep=True)
+    submission.gender = GenderSubmission(
+        value=submission.gender.value,
+        web_search_excerpts=submission.gender.web_search_excerpts,
+        standardized_value=placeholder,
+    )
+    rendered = post_commit_validation.render_codex_values(
+        submission,
+        {column: [] for column in AI_AUGMENT_EVIDENCE_COLUMNS},
+        commit_request_timestamp=TEST_COMMIT_REQUEST_TIMESTAMP,
+        argument_ref_urls={},
+    )
+    column = AI_AUGMENT_STANDARDIZED_COLUMNS[
+        AI_AUGMENT_EVIDENCE_COLUMNS.index(KTP_AI_AUGMENT_GENDER_COL)
+    ]
+    expected_value = codex_parse.render_ai_standardized_value(json.dumps(placeholder))
+    assert rendered[column] == expected_value
+    namekey = NameKey(first_name="A.", last_name="Sheikh")
+    codex_innerdict = InnerDict.from_mapping(
+        {KTP_NAMEKEY_COL: namekey.to_json_key(), **rendered},
+        _CodexInnerDictProcedure(),
+    )
     cards = build_cards(
-        selected,
+        OuterDict(data={namekey.to_json_key(): [codex_innerdict]}),
         total_draws=1,
         intro="",
         excluded_cols=api.CARD_EXCLUDED_COLUMNS,
     )
-
-    assert selected_innerdict.data[column] is None
-    assert column not in next(iter(cards.values()))
-    assert source_innerdict.data[column] == canonical_json
+    assert f"**`{column}`**: {expected_value}" in next(iter(cards.values()))
+    assert codex_innerdict.data[column] == expected_value
 
 
 @pytest.mark.python_subprocess
@@ -5583,7 +5598,7 @@ def test_repeated_researcher_rows_materialize_as_distinct_innerdicts() -> None:
     connection = duckdb.connect(":memory:")
     try:
 
-        def output_row(fragment: int, commit_record_id: str) -> dict[str, object]:
+        def output_row(fragment: int) -> dict[str, object]:
             values: dict[str, object] = {
                 column: f"value for {column}" for column, _data_type in api.CODEX_OUTPUT_SCHEMA
             }
@@ -5595,14 +5610,15 @@ def test_repeated_researcher_rows_materialize_as_distinct_innerdicts() -> None:
                 DRAW_LABEL: TEST_DRAW_NUMBER,
                 KTP_FIRST_NAME_COL: "A.",
                 KTP_LAST_NAME_COL: "Sheikh",
-                KTP_AI_AUGMENT_COMMIT_REQUEST_RECORD_ID_COL: commit_record_id,
+                KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL: f"outcome-{fragment}",
+                KTP_AI_AUGMENT_SESSION_METADATA_COL: f"summary-{fragment}",
                 KTP_AI_AUGMENT_COMMENTS_COL: None,
             })
             return values
 
-        store_for_connection(connection)._append_codex_output(output_row(100, "commit-1"),
+        store_for_connection(connection)._append_codex_output(output_row(100),
         )
-        store_for_connection(connection)._append_codex_output(output_row(101, "commit-2"),
+        store_for_connection(connection)._append_codex_output(output_row(101),
         )
         store_for_connection(connection)._replace_codex_output_view()
         innerdicts_row = connection.execute(
@@ -5613,17 +5629,24 @@ def test_repeated_researcher_rows_materialize_as_distinct_innerdicts() -> None:
         innerdicts_text = innerdicts_row[0]
         innerdicts = tuple(json.loads(line) for line in innerdicts_text.splitlines())
         assert [row[KTP_FRAGMENT_COL] for row in innerdicts] == [100, 101]
-        assert all(KTP_AI_AUGMENT_COMMIT_REQUEST_RECORD_ID_COL not in row for row in innerdicts)
-        assert all(KTP_AI_AUGMENT_SESSION_METADATA_COL in row for row in innerdicts)
-        assert all(KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL in row for row in innerdicts)
+        assert all(
+            set(row) == {
+                column for column, _data_type in api.CODEX_OUTPUT_SCHEMA
+                if column != KTP_NAMEKEY_COL
+            }
+            for row in innerdicts
+        )
+        assert [row[KTP_AI_AUGMENT_SESSION_METADATA_COL] for row in innerdicts] == [
+            "summary-100", "summary-101",
+        ]
         assert connection.execute(
-            f'SELECT "{KTP_AI_AUGMENT_COMMIT_REQUEST_RECORD_ID_COL}" '
+            f'SELECT {duckdb_quote_identifier(KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL)} '
             f'FROM {api.CODEX_OUTPUT_ROWS_TABLE} '
-            f'ORDER BY "{KTP_FRAGMENT_COL}"'
-        ).fetchall() == [("commit-1",), ("commit-2",)]
+            f'ORDER BY {duckdb_quote_identifier(KTP_FRAGMENT_COL)}'
+        ).fetchall() == [("outcome-100",), ("outcome-101",)]
 
         with pytest.raises(ReplayInputMissing, match="already accepted"):
-            store_for_connection(connection)._append_codex_output(output_row(101, "commit-3"),
+            store_for_connection(connection)._append_codex_output(output_row(101),
             )
     finally:
         connection.close()

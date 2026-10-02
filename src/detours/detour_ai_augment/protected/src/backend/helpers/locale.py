@@ -678,7 +678,7 @@ class Locale:
     GROUND_TRUTH_DOCX_INCOMPLETE: Final = "ground-truth researcher has no complete docx innerdict"
     RESEARCHER_NOT_UNIQUE: Final = "selected researcher did not resolve uniquely"
     ACCEPTED_IDENTITY_DUPLICATE: Final = (
-        "commit record ID or rollout filename/line-count fragment is already accepted"
+        "commit request record ID or rollout filename/line-count fragment is already accepted"
     )
     CAPTURE_HTTP_LOG_EXISTS: Final = "capture HTTP request log already exists"
     ARCHIVED_CAPTURE_PATH_INVALID: Final = "archived capture path is invalid"

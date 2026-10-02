@@ -13,13 +13,10 @@ from pydantic import (
 )
 
 from src.detours.detour_ai_augment.protected.src.architecture import BackendComponent
-from src.detours.detour_ai_augment.protected.src.backend.helpers import codex_parse
 from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import (
     Locale,
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
-    AI_AUGMENT_CARD_EMPTY_VALUE_PLACEHOLDERS,
-    AI_AUGMENT_STANDARDIZED_COLUMNS,
     DOCX_COLUMNS,
     AiAugmentCohort,
     AiAugmentIneligibilityCategory,
@@ -201,33 +198,11 @@ class AiAugmentSingularOuterDict(FrozenStrictModel):
 def selected_card_outer_dict(
     singular_outerdict: AiAugmentSingularOuterDict,
 ) -> OuterDict:
-    selected = OuterDict(
-        data={
-            singular_outerdict.namekey.to_json_key(): [
-                inner.model_copy(deep=True)
-                for inner in (
-                    *singular_outerdict.xlsx_innerdicts,
-                    *(item.innerdict for item in singular_outerdict.codex_innerdicts),
-                    *singular_outerdict.docx_innerdicts,
-                    *singular_outerdict.ssn_innerdicts,
-                )
-            ]
-        }
-    )
-    for inner_dicts in selected.values():
-        for inner in inner_dicts:
-            for column in AI_AUGMENT_STANDARDIZED_COLUMNS:
-                value = inner.data.get(column)
-                if not isinstance(value, str):
-                    continue
-                try:
-                    decoded = json.loads(value)
-                except json.JSONDecodeError:
-                    continue
-                if decoded is None or (
-                    isinstance(decoded, str) and decoded in AI_AUGMENT_CARD_EMPTY_VALUE_PLACEHOLDERS
-                ):
-                    inner.data[column] = None
-                else:
-                    inner.data[column] = codex_parse.render_ai_standardized_value(value)
-    return selected
+    return OuterDict(data={
+        singular_outerdict.namekey.to_json_key(): [
+            *singular_outerdict.xlsx_innerdicts,
+            *(item.innerdict for item in singular_outerdict.codex_innerdicts),
+            *singular_outerdict.docx_innerdicts,
+            *singular_outerdict.ssn_innerdicts,
+        ],
+    })

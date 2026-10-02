@@ -114,15 +114,13 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     HTTP_POST_METHOD,
     ISO_8601_UTC_OFFSET,
     ISO_8601_UTC_SUFFIX,
-    KTP_AI_AUGMENT_COMMIT_REQUEST_RECORD_ID_COL,
-    KTP_AI_AUGMENT_RUN_OUTCOME_RECORD_ID_COL,
     KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL,
     KTP_AI_AUGMENT_SESSION_METADATA_COL,
-    KTP_AI_AUGMENT_VALIDATION_RECORD_ID_COL,
     MILLISECONDS_PER_SECOND,
     NANOSECONDS_PER_MICROSECOND,
     PULL_PATH,
     PUSH_PATH,
+    ROLLOUT_LINE_FRAGMENT_TYPE,
     SOURCE_KEY_HEADER,
     SYNTHETIC_COMMIT_HOST,
     SYNTHETIC_COMMIT_SCHEME,
@@ -158,6 +156,7 @@ from src.helpers.vars import (
     KTP_FILENAME_COL,
     KTP_FIRST_NAME_COL,
     KTP_FRAGMENT_COL,
+    KTP_FRAGMENT_TYPE_COL,
     KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
     KTP_INNERDICT_JSONLINES_COL,
     KTP_LAST_NAME_COL,
@@ -1673,7 +1672,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
             != namekey
         ):
             raise _ReplayCommitInvalidError(Locale.REPLAY_COMMIT_NAME_KEY_INVALID)
-        filename, source_line_count = self._parse_source_key_header(
+        _, source_line_count = self._parse_source_key_header(
             record.request_headers.get(SOURCE_KEY_HEADER)
         )
         rollout = body.codex_session_record.codex_rollout_record
@@ -1750,15 +1749,6 @@ class AiAugmentBackendStore(FrozenStrictModel):
             except Exception as exc:
                 return None, exc
 
-        def output_identity_exists() -> tuple[bool | None, Exception | None]:
-            try:
-                return self._codex_output_identity_exists({
-                    KTP_FILENAME_COL: filename,
-                    KTP_FRAGMENT_COL: rollout.line_count,
-                }), None
-            except Exception as exc:
-                return None, exc
-
         inputs = _CommitEvaluationInputs(
             original_pull_response_record=original_pull_response_record,
             namekey=namekey,
@@ -1775,7 +1765,6 @@ class AiAugmentBackendStore(FrozenStrictModel):
             retry_baseline_exists=retry_baseline_exists,
             retry_baseline_row=retry_baseline_row,
             applied_retry_audit_rows=applied_retry_audit_rows,
-            output_identity_exists=output_identity_exists,
         )
 
     def _cursor_commit_validation(
@@ -2497,14 +2486,6 @@ class AiAugmentBackendStore(FrozenStrictModel):
                 """
             )
 
-    def _codex_output_identity_exists(self, row: Mapping[str, object]) -> bool:
-        return self._execute(
-            f"SELECT 1 FROM {CODEX_OUTPUT_ROWS_TABLE} WHERE "
-            f"{duckdb_quote_identifier(KTP_FILENAME_COL)} = ? AND "
-            f"{duckdb_quote_identifier(KTP_FRAGMENT_COL)} = ?",
-            [row[KTP_FILENAME_COL], row[KTP_FRAGMENT_COL]],
-        ).fetchone() is not None
-
     def _append_codex_output(
         self,
         row: Mapping[str, object],
@@ -2528,9 +2509,13 @@ class AiAugmentBackendStore(FrozenStrictModel):
         )
         self._execute(
             f"CREATE TABLE IF NOT EXISTS {CODEX_OUTPUT_ROWS_TABLE} ("
-            f"{definitions}, UNIQUE ("
+            f"{definitions}, "
+            "UNIQUE ("
             f"{duckdb_quote_identifier(KTP_FILENAME_COL)}, "
-            f"{duckdb_quote_identifier(KTP_FRAGMENT_COL)}))"
+            f"{duckdb_quote_identifier(KTP_FRAGMENT_COL)}), "
+            "UNIQUE ("
+            f"{duckdb_quote_identifier(KTP_NAMEKEY_COL)}, "
+            f"{duckdb_quote_identifier(KTP_AI_AUGMENT_SESSION_METADATA_COL)}))"
         )
         self._execute(
             f"CREATE TABLE IF NOT EXISTS {CODEX_RUN_OUTCOME_RECORDS_TABLE} ("
@@ -2539,24 +2524,16 @@ class AiAugmentBackendStore(FrozenStrictModel):
         )
 
     def _replace_codex_output_view(self) -> None:
-        projection = ", ".join(
-            duckdb_quote_identifier(column) for column, _data_type in CODEX_OUTPUT_SCHEMA
-            if column not in {
-                KTP_AI_AUGMENT_COMMIT_REQUEST_RECORD_ID_COL,
-                KTP_AI_AUGMENT_VALIDATION_RECORD_ID_COL, KTP_AI_AUGMENT_RUN_OUTCOME_RECORD_ID_COL,
-            }
-        )
         self._execute(
             f"""
             CREATE OR REPLACE VIEW {CODEX_OUTPUT_VIEW} AS
-            SELECT {projection}
+            SELECT *
             FROM {CODEX_OUTPUT_ROWS_TABLE}
-            WHERE {duckdb_quote_identifier(KTP_AI_AUGMENT_VALIDATION_RECORD_ID_COL)} IS NOT NULL
-              AND {duckdb_quote_identifier(KTP_AI_AUGMENT_RUN_OUTCOME_RECORD_ID_COL)} IS NOT NULL
+            WHERE
+                {duckdb_quote_identifier(KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL)} IS NOT NULL
             ORDER BY
                 {duckdb_quote_identifier(KTP_FILENAME_COL)},
-                {duckdb_quote_identifier(KTP_FRAGMENT_COL)},
-                {duckdb_quote_identifier(KTP_AI_AUGMENT_COMMIT_REQUEST_RECORD_ID_COL)}
+                {duckdb_quote_identifier(KTP_FRAGMENT_COL)}
             """
         )
         self._materialize_innerdicts(
@@ -2797,91 +2774,68 @@ class AiAugmentBackendStore(FrozenStrictModel):
             or session_id is None
         ):
             return
+        if outcome.response_headers is None:
+            raise ReplayInputMissing(Locale.RUN_OUTCOME_SOURCE_KEY_MISSING)
+        outcome_filename, outcome_fragment = source_key_from_header_value(
+            outcome.response_headers.get(SOURCE_KEY_HEADER)
+        )
         commit_request_record_id = outcome._body().commit_request_record_id
         if commit_request_record_id is None:
             raise ReplayInputMissing(Locale.RUN_OUTCOME_VALIDATION_LINKAGE_CORRUPT)
-        exists = self._execute(
-            "SELECT count(*) FROM information_schema.tables WHERE table_name = ?",
-            [CODEX_OUTPUT_ROWS_TABLE],
-        ).fetchone()
-        if exists is None or int(exists[0]) == 0:
-            return
         namekey = outcome.run_outcome_request_record.namekey
         assert namekey is not None
-        rows = self._execute(
-            f"SELECT {duckdb_quote_identifier(KTP_AI_AUGMENT_COMMIT_REQUEST_RECORD_ID_COL)} "
+        pending = self._execute(
+            f"SELECT {duckdb_quote_identifier(KTP_AI_AUGMENT_SESSION_METADATA_COL)} "
             f"FROM {CODEX_OUTPUT_ROWS_TABLE} "
             f"WHERE {duckdb_quote_identifier(KTP_NAMEKEY_COL)} = ? "
-            f"AND {duckdb_quote_identifier(KTP_AI_AUGMENT_COMMIT_REQUEST_RECORD_ID_COL)} = ? "
-            f"AND {duckdb_quote_identifier(KTP_AI_AUGMENT_RUN_OUTCOME_RECORD_ID_COL)} IS NULL",
-            [namekey.to_json_key(), str(commit_request_record_id)],
+            f"AND {duckdb_quote_identifier(KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL)} IS NULL",
+            [namekey.to_json_key()],
         ).fetchall()
-        outcome_ordinal, _ = self._http_record_with_ordinal(outcome.record_id)
-        updated = 0
-        for (value,) in rows:
-            commit_id = UUID(str(value))
-            commit_ordinal, http_commit = self._http_record_with_ordinal(commit_id)
-            commit = self._backend_commit_request_record(http_commit)
-            if commit.commit_request_body.codex_session_record.session_id != session_id:
-                continue
-            if name_key_from_header_value(commit.request_headers.get(NAME_KEY_HEADER)) != namekey:
-                raise ReplayInputMissing(Locale.RUN_OUTCOME_COMMIT_NAMEKEY_MISMATCH)
-            linked = self._execute(
-                f"SELECT {VALIDATION_REQUEST_RECORD_ID_COLUMN} "
-                f"FROM {COMMIT_VALIDATION_REQUEST_RECORD_INDEX_TABLE} "
-                f"WHERE {COMMIT_REQUEST_RECORD_ID_COLUMN} = ?",
-                [str(commit_id)],
-            ).fetchone()
-            if linked is None or linked[0] is None:
-                raise ReplayInputMissing(Locale.RUN_OUTCOME_ACCEPTED_ROW_VALIDATION_MISSING)
-            validation_id = UUID(linked[0])
-            validation_ordinal, http_validation = self._http_record_with_ordinal(
-                validation_id
-            )
-            validation = self._validation_from_cursor()
-            if (
-                validation is None
-                or validation.record_id != validation_id
-                or validation.http_request_log_record.model_dump(mode="json")
-                != http_validation.model_dump(mode="json")
-                or validation.validation_request_body.commit_request_record is not commit
-                or validation.request_headers != commit.request_headers
-                or validation.validation_request_body.post_commit_validation.result
-                is not BackendLifecycle.ACCEPTED
-                or not commit_ordinal < validation_ordinal < outcome_ordinal
-            ):
-                raise ReplayInputMissing(Locale.RUN_OUTCOME_VALIDATION_LINKAGE_INVALID)
-            self._execute(
-                f"UPDATE {CODEX_OUTPUT_ROWS_TABLE} SET "
-                f"{duckdb_quote_identifier(KTP_AI_AUGMENT_VALIDATION_RECORD_ID_COL)} = ?, "
-                f"{duckdb_quote_identifier(KTP_AI_AUGMENT_RUN_OUTCOME_RECORD_ID_COL)} = ?, "
-                f"{duckdb_quote_identifier(KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL)} = ? "
-                f"WHERE {duckdb_quote_identifier(KTP_AI_AUGMENT_COMMIT_REQUEST_RECORD_ID_COL)} = ?",
-                [
-                    str(validation.record_id), str(outcome.record_id),
-                    outcome.response_body,
-                    str(commit.record_id),
-                ],
-            )
-            self._execute(
-                f"INSERT INTO {CODEX_RUN_OUTCOME_RECORDS_TABLE} ("
-                f"{duckdb_quote_identifier(CODEX_RUN_OUTCOME_RECORD_ID_COL)}, "
-                f"{duckdb_quote_identifier(CODEX_RUN_OUTCOME_SERIALIZED_JSON_COL)}) "
-                "VALUES (?, ?)",
-                [
-                    str(outcome.record_id),
-                    _RunOutcomeResponseRecordJson.from_run_outcome_response_record(
-                        outcome
-                    ).model_dump_json(),
-                ],
-            )
-            updated += 1
-        if updated:
-            self._replace_codex_output_view()
-            logger.info(
-                Locale.RUN_OUTCOME_MATERIALIZED_SECTIONS_LOG,
-                outcome.record_id, updated,
-            )
+        matches = tuple(
+            metadata_json for (metadata_json,) in pending
+            if UUID(
+                CodexRolloutRecord.parse_summary_json(metadata_json)[
+                    CODEX_SESSION_ID_JSON_KEY
+                ]
+            ) == session_id
+        )
+        if len(matches) != 1:
+            raise ReplayInputMissing(Locale.RUN_OUTCOME_PROJECTION_INCONSISTENT)
+        metadata_json = matches[0]
+        updated_rows = self._execute(
+            f"UPDATE {CODEX_OUTPUT_ROWS_TABLE} SET "
+            f"{duckdb_quote_identifier(KTP_FILENAME_COL)} = ?, "
+            f"{duckdb_quote_identifier(KTP_FRAGMENT_COL)} = ?, "
+            f"{duckdb_quote_identifier(KTP_FRAGMENT_TYPE_COL)} = ?, "
+            f"{duckdb_quote_identifier(KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL)} = ? "
+            f"WHERE {duckdb_quote_identifier(KTP_NAMEKEY_COL)} = ? "
+            f"AND {duckdb_quote_identifier(KTP_AI_AUGMENT_SESSION_METADATA_COL)} = ? "
+            f"AND {duckdb_quote_identifier(KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL)} IS NULL "
+            f"RETURNING {duckdb_quote_identifier(KTP_NAMEKEY_COL)}",
+            [
+                outcome_filename, outcome_fragment, ROLLOUT_LINE_FRAGMENT_TYPE,
+                outcome.response_body, namekey.to_json_key(), metadata_json,
+            ],
+        ).fetchall()
+        if len(updated_rows) != 1:
+            raise ReplayInputMissing(Locale.RUN_OUTCOME_PROJECTION_INCONSISTENT)
+        self._execute(
+            f"INSERT INTO {CODEX_RUN_OUTCOME_RECORDS_TABLE} ("
+            f"{duckdb_quote_identifier(CODEX_RUN_OUTCOME_RECORD_ID_COL)}, "
+            f"{duckdb_quote_identifier(CODEX_RUN_OUTCOME_SERIALIZED_JSON_COL)}) "
+            "VALUES (?, ?)",
+            [
+                str(outcome.record_id),
+                _RunOutcomeResponseRecordJson.from_run_outcome_response_record(
+                    outcome
+                ).model_dump_json(),
+            ],
+        )
+        self._replace_codex_output_view()
+        logger.info(
+            Locale.RUN_OUTCOME_MATERIALIZED_SECTIONS_LOG,
+            outcome.record_id, len(updated_rows),
+        )
 
     def _codex_innerdicts(self) -> tuple[CodexInnerDict, ...]:
         exists = self._execute(
@@ -2900,34 +2854,24 @@ class AiAugmentBackendStore(FrozenStrictModel):
         for namekey_json, payload in rows:
             try:
                 for values in loads_jsonlines(payload):
-                    row = self._execute(
-                        "SELECT "
-                        f"{duckdb_quote_identifier(KTP_AI_AUGMENT_RUN_OUTCOME_RECORD_ID_COL)}, "
-                        f"{duckdb_quote_identifier(KTP_AI_AUGMENT_SESSION_METADATA_COL)} "
-                        f"FROM {CODEX_OUTPUT_ROWS_TABLE} "
-                        f"WHERE {duckdb_quote_identifier(KTP_NAMEKEY_COL)} = ? "
-                        f"AND {duckdb_quote_identifier(KTP_FILENAME_COL)} = ? "
-                        f"AND {duckdb_quote_identifier(KTP_FRAGMENT_COL)} = ?",
-                        [namekey_json, values[KTP_FILENAME_COL], values[KTP_FRAGMENT_COL]],
-                    ).fetchone()
-                    if row is None or row[0] is None:
+                    response_body = values[KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL]
+                    if not isinstance(response_body, str):
                         raise ReplayInputMissing(Locale.RUN_OUTCOME_PROJECTION_INCONSISTENT)
+                    outcome_record_id = RunOutcomeResponseRecord._parse_response_body(
+                        response_body
+                    ).run_outcome_record_id
                     outcome_row = self._execute(
                         f"SELECT {duckdb_quote_identifier(CODEX_RUN_OUTCOME_SERIALIZED_JSON_COL)} "
                         f"FROM {CODEX_RUN_OUTCOME_RECORDS_TABLE} "
                         f"WHERE {duckdb_quote_identifier(CODEX_RUN_OUTCOME_RECORD_ID_COL)} = ?",
-                        [row[0]],
+                        [str(outcome_record_id)],
                     ).fetchone()
                     if outcome_row is None:
                         raise ReplayInputMissing(Locale.RUN_OUTCOME_PROJECTION_INCONSISTENT)
-                    run_outcome_json = outcome_row[0]
                     outcome = _RunOutcomeResponseRecordJson.model_validate_json(
-                        run_outcome_json
+                        outcome_row[0]
                     ).to_run_outcome_response_record()
-                    summary = CodexRolloutRecord.parse_summary_json(row[1])
-                    if UUID(summary[CODEX_SESSION_ID_JSON_KEY]) != (
-                        outcome.run_outcome_request_record.session_id
-                    ):
+                    if outcome.response_body != response_body:
                         raise ReplayInputMissing(Locale.RUN_OUTCOME_PROJECTION_INCONSISTENT)
                     codex_innerdicts.append(
                         CodexInnerDict(

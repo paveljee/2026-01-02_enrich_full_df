@@ -66,6 +66,9 @@ class Locale:
     ATTEMPT_DATABASE_INCONSISTENT: Final = (
         "validated attempt database state is inconsistent"
     )
+    RUN_OUTCOME_SESSION_DUPLICATE: Final = (
+        "multiple run outcomes have the same session ID"
+    )
     JOURNAL_DUPLICATE_RUN_ID: Final = (
         "dashboard run events contain a duplicate queued run ID"
     )
@@ -81,9 +84,6 @@ class Locale:
     )
     JOURNAL_ROLLOUT_PATH_MISSING: Final = (
         "rollout-discovered event has no path"
-    )
-    JOURNAL_COMMIT_REQUEST_RECORD_ID_MISSING: Final = (
-        "push-accepted event has no commit record ID"
     )
     UNKNOWN_NAMEKEY_TEMPLATE: Final = "unknown namekey: {namekey}"
     BACKEND_OUTPUT_PIPE_MISSING: Final = "backend output pipe was not created"
@@ -108,6 +108,12 @@ class Locale:
     )
     RUN_OUTCOME_SNAPSHOT_INVALID: Final = (
         "Backend run-outcome snapshot record is invalid"
+    )
+    RUN_OUTCOME_COMPLETED_ATTEMPT_ID_MISSING: Final = (
+        "completed Run has no final attempt ID from the pull ETag"
+    )
+    RUN_OUTCOME_COMPLETED_ATTEMPT_ID_MISMATCH: Final = (
+        "Backend run-outcome response attempt ID differs from the submitted ETag"
     )
     RUN_OUTCOME_SNAPSHOT_SAVED: Final = "saved"
     RUN_OUTCOME_SNAPSHOT_FAILED: Final = "not saved"

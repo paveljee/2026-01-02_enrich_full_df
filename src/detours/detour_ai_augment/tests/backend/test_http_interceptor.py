@@ -17,6 +17,7 @@ from fastapi import FastAPI
 from starlette.types import Message, Scope
 
 from src.detours.detour_ai_augment.protected.src.backend import api
+from src.detours.detour_ai_augment.protected.src.backend.helpers import codex_parse
 from src.detours.detour_ai_augment.protected.src.backend.helpers import vars as backend_vars
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.post_commit_validation import (  # noqa: E501
     PostCommitValidation,
@@ -27,10 +28,11 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     CODEX_RUN_OUTCOME_RECORDS_TABLE,
     CODEX_RUN_OUTCOME_SERIALIZED_JSON_COL,
     DOCX_COLUMNS,
-    KTP_AI_AUGMENT_COMMIT_REQUEST_RECORD_ID_COL,
+    HTTP_CONTENT_TYPE_HEADER,
+    HTTP_GET_METHOD,
     KTP_AI_AUGMENT_EDUCATION_COL,
-    KTP_AI_AUGMENT_RUN_OUTCOME_RECORD_ID_COL,
-    KTP_AI_AUGMENT_VALIDATION_RECORD_ID_COL,
+    KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL,
+    PULL_PATH,
     SOURCE_KEY_HEADER,
     ContentType,
 )
@@ -101,7 +103,13 @@ from src.detours.detour_ai_augment.tests.backend.test_api import (
     valid_submission_body,
 )
 from src.helpers.data_models.http_request_log import HttpRequestLogRecord
-from src.helpers.vars import KTP_FIRST_NAME_COL, KTP_LAST_NAME_COL
+from src.helpers.vars import (
+    KTP_FILENAME_COL,
+    KTP_FIRST_NAME_COL,
+    KTP_FRAGMENT_COL,
+    KTP_FRAGMENT_TYPE_COL,
+    KTP_LAST_NAME_COL,
+)
 
 backend_test_paths = fixtures.backend_test_paths
 
@@ -813,9 +821,11 @@ def test_outcome_materializes_persisted_ids_identically_live_and_replay(
         )
         assert not interim.ai_augment_singular_outerdicts[0].codex_innerdicts
         assert store._execute(
-            f'SELECT "{KTP_AI_AUGMENT_VALIDATION_RECORD_ID_COL}", '
-            f'"{KTP_AI_AUGMENT_RUN_OUTCOME_RECORD_ID_COL}" FROM {api.CODEX_OUTPUT_ROWS_TABLE}'
-        ).fetchone() == (None, None)
+            f'SELECT "{KTP_FILENAME_COL}", "{KTP_FRAGMENT_COL}", '
+            f'"{KTP_FRAGMENT_TYPE_COL}", '
+            f'"{KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL}" '
+            f'FROM {api.CODEX_OUTPUT_ROWS_TABLE}'
+        ).fetchone() == (None, None, None, None)
         outcome = outcome_for_commit(
             store, result.validation_request_body.commit_request_record, path=path, partial=partial
         )
@@ -835,8 +845,19 @@ def test_outcome_materializes_persisted_ids_identically_live_and_replay(
         if outcome.response_code != 200 or path is not RunOutcomePath.COMPLETED:
             assert not query.ai_augment_singular_outerdicts[0].codex_innerdicts
         else:
-            (innerdict,) = query.ai_augment_singular_outerdicts[0].codex_innerdicts
+            singular_outerdict = query.ai_augment_singular_outerdicts[0]
+            (innerdict,) = singular_outerdict.codex_innerdicts
             data = innerdict.innerdict.data
+            for column in backend_vars.AI_AUGMENT_STANDARDIZED_COLUMNS:
+                assert data[column].startswith(
+                    f"{codex_parse.AI_GENERATED_TEXT_PREFIX} "
+                )
+            assert (
+                api.selected_card_outer_dict(singular_outerdict).get_inner_by_key(
+                    singular_outerdict.namekey.to_json_key()
+                )[len(singular_outerdict.xlsx_innerdicts)]
+                is innerdict.innerdict
+            )
             run_outcome_json = store._execute(
                 f"SELECT {CODEX_RUN_OUTCOME_SERIALIZED_JSON_COL} "
                 f"FROM {CODEX_RUN_OUTCOME_RECORDS_TABLE} "
@@ -852,11 +873,17 @@ def test_outcome_materializes_persisted_ids_identically_live_and_replay(
                 innerdict.run_outcome_response_record.model_dump_json()
                 == outcome.model_dump_json()
             )
-            assert all(column not in data for column in (
-                KTP_AI_AUGMENT_COMMIT_REQUEST_RECORD_ID_COL,
-                KTP_AI_AUGMENT_VALIDATION_RECORD_ID_COL,
-                KTP_AI_AUGMENT_RUN_OUTCOME_RECORD_ID_COL,
-            ))
+            assert outcome.response_headers is not None
+            filename, fragment = AiAugmentBackendStore._parse_source_key_header(
+                outcome.response_headers[SOURCE_KEY_HEADER]
+            )
+            assert data[KTP_FILENAME_COL] == filename
+            assert data[KTP_FRAGMENT_COL] == fragment
+            assert data[KTP_FRAGMENT_TYPE_COL] == api.ROLLOUT_LINE_FRAGMENT_TYPE
+            assert data[KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL] == outcome.response_body
+            assert set(data) == {
+                column for column, _data_type in api.CODEX_OUTPUT_SCHEMA
+            }
         snapshot = query.model_dump_json()
         assert DashboardQuerySnapshot.from_serialized_json(snapshot).model_dump_json() == snapshot
     log_bytes = Path(store._replay_log).read_bytes()
@@ -929,27 +956,48 @@ def test_outcome_finalizes_only_linked_commit_once(
     store = backend_store
     payload = valid_submission_body()
     with store._writable(runtime):
-        for index in range(2):
-            commit_id = commit(store, payload, payload, rollout_suffix=(
-                b'{"type":"event_msg","timestamp":"2026-09-03T15:17:00Z",'
-                b'"payload":{"type":"task_complete"}}\n'
-            ) * index)
-            result = store._validate_commit(commit_id)
-            assert (
-                result.validation_request_body.post_commit_validation.result
-                is BackendLifecycle.ACCEPTED
-            )
+        first = store._validate_commit(commit(store, {}, payload))
+        assert (
+            first.validation_request_body.post_commit_validation.result
+            is BackendLifecycle.REJECTED
+        )
+        assert (
+            first.validation_request_body.post_commit_validation.stage
+            is BackendLifecycle.PYDANTIC_VALIDATION
+        )
+        retry_pull = store._append_authoritative_record(persisted_http_record(
+            record_id=uuid7(), method=HTTP_GET_METHOD, path=PULL_PATH,
+            response_code=HTTPStatus.OK,
+            response_headers={HTTP_CONTENT_TYPE_HEADER: ContentType.MARKDOWN_UTF8},
+            response_body=(
+                first.validation_request_body.post_commit_validation.detail
+                or Locale.VALIDATION_ERROR_DETAIL
+            ).rstrip() + "\n",
+        ))
+        assert isinstance(retry_pull, PullResponseRecord)
+        assert retry_pull.validation_request_record is first
+
+        result = store._validate_commit(commit(store, payload, payload, retry_pull))
+        assert (
+            result.validation_request_body.post_commit_validation.result
+            is BackendLifecycle.ACCEPTED
+        )
         outcome = outcome_for_commit(store, result.validation_request_body.commit_request_record)
+        assert outcome.attempt is result
+        assert outcome._body().commit_request_record_id == (
+            result.validation_request_body.commit_request_record.record_id
+        )
+        assert outcome.response_code == HTTPStatus.OK
         store._append_authoritative_record(outcome)
         before = query_snapshot(store)
         assert len(before.ai_augment_singular_outerdicts[0].codex_innerdicts) == 1
-        store._append_authoritative_record(
-            outcome_for_commit(
-                store,
-                result.validation_request_body.commit_request_record,
-                path=RunOutcomePath.FAILED,
-            )
+        failed_outcome = outcome_for_commit(
+            store,
+            result.validation_request_body.commit_request_record,
+            path=RunOutcomePath.FAILED,
         )
+        assert failed_outcome.response_code == HTTPStatus.CONFLICT
+        store._append_authoritative_record(failed_outcome)
         after = query_snapshot(store)
         assert (
             type(after).from_serialized_json(after.model_dump_json()).model_dump_json()
@@ -1086,7 +1134,15 @@ def test_initial_validation_is_lifecycle_scoped_and_replays_explicit_links(
         session_id = UUID(OPERATOR_CAPTURED_SESSION_ID) if index == 0 else uuid7()
         assert store.current_replayed_record is None
         with store._writable(runtime):
-            first = store._validate_commit(commit(store, payload, payload, session_id=session_id))
+            first = store._validate_commit(commit(store, {}, payload, session_id=session_id))
+            assert (
+                first.validation_request_body.post_commit_validation.result
+                is BackendLifecycle.REJECTED
+            )
+            assert (
+                first.validation_request_body.post_commit_validation.stage
+                is BackendLifecycle.PYDANTIC_VALIDATION
+            )
             initial = store.current_replayed_record
             assert isinstance(initial, BackendValidationRequestRecord)
             assert first is not None
@@ -1101,6 +1157,10 @@ def test_initial_validation_is_lifecycle_scoped_and_replays_explicit_links(
             second = store._validate_commit(commit(
                 store, payload, payload, retry_pull, session_id=session_id,
             ))
+            assert (
+                second.validation_request_body.post_commit_validation.result
+                is BackendLifecycle.ACCEPTED
+            )
             last_validation = store.current_replayed_record
             assert isinstance(last_validation, BackendValidationRequestRecord)
             assert second is not None
@@ -1159,9 +1219,17 @@ def test_failed_validation_projection_does_not_advance_store_validation_state(
     with pytest.raises(RuntimeError, match="Store failed"), store._writable(runtime):
         retry_pull = None
         if has_initial:
-            store._validate_commit(commit(store, payload, payload))
+            store._validate_commit(commit(store, {}, payload))
             initial = store.current_replayed_record
             assert isinstance(initial, BackendValidationRequestRecord)
+            assert (
+                initial.validation_request_body.post_commit_validation.result
+                is BackendLifecycle.REJECTED
+            )
+            assert (
+                initial.validation_request_body.post_commit_validation.stage
+                is BackendLifecycle.PYDANTIC_VALIDATION
+            )
             retry_pull = store._append_authoritative_record(persisted_http_record(
                 record_id=uuid7(), method="GET", path="/pull", response_code=200,
             ))

@@ -141,6 +141,7 @@ from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_mod
 )
 from src.detours.detour_ai_augment.src.shared import (
     name_key_header_value,
+    source_key_from_header_value,
     source_key_header_value,
 )
 from src.helpers.cards import build_cards
@@ -151,6 +152,7 @@ from src.helpers.vars import (
     DRAW_LABEL,
     KTP_FILENAME_COL,
     KTP_FIRST_NAME_COL,
+    KTP_FRAGMENT_COL,
     KTP_LAST_NAME_COL,
     KTP_NAMEKEY_COL,
 )
@@ -443,6 +445,7 @@ class FakeBackendDatabase:
         self.run_outcome_calls: list[
             tuple[RunLifecycle, NameKey]
         ] = []
+        self.run_outcome_completed_attempt_ids: list[UUID | None] = []
         self.ipc_available = available
         self.response = DashboardQuerySnapshot(
             ai_augment_singular_outerdicts=(researcher(),),
@@ -472,6 +475,7 @@ class FakeBackendDatabase:
             f"run-outcome:{run_outcome.to_run_outcome_path()}"
         )
         self.run_outcome_calls.append((run_outcome, namekey))
+        self.run_outcome_completed_attempt_ids.append(validation_record_id)
         response = run_outcome_response_record(namekey=namekey, run_outcome=run_outcome)
         assert response.response_code is not None
         return HTTPStatus(response.response_code)
@@ -495,6 +499,7 @@ class FakeBackend:
         self.status = control_ui._BackendStatus.STOPPED
         self.api_available = full_api_available
         self.pull_status = status.HTTP_200_OK
+        self.pull_completed_attempt_id: UUID = SESSION_ID
 
     def full_api_available(self) -> bool:
         return self.api_available
@@ -506,7 +511,11 @@ class FakeBackend:
 
     async def probe_pull(self) -> tuple[HTTPStatus, UUID | None]:
         self.order.append("backend-pull")
-        return HTTPStatus(self.pull_status), None
+        return (
+            HTTPStatus(self.pull_status),
+            self.pull_completed_attempt_id
+            if self.pull_status == status.HTTP_410_GONE else None,
+        )
 
     async def supply_session_id(self, session_id: UUID) -> None:
         self.order.append("backend-session")
@@ -1009,7 +1018,10 @@ async def test_dashboard_refresh_keeps_rejected_attempts_out_of_query_snapshot(
         await application.query_ipc()
 
         assert backend_database.query_calls == 1
-        assert subject._snapshot.attempts_by_namekey == {}
+        assert all(
+            not researcher.codex_innerdicts
+            for researcher in subject._snapshot.ai_augment_singular_outerdicts
+        )
         assert app.storage.general[storage_models.BACKEND_DATABASE_STORAGE_KEY] == (
             backend_database.response.model_dump(mode="json")
         )
@@ -1065,7 +1077,10 @@ async def test_dashboard_start_restores_refreshed_backend_data_without_querying(
     await subject.start()
     try:
         assert backend_database.query_calls == 0
-        assert subject._snapshot.attempts_by_namekey == {}
+        assert all(
+            not researcher.codex_innerdicts
+            for researcher in subject._snapshot.ai_augment_singular_outerdicts
+        )
     finally:
         await subject.shutdown()
 
@@ -1209,8 +1224,16 @@ def test_backend_database_client_posts_exact_run_outcome_request(
     namekey = NameKey(first_name="Jane", last_name="Doe")
     session_id = UUID(str(SESSION_ID))
     rollout_filename = f"{api.ROLLOUT_FILENAME_PREFIX}{session_id}.jsonl"
+    accepted_attempt = (
+        agent_runtime_attempt(session_id=session_id)
+        if response_code == status.HTTP_200_OK else None
+    )
+    validation_record_id = (
+        SESSION_ID if accepted_attempt is None else accepted_attempt.record_id
+    )
     snapshot = run_outcome_response_record(
         namekey=namekey, response_code=response_code, session_id=session_id,
+        attempt=accepted_attempt,
     )
     body = snapshot.response_body
     assert body is not None
@@ -1264,7 +1287,7 @@ def test_backend_database_client_posts_exact_run_outcome_request(
         run_outcome=RunLifecycle.COMPLETED,
         namekey=namekey,
         session_id=SESSION_ID,
-        validation_record_id=SESSION_ID,
+        validation_record_id=validation_record_id,
     )
 
     assert calls == [
@@ -1274,7 +1297,7 @@ def test_backend_database_client_posts_exact_run_outcome_request(
             {
                 run_outcome_models.NAME_KEY_HEADER: name_key_header_value(namekey),
                 "Session-ID": str(SESSION_ID),
-                "ETag": f'"{SESSION_ID}"',
+                "ETag": f'"{validation_record_id}"',
             },
         )
     ]
@@ -1357,7 +1380,10 @@ async def test_run_outcome_snapshot_500_is_kept_separate_from_run_outcome(
         (RunLifecycle.FAILED, NAMEKEY)
     ]
     assert backend_database.query_calls == 0
-    assert not subject._snapshot.outcomes_by_session
+    assert all(
+        not researcher.codex_innerdicts
+        for researcher in subject._snapshot.ai_augment_singular_outerdicts
+    )
     await application.query_ipc()
     response = backend_database.last_response
     assert response.run_outcome is RunLifecycle.FAILED
@@ -1536,7 +1562,7 @@ async def test_execution_starts_fresh_backend_before_codex_and_hands_off_session
         run: run_event_models.Run,
     ) -> tuple[RunLifecycle, UUID | None]:
         assert run.run_id == run_id
-        return RunLifecycle.COMPLETED, None
+        return RunLifecycle.COMPLETED, SESSION_ID
 
     monkeypatch.setattr(control_ui._ControlCentreController, "_finalize_run", complete_run)
 
@@ -1591,7 +1617,7 @@ async def test_worker_stops_backend_before_starting_next_queued_run(
         run: run_event_models.Run,
     ) -> tuple[RunLifecycle, UUID | None]:
         assert run.run_id in subject._runs
-        return RunLifecycle.COMPLETED, None
+        return RunLifecycle.COMPLETED, SESSION_ID
 
     monkeypatch.setattr(control_ui._ControlCentreController, "_finalize_run", complete_run)
     first_run_id = await subject.queue(namekey=first.namekey)
@@ -1896,6 +1922,9 @@ async def test_backend_acceptance_remains_running_until_codex_exits(
         commit_request_record_id=accepted_commit_request_record_id,
         session_id=SESSION_ID,
     )
+    cast(FakeBackend, subject._backend).pull_completed_attempt_id = (
+        accepted_attempt.record_id
+    )
     assert accepted_attempt.validation_request_body.post_commit_validation.submission is not None
     backend_database.response = DashboardQuerySnapshot(
         ai_augment_singular_outerdicts=(source,),
@@ -1937,9 +1966,18 @@ async def test_backend_acceptance_remains_running_until_codex_exits(
     )
     assert completed.researcher_var_views[0].current_researcher_var_row_view.ai_value is None
     if expected_outcome is RunLifecycle.COMPLETED:
+        assert subject._runs[run_id].completed_attempt_id == accepted_attempt.record_id
+        assert (
+            backend_database.run_outcome_completed_attempt_ids[-1]
+            == accepted_attempt.record_id
+        )
         outcome = run_outcome_response_record(
             namekey=NAMEKEY, run_outcome=RunLifecycle.COMPLETED,
             attempt=accepted_attempt,
+        )
+        assert outcome.response_headers is not None
+        filename, fragment = source_key_from_header_value(
+            outcome.response_headers[SOURCE_KEY_HEADER]
         )
         session_metadata = CodexRolloutRecord.build_summary_json({
             "originator": "codex_cli_rs", "source": "exec", "cli_version": "test",
@@ -1950,6 +1988,8 @@ async def test_backend_acceptance_remains_running_until_codex_exits(
             innerdict=InnerDict.from_mapping(
                 {
                     KTP_NAMEKEY_COL: NAMEKEY.to_json_key(),
+                    KTP_FILENAME_COL: filename,
+                    KTP_FRAGMENT_COL: fragment,
                     researcher_var.ai_column: accepted_value,
                     KTP_AI_AUGMENT_FOOTNOTES_COL: None,
                     KTP_AI_AUGMENT_FOOTNOTE_ARGUMENTS_COL: None,
@@ -2661,42 +2701,94 @@ async def test_page_query_uses_composed_operation_and_publishes_only_after_clean
         notify.assert_called_once_with(Locale.QUERY_SNAPSHOT_REPLACED, type="positive")
 
 
-def test_multiple_commits_for_same_session_remain_distinct_display_rows(tmp_path: Path) -> None:
-    records = tuple(agent_runtime_attempt() for _ in range(2))
-    outcomes = tuple(run_outcome_response_record(attempt=record) for record in records)
+@pytest.mark.anyio
+async def test_control_centre_run_history_keeps_failed_cancelled_and_completed_runs_distinct(
+    tmp_path: Path,
+) -> None:
+    attempt = agent_runtime_attempt()
+    outcome = run_outcome_response_record(attempt=attempt)
+    assert outcome.response_headers is not None
+    filename, fragment = source_key_from_header_value(
+        outcome.response_headers[SOURCE_KEY_HEADER]
+    )
     session_metadata = CodexRolloutRecord.build_summary_json({
         "originator": "codex_cli_rs", "source": "exec", "cli_version": "test",
         "model_provider": "openai", "model": "test", "reasoning_effort": "high",
         "session_id": str(SESSION_ID), "timestamp": SESSION_TIMESTAMP.isoformat(),
     })
     source = researcher().model_copy(update={
-        "codex_innerdicts": tuple(CodexInnerDict(
+        "codex_innerdicts": (CodexInnerDict(
             innerdict=InnerDict.from_mapping({
                 KTP_NAMEKEY_COL: NAMEKEY.to_json_key(),
-                KTP_FILENAME_COL: f"commit-{index}.docx",
+                KTP_FILENAME_COL: filename,
+                KTP_FRAGMENT_COL: fragment,
                 KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL: outcome.response_body,
                 KTP_AI_AUGMENT_SESSION_METADATA_COL: session_metadata,
             }, _CodexInnerDictProcedure()),
             run_outcome_response_record=outcome,
-        ) for index, outcome in enumerate(outcomes)),
+        ),),
     })
-    storage = storage_models.AiAugmentDashboardStorage()
-    snapshot = storage.replace_query_snapshot(DashboardQuerySnapshot(
-        ai_augment_singular_outerdicts=(source,),
+    subject = controller()
+    set_researchers(subject, (source,))
+    runs: list[run_event_models.Run] = []
+    base_time = RunEvent.datetime_to_unix_usec(SESSION_TIMESTAMP)
+    for index, (lifecycle, session_id) in enumerate((
+        (RunLifecycle.FAILED, uuid7()),
+        (RunLifecycle.CANCELLED, uuid7()),
+        (RunLifecycle.COMPLETED, SESSION_ID),
+    )):
+        run_id = uuid7()
+        run = control_ui.apply_run_event(
+            None,
+            RunEvent(
+                run_id=run_id,
+                occurred_at_unix_usec=base_time + index * 1_000_000,
+                lifecycle=RunLifecycle.QUEUED,
+            ),
+            namekey=NAMEKEY,
+        )
+        run.session_id = session_id
+        if lifecycle is RunLifecycle.COMPLETED:
+            run.completed_attempt_id = attempt.record_id
+        run = control_ui.apply_run_event(run, RunEvent(
+            run_id=run_id,
+            occurred_at_unix_usec=base_time + index * 1_000_000 + 1,
+            lifecycle=lifecycle,
+        ))
+        subject._runs[run_id] = run
+        runs.append(run)
+    researcher_var = control_ui.RESEARCHER_VARS[0]
+    dashboard = await subject.snapshot(selection=control_ui._UiSelection(
+        researcher_varname=researcher_var.varname,
     ))
-    run = queued_run()
-    run.session_id = SESSION_ID
-    view = control_ui._ResearcherView.from_snapshot(source, snapshot, (run,))
-    row = view.to_var_view(
-        ground_truth=None, researcher_var=control_ui.RESEARCHER_VARS[0], codex_busy=False,
-    )
-    assert len(row.researcher_var_row_views) == 2
-    assert all(item.run_id == run.run_id for item in row.researcher_var_row_views)
+    assert len(dashboard.researcher_var_views) == 1
+    row = dashboard.researcher_var_views[0]
+    assert row.current_researcher_var_row_view.lifecycle is RunLifecycle.COMPLETED
+    assert row.current_researcher_var_row_view.run_id == runs[-1].run_id
+    assert [item.lifecycle for item in row.researcher_var_row_views] == [
+        RunLifecycle.FAILED, RunLifecycle.CANCELLED, RunLifecycle.COMPLETED,
+    ]
+    assert [item.run_id for item in row.researcher_var_row_views] == [
+        run.run_id for run in runs
+    ]
+    assert source.codex_innerdicts[0].innerdict.data[KTP_FILENAME_COL] == filename
+    assert source.codex_innerdicts[0].innerdict.data[KTP_FRAGMENT_COL] == fragment
     page = control_ui._ControlCentrePage(
-        controller=controller(), query_ipc=AsyncMock(), reference_docx=tmp_path / "ref",
+        controller=subject, query_ipc=AsyncMock(), reference_docx=tmp_path / "ref",
     )
-    ids = [item[control_ui.GRID_ROW_ID_FIELD] for item in page.run_outcome_history_rows(row=row)]
-    assert len(set(ids)) == 2
+    grid_rows = page.grid_rows(snapshot=dashboard)
+    assert len(grid_rows) == 1
+    assert grid_rows[0][control_ui.GRID_RUN_ID_FIELD] == str(runs[-1].run_id)
+    history_rows = page.run_outcome_history_rows(row=row)
+    assert len(history_rows) == 3
+    assert [item[control_ui.GRID_STATUS_FIELD] for item in history_rows] == [
+        RunLifecycle.FAILED.value,
+        RunLifecycle.CANCELLED.value,
+        RunLifecycle.COMPLETED.value,
+    ]
+    ids = [item[control_ui.GRID_ROW_ID_FIELD] for item in history_rows]
+    assert ids == [str(run.run_id) for run in runs]
+    assert len(set(ids)) == 3
     with pytest.raises(ValidationError, match="frozen"):
         row.current_researcher_var_row_view.ai_value = "changed"  # type: ignore[misc]
 
@@ -2704,26 +2796,31 @@ def test_multiple_commits_for_same_session_remain_distinct_display_rows(tmp_path
 @pytest.mark.anyio
 @pytest.mark.parametrize("include_materialization", (False, True))
 @pytest.mark.parametrize("include_outcome", (False, True))
-async def test_card_record_ids_match_each_commit_and_researcher_session(
+async def test_researcher_card_uses_linked_run_outcome_response_bodies_for_distinct_sessions(
     include_materialization: bool, include_outcome: bool,
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, inline_controller_io: None,
 ) -> None:
     source = researcher()
-    sessions = (SESSION_ID, SESSION_ID, uuid7())
+    sessions = (SESSION_ID, uuid7(), uuid7())
     records: list[AgentRuntimeAttempt] = []
     committed: list[CodexInnerDict] = []
     matched_outcomes: list[RunOutcomeResponseRecord] = []
-    for index, session_id in enumerate(sessions):
+    for session_id in sessions:
         record = agent_runtime_attempt(session_id=session_id)
         outcome = run_outcome_response_record(session_id=session_id, attempt=record)
         matched_outcomes.append(outcome)
         assert record.validation_request_body.post_commit_validation.submission is not None
         records.append(record)
         if include_materialization and include_outcome:
+            assert outcome.response_headers is not None
+            filename, fragment = source_key_from_header_value(
+                outcome.response_headers[SOURCE_KEY_HEADER]
+            )
             committed.append(CodexInnerDict(
                 innerdict=InnerDict.from_mapping({
                     KTP_NAMEKEY_COL: NAMEKEY.to_json_key(),
-                    KTP_FILENAME_COL: f"commit-{index}.docx",
+                    KTP_FILENAME_COL: filename,
+                    KTP_FRAGMENT_COL: fragment,
                     KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL: outcome.response_body,
                     KTP_AI_AUGMENT_SESSION_METADATA_COL: CodexRolloutRecord.build_summary_json({
                         "originator": "codex_cli_rs", "source": "exec",

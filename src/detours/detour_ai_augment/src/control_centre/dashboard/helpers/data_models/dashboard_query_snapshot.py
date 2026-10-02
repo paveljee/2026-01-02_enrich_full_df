@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections import defaultdict
 from collections.abc import Mapping
 from functools import cached_property
 from types import MappingProxyType
@@ -16,15 +15,12 @@ from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helper
     Locale,
 )
 from src.helpers.architecture import FrozenStrictModel
-from src.helpers.data_models import InnerDict, NameKey
+from src.helpers.data_models import InnerDict
 
-from .....agent_runtime.helpers.data_models.attempt import AgentRuntimeAttempt
 from .....backend.helpers.data_models.ai_augment_singular_outer_dict import (
     AiAugmentSingularOuterDict,
 )
-from .....backend.helpers.data_models.codex_innerdict import CodexInnerDict
 from .query_event import QueryResponseRecord
-from .run_outcome_event import RunOutcomeResponseRecord
 
 
 class DashboardQuerySnapshot(FrozenStrictModel):
@@ -48,47 +44,6 @@ class DashboardQuerySnapshot(FrozenStrictModel):
         })
 
     @cached_property
-    def committed_by_id(self) -> Mapping[UUID, CodexInnerDict]:
-        return MappingProxyType({
-            committed.run_outcome_response_record.attempt.validation_request_body
-            .commit_request_record.record_id: committed
-            for researcher in self.ai_augment_singular_outerdicts
-            for committed in researcher.codex_innerdicts
-            if committed.run_outcome_response_record.attempt is not None
-        })
-
-    @cached_property
-    def attempts_by_namekey(self) -> Mapping[str, tuple[AgentRuntimeAttempt, ...]]:
-        grouped: dict[str, list[AgentRuntimeAttempt]] = defaultdict(list)
-        for researcher in self.ai_augment_singular_outerdicts:
-            for committed in researcher.codex_innerdicts:
-                attempt = committed.run_outcome_response_record.attempt
-                if attempt is not None:
-                    grouped[researcher.namekey.to_json_key()].append(attempt)
-        return MappingProxyType({key: tuple(records) for key, records in grouped.items()})
-
-    @cached_property
-    def outcomes_by_session(self) -> Mapping[tuple[str, UUID], RunOutcomeResponseRecord]:
-        return MappingProxyType({
-            (
-                namekey.to_json_key(),
-                session_id,
-            ): run_outcome_response_record
-            for researcher in self.ai_augment_singular_outerdicts
-            for committed in researcher.codex_innerdicts
-            if (run_outcome_response_record := committed.run_outcome_response_record)
-            if (
-                namekey := run_outcome_response_record.run_outcome_request_record.namekey
-            ) is not None
-            if (
-                session_id := (
-                    run_outcome_response_record._codex_session_record().session_id
-                )
-            )
-            is not None
-        })
-
-    @cached_property
     def ground_truth_by_namekey(self) -> Mapping[str, InnerDict]:
         result: dict[str, InnerDict] = {}
         for researcher in self.ai_augment_singular_outerdicts:
@@ -103,39 +58,28 @@ class DashboardQuerySnapshot(FrozenStrictModel):
     def validate_records(self) -> Self:
         if len(self.researchers_by_namekey) != len(self.ai_augment_singular_outerdicts):
             raise ValueError(Locale.NAMEKEYS_NOT_UNIQUE)
-        committed_count = 0
+        attempt_ids: set[UUID] = set()
+        session_ids: set[UUID] = set()
         for researcher in self.ai_augment_singular_outerdicts:
             researcher.validate_ai_augment_singular_outerdict()
-            committed_count += len(researcher.codex_innerdicts)
-        if len(self.committed_by_id) != committed_count:
-            raise ValueError(Locale.ATTEMPT_DATABASE_INCONSISTENT)
-
-        for researcher in self.ai_augment_singular_outerdicts:
-            for committed in researcher.codex_innerdicts:
-                outcome = committed.run_outcome_response_record
+            for codex_innerdict in researcher.codex_innerdicts:
+                outcome = codex_innerdict.run_outcome_response_record
                 attempt = outcome.attempt
+                session_id = outcome.run_outcome_request_record.session_id
                 if (
                     attempt is None
                     or outcome.run_outcome_request_record.namekey != researcher.namekey
-                    or outcome._codex_session_record().session_id is None
-                    or attempt.validation_request_body.commit_request_record.record_id
-                    not in self.committed_by_id
+                    or session_id is None
+                    or outcome._codex_session_record().session_id != session_id
+                    or outcome.run_outcome_request_record.validation_request_record_id
+                    != attempt.record_id
+                    or attempt.record_id in attempt_ids
                 ):
                     raise ValueError(Locale.ATTEMPT_DATABASE_INCONSISTENT)
+                if session_id in session_ids:
+                    raise ValueError(Locale.RUN_OUTCOME_SESSION_DUPLICATE)
+                attempt_ids.add(attempt.record_id)
+                session_ids.add(session_id)
         # Build every derived lookup before a snapshot can replace persisted/UI state.
-        _ = self.ground_truth_by_namekey, self.outcomes_by_session
+        _ = self.ground_truth_by_namekey
         return self
-
-    def attempts_for_session(
-        self, namekey: NameKey, session_id: UUID | None,
-    ) -> tuple[AgentRuntimeAttempt, ...]:
-        if session_id is None:
-            return ()
-        return tuple(
-            record for record in self.attempts_by_namekey.get(namekey.to_json_key(), ())
-            if (
-                record.validation_request_body.commit_request_record
-                .commit_request_body.codex_session_record.session_id
-            )
-            == session_id
-        )
