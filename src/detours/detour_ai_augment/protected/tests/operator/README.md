@@ -95,13 +95,15 @@ export FASTAPI_DETOUR_AIVM_IDENTITY_FILE="$HOME/.local/share/aivm/.ssh/id_ed2551
 
 pixi run -e detour-ai-augment \
   python -m src.detours.detour_ai_augment.src.backend.server \
-  --config config_ai_augment.json
+  --config config_ai_augment.json --resume
 ```
 
 Backend requires either `--new` (recreate the detour DB from the replay log) or
 `--resume`/`--continue` (reuse known-clean state). Both ask for confirmation;
-`--yes` bypasses it. Recalculate and repin the replay-log hash in config before a
-verified restart. Dashboard verifies on startup and supplies the child flags itself.
+`--yes` bypasses it. The example uses `--resume`; use `--new` only when an
+explicit rebuild is intended. Recalculate and repin the replay-log hash in
+config before a verified restart. Dashboard verifies on startup and supplies
+the child flags itself.
 
 Leave this terminal open. Backend is deliberately waiting for one line on stdin containing the Codex session UUID, while already serving requests.
 
@@ -170,6 +172,16 @@ Codex should repeatedly:
 4. follow the returned `Location`
 5. continue until Backend returns `410 Gone`
 
+For a completed run, retain the quoted `ETag` from a `410 Gone` `GET /pull`:
+it identifies the validation request record required by `POST /completed`.
+If the final response headers were not captured, probe once while Backend is
+still running (as the Dashboard does), and proceed only if it returns `410`:
+
+```bash
+curl --silent --show-error --dump-header - --output /dev/null \
+  http://127.0.0.1:8612/pull
+```
+
 On normal completion, the Codex/SSH command exits.
 
 For a cancellation, send the `OUTCOME="cancelled"`
@@ -188,26 +200,40 @@ cd /Volumes/home/aicode/2026-01-02_enrich_full_df
 NAMEKEY='{"ktp.first_name":"A.","ktp.last_name":"Sheikh"}'
 SOCKET_PATH="/tmp/detour-manual-${UID}.sock"
 OUTCOME="completed"
+SESSION_ID='01xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'
+ETAG='"<validation request record UUID from 410 /pull>"'
 NAME_KEY_HEADER="$(
   pixi run -e detour-ai-augment python -c '
 import sys
-from src.detours.detour_ai_augment.src.backend.api import name_key_header
+from src.detours.detour_ai_augment.src.shared import name_key_header_value
 from src.helpers.data_models import NameKey
-print(name_key_header(NameKey.from_json_key(sys.argv[1])), end="")
+print(name_key_header_value(NameKey.from_json_key(sys.argv[1])), end="")
 ' "$NAMEKEY"
 )"
+
+OUTCOME_HEADERS=(
+  --header "NameKey: $NAME_KEY_HEADER"
+  --header "Session-ID: $SESSION_ID"
+)
+if test "$OUTCOME" = completed; then
+  OUTCOME_HEADERS+=(--header "ETag: $ETAG")
+fi
 
 curl --silent --show-error --include \
   --unix-socket "$SOCKET_PATH" \
   --request POST \
-  --header "NameKey: $NAME_KEY_HEADER" \
+  "${OUTCOME_HEADERS[@]}" \
   "http://invalid/$OUTCOME"
 ```
 
-Use `OUTCOME="failed"` after an unsuccessful run.
+Use the UUID supplied to Backend in terminal 1 as `SESSION_ID`. Keep the
+quotation marks around the `ETag` UUID; send that header only for
+`OUTCOME="completed"`. Use `OUTCOME="failed"` after an unsuccessful run.
 A `200 OK` response confirms that
 Backend captured the session rollout
 and appendwatch report;
+`400 Bad Request` means the request identity or headers did not match, and
+`409 Conflict` means the requested outcome conflicts with the validation result;
 `500 Internal Server Error` means the
 logged run-outcome snapshot is partial
 and should be reviewed in Backend logs.
