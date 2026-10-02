@@ -196,7 +196,7 @@ from src.detours.detour_ai_augment.src.shared import (
     source_key_header_value,
 )
 from src.helpers.architecture import FrozenStrictModel
-from src.helpers.cards import build_cards
+from src.helpers.cards import MARKDOWN_CODE_DELIMITER, build_cards
 from src.helpers.config import PipelineConfig
 from src.helpers.data_models import (
     FragmentType,
@@ -3452,15 +3452,15 @@ def test_v2_retry_baseline_replays_and_accepts_only_the_exact_correction(
         )
 
         baseline_count = connection.execute(
-            f"SELECT count(*) FROM {backend_vars.CODEX_RETRY_BASELINE_TABLE}"
+            f"SELECT count(*) FROM {backend_vars.POST_COMMIT_VALIDATION_RETRY_BASELINES_TABLE}"
         ).fetchone()
         audit_rows = connection.execute(
             f"""
             SELECT
-                {backend_vars.CODEX_EVIDENCE_APPLIED_COL},
-                {backend_vars.CODEX_EVIDENCE_ACCEPTED_COL}
-            FROM {backend_vars.CODEX_EVIDENCE_AUDIT_TABLE}
-            ORDER BY {backend_vars.CODEX_EVIDENCE_AUDIT_ID_COL}
+                {backend_vars.POST_COMMIT_VALIDATION_APPLIED_COL},
+                {backend_vars.POST_COMMIT_VALIDATION_ACCEPTED_COL}
+            FROM {backend_vars.POST_COMMIT_VALIDATION_EVIDENCE_AUDITS_TABLE}
+            ORDER BY {backend_vars.POST_COMMIT_VALIDATION_AUDIT_ID_COL}
             """
         ).fetchall()
     finally:
@@ -3538,9 +3538,9 @@ def test_v2_retry_rejects_changed_tokens_and_repeats_near_guidance(
         )
         applied_rows = connection.execute(
             f"""
-            SELECT {backend_vars.CODEX_EVIDENCE_APPLIED_COL}
-            FROM {backend_vars.CODEX_EVIDENCE_AUDIT_TABLE}
-            ORDER BY {backend_vars.CODEX_EVIDENCE_AUDIT_ID_COL}
+            SELECT {backend_vars.POST_COMMIT_VALIDATION_APPLIED_COL}
+            FROM {backend_vars.POST_COMMIT_VALIDATION_EVIDENCE_AUDITS_TABLE}
+            ORDER BY {backend_vars.POST_COMMIT_VALIDATION_AUDIT_ID_COL}
             """
         ).fetchall()
     finally:
@@ -3922,16 +3922,16 @@ def test_retry_baselines_survive_restart_and_remain_isolated_by_original_pull(
             )
         baseline_rows = second_connection.execute(
             f"""
-            SELECT {backend_vars.CODEX_RETRY_ORIGINAL_PULL_RECORD_ID_COL}
-            FROM {backend_vars.CODEX_RETRY_BASELINE_TABLE}
-            ORDER BY {backend_vars.CODEX_RETRY_ORIGINAL_PULL_RECORD_ID_COL}
+            SELECT {backend_vars.POST_COMMIT_VALIDATION_ORIGINAL_PULL_RECORD_ID_COL}
+            FROM {backend_vars.POST_COMMIT_VALIDATION_RETRY_BASELINES_TABLE}
+            ORDER BY {backend_vars.POST_COMMIT_VALIDATION_ORIGINAL_PULL_RECORD_ID_COL}
             """
         ).fetchall()
         accepted_rows = second_connection.execute(
             f"""
             SELECT count(*)
-            FROM {backend_vars.CODEX_EVIDENCE_AUDIT_TABLE}
-            WHERE {backend_vars.CODEX_EVIDENCE_ACCEPTED_COL}
+            FROM {backend_vars.POST_COMMIT_VALIDATION_EVIDENCE_AUDITS_TABLE}
+            WHERE {backend_vars.POST_COMMIT_VALIDATION_ACCEPTED_COL}
             """
         ).fetchone()
     finally:
@@ -4027,15 +4027,15 @@ def test_concurrent_first_rejections_cannot_replace_the_baseline(
     try:
         baseline_commit_record = verification_connection.execute(
             f"""
-            SELECT {backend_vars.CODEX_RETRY_COMMIT_RECORD_ID_COL}
-            FROM {backend_vars.CODEX_RETRY_BASELINE_TABLE}
+            SELECT {backend_vars.POST_COMMIT_VALIDATION_COMMIT_RECORD_ID_COL}
+            FROM {backend_vars.POST_COMMIT_VALIDATION_RETRY_BASELINES_TABLE}
             """
         ).fetchone()
         audit_commit_records = verification_connection.execute(
             f"""
-            SELECT {backend_vars.CODEX_RETRY_COMMIT_RECORD_ID_COL}
-            FROM {backend_vars.CODEX_EVIDENCE_AUDIT_TABLE}
-            ORDER BY {backend_vars.CODEX_EVIDENCE_AUDIT_ID_COL}
+            SELECT {backend_vars.POST_COMMIT_VALIDATION_COMMIT_RECORD_ID_COL}
+            FROM {backend_vars.POST_COMMIT_VALIDATION_EVIDENCE_AUDITS_TABLE}
+            ORDER BY {backend_vars.POST_COMMIT_VALIDATION_AUDIT_ID_COL}
             """
         ).fetchall()
     finally:
@@ -4088,9 +4088,9 @@ def test_corrupt_applied_audit_fails_as_configuration_error(
             )
         connection.execute(
             f"""
-            UPDATE {backend_vars.CODEX_EVIDENCE_AUDIT_TABLE}
-            SET {backend_vars.CODEX_EVIDENCE_ASSESSMENT_COL} = ?
-            WHERE {backend_vars.CODEX_RETRY_COMMIT_RECORD_ID_COL} = ?
+            UPDATE {backend_vars.POST_COMMIT_VALIDATION_EVIDENCE_AUDITS_TABLE}
+            SET {backend_vars.POST_COMMIT_VALIDATION_ASSESSMENT_COL} = ?
+            WHERE {backend_vars.POST_COMMIT_VALIDATION_COMMIT_RECORD_ID_COL} = ?
             """,
             ["{}", str(deterministic_uuid7("audit-second"))],
         )
@@ -4273,11 +4273,11 @@ def test_historical_haanen_retry_preserves_verified_evidence_roundtrip(
         audit_rows = connection.execute(
             f"""
             SELECT
-                {backend_vars.CODEX_RETRY_COMMIT_RECORD_ID_COL},
-                {backend_vars.CODEX_EVIDENCE_APPLIED_COL},
-                {backend_vars.CODEX_EVIDENCE_ACCEPTED_COL}
-            FROM {backend_vars.CODEX_EVIDENCE_AUDIT_TABLE}
-            ORDER BY {backend_vars.CODEX_EVIDENCE_AUDIT_ID_COL}
+                {backend_vars.POST_COMMIT_VALIDATION_COMMIT_RECORD_ID_COL},
+                {backend_vars.POST_COMMIT_VALIDATION_APPLIED_COL},
+                {backend_vars.POST_COMMIT_VALIDATION_ACCEPTED_COL}
+            FROM {backend_vars.POST_COMMIT_VALIDATION_EVIDENCE_AUDITS_TABLE}
+            ORDER BY {backend_vars.POST_COMMIT_VALIDATION_AUDIT_ID_COL}
             """
         ).fetchall()
     finally:
@@ -4480,13 +4480,13 @@ def test_renderer_uses_generic_arguments_wording() -> None:
         CALL_ARGUMENTS_TURN_6,
         {"turn5search0": COMPANY_URL},
         ref_id_pattern=post_commit_validation.CODEX_REF_ID_PATTERN,
-    ) == (f"1. {DISPLAY_ARGUMENTS_TURN_6}")
+    ) == (f"1. {MARKDOWN_CODE_DELIMITER}{DISPLAY_ARGUMENTS_TURN_6}{MARKDOWN_CODE_DELIMITER}")
     assert codex_parse.render_footnote_argument(
         1,
         CALL_ARGUMENTS_TURN_7,
         {"turn6view0": COMPANY_URL},
         ref_id_pattern=post_commit_validation.CODEX_REF_ID_PATTERN,
-    ) == (f"1. {DISPLAY_ARGUMENTS_TURN_7}")
+    ) == (f"1. {MARKDOWN_CODE_DELIMITER}{DISPLAY_ARGUMENTS_TURN_7}{MARKDOWN_CODE_DELIMITER}")
     multi_open = (
         '{"open":[{"ref_id":"turn1search0"},{"ref_id":"turn1search1"}],"response_length":"long"}'
     )
@@ -4496,29 +4496,29 @@ def test_renderer_uses_generic_arguments_wording() -> None:
         {"turn1search0": COMPANY_URL, "turn1search1": OFFICERS_URL},
         ref_id_pattern=post_commit_validation.CODEX_REF_ID_PATTERN,
     ) == (
-        f'1. {{"open":[{{"ref_id":"turn1search0","url":"{COMPANY_URL}"}},'
+        f'1. {MARKDOWN_CODE_DELIMITER}{{"open":[{{"ref_id":"turn1search0","url":"{COMPANY_URL}"}},'
         f'{{"ref_id":"turn1search1","url":"{OFFICERS_URL}"}}],'
-        '"response_length":"long"}'
+        f'"response_length":"long"}}{MARKDOWN_CODE_DELIMITER}'
     )
     assert codex_parse.render_footnote_argument(
         1,
         CALL_ARGUMENTS_TURN_6,
         {},
         ref_id_pattern=post_commit_validation.CODEX_REF_ID_PATTERN,
-    ) == (f"1. {CALL_ARGUMENTS_TURN_6}")
+    ) == (f"1. {MARKDOWN_CODE_DELIMITER}{CALL_ARGUMENTS_TURN_6}{MARKDOWN_CODE_DELIMITER}")
     direct_url_open = f'{{"open":[{{"ref_id":"{COMPANY_URL}"}}],"response_length":"long"}}'
     assert codex_parse.render_footnote_argument(
         1,
         direct_url_open,
         {},
         ref_id_pattern=post_commit_validation.CODEX_REF_ID_PATTERN,
-    ) == (f"1. {direct_url_open}")
+    ) == (f"1. {MARKDOWN_CODE_DELIMITER}{direct_url_open}{MARKDOWN_CODE_DELIMITER}")
     assert codex_parse.render_footnote_argument(
         1,
         CALL_ARGUMENTS_TURN_2,
         {},
         ref_id_pattern=post_commit_validation.CODEX_REF_ID_PATTERN,
-    ) == (f"1. {CALL_ARGUMENTS_TURN_2}")
+    ) == (f"1. {MARKDOWN_CODE_DELIMITER}{CALL_ARGUMENTS_TURN_2}{MARKDOWN_CODE_DELIMITER}")
 
 
 def test_copied_report_requires_one_exact_nested_ok_path(tmp_path: Path) -> None:
@@ -4971,7 +4971,7 @@ def test_card_labels_stored_standardized_fields_without_mutating_source() -> Non
             ensure_ascii=False,
             separators=(",", ":"),
         )
-        expected_value = codex_parse.render_ai_standardized_value(canonical_json)
+        expected_value = codex_parse.render_standardized_submission_value(canonical_json)
         assert codex_innerdict.data[column] == expected_value
         assert f"**`{column}`**: {expected_value}" in card
     assert source_innerdict.data == original_source
@@ -5002,7 +5002,7 @@ def test_card_preserves_standardized_placeholders(
     column = AI_AUGMENT_STANDARDIZED_COLUMNS[
         AI_AUGMENT_EVIDENCE_COLUMNS.index(KTP_AI_AUGMENT_GENDER_COL)
     ]
-    expected_value = codex_parse.render_ai_standardized_value(json.dumps(placeholder))
+    expected_value = codex_parse.render_standardized_submission_value(json.dumps(placeholder))
     assert rendered[column] == expected_value
     namekey = NameKey(first_name="A.", last_name="Sheikh")
     codex_innerdict = InnerDict.from_mapping(

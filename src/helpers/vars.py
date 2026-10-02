@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Final
+from typing import Callable, Final
 
 CARD_INTRODUCTION = """## Introduction
 **Draw number** is the sequential order in which rows were sampled from HCR tables.
@@ -61,6 +61,14 @@ KTP_LAST_NAME_COL: Final = "ktp.last_name"
 KTP_FIRST_NAME_ORIG_COLNAME_COL: Final = "ktp.first_name_original_column_name"
 KTP_LAST_NAME_ORIG_COLNAME_COL: Final = "ktp.last_name_original_column_name"
 KTP_FILENAME_COL: Final = "ktp.filename"
+
+# To be used in particular for delimiting these
+# with code blocks for Markdown rendering
+IS_A_KTP_FILENAME_COLUMN: Callable[[str], bool] = lambda column: (
+    column == KTP_FILENAME_COL
+    or (column.startswith("ktp.") and column.endswith("_filename"))
+)
+
 KTP_FRAGMENT_TYPE_COL: Final = "ktp.fragment_type"
 KTP_NAMEKEY_COL: Final = "ktp.namekey"
 KTP_INNERDICT_JSONLINES_COL: Final = "ktp.innerdicts"

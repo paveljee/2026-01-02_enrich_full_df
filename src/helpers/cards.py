@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -15,6 +16,7 @@ import pandas as pd
 from .data_models import OuterDict
 from .vars import (
     DRAW_LABEL,
+    IS_A_KTP_FILENAME_COLUMN,
     KTP_FILENAME_COL,
     KTP_FIRST_NAME_ORIG_COLNAME_COL,
     KTP_LAST_NAME_ORIG_COLNAME_COL,
@@ -28,6 +30,28 @@ def _markdown_literal(value: str) -> str:
     if MARKDOWN_LITERAL_LABEL_MARKER not in value:
         return value
     return f"{MARKDOWN_CODE_DELIMITER}{value}{MARKDOWN_CODE_DELIMITER}"
+
+
+def _markdown_json_value(value: str) -> str:
+    """If a value parses as valid JSON
+    AND into a `dict` or a `list`, then
+    it is probably worth delimiting with
+    a code block when rendering as Markdown.
+    
+    Signed off: Pavel"""
+
+    types_to_delimit = (dict, list)
+    try:
+        if not isinstance(json.loads(value), types_to_delimit):
+            raise TypeError
+    except (json.JSONDecodeError, TypeError):
+        return value
+    
+    delimiter = MARKDOWN_CODE_DELIMITER
+    while delimiter in value:
+        delimiter += MARKDOWN_CODE_DELIMITER
+    
+    return f"{delimiter}{value}{delimiter}"
 
 
 def card_filename(
@@ -104,13 +128,32 @@ def build_cards(
                 if col in excluded_cols or pd.isna(val):
                     continue
                 rendered_col = _markdown_literal(col)
-                if "\n" in str(val):
+                # Note that values are intentionally
+                # not tampered with, e.g., underscore-
+                # containing values do not get wrapped
+                # into backticks, etc. The only exceptions
+                # are the filename cols above and below and
+                # `_markdown_json_value`, which all have a
+                # predictable shape. Other than that,
+                # values are unpredictable and can contain
+                # anything. If you'd like to apply any
+                # other formatting to the value, please
+                # apply it at some point before the
+                # materialization into the innerdict,
+                # e.g., at the output VIEW stage.
+                # Signed off: Pavel
+                text = (
+                    _markdown_literal(str(val))
+                    if IS_A_KTP_FILENAME_COLUMN(col)
+                    else _markdown_json_value(str(val))
+                )
+                if "\n" in text:
                     card += (
                         f"**{rendered_col}**:\n\n"
-                        f"{str(val).replace('\n', '\n\n')}\n\n"
+                        f"{text.replace('\n', '\n\n')}\n\n"
                     )
                 else:
-                    card += f"**{rendered_col}**: {str(val)}\n\n"
+                    card += f"**{rendered_col}**: {text}\n\n"
                 # if want to render null values: ####
                 # if col in excluded_cols:
                 #     continue

@@ -1535,12 +1535,12 @@ def render_codex_values(
     for column, field_submission in submission.evidence_items():
         matches = evidence[column]
         ordered_matches.extend(matches)
-        rendered[column] = codex_parse.render_ai_value(
+        rendered[column] = codex_parse.render_footnoted_submission_value(
             field_submission.value,
             tuple(match.evidence_number for match in matches),
         )
         standardized_value = field_submission.model_dump(mode="json")[STANDARDIZED_VALUE_FIELD]
-        rendered[standardized_columns[column]] = codex_parse.render_ai_standardized_value(
+        rendered[standardized_columns[column]] = codex_parse.render_standardized_submission_value(
             json.dumps(
                 standardized_value,
                 ensure_ascii=False,
@@ -1705,6 +1705,12 @@ def _evaluate_submission_for_commit(
 
     def result(
         *,
+        commit_request_record: BackendCommitRequestRecord,
+        stage: BackendLifecycle,
+        submission_payload: Submission | StandardizedSubmission | None,
+        retry_projection: _ValidationProjection,
+        rollout_index: _RolloutIndex | None,
+        output_row: tuple[tuple[str, str | int | None], ...] | None,
         validation_result: BackendLifecycle,
         detail: str | None,
         error: Exception | None,
@@ -1725,7 +1731,7 @@ def _evaluate_submission_for_commit(
             ),
         )
         _log_post_commit_validation(
-            body.push_response_record,
+            commit_request_record.commit_request_body.push_response_record,
             post_commit_validation,
             error,
         )
@@ -1827,24 +1833,48 @@ def _evaluate_submission_for_commit(
             )
             stage = BackendLifecycle.ACCEPTED
             return result(
+                commit_request_record=commit_request_record,
+                stage=stage,
+                submission_payload=submission_payload,
+                retry_projection=retry_projection,
+                rollout_index=rollout_index,
+                output_row=output_row,
                 validation_result=BackendLifecycle.ACCEPTED,
                 detail=None,
                 error=None,
             )
         except _ValidationPreparationError as exc:
             return result(
+                commit_request_record=commit_request_record,
+                stage=stage,
+                submission_payload=submission_payload,
+                retry_projection=retry_projection,
+                rollout_index=rollout_index,
+                output_row=output_row,
                 validation_result=BackendLifecycle.CONFIGURATION_ERROR,
                 detail=Locale.CONFIGURATION_ERROR_DETAIL,
                 error=exc,
             )
         except _MultipleEvidenceMatches as exc:
             return result(
+                commit_request_record=commit_request_record,
+                stage=stage,
+                submission_payload=submission_payload,
+                retry_projection=retry_projection,
+                rollout_index=rollout_index,
+                output_row=output_row,
                 validation_result=BackendLifecycle.REJECTED,
                 detail=Locale.MULTIPLE_MATCH_DETAIL_TEMPLATE.format(excerpt=exc.excerpt),
                 error=exc,
             )
         except _PushValidationError as exc:
             return result(
+                commit_request_record=commit_request_record,
+                stage=stage,
+                submission_payload=submission_payload,
+                retry_projection=retry_projection,
+                rollout_index=rollout_index,
+                output_row=output_row,
                 validation_result=BackendLifecycle.REJECTED,
                 detail=(
                     exc.public_detail
@@ -1855,6 +1885,12 @@ def _evaluate_submission_for_commit(
             )
         except ValidationError as exc:
             return result(
+                commit_request_record=commit_request_record,
+                stage=stage,
+                submission_payload=submission_payload,
+                retry_projection=retry_projection,
+                rollout_index=rollout_index,
+                output_row=output_row,
                 validation_result=BackendLifecycle.REJECTED,
                 detail=Locale.VALIDATION_ERROR_DETAIL
                 + (f"\n{RETRY_SUBMISSION_PUBLIC_GUIDANCE}" if retry_submission_expected else ""),
@@ -1862,6 +1898,12 @@ def _evaluate_submission_for_commit(
             )
         except (OSError, ValueError, duckdb.Error, subprocess.SubprocessError) as exc:
             return result(
+                commit_request_record=commit_request_record,
+                stage=stage,
+                submission_payload=submission_payload,
+                retry_projection=retry_projection,
+                rollout_index=rollout_index,
+                output_row=output_row,
                 validation_result=BackendLifecycle.REJECTED,
                 detail=Locale.VALIDATION_ERROR_DETAIL,
                 error=exc,

@@ -7,6 +7,7 @@ from collections.abc import Mapping
 
 from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
 from src.helpers.architecture import FrozenStrictModel
+from src.helpers.cards import MARKDOWN_CODE_DELIMITER
 
 LINE_BREAK = re.compile(r"\r\n|[\n\r\v\f\x1c-\x1e\x85\u2028\u2029]")
 INLINE_CITATION_SEPARATOR = "\u2020"
@@ -69,21 +70,6 @@ def extract_cite_sections(
     return tuple(sections)
 
 
-def render_ai_value(value: str, footnote_numbers: tuple[int, ...]) -> str:
-    marker = ""
-    if footnote_numbers:
-        marker = "^" + ",".join(str(number) for number in footnote_numbers) + "^"
-    return f'{AI_GENERATED_TEXT_PREFIX} "{value}"{marker}'
-
-
-def render_ai_standardized_value(canonical_json: str) -> str:
-    return f"{AI_GENERATED_TEXT_PREFIX} {canonical_json}"
-
-
-def render_comment(value: str, timestamp: str) -> str:
-    return f'- {AI_GENERATED_TEXT_PREFIX} "{value}" ({timestamp})'
-
-
 def escape_markdown_text(value: str) -> str:
     return LINE_BREAK.sub(" ", value).translate(MARKDOWN_ESCAPE_TRANSLATION)
 
@@ -108,6 +94,30 @@ def strip_citation_markup(
         marker_suffix,
         "",
     )
+
+
+# =======================================
+# Functions to render Codex submissions.
+# Used by post_commit_validation module.
+# =======================================
+
+
+def render_footnoted_submission_value(value: str, footnote_numbers: tuple[int, ...]) -> str:
+    marker = ""
+    if footnote_numbers:
+        marker = "^" + ",".join(str(number) for number in footnote_numbers) + "^"
+    return f'{AI_GENERATED_TEXT_PREFIX} "{value}"{marker}'
+
+
+def render_standardized_submission_value(canonical_json: str) -> str:
+    return (
+        f"{AI_GENERATED_TEXT_PREFIX} "
+        f"{MARKDOWN_CODE_DELIMITER}{canonical_json}{MARKDOWN_CODE_DELIMITER}"
+    )
+
+
+def render_comment(value: str, timestamp: str) -> str:
+    return f'- {AI_GENERATED_TEXT_PREFIX} "{value}" ({timestamp})'
 
 
 def render_footnote(
@@ -216,4 +226,7 @@ def render_footnote_argument(
                 separators=(",", ":"),
             )
         break
-    return f"{number}. {arguments_json}"
+    return (
+        f"{number}. "
+        f"{MARKDOWN_CODE_DELIMITER}{arguments_json}{MARKDOWN_CODE_DELIMITER}"
+    )

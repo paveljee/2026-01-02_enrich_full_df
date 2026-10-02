@@ -18,6 +18,8 @@ from src.helpers.vars import (
     DRAW_LABEL,
     KTP_FILENAME_COL,
     KTP_FIRST_NAME_ORIG_COLNAME_COL,
+    KTP_HCR_FILENAME_COL,
+    KTP_HCR_FILENAME_COL_LEGACY,
     KTP_LAST_NAME_ORIG_COLNAME_COL,
     KTP_SSN_TOP_OLDEST_PAPERS_COL,
     KTP_SSNP_PAPERID_URL_COL,
@@ -108,7 +110,10 @@ def test_build_cards_includes_intro_and_fun_fact() -> None:
     assert "Fun fact" in card
     assert "excluded" not in card
     assert "Draw #1 of 10" in card
-    assert f"**`{KTP_SSN_TOP_OLDEST_PAPERS_COL}`**" in card
+    assert (
+        f"**`{KTP_SSN_TOP_OLDEST_PAPERS_COL}`**: "
+        f"`{data[KTP_SSN_TOP_OLDEST_PAPERS_COL]}`"
+    ) in card
     assert "Early work" in card
     assert "https://openalex.org/W1568216332" in card
 
@@ -162,6 +167,8 @@ def test_underscore_field_labels_round_trip_in_txt_and_docx(
             {
                 DRAW_LABEL: 1,
                 KTP_FILENAME_COL: UNDERSCORE_FILENAME,
+                KTP_HCR_FILENAME_COL: UNDERSCORE_FILENAME,
+                KTP_HCR_FILENAME_COL_LEGACY: UNDERSCORE_FILENAME,
                 UNDERSCORE_FIELD_LABEL: "literal value",
             },
             DummyProcedure(),
@@ -176,6 +183,9 @@ def test_underscore_field_labels_round_trip_in_txt_and_docx(
     card = cards[ROUNDTRIP_CARD_NAME]
     assert RENDERED_UNDERSCORE_FIELD_LABEL in card
     assert RENDERED_UNDERSCORE_FILENAME in card
+    assert f"**{KTP_FILENAME_COL}**: `{UNDERSCORE_FILENAME}`" in card
+    assert f"**`{KTP_HCR_FILENAME_COL}`**: `{UNDERSCORE_FILENAME}`" in card
+    assert f"**{KTP_HCR_FILENAME_COL_LEGACY}**: {UNDERSCORE_FILENAME}" in card
 
     txt_zip = write_cards_zip(
         cards,

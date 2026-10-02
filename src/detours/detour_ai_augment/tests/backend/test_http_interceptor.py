@@ -24,15 +24,15 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.pos
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
-    CODEX_RUN_OUTCOME_RECORD_ID_COL,
-    CODEX_RUN_OUTCOME_RECORDS_TABLE,
-    CODEX_RUN_OUTCOME_SERIALIZED_JSON_COL,
     DOCX_COLUMNS,
     HTTP_CONTENT_TYPE_HEADER,
     HTTP_GET_METHOD,
     KTP_AI_AUGMENT_EDUCATION_COL,
     KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL,
     PULL_PATH,
+    RUN_OUTCOME_RECORD_ID_COL,
+    RUN_OUTCOME_RECORDS_TABLE,
+    RUN_OUTCOME_SERIALIZED_JSON_COL,
     SOURCE_KEY_HEADER,
     ContentType,
 )
@@ -549,11 +549,11 @@ def test_web_argument_eligibility_drives_retry_and_replays_identically(
             assert response.text.strip() == validation.detail.strip()
             assert Locale.EVIDENCE_RETRY_INSTRUCTION in response.text
             assert store._execute(
-                f"SELECT count(*) FROM {backend_vars.CODEX_RETRY_BASELINE_TABLE}"
+                f"SELECT count(*) FROM {backend_vars.POST_COMMIT_VALIDATION_RETRY_BASELINES_TABLE}"
             ).fetchone() == (1,)
             assert store._execute(
-                f"SELECT {backend_vars.CODEX_EVIDENCE_ACCEPTED_COL} "
-                f"FROM {backend_vars.CODEX_EVIDENCE_AUDIT_TABLE}"
+                f"SELECT {backend_vars.POST_COMMIT_VALIDATION_ACCEPTED_COL} "
+                f"FROM {backend_vars.POST_COMMIT_VALIDATION_EVIDENCE_AUDITS_TABLE}"
             ).fetchall() == [(False,)]
         snapshot = query_snapshot(store).model_dump_json()
     log_bytes = Path(store._replay_log).read_bytes()
@@ -859,9 +859,9 @@ def test_outcome_materializes_persisted_ids_identically_live_and_replay(
                 is innerdict.innerdict
             )
             run_outcome_json = store._execute(
-                f"SELECT {CODEX_RUN_OUTCOME_SERIALIZED_JSON_COL} "
-                f"FROM {CODEX_RUN_OUTCOME_RECORDS_TABLE} "
-                f"WHERE {CODEX_RUN_OUTCOME_RECORD_ID_COL} = ?",
+                f"SELECT {RUN_OUTCOME_SERIALIZED_JSON_COL} "
+                f"FROM {RUN_OUTCOME_RECORDS_TABLE} "
+                f"WHERE {RUN_OUTCOME_RECORD_ID_COL} = ?",
                 [str(innerdict.run_outcome_response_record.record_id)],
             ).fetchone()
             assert run_outcome_json is not None

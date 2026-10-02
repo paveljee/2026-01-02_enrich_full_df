@@ -64,12 +64,6 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     CODEX_CALLS_TABLE,
     CODEX_CITE_TEXT_COL,
     CODEX_CITE_TOKENS_COL,
-    CODEX_EVIDENCE_ACCEPTED_COL,
-    CODEX_EVIDENCE_APPLIED_COL,
-    CODEX_EVIDENCE_ASSESSMENT_COL,
-    CODEX_EVIDENCE_AUDIT_ID_COL,
-    CODEX_EVIDENCE_AUDIT_TABLE,
-    CODEX_EVIDENCE_SUBMISSION_COL,
     CODEX_FC_ARGUMENTS_COL,
     CODEX_FC_ID_COL,
     CODEX_FC_NAME_COL,
@@ -90,17 +84,7 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     CODEX_REF_THUMBNAIL_URL_COL,
     CODEX_REF_TITLE_COL,
     CODEX_REF_URL_COL,
-    CODEX_RETRY_BASELINE_COL,
-    CODEX_RETRY_BASELINE_TABLE,
-    CODEX_RETRY_COMMIT_RECORD_ID_COL,
-    CODEX_RETRY_CREATED_AT_COL,
-    CODEX_RETRY_NAMEKEY_COL,
-    CODEX_RETRY_ORIGINAL_PULL_RECORD_ID_COL,
-    CODEX_RETRY_SESSION_ID_COL,
     CODEX_ROLLOUT_FILENAME_COL,
-    CODEX_RUN_OUTCOME_RECORD_ID_COL,
-    CODEX_RUN_OUTCOME_RECORDS_TABLE,
-    CODEX_RUN_OUTCOME_SERIALIZED_JSON_COL,
     CODEX_SESSION_ID_JSON_KEY,
     CODEX_TURN_REF_NORMALIZED_VIEW,
     CODEX_TURN_REF_TABLE,
@@ -118,9 +102,25 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     KTP_AI_AUGMENT_SESSION_METADATA_COL,
     MILLISECONDS_PER_SECOND,
     NANOSECONDS_PER_MICROSECOND,
+    POST_COMMIT_VALIDATION_ACCEPTED_COL,
+    POST_COMMIT_VALIDATION_APPLIED_COL,
+    POST_COMMIT_VALIDATION_ASSESSMENT_COL,
+    POST_COMMIT_VALIDATION_AUDIT_ID_COL,
+    POST_COMMIT_VALIDATION_BASELINE_COL,
+    POST_COMMIT_VALIDATION_COMMIT_RECORD_ID_COL,
+    POST_COMMIT_VALIDATION_CREATED_AT_COL,
+    POST_COMMIT_VALIDATION_EVIDENCE_AUDITS_TABLE,
+    POST_COMMIT_VALIDATION_NAMEKEY_COL,
+    POST_COMMIT_VALIDATION_ORIGINAL_PULL_RECORD_ID_COL,
+    POST_COMMIT_VALIDATION_RETRY_BASELINES_TABLE,
+    POST_COMMIT_VALIDATION_SESSION_ID_COL,
+    POST_COMMIT_VALIDATION_SUBMISSION_COL,
     PULL_PATH,
     PUSH_PATH,
     ROLLOUT_LINE_FRAGMENT_TYPE,
+    RUN_OUTCOME_RECORD_ID_COL,
+    RUN_OUTCOME_RECORDS_TABLE,
+    RUN_OUTCOME_SERIALIZED_JSON_COL,
     SOURCE_KEY_HEADER,
     SYNTHETIC_COMMIT_HOST,
     SYNTHETIC_COMMIT_SCHEME,
@@ -1972,7 +1972,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
             accepted=accepted,
         )
 
-    def _next_codex_row_id(self, table_name: str) -> int:
+    def _next_projected_row_id(self, table_name: str) -> int:
         """Allocate from the maximum projected row ID in the active transaction."""
         row = self._execute(
             f"SELECT COALESCE(MAX(id), 0) + 1 FROM {duckdb_quote_identifier(table_name)}"
@@ -2005,7 +2005,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
                 )
             return
         columns = (CODEX_ID_COL, *columns)
-        values = (self._next_codex_row_id(table_name), *values)
+        values = (self._next_projected_row_id(table_name), *values)
         projection = ", ".join(duckdb_quote_identifier(column) for column in columns)
         placeholders = ", ".join("?" for _column in columns)
         self._execute(
@@ -2027,10 +2027,10 @@ class AiAugmentBackendStore(FrozenStrictModel):
         row = self._execute(
             f"""
             SELECT
-                {duckdb_quote_identifier(CODEX_RETRY_NAMEKEY_COL)},
-                {duckdb_quote_identifier(CODEX_RETRY_SESSION_ID_COL)}
-            FROM {CODEX_RETRY_BASELINE_TABLE}
-            WHERE {duckdb_quote_identifier(CODEX_RETRY_ORIGINAL_PULL_RECORD_ID_COL)} = ?
+                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_NAMEKEY_COL)},
+                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_SESSION_ID_COL)}
+            FROM {POST_COMMIT_VALIDATION_RETRY_BASELINES_TABLE}
+            WHERE {duckdb_quote_identifier(POST_COMMIT_VALIDATION_ORIGINAL_PULL_RECORD_ID_COL)} = ?
             """,
             [str(original_pull.record_id)],
         ).fetchone()
@@ -2049,13 +2049,13 @@ class AiAugmentBackendStore(FrozenStrictModel):
         rows: list[tuple[str, str]] = self._execute(
             f"""
             SELECT
-                {duckdb_quote_identifier(CODEX_EVIDENCE_SUBMISSION_COL)},
-                {duckdb_quote_identifier(CODEX_EVIDENCE_ASSESSMENT_COL)}
-            FROM {CODEX_EVIDENCE_AUDIT_TABLE}
-            WHERE {duckdb_quote_identifier(CODEX_RETRY_ORIGINAL_PULL_RECORD_ID_COL)} = ?
-              AND {duckdb_quote_identifier(CODEX_EVIDENCE_APPLIED_COL)}
-              AND {duckdb_quote_identifier(CODEX_RETRY_COMMIT_RECORD_ID_COL)} <> ?
-            ORDER BY {duckdb_quote_identifier(CODEX_EVIDENCE_AUDIT_ID_COL)}
+                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_SUBMISSION_COL)},
+                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_ASSESSMENT_COL)}
+            FROM {POST_COMMIT_VALIDATION_EVIDENCE_AUDITS_TABLE}
+            WHERE {duckdb_quote_identifier(POST_COMMIT_VALIDATION_ORIGINAL_PULL_RECORD_ID_COL)} = ?
+              AND {duckdb_quote_identifier(POST_COMMIT_VALIDATION_APPLIED_COL)}
+              AND {duckdb_quote_identifier(POST_COMMIT_VALIDATION_COMMIT_RECORD_ID_COL)} <> ?
+            ORDER BY {duckdb_quote_identifier(POST_COMMIT_VALIDATION_AUDIT_ID_COL)}
             """,
             [str(original_pull_record_id), str(baseline_commit_record_id)],
         ).fetchall()
@@ -2073,17 +2073,17 @@ class AiAugmentBackendStore(FrozenStrictModel):
     ) -> bool:
         return self._execute(
             f"""
-            INSERT INTO {CODEX_RETRY_BASELINE_TABLE} (
-                {duckdb_quote_identifier(CODEX_RETRY_ORIGINAL_PULL_RECORD_ID_COL)},
-                {duckdb_quote_identifier(CODEX_RETRY_NAMEKEY_COL)},
-                {duckdb_quote_identifier(CODEX_RETRY_SESSION_ID_COL)},
-                {duckdb_quote_identifier(CODEX_RETRY_COMMIT_RECORD_ID_COL)},
-                {duckdb_quote_identifier(CODEX_RETRY_CREATED_AT_COL)},
-                {duckdb_quote_identifier(CODEX_RETRY_BASELINE_COL)}
+            INSERT INTO {POST_COMMIT_VALIDATION_RETRY_BASELINES_TABLE} (
+                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_ORIGINAL_PULL_RECORD_ID_COL)},
+                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_NAMEKEY_COL)},
+                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_SESSION_ID_COL)},
+                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_COMMIT_RECORD_ID_COL)},
+                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_CREATED_AT_COL)},
+                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_BASELINE_COL)}
             )
             VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT DO NOTHING
-            RETURNING {duckdb_quote_identifier(CODEX_RETRY_ORIGINAL_PULL_RECORD_ID_COL)}
+            RETURNING {duckdb_quote_identifier(POST_COMMIT_VALIDATION_ORIGINAL_PULL_RECORD_ID_COL)}
             """,
             [
                 str(original_pull_record_id),
@@ -2101,12 +2101,12 @@ class AiAugmentBackendStore(FrozenStrictModel):
         row: tuple[str, str, str, str] | None = self._execute(
             f"""
             SELECT
-                {duckdb_quote_identifier(CODEX_RETRY_NAMEKEY_COL)},
-                {duckdb_quote_identifier(CODEX_RETRY_SESSION_ID_COL)},
-                {duckdb_quote_identifier(CODEX_RETRY_COMMIT_RECORD_ID_COL)},
-                {duckdb_quote_identifier(CODEX_RETRY_BASELINE_COL)}
-            FROM {CODEX_RETRY_BASELINE_TABLE}
-            WHERE {duckdb_quote_identifier(CODEX_RETRY_ORIGINAL_PULL_RECORD_ID_COL)} = ?
+                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_NAMEKEY_COL)},
+                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_SESSION_ID_COL)},
+                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_COMMIT_RECORD_ID_COL)},
+                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_BASELINE_COL)}
+            FROM {POST_COMMIT_VALIDATION_RETRY_BASELINES_TABLE}
+            WHERE {duckdb_quote_identifier(POST_COMMIT_VALIDATION_ORIGINAL_PULL_RECORD_ID_COL)} = ?
             """,
             [str(original_pull_record_id)],
         ).fetchone()
@@ -2127,22 +2127,22 @@ class AiAugmentBackendStore(FrozenStrictModel):
     ) -> None:
         self._execute(
             f"""
-            INSERT INTO {CODEX_EVIDENCE_AUDIT_TABLE} (
-                {duckdb_quote_identifier(CODEX_EVIDENCE_AUDIT_ID_COL)},
-                {duckdb_quote_identifier(CODEX_RETRY_COMMIT_RECORD_ID_COL)},
-                {duckdb_quote_identifier(CODEX_RETRY_ORIGINAL_PULL_RECORD_ID_COL)},
-                {duckdb_quote_identifier(CODEX_RETRY_NAMEKEY_COL)},
-                {duckdb_quote_identifier(CODEX_RETRY_SESSION_ID_COL)},
-                {duckdb_quote_identifier(CODEX_RETRY_CREATED_AT_COL)},
-                {duckdb_quote_identifier(CODEX_EVIDENCE_SUBMISSION_COL)},
-                {duckdb_quote_identifier(CODEX_EVIDENCE_ASSESSMENT_COL)},
-                {duckdb_quote_identifier(CODEX_EVIDENCE_APPLIED_COL)},
-                {duckdb_quote_identifier(CODEX_EVIDENCE_ACCEPTED_COL)}
+            INSERT INTO {POST_COMMIT_VALIDATION_EVIDENCE_AUDITS_TABLE} (
+                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_AUDIT_ID_COL)},
+                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_COMMIT_RECORD_ID_COL)},
+                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_ORIGINAL_PULL_RECORD_ID_COL)},
+                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_NAMEKEY_COL)},
+                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_SESSION_ID_COL)},
+                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_CREATED_AT_COL)},
+                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_SUBMISSION_COL)},
+                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_ASSESSMENT_COL)},
+                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_APPLIED_COL)},
+                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_ACCEPTED_COL)}
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
-                self._next_codex_row_id(CODEX_EVIDENCE_AUDIT_TABLE),
+                self._next_projected_row_id(POST_COMMIT_VALIDATION_EVIDENCE_AUDITS_TABLE),
                 str(commit_record_id),
                 str(original_pull_record_id),
                 namekey.to_json_key(),
@@ -2288,7 +2288,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
                     )
             else:
                 columns = (CODEX_ID_COL, *columns)
-                values = (self._next_codex_row_id(CODEX_TURN_REF_TABLE), *values)
+                values = (self._next_projected_row_id(CODEX_TURN_REF_TABLE), *values)
                 projection = ", ".join(duckdb_quote_identifier(column) for column in columns)
                 placeholders = ", ".join("?" for _column in columns)
                 self._execute(
@@ -2408,30 +2408,48 @@ class AiAugmentBackendStore(FrozenStrictModel):
         )
         self._execute(
             f"""
-            CREATE TABLE IF NOT EXISTS {CODEX_RETRY_BASELINE_TABLE} (
-                {duckdb_quote_identifier(CODEX_RETRY_ORIGINAL_PULL_RECORD_ID_COL)}
+            CREATE TABLE IF NOT EXISTS {POST_COMMIT_VALIDATION_RETRY_BASELINES_TABLE} (
+                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_ORIGINAL_PULL_RECORD_ID_COL)}
                     VARCHAR PRIMARY KEY,
-                {duckdb_quote_identifier(CODEX_RETRY_NAMEKEY_COL)} VARCHAR NOT NULL,
-                {duckdb_quote_identifier(CODEX_RETRY_SESSION_ID_COL)} VARCHAR NOT NULL,
-                {duckdb_quote_identifier(CODEX_RETRY_COMMIT_RECORD_ID_COL)} VARCHAR NOT NULL,
-                {duckdb_quote_identifier(CODEX_RETRY_CREATED_AT_COL)} TIMESTAMPTZ NOT NULL,
-                {duckdb_quote_identifier(CODEX_RETRY_BASELINE_COL)} JSON NOT NULL
+                {duckdb_quote_identifier(
+                    POST_COMMIT_VALIDATION_NAMEKEY_COL
+                )} VARCHAR NOT NULL,
+                {duckdb_quote_identifier(
+                    POST_COMMIT_VALIDATION_SESSION_ID_COL
+                )} VARCHAR NOT NULL,
+                {duckdb_quote_identifier(
+                    POST_COMMIT_VALIDATION_COMMIT_RECORD_ID_COL
+                )} VARCHAR NOT NULL,
+                {duckdb_quote_identifier(
+                    POST_COMMIT_VALIDATION_CREATED_AT_COL
+                )} TIMESTAMPTZ NOT NULL,
+                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_BASELINE_COL)} JSON NOT NULL
             )
             """
         )
         self._execute(
             f"""
-            CREATE TABLE IF NOT EXISTS {CODEX_EVIDENCE_AUDIT_TABLE} (
-                {duckdb_quote_identifier(CODEX_EVIDENCE_AUDIT_ID_COL)} BIGINT PRIMARY KEY,
-                {duckdb_quote_identifier(CODEX_RETRY_COMMIT_RECORD_ID_COL)} VARCHAR NOT NULL UNIQUE,
-                {duckdb_quote_identifier(CODEX_RETRY_ORIGINAL_PULL_RECORD_ID_COL)} VARCHAR NOT NULL,
-                {duckdb_quote_identifier(CODEX_RETRY_NAMEKEY_COL)} VARCHAR NOT NULL,
-                {duckdb_quote_identifier(CODEX_RETRY_SESSION_ID_COL)} VARCHAR NOT NULL,
-                {duckdb_quote_identifier(CODEX_RETRY_CREATED_AT_COL)} TIMESTAMPTZ NOT NULL,
-                {duckdb_quote_identifier(CODEX_EVIDENCE_SUBMISSION_COL)} JSON NOT NULL,
-                {duckdb_quote_identifier(CODEX_EVIDENCE_ASSESSMENT_COL)} JSON NOT NULL,
-                {duckdb_quote_identifier(CODEX_EVIDENCE_APPLIED_COL)} BOOLEAN NOT NULL,
-                {duckdb_quote_identifier(CODEX_EVIDENCE_ACCEPTED_COL)} BOOLEAN NOT NULL
+            CREATE TABLE IF NOT EXISTS {POST_COMMIT_VALIDATION_EVIDENCE_AUDITS_TABLE} (
+                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_AUDIT_ID_COL)} BIGINT PRIMARY KEY,
+                {duckdb_quote_identifier(
+                    POST_COMMIT_VALIDATION_COMMIT_RECORD_ID_COL
+                )} VARCHAR NOT NULL UNIQUE,
+                {duckdb_quote_identifier(
+                    POST_COMMIT_VALIDATION_ORIGINAL_PULL_RECORD_ID_COL
+                )} VARCHAR NOT NULL,
+                {duckdb_quote_identifier(
+                    POST_COMMIT_VALIDATION_NAMEKEY_COL
+                )} VARCHAR NOT NULL,
+                {duckdb_quote_identifier(
+                    POST_COMMIT_VALIDATION_SESSION_ID_COL
+                )} VARCHAR NOT NULL,
+                {duckdb_quote_identifier(
+                    POST_COMMIT_VALIDATION_CREATED_AT_COL
+                )} TIMESTAMPTZ NOT NULL,
+                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_SUBMISSION_COL)} JSON NOT NULL,
+                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_ASSESSMENT_COL)} JSON NOT NULL,
+                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_APPLIED_COL)} BOOLEAN NOT NULL,
+                {duckdb_quote_identifier(POST_COMMIT_VALIDATION_ACCEPTED_COL)} BOOLEAN NOT NULL
             )
             """
         )
@@ -2518,9 +2536,9 @@ class AiAugmentBackendStore(FrozenStrictModel):
             f"{duckdb_quote_identifier(KTP_AI_AUGMENT_SESSION_METADATA_COL)}))"
         )
         self._execute(
-            f"CREATE TABLE IF NOT EXISTS {CODEX_RUN_OUTCOME_RECORDS_TABLE} ("
-            f"{duckdb_quote_identifier(CODEX_RUN_OUTCOME_RECORD_ID_COL)} VARCHAR PRIMARY KEY, "
-            f"{duckdb_quote_identifier(CODEX_RUN_OUTCOME_SERIALIZED_JSON_COL)} VARCHAR NOT NULL)"
+            f"CREATE TABLE IF NOT EXISTS {RUN_OUTCOME_RECORDS_TABLE} ("
+            f"{duckdb_quote_identifier(RUN_OUTCOME_RECORD_ID_COL)} VARCHAR PRIMARY KEY, "
+            f"{duckdb_quote_identifier(RUN_OUTCOME_SERIALIZED_JSON_COL)} VARCHAR NOT NULL)"
         )
 
     def _replace_codex_output_view(self) -> None:
@@ -2820,9 +2838,9 @@ class AiAugmentBackendStore(FrozenStrictModel):
         if len(updated_rows) != 1:
             raise ReplayInputMissing(Locale.RUN_OUTCOME_PROJECTION_INCONSISTENT)
         self._execute(
-            f"INSERT INTO {CODEX_RUN_OUTCOME_RECORDS_TABLE} ("
-            f"{duckdb_quote_identifier(CODEX_RUN_OUTCOME_RECORD_ID_COL)}, "
-            f"{duckdb_quote_identifier(CODEX_RUN_OUTCOME_SERIALIZED_JSON_COL)}) "
+            f"INSERT INTO {RUN_OUTCOME_RECORDS_TABLE} ("
+            f"{duckdb_quote_identifier(RUN_OUTCOME_RECORD_ID_COL)}, "
+            f"{duckdb_quote_identifier(RUN_OUTCOME_SERIALIZED_JSON_COL)}) "
             "VALUES (?, ?)",
             [
                 str(outcome.record_id),
@@ -2861,9 +2879,9 @@ class AiAugmentBackendStore(FrozenStrictModel):
                         response_body
                     ).run_outcome_record_id
                     outcome_row = self._execute(
-                        f"SELECT {duckdb_quote_identifier(CODEX_RUN_OUTCOME_SERIALIZED_JSON_COL)} "
-                        f"FROM {CODEX_RUN_OUTCOME_RECORDS_TABLE} "
-                        f"WHERE {duckdb_quote_identifier(CODEX_RUN_OUTCOME_RECORD_ID_COL)} = ?",
+                        f"SELECT {duckdb_quote_identifier(RUN_OUTCOME_SERIALIZED_JSON_COL)} "
+                        f"FROM {RUN_OUTCOME_RECORDS_TABLE} "
+                        f"WHERE {duckdb_quote_identifier(RUN_OUTCOME_RECORD_ID_COL)} = ?",
                         [str(outcome_record_id)],
                     ).fetchone()
                     if outcome_row is None:
