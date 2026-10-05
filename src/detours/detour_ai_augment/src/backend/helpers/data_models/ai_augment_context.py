@@ -487,23 +487,18 @@ def _load_ai_augment_singular_outerdict_blueprints(
 )
 class AiAugmentBackendContext(FrozenStrictModel):
     pipeline_config: AiAugmentDetourConfig
-    configured_namekey: NameKey | None = None
     ai_augment_singular_outerdict_blueprints: tuple[AiAugmentSingularOuterDict, ...] = Field(
         default_factory=_load_ai_augment_singular_outerdict_blueprints,
         exclude=True,
         repr=False,
     )
 
-    def configured_ai_augment_singular_outerdict(
-        self,
-    ) -> AiAugmentSingularOuterDict | None:
-        if self.configured_namekey is None:
-            return None
+    def blueprint_for_namekey(self, namekey: NameKey) -> AiAugmentSingularOuterDict:
         configured = next(
             (
                 blueprint
                 for blueprint in self.ai_augment_singular_outerdict_blueprints
-                if blueprint.namekey == self.configured_namekey
+                if blueprint.namekey == namekey
             ),
             None,
         )
@@ -517,8 +512,8 @@ class AiAugmentBackendContext(FrozenStrictModel):
                 Locale.CONFIGURED_NAMEKEY_INELIGIBLE_TEMPLATE.format(category=category.value)
             )
         stripped_identity = (
-            self.configured_namekey.first_name.strip(),
-            self.configured_namekey.last_name.strip(),
+            namekey.first_name.strip(),
+            namekey.last_name.strip(),
         )
         suggestions = sorted({
             blueprint.namekey.to_json_key()

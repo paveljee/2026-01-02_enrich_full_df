@@ -89,6 +89,8 @@ class PushResponseRecord(ResponseRecord):
                 or self.pull_response_record.response_code != HTTPStatus.OK
             ):
                 raise ValueError(Locale.PUSH_RESULT_LINKAGE_INVALID)
+        elif self.pull_response_record is not None:
+            raise ValueError(Locale.PUSH_RESULT_LINKAGE_INVALID)
         return self
 
 

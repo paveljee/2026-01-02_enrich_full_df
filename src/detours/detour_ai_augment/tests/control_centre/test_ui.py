@@ -60,6 +60,7 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     DOCX_COLUMNS,
     DOCX_TO_AI_AUGMENT_COLUMNS,
     EXCLUDED_NAMEKEY,
+    HTTP_CONTENT_TYPE_HEADER,
     HTTP_GET_METHOD,
     HTTP_POST_METHOD,
     KTP_AI_AUGMENT_FOOTNOTE_ARGUMENTS_COL,
@@ -75,6 +76,7 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     SOURCE_KEY_HEADER,
     AiAugmentCohort,
     AiAugmentIneligibilityCategory,
+    ContentType,
 )
 from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helpers import (
     vars as control_vars,
@@ -209,6 +211,7 @@ def http_record(
     path: str,
     response_code: int,
     request_body: str | None = None,
+    response_headers: dict[str, str] | None = None,
 ) -> HttpRequestLogRecord:
     return HttpRequestLogRecord(
         schema_version="1.1",
@@ -223,7 +226,7 @@ def http_record(
         request_headers={},
         request_body=request_body,
         response_code=response_code,
-        response_headers={},
+        response_headers={} if response_headers is None else response_headers,
         response_body="",
         received_at_unix_usec=1,
         duration_usec=1,
@@ -311,6 +314,7 @@ def agent_runtime_attempt(
             method=HTTP_GET_METHOD,
             path=PULL_PATH,
             response_code=status.HTTP_200_OK,
+            response_headers={HTTP_CONTENT_TYPE_HEADER: ContentType.NDJSON_UTF8},
         ),
     )
     push_response_record = PushResponseRecord.from_http_request_log_record(
@@ -3451,7 +3455,7 @@ async def test_publish_completed_includes_earlier_completed_run_and_writes_cards
     configuration = application.configuration.pipeline_config
     sources = [
         source for source in backend_server.configure_runtime(
-            startup_files.config, require_namekey=False,
+            startup_files.config,
         ).ai_augment_singular_outerdict_blueprints
         if source.ai_augment_cohort is AiAugmentCohort.NO_GROUND_TRUTH
     ][:3]
@@ -3502,7 +3506,7 @@ async def test_spreadsheet_completed_preserves_card_values_and_ground_truth_pair
 ) -> None:
     application = faithful_publishing_services
     blueprints = backend_server.configure_runtime(
-        startup_files.config, require_namekey=False,
+        startup_files.config,
     ).ai_augment_singular_outerdict_blueprints
     ground_truth_source = next(
         source for source in blueprints
@@ -3584,7 +3588,7 @@ async def test_spreadsheet_completed_preserves_card_values_and_ground_truth_pair
             application.configuration.pipeline_config.output_dir
             / control_vars.SPREADSHEET_COMPLETED_FILENAME
         )
-        with destination.open(newline="", encoding=control_vars.TEXT_ENCODING) as file:
+        with destination.open(newline="", encoding=control_vars.TEXT_ENCODING_WITH_BOM) as file:
             reader = csv.DictReader(file)
             rows = list(reader)
             columns = reader.fieldnames
@@ -3705,7 +3709,7 @@ async def test_publish_one_shot_shutdown_noop_or_first_error_keeps_written_files
     config = application.configuration.pipeline_config
     sources = [
         source for source in backend_server.configure_runtime(
-            startup_files.config, require_namekey=False,
+            startup_files.config,
         ).ai_augment_singular_outerdict_blueprints
         if source.ai_augment_cohort is AiAugmentCohort.NO_GROUND_TRUTH
     ][:3]
@@ -3855,6 +3859,9 @@ class TestBackendStartupConditions:
     def test_startup_conditions(
         startup_files: StartupFiles, mode: str, condition: str, python_process: PythonProcess,
     ) -> None:
+        from src.detours.detour_ai_augment.src.backend.helpers.data_models.init_request import (
+            BackendInitRequestRecord,
+        )
         files = startup_files
         namekey: str | None = STARTUP_NAMEKEY.to_json_key()
         success = condition == "ready"
@@ -3887,7 +3894,10 @@ class TestBackendStartupConditions:
             payload = {"empty_object_lf": b"{}\n", "empty_object_no_lf": b"{}"}.get(
                 condition, record_line(),
             )
-            files.replay.write_bytes(payload)
+            if condition == "unprojected_record":
+                files.replay.write_bytes(files.replay.read_bytes() + payload)
+            else:
+                files.replay.write_bytes(payload)
             if condition != "hash_mismatch":
                 files.repin()
             success = condition == "unprojected_record" and mode == "new"
@@ -3912,12 +3922,29 @@ class TestBackendStartupConditions:
         assert (result.returncode == 0) is success, details
         assert ("STARTUP_READY" in result.stdout) is success, details
         if success:
-            expected_rows = 1 if condition == "unprojected_record" else 0
+            expected_rows = 1 if mode == "ipc" else 2
+            if condition == "unprojected_record":
+                expected_rows += 1
             assert f"STARTUP_READY {expected_rows} 307" in result.stdout
-        for path in (files.source, files.replay):
-            assert (path.read_bytes() if path.exists() else None) == before[path]
-        # Only explicit new can change/reconstruct DB contents, even when startup fails.
-        if mode != "new":
+        assert (
+            files.source.read_bytes() if files.source.exists() else None
+        ) == before[files.source]
+        after_log = files.replay.read_bytes() if files.replay.exists() else None
+        if success and mode != "ipc":
+            before_log = before[files.replay]
+            assert before_log is not None and after_log is not None
+            assert after_log.startswith(before_log)
+            appended_lines = after_log[len(before_log):].splitlines()
+            assert len(appended_lines) == 1
+            logged_init_request_record = BackendInitRequestRecord.from_serialized_json(
+                value=appended_lines[0].decode(control_vars.TEXT_ENCODING),
+            )
+            assert namekey is not None
+            assert logged_init_request_record.namekey == NameKey.from_json_key(namekey)
+        else:
+            assert after_log == before[files.replay]
+        # IPC and failed non-new starts must still leave the DB byte-identical.
+        if mode == "ipc" or (mode != "new" and not success):
             after_db = files.detour.read_bytes() if files.detour.exists() else None
             assert after_db == before[files.detour]
 
@@ -3932,6 +3959,9 @@ class TestBackendStartupConditions:
         startup_files: StartupFiles, mode: str, stdin: str, yes: bool, success: bool,
         python_process: PythonProcess,
     ) -> None:
+        # The fixture contains init, so successful --new also requires replay confirmation.
+        if mode == "new" and success and not yes:
+            stdin += "y\n"
         result = start(python_process, startup_files, mode, stdin=stdin, yes=yes)
         assert (result.returncode == 0) is success, result.stdout + result.stderr
         assert ("[y/N]" not in result.stdout) is yes
@@ -3947,17 +3977,30 @@ class TestBackendStartupConditions:
         startup_files: StartupFiles, stdin: str, yes: bool, success: bool,
         python_process: PythonProcess,
     ) -> None:
+        from src.detours.detour_ai_augment.src.backend.helpers.data_models.init_request import (
+            BackendInitRequestRecord,
+        )
         files = startup_files
         files.replay.chmod(0o600)
-        files.replay.write_bytes(record_line())
+        files.replay.write_bytes(files.replay.read_bytes() + record_line())
         files.repin()
         old_db = files.detour.read_bytes()
         log = files.replay.read_bytes()
         result = start(python_process, files, "new", stdin=stdin, yes=yes)
         assert (result.returncode == 0) is success, result.stdout + result.stderr
         assert ("Registered a nonempty replay log" in result.stdout) is not yes
-        assert files.replay.read_bytes() == log
-        if not success:
+        after_log = files.replay.read_bytes()
+        if success:
+            assert "STARTUP_READY 3 307" in result.stdout
+            assert after_log.startswith(log)
+            appended_lines = after_log[len(log):].splitlines()
+            assert len(appended_lines) == 1
+            logged_init_request_record = BackendInitRequestRecord.from_serialized_json(
+                value=appended_lines[0].decode(control_vars.TEXT_ENCODING),
+            )
+            assert logged_init_request_record.namekey == STARTUP_NAMEKEY
+        else:
+            assert after_log == log
             assert files.detour.read_bytes() == old_db
 
     @pytest.mark.parametrize("ipc_only", (False, True))

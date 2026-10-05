@@ -488,9 +488,7 @@ def _pull_response(
             value = field["value"]
             assert isinstance(value, str)
             values[column] = value
-        singular = store.configured_ai_augment_singular_outerdict()
-        if singular is None:
-            raise BackendStoreException(Locale.PULL_COMPLETED_RESEARCHER_MISSING)
+        singular = store.selected_ai_augment_singular_outerdict()
         ground_truth = singular.ground_truth_innerdict()
         lines = [json_line(values)]
         if ground_truth is not None:
@@ -501,9 +499,7 @@ def _pull_response(
             headers={ETAG_HEADER: f'"{validation_request_record.record_id}"'},
         )
     try:
-        singular = store.configured_ai_augment_singular_outerdict()
-        if singular is None:
-            raise BackendStoreException(Locale.PULL_COMPLETED_RESEARCHER_MISSING)
+        singular = store.selected_ai_augment_singular_outerdict()
         initial_lines = tuple(configured_pull_lines(singular))
         logger.info(
             Locale.PULL_INITIAL_TASK_LOG, singular.namekey, len(initial_lines)
@@ -646,7 +642,12 @@ async def authoritative_push(
         immediate_replayed_push_response_record.response_code
         == provisional_http_response.status_code
     )
-    assert immediate_replayed_push_response_record.pull_response_record is pull_response_record
+    expected_pull = (
+        pull_response_record
+        if immediate_replayed_push_response_record.response_code == HTTPStatus.ACCEPTED
+        else None
+    )
+    assert immediate_replayed_push_response_record.pull_response_record is expected_pull
 
     if immediate_replayed_push_response_record.response_code == HTTPStatus.ACCEPTED:
         # this below hands off the awaiting to a new asyncio task,

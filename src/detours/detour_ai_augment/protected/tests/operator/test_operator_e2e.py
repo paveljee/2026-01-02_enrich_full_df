@@ -483,15 +483,29 @@ def _operator_runtime(
     config_path.write_text(json.dumps(config, indent=2), encoding=TEXT_ENCODING)
     _operator_log("initializing isolated Backend Store through --new --yes lifecycle")
     args = backend_server.parse_args(["--config", str(config_path), "--new", "--yes"])
-    backend_runtime = backend_server.configure_runtime(args.config, require_namekey=False)
+    backend_runtime = backend_server.configure_runtime(args.config)
+    from src.detours.detour_ai_augment.protected.tests.fixtures.pytest_fixtures import (
+        init_request_record,
+    )
     with backend_server.backend_store_lifecycle(
         backend_runtime,
+        init_request_record=init_request_record(
+            next(
+                blueprint.namekey
+                for blueprint in backend_runtime.ai_augment_singular_outerdict_blueprints
+                if blueprint.ai_augment_cohort is not AiAugmentCohort.INELIGIBLE
+            ),
+        ),
         new=args.new,
         confirmed=backend_server.confirm_startup(args),
         yes=args.yes,
     ) as backend_store:
         pass
     _operator_log("isolated Backend Store initialized and closed cleanly")
+    replay_config[RESOURCE_SHA256_KEY] = hashlib.sha256(
+        replay_log_path.read_bytes()
+    ).hexdigest()
+    config_path.write_text(json.dumps(config, indent=2), encoding=TEXT_ENCODING)
     return OperatorRuntime(
         repository_root=repository_root,
         config_path=config_path,

@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+from http import HTTPStatus
 from typing import Self
 
 from pydantic import Field, model_validator
+from requests.structures import CaseInsensitiveDict
 
 from src.detours.detour_ai_augment.protected.src.architecture import BackendComponent
 from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
+    HTTP_CONTENT_TYPE_HEADER,
     HTTP_GET_METHOD,
     PULL_PATH,
+    ContentType,
 )
 from src.helpers.architecture import implements
 from src.helpers.data_models.http_request_log import HttpRequestLogRecord
@@ -91,6 +95,22 @@ class PullResponseRecord(ResponseRecord):
     @model_validator(mode="after")
     def _validate_exchange(self) -> Self:
         _validate_public_exchange(self, HTTP_GET_METHOD, PULL_PATH)
+        content_type = CaseInsensitiveDict(self.response_headers or {}).get(
+            HTTP_CONTENT_TYPE_HEADER
+        )
+        if self.response_code == HTTPStatus.OK:
+            if (
+                content_type == ContentType.NDJSON_UTF8
+                and self.validation_request_record is not None
+            ) or (
+                content_type == ContentType.MARKDOWN_UTF8
+                and self.validation_request_record is None
+            ) or content_type not in {
+                ContentType.NDJSON_UTF8, ContentType.MARKDOWN_UTF8,
+            }:
+                raise ValueError(Locale.PULL_RESPONSE_LINKAGE_INVALID)
+        elif self.validation_request_record is not None:
+            raise ValueError(Locale.PULL_RESPONSE_LINKAGE_INVALID)
         return self
 
 

@@ -92,8 +92,10 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     CODEX_PAYLOAD_KEY,
     CODEX_TYPE_KEY,
     DOCX_COLUMNS,
+    HTTP_CONTENT_TYPE_HEADER,
     HTTP_GET_METHOD,
     HTTP_POST_METHOD,
+    INIT_PATH,
     KTP_AI_AUGMENT_ACADEMIC_POSITIONS_COL,
     KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL,
     KTP_AI_AUGMENT_COMMENTS_COL,
@@ -118,6 +120,8 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     ContentType,
 )
 from src.detours.detour_ai_augment.protected.tests.fixtures.pytest_fixtures import (  # noqa: E501
+    StartupFiles,
+    init_request_record,
     source_population,
 )
 from src.detours.detour_ai_augment.protected.tests.pytest_plugin import (
@@ -154,6 +158,9 @@ from src.detours.detour_ai_augment.src.backend.helpers.data_models.commit_reques
     CodexSessionRecord,
     CommitRequestBody,
     _synthetic_commit_request_record,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.init_request import (
+    BackendInitRequestRecord,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.lifecycle import (
     BackendLifecycle,
@@ -327,6 +334,13 @@ def persisted_http_record(
     response_body: str = "",
     response_headers: dict[str, str] | None = None,
 ) -> HttpRequestLogRecord:
+    if (
+        response_headers is None
+        and method == HTTP_GET_METHOD
+        and path == PULL_PATH
+        and response_code == HTTPStatus.OK
+    ):
+        response_headers = {HTTP_CONTENT_TYPE_HEADER: ContentType.NDJSON_UTF8}
     return HttpRequestLogRecord(
         schema_version="1.1",
         record_id=record_id,
@@ -1362,7 +1376,6 @@ def runtime_for_test(
             source_connection.close()
     return AiAugmentBackendContext(
         pipeline_config=pipeline,
-        configured_namekey=configured_namekey,
         ai_augment_singular_outerdict_blueprints=ai_augment_singular_outerdicts,
     )
 
@@ -1387,6 +1400,10 @@ def writable_backend_store(
     if not store._detour_db_path.exists():
         store._rebuild_from_log(runtime, reset_confirmed=True)
     with store._writable(runtime):
+        if store._init_request_record is None:
+            store._append_authoritative_record(init_request_record(
+                runtime.ai_augment_singular_outerdict_blueprints[0].namekey,
+            ))
         yield store
 
 
@@ -1404,6 +1421,8 @@ def api_runtime(tmp_path: Path, backend_test_paths: BackendTestPaths) -> AiAugme
 def api_store(api_runtime: AiAugmentBackendContext) -> AiAugmentBackendStore:
     store = backend_store_for_test(api_runtime)
     store._rebuild_from_log(api_runtime, reset_confirmed=True)
+    with store._writable(api_runtime):
+        store._append_authoritative_record(init_request_record(TEST_NAMEKEY_MODEL))
     return store
 
 
@@ -2057,8 +2076,9 @@ def test_http_adapter_persists_complete_exchange_before_sending(
             records = AiAugmentBackendStore._authoritative_log_records(
                 Path(api_store._replay_log).read_bytes()
             )
-            assert len(records) == 1
-            record = records[0][0]
+            assert len(records) == 2
+            assert records[0][0].path == INIT_PATH
+            record = records[-1][0]
             assert api_store._http_record(record.record_id) == record
             persisted.append(record)
             messages.append(message)
@@ -2516,8 +2536,9 @@ def test_run_outcome_http_exchange_is_logged_and_replays_as_raw_history(
         assert response.status_code == expected_status
         log_bytes = Path(api_store._replay_log).read_bytes()
         records = AiAugmentBackendStore._authoritative_log_records(log_bytes)
-        assert len(records) == 1
-        record = records[0][0]
+        assert len(records) == 2
+        assert records[0][0].path == INIT_PATH
+        record = records[-1][0]
         assert api_store._http_record(record.record_id) == record
         validated = RunOutcomeResponseRecord.from_http_request_log_record(record)
         body = validated._body()
@@ -2594,7 +2615,7 @@ def test_failed_post_commit_work_projects_without_conditional_rollback(
         method=HTTP_GET_METHOD,
         path=PULL_PATH,
         response_code=status.HTTP_200_OK,
-        response_headers={"content-type": ContentType.NDJSON},
+        response_headers={"content-type": ContentType.NDJSON_UTF8},
         response_body="".join(
             api.configured_pull_lines(api_runtime.ai_augment_singular_outerdict_blueprints[0])
         ),
@@ -2653,10 +2674,10 @@ def test_failed_post_commit_work_projects_without_conditional_rollback(
         assert api_store._execute(
             f"SELECT {api.AUTHORITATIVE_RECORD_ORDINAL_COLUMN} "
             f"FROM {api.AUTHORITATIVE_RECORDS_TABLE} ORDER BY 1"
-        ).fetchall() == [(1,), (2,), (3,), (4,)]
+        ).fetchall() == [(1,), (2,), (3,), (4,), (5,)]
         assert len(AiAugmentBackendStore._authoritative_log_records(
             Path(api_store._replay_log).read_bytes()
-        )) == 4
+        )) == 5
 
 
 @pytest.mark.parametrize("action", ("search_query", "open", "click", "find"))
@@ -4857,20 +4878,18 @@ def test_audit_ssh_uses_pinned_identity_and_counts_physical_lines(
         '{  "ktp.first_name" : "A." ,  "ktp.last_name" : "Sheikh"  }',
     ),
 )
-def test_context_namekey_normalizes_equivalent_json(
+def test_blueprint_lookup_normalizes_equivalent_namekey_json(
     raw_namekey: str,
     api_runtime: AiAugmentBackendContext,
 ) -> None:
     runtime = AiAugmentBackendContext(
         pipeline_config=api_runtime.pipeline_config,
-        configured_namekey=NameKey.from_json_key(raw_namekey),
         ai_augment_singular_outerdict_blueprints=(
             api_runtime.ai_augment_singular_outerdict_blueprints
         ),
     )
 
-    assert runtime.configured_namekey == NameKey.from_json_key(TEST_NAMEKEY)
-    assert runtime.configured_ai_augment_singular_outerdict() is (
+    assert runtime.blueprint_for_namekey(NameKey.from_json_key(raw_namekey)) is (
         runtime.ai_augment_singular_outerdict_blueprints[0]
     )
 
@@ -4885,21 +4904,17 @@ def test_context_namekey_normalizes_equivalent_json(
 def test_configured_namekey_rejects_malformed_or_incomplete_json(
     monkeypatch: pytest.MonkeyPatch,
     raw_namekey: str,
-    api_runtime: AiAugmentBackendContext,
-    backend_test_paths: BackendTestPaths,
-    tmp_path: Path,
+    startup_files: StartupFiles,
 ) -> None:
-    config_data = json.loads(backend_test_paths.ai_augment_config.read_text(encoding=TEXT_ENCODING))
-    config_data["db_file"] = str(api_runtime.pipeline_config.db_file)
-    config_path = tmp_path / "config.json"
-    write_text(config_path, json.dumps(config_data))
     monkeypatch.setenv(api.NAMEKEY_ENV_NAME, raw_namekey)
 
     with pytest.raises(
         ValueError,
         match=Locale.CONFIGURED_NAMEKEY_MALFORMED,
     ):
-        server.configure_runtime(config_path, verify_hash_on_init=False)
+        server.main([
+            "--config", str(startup_files.config), "--new", "--yes",
+        ])
 
 
 def ai_augment_singular_outerdict(
@@ -5052,16 +5067,16 @@ def test_backend_startup_prepares_source_rows_for_initial_pull(
 ) -> None:
     runtime = AiAugmentBackendContext(
         pipeline_config=api_runtime.pipeline_config,
-        configured_namekey=api_runtime.configured_namekey,
         ai_augment_singular_outerdict_blueprints=(
             api_runtime.ai_augment_singular_outerdict_blueprints
         ),
     )
 
-    assert runtime.configured_namekey == api_runtime.configured_namekey
+    assert runtime.ai_augment_singular_outerdict_blueprints == (
+        api_runtime.ai_augment_singular_outerdict_blueprints
+    )
     with api_store._writable(runtime):
-        singular_outerdict = api_store.configured_ai_augment_singular_outerdict()
-        assert singular_outerdict is not None
+        singular_outerdict = api_store.selected_ai_augment_singular_outerdict()
         monkeypatch.setattr(api, "BACKEND_LIFECYCLE", BackendLifecycle.READY)
         response = api._pull_response(
             requests.Request("GET", "http://testserver/pull").prepare(),
@@ -5071,7 +5086,7 @@ def test_backend_startup_prepares_source_rows_for_initial_pull(
     assert response.content == "".join(api.configured_pull_lines(singular_outerdict)).encode()
 
 
-def test_ipc_only_runtime_configures_query_without_a_namekey(
+def test_ipc_only_context_configures_query_without_a_namekey(
     api_store: AiAugmentBackendStore,
     api_runtime: AiAugmentBackendContext,
 ) -> None:
@@ -5082,9 +5097,8 @@ def test_ipc_only_runtime_configures_query_without_a_namekey(
         ),
     )
 
-    assert runtime.configured_namekey is None
+    assert not hasattr(runtime, "configured_namekey")
     with api_store._read_only(runtime):
-        assert api_store.configured_ai_augment_singular_outerdict() is None
         assert len(api_store.ai_augment_singular_outerdicts()) == 1
 
 
@@ -5174,15 +5188,13 @@ def test_detour_database_open_modes_are_explicit_and_reported(
 
 
 def test_backend_store_exposes_only_detached_reads_outside_transactions(
-    tmp_path: Path,
-    backend_test_paths: BackendTestPaths,
+    api_runtime: AiAugmentBackendContext,
 ) -> None:
-    runtime = runtime_for_test(tmp_path, backend_test_paths)
-    store = backend_store_for_test(runtime)
+    store = backend_store_for_test(api_runtime)
     assert not hasattr(store, "detour_db")
     with pytest.raises(RuntimeError, match="must be used inside"):
         store._execute("SELECT 1")
-    with writable_backend_store(runtime) as store:
+    with writable_backend_store(api_runtime) as store:
         assert store._detour_db._conn is None
         result = store._execute("SELECT 1 UNION ALL SELECT 2")
         assert store._detour_db._conn is None
@@ -5194,7 +5206,7 @@ def test_backend_store_exposes_only_detached_reads_outside_transactions(
         with pytest.raises(RuntimeError, match="transaction"):
             store._materialize_innerdicts(source_relation="unused", table_name="unused")
         assert store._detour_db_path.stat().st_mode & 0o777 == 0o400
-    with store._read_only(runtime):
+    with store._read_only(api_runtime):
         assert store._execute("SELECT 1").fetchone() == (1,)
         assert store._detour_db._conn is None
     with pytest.raises(RuntimeError, match="must be used inside"):
@@ -5202,13 +5214,11 @@ def test_backend_store_exposes_only_detached_reads_outside_transactions(
 
 
 def test_query_handler_requires_managed_backend_store_context(
-    tmp_path: Path,
+    api_runtime: AiAugmentBackendContext,
     monkeypatch: pytest.MonkeyPatch,
-    backend_test_paths: BackendTestPaths,
     threaded_loop: asyncio.Runner,
 ) -> None:
-    runtime = runtime_for_test(tmp_path, backend_test_paths)
-    store = backend_store_for_test(runtime)
+    store = backend_store_for_test(api_runtime)
     monkeypatch.setattr(
         ai_augment_detour_db,
         "load_duckdb_extension",
@@ -5221,11 +5231,13 @@ def test_query_handler_requires_managed_backend_store_context(
     ):
         query_snapshot_for_test(store, threaded_loop)
 
-    with writable_backend_store(runtime) as store:
+    with writable_backend_store(api_runtime) as store:
         response = query_snapshot_for_test(store, threaded_loop)
 
-    assert response == DashboardQuerySnapshot(
-        ai_augment_singular_outerdicts=(),
+    assert tuple(
+        item.serialize() for item in response.ai_augment_singular_outerdicts
+    ) == tuple(
+        item.serialize() for item in api_runtime.ai_augment_singular_outerdict_blueprints
     )
 
 
@@ -5310,20 +5322,19 @@ def test_detour_database_discards_connection_before_close(
     assert read_only_database._conn is None
 
 
-def test_configured_namekey_population_accepts_exact_eligible_match(
+def test_blueprint_lookup_accepts_exact_eligible_match(
     api_runtime: AiAugmentBackendContext,
 ) -> None:
     singular_outerdict = ai_augment_singular_outerdict("Gaoquan ", "Shi")
     context = AiAugmentBackendContext(
         pipeline_config=api_runtime.pipeline_config,
-        configured_namekey=singular_outerdict.namekey,
         ai_augment_singular_outerdict_blueprints=(singular_outerdict,),
     )
 
-    assert context.configured_ai_augment_singular_outerdict() is singular_outerdict
+    assert context.blueprint_for_namekey(singular_outerdict.namekey) is singular_outerdict
 
 
-def test_configured_namekey_population_reports_exact_ineligibility_category(
+def test_blueprint_lookup_reports_exact_ineligibility_category(
     api_runtime: AiAugmentBackendContext,
 ) -> None:
     category = AiAugmentIneligibilityCategory.STAGING_PARTITION_2
@@ -5335,38 +5346,36 @@ def test_configured_namekey_population_reports_exact_ineligibility_category(
     )
     context = AiAugmentBackendContext(
         pipeline_config=api_runtime.pipeline_config,
-        configured_namekey=singular_outerdict.namekey,
         ai_augment_singular_outerdict_blueprints=(singular_outerdict,),
     )
 
     with pytest.raises(ValueError) as exc_info:
-        context.configured_ai_augment_singular_outerdict()
+        context.blueprint_for_namekey(singular_outerdict.namekey)
 
     assert str(exc_info.value) == Locale.CONFIGURED_NAMEKEY_INELIGIBLE_TEMPLATE.format(
         category=category.value
     )
 
 
-def test_configured_namekey_population_suggests_exact_trailing_space_match(
+def test_blueprint_lookup_suggests_exact_trailing_space_match(
     api_runtime: AiAugmentBackendContext,
 ) -> None:
     singular_outerdict = ai_augment_singular_outerdict("Gaoquan ", "Shi")
     configured_namekey = ai_augment_singular_outerdict("Gaoquan", "Shi").namekey
     context = AiAugmentBackendContext(
         pipeline_config=api_runtime.pipeline_config,
-        configured_namekey=configured_namekey,
         ai_augment_singular_outerdict_blueprints=(singular_outerdict,),
     )
 
     with pytest.raises(ValueError) as exc_info:
-        context.configured_ai_augment_singular_outerdict()
+        context.blueprint_for_namekey(configured_namekey)
 
     assert str(exc_info.value) == Locale.CONFIGURED_NAMEKEY_NOT_FOUND_SUGGESTIONS_TEMPLATE.format(
         suggestions=singular_outerdict.namekey.to_json_key()
     )
 
 
-def test_configured_namekey_population_sorts_multiple_whitespace_suggestions(
+def test_blueprint_lookup_sorts_multiple_whitespace_suggestions(
     api_runtime: AiAugmentBackendContext,
 ) -> None:
     singular_outerdicts = (
@@ -5382,31 +5391,29 @@ def test_configured_namekey_population_sorts_multiple_whitespace_suggestions(
     )
     context = AiAugmentBackendContext(
         pipeline_config=api_runtime.pipeline_config,
-        configured_namekey=configured_namekey,
         ai_augment_singular_outerdict_blueprints=singular_outerdicts,
     )
 
     with pytest.raises(ValueError) as exc_info:
-        context.configured_ai_augment_singular_outerdict()
+        context.blueprint_for_namekey(configured_namekey)
 
     assert str(exc_info.value) == Locale.CONFIGURED_NAMEKEY_NOT_FOUND_SUGGESTIONS_TEMPLATE.format(
         suggestions=suggestions
     )
 
 
-def test_configured_namekey_population_reports_unrelated_unknown_without_suggestion(
+def test_blueprint_lookup_reports_unrelated_unknown_without_suggestion(
     api_runtime: AiAugmentBackendContext,
 ) -> None:
     singular_outerdict = ai_augment_singular_outerdict("Gaoquan ", "Shi")
     configured_namekey = ai_augment_singular_outerdict("Gaoquan", "Shih").namekey
     context = AiAugmentBackendContext(
         pipeline_config=api_runtime.pipeline_config,
-        configured_namekey=configured_namekey,
         ai_augment_singular_outerdict_blueprints=(singular_outerdict,),
     )
 
     with pytest.raises(ValueError) as exc_info:
-        context.configured_ai_augment_singular_outerdict()
+        context.blueprint_for_namekey(configured_namekey)
 
     assert str(exc_info.value) == Locale.CONFIGURED_NAMEKEY_NOT_FOUND
 
@@ -5498,9 +5505,21 @@ def test_main_ipc_only_runs_only_the_dashboard_query_server(
     backend_test_paths: BackendTestPaths,
 ) -> None:
     config_path = backend_startup_config_for_test(tmp_path, backend_test_paths)
-    context = server.configure_runtime(config_path, require_namekey=False)
-    with server.backend_store_lifecycle(context, new=True, confirmed=True, yes=True):
+    context = server.configure_runtime(config_path)
+    with server.backend_store_lifecycle(
+        context,
+        init_request_record=init_request_record(
+            context.ai_augment_singular_outerdict_blueprints[0].namekey,
+        ),
+        new=True, confirmed=True, yes=True,
+    ):
         pass
+    config_data = json.loads(config_path.read_text(encoding=TEXT_ENCODING))
+    replay_entry = config_data["files_config"][REPLAY_LOG_KEY]
+    replay_entry[RESOURCE_SHA256_KEY] = hashlib.sha256(
+        Path(replay_entry[RESOURCE_PATH_KEY]).read_bytes()
+    ).hexdigest()
+    write_text(config_path, json.dumps(config_data))
     served: list[AiAugmentQueryBackendStore] = []
 
     def serve(store: AiAugmentQueryBackendStore) -> None:
@@ -5820,7 +5839,9 @@ def test_accepted_push_is_committed_only_after_its_public_record(
             records = AiAugmentBackendStore._authoritative_log_records(
                 Path(api_store._replay_log).read_bytes()
             )
-            assert [item.path for item, _ in records] == ["/pull", "/push"]
+            assert [item.path for item, _ in records] == [
+                INIT_PATH, PULL_PATH, PUSH_PATH,
+            ]
             assert records[-1][0].record_id == accepted_push.record_id
             assert api_store._http_record(accepted_push.record_id).model_dump_json() == (
                 accepted_push.model_dump_json()
@@ -5840,7 +5861,7 @@ def test_accepted_push_is_committed_only_after_its_public_record(
             Path(api_store._replay_log).read_bytes()
         )]
         assert [item.path for item in completed_records] == [
-            "/pull", "/push", "/pull", "/commit", "/validate",
+            INIT_PATH, PULL_PATH, PUSH_PATH, PULL_PATH, COMMIT_PATH, VALIDATE_PATH,
         ]
         committed = api_store._backend_commit_request_record(completed_records[-2])
         assert (
@@ -5848,7 +5869,7 @@ def test_accepted_push_is_committed_only_after_its_public_record(
         )
         assert (
             committed.commit_request_body.push_response_record.record_id
-            == completed_records[1].record_id
+            == completed_records[2].record_id
         )
         assert committed.commit_request_body.codex_session_record.codex_rollout_record == rollout
         validation = api_store.current_replayed_record
@@ -5997,7 +6018,9 @@ def test_accepted_push_finishes_after_client_or_response_send_failure(
         records = AiAugmentBackendStore._authoritative_log_records(
             Path(api_store._replay_log).read_bytes()
         )
-        assert [record.path for record, _ in records] == ["/pull", "/push", "/commit", "/validate"]
+        assert [record.path for record, _ in records] == [
+            INIT_PATH, PULL_PATH, PUSH_PATH, COMMIT_PATH, VALIDATE_PATH,
+        ]
         assert api_store._http_record(records[-1][0].record_id) == records[-1][0]
         async with app.state.request_gate.ipc():
             assert not api.AUTHORITATIVE_BACKGROUND_TASKS
@@ -6247,19 +6270,17 @@ def test_openapi_does_not_disclose_integrity_internals() -> None:
 
 
 def test_dashboard_query_uses_scoped_store_reads(
-    tmp_path: Path,
+    api_runtime: AiAugmentBackendContext,
     monkeypatch: pytest.MonkeyPatch,
-    backend_test_paths: BackendTestPaths,
     threaded_loop: asyncio.Runner,
 ) -> None:
-    runtime = runtime_for_test(tmp_path, backend_test_paths)
     monkeypatch.setattr(
         ai_augment_detour_db,
         "load_duckdb_extension",
         lambda *_args, **_kwargs: None,
     )
 
-    with writable_backend_store(runtime) as store:
+    with writable_backend_store(api_runtime) as store:
         assert store._detour_db._conn is None
         first = query_snapshot_for_test(store, threaded_loop)
         replayed_pull = HttpRequestLogRecord(
@@ -6274,7 +6295,7 @@ def test_dashboard_query_uses_scoped_store_reads(
             request_headers={},
             request_body=None,
             response_code=status.HTTP_200_OK,
-            response_headers={"content-type": ContentType.NDJSON},
+            response_headers={"content-type": ContentType.NDJSON_UTF8},
             response_body="{}\n",
             received_at_unix_usec=None,
             duration_usec=1,
@@ -6286,14 +6307,13 @@ def test_dashboard_query_uses_scoped_store_reads(
             f"SELECT count(*) FROM {api.AUTHORITATIVE_RECORDS_TABLE}"
         ).fetchone()
 
-    assert (
-        first
-        == second
-        == DashboardQuerySnapshot(
-            ai_augment_singular_outerdicts=(),
-        )
+    assert first.model_dump(mode="json") == second.model_dump(mode="json")
+    assert tuple(
+        item.serialize() for item in first.ai_augment_singular_outerdicts
+    ) == tuple(
+        item.serialize() for item in api_runtime.ai_augment_singular_outerdict_blueprints
     )
-    assert projected_count == (1,)
+    assert projected_count == (2,)
 
 
 def test_dashboard_query_has_no_route_on_the_public_fastapi_application() -> None:
@@ -6363,10 +6383,12 @@ def test_clean_close_acknowledges_only_after_resource_cleanup(
         @contextmanager
         def fail_cleanup(
             context: AiAugmentBackendContext, *, ipc_only: Literal[False],
+            init_request_record: BackendInitRequestRecord,
             new: bool, confirmed: bool, confirm_replay: Callable[[], bool],
         ) -> Generator[AiAugmentBackendStore, None, None]:
             with initialize(
-                context, ipc_only=ipc_only, new=new, confirmed=confirmed,
+                context, ipc_only=ipc_only, init_request_record=init_request_record,
+                new=new, confirmed=confirmed,
                 confirm_replay=confirm_replay,
             ) as store:
                 yield store
@@ -6377,7 +6399,8 @@ def test_clean_close_acknowledges_only_after_resource_cleanup(
 
     def exercise() -> None:
         with server.backend_store_lifecycle(
-            api_runtime, new=True, confirmed=True, yes=True,
+            api_runtime, init_request_record=init_request_record(TEST_NAMEKEY_MODEL),
+            new=True, confirmed=True, yes=True,
         ) as store:
             assert isinstance(store, AiAugmentBackendStore)
             assert api.BACKEND_PROCESS_LOCK_DESCRIPTOR is not None
@@ -6420,7 +6443,8 @@ def test_log_descriptor_is_readonly_and_append_failure_closes_writer(
     store._rebuild_from_log(runtime, reset_confirmed=True)
     record = persisted_http_record(
         record_id=UUID("019d0000-0000-7000-8000-000000000020"),
-        method="GET", path="/pull", response_code=200,
+        method=HTTP_GET_METHOD, path=PULL_PATH,
+        response_code=HTTPStatus.SERVICE_UNAVAILABLE,
     )
     writer_fds: list[int] = []
 

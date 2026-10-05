@@ -133,6 +133,16 @@ class BackendComponent(
     # functions as a mere extension of the Human Operator's authority.
     # =================================================================
 
+    class InitRequestRecordProperty(RequestRecordProperty, Protocol):
+        """Durable NameKey selected by the operator for one Backend launch.
+
+        A Backend launch is distinct from Agent Runtime attempts and Control
+        Centre runs. Replaying this record starts a fresh lifecycle boundary.
+        """
+
+        @property
+        def namekey(self) -> NameKey: ...
+
     class PullRequestRecordProperty(RequestRecordProperty, Protocol): ...
 
     class PullResponseRecordProperty(ResponseRecordProperty, Protocol):
@@ -421,9 +431,6 @@ class BackendComponent(
         def pipeline_config(self) -> PipelineConfig: ...
 
         @property
-        def configured_namekey(self) -> NameKey | None: ...
-
-        @property
         def ai_augment_singular_outerdict_blueprints(self) -> (
             tuple[
                 BackendComponent.AiAugmentSingularOuterDictProperty,
@@ -470,7 +477,8 @@ class BackendComponent(
     class FullStoreProperty(QueryOnlyStoreProperty, Protocol):
         @property
         def current_replayed_record(self) -> (
-            BackendComponent.PullResponseRecordProperty
+            BackendComponent.InitRequestRecordProperty
+            | BackendComponent.PullResponseRecordProperty
             | BackendComponent.PushResponseRecordProperty
             | BackendComponent.CommitRequestRecordProperty
             | BackendComponent.ValidationRequestRecordProperty

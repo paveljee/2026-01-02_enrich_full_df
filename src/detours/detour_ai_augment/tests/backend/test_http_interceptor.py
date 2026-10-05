@@ -36,6 +36,9 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     SOURCE_KEY_HEADER,
     ContentType,
 )
+from src.detours.detour_ai_augment.protected.tests.fixtures.pytest_fixtures import (
+    init_request_record,
+)
 from src.detours.detour_ai_augment.src.backend import server
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_backend_store import (  # noqa: E501
     AiAugmentBackendStore,
@@ -102,6 +105,7 @@ from src.detours.detour_ai_augment.tests.backend.test_api import (
     standardized_submission_body,
     valid_submission_body,
 )
+from src.helpers.data_models import NameKey
 from src.helpers.data_models.http_request_log import HttpRequestLogRecord
 from src.helpers.vars import (
     KTP_FILENAME_COL,
@@ -214,6 +218,8 @@ def runtime(tmp_path: Path, backend_test_paths: BackendTestPaths) -> AiAugmentBa
 def backend_store(runtime: AiAugmentBackendContext) -> AiAugmentBackendStore:
     store = backend_store_for_test(runtime)
     store._rebuild_from_log(runtime, reset_confirmed=True)
+    with store._writable(runtime):
+        store._append_authoritative_record(init_request_record(TEST_NAMEKEY_MODEL))
     return store
 
 
@@ -230,6 +236,7 @@ def commit(
     pull: HttpRequestLogRecord | None = None,
     *,
     session_id: UUID = UUID(OPERATOR_CAPTURED_SESSION_ID),
+    namekey: NameKey = TEST_NAMEKEY_MODEL,
     rollout_suffix: bytes = b"",
     web_arguments: dict[str, object] | None = None,
 ) -> UUID:
@@ -241,10 +248,10 @@ def commit(
             response_code=200,
         ).model_copy(
             update={
-                "response_headers": {"content-type": ContentType.NDJSON},
+                "response_headers": {"content-type": ContentType.NDJSON_UTF8},
                 "response_body": api.json_line({
-                    KTP_FIRST_NAME_COL: TEST_NAMEKEY_MODEL.first_name,
-                    KTP_LAST_NAME_COL: TEST_NAMEKEY_MODEL.last_name,
+                    KTP_FIRST_NAME_COL: namekey.first_name,
+                    KTP_LAST_NAME_COL: namekey.last_name,
                 }),
             }
         )
@@ -289,7 +296,7 @@ def commit(
         ),
         rollout_filename=relative.name,
         appendwatch_report=report_for_rollout(relative).encode(),
-        namekey=TEST_NAMEKEY_MODEL,
+        namekey=namekey,
     )
     return store._append_authoritative_record(draft).record_id
 
@@ -386,7 +393,7 @@ def test_live_validation_replays_with_only_referenced_http(
     assert isinstance(education, dict)
     education["web_search_excerpts"][0]["excerpt"] = "not verified"
     with store._writable(runtime):
-        assert store.current_replayed_record is None
+        assert store.current_replayed_record is store._init_request_record
         baseline_id = commit(store, baseline, accepted)
         assert all(
             not researcher.codex_innerdicts
@@ -411,7 +418,7 @@ def test_live_validation_replays_with_only_referenced_http(
                 response_code=200,
             ).model_copy(
                 update={
-                    "response_headers": {"content-type": ContentType.MARKDOWN},
+                    "response_headers": {"content-type": ContentType.MARKDOWN_UTF8},
                     "response_body": rejected.validation_request_body.post_commit_validation.detail,
                 }
             )
@@ -588,7 +595,7 @@ def test_readback_failure_requires_explicit_new(
     with duckdb.connect(str(store._detour_db_path), read_only=True) as connection:
         assert connection.execute(
             f"SELECT count(*) FROM {api.AUTHORITATIVE_RECORDS_TABLE}"
-        ).fetchone() == (0,)
+        ).fetchone() == (1,)
     fresh = AiAugmentBackendStore._from_resources(
         replay_log=store._replay_log,
         detour_db=store._detour_db,
@@ -923,7 +930,7 @@ def test_outcome_without_matching_accepted_data_keeps_history_only(
         with duckdb.connect(str(store._detour_db_path), read_only=True) as connection:
             assert connection.execute(
                 f"SELECT count(*) FROM {backend_vars.AUTHORITATIVE_RECORDS_TABLE}"
-            ).fetchone() == (3,)
+            ).fetchone() == (4,)
         return
     with store._writable(runtime):
         commit_id = commit(store, {} if case == "rejected" else payload, payload)
@@ -1012,6 +1019,29 @@ def test_outcome_finalizes_only_linked_commit_once(
         ]
 
 
+def test_initial_pull_after_outcome_requires_new_backend_launch(
+    backend_store: AiAugmentBackendStore,
+    runtime: AiAugmentBackendContext,
+) -> None:
+    """A completed outcome cannot start another pull in the same Backend launch."""
+    store = backend_store
+    payload = valid_submission_body()
+    with pytest.raises(RuntimeError, match="Backend Store failed"), store._writable(runtime):
+        commit_id = commit(store, payload, payload)
+        result = store._validate_commit(commit_id)
+        outcome = store._append_authoritative_record(outcome_for_commit(
+            store, result.validation_request_body.commit_request_record,
+        ))
+        assert store.current_replayed_record is outcome
+        with pytest.raises(ValueError, match=Locale.PULL_RESPONSE_LINKAGE_INVALID):
+            commit(store, payload, payload)
+        assert store.current_replayed_record is outcome
+    with duckdb.connect(str(store._detour_db_path), read_only=True) as connection:
+        assert connection.execute(
+            f"SELECT count(*) FROM {api.CODEX_INNERDICT_TABLE}"
+        ).fetchone() == (1,)
+
+
 def test_validation_after_session_outcome_fails_without_materialization(
     backend_store: AiAugmentBackendStore,
     runtime: AiAugmentBackendContext,
@@ -1024,6 +1054,7 @@ def test_validation_after_session_outcome_fails_without_materialization(
         store._append_authoritative_record(outcome_for_commit(
             store, result.validation_request_body.commit_request_record,
         ))
+        store._append_authoritative_record(init_request_record(TEST_NAMEKEY_MODEL))
         later_id = commit(store, payload, payload)
         with pytest.raises(ReplayInputMissing, match="Validation must precede"):
             store._validate_commit(later_id)
@@ -1132,8 +1163,13 @@ def test_initial_validation_is_lifecycle_scoped_and_replays_explicit_links(
     last_validation: BackendValidationRequestRecord | None = None
     for index, store in enumerate((backend_store, backend_store_for_test(runtime))):
         session_id = UUID(OPERATOR_CAPTURED_SESSION_ID) if index == 0 else uuid7()
-        assert store.current_replayed_record is None
+        if index == 0:
+            assert store.current_replayed_record is store._init_request_record
+        else:
+            assert store.current_replayed_record is None
         with store._writable(runtime):
+            if index == 1:
+                store._append_authoritative_record(init_request_record(TEST_NAMEKEY_MODEL))
             first = store._validate_commit(commit(store, {}, payload, session_id=session_id))
             assert (
                 first.validation_request_body.post_commit_validation.result
@@ -1151,6 +1187,7 @@ def test_initial_validation_is_lifecycle_scoped_and_replays_explicit_links(
             roots.append(initial.record_id)
             retry_pull = store._append_authoritative_record(persisted_http_record(
                 record_id=uuid7(), method="GET", path="/pull", response_code=200,
+                response_headers={HTTP_CONTENT_TYPE_HEADER: ContentType.MARKDOWN_UTF8},
             ))
             assert isinstance(retry_pull, PullResponseRecord)
             assert retry_pull.validation_request_record is initial
@@ -1232,6 +1269,7 @@ def test_failed_validation_projection_does_not_advance_store_validation_state(
             )
             retry_pull = store._append_authoritative_record(persisted_http_record(
                 record_id=uuid7(), method="GET", path="/pull", response_code=200,
+                response_headers={HTTP_CONTENT_TYPE_HEADER: ContentType.MARKDOWN_UTF8},
             ))
             assert isinstance(retry_pull, PullResponseRecord)
             assert retry_pull.validation_request_record is initial
@@ -1270,7 +1308,7 @@ def test_validation_rejects_altered_embedded_inputs_after_durable_capture(
     store = backend_store
     payload = valid_submission_body()
     with pytest.raises(RuntimeError, match="Store failed"), store._writable(runtime):
-        store._validate_commit(commit(store, payload, payload))
+        store._validate_commit(commit(store, {}, payload))
         initial = store.current_replayed_record
         assert isinstance(initial, BackendValidationRequestRecord)
         provider = store._append_authoritative_record(persisted_http_record(
@@ -1278,6 +1316,7 @@ def test_validation_rejects_altered_embedded_inputs_after_durable_capture(
         ).model_copy(update={"host": "api.openalex.org", "response_body": "{}"}))
         retry_pull = store._append_authoritative_record(persisted_http_record(
             record_id=uuid7(), method="GET", path="/pull", response_code=200,
+            response_headers={HTTP_CONTENT_TYPE_HEADER: ContentType.MARKDOWN_UTF8},
         ))
         assert isinstance(retry_pull, PullResponseRecord)
         assert retry_pull.validation_request_record is initial

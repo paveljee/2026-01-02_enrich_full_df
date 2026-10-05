@@ -17,6 +17,14 @@ from src.detours.detour_ai_augment.protected.src.backend import api
 from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     AUTHORITATIVE_RECORDS_TABLE,
+    HTTP_GET_METHOD,
+    HTTP_POST_METHOD,
+    INIT_PATH,
+    PULL_PATH,
+    PUSH_PATH,
+)
+from src.detours.detour_ai_augment.protected.tests.fixtures.pytest_fixtures import (
+    init_request_record,
 )
 from src.detours.detour_ai_augment.src.backend import server
 from src.detours.detour_ai_augment.src.backend.helpers.data_models import (
@@ -26,6 +34,7 @@ from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_co
     AiAugmentBackendContext,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.commit_request import (
+    COMMIT_PATH,
     CodexSessionRecord,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.pull_event import (
@@ -105,9 +114,10 @@ def test_stale_dashboard_hash_retains_boundary_and_verified_hash_promotes_only_w
     line = append(runtime, backend_store)
     with store._read_only(runtime):
         assert store._execute(
-            f"SELECT raw_line_sha256 FROM {AUTHORITATIVE_RECORDS_TABLE}"
+            f"SELECT raw_line_sha256 FROM {AUTHORITATIVE_RECORDS_TABLE} "
+            "ORDER BY record_ordinal DESC LIMIT 1"
         ).fetchone() == (
-            hashlib.sha256(line).hexdigest(),
+            hashlib.sha256(line.splitlines(keepends=True)[-1]).hexdigest(),
         )
     with store._writable(runtime):
         pass
@@ -120,7 +130,7 @@ def test_stale_dashboard_hash_retains_boundary_and_verified_hash_promotes_only_w
         pass
     assert anchor(runtime, backend_store) == {
         "sha256": hashlib.sha256(line).hexdigest(),
-        "ordinal": 1,
+        "ordinal": 2,
         "byte_offset": len(line),
     }
     # An unverified changed config cannot authorize promotion, even in a delegated child.
@@ -169,9 +179,9 @@ def test_mismatch_fails_without_any_healing(
                     f"DELETE FROM {AUTHORITATIVE_RECORDS_TABLE} WHERE record_ordinal = 2"
                 ),
                 "extra_row": f"INSERT INTO {AUTHORITATIVE_RECORDS_TABLE} VALUES "
-                    "(3, 'extra', 'GET', '/pull', '{}', repeat('0', 64))",
+                        "(4, 'extra', 'GET', '/pull', '{}', repeat('0', 64))",
                 "gap": (
-                    f"UPDATE {AUTHORITATIVE_RECORDS_TABLE} SET record_ordinal = 3 "
+                        f"UPDATE {AUTHORITATIVE_RECORDS_TABLE} SET record_ordinal = 4 "
                     "WHERE record_ordinal = 2"
                 ),
                 "anchor_boundary": f"COMMENT ON TABLE {AUTHORITATIVE_RECORDS_TABLE} IS '"
@@ -199,6 +209,7 @@ def test_append_preflight_uses_real_append_flags_and_never_writes(
     store = backend_store
     opened: list[int] = []
     original = os.open
+    initial_log = Path(store._replay_log).read_bytes()
 
     def opening(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
         if flags & os.O_APPEND:
@@ -215,7 +226,7 @@ def test_append_preflight_uses_real_append_flags_and_never_writes(
     with store._read_only(runtime):
         pass
     assert len(opened) == 1
-    assert Path(store._replay_log).read_bytes() == b""
+    assert Path(store._replay_log).read_bytes() == initial_log
     assert Path(store._replay_log).stat().st_mode & 0o777 == 0o400
 
     def denied(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
@@ -240,8 +251,9 @@ def test_nonempty_replay_refusal_preserves_db_then_exact_raw_line_is_bootstrappe
     record = persisted_http_record(record_id=uuid7(), method="GET", path="/pull", response_code=200)
     raw = ("  " + record.model_dump_json() + "  \n").encode()
     log = Path(store._replay_log)
+    initial_log = log.read_bytes()
     log.chmod(0o600)
-    log.write_bytes(raw)
+    log.write_bytes(initial_log + raw)
     repin(runtime, backend_store)
     before = store._detour_db_path.read_bytes()
     with pytest.raises(ValueError, match="replay confirmation"):
@@ -251,12 +263,13 @@ def test_nonempty_replay_refusal_preserves_db_then_exact_raw_line_is_bootstrappe
     with store._read_only(runtime):
         assert store._http_record(record.record_id) == record
         assert store._execute(
-            f"SELECT raw_line_sha256 FROM {AUTHORITATIVE_RECORDS_TABLE}"
+            f"SELECT raw_line_sha256 FROM {AUTHORITATIVE_RECORDS_TABLE} "
+            "ORDER BY record_ordinal DESC LIMIT 1"
         ).fetchone() == (
             hashlib.sha256(raw).hexdigest(),
         )
-    assert log.read_bytes() == raw
-    assert anchor(runtime, backend_store)["byte_offset"] == len(raw)
+    assert log.read_bytes() == initial_log + raw
+    assert anchor(runtime, backend_store)["byte_offset"] == len(initial_log + raw)
 
 
 @pytest.mark.parametrize("tail", (b"{}\n", b"{}", b"\n"))
@@ -388,6 +401,9 @@ def test_query_only_capability_returns_nak_snapshot_and_never_changes_log_or_db(
     with store_models.initialize_backend_store(
         runtime,
         ipc_only=False,
+        init_request_record=init_request_record(
+            runtime.ai_augment_singular_outerdict_blueprints[0].namekey,
+        ),
         new=True,
         confirmed=True,
         confirm_replay=lambda: False,
@@ -443,7 +459,7 @@ def test_missing_identity_outcome_is_nak_with_durable_400_and_self_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = backend_store
-    assert runtime.configured_namekey is not None
+    assert store._init_request_record is not None
     record = RunOutcomeRequestRecord(
         schema_version="1.1",
         method="POST",
@@ -454,7 +470,7 @@ def test_missing_identity_outcome_is_nak_with_durable_400_and_self_id(
         query="",
         request_headers={
             run_outcome.NAME_KEY_HEADER: run_outcome.name_key_header_value(
-                runtime.configured_namekey,
+                store._init_request_record.namekey,
             ),
         },
         request_body=None,
@@ -506,12 +522,12 @@ def test_missing_identity_outcome_is_nak_with_durable_400_and_self_id(
                 else:
                     patch.setattr(type(store), "_apply_durable_record", broken)
                 exercise()
-        with duckdb.connect(str(store._detour_db_path), read_only=True) as connection:
-            assert connection.execute(
-                f"SELECT count(*) FROM {AUTHORITATIVE_RECORDS_TABLE}"
-            ).fetchone() == (0,)
-    # fsync failure need not mean zero bytes: no automatic retry or repair is permitted.
-    assert len(Path(store._replay_log).read_bytes().splitlines()) == 1
+            with duckdb.connect(str(store._detour_db_path), read_only=True) as connection:
+                assert connection.execute(
+                    f"SELECT count(*) FROM {AUTHORITATIVE_RECORDS_TABLE}"
+                ).fetchone() == (1,)
+        # fsync failure need not mean zero bytes: no automatic retry or repair is permitted.
+        assert len(Path(store._replay_log).read_bytes().splitlines()) == 2
 
 
 @pytest.mark.parametrize("fails", (False, True))
@@ -556,7 +572,7 @@ def test_response_record_promise_waiter_cancellation_preserves_completion(
     threaded_loop.run(asyncio.wait_for(exercise(), timeout=10))
 
 
-@pytest.mark.parametrize("line_count", (2, 3))
+@pytest.mark.parametrize("line_count", (3, 4))
 def test_explicit_replay_projects_durable_prefix_ending_at_push_or_commit(
     backend_store: store_models.AiAugmentBackendStore,
     runtime: AiAugmentBackendContext,
@@ -579,8 +595,10 @@ def test_explicit_replay_projects_durable_prefix_ending_at_push_or_commit(
             f"SELECT record_ordinal, method, path FROM {AUTHORITATIVE_RECORDS_TABLE} "
             "ORDER BY record_ordinal"
         ).fetchall() == [
-            (1, "GET", "/pull"), (2, "POST", "/push"),
-            *([(3, "POST", "/commit")] if line_count == 3 else []),
+            (1, HTTP_POST_METHOD, INIT_PATH),
+            (2, HTTP_GET_METHOD, PULL_PATH),
+            (3, HTTP_POST_METHOD, PUSH_PATH),
+            *([(4, HTTP_POST_METHOD, COMMIT_PATH)] if line_count == 4 else []),
         ]
         assert connection.execute(
             f"SELECT count(*) FROM {api.COMMIT_VALIDATION_REQUEST_RECORD_INDEX_TABLE}"
@@ -617,9 +635,9 @@ def test_invalid_synthetic_envelope_is_fsynced_before_domain_rejection(
         payload = log_path.read_bytes()
         assert fsynced == [payload]
         assert payload.endswith(b"\n")
-        assert HttpRequestLogRecord.model_validate_json(payload) == record
-        assert backend_store.current_replayed_record is None
+        assert HttpRequestLogRecord.model_validate_json(payload.splitlines()[-1]) == record
+        assert backend_store.current_replayed_record is backend_store._init_request_record
     with duckdb.connect(str(backend_store._detour_db_path), read_only=True) as connection:
         assert connection.execute(
             f"SELECT count(*) FROM {AUTHORITATIVE_RECORDS_TABLE}"
-        ).fetchone() == (0,)
+        ).fetchone() == (1,)

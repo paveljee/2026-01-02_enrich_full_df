@@ -69,7 +69,7 @@ def test_operator_artifact_validator_accepts_completed_store_history(
 ) -> None:
     files = completed_query_files
     with initialize_backend_store(
-        backend_server.configure_runtime(files.config, require_namekey=False),
+        backend_server.configure_runtime(files.config),
         ipc_only=True,
     ) as query_store:
         fixture_store = query_store._engine

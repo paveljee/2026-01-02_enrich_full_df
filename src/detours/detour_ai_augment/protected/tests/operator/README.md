@@ -103,7 +103,8 @@ Backend requires either `--new` (recreate the detour DB from the replay log) or
 `--yes` bypasses it. The example uses `--resume`; use `--new` only when an
 explicit rebuild is intended. Recalculate and repin the replay-log hash in
 config before a verified restart. Dashboard verifies on startup and supplies
-the child flags itself.
+the child flags itself. Each full Backend launch records and replays its selected
+NameKey in `/init` before serving `/pull`.
 
 Leave this terminal open. Backend is deliberately waiting for one line on stdin containing the Codex session UUID, while already serving requests.
 

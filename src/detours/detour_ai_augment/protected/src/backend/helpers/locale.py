@@ -54,6 +54,9 @@ class Locale:
     PULL_PERSISTED_LOG: Final = 'Pull persisted: record=%s; HTTP %s'
     PUSH_PERSISTED_LOG: Final = "Push persisted: record=%s; HTTP %s"
     STORE_CONTEXT_UNAVAILABLE: Final = 'Backend Store context is unavailable'
+    INIT_REQUEST_RECORD_INVALID: Final = "Backend init request record is invalid"
+    INIT_REQUEST_RECORD_REQUIRED: Final = "Backend init request record is required"
+    PULL_RESPONSE_LINKAGE_INVALID: Final = "Pull response linkage is invalid"
     STORE_RESET_CONFIRMATION_REQUIRED: Final = "Database reset confirmation required for --new."
     REPLAY_CONFIRMATION_REQUIRED: Final = "Nonempty replay log requires replay confirmation"
     REPLAY_EMPTY_HASH_INVALID: Final = "An empty replay log requires SHA256(empty)"
@@ -759,7 +762,7 @@ class Locale:
         "Loading Backend configuration/resources: %s; verify_hashes=%s"
     )
     BACKEND_CONFIG_VALIDATED_LOG: Final = (
-        "Backend configuration and source validated: %d researchers; selected=%s"
+        "Backend configuration and source validated: %d researchers"
     )
     BACKEND_STARTING_LOG: Final = (
         "Starting Backend: config=%s; ipc_only=%s; new=%s; resume=%s"

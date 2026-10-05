@@ -581,20 +581,26 @@ def watcher_fixture_process() -> None:
 
 
 def backend_startup_process() -> None:
+    import os
     import sys
 
     from src.detours.detour_ai_augment.protected.src.backend import api
     from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
         AUTHORITATIVE_RECORDS_TABLE,
+        NAMEKEY_ENV_NAME,
+    )
+    from src.detours.detour_ai_augment.protected.tests.fixtures.pytest_fixtures import (
+        init_request_record,
     )
     from src.detours.detour_ai_augment.src.backend import server
+    from src.helpers.data_models import NameKey
 
     args = server.parse_args(sys.argv[1:])
     confirmed = False if args.ipc_only else server.confirm_startup(args)
     api._acquire_backend_process_lock()
     try:
         runtime = server.configure_runtime(
-            args.config, require_namekey=not args.ipc_only,
+            args.config,
             verify_hash_on_init=not args.danger_no_verify_hash,
         )
         from src.detours.detour_ai_augment.src.backend.helpers.data_models import (
@@ -606,6 +612,9 @@ def backend_startup_process() -> None:
             if args.ipc_only
             else server.backend_store_lifecycle(
                 runtime,
+                init_request_record=init_request_record(
+                    NameKey.from_json_key(os.environ[NAMEKEY_ENV_NAME]),
+                ),
                 new=args.new,
                 confirmed=confirmed,
                 yes=args.yes,
@@ -652,7 +661,9 @@ def operator_fixture_bootstrap_process() -> None:
         isolated, repository_root=root, dashboard_socket_path=isolated / "ipc.sock",
     )
     assert runtime.backend_store._detour_db_path.is_file()
-    context = server.configure_runtime(runtime.config_path, require_namekey=False)
+    replay_before_query = runtime.replay_log_path.read_bytes()
+    assert len(replay_before_query.splitlines()) == 1
+    context = server.configure_runtime(runtime.config_path)
     with (
         store_models.initialize_backend_store(context, ipc_only=True) as store,
         threaded_loop_runner() as runner,
@@ -670,7 +681,7 @@ def operator_fixture_bootstrap_process() -> None:
             not researcher.codex_innerdicts
             for researcher in response
         )
-    assert runtime.replay_log_path.read_bytes() == b""
+    assert runtime.replay_log_path.read_bytes() == replay_before_query
     assert not runtime.dashboard_socket_path.exists()
     print("OPERATOR_BOOTSTRAP_QUERY_OK")
 
@@ -707,6 +718,7 @@ def completed_query_fixture_process() -> None:
     )
     from src.detours.detour_ai_augment.protected.tests.fixtures.pytest_fixtures import (
         STARTUP_NAMEKEY,
+        init_request_record,
     )
     from src.detours.detour_ai_augment.protected.tests.pytest_plugin import threaded_loop_runner
     from src.detours.detour_ai_augment.src.backend import server
@@ -795,7 +807,7 @@ def completed_query_fixture_process() -> None:
     finally:
         source.chmod(0o400)
     os.environ[NAMEKEY_ENV_NAME] = STARTUP_NAMEKEY.to_json_key()
-    runtime = server.configure_runtime(config_path, require_namekey=True)
+    runtime = server.configure_runtime(config_path)
     print("Completed-query fixture: runtime ready", flush=True)
     payload = valid_submission_body()
     rollout_bytes = operator_capture_rollout(payload)
@@ -806,7 +818,10 @@ def completed_query_fixture_process() -> None:
     blob.write_bytes(rollout_bytes)
     session_id = UUID(OPERATOR_CAPTURED_SESSION_ID)
     relative = PurePosixPath(f"2026/09/03/rollout-2026-09-03T15-16-00-{session_id}.jsonl")
-    with server.backend_store_lifecycle(runtime, new=False, confirmed=True, yes=True) as store:
+    with server.backend_store_lifecycle(
+        runtime, init_request_record=init_request_record(STARTUP_NAMEKEY),
+        new=False, confirmed=True, yes=True,
+    ) as store:
         stale = DashboardQuerySnapshot(
             ai_augment_singular_outerdicts=store.ai_augment_singular_outerdicts(),
         )
@@ -818,7 +833,9 @@ def completed_query_fixture_process() -> None:
                 response_code=200,
             ).model_copy(
                 update={
-                    "response_headers": {"content-type": ContentType.NDJSON},
+                    "response_headers": {
+                        HTTP_CONTENT_TYPE_HEADER: ContentType.NDJSON_UTF8,
+                    },
                     "response_body": api.json_line({
                         KTP_FIRST_NAME_COL: STARTUP_NAMEKEY.first_name,
                         KTP_LAST_NAME_COL: STARTUP_NAMEKEY.last_name,

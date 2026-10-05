@@ -32,6 +32,9 @@ from src.detours.detour_ai_augment.protected.src.backend.ipc import (
     DASHBOARD_QUERY_PATH,
     SOCKET_PERMISSIONS,
 )
+from src.detours.detour_ai_augment.protected.tests.fixtures.pytest_fixtures import (
+    init_request_record,
+)
 from src.detours.detour_ai_augment.src.backend import server
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_context import (  # noqa: E501
     AiAugmentBackendContext,
@@ -122,7 +125,11 @@ def test_full_backend_composition_stops_ipc_before_domain_shutdown(
     )
 
     async def exercise() -> None:
-        async with server.lifespan(server.app, runtime, new=True, confirmed=True):
+        async with server.lifespan(
+            server.app, runtime,
+            init_request_record=init_request_record(NameKey.from_json_key(TEST_NAMEKEY)),
+            new=True, confirmed=True,
+        ):
             events.append("running")
 
     threaded_loop.run(asyncio.wait_for(exercise(), timeout=10))
@@ -510,7 +517,11 @@ def test_server_shutdown_keeps_loop_available_for_inflight_ipc(
     async def exercise() -> None:
         nonlocal worker
         app = FastAPI()
-        async with server.lifespan(app, runtime, new=False, confirmed=True):
+        async with server.lifespan(
+            app, runtime,
+            init_request_record=init_request_record(NameKey.from_json_key(TEST_NAMEKEY)),
+            new=False, confirmed=True,
+        ):
             flask_app = server.create_dashboard_query_app(
                 empty_query_response,
                 query_path="/query", request_scope=received_scopes[0],
@@ -543,7 +554,11 @@ def test_full_backend_factory_registers_admission_once(monkeypatch: pytest.Monke
     monkeypatch.setattr(server, "app", app)
     runtime = Mock(spec=AiAugmentBackendContext)
     for _ in range(2):
-        assert server.full_backend_application(runtime, new=False, confirmed=True) is app
+        assert server.full_backend_application(
+            runtime,
+            init_request_record=init_request_record(NameKey.from_json_key(TEST_NAMEKEY)),
+            new=False, confirmed=True,
+        ) is app
     assert len(app.user_middleware) == 1
     for entry, expected in zip(app.user_middleware, (
         server._BackendRequestMiddleware,

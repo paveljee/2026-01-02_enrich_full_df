@@ -15,11 +15,15 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import L
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     AUTHORITATIVE_RECORDS_TABLE,
     HTTP_GET_METHOD,
+    HTTP_POST_METHOD,
     PULL_PATH,
+    PUSH_PATH,
     REPLAY_LOG_KEY,
 )
 from src.detours.detour_ai_augment.protected.tests.fixtures.pytest_fixtures import (
+    STARTUP_NAMEKEY,
     StartupFiles,
+    init_request_record,
 )
 from src.detours.detour_ai_augment.src.backend import server
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_backend_store import (  # noqa: E501
@@ -41,12 +45,18 @@ from src.detours.detour_ai_augment.src.backend.helpers.data_models.model_http_in
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.pull_event import (
     PullResponseRecord,
 )
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.push_event import (
+    PushResponseRecord,
+)
 from src.detours.detour_ai_augment.tests.backend import test_http_interceptor as store_tests
 from src.detours.detour_ai_augment.tests.backend.test_api import (
+    TEST_NAMEKEY_MODEL,
     persisted_http_record,
     valid_submission_body,
 )
+from src.helpers.data_models import NameKey
 from src.helpers.data_models.http_request_log import HttpRequestLogRecord
+from src.helpers.vars import KTP_FIRST_NAME_COL, KTP_LAST_NAME_COL
 
 backend_test_paths = store_tests.backend_test_paths
 runtime = store_tests.runtime
@@ -58,7 +68,7 @@ def test_second_same_session_acceptance_fails_loudly(
     backend_store: AiAugmentBackendStore,
     runtime: AiAugmentBackendContext,
 ) -> None:
-    """Synthetic second same-session acceptance bypasses the API lifecycle and collides with unique session metadata before outcome-link assertions"""  # noqa: E501
+    """A second Backend launch cannot accept duplicate session metadata."""
     payload = valid_submission_body()
     with pytest.raises(RuntimeError, match="Backend Store failed"), (
         backend_store._writable(runtime)
@@ -70,6 +80,7 @@ def test_second_same_session_acceptance_fails_loudly(
             first.validation_request_body.post_commit_validation.result
             is BackendLifecycle.ACCEPTED
         )
+        backend_store._append_authoritative_record(init_request_record(TEST_NAMEKEY_MODEL))
         second_commit_id = commit(
             backend_store, payload, payload,
             rollout_suffix=(
@@ -89,7 +100,7 @@ def test_resume_after_committed_row_and_postcommit_failure(
 ) -> None:
     # The startup fixture builds a synthetic 307-person source, replay log,
     # registered release map, config, and detour DB entirely under tmp_path.
-    context = server.configure_runtime(startup_files.config, require_namekey=False)
+    context = server.configure_runtime(startup_files.config)
     # The existing typed record becomes a base HTTP record when read from the
     # log. Store notices that type mismatch only after its DB transaction commits.
     record = ResponseRecord.from_http_request_log_record(
@@ -100,7 +111,8 @@ def test_resume_after_committed_row_and_postcommit_failure(
     )
     with pytest.raises(RuntimeError, match=Locale.STORE_FAILED_REBUILD_REQUIRED):
         with initialize_backend_store(
-            context, ipc_only=False, new=False, confirmed=True,
+            context, ipc_only=False, init_request_record=init_request_record(STARTUP_NAMEKEY),
+            new=False, confirmed=True,
             confirm_replay=lambda: False,
         ) as store:
             db_path = store._detour_db_path
@@ -112,23 +124,25 @@ def test_resume_after_committed_row_and_postcommit_failure(
                 store.ai_augment_singular_outerdicts()
 
     log_bytes = startup_files.replay.read_bytes()
-    assert log_bytes.endswith(b"\n") and log_bytes.count(b"\n") == 1
-    assert HttpRequestLogRecord.model_validate_json(log_bytes).record_id == record.record_id
+    log_lines = log_bytes.splitlines(keepends=True)
+    assert log_bytes.endswith(b"\n") and len(log_lines) == 3
+    assert HttpRequestLogRecord.model_validate_json(log_lines[-1]).record_id == record.record_id
     with duckdb.connect(str(db_path), read_only=True) as connection:
         projected = connection.execute(
             f"SELECT record_ordinal, record_id, raw_line_sha256 "
-            f"FROM {AUTHORITATIVE_RECORDS_TABLE}"
+            f"FROM {AUTHORITATIVE_RECORDS_TABLE} WHERE record_id = ?",
+            [str(record.record_id)],
         ).fetchone()
         anchor_row = connection.execute(
             "SELECT comment FROM duckdb_tables() WHERE table_name = ?",
             [AUTHORITATIVE_RECORDS_TABLE],
         ).fetchone()
-    assert projected == (1, str(record.record_id), hashlib.sha256(log_bytes).hexdigest())
+    assert projected == (3, str(record.record_id), hashlib.sha256(log_lines[-1]).hexdigest())
     assert anchor_row is not None
     assert json.loads(anchor_row[0]) == {
-        "sha256": hashlib.sha256(b"").hexdigest(),
-        "ordinal": 0,
-        "byte_offset": 0,
+        "sha256": hashlib.sha256(log_lines[0]).hexdigest(),
+        "ordinal": 1,
+        "byte_offset": len(log_lines[0]),
     }
 
     # The real manual --resume CLI checks the pinned hash before opening Store.
@@ -160,13 +174,15 @@ def test_resume_after_committed_row_and_postcommit_failure(
     # Dashboard children bypass the duplicated config hash check; Store still
     # verifies log/DB coverage on --resume, but does not replay the typed record.
     resumed_context = server.configure_runtime(
-        startup_files.config, require_namekey=False, verify_hash_on_init=False,
+        startup_files.config, verify_hash_on_init=False,
     )
     with initialize_backend_store(
-        resumed_context, ipc_only=False, new=False, confirmed=True,
+        resumed_context, ipc_only=False,
+        init_request_record=init_request_record(STARTUP_NAMEKEY),
+        new=False, confirmed=True,
         confirm_replay=lambda: False,  # for mypy
     ) as resumed:
-        assert resumed._append_ordinal == 1
+        assert resumed._append_ordinal == 4
         assert resumed._http_record(record.record_id).model_dump(mode="json") == (
             record.model_dump(mode="json")
         )
@@ -178,14 +194,138 @@ def test_resume_after_committed_row_and_postcommit_failure(
     with duckdb.connect(str(db_path), read_only=True) as connection:
         assert connection.execute(
             f"SELECT count(*) FROM {AUTHORITATIVE_RECORDS_TABLE}"
-        ).fetchone() == (2,)
+        ).fetchone() == (5,)
 
     # An operator can also repin only this temporary config and use the normal
     # hash-verifying startup; it still does not detect the old postcommit failure.
     startup_files.repin()
-    verified_context = server.configure_runtime(startup_files.config, require_namekey=False)
+    verified_context = server.configure_runtime(startup_files.config)
     with initialize_backend_store(
-        verified_context, ipc_only=False, new=False, confirmed=True,
+        verified_context, ipc_only=False,
+        init_request_record=init_request_record(STARTUP_NAMEKEY),
+        new=False, confirmed=True,
         confirm_replay=lambda: False,
     ) as verified_resume:
-        assert verified_resume._append_ordinal == 2
+        assert verified_resume._append_ordinal == 6
+
+
+@pytest.mark.parametrize(
+    "second_namekey",
+    (STARTUP_NAMEKEY, NameKey(first_name="Case 001", last_name="Startup")),
+    ids=("same-namekey", "different-namekey"),
+)
+def test_replay_keeps_backend_launch_boundaries(
+    startup_files: StartupFiles,
+    second_namekey: NameKey,
+) -> None:
+    """An interrupted Backend launch cannot lend its pull to the next launch."""
+    context = server.configure_runtime(startup_files.config)
+    with initialize_backend_store(
+        context, ipc_only=False,
+        init_request_record=init_request_record(STARTUP_NAMEKEY),
+        new=False, confirmed=True, confirm_replay=lambda: False,
+    ) as first:
+        first_pull = first._append_authoritative_record(persisted_http_record(
+            record_id=uuid7(), method=HTTP_GET_METHOD, path=PULL_PATH,
+            response_code=HTTPStatus.OK,
+            response_body=backend_api.json_line({
+                KTP_FIRST_NAME_COL: STARTUP_NAMEKEY.first_name,
+                KTP_LAST_NAME_COL: STARTUP_NAMEKEY.last_name,
+            }),
+        ))
+        assert isinstance(first_pull, PullResponseRecord)
+        assert first_pull.validation_request_record is None
+
+    startup_files.repin()
+    context = server.configure_runtime(startup_files.config)
+    with initialize_backend_store(
+        context, ipc_only=False,
+        init_request_record=init_request_record(second_namekey),
+        new=True, confirmed=True, confirm_replay=lambda: True,
+    ) as second:
+        replayed_init = second._init_request_record
+        assert replayed_init is not None
+        assert replayed_init is second.current_replayed_record
+        assert replayed_init.namekey == second_namekey
+        rejected = second._append_authoritative_record(persisted_http_record(
+            record_id=uuid7(), method=HTTP_POST_METHOD, path=PUSH_PATH,
+            response_code=HTTPStatus.CONFLICT,
+        ))
+        assert isinstance(rejected, PushResponseRecord)
+        assert rejected.pull_response_record is None
+        assert second.current_replayed_record is second._init_request_record
+        second_pull = second._append_authoritative_record(persisted_http_record(
+            record_id=uuid7(), method=HTTP_GET_METHOD, path=PULL_PATH,
+            response_code=HTTPStatus.OK,
+        ))
+        assert isinstance(second_pull, PullResponseRecord)
+        assert second_pull.validation_request_record is None
+        rejected_with_pull = second._append_authoritative_record(persisted_http_record(
+            record_id=uuid7(), method=HTTP_POST_METHOD, path=PUSH_PATH,
+            response_code=HTTPStatus.CONFLICT,
+        ))
+        assert isinstance(rejected_with_pull, PushResponseRecord)
+        assert rejected_with_pull.pull_response_record is None
+        assert second._current_replayed_record is second_pull
+        accepted = second._append_authoritative_record(persisted_http_record(
+            record_id=uuid7(), method=HTTP_POST_METHOD, path=PUSH_PATH,
+            response_code=HTTPStatus.ACCEPTED,
+        ))
+        assert isinstance(accepted, PushResponseRecord)
+        assert accepted.pull_response_record is second_pull
+
+    startup_files.repin()
+    second._replay_log = second._replay_log.model_copy(update={
+        "hash": hashlib.sha256(startup_files.replay.read_bytes()).hexdigest(),
+    })
+    second._rebuild_from_log(context, reset_confirmed=True, confirm_replay=lambda: True)
+    replayed = second.current_replayed_record
+    assert isinstance(replayed, PushResponseRecord)
+    assert replayed.record_id == accepted.record_id
+    assert replayed.pull_response_record is not None
+    assert replayed.pull_response_record.record_id == second_pull.record_id
+    assert replayed.pull_response_record.record_id != first_pull.record_id
+    assert replayed.pull_response_record.validation_request_record is None
+
+
+def test_historical_validation_replays_under_its_backend_launch_namekey(
+    startup_files: StartupFiles,
+) -> None:
+    """A later Backend launch cannot change an earlier validation's researcher."""
+    context = server.configure_runtime(startup_files.config)
+    with initialize_backend_store(
+        context, ipc_only=False,
+        init_request_record=init_request_record(STARTUP_NAMEKEY),
+        new=False, confirmed=True, confirm_replay=lambda: False,
+    ) as first:
+        first_pull = first._append_authoritative_record(persisted_http_record(
+            record_id=uuid7(), method=HTTP_GET_METHOD, path=PULL_PATH,
+            response_code=HTTPStatus.OK,
+            response_body=backend_api.json_line({
+                KTP_FIRST_NAME_COL: STARTUP_NAMEKEY.first_name,
+                KTP_LAST_NAME_COL: STARTUP_NAMEKEY.last_name,
+            }),
+        ))
+        assert isinstance(first_pull, PullResponseRecord)
+        commit_id = commit(
+            first, {}, valid_submission_body(), first_pull,
+            namekey=STARTUP_NAMEKEY,
+        )
+        validation = first._validate_commit(commit_id)
+        assert validation.validation_request_body.commit_request_record.record_id == commit_id
+
+    startup_files.repin()
+    context = server.configure_runtime(startup_files.config)
+    later_namekey = NameKey(first_name="Case 001", last_name="Startup")
+    with initialize_backend_store(
+        context, ipc_only=False,
+        init_request_record=init_request_record(later_namekey),
+        new=True, confirmed=True, confirm_replay=lambda: True,
+    ) as second:
+        replayed_init = second._init_request_record
+        assert replayed_init is not None
+        assert replayed_init is second.current_replayed_record
+        assert replayed_init.namekey == later_namekey
+        assert second._http_record(validation.record_id).model_dump(mode="json") == (
+            validation.http_request_log_record.model_dump(mode="json")
+        )

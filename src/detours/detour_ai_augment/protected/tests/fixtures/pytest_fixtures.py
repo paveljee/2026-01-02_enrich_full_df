@@ -4,6 +4,7 @@ import csv
 import hashlib
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -12,9 +13,19 @@ import pytest
 
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     EXCLUDED_NAMEKEY,
+    HTTP_POST_METHOD,
+    INIT_PATH,
     MAP_SUBSET_0_TO_BATCH_KEY,
+    NAME_KEY_HEADER,
+    NANOSECONDS_PER_MICROSECOND,
     REPLAY_LOG_KEY,
+    SYNTHETIC_COMMIT_HOST,
+    SYNTHETIC_COMMIT_SCHEME,
 )
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.init_request import (
+    BackendInitRequestRecord,
+)
+from src.detours.detour_ai_augment.src.shared import name_key_header_value
 from src.helpers.architecture import FrozenStrictModel
 from src.helpers.data_models import NameKey
 from src.helpers.duckdb_utils import duckdb_quote_identifier as quote
@@ -31,6 +42,7 @@ from src.helpers.vars import (
     KTP_FIRST_NAME_COL,
     KTP_FRAGMENT_COL,
     KTP_FRAGMENT_TYPE_COL,
+    KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
     KTP_INNERDICT_JSONLINES_COL,
     KTP_LAST_NAME_COL,
     KTP_NAMEKEY_COL,
@@ -41,6 +53,28 @@ from src.helpers.vars import (
 
 ROOT = Path(__file__).resolve().parents[6]
 STARTUP_NAMEKEY = NameKey(first_name="Case 000", last_name="Startup")
+
+
+def init_request_record(namekey: NameKey) -> BackendInitRequestRecord:
+    return BackendInitRequestRecord(
+        schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
+        method=HTTP_POST_METHOD,
+        scheme=SYNTHETIC_COMMIT_SCHEME,
+        host=SYNTHETIC_COMMIT_HOST,
+        port=None,
+        path=INIT_PATH,
+        query="",
+        request_headers={NAME_KEY_HEADER: name_key_header_value(namekey)},
+        request_body=None,
+        response_code=None,
+        response_headers=None,
+        response_body=None,
+        received_at_unix_usec=None,
+        ready_to_respond_at_unix_usec=(
+            time.time_ns() // NANOSECONDS_PER_MICROSECOND
+        ),
+        duration_usec=0,
+    )
 
 
 class StartupFiles(FrozenStrictModel):
@@ -142,19 +176,22 @@ def startup_files(tmp_path: Path) -> StartupFiles:
         }
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps(config))
-    runtime = backend_server.configure_runtime(config_path, require_namekey=False)
+    runtime = backend_server.configure_runtime(config_path)
     with initialize_backend_store(
-        runtime, ipc_only=False, new=True, confirmed=True,
+        runtime, ipc_only=False, init_request_record=init_request_record(STARTUP_NAMEKEY),
+        new=True, confirmed=True,
         confirm_replay=lambda: False,
     ) as store:
         detour_path = store._detour_db_path
     source.chmod(0o400)
     process_temp = tmp_path / "process-temp"
     process_temp.mkdir()
-    return StartupFiles(
+    files = StartupFiles(
         config=config_path,
         source=source,
         replay=replay,
         detour=detour_path,
         process_temp=process_temp,
     )
+    files.repin()
+    return files

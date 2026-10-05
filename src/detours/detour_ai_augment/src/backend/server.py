@@ -43,12 +43,19 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import L
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     BACKEND_STORE_CLOSED_CLEANLY,
     HTTP_POST_METHOD,
+    INIT_PATH,
+    NAME_KEY_HEADER,
     NAMEKEY_ENV_NAME,
+    NANOSECONDS_PER_MICROSECOND,
+    SYNTHETIC_COMMIT_HOST,
+    SYNTHETIC_COMMIT_SCHEME,
     VALID_NONBLANK,
     ContentType,
 )
+from src.detours.detour_ai_augment.src.shared import name_key_header_value
 from src.helpers.architecture import FrozenStrictModel
 from src.helpers.data_models import NameKey
+from src.helpers.vars import KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
 
 from ..control_centre.dashboard.helpers.data_models.run_outcome_event import (
     RUN_OUTCOME_PATHS,
@@ -59,6 +66,7 @@ from .helpers.data_models.ai_augment_backend_store import (
     initialize_backend_store,
 )
 from .helpers.data_models.ai_augment_context import AiAugmentBackendContext
+from .helpers.data_models.init_request import BackendInitRequestRecord
 
 CONFIG_OPTION = "--config"
 IPC_ONLY_OPTION = "--ipc-only"
@@ -136,7 +144,8 @@ class _BackendRequestMiddleware:
 
 @contextmanager
 def backend_store_lifecycle(
-    context: AiAugmentBackendContext, *, new: bool, confirmed: bool, yes: bool = False,
+    context: AiAugmentBackendContext, *, init_request_record: BackendInitRequestRecord,
+    new: bool, confirmed: bool, yes: bool = False,
 ) -> Generator[AiAugmentBackendStore, None, None]:
     if not confirmed:
         raise ValueError(Locale.STORE_STARTUP_CONFIRMATION_REQUIRED)
@@ -148,6 +157,7 @@ def backend_store_lifecycle(
         with initialize_backend_store(
             context,
             ipc_only=False,
+            init_request_record=init_request_record,
             new=new,
             confirmed=confirmed,
             confirm_replay=lambda: confirm_nonempty_replay(yes=yes),
@@ -165,6 +175,7 @@ def backend_store_lifecycle(
 @asynccontextmanager
 async def lifespan(
     app: FastAPI, context: AiAugmentBackendContext, *,
+    init_request_record: BackendInitRequestRecord,
     new: bool, confirmed: bool, yes: bool = False,
 ) -> AsyncGenerator[None, None]:
     gate = _BackendRequestGate()
@@ -182,7 +193,10 @@ async def lifespan(
                 scope.__aexit__(None, None, None), loop,
             ).result()
 
-    with backend_store_lifecycle(context, new=new, confirmed=confirmed, yes=yes) as store:
+    with backend_store_lifecycle(
+        context, init_request_record=init_request_record,
+        new=new, confirmed=confirmed, yes=yes,
+    ) as store:
         app.state.store = store
         async with api.lifespan():
             dashboard_query_server = start_full_dashboard_query_server(
@@ -253,11 +267,15 @@ async def push(request: Request) -> Response:
 
 
 def full_backend_application(
-    context: AiAugmentBackendContext, *, new: bool, confirmed: bool, yes: bool = False,
+    context: AiAugmentBackendContext, *, init_request_record: BackendInitRequestRecord,
+    new: bool, confirmed: bool, yes: bool = False,
 ) -> FastAPI:
     @asynccontextmanager
     async def application_lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-        async with lifespan(app, context, new=new, confirmed=confirmed, yes=yes):
+        async with lifespan(
+            app, context, init_request_record=init_request_record,
+            new=new, confirmed=confirmed, yes=yes,
+        ):
             yield
 
     if not any(
@@ -502,7 +520,6 @@ def serve_dashboard_query_only(
 def configure_runtime(
     config_path: Path,
     *,
-    require_namekey: bool = True,
     verify_hash_on_init: bool = True,
 ) -> AiAugmentBackendContext:
     logger.info(Locale.BACKEND_CONFIG_LOADING_LOG,
@@ -529,31 +546,13 @@ def configure_runtime(
             Locale.TIMEZONE_INVALID_TEMPLATE.format(timezone=pipeline.timezone)
         ) from exc
 
-    configured_namekey = None
-    if require_namekey:
-        raw_namekey = os.environ.get(NAMEKEY_ENV_NAME)
-        if not VALID_NONBLANK(raw_namekey):
-            raise ValueError(
-                Locale.NAMEKEY_NOT_SET_TEMPLATE.format(environment_name=NAMEKEY_ENV_NAME)
-            )
-        assert isinstance(raw_namekey, str)
-        try:
-            configured_namekey = NameKey.from_json_key(raw_namekey)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(Locale.CONFIGURED_NAMEKEY_MALFORMED) from exc
     try:
-        context = AiAugmentBackendContext(
-            pipeline_config=pipeline,
-            configured_namekey=configured_namekey,
-        )
-        if configured_namekey is not None:
-            context.configured_ai_augment_singular_outerdict()
+        context = AiAugmentBackendContext(pipeline_config=pipeline)
     except ValueError as exc:
         raise RuntimeError(str(exc)) from exc
     logger.info(
         Locale.BACKEND_CONFIG_VALIDATED_LOG,
         len(context.ai_augment_singular_outerdict_blueprints),
-        configured_namekey,
     )
     return context
 
@@ -615,7 +614,6 @@ def main(argv: list[str] | None = None) -> None:
     try:
         context = configure_runtime(
             args.config,
-            require_namekey=not args.ipc_only,
             verify_hash_on_init=verify_hash_on_init,
         )
         if args.ipc_only:
@@ -626,10 +624,44 @@ def main(argv: list[str] | None = None) -> None:
             logger.info(Locale.BACKEND_STORE_READ_ONLY_CLOSED_LOG)
             print(BACKEND_STORE_CLOSED_CLEANLY, flush=True)
         else:
+            raw_namekey = os.environ.get(NAMEKEY_ENV_NAME)
+            if not VALID_NONBLANK(raw_namekey):
+                raise ValueError(
+                    Locale.NAMEKEY_NOT_SET_TEMPLATE.format(
+                        environment_name=NAMEKEY_ENV_NAME,
+                    )
+                )
+            assert isinstance(raw_namekey, str)
+            try:
+                startup_namekey = NameKey.from_json_key(raw_namekey)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(Locale.CONFIGURED_NAMEKEY_MALFORMED) from exc
+            init_request_record = BackendInitRequestRecord(
+                schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
+                method=HTTP_POST_METHOD,
+                scheme=SYNTHETIC_COMMIT_SCHEME,
+                host=SYNTHETIC_COMMIT_HOST,
+                port=None,
+                path=INIT_PATH,
+                query="",
+                request_headers={
+                    NAME_KEY_HEADER: name_key_header_value(startup_namekey),
+                },
+                request_body=None,
+                response_code=None,
+                response_headers=None,
+                response_body=None,
+                received_at_unix_usec=None,
+                ready_to_respond_at_unix_usec=(
+                    time.time_ns() // NANOSECONDS_PER_MICROSECOND
+                ),
+                duration_usec=0,
+            )
             logger.info(Locale.BACKEND_HTTP_STARTING_LOG, api.SERVER_HOST, api.SERVER_PORT)
             uvicorn.run(
                 full_backend_application(
-                    context, new=args.new, confirmed=confirmed, yes=args.yes,
+                    context, init_request_record=init_request_record,
+                    new=args.new, confirmed=confirmed, yes=args.yes,
                 ),
                 host=api.SERVER_HOST,
                 port=api.SERVER_PORT,

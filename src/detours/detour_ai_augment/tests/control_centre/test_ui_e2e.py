@@ -144,7 +144,7 @@ def test_completed_query_fixture_has_current_queryable_history(
 ) -> None:
     """Verify the real browser fixture's Store setup before any browser is needed."""
     files = completed_query_files
-    runtime = backend_server.configure_runtime(files.config, require_namekey=False)
+    runtime = backend_server.configure_runtime(files.config)
     with initialize_backend_store(runtime, ipc_only=True) as capability:
         outerdicts = capability._engine.ai_augment_singular_outerdicts()
     (committed,) = (
@@ -193,7 +193,7 @@ def test_completed_grid_row_uses_real_query_ipc(
     print(f"[test-artifacts] query data: {files.config.parent}", flush=True)
     print(f"[test-artifacts] query socket: {dashboard_socket_path}", flush=True)
     with initialize_backend_store(
-        backend_server.configure_runtime(files.config, require_namekey=False),
+        backend_server.configure_runtime(files.config),
         ipc_only=True,
     ) as query_store:
         fixture_store = query_store._engine
