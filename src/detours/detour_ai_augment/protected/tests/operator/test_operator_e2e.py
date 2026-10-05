@@ -49,6 +49,7 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     ETAG_HEADER,
     HTTP_GET_METHOD,
     HTTP_POST_METHOD,
+    INIT_PATH,
     KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL,
     KTP_AI_AUGMENT_SESSION_METADATA_COL,
     PULL_PATH,
@@ -1095,6 +1096,7 @@ def _validate_workflow_http_records(
             provider_ids.add(provider.record_id)
 
     local_routes = {
+        (HTTP_POST_METHOD, INIT_PATH),
         (HTTP_GET_METHOD, PULL_PATH),
         (HTTP_POST_METHOD, PUSH_PATH),
         (HTTP_POST_METHOD, COMMIT_PATH),

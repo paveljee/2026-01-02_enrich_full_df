@@ -14,11 +14,13 @@ from src.detours.detour_ai_augment.protected.src.backend import api as backend_a
 from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     AUTHORITATIVE_RECORDS_TABLE,
+    EXCLUDED_NAMEKEY,
     HTTP_GET_METHOD,
     HTTP_POST_METHOD,
     PULL_PATH,
     PUSH_PATH,
     REPLAY_LOG_KEY,
+    AiAugmentIneligibilityCategory,
 )
 from src.detours.detour_ai_augment.protected.tests.fixtures.pytest_fixtures import (
     STARTUP_NAMEKEY,
@@ -62,6 +64,87 @@ backend_test_paths = store_tests.backend_test_paths
 runtime = store_tests.runtime
 backend_store = store_tests.backend_store
 commit = store_tests.commit
+
+
+@pytest.mark.python_subprocess
+@pytest.mark.parametrize("mode", ("new", "resume", "continue"))
+@pytest.mark.parametrize("startup_namekey, expected_detail", (
+    pytest.param(
+        NameKey(first_name="Absent", last_name="Startup"),
+        Locale.CONFIGURED_NAMEKEY_NOT_FOUND,
+        id="unknown",
+    ),
+    pytest.param(
+        NameKey(
+            first_name=STARTUP_NAMEKEY.first_name + " ",
+            last_name=STARTUP_NAMEKEY.last_name,
+        ),
+        Locale.CONFIGURED_NAMEKEY_NOT_FOUND_SUGGESTIONS_TEMPLATE.format(
+            suggestions=STARTUP_NAMEKEY.to_json_key(),
+        ),
+        id="suggestion",
+    ),
+    pytest.param(
+        NameKey.from_json_key(EXCLUDED_NAMEKEY),
+        Locale.CONFIGURED_NAMEKEY_INELIGIBLE_TEMPLATE.format(
+            category=AiAugmentIneligibilityCategory.EXCLUDED_DUPLICATE_NAMEKEY.value,
+        ),
+        id="ineligible",
+    ),
+))
+def test_invalid_launch_namekey_is_rejected_before_replay(
+    startup_files: StartupFiles,
+    pytestconfig: pytest.Config,
+    mode: str,
+    startup_namekey: NameKey,
+    expected_detail: str,
+) -> None:
+    """Reject a launch selection before replay; preserve exact NameKey suggestions.
+
+    Previously --new rebuilt the DB before rejecting an unknown or ineligible
+    NameKey. Exercise the production CLI and Store startup with isolated faithful
+    files, including a whitespace mismatch that must suggest the canonical key.
+    """
+    files = startup_files
+    before = {
+        path: hashlib.sha256(path.read_bytes()).digest()
+        for path in (files.source, files.replay, files.detour)
+    }
+    result = subprocess.run(
+        [
+            sys.executable, "-m", server.__name__,
+            server.CONFIG_OPTION, str(files.config), f"--{mode}", "--yes",
+        ],
+        cwd=pytestconfig.rootpath,
+        env=files.environment(startup_namekey.to_json_key()),
+        input="",
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    details = result.stdout + result.stderr
+    assert result.returncode != 0, details
+    assert expected_detail in details
+    assert (
+        Locale.BACKEND_HTTP_STARTING_LOG % (backend_api.SERVER_HOST, backend_api.SERVER_PORT)
+    ) not in details
+    for path, digest in before.items():
+        assert hashlib.sha256(path.read_bytes()).digest() == digest, path
+
+    context = server.configure_runtime(files.config)
+    with (
+        pytest.raises(ValueError) as rejected,
+        initialize_backend_store(
+            context, ipc_only=False,
+            init_request_record=init_request_record(startup_namekey),
+            new=mode == "new", confirmed=True, confirm_replay=lambda: True,
+        ),
+    ):
+        pass
+    assert str(rejected.value) == expected_detail
+    for path, digest in before.items():
+        assert hashlib.sha256(path.read_bytes()).digest() == digest, path
 
 
 def test_second_same_session_acceptance_fails_loudly(

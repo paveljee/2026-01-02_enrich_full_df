@@ -636,6 +636,7 @@ def main(argv: list[str] | None = None) -> None:
                 startup_namekey = NameKey.from_json_key(raw_namekey)
             except (TypeError, ValueError) as exc:
                 raise ValueError(Locale.CONFIGURED_NAMEKEY_MALFORMED) from exc
+            context.blueprint_for_namekey(startup_namekey)
             init_request_record = BackendInitRequestRecord(
                 schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
                 method=HTTP_POST_METHOD,

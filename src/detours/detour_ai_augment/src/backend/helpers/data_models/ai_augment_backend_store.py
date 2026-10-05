@@ -3081,6 +3081,11 @@ def _initialize_backend_store(
         raise ValueError(Locale.STORE_STARTUP_CONFIRMATION_REQUIRED)
     if init_request_record is None:
         raise ValueError(Locale.INIT_REQUEST_RECORD_REQUIRED)
+    # Line below checks the init'd namekey's eligibility:
+    # (Exact NameKey exists in Context's frozen blueprints
+    # AND its cohort is not AiAugmentCohort.INELIGIBLE)
+    # *before* openining store for writing.
+    context.blueprint_for_namekey(init_request_record.namekey)
     if new:
         store._rebuild_from_log(
             context, reset_confirmed=confirmed, confirm_replay=confirm_replay,
@@ -3091,7 +3096,6 @@ def _initialize_backend_store(
         # CLI/startup-only callers do not serve HTTP or accept pushes.
         store._loop = None
     with store._writable(context):
-        context.blueprint_for_namekey(init_request_record.namekey)
         reconstructed = store._append_authoritative_record(init_request_record)
         assert isinstance(reconstructed, BackendInitRequestRecord)
         assert store._init_request_record is reconstructed

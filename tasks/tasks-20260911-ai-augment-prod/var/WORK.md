@@ -1,5 +1,67 @@
 # AI augment production — current workbook (2026-10-05)
 
+## Immediate authorized restoration — reject invalid launch NameKey before replay
+
+Operator directed immediate surgical implementation of early launch-NameKey
+validation and regression coverage, restoring the existing suggestion behavior.
+Do not implement the pending operator-fixture or artifact-validator proposals in
+this change. No new resolver, fallback, architecture/model change, or historical
+replay gating. Reuse `context.blueprint_for_namekey()` unchanged.
+
+In `src/backend/server.py::main`, validate after parsing the launch NameKey and
+before constructing init or starting Uvicorn:
+
+```python
+try:
+    startup_namekey = NameKey.from_json_key(raw_namekey)
+except (TypeError, ValueError) as exc:
+    raise ValueError(Locale.CONFIGURED_NAMEKEY_MALFORMED) from exc
+context.blueprint_for_namekey(startup_namekey)
+init_request_record = BackendInitRequestRecord(
+    # Existing construction remains unchanged.
+    ...
+)
+```
+
+In `ai_augment_backend_store.py::_initialize_backend_store`, move the existing
+eligibility call and its existing comments before `if new`, after requiring init:
+
+```python
+if init_request_record is None:
+    raise ValueError(Locale.INIT_REQUEST_RECORD_REQUIRED)
+# Line below checks the init'd namekey's eligibility:
+# (Exact NameKey exists in Context's frozen blueprints
+# AND its cohort is not AiAugmentCohort.INELIGIBLE)
+# *before* openining store for writing.
+context.blueprint_for_namekey(init_request_record.namekey)
+if new:
+    store._rebuild_from_log(
+        context, reset_confirmed=confirmed, confirm_replay=confirm_replay,
+    )
+```
+
+Add `test_invalid_launch_namekey_is_rejected_before_replay` in
+`protected/tests/backend/test_backend_store_integration.py`. For each of
+`--new`, `--resume`, and `--continue`, exercise an unknown NameKey, a whitespace
+mismatch with the existing exact suggested NameKey, and the existing excluded
+ineligible NameKey. Invoke the actual Backend CLI in an isolated subprocess and
+also the production Store initializer, with the faithful `startup_files` fixture.
+Assert the exact existing error/suggestion, CLI failure before the HTTP-start log,
+and unchanged source/log/DB SHA-256 after each rejection. No mocks/monkeypatches,
+new helpers, production data writes, or server started for the invalid selection.
+Run focused tests serially in the detour Pixi environment; stop on any failure.
+
+Implemented exactly this restoration: one existing resolver call added before
+init construction in CLI; Store's existing call/comments moved before rebuild.
+The resolver/suggestions themselves are unchanged. Verification: the full
+protected backend integration module passed 14/14 in 100.10 seconds, including
+all nine new rejection/suggestion cases and existing same-/different-NameKey
+launch and historical-validation replay regressions. Affected-file Ruff passes;
+`mypy-detour-ai-augment` passes for 65 files; `git diff --check` passes. Reports:
+`logs/ai-augment-agent-checks/early-namekey.{log,xml}` and
+`early-namekey-mypy.log`. No fixture bootstrap, artifact-validator, timestamp,
+architecture, or replay-hash policy edits were made in this restoration.
+
 ## Active surgical chore — `dashboard markdown completed` (2026-10-05)
 
 Operator authorizes changes to `src/control_centre/dashboard/ui.py` and
