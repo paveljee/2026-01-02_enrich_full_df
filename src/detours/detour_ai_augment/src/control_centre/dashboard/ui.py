@@ -114,6 +114,7 @@ from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helper
     SPREADSHEET_COMPLETED_FILENAME,
     TEXT_DECODE_ERROR_POLICY,
     TEXT_ENCODING,
+    TEXT_ENCODING_WITH_BOM,
 )
 from src.detours.detour_ai_augment.src.shared import (
     AppendwatchReportError,
@@ -3784,7 +3785,11 @@ def spreadsheet_completed(services: _ApplicationServices) -> None:
             }
 
     frame = pd.DataFrame.from_records(flat_records(), columns=columns)
-    frame.to_csv(destination, index=False, encoding=TEXT_ENCODING)
+    frame.to_csv(
+        path_or_buf=destination,
+        index=False,
+        encoding=TEXT_ENCODING_WITH_BOM,  # for unencumbered opening with Excel
+    )
     emit_log(
         Locale.CONTROL_CENTRE_LOG_PREFIX,
         f"[1/1] Written {destination}: {destination.stat().st_size} bytes",
