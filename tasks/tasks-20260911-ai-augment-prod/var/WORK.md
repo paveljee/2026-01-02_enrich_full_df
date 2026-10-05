@@ -1,5 +1,163 @@
 # AI augment production — current workbook (2026-10-02)
 
+## Current implementation: `dashboard spreadsheet completed` (locally verified)
+
+Operator corrected the command to **`dashboard spreadsheet completed`** and requested one shared population filter for it and existing `dashboard publish completed`: any namekey with at least one completed, query-backed run, regardless of the latest run's status. Operator chose Pandas for the CSV writer, with no extra copy of the nested NiceGUI snapshot. Operator then authorized implementation exactly as written here, and subsequently authorized making the spreadsheet function synchronous. The existing `publish completed` command is present; its pre-change three focused tests passed. Both exports use the Controller's already-restored NiceGUI query snapshot and Run journal; neither reloads the nested storage dict or refreshes IPC. The spreadsheet has one row per completed run/outcome, while DOCX remains one card per namekey. The lower table's timestamp is Run start/queue time when matched, otherwise outcome response time; it is not a separate validation timestamp.
+
+### Approved base shape, updated to the corrected command name
+
+One CSV in the configured output directory, with 29 Codex innerdict card columns (including the visible filename heading) and the 10 corresponding Table 1 columns immediately to the right of their AI column. The plain-text CSV retains the actual innerdict values, including `NR`/`NA`, prefixes, and JSON, without Markdown rendering/parsing. Sort by the existing natural draw order, then the exact timestamp used in the lower dashboard table, then stable record ID. Use the existing `DOCX_TO_AI_AUGMENT_COLUMNS` mapping and `CODEX_OUTPUT_SCHEMA` order:
+
+```python
+codex_columns = (
+    KTP_FILENAME_COL,
+    *(
+        column for column, _ in CODEX_OUTPUT_SCHEMA
+        if column not in CARD_EXCLUDED_COLUMNS
+    ),
+)
+ground_truth_by_ai = {
+    ai_column: table_1_column
+    for table_1_column, ai_column in DOCX_TO_AI_AUGMENT_COLUMNS
+}
+columns = []
+for column in codex_columns:
+    columns.append(column)
+    if column in ground_truth_by_ai:
+        columns.append(ground_truth_by_ai[column])
+```
+
+`SPREADSHEET_COMPLETED_FILENAME: Final = "ai_augment_completed_runs.csv"` is the single new output-name constant in the existing dashboard vars module. The export adds imports for `pandas as pd`, `CODEX_OUTPUT_SCHEMA`, `KTP_FILENAME_COL`, and the filename constant. The concrete export body, using the shared Controller selector proposed below, is:
+
+```python
+def spreadsheet_completed(services: _ApplicationServices) -> None:
+    completed_rows = sorted(
+        services.controller.completed_run_rows(),
+        key=lambda item: (
+            researcher_sort_key(item[0]),
+            item[1].timestamp,
+            str(item[1].row_id),
+        ),
+    )
+    codex_columns = (
+        KTP_FILENAME_COL,
+        *(
+            column for column, _ in CODEX_OUTPUT_SCHEMA
+            if column not in CARD_EXCLUDED_COLUMNS
+        ),
+    )
+    ground_truth_by_ai = {
+        ai_column: table_1_column
+        for table_1_column, ai_column in DOCX_TO_AI_AUGMENT_COLUMNS
+    }
+    columns = []
+    for column in codex_columns:
+        columns.append(column)
+        if column in ground_truth_by_ai:
+            columns.append(ground_truth_by_ai[column])
+
+    destination = (
+        services.configuration.pipeline_config.output_dir
+        / SPREADSHEET_COMPLETED_FILENAME
+    )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+
+    def flat_records():
+        for researcher, outcome in completed_rows:
+            assert outcome.codex_innerdict is not None
+            values = dict(outcome.codex_innerdict.innerdict.data)
+            ground_truth = (
+                researcher.ground_truth_innerdict()
+                if researcher.ai_augment_cohort is AiAugmentCohort.GROUND_TRUTH
+                else None
+            )
+            for ai_column, table_1_column in ground_truth_by_ai.items():
+                values[table_1_column] = (
+                    None if ground_truth is None
+                    else ground_truth.data[table_1_column]
+                )
+            yield {
+                column: "" if values[column] is None else str(values[column])
+                for column in columns
+            }
+
+    frame = pd.DataFrame.from_records(flat_records(), columns=columns)
+    frame.to_csv(destination, index=False, encoding=TEXT_ENCODING)
+```
+
+The Controller's `_snapshot` and `_runs` were restored once at startup by `AiAugmentDashboardStorage`. Raw `app.storage.general[BACKEND_DATABASE_STORAGE_KEY]` is nested outerdict/innerdict JSON, not a flat per-run table; passing it to Pandas directly would give the wrong rows and bypass existing snapshot validation. `flat_records()` constructs only one small scalar dict per completed run for `DataFrame.from_records`; there is no second typed snapshot, no separate list of records, and no copy of the full nested lineage. Pandas 2.3.3 accepts this generator (verified with `NR`/`NA`). A loaded but empty snapshot yields one header-only CSV. The normal snapshot loader already returns an empty validated snapshot if none was stored; whether a missing snapshot should fail instead of writing a header-only CSV remains a separate behavior decision, so no new missing-snapshot exception is proposed here.
+
+The existing one-shot startup/shutdown path would accept the new operation, with no new DTO/class and no Backend/Store work:
+
+```python
+APPLICATION_SPREADSHEET_COMPLETED = False
+
+parser.add_argument("operation", nargs="?", choices=["publish", "spreadsheet"])
+parser.add_argument("selection", nargs="?", choices=["completed"])
+if (arguments.operation is None) != (arguments.selection is None):
+    parser.error("Expected: publish completed or spreadsheet completed")
+APPLICATION_PUBLISH_COMPLETED = arguments.operation == "publish"
+APPLICATION_SPREADSHEET_COMPLETED = arguments.operation == "spreadsheet"
+
+publishing = APPLICATION_PUBLISH_COMPLETED or APPLICATION_SPREADSHEET_COMPLETED
+await services.controller.start(publishing=publishing)
+if publishing:
+    await publish_and_shutdown()
+```
+
+`publish_and_shutdown()` is the existing one-shot wrapper renamed and dispatched to `await publish_completed(services)` or the synchronous `spreadsheet_completed(services)`, retaining its existing exception-to-exit-code and `app.shutdown()` behavior.
+
+### Shared-filter addition proposed for operator review
+
+The previous `publish_completed` predicate looked only at `row.current_researcher_var_row_view.lifecycle`. Replace that and the spreadsheet's independent row search with **one** Controller method in `ui.py`, using its already-restored snapshot and runs by reference. `view.lifecycle is COMPLETED` enforces the requested completed-run status; a missing `CodexInnerDict` for such a view is an error, not a silent exclusion. Query-only completions without a matching Dashboard `Run` are represented by `_RunAttemptView` and count as completed, as they already do in the lower table.
+
+```python
+def completed_run_rows(self) -> tuple[tuple[_Researcher, _RunAttemptView], ...]:
+    runs_by_namekey: dict[str, list[Run]] = {}
+    for run in self._runs.values():
+        runs_by_namekey.setdefault(run.namekey.to_json_key(), []).append(run)
+    completed_rows: list[tuple[_Researcher, _RunAttemptView]] = []
+    for researcher in self._snapshot.ai_augment_singular_outerdicts:
+        views = _ResearcherView.from_snapshot(
+            researcher,
+            self._snapshot,
+            runs_by_namekey.get(researcher.namekey.to_json_key(), ()),
+        )
+        for view in views.run_attempt_views:
+            if view.lifecycle is not RunLifecycle.COMPLETED:
+                continue
+            if view.codex_innerdict is None:
+                raise RuntimeError(Locale.ATTEMPT_DATABASE_INCONSISTENT)
+            completed_rows.append((researcher, view))
+    return tuple(completed_rows)
+```
+
+The existing DOCX mode then deduplicates **those same rows** by namekey, rather than considering only the latest row. Keep its current card renderer, logging, output directory, and DOCX writing. Treat an unexpectedly unavailable card as an error rather than silently narrowing the common population:
+
+```python
+completed_rows = controller.completed_run_rows()
+candidates = tuple({
+    researcher.namekey.to_json_key(): researcher
+    for researcher, _ in completed_rows
+}.values())
+cards = []
+for researcher in candidates:
+    card = await controller.researcher_card(namekey=researcher.namekey)
+    if not card.download_available:
+        raise RuntimeError(Locale.BACKEND_CARD_MISSING)
+    cards.append(card)
+```
+
+The spreadsheet uses `completed_rows` without deduplication. Both modes therefore use exactly the same completion filter, with no additional present-day cohort gate; the spreadsheet has one row per completion, DOCX one file per qualifying namekey. No change to the dashboard card values, query/replay, or architecture is proposed.
+
+**Implementation checkpoint:** Source has the selector, Pandas export, CLI mode, authorized synchronous correction, one-shot dispatch, and the approved `Iterator[dict[str, str]]` annotation. Detour mypy passes 64 files; focused Ruff passes. The publish tests use faithful query-backed CodexInnerDicts and a fully constructed, isolated `_ApplicationServices`: `startup_files` under `tmp_path`, the real `create_services` factory with a temp Lima config/API key, a real `QueryResponseRecord` serialized through `DashboardQuerySnapshot`, NiceGUI storage methods, journaled Runs, and Pandoc. No Backend IPC or external API is invoked. `app.shutdown` is the sole substituted behavior in the existing one-shot test because invoking actual framework shutdown inside pytest would terminate the shared process. The dedicated spreadsheet-content test substitutes no exporter, renderer, or query/storage behavior.
+
+**Fixture boundary:** The `startup_files` source fixture has 307 blueprints, but its ground-truth researchers lack complete DOCX innerdicts. Operator approved selecting three actual `NO_GROUND_TRUTH` blueprints for the DOCX publish tests; the shared fixture is untouched. The CSV test instead starts from one actual ground-truth blueprint, attaches a complete test-only DOCX `InnerDict` with distinct values, and passes it through the real query-response serialization and storage route. These values test placement/preservation, not empirical researcher truth. `_BackendDatabaseClient.card` performs local rendering, not IPC. Operator reviewed the single `app.shutdown` substitution in the one-shot test; it remains because framework-wide shutdown would terminate the pytest process.
+
+**Spreadsheet test coverage (2026-10-03):** Operator requested coverage without mock/monkeypatch substitution of production behavior. The implemented CSV test uses `create_services`, a temp source, actual query-response JSON round-trip into NiceGUI storage, two completed outcomes for the same ground-truth researcher, one completed no-ground-truth researcher, a queued later Run, and an uncompleted researcher. It checks all exported card values, ten immediately adjacent AI/ground-truth columns and their distinct values, empty no-ground-truth cells, per-completion rows/order, and unchanged storage. Operator clarified the publish tests do not need DOCX ground-truth test data, so their original test-specific selection remains.
+
+**Test execution:** The four focused cases passed; the full dashboard `test_ui.py` module passed **207/207** in 539.57 seconds. Detour mypy passed 64 source files; full-detour Ruff and `git diff --check` passed after the final comment-only edit. The two DOCX tests explicitly select AnyIO's uvloop backend, which Uvicorn auto-selects in this installed environment. A standalone stock-loop `asyncio.to_thread(lambda: 42)` completed its job but timed out during process teardown on one run (exit 124), and passed on a later run; direct `ThreadPoolExecutor().submit(lambda: 42).result()` exited normally, as did the uvloop variant. This is an intermittent environment observation, not a proved general CPython defect; test comments state it narrowly. No production or exporter behavior is mocked to bypass it. Operator E2E/pre-commit-operator has not been rerun after this feature.
+
 ## Operator-approved table-name shape — exact chat text
 
 ### Table names
@@ -49,7 +207,15 @@ Operator's next macOS trace shows the first owned full Backend starting `--new` 
 
 Failed `--new` unlinks and recreates the detour DB, then commits each replayed line separately; failure at line 20 leaves the DB with only the preceding successfully projected prefix (likely lines 1–19). Operator's subsequent manual `--resume` verifies the full log against this partial DB and fails at line 20, exactly as reported. The replay log/CAS remain authoritative; the Store correctly refuses to treat a partial DB as current. A failed owned cycle also leaves the dashboard context's `_backend_cycle_failed=True`, preventing automatic same-process retries. Do not mutate production state or suggest another `--new` before the replay bug is corrected and preservation/recovery is reviewed. Operator's standing instruction for this investigation: **NO code changes**.
 
-Operator requested a concrete code proposal, not implementation. Pending review: in `AiAugmentBackendContext`, extract the existing tuple lookup and ineligible-cohort check into `blueprint_for_namekey(namekey)` returning the original tuple member by reference; keep `configured_ai_augment_singular_outerdict()` using that method with its existing configured-namekey and suggestions behavior. In Store's `_validated_commit_inputs().draw_number()`, resolve `namekey` from the commit through `context.blueprint_for_namekey(namekey)` instead of `context.configured_ai_augment_singular_outerdict()`; preserve the lazy `(value, error)` result. No replay-log, projection, dashboard startup-policy, architecture.py, or source-DB changes. A focused regression must replay an accepted historical validation for A while B is the current configured namekey, then verify the logged validation/projected DB match; current tests cover only same-namekey replay. Exact snippets will be supplied in chat for approval.
+Current proposal request is **review only**, not implementation. Operator now proposes a synthetic `BackendInitRequestRecord` (`POST http://invalid/init`, NameKey header) appended/replayed once at each full Backend startup before HTTP admission. The startup environment namekey is used only to construct this record; `AiAugmentBackendContext` no longer retains a namekey, and Store holds the *reconstructed* init record by identity for the current Backend instance. During full-log rebuild each init marks a process boundary and replaces the replay cursor; query-only startup appends nothing. The frozen context retains only config and source blueprints, with a parameterized blueprint lookup. Historical validation draw resolution must use the replayed init/original-pull namekey, not the current process's environment. The full surgical code proposal, including the pull/push/retry/outcome loopholes below, will be presented in chat for review before any source edit. Operator states source-data version pinning is handled by config upstream of the replay log; do not expand this scope.
+
+Operator resolved replay compatibility: older replay logs without `/init` are deliberately incompatible. Add no fallback, migration, inference, or compatibility path. New full Backend histories require `/init` before any other lifecycle record; query-only startup remains read-only.
+
+Read-only follow-up (2026-10-03): `_rebuild_from_log` already iterates every line; it does not filter by configured namekey. The concrete historical-namekey gate is `_validated_commit_inputs().draw_number()`, shared by live evaluation and `_apply_validation_record()` replay. Startup and Store-open validation of the configured namekey, API `/pull`, live commit capture, and live run-outcome identity remain distinct live-operation gates. The above lookup change addresses the demonstrated validation mismatch, but is **not yet proven sufficient for every multi-namekey log**: rebuild retains one cursor across historical Backend instances, whereas live startup resets it. `_response_record_for_http()` links a prior validation to any subsequent `200 /pull`, and `_remember_reconstructed_record()` refuses a pull while cursor is a push/commit. A new run after a prior run with no `200` outcome (or an interrupted process) can therefore inherit an unrelated validation or fail the cursor assertion. This needs a separate record-evidenced boundary audit and focused regression before claiming general multi-namekey replay correctness. No code change authorized by this note.
+
+Concrete read-only comparison: in live operation, an accepted `202 /push` requires a current `200 /pull` and session ID; Store resets its cursor before each writable Backend opening. Thus an accepted live push does link a pull from that Backend instance. The replay log is globally ordered (request gate, Store/replay-log locks), but the process lock alone does not serialize every HTTP/background operation. Rebuild has no per-process cursor reset. A valid history `P_A(200), S_A(202), C_A, V_A; [process exit before successful outcome]; P_B(200), S_B(202), C_B, V_B` yields a different replay link: `P_B.validation_request_record` becomes `V_A`, although live B started with no prior validation. A subsequent validation's recorded initial-validation ID cannot match that inferred reference. If the prior process stopped after `S_A` or `C_A`, replay's next `200 /pull` trips the cursor assertion instead. Commit/validation/outcome lines carry UUID links, but Store reconstructs several byref links from its current cursor rather than arbitrary UUID lookup. The configured-namekey check is not a source-data-version check: Store reads current source blueprints at startup, and query iterates that current blueprint population rather than arbitrary historical namekeys. No source/test edits in this review.
+
+Further architecture review (read-only): Operator is considering linking `PushResponseRecord.pull_response_record` only for accepted `202`/current `200 /pull`. Currently both Store reconstruction and architecture docstring attach the current pull even for rejected pushes; changing this is a targeted contract change, and API's all-status identity assert would also need adjustment. It would prevent a rejected push in a new Backend instance from inheriting an old pull during full-log rebuild, but it does not fix the accepted-pull boundary. `PullResponseRecord.validation_request_record` is intended for retry only per architecture docstring; current Store attaches it to every `200 /pull` after a validation. Actual `/pull` responses distinguish initial `200` NDJSON from retry `200` Markdown (after retryable rejected validation). A new NDJSON pull should be a lineage root even when previous replay cursor is validation/push/commit; a Markdown retry should require the proper prior validation byref. Commit header NameKey can derive from the original NDJSON pull reached through the accepted push/retry-validation chain; validation header copies commit headers. Draw number currently comes from today's frozen source blueprint (xlsx/ssn/docx); original pull logs xlsx/ssn but not docx, so a historical source-data-version invariant remains separate. Run-outcome request NameKey is supplied by dashboard; if no pull/commit exists, no byref namekey is available to verify it without configured startup namekey or a new durable source of identity. No source/architecture edit authorized here.
 
 ## Current card/JSON formatting implementation (2026-10-02)
 

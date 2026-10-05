@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import csv
 import fcntl
 import hashlib
 import io
+import json
 import os
 import subprocess
 import sys
@@ -21,6 +23,7 @@ from unittest.mock import AsyncMock, Mock
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 from uuid import UUID, uuid7
+from zipfile import ZipFile
 from zoneinfo import ZoneInfo
 
 import duckdb
@@ -30,21 +33,32 @@ from nicegui import app, ui
 from pydantic import ValidationError
 
 from src.detours.detour_ai_augment.protected.src.backend import api, ipc
+from src.detours.detour_ai_augment.protected.src.backend.helpers.codex_parse import (
+    render_footnoted_submission_value,
+    render_standardized_submission_value,
+)
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_augment_config import (  # noqa: E501
     AiAugmentDetourConfig,
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.post_commit_validation import (  # noqa: E501
     PostCommitValidation,
 )
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.pydantic_to_paste import (  # noqa: E501
+    EXPORT_OPENALEX_API_KEY,
+)
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.submission_init import (  # noqa: E501
     Submission,
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     AI_AUGMENT_COLUMNS,
+    AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS,
     APPENDWATCH_OK_PREFIX,
     AUTHORITATIVE_RECORDS_TABLE,
     BACKEND_STORE_CLOSED_CLEANLY,
+    CARD_EXCLUDED_COLUMNS,
+    CODEX_OUTPUT_SCHEMA,
     DOCX_COLUMNS,
+    DOCX_TO_AI_AUGMENT_COLUMNS,
     EXCLUDED_NAMEKEY,
     HTTP_GET_METHOD,
     HTTP_POST_METHOD,
@@ -52,8 +66,12 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     KTP_AI_AUGMENT_FOOTNOTES_COL,
     KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL,
     KTP_AI_AUGMENT_SESSION_METADATA_COL,
+    NAME_KEY_HEADER,
+    NOT_REPORTED_VALUE,
     PULL_PATH,
     PUSH_PATH,
+    QUERY_PATH,
+    ROLLOUT_LINE_FRAGMENT_TYPE,
     SOURCE_KEY_HEADER,
     AiAugmentCohort,
     AiAugmentIneligibilityCategory,
@@ -135,6 +153,10 @@ from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_mod
 from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.lifecycle import (  # noqa: E501
     RunLifecycle,
 )
+from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.query_event import (  # noqa: E501
+    QueryRequestRecord,
+    QueryResponseRecord,
+)
 from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.run_outcome_event import (  # noqa: E501
     RunOutcomeRequestRecord,
     RunOutcomeResponseRecord,
@@ -153,6 +175,8 @@ from src.helpers.vars import (
     KTP_FILENAME_COL,
     KTP_FIRST_NAME_COL,
     KTP_FRAGMENT_COL,
+    KTP_FRAGMENT_TYPE_COL,
+    KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
     KTP_LAST_NAME_COL,
     KTP_NAMEKEY_COL,
 )
@@ -280,6 +304,7 @@ def agent_runtime_attempt(
     result: BackendLifecycle = BackendLifecycle.ACCEPTED,
     commit_request_record_id: UUID | None = None,
     session_id: UUID = SESSION_ID,
+    namekey: NameKey = NAMEKEY,
 ) -> AgentRuntimeAttempt:
     pull_response_record = PullResponseRecord.from_http_request_log_record(
         http_request_log_record=http_record(
@@ -330,7 +355,7 @@ def agent_runtime_attempt(
                 'ktp.filename="rollout.jsonl", '
                 'ktp.fragment;type="line_number";line_number="1"'
             ),
-            "NameKey": 'ktp.first_name="Jane", ktp.last_name="Doe"',
+            NAME_KEY_HEADER: name_key_header_value(namekey),
         },
         request_body=commit_body.model_dump_json(),
         response_code=None,
@@ -364,6 +389,20 @@ def agent_runtime_attempt(
 @pytest.fixture(autouse=True)
 def isolated_general_storage(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(app.storage, "_general", {})
+
+
+@pytest.fixture
+def faithful_publishing_services(
+    startup_files: StartupFiles, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> control_ui._ApplicationServices:
+    lima_path = tmp_path / "lima.yaml"
+    lima_path.write_text(json.dumps({
+        "param": {api.APPENDWATCH_REPORT_ENV_NAME: str(tmp_path / "appendwatch.txt")},
+        "mounts": [],
+    }))
+    monkeypatch.setattr(context_models, "LIMA_CONFIG_PATH", lima_path)
+    monkeypatch.setenv(EXPORT_OPENALEX_API_KEY, "test-key")
+    return control_ui.create_services(config_path=startup_files.config)
 
 
 @pytest.fixture
@@ -431,6 +470,103 @@ def queued_run(
             lifecycle=RunLifecycle.QUEUED,
         ),),
     )
+
+
+def completed_query_researcher(
+    source: AiAugmentSingularOuterDict,
+    *,
+    ai_field_values: dict[str, str] | None = None,
+) -> tuple[AiAugmentSingularOuterDict, run_event_models.Run]:
+    session_id = uuid7()
+    attempt = agent_runtime_attempt(session_id=session_id, namekey=source.namekey)
+    outcome = run_outcome_response_record(
+        namekey=source.namekey, session_id=session_id, attempt=attempt,
+    )
+    assert outcome.response_headers is not None
+    filename, fragment = source_key_from_header_value(
+        outcome.response_headers[SOURCE_KEY_HEADER]
+    )
+    values: dict[str, Any] = {column: None for column, _ in CODEX_OUTPUT_SCHEMA}
+    values.update({
+        KTP_NAMEKEY_COL: source.namekey.to_json_key(),
+        KTP_FILENAME_COL: filename,
+        KTP_FRAGMENT_COL: fragment,
+        KTP_FRAGMENT_TYPE_COL: ROLLOUT_LINE_FRAGMENT_TYPE,
+        DRAW_LABEL: source.draw_numbers[0],
+        KTP_FIRST_NAME_COL: source.namekey.first_name,
+        KTP_LAST_NAME_COL: source.namekey.last_name,
+        KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL: outcome.response_body,
+        KTP_AI_AUGMENT_SESSION_METADATA_COL: CodexRolloutRecord.build_summary_json({
+            "originator": "codex_cli_rs", "source": "exec", "cli_version": "test",
+            "model_provider": "openai", "model": "test", "reasoning_effort": "high",
+            "session_id": str(session_id), "timestamp": SESSION_TIMESTAMP.isoformat(),
+        }),
+        KTP_AI_AUGMENT_FOOTNOTES_COL: "",
+        KTP_AI_AUGMENT_FOOTNOTE_ARGUMENTS_COL: "",
+    })
+    for plain_column, standardized_column in AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS:
+        values[plain_column] = render_footnoted_submission_value(
+            NOT_REPORTED_VALUE, (),
+        )
+        values[standardized_column] = render_standardized_submission_value(
+            json.dumps(NOT_REPORTED_VALUE),
+        )
+    if ai_field_values is not None:
+        values.update(ai_field_values)
+    completed = source.model_copy(update={"codex_innerdicts": (CodexInnerDict(
+        innerdict=InnerDict.from_mapping(values, _CodexInnerDictProcedure()),
+        run_outcome_response_record=outcome,
+    ),)})
+    run = queued_run(namekey=source.namekey)
+    run.session_id = session_id
+    run.completed_attempt_id = attempt.record_id
+    control_ui.apply_run_event(run, RunEvent(
+        run_id=run.run_id,
+        occurred_at_unix_usec=RunEvent.datetime_to_unix_usec(SESSION_TIMESTAMP),
+        lifecycle=RunLifecycle.COMPLETED,
+    ))
+    return completed, run
+
+
+def store_query_response_and_runs(
+    application: control_ui._ApplicationServices,
+    researchers: tuple[AiAugmentSingularOuterDict, ...],
+    runs: tuple[run_event_models.Run, ...],
+) -> None:
+    request = QueryRequestRecord(
+        schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
+        record_id=uuid7(),
+        method=HTTP_GET_METHOD,
+        scheme="http",
+        host="testserver",
+        port=None,
+        path=QUERY_PATH,
+        query="",
+        request_headers={},
+        request_body=None,
+        response_code=None,
+        response_headers=None,
+        response_body=None,
+        received_at_unix_usec=1,
+        ready_to_respond_at_unix_usec=None,
+        duration_usec=None,
+    )
+    response = QueryResponseRecord.from_query_request(
+        request,
+        ai_augment_singular_outerdicts=researchers,
+        ready_to_respond_at_unix_usec=2,
+    )
+    assert response.response_body is not None
+    application.storage.replace_query_snapshot(
+        DashboardQuerySnapshot.from_serialized_json(response.response_body)
+    )
+    application.storage.save_runs(runs)
+    application.storage.save_run_events(tuple(
+        event for run in runs for event in run.events
+    ))
+    application.storage.save_queue(tuple(
+        run.run_id for run in runs if run.is_queued()
+    ))
 
 
 class FakeBackendDatabase:
@@ -3300,53 +3436,207 @@ async def test_restored_queue_stays_stopped_and_publish_skips_remote_and_journal
 
 
 @pytest.mark.anyio
-async def test_publish_completed_filters_current_display_and_uses_shared_renderer(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
-    inline_controller_io: None,
+# Stock asyncio has intermittently hung after to_thread here; this environment's
+# Uvicorn auto-selects uvloop, under which these publish tests complete.
+@pytest.mark.parametrize("anyio_backend", [("asyncio", {"use_uvloop": True})])
+async def test_publish_completed_includes_earlier_completed_run_and_renders_docx(
+    startup_files: StartupFiles,
+    faithful_publishing_services: control_ui._ApplicationServices,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    application = services()
+    application = faithful_publishing_services
     subject = application.controller
     configuration = application.configuration.pipeline_config
-    configuration.output_dir = tmp_path / "output"  # type: ignore[misc]
-    configuration.pandoc_reference_docx = tmp_path / "reference.docx"  # type: ignore[misc]
-    sources = tuple(researcher(NameKey(first_name=f"Person{i}", last_name="Test"))
-                    for i in range(3)) + (
-        researcher(NameKey(first_name="Person3", last_name="Test"),
-                   cohort=AiAugmentCohort.INELIGIBLE,
-                   ineligibility_category=next(iter(AiAugmentIneligibilityCategory))),
+    sources = [
+        source for source in backend_server.configure_runtime(
+            startup_files.config, require_namekey=False,
+        ).ai_augment_singular_outerdict_blueprints
+        if source.ai_augment_cohort is AiAugmentCohort.NO_GROUND_TRUTH
+    ][:3]
+    assert len(sources) == 3
+    first, first_run = completed_query_researcher(sources[0])
+    second, second_run = completed_query_researcher(sources[1])
+    sources[:2] = (first, second)
+    pending = queued_run(namekey=second.namekey)
+    store_query_response_and_runs(
+        application, tuple(sources), (first_run, second_run, pending),
     )
-    set_researchers(subject, sources)
-    for source in sources:
-        run = queued_run(namekey=source.namekey)
-        control_ui.apply_run_event(run, RunEvent(
-            run_id=run.run_id,
-            occurred_at_unix_usec=RunEvent.datetime_to_unix_usec(SESSION_TIMESTAMP),
-            lifecycle=RunLifecycle.COMPLETED,
-        ))
-        subject._runs[run.run_id] = run
-    # A queued current run excludes a researcher even with a completed predecessor.
-    pending = queued_run(namekey=sources[1].namekey)
-    subject._runs[pending.run_id] = pending
-    monkeypatch.setattr(subject, "_render_card",
-                        lambda source: "" if source is sources[2] else "shared card")
-    calls: list[tuple[str, Path]] = []
-
-    def render(markdown: str, reference: Path) -> bytes:
-        calls.append((markdown, reference))
-        return b"rendered docx"
-
-    monkeypatch.setattr(control_ui, "render_docx_bytes", render)
+    await subject.start(publishing=True)
     before = deepcopy(app.storage.general)
-    await control_ui.publish_completed(application)
-    card = await subject.researcher_card(namekey=sources[0].namekey)
-    assert list(configuration.output_dir.iterdir()) == [
-        configuration.output_dir / card.docx_filename,
-    ]
-    assert (configuration.output_dir / card.docx_filename).read_bytes() == b"rendered docx"
-    assert calls == [("shared card", configuration.pandoc_reference_docx)]
-    assert app.storage.general == before
-    assert not subject.queue_processing
-    assert "4 researchers; 2 eligible and completed; 1 DOCX" in capsys.readouterr().out
+    try:
+        await control_ui.publish_completed(application)
+        cards = (
+            await subject.researcher_card(namekey=first.namekey),
+            await subject.researcher_card(namekey=second.namekey),
+        )
+        assert {path.name for path in configuration.output_dir.iterdir()} == {
+            card.docx_filename for card in cards
+        }
+        for card in cards:
+            with ZipFile(configuration.output_dir / card.docx_filename) as document:
+                assert document.testzip() is None
+                assert "word/document.xml" in document.namelist()
+        assert app.storage.general == before
+        assert not subject.queue_processing
+        assert "3 researchers; 2 eligible and completed; 2 DOCX" in capsys.readouterr().out
+    finally:
+        await subject.shutdown()
+
+
+@pytest.mark.anyio
+async def test_spreadsheet_completed_preserves_card_values_and_ground_truth_pairs(
+    startup_files: StartupFiles,
+    faithful_publishing_services: control_ui._ApplicationServices,
+) -> None:
+    application = faithful_publishing_services
+    blueprints = backend_server.configure_runtime(
+        startup_files.config, require_namekey=False,
+    ).ai_augment_singular_outerdict_blueprints
+    ground_truth_source = next(
+        source for source in blueprints
+        if source.ai_augment_cohort is AiAugmentCohort.GROUND_TRUTH
+    )
+    no_ground_truth_sources = tuple(
+        source for source in blueprints
+        if source.ai_augment_cohort is AiAugmentCohort.NO_GROUND_TRUTH
+    )
+    assert len(no_ground_truth_sources) >= 2
+    docx_values = {
+        column: f"Ground truth {index}"
+        for index, column in enumerate(DOCX_COLUMNS)
+    }
+    ground_truth_innerdict = InnerDict.from_mapping(
+        {
+            KTP_NAMEKEY_COL: ground_truth_source.namekey.to_json_key(),
+            KTP_FIRST_NAME_COL: ground_truth_source.namekey.first_name,
+            KTP_LAST_NAME_COL: ground_truth_source.namekey.last_name,
+            DRAW_LABEL: ground_truth_source.draw_numbers[0],
+            **docx_values,
+        },
+        DocxMatchProcedure(),
+    )
+    ground_truth_source = AiAugmentSingularOuterDict(
+        namekey=ground_truth_source.namekey,
+        ai_augment_rnd=ground_truth_source.ai_augment_rnd,
+        ai_augment_cohort=ground_truth_source.ai_augment_cohort,
+        ai_augment_ineligibility_category=(
+            ground_truth_source.ai_augment_ineligibility_category
+        ),
+        xlsx_innerdicts=ground_truth_source.xlsx_innerdicts,
+        ssn_innerdicts=ground_truth_source.ssn_innerdicts,
+        docx_innerdicts=(ground_truth_innerdict,),
+    )
+    ai_values = {
+        ai_column: render_footnoted_submission_value(f"AI {index}", ())
+        for index, (_, ai_column) in enumerate(DOCX_TO_AI_AUGMENT_COLUMNS)
+    }
+    first_ground_truth, first_ground_truth_run = completed_query_researcher(
+        ground_truth_source, ai_field_values=ai_values,
+    )
+    second_ai_values = {
+        ai_column: render_footnoted_submission_value(f"Retry AI {index}", ())
+        for index, (_, ai_column) in enumerate(DOCX_TO_AI_AUGMENT_COLUMNS)
+    }
+    second_ground_truth, second_ground_truth_run = completed_query_researcher(
+        ground_truth_source, ai_field_values=second_ai_values,
+    )
+    completed_ground_truth = ground_truth_source.model_copy(update={
+        "codex_innerdicts": (
+            *first_ground_truth.codex_innerdicts,
+            *second_ground_truth.codex_innerdicts,
+        ),
+    })
+    completed_no_ground_truth, no_ground_truth_run = completed_query_researcher(
+        no_ground_truth_sources[0],
+    )
+    queued_later = queued_run(namekey=completed_ground_truth.namekey)
+    store_query_response_and_runs(
+        application,
+        (
+            completed_ground_truth,
+            completed_no_ground_truth,
+            no_ground_truth_sources[1],
+        ),
+        (
+            first_ground_truth_run,
+            second_ground_truth_run,
+            no_ground_truth_run,
+            queued_later,
+        ),
+    )
+    await application.controller.start(publishing=True)
+    before = deepcopy(app.storage.general)
+    try:
+        control_ui.spreadsheet_completed(application)
+        destination = (
+            application.configuration.pipeline_config.output_dir
+            / control_vars.SPREADSHEET_COMPLETED_FILENAME
+        )
+        with destination.open(newline="", encoding=control_vars.TEXT_ENCODING) as file:
+            reader = csv.DictReader(file)
+            rows = list(reader)
+            columns = reader.fieldnames
+        assert columns is not None
+        codex_columns = (
+            KTP_FILENAME_COL,
+            *(
+                column for column, _ in CODEX_OUTPUT_SCHEMA
+                if column not in CARD_EXCLUDED_COLUMNS
+            ),
+        )
+        assert len(columns) == len(codex_columns) + len(DOCX_TO_AI_AUGMENT_COLUMNS)
+        assert tuple(column for column in columns if column in codex_columns) == (
+            codex_columns
+        )
+        for table_1_column, ai_column in DOCX_TO_AI_AUGMENT_COLUMNS:
+            assert columns[columns.index(ai_column) + 1] == table_1_column
+        assert len(rows) == 3
+        ground_truth_rows = rows[:2]
+        no_ground_truth_row = rows[2]
+        assert all(
+            row[KTP_FIRST_NAME_COL] == ground_truth_source.namekey.first_name
+            for row in ground_truth_rows
+        )
+        ground_truth_cards = completed_ground_truth.codex_innerdicts
+        assert {row[KTP_FILENAME_COL] for row in ground_truth_rows} == {
+            card.innerdict.data[KTP_FILENAME_COL] for card in ground_truth_cards
+        }
+        ordered_ground_truth_runs = sorted(
+            (
+                (first_ground_truth_run, ground_truth_cards[0], ai_values),
+                (second_ground_truth_run, ground_truth_cards[1], second_ai_values),
+            ),
+            key=lambda item: str(item[0].run_id),
+        )
+        assert tuple(row[KTP_FILENAME_COL] for row in ground_truth_rows) == tuple(
+            card.innerdict.data[KTP_FILENAME_COL]
+            for _, card, _ in ordered_ground_truth_runs
+        )
+        assert no_ground_truth_row[KTP_FIRST_NAME_COL] == (
+            no_ground_truth_sources[0].namekey.first_name
+        )
+        no_ground_truth_card = completed_no_ground_truth.codex_innerdicts[0].innerdict.data
+        for row, (_, card, expected_ai_values) in zip(
+            ground_truth_rows, ordered_ground_truth_runs, strict=True,
+        ):
+            for column in codex_columns:
+                value = card.innerdict.data[column]
+                assert row[column] == ("" if value is None else str(value))
+            for table_1_column, ai_column in DOCX_TO_AI_AUGMENT_COLUMNS:
+                assert row[ai_column] == expected_ai_values[ai_column]
+                assert row[table_1_column] == (
+                    ground_truth_innerdict.data[table_1_column]
+                )
+        for column in codex_columns:
+            assert no_ground_truth_row[column] == (
+                "" if no_ground_truth_card[column] is None
+                else str(no_ground_truth_card[column])
+            )
+        for table_1_column, ai_column in DOCX_TO_AI_AUGMENT_COLUMNS:
+            assert no_ground_truth_row[table_1_column] == ""
+        assert app.storage.general == before
+    finally:
+        await application.controller.shutdown()
 
 
 @pytest.mark.anyio
@@ -3375,46 +3665,61 @@ async def test_probe_and_docx_failures_emit_operator_details(
 
 
 @pytest.mark.anyio
+# Stock asyncio has intermittently hung after to_thread here; this environment's
+# Uvicorn auto-selects uvloop, under which these publish tests complete.
+@pytest.mark.parametrize("anyio_backend", [("asyncio", {"use_uvloop": True})])
 @pytest.mark.parametrize("fail_second", (False, True))
 async def test_publish_one_shot_shutdown_noop_or_first_error_keeps_written_files(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fail_second: bool,
-    capsys: pytest.CaptureFixture[str], inline_controller_io: None,
+    startup_files: StartupFiles,
+    faithful_publishing_services: control_ui._ApplicationServices,
+    monkeypatch: pytest.MonkeyPatch,
+    fail_second: bool,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    application = services()
+    application = faithful_publishing_services
     subject = application.controller
     config = application.configuration.pipeline_config
-    config.output_dir = tmp_path / "published"  # type: ignore[misc]
-    config.pandoc_reference_docx = tmp_path / "reference.docx"  # type: ignore[misc]
+    sources = [
+        source for source in backend_server.configure_runtime(
+            startup_files.config, require_namekey=False,
+        ).ai_augment_singular_outerdict_blueprints
+        if source.ai_augment_cohort is AiAugmentCohort.NO_GROUND_TRUTH
+    ][:3]
+    assert len(sources) == 3
+    runs: tuple[run_event_models.Run, ...] = ()
     if fail_second:
-        sources = (researcher(), researcher(SECOND_NAMEKEY))
-        set_researchers(subject, sources)
-        for source in sources:
-            run = queued_run(namekey=source.namekey)
-            control_ui.apply_run_event(run, RunEvent(
-                run_id=run.run_id,
-                occurred_at_unix_usec=RunEvent.datetime_to_unix_usec(SESSION_TIMESTAMP),
-                lifecycle=RunLifecycle.COMPLETED,
-            ))
-            subject._runs[run.run_id] = run
-    render = Mock(side_effect=[b"first document", OSError("second render failed")])
-    monkeypatch.setattr(control_ui, "render_docx_bytes", render)
+        first, first_run = completed_query_researcher(sources[0])
+        second, second_run = completed_query_researcher(sources[1])
+        sources[:2] = (first, second)
+        runs = (first_run, second_run)
+    store_query_response_and_runs(application, tuple(sources), runs)
+    await subject.start(publishing=True)
+    if fail_second:
+        second_card = await subject.researcher_card(namekey=sources[1].namekey)
+        (config.output_dir / second_card.docx_filename).mkdir(parents=True)
     shutdown = Mock()
     monkeypatch.setattr(app, "shutdown", shutdown)
     monkeypatch.setattr(control_ui, "SERVICES", application)
     monkeypatch.setattr(control_ui, "APPLICATION_EXIT_CODE", 0)
+    monkeypatch.setattr(control_ui, "APPLICATION_PUBLISH_COMPLETED", True)
+    monkeypatch.setattr(control_ui, "APPLICATION_SPREADSHEET_COMPLETED", False)
     before = deepcopy(app.storage.general)
-    await control_ui.publish_completed_and_shutdown()
-    shutdown.assert_called_once_with()
-    assert control_ui.APPLICATION_EXIT_CODE == int(fail_second)
-    assert app.storage.general == before
-    if fail_second:
-        paths = list(config.output_dir.iterdir())
-        assert len(paths) == 1 and paths[0].read_bytes() == b"first document"
-        assert "second render failed" in capsys.readouterr().out
-    else:
-        assert not config.output_dir.exists()
-        render.assert_not_called()
-        assert "Publishing finished: 0 DOCX files" in capsys.readouterr().out
+    try:
+        await control_ui.publish_and_shutdown()
+        shutdown.assert_called_once_with()
+        assert control_ui.APPLICATION_EXIT_CODE == int(fail_second)
+        assert app.storage.general == before
+        if fail_second:
+            first_card = await subject.researcher_card(namekey=sources[0].namekey)
+            with ZipFile(config.output_dir / first_card.docx_filename) as document:
+                assert document.testzip() is None
+                assert "word/document.xml" in document.namelist()
+            assert "IsADirectoryError" in capsys.readouterr().out
+        else:
+            assert not config.output_dir.exists()
+            assert "Publishing finished: 0 DOCX files" in capsys.readouterr().out
+    finally:
+        await subject.shutdown()
 
 
 @pytest.mark.python_subprocess

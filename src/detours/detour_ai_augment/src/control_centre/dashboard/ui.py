@@ -13,7 +13,7 @@ import signal
 import socket
 import subprocess
 import sys
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
 from datetime import datetime, timezone
 from enum import StrEnum
 from http import HTTPStatus
@@ -24,6 +24,7 @@ from urllib import request as urllib_request
 from uuid import UUID, uuid7
 from zoneinfo import ZoneInfo
 
+import pandas as pd
 from fastapi import status
 from nicegui import app, ui
 from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
@@ -44,6 +45,7 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.pyd
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     AI_AUGMENT_COLUMN_PREFIX,
     BACKEND_STORE_CLOSED_CLEANLY,
+    CODEX_OUTPUT_SCHEMA,
     DOCX_TO_AI_AUGMENT_COLUMNS,
     DRAW_PILOT_PREFIX,
     DRAW_SORT_PART,
@@ -108,6 +110,7 @@ from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helper
     DEFAULT_CONFIG_PATH,
     PROCESS_STOP_TIMEOUT_SECONDS,
     REPOSITORY_ROOT,
+    SPREADSHEET_COMPLETED_FILENAME,
     TEXT_DECODE_ERROR_POLICY,
     TEXT_ENCODING,
 )
@@ -122,6 +125,7 @@ from src.helpers.data_models import InnerDict, NameKey
 from src.helpers.vars import (
     CARD_INTRODUCTION,
     DRAW_LABEL,
+    KTP_FILENAME_COL,
     KTP_FIRST_NAME_COL,
     KTP_LAST_NAME_COL,
     KTP_NAMEKEY_COL,
@@ -2244,6 +2248,25 @@ class _ControlCentreController:
             active_run_id=self.active_run_id,
         )
 
+    def completed_run_rows(self) -> tuple[tuple[_Researcher, _RunAttemptView], ...]:
+        runs_by_namekey: dict[str, list[Run]] = {}
+        for run in self._runs.values():
+            runs_by_namekey.setdefault(run.namekey.to_json_key(), []).append(run)
+        completed_rows: list[tuple[_Researcher, _RunAttemptView]] = []
+        for researcher in self._snapshot.ai_augment_singular_outerdicts:
+            views = _ResearcherView.from_snapshot(
+                researcher,
+                self._snapshot,
+                runs_by_namekey.get(researcher.namekey.to_json_key(), ()),
+            )
+            for view in views.run_attempt_views:
+                if view.lifecycle is not RunLifecycle.COMPLETED:
+                    continue
+                if view.codex_innerdict is None:
+                    raise RuntimeError(Locale.ATTEMPT_DATABASE_INCONSISTENT)
+                completed_rows.append((researcher, view))
+        return tuple(completed_rows)
+
     async def researcher_card(
         self,
         *,
@@ -3556,6 +3579,7 @@ SERVICES: _ApplicationServices | None = None
 APPLICATION_LIFECYCLE_CONFIGURED = False
 APPLICATION_CONFIG_PATH = DEFAULT_CONFIG_PATH
 APPLICATION_PUBLISH_COMPLETED = False
+APPLICATION_SPREADSHEET_COMPLETED = False
 APPLICATION_EXIT_CODE = 0
 
 
@@ -3651,16 +3675,17 @@ async def publish_completed(services: _ApplicationServices) -> None:
     dashboard = await controller.snapshot(
         selection=_UiSelection(researcher_varname=RESEARCHER_VARS[0].varname),
     )
-    candidates = [
-        row for row in dashboard.researcher_var_views
-        if row.researcher.ai_augment_cohort is not AiAugmentCohort.INELIGIBLE
-        and row.current_researcher_var_row_view.lifecycle is RunLifecycle.COMPLETED
-    ]
+    completed_rows = controller.completed_run_rows()
+    candidates = tuple({
+        researcher.namekey.to_json_key(): researcher
+        for researcher, _ in completed_rows
+    }.values())
     cards = []
-    for row in candidates:
-        card = await controller.researcher_card(namekey=row.researcher.namekey)
-        if card.download_available:
-            cards.append(card)
+    for researcher in candidates:
+        card = await controller.researcher_card(namekey=researcher.namekey)
+        if not card.download_available:
+            raise RuntimeError(Locale.BACKEND_CARD_MISSING)
+        cards.append(card)
     emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX,
              f"Publish completed: {dashboard.counts.total} researchers; {len(candidates)} eligible "
              f"and completed; {len(cards)} DOCX downloads available")
@@ -3685,10 +3710,69 @@ async def publish_completed(services: _ApplicationServices) -> None:
     logger.info(Locale.PUBLISH_FINISHED_LOG, len(cards))
 
 
-async def publish_completed_and_shutdown() -> None:
+def spreadsheet_completed(services: _ApplicationServices) -> None:
+    completed_rows = sorted(
+        services.controller.completed_run_rows(),
+        key=lambda item: (
+            researcher_sort_key(item[0]),
+            item[1].timestamp,
+            str(item[1].row_id),
+        ),
+    )
+    codex_columns = (
+        KTP_FILENAME_COL,
+        *(
+            column for column, _ in CODEX_OUTPUT_SCHEMA
+            if column not in CARD_EXCLUDED_COLUMNS
+        ),
+    )
+    ground_truth_by_ai = {
+        ai_column: table_1_column
+        for table_1_column, ai_column in DOCX_TO_AI_AUGMENT_COLUMNS
+    }
+    columns = []
+    for column in codex_columns:
+        columns.append(column)
+        if column in ground_truth_by_ai:
+            columns.append(ground_truth_by_ai[column])
+
+    destination = (
+        services.configuration.pipeline_config.output_dir
+        / SPREADSHEET_COMPLETED_FILENAME
+    )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+
+    def flat_records() -> Iterator[dict[str, str]]:
+        for researcher, outcome in completed_rows:
+            assert outcome.codex_innerdict is not None
+            values = dict(outcome.codex_innerdict.innerdict.data)
+            ground_truth = (
+                researcher.ground_truth_innerdict()
+                if researcher.ai_augment_cohort is AiAugmentCohort.GROUND_TRUTH
+                else None
+            )
+            for ai_column, table_1_column in ground_truth_by_ai.items():
+                values[table_1_column] = (
+                    None if ground_truth is None
+                    else ground_truth.data[table_1_column]
+                )
+            yield {
+                column: "" if values[column] is None else str(values[column])
+                for column in columns
+            }
+
+    frame = pd.DataFrame.from_records(flat_records(), columns=columns)
+    frame.to_csv(destination, index=False, encoding=TEXT_ENCODING)
+
+
+async def publish_and_shutdown() -> None:
     global APPLICATION_EXIT_CODE
     try:
-        await publish_completed(require_services())
+        services = require_services()
+        if APPLICATION_PUBLISH_COMPLETED:
+            await publish_completed(services)
+        else:
+            spreadsheet_completed(services)
     except Exception as exc:
         APPLICATION_EXIT_CODE = 1
         emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, f"Publishing failed: {exc!r}")
@@ -3705,19 +3789,21 @@ async def application_startup() -> None:
         if SERVICES is None:
             services = create_services(config_path=APPLICATION_CONFIG_PATH)
             try:
-                await services.controller.start(publishing=APPLICATION_PUBLISH_COMPLETED)
+                publishing = APPLICATION_PUBLISH_COMPLETED or APPLICATION_SPREADSHEET_COMPLETED
+                await services.controller.start(publishing=publishing)
             except BaseException:
                 await services.controller.shutdown()
                 raise
             SERVICES = services
         else:
-            await SERVICES.controller.start(publishing=APPLICATION_PUBLISH_COMPLETED)
+            publishing = APPLICATION_PUBLISH_COMPLETED or APPLICATION_SPREADSHEET_COMPLETED
+            await SERVICES.controller.start(publishing=publishing)
         emit_log(
             Locale.CONTROL_CENTRE_LOG_PREFIX,
             Locale.READY_LOG_TEMPLATE.format(url=CONTROL_CENTRE_BASE_URL),
         )
-        if APPLICATION_PUBLISH_COMPLETED:
-            await publish_completed_and_shutdown()
+        if publishing:
+            await publish_and_shutdown()
     except Exception as exc:
         APPLICATION_EXIT_CODE = 1
         emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, f"Dashboard startup failed: {exc!r}")
@@ -3749,16 +3835,18 @@ def configure_application_lifecycle() -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    global APPLICATION_CONFIG_PATH, APPLICATION_PUBLISH_COMPLETED, APPLICATION_EXIT_CODE
+    global APPLICATION_CONFIG_PATH, APPLICATION_PUBLISH_COMPLETED
+    global APPLICATION_SPREADSHEET_COMPLETED, APPLICATION_EXIT_CODE
 
     parser = argparse.ArgumentParser()
     parser.add_argument(CONFIG_OPTION, required=True, type=Path)
-    parser.add_argument("operation", nargs="?", choices=["publish"])
+    parser.add_argument("operation", nargs="?", choices=["publish", "spreadsheet"])
     parser.add_argument("selection", nargs="?", choices=["completed"])
     arguments = parser.parse_args(argv)
     if (arguments.operation is None) != (arguments.selection is None):
-        parser.error("Publishing requires: publish completed")
+        parser.error("Expected: publish completed or spreadsheet completed")
     APPLICATION_PUBLISH_COMPLETED = arguments.operation == "publish"
+    APPLICATION_SPREADSHEET_COMPLETED = arguments.operation == "spreadsheet"
     APPLICATION_EXIT_CODE = 0
     APPLICATION_CONFIG_PATH = arguments.config
     configure_application_lifecycle()
