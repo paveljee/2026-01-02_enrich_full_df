@@ -44,6 +44,7 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.pyd
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     AI_AUGMENT_COLUMN_PREFIX,
+    AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS,
     BACKEND_STORE_CLOSED_CLEANLY,
     CODEX_OUTPUT_SCHEMA,
     DOCX_TO_AI_AUGMENT_COLUMNS,
@@ -3579,6 +3580,7 @@ SERVICES: _ApplicationServices | None = None
 APPLICATION_LIFECYCLE_CONFIGURED = False
 APPLICATION_CONFIG_PATH = DEFAULT_CONFIG_PATH
 APPLICATION_PUBLISH_COMPLETED = False
+APPLICATION_MARKDOWN_COMPLETED = False
 APPLICATION_SPREADSHEET_COMPLETED = False
 APPLICATION_EXIT_CODE = 0
 
@@ -3669,7 +3671,11 @@ async def control_centre_page() -> None:
 # =============================================================================
 
 
-async def publish_completed(services: _ApplicationServices) -> None:
+async def publish_completed(
+    services: _ApplicationServices,
+    *,
+    output_format: Literal["docx", "txt"] = "docx",
+) -> None:
     controller = services.controller
     config = services.configuration.pipeline_config
     dashboard = await controller.snapshot(
@@ -3688,26 +3694,33 @@ async def publish_completed(services: _ApplicationServices) -> None:
         cards.append(card)
     emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX,
              f"Publish completed: {dashboard.counts.total} researchers; {len(candidates)} eligible "
-             f"and completed; {len(cards)} DOCX downloads available")
+             f"and completed; {len(cards)} {output_format.upper()} downloads available")
     logger.info(
         "Publish completed: %d researchers; %d eligible and completed; "
-        "%d DOCX downloads available",
-        dashboard.counts.total, len(candidates), len(cards),
+        "%d %s downloads available",
+        dashboard.counts.total, len(candidates), len(cards), output_format.upper(),
     )
     if cards:
         config.output_dir.mkdir(parents=True, exist_ok=True)
     for index, card in enumerate(cards, start=1):
-        destination = config.output_dir / card.docx_filename
+        destination = config.output_dir / f"{card.filename_stem}.{output_format}"
         emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX,
                  f"[{index}/{len(cards)}] Rendering {destination}")
         logger.info(Locale.PUBLISH_RENDER_LOG, index, len(cards), destination)
-        docx = await asyncio.to_thread(card.render_docx, config.pandoc_reference_docx)
-        await asyncio.to_thread(destination.write_bytes, docx)
+        if output_format == "docx":
+            content = await asyncio.to_thread(card.render_docx, config.pandoc_reference_docx)
+        else:
+            content = card.card_markdown.encode(TEXT_ENCODING)
+        await asyncio.to_thread(destination.write_bytes, content)
         emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX,
-                 f"[{index}/{len(cards)}] Written {destination}: {len(docx)} bytes")
+                 f"[{index}/{len(cards)}] Written {destination}: {len(content)} bytes")
         logger.info(Locale.PUBLISH_WRITTEN_LOG, index, len(cards), destination)
-    emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, f"Publishing finished: {len(cards)} DOCX files")
-    logger.info(Locale.PUBLISH_FINISHED_LOG, len(cards))
+    finished_log = (
+        Locale.PUBLISH_FINISHED_LOG
+        if output_format == "docx" else "Publishing finished: %d TXT files"
+    )
+    emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, finished_log % len(cards))
+    logger.info(finished_log, len(cards))
 
 
 def spreadsheet_completed(services: _ApplicationServices) -> None:
@@ -3730,6 +3743,8 @@ def spreadsheet_completed(services: _ApplicationServices) -> None:
         ai_column: table_1_column
         for table_1_column, ai_column in DOCX_TO_AI_AUGMENT_COLUMNS
     }
+    for plain_column, standardized_column in AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS:
+        ground_truth_by_ai[standardized_column] = ground_truth_by_ai.pop(plain_column)
     columns = []
     for column in codex_columns:
         columns.append(column)
@@ -3741,6 +3756,13 @@ def spreadsheet_completed(services: _ApplicationServices) -> None:
         / SPREADSHEET_COMPLETED_FILENAME
     )
     destination.parent.mkdir(parents=True, exist_ok=True)
+    summary_log = (
+        f"Spreadsheet completed: {len(completed_rows)} completed runs; {len(columns)} columns"
+    )
+    emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, summary_log)
+    logger.info(summary_log)
+    emit_log(Locale.CONTROL_CENTRE_LOG_PREFIX, Locale.PUBLISH_RENDER_LOG % (1, 1, destination))
+    logger.info(Locale.PUBLISH_RENDER_LOG, 1, 1, destination)
 
     def flat_records() -> Iterator[dict[str, str]]:
         for researcher, outcome in completed_rows:
@@ -3763,14 +3785,22 @@ def spreadsheet_completed(services: _ApplicationServices) -> None:
 
     frame = pd.DataFrame.from_records(flat_records(), columns=columns)
     frame.to_csv(destination, index=False, encoding=TEXT_ENCODING)
+    emit_log(
+        Locale.CONTROL_CENTRE_LOG_PREFIX,
+        f"[1/1] Written {destination}: {destination.stat().st_size} bytes",
+    )
+    logger.info(Locale.PUBLISH_WRITTEN_LOG, 1, 1, destination)
 
 
 async def publish_and_shutdown() -> None:
     global APPLICATION_EXIT_CODE
     try:
         services = require_services()
-        if APPLICATION_PUBLISH_COMPLETED:
-            await publish_completed(services)
+        if APPLICATION_PUBLISH_COMPLETED or APPLICATION_MARKDOWN_COMPLETED:
+            await publish_completed(
+                services,
+                output_format="txt" if APPLICATION_MARKDOWN_COMPLETED else "docx",
+            )
         else:
             spreadsheet_completed(services)
     except Exception as exc:
@@ -3789,14 +3819,20 @@ async def application_startup() -> None:
         if SERVICES is None:
             services = create_services(config_path=APPLICATION_CONFIG_PATH)
             try:
-                publishing = APPLICATION_PUBLISH_COMPLETED or APPLICATION_SPREADSHEET_COMPLETED
+                publishing = (
+                    APPLICATION_PUBLISH_COMPLETED or APPLICATION_MARKDOWN_COMPLETED
+                    or APPLICATION_SPREADSHEET_COMPLETED
+                )
                 await services.controller.start(publishing=publishing)
             except BaseException:
                 await services.controller.shutdown()
                 raise
             SERVICES = services
         else:
-            publishing = APPLICATION_PUBLISH_COMPLETED or APPLICATION_SPREADSHEET_COMPLETED
+            publishing = (
+                APPLICATION_PUBLISH_COMPLETED or APPLICATION_MARKDOWN_COMPLETED
+                or APPLICATION_SPREADSHEET_COMPLETED
+            )
             await SERVICES.controller.start(publishing=publishing)
         emit_log(
             Locale.CONTROL_CENTRE_LOG_PREFIX,
@@ -3835,17 +3871,18 @@ def configure_application_lifecycle() -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    global APPLICATION_CONFIG_PATH, APPLICATION_PUBLISH_COMPLETED
+    global APPLICATION_CONFIG_PATH, APPLICATION_PUBLISH_COMPLETED, APPLICATION_MARKDOWN_COMPLETED
     global APPLICATION_SPREADSHEET_COMPLETED, APPLICATION_EXIT_CODE
 
     parser = argparse.ArgumentParser()
     parser.add_argument(CONFIG_OPTION, required=True, type=Path)
-    parser.add_argument("operation", nargs="?", choices=["publish", "spreadsheet"])
+    parser.add_argument("operation", nargs="?", choices=["publish", "markdown", "spreadsheet"])
     parser.add_argument("selection", nargs="?", choices=["completed"])
     arguments = parser.parse_args(argv)
     if (arguments.operation is None) != (arguments.selection is None):
-        parser.error("Expected: publish completed or spreadsheet completed")
+        parser.error("Expected: publish completed, markdown completed or spreadsheet completed")
     APPLICATION_PUBLISH_COMPLETED = arguments.operation == "publish"
+    APPLICATION_MARKDOWN_COMPLETED = arguments.operation == "markdown"
     APPLICATION_SPREADSHEET_COMPLETED = arguments.operation == "spreadsheet"
     APPLICATION_EXIT_CODE = 0
     APPLICATION_CONFIG_PATH = arguments.config

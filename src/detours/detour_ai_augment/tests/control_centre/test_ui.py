@@ -3439,10 +3439,12 @@ async def test_restored_queue_stays_stopped_and_publish_skips_remote_and_journal
 # Stock asyncio has intermittently hung after to_thread here; this environment's
 # Uvicorn auto-selects uvloop, under which these publish tests complete.
 @pytest.mark.parametrize("anyio_backend", [("asyncio", {"use_uvloop": True})])
-async def test_publish_completed_includes_earlier_completed_run_and_renders_docx(
+@pytest.mark.parametrize("output_format", ("docx", "txt"))
+async def test_publish_completed_includes_earlier_completed_run_and_writes_cards(
     startup_files: StartupFiles,
     faithful_publishing_services: control_ui._ApplicationServices,
     capsys: pytest.CaptureFixture[str],
+    output_format: Literal["docx", "txt"],
 ) -> None:
     application = faithful_publishing_services
     subject = application.controller
@@ -3464,21 +3466,30 @@ async def test_publish_completed_includes_earlier_completed_run_and_renders_docx
     await subject.start(publishing=True)
     before = deepcopy(app.storage.general)
     try:
-        await control_ui.publish_completed(application)
+        await control_ui.publish_completed(application, output_format=output_format)
         cards = (
             await subject.researcher_card(namekey=first.namekey),
             await subject.researcher_card(namekey=second.namekey),
         )
         assert {path.name for path in configuration.output_dir.iterdir()} == {
-            card.docx_filename for card in cards
+            f"{card.filename_stem}.{output_format}" for card in cards
         }
         for card in cards:
-            with ZipFile(configuration.output_dir / card.docx_filename) as document:
-                assert document.testzip() is None
-                assert "word/document.xml" in document.namelist()
+            destination = configuration.output_dir / f"{card.filename_stem}.{output_format}"
+            if output_format == "docx":
+                with ZipFile(destination) as document:
+                    assert document.testzip() is None
+                    assert "word/document.xml" in document.namelist()
+            else:
+                assert destination.read_bytes() == card.card_markdown.encode(
+                    control_vars.TEXT_ENCODING,
+                )
         assert app.storage.general == before
         assert not subject.queue_processing
-        assert "3 researchers; 2 eligible and completed; 2 DOCX" in capsys.readouterr().out
+        assert (
+            f"3 researchers; 2 eligible and completed; 2 {output_format.upper()}"
+            in capsys.readouterr().out
+        )
     finally:
         await subject.shutdown()
 
@@ -3487,6 +3498,7 @@ async def test_publish_completed_includes_earlier_completed_run_and_renders_docx
 async def test_spreadsheet_completed_preserves_card_values_and_ground_truth_pairs(
     startup_files: StartupFiles,
     faithful_publishing_services: control_ui._ApplicationServices,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     application = faithful_publishing_services
     blueprints = backend_server.configure_runtime(
@@ -3588,9 +3600,19 @@ async def test_spreadsheet_completed_preserves_card_values_and_ground_truth_pair
         assert tuple(column for column in columns if column in codex_columns) == (
             codex_columns
         )
+        standardized_by_ai = dict(AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS)
         for table_1_column, ai_column in DOCX_TO_AI_AUGMENT_COLUMNS:
-            assert columns[columns.index(ai_column) + 1] == table_1_column
+            ai_column_index = columns.index(ai_column)
+            if ai_column in standardized_by_ai:
+                assert columns[ai_column_index + 1] == standardized_by_ai[ai_column]
+                assert columns[ai_column_index + 2] == table_1_column
+            else:
+                assert columns[ai_column_index + 1] == table_1_column
         assert len(rows) == 3
+        output = capsys.readouterr().out
+        assert f"Spreadsheet completed: 3 completed runs; {len(columns)} columns" in output
+        assert f"[1/1] Rendering {destination}" in output
+        assert f"[1/1] Written {destination}: {destination.stat().st_size} bytes" in output
         ground_truth_rows = rows[:2]
         no_ground_truth_row = rows[2]
         assert all(
@@ -3668,6 +3690,7 @@ async def test_probe_and_docx_failures_emit_operator_details(
 # Stock asyncio has intermittently hung after to_thread here; this environment's
 # Uvicorn auto-selects uvloop, under which these publish tests complete.
 @pytest.mark.parametrize("anyio_backend", [("asyncio", {"use_uvloop": True})])
+@pytest.mark.parametrize("output_format", ("docx", "txt"))
 @pytest.mark.parametrize("fail_second", (False, True))
 async def test_publish_one_shot_shutdown_noop_or_first_error_keeps_written_files(
     startup_files: StartupFiles,
@@ -3675,6 +3698,7 @@ async def test_publish_one_shot_shutdown_noop_or_first_error_keeps_written_files
     monkeypatch: pytest.MonkeyPatch,
     fail_second: bool,
     capsys: pytest.CaptureFixture[str],
+    output_format: Literal["docx", "txt"],
 ) -> None:
     application = faithful_publishing_services
     subject = application.controller
@@ -3696,12 +3720,13 @@ async def test_publish_one_shot_shutdown_noop_or_first_error_keeps_written_files
     await subject.start(publishing=True)
     if fail_second:
         second_card = await subject.researcher_card(namekey=sources[1].namekey)
-        (config.output_dir / second_card.docx_filename).mkdir(parents=True)
+        (config.output_dir / f"{second_card.filename_stem}.{output_format}").mkdir(parents=True)
     shutdown = Mock()
     monkeypatch.setattr(app, "shutdown", shutdown)
     monkeypatch.setattr(control_ui, "SERVICES", application)
     monkeypatch.setattr(control_ui, "APPLICATION_EXIT_CODE", 0)
-    monkeypatch.setattr(control_ui, "APPLICATION_PUBLISH_COMPLETED", True)
+    monkeypatch.setattr(control_ui, "APPLICATION_PUBLISH_COMPLETED", output_format == "docx")
+    monkeypatch.setattr(control_ui, "APPLICATION_MARKDOWN_COMPLETED", output_format == "txt")
     monkeypatch.setattr(control_ui, "APPLICATION_SPREADSHEET_COMPLETED", False)
     before = deepcopy(app.storage.general)
     try:
@@ -3711,13 +3736,22 @@ async def test_publish_one_shot_shutdown_noop_or_first_error_keeps_written_files
         assert app.storage.general == before
         if fail_second:
             first_card = await subject.researcher_card(namekey=sources[0].namekey)
-            with ZipFile(config.output_dir / first_card.docx_filename) as document:
-                assert document.testzip() is None
-                assert "word/document.xml" in document.namelist()
+            destination = config.output_dir / f"{first_card.filename_stem}.{output_format}"
+            if output_format == "docx":
+                with ZipFile(destination) as document:
+                    assert document.testzip() is None
+                    assert "word/document.xml" in document.namelist()
+            else:
+                assert destination.read_bytes() == first_card.card_markdown.encode(
+                    control_vars.TEXT_ENCODING,
+                )
             assert "IsADirectoryError" in capsys.readouterr().out
         else:
             assert not config.output_dir.exists()
-            assert "Publishing finished: 0 DOCX files" in capsys.readouterr().out
+            assert (
+                f"Publishing finished: 0 {output_format.upper()} files"
+                in capsys.readouterr().out
+            )
     finally:
         await subject.shutdown()
 
