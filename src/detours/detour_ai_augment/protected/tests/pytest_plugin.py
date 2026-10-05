@@ -662,7 +662,7 @@ def operator_fixture_bootstrap_process() -> None:
     )
     assert runtime.backend_store._detour_db_path.is_file()
     replay_before_query = runtime.replay_log_path.read_bytes()
-    assert len(replay_before_query.splitlines()) == 1
+    assert replay_before_query == b""
     context = server.configure_runtime(runtime.config_path)
     with (
         store_models.initialize_backend_store(context, ipc_only=True) as store,
@@ -681,6 +681,9 @@ def operator_fixture_bootstrap_process() -> None:
             not researcher.codex_innerdicts
             for researcher in response
         )
+    assert store._engine._mode is None
+    assert store._engine._context is None
+    assert store._engine._detour_db._conn is None
     assert runtime.replay_log_path.read_bytes() == replay_before_query
     assert not runtime.dashboard_socket_path.exists()
     print("OPERATOR_BOOTSTRAP_QUERY_OK")

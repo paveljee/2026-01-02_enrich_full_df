@@ -37,6 +37,9 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models imp
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_augment_config import (  # noqa: E501
     AiAugmentDetourConfig,
 )
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_augment_detour_db import (  # noqa: E501
+    AiAugmentDetourDB,
+)
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_augment_registered_resource import (  # noqa: E501
     RESOURCE_PATH_KEY,
     RESOURCE_SHA256_KEY,
@@ -71,6 +74,7 @@ from src.detours.detour_ai_augment.protected.tests.pytest_plugin import (
 from src.detours.detour_ai_augment.src.backend import server as backend_server
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_backend_store import (  # noqa: E501
     AiAugmentBackendStore,
+    initialize_backend_store,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_context import (
     AiAugmentBackendContext,
@@ -79,6 +83,9 @@ from src.detours.detour_ai_augment.src.backend.helpers.data_models.commit_reques
     COMMIT_PATH,
     BackendCommitRequestRecord,
     _CommitRequestBodyJson,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.init_request import (
+    BackendInitRequestRecord,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.lifecycle import (
     BackendLifecycle,
@@ -482,31 +489,19 @@ def _operator_runtime(
         "rollout_cas_dir": str(rollout_cas_dir),
     })
     config_path.write_text(json.dumps(config, indent=2), encoding=TEXT_ENCODING)
-    _operator_log("initializing isolated Backend Store through --new --yes lifecycle")
-    args = backend_server.parse_args(["--config", str(config_path), "--new", "--yes"])
-    backend_runtime = backend_server.configure_runtime(args.config)
-    from src.detours.detour_ai_augment.protected.tests.fixtures.pytest_fixtures import (
-        init_request_record,
-    )
-    with backend_server.backend_store_lifecycle(
-        backend_runtime,
-        init_request_record=init_request_record(
-            next(
-                blueprint.namekey
-                for blueprint in backend_runtime.ai_augment_singular_outerdict_blueprints
-                if blueprint.ai_augment_cohort is not AiAugmentCohort.INELIGIBLE
-            ),
+    _operator_log("preparing isolated Backend DB without a Backend launch")
+    context = backend_server.configure_runtime(config_path)
+    pipeline_config = context.pipeline_config
+    backend_store = AiAugmentBackendStore._from_resources(
+        replay_log=pipeline_config.replay_log,
+        detour_db=AiAugmentDetourDB.from_pipeline_db(
+            pipeline_config.db_file,
+            duckdb_extensions=pipeline_config.duckdb_extensions,
         ),
-        new=args.new,
-        confirmed=backend_server.confirm_startup(args),
-        yes=args.yes,
-    ) as backend_store:
-        pass
-    _operator_log("isolated Backend Store initialized and closed cleanly")
-    replay_config[RESOURCE_SHA256_KEY] = hashlib.sha256(
-        replay_log_path.read_bytes()
-    ).hexdigest()
-    config_path.write_text(json.dumps(config, indent=2), encoding=TEXT_ENCODING)
+        rollout_cas=pipeline_config.rollout_cas,
+    )
+    backend_store._rebuild_from_log(context, reset_confirmed=True)
+    _operator_log("isolated Backend DB prepared; replay log remains empty")
     return OperatorRuntime(
         repository_root=repository_root,
         config_path=config_path,
@@ -1166,7 +1161,8 @@ def validate_workflow_artifacts(
             record,
             resolve_http_record=refs.__getitem__,
         )
-        with operator_runtime.backend_store._read_only(runtime) as backend_store:
+        with initialize_backend_store(runtime, ipc_only=True) as query_store:
+            backend_store = query_store._engine
             row = backend_store._execute(
                 f"SELECT {backend_api.VALIDATION_REQUEST_RECORD_ID_COLUMN} "
                 f"FROM {backend_api.COMMIT_VALIDATION_REQUEST_RECORD_INDEX_TABLE} "
@@ -1360,6 +1356,16 @@ def assert_completed_dashboard_backend_codex_workflow_renders_researcher_card(
             queued_at_monotonic=checkpoint.queued_at_monotonic,
         )
         elapsed_seconds = time.monotonic() - checkpoint.queued_at_monotonic
+
+    logged_init_requests = tuple(
+        BackendInitRequestRecord.from_http_request_log_record(
+            http_request_log_record=record,
+        )
+        for record in authoritative_records(operator_runtime.replay_log_path)
+        if (record.method, record.path) == (HTTP_POST_METHOD, INIT_PATH)
+    )
+    assert len(logged_init_requests) == 1
+    assert logged_init_requests[0].namekey == namekey
 
     validate_workflow_artifacts(
         operator_runtime,

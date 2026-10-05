@@ -4,6 +4,7 @@ import hashlib
 import inspect
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -16,12 +17,25 @@ from uuid import UUID, uuid7
 
 import pytest
 
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_augment_detour_db import (  # noqa: E501
+    AiAugmentDetourDB,
+)
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_augment_registered_resource import (  # noqa: E501
+    RESOURCE_SHA256_KEY,
+)
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.post_commit_validation import (  # noqa: E501
     PostCommitValidation,
 )
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.replay_log import (  # noqa: E501
+    READ_ONLY_PERMISSIONS,
+    READ_WRITE_PERMISSIONS,
+)
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
+    AUTHORITATIVE_RECORDS_TABLE,
     PULL_PATH,
     PUSH_PATH,
+    REPLAY_LOG_KEY,
+    AiAugmentCohort,
 )
 from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helpers.locale import (
     Locale,
@@ -32,17 +46,22 @@ from src.detours.detour_ai_augment.protected.tests import (
 from src.detours.detour_ai_augment.protected.tests.fixtures.pytest_fixtures import (
     STARTUP_NAMEKEY,
     StartupFiles,
+    init_request_record,
 )
 from src.detours.detour_ai_augment.protected.tests.operator import (
     test_operator_e2e as workflow,
 )
 from src.detours.detour_ai_augment.src.backend import server as backend_server
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_backend_store import (
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_backend_store import (  # noqa: E501
+    AiAugmentBackendStore,
     initialize_backend_store,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.commit_request import (
     COMMIT_PATH,
     _CommitRequestBodyJson,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.init_request import (
+    BackendInitRequestRecord,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.lifecycle import (
     BackendLifecycle,
@@ -60,6 +79,150 @@ from src.detours.detour_ai_augment.tests.control_centre import test_ui_e2e as br
 from src.helpers.data_models import HttpRequestLogRecord
 
 completed_query_files = browser_tests.completed_query_files
+
+
+def test_operator_preparation_does_not_create_a_backend_launch(
+    startup_files: StartupFiles,
+    tmp_path: Path,
+) -> None:
+    """DB preparation must not invent a launch for the first eligible NameKey."""
+    repository = tmp_path / "operator-repository"
+    repository.mkdir()
+    (repository / "config_ai_augment.json").write_bytes(
+        startup_files.config.read_bytes()
+    )
+    run_directory = tmp_path / "operator-runtime"
+    run_directory.mkdir()
+    operator_runtime = workflow._operator_runtime(
+        run_directory,
+        repository_root=repository,
+        dashboard_socket_path=run_directory / "dashboard.sock",
+    )
+
+    assert operator_runtime.replay_log_path.read_bytes() == b""
+    context = backend_server.configure_runtime(operator_runtime.config_path)
+    with initialize_backend_store(context, ipc_only=True) as query_store:
+        assert query_store._engine.current_replayed_record is None
+        assert query_store._engine._execute(
+            f"SELECT count(*) FROM {AUTHORITATIVE_RECORDS_TABLE}"
+        ).fetchone() == (0,)
+
+    eligible_blueprints = tuple(
+        blueprint
+        for blueprint in context.ai_augment_singular_outerdict_blueprints
+        if blueprint.ai_augment_cohort is not AiAugmentCohort.INELIGIBLE
+    )
+    assert len(eligible_blueprints) >= 2
+    selected_blueprint = eligible_blueprints[1]
+    requested_init = init_request_record(selected_blueprint.namekey)
+
+    with initialize_backend_store(
+        context,
+        ipc_only=False,
+        init_request_record=requested_init,
+        new=True,
+        confirmed=True,
+        confirm_replay=lambda: False,
+    ) as backend_store:
+        replayed_init = backend_store.current_replayed_record
+        assert isinstance(replayed_init, BackendInitRequestRecord)
+        assert replayed_init is backend_store._init_request_record
+        assert replayed_init is not requested_init
+        assert replayed_init.record_id == requested_init.record_id
+        assert replayed_init.namekey == selected_blueprint.namekey
+        assert (
+            backend_store.selected_ai_augment_singular_outerdict()
+            is selected_blueprint
+        )
+        assert backend_store._execute(
+            f"SELECT count(*) FROM {AUTHORITATIVE_RECORDS_TABLE}"
+        ).fetchone() == (1,)
+
+    lines = operator_runtime.replay_log_path.read_bytes().splitlines()
+    assert len(lines) == 1
+    logged_init = BackendInitRequestRecord.from_serialized_json(
+        value=lines[0].decode(workflow.TEXT_ENCODING),
+    )
+    assert logged_init.record_id == requested_init.record_id
+    assert logged_init.namekey == selected_blueprint.namekey
+
+
+def test_operator_artifact_validator_opens_a_fresh_store(
+    completed_query_files: StartupFiles,
+    tmp_path: Path,
+) -> None:
+    """A later rebuild must not make validation reuse obsolete replay metadata."""
+    files = completed_query_files
+    completed_context = backend_server.configure_runtime(files.config)
+
+    repository = tmp_path / "validator-repository"
+    repository.mkdir()
+    (repository / "config_ai_augment.json").write_bytes(
+        files.config.read_bytes()
+    )
+    run_directory = tmp_path / "validator-runtime"
+    run_directory.mkdir()
+    operator_runtime = workflow._operator_runtime(
+        run_directory,
+        repository_root=repository,
+        dashboard_socket_path=run_directory / "dashboard.sock",
+    )
+    assert (
+        operator_runtime.backend_store._replay_log.hash
+        == workflow.EMPTY_FILE_SHA256
+    )
+
+    # Reuse faithfully produced completed history and its actual CAS bytes.
+    operator_runtime.replay_log_path.chmod(READ_WRITE_PERMISSIONS)
+    try:
+        operator_runtime.replay_log_path.write_bytes(files.replay.read_bytes())
+    finally:
+        operator_runtime.replay_log_path.chmod(READ_ONLY_PERMISSIONS)
+    shutil.copytree(
+        completed_context.pipeline_config.rollout_cas.path,
+        operator_runtime.rollout_cas_dir,
+        dirs_exist_ok=True,
+    )
+    config = json.loads(
+        operator_runtime.config_path.read_text(encoding=workflow.TEXT_ENCODING)
+    )
+    config["files_config"][REPLAY_LOG_KEY][
+        RESOURCE_SHA256_KEY
+    ] = hashlib.sha256(operator_runtime.replay_log_path.read_bytes()).hexdigest()
+    operator_runtime.config_path.write_text(
+        json.dumps(config),
+        encoding=workflow.TEXT_ENCODING,
+    )
+
+    context = backend_server.configure_runtime(operator_runtime.config_path)
+    pipeline_config = context.pipeline_config
+    rebuilding_store = AiAugmentBackendStore._from_resources(
+        replay_log=pipeline_config.replay_log,
+        detour_db=AiAugmentDetourDB.from_pipeline_db(
+            pipeline_config.db_file,
+            duckdb_extensions=pipeline_config.duckdb_extensions,
+        ),
+        rollout_cas=pipeline_config.rollout_cas,
+    )
+    rebuilding_store._rebuild_from_log(
+        context,
+        reset_confirmed=True,
+        confirm_replay=lambda: True,
+    )
+
+    # The existing hash guard must still reject the obsolete Store.
+    with (
+        pytest.raises(ValueError, match="Hash verification failed"),
+        operator_runtime.backend_store._read_only(context),
+    ):
+        pass
+
+    # The validator must obtain a fresh Store, not bypass that guard.
+    workflow.validate_workflow_artifacts(
+        operator_runtime,
+        namekey=STARTUP_NAMEKEY,
+        expected_run_outcome_path=RunLifecycle.COMPLETED.to_run_outcome_path(),
+    )
 
 
 @pytest.mark.python_subprocess

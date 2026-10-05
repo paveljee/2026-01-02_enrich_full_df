@@ -1367,6 +1367,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
             record = self._http_record(record.record_id)
             reconstructed: HttpRequestLogRecord
             if route == (HTTP_POST_METHOD, INIT_PATH):
+                init_request_record: BackendInitRequestRecord | None
                 init_request_record = BackendInitRequestRecord.from_http_request_log_record(
                     http_request_log_record=record,
                 )
@@ -1395,6 +1396,13 @@ class AiAugmentBackendStore(FrozenStrictModel):
                     or commit.commit_request_body.push_response_record is not push_ref
                 ):
                     raise ValueError(Locale.REPLAY_COMMIT_PUSH_MISMATCH)
+                init_request_record = self._init_request_record
+                if (
+                    init_request_record is None
+                    or self._parse_name_key_header(commit.request_headers.get(NAME_KEY_HEADER))
+                    != init_request_record.namekey
+                ):
+                    raise _ReplayCommitInvalidError(Locale.REPLAY_COMMIT_NAME_KEY_INVALID)
                 reconstructed = commit
             elif (record.method, record.path) == (HTTP_POST_METHOD, VALIDATE_PATH):
                 commit_ref = self._current_replayed_record

@@ -11,15 +11,22 @@ import duckdb
 import pytest
 
 from src.detours.detour_ai_augment.protected.src.backend import api as backend_api
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.replay_log import (  # noqa: E501
+    READ_ONLY_PERMISSIONS,
+    READ_WRITE_PERMISSIONS,
+)
 from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     AUTHORITATIVE_RECORDS_TABLE,
     EXCLUDED_NAMEKEY,
     HTTP_GET_METHOD,
     HTTP_POST_METHOD,
+    NAME_KEY_HEADER,
     PULL_PATH,
     PUSH_PATH,
     REPLAY_LOG_KEY,
+    TEXT_ENCODING,
+    AiAugmentCohort,
     AiAugmentIneligibilityCategory,
 )
 from src.detours.detour_ai_augment.protected.tests.fixtures.pytest_fixtures import (
@@ -30,6 +37,7 @@ from src.detours.detour_ai_augment.protected.tests.fixtures.pytest_fixtures impo
 from src.detours.detour_ai_augment.src.backend import server
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_backend_store import (  # noqa: E501
     AiAugmentBackendStore,
+    _ReplayCommitInvalidError,
     initialize_backend_store,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_context import (  # noqa: E501
@@ -37,6 +45,13 @@ from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_co
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_http_request_log_record import (  # noqa: E501
     ResponseRecord,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.commit_request import (
+    COMMIT_PATH,
+    BackendCommitRequestRecord,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.init_request import (
+    BackendInitRequestRecord,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.lifecycle import (
     BackendLifecycle,
@@ -50,6 +65,7 @@ from src.detours.detour_ai_augment.src.backend.helpers.data_models.pull_event im
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.push_event import (
     PushResponseRecord,
 )
+from src.detours.detour_ai_augment.src.shared import name_key_header_value
 from src.detours.detour_ai_augment.tests.backend import test_http_interceptor as store_tests
 from src.detours.detour_ai_augment.tests.backend.test_api import (
     TEST_NAMEKEY_MODEL,
@@ -145,6 +161,94 @@ def test_invalid_launch_namekey_is_rejected_before_replay(
     assert str(rejected.value) == expected_detail
     for path, digest in before.items():
         assert hashlib.sha256(path.read_bytes()).digest() == digest, path
+
+
+def test_replay_rejects_commit_namekey_mismatched_with_init(
+    startup_files: StartupFiles,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Reproduce the operator's altered-init replay failure at commit.
+
+    Keep the faithful pull/push/commit history and change only the latest
+    init's NameKey. End the log at commit so later validation cannot
+    conceal a missing commit-stage check.
+    """
+    files = startup_files
+    context = server.configure_runtime(files.config)
+    requested_init = init_request_record(STARTUP_NAMEKEY)
+    payload = valid_submission_body()
+
+    with initialize_backend_store(
+        context,
+        ipc_only=False,
+        init_request_record=requested_init,
+        new=False,
+        confirmed=True,
+        confirm_replay=lambda: False,
+    ) as store:
+        commit_request_record_id = commit(
+            store, payload, payload, namekey=STARTUP_NAMEKEY,
+        )
+        assert isinstance(store.current_replayed_record, BackendCommitRequestRecord)
+        assert store.current_replayed_record.record_id == commit_request_record_id
+
+    lines = files.replay.read_bytes().splitlines(keepends=True)
+    records = tuple(HttpRequestLogRecord.model_validate_json(line) for line in lines)
+    assert records[-1].path == COMMIT_PATH
+    assert records[-1].record_id == commit_request_record_id
+
+    wrong_namekey = next(
+        blueprint.namekey
+        for blueprint in context.ai_augment_singular_outerdict_blueprints
+        if blueprint.namekey != STARTUP_NAMEKEY
+        and blueprint.ai_augment_cohort is not AiAugmentCohort.INELIGIBLE
+    )
+    init_line_index = next(
+        index for index, record in enumerate(records)
+        if record.record_id == requested_init.record_id
+    )
+    serialized_init = requested_init.serialize()
+    serialized_init["request_headers"] = {
+        NAME_KEY_HEADER: name_key_header_value(wrong_namekey),
+    }
+    changed_init = BackendInitRequestRecord.from_serialized_json(
+        value=json.dumps(serialized_init),
+    )
+    assert changed_init.record_id == requested_init.record_id
+    assert changed_init.namekey == wrong_namekey
+    lines[init_line_index] = (
+        json.dumps(changed_init.serialize(), ensure_ascii=True) + "\n"
+    ).encode(TEXT_ENCODING)
+
+    files.replay.chmod(READ_WRITE_PERMISSIONS)
+    try:
+        files.replay.write_bytes(b"".join(lines))
+    finally:
+        files.replay.chmod(READ_ONLY_PERMISSIONS)
+    files.repin()
+    context = server.configure_runtime(files.config)
+
+    with (
+        pytest.raises(
+            _ReplayCommitInvalidError,
+            match=Locale.REPLAY_COMMIT_NAME_KEY_INVALID,
+        ),
+        initialize_backend_store(
+            context,
+            ipc_only=False,
+            init_request_record=init_request_record(wrong_namekey),
+            new=True,
+            confirmed=True,
+            confirm_replay=lambda: True,
+        ),
+    ):
+        pass
+
+    assert Locale.REPLAY_RECORD_FAILED_LOG % len(lines) in caplog.text
+    with duckdb.connect(str(files.detour), read_only=True) as connection:
+        assert connection.execute(
+            f"SELECT count(*) FROM {AUTHORITATIVE_RECORDS_TABLE}"
+        ).fetchone() == (len(records) - 1,)
 
 
 def test_second_same_session_acceptance_fails_loudly(

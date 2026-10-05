@@ -3844,7 +3844,6 @@ class TestBackendStartupConditions:
         )
         assert result.returncode == 0, result.stdout + result.stderr
         assert "OPERATOR_BOOTSTRAP_QUERY_OK" in result.stdout
-        assert BACKEND_STORE_CLOSED_CLEANLY in result.stdout
         assert hashlib.sha256(files.source.read_bytes()).hexdigest() == source_before
 
     @pytest.mark.python_subprocess
