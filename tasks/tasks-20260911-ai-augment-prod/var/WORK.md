@@ -1,5 +1,33 @@
 # AI augment production — current workbook (2026-10-05)
 
+## Authorized surgical chore — AI-generated prefix on each footnote argument
+
+Operator: "thing to apply: surgical change. ai generated prefix must also appear before each footnote arg same as standardized cols for example"
+
+In `protected/src/backend/helpers/codex_parse.py::render_footnote_argument`,
+change only the numbered-item prefix to reuse existing `AI_GENERATED_TEXT_PREFIX`:
+
+```python
+return (
+    f"{number}. {AI_GENERATED_TEXT_PREFIX} "
+    f"{MARKDOWN_CODE_DELIMITER}{arguments_json}{MARKDOWN_CODE_DELIMITER}"
+)
+```
+
+Preserve numbering, JSON content/ref URL handling, and existing backticks.
+This applies before DB/card materialization through the existing
+`render_codex_values()` call; no display-only mutation or new global/helper.
+Adapt only the six existing exact footnote-argument output expectations in
+`tests/backend/test_api.py::test_renderer_uses_generic_arguments_wording`, then
+run that focused test and affected-file Ruff serially in the detour environment.
+
+Implemented only that one production-line change and the six existing exact
+output expectations. Focused renderer test passes (1/1, 5.97 seconds), affected-
+file Ruff and `git diff --check` pass. Reports:
+`logs/ai-augment-agent-checks/footnote-argument-prefix.{log,xml}`. No new global,
+helper, or display-layer change; Git index untouched. No full-suite rerun for
+this formatting-only follow-up.
+
 ## Approved commit/init NameKey guard and serial socket exception
 
 Operator approval: "your proposed init/commit guard is approved exactly as you

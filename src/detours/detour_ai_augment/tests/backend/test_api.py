@@ -4501,13 +4501,19 @@ def test_renderer_uses_generic_arguments_wording() -> None:
         CALL_ARGUMENTS_TURN_6,
         {"turn5search0": COMPANY_URL},
         ref_id_pattern=post_commit_validation.CODEX_REF_ID_PATTERN,
-    ) == (f"1. {MARKDOWN_CODE_DELIMITER}{DISPLAY_ARGUMENTS_TURN_6}{MARKDOWN_CODE_DELIMITER}")
+    ) == (
+        f"1. {codex_parse.AI_GENERATED_TEXT_PREFIX} "
+        f"{MARKDOWN_CODE_DELIMITER}{DISPLAY_ARGUMENTS_TURN_6}{MARKDOWN_CODE_DELIMITER}"
+    )
     assert codex_parse.render_footnote_argument(
         1,
         CALL_ARGUMENTS_TURN_7,
         {"turn6view0": COMPANY_URL},
         ref_id_pattern=post_commit_validation.CODEX_REF_ID_PATTERN,
-    ) == (f"1. {MARKDOWN_CODE_DELIMITER}{DISPLAY_ARGUMENTS_TURN_7}{MARKDOWN_CODE_DELIMITER}")
+    ) == (
+        f"1. {codex_parse.AI_GENERATED_TEXT_PREFIX} "
+        f"{MARKDOWN_CODE_DELIMITER}{DISPLAY_ARGUMENTS_TURN_7}{MARKDOWN_CODE_DELIMITER}"
+    )
     multi_open = (
         '{"open":[{"ref_id":"turn1search0"},{"ref_id":"turn1search1"}],"response_length":"long"}'
     )
@@ -4517,7 +4523,8 @@ def test_renderer_uses_generic_arguments_wording() -> None:
         {"turn1search0": COMPANY_URL, "turn1search1": OFFICERS_URL},
         ref_id_pattern=post_commit_validation.CODEX_REF_ID_PATTERN,
     ) == (
-        f'1. {MARKDOWN_CODE_DELIMITER}{{"open":[{{"ref_id":"turn1search0","url":"{COMPANY_URL}"}},'
+        f"1. {codex_parse.AI_GENERATED_TEXT_PREFIX} "
+        f'{MARKDOWN_CODE_DELIMITER}{{"open":[{{"ref_id":"turn1search0","url":"{COMPANY_URL}"}},'
         f'{{"ref_id":"turn1search1","url":"{OFFICERS_URL}"}}],'
         f'"response_length":"long"}}{MARKDOWN_CODE_DELIMITER}'
     )
@@ -4526,20 +4533,29 @@ def test_renderer_uses_generic_arguments_wording() -> None:
         CALL_ARGUMENTS_TURN_6,
         {},
         ref_id_pattern=post_commit_validation.CODEX_REF_ID_PATTERN,
-    ) == (f"1. {MARKDOWN_CODE_DELIMITER}{CALL_ARGUMENTS_TURN_6}{MARKDOWN_CODE_DELIMITER}")
+    ) == (
+        f"1. {codex_parse.AI_GENERATED_TEXT_PREFIX} "
+        f"{MARKDOWN_CODE_DELIMITER}{CALL_ARGUMENTS_TURN_6}{MARKDOWN_CODE_DELIMITER}"
+    )
     direct_url_open = f'{{"open":[{{"ref_id":"{COMPANY_URL}"}}],"response_length":"long"}}'
     assert codex_parse.render_footnote_argument(
         1,
         direct_url_open,
         {},
         ref_id_pattern=post_commit_validation.CODEX_REF_ID_PATTERN,
-    ) == (f"1. {MARKDOWN_CODE_DELIMITER}{direct_url_open}{MARKDOWN_CODE_DELIMITER}")
+    ) == (
+        f"1. {codex_parse.AI_GENERATED_TEXT_PREFIX} "
+        f"{MARKDOWN_CODE_DELIMITER}{direct_url_open}{MARKDOWN_CODE_DELIMITER}"
+    )
     assert codex_parse.render_footnote_argument(
         1,
         CALL_ARGUMENTS_TURN_2,
         {},
         ref_id_pattern=post_commit_validation.CODEX_REF_ID_PATTERN,
-    ) == (f"1. {MARKDOWN_CODE_DELIMITER}{CALL_ARGUMENTS_TURN_2}{MARKDOWN_CODE_DELIMITER}")
+    ) == (
+        f"1. {codex_parse.AI_GENERATED_TEXT_PREFIX} "
+        f"{MARKDOWN_CODE_DELIMITER}{CALL_ARGUMENTS_TURN_2}{MARKDOWN_CODE_DELIMITER}"
+    )
 
 
 def test_copied_report_requires_one_exact_nested_ok_path(tmp_path: Path) -> None:

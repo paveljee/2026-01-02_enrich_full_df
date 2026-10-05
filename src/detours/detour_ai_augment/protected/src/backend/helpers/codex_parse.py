@@ -227,6 +227,6 @@ def render_footnote_argument(
             )
         break
     return (
-        f"{number}. "
+        f"{number}. {AI_GENERATED_TEXT_PREFIX} "
         f"{MARKDOWN_CODE_DELIMITER}{arguments_json}{MARKDOWN_CODE_DELIMITER}"
     )
