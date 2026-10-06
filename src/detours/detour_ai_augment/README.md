@@ -263,6 +263,24 @@ The version of pixi is locked in `.tool-versions`.
 
 More needs to be said about the Control Centre – AI Agent Runtime dynamics, so there is a separate section dedicated to this down below.
 
+## Replay log
+Along with Codex rollout blobs from the
+detour’s Content-Addressable Storage (CAS),
+this serves as the single-source-of-truth artifact
+documenting one or multiple Backend launches.
+
+Some non-obvious technical details are noted below.
+
+### Timing rules
+
+| Object | `received_at_unix_usec` | `ready_to_respond_at_unix_usec` | `duration_usec` |
+|---|---|---|---|
+| Pull/Push/Query/RunOutcome **RequestRecord** | Request receipt | `None` | `0` |
+| Corresponding **ResponseRecord** | `None` | Response ready | Response ready − request receipt |
+| Init/Commit/Validation | `None` | Construction time | `0` |
+| Outgoing OpenAlex/ROR request | `None` | Dispatch time | `0` |
+| Received OpenAlex/ROR response | Arrival time, captured immediately after `send()` returns | `None` | `response.elapsed` in microseconds |
+
 ## Known failure modes
 ### Out of disk space
 If the machine on which the AI Agent Runtime is running
