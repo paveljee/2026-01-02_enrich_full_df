@@ -149,6 +149,7 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     EVIDENCE_OUTCOME_V1_EXACT,
     EVIDENCE_OUTCOME_V2_NEAR,
     EVIDENCE_OUTCOME_WITHDRAWN,
+    EXCLUDED_NAMEKEY,
     HTTP_CONTENT_LENGTH_HEADER,
     HTTP_CONTENT_TYPE_HEADER,
     HTTP_GET_METHOD,
@@ -2419,6 +2420,18 @@ def test_synthetic_commit_matches_the_readme_contour_exactly(tmp_path: Path) -> 
     assert record.commit_request_body.pull_response_record is pull_record
     assert record.commit_request_body.push_response_record is push_record
     assert record.commit_request_body.codex_session_record.session_id == session_id
+
+    invalid_commit = HttpRequestLogRecord.model_validate({
+        **record.http_request_log_record.model_dump(),
+        "request_body": "{}",
+    })
+    with pytest.raises(_ReplayLogLineInvalidError) as exc_info:
+        AiAugmentBackendStore._authoritative_log_records(
+            (invalid_commit.model_dump_json() + "\n").encode(TEXT_ENCODING)
+        )
+    assert Locale.REPLAY_COMMIT_INVALID in str(exc_info.value)
+    assert Locale.REPLAY_REQUEST_BODY_ERROR_TEMPLATE.format(error="") in str(exc_info.value)
+    assert "pull_record_id" in str(exc_info.value)
 
 
 def test_commit_request_body_contract_is_strict_canonical_and_losslessly_resolved() -> None:
@@ -4943,6 +4956,31 @@ def test_replay_log_rejects_incomplete_tail_without_repair(
         ):
             AiAugmentBackendStore._authoritative_log_records(resource._read())
     assert replay_log.read_bytes() == value
+
+
+def test_replay_line_reports_invalid_public_response_timing() -> None:
+    record = persisted_http_record(
+        record_id=UUID("019d0000-0000-7000-8000-000000000021"),
+        method=HTTP_GET_METHOD,
+        path=PULL_PATH,
+        response_code=HTTPStatus.OK,
+    )
+    invalid = HttpRequestLogRecord.model_validate({
+        **record.model_dump(),
+        "ready_to_respond_at_unix_usec": None,
+    })
+    with pytest.raises(_ReplayLogLineInvalidError) as exc_info:
+        AiAugmentBackendStore._authoritative_log_records(
+            (invalid.model_dump_json() + "\n").encode(TEXT_ENCODING),
+            start_line_number=4,
+        )
+    assert str(exc_info.value) == Locale.REPLAY_DETAIL_TEMPLATE.format(
+        message=Locale.REPLAY_LOG_LINE_INVALID_TEMPLATE.format(line_number=4),
+        detail=Locale.REPLAY_DETAIL_TEMPLATE.format(
+            message=Locale.REPLAY_RECORD_CONTOUR_INVALID,
+            detail=Locale.REPLAY_READY_AT_MISSING_DETAIL,
+        ),
+    )
 
 
 def test_replay_log_registered_resource_rejects_reentry(

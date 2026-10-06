@@ -247,6 +247,7 @@ def test_replay_rejects_commit_namekey_mismatched_with_init(
         pass
 
     assert Locale.REPLAY_RECORD_FAILED_LOG % len(lines) in caplog.text
+    assert Locale.REPLAY_COMMIT_INIT_NAMEKEY_DETAIL in caplog.text
     with duckdb.connect(str(files.detour), read_only=True) as connection:
         assert connection.execute(
             f"SELECT count(*) FROM {AUTHORITATIVE_RECORDS_TABLE}"

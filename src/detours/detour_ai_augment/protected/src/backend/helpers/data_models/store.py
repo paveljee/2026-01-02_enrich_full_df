@@ -240,8 +240,10 @@ class _ReplayCommitInvalidError(RuntimeError):
 
 
 class _ReplayRecordContourInvalidError(RuntimeError):
-    def __init__(self) -> None:
-        super().__init__(Locale.REPLAY_RECORD_CONTOUR_INVALID)
+    def __init__(self, detail: str) -> None:
+        super().__init__(Locale.REPLAY_DETAIL_TEMPLATE.format(
+            message=Locale.REPLAY_RECORD_CONTOUR_INVALID, detail=detail,
+        ))
 
 
 class _ReplayCommitLinkMissingError(RuntimeError):
@@ -250,9 +252,11 @@ class _ReplayCommitLinkMissingError(RuntimeError):
 
 
 class _ReplayLogLineInvalidError(RuntimeError):
-    def __init__(self, line_number: int) -> None:
+    def __init__(self, line_number: int, detail: str | None = None) -> None:
+        message = Locale.REPLAY_LOG_LINE_INVALID_TEMPLATE.format(line_number=line_number)
         super().__init__(
-            Locale.REPLAY_LOG_LINE_INVALID_TEMPLATE.format(line_number=line_number)
+            Locale.REPLAY_DETAIL_TEMPLATE.format(message=message, detail=detail)
+            if detail else message
         )
 
 
@@ -478,15 +482,17 @@ class AiAugmentBackendStore(FrozenStrictModel):
                     for ordinal, line in enumerate(self._replay_log._lines(), start=1):
                         logger.info(Locale.REPLAY_LINE_LOG, ordinal, total)
                         try:
-                            record = self._authoritative_log_records(line)[0][0]
+                            record = self._authoritative_log_records(
+                                line, start_line_number=ordinal,
+                            )[0][0]
                             self._append_ordinal = ordinal
                             self._append_offset += len(line)
                             reconstructed = self._replay_durable_record(
                                 record, ordinal=ordinal, raw_line=line,
                             )
                             self._remember_reconstructed_record(reconstructed)
-                        except Exception:
-                            logger.exception(Locale.REPLAY_RECORD_FAILED_LOG, ordinal)
+                        except Exception as exc:
+                            logger.exception(Locale.REPLAY_RECORD_FAILED_DETAIL_LOG, ordinal, exc)
                             raise
                     with self._transaction():
                         self._write_anchor(_ReplayAnchor(
@@ -526,14 +532,20 @@ class AiAugmentBackendStore(FrozenStrictModel):
                         or isinstance(current, PullResponseRecord)
                         and current.validation_request_record is None
                     ):
-                        raise ValueError(Locale.PULL_RESPONSE_LINKAGE_INVALID)
+                        raise ValueError(Locale.REPLAY_DETAIL_TEMPLATE.format(
+                            message=Locale.PULL_RESPONSE_LINKAGE_INVALID,
+                            detail=Locale.REPLAY_PULL_INITIAL_CURSOR_DETAIL,
+                        ))
                 elif content_type == ContentType.MARKDOWN_UTF8:
                     if isinstance(current, BackendValidationRequestRecord):
                         prior = current
                     elif isinstance(current, PullResponseRecord):
                         prior = current.validation_request_record
                     if prior is None:
-                        raise ValueError(Locale.PULL_RETRY_VALIDATION_INCONSISTENT)
+                        raise ValueError(Locale.REPLAY_DETAIL_TEMPLATE.format(
+                            message=Locale.PULL_RETRY_VALIDATION_INCONSISTENT,
+                            detail=Locale.REPLAY_PULL_RETRY_CURSOR_DETAIL,
+                        ))
                     validation = prior.validation_request_body.post_commit_validation
                     if (
                         validation.result is not BackendLifecycle.REJECTED
@@ -542,9 +554,15 @@ class AiAugmentBackendStore(FrozenStrictModel):
                         BackendLifecycle.DUCKDB_EVIDENCE_VALIDATION,
                         }
                     ):
-                        raise ValueError(Locale.PULL_RETRY_VALIDATION_INCONSISTENT)
+                        raise ValueError(Locale.REPLAY_DETAIL_TEMPLATE.format(
+                            message=Locale.PULL_RETRY_VALIDATION_INCONSISTENT,
+                            detail=Locale.REPLAY_PULL_RETRY_STATE_DETAIL,
+                        ))
                 else:
-                    raise ValueError(Locale.PULL_RESPONSE_LINKAGE_INVALID)
+                    raise ValueError(Locale.REPLAY_DETAIL_TEMPLATE.format(
+                        message=Locale.PULL_RESPONSE_LINKAGE_INVALID,
+                        detail=Locale.REPLAY_PULL_CONTENT_TYPE_DETAIL,
+                    ))
             return PullResponseRecord.from_http_request_log_record(
                 http_request_log_record=record,
                 validation_request_record=prior,
@@ -613,7 +631,9 @@ class AiAugmentBackendStore(FrozenStrictModel):
         durable = tuple(self._replay_log._lines(offset=self._append_offset - len(line)))
         if durable != (line,):
             raise RuntimeError(Locale.STORE_DURABLE_APPEND_MISMATCH)
-        return self._authoritative_log_records(durable[0])[0][0]
+        return self._authoritative_log_records(
+            durable[0], start_line_number=self._append_ordinal,
+        )[0][0]
 
     def _assert_lifecycle_links(
         self,
@@ -633,7 +653,9 @@ class AiAugmentBackendStore(FrozenStrictModel):
                     expected = previous
                 elif isinstance(previous, PullResponseRecord):
                     expected = previous.validation_request_record
-            assert record.validation_request_record is expected
+            assert (
+                record.validation_request_record is expected
+            ), Locale.REPLAY_PULL_VALIDATION_LINK_DETAIL
         elif isinstance(record, PushResponseRecord):
             assert record.pull_response_record is (
                 previous
@@ -641,24 +663,34 @@ class AiAugmentBackendStore(FrozenStrictModel):
                 and isinstance(previous, PullResponseRecord)
                 and previous.response_code == HTTPStatus.OK
                 else None
-            )
+            ), Locale.REPLAY_PUSH_PULL_LINK_DETAIL
         elif isinstance(record, BackendCommitRequestRecord):
-            assert isinstance(previous, PushResponseRecord)
-            assert record.commit_request_body.pull_response_record is previous.pull_response_record
-            assert record.commit_request_body.push_response_record is previous
+            assert (
+                isinstance(previous, PushResponseRecord)
+            ), Locale.REPLAY_COMMIT_PREVIOUS_PUSH_DETAIL
+            assert (
+                record.commit_request_body.pull_response_record is previous.pull_response_record
+            ), Locale.REPLAY_COMMIT_PREVIOUS_PULL_DETAIL
+            assert (
+                record.commit_request_body.push_response_record is previous
+            ), Locale.REPLAY_COMMIT_PREVIOUS_PUSH_LINK_DETAIL
         elif isinstance(record, BackendValidationRequestRecord):
-            assert isinstance(previous, BackendCommitRequestRecord)
+            assert (
+                isinstance(previous, BackendCommitRequestRecord)
+            ), Locale.REPLAY_VALIDATION_PREVIOUS_COMMIT_DETAIL
             body = record.validation_request_body
-            assert body.commit_request_record is previous
+            assert (
+                body.commit_request_record is previous
+            ), Locale.REPLAY_VALIDATION_COMMIT_LINK_DETAIL
             assert body.initial_validation_request_record is (
                 self._initial_validation_for_commit(previous)
-            )
+            ), Locale.REPLAY_VALIDATION_INITIAL_LINK_DETAIL
         elif isinstance(record, RunOutcomeResponseRecord):
             assert record.attempt is (
                 self._validation_from_cursor()
                 if record._body().validation_record_id is not None
                 else None
-            )
+            ), Locale.REPLAY_OUTCOME_ATTEMPT_LINK_DETAIL
 
     def _append_authoritative_record(self, record: HttpRequestLogRecord) -> HttpRequestLogRecord:
         with self._threading_lock():
@@ -1398,8 +1430,17 @@ class AiAugmentBackendStore(FrozenStrictModel):
             record, ordinal=ordinal, raw_line=raw_line,
         )
         persisted = self._http_record(record.record_id)
-        if persisted.model_dump(mode="json") != record.model_dump(mode="json"):
-            raise RuntimeError(Locale.STORE_PROJECTION_REPLAY_MISMATCH)
+        observed = persisted.model_dump(mode="json")
+        expected = record.model_dump(mode="json")
+        if observed != expected:
+            differing_fields = ", ".join(sorted(
+                field for field in HttpRequestLogRecord.model_fields
+                if observed.get(field) != expected.get(field)
+            ))
+            raise RuntimeError(Locale.REPLAY_DETAIL_TEMPLATE.format(
+                message=Locale.STORE_PROJECTION_REPLAY_MISMATCH,
+                detail=Locale.REPLAY_DIFFERING_FIELDS_TEMPLATE.format(fields=differing_fields),
+            ))
         self._assert_lifecycle_links(reconstructed, previous)
         return reconstructed
 
@@ -1437,10 +1478,20 @@ class AiAugmentBackendStore(FrozenStrictModel):
                     not isinstance(push_ref, PushResponseRecord)
                     or push_ref.response_code != HTTPStatus.ACCEPTED
                 ):
-                    raise ValueError(Locale.REPLAY_COMMIT_PUSH_MISMATCH)
+                    raise ValueError(
+                        Locale.REPLAY_DETAIL_TEMPLATE.format(
+                            message=Locale.REPLAY_COMMIT_PUSH_MISMATCH,
+                            detail=Locale.REPLAY_PUSH_CURSOR_DETAIL,
+                        )
+                    )
                 pull_ref = push_ref.pull_response_record
                 if pull_ref is None:
-                    raise ValueError(Locale.REPLAY_COMMIT_PUSH_MISMATCH)
+                    raise ValueError(
+                        Locale.REPLAY_DETAIL_TEMPLATE.format(
+                            message=Locale.REPLAY_COMMIT_PUSH_MISMATCH,
+                            detail=Locale.REPLAY_PUSH_PULL_DETAIL,
+                        )
+                    )
                 refs: dict[UUID, PullResponseRecord | PushResponseRecord] = {
                     pull_ref.record_id: pull_ref,
                     push_ref.record_id: push_ref,
@@ -1453,19 +1504,34 @@ class AiAugmentBackendStore(FrozenStrictModel):
                     commit.commit_request_body.pull_response_record is not pull_ref
                     or commit.commit_request_body.push_response_record is not push_ref
                 ):
-                    raise ValueError(Locale.REPLAY_COMMIT_PUSH_MISMATCH)
+                    raise ValueError(
+                        Locale.REPLAY_DETAIL_TEMPLATE.format(
+                            message=Locale.REPLAY_COMMIT_PUSH_MISMATCH,
+                            detail=Locale.REPLAY_COMMIT_LINKS_DETAIL,
+                        )
+                    )
                 init_request_record = self._init_request_record
+                if init_request_record is None:
+                    raise _ReplayCommitInvalidError(Locale.REPLAY_DETAIL_TEMPLATE.format(
+                        message=Locale.REPLAY_COMMIT_NAME_KEY_INVALID,
+                        detail=Locale.REPLAY_COMMIT_INIT_MISSING_DETAIL,
+                    ))
                 if (
-                    init_request_record is None
-                    or self._parse_name_key_header(commit.request_headers.get(NAME_KEY_HEADER))
+                    self._parse_name_key_header(commit.request_headers.get(NAME_KEY_HEADER))
                     != init_request_record.namekey
                 ):
-                    raise _ReplayCommitInvalidError(Locale.REPLAY_COMMIT_NAME_KEY_INVALID)
+                    raise _ReplayCommitInvalidError(Locale.REPLAY_DETAIL_TEMPLATE.format(
+                        message=Locale.REPLAY_COMMIT_NAME_KEY_INVALID,
+                        detail=Locale.REPLAY_COMMIT_INIT_NAMEKEY_DETAIL,
+                    ))
                 reconstructed = commit
             elif (record.method, record.path) == (HTTP_POST_METHOD, VALIDATE_PATH):
                 commit_ref = self._current_replayed_record
                 if not isinstance(commit_ref, BackendCommitRequestRecord):
-                    raise ValueError(Locale.REPLAY_VALIDATION_COMMIT_MISMATCH)
+                    raise ValueError(Locale.REPLAY_DETAIL_TEMPLATE.format(
+                        message=Locale.REPLAY_VALIDATION_COMMIT_MISMATCH,
+                        detail=Locale.REPLAY_VALIDATION_COMMIT_CURSOR_DETAIL,
+                    ))
                 if record.request_body is None:
                     raise ValueError(Locale.VALIDATION_BODY_MISSING)
                 initial_ref = self._initial_validation_for_commit(commit_ref)
@@ -1495,7 +1561,12 @@ class AiAugmentBackendStore(FrozenStrictModel):
                 ):
                     raise ValueError(Locale.RUN_OUTCOME_BEFORE_VALIDATION)
                 if record.response_body is None:
-                    raise ValueError(Locale.RUN_OUTCOME_REPLAY_MISMATCH)
+                    raise ValueError(
+                        Locale.REPLAY_DETAIL_TEMPLATE.format(
+                            message=Locale.RUN_OUTCOME_REPLAY_MISMATCH,
+                            detail=Locale.REPLAY_RESPONSE_BODY_MISSING_DETAIL,
+                        )
+                    )
                 outcome_body = RunOutcomeResponseRecord._parse_response_body(record.response_body)
                 attempt_ref = (
                     self._validation_from_cursor()
@@ -1507,7 +1578,12 @@ class AiAugmentBackendStore(FrozenStrictModel):
                 if outcome._body().validation_record_id != (
                     None if attempt_ref is None else attempt_ref.record_id
                 ):
-                    raise ValueError(Locale.RUN_OUTCOME_REPLAY_MISMATCH)
+                    raise ValueError(
+                        Locale.REPLAY_DETAIL_TEMPLATE.format(
+                            message=Locale.RUN_OUTCOME_REPLAY_MISMATCH,
+                            detail=Locale.REPLAY_OUTCOME_VALIDATION_ID_DETAIL,
+                        )
+                    )
                 self._verify_run_outcome_record(outcome)
                 self._apply_run_outcome_record(outcome)
                 reconstructed = outcome
@@ -1624,11 +1700,10 @@ class AiAugmentBackendStore(FrozenStrictModel):
     @staticmethod
     def _validated_http_record(record: HttpRequestLogRecord) -> HttpRequestLogRecord:
         validated = HttpRequestLogRecord.model_validate_json(record.model_dump_json())
-        if (
-            validated.schema_version != KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
-            or validated.record_id.version != 7
-        ):
-            raise _ReplayRecordContourInvalidError
+        if validated.schema_version != KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1:
+            raise _ReplayRecordContourInvalidError(Locale.REPLAY_SCHEMA_VERSION_DETAIL)
+        if validated.record_id.version != 7:
+            raise _ReplayRecordContourInvalidError(Locale.REPLAY_RECORD_ID_DETAIL)
         route = (validated.method, validated.path)
         if route == (HTTP_POST_METHOD, INIT_PATH):
             try:
@@ -1636,13 +1711,17 @@ class AiAugmentBackendStore(FrozenStrictModel):
                     http_request_log_record=validated,
                 )
             except ValueError as exc:
-                raise _ReplayRecordContourInvalidError from exc
+                raise _ReplayRecordContourInvalidError(
+                    Locale.REPLAY_INIT_RECORD_DETAIL_TEMPLATE.format(error=exc)
+                ) from exc
             return validated
         if validated.method == HTTP_POST_METHOD and validated.path in RUN_OUTCOME_PATHS:
             try:
                 RunOutcomeResponseRecord.from_http_request_log_record(validated)
             except ValueError as exc:
-                raise _ReplayRecordContourInvalidError from exc
+                raise _ReplayRecordContourInvalidError(
+                    Locale.REPLAY_RUN_OUTCOME_RECORD_DETAIL_TEMPLATE.format(error=exc)
+                ) from exc
             return validated
 
         if route not in {
@@ -1661,71 +1740,104 @@ class AiAugmentBackendStore(FrozenStrictModel):
             public_response = route in {
                 (HTTP_GET_METHOD, PULL_PATH), (HTTP_POST_METHOD, PUSH_PATH),
             }
-            if (
-                validated.duration_usec is None
-                or validated.duration_usec < 0
-                or (
-                    public_response and (
-                        validated.response_code is None
-                        or validated.response_headers is None
-                        or validated.response_body is None
-                        or validated.received_at_unix_usec is not None
-                        or validated.ready_to_respond_at_unix_usec is None
-                    )
-                )
-                or (
-                    not public_response and transport_failure and (
-                        validated.received_at_unix_usec is not None
-                        or validated.ready_to_respond_at_unix_usec is None
-                        or validated.duration_usec != 0
-                    )
-                )
-                or (
-                    not public_response and not transport_failure and (
-                        validated.response_code is None
-                        or validated.response_headers is None
-                        or validated.response_body is None
-                        or validated.received_at_unix_usec is None
-                        or validated.ready_to_respond_at_unix_usec is not None
-                    )
-                )
-            ):
-                raise _ReplayRecordContourInvalidError
+            checks = [
+                (Locale.REPLAY_DURATION_NONNEGATIVE_DETAIL, validated.duration_usec is None
+                 or validated.duration_usec < 0),
+            ]
+            if public_response:
+                checks.extend((
+                    (Locale.REPLAY_RESPONSE_CODE_MISSING_DETAIL, validated.response_code is None),
+                    (Locale.REPLAY_RESPONSE_HEADERS_MISSING_DETAIL,
+                     validated.response_headers is None),
+                    (Locale.REPLAY_RESPONSE_BODY_MISSING_DETAIL, validated.response_body is None),
+                    (Locale.REPLAY_RECEIVED_AT_ABSENT_DETAIL,
+                     validated.received_at_unix_usec is not None),
+                    (Locale.REPLAY_READY_AT_MISSING_DETAIL,
+                     validated.ready_to_respond_at_unix_usec is None),
+                ))
+            elif transport_failure:
+                checks.extend((
+                    (Locale.REPLAY_RECEIVED_AT_ABSENT_DETAIL,
+                     validated.received_at_unix_usec is not None),
+                    (Locale.REPLAY_READY_AT_MISSING_DETAIL,
+                     validated.ready_to_respond_at_unix_usec is None),
+                    (Locale.REPLAY_DURATION_ZERO_DETAIL, validated.duration_usec != 0),
+                ))
+            else:
+                checks.extend((
+                    (Locale.REPLAY_RESPONSE_CODE_MISSING_DETAIL, validated.response_code is None),
+                    (Locale.REPLAY_RESPONSE_HEADERS_MISSING_DETAIL,
+                     validated.response_headers is None),
+                    (Locale.REPLAY_RESPONSE_BODY_MISSING_DETAIL, validated.response_body is None),
+                    (Locale.REPLAY_RECEIVED_AT_MISSING_DETAIL,
+                     validated.received_at_unix_usec is None),
+                    (Locale.REPLAY_READY_AT_ABSENT_DETAIL,
+                     validated.ready_to_respond_at_unix_usec is not None),
+                ))
+            for detail, invalid in checks:
+                if invalid:
+                    raise _ReplayRecordContourInvalidError(detail)
             return validated
-        if (
-            validated.scheme != SYNTHETIC_COMMIT_SCHEME
-            or validated.host != SYNTHETIC_COMMIT_HOST
-            or validated.port is not None
-            or validated.ready_to_respond_at_unix_usec is None
-            or validated.query
-            or set(validated.request_headers) != {SOURCE_KEY_HEADER, NAME_KEY_HEADER}
-            or not isinstance(validated.request_body, str)
-            or validated.response_code is not None
-            or validated.response_headers is not None
-            or validated.response_body is not None
-            or validated.received_at_unix_usec is not None
-            or validated.duration_usec != 0
+        if not isinstance(validated.request_body, str):
+            raise _ReplayCommitInvalidError(Locale.REPLAY_DETAIL_TEMPLATE.format(
+                message=Locale.REPLAY_COMMIT_INVALID,
+                detail=Locale.REPLAY_REQUEST_BODY_TEXT_DETAIL,
+            ))
+        for detail, invalid in (
+            (Locale.REPLAY_SCHEME_DETAIL,
+             validated.scheme != SYNTHETIC_COMMIT_SCHEME),
+            (Locale.REPLAY_HOST_DETAIL, validated.host != SYNTHETIC_COMMIT_HOST),
+            (Locale.REPLAY_PORT_ABSENT_DETAIL, validated.port is not None),
+            (Locale.REPLAY_READY_AT_MISSING_DETAIL,
+             validated.ready_to_respond_at_unix_usec is None),
+            (Locale.REPLAY_QUERY_EMPTY_DETAIL, bool(validated.query)),
+            (Locale.REPLAY_COMMIT_HEADERS_DETAIL,
+             set(validated.request_headers) != {SOURCE_KEY_HEADER, NAME_KEY_HEADER}),
+            (Locale.REPLAY_RESPONSE_CODE_ABSENT_DETAIL, validated.response_code is not None),
+            (Locale.REPLAY_RESPONSE_HEADERS_ABSENT_DETAIL,
+             validated.response_headers is not None),
+            (Locale.REPLAY_RESPONSE_BODY_ABSENT_DETAIL, validated.response_body is not None),
+            (Locale.REPLAY_RECEIVED_AT_ABSENT_DETAIL,
+             validated.received_at_unix_usec is not None),
+            (Locale.REPLAY_DURATION_ZERO_DETAIL, validated.duration_usec != 0),
         ):
-            raise _ReplayCommitInvalidError(Locale.REPLAY_COMMIT_INVALID)
+            if invalid:
+                raise _ReplayCommitInvalidError(Locale.REPLAY_DETAIL_TEMPLATE.format(
+                    message=Locale.REPLAY_COMMIT_INVALID, detail=detail,
+                ))
         if route == (HTTP_POST_METHOD, VALIDATE_PATH):
             return validated
         try:
             CommitRequestBody.validate_serialized_json(validated.request_body)
         except (ValidationError, ValueError) as exc:
-            raise _ReplayCommitInvalidError(Locale.REPLAY_COMMIT_INVALID) from exc
+            error = (
+                ", ".join(
+                    Locale.REPLAY_VALIDATION_ERROR_DETAIL_TEMPLATE.format(
+                        location=".".join(map(str, item["loc"])),
+                        error_type=item["type"],
+                    )
+                    for item in exc.errors(include_input=False)
+                ) if isinstance(exc, ValidationError) else str(exc)
+            )
+            raise _ReplayCommitInvalidError(
+                Locale.REPLAY_DETAIL_TEMPLATE.format(
+                    message=Locale.REPLAY_COMMIT_INVALID,
+                    detail=Locale.REPLAY_REQUEST_BODY_ERROR_TEMPLATE.format(error=error),
+                )
+            ) from exc
         return validated
 
     @classmethod
     def _authoritative_log_records(
-        cls, value: bytes,
+        cls, value: bytes, *, start_line_number: int = AUTHORITATIVE_FIRST_LINE,
     ) -> tuple[tuple[HttpRequestLogRecord, int], ...]:
         records: list[tuple[HttpRequestLogRecord, int]] = []
         byte_offset = AUTHORITATIVE_EMPTY_OFFSET
         for line_number, line in enumerate(
-            value.splitlines(keepends=True), start=AUTHORITATIVE_FIRST_LINE,
+            value.splitlines(keepends=True), start=start_line_number,
         ):
             if not line.endswith(b"\n") or not line.strip():
-                raise _ReplayLogLineInvalidError(line_number)
+                raise _ReplayLogLineInvalidError(line_number, Locale.REPLAY_LINE_BOUNDARY_DETAIL)
             try:
                 record = cls._validated_http_record(
                     HttpRequestLogRecord.model_validate_json(line)
@@ -1735,7 +1847,16 @@ class AiAugmentBackendStore(FrozenStrictModel):
                 _ReplayCommitInvalidError,
                 _ReplayRecordContourInvalidError,
             ) as exc:
-                raise _ReplayLogLineInvalidError(line_number) from exc
+                detail = (
+                    ", ".join(
+                        Locale.REPLAY_VALIDATION_ERROR_DETAIL_TEMPLATE.format(
+                            location=".".join(map(str, error["loc"])),
+                            error_type=error["type"],
+                        )
+                        for error in exc.errors(include_input=False)
+                    ) if isinstance(exc, ValidationError) else str(exc)
+                )
+                raise _ReplayLogLineInvalidError(line_number, detail) from exc
             byte_offset += len(line)
             records.append((record, byte_offset))
         return tuple(records)
@@ -1745,13 +1866,27 @@ class AiAugmentBackendStore(FrozenStrictModel):
         record: HttpRequestLogRecord,
     ) -> BackendCommitRequestRecord:
         commit, _validation = self._cursor_commit_validation()
-        if (
-            commit is None
-            or commit.record_id != record.record_id
-            or commit.http_request_log_record.model_dump(mode="json")
-            != record.model_dump(mode="json")
-        ):
-            raise _ReplayCommitInvalidError(Locale.REPLAY_COMMIT_INVALID)
+        if commit is None:
+            raise _ReplayCommitInvalidError(
+                Locale.REPLAY_DETAIL_TEMPLATE.format(
+                    message=Locale.REPLAY_COMMIT_INVALID,
+                    detail=Locale.REPLAY_COMMIT_CURSOR_DETAIL,
+                )
+            )
+        if commit.record_id != record.record_id:
+            raise _ReplayCommitInvalidError(
+                Locale.REPLAY_DETAIL_TEMPLATE.format(
+                    message=Locale.REPLAY_COMMIT_INVALID,
+                    detail=Locale.REPLAY_COMMIT_ID_DETAIL,
+                )
+            )
+        if commit.http_request_log_record.model_dump(mode="json") != record.model_dump(mode="json"):
+            raise _ReplayCommitInvalidError(
+                Locale.REPLAY_DETAIL_TEMPLATE.format(
+                    message=Locale.REPLAY_COMMIT_INVALID,
+                    detail=Locale.REPLAY_COMMIT_ENVELOPE_DETAIL,
+                )
+            )
         return commit
 
     @staticmethod
@@ -1759,14 +1894,18 @@ class AiAugmentBackendStore(FrozenStrictModel):
         try:
             return source_key_from_header_value(value)
         except ValueError as exc:
-            raise _ReplayCommitInvalidError(Locale.REPLAY_COMMIT_SOURCE_KEY_INVALID) from exc
+            raise _ReplayCommitInvalidError(Locale.REPLAY_DETAIL_TEMPLATE.format(
+                message=Locale.REPLAY_COMMIT_SOURCE_KEY_INVALID, detail=str(exc),
+            )) from exc
 
     @staticmethod
     def _parse_name_key_header(value: object) -> NameKey:
         try:
             return name_key_from_header_value(value)
         except ValueError as exc:
-            raise _ReplayCommitInvalidError(Locale.REPLAY_COMMIT_NAME_KEY_INVALID) from exc
+            raise _ReplayCommitInvalidError(Locale.REPLAY_DETAIL_TEMPLATE.format(
+                message=Locale.REPLAY_COMMIT_NAME_KEY_INVALID, detail=str(exc),
+            )) from exc
 
     @staticmethod
     def _namekey_from_original_pull_response_record(
@@ -1780,16 +1919,25 @@ class AiAugmentBackendStore(FrozenStrictModel):
             ),
             None,
         )
-        if (
-            original_pull_response_record.response_code != HTTPStatus.OK
-            or content_type != ContentType.NDJSON
-            or not original_pull_response_record.response_body
+        for detail, invalid in (
+            (Locale.REPLAY_COMMIT_PULL_CODE_DETAIL,
+             original_pull_response_record.response_code != HTTPStatus.OK),
+            (Locale.REPLAY_COMMIT_PULL_TYPE_DETAIL, content_type != ContentType.NDJSON),
         ):
-            raise _ReplayCommitInvalidError(Locale.REPLAY_COMMIT_PULL_INVALID)
+            if invalid:
+                raise _ReplayCommitInvalidError(Locale.REPLAY_DETAIL_TEMPLATE.format(
+                    message=Locale.REPLAY_COMMIT_PULL_INVALID, detail=detail,
+                ))
+        response_body = original_pull_response_record.response_body
+        if not response_body:
+            raise _ReplayCommitInvalidError(Locale.REPLAY_DETAIL_TEMPLATE.format(
+                message=Locale.REPLAY_COMMIT_PULL_INVALID,
+                detail=Locale.REPLAY_COMMIT_PULL_BODY_DETAIL,
+            ))
         try:
             lines = tuple(
                 json.loads(line)
-                for line in original_pull_response_record.response_body.splitlines()
+                for line in response_body.splitlines()
             )
             identity = next(
                 line for line in reversed(lines)
@@ -1801,7 +1949,10 @@ class AiAugmentBackendStore(FrozenStrictModel):
                 KTP_LAST_NAME_COL: identity[KTP_LAST_NAME_COL],
             })
         except (StopIteration, TypeError, ValueError, json.JSONDecodeError) as exc:
-            raise _ReplayCommitInvalidError(Locale.REPLAY_COMMIT_PULL_INVALID) from exc
+            raise _ReplayCommitInvalidError(Locale.REPLAY_DETAIL_TEMPLATE.format(
+                message=Locale.REPLAY_COMMIT_PULL_INVALID,
+                detail=Locale.REPLAY_COMMIT_PULL_PARSE_DETAIL_TEMPLATE.format(error=exc),
+            )) from exc
 
     def _validated_commit_inputs(
         self,
@@ -1810,7 +1961,10 @@ class AiAugmentBackendStore(FrozenStrictModel):
         initial_validation_request_record: BackendValidationRequestRecord | None,
     ) -> tuple[_CommitEvaluationInputs, _DetourDbValidationReads]:
         if self._current_replayed_record is not commit_request_record:
-            raise _ReplayCommitInvalidError(Locale.REPLAY_COMMIT_LINK_INVALID)
+            raise _ReplayCommitInvalidError(Locale.REPLAY_DETAIL_TEMPLATE.format(
+                message=Locale.REPLAY_COMMIT_LINK_INVALID,
+                detail=Locale.REPLAY_COMMIT_CURSOR_LINK_DETAIL,
+            ))
         record = commit_request_record
         body = commit_request_record.commit_request_body
         pull = body.pull_response_record
@@ -1818,15 +1972,21 @@ class AiAugmentBackendStore(FrozenStrictModel):
         pull_ordinal, _ = self._http_record_with_ordinal(pull.record_id)
         push_ordinal, _ = self._http_record_with_ordinal(push.record_id)
         commit_ordinal, _ = self._http_record_with_ordinal(record.record_id)
-        if not (
-            pull_ordinal < push_ordinal < commit_ordinal
-            and (pull.method, pull.path) == (HTTP_GET_METHOD, PULL_PATH)
-            and pull.response_code == HTTPStatus.OK
-            and (push.method, push.path) == (HTTP_POST_METHOD, PUSH_PATH)
-            and push.response_code == HTTPStatus.ACCEPTED
-            and isinstance(push.request_body, str)
+        for detail, invalid in (
+            (Locale.REPLAY_COMMIT_ORDINAL_DETAIL,
+             not pull_ordinal < push_ordinal < commit_ordinal),
+            (Locale.REPLAY_COMMIT_PULL_ROUTE_DETAIL,
+             (pull.method, pull.path) != (HTTP_GET_METHOD, PULL_PATH)
+             or pull.response_code != HTTPStatus.OK),
+            (Locale.REPLAY_COMMIT_PUSH_ROUTE_DETAIL,
+             (push.method, push.path) != (HTTP_POST_METHOD, PUSH_PATH)
+             or push.response_code != HTTPStatus.ACCEPTED),
+            (Locale.REPLAY_COMMIT_PUSH_BODY_DETAIL, not isinstance(push.request_body, str)),
         ):
-            raise _ReplayCommitInvalidError(Locale.REPLAY_COMMIT_LINK_INVALID)
+            if invalid:
+                raise _ReplayCommitInvalidError(Locale.REPLAY_DETAIL_TEMPLATE.format(
+                    message=Locale.REPLAY_COMMIT_LINK_INVALID, detail=detail,
+                ))
         namekey = self._parse_name_key_header(record.request_headers.get(NAME_KEY_HEADER))
         initial_commit = (
             commit_request_record if initial_validation_request_record is None
@@ -1837,16 +1997,35 @@ class AiAugmentBackendStore(FrozenStrictModel):
         if (
             self._namekey_from_original_pull_response_record(original_pull_response_record)
             != namekey
-            or self._init_request_record is None
-            or namekey != self._init_request_record.namekey
         ):
-            raise _ReplayCommitInvalidError(Locale.REPLAY_COMMIT_NAME_KEY_INVALID)
+            raise _ReplayCommitInvalidError(Locale.REPLAY_DETAIL_TEMPLATE.format(
+                message=Locale.REPLAY_COMMIT_NAME_KEY_INVALID,
+                detail=Locale.REPLAY_COMMIT_ORIGINAL_PULL_NAMEKEY_DETAIL,
+            ))
+        if self._init_request_record is None:
+            raise _ReplayCommitInvalidError(Locale.REPLAY_DETAIL_TEMPLATE.format(
+                message=Locale.REPLAY_COMMIT_NAME_KEY_INVALID,
+                detail=Locale.REPLAY_COMMIT_INIT_MISSING_DETAIL,
+            ))
+        if namekey != self._init_request_record.namekey:
+            raise _ReplayCommitInvalidError(Locale.REPLAY_DETAIL_TEMPLATE.format(
+                message=Locale.REPLAY_COMMIT_NAME_KEY_INVALID,
+                detail=Locale.REPLAY_COMMIT_INIT_NAMEKEY_DETAIL,
+            ))
         _, source_line_count = self._parse_source_key_header(
             record.request_headers.get(SOURCE_KEY_HEADER)
         )
         rollout = body.codex_session_record.codex_rollout_record
-        if rollout is None or source_line_count != rollout.line_count:
-            raise _ReplayCommitInvalidError(Locale.REPLAY_COMMIT_SOURCE_KEY_INVALID)
+        if rollout is None:
+            raise _ReplayCommitInvalidError(Locale.REPLAY_DETAIL_TEMPLATE.format(
+                message=Locale.REPLAY_COMMIT_SOURCE_KEY_INVALID,
+                detail=Locale.REPLAY_COMMIT_ROLLOUT_MISSING_DETAIL,
+            ))
+        if source_line_count != rollout.line_count:
+            raise _ReplayCommitInvalidError(Locale.REPLAY_DETAIL_TEMPLATE.format(
+                message=Locale.REPLAY_COMMIT_SOURCE_KEY_INVALID,
+                detail=Locale.REPLAY_COMMIT_SOURCE_LINE_COUNT_DETAIL,
+            ))
         assert isinstance(push, PushResponseRecord)
         assert push.pull_response_record is pull
         context = self.context
@@ -1981,16 +2160,21 @@ class AiAugmentBackendStore(FrozenStrictModel):
         commit_ordinal, commit = self._http_record_with_ordinal(
             commit_ref.record_id
         )
-        if (
-            self._current_replayed_record is not commit_ref
-            or commit_ordinal >= ordinal
-            or record.request_headers != commit.request_headers
-            or any(
+        for detail, invalid in (
+            (Locale.REPLAY_VALIDATION_CURSOR_DETAIL,
+             self._current_replayed_record is not commit_ref),
+            (Locale.REPLAY_VALIDATION_ORDINAL_DETAIL, commit_ordinal >= ordinal),
+            (Locale.REPLAY_VALIDATION_HEADERS_DETAIL,
+             record.request_headers != commit.request_headers),
+            (Locale.REPLAY_VALIDATION_COMMIT_ENVELOPE_DETAIL, any(
                 getattr(commit_ref, field) != getattr(commit, field)
                 for field in HttpRequestLogRecord.model_fields
-            )
+            )),
         ):
-            raise ReplayInputMissing(Locale.VALIDATION_COMMIT_LINK_INVALID)
+            if invalid:
+                raise ReplayInputMissing(Locale.REPLAY_DETAIL_TEMPLATE.format(
+                    message=Locale.VALIDATION_COMMIT_LINK_INVALID, detail=detail,
+                ))
         if initial_ref is not None:
             initial_ordinal, persisted = self._http_record_with_ordinal(initial_ref.record_id)
             if initial_ordinal >= commit_ordinal or any(
@@ -2041,11 +2225,16 @@ class AiAugmentBackendStore(FrozenStrictModel):
             )
         assert projection.commit_request_record is commit_ref
         observed = body.post_commit_validation
-        if (
-            evaluated != observed
-            or http.record_ids != tuple(item.record_id for item in body.openalex_ror_records)
-        ):
-            raise ReplayInputMissing(Locale.VALIDATION_REPLAY_MISMATCH)
+        if evaluated != observed:
+            raise ReplayInputMissing(Locale.REPLAY_DETAIL_TEMPLATE.format(
+                message=Locale.VALIDATION_REPLAY_MISMATCH,
+                detail=Locale.REPLAY_VALIDATION_EVALUATION_DETAIL,
+            ))
+        if http.record_ids != tuple(item.record_id for item in body.openalex_ror_records):
+            raise ReplayInputMissing(Locale.REPLAY_DETAIL_TEMPLATE.format(
+                message=Locale.VALIDATION_REPLAY_MISMATCH,
+                detail=Locale.REPLAY_VALIDATION_HTTP_IDS_DETAIL,
+            ))
         self._project_validation(commit_ref, projection, accepted=(
             observed.result is BackendLifecycle.ACCEPTED
         ))
@@ -2068,7 +2257,10 @@ class AiAugmentBackendStore(FrozenStrictModel):
             )
         if projection.submission_json is not None:
             if index is None:
-                raise ReplayInputMissing(Locale.VALIDATION_REPLAY_MISMATCH)
+                raise ReplayInputMissing(Locale.REPLAY_DETAIL_TEMPLATE.format(
+                    message=Locale.VALIDATION_REPLAY_MISMATCH,
+                    detail=Locale.REPLAY_VALIDATION_INDEX_DETAIL,
+                ))
             namekey = name_key_from_header_value(commit.request_headers.get(NAME_KEY_HEADER))
             commit_request_timestamp = datetime.fromtimestamp(
                 commit.record_id.time / MILLISECONDS_PER_SECOND,
@@ -2084,13 +2276,22 @@ class AiAugmentBackendStore(FrozenStrictModel):
             projection.assessment_json is not None or projection.applied is not None
             or projection.accepted is not None or projection.baseline_obligations_json is not None
         ):
-            raise ReplayInputMissing(Locale.VALIDATION_REPLAY_MISMATCH)
+            raise ReplayInputMissing(Locale.REPLAY_DETAIL_TEMPLATE.format(
+                message=Locale.VALIDATION_REPLAY_MISMATCH,
+                detail=Locale.REPLAY_VALIDATION_UNEXPECTED_AUDIT_DETAIL,
+            ))
         if projection.output_row is not None:
             if not accepted or projection.accepted is not True:
-                raise ReplayInputMissing(Locale.VALIDATION_REPLAY_MISMATCH)
+                raise ReplayInputMissing(Locale.REPLAY_DETAIL_TEMPLATE.format(
+                    message=Locale.VALIDATION_REPLAY_MISMATCH,
+                    detail=Locale.REPLAY_VALIDATION_OUTPUT_UNACCEPTED_DETAIL,
+                ))
             self._append_codex_output(dict(projection.output_row))
         elif accepted:
-            raise ReplayInputMissing(Locale.VALIDATION_REPLAY_MISMATCH)
+            raise ReplayInputMissing(Locale.REPLAY_DETAIL_TEMPLATE.format(
+                message=Locale.VALIDATION_REPLAY_MISMATCH,
+                detail=Locale.REPLAY_VALIDATION_OUTPUT_MISSING_DETAIL,
+            ))
 
     def _project_retry_evidence(
         self,
@@ -2109,7 +2310,10 @@ class AiAugmentBackendStore(FrozenStrictModel):
             submission_json is None or assessment_json is None
             or applied is None or accepted is None
         ):
-            raise ReplayInputMissing(Locale.VALIDATION_REPLAY_MISMATCH)
+            raise ReplayInputMissing(Locale.REPLAY_DETAIL_TEMPLATE.format(
+                message=Locale.VALIDATION_REPLAY_MISMATCH,
+                detail=Locale.REPLAY_VALIDATION_RETRY_FIELDS_DETAIL,
+            ))
         body = commit.commit_request_body
         pull = body.pull_response_record
         push = body.push_response_record
@@ -2856,17 +3060,27 @@ class AiAugmentBackendStore(FrozenStrictModel):
         if body.validation_record_id is not None:
             validation_ordinal, record = self._http_record_with_ordinal(body.validation_record_id)
             validation = outcome.attempt
+            if validation_ordinal >= ordinal:
+                raise ReplayInputMissing(Locale.REPLAY_DETAIL_TEMPLATE.format(
+                    message=Locale.RUN_OUTCOME_REPLAY_MISMATCH,
+                    detail=Locale.REPLAY_OUTCOME_VALIDATION_ORDER_DETAIL,
+                ))
             if (
-                validation_ordinal >= ordinal
-                or validation is None
+                validation is None
                 or validation is not self._validation_from_cursor()
                 or validation.record_id != body.validation_record_id
                 or validation.http_request_log_record.model_dump(mode="json")
                 != record.model_dump(mode="json")
             ):
-                raise ReplayInputMissing(Locale.RUN_OUTCOME_REPLAY_MISMATCH)
+                raise ReplayInputMissing(Locale.REPLAY_DETAIL_TEMPLATE.format(
+                    message=Locale.RUN_OUTCOME_REPLAY_MISMATCH,
+                    detail=Locale.REPLAY_OUTCOME_VALIDATION_LINK_DETAIL,
+                ))
         elif outcome.attempt is not None:
-            raise ReplayInputMissing(Locale.RUN_OUTCOME_REPLAY_MISMATCH)
+            raise ReplayInputMissing(Locale.REPLAY_DETAIL_TEMPLATE.format(
+                message=Locale.RUN_OUTCOME_REPLAY_MISMATCH,
+                detail=Locale.REPLAY_OUTCOME_ATTEMPT_DETAIL,
+            ))
         init_request_record = self._init_request_record
         if init_request_record is None:
             raise ReplayInputMissing(Locale.INIT_REQUEST_RECORD_REQUIRED)
@@ -2881,7 +3095,10 @@ class AiAugmentBackendStore(FrozenStrictModel):
         # A rejected client exchange remains replayable only for the same rejection.
         if outcome.response_code == HTTPStatus.BAD_REQUEST:
             if identity_error is None:
-                raise ReplayInputMissing(Locale.RUN_OUTCOME_REPLAY_MISMATCH)
+                raise ReplayInputMissing(Locale.REPLAY_DETAIL_TEMPLATE.format(
+                    message=Locale.RUN_OUTCOME_REPLAY_MISMATCH,
+                    detail=Locale.REPLAY_OUTCOME_REJECTION_DETAIL,
+                ))
             return
         if identity_error is not None:
             raise ReplayInputMissing(identity_error)
@@ -2889,7 +3106,10 @@ class AiAugmentBackendStore(FrozenStrictModel):
         if body.commit_request_record_id is not None:
             commit_ordinal, record = self._http_record_with_ordinal(body.commit_request_record_id)
             if commit_ordinal >= ordinal:
-                raise ReplayInputMissing(Locale.RUN_OUTCOME_REPLAY_MISMATCH)
+                raise ReplayInputMissing(Locale.REPLAY_DETAIL_TEMPLATE.format(
+                    message=Locale.RUN_OUTCOME_REPLAY_MISMATCH,
+                    detail=Locale.REPLAY_OUTCOME_COMMIT_ORDER_DETAIL,
+                ))
             commit = self._backend_commit_request_record(record)
         namekey = request.namekey
         assert namekey is not None and session_id is not None
@@ -2899,7 +3119,10 @@ class AiAugmentBackendStore(FrozenStrictModel):
         if outcome.response_code != self._run_outcome_code(
             outcome.path, outcome._codex_session_record(), validation,
         ):
-            raise ReplayInputMissing(Locale.RUN_OUTCOME_REPLAY_MISMATCH)
+            raise ReplayInputMissing(Locale.REPLAY_DETAIL_TEMPLATE.format(
+                message=Locale.RUN_OUTCOME_REPLAY_MISMATCH,
+                detail=Locale.REPLAY_OUTCOME_STATUS_DETAIL,
+            ))
 
     def _apply_run_outcome_record(
         self,
@@ -2938,7 +3161,10 @@ class AiAugmentBackendStore(FrozenStrictModel):
             ) == session_id
         )
         if len(matches) != 1:
-            raise ReplayInputMissing(Locale.RUN_OUTCOME_PROJECTION_INCONSISTENT)
+            raise ReplayInputMissing(Locale.REPLAY_DETAIL_TEMPLATE.format(
+                message=Locale.RUN_OUTCOME_PROJECTION_INCONSISTENT,
+                detail=Locale.REPLAY_OUTCOME_PENDING_ROW_COUNT_TEMPLATE.format(count=len(matches)),
+            ))
         metadata_json = matches[0]
         updated_rows = self._execute(
             f"UPDATE {CODEX_OUTPUT_ROWS_TABLE} SET "
@@ -2956,7 +3182,10 @@ class AiAugmentBackendStore(FrozenStrictModel):
             ],
         ).fetchall()
         if len(updated_rows) != 1:
-            raise ReplayInputMissing(Locale.RUN_OUTCOME_PROJECTION_INCONSISTENT)
+            raise ReplayInputMissing(Locale.REPLAY_DETAIL_TEMPLATE.format(
+                message=Locale.RUN_OUTCOME_PROJECTION_INCONSISTENT,
+                detail=Locale.REPLAY_OUTCOME_UPDATED_ROW_COUNT_TEMPLATE.format(count=len(updated_rows)),
+            ))
         self._execute(
             f"INSERT INTO {RUN_OUTCOME_RECORDS_TABLE} ("
             f"{duckdb_quote_identifier(RUN_OUTCOME_RECORD_ID_COL)}, "

@@ -204,6 +204,7 @@ class Locale:
     )
     RUN_OUTCOME_BEFORE_VALIDATION: Final = 'Run outcome precedes validation of the accepted push'
     REPLAY_RECORD_FAILED_LOG: Final = 'Replay failed at line %d'
+    REPLAY_RECORD_FAILED_DETAIL_LOG: Final = 'Replay failed at line %d: %s'
     PUBLIC_HTTP_EXCHANGE_INVALID: Final = 'Public HTTP exchange has an invalid contour'
     PULL_RESPONSE_BODY_MISSING: Final = 'Pull response body is missing'
     PUSH_CAPTURED_LINKAGE_REQUIRED: Final = 'Accepted push requires captured pull/session linkage'
@@ -596,6 +597,155 @@ class Locale:
     REPLAY_COMMIT_SOURCE_KEY_INVALID: Final = "private commit SourceKey is invalid"
     REPLAY_COMMIT_NAME_KEY_INVALID: Final = "private commit NameKey is invalid"
     REPLAY_PUBLIC_PUSH_INVALID: Final = "authoritative public push audit is inconsistent"
+    REPLAY_DETAIL_TEMPLATE: Final = "{message}: {detail}"
+    REPLAY_LINE_BOUNDARY_DETAIL: Final = "missing newline or empty line"
+    REPLAY_SCHEMA_VERSION_DETAIL: Final = "schema_version is not the supported version"
+    REPLAY_RECORD_ID_DETAIL: Final = "record_id is not UUIDv7"
+    REPLAY_INIT_RECORD_DETAIL_TEMPLATE: Final = "init record: {error}"
+    REPLAY_RUN_OUTCOME_RECORD_DETAIL_TEMPLATE: Final = "run-outcome record: {error}"
+    REPLAY_DURATION_NONNEGATIVE_DETAIL: Final = "duration_usec must be nonnegative"
+    REPLAY_RESPONSE_CODE_MISSING_DETAIL: Final = "response_code is missing"
+    REPLAY_RESPONSE_HEADERS_MISSING_DETAIL: Final = "response_headers are missing"
+    REPLAY_RESPONSE_BODY_MISSING_DETAIL: Final = "response_body is missing"
+    REPLAY_RECEIVED_AT_ABSENT_DETAIL: Final = "received_at_unix_usec must be absent"
+    REPLAY_RECEIVED_AT_MISSING_DETAIL: Final = "received_at_unix_usec is missing"
+    REPLAY_READY_AT_ABSENT_DETAIL: Final = "ready_to_respond_at_unix_usec must be absent"
+    REPLAY_READY_AT_MISSING_DETAIL: Final = "ready_to_respond_at_unix_usec is missing"
+    REPLAY_DURATION_ZERO_DETAIL: Final = "duration_usec must be zero"
+    REPLAY_SCHEME_DETAIL: Final = "scheme is not the synthetic commit scheme"
+    REPLAY_HOST_DETAIL: Final = "host is not the synthetic commit host"
+    REPLAY_PORT_ABSENT_DETAIL: Final = "port must be absent"
+    REPLAY_QUERY_EMPTY_DETAIL: Final = "query must be empty"
+    REPLAY_COMMIT_HEADERS_DETAIL: Final = (
+        "request_headers must contain only SourceKey and NameKey"
+    )
+    REPLAY_REQUEST_BODY_TEXT_DETAIL: Final = "request_body must be text"
+    REPLAY_RESPONSE_CODE_ABSENT_DETAIL: Final = "response_code must be absent"
+    REPLAY_RESPONSE_HEADERS_ABSENT_DETAIL: Final = "response_headers must be absent"
+    REPLAY_RESPONSE_BODY_ABSENT_DETAIL: Final = "response_body must be absent"
+    REPLAY_REQUEST_BODY_ERROR_TEMPLATE: Final = "request_body: {error}"
+    REPLAY_VALIDATION_ERROR_DETAIL_TEMPLATE: Final = "{location}: {error_type}"
+    REPLAY_COMMIT_CURSOR_DETAIL: Final = "no commit at the replay cursor"
+    REPLAY_COMMIT_ID_DETAIL: Final = "commit record_id differs from referenced record"
+    REPLAY_COMMIT_ENVELOPE_DETAIL: Final = (
+        "commit HTTP envelope differs from durable record"
+    )
+    REPLAY_PUSH_CURSOR_DETAIL: Final = "replay cursor is not an accepted push"
+    REPLAY_PUSH_PULL_DETAIL: Final = "push has no linked pull"
+    REPLAY_COMMIT_LINKS_DETAIL: Final = "commit body links differ from the current pull/push"
+    REPLAY_OUTCOME_VALIDATION_ID_DETAIL: Final = (
+        "validation_record_id differs from replay cursor"
+    )
+    REPLAY_COMMIT_PULL_CODE_DETAIL: Final = "linked pull response is not HTTP 200"
+    REPLAY_COMMIT_PULL_TYPE_DETAIL: Final = "linked pull is not NDJSON"
+    REPLAY_COMMIT_PULL_BODY_DETAIL: Final = "linked pull response_body is empty"
+    REPLAY_COMMIT_PULL_PARSE_DETAIL_TEMPLATE: Final = "linked pull identity: {error}"
+    REPLAY_COMMIT_CURSOR_LINK_DETAIL: Final = "commit is not at the replay cursor"
+    REPLAY_COMMIT_ORDINAL_DETAIL: Final = "pull, push and commit ordinals are out of order"
+    REPLAY_COMMIT_PULL_ROUTE_DETAIL: Final = "linked pull is not GET /pull with HTTP 200"
+    REPLAY_COMMIT_PUSH_ROUTE_DETAIL: Final = "linked push is not POST /push with HTTP 202"
+    REPLAY_COMMIT_PUSH_BODY_DETAIL: Final = "linked push request_body is not text"
+    REPLAY_COMMIT_ORIGINAL_PULL_NAMEKEY_DETAIL: Final = (
+        "original pull NameKey differs from commit NameKey"
+    )
+    REPLAY_COMMIT_INIT_MISSING_DETAIL: Final = "init request is missing"
+    REPLAY_COMMIT_INIT_NAMEKEY_DETAIL: Final = "init NameKey differs from commit NameKey"
+    REPLAY_COMMIT_ROLLOUT_MISSING_DETAIL: Final = "commit rollout is missing"
+    REPLAY_COMMIT_SOURCE_LINE_COUNT_DETAIL: Final = (
+        "SourceKey line count differs from rollout line count"
+    )
+    REPLAY_VALIDATION_CURSOR_DETAIL: Final = "commit is not at the replay cursor"
+    REPLAY_VALIDATION_ORDINAL_DETAIL: Final = "commit does not precede validation"
+    REPLAY_VALIDATION_HEADERS_DETAIL: Final = "validation headers differ from commit headers"
+    REPLAY_VALIDATION_COMMIT_ENVELOPE_DETAIL: Final = (
+        "linked commit envelope differs from the durable commit"
+    )
+    REPLAY_VALIDATION_EVALUATION_DETAIL: Final = (
+        "recomputed post-commit validation differs from recorded validation"
+    )
+    REPLAY_VALIDATION_HTTP_IDS_DETAIL: Final = (
+        "replayed provider HTTP record IDs differ from recorded inputs"
+    )
+    REPLAY_VALIDATION_INDEX_DETAIL: Final = "submission exists without a rollout index"
+    REPLAY_VALIDATION_UNEXPECTED_AUDIT_DETAIL: Final = (
+        "audit fields exist without a submission"
+    )
+    REPLAY_VALIDATION_OUTPUT_UNACCEPTED_DETAIL: Final = (
+        "output row exists for an unaccepted validation"
+    )
+    REPLAY_VALIDATION_OUTPUT_MISSING_DETAIL: Final = (
+        "accepted validation has no output row"
+    )
+    REPLAY_VALIDATION_RETRY_FIELDS_DETAIL: Final = (
+        "retry evidence is missing submission, assessment, applied or accepted"
+    )
+    REPLAY_OUTCOME_VALIDATION_ORDER_DETAIL: Final = (
+        "linked validation does not precede run outcome"
+    )
+    REPLAY_OUTCOME_VALIDATION_LINK_DETAIL: Final = (
+        "linked validation differs from replay cursor or durable record"
+    )
+    REPLAY_OUTCOME_ATTEMPT_DETAIL: Final = (
+        "outcome has an attempt without validation_record_id"
+    )
+    REPLAY_OUTCOME_REJECTION_DETAIL: Final = (
+        "HTTP 400 outcome has no matching request identity error"
+    )
+    REPLAY_OUTCOME_COMMIT_ORDER_DETAIL: Final = (
+        "linked commit does not precede run outcome"
+    )
+    REPLAY_OUTCOME_STATUS_DETAIL: Final = (
+        "response_code differs from replayed outcome status"
+    )
+    REPLAY_DIFFERING_FIELDS_TEMPLATE: Final = "differing fields: {fields}"
+    REPLAY_VALIDATION_COMMIT_CURSOR_DETAIL: Final = (
+        "replay cursor is not a commit request"
+    )
+    REPLAY_OUTCOME_PENDING_ROW_COUNT_TEMPLATE: Final = (
+        "expected one pending output row; found {count}"
+    )
+    REPLAY_OUTCOME_UPDATED_ROW_COUNT_TEMPLATE: Final = (
+        "expected one updated output row; found {count}"
+    )
+    REPLAY_PULL_INITIAL_CURSOR_DETAIL: Final = (
+        "initial NDJSON pull does not follow init or an initial pull"
+    )
+    REPLAY_PULL_RETRY_CURSOR_DETAIL: Final = (
+        "retry Markdown pull has no linked validation"
+    )
+    REPLAY_PULL_RETRY_STATE_DETAIL: Final = (
+        "linked validation is not a rejected submission-validation stage"
+    )
+    REPLAY_PULL_CONTENT_TYPE_DETAIL: Final = (
+        "successful pull has an unsupported Content-Type"
+    )
+    REPLAY_PULL_VALIDATION_LINK_DETAIL: Final = (
+        "pull validation link differs from replay cursor"
+    )
+    REPLAY_PUSH_PULL_LINK_DETAIL: Final = (
+        "push pull link differs from replay cursor"
+    )
+    REPLAY_COMMIT_PREVIOUS_PUSH_DETAIL: Final = (
+        "commit does not follow a push"
+    )
+    REPLAY_COMMIT_PREVIOUS_PULL_DETAIL: Final = (
+        "commit pull link differs from preceding push"
+    )
+    REPLAY_COMMIT_PREVIOUS_PUSH_LINK_DETAIL: Final = (
+        "commit push link differs from preceding push"
+    )
+    REPLAY_VALIDATION_PREVIOUS_COMMIT_DETAIL: Final = (
+        "validation does not follow a commit"
+    )
+    REPLAY_VALIDATION_COMMIT_LINK_DETAIL: Final = (
+        "validation commit link differs from preceding commit"
+    )
+    REPLAY_VALIDATION_INITIAL_LINK_DETAIL: Final = (
+        "validation initial-attempt link differs from replayed history"
+    )
+    REPLAY_OUTCOME_ATTEMPT_LINK_DETAIL: Final = (
+        "run-outcome attempt link differs from replay cursor"
+    )
     ROLLOUT_CAS_CONFLICT: Final = "rollout content-addressed storage contains a conflict"
     ROLLOUT_CAS_BLOB_INVALID: Final = "committed rollout snapshot is missing or invalid"
     INTERNAL_COMMIT_API_TITLE: Final = "AI Augmentation Private Commit API"
