@@ -1,5 +1,91 @@
 # AI augment production — current workbook (2026-10-05)
 
+## Authorized surgical chore — vary the live completed operator target (2026-10-06)
+
+Operator asks the real completed contour E2E test to choose one of six targets:
+its existing A./Sheikh target or the first five ground-truth blueprints sorted by
+existing `ai_augment_rnd`. Exclude both INELIGIBLE and NO_GROUND_TRUTH before
+taking five. Print all five NameKeys before random selection.
+Use a fresh unseeded `Random()` per test invocation, never the configuration seed
+for the six-way choice. Existing blueprint random ranks remain unchanged.
+
+Latest operator clarification, verbatim: "oh i mean excluding ineligible and also excluding no ground truth"
+
+Operator requires the reported five names to come from execution of the test's
+own logging code, not from separate exploration or a recreated ranking.
+
+Additional operator direction: "actually you know what, lets actually assert that the five rnd selected set here is these five. and pls assert in the form of json namekeys that is exactly how user will be typing them when starting backend. use minimified serialization when typing asserts. soninliterally want assert that the calculated set is and then set and five namekeys hardcoded there as strings. surgical change"
+
+Order correction, verbatim: "oh and actually not a set - lets assert tuple instead to preserve order also"
+
+Insert the ordered assertion after the five log lines and before Random().choice.
+Use NameKey's existing Pydantic compact JSON serializer with its actual aliases;
+no helper, new global, import, or name normalization. Preserve Gaoquan's trailing
+space exactly. The full authorized insertion below includes this assertion.
+
+Add `from random import Random` and a keyword-only `randomize_target: bool = False`
+to existing `target_namekey()`. After its existing target resolution, insert:
+
+```python
+if randomize_target:
+    first_five = sorted(
+        (
+            item
+            for item in configuration.ai_augment_singular_outerdict_blueprints
+            if item.ai_augment_cohort is AiAugmentCohort.GROUND_TRUTH
+        ),
+        key=lambda item: item.ai_augment_rnd,
+    )[:5]
+    _operator_log("first five workflow candidates by ai_augment_rnd:")
+    for item in first_five:
+        _operator_log(f"ai_augment_rnd={item.ai_augment_rnd}: {item.namekey.to_json_key()}")
+    assert tuple(item.namekey.model_dump_json(by_alias=True) for item in first_five) == (
+        '{"ktp.first_name":"Kenneth G","ktp.last_name":"Cassman"}',
+        '{"ktp.first_name":"John","ktp.last_name":"Haanen"}',
+        '{"ktp.first_name":"Antoine","ktp.last_name":"Guisan"}',
+        '{"ktp.first_name":"David N","ktp.last_name":"Spergel"}',
+        '{"ktp.first_name":"Gaoquan ","ktp.last_name":"Shi"}',
+    )
+    namekey = Random().choice((namekey, *(item.namekey for item in first_five)))
+```
+
+Only `assert_completed_dashboard_backend_codex_workflow_renders_researcher_card`
+opts in with `target_namekey(operator_runtime, randomize_target=True)`. The
+separate excluded durable-410 checkpoint keeps its existing deterministic target.
+No new helper, fixture, production change, or backend launch. The previous
+unfiltered independently derived name list is withdrawn; it does not satisfy
+the operator's requested evidence. Verify names by invoking the actual
+target_namekey(..., randomize_target=True) in a faithful isolated OperatorRuntime
+with the existing source DB opened read-only. Relocate the configuration's
+Mac-specific release-map path only in the temporary config to the existing
+local tmp/map_subset0_to_batch.csv; keep source data and blueprint logic intact.
+
+Implemented the exact ground-truth filter above. Executed the existing
+_operator_runtime() preparation and target_namekey(..., randomize_target=True)
+with a temporary relocated config and the main source DB read-only, without
+mocks or a Backend launch. Its own log printout gives:
+
+| ai_augment_rnd | ktp.first_name | ktp.last_name |
+|---:|---|---|
+| 1 | Kenneth G | Cassman |
+| 5 | John | Haanen |
+| 6 | Antoine | Guisan |
+| 7 | David N | Spergel |
+| 8 | Gaoquan (stored trailing space preserved) | Shi |
+
+Evidence: logs/ai-augment-agent-checks/operator-random-target-selection.log.
+Preparation leaves replay empty and Store/DB closed; temporary files were
+automatically removed. The six-way choice selected A./Sheikh on this execution.
+Affected-file Ruff and git diff --check pass; live operator node collection
+passes (1 test). Full live Codex workflow was not run here. Git index unchanged;
+only the operator test and this workbook changed. The timestamp investigation
+remains proposal-only, with no timestamp code edits.
+
+After adding the ordered compact-JSON tuple assertion, reran the same faithful
+selection stage: the assertion passed and its five logged names/ranks match the
+table above. Affected-file Ruff and git diff --check pass again. No additional
+test, helper, or production edit; no live Codex workflow run.
+
 ## Authorized surgical chore — AI-generated prefix on each footnote argument
 
 Operator: "thing to apply: surgical change. ai generated prefix must also appear before each footnote arg same as standardized cols for example"

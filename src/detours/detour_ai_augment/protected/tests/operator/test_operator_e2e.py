@@ -15,6 +15,7 @@ import time
 from collections.abc import Generator, Iterator, Sequence
 from contextlib import contextmanager, suppress
 from pathlib import Path, PurePosixPath
+from random import Random
 from typing import Any, TextIO, cast
 from urllib import error as urllib_error
 from urllib import request as urllib_request
@@ -613,7 +614,9 @@ def running_dashboard(runtime: OperatorRuntime) -> Generator[DashboardProcess]:
             dashboard.stop()
 
 
-def target_namekey(runtime: OperatorRuntime) -> NameKey:
+def target_namekey(
+    runtime: OperatorRuntime, *, randomize_target: bool = False,
+) -> NameKey:
     _operator_log("selecting the operator workflow target")
     configuration = AiAugmentBackendContext(
         pipeline_config=AiAugmentDetourConfig.from_json(
@@ -627,6 +630,26 @@ def target_namekey(runtime: OperatorRuntime) -> NameKey:
         if OPERATOR_TARGET_DRAW_NUMBER in item.draw_numbers
         and item.ai_augment_cohort is not AiAugmentCohort.INELIGIBLE
     )
+    if randomize_target:
+        first_five = sorted(
+            (
+                item
+                for item in configuration.ai_augment_singular_outerdict_blueprints
+                if item.ai_augment_cohort is AiAugmentCohort.GROUND_TRUTH
+            ),
+            key=lambda item: item.ai_augment_rnd,
+        )[:5]
+        _operator_log("first five workflow candidates by ai_augment_rnd:")
+        for item in first_five:
+            _operator_log(f"ai_augment_rnd={item.ai_augment_rnd}: {item.namekey.to_json_key()}")
+        assert tuple(item.namekey.model_dump_json(by_alias=True) for item in first_five) == (
+            '{"ktp.first_name":"Kenneth G","ktp.last_name":"Cassman"}',
+            '{"ktp.first_name":"John","ktp.last_name":"Haanen"}',
+            '{"ktp.first_name":"Antoine","ktp.last_name":"Guisan"}',
+            '{"ktp.first_name":"David N","ktp.last_name":"Spergel"}',
+            '{"ktp.first_name":"Gaoquan ","ktp.last_name":"Shi"}',
+        )
+        namekey = Random().choice((namekey, *(item.namekey for item in first_five)))
     _operator_log(f"selected workflow target {namekey}")
     return namekey
 
@@ -1341,7 +1364,7 @@ def assert_completed_dashboard_backend_codex_workflow_renders_researcher_card(
 ) -> None:
     _assert_deployed_appendwatch_topology(operator_runtime)
     _operator_log("preparing isolated completed-workflow runtime")
-    namekey = target_namekey(operator_runtime)
+    namekey = target_namekey(operator_runtime, randomize_target=True)
 
     with running_dashboard(operator_runtime) as dashboard:
         checkpoint = run_workflow_to_gone_pull(
