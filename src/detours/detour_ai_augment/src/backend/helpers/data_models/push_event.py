@@ -44,7 +44,17 @@ class PushRequestRecord(RequestRecord):
 
     @model_validator(mode="after")
     def _validate_exchange(self) -> Self:
-        _validate_public_exchange(self, HTTP_POST_METHOD, PUSH_PATH)
+        if (
+            self.method != HTTP_POST_METHOD
+            or self.path != PUSH_PATH
+            or self.response_code is not None
+            or self.response_headers is not None
+            or self.response_body is not None
+            or self.received_at_unix_usec is None
+            or self.ready_to_respond_at_unix_usec is not None
+            or self.duration_usec != 0
+        ):
+            raise ValueError(Locale.PUBLIC_HTTP_EXCHANGE_INVALID)
         return self
 
 

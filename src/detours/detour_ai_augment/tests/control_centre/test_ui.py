@@ -10,6 +10,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from collections.abc import AsyncIterator
 from contextlib import ExitStack, asynccontextmanager, nullcontext
 from copy import deepcopy
@@ -32,13 +33,17 @@ from fastapi import status
 from nicegui import app, ui
 from pydantic import ValidationError
 
-from src.detours.detour_ai_augment.protected.src.backend import api, ipc
+from src.detours.detour_ai_augment.protected.src.backend import server as backend_server
+from src.detours.detour_ai_augment.protected.src.backend.helpers import api
 from src.detours.detour_ai_augment.protected.src.backend.helpers.codex_parse import (
     render_footnoted_submission_value,
     render_standardized_submission_value,
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_augment_config import (  # noqa: E501
     AiAugmentDetourConfig,
+)
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.codex_rollout_record import (  # noqa: E501
+    CodexRolloutRecord,
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.post_commit_validation import (  # noqa: E501
     PostCommitValidation,
@@ -53,13 +58,21 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     AI_AUGMENT_COLUMNS,
     AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS,
     APPENDWATCH_OK_PREFIX,
+    APPENDWATCH_REPORT_ENV_NAME,
     AUTHORITATIVE_RECORDS_TABLE,
     BACKEND_STORE_CLOSED_CLEANLY,
+    BASE64_TEXT_ENCODING,
     CARD_EXCLUDED_COLUMNS,
     CODEX_OUTPUT_SCHEMA,
+    CODEX_SESSIONS_ROOT_ENV_NAME,
+    CONFIG_FILENAME,
+    DASHBOARD_QUERY_PATH,
+    DASHBOARD_SOCKET_PATH_ENV_NAME,
     DOCX_COLUMNS,
     DOCX_TO_AI_AUGMENT_COLUMNS,
+    ETAG_HEADER,
     EXCLUDED_NAMEKEY,
+    HTTP_CONTENT_LENGTH_HEADER,
     HTTP_CONTENT_TYPE_HEADER,
     HTTP_GET_METHOD,
     HTTP_POST_METHOD,
@@ -68,21 +81,49 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL,
     KTP_AI_AUGMENT_SESSION_METADATA_COL,
     NAME_KEY_HEADER,
+    NAMEKEY_ENV_NAME,
+    NANOSECONDS_PER_MICROSECOND,
     NOT_REPORTED_VALUE,
     PULL_PATH,
     PUSH_PATH,
     QUERY_PATH,
+    ROLLOUT_ENV_NAME,
+    ROLLOUT_FILENAME_PREFIX,
+    ROLLOUT_FILENAME_SUFFIX,
     ROLLOUT_LINE_FRAGMENT_TYPE,
+    SESSION_ID_HEADER,
     SOURCE_KEY_HEADER,
+    SYNTHETIC_COMMIT_HOST,
+    SYNTHETIC_COMMIT_SCHEME,
+    TEXT_ENCODING,
     AiAugmentCohort,
     AiAugmentIneligibilityCategory,
     ContentType,
 )
-from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helpers import (
-    vars as control_vars,
-)
 from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helpers.locale import (
     Locale,
+)
+from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helpers.vars import (
+    BACKEND_AVAILABILITY_TIMEOUT_SECONDS,
+    BACKEND_OPENAPI_URL,
+    BACKEND_PULL_URL,
+    CODEX_CLI_BIN_PATH,
+    CODEX_ENV_PATH,
+    CODEX_REMOTE_BUSY_COMMAND,
+    CODEX_SESSIONS_ROOT,
+    CONTROL_HTTP_TIMEOUT_SECONDS,
+    DEFAULT_CONFIG_PATH,
+    REPOSITORY_ROOT,
+    SPREADSHEET_COMPLETED_FILENAME,
+    TEXT_ENCODING_WITH_BOM,
+)
+from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helpers.vars import (
+    TEXT_ENCODING as CONTROL_TEXT_ENCODING,
+)
+from src.detours.detour_ai_augment.protected.src.shared import (
+    name_key_header_value,
+    source_key_from_header_value,
+    source_key_header_value,
 )
 from src.detours.detour_ai_augment.protected.tests.fixtures.pytest_fixtures import (  # noqa: E501
     ROOT,
@@ -105,12 +146,12 @@ from src.detours.detour_ai_augment.protected.tests.pytest_plugin import (
 from src.detours.detour_ai_augment.src.agent_runtime.helpers.data_models.attempt import (
     AgentRuntimeAttempt,
 )
-from src.detours.detour_ai_augment.src.backend import server as backend_server
 from src.detours.detour_ai_augment.src.backend.helpers.data_models import (
     ai_augment_context as backend_context_models,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_singular_outer_dict import (  # noqa: E501
     AiAugmentSingularOuterDict,
+    _AiAugmentSingularOuterDictJson,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.codex_innerdict import (  # noqa: E501
     CodexInnerDict,
@@ -120,9 +161,9 @@ from src.detours.detour_ai_augment.src.backend.helpers.data_models.commit_reques
     AppendwatchReportEncoding,
     AppendwatchReportRecord,
     BackendCommitRequestRecord,
-    CodexRolloutRecord,
     CodexSessionRecord,
     CommitRequestBody,
+    _CodexSessionRecordJson,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.lifecycle import (
     BackendLifecycle,
@@ -134,6 +175,8 @@ from src.detours.detour_ai_augment.src.backend.helpers.data_models.push_event im
     PushResponseRecord,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.validation_request import (
+    VALIDATE_PATH,
+    BackendValidationRequestRecord,
     ValidationRequestBody,
 )
 from src.detours.detour_ai_augment.src.control_centre.dashboard import ui as control_ui
@@ -158,15 +201,12 @@ from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_mod
 from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.query_event import (  # noqa: E501
     QueryRequestRecord,
     QueryResponseRecord,
+    _QueryResponseBodyJson,
 )
 from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.run_outcome_event import (  # noqa: E501
     RunOutcomeRequestRecord,
     RunOutcomeResponseRecord,
-)
-from src.detours.detour_ai_augment.src.shared import (
-    name_key_header_value,
-    source_key_from_header_value,
-    source_key_header_value,
+    _RunOutcomeResponseBodyJson,
 )
 from src.helpers.cards import build_cards
 from src.helpers.data_models import HttpRequestLogRecord, InnerDict, NameKey
@@ -214,7 +254,7 @@ def http_record(
     response_headers: dict[str, str] | None = None,
 ) -> HttpRequestLogRecord:
     return HttpRequestLogRecord(
-        schema_version="1.1",
+        schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
         record_id=uuid7(),
         method=method,
         scheme="http",
@@ -228,7 +268,7 @@ def http_record(
         response_code=response_code,
         response_headers={} if response_headers is None else response_headers,
         response_body="",
-        received_at_unix_usec=1,
+        received_at_unix_usec=None,
         duration_usec=1,
     )
 
@@ -245,20 +285,27 @@ def run_outcome_response_record(
         run_outcome=run_outcome, namekey=namekey, session_id=session_id,
         validation_record_id=None if attempt is None else attempt.record_id,
     )
-    request = RunOutcomeRequestRecord.from_http_request(
-        received_at_unix_usec=1,
+    request = RunOutcomeRequestRecord(
+        schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
+        record_id=uuid7(),
         method=HTTP_POST_METHOD,
-        scheme="http",
-        host="invalid",
+        scheme=SYNTHETIC_COMMIT_SCHEME,
+        host=SYNTHETIC_COMMIT_HOST,
         port=None,
         path=run_outcome.to_run_outcome_path(),
         query="",
-        request_headers=headers,
+        request_headers=dict(headers),
         request_body=None,
+        response_code=None,
+        response_headers=None,
+        response_body=None,
+        received_at_unix_usec=1,
+        ready_to_respond_at_unix_usec=None,
+        duration_usec=0,
     )
     rollout_filename: str | None = None
     if response_code in {status.HTTP_200_OK, status.HTTP_409_CONFLICT}:
-        rollout_filename = f"{api.ROLLOUT_FILENAME_PREFIX}{session_id}.jsonl"
+        rollout_filename = f"{ROLLOUT_FILENAME_PREFIX}{session_id}{ROLLOUT_FILENAME_SUFFIX}"
         report = (
             f".\n└── {APPENDWATCH_OK_PREFIX}"
             f"{rollout_filename}\n"
@@ -275,7 +322,7 @@ def run_outcome_response_record(
             ),
             appendwatch_report_record=AppendwatchReportRecord(
                 encoding=AppendwatchReportEncoding.BASE64,
-                data=base64.b64encode(report).decode("ascii"),
+                data=base64.b64encode(report).decode(BASE64_TEXT_ENCODING),
             ),
         )
     else:
@@ -285,10 +332,8 @@ def run_outcome_response_record(
             codex_rollout_record=None,
             appendwatch_report_record=None,
         )
-    return RunOutcomeResponseRecord.from_run_outcome_request_record(
-        request,
-        response_code=HTTPStatus(response_code),
-        response_headers=response_headers,
+    response_id = uuid7()
+    body = _RunOutcomeResponseBodyJson(
         pull_record_id=None,
         push_record_id=None,
         commit_request_record_id=(
@@ -296,8 +341,36 @@ def run_outcome_response_record(
             attempt.validation_request_body.commit_request_record.record_id
         ),
         validation_record_id=None if attempt is None else attempt.record_id,
-        codex_session_record=session,
+        run_outcome_record_id=response_id,
+        codex_session_record=_CodexSessionRecordJson(
+            codex_session_id=session.session_id,
+            codex_rollout_record=session.codex_rollout_record,
+            appendwatch_report_record=session.appendwatch_report_record,
+        ),
+    ).model_dump_json()
+    reply = api._response(
+        HTTPStatus(response_code), body,
+        content_type=ContentType.JSON, headers=response_headers,
+    )
+    assert request.received_at_unix_usec is not None
+    return RunOutcomeResponseRecord(
+        schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
+        record_id=response_id,
+        method=HTTP_POST_METHOD,
+        scheme=SYNTHETIC_COMMIT_SCHEME,
+        host=SYNTHETIC_COMMIT_HOST,
+        port=None,
+        path=run_outcome.to_run_outcome_path(),
+        query="",
+        request_headers=dict(headers),
+        request_body=None,
+        response_code=reply.status_code,
+        response_headers=dict(reply.headers),
+        response_body=reply.content.decode(TEXT_ENCODING),
+        received_at_unix_usec=None,
         ready_to_respond_at_unix_usec=2,
+        duration_usec=2 - request.received_at_unix_usec,
+        run_outcome_request_record=request,
         attempt=attempt,
     )
 
@@ -345,17 +418,17 @@ def agent_runtime_attempt(
         codex_session_record=codex_session_record,
     )
     commit_request_record = BackendCommitRequestRecord(
-        schema_version="1.1",
+        schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
         record_id=commit_request_record_id or uuid7(),
         method=HTTP_POST_METHOD,
-        scheme="http",
-        host="invalid",
+        scheme=SYNTHETIC_COMMIT_SCHEME,
+        host=SYNTHETIC_COMMIT_HOST,
         port=None,
-        ready_to_respond_at_unix_usec=None,
+        ready_to_respond_at_unix_usec=time.time_ns() // NANOSECONDS_PER_MICROSECOND,
         path="/commit",
         query="",
         request_headers={
-            "SourceKey": (
+            SOURCE_KEY_HEADER: (
                 'ktp.filename="rollout.jsonl", '
                 'ktp.fragment;type="line_number";line_number="1"'
             ),
@@ -366,10 +439,10 @@ def agent_runtime_attempt(
         response_headers=None,
         response_body=None,
         received_at_unix_usec=None,
-        duration_usec=None,
+        duration_usec=0,
         commit_request_body=commit_body,
     )
-    return ValidationRequestBody(
+    validation_body = ValidationRequestBody(
         commit_request_record=commit_request_record,
         post_commit_validation=PostCommitValidation(
             stage=(
@@ -387,7 +460,25 @@ def agent_runtime_attempt(
             ),
         ),
         initial_validation_request_record=None,
-    ).http_record()
+    )
+    return BackendValidationRequestRecord(
+        validation_request_body=validation_body,
+        schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
+        method=HTTP_POST_METHOD,
+        scheme=SYNTHETIC_COMMIT_SCHEME,
+        host=SYNTHETIC_COMMIT_HOST,
+        port=None,
+        path=VALIDATE_PATH,
+        query="",
+        request_headers=dict(commit_request_record.request_headers),
+        request_body=validation_body.model_dump_json(by_alias=True),
+        response_code=None,
+        response_headers=None,
+        response_body=None,
+        received_at_unix_usec=None,
+        ready_to_respond_at_unix_usec=time.time_ns() // NANOSECONDS_PER_MICROSECOND,
+        duration_usec=0,
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -401,7 +492,7 @@ def faithful_publishing_services(
 ) -> control_ui._ApplicationServices:
     lima_path = tmp_path / "lima.yaml"
     lima_path.write_text(json.dumps({
-        "param": {api.APPENDWATCH_REPORT_ENV_NAME: str(tmp_path / "appendwatch.txt")},
+        "param": {APPENDWATCH_REPORT_ENV_NAME: str(tmp_path / "appendwatch.txt")},
         "mounts": [],
     }))
     monkeypatch.setattr(context_models, "LIMA_CONFIG_PATH", lima_path)
@@ -553,13 +644,38 @@ def store_query_response_and_runs(
         response_body=None,
         received_at_unix_usec=1,
         ready_to_respond_at_unix_usec=None,
-        duration_usec=None,
+        duration_usec=0,
     )
-    response = QueryResponseRecord.from_query_request(
-        request,
-        ai_augment_singular_outerdicts=researchers,
+    body = _QueryResponseBodyJson(
+        ai_augment_singular_outerdicts=tuple(
+            _AiAugmentSingularOuterDictJson.from_ai_augment_singular_outerdict(researcher)
+            for researcher in researchers
+        ),
+    ).model_dump_json()
+    assert request.received_at_unix_usec is not None
+    response = QueryResponseRecord(
+        schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
+        record_id=uuid7(),
+        method=HTTP_GET_METHOD,
+        scheme="http",
+        host="testserver",
+        port=None,
+        path=QUERY_PATH,
+        query="",
+        request_headers={},
+        request_body=None,
+        response_code=HTTPStatus.OK,
+        response_headers={
+            HTTP_CONTENT_TYPE_HEADER: ContentType.JSON,
+            HTTP_CONTENT_LENGTH_HEADER: str(len(body.encode(TEXT_ENCODING))),
+        },
+        response_body=body,
+        received_at_unix_usec=None,
         ready_to_respond_at_unix_usec=2,
+        duration_usec=2 - request.received_at_unix_usec,
+        ai_augment_singular_outerdicts=researchers,
     )
+    assert response.record_id != request.record_id
     assert response.response_body is not None
     application.storage.replace_query_snapshot(
         DashboardQuerySnapshot.from_serialized_json(response.response_body)
@@ -728,7 +844,7 @@ def services(
     pipeline = configured_pipeline_config()
     configuration = SimpleNamespace(
         pipeline_config=pipeline, openalex_api_key="test-key",
-        lima_configuration=SimpleNamespace(param={api.APPENDWATCH_REPORT_ENV_NAME: "/test/report"}),
+        lima_configuration=SimpleNamespace(param={APPENDWATCH_REPORT_ENV_NAME: "/test/report"}),
     )
     application_services = control_ui._ApplicationServices
     # Exercise production composition/query closure with hermetic transport/process doubles.
@@ -878,7 +994,7 @@ async def test_displayed_card_download_uses_exact_markdown_and_shared_filename(
         expected_media_type = control_ui.DOCX_MEDIA_TYPE
     else:
         assert rendered == []
-        expected_bytes = "## Exact displayed card\n\n**Café — 研究**\n".encode("utf-8")
+        expected_bytes = "## Exact displayed card\n\n**Café — 研究**\n".encode(TEXT_ENCODING)
         expected_media_type = "text/plain; charset=utf-8"
     filename = f"1_pilot2_Jane_DoeSmith.{output_format}"
     assert downloads == [(expected_bytes, filename, expected_media_type)]
@@ -902,9 +1018,9 @@ def test_dashboard_paths_resolve_from_repository_root(
     pytestconfig: pytest.Config,
 ) -> None:
     repository_root = pytestconfig.rootpath
-    assert control_vars.REPOSITORY_ROOT == repository_root
-    assert control_vars.REPOSITORY_ROOT == repository_root
-    assert control_vars.DEFAULT_CONFIG_PATH == repository_root / "config_ai_augment.json"
+    assert REPOSITORY_ROOT == repository_root
+    assert REPOSITORY_ROOT == repository_root
+    assert DEFAULT_CONFIG_PATH == repository_root / "config_ai_augment.json"
 
 
 def test_dashboard_context_has_no_backend_factory() -> None:
@@ -1277,7 +1393,7 @@ def test_ipc_availability_logs_socket_path_and_distinct_failure(
     assert ("IPC probe error" in messages[0]) == isinstance(failure, PermissionError)
     connection.close.assert_called_once_with()
     connection.request.assert_called_once_with(
-        control_ui.HTTP_OPTIONS_METHOD, ipc.DASHBOARD_QUERY_PATH,
+        control_ui.HTTP_OPTIONS_METHOD, DASHBOARD_QUERY_PATH,
     )
 
 
@@ -1333,15 +1449,15 @@ def test_backend_database_client_queries_unix_socket_without_authentication(
     assert calls == [
         (
             socket_path,
-            control_vars.BACKEND_AVAILABILITY_TIMEOUT_SECONDS,
+            BACKEND_AVAILABILITY_TIMEOUT_SECONDS,
             control_ui.HTTP_OPTIONS_METHOD,
-            ipc.DASHBOARD_QUERY_PATH,
+            DASHBOARD_QUERY_PATH,
         ),
         (
             socket_path,
-            control_vars.CONTROL_HTTP_TIMEOUT_SECONDS,
+            CONTROL_HTTP_TIMEOUT_SECONDS,
             HTTP_GET_METHOD,
-            ipc.DASHBOARD_QUERY_PATH,
+            DASHBOARD_QUERY_PATH,
         ),
     ]
 
@@ -1363,7 +1479,7 @@ def test_backend_database_client_posts_exact_run_outcome_request(
     calls: list[tuple[str, str, dict[str, str]]] = []
     namekey = NameKey(first_name="Jane", last_name="Doe")
     session_id = UUID(str(SESSION_ID))
-    rollout_filename = f"{api.ROLLOUT_FILENAME_PREFIX}{session_id}.jsonl"
+    rollout_filename = f"{ROLLOUT_FILENAME_PREFIX}{session_id}{ROLLOUT_FILENAME_SUFFIX}"
     accepted_attempt = (
         agent_runtime_attempt(session_id=session_id)
         if response_code == status.HTTP_200_OK else None
@@ -1398,7 +1514,7 @@ def test_backend_database_client_posts_exact_run_outcome_request(
     class FakeConnection:
         def __init__(self, *, socket_path: Path, timeout: float) -> None:
             assert socket_path == tmp_path / "dashboard.sock"
-            assert timeout == control_vars.CONTROL_HTTP_TIMEOUT_SECONDS
+            assert timeout == CONTROL_HTTP_TIMEOUT_SECONDS
 
         def request(
             self,
@@ -1436,8 +1552,8 @@ def test_backend_database_client_posts_exact_run_outcome_request(
             run_outcome_models.COMPLETED_PATH,
             {
                 run_outcome_models.NAME_KEY_HEADER: name_key_header_value(namekey),
-                "Session-ID": str(SESSION_ID),
-                "ETag": f'"{validation_record_id}"',
+                SESSION_ID_HEADER: str(SESSION_ID),
+                ETAG_HEADER: f'"{validation_record_id}"',
             },
         )
     ]
@@ -1585,8 +1701,8 @@ def test_backend_api_availability_uses_short_fail_fast_timeout(
     )
 
     assert subject.full_api_available() is True
-    assert observed_timeouts == [control_vars.BACKEND_AVAILABILITY_TIMEOUT_SECONDS]
-    assert 0 < control_vars.BACKEND_AVAILABILITY_TIMEOUT_SECONDS <= 1
+    assert observed_timeouts == [BACKEND_AVAILABILITY_TIMEOUT_SECONDS]
+    assert 0 < BACKEND_AVAILABILITY_TIMEOUT_SECONDS <= 1
 
 
 def test_run_event_replay_keeps_dashboard_queue_ownership() -> None:
@@ -2362,16 +2478,16 @@ async def test_backend_supervisor_refuses_replacement_and_uses_stdin(
     assert first_options["cwd"] == tmp_path
     assert first_options["stdin"] is asyncio.subprocess.PIPE
     assert first_options["start_new_session"] is True
-    assert first_environment[api.NAMEKEY_ENV_NAME] == NAMEKEY.to_json_key()
-    assert second_environment[api.NAMEKEY_ENV_NAME] == SECOND_NAMEKEY.to_json_key()
-    assert second_environment[api.CODEX_SESSIONS_ROOT_ENV_NAME] == str(
-        control_vars.CODEX_SESSIONS_ROOT
+    assert first_environment[NAMEKEY_ENV_NAME] == NAMEKEY.to_json_key()
+    assert second_environment[NAMEKEY_ENV_NAME] == SECOND_NAMEKEY.to_json_key()
+    assert second_environment[CODEX_SESSIONS_ROOT_ENV_NAME] == str(
+        CODEX_SESSIONS_ROOT
     )
-    assert second_environment[api.APPENDWATCH_REPORT_ENV_NAME] == ("/mounted/appendwatch.txt")
-    assert second_environment[ipc.DASHBOARD_SOCKET_PATH_ENV_NAME] == str(
+    assert second_environment[APPENDWATCH_REPORT_ENV_NAME] == ("/mounted/appendwatch.txt")
+    assert second_environment[DASHBOARD_SOCKET_PATH_ENV_NAME] == str(
         tmp_path / "dashboard.sock"
     )
-    assert api.ROLLOUT_ENV_NAME not in second_environment
+    assert ROLLOUT_ENV_NAME not in second_environment
     assert first_process.stdin.writes == [f"{SESSION_ID}\n".encode()]
     assert first_process.stdin.closed is True
     assert first_process.returncode == -15
@@ -2400,7 +2516,7 @@ async def test_backend_readiness_uses_ipc_and_openapi_without_pull(
             return b""
 
     def urlopen(request: object, *, timeout: float) -> FakeResponse:
-        assert timeout == control_vars.BACKEND_AVAILABILITY_TIMEOUT_SECONDS
+        assert timeout == BACKEND_AVAILABILITY_TIMEOUT_SECONDS
         requested_urls.append(cast(Any, request).full_url)
         return FakeResponse()
 
@@ -2431,7 +2547,7 @@ async def test_backend_readiness_uses_ipc_and_openapi_without_pull(
     await subject.wait_until_ready()
 
     assert ipc_probes == [True]
-    assert requested_urls == [control_vars.BACKEND_OPENAPI_URL]
+    assert requested_urls == [BACKEND_OPENAPI_URL]
 
 
 @pytest.mark.anyio
@@ -2484,11 +2600,11 @@ async def test_codex_runner_starts_fresh_exec_process_and_sends_only_openapi_url
 
     assert len(process_calls) == 2
     assert all("resume" not in " ".join(map(str, call)) for call in process_calls)
-    assert all(str(control_vars.CODEX_ENV_PATH) in str(call[-1]) for call in process_calls)
+    assert all(str(CODEX_ENV_PATH) in str(call[-1]) for call in process_calls)
     assert all("key" not in str(call[-1]) for call in process_calls)
     assert [process.stdin.writes for process in processes] == [
-        [f"{control_vars.BACKEND_OPENAPI_URL}\n".encode()],
-        [f"{control_vars.BACKEND_OPENAPI_URL}\n".encode()],
+        [f"{BACKEND_OPENAPI_URL}\n".encode()],
+        [f"{BACKEND_OPENAPI_URL}\n".encode()],
     ]
 
 
@@ -2519,7 +2635,7 @@ async def test_codex_busy_probe_covers_every_runtime_account_codex_process(
     monkeypatch.setattr(runner, "_remote_command", remote_command)
 
     assert await runner.is_busy() is expected
-    assert commands == [control_vars.CODEX_REMOTE_BUSY_COMMAND]
+    assert commands == [CODEX_REMOTE_BUSY_COMMAND]
     assert 'pgrep -u "$(id -u)" -x codex' in commands[0]
     assert "codex exec" not in commands[0]
 
@@ -2632,16 +2748,16 @@ async def test_pull_status_including_http_errors_consumes_and_closes_body(
     validation_id = uuid7()
     headers = Message()
     if response_status == HTTPStatus.GONE:
-        headers["ETag"] = f'"{validation_id}"'
+        headers[ETAG_HEADER] = f'"{validation_id}"'
     response = urllib_error.HTTPError(
-        control_vars.BACKEND_PULL_URL, response_status, "test", headers, body,
+        BACKEND_PULL_URL, response_status, "test", headers, body,
     )
     calls: list[str] = []
 
     def urlopen(request: urllib_request.Request, *, timeout: float) -> object:
         calls.append(request.full_url)
-        assert request.get_method() == "GET"
-        assert timeout == control_vars.CONTROL_HTTP_TIMEOUT_SECONDS
+        assert request.get_method() == HTTP_GET_METHOD
+        assert timeout == CONTROL_HTTP_TIMEOUT_SECONDS
         if response_status >= 400:
             raise response
         return response
@@ -2658,7 +2774,7 @@ async def test_pull_status_including_http_errors_consumes_and_closes_body(
     assert await backend.probe_pull() == (
         response_status, validation_id if response_status == HTTPStatus.GONE else None,
     )
-    assert calls == [control_vars.BACKEND_PULL_URL]
+    assert calls == [BACKEND_PULL_URL]
     assert body.closed
 
 
@@ -2725,7 +2841,7 @@ async def test_ssh_auth_probes_use_existing_route_and_bound_command_time(
     assert await runner.probe_auth()
     assert calls == [
         ("cat", control_ui.SSH_PROBE_MARKER),
-        (f"{control_vars.CODEX_CLI_BIN_PATH} login status", None),
+        (f"{CODEX_CLI_BIN_PATH} login status", None),
     ]
     cancelled = asyncio.Event()
 
@@ -3050,7 +3166,7 @@ def test_card_without_commits_matches_shared_renderer_unchanged(tmp_path: Path) 
         intro=CARD_INTRODUCTION.format(
             datetime.now(ZoneInfo(configuration.timezone)).strftime(Locale.CARD_INTRO_DATE_FORMAT)
         ),
-        excluded_cols=api.CARD_EXCLUDED_COLUMNS,
+        excluded_cols=CARD_EXCLUDED_COLUMNS,
     )
     markdown = client.card(source)
     assert markdown == next(iter(expected.values()))
@@ -3486,7 +3602,7 @@ async def test_publish_completed_includes_earlier_completed_run_and_writes_cards
                     assert "word/document.xml" in document.namelist()
             else:
                 assert destination.read_bytes() == card.card_markdown.encode(
-                    control_vars.TEXT_ENCODING,
+                    CONTROL_TEXT_ENCODING,
                 )
         assert app.storage.general == before
         assert not subject.queue_processing
@@ -3586,9 +3702,9 @@ async def test_spreadsheet_completed_preserves_card_values_and_ground_truth_pair
         control_ui.spreadsheet_completed(application)
         destination = (
             application.configuration.pipeline_config.output_dir
-            / control_vars.SPREADSHEET_COMPLETED_FILENAME
+            / SPREADSHEET_COMPLETED_FILENAME
         )
-        with destination.open(newline="", encoding=control_vars.TEXT_ENCODING_WITH_BOM) as file:
+        with destination.open(newline="", encoding=TEXT_ENCODING_WITH_BOM) as file:
             reader = csv.DictReader(file)
             rows = list(reader)
             columns = reader.fieldnames
@@ -3747,7 +3863,7 @@ async def test_publish_one_shot_shutdown_noop_or_first_error_keeps_written_files
                     assert "word/document.xml" in document.namelist()
             else:
                 assert destination.read_bytes() == first_card.card_markdown.encode(
-                    control_vars.TEXT_ENCODING,
+                    CONTROL_TEXT_ENCODING,
                 )
             assert "IsADirectoryError" in capsys.readouterr().out
         else:
@@ -3801,10 +3917,11 @@ def start(
 
 def record_line() -> bytes:
     return (HttpRequestLogRecord(
-        schema_version="1.1", record_id=uuid7(), method="GET", scheme="https",
+        schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
+        record_id=uuid7(), method=HTTP_GET_METHOD, scheme="https",
         host="startup.invalid", port=None, path="/fixture", query="", request_headers={},
         request_body=None, response_code=200, response_headers={}, response_body="{}",
-        received_at_unix_usec=1, ready_to_respond_at_unix_usec=2, duration_usec=1,
+        received_at_unix_usec=1, ready_to_respond_at_unix_usec=None, duration_usec=1,
     ).model_dump_json() + "\n").encode()
 
 
@@ -3831,7 +3948,7 @@ class TestBackendStartupConditions:
         files = startup_files
         repository = files.config.parent / "operator-repository"
         repository.mkdir()
-        (repository / "config_ai_augment.json").write_bytes(files.config.read_bytes())
+        (repository / CONFIG_FILENAME).write_bytes(files.config.read_bytes())
         isolated = files.config.parent / "operator-runtime"
         isolated.mkdir()
         source_before = hashlib.sha256(files.source.read_bytes()).hexdigest()
@@ -3936,7 +4053,7 @@ class TestBackendStartupConditions:
             appended_lines = after_log[len(before_log):].splitlines()
             assert len(appended_lines) == 1
             logged_init_request_record = BackendInitRequestRecord.from_serialized_json(
-                value=appended_lines[0].decode(control_vars.TEXT_ENCODING),
+                value=appended_lines[0].decode(CONTROL_TEXT_ENCODING),
             )
             assert namekey is not None
             assert logged_init_request_record.namekey == NameKey.from_json_key(namekey)
@@ -3995,7 +4112,7 @@ class TestBackendStartupConditions:
             appended_lines = after_log[len(log):].splitlines()
             assert len(appended_lines) == 1
             logged_init_request_record = BackendInitRequestRecord.from_serialized_json(
-                value=appended_lines[0].decode(control_vars.TEXT_ENCODING),
+                value=appended_lines[0].decode(CONTROL_TEXT_ENCODING),
             )
             assert logged_init_request_record.namekey == STARTUP_NAMEKEY
         else:

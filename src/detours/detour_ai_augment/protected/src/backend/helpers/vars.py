@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
@@ -467,3 +468,19 @@ TREE_LINE = re.compile(
     rf"^(?P<{TREE_INDENT_GROUP}>(?:(?:│   )|(?:    ))*)"
     rf"(?:├── |└── )(?P<{TREE_BODY_GROUP}>.*)$"
 )
+
+# ===================
+# From former ipc.py
+# ===================
+
+SOCKET_PERMISSIONS = 0o600
+DASHBOARD_IPC_SCHEME = SYNTHETIC_COMMIT_SCHEME
+DASHBOARD_IPC_HOST = SYNTHETIC_COMMIT_HOST
+DASHBOARD_SOCKET_PATH_ENV_NAME = "FASTAPI_DETOUR_DASHBOARD_SOCKET"
+DASHBOARD_QUERY_PATH = QUERY_PATH
+DEFAULT_DASHBOARD_SOCKET_PATH = (
+    Path(tempfile.gettempdir()) / f"ktp-hcr-detour-ai-augment-{os.getuid()}.sock"
+)
+DASHBOARD_SOCKET_PATH = Path(
+    os.environ.get(DASHBOARD_SOCKET_PATH_ENV_NAME, DEFAULT_DASHBOARD_SOCKET_PATH)
+).expanduser()

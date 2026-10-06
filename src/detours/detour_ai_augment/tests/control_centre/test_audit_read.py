@@ -16,12 +16,15 @@ from unittest.mock import Mock
 import pytest
 from pydantic import BaseModel, ConfigDict, field_validator
 
+from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helpers.vars import (
+    TEXT_ENCODING,
+)
 from src.detours.detour_ai_augment.protected.tests.pytest_plugin import (
     PythonProcess,
     audit_probe_process,
     deployed_guest_imports_process,
 )
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_context import (
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_context import (  # noqa: E501
     AiAugmentBackendContext,
 )
 from src.detours.detour_ai_augment.src.control_centre.appendwatch import audit_read
@@ -137,7 +140,7 @@ def test_audit_configuration_must_be_protected_and_has_exact_shape(
             "sessions_root": str(configured.sessions_root),
             "appendwatch_report": str(configured.appendwatch_report),
         }),
-        encoding="utf-8",
+        encoding=TEXT_ENCODING,
     )
     path.chmod(0o600)
 
@@ -162,8 +165,8 @@ def test_runtime_provisioning_preserves_reverse_sshfs_ownership(
     )
     provision_path = runtime_root / "provision.sh"
     deploy_path = runtime_root / "deploy.sh"
-    provision = provision_path.read_text(encoding="utf-8")
-    deploy = deploy_path.read_text(encoding="utf-8")
+    provision = provision_path.read_text(encoding=TEXT_ENCODING)
+    deploy = deploy_path.read_text(encoding=TEXT_ENCODING)
 
     assert 'chown root:"$AIVM_AUDIT_USER" "$APPENDWATCH_DIR"' not in provision
     assert 'chmod 0700 "$APPENDWATCH_DIR"' in provision

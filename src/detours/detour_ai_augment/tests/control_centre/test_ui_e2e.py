@@ -35,6 +35,10 @@ from playwright.sync_api import (
 )
 from playwright.sync_api import Error as PlaywrightError
 
+from src.detours.detour_ai_augment.protected.src.backend import server as backend_server
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.store import (
+    initialize_backend_store,
+)
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     EXPECTED_GROUND_TRUTH_RESEARCHERS,
     EXPECTED_INELIGIBLE_RESEARCHERS,
@@ -43,11 +47,13 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     AiAugmentCohort,
     AiAugmentIneligibilityCategory,
 )
-from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helpers import (
-    vars as control_vars,
-)
 from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helpers.locale import (
     Locale,
+)
+from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helpers.vars import (
+    BACKEND_READY_POLL_SECONDS,
+    TEXT_DECODE_ERROR_POLICY,
+    TEXT_ENCODING,
 )
 from src.detours.detour_ai_augment.protected.tests import pytest_plugin
 from src.detours.detour_ai_augment.protected.tests.fixtures.pytest_fixtures import (
@@ -55,10 +61,6 @@ from src.detours.detour_ai_augment.protected.tests.fixtures.pytest_fixtures impo
     StartupFiles,
 )
 from src.detours.detour_ai_augment.protected.tests.operator import test_operator_e2e as operator
-from src.detours.detour_ai_augment.src.backend import server as backend_server
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_backend_store import (
-    initialize_backend_store,
-)
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_singular_outer_dict import (  # noqa: E501
     AiAugmentSingularOuterDict,
 )
@@ -268,7 +270,9 @@ def test_completed_grid_row_uses_real_query_ipc(
                 queued_at_monotonic=time.monotonic(),
             )
         )
-        (files.config.parent / "card-rendered.txt").write_text(card_text, encoding="utf-8")
+        (files.config.parent / "card-rendered.txt").write_text(
+            card_text, encoding=TEXT_ENCODING,
+        )
         operator.validate_workflow_artifacts(
             runtime, namekey=STARTUP_NAMEKEY,
             expected_run_outcome_path=RunLifecycle.COMPLETED.to_run_outcome_path(),
@@ -712,7 +716,9 @@ def wait_for_server(process: subprocess.Popen[str], *, url: str) -> None:
             with urllib_request.urlopen(url, timeout=1):
                 return
         except urllib_error.HTTPError as exc:
-            response_body = exc.read().decode("utf-8", errors="replace")
+            response_body = exc.read().decode(
+                TEXT_ENCODING, errors=TEXT_DECODE_ERROR_POLICY
+            )
             output = stop_e2e_server(process)
             raise RuntimeError(
                 f"Control Centre E2E server returned HTTP {exc.code} during startup"
@@ -720,7 +726,7 @@ def wait_for_server(process: subprocess.Popen[str], *, url: str) -> None:
                 f"\n\n--- child output ---\n{output}"
             ) from exc
         except OSError, urllib_error.URLError:
-            time.sleep(control_vars.BACKEND_READY_POLL_SECONDS)
+            time.sleep(BACKEND_READY_POLL_SECONDS)
     output = stop_e2e_server(process)
     raise TimeoutError(f"Control Centre E2E server did not start\n\n--- child output ---\n{output}")
 
@@ -1004,7 +1010,7 @@ def test_displayed_researcher_card_downloads_as_docx(
         assert downloaded_path is not None
         with ZipFile(downloaded_path) as archive:
             assert "[Content_Types].xml" in archive.namelist()
-            document_xml = archive.read("word/document.xml").decode("utf-8")
+            document_xml = archive.read("word/document.xml").decode(TEXT_ENCODING)
         assert E2E_CARD_FIELD_VALUE in document_xml
         expect(download_button_docx).to_be_enabled()
 

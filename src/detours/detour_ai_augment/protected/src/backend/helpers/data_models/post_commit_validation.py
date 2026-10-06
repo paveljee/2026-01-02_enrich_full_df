@@ -100,18 +100,18 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     SUBMISSION_TYPE,
     TEXT_ENCODING,
 )
+from src.detours.detour_ai_augment.protected.src.shared import (
+    AppendwatchReportError,
+    parse_appendwatch_report,
+    require_nonblank_text,
+    source_key_from_header_value,
+)
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.lifecycle import (
     BackendLifecycle,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.model_http_interceptor import (  # noqa: E501
     ModelHttpRequired,
     ReplayInputMissing,
-)
-from src.detours.detour_ai_augment.src.shared import (
-    AppendwatchReportError,
-    parse_appendwatch_report,
-    require_nonblank_text,
-    source_key_from_header_value,
 )
 from src.helpers.architecture import FrozenStrictModel, LazyResultFactory, implements
 from src.helpers.data_models import (
@@ -2070,12 +2070,14 @@ class PostCommitValidation(FrozenStrictModel):
 # that import path. These are real runtime types used by the evaluator;
 # postponing their imports avoids a half-initialized module and needs no
 # model_rebuild, placeholder type, or change to the by-reference records.
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_cas import (  # noqa: E402, E501
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.cas import (  # noqa: E402, E501
     CASCodexRolloutRecord,
+)
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.codex_rollout_record import (  # noqa: E402, E501
+    CodexRolloutRecord,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.commit_request import (  # noqa: E402, E501
     BackendCommitRequestRecord,
-    CodexRolloutRecord,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.pull_event import (  # noqa: E402, E501
     PullResponseRecord,

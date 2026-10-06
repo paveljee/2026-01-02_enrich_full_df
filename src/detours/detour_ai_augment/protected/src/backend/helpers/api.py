@@ -9,13 +9,11 @@ import os
 import sys
 import tempfile
 import threading
-import time
 from collections.abc import AsyncGenerator, Iterator, Mapping
 from contextlib import asynccontextmanager
 from http import HTTPStatus
 from pathlib import Path
 from typing import Any, TextIO
-from urllib.parse import urlsplit
 from uuid import UUID
 
 import duckdb
@@ -25,6 +23,9 @@ from fastapi import status
 from src.detours.detour_ai_augment.protected.src.architecture import BackendComponent
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.pydantic_to_paste import (  # noqa: E501
     MAX_PUSH_BODY_BYTES,
+)
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.store import (
+    AiAugmentBackendStore,
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.submission_fixture import (  # noqa: E501
     L_FEI_FEI_INITIAL_FIXTURE,
@@ -44,7 +45,6 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     HTTP_CONTENT_LENGTH_HEADER,
     HTTP_CONTENT_TYPE_HEADER,
     KTP_AI_AUGMENT_COMMENTS_COL,
-    NANOSECONDS_PER_MICROSECOND,
     STANDARDIZED_SUBMISSION_TYPE,
     TEXT_ENCODING,
     ContentType,
@@ -211,9 +211,6 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     VALIDATION_REQUEST_RECORD_ID_COLUMN as VALIDATION_REQUEST_RECORD_ID_COLUMN,
 )
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_backend_store import (
-    AiAugmentBackendStore,
-)
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_singular_outer_dict import (  # noqa: E501
     AiAugmentSingularOuterDict,
 )
@@ -223,27 +220,17 @@ from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_si
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.lifecycle import (
     BackendLifecycle,
 )
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.pull_event import (
-    PullRequestRecord,
-    PullResponseRecord,
-)
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.push_event import (
-    PushRequestRecord,
     PushResponseRecord,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.response_record_promise import (
-    BackendStoreAcknowledgment,
     BackendStoreException,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.validation_request import (  # noqa: E501
     BackendValidationRequestRecord,
 )
-from src.helpers.data_models.http_request_log import (
-    HttpRequestLogRecord,
-)
 from src.helpers.vars import (
     KTP_FIRST_NAME_COL,
-    KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
     KTP_LAST_NAME_COL,
 )
 
@@ -388,7 +375,6 @@ PUSH_ROUTE: dict[str, Any] = {
 
 
 def _response(
-    request: requests.PreparedRequest,
     code: HTTPStatus,
     body: str = "",
     *,
@@ -397,8 +383,6 @@ def _response(
 ) -> requests.Response:
     response = requests.Response()
     response.status_code = code
-    response.request = request
-    response.url = request.url or ""
     response.encoding = TEXT_ENCODING
     response._content = body.encode(TEXT_ENCODING)
     _ = response.content
@@ -411,13 +395,11 @@ def _response(
 
 
 def _error_response(
-    request: requests.PreparedRequest,
     code: HTTPStatus,
     *,
     headers: Mapping[str, str] | None = None,
 ) -> requests.Response:
     return _response(
-        request,
         code,
         json.dumps(
             {"detail": Locale.CONFIGURATION_ERROR_DETAIL},
@@ -430,7 +412,6 @@ def _error_response(
 
 
 def _pull_response(
-    request: requests.PreparedRequest,
     store: AiAugmentBackendStore,
 ) -> requests.Response:
     with BACKEND_WORKFLOW_STATE_LOCK:
@@ -446,12 +427,12 @@ def _pull_response(
     if lifecycle is BackendLifecycle.BUSY:
         logger.info(Locale.PULL_PROCESSING_LOG)
         return _error_response(
-            request, HTTPStatus.SERVICE_UNAVAILABLE,
+            HTTPStatus.SERVICE_UNAVAILABLE,
             headers={RETRY_AFTER_HEADER: RETRY_AFTER_SECONDS},
         )
     if lifecycle is BackendLifecycle.FAILED:
         logger.error(Locale.PULL_WORKFLOW_FAILED_LOG)
-        return _error_response(request, HTTPStatus.INTERNAL_SERVER_ERROR)
+        return _error_response(HTTPStatus.INTERNAL_SERVER_ERROR)
     if lifecycle in {BackendLifecycle.RETRY, BackendLifecycle.COMPLETED}:
         if validation_request_record is None:
             raise BackendStoreException(Locale.PULL_VALIDATION_RECORD_MISSING)
@@ -466,7 +447,6 @@ def _pull_response(
                 raise BackendStoreException(Locale.PULL_RETRY_VALIDATION_INCONSISTENT)
             logger.info(Locale.PULL_RETRY_STAGE_LOG, validation.stage)
             return _response(
-                request,
                 HTTPStatus.OK,
                 (validation.detail or Locale.VALIDATION_ERROR_DETAIL).rstrip() + "\n",
                 content_type=ContentType.MARKDOWN_UTF8,
@@ -495,7 +475,7 @@ def _pull_response(
             lines.append(json_line(select_columns(ground_truth.data)))
         logger.info(Locale.PULL_COMPLETED_GROUND_TRUTH_LOG, ground_truth is not None)
         return _response(
-            request, HTTPStatus.GONE, "".join(lines), content_type=ContentType.NDJSON_UTF8,
+            HTTPStatus.GONE, "".join(lines), content_type=ContentType.NDJSON_UTF8,
             headers={ETAG_HEADER: f'"{validation_request_record.record_id}"'},
         )
     try:
@@ -505,170 +485,11 @@ def _pull_response(
             Locale.PULL_INITIAL_TASK_LOG, singular.namekey, len(initial_lines)
         )
         return _response(
-            request, HTTPStatus.OK, "".join(initial_lines), content_type=ContentType.NDJSON_UTF8,
+            HTTPStatus.OK, "".join(initial_lines), content_type=ContentType.NDJSON_UTF8,
         )
     except (RuntimeError, ValueError, OSError, duckdb.Error) as exc:
         logger.error(Locale.PULL_FAILED_LOG, exc)
-        return _error_response(request, HTTPStatus.INTERNAL_SERVER_ERROR)
-
-
-async def authoritative_pull(
-    request: requests.PreparedRequest,
-    store: AiAugmentBackendStore,
-) -> requests.Response:
-    started_ns = time.monotonic_ns()
-    try:
-        response = _pull_response(request, store)
-    except Exception as exc:
-        logger.error(Locale.PULL_FAILED_LOG, exc)
-        response = _error_response(request, HTTPStatus.INTERNAL_SERVER_ERROR)
-    http_record = _authoritative_http_record(request, response, started_ns=started_ns)
-    record = PullRequestRecord(
-        schema_version=http_record.schema_version,
-        record_id=http_record.record_id,
-        method=http_record.method,
-        scheme=http_record.scheme,
-        host=http_record.host,
-        port=http_record.port,
-        path=http_record.path,
-        query=http_record.query,
-        request_headers=http_record.request_headers,
-        request_body=http_record.request_body,
-        response_code=http_record.response_code,
-        response_headers=http_record.response_headers,
-        response_body=http_record.response_body,
-        received_at_unix_usec=http_record.received_at_unix_usec,
-        ready_to_respond_at_unix_usec=http_record.ready_to_respond_at_unix_usec,
-        duration_usec=http_record.duration_usec,
-    )
-    promise = await asyncio.to_thread(store.promise_pull_response_record, record)
-    response_record, error = await promise.response_record_promise()
-    if error is not None:
-        error.raise_exception()
-    if promise.acknowledgment is not BackendStoreAcknowledgment.ACK or response_record is None:
-        raise BackendStoreException(Locale.PULL_DURABLE_RESPONSE_MISSING)
-    logger.info(
-        Locale.PULL_PERSISTED_LOG,
-        response_record.record_id,
-        response_record.response_code,
-    )
-    return response_record.to_response()
-
-
-async def authoritative_push(
-    request: requests.PreparedRequest,
-    store: AiAugmentBackendStore,
-) -> requests.Response:
-    global BACKEND_LIFECYCLE
-
-    started_ns = time.monotonic_ns()
-    with BACKEND_WORKFLOW_STATE_LOCK:
-        lifecycle = BACKEND_LIFECYCLE
-        session_id = BACKEND_SESSION_ID
-        current_replayed_record = store.current_replayed_record
-        pull_response_record = (
-            current_replayed_record
-            if isinstance(current_replayed_record, PullResponseRecord)
-            else None
-        )
-        logger.info(
-            Locale.PUSH_REQUEST_STATE_LOG, lifecycle, session_id,
-            None if pull_response_record is None else pull_response_record.record_id,
-        )
-
-        if lifecycle is BackendLifecycle.BUSY:
-            provisional_http_response = _error_response(
-                request,
-                HTTPStatus.SERVICE_UNAVAILABLE,
-                headers={RETRY_AFTER_HEADER: RETRY_AFTER_SECONDS},
-            )
-        elif (
-            lifecycle not in {BackendLifecycle.READY, BackendLifecycle.RETRY}
-            or session_id is None
-        ):
-            logger.error(Locale.PUSH_SESSION_NOT_READY_LOG)
-            provisional_http_response = _error_response(request, HTTPStatus.INTERNAL_SERVER_ERROR)
-        else:
-            commit_request_record, _ = store._cursor_commit_validation()
-            if (
-                pull_response_record is None
-                or pull_response_record.response_code != HTTPStatus.OK
-                or (
-                    commit_request_record is not None
-                    and commit_request_record.commit_request_body.pull_response_record.record_id
-                    == pull_response_record.record_id
-                )
-            ):
-                logger.warning(Locale.PUSH_CURRENT_PULL_REQUIRED_LOG)
-                provisional_http_response = _error_response(
-                    request,
-                    HTTPStatus.CONFLICT,
-                    headers={LOCATION_HEADER: PULL_PATH},
-                )
-            else:
-                BACKEND_LIFECYCLE = BackendLifecycle.BUSY
-                provisional_http_response = _response(
-                    request,
-                    HTTPStatus.ACCEPTED,
-                    headers={LOCATION_HEADER: PULL_PATH},
-                )
-
-    push_request_record = PushRequestRecord.from_http_request_log_record(
-        http_request_log_record=_authoritative_http_record(
-            request, provisional_http_response, started_ns=started_ns
-        )
-    )
-    immediate_replayed_push_response_record, stores_push_promise = await asyncio.to_thread(
-        store.promise_push_response_record,
-        push_request_record,
-        session_id=session_id,
-    )
-    # The immediate record is the replayed push for this HTTP reply. The promise yields
-    # that same instance later, after commit/validation, for `finish_push` to check.
-
-    if stores_push_promise.acknowledgment is not BackendStoreAcknowledgment.ACK:
-        _, error = await stores_push_promise.response_record_promise()
-        if error is not None:
-            error.raise_exception()
-        raise BackendStoreException(Locale.PUSH_NAK_ERROR_MISSING)
-
-    if immediate_replayed_push_response_record is None:
-        _, error = await stores_push_promise.response_record_promise()
-        if error is not None:
-            error.raise_exception()
-        raise BackendStoreException(Locale.PUSH_RESPONSE_RECORD_MISSING)
-
-    assert (
-        immediate_replayed_push_response_record.response_code
-        == provisional_http_response.status_code
-    )
-    expected_pull = (
-        pull_response_record
-        if immediate_replayed_push_response_record.response_code == HTTPStatus.ACCEPTED
-        else None
-    )
-    assert immediate_replayed_push_response_record.pull_response_record is expected_pull
-
-    if immediate_replayed_push_response_record.response_code == HTTPStatus.ACCEPTED:
-        # this below hands off the awaiting to a new asyncio task,
-        # allowing server to release a response to the HTTP client
-        # who had sent the push request:
-        _continue_awaiting_on_stores_push_promise(stores_push_promise, store)
-        logger.info(
-            Locale.PUSH_DURABLY_ACCEPTED_LOG, immediate_replayed_push_response_record.record_id
-        )
-        return immediate_replayed_push_response_record.to_response()
-
-    resolved_push_response_record, error = await stores_push_promise.response_record_promise()
-    if error is not None:
-        error.raise_exception()
-    assert resolved_push_response_record is immediate_replayed_push_response_record
-    logger.info(
-        Locale.PUSH_PERSISTED_LOG,
-        resolved_push_response_record.record_id,
-        resolved_push_response_record.response_code,
-    )
-    return resolved_push_response_record.to_response()
+        return _error_response(HTTPStatus.INTERNAL_SERVER_ERROR)
 
 
 def set_backend_session_id(value: str) -> None:
@@ -799,7 +620,7 @@ async def finish_push(
         # this basically awaits on Backend Store's
         # `promise_push_response_record` because that's
         # what this promise is supposed to be upstream,
-        # that is, as defined in `authoritative_push`:
+        # that is, as defined in `server.push`:
         promised_push_response_record, error = await stores_push_promise.response_record_promise()
         if error is not None:
             error.raise_exception()
@@ -827,7 +648,7 @@ def _continue_awaiting_on_stores_push_promise(
     ],
     store: AiAugmentBackendStore,
 ) -> None:
-    """Creates an asyncio task to await on an `authoritative_push`'s
+    """Creates an asyncio task to await on an `server.push`'s
     `ResponseRecordPromise`. The coroutine awaits on Backend Store
     finishing its `promise_push_response_record`, whose return
     object is this exact promise that this gets as an argument."""
@@ -901,32 +722,6 @@ def _request_body_for_authoritative_log(body: bytes) -> str:
             ensure_ascii=False,
             separators=COMPACT_JSON_SEPARATORS,
         )
-
-
-def _authoritative_http_record(
-    request: requests.PreparedRequest,
-    response: requests.Response,
-    *,
-    started_ns: int,
-) -> HttpRequestLogRecord:
-    parsed = urlsplit(request.url or "")
-    return HttpRequestLogRecord(
-        schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
-        method=request.method or "",
-        scheme=parsed.scheme,
-        host=parsed.hostname or "",
-        port=parsed.port,
-        path=parsed.path,
-        query=parsed.query,
-        request_headers=dict(request.headers),
-        request_body=_request_body_for_authoritative_log(_prepared_request_body(request)),
-        response_code=response.status_code,
-        response_headers=dict(response.headers),
-        response_body=response.content.decode(TEXT_ENCODING),
-        received_at_unix_usec=None,
-        ready_to_respond_at_unix_usec=time.time_ns() // NANOSECONDS_PER_MICROSECOND,
-        duration_usec=(time.monotonic_ns() - started_ns) // NANOSECONDS_PER_MICROSECOND,
-    )
 
 
 def _prepared_request_body(request: requests.PreparedRequest) -> bytes:

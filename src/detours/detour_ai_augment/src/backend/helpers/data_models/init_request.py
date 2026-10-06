@@ -13,7 +13,7 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     SYNTHETIC_COMMIT_HOST,
     SYNTHETIC_COMMIT_SCHEME,
 )
-from src.detours.detour_ai_augment.src.shared import name_key_from_header_value
+from src.detours.detour_ai_augment.protected.src.shared import name_key_from_header_value
 from src.helpers.architecture import implements
 from src.helpers.data_models import HttpRequestLogRecord, NameKey
 from src.helpers.vars import KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1

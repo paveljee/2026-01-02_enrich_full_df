@@ -10,15 +10,17 @@ from pathlib import Path, PurePosixPath
 from uuid import uuid7
 
 from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
+from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
+    AUDIT_READ_ROLLOUT_COMMAND,
+    SSH_EXECUTABLE,
+)
 from src.helpers.architecture import FrozenStrictModel
 
-from .commit_request import CodexRolloutRecord
+from .codex_rollout_record import CodexRolloutRecord
 
 ARCHIVE_HASH_CHUNK_BYTES = 1024 * 1024
 AUDIT_COPY_TIMEOUT_SECONDS = 60
-AUDIT_READ_ROLLOUT_COMMAND = "read-rollout"
 ROLLOUT_CAS_TEMP_FILENAME_TEMPLATE = ".{nonce}.tmp"
-SSH_EXECUTABLE = "ssh"
 
 
 class CASCodexRolloutRecord(CodexRolloutRecord):

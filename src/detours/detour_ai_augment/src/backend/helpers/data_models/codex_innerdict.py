@@ -12,13 +12,16 @@ from pydantic import (
 )
 
 from src.detours.detour_ai_augment.protected.src.architecture import BackendComponent
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.codex_rollout_record import (  # noqa: E501
+    CodexRolloutRecord,
+)
 from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     CODEX_SESSION_ID_JSON_KEY,
     KTP_AI_AUGMENT_SESSION_METADATA_COL,
     SOURCE_KEY_HEADER,
 )
-from src.detours.detour_ai_augment.src.shared import source_key_from_header_value
+from src.detours.detour_ai_augment.protected.src.shared import source_key_from_header_value
 from src.helpers.architecture import FrozenStrictModel, implements
 from src.helpers.data_models import (
     HttpRequestLogRecord,
@@ -35,7 +38,7 @@ from ....control_centre.dashboard.helpers.data_models.run_outcome_event import (
     RunOutcome,
     RunOutcomeResponseRecord,
 )
-from .commit_request import BackendCommitRequestRecord, CodexRolloutRecord
+from .commit_request import BackendCommitRequestRecord
 from .pull_event import PullResponseRecord
 from .push_event import PushResponseRecord
 from .validation_request import BackendValidationRequestRecord, ValidationRequestBody

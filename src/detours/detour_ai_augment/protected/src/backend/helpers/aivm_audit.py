@@ -36,7 +36,7 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     SSH_EXECUTABLE,
     SSH_TIMEOUT_SECONDS,
 )
-from src.detours.detour_ai_augment.src.shared import require_nonblank_text
+from src.detours.detour_ai_augment.protected.src.shared import require_nonblank_text
 from src.helpers.architecture import FrozenStrictModel
 
 logger = logging.getLogger(__name__)

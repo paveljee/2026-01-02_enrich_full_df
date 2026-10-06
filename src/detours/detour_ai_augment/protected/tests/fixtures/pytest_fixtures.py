@@ -12,20 +12,22 @@ import duckdb
 import pytest
 
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
+    CONFIG_FILENAME,
     EXCLUDED_NAMEKEY,
     HTTP_POST_METHOD,
     INIT_PATH,
     MAP_SUBSET_0_TO_BATCH_KEY,
     NAME_KEY_HEADER,
+    NAMEKEY_ENV_NAME,
     NANOSECONDS_PER_MICROSECOND,
     REPLAY_LOG_KEY,
     SYNTHETIC_COMMIT_HOST,
     SYNTHETIC_COMMIT_SCHEME,
 )
+from src.detours.detour_ai_augment.protected.src.shared import name_key_header_value
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.init_request import (
     BackendInitRequestRecord,
 )
-from src.detours.detour_ai_augment.src.shared import name_key_header_value
 from src.helpers.architecture import FrozenStrictModel
 from src.helpers.data_models import NameKey
 from src.helpers.duckdb_utils import duckdb_quote_identifier as quote
@@ -86,9 +88,9 @@ class StartupFiles(FrozenStrictModel):
 
     def environment(self, namekey: str | None = STARTUP_NAMEKEY.to_json_key()) -> dict[str, str]:
         environment = dict(os.environ, TMPDIR=str(self.process_temp))
-        environment.pop("FASTAPI_DETOUR_NAMEKEY", None)
+        environment.pop(NAMEKEY_ENV_NAME, None)
         if namekey is not None:
-            environment["FASTAPI_DETOUR_NAMEKEY"] = namekey
+            environment[NAMEKEY_ENV_NAME] = namekey
         return environment
 
     def repin(self) -> None:
@@ -156,8 +158,8 @@ def source_population(path: Path, release_map: Path) -> None:
 
 @pytest.fixture
 def startup_files(tmp_path: Path) -> StartupFiles:
-    from src.detours.detour_ai_augment.src.backend import server as backend_server
-    from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_backend_store import (  # noqa: E501
+    from src.detours.detour_ai_augment.protected.src.backend import server as backend_server
+    from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.store import (  # noqa: E501
         initialize_backend_store,
     )
 
@@ -166,7 +168,7 @@ def startup_files(tmp_path: Path) -> StartupFiles:
     source_population(source, release_map)
     replay = tmp_path / "replay.jsonl"
     replay.write_bytes(b"")
-    config: dict[str, Any] = json.loads((ROOT / "config_ai_augment.json").read_text())
+    config: dict[str, Any] = json.loads((ROOT / CONFIG_FILENAME).read_text())
     config.update(db_file=str(source), output_dir=str(tmp_path / "output"),
                   state_file=str(tmp_path / "state.json"), rollout_cas_dir=str(tmp_path / "cas"))
     for key, path in ((MAP_SUBSET_0_TO_BATCH_KEY, release_map), (REPLAY_LOG_KEY, replay)):

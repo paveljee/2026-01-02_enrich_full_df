@@ -5,6 +5,9 @@ from uuid import uuid7
 
 import pytest
 
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.store import (  # noqa: E501
+    AiAugmentBackendStore,
+)
 from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import (
     Locale as BackendLocale,
 )
@@ -16,9 +19,6 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
 )
 from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helpers.locale import (  # noqa: E501
     Locale as DashboardLocale,
-)
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_backend_store import (  # noqa: E501
-    AiAugmentBackendStore,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_context import (  # noqa: E501
     AiAugmentBackendContext,
@@ -72,17 +72,20 @@ def test_one_session_accepts_retry_attempts_but_rejects_multiple_run_outcomes(
             is BackendLifecycle.REJECTED
         )
         retry_pull = store._append_authoritative_record(
-            persisted_http_record(
-                record_id=uuid7(),
-                method=HTTP_GET_METHOD,
-                path=PULL_PATH,
-                response_code=HTTPStatus.OK,
-                response_headers={HTTP_CONTENT_TYPE_HEADER: ContentType.MARKDOWN_UTF8},
-                response_body=(
-                    first.validation_request_body.post_commit_validation.detail
-                    or BackendLocale.VALIDATION_ERROR_DETAIL
-                ).rstrip() + "\n",
-            )
+            PullResponseRecord.from_http_request_log_record(
+                http_request_log_record=persisted_http_record(
+                    record_id=uuid7(),
+                    method=HTTP_GET_METHOD,
+                    path=PULL_PATH,
+                    response_code=HTTPStatus.OK,
+                    response_headers={HTTP_CONTENT_TYPE_HEADER: ContentType.MARKDOWN_UTF8},
+                    response_body=(
+                        first.validation_request_body.post_commit_validation.detail
+                        or BackendLocale.VALIDATION_ERROR_DETAIL
+                    ).rstrip() + "\n",
+                ),
+                validation_request_record=first,
+            ),
         )
         assert isinstance(retry_pull, PullResponseRecord)
         assert retry_pull.validation_request_record is first

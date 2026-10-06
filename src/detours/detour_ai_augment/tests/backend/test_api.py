@@ -9,6 +9,7 @@ import logging
 import os
 import signal
 import subprocess
+import sys
 import time
 from collections.abc import Callable, Generator, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
@@ -16,6 +17,7 @@ from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime, timezone
 from http import HTTPStatus
+from importlib.metadata import version
 from io import StringIO
 from pathlib import Path, PurePosixPath
 from threading import Barrier, Event, Lock
@@ -36,12 +38,12 @@ from rich.console import Console
 from starlette.types import Message, Scope
 
 from src.detours.detour_ai_augment.protected.src.architecture import BackendComponent
-from src.detours.detour_ai_augment.protected.src.backend import api, ipc
+from src.detours.detour_ai_augment.protected.src.backend import server
 from src.detours.detour_ai_augment.protected.src.backend.helpers import (
     aivm_audit,
+    api,
     codex_parse,
 )
-from src.detours.detour_ai_augment.protected.src.backend.helpers import vars as backend_vars
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models import (
     ai_augment_detour_db,
     post_commit_validation,
@@ -58,6 +60,12 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_
     RESOURCE_PATH_KEY,
     RESOURCE_SHA256_KEY,
 )
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.cas import (  # noqa: E501
+    AiAugmentCAS,
+)
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.codex_rollout_record import (  # noqa: E501
+    CodexRolloutRecord,
+)
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.pydantic_to_paste import (  # noqa: E501
     EvidenceWithdrawal,
     FieldSubmission,
@@ -72,6 +80,13 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.rep
     ReplayLogRegisteredResource,
     _ReplayProjectionConflictError,
 )
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.store import (  # noqa: E501
+    AiAugmentBackendStore,
+    AiAugmentQueryBackendStore,
+    _ReplayCommitInvalidError,
+    _ReplayLogLineInvalidError,
+    initialize_backend_store,
+)
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.submission_fixture import (  # noqa: E501
     L_FEI_FEI_INITIAL_FIXTURE,
     L_FEI_FEI_RETRY_FIXTURE,
@@ -84,14 +99,57 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     AI_AUGMENT_COLUMNS,
     AI_AUGMENT_EVIDENCE_COLUMNS,
     AI_AUGMENT_STANDARDIZED_COLUMNS,
+    AIVM_AUDIT_USER,
+    AIVM_IDENTITY_FILE_ENV_NAME,
+    AIVM_INSTANCE,
     APPENDWATCH_COMPROMISED_PREFIX,
     APPENDWATCH_OK_PREFIX,
+    ARCHIVE_HASH_CHUNK_BYTES,
+    ASGI_BODY_KEY,
+    ASGI_HEADERS_KEY,
+    ASGI_HTTP_REQUEST_MESSAGE_TYPE,
+    ASGI_HTTP_RESPONSE_START_MESSAGE_TYPE,
+    ASGI_HTTP_SCOPE_TYPE,
+    ASGI_METHOD_KEY,
+    ASGI_MORE_BODY_KEY,
+    ASGI_PATH_KEY,
+    ASGI_TYPE_KEY,
+    AUDIT_FIND_ROLLOUT_COMMAND,
+    AUDIT_PROBE_COMMAND,
+    AUDIT_READ_APPENDWATCH_REPORT_COMMAND,
+    AUDIT_READ_ROLLOUT_COMMAND,
+    AUTHORITATIVE_RECORD_ORDINAL_COLUMN,
+    AUTHORITATIVE_RECORDS_TABLE,
     BACKEND_STORE_CLOSED_CLEANLY,
+    BASE64_TEXT_ENCODING,
+    CARD_EXCLUDED_COLUMNS,
+    CODEX_CALLS_TABLE,
     CODEX_CITE_MARKER_PREFIX,
     CODEX_CITE_MARKER_SUFFIX,
+    CODEX_FC_TABLE,
+    CODEX_FCO_TABLE,
+    CODEX_INNERDICT_TABLE,
+    CODEX_OUTPUT_ROWS_TABLE,
+    CODEX_OUTPUT_SCHEMA,
     CODEX_PAYLOAD_KEY,
+    CODEX_REF_DOMAIN_COL,
+    CODEX_REF_SNIPPET_COL,
+    CODEX_REF_THUMBNAIL_URL_COL,
+    CODEX_REF_TITLE_COL,
+    CODEX_REF_URL_COL,
+    CODEX_SESSIONS_ROOT,
+    CODEX_TURN_REF_TABLE,
     CODEX_TYPE_KEY,
+    COMMIT_VALIDATION_REQUEST_RECORD_INDEX_TABLE,
+    CONFIG_FILENAME,
+    DASHBOARD_QUERY_PATH,
     DOCX_COLUMNS,
+    ETAG_HEADER,
+    EVIDENCE_OUTCOME_UNMATCHED,
+    EVIDENCE_OUTCOME_V1_EXACT,
+    EVIDENCE_OUTCOME_V2_NEAR,
+    EVIDENCE_OUTCOME_WITHDRAWN,
+    HTTP_CONTENT_LENGTH_HEADER,
     HTTP_CONTENT_TYPE_HEADER,
     HTTP_GET_METHOD,
     HTTP_POST_METHOD,
@@ -108,16 +166,50 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL,
     KTP_AI_AUGMENT_SESSION_METADATA_COL,
     KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL,
+    LOCATION_HEADER,
     MAP_SUBSET_0_TO_BATCH_KEY,
+    NAME_KEY_HEADER,
+    NAMEKEY_ENV_NAME,
+    NANOSECONDS_PER_MICROSECOND,
+    NOT_AVAILABLE_OR_APPLICABLE_VALUE,
+    NOT_REPORTED_VALUE,
+    POST_COMMIT_VALIDATION_ACCEPTED_COL,
+    POST_COMMIT_VALIDATION_APPLIED_COL,
+    POST_COMMIT_VALIDATION_ASSESSMENT_COL,
+    POST_COMMIT_VALIDATION_AUDIT_ID_COL,
+    POST_COMMIT_VALIDATION_COMMIT_RECORD_ID_COL,
+    POST_COMMIT_VALIDATION_EVIDENCE_AUDITS_TABLE,
+    POST_COMMIT_VALIDATION_ORIGINAL_PULL_RECORD_ID_COL,
+    POST_COMMIT_VALIDATION_RETRY_BASELINES_TABLE,
     PULL_PATH,
     PUSH_PATH,
     PYDANTIC_TO_PASTE_SOURCE,
     REPLAY_LOG_KEY,
+    RETRY_AFTER_HEADER,
+    RETRY_AFTER_SECONDS,
+    ROLLOUT_ENV_NAME,
+    ROLLOUT_FILENAME_PREFIX,
+    ROLLOUT_FILENAME_SUFFIX,
+    ROLLOUT_LINE_FRAGMENT_TYPE,
+    SERVER_HOST,
+    SERVER_PORT,
+    SESSION_ID_HEADER,
     SOURCE_KEY_HEADER,
+    SSH_EXECUTABLE,
+    SYNTHETIC_COMMIT_HOST,
+    SYNTHETIC_COMMIT_SCHEME,
     TEXT_ENCODING,
     AiAugmentCohort,
     AiAugmentIneligibilityCategory,
     ContentType,
+)
+from src.detours.detour_ai_augment.protected.src.shared import (
+    AppendwatchReportError,
+    name_key_from_header_value,
+    name_key_header_value,
+    parse_appendwatch_report,
+    source_key_from_header_value,
+    source_key_header_value,
 )
 from src.detours.detour_ai_augment.protected.tests.fixtures.pytest_fixtures import (  # noqa: E501
     StartupFiles,
@@ -127,17 +219,6 @@ from src.detours.detour_ai_augment.protected.tests.fixtures.pytest_fixtures impo
 from src.detours.detour_ai_augment.protected.tests.pytest_plugin import (
     PythonProcess,
     backend_lock_holder_process,
-)
-from src.detours.detour_ai_augment.src.backend import server
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_backend_store import (  # noqa: E501
-    AiAugmentBackendStore,
-    AiAugmentQueryBackendStore,
-    _ReplayCommitInvalidError,
-    _ReplayLogLineInvalidError,
-    initialize_backend_store,
-)
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_cas import (  # noqa: E501
-    AiAugmentCAS,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_context import (
     AiAugmentBackendContext,
@@ -154,10 +235,8 @@ from src.detours.detour_ai_augment.src.backend.helpers.data_models.commit_reques
     AppendwatchReportEncoding,
     AppendwatchReportRecord,
     BackendCommitRequestRecord,
-    CodexRolloutRecord,
     CodexSessionRecord,
     CommitRequestBody,
-    _synthetic_commit_request_record,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.init_request import (
     BackendInitRequestRecord,
@@ -194,14 +273,6 @@ from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_mod
 from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.run_outcome_event import (  # noqa: E501
     RunOutcomeResponseRecord,
 )
-from src.detours.detour_ai_augment.src.shared import (
-    AppendwatchReportError,
-    name_key_from_header_value,
-    name_key_header_value,
-    parse_appendwatch_report,
-    source_key_from_header_value,
-    source_key_header_value,
-)
 from src.helpers.architecture import FrozenStrictModel
 from src.helpers.cards import MARKDOWN_CODE_DELIMITER, build_cards
 from src.helpers.config import PipelineConfig
@@ -233,6 +304,7 @@ from src.helpers.vars import (
     KTP_FIRST_NAME_COL,
     KTP_FRAGMENT_COL,
     KTP_FRAGMENT_TYPE_COL,
+    KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
     KTP_INNERDICT_JSONLINES_COL,
     KTP_LAST_NAME_COL,
     KTP_NAMEKEY_COL,
@@ -253,7 +325,7 @@ class BackendTestPaths(FrozenStrictModel):
 JULY_ROLLOUT_RELATIVE_PATH = PurePosixPath(
     "2026/07/27/rollout-2026-07-27T12-10-36-019fa457-aac5-7652-8669-9d571206e7cb.jsonl"
 )
-JULY_ROLLOUT_GUEST_PATH = f"{api.CODEX_SESSIONS_ROOT}/{JULY_ROLLOUT_RELATIVE_PATH}"
+JULY_ROLLOUT_GUEST_PATH = f"{CODEX_SESSIONS_ROOT}/{JULY_ROLLOUT_RELATIVE_PATH}"
 JULY_ROLLOUT_FILENAME = JULY_ROLLOUT_RELATIVE_PATH.name
 JULY_ROLLOUT_LINE_COUNT = 107
 JULY_SESSION_ID = "019fa457-aac5-7652-8669-9d571206e7cb"
@@ -342,7 +414,7 @@ def persisted_http_record(
     ):
         response_headers = {HTTP_CONTENT_TYPE_HEADER: ContentType.NDJSON_UTF8}
     return HttpRequestLogRecord(
-        schema_version="1.1",
+        schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
         record_id=record_id,
         method=method,
         scheme="http",
@@ -356,7 +428,7 @@ def persisted_http_record(
         response_code=response_code,
         response_headers=response_headers or {},
         response_body=response_body,
-        received_at_unix_usec=1,
+        received_at_unix_usec=None,
         duration_usec=1,
     )
 
@@ -392,19 +464,51 @@ def retry_commit_records(
         ),
         pull_response_record=pull_record,
     )
-    commit_request_record = _synthetic_commit_request_record(
+    rollout = CodexRolloutRecord(
+        size=3,
+        sha256=hashlib.sha256(b"{}\n").hexdigest(),
+        line_count=1,
+    )
+    report = b".\n"
+    body = CommitRequestBody(
         pull_response_record=pull_record,
         push_response_record=push_record,
-        session_id=session_id,
-        rollout=CodexRolloutRecord(
-            size=3,
-            sha256=hashlib.sha256(b"{}\n").hexdigest(),
-            line_count=1,
+        codex_session_record=CodexSessionRecord(
+            session_id=session_id,
+            codex_rollout_record=rollout,
+            appendwatch_report_record=AppendwatchReportRecord(
+                encoding=AppendwatchReportEncoding.BASE64,
+                data=base64.b64encode(report).decode(BASE64_TEXT_ENCODING),
+            ),
         ),
-        rollout_filename=f"rollout-{session_id}.jsonl",
-        appendwatch_report=b".\n",
-        namekey=TEST_NAMEKEY_MODEL,
-    ).model_copy(update={"record_id": deterministic_uuid7(synthetic_record_id_seed)})
+    )
+    commit_request_record = BackendCommitRequestRecord(
+        schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
+        record_id=deterministic_uuid7(synthetic_record_id_seed),
+        method=HTTP_POST_METHOD,
+        scheme=SYNTHETIC_COMMIT_SCHEME,
+        host=SYNTHETIC_COMMIT_HOST,
+        port=None,
+        path=COMMIT_PATH,
+        query="",
+        request_headers={
+            SOURCE_KEY_HEADER: source_key_header_value(
+                f"{ROLLOUT_FILENAME_PREFIX}{session_id}{ROLLOUT_FILENAME_SUFFIX}",
+                rollout.line_count,
+            ),
+            NAME_KEY_HEADER: name_key_header_value(TEST_NAMEKEY_MODEL),
+        },
+        request_body=body.model_dump_json(),
+        response_code=None,
+        response_headers=None,
+        response_body=None,
+        received_at_unix_usec=None,
+        ready_to_respond_at_unix_usec=(
+            time.time_ns() // NANOSECONDS_PER_MICROSECOND
+        ),
+        duration_usec=0,
+        commit_request_body=body,
+    )
     return pull_record, commit_request_record
 
 
@@ -541,7 +645,7 @@ def backend_test_paths(
     haanen_accepted_capture_dir = repository_root / "tmp" / HAANEN_ACCEPTED_CAPTURE_ID
     return BackendTestPaths(
         config=repository_root / "config.repl.json",
-        ai_augment_config=repository_root / "config_ai_augment.json",
+        ai_augment_config=repository_root / CONFIG_FILENAME,
         source_database=repository_root / "data" / "scisci_process.duckdb",
         reference_docx=repository_root / "resources" / "pandoc-custom-reference.docx",
         pydantic_to_paste=(
@@ -815,7 +919,7 @@ EXPECTED_CALL_LINKS = (
 )
 
 EXPECTED_TABLE_COLUMNS = {
-    backend_vars.CODEX_FC_TABLE: (
+    CODEX_FC_TABLE: (
         "id",
         "codex.fc_timestamp",
         "codex.fc_id",
@@ -823,15 +927,15 @@ EXPECTED_TABLE_COLUMNS = {
         "codex.fc_namespace",
         "codex.fc_arguments",
     ),
-    backend_vars.CODEX_FCO_TABLE: ("id", "codex.fco_timestamp", "codex.fco_id"),
-    backend_vars.CODEX_CALLS_TABLE: (
+    CODEX_FCO_TABLE: ("id", "codex.fco_timestamp", "codex.fco_id"),
+    CODEX_CALLS_TABLE: (
         "id",
         "codex.call_id",
         "codex.fc_id",
         "codex.fco_id",
         "codex.rollout_filename",
     ),
-    backend_vars.CODEX_TURN_REF_TABLE: (
+    CODEX_TURN_REF_TABLE: (
         "id",
         "codex.ref_id",
         "codex.call_id",
@@ -844,10 +948,10 @@ EXPECTED_TABLE_COLUMNS = {
     ),
 }
 OPTIONAL_REF_METADATA_COLUMNS = (
-    backend_vars.CODEX_REF_DOMAIN_COL,
-    backend_vars.CODEX_REF_SNIPPET_COL,
-    backend_vars.CODEX_REF_THUMBNAIL_URL_COL,
-    backend_vars.CODEX_REF_TITLE_COL,
+    CODEX_REF_DOMAIN_COL,
+    CODEX_REF_SNIPPET_COL,
+    CODEX_REF_THUMBNAIL_URL_COL,
+    CODEX_REF_TITLE_COL,
 )
 
 
@@ -857,7 +961,7 @@ def read_bytes(path: Path) -> bytes:
 
 
 def read_text(path: Path) -> str:
-    return path.read_text(encoding="utf-8")
+    return path.read_text(encoding=TEXT_ENCODING)
 
 
 def write_bytes(path: Path, value: bytes) -> None:
@@ -865,7 +969,7 @@ def write_bytes(path: Path, value: bytes) -> None:
 
 
 def write_text(path: Path, value: str) -> None:
-    path.write_text(value, encoding="utf-8")
+    path.write_text(value, encoding=TEXT_ENCODING)
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -877,7 +981,7 @@ def read_json(path: Path) -> dict[str, Any]:
 def file_signature(path: Path) -> tuple[int, int, str]:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
-        while chunk := stream.read(api.ARCHIVE_HASH_CHUNK_BYTES):
+        while chunk := stream.read(ARCHIVE_HASH_CHUNK_BYTES):
             digest.update(chunk)
     stat = path.stat()
     return stat.st_size, stat.st_mtime_ns, digest.hexdigest()
@@ -887,7 +991,7 @@ def read_zip_text(path: Path) -> str:
     with ZipFile(path) as archive:
         names = archive.namelist()
         assert names
-        return "\n".join(archive.read(name).decode("utf-8") for name in names)
+        return "\n".join(archive.read(name).decode(TEXT_ENCODING) for name in names)
 
 
 def zip_member_names(path: Path) -> tuple[str, ...]:
@@ -1216,8 +1320,8 @@ def historical_haanen_submissions(
 ) -> tuple[dict[str, object], dict[str, object]]:
     if not paths.haanen_rejected_rollout.is_file() or not paths.haanen_accepted_rollout.is_file():
         pytest.skip("optional historical Haanen rollout fixtures are unavailable")
-    rejected_stream = paths.haanen_rejected_rollout.open("r", encoding="utf-8")
-    accepted_stream = paths.haanen_accepted_rollout.open("r", encoding="utf-8")
+    rejected_stream = paths.haanen_rejected_rollout.open("r", encoding=TEXT_ENCODING)
+    accepted_stream = paths.haanen_accepted_rollout.open("r", encoding=TEXT_ENCODING)
     tool_inputs: list[list[str]] = []
     for stream in (rejected_stream, accepted_stream):
         inputs: list[str] = []
@@ -1452,17 +1556,17 @@ def api_push_capture(
     configuration = aivm_audit.audit_configuration(f"/home/ai/.codex/sessions/{relative}")
 
     def guest_run(command: list[str], **kwargs: object) -> SimpleNamespace:
-        assert command[0] == api.SSH_EXECUTABLE
+        assert command[0] == SSH_EXECUTABLE
         assert command[-2] == configuration.ssh_target
-        if command[-1] == f"{api.AUDIT_FIND_ROLLOUT_COMMAND} {OPERATOR_CAPTURED_SESSION_ID}":
+        if command[-1] == f"{AUDIT_FIND_ROLLOUT_COMMAND} {OPERATOR_CAPTURED_SESSION_ID}":
             return SimpleNamespace(
                 returncode=0, stdout=f"{configuration.rollout_guest_path}\n", stderr="",
             )
-        if command[-1] == f"{api.AUDIT_READ_ROLLOUT_COMMAND} {relative}":
+        if command[-1] == f"{AUDIT_READ_ROLLOUT_COMMAND} {relative}":
             cast(Any, kwargs["stdout"]).write(payload)
             return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
         assert command[-1] == (
-            f"{api.AUDIT_READ_APPENDWATCH_REPORT_COMMAND} {configuration.appendwatch_report}"
+            f"{AUDIT_READ_APPENDWATCH_REPORT_COMMAND} {configuration.appendwatch_report}"
         )
         return SimpleNamespace(
             returncode=0, stdout=report_for_rollout(relative).encode(), stderr=b"",
@@ -1512,13 +1616,13 @@ def prepare_real_sample_push(
         command: list[str],
         **kwargs: object,
     ) -> SimpleNamespace:
-        if command[0] == api.SSH_EXECUTABLE:
+        if command[0] == SSH_EXECUTABLE:
             assert command[-2] == configuration.ssh_target
-            if command[-1] == (f"{api.AUDIT_READ_ROLLOUT_COMMAND} {JULY_ROLLOUT_RELATIVE_PATH}"):
+            if command[-1] == (f"{AUDIT_READ_ROLLOUT_COMMAND} {JULY_ROLLOUT_RELATIVE_PATH}"):
                 cast(Any, kwargs["stdout"]).write(read_bytes(paths.july_rollout))
                 return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
             assert command[-1] == (
-                f"{api.AUDIT_READ_APPENDWATCH_REPORT_COMMAND} {configuration.appendwatch_report}"
+                f"{AUDIT_READ_APPENDWATCH_REPORT_COMMAND} {configuration.appendwatch_report}"
             )
             return SimpleNamespace(
                 returncode=0,
@@ -1723,11 +1827,15 @@ def create_operator_capture_source_database(
 def query_snapshot_for_test(
     store: BackendComponent.QueryOnlyStoreProperty, threaded_loop: asyncio.Runner,
 ) -> DashboardQuerySnapshot:
-    response = threaded_loop.run(ipc.handle_query_request(
-        store, requests.Request("GET", "http://invalid/query").prepare(),
-    ))
+    app = server.create_dashboard_query_app(
+        store.query_response_record,
+        query_path=DASHBOARD_QUERY_PATH,
+    )
+    response = threaded_loop.run(
+        asyncio.to_thread(app.test_client().get, DASHBOARD_QUERY_PATH)
+    )
     assert response.status_code == HTTPStatus.OK
-    return DashboardQuerySnapshot.from_serialized_json(response.content)
+    return DashboardQuerySnapshot.from_serialized_json(response.get_data())
 
 
 def api_application_for_test(
@@ -1755,7 +1863,8 @@ async def authoritative_api_exchange(
         transport=httpx.ASGITransport(app=app), base_url="http://testserver",
     ) as client:
         response = await client.request(
-            method, path, content=body, headers={"content-type": "application/json"},
+            method, path, content=body,
+            headers={HTTP_CONTENT_TYPE_HEADER.lower(): ContentType.JSON},
         )
     # This helper checks final workflow results. Early-202 timing is tested separately.
     await asyncio.gather(*tuple(api.AUTHORITATIVE_BACKGROUND_TASKS))
@@ -1815,7 +1924,7 @@ def assert_captured_operator_push_contour(
     monkeypatch.setattr(aivm_audit, "AIVM_IDENTITY_FILE", identity_path)
     monkeypatch.setattr(aivm_audit, "AIVM_KNOWN_HOSTS_FILE", known_hosts_path)
     configuration = aivm_audit.audit_configuration(
-        str(api.CODEX_SESSIONS_ROOT / rollout_relative_path)
+        str(CODEX_SESSIONS_ROOT / rollout_relative_path)
     )
 
     institution_names = {
@@ -1849,21 +1958,21 @@ def assert_captured_operator_push_contour(
         command: list[str],
         **kwargs: object,
     ) -> SimpleNamespace:
-        assert command[0] == api.SSH_EXECUTABLE
+        assert command[0] == SSH_EXECUTABLE
         assert command[-2] == configuration.ssh_target
         if command[-1] == (
-            f"{api.AUDIT_FIND_ROLLOUT_COMMAND} {OPERATOR_CAPTURED_SESSION_ID}"
+            f"{AUDIT_FIND_ROLLOUT_COMMAND} {OPERATOR_CAPTURED_SESSION_ID}"
         ):
             return SimpleNamespace(
                 returncode=0, stdout=f"{configuration.rollout_guest_path}\n", stderr="",
             )
         if command[-1] == (
-            f"{api.AUDIT_READ_ROLLOUT_COMMAND} {configuration.rollout_relative_path}"
+            f"{AUDIT_READ_ROLLOUT_COMMAND} {configuration.rollout_relative_path}"
         ):
             cast(Any, kwargs["stdout"]).write(read_bytes(rollout_path))
             return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
         assert command[-1] == (
-            f"{api.AUDIT_READ_APPENDWATCH_REPORT_COMMAND} {configuration.appendwatch_report}"
+            f"{AUDIT_READ_APPENDWATCH_REPORT_COMMAND} {configuration.appendwatch_report}"
         )
         return SimpleNamespace(
             returncode=0,
@@ -2007,7 +2116,7 @@ def assert_captured_operator_push_contour(
             api.selected_card_outer_dict(selected_singular_outerdict),
             total_draws=runtime.pipeline_config.total_draws,
             intro="",
-            excluded_cols=api.CARD_EXCLUDED_COLUMNS,
+            excluded_cols=CARD_EXCLUDED_COLUMNS,
         )
         assert len(cards) == 1
         card_markdown = next(iter(cards.values()))
@@ -2040,8 +2149,8 @@ def test_captured_operator_push_generates_commit_and_exact_410_response(
 
 
 @pytest.mark.parametrize(("method", "path", "state", "expected_status", "chunks"), (
-    ("GET", "/pull", BackendLifecycle.READY, HTTPStatus.OK, (b"",)),
-    ("POST", "/push", BackendLifecycle.BUSY, HTTPStatus.SERVICE_UNAVAILABLE,
+    (HTTP_GET_METHOD, PULL_PATH, BackendLifecycle.READY, HTTPStatus.OK, (b"",)),
+    (HTTP_POST_METHOD, PUSH_PATH, BackendLifecycle.BUSY, HTTPStatus.SERVICE_UNAVAILABLE,
      (b'{"submission":', b'"private test input"}')),
 ))
 def test_http_adapter_persists_complete_exchange_before_sending(
@@ -2069,7 +2178,11 @@ def test_http_adapter_persists_complete_exchange_before_sending(
 
         async def receive() -> Message:
             index, chunk = next(pieces)
-            return {"type": "http.request", "body": chunk, "more_body": index < len(chunks) - 1}
+            return {
+                ASGI_TYPE_KEY: ASGI_HTTP_REQUEST_MESSAGE_TYPE,
+                ASGI_BODY_KEY: chunk,
+                ASGI_MORE_BODY_KEY: index < len(chunks) - 1,
+            }
 
         async def send(message: Message) -> None:
             # Assert real durable log and DB readback BEFORE any response is emitted.
@@ -2084,17 +2197,22 @@ def test_http_adapter_persists_complete_exchange_before_sending(
             messages.append(message)
 
         scope: Scope = {
-            "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
-            "method": method, "scheme": "http", "path": path, "raw_path": path.encode(),
-            "query_string": b"", "headers": [(b"host", b"invalid")],
-            "client": ("127.0.0.1", 1), "server": ("invalid", 80),
+            ASGI_TYPE_KEY: ASGI_HTTP_SCOPE_TYPE,
+            "asgi": {"version": "3.0"}, "http_version": "1.1",
+            ASGI_METHOD_KEY: method, "scheme": "http",
+            ASGI_PATH_KEY: path, "raw_path": path.encode(),
+            "query_string": b"",
+            ASGI_HEADERS_KEY: [(
+                b"host", SYNTHETIC_COMMIT_HOST.encode(TEXT_ENCODING),
+            )],
+            "client": ("127.0.0.1", 1), "server": (SYNTHETIC_COMMIT_HOST, 80),
         }
         await app(scope, receive, send)
 
     with api_store._writable(api_runtime):
         threaded_loop.run(asyncio.wait_for(exchange(), timeout=10))
     assert messages[0]["status"] == expected_status
-    assert messages[-1].get("more_body", False) is False
+    assert messages[-1].get(ASGI_MORE_BODY_KEY, False) is False
     record = persisted[0]
     assert record.record_id.version == 7
     assert all(item == record for item in persisted)
@@ -2213,41 +2331,73 @@ def test_synthetic_commit_matches_the_readme_contour_exactly(tmp_path: Path) -> 
         + b"\n"
     )
 
-    record = _synthetic_commit_request_record(
+    body = CommitRequestBody(
         pull_response_record=pull_record,
         push_response_record=push_record,
-        session_id=session_id,
-        rollout=rollout,
-        rollout_filename=TEST_ROLLOUT_FILENAME,
-        appendwatch_report=report,
-        namekey=TEST_NAMEKEY_MODEL,
+        codex_session_record=CodexSessionRecord(
+            session_id=session_id,
+            codex_rollout_record=rollout,
+            appendwatch_report_record=AppendwatchReportRecord(
+                encoding=AppendwatchReportEncoding.BASE64,
+                data=base64.b64encode(report).decode(BASE64_TEXT_ENCODING),
+            ),
+        ),
     )
+    before_usec = time.time_ns() // NANOSECONDS_PER_MICROSECOND
+    record = BackendCommitRequestRecord(
+        schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
+        method=HTTP_POST_METHOD,
+        scheme=SYNTHETIC_COMMIT_SCHEME,
+        host=SYNTHETIC_COMMIT_HOST,
+        port=None,
+        path=COMMIT_PATH,
+        query="",
+        request_headers={
+            SOURCE_KEY_HEADER: source_key_header_value(
+                TEST_ROLLOUT_FILENAME, rollout.line_count,
+            ),
+            NAME_KEY_HEADER: name_key_header_value(TEST_NAMEKEY_MODEL),
+        },
+        request_body=body.model_dump_json(),
+        response_code=None,
+        response_headers=None,
+        response_body=None,
+        received_at_unix_usec=None,
+        ready_to_respond_at_unix_usec=(
+            time.time_ns() // NANOSECONDS_PER_MICROSECOND
+        ),
+        duration_usec=0,
+        commit_request_body=body,
+    )
+    after_usec = time.time_ns() // NANOSECONDS_PER_MICROSECOND
 
+    assert record.ready_to_respond_at_unix_usec is not None
+    assert before_usec <= record.ready_to_respond_at_unix_usec <= after_usec
     assert AiAugmentBackendStore._validated_http_record(record).model_dump() == record.model_dump()
     assert record.record_id.version == 7
     serialized_record = record.model_dump(mode="json", exclude={"record_id"})
     assert serialized_record == {
-        "schema_version": "1.1",
-        "method": "POST",
-        "scheme": "http",
-        "host": "invalid",
+        "schema_version": KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
+        "method": HTTP_POST_METHOD,
+        "scheme": SYNTHETIC_COMMIT_SCHEME,
+        "host": SYNTHETIC_COMMIT_HOST,
         "port": None,
-        "ready_to_respond_at_unix_usec": None,
+        "ready_to_respond_at_unix_usec": record.ready_to_respond_at_unix_usec,
         "path": "/commit",
         "query": "",
         "request_headers": {
-            "SourceKey": (
+            SOURCE_KEY_HEADER: (
                 f'ktp.filename="{TEST_ROLLOUT_FILENAME}", '
                 'ktp.fragment;type="line_number";line_number="2"'
             ),
-            "NameKey": 'ktp.first_name="A.", ktp.last_name="Sheikh"',
+            NAME_KEY_HEADER: 'ktp.first_name="A.", ktp.last_name="Sheikh"',
         },
         "request_body": record.request_body,
         "response_code": None,
         "response_headers": None,
         "response_body": None,
         "received_at_unix_usec": None,
-        "duration_usec": None,
+        "duration_usec": 0,
     }
     assert record.request_body is not None
     assert json.loads(record.request_body) == {
@@ -2262,7 +2412,7 @@ def test_synthetic_commit_matches_the_readme_contour_exactly(tmp_path: Path) -> 
             },
             "appendwatch_report_record": {
                 "encoding": "base64",
-                "data": base64.b64encode(report).decode("ascii"),
+                "data": base64.b64encode(report).decode(BASE64_TEXT_ENCODING),
             },
         },
     }
@@ -2305,7 +2455,7 @@ def test_commit_request_body_contract_is_strict_canonical_and_losslessly_resolve
             },
             "appendwatch_report_record": {
                 "encoding": "base64",
-                "data": base64.b64encode(b".\n").decode("ascii"),
+                "data": base64.b64encode(b".\n").decode(BASE64_TEXT_ENCODING),
             },
         },
     }
@@ -2350,7 +2500,9 @@ def test_commit_request_body_contract_is_strict_canonical_and_losslessly_resolve
                 })
             )
     with pytest.raises(ValidationError):
-        CommitRequestBody.validate_serialized_json(json.dumps({**body, "schema_version": "1.1"}))
+        CommitRequestBody.validate_serialized_json(
+            json.dumps({**body, "schema_version": KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1})
+        )
 
 
 def test_run_outcome_snapshot_captures_fresh_rollout_and_appendwatch(
@@ -2362,7 +2514,7 @@ def test_run_outcome_snapshot_captures_fresh_rollout_and_appendwatch(
     session_id = UUID("019d0000-0000-7000-8000-000000000011")
     pull_record_id = UUID("019d0000-0000-7000-8000-000000000012")
     push_record_id = UUID("019d0000-0000-7000-8000-000000000013")
-    rollout_filename = f"{api.ROLLOUT_FILENAME_PREFIX}{session_id}.jsonl"
+    rollout_filename = f"{ROLLOUT_FILENAME_PREFIX}{session_id}{ROLLOUT_FILENAME_SUFFIX}"
     for path in (tmp_path / "ssh.config", tmp_path / "identity", tmp_path / "known-hosts"):
         write_text(path, "fixture\n")
     monkeypatch.setattr(aivm_audit, "APPENDWATCH_REPORT", "/report.txt")
@@ -2376,19 +2528,19 @@ def test_run_outcome_snapshot_captures_fresh_rollout_and_appendwatch(
     calls: list[object] = []
 
     def guest_run(command: list[str], **kwargs: object) -> SimpleNamespace:
-        assert command[0] == api.SSH_EXECUTABLE
+        assert command[0] == SSH_EXECUTABLE
         assert command[-2] == configuration.ssh_target
-        if command[-1] == f"{api.AUDIT_FIND_ROLLOUT_COMMAND} {session_id}":
+        if command[-1] == f"{AUDIT_FIND_ROLLOUT_COMMAND} {session_id}":
             calls.append(("rollout", session_id))
             return SimpleNamespace(
                 returncode=0, stdout=f"{configuration.rollout_guest_path}\n", stderr="",
             )
-        if command[-1] == f"{api.AUDIT_READ_ROLLOUT_COMMAND} {rollout_filename}":
+        if command[-1] == f"{AUDIT_READ_ROLLOUT_COMMAND} {rollout_filename}":
             calls.append(("copy", configuration))
             cast(Any, kwargs["stdout"]).write(rollout_path.read_bytes())
             return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
         assert command[-1] == (
-            f"{api.AUDIT_READ_APPENDWATCH_REPORT_COMMAND} {configuration.appendwatch_report}"
+            f"{AUDIT_READ_APPENDWATCH_REPORT_COMMAND} {configuration.appendwatch_report}"
         )
         calls.append("appendwatch")
         return SimpleNamespace(returncode=0, stdout=b".\n", stderr=b"")
@@ -2396,18 +2548,22 @@ def test_run_outcome_snapshot_captures_fresh_rollout_and_appendwatch(
     monkeypatch.setattr(subprocess, "run", guest_run)
 
     monkeypatch.setattr(api, "BACKEND_SESSION_ID", session_id)
-    pull_record = persisted_http_record(
-        record_id=pull_record_id,
-        method=HTTP_GET_METHOD,
-        path=PULL_PATH,
-        response_code=status.HTTP_200_OK,
+    pull_record = PullResponseRecord.from_http_request_log_record(
+        http_request_log_record=persisted_http_record(
+            record_id=pull_record_id,
+            method=HTTP_GET_METHOD,
+            path=PULL_PATH,
+            response_code=status.HTTP_200_OK,
+        ),
     )
-    push_record = persisted_http_record(
-        record_id=push_record_id,
-        method=HTTP_POST_METHOD,
-        path=PUSH_PATH,
-        response_code=HTTPStatus.CONFLICT,
-        request_body="{}",
+    push_record = PushResponseRecord.from_http_request_log_record(
+        http_request_log_record=persisted_http_record(
+            record_id=push_record_id,
+            method=HTTP_POST_METHOD,
+            path=PUSH_PATH,
+            response_code=HTTPStatus.CONFLICT,
+            request_body="{}",
+        ),
     )
 
     with api_store._writable(api_runtime):
@@ -2427,7 +2583,7 @@ def test_run_outcome_snapshot_captures_fresh_rollout_and_appendwatch(
         ),
         appendwatch_report_record=AppendwatchReportRecord(
             encoding=AppendwatchReportEncoding.BASE64,
-            data=base64.b64encode(b".\n").decode("ascii"),
+            data=base64.b64encode(b".\n").decode(BASE64_TEXT_ENCODING),
         ),
     )
     assert calls == [
@@ -2467,19 +2623,19 @@ def test_run_outcome_http_exchange_is_logged_and_replays_as_raw_history(
     rollout = AiAugmentCAS._record(rollout_path)
 
     def guest_run(command: list[str], **kwargs: object) -> SimpleNamespace:
-        assert command[0] == api.SSH_EXECUTABLE
+        assert command[0] == SSH_EXECUTABLE
         if not complete_capture:
             raise OSError("guest evidence unavailable")
-        if command[-1] == f"{api.AUDIT_FIND_ROLLOUT_COMMAND} {TEST_SESSION_ID}":
+        if command[-1] == f"{AUDIT_FIND_ROLLOUT_COMMAND} {TEST_SESSION_ID}":
             return SimpleNamespace(
                 returncode=0,
-                stdout=f"{api.CODEX_SESSIONS_ROOT / TEST_ROLLOUT_FILENAME}\n",
+                stdout=f"{CODEX_SESSIONS_ROOT / TEST_ROLLOUT_FILENAME}\n",
                 stderr="",
             )
-        if command[-1] == f"{api.AUDIT_READ_ROLLOUT_COMMAND} {TEST_ROLLOUT_FILENAME}":
+        if command[-1] == f"{AUDIT_READ_ROLLOUT_COMMAND} {TEST_ROLLOUT_FILENAME}":
             cast(Any, kwargs["stdout"]).write(rollout_path.read_bytes())
             return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
-        assert command[-1] == f"{api.AUDIT_READ_APPENDWATCH_REPORT_COMMAND} /report.txt"
+        assert command[-1] == f"{AUDIT_READ_APPENDWATCH_REPORT_COMMAND} /report.txt"
         return SimpleNamespace(returncode=0, stdout=b".\n", stderr=b"")
 
     monkeypatch.setattr(subprocess, "run", guest_run)
@@ -2491,13 +2647,13 @@ def test_run_outcome_http_exchange_is_logged_and_replays_as_raw_history(
         appendwatch_report_record=(
             AppendwatchReportRecord(
                 encoding=AppendwatchReportEncoding.BASE64,
-                data=base64.b64encode(b".\n").decode("ascii"),
+                data=base64.b64encode(b".\n").decode(BASE64_TEXT_ENCODING),
             ) if complete_capture else None
         ),
     )
     headers = {
         run_outcome_models.NAME_KEY_HEADER: name_key_header_value(TEST_NAMEKEY_MODEL),
-        "Session-ID": str(TEST_SESSION_ID),
+        SESSION_ID_HEADER: str(TEST_SESSION_ID),
     }
     if identity == "missing_namekey":
         del headers[run_outcome_models.NAME_KEY_HEADER]
@@ -2508,21 +2664,18 @@ def test_run_outcome_http_exchange_is_logged_and_replays_as_raw_history(
             NameKey(**{KTP_FIRST_NAME_COL: "Another", KTP_LAST_NAME_COL: "Researcher"})
         )
     elif identity == "missing_session":
-        del headers["Session-ID"]
+        del headers[SESSION_ID_HEADER]
     elif identity == "malformed_session":
-        headers["Session-ID"] = "not a UUID"
+        headers[SESSION_ID_HEADER] = "not a UUID"
     elif identity == "wrong_session":
-        headers["Session-ID"] = str(uuid7())
+        headers[SESSION_ID_HEADER] = str(uuid7())
     elif identity == "unexpected_sourcekey":
-        headers["SourceKey"] = "unexpected"
+        headers[SOURCE_KEY_HEADER] = "unexpected"
     request_body = (
         b"unexpected" if identity == "unexpected_body" else
         b"\xff" if identity == "binary_body" else b""
     )
     query = "?unexpected=1" if identity == "unexpected_query" else ""
-    request = requests.Request(
-        "POST", f"http://invalid{path}{query}", headers=headers, data=request_body,
-    ).prepare()
     expected_status = (
         HTTPStatus.BAD_REQUEST
         if identity != "matching" or path is run_outcome_models.RunOutcomePath.COMPLETED else
@@ -2530,8 +2683,18 @@ def test_run_outcome_http_exchange_is_logged_and_replays_as_raw_history(
         HTTPStatus.OK
     )
     with api_store._writable(api_runtime):
-        response = threaded_loop.run(
-            ipc.handle_run_outcome_request(api_store, request),
+        app = server.create_dashboard_query_app(
+            api_store.query_response_record,
+            query_path=DASHBOARD_QUERY_PATH,
+            run_outcome_store=api_store,
+            run_outcome_paths=run_outcome_models.RUN_OUTCOME_PATHS,
+            fatal_exit=lambda code: pytest.fail(f"IPC fatal exit: {code}"),
+        )
+        response = app.test_client().post(
+            f"{path}{query}",
+            base_url="http://invalid",
+            headers=headers,
+            data=request_body,
         )
         assert response.status_code == expected_status
         log_bytes = Path(api_store._replay_log).read_bytes()
@@ -2548,7 +2711,14 @@ def test_run_outcome_http_exchange_is_logged_and_replays_as_raw_history(
         assert validated._codex_session_record() == session
         assert record.record_id.version == 7
         assert record.path == path
-        assert record.request_headers == headers
+        assert {
+            name.casefold(): value for name, value in record.request_headers.items()
+        } == {
+            **{name.casefold(): value for name, value in headers.items()},
+            "host": SYNTHETIC_COMMIT_HOST,
+            "content-length": str(len(request_body)),
+            "user-agent": f"Werkzeug/{version('werkzeug')}",
+        }
         assert record.request_body == (
             "unexpected" if identity == "unexpected_body" else
             '{"encoding":"base64","data":"/w=="}' if identity == "binary_body" else None
@@ -2557,16 +2727,24 @@ def test_run_outcome_http_exchange_is_logged_and_replays_as_raw_history(
         assert record.response_code == expected_status
         assert record.response_body == body.model_dump_json()
         assert response.text == record.response_body
-        assert record.received_at_unix_usec is not None
+        assert record.received_at_unix_usec is None
+        assert record.ready_to_respond_at_unix_usec is not None
         assert record.duration_usec is not None
+        assert record.duration_usec >= 0
+        assert validated.run_outcome_request_record.received_at_unix_usec == (
+            record.ready_to_respond_at_unix_usec - record.duration_usec
+        )
+        expected_response_headers = {
+            HTTP_CONTENT_TYPE_HEADER: ContentType.JSON,
+            HTTP_CONTENT_LENGTH_HEADER: str(
+                len(body.model_dump_json().encode(TEXT_ENCODING))
+            ),
+        }
         if complete_capture and session_id is not None:
-            assert record.response_headers == {
-                SOURCE_KEY_HEADER: source_key_header_value(
-                    TEST_ROLLOUT_FILENAME, rollout.line_count,
-                ),
-            }
-        else:
-            assert record.response_headers is None
+            expected_response_headers[SOURCE_KEY_HEADER] = source_key_header_value(
+                TEST_ROLLOUT_FILENAME, rollout.line_count,
+            )
+        assert record.response_headers == expected_response_headers
         live_query = DashboardQuerySnapshot(
             ai_augment_singular_outerdicts=api_store.ai_augment_singular_outerdicts(),
         )
@@ -2587,11 +2765,15 @@ def test_run_outcome_http_exchange_is_logged_and_replays_as_raw_history(
     )
     replay._rebuild_from_log(api_runtime, reset_confirmed=True, confirm_replay=lambda: True)
     with replay._read_only(api_runtime):
-        response = threaded_loop.run(ipc.handle_query_request(
-            replay, requests.Request("GET", "http://invalid/query").prepare(),
-        ))
+        app = server.create_dashboard_query_app(
+            replay.query_response_record,
+            query_path=DASHBOARD_QUERY_PATH,
+        )
+        response = threaded_loop.run(
+            asyncio.to_thread(app.test_client().get, DASHBOARD_QUERY_PATH)
+        )
         assert response.status_code == HTTPStatus.OK
-        snapshot = DashboardQuerySnapshot.from_serialized_json(response.content)
+        snapshot = DashboardQuerySnapshot.from_serialized_json(response.get_data())
         assert snapshot.model_dump_json() == live_snapshot
         assert all(
             not researcher.codex_innerdicts
@@ -2610,43 +2792,79 @@ def test_failed_post_commit_work_projects_without_conditional_rollback(
     rollout_path.write_text("{}\n", encoding=TEXT_ENCODING)
     pull_record_id = UUID("019d0000-0000-7000-8000-000000000061")
     push_record_id = UUID("019d0000-0000-7000-8000-000000000062")
-    pull_record = persisted_http_record(
-        record_id=pull_record_id,
-        method=HTTP_GET_METHOD,
-        path=PULL_PATH,
-        response_code=status.HTTP_200_OK,
-        response_headers={"content-type": ContentType.NDJSON_UTF8},
-        response_body="".join(
-            api.configured_pull_lines(api_runtime.ai_augment_singular_outerdict_blueprints[0])
+    pull_record = PullResponseRecord.from_http_request_log_record(
+        http_request_log_record=persisted_http_record(
+            record_id=pull_record_id,
+            method=HTTP_GET_METHOD,
+            path=PULL_PATH,
+            response_code=status.HTTP_200_OK,
+            response_headers={"content-type": ContentType.NDJSON_UTF8},
+            response_body="".join(
+                api.configured_pull_lines(api_runtime.ai_augment_singular_outerdict_blueprints[0])
+            ),
         ),
-    )
-    push_record = persisted_http_record(
-        record_id=push_record_id,
-        method=HTTP_POST_METHOD,
-        path=PUSH_PATH,
-        response_code=status.HTTP_202_ACCEPTED,
-        request_body="{}",
     )
 
     with api_store._writable(api_runtime):
         api_store._append_authoritative_record(pull_record)
         replayed_pull = api_store.current_replayed_record
         assert isinstance(replayed_pull, PullResponseRecord)
+        push_record = PushResponseRecord.from_http_request_log_record(
+            http_request_log_record=persisted_http_record(
+                record_id=push_record_id,
+                method=HTTP_POST_METHOD,
+                path=PUSH_PATH,
+                response_code=status.HTTP_202_ACCEPTED,
+                request_body="{}",
+            ),
+            pull_response_record=replayed_pull,
+        )
         api_store._append_authoritative_record(push_record)
         replayed_push = api_store.current_replayed_record
         assert isinstance(replayed_push, PushResponseRecord)
-        record = _synthetic_commit_request_record(
+        session_id = UUID("019d0000-0000-7000-8000-000000000063")
+        rollout = CodexRolloutRecord(
+            sha256=hashlib.sha256(rollout_path.read_bytes()).hexdigest(),
+            size=rollout_path.stat().st_size,
+            line_count=1,
+        )
+        report = b".\n"
+        body = CommitRequestBody(
             pull_response_record=replayed_pull,
             push_response_record=replayed_push,
-            session_id=UUID("019d0000-0000-7000-8000-000000000063"),
-            rollout=CodexRolloutRecord(
-                sha256=hashlib.sha256(rollout_path.read_bytes()).hexdigest(),
-                size=rollout_path.stat().st_size,
-                line_count=1,
+            codex_session_record=CodexSessionRecord(
+                session_id=session_id,
+                codex_rollout_record=rollout,
+                appendwatch_report_record=AppendwatchReportRecord(
+                    encoding=AppendwatchReportEncoding.BASE64,
+                    data=base64.b64encode(report).decode(BASE64_TEXT_ENCODING),
+                ),
             ),
-            rollout_filename=TEST_ROLLOUT_FILENAME,
-            appendwatch_report=b".\n",
-            namekey=TEST_NAMEKEY_MODEL,
+        )
+        record = BackendCommitRequestRecord(
+            schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
+            method=HTTP_POST_METHOD,
+            scheme=SYNTHETIC_COMMIT_SCHEME,
+            host=SYNTHETIC_COMMIT_HOST,
+            port=None,
+            path=COMMIT_PATH,
+            query="",
+            request_headers={
+                SOURCE_KEY_HEADER: source_key_header_value(
+                    TEST_ROLLOUT_FILENAME, rollout.line_count,
+                ),
+                NAME_KEY_HEADER: name_key_header_value(TEST_NAMEKEY_MODEL),
+            },
+            request_body=body.model_dump_json(),
+            response_code=None,
+            response_headers=None,
+            response_body=None,
+            received_at_unix_usec=None,
+            ready_to_respond_at_unix_usec=(
+                time.time_ns() // NANOSECONDS_PER_MICROSECOND
+            ),
+            duration_usec=0,
+            commit_request_body=body,
         )
         api_store._append_authoritative_record(record)
         replayed_commit = api_store.current_replayed_record
@@ -2661,19 +2879,39 @@ def test_failed_post_commit_work_projects_without_conditional_rollback(
             db_reads=db_reads,
         )
         assert failed_validation.result is BackendLifecycle.CONFIGURATION_ERROR
-        validation_record = ValidationRequestBody(
+        validation_body = ValidationRequestBody(
             commit_request_record=replayed_commit,
             post_commit_validation=failed_validation,
             initial_validation_request_record=None,
-        ).http_record()
+        )
+        validation_record = BackendValidationRequestRecord(
+            validation_request_body=validation_body,
+            schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
+            method=HTTP_POST_METHOD,
+            scheme=SYNTHETIC_COMMIT_SCHEME,
+            host=SYNTHETIC_COMMIT_HOST,
+            port=None,
+            path=VALIDATE_PATH,
+            query="",
+            request_headers=dict(replayed_commit.request_headers),
+            request_body=validation_body.model_dump_json(by_alias=True),
+            response_code=None,
+            response_headers=None,
+            response_body=None,
+            received_at_unix_usec=None,
+            ready_to_respond_at_unix_usec=(
+                time.time_ns() // NANOSECONDS_PER_MICROSECOND
+            ),
+            duration_usec=0,
+        )
         api_store._append_authoritative_record(validation_record)
 
         assert api_store._execute(
-            f"SELECT count(*) FROM {api.COMMIT_VALIDATION_REQUEST_RECORD_INDEX_TABLE}"
+            f"SELECT count(*) FROM {COMMIT_VALIDATION_REQUEST_RECORD_INDEX_TABLE}"
         ).fetchone() == (1,)
         assert api_store._execute(
-            f"SELECT {api.AUTHORITATIVE_RECORD_ORDINAL_COLUMN} "
-            f"FROM {api.AUTHORITATIVE_RECORDS_TABLE} ORDER BY 1"
+            f"SELECT {AUTHORITATIVE_RECORD_ORDINAL_COLUMN} "
+            f"FROM {AUTHORITATIVE_RECORDS_TABLE} ORDER BY 1"
         ).fetchall() == [(1,), (2,), (3,), (4,), (5,)]
         assert len(AiAugmentBackendStore._authoritative_log_records(
             Path(api_store._replay_log).read_bytes()
@@ -2831,7 +3069,7 @@ def test_evidence_candidates_exclude_unsupported_calls(
                 assert item.match is not None
                 assert item.match.call_id in {"call_arguments_1", "call_arguments_2"}
             else:
-                assert item.outcome == backend_vars.EVIDENCE_OUTCOME_UNMATCHED
+                assert item.outcome == EVIDENCE_OUTCOME_UNMATCHED
                 assert item.match is None
         if codex_match_version == 2:
             near = post_commit_validation.assess_submission_evidence(
@@ -2841,8 +3079,8 @@ def test_evidence_candidates_exclude_unsupported_calls(
             )
             for item in near.items:
                 assert item.outcome == (
-                    backend_vars.EVIDENCE_OUTCOME_V2_NEAR if include_supported
-                    else backend_vars.EVIDENCE_OUTCOME_UNMATCHED
+                    EVIDENCE_OUTCOME_V2_NEAR if include_supported
+                    else EVIDENCE_OUTCOME_UNMATCHED
                 )
                 assert all(candidate.call_id != "call_arguments_0" for candidate in item.candidates)
     finally:
@@ -2897,19 +3135,19 @@ def test_optional_result_metadata_is_nullable_and_no_url_ref_is_skipped() -> Non
         not_null = {
             row[1]: bool(row[3])
             for row in connection.execute(
-                f"PRAGMA table_info('{backend_vars.CODEX_TURN_REF_TABLE}')"
+                f"PRAGMA table_info('{CODEX_TURN_REF_TABLE}')"
             ).fetchall()
         }
         assert all(not not_null[column] for column in OPTIONAL_REF_METADATA_COLUMNS)
 
         store_for_connection(connection)._persist_rollout_index(index)
         stored = connection.execute(
-            f'SELECT "{backend_vars.CODEX_REF_DOMAIN_COL}", '
-            f'"{backend_vars.CODEX_REF_SNIPPET_COL}", '
-            f'"{backend_vars.CODEX_REF_THUMBNAIL_URL_COL}", '
-            f'"{backend_vars.CODEX_REF_TITLE_COL}", '
-            f'"{backend_vars.CODEX_REF_URL_COL}" '
-            f"FROM {backend_vars.CODEX_TURN_REF_TABLE}"
+            f'SELECT "{CODEX_REF_DOMAIN_COL}", '
+            f'"{CODEX_REF_SNIPPET_COL}", '
+            f'"{CODEX_REF_THUMBNAIL_URL_COL}", '
+            f'"{CODEX_REF_TITLE_COL}", '
+            f'"{CODEX_REF_URL_COL}" '
+            f"FROM {CODEX_TURN_REF_TABLE}"
         ).fetchone()
         assert stored == (None, None, None, None, TEST_URL)
     finally:
@@ -3077,7 +3315,7 @@ def test_openapi_example_is_a_complete_pydantic_valid_submission(
         for column, field in post_commit_validation.RETRY_EVIDENCE_SUBMISSION_EXAMPLE.items()
         if column in AI_AUGMENT_EVIDENCE_COLUMNS and isinstance(field, dict)
     )
-    source = backend_test_paths.pydantic_to_paste.read_text(encoding="utf-8").rstrip()
+    source = backend_test_paths.pydantic_to_paste.read_text(encoding=TEXT_ENCODING).rstrip()
     assert PYDANTIC_TO_PASTE_SOURCE == source
     assert source in post_commit_validation.RETRY_SUBMISSION_PUBLIC_GUIDANCE
     assert (
@@ -3159,11 +3397,11 @@ def test_persisted_index_is_idempotent_and_evidence_lookup_is_exact() -> None:
 @pytest.mark.parametrize(
     ("excerpt", "expected_outcome"),
     (
-        (V2_EXACT_EXCERPT, backend_vars.EVIDENCE_OUTCOME_V1_EXACT),
-        ("josé garcía — senior\nresearcher", backend_vars.EVIDENCE_OUTCOME_V2_NEAR),
-        ("Jose Garcia — Senior\nResearcher", backend_vars.EVIDENCE_OUTCOME_V2_NEAR),
-        ("José García Senior Researcher", backend_vars.EVIDENCE_OUTCOME_V2_NEAR),
-        ("José   García\n\n—\tSenior   Researcher", backend_vars.EVIDENCE_OUTCOME_V2_NEAR),
+        (V2_EXACT_EXCERPT, EVIDENCE_OUTCOME_V1_EXACT),
+        ("josé garcía — senior\nresearcher", EVIDENCE_OUTCOME_V2_NEAR),
+        ("Jose Garcia — Senior\nResearcher", EVIDENCE_OUTCOME_V2_NEAR),
+        ("José García Senior Researcher", EVIDENCE_OUTCOME_V2_NEAR),
+        ("José   García\n\n—\tSenior   Researcher", EVIDENCE_OUTCOME_V2_NEAR),
     ),
     ids=("exact", "case", "accent", "punctuation", "whitespace"),
 )
@@ -3186,10 +3424,10 @@ def test_codex_v2_classifies_normalized_variants_without_accepting_them(
         connection.close()
 
     assert {item.outcome for item in assessment.items} == {expected_outcome}
-    assert assessment.accepted is (expected_outcome == backend_vars.EVIDENCE_OUTCOME_V1_EXACT)
+    assert assessment.accepted is (expected_outcome == EVIDENCE_OUTCOME_V1_EXACT)
     assert sum(len(matches) for matches in assessment.validated.values()) == (
         len(AI_AUGMENT_EVIDENCE_COLUMNS)
-        if expected_outcome == backend_vars.EVIDENCE_OUTCOME_V1_EXACT else 0
+        if expected_outcome == EVIDENCE_OUTCOME_V1_EXACT else 0
     )
 
 
@@ -3224,14 +3462,14 @@ def test_codex_v2_normalizer_preserves_non_latin_scripts(
 @pytest.mark.parametrize(
     ("cite_text", "excerpt", "expected_outcome"),
     (
-        ("ИВАН—ПЕТРОВ", "иван петров", backend_vars.EVIDENCE_OUTCOME_V2_NEAR),
-        ("张，伟", "张 伟", backend_vars.EVIDENCE_OUTCOME_V2_NEAR),
-        ("张伟", "张 伟", backend_vars.EVIDENCE_OUTCOME_UNMATCHED),
-        ("أحمد حسن", "احمد—حسن", backend_vars.EVIDENCE_OUTCOME_V2_NEAR),
+        ("ИВАН—ПЕТРОВ", "иван петров", EVIDENCE_OUTCOME_V2_NEAR),
+        ("张，伟", "张 伟", EVIDENCE_OUTCOME_V2_NEAR),
+        ("张伟", "张 伟", EVIDENCE_OUTCOME_UNMATCHED),
+        ("أحمد حسن", "احمد—حسن", EVIDENCE_OUTCOME_V2_NEAR),
         (
             "Αλέξανδρος Παπαδόπουλος",
             "αλεξανδρος παπαδοπουλος",
-            backend_vars.EVIDENCE_OUTCOME_V2_NEAR,
+            EVIDENCE_OUTCOME_V2_NEAR,
         ),
     ),
     ids=(
@@ -3292,7 +3530,7 @@ def test_codex_v2_rejects_noncontiguous_or_empty_token_sequences(
     finally:
         connection.close()
 
-    assert {item.outcome for item in assessment.items} == {backend_vars.EVIDENCE_OUTCOME_UNMATCHED}
+    assert {item.outcome for item in assessment.items} == {EVIDENCE_OUTCOME_UNMATCHED}
     assert assessment.accepted is False
 
 
@@ -3315,7 +3553,7 @@ def test_codex_v2_cannot_join_tokens_across_citation_sections(
     finally:
         connection.close()
 
-    assert {item.outcome for item in assessment.items} == {backend_vars.EVIDENCE_OUTCOME_UNMATCHED}
+    assert {item.outcome for item in assessment.items} == {EVIDENCE_OUTCOME_UNMATCHED}
 
 
 def test_codex_v2_requires_the_exact_candidate_url(
@@ -3339,7 +3577,7 @@ def test_codex_v2_requires_the_exact_candidate_url(
     finally:
         connection.close()
 
-    assert {item.outcome for item in assessment.items} == {backend_vars.EVIDENCE_OUTCOME_UNMATCHED}
+    assert {item.outcome for item in assessment.items} == {EVIDENCE_OUTCOME_UNMATCHED}
 
 
 def test_empty_excerpt_is_rejected_before_codex_v2_matching() -> None:
@@ -3371,8 +3609,8 @@ def test_evidence_assessment_is_exhaustive_and_public_guidance_is_nonrevealing(
 
     assert len(assessment.items) == len(AI_AUGMENT_EVIDENCE_COLUMNS)
     assert assessment.exact_count == len(AI_AUGMENT_EVIDENCE_COLUMNS) - 1
-    assert assessment.items[0].outcome == backend_vars.EVIDENCE_OUTCOME_V2_NEAR
-    assert assessment.items[-1].outcome == backend_vars.EVIDENCE_OUTCOME_V1_EXACT
+    assert assessment.items[0].outcome == EVIDENCE_OUTCOME_V2_NEAR
+    assert assessment.items[-1].outcome == EVIDENCE_OUTCOME_V1_EXACT
     assert assessment.accepted is False
     assert f"{failed_field}.web_search_excerpts[0]" in detail
     assert TEST_CALL_ID not in detail
@@ -3391,7 +3629,7 @@ def test_retry_guidance_separates_exact_progress_from_blocking_contract_violatio
                 index=0,
                 evidence_number=evidence_number,
                 submission=field_submission.web_search_excerpts[0],
-                outcome=backend_vars.EVIDENCE_OUTCOME_V1_EXACT,
+                outcome=EVIDENCE_OUTCOME_V1_EXACT,
                 match=None,
             )
             for evidence_number, (field, field_submission) in enumerate(
@@ -3473,15 +3711,15 @@ def test_v2_retry_baseline_replays_and_accepts_only_the_exact_correction(
         )
 
         baseline_count = connection.execute(
-            f"SELECT count(*) FROM {backend_vars.POST_COMMIT_VALIDATION_RETRY_BASELINES_TABLE}"
+            f"SELECT count(*) FROM {POST_COMMIT_VALIDATION_RETRY_BASELINES_TABLE}"
         ).fetchone()
         audit_rows = connection.execute(
             f"""
             SELECT
-                {backend_vars.POST_COMMIT_VALIDATION_APPLIED_COL},
-                {backend_vars.POST_COMMIT_VALIDATION_ACCEPTED_COL}
-            FROM {backend_vars.POST_COMMIT_VALIDATION_EVIDENCE_AUDITS_TABLE}
-            ORDER BY {backend_vars.POST_COMMIT_VALIDATION_AUDIT_ID_COL}
+                {POST_COMMIT_VALIDATION_APPLIED_COL},
+                {POST_COMMIT_VALIDATION_ACCEPTED_COL}
+            FROM {POST_COMMIT_VALIDATION_EVIDENCE_AUDITS_TABLE}
+            ORDER BY {POST_COMMIT_VALIDATION_AUDIT_ID_COL}
             """
         ).fetchall()
     finally:
@@ -3559,16 +3797,16 @@ def test_v2_retry_rejects_changed_tokens_and_repeats_near_guidance(
         )
         applied_rows = connection.execute(
             f"""
-            SELECT {backend_vars.POST_COMMIT_VALIDATION_APPLIED_COL}
-            FROM {backend_vars.POST_COMMIT_VALIDATION_EVIDENCE_AUDITS_TABLE}
-            ORDER BY {backend_vars.POST_COMMIT_VALIDATION_AUDIT_ID_COL}
+            SELECT {POST_COMMIT_VALIDATION_APPLIED_COL}
+            FROM {POST_COMMIT_VALIDATION_EVIDENCE_AUDITS_TABLE}
+            ORDER BY {POST_COMMIT_VALIDATION_AUDIT_ID_COL}
             """
         ).fetchall()
     finally:
         connection.close()
 
     location = f"{failed_field}.web_search_excerpts[0]"
-    assert changed_assessment.items[0].outcome == backend_vars.EVIDENCE_OUTCOME_UNMATCHED
+    assert changed_assessment.items[0].outcome == EVIDENCE_OUTCOME_UNMATCHED
     assert changed_violations == (
         Locale.EVIDENCE_MINOR_CHANGE_ONLY_TEMPLATE.format(location=location),
     )
@@ -3713,7 +3951,7 @@ def test_retry_preserves_fully_verified_fields_and_complete_evidence_counts(
         (
             {"excerpt": "Profile:", "url": TEST_URL},
             False,
-            backend_vars.EVIDENCE_OUTCOME_V1_EXACT,
+            EVIDENCE_OUTCOME_V1_EXACT,
         ),
         (
             {
@@ -3722,7 +3960,7 @@ def test_retry_preserves_fully_verified_fields_and_complete_evidence_counts(
                 EVIDENCE_WITHDRAWAL_ATTESTED_FIELD: True,
             },
             True,
-            backend_vars.EVIDENCE_OUTCOME_WITHDRAWN,
+            EVIDENCE_OUTCOME_WITHDRAWN,
         ),
     ),
     ids=("replace", "withdraw"),
@@ -3943,16 +4181,16 @@ def test_retry_baselines_survive_restart_and_remain_isolated_by_original_pull(
             )
         baseline_rows = second_connection.execute(
             f"""
-            SELECT {backend_vars.POST_COMMIT_VALIDATION_ORIGINAL_PULL_RECORD_ID_COL}
-            FROM {backend_vars.POST_COMMIT_VALIDATION_RETRY_BASELINES_TABLE}
-            ORDER BY {backend_vars.POST_COMMIT_VALIDATION_ORIGINAL_PULL_RECORD_ID_COL}
+            SELECT {POST_COMMIT_VALIDATION_ORIGINAL_PULL_RECORD_ID_COL}
+            FROM {POST_COMMIT_VALIDATION_RETRY_BASELINES_TABLE}
+            ORDER BY {POST_COMMIT_VALIDATION_ORIGINAL_PULL_RECORD_ID_COL}
             """
         ).fetchall()
         accepted_rows = second_connection.execute(
             f"""
             SELECT count(*)
-            FROM {backend_vars.POST_COMMIT_VALIDATION_EVIDENCE_AUDITS_TABLE}
-            WHERE {backend_vars.POST_COMMIT_VALIDATION_ACCEPTED_COL}
+            FROM {POST_COMMIT_VALIDATION_EVIDENCE_AUDITS_TABLE}
+            WHERE {POST_COMMIT_VALIDATION_ACCEPTED_COL}
             """
         ).fetchone()
     finally:
@@ -4048,15 +4286,15 @@ def test_concurrent_first_rejections_cannot_replace_the_baseline(
     try:
         baseline_commit_record = verification_connection.execute(
             f"""
-            SELECT {backend_vars.POST_COMMIT_VALIDATION_COMMIT_RECORD_ID_COL}
-            FROM {backend_vars.POST_COMMIT_VALIDATION_RETRY_BASELINES_TABLE}
+            SELECT {POST_COMMIT_VALIDATION_COMMIT_RECORD_ID_COL}
+            FROM {POST_COMMIT_VALIDATION_RETRY_BASELINES_TABLE}
             """
         ).fetchone()
         audit_commit_records = verification_connection.execute(
             f"""
-            SELECT {backend_vars.POST_COMMIT_VALIDATION_COMMIT_RECORD_ID_COL}
-            FROM {backend_vars.POST_COMMIT_VALIDATION_EVIDENCE_AUDITS_TABLE}
-            ORDER BY {backend_vars.POST_COMMIT_VALIDATION_AUDIT_ID_COL}
+            SELECT {POST_COMMIT_VALIDATION_COMMIT_RECORD_ID_COL}
+            FROM {POST_COMMIT_VALIDATION_EVIDENCE_AUDITS_TABLE}
+            ORDER BY {POST_COMMIT_VALIDATION_AUDIT_ID_COL}
             """
         ).fetchall()
     finally:
@@ -4109,9 +4347,9 @@ def test_corrupt_applied_audit_fails_as_configuration_error(
             )
         connection.execute(
             f"""
-            UPDATE {backend_vars.POST_COMMIT_VALIDATION_EVIDENCE_AUDITS_TABLE}
-            SET {backend_vars.POST_COMMIT_VALIDATION_ASSESSMENT_COL} = ?
-            WHERE {backend_vars.POST_COMMIT_VALIDATION_COMMIT_RECORD_ID_COL} = ?
+            UPDATE {POST_COMMIT_VALIDATION_EVIDENCE_AUDITS_TABLE}
+            SET {POST_COMMIT_VALIDATION_ASSESSMENT_COL} = ?
+            WHERE {POST_COMMIT_VALIDATION_COMMIT_RECORD_ID_COL} = ?
             """,
             ["{}", str(deterministic_uuid7("audit-second"))],
         )
@@ -4165,13 +4403,13 @@ def test_historical_haanen_retry_preserves_verified_evidence_roundtrip(
         )
         assert len(original_archived_items) == HAANEN_ORIGINAL_EVIDENCE_COUNT
         assert sum(
-            item.outcome == backend_vars.EVIDENCE_OUTCOME_V1_EXACT
+            item.outcome == EVIDENCE_OUTCOME_V1_EXACT
             for item in original_archived_items
         ) == (HAANEN_ORIGINAL_EVIDENCE_COUNT - 1)
         near_items = tuple(
             item
             for item in original_assessment.items
-            if item.outcome == backend_vars.EVIDENCE_OUTCOME_V2_NEAR
+            if item.outcome == EVIDENCE_OUTCOME_V2_NEAR
         )
         assert tuple((item.field, item.index) for item in near_items) == (
             (KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL, 1),
@@ -4273,7 +4511,7 @@ def test_historical_haanen_retry_preserves_verified_evidence_roundtrip(
         )
         assert len(ideal_archived_items) == HAANEN_ORIGINAL_EVIDENCE_COUNT
         assert all(
-            item.outcome == backend_vars.EVIDENCE_OUTCOME_V1_EXACT
+            item.outcome == EVIDENCE_OUTCOME_V1_EXACT
             for item in ideal_archived_items
         )
         assert ideal_assessment.accepted is True
@@ -4294,11 +4532,11 @@ def test_historical_haanen_retry_preserves_verified_evidence_roundtrip(
         audit_rows = connection.execute(
             f"""
             SELECT
-                {backend_vars.POST_COMMIT_VALIDATION_COMMIT_RECORD_ID_COL},
-                {backend_vars.POST_COMMIT_VALIDATION_APPLIED_COL},
-                {backend_vars.POST_COMMIT_VALIDATION_ACCEPTED_COL}
-            FROM {backend_vars.POST_COMMIT_VALIDATION_EVIDENCE_AUDITS_TABLE}
-            ORDER BY {backend_vars.POST_COMMIT_VALIDATION_AUDIT_ID_COL}
+                {POST_COMMIT_VALIDATION_COMMIT_RECORD_ID_COL},
+                {POST_COMMIT_VALIDATION_APPLIED_COL},
+                {POST_COMMIT_VALIDATION_ACCEPTED_COL}
+            FROM {POST_COMMIT_VALIDATION_EVIDENCE_AUDITS_TABLE}
+            ORDER BY {POST_COMMIT_VALIDATION_AUDIT_ID_COL}
             """
         ).fetchall()
     finally:
@@ -4780,7 +5018,7 @@ def test_aivm_identity_file_must_be_configured_explicitly(
 
     with pytest.raises(
         aivm_audit._AivmAuditError,
-        match=api.AIVM_IDENTITY_FILE_ENV_NAME,
+        match=AIVM_IDENTITY_FILE_ENV_NAME,
     ):
         aivm_audit.audit_configuration(TEST_ROLLOUT_GUEST_PATH)
 
@@ -4790,7 +5028,7 @@ def test_session_rollout_discovery_uses_restricted_audit_principal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     session_id = UUID("019fa457-aac5-7652-8669-9d571206e7cb")
-    rollout = api.CODEX_SESSIONS_ROOT / JULY_ROLLOUT_RELATIVE_PATH
+    rollout = CODEX_SESSIONS_ROOT / JULY_ROLLOUT_RELATIVE_PATH
     deployment_files = [
         tmp_path / "identity",
         tmp_path / "known-hosts",
@@ -4815,10 +5053,10 @@ def test_session_rollout_discovery_uses_restricted_audit_principal(
 
     configured = aivm_audit.audit_configuration_for_session(session_id)
 
-    assert configured.ssh_user == api.AIVM_AUDIT_USER
-    assert configured.ssh_target == f"{api.AIVM_INSTANCE}-{api.AIVM_AUDIT_USER}"
-    assert f"User={api.AIVM_AUDIT_USER}" in observed
-    assert observed[-1] == f"{api.AUDIT_FIND_ROLLOUT_COMMAND} {session_id}"
+    assert configured.ssh_user == AIVM_AUDIT_USER
+    assert configured.ssh_target == f"{AIVM_INSTANCE}-{AIVM_AUDIT_USER}"
+    assert f"User={AIVM_AUDIT_USER}" in observed
+    assert observed[-1] == f"{AUDIT_FIND_ROLLOUT_COMMAND} {session_id}"
     assert configured.rollout_guest_path == str(rollout)
 
 
@@ -4867,14 +5105,14 @@ def test_audit_ssh_uses_pinned_identity_and_counts_physical_lines(
     )
 
     command = captured["command"]
-    assert command[0] == api.SSH_EXECUTABLE
+    assert command[0] == SSH_EXECUTABLE
     assert f"IdentityFile={identity_path}" in command
     assert f"UserKnownHostsFile={known_hosts_path}" in command
     assert f"User={configuration.ssh_user}" in command
     assert f"HostKeyAlias={configuration.host_key_alias}" in command
     assert "StrictHostKeyChecking=accept-new" in command
     assert command[-2] == configuration.ssh_target
-    assert command[-1] == (f"{api.AUDIT_READ_ROLLOUT_COMMAND} {TEST_ROLLOUT_RELATIVE_PATH}")
+    assert command[-1] == (f"{AUDIT_READ_ROLLOUT_COMMAND} {TEST_ROLLOUT_RELATIVE_PATH}")
     assert "shell" not in captured["kwargs"]
     assert archived.line_count == 2
     validated = runtime.pipeline_config.rollout_cas.validated_rollout(archived)
@@ -4922,7 +5160,7 @@ def test_configured_namekey_rejects_malformed_or_incomplete_json(
     raw_namekey: str,
     startup_files: StartupFiles,
 ) -> None:
-    monkeypatch.setenv(api.NAMEKEY_ENV_NAME, raw_namekey)
+    monkeypatch.setenv(NAMEKEY_ENV_NAME, raw_namekey)
 
     with pytest.raises(
         ValueError,
@@ -4989,7 +5227,7 @@ def test_card_labels_stored_standardized_fields_without_mutating_source() -> Non
         OuterDict(data={singular_outerdict.namekey.to_json_key(): [codex_innerdict]}),
         total_draws=1,
         intro="",
-        excluded_cols=api.CARD_EXCLUDED_COLUMNS,
+        excluded_cols=CARD_EXCLUDED_COLUMNS,
     )
 
     assert len(cards) == 1
@@ -5011,8 +5249,8 @@ def test_card_labels_stored_standardized_fields_without_mutating_source() -> Non
 @pytest.mark.parametrize(
     "placeholder",
     (
-        api.NOT_REPORTED_VALUE,
-        api.NOT_AVAILABLE_OR_APPLICABLE_VALUE,
+        NOT_REPORTED_VALUE,
+        NOT_AVAILABLE_OR_APPLICABLE_VALUE,
     ),
 )
 def test_card_preserves_standardized_placeholders(
@@ -5044,7 +5282,7 @@ def test_card_preserves_standardized_placeholders(
         OuterDict(data={namekey.to_json_key(): [codex_innerdict]}),
         total_draws=1,
         intro="",
-        excluded_cols=api.CARD_EXCLUDED_COLUMNS,
+        excluded_cols=CARD_EXCLUDED_COLUMNS,
     )
     assert f"**`{column}`**: {expected_value}" in next(iter(cards.values()))
     assert codex_innerdict.data[column] == expected_value
@@ -5094,10 +5332,7 @@ def test_backend_startup_prepares_source_rows_for_initial_pull(
     with api_store._writable(runtime):
         singular_outerdict = api_store.selected_ai_augment_singular_outerdict()
         monkeypatch.setattr(api, "BACKEND_LIFECYCLE", BackendLifecycle.READY)
-        response = api._pull_response(
-            requests.Request("GET", "http://testserver/pull").prepare(),
-            api_store,
-        )
+        response = api._pull_response(api_store)
     assert response.status_code == HTTPStatus.OK
     assert response.content == "".join(api.configured_pull_lines(singular_outerdict)).encode()
 
@@ -5233,6 +5468,7 @@ def test_query_handler_requires_managed_backend_store_context(
     api_runtime: AiAugmentBackendContext,
     monkeypatch: pytest.MonkeyPatch,
     threaded_loop: asyncio.Runner,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     store = backend_store_for_test(api_runtime)
     monkeypatch.setattr(
@@ -5241,11 +5477,20 @@ def test_query_handler_requires_managed_backend_store_context(
         lambda *_args, **_kwargs: None,
     )
 
-    with pytest.raises(
-        BackendStoreException,
-        match=Locale.STORE_CONTEXT_UNAVAILABLE,
-    ):
-        query_snapshot_for_test(store, threaded_loop)
+    app = server.create_dashboard_query_app(
+        store.query_response_record,
+        query_path=DASHBOARD_QUERY_PATH,
+        fatal_exit=sys.exit,
+    )
+    with pytest.raises(SystemExit) as fatal:
+        threaded_loop.run(asyncio.to_thread(app.test_client().get, DASHBOARD_QUERY_PATH))
+    assert fatal.value.code == 1
+    assert any(
+        record.exc_info is not None
+        and isinstance(record.exc_info[1], BackendStoreException)
+        and str(record.exc_info[1]) == Locale.STORE_CONTEXT_UNAVAILABLE
+        for record in caplog.records
+    )
 
     with writable_backend_store(api_runtime) as store:
         response = query_snapshot_for_test(store, threaded_loop)
@@ -5566,7 +5811,7 @@ def test_main_full_mode_configures_and_runs_composed_backend(
 ) -> None:
     config_path = backend_startup_config_for_test(tmp_path, backend_test_paths)
     monkeypatch.setenv(
-        api.NAMEKEY_ENV_NAME,
+        NAMEKEY_ENV_NAME,
         NameKey(first_name="Case 000", last_name="Startup").to_json_key(),
     )
     served: list[tuple[FastAPI, str, int]] = []
@@ -5578,7 +5823,7 @@ def test_main_full_mode_configures_and_runs_composed_backend(
 
     server.main(["--config", str(config_path), "--new", "--yes"])
 
-    assert served == [(server.app, api.SERVER_HOST, api.SERVER_PORT)]
+    assert served == [(server.app, SERVER_HOST, SERVER_PORT)]
     assert api.BACKEND_PROCESS_LOCK_DESCRIPTOR is None
 
 
@@ -5635,13 +5880,13 @@ def test_repeated_researcher_rows_materialize_as_distinct_innerdicts() -> None:
 
         def output_row(fragment: int) -> dict[str, object]:
             values: dict[str, object] = {
-                column: f"value for {column}" for column, _data_type in api.CODEX_OUTPUT_SCHEMA
+                column: f"value for {column}" for column, _data_type in CODEX_OUTPUT_SCHEMA
             }
             values.update({
                 KTP_NAMEKEY_COL: TEST_NAMEKEY,
                 KTP_FILENAME_COL: TEST_ROLLOUT_FILENAME,
                 KTP_FRAGMENT_COL: fragment,
-                KTP_FRAGMENT_TYPE_COL: api.ROLLOUT_LINE_FRAGMENT_TYPE,
+                KTP_FRAGMENT_TYPE_COL: ROLLOUT_LINE_FRAGMENT_TYPE,
                 DRAW_LABEL: TEST_DRAW_NUMBER,
                 KTP_FIRST_NAME_COL: "A.",
                 KTP_LAST_NAME_COL: "Sheikh",
@@ -5658,7 +5903,7 @@ def test_repeated_researcher_rows_materialize_as_distinct_innerdicts() -> None:
         store_for_connection(connection)._replace_codex_output_view()
         innerdicts_row = connection.execute(
             f"SELECT {duckdb_quote_identifier(KTP_INNERDICT_JSONLINES_COL)} "
-            f"FROM {api.CODEX_INNERDICT_TABLE}"
+            f"FROM {CODEX_INNERDICT_TABLE}"
         ).fetchone()
         assert innerdicts_row is not None
         innerdicts_text = innerdicts_row[0]
@@ -5666,7 +5911,7 @@ def test_repeated_researcher_rows_materialize_as_distinct_innerdicts() -> None:
         assert [row[KTP_FRAGMENT_COL] for row in innerdicts] == [100, 101]
         assert all(
             set(row) == {
-                column for column, _data_type in api.CODEX_OUTPUT_SCHEMA
+                column for column, _data_type in CODEX_OUTPUT_SCHEMA
                 if column != KTP_NAMEKEY_COL
             }
             for row in innerdicts
@@ -5676,7 +5921,7 @@ def test_repeated_researcher_rows_materialize_as_distinct_innerdicts() -> None:
         ]
         assert connection.execute(
             f'SELECT {duckdb_quote_identifier(KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL)} '
-            f'FROM {api.CODEX_OUTPUT_ROWS_TABLE} '
+            f'FROM {CODEX_OUTPUT_ROWS_TABLE} '
             f'ORDER BY {duckdb_quote_identifier(KTP_FRAGMENT_COL)}'
         ).fetchall() == [("outcome-100",), ("outcome-101",)]
 
@@ -5697,15 +5942,16 @@ def test_push_acceptance_changes_state_before_validation_is_exposed(
 
     async def exercise() -> None:
         api_store._loop = asyncio.get_running_loop()
-        await api.authoritative_pull(
-            requests.Request("GET", "http://invalid/pull").prepare(), api_store,
-        )
-        captured_pull = api_store.current_replayed_record
-        assert isinstance(captured_pull, PullResponseRecord)
-        request = requests.Request("POST", "http://invalid/push", data=b"{}").prepare()
-        response = await api.authoritative_push(request, api_store)
+        app = api_application_for_test(api_runtime, api_store)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://invalid",
+        ) as client:
+            await client.get(PULL_PATH)
+            captured_pull = api_store.current_replayed_record
+            assert isinstance(captured_pull, PullResponseRecord)
+            response = await client.post(PUSH_PATH, content=b"{}")
         assert response.status_code == HTTPStatus.ACCEPTED
-        assert response.headers[api.LOCATION_HEADER] == PULL_PATH
+        assert response.headers[LOCATION_HEADER] == PULL_PATH
         assert api.BACKEND_LIFECYCLE is BackendLifecycle.BUSY
         await asyncio.gather(*tuple(api.AUTHORITATIVE_BACKGROUND_TASKS))
         validation = api_store.current_replayed_record
@@ -5726,49 +5972,48 @@ def test_retry_push_requires_a_persisted_current_pull_before_acceptance(
 ) -> None:
     async def exercise() -> None:
         api_store._loop = asyncio.get_running_loop()
-        await api.authoritative_pull(
-            requests.Request("GET", "http://invalid/pull").prepare(), api_store,
-        )
-        initial = api_store.current_replayed_record
-        assert isinstance(initial, PullResponseRecord)
-        request = requests.Request("POST", "http://invalid/push", data=b"{}").prepare()
-        pushed = await api.authoritative_push(request, api_store)
-        assert pushed.status_code == HTTPStatus.ACCEPTED
-        await asyncio.gather(*tuple(api.AUTHORITATIVE_BACKGROUND_TASKS))
-        validation = api_store.current_replayed_record
-        assert isinstance(validation, BackendValidationRequestRecord)
-        commit = validation.validation_request_body.commit_request_record
-        assert api.BACKEND_LIFECYCLE is BackendLifecycle.RETRY
-        premature = await api.authoritative_push(request, api_store)
-        assert premature.status_code == HTTPStatus.CONFLICT
-        assert premature.headers[api.LOCATION_HEADER] == PULL_PATH
-        assert premature.json() == {"detail": Locale.CONFIGURATION_ERROR_DETAIL}
-        assert api.BACKEND_LIFECYCLE is BackendLifecycle.RETRY
-        assert api_store.current_replayed_record is validation
-        assert commit.commit_request_body.pull_response_record is initial
-        assert Locale.PUSH_CURRENT_PULL_REQUIRED_LOG in caplog.messages
-        pulled = await api.authoritative_pull(
-            requests.Request("GET", "http://invalid/pull").prepare(), api_store,
-        )
-        assert pulled.status_code == HTTPStatus.OK
-        persisted_pull = api_store.current_replayed_record
-        assert isinstance(persisted_pull, PullResponseRecord)
-        assert persisted_pull is not initial
-        assert persisted_pull.validation_request_record is validation
-        assert api_store._http_record(persisted_pull.record_id).model_dump_json() == (
-            persisted_pull.model_dump_json()
-        )
-        accepted = await api.authoritative_push(request, api_store)
-        assert accepted.status_code == HTTPStatus.ACCEPTED
-        assert accepted.headers[api.LOCATION_HEADER] == PULL_PATH
-        assert BackendLifecycle(api.BACKEND_LIFECYCLE) is BackendLifecycle.BUSY
-        await asyncio.gather(*tuple(api.AUTHORITATIVE_BACKGROUND_TASKS))
-        retried_validation = api_store.current_replayed_record
-        assert isinstance(retried_validation, BackendValidationRequestRecord)
-        assert (
-            retried_validation.validation_request_body.commit_request_record
-            .commit_request_body.pull_response_record is persisted_pull
-        )
+        app = api_application_for_test(api_runtime, api_store)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://invalid",
+        ) as client:
+            await client.get(PULL_PATH)
+            initial = api_store.current_replayed_record
+            assert isinstance(initial, PullResponseRecord)
+            pushed = await client.post(PUSH_PATH, content=b"{}")
+            assert pushed.status_code == HTTPStatus.ACCEPTED
+            await asyncio.gather(*tuple(api.AUTHORITATIVE_BACKGROUND_TASKS))
+            validation = api_store.current_replayed_record
+            assert isinstance(validation, BackendValidationRequestRecord)
+            commit = validation.validation_request_body.commit_request_record
+            assert api.BACKEND_LIFECYCLE is BackendLifecycle.RETRY
+            premature = await client.post(PUSH_PATH, content=b"{}")
+            assert premature.status_code == HTTPStatus.CONFLICT
+            assert premature.headers[LOCATION_HEADER] == PULL_PATH
+            assert premature.json() == {"detail": Locale.CONFIGURATION_ERROR_DETAIL}
+            assert api.BACKEND_LIFECYCLE is BackendLifecycle.RETRY
+            assert api_store.current_replayed_record is validation
+            assert commit.commit_request_body.pull_response_record is initial
+            assert Locale.PUSH_CURRENT_PULL_REQUIRED_LOG in caplog.messages
+            pulled = await client.get(PULL_PATH)
+            assert pulled.status_code == HTTPStatus.OK
+            persisted_pull = api_store.current_replayed_record
+            assert isinstance(persisted_pull, PullResponseRecord)
+            assert persisted_pull is not initial
+            assert persisted_pull.validation_request_record is validation
+            assert api_store._http_record(persisted_pull.record_id).model_dump_json() == (
+                persisted_pull.model_dump_json()
+            )
+            accepted = await client.post(PUSH_PATH, content=b"{}")
+            assert accepted.status_code == HTTPStatus.ACCEPTED
+            assert accepted.headers[LOCATION_HEADER] == PULL_PATH
+            assert BackendLifecycle(api.BACKEND_LIFECYCLE) is BackendLifecycle.BUSY
+            await asyncio.gather(*tuple(api.AUTHORITATIVE_BACKGROUND_TASKS))
+            retried_validation = api_store.current_replayed_record
+            assert isinstance(retried_validation, BackendValidationRequestRecord)
+            assert (
+                retried_validation.validation_request_body.commit_request_record
+                .commit_request_body.pull_response_record is persisted_pull
+            )
     with api_store._writable(api_runtime):
         threaded_loop.run(exercise())
 
@@ -5786,9 +6031,11 @@ def test_push_configuration_failures_remain_internal_errors(
     api_store: AiAugmentBackendStore,
     threaded_loop: asyncio.Runner,
 ) -> None:
-    pull_record = persisted_http_record(
-        record_id=uuid7(), method=HTTP_GET_METHOD, path=PULL_PATH,
-        response_code=HTTPStatus.OK,
+    pull_record = PullResponseRecord.from_http_request_log_record(
+        http_request_log_record=persisted_http_record(
+            record_id=uuid7(), method=HTTP_GET_METHOD, path=PULL_PATH,
+            response_code=HTTPStatus.OK,
+        ),
     )
     monkeypatch.setattr(api, "BACKEND_LIFECYCLE", workflow_status)
     monkeypatch.setattr(api, "BACKEND_SESSION_ID", session_id)
@@ -5796,14 +6043,18 @@ def test_push_configuration_failures_remain_internal_errors(
         api_store._append_authoritative_record(pull_record)
         captured_pull = api_store.current_replayed_record
         assert isinstance(captured_pull, PullResponseRecord)
-        response = threaded_loop.run(
-            api.authoritative_push(
-                requests.Request("POST", "http://invalid/push", data=b"{}").prepare(),
-                api_store,
-            )
-        )
+
+        async def request_push() -> httpx.Response:
+            api_store._loop = asyncio.get_running_loop()
+            app = api_application_for_test(api_runtime, api_store)
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://invalid",
+            ) as client:
+                return await client.post(PUSH_PATH, content=b"{}")
+
+        response = threaded_loop.run(request_push())
         assert response.status_code == HTTPStatus.INTERNAL_SERVER_ERROR
-        assert api.LOCATION_HEADER not in response.headers
+        assert LOCATION_HEADER not in response.headers
         assert api.BACKEND_LIFECYCLE is workflow_status
         assert api_store.current_replayed_record is captured_pull
 
@@ -5822,7 +6073,7 @@ def test_accepted_push_is_committed_only_after_its_public_record(
 
     def delayed_guest_run(command: list[str], **kwargs: object) -> object:
         if command[-1] == (
-            f"{api.AUDIT_READ_APPENDWATCH_REPORT_COMMAND} {configuration.appendwatch_report}"
+            f"{AUDIT_READ_APPENDWATCH_REPORT_COMMAND} {configuration.appendwatch_report}"
         ):
             entered.set()
             assert release.wait(timeout=10), "test did not release guest capture"
@@ -5832,46 +6083,41 @@ def test_accepted_push_is_committed_only_after_its_public_record(
 
     async def exercise() -> None:
         api_store._loop = asyncio.get_running_loop()
-        await api.authoritative_pull(
-            requests.Request("GET", "http://invalid/pull").prepare(), api_store,
-        )
-        initial_pull = api_store.current_replayed_record
-        assert isinstance(initial_pull, PullResponseRecord)
-        try:
-            response = await api.authoritative_push(
-                requests.Request(
-                    "POST", "http://invalid/push", json=valid_submission_body(),
-                ).prepare(),
-                api_store,
-            )
-            assert response.status_code == HTTPStatus.ACCEPTED
-            assert response.headers[api.LOCATION_HEADER] == PULL_PATH
-            assert await asyncio.to_thread(entered.wait, 5)
-            busy_lifecycle = api.BACKEND_LIFECYCLE
-            assert busy_lifecycle is BackendLifecycle.BUSY
-            accepted_push = api_store.current_replayed_record
-            assert isinstance(accepted_push, PushResponseRecord)
-            assert accepted_push.pull_response_record is initial_pull
-            records = AiAugmentBackendStore._authoritative_log_records(
-                Path(api_store._replay_log).read_bytes()
-            )
-            assert [item.path for item, _ in records] == [
-                INIT_PATH, PULL_PATH, PUSH_PATH,
-            ]
-            assert records[-1][0].record_id == accepted_push.record_id
-            assert api_store._http_record(accepted_push.record_id).model_dump_json() == (
-                accepted_push.model_dump_json()
-            )
-            assert all(not task.done() for task in api.AUTHORITATIVE_BACKGROUND_TASKS)
-            busy = await api.authoritative_pull(
-                requests.Request("GET", "http://invalid/pull").prepare(), api_store,
-            )
-            assert busy.status_code == HTTPStatus.SERVICE_UNAVAILABLE
-            assert busy.headers[api.RETRY_AFTER_HEADER] == api.RETRY_AFTER_SECONDS
-            assert "ETag" not in busy.headers
-        finally:
-            release.set()
-            await asyncio.gather(*tuple(api.AUTHORITATIVE_BACKGROUND_TASKS))
+        app = api_application_for_test(api_runtime, api_store)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://invalid",
+        ) as client:
+            await client.get(PULL_PATH)
+            initial_pull = api_store.current_replayed_record
+            assert isinstance(initial_pull, PullResponseRecord)
+            try:
+                response = await client.post(PUSH_PATH, json=valid_submission_body())
+                assert response.status_code == HTTPStatus.ACCEPTED
+                assert response.headers[LOCATION_HEADER] == PULL_PATH
+                assert await asyncio.to_thread(entered.wait, 5)
+                busy_lifecycle = api.BACKEND_LIFECYCLE
+                assert busy_lifecycle is BackendLifecycle.BUSY
+                accepted_push = api_store.current_replayed_record
+                assert isinstance(accepted_push, PushResponseRecord)
+                assert accepted_push.pull_response_record is initial_pull
+                records = AiAugmentBackendStore._authoritative_log_records(
+                    Path(api_store._replay_log).read_bytes()
+                )
+                assert [item.path for item, _ in records] == [
+                    INIT_PATH, PULL_PATH, PUSH_PATH,
+                ]
+                assert records[-1][0].record_id == accepted_push.record_id
+                assert api_store._http_record(accepted_push.record_id).model_dump_json() == (
+                    accepted_push.model_dump_json()
+                )
+                assert all(not task.done() for task in api.AUTHORITATIVE_BACKGROUND_TASKS)
+                busy = await client.get(PULL_PATH)
+                assert busy.status_code == HTTPStatus.SERVICE_UNAVAILABLE
+                assert busy.headers[RETRY_AFTER_HEADER] == RETRY_AFTER_SECONDS
+                assert ETAG_HEADER not in busy.headers
+            finally:
+                release.set()
+                await asyncio.gather(*tuple(api.AUTHORITATIVE_BACKGROUND_TASKS))
 
         completed_records = [item for item, _ in AiAugmentBackendStore._authoritative_log_records(
             Path(api_store._replay_log).read_bytes()
@@ -5914,15 +6160,14 @@ def test_persisted_push_becomes_latest_run_outcome_snapshot_provenance(
 ) -> None:
     async def exercise() -> None:
         api_store._loop = asyncio.get_running_loop()
-        await api.authoritative_pull(
-            requests.Request("GET", "http://invalid/pull").prepare(), api_store,
-        )
-        pull = api_store.current_replayed_record
-        assert isinstance(pull, PullResponseRecord)
-        response = await api.authoritative_push(
-            requests.Request("POST", "http://invalid/push", json=valid_submission_body()).prepare(),
-            api_store,
-        )
+        http_app = api_application_for_test(api_runtime, api_store)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=http_app), base_url="http://invalid",
+        ) as client:
+            await client.get(PULL_PATH)
+            pull = api_store.current_replayed_record
+            assert isinstance(pull, PullResponseRecord)
+            response = await client.post(PUSH_PATH, json=valid_submission_body())
         assert response.status_code == HTTPStatus.ACCEPTED
         await asyncio.gather(*tuple(api.AUTHORITATIVE_BACKGROUND_TASKS))
         validation = api_store.current_replayed_record
@@ -5934,34 +6179,51 @@ def test_persisted_push_becomes_latest_run_outcome_snapshot_provenance(
         assert api_store._http_record(push.record_id).model_dump_json() == push.model_dump_json()
         headers = {
             run_outcome_models.NAME_KEY_HEADER: name_key_header_value(TEST_NAMEKEY_MODEL),
-            "Session-ID": str(OPERATOR_CAPTURED_SESSION_ID),
+            SESSION_ID_HEADER: str(OPERATOR_CAPTURED_SESSION_ID),
         }
         if etag != "missing":
-            headers["ETag"] = (
+            headers[ETAG_HEADER] = (
                 f'"{validation.record_id}"' if etag == "matching" else
                 f'"{uuid7()}"' if etag == "wrong" else "invalid"
             )
-        request = run_outcome_models.RunOutcomeRequestRecord.from_http_request(
-            received_at_unix_usec=1, method="POST", scheme="http", host="invalid",
-            port=None, path="/completed", query="", request_body=None,
-            request_headers=headers,
-        )
-        session, rollout_filename, failures = api_store.capture_run_outcome_snapshot(
+        session, _rollout_filename, failures = api_store.capture_run_outcome_snapshot(
             UUID(OPERATOR_CAPTURED_SESSION_ID),
         )
         assert failures == ()
         assert api_store.context is api_runtime
         assert session.session_id == UUID(OPERATOR_CAPTURED_SESSION_ID)
-        promise = api_store.run_outcome_response_record(
-            request, codex_session_record=session, rollout_filename=rollout_filename,
+        ipc_app = server.create_dashboard_query_app(
+            api_store.query_response_record,
+            query_path=DASHBOARD_QUERY_PATH,
+            run_outcome_store=api_store,
+            run_outcome_paths=run_outcome_models.RUN_OUTCOME_PATHS,
+            fatal_exit=lambda code: pytest.fail(f"IPC fatal exit: {code}"),
         )
-        response_record, error = await promise.response_record_promise()
-        assert error is None and response_record is not None
+        reply = await asyncio.to_thread(
+            ipc_app.test_client().post,
+            "/completed",
+            base_url="http://invalid",
+            headers=headers,
+        )
+        records = AiAugmentBackendStore._authoritative_log_records(
+            Path(api_store._replay_log).read_bytes()
+        )
+        response_record = RunOutcomeResponseRecord.from_http_request_log_record(
+            records[-1][0], attempt=validation,
+        )
+        assert reply.status_code == response_record.response_code
         assert response_record.response_code == (
             HTTPStatus.OK if etag == "matching" else HTTPStatus.BAD_REQUEST
         )
         if etag == "matching":
-            assert api_store.current_replayed_record is response_record
+            current = api_store.current_replayed_record
+            assert isinstance(current, RunOutcomeResponseRecord)
+            assert current.record_id == response_record.record_id
+            assert current.model_dump_json() == response_record.model_dump_json()
+            assert current.attempt is validation
+            assert current.run_outcome_request_record.model_dump(exclude={"record_id"}) == (
+                response_record.run_outcome_request_record.model_dump(exclude={"record_id"})
+            )
         else:
             assert api_store.current_replayed_record is validation
         body = response_record._body()
@@ -5990,21 +6252,23 @@ def test_accepted_push_finishes_after_client_or_response_send_failure(
 ) -> None:
     async def exercise() -> None:
         api_store._loop = asyncio.get_running_loop()
-        await api.authoritative_pull(
-            requests.Request("GET", "http://invalid/pull").prepare(), api_store,
-        )
         app = api_application_for_test(api_runtime, api_store)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://invalid",
+        ) as http_client:
+            await http_client.get(PULL_PATH)
         started = asyncio.Event()
         release = asyncio.Event()
 
         async def receive() -> Message:
             return {
-                "type": "http.request", "body": json.dumps(valid_submission_body()).encode(),
-                "more_body": False,
+                ASGI_TYPE_KEY: ASGI_HTTP_REQUEST_MESSAGE_TYPE,
+                ASGI_BODY_KEY: json.dumps(valid_submission_body()).encode(),
+                ASGI_MORE_BODY_KEY: False,
             }
 
         async def send(message: Message) -> None:
-            if message["type"] == "http.response.start":
+            if message[ASGI_TYPE_KEY] == ASGI_HTTP_RESPONSE_START_MESSAGE_TYPE:
                 assert message["status"] == HTTPStatus.ACCEPTED
                 assert api.AUTHORITATIVE_BACKGROUND_TASKS
                 started.set()
@@ -6013,11 +6277,16 @@ def test_accepted_push_finishes_after_client_or_response_send_failure(
                     raise OSError("response send failed")
 
         scope: Scope = {
-            "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
-            "method": "POST", "scheme": "http", "path": PUSH_PATH,
+            ASGI_TYPE_KEY: ASGI_HTTP_SCOPE_TYPE,
+            "asgi": {"version": "3.0"}, "http_version": "1.1",
+            ASGI_METHOD_KEY: HTTP_POST_METHOD, "scheme": "http", ASGI_PATH_KEY: PUSH_PATH,
             "raw_path": PUSH_PATH.encode(), "query_string": b"",
-            "headers": [(b"content-type", b"application/json")],
-            "server": ("invalid", 80), "client": ("client", 1234), "root_path": "",
+            ASGI_HEADERS_KEY: [(
+                HTTP_CONTENT_TYPE_HEADER.lower().encode(TEXT_ENCODING),
+                ContentType.JSON.encode(TEXT_ENCODING),
+            )],
+            "server": (SYNTHETIC_COMMIT_HOST, 80),
+            "client": ("client", 1234), "root_path": "",
         }
         client = asyncio.create_task(app(scope, receive, send))
         try:
@@ -6098,12 +6367,12 @@ def test_post_commit_result_is_exposed_only_by_follow_up_pull(
 
     def scenario_guest_run(command: list[str], **kwargs: object) -> object:
         if stage is BackendLifecycle.ROLLOUT_INDEX and command[-1].startswith(
-            api.AUDIT_READ_ROLLOUT_COMMAND
+            AUDIT_READ_ROLLOUT_COMMAND
         ):
             cast(Any, kwargs["stdout"]).write(b"{}\n")
             return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
         if stage is BackendLifecycle.APPENDWATCH_REPORT_VALIDATION and command[-1] == (
-            f"{api.AUDIT_READ_APPENDWATCH_REPORT_COMMAND} {configuration.appendwatch_report}"
+            f"{AUDIT_READ_APPENDWATCH_REPORT_COMMAND} {configuration.appendwatch_report}"
         ):
             return SimpleNamespace(returncode=0, stdout=b"invalid\n", stderr=b"")
         return cast(Any, guest_run)(command, **kwargs)
@@ -6118,22 +6387,19 @@ def test_post_commit_result_is_exposed_only_by_follow_up_pull(
         evidence[0]["excerpt"] = "fabricated excerpt"
 
     with api_store._writable(api_runtime):
-        async def exercise() -> tuple[requests.Response, BackendValidationRequestRecord]:
+        async def exercise() -> tuple[httpx.Response, BackendValidationRequestRecord]:
             api_store._loop = asyncio.get_running_loop()
-            await api.authoritative_pull(
-                requests.Request("GET", "http://invalid/pull").prepare(), api_store,
-            )
-            push_response = await api.authoritative_push(
-                requests.Request("POST", "http://invalid/push", json=submission_body).prepare(),
-                api_store,
-            )
-            assert push_response.status_code == HTTPStatus.ACCEPTED
-            await asyncio.gather(*tuple(api.AUTHORITATIVE_BACKGROUND_TASKS))
-            validation_record = api_store.current_replayed_record
-            assert isinstance(validation_record, BackendValidationRequestRecord)
-            pull_response = await api.authoritative_pull(
-                requests.Request("GET", "http://invalid/pull").prepare(), api_store,
-            )
+            app = api_application_for_test(api_runtime, api_store)
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://invalid",
+            ) as client:
+                await client.get(PULL_PATH)
+                push_response = await client.post(PUSH_PATH, json=submission_body)
+                assert push_response.status_code == HTTPStatus.ACCEPTED
+                await asyncio.gather(*tuple(api.AUTHORITATIVE_BACKGROUND_TASKS))
+                validation_record = api_store.current_replayed_record
+                assert isinstance(validation_record, BackendValidationRequestRecord)
+                pull_response = await client.get(PULL_PATH)
             return pull_response, validation_record
 
         response, current_validation = threaded_loop.run(
@@ -6145,9 +6411,9 @@ def test_post_commit_result_is_exposed_only_by_follow_up_pull(
     commit_request_record = current_validation.validation_request_body.commit_request_record
     assert response.status_code == expected_code
     if expected_code is HTTPStatus.GONE:
-        assert response.headers["ETag"] == f'"{current_validation.record_id}"'
+        assert response.headers[ETAG_HEADER] == f'"{current_validation.record_id}"'
     else:
-        assert "ETag" not in response.headers
+        assert ETAG_HEADER not in response.headers
     assert response.headers["content-type"].startswith(expected_media_type)
     assert str(commit_request_record.record_id) in caplog.text
     if expected_code == HTTPStatus.INTERNAL_SERVER_ERROR:
@@ -6193,7 +6459,7 @@ def test_explicit_probe_proves_report_and_remote_sessions_readable(
     monkeypatch.setattr(aivm_audit, "AIVM_IDENTITY_FILE", tmp_path / "identity")
     monkeypatch.setattr(aivm_audit, "AIVM_KNOWN_HOSTS_FILE", tmp_path / "known-hosts")
     configuration = aivm_audit.audit_configuration(
-        str(api.CODEX_SESSIONS_ROOT / "rollout-startup-readability-probe.jsonl")
+        str(CODEX_SESSIONS_ROOT / "rollout-startup-readability-probe.jsonl")
     )
     observed: list[list[str]] = []
 
@@ -6202,7 +6468,7 @@ def test_explicit_probe_proves_report_and_remote_sessions_readable(
         observed.append(command)
         stdout = (
             b"appendwatch\n"
-            if command[-1].startswith(api.AUDIT_READ_APPENDWATCH_REPORT_COMMAND)
+            if command[-1].startswith(AUDIT_READ_APPENDWATCH_REPORT_COMMAND)
             else ""
         )
         return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
@@ -6214,9 +6480,9 @@ def test_explicit_probe_proves_report_and_remote_sessions_readable(
     assert len(observed) == 2
     assert all(command[-2] == configuration.ssh_target for command in observed)
     assert observed[0][-1] == (
-        f"{api.AUDIT_READ_APPENDWATCH_REPORT_COMMAND} {configuration.appendwatch_report}"
+        f"{AUDIT_READ_APPENDWATCH_REPORT_COMMAND} {configuration.appendwatch_report}"
     )
-    assert observed[1][-1] == api.AUDIT_PROBE_COMMAND
+    assert observed[1][-1] == AUDIT_PROBE_COMMAND
 
 
 def test_background_commit_failure_exits_backend(
@@ -6266,18 +6532,18 @@ def test_appendwatch_commit_lookup_requires_one_exact_filename(
 def test_openapi_does_not_disclose_integrity_internals() -> None:
     schema = server.app.openapi()
     assert set(schema["paths"]) == {PULL_PATH, PUSH_PATH}
-    push_schema = schema["paths"]["/push"]["post"]
+    push_schema = schema["paths"][PUSH_PATH]["post"]
     serialized = json.dumps(push_schema).lower()
 
     assert push_schema["description"] == Locale.PUSH_DESCRIPTION
     assert "appendwatch" not in serialized
     assert "rollout" not in serialized
-    assert api.ROLLOUT_ENV_NAME.lower() not in serialized
+    assert ROLLOUT_ENV_NAME.lower() not in serialized
     assert set(push_schema["responses"]) == {"202", "409", "500", "503"}
     conflict_schema = push_schema["responses"]["409"]
     assert "current pull must be retrieved" in conflict_schema["description"]
-    assert set(conflict_schema["headers"]) == {api.LOCATION_HEADER}
-    assert set(schema["paths"]["/pull"]["get"]["responses"]) == {
+    assert set(conflict_schema["headers"]) == {LOCATION_HEADER}
+    assert set(schema["paths"][PULL_PATH]["get"]["responses"]) == {
         "200",
         "410",
         "500",
@@ -6299,12 +6565,12 @@ def test_dashboard_query_uses_scoped_store_reads(
     with writable_backend_store(api_runtime) as store:
         assert store._detour_db._conn is None
         first = query_snapshot_for_test(store, threaded_loop)
-        replayed_pull = HttpRequestLogRecord(
-            schema_version="1.1",
+        replayed_pull = PullResponseRecord(
+            schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
             method=HTTP_GET_METHOD,
             scheme="http",
             host="127.0.0.1",
-            port=api.SERVER_PORT,
+            port=SERVER_PORT,
             ready_to_respond_at_unix_usec=1,
             path=PULL_PATH,
             query="",
@@ -6320,7 +6586,7 @@ def test_dashboard_query_uses_scoped_store_reads(
         second = query_snapshot_for_test(store, threaded_loop)
         assert store._detour_db._conn is None
         projected_count = store._execute(
-            f"SELECT count(*) FROM {api.AUTHORITATIVE_RECORDS_TABLE}"
+            f"SELECT count(*) FROM {AUTHORITATIVE_RECORDS_TABLE}"
         ).fetchone()
 
     assert first.model_dump(mode="json") == second.model_dump(mode="json")
@@ -6335,7 +6601,7 @@ def test_dashboard_query_uses_scoped_store_reads(
 def test_dashboard_query_has_no_route_on_the_public_fastapi_application() -> None:
     route_paths = {getattr(route, "path", None) for route in server.app.routes}
 
-    assert ipc.DASHBOARD_QUERY_PATH not in route_paths
+    assert DASHBOARD_QUERY_PATH not in route_paths
     assert not any(isinstance(path, str) and path.startswith("/_control/") for path in route_paths)
 
 

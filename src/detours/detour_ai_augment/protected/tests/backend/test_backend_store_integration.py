@@ -10,10 +10,16 @@ from uuid import uuid7
 import duckdb
 import pytest
 
-from src.detours.detour_ai_augment.protected.src.backend import api as backend_api
+from src.detours.detour_ai_augment.protected.src.backend import server
+from src.detours.detour_ai_augment.protected.src.backend.helpers import api as backend_api
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.replay_log import (  # noqa: E501
     READ_ONLY_PERMISSIONS,
     READ_WRITE_PERMISSIONS,
+)
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.store import (  # noqa: E501
+    AiAugmentBackendStore,
+    _ReplayCommitInvalidError,
+    initialize_backend_store,
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
@@ -25,20 +31,17 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     PULL_PATH,
     PUSH_PATH,
     REPLAY_LOG_KEY,
+    SERVER_HOST,
+    SERVER_PORT,
     TEXT_ENCODING,
     AiAugmentCohort,
     AiAugmentIneligibilityCategory,
 )
+from src.detours.detour_ai_augment.protected.src.shared import name_key_header_value
 from src.detours.detour_ai_augment.protected.tests.fixtures.pytest_fixtures import (
     STARTUP_NAMEKEY,
     StartupFiles,
     init_request_record,
-)
-from src.detours.detour_ai_augment.src.backend import server
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_backend_store import (  # noqa: E501
-    AiAugmentBackendStore,
-    _ReplayCommitInvalidError,
-    initialize_backend_store,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_context import (  # noqa: E501
     AiAugmentBackendContext,
@@ -65,7 +68,6 @@ from src.detours.detour_ai_augment.src.backend.helpers.data_models.pull_event im
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.push_event import (
     PushResponseRecord,
 )
-from src.detours.detour_ai_augment.src.shared import name_key_header_value
 from src.detours.detour_ai_augment.tests.backend import test_http_interceptor as store_tests
 from src.detours.detour_ai_augment.tests.backend.test_api import (
     TEST_NAMEKEY_MODEL,
@@ -143,7 +145,7 @@ def test_invalid_launch_namekey_is_rejected_before_replay(
     assert result.returncode != 0, details
     assert expected_detail in details
     assert (
-        Locale.BACKEND_HTTP_STARTING_LOG % (backend_api.SERVER_HOST, backend_api.SERVER_PORT)
+        Locale.BACKEND_HTTP_STARTING_LOG % (SERVER_HOST, SERVER_PORT)
     ) not in details
     for path, digest in before.items():
         assert hashlib.sha256(path.read_bytes()).digest() == digest, path
@@ -294,7 +296,11 @@ def test_resume_after_committed_row_and_postcommit_failure(
         http_request_log_record=persisted_http_record(
             record_id=uuid7(), method=HTTP_GET_METHOD,
             path="/provider-capture", response_code=HTTPStatus.OK,
-        ),
+        ).model_copy(update={
+            "received_at_unix_usec": 2,
+            "ready_to_respond_at_unix_usec": None,
+            "duration_usec": 1,
+        }),
     )
     with pytest.raises(RuntimeError, match=Locale.STORE_FAILED_REBUILD_REQUIRED):
         with initialize_backend_store(
@@ -373,10 +379,14 @@ def test_resume_after_committed_row_and_postcommit_failure(
         assert resumed._http_record(record.record_id).model_dump(mode="json") == (
             record.model_dump(mode="json")
         )
-        continued = resumed._append_authoritative_record(persisted_http_record(
-            record_id=uuid7(), method=HTTP_GET_METHOD,
-            path=PULL_PATH, response_code=HTTPStatus.OK,
-        ))
+        continued = resumed._append_authoritative_record(
+            PullResponseRecord.from_http_request_log_record(
+                http_request_log_record=persisted_http_record(
+                    record_id=uuid7(), method=HTTP_GET_METHOD,
+                    path=PULL_PATH, response_code=HTTPStatus.OK,
+                ),
+            ),
+        )
         assert isinstance(continued, PullResponseRecord)
     with duckdb.connect(str(db_path), read_only=True) as connection:
         assert connection.execute(
@@ -412,14 +422,18 @@ def test_replay_keeps_backend_launch_boundaries(
         init_request_record=init_request_record(STARTUP_NAMEKEY),
         new=False, confirmed=True, confirm_replay=lambda: False,
     ) as first:
-        first_pull = first._append_authoritative_record(persisted_http_record(
-            record_id=uuid7(), method=HTTP_GET_METHOD, path=PULL_PATH,
-            response_code=HTTPStatus.OK,
-            response_body=backend_api.json_line({
-                KTP_FIRST_NAME_COL: STARTUP_NAMEKEY.first_name,
-                KTP_LAST_NAME_COL: STARTUP_NAMEKEY.last_name,
-            }),
-        ))
+        first_pull = first._append_authoritative_record(
+            PullResponseRecord.from_http_request_log_record(
+                http_request_log_record=persisted_http_record(
+                    record_id=uuid7(), method=HTTP_GET_METHOD, path=PULL_PATH,
+                    response_code=HTTPStatus.OK,
+                    response_body=backend_api.json_line({
+                        KTP_FIRST_NAME_COL: STARTUP_NAMEKEY.first_name,
+                        KTP_LAST_NAME_COL: STARTUP_NAMEKEY.last_name,
+                    }),
+                ),
+            ),
+        )
         assert isinstance(first_pull, PullResponseRecord)
         assert first_pull.validation_request_record is None
 
@@ -434,30 +448,47 @@ def test_replay_keeps_backend_launch_boundaries(
         assert replayed_init is not None
         assert replayed_init is second.current_replayed_record
         assert replayed_init.namekey == second_namekey
-        rejected = second._append_authoritative_record(persisted_http_record(
-            record_id=uuid7(), method=HTTP_POST_METHOD, path=PUSH_PATH,
-            response_code=HTTPStatus.CONFLICT,
-        ))
+        rejected = second._append_authoritative_record(
+            PushResponseRecord.from_http_request_log_record(
+                http_request_log_record=persisted_http_record(
+                    record_id=uuid7(), method=HTTP_POST_METHOD, path=PUSH_PATH,
+                    response_code=HTTPStatus.CONFLICT,
+                ),
+            ),
+        )
         assert isinstance(rejected, PushResponseRecord)
         assert rejected.pull_response_record is None
         assert second.current_replayed_record is second._init_request_record
-        second_pull = second._append_authoritative_record(persisted_http_record(
-            record_id=uuid7(), method=HTTP_GET_METHOD, path=PULL_PATH,
-            response_code=HTTPStatus.OK,
-        ))
+        second_pull = second._append_authoritative_record(
+            PullResponseRecord.from_http_request_log_record(
+                http_request_log_record=persisted_http_record(
+                    record_id=uuid7(), method=HTTP_GET_METHOD, path=PULL_PATH,
+                    response_code=HTTPStatus.OK,
+                ),
+            ),
+        )
         assert isinstance(second_pull, PullResponseRecord)
         assert second_pull.validation_request_record is None
-        rejected_with_pull = second._append_authoritative_record(persisted_http_record(
-            record_id=uuid7(), method=HTTP_POST_METHOD, path=PUSH_PATH,
-            response_code=HTTPStatus.CONFLICT,
-        ))
+        rejected_with_pull = second._append_authoritative_record(
+            PushResponseRecord.from_http_request_log_record(
+                http_request_log_record=persisted_http_record(
+                    record_id=uuid7(), method=HTTP_POST_METHOD, path=PUSH_PATH,
+                    response_code=HTTPStatus.CONFLICT,
+                ),
+            ),
+        )
         assert isinstance(rejected_with_pull, PushResponseRecord)
         assert rejected_with_pull.pull_response_record is None
         assert second._current_replayed_record is second_pull
-        accepted = second._append_authoritative_record(persisted_http_record(
-            record_id=uuid7(), method=HTTP_POST_METHOD, path=PUSH_PATH,
-            response_code=HTTPStatus.ACCEPTED,
-        ))
+        accepted = second._append_authoritative_record(
+            PushResponseRecord.from_http_request_log_record(
+                http_request_log_record=persisted_http_record(
+                    record_id=uuid7(), method=HTTP_POST_METHOD, path=PUSH_PATH,
+                    response_code=HTTPStatus.ACCEPTED,
+                ),
+                pull_response_record=second_pull,
+            ),
+        )
         assert isinstance(accepted, PushResponseRecord)
         assert accepted.pull_response_record is second_pull
 
@@ -485,14 +516,18 @@ def test_historical_validation_replays_under_its_backend_launch_namekey(
         init_request_record=init_request_record(STARTUP_NAMEKEY),
         new=False, confirmed=True, confirm_replay=lambda: False,
     ) as first:
-        first_pull = first._append_authoritative_record(persisted_http_record(
-            record_id=uuid7(), method=HTTP_GET_METHOD, path=PULL_PATH,
-            response_code=HTTPStatus.OK,
-            response_body=backend_api.json_line({
-                KTP_FIRST_NAME_COL: STARTUP_NAMEKEY.first_name,
-                KTP_LAST_NAME_COL: STARTUP_NAMEKEY.last_name,
-            }),
-        ))
+        first_pull = first._append_authoritative_record(
+            PullResponseRecord.from_http_request_log_record(
+                http_request_log_record=persisted_http_record(
+                    record_id=uuid7(), method=HTTP_GET_METHOD, path=PULL_PATH,
+                    response_code=HTTPStatus.OK,
+                    response_body=backend_api.json_line({
+                        KTP_FIRST_NAME_COL: STARTUP_NAMEKEY.first_name,
+                        KTP_LAST_NAME_COL: STARTUP_NAMEKEY.last_name,
+                    }),
+                ),
+            ),
+        )
         assert isinstance(first_pull, PullResponseRecord)
         commit_id = commit(
             first, {}, valid_submission_body(), first_pull,

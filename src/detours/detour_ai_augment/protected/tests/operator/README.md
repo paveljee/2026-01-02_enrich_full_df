@@ -94,7 +94,7 @@ export FASTAPI_DETOUR_DASHBOARD_SOCKET="/tmp/detour-manual-${UID}.sock"
 export FASTAPI_DETOUR_AIVM_IDENTITY_FILE="$HOME/.local/share/aivm/.ssh/id_ed25519"
 
 pixi run -e detour-ai-augment \
-  python -m src.detours.detour_ai_augment.src.backend.server \
+  python -m src.detours.detour_ai_augment.protected.src.backend.server \
   --config config_ai_augment.json --resume
 ```
 
@@ -206,7 +206,7 @@ ETAG='"<validation request record UUID from 410 /pull>"'
 NAME_KEY_HEADER="$(
   pixi run -e detour-ai-augment python -c '
 import sys
-from src.detours.detour_ai_augment.src.shared import name_key_header_value
+from src.detours.detour_ai_augment.protected.src.shared import name_key_header_value
 from src.helpers.data_models import NameKey
 print(name_key_header_value(NameKey.from_json_key(sys.argv[1])), end="")
 ' "$NAMEKEY"

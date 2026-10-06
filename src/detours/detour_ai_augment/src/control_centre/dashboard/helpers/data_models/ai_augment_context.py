@@ -11,15 +11,15 @@ from pydantic import PrivateAttr, ValidationError, computed_field
 from src.detours.detour_ai_augment.protected.src.architecture import (
     ControlCentreComponent,
 )
-from src.detours.detour_ai_augment.protected.src.backend.api import (
-    APPENDWATCH_REPORT_ENV_NAME,
-    FORBIDDEN_NORMALIZED_PATH_PARTS,
-)
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_augment_config import (  # noqa: E501
     AiAugmentDetourConfig,
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.pydantic_to_paste import (  # noqa: E501
     EXPORT_OPENALEX_API_KEY,
+)
+from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
+    APPENDWATCH_REPORT_ENV_NAME,
+    FORBIDDEN_NORMALIZED_PATH_PARTS,
 )
 from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helpers.data_models.lima import (  # noqa: E501
     LimaConfiguration,

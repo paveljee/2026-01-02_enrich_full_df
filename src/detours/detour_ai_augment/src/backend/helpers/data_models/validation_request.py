@@ -105,26 +105,6 @@ class ValidationRequestBody(FrozenStrictModel):
             ),
         )
 
-    def http_record(self) -> BackendValidationRequestRecord:
-        return BackendValidationRequestRecord(
-            validation_request_body=self,
-            schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
-            method=HTTP_POST_METHOD,
-            scheme=SYNTHETIC_COMMIT_SCHEME,
-            host=SYNTHETIC_COMMIT_HOST,
-            port=None,
-            path=VALIDATE_PATH,
-            query="",
-            request_headers=dict(self.commit_request_record.request_headers),
-            request_body=self.model_dump_json(by_alias=True),
-            response_code=None,
-            response_headers=None,
-            response_body=None,
-            received_at_unix_usec=None,
-            ready_to_respond_at_unix_usec=None,
-            duration_usec=None,
-        )
-
 
 @implements[BackendComponent.ValidationRequestRecordProperty]()
 class BackendValidationRequestRecord(RequestRecord):
@@ -150,8 +130,8 @@ class BackendValidationRequestRecord(RequestRecord):
             or self.response_headers is not None
             or self.response_body is not None
             or self.received_at_unix_usec is not None
-            or self.ready_to_respond_at_unix_usec is not None
-            or self.duration_usec is not None
+            or self.ready_to_respond_at_unix_usec is None
+            or self.duration_usec != 0
         ):
             raise ValueError(Locale.VALIDATION_RECORD_INVALID)
         parsed = _ValidationRequestBodyJson.model_validate_json(self.request_body)

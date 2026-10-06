@@ -29,13 +29,6 @@ from fastapi import status
 from nicegui import app, ui
 from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 
-from src.detours.detour_ai_augment.protected.src.backend.api import (
-    APPENDWATCH_REPORT_ENV_NAME,
-    CARD_EXCLUDED_COLUMNS,
-    CODEX_SESSIONS_ROOT_ENV_NAME,
-    NAMEKEY_ENV_NAME,
-    SERVER_PORT,
-)
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_augment_config import (  # noqa: E501
     AiAugmentDetourConfig,
 )
@@ -45,8 +38,15 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.pyd
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     AI_AUGMENT_COLUMN_PREFIX,
     AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS,
+    APPENDWATCH_REPORT_ENV_NAME,
     BACKEND_STORE_CLOSED_CLEANLY,
+    CARD_EXCLUDED_COLUMNS,
     CODEX_OUTPUT_SCHEMA,
+    CODEX_SESSIONS_ROOT_ENV_NAME,
+    DASHBOARD_IPC_HOST,
+    DASHBOARD_QUERY_PATH,
+    DASHBOARD_SOCKET_PATH,
+    DASHBOARD_SOCKET_PATH_ENV_NAME,
     DOCX_TO_AI_AUGMENT_COLUMNS,
     DRAW_PILOT_PREFIX,
     DRAW_SORT_PART,
@@ -55,14 +55,14 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     HTTP_POST_METHOD,
     KTP_AI_AUGMENT_FOOTNOTE_ARGUMENTS_COL,
     KTP_AI_AUGMENT_FOOTNOTES_COL,
+    NAMEKEY_ENV_NAME,
+    SERVER_PORT,
     SOURCE_KEY_HEADER,
     AiAugmentCohort,
 )
-from src.detours.detour_ai_augment.protected.src.backend.ipc import (
-    DASHBOARD_IPC_HOST,
-    DASHBOARD_QUERY_PATH,
-    DASHBOARD_SOCKET_PATH,
-    DASHBOARD_SOCKET_PATH_ENV_NAME,
+from src.detours.detour_ai_augment.protected.src.backend.server import (
+    CONFIG_OPTION,
+    DANGER_NO_VERIFY_HASH_OPTION,
 )
 from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helpers.locale import (
     Locale,
@@ -116,7 +116,7 @@ from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helper
     TEXT_ENCODING,
     TEXT_ENCODING_WITH_BOM,
 )
-from src.detours.detour_ai_augment.src.shared import (
+from src.detours.detour_ai_augment.protected.src.shared import (
     AppendwatchReportError,
     parse_appendwatch_report_bytes,
     source_key_from_header_value,
@@ -140,10 +140,6 @@ from ...backend.helpers.data_models.ai_augment_singular_outer_dict import (
 )
 from ...backend.helpers.data_models.codex_innerdict import CodexInnerDict
 from ...backend.helpers.data_models.lifecycle import BackendLifecycle
-from ...backend.server import (
-    CONFIG_OPTION,
-    DANGER_NO_VERIFY_HASH_OPTION,
-)
 from .helpers.aggrid import AgGrid
 from .helpers.data_models.ai_augment_context import (
     AiAugmentControlCentreContext,

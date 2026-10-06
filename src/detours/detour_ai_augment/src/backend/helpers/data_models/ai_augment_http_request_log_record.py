@@ -19,8 +19,10 @@ def _validate_public_exchange(record: HttpRequestLogRecord, method: str, path: s
         or record.response_code is None
         or record.response_headers is None
         or record.response_body is None
+        or record.received_at_unix_usec is not None
         or record.ready_to_respond_at_unix_usec is None
         or record.duration_usec is None
+        or record.duration_usec < 0
     ):
         raise ValueError(Locale.PUBLIC_HTTP_EXCHANGE_INVALID)
 

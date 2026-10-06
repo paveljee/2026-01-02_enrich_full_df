@@ -11,6 +11,7 @@ import requests
 from pydantic import PrivateAttr
 
 from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
+from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import TEXT_ENCODING
 from src.helpers.architecture import FrozenStrictModel
 from src.helpers.data_models.http_request_log import (
     HttpRequestLogRecord,
@@ -37,7 +38,7 @@ class ModelHttpRequired(RuntimeError):
 def request_body(request: requests.PreparedRequest) -> str | None:
     body = request.body
     if isinstance(body, bytes):
-        return body.decode("utf-8")
+        return body.decode(TEXT_ENCODING)
     if body is not None and not isinstance(body, str):
         raise ValueError(Locale.MODEL_HTTP_REQUEST_TEXT_REQUIRED)
     return body

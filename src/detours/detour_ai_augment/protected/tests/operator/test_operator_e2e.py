@@ -27,8 +27,8 @@ from fastapi import status
 from playwright.sync_api import Locator, Page, ViewportSize, expect, sync_playwright
 from pydantic import BaseModel, ConfigDict, field_validator
 
-from src.detours.detour_ai_augment.protected.src.backend import api as backend_api
-from src.detours.detour_ai_augment.protected.src.backend import ipc as backend_ipc
+from src.detours.detour_ai_augment.protected.src.backend import server as backend_server
+from src.detours.detour_ai_augment.protected.src.backend.helpers import api as backend_api
 from src.detours.detour_ai_augment.protected.src.backend.helpers.aivm_audit import (
     aivm_connection_options,
 )
@@ -48,34 +48,61 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.post_commit_validation import (  # noqa: E501
     PostCommitValidation,
 )
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.store import (  # noqa: E501
+    AiAugmentBackendStore,
+    initialize_backend_store,
+)
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
+    AIVM_AUDIT_USER,
+    AIVM_IDENTITY_FILE,
+    AIVM_INSTANCE,
+    AIVM_KNOWN_HOSTS_FILE,
+    AUDIT_FIND_ROLLOUT_COMMAND,
+    AUDIT_PROBE_COMMAND,
+    AUDIT_READ_APPENDWATCH_REPORT_COMMAND,
+    AUDIT_READ_ROLLOUT_COMMAND,
     COMMIT_REQUEST_RECORD_ID_COLUMN,
+    COMMIT_VALIDATION_REQUEST_RECORD_INDEX_TABLE,
+    CONFIG_FILENAME,
+    DASHBOARD_SOCKET_PATH_ENV_NAME,
     ETAG_HEADER,
     HTTP_GET_METHOD,
     HTTP_POST_METHOD,
     INIT_PATH,
     KTP_AI_AUGMENT_RUN_OUTCOME_RESPONSE_BODY_COL,
     KTP_AI_AUGMENT_SESSION_METADATA_COL,
+    LIMA_SSH_CONFIG_PATH,
+    LOCATION_HEADER,
     PULL_PATH,
     PUSH_PATH,
     REPLAY_LOG_KEY,
     SOURCE_KEY_HEADER,
+    SSH_EXECUTABLE,
+    SSH_TIMEOUT_SECONDS,
+    TEXT_ENCODING,
+    VALIDATION_REQUEST_RECORD_ID_COLUMN,
     AiAugmentCohort,
-)
-from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helpers import (
-    vars as control_vars,
 )
 from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helpers.locale import (
     Locale,
 )
+from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helpers.vars import (
+    BACKEND_MODULE,
+    BACKEND_PORT,
+    BACKEND_READY_TIMEOUT_SECONDS,
+    CODEX_EXEC_COMMAND,
+    CONTROL_CENTRE_BASE_URL,
+    CONTROL_CENTRE_HOST,
+    CONTROL_CENTRE_PORT,
+    CONTROL_HTTP_TIMEOUT_SECONDS,
+)
+from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helpers.vars import (
+    PROCESS_STOP_TIMEOUT_SECONDS as CONTROL_PROCESS_STOP_TIMEOUT_SECONDS,
+)
+from src.detours.detour_ai_augment.protected.src.shared import parse_appendwatch_report_bytes
 from src.detours.detour_ai_augment.protected.tests.pytest_plugin import (
     ORIGINAL_NICEGUI_STORAGE_PATH,
     nicegui_test_environment,
-)
-from src.detours.detour_ai_augment.src.backend import server as backend_server
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_backend_store import (  # noqa: E501
-    AiAugmentBackendStore,
-    initialize_backend_store,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_context import (
     AiAugmentBackendContext,
@@ -115,10 +142,9 @@ from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_mod
     RunOutcomePath,
     RunOutcomeResponseRecord,
 )
-from src.detours.detour_ai_augment.src.shared import parse_appendwatch_report_bytes
 from src.helpers.architecture import FrozenStrictModel
 from src.helpers.data_models import HttpRequestLogRecord, NameKey
-from src.helpers.vars import KTP_LAST_NAME_COL
+from src.helpers.vars import KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1, KTP_LAST_NAME_COL
 
 CONTROL_CENTRE_MODULE = "src.detours.detour_ai_augment.src.control_centre.dashboard.ui"
 CONTROL_CENTRE_COMMAND_PREFIX = (
@@ -127,12 +153,11 @@ CONTROL_CENTRE_COMMAND_PREFIX = (
     CONTROL_CENTRE_MODULE,
     backend_server.CONFIG_OPTION,
 )
-CONTROL_CENTRE_URL = control_vars.CONTROL_CENTRE_BASE_URL
+CONTROL_CENTRE_URL = CONTROL_CENTRE_BASE_URL
 CONTROL_CENTRE_READY_LOG = Locale.READY_LOG_TEMPLATE.format(
     url=CONTROL_CENTRE_URL
 )
-CONTROL_CENTRE_PORTS = (control_vars.CONTROL_CENTRE_PORT, control_vars.BACKEND_PORT)
-TEXT_ENCODING = "utf-8"
+CONTROL_CENTRE_PORTS = (CONTROL_CENTRE_PORT, BACKEND_PORT)
 HASH_ALGORITHM = "sha256"
 HASH_SEPARATOR = b"\0"
 EMPTY_FILE_SHA256 = hashlib.sha256(b"").hexdigest()
@@ -206,7 +231,7 @@ class DashboardProcess(BaseModel):
             try:
                 with urllib_request.urlopen(
                     CONTROL_CENTRE_URL,
-                    timeout=control_vars.CONTROL_HTTP_TIMEOUT_SECONDS,
+                    timeout=CONTROL_HTTP_TIMEOUT_SECONDS,
                 ):
                     _operator_log("Control Centre is ready")
                     return
@@ -376,18 +401,18 @@ def _process_snapshot(
 def _process_role(command: tuple[str, ...]) -> str:
     command_text = " ".join(command)
     executable = Path(command[0]).name if command else ""
-    if control_vars.BACKEND_MODULE in command_text:
+    if BACKEND_MODULE in command_text:
         return "Backend"
-    if str(control_vars.CODEX_EXEC_COMMAND[0]) in command_text:
+    if str(CODEX_EXEC_COMMAND[0]) in command_text:
         return "Codex SSH transport"
-    if executable == backend_api.SSH_EXECUTABLE:
+    if executable == SSH_EXECUTABLE:
         if any(
             command in command_text
             for command in (
-                backend_api.AUDIT_FIND_ROLLOUT_COMMAND,
-                backend_api.AUDIT_READ_ROLLOUT_COMMAND,
-                backend_api.AUDIT_READ_APPENDWATCH_REPORT_COMMAND,
-                backend_api.AUDIT_PROBE_COMMAND,
+                AUDIT_FIND_ROLLOUT_COMMAND,
+                AUDIT_READ_ROLLOUT_COMMAND,
+                AUDIT_READ_APPENDWATCH_REPORT_COMMAND,
+                AUDIT_PROBE_COMMAND,
             )
         ):
             return "Backend audit reader"
@@ -463,7 +488,7 @@ def _operator_runtime(
     rollout_cas_dir = tmp_path / "rollout-cas"
     config_path = tmp_path / "config.operator.json"
     config_value: object = json.loads(
-        (repository_root / "config_ai_augment.json").read_text(
+        (repository_root / CONFIG_FILENAME).read_text(
             encoding=TEXT_ENCODING
         )
     )
@@ -540,7 +565,7 @@ def _collect_output(stream: TextIO, output: list[str]) -> None:
 def _assert_ports_available() -> None:
     for port in CONTROL_CENTRE_PORTS:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client:
-            if client.connect_ex((control_vars.CONTROL_CENTRE_HOST, port)) == 0:
+            if client.connect_ex((CONTROL_CENTRE_HOST, port)) == 0:
                 _operator_log(
                     f"local port {port} is already in use; no operator-owned "
                     "Control Centre or Backend process was started"
@@ -555,7 +580,7 @@ def _wait_for_ports_released() -> None:
         occupied = []
         for port in CONTROL_CENTRE_PORTS:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client:
-                if client.connect_ex((control_vars.CONTROL_CENTRE_HOST, port)) == 0:
+                if client.connect_ex((CONTROL_CENTRE_HOST, port)) == 0:
                     occupied.append(port)
         if not occupied:
             return
@@ -572,7 +597,7 @@ def running_dashboard(runtime: OperatorRuntime) -> Generator[DashboardProcess]:
     _operator_log(f"isolated NiceGUI storage: {storage_path}")
     environment.pop(PYTEST_CURRENT_TEST_ENV_NAME, None)
     environment["PYTHONUNBUFFERED"] = "1"
-    environment[backend_ipc.DASHBOARD_SOCKET_PATH_ENV_NAME] = str(
+    environment[DASHBOARD_SOCKET_PATH_ENV_NAME] = str(
         runtime.dashboard_socket_path
     )
     process = subprocess.Popen(
@@ -667,7 +692,7 @@ def query_snapshot_in_browser(
     output_start = len(dashboard.output)
     page.get_by_test_id(control_ui.BACKEND_REFRESH_TEST_ID).click()
     deadline = time.monotonic() + (
-        control_vars.BACKEND_READY_TIMEOUT_SECONDS + control_vars.PROCESS_STOP_TIMEOUT_SECONDS
+        BACKEND_READY_TIMEOUT_SECONDS + CONTROL_PROCESS_STOP_TIMEOUT_SECONDS
     )
     while time.monotonic() < deadline:
         raise_for_dashboard_failure(dashboard)
@@ -1012,7 +1037,7 @@ def _assert_deployed_appendwatch_topology(
     operator_runtime: OperatorRuntime,
 ) -> None:
     _operator_log("loading the deployed appendwatch topology")
-    identity_file = backend_api.AIVM_IDENTITY_FILE
+    identity_file = AIVM_IDENTITY_FILE
     assert identity_file is not None
     configuration = AiAugmentControlCentreContext(
         pipeline_config=AiAugmentDetourConfig.from_json(
@@ -1025,28 +1050,28 @@ def _assert_deployed_appendwatch_topology(
     )
     assert appendwatch_report.is_absolute()
     options = aivm_connection_options(
-        lima_ssh_config=backend_api.LIMA_SSH_CONFIG_PATH,
+        lima_ssh_config=LIMA_SSH_CONFIG_PATH,
         identity_file=identity_file,
-        known_hosts_file=backend_api.AIVM_KNOWN_HOSTS_FILE,
-        ssh_user=backend_api.AIVM_AUDIT_USER,
+        known_hosts_file=AIVM_KNOWN_HOSTS_FILE,
+        ssh_user=AIVM_AUDIT_USER,
         host_key_alias=(
-            f"lima-{backend_api.AIVM_INSTANCE}-{backend_api.AIVM_AUDIT_USER}"
+            f"lima-{AIVM_INSTANCE}-{AIVM_AUDIT_USER}"
         ),
     )
     completed = subprocess.run(
         [
-            backend_api.SSH_EXECUTABLE,
+            SSH_EXECUTABLE,
             *options,
             "--",
-            f"{backend_api.AIVM_INSTANCE}-{backend_api.AIVM_AUDIT_USER}",
+            f"{AIVM_INSTANCE}-{AIVM_AUDIT_USER}",
             shlex.join([
-                backend_api.AUDIT_READ_APPENDWATCH_REPORT_COMMAND,
+                AUDIT_READ_APPENDWATCH_REPORT_COMMAND,
                 str(appendwatch_report),
             ]),
         ],
         check=True,
         capture_output=True,
-        timeout=backend_api.SSH_TIMEOUT_SECONDS,
+        timeout=SSH_TIMEOUT_SECONDS,
     )
     assert completed.stdout
     _operator_log("deployed appendwatch topology is readable")
@@ -1143,7 +1168,10 @@ def validate_workflow_artifacts(
     assert not operator_runtime.dashboard_socket_path.exists()
     records = authoritative_records(operator_runtime.replay_log_path)
 
-    assert all(record.schema_version == "1.1" for record in records)
+    assert all(
+        record.schema_version == KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
+        for record in records
+    )
     assert all(record.record_id.version == 7 for record in records)
     validations = _validate_workflow_http_records(records)
 
@@ -1187,8 +1215,8 @@ def validate_workflow_artifacts(
         with initialize_backend_store(runtime, ipc_only=True) as query_store:
             backend_store = query_store._engine
             row = backend_store._execute(
-                f"SELECT {backend_api.VALIDATION_REQUEST_RECORD_ID_COLUMN} "
-                f"FROM {backend_api.COMMIT_VALIDATION_REQUEST_RECORD_INDEX_TABLE} "
+                f"SELECT {VALIDATION_REQUEST_RECORD_ID_COLUMN} "
+                f"FROM {COMMIT_VALIDATION_REQUEST_RECORD_INDEX_TABLE} "
                 f"WHERE {COMMIT_REQUEST_RECORD_ID_COLUMN} = ?",
                 [str(record.record_id)],
             ).fetchone()
@@ -1227,7 +1255,7 @@ def validate_workflow_artifacts(
     assert push_record.response_code == status.HTTP_202_ACCEPTED
     assert push_record.response_headers is not None
     assert backend_api._http_header_value(
-        push_record.response_headers, backend_api.LOCATION_HEADER,
+        push_record.response_headers, LOCATION_HEADER,
     ) == PULL_PATH
     rollout_blob = (
         operator_runtime.rollout_cas_dir

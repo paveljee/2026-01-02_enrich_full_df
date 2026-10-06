@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import base64
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from enum import StrEnum
 from typing import Literal, Self
 from uuid import UUID
@@ -20,12 +20,8 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     SYNTHETIC_COMMIT_HOST,
     SYNTHETIC_COMMIT_SCHEME,
 )
-from src.detours.detour_ai_augment.src.shared import (
-    name_key_header_value,
-    source_key_header_value,
-)
 from src.helpers.architecture import FrozenStrictModel, implements
-from src.helpers.data_models import HttpRequestLogRecord, NameKey
+from src.helpers.data_models import HttpRequestLogRecord
 from src.helpers.vars import KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
 
 from .ai_augment_http_request_log_record import RequestRecord
@@ -38,54 +34,6 @@ class AppendwatchReportEncoding(StrEnum):
     value: Literal["base64"]
 
     BASE64 = "base64"
-
-
-class _CodexRolloutRecordSummaryJson(FrozenStrictModel):
-    originator: StrictStr
-    source: StrictStr
-    cli_version: StrictStr
-    model_provider: StrictStr
-    model: StrictStr
-    reasoning_effort: StrictStr
-    session_id: StrictStr
-    timestamp: StrictStr
-
-    @model_validator(mode="after")
-    def validate_summary(self) -> Self:
-        if any(not value.strip() for value in self.model_dump().values()):
-            raise ValueError(Locale.CODEX_ROLLOUT_SUMMARY_BLANK)
-        return self
-
-
-@implements[BackendComponent.CodexRolloutRecordProperty]()
-class CodexRolloutRecord(FrozenStrictModel):
-    sha256: StrictStr
-    size: int = Field(ge=0)
-    line_count: int = Field(ge=1)
-
-    @classmethod
-    def build_summary_json(
-        cls,
-        values: Mapping[str, object],
-    ) -> str:
-        return _CodexRolloutRecordSummaryJson.model_validate(values).model_dump_json()
-
-    @classmethod
-    def parse_summary_json(
-        cls,
-        value: str,
-    ) -> dict[str, str]:
-        summary = _CodexRolloutRecordSummaryJson.model_validate_json(value)
-        return {
-            "originator": summary.originator,
-            "source": summary.source,
-            "cli_version": summary.cli_version,
-            "model_provider": summary.model_provider,
-            "model": summary.model,
-            "reasoning_effort": summary.reasoning_effort,
-            "session_id": summary.session_id,
-            "timestamp": summary.timestamp,
-        }
 
 
 @implements[BackendComponent.AppendwatchReportRecordProperty]()
@@ -108,6 +56,14 @@ class AppendwatchReportRecord(FrozenStrictModel):
 
     def decoded_bytes(self) -> bytes:
         return base64.b64decode(self.data, validate=True)
+
+
+# Import the concrete rollout model here before CodexSessionRecord uses it.
+# codex_rollout_record has no commit/validation dependency, so direct config/context
+# imports cannot re-enter a partially initialized cas module through commit.
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.codex_rollout_record import (  # noqa: E402, E501
+    CodexRolloutRecord,
+)
 
 
 @implements[BackendComponent.CodexSessionRecordProperty]()
@@ -248,7 +204,7 @@ class BackendCommitRequestRecord(RequestRecord):
             or self.scheme != SYNTHETIC_COMMIT_SCHEME
             or self.host != SYNTHETIC_COMMIT_HOST
             or self.port is not None
-            or self.ready_to_respond_at_unix_usec is not None
+            or self.ready_to_respond_at_unix_usec is None
             or self.path != COMMIT_PATH
             or self.query
             or set(self.request_headers) != {SOURCE_KEY_HEADER, NAME_KEY_HEADER}
@@ -257,7 +213,7 @@ class BackendCommitRequestRecord(RequestRecord):
             or self.response_headers is not None
             or self.response_body is not None
             or self.received_at_unix_usec is not None
-            or self.duration_usec is not None
+            or self.duration_usec != 0
         ):
             raise ValueError(Locale.COMMIT_HTTP_CONTOUR_INVALID)
         expected = self.commit_request_body
@@ -314,54 +270,6 @@ class BackendCommitRequestRecord(RequestRecord):
             duration_usec=record.duration_usec,
             commit_request_body=body,
         )
-
-
-def _synthetic_commit_request_record(
-    *,
-    pull_response_record: PullResponseRecord,
-    push_response_record: PushResponseRecord,
-    session_id: UUID,
-    rollout: CodexRolloutRecord,
-    rollout_filename: str,
-    appendwatch_report: bytes,
-    namekey: NameKey,
-) -> BackendCommitRequestRecord:
-    session = CodexSessionRecord(
-        session_id=session_id,
-        codex_rollout_record=rollout,
-        appendwatch_report_record=AppendwatchReportRecord(
-            encoding=AppendwatchReportEncoding.BASE64,
-            data=base64.b64encode(appendwatch_report).decode(BASE64_TEXT_ENCODING),
-        ),
-    )
-    body = CommitRequestBody(
-        pull_response_record=pull_response_record,
-        push_response_record=push_response_record,
-        codex_session_record=session,
-    )
-    assert body.pull_response_record is pull_response_record
-    assert body.push_response_record is push_response_record
-    return BackendCommitRequestRecord(
-        schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
-        method=HTTP_POST_METHOD,
-        scheme=SYNTHETIC_COMMIT_SCHEME,
-        host=SYNTHETIC_COMMIT_HOST,
-        port=None,
-        ready_to_respond_at_unix_usec=None,
-        path=COMMIT_PATH,
-        query="",
-        request_headers={
-            SOURCE_KEY_HEADER: source_key_header_value(rollout_filename, rollout.line_count),
-            NAME_KEY_HEADER: name_key_header_value(namekey),
-        },
-        request_body=body.model_dump_json(),
-        response_code=None,
-        response_headers=None,
-        response_body=None,
-        received_at_unix_usec=None,
-        duration_usec=None,
-        commit_request_body=body,
-    )
 
 
 # Deliberate post-definition imports: the concrete pull/push response types

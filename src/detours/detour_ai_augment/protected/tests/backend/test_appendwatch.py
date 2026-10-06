@@ -33,6 +33,9 @@ from typing import Any, Callable, Iterator
 
 import pytest
 
+from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helpers.vars import (
+    TEXT_ENCODING,
+)
 from src.detours.detour_ai_augment.protected.tests.pytest_plugin import (
     PythonProcess,
     watcher_fixture_process,
@@ -127,7 +130,7 @@ def wait_until(
 
 def read_text(path: Path) -> str:
     try:
-        return path.read_text(encoding="utf-8")
+        return path.read_text(encoding=TEXT_ENCODING)
     except FileNotFoundError:
         return ""
 
@@ -646,7 +649,7 @@ def test_report_and_atomic_temp_files_are_excluded(
     watcher.inspect(str(data))
     watcher.write_report()
 
-    text = report.read_text(encoding="utf-8")
+    text = report.read_text(encoding=TEXT_ENCODING)
     assert "data.log" in text
     assert "tree.txt" not in text
     assert not list(root.glob(".tree.txt.tmp.*"))
@@ -801,7 +804,7 @@ def test_queue_overflow_fail_closes_all_active_files(
     watcher = watcher_factory(root=root)
     for index in range(20):
         path = root / f"{index}.log"
-        path.write_text(str(index), encoding="utf-8")
+        path.write_text(str(index), encoding=TEXT_ENCODING)
         watcher.inspect(str(path))
 
     assert watcher.mark_all_compromised("inotify queue overflowed") is True
@@ -832,7 +835,7 @@ def test_rebuild_prunes_moved_out_watch_and_ignored_event_is_suppressed(
     events = list(watcher.ino.read())
     assert not any(mask & aw.IN_IGNORED for _path, mask, _cookie, _base in events)
 
-    (outside / "outside.log").write_text("outside", encoding="utf-8")
+    (outside / "outside.log").write_text("outside", encoding=TEXT_ENCODING)
     time.sleep(0.05)
     later = list(watcher.ino.read())
     assert not any(path.startswith(str(outside)) for path, _mask, _cookie, _base in later)

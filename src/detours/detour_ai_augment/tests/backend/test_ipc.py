@@ -3,49 +3,71 @@ from __future__ import annotations
 import asyncio
 import stat
 import threading
+import time
 from collections.abc import AsyncIterator, Generator
 from contextlib import asynccontextmanager, contextmanager
 from http import HTTPStatus
 from pathlib import Path
 from typing import Any, NoReturn
 from unittest.mock import Mock
+from uuid import UUID, uuid7
 
 import pytest
-import requests
 from fastapi import FastAPI, status
+from requests.structures import CaseInsensitiveDict
 from starlette.responses import Response
 from starlette.types import Message, Scope
 
-from src.detours.detour_ai_augment.protected.src.backend import api
+from src.detours.detour_ai_augment.protected.src.architecture import ControlCentreComponent
+from src.detours.detour_ai_augment.protected.src.backend import server
+from src.detours.detour_ai_augment.protected.src.backend.helpers import api
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_augment_config import (  # noqa: E501
     AiAugmentDetourConfig,
 )
-from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
-    PULL_PATH,
-    PUSH_PATH,
-    TEXT_ENCODING,
-    ContentType,
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.store import (  # noqa: E501
+    AiAugmentBackendStore,
 )
-from src.detours.detour_ai_augment.protected.src.backend.ipc import (
+from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
+    ASGI_BODY_KEY,
+    ASGI_HTTP_REQUEST_MESSAGE_TYPE,
+    ASGI_HTTP_RESPONSE_BODY_MESSAGE_TYPE,
+    ASGI_HTTP_SCOPE_TYPE,
+    ASGI_MORE_BODY_KEY,
+    ASGI_TYPE_KEY,
     DASHBOARD_IPC_HOST,
     DASHBOARD_IPC_SCHEME,
     DASHBOARD_QUERY_PATH,
+    HTTP_CONTENT_LENGTH_HEADER,
+    HTTP_CONTENT_TYPE_HEADER,
+    HTTP_GET_METHOD,
+    HTTP_POST_METHOD,
+    INIT_PATH,
+    NANOSECONDS_PER_MICROSECOND,
+    PULL_PATH,
+    PUSH_PATH,
+    SESSION_ID_HEADER,
     SOCKET_PERMISSIONS,
+    TEXT_ENCODING,
+    ContentType,
 )
+from src.detours.detour_ai_augment.protected.src.backend.server import (
+    create_dashboard_query_app,
+    start_dashboard_query_server,
+    stop_dashboard_query_server,
+)
+from src.detours.detour_ai_augment.protected.src.shared import name_key_header_value
 from src.detours.detour_ai_augment.protected.tests.fixtures.pytest_fixtures import (
     init_request_record,
 )
-from src.detours.detour_ai_augment.src.backend import server
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_context import (  # noqa: E501
     AiAugmentBackendContext,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.commit_request import (
     CodexSessionRecord,
 )
-from src.detours.detour_ai_augment.src.backend.server import (
-    create_dashboard_query_app,
-    start_dashboard_query_server,
-    stop_dashboard_query_server,
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.response_record_promise import (
+    BackendStoreAcknowledgment,
+    ResponseRecordPromise,
 )
 from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models import (
     run_outcome_event as run_outcome_models,
@@ -55,6 +77,7 @@ from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_mod
 )
 from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.query_event import (  # noqa: E501
     QueryRequestRecord,
+    QueryResponseRecord,
 )
 from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.run_outcome_event import (  # noqa: E501
     RunOutcomeRequestRecord,
@@ -63,17 +86,46 @@ from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_mod
 from src.detours.detour_ai_augment.src.control_centre.dashboard.ui import (
     _BackendDatabaseClient,
 )
-from src.detours.detour_ai_augment.src.shared import name_key_header_value
+from src.detours.detour_ai_augment.tests.backend import test_api as fixtures
 from src.helpers.data_models import NameKey
+from src.helpers.vars import KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
+
+backend_test_paths = fixtures.backend_test_paths
+api_runtime = fixtures.api_runtime
+api_store = fixtures.api_store
 
 TEST_NAMEKEY = '{"ktp.first_name": "A.", "ktp.last_name": "Sheikh"}'
 
 
-def empty_query_response(request: requests.PreparedRequest) -> requests.Response:
-    return api._response(
-        request, HTTPStatus.OK,
-        DashboardQuerySnapshot(ai_augment_singular_outerdicts=()).model_dump_json(),
-        content_type=ContentType.JSON,
+def empty_query_response(
+    request_record: ControlCentreComponent.BackendPort.QueryRequestRecordProperty,
+) -> ResponseRecordPromise[QueryResponseRecord]:
+    body = DashboardQuerySnapshot(ai_augment_singular_outerdicts=()).model_dump_json()
+    ready = time.time_ns() // NANOSECONDS_PER_MICROSECOND
+    assert request_record.received_at_unix_usec is not None
+    response_record = QueryResponseRecord(
+        schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
+        method=request_record.method,
+        scheme=request_record.scheme,
+        host=request_record.host,
+        port=request_record.port,
+        path=request_record.path,
+        query=request_record.query,
+        request_headers=request_record.request_headers,
+        request_body=request_record.request_body,
+        response_code=HTTPStatus.OK,
+        response_headers={
+            HTTP_CONTENT_TYPE_HEADER: ContentType.JSON,
+            HTTP_CONTENT_LENGTH_HEADER: str(len(body.encode(TEXT_ENCODING))),
+        },
+        response_body=body,
+        received_at_unix_usec=None,
+        ready_to_respond_at_unix_usec=ready,
+        duration_usec=ready - request_record.received_at_unix_usec,
+        ai_augment_singular_outerdicts=(),
+    )
+    return ResponseRecordPromise[QueryResponseRecord]._resolved(
+        BackendStoreAcknowledgment.NAK, (response_record, None),
     )
 
 
@@ -146,16 +198,15 @@ def test_full_backend_composition_stops_ipc_before_domain_shutdown(
 
 
 def test_dashboard_query_flask_application_is_separate_and_unauthenticated() -> None:
-    observed: list[requests.PreparedRequest] = []
+    observed: list[ControlCentreComponent.BackendPort.QueryRequestRecordProperty] = []
     query_response = DashboardQuerySnapshot(ai_augment_singular_outerdicts=())
     payload = query_response.model_dump_json()
 
-    def query(ipc_request: requests.PreparedRequest) -> requests.Response:
-        observed.append(ipc_request)
-        return api._response(
-            ipc_request, HTTPStatus.OK, query_response.model_dump_json(),
-            content_type=ContentType.JSON,
-        )
+    def query(
+        request_record: ControlCentreComponent.BackendPort.QueryRequestRecordProperty,
+    ) -> ResponseRecordPromise[QueryResponseRecord]:
+        observed.append(request_record)
+        return empty_query_response(request_record)
 
     app = create_dashboard_query_app(
         query,
@@ -169,7 +220,9 @@ def test_dashboard_query_flask_application_is_separate_and_unauthenticated() -> 
     assert response.status_code == 200
     assert response.content_type == ContentType.JSON
     assert response.get_data(as_text=True) == payload
-    assert [(item.method, item.path_url) for item in observed] == [("GET", "/query")]
+    assert [(item.method, item.path) for item in observed] == [
+        (HTTP_GET_METHOD, DASHBOARD_QUERY_PATH)
+    ]
     assert id(app) != id(server.app)
 
 
@@ -198,18 +251,22 @@ def test_query_rejects_filters_and_bodies_without_dispatch_or_fatal_exit(
     handler.assert_not_called()
     assert client.get(DASHBOARD_QUERY_PATH).status_code == status.HTTP_200_OK
     handler.assert_called_once()
-    assert handler.call_args.args[0].path_url == "/query"
+    assert handler.call_args.args[0].path == DASHBOARD_QUERY_PATH
 
 
 def test_query_request_is_wholesale_only() -> None:
     request = QueryRequestRecord(
-        schema_version="1.1", method="GET", scheme="http", host="invalid",
-        port=None, path="/query", query="", request_headers={}, request_body=None,
+        schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
+        method=HTTP_GET_METHOD, scheme=DASHBOARD_IPC_SCHEME,
+        host=DASHBOARD_IPC_HOST,
+        port=None, path=DASHBOARD_QUERY_PATH, query="", request_headers={}, request_body=None,
         response_code=None, response_headers=None, response_body=None,
         received_at_unix_usec=1, ready_to_respond_at_unix_usec=None,
-        duration_usec=None,
+        duration_usec=0,
     )
-    assert (request.method, request.path, request.query) == ("GET", "/query", "")
+    assert (request.method, request.path, request.query) == (
+        HTTP_GET_METHOD, DASHBOARD_QUERY_PATH, "",
+    )
     with pytest.raises(ValueError, match="Extra inputs are not permitted"):
         QueryRequestRecord.model_validate({**request.model_dump(), "namekey": None})
 
@@ -220,7 +277,9 @@ def test_dashboard_query_failure_exits_loudly() -> None:
     class FatalDashboardQuery(RuntimeError):
         pass
 
-    def failed_query(_ipc_request: requests.PreparedRequest) -> requests.Response:
+    def failed_query(
+        _request_record: ControlCentreComponent.BackendPort.QueryRequestRecordProperty,
+    ) -> ResponseRecordPromise[QueryResponseRecord]:
         raise RuntimeError("projection failed")
 
     def fatal_exit(code: int) -> NoReturn:
@@ -240,52 +299,70 @@ def test_dashboard_query_failure_exits_loudly() -> None:
     assert exit_codes == [1]
 
 
-def test_full_backend_ipc_forwards_run_outcome_http_exchange_exactly() -> None:
-    observed: list[requests.PreparedRequest] = []
-    request_record = RunOutcomeRequestRecord.from_http_request(
-        received_at_unix_usec=1, method="POST", scheme="http", host="invalid",
-        port=None, path=run_outcome_models.FAILED_PATH, query="",
-        request_headers={}, request_body=None,
-    )
-    snapshot = RunOutcomeResponseRecord.from_run_outcome_request_record(
-        request_record, response_code=HTTPStatus.INTERNAL_SERVER_ERROR,
-        response_headers=None, pull_record_id=None, push_record_id=None,
-        commit_request_record_id=None, validation_record_id=None,
-        codex_session_record=CodexSessionRecord(
-            session_id=None, codex_rollout_record=None, appendwatch_report_record=None,
-        ),
-        ready_to_respond_at_unix_usec=2,
-    )
-    body_text = snapshot.response_body
-    assert body_text is not None
-    response_body = body_text.encode(TEXT_ENCODING)
-
-    def run_outcome(request: requests.PreparedRequest) -> requests.Response:
-        observed.append(request)
-        return api._response(
-            request, HTTPStatus.INTERNAL_SERVER_ERROR, body_text,
-            content_type=ContentType.JSON,
-        )
-
-    app = create_dashboard_query_app(
-        empty_query_response, query_path=DASHBOARD_QUERY_PATH,
-        run_outcome_handler=run_outcome, run_outcome_paths=run_outcome_models.RUN_OUTCOME_PATHS,
-    )
+def test_full_backend_ipc_forwards_run_outcome_http_exchange_exactly(
+    api_runtime: AiAugmentBackendContext,
+    api_store: AiAugmentBackendStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     namekey = NameKey.from_json_key(TEST_NAMEKEY)
-    response = app.test_client().post(
-        run_outcome_models.FAILED_PATH,
-        base_url=f"{DASHBOARD_IPC_SCHEME}://{DASHBOARD_IPC_HOST}",
-        headers={run_outcome_models.NAME_KEY_HEADER: name_key_header_value(namekey)},
+    session_id = uuid7()
+    session = CodexSessionRecord(
+        session_id=session_id, codex_rollout_record=None, appendwatch_report_record=None,
     )
+    monkeypatch.setattr(api, "BACKEND_SESSION_ID", session_id)
+
+    def capture_snapshot(
+        _store: AiAugmentBackendStore, captured_session_id: UUID | None,
+    ) -> tuple[CodexSessionRecord, None, tuple[()]]:
+        assert captured_session_id == session_id
+        return session, None, ()
+
+    monkeypatch.setattr(
+        AiAugmentBackendStore, "capture_run_outcome_snapshot", capture_snapshot,
+    )
+    app = create_dashboard_query_app(
+        api_store.query_response_record,
+        query_path=DASHBOARD_QUERY_PATH,
+        run_outcome_store=api_store,
+        run_outcome_paths=run_outcome_models.RUN_OUTCOME_PATHS,
+        fatal_exit=lambda code: pytest.fail(f"IPC fatal exit: {code}"),
+    )
+    with api_store._writable(api_runtime):
+        response = app.test_client().post(
+            run_outcome_models.FAILED_PATH,
+            base_url=f"{DASHBOARD_IPC_SCHEME}://{DASHBOARD_IPC_HOST}",
+            headers={
+                run_outcome_models.NAME_KEY_HEADER: name_key_header_value(namekey),
+                SESSION_ID_HEADER: str(session_id),
+            },
+        )
+        records = [
+            item for item, _ in AiAugmentBackendStore._authoritative_log_records(
+                Path(api_store._replay_log).read_bytes()
+            )
+        ]
+        assert len(records) == 2
+        assert records[0].path == INIT_PATH
+        persisted = RunOutcomeResponseRecord.from_http_request_log_record(records[-1])
+        assert api_store._http_record(persisted.record_id) == records[-1]
+
     assert response.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
     assert response.content_type == ContentType.JSON
-    assert response.data == response_body
-    assert len(observed) == 1
-    request = observed[0]
-    assert request.method == "POST"
-    assert request.url == "http://invalid/failed"
-    assert request.headers[run_outcome_models.NAME_KEY_HEADER] == name_key_header_value(namekey)
-    assert api._prepared_request_body(request) == b""
+    assert persisted.response_body is not None
+    assert response.data == persisted.response_body.encode(TEXT_ENCODING)
+    assert persisted._codex_session_record() == session
+    assert persisted._body().run_outcome_record_id == persisted.record_id
+    request_record = persisted.run_outcome_request_record
+    assert isinstance(request_record, RunOutcomeRequestRecord)
+    assert request_record.record_id != persisted.record_id
+    assert request_record.method == HTTP_POST_METHOD
+    assert (
+        request_record.scheme, request_record.host, request_record.path
+    ) == (DASHBOARD_IPC_SCHEME, DASHBOARD_IPC_HOST, "/failed")
+    request_headers = CaseInsensitiveDict(request_record.request_headers)
+    assert request_headers[run_outcome_models.NAME_KEY_HEADER] == name_key_header_value(namekey)
+    assert request_headers[SESSION_ID_HEADER] == str(session_id)
+    assert request_record.request_body is None
 
 
 def test_ipc_only_flask_application_has_no_run_outcome_routes() -> None:
@@ -305,15 +382,14 @@ def test_dashboard_client_queries_real_mode_0600_unix_socket(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     socket_path = tmp_path / "dashboard.sock"
-    observed: list[requests.PreparedRequest] = []
+    observed: list[ControlCentreComponent.BackendPort.QueryRequestRecordProperty] = []
     query_response = DashboardQuerySnapshot(ai_augment_singular_outerdicts=())
 
-    def query(ipc_request: requests.PreparedRequest) -> requests.Response:
-        observed.append(ipc_request)
-        return api._response(
-            ipc_request, HTTPStatus.OK, query_response.model_dump_json(),
-            content_type=ContentType.JSON,
-        )
+    def query(
+        request_record: ControlCentreComponent.BackendPort.QueryRequestRecordProperty,
+    ) -> ResponseRecordPromise[QueryResponseRecord]:
+        observed.append(request_record)
+        return empty_query_response(request_record)
 
     try:
         server = start_dashboard_query_server(
@@ -334,7 +410,9 @@ def test_dashboard_client_queries_real_mode_0600_unix_socket(
         assert client.available() is True
         assert observed == []
         assert client.send_query_request() == query_response
-        assert [(item.method, item.path_url) for item in observed] == [("GET", "/query")]
+        assert [(item.method, item.path) for item in observed] == [
+        (HTTP_GET_METHOD, DASHBOARD_QUERY_PATH)
+    ]
     finally:
         stop_dashboard_query_server(server)
 
@@ -343,7 +421,7 @@ def test_dashboard_client_queries_real_mode_0600_unix_socket(
 
 def test_dashboard_ipc_refuses_to_replace_non_socket_path(tmp_path: Path) -> None:
     socket_path = tmp_path / "dashboard.sock"
-    socket_path.write_text("owned by someone else", encoding="utf-8")
+    socket_path.write_text("owned by someone else", encoding=TEXT_ENCODING)
     with pytest.raises(RuntimeError, match="not a Unix socket"):
         start_dashboard_query_server(
             socket_path,
@@ -351,7 +429,7 @@ def test_dashboard_ipc_refuses_to_replace_non_socket_path(tmp_path: Path) -> Non
             query_path=DASHBOARD_QUERY_PATH,
         )
 
-    assert socket_path.read_text(encoding="utf-8") == "owned by someone else"
+    assert socket_path.read_text(encoding=TEXT_ENCODING) == "owned by someone else"
 
 
 def test_http_response_and_background_completion_precede_ipc_admission(
@@ -378,17 +456,20 @@ def test_http_response_and_background_completion_precede_ipc_admission(
         monkeypatch.setattr(api, "AUTHORITATIVE_BACKGROUND_TASKS", {task})
 
         async def receive() -> Message:
-            return {"type": "http.request", "body": b"", "more_body": False}
+            return {
+                ASGI_TYPE_KEY: ASGI_HTTP_REQUEST_MESSAGE_TYPE,
+                ASGI_BODY_KEY: b"", ASGI_MORE_BODY_KEY: False,
+            }
 
         async def send(message: Message) -> None:
             messages.append(message)
-            if message["type"] == "http.response.body":
+            if message[ASGI_TYPE_KEY] == ASGI_HTTP_RESPONSE_BODY_MESSAGE_TYPE:
                 response_started.set()
                 await release_response.wait()
 
         # Ordinary HTTP503 remains possible while post202 work is outstanding.
         middleware = server._BackendRequestMiddleware(Response(status_code=503))
-        scope: Scope = {"type": "http", "app": app}
+        scope: Scope = {ASGI_TYPE_KEY: ASGI_HTTP_SCOPE_TYPE, "app": app}
         first_http = asyncio.create_task(middleware(scope, receive, send))
         await response_started.wait()
         await background_started.wait()
@@ -453,8 +534,8 @@ def test_request_gate_releases_admission_after_failure(
 
 
 @pytest.mark.parametrize(("method", "path", "code"), (
-    ("OPTIONS", "/query", 200), ("GET", "/query", 200),
-    ("GET", "/query?namekey=invalid", 400), ("GET", "/missing", 404),
+    ("OPTIONS", DASHBOARD_QUERY_PATH, 200), (HTTP_GET_METHOD, DASHBOARD_QUERY_PATH, 200),
+    (HTTP_GET_METHOD, "/query?namekey=invalid", 400), (HTTP_GET_METHOD, "/missing", 404),
 ))
 def test_ipc_scope_covers_complete_wsgi_exchange(method: str, path: str, code: int) -> None:
     events: list[str] = []
@@ -467,12 +548,14 @@ def test_ipc_scope_covers_complete_wsgi_exchange(method: str, path: str, code: i
         finally:
             events.append("exit")
 
-    def query(request: requests.PreparedRequest) -> requests.Response:
+    def query(
+        request_record: ControlCentreComponent.BackendPort.QueryRequestRecordProperty,
+    ) -> ResponseRecordPromise[QueryResponseRecord]:
         assert events == ["enter"]
-        return empty_query_response(request)
+        return empty_query_response(request_record)
 
     app = server.create_dashboard_query_app(
-        query, query_path="/query", request_scope=request_scope,
+        query, query_path=DASHBOARD_QUERY_PATH, request_scope=request_scope,
     )
     response = app.test_client().open(path, method=method, buffered=True)
     assert response.status_code == code
@@ -524,13 +607,13 @@ def test_server_shutdown_keeps_loop_available_for_inflight_ipc(
         ):
             flask_app = server.create_dashboard_query_app(
                 empty_query_response,
-                query_path="/query", request_scope=received_scopes[0],
+                query_path=DASHBOARD_QUERY_PATH, request_scope=received_scopes[0],
             )
 
             def request() -> None:
                 try:
                     worker_started.set()
-                    response = flask_app.test_client().options("/query", buffered=True)
+                    response = flask_app.test_client().options(DASHBOARD_QUERY_PATH, buffered=True)
                     response_codes.append(response.status_code)
                 except BaseException as exc:
                     thread_errors.append(exc)

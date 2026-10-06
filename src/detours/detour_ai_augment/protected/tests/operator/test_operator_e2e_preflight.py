@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 from http import HTTPStatus
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,6 +18,7 @@ from uuid import UUID, uuid7
 
 import pytest
 
+from src.detours.detour_ai_augment.protected.src.backend import server as backend_server
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_augment_detour_db import (  # noqa: E501
     AiAugmentDetourDB,
 )
@@ -30,11 +32,22 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.rep
     READ_ONLY_PERMISSIONS,
     READ_WRITE_PERMISSIONS,
 )
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.store import (  # noqa: E501
+    AiAugmentBackendStore,
+    initialize_backend_store,
+)
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     AUTHORITATIVE_RECORDS_TABLE,
+    CONFIG_FILENAME,
+    HTTP_GET_METHOD,
+    HTTP_POST_METHOD,
+    NANOSECONDS_PER_MICROSECOND,
     PULL_PATH,
     PUSH_PATH,
     REPLAY_LOG_KEY,
+    SYNTHETIC_COMMIT_HOST,
+    SYNTHETIC_COMMIT_SCHEME,
+    TEXT_ENCODING,
     AiAugmentCohort,
 )
 from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helpers.locale import (
@@ -51,11 +64,6 @@ from src.detours.detour_ai_augment.protected.tests.fixtures.pytest_fixtures impo
 from src.detours.detour_ai_augment.protected.tests.operator import (
     test_operator_e2e as workflow,
 )
-from src.detours.detour_ai_augment.src.backend import server as backend_server
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_backend_store import (  # noqa: E501
-    AiAugmentBackendStore,
-    initialize_backend_store,
-)
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.commit_request import (
     COMMIT_PATH,
     _CommitRequestBodyJson,
@@ -67,6 +75,7 @@ from src.detours.detour_ai_augment.src.backend.helpers.data_models.lifecycle imp
     BackendLifecycle,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.validation_request import (
+    VALIDATE_PATH,
     BackendValidationRequestRecord,
     ValidationRequestBody,
 )
@@ -77,6 +86,7 @@ from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_mod
 from src.detours.detour_ai_augment.tests.backend import test_api as api_fixtures
 from src.detours.detour_ai_augment.tests.control_centre import test_ui_e2e as browser_tests
 from src.helpers.data_models import HttpRequestLogRecord
+from src.helpers.vars import KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
 
 completed_query_files = browser_tests.completed_query_files
 
@@ -88,7 +98,7 @@ def test_operator_preparation_does_not_create_a_backend_launch(
     """DB preparation must not invent a launch for the first eligible NameKey."""
     repository = tmp_path / "operator-repository"
     repository.mkdir()
-    (repository / "config_ai_augment.json").write_bytes(
+    (repository / CONFIG_FILENAME).write_bytes(
         startup_files.config.read_bytes()
     )
     run_directory = tmp_path / "operator-runtime"
@@ -141,7 +151,7 @@ def test_operator_preparation_does_not_create_a_backend_launch(
     lines = operator_runtime.replay_log_path.read_bytes().splitlines()
     assert len(lines) == 1
     logged_init = BackendInitRequestRecord.from_serialized_json(
-        value=lines[0].decode(workflow.TEXT_ENCODING),
+        value=lines[0].decode(TEXT_ENCODING),
     )
     assert logged_init.record_id == requested_init.record_id
     assert logged_init.namekey == selected_blueprint.namekey
@@ -157,7 +167,7 @@ def test_operator_artifact_validator_opens_a_fresh_store(
 
     repository = tmp_path / "validator-repository"
     repository.mkdir()
-    (repository / "config_ai_augment.json").write_bytes(
+    (repository / CONFIG_FILENAME).write_bytes(
         files.config.read_bytes()
     )
     run_directory = tmp_path / "validator-runtime"
@@ -184,14 +194,14 @@ def test_operator_artifact_validator_opens_a_fresh_store(
         dirs_exist_ok=True,
     )
     config = json.loads(
-        operator_runtime.config_path.read_text(encoding=workflow.TEXT_ENCODING)
+        operator_runtime.config_path.read_text(encoding=TEXT_ENCODING)
     )
     config["files_config"][REPLAY_LOG_KEY][
         RESOURCE_SHA256_KEY
     ] = hashlib.sha256(operator_runtime.replay_log_path.read_bytes()).hexdigest()
     operator_runtime.config_path.write_text(
         json.dumps(config),
-        encoding=workflow.TEXT_ENCODING,
+        encoding=TEXT_ENCODING,
     )
 
     context = backend_server.configure_runtime(operator_runtime.config_path)
@@ -267,16 +277,17 @@ def _workflow_http_records(
         )
         providers = tuple(
             HttpRequestLogRecord(
-                schema_version="1.1", record_id=uuid7(), method="GET", scheme="https",
+                schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
+                record_id=uuid7(), method=HTTP_GET_METHOD, scheme="https",
                 host=host, port=None, path=path, query="", request_headers={},
                 request_body=None, response_code=provider_status, response_headers={},
                 response_body='{"provider": "fixture"}', received_at_unix_usec=1,
-                ready_to_respond_at_unix_usec=2, duration_usec=1,
+                ready_to_respond_at_unix_usec=None, duration_usec=1,
             )
             for host, path in provider_targets
             if not with_initial or index == 1
         )
-        validation = ValidationRequestBody(
+        validation_body = ValidationRequestBody(
             commit_request_record=commit,
             post_commit_validation=PostCommitValidation(
                 stage=BackendLifecycle.PYDANTIC_VALIDATION,
@@ -287,11 +298,29 @@ def _workflow_http_records(
             ),
             initial_validation_request_record=initial,
             openalex_ror_records=providers,
-        ).http_record()
+        )
+        validation_request_record = BackendValidationRequestRecord(
+            validation_request_body=validation_body,
+            schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
+            method=HTTP_POST_METHOD,
+            scheme=SYNTHETIC_COMMIT_SCHEME,
+            host=SYNTHETIC_COMMIT_HOST,
+            port=None,
+            path=VALIDATE_PATH,
+            query="",
+            request_headers=dict(commit.request_headers),
+            request_body=validation_body.model_dump_json(by_alias=True),
+            response_code=None,
+            response_headers=None,
+            response_body=None,
+            received_at_unix_usec=None,
+            ready_to_respond_at_unix_usec=time.time_ns() // NANOSECONDS_PER_MICROSECOND,
+            duration_usec=0,
+        )
         records.extend((pull, commit.commit_request_body.push_response_record, commit,
-                        *providers, validation))
+                        *providers, validation_request_record))
         if initial is None:
-            initial = validation
+            initial = validation_request_record
     return tuple(records)
 
 
@@ -343,7 +372,7 @@ def test_operator_http_history_rejects_corrupt_or_unreferenced_records(
     commit_body = _CommitRequestBodyJson.model_validate_json(commit.request_body)
     if mutation == "unknown-route":
         records.append(api_fixtures.persisted_http_record(
-            record_id=uuid7(), method="GET", path="/unexpected",
+            record_id=uuid7(), method=HTTP_GET_METHOD, path="/unexpected",
             response_code=HTTPStatus.OK,
         ))
     elif mutation == "unreferenced-provider":
@@ -393,7 +422,7 @@ def test_operator_runtime_uses_supplied_directories_and_preserves_files(
     directory = tempfile.TemporaryDirectory(prefix="p.", dir="/tmp")
     request.addfinalizer(directory.cleanup)
     repository = Path(directory.name)
-    (repository / "config_ai_augment.json").write_bytes(files.config.read_bytes())
+    (repository / CONFIG_FILENAME).write_bytes(files.config.read_bytes())
     run_dirs: list[Path] = []
     for index in range(2):
         supplied = repository / f"run-{index}"

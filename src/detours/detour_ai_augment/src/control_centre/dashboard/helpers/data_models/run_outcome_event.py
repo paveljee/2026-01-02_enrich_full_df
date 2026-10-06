@@ -15,23 +15,25 @@ from src.detours.detour_ai_augment.protected.src.architecture import (
 from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     ETAG_HEADER,
+    HTTP_CONTENT_LENGTH_HEADER,
     HTTP_CONTENT_TYPE_HEADER,
     HTTP_POST_METHOD,
     SESSION_ID_HEADER,
     SOURCE_KEY_HEADER,
     SYNTHETIC_COMMIT_HOST,
     SYNTHETIC_COMMIT_SCHEME,
+    TEXT_ENCODING,
     ContentType,
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     NAME_KEY_HEADER as NAME_KEY_HEADER,
 )
-from src.detours.detour_ai_augment.src.shared import (
+from src.detours.detour_ai_augment.protected.src.shared import (
     name_key_from_header_value,
     source_key_from_header_value,
     source_key_header_value,
 )
-from src.detours.detour_ai_augment.src.shared import (
+from src.detours.detour_ai_augment.protected.src.shared import (
     name_key_header_value as name_key_header_value,
 )
 from src.helpers.architecture import FrozenStrictModel, implements
@@ -137,17 +139,21 @@ class RunOutcomeRequestRecord(RequestRecord):
     @property
     def namekey(self) -> NameKey | None:
         try:
-            return name_key_from_header_value(self.request_headers.get(NAME_KEY_HEADER))
+            return name_key_from_header_value(
+                _http_header_value(self.request_headers, NAME_KEY_HEADER)
+            )
         except ValueError:
             return None
 
     @property
     def session_id(self) -> UUID | None:
-        return _request_uuid(self.request_headers.get(SESSION_ID_HEADER))
+        return _request_uuid(_http_header_value(self.request_headers, SESSION_ID_HEADER))
 
     @property
     def validation_request_record_id(self) -> UUID | None:
-        return _request_uuid(self.request_headers.get(ETAG_HEADER), quoted=True)
+        return _request_uuid(
+            _http_header_value(self.request_headers, ETAG_HEADER), quoted=True
+        )
 
     @property
     def run_outcome(self) -> RunOutcome:
@@ -172,44 +178,6 @@ class RunOutcomeRequestRecord(RequestRecord):
             headers[ETAG_HEADER] = f'"{validation_record_id}"'
         return run_outcome.to_run_outcome_path(), headers
 
-    @classmethod
-    def from_http_request(
-        cls,
-        *,
-        received_at_unix_usec: int,
-        method: str,
-        scheme: str,
-        host: str,
-        port: int | None,
-        path: str,
-        query: str,
-        request_headers: Mapping[str, str],
-        request_body: str | None,
-    ) -> Self:
-        selected_headers = {
-            name: value
-            for name in (NAME_KEY_HEADER, SOURCE_KEY_HEADER, SESSION_ID_HEADER, ETAG_HEADER)
-            if (value := _http_header_value(request_headers, name)) is not None
-        }
-        record = HttpRequestLogRecord(
-            schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
-            received_at_unix_usec=received_at_unix_usec,
-            method=method,
-            scheme=scheme,
-            host=host,
-            port=port,
-            path=path,
-            query=query,
-            request_headers=selected_headers,
-            request_body=request_body,
-            response_code=None,
-            response_headers=None,
-            response_body=None,
-            ready_to_respond_at_unix_usec=None,
-            duration_usec=None,
-        )
-        return cls.from_http_request_log_record(http_request_log_record=record)
-
     def validate_http_request_log_record(self) -> Self:
         record = self.http_request_log_record
         if (
@@ -225,7 +193,7 @@ class RunOutcomeRequestRecord(RequestRecord):
             or record.response_headers is not None
             or record.response_body is not None
             or record.received_at_unix_usec is None
-            or record.duration_usec is not None
+            or record.duration_usec != 0
         ):
             raise ValueError(Locale.RUN_OUTCOME_REQUEST_CONTOUR_INVALID)
         return self
@@ -291,58 +259,6 @@ class RunOutcomeResponseRecord(ResponseRecord):
     def serialize(self) -> dict[str, object]:
         return self.http_request_log_record.model_dump(mode="json")
 
-    @classmethod
-    def from_run_outcome_request_record(
-        cls,
-        request_record: RunOutcomeRequestRecord,
-        *,
-        response_code: HTTPStatus,
-        response_headers: Mapping[str, str] | None,
-        pull_record_id: UUID | None,
-        push_record_id: UUID | None,
-        commit_request_record_id: UUID | None,
-        validation_record_id: UUID | None,
-        codex_session_record: CodexSessionRecord,
-        ready_to_respond_at_unix_usec: int,
-        attempt: AgentRuntimeAttempt | None = None,
-    ) -> Self:
-        received_at_unix_usec = request_record.received_at_unix_usec
-        if received_at_unix_usec is None:
-            raise ValueError(Locale.RUN_OUTCOME_REQUEST_RECEIPT_MISSING)
-        response_body = _RunOutcomeResponseBodyJson(
-            pull_record_id=pull_record_id,
-            push_record_id=push_record_id,
-            commit_request_record_id=commit_request_record_id,
-            validation_record_id=validation_record_id,
-            run_outcome_record_id=request_record.record_id,
-            codex_session_record=_CodexSessionRecordJson(
-                codex_session_id=codex_session_record.session_id,
-                codex_rollout_record=codex_session_record.codex_rollout_record,
-                appendwatch_report_record=codex_session_record.appendwatch_report_record,
-            ),
-        )
-        response = cls(
-            schema_version=request_record.schema_version,
-            record_id=request_record.record_id,
-            method=request_record.method,
-            scheme=request_record.scheme,
-            host=request_record.host,
-            port=request_record.port,
-            path=request_record.path,
-            query=request_record.query,
-            request_headers=request_record.request_headers,
-            request_body=request_record.request_body,
-            response_code=response_code,
-            response_headers=None if response_headers is None else dict(response_headers),
-            response_body=response_body.model_dump_json(),
-            received_at_unix_usec=received_at_unix_usec,
-            ready_to_respond_at_unix_usec=ready_to_respond_at_unix_usec,
-            duration_usec=ready_to_respond_at_unix_usec - received_at_unix_usec,
-            run_outcome_request_record=request_record,
-            attempt=attempt,
-        )
-        return response
-
     def validate_record(self) -> Self:
         projected_request_record = HttpRequestLogRecord(
             schema_version=self.schema_version,
@@ -358,9 +274,13 @@ class RunOutcomeResponseRecord(ResponseRecord):
             response_code=None,
             response_headers=None,
             response_body=None,
-            received_at_unix_usec=self.received_at_unix_usec,
+            received_at_unix_usec=(
+                self.ready_to_respond_at_unix_usec - self.duration_usec
+                if self.ready_to_respond_at_unix_usec is not None
+                and self.duration_usec is not None else None
+            ),
             ready_to_respond_at_unix_usec=None,
-            duration_usec=None,
+            duration_usec=0,
         )
         session = self._codex_session_record()
         rollout = session.codex_rollout_record
@@ -376,7 +296,7 @@ class RunOutcomeResponseRecord(ResponseRecord):
             if self.response_headers is None:
                 raise ValueError(Locale.RUN_OUTCOME_SOURCE_KEY_MISSING)
             filename, line_count = source_key_from_header_value(
-                self.response_headers.get(SOURCE_KEY_HEADER)
+                _http_header_value(self.response_headers, SOURCE_KEY_HEADER)
             )
             if line_count != rollout.line_count:
                 raise ValueError(Locale.RUN_OUTCOME_SOURCE_KEY_LINE_COUNT_INVALID)
@@ -386,19 +306,33 @@ class RunOutcomeResponseRecord(ResponseRecord):
         received_at_unix_usec = self.received_at_unix_usec
         ready_to_respond_at_unix_usec = self.ready_to_respond_at_unix_usec
         if (
-            projected_request_record.model_dump(mode="json")
-            != self.run_outcome_request_record.model_dump(mode="json")
+            projected_request_record.model_dump(mode="json", exclude={"record_id"})
+            != self.run_outcome_request_record.model_dump(mode="json", exclude={"record_id"})
             or self.response_code not in {
                 HTTPStatus.OK, HTTPStatus.BAD_REQUEST, HTTPStatus.CONFLICT,
                 HTTPStatus.INTERNAL_SERVER_ERROR,
             }
             or self.response_body is None
             or ready_to_respond_at_unix_usec is None
-            or received_at_unix_usec is None
+            or received_at_unix_usec is not None
             or self.duration_usec is None
             or self.duration_usec < 0
-            or self.duration_usec != ready_to_respond_at_unix_usec - received_at_unix_usec
-            or self.response_headers != expected_response_headers
+            or self.response_headers is None
+            or _http_header_value(self.response_headers, HTTP_CONTENT_TYPE_HEADER)
+            != ContentType.JSON
+            or _http_header_value(self.response_headers, HTTP_CONTENT_LENGTH_HEADER)
+            != str(len(self.response_body.encode(TEXT_ENCODING)))
+            or {
+                key.casefold() for key in self.response_headers
+            } != {
+                HTTP_CONTENT_TYPE_HEADER.casefold(), "content-length",
+                *({SOURCE_KEY_HEADER.casefold()} if expected_response_headers else set()),
+            }
+            or (
+                expected_response_headers is not None
+                and _http_header_value(self.response_headers, SOURCE_KEY_HEADER)
+                != expected_response_headers[SOURCE_KEY_HEADER]
+            )
             or (
                 self.response_code != HTTPStatus.BAD_REQUEST
                 and (self.response_code in {HTTPStatus.OK, HTTPStatus.CONFLICT})
@@ -434,27 +368,7 @@ class RunOutcomeResponseRecord(ResponseRecord):
     def to_response(self) -> requests.Response:
         # Absence of SourceKey is intentional for an incomplete outcome capture.
         # Adapt only at this transport boundary; do not alter the durable record.
-        response_headers = dict(self.response_headers or {})
-        response_headers[HTTP_CONTENT_TYPE_HEADER] = ContentType.JSON
-        record = HttpRequestLogRecord(
-            schema_version=self.schema_version,
-            record_id=self.record_id,
-            method=self.method,
-            scheme=self.scheme,
-            host=self.host,
-            port=self.port,
-            path=self.path,
-            query=self.query,
-            request_headers=self.request_headers,
-            request_body=self.request_body,
-            response_code=self.response_code,
-            response_headers=response_headers,
-            response_body=self.response_body,
-            received_at_unix_usec=self.received_at_unix_usec,
-            ready_to_respond_at_unix_usec=self.ready_to_respond_at_unix_usec,
-            duration_usec=self.duration_usec,
-        )
-        return record.to_response()
+        return super().to_response()
 
     @model_validator(mode="after")
     def _validate_run_outcome_record(self) -> Self:
@@ -468,11 +382,11 @@ class RunOutcomeResponseRecord(ResponseRecord):
         attempt: AgentRuntimeAttempt | None = None,
     ) -> Self:
         record = http_request_log_record
-        if record.response_body is None:
+        if (record.response_body is None or record.ready_to_respond_at_unix_usec is None
+                or record.duration_usec is None):
             raise ValueError(Locale.RUN_OUTCOME_RECORD_INCOMPLETE)
         request_record = HttpRequestLogRecord(
             schema_version=record.schema_version,
-            record_id=record.record_id,
             method=record.method,
             scheme=record.scheme,
             host=record.host,
@@ -484,9 +398,11 @@ class RunOutcomeResponseRecord(ResponseRecord):
             response_code=None,
             response_headers=None,
             response_body=None,
-            received_at_unix_usec=record.received_at_unix_usec,
+            received_at_unix_usec=(
+                record.ready_to_respond_at_unix_usec - record.duration_usec
+            ),
             ready_to_respond_at_unix_usec=None,
-            duration_usec=None,
+            duration_usec=0,
         )
         return cls(
             schema_version=record.schema_version,

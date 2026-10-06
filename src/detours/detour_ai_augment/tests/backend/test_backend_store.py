@@ -13,38 +13,51 @@ from uuid import uuid7
 import duckdb
 import pytest
 
-from src.detours.detour_ai_augment.protected.src.backend import api
+from src.detours.detour_ai_augment.protected.src.backend import server
+from src.detours.detour_ai_augment.protected.src.backend.helpers import api
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models import (
+    store as store_models,
+)
 from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     AUTHORITATIVE_RECORDS_TABLE,
+    COMMIT_VALIDATION_REQUEST_RECORD_INDEX_TABLE,
+    HTTP_CONTENT_LENGTH_HEADER,
+    HTTP_CONTENT_TYPE_HEADER,
     HTTP_GET_METHOD,
     HTTP_POST_METHOD,
     INIT_PATH,
     PULL_PATH,
     PUSH_PATH,
+    QUERY_PATH,
+    SYNTHETIC_COMMIT_HOST,
+    SYNTHETIC_COMMIT_SCHEME,
+    TEXT_ENCODING,
+    ContentType,
 )
 from src.detours.detour_ai_augment.protected.tests.fixtures.pytest_fixtures import (
     init_request_record,
 )
-from src.detours.detour_ai_augment.src.backend import server
-from src.detours.detour_ai_augment.src.backend.helpers.data_models import (
-    ai_augment_backend_store as store_models,
-)
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_context import (
     AiAugmentBackendContext,
 )
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_http_request_log_record import (  # noqa: E501
+    RequestRecord,
+)
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.commit_request import (
     COMMIT_PATH,
-    CodexSessionRecord,
+    _CodexSessionRecordJson,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.pull_event import (
-    PullRequestRecord,
     PullResponseRecord,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.response_record_promise import (
     BackendStoreAcknowledgment,
     BackendStoreException,
     ResponseRecordPromise,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.validation_request import (
+    VALIDATE_PATH,
 )
 from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models import (
     run_outcome_event as run_outcome,
@@ -54,6 +67,8 @@ from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_mod
 )
 from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.run_outcome_event import (  # noqa: E501
     RunOutcomeRequestRecord,
+    RunOutcomeResponseRecord,
+    _RunOutcomeResponseBodyJson,
 )
 from src.detours.detour_ai_augment.tests.backend import test_http_interceptor as fixtures
 from src.detours.detour_ai_augment.tests.backend.test_api import (
@@ -61,6 +76,7 @@ from src.detours.detour_ai_augment.tests.backend.test_api import (
     valid_submission_body,
 )
 from src.helpers.data_models.http_request_log import HttpRequestLogRecord
+from src.helpers.vars import KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
 
 backend_test_paths = fixtures.backend_test_paths
 runtime = fixtures.runtime
@@ -73,11 +89,13 @@ def append(
     store = backend_store
     with store._writable(runtime):
         store._append_authoritative_record(
-            persisted_http_record(
-                record_id=uuid7(),
-                method="GET",
-                path="/pull",
-                response_code=200,
+            PullResponseRecord.model_validate(
+                persisted_http_record(
+                    record_id=uuid7(),
+                    method=HTTP_GET_METHOD,
+                    path=PULL_PATH,
+                    response_code=200,
+                ).model_dump()
             )
         )
     return Path(store._replay_log).read_bytes()
@@ -248,7 +266,9 @@ def test_nonempty_replay_refusal_preserves_db_then_exact_raw_line_is_bootstrappe
     runtime: AiAugmentBackendContext,
 ) -> None:
     store = backend_store
-    record = persisted_http_record(record_id=uuid7(), method="GET", path="/pull", response_code=200)
+    record = persisted_http_record(
+        record_id=uuid7(), method=HTTP_GET_METHOD, path=PULL_PATH, response_code=200,
+    )
     raw = ("  " + record.model_dump_json() + "  \n").encode()
     log = Path(store._replay_log)
     initial_log = log.read_bytes()
@@ -349,13 +369,13 @@ def test_pull_ack_means_only_request_fsync_and_result_reports_processing_error(
     failure: str | None,
 ) -> None:
     store = backend_store
-    record = PullRequestRecord.model_validate(
-        persisted_http_record(
+    record = PullResponseRecord.from_http_request_log_record(
+        http_request_log_record=persisted_http_record(
             record_id=uuid7(),
-            method="GET",
-            path="/pull",
+            method=HTTP_GET_METHOD,
+            path=PULL_PATH,
             response_code=200,
-        ).model_dump()
+        ),
     )
 
     def broken(*_args: object, **_kwargs: object) -> None:
@@ -411,13 +431,13 @@ def test_query_only_capability_returns_nak_snapshot_and_never_changes_log_or_db(
         db_path = writable._detour_db_path
     before_db = db_path.read_bytes()
     before_log = Path(runtime.pipeline_config.replay_log).read_bytes()
-    request = QueryRequestRecord(
-        schema_version="1.1",
-        method="GET",
-        scheme="http",
-        host="invalid",
+    request_fields: dict[str, object] = dict(
+        schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
+        method=HTTP_GET_METHOD,
+        scheme=SYNTHETIC_COMMIT_SCHEME,
+        host=SYNTHETIC_COMMIT_HOST,
         port=None,
-        path="/query",
+        path=QUERY_PATH,
         query="",
         request_headers={},
         request_body=None,
@@ -426,8 +446,15 @@ def test_query_only_capability_returns_nak_snapshot_and_never_changes_log_or_db(
         response_body=None,
         received_at_unix_usec=received_at_unix_usec,
         ready_to_respond_at_unix_usec=None,
-        duration_usec=None,
+        duration_usec=0,
     )
+    if received_at_unix_usec is None:
+        with pytest.raises(ValueError, match=Locale.QUERY_REQUEST_INVALID):
+            QueryRequestRecord.model_validate(request_fields)
+        # Exercise Store's rejection boundary despite the typed model rejecting this input.
+        request = RequestRecord.model_validate(request_fields)
+    else:
+        request = QueryRequestRecord.model_validate(request_fields)
     with store_models.initialize_backend_store(runtime, ipc_only=True) as store:
         assert not any(hasattr(store, name) for name in ("pull", "push", "run_outcome", "execute"))
         promise = store.query_response_record(request)
@@ -435,15 +462,20 @@ def test_query_only_capability_returns_nak_snapshot_and_never_changes_log_or_db(
         response, error = asyncio.run(promise.response_record_promise())
         if received_at_unix_usec is None:
             assert response is None and error is not None
-            assert str(error) == Locale.QUERY_REQUEST_RECEIPT_TIME_MISSING
+            assert Locale.QUERY_REQUEST_INVALID in str(error)
         else:
             assert error is None and response is not None
-            assert response.record_id == request.record_id
+            assert response.record_id != request.record_id
+            assert response.received_at_unix_usec is None
             assert response.ready_to_respond_at_unix_usec is not None
             assert response.duration_usec == (
                 response.ready_to_respond_at_unix_usec - received_at_unix_usec
             )
-            assert response.response_headers == {"Content-Type": "application/json"}
+            assert response.response_body is not None
+            assert response.response_headers == {
+                HTTP_CONTENT_TYPE_HEADER: ContentType.JSON,
+                HTTP_CONTENT_LENGTH_HEADER: str(len(response.response_body.encode(TEXT_ENCODING))),
+            }
             assert len(response.ai_augment_singular_outerdicts) == 1
     assert db_path.read_bytes() == before_db
     assert Path(runtime.pipeline_config.replay_log).read_bytes() == before_log
@@ -460,38 +492,64 @@ def test_missing_identity_outcome_is_nak_with_durable_400_and_self_id(
 ) -> None:
     store = backend_store
     assert store._init_request_record is not None
-    record = RunOutcomeRequestRecord(
-        schema_version="1.1",
-        method="POST",
-        scheme="http",
-        host="invalid",
+    request_headers = {
+        run_outcome.NAME_KEY_HEADER: run_outcome.name_key_header_value(
+            store._init_request_record.namekey,
+        ),
+    }
+    request_record = RunOutcomeRequestRecord(
+        schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
+        method=HTTP_POST_METHOD,
+        scheme=SYNTHETIC_COMMIT_SCHEME,
+        host=SYNTHETIC_COMMIT_HOST,
         port=None,
         path=path,
         query="",
-        request_headers={
-            run_outcome.NAME_KEY_HEADER: run_outcome.name_key_header_value(
-                store._init_request_record.namekey,
-            ),
-        },
+        request_headers=request_headers,
         request_body=None,
         response_code=None,
         response_headers=None,
         response_body=None,
         received_at_unix_usec=1,
         ready_to_respond_at_unix_usec=None,
-        duration_usec=None,
+        duration_usec=0,
+    )
+    response_id = uuid7()
+    body = _RunOutcomeResponseBodyJson(
+        pull_record_id=None,
+        push_record_id=None,
+        commit_request_record_id=None,
+        validation_record_id=None,
+        run_outcome_record_id=response_id,
+        codex_session_record=_CodexSessionRecordJson(
+            codex_session_id=None,
+            codex_rollout_record=None,
+            appendwatch_report_record=None,
+        ),
+    ).model_dump_json()
+    reply = api._response(HTTPStatus.BAD_REQUEST, body, content_type=ContentType.JSON)
+    response_record = RunOutcomeResponseRecord(
+        schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
+        record_id=response_id,
+        method=HTTP_POST_METHOD,
+        scheme=SYNTHETIC_COMMIT_SCHEME,
+        host=SYNTHETIC_COMMIT_HOST,
+        port=None,
+        path=path,
+        query="",
+        request_headers=request_headers,
+        request_body=None,
+        response_code=reply.status_code,
+        response_headers=dict(reply.headers),
+        response_body=reply.content.decode(TEXT_ENCODING),
+        received_at_unix_usec=None,
+        ready_to_respond_at_unix_usec=2,
+        duration_usec=1,
+        run_outcome_request_record=request_record,
     )
 
     def exercise() -> None:
-        promise = store.run_outcome_response_record(
-            record,
-            codex_session_record=CodexSessionRecord(
-                session_id=None,
-                codex_rollout_record=None,
-                appendwatch_report_record=None,
-            ),
-            rollout_filename=None,
-        )
+        promise = store.run_outcome_response_record(response_record)
         assert promise.acknowledgment is BackendStoreAcknowledgment.NAK
         response, error = asyncio.run(promise.response_record_promise())
         if failure is not None:
@@ -502,11 +560,12 @@ def test_missing_identity_outcome_is_nak_with_durable_400_and_self_id(
             return
         assert error is None and response is not None
         assert response.response_code == HTTPStatus.BAD_REQUEST
-        assert response._body().run_outcome_record_id == record.record_id
+        assert response._body().run_outcome_record_id == response.record_id
+        assert response.record_id != request_record.record_id
         assert response._body().commit_request_record_id is None
         assert response._body().validation_record_id is None
         assert response.to_response().status_code == HTTPStatus.BAD_REQUEST
-        assert store._http_record(record.record_id).model_dump() == response.model_dump()
+        assert store._http_record(response.record_id).model_dump() == response.model_dump()
 
     if failure is None:
         with store._writable(runtime):
@@ -537,7 +596,7 @@ def test_response_record_promise_waiter_cancellation_preserves_completion(
     entered = Event()
     release = Event()
     record = PullResponseRecord.model_validate(persisted_http_record(
-        record_id=uuid7(), method="GET", path="/pull", response_code=HTTPStatus.OK,
+        record_id=uuid7(), method=HTTP_GET_METHOD, path=PULL_PATH, response_code=HTTPStatus.OK,
     ).model_dump())
     failure = OSError("response processing failed")
 
@@ -601,12 +660,12 @@ def test_explicit_replay_projects_durable_prefix_ending_at_push_or_commit(
             *([(4, HTTP_POST_METHOD, COMMIT_PATH)] if line_count == 4 else []),
         ]
         assert connection.execute(
-            f"SELECT count(*) FROM {api.COMMIT_VALIDATION_REQUEST_RECORD_INDEX_TABLE}"
+            f"SELECT count(*) FROM {COMMIT_VALIDATION_REQUEST_RECORD_INDEX_TABLE}"
         ).fetchone() == (0,)
     assert log.read_bytes() == b"".join(lines)
 
 
-@pytest.mark.parametrize("path", ("/commit", "/validate"))
+@pytest.mark.parametrize("path", (COMMIT_PATH, VALIDATE_PATH))
 def test_invalid_synthetic_envelope_is_fsynced_before_domain_rejection(
     runtime: AiAugmentBackendContext,
     backend_store: store_models.AiAugmentBackendStore,
@@ -614,7 +673,9 @@ def test_invalid_synthetic_envelope_is_fsynced_before_domain_rejection(
     path: str,
 ) -> None:
     record = HttpRequestLogRecord(
-        schema_version="1.1", method="POST", scheme="http", host="invalid", port=None,
+        schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
+        method=HTTP_POST_METHOD, scheme=SYNTHETIC_COMMIT_SCHEME,
+        host=SYNTHETIC_COMMIT_HOST, port=None,
         path=path, query="", request_headers={}, request_body="{}",
         response_code=None, response_headers=None, response_body=None,
         received_at_unix_usec=None, ready_to_respond_at_unix_usec=None, duration_usec=None,

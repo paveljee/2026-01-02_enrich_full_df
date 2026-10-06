@@ -94,7 +94,6 @@ TEST_LIMA_MOUNT_DIRECTORY = "lima-mount"
 TEST_GUEST_MOUNT_POINT = "/home/ai/operator-fixture"
 TEST_APPENDWATCH_RELATIVE_PATH = ".aivm-control/appendwatch/appendwatch-tree.txt"
 TEST_APPENDWATCH_CONTENT = ".\n"
-TEXT_ENCODING = "utf-8"
 OPERATOR_PROBE_TIMEOUT_SECONDS = 10
 OPERATOR_START_TIMEOUT_SECONDS = 300
 OPERATOR_DEPLOY_TIMEOUT_SECONDS = 1_800
@@ -584,7 +583,8 @@ def backend_startup_process() -> None:
     import os
     import sys
 
-    from src.detours.detour_ai_augment.protected.src.backend import api
+    from src.detours.detour_ai_augment.protected.src.backend import server
+    from src.detours.detour_ai_augment.protected.src.backend.helpers import api
     from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
         AUTHORITATIVE_RECORDS_TABLE,
         NAMEKEY_ENV_NAME,
@@ -592,7 +592,6 @@ def backend_startup_process() -> None:
     from src.detours.detour_ai_augment.protected.tests.fixtures.pytest_fixtures import (
         init_request_record,
     )
-    from src.detours.detour_ai_augment.src.backend import server
     from src.helpers.data_models import NameKey
 
     args = server.parse_args(sys.argv[1:])
@@ -603,8 +602,8 @@ def backend_startup_process() -> None:
             args.config,
             verify_hash_on_init=not args.danger_no_verify_hash,
         )
-        from src.detours.detour_ai_augment.src.backend.helpers.data_models import (
-            ai_augment_backend_store as store_models,
+        from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models import (
+            store as store_models,
         )
 
         boundary = (
@@ -639,18 +638,15 @@ def operator_fixture_bootstrap_process() -> None:
     import sys
     from pathlib import Path
 
-    import requests
-
-    from src.detours.detour_ai_augment.protected.src.backend import ipc
+    from src.detours.detour_ai_augment.protected.src.backend import server
+    from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models import (
+        store as store_models,
+    )
     from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
+        DASHBOARD_QUERY_PATH,
         EXPECTED_SOURCE_RESEARCHERS,
     )
     from src.detours.detour_ai_augment.protected.tests.operator import test_operator_e2e as workflow
-    from src.detours.detour_ai_augment.protected.tests.pytest_plugin import threaded_loop_runner
-    from src.detours.detour_ai_augment.src.backend import server
-    from src.detours.detour_ai_augment.src.backend.helpers.data_models import (
-        ai_augment_backend_store as store_models,
-    )
     from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.query_event import (  # noqa: E501
         QueryResponseRecord,
     )
@@ -664,17 +660,16 @@ def operator_fixture_bootstrap_process() -> None:
     replay_before_query = runtime.replay_log_path.read_bytes()
     assert replay_before_query == b""
     context = server.configure_runtime(runtime.config_path)
-    with (
-        store_models.initialize_backend_store(context, ipc_only=True) as store,
-        threaded_loop_runner() as runner,
-    ):
+    with store_models.initialize_backend_store(context, ipc_only=True) as store:
+        app = server.create_dashboard_query_app(
+            store.query_response_record,
+            query_path=DASHBOARD_QUERY_PATH,
+            fatal_exit=lambda code: pytest.fail(f"IPC fatal exit: {code}"),
+        )
+        http_response = app.test_client().get(DASHBOARD_QUERY_PATH)
+        assert http_response.status_code == 200
         response = QueryResponseRecord.outerdicts_from_response_body(
-            runner.run(
-                ipc.handle_query_request(
-                    store,
-                    requests.Request("GET", "http://invalid/query").prepare(),
-                )
-            ).content
+            http_response.get_data()
         )
         assert len(response) == EXPECTED_SOURCE_RESEARCHERS
         assert all(
@@ -692,6 +687,7 @@ def operator_fixture_bootstrap_process() -> None:
 def completed_query_fixture_process() -> None:
     """Seed real Store history and a deliberately stale, private Dashboard snapshot."""
     print("Completed-query fixture: importing dependencies", flush=True)
+    import base64
     import hashlib
     import json
     import os
@@ -704,31 +700,51 @@ def completed_query_fixture_process() -> None:
     import duckdb
     from nicegui import app
 
-    from src.detours.detour_ai_augment.protected.src.backend import api
-    from src.detours.detour_ai_augment.protected.src.backend.api import LOCATION_HEADER
+    from src.detours.detour_ai_augment.protected.src.backend import server
+    from src.detours.detour_ai_augment.protected.src.backend.helpers import api
+    from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.codex_rollout_record import (  # noqa: E501
+        CodexRolloutRecord,
+    )
     from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
+        APPENDWATCH_REPORT_ENV_NAME,
+        BASE64_TEXT_ENCODING,
         DOCX_COLUMNS,
         ETAG_HEADER,
         HTTP_CONTENT_TYPE_HEADER,
         HTTP_GET_METHOD,
+        HTTP_POST_METHOD,
+        LOCATION_HEADER,
         NAMEKEY_ENV_NAME,
+        NANOSECONDS_PER_MICROSECOND,
         PULL_PATH,
+        PUSH_PATH,
         REPLAY_LOG_KEY,
+        ROLLOUT_FILENAME_PREFIX,
+        ROLLOUT_FILENAME_SUFFIX,
+        SESSION_ID_HEADER,
         SOURCE_KEY_HEADER,
         SYNTHETIC_COMMIT_HOST,
         SYNTHETIC_COMMIT_SCHEME,
+        TEXT_ENCODING,
         ContentType,
+    )
+    from src.detours.detour_ai_augment.protected.src.shared import (
+        name_key_header_value,
+        source_key_header_value,
     )
     from src.detours.detour_ai_augment.protected.tests.fixtures.pytest_fixtures import (
         STARTUP_NAMEKEY,
         init_request_record,
     )
     from src.detours.detour_ai_augment.protected.tests.pytest_plugin import threaded_loop_runner
-    from src.detours.detour_ai_augment.src.backend import server
     from src.detours.detour_ai_augment.src.backend.helpers.data_models.commit_request import (
+        COMMIT_PATH,
+        AppendwatchReportEncoding,
+        AppendwatchReportRecord,
         BackendCommitRequestRecord,
-        CodexRolloutRecord,
-        _synthetic_commit_request_record,
+        CodexSessionRecord,
+        CommitRequestBody,
+        _CodexSessionRecordJson,
     )
     from src.detours.detour_ai_augment.src.backend.helpers.data_models.lifecycle import (  # noqa: E501
         BackendLifecycle,
@@ -760,8 +776,8 @@ def completed_query_fixture_process() -> None:
         NAME_KEY_HEADER,
         RunOutcomeRequestRecord,
         RunOutcomeResponseRecord,
+        _RunOutcomeResponseBodyJson,
     )
-    from src.detours.detour_ai_augment.src.shared import name_key_header_value
     from src.detours.detour_ai_augment.tests.backend.test_api import (
         OPERATOR_CAPTURED_SESSION_ID,
         operator_capture_rollout,
@@ -776,6 +792,7 @@ def completed_query_fixture_process() -> None:
         KTP_FIRST_NAME_COL,
         KTP_FRAGMENT_COL,
         KTP_FRAGMENT_TYPE_COL,
+        KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
         KTP_INNERDICT_JSONLINES_COL,
         KTP_LAST_NAME_COL,
         KTP_NAMEKEY_COL,
@@ -820,7 +837,10 @@ def completed_query_fixture_process() -> None:
     blob.parent.mkdir(parents=True, exist_ok=True)
     blob.write_bytes(rollout_bytes)
     session_id = UUID(OPERATOR_CAPTURED_SESSION_ID)
-    relative = PurePosixPath(f"2026/09/03/rollout-2026-09-03T15-16-00-{session_id}.jsonl")
+    relative = PurePosixPath(
+        f"2026/09/03/{ROLLOUT_FILENAME_PREFIX}2026-09-03T15-16-00-"
+        f"{session_id}{ROLLOUT_FILENAME_SUFFIX}"
+    )
     with server.backend_store_lifecycle(
         runtime, init_request_record=init_request_record(STARTUP_NAMEKEY),
         new=False, confirmed=True, yes=True,
@@ -829,43 +849,76 @@ def completed_query_fixture_process() -> None:
             ai_augment_singular_outerdicts=store.ai_augment_singular_outerdicts(),
         )
         pull = store._append_authoritative_record(
-            persisted_http_record(
-                record_id=uuid7(),
-                method="GET",
-                path="/pull",
-                response_code=200,
-            ).model_copy(
-                update={
-                    "response_headers": {
-                        HTTP_CONTENT_TYPE_HEADER: ContentType.NDJSON_UTF8,
-                    },
-                    "response_body": api.json_line({
-                        KTP_FIRST_NAME_COL: STARTUP_NAMEKEY.first_name,
-                        KTP_LAST_NAME_COL: STARTUP_NAMEKEY.last_name,
-                    }),
-                }
-            )
+            PullResponseRecord.from_http_request_log_record(
+                http_request_log_record=persisted_http_record(
+                    record_id=uuid7(),
+                    method=HTTP_GET_METHOD,
+                    path=PULL_PATH,
+                    response_code=200,
+                ).model_copy(
+                    update={
+                        "response_headers": {
+                            HTTP_CONTENT_TYPE_HEADER: ContentType.NDJSON_UTF8,
+                        },
+                        "response_body": api.json_line({
+                            KTP_FIRST_NAME_COL: STARTUP_NAMEKEY.first_name,
+                            KTP_LAST_NAME_COL: STARTUP_NAMEKEY.last_name,
+                        }),
+                    }
+                ),
+            ),
         )
         assert isinstance(pull, PullResponseRecord)
         push = store._append_authoritative_record(
-            persisted_http_record(
-                record_id=uuid7(),
-                method="POST",
-                path="/push",
-                response_code=202,
-                request_body=json.dumps(payload),
-                response_headers={LOCATION_HEADER: PULL_PATH},
-            )
+            PushResponseRecord.from_http_request_log_record(
+                http_request_log_record=persisted_http_record(
+                    record_id=uuid7(),
+                    method=HTTP_POST_METHOD,
+                    path=PUSH_PATH,
+                    response_code=202,
+                    request_body=json.dumps(payload),
+                    response_headers={LOCATION_HEADER: PULL_PATH},
+                ),
+                pull_response_record=pull,
+            ),
         )
         assert isinstance(push, PushResponseRecord)
-        draft = _synthetic_commit_request_record(
-            pull_response_record=pull, push_response_record=push, session_id=session_id,
-            rollout=CodexRolloutRecord(
-                sha256=digest, size=len(rollout_bytes), line_count=rollout_bytes.count(b"\n"),
+        rollout = CodexRolloutRecord(
+            sha256=digest, size=len(rollout_bytes), line_count=rollout_bytes.count(b"\n"),
+        )
+        report = report_for_rollout(relative).encode()
+        body = CommitRequestBody(
+            pull_response_record=pull,
+            push_response_record=push,
+            codex_session_record=CodexSessionRecord(
+                session_id=session_id,
+                codex_rollout_record=rollout,
+                appendwatch_report_record=AppendwatchReportRecord(
+                    encoding=AppendwatchReportEncoding.BASE64,
+                    data=base64.b64encode(report).decode(BASE64_TEXT_ENCODING),
+                ),
             ),
-            rollout_filename=relative.name,
-            appendwatch_report=report_for_rollout(relative).encode(),
-            namekey=STARTUP_NAMEKEY,
+        )
+        draft = BackendCommitRequestRecord(
+            schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
+            method=HTTP_POST_METHOD,
+            scheme=SYNTHETIC_COMMIT_SCHEME,
+            host=SYNTHETIC_COMMIT_HOST,
+            port=None,
+            path=COMMIT_PATH,
+            query="",
+            request_headers={
+                SOURCE_KEY_HEADER: source_key_header_value(relative.name, rollout.line_count),
+                NAME_KEY_HEADER: name_key_header_value(STARTUP_NAMEKEY),
+            },
+            request_body=body.model_dump_json(),
+            response_code=None,
+            response_headers=None,
+            response_body=None,
+            received_at_unix_usec=None,
+            ready_to_respond_at_unix_usec=time.time_ns() // NANOSECONDS_PER_MICROSECOND,
+            duration_usec=0,
+            commit_request_body=body,
         )
         commit = store._append_authoritative_record(draft)
         assert isinstance(commit, BackendCommitRequestRecord)
@@ -888,40 +941,83 @@ def completed_query_fixture_process() -> None:
         ground_truth_innerdict = store.ai_augment_singular_outerdicts()[0].ground_truth_innerdict()
         if ground_truth_innerdict is not None:
             lines.append(api.json_line(api.select_columns(ground_truth_innerdict.data)))
-        store._append_authoritative_record(persisted_http_record(
-            record_id=uuid7(),
-            method=HTTP_GET_METHOD,
-            path=PULL_PATH,
-            response_code=HTTPStatus.GONE,
-            response_headers={
-                HTTP_CONTENT_TYPE_HEADER: ContentType.NDJSON_UTF8,
-                ETAG_HEADER: f'"{validated.record_id}"',
-            },
-            response_body="".join(lines),
-        ))
-        occurred_at = commit.record_id.time * 1000
-        request_record = RunOutcomeRequestRecord.from_http_request(
-            received_at_unix_usec=occurred_at + 6, method="POST", scheme=SYNTHETIC_COMMIT_SCHEME,
-            host=SYNTHETIC_COMMIT_HOST,
-            port=None, path=RunLifecycle.COMPLETED.to_run_outcome_path(), query="",
-            request_headers={
-                NAME_KEY_HEADER: name_key_header_value(STARTUP_NAMEKEY),
-                "Session-ID": str(session_id),
-                "ETag": f'"{validated.record_id}"',
-            },
-            request_body=None,
+        store._append_authoritative_record(
+            PullResponseRecord.from_http_request_log_record(
+                http_request_log_record=persisted_http_record(
+                    record_id=uuid7(),
+                    method=HTTP_GET_METHOD,
+                    path=PULL_PATH,
+                    response_code=HTTPStatus.GONE,
+                    response_headers={
+                        HTTP_CONTENT_TYPE_HEADER: ContentType.NDJSON_UTF8,
+                        ETAG_HEADER: f'"{validated.record_id}"',
+                    },
+                    response_body="".join(lines),
+                ),
+            ),
         )
-        outcome = RunOutcomeResponseRecord.from_run_outcome_request_record(
-            request_record,
-            attempt=validated,
-            response_code=HTTPStatus.OK,
-            response_headers={SOURCE_KEY_HEADER: draft.request_headers[SOURCE_KEY_HEADER]},
+        occurred_at = commit.record_id.time * 1000
+        outcome_headers = {
+            NAME_KEY_HEADER: name_key_header_value(STARTUP_NAMEKEY),
+            SESSION_ID_HEADER: str(session_id),
+            ETAG_HEADER: f'"{validated.record_id}"',
+        }
+        request_record = RunOutcomeRequestRecord(
+            schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
+            method=HTTP_POST_METHOD,
+            scheme=SYNTHETIC_COMMIT_SCHEME,
+            host=SYNTHETIC_COMMIT_HOST,
+            port=None,
+            path=RunLifecycle.COMPLETED.to_run_outcome_path(),
+            query="",
+            request_headers=outcome_headers,
+            request_body=None,
+            response_code=None,
+            response_headers=None,
+            response_body=None,
+            received_at_unix_usec=occurred_at + 6,
+            ready_to_respond_at_unix_usec=None,
+            duration_usec=0,
+        )
+        outcome_id = uuid7()
+        codex_session = draft.commit_request_body.codex_session_record
+        outcome_body = _RunOutcomeResponseBodyJson(
             pull_record_id=commit.commit_request_body.pull_response_record.record_id,
             push_record_id=push.record_id,
             commit_request_record_id=commit.record_id,
             validation_record_id=validated.record_id,
-            codex_session_record=draft.commit_request_body.codex_session_record,
+            run_outcome_record_id=outcome_id,
+            codex_session_record=_CodexSessionRecordJson(
+                codex_session_id=codex_session.session_id,
+                codex_rollout_record=codex_session.codex_rollout_record,
+                appendwatch_report_record=codex_session.appendwatch_report_record,
+            ),
+        ).model_dump_json()
+        reply = api._response(
+            HTTPStatus.OK,
+            outcome_body,
+            content_type=ContentType.JSON,
+            headers={SOURCE_KEY_HEADER: draft.request_headers[SOURCE_KEY_HEADER]},
+        )
+        outcome = RunOutcomeResponseRecord(
+            schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
+            record_id=outcome_id,
+            method=HTTP_POST_METHOD,
+            scheme=SYNTHETIC_COMMIT_SCHEME,
+            host=SYNTHETIC_COMMIT_HOST,
+            port=None,
+            path=RunLifecycle.COMPLETED.to_run_outcome_path(),
+            query="",
+            request_headers=outcome_headers,
+            request_body=None,
+            response_code=reply.status_code,
+            response_headers=dict(reply.headers),
+            response_body=reply.content.decode(TEXT_ENCODING),
+            received_at_unix_usec=None,
             ready_to_respond_at_unix_usec=occurred_at + 7,
+            duration_usec=1,
+            run_outcome_request_record=request_record,
+            attempt=validated,
         )
         store._append_authoritative_record(outcome.http_request_log_record)
         fresh = DashboardQuerySnapshot(
@@ -954,7 +1050,7 @@ def completed_query_fixture_process() -> None:
     # The real FilePersistentDict writes synchronously outside a running event loop.
     assert app.storage.general
     (config_path.parent / "lima.json").write_text(json.dumps({
-        "param": {"FASTAPI_DETOUR_APPENDWATCH_REPORT": "/fixture/appendwatch.txt"},
+        "param": {APPENDWATCH_REPORT_ENV_NAME: "/fixture/appendwatch.txt"},
         "mounts": [{"location": str(config_path.parent), "mountPoint": "/fixture"}],
     }))
     setattr(ai_augment_context, "LIMA_CONFIG_PATH", config_path.parent / "lima.json")
@@ -1171,6 +1267,7 @@ def isolated_lima_configuration(
 ) -> None:
     if request.node.get_closest_marker(OPERATOR_MARKER) is not None:
         return
+    from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import TEXT_ENCODING
     from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models import (
         ai_augment_context,
     )

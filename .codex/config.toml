@@ -17,7 +17,7 @@
 # ======================================
 
 # OpenAI Codex (v 0.160.0)
-model = "gpt-6.1-sol"
+model = "gpt-6-sol"
 model_reasoning_effort = "xhigh"
 model_reasoning_summary = "detailed"
 personality = "none"

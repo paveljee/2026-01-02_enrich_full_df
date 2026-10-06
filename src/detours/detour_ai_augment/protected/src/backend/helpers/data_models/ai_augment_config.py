@@ -6,7 +6,7 @@ from typing import Self
 
 from pydantic import Field, ValidationInfo, model_validator
 
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_cas import (  # noqa: E501
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.cas import (  # noqa: E501
     AiAugmentCAS,
 )
 from src.helpers.architecture import FrozenStrictModel
