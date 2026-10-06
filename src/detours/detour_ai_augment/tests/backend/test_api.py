@@ -5171,6 +5171,39 @@ def test_configured_namekey_rejects_malformed_or_incomplete_json(
         ])
 
 
+@pytest.mark.parametrize(
+    ("raw_namekey", "expected_message"),
+    (
+        (
+            NameKey(first_name="Absent", last_name="Startup").to_json_key(),
+            Locale.CONFIGURED_NAMEKEY_NOT_FOUND,
+        ),
+        (
+            EXCLUDED_NAMEKEY,
+            Locale.CONFIGURED_NAMEKEY_INELIGIBLE_TEMPLATE.format(
+                category=AiAugmentIneligibilityCategory.EXCLUDED_DUPLICATE_NAMEKEY.value,
+            ),
+        ),
+    ),
+)
+def test_invalid_namekey_is_rejected_before_startup_confirmation(
+    monkeypatch: pytest.MonkeyPatch,
+    raw_namekey: str,
+    expected_message: str,
+    startup_files: StartupFiles,
+) -> None:
+    monkeypatch.setenv(NAMEKEY_ENV_NAME, raw_namekey)
+    monkeypatch.setattr(
+        Console, "input", lambda *_args, **_kwargs: pytest.fail("prompted for invalid NameKey"),
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        server.main(["--config", str(startup_files.config), "--new"])
+
+    assert str(exc_info.value) == expected_message
+    assert api.BACKEND_PROCESS_LOCK_DESCRIPTOR is None
+
+
 def ai_augment_singular_outerdict(
     first_name: str,
     last_name: str,
@@ -6631,6 +6664,7 @@ def test_startup_modes_require_confirmation_or_yes(
 @pytest.mark.parametrize("eof", (False, True))
 def test_declined_startup_never_acquires_process_lock(
     mode: str, eof: bool, monkeypatch: pytest.MonkeyPatch,
+    startup_files: StartupFiles,
 ) -> None:
     def decline(*_args: object, **_kwargs: object) -> str:
         if eof:
@@ -6638,9 +6672,13 @@ def test_declined_startup_never_acquires_process_lock(
         return "n"
 
     monkeypatch.setattr(Console, "input", decline)
+    monkeypatch.setenv(
+        NAMEKEY_ENV_NAME,
+        NameKey(first_name="Case 000", last_name="Startup").to_json_key(),
+    )
     assert not api.BACKEND_PROCESS_LOCK_PATH.exists()
     with pytest.raises(ValueError, match="confirmation required"):
-        server.main(["--config", "unused.json", mode])
+        server.main(["--config", str(startup_files.config), mode])
     assert api.BACKEND_PROCESS_LOCK_DESCRIPTOR is None
     assert not api.BACKEND_PROCESS_LOCK_PATH.exists()
 

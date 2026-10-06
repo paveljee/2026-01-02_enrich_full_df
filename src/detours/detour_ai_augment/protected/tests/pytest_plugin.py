@@ -595,13 +595,21 @@ def backend_startup_process() -> None:
     from src.helpers.data_models import NameKey
 
     args = server.parse_args(sys.argv[1:])
-    confirmed = False if args.ipc_only else server.confirm_startup(args)
-    api._acquire_backend_process_lock()
-    try:
+    if not args.ipc_only:
+        startup_namekey = NameKey.from_json_key(os.environ[NAMEKEY_ENV_NAME])
         runtime = server.configure_runtime(
             args.config,
             verify_hash_on_init=not args.danger_no_verify_hash,
         )
+        runtime.blueprint_for_namekey(startup_namekey)
+        confirmed = server.confirm_startup(args)
+    api._acquire_backend_process_lock()
+    try:
+        if args.ipc_only:
+            runtime = server.configure_runtime(
+                args.config,
+                verify_hash_on_init=not args.danger_no_verify_hash,
+            )
         from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models import (
             store as store_models,
         )
@@ -611,9 +619,7 @@ def backend_startup_process() -> None:
             if args.ipc_only
             else server.backend_store_lifecycle(
                 runtime,
-                init_request_record=init_request_record(
-                    NameKey.from_json_key(os.environ[NAMEKEY_ENV_NAME]),
-                ),
+                init_request_record=init_request_record(startup_namekey),
                 new=args.new,
                 confirmed=confirmed,
                 yes=args.yes,

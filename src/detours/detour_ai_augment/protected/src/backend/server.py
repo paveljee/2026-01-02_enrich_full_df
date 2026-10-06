@@ -1013,22 +1013,9 @@ def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     logger.info(Locale.BACKEND_STARTING_LOG,
                 args.config, args.ipc_only, args.new, args.resume)
-    confirmed = False if args.ipc_only else confirm_startup(args)
     verify_hash_on_init = not args.danger_no_verify_hash
-    api._acquire_backend_process_lock()
-    try:
-        context = configure_runtime(
-            args.config,
-            verify_hash_on_init=verify_hash_on_init,
-        )
-        if args.ipc_only:
-            logger.info(Locale.BACKEND_STORE_OPEN_READ_ONLY_LOG)
-            with initialize_backend_store(context, ipc_only=True) as store:
-                logger.info(Locale.BACKEND_STORE_READ_ONLY_READY_LOG)
-                serve_dashboard_query_only(store)
-            logger.info(Locale.BACKEND_STORE_READ_ONLY_CLOSED_LOG)
-            print(BACKEND_STORE_CLOSED_CLEANLY, flush=True)
-        else:
+    if not args.ipc_only:
+        try:
             raw_namekey = os.environ.get(NAMEKEY_ENV_NAME)
             if not VALID_NONBLANK(raw_namekey):
                 raise ValueError(
@@ -1041,7 +1028,29 @@ def main(argv: list[str] | None = None) -> None:
                 startup_namekey = NameKey.from_json_key(raw_namekey)
             except (TypeError, ValueError) as exc:
                 raise ValueError(Locale.CONFIGURED_NAMEKEY_MALFORMED) from exc
+            context = configure_runtime(
+                args.config,
+                verify_hash_on_init=verify_hash_on_init,
+            )
             context.blueprint_for_namekey(startup_namekey)
+        except BaseException:
+            logger.exception(Locale.BACKEND_FAILED_LOG)
+            raise
+        confirmed = confirm_startup(args)
+    api._acquire_backend_process_lock()
+    try:
+        if args.ipc_only:
+            context = configure_runtime(
+                args.config,
+                verify_hash_on_init=verify_hash_on_init,
+            )
+            logger.info(Locale.BACKEND_STORE_OPEN_READ_ONLY_LOG)
+            with initialize_backend_store(context, ipc_only=True) as store:
+                logger.info(Locale.BACKEND_STORE_READ_ONLY_READY_LOG)
+                serve_dashboard_query_only(store)
+            logger.info(Locale.BACKEND_STORE_READ_ONLY_CLOSED_LOG)
+            print(BACKEND_STORE_CLOSED_CLEANLY, flush=True)
+        else:
             init_request_record = BackendInitRequestRecord(
                 schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
                 method=HTTP_POST_METHOD,
