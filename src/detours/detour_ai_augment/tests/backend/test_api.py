@@ -3283,6 +3283,13 @@ def test_successful_initial_submission_converts_to_retry_model_with_placeholders
             getattr(converted_field, FIELD_STANDARDIZED_VALUE_FIELD)
             == (post_commit_validation.INITIAL_STANDARDIZED_VALUES[initial_column])
         )
+        standardized_value = converted_field.model_dump(mode="json")[
+            FIELD_STANDARDIZED_VALUE_FIELD
+        ]
+        if isinstance(standardized_value, dict):
+            assert set(standardized_value.values()) == {NOT_AVAILABLE_OR_APPLICABLE_VALUE}
+        else:
+            assert standardized_value == NOT_AVAILABLE_OR_APPLICABLE_VALUE
 
 
 def test_openapi_example_is_a_complete_pydantic_valid_submission(

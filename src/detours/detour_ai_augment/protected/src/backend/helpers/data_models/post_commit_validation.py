@@ -92,7 +92,6 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL,
     MILLISECONDS_PER_SECOND,
     NOT_AVAILABLE_OR_APPLICABLE_VALUE,
-    NOT_REPORTED_VALUE,
     ROLLOUT_FILENAME_PREFIX,
     ROLLOUT_FILENAME_SUFFIX,
     SOURCE_KEY_HEADER,
@@ -278,20 +277,20 @@ STANDARDIZED_VALUE_FIELD = next(
     if field not in FieldSubmission.model_fields
 )
 INITIAL_RESEARCHER_AUTHOR_STANDARDIZED = ResearcherAuthorStandardized(
-    first_name=NOT_REPORTED_VALUE,
-    last_name=NOT_REPORTED_VALUE,
-    orcid=NOT_REPORTED_VALUE,
-    openalex_id=NOT_REPORTED_VALUE,
+    first_name=NOT_AVAILABLE_OR_APPLICABLE_VALUE,
+    last_name=NOT_AVAILABLE_OR_APPLICABLE_VALUE,
+    orcid=NOT_AVAILABLE_OR_APPLICABLE_VALUE,
+    openalex_id=NOT_AVAILABLE_OR_APPLICABLE_VALUE,
 )
 INITIAL_PLACE_OF_RESIDENCE_STANDARDIZED = PlaceOfResidenceStandardized(
-    place=NOT_REPORTED_VALUE,
-    location=NOT_REPORTED_VALUE,
+    place=NOT_AVAILABLE_OR_APPLICABLE_VALUE,
+    location=NOT_AVAILABLE_OR_APPLICABLE_VALUE,
 )
 INITIAL_RACE_ETHNICITY_LANGUAGE_CULTURE_STANDARDIZED = (
     RaceEthnicityLanguageCultureStandardized(
         race=NOT_AVAILABLE_OR_APPLICABLE_VALUE,
         ethnicity=NOT_AVAILABLE_OR_APPLICABLE_VALUE,
-        language=NOT_REPORTED_VALUE,
+        language=NOT_AVAILABLE_OR_APPLICABLE_VALUE,
         culture=NOT_AVAILABLE_OR_APPLICABLE_VALUE,
     )
 )
@@ -301,12 +300,12 @@ INITIAL_STANDARDIZED_VALUES: Mapping[str, StandardizedValue] = {
     KTP_AI_AUGMENT_RACE_ETHNICITY_LANGUAGE_CULTURE_COL: (
         INITIAL_RACE_ETHNICITY_LANGUAGE_CULTURE_STANDARDIZED
     ),
-    KTP_AI_AUGMENT_GENDER_COL: NOT_REPORTED_VALUE,
-    KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL: NOT_REPORTED_VALUE,
-    KTP_AI_AUGMENT_EDUCATION_COL: NOT_REPORTED_VALUE,
-    KTP_AI_AUGMENT_ACADEMIC_POSITIONS_COL: NOT_REPORTED_VALUE,
-    KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL: NOT_REPORTED_VALUE,
-    KTP_AI_AUGMENT_LINKS_COL: NOT_REPORTED_VALUE,
+    KTP_AI_AUGMENT_GENDER_COL: NOT_AVAILABLE_OR_APPLICABLE_VALUE,
+    KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL: NOT_AVAILABLE_OR_APPLICABLE_VALUE,
+    KTP_AI_AUGMENT_EDUCATION_COL: NOT_AVAILABLE_OR_APPLICABLE_VALUE,
+    KTP_AI_AUGMENT_ACADEMIC_POSITIONS_COL: NOT_AVAILABLE_OR_APPLICABLE_VALUE,
+    KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL: NOT_AVAILABLE_OR_APPLICABLE_VALUE,
+    KTP_AI_AUGMENT_LINKS_COL: NOT_AVAILABLE_OR_APPLICABLE_VALUE,
 }
 DRAW_NUMBER_COLUMN = DRAW_LABEL
 FRAGMENT_TYPE_COLUMN = KTP_FRAGMENT_TYPE_COL
@@ -1610,32 +1609,32 @@ def _standardized_initial_submission(
         KTP_AI_AUGMENT_GENDER_COL: GenderSubmission(
             value=submission.gender.value,
             web_search_excerpts=submission.gender.web_search_excerpts,
-            standardized_value=NOT_REPORTED_VALUE,
+            standardized_value=NOT_AVAILABLE_OR_APPLICABLE_VALUE,
         ),
         KTP_AI_AUGMENT_AGE_FIRST_PUBLICATION_COL: AgeFirstPublicationSubmission(
             value=submission.age_first_publication.value,
             web_search_excerpts=submission.age_first_publication.web_search_excerpts,
-            standardized_value=NOT_REPORTED_VALUE,
+            standardized_value=NOT_AVAILABLE_OR_APPLICABLE_VALUE,
         ),
         KTP_AI_AUGMENT_EDUCATION_COL: EducationSubmission(
             value=submission.education.value,
             web_search_excerpts=submission.education.web_search_excerpts,
-            standardized_value=NOT_REPORTED_VALUE,
+            standardized_value=NOT_AVAILABLE_OR_APPLICABLE_VALUE,
         ),
         KTP_AI_AUGMENT_ACADEMIC_POSITIONS_COL: AcademicPositionsSubmission(
             value=submission.academic_positions.value,
             web_search_excerpts=submission.academic_positions.web_search_excerpts,
-            standardized_value=NOT_REPORTED_VALUE,
+            standardized_value=NOT_AVAILABLE_OR_APPLICABLE_VALUE,
         ),
         KTP_AI_AUGMENT_SOCIAL_CAPITAL_COL: SocialCapitalSubmission(
             value=submission.social_capital.value,
             web_search_excerpts=submission.social_capital.web_search_excerpts,
-            standardized_value=NOT_REPORTED_VALUE,
+            standardized_value=NOT_AVAILABLE_OR_APPLICABLE_VALUE,
         ),
         KTP_AI_AUGMENT_LINKS_COL: ResearcherLinksSubmission(
             value=submission.links.value,
             web_search_excerpts=submission.links.web_search_excerpts,
-            standardized_value=NOT_REPORTED_VALUE,
+            standardized_value=NOT_AVAILABLE_OR_APPLICABLE_VALUE,
         ),
         KTP_AI_AUGMENT_COMMENTS_COL: submission.comments,
     })
