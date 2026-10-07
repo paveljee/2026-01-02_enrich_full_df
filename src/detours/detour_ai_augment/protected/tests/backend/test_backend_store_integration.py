@@ -339,7 +339,8 @@ def test_resume_after_committed_row_and_postcommit_failure(
         "byte_offset": len(log_lines[0]),
     }
 
-    # The real manual --resume CLI checks the pinned hash before opening Store.
+    # The real manual --resume CLI checks the pinned hash before acquiring the
+    # lock or opening Store.
     manual_resume = subprocess.run(
         [
             sys.executable, "-m", server.__name__, server.CONFIG_OPTION,
@@ -357,7 +358,7 @@ def test_resume_after_committed_row_and_postcommit_failure(
         config_path=startup_files.config,
     ) in manual_resume.stderr
     assert REPLAY_LOG_KEY in manual_resume.stderr
-    assert (
+    assert not (
         startup_files.process_temp / backend_api.BACKEND_PROCESS_LOCK_PATH.name
     ).is_file()
     assert startup_files.replay.read_bytes() == log_bytes
