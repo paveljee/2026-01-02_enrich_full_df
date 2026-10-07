@@ -16,7 +16,7 @@
 # options below.
 # ======================================
 
-# OpenAI Codex (v 0.160.0)
+# OpenAI Codex (v 0.161.0)
 model = "gpt-6-sol"
 model_reasoning_effort = "xhigh"
 model_reasoning_summary = "detailed"
