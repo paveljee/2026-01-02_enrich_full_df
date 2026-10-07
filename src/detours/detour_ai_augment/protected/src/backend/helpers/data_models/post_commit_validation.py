@@ -102,6 +102,7 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
 from src.detours.detour_ai_augment.protected.src.shared import (
     AppendwatchReportError,
     parse_appendwatch_report,
+    pydantic_diagnostic_json,
     require_nonblank_text,
     source_key_from_header_value,
 )
@@ -1954,6 +1955,7 @@ def _log_post_commit_validation(
             field or Locale.UNKNOWN_FIELD,
             failed_input,
             reason,
+            pydantic_diagnostic_json(error),
         )
     elif isinstance(error, _ValidationPreparationError):
         logger.error(

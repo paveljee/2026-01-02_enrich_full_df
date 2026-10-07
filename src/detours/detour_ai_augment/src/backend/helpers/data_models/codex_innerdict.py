@@ -217,8 +217,6 @@ class CodexInnerDict(FrozenStrictModel):
         )
         if UUID(summary[CODEX_SESSION_ID_JSON_KEY]) != session_id:
             raise ValueError(Locale.INNERDICT_OUTCOME_MISMATCH)
-        if outcome.response_headers is None:
-            raise ValueError(Locale.INNERDICT_OUTCOME_MISMATCH)
         filename, fragment = source_key_from_header_value(
             outcome.response_headers.get(SOURCE_KEY_HEADER)
         )

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from http import HTTPStatus
-from typing import Self
+from typing import Annotated, Literal, Self
 
-from pydantic import Field, model_validator
+from pydantic import Field, NonNegativeInt, model_validator
 
 from src.detours.detour_ai_augment.protected.src.architecture import ControlCentreComponent
 from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
@@ -13,12 +13,10 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
 )
 from src.helpers.architecture import FrozenStrictModel, implements
 from src.helpers.data_models.http_request_log import HttpRequestLogRecord
-from src.helpers.vars import KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
 
 from .....backend.helpers.data_models.ai_augment_http_request_log_record import (
     RequestRecord,
     ResponseRecord,
-    _validate_public_exchange,
 )
 from .....backend.helpers.data_models.ai_augment_singular_outer_dict import (
     AiAugmentSingularOuterDict,
@@ -28,6 +26,16 @@ from .....backend.helpers.data_models.ai_augment_singular_outer_dict import (
 
 @implements[ControlCentreComponent.BackendPort.QueryRequestRecordProperty]()
 class QueryRequestRecord(RequestRecord):
+    method: Annotated[str, Field(pattern=f"^{HTTP_GET_METHOD}$")]
+    path: Annotated[str, Field(pattern=f"^{QUERY_PATH}$")]
+    # Reject explicit URL ports before a query reaches the read-only Store port.
+    port: None = None
+    query: Literal[""] = ""
+    request_body: None = None
+    received_at_unix_usec: int
+    ready_to_respond_at_unix_usec: None = None
+    duration_usec: Literal[0]
+
     @property
     def http_request_log_record(self) -> HttpRequestLogRecord:
         return super().http_request_log_record
@@ -47,24 +55,6 @@ class QueryRequestRecord(RequestRecord):
     def serialize(self) -> dict[str, object]:
         return super().serialize()
 
-    @model_validator(mode="after")
-    def _validate_query(self) -> Self:
-        if (
-            self.schema_version != KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
-            or self.record_id.version != 7
-            or (self.method, self.path) != (HTTP_GET_METHOD, QUERY_PATH)
-            or self.query
-            or self.request_body not in (None, "")
-            or self.response_code is not None
-            or self.response_headers is not None
-            or self.response_body is not None
-            or self.ready_to_respond_at_unix_usec is not None
-            or self.received_at_unix_usec is None
-            or self.duration_usec != 0
-        ):
-            raise ValueError(Locale.QUERY_REQUEST_INVALID)
-        return self
-
 
 class _QueryResponseBodyJson(FrozenStrictModel):
     ai_augment_singular_outerdicts: tuple[_AiAugmentSingularOuterDictJson, ...]
@@ -72,6 +62,14 @@ class _QueryResponseBodyJson(FrozenStrictModel):
 
 @implements[ControlCentreComponent.BackendPort.QueryResponseRecordProperty]()
 class QueryResponseRecord(ResponseRecord):
+    method: Annotated[str, Field(pattern=f"^{HTTP_GET_METHOD}$")]
+    path: Annotated[str, Field(pattern=f"^{QUERY_PATH}$")]
+    # Store-produced replies keep the same portless IPC contour on conversion.
+    port: None = None
+    received_at_unix_usec: None = None
+    ready_to_respond_at_unix_usec: int
+    duration_usec: NonNegativeInt
+
     ai_augment_singular_outerdicts: tuple[AiAugmentSingularOuterDict, ...] = Field(
         exclude=True,
     )
@@ -113,7 +111,6 @@ class QueryResponseRecord(ResponseRecord):
 
     @model_validator(mode="after")
     def _validate_query(self) -> Self:
-        _validate_public_exchange(self, HTTP_GET_METHOD, QUERY_PATH)
         if self.response_code != HTTPStatus.OK or self.response_body is None:
             raise ValueError(Locale.QUERY_RESPONSE_BODY_MISMATCH)
         body = _QueryResponseBodyJson.model_validate_json(self.response_body)

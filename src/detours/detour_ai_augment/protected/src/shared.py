@@ -1,6 +1,8 @@
 import re
 from pathlib import Path, PurePosixPath
 
+from pydantic import ValidationError
+
 from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     APPENDWATCH_BLANK_LINE,
@@ -39,6 +41,22 @@ from src.helpers.vars import (
     KTP_FRAGMENT_COL,
     KTP_LAST_NAME_COL,
 )
+
+
+def pydantic_diagnostic_json(error: ValidationError) -> str:
+    """Serialize a Pydantic failure without shortening rejected input.
+
+    Typed record fields can reject input before older Locale contour checks run.
+    Pydantic's normal exception text abbreviates long rejected values. Call this
+    with the original ValidationError at a log or replay boundary to keep every
+    error, its full input, and validator context in one consistent format. It
+    does not validate input or change client-facing errors.
+    """
+    return error.json(
+        include_url=False,
+        include_context=True,
+        include_input=True,
+    )
 
 
 def structured_field_string(value: str) -> str:

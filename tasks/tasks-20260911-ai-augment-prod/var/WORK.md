@@ -279,3 +279,173 @@ Its transient request UUID must not be compared with the response UUID. Compare 
 - Operator logs reviewed (`logs/from_operator/pre-commit.log`, `pre-commit-extra.log`, 2026-10-06; counts below are **per task**, not additive unique-test counts): guest `pre-commit` exited 0: Ruff and both mypy checks passed; default suite 174 passed/5 skipped/6 xfailed/1 xpassed; step-4 ordinary 4 passed/1 skipped and slow real-config 1 skipped; mode-3 6 passed; mode-0 4 passed; detour 776 passed/1 skipped/3 deselected; detour real-API 1 passed. Extra guest checks exited 0: default real-API 3 passed/1 xfailed; privileged appendwatch 3 passed. Mac Chrome UI: 8 passed/1 failed; `test_completed_grid_row_uses_real_query_ipc` was stopped **before launching dashboard/query assertions** by `_assert_ports_available()` because local port 8611 was occupied. Preserve this guard and assertions; operator should identify/free the port, then rerun that one test. Final operator AIVM E2E never collected: `test-detour-ai-augment-operator` stopped at `Redeploy AIVM before each operator test? [y/N]` with exit 2. Run it interactively with a deliberate redeploy/reuse choice after the port issue. No code/test assertion fix justified by these logs; no test was weakened.
 - Operator follow-up: user reports the occupying process was killed and the entire pre-commit suite and final operator E2E now pass. The randomized workflow candidate log listed five ground-truth records but omitted the extra draw-146 Sheikh candidate. Added only an `_operator_log` line in `target_namekey()` immediately before `Random().choice(...)`: `added {namekey.last_name} to workflow candidates: {namekey.model_dump_json(by_alias=True)}`. `model_dump_json(by_alias=True)` is compact; `to_json_key()` would insert spaces. Candidate selection and assertions are unchanged. Verified exact compact Sheikh output, focused Ruff, focused mypy (1 source file), and `git diff --check`; all passed. The E2E run already in progress when this source edit was made did not include that logging change.
 - Read-only operator artifact audit: new `tmp/test.pf957tzt` (David N Spergel) versus pre-timestamp-fix `tmp/test.m3b9l8lg` (A. Sheikh). Both completed with 7 UI lifecycle events, one final output row with all 30 fields non-null, correctly linked outcome IDs, valid per-line replay hashes, SHA256-addressed CAS files, and accepted final evidence. New replay: 8 records, one push/commit/validation accepted first try; old replay: 13 records, including an existing Beatriz Roldan Cuenya `/init` prefix (the old config hash equals precisely the first JSONL line), then one rejected and one accepted Sheikh validation. New config hash equals empty replay prefix. New JSONL Table 1 check: all 8 `received_at=None`; all 8 `ready` present; init/commit/validate duration 0; pull durations 2256, 1990, 885 µs; push 956 µs; completed 608648 µs. Event times increase with no reconstructed interval overlap; final pull follows Codex exit by 2.643 ms, `/completed` starts 82.167 ms later, and UI completion is 65.015 ms after its response-ready time. Old commit/validate timing was null and old `/completed` had both receipt and ready timestamps; new representation fixes both. No provider HTTP records in either replay, so `response.elapsed` timing is not assessed here. Pull/push `ready` is captured at reply selection, before typed-record construction/persistence, as specified; UUIDv7 creation can follow it by a few ms (7 ms max observed), so recorded durations are not end-to-end network latencies. The session-discovered UI event is backdated to `result.session_timestamp` and may appear after a later remote-PID event in storage; present in both runs, not a regression. No source/test changes made for the audit.
+- In-progress field-type surgery (2026-10-06): narrowed shared request/response and concrete timing fields in architecture and existing Pydantic record subclasses; removed `_validate_public_exchange`. No tests modified. Attempted removal of Store `_validated_http_record` caused a real early-replay-validation regression: malformed public timing passed `_authoritative_log_records`, and malformed commit/validation envelopes hit lifecycle-cursor errors first. Restored **only** the Store file; four focused replay/contour tests pass again. Prior Store/interceptor run with the attempted removal was 83 passed/10 failed. After restoration, six parametrized validation-envelope cases and one query case still fail only because old custom-message regexes no longer match Pydantic's field/type errors; each rejection still occurs. Strict mypy passes production (48 files) but full detour check reports one test fixture static type error (`RequestRecord` passed to narrowed query port). Ruff and whitespace checks pass. Do not claim complete or change assertions without an exact proposal to the operator. Preserve Table 1 above. Next: settle minimal typed envelope boundary before removing Store checker; no new helper/wrapper has been added.
+### 2. Keep the invalid-query test exercising both boundaries
+
+In [test_backend_store.py](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/tests/backend/test_backend_store.py:452), for the `None` case only:
+
+```python
+with pytest.raises(ValidationError) as exc_info:
+    QueryRequestRecord.model_validate(request_fields)
+assert [(e["loc"], e["type"]) for e in exc_info.value.errors()] == [
+    (("received_at_unix_usec",), "int_type")
+]
+request = QueryRequestRecord.model_construct(**request_fields)
+```
+
+After the existing `response is None and error is not None` assertion, check Store’s wrapped cause:
+
+```python
+assert isinstance(error.__cause__, ValidationError)
+assert [(e["loc"], e["type"]) for e in error.__cause__.errors()] == [
+    (("received_at_unix_usec",), "int_type")
+]
+```
+
+`model_construct` is **only** the deliberately invalid test input; Store’s Pydantic round-trip must reject it. Keep the DB/log no-write assertions and valid cases unchanged.
+
+### 3. Make the six validation-envelope assertions exact
+
+In [test_http_interceptor.py](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/tests/backend/test_http_interceptor.py:222), retain the existing message check for the other seven cases. For the six fields now rejected by their Pydantic types, assert the precise error:
+
+```python
+typed_errors = {
+    "response_code": "none_required",
+    "response_headers": "none_required",
+    "response_body": "none_required",
+    "received_at_unix_usec": "none_required",
+    "ready_to_respond_at_unix_usec": "int_type",
+    "duration_usec": "literal_error",
+}
+with pytest.raises(ValueError) as exc_info:
+    BackendValidationRequestRecord.from_http_request_log_record(
+        invalid,
+        validation_request_body=validation_http_record.validation_request_body,
+    )
+if field in typed_errors:
+    assert isinstance(exc_info.value, ValidationError)
+    assert [(e["loc"], e["type"]) for e in exc_info.value.errors()] == [
+        ((field,), typed_errors[field])
+    ]
+else:
+    assert re.search(
+        r"validation .* (invalid contour|missing)", str(exc_info.value)
+    )
+```
+
+**Not in this patch:** deleting Store’s `_validated_http_record`. Doing so already proved to accept malformed timing at the log-line boundary. I cannot justify that deletion as a surgical type-only change with the current classes: commit, validation, and some responses need links unavailable when a raw line is first parsed. That boundary needs a separately reviewed design; I will not quietly weaken it.
+
+I’m waiting because you asked to review the specific code before implementation and previously required each failing-test assertion change to come back to you.
+
+## User
+
+re 1, why "re" validate? why multiple validations needed?
+
+## Reasoning
+
+**Redesigning test fixture**
+
+## Assistant
+
+It doesn’t need multiple validations. The existing Store call already validates an incoming `RequestRecord`:
+
+```python
+QueryRequestRecord.model_validate(request_record, from_attributes=True)
+```
+
+I proposed a second validation only because my proposed test used `QueryRequestRecord.model_construct(...)`. Pydantic can accept an instance of that same class without rechecking its fields. Changing production Store code to accommodate that artificial fixture was unjustified.
+
+I withdraw item 1 **and** the dependent `model_construct` test proposal. Store should remain unchanged; I’ll propose a test-only way to exercise its rejection boundary.
+
+## User
+
+propose it
+
+## Reasoning
+
+**Assessing test type workaround**
+
+## Reasoning
+
+**Moving request construction**
+
+## Reasoning
+
+**Checking Pydantic validation**
+
+**Reviewing current test**
+
+## Reasoning
+
+**Evaluating query-call typing**
+
+**Splitting query-call branches**
+
+## Reasoning
+
+**Refining request test typing**
+
+## Assistant
+
+Use the original invalid `RequestRecord` fixture and leave Store unchanged. The test deliberately passes an object that violates the query port’s static type, so I propose **one explicit test-only type-check suppression**, confined to that invalid branch:
+
+```python
+from pydantic import ValidationError
+
+# In the received_at_unix_usec is None branch:
+with pytest.raises(ValidationError) as exc_info:
+    QueryRequestRecord.model_validate(request_fields)
+assert [(e["loc"], e["type"]) for e in exc_info.value.errors()] == [
+    (("received_at_unix_usec",), "int_type")
+]
+request = RequestRecord.model_validate(request_fields)
+
+# At the existing Store call:
+if isinstance(request, QueryRequestRecord):
+    promise = store.query_response_record(request)
+else:
+    assert received_at_unix_usec is None
+    # Intentionally violate the typed port to test Store's runtime boundary.
+    promise = store.query_response_record(request)  # type: ignore[arg-type]
+```
+
+For the existing Store-error assertion, require the same exact Pydantic error on the wrapped cause:
+
+```python
+assert isinstance(error.__cause__, ValidationError)
+assert [(e["loc"], e["type"]) for e in error.__cause__.errors()] == [
+    (("received_at_unix_usec",), "int_type")
+]
+```
+
+This preserves **both** rejection checks and every DB/log no-write assertion. No `cast`, fabricated Pydantic instance, or production change. The single `type: ignore` is necessary because testing rejection at a typed port requires intentionally violating that port’s static contract.
+
+## User
+
+i approve three test only changes (this one and 2-3) above in *exact shape you proposed here*,
+
+## 2026-10-07 approved test-only execution
+
+- Copied the exported session from line 123761 through EOF above, byte-for-byte (verified by diff of the 143-line suffix). The earlier `model_construct`/Store round-trip proposal inside that transcript was explicitly withdrawn; no Store production change was made.
+- Applied only the approved query and validation-envelope test assertions. The intentionally invalid query uses the original `RequestRecord` with one branch-local `# type: ignore[arg-type]`; both Pydantic rejection boundaries assert exact `loc`/`type`. The six newly field-typed validation cases assert exact Pydantic `loc`/`type`; the other seven retain their prior message check. Removed one now-unused test import; no production files were changed in this step.
+- Focused pytest: 16 passed (four existing Pydantic serializer warnings from intentionally invalid fixture fields). Ruff passes for both modified test files; strict detour mypy passes 65 files. Store `_validated_http_record` remains pending separate architectural review; do not delete or change its tests in this step.
+
+## 2026-10-07 focused Pydantic logging preview
+
+- Per operator review request, changed only the existing post-commit Pydantic warning call to pass `ValidationError.json(include_url=False, include_context=False, include_input=True)` and extended that warning's existing backend Locale format by one `%s`. No logging hook, helper, Store change, or other log call was added. Await operator review before further diagnostics edits.
+- Focused `test_pydantic_failure_reports_exact_rejected_input`: 1 passed. Ruff passes for the two production files; strict detour mypy passes 65 source files; whitespace check passes. Git was used read-only; no staging/unstaging by agent.
+- Approved follow-up: put only the shared Pydantic diagnostic JSON options in `protected/src/shared.py` as `pydantic_diagnostic_json(error: ValidationError)`, with a plain-language docstring. The post-commit warning calls it, retaining validator context (`include_context=True`). Ruff, strict mypy (65 source files), focused pytest, and a 10,000-character input/Locale-context serialization probe passed.
+- Latest review slice: the Backend pull/push and Flask run-outcome fatal boundaries now log the shared full Pydantic diagnostic JSON only when the caught exception is directly a `ValidationError`. Their existing exception logs, exit behavior, and route responses are unchanged. One new backend Locale format string labels the extra line. No Store, Dashboard, serializer, or other diagnostic site changed in this slice. Focused API pytest: 75 passed; Ruff and strict detour mypy (65 source files) passed. Await operator review before further expansion.
+
+## 2026-10-07 whole-unit validation audit (in progress)
+
+- Using operator-edited `.codex/skills/paveljee-code-review/SKILL.md`: review whole unit/model/inheritance before changing a suspected duplicate. `BackendCommitRequestRecord` and `BackendValidationRequestRecord` now type their complete synthetic HTTP contours (method/scheme/host/port/path/query/exact SourceKey+NameKey header keys); each retains its cross-field serialized-body/link comparison in its Pydantic model validator. Generic Store replay-line checks and raw-input checks remain untouched. No Git staging/unstaging by agent.
+- Commit focused tests: 2 passed; a direct invalid-contour probe confirmed every removed predicate is rejected by a typed field. Operator approved exact six-case validation-envelope assertion migration: method/path/host `string_pattern_mismatch`, port `none_required`, query `literal_error`, request_headers `too_short`. All 13 cases now pass; no assertion was removed. Ruff and strict detour mypy (65 files) pass.
+- Pull/Push request models: reviewed entire units/inheritance/route uses. Their request-only validators checked only method/path and already-typed fields; method/path are now typed, validators removed, response validators retained. Three focused API tests, invalid-route probe, Ruff, and mypy pass.
+- Query request: operator approved method/path/query/body annotations and removed its covered validator. The route now rejects nonempty query/body before constructing `QueryRequestRecord`, passing canonical empty values proven identical to accepted request data. The existing ValueError handler retains exact `Locale.QUERY_REQUEST_INVALID` 400 text; the existing four-case IPC test asserts it. No generic `except ValidationError`, helper, cast, or assertion was added. RunOutcome malformed query/body remain representable for durable 400 responses. Generic Store replay-line validation is untouched.
+- Init request: reviewed whole model/inheritance; typed its exact single NameKey header key and removed only the manual set equality, retaining NameKey value parsing in its validator. Focused replay test passed, direct missing/wrong/extra-header probe rejected all cases, Ruff/mypy passed.
+- IPC port policy (approved): Query and RunOutcome request/response Pydantic records and their four architecture properties require `port: None`; Pull/Push remain unchanged. Direct Query/RunOutcome routes and the outcome fixture bind `port = target.port`, reject a non-None port via `Locale.IPC_PORT_INVALID`, and pass the narrowed local to the constructors. Comments at each check/reuse explain why this duplicates the Pydantic restriction for mypy. No `type: ignore` or cast. A direct probe found `none_required` for all four models.
+- Architecture audit: reviewed all 17 `*RecordProperty` protocols against their implementing record classes. Per operator approval, backfilled Commit/Validation property `port -> None` and `query -> Literal[""]`, and Query-request property `query -> Literal[""]` and `request_body -> Literal[""] | None`. Existing Query/RunOutcome port properties have brief downstream-purpose comments. Regex-backed method/path and cross-record checks remain in concrete Pydantic models; `@implements` cannot enforce regex or runtime invariants from plain `str` protocol properties. No further architecture changes were authorized.
+- Query constructor (approved final shape): `Literal[""]` fields correctly reject raw nonempty strings, so the previous post-construction query/body guard was unreachable on invalid input and direct raw `str` arguments caused two mypy errors. The route now checks `has_query_or_body` **before** construction, raises the existing `Locale.QUERY_REQUEST_INVALID` for the same exact 400 response, and passes `query=""`, `request_body=None` only after those values are proven equivalent to the accepted request. Existing port guard and `except ValueError` are unchanged. No helper, cast, `match`, assertion, or dynamic model construction was added. Focused pytest: 17 passed; Ruff passed; strict mypy: 65 source files, no issues; `git diff --check` passed. Operator has not rerun pre-commit/operator E2E after this slice.
+- Pre-commit-operator handoff check: baseline remains **954 unique tests**, **931 runnable here** (last completed full local pass: 923 passed, 8 skipped), **23 host-dependent** (breakdown above). The wrapper itself requires the operator's macOS/Lima/root/API/AIVM environment. After the final Query/IPC-port slice, focused pytest 17 passed, repo Ruff and default mypy (68 files) passed, strict detour mypy (65 files) passed, and worktree/index whitespace checks passed. A further broad fail-fast detour rerun went past 29% without an assertion failure, including the point where an earlier concurrent run had shown an unidentified `F`; it was intentionally stopped because pytest fixture output was consuming the remaining disk. Thus do **not** report a new full 931-case pass. The duplicate strict-mypy invocation in `pixi run lint` was also stopped under memory pressure; its independent completed run had already passed. Generated temporary pytest directories were removed, restoring ~964 MB free. No production/test code or assertions changed during this handoff check, and Git was read-only.
+- Query no-body type refinement: operator requested `QueryRequestRecord.request_body: None = None`; matching `QueryRequestRecordProperty.request_body -> None` now agrees. No route or test changes. Confirmed Dashboard `_BackendDatabaseClient.send_query_request()` calls `_request(method=GET, target=DASHBOARD_QUERY_PATH)`, and `_request` calls `connection.request(method, target)` without a body argument. The server also constructs the accepted Query request with `request_body=None`. Focused IPC/Store/UI tests: 26 passed, 1 skipped; Ruff passed; strict detour mypy passed 65 source files; whitespace check passed. Operator pre-commit/E2E remains to be rerun after this final two-line change.

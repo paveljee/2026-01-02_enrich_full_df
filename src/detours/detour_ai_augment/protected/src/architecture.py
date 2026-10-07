@@ -53,6 +53,9 @@ class BackendComponent(
         Protocol,
     ):
         @property
+        def schema_version(self) -> Literal["1.1"]: ...
+
+        @property
         def http_request_log_record(self) -> HttpRequestLogRecord: ...
 
         @classmethod
@@ -75,13 +78,29 @@ class BackendComponent(
         AiAugmentHttpRequestLogRecordProperty,
         ComponentProtocol.PropertyProtocol,
         Protocol,
-    ): ...
+    ):
+        @property
+        def response_code(self) -> None: ...
+
+        @property
+        def response_headers(self) -> None: ...
+
+        @property
+        def response_body(self) -> None: ...
 
     class ResponseRecordProperty(
         AiAugmentHttpRequestLogRecordProperty,
         ComponentProtocol.PropertyProtocol,
         Protocol,
-    ): ...
+    ):
+        @property
+        def response_code(self) -> int: ...
+
+        @property
+        def response_headers(self) -> dict[str, str]: ...
+
+        @property
+        def response_body(self) -> str: ...
 
     class StoreExceptionProperty(ComponentProtocol.PropertyProtocol, Protocol):
         """Backend Store uses this to communicate exceptions asynchronously."""
@@ -143,9 +162,44 @@ class BackendComponent(
         @property
         def namekey(self) -> NameKey: ...
 
-    class PullRequestRecordProperty(RequestRecordProperty, Protocol): ...
+        @property
+        def request_body(self) -> None: ...
+
+        @property
+        def port(self) -> None: ...
+
+        @property
+        def query(self) -> Literal[""]: ...
+
+        @property
+        def received_at_unix_usec(self) -> None: ...
+
+        @property
+        def ready_to_respond_at_unix_usec(self) -> int: ...
+
+        @property
+        def duration_usec(self) -> Literal[0]: ...
+
+    class PullRequestRecordProperty(RequestRecordProperty, Protocol):
+        @property
+        def received_at_unix_usec(self) -> int: ...
+
+        @property
+        def ready_to_respond_at_unix_usec(self) -> None: ...
+
+        @property
+        def duration_usec(self) -> Literal[0]: ...
 
     class PullResponseRecordProperty(ResponseRecordProperty, Protocol):
+        @property
+        def received_at_unix_usec(self) -> None: ...
+
+        @property
+        def ready_to_respond_at_unix_usec(self) -> int: ...
+
+        @property
+        def duration_usec(self) -> int: ...
+
         @property
         def validation_request_record(
             self,
@@ -165,9 +219,26 @@ class BackendComponent(
             
             """
 
-    class PushRequestRecordProperty(RequestRecordProperty, Protocol): ...
+    class PushRequestRecordProperty(RequestRecordProperty, Protocol):
+        @property
+        def received_at_unix_usec(self) -> int: ...
+
+        @property
+        def ready_to_respond_at_unix_usec(self) -> None: ...
+
+        @property
+        def duration_usec(self) -> Literal[0]: ...
 
     class PushResponseRecordProperty(ResponseRecordProperty, Protocol):
+        @property
+        def received_at_unix_usec(self) -> None: ...
+
+        @property
+        def ready_to_respond_at_unix_usec(self) -> int: ...
+
+        @property
+        def duration_usec(self) -> int: ...
+
         @property
         def pull_response_record(
             self,
@@ -177,6 +248,24 @@ class BackendComponent(
             request was received from the HTTP client."""
 
     class CommitRequestRecordProperty(RequestRecordProperty, Protocol):
+        @property
+        def port(self) -> None: ...
+
+        @property
+        def query(self) -> Literal[""]: ...
+
+        @property
+        def request_body(self) -> str: ...
+
+        @property
+        def received_at_unix_usec(self) -> None: ...
+
+        @property
+        def ready_to_respond_at_unix_usec(self) -> int: ...
+
+        @property
+        def duration_usec(self) -> Literal[0]: ...
+
         @property
         def commit_request_body(
             self,
@@ -191,7 +280,25 @@ class BackendComponent(
         exposed to the Agent Runtime."""
         
         @property
+        def port(self) -> None: ...
+
+        @property
+        def query(self) -> Literal[""]: ...
+
+        @property
         def validation_request_body(self) -> BackendComponent.ValidationRequestBodyProperty: ...
+
+        @property
+        def request_body(self) -> str: ...
+
+        @property
+        def received_at_unix_usec(self) -> None: ...
+
+        @property
+        def ready_to_respond_at_unix_usec(self) -> int: ...
+
+        @property
+        def duration_usec(self) -> Literal[0]: ...
     
     # =============================================
     # Secondary representations for detour handoff
@@ -716,6 +823,19 @@ class ControlCentreComponent(
             ComponentProtocol.PropertyProtocol,
             Protocol,
         ):
+            # Reject an explicit IPC URL port; downstream outcome code sees None.
+            @property
+            def port(self) -> None: ...
+
+            @property
+            def received_at_unix_usec(self) -> int: ...
+
+            @property
+            def ready_to_respond_at_unix_usec(self) -> None: ...
+
+            @property
+            def duration_usec(self) -> Literal[0]: ...
+
             @property
             def namekey(self) -> NameKey | None: ...
 
@@ -732,6 +852,19 @@ class ControlCentreComponent(
             BackendComponent.ResponseRecordProperty,
             Protocol,
         ):
+            # A persisted IPC outcome still has no transport port on replay.
+            @property
+            def port(self) -> None: ...
+
+            @property
+            def received_at_unix_usec(self) -> None: ...
+
+            @property
+            def ready_to_respond_at_unix_usec(self) -> int: ...
+
+            @property
+            def duration_usec(self) -> int: ...
+
             @property
             def run_outcome_request_record(
                 self,
@@ -747,11 +880,42 @@ class ControlCentreComponent(
         ):
             """Request all `AiAugmentSingularOuterDict`s."""
 
+            # Reject an explicit IPC URL port before downstream Store reads.
+            @property
+            def port(self) -> None: ...
+
+            @property
+            def query(self) -> Literal[""]: ...
+
+            @property
+            def request_body(self) -> None: ...
+
+            @property
+            def received_at_unix_usec(self) -> int: ...
+
+            @property
+            def ready_to_respond_at_unix_usec(self) -> None: ...
+
+            @property
+            def duration_usec(self) -> Literal[0]: ...
+
         class QueryResponseRecordProperty(
             BackendComponent.ResponseRecordProperty,
             ComponentProtocol.PropertyProtocol,
             Protocol,
         ):
+            # The ephemeral query reply inherits the portless IPC contour.
+            @property
+            def port(self) -> None: ...
+
+            @property
+            def received_at_unix_usec(self) -> None: ...
+
+            @property
+            def ready_to_respond_at_unix_usec(self) -> int: ...
+
+            @property
+            def duration_usec(self) -> int: ...
 
             @property
             def ai_augment_singular_outerdicts(

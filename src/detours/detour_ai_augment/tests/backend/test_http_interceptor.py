@@ -4,6 +4,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import re
 import threading
 import time
 from http import HTTPStatus
@@ -17,6 +18,7 @@ import httpx
 import pytest
 import requests
 from fastapi import FastAPI
+from pydantic import ValidationError
 from starlette.types import Message, Scope
 
 from src.detours.detour_ai_augment.protected.src.backend import server
@@ -224,10 +226,33 @@ def test_validation_record_rejects_invalid_envelope(
     validation_http_record: BackendValidationRequestRecord, field: str, value: Any,
 ) -> None:
     invalid = validation_http_record.model_copy(update={field: value})
-    with pytest.raises(ValueError, match="validation .* (invalid contour|missing)"):
+    typed_errors = {
+        "method": "string_pattern_mismatch",
+        "path": "string_pattern_mismatch",
+        "host": "string_pattern_mismatch",
+        "port": "none_required",
+        "query": "literal_error",
+        "request_headers": "too_short",
+        "response_code": "none_required",
+        "response_headers": "none_required",
+        "response_body": "none_required",
+        "received_at_unix_usec": "none_required",
+        "ready_to_respond_at_unix_usec": "int_type",
+        "duration_usec": "literal_error",
+    }
+    with pytest.raises(ValueError) as exc_info:
         BackendValidationRequestRecord.from_http_request_log_record(
             invalid,
             validation_request_body=validation_http_record.validation_request_body,
+        )
+    if field in typed_errors:
+        assert isinstance(exc_info.value, ValidationError)
+        assert [(e["loc"], e["type"]) for e in exc_info.value.errors()] == [
+            ((field,), typed_errors[field])
+        ]
+    else:
+        assert re.search(
+            r"validation .* (invalid contour|missing)", str(exc_info.value)
         )
 
 
@@ -890,12 +915,17 @@ def outcome_for_commit(
         HTTP_POST_METHOD, f"http://invalid{path.value}", headers=request_headers,
     ).prepare()
     target = urlsplit(prepared.url or "")
+    port = target.port
+    # Pydantic also requires None; mypy needs this explicit narrowing
+    # because urlsplit.port is statically int | None.
+    if port is not None:
+        raise ValueError(Locale.IPC_PORT_INVALID)
     request_record = RunOutcomeRequestRecord(
         schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
         method=prepared.method or "",
         scheme=target.scheme,
         host=target.hostname or "",
-        port=target.port,
+        port=port,
         path=target.path,
         query=target.query,
         request_headers=dict(prepared.headers),
@@ -959,13 +989,15 @@ def outcome_for_commit(
     reply = api._response(code, body, content_type=ContentType.JSON, headers=headers)
     ready = 2
     assert request_record.received_at_unix_usec is not None
+    # Reuse the narrowed port: Pydantic checks this response too, but
+    # mypy cannot infer None from the original urlsplit.port property.
     return RunOutcomeResponseRecord(
         schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
         record_id=response_id,
         method=prepared.method or "",
         scheme=target.scheme,
         host=target.hostname or "",
-        port=target.port,
+        port=port,
         path=target.path,
         query=target.query,
         request_headers=dict(prepared.headers),

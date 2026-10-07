@@ -190,7 +190,9 @@ class Locale:
     IPC_RUNNING_TEMPLATE: Final = 'Dashboard IPC running on unix://{path}'
     PULL_PROCESSING_FATAL_LOG: Final = 'Backend pull processing failed fatally'
     PUSH_PROCESSING_FATAL_LOG: Final = 'Backend push processing failed fatally'
+    PYDANTIC_VALIDATION_DETAILS_LOG: Final = 'Pydantic validation details: %s'
     IPC_OUTCOME_HANDLER_UNAVAILABLE: Final = 'run-outcome IPC handler is unavailable'
+    IPC_PORT_INVALID: Final = 'IPC request URL must omit a port'
     IPC_QUERY_FATAL_LOG: Final = 'dashboard query failed fatally'
     IPC_OUTCOME_FATAL_LOG: Final = 'dashboard run-outcome request failed fatally'
     IPC_QUERY_STOPPED_UNEXPECTEDLY: Final = 'Backend query server stopped unexpectedly'
@@ -865,7 +867,9 @@ class Locale:
     EVIDENCE_ITEM_ASSESSMENT_LOG: Final = (
         "commit_record_id=%s evidence field=%s index=%s outcome=%s excerpt=%r url=%r candidates=%r"
     )
-    PUSH_PYDANTIC_FAILED_LOG: Final = "push_record_id=%s failed stage=%s field=%s value=%r: %s"
+    PUSH_PYDANTIC_FAILED_LOG: Final = (
+        "push_record_id=%s failed stage=%s field=%s value=%r: %s; pydantic=%s"
+    )
     PUSH_UNEXPECTED_FAILED_LOG: Final = "push_record_id=%s failed stage=%s: %s"
     CODEX_ROLLOUT_SUMMARY_BLANK: Final = "Codex rollout summary values must be nonblank"
     APPENDWATCH_BASE64_INVALID: Final = "appendwatch report is not valid base64"

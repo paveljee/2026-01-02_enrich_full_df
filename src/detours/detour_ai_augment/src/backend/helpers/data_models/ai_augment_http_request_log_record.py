@@ -1,30 +1,15 @@
 from __future__ import annotations
 
-from typing import Self
+from typing import Literal, Self
+from uuid import uuid7
+
+from pydantic import UUID7, Field
 
 from src.detours.detour_ai_augment.protected.src.architecture import BackendComponent
-from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
 from src.helpers.architecture import FrozenStrictModel, implements
 from src.helpers.data_models.http_request_log import (
     HttpRequestLogRecord,
 )
-from src.helpers.vars import KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
-
-
-def _validate_public_exchange(record: HttpRequestLogRecord, method: str, path: str) -> None:
-    if (
-        record.schema_version != KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
-        or record.record_id.version != 7
-        or (record.method, record.path) != (method, path)
-        or record.response_code is None
-        or record.response_headers is None
-        or record.response_body is None
-        or record.received_at_unix_usec is not None
-        or record.ready_to_respond_at_unix_usec is None
-        or record.duration_usec is None
-        or record.duration_usec < 0
-    ):
-        raise ValueError(Locale.PUBLIC_HTTP_EXCHANGE_INVALID)
 
 
 @implements[BackendComponent.AiAugmentHttpRequestLogRecordProperty]()
@@ -32,6 +17,9 @@ class AiAugmentHttpRequestLogRecord(
     HttpRequestLogRecord,
     FrozenStrictModel,
 ):
+    schema_version: Literal["1.1"]
+    record_id: UUID7 = Field(default_factory=uuid7)
+
     @property
     def http_request_log_record(self) -> HttpRequestLogRecord:
         return self
@@ -52,6 +40,10 @@ class AiAugmentHttpRequestLogRecord(
 
 @implements[BackendComponent.RequestRecordProperty]()
 class RequestRecord(AiAugmentHttpRequestLogRecord):
+    response_code: None = None
+    response_headers: None = None
+    response_body: None = None
+
     @property
     def http_request_log_record(self) -> HttpRequestLogRecord:
         return super().http_request_log_record
@@ -74,6 +66,10 @@ class RequestRecord(AiAugmentHttpRequestLogRecord):
 
 @implements[BackendComponent.ResponseRecordProperty]()
 class ResponseRecord(AiAugmentHttpRequestLogRecord):
+    response_code: int
+    response_headers: dict[str, str]
+    response_body: str
+
     @property
     def http_request_log_record(self) -> HttpRequestLogRecord:
         return super().http_request_log_record

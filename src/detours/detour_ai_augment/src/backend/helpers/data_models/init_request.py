@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from typing import Self
+from typing import Annotated, Literal, Self
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 
 from src.detours.detour_ai_augment.protected.src.architecture import BackendComponent
 from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
@@ -16,13 +16,27 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
 from src.detours.detour_ai_augment.protected.src.shared import name_key_from_header_value
 from src.helpers.architecture import implements
 from src.helpers.data_models import HttpRequestLogRecord, NameKey
-from src.helpers.vars import KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
 
 from .ai_augment_http_request_log_record import RequestRecord
 
 
 @implements[BackendComponent.InitRequestRecordProperty]()
 class BackendInitRequestRecord(RequestRecord):
+    method: Annotated[str, Field(pattern=f"^{HTTP_POST_METHOD}$")]
+    scheme: Annotated[str, Field(pattern=f"^{SYNTHETIC_COMMIT_SCHEME}$")]
+    host: Annotated[str, Field(pattern=f"^{SYNTHETIC_COMMIT_HOST}$")]
+    port: None = None
+    path: Annotated[str, Field(pattern=f"^{INIT_PATH}$")]
+    query: Literal[""] = ""
+    request_headers: Annotated[
+        dict[Annotated[str, Field(pattern=f"^{NAME_KEY_HEADER}$")], str],
+        Field(min_length=1, max_length=1),
+    ]
+    request_body: None = None
+    received_at_unix_usec: None = None
+    ready_to_respond_at_unix_usec: int
+    duration_usec: Literal[0]
+
     @property
     def namekey(self) -> NameKey:
         return name_key_from_header_value(self.request_headers[NAME_KEY_HEADER])
@@ -48,25 +62,6 @@ class BackendInitRequestRecord(RequestRecord):
 
     @model_validator(mode="after")
     def _validate_contour(self) -> Self:
-        if (
-            self.schema_version != KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
-            or self.record_id.version != 7
-            or (self.method, self.scheme, self.host, self.path) != (
-                HTTP_POST_METHOD, SYNTHETIC_COMMIT_SCHEME,
-                SYNTHETIC_COMMIT_HOST, INIT_PATH,
-            )
-            or self.port is not None
-            or self.query
-            or set(self.request_headers) != {NAME_KEY_HEADER}
-            or self.request_body is not None
-            or self.response_code is not None
-            or self.response_headers is not None
-            or self.response_body is not None
-            or self.received_at_unix_usec is not None
-            or self.ready_to_respond_at_unix_usec is None
-            or self.duration_usec != 0
-        ):
-            raise ValueError(Locale.INIT_REQUEST_RECORD_INVALID)
         try:
             self.namekey
         except ValueError as exc:

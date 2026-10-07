@@ -30,7 +30,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import Response
 from flask import Flask, request
 from flask import Response as FlaskResponse
-from pydantic import BaseModel, ConfigDict, PrivateAttr
+from pydantic import BaseModel, ConfigDict, PrivateAttr, ValidationError
 from requests.structures import CaseInsensitiveDict
 from rich.console import Console
 from starlette.types import ASGIApp, Receive, Scope, Send
@@ -79,6 +79,7 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
 from src.detours.detour_ai_augment.protected.src.shared import (
     name_key_from_header_value,
     name_key_header_value,
+    pydantic_diagnostic_json,
     source_key_header_value,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_context import (
@@ -316,7 +317,6 @@ async def pull(request: Request) -> Response:
             ready_to_respond_at_unix_usec=None,
             duration_usec=0,
         )
-        assert request_record.received_at_unix_usec is not None
         store = request.app.state.store
         try:
             reply = api._pull_response(store)
@@ -363,6 +363,8 @@ async def pull(request: Request) -> Response:
         logger.info(Locale.PULL_PERSISTED_LOG, stored.record_id, stored.response_code)
         return _http_response(stored.to_response())
     except Exception as exc:
+        if isinstance(exc, ValidationError):
+            logger.error(Locale.PYDANTIC_VALIDATION_DETAILS_LOG, pydantic_diagnostic_json(exc))
         logger.exception(Locale.PULL_PROCESSING_FATAL_LOG)
         raise SystemExit(1) from exc
 
@@ -392,7 +394,6 @@ async def push(request: Request) -> Response:
             ready_to_respond_at_unix_usec=None,
             duration_usec=0,
         )
-        assert request_record.received_at_unix_usec is not None
         store = request.app.state.store
         with api.BACKEND_WORKFLOW_STATE_LOCK:
             lifecycle = api.BACKEND_LIFECYCLE
@@ -499,6 +500,8 @@ async def push(request: Request) -> Response:
         logger.info(Locale.PUSH_PERSISTED_LOG, resolved.record_id, resolved.response_code)
         return _http_response(resolved.to_response())
     except Exception as exc:
+        if isinstance(exc, ValidationError):
+            logger.error(Locale.PYDANTIC_VALIDATION_DETAILS_LOG, pydantic_diagnostic_json(exc))
         logger.exception(Locale.PUSH_PROCESSING_FATAL_LOG)
         raise SystemExit(1) from exc
 
@@ -580,20 +583,27 @@ def create_dashboard_query_app(
         received = time.time_ns() // NANOSECONDS_PER_MICROSECOND
         prepared = prepared_request()
         target = urlsplit(prepared.url or "")
+        has_query_or_body = bool(target.query)
         try:
+            raw_body = api._prepared_request_body(prepared)
+            has_query_or_body = bool(target.query or raw_body)
+            if has_query_or_body:
+                raise ValueError(Locale.QUERY_REQUEST_INVALID)
+            port = target.port
+            # Pydantic also requires None; mypy needs this explicit narrowing
+            # because urlsplit.port is statically int | None.
+            if port is not None:
+                raise ValueError(Locale.IPC_PORT_INVALID)
             request_record = QueryRequestRecord(
                 schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
                 method=prepared.method or "",
                 scheme=target.scheme,
                 host=target.hostname or "",
-                port=target.port,
+                port=port,
                 path=target.path,
-                query=target.query,
+                query="",  # Guard established target.query is empty.
                 request_headers=dict(prepared.headers),
-                request_body=(
-                    api._request_body_for_authoritative_log(api._prepared_request_body(prepared))
-                    if api._prepared_request_body(prepared) else None
-                ),
+                request_body=None,  # Guard established raw_body is empty.
                 response_code=None,
                 response_headers=None,
                 response_body=None,
@@ -601,11 +611,11 @@ def create_dashboard_query_app(
                 ready_to_respond_at_unix_usec=None,
                 duration_usec=0,
             )
-            if target.query or api._prepared_request_body(prepared):
-                raise ValueError(Locale.QUERY_REQUEST_INVALID)
         except ValueError as exc:
             return FlaskResponse(
-                str(exc), status=HTTPStatus.BAD_REQUEST, content_type=ContentType.PLAIN_TEXT,
+                Locale.QUERY_REQUEST_INVALID if has_query_or_body else str(exc),
+                status=HTTPStatus.BAD_REQUEST,
+                content_type=ContentType.PLAIN_TEXT,
             )
         try:
             logger.info(Locale.QUERY_SNAPSHOT_READING_LOG)
@@ -634,12 +644,17 @@ def create_dashboard_query_app(
             prepared = prepared_request()
             target = urlsplit(prepared.url or "")
             raw_body = api._prepared_request_body(prepared)
+            port = target.port
+            # Pydantic also requires None; mypy needs this explicit narrowing
+            # because urlsplit.port is statically int | None.
+            if port is not None:
+                raise ValueError(Locale.IPC_PORT_INVALID)
             request_record = RunOutcomeRequestRecord(
                 schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
                 method=prepared.method or "",
                 scheme=target.scheme,
                 host=target.hostname or "",
-                port=target.port,
+                port=port,
                 path=target.path,
                 query=target.query,
                 request_headers=dict(prepared.headers),
@@ -730,13 +745,15 @@ def create_dashboard_query_app(
             ).model_dump_json()
             reply = api._response(code, body, content_type=ContentType.JSON, headers=headers)
             ready = time.time_ns() // NANOSECONDS_PER_MICROSECOND
+            # Reuse the narrowed port: Pydantic checks this response too, but
+            # mypy cannot infer None from the original urlsplit.port property.
             response_record = RunOutcomeResponseRecord(
                 schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
                 record_id=response_id,
                 method=prepared.method or "",
                 scheme=target.scheme,
                 host=target.hostname or "",
-                port=target.port,
+                port=port,
                 path=target.path,
                 query=target.query,
                 request_headers=dict(prepared.headers),
@@ -762,7 +779,12 @@ def create_dashboard_query_app(
                 raise BackendStoreException(Locale.IPC_RESPONSE_MISSING)
             logger.info(Locale.RUN_OUTCOME_PERSISTED_LOG, stored.record_id, stored.response_code)
             return response_from_adapter(stored.to_response())
-        except BaseException:
+        except BaseException as exc:
+            if isinstance(exc, ValidationError):
+                app.logger.error(
+                    Locale.PYDANTIC_VALIDATION_DETAILS_LOG,
+                    pydantic_diagnostic_json(exc),
+                )
             app.logger.exception(Locale.IPC_OUTCOME_FATAL_LOG)
             fatal_exit(1)
 

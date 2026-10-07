@@ -1001,7 +1001,6 @@ class AiAugmentBackendStore(FrozenStrictModel):
                 ),
             ).model_dump_json()
             ready = time.time_ns() // NANOSECONDS_PER_MICROSECOND
-            assert query_request_record.received_at_unix_usec is not None
             query_response_record = QueryResponseRecord(
                 schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
                 method=query_request_record.method,
@@ -3135,8 +3134,6 @@ class AiAugmentBackendStore(FrozenStrictModel):
             or session_id is None
         ):
             return
-        if outcome.response_headers is None:
-            raise ReplayInputMissing(Locale.RUN_OUTCOME_SOURCE_KEY_MISSING)
         outcome_filename, outcome_fragment = source_key_from_header_value(
             outcome.response_headers.get(SOURCE_KEY_HEADER)
         )

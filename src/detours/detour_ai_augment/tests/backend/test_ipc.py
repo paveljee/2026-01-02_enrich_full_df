@@ -27,6 +27,7 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.store import (  # noqa: E501
     AiAugmentBackendStore,
 )
+from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     ASGI_BODY_KEY,
     ASGI_HTTP_REQUEST_MESSAGE_TYPE,
@@ -245,6 +246,7 @@ def test_query_rejects_filters_and_bodies_without_dispatch_or_fatal_exit(
     response = client.get(DASHBOARD_QUERY_PATH, query_string=parameters, data=body)
 
     assert response.status_code == status.HTTP_400_BAD_REQUEST
+    assert response.get_data(as_text=True) == Locale.QUERY_REQUEST_INVALID
     handler.assert_not_called()
     fatal_exit.assert_not_called()
     assert client.options(DASHBOARD_QUERY_PATH).status_code == status.HTTP_200_OK

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from http import HTTPStatus
-from typing import Self
+from typing import Annotated, Literal, Self
 
-from pydantic import Field, model_validator
+from pydantic import Field, NonNegativeInt, model_validator
 
 from src.detours.detour_ai_augment.protected.src.architecture import BackendComponent
 from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
@@ -17,12 +17,17 @@ from src.helpers.data_models.http_request_log import HttpRequestLogRecord
 from .ai_augment_http_request_log_record import (
     RequestRecord,
     ResponseRecord,
-    _validate_public_exchange,
 )
 
 
 @implements[BackendComponent.PushRequestRecordProperty]()
 class PushRequestRecord(RequestRecord):
+    method: Annotated[str, Field(pattern=f"^{HTTP_POST_METHOD}$")]
+    path: Annotated[str, Field(pattern=f"^{PUSH_PATH}$")]
+    received_at_unix_usec: int
+    ready_to_respond_at_unix_usec: None = None
+    duration_usec: Literal[0]
+
     @property
     def http_request_log_record(self) -> HttpRequestLogRecord:
         return super().http_request_log_record
@@ -42,24 +47,15 @@ class PushRequestRecord(RequestRecord):
     def serialize(self) -> dict[str, object]:
         return super().serialize()
 
-    @model_validator(mode="after")
-    def _validate_exchange(self) -> Self:
-        if (
-            self.method != HTTP_POST_METHOD
-            or self.path != PUSH_PATH
-            or self.response_code is not None
-            or self.response_headers is not None
-            or self.response_body is not None
-            or self.received_at_unix_usec is None
-            or self.ready_to_respond_at_unix_usec is not None
-            or self.duration_usec != 0
-        ):
-            raise ValueError(Locale.PUBLIC_HTTP_EXCHANGE_INVALID)
-        return self
-
 
 @implements[BackendComponent.PushResponseRecordProperty]()
 class PushResponseRecord(ResponseRecord):
+    method: Annotated[str, Field(pattern=f"^{HTTP_POST_METHOD}$")]
+    path: Annotated[str, Field(pattern=f"^{PUSH_PATH}$")]
+    received_at_unix_usec: None = None
+    ready_to_respond_at_unix_usec: int
+    duration_usec: NonNegativeInt
+
     pull_response_record: PullResponseRecord | None = Field(default=None, exclude=True)
 
     @property
@@ -92,7 +88,6 @@ class PushResponseRecord(ResponseRecord):
 
     @model_validator(mode="after")
     def _validate_exchange(self) -> Self:
-        _validate_public_exchange(self, HTTP_POST_METHOD, PUSH_PATH)
         if self.response_code == HTTPStatus.ACCEPTED:
             if (
                 self.pull_response_record is None

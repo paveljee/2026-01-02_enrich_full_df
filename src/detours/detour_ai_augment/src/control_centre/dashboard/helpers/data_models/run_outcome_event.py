@@ -3,11 +3,11 @@ from __future__ import annotations
 from collections.abc import Mapping
 from enum import StrEnum
 from http import HTTPStatus
-from typing import Literal, Self
+from typing import Annotated, Literal, Self
 from uuid import UUID
 
 import requests
-from pydantic import Field, model_validator
+from pydantic import Field, NonNegativeInt, model_validator
 
 from src.detours.detour_ai_augment.protected.src.architecture import (
     ControlCentreComponent,
@@ -38,7 +38,6 @@ from src.detours.detour_ai_augment.protected.src.shared import (
 )
 from src.helpers.architecture import FrozenStrictModel, implements
 from src.helpers.data_models import HttpRequestLogRecord, NameKey
-from src.helpers.vars import KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
 
 from .....agent_runtime.helpers.data_models.attempt import AgentRuntimeAttempt
 from .....backend.helpers.data_models.ai_augment_http_request_log_record import (
@@ -117,6 +116,16 @@ def _request_uuid(value: str | None, *, quoted: bool = False) -> UUID | None:
 
 @implements[ControlCentreComponent.BackendPort.RunOutcomeRequestRecordProperty]()
 class RunOutcomeRequestRecord(RequestRecord):
+    method: Annotated[str, Field(pattern=f"^{HTTP_POST_METHOD}$")]
+    scheme: Annotated[str, Field(pattern=f"^{SYNTHETIC_COMMIT_SCHEME}$")]
+    host: Annotated[str, Field(pattern=f"^{SYNTHETIC_COMMIT_HOST}$")]
+    # Reject explicit URL ports before outcome processing on the Unix socket.
+    port: None = None
+    path: Annotated[str, Field(pattern=f"^(?:{'|'.join(RUN_OUTCOME_PATHS)})$")]
+    received_at_unix_usec: int
+    ready_to_respond_at_unix_usec: None = None
+    duration_usec: Literal[0]
+
     @property
     def http_request_log_record(self) -> HttpRequestLogRecord:
         return super().http_request_log_record
@@ -178,30 +187,6 @@ class RunOutcomeRequestRecord(RequestRecord):
             headers[ETAG_HEADER] = f'"{validation_record_id}"'
         return run_outcome.to_run_outcome_path(), headers
 
-    def validate_http_request_log_record(self) -> Self:
-        record = self.http_request_log_record
-        if (
-            record.schema_version != KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
-            or record.record_id.version != 7
-            or record.method != HTTP_POST_METHOD
-            or record.scheme != SYNTHETIC_COMMIT_SCHEME
-            or record.host != SYNTHETIC_COMMIT_HOST
-            or record.port is not None
-            or record.ready_to_respond_at_unix_usec is not None
-            or record.path not in RUN_OUTCOME_PATHS
-            or record.response_code is not None
-            or record.response_headers is not None
-            or record.response_body is not None
-            or record.received_at_unix_usec is None
-            or record.duration_usec != 0
-        ):
-            raise ValueError(Locale.RUN_OUTCOME_REQUEST_CONTOUR_INVALID)
-        return self
-
-    @model_validator(mode="after")
-    def _validate_http_request_log_record(self) -> Self:
-        return self.validate_http_request_log_record()
-
 
 class _RunOutcomeResponseBodyJson(FrozenStrictModel):
     pull_record_id: UUID | None
@@ -214,6 +199,12 @@ class _RunOutcomeResponseBodyJson(FrozenStrictModel):
 
 @implements[ControlCentreComponent.BackendPort.RunOutcomeResponseRecordProperty]()
 class RunOutcomeResponseRecord(ResponseRecord):
+    # Persisted outcomes preserve the portless IPC contour during replay.
+    port: None = None
+    received_at_unix_usec: None = None
+    ready_to_respond_at_unix_usec: int
+    duration_usec: NonNegativeInt
+
     run_outcome_request_record: RunOutcomeRequestRecord = Field(exclude=True)
     attempt: AgentRuntimeAttempt | None = Field(default=None, exclude=True)
 
@@ -404,25 +395,10 @@ class RunOutcomeResponseRecord(ResponseRecord):
             ready_to_respond_at_unix_usec=None,
             duration_usec=0,
         )
-        return cls(
-            schema_version=record.schema_version,
-            record_id=record.record_id,
-            method=record.method,
-            scheme=record.scheme,
-            host=record.host,
-            port=record.port,
-            path=record.path,
-            query=record.query,
-            request_headers=record.request_headers,
-            request_body=record.request_body,
-            response_code=record.response_code,
-            response_headers=record.response_headers,
-            response_body=record.response_body,
-            received_at_unix_usec=record.received_at_unix_usec,
-            ready_to_respond_at_unix_usec=record.ready_to_respond_at_unix_usec,
-            duration_usec=record.duration_usec,
-            run_outcome_request_record=RunOutcomeRequestRecord.from_http_request_log_record(
+        return cls.model_validate({
+            **record.model_dump(),
+            "run_outcome_request_record": RunOutcomeRequestRecord.from_http_request_log_record(
                 http_request_log_record=request_record,
             ),
-            attempt=attempt,
-        )
+            "attempt": attempt,
+        })

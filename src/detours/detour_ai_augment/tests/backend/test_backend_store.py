@@ -12,13 +12,13 @@ from uuid import uuid7
 
 import duckdb
 import pytest
+from pydantic import ValidationError
 
 from src.detours.detour_ai_augment.protected.src.backend import server
 from src.detours.detour_ai_augment.protected.src.backend.helpers import api
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models import (
     store as store_models,
 )
-from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     AUTHORITATIVE_RECORDS_TABLE,
     COMMIT_VALIDATION_REQUEST_RECORD_INDEX_TABLE,
@@ -449,20 +449,31 @@ def test_query_only_capability_returns_nak_snapshot_and_never_changes_log_or_db(
         duration_usec=0,
     )
     if received_at_unix_usec is None:
-        with pytest.raises(ValueError, match=Locale.QUERY_REQUEST_INVALID):
+        with pytest.raises(ValidationError) as exc_info:
             QueryRequestRecord.model_validate(request_fields)
+        assert [(e["loc"], e["type"]) for e in exc_info.value.errors()] == [
+            (("received_at_unix_usec",), "int_type")
+        ]
         # Exercise Store's rejection boundary despite the typed model rejecting this input.
         request = RequestRecord.model_validate(request_fields)
     else:
         request = QueryRequestRecord.model_validate(request_fields)
     with store_models.initialize_backend_store(runtime, ipc_only=True) as store:
         assert not any(hasattr(store, name) for name in ("pull", "push", "run_outcome", "execute"))
-        promise = store.query_response_record(request)
+        if isinstance(request, QueryRequestRecord):
+            promise = store.query_response_record(request)
+        else:
+            assert received_at_unix_usec is None
+            # Intentionally violate the typed port to test Store's runtime boundary.
+            promise = store.query_response_record(request)  # type: ignore[arg-type]
         assert promise.acknowledgment is BackendStoreAcknowledgment.NAK
         response, error = asyncio.run(promise.response_record_promise())
         if received_at_unix_usec is None:
             assert response is None and error is not None
-            assert Locale.QUERY_REQUEST_INVALID in str(error)
+            assert isinstance(error.__cause__, ValidationError)
+            assert [(e["loc"], e["type"]) for e in error.__cause__.errors()] == [
+                (("received_at_unix_usec",), "int_type")
+            ]
         else:
             assert error is None and response is not None
             assert response.record_id != request.record_id
