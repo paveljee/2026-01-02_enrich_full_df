@@ -1,3 +1,4 @@
+from types import FunctionType
 from typing import Any, Callable, TypeVar, get_args
 
 from pydantic import BaseModel, ConfigDict
@@ -110,3 +111,24 @@ type LazyResultFactory[**P, T, E] = Callable[
     P,
     tuple[T | None, E | None],
 ]
+
+
+def nameof(selector: Callable[[], Any]) -> str:
+    """
+    Extracts an attribute name from a simple lambda expression, avoiding
+    hardcoded strings. Applies to, but is not specific to, Pydantic fields.
+    Requires at least Python 3.5+.
+
+    This reads the last bytecode name, not a parsed attribute expression:
+    use only a simple lambda selecting one attribute. Complex expressions
+    can return the wrong name.
+
+    Usage:
+        nameof(lambda: FieldSubmission.value)  # "value"
+        nameof(lambda: FieldSubmission.web_search_excerpts)  # "web_search_excerpts"
+
+    Callable objects other than Python functions and lambdas are rejected.
+    """
+    if not isinstance(selector, FunctionType):
+        raise TypeError
+    return selector.__code__.co_names[-1]
