@@ -12,7 +12,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from random import Random
-from typing import TYPE_CHECKING, Callable, Literal, Self
+from typing import TYPE_CHECKING, Callable, Final, Literal, Self
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -113,7 +113,7 @@ from src.detours.detour_ai_augment.src.backend.helpers.data_models.model_http_in
     ModelHttpRequired,
     ReplayInputMissing,
 )
-from src.helpers.architecture import FrozenStrictModel, LazyResultFactory, implements
+from src.helpers.architecture import FrozenStrictModel, LazyResultFactory, implements, nameof
 from src.helpers.data_models import (
     FragmentType,
     NameKey,
@@ -243,8 +243,8 @@ HTTP_ACCEPT_HEADER = "Accept"
 ROLLOUT_TIMESTAMP_FORMAT = "%Y-%m-%dT%H-%M-%S"
 FCO_TIMESTAMP_TIMESPEC = "milliseconds"
 PYDANTIC_ERROR_MESSAGE_KEY = "msg"
-PYDANTIC_ERROR_LOCATION_KEY = "loc"
-PYDANTIC_ERROR_TYPE_KEY = "type"
+PYDANTIC_ERROR_LOCATION_KEY: Final = "loc"
+PYDANTIC_ERROR_TYPE_KEY: Final = "type"
 PYDANTIC_ERROR_INPUT_KEY = "input"
 PYDANTIC_MISSING_ERROR_TYPE = "missing"
 HTTP_ETAG_HEADER = "ETag"
@@ -1773,11 +1773,68 @@ def _evaluate_submission_for_commit(
                 raise error
             assert retry_baseline_exists is not None
             retry_submission_expected = retry_baseline_exists
-            submission_payload = (
-                StandardizedSubmission.model_validate_with_http_records(push_request_body)
-                if retry_submission_expected
-                else Submission.model_validate_with_http_records(push_request_body)
-            )
+            try:
+                submission_payload = (
+                    StandardizedSubmission.model_validate_with_http_records(push_request_body)
+                    if retry_submission_expected
+                    else Submission.model_validate_with_http_records(push_request_body)
+                )
+            except ValidationError as exc:
+                corrections: dict[str, str] = {}
+                for issue in exc.errors(
+                    include_url=False, include_context=False, include_input=False,
+                ):
+                    location_items = issue[PYDANTIC_ERROR_LOCATION_KEY]
+                    # Deeper union paths can contain internal Pydantic branch names.
+                    location = (
+                        EVIDENCE_LOCATION_DEF(str(location_items[0]), location_items[2])
+                        if len(location_items) > 2
+                        and location_items[1] == nameof(
+                            lambda: FieldSubmission.web_search_excerpts
+                        )
+                        and isinstance(location_items[2], int)
+                        else ".".join(str(item) for item in location_items[:2])
+                        or Locale.SUBMISSION_SCHEMA_ROOT
+                    )
+                    if len(location_items) <= 2 and issue[PYDANTIC_ERROR_TYPE_KEY] == (
+                        "extra_forbidden"
+                    ):
+                        instruction = Locale.SUBMISSION_FIELD_REMOVE
+                    elif len(location_items) <= 2 and issue[PYDANTIC_ERROR_TYPE_KEY] == (
+                        PYDANTIC_MISSING_ERROR_TYPE
+                    ):
+                        instruction = Locale.SUBMISSION_FIELD_REQUIRED
+                    else:
+                        instruction = Locale.SUBMISSION_FIELD_INVALID
+                    if location in corrections and corrections[location] != instruction:
+                        corrections[location] = Locale.SUBMISSION_FIELD_INVALID
+                    else:
+                        corrections[location] = instruction
+                lines = [
+                    Locale.SUBMISSION_ONE_ISSUE_HEADER
+                    if len(corrections) == 1
+                    else Locale.SUBMISSION_ISSUES_HEADER_TEMPLATE.format(
+                        count=len(corrections),
+                    )
+                ]
+                lines.extend(
+                    Locale.SUBMISSION_SCHEMA_ITEM_TEMPLATE.format(
+                        location=location, instruction=instruction,
+                    )
+                    for location, instruction in corrections.items()
+                )
+                lines.append(Locale.SUBMISSION_RESUBMIT_INSTRUCTION)
+                return result(
+                    commit_request_record=commit_request_record,
+                    stage=stage,
+                    submission_payload=None,
+                    retry_projection=retry_projection,
+                    rollout_index=rollout_index,
+                    output_row=output_row,
+                    validation_result=BackendLifecycle.REJECTED,
+                    detail="\n".join(lines),
+                    error=exc,
+                )
 
             stage = BackendLifecycle.DUCKDB_EVIDENCE_VALIDATION
             _seed_evidence_random(inputs.config_facts.sample_seed)

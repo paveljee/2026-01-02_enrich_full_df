@@ -258,6 +258,16 @@ class Locale:
         "associated URL exactly. Do not paraphrase, normalize, retype, or join separated "
         "text."
     )
+    SUBMISSION_ONE_ISSUE_HEADER: Final = "1 submission issue needs correction:"
+    SUBMISSION_ISSUES_HEADER_TEMPLATE: Final = "{count} submission issues need correction:"
+    SUBMISSION_SCHEMA_ROOT: Final = "submission"
+    SUBMISSION_SCHEMA_ITEM_TEMPLATE: Final = "- {location}: {instruction}"
+    SUBMISSION_FIELD_REMOVE: Final = "Remove this field."
+    SUBMISSION_FIELD_REQUIRED: Final = "Supply this required field."
+    SUBMISSION_FIELD_INVALID: Final = "Check this field's format and value."
+    SUBMISSION_RESUBMIT_INSTRUCTION: Final = (
+        "Correct these issues and resubmit the complete payload."
+    )
     MULTIPLE_MATCH_DETAIL_TEMPLATE: Final = (
         "Excerpt matched multiple entries. Resubmit with an excerpt unique across "
         "the searched web pages: {excerpt}"

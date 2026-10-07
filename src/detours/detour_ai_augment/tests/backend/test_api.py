@@ -274,7 +274,7 @@ from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_mod
 from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.run_outcome_event import (  # noqa: E501
     RunOutcomeResponseRecord,
 )
-from src.helpers.architecture import FrozenStrictModel
+from src.helpers.architecture import FrozenStrictModel, nameof
 from src.helpers.cards import MARKDOWN_CODE_DELIMITER, build_cards
 from src.helpers.config import PipelineConfig
 from src.helpers.data_models import (
@@ -3270,10 +3270,16 @@ def test_submission_contract_has_nine_evidence_fields_and_optional_comments() ->
 
     comments_with_evidence = valid_submission_body()
     comments_with_evidence[KTP_AI_AUGMENT_COMMENTS_COL][  # type: ignore[index]
-        "web_search_excerpts"
+        nameof(lambda: FieldSubmission.web_search_excerpts)
     ] = []
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValidationError) as exc_info:
         Submission.model_validate(comments_with_evidence)
+    assert [(issue["loc"], issue["type"]) for issue in exc_info.value.errors()] == [
+        (
+            (KTP_AI_AUGMENT_COMMENTS_COL, nameof(lambda: FieldSubmission.web_search_excerpts)),
+            "extra_forbidden",
+        )
+    ]
 
 
 def test_successful_initial_submission_converts_to_retry_model_with_placeholders() -> None:
@@ -6393,37 +6399,56 @@ def test_accepted_push_finishes_after_client_or_response_send_failure(
 
 
 @pytest.mark.parametrize(
-    ("result", "stage", "expected_code", "expected_media_type"),
+    ("result", "stage", "expected_code", "expected_media_type", "schema_case"),
     (
         (
             BackendLifecycle.ACCEPTED,
             BackendLifecycle.ACCEPTED,
             HTTPStatus.GONE,
             ContentType.NDJSON_UTF8,
+            None,
         ),
         (
             BackendLifecycle.REJECTED,
             BackendLifecycle.PYDANTIC_VALIDATION,
             HTTPStatus.OK,
             ContentType.MARKDOWN,
+            "unexpected",
+        ),
+        (
+            BackendLifecycle.REJECTED,
+            BackendLifecycle.PYDANTIC_VALIDATION,
+            HTTPStatus.OK,
+            ContentType.MARKDOWN,
+            "comments_extra",
+        ),
+        (
+            BackendLifecycle.REJECTED,
+            BackendLifecycle.PYDANTIC_VALIDATION,
+            HTTPStatus.OK,
+            ContentType.MARKDOWN,
+            "nested_evidence",
         ),
         (
             BackendLifecycle.REJECTED,
             BackendLifecycle.DUCKDB_EVIDENCE_VALIDATION,
             HTTPStatus.OK,
             ContentType.MARKDOWN,
+            None,
         ),
         (
             BackendLifecycle.REJECTED,
             BackendLifecycle.ROLLOUT_INDEX,
             HTTPStatus.INTERNAL_SERVER_ERROR,
             ContentType.JSON,
+            None,
         ),
         (
             BackendLifecycle.REJECTED,
             BackendLifecycle.APPENDWATCH_REPORT_VALIDATION,
             HTTPStatus.INTERNAL_SERVER_ERROR,
             ContentType.JSON,
+            None,
         ),
     ),
 )
@@ -6434,6 +6459,7 @@ def test_post_commit_result_is_exposed_only_by_follow_up_pull(
     stage: BackendLifecycle,
     expected_code: HTTPStatus,
     expected_media_type: str,
+    schema_case: str | None,
     api_runtime: AiAugmentBackendContext,
     api_store: AiAugmentBackendStore,
     api_push_capture: tuple[CodexRolloutRecord, aivm_audit._AivmAuditConfiguration],
@@ -6458,7 +6484,21 @@ def test_post_commit_result_is_exposed_only_by_follow_up_pull(
     monkeypatch.setattr(subprocess, "run", scenario_guest_run)
     submission_body = valid_submission_body()
     if stage is BackendLifecycle.PYDANTIC_VALIDATION:
-        submission_body = {"unexpected": True}
+        if schema_case == "unexpected":
+            submission_body = {"unexpected": True}
+        elif schema_case == "comments_extra":
+            comments = submission_body[KTP_AI_AUGMENT_COMMENTS_COL]
+            assert isinstance(comments, dict)
+            comments[nameof(lambda: FieldSubmission.web_search_excerpts)] = []
+        else:
+            assert schema_case == "nested_evidence"
+            field = submission_body[KTP_AI_AUGMENT_EDUCATION_COL]
+            assert isinstance(field, dict)
+            excerpts = field[nameof(lambda: FieldSubmission.web_search_excerpts)]
+            assert isinstance(excerpts, list)
+            excerpt = excerpts[0]
+            assert isinstance(excerpt, dict)
+            excerpt[nameof(lambda: WebSearchExcerpt.excerpt)] = ""
     elif stage is BackendLifecycle.DUCKDB_EVIDENCE_VALIDATION:
         field = cast(dict[str, object], submission_body[KTP_AI_AUGMENT_EDUCATION_COL])
         evidence = cast(list[dict[str, str]], field["web_search_excerpts"])
@@ -6500,6 +6540,22 @@ def test_post_commit_result_is_exposed_only_by_follow_up_pull(
     elif result is BackendLifecycle.REJECTED:
         assert isinstance(validation.detail, str)
         assert response.text == validation.detail.rstrip() + "\n"
+        if schema_case == "comments_extra":
+            assert response.text == (
+                "1 submission issue needs correction:\n"
+                f"- {KTP_AI_AUGMENT_COMMENTS_COL}."
+                f"{nameof(lambda: FieldSubmission.web_search_excerpts)}: "
+                "Remove this field.\n"
+                "Correct these issues and resubmit the complete payload.\n"
+            )
+        elif schema_case == "nested_evidence":
+            assert response.text == (
+                "1 submission issue needs correction:\n"
+                f"- {KTP_AI_AUGMENT_EDUCATION_COL}."
+                f"{nameof(lambda: FieldSubmission.web_search_excerpts)}[0]: "
+                "Check this field's format and value.\n"
+                "Correct these issues and resubmit the complete payload.\n"
+            )
     else:
         assert validation.submission is not None
         rows = [json.loads(line) for line in response.text.splitlines()]
