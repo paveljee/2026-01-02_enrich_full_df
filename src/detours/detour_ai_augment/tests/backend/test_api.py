@@ -576,6 +576,7 @@ def evaluate_retry_submission_for_test(
     store._project_retry_evidence(
         commit_request_record,
         projection,
+        original_pull_response_record=original_pull,
         namekey=namekey,
         commit_request_timestamp=commit_request_timestamp,
     )
@@ -6626,6 +6627,110 @@ def test_post_commit_result_is_exposed_only_by_follow_up_pull(
         assert rows[0][KTP_AI_AUGMENT_EDUCATION_COL] == (
             education["value"]
         )
+
+
+def test_evidence_retry_uses_original_pull_for_schema_and_projection(
+    api_runtime: AiAugmentBackendContext,
+    api_store: AiAugmentBackendStore,
+    api_push_capture: tuple[CodexRolloutRecord, aivm_audit._AivmAuditConfiguration],
+    threaded_loop: asyncio.Runner,
+) -> None:
+    assert api_push_capture[0].line_count > 0
+    rejected_evidence = valid_submission_body()
+    field = rejected_evidence[KTP_AI_AUGMENT_EDUCATION_COL]
+    assert isinstance(field, dict)
+    excerpts = field[FIELD_EVIDENCE_FIELD]
+    assert isinstance(excerpts, list)
+    excerpt = excerpts[0]
+    assert isinstance(excerpt, dict)
+    excerpt[nameof(lambda: WebSearchExcerpt.excerpt)] = "fabricated excerpt"
+    invalid_submission = {"unexpected": True}
+    plain = valid_submission_body()
+    standardized = standardized_submission_body(plain)
+
+    with api_store._writable(api_runtime):
+        async def exercise() -> None:
+            api_store._loop = asyncio.get_running_loop()
+            app = api_application_for_test(api_runtime, api_store)
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app),
+                base_url=f"{SYNTHETIC_COMMIT_SCHEME}://{SYNTHETIC_COMMIT_HOST}",
+            ) as client:
+                initial_response = await client.get(PULL_PATH)
+                assert initial_response.status_code == HTTPStatus.OK
+                original_pull = api_store.current_replayed_record
+                assert isinstance(original_pull, PullResponseRecord)
+                for submission, expected_stage, expected_result, expected_pull_status in (
+                    (
+                        invalid_submission, BackendLifecycle.PYDANTIC_VALIDATION,
+                        BackendLifecycle.REJECTED, HTTPStatus.OK,
+                    ),
+                    (
+                        rejected_evidence, BackendLifecycle.DUCKDB_EVIDENCE_VALIDATION,
+                        BackendLifecycle.REJECTED, HTTPStatus.OK,
+                    ),
+                    (
+                        plain, BackendLifecycle.PYDANTIC_VALIDATION,
+                        BackendLifecycle.REJECTED, HTTPStatus.OK,
+                    ),
+                    (
+                        standardized, BackendLifecycle.ACCEPTED,
+                        BackendLifecycle.ACCEPTED, HTTPStatus.GONE,
+                    ),
+                ):
+                    push = await client.post(PUSH_PATH, json=submission)
+                    assert push.status_code == HTTPStatus.ACCEPTED
+                    await asyncio.gather(*tuple(api.AUTHORITATIVE_BACKGROUND_TASKS))
+                    validation = api_store.current_replayed_record
+                    assert isinstance(validation, BackendValidationRequestRecord)
+                    outcome = validation.validation_request_body.post_commit_validation
+                    assert outcome.stage is expected_stage
+                    assert outcome.result is expected_result
+                    pull = await client.get(PULL_PATH)
+                    assert pull.status_code == expected_pull_status
+                    if submission is rejected_evidence:
+                        assert post_commit_validation.RETRY_SUBMISSION_PUBLIC_GUIDANCE in pull.text
+                    elif submission is invalid_submission:
+                        assert (
+                            post_commit_validation.RETRY_SUBMISSION_PUBLIC_GUIDANCE
+                            not in pull.text
+                        )
+                    elif submission is plain:
+                        assert (
+                            f"{KTP_AI_AUGMENT_EDUCATION_COL}.{FIELD_STANDARDIZED_VALUE_FIELD}"
+                            in pull.text
+                        )
+            baseline_rows = api_store._execute(
+                f"SELECT {POST_COMMIT_VALIDATION_ORIGINAL_PULL_RECORD_ID_COL} "
+                f"FROM {POST_COMMIT_VALIDATION_RETRY_BASELINES_TABLE}"
+            ).fetchall()
+            audit_rows = api_store._execute(
+                f"SELECT {POST_COMMIT_VALIDATION_ORIGINAL_PULL_RECORD_ID_COL} "
+                f"FROM {POST_COMMIT_VALIDATION_EVIDENCE_AUDITS_TABLE} "
+                f"ORDER BY {POST_COMMIT_VALIDATION_AUDIT_ID_COL}"
+            ).fetchall()
+            assert baseline_rows == [(str(original_pull.record_id),)]
+            assert audit_rows == [(str(original_pull.record_id),)] * 2
+
+        threaded_loop.run(asyncio.wait_for(exercise(), timeout=60))
+
+    live_database = logical_database_snapshot(api_store._detour_db_path)
+    log_bytes = Path(api_store._replay_log).read_bytes()
+    replay = AiAugmentBackendStore._from_resources(
+        replay_log=api_store._replay_log.model_copy(update={
+            nameof(lambda: ReplayLogRegisteredResource.hash): (
+                hashlib.sha256(log_bytes).hexdigest()
+            ),
+        }),
+        detour_db=api_store._detour_db.model_copy(update={
+            nameof(lambda: AiAugmentDetourDB.path): (
+                api_store._detour_db_path.with_name("retry-phase-replay.duckdb")
+            ),
+        }),
+        rollout_cas=api_store.rollout_cas,
+    )
+    replay._rebuild_from_log(api_runtime, reset_confirmed=True, confirm_replay=lambda: True)
+    assert logical_database_snapshot(replay._detour_db_path) == live_database
 
 
 def test_backend_stdin_accepts_one_canonical_session_id() -> None:

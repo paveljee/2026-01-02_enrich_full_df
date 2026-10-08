@@ -2313,15 +2313,19 @@ class AiAugmentBackendStore(FrozenStrictModel):
                 message=Locale.VALIDATION_REPLAY_MISMATCH,
                 detail=Locale.REPLAY_VALIDATION_HTTP_IDS_DETAIL,
             ))
-        self._project_validation(commit_ref, projection, accepted=(
-            observed.result is BackendLifecycle.ACCEPTED
-        ))
+        self._project_validation(
+            commit_ref,
+            projection,
+            original_pull_response_record=evaluation_inputs.original_pull_response_record,
+            accepted=observed.result is BackendLifecycle.ACCEPTED,
+        )
 
     def _project_validation(
         self,
         commit: BackendCommitRequestRecord,
         projection: _ValidationProjection,
         *,
+        original_pull_response_record: PullResponseRecord,
         accepted: bool,
     ) -> None:
         assert commit is self._current_replayed_record
@@ -2347,6 +2351,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
             self._project_retry_evidence(
                 commit,
                 projection,
+                original_pull_response_record=original_pull_response_record,
                 namekey=namekey,
                 commit_request_timestamp=commit_request_timestamp,
             )
@@ -2376,6 +2381,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
         commit: BackendCommitRequestRecord,
         projection: _ValidationProjection,
         *,
+        original_pull_response_record: PullResponseRecord,
         namekey: NameKey,
         commit_request_timestamp: datetime,
     ) -> None:
@@ -2401,7 +2407,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
         session_id = body.codex_session_record.session_id
         assert session_id is not None
         if projection.baseline_obligations_json is not None and not self._insert_retry_baseline(
-            original_pull_record_id=pull.record_id,
+            original_pull_record_id=original_pull_response_record.record_id,
             namekey=namekey,
             session_id=session_id,
             commit_record_id=commit.record_id,
@@ -2411,7 +2417,7 @@ class AiAugmentBackendStore(FrozenStrictModel):
             raise _ReplayProjectionConflictError
         self._append_evidence_audit(
             commit_record_id=commit.record_id,
-            original_pull_record_id=pull.record_id,
+            original_pull_record_id=original_pull_response_record.record_id,
             namekey=namekey,
             session_id=session_id,
             commit_request_timestamp=commit_request_timestamp,
