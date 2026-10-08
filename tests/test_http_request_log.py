@@ -1,17 +1,13 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 import requests
 from pydantic import ValidationError
 
+from src.helpers.architecture import nameof
 from src.helpers.data_models.http_request_log import (
-    HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY,
-    HTTP_REQUEST_LOG_DURATION_USEC_KEY,
-    HTTP_REQUEST_LOG_PORT_KEY,
-    HTTP_REQUEST_LOG_READY_TO_RESPOND_AT_UNIX_USEC_KEY,
-    HTTP_REQUEST_LOG_RECORD_ID_KEY,
-    HTTP_REQUEST_LOG_RESPONSE_HEADERS_KEY,
-    HTTP_REQUEST_LOG_SCHEMA_VERSION_KEY,
     HttpRequestLogRecord,
     HttpRequestLogSchemaVersion,
     HttpRequestLogSchemaVersionV1,
@@ -48,24 +44,30 @@ def test_http_request_log_schema_version_uses_strings_and_legacy_v1_int() -> Non
     version_1_1 = HttpRequestLogRecord.model_validate(
         version_1
         | {
-            HTTP_REQUEST_LOG_SCHEMA_VERSION_KEY: (
+            nameof(lambda: HttpRequestLogRecord.schema_version): (
                 KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
             )
         }
     )
     legacy_version_1 = HttpRequestLogRecord.model_validate(
-        version_1 | {HTTP_REQUEST_LOG_SCHEMA_VERSION_KEY: 1}
+        version_1 | {nameof(lambda: HttpRequestLogRecord.schema_version): 1}
     )
     restored_legacy_version_1 = HttpRequestLogRecord.model_validate_json(
         legacy_version_1.model_dump_json()
     )
 
-    assert version_1[HTTP_REQUEST_LOG_SCHEMA_VERSION_KEY] == "1"
-    assert isinstance(version_1[HTTP_REQUEST_LOG_SCHEMA_VERSION_KEY], str)
+    assert version_1[nameof(lambda: HttpRequestLogRecord.schema_version)] == "1"
+    assert isinstance(version_1[nameof(lambda: HttpRequestLogRecord.schema_version)], str)
     assert legacy_version_1.schema_version == 1
     assert isinstance(legacy_version_1.schema_version, int)
-    assert HTTP_REQUEST_LOG_RECORD_ID_KEY not in legacy_version_1.model_dump()
-    assert HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY not in legacy_version_1.model_dump()
+    assert (
+        nameof(lambda: HttpRequestLogRecord.record_id)
+        not in legacy_version_1.model_dump()
+    )
+    assert (
+        nameof(lambda: HttpRequestLogRecord.coerce_schema_v1)
+        not in legacy_version_1.model_dump()
+    )
     assert restored_legacy_version_1.model_dump() == legacy_version_1.model_dump()
     assert restored_legacy_version_1.schema_version == 1
     assert version_1_1.schema_version == "1.1"
@@ -74,7 +76,11 @@ def test_http_request_log_schema_version_uses_strings_and_legacy_v1_int() -> Non
         with pytest.raises(ValidationError):
             HttpRequestLogRecord.model_validate(
                 version_1
-                | {HTTP_REQUEST_LOG_SCHEMA_VERSION_KEY: invalid_schema_version}
+                | {
+                    nameof(lambda: HttpRequestLogRecord.schema_version): (
+                        invalid_schema_version
+                    )
+                }
             )
 
 
@@ -92,17 +98,19 @@ def test_http_request_log_record_id_defaults_to_unique_uuid7_in_v1_1() -> None:
         duration_usec=789,
     ).model_dump()
     version_1_1 = version_1 | {
-        HTTP_REQUEST_LOG_SCHEMA_VERSION_KEY: KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
+        nameof(lambda: HttpRequestLogRecord.schema_version): (
+            KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
+        )
     }
     record = HttpRequestLogRecord.model_validate(version_1_1)
     another = HttpRequestLogRecord.model_validate(version_1_1)
     restored = HttpRequestLogRecord.model_validate_json(record.model_dump_json())
 
-    assert HTTP_REQUEST_LOG_RECORD_ID_KEY not in version_1
+    assert nameof(lambda: HttpRequestLogRecord.record_id) not in version_1
     assert record.record_id.version == 7
     assert another.record_id.version == 7
     assert another.record_id != record.record_id
-    assert HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY not in record.model_dump()
+    assert nameof(lambda: HttpRequestLogRecord.coerce_schema_v1) not in record.model_dump()
     assert restored == record
     assert restored.record_id == record.record_id
 
@@ -178,14 +186,17 @@ def test_http_request_log_schema_version_1_omits_and_rejects_v1_1_fields() -> No
     )
     serialized = record.model_dump()
 
-    assert HTTP_REQUEST_LOG_RECORD_ID_KEY not in serialized
-    assert HTTP_REQUEST_LOG_PORT_KEY not in serialized
-    assert HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY not in serialized
-    assert HTTP_REQUEST_LOG_READY_TO_RESPOND_AT_UNIX_USEC_KEY not in serialized
+    assert nameof(lambda: HttpRequestLogRecord.record_id) not in serialized
+    assert nameof(lambda: HttpRequestLogRecord.port) not in serialized
+    assert nameof(lambda: HttpRequestLogRecord.coerce_schema_v1) not in serialized
+    assert (
+        nameof(lambda: HttpRequestLogRecord.ready_to_respond_at_unix_usec)
+        not in serialized
+    )
     for field in (
-        HTTP_REQUEST_LOG_RECORD_ID_KEY,
-        HTTP_REQUEST_LOG_PORT_KEY,
-        HTTP_REQUEST_LOG_READY_TO_RESPOND_AT_UNIX_USEC_KEY,
+        nameof(lambda: HttpRequestLogRecord.record_id),
+        nameof(lambda: HttpRequestLogRecord.port),
+        nameof(lambda: HttpRequestLogRecord.ready_to_respond_at_unix_usec),
     ):
         with pytest.raises(ValidationError) as raised:
             HttpRequestLogRecord.model_validate(serialized | {field: None})
@@ -199,12 +210,82 @@ def test_http_request_log_schema_version_1_omits_and_rejects_v1_1_fields() -> No
             }
         ]
     explicit_false = HttpRequestLogRecord.model_validate(
-        serialized | {HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY: False}
+        serialized | {nameof(lambda: HttpRequestLogRecord.coerce_schema_v1): False}
     )
 
     assert explicit_false.schema_version == KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION
     assert explicit_false.coerce_schema_v1 is False
     assert explicit_false.model_dump() == serialized
+
+
+def test_received_at_may_be_omitted_in_v1_1_but_is_required_in_v1() -> None:
+    legacy = http_request_log_record(
+        schema_version=KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION,
+        method="GET",
+        scheme="https",
+        host=TEST_HTTP_HOST,
+        path="/works/W123",
+        redacted_query="select=title&api_key=REDACTED",
+        response_code=200,
+        response_body='{"title":"A Fine Paper"}',
+        received_at_unix_usec=123456,
+        duration_usec=789,
+    ).model_dump()
+    legacy.pop("received_at_unix_usec")
+    version_1_1 = legacy | {
+        nameof(lambda: HttpRequestLogRecord.schema_version): (
+            KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
+        ),
+        nameof(lambda: HttpRequestLogRecord.ready_to_respond_at_unix_usec): (
+            TEST_HTTP_READY_TO_RESPOND_AT_UNIX_USEC
+        ),
+    }
+
+    record = HttpRequestLogRecord.model_validate_json(json.dumps(version_1_1))
+    assert record.received_at_unix_usec is None
+    assert HttpRequestLogRecord.model_validate_json(record.model_dump_json()) == record
+
+    for timestamps in (
+        {},
+        {"received_at_unix_usec": None},
+        {nameof(lambda: HttpRequestLogRecord.ready_to_respond_at_unix_usec): None},
+        {
+            "received_at_unix_usec": None,
+            nameof(lambda: HttpRequestLogRecord.ready_to_respond_at_unix_usec): None,
+        },
+    ):
+        with pytest.raises(ValidationError, match="must be non-null"):
+            HttpRequestLogRecord.model_validate_json(json.dumps(
+                legacy | {
+                    nameof(lambda: HttpRequestLogRecord.schema_version): (
+                        KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
+                    ),
+                    **timestamps,
+                }
+            ))
+
+    for schema_version in (1, KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION):
+        for coerce_schema_v1 in (False, True):
+            version_1 = legacy | {
+                nameof(lambda: HttpRequestLogRecord.schema_version): schema_version,
+                nameof(lambda: HttpRequestLogRecord.coerce_schema_v1): coerce_schema_v1,
+            }
+            for received_at, expected_type in (
+                (None, "int_type"),
+                ("123456", "int_type"),
+            ):
+                with pytest.raises(ValidationError) as raised:
+                    HttpRequestLogRecord.model_validate(
+                        version_1 | {"received_at_unix_usec": received_at}
+                    )
+                assert [(item["loc"], item["type"]) for item in raised.value.errors()] == [
+                    (("received_at_unix_usec",), expected_type),
+                ]
+            with pytest.raises(ValidationError) as raised:
+                HttpRequestLogRecord.model_validate_json(json.dumps(version_1))
+            assert [(item["loc"], item["type"]) for item in raised.value.errors()] == [
+                (("received_at_unix_usec",), "missing"),
+            ]
 
 
 @pytest.mark.parametrize(
@@ -233,19 +314,21 @@ def test_http_request_log_schema_version_1_1_roundtrips_optional_port(
         duration_usec=789,
     ).model_dump()
     version_1_1 = version_1 | {
-        HTTP_REQUEST_LOG_SCHEMA_VERSION_KEY: KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
-        HTTP_REQUEST_LOG_PORT_KEY: port,
+        nameof(lambda: HttpRequestLogRecord.schema_version): (
+            KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
+        ),
+        nameof(lambda: HttpRequestLogRecord.port): port,
     }
     expected_version_1_1 = version_1_1 | {
-        HTTP_REQUEST_LOG_READY_TO_RESPOND_AT_UNIX_USEC_KEY: None,
+        nameof(lambda: HttpRequestLogRecord.ready_to_respond_at_unix_usec): None,
     }
 
     record = HttpRequestLogRecord.model_validate(version_1_1)
     restored = HttpRequestLogRecord.model_validate_json(record.model_dump_json())
 
-    assert restored.model_dump(exclude={HTTP_REQUEST_LOG_RECORD_ID_KEY}) == (
-        expected_version_1_1
-    )
+    assert restored.model_dump(
+        exclude={nameof(lambda: HttpRequestLogRecord.record_id)}
+    ) == expected_version_1_1
     assert restored.record_id == record.record_id
 
 
@@ -265,9 +348,11 @@ def test_http_request_log_schema_version_1_is_promoted_only_with_opt_in(
         received_at_unix_usec=123456,
         duration_usec=789,
     ).model_dump()
-    version_1[HTTP_REQUEST_LOG_SCHEMA_VERSION_KEY] = schema_version
+    version_1[nameof(lambda: HttpRequestLogRecord.schema_version)] = schema_version
     version_1_1 = version_1 | {
-        HTTP_REQUEST_LOG_SCHEMA_VERSION_KEY: KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
+        nameof(lambda: HttpRequestLogRecord.schema_version): (
+            KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
+        )
     }
 
     native_version_1 = HttpRequestLogRecord.model_validate(version_1)
@@ -278,38 +363,44 @@ def test_http_request_log_schema_version_1_is_promoted_only_with_opt_in(
         HttpRequestLogRecord.model_validate(
             version_1_1
             | {
-                HTTP_REQUEST_LOG_READY_TO_RESPOND_AT_UNIX_USEC_KEY: (
+                nameof(lambda: HttpRequestLogRecord.ready_to_respond_at_unix_usec): (
                     TEST_HTTP_READY_TO_RESPOND_AT_UNIX_USEC
                 )
             }
         ).model_dump_json()
     )
     coerced = HttpRequestLogRecord.model_validate(
-        version_1 | {HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY: True}
+        version_1 | {nameof(lambda: HttpRequestLogRecord.coerce_schema_v1): True}
     )
     restored_coerced = HttpRequestLogRecord.model_validate_json(
         coerced.model_dump_json()
     )
     json_schema = HttpRequestLogRecord.model_json_schema()
 
-    assert HTTP_REQUEST_LOG_RECORD_ID_KEY in json_schema["properties"]
-    assert HTTP_REQUEST_LOG_RECORD_ID_KEY not in json_schema["required"]
-    assert HTTP_REQUEST_LOG_PORT_KEY in json_schema["properties"]
-    assert HTTP_REQUEST_LOG_PORT_KEY not in json_schema["required"]
+    assert nameof(lambda: HttpRequestLogRecord.record_id) in json_schema["properties"]
+    assert nameof(lambda: HttpRequestLogRecord.record_id) not in json_schema["required"]
+    assert nameof(lambda: HttpRequestLogRecord.port) in json_schema["properties"]
+    assert nameof(lambda: HttpRequestLogRecord.port) not in json_schema["required"]
     assert (
-        HTTP_REQUEST_LOG_READY_TO_RESPOND_AT_UNIX_USEC_KEY
+        nameof(lambda: HttpRequestLogRecord.ready_to_respond_at_unix_usec)
         in json_schema["properties"]
     )
     assert (
-        HTTP_REQUEST_LOG_READY_TO_RESPOND_AT_UNIX_USEC_KEY
+        nameof(lambda: HttpRequestLogRecord.ready_to_respond_at_unix_usec)
         not in json_schema["required"]
     )
     assert (
         native_version_1.schema_version
         == schema_version
     )
-    assert HTTP_REQUEST_LOG_RECORD_ID_KEY not in native_version_1.model_dump()
-    assert HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY not in native_version_1.model_dump()
+    assert (
+        nameof(lambda: HttpRequestLogRecord.record_id)
+        not in native_version_1.model_dump()
+    )
+    assert (
+        nameof(lambda: HttpRequestLogRecord.coerce_schema_v1)
+        not in native_version_1.model_dump()
+    )
     assert restored_native_version_1.model_dump() == native_version_1.model_dump()
     assert native.port is None
     assert native.coerce_schema_v1 is False
@@ -317,18 +408,18 @@ def test_http_request_log_schema_version_1_is_promoted_only_with_opt_in(
         native.ready_to_respond_at_unix_usec
         == TEST_HTTP_READY_TO_RESPOND_AT_UNIX_USEC
     )
-    assert native.model_dump()[HTTP_REQUEST_LOG_PORT_KEY] is None
-    assert HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY not in native.model_dump()
+    assert native.model_dump()[nameof(lambda: HttpRequestLogRecord.port)] is None
+    assert nameof(lambda: HttpRequestLogRecord.coerce_schema_v1) not in native.model_dump()
     assert coerced.schema_version == KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
     assert coerced.record_id.version == 7
-    assert HTTP_REQUEST_LOG_RECORD_ID_KEY in coerced.model_dump()
-    assert HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY not in coerced.model_dump()
+    assert nameof(lambda: HttpRequestLogRecord.record_id) in coerced.model_dump()
+    assert nameof(lambda: HttpRequestLogRecord.coerce_schema_v1) not in coerced.model_dump()
     assert coerced.port is None
     assert coerced.coerce_schema_v1 is True
     assert coerced.ready_to_respond_at_unix_usec is None
-    assert coerced.model_dump()[HTTP_REQUEST_LOG_PORT_KEY] is None
+    assert coerced.model_dump()[nameof(lambda: HttpRequestLogRecord.port)] is None
     assert restored_coerced == coerced.model_copy(
-        update={HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY: False}
+        update={nameof(lambda: HttpRequestLogRecord.coerce_schema_v1): False}
     )
 
 
@@ -349,7 +440,7 @@ def test_invalid_schema_version_1_is_rejected_before_opt_in_migration() -> None:
 
     with pytest.raises(ValidationError) as raised:
         HttpRequestLogRecord.model_validate(
-            version_1 | {HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY: True}
+            version_1 | {nameof(lambda: HttpRequestLogRecord.coerce_schema_v1): True}
         )
 
     assert raised.value.errors(include_url=False) == [
@@ -377,7 +468,7 @@ def test_schema_version_1_reports_ordinary_and_versioned_pydantic_errors() -> No
     ).model_dump() | {
         "method": 1,
         "response_body": None,
-        HTTP_REQUEST_LOG_PORT_KEY: None,
+        nameof(lambda: HttpRequestLogRecord.port): None,
     }
 
     with pytest.raises(ValidationError) as raised:
@@ -398,7 +489,7 @@ def test_schema_version_1_reports_ordinary_and_versioned_pydantic_errors() -> No
         },
         {
             "type": "extra_forbidden",
-            "loc": (HTTP_REQUEST_LOG_PORT_KEY,),
+            "loc": (nameof(lambda: HttpRequestLogRecord.port),),
             "msg": "Extra inputs are not permitted",
             "input": None,
         },
@@ -499,11 +590,11 @@ def test_http_request_log_response_body_is_required_in_v1_and_nullable_in_v1_1(
         duration_usec=789,
     ).model_dump()
 
-    value[HTTP_REQUEST_LOG_SCHEMA_VERSION_KEY] = schema_version
+    value[nameof(lambda: HttpRequestLogRecord.schema_version)] = schema_version
     value["response_body"] = response_body
 
     if coerce_schema_v1 is not None:
-        value[HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY] = coerce_schema_v1
+        value[nameof(lambda: HttpRequestLogRecord.coerce_schema_v1)] = coerce_schema_v1
 
     if valid:
         record = HttpRequestLogRecord.model_validate(value)
@@ -513,7 +604,7 @@ def test_http_request_log_response_body_is_required_in_v1_and_nullable_in_v1_1(
 
         assert restored.response_body == response_body
         assert restored.schema_version == expected_schema_version
-        assert HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY not in record.model_dump()
+        assert nameof(lambda: HttpRequestLogRecord.coerce_schema_v1) not in record.model_dump()
         assert restored.coerce_schema_v1 is False
     else:
         with pytest.raises(ValidationError) as raised:
@@ -533,12 +624,12 @@ def test_http_request_log_response_body_is_required_in_v1_and_nullable_in_v1_1(
     ("field", "error_type", "error_message"),
     [
         (
-            HTTP_REQUEST_LOG_RESPONSE_HEADERS_KEY,
+            nameof(lambda: HttpRequestLogRecord.response_headers),
             "dict_type",
             "Input should be a valid dictionary",
         ),
         (
-            HTTP_REQUEST_LOG_DURATION_USEC_KEY,
+            nameof(lambda: HttpRequestLogRecord.duration_usec),
             "int_type",
             "Input should be a valid integer",
         ),
@@ -562,7 +653,9 @@ def test_http_request_log_response_metadata_is_nonnull_in_v1_and_nullable_in_v1_
         duration_usec=789,
     ).model_dump()
     nullable_version_1_1 = version_1 | {
-        HTTP_REQUEST_LOG_SCHEMA_VERSION_KEY: KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
+        nameof(lambda: HttpRequestLogRecord.schema_version): (
+            KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
+        ),
         field: None,
     }
 
@@ -574,8 +667,8 @@ def test_http_request_log_response_metadata_is_nonnull_in_v1_and_nullable_in_v1_
     for schema_version in (1, "1"):
         for coerce_schema_v1 in (False, True):
             invalid_version_1 = version_1 | {
-                HTTP_REQUEST_LOG_SCHEMA_VERSION_KEY: schema_version,
-                HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY: coerce_schema_v1,
+                nameof(lambda: HttpRequestLogRecord.schema_version): schema_version,
+                nameof(lambda: HttpRequestLogRecord.coerce_schema_v1): coerce_schema_v1,
                 field: None,
             }
             with pytest.raises(ValidationError) as raised:
@@ -607,7 +700,9 @@ def test_http_request_log_schema_version_1_1_requires_string_header_values(
         received_at_unix_usec=123456,
         duration_usec=789,
     ).model_dump() | {
-        HTTP_REQUEST_LOG_SCHEMA_VERSION_KEY: KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
+        nameof(lambda: HttpRequestLogRecord.schema_version): (
+            KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
+        ),
         field: {"x-test-header": 1},
     }
 
@@ -640,11 +735,13 @@ def test_invalid_schema_version_1_1_ignores_v1_coercion_flag(
         received_at_unix_usec=123456,
         duration_usec=789,
     ).model_dump() | {
-        HTTP_REQUEST_LOG_SCHEMA_VERSION_KEY: KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
-        HTTP_REQUEST_LOG_PORT_KEY: "8612",
+        nameof(lambda: HttpRequestLogRecord.schema_version): (
+            KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
+        ),
+        nameof(lambda: HttpRequestLogRecord.port): "8612",
     }
     if coerce_schema_v1 is not None:
-        value[HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY] = coerce_schema_v1
+        value[nameof(lambda: HttpRequestLogRecord.coerce_schema_v1)] = coerce_schema_v1
 
     with pytest.raises(ValidationError) as raised:
         HttpRequestLogRecord.model_validate(value)
@@ -698,7 +795,7 @@ def test_to_response_does_not_invent_a_response_for_request_only_record() -> Non
     record = HttpRequestLogRecord(
         schema_version="1.1", method="POST", scheme="http", host="invalid",
         path="/validate", query="", response_code=None, response_headers=None,
-        response_body=None, received_at_unix_usec=None, duration_usec=None,
+        response_body=None, received_at_unix_usec=1, duration_usec=0,
     )
     with pytest.raises(OSError, match="did not receive"):
         record.to_response()

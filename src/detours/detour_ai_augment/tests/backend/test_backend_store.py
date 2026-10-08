@@ -75,7 +75,10 @@ from src.detours.detour_ai_augment.tests.backend.test_api import (
     persisted_http_record,
     valid_submission_body,
 )
-from src.helpers.data_models.http_request_log import HttpRequestLogRecord
+from src.helpers.architecture import nameof
+from src.helpers.data_models.http_request_log import (
+    HttpRequestLogRecord,
+)
 from src.helpers.vars import KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
 
 backend_test_paths = fixtures.backend_test_paths
@@ -413,10 +416,19 @@ def test_pull_ack_means_only_request_fsync_and_result_reports_processing_error(
                 asyncio.run(exercise())
 
 
-@pytest.mark.parametrize("received_at_unix_usec", (1, 0, None))
+@pytest.mark.parametrize(
+    ("request_record_type", "received_at_unix_usec", "ready_to_respond_at_unix_usec"),
+    (
+        (QueryRequestRecord, 1, None),
+        (QueryRequestRecord, 0, None),
+        (RequestRecord, None, 1),
+    ),
+)
 def test_query_only_capability_returns_nak_snapshot_and_never_changes_log_or_db(
     runtime: AiAugmentBackendContext,
+    request_record_type: type[RequestRecord],
     received_at_unix_usec: int | None,
+    ready_to_respond_at_unix_usec: int | None,
 ) -> None:
     with store_models.initialize_backend_store(
         runtime,
@@ -445,19 +457,21 @@ def test_query_only_capability_returns_nak_snapshot_and_never_changes_log_or_db(
         response_headers=None,
         response_body=None,
         received_at_unix_usec=received_at_unix_usec,
-        ready_to_respond_at_unix_usec=None,
+        ready_to_respond_at_unix_usec=ready_to_respond_at_unix_usec,
         duration_usec=0,
     )
     if received_at_unix_usec is None:
         with pytest.raises(ValidationError) as exc_info:
             QueryRequestRecord.model_validate(request_fields)
         assert [(e["loc"], e["type"]) for e in exc_info.value.errors()] == [
+            (
+                (nameof(lambda: HttpRequestLogRecord.ready_to_respond_at_unix_usec),),
+                "none_required",
+            ),
             (("received_at_unix_usec",), "int_type")
         ]
-        # Exercise Store's rejection boundary despite the typed model rejecting this input.
-        request = RequestRecord.model_validate(request_fields)
-    else:
-        request = QueryRequestRecord.model_validate(request_fields)
+    # The generic record exercises Store rejection of the malformed query envelope.
+    request = request_record_type.model_validate(request_fields)
     with store_models.initialize_backend_store(runtime, ipc_only=True) as store:
         assert not any(hasattr(store, name) for name in ("pull", "push", "run_outcome", "execute"))
         if isinstance(request, QueryRequestRecord):
@@ -472,6 +486,10 @@ def test_query_only_capability_returns_nak_snapshot_and_never_changes_log_or_db(
             assert response is None and error is not None
             assert isinstance(error.__cause__, ValidationError)
             assert [(e["loc"], e["type"]) for e in error.__cause__.errors()] == [
+                (
+                    (nameof(lambda: HttpRequestLogRecord.ready_to_respond_at_unix_usec),),
+                    "none_required",
+                ),
                 (("received_at_unix_usec",), "int_type")
             ]
         else:
@@ -689,7 +707,7 @@ def test_invalid_synthetic_envelope_is_fsynced_before_domain_rejection(
         host=SYNTHETIC_COMMIT_HOST, port=None,
         path=path, query="", request_headers={}, request_body="{}",
         response_code=None, response_headers=None, response_body=None,
-        received_at_unix_usec=None, ready_to_respond_at_unix_usec=None, duration_usec=None,
+        received_at_unix_usec=1, ready_to_respond_at_unix_usec=None, duration_usec=None,
     )
     fsynced: list[bytes] = []
     real_fsync = os.fsync

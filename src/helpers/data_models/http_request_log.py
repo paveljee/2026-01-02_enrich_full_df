@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Final, Literal, Protocol, Self, cast
+from typing import Any, Literal, Protocol, Self, cast
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 from uuid import UUID, uuid7
 
@@ -18,22 +18,12 @@ from pydantic import (
 )
 from pydantic_core import InitErrorDetails
 
-from src.helpers.architecture import implements
+from src.helpers.architecture import implements, nameof
 from src.helpers.vars import (
     KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION,
     KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1,
 )
 
-HTTP_REQUEST_LOG_SCHEMA_VERSION_KEY: Final = "schema_version"
-HTTP_REQUEST_LOG_RECORD_ID_KEY: Final = "record_id"
-HTTP_REQUEST_LOG_PORT_KEY: Final = "port"
-HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY: Final = "coerce_schema_v1"
-HTTP_REQUEST_LOG_READY_TO_RESPOND_AT_UNIX_USEC_KEY: Final = (
-    "ready_to_respond_at_unix_usec"
-)
-HTTP_REQUEST_LOG_RESPONSE_BODY_KEY: Final = "response_body"
-HTTP_REQUEST_LOG_RESPONSE_HEADERS_KEY: Final = "response_headers"
-HTTP_REQUEST_LOG_DURATION_USEC_KEY: Final = "duration_usec"
 HttpRequestLogSchemaVersionV1 = Literal[1, "1"]
 HttpRequestLogSchemaVersion = Literal[1, "1", "1.1"]
 
@@ -146,7 +136,7 @@ class HttpRequestLogRecord(BaseModel):
     response_code: int | None
     response_headers: dict[str, str] | None = Field(default_factory=dict)
     response_body: str | None
-    received_at_unix_usec: int | None
+    received_at_unix_usec: int | None = None
     duration_usec: int | None
 
     @classmethod
@@ -215,26 +205,31 @@ class HttpRequestLogRecord(BaseModel):
     def validate_versioned_fields(cls, value: Any) -> Any:
         if not isinstance(value, Mapping):
             return value
-        schema_version = value.get(HTTP_REQUEST_LOG_SCHEMA_VERSION_KEY)
+        received_at_field = nameof(
+            lambda: HttpRequestLogRecord.received_at_unix_usec
+        )
+        schema_version = value.get(
+            nameof(lambda: HttpRequestLogRecord.schema_version)
+        )
         coerce_schema_v1 = (
-            value.get(HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY) is True
+            value.get(nameof(lambda: HttpRequestLogRecord.coerce_schema_v1)) is True
         )
         if _is_http_request_log_schema_version_1(schema_version):
             if coerce_schema_v1:
                 version_1 = dict(value)
-                version_1.pop(HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY, None)
+                version_1.pop(nameof(lambda: HttpRequestLogRecord.coerce_schema_v1), None)
                 cls.model_validate(version_1)
                 version_1_1 = dict(value)
-                version_1_1[HTTP_REQUEST_LOG_SCHEMA_VERSION_KEY] = (
+                version_1_1[nameof(lambda: HttpRequestLogRecord.schema_version)] = (
                     KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
                 )
                 return version_1_1
             version_1_errors: list[InitErrorDetails] = []
             # disallow legacy typing
             for field, error_type in (
-                (HTTP_REQUEST_LOG_RESPONSE_BODY_KEY, "string_type"),
-                (HTTP_REQUEST_LOG_RESPONSE_HEADERS_KEY, "dict_type"),
-                (HTTP_REQUEST_LOG_DURATION_USEC_KEY, "int_type"),
+                (nameof(lambda: HttpRequestLogRecord.response_body), "string_type"),
+                (nameof(lambda: HttpRequestLogRecord.response_headers), "dict_type"),
+                (nameof(lambda: HttpRequestLogRecord.duration_usec), "int_type"),
             ):
                 if field in value and value[field] is None:
                     version_1_errors.append(
@@ -244,12 +239,20 @@ class HttpRequestLogRecord(BaseModel):
                             input=None,
                         )
                     )
+            # v1 requires a real receipt; v1.1 can omit this timestamp entirely.
+            if received_at_field not in value:
+                version_1_errors.append(InitErrorDetails(
+                    type="missing", loc=(received_at_field,), input=value,
+                ))
+            elif value[received_at_field] is None:
+                version_1_errors.append(InitErrorDetails(
+                    type="int_type", loc=(received_at_field,), input=None,
+                ))
             # disallow extra fields
             for field in (
-                HTTP_REQUEST_LOG_RECORD_ID_KEY,
-                HTTP_REQUEST_LOG_PORT_KEY,
-                HTTP_REQUEST_LOG_READY_TO_RESPOND_AT_UNIX_USEC_KEY,
-                # HTTP_REQUEST_LOG_COERCE_SCHEMA_V1_KEY,  # but allow coercion field
+                nameof(lambda: HttpRequestLogRecord.record_id),
+                nameof(lambda: HttpRequestLogRecord.port),
+                nameof(lambda: HttpRequestLogRecord.ready_to_respond_at_unix_usec),
             ):
                 if field in value:
                     version_1_errors.append(
@@ -260,15 +263,19 @@ class HttpRequestLogRecord(BaseModel):
                         )
                     )
             version_1_1 = dict(value)
-            version_1_1[HTTP_REQUEST_LOG_SCHEMA_VERSION_KEY] = (
+            version_1_1[nameof(lambda: HttpRequestLogRecord.schema_version)] = (
                 KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
             )
-            version_1_1.pop(HTTP_REQUEST_LOG_RECORD_ID_KEY, None)
-            version_1_1.pop(HTTP_REQUEST_LOG_PORT_KEY, None)
+            version_1_1.pop(nameof(lambda: HttpRequestLogRecord.record_id), None)
+            version_1_1.pop(nameof(lambda: HttpRequestLogRecord.port), None)
             version_1_1.pop(
-                HTTP_REQUEST_LOG_READY_TO_RESPOND_AT_UNIX_USEC_KEY,
+                nameof(lambda: HttpRequestLogRecord.ready_to_respond_at_unix_usec),
                 None,
             )
+            if version_1_1.get(received_at_field) is None:
+                # This copy only probes ordinary field errors. The original v1
+                # input's missing/null receipt is reported separately below.
+                version_1_1[received_at_field] = 0
             ordinary_errors: list[Any] = []
             try:
                 cls.model_validate(version_1_1)
@@ -284,6 +291,25 @@ class HttpRequestLogRecord(BaseModel):
             return value
         return value
 
+    @model_validator(mode="after")
+    def require_timing_endpoint(self) -> Self:
+        if (
+            self.schema_version == KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
+            and self.received_at_unix_usec is None
+            and self.ready_to_respond_at_unix_usec is None
+        ):
+            received_at_field = nameof(
+                lambda: HttpRequestLogRecord.received_at_unix_usec
+            )
+            ready_to_respond_at_field = nameof(
+                lambda: HttpRequestLogRecord.ready_to_respond_at_unix_usec
+            )
+            raise ValueError(
+                f"At least one of {received_at_field} or "
+                f"{ready_to_respond_at_field} must be non-null"
+            )
+        return self
+
     @model_serializer(mode="wrap")
     def serialize_versioned_fields(
         self,
@@ -291,9 +317,12 @@ class HttpRequestLogRecord(BaseModel):
     ) -> dict[str, Any]:
         serialized = cast(dict[str, Any], handler(self))
         if _is_http_request_log_schema_version_1(self.schema_version):
-            serialized.pop(HTTP_REQUEST_LOG_RECORD_ID_KEY, None)
-            serialized.pop(HTTP_REQUEST_LOG_PORT_KEY, None)
-            serialized.pop(HTTP_REQUEST_LOG_READY_TO_RESPOND_AT_UNIX_USEC_KEY, None)
+            serialized.pop(nameof(lambda: HttpRequestLogRecord.record_id), None)
+            serialized.pop(nameof(lambda: HttpRequestLogRecord.port), None)
+            serialized.pop(
+                nameof(lambda: HttpRequestLogRecord.ready_to_respond_at_unix_usec),
+                None,
+            )
         return serialized
 
 
