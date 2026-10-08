@@ -15,15 +15,11 @@ from src.detours.detour_ai_augment.protected.src.architecture import (
 from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import Locale
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     ETAG_HEADER,
-    HTTP_CONTENT_LENGTH_HEADER,
-    HTTP_CONTENT_TYPE_HEADER,
     HTTP_POST_METHOD,
     SESSION_ID_HEADER,
     SOURCE_KEY_HEADER,
     SYNTHETIC_COMMIT_HOST,
     SYNTHETIC_COMMIT_SCHEME,
-    TEXT_ENCODING,
-    ContentType,
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     NAME_KEY_HEADER as NAME_KEY_HEADER,
@@ -281,19 +277,16 @@ class RunOutcomeResponseRecord(ResponseRecord):
             and rollout is not None
             and report is not None
         )
+        source_key = _http_header_value(self.response_headers, SOURCE_KEY_HEADER)
         if rollout is None:
-            expected_response_headers = None
+            expected_source_key = None
         else:
-            if self.response_headers is None:
+            if source_key is None:
                 raise ValueError(Locale.RUN_OUTCOME_SOURCE_KEY_MISSING)
-            filename, line_count = source_key_from_header_value(
-                _http_header_value(self.response_headers, SOURCE_KEY_HEADER)
-            )
+            filename, line_count = source_key_from_header_value(source_key)
             if line_count != rollout.line_count:
                 raise ValueError(Locale.RUN_OUTCOME_SOURCE_KEY_LINE_COUNT_INVALID)
-            expected_response_headers = {
-                SOURCE_KEY_HEADER: source_key_header_value(filename, line_count)
-            }
+            expected_source_key = source_key_header_value(filename, line_count)
         received_at_unix_usec = self.received_at_unix_usec
         ready_to_respond_at_unix_usec = self.ready_to_respond_at_unix_usec
         if (
@@ -308,22 +301,7 @@ class RunOutcomeResponseRecord(ResponseRecord):
             or received_at_unix_usec is not None
             or self.duration_usec is None
             or self.duration_usec < 0
-            or self.response_headers is None
-            or _http_header_value(self.response_headers, HTTP_CONTENT_TYPE_HEADER)
-            != ContentType.JSON
-            or _http_header_value(self.response_headers, HTTP_CONTENT_LENGTH_HEADER)
-            != str(len(self.response_body.encode(TEXT_ENCODING)))
-            or {
-                key.casefold() for key in self.response_headers
-            } != {
-                HTTP_CONTENT_TYPE_HEADER.casefold(), "content-length",
-                *({SOURCE_KEY_HEADER.casefold()} if expected_response_headers else set()),
-            }
-            or (
-                expected_response_headers is not None
-                and _http_header_value(self.response_headers, SOURCE_KEY_HEADER)
-                != expected_response_headers[SOURCE_KEY_HEADER]
-            )
+            or source_key != expected_source_key
             or (
                 self.response_code != HTTPStatus.BAD_REQUEST
                 and (self.response_code in {HTTPStatus.OK, HTTPStatus.CONFLICT})

@@ -149,6 +149,7 @@ from src.detours.detour_ai_augment.tests.backend.test_api import (
     standardized_submission_body,
     valid_submission_body,
 )
+from src.helpers.architecture import nameof
 from src.helpers.data_models import NameKey
 from src.helpers.data_models.http_request_log import HttpRequestLogRecord
 from src.helpers.vars import (
@@ -1011,6 +1012,42 @@ def outcome_for_commit(
         run_outcome_request_record=request_record,
         attempt=validation,
     )
+
+
+def test_run_outcome_replay_accepts_source_key_without_transport_headers(
+    backend_store: AiAugmentBackendStore,
+    runtime: AiAugmentBackendContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(requests.Session, "send", no_network)
+    store = backend_store
+    with store._writable(runtime):
+        commit_id = commit(store, valid_submission_body(), valid_submission_body())
+        validation = store._validate_commit(commit_id)
+        outcome = outcome_for_commit(
+            store, validation.validation_request_body.commit_request_record,
+        )
+        source_key = outcome.response_headers[SOURCE_KEY_HEADER]
+        recorded = outcome.model_copy(update={
+            nameof(lambda: RunOutcomeResponseRecord.response_headers): {
+                SOURCE_KEY_HEADER: source_key,
+            },
+        })
+        assert AiAugmentBackendStore._validated_http_record(recorded).model_dump_json() == (
+            recorded.model_dump_json()
+        )
+        replayed = RunOutcomeResponseRecord.from_http_request_log_record(recorded)
+        assert replayed.record_id == outcome.record_id
+        assert replayed.response_headers == {SOURCE_KEY_HEADER: source_key}
+
+        filename, line_count = AiAugmentBackendStore._parse_source_key_header(source_key)
+        invalid = recorded.model_copy(update={
+            nameof(lambda: RunOutcomeResponseRecord.response_headers): {
+                SOURCE_KEY_HEADER: source_key_header_value(filename, line_count + 1),
+            },
+        })
+        with pytest.raises(ValueError, match=Locale.RUN_OUTCOME_SOURCE_KEY_LINE_COUNT_INVALID):
+            RunOutcomeResponseRecord.from_http_request_log_record(invalid)
 
 
 @pytest.mark.parametrize("path", tuple(RunOutcomePath))
