@@ -2854,6 +2854,7 @@ class _ControlCentrePage:
                 .style(RUN_OUTCOME_HISTORY_TABLE_STYLE)
                 .props(
                     f"{RUN_OUTCOME_HISTORY_TABLE_PROPS} "
+                    f'no-data-label="{Locale.RUN_OUTCOME_HISTORY_EMPTY}" '
                     f"{_NiceGui.TEST_ID_PROP_TEMPLATE.format(test_id=RUN_OUTCOME_HISTORY_TABLE_TEST_ID)}"
                 )
             )

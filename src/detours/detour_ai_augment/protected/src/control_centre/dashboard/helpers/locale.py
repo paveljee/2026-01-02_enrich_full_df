@@ -53,6 +53,14 @@ class Locale:
     RUN_OUTCOME_HISTORY_TEMPLATE: Final = (
         "Runs and outcomes: {first_name} {last_name}"
     )
+    RUN_OUTCOME_HISTORY_EMPTY: Final = (
+        "No data available. Completed runs with saved results can be restored "
+        "from the Backend; failed and cancelled runs appear here only from this "
+        "Dashboard's local history. Backend refreshes preserve that history, "
+        "but runs started elsewhere or lost from local storage will not appear "
+        "unless completed with saved results. Their records may still exist in "
+        "the Backend database."
+    )
     CARD_INTRO_DATE_FORMAT: Final = "%B %d, %Y"
 
     ELIGIBLE_COHORTS_NOT_CONFIGURED: Final = "eligible cohorts were not configured"
