@@ -236,9 +236,9 @@ class Locale:
     PULL_RESPONSE_DESCRIPTION: Final = "JSON Lines annotation task or Markdown retry"
     PUSH_SUMMARY: Final = "Submit completed annotations"
     PUSH_DESCRIPTION: Final = (
-        "Durably accepts the submission before asynchronous validation."
+        "Accepts the submission before asynchronous validation."
     )
-    PUSH_RESPONSE_DESCRIPTION: Final = "Submission durably accepted; poll Location for outcome."
+    PUSH_RESPONSE_DESCRIPTION: Final = "Submission accepted; poll Location for outcome."
     EXCERPT_URL_NONBLANK = "excerpt and url must be non-blank"
     VALUE_NONBLANK = "value must be non-blank"
     EXCERPT_PAIRS_UNIQUE = "web_search_excerpts must not contain duplicate pairs"
