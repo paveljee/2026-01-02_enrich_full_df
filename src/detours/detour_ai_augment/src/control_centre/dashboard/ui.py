@@ -29,6 +29,9 @@ from fastapi import status
 from nicegui import app, ui
 from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 
+from src.detours.detour_ai_augment.protected.src.backend.helpers.codex_parse import (  # noqa: E501
+    AI_GENERATED_TEXT_PREFIX,
+)
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_augment_config import (  # noqa: E501
     AiAugmentDetourConfig,
 )
@@ -46,6 +49,7 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     CARD_EXCLUDED_COLUMNS,
     CODEX_OUTPUT_SCHEMA,
     CODEX_SESSIONS_ROOT_ENV_NAME,
+    COMPACT_JSON_SEPARATORS,
     DASHBOARD_IPC_HOST,
     DASHBOARD_QUERY_PATH,
     DASHBOARD_SOCKET_PATH,
@@ -126,7 +130,12 @@ from src.detours.detour_ai_augment.protected.src.shared import (
     source_key_from_header_value,
 )
 from src.helpers.architecture import FrozenStrictModel
-from src.helpers.cards import build_cards, card_filename, render_docx_bytes
+from src.helpers.cards import (
+    MARKDOWN_CODE_DELIMITER,
+    build_cards,
+    card_filename,
+    render_docx_bytes,
+)
 from src.helpers.data_models import InnerDict, NameKey
 from src.helpers.vars import (
     CARD_INTRODUCTION,
@@ -3607,6 +3616,7 @@ APPLICATION_CONFIG_PATH = DEFAULT_CONFIG_PATH
 APPLICATION_PUBLISH_COMPLETED = False
 APPLICATION_MARKDOWN_COMPLETED = False
 APPLICATION_SPREADSHEET_COMPLETED = False
+APPLICATION_SPREADSHEET_MARTIN = False
 APPLICATION_EXIT_CODE = 0
 
 
@@ -3748,7 +3758,7 @@ async def publish_completed(
     logger.info(finished_log, len(cards))
 
 
-def spreadsheet_completed(services: _ApplicationServices) -> None:
+def spreadsheet_completed(services: _ApplicationServices, *, martin: bool = False) -> None:
     completed_rows = sorted(
         services.controller.completed_run_rows(),
         key=lambda item: (
@@ -3770,6 +3780,10 @@ def spreadsheet_completed(services: _ApplicationServices) -> None:
     }
     for plain_column, standardized_column in AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS:
         ground_truth_by_ai[standardized_column] = ground_truth_by_ai.pop(plain_column)
+    standardized_columns = tuple(
+        standardized_column
+        for _, standardized_column in AI_AUGMENT_EVIDENCE_STANDARDIZED_PAIRS
+    )
     columns = []
     for column in codex_columns:
         columns.append(column)
@@ -3803,10 +3817,14 @@ def spreadsheet_completed(services: _ApplicationServices) -> None:
                     None if ground_truth is None
                     else ground_truth.data[table_1_column]
                 )
-            yield {
+            record = {
                 column: "" if values[column] is None else str(values[column])
                 for column in columns
             }
+            if martin:
+                for column in standardized_columns:
+                    record[column] = martin_serialize_standardized_cell(record[column])
+            yield record
 
     frame = pd.DataFrame.from_records(flat_records(), columns=columns)
     frame.to_csv(
@@ -3821,6 +3839,39 @@ def spreadsheet_completed(services: _ApplicationServices) -> None:
     logger.info(Locale.PUBLISH_WRITTEN_LOG, 1, 1, destination)
 
 
+def martin_serialize_standardized_cell(cell: str) -> str:
+    opening = f"{AI_GENERATED_TEXT_PREFIX} {MARKDOWN_CODE_DELIMITER}"
+    if not (cell.startswith(opening) and cell.endswith(MARKDOWN_CODE_DELIMITER)):
+        return cell
+
+    value = json.loads(cell[len(opening):-len(MARKDOWN_CODE_DELIMITER)])
+
+    def inline(item: object) -> str:
+        if isinstance(item, str):
+            return item
+        if isinstance(item, (dict, list)):
+            parts = item.values() if isinstance(item, dict) else item
+            if all(not isinstance(part, (dict, list)) for part in parts):
+                return ", ".join(inline(part) for part in parts)
+        return json.dumps(item, ensure_ascii=False, separators=COMPACT_JSON_SEPARATORS)
+
+    def block(item: object) -> str:
+        return (
+            "\n".join(inline(part) for part in item.values())
+            if isinstance(item, dict) else inline(item)
+        )
+
+    if isinstance(value, list):
+        separator = "\n\n" if all(isinstance(item, dict) for item in value) else "\n"
+        body = separator.join(block(item) for item in value)
+    else:
+        body = block(value)
+    if not isinstance(value, (dict, list)) or "\n" not in body:
+        return cell
+    fence = MARKDOWN_CODE_DELIMITER * 3
+    return f"{AI_GENERATED_TEXT_PREFIX}\n\n{fence}\n{body}\n{fence}"
+
+
 async def publish_and_shutdown() -> None:
     global APPLICATION_EXIT_CODE
     try:
@@ -3831,7 +3882,7 @@ async def publish_and_shutdown() -> None:
                 output_format="txt" if APPLICATION_MARKDOWN_COMPLETED else "docx",
             )
         else:
-            spreadsheet_completed(services)
+            spreadsheet_completed(services, martin=APPLICATION_SPREADSHEET_MARTIN)
     except Exception as exc:
         APPLICATION_EXIT_CODE = 1
         if isinstance(exc, ValidationError):
@@ -3916,18 +3967,23 @@ def configure_application_lifecycle() -> None:
 
 def main(argv: list[str] | None = None) -> int:
     global APPLICATION_CONFIG_PATH, APPLICATION_PUBLISH_COMPLETED, APPLICATION_MARKDOWN_COMPLETED
-    global APPLICATION_SPREADSHEET_COMPLETED, APPLICATION_EXIT_CODE
+    global APPLICATION_SPREADSHEET_COMPLETED, APPLICATION_SPREADSHEET_MARTIN
+    global APPLICATION_EXIT_CODE
 
     parser = argparse.ArgumentParser()
     parser.add_argument(CONFIG_OPTION, required=True, type=Path)
     parser.add_argument("operation", nargs="?", choices=["publish", "markdown", "spreadsheet"])
     parser.add_argument("selection", nargs="?", choices=["completed"])
+    parser.add_argument("style", nargs="?", choices=["martin"])
     arguments = parser.parse_args(argv)
     if (arguments.operation is None) != (arguments.selection is None):
         parser.error("Expected: publish completed, markdown completed or spreadsheet completed")
+    if arguments.style is not None and arguments.operation != "spreadsheet":
+        parser.error(Locale.SPREADSHEET_MARTIN_ONLY)
     APPLICATION_PUBLISH_COMPLETED = arguments.operation == "publish"
     APPLICATION_MARKDOWN_COMPLETED = arguments.operation == "markdown"
     APPLICATION_SPREADSHEET_COMPLETED = arguments.operation == "spreadsheet"
+    APPLICATION_SPREADSHEET_MARTIN = arguments.style == "martin"
     APPLICATION_EXIT_CODE = 0
     APPLICATION_CONFIG_PATH = arguments.config
     configure_application_lifecycle()

@@ -36,6 +36,7 @@ from pydantic import ValidationError
 from src.detours.detour_ai_augment.protected.src.backend import server as backend_server
 from src.detours.detour_ai_augment.protected.src.backend.helpers import api
 from src.detours.detour_ai_augment.protected.src.backend.helpers.codex_parse import (
+    AI_GENERATED_TEXT_PREFIX,
     render_footnoted_submission_value,
     render_standardized_submission_value,
 )
@@ -51,6 +52,9 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.pos
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.pydantic_to_paste import (  # noqa: E501
     EXPORT_OPENALEX_API_KEY,
 )
+from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.submission_fixture import (  # noqa: E501
+    L_FEI_FEI_RETRY_FIXTURE,
+)
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.submission_init import (  # noqa: E501
     Submission,
 )
@@ -65,6 +69,7 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     CARD_EXCLUDED_COLUMNS,
     CODEX_OUTPUT_SCHEMA,
     CODEX_SESSIONS_ROOT_ENV_NAME,
+    COMPACT_JSON_SEPARATORS,
     CONFIG_FILENAME,
     DASHBOARD_QUERY_PATH,
     DASHBOARD_SOCKET_PATH_ENV_NAME,
@@ -3614,11 +3619,96 @@ async def test_publish_completed_includes_earlier_completed_run_and_writes_cards
         await subject.shutdown()
 
 
+def test_martin_standardized_serializer_formats_fixture_and_preserves_single_values() -> None:
+    submission = L_FEI_FEI_RETRY_FIXTURE.submission
+
+    def cell(field: str) -> str:
+        value = getattr(submission, field).model_dump(mode="json")["standardized_value"]
+        return render_standardized_submission_value(json.dumps(
+            value, ensure_ascii=False, separators=COMPACT_JSON_SEPARATORS,
+        ))
+
+    assert control_ui.martin_serialize_standardized_cell(cell("gender")) == cell("gender")
+    assert control_ui.martin_serialize_standardized_cell(cell("age_first_publication")) == (
+        cell("age_first_publication")
+    )
+    multiline_scalar = render_standardized_submission_value(json.dumps("line one\nline two"))
+    assert control_ui.martin_serialize_standardized_cell(multiline_scalar) == multiline_scalar
+    assert control_ui.martin_serialize_standardized_cell(
+        cell("race_ethnicity_language_culture")
+    ) == (
+        f"{AI_GENERATED_TEXT_PREFIX}\n\n```\nNA\nNA\neng, cmn\nNA\n```"
+    )
+    assert control_ui.martin_serialize_standardized_cell(cell("education")) == (
+        f"{AI_GENERATED_TEXT_PREFIX}\n\n```\n"
+        "B.A. Physics\n6\nPrinceton University, https://openalex.org/I20089843, "
+        "https://ror.org/00hx57361\n1999\n\n"
+        "M.S. Electrical Engineering\n7\nCalifornia Institute of Technology, "
+        "https://openalex.org/I122411786, https://ror.org/05dxps055\n2001\n\n"
+        "Ph.D. Electrical Engineering\n8\nCalifornia Institute of Technology, "
+        "https://openalex.org/I122411786, https://ror.org/05dxps055\n2005\n```"
+    )
+    assert control_ui.martin_serialize_standardized_cell(cell("links")) == (
+        f"{AI_GENERATED_TEXT_PREFIX}\n\n```\n"
+        "https://profiles.stanford.edu/fei-fei-li\nfalse\n\n"
+        "https://openalex.org/A5100450462\nfalse\n\n"
+        "https://ai-4-all.org/our-people/fei-fei-li/\nfalse\n```"
+    )
+    assert control_ui.martin_serialize_standardized_cell(cell("social_capital")) == (
+        f"{AI_GENERATED_TEXT_PREFIX}\n\n```\n"
+        "Founding Co-Director, Stanford HAI\nCo-founder and Chair, AI4ALL\n"
+        "Member, National Academy of Engineering\n"
+        "Member, National Academy of Medicine\n"
+        "Member, American Academy of Arts and Sciences\n"
+        "Member, Council on Foreign Relations\nACM Fellow\n"
+        "United Nations special adviser\n```"
+    )
+    deeper = render_standardized_submission_value(json.dumps({
+        "first": {"nested": {"value": "NA"}}, "second": "NR",
+    }))
+    assert control_ui.martin_serialize_standardized_cell(deeper) == (
+        f'{AI_GENERATED_TEXT_PREFIX}\n\n```\n{{"nested":{{"value":"NA"}}}}\nNR\n```'
+    )
+    assert control_ui.martin_serialize_standardized_cell("unrecognized cell") == (
+        "unrecognized cell"
+    )
+
+
+def test_martin_cli_is_available_only_for_completed_spreadsheet(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    run = Mock()
+    monkeypatch.setattr(control_ui, "configure_application_lifecycle", Mock())
+    monkeypatch.setattr(ui, "run", run)
+    for flag in (
+        "APPLICATION_PUBLISH_COMPLETED", "APPLICATION_MARKDOWN_COMPLETED",
+        "APPLICATION_SPREADSHEET_COMPLETED", "APPLICATION_SPREADSHEET_MARTIN",
+    ):
+        monkeypatch.setattr(control_ui, flag, False)
+    monkeypatch.setattr(control_ui, "APPLICATION_CONFIG_PATH", Path("config.json"))
+    monkeypatch.setattr(control_ui, "APPLICATION_EXIT_CODE", 0)
+
+    command = [backend_server.CONFIG_OPTION, "config.json", "spreadsheet", "completed"]
+    assert control_ui.main([*command, "martin"]) == 0
+    assert control_ui.APPLICATION_SPREADSHEET_MARTIN is True
+    assert control_ui.main(command) == 0
+    assert control_ui.APPLICATION_SPREADSHEET_MARTIN is False
+    assert run.call_count == 2
+
+    with pytest.raises(SystemExit) as exc_info:
+        control_ui.main([
+            backend_server.CONFIG_OPTION, "config.json", "publish", "completed", "martin",
+        ])
+    assert exc_info.value.code == 2
+    assert Locale.SPREADSHEET_MARTIN_ONLY in capsys.readouterr().err
+
+
 @pytest.mark.anyio
 async def test_spreadsheet_completed_preserves_card_values_and_ground_truth_pairs(
     startup_files: StartupFiles,
     faithful_publishing_services: control_ui._ApplicationServices,
     capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     application = faithful_publishing_services
     blueprints = backend_server.configure_runtime(
@@ -3776,6 +3866,21 @@ async def test_spreadsheet_completed_preserves_card_values_and_ground_truth_pair
             )
         for table_1_column, ai_column in DOCX_TO_AI_AUGMENT_COLUMNS:
             assert no_ground_truth_row[table_1_column] == ""
+        assert app.storage.general == before
+
+        converted = Mock(side_effect=lambda cell: f"martin::{cell}")
+        monkeypatch.setattr(control_ui, "martin_serialize_standardized_cell", converted)
+        control_ui.spreadsheet_completed(application, martin=True)
+        with destination.open(newline="", encoding=TEXT_ENCODING_WITH_BOM) as file:
+            martin_rows = list(csv.DictReader(file))
+        standardized_columns = set(standardized_by_ai.values())
+        assert converted.call_count == len(rows) * len(standardized_columns)
+        for original, martin_row in zip(rows, martin_rows, strict=True):
+            for column in columns:
+                assert martin_row[column] == (
+                    f"martin::{original[column]}"
+                    if column in standardized_columns else original[column]
+                )
         assert app.storage.general == before
     finally:
         await application.controller.shutdown()

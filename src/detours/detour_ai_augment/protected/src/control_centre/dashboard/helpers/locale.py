@@ -289,4 +289,5 @@ class Locale:
     PUBLISH_WRITTEN_LOG: Final = "[%d/%d] Written %s"
     PUBLISH_FINISHED_LOG: Final = "Publishing finished: %d DOCX files"
     PUBLISH_FAILED_LOG: Final = "Publishing completed researchers failed"
+    SPREADSHEET_MARTIN_ONLY: Final = "martin is only available for spreadsheet completed"
     DASHBOARD_STARTUP_FAILED_LOG: Final = "Dashboard startup failed"
