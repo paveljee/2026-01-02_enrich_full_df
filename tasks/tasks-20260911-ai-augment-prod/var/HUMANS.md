@@ -52,3 +52,33 @@
 | [codex_innerdicts](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/src/backend/helpers/data_models/ai_augment_backend_store.py:2562) | Completed-output view is materialized as grouped flat JSONL → Store query builds `CodexInnerDict` and outerdicts. | Required final card representation. |
 
 **Other relations:** `codex_output` is a used view that filters completed rows for `codex_innerdicts`. `codex_turn_ref_normalized` is a match-version-2 view that is created but has **no production reader I could find**; it is the one relation whose current utility I cannot justify. [Store:2487](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/src/backend/helpers/data_models/ai_augment_backend_store.py:2487) The shared materializer briefly creates and drops `codex_innerdicts_frame`, so it is **not a twelfth persistent table**. The sample proxy’s `pricing_daily` and `requests` belong to a separate SQLite DB, not this DuckDB.
+
+# on retry, what are opportunities for client? enumerate the complete list of what extent and in what specific ways in which client can modify the submission vs the baseline.
+
+There are **two kinds of retry**. After a schema or rollout rejection *before* an evidence baseline exists, the client still submits `Submission`. Once an evidence-rejected submission establishes the baseline, every later push in that original-pull chain must submit a **complete `StandardizedSubmission`**, not a patch ([post_commit_validation.py](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/protected/src/backend/helpers/data_models/post_commit_validation.py:1777)).
+
+For that post-baseline retry, the comparison is against the **current obligations**: the original baseline plus earlier *applied* audits, not necessarily the original push unchanged.
+
+| Part of the new submission | What the client may change |
+| --- | --- |
+| Nine evidence-bearing fields | All must remain present. Each must now include a type-valid `standardized_value`. |
+| `standardized_value` | May be supplied or changed independently on **any** field—even one whose evidence and raw `value` are frozen. The retry-obligation check does not compare standardized values; Pydantic and provider checks still apply. |
+| Optional comments | May be added, edited, or removed. They are not in the evidence obligations. |
+| Raw `value` of a fully accepted field | **Cannot change.** A field becomes accepted when it has at least one exact item and every other item is exact or withdrawn. Its entire evidence list is then frozen too. |
+| Raw `value` of a not-yet-accepted field | May change, subject to its schema. It **must** change if this retry withdraws a previously unmatched item in that field. |
+| Previously exact evidence item | Its excerpt and URL must remain identical at that index. |
+| Previously near-match item | Cannot be withdrawn or given a different URL. Its excerpt may change only while retaining the same normalized word tokens and assessing as near or exact—principally corrections to case, accents, punctuation, or spacing. Once exact in an applied retry, it becomes immutable. |
+| Previously unmatched item | May be replaced with a different excerpt and/or URL, retained, or replaced by the explicit attested withdrawal object. A withdrawal is not a way to delete the slot. |
+| Previously withdrawn item | Must remain a withdrawal; it cannot be restored as an excerpt. |
+| Evidence-list length | A not-yet-accepted field may gain new excerpt items at the end, but cannot lose prior positions. A new item cannot *start* as a withdrawal. An accepted field cannot gain items. |
+
+These are **index-based** rules; there is no separate evidence-item ID. Reordering is permissible only insofar as every resulting position still satisfies its rule. The model also requires nonblank, unique excerpt/URL pairs and at least one evidence entry per field ([pydantic_to_paste.py](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/protected/src/backend/helpers/data_models/pydantic_to_paste.py:378), [post_commit_validation.py](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/protected/src/backend/helpers/data_models/post_commit_validation.py:1225)).
+
+The key checks are:
+
+```python
+applied = not violations
+accepted = assessment.accepted and applied
+```
+
+So a retry can make an allowed change without yet passing evidence validation; if it has **no contract violations**, that change becomes part of the obligations for the *next* retry. Final acceptance requires no contract violations **and**, in every evidence-bearing field, at least one exact match with all remaining items exact or withdrawn ([vars.py](/home/moshi/2026-01-02_enrich_full_df/src/detours/detour_ai_augment/protected/src/backend/helpers/vars.py:193)).
