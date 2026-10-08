@@ -10,6 +10,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections.abc import Generator, Iterator, Sequence
@@ -45,12 +46,12 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.ai_
     RESOURCE_PATH_KEY,
     RESOURCE_SHA256_KEY,
 )
-from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.post_commit_validation import (  # noqa: E501
-    PostCommitValidation,
-)
 from src.detours.detour_ai_augment.protected.src.backend.helpers.data_models.store import (  # noqa: E501
     AiAugmentBackendStore,
     initialize_backend_store,
+)
+from src.detours.detour_ai_augment.protected.src.backend.helpers.locale import (  # noqa: E501
+    Locale as BackendLocale,
 )
 from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     AIVM_AUDIT_USER,
@@ -61,11 +62,13 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     AUDIT_PROBE_COMMAND,
     AUDIT_READ_APPENDWATCH_REPORT_COMMAND,
     AUDIT_READ_ROLLOUT_COMMAND,
+    CODEX_OUTPUT_ROWS_TABLE,
     COMMIT_REQUEST_RECORD_ID_COLUMN,
     COMMIT_VALIDATION_REQUEST_RECORD_INDEX_TABLE,
     CONFIG_FILENAME,
     DASHBOARD_SOCKET_PATH_ENV_NAME,
     ETAG_HEADER,
+    HTTP_CONTENT_TYPE_HEADER,
     HTTP_GET_METHOD,
     HTTP_POST_METHOD,
     INIT_PATH,
@@ -73,6 +76,8 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     KTP_AI_AUGMENT_SESSION_METADATA_COL,
     LIMA_SSH_CONFIG_PATH,
     LOCATION_HEADER,
+    POST_COMMIT_VALIDATION_COMMIT_RECORD_ID_COL,
+    POST_COMMIT_VALIDATION_EVIDENCE_AUDITS_TABLE,
     PULL_PATH,
     PUSH_PATH,
     REPLAY_LOG_KEY,
@@ -82,6 +87,7 @@ from src.detours.detour_ai_augment.protected.src.backend.helpers.vars import (
     TEXT_ENCODING,
     VALIDATION_REQUEST_RECORD_ID_COLUMN,
     AiAugmentCohort,
+    ContentType,
 )
 from src.detours.detour_ai_augment.protected.src.control_centre.dashboard.helpers.locale import (
     Locale,
@@ -107,9 +113,14 @@ from src.detours.detour_ai_augment.protected.tests.pytest_plugin import (
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_context import (
     AiAugmentBackendContext,
 )
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.ai_augment_singular_outer_dict import (  # noqa: E501
+    AiAugmentSingularOuterDict,
+)
+from src.detours.detour_ai_augment.src.backend.helpers.data_models.codex_innerdict import (
+    CodexInnerDict,
+)
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.commit_request import (
     COMMIT_PATH,
-    BackendCommitRequestRecord,
     _CommitRequestBodyJson,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.init_request import (
@@ -117,12 +128,6 @@ from src.detours.detour_ai_augment.src.backend.helpers.data_models.init_request 
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.lifecycle import (
     BackendLifecycle,
-)
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.pull_event import (
-    PullResponseRecord,
-)
-from src.detours.detour_ai_augment.src.backend.helpers.data_models.push_event import (
-    PushResponseRecord,
 )
 from src.detours.detour_ai_augment.src.backend.helpers.data_models.validation_request import (
     VALIDATE_PATH,
@@ -135,14 +140,26 @@ from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_mod
     LIMA_APPENDWATCH_REPORT_PARAM,
     AiAugmentControlCentreContext,
 )
+from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.ai_augment_dashboard_storage import (  # noqa: E501
+    BACKEND_DATABASE_STORAGE_KEY,
+    RUN_EVENTS_STORAGE_KEY,
+    RUNS_STORAGE_KEY,
+)
+from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.dashboard_query_snapshot import (  # noqa: E501
+    DashboardQuerySnapshot,
+)
 from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.lifecycle import (  # noqa: E501
     RunLifecycle,
+)
+from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.run_event import (  # noqa: E501
+    Run,
+    RunEvent,
 )
 from src.detours.detour_ai_augment.src.control_centre.dashboard.helpers.data_models.run_outcome_event import (  # noqa: E501
     RunOutcomePath,
     RunOutcomeResponseRecord,
 )
-from src.helpers.architecture import FrozenStrictModel
+from src.helpers.architecture import FrozenStrictModel, nameof
 from src.helpers.data_models import HttpRequestLogRecord, NameKey
 from src.helpers.vars import KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1, KTP_LAST_NAME_COL
 
@@ -545,6 +562,7 @@ def operator_runtime(
 ) -> Iterator[OperatorRuntime]:
     run_dir = tmp_path
     _operator_log(f"Operator run directory (preserved): {run_dir}")
+    _operator_log(f"operator test source SHA-256: {_file_digest(Path(__file__)).hex()}")
     dashboard_socket_path = run_dir / "dashboard.sock"
     if len(os.fsencode(dashboard_socket_path)) >= DARWIN_AF_UNIX_PATH_CAPACITY_BYTES:
         raise RuntimeError("operator dashboard socket path exceeds Darwin AF_UNIX capacity")
@@ -1170,7 +1188,26 @@ def validate_workflow_artifacts(
 ) -> None:
     _operator_log("validating authoritative workflow artifacts")
     assert not operator_runtime.dashboard_socket_path.exists()
+    artifact_dir = operator_runtime.config_path.parent
+    _operator_log(
+        f"retained artifact entries: "
+        f"{', '.join(sorted(path.name for path in artifact_dir.iterdir()))}"
+    )
     records = authoritative_records(operator_runtime.replay_log_path)
+    previous_end: int | None = None
+    for ordinal, record in enumerate(records, start=1):
+        ready = record.ready_to_respond_at_unix_usec
+        end = ready if ready is not None else record.received_at_unix_usec
+        duration = record.duration_usec
+        start = end - duration if end is not None and duration is not None else None
+        gap = start - previous_end if start is not None and previous_end is not None else None
+        _operator_log(
+            f"replay line={ordinal}/{len(records)} record={record.record_id} "
+            f"{record.method} {record.path} status={record.response_code} "
+            f"received={record.received_at_unix_usec} ready={ready} "
+            f"duration={duration} gap_from_previous_end={gap}"
+        )
+        previous_end = end
 
     assert all(
         record.schema_version == KTP_HTTP_REQUEST_LOG_SCHEMA_VERSION_V1_1
@@ -1196,26 +1233,41 @@ def validate_workflow_artifacts(
             verify_hash_on_init=False,
         )
     )
-    accepted_commits: list[BackendCommitRequestRecord] = []
+    accepted_commits: list[tuple[HttpRequestLogRecord, _CommitRequestBodyJson]] = []
     for record in records:
         if (record.method, record.path) != (HTTP_POST_METHOD, COMMIT_PATH):
             continue
         assert record.request_body is not None
         body = _CommitRequestBodyJson.model_validate_json(record.request_body)
-        pull = PullResponseRecord.from_http_request_log_record(
-            http_request_log_record=records_by_id[body.pull_record_id],
+        pull = records_by_id[body.pull_record_id]
+        push = records_by_id[body.push_record_id]
+        assert pull.response_code == status.HTTP_200_OK
+        assert push.response_code == status.HTTP_202_ACCEPTED
+        pull_ordinal = _record_ordinal(records, pull.record_id)
+        assert (
+            pull_ordinal
+            < _record_ordinal(records, push.record_id)
+            < _record_ordinal(records, record.record_id)
         )
-        push = PushResponseRecord.from_http_request_log_record(
-            http_request_log_record=records_by_id[body.push_record_id],
-            pull_response_record=pull,
-        )
-        refs: dict[UUID, PullResponseRecord | PushResponseRecord] = {
-            pull.record_id: pull, push.record_id: push,
-        }
-        commit_request_record = BackendCommitRequestRecord.from_http_request_log_record(
-            record,
-            resolve_http_record=refs.__getitem__,
-        )
+        if backend_api._http_header_value(
+            pull.response_headers, HTTP_CONTENT_TYPE_HEADER,
+        ) == ContentType.MARKDOWN_UTF8:
+            prior_validation = next(
+                (
+                    candidate for candidate in reversed(records[:pull_ordinal])
+                    if (candidate.method, candidate.path)
+                    == (HTTP_POST_METHOD, VALIDATE_PATH)
+                ),
+                None,
+            )
+            assert prior_validation is not None
+            assert prior_validation.request_body is not None
+            feedback = json.loads(prior_validation.request_body)[
+                "post_commit_validation"
+            ]["detail"]
+            assert pull.response_body == (
+                (feedback or BackendLocale.VALIDATION_ERROR_DETAIL).rstrip() + "\n"
+            )
         with initialize_backend_store(runtime, ipc_only=True) as query_store:
             backend_store = query_store._engine
             row = backend_store._execute(
@@ -1232,26 +1284,19 @@ def validate_workflow_artifacts(
                 assert UUID(validation_request_body["commit_request_record_id"]) == record.record_id
         if row is not None:
             if (
-                PostCommitValidation.model_validate(
-                    validation_request_body["post_commit_validation"], strict=False,
-                ).result
-                is BackendLifecycle.ACCEPTED
+                validation_request_body["post_commit_validation"]["result"]
+                == BackendLifecycle.ACCEPTED
             ):
-                accepted_commits.append(commit_request_record)
+                accepted_commits.append((record, body))
     assert len(accepted_commits) == 1
-    commit_request_record = accepted_commits[0]
-    assert (
-        AiAugmentBackendStore._validated_http_record(commit_request_record).model_dump()
-        == commit_request_record.model_dump()
-    )
-    commit_request_body = commit_request_record.commit_request_body
+    commit_request_record, commit_request_body = accepted_commits[0]
     session = commit_request_body.codex_session_record
-    assert session.session_id is not None
+    assert session.codex_session_id is not None
     assert session.codex_rollout_record is not None
     assert session.appendwatch_report_record is not None
     rollout = session.codex_rollout_record
-    pull_ordinal = _record_ordinal(records, commit_request_body.pull_response_record.record_id)
-    push_ordinal = _record_ordinal(records, commit_request_body.push_response_record.record_id)
+    pull_ordinal = _record_ordinal(records, commit_request_body.pull_record_id)
+    push_ordinal = _record_ordinal(records, commit_request_body.push_record_id)
     commit_ordinal = _record_ordinal(records, commit_request_record.record_id)
     gone_pull_ordinal = _record_ordinal(records, gone_pull.record_id)
     assert pull_ordinal < push_ordinal < commit_ordinal < gone_pull_ordinal
@@ -1302,12 +1347,8 @@ def validate_workflow_artifacts(
         run_outcome_record
     )
     run_outcome_snapshot = validated_run_outcome._body()
-    assert run_outcome_snapshot.pull_record_id == (
-        commit_request_body.pull_response_record.record_id
-    )
-    assert run_outcome_snapshot.push_record_id == (
-        commit_request_body.push_response_record.record_id
-    )
+    assert run_outcome_snapshot.pull_record_id == commit_request_body.pull_record_id
+    assert run_outcome_snapshot.push_record_id == commit_request_body.push_record_id
     assert run_outcome_snapshot.commit_request_record_id == commit_request_record.record_id
     assert run_outcome_snapshot.run_outcome_record_id == run_outcome_record.record_id
     assert run_outcome_snapshot.validation_record_id is not None
@@ -1316,18 +1357,13 @@ def validate_workflow_artifacts(
     assert validation.request_body is not None
     validation_body = json.loads(validation.request_body)
     assert UUID(validation_body["commit_request_record_id"]) == commit_request_record.record_id
-    assert (
-        PostCommitValidation.model_validate(
-            validation_body["post_commit_validation"], strict=False,
-        ).result
-        is BackendLifecycle.ACCEPTED
-    )
+    assert validation_body["post_commit_validation"]["result"] == BackendLifecycle.ACCEPTED
     assert commit_ordinal < _record_ordinal(records, validation.record_id) < gone_pull_ordinal
     assert backend_api._http_header_value(
         gone_pull.response_headers, ETAG_HEADER,
     ) == f'"{validation.record_id}"'
     outcome_request = validated_run_outcome.run_outcome_request_record
-    assert outcome_request.session_id == session.session_id
+    assert outcome_request.session_id == session.codex_session_id
     if outcome_request.run_outcome is run_outcome_models.RunOutcome.COMPLETED:
         assert outcome_request.validation_request_record_id == validation.record_id
     run_outcome_session = validated_run_outcome._codex_session_record()
@@ -1369,6 +1405,77 @@ def validate_workflow_artifacts(
         assert last_name_position < outcome_position < metadata_position
         assert browser_run_outcome_response_body is not None
         assert browser_run_outcome_response_body == validated_run_outcome.response_body
+        with initialize_backend_store(runtime, ipc_only=True) as query_store:
+            backend_store = query_store._engine
+            card = next(
+                card for card in backend_store.ai_augment_singular_outerdicts()
+                if card.namekey == namekey
+            )
+            assert len(card.codex_innerdicts) == 1
+            projected = card.codex_innerdicts[0]
+            assert (
+                projected.run_outcome_response_record.response_body
+                == run_outcome_record.response_body
+                == browser_run_outcome_response_body
+            )
+            output_rows = backend_store._query_mappings(
+                f"SELECT * FROM {CODEX_OUTPUT_ROWS_TABLE}"
+            )
+            assert len(output_rows) == 1
+            output = output_rows[0]
+            assert all(value is not None for value in output.values())
+            assert output == projected.innerdict.data
+            _operator_log(f"completed output: {len(output)} populated fields")
+            audits = backend_store._query_mappings(
+                f"SELECT * FROM {POST_COMMIT_VALIDATION_EVIDENCE_AUDITS_TABLE}"
+            )
+            accepted_audits = tuple(audit for audit in audits if audit["accepted"] is True)
+            assert len(accepted_audits) == 1
+            assert accepted_audits[0]["applied"] is True
+            assert (
+                accepted_audits[0][POST_COMMIT_VALIDATION_COMMIT_RECORD_ID_COL]
+                == str(commit_request_record.record_id)
+            )
+            _operator_log(
+                f"evidence audits: {len(audits)} total, "
+                f"{len(accepted_audits)} accepted"
+            )
+        storage_path = artifact_dir / "nicegui" / "storage-general.json"
+        stored = json.loads(storage_path.read_text(encoding=TEXT_ENCODING))
+        snapshot = stored[BACKEND_DATABASE_STORAGE_KEY][
+            nameof(lambda: DashboardQuerySnapshot.ai_augment_singular_outerdicts)
+        ]
+        stored_target = next(
+            item for item in snapshot
+            if item[nameof(lambda: AiAugmentSingularOuterDict.namekey)]
+            == namekey.model_dump(mode="json")
+        )
+        stored_codex = stored_target[
+            nameof(lambda: AiAugmentSingularOuterDict.codex_innerdicts)
+        ]
+        assert len(stored_codex) == 1
+        assert stored_codex[0][nameof(lambda: CodexInnerDict.innerdict)] == output
+        _operator_log("completed output matches the saved Dashboard snapshot")
+        stored_runs = stored[RUNS_STORAGE_KEY]
+        assert len(stored_runs) == 1
+        stored_run = stored_runs[0]
+        assert stored_run[nameof(lambda: Run.namekey)] == namekey.model_dump(mode="json")
+        assert stored_run[nameof(lambda: Run.session_id)] == str(session.codex_session_id)
+        assert stored_run[nameof(lambda: Run.lifecycle)] == RunLifecycle.COMPLETED.value
+        events = tuple(
+            event for event in stored[RUN_EVENTS_STORAGE_KEY]
+            if event[nameof(lambda: RunEvent.run_id)]
+            == stored_run[nameof(lambda: Run.run_id)]
+        )
+        assert events
+        assert events[0][nameof(lambda: RunEvent.lifecycle)] == RunLifecycle.QUEUED.value
+        assert events[-1][nameof(lambda: RunEvent.lifecycle)] == RunLifecycle.COMPLETED.value
+        _operator_log(
+            "persisted run events: "
+            + " -> ".join(
+                event[nameof(lambda: RunEvent.lifecycle)] for event in events
+            )
+        )
     _operator_log("full operator workflow contract validated")
 
 
@@ -1391,6 +1498,76 @@ def test_complete_dashboard_backend_codex_commit_and_replay_workflow(
     validate_workflow_artifacts(operator_runtime, namekey=namekey)
 
 
+def assert_completed_workflow_artifacts(
+    operator_runtime: OperatorRuntime,
+    *,
+    namekey: NameKey,
+    card_text: str,
+    browser_run_outcome_response_body: str,
+) -> None:
+    logged_init_requests = tuple(
+        BackendInitRequestRecord.from_http_request_log_record(
+            http_request_log_record=record,
+        )
+        for record in authoritative_records(operator_runtime.replay_log_path)
+        if (record.method, record.path) == (HTTP_POST_METHOD, INIT_PATH)
+    )
+    assert len(logged_init_requests) == 1
+    assert logged_init_requests[0].namekey == namekey
+
+    validate_workflow_artifacts(
+        operator_runtime,
+        namekey=namekey,
+        expected_run_outcome_path=run_outcome_models.COMPLETED_PATH,
+        card_text=card_text,
+        browser_run_outcome_response_body=browser_run_outcome_response_body,
+    )
+
+
+def assert_final_replay_rebuilds(operator_runtime: OperatorRuntime) -> None:
+    """Rebuild the completed log in isolation; reading its existing DB is insufficient."""
+
+    # Reading the existing projection cannot prove the final log can be replayed.
+    with tempfile.TemporaryDirectory(
+        prefix="operator-final-replay-", dir=operator_runtime.config_path.parent,
+    ) as temporary:
+        replay_root = Path(temporary).resolve()
+        current_config = AiAugmentDetourConfig.from_json(
+            operator_runtime.config_path, verify_hash_on_init=False,
+        )
+        source_link = replay_root / current_config.db_file.name
+        source_link.symlink_to(current_config.db_file.resolve())
+        raw_log = operator_runtime.replay_log_path.read_bytes()
+        replay_path = replay_root / operator_runtime.replay_log_path.name
+        replay_path.write_bytes(raw_log)
+        config = json.loads(operator_runtime.config_path.read_text(encoding=TEXT_ENCODING))
+        config["db_file"] = str(source_link)
+        config["state_file"] = str(replay_root / "state.json")
+        config["output_dir"] = str(replay_root / "output")
+        config["files_config"][REPLAY_LOG_KEY][RESOURCE_PATH_KEY] = str(replay_path)
+        # A new replay verifies the complete copied log, not the live DB's prefix anchor.
+        config["files_config"][REPLAY_LOG_KEY][RESOURCE_SHA256_KEY] = (
+            hashlib.sha256(raw_log).hexdigest()
+        )
+        replay_config_path = replay_root / operator_runtime.config_path.name
+        replay_config_path.write_text(json.dumps(config), encoding=TEXT_ENCODING)
+        replay_config = AiAugmentDetourConfig.from_json(
+            replay_config_path, verify_hash_on_init=False,
+        )
+        replay_store = AiAugmentBackendStore._from_resources(
+            replay_log=replay_config.replay_log,
+            detour_db=AiAugmentDetourDB.from_pipeline_db(
+                replay_config.db_file, duckdb_extensions=replay_config.duckdb_extensions,
+            ),
+            rollout_cas=replay_config.rollout_cas,
+        )
+        replay_store._rebuild_from_log(
+            AiAugmentBackendContext(pipeline_config=replay_config),
+            reset_confirmed=True,
+            confirm_replay=lambda: True,
+        )
+
+
 def assert_completed_dashboard_backend_codex_workflow_renders_researcher_card(
     operator_runtime: OperatorRuntime,
 ) -> None:
@@ -1410,26 +1587,16 @@ def assert_completed_dashboard_backend_codex_workflow_renders_researcher_card(
             namekey=namekey,
             queued_at_monotonic=checkpoint.queued_at_monotonic,
         )
+        emit_researcher_card(card_text)
         elapsed_seconds = time.monotonic() - checkpoint.queued_at_monotonic
 
-    logged_init_requests = tuple(
-        BackendInitRequestRecord.from_http_request_log_record(
-            http_request_log_record=record,
-        )
-        for record in authoritative_records(operator_runtime.replay_log_path)
-        if (record.method, record.path) == (HTTP_POST_METHOD, INIT_PATH)
-    )
-    assert len(logged_init_requests) == 1
-    assert logged_init_requests[0].namekey == namekey
-
-    validate_workflow_artifacts(
+    assert_completed_workflow_artifacts(
         operator_runtime,
         namekey=namekey,
-        expected_run_outcome_path=run_outcome_models.COMPLETED_PATH,
         card_text=card_text,
         browser_run_outcome_response_body=browser_run_outcome_response_body,
     )
-    emit_researcher_card(card_text)
+    assert_final_replay_rebuilds(operator_runtime)
     _operator_log(
         "full end-to-end execution elapsed time from queue submission through "
         f"final Playwright verification: {elapsed_seconds:.3f}s"
